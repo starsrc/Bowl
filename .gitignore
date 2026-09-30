@@ -29,3 +29,4 @@ go.work.sum
 .DS_Store
 .tdd_list.md
 docker-compose.yaml
+.agents

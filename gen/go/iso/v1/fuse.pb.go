@@ -241,6 +241,154 @@ func (FuseOpenFlag) EnumDescriptor() ([]byte, []int) {
 	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{2}
 }
 
+// SetAttrMask 定义修改文件属性时的有效位掩码（对应 Linux FUSE FATTR_* 位掩码）。
+// 多个标志位通过按位或（bit-wise OR）组合，用于指示 SetAttrOp 中哪些字段包含有效的新属性值。
+type SetAttrMask int32
+
+const (
+	// 未指定属性标志（默认占位值）。
+	SetAttrMask_SET_ATTR_MASK_UNSPECIFIED SetAttrMask = 0
+	// 修改文件权限模式（对应 FATTR_MODE = 1 << 0）。
+	SetAttrMask_SET_ATTR_MASK_MODE SetAttrMask = 1
+	// 修改属主用户 ID（对应 FATTR_UID = 1 << 1）。
+	SetAttrMask_SET_ATTR_MASK_UID SetAttrMask = 2
+	// 修改属主用户组 ID（对应 FATTR_GID = 1 << 2）。
+	SetAttrMask_SET_ATTR_MASK_GID SetAttrMask = 4
+	// 修改文件大小 / 截断扩展文件（对应 FATTR_SIZE = 1 << 3）。
+	SetAttrMask_SET_ATTR_MASK_SIZE SetAttrMask = 8
+	// 修改最后访问时间戳（对应 FATTR_ATIME = 1 << 4）。
+	SetAttrMask_SET_ATTR_MASK_ATIME SetAttrMask = 16
+	// 修改最后修改时间戳（对应 FATTR_MTIME = 1 << 5）。
+	SetAttrMask_SET_ATTR_MASK_MTIME SetAttrMask = 32
+	// 校验或使用传入的文件句柄（对应 FATTR_FH = 1 << 6）。
+	SetAttrMask_SET_ATTR_MASK_FH SetAttrMask = 64
+	// 设置最后访问时间为服务端当前时间（对应 FATTR_ATIME_NOW = 1 << 7）。
+	SetAttrMask_SET_ATTR_MASK_ATIME_NOW SetAttrMask = 128
+	// 设置最后修改时间为服务端当前时间（对应 FATTR_MTIME_NOW = 1 << 8）。
+	SetAttrMask_SET_ATTR_MASK_MTIME_NOW SetAttrMask = 256
+	// 校验或更新文件锁持有者（对应 FATTR_LOCKOWNER = 1 << 9）。
+	SetAttrMask_SET_ATTR_MASK_LOCK_OWNER SetAttrMask = 512
+	// 修改最后状态变更时间戳（对应 FATTR_CTIME = 1 << 10）。
+	SetAttrMask_SET_ATTR_MASK_CTIME SetAttrMask = 1024
+	// 清除 SUID 与 SGID 权限位（对应 FATTR_KILL_SUIDGID = 1 << 11）。
+	SetAttrMask_SET_ATTR_MASK_KILL_SUIDGID SetAttrMask = 2048
+)
+
+// Enum value maps for SetAttrMask.
+var (
+	SetAttrMask_name = map[int32]string{
+		0:    "SET_ATTR_MASK_UNSPECIFIED",
+		1:    "SET_ATTR_MASK_MODE",
+		2:    "SET_ATTR_MASK_UID",
+		4:    "SET_ATTR_MASK_GID",
+		8:    "SET_ATTR_MASK_SIZE",
+		16:   "SET_ATTR_MASK_ATIME",
+		32:   "SET_ATTR_MASK_MTIME",
+		64:   "SET_ATTR_MASK_FH",
+		128:  "SET_ATTR_MASK_ATIME_NOW",
+		256:  "SET_ATTR_MASK_MTIME_NOW",
+		512:  "SET_ATTR_MASK_LOCK_OWNER",
+		1024: "SET_ATTR_MASK_CTIME",
+		2048: "SET_ATTR_MASK_KILL_SUIDGID",
+	}
+	SetAttrMask_value = map[string]int32{
+		"SET_ATTR_MASK_UNSPECIFIED":  0,
+		"SET_ATTR_MASK_MODE":         1,
+		"SET_ATTR_MASK_UID":          2,
+		"SET_ATTR_MASK_GID":          4,
+		"SET_ATTR_MASK_SIZE":         8,
+		"SET_ATTR_MASK_ATIME":        16,
+		"SET_ATTR_MASK_MTIME":        32,
+		"SET_ATTR_MASK_FH":           64,
+		"SET_ATTR_MASK_ATIME_NOW":    128,
+		"SET_ATTR_MASK_MTIME_NOW":    256,
+		"SET_ATTR_MASK_LOCK_OWNER":   512,
+		"SET_ATTR_MASK_CTIME":        1024,
+		"SET_ATTR_MASK_KILL_SUIDGID": 2048,
+	}
+)
+
+func (x SetAttrMask) Enum() *SetAttrMask {
+	p := new(SetAttrMask)
+	*p = x
+	return p
+}
+
+func (x SetAttrMask) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SetAttrMask) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[3].Descriptor()
+}
+
+func (SetAttrMask) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[3]
+}
+
+func (x SetAttrMask) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SetAttrMask.Descriptor instead.
+func (SetAttrMask) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{3}
+}
+
+// LseekWhence 定义 lseek 寻址空洞与数据区间的操作模式枚举（对应 Linux lseek(2) 的 SEEK_DATA / SEEK_HOLE）。
+// 用于高效探测稀疏文件（Sparse File）的分配区间与空洞区间。
+type LseekWhence int32
+
+const (
+	// 未指定模式（默认占位值）。
+	LseekWhence_LSEEK_WHENCE_UNSPECIFIED LseekWhence = 0
+	// 寻找下一个有效数据区间的起始偏移量（对应 Linux SEEK_DATA = 3）。
+	LseekWhence_LSEEK_WHENCE_DATA LseekWhence = 3
+	// 寻找下一个稀疏空洞区间的起始偏移量（对应 Linux SEEK_HOLE = 4）。
+	LseekWhence_LSEEK_WHENCE_HOLE LseekWhence = 4
+)
+
+// Enum value maps for LseekWhence.
+var (
+	LseekWhence_name = map[int32]string{
+		0: "LSEEK_WHENCE_UNSPECIFIED",
+		3: "LSEEK_WHENCE_DATA",
+		4: "LSEEK_WHENCE_HOLE",
+	}
+	LseekWhence_value = map[string]int32{
+		"LSEEK_WHENCE_UNSPECIFIED": 0,
+		"LSEEK_WHENCE_DATA":        3,
+		"LSEEK_WHENCE_HOLE":        4,
+	}
+)
+
+func (x LseekWhence) Enum() *LseekWhence {
+	p := new(LseekWhence)
+	*p = x
+	return p
+}
+
+func (x LseekWhence) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (LseekWhence) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[4].Descriptor()
+}
+
+func (LseekWhence) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[4]
+}
+
+func (x LseekWhence) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use LseekWhence.Descriptor instead.
+func (LseekWhence) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{4}
+}
+
 // XAttrSetFlag 表示设置扩展属性时的操作模式标志（对应 Linux setxattr 的 flags 参数）。
 type XAttrSetFlag int32
 
@@ -278,11 +426,11 @@ func (x XAttrSetFlag) String() string {
 }
 
 func (XAttrSetFlag) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_fuse_proto_enumTypes[3].Descriptor()
+	return file_iso_v1_fuse_proto_enumTypes[5].Descriptor()
 }
 
 func (XAttrSetFlag) Type() protoreflect.EnumType {
-	return &file_iso_v1_fuse_proto_enumTypes[3]
+	return &file_iso_v1_fuse_proto_enumTypes[5]
 }
 
 func (x XAttrSetFlag) Number() protoreflect.EnumNumber {
@@ -291,7 +439,7 @@ func (x XAttrSetFlag) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use XAttrSetFlag.Descriptor instead.
 func (XAttrSetFlag) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{3}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{5}
 }
 
 // XAttrOpType 表示扩展属性操作类型枚举。
@@ -339,11 +487,11 @@ func (x XAttrOpType) String() string {
 }
 
 func (XAttrOpType) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_fuse_proto_enumTypes[4].Descriptor()
+	return file_iso_v1_fuse_proto_enumTypes[6].Descriptor()
 }
 
 func (XAttrOpType) Type() protoreflect.EnumType {
-	return &file_iso_v1_fuse_proto_enumTypes[4]
+	return &file_iso_v1_fuse_proto_enumTypes[6]
 }
 
 func (x XAttrOpType) Number() protoreflect.EnumNumber {
@@ -352,7 +500,7 @@ func (x XAttrOpType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use XAttrOpType.Descriptor instead.
 func (XAttrOpType) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{4}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{6}
 }
 
 // LockType 表示文件锁的操作与状态类型枚举。
@@ -400,11 +548,11 @@ func (x LockType) String() string {
 }
 
 func (LockType) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_fuse_proto_enumTypes[5].Descriptor()
+	return file_iso_v1_fuse_proto_enumTypes[7].Descriptor()
 }
 
 func (LockType) Type() protoreflect.EnumType {
-	return &file_iso_v1_fuse_proto_enumTypes[5]
+	return &file_iso_v1_fuse_proto_enumTypes[7]
 }
 
 func (x LockType) Number() protoreflect.EnumNumber {
@@ -413,7 +561,7 @@ func (x LockType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LockType.Descriptor instead.
 func (LockType) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{5}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{7}
 }
 
 // RenameFlag 定义原子重命名操作的行为标志位（对应 Linux renameat2(2) 的 flags 参数）。
@@ -461,11 +609,11 @@ func (x RenameFlag) String() string {
 }
 
 func (RenameFlag) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_fuse_proto_enumTypes[6].Descriptor()
+	return file_iso_v1_fuse_proto_enumTypes[8].Descriptor()
 }
 
 func (RenameFlag) Type() protoreflect.EnumType {
-	return &file_iso_v1_fuse_proto_enumTypes[6]
+	return &file_iso_v1_fuse_proto_enumTypes[8]
 }
 
 func (x RenameFlag) Number() protoreflect.EnumNumber {
@@ -474,7 +622,7 @@ func (x RenameFlag) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RenameFlag.Descriptor instead.
 func (RenameFlag) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{6}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{8}
 }
 
 // FallocateMode 定义文件空间预分配、打洞与区间重构的模式标志（对应 Linux fallocate(2) 的 mode 标志位）。
@@ -542,11 +690,11 @@ func (x FallocateMode) String() string {
 }
 
 func (FallocateMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_fuse_proto_enumTypes[7].Descriptor()
+	return file_iso_v1_fuse_proto_enumTypes[9].Descriptor()
 }
 
 func (FallocateMode) Type() protoreflect.EnumType {
-	return &file_iso_v1_fuse_proto_enumTypes[7]
+	return &file_iso_v1_fuse_proto_enumTypes[9]
 }
 
 func (x FallocateMode) Number() protoreflect.EnumNumber {
@@ -555,7 +703,7 @@ func (x FallocateMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FallocateMode.Descriptor instead.
 func (FallocateMode) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{7}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{9}
 }
 
 // ACLTag 表示 POSIX 访问控制列表（ACL）的条目分类标签枚举。
@@ -612,11 +760,11 @@ func (x ACLTag) String() string {
 }
 
 func (ACLTag) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_fuse_proto_enumTypes[8].Descriptor()
+	return file_iso_v1_fuse_proto_enumTypes[10].Descriptor()
 }
 
 func (ACLTag) Type() protoreflect.EnumType {
-	return &file_iso_v1_fuse_proto_enumTypes[8]
+	return &file_iso_v1_fuse_proto_enumTypes[10]
 }
 
 func (x ACLTag) Number() protoreflect.EnumNumber {
@@ -625,7 +773,7 @@ func (x ACLTag) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ACLTag.Descriptor instead.
 func (ACLTag) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{8}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{10}
 }
 
 // Inode 代表 ISO Storage 文件系统的核心元数据抽象。
@@ -1084,41 +1232,51 @@ func (x *DirEntry) GetEntryTimeout() *durationpb.Duration {
 	return nil
 }
 
-// Slice 表示数据切片元数据。
-// 对齐 JuiceFS 切片存储模型，表示对某个 64MB Chunk 的一次写入区间。
-type Slice struct {
+// SetAttrOp 表示修改文件属性操作的抽象模型（对应 FUSE_SETATTR 协议）。
+// 封装 Linux setattr / chmod / chown / truncate / utimensat 等系统调用，
+// 通过 valid 掩码精确指明需要原子更新的属性集合。
+type SetAttrOp struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 切片全局唯一标识 ID。
-	// 用于在服务端 NVMe SSD 本地缓存区或远端 B2 对象存储中寻址与定位实际切片数据对象。
-	Id uint64 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
-	// 切片在所属 64MB Chunk 内的起始逻辑偏移量（字节数，0 <= offset < 64MB）。
-	Offset uint32 `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
-	// 切片有效数据的写入长度（字节数）。
-	Length uint32 `protobuf:"varint,3,opt,name=length,proto3" json:"length,omitempty"`
-	// 切片实际物理存储大小（字节数）。
-	Size uint32 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
-	// 切片在底层不可变物理数据对象（id）内部的起始读取偏移量（默认为 0）。
-	// 当发生切片裁剪（Cut）、重叠部分覆写、跨文件区间克隆（Clone）或碎片整理合并（Compaction）时，
-	// 用于指示从底层对象的第几字节开始读取，100% 完备对齐 JuiceFS 的 (pos, id, size, off, len) 五元组切片模型。
-	SrcOffset     uint32 `protobuf:"varint,5,opt,name=src_offset,json=srcOffset,proto3" json:"src_offset,omitempty"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 文件打开句柄（当 valid 包含 SET_ATTR_MASK_FH 时生效，若由 fchmod/ftruncate 等针对已有句柄的操作发起；无关联句柄时置为 0）。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 有效属性位掩码（按位或组合，详见 SetAttrMask 枚举定义）。
+	Valid uint32 `protobuf:"varint,3,opt,name=valid,proto3" json:"valid,omitempty"`
+	// POSIX 权限位（当 valid 包含 SET_ATTR_MASK_MODE 时生效）。
+	Mode uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 属主用户 ID（UID，当 valid 包含 SET_ATTR_MASK_UID 时生效）。
+	Uid uint32 `protobuf:"varint,5,opt,name=uid,proto3" json:"uid,omitempty"`
+	// 属主用户组 ID（GID，当 valid 包含 SET_ATTR_MASK_GID 时生效）。
+	Gid uint32 `protobuf:"varint,6,opt,name=gid,proto3" json:"gid,omitempty"`
+	// 目标文件大小（字节数，当 valid 包含 SET_ATTR_MASK_SIZE 时生效）。
+	Size uint64 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`
+	// 最后访问时间戳（atime，当 valid 包含 SET_ATTR_MASK_ATIME 时生效）。
+	Atime *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=atime,proto3" json:"atime,omitempty"`
+	// 最后修改时间戳（mtime，当 valid 包含 SET_ATTR_MASK_MTIME 时生效）。
+	Mtime *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=mtime,proto3" json:"mtime,omitempty"`
+	// 最后状态变更时间戳（ctime，当 valid 包含 SET_ATTR_MASK_CTIME 时生效）。
+	Ctime *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=ctime,proto3" json:"ctime,omitempty"`
+	// 锁持有者唯一标识（当 valid 包含 SET_ATTR_MASK_LOCK_OWNER 时生效，用于 POSIX 锁冲突检查与截断保护）。
+	LockOwner     uint64 `protobuf:"varint,11,opt,name=lock_owner,json=lockOwner,proto3" json:"lock_owner,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Slice) Reset() {
-	*x = Slice{}
+func (x *SetAttrOp) Reset() {
+	*x = SetAttrOp{}
 	mi := &file_iso_v1_fuse_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Slice) String() string {
+func (x *SetAttrOp) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Slice) ProtoMessage() {}
+func (*SetAttrOp) ProtoMessage() {}
 
-func (x *Slice) ProtoReflect() protoreflect.Message {
+func (x *SetAttrOp) ProtoReflect() protoreflect.Message {
 	mi := &file_iso_v1_fuse_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1130,110 +1288,575 @@ func (x *Slice) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Slice.ProtoReflect.Descriptor instead.
-func (*Slice) Descriptor() ([]byte, []int) {
+// Deprecated: Use SetAttrOp.ProtoReflect.Descriptor instead.
+func (*SetAttrOp) Descriptor() ([]byte, []int) {
 	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *Slice) GetId() uint64 {
-	if x != nil {
-		return x.Id
-	}
-	return 0
-}
-
-func (x *Slice) GetOffset() uint32 {
-	if x != nil {
-		return x.Offset
-	}
-	return 0
-}
-
-func (x *Slice) GetLength() uint32 {
-	if x != nil {
-		return x.Length
-	}
-	return 0
-}
-
-func (x *Slice) GetSize() uint32 {
-	if x != nil {
-		return x.Size
-	}
-	return 0
-}
-
-func (x *Slice) GetSrcOffset() uint32 {
-	if x != nil {
-		return x.SrcOffset
-	}
-	return 0
-}
-
-// Chunk 表示文件的 64MB 逻辑分块元数据。
-// 对齐 JuiceFS 分块存储模型，大文件按 64MB 划分为多个连续逻辑 Chunk。
-type Chunk struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// 所属文件的 Inode 编号。
-	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
-	// 文件内部的 Chunk 逻辑索引（从 0 开始自增，每个 Chunk 固定为 64MB 大小）。
-	Index uint32 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
-	// 构成该 Chunk 的数据切片列表。
-	// 遵循切片叠加覆盖模型（Slice Overlay）：后写入的切片具有更高优先级，覆盖先前写入重叠区域的数据。
-	Slices        []*Slice `protobuf:"bytes,3,rep,name=slices,proto3" json:"slices,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Chunk) Reset() {
-	*x = Chunk{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Chunk) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Chunk) ProtoMessage() {}
-
-func (x *Chunk) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Chunk.ProtoReflect.Descriptor instead.
-func (*Chunk) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *Chunk) GetIno() uint64 {
+func (x *SetAttrOp) GetIno() uint64 {
 	if x != nil {
 		return x.Ino
 	}
 	return 0
 }
 
-func (x *Chunk) GetIndex() uint32 {
+func (x *SetAttrOp) GetFh() uint64 {
 	if x != nil {
-		return x.Index
+		return x.Fh
 	}
 	return 0
 }
 
-func (x *Chunk) GetSlices() []*Slice {
+func (x *SetAttrOp) GetValid() uint32 {
 	if x != nil {
-		return x.Slices
+		return x.Valid
+	}
+	return 0
+}
+
+func (x *SetAttrOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *SetAttrOp) GetUid() uint32 {
+	if x != nil {
+		return x.Uid
+	}
+	return 0
+}
+
+func (x *SetAttrOp) GetGid() uint32 {
+	if x != nil {
+		return x.Gid
+	}
+	return 0
+}
+
+func (x *SetAttrOp) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *SetAttrOp) GetAtime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Atime
 	}
 	return nil
+}
+
+func (x *SetAttrOp) GetMtime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Mtime
+	}
+	return nil
+}
+
+func (x *SetAttrOp) GetCtime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Ctime
+	}
+	return nil
+}
+
+func (x *SetAttrOp) GetLockOwner() uint64 {
+	if x != nil {
+		return x.LockOwner
+	}
+	return 0
+}
+
+// ForgetNode 表示单个 Inode 查找引用计数的减少条目。
+// 对应 Linux FUSE 内核在 dentry 缓存逐出时通知用户态的单个节点信息。
+type ForgetNode struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 内核释放的查找引用计数（Lookup Count 减少值）。
+	// 当服务端维护的该 Inode 累计 nlookup 归零且硬链接为 0 时，服务端可彻底回收该 Inode 资源。
+	Nlookup       uint64 `protobuf:"varint,2,opt,name=nlookup,proto3" json:"nlookup,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForgetNode) Reset() {
+	*x = ForgetNode{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForgetNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForgetNode) ProtoMessage() {}
+
+func (x *ForgetNode) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForgetNode.ProtoReflect.Descriptor instead.
+func (*ForgetNode) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ForgetNode) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *ForgetNode) GetNlookup() uint64 {
+	if x != nil {
+		return x.Nlookup
+	}
+	return 0
+}
+
+// ForgetOp 表示单个 Inode 遗忘操作的描述模型（对应 FUSE_FORGET 协议）。
+// 当内核从 dcache 中逐出该 Inode 缓存项时发送，指示服务端递减对应的查找引用计数。
+type ForgetOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 内核释放的查找引用计数（Lookup Count 减少值）。
+	Nlookup       uint64 `protobuf:"varint,2,opt,name=nlookup,proto3" json:"nlookup,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForgetOp) Reset() {
+	*x = ForgetOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForgetOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForgetOp) ProtoMessage() {}
+
+func (x *ForgetOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForgetOp.ProtoReflect.Descriptor instead.
+func (*ForgetOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ForgetOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *ForgetOp) GetNlookup() uint64 {
+	if x != nil {
+		return x.Nlookup
+	}
+	return 0
+}
+
+// BatchForgetOp 表示批量 Inode 遗忘操作的描述模型（对应 FUSE_BATCH_FORGET 协议）。
+// 允许内核在单次 RPC 中批量递减多个 Inode 的查找引用计数，减少频繁单节点 forget 的网络与通信开销。
+type BatchForgetOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 待批量遗忘的节点条目列表。
+	Nodes         []*ForgetNode `protobuf:"bytes,1,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchForgetOp) Reset() {
+	*x = BatchForgetOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchForgetOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchForgetOp) ProtoMessage() {}
+
+func (x *BatchForgetOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchForgetOp.ProtoReflect.Descriptor instead.
+func (*BatchForgetOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *BatchForgetOp) GetNodes() []*ForgetNode {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
+// FlushOp 表示文件关闭刷新操作的描述模型（对应 FUSE_FLUSH 协议）。
+// 在每次 close(2) 文件描述符时由内核发起，用于刷回脏数据并清理该文件描述符关联的 POSIX 文件锁。
+type FlushOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 待关闭刷新关联的文件打开句柄。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// POSIX 锁持有者唯一标识。
+	// 用于清理当前进程在关闭此句柄时所占用的所有 POSIX 记录锁（Plock 清理语义）。
+	LockOwner     uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3" json:"lock_owner,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FlushOp) Reset() {
+	*x = FlushOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FlushOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FlushOp) ProtoMessage() {}
+
+func (x *FlushOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FlushOp.ProtoReflect.Descriptor instead.
+func (*FlushOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *FlushOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *FlushOp) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *FlushOp) GetLockOwner() uint64 {
+	if x != nil {
+		return x.LockOwner
+	}
+	return 0
+}
+
+// FsyncOp 表示文件数据与元数据强制落盘同步操作的描述模型（对应 FUSE_FSYNC 与 FUSE_FSYNCDIR 协议）。
+// 对应 POSIX fsync(2) 与 fdatasync(2) 系统调用语义。
+type FsyncOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 文件打开句柄（若针对目录 fsyncdir 或已打开文件；无关联句柄可置为 0）。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 是否仅同步数据（对应 fdatasync 语义）。
+	// 值为 true 时仅强制落盘文件数据与检索所需必要元数据；值为 false 时强制落盘所有数据及完整元数据（mtime/ctime 等）。
+	Datasync      bool `protobuf:"varint,3,opt,name=datasync,proto3" json:"datasync,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FsyncOp) Reset() {
+	*x = FsyncOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FsyncOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FsyncOp) ProtoMessage() {}
+
+func (x *FsyncOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FsyncOp.ProtoReflect.Descriptor instead.
+func (*FsyncOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *FsyncOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *FsyncOp) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *FsyncOp) GetDatasync() bool {
+	if x != nil {
+		return x.Datasync
+	}
+	return false
+}
+
+// LseekOp 表示稀疏文件寻址操作的描述模型（对应 FUSE_LSEEK 协议）。
+// 允许客户端快速定位文件中的数据分配块或稀疏空洞，避免全量读取传输无用零值数据。
+type LseekOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 文件打开句柄。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 起始查找的字节偏移量。
+	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
+	// 寻址模式（SEEK_DATA 或 SEEK_HOLE，详见 LseekWhence 枚举定义）。
+	Whence        LseekWhence `protobuf:"varint,4,opt,name=whence,proto3,enum=iso.v1.LseekWhence" json:"whence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LseekOp) Reset() {
+	*x = LseekOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LseekOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LseekOp) ProtoMessage() {}
+
+func (x *LseekOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LseekOp.ProtoReflect.Descriptor instead.
+func (*LseekOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *LseekOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *LseekOp) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *LseekOp) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *LseekOp) GetWhence() LseekWhence {
+	if x != nil {
+		return x.Whence
+	}
+	return LseekWhence_LSEEK_WHENCE_UNSPECIFIED
+}
+
+// InvalNodeOp 表示内核 Inode 缓存失效通知操作的描述模型（对应 FUSE_NOTIFY_INVAL_INODE 协议）。
+// 由服务端主动向客户端发起，用于使客户端内核中指定的 Inode 页缓存（Page Cache）失效。
+type InvalNodeOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 失效区间的起始字节偏移量。
+	Offset int64 `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
+	// 失效区间的连续字节长度。
+	// 若 length 为 0 或负数（例如 -1），表示使该文件从 offset 开始的全部页缓存失效。
+	Length        int64 `protobuf:"varint,3,opt,name=length,proto3" json:"length,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InvalNodeOp) Reset() {
+	*x = InvalNodeOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InvalNodeOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InvalNodeOp) ProtoMessage() {}
+
+func (x *InvalNodeOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InvalNodeOp.ProtoReflect.Descriptor instead.
+func (*InvalNodeOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *InvalNodeOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *InvalNodeOp) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *InvalNodeOp) GetLength() int64 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+// InvalEntryOp 表示内核目录项缓存失效通知操作的描述模型（对应 FUSE_NOTIFY_INVAL_ENTRY 协议）。
+// 由服务端主动向客户端发起，用于使客户端内核 dcache 中父目录下指定名称的目录项失效，
+// 促使后续访问重新发起 lookup 查询以获取最新元数据。
+type InvalEntryOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待失效的子文件或子目录名称。
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InvalEntryOp) Reset() {
+	*x = InvalEntryOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InvalEntryOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InvalEntryOp) ProtoMessage() {}
+
+func (x *InvalEntryOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InvalEntryOp.ProtoReflect.Descriptor instead.
+func (*InvalEntryOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *InvalEntryOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *InvalEntryOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 // XAttr 表示单个文件扩展属性（Extended Attribute，Key-Value 元数据对）。
@@ -1250,7 +1873,7 @@ type XAttr struct {
 
 func (x *XAttr) Reset() {
 	*x = XAttr{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[5]
+	mi := &file_iso_v1_fuse_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1262,7 +1885,7 @@ func (x *XAttr) String() string {
 func (*XAttr) ProtoMessage() {}
 
 func (x *XAttr) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[5]
+	mi := &file_iso_v1_fuse_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1275,7 +1898,7 @@ func (x *XAttr) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use XAttr.ProtoReflect.Descriptor instead.
 func (*XAttr) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{5}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *XAttr) GetName() string {
@@ -1308,7 +1931,7 @@ type XAttrList struct {
 
 func (x *XAttrList) Reset() {
 	*x = XAttrList{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[6]
+	mi := &file_iso_v1_fuse_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1320,7 +1943,7 @@ func (x *XAttrList) String() string {
 func (*XAttrList) ProtoMessage() {}
 
 func (x *XAttrList) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[6]
+	mi := &file_iso_v1_fuse_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1333,7 +1956,7 @@ func (x *XAttrList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use XAttrList.ProtoReflect.Descriptor instead.
 func (*XAttrList) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{6}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *XAttrList) GetIno() uint64 {
@@ -1377,7 +2000,7 @@ type XAttrOp struct {
 
 func (x *XAttrOp) Reset() {
 	*x = XAttrOp{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[7]
+	mi := &file_iso_v1_fuse_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1389,7 +2012,7 @@ func (x *XAttrOp) String() string {
 func (*XAttrOp) ProtoMessage() {}
 
 func (x *XAttrOp) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[7]
+	mi := &file_iso_v1_fuse_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1402,7 +2025,7 @@ func (x *XAttrOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use XAttrOp.ProtoReflect.Descriptor instead.
 func (*XAttrOp) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{7}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *XAttrOp) GetIno() uint64 {
@@ -1456,7 +2079,7 @@ type Flock struct {
 
 func (x *Flock) Reset() {
 	*x = Flock{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[8]
+	mi := &file_iso_v1_fuse_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1468,7 +2091,7 @@ func (x *Flock) String() string {
 func (*Flock) ProtoMessage() {}
 
 func (x *Flock) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[8]
+	mi := &file_iso_v1_fuse_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1481,7 +2104,7 @@ func (x *Flock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Flock.ProtoReflect.Descriptor instead.
 func (*Flock) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{8}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Flock) GetIno() uint64 {
@@ -1524,7 +2147,7 @@ type PlockRecord struct {
 
 func (x *PlockRecord) Reset() {
 	*x = PlockRecord{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[9]
+	mi := &file_iso_v1_fuse_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1536,7 +2159,7 @@ func (x *PlockRecord) String() string {
 func (*PlockRecord) ProtoMessage() {}
 
 func (x *PlockRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[9]
+	mi := &file_iso_v1_fuse_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1549,7 +2172,7 @@ func (x *PlockRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlockRecord.ProtoReflect.Descriptor instead.
 func (*PlockRecord) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{9}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PlockRecord) GetStart() uint64 {
@@ -1596,7 +2219,7 @@ type Plock struct {
 
 func (x *Plock) Reset() {
 	*x = Plock{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[10]
+	mi := &file_iso_v1_fuse_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1608,7 +2231,7 @@ func (x *Plock) String() string {
 func (*Plock) ProtoMessage() {}
 
 func (x *Plock) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[10]
+	mi := &file_iso_v1_fuse_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1621,7 +2244,7 @@ func (x *Plock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Plock.ProtoReflect.Descriptor instead.
 func (*Plock) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{10}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Plock) GetIno() uint64 {
@@ -1667,7 +2290,7 @@ type RenameOp struct {
 
 func (x *RenameOp) Reset() {
 	*x = RenameOp{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[11]
+	mi := &file_iso_v1_fuse_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1679,7 +2302,7 @@ func (x *RenameOp) String() string {
 func (*RenameOp) ProtoMessage() {}
 
 func (x *RenameOp) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[11]
+	mi := &file_iso_v1_fuse_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1692,7 +2315,7 @@ func (x *RenameOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenameOp.ProtoReflect.Descriptor instead.
 func (*RenameOp) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{11}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RenameOp) GetParentSrc() uint64 {
@@ -1751,7 +2374,7 @@ type FallocateOp struct {
 
 func (x *FallocateOp) Reset() {
 	*x = FallocateOp{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[12]
+	mi := &file_iso_v1_fuse_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1763,7 +2386,7 @@ func (x *FallocateOp) String() string {
 func (*FallocateOp) ProtoMessage() {}
 
 func (x *FallocateOp) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[12]
+	mi := &file_iso_v1_fuse_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1776,7 +2399,7 @@ func (x *FallocateOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FallocateOp.ProtoReflect.Descriptor instead.
 func (*FallocateOp) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{12}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *FallocateOp) GetIno() uint64 {
@@ -1843,7 +2466,7 @@ type CopyFileRangeOp struct {
 
 func (x *CopyFileRangeOp) Reset() {
 	*x = CopyFileRangeOp{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[13]
+	mi := &file_iso_v1_fuse_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1855,7 +2478,7 @@ func (x *CopyFileRangeOp) String() string {
 func (*CopyFileRangeOp) ProtoMessage() {}
 
 func (x *CopyFileRangeOp) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[13]
+	mi := &file_iso_v1_fuse_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1868,7 +2491,7 @@ func (x *CopyFileRangeOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyFileRangeOp.ProtoReflect.Descriptor instead.
 func (*CopyFileRangeOp) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{13}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *CopyFileRangeOp) GetSrcIno() uint64 {
@@ -1947,7 +2570,7 @@ type ACLEntry struct {
 
 func (x *ACLEntry) Reset() {
 	*x = ACLEntry{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[14]
+	mi := &file_iso_v1_fuse_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1959,7 +2582,7 @@ func (x *ACLEntry) String() string {
 func (*ACLEntry) ProtoMessage() {}
 
 func (x *ACLEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[14]
+	mi := &file_iso_v1_fuse_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1972,7 +2595,7 @@ func (x *ACLEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ACLEntry.ProtoReflect.Descriptor instead.
 func (*ACLEntry) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{14}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ACLEntry) GetTag() ACLTag {
@@ -2011,7 +2634,7 @@ type ACL struct {
 
 func (x *ACL) Reset() {
 	*x = ACL{}
-	mi := &file_iso_v1_fuse_proto_msgTypes[15]
+	mi := &file_iso_v1_fuse_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2023,7 +2646,7 @@ func (x *ACL) String() string {
 func (*ACL) ProtoMessage() {}
 
 func (x *ACL) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_fuse_proto_msgTypes[15]
+	mi := &file_iso_v1_fuse_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2036,7 +2659,7 @@ func (x *ACL) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ACL.ProtoReflect.Descriptor instead.
 func (*ACL) Descriptor() ([]byte, []int) {
-	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{15}
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ACL) GetId() uint32 {
@@ -2051,6 +2674,1069 @@ func (x *ACL) GetEntries() []*ACLEntry {
 		return x.Entries
 	}
 	return nil
+}
+
+// Statfs 表示文件系统整体状态统计元数据。
+// 对齐 Linux statvfs(3) / statfs(2) 系统调用以及 FUSE 协议中的 fuse.StatfsOut 结构体。
+// 用于 df、stat 等系统工具获取存储池容量、空闲空间、Inode 用量及文件系统限制。
+type Statfs struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 文件系统基本数据块大小（字节数，对应 statvfs f_bsize 与 fuse.StatfsOut.Bsize）。
+	// ISO Storage 中通常为 4096 (4KB)。
+	BlockSize uint32 `protobuf:"varint,1,opt,name=block_size,json=blockSize,proto3" json:"block_size,omitempty"`
+	// 基本块大小 / 碎片大小（字节数，对应 statvfs f_frsize 与 fuse.StatfsOut.Frsize）。
+	// 在 Linux 系统中通常等于 block_size。
+	FragmentSize uint32 `protobuf:"varint,2,opt,name=fragment_size,json=fragmentSize,proto3" json:"fragment_size,omitempty"`
+	// 文件系统数据块总数（以 block_size 为单位，对应 statvfs f_blocks 与 fuse.StatfsOut.Blocks）。
+	Blocks uint64 `protobuf:"varint,3,opt,name=blocks,proto3" json:"blocks,omitempty"`
+	// 文件系统空闲数据块总数（对应 statvfs f_bfree 与 fuse.StatfsOut.Bfree）。
+	BlocksFree uint64 `protobuf:"varint,4,opt,name=blocks_free,json=blocksFree,proto3" json:"blocks_free,omitempty"`
+	// 非特权用户可用的空闲数据块总数（对应 statvfs f_bavail 与 fuse.StatfsOut.Bavail）。
+	BlocksAvail uint64 `protobuf:"varint,5,opt,name=blocks_avail,json=blocksAvail,proto3" json:"blocks_avail,omitempty"`
+	// 文件系统 Inode 节点总数（对应 statvfs f_files 与 fuse.StatfsOut.Files）。
+	Files uint64 `protobuf:"varint,6,opt,name=files,proto3" json:"files,omitempty"`
+	// 文件系统空闲 Inode 节点总数（对应 statvfs f_ffree 与 fuse.StatfsOut.Ffree）。
+	FilesFree uint64 `protobuf:"varint,7,opt,name=files_free,json=filesFree,proto3" json:"files_free,omitempty"`
+	// 支持的最大文件名长度（字符/字节数，对应 statvfs f_namemax 与 fuse.StatfsOut.NameLen，通常为 255）。
+	MaxNameLen    uint32 `protobuf:"varint,8,opt,name=max_name_len,json=maxNameLen,proto3" json:"max_name_len,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Statfs) Reset() {
+	*x = Statfs{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Statfs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Statfs) ProtoMessage() {}
+
+func (x *Statfs) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Statfs.ProtoReflect.Descriptor instead.
+func (*Statfs) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *Statfs) GetBlockSize() uint32 {
+	if x != nil {
+		return x.BlockSize
+	}
+	return 0
+}
+
+func (x *Statfs) GetFragmentSize() uint32 {
+	if x != nil {
+		return x.FragmentSize
+	}
+	return 0
+}
+
+func (x *Statfs) GetBlocks() uint64 {
+	if x != nil {
+		return x.Blocks
+	}
+	return 0
+}
+
+func (x *Statfs) GetBlocksFree() uint64 {
+	if x != nil {
+		return x.BlocksFree
+	}
+	return 0
+}
+
+func (x *Statfs) GetBlocksAvail() uint64 {
+	if x != nil {
+		return x.BlocksAvail
+	}
+	return 0
+}
+
+func (x *Statfs) GetFiles() uint64 {
+	if x != nil {
+		return x.Files
+	}
+	return 0
+}
+
+func (x *Statfs) GetFilesFree() uint64 {
+	if x != nil {
+		return x.FilesFree
+	}
+	return 0
+}
+
+func (x *Statfs) GetMaxNameLen() uint32 {
+	if x != nil {
+		return x.MaxNameLen
+	}
+	return 0
+}
+
+// StatfsOp 表示查询文件系统统计信息的操作描述模型（对应 FUSE_STATFS 协议）。
+// 封装 statvfs 系统调用，获取整个文件系统或特定目录下的存储用量与配额状态。
+type StatfsOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标 Inode 编号（文件系统查询起点，通常为根节点 1 或特定挂载目录 Inode）。
+	Ino           uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatfsOp) Reset() {
+	*x = StatfsOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatfsOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatfsOp) ProtoMessage() {}
+
+func (x *StatfsOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatfsOp.ProtoReflect.Descriptor instead.
+func (*StatfsOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *StatfsOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+// LookupOp 表示在指定目录下按名称查找子条目的操作描述模型（对应 FUSE_LOOKUP 协议）。
+// 对应 Linux VFS 路径分量解析的核心步骤，查询目标文件的 Inode 及其元数据属性，建立或刷新内核 dentry 缓存。
+type LookupOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待查找的子文件或目录名称。
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LookupOp) Reset() {
+	*x = LookupOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LookupOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LookupOp) ProtoMessage() {}
+
+func (x *LookupOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LookupOp.ProtoReflect.Descriptor instead.
+func (*LookupOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *LookupOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *LookupOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// CreateOp 表示在指定目录下原子创建并打开常规文件的操作描述模型（对应 FUSE_CREATE 协议）。
+// 封装 open(..., O_CREAT|...) 系统调用，原子完成 Inode 创建、目录项链接以及文件句柄分配，
+// 并初始化一写多读（OWMR）写租约，避免多步 RPC 往返竞争。
+type CreateOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待创建的文件名称。
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// POSIX 文件权限模式位（st_mode 低 12 位，调用方已结合 umask 计算）。
+	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 调用进程的文件创建掩码（umask）。
+	Umask uint32 `protobuf:"varint,4,opt,name=umask,proto3" json:"umask,omitempty"`
+	// 打开标志位掩码（POSIX open flags，如 O_CREAT, O_WRONLY, O_TRUNC, O_EXCL 等）。
+	Flags         uint32 `protobuf:"varint,5,opt,name=flags,proto3" json:"flags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateOp) Reset() {
+	*x = CreateOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateOp) ProtoMessage() {}
+
+func (x *CreateOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateOp.ProtoReflect.Descriptor instead.
+func (*CreateOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *CreateOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *CreateOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CreateOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *CreateOp) GetUmask() uint32 {
+	if x != nil {
+		return x.Umask
+	}
+	return 0
+}
+
+func (x *CreateOp) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+// MkdirOp 表示在指定目录下创建新子目录的操作描述模型（对应 FUSE_MKDIR 协议）。
+// 对应 POSIX mkdir(2) 系统调用语义，分配新目录 Inode 并建立父子目录项链接。
+type MkdirOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待创建的子目录名称。
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// 目录 POSIX 权限模式位（st_mode 低 12 位）。
+	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 调用进程的文件创建掩码（umask）。
+	Umask         uint32 `protobuf:"varint,4,opt,name=umask,proto3" json:"umask,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MkdirOp) Reset() {
+	*x = MkdirOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MkdirOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MkdirOp) ProtoMessage() {}
+
+func (x *MkdirOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MkdirOp.ProtoReflect.Descriptor instead.
+func (*MkdirOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *MkdirOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *MkdirOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MkdirOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *MkdirOp) GetUmask() uint32 {
+	if x != nil {
+		return x.Umask
+	}
+	return 0
+}
+
+// RmdirOp 表示删除空目录的操作描述模型（对应 FUSE_RMDIR 协议）。
+// 对应 POSIX rmdir(2) 系统调用语义。目标目录必须为空（仅包含 . 和 ..），否则服务端将拒绝操作并返回 ENOTEMPTY。
+type RmdirOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待删除的子目录名称。
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RmdirOp) Reset() {
+	*x = RmdirOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RmdirOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RmdirOp) ProtoMessage() {}
+
+func (x *RmdirOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RmdirOp.ProtoReflect.Descriptor instead.
+func (*RmdirOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *RmdirOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *RmdirOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// UnlinkOp 表示从父目录中删除指定硬链接/文件的操作描述模型（对应 FUSE_UNLINK 协议）。
+// 对应 POSIX unlink(2) 系统调用语义。递减目标 Inode 的硬链接数（nlink）；
+// 当 nlink 归零且无进程打开该文件（nlookup 与活跃句柄均为 0）时，底层存储资源将被彻底释放回收。
+type UnlinkOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待删除的硬链接或文件名。
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnlinkOp) Reset() {
+	*x = UnlinkOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnlinkOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnlinkOp) ProtoMessage() {}
+
+func (x *UnlinkOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnlinkOp.ProtoReflect.Descriptor instead.
+func (*UnlinkOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *UnlinkOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *UnlinkOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// SymlinkOp 表示创建符号链接（软链接）的操作描述模型（对应 FUSE_SYMLINK 协议）。
+// 对应 POSIX symlink(2) 系统调用语义，创建一个类型为 INODE_TYPE_SYMLINK 的 Inode，
+// 其内容存储所指向的目标路径字符串。
+type SymlinkOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待创建的符号链接名称。
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// 符号链接指向的目标路径字符串（Target Path）。
+	Target        string `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SymlinkOp) Reset() {
+	*x = SymlinkOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SymlinkOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SymlinkOp) ProtoMessage() {}
+
+func (x *SymlinkOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SymlinkOp.ProtoReflect.Descriptor instead.
+func (*SymlinkOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *SymlinkOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *SymlinkOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SymlinkOp) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+// ReadlinkOp 表示读取符号链接目标路径的操作描述模型（对应 FUSE_READLINK 协议）。
+// 对应 POSIX readlink(2) 系统调用语义，返回符号链接 Inode 中存储的目标路径。
+type ReadlinkOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标符号链接的 Inode 编号。
+	Ino           uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadlinkOp) Reset() {
+	*x = ReadlinkOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadlinkOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadlinkOp) ProtoMessage() {}
+
+func (x *ReadlinkOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadlinkOp.ProtoReflect.Descriptor instead.
+func (*ReadlinkOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ReadlinkOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+// LinkOp 表示创建硬链接的操作描述模型（对应 FUSE_LINK 协议）。
+// 对应 POSIX link(2) 系统调用语义。在指定新父目录下为已有源 Inode 增加一个目录项别名，
+// 并递增源 Inode 的硬链接计数（nlink）。
+type LinkOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 源文件已有 Inode 编号。
+	InoSrc uint64 `protobuf:"varint,1,opt,name=ino_src,json=inoSrc,proto3" json:"ino_src,omitempty"`
+	// 新硬链接所在的父目录 Inode 编号。
+	NewParentIno uint64 `protobuf:"varint,2,opt,name=new_parent_ino,json=newParentIno,proto3" json:"new_parent_ino,omitempty"`
+	// 新硬链接的名称。
+	NewName       string `protobuf:"bytes,3,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LinkOp) Reset() {
+	*x = LinkOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkOp) ProtoMessage() {}
+
+func (x *LinkOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkOp.ProtoReflect.Descriptor instead.
+func (*LinkOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *LinkOp) GetInoSrc() uint64 {
+	if x != nil {
+		return x.InoSrc
+	}
+	return 0
+}
+
+func (x *LinkOp) GetNewParentIno() uint64 {
+	if x != nil {
+		return x.NewParentIno
+	}
+	return 0
+}
+
+func (x *LinkOp) GetNewName() string {
+	if x != nil {
+		return x.NewName
+	}
+	return ""
+}
+
+// MknodOp 表示创建特殊设备文件、管道或套接字节点的操作描述模型（对应 FUSE_MKNOD 协议）。
+// 对应 POSIX mknod(2) 系统调用语义。用于创建 FIFO 管道、UNIX 域套接字、字符设备或块设备节点。
+type MknodOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录 Inode 编号。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 待创建的特殊文件节点名称。
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// 待创建节点的分类类型（例如 FIFO、SOCKET、BLOCK_DEV、CHAR_DEV）。
+	Type InodeType `protobuf:"varint,3,opt,name=type,proto3,enum=iso.v1.InodeType" json:"type,omitempty"`
+	// POSIX 权限模式位（st_mode 低 12 位）。
+	Mode uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 调用进程的文件创建掩码（umask）。
+	Umask uint32 `protobuf:"varint,5,opt,name=umask,proto3" json:"umask,omitempty"`
+	// 设备编号（针对字符设备或块设备的主次设备号，POSIX st_rdev）。
+	Rdev          uint32 `protobuf:"varint,6,opt,name=rdev,proto3" json:"rdev,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MknodOp) Reset() {
+	*x = MknodOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MknodOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MknodOp) ProtoMessage() {}
+
+func (x *MknodOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MknodOp.ProtoReflect.Descriptor instead.
+func (*MknodOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *MknodOp) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *MknodOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MknodOp) GetType() InodeType {
+	if x != nil {
+		return x.Type
+	}
+	return InodeType_INODE_TYPE_UNSPECIFIED
+}
+
+func (x *MknodOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *MknodOp) GetUmask() uint32 {
+	if x != nil {
+		return x.Umask
+	}
+	return 0
+}
+
+func (x *MknodOp) GetRdev() uint32 {
+	if x != nil {
+		return x.Rdev
+	}
+	return 0
+}
+
+// OpenOp 表示打开已有文件的操作描述模型（对应 FUSE_OPEN 协议）。
+// 对应 POSIX open(2) 系统调用语义。校验文件存在性与访问权限，在服务端分配或绑定文件打开句柄（FileHandle），
+// 协调一写多读（OWMR）租约与内核页缓存控制标志（FOPEN_*）。
+type OpenOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// POSIX open 系统调用传入的原始标志位掩码（如 O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_DIRECT 等）。
+	Flags uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
+	// 文件打开的基础访问模式枚举（只读、只写、读写）。
+	OpenMode      OpenMode `protobuf:"varint,3,opt,name=open_mode,json=openMode,proto3,enum=iso.v1.OpenMode" json:"open_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OpenOp) Reset() {
+	*x = OpenOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OpenOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OpenOp) ProtoMessage() {}
+
+func (x *OpenOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OpenOp.ProtoReflect.Descriptor instead.
+func (*OpenOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *OpenOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *OpenOp) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+func (x *OpenOp) GetOpenMode() OpenMode {
+	if x != nil {
+		return x.OpenMode
+	}
+	return OpenMode_OPEN_MODE_UNSPECIFIED
+}
+
+// ReleaseOp 表示关闭并彻底释放文件句柄的操作描述模型（对应 FUSE_RELEASE 与 FUSE_RELEASEDIR 协议）。
+// 对应 POSIX close(2) 的最终内核释放动作（当同一文件描述符的所有 dup 引用均关闭后触发）。
+// 用于彻底注销服务端文件句柄资源，主动交还或回收一写多读（OWMR）排他写租约，并清理未决锁与会话追踪。
+type ReleaseOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 待释放注销的服务端文件打开句柄 ID（File Handle ID）。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// POSIX open 打开时的原始标志位掩码。
+	Flags uint32 `protobuf:"varint,3,opt,name=flags,proto3" json:"flags,omitempty"`
+	// 内核释放行为标志位（对应 Linux release_flags，例如 RELEASE_FLUSH）。
+	ReleaseFlags uint32 `protobuf:"varint,4,opt,name=release_flags,json=releaseFlags,proto3" json:"release_flags,omitempty"`
+	// POSIX 锁持有者唯一标识。
+	// 用于清理该句柄持有者关联占用的所有未决 POSIX 锁。
+	LockOwner uint64 `protobuf:"varint,5,opt,name=lock_owner,json=lockOwner,proto3" json:"lock_owner,omitempty"`
+	// 持有该句柄的客户端/挂载点唯一标识。
+	// 用于精确校验会话归属并安全回收 OWMR 写租约。
+	ClientId      string `protobuf:"bytes,6,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReleaseOp) Reset() {
+	*x = ReleaseOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReleaseOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReleaseOp) ProtoMessage() {}
+
+func (x *ReleaseOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReleaseOp.ProtoReflect.Descriptor instead.
+func (*ReleaseOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ReleaseOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *ReleaseOp) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *ReleaseOp) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+func (x *ReleaseOp) GetReleaseFlags() uint32 {
+	if x != nil {
+		return x.ReleaseFlags
+	}
+	return 0
+}
+
+func (x *ReleaseOp) GetLockOwner() uint64 {
+	if x != nil {
+		return x.LockOwner
+	}
+	return 0
+}
+
+func (x *ReleaseOp) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+// ReadDirOp 表示流式遍历读取目录项内容的操作描述模型（对应 FUSE_READDIR 与 FUSE_READDIRPLUS 协议）。
+// 封装 getdents64 系统调用，支持从指定的游标偏移量分批流式拉取子目录项，
+// 并支持 readdirplus 模式一次性预取 Inode 完整属性以最小化网络 RPC 往返。
+type ReadDirOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标目录 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 目录打开句柄（由 opendir 操作返回，若无需句柄管理可置为 0）。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 遍历起始游标偏移量（对应 DirEntry.offset，从该偏移之后继续拉取，首批查询从 0 开始）。
+	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
+	// 本批次期望返回的最大目录项数量限制（Limit）。
+	Limit uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// 是否启用 readdirplus 预取模式。
+	// 值为 true 时，返回的 DirEntry 中将附带完整 Inode 属性（DirEntry.attr）及属性有效时长，
+	// 供内核直接装载 dentry 与 inode 缓存，显著加速 ls -l 或递归扫描性能。
+	Plus          bool `protobuf:"varint,5,opt,name=plus,proto3" json:"plus,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadDirOp) Reset() {
+	*x = ReadDirOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadDirOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadDirOp) ProtoMessage() {}
+
+func (x *ReadDirOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadDirOp.ProtoReflect.Descriptor instead.
+func (*ReadDirOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *ReadDirOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *ReadDirOp) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *ReadDirOp) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *ReadDirOp) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ReadDirOp) GetPlus() bool {
+	if x != nil {
+		return x.Plus
+	}
+	return false
+}
+
+// AccessOp 表示校验调用进程对指定文件访问权限的操作描述模型（对应 FUSE_ACCESS 协议）。
+// 对应 POSIX access(2) / faccessat(2) 系统调用语义。
+// 内核在未启用 default_permissions 挂载选项或需要实时鉴权时向服务端发起校验。
+type AccessOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 待校验的访问权限掩码位（对应 POSIX access 掩码：R_OK=4, W_OK=2, X_OK=1, F_OK=0）。
+	// 多个权限位通过按位或组合。
+	Mask          uint32 `protobuf:"varint,2,opt,name=mask,proto3" json:"mask,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccessOp) Reset() {
+	*x = AccessOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccessOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccessOp) ProtoMessage() {}
+
+func (x *AccessOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccessOp.ProtoReflect.Descriptor instead.
+func (*AccessOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *AccessOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *AccessOp) GetMask() uint32 {
+	if x != nil {
+		return x.Mask
+	}
+	return 0
 }
 
 var File_iso_v1_fuse_proto protoreflect.FileDescriptor
@@ -2104,18 +3790,52 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\n" +
 	"generation\x18\x06 \x01(\x04R\n" +
 	"generation\x12>\n" +
-	"\rentry_timeout\x18\a \x01(\v2\x19.google.protobuf.DurationR\fentryTimeout\"z\n" +
-	"\x05Slice\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x16\n" +
-	"\x06offset\x18\x02 \x01(\rR\x06offset\x12\x16\n" +
-	"\x06length\x18\x03 \x01(\rR\x06length\x12\x12\n" +
-	"\x04size\x18\x04 \x01(\rR\x04size\x12\x1d\n" +
+	"\rentry_timeout\x18\a \x01(\v2\x19.google.protobuf.DurationR\fentryTimeout\"\xc4\x02\n" +
+	"\tSetAttrOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x14\n" +
+	"\x05valid\x18\x03 \x01(\rR\x05valid\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\x12\x10\n" +
+	"\x03uid\x18\x05 \x01(\rR\x03uid\x12\x10\n" +
+	"\x03gid\x18\x06 \x01(\rR\x03gid\x12\x12\n" +
+	"\x04size\x18\a \x01(\x04R\x04size\x120\n" +
+	"\x05atime\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\x05atime\x120\n" +
+	"\x05mtime\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x05mtime\x120\n" +
+	"\x05ctime\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\x05ctime\x12\x1d\n" +
 	"\n" +
-	"src_offset\x18\x05 \x01(\rR\tsrcOffset\"V\n" +
-	"\x05Chunk\x12\x10\n" +
-	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x14\n" +
-	"\x05index\x18\x02 \x01(\rR\x05index\x12%\n" +
-	"\x06slices\x18\x03 \x03(\v2\r.iso.v1.SliceR\x06slices\"1\n" +
+	"lock_owner\x18\v \x01(\x04R\tlockOwner\"8\n" +
+	"\n" +
+	"ForgetNode\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x18\n" +
+	"\anlookup\x18\x02 \x01(\x04R\anlookup\"6\n" +
+	"\bForgetOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x18\n" +
+	"\anlookup\x18\x02 \x01(\x04R\anlookup\"9\n" +
+	"\rBatchForgetOp\x12(\n" +
+	"\x05nodes\x18\x01 \x03(\v2\x12.iso.v1.ForgetNodeR\x05nodes\"J\n" +
+	"\aFlushOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x1d\n" +
+	"\n" +
+	"lock_owner\x18\x03 \x01(\x04R\tlockOwner\"G\n" +
+	"\aFsyncOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x1a\n" +
+	"\bdatasync\x18\x03 \x01(\bR\bdatasync\"p\n" +
+	"\aLseekOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x04R\x06offset\x12+\n" +
+	"\x06whence\x18\x04 \x01(\x0e2\x13.iso.v1.LseekWhenceR\x06whence\"O\n" +
+	"\vInvalNodeOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x16\n" +
+	"\x06offset\x18\x02 \x01(\x03R\x06offset\x12\x16\n" +
+	"\x06length\x18\x03 \x01(\x03R\x06length\"A\n" +
+	"\fInvalEntryOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"1\n" +
 	"\x05XAttr\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value\"Z\n" +
@@ -2173,7 +3893,88 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\x04perm\x18\x03 \x01(\rR\x04perm\"A\n" +
 	"\x03ACL\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x12*\n" +
-	"\aentries\x18\x02 \x03(\v2\x10.iso.v1.ACLEntryR\aentries*\xcd\x01\n" +
+	"\aentries\x18\x02 \x03(\v2\x10.iso.v1.ACLEntryR\aentries\"\xff\x01\n" +
+	"\x06Statfs\x12\x1d\n" +
+	"\n" +
+	"block_size\x18\x01 \x01(\rR\tblockSize\x12#\n" +
+	"\rfragment_size\x18\x02 \x01(\rR\ffragmentSize\x12\x16\n" +
+	"\x06blocks\x18\x03 \x01(\x04R\x06blocks\x12\x1f\n" +
+	"\vblocks_free\x18\x04 \x01(\x04R\n" +
+	"blocksFree\x12!\n" +
+	"\fblocks_avail\x18\x05 \x01(\x04R\vblocksAvail\x12\x14\n" +
+	"\x05files\x18\x06 \x01(\x04R\x05files\x12\x1d\n" +
+	"\n" +
+	"files_free\x18\a \x01(\x04R\tfilesFree\x12 \n" +
+	"\fmax_name_len\x18\b \x01(\rR\n" +
+	"maxNameLen\"\x1c\n" +
+	"\bStatfsOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\"=\n" +
+	"\bLookupOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"}\n" +
+	"\bCreateOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x14\n" +
+	"\x05umask\x18\x04 \x01(\rR\x05umask\x12\x14\n" +
+	"\x05flags\x18\x05 \x01(\rR\x05flags\"f\n" +
+	"\aMkdirOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x14\n" +
+	"\x05umask\x18\x04 \x01(\rR\x05umask\"<\n" +
+	"\aRmdirOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"=\n" +
+	"\bUnlinkOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"V\n" +
+	"\tSymlinkOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
+	"\x06target\x18\x03 \x01(\tR\x06target\"\x1e\n" +
+	"\n" +
+	"ReadlinkOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\"b\n" +
+	"\x06LinkOp\x12\x17\n" +
+	"\aino_src\x18\x01 \x01(\x04R\x06inoSrc\x12$\n" +
+	"\x0enew_parent_ino\x18\x02 \x01(\x04R\fnewParentIno\x12\x19\n" +
+	"\bnew_name\x18\x03 \x01(\tR\anewName\"\xa1\x01\n" +
+	"\aMknodOp\x12\x1d\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04R\tparentIno\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x11.iso.v1.InodeTypeR\x04type\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\x12\x14\n" +
+	"\x05umask\x18\x05 \x01(\rR\x05umask\x12\x12\n" +
+	"\x04rdev\x18\x06 \x01(\rR\x04rdev\"_\n" +
+	"\x06OpenOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x14\n" +
+	"\x05flags\x18\x02 \x01(\rR\x05flags\x12-\n" +
+	"\topen_mode\x18\x03 \x01(\x0e2\x10.iso.v1.OpenModeR\bopenMode\"\xa4\x01\n" +
+	"\tReleaseOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x14\n" +
+	"\x05flags\x18\x03 \x01(\rR\x05flags\x12#\n" +
+	"\rrelease_flags\x18\x04 \x01(\rR\freleaseFlags\x12\x1d\n" +
+	"\n" +
+	"lock_owner\x18\x05 \x01(\x04R\tlockOwner\x12\x1b\n" +
+	"\tclient_id\x18\x06 \x01(\tR\bclientId\"o\n" +
+	"\tReadDirOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x04R\x06offset\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\rR\x05limit\x12\x12\n" +
+	"\x04plus\x18\x05 \x01(\bR\x04plus\"0\n" +
+	"\bAccessOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x12\n" +
+	"\x04mask\x18\x02 \x01(\rR\x04mask*\xcd\x01\n" +
 	"\tInodeType\x12\x1a\n" +
 	"\x16INODE_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fINODE_TYPE_FILE\x10\x01\x12\x18\n" +
@@ -2197,7 +3998,25 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\x15FUSE_OPEN_FLAG_STREAM\x10\x10\x12\x1a\n" +
 	"\x16FUSE_OPEN_FLAG_NOFLUSH\x10 \x12)\n" +
 	"%FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES\x10@\x12\x1f\n" +
-	"\x1aFUSE_OPEN_FLAG_PASSTHROUGH\x10\x80\x01*h\n" +
+	"\x1aFUSE_OPEN_FLAG_PASSTHROUGH\x10\x80\x01*\xe8\x02\n" +
+	"\vSetAttrMask\x12\x1d\n" +
+	"\x19SET_ATTR_MASK_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12SET_ATTR_MASK_MODE\x10\x01\x12\x15\n" +
+	"\x11SET_ATTR_MASK_UID\x10\x02\x12\x15\n" +
+	"\x11SET_ATTR_MASK_GID\x10\x04\x12\x16\n" +
+	"\x12SET_ATTR_MASK_SIZE\x10\b\x12\x17\n" +
+	"\x13SET_ATTR_MASK_ATIME\x10\x10\x12\x17\n" +
+	"\x13SET_ATTR_MASK_MTIME\x10 \x12\x14\n" +
+	"\x10SET_ATTR_MASK_FH\x10@\x12\x1c\n" +
+	"\x17SET_ATTR_MASK_ATIME_NOW\x10\x80\x01\x12\x1c\n" +
+	"\x17SET_ATTR_MASK_MTIME_NOW\x10\x80\x02\x12\x1d\n" +
+	"\x18SET_ATTR_MASK_LOCK_OWNER\x10\x80\x04\x12\x18\n" +
+	"\x13SET_ATTR_MASK_CTIME\x10\x80\b\x12\x1f\n" +
+	"\x1aSET_ATTR_MASK_KILL_SUIDGID\x10\x80\x10*Y\n" +
+	"\vLseekWhence\x12\x1c\n" +
+	"\x18LSEEK_WHENCE_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11LSEEK_WHENCE_DATA\x10\x03\x12\x15\n" +
+	"\x11LSEEK_WHENCE_HOLE\x10\x04*h\n" +
 	"\fXAttrSetFlag\x12\x1f\n" +
 	"\x1bX_ATTR_SET_FLAG_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16X_ATTR_SET_FLAG_CREATE\x10\x01\x12\x1b\n" +
@@ -2249,61 +4068,91 @@ func file_iso_v1_fuse_proto_rawDescGZIP() []byte {
 	return file_iso_v1_fuse_proto_rawDescData
 }
 
-var file_iso_v1_fuse_proto_enumTypes = make([]protoimpl.EnumInfo, 9)
-var file_iso_v1_fuse_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_iso_v1_fuse_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
+var file_iso_v1_fuse_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_iso_v1_fuse_proto_goTypes = []any{
 	(InodeType)(0),                // 0: iso.v1.InodeType
 	(OpenMode)(0),                 // 1: iso.v1.OpenMode
 	(FuseOpenFlag)(0),             // 2: iso.v1.FuseOpenFlag
-	(XAttrSetFlag)(0),             // 3: iso.v1.XAttrSetFlag
-	(XAttrOpType)(0),              // 4: iso.v1.XAttrOpType
-	(LockType)(0),                 // 5: iso.v1.LockType
-	(RenameFlag)(0),               // 6: iso.v1.RenameFlag
-	(FallocateMode)(0),            // 7: iso.v1.FallocateMode
-	(ACLTag)(0),                   // 8: iso.v1.ACLTag
-	(*Inode)(nil),                 // 9: iso.v1.Inode
-	(*FileHandle)(nil),            // 10: iso.v1.FileHandle
-	(*DirEntry)(nil),              // 11: iso.v1.DirEntry
-	(*Slice)(nil),                 // 12: iso.v1.Slice
-	(*Chunk)(nil),                 // 13: iso.v1.Chunk
-	(*XAttr)(nil),                 // 14: iso.v1.XAttr
-	(*XAttrList)(nil),             // 15: iso.v1.XAttrList
-	(*XAttrOp)(nil),               // 16: iso.v1.XAttrOp
-	(*Flock)(nil),                 // 17: iso.v1.Flock
-	(*PlockRecord)(nil),           // 18: iso.v1.PlockRecord
-	(*Plock)(nil),                 // 19: iso.v1.Plock
-	(*RenameOp)(nil),              // 20: iso.v1.RenameOp
-	(*FallocateOp)(nil),           // 21: iso.v1.FallocateOp
-	(*CopyFileRangeOp)(nil),       // 22: iso.v1.CopyFileRangeOp
-	(*ACLEntry)(nil),              // 23: iso.v1.ACLEntry
-	(*ACL)(nil),                   // 24: iso.v1.ACL
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 26: google.protobuf.Duration
+	(SetAttrMask)(0),              // 3: iso.v1.SetAttrMask
+	(LseekWhence)(0),              // 4: iso.v1.LseekWhence
+	(XAttrSetFlag)(0),             // 5: iso.v1.XAttrSetFlag
+	(XAttrOpType)(0),              // 6: iso.v1.XAttrOpType
+	(LockType)(0),                 // 7: iso.v1.LockType
+	(RenameFlag)(0),               // 8: iso.v1.RenameFlag
+	(FallocateMode)(0),            // 9: iso.v1.FallocateMode
+	(ACLTag)(0),                   // 10: iso.v1.ACLTag
+	(*Inode)(nil),                 // 11: iso.v1.Inode
+	(*FileHandle)(nil),            // 12: iso.v1.FileHandle
+	(*DirEntry)(nil),              // 13: iso.v1.DirEntry
+	(*SetAttrOp)(nil),             // 14: iso.v1.SetAttrOp
+	(*ForgetNode)(nil),            // 15: iso.v1.ForgetNode
+	(*ForgetOp)(nil),              // 16: iso.v1.ForgetOp
+	(*BatchForgetOp)(nil),         // 17: iso.v1.BatchForgetOp
+	(*FlushOp)(nil),               // 18: iso.v1.FlushOp
+	(*FsyncOp)(nil),               // 19: iso.v1.FsyncOp
+	(*LseekOp)(nil),               // 20: iso.v1.LseekOp
+	(*InvalNodeOp)(nil),           // 21: iso.v1.InvalNodeOp
+	(*InvalEntryOp)(nil),          // 22: iso.v1.InvalEntryOp
+	(*XAttr)(nil),                 // 23: iso.v1.XAttr
+	(*XAttrList)(nil),             // 24: iso.v1.XAttrList
+	(*XAttrOp)(nil),               // 25: iso.v1.XAttrOp
+	(*Flock)(nil),                 // 26: iso.v1.Flock
+	(*PlockRecord)(nil),           // 27: iso.v1.PlockRecord
+	(*Plock)(nil),                 // 28: iso.v1.Plock
+	(*RenameOp)(nil),              // 29: iso.v1.RenameOp
+	(*FallocateOp)(nil),           // 30: iso.v1.FallocateOp
+	(*CopyFileRangeOp)(nil),       // 31: iso.v1.CopyFileRangeOp
+	(*ACLEntry)(nil),              // 32: iso.v1.ACLEntry
+	(*ACL)(nil),                   // 33: iso.v1.ACL
+	(*Statfs)(nil),                // 34: iso.v1.Statfs
+	(*StatfsOp)(nil),              // 35: iso.v1.StatfsOp
+	(*LookupOp)(nil),              // 36: iso.v1.LookupOp
+	(*CreateOp)(nil),              // 37: iso.v1.CreateOp
+	(*MkdirOp)(nil),               // 38: iso.v1.MkdirOp
+	(*RmdirOp)(nil),               // 39: iso.v1.RmdirOp
+	(*UnlinkOp)(nil),              // 40: iso.v1.UnlinkOp
+	(*SymlinkOp)(nil),             // 41: iso.v1.SymlinkOp
+	(*ReadlinkOp)(nil),            // 42: iso.v1.ReadlinkOp
+	(*LinkOp)(nil),                // 43: iso.v1.LinkOp
+	(*MknodOp)(nil),               // 44: iso.v1.MknodOp
+	(*OpenOp)(nil),                // 45: iso.v1.OpenOp
+	(*ReleaseOp)(nil),             // 46: iso.v1.ReleaseOp
+	(*ReadDirOp)(nil),             // 47: iso.v1.ReadDirOp
+	(*AccessOp)(nil),              // 48: iso.v1.AccessOp
+	(*timestamppb.Timestamp)(nil), // 49: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 50: google.protobuf.Duration
 }
 var file_iso_v1_fuse_proto_depIdxs = []int32{
 	0,  // 0: iso.v1.Inode.type:type_name -> iso.v1.InodeType
-	25, // 1: iso.v1.Inode.atime:type_name -> google.protobuf.Timestamp
-	25, // 2: iso.v1.Inode.mtime:type_name -> google.protobuf.Timestamp
-	25, // 3: iso.v1.Inode.ctime:type_name -> google.protobuf.Timestamp
-	26, // 4: iso.v1.Inode.attr_timeout:type_name -> google.protobuf.Duration
+	49, // 1: iso.v1.Inode.atime:type_name -> google.protobuf.Timestamp
+	49, // 2: iso.v1.Inode.mtime:type_name -> google.protobuf.Timestamp
+	49, // 3: iso.v1.Inode.ctime:type_name -> google.protobuf.Timestamp
+	50, // 4: iso.v1.Inode.attr_timeout:type_name -> google.protobuf.Duration
 	1,  // 5: iso.v1.FileHandle.open_mode:type_name -> iso.v1.OpenMode
 	0,  // 6: iso.v1.DirEntry.type:type_name -> iso.v1.InodeType
-	9,  // 7: iso.v1.DirEntry.attr:type_name -> iso.v1.Inode
-	26, // 8: iso.v1.DirEntry.entry_timeout:type_name -> google.protobuf.Duration
-	12, // 9: iso.v1.Chunk.slices:type_name -> iso.v1.Slice
-	14, // 10: iso.v1.XAttrList.xattrs:type_name -> iso.v1.XAttr
-	4,  // 11: iso.v1.XAttrOp.op:type_name -> iso.v1.XAttrOpType
-	3,  // 12: iso.v1.XAttrOp.flags:type_name -> iso.v1.XAttrSetFlag
-	5,  // 13: iso.v1.Flock.type:type_name -> iso.v1.LockType
-	5,  // 14: iso.v1.PlockRecord.type:type_name -> iso.v1.LockType
-	18, // 15: iso.v1.Plock.records:type_name -> iso.v1.PlockRecord
-	8,  // 16: iso.v1.ACLEntry.tag:type_name -> iso.v1.ACLTag
-	23, // 17: iso.v1.ACL.entries:type_name -> iso.v1.ACLEntry
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	11, // 7: iso.v1.DirEntry.attr:type_name -> iso.v1.Inode
+	50, // 8: iso.v1.DirEntry.entry_timeout:type_name -> google.protobuf.Duration
+	49, // 9: iso.v1.SetAttrOp.atime:type_name -> google.protobuf.Timestamp
+	49, // 10: iso.v1.SetAttrOp.mtime:type_name -> google.protobuf.Timestamp
+	49, // 11: iso.v1.SetAttrOp.ctime:type_name -> google.protobuf.Timestamp
+	15, // 12: iso.v1.BatchForgetOp.nodes:type_name -> iso.v1.ForgetNode
+	4,  // 13: iso.v1.LseekOp.whence:type_name -> iso.v1.LseekWhence
+	23, // 14: iso.v1.XAttrList.xattrs:type_name -> iso.v1.XAttr
+	6,  // 15: iso.v1.XAttrOp.op:type_name -> iso.v1.XAttrOpType
+	5,  // 16: iso.v1.XAttrOp.flags:type_name -> iso.v1.XAttrSetFlag
+	7,  // 17: iso.v1.Flock.type:type_name -> iso.v1.LockType
+	7,  // 18: iso.v1.PlockRecord.type:type_name -> iso.v1.LockType
+	27, // 19: iso.v1.Plock.records:type_name -> iso.v1.PlockRecord
+	10, // 20: iso.v1.ACLEntry.tag:type_name -> iso.v1.ACLTag
+	32, // 21: iso.v1.ACL.entries:type_name -> iso.v1.ACLEntry
+	0,  // 22: iso.v1.MknodOp.type:type_name -> iso.v1.InodeType
+	1,  // 23: iso.v1.OpenOp.open_mode:type_name -> iso.v1.OpenMode
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_iso_v1_fuse_proto_init() }
@@ -2316,8 +4165,8 @@ func file_iso_v1_fuse_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_iso_v1_fuse_proto_rawDesc), len(file_iso_v1_fuse_proto_rawDesc)),
-			NumEnums:      9,
-			NumMessages:   16,
+			NumEnums:      11,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

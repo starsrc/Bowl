@@ -222,40 +222,195 @@ message DirEntry {
   google.protobuf.Duration entry_timeout = 7;
 }
 
-// Slice 表示数据切片元数据。
-// 对齐 JuiceFS 切片存储模型，表示对某个 64MB Chunk 的一次写入区间。
-message Slice {
-  // 切片全局唯一标识 ID。
-  // 用于在服务端 NVMe SSD 本地缓存区或远端 B2 对象存储中寻址与定位实际切片数据对象。
-  uint64 id = 1;
+// SetAttrMask 定义修改文件属性时的有效位掩码（对应 Linux FUSE FATTR_* 位掩码）。
+// 多个标志位通过按位或（bit-wise OR）组合，用于指示 SetAttrOp 中哪些字段包含有效的新属性值。
+enum SetAttrMask {
+  // 未指定属性标志（默认占位值）。
+  SET_ATTR_MASK_UNSPECIFIED = 0;
 
-  // 切片在所属 64MB Chunk 内的起始逻辑偏移量（字节数，0 <= offset < 64MB）。
-  uint32 offset = 2;
+  // 修改文件权限模式（对应 FATTR_MODE = 1 << 0）。
+  SET_ATTR_MASK_MODE = 1;
 
-  // 切片有效数据的写入长度（字节数）。
-  uint32 length = 3;
+  // 修改属主用户 ID（对应 FATTR_UID = 1 << 1）。
+  SET_ATTR_MASK_UID = 2;
 
-  // 切片实际物理存储大小（字节数）。
-  uint32 size = 4;
+  // 修改属主用户组 ID（对应 FATTR_GID = 1 << 2）。
+  SET_ATTR_MASK_GID = 4;
 
-  // 切片在底层不可变物理数据对象（id）内部的起始读取偏移量（默认为 0）。
-  // 当发生切片裁剪（Cut）、重叠部分覆写、跨文件区间克隆（Clone）或碎片整理合并（Compaction）时，
-  // 用于指示从底层对象的第几字节开始读取，100% 完备对齐 JuiceFS 的 (pos, id, size, off, len) 五元组切片模型。
-  uint32 src_offset = 5;
+  // 修改文件大小 / 截断扩展文件（对应 FATTR_SIZE = 1 << 3）。
+  SET_ATTR_MASK_SIZE = 8;
+
+  // 修改最后访问时间戳（对应 FATTR_ATIME = 1 << 4）。
+  SET_ATTR_MASK_ATIME = 16;
+
+  // 修改最后修改时间戳（对应 FATTR_MTIME = 1 << 5）。
+  SET_ATTR_MASK_MTIME = 32;
+
+  // 校验或使用传入的文件句柄（对应 FATTR_FH = 1 << 6）。
+  SET_ATTR_MASK_FH = 64;
+
+  // 设置最后访问时间为服务端当前时间（对应 FATTR_ATIME_NOW = 1 << 7）。
+  SET_ATTR_MASK_ATIME_NOW = 128;
+
+  // 设置最后修改时间为服务端当前时间（对应 FATTR_MTIME_NOW = 1 << 8）。
+  SET_ATTR_MASK_MTIME_NOW = 256;
+
+  // 校验或更新文件锁持有者（对应 FATTR_LOCKOWNER = 1 << 9）。
+  SET_ATTR_MASK_LOCK_OWNER = 512;
+
+  // 修改最后状态变更时间戳（对应 FATTR_CTIME = 1 << 10）。
+  SET_ATTR_MASK_CTIME = 1024;
+
+  // 清除 SUID 与 SGID 权限位（对应 FATTR_KILL_SUIDGID = 1 << 11）。
+  SET_ATTR_MASK_KILL_SUIDGID = 2048;
 }
 
-// Chunk 表示文件的 64MB 逻辑分块元数据。
-// 对齐 JuiceFS 分块存储模型，大文件按 64MB 划分为多个连续逻辑 Chunk。
-message Chunk {
-  // 所属文件的 Inode 编号。
+// SetAttrOp 表示修改文件属性操作的抽象模型（对应 FUSE_SETATTR 协议）。
+// 封装 Linux setattr / chmod / chown / truncate / utimensat 等系统调用，
+// 通过 valid 掩码精确指明需要原子更新的属性集合。
+message SetAttrOp {
+  // 目标文件 Inode 编号。
   uint64 ino = 1;
 
-  // 文件内部的 Chunk 逻辑索引（从 0 开始自增，每个 Chunk 固定为 64MB 大小）。
-  uint32 index = 2;
+  // 文件打开句柄（当 valid 包含 SET_ATTR_MASK_FH 时生效，若由 fchmod/ftruncate 等针对已有句柄的操作发起；无关联句柄时置为 0）。
+  uint64 fh = 2;
 
-  // 构成该 Chunk 的数据切片列表。
-  // 遵循切片叠加覆盖模型（Slice Overlay）：后写入的切片具有更高优先级，覆盖先前写入重叠区域的数据。
-  repeated Slice slices = 3;
+  // 有效属性位掩码（按位或组合，详见 SetAttrMask 枚举定义）。
+  uint32 valid = 3;
+
+  // POSIX 权限位（当 valid 包含 SET_ATTR_MASK_MODE 时生效）。
+  uint32 mode = 4;
+
+  // 属主用户 ID（UID，当 valid 包含 SET_ATTR_MASK_UID 时生效）。
+  uint32 uid = 5;
+
+  // 属主用户组 ID（GID，当 valid 包含 SET_ATTR_MASK_GID 时生效）。
+  uint32 gid = 6;
+
+  // 目标文件大小（字节数，当 valid 包含 SET_ATTR_MASK_SIZE 时生效）。
+  uint64 size = 7;
+
+  // 最后访问时间戳（atime，当 valid 包含 SET_ATTR_MASK_ATIME 时生效）。
+  google.protobuf.Timestamp atime = 8;
+
+  // 最后修改时间戳（mtime，当 valid 包含 SET_ATTR_MASK_MTIME 时生效）。
+  google.protobuf.Timestamp mtime = 9;
+
+  // 最后状态变更时间戳（ctime，当 valid 包含 SET_ATTR_MASK_CTIME 时生效）。
+  google.protobuf.Timestamp ctime = 10;
+
+  // 锁持有者唯一标识（当 valid 包含 SET_ATTR_MASK_LOCK_OWNER 时生效，用于 POSIX 锁冲突检查与截断保护）。
+  uint64 lock_owner = 11;
+}
+
+// ForgetNode 表示单个 Inode 查找引用计数的减少条目。
+// 对应 Linux FUSE 内核在 dentry 缓存逐出时通知用户态的单个节点信息。
+message ForgetNode {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 内核释放的查找引用计数（Lookup Count 减少值）。
+  // 当服务端维护的该 Inode 累计 nlookup 归零且硬链接为 0 时，服务端可彻底回收该 Inode 资源。
+  uint64 nlookup = 2;
+}
+
+// ForgetOp 表示单个 Inode 遗忘操作的描述模型（对应 FUSE_FORGET 协议）。
+// 当内核从 dcache 中逐出该 Inode 缓存项时发送，指示服务端递减对应的查找引用计数。
+message ForgetOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 内核释放的查找引用计数（Lookup Count 减少值）。
+  uint64 nlookup = 2;
+}
+
+// BatchForgetOp 表示批量 Inode 遗忘操作的描述模型（对应 FUSE_BATCH_FORGET 协议）。
+// 允许内核在单次 RPC 中批量递减多个 Inode 的查找引用计数，减少频繁单节点 forget 的网络与通信开销。
+message BatchForgetOp {
+  // 待批量遗忘的节点条目列表。
+  repeated ForgetNode nodes = 1;
+}
+
+// FlushOp 表示文件关闭刷新操作的描述模型（对应 FUSE_FLUSH 协议）。
+// 在每次 close(2) 文件描述符时由内核发起，用于刷回脏数据并清理该文件描述符关联的 POSIX 文件锁。
+message FlushOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 待关闭刷新关联的文件打开句柄。
+  uint64 fh = 2;
+
+  // POSIX 锁持有者唯一标识。
+  // 用于清理当前进程在关闭此句柄时所占用的所有 POSIX 记录锁（Plock 清理语义）。
+  uint64 lock_owner = 3;
+}
+
+// FsyncOp 表示文件数据与元数据强制落盘同步操作的描述模型（对应 FUSE_FSYNC 与 FUSE_FSYNCDIR 协议）。
+// 对应 POSIX fsync(2) 与 fdatasync(2) 系统调用语义。
+message FsyncOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 文件打开句柄（若针对目录 fsyncdir 或已打开文件；无关联句柄可置为 0）。
+  uint64 fh = 2;
+
+  // 是否仅同步数据（对应 fdatasync 语义）。
+  // 值为 true 时仅强制落盘文件数据与检索所需必要元数据；值为 false 时强制落盘所有数据及完整元数据（mtime/ctime 等）。
+  bool datasync = 3;
+}
+
+// LseekWhence 定义 lseek 寻址空洞与数据区间的操作模式枚举（对应 Linux lseek(2) 的 SEEK_DATA / SEEK_HOLE）。
+// 用于高效探测稀疏文件（Sparse File）的分配区间与空洞区间。
+enum LseekWhence {
+  // 未指定模式（默认占位值）。
+  LSEEK_WHENCE_UNSPECIFIED = 0;
+
+  // 寻找下一个有效数据区间的起始偏移量（对应 Linux SEEK_DATA = 3）。
+  LSEEK_WHENCE_DATA = 3;
+
+  // 寻找下一个稀疏空洞区间的起始偏移量（对应 Linux SEEK_HOLE = 4）。
+  LSEEK_WHENCE_HOLE = 4;
+}
+
+// LseekOp 表示稀疏文件寻址操作的描述模型（对应 FUSE_LSEEK 协议）。
+// 允许客户端快速定位文件中的数据分配块或稀疏空洞，避免全量读取传输无用零值数据。
+message LseekOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 文件打开句柄。
+  uint64 fh = 2;
+
+  // 起始查找的字节偏移量。
+  uint64 offset = 3;
+
+  // 寻址模式（SEEK_DATA 或 SEEK_HOLE，详见 LseekWhence 枚举定义）。
+  LseekWhence whence = 4;
+}
+
+// InvalNodeOp 表示内核 Inode 缓存失效通知操作的描述模型（对应 FUSE_NOTIFY_INVAL_INODE 协议）。
+// 由服务端主动向客户端发起，用于使客户端内核中指定的 Inode 页缓存（Page Cache）失效。
+message InvalNodeOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 失效区间的起始字节偏移量。
+  int64 offset = 2;
+
+  // 失效区间的连续字节长度。
+  // 若 length 为 0 或负数（例如 -1），表示使该文件从 offset 开始的全部页缓存失效。
+  int64 length = 3;
+}
+
+// InvalEntryOp 表示内核目录项缓存失效通知操作的描述模型（对应 FUSE_NOTIFY_INVAL_ENTRY 协议）。
+// 由服务端主动向客户端发起，用于使客户端内核 dcache 中父目录下指定名称的目录项失效，
+// 促使后续访问重新发起 lookup 查询以获取最新元数据。
+message InvalEntryOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待失效的子文件或子目录名称。
+  string name = 2;
 }
 
 // XAttr 表示单个文件扩展属性（Extended Attribute，Key-Value 元数据对）。
@@ -560,4 +715,239 @@ message ACL {
 
   // 构成本 ACL 集合的规则条目列表。
   repeated ACLEntry entries = 2;
+}
+
+// Statfs 表示文件系统整体状态统计元数据。
+// 对齐 Linux statvfs(3) / statfs(2) 系统调用以及 FUSE 协议中的 fuse.StatfsOut 结构体。
+// 用于 df、stat 等系统工具获取存储池容量、空闲空间、Inode 用量及文件系统限制。
+message Statfs {
+  // 文件系统基本数据块大小（字节数，对应 statvfs f_bsize 与 fuse.StatfsOut.Bsize）。
+  // ISO Storage 中通常为 4096 (4KB)。
+  uint32 block_size = 1;
+
+  // 基本块大小 / 碎片大小（字节数，对应 statvfs f_frsize 与 fuse.StatfsOut.Frsize）。
+  // 在 Linux 系统中通常等于 block_size。
+  uint32 fragment_size = 2;
+
+  // 文件系统数据块总数（以 block_size 为单位，对应 statvfs f_blocks 与 fuse.StatfsOut.Blocks）。
+  uint64 blocks = 3;
+
+  // 文件系统空闲数据块总数（对应 statvfs f_bfree 与 fuse.StatfsOut.Bfree）。
+  uint64 blocks_free = 4;
+
+  // 非特权用户可用的空闲数据块总数（对应 statvfs f_bavail 与 fuse.StatfsOut.Bavail）。
+  uint64 blocks_avail = 5;
+
+  // 文件系统 Inode 节点总数（对应 statvfs f_files 与 fuse.StatfsOut.Files）。
+  uint64 files = 6;
+
+  // 文件系统空闲 Inode 节点总数（对应 statvfs f_ffree 与 fuse.StatfsOut.Ffree）。
+  uint64 files_free = 7;
+
+  // 支持的最大文件名长度（字符/字节数，对应 statvfs f_namemax 与 fuse.StatfsOut.NameLen，通常为 255）。
+  uint32 max_name_len = 8;
+}
+
+// StatfsOp 表示查询文件系统统计信息的操作描述模型（对应 FUSE_STATFS 协议）。
+// 封装 statvfs 系统调用，获取整个文件系统或特定目录下的存储用量与配额状态。
+message StatfsOp {
+  // 目标 Inode 编号（文件系统查询起点，通常为根节点 1 或特定挂载目录 Inode）。
+  uint64 ino = 1;
+}
+
+// LookupOp 表示在指定目录下按名称查找子条目的操作描述模型（对应 FUSE_LOOKUP 协议）。
+// 对应 Linux VFS 路径分量解析的核心步骤，查询目标文件的 Inode 及其元数据属性，建立或刷新内核 dentry 缓存。
+message LookupOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待查找的子文件或目录名称。
+  string name = 2;
+}
+
+// CreateOp 表示在指定目录下原子创建并打开常规文件的操作描述模型（对应 FUSE_CREATE 协议）。
+// 封装 open(..., O_CREAT|...) 系统调用，原子完成 Inode 创建、目录项链接以及文件句柄分配，
+// 并初始化一写多读（OWMR）写租约，避免多步 RPC 往返竞争。
+message CreateOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待创建的文件名称。
+  string name = 2;
+
+  // POSIX 文件权限模式位（st_mode 低 12 位，调用方已结合 umask 计算）。
+  uint32 mode = 3;
+
+  // 调用进程的文件创建掩码（umask）。
+  uint32 umask = 4;
+
+  // 打开标志位掩码（POSIX open flags，如 O_CREAT, O_WRONLY, O_TRUNC, O_EXCL 等）。
+  uint32 flags = 5;
+}
+
+// MkdirOp 表示在指定目录下创建新子目录的操作描述模型（对应 FUSE_MKDIR 协议）。
+// 对应 POSIX mkdir(2) 系统调用语义，分配新目录 Inode 并建立父子目录项链接。
+message MkdirOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待创建的子目录名称。
+  string name = 2;
+
+  // 目录 POSIX 权限模式位（st_mode 低 12 位）。
+  uint32 mode = 3;
+
+  // 调用进程的文件创建掩码（umask）。
+  uint32 umask = 4;
+}
+
+// RmdirOp 表示删除空目录的操作描述模型（对应 FUSE_RMDIR 协议）。
+// 对应 POSIX rmdir(2) 系统调用语义。目标目录必须为空（仅包含 . 和 ..），否则服务端将拒绝操作并返回 ENOTEMPTY。
+message RmdirOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待删除的子目录名称。
+  string name = 2;
+}
+
+// UnlinkOp 表示从父目录中删除指定硬链接/文件的操作描述模型（对应 FUSE_UNLINK 协议）。
+// 对应 POSIX unlink(2) 系统调用语义。递减目标 Inode 的硬链接数（nlink）；
+// 当 nlink 归零且无进程打开该文件（nlookup 与活跃句柄均为 0）时，底层存储资源将被彻底释放回收。
+message UnlinkOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待删除的硬链接或文件名。
+  string name = 2;
+}
+
+// SymlinkOp 表示创建符号链接（软链接）的操作描述模型（对应 FUSE_SYMLINK 协议）。
+// 对应 POSIX symlink(2) 系统调用语义，创建一个类型为 INODE_TYPE_SYMLINK 的 Inode，
+// 其内容存储所指向的目标路径字符串。
+message SymlinkOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待创建的符号链接名称。
+  string name = 2;
+
+  // 符号链接指向的目标路径字符串（Target Path）。
+  string target = 3;
+}
+
+// ReadlinkOp 表示读取符号链接目标路径的操作描述模型（对应 FUSE_READLINK 协议）。
+// 对应 POSIX readlink(2) 系统调用语义，返回符号链接 Inode 中存储的目标路径。
+message ReadlinkOp {
+  // 目标符号链接的 Inode 编号。
+  uint64 ino = 1;
+}
+
+// LinkOp 表示创建硬链接的操作描述模型（对应 FUSE_LINK 协议）。
+// 对应 POSIX link(2) 系统调用语义。在指定新父目录下为已有源 Inode 增加一个目录项别名，
+// 并递增源 Inode 的硬链接计数（nlink）。
+message LinkOp {
+  // 源文件已有 Inode 编号。
+  uint64 ino_src = 1;
+
+  // 新硬链接所在的父目录 Inode 编号。
+  uint64 new_parent_ino = 2;
+
+  // 新硬链接的名称。
+  string new_name = 3;
+}
+
+// MknodOp 表示创建特殊设备文件、管道或套接字节点的操作描述模型（对应 FUSE_MKNOD 协议）。
+// 对应 POSIX mknod(2) 系统调用语义。用于创建 FIFO 管道、UNIX 域套接字、字符设备或块设备节点。
+message MknodOp {
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 1;
+
+  // 待创建的特殊文件节点名称。
+  string name = 2;
+
+  // 待创建节点的分类类型（例如 FIFO、SOCKET、BLOCK_DEV、CHAR_DEV）。
+  InodeType type = 3;
+
+  // POSIX 权限模式位（st_mode 低 12 位）。
+  uint32 mode = 4;
+
+  // 调用进程的文件创建掩码（umask）。
+  uint32 umask = 5;
+
+  // 设备编号（针对字符设备或块设备的主次设备号，POSIX st_rdev）。
+  uint32 rdev = 6;
+}
+
+// OpenOp 表示打开已有文件的操作描述模型（对应 FUSE_OPEN 协议）。
+// 对应 POSIX open(2) 系统调用语义。校验文件存在性与访问权限，在服务端分配或绑定文件打开句柄（FileHandle），
+// 协调一写多读（OWMR）租约与内核页缓存控制标志（FOPEN_*）。
+message OpenOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // POSIX open 系统调用传入的原始标志位掩码（如 O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_DIRECT 等）。
+  uint32 flags = 2;
+
+  // 文件打开的基础访问模式枚举（只读、只写、读写）。
+  OpenMode open_mode = 3;
+}
+
+// ReleaseOp 表示关闭并彻底释放文件句柄的操作描述模型（对应 FUSE_RELEASE 与 FUSE_RELEASEDIR 协议）。
+// 对应 POSIX close(2) 的最终内核释放动作（当同一文件描述符的所有 dup 引用均关闭后触发）。
+// 用于彻底注销服务端文件句柄资源，主动交还或回收一写多读（OWMR）排他写租约，并清理未决锁与会话追踪。
+message ReleaseOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 待释放注销的服务端文件打开句柄 ID（File Handle ID）。
+  uint64 fh = 2;
+
+  // POSIX open 打开时的原始标志位掩码。
+  uint32 flags = 3;
+
+  // 内核释放行为标志位（对应 Linux release_flags，例如 RELEASE_FLUSH）。
+  uint32 release_flags = 4;
+
+  // POSIX 锁持有者唯一标识。
+  // 用于清理该句柄持有者关联占用的所有未决 POSIX 锁。
+  uint64 lock_owner = 5;
+
+  // 持有该句柄的客户端/挂载点唯一标识。
+  // 用于精确校验会话归属并安全回收 OWMR 写租约。
+  string client_id = 6;
+}
+
+// ReadDirOp 表示流式遍历读取目录项内容的操作描述模型（对应 FUSE_READDIR 与 FUSE_READDIRPLUS 协议）。
+// 封装 getdents64 系统调用，支持从指定的游标偏移量分批流式拉取子目录项，
+// 并支持 readdirplus 模式一次性预取 Inode 完整属性以最小化网络 RPC 往返。
+message ReadDirOp {
+  // 目标目录 Inode 编号。
+  uint64 ino = 1;
+
+  // 目录打开句柄（由 opendir 操作返回，若无需句柄管理可置为 0）。
+  uint64 fh = 2;
+
+  // 遍历起始游标偏移量（对应 DirEntry.offset，从该偏移之后继续拉取，首批查询从 0 开始）。
+  uint64 offset = 3;
+
+  // 本批次期望返回的最大目录项数量限制（Limit）。
+  uint32 limit = 4;
+
+  // 是否启用 readdirplus 预取模式。
+  // 值为 true 时，返回的 DirEntry 中将附带完整 Inode 属性（DirEntry.attr）及属性有效时长，
+  // 供内核直接装载 dentry 与 inode 缓存，显著加速 ls -l 或递归扫描性能。
+  bool plus = 5;
+}
+
+// AccessOp 表示校验调用进程对指定文件访问权限的操作描述模型（对应 FUSE_ACCESS 协议）。
+// 对应 POSIX access(2) / faccessat(2) 系统调用语义。
+// 内核在未启用 default_permissions 挂载选项或需要实时鉴权时向服务端发起校验。
+message AccessOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 待校验的访问权限掩码位（对应 POSIX access 掩码：R_OK=4, W_OK=2, X_OK=1, F_OK=0）。
+  // 多个权限位通过按位或组合。
+  uint32 mask = 2;
 }

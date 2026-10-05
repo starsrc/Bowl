@@ -9,6 +9,9 @@ lint:
     - STANDARD
   except:
     - RPC_RESPONSE_STANDARD_NAME
+  ignore_only:
+    IMPORT_USED:
+      - proto/iso/v1/storage.proto
 breaking:
   use:
     - FILE

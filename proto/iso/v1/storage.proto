@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package iso.v1;
+
+import "iso/v1/fuse.proto";
+
+option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
+
+// StorageService 定义 ISO Storage 的核心存储 RPC 服务接口。
+// 负责处理客户端文件系统操作、元数据与数据流的高效存取。
+service StorageService {}

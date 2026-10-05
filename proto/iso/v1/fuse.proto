@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package iso.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
+
+// InodeType 表示文件系统中节点的类型枚举。
+// 设计对齐 POSIX 文件类型定义 (S_IFMT) 以及 JuiceFS 的 Inode 类型定义。
+enum InodeType {
+  // 未指定类型（默认占位值）。
+  INODE_TYPE_UNSPECIFIED = 0;
+  // 普通文件。
+  INODE_TYPE_FILE = 1;
+  // 目录节点。
+  INODE_TYPE_DIRECTORY = 2;
+  // 符号链接（软链接）。
+  INODE_TYPE_SYMLINK = 3;
+  // 命名管道（FIFO 特殊文件）。
+  INODE_TYPE_FIFO = 4;
+  // 块设备特殊文件。
+  INODE_TYPE_BLOCK_DEV = 5;
+  // 字符设备特殊文件。
+  INODE_TYPE_CHAR_DEV = 6;
+  // UNIX 域套接字特殊文件。
+  INODE_TYPE_SOCKET = 7;
+}
+
+// Inode 代表 ISO Storage 文件系统的核心元数据抽象。
+// 设计融合了 POSIX 文件属性、JuiceFS 元数据模型以及 ISO Storage 的多级缓存/对象存储架构特性
+// （例如服务端 NVMe SSD 本地热缓存与远端 B2 对象存储冷分层，以及一写多读一致性模型）。
+message Inode {
+  // 全局唯一 Inode 编号（文件系统根目录固定为 1）。
+  uint64 ino = 1;
+
+  // 父目录 Inode 编号。
+  // 用于支持高效的反向路径解析和目录树遍历。
+  // 在多硬链接场景（nlink > 1）下，该字段设为 0，父节点映射关系由专用的反向索引表统一维护，对齐 JuiceFS 规范。
+  uint64 parent_ino = 2;
+
+  // 文件类型分类。
+  // 该字段作为文件类型的唯一权威来源（Single Source of Truth），上层逻辑不应从 mode 中解析类型。
+  InodeType type = 3;
+
+  // POSIX 权限位（st_mode 低 12 位：rwxrwxrwx、setuid、setgid 与 sticky bit）。
+  // 对齐 JuiceFS Attr.Mode 规范。此处明确剥离了文件类型位，文件类型完全由 type 字段决定。
+  uint32 mode = 4;
+
+  // 属主用户 ID (UID)。
+  uint32 uid = 5;
+
+  // 属主用户组 ID (GID)。
+  uint32 gid = 6;
+
+  // 文件总大小（字节数）。
+  uint64 size = 7;
+
+  // 指向该 Inode 的硬链接计数。
+  uint32 nlink = 8;
+
+  // 设备特殊文件的设备编号（POSIX st_rdev，针对字符设备或块设备）。
+  uint32 rdev = 9;
+
+  // 最后数据访问时间戳（atime，纳秒精度）。
+  google.protobuf.Timestamp atime = 10;
+
+  // 最后数据修改时间戳（mtime，纳秒精度）。
+  google.protobuf.Timestamp mtime = 11;
+
+  // 最后元数据状态变更时间戳（ctime，纳秒精度）。
+  google.protobuf.Timestamp ctime = 12;
+
+  // 符号链接目标路径（当且仅当 type 为 INODE_TYPE_SYMLINK 时有效）。
+  string target = 13;
+
+  // 扩展文件属性标志位（对应 Linux chattr 属性，例如不可变 immutable、仅追加 append-only 等）。
+  uint32 flags = 14;
+
+  // 存储分层与缓存层级标志（用于 ISO Storage 的分层存储管理与生命周期调度）。
+  // 区分服务端 NVMe SSD 本地热缓存与 B2 远端冷对象存储层级。
+  uint32 tier = 15;
+
+  // 分配给该 Inode 的 512 字节块总数（对应 POSIX st_blocks 与 FUSE Blocks）。
+  // 用于精确磁盘空间用量统计与 du 命令核算。
+  uint64 blocks = 16;
+}
+
+// OpenMode 表示文件打开的基础访问模式枚举。
+// 设计对齐 POSIX 访问模式标志（O_RDONLY、O_WRONLY、O_RDWR）。
+enum OpenMode {
+  // 未指定访问模式（默认占位值）。
+  OPEN_MODE_UNSPECIFIED = 0;
+  // 只读模式（对应 POSIX O_RDONLY）。
+  OPEN_MODE_READ_ONLY = 1;
+  // 只写模式（对应 POSIX O_WRONLY）。
+  OPEN_MODE_WRITE_ONLY = 2;
+  // 读写模式（对应 POSIX O_RDWR）。
+  OPEN_MODE_READ_WRITE = 3;
+}
+
+// FileHandle 代表 ISO Storage 服务端分配并维护的文件打开句柄抽象。
+// 结合 FUSE 协议标准与 ISO Storage 一写多读（OWMR）并发控制模型及冷热分层缓存设计，
+// 用于跟踪客户端的文件打开会话、I/O 模式、租约状态与生命周期回收。
+message FileHandle {
+  // 服务端集中分配的全局唯一文件句柄标识（File Handle ID）。
+  uint64 fh = 1;
+
+  // 该文件句柄关联的目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开的基础访问模式（只读、只写、读写）。
+  OpenMode open_mode = 3;
+
+  // POSIX open 系统调用传入的原始标志位掩码（例如 O_APPEND、O_DIRECT、O_SYNC 等）。
+  // 用于引导服务端与客户端执行对应的 I/O 语义（如直接 I/O 绕过缓存、追加写等）。
+  uint32 flags = 4;
+
+  // 持有该文件句柄的客户端/挂载点会话唯一标识。
+  // 用于实现租约有效性校验、心跳检测与客户端宕机/网络断开后的孤儿句柄资源自动回收。
+  string client_id = 5;
+
+  // 是否持有当前 Inode 的排他性写租约。
+  // 在 ISO Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
+  // 确保数据修改的唯一性与缓存失效同步。
+  bool is_write_lease = 6;
+}
+
+// DirEntry 表示目录项元数据。
+// 对应文件系统目录中的单个文件或子目录映射关系。
+message DirEntry {
+  // 目录项名称（例如 "file.txt" 或子目录名）。
+  string name = 1;
+
+  // 关联的目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 目标文件类型分类。
+  InodeType type = 3;
+
+  // 可选的关联完整 Inode 属性。
+  // 用于支持 FUSE readdirplus 操作，实现目录列表与属性预取的一次性高效带回，避免多次 RPC 往返。
+  Inode attr = 4;
+
+  // 目录流游标偏移量（对应 POSIX d_off 与 FUSE DirEntry.Off）。
+  // 用于支持超大目录分批流式遍历与内核断点续传。
+  uint64 offset = 5;
+}
+
+// Slice 表示数据切片元数据。
+// 对齐 JuiceFS 切片存储模型，表示对某个 64MB Chunk 的一次写入区间。
+message Slice {
+  // 切片全局唯一标识 ID。
+  // 用于在服务端 NVMe SSD 本地缓存区或远端 B2 对象存储中寻址与定位实际切片数据对象。
+  uint64 id = 1;
+
+  // 切片在所属 64MB Chunk 内的起始逻辑偏移量（字节数，0 <= offset < 64MB）。
+  uint32 offset = 2;
+
+  // 切片有效数据的写入长度（字节数）。
+  uint32 length = 3;
+
+  // 切片实际物理存储大小（字节数）。
+  uint32 size = 4;
+
+  // 切片在底层不可变物理数据对象（id）内部的起始读取偏移量（默认为 0）。
+  // 当发生切片裁剪（Cut）、重叠部分覆写、跨文件区间克隆（Clone）或碎片整理合并（Compaction）时，
+  // 用于指示从底层对象的第几字节开始读取，100% 完备对齐 JuiceFS 的 (pos, id, size, off, len) 五元组切片模型。
+  uint32 src_offset = 5;
+}
+
+// Chunk 表示文件的 64MB 逻辑分块元数据。
+// 对齐 JuiceFS 分块存储模型，大文件按 64MB 划分为多个连续逻辑 Chunk。
+message Chunk {
+  // 所属文件的 Inode 编号。
+  uint64 ino = 1;
+
+  // 文件内部的 Chunk 逻辑索引（从 0 开始自增，每个 Chunk 固定为 64MB 大小）。
+  uint32 index = 2;
+
+  // 构成该 Chunk 的数据切片列表。
+  // 遵循切片叠加覆盖模型（Slice Overlay）：后写入的切片具有更高优先级，覆盖先前写入重叠区域的数据。
+  repeated Slice slices = 3;
+}

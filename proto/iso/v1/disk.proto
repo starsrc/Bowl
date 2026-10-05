@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package iso.v1;
+
+import "google/protobuf/timestamp.proto";
+import "iso/v1/fuse.proto";
+
+option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
+
+// DiskStatus 表示面向用户与租户的虚拟磁盘生命周期状态枚举。
+enum DiskStatus {
+  // 未指定状态（默认占位值）。
+  DISK_STATUS_UNSPECIFIED = 0;
+
+  // 磁盘创建与初始化中。
+  DISK_STATUS_CREATING = 1;
+
+  // 磁盘已创建完成，处于就绪闲置状态（可供挂载）。
+  DISK_STATUS_READY = 2;
+
+  // 磁盘已挂载至客户端（当前处于连接与 I/O 活跃状态）。
+  DISK_STATUS_ATTACHED = 3;
+
+  // 磁盘已从客户端正常卸载分离。
+  DISK_STATUS_DETACHED = 4;
+
+  // 磁盘处于异常或故障状态。
+  DISK_STATUS_ERROR = 5;
+}
+
+// Disk 代表面向租户与用户的顶层虚拟磁盘业务实体。
+// 封装了分布式文件系统的存储配额、使用量统计、生命周期挂载状态以及文件系统级元数据抽象。
+message Disk {
+  // 磁盘全局唯一标识 ID（UUID）。
+  string disk_id = 1;
+
+  // 磁盘易读名称。
+  string name = 2;
+
+  // 磁盘分配的总存储容量上限（字节数）。
+  uint64 capacity_bytes = 3;
+
+  // 磁盘当前已使用的存储容量（字节数）。
+  uint64 used_bytes = 4;
+
+  // 磁盘 Inode 节点配额上限（0 表示无限制）。
+  uint64 inodes_quota = 5;
+
+  // 磁盘当前已分配使用的 Inode 节点总数。
+  uint64 inodes_used = 6;
+
+  // 磁盘当前的生命周期状态。
+  DiskStatus status = 7;
+
+  // 当前挂载持有该磁盘的客户端/宿主机唯一标识 ID（未挂载时为空）。
+  string attached_client_id = 8;
+
+  // 磁盘创建时间戳。
+  google.protobuf.Timestamp created_at = 9;
+
+  // 磁盘最后更新时间戳。
+  google.protobuf.Timestamp updated_at = 10;
+
+  // 核心关联字段：文件系统全局状态与统计元数据（对齐 Linux statvfs）。
+  iso.v1.Statfs statfs = 11;
+}

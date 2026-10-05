@@ -28,5 +28,5 @@ go.work.sum
 .idea/
 .DS_Store
 .tdd_list.md
-docker-compose.yaml
 .agents
+/references

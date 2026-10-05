@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package iso.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
@@ -84,6 +85,27 @@ message Inode {
   // 分配给该 Inode 的 512 字节块总数（对应 POSIX st_blocks 与 FUSE Blocks）。
   // 用于精确磁盘空间用量统计与 du 命令核算。
   uint64 blocks = 16;
+
+  // Inode 代数 / 纪元号（Generation）。
+  // 用于内核校验 Inode 有效性。当 Inode 编号被删除且后续重新分配给新文件时，
+  // generation 会自增递增，避免内核 FUSE 驱动以及 NFS 客户端因 Inode 编号复用产生的 ABA 问题及陈旧句柄（ESTALE）。
+  uint64 generation = 17;
+
+  // 内核属性缓存有效时间（Attr Timeout）。
+  // 指示内核 FUSE 驱动在多长时间内无需向服务端重新发起 getattr 查询。
+  // ISO Storage 服务端可根据文件冷热层级、一写多读（OWMR）租约状态动态调整该值以达到性能与一致性的平衡。
+  google.protobuf.Duration attr_timeout = 18;
+
+  // 访问控制列表（Access ACL）标识 ID。
+  // 指向当前 Inode 绑定的扩展访问权限规则集合。
+  // 具有相同 ACL 规则集合的文件共享相同的 access_acl ID，对齐 JuiceFS Attr.AccessACL 设计。
+  // 值为 0 时表示未配置扩展访问控制列表，完全遵循 mode 权限位。
+  uint32 access_acl = 19;
+
+  // 默认访问控制列表（Default ACL）标识 ID。
+  // 当且仅当 Inode 为目录时有效，定义该目录下新建子文件或子目录时自动继承的默认 ACL 规则集合。
+  // 对齐 JuiceFS Attr.DefaultACL 设计。值为 0 时表示未配置目录默认继承 ACL。
+  uint32 default_acl = 20;
 }
 
 // OpenMode 表示文件打开的基础访问模式枚举。
@@ -97,6 +119,37 @@ enum OpenMode {
   OPEN_MODE_WRITE_ONLY = 2;
   // 读写模式（对应 POSIX O_RDWR）。
   OPEN_MODE_READ_WRITE = 3;
+}
+
+// FuseOpenFlag 定义 FUSE 内核 open 操作的响应标志（对应 Linux 内核 FOPEN_* 位掩码）。
+// 服务端通过 FileHandle.open_flags 返回给内核驱动，指示内核对该文件打开会话采取的底层 I/O 行为。
+// 由于多个标志可以通过按位或（bit-wise OR）组合使用，实际在 FileHandle 中以 uint32 open_flags 存储。
+enum FuseOpenFlag {
+  // 未指定任何行为标志（默认行为：使用内核标准页缓存、无特殊选项）。
+  FUSE_OPEN_FLAG_UNSPECIFIED = 0;
+  // 直接 I/O 模式（对应 FOPEN_DIRECT_IO = 1 << 0）。
+  // 绕过内核页缓存（Page Cache），所有读写直接通过 FUSE 发送给用户空间/服务端。
+  FUSE_OPEN_FLAG_DIRECT_IO = 1;
+  // 保留内核页缓存（对应 FOPEN_KEEP_CACHE = 1 << 1）。
+  // 打开文件时不失效现有的页缓存，适用于文件内容未发生变化的只读重用场景。
+  FUSE_OPEN_FLAG_KEEP_CACHE = 2;
+  // 不可寻址模式（对应 FOPEN_NONSEEKABLE = 1 << 2）。
+  // 指示文件不支持 lseek 寻址操作（例如 FIFO 管道或字符流）。
+  FUSE_OPEN_FLAG_NONSEEKABLE = 4;
+  // 缓存目录内容（对应 FOPEN_CACHE_DIR = 1 << 3）。
+  // 指示内核缓存 opendir 后的目录内容。
+  FUSE_OPEN_FLAG_CACHE_DIR = 8;
+  // 流式文件传输（对应 FOPEN_STREAM = 1 << 4）。
+  // 指示内核该文件为单向流式操作，优化并发流读写。
+  FUSE_OPEN_FLAG_STREAM = 16;
+  // 关闭时不隐式执行 flush（对应 FOPEN_NOFLUSH = 1 << 5）。
+  FUSE_OPEN_FLAG_NOFLUSH = 32;
+  // 并发直接写入（对应 FOPEN_PARALLEL_DIRECT_WRITES = 1 << 6）。
+  // 允许对同一文件句柄进行无锁或并发的直接 I/O 写入。
+  FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES = 64;
+  // 直通模式（对应 FOPEN_PASSTHROUGH = 1 << 7）。
+  // 允许内核绕过 FUSE 守护进程，直接重定向到下层物理文件系统（Linux 5.14+ 特性）。
+  FUSE_OPEN_FLAG_PASSTHROUGH = 128;
 }
 
 // FileHandle 代表 ISO Storage 服务端分配并维护的文件打开句柄抽象。
@@ -124,6 +177,19 @@ message FileHandle {
   // 在 ISO Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
   // 确保数据修改的唯一性与缓存失效同步。
   bool is_write_lease = 6;
+
+  // 服务端指示内核 FUSE 的底层打开行为标志位掩码（按位或组合）。
+  // 对应 Linux 内核 FOPEN_* 标志位定义（详见 FuseOpenFlag 枚举与常量）。
+  // 常用标志位：
+  //   - FOPEN_DIRECT_IO (1 << 0, 0x01): 绕过内核页缓存（Page Cache）进行直接读写。
+  //   - FOPEN_KEEP_CACHE (1 << 1, 0x02): open 时保留内核已有页缓存，不触发失效。
+  //   - FOPEN_NONSEEKABLE (1 << 2, 0x04): 指示文件不支持 lseek 寻址操作。
+  //   - FOPEN_CACHE_DIR (1 << 3, 0x08): 允许内核缓存 opendir 打开的目录项。
+  //   - FOPEN_STREAM (1 << 4, 0x10): 流式文件传输模式（优化并发流读写）。
+  //   - FOPEN_NOFLUSH (1 << 5, 0x20): 关闭文件时不隐式调用 flush。
+  //   - FOPEN_PARALLEL_DIRECT_WRITES (1 << 6, 0x40): 允许对同一文件句柄进行并发直接写。
+  //   - FOPEN_PASSTHROUGH (1 << 7, 0x80): 启用内核直通模式（绕过 FUSE 守护进程重定向至下层文件系统）。
+  uint32 open_flags = 7;
 }
 
 // DirEntry 表示目录项元数据。
@@ -145,6 +211,15 @@ message DirEntry {
   // 目录流游标偏移量（对应 POSIX d_off 与 FUSE DirEntry.Off）。
   // 用于支持超大目录分批流式遍历与内核断点续传。
   uint64 offset = 5;
+
+  // 关联目标 Inode 的代数 / 纪元号（Generation）。
+  // 用于内核在 lookup / readdirplus 阶段校验 Inode 映射有效性，防止 Inode 编号复用引发的 ABA 错位。
+  uint64 generation = 6;
+
+  // 内核目录项缓存有效时间（Entry Timeout）。
+  // 指示内核 FUSE 驱动在多长时间内直接复用 dentry 目录项缓存，而无需重复向服务端发起 lookup 解析。
+  // 配合 ISO Storage 服务端租约与元数据变更通知机制实现高效缓存。
+  google.protobuf.Duration entry_timeout = 7;
 }
 
 // Slice 表示数据切片元数据。
@@ -181,4 +256,308 @@ message Chunk {
   // 构成该 Chunk 的数据切片列表。
   // 遵循切片叠加覆盖模型（Slice Overlay）：后写入的切片具有更高优先级，覆盖先前写入重叠区域的数据。
   repeated Slice slices = 3;
+}
+
+// XAttr 表示单个文件扩展属性（Extended Attribute，Key-Value 元数据对）。
+// 对齐 Linux xattr 机制（支持 user.*、trusted.*、security.*、system.* 等命名空间）与 JuiceFS 扩展属性设计。
+message XAttr {
+  // 扩展属性键名（例如 "user.comment"、"security.selinux"）。
+  string name = 1;
+
+  // 扩展属性值（二进制数据）。
+  bytes value = 2;
+}
+
+// XAttrSetFlag 表示设置扩展属性时的操作模式标志（对应 Linux setxattr 的 flags 参数）。
+enum XAttrSetFlag {
+  // 未指定标志（默认模式：若属性存在则覆盖替换，若不存在则创建）。
+  X_ATTR_SET_FLAG_UNSPECIFIED = 0;
+  // 仅在属性尚不存在时创建；若已存在则返回 EEXIST 错误（对应 Linux XATTR_CREATE = 0x1）。
+  X_ATTR_SET_FLAG_CREATE = 1;
+  // 仅在属性已存在时替换；若不存在则返回 ENODATA / ENOATTR 错误（对应 Linux XATTR_REPLACE = 0x2）。
+  X_ATTR_SET_FLAG_REPLACE = 2;
+}
+
+// XAttrOpType 表示扩展属性操作类型枚举。
+enum XAttrOpType {
+  // 未指定操作类型。
+  X_ATTR_OP_TYPE_UNSPECIFIED = 0;
+  // 获取指定的扩展属性值 (getxattr)。
+  X_ATTR_OP_TYPE_GET = 1;
+  // 设置指定的扩展属性值 (setxattr)。
+  X_ATTR_OP_TYPE_SET = 2;
+  // 删除指定的扩展属性 (removexattr)。
+  X_ATTR_OP_TYPE_REMOVE = 3;
+  // 列出所有扩展属性键名 (listxattr)。
+  X_ATTR_OP_TYPE_LIST = 4;
+}
+
+// XAttrList 表示扩展属性的列表与集合抽象模型。
+// 用于 listxattr 系统调用响应以及客户端属性批量预取与元数据同步。
+message XAttrList {
+  // 关联的目标 Inode 编号。
+  uint64 ino = 1;
+
+  // 扩展属性键名列表（用于 listxattr 查询时仅返回键名集合）。
+  repeated string names = 2;
+
+  // 完整的扩展属性键值对列表（用于批量获取、属性预取或元数据快照同步）。
+  repeated XAttr xattrs = 3;
+}
+
+// XAttrOp 表示扩展属性的操作描述抽象模型。
+// 用于在 RPC 或批量元数据调用中统一表达 getxattr/setxattr/removexattr/listxattr 操作。
+message XAttrOp {
+  // 关联的目标 Inode 编号。
+  uint64 ino = 1;
+
+  // 扩展属性操作类型。
+  XAttrOpType op = 2;
+
+  // 目标扩展属性键名（在 GET、SET、REMOVE 操作时必须指定）。
+  string name = 3;
+
+  // 待写入的扩展属性值（在 SET 操作时指定）。
+  bytes value = 4;
+
+  // 设置属性时的控制标志（在 SET 操作时有效，如 XATTR_SET_FLAG_CREATE / XATTR_SET_FLAG_REPLACE）。
+  XAttrSetFlag flags = 5;
+}
+
+// LockType 表示文件锁的操作与状态类型枚举。
+// 统一抽象 POSIX fcntl 记录锁与 BSD flock 整体文件锁的加锁模式。
+enum LockType {
+  // 未指定锁类型（默认占位值）。
+  LOCK_TYPE_UNSPECIFIED = 0;
+  // 共享锁 / 读锁（对应 POSIX F_RDLCK 与 BSD LOCK_SH）。
+  // 允许多个客户端/会话并发持有读锁进行读取。
+  LOCK_TYPE_SHARED = 1;
+  // 排他锁 / 写锁（对应 POSIX F_WRLCK 与 BSD LOCK_EX）。
+  // 仅允许单一客户端/会话独占持有，阻止其他并发读写锁。
+  LOCK_TYPE_EXCLUSIVE = 2;
+  // 解锁（对应 POSIX F_UNLCK 与 BSD LOCK_UN）。
+  // 释放先前持有的锁。
+  LOCK_TYPE_UNLOCK = 3;
+}
+
+// Flock 代表 BSD 风格的文件级锁抽象模型（对应 flock(2) 系统调用）。
+// 作用于整个文件对象（非字节区间），按 Inode 粒度进行加锁与互斥控制。
+message Flock {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 锁持有者的唯一标识（对应内核 FUSE 的 lock_owner 或客户端会话 ID）。
+  uint64 owner = 2;
+
+  // 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+  LockType type = 3;
+}
+
+// PlockRecord 代表 POSIX 风格的字节区间记录锁（对应 fcntl(2) F_GETLK / F_SETLK / F_SETLKW）。
+// 支持对文件内部的特定连续字节区间 [start, end] 进行精确的细粒度加锁。
+message PlockRecord {
+  // 锁定区间的起始字节偏移量（包含该字节，闭区间起点）。
+  uint64 start = 1;
+
+  // 锁定区间的结束字节偏移量（包含该字节，闭区间终点；0 或最大值表示直至文件末尾无穷大）。
+  uint64 end = 2;
+
+  // 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+  LockType type = 3;
+
+  // 持有该区间锁的进程 ID (PID)。
+  // 用于 POSIX 锁持有者标识以及死锁检测与 fcntl F_GETLK 查询返回。
+  uint32 pid = 4;
+}
+
+// Plock 代表 POSIX 记录锁（Plock）在 Inode 维度的聚合持有状态模型。
+// 维护特定持有者对该 Inode 所占用的所有区间记录锁列表。
+message Plock {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 锁持有者的唯一标识（对应内核 FUSE 的 lock_owner）。
+  uint64 owner = 2;
+
+  // 该持有者在当前 Inode 上持有的一组字节区间记录锁列表。
+  repeated PlockRecord records = 3;
+}
+
+// RenameFlag 定义原子重命名操作的行为标志位（对应 Linux renameat2(2) 的 flags 参数）。
+// 多个标志位支持按位或（bit-wise OR）组合，用于实现原子安全替换、双向交换与白障标记。
+enum RenameFlag {
+  // 未指定重命名标志（默认标准 POSIX rename 行为：目标存在时直接原子覆盖替换）。
+  RENAME_FLAG_UNSPECIFIED = 0;
+
+  // 禁止覆盖目标路径（对应 Linux RENAME_NOREPLACE = 1 << 0）。
+  // 当目标路径已存在时原子操作失败并返回 EEXIST 错误，保证创建/重命名操作的安全幂等性。
+  RENAME_FLAG_NO_REPLACE = 1;
+
+  // 原子双向交换源路径与目标路径（对应 Linux RENAME_EXCHANGE = 1 << 1）。
+  // 源和目标路径必须均已存在，原子互换两者对应的 Inode 引用，常用于无停机元数据切换与文件内容热置换。
+  RENAME_FLAG_EXCHANGE = 2;
+
+  // 在源路径创建白障/删除标记文件（对应 Linux RENAME_WHITEOUT = 1 << 2）。
+  // 适用于 OverlayFS 等联合文件系统环境，在执行重命名的同时在源位置留下白障节点以遮蔽下层同名实体。
+  RENAME_FLAG_WHITEOUT = 4;
+}
+
+// RenameOp 表示文件或目录的原子重命名与交换操作抽象模型。
+// 封装 Linux renameat2 系统调用与 FUSE RENAME2 协议语义，
+// 统一支持常规重命名、无覆盖原子重命名（NOREPLACE）以及双向原子交换（EXCHANGE）。
+message RenameOp {
+  // 源目录 Inode 编号。
+  uint64 parent_src = 1;
+
+  // 待移动或重命名的源文件/目录名称。
+  string name_src = 2;
+
+  // 目标目录 Inode 编号。
+  uint64 parent_dst = 3;
+
+  // 移动或重命名后的目标文件/目录名称。
+  string name_dst = 4;
+
+  // 重命名标志位掩码（按位或组合，详见 RenameFlag 枚举定义）。
+  // 对应 Linux renameat2 标志（如 RENAME_NOREPLACE、RENAME_EXCHANGE、RENAME_WHITEOUT）。
+  uint32 flags = 5;
+}
+
+// FallocateMode 定义文件空间预分配、打洞与区间重构的模式标志（对应 Linux fallocate(2) 的 mode 标志位）。
+// 多个模式标志可通过按位或组合使用，实际在 FallocateOp 中以 uint32 mode 位掩码存储。
+enum FallocateMode {
+  // 未指定模式（默认标准空间预分配行为：实际分配物理存储块并扩容文件大小，对应 FALLOC_FL_ALLOCATE / 0）。
+  FALLOCATE_MODE_UNSPECIFIED = 0;
+
+  // 保持文件大小不变（对应 Linux FALLOC_FL_KEEP_SIZE = 0x01）。
+  // 执行预分配或打洞时，即便操作区间超过当前文件末尾（EOF），也不会扩大文件的 size 属性。
+  FALLOCATE_MODE_KEEP_SIZE = 1;
+
+  // 打洞释放指定区间空间（对应 Linux FALLOC_FL_PUNCH_HOLE = 0x02）。
+  // 释放指定区间的数据与底层切片/物理块，产生逻辑稀疏空洞并将空间归还文件系统。必须与 KEEP_SIZE 联合使用。
+  FALLOCATE_MODE_PUNCH_HOLE = 2;
+
+  // 不隐藏陈旧数据块（对应 Linux FALLOC_FL_NO_HIDE_STALES = 0x04）。
+  // 保留未写入块且不主动进行零值抹除隐藏旧数据，用于针对安全要求较低场景的高性能块快速预分配。
+  FALLOCATE_MODE_NO_HIDE_STALES = 4;
+
+  // 折叠消除区间并前移后续数据（对应 Linux FALLOC_FL_COLLAPSE_RANGE = 0x08）。
+  // 消除指定的连续字节区间并将后续文件内容无缝向前平移，相应减小文件总大小，避免昂贵的数据搬迁。
+  FALLOCATE_MODE_COLLAPSE_RANGE = 8;
+
+  // 区间数据快速清零（对应 Linux FALLOC_FL_ZERO_RANGE = 0x10）。
+  // 将指定区间的字节清零，保留已分配块或转换为未写入块，若超出文件末尾则自动扩容（除非附加 KEEP_SIZE）。
+  FALLOCATE_MODE_ZERO_RANGE = 16;
+
+  // 插入空洞区间并后移后续数据（对应 Linux FALLOC_FL_INSERT_RANGE = 0x20）。
+  // 在文件内部插入指定大小的稀疏空洞区间并将后续数据向后推移，相应增加文件总大小。
+  FALLOCATE_MODE_INSERT_RANGE = 32;
+
+  // 解除写时复制共享引用（对应 Linux FALLOC_FL_UNSHARE_RANGE = 0x40）。
+  // 对共享的 CoW 切片区间进行预先解耦和独占分配，确保后续写入时无额外分配延迟。
+  FALLOCATE_MODE_UNSHARE_RANGE = 64;
+}
+
+// FallocateOp 表示文件空间预分配、打洞释放与区间重构操作抽象模型。
+// 封装 Linux fallocate(2) 系统调用与 FUSE FALLOCATE 协议语义，
+// 配合 ISO Storage 服务端 NVMe SSD 缓存及底层切片管理实现零填充、空洞裁剪与容量预热。
+message FallocateOp {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 文件打开句柄（若调用由已打开文件句柄发起；若无句柄或句柄不可用可填 0）。
+  uint64 fh = 2;
+
+  // 预分配/打洞模式位掩码（按位或组合，详见 FallocateMode 枚举定义）。
+  uint32 mode = 3;
+
+  // 操作区间的起始字节偏移量。
+  uint64 offset = 4;
+
+  // 操作区间的连续字节长度。
+  uint64 length = 5;
+}
+
+// CopyFileRangeOp 表示跨文件或同文件内的区间秒级克隆操作抽象模型。
+// 封装 Linux copy_file_range(2) 系统调用与 FUSE COPY_FILE_RANGE 协议语义。
+// 得益于 ISO Storage 与 JuiceFS 底层数据切片（Slice）的不可变性（Immutable 特性），
+// 服务端可在元数据层级直接复制切片索引映射（复用 Slice ID、动态调整切片内的 src_offset 与 length），
+// 无需在服务端或对象存储间进行真实物理数据复制，实现毫秒级元数据零拷贝区间克隆。
+message CopyFileRangeOp {
+  // 源文件 Inode 编号。
+  uint64 src_ino = 1;
+
+  // 源文件打开句柄（若提供句柄可用于租约与状态校验，可选，默认为 0）。
+  uint64 src_fh = 2;
+
+  // 源文件克隆区间的起始字节偏移量。
+  uint64 src_offset = 3;
+
+  // 目标文件 Inode 编号。
+  uint64 dst_ino = 4;
+
+  // 目标文件打开句柄（若提供句柄可用于租约与状态校验，可选，默认为 0）。
+  uint64 dst_fh = 5;
+
+  // 目标文件写入区间的起始字节偏移量。
+  uint64 dst_offset = 6;
+
+  // 待克隆的数据连续字节长度。
+  uint64 length = 7;
+
+  // 内核 copy_file_range 传入的控制标志位（保留供未来扩展，当前 Linux 内核要求必须为 0）。
+  uint32 flags = 8;
+}
+
+// ACLTag 表示 POSIX 访问控制列表（ACL）的条目分类标签枚举。
+// 数值设计与 POSIX.1e 标准草案（sys/acl.h）、Linux 内核（linux/posix_acl.h）及 JuiceFS 底层数值 1:1 精确对齐。
+enum ACLTag {
+  // 未指定类型（默认占位值）。
+  ACL_TAG_UNSPECIFIED = 0;
+
+  // 文件所有者（对应 POSIX ACL_USER_OBJ = 0x01）。
+  ACL_TAG_USER_OBJ = 1;
+
+  // 指定用户（对应 POSIX ACL_USER = 0x02）。
+  ACL_TAG_USER = 2;
+
+  // 文件所有组（对应 POSIX ACL_GROUP_OBJ = 0x04）。
+  ACL_TAG_GROUP_OBJ = 4;
+
+  // 指定用户组（对应 POSIX ACL_GROUP = 0x08）。
+  ACL_TAG_GROUP = 8;
+
+  // 权限掩码（对应 POSIX ACL_MASK = 0x10）。
+  ACL_TAG_MASK = 16;
+
+  // 其他人（对应 POSIX ACL_OTHER = 0x20）。
+  ACL_TAG_OTHER = 32;
+}
+
+// ACLEntry 表示 POSIX 访问控制列表中的单个权限规则条目。
+// 结合标签类型、目标实体 ID 以及 rwx 权限位定义细粒度访问控制。
+message ACLEntry {
+  // ACL 条目标签分类（指明属主、扩展用户、属组、扩展组、掩码或其它人）。
+  ACLTag tag = 1;
+
+  // 用户 UID 或用户组 GID。
+  // 当 tag 为 ACL_TAG_USER 时为目标用户的 UID；
+  // 当 tag 为 ACL_TAG_GROUP 时为目标用户组的 GID；
+  // 当 tag 为 USER_OBJ、GROUP_OBJ、MASK、OTHER 时该字段固定为 0。
+  // 注：在序列化为 Linux xattr 二进制报文时，对于无特定对象的条目（USER_OBJ, GROUP_OBJ, MASK, OTHER），底层二进制对应的 e_id 需转为 ACL_UNDEFINED_ID (0xFFFFFFFF)。
+  uint32 id = 2;
+
+  // 访问权限位（对齐 POSIX 权限位表示，低 3 位分别代表读 r=4、写 w=2、执行 x=1，取值范围 0~7）。
+  uint32 perm = 3;
+}
+
+// ACL 表示一组聚合的 POSIX 访问控制列表规则模型。
+// 采用规则去重与哈希共享机制，相同条目集合映射到相同的全局唯一 ACL ID，对齐 JuiceFS 设计以最小化元数据存储开销。
+message ACL {
+  // 全局唯一的 ACL 规则集合标识 ID。
+  // 相同规则条目的 Inode 共享复用同一 ID（对应 Inode.access_acl 与 Inode.default_acl）。
+  uint32 id = 1;
+
+  // 构成本 ACL 集合的规则条目列表。
+  repeated ACLEntry entries = 2;
 }

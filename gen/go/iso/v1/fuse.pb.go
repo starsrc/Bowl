@@ -9,6 +9,7 @@ package isov1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -154,6 +155,479 @@ func (OpenMode) EnumDescriptor() ([]byte, []int) {
 	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{1}
 }
 
+// FuseOpenFlag 定义 FUSE 内核 open 操作的响应标志（对应 Linux 内核 FOPEN_* 位掩码）。
+// 服务端通过 FileHandle.open_flags 返回给内核驱动，指示内核对该文件打开会话采取的底层 I/O 行为。
+// 由于多个标志可以通过按位或（bit-wise OR）组合使用，实际在 FileHandle 中以 uint32 open_flags 存储。
+type FuseOpenFlag int32
+
+const (
+	// 未指定任何行为标志（默认行为：使用内核标准页缓存、无特殊选项）。
+	FuseOpenFlag_FUSE_OPEN_FLAG_UNSPECIFIED FuseOpenFlag = 0
+	// 直接 I/O 模式（对应 FOPEN_DIRECT_IO = 1 << 0）。
+	// 绕过内核页缓存（Page Cache），所有读写直接通过 FUSE 发送给用户空间/服务端。
+	FuseOpenFlag_FUSE_OPEN_FLAG_DIRECT_IO FuseOpenFlag = 1
+	// 保留内核页缓存（对应 FOPEN_KEEP_CACHE = 1 << 1）。
+	// 打开文件时不失效现有的页缓存，适用于文件内容未发生变化的只读重用场景。
+	FuseOpenFlag_FUSE_OPEN_FLAG_KEEP_CACHE FuseOpenFlag = 2
+	// 不可寻址模式（对应 FOPEN_NONSEEKABLE = 1 << 2）。
+	// 指示文件不支持 lseek 寻址操作（例如 FIFO 管道或字符流）。
+	FuseOpenFlag_FUSE_OPEN_FLAG_NONSEEKABLE FuseOpenFlag = 4
+	// 缓存目录内容（对应 FOPEN_CACHE_DIR = 1 << 3）。
+	// 指示内核缓存 opendir 后的目录内容。
+	FuseOpenFlag_FUSE_OPEN_FLAG_CACHE_DIR FuseOpenFlag = 8
+	// 流式文件传输（对应 FOPEN_STREAM = 1 << 4）。
+	// 指示内核该文件为单向流式操作，优化并发流读写。
+	FuseOpenFlag_FUSE_OPEN_FLAG_STREAM FuseOpenFlag = 16
+	// 关闭时不隐式执行 flush（对应 FOPEN_NOFLUSH = 1 << 5）。
+	FuseOpenFlag_FUSE_OPEN_FLAG_NOFLUSH FuseOpenFlag = 32
+	// 并发直接写入（对应 FOPEN_PARALLEL_DIRECT_WRITES = 1 << 6）。
+	// 允许对同一文件句柄进行无锁或并发的直接 I/O 写入。
+	FuseOpenFlag_FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES FuseOpenFlag = 64
+	// 直通模式（对应 FOPEN_PASSTHROUGH = 1 << 7）。
+	// 允许内核绕过 FUSE 守护进程，直接重定向到下层物理文件系统（Linux 5.14+ 特性）。
+	FuseOpenFlag_FUSE_OPEN_FLAG_PASSTHROUGH FuseOpenFlag = 128
+)
+
+// Enum value maps for FuseOpenFlag.
+var (
+	FuseOpenFlag_name = map[int32]string{
+		0:   "FUSE_OPEN_FLAG_UNSPECIFIED",
+		1:   "FUSE_OPEN_FLAG_DIRECT_IO",
+		2:   "FUSE_OPEN_FLAG_KEEP_CACHE",
+		4:   "FUSE_OPEN_FLAG_NONSEEKABLE",
+		8:   "FUSE_OPEN_FLAG_CACHE_DIR",
+		16:  "FUSE_OPEN_FLAG_STREAM",
+		32:  "FUSE_OPEN_FLAG_NOFLUSH",
+		64:  "FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES",
+		128: "FUSE_OPEN_FLAG_PASSTHROUGH",
+	}
+	FuseOpenFlag_value = map[string]int32{
+		"FUSE_OPEN_FLAG_UNSPECIFIED":            0,
+		"FUSE_OPEN_FLAG_DIRECT_IO":              1,
+		"FUSE_OPEN_FLAG_KEEP_CACHE":             2,
+		"FUSE_OPEN_FLAG_NONSEEKABLE":            4,
+		"FUSE_OPEN_FLAG_CACHE_DIR":              8,
+		"FUSE_OPEN_FLAG_STREAM":                 16,
+		"FUSE_OPEN_FLAG_NOFLUSH":                32,
+		"FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES": 64,
+		"FUSE_OPEN_FLAG_PASSTHROUGH":            128,
+	}
+)
+
+func (x FuseOpenFlag) Enum() *FuseOpenFlag {
+	p := new(FuseOpenFlag)
+	*p = x
+	return p
+}
+
+func (x FuseOpenFlag) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FuseOpenFlag) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[2].Descriptor()
+}
+
+func (FuseOpenFlag) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[2]
+}
+
+func (x FuseOpenFlag) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FuseOpenFlag.Descriptor instead.
+func (FuseOpenFlag) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{2}
+}
+
+// XAttrSetFlag 表示设置扩展属性时的操作模式标志（对应 Linux setxattr 的 flags 参数）。
+type XAttrSetFlag int32
+
+const (
+	// 未指定标志（默认模式：若属性存在则覆盖替换，若不存在则创建）。
+	XAttrSetFlag_X_ATTR_SET_FLAG_UNSPECIFIED XAttrSetFlag = 0
+	// 仅在属性尚不存在时创建；若已存在则返回 EEXIST 错误（对应 Linux XATTR_CREATE = 0x1）。
+	XAttrSetFlag_X_ATTR_SET_FLAG_CREATE XAttrSetFlag = 1
+	// 仅在属性已存在时替换；若不存在则返回 ENODATA / ENOATTR 错误（对应 Linux XATTR_REPLACE = 0x2）。
+	XAttrSetFlag_X_ATTR_SET_FLAG_REPLACE XAttrSetFlag = 2
+)
+
+// Enum value maps for XAttrSetFlag.
+var (
+	XAttrSetFlag_name = map[int32]string{
+		0: "X_ATTR_SET_FLAG_UNSPECIFIED",
+		1: "X_ATTR_SET_FLAG_CREATE",
+		2: "X_ATTR_SET_FLAG_REPLACE",
+	}
+	XAttrSetFlag_value = map[string]int32{
+		"X_ATTR_SET_FLAG_UNSPECIFIED": 0,
+		"X_ATTR_SET_FLAG_CREATE":      1,
+		"X_ATTR_SET_FLAG_REPLACE":     2,
+	}
+)
+
+func (x XAttrSetFlag) Enum() *XAttrSetFlag {
+	p := new(XAttrSetFlag)
+	*p = x
+	return p
+}
+
+func (x XAttrSetFlag) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (XAttrSetFlag) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[3].Descriptor()
+}
+
+func (XAttrSetFlag) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[3]
+}
+
+func (x XAttrSetFlag) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use XAttrSetFlag.Descriptor instead.
+func (XAttrSetFlag) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{3}
+}
+
+// XAttrOpType 表示扩展属性操作类型枚举。
+type XAttrOpType int32
+
+const (
+	// 未指定操作类型。
+	XAttrOpType_X_ATTR_OP_TYPE_UNSPECIFIED XAttrOpType = 0
+	// 获取指定的扩展属性值 (getxattr)。
+	XAttrOpType_X_ATTR_OP_TYPE_GET XAttrOpType = 1
+	// 设置指定的扩展属性值 (setxattr)。
+	XAttrOpType_X_ATTR_OP_TYPE_SET XAttrOpType = 2
+	// 删除指定的扩展属性 (removexattr)。
+	XAttrOpType_X_ATTR_OP_TYPE_REMOVE XAttrOpType = 3
+	// 列出所有扩展属性键名 (listxattr)。
+	XAttrOpType_X_ATTR_OP_TYPE_LIST XAttrOpType = 4
+)
+
+// Enum value maps for XAttrOpType.
+var (
+	XAttrOpType_name = map[int32]string{
+		0: "X_ATTR_OP_TYPE_UNSPECIFIED",
+		1: "X_ATTR_OP_TYPE_GET",
+		2: "X_ATTR_OP_TYPE_SET",
+		3: "X_ATTR_OP_TYPE_REMOVE",
+		4: "X_ATTR_OP_TYPE_LIST",
+	}
+	XAttrOpType_value = map[string]int32{
+		"X_ATTR_OP_TYPE_UNSPECIFIED": 0,
+		"X_ATTR_OP_TYPE_GET":         1,
+		"X_ATTR_OP_TYPE_SET":         2,
+		"X_ATTR_OP_TYPE_REMOVE":      3,
+		"X_ATTR_OP_TYPE_LIST":        4,
+	}
+)
+
+func (x XAttrOpType) Enum() *XAttrOpType {
+	p := new(XAttrOpType)
+	*p = x
+	return p
+}
+
+func (x XAttrOpType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (XAttrOpType) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[4].Descriptor()
+}
+
+func (XAttrOpType) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[4]
+}
+
+func (x XAttrOpType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use XAttrOpType.Descriptor instead.
+func (XAttrOpType) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{4}
+}
+
+// LockType 表示文件锁的操作与状态类型枚举。
+// 统一抽象 POSIX fcntl 记录锁与 BSD flock 整体文件锁的加锁模式。
+type LockType int32
+
+const (
+	// 未指定锁类型（默认占位值）。
+	LockType_LOCK_TYPE_UNSPECIFIED LockType = 0
+	// 共享锁 / 读锁（对应 POSIX F_RDLCK 与 BSD LOCK_SH）。
+	// 允许多个客户端/会话并发持有读锁进行读取。
+	LockType_LOCK_TYPE_SHARED LockType = 1
+	// 排他锁 / 写锁（对应 POSIX F_WRLCK 与 BSD LOCK_EX）。
+	// 仅允许单一客户端/会话独占持有，阻止其他并发读写锁。
+	LockType_LOCK_TYPE_EXCLUSIVE LockType = 2
+	// 解锁（对应 POSIX F_UNLCK 与 BSD LOCK_UN）。
+	// 释放先前持有的锁。
+	LockType_LOCK_TYPE_UNLOCK LockType = 3
+)
+
+// Enum value maps for LockType.
+var (
+	LockType_name = map[int32]string{
+		0: "LOCK_TYPE_UNSPECIFIED",
+		1: "LOCK_TYPE_SHARED",
+		2: "LOCK_TYPE_EXCLUSIVE",
+		3: "LOCK_TYPE_UNLOCK",
+	}
+	LockType_value = map[string]int32{
+		"LOCK_TYPE_UNSPECIFIED": 0,
+		"LOCK_TYPE_SHARED":      1,
+		"LOCK_TYPE_EXCLUSIVE":   2,
+		"LOCK_TYPE_UNLOCK":      3,
+	}
+)
+
+func (x LockType) Enum() *LockType {
+	p := new(LockType)
+	*p = x
+	return p
+}
+
+func (x LockType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (LockType) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[5].Descriptor()
+}
+
+func (LockType) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[5]
+}
+
+func (x LockType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use LockType.Descriptor instead.
+func (LockType) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{5}
+}
+
+// RenameFlag 定义原子重命名操作的行为标志位（对应 Linux renameat2(2) 的 flags 参数）。
+// 多个标志位支持按位或（bit-wise OR）组合，用于实现原子安全替换、双向交换与白障标记。
+type RenameFlag int32
+
+const (
+	// 未指定重命名标志（默认标准 POSIX rename 行为：目标存在时直接原子覆盖替换）。
+	RenameFlag_RENAME_FLAG_UNSPECIFIED RenameFlag = 0
+	// 禁止覆盖目标路径（对应 Linux RENAME_NOREPLACE = 1 << 0）。
+	// 当目标路径已存在时原子操作失败并返回 EEXIST 错误，保证创建/重命名操作的安全幂等性。
+	RenameFlag_RENAME_FLAG_NO_REPLACE RenameFlag = 1
+	// 原子双向交换源路径与目标路径（对应 Linux RENAME_EXCHANGE = 1 << 1）。
+	// 源和目标路径必须均已存在，原子互换两者对应的 Inode 引用，常用于无停机元数据切换与文件内容热置换。
+	RenameFlag_RENAME_FLAG_EXCHANGE RenameFlag = 2
+	// 在源路径创建白障/删除标记文件（对应 Linux RENAME_WHITEOUT = 1 << 2）。
+	// 适用于 OverlayFS 等联合文件系统环境，在执行重命名的同时在源位置留下白障节点以遮蔽下层同名实体。
+	RenameFlag_RENAME_FLAG_WHITEOUT RenameFlag = 4
+)
+
+// Enum value maps for RenameFlag.
+var (
+	RenameFlag_name = map[int32]string{
+		0: "RENAME_FLAG_UNSPECIFIED",
+		1: "RENAME_FLAG_NO_REPLACE",
+		2: "RENAME_FLAG_EXCHANGE",
+		4: "RENAME_FLAG_WHITEOUT",
+	}
+	RenameFlag_value = map[string]int32{
+		"RENAME_FLAG_UNSPECIFIED": 0,
+		"RENAME_FLAG_NO_REPLACE":  1,
+		"RENAME_FLAG_EXCHANGE":    2,
+		"RENAME_FLAG_WHITEOUT":    4,
+	}
+)
+
+func (x RenameFlag) Enum() *RenameFlag {
+	p := new(RenameFlag)
+	*p = x
+	return p
+}
+
+func (x RenameFlag) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RenameFlag) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[6].Descriptor()
+}
+
+func (RenameFlag) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[6]
+}
+
+func (x RenameFlag) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RenameFlag.Descriptor instead.
+func (RenameFlag) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{6}
+}
+
+// FallocateMode 定义文件空间预分配、打洞与区间重构的模式标志（对应 Linux fallocate(2) 的 mode 标志位）。
+// 多个模式标志可通过按位或组合使用，实际在 FallocateOp 中以 uint32 mode 位掩码存储。
+type FallocateMode int32
+
+const (
+	// 未指定模式（默认标准空间预分配行为：实际分配物理存储块并扩容文件大小，对应 FALLOC_FL_ALLOCATE / 0）。
+	FallocateMode_FALLOCATE_MODE_UNSPECIFIED FallocateMode = 0
+	// 保持文件大小不变（对应 Linux FALLOC_FL_KEEP_SIZE = 0x01）。
+	// 执行预分配或打洞时，即便操作区间超过当前文件末尾（EOF），也不会扩大文件的 size 属性。
+	FallocateMode_FALLOCATE_MODE_KEEP_SIZE FallocateMode = 1
+	// 打洞释放指定区间空间（对应 Linux FALLOC_FL_PUNCH_HOLE = 0x02）。
+	// 释放指定区间的数据与底层切片/物理块，产生逻辑稀疏空洞并将空间归还文件系统。必须与 KEEP_SIZE 联合使用。
+	FallocateMode_FALLOCATE_MODE_PUNCH_HOLE FallocateMode = 2
+	// 不隐藏陈旧数据块（对应 Linux FALLOC_FL_NO_HIDE_STALES = 0x04）。
+	// 保留未写入块且不主动进行零值抹除隐藏旧数据，用于针对安全要求较低场景的高性能块快速预分配。
+	FallocateMode_FALLOCATE_MODE_NO_HIDE_STALES FallocateMode = 4
+	// 折叠消除区间并前移后续数据（对应 Linux FALLOC_FL_COLLAPSE_RANGE = 0x08）。
+	// 消除指定的连续字节区间并将后续文件内容无缝向前平移，相应减小文件总大小，避免昂贵的数据搬迁。
+	FallocateMode_FALLOCATE_MODE_COLLAPSE_RANGE FallocateMode = 8
+	// 区间数据快速清零（对应 Linux FALLOC_FL_ZERO_RANGE = 0x10）。
+	// 将指定区间的字节清零，保留已分配块或转换为未写入块，若超出文件末尾则自动扩容（除非附加 KEEP_SIZE）。
+	FallocateMode_FALLOCATE_MODE_ZERO_RANGE FallocateMode = 16
+	// 插入空洞区间并后移后续数据（对应 Linux FALLOC_FL_INSERT_RANGE = 0x20）。
+	// 在文件内部插入指定大小的稀疏空洞区间并将后续数据向后推移，相应增加文件总大小。
+	FallocateMode_FALLOCATE_MODE_INSERT_RANGE FallocateMode = 32
+	// 解除写时复制共享引用（对应 Linux FALLOC_FL_UNSHARE_RANGE = 0x40）。
+	// 对共享的 CoW 切片区间进行预先解耦和独占分配，确保后续写入时无额外分配延迟。
+	FallocateMode_FALLOCATE_MODE_UNSHARE_RANGE FallocateMode = 64
+)
+
+// Enum value maps for FallocateMode.
+var (
+	FallocateMode_name = map[int32]string{
+		0:  "FALLOCATE_MODE_UNSPECIFIED",
+		1:  "FALLOCATE_MODE_KEEP_SIZE",
+		2:  "FALLOCATE_MODE_PUNCH_HOLE",
+		4:  "FALLOCATE_MODE_NO_HIDE_STALES",
+		8:  "FALLOCATE_MODE_COLLAPSE_RANGE",
+		16: "FALLOCATE_MODE_ZERO_RANGE",
+		32: "FALLOCATE_MODE_INSERT_RANGE",
+		64: "FALLOCATE_MODE_UNSHARE_RANGE",
+	}
+	FallocateMode_value = map[string]int32{
+		"FALLOCATE_MODE_UNSPECIFIED":    0,
+		"FALLOCATE_MODE_KEEP_SIZE":      1,
+		"FALLOCATE_MODE_PUNCH_HOLE":     2,
+		"FALLOCATE_MODE_NO_HIDE_STALES": 4,
+		"FALLOCATE_MODE_COLLAPSE_RANGE": 8,
+		"FALLOCATE_MODE_ZERO_RANGE":     16,
+		"FALLOCATE_MODE_INSERT_RANGE":   32,
+		"FALLOCATE_MODE_UNSHARE_RANGE":  64,
+	}
+)
+
+func (x FallocateMode) Enum() *FallocateMode {
+	p := new(FallocateMode)
+	*p = x
+	return p
+}
+
+func (x FallocateMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FallocateMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[7].Descriptor()
+}
+
+func (FallocateMode) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[7]
+}
+
+func (x FallocateMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FallocateMode.Descriptor instead.
+func (FallocateMode) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{7}
+}
+
+// ACLTag 表示 POSIX 访问控制列表（ACL）的条目分类标签枚举。
+// 数值设计与 POSIX.1e 标准草案（sys/acl.h）、Linux 内核（linux/posix_acl.h）及 JuiceFS 底层数值 1:1 精确对齐。
+type ACLTag int32
+
+const (
+	// 未指定类型（默认占位值）。
+	ACLTag_ACL_TAG_UNSPECIFIED ACLTag = 0
+	// 文件所有者（对应 POSIX ACL_USER_OBJ = 0x01）。
+	ACLTag_ACL_TAG_USER_OBJ ACLTag = 1
+	// 指定用户（对应 POSIX ACL_USER = 0x02）。
+	ACLTag_ACL_TAG_USER ACLTag = 2
+	// 文件所有组（对应 POSIX ACL_GROUP_OBJ = 0x04）。
+	ACLTag_ACL_TAG_GROUP_OBJ ACLTag = 4
+	// 指定用户组（对应 POSIX ACL_GROUP = 0x08）。
+	ACLTag_ACL_TAG_GROUP ACLTag = 8
+	// 权限掩码（对应 POSIX ACL_MASK = 0x10）。
+	ACLTag_ACL_TAG_MASK ACLTag = 16
+	// 其他人（对应 POSIX ACL_OTHER = 0x20）。
+	ACLTag_ACL_TAG_OTHER ACLTag = 32
+)
+
+// Enum value maps for ACLTag.
+var (
+	ACLTag_name = map[int32]string{
+		0:  "ACL_TAG_UNSPECIFIED",
+		1:  "ACL_TAG_USER_OBJ",
+		2:  "ACL_TAG_USER",
+		4:  "ACL_TAG_GROUP_OBJ",
+		8:  "ACL_TAG_GROUP",
+		16: "ACL_TAG_MASK",
+		32: "ACL_TAG_OTHER",
+	}
+	ACLTag_value = map[string]int32{
+		"ACL_TAG_UNSPECIFIED": 0,
+		"ACL_TAG_USER_OBJ":    1,
+		"ACL_TAG_USER":        2,
+		"ACL_TAG_GROUP_OBJ":   4,
+		"ACL_TAG_GROUP":       8,
+		"ACL_TAG_MASK":        16,
+		"ACL_TAG_OTHER":       32,
+	}
+)
+
+func (x ACLTag) Enum() *ACLTag {
+	p := new(ACLTag)
+	*p = x
+	return p
+}
+
+func (x ACLTag) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ACLTag) Descriptor() protoreflect.EnumDescriptor {
+	return file_iso_v1_fuse_proto_enumTypes[8].Descriptor()
+}
+
+func (ACLTag) Type() protoreflect.EnumType {
+	return &file_iso_v1_fuse_proto_enumTypes[8]
+}
+
+func (x ACLTag) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ACLTag.Descriptor instead.
+func (ACLTag) EnumDescriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{8}
+}
+
 // Inode 代表 ISO Storage 文件系统的核心元数据抽象。
 // 设计融合了 POSIX 文件属性、JuiceFS 元数据模型以及 ISO Storage 的多级缓存/对象存储架构特性
 // （例如服务端 NVMe SSD 本地热缓存与远端 B2 对象存储冷分层，以及一写多读一致性模型）。
@@ -196,7 +670,24 @@ type Inode struct {
 	Tier uint32 `protobuf:"varint,15,opt,name=tier,proto3" json:"tier,omitempty"`
 	// 分配给该 Inode 的 512 字节块总数（对应 POSIX st_blocks 与 FUSE Blocks）。
 	// 用于精确磁盘空间用量统计与 du 命令核算。
-	Blocks        uint64 `protobuf:"varint,16,opt,name=blocks,proto3" json:"blocks,omitempty"`
+	Blocks uint64 `protobuf:"varint,16,opt,name=blocks,proto3" json:"blocks,omitempty"`
+	// Inode 代数 / 纪元号（Generation）。
+	// 用于内核校验 Inode 有效性。当 Inode 编号被删除且后续重新分配给新文件时，
+	// generation 会自增递增，避免内核 FUSE 驱动以及 NFS 客户端因 Inode 编号复用产生的 ABA 问题及陈旧句柄（ESTALE）。
+	Generation uint64 `protobuf:"varint,17,opt,name=generation,proto3" json:"generation,omitempty"`
+	// 内核属性缓存有效时间（Attr Timeout）。
+	// 指示内核 FUSE 驱动在多长时间内无需向服务端重新发起 getattr 查询。
+	// ISO Storage 服务端可根据文件冷热层级、一写多读（OWMR）租约状态动态调整该值以达到性能与一致性的平衡。
+	AttrTimeout *durationpb.Duration `protobuf:"bytes,18,opt,name=attr_timeout,json=attrTimeout,proto3" json:"attr_timeout,omitempty"`
+	// 访问控制列表（Access ACL）标识 ID。
+	// 指向当前 Inode 绑定的扩展访问权限规则集合。
+	// 具有相同 ACL 规则集合的文件共享相同的 access_acl ID，对齐 JuiceFS Attr.AccessACL 设计。
+	// 值为 0 时表示未配置扩展访问控制列表，完全遵循 mode 权限位。
+	AccessAcl uint32 `protobuf:"varint,19,opt,name=access_acl,json=accessAcl,proto3" json:"access_acl,omitempty"`
+	// 默认访问控制列表（Default ACL）标识 ID。
+	// 当且仅当 Inode 为目录时有效，定义该目录下新建子文件或子目录时自动继承的默认 ACL 规则集合。
+	// 对齐 JuiceFS Attr.DefaultACL 设计。值为 0 时表示未配置目录默认继承 ACL。
+	DefaultAcl    uint32 `protobuf:"varint,20,opt,name=default_acl,json=defaultAcl,proto3" json:"default_acl,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -343,6 +834,34 @@ func (x *Inode) GetBlocks() uint64 {
 	return 0
 }
 
+func (x *Inode) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *Inode) GetAttrTimeout() *durationpb.Duration {
+	if x != nil {
+		return x.AttrTimeout
+	}
+	return nil
+}
+
+func (x *Inode) GetAccessAcl() uint32 {
+	if x != nil {
+		return x.AccessAcl
+	}
+	return 0
+}
+
+func (x *Inode) GetDefaultAcl() uint32 {
+	if x != nil {
+		return x.DefaultAcl
+	}
+	return 0
+}
+
 // FileHandle 代表 ISO Storage 服务端分配并维护的文件打开句柄抽象。
 // 结合 FUSE 协议标准与 ISO Storage 一写多读（OWMR）并发控制模型及冷热分层缓存设计，
 // 用于跟踪客户端的文件打开会话、I/O 模式、租约状态与生命周期回收。
@@ -363,7 +882,19 @@ type FileHandle struct {
 	// 是否持有当前 Inode 的排他性写租约。
 	// 在 ISO Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
 	// 确保数据修改的唯一性与缓存失效同步。
-	IsWriteLease  bool `protobuf:"varint,6,opt,name=is_write_lease,json=isWriteLease,proto3" json:"is_write_lease,omitempty"`
+	IsWriteLease bool `protobuf:"varint,6,opt,name=is_write_lease,json=isWriteLease,proto3" json:"is_write_lease,omitempty"`
+	// 服务端指示内核 FUSE 的底层打开行为标志位掩码（按位或组合）。
+	// 对应 Linux 内核 FOPEN_* 标志位定义（详见 FuseOpenFlag 枚举与常量）。
+	// 常用标志位：
+	//   - FOPEN_DIRECT_IO (1 << 0, 0x01): 绕过内核页缓存（Page Cache）进行直接读写。
+	//   - FOPEN_KEEP_CACHE (1 << 1, 0x02): open 时保留内核已有页缓存，不触发失效。
+	//   - FOPEN_NONSEEKABLE (1 << 2, 0x04): 指示文件不支持 lseek 寻址操作。
+	//   - FOPEN_CACHE_DIR (1 << 3, 0x08): 允许内核缓存 opendir 打开的目录项。
+	//   - FOPEN_STREAM (1 << 4, 0x10): 流式文件传输模式（优化并发流读写）。
+	//   - FOPEN_NOFLUSH (1 << 5, 0x20): 关闭文件时不隐式调用 flush。
+	//   - FOPEN_PARALLEL_DIRECT_WRITES (1 << 6, 0x40): 允许对同一文件句柄进行并发直接写。
+	//   - FOPEN_PASSTHROUGH (1 << 7, 0x80): 启用内核直通模式（绕过 FUSE 守护进程重定向至下层文件系统）。
+	OpenFlags     uint32 `protobuf:"varint,7,opt,name=open_flags,json=openFlags,proto3" json:"open_flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -440,6 +971,13 @@ func (x *FileHandle) GetIsWriteLease() bool {
 	return false
 }
 
+func (x *FileHandle) GetOpenFlags() uint32 {
+	if x != nil {
+		return x.OpenFlags
+	}
+	return 0
+}
+
 // DirEntry 表示目录项元数据。
 // 对应文件系统目录中的单个文件或子目录映射关系。
 type DirEntry struct {
@@ -455,7 +993,14 @@ type DirEntry struct {
 	Attr *Inode `protobuf:"bytes,4,opt,name=attr,proto3" json:"attr,omitempty"`
 	// 目录流游标偏移量（对应 POSIX d_off 与 FUSE DirEntry.Off）。
 	// 用于支持超大目录分批流式遍历与内核断点续传。
-	Offset        uint64 `protobuf:"varint,5,opt,name=offset,proto3" json:"offset,omitempty"`
+	Offset uint64 `protobuf:"varint,5,opt,name=offset,proto3" json:"offset,omitempty"`
+	// 关联目标 Inode 的代数 / 纪元号（Generation）。
+	// 用于内核在 lookup / readdirplus 阶段校验 Inode 映射有效性，防止 Inode 编号复用引发的 ABA 错位。
+	Generation uint64 `protobuf:"varint,6,opt,name=generation,proto3" json:"generation,omitempty"`
+	// 内核目录项缓存有效时间（Entry Timeout）。
+	// 指示内核 FUSE 驱动在多长时间内直接复用 dentry 目录项缓存，而无需重复向服务端发起 lookup 解析。
+	// 配合 ISO Storage 服务端租约与元数据变更通知机制实现高效缓存。
+	EntryTimeout  *durationpb.Duration `protobuf:"bytes,7,opt,name=entry_timeout,json=entryTimeout,proto3" json:"entry_timeout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -523,6 +1068,20 @@ func (x *DirEntry) GetOffset() uint64 {
 		return x.Offset
 	}
 	return 0
+}
+
+func (x *DirEntry) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *DirEntry) GetEntryTimeout() *durationpb.Duration {
+	if x != nil {
+		return x.EntryTimeout
+	}
+	return nil
 }
 
 // Slice 表示数据切片元数据。
@@ -677,11 +1236,828 @@ func (x *Chunk) GetSlices() []*Slice {
 	return nil
 }
 
+// XAttr 表示单个文件扩展属性（Extended Attribute，Key-Value 元数据对）。
+// 对齐 Linux xattr 机制（支持 user.*、trusted.*、security.*、system.* 等命名空间）与 JuiceFS 扩展属性设计。
+type XAttr struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 扩展属性键名（例如 "user.comment"、"security.selinux"）。
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// 扩展属性值（二进制数据）。
+	Value         []byte `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *XAttr) Reset() {
+	*x = XAttr{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *XAttr) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*XAttr) ProtoMessage() {}
+
+func (x *XAttr) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use XAttr.ProtoReflect.Descriptor instead.
+func (*XAttr) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *XAttr) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *XAttr) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+// XAttrList 表示扩展属性的列表与集合抽象模型。
+// 用于 listxattr 系统调用响应以及客户端属性批量预取与元数据同步。
+type XAttrList struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 关联的目标 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 扩展属性键名列表（用于 listxattr 查询时仅返回键名集合）。
+	Names []string `protobuf:"bytes,2,rep,name=names,proto3" json:"names,omitempty"`
+	// 完整的扩展属性键值对列表（用于批量获取、属性预取或元数据快照同步）。
+	Xattrs        []*XAttr `protobuf:"bytes,3,rep,name=xattrs,proto3" json:"xattrs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *XAttrList) Reset() {
+	*x = XAttrList{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *XAttrList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*XAttrList) ProtoMessage() {}
+
+func (x *XAttrList) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use XAttrList.ProtoReflect.Descriptor instead.
+func (*XAttrList) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *XAttrList) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *XAttrList) GetNames() []string {
+	if x != nil {
+		return x.Names
+	}
+	return nil
+}
+
+func (x *XAttrList) GetXattrs() []*XAttr {
+	if x != nil {
+		return x.Xattrs
+	}
+	return nil
+}
+
+// XAttrOp 表示扩展属性的操作描述抽象模型。
+// 用于在 RPC 或批量元数据调用中统一表达 getxattr/setxattr/removexattr/listxattr 操作。
+type XAttrOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 关联的目标 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 扩展属性操作类型。
+	Op XAttrOpType `protobuf:"varint,2,opt,name=op,proto3,enum=iso.v1.XAttrOpType" json:"op,omitempty"`
+	// 目标扩展属性键名（在 GET、SET、REMOVE 操作时必须指定）。
+	Name string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// 待写入的扩展属性值（在 SET 操作时指定）。
+	Value []byte `protobuf:"bytes,4,opt,name=value,proto3" json:"value,omitempty"`
+	// 设置属性时的控制标志（在 SET 操作时有效，如 XATTR_SET_FLAG_CREATE / XATTR_SET_FLAG_REPLACE）。
+	Flags         XAttrSetFlag `protobuf:"varint,5,opt,name=flags,proto3,enum=iso.v1.XAttrSetFlag" json:"flags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *XAttrOp) Reset() {
+	*x = XAttrOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *XAttrOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*XAttrOp) ProtoMessage() {}
+
+func (x *XAttrOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use XAttrOp.ProtoReflect.Descriptor instead.
+func (*XAttrOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *XAttrOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *XAttrOp) GetOp() XAttrOpType {
+	if x != nil {
+		return x.Op
+	}
+	return XAttrOpType_X_ATTR_OP_TYPE_UNSPECIFIED
+}
+
+func (x *XAttrOp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *XAttrOp) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *XAttrOp) GetFlags() XAttrSetFlag {
+	if x != nil {
+		return x.Flags
+	}
+	return XAttrSetFlag_X_ATTR_SET_FLAG_UNSPECIFIED
+}
+
+// Flock 代表 BSD 风格的文件级锁抽象模型（对应 flock(2) 系统调用）。
+// 作用于整个文件对象（非字节区间），按 Inode 粒度进行加锁与互斥控制。
+type Flock struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 锁持有者的唯一标识（对应内核 FUSE 的 lock_owner 或客户端会话 ID）。
+	Owner uint64 `protobuf:"varint,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	// 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+	Type          LockType `protobuf:"varint,3,opt,name=type,proto3,enum=iso.v1.LockType" json:"type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Flock) Reset() {
+	*x = Flock{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Flock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Flock) ProtoMessage() {}
+
+func (x *Flock) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Flock.ProtoReflect.Descriptor instead.
+func (*Flock) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Flock) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *Flock) GetOwner() uint64 {
+	if x != nil {
+		return x.Owner
+	}
+	return 0
+}
+
+func (x *Flock) GetType() LockType {
+	if x != nil {
+		return x.Type
+	}
+	return LockType_LOCK_TYPE_UNSPECIFIED
+}
+
+// PlockRecord 代表 POSIX 风格的字节区间记录锁（对应 fcntl(2) F_GETLK / F_SETLK / F_SETLKW）。
+// 支持对文件内部的特定连续字节区间 [start, end] 进行精确的细粒度加锁。
+type PlockRecord struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 锁定区间的起始字节偏移量（包含该字节，闭区间起点）。
+	Start uint64 `protobuf:"varint,1,opt,name=start,proto3" json:"start,omitempty"`
+	// 锁定区间的结束字节偏移量（包含该字节，闭区间终点；0 或最大值表示直至文件末尾无穷大）。
+	End uint64 `protobuf:"varint,2,opt,name=end,proto3" json:"end,omitempty"`
+	// 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+	Type LockType `protobuf:"varint,3,opt,name=type,proto3,enum=iso.v1.LockType" json:"type,omitempty"`
+	// 持有该区间锁的进程 ID (PID)。
+	// 用于 POSIX 锁持有者标识以及死锁检测与 fcntl F_GETLK 查询返回。
+	Pid           uint32 `protobuf:"varint,4,opt,name=pid,proto3" json:"pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlockRecord) Reset() {
+	*x = PlockRecord{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlockRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlockRecord) ProtoMessage() {}
+
+func (x *PlockRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlockRecord.ProtoReflect.Descriptor instead.
+func (*PlockRecord) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *PlockRecord) GetStart() uint64 {
+	if x != nil {
+		return x.Start
+	}
+	return 0
+}
+
+func (x *PlockRecord) GetEnd() uint64 {
+	if x != nil {
+		return x.End
+	}
+	return 0
+}
+
+func (x *PlockRecord) GetType() LockType {
+	if x != nil {
+		return x.Type
+	}
+	return LockType_LOCK_TYPE_UNSPECIFIED
+}
+
+func (x *PlockRecord) GetPid() uint32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+// Plock 代表 POSIX 记录锁（Plock）在 Inode 维度的聚合持有状态模型。
+// 维护特定持有者对该 Inode 所占用的所有区间记录锁列表。
+type Plock struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 锁持有者的唯一标识（对应内核 FUSE 的 lock_owner）。
+	Owner uint64 `protobuf:"varint,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	// 该持有者在当前 Inode 上持有的一组字节区间记录锁列表。
+	Records       []*PlockRecord `protobuf:"bytes,3,rep,name=records,proto3" json:"records,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Plock) Reset() {
+	*x = Plock{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Plock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Plock) ProtoMessage() {}
+
+func (x *Plock) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Plock.ProtoReflect.Descriptor instead.
+func (*Plock) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *Plock) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *Plock) GetOwner() uint64 {
+	if x != nil {
+		return x.Owner
+	}
+	return 0
+}
+
+func (x *Plock) GetRecords() []*PlockRecord {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+// RenameOp 表示文件或目录的原子重命名与交换操作抽象模型。
+// 封装 Linux renameat2 系统调用与 FUSE RENAME2 协议语义，
+// 统一支持常规重命名、无覆盖原子重命名（NOREPLACE）以及双向原子交换（EXCHANGE）。
+type RenameOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 源目录 Inode 编号。
+	ParentSrc uint64 `protobuf:"varint,1,opt,name=parent_src,json=parentSrc,proto3" json:"parent_src,omitempty"`
+	// 待移动或重命名的源文件/目录名称。
+	NameSrc string `protobuf:"bytes,2,opt,name=name_src,json=nameSrc,proto3" json:"name_src,omitempty"`
+	// 目标目录 Inode 编号。
+	ParentDst uint64 `protobuf:"varint,3,opt,name=parent_dst,json=parentDst,proto3" json:"parent_dst,omitempty"`
+	// 移动或重命名后的目标文件/目录名称。
+	NameDst string `protobuf:"bytes,4,opt,name=name_dst,json=nameDst,proto3" json:"name_dst,omitempty"`
+	// 重命名标志位掩码（按位或组合，详见 RenameFlag 枚举定义）。
+	// 对应 Linux renameat2 标志（如 RENAME_NOREPLACE、RENAME_EXCHANGE、RENAME_WHITEOUT）。
+	Flags         uint32 `protobuf:"varint,5,opt,name=flags,proto3" json:"flags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenameOp) Reset() {
+	*x = RenameOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenameOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameOp) ProtoMessage() {}
+
+func (x *RenameOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameOp.ProtoReflect.Descriptor instead.
+func (*RenameOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RenameOp) GetParentSrc() uint64 {
+	if x != nil {
+		return x.ParentSrc
+	}
+	return 0
+}
+
+func (x *RenameOp) GetNameSrc() string {
+	if x != nil {
+		return x.NameSrc
+	}
+	return ""
+}
+
+func (x *RenameOp) GetParentDst() uint64 {
+	if x != nil {
+		return x.ParentDst
+	}
+	return 0
+}
+
+func (x *RenameOp) GetNameDst() string {
+	if x != nil {
+		return x.NameDst
+	}
+	return ""
+}
+
+func (x *RenameOp) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+// FallocateOp 表示文件空间预分配、打洞释放与区间重构操作抽象模型。
+// 封装 Linux fallocate(2) 系统调用与 FUSE FALLOCATE 协议语义，
+// 配合 ISO Storage 服务端 NVMe SSD 缓存及底层切片管理实现零填充、空洞裁剪与容量预热。
+type FallocateOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标文件 Inode 编号。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 文件打开句柄（若调用由已打开文件句柄发起；若无句柄或句柄不可用可填 0）。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 预分配/打洞模式位掩码（按位或组合，详见 FallocateMode 枚举定义）。
+	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 操作区间的起始字节偏移量。
+	Offset uint64 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
+	// 操作区间的连续字节长度。
+	Length        uint64 `protobuf:"varint,5,opt,name=length,proto3" json:"length,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FallocateOp) Reset() {
+	*x = FallocateOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FallocateOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FallocateOp) ProtoMessage() {}
+
+func (x *FallocateOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FallocateOp.ProtoReflect.Descriptor instead.
+func (*FallocateOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *FallocateOp) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *FallocateOp) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *FallocateOp) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *FallocateOp) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *FallocateOp) GetLength() uint64 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+// CopyFileRangeOp 表示跨文件或同文件内的区间秒级克隆操作抽象模型。
+// 封装 Linux copy_file_range(2) 系统调用与 FUSE COPY_FILE_RANGE 协议语义。
+// 得益于 ISO Storage 与 JuiceFS 底层数据切片（Slice）的不可变性（Immutable 特性），
+// 服务端可在元数据层级直接复制切片索引映射（复用 Slice ID、动态调整切片内的 src_offset 与 length），
+// 无需在服务端或对象存储间进行真实物理数据复制，实现毫秒级元数据零拷贝区间克隆。
+type CopyFileRangeOp struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 源文件 Inode 编号。
+	SrcIno uint64 `protobuf:"varint,1,opt,name=src_ino,json=srcIno,proto3" json:"src_ino,omitempty"`
+	// 源文件打开句柄（若提供句柄可用于租约与状态校验，可选，默认为 0）。
+	SrcFh uint64 `protobuf:"varint,2,opt,name=src_fh,json=srcFh,proto3" json:"src_fh,omitempty"`
+	// 源文件克隆区间的起始字节偏移量。
+	SrcOffset uint64 `protobuf:"varint,3,opt,name=src_offset,json=srcOffset,proto3" json:"src_offset,omitempty"`
+	// 目标文件 Inode 编号。
+	DstIno uint64 `protobuf:"varint,4,opt,name=dst_ino,json=dstIno,proto3" json:"dst_ino,omitempty"`
+	// 目标文件打开句柄（若提供句柄可用于租约与状态校验，可选，默认为 0）。
+	DstFh uint64 `protobuf:"varint,5,opt,name=dst_fh,json=dstFh,proto3" json:"dst_fh,omitempty"`
+	// 目标文件写入区间的起始字节偏移量。
+	DstOffset uint64 `protobuf:"varint,6,opt,name=dst_offset,json=dstOffset,proto3" json:"dst_offset,omitempty"`
+	// 待克隆的数据连续字节长度。
+	Length uint64 `protobuf:"varint,7,opt,name=length,proto3" json:"length,omitempty"`
+	// 内核 copy_file_range 传入的控制标志位（保留供未来扩展，当前 Linux 内核要求必须为 0）。
+	Flags         uint32 `protobuf:"varint,8,opt,name=flags,proto3" json:"flags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CopyFileRangeOp) Reset() {
+	*x = CopyFileRangeOp{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CopyFileRangeOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CopyFileRangeOp) ProtoMessage() {}
+
+func (x *CopyFileRangeOp) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CopyFileRangeOp.ProtoReflect.Descriptor instead.
+func (*CopyFileRangeOp) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *CopyFileRangeOp) GetSrcIno() uint64 {
+	if x != nil {
+		return x.SrcIno
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetSrcFh() uint64 {
+	if x != nil {
+		return x.SrcFh
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetSrcOffset() uint64 {
+	if x != nil {
+		return x.SrcOffset
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetDstIno() uint64 {
+	if x != nil {
+		return x.DstIno
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetDstFh() uint64 {
+	if x != nil {
+		return x.DstFh
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetDstOffset() uint64 {
+	if x != nil {
+		return x.DstOffset
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetLength() uint64 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+func (x *CopyFileRangeOp) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+// ACLEntry 表示 POSIX 访问控制列表中的单个权限规则条目。
+// 结合标签类型、目标实体 ID 以及 rwx 权限位定义细粒度访问控制。
+type ACLEntry struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ACL 条目标签分类（指明属主、扩展用户、属组、扩展组、掩码或其它人）。
+	Tag ACLTag `protobuf:"varint,1,opt,name=tag,proto3,enum=iso.v1.ACLTag" json:"tag,omitempty"`
+	// 用户 UID 或用户组 GID。
+	// 当 tag 为 ACL_TAG_USER 时为目标用户的 UID；
+	// 当 tag 为 ACL_TAG_GROUP 时为目标用户组的 GID；
+	// 当 tag 为 USER_OBJ、GROUP_OBJ、MASK、OTHER 时该字段固定为 0。
+	// 注：在序列化为 Linux xattr 二进制报文时，对于无特定对象的条目（USER_OBJ, GROUP_OBJ, MASK, OTHER），底层二进制对应的 e_id 需转为 ACL_UNDEFINED_ID (0xFFFFFFFF)。
+	Id uint32 `protobuf:"varint,2,opt,name=id,proto3" json:"id,omitempty"`
+	// 访问权限位（对齐 POSIX 权限位表示，低 3 位分别代表读 r=4、写 w=2、执行 x=1，取值范围 0~7）。
+	Perm          uint32 `protobuf:"varint,3,opt,name=perm,proto3" json:"perm,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ACLEntry) Reset() {
+	*x = ACLEntry{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ACLEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ACLEntry) ProtoMessage() {}
+
+func (x *ACLEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ACLEntry.ProtoReflect.Descriptor instead.
+func (*ACLEntry) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ACLEntry) GetTag() ACLTag {
+	if x != nil {
+		return x.Tag
+	}
+	return ACLTag_ACL_TAG_UNSPECIFIED
+}
+
+func (x *ACLEntry) GetId() uint32 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *ACLEntry) GetPerm() uint32 {
+	if x != nil {
+		return x.Perm
+	}
+	return 0
+}
+
+// ACL 表示一组聚合的 POSIX 访问控制列表规则模型。
+// 采用规则去重与哈希共享机制，相同条目集合映射到相同的全局唯一 ACL ID，对齐 JuiceFS 设计以最小化元数据存储开销。
+type ACL struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 全局唯一的 ACL 规则集合标识 ID。
+	// 相同规则条目的 Inode 共享复用同一 ID（对应 Inode.access_acl 与 Inode.default_acl）。
+	Id uint32 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	// 构成本 ACL 集合的规则条目列表。
+	Entries       []*ACLEntry `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ACL) Reset() {
+	*x = ACL{}
+	mi := &file_iso_v1_fuse_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ACL) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ACL) ProtoMessage() {}
+
+func (x *ACL) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_fuse_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ACL.ProtoReflect.Descriptor instead.
+func (*ACL) Descriptor() ([]byte, []int) {
+	return file_iso_v1_fuse_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ACL) GetId() uint32 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *ACL) GetEntries() []*ACLEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
 var File_iso_v1_fuse_proto protoreflect.FileDescriptor
 
 const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\n" +
-	"\x11iso/v1/fuse.proto\x12\x06iso.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc5\x03\n" +
+	"\x11iso/v1/fuse.proto\x12\x06iso.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe3\x04\n" +
 	"\x05Inode\x12\x10\n" +
 	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x1d\n" +
 	"\n" +
@@ -700,7 +2076,15 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\x06target\x18\r \x01(\tR\x06target\x12\x14\n" +
 	"\x05flags\x18\x0e \x01(\rR\x05flags\x12\x12\n" +
 	"\x04tier\x18\x0f \x01(\rR\x04tier\x12\x16\n" +
-	"\x06blocks\x18\x10 \x01(\x04R\x06blocks\"\xb6\x01\n" +
+	"\x06blocks\x18\x10 \x01(\x04R\x06blocks\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x11 \x01(\x04R\n" +
+	"generation\x12<\n" +
+	"\fattr_timeout\x18\x12 \x01(\v2\x19.google.protobuf.DurationR\vattrTimeout\x12\x1d\n" +
+	"\n" +
+	"access_acl\x18\x13 \x01(\rR\taccessAcl\x12\x1f\n" +
+	"\vdefault_acl\x18\x14 \x01(\rR\n" +
+	"defaultAcl\"\xd5\x01\n" +
 	"\n" +
 	"FileHandle\x12\x0e\n" +
 	"\x02fh\x18\x01 \x01(\x04R\x02fh\x12\x10\n" +
@@ -708,13 +2092,19 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\topen_mode\x18\x03 \x01(\x0e2\x10.iso.v1.OpenModeR\bopenMode\x12\x14\n" +
 	"\x05flags\x18\x04 \x01(\rR\x05flags\x12\x1b\n" +
 	"\tclient_id\x18\x05 \x01(\tR\bclientId\x12$\n" +
-	"\x0eis_write_lease\x18\x06 \x01(\bR\fisWriteLease\"\x92\x01\n" +
+	"\x0eis_write_lease\x18\x06 \x01(\bR\fisWriteLease\x12\x1d\n" +
+	"\n" +
+	"open_flags\x18\a \x01(\rR\topenFlags\"\xf2\x01\n" +
 	"\bDirEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03ino\x18\x02 \x01(\x04R\x03ino\x12%\n" +
 	"\x04type\x18\x03 \x01(\x0e2\x11.iso.v1.InodeTypeR\x04type\x12!\n" +
 	"\x04attr\x18\x04 \x01(\v2\r.iso.v1.InodeR\x04attr\x12\x16\n" +
-	"\x06offset\x18\x05 \x01(\x04R\x06offset\"z\n" +
+	"\x06offset\x18\x05 \x01(\x04R\x06offset\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x06 \x01(\x04R\n" +
+	"generation\x12>\n" +
+	"\rentry_timeout\x18\a \x01(\v2\x19.google.protobuf.DurationR\fentryTimeout\"z\n" +
 	"\x05Slice\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x16\n" +
 	"\x06offset\x18\x02 \x01(\rR\x06offset\x12\x16\n" +
@@ -725,7 +2115,65 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\x05Chunk\x12\x10\n" +
 	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\rR\x05index\x12%\n" +
-	"\x06slices\x18\x03 \x03(\v2\r.iso.v1.SliceR\x06slices*\xcd\x01\n" +
+	"\x06slices\x18\x03 \x03(\v2\r.iso.v1.SliceR\x06slices\"1\n" +
+	"\x05XAttr\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\"Z\n" +
+	"\tXAttrList\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x14\n" +
+	"\x05names\x18\x02 \x03(\tR\x05names\x12%\n" +
+	"\x06xattrs\x18\x03 \x03(\v2\r.iso.v1.XAttrR\x06xattrs\"\x96\x01\n" +
+	"\aXAttrOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12#\n" +
+	"\x02op\x18\x02 \x01(\x0e2\x13.iso.v1.XAttrOpTypeR\x02op\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x04 \x01(\fR\x05value\x12*\n" +
+	"\x05flags\x18\x05 \x01(\x0e2\x14.iso.v1.XAttrSetFlagR\x05flags\"U\n" +
+	"\x05Flock\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x14\n" +
+	"\x05owner\x18\x02 \x01(\x04R\x05owner\x12$\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x10.iso.v1.LockTypeR\x04type\"m\n" +
+	"\vPlockRecord\x12\x14\n" +
+	"\x05start\x18\x01 \x01(\x04R\x05start\x12\x10\n" +
+	"\x03end\x18\x02 \x01(\x04R\x03end\x12$\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x10.iso.v1.LockTypeR\x04type\x12\x10\n" +
+	"\x03pid\x18\x04 \x01(\rR\x03pid\"^\n" +
+	"\x05Plock\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x14\n" +
+	"\x05owner\x18\x02 \x01(\x04R\x05owner\x12-\n" +
+	"\arecords\x18\x03 \x03(\v2\x13.iso.v1.PlockRecordR\arecords\"\x94\x01\n" +
+	"\bRenameOp\x12\x1d\n" +
+	"\n" +
+	"parent_src\x18\x01 \x01(\x04R\tparentSrc\x12\x19\n" +
+	"\bname_src\x18\x02 \x01(\tR\anameSrc\x12\x1d\n" +
+	"\n" +
+	"parent_dst\x18\x03 \x01(\x04R\tparentDst\x12\x19\n" +
+	"\bname_dst\x18\x04 \x01(\tR\anameDst\x12\x14\n" +
+	"\x05flags\x18\x05 \x01(\rR\x05flags\"s\n" +
+	"\vFallocateOp\x12\x10\n" +
+	"\x03ino\x18\x01 \x01(\x04R\x03ino\x12\x0e\n" +
+	"\x02fh\x18\x02 \x01(\x04R\x02fh\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x16\n" +
+	"\x06offset\x18\x04 \x01(\x04R\x06offset\x12\x16\n" +
+	"\x06length\x18\x05 \x01(\x04R\x06length\"\xdd\x01\n" +
+	"\x0fCopyFileRangeOp\x12\x17\n" +
+	"\asrc_ino\x18\x01 \x01(\x04R\x06srcIno\x12\x15\n" +
+	"\x06src_fh\x18\x02 \x01(\x04R\x05srcFh\x12\x1d\n" +
+	"\n" +
+	"src_offset\x18\x03 \x01(\x04R\tsrcOffset\x12\x17\n" +
+	"\adst_ino\x18\x04 \x01(\x04R\x06dstIno\x12\x15\n" +
+	"\x06dst_fh\x18\x05 \x01(\x04R\x05dstFh\x12\x1d\n" +
+	"\n" +
+	"dst_offset\x18\x06 \x01(\x04R\tdstOffset\x12\x16\n" +
+	"\x06length\x18\a \x01(\x04R\x06length\x12\x14\n" +
+	"\x05flags\x18\b \x01(\rR\x05flags\"P\n" +
+	"\bACLEntry\x12 \n" +
+	"\x03tag\x18\x01 \x01(\x0e2\x0e.iso.v1.ACLTagR\x03tag\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\rR\x02id\x12\x12\n" +
+	"\x04perm\x18\x03 \x01(\rR\x04perm\"A\n" +
+	"\x03ACL\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\rR\x02id\x12*\n" +
+	"\aentries\x18\x02 \x03(\v2\x10.iso.v1.ACLEntryR\aentries*\xcd\x01\n" +
 	"\tInodeType\x12\x1a\n" +
 	"\x16INODE_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fINODE_TYPE_FILE\x10\x01\x12\x18\n" +
@@ -739,7 +2187,55 @@ const file_iso_v1_fuse_proto_rawDesc = "" +
 	"\x15OPEN_MODE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13OPEN_MODE_READ_ONLY\x10\x01\x12\x18\n" +
 	"\x14OPEN_MODE_WRITE_ONLY\x10\x02\x12\x18\n" +
-	"\x14OPEN_MODE_READ_WRITE\x10\x03B,Z*github.com/starsrc/iso/gen/go/iso/v1;isov1b\x06proto3"
+	"\x14OPEN_MODE_READ_WRITE\x10\x03*\xac\x02\n" +
+	"\fFuseOpenFlag\x12\x1e\n" +
+	"\x1aFUSE_OPEN_FLAG_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18FUSE_OPEN_FLAG_DIRECT_IO\x10\x01\x12\x1d\n" +
+	"\x19FUSE_OPEN_FLAG_KEEP_CACHE\x10\x02\x12\x1e\n" +
+	"\x1aFUSE_OPEN_FLAG_NONSEEKABLE\x10\x04\x12\x1c\n" +
+	"\x18FUSE_OPEN_FLAG_CACHE_DIR\x10\b\x12\x19\n" +
+	"\x15FUSE_OPEN_FLAG_STREAM\x10\x10\x12\x1a\n" +
+	"\x16FUSE_OPEN_FLAG_NOFLUSH\x10 \x12)\n" +
+	"%FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES\x10@\x12\x1f\n" +
+	"\x1aFUSE_OPEN_FLAG_PASSTHROUGH\x10\x80\x01*h\n" +
+	"\fXAttrSetFlag\x12\x1f\n" +
+	"\x1bX_ATTR_SET_FLAG_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16X_ATTR_SET_FLAG_CREATE\x10\x01\x12\x1b\n" +
+	"\x17X_ATTR_SET_FLAG_REPLACE\x10\x02*\x91\x01\n" +
+	"\vXAttrOpType\x12\x1e\n" +
+	"\x1aX_ATTR_OP_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12X_ATTR_OP_TYPE_GET\x10\x01\x12\x16\n" +
+	"\x12X_ATTR_OP_TYPE_SET\x10\x02\x12\x19\n" +
+	"\x15X_ATTR_OP_TYPE_REMOVE\x10\x03\x12\x17\n" +
+	"\x13X_ATTR_OP_TYPE_LIST\x10\x04*j\n" +
+	"\bLockType\x12\x19\n" +
+	"\x15LOCK_TYPE_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10LOCK_TYPE_SHARED\x10\x01\x12\x17\n" +
+	"\x13LOCK_TYPE_EXCLUSIVE\x10\x02\x12\x14\n" +
+	"\x10LOCK_TYPE_UNLOCK\x10\x03*y\n" +
+	"\n" +
+	"RenameFlag\x12\x1b\n" +
+	"\x17RENAME_FLAG_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16RENAME_FLAG_NO_REPLACE\x10\x01\x12\x18\n" +
+	"\x14RENAME_FLAG_EXCHANGE\x10\x02\x12\x18\n" +
+	"\x14RENAME_FLAG_WHITEOUT\x10\x04*\x94\x02\n" +
+	"\rFallocateMode\x12\x1e\n" +
+	"\x1aFALLOCATE_MODE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18FALLOCATE_MODE_KEEP_SIZE\x10\x01\x12\x1d\n" +
+	"\x19FALLOCATE_MODE_PUNCH_HOLE\x10\x02\x12!\n" +
+	"\x1dFALLOCATE_MODE_NO_HIDE_STALES\x10\x04\x12!\n" +
+	"\x1dFALLOCATE_MODE_COLLAPSE_RANGE\x10\b\x12\x1d\n" +
+	"\x19FALLOCATE_MODE_ZERO_RANGE\x10\x10\x12\x1f\n" +
+	"\x1bFALLOCATE_MODE_INSERT_RANGE\x10 \x12 \n" +
+	"\x1cFALLOCATE_MODE_UNSHARE_RANGE\x10@*\x98\x01\n" +
+	"\x06ACLTag\x12\x17\n" +
+	"\x13ACL_TAG_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10ACL_TAG_USER_OBJ\x10\x01\x12\x10\n" +
+	"\fACL_TAG_USER\x10\x02\x12\x15\n" +
+	"\x11ACL_TAG_GROUP_OBJ\x10\x04\x12\x11\n" +
+	"\rACL_TAG_GROUP\x10\b\x12\x10\n" +
+	"\fACL_TAG_MASK\x10\x10\x12\x11\n" +
+	"\rACL_TAG_OTHER\x10 B,Z*github.com/starsrc/iso/gen/go/iso/v1;isov1b\x06proto3"
 
 var (
 	file_iso_v1_fuse_proto_rawDescOnce sync.Once
@@ -753,32 +2249,61 @@ func file_iso_v1_fuse_proto_rawDescGZIP() []byte {
 	return file_iso_v1_fuse_proto_rawDescData
 }
 
-var file_iso_v1_fuse_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_iso_v1_fuse_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_iso_v1_fuse_proto_enumTypes = make([]protoimpl.EnumInfo, 9)
+var file_iso_v1_fuse_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_iso_v1_fuse_proto_goTypes = []any{
 	(InodeType)(0),                // 0: iso.v1.InodeType
 	(OpenMode)(0),                 // 1: iso.v1.OpenMode
-	(*Inode)(nil),                 // 2: iso.v1.Inode
-	(*FileHandle)(nil),            // 3: iso.v1.FileHandle
-	(*DirEntry)(nil),              // 4: iso.v1.DirEntry
-	(*Slice)(nil),                 // 5: iso.v1.Slice
-	(*Chunk)(nil),                 // 6: iso.v1.Chunk
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	(FuseOpenFlag)(0),             // 2: iso.v1.FuseOpenFlag
+	(XAttrSetFlag)(0),             // 3: iso.v1.XAttrSetFlag
+	(XAttrOpType)(0),              // 4: iso.v1.XAttrOpType
+	(LockType)(0),                 // 5: iso.v1.LockType
+	(RenameFlag)(0),               // 6: iso.v1.RenameFlag
+	(FallocateMode)(0),            // 7: iso.v1.FallocateMode
+	(ACLTag)(0),                   // 8: iso.v1.ACLTag
+	(*Inode)(nil),                 // 9: iso.v1.Inode
+	(*FileHandle)(nil),            // 10: iso.v1.FileHandle
+	(*DirEntry)(nil),              // 11: iso.v1.DirEntry
+	(*Slice)(nil),                 // 12: iso.v1.Slice
+	(*Chunk)(nil),                 // 13: iso.v1.Chunk
+	(*XAttr)(nil),                 // 14: iso.v1.XAttr
+	(*XAttrList)(nil),             // 15: iso.v1.XAttrList
+	(*XAttrOp)(nil),               // 16: iso.v1.XAttrOp
+	(*Flock)(nil),                 // 17: iso.v1.Flock
+	(*PlockRecord)(nil),           // 18: iso.v1.PlockRecord
+	(*Plock)(nil),                 // 19: iso.v1.Plock
+	(*RenameOp)(nil),              // 20: iso.v1.RenameOp
+	(*FallocateOp)(nil),           // 21: iso.v1.FallocateOp
+	(*CopyFileRangeOp)(nil),       // 22: iso.v1.CopyFileRangeOp
+	(*ACLEntry)(nil),              // 23: iso.v1.ACLEntry
+	(*ACL)(nil),                   // 24: iso.v1.ACL
+	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 26: google.protobuf.Duration
 }
 var file_iso_v1_fuse_proto_depIdxs = []int32{
-	0, // 0: iso.v1.Inode.type:type_name -> iso.v1.InodeType
-	7, // 1: iso.v1.Inode.atime:type_name -> google.protobuf.Timestamp
-	7, // 2: iso.v1.Inode.mtime:type_name -> google.protobuf.Timestamp
-	7, // 3: iso.v1.Inode.ctime:type_name -> google.protobuf.Timestamp
-	1, // 4: iso.v1.FileHandle.open_mode:type_name -> iso.v1.OpenMode
-	0, // 5: iso.v1.DirEntry.type:type_name -> iso.v1.InodeType
-	2, // 6: iso.v1.DirEntry.attr:type_name -> iso.v1.Inode
-	5, // 7: iso.v1.Chunk.slices:type_name -> iso.v1.Slice
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	0,  // 0: iso.v1.Inode.type:type_name -> iso.v1.InodeType
+	25, // 1: iso.v1.Inode.atime:type_name -> google.protobuf.Timestamp
+	25, // 2: iso.v1.Inode.mtime:type_name -> google.protobuf.Timestamp
+	25, // 3: iso.v1.Inode.ctime:type_name -> google.protobuf.Timestamp
+	26, // 4: iso.v1.Inode.attr_timeout:type_name -> google.protobuf.Duration
+	1,  // 5: iso.v1.FileHandle.open_mode:type_name -> iso.v1.OpenMode
+	0,  // 6: iso.v1.DirEntry.type:type_name -> iso.v1.InodeType
+	9,  // 7: iso.v1.DirEntry.attr:type_name -> iso.v1.Inode
+	26, // 8: iso.v1.DirEntry.entry_timeout:type_name -> google.protobuf.Duration
+	12, // 9: iso.v1.Chunk.slices:type_name -> iso.v1.Slice
+	14, // 10: iso.v1.XAttrList.xattrs:type_name -> iso.v1.XAttr
+	4,  // 11: iso.v1.XAttrOp.op:type_name -> iso.v1.XAttrOpType
+	3,  // 12: iso.v1.XAttrOp.flags:type_name -> iso.v1.XAttrSetFlag
+	5,  // 13: iso.v1.Flock.type:type_name -> iso.v1.LockType
+	5,  // 14: iso.v1.PlockRecord.type:type_name -> iso.v1.LockType
+	18, // 15: iso.v1.Plock.records:type_name -> iso.v1.PlockRecord
+	8,  // 16: iso.v1.ACLEntry.tag:type_name -> iso.v1.ACLTag
+	23, // 17: iso.v1.ACL.entries:type_name -> iso.v1.ACLEntry
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_iso_v1_fuse_proto_init() }
@@ -791,8 +2316,8 @@ func file_iso_v1_fuse_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_iso_v1_fuse_proto_rawDesc), len(file_iso_v1_fuse_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   5,
+			NumEnums:      9,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

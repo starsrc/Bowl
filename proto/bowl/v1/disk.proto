@@ -1,12 +1,12 @@
 syntax = "proto3";
 
-package iso.v1;
+package bowl.v1;
 
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
-import "iso/v1/storage.proto";
+import "bowl/v1/storage.proto";
 
-option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
+option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
 
 // DiskStatus 表示面向用户与租户的虚拟磁盘生命周期状态枚举。
 enum DiskStatus {
@@ -60,13 +60,13 @@ message Disk {
   google.protobuf.Timestamp updated_at = 10;
 
   // 核心关联字段：文件系统全局状态与统计元数据（对齐 Linux statvfs）。
-  iso.v1.Statfs statfs = 11;
+  bowl.v1.Statfs statfs = 11;
 
   // 当前并发以只读模式挂载的客户端/节点唯一标识 ID 列表。
   repeated string reader_client_ids = 12;
 }
 
-// DiskService 定义 ISO Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
+// DiskService 定义 Bowl Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
 // 提供面向租户的虚拟磁盘全生命周期管理（增删改查）、挂载与分离控制以及文件系统用量统计查询。
 service DiskService {
   // 创建新的虚拟磁盘实体。
@@ -192,7 +192,7 @@ message AttachDiskRequest {
   // 发起挂载的客户端/宿主机唯一标识 ID。
   string client_id = 2;
 
-  // 是否以只读模式挂载（在 ISO Storage OWMR 一写多读模型中，允许多个客户端以只读模式挂载，写模式仅允许单一排他客户端）。
+  // 是否以只读模式挂载（在 Bowl Storage OWMR 一写多读模型中，允许多个客户端以只读模式挂载，写模式仅允许单一排他客户端）。
   bool read_only = 3;
 }
 

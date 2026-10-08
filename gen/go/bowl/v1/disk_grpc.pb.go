@@ -2,9 +2,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: iso/v1/disk.proto
+// source: bowl/v1/disk.proto
 
-package isov1
+package bowlv1
 
 import (
 	context "context"
@@ -19,21 +19,21 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	DiskService_CreateDisk_FullMethodName    = "/iso.v1.DiskService/CreateDisk"
-	DiskService_GetDisk_FullMethodName       = "/iso.v1.DiskService/GetDisk"
-	DiskService_UpdateDisk_FullMethodName    = "/iso.v1.DiskService/UpdateDisk"
-	DiskService_DeleteDisk_FullMethodName    = "/iso.v1.DiskService/DeleteDisk"
-	DiskService_ListDisks_FullMethodName     = "/iso.v1.DiskService/ListDisks"
-	DiskService_AttachDisk_FullMethodName    = "/iso.v1.DiskService/AttachDisk"
-	DiskService_DetachDisk_FullMethodName    = "/iso.v1.DiskService/DetachDisk"
-	DiskService_GetDiskStatfs_FullMethodName = "/iso.v1.DiskService/GetDiskStatfs"
+	DiskService_CreateDisk_FullMethodName    = "/bowl.v1.DiskService/CreateDisk"
+	DiskService_GetDisk_FullMethodName       = "/bowl.v1.DiskService/GetDisk"
+	DiskService_UpdateDisk_FullMethodName    = "/bowl.v1.DiskService/UpdateDisk"
+	DiskService_DeleteDisk_FullMethodName    = "/bowl.v1.DiskService/DeleteDisk"
+	DiskService_ListDisks_FullMethodName     = "/bowl.v1.DiskService/ListDisks"
+	DiskService_AttachDisk_FullMethodName    = "/bowl.v1.DiskService/AttachDisk"
+	DiskService_DetachDisk_FullMethodName    = "/bowl.v1.DiskService/DetachDisk"
+	DiskService_GetDiskStatfs_FullMethodName = "/bowl.v1.DiskService/GetDiskStatfs"
 )
 
 // DiskServiceClient is the client API for DiskService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// DiskService 定义 ISO Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
+// DiskService 定义 Bowl Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
 // 提供面向租户的虚拟磁盘全生命周期管理（增删改查）、挂载与分离控制以及文件系统用量统计查询。
 type DiskServiceClient interface {
 	// 创建新的虚拟磁盘实体。
@@ -146,7 +146,7 @@ func (c *diskServiceClient) GetDiskStatfs(ctx context.Context, in *GetDiskStatfs
 // All implementations must embed UnimplementedDiskServiceServer
 // for forward compatibility.
 //
-// DiskService 定义 ISO Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
+// DiskService 定义 Bowl Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
 // 提供面向租户的虚拟磁盘全生命周期管理（增删改查）、挂载与分离控制以及文件系统用量统计查询。
 type DiskServiceServer interface {
 	// 创建新的虚拟磁盘实体。
@@ -368,7 +368,7 @@ func _DiskService_GetDiskStatfs_Handler(srv interface{}, ctx context.Context, de
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var DiskService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "iso.v1.DiskService",
+	ServiceName: "bowl.v1.DiskService",
 	HandlerType: (*DiskServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -405,5 +405,5 @@ var DiskService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "iso/v1/disk.proto",
+	Metadata: "bowl/v1/disk.proto",
 }

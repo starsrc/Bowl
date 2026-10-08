@@ -1,11 +1,11 @@
 syntax = "proto3";
 
-package iso.v1;
+package bowl.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
+option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
 
 // =========================================================================
 // 基础数据类型与核心领域模型 (Domain Models)
@@ -212,8 +212,8 @@ enum FallocateMode {
   FALLOCATE_MODE_UNSHARE_RANGE = 64;
 }
 
-// Inode 代表 ISO Storage 文件系统的核心元数据抽象。
-// 设计融合了 POSIX 文件属性、JuiceFS 元数据模型以及 ISO Storage 的多级缓存/对象存储架构特性
+// Inode 代表 Bowl Storage 文件系统的核心元数据抽象。
+// 设计融合了 POSIX 文件属性、JuiceFS 元数据模型以及 Bowl Storage 的多级缓存/对象存储架构特性
 // （例如服务端 NVMe SSD 本地热缓存与远端 B2 对象存储冷分层，以及一写多读一致性模型）。
 message Inode {
   // 全局唯一 Inode 编号（文件系统根目录固定为 1）。
@@ -262,7 +262,7 @@ message Inode {
   // 扩展文件属性标志位（对应 Linux chattr 属性，例如不可变 immutable、仅追加 append-only 等）。
   uint32 flags = 14;
 
-  // 存储分层与缓存层级标志（用于 ISO Storage 的分层存储管理与生命周期调度）。
+  // 存储分层与缓存层级标志（用于 Bowl Storage 的分层存储管理与生命周期调度）。
   // 区分服务端 NVMe SSD 本地热缓存与 B2 远端冷对象存储层级。
   uint32 tier = 15;
 
@@ -277,7 +277,7 @@ message Inode {
 
   // 内核属性缓存有效时间（Attr Timeout）。
   // 指示内核 FUSE 驱动在多长时间内无需向服务端重新发起 getattr 查询。
-  // ISO Storage 服务端可根据文件冷热层级、一写多读（OWMR）租约状态动态调整该值以达到性能与一致性的平衡。
+  // Bowl Storage 服务端可根据文件冷热层级、一写多读（OWMR）租约状态动态调整该值以达到性能与一致性的平衡。
   google.protobuf.Duration attr_timeout = 18;
 
   // 访问控制列表（Access ACL）标识 ID。
@@ -292,8 +292,8 @@ message Inode {
   uint32 default_acl = 20;
 }
 
-// FileHandle 代表 ISO Storage 服务端分配并维护的文件打开句柄抽象。
-// 结合 FUSE 协议标准与 ISO Storage 一写多读（OWMR）并发控制模型及冷热分层缓存设计，
+// FileHandle 代表 Bowl Storage 服务端分配并维护的文件打开句柄抽象。
+// 结合 FUSE 协议标准与 Bowl Storage 一写多读（OWMR）并发控制模型及冷热分层缓存设计，
 // 用于跟踪客户端的文件打开会话、I/O 模式、租约状态与生命周期回收。
 message FileHandle {
   // 服务端集中分配的全局唯一文件句柄标识（File Handle ID）。
@@ -314,7 +314,7 @@ message FileHandle {
   string client_id = 5;
 
   // 是否持有当前 Inode 的排他性写租约。
-  // 在 ISO Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
+  // 在 Bowl Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
   // 确保数据修改的唯一性与缓存失效同步。
   bool is_write_lease = 6;
 
@@ -358,7 +358,7 @@ message DirEntry {
 
   // 内核目录项缓存有效时间（Entry Timeout）。
   // 指示内核 FUSE 驱动在多长时间内直接复用 dentry 目录项缓存，而无需重复向服务端发起 lookup 解析。
-  // 配合 ISO Storage 服务端租约与元数据变更通知机制实现高效缓存。
+  // 配合 Bowl Storage 服务端租约与元数据变更通知机制实现高效缓存。
   google.protobuf.Duration entry_timeout = 7;
 }
 
@@ -395,7 +395,7 @@ message PlockRecord {
 // 用于 df、stat 等系统工具获取存储池容量、空闲空间、Inode 用量及文件系统限制。
 message Statfs {
   // 文件系统基本数据块大小（字节数，对应 statvfs f_bsize 与 fuse.StatfsOut.Bsize）。
-  // ISO Storage 中通常为 4096 (4KB)。
+  // Bowl Storage 中通常为 4096 (4KB)。
   uint32 block_size = 1;
 
   // 基本块大小 / 碎片大小（字节数，对应 statvfs f_frsize 与 fuse.StatfsOut.Frsize）。
@@ -425,7 +425,7 @@ message Statfs {
 // 服务接口契约 (Service Contracts)
 // =========================================================================
 
-// StorageService 定义 ISO Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
+// StorageService 定义 Bowl Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
 // 承担挂载会话维护、一写多读 (OWMR) 租约协调、FUSE 元数据操作、流式目录项读取、
 // 高性能数据 I/O（瘦客户端直通与冷热分层缓存）、并发锁控制及扩展属性存取职责。
 service StorageService {
@@ -582,7 +582,7 @@ message MountRequest {
   string client_id = 2;
 
   // 是否以只读模式挂载。
-  // 在 ISO Storage OWMR 架构中，若为 true 则以只读共享身份挂载；
+  // 在 Bowl Storage OWMR 架构中，若为 true 则以只读共享身份挂载；
   // 若为 false 则尝试向服务端申请排他性写租约。
   bool read_only = 3;
 }

@@ -1,4 +1,4 @@
-module github.com/starsrc/iso
+module github.com/starsrc/bowl
 
 go 1.26.5
 

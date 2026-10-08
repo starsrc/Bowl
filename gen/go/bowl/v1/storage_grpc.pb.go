@@ -2,9 +2,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: iso/v1/storage.proto
+// source: bowl/v1/storage.proto
 
-package isov1
+package bowlv1
 
 import (
 	context "context"
@@ -19,54 +19,54 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StorageService_Mount_FullMethodName         = "/iso.v1.StorageService/Mount"
-	StorageService_Unmount_FullMethodName       = "/iso.v1.StorageService/Unmount"
-	StorageService_KeepAlive_FullMethodName     = "/iso.v1.StorageService/KeepAlive"
-	StorageService_Lookup_FullMethodName        = "/iso.v1.StorageService/Lookup"
-	StorageService_GetAttr_FullMethodName       = "/iso.v1.StorageService/GetAttr"
-	StorageService_SetAttr_FullMethodName       = "/iso.v1.StorageService/SetAttr"
-	StorageService_Access_FullMethodName        = "/iso.v1.StorageService/Access"
-	StorageService_Statfs_FullMethodName        = "/iso.v1.StorageService/Statfs"
-	StorageService_Forget_FullMethodName        = "/iso.v1.StorageService/Forget"
-	StorageService_BatchForget_FullMethodName   = "/iso.v1.StorageService/BatchForget"
-	StorageService_Create_FullMethodName        = "/iso.v1.StorageService/Create"
-	StorageService_Mknod_FullMethodName         = "/iso.v1.StorageService/Mknod"
-	StorageService_Mkdir_FullMethodName         = "/iso.v1.StorageService/Mkdir"
-	StorageService_Rmdir_FullMethodName         = "/iso.v1.StorageService/Rmdir"
-	StorageService_Unlink_FullMethodName        = "/iso.v1.StorageService/Unlink"
-	StorageService_Link_FullMethodName          = "/iso.v1.StorageService/Link"
-	StorageService_Symlink_FullMethodName       = "/iso.v1.StorageService/Symlink"
-	StorageService_Readlink_FullMethodName      = "/iso.v1.StorageService/Readlink"
-	StorageService_Rename_FullMethodName        = "/iso.v1.StorageService/Rename"
-	StorageService_OpenDir_FullMethodName       = "/iso.v1.StorageService/OpenDir"
-	StorageService_ReadDir_FullMethodName       = "/iso.v1.StorageService/ReadDir"
-	StorageService_ReadDirPlus_FullMethodName   = "/iso.v1.StorageService/ReadDirPlus"
-	StorageService_ReleaseDir_FullMethodName    = "/iso.v1.StorageService/ReleaseDir"
-	StorageService_FsyncDir_FullMethodName      = "/iso.v1.StorageService/FsyncDir"
-	StorageService_Open_FullMethodName          = "/iso.v1.StorageService/Open"
-	StorageService_Read_FullMethodName          = "/iso.v1.StorageService/Read"
-	StorageService_Write_FullMethodName         = "/iso.v1.StorageService/Write"
-	StorageService_Flush_FullMethodName         = "/iso.v1.StorageService/Flush"
-	StorageService_Release_FullMethodName       = "/iso.v1.StorageService/Release"
-	StorageService_Fsync_FullMethodName         = "/iso.v1.StorageService/Fsync"
-	StorageService_Fallocate_FullMethodName     = "/iso.v1.StorageService/Fallocate"
-	StorageService_CopyFileRange_FullMethodName = "/iso.v1.StorageService/CopyFileRange"
-	StorageService_Lseek_FullMethodName         = "/iso.v1.StorageService/Lseek"
-	StorageService_GetLk_FullMethodName         = "/iso.v1.StorageService/GetLk"
-	StorageService_SetLk_FullMethodName         = "/iso.v1.StorageService/SetLk"
-	StorageService_SetLkw_FullMethodName        = "/iso.v1.StorageService/SetLkw"
-	StorageService_Flock_FullMethodName         = "/iso.v1.StorageService/Flock"
-	StorageService_GetXAttr_FullMethodName      = "/iso.v1.StorageService/GetXAttr"
-	StorageService_SetXAttr_FullMethodName      = "/iso.v1.StorageService/SetXAttr"
-	StorageService_ListXAttr_FullMethodName     = "/iso.v1.StorageService/ListXAttr"
-	StorageService_RemoveXAttr_FullMethodName   = "/iso.v1.StorageService/RemoveXAttr"
+	StorageService_Mount_FullMethodName         = "/bowl.v1.StorageService/Mount"
+	StorageService_Unmount_FullMethodName       = "/bowl.v1.StorageService/Unmount"
+	StorageService_KeepAlive_FullMethodName     = "/bowl.v1.StorageService/KeepAlive"
+	StorageService_Lookup_FullMethodName        = "/bowl.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName       = "/bowl.v1.StorageService/GetAttr"
+	StorageService_SetAttr_FullMethodName       = "/bowl.v1.StorageService/SetAttr"
+	StorageService_Access_FullMethodName        = "/bowl.v1.StorageService/Access"
+	StorageService_Statfs_FullMethodName        = "/bowl.v1.StorageService/Statfs"
+	StorageService_Forget_FullMethodName        = "/bowl.v1.StorageService/Forget"
+	StorageService_BatchForget_FullMethodName   = "/bowl.v1.StorageService/BatchForget"
+	StorageService_Create_FullMethodName        = "/bowl.v1.StorageService/Create"
+	StorageService_Mknod_FullMethodName         = "/bowl.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName         = "/bowl.v1.StorageService/Mkdir"
+	StorageService_Rmdir_FullMethodName         = "/bowl.v1.StorageService/Rmdir"
+	StorageService_Unlink_FullMethodName        = "/bowl.v1.StorageService/Unlink"
+	StorageService_Link_FullMethodName          = "/bowl.v1.StorageService/Link"
+	StorageService_Symlink_FullMethodName       = "/bowl.v1.StorageService/Symlink"
+	StorageService_Readlink_FullMethodName      = "/bowl.v1.StorageService/Readlink"
+	StorageService_Rename_FullMethodName        = "/bowl.v1.StorageService/Rename"
+	StorageService_OpenDir_FullMethodName       = "/bowl.v1.StorageService/OpenDir"
+	StorageService_ReadDir_FullMethodName       = "/bowl.v1.StorageService/ReadDir"
+	StorageService_ReadDirPlus_FullMethodName   = "/bowl.v1.StorageService/ReadDirPlus"
+	StorageService_ReleaseDir_FullMethodName    = "/bowl.v1.StorageService/ReleaseDir"
+	StorageService_FsyncDir_FullMethodName      = "/bowl.v1.StorageService/FsyncDir"
+	StorageService_Open_FullMethodName          = "/bowl.v1.StorageService/Open"
+	StorageService_Read_FullMethodName          = "/bowl.v1.StorageService/Read"
+	StorageService_Write_FullMethodName         = "/bowl.v1.StorageService/Write"
+	StorageService_Flush_FullMethodName         = "/bowl.v1.StorageService/Flush"
+	StorageService_Release_FullMethodName       = "/bowl.v1.StorageService/Release"
+	StorageService_Fsync_FullMethodName         = "/bowl.v1.StorageService/Fsync"
+	StorageService_Fallocate_FullMethodName     = "/bowl.v1.StorageService/Fallocate"
+	StorageService_CopyFileRange_FullMethodName = "/bowl.v1.StorageService/CopyFileRange"
+	StorageService_Lseek_FullMethodName         = "/bowl.v1.StorageService/Lseek"
+	StorageService_GetLk_FullMethodName         = "/bowl.v1.StorageService/GetLk"
+	StorageService_SetLk_FullMethodName         = "/bowl.v1.StorageService/SetLk"
+	StorageService_SetLkw_FullMethodName        = "/bowl.v1.StorageService/SetLkw"
+	StorageService_Flock_FullMethodName         = "/bowl.v1.StorageService/Flock"
+	StorageService_GetXAttr_FullMethodName      = "/bowl.v1.StorageService/GetXAttr"
+	StorageService_SetXAttr_FullMethodName      = "/bowl.v1.StorageService/SetXAttr"
+	StorageService_ListXAttr_FullMethodName     = "/bowl.v1.StorageService/ListXAttr"
+	StorageService_RemoveXAttr_FullMethodName   = "/bowl.v1.StorageService/RemoveXAttr"
 )
 
 // StorageServiceClient is the client API for StorageService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// StorageService 定义 ISO Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
+// StorageService 定义 Bowl Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
 // 承担挂载会话维护、一写多读 (OWMR) 租约协调、FUSE 元数据操作、流式目录项读取、
 // 高性能数据 I/O（瘦客户端直通与冷热分层缓存）、并发锁控制及扩展属性存取职责。
 type StorageServiceClient interface {
@@ -580,7 +580,7 @@ func (c *storageServiceClient) RemoveXAttr(ctx context.Context, in *RemoveXAttrR
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
 //
-// StorageService 定义 ISO Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
+// StorageService 定义 Bowl Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
 // 承担挂载会话维护、一写多读 (OWMR) 租约协调、FUSE 元数据操作、流式目录项读取、
 // 高性能数据 I/O（瘦客户端直通与冷热分层缓存）、并发锁控制及扩展属性存取职责。
 type StorageServiceServer interface {
@@ -1566,7 +1566,7 @@ func _StorageService_RemoveXAttr_Handler(srv interface{}, ctx context.Context, d
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var StorageService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "iso.v1.StorageService",
+	ServiceName: "bowl.v1.StorageService",
 	HandlerType: (*StorageServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -1735,5 +1735,5 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "iso/v1/storage.proto",
+	Metadata: "bowl/v1/storage.proto",
 }

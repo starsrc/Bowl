@@ -2,9 +2,9 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
-// source: iso/v1/disk.proto
+// source: bowl/v1/disk.proto
 
-package isov1
+package bowlv1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -68,11 +68,11 @@ func (x DiskStatus) String() string {
 }
 
 func (DiskStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_iso_v1_disk_proto_enumTypes[0].Descriptor()
+	return file_bowl_v1_disk_proto_enumTypes[0].Descriptor()
 }
 
 func (DiskStatus) Type() protoreflect.EnumType {
-	return &file_iso_v1_disk_proto_enumTypes[0]
+	return &file_bowl_v1_disk_proto_enumTypes[0]
 }
 
 func (x DiskStatus) Number() protoreflect.EnumNumber {
@@ -81,7 +81,7 @@ func (x DiskStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DiskStatus.Descriptor instead.
 func (DiskStatus) EnumDescriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{0}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{0}
 }
 
 // Disk 代表面向租户与用户的顶层虚拟磁盘业务实体。
@@ -101,7 +101,7 @@ type Disk struct {
 	// 磁盘当前已分配使用的 Inode 节点总数。
 	InodesUsed uint64 `protobuf:"varint,6,opt,name=inodes_used,json=inodesUsed,proto3" json:"inodes_used,omitempty"`
 	// 磁盘当前的生命周期状态。
-	Status DiskStatus `protobuf:"varint,7,opt,name=status,proto3,enum=iso.v1.DiskStatus" json:"status,omitempty"`
+	Status DiskStatus `protobuf:"varint,7,opt,name=status,proto3,enum=bowl.v1.DiskStatus" json:"status,omitempty"`
 	// 当前持有排他写租约的客户端/节点唯一标识 ID（未挂载写者时为空）。
 	WriterClientId string `protobuf:"bytes,8,opt,name=writer_client_id,json=writerClientId,proto3" json:"writer_client_id,omitempty"`
 	// 磁盘创建时间戳。
@@ -118,7 +118,7 @@ type Disk struct {
 
 func (x *Disk) Reset() {
 	*x = Disk{}
-	mi := &file_iso_v1_disk_proto_msgTypes[0]
+	mi := &file_bowl_v1_disk_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -130,7 +130,7 @@ func (x *Disk) String() string {
 func (*Disk) ProtoMessage() {}
 
 func (x *Disk) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[0]
+	mi := &file_bowl_v1_disk_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -143,7 +143,7 @@ func (x *Disk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Disk.ProtoReflect.Descriptor instead.
 func (*Disk) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{0}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Disk) GetDiskId() string {
@@ -245,7 +245,7 @@ type CreateDiskRequest struct {
 
 func (x *CreateDiskRequest) Reset() {
 	*x = CreateDiskRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[1]
+	mi := &file_bowl_v1_disk_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -257,7 +257,7 @@ func (x *CreateDiskRequest) String() string {
 func (*CreateDiskRequest) ProtoMessage() {}
 
 func (x *CreateDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[1]
+	mi := &file_bowl_v1_disk_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -270,7 +270,7 @@ func (x *CreateDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDiskRequest.ProtoReflect.Descriptor instead.
 func (*CreateDiskRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{1}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CreateDiskRequest) GetName() string {
@@ -305,7 +305,7 @@ type CreateDiskResponse struct {
 
 func (x *CreateDiskResponse) Reset() {
 	*x = CreateDiskResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[2]
+	mi := &file_bowl_v1_disk_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -317,7 +317,7 @@ func (x *CreateDiskResponse) String() string {
 func (*CreateDiskResponse) ProtoMessage() {}
 
 func (x *CreateDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[2]
+	mi := &file_bowl_v1_disk_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -330,7 +330,7 @@ func (x *CreateDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDiskResponse.ProtoReflect.Descriptor instead.
 func (*CreateDiskResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{2}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CreateDiskResponse) GetDisk() *Disk {
@@ -351,7 +351,7 @@ type GetDiskRequest struct {
 
 func (x *GetDiskRequest) Reset() {
 	*x = GetDiskRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[3]
+	mi := &file_bowl_v1_disk_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -363,7 +363,7 @@ func (x *GetDiskRequest) String() string {
 func (*GetDiskRequest) ProtoMessage() {}
 
 func (x *GetDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[3]
+	mi := &file_bowl_v1_disk_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -376,7 +376,7 @@ func (x *GetDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDiskRequest.ProtoReflect.Descriptor instead.
 func (*GetDiskRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{3}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetDiskRequest) GetDiskId() string {
@@ -397,7 +397,7 @@ type GetDiskResponse struct {
 
 func (x *GetDiskResponse) Reset() {
 	*x = GetDiskResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[4]
+	mi := &file_bowl_v1_disk_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -409,7 +409,7 @@ func (x *GetDiskResponse) String() string {
 func (*GetDiskResponse) ProtoMessage() {}
 
 func (x *GetDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[4]
+	mi := &file_bowl_v1_disk_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -422,7 +422,7 @@ func (x *GetDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDiskResponse.ProtoReflect.Descriptor instead.
 func (*GetDiskResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{4}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetDiskResponse) GetDisk() *Disk {
@@ -451,7 +451,7 @@ type UpdateDiskRequest struct {
 
 func (x *UpdateDiskRequest) Reset() {
 	*x = UpdateDiskRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[5]
+	mi := &file_bowl_v1_disk_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -463,7 +463,7 @@ func (x *UpdateDiskRequest) String() string {
 func (*UpdateDiskRequest) ProtoMessage() {}
 
 func (x *UpdateDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[5]
+	mi := &file_bowl_v1_disk_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -476,7 +476,7 @@ func (x *UpdateDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateDiskRequest.ProtoReflect.Descriptor instead.
 func (*UpdateDiskRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{5}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UpdateDiskRequest) GetDiskId() string {
@@ -525,7 +525,7 @@ type UpdateDiskResponse struct {
 
 func (x *UpdateDiskResponse) Reset() {
 	*x = UpdateDiskResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[6]
+	mi := &file_bowl_v1_disk_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -537,7 +537,7 @@ func (x *UpdateDiskResponse) String() string {
 func (*UpdateDiskResponse) ProtoMessage() {}
 
 func (x *UpdateDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[6]
+	mi := &file_bowl_v1_disk_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -550,7 +550,7 @@ func (x *UpdateDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateDiskResponse.ProtoReflect.Descriptor instead.
 func (*UpdateDiskResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{6}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *UpdateDiskResponse) GetDisk() *Disk {
@@ -573,7 +573,7 @@ type DeleteDiskRequest struct {
 
 func (x *DeleteDiskRequest) Reset() {
 	*x = DeleteDiskRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[7]
+	mi := &file_bowl_v1_disk_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -585,7 +585,7 @@ func (x *DeleteDiskRequest) String() string {
 func (*DeleteDiskRequest) ProtoMessage() {}
 
 func (x *DeleteDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[7]
+	mi := &file_bowl_v1_disk_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -598,7 +598,7 @@ func (x *DeleteDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDiskRequest.ProtoReflect.Descriptor instead.
 func (*DeleteDiskRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{7}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeleteDiskRequest) GetDiskId() string {
@@ -624,7 +624,7 @@ type DeleteDiskResponse struct {
 
 func (x *DeleteDiskResponse) Reset() {
 	*x = DeleteDiskResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[8]
+	mi := &file_bowl_v1_disk_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -636,7 +636,7 @@ func (x *DeleteDiskResponse) String() string {
 func (*DeleteDiskResponse) ProtoMessage() {}
 
 func (x *DeleteDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[8]
+	mi := &file_bowl_v1_disk_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -649,7 +649,7 @@ func (x *DeleteDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDiskResponse.ProtoReflect.Descriptor instead.
 func (*DeleteDiskResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{8}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{8}
 }
 
 // ListDisksRequest 表示分页查询虚拟磁盘列表的请求参数模型。
@@ -660,14 +660,14 @@ type ListDisksRequest struct {
 	// 分页游标 Token（首次查询传空，后续传入上一页响应返回的 next_page_token）。
 	PageToken string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	// 可选的生命周期状态筛选条件（未指定 DISK_STATUS_UNSPECIFIED 时不过滤）。
-	FilterStatus  DiskStatus `protobuf:"varint,3,opt,name=filter_status,json=filterStatus,proto3,enum=iso.v1.DiskStatus" json:"filter_status,omitempty"`
+	FilterStatus  DiskStatus `protobuf:"varint,3,opt,name=filter_status,json=filterStatus,proto3,enum=bowl.v1.DiskStatus" json:"filter_status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListDisksRequest) Reset() {
 	*x = ListDisksRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[9]
+	mi := &file_bowl_v1_disk_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -679,7 +679,7 @@ func (x *ListDisksRequest) String() string {
 func (*ListDisksRequest) ProtoMessage() {}
 
 func (x *ListDisksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[9]
+	mi := &file_bowl_v1_disk_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -692,7 +692,7 @@ func (x *ListDisksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDisksRequest.ProtoReflect.Descriptor instead.
 func (*ListDisksRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{9}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListDisksRequest) GetPageSize() int32 {
@@ -731,7 +731,7 @@ type ListDisksResponse struct {
 
 func (x *ListDisksResponse) Reset() {
 	*x = ListDisksResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[10]
+	mi := &file_bowl_v1_disk_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -743,7 +743,7 @@ func (x *ListDisksResponse) String() string {
 func (*ListDisksResponse) ProtoMessage() {}
 
 func (x *ListDisksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[10]
+	mi := &file_bowl_v1_disk_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -756,7 +756,7 @@ func (x *ListDisksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDisksResponse.ProtoReflect.Descriptor instead.
 func (*ListDisksResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{10}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListDisksResponse) GetDisks() []*Disk {
@@ -787,7 +787,7 @@ type AttachDiskRequest struct {
 	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
 	// 发起挂载的客户端/宿主机唯一标识 ID。
 	ClientId string `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	// 是否以只读模式挂载（在 ISO Storage OWMR 一写多读模型中，允许多个客户端以只读模式挂载，写模式仅允许单一排他客户端）。
+	// 是否以只读模式挂载（在 Bowl Storage OWMR 一写多读模型中，允许多个客户端以只读模式挂载，写模式仅允许单一排他客户端）。
 	ReadOnly      bool `protobuf:"varint,3,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -795,7 +795,7 @@ type AttachDiskRequest struct {
 
 func (x *AttachDiskRequest) Reset() {
 	*x = AttachDiskRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[11]
+	mi := &file_bowl_v1_disk_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -807,7 +807,7 @@ func (x *AttachDiskRequest) String() string {
 func (*AttachDiskRequest) ProtoMessage() {}
 
 func (x *AttachDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[11]
+	mi := &file_bowl_v1_disk_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -820,7 +820,7 @@ func (x *AttachDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachDiskRequest.ProtoReflect.Descriptor instead.
 func (*AttachDiskRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{11}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AttachDiskRequest) GetDiskId() string {
@@ -855,7 +855,7 @@ type AttachDiskResponse struct {
 
 func (x *AttachDiskResponse) Reset() {
 	*x = AttachDiskResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[12]
+	mi := &file_bowl_v1_disk_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -867,7 +867,7 @@ func (x *AttachDiskResponse) String() string {
 func (*AttachDiskResponse) ProtoMessage() {}
 
 func (x *AttachDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[12]
+	mi := &file_bowl_v1_disk_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -880,7 +880,7 @@ func (x *AttachDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachDiskResponse.ProtoReflect.Descriptor instead.
 func (*AttachDiskResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{12}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *AttachDiskResponse) GetDisk() *Disk {
@@ -905,7 +905,7 @@ type DetachDiskRequest struct {
 
 func (x *DetachDiskRequest) Reset() {
 	*x = DetachDiskRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[13]
+	mi := &file_bowl_v1_disk_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -917,7 +917,7 @@ func (x *DetachDiskRequest) String() string {
 func (*DetachDiskRequest) ProtoMessage() {}
 
 func (x *DetachDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[13]
+	mi := &file_bowl_v1_disk_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -930,7 +930,7 @@ func (x *DetachDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetachDiskRequest.ProtoReflect.Descriptor instead.
 func (*DetachDiskRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{13}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DetachDiskRequest) GetDiskId() string {
@@ -965,7 +965,7 @@ type DetachDiskResponse struct {
 
 func (x *DetachDiskResponse) Reset() {
 	*x = DetachDiskResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[14]
+	mi := &file_bowl_v1_disk_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -977,7 +977,7 @@ func (x *DetachDiskResponse) String() string {
 func (*DetachDiskResponse) ProtoMessage() {}
 
 func (x *DetachDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[14]
+	mi := &file_bowl_v1_disk_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -990,7 +990,7 @@ func (x *DetachDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetachDiskResponse.ProtoReflect.Descriptor instead.
 func (*DetachDiskResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{14}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DetachDiskResponse) GetDisk() *Disk {
@@ -1011,7 +1011,7 @@ type GetDiskStatfsRequest struct {
 
 func (x *GetDiskStatfsRequest) Reset() {
 	*x = GetDiskStatfsRequest{}
-	mi := &file_iso_v1_disk_proto_msgTypes[15]
+	mi := &file_bowl_v1_disk_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1023,7 +1023,7 @@ func (x *GetDiskStatfsRequest) String() string {
 func (*GetDiskStatfsRequest) ProtoMessage() {}
 
 func (x *GetDiskStatfsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[15]
+	mi := &file_bowl_v1_disk_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1036,7 +1036,7 @@ func (x *GetDiskStatfsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDiskStatfsRequest.ProtoReflect.Descriptor instead.
 func (*GetDiskStatfsRequest) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{15}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetDiskStatfsRequest) GetDiskId() string {
@@ -1059,7 +1059,7 @@ type GetDiskStatfsResponse struct {
 
 func (x *GetDiskStatfsResponse) Reset() {
 	*x = GetDiskStatfsResponse{}
-	mi := &file_iso_v1_disk_proto_msgTypes[16]
+	mi := &file_bowl_v1_disk_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1071,7 +1071,7 @@ func (x *GetDiskStatfsResponse) String() string {
 func (*GetDiskStatfsResponse) ProtoMessage() {}
 
 func (x *GetDiskStatfsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_iso_v1_disk_proto_msgTypes[16]
+	mi := &file_bowl_v1_disk_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1084,7 +1084,7 @@ func (x *GetDiskStatfsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDiskStatfsResponse.ProtoReflect.Descriptor instead.
 func (*GetDiskStatfsResponse) Descriptor() ([]byte, []int) {
-	return file_iso_v1_disk_proto_rawDescGZIP(), []int{16}
+	return file_bowl_v1_disk_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetDiskStatfsResponse) GetDiskId() string {
@@ -1101,11 +1101,11 @@ func (x *GetDiskStatfsResponse) GetStatfs() *Statfs {
 	return nil
 }
 
-var File_iso_v1_disk_proto protoreflect.FileDescriptor
+var File_bowl_v1_disk_proto protoreflect.FileDescriptor
 
-const file_iso_v1_disk_proto_rawDesc = "" +
+const file_bowl_v1_disk_proto_rawDesc = "" +
 	"\n" +
-	"\x11iso/v1/disk.proto\x12\x06iso.v1\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14iso/v1/storage.proto\"\xdd\x03\n" +
+	"\x12bowl/v1/disk.proto\x12\abowl.v1\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x15bowl/v1/storage.proto\"\xdf\x03\n" +
 	"\x04Disk\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
@@ -1114,155 +1114,155 @@ const file_iso_v1_disk_proto_rawDesc = "" +
 	"used_bytes\x18\x04 \x01(\x04R\tusedBytes\x12!\n" +
 	"\finodes_quota\x18\x05 \x01(\x04R\vinodesQuota\x12\x1f\n" +
 	"\vinodes_used\x18\x06 \x01(\x04R\n" +
-	"inodesUsed\x12*\n" +
-	"\x06status\x18\a \x01(\x0e2\x12.iso.v1.DiskStatusR\x06status\x12(\n" +
+	"inodesUsed\x12+\n" +
+	"\x06status\x18\a \x01(\x0e2\x13.bowl.v1.DiskStatusR\x06status\x12(\n" +
 	"\x10writer_client_id\x18\b \x01(\tR\x0ewriterClientId\x129\n" +
 	"\n" +
 	"created_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\n" +
-	" \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12&\n" +
-	"\x06statfs\x18\v \x01(\v2\x0e.iso.v1.StatfsR\x06statfs\x12*\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12'\n" +
+	"\x06statfs\x18\v \x01(\v2\x0f.bowl.v1.StatfsR\x06statfs\x12*\n" +
 	"\x11reader_client_ids\x18\f \x03(\tR\x0freaderClientIds\"q\n" +
 	"\x11CreateDiskRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12%\n" +
 	"\x0ecapacity_bytes\x18\x02 \x01(\x04R\rcapacityBytes\x12!\n" +
-	"\finodes_quota\x18\x03 \x01(\x04R\vinodesQuota\"6\n" +
-	"\x12CreateDiskResponse\x12 \n" +
-	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\")\n" +
+	"\finodes_quota\x18\x03 \x01(\x04R\vinodesQuota\"7\n" +
+	"\x12CreateDiskResponse\x12!\n" +
+	"\x04disk\x18\x01 \x01(\v2\r.bowl.v1.DiskR\x04disk\")\n" +
 	"\x0eGetDiskRequest\x12\x17\n" +
-	"\adisk_id\x18\x01 \x01(\tR\x06diskId\"3\n" +
-	"\x0fGetDiskResponse\x12 \n" +
-	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"\xc5\x01\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\"4\n" +
+	"\x0fGetDiskResponse\x12!\n" +
+	"\x04disk\x18\x01 \x01(\v2\r.bowl.v1.DiskR\x04disk\"\xc5\x01\n" +
 	"\x11UpdateDiskRequest\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
 	"\x0ecapacity_bytes\x18\x03 \x01(\x04R\rcapacityBytes\x12!\n" +
 	"\finodes_quota\x18\x04 \x01(\x04R\vinodesQuota\x129\n" +
 	"\n" +
-	"field_mask\x18\x05 \x01(\v2\x1a.google.protobuf.FieldMaskR\tfieldMask\"6\n" +
-	"\x12UpdateDiskResponse\x12 \n" +
-	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"B\n" +
+	"field_mask\x18\x05 \x01(\v2\x1a.google.protobuf.FieldMaskR\tfieldMask\"7\n" +
+	"\x12UpdateDiskResponse\x12!\n" +
+	"\x04disk\x18\x01 \x01(\v2\r.bowl.v1.DiskR\x04disk\"B\n" +
 	"\x11DeleteDiskRequest\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x14\n" +
 	"\x05force\x18\x02 \x01(\bR\x05force\"\x14\n" +
-	"\x12DeleteDiskResponse\"\x87\x01\n" +
+	"\x12DeleteDiskResponse\"\x88\x01\n" +
 	"\x10ListDisksRequest\x12\x1b\n" +
 	"\tpage_size\x18\x01 \x01(\x05R\bpageSize\x12\x1d\n" +
 	"\n" +
-	"page_token\x18\x02 \x01(\tR\tpageToken\x127\n" +
-	"\rfilter_status\x18\x03 \x01(\x0e2\x12.iso.v1.DiskStatusR\ffilterStatus\"\x80\x01\n" +
-	"\x11ListDisksResponse\x12\"\n" +
-	"\x05disks\x18\x01 \x03(\v2\f.iso.v1.DiskR\x05disks\x12&\n" +
+	"page_token\x18\x02 \x01(\tR\tpageToken\x128\n" +
+	"\rfilter_status\x18\x03 \x01(\x0e2\x13.bowl.v1.DiskStatusR\ffilterStatus\"\x81\x01\n" +
+	"\x11ListDisksResponse\x12#\n" +
+	"\x05disks\x18\x01 \x03(\v2\r.bowl.v1.DiskR\x05disks\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1f\n" +
 	"\vtotal_count\x18\x03 \x01(\x03R\n" +
 	"totalCount\"f\n" +
 	"\x11AttachDiskRequest\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x1b\n" +
-	"\tread_only\x18\x03 \x01(\bR\breadOnly\"6\n" +
-	"\x12AttachDiskResponse\x12 \n" +
-	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"_\n" +
+	"\tread_only\x18\x03 \x01(\bR\breadOnly\"7\n" +
+	"\x12AttachDiskResponse\x12!\n" +
+	"\x04disk\x18\x01 \x01(\v2\r.bowl.v1.DiskR\x04disk\"_\n" +
 	"\x11DetachDiskRequest\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x14\n" +
-	"\x05force\x18\x03 \x01(\bR\x05force\"6\n" +
-	"\x12DetachDiskResponse\x12 \n" +
-	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"/\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"7\n" +
+	"\x12DetachDiskResponse\x12!\n" +
+	"\x04disk\x18\x01 \x01(\v2\r.bowl.v1.DiskR\x04disk\"/\n" +
 	"\x14GetDiskStatfsRequest\x12\x17\n" +
-	"\adisk_id\x18\x01 \x01(\tR\x06diskId\"X\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\"Y\n" +
 	"\x15GetDiskStatfsResponse\x12\x17\n" +
-	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12&\n" +
-	"\x06statfs\x18\x02 \x01(\v2\x0e.iso.v1.StatfsR\x06statfs*\x8b\x01\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12'\n" +
+	"\x06statfs\x18\x02 \x01(\v2\x0f.bowl.v1.StatfsR\x06statfs*\x8b\x01\n" +
 	"\n" +
 	"DiskStatus\x12\x1b\n" +
 	"\x17DISK_STATUS_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DISK_STATUS_CREATING\x10\x01\x12\x15\n" +
 	"\x11DISK_STATUS_READY\x10\x02\x12\x18\n" +
 	"\x14DISK_STATUS_ATTACHED\x10\x03\x12\x15\n" +
-	"\x11DISK_STATUS_ERROR\x10\x042\xb2\x04\n" +
-	"\vDiskService\x12C\n" +
+	"\x11DISK_STATUS_ERROR\x10\x042\xc2\x04\n" +
+	"\vDiskService\x12E\n" +
 	"\n" +
-	"CreateDisk\x12\x19.iso.v1.CreateDiskRequest\x1a\x1a.iso.v1.CreateDiskResponse\x12:\n" +
-	"\aGetDisk\x12\x16.iso.v1.GetDiskRequest\x1a\x17.iso.v1.GetDiskResponse\x12C\n" +
+	"CreateDisk\x12\x1a.bowl.v1.CreateDiskRequest\x1a\x1b.bowl.v1.CreateDiskResponse\x12<\n" +
+	"\aGetDisk\x12\x17.bowl.v1.GetDiskRequest\x1a\x18.bowl.v1.GetDiskResponse\x12E\n" +
 	"\n" +
-	"UpdateDisk\x12\x19.iso.v1.UpdateDiskRequest\x1a\x1a.iso.v1.UpdateDiskResponse\x12C\n" +
+	"UpdateDisk\x12\x1a.bowl.v1.UpdateDiskRequest\x1a\x1b.bowl.v1.UpdateDiskResponse\x12E\n" +
 	"\n" +
-	"DeleteDisk\x12\x19.iso.v1.DeleteDiskRequest\x1a\x1a.iso.v1.DeleteDiskResponse\x12@\n" +
-	"\tListDisks\x12\x18.iso.v1.ListDisksRequest\x1a\x19.iso.v1.ListDisksResponse\x12C\n" +
+	"DeleteDisk\x12\x1a.bowl.v1.DeleteDiskRequest\x1a\x1b.bowl.v1.DeleteDiskResponse\x12B\n" +
+	"\tListDisks\x12\x19.bowl.v1.ListDisksRequest\x1a\x1a.bowl.v1.ListDisksResponse\x12E\n" +
 	"\n" +
-	"AttachDisk\x12\x19.iso.v1.AttachDiskRequest\x1a\x1a.iso.v1.AttachDiskResponse\x12C\n" +
+	"AttachDisk\x12\x1a.bowl.v1.AttachDiskRequest\x1a\x1b.bowl.v1.AttachDiskResponse\x12E\n" +
 	"\n" +
-	"DetachDisk\x12\x19.iso.v1.DetachDiskRequest\x1a\x1a.iso.v1.DetachDiskResponse\x12L\n" +
-	"\rGetDiskStatfs\x12\x1c.iso.v1.GetDiskStatfsRequest\x1a\x1d.iso.v1.GetDiskStatfsResponseB,Z*github.com/starsrc/iso/gen/go/iso/v1;isov1b\x06proto3"
+	"DetachDisk\x12\x1a.bowl.v1.DetachDiskRequest\x1a\x1b.bowl.v1.DetachDiskResponse\x12N\n" +
+	"\rGetDiskStatfs\x12\x1d.bowl.v1.GetDiskStatfsRequest\x1a\x1e.bowl.v1.GetDiskStatfsResponseB/Z-github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1b\x06proto3"
 
 var (
-	file_iso_v1_disk_proto_rawDescOnce sync.Once
-	file_iso_v1_disk_proto_rawDescData []byte
+	file_bowl_v1_disk_proto_rawDescOnce sync.Once
+	file_bowl_v1_disk_proto_rawDescData []byte
 )
 
-func file_iso_v1_disk_proto_rawDescGZIP() []byte {
-	file_iso_v1_disk_proto_rawDescOnce.Do(func() {
-		file_iso_v1_disk_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_iso_v1_disk_proto_rawDesc), len(file_iso_v1_disk_proto_rawDesc)))
+func file_bowl_v1_disk_proto_rawDescGZIP() []byte {
+	file_bowl_v1_disk_proto_rawDescOnce.Do(func() {
+		file_bowl_v1_disk_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_bowl_v1_disk_proto_rawDesc), len(file_bowl_v1_disk_proto_rawDesc)))
 	})
-	return file_iso_v1_disk_proto_rawDescData
+	return file_bowl_v1_disk_proto_rawDescData
 }
 
-var file_iso_v1_disk_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_iso_v1_disk_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
-var file_iso_v1_disk_proto_goTypes = []any{
-	(DiskStatus)(0),               // 0: iso.v1.DiskStatus
-	(*Disk)(nil),                  // 1: iso.v1.Disk
-	(*CreateDiskRequest)(nil),     // 2: iso.v1.CreateDiskRequest
-	(*CreateDiskResponse)(nil),    // 3: iso.v1.CreateDiskResponse
-	(*GetDiskRequest)(nil),        // 4: iso.v1.GetDiskRequest
-	(*GetDiskResponse)(nil),       // 5: iso.v1.GetDiskResponse
-	(*UpdateDiskRequest)(nil),     // 6: iso.v1.UpdateDiskRequest
-	(*UpdateDiskResponse)(nil),    // 7: iso.v1.UpdateDiskResponse
-	(*DeleteDiskRequest)(nil),     // 8: iso.v1.DeleteDiskRequest
-	(*DeleteDiskResponse)(nil),    // 9: iso.v1.DeleteDiskResponse
-	(*ListDisksRequest)(nil),      // 10: iso.v1.ListDisksRequest
-	(*ListDisksResponse)(nil),     // 11: iso.v1.ListDisksResponse
-	(*AttachDiskRequest)(nil),     // 12: iso.v1.AttachDiskRequest
-	(*AttachDiskResponse)(nil),    // 13: iso.v1.AttachDiskResponse
-	(*DetachDiskRequest)(nil),     // 14: iso.v1.DetachDiskRequest
-	(*DetachDiskResponse)(nil),    // 15: iso.v1.DetachDiskResponse
-	(*GetDiskStatfsRequest)(nil),  // 16: iso.v1.GetDiskStatfsRequest
-	(*GetDiskStatfsResponse)(nil), // 17: iso.v1.GetDiskStatfsResponse
+var file_bowl_v1_disk_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_bowl_v1_disk_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_bowl_v1_disk_proto_goTypes = []any{
+	(DiskStatus)(0),               // 0: bowl.v1.DiskStatus
+	(*Disk)(nil),                  // 1: bowl.v1.Disk
+	(*CreateDiskRequest)(nil),     // 2: bowl.v1.CreateDiskRequest
+	(*CreateDiskResponse)(nil),    // 3: bowl.v1.CreateDiskResponse
+	(*GetDiskRequest)(nil),        // 4: bowl.v1.GetDiskRequest
+	(*GetDiskResponse)(nil),       // 5: bowl.v1.GetDiskResponse
+	(*UpdateDiskRequest)(nil),     // 6: bowl.v1.UpdateDiskRequest
+	(*UpdateDiskResponse)(nil),    // 7: bowl.v1.UpdateDiskResponse
+	(*DeleteDiskRequest)(nil),     // 8: bowl.v1.DeleteDiskRequest
+	(*DeleteDiskResponse)(nil),    // 9: bowl.v1.DeleteDiskResponse
+	(*ListDisksRequest)(nil),      // 10: bowl.v1.ListDisksRequest
+	(*ListDisksResponse)(nil),     // 11: bowl.v1.ListDisksResponse
+	(*AttachDiskRequest)(nil),     // 12: bowl.v1.AttachDiskRequest
+	(*AttachDiskResponse)(nil),    // 13: bowl.v1.AttachDiskResponse
+	(*DetachDiskRequest)(nil),     // 14: bowl.v1.DetachDiskRequest
+	(*DetachDiskResponse)(nil),    // 15: bowl.v1.DetachDiskResponse
+	(*GetDiskStatfsRequest)(nil),  // 16: bowl.v1.GetDiskStatfsRequest
+	(*GetDiskStatfsResponse)(nil), // 17: bowl.v1.GetDiskStatfsResponse
 	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
-	(*Statfs)(nil),                // 19: iso.v1.Statfs
+	(*Statfs)(nil),                // 19: bowl.v1.Statfs
 	(*fieldmaskpb.FieldMask)(nil), // 20: google.protobuf.FieldMask
 }
-var file_iso_v1_disk_proto_depIdxs = []int32{
-	0,  // 0: iso.v1.Disk.status:type_name -> iso.v1.DiskStatus
-	18, // 1: iso.v1.Disk.created_at:type_name -> google.protobuf.Timestamp
-	18, // 2: iso.v1.Disk.updated_at:type_name -> google.protobuf.Timestamp
-	19, // 3: iso.v1.Disk.statfs:type_name -> iso.v1.Statfs
-	1,  // 4: iso.v1.CreateDiskResponse.disk:type_name -> iso.v1.Disk
-	1,  // 5: iso.v1.GetDiskResponse.disk:type_name -> iso.v1.Disk
-	20, // 6: iso.v1.UpdateDiskRequest.field_mask:type_name -> google.protobuf.FieldMask
-	1,  // 7: iso.v1.UpdateDiskResponse.disk:type_name -> iso.v1.Disk
-	0,  // 8: iso.v1.ListDisksRequest.filter_status:type_name -> iso.v1.DiskStatus
-	1,  // 9: iso.v1.ListDisksResponse.disks:type_name -> iso.v1.Disk
-	1,  // 10: iso.v1.AttachDiskResponse.disk:type_name -> iso.v1.Disk
-	1,  // 11: iso.v1.DetachDiskResponse.disk:type_name -> iso.v1.Disk
-	19, // 12: iso.v1.GetDiskStatfsResponse.statfs:type_name -> iso.v1.Statfs
-	2,  // 13: iso.v1.DiskService.CreateDisk:input_type -> iso.v1.CreateDiskRequest
-	4,  // 14: iso.v1.DiskService.GetDisk:input_type -> iso.v1.GetDiskRequest
-	6,  // 15: iso.v1.DiskService.UpdateDisk:input_type -> iso.v1.UpdateDiskRequest
-	8,  // 16: iso.v1.DiskService.DeleteDisk:input_type -> iso.v1.DeleteDiskRequest
-	10, // 17: iso.v1.DiskService.ListDisks:input_type -> iso.v1.ListDisksRequest
-	12, // 18: iso.v1.DiskService.AttachDisk:input_type -> iso.v1.AttachDiskRequest
-	14, // 19: iso.v1.DiskService.DetachDisk:input_type -> iso.v1.DetachDiskRequest
-	16, // 20: iso.v1.DiskService.GetDiskStatfs:input_type -> iso.v1.GetDiskStatfsRequest
-	3,  // 21: iso.v1.DiskService.CreateDisk:output_type -> iso.v1.CreateDiskResponse
-	5,  // 22: iso.v1.DiskService.GetDisk:output_type -> iso.v1.GetDiskResponse
-	7,  // 23: iso.v1.DiskService.UpdateDisk:output_type -> iso.v1.UpdateDiskResponse
-	9,  // 24: iso.v1.DiskService.DeleteDisk:output_type -> iso.v1.DeleteDiskResponse
-	11, // 25: iso.v1.DiskService.ListDisks:output_type -> iso.v1.ListDisksResponse
-	13, // 26: iso.v1.DiskService.AttachDisk:output_type -> iso.v1.AttachDiskResponse
-	15, // 27: iso.v1.DiskService.DetachDisk:output_type -> iso.v1.DetachDiskResponse
-	17, // 28: iso.v1.DiskService.GetDiskStatfs:output_type -> iso.v1.GetDiskStatfsResponse
+var file_bowl_v1_disk_proto_depIdxs = []int32{
+	0,  // 0: bowl.v1.Disk.status:type_name -> bowl.v1.DiskStatus
+	18, // 1: bowl.v1.Disk.created_at:type_name -> google.protobuf.Timestamp
+	18, // 2: bowl.v1.Disk.updated_at:type_name -> google.protobuf.Timestamp
+	19, // 3: bowl.v1.Disk.statfs:type_name -> bowl.v1.Statfs
+	1,  // 4: bowl.v1.CreateDiskResponse.disk:type_name -> bowl.v1.Disk
+	1,  // 5: bowl.v1.GetDiskResponse.disk:type_name -> bowl.v1.Disk
+	20, // 6: bowl.v1.UpdateDiskRequest.field_mask:type_name -> google.protobuf.FieldMask
+	1,  // 7: bowl.v1.UpdateDiskResponse.disk:type_name -> bowl.v1.Disk
+	0,  // 8: bowl.v1.ListDisksRequest.filter_status:type_name -> bowl.v1.DiskStatus
+	1,  // 9: bowl.v1.ListDisksResponse.disks:type_name -> bowl.v1.Disk
+	1,  // 10: bowl.v1.AttachDiskResponse.disk:type_name -> bowl.v1.Disk
+	1,  // 11: bowl.v1.DetachDiskResponse.disk:type_name -> bowl.v1.Disk
+	19, // 12: bowl.v1.GetDiskStatfsResponse.statfs:type_name -> bowl.v1.Statfs
+	2,  // 13: bowl.v1.DiskService.CreateDisk:input_type -> bowl.v1.CreateDiskRequest
+	4,  // 14: bowl.v1.DiskService.GetDisk:input_type -> bowl.v1.GetDiskRequest
+	6,  // 15: bowl.v1.DiskService.UpdateDisk:input_type -> bowl.v1.UpdateDiskRequest
+	8,  // 16: bowl.v1.DiskService.DeleteDisk:input_type -> bowl.v1.DeleteDiskRequest
+	10, // 17: bowl.v1.DiskService.ListDisks:input_type -> bowl.v1.ListDisksRequest
+	12, // 18: bowl.v1.DiskService.AttachDisk:input_type -> bowl.v1.AttachDiskRequest
+	14, // 19: bowl.v1.DiskService.DetachDisk:input_type -> bowl.v1.DetachDiskRequest
+	16, // 20: bowl.v1.DiskService.GetDiskStatfs:input_type -> bowl.v1.GetDiskStatfsRequest
+	3,  // 21: bowl.v1.DiskService.CreateDisk:output_type -> bowl.v1.CreateDiskResponse
+	5,  // 22: bowl.v1.DiskService.GetDisk:output_type -> bowl.v1.GetDiskResponse
+	7,  // 23: bowl.v1.DiskService.UpdateDisk:output_type -> bowl.v1.UpdateDiskResponse
+	9,  // 24: bowl.v1.DiskService.DeleteDisk:output_type -> bowl.v1.DeleteDiskResponse
+	11, // 25: bowl.v1.DiskService.ListDisks:output_type -> bowl.v1.ListDisksResponse
+	13, // 26: bowl.v1.DiskService.AttachDisk:output_type -> bowl.v1.AttachDiskResponse
+	15, // 27: bowl.v1.DiskService.DetachDisk:output_type -> bowl.v1.DetachDiskResponse
+	17, // 28: bowl.v1.DiskService.GetDiskStatfs:output_type -> bowl.v1.GetDiskStatfsResponse
 	21, // [21:29] is the sub-list for method output_type
 	13, // [13:21] is the sub-list for method input_type
 	13, // [13:13] is the sub-list for extension type_name
@@ -1270,28 +1270,28 @@ var file_iso_v1_disk_proto_depIdxs = []int32{
 	0,  // [0:13] is the sub-list for field type_name
 }
 
-func init() { file_iso_v1_disk_proto_init() }
-func file_iso_v1_disk_proto_init() {
-	if File_iso_v1_disk_proto != nil {
+func init() { file_bowl_v1_disk_proto_init() }
+func file_bowl_v1_disk_proto_init() {
+	if File_bowl_v1_disk_proto != nil {
 		return
 	}
-	file_iso_v1_storage_proto_init()
+	file_bowl_v1_storage_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_iso_v1_disk_proto_rawDesc), len(file_iso_v1_disk_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bowl_v1_disk_proto_rawDesc), len(file_bowl_v1_disk_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_iso_v1_disk_proto_goTypes,
-		DependencyIndexes: file_iso_v1_disk_proto_depIdxs,
-		EnumInfos:         file_iso_v1_disk_proto_enumTypes,
-		MessageInfos:      file_iso_v1_disk_proto_msgTypes,
+		GoTypes:           file_bowl_v1_disk_proto_goTypes,
+		DependencyIndexes: file_bowl_v1_disk_proto_depIdxs,
+		EnumInfos:         file_bowl_v1_disk_proto_enumTypes,
+		MessageInfos:      file_bowl_v1_disk_proto_msgTypes,
 	}.Build()
-	File_iso_v1_disk_proto = out.File
-	file_iso_v1_disk_proto_goTypes = nil
-	file_iso_v1_disk_proto_depIdxs = nil
+	File_bowl_v1_disk_proto = out.File
+	file_bowl_v1_disk_proto_goTypes = nil
+	file_bowl_v1_disk_proto_depIdxs = nil
 }

@@ -9,6 +9,7 @@ package isov1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	fieldmaskpb "google.golang.org/protobuf/types/known/fieldmaskpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -34,10 +35,8 @@ const (
 	DiskStatus_DISK_STATUS_READY DiskStatus = 2
 	// 磁盘已挂载至客户端（当前处于连接与 I/O 活跃状态）。
 	DiskStatus_DISK_STATUS_ATTACHED DiskStatus = 3
-	// 磁盘已从客户端正常卸载分离。
-	DiskStatus_DISK_STATUS_DETACHED DiskStatus = 4
 	// 磁盘处于异常或故障状态。
-	DiskStatus_DISK_STATUS_ERROR DiskStatus = 5
+	DiskStatus_DISK_STATUS_ERROR DiskStatus = 4
 )
 
 // Enum value maps for DiskStatus.
@@ -47,16 +46,14 @@ var (
 		1: "DISK_STATUS_CREATING",
 		2: "DISK_STATUS_READY",
 		3: "DISK_STATUS_ATTACHED",
-		4: "DISK_STATUS_DETACHED",
-		5: "DISK_STATUS_ERROR",
+		4: "DISK_STATUS_ERROR",
 	}
 	DiskStatus_value = map[string]int32{
 		"DISK_STATUS_UNSPECIFIED": 0,
 		"DISK_STATUS_CREATING":    1,
 		"DISK_STATUS_READY":       2,
 		"DISK_STATUS_ATTACHED":    3,
-		"DISK_STATUS_DETACHED":    4,
-		"DISK_STATUS_ERROR":       5,
+		"DISK_STATUS_ERROR":       4,
 	}
 )
 
@@ -105,16 +102,18 @@ type Disk struct {
 	InodesUsed uint64 `protobuf:"varint,6,opt,name=inodes_used,json=inodesUsed,proto3" json:"inodes_used,omitempty"`
 	// 磁盘当前的生命周期状态。
 	Status DiskStatus `protobuf:"varint,7,opt,name=status,proto3,enum=iso.v1.DiskStatus" json:"status,omitempty"`
-	// 当前挂载持有该磁盘的客户端/宿主机唯一标识 ID（未挂载时为空）。
-	AttachedClientId string `protobuf:"bytes,8,opt,name=attached_client_id,json=attachedClientId,proto3" json:"attached_client_id,omitempty"`
+	// 当前持有排他写租约的客户端/节点唯一标识 ID（未挂载写者时为空）。
+	WriterClientId string `protobuf:"bytes,8,opt,name=writer_client_id,json=writerClientId,proto3" json:"writer_client_id,omitempty"`
 	// 磁盘创建时间戳。
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// 磁盘最后更新时间戳。
 	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// 核心关联字段：文件系统全局状态与统计元数据（对齐 Linux statvfs）。
-	Statfs        *Statfs `protobuf:"bytes,11,opt,name=statfs,proto3" json:"statfs,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Statfs *Statfs `protobuf:"bytes,11,opt,name=statfs,proto3" json:"statfs,omitempty"`
+	// 当前并发以只读模式挂载的客户端/节点唯一标识 ID 列表。
+	ReaderClientIds []string `protobuf:"bytes,12,rep,name=reader_client_ids,json=readerClientIds,proto3" json:"reader_client_ids,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Disk) Reset() {
@@ -196,9 +195,9 @@ func (x *Disk) GetStatus() DiskStatus {
 	return DiskStatus_DISK_STATUS_UNSPECIFIED
 }
 
-func (x *Disk) GetAttachedClientId() string {
+func (x *Disk) GetWriterClientId() string {
 	if x != nil {
-		return x.AttachedClientId
+		return x.WriterClientId
 	}
 	return ""
 }
@@ -224,11 +223,889 @@ func (x *Disk) GetStatfs() *Statfs {
 	return nil
 }
 
+func (x *Disk) GetReaderClientIds() []string {
+	if x != nil {
+		return x.ReaderClientIds
+	}
+	return nil
+}
+
+// CreateDiskRequest 表示创建虚拟磁盘的请求参数模型。
+type CreateDiskRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 磁盘易读名称。
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// 磁盘分配的总存储容量上限（字节数）。
+	CapacityBytes uint64 `protobuf:"varint,2,opt,name=capacity_bytes,json=capacityBytes,proto3" json:"capacity_bytes,omitempty"`
+	// 磁盘 Inode 节点配额上限（0 表示无限制）。
+	InodesQuota   uint64 `protobuf:"varint,3,opt,name=inodes_quota,json=inodesQuota,proto3" json:"inodes_quota,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateDiskRequest) Reset() {
+	*x = CreateDiskRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateDiskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateDiskRequest) ProtoMessage() {}
+
+func (x *CreateDiskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateDiskRequest.ProtoReflect.Descriptor instead.
+func (*CreateDiskRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *CreateDiskRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CreateDiskRequest) GetCapacityBytes() uint64 {
+	if x != nil {
+		return x.CapacityBytes
+	}
+	return 0
+}
+
+func (x *CreateDiskRequest) GetInodesQuota() uint64 {
+	if x != nil {
+		return x.InodesQuota
+	}
+	return 0
+}
+
+// CreateDiskResponse 表示创建虚拟磁盘的响应结果。
+type CreateDiskResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 创建成功的虚拟磁盘实体。
+	Disk          *Disk `protobuf:"bytes,1,opt,name=disk,proto3" json:"disk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateDiskResponse) Reset() {
+	*x = CreateDiskResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateDiskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateDiskResponse) ProtoMessage() {}
+
+func (x *CreateDiskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateDiskResponse.ProtoReflect.Descriptor instead.
+func (*CreateDiskResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CreateDiskResponse) GetDisk() *Disk {
+	if x != nil {
+		return x.Disk
+	}
+	return nil
+}
+
+// GetDiskRequest 表示获取虚拟磁盘详情的请求参数模型。
+type GetDiskRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标虚拟磁盘全局唯一标识 ID。
+	DiskId        string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDiskRequest) Reset() {
+	*x = GetDiskRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDiskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDiskRequest) ProtoMessage() {}
+
+func (x *GetDiskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDiskRequest.ProtoReflect.Descriptor instead.
+func (*GetDiskRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *GetDiskRequest) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+// GetDiskResponse 表示获取虚拟磁盘详情的响应结果。
+type GetDiskResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 查询到的虚拟磁盘实体。
+	Disk          *Disk `protobuf:"bytes,1,opt,name=disk,proto3" json:"disk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDiskResponse) Reset() {
+	*x = GetDiskResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDiskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDiskResponse) ProtoMessage() {}
+
+func (x *GetDiskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDiskResponse.ProtoReflect.Descriptor instead.
+func (*GetDiskResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *GetDiskResponse) GetDisk() *Disk {
+	if x != nil {
+		return x.Disk
+	}
+	return nil
+}
+
+// UpdateDiskRequest 表示更新虚拟磁盘配置的请求参数模型。
+type UpdateDiskRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 待更新的虚拟磁盘全局唯一标识 ID。
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 更新后的磁盘易读名称。
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// 更新后的存储容量上限（字节数）。
+	CapacityBytes uint64 `protobuf:"varint,3,opt,name=capacity_bytes,json=capacityBytes,proto3" json:"capacity_bytes,omitempty"`
+	// 更新后的 Inode 节点配额上限（0 表示无限制）。
+	InodesQuota uint64 `protobuf:"varint,4,opt,name=inodes_quota,json=inodesQuota,proto3" json:"inodes_quota,omitempty"`
+	// 可选的字段更新掩码，用于支持局部属性更新。
+	FieldMask     *fieldmaskpb.FieldMask `protobuf:"bytes,5,opt,name=field_mask,json=fieldMask,proto3" json:"field_mask,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateDiskRequest) Reset() {
+	*x = UpdateDiskRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateDiskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateDiskRequest) ProtoMessage() {}
+
+func (x *UpdateDiskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateDiskRequest.ProtoReflect.Descriptor instead.
+func (*UpdateDiskRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *UpdateDiskRequest) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+func (x *UpdateDiskRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *UpdateDiskRequest) GetCapacityBytes() uint64 {
+	if x != nil {
+		return x.CapacityBytes
+	}
+	return 0
+}
+
+func (x *UpdateDiskRequest) GetInodesQuota() uint64 {
+	if x != nil {
+		return x.InodesQuota
+	}
+	return 0
+}
+
+func (x *UpdateDiskRequest) GetFieldMask() *fieldmaskpb.FieldMask {
+	if x != nil {
+		return x.FieldMask
+	}
+	return nil
+}
+
+// UpdateDiskResponse 表示更新虚拟磁盘配置的响应结果。
+type UpdateDiskResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 更新后的虚拟磁盘实体。
+	Disk          *Disk `protobuf:"bytes,1,opt,name=disk,proto3" json:"disk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateDiskResponse) Reset() {
+	*x = UpdateDiskResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateDiskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateDiskResponse) ProtoMessage() {}
+
+func (x *UpdateDiskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateDiskResponse.ProtoReflect.Descriptor instead.
+func (*UpdateDiskResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *UpdateDiskResponse) GetDisk() *Disk {
+	if x != nil {
+		return x.Disk
+	}
+	return nil
+}
+
+// DeleteDiskRequest 表示删除虚拟磁盘的请求参数模型。
+type DeleteDiskRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 待删除的虚拟磁盘全局唯一标识 ID。
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 是否强制删除（即使磁盘处于挂载状态或存在未同步数据）。
+	Force         bool `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDiskRequest) Reset() {
+	*x = DeleteDiskRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDiskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDiskRequest) ProtoMessage() {}
+
+func (x *DeleteDiskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDiskRequest.ProtoReflect.Descriptor instead.
+func (*DeleteDiskRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *DeleteDiskRequest) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+func (x *DeleteDiskRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
+// DeleteDiskResponse 表示删除虚拟磁盘的响应结果。
+type DeleteDiskResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteDiskResponse) Reset() {
+	*x = DeleteDiskResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteDiskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteDiskResponse) ProtoMessage() {}
+
+func (x *DeleteDiskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteDiskResponse.ProtoReflect.Descriptor instead.
+func (*DeleteDiskResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{8}
+}
+
+// ListDisksRequest 表示分页查询虚拟磁盘列表的请求参数模型。
+type ListDisksRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 单页返回的最大磁盘条目数（默认或 0 时由服务端采用默认分页大小）。
+	PageSize int32 `protobuf:"varint,1,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// 分页游标 Token（首次查询传空，后续传入上一页响应返回的 next_page_token）。
+	PageToken string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	// 可选的生命周期状态筛选条件（未指定 DISK_STATUS_UNSPECIFIED 时不过滤）。
+	FilterStatus  DiskStatus `protobuf:"varint,3,opt,name=filter_status,json=filterStatus,proto3,enum=iso.v1.DiskStatus" json:"filter_status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListDisksRequest) Reset() {
+	*x = ListDisksRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDisksRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDisksRequest) ProtoMessage() {}
+
+func (x *ListDisksRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDisksRequest.ProtoReflect.Descriptor instead.
+func (*ListDisksRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ListDisksRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListDisksRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+func (x *ListDisksRequest) GetFilterStatus() DiskStatus {
+	if x != nil {
+		return x.FilterStatus
+	}
+	return DiskStatus_DISK_STATUS_UNSPECIFIED
+}
+
+// ListDisksResponse 表示分页查询虚拟磁盘列表的响应结果。
+type ListDisksResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 虚拟磁盘实体列表。
+	Disks []*Disk `protobuf:"bytes,1,rep,name=disks,proto3" json:"disks,omitempty"`
+	// 下一页分页游标 Token（为空表示无更多后续数据）。
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	// 匹配筛选条件的总磁盘数量。
+	TotalCount    int64 `protobuf:"varint,3,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListDisksResponse) Reset() {
+	*x = ListDisksResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDisksResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDisksResponse) ProtoMessage() {}
+
+func (x *ListDisksResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDisksResponse.ProtoReflect.Descriptor instead.
+func (*ListDisksResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ListDisksResponse) GetDisks() []*Disk {
+	if x != nil {
+		return x.Disks
+	}
+	return nil
+}
+
+func (x *ListDisksResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+func (x *ListDisksResponse) GetTotalCount() int64 {
+	if x != nil {
+		return x.TotalCount
+	}
+	return 0
+}
+
+// AttachDiskRequest 表示挂载虚拟磁盘至客户端的请求参数模型。
+type AttachDiskRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标虚拟磁盘全局唯一标识 ID。
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 发起挂载的客户端/宿主机唯一标识 ID。
+	ClientId string `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	// 是否以只读模式挂载（在 ISO Storage OWMR 一写多读模型中，允许多个客户端以只读模式挂载，写模式仅允许单一排他客户端）。
+	ReadOnly      bool `protobuf:"varint,3,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttachDiskRequest) Reset() {
+	*x = AttachDiskRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttachDiskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttachDiskRequest) ProtoMessage() {}
+
+func (x *AttachDiskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttachDiskRequest.ProtoReflect.Descriptor instead.
+func (*AttachDiskRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AttachDiskRequest) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+func (x *AttachDiskRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *AttachDiskRequest) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
+}
+
+// AttachDiskResponse 表示挂载虚拟磁盘至客户端的响应结果。
+type AttachDiskResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 挂载后的虚拟磁盘实体状态。
+	Disk          *Disk `protobuf:"bytes,1,opt,name=disk,proto3" json:"disk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttachDiskResponse) Reset() {
+	*x = AttachDiskResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttachDiskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttachDiskResponse) ProtoMessage() {}
+
+func (x *AttachDiskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttachDiskResponse.ProtoReflect.Descriptor instead.
+func (*AttachDiskResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *AttachDiskResponse) GetDisk() *Disk {
+	if x != nil {
+		return x.Disk
+	}
+	return nil
+}
+
+// DetachDiskRequest 表示从客户端卸载分离虚拟磁盘的请求参数模型。
+type DetachDiskRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标虚拟磁盘全局唯一标识 ID。
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 发起卸载分离的客户端/宿主机唯一标识 ID。
+	ClientId string `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	// 是否强制分离（忽略客户端未刷新缓存或在途 I/O，立即释放租约）。
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DetachDiskRequest) Reset() {
+	*x = DetachDiskRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DetachDiskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DetachDiskRequest) ProtoMessage() {}
+
+func (x *DetachDiskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DetachDiskRequest.ProtoReflect.Descriptor instead.
+func (*DetachDiskRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DetachDiskRequest) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+func (x *DetachDiskRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *DetachDiskRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
+// DetachDiskResponse 表示从客户端卸载分离虚拟磁盘的响应结果。
+type DetachDiskResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 卸载分离后的虚拟磁盘实体状态。
+	Disk          *Disk `protobuf:"bytes,1,opt,name=disk,proto3" json:"disk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DetachDiskResponse) Reset() {
+	*x = DetachDiskResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DetachDiskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DetachDiskResponse) ProtoMessage() {}
+
+func (x *DetachDiskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DetachDiskResponse.ProtoReflect.Descriptor instead.
+func (*DetachDiskResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *DetachDiskResponse) GetDisk() *Disk {
+	if x != nil {
+		return x.Disk
+	}
+	return nil
+}
+
+// GetDiskStatfsRequest 表示获取虚拟磁盘文件系统统计信息的请求参数模型。
+type GetDiskStatfsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标虚拟磁盘全局唯一标识 ID。
+	DiskId        string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDiskStatfsRequest) Reset() {
+	*x = GetDiskStatfsRequest{}
+	mi := &file_iso_v1_disk_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDiskStatfsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDiskStatfsRequest) ProtoMessage() {}
+
+func (x *GetDiskStatfsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDiskStatfsRequest.ProtoReflect.Descriptor instead.
+func (*GetDiskStatfsRequest) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GetDiskStatfsRequest) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+// GetDiskStatfsResponse 表示获取虚拟磁盘文件系统统计信息的响应结果。
+type GetDiskStatfsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标虚拟磁盘全局唯一标识 ID。
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 文件系统全局状态与统计元数据（对齐 Linux statvfs）。
+	Statfs        *Statfs `protobuf:"bytes,2,opt,name=statfs,proto3" json:"statfs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDiskStatfsResponse) Reset() {
+	*x = GetDiskStatfsResponse{}
+	mi := &file_iso_v1_disk_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDiskStatfsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDiskStatfsResponse) ProtoMessage() {}
+
+func (x *GetDiskStatfsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_iso_v1_disk_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDiskStatfsResponse.ProtoReflect.Descriptor instead.
+func (*GetDiskStatfsResponse) Descriptor() ([]byte, []int) {
+	return file_iso_v1_disk_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetDiskStatfsResponse) GetDiskId() string {
+	if x != nil {
+		return x.DiskId
+	}
+	return ""
+}
+
+func (x *GetDiskStatfsResponse) GetStatfs() *Statfs {
+	if x != nil {
+		return x.Statfs
+	}
+	return nil
+}
+
 var File_iso_v1_disk_proto protoreflect.FileDescriptor
 
 const file_iso_v1_disk_proto_rawDesc = "" +
 	"\n" +
-	"\x11iso/v1/disk.proto\x12\x06iso.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x11iso/v1/fuse.proto\"\xb5\x03\n" +
+	"\x11iso/v1/disk.proto\x12\x06iso.v1\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14iso/v1/storage.proto\"\xdd\x03\n" +
 	"\x04Disk\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
@@ -238,22 +1115,86 @@ const file_iso_v1_disk_proto_rawDesc = "" +
 	"\finodes_quota\x18\x05 \x01(\x04R\vinodesQuota\x12\x1f\n" +
 	"\vinodes_used\x18\x06 \x01(\x04R\n" +
 	"inodesUsed\x12*\n" +
-	"\x06status\x18\a \x01(\x0e2\x12.iso.v1.DiskStatusR\x06status\x12,\n" +
-	"\x12attached_client_id\x18\b \x01(\tR\x10attachedClientId\x129\n" +
+	"\x06status\x18\a \x01(\x0e2\x12.iso.v1.DiskStatusR\x06status\x12(\n" +
+	"\x10writer_client_id\x18\b \x01(\tR\x0ewriterClientId\x129\n" +
 	"\n" +
 	"created_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12&\n" +
-	"\x06statfs\x18\v \x01(\v2\x0e.iso.v1.StatfsR\x06statfs*\xa5\x01\n" +
+	"\x06statfs\x18\v \x01(\v2\x0e.iso.v1.StatfsR\x06statfs\x12*\n" +
+	"\x11reader_client_ids\x18\f \x03(\tR\x0freaderClientIds\"q\n" +
+	"\x11CreateDiskRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12%\n" +
+	"\x0ecapacity_bytes\x18\x02 \x01(\x04R\rcapacityBytes\x12!\n" +
+	"\finodes_quota\x18\x03 \x01(\x04R\vinodesQuota\"6\n" +
+	"\x12CreateDiskResponse\x12 \n" +
+	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\")\n" +
+	"\x0eGetDiskRequest\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\"3\n" +
+	"\x0fGetDiskResponse\x12 \n" +
+	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"\xc5\x01\n" +
+	"\x11UpdateDiskRequest\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
+	"\x0ecapacity_bytes\x18\x03 \x01(\x04R\rcapacityBytes\x12!\n" +
+	"\finodes_quota\x18\x04 \x01(\x04R\vinodesQuota\x129\n" +
+	"\n" +
+	"field_mask\x18\x05 \x01(\v2\x1a.google.protobuf.FieldMaskR\tfieldMask\"6\n" +
+	"\x12UpdateDiskResponse\x12 \n" +
+	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"B\n" +
+	"\x11DeleteDiskRequest\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x14\n" +
+	"\x05force\x18\x02 \x01(\bR\x05force\"\x14\n" +
+	"\x12DeleteDiskResponse\"\x87\x01\n" +
+	"\x10ListDisksRequest\x12\x1b\n" +
+	"\tpage_size\x18\x01 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x02 \x01(\tR\tpageToken\x127\n" +
+	"\rfilter_status\x18\x03 \x01(\x0e2\x12.iso.v1.DiskStatusR\ffilterStatus\"\x80\x01\n" +
+	"\x11ListDisksResponse\x12\"\n" +
+	"\x05disks\x18\x01 \x03(\v2\f.iso.v1.DiskR\x05disks\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1f\n" +
+	"\vtotal_count\x18\x03 \x01(\x03R\n" +
+	"totalCount\"f\n" +
+	"\x11AttachDiskRequest\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x1b\n" +
+	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x1b\n" +
+	"\tread_only\x18\x03 \x01(\bR\breadOnly\"6\n" +
+	"\x12AttachDiskResponse\x12 \n" +
+	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"_\n" +
+	"\x11DetachDiskRequest\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x1b\n" +
+	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"6\n" +
+	"\x12DetachDiskResponse\x12 \n" +
+	"\x04disk\x18\x01 \x01(\v2\f.iso.v1.DiskR\x04disk\"/\n" +
+	"\x14GetDiskStatfsRequest\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\"X\n" +
+	"\x15GetDiskStatfsResponse\x12\x17\n" +
+	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12&\n" +
+	"\x06statfs\x18\x02 \x01(\v2\x0e.iso.v1.StatfsR\x06statfs*\x8b\x01\n" +
 	"\n" +
 	"DiskStatus\x12\x1b\n" +
 	"\x17DISK_STATUS_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DISK_STATUS_CREATING\x10\x01\x12\x15\n" +
 	"\x11DISK_STATUS_READY\x10\x02\x12\x18\n" +
-	"\x14DISK_STATUS_ATTACHED\x10\x03\x12\x18\n" +
-	"\x14DISK_STATUS_DETACHED\x10\x04\x12\x15\n" +
-	"\x11DISK_STATUS_ERROR\x10\x05B,Z*github.com/starsrc/iso/gen/go/iso/v1;isov1b\x06proto3"
+	"\x14DISK_STATUS_ATTACHED\x10\x03\x12\x15\n" +
+	"\x11DISK_STATUS_ERROR\x10\x042\xb2\x04\n" +
+	"\vDiskService\x12C\n" +
+	"\n" +
+	"CreateDisk\x12\x19.iso.v1.CreateDiskRequest\x1a\x1a.iso.v1.CreateDiskResponse\x12:\n" +
+	"\aGetDisk\x12\x16.iso.v1.GetDiskRequest\x1a\x17.iso.v1.GetDiskResponse\x12C\n" +
+	"\n" +
+	"UpdateDisk\x12\x19.iso.v1.UpdateDiskRequest\x1a\x1a.iso.v1.UpdateDiskResponse\x12C\n" +
+	"\n" +
+	"DeleteDisk\x12\x19.iso.v1.DeleteDiskRequest\x1a\x1a.iso.v1.DeleteDiskResponse\x12@\n" +
+	"\tListDisks\x12\x18.iso.v1.ListDisksRequest\x1a\x19.iso.v1.ListDisksResponse\x12C\n" +
+	"\n" +
+	"AttachDisk\x12\x19.iso.v1.AttachDiskRequest\x1a\x1a.iso.v1.AttachDiskResponse\x12C\n" +
+	"\n" +
+	"DetachDisk\x12\x19.iso.v1.DetachDiskRequest\x1a\x1a.iso.v1.DetachDiskResponse\x12L\n" +
+	"\rGetDiskStatfs\x12\x1c.iso.v1.GetDiskStatfsRequest\x1a\x1d.iso.v1.GetDiskStatfsResponseB,Z*github.com/starsrc/iso/gen/go/iso/v1;isov1b\x06proto3"
 
 var (
 	file_iso_v1_disk_proto_rawDescOnce sync.Once
@@ -268,23 +1209,65 @@ func file_iso_v1_disk_proto_rawDescGZIP() []byte {
 }
 
 var file_iso_v1_disk_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_iso_v1_disk_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_iso_v1_disk_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_iso_v1_disk_proto_goTypes = []any{
 	(DiskStatus)(0),               // 0: iso.v1.DiskStatus
 	(*Disk)(nil),                  // 1: iso.v1.Disk
-	(*timestamppb.Timestamp)(nil), // 2: google.protobuf.Timestamp
-	(*Statfs)(nil),                // 3: iso.v1.Statfs
+	(*CreateDiskRequest)(nil),     // 2: iso.v1.CreateDiskRequest
+	(*CreateDiskResponse)(nil),    // 3: iso.v1.CreateDiskResponse
+	(*GetDiskRequest)(nil),        // 4: iso.v1.GetDiskRequest
+	(*GetDiskResponse)(nil),       // 5: iso.v1.GetDiskResponse
+	(*UpdateDiskRequest)(nil),     // 6: iso.v1.UpdateDiskRequest
+	(*UpdateDiskResponse)(nil),    // 7: iso.v1.UpdateDiskResponse
+	(*DeleteDiskRequest)(nil),     // 8: iso.v1.DeleteDiskRequest
+	(*DeleteDiskResponse)(nil),    // 9: iso.v1.DeleteDiskResponse
+	(*ListDisksRequest)(nil),      // 10: iso.v1.ListDisksRequest
+	(*ListDisksResponse)(nil),     // 11: iso.v1.ListDisksResponse
+	(*AttachDiskRequest)(nil),     // 12: iso.v1.AttachDiskRequest
+	(*AttachDiskResponse)(nil),    // 13: iso.v1.AttachDiskResponse
+	(*DetachDiskRequest)(nil),     // 14: iso.v1.DetachDiskRequest
+	(*DetachDiskResponse)(nil),    // 15: iso.v1.DetachDiskResponse
+	(*GetDiskStatfsRequest)(nil),  // 16: iso.v1.GetDiskStatfsRequest
+	(*GetDiskStatfsResponse)(nil), // 17: iso.v1.GetDiskStatfsResponse
+	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
+	(*Statfs)(nil),                // 19: iso.v1.Statfs
+	(*fieldmaskpb.FieldMask)(nil), // 20: google.protobuf.FieldMask
 }
 var file_iso_v1_disk_proto_depIdxs = []int32{
-	0, // 0: iso.v1.Disk.status:type_name -> iso.v1.DiskStatus
-	2, // 1: iso.v1.Disk.created_at:type_name -> google.protobuf.Timestamp
-	2, // 2: iso.v1.Disk.updated_at:type_name -> google.protobuf.Timestamp
-	3, // 3: iso.v1.Disk.statfs:type_name -> iso.v1.Statfs
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: iso.v1.Disk.status:type_name -> iso.v1.DiskStatus
+	18, // 1: iso.v1.Disk.created_at:type_name -> google.protobuf.Timestamp
+	18, // 2: iso.v1.Disk.updated_at:type_name -> google.protobuf.Timestamp
+	19, // 3: iso.v1.Disk.statfs:type_name -> iso.v1.Statfs
+	1,  // 4: iso.v1.CreateDiskResponse.disk:type_name -> iso.v1.Disk
+	1,  // 5: iso.v1.GetDiskResponse.disk:type_name -> iso.v1.Disk
+	20, // 6: iso.v1.UpdateDiskRequest.field_mask:type_name -> google.protobuf.FieldMask
+	1,  // 7: iso.v1.UpdateDiskResponse.disk:type_name -> iso.v1.Disk
+	0,  // 8: iso.v1.ListDisksRequest.filter_status:type_name -> iso.v1.DiskStatus
+	1,  // 9: iso.v1.ListDisksResponse.disks:type_name -> iso.v1.Disk
+	1,  // 10: iso.v1.AttachDiskResponse.disk:type_name -> iso.v1.Disk
+	1,  // 11: iso.v1.DetachDiskResponse.disk:type_name -> iso.v1.Disk
+	19, // 12: iso.v1.GetDiskStatfsResponse.statfs:type_name -> iso.v1.Statfs
+	2,  // 13: iso.v1.DiskService.CreateDisk:input_type -> iso.v1.CreateDiskRequest
+	4,  // 14: iso.v1.DiskService.GetDisk:input_type -> iso.v1.GetDiskRequest
+	6,  // 15: iso.v1.DiskService.UpdateDisk:input_type -> iso.v1.UpdateDiskRequest
+	8,  // 16: iso.v1.DiskService.DeleteDisk:input_type -> iso.v1.DeleteDiskRequest
+	10, // 17: iso.v1.DiskService.ListDisks:input_type -> iso.v1.ListDisksRequest
+	12, // 18: iso.v1.DiskService.AttachDisk:input_type -> iso.v1.AttachDiskRequest
+	14, // 19: iso.v1.DiskService.DetachDisk:input_type -> iso.v1.DetachDiskRequest
+	16, // 20: iso.v1.DiskService.GetDiskStatfs:input_type -> iso.v1.GetDiskStatfsRequest
+	3,  // 21: iso.v1.DiskService.CreateDisk:output_type -> iso.v1.CreateDiskResponse
+	5,  // 22: iso.v1.DiskService.GetDisk:output_type -> iso.v1.GetDiskResponse
+	7,  // 23: iso.v1.DiskService.UpdateDisk:output_type -> iso.v1.UpdateDiskResponse
+	9,  // 24: iso.v1.DiskService.DeleteDisk:output_type -> iso.v1.DeleteDiskResponse
+	11, // 25: iso.v1.DiskService.ListDisks:output_type -> iso.v1.ListDisksResponse
+	13, // 26: iso.v1.DiskService.AttachDisk:output_type -> iso.v1.AttachDiskResponse
+	15, // 27: iso.v1.DiskService.DetachDisk:output_type -> iso.v1.DetachDiskResponse
+	17, // 28: iso.v1.DiskService.GetDiskStatfs:output_type -> iso.v1.GetDiskStatfsResponse
+	21, // [21:29] is the sub-list for method output_type
+	13, // [13:21] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_iso_v1_disk_proto_init() }
@@ -292,16 +1275,16 @@ func file_iso_v1_disk_proto_init() {
 	if File_iso_v1_disk_proto != nil {
 		return
 	}
-	file_iso_v1_fuse_proto_init()
+	file_iso_v1_storage_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_iso_v1_disk_proto_rawDesc), len(file_iso_v1_disk_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   1,
+			NumMessages:   17,
 			NumExtensions: 0,
-			NumServices:   0,
+			NumServices:   1,
 		},
 		GoTypes:           file_iso_v1_disk_proto_goTypes,
 		DependencyIndexes: file_iso_v1_disk_proto_depIdxs,

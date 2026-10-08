@@ -2,8 +2,9 @@ syntax = "proto3";
 
 package iso.v1;
 
+import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
-import "iso/v1/fuse.proto";
+import "iso/v1/storage.proto";
 
 option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
 
@@ -21,11 +22,8 @@ enum DiskStatus {
   // 磁盘已挂载至客户端（当前处于连接与 I/O 活跃状态）。
   DISK_STATUS_ATTACHED = 3;
 
-  // 磁盘已从客户端正常卸载分离。
-  DISK_STATUS_DETACHED = 4;
-
   // 磁盘处于异常或故障状态。
-  DISK_STATUS_ERROR = 5;
+  DISK_STATUS_ERROR = 4;
 }
 
 // Disk 代表面向租户与用户的顶层虚拟磁盘业务实体。
@@ -52,8 +50,8 @@ message Disk {
   // 磁盘当前的生命周期状态。
   DiskStatus status = 7;
 
-  // 当前挂载持有该磁盘的客户端/宿主机唯一标识 ID（未挂载时为空）。
-  string attached_client_id = 8;
+  // 当前持有排他写租约的客户端/节点唯一标识 ID（未挂载写者时为空）。
+  string writer_client_id = 8;
 
   // 磁盘创建时间戳。
   google.protobuf.Timestamp created_at = 9;
@@ -63,4 +61,176 @@ message Disk {
 
   // 核心关联字段：文件系统全局状态与统计元数据（对齐 Linux statvfs）。
   iso.v1.Statfs statfs = 11;
+
+  // 当前并发以只读模式挂载的客户端/节点唯一标识 ID 列表。
+  repeated string reader_client_ids = 12;
+}
+
+// DiskService 定义 ISO Storage 控制面与商业化虚拟磁盘生命周期管理 RPC 服务接口。
+// 提供面向租户的虚拟磁盘全生命周期管理（增删改查）、挂载与分离控制以及文件系统用量统计查询。
+service DiskService {
+  // 创建新的虚拟磁盘实体。
+  rpc CreateDisk(CreateDiskRequest) returns (CreateDiskResponse);
+
+  // 根据唯一标识获取虚拟磁盘详情。
+  rpc GetDisk(GetDiskRequest) returns (GetDiskResponse);
+
+  // 更新指定虚拟磁盘的配置属性（如名称、容量配额、Inode 配额）。
+  rpc UpdateDisk(UpdateDiskRequest) returns (UpdateDiskResponse);
+
+  // 删除指定的虚拟磁盘。
+  rpc DeleteDisk(DeleteDiskRequest) returns (DeleteDiskResponse);
+
+  // 分页列出虚拟磁盘，支持按生命周期状态筛选。
+  rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
+
+  // 将虚拟磁盘挂载关联至指定的客户端（支持一写多读模式）。
+  rpc AttachDisk(AttachDiskRequest) returns (AttachDiskResponse);
+
+  // 将虚拟磁盘从指定的客户端分离卸载。
+  rpc DetachDisk(DetachDiskRequest) returns (DetachDiskResponse);
+
+  // 获取指定虚拟磁盘的文件系统统计与配额用量信息。
+  rpc GetDiskStatfs(GetDiskStatfsRequest) returns (GetDiskStatfsResponse);
+}
+
+// CreateDiskRequest 表示创建虚拟磁盘的请求参数模型。
+message CreateDiskRequest {
+  // 磁盘易读名称。
+  string name = 1;
+
+  // 磁盘分配的总存储容量上限（字节数）。
+  uint64 capacity_bytes = 2;
+
+  // 磁盘 Inode 节点配额上限（0 表示无限制）。
+  uint64 inodes_quota = 3;
+}
+
+// CreateDiskResponse 表示创建虚拟磁盘的响应结果。
+message CreateDiskResponse {
+  // 创建成功的虚拟磁盘实体。
+  Disk disk = 1;
+}
+
+// GetDiskRequest 表示获取虚拟磁盘详情的请求参数模型。
+message GetDiskRequest {
+  // 目标虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+}
+
+// GetDiskResponse 表示获取虚拟磁盘详情的响应结果。
+message GetDiskResponse {
+  // 查询到的虚拟磁盘实体。
+  Disk disk = 1;
+}
+
+// UpdateDiskRequest 表示更新虚拟磁盘配置的请求参数模型。
+message UpdateDiskRequest {
+  // 待更新的虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+
+  // 更新后的磁盘易读名称。
+  string name = 2;
+
+  // 更新后的存储容量上限（字节数）。
+  uint64 capacity_bytes = 3;
+
+  // 更新后的 Inode 节点配额上限（0 表示无限制）。
+  uint64 inodes_quota = 4;
+
+  // 可选的字段更新掩码，用于支持局部属性更新。
+  google.protobuf.FieldMask field_mask = 5;
+}
+
+// UpdateDiskResponse 表示更新虚拟磁盘配置的响应结果。
+message UpdateDiskResponse {
+  // 更新后的虚拟磁盘实体。
+  Disk disk = 1;
+}
+
+// DeleteDiskRequest 表示删除虚拟磁盘的请求参数模型。
+message DeleteDiskRequest {
+  // 待删除的虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+
+  // 是否强制删除（即使磁盘处于挂载状态或存在未同步数据）。
+  bool force = 2;
+}
+
+// DeleteDiskResponse 表示删除虚拟磁盘的响应结果。
+message DeleteDiskResponse {}
+
+// ListDisksRequest 表示分页查询虚拟磁盘列表的请求参数模型。
+message ListDisksRequest {
+  // 单页返回的最大磁盘条目数（默认或 0 时由服务端采用默认分页大小）。
+  int32 page_size = 1;
+
+  // 分页游标 Token（首次查询传空，后续传入上一页响应返回的 next_page_token）。
+  string page_token = 2;
+
+  // 可选的生命周期状态筛选条件（未指定 DISK_STATUS_UNSPECIFIED 时不过滤）。
+  DiskStatus filter_status = 3;
+}
+
+// ListDisksResponse 表示分页查询虚拟磁盘列表的响应结果。
+message ListDisksResponse {
+  // 虚拟磁盘实体列表。
+  repeated Disk disks = 1;
+
+  // 下一页分页游标 Token（为空表示无更多后续数据）。
+  string next_page_token = 2;
+
+  // 匹配筛选条件的总磁盘数量。
+  int64 total_count = 3;
+}
+
+// AttachDiskRequest 表示挂载虚拟磁盘至客户端的请求参数模型。
+message AttachDiskRequest {
+  // 目标虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+
+  // 发起挂载的客户端/宿主机唯一标识 ID。
+  string client_id = 2;
+
+  // 是否以只读模式挂载（在 ISO Storage OWMR 一写多读模型中，允许多个客户端以只读模式挂载，写模式仅允许单一排他客户端）。
+  bool read_only = 3;
+}
+
+// AttachDiskResponse 表示挂载虚拟磁盘至客户端的响应结果。
+message AttachDiskResponse {
+  // 挂载后的虚拟磁盘实体状态。
+  Disk disk = 1;
+}
+
+// DetachDiskRequest 表示从客户端卸载分离虚拟磁盘的请求参数模型。
+message DetachDiskRequest {
+  // 目标虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+
+  // 发起卸载分离的客户端/宿主机唯一标识 ID。
+  string client_id = 2;
+
+  // 是否强制分离（忽略客户端未刷新缓存或在途 I/O，立即释放租约）。
+  bool force = 3;
+}
+
+// DetachDiskResponse 表示从客户端卸载分离虚拟磁盘的响应结果。
+message DetachDiskResponse {
+  // 卸载分离后的虚拟磁盘实体状态。
+  Disk disk = 1;
+}
+
+// GetDiskStatfsRequest 表示获取虚拟磁盘文件系统统计信息的请求参数模型。
+message GetDiskStatfsRequest {
+  // 目标虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+}
+
+// GetDiskStatfsResponse 表示获取虚拟磁盘文件系统统计信息的响应结果。
+message GetDiskStatfsResponse {
+  // 目标虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+
+  // 文件系统全局状态与统计元数据（对齐 Linux statvfs）。
+  Statfs statfs = 2;
 }

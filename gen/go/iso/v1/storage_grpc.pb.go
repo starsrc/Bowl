@@ -7,7 +7,10 @@
 package isov1
 
 import (
+	context "context"
 	grpc "google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
+	status "google.golang.org/grpc/status"
 )
 
 // This is a compile-time assertion to ensure that this generated file
@@ -15,13 +18,144 @@ import (
 // Requires gRPC-Go v1.64.0 or later.
 const _ = grpc.SupportPackageIsVersion9
 
+const (
+	StorageService_Mount_FullMethodName         = "/iso.v1.StorageService/Mount"
+	StorageService_Unmount_FullMethodName       = "/iso.v1.StorageService/Unmount"
+	StorageService_KeepAlive_FullMethodName     = "/iso.v1.StorageService/KeepAlive"
+	StorageService_Lookup_FullMethodName        = "/iso.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName       = "/iso.v1.StorageService/GetAttr"
+	StorageService_SetAttr_FullMethodName       = "/iso.v1.StorageService/SetAttr"
+	StorageService_Access_FullMethodName        = "/iso.v1.StorageService/Access"
+	StorageService_Statfs_FullMethodName        = "/iso.v1.StorageService/Statfs"
+	StorageService_Forget_FullMethodName        = "/iso.v1.StorageService/Forget"
+	StorageService_BatchForget_FullMethodName   = "/iso.v1.StorageService/BatchForget"
+	StorageService_Create_FullMethodName        = "/iso.v1.StorageService/Create"
+	StorageService_Mknod_FullMethodName         = "/iso.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName         = "/iso.v1.StorageService/Mkdir"
+	StorageService_Rmdir_FullMethodName         = "/iso.v1.StorageService/Rmdir"
+	StorageService_Unlink_FullMethodName        = "/iso.v1.StorageService/Unlink"
+	StorageService_Link_FullMethodName          = "/iso.v1.StorageService/Link"
+	StorageService_Symlink_FullMethodName       = "/iso.v1.StorageService/Symlink"
+	StorageService_Readlink_FullMethodName      = "/iso.v1.StorageService/Readlink"
+	StorageService_Rename_FullMethodName        = "/iso.v1.StorageService/Rename"
+	StorageService_OpenDir_FullMethodName       = "/iso.v1.StorageService/OpenDir"
+	StorageService_ReadDir_FullMethodName       = "/iso.v1.StorageService/ReadDir"
+	StorageService_ReadDirPlus_FullMethodName   = "/iso.v1.StorageService/ReadDirPlus"
+	StorageService_ReleaseDir_FullMethodName    = "/iso.v1.StorageService/ReleaseDir"
+	StorageService_FsyncDir_FullMethodName      = "/iso.v1.StorageService/FsyncDir"
+	StorageService_Open_FullMethodName          = "/iso.v1.StorageService/Open"
+	StorageService_Read_FullMethodName          = "/iso.v1.StorageService/Read"
+	StorageService_Write_FullMethodName         = "/iso.v1.StorageService/Write"
+	StorageService_Flush_FullMethodName         = "/iso.v1.StorageService/Flush"
+	StorageService_Release_FullMethodName       = "/iso.v1.StorageService/Release"
+	StorageService_Fsync_FullMethodName         = "/iso.v1.StorageService/Fsync"
+	StorageService_Fallocate_FullMethodName     = "/iso.v1.StorageService/Fallocate"
+	StorageService_CopyFileRange_FullMethodName = "/iso.v1.StorageService/CopyFileRange"
+	StorageService_Lseek_FullMethodName         = "/iso.v1.StorageService/Lseek"
+	StorageService_GetLk_FullMethodName         = "/iso.v1.StorageService/GetLk"
+	StorageService_SetLk_FullMethodName         = "/iso.v1.StorageService/SetLk"
+	StorageService_SetLkw_FullMethodName        = "/iso.v1.StorageService/SetLkw"
+	StorageService_Flock_FullMethodName         = "/iso.v1.StorageService/Flock"
+	StorageService_GetXAttr_FullMethodName      = "/iso.v1.StorageService/GetXAttr"
+	StorageService_SetXAttr_FullMethodName      = "/iso.v1.StorageService/SetXAttr"
+	StorageService_ListXAttr_FullMethodName     = "/iso.v1.StorageService/ListXAttr"
+	StorageService_RemoveXAttr_FullMethodName   = "/iso.v1.StorageService/RemoveXAttr"
+)
+
 // StorageServiceClient is the client API for StorageService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// StorageService 定义 ISO Storage 的核心存储 RPC 服务接口。
-// 负责处理客户端文件系统操作、元数据与数据流的高效存取。
+// StorageService 定义 ISO Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
+// 承担挂载会话维护、一写多读 (OWMR) 租约协调、FUSE 元数据操作、流式目录项读取、
+// 高性能数据 I/O（瘦客户端直通与冷热分层缓存）、并发锁控制及扩展属性存取职责。
 type StorageServiceClient interface {
+	// 挂载虚拟磁盘并建立客户端会话。
+	// 基于 disk_id 与 client_id 校验权限，签发全局唯一 session_id，
+	// 返回根目录 Inode、Statfs 统计以及只读/写租约标识与有效期。
+	Mount(ctx context.Context, in *MountRequest, opts ...grpc.CallOption) (*MountResponse, error)
+	// 卸载客户端挂载会话。
+	// 注销指定 session_id，主动释放排他性写租约并回收关联的未决资源。
+	Unmount(ctx context.Context, in *UnmountRequest, opts ...grpc.CallOption) (*UnmountResponse, error)
+	// 心跳保活与写租约续期。
+	// 维持会话活跃状态，续期持有中的排他性写租约，并感知服务端的租约撤回/降级通知。
+	KeepAlive(ctx context.Context, in *KeepAliveRequest, opts ...grpc.CallOption) (*KeepAliveResponse, error)
+	// 在指定目录下按名称查找子条目（对应 FUSE_LOOKUP）。
+	Lookup(ctx context.Context, in *LookupRequest, opts ...grpc.CallOption) (*LookupResponse, error)
+	// 获取文件或目录的元数据属性（对应 FUSE_GETATTR）。
+	GetAttr(ctx context.Context, in *GetAttrRequest, opts ...grpc.CallOption) (*GetAttrResponse, error)
+	// 修改文件或目录的元数据属性（对应 FUSE_SETATTR）。
+	SetAttr(ctx context.Context, in *SetAttrRequest, opts ...grpc.CallOption) (*SetAttrResponse, error)
+	// 校验调用方对指定节点的访问权限（对应 FUSE_ACCESS）。
+	Access(ctx context.Context, in *AccessRequest, opts ...grpc.CallOption) (*AccessResponse, error)
+	// 获取文件系统全局容量与使用量统计信息（对应 FUSE_STATFS）。
+	Statfs(ctx context.Context, in *StatfsRequest, opts ...grpc.CallOption) (*StatfsResponse, error)
+	// 通知服务端释放单个 Inode 的查找引用计数（对应 FUSE_FORGET）。
+	Forget(ctx context.Context, in *ForgetRequest, opts ...grpc.CallOption) (*ForgetResponse, error)
+	// 批量通知服务端释放多个 Inode 的查找引用计数（对应 FUSE_BATCH_FORGET）。
+	BatchForget(ctx context.Context, in *BatchForgetRequest, opts ...grpc.CallOption) (*BatchForgetResponse, error)
+	// 原子创建并打开普通文件（对应 FUSE_CREATE）。
+	Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error)
+	// 创建特殊设备文件、管道或套接字节点（对应 FUSE_MKNOD）。
+	Mknod(ctx context.Context, in *MknodRequest, opts ...grpc.CallOption) (*MknodResponse, error)
+	// 创建子目录（对应 FUSE_MKDIR）。
+	Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error)
+	// 删除空子目录（对应 FUSE_RMDIR）。
+	Rmdir(ctx context.Context, in *RmdirRequest, opts ...grpc.CallOption) (*RmdirResponse, error)
+	// 删除硬链接或常规文件（对应 FUSE_UNLINK）。
+	Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error)
+	// 创建硬链接（对应 FUSE_LINK）。
+	Link(ctx context.Context, in *LinkRequest, opts ...grpc.CallOption) (*LinkResponse, error)
+	// 创建符号链接（软链接，对应 FUSE_SYMLINK）。
+	Symlink(ctx context.Context, in *SymlinkRequest, opts ...grpc.CallOption) (*SymlinkResponse, error)
+	// 读取符号链接目标路径（对应 FUSE_READLINK）。
+	Readlink(ctx context.Context, in *ReadlinkRequest, opts ...grpc.CallOption) (*ReadlinkResponse, error)
+	// 原子重命名或交换文件/目录（对应 FUSE_RENAME / FUSE_RENAME2）。
+	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error)
+	// 打开目录以准备遍历（对应 FUSE_OPENDIR）。
+	OpenDir(ctx context.Context, in *OpenDirRequest, opts ...grpc.CallOption) (*OpenDirResponse, error)
+	// 流式分批读取目录项内容（对应 FUSE_READDIR）。
+	ReadDir(ctx context.Context, in *ReadDirRequest, opts ...grpc.CallOption) (*ReadDirResponse, error)
+	// 流式分批读取目录项内容并预取 Inode 完整属性（对应 FUSE_READDIRPLUS）。
+	ReadDirPlus(ctx context.Context, in *ReadDirPlusRequest, opts ...grpc.CallOption) (*ReadDirPlusResponse, error)
+	// 关闭并释放打开的目录句柄（对应 FUSE_RELEASEDIR）。
+	ReleaseDir(ctx context.Context, in *ReleaseDirRequest, opts ...grpc.CallOption) (*ReleaseDirResponse, error)
+	// 同步目录内容与元数据至持久存储（对应 FUSE_FSYNCDIR）。
+	FsyncDir(ctx context.Context, in *FsyncDirRequest, opts ...grpc.CallOption) (*FsyncDirResponse, error)
+	// 打开已有文件并分配服务端文件句柄（对应 FUSE_OPEN）。
+	Open(ctx context.Context, in *OpenRequest, opts ...grpc.CallOption) (*OpenResponse, error)
+	// 瘦客户端模式文件数据读取（对应 FUSE_READ）。
+	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error)
+	// 瘦客户端模式文件数据写入（对应 FUSE_WRITE）。
+	Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error)
+	// 文件关闭前刷新脏数据与清理文件锁（对应 FUSE_FLUSH）。
+	Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error)
+	// 关闭并释放打开的文件句柄与相关租约（对应 FUSE_RELEASE）。
+	Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*ReleaseResponse, error)
+	// 强制同步文件数据与元数据至持久存储（对应 FUSE_FSYNC）。
+	Fsync(ctx context.Context, in *FsyncRequest, opts ...grpc.CallOption) (*FsyncResponse, error)
+	// 文件空间预分配、打洞与区间重构（对应 FUSE_FALLOCATE）。
+	Fallocate(ctx context.Context, in *FallocateRequest, opts ...grpc.CallOption) (*FallocateResponse, error)
+	// 跨文件或同文件内的区间秒级元数据克隆（对应 FUSE_COPY_FILE_RANGE）。
+	CopyFileRange(ctx context.Context, in *CopyFileRangeRequest, opts ...grpc.CallOption) (*CopyFileRangeResponse, error)
+	// 探测稀疏文件的数据与空洞区间偏移量（对应 FUSE_LSEEK）。
+	Lseek(ctx context.Context, in *LseekRequest, opts ...grpc.CallOption) (*LseekResponse, error)
+	// 测试查询 POSIX 字节区间记录锁（对应 FUSE_GETLK）。
+	GetLk(ctx context.Context, in *GetLkRequest, opts ...grpc.CallOption) (*GetLkResponse, error)
+	// 非阻塞获取或释放 POSIX 字节区间记录锁（对应 FUSE_SETLK）。
+	SetLk(ctx context.Context, in *SetLkRequest, opts ...grpc.CallOption) (*SetLkResponse, error)
+	// 阻塞等待获取 POSIX 字节区间记录锁（对应 FUSE_SETLKW）。
+	SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error)
+	// 获取或释放 BSD 风格整体文件互斥锁（对应 flock 系统调用）。
+	Flock(ctx context.Context, in *FlockRequest, opts ...grpc.CallOption) (*FlockResponse, error)
+	// 获取指定扩展属性值（对应 FUSE_GETXATTR）。
+	GetXAttr(ctx context.Context, in *GetXAttrRequest, opts ...grpc.CallOption) (*GetXAttrResponse, error)
+	// 设置指定扩展属性键值对（对应 FUSE_SETXATTR）。
+	SetXAttr(ctx context.Context, in *SetXAttrRequest, opts ...grpc.CallOption) (*SetXAttrResponse, error)
+	// 列出指定节点的所有扩展属性键名（对应 FUSE_LISTXATTR）。
+	ListXAttr(ctx context.Context, in *ListXAttrRequest, opts ...grpc.CallOption) (*ListXAttrResponse, error)
+	// 删除指定节点的扩展属性（对应 FUSE_REMOVEXATTR）。
+	RemoveXAttr(ctx context.Context, in *RemoveXAttrRequest, opts ...grpc.CallOption) (*RemoveXAttrResponse, error)
 }
 
 type storageServiceClient struct {
@@ -32,13 +166,510 @@ func NewStorageServiceClient(cc grpc.ClientConnInterface) StorageServiceClient {
 	return &storageServiceClient{cc}
 }
 
+func (c *storageServiceClient) Mount(ctx context.Context, in *MountRequest, opts ...grpc.CallOption) (*MountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MountResponse)
+	err := c.cc.Invoke(ctx, StorageService_Mount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Unmount(ctx context.Context, in *UnmountRequest, opts ...grpc.CallOption) (*UnmountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnmountResponse)
+	err := c.cc.Invoke(ctx, StorageService_Unmount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) KeepAlive(ctx context.Context, in *KeepAliveRequest, opts ...grpc.CallOption) (*KeepAliveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KeepAliveResponse)
+	err := c.cc.Invoke(ctx, StorageService_KeepAlive_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Lookup(ctx context.Context, in *LookupRequest, opts ...grpc.CallOption) (*LookupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LookupResponse)
+	err := c.cc.Invoke(ctx, StorageService_Lookup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) GetAttr(ctx context.Context, in *GetAttrRequest, opts ...grpc.CallOption) (*GetAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetAttr(ctx context.Context, in *SetAttrRequest, opts ...grpc.CallOption) (*SetAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Access(ctx context.Context, in *AccessRequest, opts ...grpc.CallOption) (*AccessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AccessResponse)
+	err := c.cc.Invoke(ctx, StorageService_Access_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Statfs(ctx context.Context, in *StatfsRequest, opts ...grpc.CallOption) (*StatfsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StatfsResponse)
+	err := c.cc.Invoke(ctx, StorageService_Statfs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Forget(ctx context.Context, in *ForgetRequest, opts ...grpc.CallOption) (*ForgetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ForgetResponse)
+	err := c.cc.Invoke(ctx, StorageService_Forget_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) BatchForget(ctx context.Context, in *BatchForgetRequest, opts ...grpc.CallOption) (*BatchForgetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchForgetResponse)
+	err := c.cc.Invoke(ctx, StorageService_BatchForget_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateResponse)
+	err := c.cc.Invoke(ctx, StorageService_Create_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Mknod(ctx context.Context, in *MknodRequest, opts ...grpc.CallOption) (*MknodResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MknodResponse)
+	err := c.cc.Invoke(ctx, StorageService_Mknod_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MkdirResponse)
+	err := c.cc.Invoke(ctx, StorageService_Mkdir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Rmdir(ctx context.Context, in *RmdirRequest, opts ...grpc.CallOption) (*RmdirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RmdirResponse)
+	err := c.cc.Invoke(ctx, StorageService_Rmdir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Unlink(ctx context.Context, in *UnlinkRequest, opts ...grpc.CallOption) (*UnlinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnlinkResponse)
+	err := c.cc.Invoke(ctx, StorageService_Unlink_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Link(ctx context.Context, in *LinkRequest, opts ...grpc.CallOption) (*LinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LinkResponse)
+	err := c.cc.Invoke(ctx, StorageService_Link_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Symlink(ctx context.Context, in *SymlinkRequest, opts ...grpc.CallOption) (*SymlinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SymlinkResponse)
+	err := c.cc.Invoke(ctx, StorageService_Symlink_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Readlink(ctx context.Context, in *ReadlinkRequest, opts ...grpc.CallOption) (*ReadlinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadlinkResponse)
+	err := c.cc.Invoke(ctx, StorageService_Readlink_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenameResponse)
+	err := c.cc.Invoke(ctx, StorageService_Rename_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) OpenDir(ctx context.Context, in *OpenDirRequest, opts ...grpc.CallOption) (*OpenDirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenDirResponse)
+	err := c.cc.Invoke(ctx, StorageService_OpenDir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ReadDir(ctx context.Context, in *ReadDirRequest, opts ...grpc.CallOption) (*ReadDirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadDirResponse)
+	err := c.cc.Invoke(ctx, StorageService_ReadDir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ReadDirPlus(ctx context.Context, in *ReadDirPlusRequest, opts ...grpc.CallOption) (*ReadDirPlusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadDirPlusResponse)
+	err := c.cc.Invoke(ctx, StorageService_ReadDirPlus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ReleaseDir(ctx context.Context, in *ReleaseDirRequest, opts ...grpc.CallOption) (*ReleaseDirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseDirResponse)
+	err := c.cc.Invoke(ctx, StorageService_ReleaseDir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) FsyncDir(ctx context.Context, in *FsyncDirRequest, opts ...grpc.CallOption) (*FsyncDirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FsyncDirResponse)
+	err := c.cc.Invoke(ctx, StorageService_FsyncDir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Open(ctx context.Context, in *OpenRequest, opts ...grpc.CallOption) (*OpenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OpenResponse)
+	err := c.cc.Invoke(ctx, StorageService_Open_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadResponse)
+	err := c.cc.Invoke(ctx, StorageService_Read_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Write(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*WriteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WriteResponse)
+	err := c.cc.Invoke(ctx, StorageService_Write_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FlushResponse)
+	err := c.cc.Invoke(ctx, StorageService_Flush_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*ReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseResponse)
+	err := c.cc.Invoke(ctx, StorageService_Release_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Fsync(ctx context.Context, in *FsyncRequest, opts ...grpc.CallOption) (*FsyncResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FsyncResponse)
+	err := c.cc.Invoke(ctx, StorageService_Fsync_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Fallocate(ctx context.Context, in *FallocateRequest, opts ...grpc.CallOption) (*FallocateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FallocateResponse)
+	err := c.cc.Invoke(ctx, StorageService_Fallocate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) CopyFileRange(ctx context.Context, in *CopyFileRangeRequest, opts ...grpc.CallOption) (*CopyFileRangeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CopyFileRangeResponse)
+	err := c.cc.Invoke(ctx, StorageService_CopyFileRange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Lseek(ctx context.Context, in *LseekRequest, opts ...grpc.CallOption) (*LseekResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LseekResponse)
+	err := c.cc.Invoke(ctx, StorageService_Lseek_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) GetLk(ctx context.Context, in *GetLkRequest, opts ...grpc.CallOption) (*GetLkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetLkResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetLk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetLk(ctx context.Context, in *SetLkRequest, opts ...grpc.CallOption) (*SetLkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetLkResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetLk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetLkwResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetLkw_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Flock(ctx context.Context, in *FlockRequest, opts ...grpc.CallOption) (*FlockResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FlockResponse)
+	err := c.cc.Invoke(ctx, StorageService_Flock_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) GetXAttr(ctx context.Context, in *GetXAttrRequest, opts ...grpc.CallOption) (*GetXAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetXAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetXAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetXAttr(ctx context.Context, in *SetXAttrRequest, opts ...grpc.CallOption) (*SetXAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetXAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetXAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ListXAttr(ctx context.Context, in *ListXAttrRequest, opts ...grpc.CallOption) (*ListXAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListXAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_ListXAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) RemoveXAttr(ctx context.Context, in *RemoveXAttrRequest, opts ...grpc.CallOption) (*RemoveXAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveXAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_RemoveXAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
 //
-// StorageService 定义 ISO Storage 的核心存储 RPC 服务接口。
-// 负责处理客户端文件系统操作、元数据与数据流的高效存取。
+// StorageService 定义 ISO Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
+// 承担挂载会话维护、一写多读 (OWMR) 租约协调、FUSE 元数据操作、流式目录项读取、
+// 高性能数据 I/O（瘦客户端直通与冷热分层缓存）、并发锁控制及扩展属性存取职责。
 type StorageServiceServer interface {
+	// 挂载虚拟磁盘并建立客户端会话。
+	// 基于 disk_id 与 client_id 校验权限，签发全局唯一 session_id，
+	// 返回根目录 Inode、Statfs 统计以及只读/写租约标识与有效期。
+	Mount(context.Context, *MountRequest) (*MountResponse, error)
+	// 卸载客户端挂载会话。
+	// 注销指定 session_id，主动释放排他性写租约并回收关联的未决资源。
+	Unmount(context.Context, *UnmountRequest) (*UnmountResponse, error)
+	// 心跳保活与写租约续期。
+	// 维持会话活跃状态，续期持有中的排他性写租约，并感知服务端的租约撤回/降级通知。
+	KeepAlive(context.Context, *KeepAliveRequest) (*KeepAliveResponse, error)
+	// 在指定目录下按名称查找子条目（对应 FUSE_LOOKUP）。
+	Lookup(context.Context, *LookupRequest) (*LookupResponse, error)
+	// 获取文件或目录的元数据属性（对应 FUSE_GETATTR）。
+	GetAttr(context.Context, *GetAttrRequest) (*GetAttrResponse, error)
+	// 修改文件或目录的元数据属性（对应 FUSE_SETATTR）。
+	SetAttr(context.Context, *SetAttrRequest) (*SetAttrResponse, error)
+	// 校验调用方对指定节点的访问权限（对应 FUSE_ACCESS）。
+	Access(context.Context, *AccessRequest) (*AccessResponse, error)
+	// 获取文件系统全局容量与使用量统计信息（对应 FUSE_STATFS）。
+	Statfs(context.Context, *StatfsRequest) (*StatfsResponse, error)
+	// 通知服务端释放单个 Inode 的查找引用计数（对应 FUSE_FORGET）。
+	Forget(context.Context, *ForgetRequest) (*ForgetResponse, error)
+	// 批量通知服务端释放多个 Inode 的查找引用计数（对应 FUSE_BATCH_FORGET）。
+	BatchForget(context.Context, *BatchForgetRequest) (*BatchForgetResponse, error)
+	// 原子创建并打开普通文件（对应 FUSE_CREATE）。
+	Create(context.Context, *CreateRequest) (*CreateResponse, error)
+	// 创建特殊设备文件、管道或套接字节点（对应 FUSE_MKNOD）。
+	Mknod(context.Context, *MknodRequest) (*MknodResponse, error)
+	// 创建子目录（对应 FUSE_MKDIR）。
+	Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error)
+	// 删除空子目录（对应 FUSE_RMDIR）。
+	Rmdir(context.Context, *RmdirRequest) (*RmdirResponse, error)
+	// 删除硬链接或常规文件（对应 FUSE_UNLINK）。
+	Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error)
+	// 创建硬链接（对应 FUSE_LINK）。
+	Link(context.Context, *LinkRequest) (*LinkResponse, error)
+	// 创建符号链接（软链接，对应 FUSE_SYMLINK）。
+	Symlink(context.Context, *SymlinkRequest) (*SymlinkResponse, error)
+	// 读取符号链接目标路径（对应 FUSE_READLINK）。
+	Readlink(context.Context, *ReadlinkRequest) (*ReadlinkResponse, error)
+	// 原子重命名或交换文件/目录（对应 FUSE_RENAME / FUSE_RENAME2）。
+	Rename(context.Context, *RenameRequest) (*RenameResponse, error)
+	// 打开目录以准备遍历（对应 FUSE_OPENDIR）。
+	OpenDir(context.Context, *OpenDirRequest) (*OpenDirResponse, error)
+	// 流式分批读取目录项内容（对应 FUSE_READDIR）。
+	ReadDir(context.Context, *ReadDirRequest) (*ReadDirResponse, error)
+	// 流式分批读取目录项内容并预取 Inode 完整属性（对应 FUSE_READDIRPLUS）。
+	ReadDirPlus(context.Context, *ReadDirPlusRequest) (*ReadDirPlusResponse, error)
+	// 关闭并释放打开的目录句柄（对应 FUSE_RELEASEDIR）。
+	ReleaseDir(context.Context, *ReleaseDirRequest) (*ReleaseDirResponse, error)
+	// 同步目录内容与元数据至持久存储（对应 FUSE_FSYNCDIR）。
+	FsyncDir(context.Context, *FsyncDirRequest) (*FsyncDirResponse, error)
+	// 打开已有文件并分配服务端文件句柄（对应 FUSE_OPEN）。
+	Open(context.Context, *OpenRequest) (*OpenResponse, error)
+	// 瘦客户端模式文件数据读取（对应 FUSE_READ）。
+	Read(context.Context, *ReadRequest) (*ReadResponse, error)
+	// 瘦客户端模式文件数据写入（对应 FUSE_WRITE）。
+	Write(context.Context, *WriteRequest) (*WriteResponse, error)
+	// 文件关闭前刷新脏数据与清理文件锁（对应 FUSE_FLUSH）。
+	Flush(context.Context, *FlushRequest) (*FlushResponse, error)
+	// 关闭并释放打开的文件句柄与相关租约（对应 FUSE_RELEASE）。
+	Release(context.Context, *ReleaseRequest) (*ReleaseResponse, error)
+	// 强制同步文件数据与元数据至持久存储（对应 FUSE_FSYNC）。
+	Fsync(context.Context, *FsyncRequest) (*FsyncResponse, error)
+	// 文件空间预分配、打洞与区间重构（对应 FUSE_FALLOCATE）。
+	Fallocate(context.Context, *FallocateRequest) (*FallocateResponse, error)
+	// 跨文件或同文件内的区间秒级元数据克隆（对应 FUSE_COPY_FILE_RANGE）。
+	CopyFileRange(context.Context, *CopyFileRangeRequest) (*CopyFileRangeResponse, error)
+	// 探测稀疏文件的数据与空洞区间偏移量（对应 FUSE_LSEEK）。
+	Lseek(context.Context, *LseekRequest) (*LseekResponse, error)
+	// 测试查询 POSIX 字节区间记录锁（对应 FUSE_GETLK）。
+	GetLk(context.Context, *GetLkRequest) (*GetLkResponse, error)
+	// 非阻塞获取或释放 POSIX 字节区间记录锁（对应 FUSE_SETLK）。
+	SetLk(context.Context, *SetLkRequest) (*SetLkResponse, error)
+	// 阻塞等待获取 POSIX 字节区间记录锁（对应 FUSE_SETLKW）。
+	SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error)
+	// 获取或释放 BSD 风格整体文件互斥锁（对应 flock 系统调用）。
+	Flock(context.Context, *FlockRequest) (*FlockResponse, error)
+	// 获取指定扩展属性值（对应 FUSE_GETXATTR）。
+	GetXAttr(context.Context, *GetXAttrRequest) (*GetXAttrResponse, error)
+	// 设置指定扩展属性键值对（对应 FUSE_SETXATTR）。
+	SetXAttr(context.Context, *SetXAttrRequest) (*SetXAttrResponse, error)
+	// 列出指定节点的所有扩展属性键名（对应 FUSE_LISTXATTR）。
+	ListXAttr(context.Context, *ListXAttrRequest) (*ListXAttrResponse, error)
+	// 删除指定节点的扩展属性（对应 FUSE_REMOVEXATTR）。
+	RemoveXAttr(context.Context, *RemoveXAttrRequest) (*RemoveXAttrResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -49,6 +680,129 @@ type StorageServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedStorageServiceServer struct{}
 
+func (UnimplementedStorageServiceServer) Mount(context.Context, *MountRequest) (*MountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mount not implemented")
+}
+func (UnimplementedStorageServiceServer) Unmount(context.Context, *UnmountRequest) (*UnmountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Unmount not implemented")
+}
+func (UnimplementedStorageServiceServer) KeepAlive(context.Context, *KeepAliveRequest) (*KeepAliveResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method KeepAlive not implemented")
+}
+func (UnimplementedStorageServiceServer) Lookup(context.Context, *LookupRequest) (*LookupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Lookup not implemented")
+}
+func (UnimplementedStorageServiceServer) GetAttr(context.Context, *GetAttrRequest) (*GetAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttr not implemented")
+}
+func (UnimplementedStorageServiceServer) SetAttr(context.Context, *SetAttrRequest) (*SetAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetAttr not implemented")
+}
+func (UnimplementedStorageServiceServer) Access(context.Context, *AccessRequest) (*AccessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Access not implemented")
+}
+func (UnimplementedStorageServiceServer) Statfs(context.Context, *StatfsRequest) (*StatfsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Statfs not implemented")
+}
+func (UnimplementedStorageServiceServer) Forget(context.Context, *ForgetRequest) (*ForgetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Forget not implemented")
+}
+func (UnimplementedStorageServiceServer) BatchForget(context.Context, *BatchForgetRequest) (*BatchForgetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BatchForget not implemented")
+}
+func (UnimplementedStorageServiceServer) Create(context.Context, *CreateRequest) (*CreateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Create not implemented")
+}
+func (UnimplementedStorageServiceServer) Mknod(context.Context, *MknodRequest) (*MknodResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mknod not implemented")
+}
+func (UnimplementedStorageServiceServer) Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mkdir not implemented")
+}
+func (UnimplementedStorageServiceServer) Rmdir(context.Context, *RmdirRequest) (*RmdirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Rmdir not implemented")
+}
+func (UnimplementedStorageServiceServer) Unlink(context.Context, *UnlinkRequest) (*UnlinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Unlink not implemented")
+}
+func (UnimplementedStorageServiceServer) Link(context.Context, *LinkRequest) (*LinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Link not implemented")
+}
+func (UnimplementedStorageServiceServer) Symlink(context.Context, *SymlinkRequest) (*SymlinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Symlink not implemented")
+}
+func (UnimplementedStorageServiceServer) Readlink(context.Context, *ReadlinkRequest) (*ReadlinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Readlink not implemented")
+}
+func (UnimplementedStorageServiceServer) Rename(context.Context, *RenameRequest) (*RenameResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Rename not implemented")
+}
+func (UnimplementedStorageServiceServer) OpenDir(context.Context, *OpenDirRequest) (*OpenDirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method OpenDir not implemented")
+}
+func (UnimplementedStorageServiceServer) ReadDir(context.Context, *ReadDirRequest) (*ReadDirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadDir not implemented")
+}
+func (UnimplementedStorageServiceServer) ReadDirPlus(context.Context, *ReadDirPlusRequest) (*ReadDirPlusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadDirPlus not implemented")
+}
+func (UnimplementedStorageServiceServer) ReleaseDir(context.Context, *ReleaseDirRequest) (*ReleaseDirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseDir not implemented")
+}
+func (UnimplementedStorageServiceServer) FsyncDir(context.Context, *FsyncDirRequest) (*FsyncDirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FsyncDir not implemented")
+}
+func (UnimplementedStorageServiceServer) Open(context.Context, *OpenRequest) (*OpenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Open not implemented")
+}
+func (UnimplementedStorageServiceServer) Read(context.Context, *ReadRequest) (*ReadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Read not implemented")
+}
+func (UnimplementedStorageServiceServer) Write(context.Context, *WriteRequest) (*WriteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Write not implemented")
+}
+func (UnimplementedStorageServiceServer) Flush(context.Context, *FlushRequest) (*FlushResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Flush not implemented")
+}
+func (UnimplementedStorageServiceServer) Release(context.Context, *ReleaseRequest) (*ReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Release not implemented")
+}
+func (UnimplementedStorageServiceServer) Fsync(context.Context, *FsyncRequest) (*FsyncResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Fsync not implemented")
+}
+func (UnimplementedStorageServiceServer) Fallocate(context.Context, *FallocateRequest) (*FallocateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Fallocate not implemented")
+}
+func (UnimplementedStorageServiceServer) CopyFileRange(context.Context, *CopyFileRangeRequest) (*CopyFileRangeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CopyFileRange not implemented")
+}
+func (UnimplementedStorageServiceServer) Lseek(context.Context, *LseekRequest) (*LseekResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Lseek not implemented")
+}
+func (UnimplementedStorageServiceServer) GetLk(context.Context, *GetLkRequest) (*GetLkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLk not implemented")
+}
+func (UnimplementedStorageServiceServer) SetLk(context.Context, *SetLkRequest) (*SetLkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetLk not implemented")
+}
+func (UnimplementedStorageServiceServer) SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetLkw not implemented")
+}
+func (UnimplementedStorageServiceServer) Flock(context.Context, *FlockRequest) (*FlockResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Flock not implemented")
+}
+func (UnimplementedStorageServiceServer) GetXAttr(context.Context, *GetXAttrRequest) (*GetXAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetXAttr not implemented")
+}
+func (UnimplementedStorageServiceServer) SetXAttr(context.Context, *SetXAttrRequest) (*SetXAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetXAttr not implemented")
+}
+func (UnimplementedStorageServiceServer) ListXAttr(context.Context, *ListXAttrRequest) (*ListXAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListXAttr not implemented")
+}
+func (UnimplementedStorageServiceServer) RemoveXAttr(context.Context, *RemoveXAttrRequest) (*RemoveXAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveXAttr not implemented")
+}
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
 
@@ -70,13 +824,916 @@ func RegisterStorageServiceServer(s grpc.ServiceRegistrar, srv StorageServiceSer
 	s.RegisterService(&StorageService_ServiceDesc, srv)
 }
 
+func _StorageService_Mount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Mount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Mount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Mount(ctx, req.(*MountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Unmount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnmountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Unmount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Unmount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Unmount(ctx, req.(*UnmountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_KeepAlive_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KeepAliveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).KeepAlive(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_KeepAlive_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).KeepAlive(ctx, req.(*KeepAliveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Lookup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LookupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Lookup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Lookup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Lookup(ctx, req.(*LookupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_GetAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetAttr(ctx, req.(*GetAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetAttr(ctx, req.(*SetAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Access_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AccessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Access(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Access_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Access(ctx, req.(*AccessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Statfs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatfsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Statfs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Statfs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Statfs(ctx, req.(*StatfsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Forget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForgetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Forget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Forget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Forget(ctx, req.(*ForgetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_BatchForget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchForgetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).BatchForget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_BatchForget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).BatchForget(ctx, req.(*BatchForgetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Create(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Create_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Create(ctx, req.(*CreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Mknod_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MknodRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Mknod(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Mknod_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Mknod(ctx, req.(*MknodRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Mkdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MkdirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Mkdir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Mkdir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Mkdir(ctx, req.(*MkdirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Rmdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RmdirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Rmdir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Rmdir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Rmdir(ctx, req.(*RmdirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Unlink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnlinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Unlink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Unlink_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Unlink(ctx, req.(*UnlinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Link_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Link(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Link_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Link(ctx, req.(*LinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Symlink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SymlinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Symlink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Symlink_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Symlink(ctx, req.(*SymlinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Readlink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadlinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Readlink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Readlink_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Readlink(ctx, req.(*ReadlinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Rename_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Rename(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Rename_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Rename(ctx, req.(*RenameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_OpenDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenDirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).OpenDir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_OpenDir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).OpenDir(ctx, req.(*OpenDirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ReadDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadDirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ReadDir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ReadDir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ReadDir(ctx, req.(*ReadDirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ReadDirPlus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadDirPlusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ReadDirPlus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ReadDirPlus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ReadDirPlus(ctx, req.(*ReadDirPlusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ReleaseDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseDirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ReleaseDir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ReleaseDir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ReleaseDir(ctx, req.(*ReleaseDirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_FsyncDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FsyncDirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).FsyncDir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_FsyncDir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).FsyncDir(ctx, req.(*FsyncDirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Open_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OpenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Open(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Open_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Open(ctx, req.(*OpenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Read_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Read(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Read_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Read(ctx, req.(*ReadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Write_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WriteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Write(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Write_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Write(ctx, req.(*WriteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Flush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Flush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Flush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Flush(ctx, req.(*FlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Release_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Release(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Release_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Release(ctx, req.(*ReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Fsync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FsyncRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Fsync(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Fsync_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Fsync(ctx, req.(*FsyncRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Fallocate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FallocateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Fallocate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Fallocate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Fallocate(ctx, req.(*FallocateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_CopyFileRange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CopyFileRangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).CopyFileRange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_CopyFileRange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).CopyFileRange(ctx, req.(*CopyFileRangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Lseek_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LseekRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Lseek(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Lseek_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Lseek(ctx, req.(*LseekRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_GetLk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetLk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetLk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetLk(ctx, req.(*GetLkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetLk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetLkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetLk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetLk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetLk(ctx, req.(*SetLkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetLkw_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetLkwRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetLkw(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetLkw_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetLkw(ctx, req.(*SetLkwRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Flock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FlockRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Flock(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Flock_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Flock(ctx, req.(*FlockRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_GetXAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetXAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetXAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetXAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetXAttr(ctx, req.(*GetXAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetXAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetXAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetXAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetXAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetXAttr(ctx, req.(*SetXAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ListXAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListXAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ListXAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ListXAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ListXAttr(ctx, req.(*ListXAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_RemoveXAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveXAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).RemoveXAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_RemoveXAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).RemoveXAttr(ctx, req.(*RemoveXAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var StorageService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "iso.v1.StorageService",
 	HandlerType: (*StorageServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
-	Streams:     []grpc.StreamDesc{},
-	Metadata:    "iso/v1/storage.proto",
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Mount",
+			Handler:    _StorageService_Mount_Handler,
+		},
+		{
+			MethodName: "Unmount",
+			Handler:    _StorageService_Unmount_Handler,
+		},
+		{
+			MethodName: "KeepAlive",
+			Handler:    _StorageService_KeepAlive_Handler,
+		},
+		{
+			MethodName: "Lookup",
+			Handler:    _StorageService_Lookup_Handler,
+		},
+		{
+			MethodName: "GetAttr",
+			Handler:    _StorageService_GetAttr_Handler,
+		},
+		{
+			MethodName: "SetAttr",
+			Handler:    _StorageService_SetAttr_Handler,
+		},
+		{
+			MethodName: "Access",
+			Handler:    _StorageService_Access_Handler,
+		},
+		{
+			MethodName: "Statfs",
+			Handler:    _StorageService_Statfs_Handler,
+		},
+		{
+			MethodName: "Forget",
+			Handler:    _StorageService_Forget_Handler,
+		},
+		{
+			MethodName: "BatchForget",
+			Handler:    _StorageService_BatchForget_Handler,
+		},
+		{
+			MethodName: "Create",
+			Handler:    _StorageService_Create_Handler,
+		},
+		{
+			MethodName: "Mknod",
+			Handler:    _StorageService_Mknod_Handler,
+		},
+		{
+			MethodName: "Mkdir",
+			Handler:    _StorageService_Mkdir_Handler,
+		},
+		{
+			MethodName: "Rmdir",
+			Handler:    _StorageService_Rmdir_Handler,
+		},
+		{
+			MethodName: "Unlink",
+			Handler:    _StorageService_Unlink_Handler,
+		},
+		{
+			MethodName: "Link",
+			Handler:    _StorageService_Link_Handler,
+		},
+		{
+			MethodName: "Symlink",
+			Handler:    _StorageService_Symlink_Handler,
+		},
+		{
+			MethodName: "Readlink",
+			Handler:    _StorageService_Readlink_Handler,
+		},
+		{
+			MethodName: "Rename",
+			Handler:    _StorageService_Rename_Handler,
+		},
+		{
+			MethodName: "OpenDir",
+			Handler:    _StorageService_OpenDir_Handler,
+		},
+		{
+			MethodName: "ReadDir",
+			Handler:    _StorageService_ReadDir_Handler,
+		},
+		{
+			MethodName: "ReadDirPlus",
+			Handler:    _StorageService_ReadDirPlus_Handler,
+		},
+		{
+			MethodName: "ReleaseDir",
+			Handler:    _StorageService_ReleaseDir_Handler,
+		},
+		{
+			MethodName: "FsyncDir",
+			Handler:    _StorageService_FsyncDir_Handler,
+		},
+		{
+			MethodName: "Open",
+			Handler:    _StorageService_Open_Handler,
+		},
+		{
+			MethodName: "Read",
+			Handler:    _StorageService_Read_Handler,
+		},
+		{
+			MethodName: "Write",
+			Handler:    _StorageService_Write_Handler,
+		},
+		{
+			MethodName: "Flush",
+			Handler:    _StorageService_Flush_Handler,
+		},
+		{
+			MethodName: "Release",
+			Handler:    _StorageService_Release_Handler,
+		},
+		{
+			MethodName: "Fsync",
+			Handler:    _StorageService_Fsync_Handler,
+		},
+		{
+			MethodName: "Fallocate",
+			Handler:    _StorageService_Fallocate_Handler,
+		},
+		{
+			MethodName: "CopyFileRange",
+			Handler:    _StorageService_CopyFileRange_Handler,
+		},
+		{
+			MethodName: "Lseek",
+			Handler:    _StorageService_Lseek_Handler,
+		},
+		{
+			MethodName: "GetLk",
+			Handler:    _StorageService_GetLk_Handler,
+		},
+		{
+			MethodName: "SetLk",
+			Handler:    _StorageService_SetLk_Handler,
+		},
+		{
+			MethodName: "SetLkw",
+			Handler:    _StorageService_SetLkw_Handler,
+		},
+		{
+			MethodName: "Flock",
+			Handler:    _StorageService_Flock_Handler,
+		},
+		{
+			MethodName: "GetXAttr",
+			Handler:    _StorageService_GetXAttr_Handler,
+		},
+		{
+			MethodName: "SetXAttr",
+			Handler:    _StorageService_SetXAttr_Handler,
+		},
+		{
+			MethodName: "ListXAttr",
+			Handler:    _StorageService_ListXAttr_Handler,
+		},
+		{
+			MethodName: "RemoveXAttr",
+			Handler:    _StorageService_RemoveXAttr_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "iso/v1/storage.proto",
 }

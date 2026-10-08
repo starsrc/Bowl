@@ -2,10 +2,1485 @@ syntax = "proto3";
 
 package iso.v1;
 
-import "iso/v1/fuse.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/starsrc/iso/gen/go/iso/v1;isov1";
 
-// StorageService 定义 ISO Storage 的核心存储 RPC 服务接口。
-// 负责处理客户端文件系统操作、元数据与数据流的高效存取。
-service StorageService {}
+// =========================================================================
+// 基础数据类型与核心领域模型 (Domain Models)
+// =========================================================================
+
+// InodeType 表示文件系统中节点的类型枚举。
+// 设计对齐 POSIX 文件类型定义 (S_IFMT) 以及 JuiceFS 的 Inode 类型定义。
+enum InodeType {
+  // 未指定类型（默认占位值）。
+  INODE_TYPE_UNSPECIFIED = 0;
+  // 普通文件。
+  INODE_TYPE_FILE = 1;
+  // 目录节点。
+  INODE_TYPE_DIRECTORY = 2;
+  // 符号链接（软链接）。
+  INODE_TYPE_SYMLINK = 3;
+  // 命名管道（FIFO 特殊文件）。
+  INODE_TYPE_FIFO = 4;
+  // 块设备特殊文件。
+  INODE_TYPE_BLOCK_DEV = 5;
+  // 字符设备特殊文件。
+  INODE_TYPE_CHAR_DEV = 6;
+  // UNIX 域套接字特殊文件。
+  INODE_TYPE_SOCKET = 7;
+}
+
+// OpenMode 表示文件打开的基础访问模式枚举。
+// 设计对齐 POSIX 访问模式标志（O_RDONLY、O_WRONLY、O_RDWR）。
+enum OpenMode {
+  // 未指定访问模式（默认占位值）。
+  OPEN_MODE_UNSPECIFIED = 0;
+  // 只读模式（对应 POSIX O_RDONLY）。
+  OPEN_MODE_READ_ONLY = 1;
+  // 只写模式（对应 POSIX O_WRONLY）。
+  OPEN_MODE_WRITE_ONLY = 2;
+  // 读写模式（对应 POSIX O_RDWR）。
+  OPEN_MODE_READ_WRITE = 3;
+}
+
+// FuseOpenFlag 定义 FUSE 内核 open 操作的响应标志（对应 Linux 内核 FOPEN_* 位掩码）。
+// 服务端通过 FileHandle.open_flags 返回给内核驱动，指示内核对该文件打开会话采取的底层 I/O 行为。
+// 由于多个标志可以通过按位或（bit-wise OR）组合使用，实际在 FileHandle 中以 uint32 open_flags 存储。
+enum FuseOpenFlag {
+  // 未指定任何行为标志（默认行为：使用内核标准页缓存、无特殊选项）。
+  FUSE_OPEN_FLAG_UNSPECIFIED = 0;
+  // 直接 I/O 模式（对应 FOPEN_DIRECT_IO = 1 << 0）。
+  // 绕过内核页缓存（Page Cache），所有读写直接通过 FUSE 发送给用户空间/服务端。
+  FUSE_OPEN_FLAG_DIRECT_IO = 1;
+  // 保留内核页缓存（对应 FOPEN_KEEP_CACHE = 1 << 1）。
+  // 打开文件时不失效现有的页缓存，适用于文件内容未发生变化的只读重用场景。
+  FUSE_OPEN_FLAG_KEEP_CACHE = 2;
+  // 不可寻址模式（对应 FOPEN_NONSEEKABLE = 1 << 2）。
+  // 指示文件不支持 lseek 寻址操作（例如 FIFO 管道或字符流）。
+  FUSE_OPEN_FLAG_NONSEEKABLE = 4;
+  // 缓存目录内容（对应 FOPEN_CACHE_DIR = 1 << 3）。
+  // 指示内核缓存 opendir 后的目录内容。
+  FUSE_OPEN_FLAG_CACHE_DIR = 8;
+  // 流式文件传输（对应 FOPEN_STREAM = 1 << 4）。
+  // 指示内核该文件为单向流式操作，优化并发流读写。
+  FUSE_OPEN_FLAG_STREAM = 16;
+  // 关闭时不隐式执行 flush（对应 FOPEN_NOFLUSH = 1 << 5）。
+  FUSE_OPEN_FLAG_NOFLUSH = 32;
+  // 并发直接写入（对应 FOPEN_PARALLEL_DIRECT_WRITES = 1 << 6）。
+  // 允许对同一文件句柄进行无锁或并发的直接 I/O 写入。
+  FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES = 64;
+  // 直通模式（对应 FOPEN_PASSTHROUGH = 1 << 7）。
+  // 允许内核绕过 FUSE 守护进程，直接重定向到下层物理文件系统（Linux 5.14+ 特性）。
+  FUSE_OPEN_FLAG_PASSTHROUGH = 128;
+}
+
+// SetAttrMask 定义修改文件属性时的有效位掩码（对应 Linux FUSE FATTR_* 位掩码）。
+// 多个标志位通过按位或（bit-wise OR）组合，用于指示 SetAttrOp 中哪些字段包含有效的新属性值。
+enum SetAttrMask {
+  // 未指定属性标志（默认占位值）。
+  SET_ATTR_MASK_UNSPECIFIED = 0;
+
+  // 修改文件权限模式（对应 FATTR_MODE = 1 << 0）。
+  SET_ATTR_MASK_MODE = 1;
+
+  // 修改属主用户 ID（对应 FATTR_UID = 1 << 1）。
+  SET_ATTR_MASK_UID = 2;
+
+  // 修改属主用户组 ID（对应 FATTR_GID = 1 << 2）。
+  SET_ATTR_MASK_GID = 4;
+
+  // 修改文件大小 / 截断扩展文件（对应 FATTR_SIZE = 1 << 3）。
+  SET_ATTR_MASK_SIZE = 8;
+
+  // 修改最后访问时间戳（对应 FATTR_ATIME = 1 << 4）。
+  SET_ATTR_MASK_ATIME = 16;
+
+  // 修改最后修改时间戳（对应 FATTR_MTIME = 1 << 5）。
+  SET_ATTR_MASK_MTIME = 32;
+
+  // 校验或使用传入的文件句柄（对应 FATTR_FH = 1 << 6）。
+  SET_ATTR_MASK_FH = 64;
+
+  // 设置最后访问时间为服务端当前时间（对应 FATTR_ATIME_NOW = 1 << 7）。
+  SET_ATTR_MASK_ATIME_NOW = 128;
+
+  // 设置最后修改时间为服务端当前时间（对应 FATTR_MTIME_NOW = 1 << 8）。
+  SET_ATTR_MASK_MTIME_NOW = 256;
+
+  // 校验或更新文件锁持有者（对应 FATTR_LOCKOWNER = 1 << 9）。
+  SET_ATTR_MASK_LOCK_OWNER = 512;
+
+  // 修改最后状态变更时间戳（对应 FATTR_CTIME = 1 << 10）。
+  SET_ATTR_MASK_CTIME = 1024;
+
+  // 清除 SUID 与 SGID 权限位（对应 FATTR_KILL_SUIDGID = 1 << 11）。
+  SET_ATTR_MASK_KILL_SUIDGID = 2048;
+}
+
+// LseekWhence 定义 lseek 寻址空洞与数据区间的操作模式枚举（对应 Linux lseek(2) 的 SEEK_DATA / SEEK_HOLE）。
+// 用于高效探测稀疏文件（Sparse File）的分配区间与空洞区间。
+enum LseekWhence {
+  // 未指定模式（默认占位值）。
+  LSEEK_WHENCE_UNSPECIFIED = 0;
+
+  // 寻找下一个有效数据区间的起始偏移量（对应 Linux SEEK_DATA = 3）。
+  LSEEK_WHENCE_DATA = 3;
+
+  // 寻找下一个稀疏空洞区间的起始偏移量（对应 Linux SEEK_HOLE = 4）。
+  LSEEK_WHENCE_HOLE = 4;
+}
+
+// XAttrSetFlag 表示设置扩展属性时的操作模式标志（对应 Linux setxattr 的 flags 参数）。
+enum XAttrSetFlag {
+  // 未指定标志（默认模式：若属性存在则覆盖替换，若不存在则创建）。
+  X_ATTR_SET_FLAG_UNSPECIFIED = 0;
+  // 仅在属性尚不存在时创建；若已存在则返回 EEXIST 错误（对应 Linux XATTR_CREATE = 0x1）。
+  X_ATTR_SET_FLAG_CREATE = 1;
+  // 仅在属性已存在时替换；若不存在则返回 ENODATA / ENOATTR 错误（对应 Linux XATTR_REPLACE = 0x2）。
+  X_ATTR_SET_FLAG_REPLACE = 2;
+}
+
+// LockType 表示文件锁的操作与状态类型枚举。
+// 统一抽象 POSIX fcntl 记录锁与 BSD flock 整体文件锁的加锁模式。
+enum LockType {
+  // 未指定锁类型（默认占位值）。
+  LOCK_TYPE_UNSPECIFIED = 0;
+  // 共享锁 / 读锁（对应 POSIX F_RDLCK 与 BSD LOCK_SH）。
+  // 允许多个客户端/会话并发持有读锁进行读取。
+  LOCK_TYPE_SHARED = 1;
+  // 排他锁 / 写锁（对应 POSIX F_WRLCK 与 BSD LOCK_EX）。
+  // 仅允许单一客户端/会话独占持有，阻止其他并发读写锁。
+  LOCK_TYPE_EXCLUSIVE = 2;
+  // 解锁（对应 POSIX F_UNLCK 与 BSD LOCK_UN）。
+  // 释放先前持有的锁。
+  LOCK_TYPE_UNLOCK = 3;
+}
+
+// RenameFlag 定义原子重命名操作的行为标志位（对应 Linux renameat2(2) 的 flags 参数）。
+// 多个标志位支持按位或（bit-wise OR）组合，用于实现原子安全替换、双向交换与白障标记。
+enum RenameFlag {
+  // 未指定重命名标志（默认标准 POSIX rename 行为：目标存在时直接原子覆盖替换）。
+  RENAME_FLAG_UNSPECIFIED = 0;
+
+  // 禁止覆盖目标路径（对应 Linux RENAME_NOREPLACE = 1 << 0）。
+  // 当目标路径已存在时原子操作失败并返回 EEXIST 错误，保证创建/重命名操作的安全幂等性。
+  RENAME_FLAG_NO_REPLACE = 1;
+
+  // 原子双向交换源路径与目标路径（对应 Linux RENAME_EXCHANGE = 1 << 1）。
+  // 源和目标路径必须均已存在，原子互换两者对应的 Inode 引用，常用于无停机元数据切换与文件内容热置换。
+  RENAME_FLAG_EXCHANGE = 2;
+
+  // 在源路径创建白障/删除标记文件（对应 Linux RENAME_WHITEOUT = 1 << 2）。
+  // 适用于 OverlayFS 等联合文件系统环境，在执行重命名的同时在源位置留下白障节点以遮蔽下层同名实体。
+  RENAME_FLAG_WHITEOUT = 4;
+}
+
+// FallocateMode 定义文件空间预分配、打洞与区间重构的模式标志（对应 Linux fallocate(2) 的 mode 标志位）。
+// 多个模式标志可通过按位或组合使用，实际在 FallocateOp 中以 uint32 mode 位掩码存储。
+enum FallocateMode {
+  // 未指定模式（默认标准空间预分配行为：实际分配物理存储块并扩容文件大小，对应 FALLOC_FL_ALLOCATE / 0）。
+  FALLOCATE_MODE_UNSPECIFIED = 0;
+
+  // 保持文件大小不变（对应 Linux FALLOC_FL_KEEP_SIZE = 0x01）。
+  // 执行预分配或打洞时，即便操作区间超过当前文件末尾（EOF），也不会扩大文件的 size 属性。
+  FALLOCATE_MODE_KEEP_SIZE = 1;
+
+  // 打洞释放指定区间空间（对应 Linux FALLOC_FL_PUNCH_HOLE = 0x02）。
+  // 释放指定区间的数据与底层切片/物理块，产生逻辑稀疏空洞并将空间归还文件系统。必须与 KEEP_SIZE 联合使用。
+  FALLOCATE_MODE_PUNCH_HOLE = 2;
+
+  // 不隐藏陈旧数据块（对应 Linux FALLOC_FL_NO_HIDE_STALES = 0x04）。
+  // 保留未写入块且不主动进行零值抹除隐藏旧数据，用于针对安全要求较低场景的高性能块快速预分配。
+  FALLOCATE_MODE_NO_HIDE_STALES = 4;
+
+  // 折叠消除区间并前移后续数据（对应 Linux FALLOC_FL_COLLAPSE_RANGE = 0x08）。
+  // 消除指定的连续字节区间并将后续文件内容无缝向前平移，相应减小文件总大小，避免昂贵的数据搬迁。
+  FALLOCATE_MODE_COLLAPSE_RANGE = 8;
+
+  // 区间数据快速清零（对应 Linux FALLOC_FL_ZERO_RANGE = 0x10）。
+  // 将指定区间的字节清零，保留已分配块或转换为未写入块，若超出文件末尾则自动扩容（除非附加 KEEP_SIZE）。
+  FALLOCATE_MODE_ZERO_RANGE = 16;
+
+  // 插入空洞区间并后移后续数据（对应 Linux FALLOC_FL_INSERT_RANGE = 0x20）。
+  // 在文件内部插入指定大小的稀疏空洞区间并将后续数据向后推移，相应增加文件总大小。
+  FALLOCATE_MODE_INSERT_RANGE = 32;
+
+  // 解除写时复制共享引用（对应 Linux FALLOC_FL_UNSHARE_RANGE = 0x40）。
+  // 对共享的 CoW 切片区间进行预先解耦和独占分配，确保后续写入时无额外分配延迟。
+  FALLOCATE_MODE_UNSHARE_RANGE = 64;
+}
+
+// Inode 代表 ISO Storage 文件系统的核心元数据抽象。
+// 设计融合了 POSIX 文件属性、JuiceFS 元数据模型以及 ISO Storage 的多级缓存/对象存储架构特性
+// （例如服务端 NVMe SSD 本地热缓存与远端 B2 对象存储冷分层，以及一写多读一致性模型）。
+message Inode {
+  // 全局唯一 Inode 编号（文件系统根目录固定为 1）。
+  uint64 ino = 1;
+
+  // 父目录 Inode 编号。
+  // 用于支持高效的反向路径解析和目录树遍历。
+  // 在多硬链接场景（nlink > 1）下，该字段设为 0，父节点映射关系由专用的反向索引表统一维护，对齐 JuiceFS 规范。
+  uint64 parent_ino = 2;
+
+  // 文件类型分类。
+  // 该字段作为文件类型的唯一权威来源（Single Source of Truth），上层逻辑不应从 mode 中解析类型。
+  InodeType type = 3;
+
+  // POSIX 权限位（st_mode 低 12 位：rwxrwxrwx、setuid、setgid 与 sticky bit）。
+  // 对齐 JuiceFS Attr.Mode 规范。此处明确剥离了文件类型位，文件类型完全由 type 字段决定。
+  uint32 mode = 4;
+
+  // 属主用户 ID (UID)。
+  uint32 uid = 5;
+
+  // 属主用户组 ID (GID)。
+  uint32 gid = 6;
+
+  // 文件总大小（字节数）。
+  uint64 size = 7;
+
+  // 指向该 Inode 的硬链接计数。
+  uint32 nlink = 8;
+
+  // 设备特殊文件的设备编号（POSIX st_rdev，针对字符设备或块设备）。
+  uint32 rdev = 9;
+
+  // 最后数据访问时间戳（atime，纳秒精度）。
+  google.protobuf.Timestamp atime = 10;
+
+  // 最后数据修改时间戳（mtime，纳秒精度）。
+  google.protobuf.Timestamp mtime = 11;
+
+  // 最后元数据状态变更时间戳（ctime，纳秒精度）。
+  google.protobuf.Timestamp ctime = 12;
+
+  // 符号链接目标路径（当且仅当 type 为 INODE_TYPE_SYMLINK 时有效）。
+  string target = 13;
+
+  // 扩展文件属性标志位（对应 Linux chattr 属性，例如不可变 immutable、仅追加 append-only 等）。
+  uint32 flags = 14;
+
+  // 存储分层与缓存层级标志（用于 ISO Storage 的分层存储管理与生命周期调度）。
+  // 区分服务端 NVMe SSD 本地热缓存与 B2 远端冷对象存储层级。
+  uint32 tier = 15;
+
+  // 分配给该 Inode 的 512 字节块总数（对应 POSIX st_blocks 与 FUSE Blocks）。
+  // 用于精确磁盘空间用量统计与 du 命令核算。
+  uint64 blocks = 16;
+
+  // Inode 代数 / 纪元号（Generation）。
+  // 用于内核校验 Inode 有效性。当 Inode 编号被删除且后续重新分配给新文件时，
+  // generation 会自增递增，避免内核 FUSE 驱动以及 NFS 客户端因 Inode 编号复用产生的 ABA 问题及陈旧句柄（ESTALE）。
+  uint64 generation = 17;
+
+  // 内核属性缓存有效时间（Attr Timeout）。
+  // 指示内核 FUSE 驱动在多长时间内无需向服务端重新发起 getattr 查询。
+  // ISO Storage 服务端可根据文件冷热层级、一写多读（OWMR）租约状态动态调整该值以达到性能与一致性的平衡。
+  google.protobuf.Duration attr_timeout = 18;
+
+  // 访问控制列表（Access ACL）标识 ID。
+  // 指向当前 Inode 绑定的扩展访问权限规则集合。
+  // 具有相同 ACL 规则集合的文件共享相同的 access_acl ID，对齐 JuiceFS Attr.AccessACL 设计。
+  // 值为 0 时表示未配置扩展访问控制列表，完全遵循 mode 权限位。
+  uint32 access_acl = 19;
+
+  // 默认访问控制列表（Default ACL）标识 ID。
+  // 当且仅当 Inode 为目录时有效，定义该目录下新建子文件或子目录时自动继承的默认 ACL 规则集合。
+  // 对齐 JuiceFS Attr.DefaultACL 设计。值为 0 时表示未配置目录默认继承 ACL。
+  uint32 default_acl = 20;
+}
+
+// FileHandle 代表 ISO Storage 服务端分配并维护的文件打开句柄抽象。
+// 结合 FUSE 协议标准与 ISO Storage 一写多读（OWMR）并发控制模型及冷热分层缓存设计，
+// 用于跟踪客户端的文件打开会话、I/O 模式、租约状态与生命周期回收。
+message FileHandle {
+  // 服务端集中分配的全局唯一文件句柄标识（File Handle ID）。
+  uint64 fh = 1;
+
+  // 该文件句柄关联的目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开的基础访问模式（只读、只写、读写）。
+  OpenMode open_mode = 3;
+
+  // POSIX open 系统调用传入的原始标志位掩码（例如 O_APPEND、O_DIRECT、O_SYNC 等）。
+  // 用于引导服务端与客户端执行对应的 I/O 语义（如直接 I/O 绕过缓存、追加写等）。
+  uint32 flags = 4;
+
+  // 持有该文件句柄的客户端/挂载点会话唯一标识。
+  // 用于实现租约有效性校验、心跳检测与客户端宕机/网络断开后的孤儿句柄资源自动回收。
+  string client_id = 5;
+
+  // 是否持有当前 Inode 的排他性写租约。
+  // 在 ISO Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
+  // 确保数据修改的唯一性与缓存失效同步。
+  bool is_write_lease = 6;
+
+  // 服务端指示内核 FUSE 的底层打开行为标志位掩码（按位或组合）。
+  // 对应 Linux 内核 FOPEN_* 标志位定义（详见 FuseOpenFlag 枚举与常量）。
+  // 常用标志位：
+  //   - FOPEN_DIRECT_IO (1 << 0, 0x01): 绕过内核页缓存（Page Cache）进行直接读写。
+  //   - FOPEN_KEEP_CACHE (1 << 1, 0x02): open 时保留内核已有页缓存，不触发失效。
+  //   - FOPEN_NONSEEKABLE (1 << 2, 0x04): 指示文件不支持 lseek 寻址操作。
+  //   - FOPEN_CACHE_DIR (1 << 3, 0x08): 允许内核缓存 opendir 打开的目录项。
+  //   - FOPEN_STREAM (1 << 4, 0x10): 流式文件传输模式（优化并发流读写）。
+  //   - FOPEN_NOFLUSH (1 << 5, 0x20): 关闭文件时不隐式调用 flush。
+  //   - FOPEN_PARALLEL_DIRECT_WRITES (1 << 6, 0x40): 允许对同一文件句柄进行并发直接写。
+  //   - FOPEN_PASSTHROUGH (1 << 7, 0x80): 启用内核直通模式（绕过 FUSE 守护进程重定向至下层文件系统）。
+  uint32 open_flags = 7;
+}
+
+// DirEntry 表示目录项元数据。
+// 对应文件系统目录中的单个文件或子目录映射关系。
+message DirEntry {
+  // 目录项名称（例如 "file.txt" 或子目录名）。
+  string name = 1;
+
+  // 关联的目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 目标文件类型分类。
+  InodeType type = 3;
+
+  // 可选的关联完整 Inode 属性。
+  // 用于支持 FUSE readdirplus 操作，实现目录列表与属性预取的一次性高效带回，避免多次 RPC 往返。
+  Inode attr = 4;
+
+  // 目录流游标偏移量（对应 POSIX d_off 与 FUSE DirEntry.Off）。
+  // 用于支持超大目录分批流式遍历与内核断点续传。
+  uint64 offset = 5;
+
+  // 关联目标 Inode 的代数 / 纪元号（Generation）。
+  // 用于内核在 lookup / readdirplus 阶段校验 Inode 映射有效性，防止 Inode 编号复用引发的 ABA 错位。
+  uint64 generation = 6;
+
+  // 内核目录项缓存有效时间（Entry Timeout）。
+  // 指示内核 FUSE 驱动在多长时间内直接复用 dentry 目录项缓存，而无需重复向服务端发起 lookup 解析。
+  // 配合 ISO Storage 服务端租约与元数据变更通知机制实现高效缓存。
+  google.protobuf.Duration entry_timeout = 7;
+}
+
+// ForgetNode 表示单个 Inode 查找引用计数的减少条目。
+// 对应 Linux FUSE 内核在 dentry 缓存逐出时通知用户态的单个节点信息。
+message ForgetNode {
+  // 目标文件 Inode 编号。
+  uint64 ino = 1;
+
+  // 内核释放的查找引用计数（Lookup Count 减少值）。
+  // 当服务端维护的该 Inode 累计 nlookup 归零且硬链接为 0 时，服务端可彻底回收该 Inode 资源。
+  uint64 nlookup = 2;
+}
+
+// PlockRecord 代表 POSIX 风格的字节区间记录锁（对应 fcntl(2) F_GETLK / F_SETLK / F_SETLKW）。
+// 支持对文件内部的特定连续字节区间 [start, end] 进行精确的细粒度加锁。
+message PlockRecord {
+  // 锁定区间的起始字节偏移量（包含该字节，闭区间起点）。
+  uint64 start = 1;
+
+  // 锁定区间的结束字节偏移量（包含该字节，闭区间终点；0 或最大值表示直至文件末尾无穷大）。
+  uint64 end = 2;
+
+  // 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+  LockType type = 3;
+
+  // 持有该区间锁的进程 ID (PID)。
+  // 用于 POSIX 锁持有者标识以及死锁检测与 fcntl F_GETLK 查询返回。
+  uint32 pid = 4;
+}
+
+// Statfs 表示文件系统整体状态统计元数据。
+// 对齐 Linux statvfs(3) / statfs(2) 系统调用以及 FUSE 协议中的 fuse.StatfsOut 结构体。
+// 用于 df、stat 等系统工具获取存储池容量、空闲空间、Inode 用量及文件系统限制。
+message Statfs {
+  // 文件系统基本数据块大小（字节数，对应 statvfs f_bsize 与 fuse.StatfsOut.Bsize）。
+  // ISO Storage 中通常为 4096 (4KB)。
+  uint32 block_size = 1;
+
+  // 基本块大小 / 碎片大小（字节数，对应 statvfs f_frsize 与 fuse.StatfsOut.Frsize）。
+  // 在 Linux 系统中通常等于 block_size。
+  uint32 fragment_size = 2;
+
+  // 文件系统数据块总数（以 block_size 为单位，对应 statvfs f_blocks 与 fuse.StatfsOut.Blocks）。
+  uint64 blocks = 3;
+
+  // 文件系统空闲数据块总数（对应 statvfs f_bfree 与 fuse.StatfsOut.Bfree）。
+  uint64 blocks_free = 4;
+
+  // 非特权用户可用的空闲数据块总数（对应 statvfs f_bavail 与 fuse.StatfsOut.Bavail）。
+  uint64 blocks_avail = 5;
+
+  // 文件系统 Inode 节点总数（对应 statvfs f_files 与 fuse.StatfsOut.Files）。
+  uint64 files = 6;
+
+  // 文件系统空闲 Inode 节点总数（对应 statvfs f_ffree 与 fuse.StatfsOut.Ffree）。
+  uint64 files_free = 7;
+
+  // 支持的最大文件名长度（字符/字节数，对应 statvfs f_namemax 与 fuse.StatfsOut.NameLen，通常为 255）。
+  uint32 max_name_len = 8;
+}
+
+// =========================================================================
+// 服务接口契约 (Service Contracts)
+// =========================================================================
+
+// StorageService 定义 ISO Storage 的核心数据面与 FUSE 协议服务端 RPC 契约。
+// 承担挂载会话维护、一写多读 (OWMR) 租约协调、FUSE 元数据操作、流式目录项读取、
+// 高性能数据 I/O（瘦客户端直通与冷热分层缓存）、并发锁控制及扩展属性存取职责。
+service StorageService {
+  // =========================================================================
+  // AC-2: 挂载会话与一写多读 (OWMR) 租约生命周期 RPC
+  // =========================================================================
+
+  // 挂载虚拟磁盘并建立客户端会话。
+  // 基于 disk_id 与 client_id 校验权限，签发全局唯一 session_id，
+  // 返回根目录 Inode、Statfs 统计以及只读/写租约标识与有效期。
+  rpc Mount(MountRequest) returns (MountResponse);
+
+  // 卸载客户端挂载会话。
+  // 注销指定 session_id，主动释放排他性写租约并回收关联的未决资源。
+  rpc Unmount(UnmountRequest) returns (UnmountResponse);
+
+  // 心跳保活与写租约续期。
+  // 维持会话活跃状态，续期持有中的排他性写租约，并感知服务端的租约撤回/降级通知。
+  rpc KeepAlive(KeepAliveRequest) returns (KeepAliveResponse);
+
+  // =========================================================================
+  // AC-3: FUSE 元数据与目录树操作 RPC
+  // =========================================================================
+
+  // 在指定目录下按名称查找子条目（对应 FUSE_LOOKUP）。
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+
+  // 获取文件或目录的元数据属性（对应 FUSE_GETATTR）。
+  rpc GetAttr(GetAttrRequest) returns (GetAttrResponse);
+
+  // 修改文件或目录的元数据属性（对应 FUSE_SETATTR）。
+  rpc SetAttr(SetAttrRequest) returns (SetAttrResponse);
+
+  // 校验调用方对指定节点的访问权限（对应 FUSE_ACCESS）。
+  rpc Access(AccessRequest) returns (AccessResponse);
+
+  // 获取文件系统全局容量与使用量统计信息（对应 FUSE_STATFS）。
+  rpc Statfs(StatfsRequest) returns (StatfsResponse);
+
+  // 通知服务端释放单个 Inode 的查找引用计数（对应 FUSE_FORGET）。
+  rpc Forget(ForgetRequest) returns (ForgetResponse);
+
+  // 批量通知服务端释放多个 Inode 的查找引用计数（对应 FUSE_BATCH_FORGET）。
+  rpc BatchForget(BatchForgetRequest) returns (BatchForgetResponse);
+
+  // 原子创建并打开普通文件（对应 FUSE_CREATE）。
+  rpc Create(CreateRequest) returns (CreateResponse);
+
+  // 创建特殊设备文件、管道或套接字节点（对应 FUSE_MKNOD）。
+  rpc Mknod(MknodRequest) returns (MknodResponse);
+
+  // 创建子目录（对应 FUSE_MKDIR）。
+  rpc Mkdir(MkdirRequest) returns (MkdirResponse);
+
+  // 删除空子目录（对应 FUSE_RMDIR）。
+  rpc Rmdir(RmdirRequest) returns (RmdirResponse);
+
+  // 删除硬链接或常规文件（对应 FUSE_UNLINK）。
+  rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
+
+  // 创建硬链接（对应 FUSE_LINK）。
+  rpc Link(LinkRequest) returns (LinkResponse);
+
+  // 创建符号链接（软链接，对应 FUSE_SYMLINK）。
+  rpc Symlink(SymlinkRequest) returns (SymlinkResponse);
+
+  // 读取符号链接目标路径（对应 FUSE_READLINK）。
+  rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
+
+  // 原子重命名或交换文件/目录（对应 FUSE_RENAME / FUSE_RENAME2）。
+  rpc Rename(RenameRequest) returns (RenameResponse);
+
+  // 打开目录以准备遍历（对应 FUSE_OPENDIR）。
+  rpc OpenDir(OpenDirRequest) returns (OpenDirResponse);
+
+  // 流式分批读取目录项内容（对应 FUSE_READDIR）。
+  rpc ReadDir(ReadDirRequest) returns (ReadDirResponse);
+
+  // 流式分批读取目录项内容并预取 Inode 完整属性（对应 FUSE_READDIRPLUS）。
+  rpc ReadDirPlus(ReadDirPlusRequest) returns (ReadDirPlusResponse);
+
+  // 关闭并释放打开的目录句柄（对应 FUSE_RELEASEDIR）。
+  rpc ReleaseDir(ReleaseDirRequest) returns (ReleaseDirResponse);
+
+  // 同步目录内容与元数据至持久存储（对应 FUSE_FSYNCDIR）。
+  rpc FsyncDir(FsyncDirRequest) returns (FsyncDirResponse);
+
+  // =========================================================================
+  // AC-4: FUSE 文件 I/O、锁与扩展属性操作 RPC
+  // =========================================================================
+
+  // 打开已有文件并分配服务端文件句柄（对应 FUSE_OPEN）。
+  rpc Open(OpenRequest) returns (OpenResponse);
+
+  // 瘦客户端模式文件数据读取（对应 FUSE_READ）。
+  rpc Read(ReadRequest) returns (ReadResponse);
+
+  // 瘦客户端模式文件数据写入（对应 FUSE_WRITE）。
+  rpc Write(WriteRequest) returns (WriteResponse);
+
+  // 文件关闭前刷新脏数据与清理文件锁（对应 FUSE_FLUSH）。
+  rpc Flush(FlushRequest) returns (FlushResponse);
+
+  // 关闭并释放打开的文件句柄与相关租约（对应 FUSE_RELEASE）。
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // 强制同步文件数据与元数据至持久存储（对应 FUSE_FSYNC）。
+  rpc Fsync(FsyncRequest) returns (FsyncResponse);
+
+  // 文件空间预分配、打洞与区间重构（对应 FUSE_FALLOCATE）。
+  rpc Fallocate(FallocateRequest) returns (FallocateResponse);
+
+  // 跨文件或同文件内的区间秒级元数据克隆（对应 FUSE_COPY_FILE_RANGE）。
+  rpc CopyFileRange(CopyFileRangeRequest) returns (CopyFileRangeResponse);
+
+  // 探测稀疏文件的数据与空洞区间偏移量（对应 FUSE_LSEEK）。
+  rpc Lseek(LseekRequest) returns (LseekResponse);
+
+  // 测试查询 POSIX 字节区间记录锁（对应 FUSE_GETLK）。
+  rpc GetLk(GetLkRequest) returns (GetLkResponse);
+
+  // 非阻塞获取或释放 POSIX 字节区间记录锁（对应 FUSE_SETLK）。
+  rpc SetLk(SetLkRequest) returns (SetLkResponse);
+
+  // 阻塞等待获取 POSIX 字节区间记录锁（对应 FUSE_SETLKW）。
+  rpc SetLkw(SetLkwRequest) returns (SetLkwResponse);
+
+  // 获取或释放 BSD 风格整体文件互斥锁（对应 flock 系统调用）。
+  rpc Flock(FlockRequest) returns (FlockResponse);
+
+  // 获取指定扩展属性值（对应 FUSE_GETXATTR）。
+  rpc GetXAttr(GetXAttrRequest) returns (GetXAttrResponse);
+
+  // 设置指定扩展属性键值对（对应 FUSE_SETXATTR）。
+  rpc SetXAttr(SetXAttrRequest) returns (SetXAttrResponse);
+
+  // 列出指定节点的所有扩展属性键名（对应 FUSE_LISTXATTR）。
+  rpc ListXAttr(ListXAttrRequest) returns (ListXAttrResponse);
+
+  // 删除指定节点的扩展属性（对应 FUSE_REMOVEXATTR）。
+  rpc RemoveXAttr(RemoveXAttrRequest) returns (RemoveXAttrResponse);
+}
+
+// =============================================================================
+// AC-2: 挂载会话与一写多读 (OWMR) 租约生命周期模型
+// =============================================================================
+
+// MountRequest 表示挂载虚拟磁盘的请求参数模型。
+message MountRequest {
+  // 目标虚拟磁盘全局唯一标识 ID。
+  string disk_id = 1;
+
+  // 发起挂载的客户端/宿主机唯一标识 ID（例如 Node/Pod/VM 标识）。
+  string client_id = 2;
+
+  // 是否以只读模式挂载。
+  // 在 ISO Storage OWMR 架构中，若为 true 则以只读共享身份挂载；
+  // 若为 false 则尝试向服务端申请排他性写租约。
+  bool read_only = 3;
+}
+
+// MountResponse 表示挂载虚拟磁盘的响应结果。
+message MountResponse {
+  // 服务端为本次挂载签发的全局唯一会话标识 ID。
+  // 后续所有数据面与元数据 RPC 均需携带该 ID 以维护租约与访问会话上下文。
+  string session_id = 1;
+
+  // 文件系统根目录 Inode 元数据属性（根节点 ino 通常固定为 1）。
+  Inode root_inode = 2;
+
+  // 文件系统全局容量配额与使用量统计信息。
+  Statfs statfs = 3;
+
+  // 是否成功获得排他性写租约。
+  // 当 read_only 为 false 且无并发写租约冲突时为 true；
+  // 若只读挂载或写租约已被其他客户端占用，则为 false。
+  bool is_write_lease = 4;
+
+  // 当前租约到期绝对时间戳。
+  google.protobuf.Timestamp lease_expire_time = 5;
+
+  // 租约有效持续时长与建议心跳保活间隔。
+  google.protobuf.Duration lease_timeout = 6;
+}
+
+// UnmountRequest 表示卸载客户端会话的请求参数模型。
+message UnmountRequest {
+  // 待卸载的挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 是否强制卸载。
+  // 值为 true 时丢弃未同步脏数据，强制注销服务端会话并释放写租约。
+  bool force = 2;
+}
+
+// UnmountResponse 表示卸载客户端会话的响应结果。
+message UnmountResponse {}
+
+// KeepAliveRequest 表示心跳保活与租约续期的请求参数模型。
+message KeepAliveRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+}
+
+// KeepAliveResponse 表示心跳保活与租约续期的响应结果。
+message KeepAliveResponse {
+  // 当前客户端是否继续持有排他性写租约。
+  bool is_write_lease = 1;
+
+  // 续期后的租约过期绝对时间戳。
+  google.protobuf.Timestamp lease_expire_time = 2;
+
+  // 服务端是否要求撤回或降级写租约。
+  // 值为 true 时指示客户端应立即执行脏缓存刷盘并降级为只读模式。
+  bool lease_revocation = 3;
+}
+
+// =============================================================================
+// AC-3: FUSE 元数据与目录树操作模型
+// =============================================================================
+
+// LookupRequest 表示按名称查找目录项的请求参数模型（对应 FUSE_LOOKUP）。
+message LookupRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待查找的子文件或目录名称。
+  string name = 3;
+}
+
+// LookupResponse 表示按名称查找目录项的响应结果。
+message LookupResponse {
+  // 查找到的目标 Inode 元数据属性（包含 attr_timeout 等）。
+  Inode inode = 1;
+
+  // 内核目录项缓存有效时长（Entry Timeout）。
+  // 指示内核 FUSE 驱动在多长时间内直接复用该查找映射。
+  google.protobuf.Duration entry_timeout = 2;
+}
+
+// GetAttrRequest 表示获取元数据属性的请求参数模型（对应 FUSE_GETATTR）。
+message GetAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 可选：文件打开句柄（若由 fstat 等针对已打开句柄发起，未打开填 0）。
+  uint64 fh = 3;
+}
+
+// GetAttrResponse 表示获取元数据属性的响应结果。
+message GetAttrResponse {
+  // 目标 Inode 最新元数据属性。
+  Inode inode = 1;
+}
+
+// SetAttrRequest 表示修改元数据属性的请求参数模型（对应 FUSE_SETATTR）。
+message SetAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄（当 valid 包含 SET_ATTR_MASK_FH 时生效；无关联句柄置为 0）。
+  uint64 fh = 3;
+
+  // 有效属性位掩码（按位或组合，详见 SetAttrMask 枚举定义）。
+  uint32 valid = 4;
+
+  // POSIX 权限位（当 valid 包含 SET_ATTR_MASK_MODE 时生效）。
+  uint32 mode = 5;
+
+  // 属主用户 ID（UID，当 valid 包含 SET_ATTR_MASK_UID 时生效）。
+  uint32 uid = 6;
+
+  // 属主用户组 ID（GID，当 valid 包含 SET_ATTR_MASK_GID 时生效）。
+  uint32 gid = 7;
+
+  // 目标文件大小（字节数，当 valid 包含 SET_ATTR_MASK_SIZE 时生效）。
+  uint64 size = 8;
+
+  // 最后访问时间戳（atime，当 valid 包含 SET_ATTR_MASK_ATIME 时生效）。
+  google.protobuf.Timestamp atime = 9;
+
+  // 最后修改时间戳（mtime，当 valid 包含 SET_ATTR_MASK_MTIME 时生效）。
+  google.protobuf.Timestamp mtime = 10;
+
+  // 最后状态变更时间戳（ctime，当 valid 包含 SET_ATTR_MASK_CTIME 时生效）。
+  google.protobuf.Timestamp ctime = 11;
+
+  // 锁持有者唯一标识（当 valid 包含 SET_ATTR_MASK_LOCK_OWNER 时生效）。
+  uint64 lock_owner = 12;
+}
+
+// SetAttrResponse 表示修改元数据属性的响应结果。
+message SetAttrResponse {
+  // 修改生效后的目标 Inode 最新元数据属性。
+  Inode inode = 1;
+}
+
+// AccessRequest 表示访问权限校验的请求参数模型（对应 FUSE_ACCESS）。
+message AccessRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 待校验的访问权限掩码位（POSIX access 掩码：R_OK=4, W_OK=2, X_OK=1, F_OK=0）。
+  uint32 mask = 3;
+}
+
+// AccessResponse 表示访问权限校验的响应结果。
+message AccessResponse {
+  // 是否允许访问（鉴权成功为 true，否则为 false）。
+  bool allowed = 1;
+}
+
+// StatfsRequest 表示查询文件系统统计信息的请求参数模型（对应 FUSE_STATFS）。
+message StatfsRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标 Inode 编号（文件系统查询起点，通常为根节点 1）。
+  uint64 ino = 2;
+}
+
+// StatfsResponse 表示查询文件系统统计信息的响应结果。
+message StatfsResponse {
+  // 文件系统整体容量与统计元数据（对齐 Linux statvfs）。
+  Statfs statfs = 1;
+}
+
+// ForgetRequest 表示单个 Inode 查找引用计数释放的请求参数模型（对应 FUSE_FORGET）。
+message ForgetRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 内核释放的查找引用计数（Lookup Count 减少值）。
+  uint64 nlookup = 3;
+}
+
+// ForgetResponse 表示单个 Inode 查找引用计数释放的响应结果（FUSE 标准协议无显式回包）。
+message ForgetResponse {}
+
+// BatchForgetRequest 表示批量 Inode 查找引用计数释放的请求参数模型（对应 FUSE_BATCH_FORGET）。
+message BatchForgetRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 待批量释放查找引用计数的节点条目列表。
+  repeated ForgetNode nodes = 2;
+}
+
+// BatchForgetResponse 表示批量 Inode 查找引用计数释放的响应结果。
+message BatchForgetResponse {}
+
+// CreateRequest 表示原子创建并打开文件的请求参数模型（对应 FUSE_CREATE）。
+message CreateRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待创建的文件名称。
+  string name = 3;
+
+  // POSIX 文件权限模式位（st_mode 低 12 位）。
+  uint32 mode = 4;
+
+  // 调用进程的文件创建掩码（umask）。
+  uint32 umask = 5;
+
+  // 打开标志位掩码（POSIX open flags，如 O_CREAT, O_WRONLY, O_TRUNC 等）。
+  uint32 flags = 6;
+}
+
+// CreateResponse 表示原子创建并打开文件的响应结果。
+message CreateResponse {
+  // 新建文件的 Inode 元数据属性。
+  Inode inode = 1;
+
+  // 服务端为新建文件分配的文件打开句柄。
+  FileHandle file_handle = 2;
+
+  // 内核目录项缓存有效时长（Entry Timeout）。
+  google.protobuf.Duration entry_timeout = 3;
+}
+
+// MknodRequest 表示创建特殊节点的请求参数模型（对应 FUSE_MKNOD）。
+message MknodRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待创建的特殊节点名称。
+  string name = 3;
+
+  // 待创建节点的分类类型（FIFO, SOCKET, BLOCK_DEV, CHAR_DEV）。
+  InodeType type = 4;
+
+  // POSIX 权限模式位。
+  uint32 mode = 5;
+
+  // 调用进程的文件创建掩码（umask）。
+  uint32 umask = 6;
+
+  // 设备编号（针对字符设备或块设备的主次设备号，POSIX st_rdev）。
+  uint32 rdev = 7;
+}
+
+// MknodResponse 表示创建特殊节点的响应结果。
+message MknodResponse {
+  // 新建特殊节点的 Inode 元数据属性。
+  Inode inode = 1;
+
+  // 内核目录项缓存有效时长（Entry Timeout）。
+  google.protobuf.Duration entry_timeout = 2;
+}
+
+// MkdirRequest 表示创建子目录的请求参数模型（对应 FUSE_MKDIR）。
+message MkdirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待创建的子目录名称。
+  string name = 3;
+
+  // 目录 POSIX 权限模式位。
+  uint32 mode = 4;
+
+  // 调用进程的文件创建掩码（umask）。
+  uint32 umask = 5;
+}
+
+// MkdirResponse 表示创建子目录的响应结果。
+message MkdirResponse {
+  // 新建子目录的 Inode 元数据属性。
+  Inode inode = 1;
+
+  // 内核目录项缓存有效时长（Entry Timeout）。
+  google.protobuf.Duration entry_timeout = 2;
+}
+
+// RmdirRequest 表示删除空目录的请求参数模型（对应 FUSE_RMDIR）。
+message RmdirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待删除的空目录名称。
+  string name = 3;
+}
+
+// RmdirResponse 表示删除空目录的响应结果。
+message RmdirResponse {}
+
+// UnlinkRequest 表示删除硬链接或文件的请求参数模型（对应 FUSE_UNLINK）。
+message UnlinkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待删除的文件或硬链接名称。
+  string name = 3;
+}
+
+// UnlinkResponse 表示删除硬链接或文件的响应结果。
+message UnlinkResponse {}
+
+// LinkRequest 表示创建硬链接的请求参数模型（对应 FUSE_LINK）。
+message LinkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 源文件已有 Inode 编号。
+  uint64 src_ino = 2;
+
+  // 新硬链接所在的父目录 Inode 编号。
+  uint64 new_parent_ino = 3;
+
+  // 新硬链接的名称。
+  string new_name = 4;
+}
+
+// LinkResponse 表示创建硬链接的响应结果。
+message LinkResponse {
+  // 建立链接后递增硬链接计数的目标 Inode 元数据属性。
+  Inode inode = 1;
+
+  // 内核目录项缓存有效时长（Entry Timeout）。
+  google.protobuf.Duration entry_timeout = 2;
+}
+
+// SymlinkRequest 表示创建符号链接的请求参数模型（对应 FUSE_SYMLINK）。
+message SymlinkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 父目录 Inode 编号。
+  uint64 parent_ino = 2;
+
+  // 待创建的符号链接名称。
+  string name = 3;
+
+  // 符号链接指向的目标路径字符串。
+  string target = 4;
+}
+
+// SymlinkResponse 表示创建符号链接的响应结果。
+message SymlinkResponse {
+  // 新建符号链接的 Inode 元数据属性。
+  Inode inode = 1;
+
+  // 内核目录项缓存有效时长（Entry Timeout）。
+  google.protobuf.Duration entry_timeout = 2;
+}
+
+// ReadlinkRequest 表示读取符号链接目标路径的请求参数模型（对应 FUSE_READLINK）。
+message ReadlinkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标符号链接的 Inode 编号。
+  uint64 ino = 2;
+}
+
+// ReadlinkResponse 表示读取符号链接目标路径的响应结果。
+message ReadlinkResponse {
+  // 符号链接指向的目标路径字符串。
+  string target = 1;
+}
+
+// RenameRequest 表示原子重命名或交换文件/目录的请求参数模型（对应 FUSE_RENAME / FUSE_RENAME2）。
+message RenameRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 源目录 Inode 编号。
+  uint64 parent_src = 2;
+
+  // 待移动或重命名的源文件/目录名称。
+  string name_src = 3;
+
+  // 目标目录 Inode 编号。
+  uint64 parent_dst = 4;
+
+  // 移动或重命名后的目标文件/目录名称。
+  string name_dst = 5;
+
+  // 重命名标志位掩码（按位或组合，详见 RenameFlag 枚举定义）。
+  uint32 flags = 6;
+}
+
+// RenameResponse 表示原子重命名或交换文件/目录的响应结果。
+message RenameResponse {}
+
+// OpenDirRequest 表示打开目录准备遍历的请求参数模型（对应 FUSE_OPENDIR）。
+message OpenDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 打开目录的 POSIX 标志位掩码。
+  uint32 flags = 3;
+}
+
+// OpenDirResponse 表示打开目录的响应结果。
+message OpenDirResponse {
+  // 服务端为已打开目录分配的文件打开句柄。
+  FileHandle file_handle = 1;
+}
+
+// ReadDirRequest 表示流式分批读取目录项内容的请求参数模型（对应 FUSE_READDIR）。
+message ReadDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 目录打开句柄（由 opendir 返回，若无需句柄管理填 0）。
+  uint64 fh = 3;
+
+  // 遍历起始游标偏移量（对应 DirEntry.offset，从该偏移后继续拉取，首批从 0 开始）。
+  uint64 offset = 4;
+
+  // 本批次期望返回的最大目录项数量限制。
+  uint32 limit = 5;
+}
+
+// ReadDirResponse 表示流式分批读取目录项内容的响应结果。
+message ReadDirResponse {
+  // 目录项元数据列表。
+  repeated DirEntry entries = 1;
+}
+
+// ReadDirPlusRequest 表示流式读取目录项并预取属性的请求参数模型（对应 FUSE_READDIRPLUS）。
+message ReadDirPlusRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 目录打开句柄。
+  uint64 fh = 3;
+
+  // 遍历起始游标偏移量。
+  uint64 offset = 4;
+
+  // 本批次期望返回的最大目录项数量限制。
+  uint32 limit = 5;
+}
+
+// ReadDirPlusResponse 表示流式读取目录项并预取属性的响应结果。
+message ReadDirPlusResponse {
+  // 目录项元数据列表（每个条目均附带完整 Inode 属性与 entry_timeout）。
+  repeated DirEntry entries = 1;
+}
+
+// ReleaseDirRequest 表示关闭释放目录句柄的请求参数模型（对应 FUSE_RELEASEDIR）。
+message ReleaseDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 待释放的目录打开句柄 ID。
+  uint64 fh = 3;
+}
+
+// ReleaseDirResponse 表示关闭释放目录句柄的响应结果。
+message ReleaseDirResponse {}
+
+// FsyncDirRequest 表示同步目录元数据至持久存储的请求参数模型（对应 FUSE_FSYNCDIR）。
+message FsyncDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 目录打开句柄 ID。
+  uint64 fh = 3;
+
+  // 是否仅同步目录项数据（对应 fdatasync 语义）。
+  bool datasync = 4;
+}
+
+// FsyncDirResponse 表示同步目录元数据至持久存储的响应结果。
+message FsyncDirResponse {}
+
+// =============================================================================
+// AC-4: FUSE 文件 I/O、锁与扩展属性操作模型
+// =============================================================================
+
+// OpenRequest 表示打开已有文件的请求参数模型（对应 FUSE_OPEN）。
+message OpenRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // POSIX open 标志位掩码（如 O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_DIRECT 等）。
+  uint32 flags = 3;
+
+  // 文件打开的基础访问模式枚举。
+  OpenMode open_mode = 4;
+}
+
+// OpenResponse 表示打开已有文件的响应结果。
+message OpenResponse {
+  // 服务端集中分配维护的文件打开句柄实体。
+  FileHandle file_handle = 1;
+}
+
+// ReadRequest 表示瘦客户端模式读取文件数据的请求参数模型（对应 FUSE_READ）。
+message ReadRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 读取数据的起始字节偏移量。
+  uint64 offset = 4;
+
+  // 期望读取的最大连续字节数。
+  uint32 size = 5;
+}
+
+// ReadResponse 表示瘦客户端模式读取文件数据的响应结果。
+message ReadResponse {
+  // 实际读取到的二进制数据内容。
+  bytes data = 1;
+
+  // 是否已读取至文件末尾（EOF 标志）。
+  bool eof = 2;
+}
+
+// WriteRequest 表示瘦客户端模式写入文件数据的请求参数模型（对应 FUSE_WRITE）。
+message WriteRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 写入数据的起始字节偏移量。
+  uint64 offset = 4;
+
+  // 待写入的二进制数据内容。
+  bytes data = 5;
+
+  // 写入控制标志位掩码。
+  uint32 flags = 6;
+}
+
+// WriteResponse 表示瘦客户端模式写入文件数据的响应结果。
+message WriteResponse {
+  // 实际成功写入服务端的连续字节数。
+  uint32 written = 1;
+}
+
+// FlushRequest 表示文件关闭前刷新脏数据与锁清理的请求参数模型（对应 FUSE_FLUSH）。
+message FlushRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待刷新的文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // POSIX 锁持有者唯一标识（用于清理关闭句柄占用的记录锁）。
+  uint64 lock_owner = 4;
+}
+
+// FlushResponse 表示文件关闭前刷新脏数据与锁清理的响应结果。
+message FlushResponse {}
+
+// ReleaseRequest 表示注销释放文件句柄的请求参数模型（对应 FUSE_RELEASE）。
+message ReleaseRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待释放注销的服务端文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // POSIX open 打开时的原始标志位掩码。
+  uint32 flags = 4;
+
+  // 内核释放行为标志位（对应 release_flags，例如 RELEASE_FLUSH）。
+  uint32 release_flags = 5;
+
+  // POSIX 锁持有者唯一标识。
+  uint64 lock_owner = 6;
+}
+
+// ReleaseResponse 表示注销释放文件句柄的响应结果。
+message ReleaseResponse {}
+
+// FsyncRequest 表示强制同步文件数据与元数据至持久存储的请求参数模型（对应 FUSE_FSYNC）。
+message FsyncRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID（若无关联句柄填 0）。
+  uint64 fh = 3;
+
+  // 是否仅同步数据（对应 fdatasync 语义；false 时强制同步所有数据及元数据）。
+  bool datasync = 4;
+}
+
+// FsyncResponse 表示强制同步文件数据与元数据至持久存储的响应结果。
+message FsyncResponse {}
+
+// FallocateRequest 表示文件空间预分配、打洞与区间重构的请求参数模型（对应 FUSE_FALLOCATE）。
+message FallocateRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID（若无已打开句柄填 0）。
+  uint64 fh = 3;
+
+  // 预分配/打洞模式位掩码（按位或组合，详见 FallocateMode 枚举定义）。
+  uint32 mode = 4;
+
+  // 操作区间的起始字节偏移量。
+  uint64 offset = 5;
+
+  // 操作区间的连续字节长度。
+  uint64 length = 6;
+}
+
+// FallocateResponse 表示文件空间预分配、打洞与区间重构的响应结果。
+message FallocateResponse {}
+
+// CopyFileRangeRequest 表示区间秒级元数据克隆的请求参数模型（对应 FUSE_COPY_FILE_RANGE）。
+message CopyFileRangeRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 源文件 Inode 编号。
+  uint64 src_ino = 2;
+
+  // 源文件打开句柄 ID（可选，默认 0）。
+  uint64 src_fh = 3;
+
+  // 源文件克隆区间的起始字节偏移量。
+  uint64 src_offset = 4;
+
+  // 目标文件 Inode 编号。
+  uint64 dst_ino = 5;
+
+  // 目标文件打开句柄 ID（可选，默认 0）。
+  uint64 dst_fh = 6;
+
+  // 目标文件写入区间的起始字节偏移量。
+  uint64 dst_offset = 7;
+
+  // 待克隆的数据连续字节长度。
+  uint64 length = 8;
+
+  // 控制标志位（保留供扩展，当前默认为 0）。
+  uint32 flags = 9;
+}
+
+// CopyFileRangeResponse 表示区间秒级元数据克隆的响应结果。
+message CopyFileRangeResponse {
+  // 实际成功克隆复制的字节数。
+  uint64 copied = 1;
+}
+
+// LseekRequest 表示探测稀疏文件数据与空洞区间的请求参数模型（对应 FUSE_LSEEK）。
+message LseekRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 起始查找的字节偏移量。
+  uint64 offset = 4;
+
+  // 寻址模式（SEEK_DATA 或 SEEK_HOLE，详见 LseekWhence 枚举定义）。
+  LseekWhence whence = 5;
+}
+
+// LseekResponse 表示探测稀疏文件数据与空洞区间的响应结果。
+message LseekResponse {
+  // 找到的目标数据块或稀疏空洞区间的起始字节偏移量。
+  uint64 offset = 1;
+}
+
+// GetLkRequest 表示测试查询 POSIX 记录锁的请求参数模型（对应 FUSE_GETLK）。
+message GetLkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识（lock_owner）。
+  uint64 lock_owner = 4;
+
+  // 待测试查询的 POSIX 记录锁区间描述。
+  PlockRecord lk = 5;
+}
+
+// GetLkResponse 表示测试查询 POSIX 记录锁的响应结果。
+message GetLkResponse {
+  // 查询结果锁描述。
+  // 若存在阻止加锁的冲突锁，返回冲突锁详情（type, start, end, pid）；
+  // 若当前区间无锁冲突，返回 type 为 LOCK_TYPE_UNLOCK。
+  PlockRecord lk = 1;
+}
+
+// SetLkRequest 表示非阻塞获取或释放 POSIX 记录锁的请求参数模型（对应 FUSE_SETLK）。
+message SetLkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识。
+  uint64 lock_owner = 4;
+
+  // 待加锁或解锁的 POSIX 记录锁区间描述。
+  PlockRecord lk = 5;
+}
+
+// SetLkResponse 表示非阻塞获取或释放 POSIX 记录锁的响应结果。
+message SetLkResponse {}
+
+// SetLkwRequest 表示阻塞等待获取 POSIX 记录锁的请求参数模型（对应 FUSE_SETLKW）。
+message SetLkwRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识。
+  uint64 lock_owner = 4;
+
+  // 待获取的 POSIX 记录锁区间描述。
+  PlockRecord lk = 5;
+}
+
+// SetLkwResponse 表示阻塞等待获取 POSIX 记录锁的响应结果。
+message SetLkwResponse {}
+
+// FlockRequest 表示获取或释放 BSD 风格整体文件互斥锁的请求参数模型。
+message FlockRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识。
+  uint64 lock_owner = 4;
+
+  // 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+  LockType type = 5;
+
+  // 锁控制标志位（例如非阻塞标志 LOCK_NB）。
+  uint32 flags = 6;
+}
+
+// FlockResponse 表示获取或释放 BSD 风格整体文件互斥锁的响应结果。
+message FlockResponse {}
+
+// GetXAttrRequest 表示获取指定扩展属性值的请求参数模型（对应 FUSE_GETXATTR）。
+message GetXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待查询的扩展属性键名（例如 "user.comment"）。
+  string name = 3;
+}
+
+// GetXAttrResponse 表示获取指定扩展属性值的响应结果。
+message GetXAttrResponse {
+  // 扩展属性对应的二进制数据值。
+  bytes value = 1;
+}
+
+// SetXAttrRequest 表示设置指定扩展属性键值对的请求参数模型（对应 FUSE_SETXATTR）。
+message SetXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待设置的扩展属性键名。
+  string name = 3;
+
+  // 待写入的扩展属性二进制数据值。
+  bytes value = 4;
+
+  // 设置属性控制标志（详见 XAttrSetFlag 枚举定义：CREATE / REPLACE）。
+  XAttrSetFlag flags = 5;
+}
+
+// SetXAttrResponse 表示设置指定扩展属性键值对的响应结果。
+message SetXAttrResponse {}
+
+// ListXAttrRequest 表示列出节点所有扩展属性键名的请求参数模型（对应 FUSE_LISTXATTR）。
+message ListXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+}
+
+// ListXAttrResponse 表示列出节点所有扩展属性键名的响应结果。
+message ListXAttrResponse {
+  // 该节点拥有的全部扩展属性键名列表。
+  repeated string names = 1;
+}
+
+// RemoveXAttrRequest 表示删除指定扩展属性的请求参数模型（对应 FUSE_REMOVEXATTR）。
+message RemoveXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待删除的扩展属性键名。
+  string name = 3;
+}
+
+// RemoveXAttrResponse 表示删除指定扩展属性的响应结果。
+message RemoveXAttrResponse {}

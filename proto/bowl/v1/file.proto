@@ -1,0 +1,355 @@
+syntax = "proto3";
+
+package bowl.v1;
+
+option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
+
+// =========================================================================
+// 文件 I/O 领域模型与基础枚举
+// =========================================================================
+
+// OpenMode 表示文件打开的基础访问模式枚举。
+// 设计对齐 POSIX 访问模式标志（O_RDONLY、O_WRONLY、O_RDWR）。
+enum OpenMode {
+  // 未指定访问模式（默认占位值）。
+  OPEN_MODE_UNSPECIFIED = 0;
+  // 只读模式（对应 POSIX O_RDONLY）。
+  OPEN_MODE_READ_ONLY = 1;
+  // 只写模式（对应 POSIX O_WRONLY）。
+  OPEN_MODE_WRITE_ONLY = 2;
+  // 读写模式（对应 POSIX O_RDWR）。
+  OPEN_MODE_READ_WRITE = 3;
+}
+
+// FuseOpenFlag 定义 FUSE 内核 open 操作的响应标志（对应 Linux 内核 FOPEN_* 位掩码）。
+// 服务端通过 FileHandle.open_flags 返回给内核驱动，指示内核对该文件打开会话采取的底层 I/O 行为。
+// 由于多个标志可以通过按位或（bit-wise OR）组合使用，实际在 FileHandle 中以 uint32 open_flags 存储。
+enum FuseOpenFlag {
+  // 未指定任何行为标志（默认行为：使用内核标准页缓存、无特殊选项）。
+  FUSE_OPEN_FLAG_UNSPECIFIED = 0;
+  // 直接 I/O 模式（对应 FOPEN_DIRECT_IO = 1 << 0）。
+  // 绕过内核页缓存（Page Cache），所有读写直接通过 FUSE 发送给用户空间/服务端。
+  FUSE_OPEN_FLAG_DIRECT_IO = 1;
+  // 保留内核页缓存（对应 FOPEN_KEEP_CACHE = 1 << 1）。
+  // 打开文件时不失效现有的页缓存，适用于文件内容未发生变化的只读重用场景。
+  FUSE_OPEN_FLAG_KEEP_CACHE = 2;
+  // 不可寻址模式（对应 FOPEN_NONSEEKABLE = 1 << 2）。
+  // 指示文件不支持 lseek 寻址操作（例如 FIFO 管道或字符流）。
+  FUSE_OPEN_FLAG_NONSEEKABLE = 4;
+  // 缓存目录内容（对应 FOPEN_CACHE_DIR = 1 << 3）。
+  // 指示内核缓存 opendir 后的目录内容。
+  FUSE_OPEN_FLAG_CACHE_DIR = 8;
+  // 流式文件传输（对应 FOPEN_STREAM = 1 << 4）。
+  // 指示内核该文件为单向流式操作，优化并发流读写。
+  FUSE_OPEN_FLAG_STREAM = 16;
+  // 关闭时不隐式执行 flush（对应 FOPEN_NOFLUSH = 1 << 5）。
+  FUSE_OPEN_FLAG_NOFLUSH = 32;
+  // 并发直接写入（对应 FOPEN_PARALLEL_DIRECT_WRITES = 1 << 6）。
+  // 允许对同一文件句柄进行无锁或并发的直接 I/O 写入。
+  FUSE_OPEN_FLAG_PARALLEL_DIRECT_WRITES = 64;
+  // 直通模式（对应 FOPEN_PASSTHROUGH = 1 << 7）。
+  // 允许内核绕过 FUSE 守护进程，直接重定向到下层物理文件系统（Linux 5.14+ 特性）。
+  FUSE_OPEN_FLAG_PASSTHROUGH = 128;
+}
+
+// LseekWhence 定义 lseek 寻址空洞与数据区间的操作模式枚举（对应 Linux lseek(2) 的 SEEK_DATA / SEEK_HOLE）。
+// 用于高效探测稀疏文件（Sparse File）的分配区间与空洞区间。
+enum LseekWhence {
+  // 未指定模式（默认占位值）。
+  LSEEK_WHENCE_UNSPECIFIED = 0;
+
+  // 寻找下一个有效数据区间的起始偏移量（对应 Linux SEEK_DATA = 3）。
+  LSEEK_WHENCE_DATA = 3;
+
+  // 寻找下一个稀疏空洞区间的起始偏移量（对应 Linux SEEK_HOLE = 4）。
+  LSEEK_WHENCE_HOLE = 4;
+}
+
+// FallocateMode 定义文件空间预分配、打洞与区间重构的模式标志（对应 Linux fallocate(2) 的 mode 标志位）。
+// 多个模式标志可通过按位或组合使用，实际在 FallocateOp 中以 uint32 mode 位掩码存储。
+enum FallocateMode {
+  // 未指定模式（默认标准空间预分配行为：实际分配物理存储块并扩容文件大小，对应 FALLOC_FL_ALLOCATE / 0）。
+  FALLOCATE_MODE_UNSPECIFIED = 0;
+
+  // 保持文件大小不变（对应 Linux FALLOC_FL_KEEP_SIZE = 0x01）。
+  // 执行预分配或打洞时，即便操作区间超过当前文件末尾（EOF），也不会扩大文件的 size 属性。
+  FALLOCATE_MODE_KEEP_SIZE = 1;
+
+  // 打洞释放指定区间空间（对应 Linux FALLOC_FL_PUNCH_HOLE = 0x02）。
+  // 释放指定区间的数据与底层切片/物理块，产生逻辑稀疏空洞并将空间归还文件系统。必须与 KEEP_SIZE 联合使用。
+  FALLOCATE_MODE_PUNCH_HOLE = 2;
+
+  // 不隐藏陈旧数据块（对应 Linux FALLOC_FL_NO_HIDE_STALES = 0x04）。
+  // 保留未写入块且不主动进行零值抹除隐藏旧数据，用于针对安全要求较低场景的高性能块快速预分配。
+  FALLOCATE_MODE_NO_HIDE_STALES = 4;
+
+  // 折叠消除区间并前移后续数据（对应 Linux FALLOC_FL_COLLAPSE_RANGE = 0x08）。
+  // 消除指定的连续字节区间并将后续文件内容无缝向前平移，相应减小文件总大小，避免昂贵的数据搬迁。
+  FALLOCATE_MODE_COLLAPSE_RANGE = 8;
+
+  // 区间数据快速清零（对应 Linux FALLOC_FL_ZERO_RANGE = 0x10）。
+  // 将指定区间的字节清零，保留已分配块或转换为未写入块，若超出文件末尾则自动扩容（除非附加 KEEP_SIZE）。
+  FALLOCATE_MODE_ZERO_RANGE = 16;
+
+  // 插入空洞区间并后移后续数据（对应 Linux FALLOC_FL_INSERT_RANGE = 0x20）。
+  // 在文件内部插入指定大小的稀疏空洞区间并将后续数据向后推移，相应增加文件总大小。
+  FALLOCATE_MODE_INSERT_RANGE = 32;
+
+  // 解除写时复制共享引用（对应 Linux FALLOC_FL_UNSHARE_RANGE = 0x40）。
+  // 对共享的 CoW 切片区间进行预先解耦和独占分配，确保后续写入时无额外分配延迟。
+  FALLOCATE_MODE_UNSHARE_RANGE = 64;
+}
+
+// FileHandle 代表 Bowl Storage 服务端分配并维护的文件打开句柄抽象。
+// 结合 FUSE 协议标准与 Bowl Storage 一写多读（OWMR）并发控制模型及冷热分层缓存设计，
+// 用于跟踪客户端的文件打开会话、I/O 模式、租约状态与生命周期回收。
+message FileHandle {
+  // 服务端集中分配的全局唯一文件句柄标识（File Handle ID）。
+  uint64 fh = 1;
+
+  // 该文件句柄关联的目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开的基础访问模式（只读、只写、读写）。
+  OpenMode open_mode = 3;
+
+  // POSIX open 系统调用传入的原始标志位掩码（例如 O_APPEND、O_DIRECT、O_SYNC 等）。
+  // 用于引导服务端与客户端执行对应的 I/O 语义（如直接 I/O 绕过缓存、追加写等）。
+  uint32 flags = 4;
+
+  // 持有该文件句柄的客户端/挂载点会话唯一标识。
+  // 用于实现租约有效性校验、心跳检测与客户端宕机/网络断开后的孤儿句柄资源自动回收。
+  string client_id = 5;
+
+  // 是否持有当前 Inode 的排他性写租约。
+  // 在 Bowl Storage V1 一写多读（OWMR）架构中，同一时刻仅允许一个客户端持有写租约，
+  // 确保数据修改的唯一性与缓存失效同步。
+  bool is_write_lease = 6;
+
+  // 服务端指示内核 FUSE 的底层打开行为标志位掩码（按位或组合）。
+  // 对应 Linux 内核 FOPEN_* 标志位定义（详见 FuseOpenFlag 枚举与常量）。
+  uint32 open_flags = 7;
+}
+
+// =============================================================================
+// 文件 I/O 与句柄操作请求与响应
+// =============================================================================
+
+// OpenRequest 表示打开已有文件的请求参数模型（对应 FUSE_OPEN）。
+message OpenRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // POSIX open 标志位掩码（如 O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_DIRECT 等）。
+  uint32 flags = 3;
+
+  // 文件打开的基础访问模式枚举。
+  OpenMode open_mode = 4;
+}
+
+// OpenResponse 表示打开已有文件的响应结果。
+message OpenResponse {
+  // 服务端集中分配维护的文件打开句柄实体。
+  FileHandle file_handle = 1;
+}
+
+// ReadRequest 表示瘦客户端模式读取文件数据的请求参数模型（对应 FUSE_READ）。
+message ReadRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 读取数据的起始字节偏移量。
+  uint64 offset = 4;
+
+  // 期望读取的最大连续字节数。
+  uint32 size = 5;
+}
+
+// ReadResponse 表示瘦客户端模式读取文件数据的响应结果。
+message ReadResponse {
+  // 实际读取到的二进制数据内容。
+  bytes data = 1;
+
+  // 是否已读取至文件末尾（EOF 标志）。
+  bool eof = 2;
+}
+
+// WriteRequest 表示瘦客户端模式写入文件数据的请求参数模型（对应 FUSE_WRITE）。
+message WriteRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 写入数据的起始字节偏移量。
+  uint64 offset = 4;
+
+  // 待写入的二进制数据内容。
+  bytes data = 5;
+
+  // 写入控制标志位掩码。
+  uint32 flags = 6;
+}
+
+// WriteResponse 表示瘦客户端模式写入文件数据的响应结果。
+message WriteResponse {
+  // 实际成功写入服务端的连续字节数。
+  uint32 written = 1;
+}
+
+// FlushRequest 表示文件关闭前刷新脏数据与锁清理的请求参数模型（对应 FUSE_FLUSH）。
+message FlushRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待刷新的文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // POSIX 锁持有者唯一标识（用于清理关闭句柄占用的记录锁）。
+  uint64 lock_owner = 4;
+}
+
+// FlushResponse 表示文件关闭前刷新脏数据与锁清理的响应结果。
+message FlushResponse {}
+
+// ReleaseRequest 表示注销释放文件句柄的请求参数模型（对应 FUSE_RELEASE）。
+message ReleaseRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待释放注销的服务端文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // POSIX open 打开时的原始标志位掩码。
+  uint32 flags = 4;
+
+  // 内核释放行为标志位（对应 release_flags，例如 RELEASE_FLUSH）。
+  uint32 release_flags = 5;
+
+  // POSIX 锁持有者唯一标识。
+  uint64 lock_owner = 6;
+}
+
+// ReleaseResponse 表示注销释放文件句柄的响应结果。
+message ReleaseResponse {}
+
+// FsyncRequest 表示强制同步文件数据与元数据至持久存储的请求参数模型（对应 FUSE_FSYNC）。
+message FsyncRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID（若无关联句柄填 0）。
+  uint64 fh = 3;
+
+  // 是否仅同步数据（对应 fdatasync 语义；false 时强制同步所有数据及元数据）。
+  bool datasync = 4;
+}
+
+// FsyncResponse 表示强制同步文件数据与元数据至持久存储的响应结果。
+message FsyncResponse {}
+
+// FallocateRequest 表示文件空间预分配、打洞与区间重构的请求参数模型（对应 FUSE_FALLOCATE）。
+message FallocateRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID（若无已打开句柄填 0）。
+  uint64 fh = 3;
+
+  // 预分配/打洞模式位掩码（按位或组合，详见 FallocateMode 枚举定义）。
+  uint32 mode = 4;
+
+  // 操作区间的起始字节偏移量。
+  uint64 offset = 5;
+
+  // 操作区间的连续字节长度。
+  uint64 length = 6;
+}
+
+// FallocateResponse 表示文件空间预分配、打洞与区间重构的响应结果。
+message FallocateResponse {}
+
+// CopyFileRangeRequest 表示区间秒级元数据克隆的请求参数模型（对应 FUSE_COPY_FILE_RANGE）。
+message CopyFileRangeRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 源文件 Inode 编号。
+  uint64 src_ino = 2;
+
+  // 源文件打开句柄 ID（可选，默认 0）。
+  uint64 src_fh = 3;
+
+  // 源文件克隆区间的起始字节偏移量。
+  uint64 src_offset = 4;
+
+  // 目标文件 Inode 编号。
+  uint64 dst_ino = 5;
+
+  // 目标文件打开句柄 ID（可选，默认 0）。
+  uint64 dst_fh = 6;
+
+  // 目标文件写入区间的起始字节偏移量。
+  uint64 dst_offset = 7;
+
+  // 待克隆的数据连续字节长度。
+  uint64 length = 8;
+
+  // 控制标志位（保留供扩展，当前默认为 0）。
+  uint32 flags = 9;
+}
+
+// CopyFileRangeResponse 表示区间秒级元数据克隆的响应结果。
+message CopyFileRangeResponse {
+  // 实际成功克隆复制的字节数。
+  uint64 copied = 1;
+}
+
+// LseekRequest 表示探测稀疏文件数据与空洞区间的请求参数模型（对应 FUSE_LSEEK）。
+message LseekRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 起始查找的字节偏移量。
+  uint64 offset = 4;
+
+  // 寻址模式（SEEK_DATA 或 SEEK_HOLE，详见 LseekWhence 枚举定义）。
+  LseekWhence whence = 5;
+}
+
+// LseekResponse 表示探测稀疏文件数据与空洞区间的响应结果。
+message LseekResponse {
+  // 找到的目标数据块或稀疏空洞区间的起始字节偏移量。
+  uint64 offset = 1;
+}

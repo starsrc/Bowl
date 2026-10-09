@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+package bowl.v1;
+
+option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
+
+// =========================================================================
+// 文件锁领域模型与基础枚举
+// =========================================================================
+
+// LockType 表示文件锁的操作与状态类型枚举。
+// 统一抽象 POSIX fcntl 记录锁与 BSD flock 整体文件锁的加锁模式。
+enum LockType {
+  // 未指定锁类型（默认占位值）。
+  LOCK_TYPE_UNSPECIFIED = 0;
+  // 共享锁 / 读锁（对应 POSIX F_RDLCK 与 BSD LOCK_SH）。
+  // 允许多个客户端/会话并发持有读锁进行读取。
+  LOCK_TYPE_SHARED = 1;
+  // 排他锁 / 写锁（对应 POSIX F_WRLCK 与 BSD LOCK_EX）。
+  // 仅允许单一客户端/会话独占持有，阻止其他并发读写锁。
+  LOCK_TYPE_EXCLUSIVE = 2;
+  // 解锁（对应 POSIX F_UNLCK 与 BSD LOCK_UN）。
+  // 释放先前持有的锁。
+  LOCK_TYPE_UNLOCK = 3;
+}
+
+// PlockRecord 代表 POSIX 风格的字节区间记录锁（对应 fcntl(2) F_GETLK / F_SETLK / F_SETLKW）。
+// 支持对文件内部的特定连续字节区间 [start, end] 进行精确的细粒度加锁。
+message PlockRecord {
+  // 锁定区间的起始字节偏移量（包含该字节，闭区间起点）。
+  uint64 start = 1;
+
+  // 锁定区间的结束字节偏移量（包含该字节，闭区间终点；0 或最大值表示直至文件末尾无穷大）。
+  uint64 end = 2;
+
+  // 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+  LockType type = 3;
+
+  // 持有该区间锁的进程 ID (PID)。
+  // 用于 POSIX 锁持有者标识以及死锁检测与 fcntl F_GETLK 查询返回。
+  uint32 pid = 4;
+}
+
+// =============================================================================
+// 文件锁操作请求与响应
+// =============================================================================
+
+// GetLkRequest 表示测试查询 POSIX 记录锁的请求参数模型（对应 FUSE_GETLK）。
+message GetLkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识（lock_owner）。
+  uint64 lock_owner = 4;
+
+  // 待测试查询的 POSIX 记录锁区间描述。
+  PlockRecord lk = 5;
+}
+
+// GetLkResponse 表示测试查询 POSIX 记录锁的响应结果。
+message GetLkResponse {
+  // 查询结果锁描述。
+  // 若存在阻止加锁的冲突锁，返回冲突锁详情（type, start, end, pid）；
+  // 若当前区间无锁冲突，返回 type 为 LOCK_TYPE_UNLOCK。
+  PlockRecord lk = 1;
+}
+
+// SetLkRequest 表示非阻塞获取或释放 POSIX 记录锁的请求参数模型（对应 FUSE_SETLK）。
+message SetLkRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识。
+  uint64 lock_owner = 4;
+
+  // 待加锁或解锁的 POSIX 记录锁区间描述。
+  PlockRecord lk = 5;
+}
+
+// SetLkResponse 表示非阻塞获取或释放 POSIX 记录锁的响应结果。
+message SetLkResponse {}
+
+// SetLkwRequest 表示阻塞等待获取 POSIX 记录锁的请求参数模型（对应 FUSE_SETLKW）。
+message SetLkwRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识。
+  uint64 lock_owner = 4;
+
+  // 待获取的 POSIX 记录锁区间描述。
+  PlockRecord lk = 5;
+}
+
+// SetLkwResponse 表示阻塞等待获取 POSIX 记录锁的响应结果。
+message SetLkwResponse {}
+
+// FlockRequest 表示获取或释放 BSD 风格整体文件互斥锁的请求参数模型。
+message FlockRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 文件打开句柄 ID。
+  uint64 fh = 3;
+
+  // 锁持有者唯一标识。
+  uint64 lock_owner = 4;
+
+  // 锁类型（共享读锁 LOCK_TYPE_SHARED、独占写锁 LOCK_TYPE_EXCLUSIVE 或解锁 LOCK_TYPE_UNLOCK）。
+  LockType type = 5;
+
+  // 锁控制标志位（例如非阻塞标志 LOCK_NB）。
+  uint32 flags = 6;
+}
+
+// FlockResponse 表示获取或释放 BSD 风格整体文件互斥锁的响应结果。
+message FlockResponse {}

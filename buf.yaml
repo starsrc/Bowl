@@ -9,4 +9,4 @@ lint:
     - STANDARD
 breaking:
   use:
-    - FILE
+    - PACKAGE

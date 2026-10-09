@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package bowl.v1;
 
+import "bowl/v1/inode.proto";
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
-import "bowl/v1/storage.proto";
 
 option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
 

@@ -427,6 +427,68 @@ func (s *DiskService) DetachDisk(ctx context.Context, req *bowlv1.DetachDiskRequ
 	}, nil
 }
 
+// GetDiskStatfs retrieves filesystem statfs statistics and quota usage for a virtual disk.
+func (s *DiskService) GetDiskStatfs(ctx context.Context, req *bowlv1.GetDiskStatfsRequest) (*bowlv1.GetDiskStatfsResponse, error) {
+	diskIDStr := strings.TrimSpace(req.GetDiskId())
+	if diskIDStr == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "disk_id is required")
+	}
+
+	parsedUUID, err := uuid.Parse(diskIDStr)
+	if err != nil {
+		return nil, connect.Errorf(connect.CodeInvalidArgument, "invalid disk_id UUID format: %s", err)
+	}
+
+	diskUUID := pgtype.UUID{Bytes: parsedUUID, Valid: true}
+	row, err := s.store.GetDisk(ctx, diskUUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, connect.Errorf(connect.CodeNotFound, "disk not found: %s", diskIDStr)
+		}
+		return nil, connect.Errorf(connect.CodeInternal, "failed to get disk: %s", err).WithCause(err)
+	}
+
+	return &bowlv1.GetDiskStatfsResponse{
+		DiskId: uuid.UUID(row.DiskID.Bytes).String(),
+		Statfs: calculateStatfs(row),
+	}, nil
+}
+
+func calculateStatfs(disk db.Disk) *bowlv1.Statfs {
+	const blockSize = 4096
+
+	var blocks uint64
+	if disk.CapacityBytes > 0 {
+		blocks = uint64(disk.CapacityBytes / blockSize)
+	}
+
+	var blocksFree uint64
+	if disk.CapacityBytes > disk.UsedBytes {
+		blocksFree = uint64((disk.CapacityBytes - disk.UsedBytes) / blockSize)
+	}
+
+	var files uint64
+	if disk.InodesQuota > 0 {
+		files = uint64(disk.InodesQuota)
+	}
+
+	var filesFree uint64
+	if disk.InodesQuota > 0 && disk.InodesQuota > disk.InodesUsed {
+		filesFree = uint64(disk.InodesQuota - disk.InodesUsed)
+	}
+
+	return &bowlv1.Statfs{
+		BlockSize:    blockSize,
+		FragmentSize: blockSize,
+		Blocks:       blocks,
+		BlocksFree:   blocksFree,
+		BlocksAvail:  blocksFree,
+		Files:        files,
+		FilesFree:    filesFree,
+		MaxNameLen:   255,
+	}
+}
+
 func buildDiskProto(row db.Disk, attachments []db.DiskAttachment) *bowlv1.Disk {
 	disk := &bowlv1.Disk{
 		DiskId:        uuid.UUID(row.DiskID.Bytes).String(),
@@ -436,6 +498,7 @@ func buildDiskProto(row db.Disk, attachments []db.DiskAttachment) *bowlv1.Disk {
 		InodesQuota:   uint64(row.InodesQuota),
 		InodesUsed:    uint64(row.InodesUsed),
 		Status:        bowlv1.DiskStatus(row.Status),
+		Statfs:        calculateStatfs(row),
 	}
 	if row.CreatedAt.Valid {
 		disk.CreatedAt = timestamppb.New(row.CreatedAt.Time)

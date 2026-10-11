@@ -21,7 +21,7 @@ import (
 )
 
 // DefaultLeaseDuration defines the default write lease duration (10 seconds).
-const DefaultLeaseDuration = 10 * time.Second
+const DefaultLeaseDuration = session.DefaultLeaseTimeout
 
 // DBExecutor abstracts database execution for schema management.
 type DBExecutor interface {
@@ -136,18 +136,23 @@ func (s *StorageService) Mount(ctx context.Context, req *bowlv1.MountRequest) (*
 
 	now := time.Now()
 	leaseTimeout := s.leaseDuration
-	leaseExpire := now.Add(leaseTimeout)
 	isWriteLease := !req.GetReadOnly()
+	var leaseExpire time.Time
+	var leaseExpirePb *timestamppb.Timestamp
+	if isWriteLease {
+		leaseExpire = now.Add(leaseTimeout)
+		leaseExpirePb = timestamppb.New(leaseExpire)
+	}
 
 	sessionID := uuid.New().String()
 	sess := &session.Session{
-		ID:              sessionID,
-		DiskID:          parsedDiskUUID.String(),
-		ClientID:        clientID,
-		ReadOnly:        req.GetReadOnly(),
-		IsWriteLease:    isWriteLease,
-		LeaseExpireTime: leaseExpire,
-		CreatedAt:       now,
+		ID:             sessionID,
+		DiskID:         parsedDiskUUID.String(),
+		ClientID:       clientID,
+		ReadOnly:       req.GetReadOnly(),
+		IsWriteLease:   isWriteLease,
+		LeaseExpiresAt: leaseExpire,
+		CreatedAt:      now,
 	}
 	s.sessions.Create(sess)
 
@@ -205,7 +210,7 @@ func (s *StorageService) Mount(ctx context.Context, req *bowlv1.MountRequest) (*
 		RootInode:       rootInode,
 		Statfs:          statfs,
 		IsWriteLease:    isWriteLease,
-		LeaseExpireTime: timestamppb.New(leaseExpire),
+		LeaseExpireTime: leaseExpirePb,
 		LeaseTimeout:    durationpb.New(leaseTimeout),
 	}, nil
 }
@@ -238,4 +243,31 @@ func (s *StorageService) Unmount(ctx context.Context, req *bowlv1.UnmountRequest
 	s.sessions.Delete(sessionID)
 
 	return &bowlv1.UnmountResponse{}, nil
+}
+
+// KeepAlive handles heartbeat and write lease renewal for an active mount session.
+func (s *StorageService) KeepAlive(ctx context.Context, req *bowlv1.KeepAliveRequest) (*bowlv1.KeepAliveResponse, error) {
+	sessionID := strings.TrimSpace(req.GetSessionId())
+	if sessionID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "session_id is required")
+	}
+
+	sess, err := s.sessions.RenewLease(sessionID)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return nil, connect.Errorf(connect.CodeNotFound, "session not found: %s", sessionID)
+		}
+		return nil, toConnectError(err)
+	}
+
+	var expirePb *timestamppb.Timestamp
+	if !sess.LeaseExpiresAt.IsZero() {
+		expirePb = timestamppb.New(sess.LeaseExpiresAt)
+	}
+
+	return &bowlv1.KeepAliveResponse{
+		IsWriteLease:    sess.IsWriteLease,
+		LeaseExpireTime: expirePb,
+		LeaseRevocation: sess.Revoked,
+	}, nil
 }

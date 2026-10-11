@@ -427,3 +427,148 @@ func TestStorageService_Unmount_DetachDiskFailureWithoutForce(t *testing.T) {
 	_, found = h.sessionMgr.Get(sessionID)
 	assert.False(t, found, "session must be removed on force unmount")
 }
+
+func TestStorageService_KeepAlive_ActiveWriter_Success(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "writer-client-keepalive"
+
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+	initialExpiry := mountResp.GetLeaseExpireTime().AsTime()
+
+	time.Sleep(15 * time.Millisecond)
+
+	keepAliveResp, err := h.storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
+		SessionId: sessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, keepAliveResp)
+
+	assert.True(t, keepAliveResp.GetIsWriteLease())
+	assert.False(t, keepAliveResp.GetLeaseRevocation())
+	assert.True(t, keepAliveResp.GetLeaseExpireTime().AsTime().After(initialExpiry))
+
+	// Verify session manager reflects renewed expiry
+	sess, found := h.sessionMgr.Get(sessionID)
+	require.True(t, found)
+	assert.True(t, sess.IsWriteLease)
+	assert.False(t, sess.Revoked)
+	assert.True(t, sess.LeaseExpiresAt.After(initialExpiry))
+}
+
+func TestStorageService_KeepAlive_ReadOnly(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "reader-client-keepalive"
+
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	keepAliveResp, err := h.storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
+		SessionId: sessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, keepAliveResp)
+
+	assert.False(t, keepAliveResp.GetIsWriteLease())
+	assert.False(t, keepAliveResp.GetLeaseRevocation())
+}
+
+func TestStorageService_KeepAlive_Timeout_TriggersRevocation(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "expired-client-keepalive"
+
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Simulate expired lease by updating the session expiration to the past
+	sess, found := h.sessionMgr.Get(sessionID)
+	require.True(t, found)
+	sess.LeaseExpiresAt = time.Now().Add(-2 * time.Second)
+	h.sessionMgr.Create(sess)
+
+	// KeepAlive should detect expiration and trigger revocation
+	keepAliveResp, err := h.storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
+		SessionId: sessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, keepAliveResp)
+
+	assert.False(t, keepAliveResp.GetIsWriteLease())
+	assert.True(t, keepAliveResp.GetLeaseRevocation())
+
+	// Session in manager must be marked revoked
+	storedSess, found := h.sessionMgr.Get(sessionID)
+	require.True(t, found)
+	assert.False(t, storedSess.IsWriteLease)
+	assert.True(t, storedSess.Revoked)
+}
+
+func TestStorageService_KeepAlive_ValidationErrors(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+
+	// 1. Empty session_id -> InvalidArgument
+	_, err := h.storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
+		SessionId: "",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 2. Whitespace session_id -> InvalidArgument
+	_, err = h.storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
+		SessionId: "   ",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 3. Non-existent session_id -> NotFound
+	_, err = h.storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
+		SessionId: uuid.New().String(),
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}

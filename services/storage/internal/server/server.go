@@ -26,7 +26,7 @@ func New(cfg config.ServerConfig, storageService bowlv1connect.StorageServiceHan
 	bowlv1connect.RegisterStorageServiceHandler(connectServer, storageService)
 
 	mux := http.NewServeMux()
-	connecthttp.Mount(mux, connectServer)
+	connecthttp.Mount(mux, connectServer, connecthttp.WithReadMaxBytes(256*1024*1024))
 
 	var protocols http.Protocols
 	protocols.SetHTTP1(true)

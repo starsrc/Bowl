@@ -66,45 +66,20 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 	return []byte{}, true, nil
 }
 
-// Write writes file data at a given offset by creating an NVMe staging slice and appending its 24-byte metadata to chunks table.
+// Write writes file data at a given offset by creating NVMe staging slices and appending their 24-byte metadata to chunks table.
+// If the write interval [offset, offset+len(data)) crosses 64MB Chunk boundaries, it is automatically split into multiple slices.
 func (d *ChunkDriver) Write(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, data []byte) (uint32, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
 
-	chunkIndx := uint32(offset / chunk.ChunkSize)
-	chunkPos := uint32(offset % chunk.ChunkSize)
-	dataLen := uint32(len(data))
-
-	// 1. Generate unique slice ID
-	sliceID := d.staging.NextSliceID()
-
-	// 2. Write payload to local NVMe staging file
-	if err := d.staging.WriteSlice(diskID, sliceID, data); err != nil {
-		return 0, connect.Errorf(connect.CodeInternal, "failed to write staging slice: %s", err)
-	}
-
-	// 3. Encode 24-byte big-endian slice
-	s := chunk.Slice{
-		Pos:  chunkPos,
-		ID:   sliceID,
-		Size: dataLen,
-		Off:  0,
-		Len:  dataLen,
-	}
-	if err := s.Validate(); err != nil {
-		return 0, connect.Errorf(connect.CodeInvalidArgument, "invalid slice: %s", err)
-	}
-	encoded := chunk.EncodeSlice(s)
-
-	// 4. Resolve schema name from diskID
+	// 1. Resolve schema name from diskID
 	parsedDiskUUID, err := uuid.Parse(diskID)
 	if err != nil {
 		return 0, connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
 	}
 	schemaName := FormatDiskSchema(parsedDiskUUID)
 
-	// 5. Atomically append the 24-byte slice to "<schema>".chunks table
 	query := fmt.Sprintf(`
 INSERT INTO "%s".chunks (ino, indx, slices)
 VALUES ($1, $2, $3)
@@ -112,11 +87,54 @@ ON CONFLICT (ino, indx)
 DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
 `, schemaName)
 
-	if _, err := d.db.Exec(ctx, query, int64(ino), int32(chunkIndx), encoded); err != nil {
-		return 0, connect.Errorf(connect.CodeInternal, "failed to append chunk slice metadata: %s", err)
+	curOffset := offset
+	remaining := data
+	endOffset := offset + uint64(len(data))
+
+	// 2. Iterate and split data across 64MB chunk boundaries
+	for curOffset < endOffset {
+		curChunk := uint32(curOffset / chunk.ChunkSize)
+		chunkEnd := uint64(curChunk+1) * chunk.ChunkSize
+		chunkRemaining := chunkEnd - curOffset
+
+		toWrite := uint64(len(remaining))
+		if toWrite > chunkRemaining {
+			toWrite = chunkRemaining
+		}
+		chunkPos := uint32(curOffset % chunk.ChunkSize)
+		chunkData := remaining[:toWrite]
+
+		// 2.1. Generate unique slice ID
+		sliceID := d.staging.NextSliceID()
+
+		// 2.2. Write payload to local NVMe staging file
+		if err := d.staging.WriteSlice(diskID, sliceID, chunkData); err != nil {
+			return 0, connect.Errorf(connect.CodeInternal, "failed to write staging slice: %s", err)
+		}
+
+		// 2.3. Encode 24-byte big-endian slice
+		s := chunk.Slice{
+			Pos:  chunkPos,
+			ID:   sliceID,
+			Size: uint32(toWrite),
+			Off:  0,
+			Len:  uint32(toWrite),
+		}
+		if err := s.Validate(); err != nil {
+			return 0, connect.Errorf(connect.CodeInvalidArgument, "invalid slice: %s", err)
+		}
+		encoded := chunk.EncodeSlice(s)
+
+		// 2.4. Atomically append the 24-byte slice to "<schema>".chunks table
+		if _, err := d.db.Exec(ctx, query, int64(ino), int32(curChunk), encoded); err != nil {
+			return 0, connect.Errorf(connect.CodeInternal, "failed to append chunk slice metadata: %s", err)
+		}
+
+		curOffset += toWrite
+		remaining = remaining[toWrite:]
 	}
 
-	return dataLen, nil
+	return uint32(len(data)), nil
 }
 
 // Flush flushes dirty data for an open handle (no-op in STARSRC-117, implemented in STARSRC-123).

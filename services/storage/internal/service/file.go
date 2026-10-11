@@ -233,13 +233,7 @@ func (s *StorageService) Write(ctx context.Context, req *bowlv1.WriteRequest) (*
 		return nil, connect.NewError(connect.CodeInvalidArgument, "fh must be greater than 0")
 	}
 
-	// 1. Check write lease
-	_, schemaName, err := s.checkWriteLease(sessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Lookup handle
+	// 1. Lookup handle
 	val, ok := s.openHandles.Load(fh)
 	if !ok {
 		return nil, connect.Errorf(connect.CodeNotFound, "file handle %d not found", fh)
@@ -247,6 +241,12 @@ func (s *StorageService) Write(ctx context.Context, req *bowlv1.WriteRequest) (*
 	handle := val.(*OpenFileHandle)
 	if handle.SessionID != sessionID {
 		return nil, connect.Errorf(connect.CodePermissionDenied, "file handle %d does not belong to session %s", fh, sessionID)
+	}
+
+	// 2. Check write lease
+	_, schemaName, err := s.checkWriteLease(sessionID)
+	if err != nil {
+		return nil, err
 	}
 
 	// 3. Validate Inode

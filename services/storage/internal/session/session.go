@@ -49,6 +49,14 @@ type MemoryManager struct {
 	mu           sync.RWMutex
 	sessions     map[string]*Session
 	leaseTimeout time.Duration
+	onRevoke     func(sess *Session)
+}
+
+// SetOnRevoke sets an optional callback invoked whenever a session write lease is revoked.
+func (m *MemoryManager) SetOnRevoke(fn func(sess *Session)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onRevoke = fn
 }
 
 // NewMemoryManager initializes an empty MemoryManager.
@@ -116,6 +124,18 @@ func (m *MemoryManager) ListByDiskID(diskID string) []*Session {
 // If the session has already expired, the write lease is revoked (IsWriteLease: false, Revoked: true).
 // Otherwise, LeaseExpiresAt is extended by DefaultLeaseTimeout.
 func (m *MemoryManager) RenewLease(sessionID string) (*Session, error) {
+	var revokedSess *Session
+	defer func() {
+		if revokedSess != nil {
+			m.mu.RLock()
+			onRevoke := m.onRevoke
+			m.mu.RUnlock()
+			if onRevoke != nil {
+				onRevoke(revokedSess)
+			}
+		}
+	}()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -150,6 +170,7 @@ func (m *MemoryManager) RenewLease(sessionID string) (*Session, error) {
 		sess.IsWriteLease = false
 		sess.Revoked = true
 		cp := *sess
+		revokedSess = &cp
 		return &cp, nil
 	}
 
@@ -167,8 +188,6 @@ func (m *MemoryManager) RenewLease(sessionID string) (*Session, error) {
 // It returns a slice of sessions whose write leases were revoked during this check.
 func (m *MemoryManager) CheckExpiredLeases(now time.Time) []*Session {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	var revoked []*Session
 	for _, sess := range m.sessions {
 		if sess.IsWriteLease && now.After(sess.LeaseExpiresAt) {
@@ -176,6 +195,14 @@ func (m *MemoryManager) CheckExpiredLeases(now time.Time) []*Session {
 			sess.Revoked = true
 			cp := *sess
 			revoked = append(revoked, &cp)
+		}
+	}
+	onRevoke := m.onRevoke
+	m.mu.Unlock()
+
+	if onRevoke != nil {
+		for _, sess := range revoked {
+			onRevoke(sess)
 		}
 	}
 	return revoked

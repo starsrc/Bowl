@@ -119,6 +119,7 @@ func (f *fakeDiskService) GetDiskStatfs(ctx context.Context, req *bowlv1.GetDisk
 
 type testHarness struct {
 	storageClient bowlv1connect.StorageServiceClient
+	storageSvc    *StorageService
 	fakeDiskSvc   *fakeDiskService
 	sessionMgr    *session.MemoryManager
 	dbPool        *pgxpool.Pool
@@ -176,6 +177,7 @@ func setupTestHarness(t *testing.T) *testHarness {
 
 	return &testHarness{
 		storageClient: storageClient,
+		storageSvc:    storageSvc,
 		fakeDiskSvc:   fakeDisk,
 		sessionMgr:    sessionMgr,
 		dbPool:        pool,

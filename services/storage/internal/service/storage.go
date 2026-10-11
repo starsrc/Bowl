@@ -96,6 +96,11 @@ func NewStorageService(
 	for _, opt := range opts {
 		opt(svc)
 	}
+	if revoker, ok := sessions.(interface{ SetOnRevoke(func(*session.Session)) }); ok {
+		revoker.SetOnRevoke(func(sess *session.Session) {
+			svc.cleanupSessionResources(sess.ID)
+		})
+	}
 	return svc
 }
 
@@ -230,6 +235,7 @@ func (s *StorageService) Unmount(ctx context.Context, req *bowlv1.UnmountRequest
 	sess, found := s.sessions.Get(sessionID)
 	if !found {
 		if req.GetForce() {
+			s.cleanupSessionResources(sessionID)
 			return &bowlv1.UnmountResponse{}, nil
 		}
 		return nil, connect.Errorf(connect.CodeNotFound, "session not found: %s", sessionID)
@@ -247,21 +253,75 @@ func (s *StorageService) Unmount(ctx context.Context, req *bowlv1.UnmountRequest
 
 	s.sessions.Delete(sessionID)
 
-	// ADR 0011: Clean up session-bound open handles on unmount
+	// ADR 0011: Clean up session-bound open handles and buffers on unmount
+	s.cleanupSessionResources(sessionID)
+
+	return &bowlv1.UnmountResponse{}, nil
+}
+
+// cleanupSessionResources reclaims all open file handles, directory handles, and flushes buffers for the given session (ADR 0011).
+func (s *StorageService) cleanupSessionResources(sessionID string) {
 	s.openHandles.Range(func(key, value any) bool {
-		if h, ok := value.(*OpenFileHandle); ok && h.SessionID == sessionID {
+		h, ok := value.(*OpenFileHandle)
+		if ok && h.SessionID == sessionID {
 			s.openHandles.Delete(key)
-		}
-		return true
-	})
-	s.openDirHandles.Range(func(key, value any) bool {
-		if h, ok := value.(*OpenDirHandle); ok && h.SessionID == sessionID {
-			s.openDirHandles.Delete(key)
+			h.mu.Lock()
+			if h.file != nil {
+				_ = h.file.Sync()
+				_ = h.file.Close()
+				h.file = nil
+			}
+			h.mu.Unlock()
 		}
 		return true
 	})
 
-	return &bowlv1.UnmountResponse{}, nil
+	s.openDirHandles.Range(func(key, value any) bool {
+		h, ok := value.(*OpenDirHandle)
+		if ok && h.SessionID == sessionID {
+			s.openDirHandles.Delete(key)
+		}
+		return true
+	})
+}
+
+// CleanupSessionResources reclaims all open file handles, directory handles, and flushes buffers for the given session.
+func (s *StorageService) CleanupSessionResources(sessionID string) {
+	s.cleanupSessionResources(sessionID)
+}
+
+// CheckExpiredLeases scans active sessions for expired write leases, marks them revoked,
+// and automatically reclaims all orphaned handles and file buffers for those sessions.
+func (s *StorageService) CheckExpiredLeases(now time.Time) []*session.Session {
+	revoked := s.sessions.CheckExpiredLeases(now)
+	for _, sess := range revoked {
+		s.cleanupSessionResources(sess.ID)
+	}
+	return revoked
+}
+
+// OpenFileHandlesCount returns the number of active open file handles for a given session.
+func (s *StorageService) OpenFileHandlesCount(sessionID string) int {
+	count := 0
+	s.openHandles.Range(func(_, value any) bool {
+		if h, ok := value.(*OpenFileHandle); ok && h.SessionID == sessionID {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+// OpenDirHandlesCount returns the number of active open directory handles for a given session.
+func (s *StorageService) OpenDirHandlesCount(sessionID string) int {
+	count := 0
+	s.openDirHandles.Range(func(_, value any) bool {
+		if h, ok := value.(*OpenDirHandle); ok && h.SessionID == sessionID {
+			count++
+		}
+		return true
+	})
+	return count
 }
 
 // KeepAlive handles heartbeat and write lease renewal for an active mount session.
@@ -277,6 +337,10 @@ func (s *StorageService) KeepAlive(ctx context.Context, req *bowlv1.KeepAliveReq
 			return nil, connect.Errorf(connect.CodeNotFound, "session not found: %s", sessionID)
 		}
 		return nil, toConnectError(err)
+	}
+
+	if sess.Revoked {
+		s.cleanupSessionResources(sessionID)
 	}
 
 	var expirePb *timestamppb.Timestamp

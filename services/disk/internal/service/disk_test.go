@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
@@ -762,4 +763,316 @@ func TestDiskService_ListDisks_ValidationAndDefaults(t *testing.T) {
 	})
 }
 
+func TestDiskService_UpdateDisk_Success_WithoutFieldMask(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
 
+	ctx := context.Background()
+
+	// 1. Create a disk
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "initial-volume",
+		CapacityBytes: 10737418240, // 10 GiB
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// 2. Attach a reader and a writer to verify attachments are populated in UpdateDisk response
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-01",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-01",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	// Small pause so updated_at differs
+	time.Sleep(10 * time.Millisecond)
+
+	// 3. Update without field mask
+	updateResp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+		DiskId:        diskID,
+		Name:          "renamed-volume",
+		CapacityBytes: 21474836480, // 20 GiB
+		InodesQuota:   200000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updateResp)
+	require.NotNil(t, updateResp.Disk)
+
+	updatedDisk := updateResp.Disk
+	assert.Equal(t, diskID, updatedDisk.DiskId)
+	assert.Equal(t, "renamed-volume", updatedDisk.Name)
+	assert.Equal(t, uint64(21474836480), updatedDisk.CapacityBytes)
+	assert.Equal(t, uint64(200000), updatedDisk.InodesQuota)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, updatedDisk.Status)
+	assert.Equal(t, "writer-01", updatedDisk.WriterClientId)
+	assert.Equal(t, []string{"reader-01"}, updatedDisk.ReaderClientIds)
+	assert.True(t, updatedDisk.UpdatedAt.AsTime().After(createResp.Disk.UpdatedAt.AsTime()))
+
+	// 4. Verify GetDisk returns the updated state
+	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.NoError(t, err)
+	assert.Equal(t, "renamed-volume", getResp.Disk.Name)
+	assert.Equal(t, uint64(21474836480), getResp.Disk.CapacityBytes)
+	assert.Equal(t, uint64(200000), getResp.Disk.InodesQuota)
+}
+
+func TestDiskService_UpdateDisk_Success_WithFieldMask(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create initial disk
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "original-name",
+		CapacityBytes: 10737418240, // 10 GiB
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	t.Run("update only name via field mask", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			Name:          "only-name-changed",
+			CapacityBytes: 0, // Ignored because not in mask
+			InodesQuota:   0, // Ignored because not in mask
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"name"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "only-name-changed", resp.Disk.Name)
+		assert.Equal(t, uint64(10737418240), resp.Disk.CapacityBytes, "capacity should be preserved")
+		assert.Equal(t, uint64(100000), resp.Disk.InodesQuota, "inodes quota should be preserved")
+	})
+
+	t.Run("update only capacity_bytes via field mask", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			Name:          "",          // Ignored because not in mask
+			CapacityBytes: 32212254720, // 30 GiB
+			InodesQuota:   0,           // Ignored because not in mask
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"capacity_bytes"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "only-name-changed", resp.Disk.Name, "name should be preserved")
+		assert.Equal(t, uint64(32212254720), resp.Disk.CapacityBytes)
+		assert.Equal(t, uint64(100000), resp.Disk.InodesQuota, "inodes quota should be preserved")
+	})
+
+	t.Run("update only inodes_quota via field mask", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			Name:          "", // Ignored because not in mask
+			CapacityBytes: 0,  // Ignored because not in mask
+			InodesQuota:   500000,
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"inodes_quota"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "only-name-changed", resp.Disk.Name, "name should be preserved")
+		assert.Equal(t, uint64(32212254720), resp.Disk.CapacityBytes, "capacity should be preserved")
+		assert.Equal(t, uint64(500000), resp.Disk.InodesQuota)
+	})
+
+	t.Run("update multiple fields via field mask", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			Name:          "multi-updated-name",
+			CapacityBytes: 42949672960, // 40 GiB
+			InodesQuota:   0,           // Ignored because not in mask
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"name", "capacity_bytes"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "multi-updated-name", resp.Disk.Name)
+		assert.Equal(t, uint64(42949672960), resp.Disk.CapacityBytes)
+		assert.Equal(t, uint64(500000), resp.Disk.InodesQuota, "inodes quota should be preserved")
+	})
+}
+
+func TestDiskService_UpdateDisk_DownsizingProtection(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "downsize-test-disk",
+		CapacityBytes: 10737418240, // 10 GiB
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// Simulate existing used_bytes = 5 GiB directly in DB
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const usedBytes = int64(5368709120) // 5 GiB
+	_, err = pool.Exec(ctx, "UPDATE disks SET used_bytes = $1 WHERE disk_id = $2", usedBytes, diskID)
+	require.NoError(t, err)
+
+	t.Run("downsizing below used_bytes returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			Name:          "downsize-test-disk",
+			CapacityBytes: 4294967296, // 4 GiB (< 5 GiB used)
+			InodesQuota:   100000,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("downsizing below used_bytes with field_mask returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			CapacityBytes: 2147483648, // 2 GiB (< 5 GiB used)
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"capacity_bytes"}},
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("downsizing to exactly used_bytes succeeds", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			CapacityBytes: uint64(usedBytes), // 5 GiB == 5 GiB used
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"capacity_bytes"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(usedBytes), resp.Disk.CapacityBytes)
+	})
+
+	t.Run("upsizing above used_bytes succeeds", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        diskID,
+			CapacityBytes: 21474836480, // 20 GiB
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"capacity_bytes"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, uint64(21474836480), resp.Disk.CapacityBytes)
+	})
+}
+
+func TestDiskService_UpdateDisk_ValidationErrors(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "validation-test-disk",
+		CapacityBytes: 10737418240,
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	validDiskID := createResp.Disk.DiskId
+
+	t.Run("empty disk_id returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        "",
+			Name:          "renamed",
+			CapacityBytes: 10737418240,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("malformed disk_id returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        "not-a-uuid",
+			Name:          "renamed",
+			CapacityBytes: 10737418240,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("empty name without field mask returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        validDiskID,
+			Name:          "   ",
+			CapacityBytes: 10737418240,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("empty name with field mask returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:    validDiskID,
+			Name:      "",
+			FieldMask: &fieldmaskpb.FieldMask{Paths: []string{"name"}},
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("zero capacity without field mask returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        validDiskID,
+			Name:          "renamed",
+			CapacityBytes: 0,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("zero capacity with field mask returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:        validDiskID,
+			CapacityBytes: 0,
+			FieldMask:     &fieldmaskpb.FieldMask{Paths: []string{"capacity_bytes"}},
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("unsupported field mask path returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+			DiskId:    validDiskID,
+			Name:      "renamed",
+			FieldMask: &fieldmaskpb.FieldMask{Paths: []string{"unsupported_path"}},
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+}
+
+func TestDiskService_UpdateDisk_NotFound(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	randomUUID := uuid.New().String()
+
+	resp, err := client.UpdateDisk(ctx, &bowlv1.UpdateDiskRequest{
+		DiskId:        randomUUID,
+		Name:          "non-existent-disk",
+		CapacityBytes: 10737418240,
+	})
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}

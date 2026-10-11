@@ -92,6 +92,133 @@ func (s *DiskService) GetDisk(ctx context.Context, req *bowlv1.GetDiskRequest) (
 	}, nil
 }
 
+// UpdateDisk updates dynamic configuration of a virtual disk (name, capacity_bytes, inodes_quota)
+// with FieldMask support and downsizing protection against used_bytes.
+func (s *DiskService) UpdateDisk(ctx context.Context, req *bowlv1.UpdateDiskRequest) (*bowlv1.UpdateDiskResponse, error) {
+	diskIDStr := strings.TrimSpace(req.GetDiskId())
+	if diskIDStr == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "disk_id is required")
+	}
+
+	parsedUUID, err := uuid.Parse(diskIDStr)
+	if err != nil {
+		return nil, connect.Errorf(connect.CodeInvalidArgument, "invalid disk_id UUID format: %s", err)
+	}
+
+	diskUUID := pgtype.UUID{Bytes: parsedUUID, Valid: true}
+
+	var (
+		updateName     bool
+		updateCapacity bool
+		updateInodes   bool
+	)
+
+	mask := req.GetFieldMask()
+	if mask == nil || len(mask.GetPaths()) == 0 {
+		updateName = true
+		updateCapacity = true
+		updateInodes = true
+	} else {
+		for _, p := range mask.GetPaths() {
+			switch p {
+			case "name":
+				updateName = true
+			case "capacity_bytes", "capacityBytes":
+				updateCapacity = true
+			case "inodes_quota", "inodesQuota":
+				updateInodes = true
+			default:
+				return nil, connect.Errorf(connect.CodeInvalidArgument, "unsupported field_mask path: %s", p)
+			}
+		}
+	}
+
+	var newName string
+	if updateName {
+		newName = strings.TrimSpace(req.GetName())
+		if newName == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, "disk name cannot be empty")
+		}
+	}
+
+	var newCapacity uint64
+	if updateCapacity {
+		newCapacity = req.GetCapacityBytes()
+		if newCapacity == 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, "capacity_bytes must be greater than 0")
+		}
+		if newCapacity > math.MaxInt64 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, "capacity_bytes exceeds maximum allowed value")
+		}
+	}
+
+	if updateInodes {
+		if req.GetInodesQuota() > math.MaxInt64 {
+			return nil, connect.NewError(connect.CodeInvalidArgument, "inodes_quota exceeds maximum allowed value")
+		}
+	}
+
+	var updatedRow db.Disk
+	var attachments []db.DiskAttachment
+
+	err = s.store.ExecTx(ctx, func(q db.Querier) error {
+		existing, err := q.GetDisk(ctx, diskUUID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return connect.Errorf(connect.CodeNotFound, "disk not found: %s", diskIDStr)
+			}
+			return connect.Errorf(connect.CodeInternal, "failed to get disk: %s", err).WithCause(err)
+		}
+
+		targetName := existing.Name
+		if updateName {
+			targetName = newName
+		}
+
+		targetCapacity := existing.CapacityBytes
+		if updateCapacity {
+			if int64(newCapacity) < existing.UsedBytes {
+				return connect.Errorf(
+					connect.CodeInvalidArgument,
+					"cannot downsize disk capacity below used bytes (%d < %d)",
+					newCapacity,
+					existing.UsedBytes,
+				)
+			}
+			targetCapacity = int64(newCapacity)
+		}
+
+		targetInodes := existing.InodesQuota
+		if updateInodes {
+			targetInodes = int64(req.GetInodesQuota())
+		}
+
+		updatedRow, err = q.UpdateDisk(ctx, db.UpdateDiskParams{
+			DiskID:        diskUUID,
+			Name:          targetName,
+			CapacityBytes: targetCapacity,
+			InodesQuota:   targetInodes,
+		})
+		if err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to update disk: %s", err).WithCause(err)
+		}
+
+		attachments, err = q.ListDiskAttachmentsByDiskID(ctx, diskUUID)
+		if err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to list disk attachments: %s", err).WithCause(err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &bowlv1.UpdateDiskResponse{
+		Disk: buildDiskProto(updatedRow, attachments),
+	}, nil
+}
+
 // ListDisks retrieves a paginated list of virtual disks with optional status filtering.
 func (s *DiskService) ListDisks(ctx context.Context, req *bowlv1.ListDisksRequest) (*bowlv1.ListDisksResponse, error) {
 	if req.GetFilterStatus() < bowlv1.DiskStatus_DISK_STATUS_UNSPECIFIED || req.GetFilterStatus() > bowlv1.DiskStatus_DISK_STATUS_ERROR {
@@ -146,7 +273,6 @@ func (s *DiskService) ListDisks(ctx context.Context, req *bowlv1.ListDisksReques
 		TotalCount:    totalCount,
 	}, nil
 }
-
 
 // AttachDisk binds a client to a virtual disk in read-only or exclusive read-write mode.
 func (s *DiskService) AttachDisk(ctx context.Context, req *bowlv1.AttachDiskRequest) (*bowlv1.AttachDiskResponse, error) {
@@ -361,4 +487,3 @@ func parsePageToken(token string) (int64, error) {
 
 	return val, nil
 }
-

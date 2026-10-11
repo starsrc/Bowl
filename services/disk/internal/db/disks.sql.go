@@ -132,6 +132,45 @@ func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, e
 	return items, nil
 }
 
+const updateDisk = `-- name: UpdateDisk :one
+UPDATE disks
+SET name = $2,
+    capacity_bytes = $3,
+    inodes_quota = $4,
+    updated_at = now()
+WHERE disk_id = $1
+RETURNING disk_id, name, capacity_bytes, used_bytes, inodes_quota, inodes_used, status, created_at, updated_at
+`
+
+type UpdateDiskParams struct {
+	DiskID        pgtype.UUID `json:"disk_id"`
+	Name          string      `json:"name"`
+	CapacityBytes int64       `json:"capacity_bytes"`
+	InodesQuota   int64       `json:"inodes_quota"`
+}
+
+func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, updateDisk,
+		arg.DiskID,
+		arg.Name,
+		arg.CapacityBytes,
+		arg.InodesQuota,
+	)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.CapacityBytes,
+		&i.UsedBytes,
+		&i.InodesQuota,
+		&i.InodesUsed,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateDiskStatus = `-- name: UpdateDiskStatus :one
 UPDATE disks
 SET status = $2

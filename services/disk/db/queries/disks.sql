@@ -20,6 +20,15 @@ SET status = $2
 WHERE disk_id = $1
 RETURNING *;
 
+-- name: UpdateDisk :one
+UPDATE disks
+SET name = $2,
+    capacity_bytes = $3,
+    inodes_quota = $4,
+    updated_at = now()
+WHERE disk_id = $1
+RETURNING *;
+
 -- name: ListDisks :many
 SELECT * FROM disks
 WHERE (@status_filter::smallint = 0 OR status = @status_filter::smallint)

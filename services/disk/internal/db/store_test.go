@@ -104,6 +104,34 @@ func TestStore_UpdateDiskStatus(t *testing.T) {
 	assert.Equal(t, int16(3), updated.Status)
 }
 
+func TestStore_UpdateDisk(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	created, err := store.CreateDisk(ctx, db.CreateDiskParams{
+		DiskID:        pgtype.UUID{Bytes: diskID, Valid: true},
+		Name:          "initial-name",
+		CapacityBytes: 1024,
+		InodesQuota:   100,
+		Status:        2, // READY
+	})
+	require.NoError(t, err)
+
+	updated, err := store.UpdateDisk(ctx, db.UpdateDiskParams{
+		DiskID:        pgtype.UUID{Bytes: diskID, Valid: true},
+		Name:          "updated-name",
+		CapacityBytes: 2048,
+		InodesQuota:   200,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "updated-name", updated.Name)
+	assert.Equal(t, int64(2048), updated.CapacityBytes)
+	assert.Equal(t, int64(200), updated.InodesQuota)
+	assert.True(t, updated.UpdatedAt.Time.After(created.UpdatedAt.Time) || updated.UpdatedAt.Time.Equal(created.UpdatedAt.Time))
+}
+
 func TestStore_DiskAttachments_OWMR(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -299,5 +327,3 @@ func TestStore_ListDisksAndCountDisks(t *testing.T) {
 		assert.Equal(t, int16(2), d.Status)
 	}
 }
-
-

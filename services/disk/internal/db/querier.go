@@ -20,6 +20,7 @@ type Querier interface {
 	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 	ListDiskAttachmentsByDiskID(ctx context.Context, diskID pgtype.UUID) ([]DiskAttachment, error)
 	ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error)
+	UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error)
 	UpdateDiskStatus(ctx context.Context, arg UpdateDiskStatusParams) (Disk, error)
 }
 

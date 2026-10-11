@@ -170,40 +170,7 @@ func (s *StorageService) Mount(ctx context.Context, req *bowlv1.MountRequest) (*
 		AttrTimeout: durationpb.New(1 * time.Second),
 	}
 
-	disk := attachResp.GetDisk()
-	var statfs *bowlv1.Statfs
-	if disk != nil && disk.GetStatfs() != nil {
-		statfs = disk.GetStatfs()
-	} else {
-		var capacity, used, inodesQuota, inodesUsed uint64
-		if disk != nil {
-			capacity = disk.GetCapacityBytes()
-			used = disk.GetUsedBytes()
-			inodesQuota = disk.GetInodesQuota()
-			inodesUsed = disk.GetInodesUsed()
-		}
-		blockSize := uint32(4096)
-		var blocks, freeBlocks, filesFree uint64
-		if capacity > 0 {
-			blocks = capacity / uint64(blockSize)
-			if capacity > used {
-				freeBlocks = (capacity - used) / uint64(blockSize)
-			}
-		}
-		if inodesQuota > 0 && inodesQuota > inodesUsed {
-			filesFree = inodesQuota - inodesUsed
-		}
-		statfs = &bowlv1.Statfs{
-			BlockSize:    blockSize,
-			FragmentSize: blockSize,
-			Blocks:       blocks,
-			BlocksFree:   freeBlocks,
-			BlocksAvail:  freeBlocks,
-			Files:        inodesQuota,
-			FilesFree:    filesFree,
-			MaxNameLen:   255,
-		}
-	}
+	statfs := buildStatfs(attachResp.GetDisk())
 
 	return &bowlv1.MountResponse{
 		SessionId:       sessionID,
@@ -271,3 +238,78 @@ func (s *StorageService) KeepAlive(ctx context.Context, req *bowlv1.KeepAliveReq
 		LeaseRevocation: sess.Revoked,
 	}, nil
 }
+
+// buildStatfs constructs a Statfs proto message from a Disk proto entity or defaults.
+func buildStatfs(disk *bowlv1.Disk) *bowlv1.Statfs {
+	if disk != nil && disk.GetStatfs() != nil {
+		return disk.GetStatfs()
+	}
+	var capacity, used, inodesQuota, inodesUsed uint64
+	if disk != nil {
+		capacity = disk.GetCapacityBytes()
+		used = disk.GetUsedBytes()
+		inodesQuota = disk.GetInodesQuota()
+		inodesUsed = disk.GetInodesUsed()
+	}
+	blockSize := uint32(4096)
+	var blocks, freeBlocks, filesFree uint64
+	if capacity > 0 {
+		blocks = capacity / uint64(blockSize)
+		if capacity > used {
+			freeBlocks = (capacity - used) / uint64(blockSize)
+		}
+	}
+	if inodesQuota > 0 && inodesQuota > inodesUsed {
+		filesFree = inodesQuota - inodesUsed
+	}
+	return &bowlv1.Statfs{
+		BlockSize:    blockSize,
+		FragmentSize: blockSize,
+		Blocks:       blocks,
+		BlocksFree:   freeBlocks,
+		BlocksAvail:  freeBlocks,
+		Files:        inodesQuota,
+		FilesFree:    filesFree,
+		MaxNameLen:   255,
+	}
+}
+
+// Statfs returns file system capacity, usage statistics, and Inode metadata counters.
+func (s *StorageService) Statfs(ctx context.Context, req *bowlv1.StatfsRequest) (*bowlv1.StatfsResponse, error) {
+	sessionID := strings.TrimSpace(req.GetSessionId())
+	if sessionID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "session_id is required")
+	}
+
+	sess, found := s.sessions.Get(sessionID)
+	if !found {
+		return nil, connect.Errorf(connect.CodeNotFound, "session not found: %s", sessionID)
+	}
+
+	var statfs *bowlv1.Statfs
+	if s.diskClient != nil {
+		statfsResp, err := s.diskClient.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{
+			DiskId: sess.DiskID,
+		})
+		if err == nil && statfsResp.GetStatfs() != nil {
+			statfs = statfsResp.GetStatfs()
+		} else if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
+			return nil, toConnectError(err)
+		} else {
+			diskResp, err := s.diskClient.GetDisk(ctx, &bowlv1.GetDiskRequest{
+				DiskId: sess.DiskID,
+			})
+			if err != nil {
+				return nil, toConnectError(err)
+			}
+			statfs = buildStatfs(diskResp.GetDisk())
+		}
+	} else {
+		statfs = buildStatfs(nil)
+	}
+
+	return &bowlv1.StatfsResponse{
+		Statfs: statfs,
+	}, nil
+}
+

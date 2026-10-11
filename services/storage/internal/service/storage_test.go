@@ -28,8 +28,12 @@ type fakeDiskService struct {
 	mu          sync.Mutex
 	attachCalls []*bowlv1.AttachDiskRequest
 	detachCalls []*bowlv1.DetachDiskRequest
+	getCalls    []*bowlv1.GetDiskRequest
+	statfsCalls []*bowlv1.GetDiskStatfsRequest
 	attachHook  func(ctx context.Context, req *bowlv1.AttachDiskRequest) (*bowlv1.AttachDiskResponse, error)
 	detachHook  func(ctx context.Context, req *bowlv1.DetachDiskRequest) (*bowlv1.DetachDiskResponse, error)
+	getHook     func(ctx context.Context, req *bowlv1.GetDiskRequest) (*bowlv1.GetDiskResponse, error)
+	statfsHook  func(ctx context.Context, req *bowlv1.GetDiskStatfsRequest) (*bowlv1.GetDiskStatfsResponse, error)
 }
 
 func (f *fakeDiskService) AttachDisk(ctx context.Context, req *bowlv1.AttachDiskRequest) (*bowlv1.AttachDiskResponse, error) {
@@ -73,6 +77,42 @@ func (f *fakeDiskService) DetachDisk(ctx context.Context, req *bowlv1.DetachDisk
 			Status:        bowlv1.DiskStatus_DISK_STATUS_READY,
 		},
 	}, nil
+}
+
+func (f *fakeDiskService) GetDisk(ctx context.Context, req *bowlv1.GetDiskRequest) (*bowlv1.GetDiskResponse, error) {
+	f.mu.Lock()
+	f.getCalls = append(f.getCalls, req)
+	hook := f.getHook
+	f.mu.Unlock()
+
+	if hook != nil {
+		return hook(ctx, req)
+	}
+
+	return &bowlv1.GetDiskResponse{
+		Disk: &bowlv1.Disk{
+			DiskId:        req.GetDiskId(),
+			Name:          "test-disk",
+			CapacityBytes: 10 * 1024 * 1024 * 1024, // 10 GB
+			UsedBytes:     1024 * 1024,             // 1 MB
+			InodesQuota:   1000000,
+			InodesUsed:    10,
+			Status:        bowlv1.DiskStatus_DISK_STATUS_ATTACHED,
+		},
+	}, nil
+}
+
+func (f *fakeDiskService) GetDiskStatfs(ctx context.Context, req *bowlv1.GetDiskStatfsRequest) (*bowlv1.GetDiskStatfsResponse, error) {
+	f.mu.Lock()
+	f.statfsCalls = append(f.statfsCalls, req)
+	hook := f.statfsHook
+	f.mu.Unlock()
+
+	if hook != nil {
+		return hook(ctx, req)
+	}
+
+	return nil, connect.NewError(connect.CodeUnimplemented, "GetDiskStatfs unimplemented")
 }
 
 type testHarness struct {
@@ -571,4 +611,182 @@ func TestStorageService_KeepAlive_ValidationErrors(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestStorageService_Statfs_Success(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "statfs-client-1"
+
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+	require.NotEmpty(t, sessionID)
+
+	statfsResp, err := h.storageClient.Statfs(ctx, &bowlv1.StatfsRequest{
+		SessionId: sessionID,
+		Ino:       1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, statfsResp)
+
+	statfs := statfsResp.GetStatfs()
+	require.NotNil(t, statfs)
+
+	// Block and fragment size: 4096
+	assert.Equal(t, uint32(4096), statfs.GetBlockSize())
+	assert.Equal(t, uint32(4096), statfs.GetFragmentSize())
+
+	// Capacity: 10GB = 10 * 1024 * 1024 * 1024 bytes -> 2621440 blocks
+	expectedBlocks := uint64(10 * 1024 * 1024 * 1024 / 4096)
+	assert.Equal(t, expectedBlocks, statfs.GetBlocks())
+
+	// Used: 1MB = 1024 * 1024 bytes -> free = (10GB - 1MB) / 4096
+	expectedBlocksFree := uint64((10*1024*1024*1024 - 1024*1024) / 4096)
+	assert.Equal(t, expectedBlocksFree, statfs.GetBlocksFree())
+	assert.Equal(t, expectedBlocksFree, statfs.GetBlocksAvail())
+
+	// Inodes: quota = 1000000, used = 10 -> free = 999990
+	assert.Equal(t, uint64(1000000), statfs.GetFiles())
+	assert.Equal(t, uint64(999990), statfs.GetFilesFree())
+
+	// Max filename length: 255
+	assert.Equal(t, uint32(255), statfs.GetMaxNameLen())
+}
+
+func TestStorageService_Statfs_ValidationErrors(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+
+	// 1. Empty session_id -> InvalidArgument
+	_, err := h.storageClient.Statfs(ctx, &bowlv1.StatfsRequest{
+		SessionId: "",
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 2. Whitespace session_id -> InvalidArgument
+	_, err = h.storageClient.Statfs(ctx, &bowlv1.StatfsRequest{
+		SessionId: "   ",
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+func TestStorageService_Statfs_NotFound(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	unknownSessionID := uuid.New().String()
+
+	_, err := h.storageClient.Statfs(ctx, &bowlv1.StatfsRequest{
+		SessionId: unknownSessionID,
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestStorageService_Statfs_DirectFromDiskStatfs(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "statfs-client-direct"
+
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Configure fake DiskService to return custom Statfs via GetDiskStatfs
+	customStatfs := &bowlv1.Statfs{
+		BlockSize:    4096,
+		FragmentSize: 4096,
+		Blocks:       5000000,
+		BlocksFree:   4500000,
+		BlocksAvail:  4500000,
+		Files:        2000000,
+		FilesFree:    1900000,
+		MaxNameLen:   255,
+	}
+	h.fakeDiskSvc.mu.Lock()
+	h.fakeDiskSvc.statfsHook = func(ctx context.Context, req *bowlv1.GetDiskStatfsRequest) (*bowlv1.GetDiskStatfsResponse, error) {
+		return &bowlv1.GetDiskStatfsResponse{
+			DiskId: req.GetDiskId(),
+			Statfs: customStatfs,
+		}, nil
+	}
+	h.fakeDiskSvc.mu.Unlock()
+
+	statfsResp, err := h.storageClient.Statfs(ctx, &bowlv1.StatfsRequest{
+		SessionId: sessionID,
+		Ino:       1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, statfsResp)
+	assert.Equal(t, customStatfs.GetBlocks(), statfsResp.GetStatfs().GetBlocks())
+	assert.Equal(t, customStatfs.GetBlocksFree(), statfsResp.GetStatfs().GetBlocksFree())
+	assert.Equal(t, customStatfs.GetFiles(), statfsResp.GetStatfs().GetFiles())
+	assert.Equal(t, customStatfs.GetFilesFree(), statfsResp.GetStatfs().GetFilesFree())
+}
+
+func TestStorageService_Statfs_DiskServiceError(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "statfs-client-err"
+
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Configure fake DiskService GetDisk to fail
+	h.fakeDiskSvc.mu.Lock()
+	h.fakeDiskSvc.getHook = func(ctx context.Context, req *bowlv1.GetDiskRequest) (*bowlv1.GetDiskResponse, error) {
+		return nil, connect.NewError(connect.CodeInternal, "disk store query error")
+	}
+	h.fakeDiskSvc.mu.Unlock()
+
+	_, err = h.storageClient.Statfs(ctx, &bowlv1.StatfsRequest{
+		SessionId: sessionID,
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 }

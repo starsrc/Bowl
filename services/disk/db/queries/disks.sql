@@ -38,3 +38,8 @@ LIMIT @limit_val OFFSET @offset_val;
 -- name: CountDisks :one
 SELECT COUNT(*) FROM disks
 WHERE (@status_filter::smallint = 0 OR status = @status_filter::smallint);
+
+-- name: DeleteDisk :execrows
+DELETE FROM disks
+WHERE disk_id = $1;
+

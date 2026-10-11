@@ -15,6 +15,7 @@ type Querier interface {
 	CountDisks(ctx context.Context, statusFilter int16) (int64, error)
 	CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error)
 	CreateDiskAttachment(ctx context.Context, arg CreateDiskAttachmentParams) (DiskAttachment, error)
+	DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	DeleteDiskAttachment(ctx context.Context, arg DeleteDiskAttachmentParams) (int64, error)
 	DeleteDiskAttachmentsByDiskID(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)

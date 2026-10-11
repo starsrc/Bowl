@@ -74,8 +74,9 @@ func main() {
 	slog.Info("database migrations applied successfully")
 
 	store := db.NewStore(pool)
-	diskService := service.NewDiskService(store)
+	diskService := service.NewDiskService(store, service.WithDataDir(cfg.Storage.DataDir))
 	srv := server.New(cfg.Server, diskService)
+
 
 	go func() {
 		slog.Info("starting disk service", "addr", cfg.Server.Addr())

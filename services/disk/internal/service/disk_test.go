@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +26,7 @@ import (
 	"github.com/starsrc/bowl/services/disk/internal/service"
 )
 
-func setupTestServer(t *testing.T) (bowlv1connect.DiskServiceClient, func()) {
+func setupTestServerWithDataDir(t *testing.T, dataDir string) (bowlv1connect.DiskServiceClient, *pgxpool.Pool, func()) {
 	t.Helper()
 
 	dsn := os.Getenv("DB_DSN")
@@ -40,7 +42,11 @@ func setupTestServer(t *testing.T) (bowlv1connect.DiskServiceClient, func()) {
 	require.NoError(t, err)
 
 	store := db.NewStore(pool)
-	diskService := service.NewDiskService(store)
+	opts := []service.Option{}
+	if dataDir != "" {
+		opts = append(opts, service.WithDataDir(dataDir))
+	}
+	diskService := service.NewDiskService(store, opts...)
 
 	// Build Connect-RPC Server and mount onto HTTP multiplexer
 	connectServer := connect.NewServer()
@@ -61,8 +67,14 @@ func setupTestServer(t *testing.T) (bowlv1connect.DiskServiceClient, func()) {
 		store.Close()
 	}
 
+	return client, pool, cleanup
+}
+
+func setupTestServer(t *testing.T) (bowlv1connect.DiskServiceClient, func()) {
+	client, _, cleanup := setupTestServerWithDataDir(t, "")
 	return client, cleanup
 }
+
 
 func TestDiskService_CreateDisk_Success(t *testing.T) {
 	client, cleanup := setupTestServer(t)
@@ -1263,3 +1275,196 @@ func TestDiskService_GetDisk_IncludesStatfs(t *testing.T) {
 	assert.Equal(t, inodesQuota, statfs.FilesFree)
 	assert.Equal(t, uint32(255), statfs.MaxNameLen)
 }
+
+func TestDiskService_DeleteDisk_NormalDeletion_Success(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "delete-normal-volume",
+		CapacityBytes: 1073741824,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// Normal deletion without attachments (force = false)
+	deleteResp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+		DiskId: diskID,
+		Force:  false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deleteResp)
+
+	// Disk should no longer exist
+	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.Error(t, err)
+	assert.Nil(t, getResp)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestDiskService_DeleteDisk_ActiveAttachments_Rejection(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "delete-active-attachment-volume",
+		CapacityBytes: 1073741824,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// Attach client to disk
+	attachResp, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "worker-node-1",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, attachResp)
+
+	// Normal deletion with active attachments (force = false) must fail
+	deleteResp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+		DiskId: diskID,
+		Force:  false,
+	})
+	require.Error(t, err)
+	assert.Nil(t, deleteResp)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	assert.Contains(t, err.Error(), "cannot delete disk with active attachments without force=true")
+
+	// Verify disk still exists and is attached
+	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, getResp.Disk.Status)
+}
+
+func TestDiskService_DeleteDisk_ForceCascadeDeletion_Success(t *testing.T) {
+	dataDir := t.TempDir()
+	client, pool, cleanup := setupTestServerWithDataDir(t, dataDir)
+	defer cleanup()
+
+	ctx := context.Background()
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "force-cascade-volume",
+		CapacityBytes: 1073741824,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// Attach writer and reader
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-client-1",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-client-1",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+
+	// Create PostgreSQL schema per ADR 0006 & ADR 0010
+	parsedUUID := uuid.MustParse(diskID)
+	schemaName := fmt.Sprintf("disk_%s", strings.ReplaceAll(parsedUUID.String(), "-", "_"))
+	_, err = pool.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, schemaName))
+	require.NoError(t, err)
+
+	// Create dummy table inside schema to ensure CASCADE drops dependent objects
+	_, err = pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE "%s"."chunks" (id text)`, schemaName))
+	require.NoError(t, err)
+
+	// Create local chunk storage directory
+	diskChunkDir := filepath.Join(dataDir, diskID)
+	err = os.MkdirAll(diskChunkDir, 0755)
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(diskChunkDir, "chunk_001.bin"), []byte("sample chunk data"), 0644)
+	require.NoError(t, err)
+
+	// Force deletion (force = true)
+	deleteResp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+		DiskId: diskID,
+		Force:  true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deleteResp)
+
+	// 1. Verify disk record deleted
+	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.Error(t, err)
+	assert.Nil(t, getResp)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	// 2. Verify disk attachments deleted
+	var attCount int64
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM disk_attachments WHERE disk_id = $1", parsedUUID).Scan(&attCount)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), attCount)
+
+	// 3. Verify PostgreSQL schema dropped
+	var schemaExists bool
+	err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)", schemaName).Scan(&schemaExists)
+	require.NoError(t, err)
+	assert.False(t, schemaExists, "PostgreSQL schema should have been dropped with CASCADE")
+
+	// 4. Verify local chunk directory deleted
+	assert.NoDirExists(t, diskChunkDir, "Local chunk directory should have been removed")
+}
+
+func TestDiskService_DeleteDisk_NotFound(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	nonExistentID := uuid.New().String()
+
+	t.Run("force=false returns NotFound", func(t *testing.T) {
+		resp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+			DiskId: nonExistentID,
+			Force:  false,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	})
+
+	t.Run("force=true returns NotFound", func(t *testing.T) {
+		resp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+			DiskId: nonExistentID,
+			Force:  true,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	})
+}
+
+func TestDiskService_DeleteDisk_ValidationErrors(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("empty disk_id returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+			DiskId: "   ",
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("malformed disk_id returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+			DiskId: "invalid-uuid-string",
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+}
+

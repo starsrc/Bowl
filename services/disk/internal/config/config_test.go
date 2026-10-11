@@ -37,4 +37,6 @@ func TestLoad_SuccessWithDefaults(t *testing.T) {
 	assert.Equal(t, "0.0.0.0:9090", cfg.Server.Addr())
 	assert.Equal(t, 10*time.Second, cfg.Server.ReadHeaderTimeout())
 	assert.Equal(t, 10*time.Second, cfg.Server.ShutdownTimeout())
+	assert.Equal(t, "/tmp/bowl/data", cfg.Storage.DataDir)
 }
+

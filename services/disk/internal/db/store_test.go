@@ -327,3 +327,39 @@ func TestStore_ListDisksAndCountDisks(t *testing.T) {
 		assert.Equal(t, int16(2), d.Status)
 	}
 }
+
+func TestStore_DeleteDisk(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+		DiskID:        pgtype.UUID{Bytes: diskID, Valid: true},
+		Name:          "delete-test-disk",
+		CapacityBytes: 1024,
+		InodesQuota:   100,
+		Status:        2,
+	})
+	require.NoError(t, err)
+
+	// Verify disk exists
+	_, err = store.GetDisk(ctx, pgtype.UUID{Bytes: diskID, Valid: true})
+	require.NoError(t, err)
+
+	// Delete disk
+	rows, err := store.DeleteDisk(ctx, pgtype.UUID{Bytes: diskID, Valid: true})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+
+	// Verify disk no longer exists
+	_, err = store.GetDisk(ctx, pgtype.UUID{Bytes: diskID, Valid: true})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// Deleting again returns 0 rows affected
+	rows, err = store.DeleteDisk(ctx, pgtype.UUID{Bytes: diskID, Valid: true})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), rows)
+}
+

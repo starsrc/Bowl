@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -13,6 +14,7 @@ type Store interface {
 	Querier
 	ExecTx(ctx context.Context, fn func(Querier) error) error
 	Close()
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
 // SQLStore provides Store implementation backed by pgxpool.Pool.
@@ -27,6 +29,11 @@ func NewStore(pool *pgxpool.Pool) Store {
 		Queries: New(pool),
 		pool:    pool,
 	}
+}
+
+// Exec executes a raw SQL query on the connection pool.
+func (s *SQLStore) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return s.pool.Exec(ctx, sql, arguments...)
 }
 
 // Close closes the underlying connection pool.

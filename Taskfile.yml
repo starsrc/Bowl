@@ -40,3 +40,19 @@ tasks:
     desc: "Run tests"
     cmds:
       - go test -v ./... {{.CLI_ARGS}}
+
+  minio:up:
+    desc: "Start local MinIO object storage container and initialize bucket"
+    cmds:
+      - docker compose up -d minio
+      - ./scripts/init_minio.sh
+
+  minio:down:
+    desc: "Stop local MinIO object storage container"
+    cmds:
+      - docker compose down
+
+  minio:status:
+    desc: "Check local MinIO status"
+    cmds:
+      - docker compose ps minio

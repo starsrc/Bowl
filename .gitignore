@@ -30,3 +30,4 @@ go.work.sum
 .tdd_list.md
 .agents
 /references
+/data/

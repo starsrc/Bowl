@@ -20,6 +20,7 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
+	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/session"
 )
 
@@ -122,6 +123,14 @@ func NewStorageService(
 		})
 	}
 	return svc
+}
+
+// RecoverStaging triggers NVMe staging recovery if ChunkDriver is configured.
+func (s *StorageService) RecoverStaging(ctx context.Context) (*chunk.RecoveryReport, error) {
+	if cd, ok := s.driver.(*ChunkDriver); ok {
+		return cd.RecoverStaging(ctx)
+	}
+	return &chunk.RecoveryReport{}, nil
 }
 
 // FormatDiskSchema formats the PostgreSQL schema name for a given virtual disk UUID.

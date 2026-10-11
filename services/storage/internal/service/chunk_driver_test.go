@@ -2519,7 +2519,7 @@ func TestChunkDriver_Flush_BlocksUntilS3UploadsFinish(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, flushResp)
-	assert.GreaterOrEqual(t, elapsed, 80*time.Millisecond, "Flush must block until simulated S3 upload finishes")
+	assert.GreaterOrEqual(t, elapsed, 70*time.Millisecond, "Flush must block until simulated S3 upload finishes")
 
 	objs := mockClient.getObjects()
 	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)

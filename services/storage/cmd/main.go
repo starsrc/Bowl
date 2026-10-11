@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
+	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/server"
 	"github.com/starsrc/bowl/services/storage/internal/service"
@@ -80,9 +81,30 @@ func main() {
 	connectClient := connect.NewClient(transport)
 	diskClient := bowlv1connect.NewDiskServiceClient(connectClient)
 
+	// Initialize storage driver based on configuration
+	var driver service.FileStorageDriver
+	if cfg.Storage.Driver == "chunk" {
+		if err := os.MkdirAll(cfg.Storage.StagingDir, 0o755); err != nil {
+			slog.Error("failed to create staging directory", "error", err)
+			os.Exit(1)
+		}
+		stagingMgr := chunk.NewStagingManager(cfg.Storage.StagingDir)
+		driver = service.NewChunkDriver(stagingMgr, pool)
+		slog.Info("using chunk storage driver", "staging_dir", cfg.Storage.StagingDir)
+	} else {
+		driver = service.NewLegacyFileDriver(cfg.Storage.DataDir)
+		slog.Info("using legacy file storage driver", "data_dir", cfg.Storage.DataDir)
+	}
+
 	// Initialize in-memory session manager and StorageService
 	sessionMgr := session.NewMemoryManager()
-	storageService := service.NewStorageService(diskClient, pool, sessionMgr, cfg.Storage.DataDir)
+	storageService := service.NewStorageService(
+		diskClient,
+		pool,
+		sessionMgr,
+		cfg.Storage.DataDir,
+		service.WithFileStorageDriver(driver),
+	)
 	srv := server.New(cfg.Server, storageService)
 
 	go func() {

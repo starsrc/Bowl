@@ -55,7 +55,9 @@ type DBConfig struct {
 
 // StorageConfig defines local block storage configuration.
 type StorageConfig struct {
-	DataDir string `env:"DATA_DIR" envDefault:"/tmp/bowl/data"`
+	DataDir    string `env:"DATA_DIR" envDefault:"/tmp/bowl/data"`
+	StagingDir string `env:"STAGING_DIR" envDefault:"/tmp/bowl/staging"`
+	Driver     string `env:"STORAGE_DRIVER" envDefault:"legacy"`
 }
 
 // DiskServiceConfig defines upstream DiskService configuration.

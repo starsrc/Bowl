@@ -692,3 +692,275 @@ func TestChunkDriver_Read_InodeNotFound(t *testing.T) {
 	assert.Nil(t, data)
 	assert.False(t, eof)
 }
+
+func TestChunkDriver_DirectWrite_SpanningBoundary(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	_, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "direct-spanning-client",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	handle, err := driver.Open(ctx, diskID.String(), 200, bowlv1.OpenMode_OPEN_MODE_READ_WRITE, 0)
+	require.NoError(t, err)
+	defer func() { _ = driver.Close(ctx, handle) }()
+
+	// Write spanning from Chunk 2 to Chunk 3:
+	// Chunk 2 starts at 2 * ChunkSize = 134217728.
+	// Offset: Chunk 2 at 63 MiB offset = 2 * ChunkSize + 63 MiB
+	// Length: 2 MiB (1 MiB in Chunk 2, 1 MiB in Chunk 3)
+	offset := uint64(2*chunk.ChunkSize + 63*1024*1024)
+	payload := []byte("first-half-chunk2-data" + string(bytes.Repeat([]byte("A"), 1024*1024-22)) +
+		"second-half-chunk3-data" + string(bytes.Repeat([]byte("B"), 1024*1024-23)))
+
+	written, err := driver.Write(ctx, handle, diskID.String(), 200, offset, payload)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(len(payload)), written)
+
+	// Verify Chunk 2
+	var rawSlices2 []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = 200 AND indx = 2`, schemaName)).Scan(&rawSlices2)
+	require.NoError(t, err)
+	slices2, err := chunk.DecodeSlices(rawSlices2)
+	require.NoError(t, err)
+	require.Len(t, slices2, 1)
+	assert.Equal(t, uint32(63*1024*1024), slices2[0].Pos)
+	assert.Equal(t, uint32(1024*1024), slices2[0].Len)
+
+	// Verify Chunk 3
+	var rawSlices3 []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = 200 AND indx = 3`, schemaName)).Scan(&rawSlices3)
+	require.NoError(t, err)
+	slices3, err := chunk.DecodeSlices(rawSlices3)
+	require.NoError(t, err)
+	require.Len(t, slices3, 1)
+	assert.Equal(t, uint32(0), slices3[0].Pos)
+	assert.Equal(t, uint32(1024*1024), slices3[0].Len)
+
+	// Verify staging slice data
+	slice2Data, err := stagingMgr.ReadSlice(diskID.String(), slices2[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[:1024*1024], slice2Data)
+
+	slice3Data, err := stagingMgr.ReadSlice(diskID.String(), slices3[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[1024*1024:], slice3Data)
+}
+
+func TestChunkDriver_Write_EndToEnd_SpanningBoundary(t *testing.T) {
+	h, stagingMgr, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-spanning-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "spanning-boundary.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 2 MiB spanning across Chunk 0 and Chunk 1:
+	// Start at 63 MiB (63 * 1024 * 1024), write 2 MiB (2 * 1024 * 1024)
+	offset := uint64(63 * 1024 * 1024)
+	size := 2 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(size), writeResp.GetWritten())
+
+	// Verify Chunk 0 (indx 0)
+	var rawSlices0 []byte
+	query0 := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName)
+	err = h.dbPool.QueryRow(ctx, query0, int64(ino)).Scan(&rawSlices0)
+	require.NoError(t, err)
+	slices0, err := chunk.DecodeSlices(rawSlices0)
+	require.NoError(t, err)
+	require.Len(t, slices0, 1)
+
+	expectedChunk0Len := uint32(1 * 1024 * 1024)
+	assert.Equal(t, uint32(63*1024*1024), slices0[0].Pos)
+	assert.Equal(t, expectedChunk0Len, slices0[0].Size)
+	assert.Equal(t, uint32(0), slices0[0].Off)
+	assert.Equal(t, expectedChunk0Len, slices0[0].Len)
+
+	// Verify Chunk 1 (indx 1)
+	var rawSlices1 []byte
+	query1 := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName)
+	err = h.dbPool.QueryRow(ctx, query1, int64(ino)).Scan(&rawSlices1)
+	require.NoError(t, err)
+	slices1, err := chunk.DecodeSlices(rawSlices1)
+	require.NoError(t, err)
+	require.Len(t, slices1, 1)
+
+	expectedChunk1Len := uint32(1 * 1024 * 1024)
+	assert.Equal(t, uint32(0), slices1[0].Pos)
+	assert.Equal(t, expectedChunk1Len, slices1[0].Size)
+	assert.Equal(t, uint32(0), slices1[0].Off)
+	assert.Equal(t, expectedChunk1Len, slices1[0].Len)
+
+	// Verify staging slice data
+	slice0Data, err := stagingMgr.ReadSlice(diskID.String(), slices0[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[:expectedChunk0Len], slice0Data)
+
+	slice1Data, err := stagingMgr.ReadSlice(diskID.String(), slices1[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[expectedChunk0Len:], slice1Data)
+
+	// Verify inode metadata
+	var inodeSize int64
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName), int64(ino)).Scan(&inodeSize)
+	require.NoError(t, err)
+	assert.Equal(t, int64(offset)+int64(size), inodeSize)
+}
+
+func TestChunkDriver_Write_EndToEnd_MultiChunk_ThreeChunks(t *testing.T) {
+	h, stagingMgr, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-3chunks-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "three-chunks.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 130 MiB write starting at offset 0:
+	// Chunk 0: 64 MiB
+	// Chunk 1: 64 MiB
+	// Chunk 2: 2 MiB
+	totalSize := 130 * 1024 * 1024
+	payload := make([]byte, totalSize)
+	// Fill with deterministic pattern
+	for i := 0; i < totalSize; i += 1024 * 1024 {
+		pattern := byte(i / (1024 * 1024))
+		for j := 0; j < 1024*1024 && i+j < totalSize; j++ {
+			payload[i+j] = pattern
+		}
+	}
+
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(totalSize), writeResp.GetWritten())
+
+	// Query all chunk rows
+	rows, err := h.dbPool.Query(ctx, fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1 ORDER BY indx`, schemaName), int64(ino))
+	require.NoError(t, err)
+	defer rows.Close()
+
+	type chunkInfo struct {
+		indx   int32
+		slices []chunk.Slice
+	}
+	var chunks []chunkInfo
+	for rows.Next() {
+		var indx int32
+		var raw []byte
+		err := rows.Scan(&indx, &raw)
+		require.NoError(t, err)
+		decoded, err := chunk.DecodeSlices(raw)
+		require.NoError(t, err)
+		chunks = append(chunks, chunkInfo{indx: indx, slices: decoded})
+	}
+	require.NoError(t, rows.Err())
+
+	require.Len(t, chunks, 3)
+
+	// Chunk 0: 64 MiB
+	assert.Equal(t, int32(0), chunks[0].indx)
+	require.Len(t, chunks[0].slices, 1)
+	assert.Equal(t, uint32(0), chunks[0].slices[0].Pos)
+	assert.Equal(t, uint32(chunk.ChunkSize), chunks[0].slices[0].Size)
+	assert.Equal(t, uint32(chunk.ChunkSize), chunks[0].slices[0].Len)
+
+	// Chunk 1: 64 MiB
+	assert.Equal(t, int32(1), chunks[1].indx)
+	require.Len(t, chunks[1].slices, 1)
+	assert.Equal(t, uint32(0), chunks[1].slices[0].Pos)
+	assert.Equal(t, uint32(chunk.ChunkSize), chunks[1].slices[0].Size)
+	assert.Equal(t, uint32(chunk.ChunkSize), chunks[1].slices[0].Len)
+
+	// Chunk 2: 2 MiB
+	expectedChunk2Len := uint32(2 * 1024 * 1024)
+	assert.Equal(t, int32(2), chunks[2].indx)
+	require.Len(t, chunks[2].slices, 1)
+	assert.Equal(t, uint32(0), chunks[2].slices[0].Pos)
+	assert.Equal(t, expectedChunk2Len, chunks[2].slices[0].Size)
+	assert.Equal(t, expectedChunk2Len, chunks[2].slices[0].Len)
+
+	// Verify staging slice data for Chunk 2
+	slice2Data, err := stagingMgr.ReadSlice(diskID.String(), chunks[2].slices[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[128*1024*1024:], slice2Data)
+
+	// Verify inode metadata size
+	var inodeSize int64
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName), int64(ino)).Scan(&inodeSize)
+	require.NoError(t, err)
+	assert.Equal(t, int64(totalSize), inodeSize)
+}

@@ -161,10 +161,15 @@ func setupTestHarness(t *testing.T) *testHarness {
 	storageConnectServer := connect.NewServer()
 	bowlv1connect.RegisterStorageServiceHandler(storageConnectServer, storageSvc)
 	storageMux := http.NewServeMux()
-	connecthttp.Mount(storageMux, storageConnectServer)
+	connecthttp.Mount(storageMux, storageConnectServer, connecthttp.WithReadMaxBytes(256*1024*1024))
 	storageTestServer := httptest.NewServer(storageMux)
 
-	storageTransport := connecthttp.NewTransport(storageTestServer.Client(), storageTestServer.URL)
+	storageTransport := connecthttp.NewTransport(
+		storageTestServer.Client(),
+		storageTestServer.URL,
+		connecthttp.WithSendMaxBytes(256*1024*1024),
+		connecthttp.WithReadMaxBytes(256*1024*1024),
+	)
 	storageConnectClient := connect.NewClient(storageTransport)
 	storageClient := bowlv1connect.NewStorageServiceClient(storageConnectClient)
 
@@ -1587,4 +1592,3 @@ func TestStorageService_Access_NotFoundAndValidationErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }
-

@@ -360,11 +360,24 @@ func (s *StorageService) Unlink(ctx context.Context, req *bowlv1.UnlinkRequest) 
 
 	now := time.Now()
 
-	// 3. Decrement nlink; delete inode if nlink <= 1
+	// 3. Decrement nlink; delete inode if nlink <= 1 and lookup_count == 0
 	if targetInode.GetNlink() <= 1 {
-		deleteSQL := fmt.Sprintf(`DELETE FROM "%s".inodes WHERE ino = $1;`, schemaName)
-		if _, err := s.db.Exec(ctx, deleteSQL, int64(targetInode.GetIno())); err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to delete inode: %s", err)
+		var lookupCount int64
+		_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT lookup_count FROM "%s".inodes WHERE ino = $1;`, schemaName), int64(targetInode.GetIno())).Scan(&lookupCount)
+		if lookupCount <= 0 {
+			deleteSQL := fmt.Sprintf(`DELETE FROM "%s".inodes WHERE ino = $1;`, schemaName)
+			if _, err := s.db.Exec(ctx, deleteSQL, int64(targetInode.GetIno())); err != nil {
+				return nil, connect.Errorf(connect.CodeInternal, "failed to delete inode: %s", err)
+			}
+			deleteXAttrSQL := fmt.Sprintf(`DELETE FROM "%s".xattrs WHERE ino = $1;`, schemaName)
+			_, _ = s.db.Exec(ctx, deleteXAttrSQL, int64(targetInode.GetIno()))
+		} else {
+			// Unlinked but still referenced by lookup count: set nlink = 0 and detach from parent
+			deletedName := fmt.Sprintf(".deleted.%d", targetInode.GetIno())
+			updateSQL := fmt.Sprintf(`UPDATE "%s".inodes SET nlink = 0, parent = 0, name = $1, ctime = $2 WHERE ino = $3;`, schemaName)
+			if _, err := s.db.Exec(ctx, updateSQL, deletedName, now, int64(targetInode.GetIno())); err != nil {
+				return nil, connect.Errorf(connect.CodeInternal, "failed to unlink inode: %s", err)
+			}
 		}
 	} else {
 		updateSQL := fmt.Sprintf(`UPDATE "%s".inodes SET nlink = nlink - 1, ctime = $1 WHERE ino = $2;`, schemaName)

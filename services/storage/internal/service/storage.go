@@ -376,8 +376,11 @@ CREATE TABLE IF NOT EXISTS "%s".inodes (
 	mtime TIMESTAMPTZ NOT NULL,
 	ctime TIMESTAMPTZ NOT NULL,
 	target TEXT NOT NULL DEFAULT '',
-	generation BIGINT NOT NULL DEFAULT 0
+	generation BIGINT NOT NULL DEFAULT 0,
+	lookup_count BIGINT NOT NULL DEFAULT 1
 );
+
+ALTER TABLE "%s".inodes ADD COLUMN IF NOT EXISTS lookup_count BIGINT NOT NULL DEFAULT 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inodes_parent_name ON "%s".inodes (parent, name);
 
@@ -387,7 +390,7 @@ CREATE TABLE IF NOT EXISTS "%s".xattrs (
 	value BYTEA NOT NULL,
 	PRIMARY KEY (ino, name)
 );
-`, schemaName, schemaName, schemaName, schemaName)
+`, schemaName, schemaName, schemaName, schemaName, schemaName)
 
 	if _, err := s.db.Exec(ctx, ddl); err != nil {
 		return err
@@ -395,8 +398,8 @@ CREATE TABLE IF NOT EXISTS "%s".xattrs (
 
 	now := time.Now()
 	insertRoot := fmt.Sprintf(`
-INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
-VALUES (1, 1, '/', $1, $2, 2, 0, 0, 4096, 8, 0, $3, $3, $3)
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime, lookup_count)
+VALUES (1, 1, '/', $1, $2, 2, 0, 0, 4096, 8, 0, $3, $3, $3, 1)
 ON CONFLICT (ino) DO NOTHING;
 `, schemaName)
 
@@ -586,6 +589,13 @@ func (s *StorageService) Lookup(ctx context.Context, req *bowlv1.LookupRequest) 
 			return nil, connect.Errorf(connect.CodeNotFound, "entry not found: parent %d, name %s", req.GetParentIno(), name)
 		}
 		return nil, connect.Errorf(connect.CodeInternal, "failed to lookup entry: %s", err)
+	}
+
+	if s.db != nil {
+		updateQuery := fmt.Sprintf(`UPDATE "%s".inodes SET lookup_count = lookup_count + 1 WHERE ino = $1;`, schemaName)
+		if _, err := s.db.Exec(ctx, updateQuery, int64(inode.GetIno())); err != nil {
+			return nil, connect.Errorf(connect.CodeInternal, "failed to increment lookup count: %s", err)
+		}
 	}
 
 	return &bowlv1.LookupResponse{

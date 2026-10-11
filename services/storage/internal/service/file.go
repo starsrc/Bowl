@@ -175,7 +175,22 @@ func (s *StorageService) Read(ctx context.Context, req *bowlv1.ReadRequest) (*bo
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
 
-	if handle.file == nil {
+	// Check if parent disk directory exists
+	if _, err := os.Stat(filepath.Dir(filePath)); os.IsNotExist(err) {
+		if handle.file != nil {
+			_ = handle.file.Close()
+			handle.file = nil
+		}
+		return nil, connect.Errorf(connect.CodeNotFound, "disk storage directory does not exist: %s", handle.DiskID)
+	}
+
+	if handle.file != nil {
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			_ = handle.file.Close()
+			handle.file = nil
+			return nil, connect.Errorf(connect.CodeNotFound, "chunk file was deleted: %s", filePath)
+		}
+	} else {
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			return &bowlv1.ReadResponse{
 				Data: []byte{},

@@ -359,6 +359,19 @@ func (s *StorageService) KeepAlive(ctx context.Context, req *bowlv1.KeepAliveReq
 		s.cleanupSessionResources(sessionID)
 	}
 
+	// Verify upstream disk existence (ADR 0004 & ADR 0005)
+	if s.diskClient != nil {
+		_, err := s.diskClient.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: sess.DiskID})
+		if err != nil && connect.CodeOf(err) == connect.CodeNotFound {
+			s.sessions.Delete(sessionID)
+			s.cleanupSessionResources(sessionID)
+			return &bowlv1.KeepAliveResponse{
+				IsWriteLease:    false,
+				LeaseRevocation: true,
+			}, nil
+		}
+	}
+
 	var expirePb *timestamppb.Timestamp
 	if !sess.LeaseExpiresAt.IsZero() {
 		expirePb = timestamppb.New(sess.LeaseExpiresAt)

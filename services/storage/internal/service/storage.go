@@ -11,6 +11,7 @@ import (
 
 	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -23,9 +24,11 @@ import (
 // DefaultLeaseDuration defines the default write lease duration (10 seconds).
 const DefaultLeaseDuration = session.DefaultLeaseTimeout
 
-// DBExecutor abstracts database execution for schema management.
+// DBExecutor abstracts database execution for schema and metadata management.
 type DBExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // StorageService implements bowl.v1.StorageService.
@@ -120,9 +123,8 @@ func (s *StorageService) Mount(ctx context.Context, req *bowlv1.MountRequest) (*
 	// ADR 0006: PostgreSQL Schema Isolation per disk
 	schemaName := FormatDiskSchema(parsedDiskUUID)
 	if s.db != nil {
-		query := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, schemaName)
-		if _, err := s.db.Exec(ctx, query); err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to create disk schema %s: %s", schemaName, err).WithCause(err)
+		if err := s.ensureDiskSchema(ctx, schemaName); err != nil {
+			return nil, connect.Errorf(connect.CodeInternal, "failed to initialize disk schema %s: %s", schemaName, err).WithCause(err)
 		}
 	}
 
@@ -156,18 +158,27 @@ func (s *StorageService) Mount(ctx context.Context, req *bowlv1.MountRequest) (*
 	}
 	s.sessions.Create(sess)
 
-	rootInode := &bowlv1.Inode{
-		Ino:         1,
-		ParentIno:   1,
-		Type:        bowlv1.InodeType_INODE_TYPE_DIRECTORY,
-		Mode:        0o755,
-		Nlink:       2,
-		Uid:         0,
-		Gid:         0,
-		Atime:       timestamppb.New(now),
-		Mtime:       timestamppb.New(now),
-		Ctime:       timestamppb.New(now),
-		AttrTimeout: durationpb.New(1 * time.Second),
+	var rootInode *bowlv1.Inode
+	if s.db != nil {
+		var err error
+		rootInode, err = s.getInode(ctx, schemaName, 1)
+		if err != nil {
+			return nil, connect.Errorf(connect.CodeInternal, "failed to query root inode for disk %s: %s", schemaName, err).WithCause(err)
+		}
+	} else {
+		rootInode = &bowlv1.Inode{
+			Ino:         1,
+			ParentIno:   1,
+			Type:        bowlv1.InodeType_INODE_TYPE_DIRECTORY,
+			Mode:        0o755,
+			Nlink:       2,
+			Uid:         0,
+			Gid:         0,
+			Atime:       timestamppb.New(now),
+			Mtime:       timestamppb.New(now),
+			Ctime:       timestamppb.New(now),
+			AttrTimeout: durationpb.New(1 * time.Second),
+		}
 	}
 
 	statfs := buildStatfs(attachResp.GetDisk())
@@ -276,14 +287,9 @@ func buildStatfs(disk *bowlv1.Disk) *bowlv1.Statfs {
 
 // Statfs returns file system capacity, usage statistics, and Inode metadata counters.
 func (s *StorageService) Statfs(ctx context.Context, req *bowlv1.StatfsRequest) (*bowlv1.StatfsResponse, error) {
-	sessionID := strings.TrimSpace(req.GetSessionId())
-	if sessionID == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, "session_id is required")
-	}
-
-	sess, found := s.sessions.Get(sessionID)
-	if !found {
-		return nil, connect.Errorf(connect.CodeNotFound, "session not found: %s", sessionID)
+	sess, _, err := s.getDiskSchemaForSession(req.GetSessionId())
+	if err != nil {
+		return nil, err
 	}
 
 	var statfs *bowlv1.Statfs
@@ -312,4 +318,439 @@ func (s *StorageService) Statfs(ctx context.Context, req *bowlv1.StatfsRequest) 
 		Statfs: statfs,
 	}, nil
 }
+
+// getDiskSchemaForSession retrieves the session and computes the PostgreSQL disk schema name.
+func (s *StorageService) getDiskSchemaForSession(sessionID string) (*session.Session, string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, "", connect.NewError(connect.CodeInvalidArgument, "session_id is required")
+	}
+
+	sess, found := s.sessions.Get(sessionID)
+	if !found {
+		return nil, "", connect.Errorf(connect.CodeNotFound, "session not found: %s", sessionID)
+	}
+
+	parsedDiskUUID, err := uuid.Parse(sess.DiskID)
+	if err != nil {
+		return nil, "", connect.Errorf(connect.CodeInternal, "invalid disk_id in session: %s", err)
+	}
+
+	return sess, FormatDiskSchema(parsedDiskUUID), nil
+}
+
+// ensureDiskSchema creates the per-disk PostgreSQL schema, table inodes, and initializes the root inode.
+func (s *StorageService) ensureDiskSchema(ctx context.Context, schemaName string) error {
+	if s.db == nil {
+		return errors.New("database not initialized")
+	}
+
+	ddl := fmt.Sprintf(`
+CREATE SCHEMA IF NOT EXISTS "%s";
+
+CREATE TABLE IF NOT EXISTS "%s".inodes (
+	ino BIGINT PRIMARY KEY,
+	parent BIGINT NOT NULL,
+	name TEXT NOT NULL,
+	type INT NOT NULL,
+	mode INT NOT NULL,
+	nlink INT NOT NULL,
+	uid INT NOT NULL DEFAULT 0,
+	gid INT NOT NULL DEFAULT 0,
+	size BIGINT NOT NULL DEFAULT 0,
+	blocks BIGINT NOT NULL DEFAULT 0,
+	rdev BIGINT NOT NULL DEFAULT 0,
+	atime TIMESTAMPTZ NOT NULL,
+	mtime TIMESTAMPTZ NOT NULL,
+	ctime TIMESTAMPTZ NOT NULL,
+	target TEXT NOT NULL DEFAULT '',
+	generation BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inodes_parent_name ON "%s".inodes (parent, name);
+`, schemaName, schemaName, schemaName)
+
+	if _, err := s.db.Exec(ctx, ddl); err != nil {
+		return err
+	}
+
+	now := time.Now()
+	insertRoot := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
+VALUES (1, 1, '/', $1, $2, 2, 0, 0, 4096, 8, 0, $3, $3, $3)
+ON CONFLICT (ino) DO NOTHING;
+`, schemaName)
+
+	if _, err := s.db.Exec(ctx, insertRoot, int(bowlv1.InodeType_INODE_TYPE_DIRECTORY), int(0o755), now); err != nil {
+		return err
+	}
+	return nil
+}
+
+// getInode queries an Inode record by its inode number.
+func (s *StorageService) getInode(ctx context.Context, schemaName string, ino uint64) (*bowlv1.Inode, error) {
+	if s.db == nil {
+		return nil, errors.New("database not initialized")
+	}
+
+	query := fmt.Sprintf(`
+SELECT ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime, target, generation
+FROM "%s".inodes WHERE ino = $1;
+`, schemaName)
+
+	var (
+		resIno        int64
+		resParent     int64
+		resName       string
+		resType       int
+		resMode       int
+		resNlink      int
+		resUid        int
+		resGid        int
+		resSize       int64
+		resBlocks     int64
+		resRdev       int64
+		resAtime      time.Time
+		resMtime      time.Time
+		resCtime      time.Time
+		resTarget     string
+		resGeneration int64
+	)
+
+	err := s.db.QueryRow(ctx, query, int64(ino)).Scan(
+		&resIno,
+		&resParent,
+		&resName,
+		&resType,
+		&resMode,
+		&resNlink,
+		&resUid,
+		&resGid,
+		&resSize,
+		&resBlocks,
+		&resRdev,
+		&resAtime,
+		&resMtime,
+		&resCtime,
+		&resTarget,
+		&resGeneration,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &bowlv1.Inode{
+		Ino:         uint64(resIno),
+		ParentIno:   uint64(resParent),
+		Type:        bowlv1.InodeType(resType),
+		Mode:        uint32(resMode),
+		Uid:         uint32(resUid),
+		Gid:         uint32(resGid),
+		Size:        uint64(resSize),
+		Nlink:       uint32(resNlink),
+		Rdev:        uint32(resRdev),
+		Atime:       timestamppb.New(resAtime),
+		Mtime:       timestamppb.New(resMtime),
+		Ctime:       timestamppb.New(resCtime),
+		Target:      resTarget,
+		Blocks:      uint64(resBlocks),
+		Generation:  uint64(resGeneration),
+		AttrTimeout: durationpb.New(1 * time.Second),
+	}, nil
+}
+
+// getInodeByParentAndName queries an Inode record by parent inode and entry name.
+func (s *StorageService) getInodeByParentAndName(ctx context.Context, schemaName string, parent uint64, name string) (*bowlv1.Inode, error) {
+	if s.db == nil {
+		return nil, errors.New("database not initialized")
+	}
+
+	if name == "." {
+		return s.getInode(ctx, schemaName, parent)
+	}
+	if name == ".." {
+		if parent == 1 {
+			return s.getInode(ctx, schemaName, 1)
+		}
+		var parentOfParent int64
+		query := fmt.Sprintf(`SELECT parent FROM "%s".inodes WHERE ino = $1;`, schemaName)
+		if err := s.db.QueryRow(ctx, query, int64(parent)).Scan(&parentOfParent); err != nil {
+			return nil, err
+		}
+		return s.getInode(ctx, schemaName, uint64(parentOfParent))
+	}
+
+	query := fmt.Sprintf(`
+SELECT ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime, target, generation
+FROM "%s".inodes WHERE parent = $1 AND name = $2;
+`, schemaName)
+
+	var (
+		resIno        int64
+		resParent     int64
+		resName       string
+		resType       int
+		resMode       int
+		resNlink      int
+		resUid        int
+		resGid        int
+		resSize       int64
+		resBlocks     int64
+		resRdev       int64
+		resAtime      time.Time
+		resMtime      time.Time
+		resCtime      time.Time
+		resTarget     string
+		resGeneration int64
+	)
+
+	err := s.db.QueryRow(ctx, query, int64(parent), name).Scan(
+		&resIno,
+		&resParent,
+		&resName,
+		&resType,
+		&resMode,
+		&resNlink,
+		&resUid,
+		&resGid,
+		&resSize,
+		&resBlocks,
+		&resRdev,
+		&resAtime,
+		&resMtime,
+		&resCtime,
+		&resTarget,
+		&resGeneration,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &bowlv1.Inode{
+		Ino:         uint64(resIno),
+		ParentIno:   uint64(resParent),
+		Type:        bowlv1.InodeType(resType),
+		Mode:        uint32(resMode),
+		Uid:         uint32(resUid),
+		Gid:         uint32(resGid),
+		Size:        uint64(resSize),
+		Nlink:       uint32(resNlink),
+		Rdev:        uint32(resRdev),
+		Atime:       timestamppb.New(resAtime),
+		Mtime:       timestamppb.New(resMtime),
+		Ctime:       timestamppb.New(resCtime),
+		Target:      resTarget,
+		Blocks:      uint64(resBlocks),
+		Generation:  uint64(resGeneration),
+		AttrTimeout: durationpb.New(1 * time.Second),
+	}, nil
+}
+
+// Lookup looks up a directory entry by parent inode and name (FUSE_LOOKUP).
+func (s *StorageService) Lookup(ctx context.Context, req *bowlv1.LookupRequest) (*bowlv1.LookupResponse, error) {
+	if req.GetParentIno() == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "parent_ino must be greater than 0")
+	}
+	name := req.GetName()
+	if name == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "name is required")
+	}
+
+	_, schemaName, err := s.getDiskSchemaForSession(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+
+	inode, err := s.getInodeByParentAndName(ctx, schemaName, req.GetParentIno(), name)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, connect.Errorf(connect.CodeNotFound, "entry not found: parent %d, name %s", req.GetParentIno(), name)
+		}
+		return nil, connect.Errorf(connect.CodeInternal, "failed to lookup entry: %s", err)
+	}
+
+	return &bowlv1.LookupResponse{
+		Inode:        inode,
+		EntryTimeout: durationpb.New(1 * time.Second),
+	}, nil
+}
+
+// GetAttr retrieves metadata attributes for an Inode (FUSE_GETATTR).
+func (s *StorageService) GetAttr(ctx context.Context, req *bowlv1.GetAttrRequest) (*bowlv1.GetAttrResponse, error) {
+	if req.GetIno() == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "ino must be greater than 0")
+	}
+
+	_, schemaName, err := s.getDiskSchemaForSession(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+
+	inode, err := s.getInode(ctx, schemaName, req.GetIno())
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, connect.Errorf(connect.CodeNotFound, "inode not found: %d", req.GetIno())
+		}
+		return nil, connect.Errorf(connect.CodeInternal, "failed to get inode attributes: %s", err)
+	}
+
+	return &bowlv1.GetAttrResponse{
+		Inode: inode,
+	}, nil
+}
+
+// SetAttr modifies metadata attributes for an Inode (FUSE_SETATTR).
+func (s *StorageService) SetAttr(ctx context.Context, req *bowlv1.SetAttrRequest) (*bowlv1.SetAttrResponse, error) {
+	if req.GetIno() == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "ino must be greater than 0")
+	}
+
+	sess, schemaName, err := s.getDiskSchemaForSession(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+
+	if sess.ReadOnly || !sess.IsWriteLease || sess.Revoked {
+		return nil, connect.NewError(connect.CodePermissionDenied, "write permission denied: session is read-only or lease expired")
+	}
+
+	inode, err := s.getInode(ctx, schemaName, req.GetIno())
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, connect.Errorf(connect.CodeNotFound, "inode not found: %d", req.GetIno())
+		}
+		return nil, connect.Errorf(connect.CodeInternal, "failed to query inode: %s", err)
+	}
+
+	valid := req.GetValid()
+	if valid == 0 {
+		return &bowlv1.SetAttrResponse{
+			Inode: inode,
+		}, nil
+	}
+
+	newMode := int(inode.GetMode())
+	newUid := int(inode.GetUid())
+	newGid := int(inode.GetGid())
+	newSize := int64(inode.GetSize())
+	newBlocks := int64(inode.GetBlocks())
+	newAtime := inode.GetAtime().AsTime()
+	newMtime := inode.GetMtime().AsTime()
+	newCtime := time.Now()
+
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE) != 0 {
+		newMode = int(req.GetMode())
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_KILL_SUIDGID) != 0 {
+		newMode = newMode &^ 0o6000
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_UID) != 0 {
+		newUid = int(req.GetUid())
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_GID) != 0 {
+		newGid = int(req.GetGid())
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_SIZE) != 0 {
+		newSize = int64(req.GetSize())
+		newBlocks = (newSize + 511) / 512
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_ATIME_NOW) != 0 {
+		newAtime = time.Now()
+	} else if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_ATIME) != 0 && req.GetAtime() != nil {
+		newAtime = req.GetAtime().AsTime()
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MTIME_NOW) != 0 {
+		newMtime = time.Now()
+	} else if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MTIME) != 0 && req.GetMtime() != nil {
+		newMtime = req.GetMtime().AsTime()
+	}
+	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_CTIME) != 0 && req.GetCtime() != nil {
+		newCtime = req.GetCtime().AsTime()
+	}
+
+	updateQuery := fmt.Sprintf(`
+UPDATE "%s".inodes
+SET mode = $1, uid = $2, gid = $3, size = $4, blocks = $5, atime = $6, mtime = $7, ctime = $8
+WHERE ino = $9;
+`, schemaName)
+
+	if _, err := s.db.Exec(ctx, updateQuery, newMode, newUid, newGid, newSize, newBlocks, newAtime, newMtime, newCtime, int64(req.GetIno())); err != nil {
+		return nil, connect.Errorf(connect.CodeInternal, "failed to update inode: %s", err)
+	}
+
+	updatedInode := &bowlv1.Inode{
+		Ino:         req.GetIno(),
+		ParentIno:   inode.GetParentIno(),
+		Type:        inode.GetType(),
+		Mode:        uint32(newMode),
+		Uid:         uint32(newUid),
+		Gid:         uint32(newGid),
+		Size:        uint64(newSize),
+		Blocks:      uint64(newBlocks),
+		Nlink:       inode.GetNlink(),
+		Rdev:        inode.GetRdev(),
+		Atime:       timestamppb.New(newAtime),
+		Mtime:       timestamppb.New(newMtime),
+		Ctime:       timestamppb.New(newCtime),
+		Target:      inode.GetTarget(),
+		Generation:  inode.GetGeneration(),
+		AttrTimeout: durationpb.New(1 * time.Second),
+	}
+
+	return &bowlv1.SetAttrResponse{
+		Inode: updatedInode,
+	}, nil
+}
+
+// Access verifies caller permissions against Inode mode and session state (FUSE_ACCESS).
+func (s *StorageService) Access(ctx context.Context, req *bowlv1.AccessRequest) (*bowlv1.AccessResponse, error) {
+	if req.GetIno() == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "ino must be greater than 0")
+	}
+
+	sess, schemaName, err := s.getDiskSchemaForSession(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+
+	inode, err := s.getInode(ctx, schemaName, req.GetIno())
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, connect.Errorf(connect.CodeNotFound, "inode not found: %d", req.GetIno())
+		}
+		return nil, connect.Errorf(connect.CodeInternal, "failed to query inode: %s", err)
+	}
+
+	mask := req.GetMask()
+	mode := inode.GetMode()
+
+	// Write check (W_OK = 2)
+	if mask&2 != 0 {
+		if sess.ReadOnly {
+			return nil, connect.NewError(connect.CodePermissionDenied, "write permission denied: session is read-only")
+		}
+		if mode&0o222 == 0 {
+			return nil, connect.NewError(connect.CodePermissionDenied, "write permission denied: file mode does not permit write")
+		}
+	}
+
+	// Read check (R_OK = 4)
+	if mask&4 != 0 {
+		if mode&0o444 == 0 {
+			return nil, connect.NewError(connect.CodePermissionDenied, "read permission denied: file mode does not permit read")
+		}
+	}
+
+	// Execute check (X_OK = 1)
+	if mask&1 != 0 {
+		if mode&0o111 == 0 {
+			return nil, connect.NewError(connect.CodePermissionDenied, "execute permission denied: file mode does not permit execute")
+		}
+	}
+
+	return &bowlv1.AccessResponse{
+		Allowed: true,
+	}, nil
+}
+
 

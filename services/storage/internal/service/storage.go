@@ -66,6 +66,8 @@ type StorageService struct {
 	openHandles    sync.Map // uint64 -> *OpenFileHandle
 	nextDH         atomic.Uint64
 	openDirHandles sync.Map // uint64 -> *OpenDirHandle
+	lockMgr        *LockManager
+	lockTimeout    time.Duration
 }
 
 // Option configures StorageService parameters.
@@ -75,6 +77,13 @@ type Option func(*StorageService)
 func WithLeaseDuration(d time.Duration) Option {
 	return func(s *StorageService) {
 		s.leaseDuration = d
+	}
+}
+
+// WithLockTimeout overrides the default lock acquisition timeout.
+func WithLockTimeout(d time.Duration) Option {
+	return func(s *StorageService) {
+		s.lockTimeout = d
 	}
 }
 
@@ -92,6 +101,8 @@ func NewStorageService(
 		sessions:      sessions,
 		dataDir:       dataDir,
 		leaseDuration: DefaultLeaseDuration,
+		lockMgr:       NewLockManager(sessions),
+		lockTimeout:   DefaultLockTimeout,
 	}
 	for _, opt := range opts {
 		opt(svc)
@@ -283,6 +294,11 @@ func (s *StorageService) cleanupSessionResources(sessionID string) {
 		}
 		return true
 	})
+
+	// Release session locks on unmount / eviction
+	if s.lockMgr != nil {
+		s.lockMgr.ReleaseSessionLocks(sessionID)
+	}
 }
 
 // CleanupSessionResources reclaims all open file handles, directory handles, and flushes buffers for the given session.
@@ -875,5 +891,3 @@ func (s *StorageService) Access(ctx context.Context, req *bowlv1.AccessRequest) 
 		Allowed: true,
 	}, nil
 }
-
-

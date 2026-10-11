@@ -32,6 +32,8 @@ type OpenFileHandle struct {
 	SessionID string
 	DiskID    string
 	CreatedAt time.Time
+	mu        sync.Mutex
+	file      *os.File
 }
 
 // DBExecutor abstracts database execution for schema and metadata management.

@@ -31,3 +31,19 @@ _Avoid_: Metadata database, disk namespace
 **File Handle (fh)**:
 A server-allocated unique identifier tracking an open file state, I/O mode, and lease ownership within a mount session.
 _Avoid_: File descriptor, inode handle, file pointer
+
+**Chunk**:
+A fixed 64 MiB logical partition of a file within the storage engine.
+_Avoid_: File segment, logical block
+
+**Slice**:
+An append-only byte range generated within a chunk by a write operation.
+_Avoid_: Fragment, write delta, chunk piece
+
+**Block**:
+A 4 MiB physical data unit uploaded to object storage representing slice data.
+_Avoid_: Object chunk, payload unit
+
+**NVMe Staging Cache**:
+A high-speed local NVMe SSD write buffer and read cache staging slices before asynchronous flush to object storage.
+_Avoid_: Temp buffer, scratch disk, local storage

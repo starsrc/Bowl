@@ -40,4 +40,15 @@ func TestMigrateUp_Success(t *testing.T) {
 	err = pool.QueryRow(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'disk_attachments'").Scan(&tableName)
 	require.NoError(t, err)
 	assert.Equal(t, "disk_attachments", tableName)
+
+	// Verify indexes exist on disks table
+	var idxStatusCreatedAt string
+	err = pool.QueryRow(ctx, "SELECT indexname FROM pg_indexes WHERE tablename = 'disks' AND indexname = 'idx_disks_status_created_at'").Scan(&idxStatusCreatedAt)
+	require.NoError(t, err)
+	assert.Equal(t, "idx_disks_status_created_at", idxStatusCreatedAt)
+
+	var idxCreatedAt string
+	err = pool.QueryRow(ctx, "SELECT indexname FROM pg_indexes WHERE tablename = 'disks' AND indexname = 'idx_disks_created_at'").Scan(&idxCreatedAt)
+	require.NoError(t, err)
+	assert.Equal(t, "idx_disks_created_at", idxCreatedAt)
 }

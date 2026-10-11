@@ -206,3 +206,98 @@ func TestStore_DiskAttachments_OWMR(t *testing.T) {
 	assert.Equal(t, int64(0), countAfter)
 }
 
+func TestStore_ListDisksAndCountDisks(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create 5 disks with varying statuses and distinct creation times
+	// Statuses: READY (2), ATTACHED (3), READY (2), ERROR (4), READY (2)
+	statuses := []int16{2, 3, 2, 4, 2}
+	createdIDs := make([]uuid.UUID, len(statuses))
+	for i, st := range statuses {
+		id := uuid.New()
+		createdIDs[i] = id
+		_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:        pgtype.UUID{Bytes: id, Valid: true},
+			Name:          "list-disk-" + string(rune('a'+i)),
+			CapacityBytes: 1024 * int64(i+1),
+			InodesQuota:   100,
+			Status:        st,
+		})
+		require.NoError(t, err)
+		time.Sleep(5 * time.Millisecond) // guarantee strictly increasing created_at
+	}
+
+	// 1. Total count without filter (0 means unspecified / all)
+	totalCount, err := store.CountDisks(ctx, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), totalCount)
+
+	// 2. Count with READY filter (status = 2)
+	readyCount, err := store.CountDisks(ctx, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), readyCount)
+
+	// 3. Count with ATTACHED filter (status = 3)
+	attachedCount, err := store.CountDisks(ctx, 3)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), attachedCount)
+
+	// 4. List first page (limit = 2, offset = 0) ordered by created_at DESC
+	page1, err := store.ListDisks(ctx, db.ListDisksParams{
+		StatusFilter: 0,
+		LimitVal:     2,
+		OffsetVal:    0,
+	})
+	require.NoError(t, err)
+	require.Len(t, page1, 2)
+	// Most recently created disk was index 4 (last one created)
+	assert.Equal(t, createdIDs[4], uuid.UUID(page1[0].DiskID.Bytes))
+	assert.Equal(t, createdIDs[3], uuid.UUID(page1[1].DiskID.Bytes))
+
+	// 5. List second page (limit = 2, offset = 2)
+	page2, err := store.ListDisks(ctx, db.ListDisksParams{
+		StatusFilter: 0,
+		LimitVal:     2,
+		OffsetVal:    2,
+	})
+	require.NoError(t, err)
+	require.Len(t, page2, 2)
+	assert.Equal(t, createdIDs[2], uuid.UUID(page2[0].DiskID.Bytes))
+	assert.Equal(t, createdIDs[1], uuid.UUID(page2[1].DiskID.Bytes))
+
+	// 6. List third page (limit = 2, offset = 4)
+	page3, err := store.ListDisks(ctx, db.ListDisksParams{
+		StatusFilter: 0,
+		LimitVal:     2,
+		OffsetVal:    4,
+	})
+	require.NoError(t, err)
+	require.Len(t, page3, 1)
+	assert.Equal(t, createdIDs[0], uuid.UUID(page3[0].DiskID.Bytes))
+
+	// 7. List out-of-range offset returns empty list
+	pageEmpty, err := store.ListDisks(ctx, db.ListDisksParams{
+		StatusFilter: 0,
+		LimitVal:     2,
+		OffsetVal:    10,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pageEmpty)
+
+	// 8. Filtered list for READY (status = 2)
+	readyList, err := store.ListDisks(ctx, db.ListDisksParams{
+		StatusFilter: 2,
+		LimitVal:     10,
+		OffsetVal:    0,
+	})
+	require.NoError(t, err)
+	require.Len(t, readyList, 3)
+	for _, d := range readyList {
+		assert.Equal(t, int16(2), d.Status)
+	}
+}
+
+

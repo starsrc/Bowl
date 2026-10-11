@@ -19,3 +19,13 @@ UPDATE disks
 SET status = $2
 WHERE disk_id = $1
 RETURNING *;
+
+-- name: ListDisks :many
+SELECT * FROM disks
+WHERE (@status_filter::smallint = 0 OR status = @status_filter::smallint)
+ORDER BY created_at DESC
+LIMIT @limit_val OFFSET @offset_val;
+
+-- name: CountDisks :one
+SELECT COUNT(*) FROM disks
+WHERE (@status_filter::smallint = 0 OR status = @status_filter::smallint);

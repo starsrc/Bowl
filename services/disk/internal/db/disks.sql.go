@@ -11,6 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countDisks = `-- name: CountDisks :one
+SELECT COUNT(*) FROM disks
+WHERE ($1::smallint = 0 OR status = $1::smallint)
+`
+
+func (q *Queries) CountDisks(ctx context.Context, statusFilter int16) (int64, error) {
+	row := q.db.QueryRow(ctx, countDisks, statusFilter)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createDisk = `-- name: CreateDisk :one
 INSERT INTO disks (
     disk_id,
@@ -75,6 +87,49 @@ func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listDisks = `-- name: ListDisks :many
+SELECT disk_id, name, capacity_bytes, used_bytes, inodes_quota, inodes_used, status, created_at, updated_at FROM disks
+WHERE ($1::smallint = 0 OR status = $1::smallint)
+ORDER BY created_at DESC
+LIMIT $3 OFFSET $2
+`
+
+type ListDisksParams struct {
+	StatusFilter int16 `json:"status_filter"`
+	OffsetVal    int32 `json:"offset_val"`
+	LimitVal     int32 `json:"limit_val"`
+}
+
+func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error) {
+	rows, err := q.db.Query(ctx, listDisks, arg.StatusFilter, arg.OffsetVal, arg.LimitVal)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Disk
+	for rows.Next() {
+		var i Disk
+		if err := rows.Scan(
+			&i.DiskID,
+			&i.Name,
+			&i.CapacityBytes,
+			&i.UsedBytes,
+			&i.InodesQuota,
+			&i.InodesUsed,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateDiskStatus = `-- name: UpdateDiskStatus :one

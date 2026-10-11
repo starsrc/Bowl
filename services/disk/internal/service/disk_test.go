@@ -2,6 +2,8 @@ package service_test
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -460,4 +462,304 @@ func TestDiskService_AttachAndDetach_ValidationErrors(t *testing.T) {
 		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 	})
 }
+
+func TestDiskService_ListDisks_PaginationBoundaryConditions(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create 7 disks
+	createdIDs := make([]string, 7)
+	for i := 0; i < 7; i++ {
+		resp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+			Name:          fmt.Sprintf("pagination-disk-%02d", i+1),
+			CapacityBytes: 1024 * 1024 * 1024 * uint64(i+1),
+			InodesQuota:   10000,
+		})
+		require.NoError(t, err)
+		createdIDs[i] = resp.Disk.DiskId
+		time.Sleep(5 * time.Millisecond) // Ensure unique created_at timestamps
+	}
+
+	// 1. First page: page_size = 3, page_token = ""
+	page1Resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		PageSize:  3,
+		PageToken: "",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, page1Resp)
+	assert.Equal(t, int64(7), page1Resp.TotalCount)
+	require.Len(t, page1Resp.Disks, 3)
+	assert.NotEmpty(t, page1Resp.NextPageToken)
+	assert.Equal(t, "3", page1Resp.NextPageToken)
+
+	// Items are ordered by created_at DESC -> createdIDs[6], createdIDs[5], createdIDs[4]
+	assert.Equal(t, createdIDs[6], page1Resp.Disks[0].DiskId)
+	assert.Equal(t, createdIDs[5], page1Resp.Disks[1].DiskId)
+	assert.Equal(t, createdIDs[4], page1Resp.Disks[2].DiskId)
+
+	// 2. Second page: page_size = 3, page_token = page1Resp.NextPageToken
+	page2Resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		PageSize:  3,
+		PageToken: page1Resp.NextPageToken,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, page2Resp)
+	assert.Equal(t, int64(7), page2Resp.TotalCount)
+	require.Len(t, page2Resp.Disks, 3)
+	assert.NotEmpty(t, page2Resp.NextPageToken)
+	assert.Equal(t, "6", page2Resp.NextPageToken)
+	assert.Equal(t, createdIDs[3], page2Resp.Disks[0].DiskId)
+	assert.Equal(t, createdIDs[2], page2Resp.Disks[1].DiskId)
+	assert.Equal(t, createdIDs[1], page2Resp.Disks[2].DiskId)
+
+	// 3. Third page: page_size = 3, page_token = page2Resp.NextPageToken
+	page3Resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		PageSize:  3,
+		PageToken: page2Resp.NextPageToken,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, page3Resp)
+	assert.Equal(t, int64(7), page3Resp.TotalCount)
+	require.Len(t, page3Resp.Disks, 1)
+	assert.Empty(t, page3Resp.NextPageToken, "last page must have empty next_page_token")
+	assert.Equal(t, createdIDs[0], page3Resp.Disks[0].DiskId)
+
+	// 4. Empty page: offset beyond total_count
+	emptyResp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		PageSize:  3,
+		PageToken: "10",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, emptyResp)
+	assert.Equal(t, int64(7), emptyResp.TotalCount)
+	assert.Empty(t, emptyResp.Disks)
+	assert.Empty(t, emptyResp.NextPageToken)
+
+	// 5. Query with base64 encoded offset token
+	b64Token := base64.StdEncoding.EncodeToString([]byte("3"))
+	b64Resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		PageSize:  3,
+		PageToken: b64Token,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, b64Resp)
+	assert.Equal(t, int64(7), b64Resp.TotalCount)
+	require.Len(t, b64Resp.Disks, 3)
+	assert.Equal(t, createdIDs[3], b64Resp.Disks[0].DiskId)
+	assert.Equal(t, createdIDs[2], b64Resp.Disks[1].DiskId)
+	assert.Equal(t, createdIDs[1], b64Resp.Disks[2].DiskId)
+}
+
+func TestDiskService_ListDisks_StatusFiltering(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create 5 disks
+	disks := make([]*bowlv1.Disk, 5)
+	for i := 0; i < 5; i++ {
+		resp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+			Name:          fmt.Sprintf("filter-disk-%02d", i+1),
+			CapacityBytes: 1024 * 1024,
+		})
+		require.NoError(t, err)
+		disks[i] = resp.Disk
+	}
+
+	// Attach 2 disks to make their status ATTACHED
+	_, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   disks[1].DiskId,
+		ClientId: "reader-node-a",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   disks[3].DiskId,
+		ClientId: "writer-node-b",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	// Disks status:
+	// disks[0]: READY
+	// disks[1]: ATTACHED
+	// disks[2]: READY
+	// disks[3]: ATTACHED
+	// disks[4]: READY
+
+	// 1. Query with DISK_STATUS_UNSPECIFIED (returns all 5)
+	allResp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		FilterStatus: bowlv1.DiskStatus_DISK_STATUS_UNSPECIFIED,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), allResp.TotalCount)
+	assert.Len(t, allResp.Disks, 5)
+
+	// 2. Query with DISK_STATUS_READY (returns 3)
+	readyResp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		FilterStatus: bowlv1.DiskStatus_DISK_STATUS_READY,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), readyResp.TotalCount)
+	require.Len(t, readyResp.Disks, 3)
+	for _, d := range readyResp.Disks {
+		assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_READY, d.Status)
+	}
+
+	// 3. Query with DISK_STATUS_ATTACHED (returns 2)
+	attachedResp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		FilterStatus: bowlv1.DiskStatus_DISK_STATUS_ATTACHED,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), attachedResp.TotalCount)
+	require.Len(t, attachedResp.Disks, 2)
+	for _, d := range attachedResp.Disks {
+		assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, d.Status)
+	}
+
+	// 4. Query with DISK_STATUS_ERROR (returns 0)
+	errResp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+		FilterStatus: bowlv1.DiskStatus_DISK_STATUS_ERROR,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), errResp.TotalCount)
+	assert.Empty(t, errResp.Disks)
+	assert.Empty(t, errResp.NextPageToken)
+}
+
+func TestDiskService_ListDisks_AttachmentFieldsPopulated(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "attachment-list-disk",
+		CapacityBytes: 2048,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// Attach 2 readers and 1 writer
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-01",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-02",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+
+	_, err = client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-node-01",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	// List disks and verify attachment fields
+	listResp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{})
+	require.NoError(t, err)
+	require.Len(t, listResp.Disks, 1)
+
+	disk := listResp.Disks[0]
+	assert.Equal(t, diskID, disk.DiskId)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, disk.Status)
+	assert.Equal(t, "writer-node-01", disk.WriterClientId)
+	assert.Equal(t, []string{"reader-node-01", "reader-node-02"}, disk.ReaderClientIds)
+}
+
+func TestDiskService_ListDisks_ValidationAndDefaults(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create 25 disks to test default page size of 20
+	for i := 0; i < 25; i++ {
+		_, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+			Name:          fmt.Sprintf("bulk-disk-%02d", i+1),
+			CapacityBytes: 1024,
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("page_size <= 0 defaults to 20", func(t *testing.T) {
+		resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			PageSize: 0,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(25), resp.TotalCount)
+		assert.Len(t, resp.Disks, 20)
+		assert.Equal(t, "20", resp.NextPageToken)
+	})
+
+	t.Run("page_size negative defaults to 20", func(t *testing.T) {
+		resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			PageSize: -5,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(25), resp.TotalCount)
+		assert.Len(t, resp.Disks, 20)
+		assert.Equal(t, "20", resp.NextPageToken)
+	})
+
+	t.Run("page_size > 100 caps at 100", func(t *testing.T) {
+		resp, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			PageSize: 200,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(25), resp.TotalCount)
+		assert.Len(t, resp.Disks, 25) // All 25 returned since 25 <= 100
+		assert.Empty(t, resp.NextPageToken)
+	})
+
+	t.Run("malformed page_token returns InvalidArgument", func(t *testing.T) {
+		_, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			PageToken: "invalid-token",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("negative page_token returns InvalidArgument", func(t *testing.T) {
+		_, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			PageToken: "-5",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("overflowing page_token returns InvalidArgument", func(t *testing.T) {
+		_, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			PageToken: "999999999999999999999999999999",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("invalid filter_status returns InvalidArgument", func(t *testing.T) {
+		_, err := client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			FilterStatus: bowlv1.DiskStatus(-1),
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+		_, err = client.ListDisks(ctx, &bowlv1.ListDisksRequest{
+			FilterStatus: bowlv1.DiskStatus(999),
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+}
+
 

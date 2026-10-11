@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 
 	connect "connectrpc.com/connect/v2"
@@ -88,6 +91,62 @@ func (s *DiskService) GetDisk(ctx context.Context, req *bowlv1.GetDiskRequest) (
 		Disk: buildDiskProto(row, attachments),
 	}, nil
 }
+
+// ListDisks retrieves a paginated list of virtual disks with optional status filtering.
+func (s *DiskService) ListDisks(ctx context.Context, req *bowlv1.ListDisksRequest) (*bowlv1.ListDisksResponse, error) {
+	if req.GetFilterStatus() < bowlv1.DiskStatus_DISK_STATUS_UNSPECIFIED || req.GetFilterStatus() > bowlv1.DiskStatus_DISK_STATUS_ERROR {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "invalid filter_status")
+	}
+
+	pageSize := req.GetPageSize()
+	if pageSize <= 0 {
+		pageSize = 20
+	} else if pageSize > 100 {
+		pageSize = 100
+	}
+
+	offset, err := parsePageToken(req.GetPageToken())
+	if err != nil {
+		return nil, err
+	}
+
+	statusFilter := int16(req.GetFilterStatus())
+
+	totalCount, err := s.store.CountDisks(ctx, statusFilter)
+	if err != nil {
+		return nil, connect.Errorf(connect.CodeInternal, "failed to count disks: %s", err).WithCause(err)
+	}
+
+	rows, err := s.store.ListDisks(ctx, db.ListDisksParams{
+		StatusFilter: statusFilter,
+		OffsetVal:    int32(offset),
+		LimitVal:     int32(pageSize),
+	})
+	if err != nil {
+		return nil, connect.Errorf(connect.CodeInternal, "failed to list disks: %s", err).WithCause(err)
+	}
+
+	disks := make([]*bowlv1.Disk, 0, len(rows))
+	for _, row := range rows {
+		attachments, err := s.store.ListDiskAttachmentsByDiskID(ctx, row.DiskID)
+		if err != nil {
+			return nil, connect.Errorf(connect.CodeInternal, "failed to list disk attachments: %s", err).WithCause(err)
+		}
+		disks = append(disks, buildDiskProto(row, attachments))
+	}
+
+	var nextPageToken string
+	if offset+int64(len(disks)) < totalCount {
+		nextPageToken = strconv.FormatInt(offset+int64(len(disks)), 10)
+	}
+
+	return &bowlv1.ListDisksResponse{
+		Disks:         disks,
+		NextPageToken: nextPageToken,
+		TotalCount:    totalCount,
+	}, nil
+}
+
 
 // AttachDisk binds a client to a virtual disk in read-only or exclusive read-write mode.
 func (s *DiskService) AttachDisk(ctx context.Context, req *bowlv1.AttachDiskRequest) (*bowlv1.AttachDiskResponse, error) {
@@ -267,3 +326,39 @@ func buildDiskProto(row db.Disk, attachments []db.DiskAttachment) *bowlv1.Disk {
 	}
 	return disk
 }
+
+func parsePageToken(token string) (int64, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return 0, nil
+	}
+
+	// Try base64 standard decoding
+	if decoded, err := base64.StdEncoding.DecodeString(token); err == nil {
+		if val, err := strconv.ParseInt(string(decoded), 10, 64); err == nil {
+			if val < 0 || val > math.MaxInt32 {
+				return 0, connect.NewError(connect.CodeInvalidArgument, "invalid page_token: offset out of bounds")
+			}
+			return val, nil
+		}
+	}
+
+	// Try base64 URL decoding
+	if decoded, err := base64.RawURLEncoding.DecodeString(token); err == nil {
+		if val, err := strconv.ParseInt(string(decoded), 10, 64); err == nil {
+			if val < 0 || val > math.MaxInt32 {
+				return 0, connect.NewError(connect.CodeInvalidArgument, "invalid page_token: offset out of bounds")
+			}
+			return val, nil
+		}
+	}
+
+	// Fallback to direct decimal integer string
+	val, err := strconv.ParseInt(token, 10, 64)
+	if err != nil || val < 0 || val > math.MaxInt32 {
+		return 0, connect.NewError(connect.CodeInvalidArgument, "invalid page_token: must be a non-negative integer or valid base64 offset")
+	}
+
+	return val, nil
+}
+

@@ -75,3 +75,21 @@ func (m *StagingManager) DeleteSlice(diskID string, sliceID uint64) error {
 	}
 	return nil
 }
+
+// SyncDisk flushes staging directory metadata for a virtual disk to persistent storage.
+func (m *StagingManager) SyncDisk(diskID string) error {
+	if m == nil || m.dir == "" || diskID == "" {
+		return nil
+	}
+	dirPath := filepath.Join(m.dir, diskID)
+	f, err := os.Open(dirPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("staging: failed to sync disk directory: %w", err)
+	}
+	defer f.Close()
+	return f.Sync()
+}
+

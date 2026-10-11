@@ -115,3 +115,27 @@ func TestStagingManager_ReadNonExistentSlice(t *testing.T) {
 	_, err := mgr.ReadSlice(diskID, 999999)
 	assert.Error(t, err)
 }
+
+func TestStagingManager_SyncDisk(t *testing.T) {
+	tempDir := t.TempDir()
+	mgr := chunk.NewStagingManager(tempDir)
+
+	diskID := "test-disk-uuid-sync"
+	// Syncing non-existent disk directory returns nil (graceful)
+	err := mgr.SyncDisk(diskID)
+	assert.NoError(t, err)
+
+	// Write a slice to create disk directory
+	sliceID := mgr.NextSliceID()
+	err = mgr.WriteSlice(diskID, sliceID, []byte("data"))
+	require.NoError(t, err)
+
+	// Syncing existing disk directory succeeds
+	err = mgr.SyncDisk(diskID)
+	assert.NoError(t, err)
+
+	// Sync with empty diskID returns nil
+	err = mgr.SyncDisk("")
+	assert.NoError(t, err)
+}
+

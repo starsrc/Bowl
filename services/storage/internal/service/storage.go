@@ -368,7 +368,14 @@ CREATE TABLE IF NOT EXISTS "%s".inodes (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inodes_parent_name ON "%s".inodes (parent, name);
-`, schemaName, schemaName, schemaName)
+
+CREATE TABLE IF NOT EXISTS "%s".xattrs (
+	ino BIGINT NOT NULL,
+	name TEXT NOT NULL,
+	value BYTEA NOT NULL,
+	PRIMARY KEY (ino, name)
+);
+`, schemaName, schemaName, schemaName, schemaName)
 
 	if _, err := s.db.Exec(ctx, ddl); err != nil {
 		return err

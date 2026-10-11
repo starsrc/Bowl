@@ -31,3 +31,4 @@ go.work.sum
 .agents
 /references
 .worktrees/
+/data/

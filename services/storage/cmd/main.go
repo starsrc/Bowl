@@ -83,18 +83,30 @@ func main() {
 
 	// Initialize storage driver based on configuration
 	var driver service.FileStorageDriver
+	var s3Uploader *chunk.S3Uploader
 	if cfg.Storage.Driver == "chunk" {
 		if err := os.MkdirAll(cfg.Storage.StagingDir, 0o755); err != nil {
 			slog.Error("failed to create staging directory", "error", err)
 			os.Exit(1)
 		}
 		stagingMgr := chunk.NewStagingManager(cfg.Storage.StagingDir)
-		driver = service.NewChunkDriver(stagingMgr, pool)
+		if cfg.S3.Enabled {
+			var err error
+			s3Uploader, err = chunk.NewS3Uploader(cfg.S3, stagingMgr)
+			if err != nil {
+				slog.Error("failed to initialize S3 uploader", "error", err)
+				os.Exit(1)
+			}
+			s3Uploader.Start(ctx)
+			slog.Info("S3 asynchronous upload pipeline started", "bucket", cfg.S3.Bucket, "endpoint", cfg.S3.Endpoint)
+		}
+		driver = service.NewChunkDriver(stagingMgr, pool, s3Uploader)
 		slog.Info("using chunk storage driver", "staging_dir", cfg.Storage.StagingDir)
 	} else {
 		driver = service.NewLegacyFileDriver(cfg.Storage.DataDir)
 		slog.Info("using legacy file storage driver", "data_dir", cfg.Storage.DataDir)
 	}
+
 
 	// Initialize in-memory session manager and StorageService
 	sessionMgr := session.NewMemoryManager()
@@ -126,5 +138,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if s3Uploader != nil {
+		s3Uploader.Stop()
+		slog.Info("S3 uploader stopped cleanly")
+	}
+
 	slog.Info("storage service stopped cleanly")
 }
+

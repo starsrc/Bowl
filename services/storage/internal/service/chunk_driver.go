@@ -23,19 +23,37 @@ type chunkFileHandle struct {
 
 // ChunkDriver implements FileStorageDriver using NVMe staging slices and PostgreSQL chunk metadata.
 type ChunkDriver struct {
-	staging *chunk.StagingManager
-	db      DBExecutor
+	staging  *chunk.StagingManager
+	db       DBExecutor
+	uploader *chunk.S3Uploader
 }
 
 var _ FileStorageDriver = (*ChunkDriver)(nil)
 
 // NewChunkDriver constructs a new ChunkDriver backed by a StagingManager and database executor.
-func NewChunkDriver(staging *chunk.StagingManager, db DBExecutor) *ChunkDriver {
+// An optional S3Uploader can be provided for background S3 block persistence.
+func NewChunkDriver(staging *chunk.StagingManager, db DBExecutor, uploader ...*chunk.S3Uploader) *ChunkDriver {
+	var up *chunk.S3Uploader
+	if len(uploader) > 0 {
+		up = uploader[0]
+	}
 	return &ChunkDriver{
-		staging: staging,
-		db:      db,
+		staging:  staging,
+		db:       db,
+		uploader: up,
 	}
 }
+
+// Uploader returns the configured S3Uploader, if any.
+func (d *ChunkDriver) Uploader() *chunk.S3Uploader {
+	return d.uploader
+}
+
+// SetUploader configures or updates the S3Uploader.
+func (d *ChunkDriver) SetUploader(uploader *chunk.S3Uploader) {
+	d.uploader = uploader
+}
+
 
 // StagingManager returns the underlying StagingManager.
 func (d *ChunkDriver) StagingManager() *chunk.StagingManager {
@@ -116,8 +134,19 @@ DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
 		return 0, connect.Errorf(connect.CodeInternal, "failed to append chunk slice metadata: %s", err)
 	}
 
+	// 6. Asynchronously enqueue slice to S3 uploader if configured
+	if d.uploader != nil {
+		_ = d.uploader.Enqueue(ctx, &chunk.UploadTask{
+			DiskID:    diskID,
+			Ino:       ino,
+			ChunkIndx: chunkIndx,
+			SliceID:   sliceID,
+		})
+	}
+
 	return dataLen, nil
 }
+
 
 // Flush flushes dirty data for an open handle (no-op in STARSRC-117, implemented in STARSRC-123).
 func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {

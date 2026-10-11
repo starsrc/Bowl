@@ -17,7 +17,11 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
+	"github.com/starsrc/bowl/services/storage/internal/config"
+
+	"github.com/minio/minio-go/v7"
 )
+
 
 func setupChunkHarness(t *testing.T) (*testHarness, *chunk.StagingManager, *ChunkDriver) {
 	t.Helper()
@@ -486,6 +490,7 @@ func TestChunkDriver_Read_EndToEnd_RoundTrip(t *testing.T) {
 	assert.Equal(t, payload, readResp.GetData())
 	assert.True(t, readResp.GetEof())
 }
+
 
 func TestChunkDriver_Read_EndToEnd_BoundaryCases(t *testing.T) {
 	h, _, _ := setupChunkHarness(t)
@@ -964,3 +969,97 @@ func TestChunkDriver_Write_EndToEnd_MultiChunk_ThreeChunks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(totalSize), inodeSize)
 }
+
+func TestChunkDriver_Write_S3AsyncUploadPipeline(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "pipeline-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. Mount disk
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. Setup S3Uploader (using MinIO or mock)
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// 3. Create file
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "pipeline-test.dat",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 4. Write 1MB payload via Connect-RPC client (FUSE standard chunk write)
+	payloadSize := 1024 * 1024
+	payload := bytes.Repeat([]byte("X"), payloadSize)
+	start := time.Now()
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Equal(t, uint32(payloadSize), writeResp.GetWritten())
+	assert.Less(t, elapsed, 100*time.Millisecond, "NVMe staging fast path must ACK rapidly")
+
+	// 5. Wait for Inode upload barrier
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+
+	err = uploader.WaitForIno(waitCtx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// 6. Verify object exists in MinIO
+	expectedKey := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, expectedKey, minio.RemoveObjectOptions{})
+	}()
+
+	stat, err := minioClient.StatObject(context.Background(), cfg.Bucket, expectedKey, minio.StatObjectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(payloadSize), stat.Size)
+}
+

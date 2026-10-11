@@ -348,5 +348,10 @@ func (s *StorageService) Release(ctx context.Context, req *bowlv1.ReleaseRequest
 	}
 	handle.mu.Unlock()
 
+	// Release locks associated with this handle
+	if s.lockMgr != nil {
+		s.lockMgr.ReleaseHandleLocks(sessionID, handle.Handle.GetIno(), fh, req.GetLockOwner())
+	}
+
 	return &bowlv1.ReleaseResponse{}, nil
 }

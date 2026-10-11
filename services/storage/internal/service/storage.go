@@ -536,7 +536,13 @@ CREATE TABLE IF NOT EXISTS "%s".chunks (
 	slices BYTEA NOT NULL,
 	PRIMARY KEY (ino, indx)
 );
-`, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName)
+
+CREATE TABLE IF NOT EXISTS "%s".slice_refs (
+	id BIGINT PRIMARY KEY,
+	size INT NOT NULL,
+	refs INT NOT NULL DEFAULT 1
+);
+`, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName)
 
 	if _, err := s.db.Exec(ctx, ddl); err != nil {
 		return err

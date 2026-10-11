@@ -1068,6 +1068,1192 @@ func TestChunkDriver_Write_S3AsyncUploadPipeline(t *testing.T) {
 	assert.Equal(t, int64(payloadSize), stat.Size)
 }
 
+func TestChunkDriver_Read_OverlappingOverwrites(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-overwrite-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "overwrite-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. Base write: 100 bytes of 'A' at offset 0
+	dataA := bytes.Repeat([]byte("A"), 100)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataA,
+	})
+	require.NoError(t, err)
+
+	// 2. Overwrite: 20 bytes of 'B' at offset 10
+	dataB := bytes.Repeat([]byte("B"), 20)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    10,
+		Data:      dataB,
+	})
+	require.NoError(t, err)
+
+	// 3. Overwrite: 10 bytes of 'C' at offset 50
+	dataC := bytes.Repeat([]byte("C"), 10)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    50,
+		Data:      dataC,
+	})
+	require.NoError(t, err)
+
+	// Expected content for 0..100:
+	// 0..9: 'A'
+	// 10..29: 'B'
+	// 30..49: 'A'
+	// 50..59: 'C'
+	// 60..99: 'A'
+	expected := make([]byte, 100)
+	copy(expected[0:100], dataA)
+	copy(expected[10:30], dataB)
+	copy(expected[50:60], dataC)
+
+	// Read full range 0..100
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      100,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expected, readResp.GetData())
+	assert.True(t, readResp.GetEof())
+
+	// Read sub-range 5..35 (covering partial A and all B and partial A)
+	readSub1, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    5,
+		Size:      30,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expected[5:35], readSub1.GetData())
+	assert.False(t, readSub1.GetEof())
+
+	// Read sub-range 45..65 (covering partial A, all C, partial A)
+	readSub2, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    45,
+		Size:      20,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expected[45:65], readSub2.GetData())
+	assert.False(t, readSub2.GetEof())
+}
+
+func TestChunkDriver_Read_SparseHolesWithData(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-sparse-data-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "sparse-data-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 10 bytes at offset 0 ('X')
+	dataX := bytes.Repeat([]byte("X"), 10)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataX,
+	})
+	require.NoError(t, err)
+
+	// Write 10 bytes at offset 50 ('Y')
+	dataY := bytes.Repeat([]byte("Y"), 10)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    50,
+		Data:      dataY,
+	})
+	require.NoError(t, err)
+
+	// Read range 0..60
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      60,
+	})
+	require.NoError(t, err)
+	data := readResp.GetData()
+	require.Len(t, data, 60)
+	assert.Equal(t, dataX, data[0:10])
+	assert.Equal(t, make([]byte, 40), data[10:50], "bytes 10..49 must be zero sparse hole")
+	assert.Equal(t, dataY, data[50:60])
+	assert.True(t, readResp.GetEof())
+}
+
+func TestChunkDriver_Read_MultiChunk_SpanningBoundary(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-multichunk-read-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "multichunk-read.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 2 MiB spanning across Chunk 0 and Chunk 1:
+	// Chunk 0: from 63 MiB to 64 MiB (1 MiB)
+	// Chunk 1: from 0 to 1 MiB (1 MiB)
+	offset := uint64(63 * 1024 * 1024)
+	size := 2 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Read spanning Chunk 0 and Chunk 1:
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Size:      uint32(size),
+	})
+	require.NoError(t, err)
+	require.Equal(t, len(payload), len(readResp.GetData()), "read length should match payload length")
+	assert.True(t, bytes.Equal(payload, readResp.GetData()), "read data should match payload")
+	assert.True(t, readResp.GetEof())
+
+	// Read spanning boundary with sparse holes before it:
+	// Read from 62 MiB (sparse hole 1 MiB) through 65 MiB (1 MiB data in chunk 0 + 1 MiB data in chunk 1)
+	// Total requested size = 3 MiB
+	readRespSpanningHole, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(62 * 1024 * 1024),
+		Size:      uint32(3 * 1024 * 1024),
+	})
+	require.NoError(t, err)
+	dataSpanning := readRespSpanningHole.GetData()
+	require.Equal(t, 3*1024*1024, len(dataSpanning))
+	assert.True(t, bytes.Equal(make([]byte, 1024*1024), dataSpanning[:1024*1024]), "62MiB..63MiB must be zeros")
+	assert.True(t, bytes.Equal(payload, dataSpanning[1024*1024:]), "63MiB..65MiB must match payload")
+	assert.True(t, readRespSpanningHole.GetEof())
+}
+
+func TestChunkDriver_DirectRead_MultiChunkAndEOF(t *testing.T) {
+	h, _, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	_, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "direct-multichunk-client",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	handle, err := driver.Open(ctx, diskID.String(), 300, bowlv1.OpenMode_OPEN_MODE_READ_WRITE, 0)
+	require.NoError(t, err)
+	defer func() { _ = driver.Close(ctx, handle) }()
+
+	// Write data at Chunk 0 (offset 63.5 MiB, size 1 MiB -> ends at 64.5 MiB in Chunk 1)
+	startOffset := uint64(63*1024*1024 + 512*1024)
+	payload := bytes.Repeat([]byte("M"), 1024*1024)
+	written, err := driver.Write(ctx, handle, diskID.String(), 300, startOffset, payload)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(len(payload)), written)
+
+	fileSize := startOffset + uint64(len(payload))
+
+	// Insert inode with fileSize
+	insertInodeSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, size, atime, mtime, ctime)
+VALUES (300, 1, 'direct-multichunk', 1, 0644, 1, $1, NOW(), NOW(), NOW())
+`, schemaName)
+	_, err = h.dbPool.Exec(ctx, insertInodeSQL, int64(fileSize))
+	require.NoError(t, err)
+
+	// Case 1: Read exactly within data spanning Chunk 0 and Chunk 1 (not hitting EOF)
+	// Read 512 KiB spanning the 64 MiB boundary: 256 KiB in Chunk 0, 256 KiB in Chunk 1
+	subOffset := uint64(chunk.ChunkSize - 256*1024)
+	subSize := uint32(512 * 1024)
+	data, eof, err := driver.Read(ctx, handle, diskID.String(), 300, subOffset, subSize)
+	require.NoError(t, err)
+	require.Equal(t, int(subSize), len(data))
+	assert.False(t, eof)
+	assert.True(t, bytes.Equal(bytes.Repeat([]byte("M"), int(subSize)), data))
+
+	// Case 2: Read reaching past EOF (offset + size > fileSize)
+	// Reading from subOffset with size = 2 MiB (file ends at 64.5 MiB, so available is only 768 KiB)
+	oversized := uint32(2 * 1024 * 1024)
+	expectedAvailable := fileSize - subOffset
+	dataEOF, eof, err := driver.Read(ctx, handle, diskID.String(), 300, subOffset, oversized)
+	require.NoError(t, err)
+	assert.True(t, eof, "eof must be true when requested range reaches or exceeds fileSize")
+	require.Equal(t, int(expectedAvailable), len(dataEOF), "data must be truncated at fileSize")
+	assert.True(t, bytes.Equal(bytes.Repeat([]byte("M"), int(expectedAvailable)), dataEOF))
+}
+
+func TestChunkDriver_Read_S3TransparentReadPenetration_EndToEnd(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "s3-read-penetration-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. Mount virtual disk
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. Setup S3Uploader & S3Reader
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// 3. Create file
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "cold-penetration.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 4. Write 64 KB of random data
+	payloadSize := 64 * 1024
+	payload := make([]byte, payloadSize)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(payloadSize), writeResp.GetWritten())
+
+	// 5. Query chunk slice ID
+	var rawSlices []byte
+	querySQL := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName)
+	err = h.dbPool.QueryRow(ctx, querySQL, int64(ino)).Scan(&rawSlices)
+	require.NoError(t, err)
+	slices, err := chunk.DecodeSlices(rawSlices)
+	require.NoError(t, err)
+	require.Len(t, slices, 1)
+	sliceID := slices[0].ID
+
+	// 6. Wait for async S3 upload to finish
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer waitCancel()
+	err = uploader.WaitForSlice(waitCtx, diskID.String(), sliceID)
+	require.NoError(t, err)
+	assert.Equal(t, chunk.SliceStatusSynced, uploader.GetSliceStatus(diskID.String(), sliceID))
+
+	// Verify object exists in S3
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	objectKey := chunk.FormatObjectKey(diskID.String(), 0, sliceID, 0)
+	stat, err := minioClient.StatObject(ctx, cfg.Bucket, objectKey, minio.StatObjectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(payloadSize), stat.Size)
+
+	// Clean up S3 object on test completion
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, objectKey, minio.RemoveObjectOptions{})
+	}()
+
+	// 7. Purge/delete local NVMe staging file to turn this slice into a COLD slice
+	localPath := stagingMgr.SlicePath(diskID.String(), sliceID)
+	err = os.Remove(localPath)
+	require.NoError(t, err, "staging file must be successfully purged")
+	_, err = os.Stat(localPath)
+	require.True(t, os.IsNotExist(err), "staging file must not exist locally")
+
+	// 8. Read via Connect-RPC StorageService.Read
+	// Should transparently penetrate to S3, fetch the cold slice block, and reconstitute data
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      uint32(payloadSize),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData(), "data read from cold S3 must match original written payload")
+	assert.True(t, readResp.GetEof())
+
+	// 9. Partial read on cold slice
+	readPart, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1024,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[1024:3072], readPart.GetData())
+	assert.False(t, readPart.GetEof())
+}
+
+func TestChunkDriver_Read_MixedHotStagingAndColdS3(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "mixed-hot-cold-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "mixed-hot-cold.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. Write first slice (Slice 1): 2048 bytes of 'A' at offset 0
+	dataA := bytes.Repeat([]byte("A"), 2048)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataA,
+	})
+	require.NoError(t, err)
+
+	// Wait for Slice 1 to upload to S3
+	waitCtx1, cancel1 := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel1()
+	err = uploader.WaitForIno(waitCtx1, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// Purge Slice 1 from local staging (turns into COLD slice on S3)
+	slice1Path := stagingMgr.SlicePath(diskID.String(), 1)
+	err = os.Remove(slice1Path)
+	require.NoError(t, err)
+
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+	}()
+
+	// 2. Write second slice (Slice 2): 2048 bytes of 'B' at offset 2048 (remains HOT in NVMe staging)
+	dataB := bytes.Repeat([]byte("B"), 2048)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Data:      dataB,
+	})
+	require.NoError(t, err)
+
+	// Ensure Slice 1 is absent from staging and Slice 2 is present in staging
+	_, err = os.Stat(stagingMgr.SlicePath(diskID.String(), 1))
+	assert.True(t, os.IsNotExist(err), "Slice 1 must be purged from staging")
+	_, err = os.Stat(stagingMgr.SlicePath(diskID.String(), 2))
+	assert.NoError(t, err, "Slice 2 must exist in staging")
+
+	// 3. Read spanning both slices (0..4096)
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      4096,
+	})
+	require.NoError(t, err)
+
+	expected := append(dataA, dataB...)
+	assert.Equal(t, expected, readResp.GetData(), "mixed read from cold S3 (0..2048) and hot staging (2048..4096) must be seamless")
+	assert.True(t, readResp.GetEof())
+
+	// 4. Overwrite part of cold slice: 100 bytes of 'C' at offset 1000 (hot in staging)
+	dataC := bytes.Repeat([]byte("C"), 100)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1000,
+		Data:      dataC,
+	})
+	require.NoError(t, err)
+
+	readOverwrite, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    950,
+		Size:      200,
+	})
+	require.NoError(t, err)
+
+	// Offset 950..1000: 'A' (from cold S3 slice 1)
+	// Offset 1000..1100: 'C' (from hot staging slice 3)
+	// Offset 1100..1150: 'A' (from cold S3 slice 1)
+	expectedOverwrite := make([]byte, 200)
+	copy(expectedOverwrite[0:50], bytes.Repeat([]byte("A"), 50))
+	copy(expectedOverwrite[50:150], dataC)
+	copy(expectedOverwrite[150:200], bytes.Repeat([]byte("A"), 50))
+
+	assert.Equal(t, expectedOverwrite, readOverwrite.GetData(), "overwritten range over cold S3 slice must reconstitute properly")
+}
+
+func TestChunkDriver_Read_MultiChunk_ColdS3SpanningBoundary(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "multichunk-cold-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "spanning-cold.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 2 MiB spanning Chunk 0 and Chunk 1:
+	// 1 MiB in Chunk 0 (pos: 63 MiB)
+	// 1 MiB in Chunk 1 (pos: 0)
+	offset := uint64(63 * 1024 * 1024)
+	size := 2 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte((i * 13) % 251)
+	}
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Wait for upload of both slices (chunk 0 slice 1, chunk 1 slice 2)
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err = uploader.WaitForIno(waitCtx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 1, 2, 0), minio.RemoveObjectOptions{})
+	}()
+
+	// Purge BOTH slices from staging -> both are now COLD in S3
+	err = os.Remove(stagingMgr.SlicePath(diskID.String(), 1))
+	require.NoError(t, err)
+	err = os.Remove(stagingMgr.SlicePath(diskID.String(), 2))
+	require.NoError(t, err)
+
+	// Read 2 MiB spanning across cold Chunk 0 and cold Chunk 1
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Size:      uint32(size),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData(), "spanning read across cold Chunk 0 and Chunk 1 from S3 must match")
+	assert.True(t, readResp.GetEof())
+}
+
+
+func TestChunkDriver_Write_RecordsSliceRefs(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "write-slice-refs-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-slice-refs.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 4096 bytes
+	payload := make([]byte, 4096)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Verify slice_refs has 1 row with size = 4096 and refs = 1
+	var (
+		refID   int64
+		refSize int32
+		refRefs int32
+	)
+	query := fmt.Sprintf(`SELECT id, size, refs FROM "%s".slice_refs WHERE id = 1`, schemaName)
+	err = h.dbPool.QueryRow(ctx, query).Scan(&refID, &refSize, &refRefs)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), refID)
+	assert.Equal(t, int32(4096), refSize)
+	assert.Equal(t, int32(1), refRefs)
+}
+
+func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "copy-file-range-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Create source file and write 16KB
+	srcResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "src-file.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	srcIno := srcResp.GetInode().GetIno()
+	srcFH := srcResp.GetFileHandle().GetFh()
+
+	payload := make([]byte, 16384)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        srcFH,
+		Ino:       srcIno,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Verify slice_refs initially has refs = 1
+	var ref1 int32
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&ref1)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), ref1)
+
+	// 2. Create destination file
+	dstResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "dst-file.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	dstIno := dstResp.GetInode().GetIno()
+	dstFH := dstResp.GetFileHandle().GetFh()
+
+	// 3. Clone via CopyFileRange
+	copyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    srcIno,
+		SrcFh:     srcFH,
+		SrcOffset: 0,
+		DstIno:    dstIno,
+		DstFh:     dstFH,
+		DstOffset: 0,
+		Length:    16384,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(16384), copyResp.GetCopied())
+
+	// 4. Assert slice_refs.refs incremented to 2
+	var ref2 int32
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&ref2)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), ref2, "slice_refs.refs must be incremented to 2 after CopyFileRange")
+
+	// 5. Assert destination Inode size is 16384
+	dstAttr, err := h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       dstIno,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(16384), dstAttr.GetInode().GetSize())
+
+	// 6. Assert destination chunks metadata row exists
+	var dstRawSlices []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(dstIno)).Scan(&dstRawSlices)
+	require.NoError(t, err)
+	dstSlices, err := chunk.DecodeSlices(dstRawSlices)
+	require.NoError(t, err)
+	require.Len(t, dstSlices, 1)
+	assert.Equal(t, uint64(1), dstSlices[0].ID)
+	assert.Equal(t, uint32(0), dstSlices[0].Pos)
+	assert.Equal(t, uint32(16384), dstSlices[0].Len)
+
+	// 7. Read destination file and verify exact byte content
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        dstFH,
+		Ino:       dstIno,
+		Offset:    0,
+		Size:      16384,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData())
+	assert.True(t, readResp.GetEof())
+}
+
+func TestChunkDriver_CopyFileRange_Simulated1GB_Sub50ms(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "simulated-1gb-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Create source inode (ino 2) and destination inode (ino 3)
+	srcResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "src-1gb.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	srcIno := srcResp.GetInode().GetIno()
+
+	dstResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "dst-1gb.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	dstIno := dstResp.GetInode().GetIno()
+
+	// Simulate 1GB (16 chunks of 64MB) in source inode metadata
+	const (
+		numChunks = 16
+		oneGB     = uint64(1024 * 1024 * 1024)
+	)
+
+	// Update source inode size to 1GB in postgres
+	_, err = h.dbPool.Exec(ctx, fmt.Sprintf(`UPDATE "%s".inodes SET size = $1 WHERE ino = $2`, schemaName), int64(oneGB), int64(srcIno))
+	require.NoError(t, err)
+
+	// Insert 16 chunk rows and slice_refs rows (1 slice of 64MB per chunk)
+	for i := 0; i < numChunks; i++ {
+		sliceID := uint64(100 + i)
+		s := chunk.Slice{
+			Pos:  0,
+			ID:   sliceID,
+			Size: chunk.ChunkSize,
+			Off:  0,
+			Len:  chunk.ChunkSize,
+		}
+		encoded := chunk.EncodeSlice(s)
+		_, err = h.dbPool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".chunks (ino, indx, slices) VALUES ($1, $2, $3)`, schemaName), int64(srcIno), int32(i), encoded)
+		require.NoError(t, err)
+
+		_, err = h.dbPool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".slice_refs (id, size, refs) VALUES ($1, $2, 1)`, schemaName), int64(sliceID), int32(chunk.ChunkSize))
+		require.NoError(t, err)
+	}
+
+	// Benchmark CopyFileRange execution time
+	start := time.Now()
+	copied, err := chunkDriver.CopyFileRange(
+		ctx,
+		nil,
+		diskID.String(),
+		srcIno,
+		0,
+		nil,
+		diskID.String(),
+		dstIno,
+		0,
+		oneGB,
+	)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Equal(t, oneGB, copied)
+	t.Logf("1GB simulated CopyFileRange elapsed: %v", elapsed)
+	assert.Less(t, elapsed, 50*time.Millisecond, "1GB metadata zero-copy clone must complete in < 50ms, took %v", elapsed)
+
+	// Verify all 16 slice_refs have refs = 2
+	for i := 0; i < numChunks; i++ {
+		sliceID := uint64(100 + i)
+		var refs int32
+		err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName), int64(sliceID)).Scan(&refs)
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), refs, "slice %d refs must be 2", sliceID)
+	}
+
+	// Verify destination Inode size is 1GB
+	var dstSize int64
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName), int64(dstIno)).Scan(&dstSize)
+	require.NoError(t, err)
+	assert.Equal(t, int64(oneGB), dstSize)
+}
+
+func TestChunkDriver_CopyFileRange_OffsetAndCrossBoundary(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "copy-range-boundary-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Partial range copy within chunk
+	srcResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "src-offset.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	srcIno := srcResp.GetInode().GetIno()
+	srcFH := srcResp.GetFileHandle().GetFh()
+
+	payload := make([]byte, 8192)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        srcFH,
+		Ino:       srcIno,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	dstResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "dst-offset.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	dstIno := dstResp.GetInode().GetIno()
+	dstFH := dstResp.GetFileHandle().GetFh()
+
+	// Copy 2500 bytes from src offset 1000 to dst offset 3000
+	copyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    srcIno,
+		SrcFh:     srcFH,
+		SrcOffset: 1000,
+		DstIno:    dstIno,
+		DstFh:     dstFH,
+		DstOffset: 3000,
+		Length:    2500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2500), copyResp.GetCopied())
+
+	// Read destination at offset 3000, size 2500
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        dstFH,
+		Ino:       dstIno,
+		Offset:    3000,
+		Size:      2500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[1000:3500], readResp.GetData())
+
+	// 2. Zero length copy
+	zeroCopyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    srcIno,
+		SrcFh:     srcFH,
+		SrcOffset: 0,
+		DstIno:    dstIno,
+		DstFh:     dstFH,
+		DstOffset: 0,
+		Length:    0,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), zeroCopyResp.GetCopied())
+
+	// 3. Offset past EOF copy
+	eofCopyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    srcIno,
+		SrcFh:     srcFH,
+		SrcOffset: 99999,
+		DstIno:    dstIno,
+		DstFh:     dstFH,
+		DstOffset: 0,
+		Length:    100,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), eofCopyResp.GetCopied())
+
+	// 4. Cross 64MB Chunk boundary copy in destination
+	crossSrcResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "src-cross.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	crossSrcIno := crossSrcResp.GetInode().GetIno()
+	crossSrcFH := crossSrcResp.GetFileHandle().GetFh()
+
+	crossPayload := make([]byte, 4096)
+	_, err = rand.Read(crossPayload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        crossSrcFH,
+		Ino:       crossSrcIno,
+		Offset:    0,
+		Data:      crossPayload,
+	})
+	require.NoError(t, err)
+
+	crossDstResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "dst-cross.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	crossDstIno := crossDstResp.GetInode().GetIno()
+	crossDstFH := crossDstResp.GetFileHandle().GetFh()
+
+	// Destination offset is chunk.ChunkSize - 2048, length is 4096
+	// This forces 2048 bytes in chunk 0 and 2048 bytes in chunk 1
+	dstCrossOffset := uint64(chunk.ChunkSize - 2048)
+	crossCopyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    crossSrcIno,
+		SrcFh:     crossSrcFH,
+		SrcOffset: 0,
+		DstIno:    crossDstIno,
+		DstFh:     crossDstFH,
+		DstOffset: dstCrossOffset,
+		Length:    4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4096), crossCopyResp.GetCopied())
+
+	// Verify destination chunks table has 2 rows
+	var chunk0Slices, chunk1Slices []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(crossDstIno)).Scan(&chunk0Slices)
+	require.NoError(t, err)
+	s0, err := chunk.DecodeSlices(chunk0Slices)
+	require.NoError(t, err)
+	require.Len(t, s0, 1)
+	assert.Equal(t, uint32(chunk.ChunkSize-2048), s0[0].Pos)
+	assert.Equal(t, uint32(0), s0[0].Off)
+	assert.Equal(t, uint32(2048), s0[0].Len)
+
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName), int64(crossDstIno)).Scan(&chunk1Slices)
+	require.NoError(t, err)
+	s1, err := chunk.DecodeSlices(chunk1Slices)
+	require.NoError(t, err)
+	require.Len(t, s1, 1)
+	assert.Equal(t, uint32(0), s1[0].Pos)
+	assert.Equal(t, uint32(2048), s1[0].Off)
+	assert.Equal(t, uint32(2048), s1[0].Len)
+
+	// Read destination across both chunks
+	readPart0, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        crossDstFH,
+		Ino:       crossDstIno,
+		Offset:    dstCrossOffset,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, crossPayload[:2048], readPart0.GetData())
+
+	readPart1, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        crossDstFH,
+		Ino:       crossDstIno,
+		Offset:    uint64(chunk.ChunkSize),
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, crossPayload[2048:], readPart1.GetData())
+}
+
 // mockS3Client implements chunk.ObjectStorageClient for controlled delay and failure simulation.
 type mockS3Client struct {
 	mu       sync.Mutex
@@ -1675,6 +2861,3 @@ func TestChunkDriver_Fsync_EndToEnd_MinIO_MultiBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(payload3)), stat3.Size)
 }
-
-
-

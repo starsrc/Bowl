@@ -135,21 +135,32 @@ VALUES ($1, $2, $3, $4, $5, 1, 0, 0, 0, 0, 0, $6, $6, $6, '', 0);
 	_, _ = s.db.Exec(ctx, updateParentSQL, now, int64(req.GetParentIno()))
 
 	// 7. Allocate file handle
+	openMode := parseOpenMode(req.GetFlags())
+	var driverHandle HandleContext
+	if s.driver != nil {
+		var err error
+		driverHandle, err = s.driver.Open(ctx, sess.DiskID, newIno, openMode, req.GetFlags())
+		if err != nil {
+			return nil, toConnectError(err)
+		}
+	}
+
 	fh := s.nextFH.Add(1)
 	fileHandle := &bowlv1.FileHandle{
 		Fh:           fh,
 		Ino:          newIno,
-		OpenMode:     parseOpenMode(req.GetFlags()),
+		OpenMode:     openMode,
 		Flags:        req.GetFlags(),
 		ClientId:     sess.ClientID,
 		IsWriteLease: true,
 		OpenFlags:    0,
 	}
 	s.openHandles.Store(fh, &OpenFileHandle{
-		Handle:    fileHandle,
-		SessionID: sess.ID,
-		DiskID:    sess.DiskID,
-		CreatedAt: now,
+		Handle:       fileHandle,
+		SessionID:    sess.ID,
+		DiskID:       sess.DiskID,
+		CreatedAt:    now,
+		driverHandle: driverHandle,
 	})
 
 	inode := &bowlv1.Inode{

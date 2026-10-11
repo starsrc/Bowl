@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package bowl.v1;
+
+import "bowl/v1/file.proto";
+import "bowl/v1/inode.proto";
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
+
+// =========================================================================
+// 目录 (Directory) 领域模型
+// =========================================================================
+
+// DirEntry 表示目录项元数据。
+// 对应文件系统目录中的单个文件或子目录映射关系。
+message DirEntry {
+  // 目录项名称（例如 "file.txt" 或子目录名）。
+  string name = 1;
+
+  // 关联的目标 Inode 编号。
+  uint64 ino = 2;
+
+  // 目标文件类型分类。
+  InodeType type = 3;
+
+  // 可选的关联完整 Inode 属性。
+  // 用于支持 FUSE readdirplus 操作，实现目录列表与属性预取的一次性高效带回，避免多次 RPC 往返。
+  Inode attr = 4;
+
+  // 目录流游标偏移量（对应 POSIX d_off 与 FUSE DirEntry.Off）。
+  // 用于支持超大目录分批流式遍历与内核断点续传。
+  uint64 offset = 5;
+
+  // 关联目标 Inode 的代数 / 纪元号（Generation）。
+  // 用于内核在 lookup / readdirplus 阶段校验 Inode 映射有效性，防止 Inode 编号复用引发的 ABA 错位。
+  uint64 generation = 6;
+
+  // 内核目录项缓存有效时间（Entry Timeout）。
+  // 指示内核 FUSE 驱动在多长时间内直接复用 dentry 目录项缓存，而无需重复向服务端发起 lookup 解析。
+  // 配合 Bowl Storage 服务端租约与元数据变更通知机制实现高效缓存。
+  google.protobuf.Duration entry_timeout = 7;
+}
+
+// =============================================================================
+// 目录操作请求与响应
+// =============================================================================
+
+// OpenDirRequest 表示打开目录准备遍历的请求参数模型（对应 FUSE_OPENDIR）。
+message OpenDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 打开目录的 POSIX 标志位掩码。
+  uint32 flags = 3;
+}
+
+// OpenDirResponse 表示打开目录的响应结果。
+message OpenDirResponse {
+  // 服务端为已打开目录分配的文件打开句柄。
+  FileHandle file_handle = 1;
+}
+
+// ReadDirRequest 表示流式分批读取目录项内容的请求参数模型（对应 FUSE_READDIR）。
+message ReadDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 目录打开句柄（由 opendir 返回，若无需句柄管理填 0）。
+  uint64 fh = 3;
+
+  // 遍历起始游标偏移量（对应 DirEntry.offset，从该偏移后继续拉取，首批从 0 开始）。
+  uint64 offset = 4;
+
+  // 本批次期望返回的最大目录项数量限制。
+  uint32 limit = 5;
+}
+
+// ReadDirResponse 表示流式分批读取目录项内容的响应结果。
+message ReadDirResponse {
+  // 目录项元数据列表。
+  repeated DirEntry entries = 1;
+}
+
+// ReadDirPlusRequest 表示流式读取目录项并预取属性的请求参数模型（对应 FUSE_READDIRPLUS）。
+message ReadDirPlusRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 目录打开句柄。
+  uint64 fh = 3;
+
+  // 遍历起始游标偏移量。
+  uint64 offset = 4;
+
+  // 本批次期望返回的最大目录项数量限制。
+  uint32 limit = 5;
+}
+
+// ReadDirPlusResponse 表示流式读取目录项并预取属性的响应结果。
+message ReadDirPlusResponse {
+  // 目录项元数据列表（每个条目均附带完整 Inode 属性与 entry_timeout）。
+  repeated DirEntry entries = 1;
+}
+
+// ReleaseDirRequest 表示关闭释放目录句柄的请求参数模型（对应 FUSE_RELEASEDIR）。
+message ReleaseDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 待释放的目录打开句柄 ID。
+  uint64 fh = 3;
+}
+
+// ReleaseDirResponse 表示关闭释放目录句柄的响应结果。
+message ReleaseDirResponse {}
+
+// FsyncDirRequest 表示同步目录元数据至持久存储的请求参数模型（对应 FUSE_FSYNCDIR）。
+message FsyncDirRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标目录 Inode 编号。
+  uint64 ino = 2;
+
+  // 目录打开句柄 ID。
+  uint64 fh = 3;
+
+  // 是否仅同步目录项数据（对应 fdatasync 语义）。
+  bool datasync = 4;
+}
+
+// FsyncDirResponse 表示同步目录元数据至持久存储的响应结果。
+message FsyncDirResponse {}

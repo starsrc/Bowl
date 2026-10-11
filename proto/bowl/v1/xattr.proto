@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package bowl.v1;
+
+option go_package = "github.com/starsrc/bowl/gen/go/bowl/v1;bowlv1";
+
+// =========================================================================
+// 扩展属性 (xattr) 领域模型与基础枚举
+// =========================================================================
+
+// XAttrSetFlag 表示设置扩展属性时的操作模式标志（对应 Linux setxattr 的 flags 参数）。
+enum XAttrSetFlag {
+  // 未指定标志（默认模式：若属性存在则覆盖替换，若不存在则创建）。
+  X_ATTR_SET_FLAG_UNSPECIFIED = 0;
+  // 仅在属性尚不存在时创建；若已存在则返回 EEXIST 错误（对应 Linux XATTR_CREATE = 0x1）。
+  X_ATTR_SET_FLAG_CREATE = 1;
+  // 仅在属性已存在时替换；若不存在则返回 ENODATA / ENOATTR 错误（对应 Linux XATTR_REPLACE = 0x2）。
+  X_ATTR_SET_FLAG_REPLACE = 2;
+}
+
+// =============================================================================
+// 扩展属性操作请求与响应
+// =============================================================================
+
+// GetXAttrRequest 表示获取指定扩展属性值的请求参数模型（对应 FUSE_GETXATTR）。
+message GetXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待查询的扩展属性键名（例如 "user.comment"）。
+  string name = 3;
+}
+
+// GetXAttrResponse 表示获取指定扩展属性值的响应结果。
+message GetXAttrResponse {
+  // 扩展属性对应的二进制数据值。
+  bytes value = 1;
+}
+
+// SetXAttrRequest 表示设置指定扩展属性键值对的请求参数模型（对应 FUSE_SETXATTR）。
+message SetXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待设置的扩展属性键名。
+  string name = 3;
+
+  // 待写入的扩展属性二进制数据值。
+  bytes value = 4;
+
+  // 设置属性控制标志（详见 XAttrSetFlag 枚举定义：CREATE / REPLACE）。
+  XAttrSetFlag flags = 5;
+}
+
+// SetXAttrResponse 表示设置指定扩展属性键值对的响应结果。
+message SetXAttrResponse {}
+
+// ListXAttrRequest 表示列出节点所有扩展属性键名的请求参数模型（对应 FUSE_LISTXATTR）。
+message ListXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+}
+
+// ListXAttrResponse 表示列出节点所有扩展属性键名的响应结果。
+message ListXAttrResponse {
+  // 该节点拥有的全部扩展属性键名列表。
+  repeated string names = 1;
+}
+
+// RemoveXAttrRequest 表示删除指定扩展属性的请求参数模型（对应 FUSE_REMOVEXATTR）。
+message RemoveXAttrRequest {
+  // 挂载会话唯一标识 ID。
+  string session_id = 1;
+
+  // 目标文件 Inode 编号。
+  uint64 ino = 2;
+
+  // 待删除的扩展属性键名。
+  string name = 3;
+}
+
+// RemoveXAttrResponse 表示删除指定扩展属性的响应结果。
+message RemoveXAttrResponse {}

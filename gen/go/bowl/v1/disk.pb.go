@@ -1105,7 +1105,7 @@ var File_bowl_v1_disk_proto protoreflect.FileDescriptor
 
 const file_bowl_v1_disk_proto_rawDesc = "" +
 	"\n" +
-	"\x12bowl/v1/disk.proto\x12\abowl.v1\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x15bowl/v1/storage.proto\"\xdf\x03\n" +
+	"\x12bowl/v1/disk.proto\x12\abowl.v1\x1a\x13bowl/v1/inode.proto\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xdf\x03\n" +
 	"\x04Disk\x12\x17\n" +
 	"\adisk_id\x18\x01 \x01(\tR\x06diskId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
@@ -1275,7 +1275,7 @@ func file_bowl_v1_disk_proto_init() {
 	if File_bowl_v1_disk_proto != nil {
 		return
 	}
-	file_bowl_v1_storage_proto_init()
+	file_bowl_v1_inode_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

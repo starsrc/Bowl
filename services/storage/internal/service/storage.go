@@ -523,7 +523,14 @@ CREATE TABLE IF NOT EXISTS "%s".xattrs (
 	value BYTEA NOT NULL,
 	PRIMARY KEY (ino, name)
 );
-`, schemaName, schemaName, schemaName, schemaName, schemaName)
+
+CREATE TABLE IF NOT EXISTS "%s".chunks (
+	ino BIGINT NOT NULL,
+	indx INT NOT NULL,
+	slices BYTEA NOT NULL,
+	PRIMARY KEY (ino, indx)
+);
+`, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName)
 
 	if _, err := s.db.Exec(ctx, ddl); err != nil {
 		return err

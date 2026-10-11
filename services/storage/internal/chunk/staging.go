@@ -39,6 +39,19 @@ func (m *StagingManager) NextSliceID() uint64 {
 	return m.nextSliceID.Add(1)
 }
 
+// UpdateMaxSliceID ensures nextSliceID is at least maxID so subsequent allocations do not collide.
+func (m *StagingManager) UpdateMaxSliceID(maxID uint64) {
+	for {
+		cur := m.nextSliceID.Load()
+		if maxID <= cur {
+			break
+		}
+		if m.nextSliceID.CompareAndSwap(cur, maxID) {
+			break
+		}
+	}
+}
+
 // SlicePath returns the filesystem path for a specific slice within a virtual disk.
 // Format: `<staging_dir>/<disk_id>/slice_<slice_id>.bin`
 func (m *StagingManager) SlicePath(diskID string, sliceID uint64) string {
@@ -75,3 +88,21 @@ func (m *StagingManager) DeleteSlice(diskID string, sliceID uint64) error {
 	}
 	return nil
 }
+
+// SyncDisk flushes staging directory metadata for a virtual disk to persistent storage.
+func (m *StagingManager) SyncDisk(diskID string) error {
+	if m == nil || m.dir == "" || diskID == "" {
+		return nil
+	}
+	dirPath := filepath.Join(m.dir, diskID)
+	f, err := os.Open(dirPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("staging: failed to sync disk directory: %w", err)
+	}
+	defer f.Close()
+	return f.Sync()
+}
+

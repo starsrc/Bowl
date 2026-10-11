@@ -20,6 +20,7 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
+	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/session"
 )
 
@@ -124,6 +125,14 @@ func NewStorageService(
 	return svc
 }
 
+// RecoverStaging triggers NVMe staging recovery if ChunkDriver is configured.
+func (s *StorageService) RecoverStaging(ctx context.Context) (*chunk.RecoveryReport, error) {
+	if cd, ok := s.driver.(*ChunkDriver); ok {
+		return cd.RecoverStaging(ctx)
+	}
+	return &chunk.RecoveryReport{}, nil
+}
+
 // FormatDiskSchema formats the PostgreSQL schema name for a given virtual disk UUID.
 func FormatDiskSchema(diskID uuid.UUID) string {
 	return fmt.Sprintf("disk_%s", strings.ReplaceAll(diskID.String(), "-", "_"))
@@ -132,6 +141,12 @@ func FormatDiskSchema(diskID uuid.UUID) string {
 func toConnectError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+	}
+	if errors.Is(err, context.Canceled) {
+		return connect.NewError(connect.CodeCanceled, err.Error())
 	}
 	var connectErr *connect.Error
 	if errors.As(err, &connectErr) {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
@@ -114,6 +116,62 @@ func (d *ChunkDriver) StagingManager() *chunk.StagingManager {
 // DB returns the underlying DBExecutor.
 func (d *ChunkDriver) DB() DBExecutor {
 	return d.db
+}
+
+// LocateSlice queries the PostgreSQL chunks table for the given diskID to find the (ino, chunk_indx)
+// referencing the given sliceID.
+func (d *ChunkDriver) LocateSlice(ctx context.Context, diskID string, sliceID uint64) (uint64, uint32, bool, error) {
+	parsedDiskUUID, err := uuid.Parse(diskID)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("invalid disk id %q: %w", diskID, err)
+	}
+	schemaName := FormatDiskSchema(parsedDiskUUID)
+
+	sliceIDBytes := binary.BigEndian.AppendUint64(nil, sliceID)
+	query := fmt.Sprintf(`SELECT ino, indx, slices FROM "%s".chunks WHERE position($1 IN slices) > 0;`, schemaName)
+
+	rows, err := d.db.Query(ctx, query, sliceIDBytes)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "3F000" || pgErr.Code == "42P01") {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, fmt.Errorf("query chunk slices for disk %s: %w", diskID, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ino int64
+		var indx int32
+		var rawSlices []byte
+		if err := rows.Scan(&ino, &indx, &rawSlices); err != nil {
+			return 0, 0, false, fmt.Errorf("scan chunk row: %w", err)
+		}
+
+		slices, err := chunk.DecodeSlices(rawSlices)
+		if err != nil {
+			continue
+		}
+		for _, s := range slices {
+			if s.ID == sliceID {
+				return uint64(ino), uint32(indx), true, nil
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, false, fmt.Errorf("iterate chunk rows: %w", err)
+	}
+
+	return 0, 0, false, nil
+}
+
+// RecoverStaging triggers the recovery pipeline, scanning local NVMe staging for unflushed slices,
+// resolving metadata from PostgreSQL, and re-enqueueing unpersisted slices to S3.
+func (d *ChunkDriver) RecoverStaging(ctx context.Context) (*chunk.RecoveryReport, error) {
+	if d.staging == nil {
+		return &chunk.RecoveryReport{}, nil
+	}
+	return chunk.RecoverStagingPipeline(ctx, d.staging, d.uploader, d)
 }
 
 // Open opens an existing file or creates a driver handle.
@@ -297,7 +355,7 @@ ON CONFLICT (id) DO NOTHING;
 			return 0, connect.Errorf(connect.CodeInternal, "failed to record slice reference: %s", err)
 		}
 
-		// 2.5. Asynchronously enqueue slice to S3 uploader if configured
+		// 2.6. Asynchronously enqueue slice to S3 uploader if configured
 		if d.uploader != nil {
 			_ = d.uploader.Enqueue(ctx, &chunk.UploadTask{
 				DiskID:    diskID,
@@ -316,13 +374,95 @@ ON CONFLICT (id) DO NOTHING;
 
 
 
-// Flush flushes dirty data for an open handle (no-op in STARSRC-117, implemented in STARSRC-123).
+// Flush flushes dirty data for an open handle (implemented in STARSRC-123).
 func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+		}
+		if errors.Is(err, context.Canceled) {
+			return connect.NewError(connect.CodeCanceled, err.Error())
+		}
+		return err
+	}
+
+	if d.staging != nil && diskID != "" {
+		if err := d.staging.SyncDisk(diskID); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to sync staging disk: %s", err)
+		}
+	}
+
+	if d.uploader != nil && diskID != "" && ino > 0 {
+		if err := d.uploader.WaitForIno(ctx, diskID, ino); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+			}
+			if errors.Is(err, context.Canceled) {
+				return connect.NewError(connect.CodeCanceled, err.Error())
+			}
+			return connect.Errorf(connect.CodeInternal, "s3 persistence failure for ino %d: %s", ino, err)
+		}
+	}
+
 	return nil
 }
 
-// Fsync synchronizes file data to persistent storage (no-op in STARSRC-117, implemented in STARSRC-123).
+// Fsync synchronizes file data to persistent storage (implemented in STARSRC-123).
 func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID string, ino uint64, datasync bool) error {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+		}
+		if errors.Is(err, context.Canceled) {
+			return connect.NewError(connect.CodeCanceled, err.Error())
+		}
+		return err
+	}
+
+	if d.staging != nil && diskID != "" {
+		if err := d.staging.SyncDisk(diskID); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to sync staging disk: %s", err)
+		}
+	}
+
+	if d.uploader != nil && diskID != "" && ino > 0 {
+		if err := d.uploader.WaitForIno(ctx, diskID, ino); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+			}
+			if errors.Is(err, context.Canceled) {
+				return connect.NewError(connect.CodeCanceled, err.Error())
+			}
+			return connect.Errorf(connect.CodeInternal, "s3 persistence failure for ino %d: %s", ino, err)
+		}
+	}
+
 	return nil
 }
 

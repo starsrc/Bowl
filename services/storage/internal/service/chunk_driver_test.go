@@ -4,22 +4,26 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/config"
-
-	"github.com/minio/minio-go/v7"
 )
 
 
@@ -2249,6 +2253,614 @@ func TestChunkDriver_CopyFileRange_OffsetAndCrossBoundary(t *testing.T) {
 	assert.Equal(t, crossPayload[2048:], readPart1.GetData())
 }
 
+// mockS3Client implements chunk.ObjectStorageClient for controlled delay and failure simulation.
+type mockS3Client struct {
+	mu       sync.Mutex
+	putCalls atomic.Int32
+	putDelay time.Duration
+	putErr   error
+	objects  map[string][]byte
+}
+
+func newMockS3Client() *mockS3Client {
+	return &mockS3Client{
+		objects: make(map[string][]byte),
+	}
+}
+
+func (m *mockS3Client) PutObject(ctx context.Context, bucket, objectKey string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+	m.putCalls.Add(1)
+	if m.putDelay > 0 {
+		select {
+		case <-time.After(m.putDelay):
+		case <-ctx.Done():
+			return minio.UploadInfo{}, ctx.Err()
+		}
+	}
+	m.mu.Lock()
+	err := m.putErr
+	m.mu.Unlock()
+	if err != nil {
+		return minio.UploadInfo{}, err
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return minio.UploadInfo{}, err
+	}
+
+	m.mu.Lock()
+	m.objects[objectKey] = data
+	m.mu.Unlock()
+
+	return minio.UploadInfo{
+		Bucket: bucket,
+		Key:    objectKey,
+		Size:   int64(len(data)),
+	}, nil
+}
+
+func (m *mockS3Client) StatObject(ctx context.Context, bucket, objectKey string, opts minio.StatObjectOptions) (minio.ObjectInfo, error) {
+	m.mu.Lock()
+	data, ok := m.objects[objectKey]
+	m.mu.Unlock()
+	if !ok {
+		return minio.ObjectInfo{}, minio.ErrorResponse{
+			StatusCode: 404,
+			Code:       "NoSuchKey",
+			Message:    "The specified key does not exist.",
+		}
+	}
+	return minio.ObjectInfo{
+		Key:  objectKey,
+		Size: int64(len(data)),
+	}, nil
+}
+
+func (m *mockS3Client) GetObject(ctx context.Context, bucket, objectKey string, opts minio.GetObjectOptions) (*minio.Object, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockS3Client) RemoveObject(ctx context.Context, bucket, objectKey string, opts minio.RemoveObjectOptions) error {
+	m.mu.Lock()
+	delete(m.objects, objectKey)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *mockS3Client) BucketExists(ctx context.Context, bucket string) (bool, error) {
+	return true, nil
+}
+
+func (m *mockS3Client) MakeBucket(ctx context.Context, bucket string, opts minio.MakeBucketOptions) error {
+	return nil
+}
+
+func (m *mockS3Client) getObjects() map[string][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := make(map[string][]byte, len(m.objects))
+	for k, v := range m.objects {
+		res[k] = v
+	}
+	return res
+}
+
+func TestChunkDriver_Fsync_BlocksUntilS3UploadsFinish(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "fsync-block-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	mockClient.putDelay = 80 * time.Millisecond // simulate network latency on S3 PutObject
+
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "fsync-barrier-test.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 3 slices: 4MB, 4MB, 1MB
+	blockSize := chunk.BlockSize // 4MB
+	payload1 := bytes.Repeat([]byte("A"), blockSize)
+	payload2 := bytes.Repeat([]byte("B"), blockSize)
+	payload3 := bytes.Repeat([]byte("C"), 1024*1024)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload1,
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(blockSize),
+		Data:      payload2,
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(blockSize * 2),
+		Data:      payload3,
+	})
+	require.NoError(t, err)
+
+	// Call Fsync and verify it blocks until all 3 slices are uploaded
+	start := time.Now()
+	fsyncResp, err := h.storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Datasync:  false,
+	})
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.NotNil(t, fsyncResp)
+	assert.GreaterOrEqual(t, elapsed, 80*time.Millisecond, "Fsync must block until simulated S3 upload finishes")
+
+	// Verify all blocks exist in storage
+	objs := mockClient.getObjects()
+	assert.Equal(t, int32(3), mockClient.putCalls.Load())
+	assert.Len(t, objs, 3)
+
+	key1 := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key2 := chunk.FormatObjectKey(diskID.String(), 0, 2, 0)
+	key3 := chunk.FormatObjectKey(diskID.String(), 0, 3, 0)
+	assert.Contains(t, objs, key1)
+	assert.Contains(t, objs, key2)
+	assert.Contains(t, objs, key3)
+	assert.Equal(t, payload1, objs[key1])
+	assert.Equal(t, payload2, objs[key2])
+	assert.Equal(t, payload3, objs[key3])
+}
+
+func TestChunkDriver_Flush_BlocksUntilS3UploadsFinish(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "flush-block-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	mockClient.putDelay = 80 * time.Millisecond
+
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "flush-barrier-test.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	payload := bytes.Repeat([]byte("D"), 2*1024*1024)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	start := time.Now()
+	flushResp, err := h.storageClient.Flush(ctx, &bowlv1.FlushRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+	})
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.NotNil(t, flushResp)
+	assert.GreaterOrEqual(t, elapsed, 70*time.Millisecond, "Flush must block until simulated S3 upload finishes")
+
+	objs := mockClient.getObjects()
+	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	assert.Contains(t, objs, key)
+	assert.Equal(t, payload, objs[key])
+}
+
+func TestChunkDriver_Fsync_UploadFailure_PropagatesError(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "fsync-fail-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	mockClient.putErr = errors.New("s3 permanent failure: access denied")
+
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(1),
+		chunk.WithMaxRetries(0),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "fail-test.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      []byte("hello world fail"),
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Datasync:  false,
+	})
+	require.Error(t, err, "Fsync must return error when background S3 upload fails")
+	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	assert.Contains(t, err.Error(), "s3 persistence failure")
+}
+
+func TestChunkDriver_Fsync_ContextTimeout_UnblocksWithError(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "fsync-timeout-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	mockClient.putDelay = 1 * time.Second
+
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(1),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "timeout-test.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      []byte("timeout test payload"),
+	})
+	require.NoError(t, err)
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = h.storageClient.Fsync(timeoutCtx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Datasync:  false,
+	})
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "Fsync must fail with deadline exceeded")
+	assert.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	assert.Less(t, elapsed, 300*time.Millisecond, "Fsync must unblock immediately upon context cancellation")
+}
+
+func TestChunkDriver_Fsync_WithoutUploader_Succeeds(t *testing.T) {
+	h, _, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "no-uploader-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	assert.Nil(t, driver.Uploader(), "Uploader should be nil initially")
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "no-uploader.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      []byte("data without uploader"),
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Flush(ctx, &bowlv1.FlushRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+	})
+	require.NoError(t, err)
+}
+
+func isMinIOHealthy(endpoint string) bool {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get(endpoint + "/minio/health/live")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func TestChunkDriver_Fsync_EndToEnd_MinIO_MultiBlock(t *testing.T) {
+	minioEndpoint := "http://127.0.0.1:9000"
+	if !isMinIOHealthy(minioEndpoint) {
+		t.Skip("MinIO is not reachable at 127.0.0.1:9000, skipping live MinIO test")
+	}
+
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "fsync-minio-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       minioEndpoint,
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(4),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "multiblock-minio.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	blockSize := chunk.BlockSize // 4MB
+	payload1 := make([]byte, blockSize)
+	_, _ = rand.Read(payload1)
+	payload2 := make([]byte, blockSize)
+	_, _ = rand.Read(payload2)
+	payload3 := make([]byte, 1024*1024) // 1MB
+	_, _ = rand.Read(payload3)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload1,
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(blockSize),
+		Data:      payload2,
+	})
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(blockSize * 2),
+		Data:      payload3,
+	})
+	require.NoError(t, err)
+
+	// Invoke Fsync to wait for all in-flight S3 blocks to be persisted
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer syncCancel()
+
+	fsyncResp, err := h.storageClient.Fsync(syncCtx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Datasync:  false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fsyncResp)
+
+	// Verify all 4MB physical blocks exist in MinIO
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+
+	key1 := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key2 := chunk.FormatObjectKey(diskID.String(), 0, 2, 0)
+	key3 := chunk.FormatObjectKey(diskID.String(), 0, 3, 0)
+
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, key1, minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, key2, minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, key3, minio.RemoveObjectOptions{})
+	}()
+
+	stat1, err := minioClient.StatObject(context.Background(), cfg.Bucket, key1, minio.StatObjectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(blockSize), stat1.Size)
+
+	stat2, err := minioClient.StatObject(context.Background(), cfg.Bucket, key2, minio.StatObjectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(blockSize), stat2.Size)
+
+	stat3, err := minioClient.StatObject(context.Background(), cfg.Bucket, key3, minio.StatObjectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(payload3)), stat3.Size)
+}
+
 func TestChunkDriver_DeleteInode_DecrementsSliceRefs_AndDeletesChunks(t *testing.T) {
 	h, _, chunkDriver := setupChunkHarness(t)
 	defer h.cleanup()
@@ -2658,6 +3270,11 @@ func TestStorageService_SetAttr_TruncateShrink_DecrementsSliceRefs(t *testing.T)
 }
 
 func TestChunkDriver_COWClone_S3AndStaging_GCLifecycle(t *testing.T) {
+	minioEndpoint := "http://127.0.0.1:9000"
+	if !isMinIOHealthy(minioEndpoint) {
+		t.Skip("MinIO is not reachable at 127.0.0.1:9000, skipping live MinIO test")
+	}
+
 	h, stagingMgr, chunkDriver := setupChunkHarness(t)
 	defer h.cleanup()
 
@@ -2681,7 +3298,7 @@ func TestChunkDriver_COWClone_S3AndStaging_GCLifecycle(t *testing.T) {
 	// Configure S3 Uploader
 	cfg := config.S3Config{
 		Enabled:        true,
-		Endpoint:       "http://127.0.0.1:9000",
+		Endpoint:       minioEndpoint,
 		Bucket:         "bowl-data",
 		AccessKey:      "minioadmin",
 		SecretKey:      "minioadmin",
@@ -2880,7 +3497,3 @@ func TestChunkDriver_COWClone_S3AndStaging_GCLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, rowCount, "slice_refs row must be deleted after GC")
 }
-
-
-
-

@@ -197,3 +197,267 @@ func TestDiskService_GetDisk_ValidationErrors(t *testing.T) {
 		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
 	})
 }
+
+func TestDiskService_AttachDisk_OWMR_Lifecycle(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Create a disk (status READY)
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "owmr-disk-lifecycle",
+		CapacityBytes: 10737418240,
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_READY, createResp.Disk.Status)
+	assert.Empty(t, createResp.Disk.WriterClientId)
+	assert.Empty(t, createResp.Disk.ReaderClientIds)
+
+	// 2. Attach reader client-1 (read_only = true) -> status transitions to ATTACHED
+	attachResp1, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-01",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, attachResp1.Disk.Status)
+	assert.Empty(t, attachResp1.Disk.WriterClientId)
+	assert.Equal(t, []string{"reader-node-01"}, attachResp1.Disk.ReaderClientIds)
+
+	// 3. Attach reader client-2 (read_only = true) -> multi-reader allowed
+	attachResp2, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-02",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, attachResp2.Disk.Status)
+	assert.Empty(t, attachResp2.Disk.WriterClientId)
+	assert.Equal(t, []string{"reader-node-01", "reader-node-02"}, attachResp2.Disk.ReaderClientIds)
+
+	// 4. Attach exclusive writer client-3 (read_only = false) -> succeeds for first writer
+	attachResp3, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-node-03",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, attachResp3.Disk.Status)
+	assert.Equal(t, "writer-node-03", attachResp3.Disk.WriterClientId)
+	assert.Equal(t, []string{"reader-node-01", "reader-node-02"}, attachResp3.Disk.ReaderClientIds)
+
+	// 5. Attach second writer client-4 (read_only = false) -> fails with CodeFailedPrecondition (OWMR mutual exclusion)
+	attachResp4, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-node-04",
+		ReadOnly: false,
+	})
+	require.Error(t, err)
+	assert.Nil(t, attachResp4)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+
+	// 6. Duplicate attachment from same client (reader-node-01) -> fails with CodeAlreadyExists
+	dupResp, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-01",
+		ReadOnly: true,
+	})
+	require.Error(t, err)
+	assert.Nil(t, dupResp)
+	assert.Equal(t, connect.CodeAlreadyExists, connect.CodeOf(err))
+
+	// 7. Verify GetDisk reflects all current attachments
+	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, getResp.Disk.Status)
+	assert.Equal(t, "writer-node-03", getResp.Disk.WriterClientId)
+	assert.Equal(t, []string{"reader-node-01", "reader-node-02"}, getResp.Disk.ReaderClientIds)
+
+	// 8. Detach writer-node-03 -> releases exclusive write lease
+	detachResp3, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-node-03",
+		Force:    false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_ATTACHED, detachResp3.Disk.Status) // readers still active
+	assert.Empty(t, detachResp3.Disk.WriterClientId)
+	assert.Equal(t, []string{"reader-node-01", "reader-node-02"}, detachResp3.Disk.ReaderClientIds)
+
+	// 9. Now writer-node-04 can attach as writer!
+	attachResp4Retry, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-node-04",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "writer-node-04", attachResp4Retry.Disk.WriterClientId)
+
+	// 10. Detach remaining clients one by one
+	_, err = client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "writer-node-04",
+	})
+	require.NoError(t, err)
+
+	_, err = client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-01",
+	})
+	require.NoError(t, err)
+
+	// Detach last reader -> status transitions back to READY
+	detachLast, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+		DiskId:   diskID,
+		ClientId: "reader-node-02",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_READY, detachLast.Disk.Status)
+	assert.Empty(t, detachLast.Disk.WriterClientId)
+	assert.Empty(t, detachLast.Disk.ReaderClientIds)
+
+	// Verify GetDisk after all clients detached
+	finalGet, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.NoError(t, err)
+	assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_READY, finalGet.Disk.Status)
+	assert.Empty(t, finalGet.Disk.WriterClientId)
+	assert.Empty(t, finalGet.Disk.ReaderClientIds)
+}
+
+func TestDiskService_DetachDisk_ForceAndNotFound(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "detach-force-disk",
+		CapacityBytes: 1024,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	t.Run("detach unattached client without force returns NotFound", func(t *testing.T) {
+		resp, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   diskID,
+			ClientId: "unattached-client",
+			Force:    false,
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	})
+
+	t.Run("detach unattached client with force succeeds idempotently", func(t *testing.T) {
+		resp, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   diskID,
+			ClientId: "unattached-client",
+			Force:    true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_READY, resp.Disk.Status)
+	})
+
+	t.Run("attach and detach with force succeeds", func(t *testing.T) {
+		_, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+			DiskId:   diskID,
+			ClientId: "client-force-test",
+			ReadOnly: false,
+		})
+		require.NoError(t, err)
+
+		resp, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   diskID,
+			ClientId: "client-force-test",
+			Force:    true,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, bowlv1.DiskStatus_DISK_STATUS_READY, resp.Disk.Status)
+		assert.Empty(t, resp.Disk.WriterClientId)
+	})
+}
+
+func TestDiskService_AttachAndDetach_ValidationErrors(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	randomUUID := uuid.New().String()
+
+	t.Run("AttachDisk empty disk_id returns InvalidArgument", func(t *testing.T) {
+		_, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+			DiskId:   "",
+			ClientId: "c-1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("AttachDisk malformed disk_id returns InvalidArgument", func(t *testing.T) {
+		_, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+			DiskId:   "not-a-uuid",
+			ClientId: "c-1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("AttachDisk empty client_id returns InvalidArgument", func(t *testing.T) {
+		_, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+			DiskId:   randomUUID,
+			ClientId: "   ",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("AttachDisk non-existent disk returns NotFound", func(t *testing.T) {
+		_, err := client.AttachDisk(ctx, &bowlv1.AttachDiskRequest{
+			DiskId:   randomUUID,
+			ClientId: "c-1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	})
+
+	t.Run("DetachDisk empty disk_id returns InvalidArgument", func(t *testing.T) {
+		_, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   "",
+			ClientId: "c-1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("DetachDisk malformed disk_id returns InvalidArgument", func(t *testing.T) {
+		_, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   "not-a-uuid",
+			ClientId: "c-1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("DetachDisk empty client_id returns InvalidArgument", func(t *testing.T) {
+		_, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   randomUUID,
+			ClientId: "   ",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("DetachDisk non-existent disk returns NotFound", func(t *testing.T) {
+		_, err := client.DetachDisk(ctx, &bowlv1.DetachDiskRequest{
+			DiskId:   randomUUID,
+			ClientId: "c-1",
+		})
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	})
+}
+

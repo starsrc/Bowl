@@ -19,3 +19,11 @@ type Disk struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
+
+type DiskAttachment struct {
+	ID         pgtype.UUID        `json:"id"`
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	ClientID   string             `json:"client_id"`
+	ReadOnly   bool               `json:"read_only"`
+	AttachedAt pgtype.Timestamptz `json:"attached_at"`
+}

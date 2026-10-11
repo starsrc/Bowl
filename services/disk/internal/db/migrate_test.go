@@ -31,9 +31,13 @@ func TestMigrateUp_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	// Verify table exists by querying information_schema
+	// Verify tables exist by querying information_schema
 	var tableName string
 	err = pool.QueryRow(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'disks'").Scan(&tableName)
 	require.NoError(t, err)
 	assert.Equal(t, "disks", tableName)
+
+	err = pool.QueryRow(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'disk_attachments'").Scan(&tableName)
+	require.NoError(t, err)
+	assert.Equal(t, "disk_attachments", tableName)
 }

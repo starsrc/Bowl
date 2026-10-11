@@ -76,3 +76,32 @@ func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 	)
 	return i, err
 }
+
+const updateDiskStatus = `-- name: UpdateDiskStatus :one
+UPDATE disks
+SET status = $2
+WHERE disk_id = $1
+RETURNING disk_id, name, capacity_bytes, used_bytes, inodes_quota, inodes_used, status, created_at, updated_at
+`
+
+type UpdateDiskStatusParams struct {
+	DiskID pgtype.UUID `json:"disk_id"`
+	Status int16       `json:"status"`
+}
+
+func (q *Queries) UpdateDiskStatus(ctx context.Context, arg UpdateDiskStatusParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, updateDiskStatus, arg.DiskID, arg.Status)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.CapacityBytes,
+		&i.UsedBytes,
+		&i.InodesQuota,
+		&i.InodesUsed,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}

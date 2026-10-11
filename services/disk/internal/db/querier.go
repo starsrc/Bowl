@@ -11,8 +11,14 @@ import (
 )
 
 type Querier interface {
+	CountDiskAttachmentsByDiskID(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error)
+	CreateDiskAttachment(ctx context.Context, arg CreateDiskAttachmentParams) (DiskAttachment, error)
+	DeleteDiskAttachment(ctx context.Context, arg DeleteDiskAttachmentParams) (int64, error)
+	DeleteDiskAttachmentsByDiskID(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
+	ListDiskAttachmentsByDiskID(ctx context.Context, diskID pgtype.UUID) ([]DiskAttachment, error)
+	UpdateDiskStatus(ctx context.Context, arg UpdateDiskStatusParams) (Disk, error)
 }
 
 var _ Querier = (*Queries)(nil)

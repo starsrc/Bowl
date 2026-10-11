@@ -13,3 +13,9 @@ RETURNING *;
 -- name: GetDisk :one
 SELECT * FROM disks
 WHERE disk_id = $1;
+
+-- name: UpdateDiskStatus :one
+UPDATE disks
+SET status = $2
+WHERE disk_id = $1
+RETURNING *;

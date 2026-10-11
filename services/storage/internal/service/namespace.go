@@ -367,6 +367,11 @@ func (s *StorageService) Unlink(ctx context.Context, req *bowlv1.UnlinkRequest) 
 			return nil, connect.Errorf(connect.CodeInternal, "failed to delete inode: %s", err)
 		}
 	} else {
+		deleteEntrySQL := fmt.Sprintf(`DELETE FROM "%s".inodes WHERE parent = $1 AND name = $2;`, schemaName)
+		if _, err := s.db.Exec(ctx, deleteEntrySQL, int64(req.GetParentIno()), name); err != nil {
+			return nil, connect.Errorf(connect.CodeInternal, "failed to delete directory entry: %s", err)
+		}
+
 		updateSQL := fmt.Sprintf(`UPDATE "%s".inodes SET nlink = nlink - 1, ctime = $1 WHERE ino = $2;`, schemaName)
 		if _, err := s.db.Exec(ctx, updateSQL, now, int64(targetInode.GetIno())); err != nil {
 			return nil, connect.Errorf(connect.CodeInternal, "failed to decrement nlink: %s", err)

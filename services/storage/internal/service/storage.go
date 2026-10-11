@@ -361,7 +361,7 @@ func (s *StorageService) ensureDiskSchema(ctx context.Context, schemaName string
 CREATE SCHEMA IF NOT EXISTS "%s";
 
 CREATE TABLE IF NOT EXISTS "%s".inodes (
-	ino BIGINT PRIMARY KEY,
+	ino BIGINT NOT NULL,
 	parent BIGINT NOT NULL,
 	name TEXT NOT NULL,
 	type INT NOT NULL,
@@ -376,10 +376,11 @@ CREATE TABLE IF NOT EXISTS "%s".inodes (
 	mtime TIMESTAMPTZ NOT NULL,
 	ctime TIMESTAMPTZ NOT NULL,
 	target TEXT NOT NULL DEFAULT '',
-	generation BIGINT NOT NULL DEFAULT 0
+	generation BIGINT NOT NULL DEFAULT 0,
+	PRIMARY KEY (parent, name)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_inodes_parent_name ON "%s".inodes (parent, name);
+CREATE INDEX IF NOT EXISTS idx_inodes_ino ON "%s".inodes (ino);
 
 CREATE TABLE IF NOT EXISTS "%s".xattrs (
 	ino BIGINT NOT NULL,
@@ -397,7 +398,7 @@ CREATE TABLE IF NOT EXISTS "%s".xattrs (
 	insertRoot := fmt.Sprintf(`
 INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
 VALUES (1, 1, '/', $1, $2, 2, 0, 0, 4096, 8, 0, $3, $3, $3)
-ON CONFLICT (ino) DO NOTHING;
+ON CONFLICT (parent, name) DO NOTHING;
 `, schemaName)
 
 	if _, err := s.db.Exec(ctx, insertRoot, int(bowlv1.InodeType_INODE_TYPE_DIRECTORY), int(0o755), now); err != nil {
@@ -414,7 +415,7 @@ func (s *StorageService) getInode(ctx context.Context, schemaName string, ino ui
 
 	query := fmt.Sprintf(`
 SELECT ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime, target, generation
-FROM "%s".inodes WHERE ino = $1;
+FROM "%s".inodes WHERE ino = $1 LIMIT 1;
 `, schemaName)
 
 	var (

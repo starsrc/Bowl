@@ -18,7 +18,9 @@ type Config struct {
 	DB          DBConfig
 	Storage     StorageConfig
 	DiskService DiskServiceConfig
+	S3          S3Config
 }
+
 
 // ServerConfig defines HTTP server configuration.
 type ServerConfig struct {
@@ -65,6 +67,18 @@ type DiskServiceConfig struct {
 	Addr string `env:"DISK_SERVICE_ADDR" envDefault:"http://127.0.0.1:8080"`
 }
 
+// S3Config defines object storage configuration for asynchronous block persistence.
+type S3Config struct {
+	Enabled        bool   `env:"S3_ENABLED" envDefault:"false"`
+	Endpoint       string `env:"S3_ENDPOINT" envDefault:"http://127.0.0.1:9000"`
+	Bucket         string `env:"S3_BUCKET" envDefault:"bowl-data"`
+	AccessKey      string `env:"S3_ACCESS_KEY"`
+	SecretKey      string `env:"S3_SECRET_KEY"`
+	Region         string `env:"S3_REGION" envDefault:"us-east-1"`
+	UseSSL         bool   `env:"S3_USE_SSL" envDefault:"false"`
+	ForcePathStyle bool   `env:"S3_FORCE_PATH_STYLE" envDefault:"true"`
+}
+
 // Load loads configuration from environment variables and optional .env files.
 func Load(filenames ...string) (*Config, error) {
 	if len(filenames) == 0 {
@@ -82,5 +96,18 @@ func Load(filenames ...string) (*Config, error) {
 		return nil, fmt.Errorf("parse environment variables: %w", err)
 	}
 
+	if cfg.S3.Enabled {
+		if cfg.S3.Endpoint == "" {
+			return nil, errors.New("S3_ENDPOINT is required when S3_ENABLED is true")
+		}
+		if cfg.S3.Bucket == "" {
+			return nil, errors.New("S3_BUCKET is required when S3_ENABLED is true")
+		}
+		if cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" {
+			return nil, errors.New("S3_ACCESS_KEY and S3_SECRET_KEY are required when S3_ENABLED is true")
+		}
+	}
+
 	return &cfg, nil
 }
+

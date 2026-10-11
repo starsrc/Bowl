@@ -1076,3 +1076,190 @@ func TestDiskService_UpdateDisk_NotFound(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }
+
+func TestDiskService_GetDiskStatfs_Success(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Create a disk with 10 MiB capacity and 1000 inodes quota
+	const capacityBytes = uint64(10485760) // 10 MiB (2560 blocks of 4096)
+	const inodesQuota = uint64(1000)
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "statfs-test-disk",
+		CapacityBytes: capacityBytes,
+		InodesQuota:   inodesQuota,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// 2. Simulate used_bytes = 2 MiB (512 blocks) and inodes_used = 150 directly in DB
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const usedBytes = int64(2097152) // 2 MiB
+	const inodesUsed = int64(150)
+	_, err = pool.Exec(ctx, "UPDATE disks SET used_bytes = $1, inodes_used = $2 WHERE disk_id = $3", usedBytes, inodesUsed, diskID)
+	require.NoError(t, err)
+
+	// 3. Query GetDiskStatfs
+	statfsResp, err := client.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{
+		DiskId: diskID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, statfsResp)
+	assert.Equal(t, diskID, statfsResp.DiskId)
+	require.NotNil(t, statfsResp.Statfs)
+
+	statfs := statfsResp.Statfs
+	assert.Equal(t, uint32(4096), statfs.BlockSize)
+	assert.Equal(t, uint32(4096), statfs.FragmentSize)
+	assert.Equal(t, uint64(2560), statfs.Blocks)
+	assert.Equal(t, uint64(2048), statfs.BlocksFree) // (10485760 - 2097152) / 4096 = 2048
+	assert.Equal(t, uint64(2048), statfs.BlocksAvail)
+	assert.Equal(t, inodesQuota, statfs.Files)
+	assert.Equal(t, uint64(850), statfs.FilesFree) // 1000 - 150 = 850
+	assert.Equal(t, uint32(255), statfs.MaxNameLen)
+}
+
+func TestDiskService_GetDiskStatfs_CapacityEqualsUsed(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	const capacityBytes = uint64(40960) // 10 blocks
+	const inodesQuota = uint64(50)
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "full-capacity-disk",
+		CapacityBytes: capacityBytes,
+		InodesQuota:   inodesQuota,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	t.Run("capacity equals used_bytes yields blocks_free = 0 and files_free = 0", func(t *testing.T) {
+		_, err = pool.Exec(ctx, "UPDATE disks SET used_bytes = $1, inodes_used = $2 WHERE disk_id = $3", int64(capacityBytes), int64(inodesQuota), diskID)
+		require.NoError(t, err)
+
+		resp, err := client.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{DiskId: diskID})
+		require.NoError(t, err)
+		require.NotNil(t, resp.Statfs)
+		assert.Equal(t, uint64(10), resp.Statfs.Blocks)
+		assert.Equal(t, uint64(0), resp.Statfs.BlocksFree)
+		assert.Equal(t, uint64(0), resp.Statfs.BlocksAvail)
+		assert.Equal(t, uint64(50), resp.Statfs.Files)
+		assert.Equal(t, uint64(0), resp.Statfs.FilesFree)
+	})
+
+	t.Run("used_bytes exceeds capacity yields blocks_free = 0 without underflow", func(t *testing.T) {
+		_, err = pool.Exec(ctx, "UPDATE disks SET used_bytes = $1, inodes_used = $2 WHERE disk_id = $3", int64(capacityBytes+8192), int64(inodesQuota+10), diskID)
+		require.NoError(t, err)
+
+		resp, err := client.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{DiskId: diskID})
+		require.NoError(t, err)
+		require.NotNil(t, resp.Statfs)
+		assert.Equal(t, uint64(0), resp.Statfs.BlocksFree)
+		assert.Equal(t, uint64(0), resp.Statfs.BlocksAvail)
+		assert.Equal(t, uint64(0), resp.Statfs.FilesFree)
+	})
+}
+
+func TestDiskService_GetDiskStatfs_NotFound(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	randomUUID := uuid.New().String()
+
+	resp, err := client.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{
+		DiskId: randomUUID,
+	})
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestDiskService_GetDiskStatfs_ValidationErrors(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	t.Run("empty disk_id returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{
+			DiskId: "   ",
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+
+	t.Run("malformed disk_id returns InvalidArgument", func(t *testing.T) {
+		resp, err := client.GetDiskStatfs(ctx, &bowlv1.GetDiskStatfsRequest{
+			DiskId: "invalid-uuid-format",
+		})
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	})
+}
+
+func TestDiskService_GetDisk_IncludesStatfs(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Create a disk
+	const capacityBytes = uint64(819200) // 200 blocks of 4096
+	const inodesQuota = uint64(200)
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "includes-statfs-volume",
+		CapacityBytes: capacityBytes,
+		InodesQuota:   inodesQuota,
+	})
+	require.NoError(t, err)
+	diskID := createResp.Disk.DiskId
+
+	// CreateDisk response should include Statfs
+	require.NotNil(t, createResp.Disk.Statfs)
+	assert.Equal(t, uint32(4096), createResp.Disk.Statfs.BlockSize)
+	assert.Equal(t, uint64(200), createResp.Disk.Statfs.Blocks)
+	assert.Equal(t, uint64(200), createResp.Disk.Statfs.BlocksFree)
+	assert.Equal(t, uint64(200), createResp.Disk.Statfs.Files)
+	assert.Equal(t, uint64(200), createResp.Disk.Statfs.FilesFree)
+
+	// 2. Query GetDisk
+	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
+	require.NoError(t, err)
+	require.NotNil(t, getResp.Disk)
+	require.NotNil(t, getResp.Disk.Statfs)
+
+	statfs := getResp.Disk.Statfs
+	assert.Equal(t, uint32(4096), statfs.BlockSize)
+	assert.Equal(t, uint32(4096), statfs.FragmentSize)
+	assert.Equal(t, uint64(200), statfs.Blocks)
+	assert.Equal(t, uint64(200), statfs.BlocksFree)
+	assert.Equal(t, uint64(200), statfs.BlocksAvail)
+	assert.Equal(t, inodesQuota, statfs.Files)
+	assert.Equal(t, inodesQuota, statfs.FilesFree)
+	assert.Equal(t, uint32(255), statfs.MaxNameLen)
+}

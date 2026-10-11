@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
@@ -790,3 +792,797 @@ func TestStorageService_Statfs_DiskServiceError(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
 }
+
+func TestStorageService_Lookup_RootAndChild_Success(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "lookup-client-1"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Lookup root directory entry ("/")
+	lookupResp, err := h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "/",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, lookupResp)
+	assert.Equal(t, uint64(1), lookupResp.GetInode().GetIno())
+	assert.Equal(t, bowlv1.InodeType_INODE_TYPE_DIRECTORY, lookupResp.GetInode().GetType())
+	assert.Equal(t, uint32(0o755), lookupResp.GetInode().GetMode())
+	assert.Equal(t, int64(1), lookupResp.GetEntryTimeout().GetSeconds())
+	assert.Equal(t, int64(1), lookupResp.GetInode().GetAttrTimeout().GetSeconds())
+
+	// 2. Lookup "." on root directory
+	lookupDot, err := h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      ".",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), lookupDot.GetInode().GetIno())
+
+	// 3. Lookup ".." on root directory
+	lookupDotDot, err := h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "..",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), lookupDotDot.GetInode().GetIno())
+
+	// 4. Insert child file (ino=2)
+	now := time.Now()
+	insertSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+`, schemaName)
+	_, err = h.dbPool.Exec(ctx, insertSQL, 2, 1, "hello.txt", int(bowlv1.InodeType_INODE_TYPE_FILE), 0o644, 1, 1000, 1000, 2048, 4, 0, now, now, now)
+	require.NoError(t, err)
+
+	// 5. Lookup child file by name
+	childResp, err := h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "hello.txt",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, childResp)
+	childInode := childResp.GetInode()
+	assert.Equal(t, uint64(2), childInode.GetIno())
+	assert.Equal(t, uint64(1), childInode.GetParentIno())
+	assert.Equal(t, bowlv1.InodeType_INODE_TYPE_FILE, childInode.GetType())
+	assert.Equal(t, uint32(0o644), childInode.GetMode())
+	assert.Equal(t, uint64(2048), childInode.GetSize())
+	assert.Equal(t, uint64(4), childInode.GetBlocks())
+	assert.Equal(t, uint32(1000), childInode.GetUid())
+	assert.Equal(t, uint32(1000), childInode.GetGid())
+
+	// 6. Lookup "." on child
+	childDot, err := h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 2,
+		Name:      ".",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), childDot.GetInode().GetIno())
+
+	// 7. Lookup ".." on child (parent is root ino=1)
+	childDotDot, err := h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 2,
+		Name:      "..",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), childDotDot.GetInode().GetIno())
+}
+
+func TestStorageService_Lookup_NotFound(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "lookup-notfound-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Non-existent child in root
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "nonexistent.txt",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	// Non-existent parent
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 99999,
+		Name:      "test.txt",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestStorageService_Lookup_ValidationErrors(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "lookup-val-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Empty session_id
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: "",
+		ParentIno: 1,
+		Name:      "test.txt",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 2. Whitespace session_id
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: "   ",
+		ParentIno: 1,
+		Name:      "test.txt",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 3. Non-existent session_id
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: uuid.New().String(),
+		ParentIno: 1,
+		Name:      "test.txt",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	// 4. parent_ino = 0
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 0,
+		Name:      "test.txt",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 5. Empty name
+	_, err = h.storageClient.Lookup(ctx, &bowlv1.LookupRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "",
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+func TestStorageService_GetAttr_Success(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "getattr-client-1"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. GetAttr on root inode (ino=1)
+	attrResp, err := h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, attrResp)
+	rootInode := attrResp.GetInode()
+	assert.Equal(t, uint64(1), rootInode.GetIno())
+	assert.Equal(t, uint64(1), rootInode.GetParentIno())
+	assert.Equal(t, bowlv1.InodeType_INODE_TYPE_DIRECTORY, rootInode.GetType())
+	assert.Equal(t, uint32(0o755), rootInode.GetMode())
+	assert.Equal(t, uint32(2), rootInode.GetNlink())
+	assert.Equal(t, int64(1), rootInode.GetAttrTimeout().GetSeconds())
+
+	// 2. Insert child inode and GetAttr
+	now := time.Now()
+	insertSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+`, schemaName)
+	_, err = h.dbPool.Exec(ctx, insertSQL, 2, 1, "data.bin", int(bowlv1.InodeType_INODE_TYPE_FILE), 0o640, 1, 500, 500, 4096, 8, 0, now, now, now)
+	require.NoError(t, err)
+
+	childAttrResp, err := h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, childAttrResp)
+	childInode := childAttrResp.GetInode()
+	assert.Equal(t, uint64(2), childInode.GetIno())
+	assert.Equal(t, uint64(1), childInode.GetParentIno())
+	assert.Equal(t, bowlv1.InodeType_INODE_TYPE_FILE, childInode.GetType())
+	assert.Equal(t, uint32(0o640), childInode.GetMode())
+	assert.Equal(t, uint64(4096), childInode.GetSize())
+	assert.Equal(t, uint64(8), childInode.GetBlocks())
+	assert.Equal(t, uint32(500), childInode.GetUid())
+	assert.Equal(t, uint32(500), childInode.GetGid())
+}
+
+func TestStorageService_GetAttr_NotFoundAndValidationErrors(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "getattr-err-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Non-existent Inode -> NotFound
+	_, err = h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       99999,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	// 2. ino = 0 -> InvalidArgument
+	_, err = h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       0,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 3. Empty session_id -> InvalidArgument
+	_, err = h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: "",
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 4. Unknown session_id -> NotFound
+	_, err = h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: uuid.New().String(),
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestStorageService_SetAttr_Success_ModeSizeTimestamps(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "setattr-client-1"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Insert child file ino=2
+	now := time.Now()
+	insertSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+`, schemaName)
+	_, err = h.dbPool.Exec(ctx, insertSQL, 2, 1, "target.txt", int(bowlv1.InodeType_INODE_TYPE_FILE), 0o644, 1, 0, 0, 500, 1, 0, now, now, now)
+	require.NoError(t, err)
+
+	// 1. Update Mode
+	setResp, err := h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE),
+		Mode:      0o700,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0o700), setResp.GetInode().GetMode())
+
+	// Verify persistence via GetAttr
+	attrResp, err := h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0o700), attrResp.GetInode().GetMode())
+
+	// 2. Update Size (truncate to 2048 bytes -> 4 blocks)
+	setResp, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_SIZE),
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2048), setResp.GetInode().GetSize())
+	assert.Equal(t, uint64(4), setResp.GetInode().GetBlocks())
+
+	// 3. Update UID and GID
+	setResp, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_UID | bowlv1.SetAttrMask_SET_ATTR_MASK_GID),
+		Uid:       1001,
+		Gid:       1002,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1001), setResp.GetInode().GetUid())
+	assert.Equal(t, uint32(1002), setResp.GetInode().GetGid())
+
+	// 4. Update Atime and Mtime explicitly
+	targetAtime := time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	targetMtime := time.Now().Add(-1 * time.Hour).Truncate(time.Microsecond)
+	setResp, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_ATIME | bowlv1.SetAttrMask_SET_ATTR_MASK_MTIME),
+		Atime:     timestamppb.New(targetAtime),
+		Mtime:     timestamppb.New(targetMtime),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, targetAtime.Unix(), setResp.GetInode().GetAtime().AsTime().Unix())
+	assert.Equal(t, targetMtime.Unix(), setResp.GetInode().GetMtime().AsTime().Unix())
+
+	// 5. Update ATIME_NOW and MTIME_NOW
+	setResp, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_ATIME_NOW | bowlv1.SetAttrMask_SET_ATTR_MASK_MTIME_NOW),
+	})
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), setResp.GetInode().GetAtime().AsTime(), 2*time.Second)
+	assert.WithinDuration(t, time.Now(), setResp.GetInode().GetMtime().AsTime(), 2*time.Second)
+
+	// 6. Kill SUID and SGID
+	// First set mode with SUID: 04755
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE),
+		Mode:      0o4755,
+	})
+	require.NoError(t, err)
+
+	setResp, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_KILL_SUIDGID),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0o755), setResp.GetInode().GetMode())
+
+	// 7. Verify ctime was updated to recent time
+	assert.WithinDuration(t, time.Now(), setResp.GetInode().GetCtime().AsTime(), 2*time.Second)
+
+	// 8. Valid = 0 should return current attributes unchanged
+	setResp, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       2,
+		Valid:     0,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0o755), setResp.GetInode().GetMode())
+}
+
+func TestStorageService_SetAttr_PermissionDenied_ReadOnlySession(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "setattr-ro-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Attempting SetAttr on read-only session must return PermissionDenied
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE),
+		Mode:      0o777,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+}
+
+func TestStorageService_SetAttr_PermissionDenied_ExpiredWriter(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "setattr-expired-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Expire the lease in session manager
+	sess, found := h.sessionMgr.Get(sessionID)
+	require.True(t, found)
+	sess.IsWriteLease = false
+	sess.Revoked = true
+	h.sessionMgr.Create(sess)
+
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE),
+		Mode:      0o777,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+}
+
+func TestStorageService_SetAttr_NotFoundAndValidationErrors(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "setattr-val-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Non-existent Inode -> NotFound
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       99999,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE),
+		Mode:      0o700,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	// 2. ino = 0 -> InvalidArgument
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       0,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_MODE),
+		Mode:      0o700,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 3. Empty session_id -> InvalidArgument
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: "",
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 4. Unknown session_id -> NotFound
+	_, err = h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: uuid.New().String(),
+		Ino:       1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+func TestStorageService_Access_Success(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "access-client-1"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Root directory mode is 0o755 (rwxr-xr-x)
+	// 1. F_OK (0)
+	resp, err := h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Mask:      0,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+
+	// 2. R_OK (4)
+	resp, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Mask:      4,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+
+	// 3. W_OK (2) on read-write session
+	resp, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Mask:      2,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+
+	// 4. X_OK (1)
+	resp, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Mask:      1,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+
+	// 5. R_OK | W_OK | X_OK (7)
+	resp, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       1,
+		Mask:      7,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+}
+
+func TestStorageService_Access_PermissionDenied(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. Read-only session write access denied
+	roMount, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "ro-client",
+		ReadOnly: true,
+	})
+	require.NoError(t, err)
+	roSessionID := roMount.GetSessionId()
+
+	// Read is allowed on RO session
+	resp, err := h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: roSessionID,
+		Ino:       1,
+		Mask:      4,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+
+	// Write is denied on RO session
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: roSessionID,
+		Ino:       1,
+		Mask:      2,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+
+	// Combined RW is denied on RO session
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: roSessionID,
+		Ino:       1,
+		Mask:      6,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+
+	// 2. Read-write session on restricted inode modes
+	rwMount, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "rw-client",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	rwSessionID := rwMount.GetSessionId()
+
+	now := time.Now()
+	insertSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, uid, gid, size, blocks, rdev, atime, mtime, ctime)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+`, schemaName)
+	// ino=2: mode 0444 (read-only file, no write, no execute)
+	_, err = h.dbPool.Exec(ctx, insertSQL, 2, 1, "ro.txt", int(bowlv1.InodeType_INODE_TYPE_FILE), 0o444, 1, 0, 0, 100, 1, 0, now, now, now)
+	require.NoError(t, err)
+
+	// ino=3: mode 0000 (no permissions)
+	_, err = h.dbPool.Exec(ctx, insertSQL, 3, 1, "none.txt", int(bowlv1.InodeType_INODE_TYPE_FILE), 0o000, 1, 0, 0, 100, 1, 0, now, now, now)
+	require.NoError(t, err)
+
+	// Ino=2: Read is allowed
+	resp, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: rwSessionID,
+		Ino:       2,
+		Mask:      4,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetAllowed())
+
+	// Ino=2: Write is denied because mode is 0444
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: rwSessionID,
+		Ino:       2,
+		Mask:      2,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+
+	// Ino=2: Execute is denied because mode is 0444
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: rwSessionID,
+		Ino:       2,
+		Mask:      1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+
+	// Ino=3: Read is denied because mode is 0000
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: rwSessionID,
+		Ino:       3,
+		Mask:      4,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+}
+
+func TestStorageService_Access_NotFoundAndValidationErrors(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "access-val-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 1. Non-existent Inode -> NotFound
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       99999,
+		Mask:      4,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	// 2. ino = 0 -> InvalidArgument
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: sessionID,
+		Ino:       0,
+		Mask:      4,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 3. Empty session_id -> InvalidArgument
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: "",
+		Ino:       1,
+		Mask:      4,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 4. Unknown session_id -> NotFound
+	_, err = h.storageClient.Access(ctx, &bowlv1.AccessRequest{
+		SessionId: uuid.New().String(),
+		Ino:       1,
+		Mask:      4,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+

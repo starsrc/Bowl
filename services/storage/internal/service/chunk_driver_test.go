@@ -1063,6 +1063,329 @@ func TestChunkDriver_Write_S3AsyncUploadPipeline(t *testing.T) {
 	assert.Equal(t, int64(payloadSize), stat.Size)
 }
 
+func TestChunkDriver_Read_OverlappingOverwrites(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-overwrite-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "overwrite-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. Base write: 100 bytes of 'A' at offset 0
+	dataA := bytes.Repeat([]byte("A"), 100)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataA,
+	})
+	require.NoError(t, err)
+
+	// 2. Overwrite: 20 bytes of 'B' at offset 10
+	dataB := bytes.Repeat([]byte("B"), 20)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    10,
+		Data:      dataB,
+	})
+	require.NoError(t, err)
+
+	// 3. Overwrite: 10 bytes of 'C' at offset 50
+	dataC := bytes.Repeat([]byte("C"), 10)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    50,
+		Data:      dataC,
+	})
+	require.NoError(t, err)
+
+	// Expected content for 0..100:
+	// 0..9: 'A'
+	// 10..29: 'B'
+	// 30..49: 'A'
+	// 50..59: 'C'
+	// 60..99: 'A'
+	expected := make([]byte, 100)
+	copy(expected[0:100], dataA)
+	copy(expected[10:30], dataB)
+	copy(expected[50:60], dataC)
+
+	// Read full range 0..100
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      100,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expected, readResp.GetData())
+	assert.True(t, readResp.GetEof())
+
+	// Read sub-range 5..35 (covering partial A and all B and partial A)
+	readSub1, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    5,
+		Size:      30,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expected[5:35], readSub1.GetData())
+	assert.False(t, readSub1.GetEof())
+
+	// Read sub-range 45..65 (covering partial A, all C, partial A)
+	readSub2, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    45,
+		Size:      20,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expected[45:65], readSub2.GetData())
+	assert.False(t, readSub2.GetEof())
+}
+
+func TestChunkDriver_Read_SparseHolesWithData(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-sparse-data-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "sparse-data-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 10 bytes at offset 0 ('X')
+	dataX := bytes.Repeat([]byte("X"), 10)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataX,
+	})
+	require.NoError(t, err)
+
+	// Write 10 bytes at offset 50 ('Y')
+	dataY := bytes.Repeat([]byte("Y"), 10)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    50,
+		Data:      dataY,
+	})
+	require.NoError(t, err)
+
+	// Read range 0..60
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      60,
+	})
+	require.NoError(t, err)
+	data := readResp.GetData()
+	require.Len(t, data, 60)
+	assert.Equal(t, dataX, data[0:10])
+	assert.Equal(t, make([]byte, 40), data[10:50], "bytes 10..49 must be zero sparse hole")
+	assert.Equal(t, dataY, data[50:60])
+	assert.True(t, readResp.GetEof())
+}
+
+func TestChunkDriver_Read_MultiChunk_SpanningBoundary(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-multichunk-read-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "multichunk-read.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 2 MiB spanning across Chunk 0 and Chunk 1:
+	// Chunk 0: from 63 MiB to 64 MiB (1 MiB)
+	// Chunk 1: from 0 to 1 MiB (1 MiB)
+	offset := uint64(63 * 1024 * 1024)
+	size := 2 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Read spanning Chunk 0 and Chunk 1:
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Size:      uint32(size),
+	})
+	require.NoError(t, err)
+	require.Equal(t, len(payload), len(readResp.GetData()), "read length should match payload length")
+	assert.True(t, bytes.Equal(payload, readResp.GetData()), "read data should match payload")
+	assert.True(t, readResp.GetEof())
+
+	// Read spanning boundary with sparse holes before it:
+	// Read from 62 MiB (sparse hole 1 MiB) through 65 MiB (1 MiB data in chunk 0 + 1 MiB data in chunk 1)
+	// Total requested size = 3 MiB
+	readRespSpanningHole, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(62 * 1024 * 1024),
+		Size:      uint32(3 * 1024 * 1024),
+	})
+	require.NoError(t, err)
+	dataSpanning := readRespSpanningHole.GetData()
+	require.Equal(t, 3*1024*1024, len(dataSpanning))
+	assert.True(t, bytes.Equal(make([]byte, 1024*1024), dataSpanning[:1024*1024]), "62MiB..63MiB must be zeros")
+	assert.True(t, bytes.Equal(payload, dataSpanning[1024*1024:]), "63MiB..65MiB must match payload")
+	assert.True(t, readRespSpanningHole.GetEof())
+}
+
+func TestChunkDriver_DirectRead_MultiChunkAndEOF(t *testing.T) {
+	h, _, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	_, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "direct-multichunk-client",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	handle, err := driver.Open(ctx, diskID.String(), 300, bowlv1.OpenMode_OPEN_MODE_READ_WRITE, 0)
+	require.NoError(t, err)
+	defer func() { _ = driver.Close(ctx, handle) }()
+
+	// Write data at Chunk 0 (offset 63.5 MiB, size 1 MiB -> ends at 64.5 MiB in Chunk 1)
+	startOffset := uint64(63*1024*1024 + 512*1024)
+	payload := bytes.Repeat([]byte("M"), 1024*1024)
+	written, err := driver.Write(ctx, handle, diskID.String(), 300, startOffset, payload)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(len(payload)), written)
+
+	fileSize := startOffset + uint64(len(payload))
+
+	// Insert inode with fileSize
+	insertInodeSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, size, atime, mtime, ctime)
+VALUES (300, 1, 'direct-multichunk', 1, 0644, 1, $1, NOW(), NOW(), NOW())
+`, schemaName)
+	_, err = h.dbPool.Exec(ctx, insertInodeSQL, int64(fileSize))
+	require.NoError(t, err)
+
+	// Case 1: Read exactly within data spanning Chunk 0 and Chunk 1 (not hitting EOF)
+	// Read 512 KiB spanning the 64 MiB boundary: 256 KiB in Chunk 0, 256 KiB in Chunk 1
+	subOffset := uint64(chunk.ChunkSize - 256*1024)
+	subSize := uint32(512 * 1024)
+	data, eof, err := driver.Read(ctx, handle, diskID.String(), 300, subOffset, subSize)
+	require.NoError(t, err)
+	require.Equal(t, int(subSize), len(data))
+	assert.False(t, eof)
+	assert.True(t, bytes.Equal(bytes.Repeat([]byte("M"), int(subSize)), data))
+
+	// Case 2: Read reaching past EOF (offset + size > fileSize)
+	// Reading from subOffset with size = 2 MiB (file ends at 64.5 MiB, so available is only 768 KiB)
+	oversized := uint32(2 * 1024 * 1024)
+	expectedAvailable := fileSize - subOffset
+	dataEOF, eof, err := driver.Read(ctx, handle, diskID.String(), 300, subOffset, oversized)
+	require.NoError(t, err)
+	assert.True(t, eof, "eof must be true when requested range reaches or exceeds fileSize")
+	require.Equal(t, int(expectedAvailable), len(dataEOF), "data must be truncated at fileSize")
+	assert.True(t, bytes.Equal(bytes.Repeat([]byte("M"), int(expectedAvailable)), dataEOF))
+}
+
 func TestChunkDriver_Write_RecordsSliceRefs(t *testing.T) {
 	h, _, _ := setupChunkHarness(t)
 	defer h.cleanup()
@@ -1545,4 +1868,3 @@ func TestChunkDriver_CopyFileRange_OffsetAndCrossBoundary(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, crossPayload[2048:], readPart1.GetData())
 }
-

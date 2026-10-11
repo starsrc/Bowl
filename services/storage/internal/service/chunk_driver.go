@@ -79,7 +79,8 @@ func (d *ChunkDriver) Open(ctx context.Context, diskID string, ino uint64, openM
 	}, nil
 }
 
-// Read reads file data at a given offset and size from NVMe staging slices or sparse holes.
+// Read reads file data at a given offset and size from NVMe staging slices or sparse holes,
+// reconstructing overlapping slices and spanning across 64MB Chunk boundaries.
 func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, size uint32) ([]byte, bool, error) {
 	if size == 0 {
 		return []byte{}, false, nil
@@ -125,65 +126,49 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 		toRead = available
 	}
 
-	// 3. Calculate chunk coordinates
-	chunkIndx := uint32(offset / chunk.ChunkSize)
-	chunkPos := uint32(offset % chunk.ChunkSize)
+	isEOF := (offset + uint64(size)) >= uint64(fileSize)
 
-	// 4. Query PostgreSQL chunks table for (ino, chunkIndx)
-	var rawSlices []byte
+	result := make([]byte, toRead)
+	var resultOffset uint64 = 0
+	curOffset := offset
+	endOffset := offset + toRead
+
 	queryChunks := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
-	err = d.db.QueryRow(ctx, queryChunks, int64(ino), int32(chunkIndx)).Scan(&rawSlices)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Row does not exist: sparse hole filled with zeros
-		isEOF := (offset + toRead) >= uint64(fileSize)
-		return make([]byte, toRead), isEOF, nil
-	} else if err != nil {
-		return nil, false, connect.Errorf(connect.CodeInternal, "failed to query chunk slices: %s", err)
-	}
 
-	// 5. Decode slices
-	slices, err := chunk.DecodeSlices(rawSlices)
-	if err != nil {
-		return nil, false, connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
-	}
+	for curOffset < endOffset {
+		curChunk := uint32(curOffset / chunk.ChunkSize)
+		chunkEnd := uint64(curChunk+1) * chunk.ChunkSize
+		chunkRemaining := chunkEnd - curOffset
 
-	// 6. Locate the slice containing chunkPos (scan backwards to find newest overlapping slice)
-	var matchedSlice *chunk.Slice
-	for i := len(slices) - 1; i >= 0; i-- {
-		s := slices[i]
-		if chunkPos >= s.Pos && chunkPos < s.Pos+s.Len {
-			matchedSlice = &slices[i]
-			break
+		chunkReadLen := endOffset - curOffset
+		if chunkReadLen > chunkRemaining {
+			chunkReadLen = chunkRemaining
 		}
+		chunkPos := uint32(curOffset % chunk.ChunkSize)
+
+		var rawSlices []byte
+		err := d.db.QueryRow(ctx, queryChunks, int64(ino), int32(curChunk)).Scan(&rawSlices)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Chunk row does not exist: entire range is sparse hole filled with 0x00.
+			// Since result is already initialized with 0x00, no copy is necessary.
+		} else if err != nil {
+			return nil, false, connect.Errorf(connect.CodeInternal, "failed to query chunk slices: %s", err)
+		} else if len(rawSlices) > 0 {
+			slices, err := chunk.DecodeSlices(rawSlices)
+			if err != nil {
+				return nil, false, connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
+			}
+
+			dst := result[resultOffset : resultOffset+chunkReadLen]
+			if err := chunk.ReconstituteRangeTo(dst, diskID, slices, chunkPos, uint32(chunkReadLen), d.staging); err != nil {
+				return nil, false, connect.Errorf(connect.CodeInternal, "failed to reconstitute chunk slice: %s", err)
+			}
+		}
+
+		resultOffset += chunkReadLen
+		curOffset += chunkReadLen
 	}
 
-	if matchedSlice == nil {
-		// No slice covers chunkPos: sparse hole filled with zeros
-		isEOF := (offset + toRead) >= uint64(fileSize)
-		return make([]byte, toRead), isEOF, nil
-	}
-
-	// 7. Read slice bytes from StagingManager
-	sliceData, err := d.staging.ReadSlice(diskID, matchedSlice.ID)
-	if err != nil {
-		return nil, false, connect.Errorf(connect.CodeInternal, "failed to read staging slice: %s", err)
-	}
-
-	offsetInSlice := chunkPos - matchedSlice.Pos
-	bytesInSlice := matchedSlice.Len - offsetInSlice
-	readLen := uint32(toRead)
-	if readLen > bytesInSlice {
-		readLen = bytesInSlice
-	}
-
-	start := matchedSlice.Off + offsetInSlice
-	end := start + readLen
-	if int(end) > len(sliceData) {
-		return nil, false, connect.Errorf(connect.CodeInternal, "corrupted staging slice: length %d is less than required %d", len(sliceData), end)
-	}
-
-	result := sliceData[start:end]
-	isEOF := (offset + uint64(len(result))) >= uint64(fileSize)
 	return result, isEOF, nil
 }
 

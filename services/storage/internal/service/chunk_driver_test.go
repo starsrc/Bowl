@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -408,7 +409,286 @@ func TestChunkDriver_DirectOperations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rawSlices, chunk.SliceBytes)
 
-	// 3. Close
+	// Insert inode 100 into inodes table to allow driver.Read
+	insertInodeSQL := fmt.Sprintf(`
+INSERT INTO "%s".inodes (ino, parent, name, type, mode, nlink, size, atime, mtime, ctime)
+VALUES (100, 1, 'direct-file', 1, 0644, 1, $1, NOW(), NOW(), NOW())
+`, schemaName)
+	_, err = h.dbPool.Exec(ctx, insertInodeSQL, int64(len(payload)))
+	require.NoError(t, err)
+
+	// 3. Direct Read
+	readData, eof, err := driver.Read(ctx, handle, diskID.String(), 100, 0, uint32(len(payload)))
+	require.NoError(t, err)
+	assert.Equal(t, payload, readData)
+	assert.True(t, eof)
+
+	// 4. Close
 	err = driver.Close(ctx, handle)
 	require.NoError(t, err)
+}
+
+func TestChunkDriver_Read_EndToEnd_RoundTrip(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-read-roundtrip-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "read-roundtrip.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 8192 bytes
+	payload := make([]byte, 8192)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(len(payload)), writeResp.GetWritten())
+
+	// Read 8192 bytes back
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      8192,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData())
+	assert.True(t, readResp.GetEof())
+}
+
+func TestChunkDriver_Read_EndToEnd_BoundaryCases(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-read-boundary-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "read-boundary.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 4096 bytes
+	payload := make([]byte, 4096)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// 1. Zero size read
+	respZero, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      0,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, respZero.GetData())
+	assert.False(t, respZero.GetEof())
+
+	// 2. Read exactly at EOF (offset == 4096)
+	respAtEOF, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    4096,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, respAtEOF.GetData())
+	assert.True(t, respAtEOF.GetEof())
+
+	// 3. Read past EOF (offset > 4096)
+	respPastEOF, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    5000,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, respPastEOF.GetData())
+	assert.True(t, respPastEOF.GetEof())
+
+	// 4. Partial read from beginning: offset 0, size 1024
+	respPart1, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[:1024], respPart1.GetData())
+	assert.False(t, respPart1.GetEof())
+
+	// 5. Partial read inside: offset 1000, size 500
+	respPart2, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1000,
+		Size:      500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[1000:1500], respPart2.GetData())
+	assert.False(t, respPart2.GetEof())
+
+	// 6. Partial read reaching EOF: offset 2048, size 2048
+	respPart3, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[2048:4096], respPart3.GetData())
+	assert.True(t, respPart3.GetEof())
+
+	// 7. Oversized read reaching EOF: offset 3000, size 2000 (only 1096 available)
+	respOversized, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    3000,
+		Size:      2000,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[3000:4096], respOversized.GetData())
+	assert.Equal(t, 1096, len(respOversized.GetData()))
+	assert.True(t, respOversized.GetEof())
+}
+
+func TestChunkDriver_Read_SparseHole(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "chunk-driver-sparse-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "sparse-file.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Update inode size directly in DB to create a sparse file of 4096 bytes with no chunk rows
+	updateSQL := fmt.Sprintf(`UPDATE "%s".inodes SET size = 4096 WHERE ino = $1`, schemaName)
+	_, err = h.dbPool.Exec(ctx, updateSQL, int64(ino))
+	require.NoError(t, err)
+
+	// Read 4096 bytes from the hole
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 4096), readResp.GetData())
+	assert.True(t, readResp.GetEof())
+}
+
+func TestChunkDriver_Read_InodeNotFound(t *testing.T) {
+	h, _, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	_, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "read-not-found-client",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+
+	// Inode 99999 does not exist
+	data, eof, err := driver.Read(ctx, nil, diskID.String(), 99999, 0, 1024)
+	assert.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	assert.Nil(t, data)
+	assert.False(t, eof)
 }

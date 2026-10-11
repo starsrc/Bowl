@@ -28,6 +28,7 @@ type ChunkDriver struct {
 	staging  *chunk.StagingManager
 	db       DBExecutor
 	uploader *chunk.S3Uploader
+	reader   *chunk.S3Reader
 }
 
 var _ FileStorageDriver = (*ChunkDriver)(nil)
@@ -39,10 +40,15 @@ func NewChunkDriver(staging *chunk.StagingManager, db DBExecutor, uploader ...*c
 	if len(uploader) > 0 {
 		up = uploader[0]
 	}
+	var r *chunk.S3Reader
+	if up != nil {
+		r = chunk.NewS3Reader(up.Client(), up.Bucket(), staging)
+	}
 	return &ChunkDriver{
 		staging:  staging,
 		db:       db,
 		uploader: up,
+		reader:   r,
 	}
 }
 
@@ -51,9 +57,22 @@ func (d *ChunkDriver) Uploader() *chunk.S3Uploader {
 	return d.uploader
 }
 
-// SetUploader configures or updates the S3Uploader.
+// SetUploader configures or updates the S3Uploader and initializes the S3Reader fallback if not set.
 func (d *ChunkDriver) SetUploader(uploader *chunk.S3Uploader) {
 	d.uploader = uploader
+	if uploader != nil {
+		d.reader = chunk.NewS3Reader(uploader.Client(), uploader.Bucket(), d.staging)
+	}
+}
+
+// Reader returns the configured S3Reader, if any.
+func (d *ChunkDriver) Reader() *chunk.S3Reader {
+	return d.reader
+}
+
+// SetReader configures or updates the S3Reader.
+func (d *ChunkDriver) SetReader(reader *chunk.S3Reader) {
+	d.reader = reader
 }
 
 
@@ -158,7 +177,11 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 			}
 
 			dst := result[resultOffset : resultOffset+chunkReadLen]
-			if err := chunk.ReconstituteRangeTo(dst, diskID, slices, chunkPos, uint32(chunkReadLen), d.staging); err != nil {
+			var sliceReader chunk.SliceReader = d.staging
+			if d.reader != nil {
+				sliceReader = d.reader.ForChunkWithContext(ctx, curChunk)
+			}
+			if err := chunk.ReconstituteRangeTo(dst, diskID, slices, chunkPos, uint32(chunkReadLen), sliceReader); err != nil {
 				return nil, false, connect.Errorf(connect.CodeInternal, "failed to reconstitute chunk slice: %s", err)
 			}
 		}

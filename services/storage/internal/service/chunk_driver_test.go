@@ -1385,3 +1385,384 @@ VALUES (300, 1, 'direct-multichunk', 1, 0644, 1, $1, NOW(), NOW(), NOW())
 	require.Equal(t, int(expectedAvailable), len(dataEOF), "data must be truncated at fileSize")
 	assert.True(t, bytes.Equal(bytes.Repeat([]byte("M"), int(expectedAvailable)), dataEOF))
 }
+
+func TestChunkDriver_Read_S3TransparentReadPenetration_EndToEnd(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "s3-read-penetration-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. Mount virtual disk
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. Setup S3Uploader & S3Reader
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// 3. Create file
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "cold-penetration.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 4. Write 64 KB of random data
+	payloadSize := 64 * 1024
+	payload := make([]byte, payloadSize)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(payloadSize), writeResp.GetWritten())
+
+	// 5. Query chunk slice ID
+	var rawSlices []byte
+	querySQL := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName)
+	err = h.dbPool.QueryRow(ctx, querySQL, int64(ino)).Scan(&rawSlices)
+	require.NoError(t, err)
+	slices, err := chunk.DecodeSlices(rawSlices)
+	require.NoError(t, err)
+	require.Len(t, slices, 1)
+	sliceID := slices[0].ID
+
+	// 6. Wait for async S3 upload to finish
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer waitCancel()
+	err = uploader.WaitForSlice(waitCtx, diskID.String(), sliceID)
+	require.NoError(t, err)
+	assert.Equal(t, chunk.SliceStatusSynced, uploader.GetSliceStatus(diskID.String(), sliceID))
+
+	// Verify object exists in S3
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	objectKey := chunk.FormatObjectKey(diskID.String(), 0, sliceID, 0)
+	stat, err := minioClient.StatObject(ctx, cfg.Bucket, objectKey, minio.StatObjectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(payloadSize), stat.Size)
+
+	// Clean up S3 object on test completion
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, objectKey, minio.RemoveObjectOptions{})
+	}()
+
+	// 7. Purge/delete local NVMe staging file to turn this slice into a COLD slice
+	localPath := stagingMgr.SlicePath(diskID.String(), sliceID)
+	err = os.Remove(localPath)
+	require.NoError(t, err, "staging file must be successfully purged")
+	_, err = os.Stat(localPath)
+	require.True(t, os.IsNotExist(err), "staging file must not exist locally")
+
+	// 8. Read via Connect-RPC StorageService.Read
+	// Should transparently penetrate to S3, fetch the cold slice block, and reconstitute data
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      uint32(payloadSize),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData(), "data read from cold S3 must match original written payload")
+	assert.True(t, readResp.GetEof())
+
+	// 9. Partial read on cold slice
+	readPart, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1024,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload[1024:3072], readPart.GetData())
+	assert.False(t, readPart.GetEof())
+}
+
+func TestChunkDriver_Read_MixedHotStagingAndColdS3(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "mixed-hot-cold-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "mixed-hot-cold.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. Write first slice (Slice 1): 2048 bytes of 'A' at offset 0
+	dataA := bytes.Repeat([]byte("A"), 2048)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataA,
+	})
+	require.NoError(t, err)
+
+	// Wait for Slice 1 to upload to S3
+	waitCtx1, cancel1 := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel1()
+	err = uploader.WaitForIno(waitCtx1, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// Purge Slice 1 from local staging (turns into COLD slice on S3)
+	slice1Path := stagingMgr.SlicePath(diskID.String(), 1)
+	err = os.Remove(slice1Path)
+	require.NoError(t, err)
+
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+	}()
+
+	// 2. Write second slice (Slice 2): 2048 bytes of 'B' at offset 2048 (remains HOT in NVMe staging)
+	dataB := bytes.Repeat([]byte("B"), 2048)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Data:      dataB,
+	})
+	require.NoError(t, err)
+
+	// Ensure Slice 1 is absent from staging and Slice 2 is present in staging
+	_, err = os.Stat(stagingMgr.SlicePath(diskID.String(), 1))
+	assert.True(t, os.IsNotExist(err), "Slice 1 must be purged from staging")
+	_, err = os.Stat(stagingMgr.SlicePath(diskID.String(), 2))
+	assert.NoError(t, err, "Slice 2 must exist in staging")
+
+	// 3. Read spanning both slices (0..4096)
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      4096,
+	})
+	require.NoError(t, err)
+
+	expected := append(dataA, dataB...)
+	assert.Equal(t, expected, readResp.GetData(), "mixed read from cold S3 (0..2048) and hot staging (2048..4096) must be seamless")
+	assert.True(t, readResp.GetEof())
+
+	// 4. Overwrite part of cold slice: 100 bytes of 'C' at offset 1000 (hot in staging)
+	dataC := bytes.Repeat([]byte("C"), 100)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1000,
+		Data:      dataC,
+	})
+	require.NoError(t, err)
+
+	readOverwrite, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    950,
+		Size:      200,
+	})
+	require.NoError(t, err)
+
+	// Offset 950..1000: 'A' (from cold S3 slice 1)
+	// Offset 1000..1100: 'C' (from hot staging slice 3)
+	// Offset 1100..1150: 'A' (from cold S3 slice 1)
+	expectedOverwrite := make([]byte, 200)
+	copy(expectedOverwrite[0:50], bytes.Repeat([]byte("A"), 50))
+	copy(expectedOverwrite[50:150], dataC)
+	copy(expectedOverwrite[150:200], bytes.Repeat([]byte("A"), 50))
+
+	assert.Equal(t, expectedOverwrite, readOverwrite.GetData(), "overwritten range over cold S3 slice must reconstitute properly")
+}
+
+func TestChunkDriver_Read_MultiChunk_ColdS3SpanningBoundary(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "multichunk-cold-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "spanning-cold.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 2 MiB spanning Chunk 0 and Chunk 1:
+	// 1 MiB in Chunk 0 (pos: 63 MiB)
+	// 1 MiB in Chunk 1 (pos: 0)
+	offset := uint64(63 * 1024 * 1024)
+	size := 2 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte((i * 13) % 251)
+	}
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Wait for upload of both slices (chunk 0 slice 1, chunk 1 slice 2)
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err = uploader.WaitForIno(waitCtx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 1, 2, 0), minio.RemoveObjectOptions{})
+	}()
+
+	// Purge BOTH slices from staging -> both are now COLD in S3
+	err = os.Remove(stagingMgr.SlicePath(diskID.String(), 1))
+	require.NoError(t, err)
+	err = os.Remove(stagingMgr.SlicePath(diskID.String(), 2))
+	require.NoError(t, err)
+
+	// Read 2 MiB spanning across cold Chunk 0 and cold Chunk 1
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset,
+		Size:      uint32(size),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData(), "spanning read across cold Chunk 0 and Chunk 1 from S3 must match")
+	assert.True(t, readResp.GetEof())
+}
+
+

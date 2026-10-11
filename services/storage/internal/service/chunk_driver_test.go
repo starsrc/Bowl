@@ -2860,3 +2860,640 @@ func TestChunkDriver_Fsync_EndToEnd_MinIO_MultiBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(payload3)), stat3.Size)
 }
+
+func TestChunkDriver_DeleteInode_DecrementsSliceRefs_AndDeletesChunks(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-del-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "del-test-file.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write data spanning 2 chunks (64MB - 1KB to 64MB + 1KB, total 2KB)
+	writeOffset := uint64(chunk.ChunkSize - 1024)
+	payload := make([]byte, 2048)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    writeOffset,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Verify 2 slices created in slice_refs with refs = 1
+	var refCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs WHERE refs = 1`, schemaName)).Scan(&refCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, refCount)
+
+	// Verify 2 chunks rows exist for ino
+	var chunkCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1`, schemaName), int64(ino)).Scan(&chunkCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, chunkCount)
+
+	// Call DeleteInode on ChunkDriver
+	err = chunkDriver.DeleteInode(ctx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// Assert chunks rows are deleted
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1`, schemaName), int64(ino)).Scan(&chunkCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, chunkCount, "chunks rows must be deleted for unlinked inode")
+
+	// Assert slice_refs have refs = 0
+	var zeroRefCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs WHERE refs = 0`, schemaName)).Scan(&zeroRefCount)
+	require.NoError(t, err)
+	assert.Equal(t, 2, zeroRefCount, "all discarded slices must have refs = 0")
+}
+
+func TestStorageService_Unlink_ReclaimsChunksAndDecrementsSliceRefs(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-unlink-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "unlink-file.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	payload := make([]byte, 4096)
+	_, err = rand.Read(payload)
+	require.NoError(t, err)
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Release handle
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+
+	// Assert refs = 1
+	var ref1 int32
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&ref1)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), ref1)
+
+	// Unlink file (nlink becomes 0, lookup_count is still 1)
+	_, err = h.storageClient.Unlink(ctx, &bowlv1.UnlinkRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "unlink-file.bin",
+	})
+	require.NoError(t, err)
+
+	// While still referenced by lookup_count = 1, chunks and refs are preserved
+	var chunkCountStill int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1`, schemaName), int64(ino)).Scan(&chunkCountStill)
+	require.NoError(t, err)
+	assert.Equal(t, 1, chunkCountStill)
+
+	// Now client forgets lookup reference (lookup_count drops to 0) -> triggers permanent reclamation!
+	_, err = h.storageClient.Forget(ctx, &bowlv1.ForgetRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+		Nlookup:   1,
+	})
+	require.NoError(t, err)
+
+	// Assert chunks rows deleted and slice_refs decremented to 0
+	var chunkCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1`, schemaName), int64(ino)).Scan(&chunkCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, chunkCount, "chunks rows must be deleted when unlinked inode is forgotten")
+
+	var refAfter int32
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&refAfter)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), refAfter, "slice_refs.refs must be decremented to 0 upon final reclaim")
+}
+
+func TestChunkDriver_Truncate_Shrink_AdjustsSlicesAndDecrementsRefs(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-truncate-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "trunc-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. Write Slice 1: offset 0..4096 (in chunk 0)
+	p1 := make([]byte, 4096)
+	_, _ = rand.Read(p1)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      p1,
+	})
+	require.NoError(t, err)
+
+	// 2. Write Slice 2: offset 4096..8192 (in chunk 0)
+	p2 := make([]byte, 4096)
+	_, _ = rand.Read(p2)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    4096,
+		Data:      p2,
+	})
+	require.NoError(t, err)
+
+	// 3. Write Slice 3: offset 64MB..64MB+4096 (in chunk 1)
+	p3 := make([]byte, 4096)
+	_, _ = rand.Read(p3)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(chunk.ChunkSize),
+		Data:      p3,
+	})
+	require.NoError(t, err)
+
+	// All 3 slices must have refs = 1
+	var r1, r2, r3 int32
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&r1))
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 2`, schemaName)).Scan(&r2))
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 3`, schemaName)).Scan(&r3))
+	assert.Equal(t, int32(1), r1)
+	assert.Equal(t, int32(1), r2)
+	assert.Equal(t, int32(1), r3)
+
+	// Step A: Truncate to 64MB (Chunk 1 discarded completely)
+	err = chunkDriver.Truncate(ctx, diskID.String(), ino, uint64(chunk.ChunkSize))
+	require.NoError(t, err)
+
+	// Chunk 1 row deleted
+	var c1Count int
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName), int64(ino)).Scan(&c1Count))
+	assert.Equal(t, 0, c1Count, "chunk 1 row must be deleted after truncate to 64MB")
+
+	// Slice 3 refs decremented to 0; Slices 1 and 2 keep refs = 1
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 3`, schemaName)).Scan(&r3))
+	assert.Equal(t, int32(0), r3, "slice 3 in chunk 1 must have refs = 0")
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&r1))
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 2`, schemaName)).Scan(&r2))
+	assert.Equal(t, int32(1), r1)
+	assert.Equal(t, int32(1), r2)
+
+	// Step B: Truncate to 6000 bytes (Slice 2 partially truncated to Len = 1904)
+	err = chunkDriver.Truncate(ctx, diskID.String(), ino, 6000)
+	require.NoError(t, err)
+
+	// Check chunk 0 slices
+	var rawSlices []byte
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&rawSlices))
+	sList, err := chunk.DecodeSlices(rawSlices)
+	require.NoError(t, err)
+	require.Len(t, sList, 2)
+	assert.Equal(t, uint32(4096), sList[0].Len)
+	assert.Equal(t, uint32(1904), sList[1].Len, "slice 2 Len must be adjusted to 6000 - 4096 = 1904")
+
+	// Slices 1 and 2 still have refs = 1
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&r1))
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 2`, schemaName)).Scan(&r2))
+	assert.Equal(t, int32(1), r1)
+	assert.Equal(t, int32(1), r2)
+
+	// Step C: Truncate to 2000 bytes (Slice 2 fully discarded, Slice 1 partially truncated to Len = 2000)
+	err = chunkDriver.Truncate(ctx, diskID.String(), ino, 2000)
+	require.NoError(t, err)
+
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&rawSlices))
+	sList, err = chunk.DecodeSlices(rawSlices)
+	require.NoError(t, err)
+	require.Len(t, sList, 1)
+	assert.Equal(t, uint32(2000), sList[0].Len, "slice 1 Len must be adjusted to 2000")
+
+	// Slice 2 refs decremented to 0
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 2`, schemaName)).Scan(&r2))
+	assert.Equal(t, int32(0), r2, "slice 2 must have refs = 0 after being fully discarded")
+
+	// Step D: Truncate to 0 bytes
+	err = chunkDriver.Truncate(ctx, diskID.String(), ino, 0)
+	require.NoError(t, err)
+
+	var c0Count int
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&c0Count))
+	assert.Equal(t, 0, c0Count, "chunk 0 row must be deleted after truncate to 0")
+
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&r1))
+	assert.Equal(t, int32(0), r1, "slice 1 must have refs = 0 after truncate to 0")
+}
+
+func TestStorageService_SetAttr_TruncateShrink_DecrementsSliceRefs(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-setattr-trunc",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "setattr-trunc.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// Write 2 Chunks:
+	// Chunk 0: 4096 bytes at offset 0
+	p1 := make([]byte, 4096)
+	_, _ = rand.Read(p1)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      p1,
+	})
+	require.NoError(t, err)
+
+	// Chunk 1: 4096 bytes at offset 64MB
+	p2 := make([]byte, 4096)
+	_, _ = rand.Read(p2)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(chunk.ChunkSize),
+		Data:      p2,
+	})
+	require.NoError(t, err)
+
+	// Assert 2 slices exist with refs = 1
+	var r1, r2 int32
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&r1))
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 2`, schemaName)).Scan(&r2))
+	assert.Equal(t, int32(1), r1)
+	assert.Equal(t, int32(1), r2)
+
+	// Call SetAttr to shrink file size to 2048 bytes (half of Chunk 0, completely discarding Chunk 1)
+	setAttrResp, err := h.storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_SIZE),
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2048), setAttrResp.GetInode().GetSize())
+
+	// Assert Slice 2 in Chunk 1 is discarded (refs = 0), and Chunk 1 row is gone
+	var c1Count int
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName), int64(ino)).Scan(&c1Count))
+	assert.Equal(t, 0, c1Count)
+
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 2`, schemaName)).Scan(&r2))
+	assert.Equal(t, int32(0), r2, "slice 2 in chunk 1 must have refs = 0")
+
+	// Slice 1 in Chunk 0 is partially truncated to 2048, so it still has refs = 1
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&r1))
+	assert.Equal(t, int32(1), r1, "slice 1 must remain referenced with refs = 1")
+
+	// Read beyond new size returns EOF
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.True(t, readResp.GetEof())
+	assert.Empty(t, readResp.GetData())
+
+	// Read within new size returns first 2048 bytes
+	readResp2, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, p1[:2048], readResp2.GetData())
+}
+
+func TestChunkDriver_COWClone_S3AndStaging_GCLifecycle(t *testing.T) {
+	minioEndpoint := "http://127.0.0.1:9000"
+	if !isMinIOHealthy(minioEndpoint) {
+		t.Skip("MinIO is not reachable at 127.0.0.1:9000, skipping live MinIO test")
+	}
+
+	h, stagingMgr, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "cow-gc-test-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// Mount disk
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// Configure S3 Uploader
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       minioEndpoint,
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	chunkDriver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// 1. Create File A
+	createAResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "file_a.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	inoA := createAResp.GetInode().GetIno()
+	fhA := createAResp.GetFileHandle().GetFh()
+
+	// Write 4096 bytes to File A
+	payloadA := make([]byte, 4096)
+	_, _ = rand.Read(payloadA)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fhA,
+		Ino:       inoA,
+		Offset:    0,
+		Data:      payloadA,
+	})
+	require.NoError(t, err)
+
+	// Wait for S3 upload barrier
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	err = uploader.WaitForSlice(waitCtx, diskID.String(), 1)
+	require.NoError(t, err)
+
+	// Verify slice 1 staging file exists
+	slice1StagingPath := stagingMgr.SlicePath(diskID.String(), 1)
+	_, err = os.Stat(slice1StagingPath)
+	require.NoError(t, err, "staging file must exist")
+
+	// Verify S3 block exists in MinIO
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	expectedObjectKey := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	objInfo, err := minioClient.StatObject(ctx, cfg.Bucket, expectedObjectKey, minio.StatObjectOptions{})
+	require.NoError(t, err, "S3 object must exist in bucket")
+	assert.Equal(t, int64(4096), objInfo.Size)
+
+	// 2. Create File B
+	createBResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "file_b.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	inoB := createBResp.GetInode().GetIno()
+	fhB := createBResp.GetFileHandle().GetFh()
+
+	// 3. CopyFileRange from File A to File B (COW clone)
+	copyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    inoA,
+		SrcFh:     fhA,
+		SrcOffset: 0,
+		DstIno:    inoB,
+		DstFh:     fhB,
+		DstOffset: 0,
+		Length:    4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4096), copyResp.GetCopied())
+
+	// Release handles
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fhA,
+	})
+	require.NoError(t, err)
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fhB,
+	})
+	require.NoError(t, err)
+
+	// Verify slice_refs.refs is now 2
+	var refs int32
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&refs)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), refs, "slice_refs.refs must be 2 after CopyFileRange")
+
+	// 4. Unlink and Forget File A
+	_, err = h.storageClient.Unlink(ctx, &bowlv1.UnlinkRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "file_a.bin",
+	})
+	require.NoError(t, err)
+	_, err = h.storageClient.Forget(ctx, &bowlv1.ForgetRequest{
+		SessionId: sessionID,
+		Ino:       inoA,
+		Nlookup:   1,
+	})
+	require.NoError(t, err)
+
+	// Verify slice_refs.refs decremented to 1
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&refs)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), refs, "slice_refs.refs must be 1 after unlinking file A")
+
+	// 5. Trigger GC -> Assert S3 object and staging data are NOT deleted!
+	reclaimed, err := chunkDriver.RunGC(ctx, diskID.String())
+	require.NoError(t, err)
+	assert.Equal(t, 0, reclaimed, "0 slices must be collected while refs == 1")
+
+	_, err = os.Stat(slice1StagingPath)
+	assert.NoError(t, err, "staging file must NOT be deleted while File B still references it")
+
+	_, err = minioClient.StatObject(ctx, cfg.Bucket, expectedObjectKey, minio.StatObjectOptions{})
+	assert.NoError(t, err, "S3 object must NOT be deleted while File B still references it")
+
+	// File B must still be fully readable!
+	openBResp, err := h.storageClient.Open(ctx, &bowlv1.OpenRequest{
+		SessionId: sessionID,
+		Ino:       inoB,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	fhReadB := openBResp.GetFileHandle().GetFh()
+
+	readBResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fhReadB,
+		Ino:       inoB,
+		Offset:    0,
+		Size:      4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payloadA, readBResp.GetData())
+
+	_, _ = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fhReadB,
+	})
+
+	// 6. Unlink and Forget File B -> refs becomes 0
+	_, err = h.storageClient.Unlink(ctx, &bowlv1.UnlinkRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "file_b.bin",
+	})
+	require.NoError(t, err)
+	_, err = h.storageClient.Forget(ctx, &bowlv1.ForgetRequest{
+		SessionId: sessionID,
+		Ino:       inoB,
+		Nlookup:   1,
+	})
+	require.NoError(t, err)
+
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&refs)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), refs, "slice_refs.refs must be 0 after unlinking file B")
+
+	// 7. Trigger GC -> S3 object and staging file are cleaned up, slice_refs row is removed!
+	reclaimed, err = chunkDriver.RunGC(ctx, diskID.String())
+	require.NoError(t, err)
+	assert.Equal(t, 1, reclaimed, "1 slice must be collected now that refs == 0")
+
+	// Staging file deleted
+	_, err = os.Stat(slice1StagingPath)
+	assert.True(t, os.IsNotExist(err), "staging file must be deleted after GC")
+
+	// S3 object deleted
+	_, err = minioClient.StatObject(ctx, cfg.Bucket, expectedObjectKey, minio.StatObjectOptions{})
+	assert.Error(t, err, "S3 object must be deleted from MinIO bucket after GC")
+	errResp := minio.ToErrorResponse(err)
+	assert.Equal(t, "NoSuchKey", errResp.Code)
+
+	// slice_refs row deleted
+	var rowCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&rowCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, rowCount, "slice_refs row must be deleted after GC")
+}

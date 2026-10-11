@@ -33,6 +33,7 @@ type ChunkDriver struct {
 	db       DBExecutor
 	uploader *chunk.S3Uploader
 	reader   *chunk.S3Reader
+	gc       *chunk.GarbageCollector
 }
 
 var _ FileStorageDriver = (*ChunkDriver)(nil)
@@ -45,14 +46,19 @@ func NewChunkDriver(staging *chunk.StagingManager, db DBExecutor, uploader ...*c
 		up = uploader[0]
 	}
 	var r *chunk.S3Reader
+	var gc *chunk.GarbageCollector
 	if up != nil {
 		r = chunk.NewS3Reader(up.Client(), up.Bucket(), staging)
+		gc = chunk.NewGarbageCollector(db, staging, chunk.WithGCClient(up.Client(), up.Bucket()))
+	} else {
+		gc = chunk.NewGarbageCollector(db, staging)
 	}
 	return &ChunkDriver{
 		staging:  staging,
 		db:       db,
 		uploader: up,
 		reader:   r,
+		gc:       gc,
 	}
 }
 
@@ -66,6 +72,9 @@ func (d *ChunkDriver) SetUploader(uploader *chunk.S3Uploader) {
 	d.uploader = uploader
 	if uploader != nil {
 		d.reader = chunk.NewS3Reader(uploader.Client(), uploader.Bucket(), d.staging)
+		if d.gc != nil {
+			d.gc.SetClient(uploader.Client(), uploader.Bucket())
+		}
 	}
 }
 
@@ -78,6 +87,25 @@ func (d *ChunkDriver) Reader() *chunk.S3Reader {
 func (d *ChunkDriver) SetReader(reader *chunk.S3Reader) {
 	d.reader = reader
 }
+
+// GC returns the underlying GarbageCollector.
+func (d *ChunkDriver) GC() *chunk.GarbageCollector {
+	return d.gc
+}
+
+// SetGC configures or updates the GarbageCollector.
+func (d *ChunkDriver) SetGC(gc *chunk.GarbageCollector) {
+	d.gc = gc
+}
+
+// RunGC runs an on-demand garbage collection cycle for the given virtual disk.
+func (d *ChunkDriver) RunGC(ctx context.Context, diskID string) (int, error) {
+	if d.gc == nil {
+		return 0, nil
+	}
+	return d.gc.RunGC(ctx, diskID)
+}
+
 
 
 // StagingManager returns the underlying StagingManager.
@@ -319,11 +347,11 @@ DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
 
 		// 2.5. Record slice reference in slice_refs table
 		insertRefQuery := fmt.Sprintf(`
-INSERT INTO "%s".slice_refs (id, size, refs)
-VALUES ($1, $2, 1)
+INSERT INTO "%s".slice_refs (id, chunk_indx, size, refs)
+VALUES ($1, $2, $3, 1)
 ON CONFLICT (id) DO NOTHING;
 `, schemaName)
-		if _, err := d.db.Exec(ctx, insertRefQuery, int64(sliceID), int32(toWrite)); err != nil {
+		if _, err := d.db.Exec(ctx, insertRefQuery, int64(sliceID), int32(curChunk), int32(toWrite)); err != nil {
 			return 0, connect.Errorf(connect.CodeInternal, "failed to record slice reference: %s", err)
 		}
 
@@ -438,8 +466,160 @@ func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID st
 	return nil
 }
 
-// Truncate truncates or extends a file to the specified size (implemented in STARSRC-125).
+// Truncate truncates or extends a file to the specified size.
+// If shrinking to size, finds chunks and slices beyond size, decrements slice_refs for discarded slices,
+// and adjusts or removes truncated slices.
 func (d *ChunkDriver) Truncate(ctx context.Context, diskID string, ino uint64, size uint64) error {
+	parsedDiskUUID, err := uuid.Parse(diskID)
+	if err != nil {
+		return connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
+	}
+	schemaName := FormatDiskSchema(parsedDiskUUID)
+
+	// 1. Query current file size from database
+	var currentSize int64
+	querySizeSQL := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
+	if err := d.db.QueryRow(ctx, querySizeSQL, int64(ino)).Scan(&currentSize); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return connect.Errorf(connect.CodeNotFound, "inode %d not found", ino)
+		}
+		return connect.Errorf(connect.CodeInternal, "failed to query inode size: %s", err)
+	}
+
+	// If expanding or keeping size unchanged, no slices need to be discarded.
+	if size >= uint64(currentSize) {
+		now := time.Now()
+		updateInodeSQL := fmt.Sprintf(`
+UPDATE "%s".inodes
+SET size = $1,
+    blocks = ($1::bigint + 511) / 512,
+    mtime = $2,
+    ctime = $2
+WHERE ino = $3;
+`, schemaName)
+		_, _ = d.db.Exec(ctx, updateInodeSQL, int64(size), now, int64(ino))
+		return nil
+	}
+
+	// 2. Shrinking: calculate boundary chunk and position within chunk
+	targetChunkIndx := uint32(size / chunk.ChunkSize)
+	targetChunkPos := uint32(size % chunk.ChunkSize)
+
+	discardedSliceCounts := make(map[uint64]int)
+
+	// 2.1. Find all chunks strictly beyond targetChunkIndx (or targetChunkIndx itself if targetChunkPos == 0)
+	var boundaryCondition string
+	if targetChunkPos == 0 {
+		boundaryCondition = fmt.Sprintf("indx >= %d", targetChunkIndx)
+	} else {
+		boundaryCondition = fmt.Sprintf("indx > %d", targetChunkIndx)
+	}
+
+	queryBeyondChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1 AND %s`, schemaName, boundaryCondition)
+	rows, err := d.db.Query(ctx, queryBeyondChunks, int64(ino))
+	if err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to query beyond chunks: %s", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cIndx int32
+		var rawSlices []byte
+		if err := rows.Scan(&cIndx, &rawSlices); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to scan beyond chunk: %s", err)
+		}
+		if len(rawSlices) > 0 {
+			slices, err := chunk.DecodeSlices(rawSlices)
+			if err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to decode beyond chunk slices: %s", err)
+			}
+			for _, s := range slices {
+				discardedSliceCounts[s.ID]++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to iterate beyond chunks: %s", err)
+	}
+	rows.Close()
+
+	// Delete fully discarded chunks rows
+	deleteBeyondSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1 AND %s`, schemaName, boundaryCondition)
+	if _, err := d.db.Exec(ctx, deleteBeyondSQL, int64(ino)); err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to delete beyond chunks: %s", err)
+	}
+
+	// 2.2. If targetChunkPos > 0, inspect boundary chunk at targetChunkIndx
+	if targetChunkPos > 0 {
+		var rawSlices []byte
+		queryBoundaryChunk := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
+		err := d.db.QueryRow(ctx, queryBoundaryChunk, int64(ino), int32(targetChunkIndx)).Scan(&rawSlices)
+		if err == nil && len(rawSlices) > 0 {
+			slices, err := chunk.DecodeSlices(rawSlices)
+			if err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to decode boundary chunk slices: %s", err)
+			}
+
+			var preservedSlices []chunk.Slice
+			for _, s := range slices {
+				if s.Pos >= targetChunkPos {
+					// Subcase B1: Slice starts at or after targetChunkPos -> fully discarded
+					discardedSliceCounts[s.ID]++
+				} else if s.Pos+s.Len > targetChunkPos {
+					// Subcase B2: Slice crosses targetChunkPos -> partially truncated
+					adjusted := chunk.Slice{
+						Pos:  s.Pos,
+						ID:   s.ID,
+						Size: s.Size,
+						Off:  s.Off,
+						Len:  targetChunkPos - s.Pos,
+					}
+					preservedSlices = append(preservedSlices, adjusted)
+				} else {
+					// Subcase B3: Slice is entirely within [0, targetChunkPos) -> fully preserved
+					preservedSlices = append(preservedSlices, s)
+				}
+			}
+
+			if len(preservedSlices) == 0 {
+				deleteBoundarySQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
+				if _, err := d.db.Exec(ctx, deleteBoundarySQL, int64(ino), int32(targetChunkIndx)); err != nil {
+					return connect.Errorf(connect.CodeInternal, "failed to delete boundary chunk: %s", err)
+				}
+			} else {
+				encoded := chunk.EncodeSlices(preservedSlices)
+				updateBoundarySQL := fmt.Sprintf(`UPDATE "%s".chunks SET slices = $1 WHERE ino = $2 AND indx = $3`, schemaName)
+				if _, err := d.db.Exec(ctx, updateBoundarySQL, encoded, int64(ino), int32(targetChunkIndx)); err != nil {
+					return connect.Errorf(connect.CodeInternal, "failed to update boundary chunk slices: %s", err)
+				}
+			}
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return connect.Errorf(connect.CodeInternal, "failed to query boundary chunk: %s", err)
+		}
+	}
+
+	// 2.3. Decrement reference count in slice_refs for each fully discarded slice
+	for sliceID, count := range discardedSliceCounts {
+		updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs - $1 WHERE id = $2;`, schemaName)
+		if _, err := d.db.Exec(ctx, updateRefSQL, int32(count), int64(sliceID)); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to decrement slice ref: %s", err)
+		}
+	}
+
+	// 2.4. Update inode size in PostgreSQL
+	now := time.Now()
+	updateInodeSQL := fmt.Sprintf(`
+UPDATE "%s".inodes
+SET size = $1,
+    blocks = ($1::bigint + 511) / 512,
+    mtime = $2,
+    ctime = $2
+WHERE ino = $3;
+`, schemaName)
+	if _, err := d.db.Exec(ctx, updateInodeSQL, int64(size), now, int64(ino)); err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to update inode size: %s", err)
+	}
+
 	return nil
 }
 
@@ -723,3 +903,64 @@ func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID st
 func (d *ChunkDriver) Close(ctx context.Context, handle HandleContext) error {
 	return nil
 }
+
+// DeleteInode reclaims chunks metadata and decrements slice reference counts for an unlinked/deleted Inode.
+func (d *ChunkDriver) DeleteInode(ctx context.Context, diskID string, ino uint64) error {
+	parsedDiskUUID, err := uuid.Parse(diskID)
+	if err != nil {
+		return connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
+	}
+	schemaName := FormatDiskSchema(parsedDiskUUID)
+
+	// 1. Fetch all chunks rows for the Inode
+	queryChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1`, schemaName)
+	rows, err := d.db.Query(ctx, queryChunks, int64(ino))
+	if err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to query inode chunks: %s", err)
+	}
+	defer rows.Close()
+
+	sliceCounts := make(map[uint64]int)
+	for rows.Next() {
+		var indx int32
+		var rawSlices []byte
+		if err := rows.Scan(&indx, &rawSlices); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to scan chunk slices: %s", err)
+		}
+		if len(rawSlices) > 0 {
+			slices, err := chunk.DecodeSlices(rawSlices)
+			if err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
+			}
+			for _, s := range slices {
+				sliceCounts[s.ID]++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to iterate inode chunks: %s", err)
+	}
+	rows.Close()
+
+	// 2. Decrement reference count in slice_refs for each discarded slice
+	for sliceID, count := range sliceCounts {
+		updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs - $1 WHERE id = $2;`, schemaName)
+		if _, err := d.db.Exec(ctx, updateRefSQL, int32(count), int64(sliceID)); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to decrement slice ref: %s", err)
+		}
+	}
+
+	// 3. Delete chunks rows for this Inode
+	deleteChunksSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1;`, schemaName)
+	if _, err := d.db.Exec(ctx, deleteChunksSQL, int64(ino)); err != nil {
+		return connect.Errorf(connect.CodeInternal, "failed to delete inode chunks: %s", err)
+	}
+
+	return nil
+}
+
+// Unlink is an alias for DeleteInode.
+func (d *ChunkDriver) Unlink(ctx context.Context, diskID string, ino uint64) error {
+	return d.DeleteInode(ctx, diskID, ino)
+}
+

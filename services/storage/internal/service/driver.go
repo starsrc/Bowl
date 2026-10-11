@@ -48,6 +48,9 @@ type FileStorageDriver interface {
 
 	// Close closes the driver handle and frees resources.
 	Close(ctx context.Context, handle HandleContext) error
+
+	// DeleteInode removes physical storage resources for an unlinked/deleted inode.
+	DeleteInode(ctx context.Context, diskID string, ino uint64) error
 }
 
 // legacyFileHandle represents open file context for LegacyFileDriver.
@@ -603,5 +606,12 @@ func (d *LegacyFileDriver) Close(ctx context.Context, handle HandleContext) erro
 			return err
 		}
 	}
+	return nil
+}
+
+// DeleteInode removes physical storage resources for an unlinked/deleted inode.
+func (d *LegacyFileDriver) DeleteInode(ctx context.Context, diskID string, ino uint64) error {
+	filePath := d.FilePath(diskID, ino)
+	_ = os.Remove(filePath)
 	return nil
 }

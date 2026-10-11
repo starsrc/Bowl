@@ -102,6 +102,12 @@ func (m *mockStorageDriver) Close(ctx context.Context, handle HandleContext) err
 	return nil
 }
 
+func (m *mockStorageDriver) DeleteInode(ctx context.Context, diskID string, ino uint64) error {
+	m.lastDiskID = diskID
+	m.lastIno = ino
+	return nil
+}
+
 func TestStorageService_FileStorageDriver_InterfaceAndDefault(t *testing.T) {
 	h := setupTestHarness(t)
 	defer h.cleanup()

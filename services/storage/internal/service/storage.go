@@ -34,6 +34,17 @@ type OpenFileHandle struct {
 	CreatedAt time.Time
 }
 
+// OpenDirHandle represents an open directory handle registered to a session.
+type OpenDirHandle struct {
+	Handle    *bowlv1.FileHandle
+	DH        uint64
+	Ino       uint64
+	SessionID string
+	DiskID    string
+	Flags     uint32
+	CreatedAt time.Time
+}
+
 // DBExecutor abstracts database execution for schema and metadata management.
 type DBExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -44,13 +55,15 @@ type DBExecutor interface {
 // StorageService implements bowl.v1.StorageService.
 type StorageService struct {
 	bowlv1connect.UnimplementedStorageServiceHandler
-	diskClient    bowlv1connect.DiskServiceClient
-	db            DBExecutor
-	sessions      session.Manager
-	dataDir       string
-	leaseDuration time.Duration
-	nextFH        atomic.Uint64
-	openHandles   sync.Map // uint64 -> *OpenFileHandle
+	diskClient     bowlv1connect.DiskServiceClient
+	db             DBExecutor
+	sessions       session.Manager
+	dataDir        string
+	leaseDuration  time.Duration
+	nextFH         atomic.Uint64
+	openHandles    sync.Map // uint64 -> *OpenFileHandle
+	nextDH         atomic.Uint64
+	openDirHandles sync.Map // uint64 -> *OpenDirHandle
 }
 
 // Option configures StorageService parameters.
@@ -231,6 +244,20 @@ func (s *StorageService) Unmount(ctx context.Context, req *bowlv1.UnmountRequest
 	}
 
 	s.sessions.Delete(sessionID)
+
+	// ADR 0011: Clean up session-bound open handles on unmount
+	s.openHandles.Range(func(key, value any) bool {
+		if h, ok := value.(*OpenFileHandle); ok && h.SessionID == sessionID {
+			s.openHandles.Delete(key)
+		}
+		return true
+	})
+	s.openDirHandles.Range(func(key, value any) bool {
+		if h, ok := value.(*OpenDirHandle); ok && h.SessionID == sessionID {
+			s.openDirHandles.Delete(key)
+		}
+		return true
+	})
 
 	return &bowlv1.UnmountResponse{}, nil
 }

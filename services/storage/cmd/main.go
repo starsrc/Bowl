@@ -100,8 +100,24 @@ func main() {
 			s3Uploader.Start(ctx)
 			slog.Info("S3 asynchronous upload pipeline started", "bucket", cfg.S3.Bucket, "endpoint", cfg.S3.Endpoint)
 		}
-		driver = service.NewChunkDriver(stagingMgr, pool, s3Uploader)
+		chunkDriver := service.NewChunkDriver(stagingMgr, pool, s3Uploader)
+		driver = chunkDriver
 		slog.Info("using chunk storage driver", "staging_dir", cfg.Storage.StagingDir)
+
+		// Recover unflushed NVMe staging slices and replay to S3
+		recoveryReport, err := chunkDriver.RecoverStaging(ctx)
+		if err != nil {
+			slog.Error("failed to recover NVMe staging slices", "error", err)
+		} else if recoveryReport != nil && recoveryReport.ScannedSlices > 0 {
+			slog.Info("NVMe staging recovery completed",
+				"scanned_disks", recoveryReport.ScannedDisks,
+				"scanned_slices", recoveryReport.ScannedSlices,
+				"requeued_slices", recoveryReport.RequeuedSlices,
+				"skipped_slices", recoveryReport.SkippedSlices,
+				"orphaned_slices", recoveryReport.OrphanedSlices,
+				"max_slice_id", recoveryReport.MaxSliceID,
+			)
+		}
 	} else {
 		driver = service.NewLegacyFileDriver(cfg.Storage.DataDir)
 		slog.Info("using legacy file storage driver", "data_dir", cfg.Storage.DataDir)

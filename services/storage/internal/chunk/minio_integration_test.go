@@ -132,3 +132,104 @@ func TestMinIO_Integration_BackgroundUpload4MBBlock(t *testing.T) {
 
 	fmt.Printf("Successfully validated 4MB and 512KB blocks uploaded to MinIO: %s, %s\n", key0, key1)
 }
+
+func TestMinIO_Integration_CrashRecoveryReplay(t *testing.T) {
+	minioEndpoint := "http://127.0.0.1:9000"
+	if !isMinIOAvailable(minioEndpoint) {
+		t.Skip("MinIO is not running at 127.0.0.1:9000, skipping live integration test")
+	}
+
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       minioEndpoint,
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+
+	tempDir := t.TempDir()
+	staging := chunk.NewStagingManager(tempDir)
+
+	diskID := "d4b4a11b-0000-0000-0000-000000000002"
+	sliceID1 := uint64(10)
+	sliceID2 := uint64(20)
+
+	payload1 := make([]byte, 512*1024)
+	_, _ = rand.Read(payload1)
+	payload2 := make([]byte, 1024*1024)
+	_, _ = rand.Read(payload2)
+
+	// Pre-populate NVMe staging directory with unflushed slices (simulating crash)
+	err := staging.WriteSlice(diskID, sliceID1, payload1)
+	require.NoError(t, err)
+	err = staging.WriteSlice(diskID, sliceID2, payload2)
+	require.NoError(t, err)
+
+	locator := chunk.MetadataLocatorFunc(func(ctx context.Context, dID string, sID uint64) (uint64, uint32, bool, error) {
+		if dID == diskID {
+			if sID == sliceID1 {
+				return 1001, 0, true, nil
+			}
+			if sID == sliceID2 {
+				return 1001, 1, true, nil
+			}
+		}
+		return 0, 0, false, nil
+	})
+
+	// Initialize S3 uploader
+	uploader, err := chunk.NewS3Uploader(cfg, staging,
+		chunk.WithWorkers(4),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// Run recovery pipeline
+	report, err := chunk.RecoverStagingPipeline(ctx, staging, uploader, locator)
+	require.NoError(t, err)
+	require.NotNil(t, report)
+
+	assert.Equal(t, 2, report.ScannedSlices)
+	assert.Equal(t, 2, report.RequeuedSlices)
+	assert.Equal(t, uint64(20), report.MaxSliceID)
+
+	// Wait for uploads to complete
+	err = uploader.WaitForAll(ctx)
+	require.NoError(t, err)
+
+	// Verify both objects in MinIO
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+
+	key1 := chunk.FormatObjectKey(diskID, 0, sliceID1, 0)
+	key2 := chunk.FormatObjectKey(diskID, 1, sliceID2, 0)
+
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, key1, minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, key2, minio.RemoveObjectOptions{})
+	}()
+
+	stat1, err := minioClient.StatObject(context.Background(), cfg.Bucket, key1, minio.StatObjectOptions{})
+	require.NoError(t, err, "object %s must exist in MinIO", key1)
+	assert.Equal(t, int64(len(payload1)), stat1.Size)
+
+	stat2, err := minioClient.StatObject(context.Background(), cfg.Bucket, key2, minio.StatObjectOptions{})
+	require.NoError(t, err, "object %s must exist in MinIO", key2)
+	assert.Equal(t, int64(len(payload2)), stat2.Size)
+
+	// Re-run recovery pipeline: should skip both as already persisted
+	report2, err := chunk.RecoverStagingPipeline(ctx, staging, uploader, locator)
+	require.NoError(t, err)
+	assert.Equal(t, 2, report2.SkippedSlices, "slices must be skipped since already in MinIO")
+	assert.Equal(t, 0, report2.RequeuedSlices)
+}
+

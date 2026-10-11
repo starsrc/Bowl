@@ -133,6 +133,12 @@ func toConnectError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+	}
+	if errors.Is(err, context.Canceled) {
+		return connect.NewError(connect.CodeCanceled, err.Error())
+	}
 	var connectErr *connect.Error
 	if errors.As(err, &connectErr) {
 		return connect.NewError(connectErr.Code(), connectErr.Message())

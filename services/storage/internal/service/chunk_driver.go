@@ -269,7 +269,7 @@ ON CONFLICT (id) DO NOTHING;
 			return 0, connect.Errorf(connect.CodeInternal, "failed to record slice reference: %s", err)
 		}
 
-		// 2.5. Asynchronously enqueue slice to S3 uploader if configured
+		// 2.6. Asynchronously enqueue slice to S3 uploader if configured
 		if d.uploader != nil {
 			_ = d.uploader.Enqueue(ctx, &chunk.UploadTask{
 				DiskID:    diskID,
@@ -288,13 +288,95 @@ ON CONFLICT (id) DO NOTHING;
 
 
 
-// Flush flushes dirty data for an open handle (no-op in STARSRC-117, implemented in STARSRC-123).
+// Flush flushes dirty data for an open handle (implemented in STARSRC-123).
 func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+		}
+		if errors.Is(err, context.Canceled) {
+			return connect.NewError(connect.CodeCanceled, err.Error())
+		}
+		return err
+	}
+
+	if d.staging != nil && diskID != "" {
+		if err := d.staging.SyncDisk(diskID); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to sync staging disk: %s", err)
+		}
+	}
+
+	if d.uploader != nil && diskID != "" && ino > 0 {
+		if err := d.uploader.WaitForIno(ctx, diskID, ino); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+			}
+			if errors.Is(err, context.Canceled) {
+				return connect.NewError(connect.CodeCanceled, err.Error())
+			}
+			return connect.Errorf(connect.CodeInternal, "s3 persistence failure for ino %d: %s", ino, err)
+		}
+	}
+
 	return nil
 }
 
-// Fsync synchronizes file data to persistent storage (no-op in STARSRC-117, implemented in STARSRC-123).
+// Fsync synchronizes file data to persistent storage (implemented in STARSRC-123).
 func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID string, ino uint64, datasync bool) error {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+		}
+		if errors.Is(err, context.Canceled) {
+			return connect.NewError(connect.CodeCanceled, err.Error())
+		}
+		return err
+	}
+
+	if d.staging != nil && diskID != "" {
+		if err := d.staging.SyncDisk(diskID); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to sync staging disk: %s", err)
+		}
+	}
+
+	if d.uploader != nil && diskID != "" && ino > 0 {
+		if err := d.uploader.WaitForIno(ctx, diskID, ino); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+			}
+			if errors.Is(err, context.Canceled) {
+				return connect.NewError(connect.CodeCanceled, err.Error())
+			}
+			return connect.Errorf(connect.CodeInternal, "s3 persistence failure for ino %d: %s", ino, err)
+		}
+	}
+
 	return nil
 }
 

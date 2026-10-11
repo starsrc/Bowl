@@ -147,9 +147,10 @@ type S3Uploader struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 
-	mu       sync.Mutex
-	slices   map[sliceKey]*sliceTrack
-	inoTasks map[inoKey]map[uint64]struct{}
+	mu        sync.Mutex
+	slices    map[sliceKey]*sliceTrack
+	inoTasks  map[inoKey]map[uint64]struct{}
+	inoErrors map[inoKey]error
 }
 
 // NewMinIOClient initializes a MinIO client from S3Config.
@@ -202,6 +203,7 @@ func NewS3UploaderWithClient(client ObjectStorageClient, bucket string, opts ...
 		cancel:         cancel,
 		slices:         make(map[sliceKey]*sliceTrack),
 		inoTasks:       make(map[inoKey]map[uint64]struct{}),
+		inoErrors:      make(map[inoKey]error),
 	}
 
 	for _, opt := range opts {
@@ -420,6 +422,9 @@ func (u *S3Uploader) processTask(ctx context.Context, task *UploadTask) {
 	}
 
 	if task.Ino > 0 {
+		if err != nil {
+			u.inoErrors[iKey] = err
+		}
 		if set, ok := u.inoTasks[iKey]; ok {
 			delete(set, task.SliceID)
 			if len(set) == 0 {
@@ -461,33 +466,65 @@ func (u *S3Uploader) WaitForSlice(ctx context.Context, diskID string, sliceID ui
 
 // WaitForIno blocks until all in-flight S3 upload tasks for a given Inode complete.
 func (u *S3Uploader) WaitForIno(ctx context.Context, diskID string, ino uint64) error {
-	u.mu.Lock()
-	set := u.inoTasks[inoKey{diskID: diskID, ino: ino}]
-	var waitChans []chan struct{}
-	var tracks []*sliceTrack
-	for sliceID := range set {
-		if tr := u.slices[sliceKey{diskID: diskID, sliceID: sliceID}]; tr != nil {
-			waitChans = append(waitChans, tr.done)
-			tracks = append(tracks, tr)
-		}
-	}
-	u.mu.Unlock()
-
-	for _, ch := range waitChans {
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	if u == nil {
+		return nil
 	}
 
-	for _, tr := range tracks {
-		if tr.err != nil {
-			return tr.err
-		}
-	}
+	iKey := inoKey{diskID: diskID, ino: ino}
 
-	return nil
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		u.mu.Lock()
+		set := u.inoTasks[iKey]
+		if len(set) == 0 {
+			if recordedErr, ok := u.inoErrors[iKey]; ok {
+				delete(u.inoErrors, iKey)
+				u.mu.Unlock()
+				return recordedErr
+			}
+			u.mu.Unlock()
+			return nil
+		}
+		var waitChans []chan struct{}
+		var tracks []*sliceTrack
+		for sliceID := range set {
+			if tr := u.slices[sliceKey{diskID: diskID, sliceID: sliceID}]; tr != nil {
+				waitChans = append(waitChans, tr.done)
+				tracks = append(tracks, tr)
+			}
+		}
+		u.mu.Unlock()
+
+		for _, ch := range waitChans {
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		u.mu.Lock()
+		for _, tr := range tracks {
+			if tr.err != nil {
+				if recordedErr, ok := u.inoErrors[iKey]; ok {
+					delete(u.inoErrors, iKey)
+					u.mu.Unlock()
+					return recordedErr
+				}
+				u.mu.Unlock()
+				return tr.err
+			}
+		}
+		if recordedErr, ok := u.inoErrors[iKey]; ok {
+			delete(u.inoErrors, iKey)
+			u.mu.Unlock()
+			return recordedErr
+		}
+		u.mu.Unlock()
+	}
 }
 
 // WaitForAll blocks until the current queue is empty and all in-flight tasks have finished.

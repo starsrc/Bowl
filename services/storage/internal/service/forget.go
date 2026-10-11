@@ -23,12 +23,12 @@ func (s *StorageService) Forget(ctx context.Context, req *bowlv1.ForgetRequest) 
 		return nil, connect.NewError(connect.CodeInvalidArgument, "ino must be greater than 0")
 	}
 
-	_, schemaName, err := s.getDiskSchemaForSession(sessionID)
+	sess, schemaName, err := s.getDiskSchemaForSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := s.forgetInode(ctx, schemaName, req.GetIno(), req.GetNlookup()); err != nil {
+	if err := s.forgetInode(ctx, sess.DiskID, schemaName, req.GetIno(), req.GetNlookup()); err != nil {
 		return nil, connect.Errorf(connect.CodeInternal, "failed to forget inode: %s", err)
 	}
 
@@ -42,7 +42,7 @@ func (s *StorageService) BatchForget(ctx context.Context, req *bowlv1.BatchForge
 		return nil, connect.NewError(connect.CodeInvalidArgument, "session_id is required")
 	}
 
-	_, schemaName, err := s.getDiskSchemaForSession(sessionID)
+	sess, schemaName, err := s.getDiskSchemaForSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func (s *StorageService) BatchForget(ctx context.Context, req *bowlv1.BatchForge
 		if node == nil || node.GetIno() == 0 {
 			continue
 		}
-		if err := s.forgetInode(ctx, schemaName, node.GetIno(), node.GetNlookup()); err != nil {
+		if err := s.forgetInode(ctx, sess.DiskID, schemaName, node.GetIno(), node.GetNlookup()); err != nil {
 			return nil, connect.Errorf(connect.CodeInternal, "failed to batch forget inode %d: %s", node.GetIno(), err)
 		}
 	}
@@ -60,7 +60,7 @@ func (s *StorageService) BatchForget(ctx context.Context, req *bowlv1.BatchForge
 }
 
 // forgetInode decrements lookup_count by nlookup (floored at 0) and reclaims the inode if lookup_count == 0 and nlink == 0.
-func (s *StorageService) forgetInode(ctx context.Context, schemaName string, ino uint64, nlookup uint64) error {
+func (s *StorageService) forgetInode(ctx context.Context, diskID, schemaName string, ino uint64, nlookup uint64) error {
 	if s.db == nil || ino == 0 {
 		return nil
 	}
@@ -89,6 +89,9 @@ RETURNING lookup_count, nlink;
 		}
 		deleteXAttrSQL := fmt.Sprintf(`DELETE FROM "%s".xattrs WHERE ino = $1;`, schemaName)
 		_, _ = s.db.Exec(ctx, deleteXAttrSQL, int64(ino))
+		if s.driver != nil && diskID != "" {
+			_ = s.driver.DeleteInode(ctx, diskID, ino)
+		}
 	}
 
 	return nil

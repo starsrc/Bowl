@@ -104,3 +104,13 @@ func DecodeSlices(data []byte) ([]Slice, error) {
 	}
 	return slices, nil
 }
+
+// EncodeSlices serializes a slice of Slice structs into a contiguous binary buffer.
+func EncodeSlices(slices []Slice) []byte {
+	buf := make([]byte, 0, len(slices)*SliceBytes)
+	for _, s := range slices {
+		buf = AppendSlice(buf, s)
+	}
+	return buf
+}
+

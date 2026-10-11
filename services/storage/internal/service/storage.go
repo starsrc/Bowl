@@ -533,10 +533,12 @@ CREATE TABLE IF NOT EXISTS "%s".chunks (
 
 CREATE TABLE IF NOT EXISTS "%s".slice_refs (
 	id BIGINT PRIMARY KEY,
+	chunk_indx INT NOT NULL DEFAULT 0,
 	size INT NOT NULL,
 	refs INT NOT NULL DEFAULT 1
 );
-`, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName)
+ALTER TABLE "%s".slice_refs ADD COLUMN IF NOT EXISTS chunk_indx INT NOT NULL DEFAULT 0;
+`, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName)
 
 	if _, err := s.db.Exec(ctx, ddl); err != nil {
 		return err

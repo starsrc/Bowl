@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+
 
 	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
@@ -20,18 +24,34 @@ import (
 	"github.com/starsrc/bowl/services/disk/internal/db"
 )
 
+// Option configures DiskService options.
+type Option func(*DiskService)
+
+// WithDataDir sets the storage data directory.
+func WithDataDir(dataDir string) Option {
+	return func(s *DiskService) {
+		s.dataDir = dataDir
+	}
+}
+
 // DiskService implements bowl.v1.DiskService.
 type DiskService struct {
 	bowlv1connect.UnimplementedDiskServiceHandler
-	store db.Store
+	store   db.Store
+	dataDir string
 }
 
 // NewDiskService creates a new DiskService instance.
-func NewDiskService(store db.Store) *DiskService {
-	return &DiskService{
+func NewDiskService(store db.Store, opts ...Option) *DiskService {
+	s := &DiskService{
 		store: store,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
+
 
 // CreateDisk creates a new virtual disk entity with initial status DISK_STATUS_READY.
 func (s *DiskService) CreateDisk(ctx context.Context, req *bowlv1.CreateDiskRequest) (*bowlv1.CreateDiskResponse, error) {
@@ -217,6 +237,78 @@ func (s *DiskService) UpdateDisk(ctx context.Context, req *bowlv1.UpdateDiskRequ
 	return &bowlv1.UpdateDiskResponse{
 		Disk: buildDiskProto(updatedRow, attachments),
 	}, nil
+}
+
+// DeleteDisk deletes a virtual disk with protection against deleting active disks (ADR 0010).
+// When force=false, active attachments reject deletion with CodeFailedPrecondition.
+// When force=true, attachments are revoked, PostgreSQL schema disk_<uuid> is dropped with CASCADE,
+// and local chunk storage is cleaned up.
+func (s *DiskService) DeleteDisk(ctx context.Context, req *bowlv1.DeleteDiskRequest) (*bowlv1.DeleteDiskResponse, error) {
+	diskIDStr := strings.TrimSpace(req.GetDiskId())
+	if diskIDStr == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, "disk_id is required")
+	}
+
+	parsedUUID, err := uuid.Parse(diskIDStr)
+	if err != nil {
+		return nil, connect.Errorf(connect.CodeInvalidArgument, "invalid disk_id UUID format: %s", err)
+	}
+
+	diskUUID := pgtype.UUID{Bytes: parsedUUID, Valid: true}
+
+	// 1. Fetch disk from store to verify existence
+	_, err = s.store.GetDisk(ctx, diskUUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, connect.Errorf(connect.CodeNotFound, "disk not found: %s", diskIDStr)
+		}
+		return nil, connect.Errorf(connect.CodeInternal, "failed to get disk: %s", err).WithCause(err)
+	}
+
+	// 2. Check active attachments
+	attachmentCount, err := s.store.CountDiskAttachmentsByDiskID(ctx, diskUUID)
+	if err != nil {
+		return nil, connect.Errorf(connect.CodeInternal, "failed to count disk attachments: %s", err).WithCause(err)
+	}
+
+	if !req.GetForce() && attachmentCount > 0 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, "cannot delete disk with active attachments without force=true")
+	}
+
+
+	// 3. Clean up attachments, schema, and chunks
+	if req.GetForce() {
+		if _, err := s.store.DeleteDiskAttachmentsByDiskID(ctx, diskUUID); err != nil {
+			return nil, connect.Errorf(connect.CodeInternal, "failed to delete disk attachments: %s", err).WithCause(err)
+		}
+	}
+
+	// Cascade drop PostgreSQL schema disk_<uuid_with_underscores> (per ADR 0006 & ADR 0010)
+	schemaName := formatDiskSchema(parsedUUID)
+	dropSchemaSQL := fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, schemaName)
+	if _, err := s.store.Exec(ctx, dropSchemaSQL); err != nil {
+		return nil, connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
+	}
+
+	// Clean up local chunk storage directory if configured
+	dataDir := s.dataDir
+	if dataDir == "" {
+		dataDir = os.Getenv("DATA_DIR")
+	}
+	if dataDir != "" {
+		_ = os.RemoveAll(filepath.Join(dataDir, diskIDStr))
+	}
+
+	// 4. Delete disk record from disks table
+	if _, err := s.store.DeleteDisk(ctx, diskUUID); err != nil {
+		return nil, connect.Errorf(connect.CodeInternal, "failed to delete disk: %s", err).WithCause(err)
+	}
+
+	return &bowlv1.DeleteDiskResponse{}, nil
+}
+
+func formatDiskSchema(diskID uuid.UUID) string {
+	return fmt.Sprintf("disk_%s", strings.ReplaceAll(diskID.String(), "-", "_"))
 }
 
 // ListDisks retrieves a paginated list of virtual disks with optional status filtering.

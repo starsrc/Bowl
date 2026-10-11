@@ -67,6 +67,19 @@ func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, e
 	return i, err
 }
 
+const deleteDisk = `-- name: DeleteDisk :execrows
+DELETE FROM disks
+WHERE disk_id = $1
+`
+
+func (q *Queries) DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDisk, diskID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getDisk = `-- name: GetDisk :one
 SELECT disk_id, name, capacity_bytes, used_bytes, inodes_quota, inodes_used, status, created_at, updated_at FROM disks
 WHERE disk_id = $1

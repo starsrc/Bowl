@@ -14,9 +14,16 @@ import (
 
 // Config aggregates service configuration.
 type Config struct {
-	Server ServerConfig
-	DB     DBConfig
+	Server  ServerConfig
+	DB      DBConfig
+	Storage StorageConfig
 }
+
+// StorageConfig defines local block storage configuration.
+type StorageConfig struct {
+	DataDir string `env:"DATA_DIR" envDefault:"/tmp/bowl/data"`
+}
+
 
 // ServerConfig defines HTTP server configuration.
 type ServerConfig struct {

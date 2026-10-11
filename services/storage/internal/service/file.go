@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +18,9 @@ import (
 // filePath computes the local file path for storing chunk data of a specific Inode.
 // Data root path: <DATA_DIR>/<disk_id>/file_<ino>.bin (ADR 0009).
 func (s *StorageService) filePath(diskID string, ino uint64) string {
+	if legacy, ok := s.driver.(*LegacyFileDriver); ok {
+		return legacy.FilePath(diskID, ino)
+	}
 	base := s.dataDir
 	if base == "" {
 		base = filepath.Join(os.TempDir(), "bowl_data")
@@ -80,23 +82,10 @@ func (s *StorageService) Open(ctx context.Context, req *bowlv1.OpenRequest) (*bo
 		}
 	}
 
-	// 4. Open underlying OS file
-	filePath := s.filePath(sess.DiskID, ino)
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to create directory: %s", err)
-	}
-
-	var file *os.File
-	if isWriteRequested {
-		file, err = os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open file: %s", err)
-		}
-	} else {
-		file, err = os.OpenFile(filePath, os.O_CREATE|os.O_RDONLY, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open file: %s", err)
-		}
+	// 4. Open underlying storage via driver
+	driverHandle, err := s.driver.Open(ctx, sess.DiskID, ino, openMode, req.GetFlags())
+	if err != nil {
+		return nil, toConnectError(err)
 	}
 
 	// 5. Allocate and register file handle
@@ -113,11 +102,11 @@ func (s *StorageService) Open(ctx context.Context, req *bowlv1.OpenRequest) (*bo
 	}
 
 	s.openHandles.Store(fh, &OpenFileHandle{
-		Handle:    fileHandle,
-		SessionID: sess.ID,
-		DiskID:    sess.DiskID,
-		CreatedAt: time.Now(),
-		file:      file,
+		Handle:       fileHandle,
+		SessionID:    sess.ID,
+		DiskID:       sess.DiskID,
+		CreatedAt:    time.Now(),
+		driverHandle: driverHandle,
 	})
 
 	return &bowlv1.OpenResponse{
@@ -170,70 +159,19 @@ func (s *StorageService) Read(ctx context.Context, req *bowlv1.ReadRequest) (*bo
 		}, nil
 	}
 
-	// 5. Read from local file
-	filePath := s.filePath(handle.DiskID, ino)
+	// 5. Read from driver
 	handle.mu.Lock()
-	defer handle.mu.Unlock()
+	driverHandle := handle.driverHandle
+	handle.mu.Unlock()
 
-	// Check if parent disk directory exists
-	if _, err := os.Stat(filepath.Dir(filePath)); os.IsNotExist(err) {
-		if handle.file != nil {
-			_ = handle.file.Close()
-			handle.file = nil
-		}
-		return nil, connect.Errorf(connect.CodeNotFound, "disk storage directory does not exist: %s", handle.DiskID)
-	}
-
-	if handle.file != nil {
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			_ = handle.file.Close()
-			handle.file = nil
-			return nil, connect.Errorf(connect.CodeNotFound, "chunk file was deleted: %s", filePath)
-		}
-	} else {
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			return &bowlv1.ReadResponse{
-				Data: []byte{},
-				Eof:  true,
-			}, nil
-		}
-		f, err := os.OpenFile(filePath, os.O_RDONLY, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open file for read: %s", err)
-		}
-		handle.file = f
-	}
-
-	fi, err := handle.file.Stat()
+	data, eof, err := s.driver.Read(ctx, driverHandle, handle.DiskID, ino, req.GetOffset(), req.GetSize())
 	if err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to stat file: %s", err)
-	}
-	fileSize := uint64(fi.Size())
-	offset := req.GetOffset()
-	if offset >= fileSize {
-		return &bowlv1.ReadResponse{
-			Data: []byte{},
-			Eof:  true,
-		}, nil
-	}
-
-	available := fileSize - offset
-	toRead := uint64(req.GetSize())
-	eof := false
-	if toRead >= available {
-		toRead = available
-		eof = true
-	}
-
-	buf := make([]byte, toRead)
-	n, err := handle.file.ReadAt(buf, int64(offset))
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to read file: %s", err)
+		return nil, toConnectError(err)
 	}
 
 	return &bowlv1.ReadResponse{
-		Data: buf[:n],
-		Eof:  eof || (errors.Is(err, io.EOF) && uint64(n) == available),
+		Data: data,
+		Eof:  eof,
 	}, nil
 }
 
@@ -275,31 +213,14 @@ func (s *StorageService) Write(ctx context.Context, req *bowlv1.WriteRequest) (*
 		return nil, connect.NewError(connect.CodePermissionDenied, "file handle is open for read-only")
 	}
 
-	// 5. Write data into local file
-	data := req.GetData()
-	filePath := s.filePath(handle.DiskID, ino)
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to create directory: %s", err)
-	}
-
+	// 5. Write data via driver
 	handle.mu.Lock()
-	defer handle.mu.Unlock()
+	driverHandle := handle.driverHandle
+	handle.mu.Unlock()
 
-	if handle.file == nil {
-		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open file for write: %s", err)
-		}
-		handle.file = f
-	}
-
-	var written uint32
-	if len(data) > 0 {
-		n, err := handle.file.WriteAt(data, int64(req.GetOffset()))
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to write file: %s", err)
-		}
-		written = uint32(n)
+	written, err := s.driver.Write(ctx, driverHandle, handle.DiskID, ino, req.GetOffset(), req.GetData())
+	if err != nil {
+		return nil, toConnectError(err)
 	}
 
 	// 6. Update Inode size and mtime in PostgreSQL
@@ -353,15 +274,19 @@ func (s *StorageService) Release(ctx context.Context, req *bowlv1.ReleaseRequest
 		return nil, connect.Errorf(connect.CodeInvalidArgument, "ino %d does not match handle ino %d", req.GetIno(), handle.Handle.GetIno())
 	}
 
-	// 3. Unregister and close file
+	// 3. Unregister and close driver handle
 	s.openHandles.Delete(fh)
 
 	handle.mu.Lock()
-	if handle.file != nil {
-		_ = handle.file.Close()
-		handle.file = nil
-	}
+	driverHandle := handle.driverHandle
+	handle.driverHandle = nil
 	handle.mu.Unlock()
+
+	if driverHandle != nil && s.driver != nil {
+		if err := s.driver.Close(ctx, driverHandle); err != nil {
+			return nil, toConnectError(err)
+		}
+	}
 
 	// Release locks associated with this handle
 	if s.lockMgr != nil {

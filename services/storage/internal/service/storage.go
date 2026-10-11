@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	connect "connectrpc.com/connect/v2"
@@ -24,6 +26,14 @@ import (
 // DefaultLeaseDuration defines the default write lease duration (10 seconds).
 const DefaultLeaseDuration = session.DefaultLeaseTimeout
 
+// OpenFileHandle represents an open file handle registered to a session.
+type OpenFileHandle struct {
+	Handle    *bowlv1.FileHandle
+	SessionID string
+	DiskID    string
+	CreatedAt time.Time
+}
+
 // DBExecutor abstracts database execution for schema and metadata management.
 type DBExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -39,6 +49,8 @@ type StorageService struct {
 	sessions      session.Manager
 	dataDir       string
 	leaseDuration time.Duration
+	nextFH        atomic.Uint64
+	openHandles   sync.Map // uint64 -> *OpenFileHandle
 }
 
 // Option configures StorageService parameters.

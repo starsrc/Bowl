@@ -126,3 +126,100 @@ func TestEnsureDiskSchema_ChunksTableInitialized(t *testing.T) {
 	assert.Equal(t, int32(0), resIndx)
 	assert.Equal(t, testPayload, resSlices)
 }
+
+func TestEnsureDiskSchema_SliceRefsTableInitialized(t *testing.T) {
+	h := setupTestHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "slice-refs-schema-test-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, mountResp.GetSessionId())
+
+	// Verify slice_refs table exists in the schema
+	var tableExists bool
+	checkTableSQL := `
+		SELECT EXISTS (
+			SELECT FROM information_schema.tables 
+			WHERE table_schema = $1 AND table_name = 'slice_refs'
+		);
+	`
+	err = h.dbPool.QueryRow(ctx, checkTableSQL, schemaName).Scan(&tableExists)
+	require.NoError(t, err)
+	assert.True(t, tableExists, "table %s.slice_refs must exist", schemaName)
+
+	// Verify columns: id (bigint), size (integer), refs (integer)
+	type columnInfo struct {
+		columnName string
+		dataType   string
+		isNullable string
+	}
+	colsQuery := `
+		SELECT column_name, data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'slice_refs'
+		ORDER BY column_name;
+	`
+	rows, err := h.dbPool.Query(ctx, colsQuery, schemaName)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	cols := make(map[string]columnInfo)
+	for rows.Next() {
+		var c columnInfo
+		err := rows.Scan(&c.columnName, &c.dataType, &c.isNullable)
+		require.NoError(t, err)
+		cols[c.columnName] = c
+	}
+	require.NoError(t, rows.Err())
+
+	require.Contains(t, cols, "id")
+	assert.Equal(t, "bigint", cols["id"].dataType)
+	assert.Equal(t, "NO", cols["id"].isNullable)
+
+	require.Contains(t, cols, "size")
+	assert.Equal(t, "integer", cols["size"].dataType)
+	assert.Equal(t, "NO", cols["size"].isNullable)
+
+	require.Contains(t, cols, "refs")
+	assert.Equal(t, "integer", cols["refs"].dataType)
+	assert.Equal(t, "NO", cols["refs"].isNullable)
+
+	// Verify primary key constraint is (id)
+	var pkColumns []string
+	pkQuery := `
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name
+		  AND tc.table_schema = kcu.table_schema
+		WHERE tc.table_schema = $1
+		  AND tc.table_name = 'slice_refs'
+		  AND tc.constraint_type = 'PRIMARY KEY'
+		ORDER BY kcu.ordinal_position;
+	`
+	pkRows, err := h.dbPool.Query(ctx, pkQuery, schemaName)
+	require.NoError(t, err)
+	defer pkRows.Close()
+
+	for pkRows.Next() {
+		var col string
+		err := pkRows.Scan(&col)
+		require.NoError(t, err)
+		pkColumns = append(pkColumns, col)
+	}
+	require.NoError(t, pkRows.Err())
+
+	assert.Equal(t, []string{"id"}, pkColumns)
+}

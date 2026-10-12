@@ -266,5 +266,13 @@ func TestS3Reader_ReadSliceRange_HTTPRange(t *testing.T) {
 	stagingRangeData, err := reader.ReadSliceRange(ctx, diskID, chunkIndx, 700, 200, 80)
 	require.NoError(t, err)
 	assert.Equal(t, payload[200:280], stagingRangeData)
+
+	// Verify chunk wrapper implements RangeSliceReader
+	wrapper := reader.ForChunkWithContext(ctx, chunkIndx)
+	var rangeReader chunk.RangeSliceReader = wrapper
+	subData, err := rangeReader.ReadSliceRange(diskID, sliceID, 100, 50)
+	require.NoError(t, err)
+	assert.Equal(t, payload[100:150], subData)
 }
+
 

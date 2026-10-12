@@ -374,21 +374,7 @@ ON CONFLICT (id) DO NOTHING;
 
 
 
-// Flush flushes dirty data for an open handle (implemented in STARSRC-123).
-func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
-	}
-
+func (d *ChunkDriver) syncInodeBarrier(ctx context.Context, diskID string, ino uint64) error {
 	if err := ctx.Err(); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
@@ -420,6 +406,24 @@ func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID st
 	return nil
 }
 
+// Flush flushes dirty data for an open handle (implemented in STARSRC-123).
+func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
+
+	return d.syncInodeBarrier(ctx, diskID, ino)
+}
+
 // Fsync synchronizes file data to persistent storage (implemented in STARSRC-123).
 func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID string, ino uint64, datasync bool) error {
 	if handle != nil {
@@ -435,35 +439,7 @@ func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID st
 		}
 	}
 
-	if err := ctx.Err(); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
-		}
-		if errors.Is(err, context.Canceled) {
-			return connect.NewError(connect.CodeCanceled, err.Error())
-		}
-		return err
-	}
-
-	if d.staging != nil && diskID != "" {
-		if err := d.staging.SyncDisk(diskID); err != nil {
-			return connect.Errorf(connect.CodeInternal, "failed to sync staging disk: %s", err)
-		}
-	}
-
-	if d.uploader != nil && diskID != "" && ino > 0 {
-		if err := d.uploader.WaitForIno(ctx, diskID, ino); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
-			}
-			if errors.Is(err, context.Canceled) {
-				return connect.NewError(connect.CodeCanceled, err.Error())
-			}
-			return connect.Errorf(connect.CodeInternal, "s3 persistence failure for ino %d: %s", ino, err)
-		}
-	}
-
-	return nil
+	return d.syncInodeBarrier(ctx, diskID, ino)
 }
 
 // Truncate truncates or extends a file to the specified size.
@@ -817,7 +793,24 @@ ORDER BY indx ASC;
 		}
 	}
 
-	// 4. Increment reference count in slice_refs for each mapped source slice
+	// 4. Begin database transaction for slice_refs, chunks, and inode updates
+	var exec DBExecutor = d.db
+	var tx pgx.Tx
+	if tb, ok := d.db.(txBeginner); ok {
+		var err error
+		tx, err = tb.Begin(ctx)
+		if err != nil {
+			return 0, connect.Errorf(connect.CodeInternal, "failed to begin transaction for copy_file_range: %s", err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		exec = tx
+	}
+
+	// 5. Increment reference count in slice_refs for each mapped source slice
 	if len(sliceRefsToInc) > 0 {
 		refCounts := make(map[uint64]int)
 		refSizes := make(map[uint64]uint32)
@@ -833,7 +826,7 @@ ORDER BY indx ASC;
 
 		for cnt, ids := range countsMap {
 			updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs + $1 WHERE id = ANY($2);`, schemaName)
-			res, err := d.db.Exec(ctx, updateRefSQL, int32(cnt), ids)
+			res, err := exec.Exec(ctx, updateRefSQL, int32(cnt), ids)
 			if err != nil {
 				return 0, connect.Errorf(connect.CodeInternal, "failed to increment slice reference count: %s", err)
 			}
@@ -844,7 +837,7 @@ INSERT INTO "%s".slice_refs (id, size, refs)
 VALUES ($1, $2, $3)
 ON CONFLICT (id) DO UPDATE SET refs = "%s".slice_refs.refs + EXCLUDED.refs;
 `, schemaName, schemaName)
-					if _, err := d.db.Exec(ctx, insertRefSQL, id, int32(refSizes[uint64(id)]), int32(cnt+1)); err != nil {
+					if _, err := exec.Exec(ctx, insertRefSQL, id, int32(refSizes[uint64(id)]), int32(cnt+1)); err != nil {
 						return 0, connect.Errorf(connect.CodeInternal, "failed to insert slice reference count: %s", err)
 					}
 				}
@@ -852,7 +845,7 @@ ON CONFLICT (id) DO UPDATE SET refs = "%s".slice_refs.refs + EXCLUDED.refs;
 		}
 	}
 
-	// 5. Append cloned slice metadata to destination Inode chunks
+	// 6. Append cloned slice metadata to destination Inode chunks
 	if len(dstChunkOrder) > 0 {
 		valuePlaceholders := make([]string, len(dstChunkOrder))
 		args := make([]any, 0, len(dstChunkOrder)*3)
@@ -871,12 +864,12 @@ ON CONFLICT (ino, indx)
 DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
 `, schemaName, strings.Join(valuePlaceholders, ", "))
 
-		if _, err := d.db.Exec(ctx, insertChunksSQL, args...); err != nil {
+		if _, err := exec.Exec(ctx, insertChunksSQL, args...); err != nil {
 			return 0, connect.Errorf(connect.CodeInternal, "failed to append dst chunk metadata: %s", err)
 		}
 	}
 
-	// 6. Update destination Inode size/mtime/ctime in PostgreSQL
+	// 7. Update destination Inode size/mtime/ctime in PostgreSQL
 	now := time.Now()
 	newEnd := int64(dstOffset + toCopy)
 	updateInodeSQL := fmt.Sprintf(`
@@ -887,8 +880,15 @@ SET size = GREATEST(size, $1::bigint),
     ctime = $2
 WHERE ino = $3;
 `, schemaName)
-	if _, err := d.db.Exec(ctx, updateInodeSQL, newEnd, now, int64(dstIno)); err != nil {
+	if _, err := exec.Exec(ctx, updateInodeSQL, newEnd, now, int64(dstIno)); err != nil {
 		return 0, connect.Errorf(connect.CodeInternal, "failed to update dst inode metadata: %s", err)
+	}
+
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, connect.Errorf(connect.CodeInternal, "failed to commit copy_file_range transaction: %s", err)
+		}
+		tx = nil
 	}
 
 	return toCopy, nil

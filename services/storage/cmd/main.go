@@ -84,6 +84,7 @@ func main() {
 	// Initialize storage driver based on configuration
 	var driver service.FileStorageDriver
 	var s3Uploader *chunk.S3Uploader
+	var chunkDriver *service.ChunkDriver
 	if cfg.Storage.Driver == "chunk" {
 		if err := os.MkdirAll(cfg.Storage.StagingDir, 0o755); err != nil {
 			slog.Error("failed to create staging directory", "error", err)
@@ -100,9 +101,15 @@ func main() {
 			s3Uploader.Start(ctx)
 			slog.Info("S3 asynchronous upload pipeline started", "bucket", cfg.S3.Bucket, "endpoint", cfg.S3.Endpoint)
 		}
-		chunkDriver := service.NewChunkDriver(stagingMgr, pool, s3Uploader)
+		chunkDriver = service.NewChunkDriver(stagingMgr, pool, s3Uploader)
 		driver = chunkDriver
 		slog.Info("using chunk storage driver", "staging_dir", cfg.Storage.StagingDir)
+
+		// Start background garbage collector
+		if chunkDriver.GC() != nil {
+			chunkDriver.GC().Start(ctx)
+			slog.Info("chunk garbage collector started")
+		}
 
 		// Recover unflushed NVMe staging slices and replay to S3
 		recoveryReport, err := chunkDriver.RecoverStaging(ctx)
@@ -152,6 +159,11 @@ func main() {
 	if err := srv.Stop(shutdownCtx); err != nil {
 		slog.Error("storage service graceful shutdown error", "error", err)
 		os.Exit(1)
+	}
+
+	if chunkDriver != nil && chunkDriver.GC() != nil {
+		chunkDriver.GC().Stop()
+		slog.Info("chunk garbage collector stopped cleanly")
 	}
 
 	if s3Uploader != nil {

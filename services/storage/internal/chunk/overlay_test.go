@@ -195,3 +195,68 @@ func TestReconstituteRange_EdgeCasesAndErrors(t *testing.T) {
 	err = chunk.ReconstituteRangeTo(bufTooShort, "disk-1", slices, 0, 10, reader)
 	assert.ErrorIs(t, err, chunk.ErrTruncatedBuffer)
 }
+
+type mockRangeSliceReader struct {
+	data             map[uint64][]byte
+	readSliceCalls   int
+	rangeSliceCalls  int
+	lastRequestedOff uint32
+	lastRequestedLen uint32
+}
+
+func (m *mockRangeSliceReader) ReadSlice(diskID string, sliceID uint64) ([]byte, error) {
+	m.readSliceCalls++
+	d, ok := m.data[sliceID]
+	if !ok {
+		return nil, fmt.Errorf("slice %d not found", sliceID)
+	}
+	return d, nil
+}
+
+func (m *mockRangeSliceReader) ReadSliceRange(diskID string, sliceID uint64, off uint32, length uint32) ([]byte, error) {
+	m.rangeSliceCalls++
+	m.lastRequestedOff = off
+	m.lastRequestedLen = length
+	d, ok := m.data[sliceID]
+	if !ok {
+		return nil, fmt.Errorf("slice %d not found", sliceID)
+	}
+	if int(off+length) > len(d) {
+		return nil, fmt.Errorf("range out of bounds")
+	}
+	return d[off : off+length], nil
+}
+
+func TestReconstituteRange_RangeSliceReader(t *testing.T) {
+	reader := &mockRangeSliceReader{
+		data: map[uint64][]byte{
+			1: []byte("0123456789ABCDEF0123456789ABCDEF"), // 32 bytes
+		},
+	}
+
+	// Slice at chunk pos=100, length=32, slice offset=4
+	slices := []chunk.Slice{
+		{
+			Pos:  100,
+			ID:   1,
+			Size: 32,
+			Off:  4,
+			Len:  20,
+		},
+	}
+
+	// Read interval [105, 115): length 10
+	// Intersects slice interval [100, 120) from 105 to 115.
+	// Overlap start: 105, end: 115, overlapLen: 10
+	// Slice offset within slice: s.Off + (105 - 100) = 4 + 5 = 9
+	result, err := chunk.ReconstituteRange("disk-1", slices, 105, 10, reader)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("9ABCDEF012"), result)
+
+	// Verify that ReadSliceRange was called instead of ReadSlice
+	assert.Equal(t, 0, reader.readSliceCalls)
+	assert.Equal(t, 1, reader.rangeSliceCalls)
+	assert.Equal(t, uint32(9), reader.lastRequestedOff)
+	assert.Equal(t, uint32(10), reader.lastRequestedLen)
+}
+

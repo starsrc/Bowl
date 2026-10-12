@@ -216,3 +216,22 @@ func TestGarbageCollector_PeriodicStartStop(t *testing.T) {
 
 	gc.Stop()
 }
+
+func TestParseDiskSchemaName(t *testing.T) {
+	diskID := "d4b4a11b-1234-5678-9abc-def012345678"
+	schema := chunk.FormatDiskSchemaName(diskID)
+	assert.Equal(t, "disk_d4b4a11b_1234_5678_9abc_def012345678", schema)
+
+	parsed, err := chunk.ParseDiskSchemaName(schema)
+	require.NoError(t, err)
+	assert.Equal(t, diskID, parsed)
+
+	// Test without prefix or with standard dashes
+	parsed2, err := chunk.ParseDiskSchemaName(diskID)
+	require.NoError(t, err)
+	assert.Equal(t, diskID, parsed2)
+
+	// Invalid schema
+	_, err = chunk.ParseDiskSchemaName("invalid-schema")
+	assert.Error(t, err)
+}

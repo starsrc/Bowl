@@ -33,6 +33,18 @@ func FormatDiskSchemaName(diskID string) string {
 	return "disk_" + strings.ReplaceAll(diskID, "-", "_")
 }
 
+// ParseDiskSchemaName converts a PostgreSQL schema name (format "disk_<uuid_with_underscores>")
+// back into the canonical disk UUID string format.
+func ParseDiskSchemaName(schema string) (string, error) {
+	raw := strings.TrimPrefix(schema, "disk_")
+	uuidStr := strings.ReplaceAll(raw, "_", "-")
+	parsed, err := uuid.Parse(uuidStr)
+	if err != nil {
+		return raw, fmt.Errorf("invalid disk schema name %q: %w", schema, err)
+	}
+	return parsed.String(), nil
+}
+
 // GarbageCollector removes stale local staging files, S3 physical blocks, and database references
 // for slices whose reference count has dropped to zero or below (refs <= 0).
 type GarbageCollector struct {
@@ -255,7 +267,12 @@ func (gc *GarbageCollector) tick(ctx context.Context) {
 			for rows.Next() {
 				var schema string
 				if err := rows.Scan(&schema); err == nil {
-					disks = append(disks, schema)
+					diskUUID, parseErr := ParseDiskSchemaName(schema)
+					if parseErr == nil {
+						disks = append(disks, diskUUID)
+					} else {
+						disks = append(disks, schema)
+					}
 				}
 			}
 			rows.Close()

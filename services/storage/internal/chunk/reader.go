@@ -284,29 +284,38 @@ func (r *S3Reader) ReadSliceRange(ctx context.Context, diskID string, chunkIndx 
 	return result, nil
 }
 
-// ForChunk returns a SliceReader bound to a specific chunk index using context.Background().
-func (r *S3Reader) ForChunk(chunkIndx uint32) SliceReader {
+// ForChunk returns a chunkReaderWrapper bound to a specific chunk index using context.Background().
+func (r *S3Reader) ForChunk(chunkIndx uint32) *chunkReaderWrapper {
 	return r.ForChunkWithContext(context.Background(), chunkIndx)
 }
 
-// ForChunkWithContext returns a SliceReader bound to a specific chunk index and context.
-func (r *S3Reader) ForChunkWithContext(ctx context.Context, chunkIndx uint32) SliceReader {
-	return &chunkSliceReaderAdapter{
+// ForChunkWithContext returns a chunkReaderWrapper bound to a specific chunk index and context.
+func (r *S3Reader) ForChunkWithContext(ctx context.Context, chunkIndx uint32) *chunkReaderWrapper {
+	return &chunkReaderWrapper{
 		reader:    r,
 		ctx:       ctx,
 		chunkIndx: chunkIndx,
 	}
 }
 
-type chunkSliceReaderAdapter struct {
+// chunkReaderWrapper adapts S3Reader to SliceReader and RangeSliceReader for a specific chunk.
+type chunkReaderWrapper struct {
 	reader    *S3Reader
 	ctx       context.Context
 	chunkIndx uint32
 }
 
-func (a *chunkSliceReaderAdapter) ReadSlice(diskID string, sliceID uint64) ([]byte, error) {
-	return a.reader.ReadSlice(a.ctx, diskID, a.chunkIndx, sliceID)
+func (w *chunkReaderWrapper) ReadSlice(diskID string, sliceID uint64) ([]byte, error) {
+	return w.reader.ReadSlice(w.ctx, diskID, w.chunkIndx, sliceID)
 }
 
-// Ensure chunkSliceReaderAdapter implements SliceReader.
-var _ SliceReader = (*chunkSliceReaderAdapter)(nil)
+func (w *chunkReaderWrapper) ReadSliceRange(diskID string, sliceID uint64, off uint32, length uint32) ([]byte, error) {
+	return w.reader.ReadSliceRange(w.ctx, diskID, w.chunkIndx, sliceID, off, length)
+}
+
+// chunkSliceReaderAdapter is maintained for backward compatibility.
+type chunkSliceReaderAdapter = chunkReaderWrapper
+
+// Ensure chunkReaderWrapper implements SliceReader and RangeSliceReader.
+var _ SliceReader = (*chunkReaderWrapper)(nil)
+var _ RangeSliceReader = (*chunkReaderWrapper)(nil)

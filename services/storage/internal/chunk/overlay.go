@@ -10,6 +10,12 @@ type SliceReader interface {
 	ReadSlice(diskID string, sliceID uint64) ([]byte, error)
 }
 
+// RangeSliceReader abstracts reading sub-ranges of slice payload bytes by slice ID.
+// chunkReaderWrapper and StagingManager satisfy this interface.
+type RangeSliceReader interface {
+	ReadSliceRange(diskID string, sliceID uint64, off uint32, length uint32) ([]byte, error)
+}
+
 // ReconstituteRange reconstructs byte data for a specific chunk interval [start, start+size)
 // by layering slices in chronological order over an initial sparse hole of zeros (0x00).
 func ReconstituteRange(diskID string, slices []Slice, start uint32, size uint32, reader SliceReader) ([]byte, error) {
@@ -37,6 +43,8 @@ func ReconstituteRangeTo(dst []byte, diskID string, slices []Slice, start uint32
 	}
 
 	reqEnd := start + size
+
+	rangeReader, hasRangeReader := reader.(RangeSliceReader)
 
 	var cache map[uint64][]byte
 	getSliceData := func(id uint64) ([]byte, error) {
@@ -77,19 +85,30 @@ func ReconstituteRangeTo(dst []byte, diskID string, slices []Slice, start uint32
 		dstStart := overlapStart - start
 		dstEnd := dstStart + overlapLen
 
-		srcStart := s.Off + (overlapStart - s.Pos)
-		srcEnd := srcStart + overlapLen
+		sliceOff := s.Off + (overlapStart - s.Pos)
 
-		payload, err := getSliceData(s.ID)
-		if err != nil {
-			return fmt.Errorf("chunk: failed to read slice %d: %w", s.ID, err)
+		if hasRangeReader {
+			subPayload, err := rangeReader.ReadSliceRange(diskID, s.ID, sliceOff, overlapLen)
+			if err != nil {
+				return fmt.Errorf("chunk: failed to read slice %d range: %w", s.ID, err)
+			}
+			if uint32(len(subPayload)) < overlapLen {
+				return fmt.Errorf("chunk: corrupted slice payload %d: range length %d is less than required %d", s.ID, len(subPayload), overlapLen)
+			}
+			copy(dst[dstStart:dstEnd], subPayload[:overlapLen])
+		} else {
+			srcEnd := sliceOff + overlapLen
+			payload, err := getSliceData(s.ID)
+			if err != nil {
+				return fmt.Errorf("chunk: failed to read slice %d: %w", s.ID, err)
+			}
+
+			if uint64(len(payload)) < uint64(srcEnd) {
+				return fmt.Errorf("chunk: corrupted slice payload %d: length %d is less than required %d", s.ID, len(payload), srcEnd)
+			}
+
+			copy(dst[dstStart:dstEnd], payload[sliceOff:srcEnd])
 		}
-
-		if uint64(len(payload)) < uint64(srcEnd) {
-			return fmt.Errorf("chunk: corrupted slice payload %d: length %d is less than required %d", s.ID, len(payload), srcEnd)
-		}
-
-		copy(dst[dstStart:dstEnd], payload[srcStart:srcEnd])
 	}
 
 	return nil

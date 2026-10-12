@@ -1,7 +1,9 @@
 package chunk
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -79,6 +81,29 @@ func (m *StagingManager) ReadSlice(diskID string, sliceID uint64) ([]byte, error
 	}
 	return data, nil
 }
+
+// ReadSliceRange reads a sub-range [off, off+length) of slice payload bytes from local NVMe staging.
+func (m *StagingManager) ReadSliceRange(diskID string, sliceID uint64, off uint32, length uint32) ([]byte, error) {
+	if length == 0 {
+		return []byte{}, nil
+	}
+	path := m.SlicePath(diskID, sliceID)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("staging: failed to open slice file: %w", err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, int64(off))
+	if err != nil && (!errors.Is(err, io.EOF) || n < int(length)) {
+		return nil, fmt.Errorf("staging: failed to read slice range [%d, %d): %w", off, off+length, err)
+	}
+	return buf[:n], nil
+}
+
+var _ SliceReader = (*StagingManager)(nil)
+var _ RangeSliceReader = (*StagingManager)(nil)
 
 // DeleteSlice removes a slice payload file from the local NVMe staging directory.
 func (m *StagingManager) DeleteSlice(diskID string, sliceID uint64) error {

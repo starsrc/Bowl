@@ -400,3 +400,62 @@ func TestMetaAdapter_ConcurrentWrites(t *testing.T) {
 	}
 }
 
+// TestMetaAdapter_DeleteInodeChunks_DecrementsRefsAndReturnsOrphans 测试删除 Inode 时切片引用安全递减与孤儿切片查验
+func TestMetaAdapter_DeleteInodeChunks_DecrementsRefsAndReturnsOrphans(t *testing.T) {
+	pool, diskID, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	adapter := NewMetaAdapter(pool)
+	ino := uint64(500)
+
+	// 在 Chunk 0 与 Chunk 1 写入切片
+	s1 := Slice{Pos: 0, ID: 101, Size: 4096, Off: 0, Len: 4096}
+	s2 := Slice{Pos: 4096, ID: 102, Size: 4096, Off: 0, Len: 4096}
+	s3 := Slice{Pos: 0, ID: 103, Size: 4096, Off: 0, Len: 4096}
+
+	err := adapter.WriteSlices(ctx, diskID, ino, 0, []Slice{s1, s2})
+	require.NoError(t, err)
+	err = adapter.WriteSlice(ctx, diskID, ino, 1, s3)
+	require.NoError(t, err)
+
+	// 切片 101 同时被另一个 Inode 引用（克隆场景），将 refs 增至 2
+	err = adapter.IncSliceRef(ctx, diskID, 101, 1, 4096)
+	require.NoError(t, err)
+
+	ref101, _, err := adapter.GetSliceRef(ctx, diskID, 101)
+	require.NoError(t, err)
+	assert.Equal(t, 2, ref101)
+
+	// 执行 DeleteInodeChunks
+	orphans, err := adapter.DeleteInodeChunks(ctx, diskID, ino)
+	require.NoError(t, err)
+
+	// 切片 102 与 103 引用归零，应判定为物理孤儿切片并返回；切片 101 仍有引用 (refs=1)，不属于孤儿
+	assert.ElementsMatch(t, []uint64{102, 103}, orphans)
+
+	// 验证切片 101 当前 refs 降为 1
+	ref101After, _, err := adapter.GetSliceRef(ctx, diskID, 101)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ref101After)
+
+	// 验证切片 102 与 103 当前 refs 为 0
+	ref102, _, err := adapter.GetSliceRef(ctx, diskID, 102)
+	require.NoError(t, err)
+	assert.Equal(t, 0, ref102)
+
+	ref103, _, err := adapter.GetSliceRef(ctx, diskID, 103)
+	require.NoError(t, err)
+	assert.Equal(t, 0, ref103)
+
+	// 验证 Inode 500 的 chunks 全部行被删除
+	slices0, err := adapter.ReadSlices(ctx, diskID, ino, 0)
+	require.NoError(t, err)
+	assert.Nil(t, slices0)
+
+	slices1, err := adapter.ReadSlices(ctx, diskID, ino, 1)
+	require.NoError(t, err)
+	assert.Nil(t, slices1)
+}
+
+

@@ -24,6 +24,7 @@ import (
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/config"
+	jfsChunk "github.com/starsrc/bowl/services/storage/internal/juicefs/chunk"
 )
 
 
@@ -3186,6 +3187,11 @@ func TestChunkDriver_DeleteInode_DecrementsSliceRefs_AndDeletesChunks(t *testing
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs WHERE refs = 0`, schemaName)).Scan(&zeroRefCount)
 	require.NoError(t, err)
 	assert.Equal(t, 2, zeroRefCount, "all discarded slices must have refs = 0")
+
+	// 校验垃圾回收器已自动登记该磁盘并跟踪这 2 个孤儿切片
+	orphans := chunkDriver.TrackedOrphans(diskID.String())
+	assert.Len(t, orphans, 2, "垃圾回收器必须记录待物理清理的 2 个孤儿切片")
+	assert.ElementsMatch(t, []uint64{1, 2}, orphans, "孤儿切片编号必须与释放切片一致")
 }
 
 func TestStorageService_Unlink_ReclaimsChunksAndDecrementsSliceRefs(t *testing.T) {
@@ -4468,4 +4474,203 @@ func TestChunkDriver_Read_ColdS3_HTTPRange_SubBlock(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// TestChunkDriver_Close_ReleasesPageBuffersAndClosesState 验证文件句柄关闭时安全释放内存 Page 缓冲区，置位关闭状态，并阻断后续全部 I/O 操作
+func TestChunkDriver_Close_ReleasesPageBuffersAndClosesState(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘并创建测试文件
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-close-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "close-test-file.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+
+	// 2. 直接通过 ChunkDriver 打开句柄
+	handle, err := chunkDriver.Open(ctx, diskID.String(), ino, bowlv1.OpenMode_OPEN_MODE_READ_WRITE, 0)
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+
+	ch, ok := handle.(*chunkFileHandle)
+	require.True(t, ok, "底层句柄类型必须为 *chunkFileHandle")
+	assert.False(t, ch.IsClosed(), "初始状态句柄不应为关闭状态")
+
+	// 3. 向句柄关联内存 Page 缓冲区
+	p1 := jfsChunk.NewOffPage(1024)
+	p2 := jfsChunk.NewOffPage(2048)
+	ch.AttachPage(p1)
+	ch.AttachPage(p2)
+	assert.Len(t, ch.Pages(), 2, "句柄必须持有 2 个关联的内存 Page 缓冲区")
+
+	// 4. 调用 Close 释放句柄资源
+	err = chunkDriver.Close(ctx, handle)
+	require.NoError(t, err)
+	assert.True(t, ch.IsClosed(), "Close 后句柄必须标记为已关闭")
+	assert.Empty(t, ch.Pages(), "Close 后关联的内存 Page 缓冲区列表必须清空")
+
+	// 5. 重复 Close 具备幂等安全性
+	err = chunkDriver.Close(ctx, handle)
+	require.NoError(t, err)
+	assert.True(t, ch.IsClosed())
+
+	// 6. 验证后续全部 I/O 操作均被前置拦截并返回 CodeFailedPrecondition 错误
+	// 6.1 Read
+	_, _, err = chunkDriver.Read(ctx, handle, diskID.String(), ino, 0, 1024)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "关闭句柄上的 Read 必须返回 CodeFailedPrecondition")
+
+	// 6.2 Write
+	_, err = chunkDriver.Write(ctx, handle, diskID.String(), ino, 0, []byte("data"))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "关闭句柄上的 Write 必须返回 CodeFailedPrecondition")
+
+	// 6.3 Flush
+	err = chunkDriver.Flush(ctx, handle, diskID.String(), ino)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "关闭句柄上的 Flush 必须返回 CodeFailedPrecondition")
+
+	// 6.4 Fsync
+	err = chunkDriver.Fsync(ctx, handle, diskID.String(), ino, false)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "关闭句柄上的 Fsync 必须返回 CodeFailedPrecondition")
+
+	// 6.5 Fallocate
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, 0, 0, 1024)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "关闭句柄上的 Fallocate 必须返回 CodeFailedPrecondition")
+
+	// 6.6 Lseek
+	_, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 0, 0)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "关闭句柄上的 Lseek 必须返回 CodeFailedPrecondition")
+
+	// 6.7 CopyFileRange (源句柄关闭)
+	_, err = chunkDriver.CopyFileRange(ctx, handle, diskID.String(), ino, 0, nil, diskID.String(), ino, 0, 1024)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "源句柄关闭时的 CopyFileRange 必须返回 CodeFailedPrecondition")
+
+	// 6.8 CopyFileRange (目标句柄关闭)
+	_, err = chunkDriver.CopyFileRange(ctx, nil, diskID.String(), ino, 0, handle, diskID.String(), ino, 0, 1024)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err), "目标句柄关闭时的 CopyFileRange 必须返回 CodeFailedPrecondition")
+}
+
+// TestChunkDriver_DeleteInode_TracksOrphans 验证 Inode 物理删除联动切片引用计数递减与垃圾回收器孤儿切片追踪
+func TestChunkDriver_DeleteInode_TracksOrphans(t *testing.T) {
+	h, stagingMgr, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘并创建文件
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-gc-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "gc-orphan-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 2. 写入 3 个不同偏移位置生成 3 个独立切片
+	for i := 0; i < 3; i++ {
+		payload := bytes.Repeat([]byte{byte('A' + i)}, 1024)
+		_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+			SessionId: sessionID,
+			Fh:        fh,
+			Ino:       ino,
+			Offset:    uint64(i * 4096),
+			Data:      payload,
+		})
+		require.NoError(t, err)
+	}
+
+	// 3. 校验切片已落入 NVMe Staging 缓存目录且在 slice_refs 中引用计数为 1
+	for sliceID := uint64(1); sliceID <= 3; sliceID++ {
+		slicePath := stagingMgr.SlicePath(diskID.String(), sliceID)
+		_, err := os.Stat(slicePath)
+		require.NoError(t, err, "切片本地缓存文件必须存在: %s", slicePath)
+
+		var refs int32
+		err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName), int64(sliceID)).Scan(&refs)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), refs)
+	}
+
+	// 4. 调用 DeleteInode 触发 Inode 删除联动
+	err = chunkDriver.DeleteInode(ctx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// 5. 校验 chunks 表已彻底清理
+	var chunkCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1`, schemaName), int64(ino)).Scan(&chunkCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, chunkCount, "chunks 元数据行必须全部被清除")
+
+	// 6. 校验 slice_refs 中全部切片引用计数已递减至 0
+	var zeroRefCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs WHERE refs = 0`, schemaName)).Scan(&zeroRefCount)
+	require.NoError(t, err)
+	assert.Equal(t, 3, zeroRefCount, "3 个切片的引用计数必须均已递减为 0")
+
+	// 7. 校验垃圾回收器已登记并跟踪全部 3 个孤儿切片
+	tracked := chunkDriver.TrackedOrphans(diskID.String())
+	assert.ElementsMatch(t, []uint64{1, 2, 3}, tracked, "垃圾回收器跟踪列表必须包含全部 3 个孤儿切片")
+
+	// 8. 触发垃圾回收 GC 周期，验证孤儿切片物理清理
+	cleaned, err := chunkDriver.RunGC(ctx, diskID.String())
+	require.NoError(t, err)
+	assert.Equal(t, 3, cleaned, "GC 必须成功回收清理 3 个孤儿切片")
+
+	// 9. 校验 GC 运行后，slice_refs 引用账本已清空，NVMe 本地缓存文件已彻底移除
+	var remainingRefs int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs`, schemaName)).Scan(&remainingRefs)
+	require.NoError(t, err)
+	assert.Equal(t, 0, remainingRefs, "GC 运行后 slice_refs 记录必须全部删除")
+
+	for sliceID := uint64(1); sliceID <= 3; sliceID++ {
+		slicePath := stagingMgr.SlicePath(diskID.String(), sliceID)
+		_, err := os.Stat(slicePath)
+		assert.True(t, os.IsNotExist(err), "GC 运行后本地缓存切片文件必须被物理删除: %s", slicePath)
+	}
+
+	// 10. 校验垃圾回收器中的孤儿跟踪列表已同步清空
+	assert.Empty(t, chunkDriver.TrackedOrphans(diskID.String()), "GC 运行后孤儿切片跟踪队列必须被清空")
+}
+
 

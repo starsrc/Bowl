@@ -55,6 +55,9 @@ type MetaAdapter interface {
 	// DeleteChunk 删除指定 Chunk 的元数据行，并返回被删除的所有切片（便于联动递减引用计数）
 	DeleteChunk(ctx context.Context, diskID string, ino uint64, chunkIndx uint32) ([]Slice, error)
 
+	// DeleteInodeChunks 删除指定 Inode 的所有 Chunk 元数据行，并通过 DecSliceRef 安全递减关联切片的引用计数，返回标记为物理孤儿切片（refs <= 0）的切片编号列表
+	DeleteInodeChunks(ctx context.Context, diskID string, ino uint64) ([]uint64, error)
+
 	// TruncateChunkSlices 替换指定 Chunk 的切片列表（用于文件截断保留局部切片）
 	TruncateChunkSlices(ctx context.Context, diskID string, ino uint64, chunkIndx uint32, slices []Slice) error
 
@@ -346,4 +349,67 @@ func (a *metaAdapter) TruncateChunkSlices(ctx context.Context, diskID string, in
 	updateSQL := fmt.Sprintf(`UPDATE "%s".chunks SET slices = $1 WHERE ino = $2 AND indx = $3`, schemaName)
 	_, err = a.db.Exec(ctx, updateSQL, encoded, int64(ino), int32(chunkIndx))
 	return err
+}
+
+// DeleteInodeChunks 删除指定 Inode 的所有 Chunk 元数据行，并通过 DecSliceRef 安全递减关联切片的引用计数，返回标记为物理孤儿切片（refs <= 0）的切片编号列表
+func (a *metaAdapter) DeleteInodeChunks(ctx context.Context, diskID string, ino uint64) ([]uint64, error) {
+	schemaName, err := FormatDiskSchema(diskID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. 查询该 Inode 下属的所有 Chunk 行及切片二进制数据
+	queryChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1`, schemaName)
+	rows, err := a.db.Query(ctx, queryChunks, int64(ino))
+	if err != nil {
+		return nil, fmt.Errorf("查询 Inode %d 的切片元数据失败: %w", ino, err)
+	}
+	defer rows.Close()
+
+	sliceCounts := make(map[uint64]int)
+	for rows.Next() {
+		var indx int32
+		var rawSlices []byte
+		if err := rows.Scan(&indx, &rawSlices); err != nil {
+			return nil, fmt.Errorf("扫描 Inode %d 的 chunk 记录失败: %w", ino, err)
+		}
+		if len(rawSlices) > 0 {
+			slices, err := DecodeSlices(rawSlices)
+			if err != nil {
+				return nil, fmt.Errorf("解码 Inode %d 的切片数据失败: %w", ino, err)
+			}
+			for _, s := range slices {
+				sliceCounts[s.ID]++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历 Inode %d 的 chunks 结果集失败: %w", ino, err)
+	}
+	rows.Close()
+
+	var orphanSliceIDs []uint64
+
+	// 2. 依次通过 DecSliceRef 递减切片引用计数，并查验标记物理孤儿切片 (refs <= 0)
+	for sliceID, count := range sliceCounts {
+		if err := a.DecSliceRef(ctx, diskID, sliceID, count); err != nil {
+			return nil, fmt.Errorf("递减切片 %d 引用计数失败: %w", sliceID, err)
+		}
+
+		// 检查更新后的引用计数，若 <= 0 则判定为物理孤儿切片
+		var currentRefs int32
+		checkRefSQL := fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName)
+		err := a.db.QueryRow(ctx, checkRefSQL, int64(sliceID)).Scan(&currentRefs)
+		if err == nil && currentRefs <= 0 {
+			orphanSliceIDs = append(orphanSliceIDs, sliceID)
+		}
+	}
+
+	// 3. 删除该 Inode 的全部 chunks 行
+	deleteChunksSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1`, schemaName)
+	if _, err := a.db.Exec(ctx, deleteChunksSQL, int64(ino)); err != nil {
+		return nil, fmt.Errorf("删除 Inode %d 的 chunks 行失败: %w", ino, err)
+	}
+
+	return orphanSliceIDs, nil
 }

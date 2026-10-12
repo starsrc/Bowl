@@ -40,4 +40,12 @@ _Avoid_: Lazy delete, soft purge, partial cleanup
 A persistent background task record tracking the physical purge progress and status of a deleted virtual disk across object storage and NVMe staging.
 _Avoid_: GC job, delete thread, async hook
 
+**JuiceFS Data Engine**:
+An inlined, build-stabilized JuiceFS data pipeline managing chunk caching, 4MB block batching, and object storage persistence.
+_Avoid_: External JuiceFS SDK, JuiceFS daemon, standalone client
+
+**JuiceFS Meta Adapter**:
+An internal bridge translating Bowl per-disk PostgreSQL schema chunk and slice tables into the JuiceFS metadata interfaces required by its data engine.
+_Avoid_: Global metadata client, foreign schema driver
+
 

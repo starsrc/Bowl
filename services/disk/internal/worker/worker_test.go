@@ -64,6 +64,8 @@ func setupTestStore(t *testing.T) (db.Store, func()) {
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 
+	_, _ = pool.Exec(ctx, "TRUNCATE TABLE disks, disk_cleanup_tasks CASCADE")
+
 	store := db.NewStore(pool)
 
 	cleanup := func() {

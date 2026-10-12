@@ -9,6 +9,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Execer 定义执行原始 SQL 命令的接口能力。
+type Execer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
 // Store combines Querier with transaction execution capabilities.
 type Store interface {
 	Querier
@@ -58,4 +63,9 @@ func (s *SQLStore) ExecTx(ctx context.Context, fn func(Querier) error) error {
 	}
 
 	return tx.Commit(ctx)
+}
+
+// Exec 在底层 DBTX 连接或事务上执行原始 SQL 命令。
+func (q *Queries) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return q.db.Exec(ctx, sql, arguments...)
 }

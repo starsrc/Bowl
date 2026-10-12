@@ -6,11 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-
 
 	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
@@ -24,6 +21,11 @@ import (
 	"github.com/starsrc/bowl/services/disk/internal/db"
 )
 
+// CleanupWorker 定义磁盘底层物理数据清理通知接口（如 worker.DiskCleanupWorker）。
+type CleanupWorker interface {
+	Notify(diskID uuid.UUID)
+}
+
 // Option configures DiskService options.
 type Option func(*DiskService)
 
@@ -34,11 +36,19 @@ func WithDataDir(dataDir string) Option {
 	}
 }
 
+// WithCleanupWorker 注入物理清理工作器以实现删除磁盘时的异步通知调度。
+func WithCleanupWorker(w CleanupWorker) Option {
+	return func(s *DiskService) {
+		s.cleanupWorker = w
+	}
+}
+
 // DiskService implements bowl.v1.DiskService.
 type DiskService struct {
 	bowlv1connect.UnimplementedDiskServiceHandler
-	store   db.Store
-	dataDir string
+	store         db.Store
+	dataDir       string
+	cleanupWorker CleanupWorker
 }
 
 // NewDiskService creates a new DiskService instance.
@@ -239,10 +249,14 @@ func (s *DiskService) UpdateDisk(ctx context.Context, req *bowlv1.UpdateDiskRequ
 	}, nil
 }
 
-// DeleteDisk deletes a virtual disk with protection against deleting active disks (ADR 0010).
-// When force=false, active attachments reject deletion with CodeFailedPrecondition.
-// When force=true, attachments are revoked, PostgreSQL schema disk_<uuid> is dropped with CASCADE,
-// and local chunk storage is cleaned up.
+// DeleteDisk 删除指定的虚拟磁盘（遵循 ADR 0010 与 ADR 0015）。
+// 当 force=false 且存在活跃挂载时，拒绝删除并返回 CodeFailedPrecondition。
+// 当通过前置检查后，在单个数据库事务内原子执行：
+// 1. 若 force=true，强制解绑活跃客户端挂载 (disk_attachments)；
+// 2. 插入 PENDING 状态的物理清理任务记录 (disk_cleanup_tasks)；
+// 3. 级联删除 PostgreSQL 独立元数据模式 (DROP SCHEMA disk_<uuid> CASCADE)；
+// 4. 从 disks 表删除磁盘元数据记录。
+// 事务提交后，立即异步通知清理工作器进行物理资源回收，并极速返回响应（消除前台 S3 删除阻塞）。
 func (s *DiskService) DeleteDisk(ctx context.Context, req *bowlv1.DeleteDiskRequest) (*bowlv1.DeleteDiskResponse, error) {
 	diskIDStr := strings.TrimSpace(req.GetDiskId())
 	if diskIDStr == "" {
@@ -256,7 +270,7 @@ func (s *DiskService) DeleteDisk(ctx context.Context, req *bowlv1.DeleteDiskRequ
 
 	diskUUID := pgtype.UUID{Bytes: parsedUUID, Valid: true}
 
-	// 1. Fetch disk from store to verify existence
+	// 1. 查询磁盘校验存在性
 	_, err = s.store.GetDisk(ctx, diskUUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -265,7 +279,7 @@ func (s *DiskService) DeleteDisk(ctx context.Context, req *bowlv1.DeleteDiskRequ
 		return nil, connect.Errorf(connect.CodeInternal, "failed to get disk: %s", err).WithCause(err)
 	}
 
-	// 2. Check active attachments
+	// 2. 校验是否存在活跃挂载绑定
 	attachmentCount, err := s.store.CountDiskAttachmentsByDiskID(ctx, diskUUID)
 	if err != nil {
 		return nil, connect.Errorf(connect.CodeInternal, "failed to count disk attachments: %s", err).WithCause(err)
@@ -275,33 +289,53 @@ func (s *DiskService) DeleteDisk(ctx context.Context, req *bowlv1.DeleteDiskRequ
 		return nil, connect.NewError(connect.CodeFailedPrecondition, "cannot delete disk with active attachments without force=true")
 	}
 
-
-	// 3. Clean up attachments, schema, and chunks
-	if req.GetForce() {
-		if _, err := s.store.DeleteDiskAttachmentsByDiskID(ctx, diskUUID); err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to delete disk attachments: %s", err).WithCause(err)
+	// 3. 在事务中原子执行：解绑附件、持久化清理任务、级联删除 Schema、删除磁盘元数据
+	err = s.store.ExecTx(ctx, func(q db.Querier) error {
+		// a. 若 force=true，清理活跃挂载绑定
+		if req.GetForce() {
+			if _, err := q.DeleteDiskAttachmentsByDiskID(ctx, diskUUID); err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to delete disk attachments: %s", err).WithCause(err)
+			}
 		}
+
+		// b. 持久化 PENDING 状态的物理清理任务记录 (ADR 0015)
+		taskID := uuid.New()
+		_, err := q.CreateCleanupTask(ctx, db.CreateCleanupTaskParams{
+			TaskID: pgtype.UUID{Bytes: taskID, Valid: true},
+			DiskID: diskUUID,
+			Status: db.CleanupTaskStatusPending,
+		})
+		if err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to create cleanup task: %s", err).WithCause(err)
+		}
+
+		// c. 级联删除 PostgreSQL 独立元数据模式 disk_<uuid>
+		schemaName := formatDiskSchema(parsedUUID)
+		dropSchemaSQL := fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, schemaName)
+		if execer, ok := q.(db.Execer); ok {
+			if _, err := execer.Exec(ctx, dropSchemaSQL); err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
+			}
+		} else {
+			if _, err := s.store.Exec(ctx, dropSchemaSQL); err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
+			}
+		}
+
+		// d. 从 disks 表删除虚拟磁盘元数据
+		if _, err := q.DeleteDisk(ctx, diskUUID); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to delete disk: %s", err).WithCause(err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	// Cascade drop PostgreSQL schema disk_<uuid_with_underscores> (per ADR 0006 & ADR 0010)
-	schemaName := formatDiskSchema(parsedUUID)
-	dropSchemaSQL := fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, schemaName)
-	if _, err := s.store.Exec(ctx, dropSchemaSQL); err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
-	}
-
-	// Clean up local chunk storage directory if configured
-	dataDir := s.dataDir
-	if dataDir == "" {
-		dataDir = os.Getenv("DATA_DIR")
-	}
-	if dataDir != "" {
-		_ = os.RemoveAll(filepath.Join(dataDir, diskIDStr))
-	}
-
-	// 4. Delete disk record from disks table
-	if _, err := s.store.DeleteDisk(ctx, diskUUID); err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to delete disk: %s", err).WithCause(err)
+	// 4. 事务提交后立即通知后台清理工作器，无需等待物理清理即可极速响应前台
+	if s.cleanupWorker != nil {
+		s.cleanupWorker.Notify(parsedUUID)
 	}
 
 	return &bowlv1.DeleteDiskResponse{}, nil

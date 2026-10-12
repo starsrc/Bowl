@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"sync"
 	connect "connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/google/uuid"
@@ -22,8 +23,11 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
+	"github.com/starsrc/bowl/services/disk/internal/config"
 	"github.com/starsrc/bowl/services/disk/internal/db"
 	"github.com/starsrc/bowl/services/disk/internal/service"
+	"github.com/starsrc/bowl/services/disk/internal/storage"
+	"github.com/starsrc/bowl/services/disk/internal/worker"
 )
 
 func setupTestServerWithDataDir(t *testing.T, dataDir string) (bowlv1connect.DiskServiceClient, *pgxpool.Pool, func()) {
@@ -46,6 +50,15 @@ func setupTestServerWithDataDir(t *testing.T, dataDir string) (bowlv1connect.Dis
 	if dataDir != "" {
 		opts = append(opts, service.WithDataDir(dataDir))
 	}
+
+	// 为测试配置清理驱动与工作器
+	purger, err := storage.NewMinIOObjectStoragePurger(config.S3Config{}, config.StorageConfig{DataDir: dataDir})
+	require.NoError(t, err)
+
+	cleanupWorker := worker.NewDiskCleanupWorker(store, purger, worker.WithPollInterval(50*time.Millisecond))
+	cleanupWorker.Start(ctx)
+	opts = append(opts, service.WithCleanupWorker(cleanupWorker))
+
 	diskService := service.NewDiskService(store, opts...)
 
 	// Build Connect-RPC Server and mount onto HTTP multiplexer
@@ -62,8 +75,9 @@ func setupTestServerWithDataDir(t *testing.T, dataDir string) (bowlv1connect.Dis
 	client := bowlv1connect.NewDiskServiceClient(connectClient)
 
 	cleanup := func() {
+		cleanupWorker.Stop()
 		testServer.Close()
-		_, _ = pool.Exec(ctx, "TRUNCATE TABLE disks CASCADE")
+		_, _ = pool.Exec(ctx, "TRUNCATE TABLE disk_cleanup_tasks, disks CASCADE")
 		store.Close()
 	}
 
@@ -1411,8 +1425,220 @@ func TestDiskService_DeleteDisk_ForceCascadeDeletion_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, schemaExists, "PostgreSQL schema should have been dropped with CASCADE")
 
-	// 4. Verify local chunk directory deleted
-	assert.NoDirExists(t, diskChunkDir, "Local chunk directory should have been removed")
+	// 4. Verify cleanup task created and transitioned to COMPLETED
+	require.Eventually(t, func() bool {
+		var status int16
+		err := pool.QueryRow(ctx, "SELECT status FROM disk_cleanup_tasks WHERE disk_id = $1", parsedUUID).Scan(&status)
+		return err == nil && status == db.CleanupTaskStatusCompleted
+	}, 5*time.Second, 20*time.Millisecond, "清理任务应成功流转至 COMPLETED")
+
+	// 5. Verify local chunk directory deleted by background worker
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(diskChunkDir)
+		return os.IsNotExist(err)
+	}, 5*time.Second, 20*time.Millisecond, "本地切片目录应被后台清理工作器安全移除")
+}
+
+// mockCleanupWorker 用于测试验证 DeleteDisk 的 Notify 调用与通知参数。
+type mockCleanupWorker struct {
+	mu          sync.Mutex
+	notifiedIDs []uuid.UUID
+}
+
+func (m *mockCleanupWorker) Notify(diskID uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.notifiedIDs = append(m.notifiedIDs, diskID)
+}
+
+func (m *mockCleanupWorker) NotifiedIDs() []uuid.UUID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]uuid.UUID, len(m.notifiedIDs))
+	copy(copied, m.notifiedIDs)
+	return copied
+}
+
+func TestDiskService_DeleteDisk_CreatesPendingTaskAndNotifiesWorker(t *testing.T) {
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	err := db.MigrateUp(dsn)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	store := db.NewStore(pool)
+	defer store.Close()
+
+	mockWorker := &mockCleanupWorker{}
+	diskService := service.NewDiskService(store, service.WithCleanupWorker(mockWorker))
+
+	connectServer := connect.NewServer()
+	bowlv1connect.RegisterDiskServiceHandler(connectServer, diskService)
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, connectServer)
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+	defer func() {
+		_, _ = pool.Exec(ctx, "TRUNCATE TABLE disk_cleanup_tasks, disks CASCADE")
+	}()
+
+	client := bowlv1connect.NewDiskServiceClient(connect.NewClient(connecthttp.NewTransport(testServer.Client(), testServer.URL)))
+
+	// 1. 创建虚拟磁盘
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "pending-task-test-disk",
+		CapacityBytes: 1048576,
+	})
+	require.NoError(t, err)
+	diskIDStr := createResp.Disk.DiskId
+	parsedUUID := uuid.MustParse(diskIDStr)
+
+	// 2. 执行删除
+	start := time.Now()
+	deleteResp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+		DiskId: diskIDStr,
+		Force:  true,
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.NotNil(t, deleteResp)
+	assert.Less(t, elapsed, 500*time.Millisecond, "前台 DeleteDisk 响应耗时应远小于 500ms")
+
+	// 3. 校验 mockWorker 收到即时通知
+	notified := mockWorker.NotifiedIDs()
+	require.Len(t, notified, 1, "应收到恰好一次清理通知")
+	assert.Equal(t, parsedUUID, notified[0], "通知的 diskID 必须与删除的磁盘 UUID 一致")
+
+	// 4. 校验数据库中的清理任务状态为 PENDING
+	var (
+		taskStatus int16
+		attempts   int32
+	)
+	err = pool.QueryRow(ctx, "SELECT status, attempts FROM disk_cleanup_tasks WHERE disk_id = $1", parsedUUID).Scan(&taskStatus, &attempts)
+	require.NoError(t, err)
+	assert.Equal(t, db.CleanupTaskStatusPending, taskStatus, "清理任务初始状态必须为 PENDING (1)")
+	assert.Equal(t, int32(0), attempts, "初始尝试次数应为 0")
+}
+
+func TestDiskService_DeleteDisk_NormalDeletion_CreatesPendingTask(t *testing.T) {
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	err := db.MigrateUp(dsn)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	store := db.NewStore(pool)
+	defer store.Close()
+
+	mockWorker := &mockCleanupWorker{}
+	diskService := service.NewDiskService(store, service.WithCleanupWorker(mockWorker))
+
+	connectServer := connect.NewServer()
+	bowlv1connect.RegisterDiskServiceHandler(connectServer, diskService)
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, connectServer)
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+	defer func() {
+		_, _ = pool.Exec(ctx, "TRUNCATE TABLE disk_cleanup_tasks, disks CASCADE")
+	}()
+
+	client := bowlv1connect.NewDiskServiceClient(connect.NewClient(connecthttp.NewTransport(testServer.Client(), testServer.URL)))
+
+	// 1. 创建虚拟磁盘（无活跃挂载）
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "normal-deletion-pending-disk",
+		CapacityBytes: 2097152,
+	})
+	require.NoError(t, err)
+	diskIDStr := createResp.Disk.DiskId
+	parsedUUID := uuid.MustParse(diskIDStr)
+
+	// 2. 执行常规删除 (force = false)
+	deleteResp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+		DiskId: diskIDStr,
+		Force:  false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deleteResp)
+
+	// 3. 校验通知与持久化状态
+	notified := mockWorker.NotifiedIDs()
+	require.Len(t, notified, 1)
+	assert.Equal(t, parsedUUID, notified[0])
+
+	var taskStatus int16
+	err = pool.QueryRow(ctx, "SELECT status FROM disk_cleanup_tasks WHERE disk_id = $1", parsedUUID).Scan(&taskStatus)
+	require.NoError(t, err)
+	assert.Equal(t, db.CleanupTaskStatusPending, taskStatus)
+}
+
+func TestDiskService_DeleteDisk_WithNilWorker_Succeeds(t *testing.T) {
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	err := db.MigrateUp(dsn)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	store := db.NewStore(pool)
+	defer store.Close()
+
+	// 未注入任何 worker (worker == nil)
+	diskService := service.NewDiskService(store)
+
+	connectServer := connect.NewServer()
+	bowlv1connect.RegisterDiskServiceHandler(connectServer, diskService)
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, connectServer)
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+	defer func() {
+		_, _ = pool.Exec(ctx, "TRUNCATE TABLE disk_cleanup_tasks, disks CASCADE")
+	}()
+
+	client := bowlv1connect.NewDiskServiceClient(connect.NewClient(connecthttp.NewTransport(testServer.Client(), testServer.URL)))
+
+	createResp, err := client.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "nil-worker-disk",
+		CapacityBytes: 1048576,
+	})
+	require.NoError(t, err)
+	diskIDStr := createResp.Disk.DiskId
+	parsedUUID := uuid.MustParse(diskIDStr)
+
+	deleteResp, err := client.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
+		DiskId: diskIDStr,
+		Force:  true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deleteResp)
+
+	// 校验数据库中仍然正确创建了 PENDING 任务，供后续轮询兜底执行
+	var taskStatus int16
+	err = pool.QueryRow(ctx, "SELECT status FROM disk_cleanup_tasks WHERE disk_id = $1", parsedUUID).Scan(&taskStatus)
+	require.NoError(t, err)
+	assert.Equal(t, db.CleanupTaskStatusPending, taskStatus)
 }
 
 func TestDiskService_DeleteDisk_NotFound(t *testing.T) {

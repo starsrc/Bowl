@@ -1407,32 +1407,32 @@ func TestDiskService_DeleteDisk_ForceCascadeDeletion_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, deleteResp)
 
-	// 1. Verify disk record deleted
+	// 1. 验证虚拟磁盘元数据记录已删除
 	getResp, err := client.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
 	require.Error(t, err)
 	assert.Nil(t, getResp)
 	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 
-	// 2. Verify disk attachments deleted
+	// 2. 验证虚拟磁盘挂载关联记录已删除
 	var attCount int64
 	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM disk_attachments WHERE disk_id = $1", parsedUUID).Scan(&attCount)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), attCount)
 
-	// 3. Verify PostgreSQL schema dropped
+	// 3. 验证 PostgreSQL 隔离元数据模式已级联删除
 	var schemaExists bool
 	err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)", schemaName).Scan(&schemaExists)
 	require.NoError(t, err)
-	assert.False(t, schemaExists, "PostgreSQL schema should have been dropped with CASCADE")
+	assert.False(t, schemaExists, "PostgreSQL 模式应已被级联删除")
 
-	// 4. Verify cleanup task created and transitioned to COMPLETED
+	// 4. 验证清理任务已创建并成功流转至 COMPLETED
 	require.Eventually(t, func() bool {
 		var status int16
 		err := pool.QueryRow(ctx, "SELECT status FROM disk_cleanup_tasks WHERE disk_id = $1", parsedUUID).Scan(&status)
 		return err == nil && status == db.CleanupTaskStatusCompleted
 	}, 5*time.Second, 20*time.Millisecond, "清理任务应成功流转至 COMPLETED")
 
-	// 5. Verify local chunk directory deleted by background worker
+	// 5. 验证后台工作器已物理删除本地切片目录
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(diskChunkDir)
 		return os.IsNotExist(err)

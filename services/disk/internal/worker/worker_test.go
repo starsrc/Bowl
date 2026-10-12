@@ -37,6 +37,10 @@ func (m *mockObjectStoragePurger) PurgeDisk(ctx context.Context, diskID uuid.UUI
 	return nil
 }
 
+func (m *mockObjectStoragePurger) PurgeDiskObjects(ctx context.Context, diskID uuid.UUID) error {
+	return m.PurgeDisk(ctx, diskID)
+}
+
 func (m *mockObjectStoragePurger) getCalls() []uuid.UUID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -256,7 +260,7 @@ func TestDiskCleanupWorker_ExponentialRetry_AndFailure(t *testing.T) {
 	finalTask, err := store.GetCleanupTask(ctx, pgtype.UUID{Bytes: taskID, Valid: true})
 	require.NoError(t, err)
 	assert.Equal(t, db.CleanupTaskStatusFailed, finalTask.Status)
-	assert.Equal(t, int32(maxAttempts), finalTask.Attempts)
+	assert.Equal(t, int32(maxAttempts+1), finalTask.Attempts)
 	assert.True(t, finalTask.LastError.Valid)
 	assert.Contains(t, finalTask.LastError.String, "simulated object storage connection error")
 
@@ -264,10 +268,10 @@ func TestDiskCleanupWorker_ExponentialRetry_AndFailure(t *testing.T) {
 	callMu.Lock()
 	actualCalls := len(callTimes)
 	callMu.Unlock()
-	assert.Equal(t, maxAttempts, actualCalls, "总调用次数应与 maxAttempts 一致")
+	assert.Equal(t, maxAttempts+1, actualCalls, "总调用次数应为初始调用加上 maxAttempts 次重试")
 
-	// 理论退避间隔: 30ms (attempt 1) + 60ms (attempt 2) = 90ms
-	expectedMinElapsed := baseBackoff + 2*baseBackoff
+	// 理论退避间隔: 30ms (attempt 1) + 60ms (attempt 2) + 120ms (attempt 3) = 210ms
+	expectedMinElapsed := baseBackoff + 2*baseBackoff + 4*baseBackoff
 	assert.True(t, elapsed >= expectedMinElapsed, "总执行时间 (%v) 应大于退避时间之和 (%v)", elapsed, expectedMinElapsed)
 }
 

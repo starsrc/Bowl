@@ -26,6 +26,9 @@ import (
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
 )
 
+// cleanupTaskStatusCompleted 定义清理任务已完成状态常量（对齐 db.CleanupTaskStatusCompleted）。
+const cleanupTaskStatusCompleted = 3
+
 func getFreePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -318,56 +321,66 @@ func TestE2E_FullLifecycleCascadeCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	// =========================================================================
-	// Scenario Step 6: Non-Graceful Forced Cascade Deletion (DeleteDisk force=true)
+	// 场景步骤 6：非优雅强制级联删除 (DeleteDisk force=true)
 	// =========================================================================
-	// Without unmounting or closing handles, directly trigger DeleteDisk(force = true)
+	// 不卸载也不关闭文件句柄，直接触发 DeleteDisk(force = true) 并校验前台极速响应
+	deleteStart := time.Now()
 	_, err = diskClient.DeleteDisk(ctx, &bowlv1.DeleteDiskRequest{
 		DiskId: diskID,
 		Force:  true,
 	})
+	deleteLatency := time.Since(deleteStart)
 	require.NoError(t, err)
+	assert.Less(t, deleteLatency, 500*time.Millisecond, "DeleteDisk 前台响应延迟必须严格小于 500ms")
 
 	// =========================================================================
-	// Scenario Step 7: Comprehensive Zero-Remnants Verification
+	// 场景步骤 7：全面零残留（Zero-Remnants）闭环验证
 	// =========================================================================
-	// 1. Control Plane: GetDisk returns NotFound
+	// 1. 控制面：GetDisk 返回 NotFound
 	_, err = diskClient.GetDisk(ctx, &bowlv1.GetDiskRequest{DiskId: diskID})
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 
-	// 2. Database: disks table record is removed
+	// 2. 数据库：disks 元数据表记录已被删除
 	var diskCount int
 	err = pool.QueryRow(ctx, "SELECT count(*) FROM disks WHERE disk_id = $1", parsedDiskUUID).Scan(&diskCount)
 	require.NoError(t, err)
-	assert.Equal(t, 0, diskCount, "disks table entry must be deleted")
+	assert.Equal(t, 0, diskCount, "disks 元数据表记录必须已被删除")
 
-	// 3. Database: disk_attachments records are deleted
+	// 3. 数据库：disk_attachments 绑定记录已被清空
 	var attachmentCount int
 	err = pool.QueryRow(ctx, "SELECT count(*) FROM disk_attachments WHERE disk_id = $1", parsedDiskUUID).Scan(&attachmentCount)
 	require.NoError(t, err)
-	assert.Equal(t, 0, attachmentCount, "disk_attachments entries must be deleted")
+	assert.Equal(t, 0, attachmentCount, "disk_attachments 绑定记录必须已被清空")
 
-	// 4. Database: PostgreSQL isolated schema is dropped CASCADE
+	// 4. 数据库：PostgreSQL 独立元数据模式被 CASCADE 完全删除
 	err = pool.QueryRow(ctx, "SELECT count(*) FROM information_schema.schemata WHERE schema_name = $1", schemaName).Scan(&schemaCount)
 	require.NoError(t, err)
-	assert.Equal(t, 0, schemaCount, "PostgreSQL schema %s must be completely dropped via CASCADE", schemaName)
+	assert.Equal(t, 0, schemaCount, "PostgreSQL 隔离模式 %s 必须通过 CASCADE 完全删除", schemaName)
 
-	// 5. Filesystem: Local chunk directory is physically deleted by background worker
+	// 5. 数据库：disk_cleanup_tasks 物理清理任务成功流转至 COMPLETED
+	require.Eventually(t, func() bool {
+		var status int16
+		err := pool.QueryRow(ctx, "SELECT status FROM disk_cleanup_tasks WHERE disk_id = $1 ORDER BY created_at DESC LIMIT 1", parsedDiskUUID).Scan(&status)
+		return err == nil && status == cleanupTaskStatusCompleted
+	}, 15*time.Second, 100*time.Millisecond, "disk_cleanup_tasks 任务状态必须在超时前流转为 COMPLETED")
+
+	// 6. 文件系统：本地切片目录被后台工作器物理删除
 	require.Eventually(t, func() bool {
 		_, err = os.Stat(diskDataDir)
 		return os.IsNotExist(err)
-	}, 5*time.Second, 50*time.Millisecond, "local chunk data directory %s must be physically removed", diskDataDir)
+	}, 5*time.Second, 50*time.Millisecond, "本地切片数据目录 %s 必须被物理移除", diskDataDir)
 
-	// 6. Data Plane: Subsequent operations on deleted session or handle fail
-	// KeepAlive detects disk removal, triggers orphan handle cleanup, and reports LeaseRevocation
+	// 7. 数据面：对已删除会话或文件句柄的后续操作必须全部失败
+	// KeepAlive 检测到磁盘已被删除，触发孤儿句柄清理并报告 LeaseRevocation
 	keepAliveResp, err := storageClient.KeepAlive(ctx, &bowlv1.KeepAliveRequest{
 		SessionId: sessionID,
 	})
 	if err == nil {
-		assert.True(t, keepAliveResp.GetLeaseRevocation(), "expected lease revocation on deleted disk")
+		assert.True(t, keepAliveResp.GetLeaseRevocation(), "在已删除磁盘上预期的租约已被撤销")
 	}
 
-	// Subsequent Read with previously open handle must fail
+	// 针对先前打开句柄的后续 Read 操作必须失败
 	_, err = storageClient.Read(ctx, &bowlv1.ReadRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -375,9 +388,9 @@ func TestE2E_FullLifecycleCascadeCleanup(t *testing.T) {
 		Offset:    0,
 		Size:      1024,
 	})
-	assert.Error(t, err, "subsequent Read operations must fail after cascade disk deletion")
+	assert.Error(t, err, "级联删除磁盘后对旧文件句柄的 Read 操作必须失败")
 
-	// Subsequent Write must fail
+	// 后续 Write 操作必须失败
 	_, err = storageClient.Write(ctx, &bowlv1.WriteRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -385,9 +398,9 @@ func TestE2E_FullLifecycleCascadeCleanup(t *testing.T) {
 		Offset:    0,
 		Data:      []byte("more data"),
 	})
-	assert.Error(t, err, "subsequent Write operations must fail after cascade disk deletion")
+	assert.Error(t, err, "级联删除磁盘后对旧文件句柄的 Write 操作必须失败")
 
-	// Subsequent Mount for deleted disk must fail with NotFound
+	// 对已删除磁盘执行 Mount 操作必须返回 NotFound
 	_, err = storageClient.Mount(ctx, &bowlv1.MountRequest{
 		DiskId:   diskID,
 		ClientId: "new-client",
@@ -638,8 +651,8 @@ func TestE2E_CascadeLifecycle_WithS3AndZeroRemnants(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var status int16
 		err := pool.QueryRow(ctx, "SELECT status FROM disk_cleanup_tasks WHERE disk_id = $1 ORDER BY created_at DESC LIMIT 1", parsedDiskUUID).Scan(&status)
-		return err == nil && status == 3 // CleanupTaskStatusCompleted
-	}, 15*time.Second, 100*time.Millisecond, "disk_cleanup_tasks 任务状态必须在超时前流转为 COMPLETED (3)")
+		return err == nil && status == cleanupTaskStatusCompleted
+	}, 15*time.Second, 100*time.Millisecond, "disk_cleanup_tasks 任务状态必须在超时前流转为 COMPLETED")
 
 	// 步骤 8：全量零残留（Zero-Remnants）闭环验证
 	// 8.1 S3/MinIO 对象 100% 物理消除

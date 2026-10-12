@@ -19,6 +19,7 @@ import (
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
 	"github.com/starsrc/bowl/services/disk/internal/db"
+	"github.com/starsrc/bowl/services/disk/internal/storage"
 )
 
 // CleanupWorker 定义磁盘底层物理数据清理通知接口（如 worker.DiskCleanupWorker）。
@@ -43,12 +44,20 @@ func WithCleanupWorker(w CleanupWorker) Option {
 	}
 }
 
+// WithObjectStorage 注入对象存储物理清理驱动（满足 ADR 0015 规约要求）。
+func WithObjectStorage(p storage.ObjectStoragePurger) Option {
+	return func(s *DiskService) {
+		s.objectStorage = p
+	}
+}
+
 // DiskService implements bowl.v1.DiskService.
 type DiskService struct {
 	bowlv1connect.UnimplementedDiskServiceHandler
 	store         db.Store
 	dataDir       string
 	cleanupWorker CleanupWorker
+	objectStorage storage.ObjectStoragePurger
 }
 
 // NewDiskService creates a new DiskService instance.
@@ -312,14 +321,12 @@ func (s *DiskService) DeleteDisk(ctx context.Context, req *bowlv1.DeleteDiskRequ
 		// c. 级联删除 PostgreSQL 独立元数据模式 disk_<uuid>
 		schemaName := formatDiskSchema(parsedUUID)
 		dropSchemaSQL := fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, schemaName)
-		if execer, ok := q.(db.Execer); ok {
-			if _, err := execer.Exec(ctx, dropSchemaSQL); err != nil {
-				return connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
-			}
-		} else {
-			if _, err := s.store.Exec(ctx, dropSchemaSQL); err != nil {
-				return connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
-			}
+		execer, ok := q.(db.Execer)
+		if !ok {
+			return connect.Errorf(connect.CodeInternal, "failed to drop disk schema: querier does not implement db.Execer")
+		}
+		if _, err := execer.Exec(ctx, dropSchemaSQL); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to drop disk schema: %s", err).WithCause(err)
 		}
 
 		// d. 从 disks 表删除虚拟磁盘元数据

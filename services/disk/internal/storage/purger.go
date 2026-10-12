@@ -19,7 +19,10 @@ import (
 
 // ObjectStoragePurger 定义虚拟磁盘底层物理数据清理接口。
 type ObjectStoragePurger interface {
+	// PurgeDisk 执行虚拟磁盘在底层物理存储（包含 S3/MinIO 对象存储与本地切片目录）中的完整级联清理。
 	PurgeDisk(ctx context.Context, diskID uuid.UUID) error
+	// PurgeDiskObjects 执行虚拟磁盘在底层对象存储（S3/MinIO）中的物理切片对象批量清理。
+	PurgeDiskObjects(ctx context.Context, diskID uuid.UUID) error
 }
 
 // MinIOClient 抽象 MinIO/S3 批量对象列表与删除操作接口，便于单元测试 Mock。
@@ -76,10 +79,8 @@ func (p *MinIOObjectStoragePurger) PurgeDisk(ctx context.Context, diskID uuid.UU
 	}
 
 	// 1. 若启用了 S3 对象存储，批量清理 S3 物理对象
-	if p.s3Cfg.Enabled && p.client != nil {
-		if err := p.purgeS3Objects(ctx, diskID); err != nil {
-			return fmt.Errorf("批量清理 S3 物理对象失败: %w", err)
-		}
+	if err := p.PurgeDiskObjects(ctx, diskID); err != nil {
+		return err
 	}
 
 	// 2. 无论是否启用 S3，均清理本地 DATA_DIR/<disk_id> 与 STAGING_DIR/<disk_id> 目录
@@ -90,9 +91,19 @@ func (p *MinIOObjectStoragePurger) PurgeDisk(ctx context.Context, diskID uuid.UU
 	return nil
 }
 
-// PurgeDiskObjects 提供与 PurgeDisk 语义一致的别名方法。
+// PurgeDiskObjects 清理指定虚拟磁盘在 S3/MinIO 对象存储中的全部物理切片对象。
 func (p *MinIOObjectStoragePurger) PurgeDiskObjects(ctx context.Context, diskID uuid.UUID) error {
-	return p.PurgeDisk(ctx, diskID)
+	if diskID == uuid.Nil {
+		return errors.New("diskID 不能为空")
+	}
+
+	if p.s3Cfg.Enabled && p.client != nil {
+		if err := p.purgeS3Objects(ctx, diskID); err != nil {
+			return fmt.Errorf("批量清理 S3 物理对象失败: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // purgeS3Objects 流式列出并批量删除 S3 中前缀为 chunks/<disk_id>/ 的全部物理对象。

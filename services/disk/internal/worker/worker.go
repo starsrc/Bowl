@@ -262,9 +262,8 @@ func (w *DiskCleanupWorker) processDisk(ctx context.Context, diskID uuid.UUID) e
 			return ctx.Err()
 		}
 
-		// 3. 清理失败：判断是否达到最大尝试次数
-		nextAttempts := int(task.Attempts) + 1
-		if nextAttempts >= w.maxAttempts {
+		// 3. 清理失败：判断是否达到最大重试次数上限
+		if int(task.Attempts) >= w.maxAttempts {
 			// 达到最大重试次数，流转至 FAILED
 			_, err = w.store.FailCleanupTask(ctx, db.FailCleanupTaskParams{
 				TaskID:    task.TaskID,

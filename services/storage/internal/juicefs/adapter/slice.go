@@ -28,6 +28,12 @@ var (
 
 	// ErrInvalidSliceID 表示切片编号非法（例如为 0）
 	ErrInvalidSliceID = errors.New("adapter: 切片编号非法")
+
+	// ErrSrcInodeNotFound 表示写时复制克隆时源 Inode 不存在
+	ErrSrcInodeNotFound = errors.New("adapter: 源 Inode 不存在")
+
+	// ErrDstInodeNotFound 表示写时复制克隆时目标 Inode 不存在
+	ErrDstInodeNotFound = errors.New("adapter: 目标 Inode 不存在")
 )
 
 // Slice 对应 64MB Chunk 内部写入的不可变切片元数据记录。

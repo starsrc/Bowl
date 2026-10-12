@@ -31,6 +31,19 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, string, string, func()) {
 
 	ddl := fmt.Sprintf(`
 CREATE SCHEMA IF NOT EXISTS "%s";
+CREATE TABLE IF NOT EXISTS "%s".inodes (
+	ino BIGINT PRIMARY KEY,
+	parent BIGINT NOT NULL DEFAULT 1,
+	name TEXT NOT NULL DEFAULT '',
+	type INT NOT NULL DEFAULT 1,
+	mode INT NOT NULL DEFAULT 0644,
+	nlink INT NOT NULL DEFAULT 1,
+	size BIGINT NOT NULL DEFAULT 0,
+	blocks BIGINT NOT NULL DEFAULT 0,
+	atime TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	mtime TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	ctime TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS "%s".chunks (
 	ino BIGINT NOT NULL,
 	indx INT NOT NULL,
@@ -43,7 +56,7 @@ CREATE TABLE IF NOT EXISTS "%s".slice_refs (
 	size INT NOT NULL,
 	refs INT NOT NULL DEFAULT 1
 );
-`, schemaName, schemaName, schemaName)
+`, schemaName, schemaName, schemaName, schemaName)
 
 	_, err = pool.Exec(ctx, ddl)
 	require.NoError(t, err)
@@ -457,5 +470,63 @@ func TestMetaAdapter_DeleteInodeChunks_DecrementsRefsAndReturnsOrphans(t *testin
 	require.NoError(t, err)
 	assert.Nil(t, slices1)
 }
+
+// TestMetaAdapter_CloneRange 测试元数据切片写时复制 (COW) 克隆、跨块映射与引用计数递增
+func TestMetaAdapter_CloneRange(t *testing.T) {
+	pool, diskID, schemaName, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	adapter := NewMetaAdapter(pool)
+
+	const srcIno = uint64(10)
+	const dstIno = uint64(20)
+
+	// 1. 初始化源与目标 Inode
+	_, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".inodes (ino, size) VALUES ($1, $2)`, schemaName), int64(srcIno), int64(8192))
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".inodes (ino, size) VALUES ($1, $2)`, schemaName), int64(dstIno), int64(0))
+	require.NoError(t, err)
+
+	// 2. 写入源 Inode 切片数据 (Slice 1: 0..8192)
+	s1 := Slice{Pos: 0, ID: 1001, Size: 8192, Off: 0, Len: 8192}
+	err = adapter.WriteSlice(ctx, diskID, srcIno, 0, s1)
+	require.NoError(t, err)
+
+	// 3. 克隆切片数据区间 [1000, 3500) 至目标 Inode 偏移 2000
+	copied, err := adapter.CloneRange(ctx, diskID, srcIno, 1000, dstIno, 2000, 2500)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2500), copied)
+
+	// 4. 校验 slice_refs 引用计数递增为 2
+	ref, size, err := adapter.GetSliceRef(ctx, diskID, 1001)
+	require.NoError(t, err)
+	assert.Equal(t, 2, ref)
+	assert.Equal(t, uint32(8192), size)
+
+	// 5. 校验目标 Inode 大小已自动更新为 4500 (2000 + 2500)
+	var dstSize int64
+	err = pool.QueryRow(ctx, fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName), int64(dstIno)).Scan(&dstSize)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4500), dstSize)
+
+	// 6. 校验目标 Inode 的 Chunk 0 中切片元数据
+	dstSlices, err := adapter.ReadSlices(ctx, diskID, dstIno, 0)
+	require.NoError(t, err)
+	require.Len(t, dstSlices, 1)
+	assert.Equal(t, uint32(2000), dstSlices[0].Pos)
+	assert.Equal(t, uint64(1001), dstSlices[0].ID)
+	assert.Equal(t, uint32(1000), dstSlices[0].Off)
+	assert.Equal(t, uint32(2500), dstSlices[0].Len)
+
+	// 7. 测试不存在的源 Inode 报错
+	_, err = adapter.CloneRange(ctx, diskID, 99999, 0, dstIno, 0, 100)
+	assert.ErrorIs(t, err, ErrSrcInodeNotFound)
+
+	// 8. 测试不存在的目标 Inode 报错
+	_, err = adapter.CloneRange(ctx, diskID, srcIno, 0, 99999, 0, 100)
+	assert.ErrorIs(t, err, ErrDstInodeNotFound)
+}
+
 
 

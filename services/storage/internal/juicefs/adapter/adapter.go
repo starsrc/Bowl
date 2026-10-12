@@ -61,6 +61,9 @@ type MetaAdapter interface {
 	// TruncateChunkSlices 替换指定 Chunk 的切片列表（用于文件截断保留局部切片）
 	TruncateChunkSlices(ctx context.Context, diskID string, ino uint64, chunkIndx uint32, slices []Slice) error
 
+	// CloneRange 在同一个虚拟磁盘内通过元数据写时复制克隆切片账本记录并原子递增 slice_refs 引用计数
+	CloneRange(ctx context.Context, diskID string, srcIno uint64, srcOffset uint64, dstIno uint64, dstOffset uint64, length uint64) (uint64, error)
+
 	// WithExecutor 绑定指定事务执行器，支持事务内原子执行
 	WithExecutor(exec DBExecutor) MetaAdapter
 }
@@ -413,3 +416,266 @@ func (a *metaAdapter) DeleteInodeChunks(ctx context.Context, diskID string, ino 
 
 	return orphanSliceIDs, nil
 }
+
+// CloneRange 在同一个虚拟磁盘内通过元数据写时复制克隆切片账本记录并原子递增 slice_refs 引用计数
+func (a *metaAdapter) CloneRange(ctx context.Context, diskID string, srcIno uint64, srcOffset uint64, dstIno uint64, dstOffset uint64, length uint64) (uint64, error) {
+	if length == 0 {
+		return 0, nil
+	}
+
+	schemaName, err := FormatDiskSchema(diskID)
+	if err != nil {
+		return 0, err
+	}
+
+	// 1. 查询源 Inode 大小
+	var srcSize int64
+	querySrc := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
+	if err := a.db.QueryRow(ctx, querySrc, int64(srcIno)).Scan(&srcSize); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrSrcInodeNotFound
+		}
+		return 0, fmt.Errorf("查询源 Inode 大小失败: %w", err)
+	}
+
+	// 2. 检查目标 Inode 是否存在
+	var dstExists bool
+	queryDst := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".inodes WHERE ino = $1)`, schemaName)
+	if err := a.db.QueryRow(ctx, queryDst, int64(dstIno)).Scan(&dstExists); err != nil {
+		return 0, fmt.Errorf("检查目标 Inode 失败: %w", err)
+	}
+	if !dstExists {
+		return 0, ErrDstInodeNotFound
+	}
+
+	// 边界检查：若 srcOffset 已到达或超出源文件大小，直接返回 0
+	if srcOffset >= uint64(srcSize) {
+		return 0, nil
+	}
+
+	toCopy := length
+	available := uint64(srcSize) - srcOffset
+	if toCopy > available {
+		toCopy = available
+	}
+	if toCopy == 0 {
+		return 0, nil
+	}
+
+	srcStart := srcOffset
+	srcEnd := srcOffset + toCopy
+
+	startChunkIndx := int32(srcStart / ChunkSize)
+	endChunkIndx := int32((srcEnd - 1) / ChunkSize)
+
+	// 3. 查询与请求区间 [srcStart, srcEnd) 相交的源 Inode Chunk 切片元数据
+	queryChunks := fmt.Sprintf(`
+SELECT indx, slices FROM "%s".chunks
+WHERE ino = $1 AND indx >= $2 AND indx <= $3
+ORDER BY indx ASC;
+`, schemaName)
+
+	rows, err := a.db.Query(ctx, queryChunks, int64(srcIno), startChunkIndx, endChunkIndx)
+	if err != nil {
+		return 0, fmt.Errorf("查询源 Inode 切片元数据失败: %w", err)
+	}
+	defer rows.Close()
+
+	type chunkRow struct {
+		indx   uint32
+		slices []Slice
+	}
+	var srcRows []chunkRow
+
+	for rows.Next() {
+		var cIndx int32
+		var rawSlices []byte
+		if err := rows.Scan(&cIndx, &rawSlices); err != nil {
+			return 0, fmt.Errorf("扫描源 Inode 切片数据失败: %w", err)
+		}
+		slices, err := DecodeSlices(rawSlices)
+		if err != nil {
+			return 0, fmt.Errorf("解码源 Inode 切片数据失败: %w", err)
+		}
+		srcRows = append(srcRows, chunkRow{
+			indx:   uint32(cIndx),
+			slices: slices,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("遍历源 Inode 切片结果集失败: %w", err)
+	}
+	rows.Close()
+
+	// 4. 将相交的源切片投射映射至目标文件 Chunk 偏移区间
+	dstChunks := make(map[uint32][]Slice)
+	var dstChunkOrder []uint32
+
+	type sliceRefUpdate struct {
+		id   uint64
+		size uint32
+	}
+	var sliceRefsToInc []sliceRefUpdate
+
+	for _, cr := range srcRows {
+		chunkBase := uint64(cr.indx) * uint64(ChunkSize)
+		for _, s := range cr.slices {
+			sliceStart := chunkBase + uint64(s.Pos)
+			sliceEnd := sliceStart + uint64(s.Len)
+
+			overlapStart := max(sliceStart, srcStart)
+			overlapEnd := min(sliceEnd, srcEnd)
+			if overlapStart >= overlapEnd {
+				continue
+			}
+
+			subLen := overlapEnd - overlapStart
+			subOff := s.Off + uint32(overlapStart-sliceStart)
+			dstFileStart := dstOffset + (overlapStart - srcStart)
+
+			curDstPos := dstFileStart
+			remainingLen := subLen
+			curPayloadOff := subOff
+
+			for remainingLen > 0 {
+				dstChunkIndx := uint32(curDstPos / ChunkSize)
+				dstChunkOffset := uint32(curDstPos % ChunkSize)
+				dstChunkRemaining := uint64(ChunkSize - dstChunkOffset)
+
+				pieceLen := remainingLen
+				if pieceLen > dstChunkRemaining {
+					pieceLen = dstChunkRemaining
+				}
+
+				clonedSlice := Slice{
+					Pos:  dstChunkOffset,
+					ID:   s.ID,
+					Size: s.Size,
+					Off:  curPayloadOff,
+					Len:  uint32(pieceLen),
+				}
+				if err := clonedSlice.Validate(); err != nil {
+					return 0, fmt.Errorf("克隆切片校验失败: %w", err)
+				}
+
+				if _, exists := dstChunks[dstChunkIndx]; !exists {
+					dstChunkOrder = append(dstChunkOrder, dstChunkIndx)
+				}
+				dstChunks[dstChunkIndx] = append(dstChunks[dstChunkIndx], clonedSlice)
+
+				curDstPos += pieceLen
+				curPayloadOff += uint32(pieceLen)
+				remainingLen -= pieceLen
+			}
+
+			sliceRefsToInc = append(sliceRefsToInc, sliceRefUpdate{
+				id:   s.ID,
+				size: s.Size,
+			})
+		}
+	}
+
+	// 5. 开启事务，原子递增 slice_refs、写入目标 chunks、更新目标 Inode 属性
+	exec := a.db
+	type txBeginner interface {
+		Begin(ctx context.Context) (pgx.Tx, error)
+	}
+	var tx pgx.Tx
+	if tb, ok := a.db.(txBeginner); ok {
+		var err error
+		tx, err = tb.Begin(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("开启事务失败: %w", err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback(ctx)
+			}
+		}()
+		exec = tx
+	}
+
+	// 5.1 原子递增切片引用计数
+	if len(sliceRefsToInc) > 0 {
+		refCounts := make(map[uint64]int)
+		refSizes := make(map[uint64]uint32)
+		for _, ref := range sliceRefsToInc {
+			refCounts[ref.id]++
+			refSizes[ref.id] = ref.size
+		}
+
+		countsMap := make(map[int][]int64)
+		for id, cnt := range refCounts {
+			countsMap[cnt] = append(countsMap[cnt], int64(id))
+		}
+
+		for cnt, ids := range countsMap {
+			updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs + $1 WHERE id = ANY($2);`, schemaName)
+			res, err := exec.Exec(ctx, updateRefSQL, int32(cnt), ids)
+			if err != nil {
+				return 0, fmt.Errorf("递增切片引用计数失败: %w", err)
+			}
+			if res.RowsAffected() < int64(len(ids)) {
+				for _, id := range ids {
+					insertRefSQL := fmt.Sprintf(`
+INSERT INTO "%s".slice_refs (id, size, refs)
+VALUES ($1, $2, $3)
+ON CONFLICT (id) DO UPDATE SET refs = "%s".slice_refs.refs + EXCLUDED.refs;
+`, schemaName, schemaName)
+					if _, err := exec.Exec(ctx, insertRefSQL, id, int32(refSizes[uint64(id)]), int32(cnt)); err != nil {
+						return 0, fmt.Errorf("插入切片引用计数失败: %w", err)
+					}
+				}
+			}
+		}
+	}
+
+	// 5.2 将克隆切片追加至目标 Inode chunks 表
+	if len(dstChunkOrder) > 0 {
+		valuePlaceholders := make([]string, len(dstChunkOrder))
+		args := make([]any, 0, len(dstChunkOrder)*3)
+		for i, indx := range dstChunkOrder {
+			p1 := i*3 + 1
+			p2 := i*3 + 2
+			p3 := i*3 + 3
+			valuePlaceholders[i] = fmt.Sprintf("($%d, $%d, $%d)", p1, p2, p3)
+			args = append(args, int64(dstIno), int32(indx), EncodeSlices(dstChunks[indx]))
+		}
+
+		insertChunksSQL := fmt.Sprintf(`
+INSERT INTO "%s".chunks (ino, indx, slices)
+VALUES %s
+ON CONFLICT (ino, indx)
+DO UPDATE SET slices = "%s".chunks.slices || EXCLUDED.slices;
+`, schemaName, strings.Join(valuePlaceholders, ", "), schemaName)
+
+		if _, err := exec.Exec(ctx, insertChunksSQL, args...); err != nil {
+			return 0, fmt.Errorf("追加目标 Chunk 元数据失败: %w", err)
+		}
+	}
+
+	// 5.3 更新目标 Inode 大小、块数及修改时间
+	now := time.Now()
+	newEnd := int64(dstOffset + toCopy)
+	updateInodeSQL := fmt.Sprintf(`
+UPDATE "%s".inodes
+SET size = GREATEST(size, $1::bigint),
+    blocks = (GREATEST(size, $1::bigint) + 511) / 512,
+    mtime = $2,
+    ctime = $2
+WHERE ino = $3;
+`, schemaName)
+	if _, err := exec.Exec(ctx, updateInodeSQL, newEnd, now, int64(dstIno)); err != nil {
+		return 0, fmt.Errorf("更新目标 Inode 大小失败: %w", err)
+	}
+
+	if tx != nil {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, fmt.Errorf("提交克隆事务失败: %w", err)
+		}
+		tx = nil
+	}
+
+	return toCopy, nil
+}
+

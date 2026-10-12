@@ -60,3 +60,11 @@ func NewMetaAdapter(db DBExecutor) MetaAdapter {
 	return adapter.NewMetaAdapter(db)
 }
 
+var (
+	// ErrSrcInodeNotFound 表示写时复制克隆时源 Inode 不存在
+	ErrSrcInodeNotFound = adapter.ErrSrcInodeNotFound
+
+	// ErrDstInodeNotFound 表示写时复制克隆时目标 Inode 不存在
+	ErrDstInodeNotFound = adapter.ErrDstInodeNotFound
+)
+

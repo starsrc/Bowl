@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -737,7 +736,9 @@ func (d *ChunkDriver) Fallocate(ctx context.Context, handle HandleContext, diskI
 	return nil
 }
 
-// CopyFileRange copies a range of data between files or within the same file via metadata-only zero-copy clone.
+// CopyFileRange 基于 JuiceFS 元数据切片账本实现秒级写时复制 (COW) 克隆语义。
+// 在同一虚拟磁盘内，仅通过 MetaAdapter 克隆 chunks 表中切片索引记录并原子递增 slice_refs.refs 引用计数，
+// 无需搬迁物理 S3/NVMe 载荷字节，具备亚毫秒级元数据克隆与严格的写时复制 (COW) 隔离性。
 func (d *ChunkDriver) CopyFileRange(ctx context.Context, srcHandle HandleContext, srcDiskID string, srcIno uint64, srcOffset uint64, dstHandle HandleContext, dstDiskID string, dstIno uint64, dstOffset uint64, length uint64) (uint64, error) {
 	if srcHandle != nil {
 		if ch, ok := srcHandle.(*chunkFileHandle); ok {
@@ -787,253 +788,26 @@ func (d *ChunkDriver) CopyFileRange(ctx context.Context, srcHandle HandleContext
 	if srcDiskUUID != dstDiskUUID {
 		return 0, connect.Errorf(connect.CodeInvalidArgument, "cross-disk copy_file_range is not supported")
 	}
-	schemaName := FormatDiskSchema(srcDiskUUID)
 
-	// 1. Query source Inode size and destination Inode existence
-	var srcSize int64
-	querySrcInode := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
-	if err := d.db.QueryRow(ctx, querySrcInode, int64(srcIno)).Scan(&srcSize); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	meta := d.MetaAdapter()
+	if meta == nil {
+		return 0, connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
+	}
+
+	copied, err := meta.CloneRange(ctx, srcDiskID, srcIno, srcOffset, dstIno, dstOffset, length)
+	if err != nil {
+		if errors.Is(err, ErrSrcInodeNotFound) {
 			return 0, connect.Errorf(connect.CodeNotFound, "src inode %d not found", srcIno)
 		}
-		return 0, connect.Errorf(connect.CodeInternal, "failed to query src inode: %s", err)
-	}
-
-	var dstExists bool
-	checkDstInode := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM "%s".inodes WHERE ino = $1)`, schemaName)
-	if err := d.db.QueryRow(ctx, checkDstInode, int64(dstIno)).Scan(&dstExists); err != nil {
-		return 0, connect.Errorf(connect.CodeInternal, "failed to query dst inode: %s", err)
-	}
-	if !dstExists {
-		return 0, connect.Errorf(connect.CodeNotFound, "dst inode %d not found", dstIno)
-	}
-
-	if srcOffset >= uint64(srcSize) {
-		return 0, nil
-	}
-	toCopy := length
-	available := uint64(srcSize) - srcOffset
-	if toCopy > available {
-		toCopy = available
-	}
-	if toCopy == 0 {
-		return 0, nil
-	}
-
-	srcStart := srcOffset
-	srcEnd := srcOffset + toCopy
-
-	startChunkIndx := int32(srcStart / chunk.ChunkSize)
-	endChunkIndx := int32((srcEnd - 1) / chunk.ChunkSize)
-
-	// 2. Query source Inode chunks intersecting [srcOffset, srcOffset+toCopy)
-	queryChunks := fmt.Sprintf(`
-SELECT indx, slices FROM "%s".chunks
-WHERE ino = $1 AND indx >= $2 AND indx <= $3
-ORDER BY indx ASC;
-`, schemaName)
-
-	rows, err := d.db.Query(ctx, queryChunks, int64(srcIno), startChunkIndx, endChunkIndx)
-	if err != nil {
-		return 0, connect.Errorf(connect.CodeInternal, "failed to query src chunks: %s", err)
-	}
-	defer rows.Close()
-
-	type chunkRow struct {
-		indx   uint32
-		slices []chunk.Slice
-	}
-	var srcRows []chunkRow
-
-	for rows.Next() {
-		var cIndx int32
-		var rawSlices []byte
-		if err := rows.Scan(&cIndx, &rawSlices); err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to scan src chunk: %s", err)
+		if errors.Is(err, ErrDstInodeNotFound) {
+			return 0, connect.Errorf(connect.CodeNotFound, "dst inode %d not found", dstIno)
 		}
-		slices, err := chunk.DecodeSlices(rawSlices)
-		if err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to decode src chunk slices: %s", err)
-		}
-		srcRows = append(srcRows, chunkRow{
-			indx:   uint32(cIndx),
-			slices: slices,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return 0, connect.Errorf(connect.CodeInternal, "failed to iterate src chunks: %s", err)
-	}
-	rows.Close()
-
-	// 3. Map intersecting source slices to destination chunk intervals
-	dstChunks := make(map[uint32][]byte)
-	var dstChunkOrder []uint32
-
-	type sliceRefUpdate struct {
-		id   uint64
-		size uint32
-	}
-	var sliceRefsToInc []sliceRefUpdate
-
-	for _, cr := range srcRows {
-		chunkBase := uint64(cr.indx) * uint64(chunk.ChunkSize)
-		for _, s := range cr.slices {
-			sliceStart := chunkBase + uint64(s.Pos)
-			sliceEnd := sliceStart + uint64(s.Len)
-
-			overlapStart := max(sliceStart, srcStart)
-			overlapEnd := min(sliceEnd, srcEnd)
-			if overlapStart >= overlapEnd {
-				continue
-			}
-
-			subLen := overlapEnd - overlapStart
-			subOff := s.Off + uint32(overlapStart-sliceStart)
-			dstFileStart := dstOffset + (overlapStart - srcStart)
-
-			curDstPos := dstFileStart
-			remainingLen := subLen
-			curPayloadOff := subOff
-
-			for remainingLen > 0 {
-				dstChunkIndx := uint32(curDstPos / chunk.ChunkSize)
-				dstChunkOffset := uint32(curDstPos % chunk.ChunkSize)
-				dstChunkRemaining := uint64(chunk.ChunkSize - dstChunkOffset)
-
-				pieceLen := remainingLen
-				if pieceLen > dstChunkRemaining {
-					pieceLen = dstChunkRemaining
-				}
-
-				clonedSlice := chunk.Slice{
-					Pos:  dstChunkOffset,
-					ID:   s.ID,
-					Size: s.Size,
-					Off:  curPayloadOff,
-					Len:  uint32(pieceLen),
-				}
-				if err := clonedSlice.Validate(); err != nil {
-					return 0, connect.Errorf(connect.CodeInternal, "cloned slice invalid: %s", err)
-				}
-
-				encoded := chunk.EncodeSlice(clonedSlice)
-				if _, exists := dstChunks[dstChunkIndx]; !exists {
-					dstChunkOrder = append(dstChunkOrder, dstChunkIndx)
-				}
-				dstChunks[dstChunkIndx] = append(dstChunks[dstChunkIndx], encoded...)
-
-				curDstPos += pieceLen
-				curPayloadOff += uint32(pieceLen)
-				remainingLen -= pieceLen
-			}
-
-			sliceRefsToInc = append(sliceRefsToInc, sliceRefUpdate{
-				id:   s.ID,
-				size: s.Size,
-			})
-		}
+		return 0, connect.Errorf(connect.CodeInternal, "执行写时复制切片克隆失败: %s", err)
 	}
 
-	// 4. Begin database transaction for slice_refs, chunks, and inode updates
-	var exec DBExecutor = d.db
-	var tx pgx.Tx
-	if tb, ok := d.db.(txBeginner); ok {
-		var err error
-		tx, err = tb.Begin(ctx)
-		if err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to begin transaction for copy_file_range: %s", err)
-		}
-		defer func() {
-			if tx != nil {
-				_ = tx.Rollback(ctx)
-			}
-		}()
-		exec = tx
-	}
-
-	// 5. Increment reference count in slice_refs for each mapped source slice
-	if len(sliceRefsToInc) > 0 {
-		refCounts := make(map[uint64]int)
-		refSizes := make(map[uint64]uint32)
-		for _, ref := range sliceRefsToInc {
-			refCounts[ref.id]++
-			refSizes[ref.id] = ref.size
-		}
-
-		countsMap := make(map[int][]int64)
-		for id, cnt := range refCounts {
-			countsMap[cnt] = append(countsMap[cnt], int64(id))
-		}
-
-		for cnt, ids := range countsMap {
-			updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs + $1 WHERE id = ANY($2);`, schemaName)
-			res, err := exec.Exec(ctx, updateRefSQL, int32(cnt), ids)
-			if err != nil {
-				return 0, connect.Errorf(connect.CodeInternal, "failed to increment slice reference count: %s", err)
-			}
-			if res.RowsAffected() < int64(len(ids)) {
-				for _, id := range ids {
-					insertRefSQL := fmt.Sprintf(`
-INSERT INTO "%s".slice_refs (id, size, refs)
-VALUES ($1, $2, $3)
-ON CONFLICT (id) DO UPDATE SET refs = "%s".slice_refs.refs + EXCLUDED.refs;
-`, schemaName, schemaName)
-					if _, err := exec.Exec(ctx, insertRefSQL, id, int32(refSizes[uint64(id)]), int32(cnt+1)); err != nil {
-						return 0, connect.Errorf(connect.CodeInternal, "failed to insert slice reference count: %s", err)
-					}
-				}
-			}
-		}
-	}
-
-	// 6. Append cloned slice metadata to destination Inode chunks
-	if len(dstChunkOrder) > 0 {
-		valuePlaceholders := make([]string, len(dstChunkOrder))
-		args := make([]any, 0, len(dstChunkOrder)*3)
-		for i, indx := range dstChunkOrder {
-			p1 := i*3 + 1
-			p2 := i*3 + 2
-			p3 := i*3 + 3
-			valuePlaceholders[i] = fmt.Sprintf("($%d, $%d, $%d)", p1, p2, p3)
-			args = append(args, int64(dstIno), int32(indx), dstChunks[indx])
-		}
-
-		insertChunksSQL := fmt.Sprintf(`
-INSERT INTO "%s".chunks (ino, indx, slices)
-VALUES %s
-ON CONFLICT (ino, indx)
-DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
-`, schemaName, strings.Join(valuePlaceholders, ", "))
-
-		if _, err := exec.Exec(ctx, insertChunksSQL, args...); err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to append dst chunk metadata: %s", err)
-		}
-	}
-
-	// 7. Update destination Inode size/mtime/ctime in PostgreSQL
-	now := time.Now()
-	newEnd := int64(dstOffset + toCopy)
-	updateInodeSQL := fmt.Sprintf(`
-UPDATE "%s".inodes
-SET size = GREATEST(size, $1::bigint),
-    blocks = (GREATEST(size, $1::bigint) + 511) / 512,
-    mtime = $2,
-    ctime = $2
-WHERE ino = $3;
-`, schemaName)
-	if _, err := exec.Exec(ctx, updateInodeSQL, newEnd, now, int64(dstIno)); err != nil {
-		return 0, connect.Errorf(connect.CodeInternal, "failed to update dst inode metadata: %s", err)
-	}
-
-	if tx != nil {
-		if err := tx.Commit(ctx); err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to commit copy_file_range transaction: %s", err)
-		}
-		tx = nil
-	}
-
-	return toCopy, nil
+	return copied, nil
 }
+
 
 // Lseek 定位文件内部数据或稀疏空洞偏移量
 func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, whence uint32) (uint64, error) {

@@ -1,0 +1,4 @@
+# Cascade S3 Object Cleanup on Disk Deletion
+
+Deleting a virtual disk while data plane slices reside in S3 risks permanently leaking physical storage objects once the PostgreSQL metadata schema is dropped, while synchronously waiting for S3 batch deletion in the RPC request path introduces request blocking and timeout failures. We decided that `DiskService.DeleteDisk` performs synchronous metadata dereferencing (dropping the PostgreSQL schema and disks record) and persists an asynchronous task in the `disk_cleanup_tasks` table, immediately returning HTTP 200 OK. A background worker subsequently consumes the task, purging all S3 objects under `chunks/<disk_id>/` and removing local `DATA_DIR` and `STAGING_DIR` directories with exponential backoff and persistent status updates. This decouples API latency from physical reclamation latency while guaranteeing eventual zero-remnant consistency across object storage and NVMe staging.
+

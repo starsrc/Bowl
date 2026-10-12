@@ -15,6 +15,8 @@ import (
 	"github.com/starsrc/bowl/services/disk/internal/db"
 	"github.com/starsrc/bowl/services/disk/internal/server"
 	"github.com/starsrc/bowl/services/disk/internal/service"
+	"github.com/starsrc/bowl/services/disk/internal/storage"
+	"github.com/starsrc/bowl/services/disk/internal/worker"
 )
 
 func main() {
@@ -74,9 +76,24 @@ func main() {
 	slog.Info("database migrations applied successfully")
 
 	store := db.NewStore(pool)
-	diskService := service.NewDiskService(store, service.WithDataDir(cfg.Storage.DataDir))
-	srv := server.New(cfg.Server, diskService)
 
+	// 初始化底层存储物理清理驱动与常驻清理工作器 (ADR 0015)
+	purger, err := storage.NewMinIOObjectStoragePurger(cfg.S3, cfg.Storage)
+	if err != nil {
+		slog.Error("failed to create object storage purger", "error", err)
+		os.Exit(1)
+	}
+
+	cleanupWorker := worker.NewDiskCleanupWorker(store, purger)
+	cleanupWorker.Start(ctx)
+	slog.Info("disk cleanup worker started successfully")
+
+	diskService := service.NewDiskService(
+		store,
+		service.WithDataDir(cfg.Storage.DataDir),
+		service.WithCleanupWorker(cleanupWorker),
+	)
+	srv := server.New(cfg.Server, diskService)
 
 	go func() {
 		slog.Info("starting disk service", "addr", cfg.Server.Addr())
@@ -96,6 +113,10 @@ func main() {
 		slog.Error("disk service graceful shutdown error", "error", err)
 		os.Exit(1)
 	}
+
+	// 优雅停止后台异步清理工作器
+	cleanupWorker.Stop()
+	slog.Info("disk cleanup worker stopped cleanly")
 
 	slog.Info("disk service stopped cleanly")
 }

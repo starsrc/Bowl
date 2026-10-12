@@ -27,3 +27,13 @@ type DiskAttachment struct {
 	ReadOnly   bool               `json:"read_only"`
 	AttachedAt pgtype.Timestamptz `json:"attached_at"`
 }
+
+type DiskCleanupTask struct {
+	TaskID    pgtype.UUID        `json:"task_id"`
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	Status    int16              `json:"status"`
+	Attempts  int32              `json:"attempts"`
+	LastError pgtype.Text        `json:"last_error"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}

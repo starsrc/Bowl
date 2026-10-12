@@ -41,6 +41,11 @@ func TestMigrateUp_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "disk_attachments", tableName)
 
+	// 验证 disk_cleanup_tasks 数据表已成功创建
+	err = pool.QueryRow(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'disk_cleanup_tasks'").Scan(&tableName)
+	require.NoError(t, err)
+	assert.Equal(t, "disk_cleanup_tasks", tableName)
+
 	// Verify indexes exist on disks table
 	var idxStatusCreatedAt string
 	err = pool.QueryRow(ctx, "SELECT indexname FROM pg_indexes WHERE tablename = 'disks' AND indexname = 'idx_disks_status_created_at'").Scan(&idxStatusCreatedAt)
@@ -51,4 +56,10 @@ func TestMigrateUp_Success(t *testing.T) {
 	err = pool.QueryRow(ctx, "SELECT indexname FROM pg_indexes WHERE tablename = 'disks' AND indexname = 'idx_disks_created_at'").Scan(&idxCreatedAt)
 	require.NoError(t, err)
 	assert.Equal(t, "idx_disks_created_at", idxCreatedAt)
+
+	// 验证 disk_cleanup_tasks 表的 status 索引已成功创建
+	var idxCleanupStatus string
+	err = pool.QueryRow(ctx, "SELECT indexname FROM pg_indexes WHERE tablename = 'disk_cleanup_tasks' AND indexname = 'idx_disk_cleanup_tasks_status'").Scan(&idxCleanupStatus)
+	require.NoError(t, err)
+	assert.Equal(t, "idx_disk_cleanup_tasks_status", idxCleanupStatus)
 }

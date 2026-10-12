@@ -20,6 +20,76 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
+// Block 表示待上传至 S3 的 4MB 物理分块
+type Block struct {
+	DiskID    string
+	ChunkIndx uint32
+	SliceID   uint64
+	BlockIndx uint32
+	Offset    uint32 // 切片载荷内的起始偏移量
+	Data      []byte
+	Key       string
+}
+
+// BlockBatcher 将切片数据划分为 4MB 物理分块并计算 S3 对象键
+type BlockBatcher struct {
+	blockSize int
+}
+
+// NewBlockBatcher 构造 BlockBatcher 实例
+func NewBlockBatcher(blockSize ...int) *BlockBatcher {
+	bs := BlockSize
+	if len(blockSize) > 0 && blockSize[0] > 0 {
+		bs = blockSize[0]
+	}
+	return &BlockBatcher{blockSize: bs}
+}
+
+// BlockSize 返回当前配置的物理分块字节大小
+func (b *BlockBatcher) BlockSize() int {
+	return b.blockSize
+}
+
+// SplitSlice 将切片数据切分为 4MB 物理分块并生成对应的 S3 对象键
+func (b *BlockBatcher) SplitSlice(diskID string, chunkIndx uint32, sliceID uint64, data []byte) []Block {
+	if len(data) == 0 {
+		return nil
+	}
+
+	numBlocks := (len(data) + b.blockSize - 1) / b.blockSize
+	blocks := make([]Block, 0, numBlocks)
+
+	for i := 0; i < numBlocks; i++ {
+		start := i * b.blockSize
+		end := start + b.blockSize
+		if end > len(data) {
+			end = len(data)
+		}
+		blockIndx := uint32(i)
+		key := FormatObjectKey(diskID, chunkIndx, sliceID, blockIndx)
+		blocks = append(blocks, Block{
+			DiskID:    diskID,
+			ChunkIndx: chunkIndx,
+			SliceID:   sliceID,
+			BlockIndx: blockIndx,
+			Offset:    uint32(start),
+			Data:      data[start:end],
+			Key:       key,
+		})
+	}
+
+	return blocks
+}
+
+// SplitSliceFromStaging 从本地 staging 目录读取切片数据并切分为物理分块
+func (b *BlockBatcher) SplitSliceFromStaging(staging *StagingManager, diskID string, chunkIndx uint32, sliceID uint64) ([]Block, error) {
+	data, err := staging.ReadSlice(diskID, sliceID)
+	if err != nil {
+		return nil, fmt.Errorf("读取 staging 切片失败: %w", err)
+	}
+	return b.SplitSlice(diskID, chunkIndx, sliceID, data), nil
+}
+
 // inodeBarrier 表示针对指定 Inode 的在途切片持久化同步屏障
 type inodeBarrier struct {
 	remaining map[uint64]struct{}
@@ -27,7 +97,7 @@ type inodeBarrier struct {
 	err       error
 }
 
-// ObjectStorageClient represents the contract for standard S3/MinIO operations.
+// ObjectStorageClient 抽象标准 S3/MinIO 存储操作接口契约
 type ObjectStorageClient interface {
 	PutObject(ctx context.Context, bucket, objectKey string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
 	StatObject(ctx context.Context, bucket, objectKey string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
@@ -37,7 +107,7 @@ type ObjectStorageClient interface {
 	MakeBucket(ctx context.Context, bucket string, opts minio.MakeBucketOptions) error
 }
 
-// SliceStatus represents the asynchronous S3 persistence state of a staged slice.
+// SliceStatus 表示暂存切片的异步 S3 持久化状态
 type SliceStatus string
 
 const (
@@ -48,13 +118,13 @@ const (
 	SliceStatusFailed    SliceStatus = "failed"
 )
 
-// UploadTask represents a staged slice queued for S3 persistence.
+// UploadTask 表示排队等待 S3 持久化的切片上传任务
 type UploadTask struct {
 	DiskID    string
 	Ino       uint64
 	ChunkIndx uint32
 	SliceID   uint64
-	Data      []byte // optional payload; if empty, read from staging
+	Data      []byte // 可选载荷；若为空则从 staging 目录读取
 }
 
 type sliceKey struct {
@@ -73,38 +143,38 @@ type sliceTrack struct {
 	done   chan struct{}
 }
 
-// UploaderOption configures an S3Uploader instance.
+// UploaderOption 配置 S3Uploader 实例的可选函数
 type UploaderOption func(*S3Uploader)
 
-// WithMaxRetries sets the maximum number of retry attempts for transient errors.
+// WithMaxRetries 设置针对瞬时错误的最大重试次数
 func WithMaxRetries(n int) UploaderOption {
 	return func(u *S3Uploader) {
 		u.maxRetries = n
 	}
 }
 
-// WithInitialBackoff sets the base delay before the first retry attempt.
+// WithInitialBackoff 设置首次重试前的初始退避时间
 func WithInitialBackoff(d time.Duration) UploaderOption {
 	return func(u *S3Uploader) {
 		u.initialBackoff = d
 	}
 }
 
-// WithMaxBackoff sets the maximum backoff delay between retry attempts.
+// WithMaxBackoff 设置重试之间的最大退避等待上限
 func WithMaxBackoff(d time.Duration) UploaderOption {
 	return func(u *S3Uploader) {
 		u.maxBackoff = d
 	}
 }
 
-// WithBackoffFactor sets the multiplier for exponential backoff.
+// WithBackoffFactor 设置指数退避乘数因子
 func WithBackoffFactor(f float64) UploaderOption {
 	return func(u *S3Uploader) {
 		u.backoffFactor = f
 	}
 }
 
-// WithWorkers sets the number of concurrent upload worker goroutines.
+// WithWorkers 设置并发上传 worker 协程数量
 func WithWorkers(n int) UploaderOption {
 	return func(u *S3Uploader) {
 		if n > 0 {
@@ -113,7 +183,7 @@ func WithWorkers(n int) UploaderOption {
 	}
 }
 
-// WithQueueSize sets the upload queue channel capacity.
+// WithQueueSize 设置上传任务队列缓冲通道容量
 func WithQueueSize(n int) UploaderOption {
 	return func(u *S3Uploader) {
 		if n > 0 {
@@ -122,14 +192,14 @@ func WithQueueSize(n int) UploaderOption {
 	}
 }
 
-// WithStaging configures the StagingManager for reading slice payloads.
+// WithStaging 配置读取切片载荷数据的 StagingManager 实例
 func WithStaging(s *StagingManager) UploaderOption {
 	return func(u *S3Uploader) {
 		u.staging = s
 	}
 }
 
-// WithBatcher configures the BlockBatcher.
+// WithBatcher 配置分块批处理器 BlockBatcher
 func WithBatcher(b *BlockBatcher) UploaderOption {
 	return func(u *S3Uploader) {
 		u.batcher = b
@@ -143,7 +213,7 @@ func WithObjectStorage(objStore object.ObjectStorage) UploaderOption {
 	}
 }
 
-// S3Uploader manages block aggregation, transient error retry, and background asynchronous S3 uploads.
+// S3Uploader 管理分块聚合、瞬时错误重试以及后台异步多协程 S3 推流落盘
 type S3Uploader struct {
 	client         ObjectStorageClient
 	objStorage     object.ObjectStorage
@@ -170,7 +240,7 @@ type S3Uploader struct {
 	inoBarriers map[inoKey][]*inodeBarrier
 }
 
-// NewMinIOClient initializes a MinIO client from S3Config.
+// NewMinIOClient 基于 S3Config 初始化 MinIO 客户端实例
 func NewMinIOClient(cfg config.S3Config) (*minio.Client, error) {
 	endpoint := cfg.Endpoint
 	u, err := url.Parse(endpoint)
@@ -192,11 +262,11 @@ func NewMinIOClient(cfg config.S3Config) (*minio.Client, error) {
 	})
 }
 
-// NewS3Uploader creates a new S3Uploader connected to S3/MinIO using S3Config.
+// NewS3Uploader 基于 S3Config 创建并连接 S3/MinIO 的 S3Uploader 实例
 func NewS3Uploader(cfg config.S3Config, staging *StagingManager, opts ...UploaderOption) (*S3Uploader, error) {
 	client, err := NewMinIOClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("init minio client: %w", err)
+		return nil, fmt.Errorf("初始化 minio 客户端失败: %w", err)
 	}
 
 	objStore := object.NewS3WithClient(client, cfg.Bucket)
@@ -204,7 +274,7 @@ func NewS3Uploader(cfg config.S3Config, staging *StagingManager, opts ...Uploade
 	return NewS3UploaderWithClient(client, cfg.Bucket, allOpts...), nil
 }
 
-// NewS3UploaderWithClient creates an S3Uploader using a provided ObjectStorageClient.
+// NewS3UploaderWithClient 基于已有 ObjectStorageClient 构造 S3Uploader 实例
 func NewS3UploaderWithClient(client ObjectStorageClient, bucket string, opts ...UploaderOption) *S3Uploader {
 	ctx, cancel := context.WithCancel(context.Background())
 	u := &S3Uploader{
@@ -245,17 +315,17 @@ func (u *S3Uploader) ObjectStorage() object.ObjectStorage {
 	return u.objStorage
 }
 
-// Client returns the underlying ObjectStorageClient.
+// Client 返回底层绑定的 ObjectStorageClient 实例
 func (u *S3Uploader) Client() ObjectStorageClient {
 	return u.client
 }
 
-// Bucket returns the target bucket name.
+// Bucket 返回目标 S3 存储桶名称
 func (u *S3Uploader) Bucket() string {
 	return u.bucket
 }
 
-// IsTransientError checks if an error returned by S3/MinIO is recoverable via retry.
+// isTransientError 检查 S3/MinIO 返回的错误是否属于可通过重试恢复的瞬时错误
 func isTransientError(err error) bool {
 	if err == nil {
 		return false
@@ -283,7 +353,7 @@ func isTransientError(err error) bool {
 	return false
 }
 
-// UploadBlock uploads a single 4MB block to S3, with retry and exponential backoff on transient errors.
+// UploadBlock 将单个 4MB 物理分块上传至 S3，并在遇到瞬时错误时执行指数退避重试
 func (u *S3Uploader) UploadBlock(ctx context.Context, block Block) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -311,20 +381,20 @@ func (u *S3Uploader) UploadBlock(ctx context.Context, block Block) error {
 
 		lastErr = err
 
-		// Permanent error or context cancellation: stop immediately
+		// 不可恢复错误或上下文已取消：立即终止退出
 		if !isTransientError(err) || ctx.Err() != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("s3 put %s permanent failure: %w", block.Key, err)
+			return fmt.Errorf("s3 put %s 遇到不可恢复错误: %w", block.Key, err)
 		}
 
-		// If this was the last attempt, don't sleep
+		// 若为最后一次尝试，则无需等待
 		if attempt == maxAttempts-1 {
 			break
 		}
 
-		// Calculate exponential backoff delay
+		// 计算指数退避延迟时间
 		backoff := float64(u.initialBackoff) * math.Pow(u.backoffFactor, float64(attempt))
 		delay := time.Duration(backoff)
 		if delay > u.maxBackoff {
@@ -338,10 +408,10 @@ func (u *S3Uploader) UploadBlock(ctx context.Context, block Block) error {
 		}
 	}
 
-	return fmt.Errorf("s3 put %s exceeded max retries (%d): %w", block.Key, u.maxRetries, lastErr)
+	return fmt.Errorf("s3 put %s 超过最大重试次数 (%d): %w", block.Key, u.maxRetries, lastErr)
 }
 
-// UploadSlice synchronously partitions a slice payload into 4MB blocks and uploads them to S3.
+// UploadSlice 同步将切片载荷数据划分为 4MB 物理分块并上传至 S3
 func (u *S3Uploader) UploadSlice(ctx context.Context, diskID string, chunkIndx uint32, sliceID uint64, data []byte) error {
 	blocks := u.batcher.SplitSlice(diskID, chunkIndx, sliceID, data)
 	for _, block := range blocks {
@@ -352,7 +422,7 @@ func (u *S3Uploader) UploadSlice(ctx context.Context, diskID string, chunkIndx u
 	return nil
 }
 
-// Start launches the background worker pool to consume and process upload tasks.
+// Start 启动后台 worker 协程池以并发消费并处理推流任务
 func (u *S3Uploader) Start(ctx context.Context) {
 	for i := 0; i < u.workers; i++ {
 		u.workerWg.Add(1)
@@ -360,7 +430,7 @@ func (u *S3Uploader) Start(ctx context.Context) {
 	}
 }
 
-// Stop gracefully stops the upload queue and waits for all workers to finish.
+// Stop 优雅关闭上传队列并等待所有后台 worker 协程退出完成
 func (u *S3Uploader) Stop() {
 	u.stopOnce.Do(func() {
 		u.cancel()
@@ -369,10 +439,10 @@ func (u *S3Uploader) Stop() {
 	})
 }
 
-// Enqueue registers an asynchronous upload task and schedules it for background persistence.
+// Enqueue 登记异步上传任务并投递入后台排队通道
 func (u *S3Uploader) Enqueue(ctx context.Context, task *UploadTask) error {
 	if task == nil {
-		return errors.New("cannot enqueue nil upload task")
+		return errors.New("不能入队空上传任务")
 	}
 
 	sKey := sliceKey{diskID: task.DiskID, sliceID: task.SliceID}
@@ -403,7 +473,7 @@ func (u *S3Uploader) Enqueue(ctx context.Context, task *UploadTask) error {
 		u.failTaskOnEnqueueError(task, ctx.Err())
 		return ctx.Err()
 	case <-u.ctx.Done():
-		err := errors.New("uploader is closed")
+		err := errors.New("上传器已关闭")
 		u.failTaskOnEnqueueError(task, err)
 		return err
 	}
@@ -464,7 +534,7 @@ func (u *S3Uploader) processTask(ctx context.Context, task *UploadTask) {
 	}
 	u.mu.Unlock()
 
-	// 1. Resolve payload bytes
+	// 1. 获取有效切片载荷字节
 	data := task.Data
 	var err error
 	if len(data) == 0 && u.staging != nil {
@@ -472,7 +542,7 @@ func (u *S3Uploader) processTask(ctx context.Context, task *UploadTask) {
 	}
 
 	if err == nil {
-		// 2. Upload partitioned 4MB blocks
+		// 2. 上传 4MB 物理分块
 		err = u.UploadSlice(ctx, task.DiskID, task.ChunkIndx, task.SliceID, data)
 	}
 
@@ -530,7 +600,7 @@ func (u *S3Uploader) notifyBarriersLocked(iKey inoKey, sliceID uint64, err error
 	}
 }
 
-// GetSliceStatus queries the upload status of a slice.
+// GetSliceStatus 查询指定切片的 S3 异步推流持久化状态
 func (u *S3Uploader) GetSliceStatus(diskID string, sliceID uint64) SliceStatus {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -542,14 +612,14 @@ func (u *S3Uploader) GetSliceStatus(diskID string, sliceID uint64) SliceStatus {
 	return track.status
 }
 
-// WaitForSlice blocks until the specified slice is uploaded or fails.
+// WaitForSlice 阻塞等待指定切片上传成功或失败
 func (u *S3Uploader) WaitForSlice(ctx context.Context, diskID string, sliceID uint64) error {
 	u.mu.Lock()
 	track := u.slices[sliceKey{diskID: diskID, sliceID: sliceID}]
 	u.mu.Unlock()
 
 	if track == nil {
-		return fmt.Errorf("slice %d not tracked", sliceID)
+		return fmt.Errorf("切片 %d 未被跟踪", sliceID)
 	}
 
 	select {
@@ -611,11 +681,11 @@ func (u *S3Uploader) WaitForIno(ctx context.Context, diskID string, ino uint64) 
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-u.ctx.Done():
-		return errors.New("uploader is closed")
+		return errors.New("上传器已关闭")
 	}
 }
 
-// WaitForAll blocks until the current queue is empty and all in-flight tasks have finished.
+// WaitForAll 阻塞等待直到当前队列清空且所有在途推流任务全部执行完成
 func (u *S3Uploader) WaitForAll(ctx context.Context) error {
 	for {
 		u.mu.Lock()

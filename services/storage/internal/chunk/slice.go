@@ -1,116 +1,66 @@
 package chunk
 
 import (
-	"encoding/binary"
-	"errors"
-	"fmt"
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/adapter"
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
+// Slice 为 JuiceFS 元数据适配层切片结构的类型别名，保持与历史调用点兼容
+type Slice = adapter.Slice
+
 const (
-	// SliceBytes is the fixed byte size of a 24-byte serialized Slice in big-endian format.
-	SliceBytes = 24
-	// ChunkSize defines the maximum logical size of a chunk (64 MiB).
-	ChunkSize = 64 * 1024 * 1024
-	// BlockSize defines the physical object block size (4 MiB).
-	BlockSize = 4 * 1024 * 1024
+	// SliceBytes 24 字节大端序二进制切片序列化规约固定长度
+	SliceBytes = adapter.SliceBytes
+
+	// ChunkSize 单个 Chunk 的最大逻辑长度（64 MiB）
+	ChunkSize = adapter.ChunkSize
+
+	// BlockSize 单个物理块的标准尺寸（4 MiB）
+	BlockSize = adapter.BlockSize
 )
 
 var (
-	// ErrTruncatedBuffer indicates the binary buffer is incomplete or not an exact multiple of 24 bytes.
-	ErrTruncatedBuffer = errors.New("chunk: buffer is truncated or not a multiple of 24 bytes")
+	// ErrTruncatedBuffer 表示切片二进制缓冲区长度受损或非 24 字节整数倍
+	ErrTruncatedBuffer = adapter.ErrTruncatedBuffer
 
-	// ErrOutOfBounds indicates slice fields violate boundary constraints.
-	ErrOutOfBounds = errors.New("chunk: slice offset or length exceeds bounds")
+	// ErrOutOfBounds 表示切片区间超出逻辑边界约束
+	ErrOutOfBounds = adapter.ErrOutOfBounds
+
+	// ErrInvalidObjectKey 当 S3 对象键不符合命名规约时返回
+	ErrInvalidObjectKey = object.ErrInvalidObjectKey
 )
 
-// Slice represents an immutable byte interval within a 64 MiB Chunk.
-// Binary format (24 bytes, big-endian):
-//
-//	Pos:  uint32 (bytes 0..3)   - Byte offset within the 64 MiB Chunk [0, ChunkSize)
-//	ID:   uint64 (bytes 4..11)  - Globally unique slice identifier
-//	Size: uint32 (bytes 12..15) - Total payload size of the slice
-//	Off:  uint32 (bytes 16..19) - Offset within the slice payload [0, Size)
-//	Len:  uint32 (bytes 20..23) - Length of valid slice data [0, Size - Off]
-type Slice struct {
-	Pos  uint32
-	ID   uint64
-	Size uint32
-	Off  uint32
-	Len  uint32
-}
-
-// Validate checks whether the slice invariants and boundaries are satisfied.
-func (s Slice) Validate() error {
-	// Guard against integer overflow and ensure slice reference does not exceed payload size
-	if uint64(s.Off)+uint64(s.Len) > uint64(s.Size) {
-		return fmt.Errorf("%w: off (%d) + len (%d) > size (%d)", ErrOutOfBounds, s.Off, s.Len, s.Size)
-	}
-	// Guard against integer overflow and ensure slice does not exceed 64 MiB Chunk boundary
-	if uint64(s.Pos)+uint64(s.Len) > ChunkSize {
-		return fmt.Errorf("%w: pos (%d) + len (%d) > chunk size (%d)", ErrOutOfBounds, s.Pos, s.Len, ChunkSize)
-	}
-	return nil
-}
-
-// EncodeSlice serializes a single Slice into a 24-byte big-endian buffer.
+// EncodeSlice 序列化单切片为 24 字节大端序二进制切片
 func EncodeSlice(s Slice) []byte {
-	return AppendSlice(make([]byte, 0, SliceBytes), s)
+	return adapter.EncodeSlice(s)
 }
 
-// AppendSlice appends the 24-byte big-endian binary encoding of s to dst and returns the extended slice.
+// AppendSlice 将切片按 24 字节大端序追加写入目标字节数组
 func AppendSlice(dst []byte, s Slice) []byte {
-	dst = binary.BigEndian.AppendUint32(dst, s.Pos)
-	dst = binary.BigEndian.AppendUint64(dst, s.ID)
-	dst = binary.BigEndian.AppendUint32(dst, s.Size)
-	dst = binary.BigEndian.AppendUint32(dst, s.Off)
-	dst = binary.BigEndian.AppendUint32(dst, s.Len)
-	return dst
+	return adapter.AppendSlice(dst, s)
 }
 
-// DecodeSlice decodes a single 24-byte buffer into a Slice and validates boundary invariants.
+// DecodeSlice 从 24 字节二进制数据反序列化为单切片并执行合法性校验
 func DecodeSlice(data []byte) (Slice, error) {
-	if len(data) < SliceBytes {
-		return Slice{}, fmt.Errorf("%w: expected %d bytes, got %d", ErrTruncatedBuffer, SliceBytes, len(data))
-	}
-	s := Slice{
-		Pos:  binary.BigEndian.Uint32(data[0:4]),
-		ID:   binary.BigEndian.Uint64(data[4:12]),
-		Size: binary.BigEndian.Uint32(data[12:16]),
-		Off:  binary.BigEndian.Uint32(data[16:20]),
-		Len:  binary.BigEndian.Uint32(data[20:24]),
-	}
-	if err := s.Validate(); err != nil {
-		return Slice{}, err
-	}
-	return s, nil
+	return adapter.DecodeSlice(data)
 }
 
-// DecodeSlices deserializes raw bytes into a slice of Slice structs, enforcing boundary checks on each slice.
+// DecodeSlices 从连续二进制字节流反序列化切片列表
 func DecodeSlices(data []byte) ([]Slice, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	if len(data)%SliceBytes != 0 {
-		return nil, fmt.Errorf("%w: buffer length %d is not a multiple of %d", ErrTruncatedBuffer, len(data), SliceBytes)
-	}
-	count := len(data) / SliceBytes
-	slices := make([]Slice, 0, count)
-	for i := 0; i < len(data); i += SliceBytes {
-		s, err := DecodeSlice(data[i : i+SliceBytes])
-		if err != nil {
-			return nil, fmt.Errorf("corrupted slice at index %d: %w", i/SliceBytes, err)
-		}
-		slices = append(slices, s)
-	}
-	return slices, nil
+	return adapter.DecodeSlices(data)
 }
 
-// EncodeSlices serializes a slice of Slice structs into a contiguous binary buffer.
+// EncodeSlices 序列化切片列表为连续紧凑二进制字节流
 func EncodeSlices(slices []Slice) []byte {
-	buf := make([]byte, 0, len(slices)*SliceBytes)
-	for _, s := range slices {
-		buf = AppendSlice(buf, s)
-	}
-	return buf
+	return adapter.EncodeSlices(slices)
 }
 
+// FormatObjectKey 根据多租户命名规范格式化 S3 对象键，委托给内联 JuiceFS 对象存储模块
+func FormatObjectKey(diskID string, chunkIndx uint32, sliceID uint64, blockIndx uint32) string {
+	return object.FormatObjectKey(diskID, chunkIndx, sliceID, blockIndx)
+}
+
+// ParseObjectKey 解析 S3 对象键，委托给内联 JuiceFS 对象存储模块
+func ParseObjectKey(key string) (diskID string, chunkIndx uint32, sliceID uint64, blockIndx uint32, err error) {
+	return object.ParseObjectKey(key)
+}

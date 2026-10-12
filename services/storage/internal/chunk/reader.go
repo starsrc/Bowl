@@ -15,46 +15,46 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/config"
 )
 
-// ReaderOption configures an S3Reader instance.
+// ReaderOption 配置 S3Reader 实例的可选函数
 type ReaderOption func(*S3Reader)
 
-// WithReaderMaxRetries sets the maximum number of retry attempts for transient errors.
+// WithReaderMaxRetries 设置针对瞬时错误的最大重试次数
 func WithReaderMaxRetries(n int) ReaderOption {
 	return func(r *S3Reader) {
 		r.maxRetries = n
 	}
 }
 
-// WithReaderInitialBackoff sets the base delay before the first retry attempt.
+// WithReaderInitialBackoff 设置首次重试前的初始退避时间
 func WithReaderInitialBackoff(d time.Duration) ReaderOption {
 	return func(r *S3Reader) {
 		r.initialBackoff = d
 	}
 }
 
-// WithReaderMaxBackoff sets the maximum backoff delay between retry attempts.
+// WithReaderMaxBackoff 设置重试之间的最大退避等待上限
 func WithReaderMaxBackoff(d time.Duration) ReaderOption {
 	return func(r *S3Reader) {
 		r.maxBackoff = d
 	}
 }
 
-// WithReaderBackoffFactor sets the multiplier for exponential backoff.
+// WithReaderBackoffFactor 设置指数退避乘数因子
 func WithReaderBackoffFactor(f float64) ReaderOption {
 	return func(r *S3Reader) {
 		r.backoffFactor = f
 	}
 }
 
-// WithReaderBatcher configures the BlockBatcher.
+// WithReaderBatcher 配置分块切分批处理器 BlockBatcher
 func WithReaderBatcher(b *BlockBatcher) ReaderOption {
 	return func(r *S3Reader) {
 		r.batcher = b
 	}
 }
 
-// S3Reader provides transparent read penetration for slices:
-// reading first from local NVMe staging, and falling back to S3/MinIO.
+// S3Reader 提供切片数据的透明穿透回源读取：
+// 优先命中本地 NVMe Staging 缓存，本地缺失时透明回源至 S3/MinIO。
 type S3Reader struct {
 	client         ObjectStorageClient
 	bucket         string
@@ -66,7 +66,7 @@ type S3Reader struct {
 	backoffFactor  float64
 }
 
-// NewS3Reader creates a new S3Reader.
+// NewS3Reader 构造 S3Reader 实例
 func NewS3Reader(client ObjectStorageClient, bucket string, staging *StagingManager, opts ...ReaderOption) *S3Reader {
 	r := &S3Reader{
 		client:         client,
@@ -84,31 +84,31 @@ func NewS3Reader(client ObjectStorageClient, bucket string, staging *StagingMana
 	return r
 }
 
-// NewS3ReaderFromConfig creates a new S3Reader connected to S3/MinIO using S3Config.
+// NewS3ReaderFromConfig 基于 S3Config 配置初始化连接并构造 S3Reader 实例
 func NewS3ReaderFromConfig(cfg config.S3Config, staging *StagingManager, opts ...ReaderOption) (*S3Reader, error) {
 	client, err := NewMinIOClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("init minio client: %w", err)
+		return nil, fmt.Errorf("初始化 minio 客户端失败: %w", err)
 	}
 	return NewS3Reader(client, cfg.Bucket, staging, opts...), nil
 }
 
-// Client returns the underlying ObjectStorageClient.
+// Client 返回底层绑定的 ObjectStorageClient 实例
 func (r *S3Reader) Client() ObjectStorageClient {
 	return r.client
 }
 
-// Bucket returns the target bucket name.
+// Bucket 返回目标 S3 存储桶名称
 func (r *S3Reader) Bucket() string {
 	return r.bucket
 }
 
-// Staging returns the configured StagingManager.
+// Staging 返回配置的 StagingManager 实例
 func (r *S3Reader) Staging() *StagingManager {
 	return r.staging
 }
 
-// isS3NotFoundError checks if an error indicates the object was not found in S3/MinIO.
+// isS3NotFoundError 检查指定错误是否表示对象在 S3/MinIO 中不存在
 func isS3NotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -123,10 +123,10 @@ func isS3NotFoundError(err error) bool {
 	return false
 }
 
-// ReadBlock reads an object block from S3 with retry on transient errors.
+// ReadBlock 从 S3 读取单个对象物理块，并在遭遇瞬时错误时自动执行指数退避重试
 func (r *S3Reader) ReadBlock(ctx context.Context, key string, opts minio.GetObjectOptions) ([]byte, error) {
 	if r.client == nil {
-		return nil, fmt.Errorf("s3 client is nil: %w", os.ErrNotExist)
+		return nil, fmt.Errorf("s3 客户端为空: %w", os.ErrNotExist)
 	}
 
 	maxAttempts := 1 + r.maxRetries
@@ -176,13 +176,12 @@ func (r *S3Reader) ReadBlock(ctx context.Context, key string, opts minio.GetObje
 		}
 	}
 
-	return nil, fmt.Errorf("s3 get %s exceeded max retries (%d): %w", key, r.maxRetries, lastErr)
+	return nil, fmt.Errorf("s3 get %s 超过最大重试次数 (%d): %w", key, r.maxRetries, lastErr)
 }
 
-// ReadSlice attempts to read a slice payload from local NVMe staging first,
-// and falls back to S3/MinIO transparently if not found in staging.
+// ReadSlice 尝试读取切片完整数据：优先命中本地 NVMe Staging 缓存，本地缺失时透明回源拉取 S3
 func (r *S3Reader) ReadSlice(ctx context.Context, diskID string, chunkIndx uint32, sliceID uint64) ([]byte, error) {
-	// 1. Hot path: NVMe Staging cache
+	// 1. 热路径：优先尝试本地 NVMe Staging 缓存
 	if r.staging != nil {
 		data, err := r.staging.ReadSlice(diskID, sliceID)
 		if err == nil {
@@ -190,9 +189,9 @@ func (r *S3Reader) ReadSlice(ctx context.Context, diskID string, chunkIndx uint3
 		}
 	}
 
-	// 2. Cold path: S3 / MinIO transparent fallback
+	// 2. 冷路径：透明回源 S3 / MinIO
 	if r.client == nil {
-		return nil, fmt.Errorf("slice %d not found in staging and s3 client is not configured: %w", sliceID, os.ErrNotExist)
+		return nil, fmt.Errorf("切片 %d 在本地暂存缺失且未配置 S3 客户端: %w", sliceID, os.ErrNotExist)
 	}
 
 	var totalData []byte
@@ -204,17 +203,17 @@ func (r *S3Reader) ReadSlice(ctx context.Context, diskID string, chunkIndx uint3
 		if err != nil {
 			if isS3NotFoundError(err) {
 				if blockIndx == 0 {
-					return nil, fmt.Errorf("slice %d (key: %s) not found: %w", sliceID, key, os.ErrNotExist)
+					return nil, fmt.Errorf("切片 %d (对象键: %s) 不存在: %w", sliceID, key, os.ErrNotExist)
 				}
-				// Reached end of multi-block slice
+				// 达到多块切片的尾部
 				break
 			}
-			return nil, fmt.Errorf("failed to fetch slice block %s: %w", key, err)
+			return nil, fmt.Errorf("读取切片物理块 %s 失败: %w", key, err)
 		}
 
 		totalData = append(totalData, data...)
 
-		// If block size is less than 4MB, it must be the final block of the slice
+		// 若读取的数据块小于 4MB，说明已达到该切片的最后一个物理块
 		if len(data) < blockSize {
 			break
 		}
@@ -223,14 +222,14 @@ func (r *S3Reader) ReadSlice(ctx context.Context, diskID string, chunkIndx uint3
 	return totalData, nil
 }
 
-// ReadSliceRange reads a sub-range [offset, offset+length) of a slice payload.
-// It checks local NVMe staging first, and falls back to S3 HTTP Range requests if not found.
+// ReadSliceRange 读取切片的有效载荷子区间 [offset, offset+length)。
+// 优先查验本地 NVMe Staging 文件，未命中时通过 S3 HTTP Range 发起按需区间请求。
 func (r *S3Reader) ReadSliceRange(ctx context.Context, diskID string, chunkIndx uint32, sliceID uint64, offset uint32, length uint32) ([]byte, error) {
 	if length == 0 {
 		return []byte{}, nil
 	}
 
-	// 1. Hot path: Read from local NVMe staging file
+	// 1. 热路径：从本地 NVMe Staging 缓存文件读取
 	if r.staging != nil {
 		path := r.staging.SlicePath(diskID, sliceID)
 		f, err := os.Open(path)
@@ -244,9 +243,9 @@ func (r *S3Reader) ReadSliceRange(ctx context.Context, diskID string, chunkIndx 
 		}
 	}
 
-	// 2. Cold path: S3 HTTP Range requests
+	// 2. 冷路径：通过 S3 HTTP Range 局部区间回源拉取
 	if r.client == nil {
-		return nil, fmt.Errorf("slice %d not found in staging and s3 client is not configured: %w", sliceID, os.ErrNotExist)
+		return nil, fmt.Errorf("切片 %d 在本地暂存缺失且未配置 S3 客户端: %w", sliceID, os.ErrNotExist)
 	}
 
 	blockSize := uint32(r.batcher.BlockSize())
@@ -270,12 +269,12 @@ func (r *S3Reader) ReadSliceRange(ctx context.Context, diskID string, chunkIndx 
 
 		opts := minio.GetObjectOptions{}
 		if err := opts.SetRange(blockStart, blockEnd); err != nil {
-			return nil, fmt.Errorf("invalid range [%d, %d]: %w", blockStart, blockEnd, err)
+			return nil, fmt.Errorf("无效的 HTTP Range 区间 [%d, %d]: %w", blockStart, blockEnd, err)
 		}
 
 		data, err := r.ReadBlock(ctx, key, opts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch slice block range %s [%d-%d]: %w", key, blockStart, blockEnd, err)
+			return nil, fmt.Errorf("拉取切片物理块区间 %s [%d-%d] 失败: %w", key, blockStart, blockEnd, err)
 		}
 
 		result = append(result, data...)
@@ -284,12 +283,12 @@ func (r *S3Reader) ReadSliceRange(ctx context.Context, diskID string, chunkIndx 
 	return result, nil
 }
 
-// ForChunk returns a chunkReaderWrapper bound to a specific chunk index using context.Background().
+// ForChunk 返回绑定到特定 chunk 索引的包装器（默认使用 context.Background）
 func (r *S3Reader) ForChunk(chunkIndx uint32) *chunkReaderWrapper {
 	return r.ForChunkWithContext(context.Background(), chunkIndx)
 }
 
-// ForChunkWithContext returns a chunkReaderWrapper bound to a specific chunk index and context.
+// ForChunkWithContext 返回绑定到特定 chunk 索引与上下文的包装读取器
 func (r *S3Reader) ForChunkWithContext(ctx context.Context, chunkIndx uint32) *chunkReaderWrapper {
 	return &chunkReaderWrapper{
 		reader:    r,
@@ -298,7 +297,7 @@ func (r *S3Reader) ForChunkWithContext(ctx context.Context, chunkIndx uint32) *c
 	}
 }
 
-// chunkReaderWrapper adapts S3Reader to SliceReader and RangeSliceReader for a specific chunk.
+// chunkReaderWrapper 适配特定 chunk 的切片范围读取器
 type chunkReaderWrapper struct {
 	reader    *S3Reader
 	ctx       context.Context
@@ -313,9 +312,5 @@ func (w *chunkReaderWrapper) ReadSliceRange(diskID string, sliceID uint64, off u
 	return w.reader.ReadSliceRange(w.ctx, diskID, w.chunkIndx, sliceID, off, length)
 }
 
-// chunkSliceReaderAdapter is maintained for backward compatibility.
+// chunkSliceReaderAdapter 保持向后兼容性别名
 type chunkSliceReaderAdapter = chunkReaderWrapper
-
-// Ensure chunkReaderWrapper implements SliceReader and RangeSliceReader.
-var _ SliceReader = (*chunkReaderWrapper)(nil)
-var _ RangeSliceReader = (*chunkReaderWrapper)(nil)

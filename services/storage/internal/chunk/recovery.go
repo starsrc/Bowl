@@ -12,20 +12,20 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-// MetadataLocator resolves the file Inode and ChunkIndx associated with a staged slice.
+// MetadataLocator 解析并定位暂存切片所归属的 Inode 和 ChunkIndx
 type MetadataLocator interface {
 	LocateSlice(ctx context.Context, diskID string, sliceID uint64) (ino uint64, chunkIndx uint32, found bool, err error)
 }
 
-// MetadataLocatorFunc allows a plain function to act as a MetadataLocator.
+// MetadataLocatorFunc 支持普通函数作为 MetadataLocator 接口实现
 type MetadataLocatorFunc func(ctx context.Context, diskID string, sliceID uint64) (ino uint64, chunkIndx uint32, found bool, err error)
 
-// LocateSlice delegates to the underlying function.
+// LocateSlice 委托给底层函数实现
 func (f MetadataLocatorFunc) LocateSlice(ctx context.Context, diskID string, sliceID uint64) (ino uint64, chunkIndx uint32, found bool, err error) {
 	return f(ctx, diskID, sliceID)
 }
 
-// RecoveryReport contains metrics and statistics from a staging recovery replay run.
+// RecoveryReport 记录 Staging 暂存恢复重放管道的统计指标
 type RecoveryReport struct {
 	ScannedDisks   int
 	ScannedSlices  int
@@ -35,8 +35,8 @@ type RecoveryReport struct {
 	MaxSliceID     uint64
 }
 
-// RecoverStagingPipeline scans local staging directory `<staging_dir>/<disk_id>/slice_<slice_id>.bin`,
-// verifies S3 persistence status, locates associated (ino, chunk_indx), and re-enqueues unflushed slices into S3Uploader.
+// RecoverStagingPipeline 扫描本地暂存目录 <staging_dir>/<disk_id>/slice_<slice_id>.bin，
+// 查验 S3 持久化状态，定位所属 (ino, chunk_indx)，并将未落盘切片重新入队至 S3Uploader 进行持久化推流。
 func RecoverStagingPipeline(
 	ctx context.Context,
 	staging *StagingManager,
@@ -53,7 +53,7 @@ func RecoverStagingPipeline(
 		if os.IsNotExist(err) {
 			return report, nil
 		}
-		return nil, fmt.Errorf("read staging directory %s: %w", staging.Dir(), err)
+		return nil, fmt.Errorf("读取 staging 目录 %s 失败: %w", staging.Dir(), err)
 	}
 
 	var maxSliceID uint64
@@ -103,27 +103,27 @@ func RecoverStagingPipeline(
 				continue
 			}
 
-			// 1. Locate (ino, chunk_indx)
+			// 1. 定位 (ino, chunk_indx)
 			ino, chunkIndx, found, err := locator.LocateSlice(ctx, diskID, sliceID)
 			if err != nil {
-				return report, fmt.Errorf("locate slice (disk=%s, slice=%d): %w", diskID, sliceID, err)
+				return report, fmt.Errorf("定位切片元数据失败 (disk=%s, slice=%d): %w", diskID, sliceID, err)
 			}
 			if !found {
 				report.OrphanedSlices++
 				continue
 			}
 
-			// 2. Query S3 StatObject to check if slice is fully persisted
+			// 2. 通过 S3 StatObject 查验该切片是否已全部持久化至对象存储
 			alreadyPersisted, err := isSlicePersistedToS3(ctx, uploader, staging, diskID, chunkIndx, sliceID)
 			if err != nil {
-				return report, fmt.Errorf("check s3 persistence (disk=%s, slice=%d): %w", diskID, sliceID, err)
+				return report, fmt.Errorf("查验 S3 持久化状态失败 (disk=%s, slice=%d): %w", diskID, sliceID, err)
 			}
 			if alreadyPersisted {
 				report.SkippedSlices++
 				continue
 			}
 
-			// 3. Re-register slice as an UploadTask into S3Uploader
+			// 3. 将未完全落盘的切片作为 UploadTask 重新入队到 S3Uploader
 			task := &UploadTask{
 				DiskID:    diskID,
 				Ino:       ino,
@@ -131,7 +131,7 @@ func RecoverStagingPipeline(
 				SliceID:   sliceID,
 			}
 			if err := uploader.Enqueue(ctx, task); err != nil {
-				return report, fmt.Errorf("enqueue upload task (disk=%s, slice=%d): %w", diskID, sliceID, err)
+				return report, fmt.Errorf("重放切片入队失败 (disk=%s, slice=%d): %w", diskID, sliceID, err)
 			}
 			report.RequeuedSlices++
 		}

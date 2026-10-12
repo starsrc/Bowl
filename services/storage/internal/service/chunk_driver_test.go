@@ -3497,3 +3497,314 @@ func TestChunkDriver_COWClone_S3AndStaging_GCLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, rowCount, "slice_refs row must be deleted after GC")
 }
+
+func TestChunkDriver_Write_128KB_FastIngestion_Sub10ms(t *testing.T) {
+	h, stagingMgr, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "client-fast-ingest"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘并获取写租约会话
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. 创建测试文件
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-128kb-fast.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 3. 准备 128KB 载荷并执行写入
+	payloadSize := 128 * 1024
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte((i * 17) % 256)
+	}
+
+	start := time.Now()
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(payloadSize), writeResp.GetWritten())
+
+	// 严格断言 128KB 载荷写入确认延迟小于 10ms
+	assert.Less(t, elapsed, 10*time.Millisecond, "128KB 载荷写入延迟必须在 10ms 内返回 ACK，实际耗时: %v", elapsed)
+
+	// 4. 断言 NVMe 本地暂存文件存在且数据字节完整一致
+	slicePath := stagingMgr.SlicePath(diskID.String(), 1)
+	fi, err := os.Stat(slicePath)
+	require.NoError(t, err, "NVMe 本地暂存切片文件必须存在: %s", slicePath)
+	assert.Equal(t, int64(payloadSize), fi.Size())
+
+	sliceData, err := stagingMgr.ReadSlice(diskID.String(), 1)
+	require.NoError(t, err)
+	assert.Equal(t, payload, sliceData)
+
+	// 5. 断言 PostgreSQL chunks 表记录且元数据切片严格为 24 字节大端序规约
+	var rawSlices []byte
+	queryChunks := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName)
+	err = h.dbPool.QueryRow(ctx, queryChunks, int64(ino)).Scan(&rawSlices)
+	require.NoError(t, err)
+	assert.Len(t, rawSlices, SliceBytes)
+
+	slices, err := DecodeSlices(rawSlices)
+	require.NoError(t, err)
+	require.Len(t, slices, 1)
+	assert.Equal(t, uint32(0), slices[0].Pos)
+	assert.Equal(t, uint64(1), slices[0].ID)
+	assert.Equal(t, uint32(payloadSize), slices[0].Size)
+	assert.Equal(t, uint32(0), slices[0].Off)
+	assert.Equal(t, uint32(payloadSize), slices[0].Len)
+
+	// 6. 断言 slice_refs 引用账本表记录且引用计数为 1
+	var refCount int32
+	var refSize int32
+	queryRef := fmt.Sprintf(`SELECT refs, size FROM "%s".slice_refs WHERE id = 1`, schemaName)
+	err = h.dbPool.QueryRow(ctx, queryRef).Scan(&refCount, &refSize)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), refCount)
+	assert.Equal(t, int32(payloadSize), refSize)
+
+	// 7. 释放文件句柄
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+
+func TestChunkDriver_Write_CrossChunk64MB_BoundarySplitting_MetaAdapter(t *testing.T) {
+	h, stagingMgr, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "client-boundary-split"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. 创建跨 64MB 边界测试文件
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-boundary-split.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 3. 跨越 64MB Chunk 边界写入: 从 Chunk 0 末尾 64KB (ChunkSize - 64KB) 开始，写入 128KB
+	// 期望: 前 64KB 落在 Chunk 0 (indx=0), 后 64KB 落在 Chunk 1 (indx=1)
+	startOffset := uint64(ChunkSize - 64*1024)
+	payloadSize := 128 * 1024
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte((i * 31) % 256)
+	}
+
+	start := time.Now()
+	writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    startOffset,
+		Data:      payload,
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(payloadSize), writeResp.GetWritten())
+	assert.Less(t, elapsed, 10*time.Millisecond)
+
+	// 4. 校验 Chunk 0 元数据行
+	var rawSlices0 []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&rawSlices0)
+	require.NoError(t, err)
+	slices0, err := DecodeSlices(rawSlices0)
+	require.NoError(t, err)
+	require.Len(t, slices0, 1)
+	assert.Equal(t, uint32(ChunkSize-64*1024), slices0[0].Pos)
+	assert.Equal(t, uint32(64*1024), slices0[0].Len)
+	assert.Equal(t, uint32(64*1024), slices0[0].Size)
+	assert.Equal(t, uint64(1), slices0[0].ID)
+
+	// 5. 校验 Chunk 1 元数据行
+	var rawSlices1 []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName), int64(ino)).Scan(&rawSlices1)
+	require.NoError(t, err)
+	slices1, err := DecodeSlices(rawSlices1)
+	require.NoError(t, err)
+	require.Len(t, slices1, 1)
+	assert.Equal(t, uint32(0), slices1[0].Pos)
+	assert.Equal(t, uint32(64*1024), slices1[0].Len)
+	assert.Equal(t, uint32(64*1024), slices1[0].Size)
+	assert.Equal(t, uint64(2), slices1[0].ID)
+
+	// 6. 校验 NVMe 本地暂存物理文件分块
+	data0, err := stagingMgr.ReadSlice(diskID.String(), slices0[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[:64*1024], data0)
+
+	data1, err := stagingMgr.ReadSlice(diskID.String(), slices1[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload[64*1024:], data1)
+
+	// 7. 校验 slice_refs 账本记录
+	var refs0, refs1 int32
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName), int64(slices0[0].ID)).Scan(&refs0))
+	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName), int64(slices1[0].ID)).Scan(&refs1))
+	assert.Equal(t, int32(1), refs0)
+	assert.Equal(t, int32(1), refs1)
+
+	// 8. 回读跨边界数据并校验一致性
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    startOffset,
+		Size:      uint32(payloadSize),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload, readResp.GetData())
+
+	// 9. 释放句柄
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+
+func TestChunkDriver_Write_SequentialAppend_MultiSliceLedger(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "client-seq-append"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. 创建连续追加测试文件
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-seq-append.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 3. 执行三次连续 128KB 追加写
+	sliceSize := 128 * 1024
+	var allPayload []byte
+	for i := 0; i < 3; i++ {
+		p := make([]byte, sliceSize)
+		for j := range p {
+			p[j] = byte((i*73 + j*13) % 256)
+		}
+		allPayload = append(allPayload, p...)
+
+		start := time.Now()
+		writeResp, err := h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+			SessionId: sessionID,
+			Fh:        fh,
+			Ino:       ino,
+			Offset:    uint64(i * sliceSize),
+			Data:      p,
+		})
+		elapsed := time.Since(start)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(sliceSize), writeResp.GetWritten())
+		assert.Less(t, elapsed, 10*time.Millisecond)
+	}
+
+	// 4. 校验 chunks 表包含连续追加的 3 条切片记录 (总计 72 字节)
+	var rawSlices []byte
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&rawSlices)
+	require.NoError(t, err)
+	assert.Len(t, rawSlices, 3*SliceBytes)
+
+	slices, err := DecodeSlices(rawSlices)
+	require.NoError(t, err)
+	require.Len(t, slices, 3)
+	for i, s := range slices {
+		assert.Equal(t, uint32(i*sliceSize), s.Pos)
+		assert.Equal(t, uint64(i+1), s.ID)
+		assert.Equal(t, uint32(sliceSize), s.Size)
+		assert.Equal(t, uint32(sliceSize), s.Len)
+	}
+
+	// 5. 校验 slice_refs 包含 3 条引用记录
+	var totalRefs int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".slice_refs WHERE refs = 1`, schemaName)).Scan(&totalRefs)
+	require.NoError(t, err)
+	assert.Equal(t, 3, totalRefs)
+
+	// 6. 回读完整 384KB 数据并校验
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      uint32(len(allPayload)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, allPayload, readResp.GetData())
+
+	// 7. 释放句柄
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+

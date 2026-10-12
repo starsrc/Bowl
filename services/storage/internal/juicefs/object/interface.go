@@ -81,6 +81,10 @@ type ObjectStorage interface {
 	Copy(ctx context.Context, dst, src string) error
 	// Delete 删除指定对象
 	Delete(ctx context.Context, key string, getters ...AttrGetter) error
+	// DeleteBatch 批量删除指定对象列表
+	DeleteBatch(ctx context.Context, keys []string) error
+	// DeletePrefix 批量删除指定前缀的所有对象
+	DeletePrefix(ctx context.Context, prefix string) error
 	// Head 查询对象元数据
 	Head(ctx context.Context, key string) (Object, error)
 	// List 列出匹配前缀的对象

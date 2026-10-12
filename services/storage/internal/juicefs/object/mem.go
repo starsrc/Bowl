@@ -100,6 +100,28 @@ func (m *memStore) Delete(ctx context.Context, key string, getters ...AttrGetter
 	return nil
 }
 
+// DeleteBatch 批量删除内存对象
+func (m *memStore) DeleteBatch(ctx context.Context, keys []string) error {
+	m.Lock()
+	defer m.Unlock()
+	for _, key := range keys {
+		delete(m.objects, key)
+	}
+	return nil
+}
+
+// DeletePrefix 按前缀批量删除内存对象
+func (m *memStore) DeletePrefix(ctx context.Context, prefix string) error {
+	m.Lock()
+	defer m.Unlock()
+	for k := range m.objects {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.objects, k)
+		}
+	}
+	return nil
+}
+
 func (m *memStore) List(ctx context.Context, prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	m.Lock()
 	defer m.Unlock()

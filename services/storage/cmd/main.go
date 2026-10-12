@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
+	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/server"
 	"github.com/starsrc/bowl/services/storage/internal/service"
@@ -80,9 +81,65 @@ func main() {
 	connectClient := connect.NewClient(transport)
 	diskClient := bowlv1connect.NewDiskServiceClient(connectClient)
 
+	// Initialize storage driver based on configuration
+	var driver service.FileStorageDriver
+	var s3Uploader *chunk.S3Uploader
+	var chunkDriver *service.ChunkDriver
+	if cfg.Storage.Driver == "chunk" {
+		if err := os.MkdirAll(cfg.Storage.StagingDir, 0o755); err != nil {
+			slog.Error("failed to create staging directory", "error", err)
+			os.Exit(1)
+		}
+		stagingMgr := chunk.NewStagingManager(cfg.Storage.StagingDir)
+		if cfg.S3.Enabled {
+			var err error
+			s3Uploader, err = chunk.NewS3Uploader(cfg.S3, stagingMgr)
+			if err != nil {
+				slog.Error("failed to initialize S3 uploader", "error", err)
+				os.Exit(1)
+			}
+			s3Uploader.Start(ctx)
+			slog.Info("S3 asynchronous upload pipeline started", "bucket", cfg.S3.Bucket, "endpoint", cfg.S3.Endpoint)
+		}
+		chunkDriver = service.NewChunkDriver(stagingMgr, pool, s3Uploader)
+		driver = chunkDriver
+		slog.Info("using chunk storage driver", "staging_dir", cfg.Storage.StagingDir)
+
+		// Start background garbage collector
+		if chunkDriver.GC() != nil {
+			chunkDriver.GC().Start(ctx)
+			slog.Info("chunk garbage collector started")
+		}
+
+		// Recover unflushed NVMe staging slices and replay to S3
+		recoveryReport, err := chunkDriver.RecoverStaging(ctx)
+		if err != nil {
+			slog.Error("failed to recover NVMe staging slices", "error", err)
+		} else if recoveryReport != nil && recoveryReport.ScannedSlices > 0 {
+			slog.Info("NVMe staging recovery completed",
+				"scanned_disks", recoveryReport.ScannedDisks,
+				"scanned_slices", recoveryReport.ScannedSlices,
+				"requeued_slices", recoveryReport.RequeuedSlices,
+				"skipped_slices", recoveryReport.SkippedSlices,
+				"orphaned_slices", recoveryReport.OrphanedSlices,
+				"max_slice_id", recoveryReport.MaxSliceID,
+			)
+		}
+	} else {
+		driver = service.NewLegacyFileDriver(cfg.Storage.DataDir)
+		slog.Info("using legacy file storage driver", "data_dir", cfg.Storage.DataDir)
+	}
+
+
 	// Initialize in-memory session manager and StorageService
 	sessionMgr := session.NewMemoryManager()
-	storageService := service.NewStorageService(diskClient, pool, sessionMgr, cfg.Storage.DataDir)
+	storageService := service.NewStorageService(
+		diskClient,
+		pool,
+		sessionMgr,
+		cfg.Storage.DataDir,
+		service.WithFileStorageDriver(driver),
+	)
 	srv := server.New(cfg.Server, storageService)
 
 	go func() {
@@ -104,5 +161,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	if chunkDriver != nil && chunkDriver.GC() != nil {
+		chunkDriver.GC().Stop()
+		slog.Info("chunk garbage collector stopped cleanly")
+	}
+
+	if s3Uploader != nil {
+		s3Uploader.Stop()
+		slog.Info("S3 uploader stopped cleanly")
+	}
+
 	slog.Info("storage service stopped cleanly")
 }
+

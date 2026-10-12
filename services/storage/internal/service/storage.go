@@ -20,6 +20,7 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/gen/go/bowl/v1/bowlv1connect"
+	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/session"
 )
 
@@ -28,12 +29,12 @@ const DefaultLeaseDuration = session.DefaultLeaseTimeout
 
 // OpenFileHandle represents an open file handle registered to a session.
 type OpenFileHandle struct {
-	Handle    *bowlv1.FileHandle
-	SessionID string
-	DiskID    string
-	CreatedAt time.Time
-	mu        sync.Mutex
-	file      *os.File
+	Handle       *bowlv1.FileHandle
+	SessionID    string
+	DiskID       string
+	CreatedAt    time.Time
+	mu           sync.Mutex
+	driverHandle HandleContext
 }
 
 // OpenDirHandle represents an open directory handle registered to a session.
@@ -61,6 +62,7 @@ type StorageService struct {
 	db             DBExecutor
 	sessions       session.Manager
 	dataDir        string
+	driver         FileStorageDriver
 	leaseDuration  time.Duration
 	nextFH         atomic.Uint64
 	openHandles    sync.Map // uint64 -> *OpenFileHandle
@@ -87,6 +89,13 @@ func WithLockTimeout(d time.Duration) Option {
 	}
 }
 
+// WithFileStorageDriver overrides the default file storage driver.
+func WithFileStorageDriver(driver FileStorageDriver) Option {
+	return func(s *StorageService) {
+		s.driver = driver
+	}
+}
+
 // NewStorageService constructs a new StorageService.
 func NewStorageService(
 	diskClient bowlv1connect.DiskServiceClient,
@@ -100,6 +109,7 @@ func NewStorageService(
 		db:            db,
 		sessions:      sessions,
 		dataDir:       dataDir,
+		driver:        NewLegacyFileDriver(dataDir),
 		leaseDuration: DefaultLeaseDuration,
 		lockMgr:       NewLockManager(sessions),
 		lockTimeout:   DefaultLockTimeout,
@@ -115,6 +125,14 @@ func NewStorageService(
 	return svc
 }
 
+// RecoverStaging triggers NVMe staging recovery if ChunkDriver is configured.
+func (s *StorageService) RecoverStaging(ctx context.Context) (*chunk.RecoveryReport, error) {
+	if cd, ok := s.driver.(*ChunkDriver); ok {
+		return cd.RecoverStaging(ctx)
+	}
+	return &chunk.RecoveryReport{}, nil
+}
+
 // FormatDiskSchema formats the PostgreSQL schema name for a given virtual disk UUID.
 func FormatDiskSchema(diskID uuid.UUID) string {
 	return fmt.Sprintf("disk_%s", strings.ReplaceAll(diskID.String(), "-", "_"))
@@ -123,6 +141,12 @@ func FormatDiskSchema(diskID uuid.UUID) string {
 func toConnectError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err.Error())
+	}
+	if errors.Is(err, context.Canceled) {
+		return connect.NewError(connect.CodeCanceled, err.Error())
 	}
 	var connectErr *connect.Error
 	if errors.As(err, &connectErr) {
@@ -277,12 +301,13 @@ func (s *StorageService) cleanupSessionResources(sessionID string) {
 		if ok && h.SessionID == sessionID {
 			s.openHandles.Delete(key)
 			h.mu.Lock()
-			if h.file != nil {
-				_ = h.file.Sync()
-				_ = h.file.Close()
-				h.file = nil
-			}
+			driverHandle := h.driverHandle
+			h.driverHandle = nil
 			h.mu.Unlock()
+			if driverHandle != nil && s.driver != nil {
+				_ = s.driver.Flush(context.Background(), driverHandle, h.DiskID, h.Handle.GetIno())
+				_ = s.driver.Close(context.Background(), driverHandle)
+			}
 		}
 		return true
 	})
@@ -513,7 +538,22 @@ CREATE TABLE IF NOT EXISTS "%s".xattrs (
 	value BYTEA NOT NULL,
 	PRIMARY KEY (ino, name)
 );
-`, schemaName, schemaName, schemaName, schemaName, schemaName)
+
+CREATE TABLE IF NOT EXISTS "%s".chunks (
+	ino BIGINT NOT NULL,
+	indx INT NOT NULL,
+	slices BYTEA NOT NULL,
+	PRIMARY KEY (ino, indx)
+);
+
+CREATE TABLE IF NOT EXISTS "%s".slice_refs (
+	id BIGINT PRIMARY KEY,
+	chunk_indx INT NOT NULL DEFAULT 0,
+	size INT NOT NULL,
+	refs INT NOT NULL DEFAULT 1
+);
+ALTER TABLE "%s".slice_refs ADD COLUMN IF NOT EXISTS chunk_indx INT NOT NULL DEFAULT 0;
+`, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName, schemaName)
 
 	if _, err := s.db.Exec(ctx, ddl); err != nil {
 		return err
@@ -805,6 +845,11 @@ func (s *StorageService) SetAttr(ctx context.Context, req *bowlv1.SetAttrRequest
 	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_SIZE) != 0 {
 		newSize = int64(req.GetSize())
 		newBlocks = (newSize + 511) / 512
+		if s.driver != nil {
+			if err := s.driver.Truncate(ctx, sess.DiskID, req.GetIno(), req.GetSize()); err != nil {
+				return nil, toConnectError(err)
+			}
+		}
 	}
 	if valid&uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_ATIME_NOW) != 0 {
 		newAtime = time.Now()

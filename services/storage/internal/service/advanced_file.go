@@ -2,11 +2,7 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,11 +40,12 @@ func (s *StorageService) Flush(ctx context.Context, req *bowlv1.FlushRequest) (*
 	}
 
 	handle.mu.Lock()
-	defer handle.mu.Unlock()
+	driverHandle := handle.driverHandle
+	handle.mu.Unlock()
 
-	if handle.file != nil {
-		if err := handle.file.Sync(); err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to sync file: %s", err)
+	if s.driver != nil {
+		if err := s.driver.Flush(ctx, driverHandle, handle.DiskID, handle.Handle.GetIno()); err != nil {
+			return nil, toConnectError(err)
 		}
 	}
 
@@ -88,19 +85,16 @@ func (s *StorageService) Fsync(ctx context.Context, req *bowlv1.FsyncRequest) (*
 		return nil, connect.NewError(connect.CodeInvalidArgument, "fh or ino is required")
 	}
 
+	var driverHandle HandleContext
 	if handle != nil {
 		handle.mu.Lock()
-		defer handle.mu.Unlock()
-		if handle.file != nil {
-			if err := handle.file.Sync(); err != nil {
-				return nil, connect.Errorf(connect.CodeInternal, "failed to sync file: %s", err)
-			}
-		}
-	} else {
-		filePath := s.filePath(sess.DiskID, targetIno)
-		if f, err := os.OpenFile(filePath, os.O_RDWR, 0o644); err == nil {
-			_ = f.Sync()
-			_ = f.Close()
+		driverHandle = handle.driverHandle
+		handle.mu.Unlock()
+	}
+
+	if s.driver != nil {
+		if err := s.driver.Fsync(ctx, driverHandle, sess.DiskID, targetIno, req.GetDatasync()); err != nil {
+			return nil, toConnectError(err)
 		}
 	}
 
@@ -157,42 +151,16 @@ func (s *StorageService) Fallocate(ctx context.Context, req *bowlv1.FallocateReq
 		return nil, connect.NewError(connect.CodeInvalidArgument, "fh or ino is required")
 	}
 
-	filePath := s.filePath(sess.DiskID, targetIno)
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to create directory: %s", err)
-	}
-
-	var osFile *os.File
+	var driverHandle HandleContext
 	if handle != nil {
 		handle.mu.Lock()
-		defer handle.mu.Unlock()
-		if handle.file == nil {
-			f, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
-			if err != nil {
-				return nil, connect.Errorf(connect.CodeInternal, "failed to open file: %s", err)
-			}
-			handle.file = f
-		}
-		osFile = handle.file
-	} else {
-		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open file: %s", err)
-		}
-		defer f.Close()
-		osFile = f
+		driverHandle = handle.driverHandle
+		handle.mu.Unlock()
 	}
 
-	fi, err := osFile.Stat()
-	if err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to stat file: %s", err)
-	}
-	currentSize := uint64(fi.Size())
-	if s.db != nil {
-		if curInode, err := s.getInode(ctx, schemaName, targetIno); err == nil {
-			if curInode.GetSize() > currentSize {
-				currentSize = curInode.GetSize()
-			}
+	if s.driver != nil {
+		if err := s.driver.Fallocate(ctx, driverHandle, sess.DiskID, targetIno, req.GetMode(), offset, length); err != nil {
+			return nil, toConnectError(err)
 		}
 	}
 
@@ -201,16 +169,6 @@ func (s *StorageService) Fallocate(ctx context.Context, req *bowlv1.FallocateReq
 
 	// Punch hole (mode & 2 or FALLOC_FL_PUNCH_HOLE)
 	if mode&uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE) != 0 || mode == 2 {
-		if offset < currentSize {
-			writeLen := length
-			if offset+writeLen > currentSize {
-				writeLen = currentSize - offset
-			}
-			zeros := make([]byte, writeLen)
-			if _, err := osFile.WriteAt(zeros, int64(offset)); err != nil {
-				return nil, connect.Errorf(connect.CodeInternal, "failed to write zeros for punch hole: %s", err)
-			}
-		}
 		if s.db != nil {
 			updateSQL := fmt.Sprintf(`UPDATE "%s".inodes SET mtime = $1, ctime = $1 WHERE ino = $2;`, schemaName)
 			if _, err := s.db.Exec(ctx, updateSQL, now, int64(targetIno)); err != nil {
@@ -220,12 +178,15 @@ func (s *StorageService) Fallocate(ctx context.Context, req *bowlv1.FallocateReq
 	} else {
 		// Mode 0 (preallocate) or other modes extending size
 		keepSize := (mode & uint32(bowlv1.FallocateMode_FALLOCATE_MODE_KEEP_SIZE)) != 0
+		var currentSize uint64
+		if s.db != nil {
+			if curInode, err := s.getInode(ctx, schemaName, targetIno); err == nil {
+				currentSize = curInode.GetSize()
+			}
+		}
 		newSize := currentSize
 		if !keepSize && offset+length > currentSize {
 			newSize = offset + length
-			if err := osFile.Truncate(int64(newSize)); err != nil {
-				return nil, connect.Errorf(connect.CodeInternal, "failed to extend file: %s", err)
-			}
 		}
 		if s.db != nil {
 			updateSQL := fmt.Sprintf(`
@@ -303,78 +264,33 @@ func (s *StorageService) CopyFileRange(ctx context.Context, req *bowlv1.CopyFile
 	}
 	dstIno := dstHandle.Handle.GetIno()
 
-	// Prevent deadlocks by ordering mutex acquisition
-	if srcFH == dstFH {
-		srcHandle.mu.Lock()
-		defer srcHandle.mu.Unlock()
-	} else if srcFH < dstFH {
-		srcHandle.mu.Lock()
-		dstHandle.mu.Lock()
-		defer srcHandle.mu.Unlock()
-		defer dstHandle.mu.Unlock()
-	} else {
-		dstHandle.mu.Lock()
-		srcHandle.mu.Lock()
-		defer dstHandle.mu.Unlock()
-		defer srcHandle.mu.Unlock()
-	}
+	srcHandle.mu.Lock()
+	srcDriverHandle := srcHandle.driverHandle
+	srcHandle.mu.Unlock()
 
-	if srcHandle.file == nil {
-		srcPath := s.filePath(srcHandle.DiskID, srcIno)
-		f, err := os.OpenFile(srcPath, os.O_RDONLY, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open src file: %s", err)
-		}
-		srcHandle.file = f
-	}
+	dstHandle.mu.Lock()
+	dstDriverHandle := dstHandle.driverHandle
+	dstHandle.mu.Unlock()
 
-	if dstHandle.file == nil {
-		dstPath := s.filePath(dstHandle.DiskID, dstIno)
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to create directory: %s", err)
-		}
-		f, err := os.OpenFile(dstPath, os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to open dst file: %s", err)
-		}
-		dstHandle.file = f
-	}
-
-	srcFi, err := srcHandle.file.Stat()
+	copied, err := s.driver.CopyFileRange(
+		ctx,
+		srcDriverHandle,
+		srcHandle.DiskID,
+		srcIno,
+		req.GetSrcOffset(),
+		dstDriverHandle,
+		dstHandle.DiskID,
+		dstIno,
+		req.GetDstOffset(),
+		length,
+	)
 	if err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to stat src file: %s", err)
-	}
-	srcSize := uint64(srcFi.Size())
-	srcOffset := req.GetSrcOffset()
-	if srcOffset >= srcSize {
-		return &bowlv1.CopyFileRangeResponse{Copied: 0}, nil
+		return nil, toConnectError(err)
 	}
 
-	available := srcSize - srcOffset
-	toCopy := length
-	if toCopy > available {
-		toCopy = available
-	}
-
-	buf := make([]byte, toCopy)
-	n, err := srcHandle.file.ReadAt(buf, int64(srcOffset))
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to read src file: %s", err)
-	}
-	if n == 0 {
-		return &bowlv1.CopyFileRangeResponse{Copied: 0}, nil
-	}
-	buf = buf[:n]
-
-	dstOffset := req.GetDstOffset()
-	written, err := dstHandle.file.WriteAt(buf, int64(dstOffset))
-	if err != nil {
-		return nil, connect.Errorf(connect.CodeInternal, "failed to write dst file: %s", err)
-	}
-
-	if s.db != nil {
+	if s.db != nil && copied > 0 {
 		now := time.Now()
-		newEnd := int64(dstOffset) + int64(written)
+		newEnd := int64(req.GetDstOffset()) + int64(copied)
 		updateSQL := fmt.Sprintf(`
 UPDATE "%s".inodes
 SET size = GREATEST(size, $1::bigint),
@@ -389,7 +305,7 @@ WHERE ino = $3;
 	}
 
 	return &bowlv1.CopyFileRangeResponse{
-		Copied: uint64(written),
+		Copied: copied,
 	}, nil
 }
 
@@ -424,95 +340,13 @@ func (s *StorageService) Lseek(ctx context.Context, req *bowlv1.LseekRequest) (*
 	targetIno := handle.Handle.GetIno()
 
 	handle.mu.Lock()
-	defer handle.mu.Unlock()
+	driverHandle := handle.driverHandle
+	handle.mu.Unlock()
 
-	filePath := s.filePath(handle.DiskID, targetIno)
-	if handle.file == nil {
-		if _, err := os.Stat(filePath); !os.IsNotExist(err) {
-			f, err := os.OpenFile(filePath, os.O_RDONLY, 0o644)
-			if err != nil {
-				return nil, connect.Errorf(connect.CodeInternal, "failed to open file: %s", err)
-			}
-			handle.file = f
-		}
+	offset, err := s.driver.Lseek(ctx, driverHandle, handle.DiskID, targetIno, req.GetOffset(), uint32(req.GetWhence()))
+	if err != nil {
+		return nil, toConnectError(err)
 	}
 
-	var fileSize uint64
-	if handle.file != nil {
-		fi, err := handle.file.Stat()
-		if err != nil {
-			return nil, connect.Errorf(connect.CodeInternal, "failed to stat file: %s", err)
-		}
-		fileSize = uint64(fi.Size())
-	}
-
-	offset := req.GetOffset()
-	whence := req.GetWhence()
-
-	switch whence {
-	case 0, 1: // SEEK_SET (0), SEEK_CUR (1)
-		return &bowlv1.LseekResponse{Offset: offset}, nil
-	case 2: // SEEK_END (2)
-		return &bowlv1.LseekResponse{Offset: fileSize + offset}, nil
-	case bowlv1.LseekWhence_LSEEK_WHENCE_DATA: // 3
-		if offset >= fileSize {
-			return nil, connect.Errorf(connect.CodeOutOfRange, "offset %d is at or beyond EOF %d", offset, fileSize)
-		}
-		if handle.file == nil {
-			return nil, connect.Errorf(connect.CodeOutOfRange, "no data found at or after offset %d", offset)
-		}
-		foundOffset, found, err := s.scanFileForByte(handle.file, offset, fileSize, false)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return nil, connect.Errorf(connect.CodeOutOfRange, "no data found at or after offset %d", offset)
-		}
-		return &bowlv1.LseekResponse{Offset: foundOffset}, nil
-	case bowlv1.LseekWhence_LSEEK_WHENCE_HOLE: // 4
-		if offset > fileSize {
-			return nil, connect.Errorf(connect.CodeOutOfRange, "offset %d is beyond EOF %d", offset, fileSize)
-		}
-		if offset == fileSize || handle.file == nil {
-			return &bowlv1.LseekResponse{Offset: fileSize}, nil
-		}
-		foundOffset, found, err := s.scanFileForByte(handle.file, offset, fileSize, true)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return &bowlv1.LseekResponse{Offset: fileSize}, nil
-		}
-		return &bowlv1.LseekResponse{Offset: foundOffset}, nil
-	default:
-		return nil, connect.Errorf(connect.CodeInvalidArgument, "unsupported lseek whence: %d", whence)
-	}
-}
-
-// scanFileForByte scans a range of file for the first zero or non-zero byte.
-func (s *StorageService) scanFileForByte(file *os.File, start, end uint64, lookForZero bool) (uint64, bool, error) {
-	const bufSize = 32768
-	buf := make([]byte, bufSize)
-	curr := start
-	for curr < end {
-		toRead := int64(bufSize)
-		if curr+uint64(toRead) > end {
-			toRead = int64(end - curr)
-		}
-		n, err := file.ReadAt(buf[:toRead], int64(curr))
-		if err != nil && !errors.Is(err, io.EOF) {
-			return 0, false, connect.Errorf(connect.CodeInternal, "failed to scan file: %s", err)
-		}
-		if n == 0 {
-			break
-		}
-		for i := 0; i < n; i++ {
-			b := buf[i]
-			if (lookForZero && b == 0) || (!lookForZero && b != 0) {
-				return curr + uint64(i), true, nil
-			}
-		}
-		curr += uint64(n)
-	}
-	return 0, false, nil
+	return &bowlv1.LseekResponse{Offset: offset}, nil
 }

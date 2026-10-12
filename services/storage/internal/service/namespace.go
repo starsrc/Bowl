@@ -135,21 +135,32 @@ VALUES ($1, $2, $3, $4, $5, 1, 0, 0, 0, 0, 0, $6, $6, $6, '', 0);
 	_, _ = s.db.Exec(ctx, updateParentSQL, now, int64(req.GetParentIno()))
 
 	// 7. Allocate file handle
+	openMode := parseOpenMode(req.GetFlags())
+	var driverHandle HandleContext
+	if s.driver != nil {
+		var err error
+		driverHandle, err = s.driver.Open(ctx, sess.DiskID, newIno, openMode, req.GetFlags())
+		if err != nil {
+			return nil, toConnectError(err)
+		}
+	}
+
 	fh := s.nextFH.Add(1)
 	fileHandle := &bowlv1.FileHandle{
 		Fh:           fh,
 		Ino:          newIno,
-		OpenMode:     parseOpenMode(req.GetFlags()),
+		OpenMode:     openMode,
 		Flags:        req.GetFlags(),
 		ClientId:     sess.ClientID,
 		IsWriteLease: true,
 		OpenFlags:    0,
 	}
 	s.openHandles.Store(fh, &OpenFileHandle{
-		Handle:    fileHandle,
-		SessionID: sess.ID,
-		DiskID:    sess.DiskID,
-		CreatedAt: now,
+		Handle:       fileHandle,
+		SessionID:    sess.ID,
+		DiskID:       sess.DiskID,
+		CreatedAt:    now,
+		driverHandle: driverHandle,
 	})
 
 	inode := &bowlv1.Inode{
@@ -339,7 +350,7 @@ func (s *StorageService) Unlink(ctx context.Context, req *bowlv1.UnlinkRequest) 
 		return nil, connect.NewError(connect.CodeInvalidArgument, "invalid entry name")
 	}
 
-	_, schemaName, err := s.checkWriteLease(req.GetSessionId())
+	sess, schemaName, err := s.checkWriteLease(req.GetSessionId())
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +382,9 @@ func (s *StorageService) Unlink(ctx context.Context, req *bowlv1.UnlinkRequest) 
 			}
 			deleteXAttrSQL := fmt.Sprintf(`DELETE FROM "%s".xattrs WHERE ino = $1;`, schemaName)
 			_, _ = s.db.Exec(ctx, deleteXAttrSQL, int64(targetInode.GetIno()))
+			if s.driver != nil {
+				_ = s.driver.DeleteInode(ctx, sess.DiskID, targetInode.GetIno())
+			}
 		} else {
 			// Unlinked but still referenced by lookup count: set nlink = 0 and detach from parent
 			deletedName := fmt.Sprintf(".deleted.%d", targetInode.GetIno())

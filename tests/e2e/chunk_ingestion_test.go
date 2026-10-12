@@ -1181,4 +1181,284 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestE2E_ChunkDriver_CopyFileRange_ZeroCopyAndCOWIsolation 验证基于真实二进制服务的秒级写时复制克隆语义 (CopyFileRange) 与 COW 严格数据隔离性
+func TestE2E_ChunkDriver_CopyFileRange_ZeroCopyAndCOWIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	// 1. 初始化数据库连接池
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// 2. 准备运行目录
+	baseDir := t.TempDir()
+	binDir := filepath.Join(baseDir, "bin")
+	dataDir := filepath.Join(baseDir, "data")
+	stagingDir := filepath.Join(baseDir, "staging")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+
+	repoRoot, err := filepath.Abs("../..")
+	require.NoError(t, err)
+
+	diskBin := filepath.Join(binDir, "disk-service")
+	storageBin := filepath.Join(binDir, "storage-service")
+
+	// 3. 静态编译真实服务二进制
+	cmdDiskBuild := exec.Command("go", "build", "-o", diskBin, "./services/disk/cmd")
+	cmdDiskBuild.Dir = repoRoot
+	out, err := cmdDiskBuild.CombinedOutput()
+	require.NoError(t, err, "编译 disk-service 失败: %s", string(out))
+
+	cmdStorageBuild := exec.Command("go", "build", "-o", storageBin, "./services/storage/cmd")
+	cmdStorageBuild.Dir = repoRoot
+	out, err = cmdStorageBuild.CombinedOutput()
+	require.NoError(t, err, "编译 storage-service 失败: %s", string(out))
+
+	// 4. 启动 DiskService 进程
+	diskPort := getFreePort(t)
+	diskAddr := fmt.Sprintf("http://127.0.0.1:%d", diskPort)
+
+	ctxDisk, cancelDisk := context.WithCancel(context.Background())
+	defer cancelDisk()
+
+	cmdDisk := exec.CommandContext(ctxDisk, diskBin)
+	cmdDisk.Dir = repoRoot
+	cmdDisk.Env = append(os.Environ(),
+		fmt.Sprintf("SERVER_PORT=%d", diskPort),
+		fmt.Sprintf("PORT=%d", diskPort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+	)
+	cmdDisk.Stdout = os.Stdout
+	cmdDisk.Stderr = os.Stderr
+	require.NoError(t, cmdDisk.Start())
+	defer func() {
+		cancelDisk()
+		_ = cmdDisk.Wait()
+	}()
+
+	waitForHTTP(t, diskAddr, 10*time.Second)
+
+	// 5. 启动 StorageService 进程 (启用 STORAGE_DRIVER=chunk)
+	storagePort := getFreePort(t)
+	storageAddr := fmt.Sprintf("http://127.0.0.1:%d", storagePort)
+
+	ctxStorage, cancelStorage := context.WithCancel(context.Background())
+	defer cancelStorage()
+
+	cmdStorage := exec.CommandContext(ctxStorage, storageBin)
+	cmdStorage.Dir = repoRoot
+	cmdStorage.Env = append(os.Environ(),
+		fmt.Sprintf("PORT=%d", storagePort),
+		fmt.Sprintf("SERVER_PORT=%d", storagePort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+		"STAGING_DIR="+stagingDir,
+		"STORAGE_DRIVER=chunk",
+		"DISK_SERVICE_ADDR="+diskAddr,
+	)
+	cmdStorage.Stdout = os.Stdout
+	cmdStorage.Stderr = os.Stderr
+	require.NoError(t, cmdStorage.Start())
+	defer func() {
+		cancelStorage()
+		_ = cmdStorage.Wait()
+	}()
+
+	waitForHTTP(t, storageAddr, 10*time.Second)
+
+	// 6. 构造 Connect-RPC 客户端并创建虚拟磁盘
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	diskClient := bowlv1connect.NewDiskServiceClient(connect.NewClient(connecthttp.NewTransport(httpClient, diskAddr)))
+	storageClient := bowlv1connect.NewStorageServiceClient(connect.NewClient(connecthttp.NewTransport(httpClient, storageAddr)))
+
+	createDiskResp, err := diskClient.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "e2e-cow-disk",
+		CapacityBytes: 10 * 1024 * 1024 * 1024,
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskIDStr := createDiskResp.GetDisk().GetDiskId()
+	parsedDiskUUID, err := uuid.Parse(diskIDStr)
+	require.NoError(t, err)
+
+	schemaName := fmt.Sprintf("disk_%s", strings.ReplaceAll(parsedDiskUUID.String(), "-", "_"))
+	defer func() {
+		_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 7. 挂载虚拟磁盘
+	clientID := "e2e-cow-client"
+	mountResp, err := storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskIDStr,
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 8. 创建源文件 A 并写入 64KB 数据
+	createSrcResp, err := storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "source_file.dat",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	srcIno := createSrcResp.GetInode().GetIno()
+	srcFH := createSrcResp.GetFileHandle().GetFh()
+
+	const dataSize = 64 * 1024
+	payloadA := bytes.Repeat([]byte{0x5A}, dataSize)
+	writeResp, err := storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        srcFH,
+		Ino:       srcIno,
+		Offset:    0,
+		Data:      payloadA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(dataSize), writeResp.GetWritten())
+
+	// 9. 创建目标文件 B
+	createDstResp, err := storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "cloned_file.dat",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	dstIno := createDstResp.GetInode().GetIno()
+	dstFH := createDstResp.GetFileHandle().GetFh()
+
+	// 10. 执行 CopyFileRange：秒级零拷贝克隆
+	startCopy := time.Now()
+	copyResp, err := storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
+		SessionId: sessionID,
+		SrcIno:    srcIno,
+		SrcFh:     srcFH,
+		SrcOffset: 0,
+		DstIno:    dstIno,
+		DstFh:     dstFH,
+		DstOffset: 0,
+		Length:    dataSize,
+	})
+	elapsedCopy := time.Since(startCopy)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(dataSize), copyResp.GetCopied())
+	assert.Less(t, elapsedCopy, 50*time.Millisecond, "端到端 CopyFileRange 元数据克隆耗时必须低于 50ms")
+
+	// 11. 校验 PostgreSQL 元数据层：slice_refs 引用计数原子递增为 2
+	var sliceRefCount int32
+	err = pool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&sliceRefCount)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), sliceRefCount, "克隆后切片 1 引用计数必须原子递增为 2")
+
+	// 校验目标 Inode 大小已自动更新为 64KB
+	dstAttr, err := storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{SessionId: sessionID, Ino: dstIno})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(dataSize), dstAttr.GetInode().GetSize())
+
+	// 12. 回读目标文件 B，验证初始克隆内容完全一致
+	readDstInitial, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        dstFH,
+		Ino:       dstIno,
+		Offset:    0,
+		Size:      dataSize,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payloadA, readDstInitial.GetData())
+
+	// 13. 写时复制 (COW) 隔离性验证：覆写目标文件 B 内部中间区间 [16KB, 32KB)
+	const overwriteOffset = 16 * 1024
+	const overwriteSize = 16 * 1024
+	payloadB := bytes.Repeat([]byte{0x7B}, overwriteSize)
+	writeOverwriteResp, err := storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        dstFH,
+		Ino:       dstIno,
+		Offset:    overwriteOffset,
+		Data:      payloadB,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(overwriteSize), writeOverwriteResp.GetWritten())
+
+	// 14. 核心 COW 数据隔离断言：
+	// 14.1 源文件 A 必须保持 100% 原始数据，完全不受目标文件覆写影响！
+	readSrcAfter, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        srcFH,
+		Ino:       srcIno,
+		Offset:    0,
+		Size:      dataSize,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payloadA, readSrcAfter.GetData(), "源文件数据必须绝对保持原始状态不受波及")
+
+	// 14.2 目标文件 B 读取应返回合成后的图层数据
+	expectedDstData := make([]byte, dataSize)
+	copy(expectedDstData, payloadA)
+	copy(expectedDstData[overwriteOffset:], payloadB)
+
+	readDstAfter, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        dstFH,
+		Ino:       dstIno,
+		Offset:    0,
+		Size:      dataSize,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expectedDstData, readDstAfter.GetData(), "目标文件数据必须包含覆写后的最新图层内容")
+
+	// 15. 生命周期与孤儿切片安全保护验证：
+	// 释放句柄、Unlink 并 Forget 源文件 A
+	_, err = storageClient.Release(ctx, &bowlv1.ReleaseRequest{SessionId: sessionID, Fh: srcFH})
+	require.NoError(t, err)
+	_, err = storageClient.Unlink(ctx, &bowlv1.UnlinkRequest{SessionId: sessionID, ParentIno: 1, Name: "source_file.dat"})
+	require.NoError(t, err)
+	_, err = storageClient.Forget(ctx, &bowlv1.ForgetRequest{SessionId: sessionID, Ino: srcIno, Nlookup: 1})
+	require.NoError(t, err)
+
+	// 切片 1 引用计数递减为 1，不属于孤儿切片
+	var sliceRefAfterA int32
+	err = pool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&sliceRefAfterA)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), sliceRefAfterA)
+
+	// 目标文件 B 数据依然可正常完整读取
+	readDstFinal, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        dstFH,
+		Ino:       dstIno,
+		Offset:    0,
+		Size:      dataSize,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expectedDstData, readDstFinal.GetData(), "源文件物理清理后克隆文件仍可正常完整读取")
+
+	// 释放目标文件 B
+	_, err = storageClient.Release(ctx, &bowlv1.ReleaseRequest{SessionId: sessionID, Fh: dstFH})
+	require.NoError(t, err)
+	_, err = storageClient.Unlink(ctx, &bowlv1.UnlinkRequest{SessionId: sessionID, ParentIno: 1, Name: "cloned_file.dat"})
+	require.NoError(t, err)
+	_, err = storageClient.Forget(ctx, &bowlv1.ForgetRequest{SessionId: sessionID, Ino: dstIno, Nlookup: 1})
+	require.NoError(t, err)
+
+	// 最终切片 1 引用计数归零
+	var sliceRefZero int32
+	err = pool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&sliceRefZero)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), sliceRefZero)
+}
+
 

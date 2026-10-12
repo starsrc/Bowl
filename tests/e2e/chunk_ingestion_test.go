@@ -1063,7 +1063,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	assert.Equal(t, payload8K[4096:], readPart2.GetData())
 
 	// 12. Lseek 跨切片与稀疏空洞探测语义验证
-	// SEEK_DATA at offset 0 -> 0
+	// 探测有效数据：偏移量 0 处为有效数据，返回 0
 	lseekData0, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -1074,7 +1074,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), lseekData0.GetOffset())
 
-	// SEEK_DATA at offset 2048 (在打洞空洞内) -> 4096 (下一个有效数据点)
+	// 探测有效数据：偏移量 2048 处于打洞空洞内，跳过空洞返回下一个有效数据偏移量 4096
 	lseekDataHole, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -1085,7 +1085,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(4096), lseekDataHole.GetOffset())
 
-	// SEEK_HOLE at offset 0 -> 2048 (第一个空洞起点)
+	// 探测稀疏空洞：偏移量 0 处扫描，首个空洞起点位于 2048
 	lseekHole0, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -1096,7 +1096,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2048), lseekHole0.GetOffset())
 
-	// SEEK_HOLE at offset 2048 (已经在空洞内) -> 2048
+	// 探测稀疏空洞：偏移量 2048 处已处于空洞内，直接返回当前偏移量 2048
 	lseekHoleInside, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -1107,7 +1107,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2048), lseekHoleInside.GetOffset())
 
-	// SEEK_HOLE at offset 4096 (数据区间 [4096, 8192) 中) -> 8192 (下一个稀疏空洞)
+	// 探测稀疏空洞：偏移量 4096 处于数据区间 [4096, 8192) 中，返回下一个稀疏空洞起点 8192
 	lseekHoleNext, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -1118,7 +1118,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(8192), lseekHoleNext.GetOffset())
 
-	// SEEK_DATA at offset 8192 (在尾部稀疏空洞内) -> OutOfRange
+	// 探测有效数据：偏移量 8192 处于尾部稀疏空洞且后续无数据，期望返回 OutOfRange 错误
 	_, err = storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -1129,7 +1129,7 @@ func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeOutOfRange, connect.CodeOf(err))
 
-	// SEEK_HOLE at offset 1048576 (EOF 处) -> 1048576 (隐式 EOF 空洞)
+	// 探测稀疏空洞：偏移量 1048576 位于文件末尾 EOF 处，返回文件总长度作为隐式空洞
 	lseekHoleEOF, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
 		SessionId: sessionID,
 		Fh:        fh,

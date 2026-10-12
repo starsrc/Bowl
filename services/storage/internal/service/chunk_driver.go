@@ -25,9 +25,46 @@ type chunkFileHandle struct {
 	openMode bowlv1.OpenMode
 	flags    uint32
 	closed   bool
+	offset   uint64
 	pages    []*jfsChunk.Page
 	buffer   []byte
 }
+
+func (h *chunkFileHandle) updateOffset(off uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.offset = off
+}
+
+func (h *chunkFileHandle) getOffset() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.offset
+}
+
+// resolveHandle 校验文件句柄状态并提取 diskID 与 ino 缺省值
+func resolveHandle(handle HandleContext, diskID *string, ino *uint64) (*chunkFileHandle, error) {
+	if handle == nil {
+		return nil, nil
+	}
+	ch, ok := handle.(*chunkFileHandle)
+	if !ok {
+		return nil, nil
+	}
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if ch.closed {
+		return nil, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+	}
+	if *diskID == "" {
+		*diskID = ch.diskID
+	}
+	if *ino == 0 {
+		*ino = ch.ino
+	}
+	return ch, nil
+}
+
 
 // AttachPage 向当前文件句柄移交内存 Page 缓冲区所有权，交由句柄生命周期统一管理与释放
 func (h *chunkFileHandle) AttachPage(p *jfsChunk.Page) {
@@ -230,21 +267,9 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 		return []byte{}, false, nil
 	}
 
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return nil, false, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
-			}
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	ch, err := resolveHandle(handle, &diskID, &ino)
+	if err != nil {
+		return nil, false, err
 	}
 
 	parsedDiskUUID, err := uuid.Parse(diskID)
@@ -353,6 +378,9 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 		curOffset += chunkReadLen
 	}
 
+	if ch != nil {
+		ch.updateOffset(offset + uint64(len(result)))
+	}
 	return result, isEOF, nil
 }
 
@@ -386,21 +414,9 @@ func (d *ChunkDriver) Write(ctx context.Context, handle HandleContext, diskID st
 		return 0, nil
 	}
 
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return 0, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
-			}
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	ch, err := resolveHandle(handle, &diskID, &ino)
+	if err != nil {
+		return 0, err
 	}
 
 	if diskID == "" {
@@ -471,6 +487,9 @@ func (d *ChunkDriver) Write(ctx context.Context, handle HandleContext, diskID st
 		remaining = remaining[toWrite:]
 	}
 
+	if ch != nil {
+		ch.updateOffset(offset + uint64(len(data)))
+	}
 	return uint32(len(data)), nil
 }
 
@@ -516,45 +535,17 @@ func (d *ChunkDriver) syncInodeBarrier(ctx context.Context, diskID string, ino u
 
 // Flush 针对打开文件句柄同步脏切片并等待后台 S3 推流屏障达成 (FUSE_FLUSH)
 func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
-			}
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	if _, err := resolveHandle(handle, &diskID, &ino); err != nil {
+		return err
 	}
-
 	return d.syncInodeBarrier(ctx, diskID, ino)
 }
 
 // Fsync 针对文件数据与元数据执行持久化同步屏障，挂起等待全部在途 4MB 物理分块刷盘至 S3 (FUSE_FSYNC)
 func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID string, ino uint64, datasync bool) error {
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
-			}
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	if _, err := resolveHandle(handle, &diskID, &ino); err != nil {
+		return err
 	}
-
 	return d.syncInodeBarrier(ctx, diskID, ino)
 }
 
@@ -639,21 +630,8 @@ WHERE ino = $3;
 // Fallocate 空间预分配与区间打洞 (FALLOC_FL_PUNCH_HOLE)。
 // 打洞模式下通过 MetaAdapter 覆盖空洞切片释放物理存储；预分配模式下扩展文件大小形成稀疏空洞。
 func (d *ChunkDriver) Fallocate(ctx context.Context, handle HandleContext, diskID string, ino uint64, mode uint32, offset uint64, length uint64) error {
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
-			}
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	if _, err := resolveHandle(handle, &diskID, &ino); err != nil {
+		return err
 	}
 
 	if diskID == "" {
@@ -737,37 +715,11 @@ WHERE ino = $3;
 // 在同一虚拟磁盘内，仅通过 MetaAdapter 克隆 chunks 表中切片索引记录并原子递增 slice_refs.refs 引用计数，
 // 无需搬迁物理 S3/NVMe 载荷字节，具备亚毫秒级元数据克隆与严格的写时复制 (COW) 隔离性。
 func (d *ChunkDriver) CopyFileRange(ctx context.Context, srcHandle HandleContext, srcDiskID string, srcIno uint64, srcOffset uint64, dstHandle HandleContext, dstDiskID string, dstIno uint64, dstOffset uint64, length uint64) (uint64, error) {
-	if srcHandle != nil {
-		if ch, ok := srcHandle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return 0, connect.Errorf(connect.CodeFailedPrecondition, "源文件句柄已关闭")
-			}
-			if srcDiskID == "" {
-				srcDiskID = ch.diskID
-			}
-			if srcIno == 0 {
-				srcIno = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	if _, err := resolveHandle(srcHandle, &srcDiskID, &srcIno); err != nil {
+		return 0, err
 	}
-	if dstHandle != nil {
-		if ch, ok := dstHandle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return 0, connect.Errorf(connect.CodeFailedPrecondition, "目标文件句柄已关闭")
-			}
-			if dstDiskID == "" {
-				dstDiskID = ch.diskID
-			}
-			if dstIno == 0 {
-				dstIno = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	if _, err := resolveHandle(dstHandle, &dstDiskID, &dstIno); err != nil {
+		return 0, err
 	}
 
 	if length == 0 {
@@ -807,21 +759,9 @@ func (d *ChunkDriver) CopyFileRange(ctx context.Context, srcHandle HandleContext
 
 // Lseek 定位文件内部数据或稀疏空洞偏移量 (SEEK_DATA / SEEK_HOLE / 标准 whence)
 func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, whence uint32) (uint64, error) {
-	if handle != nil {
-		if ch, ok := handle.(*chunkFileHandle); ok {
-			ch.mu.Lock()
-			if ch.closed {
-				ch.mu.Unlock()
-				return 0, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
-			}
-			if diskID == "" {
-				diskID = ch.diskID
-			}
-			if ino == 0 {
-				ino = ch.ino
-			}
-			ch.mu.Unlock()
-		}
+	ch, err := resolveHandle(handle, &diskID, &ino)
+	if err != nil {
+		return 0, err
 	}
 
 	if diskID == "" {
@@ -847,11 +787,12 @@ func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID st
 	}
 	fileSize := uint64(currentSize)
 
+	var targetOffset uint64
 	switch whence {
 	case 0, 1: // SEEK_SET (0), SEEK_CUR (1)
-		return offset, nil
+		targetOffset = offset
 	case 2: // SEEK_END (2)
-		return fileSize + offset, nil
+		targetOffset = fileSize + offset
 	case uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA): // 3
 		if offset >= fileSize {
 			return 0, connect.Errorf(connect.CodeOutOfRange, "offset %d is at or beyond EOF %d", offset, fileSize)
@@ -863,18 +804,28 @@ func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID st
 		if !found {
 			return 0, connect.Errorf(connect.CodeOutOfRange, "no data found at or after offset %d", offset)
 		}
-		return foundOffset, nil
+		targetOffset = foundOffset
 	case uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE): // 4
 		if offset > fileSize {
 			return 0, connect.Errorf(connect.CodeOutOfRange, "offset %d is beyond EOF %d", offset, fileSize)
 		}
 		if offset == fileSize {
-			return fileSize, nil
+			targetOffset = fileSize
+		} else {
+			holeOffset, err := d.scanHole(ctx, diskID, ino, offset, fileSize)
+			if err != nil {
+				return 0, err
+			}
+			targetOffset = holeOffset
 		}
-		return d.scanHole(ctx, diskID, ino, offset, fileSize)
 	default:
 		return 0, connect.Errorf(connect.CodeInvalidArgument, "unsupported lseek whence: %d", whence)
 	}
+
+	if ch != nil {
+		ch.updateOffset(targetOffset)
+	}
+	return targetOffset, nil
 }
 
 // scanData 扫描文件在 [startOffset, fileSize) 区间内的第一个有效数据偏移量

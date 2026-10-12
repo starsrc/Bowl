@@ -744,15 +744,18 @@ ORDER BY indx ASC;
 				}
 				dstChunks[dstChunkIndx] = append(dstChunks[dstChunkIndx], clonedSlice)
 
+				// 当切片存在实际物理块时（ID > 0），针对生成的每个目标切片记录递增引用计数
+				if s.ID > 0 {
+					sliceRefsToInc = append(sliceRefsToInc, sliceRefUpdate{
+						id:   s.ID,
+						size: s.Size,
+					})
+				}
+
 				curDstPos += pieceLen
 				curPayloadOff += uint32(pieceLen)
 				remainingLen -= pieceLen
 			}
-
-			sliceRefsToInc = append(sliceRefsToInc, sliceRefUpdate{
-				id:   s.ID,
-				size: s.Size,
-			})
 		}
 	}
 

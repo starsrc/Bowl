@@ -1882,7 +1882,7 @@ func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), ref1)
 
-	// 2. Create destination file
+	// 2. 创建目标文件
 	dstResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
 		SessionId: sessionID,
 		ParentIno: 1,
@@ -1894,7 +1894,7 @@ func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
 	dstIno := dstResp.GetInode().GetIno()
 	dstFH := dstResp.GetFileHandle().GetFh()
 
-	// 3. Clone via CopyFileRange
+	// 3. 通过 CopyFileRange 执行切片克隆
 	copyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
 		SessionId: sessionID,
 		SrcIno:    srcIno,
@@ -1908,13 +1908,13 @@ func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(16384), copyResp.GetCopied())
 
-	// 4. Assert slice_refs.refs incremented to 2
+	// 4. 断言 slice_refs.refs 引用计数递增至 2
 	var ref2 int32
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = 1`, schemaName)).Scan(&ref2)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), ref2, "slice_refs.refs must be incremented to 2 after CopyFileRange")
+	assert.Equal(t, int32(2), ref2, "CopyFileRange 成功后 slice_refs.refs 必须自增为 2")
 
-	// 5. Assert destination Inode size is 16384
+	// 5. 断言目标 Inode 文件大小更新为 16384
 	dstAttr, err := h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
 		SessionId: sessionID,
 		Ino:       dstIno,
@@ -1922,7 +1922,7 @@ func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(16384), dstAttr.GetInode().GetSize())
 
-	// 6. Assert destination chunks metadata row exists
+	// 6. 断言目标 chunks 切片元数据行存在并精确记录切片映射
 	var dstRawSlices []byte
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(dstIno)).Scan(&dstRawSlices)
 	require.NoError(t, err)
@@ -1933,7 +1933,7 @@ func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
 	assert.Equal(t, uint32(0), dstSlices[0].Pos)
 	assert.Equal(t, uint32(16384), dstSlices[0].Len)
 
-	// 7. Read destination file and verify exact byte content
+	// 7. 回读目标文件验证数据字节完全一致
 	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
 		SessionId: sessionID,
 		Fh:        dstFH,

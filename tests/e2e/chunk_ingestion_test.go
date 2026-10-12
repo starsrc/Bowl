@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -286,6 +289,256 @@ func TestE2E_ChunkDriver_FastIngestionAndBoundarySplitting(t *testing.T) {
 	assert.Equal(t, boundaryPayload, readResp.GetData())
 
 	// 14. 释放文件句柄
+	_, err = storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+
+// TestE2E_ChunkDriver_Read_JuiceFSOverlayAndColdS3Fallback 验证基于真实二进制服务的切片图层覆盖读取、稀疏空洞填充与 S3 透明 HTTP Range 回源全通路
+func TestE2E_ChunkDriver_Read_JuiceFSOverlayAndColdS3Fallback(t *testing.T) {
+	ctx := context.Background()
+
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	// 1. 初始化数据库连接池
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// 2. 初始化 MinIO 客户端并确保 bucket 存在
+	minioEndpoint := "127.0.0.1:9000"
+	minioBucket := "bowl-data"
+	minioClient, err := minio.New(minioEndpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4("minioadmin", "minioadmin", ""),
+		Secure: false,
+	})
+	require.NoError(t, err)
+
+	bucketExists, err := minioClient.BucketExists(ctx, minioBucket)
+	require.NoError(t, err)
+	if !bucketExists {
+		err = minioClient.MakeBucket(ctx, minioBucket, minio.MakeBucketOptions{})
+		require.NoError(t, err)
+	}
+
+	// 3. 准备独立测试目录
+	baseDir := t.TempDir()
+	binDir := filepath.Join(baseDir, "bin")
+	dataDir := filepath.Join(baseDir, "data")
+	stagingDir := filepath.Join(baseDir, "staging")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+
+	repoRoot, err := filepath.Abs("../..")
+	require.NoError(t, err)
+
+	diskBin := filepath.Join(binDir, "disk-service")
+	storageBin := filepath.Join(binDir, "storage-service")
+
+	// 4. 静态编译二进制
+	cmdDiskBuild := exec.Command("go", "build", "-o", diskBin, "./services/disk/cmd")
+	cmdDiskBuild.Dir = repoRoot
+	out, err := cmdDiskBuild.CombinedOutput()
+	require.NoError(t, err, "编译 disk-service 失败: %s", string(out))
+
+	cmdStorageBuild := exec.Command("go", "build", "-o", storageBin, "./services/storage/cmd")
+	cmdStorageBuild.Dir = repoRoot
+	out, err = cmdStorageBuild.CombinedOutput()
+	require.NoError(t, err, "编译 storage-service 失败: %s", string(out))
+
+	// 5. 启动 DiskService 进程
+	diskPort := getFreePort(t)
+	diskAddr := fmt.Sprintf("http://127.0.0.1:%d", diskPort)
+
+	ctxDisk, cancelDisk := context.WithCancel(context.Background())
+	defer cancelDisk()
+
+	cmdDisk := exec.CommandContext(ctxDisk, diskBin)
+	cmdDisk.Dir = repoRoot
+	cmdDisk.Env = append(os.Environ(),
+		fmt.Sprintf("SERVER_PORT=%d", diskPort),
+		fmt.Sprintf("PORT=%d", diskPort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+	)
+	cmdDisk.Stdout = os.Stdout
+	cmdDisk.Stderr = os.Stderr
+	require.NoError(t, cmdDisk.Start())
+	defer func() {
+		cancelDisk()
+		_ = cmdDisk.Wait()
+	}()
+
+	waitForHTTP(t, diskAddr, 10*time.Second)
+
+	// 6. 启动 StorageService 进程 (启用 STORAGE_DRIVER=chunk 与 S3 回源)
+	storagePort := getFreePort(t)
+	storageAddr := fmt.Sprintf("http://127.0.0.1:%d", storagePort)
+
+	ctxStorage, cancelStorage := context.WithCancel(context.Background())
+	defer cancelStorage()
+
+	cmdStorage := exec.CommandContext(ctxStorage, storageBin)
+	cmdStorage.Dir = repoRoot
+	cmdStorage.Env = append(os.Environ(),
+		fmt.Sprintf("PORT=%d", storagePort),
+		fmt.Sprintf("SERVER_PORT=%d", storagePort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+		"STAGING_DIR="+stagingDir,
+		"STORAGE_DRIVER=chunk",
+		"DISK_SERVICE_ADDR="+diskAddr,
+		"S3_ENABLED=true",
+		"S3_ENDPOINT=http://127.0.0.1:9000",
+		"S3_BUCKET="+minioBucket,
+		"S3_ACCESS_KEY=minioadmin",
+		"S3_SECRET_KEY=minioadmin",
+		"S3_REGION=us-east-1",
+		"S3_USE_SSL=false",
+		"S3_FORCE_PATH_STYLE=true",
+	)
+	cmdStorage.Stdout = os.Stdout
+	cmdStorage.Stderr = os.Stderr
+	require.NoError(t, cmdStorage.Start())
+	defer func() {
+		cancelStorage()
+		_ = cmdStorage.Wait()
+	}()
+
+	waitForHTTP(t, storageAddr, 10*time.Second)
+
+	// 7. 构造 Connect-RPC 客户端并创建虚拟磁盘
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	diskClient := bowlv1connect.NewDiskServiceClient(connect.NewClient(connecthttp.NewTransport(httpClient, diskAddr)))
+	storageClient := bowlv1connect.NewStorageServiceClient(connect.NewClient(connecthttp.NewTransport(httpClient, storageAddr)))
+
+	createDiskResp, err := diskClient.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "e2e-read-overlay-disk",
+		CapacityBytes: 10 * 1024 * 1024 * 1024,
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskIDStr := createDiskResp.GetDisk().GetDiskId()
+	parsedDiskUUID, err := uuid.Parse(diskIDStr)
+	require.NoError(t, err)
+
+	schemaName := fmt.Sprintf("disk_%s", strings.ReplaceAll(parsedDiskUUID.String(), "-", "_"))
+	defer func() {
+		_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 8. 挂载虚拟磁盘并创建文件
+	clientID := "e2e-read-client"
+	mountResp, err := storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskIDStr,
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "read-overlay-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 9. 阶段一：写入多层重叠数据并在远端留下稀疏空洞
+	// 写入 1: 0..64KB 写入 'A'
+	size64K := 64 * 1024
+	payloadA := bytes.Repeat([]byte("A"), size64K)
+	_, err = storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payloadA,
+	})
+	require.NoError(t, err)
+
+	// 写入 2: 16KB..32KB 覆写 'B' (密集覆写)
+	size16K := 16 * 1024
+	payloadB := bytes.Repeat([]byte("B"), size16K)
+	_, err = storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    16 * 1024,
+		Data:      payloadB,
+	})
+	require.NoError(t, err)
+
+	// 写入 3: 1MB..1MB+64KB 写入 'C' (中间 64KB..1MB 形成稀疏空洞)
+	offset1MB := uint64(1024 * 1024)
+	payloadC := bytes.Repeat([]byte("C"), size64K)
+	_, err = storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset1MB,
+		Data:      payloadC,
+	})
+	require.NoError(t, err)
+
+	// 10. 阶段二：热路径读取与稀疏空洞验证
+	// 10.1 回读 0..32KB (前 16KB 为 'A'，后 16KB 为 'B')
+	readHotResp, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      uint32(32 * 1024),
+	})
+	require.NoError(t, err)
+	expectedHot := append(bytes.Repeat([]byte("A"), size16K), bytes.Repeat([]byte("B"), size16K)...)
+	assert.Equal(t, expectedHot, readHotResp.GetData(), "热缓存图层覆写回读必须返回最新写入")
+
+	// 10.2 回读稀疏空洞区间 64KB..128KB (必须全零)
+	readHoleResp, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    uint64(size64K),
+		Size:      uint32(size64K),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, size64K), readHoleResp.GetData(), "稀疏空洞区间必须全为 0x00")
+
+	// 11. 阶段三：等待后台 S3 上传并将切片 3 转换为冷数据
+	// 触发 Fsync 等待 S3 持久化完成
+	_, _ = storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	time.Sleep(1 * time.Second)
+
+	// 清除切片 3 的本地 Staging 文件
+	slice3Path := filepath.Join(stagingDir, diskIDStr, "slice_3.bin")
+	_ = os.Remove(slice3Path)
+
+	// 12. 阶段四：冷路径回源读取 (从 S3 HTTP Range 局部拉取 1MB 处的 'C' 数据)
+	readColdResp, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset1MB,
+		Size:      uint32(size64K),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payloadC, readColdResp.GetData(), "S3 HTTP Range 透明冷读回源数据必须完全一致")
+
+	// 13. 释放句柄
 	_, err = storageClient.Release(ctx, &bowlv1.ReleaseRequest{
 		SessionId: sessionID,
 		Fh:        fh,

@@ -3808,3 +3808,410 @@ func TestChunkDriver_Write_SequentialAppend_MultiSliceLedger(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestChunkDriver_Read_JuiceFSOverlay_DenseOverwrites 验证多层密集覆写场景下 JuiceFS 图层重构算法严格返回最新写入数据
+func TestChunkDriver_Read_JuiceFSOverlay_DenseOverwrites(t *testing.T) {
+	h, _, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "client-overlay-dense"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. 创建测试文件
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-overlay-dense.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 3. 多层密集覆写写入序列:
+	// 层 1: 写入 8192 字节基底数据 'A' (区间 0..8192)
+	dataA := bytes.Repeat([]byte("A"), 8192)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      dataA,
+	})
+	require.NoError(t, err)
+
+	// 层 2: 覆写 2048 字节数据 'B' (区间 1024..3072)
+	dataB := bytes.Repeat([]byte("B"), 2048)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1024,
+		Data:      dataB,
+	})
+	require.NoError(t, err)
+
+	// 层 3: 覆写 1024 字节数据 'C' (区间 2048..3072)，覆盖层 2 后半段
+	dataC := bytes.Repeat([]byte("C"), 1024)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Data:      dataC,
+	})
+	require.NoError(t, err)
+
+	// 层 4: 覆写 512 字节数据 'D' (区间 512..1024)，跨越层 1 与层 2 边界
+	dataD := bytes.Repeat([]byte("D"), 512)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    512,
+		Data:      dataD,
+	})
+	require.NoError(t, err)
+
+	// 层 5: 追加并扩展写入 4096 字节数据 'E' (区间 6144..10240)，使文件总长扩展至 10240 字节
+	dataE := bytes.Repeat([]byte("E"), 4096)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    6144,
+		Data:      dataE,
+	})
+	require.NoError(t, err)
+
+	// 4. 根据写入时序构建预期真值缓冲
+	// 0..512:     'A' (来自层 1)
+	// 512..1024:  'D' (来自层 4)
+	// 1024..2048: 'B' (来自层 2)
+	// 2048..3072: 'C' (来自层 3)
+	// 3072..6144: 'A' (来自层 1)
+	// 6144..10240:'E' (来自层 5)
+	expectedFull := make([]byte, 10240)
+	copy(expectedFull[0:8192], dataA)
+	copy(expectedFull[1024:3072], dataB)
+	copy(expectedFull[2048:3072], dataC)
+	copy(expectedFull[512:1024], dataD)
+	copy(expectedFull[6144:10240], dataE)
+
+	// 5. 校验 JuiceFS MetaAdapter 重组后的切片图层
+	meta := driver.MetaAdapter()
+	reconstituted, err := meta.ReadReconstitutedSlices(ctx, diskID.String(), ino, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, reconstituted)
+
+	// 6. 全量回读校验
+	readFullResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      10240,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expectedFull, readFullResp.GetData(), "全量图层覆写回读必须与最新写入严格一致")
+	assert.True(t, readFullResp.GetEof())
+
+	// 7. 跨重叠切片交界处的局部区间回读校验
+	subTests := []struct {
+		name   string
+		offset uint64
+		size   uint32
+	}{
+		{"跨 A 与 D 边界", 400, 300},
+		{"跨 D 与 B 边界", 900, 300},
+		{"跨 B 与 C 边界", 1900, 300},
+		{"跨 C 与 A 边界", 3000, 300},
+		{"跨 A 与 E 边界", 6000, 400},
+		{"单切片内部读取", 1200, 500},
+	}
+
+	for _, tc := range subTests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+				SessionId: sessionID,
+				Fh:        fh,
+				Ino:       ino,
+				Offset:    tc.offset,
+				Size:      tc.size,
+			})
+			require.NoError(t, err)
+			expectedPart := expectedFull[tc.offset : tc.offset+uint64(tc.size)]
+			assert.Equal(t, expectedPart, resp.GetData(), "局部切片图层区间回读不符")
+		})
+	}
+
+	// 8. 释放句柄
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+
+// TestChunkDriver_Read_SparseHoles_ZeroFill 验证未写入的稀疏空洞区间自动返回全零 0x00 字节且不触发多余 S3 请求
+func TestChunkDriver_Read_SparseHoles_ZeroFill(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "client-sparse-holes"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. 配置 S3Reader 与 S3Uploader
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// 3. 创建测试文件
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-sparse-holes.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 4. 写入两个孤立的数据块，并在中间留下稀疏空洞:
+	// 块 1: 在起始偏移 0 写入 32KB
+	payload1 := make([]byte, 32*1024)
+	for i := range payload1 {
+		payload1[i] = byte((i * 17) % 256)
+	}
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload1,
+	})
+	require.NoError(t, err)
+
+	// 块 2: 在 1MB (1048576) 偏移处写入 32KB
+	offset2 := uint64(1024 * 1024)
+	payload2 := make([]byte, 32*1024)
+	for i := range payload2 {
+		payload2[i] = byte((i * 23) % 256)
+	}
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    offset2,
+		Data:      payload2,
+	})
+	require.NoError(t, err)
+
+	// 等待 S3 异步推流完成
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer waitCancel()
+	err = uploader.WaitForIno(waitCtx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// 将本地 Staging 切片删除，使数据切片完全转入 S3 冷存储
+	localSlice1 := stagingMgr.SlicePath(diskID.String(), 1)
+	localSlice2 := stagingMgr.SlicePath(diskID.String(), 2)
+	_ = os.Remove(localSlice1)
+	_ = os.Remove(localSlice2)
+
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 2, 0), minio.RemoveObjectOptions{})
+	}()
+
+	// 5. 校验中间稀疏空洞区间 (32KB..1MB) 读取: 必须返回全零且不报错
+	holeOffset := uint64(32 * 1024)
+	holeSize := uint32(256 * 1024)
+	readHoleResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    holeOffset,
+		Size:      holeSize,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, holeSize), readHoleResp.GetData(), "稀疏空洞区间必须返回全 0x00 字节")
+
+	// 6. 校验跨越“空洞-有效冷数据”交界的读取 (从 1MB-16KB 开始读取 32KB: 前 16KB 为全零，后 16KB 为 S3 冷数据)
+	spanOffset := offset2 - 16*1024
+	spanSize := uint32(32 * 1024)
+	readSpanResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    spanOffset,
+		Size:      spanSize,
+	})
+	require.NoError(t, err)
+	expectedSpan := make([]byte, spanSize)
+	copy(expectedSpan[16*1024:], payload2[:16*1024])
+	assert.Equal(t, expectedSpan, readSpanResp.GetData(), "空洞与冷切片交界读取数据必须准确吻合")
+
+	// 7. 释放句柄
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+
+// TestChunkDriver_Read_ColdS3_HTTPRange_SubBlock 验证跨 4MB S3 Block 边界时的 HTTP Range 局部精细回源拉取
+func TestChunkDriver_Read_ColdS3_HTTPRange_SubBlock(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "client-s3-range-subblock"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 1. 挂载虚拟磁盘
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 2. 配置 S3Reader 与 S3Uploader
+	cfg := config.S3Config{
+		Enabled:        true,
+		Endpoint:       "http://127.0.0.1:9000",
+		Bucket:         "bowl-data",
+		AccessKey:      "minioadmin",
+		SecretKey:      "minioadmin",
+		Region:         "us-east-1",
+		UseSSL:         false,
+		ForcePathStyle: true,
+	}
+	uploader, err := chunk.NewS3Uploader(cfg, stagingMgr,
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	require.NoError(t, err)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	// 3. 创建测试文件
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "test-s3-range-subblock.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 4. 写入 5MB 载荷 (跨越 4MB 物理分块边界: Block 0 为 4MB, Block 1 为 1MB)
+	payload5MB := make([]byte, 5*1024*1024)
+	for i := range payload5MB {
+		payload5MB[i] = byte((i * 19) % 256)
+	}
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload5MB,
+	})
+	require.NoError(t, err)
+
+	// 等待 S3 异步推流完成
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	err = uploader.WaitForIno(waitCtx, diskID.String(), ino)
+	require.NoError(t, err)
+
+	// 清理本地 Staging 文件，迫使读请求全部通过 S3 回源
+	localSlice := stagingMgr.SlicePath(diskID.String(), 1)
+	_ = os.Remove(localSlice)
+
+	minioClient, err := chunk.NewMinIOClient(cfg)
+	require.NoError(t, err)
+	defer func() {
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 1), minio.RemoveObjectOptions{})
+	}()
+
+	// 5. 跨越 4MB Block 边界发起局部 Range 读取: 从 4MB-32KB 读取 64KB
+	// 期望: 通过 HTTP Range 从 Block 0 读取末尾 32KB，从 Block 1 读取起始 32KB
+	rangeOffset := uint64(4*1024*1024 - 32*1024)
+	rangeSize := uint32(64 * 1024)
+	readResp, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    rangeOffset,
+		Size:      rangeSize,
+	})
+	require.NoError(t, err)
+	expectedRange := payload5MB[rangeOffset : rangeOffset+uint64(rangeSize)]
+	assert.Equal(t, expectedRange, readResp.GetData(), "跨 4MB Block 边界的 S3 HTTP Range 读取数据必须准确")
+
+	// 6. 释放句柄
+	_, err = h.storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+

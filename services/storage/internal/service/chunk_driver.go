@@ -189,7 +189,7 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 	}
 	schemaName := FormatDiskSchema(parsedDiskUUID)
 
-	// 1. Query Inode size from PostgreSQL
+	// 1. 查询 Inode 文件大小
 	var fileSize int64
 	queryInodeSize := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
 	if err := d.db.QueryRow(ctx, queryInodeSize, int64(ino)).Scan(&fileSize); err != nil {
@@ -199,7 +199,7 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 		return nil, false, connect.Errorf(connect.CodeInternal, "failed to query inode size: %s", err)
 	}
 
-	// 2. Boundary check: if offset >= fileSize, return EOF
+	// 2. 边界检查：若 offset 已超出或等于文件大小，返回空数据与 EOF
 	if offset >= uint64(fileSize) {
 		return []byte{}, true, nil
 	}
@@ -217,39 +217,71 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 	curOffset := offset
 	endOffset := offset + toRead
 
-	queryChunks := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
+	meta := d.MetaAdapter()
+	if meta == nil {
+		return nil, false, connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
+	}
 
+	// 3. 循环跨 64MB Chunk 边界读取数据并重构切片图层
 	for curOffset < endOffset {
-		curChunk := uint32(curOffset / chunk.ChunkSize)
-		chunkEnd := uint64(curChunk+1) * chunk.ChunkSize
+		curChunk := uint32(curOffset / ChunkSize)
+		chunkEnd := uint64(curChunk+1) * ChunkSize
 		chunkRemaining := chunkEnd - curOffset
 
 		chunkReadLen := endOffset - curOffset
 		if chunkReadLen > chunkRemaining {
 			chunkReadLen = chunkRemaining
 		}
-		chunkPos := uint32(curOffset % chunk.ChunkSize)
+		chunkPos := uint32(curOffset % ChunkSize)
 
-		var rawSlices []byte
-		err := d.db.QueryRow(ctx, queryChunks, int64(ino), int32(curChunk)).Scan(&rawSlices)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Chunk row does not exist: entire range is sparse hole filled with 0x00.
-			// Since result is already initialized with 0x00, no copy is necessary.
-		} else if err != nil {
-			return nil, false, connect.Errorf(connect.CodeInternal, "failed to query chunk slices: %s", err)
-		} else if len(rawSlices) > 0 {
-			slices, err := chunk.DecodeSlices(rawSlices)
-			if err != nil {
-				return nil, false, connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
-			}
+		// 3.1. 通过 MetaAdapter 获取经过 JuiceFS 图层重构后的无重叠切片视图
+		reconstitutedSlices, err := meta.ReadReconstitutedSlices(ctx, diskID, ino, curChunk)
+		if err != nil {
+			return nil, false, connect.Errorf(connect.CodeInternal, "查询并重组切片元数据失败: %s", err)
+		}
 
+		if len(reconstitutedSlices) > 0 {
 			dst := result[resultOffset : resultOffset+chunkReadLen]
-			var sliceReader chunk.SliceReader = d.staging
-			if d.reader != nil {
-				sliceReader = d.reader.ForChunkWithContext(ctx, curChunk)
-			}
-			if err := chunk.ReconstituteRangeTo(dst, diskID, slices, chunkPos, uint32(chunkReadLen), sliceReader); err != nil {
-				return nil, false, connect.Errorf(connect.CodeInternal, "failed to reconstitute chunk slice: %s", err)
+			reqStart := chunkPos
+			reqEnd := chunkPos + uint32(chunkReadLen)
+
+			var curSlicePos uint32 = 0
+			for _, s := range reconstitutedSlices {
+				sliceStart := curSlicePos
+				sliceEnd := curSlicePos + s.Len
+				curSlicePos += s.Len
+
+				// 检查当前重构切片与请求区间的重叠交集
+				if sliceEnd <= reqStart || sliceStart >= reqEnd {
+					continue
+				}
+
+				overlapStart := max(sliceStart, reqStart)
+				overlapEnd := min(sliceEnd, reqEnd)
+				overlapLen := overlapEnd - overlapStart
+
+				dstStart := overlapStart - reqStart
+				dstEnd := dstStart + overlapLen
+
+				// 稀疏空洞 (Id == 0): 不查询 S3 或本地缓存，自动填充为全零 0x00
+				if s.Id == 0 {
+					clear(dst[dstStart:dstEnd])
+					continue
+				}
+
+				// 计算在物理切片载荷中的有效偏移量
+				sliceOff := s.Off + (overlapStart - sliceStart)
+
+				// 从本地 NVMe Staging 缓存（热路径）或 S3 HTTP Range（冷路径）拉取切片局部数据
+				subPayload, err := d.readSliceRange(ctx, diskID, curChunk, s.Id, sliceOff, overlapLen)
+				if err != nil {
+					return nil, false, connect.Errorf(connect.CodeInternal, "读取切片 %d 数据失败: %s", s.Id, err)
+				}
+				if uint32(len(subPayload)) < overlapLen {
+					return nil, false, connect.Errorf(connect.CodeInternal, "切片 %d 载荷损坏: 期望长度 %d，实际读取 %d", s.Id, overlapLen, len(subPayload))
+				}
+
+				copy(dst[dstStart:dstEnd], subPayload[:overlapLen])
 			}
 		}
 
@@ -258,6 +290,29 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 	}
 
 	return result, isEOF, nil
+}
+
+// readSliceRange 读取指定切片的指定有效载荷区间 [offset, offset+length)。
+// 优先命中本地 NVMe Staging 缓存热路径；本地缺失时透明通过 S3 HTTP Range 发起 4MB 物理分块局部拉取冷路径。
+func (d *ChunkDriver) readSliceRange(ctx context.Context, diskID string, chunkIndx uint32, sliceID uint64, offset uint32, length uint32) ([]byte, error) {
+	if length == 0 {
+		return []byte{}, nil
+	}
+
+	// 1. 热路径 (Hot path): 优先尝试从本地 NVMe Staging 缓存读取
+	if d.staging != nil {
+		data, err := d.staging.ReadSliceRange(diskID, sliceID, offset, length)
+		if err == nil && uint32(len(data)) == length {
+			return data, nil
+		}
+	}
+
+	// 2. 冷路径 (Cold path): 本地缺失时，透明通过 S3 HTTP Range 拉取 4MB Block 区间
+	if d.reader != nil {
+		return d.reader.ReadSliceRange(ctx, diskID, chunkIndx, sliceID, offset, length)
+	}
+
+	return nil, fmt.Errorf("切片 %d 本地缓存缺失且未配置 S3 回源读取器", sliceID)
 }
 
 // Write 将指定数据分片写入 NVMe 本地暂存缓存并提交 24 字节切片账本元数据至 PostgreSQL。

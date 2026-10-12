@@ -193,6 +193,9 @@ func (a *metaAdapter) ReadReconstitutedSlices(ctx context.Context, diskID string
 	if err != nil {
 		return nil, fmt.Errorf("查询 chunks 表失败 (ino=%d, indx=%d): %w", ino, chunkIndx, err)
 	}
+	if len(raw) > 0 && len(raw)%SliceBytes != 0 {
+		return nil, fmt.Errorf("%w: chunks 表元数据损坏 (ino=%d, indx=%d, len=%d)", ErrTruncatedBuffer, ino, chunkIndx, len(raw))
+	}
 
 	return BuildSliceFromRaw(raw), nil
 }

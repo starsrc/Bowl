@@ -2259,6 +2259,7 @@ type mockS3Client struct {
 	putCalls atomic.Int32
 	putDelay time.Duration
 	putErr   error
+	putFunc  func(ctx context.Context, bucket, objectKey string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
 	objects  map[string][]byte
 }
 
@@ -2278,8 +2279,12 @@ func (m *mockS3Client) PutObject(ctx context.Context, bucket, objectKey string, 
 		}
 	}
 	m.mu.Lock()
+	pFunc := m.putFunc
 	err := m.putErr
 	m.mu.Unlock()
+	if pFunc != nil {
+		return pFunc(ctx, bucket, objectKey, reader, objectSize, opts)
+	}
 	if err != nil {
 		return minio.UploadInfo{}, err
 	}
@@ -2717,6 +2722,255 @@ func TestChunkDriver_Fsync_WithoutUploader_Succeeds(t *testing.T) {
 		Ino:       ino,
 	})
 	require.NoError(t, err)
+}
+
+// TestChunkDriver_Fsync_TransientRetry_SucceedsAfterBackoff 验证遭遇瞬时网络抖动时指数退避重试，Fsync 成功阻塞直至数据落盘
+func TestChunkDriver_Fsync_TransientRetry_SucceedsAfterBackoff(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "fsync-transient-retry-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	var attempts atomic.Int32
+	mockClient.putFunc = func(ctx context.Context, bucket, objectKey string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+		cur := attempts.Add(1)
+		if cur <= 2 {
+			// 模拟前 2 次遭遇瞬时 503 错误
+			return minio.UploadInfo{}, minio.ErrorResponse{
+				StatusCode: 503,
+				Code:       "ServiceUnavailable",
+				Message:    "transient network congestion",
+			}
+		}
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return minio.UploadInfo{}, err
+		}
+		mockClient.mu.Lock()
+		mockClient.objects[objectKey] = data
+		mockClient.mu.Unlock()
+		return minio.UploadInfo{
+			Bucket: bucket,
+			Key:    objectKey,
+			Size:   int64(len(data)),
+		}, nil
+	}
+
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(1),
+		chunk.WithMaxRetries(4),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "retry-test.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	payload := []byte("transient retry data payload with backoff")
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// Fsync 必须挂起直至退避重试成功并提交 S3
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer syncCancel()
+
+	fsyncResp, err := h.storageClient.Fsync(syncCtx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Datasync:  false,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fsyncResp)
+	assert.GreaterOrEqual(t, attempts.Load(), int32(3), "应当经历至少 2 次瞬时失败与 1 次成功重试")
+
+	objs := mockClient.getObjects()
+	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	assert.Equal(t, payload, objs[key], "重试成功后 S3 物理对象必须完整存在")
+}
+
+// TestChunkDriver_Fsync_ConcurrentCalls_SameInode 验证对同一 Inode 发起并发 Fsync/Flush 时均能正确挂起并安全返回
+func TestChunkDriver_Fsync_ConcurrentCalls_SameInode(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "fsync-concurrent-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	mockClient.putDelay = 60 * time.Millisecond
+
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(2),
+		chunk.WithInitialBackoff(10*time.Millisecond),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "concurrent-fsync.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	payload := bytes.Repeat([]byte("C"), 1024*1024)
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// 并发触发 Flush 与 Fsync
+	var wg sync.WaitGroup
+	var errFlush, errFsync error
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		_, errFlush = h.storageClient.Flush(ctx, &bowlv1.FlushRequest{
+			SessionId: sessionID,
+			Fh:        fh,
+			Ino:       ino,
+		})
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, errFsync = h.storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+			SessionId: sessionID,
+			Fh:        fh,
+			Ino:       ino,
+		})
+	}()
+
+	wg.Wait()
+	require.NoError(t, errFlush, "并发 Flush 必须成功")
+	require.NoError(t, errFsync, "并发 Fsync 必须成功")
+
+	objs := mockClient.getObjects()
+	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	assert.Equal(t, payload, objs[key])
+}
+
+// TestChunkDriver_ObjectStorage_And_Barrier 验证切片驱动与内联 JuiceFS 对象存储及同步屏障信道的集成
+func TestChunkDriver_ObjectStorage_And_Barrier(t *testing.T) {
+	h, stagingMgr, driver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	clientID := "driver-barrier-client"
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	mockClient := newMockS3Client()
+	uploader := chunk.NewS3UploaderWithClient(
+		mockClient,
+		"bowl-data",
+		chunk.WithStaging(stagingMgr),
+		chunk.WithWorkers(2),
+	)
+	driver.SetUploader(uploader)
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "barrier-seam.bin",
+		Mode:      0o644,
+		Flags:     0,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      []byte("data for barrier seam test"),
+	})
+	require.NoError(t, err)
+
+	// 直接从驱动 seam 获取同步屏障信道并等待达成
+	barrierCh := driver.Barrier(diskID.String(), ino)
+	select {
+	case err := <-barrierCh:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("持久化屏障信道等待超时")
+	}
 }
 
 func isMinIOHealthy(endpoint string) bool {

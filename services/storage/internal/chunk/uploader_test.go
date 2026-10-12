@@ -14,6 +14,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
 // mockStorageClient implements ObjectStorageClient for white-box transient error testing.
@@ -427,4 +429,197 @@ func TestS3Uploader_BackgroundWorker_FailureStatus(t *testing.T) {
 
 	assert.Equal(t, SliceStatusFailed, uploader.GetSliceStatus(diskID, sliceID))
 }
+
+func TestS3Uploader_Barrier_Channel_SuccessAndConcurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	staging := NewStagingManager(tempDir)
+	mockClient := newMockStorageClient()
+
+	uploader := NewS3UploaderWithClient(mockClient, "test-bucket",
+		WithStaging(staging),
+		WithWorkers(4),
+		WithInitialBackoff(5*time.Millisecond),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	diskID := "disk-barrier-test"
+	ino := uint64(777)
+
+	// 1. 入队 3 个在途切片推流任务
+	for i := 0; i < 3; i++ {
+		sID := staging.NextSliceID()
+		d := []byte(fmt.Sprintf("barrier slice %d for ino %d", i, ino))
+		err := staging.WriteSlice(diskID, sID, d)
+		require.NoError(t, err)
+
+		err = uploader.Enqueue(ctx, &UploadTask{
+			DiskID:    diskID,
+			Ino:       ino,
+			ChunkIndx: 0,
+			SliceID:   sID,
+		})
+		require.NoError(t, err)
+	}
+
+	// 2. 同时创建两个针对该 Inode 的持久化同步屏障信道 (模拟并发 RPC 调用)
+	barrierCh1 := uploader.Barrier(diskID, ino)
+	barrierCh2 := uploader.Barrier(diskID, ino)
+
+	// 3. 并发等待两个屏障信道达成
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		err1 = <-barrierCh1
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = <-barrierCh2
+	}()
+
+	wg.Wait()
+	require.NoError(t, err1, "屏障 1 必须成功")
+	require.NoError(t, err2, "屏障 2 必须成功")
+
+	// 4. 再次调用 Barrier 时应立即返回 nil
+	immediateCh := uploader.Barrier(diskID, ino)
+	select {
+	case err := <-immediateCh:
+		require.NoError(t, err)
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("无在途切片时 Barrier 必须非阻塞立即返回")
+	}
+}
+
+func TestS3Uploader_Barrier_Channel_ErrorPropagation_Concurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	staging := NewStagingManager(tempDir)
+	mockClient := newMockStorageClient()
+	mockClient.putFunc = func(ctx context.Context, bucket, objectKey string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+		return minio.UploadInfo{}, errors.New("s3 fatal error: simulated disk crash")
+	}
+
+	uploader := NewS3UploaderWithClient(mockClient, "test-bucket",
+		WithStaging(staging),
+		WithWorkers(2),
+		WithMaxRetries(0),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uploader.Start(ctx)
+	defer uploader.Stop()
+
+	diskID := "disk-barrier-err"
+	ino := uint64(888)
+
+	sID := staging.NextSliceID()
+	_ = staging.WriteSlice(diskID, sID, []byte("fatal payload"))
+
+	err := uploader.Enqueue(ctx, &UploadTask{
+		DiskID:    diskID,
+		Ino:       ino,
+		ChunkIndx: 0,
+		SliceID:   sID,
+	})
+	require.NoError(t, err)
+
+	barrierCh1 := uploader.Barrier(diskID, ino)
+	barrierCh2 := uploader.Barrier(diskID, ino)
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		err1 = <-barrierCh1
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = <-barrierCh2
+	}()
+
+	wg.Wait()
+	require.Error(t, err1, "并发屏障 1 必须收到不可恢复错误")
+	require.Error(t, err2, "并发屏障 2 必须收到不可恢复错误")
+	assert.Contains(t, err1.Error(), "fatal error")
+	assert.Contains(t, err2.Error(), "fatal error")
+}
+
+func TestS3Uploader_InlinedJuiceFS_ObjectStorage(t *testing.T) {
+	mockClient := newMockStorageClient()
+	objStore := object.NewMemStorage()
+
+	uploader := NewS3UploaderWithClient(mockClient, "test-bucket",
+		WithObjectStorage(objStore),
+		WithMaxRetries(1),
+	)
+
+	assert.NotNil(t, uploader.ObjectStorage(), "ObjectStorage 必须可读取")
+	assert.Equal(t, objStore, uploader.ObjectStorage())
+
+	block := Block{
+		DiskID:    "disk-jfs",
+		ChunkIndx: 0,
+		SliceID:   123,
+		BlockIndx: 0,
+		Data:      []byte("juicefs inlined data payload"),
+		Key:       FormatObjectKey("disk-jfs", 0, 123, 0),
+	}
+
+	err := uploader.UploadBlock(context.Background(), block)
+	require.NoError(t, err)
+
+	// 校验数据已通过 JuiceFS ObjectStorage 上传
+	head, err := objStore.Head(context.Background(), block.Key)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(block.Data)), head.Size())
+}
+
+func TestS3Uploader_Enqueue_ContextCanceled_NoDeadlock(t *testing.T) {
+	tempDir := t.TempDir()
+	staging := NewStagingManager(tempDir)
+	mockClient := newMockStorageClient()
+
+	uploader := NewS3UploaderWithClient(mockClient, "test-bucket",
+		WithStaging(staging),
+		WithQueueSize(1), // 极小队列
+		WithWorkers(0),   // 无 worker 消费，队列将瞬间填满
+	)
+
+	ctx := context.Background()
+	task1 := &UploadTask{DiskID: "disk-dl", Ino: 999, SliceID: 1}
+	err := uploader.Enqueue(ctx, task1)
+	require.NoError(t, err)
+
+	// 队列已满，传入已取消的上下文入队 task2
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	task2 := &UploadTask{DiskID: "disk-dl", Ino: 999, SliceID: 2}
+	err = uploader.Enqueue(cancelCtx, task2)
+	require.Error(t, err)
+
+	// 验证对于 task2，其在途状态必须被清理，不能导致 Barrier 永久死锁
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer waitCancel()
+
+	// 对该 Inode 发起 WaitForIno，等待应当因 task2 被标记失败或从在途移除而正常返回，不应挂起死锁
+	barrierCh := uploader.Barrier("disk-dl", 999)
+	select {
+	case <-barrierCh:
+		// 正常返回
+	case <-waitCtx.Done():
+		// task1 仍然在队列中未被消费，但 task2 不能造成死锁，如果我们在 waitCtx 超时前检查 task2 的状态：
+		assert.Equal(t, SliceStatusFailed, uploader.GetSliceStatus("disk-dl", 2))
+	}
+}
+
 

@@ -14,6 +14,7 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
 // chunkFileHandle represents open file context for ChunkDriver.
@@ -93,6 +94,24 @@ func (d *ChunkDriver) SetUploader(uploader *chunk.S3Uploader) {
 			d.gc.SetClient(uploader.Client(), uploader.Bucket())
 		}
 	}
+}
+
+// ObjectStorage 返回底层内联的 JuiceFS 对象存储引擎驱动（若已配置）
+func (d *ChunkDriver) ObjectStorage() object.ObjectStorage {
+	if d.uploader != nil {
+		return d.uploader.ObjectStorage()
+	}
+	return nil
+}
+
+// Barrier 返回针对指定 Inode 的持久化同步屏障信道
+func (d *ChunkDriver) Barrier(diskID string, ino uint64) <-chan error {
+	if d.uploader != nil {
+		return d.uploader.Barrier(diskID, ino)
+	}
+	ch := make(chan error, 1)
+	ch <- nil
+	return ch
 }
 
 // Reader returns the configured S3Reader, if any.
@@ -408,6 +427,10 @@ func (d *ChunkDriver) Write(ctx context.Context, handle HandleContext, diskID st
 
 
 
+// syncInodeBarrier 执行针对指定 Inode 的持久化同步屏障：
+// 1. 同步刷新本地 NVMe Staging 缓存目录元数据与文件缓冲至持久介质。
+// 2. 阻塞等待该 Inode 在途的全部 4MB S3/MinIO 物理分块异步上传任务持久化完成。
+// 3. 处理瞬时错误重试衰竭、不可恢复错误与超时/取消，向 Connect-RPC 调用方正确回传错误。
 func (d *ChunkDriver) syncInodeBarrier(ctx context.Context, diskID string, ino uint64) error {
 	if err := ctx.Err(); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -419,12 +442,14 @@ func (d *ChunkDriver) syncInodeBarrier(ctx context.Context, diskID string, ino u
 		return err
 	}
 
+	// 1. 同步本地 NVMe Staging 缓存目录与文件数据
 	if d.staging != nil && diskID != "" {
 		if err := d.staging.SyncDisk(diskID); err != nil {
 			return connect.Errorf(connect.CodeInternal, "failed to sync staging disk: %s", err)
 		}
 	}
 
+	// 2. 阻塞等待该 Inode 在途的全部 4MB 物理分块持久化至 S3/MinIO
 	if d.uploader != nil && diskID != "" && ino > 0 {
 		if err := d.uploader.WaitForIno(ctx, diskID, ino); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -440,7 +465,7 @@ func (d *ChunkDriver) syncInodeBarrier(ctx context.Context, diskID string, ino u
 	return nil
 }
 
-// Flush flushes dirty data for an open handle (implemented in STARSRC-123).
+// Flush 针对打开文件句柄同步脏切片并等待后台 S3 推流屏障达成 (FUSE_FLUSH)
 func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID string, ino uint64) error {
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
@@ -458,7 +483,7 @@ func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID st
 	return d.syncInodeBarrier(ctx, diskID, ino)
 }
 
-// Fsync synchronizes file data to persistent storage (implemented in STARSRC-123).
+// Fsync 针对文件数据与元数据执行持久化同步屏障，挂起等待全部在途 4MB 物理分块刷盘至 S3 (FUSE_FSYNC)
 func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID string, ino uint64, datasync bool) error {
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {

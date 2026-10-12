@@ -17,7 +17,15 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
+
+// inodeBarrier 表示针对指定 Inode 的在途切片持久化同步屏障
+type inodeBarrier struct {
+	remaining map[uint64]struct{}
+	ch        chan error
+	err       error
+}
 
 // ObjectStorageClient represents the contract for standard S3/MinIO operations.
 type ObjectStorageClient interface {
@@ -128,9 +136,17 @@ func WithBatcher(b *BlockBatcher) UploaderOption {
 	}
 }
 
+// WithObjectStorage 配置 JuiceFS 内联对象存储驱动
+func WithObjectStorage(objStore object.ObjectStorage) UploaderOption {
+	return func(u *S3Uploader) {
+		u.objStorage = objStore
+	}
+}
+
 // S3Uploader manages block aggregation, transient error retry, and background asynchronous S3 uploads.
 type S3Uploader struct {
 	client         ObjectStorageClient
+	objStorage     object.ObjectStorage
 	bucket         string
 	staging        *StagingManager
 	batcher        *BlockBatcher
@@ -147,10 +163,11 @@ type S3Uploader struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 
-	mu        sync.Mutex
-	slices    map[sliceKey]*sliceTrack
-	inoTasks  map[inoKey]map[uint64]struct{}
-	inoErrors map[inoKey]error
+	mu          sync.Mutex
+	slices      map[sliceKey]*sliceTrack
+	inoTasks    map[inoKey]map[uint64]struct{}
+	inoErrors   map[inoKey]error
+	inoBarriers map[inoKey][]*inodeBarrier
 }
 
 // NewMinIOClient initializes a MinIO client from S3Config.
@@ -182,7 +199,8 @@ func NewS3Uploader(cfg config.S3Config, staging *StagingManager, opts ...Uploade
 		return nil, fmt.Errorf("init minio client: %w", err)
 	}
 
-	allOpts := append([]UploaderOption{WithStaging(staging)}, opts...)
+	objStore := object.NewS3WithClient(client, cfg.Bucket)
+	allOpts := append([]UploaderOption{WithStaging(staging), WithObjectStorage(objStore)}, opts...)
 	return NewS3UploaderWithClient(client, cfg.Bucket, allOpts...), nil
 }
 
@@ -204,14 +222,27 @@ func NewS3UploaderWithClient(client ObjectStorageClient, bucket string, opts ...
 		slices:         make(map[sliceKey]*sliceTrack),
 		inoTasks:       make(map[inoKey]map[uint64]struct{}),
 		inoErrors:      make(map[inoKey]error),
+		inoBarriers:    make(map[inoKey][]*inodeBarrier),
 	}
 
 	for _, opt := range opts {
 		opt(u)
 	}
 
+	// 若未显式传入 objStorage，且 client 实际为 *minio.Client，自动构造内联 JuiceFS S3 驱动
+	if u.objStorage == nil && client != nil {
+		if mc, ok := client.(*minio.Client); ok {
+			u.objStorage = object.NewS3WithClient(mc, bucket)
+		}
+	}
+
 	u.queue = make(chan *UploadTask, u.queueSize)
 	return u
+}
+
+// ObjectStorage 返回当前配置的 JuiceFS 内联对象存储驱动实例
+func (u *S3Uploader) ObjectStorage() object.ObjectStorage {
+	return u.objStorage
 }
 
 // Client returns the underlying ObjectStorageClient.
@@ -263,9 +294,17 @@ func (u *S3Uploader) UploadBlock(ctx context.Context, block Block) error {
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		reader := bytes.NewReader(block.Data)
-		_, err := u.client.PutObject(ctx, u.bucket, block.Key, reader, int64(len(block.Data)), minio.PutObjectOptions{
-			ContentType: "application/octet-stream",
-		})
+		var err error
+		if u.objStorage != nil {
+			err = u.objStorage.Put(ctx, block.Key, reader)
+		} else if u.client != nil {
+			_, err = u.client.PutObject(ctx, u.bucket, block.Key, reader, int64(len(block.Data)), minio.PutObjectOptions{
+				ContentType: "application/octet-stream",
+			})
+		} else {
+			return errors.New("对象存储客户端未初始化")
+		}
+
 		if err == nil {
 			return nil
 		}
@@ -361,9 +400,38 @@ func (u *S3Uploader) Enqueue(ctx context.Context, task *UploadTask) error {
 	case u.queue <- task:
 		return nil
 	case <-ctx.Done():
+		u.failTaskOnEnqueueError(task, ctx.Err())
 		return ctx.Err()
 	case <-u.ctx.Done():
-		return errors.New("uploader is closed")
+		err := errors.New("uploader is closed")
+		u.failTaskOnEnqueueError(task, err)
+		return err
+	}
+}
+
+// failTaskOnEnqueueError 在入队遭遇上下文取消或通道关闭时清理在途状态并通知屏障，避免死锁
+func (u *S3Uploader) failTaskOnEnqueueError(task *UploadTask, err error) {
+	sKey := sliceKey{diskID: task.DiskID, sliceID: task.SliceID}
+	iKey := inoKey{diskID: task.DiskID, ino: task.Ino}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if track := u.slices[sKey]; track != nil {
+		track.status = SliceStatusFailed
+		track.err = err
+		close(track.done)
+	}
+
+	if task.Ino > 0 {
+		u.inoErrors[iKey] = err
+		if set, ok := u.inoTasks[iKey]; ok {
+			delete(set, task.SliceID)
+			if len(set) == 0 {
+				delete(u.inoTasks, iKey)
+			}
+		}
+		u.notifyBarriersLocked(iKey, task.SliceID, err)
 	}
 }
 
@@ -431,6 +499,34 @@ func (u *S3Uploader) processTask(ctx context.Context, task *UploadTask) {
 				delete(u.inoTasks, iKey)
 			}
 		}
+		// 通知所有等待此 Inode 的同步屏障
+		u.notifyBarriersLocked(iKey, task.SliceID, err)
+	}
+}
+
+// notifyBarriersLocked 递减等待指定切片的同步屏障并触发达成通知（必须持有 u.mu 锁）
+func (u *S3Uploader) notifyBarriersLocked(iKey inoKey, sliceID uint64, err error) {
+	barriers := u.inoBarriers[iKey]
+	var activeBarriers []*inodeBarrier
+
+	for _, b := range barriers {
+		if _, ok := b.remaining[sliceID]; ok {
+			delete(b.remaining, sliceID)
+			if err != nil && b.err == nil {
+				b.err = err
+			}
+			if len(b.remaining) == 0 {
+				b.ch <- b.err
+				continue
+			}
+		}
+		activeBarriers = append(activeBarriers, b)
+	}
+
+	if len(activeBarriers) == 0 {
+		delete(u.inoBarriers, iKey)
+	} else {
+		u.inoBarriers[iKey] = activeBarriers
 	}
 }
 
@@ -464,66 +560,58 @@ func (u *S3Uploader) WaitForSlice(ctx context.Context, diskID string, sliceID ui
 	}
 }
 
-// WaitForIno blocks until all in-flight S3 upload tasks for a given Inode complete.
-func (u *S3Uploader) WaitForIno(ctx context.Context, diskID string, ino uint64) error {
-	if u == nil {
-		return nil
+// Barrier 为指定 Inode 创建持久化同步屏障信道。
+// 当该 Inode 当前所有的在途 4MB 物理分块推流完成时，该信道将接收处理结果（nil 或不可恢复错误）。
+func (u *S3Uploader) Barrier(diskID string, ino uint64) <-chan error {
+	ch := make(chan error, 1)
+	if u == nil || diskID == "" || ino == 0 {
+		ch <- nil
+		return ch
 	}
 
 	iKey := inoKey{diskID: diskID, ino: ino}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	u.mu.Lock()
+	defer u.mu.Unlock()
 
-		u.mu.Lock()
-		set := u.inoTasks[iKey]
-		if len(set) == 0 {
-			if recordedErr, ok := u.inoErrors[iKey]; ok {
-				delete(u.inoErrors, iKey)
-				u.mu.Unlock()
-				return recordedErr
-			}
-			u.mu.Unlock()
-			return nil
-		}
-		var waitChans []chan struct{}
-		var tracks []*sliceTrack
-		for sliceID := range set {
-			if tr := u.slices[sliceKey{diskID: diskID, sliceID: sliceID}]; tr != nil {
-				waitChans = append(waitChans, tr.done)
-				tracks = append(tracks, tr)
-			}
-		}
-		u.mu.Unlock()
-
-		for _, ch := range waitChans {
-			select {
-			case <-ch:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-
-		u.mu.Lock()
-		for _, tr := range tracks {
-			if tr.err != nil {
-				if recordedErr, ok := u.inoErrors[iKey]; ok {
-					delete(u.inoErrors, iKey)
-					u.mu.Unlock()
-					return recordedErr
-				}
-				u.mu.Unlock()
-				return tr.err
-			}
-		}
+	set := u.inoTasks[iKey]
+	if len(set) == 0 {
 		if recordedErr, ok := u.inoErrors[iKey]; ok {
 			delete(u.inoErrors, iKey)
-			u.mu.Unlock()
-			return recordedErr
+			ch <- recordedErr
+			return ch
 		}
-		u.mu.Unlock()
+		ch <- nil
+		return ch
+	}
+
+	b := &inodeBarrier{
+		remaining: make(map[uint64]struct{}, len(set)),
+		ch:        ch,
+		err:       u.inoErrors[iKey],
+	}
+	for sliceID := range set {
+		b.remaining[sliceID] = struct{}{}
+	}
+	u.inoBarriers[iKey] = append(u.inoBarriers[iKey], b)
+	return ch
+}
+
+// WaitForIno 阻塞等待指定 Inode 当前所有的在途 4MB 物理分块持久化至 S3/MinIO 完成
+func (u *S3Uploader) WaitForIno(ctx context.Context, diskID string, ino uint64) error {
+	if u == nil || diskID == "" || ino == 0 {
+		return nil
+	}
+
+	barrierCh := u.Barrier(diskID, ino)
+
+	select {
+	case err := <-barrierCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-u.ctx.Done():
+		return errors.New("uploader is closed")
 	}
 }
 

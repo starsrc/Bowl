@@ -64,6 +64,23 @@ func (s *withPrefix) Delete(ctx context.Context, key string, getters ...AttrGett
 	return s.os.Delete(ctx, s.prefix+key, getters...)
 }
 
+// DeleteBatch 批量删除指定对象列表（自动拼接前缀）
+func (s *withPrefix) DeleteBatch(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	prefixed := make([]string, len(keys))
+	for i, k := range keys {
+		prefixed[i] = s.prefix + k
+	}
+	return s.os.DeleteBatch(ctx, prefixed)
+}
+
+// DeletePrefix 按前缀批量删除对象（自动拼接前缀）
+func (s *withPrefix) DeletePrefix(ctx context.Context, prefix string) error {
+	return s.os.DeletePrefix(ctx, s.prefix+prefix)
+}
+
 func (s *withPrefix) List(ctx context.Context, prefix, startAfter, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	objs, hasMore, nextToken, err := s.os.List(ctx, s.prefix+prefix, s.prefix+startAfter, token, delimiter, limit, followLink)
 	if err != nil {

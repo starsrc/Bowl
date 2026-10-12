@@ -29,6 +29,16 @@ func (s DefaultObjectStorage) Copy(ctx context.Context, dst, src string) error {
 	return notSupported
 }
 
+// DeleteBatch 默认不支持批量删除
+func (s DefaultObjectStorage) DeleteBatch(ctx context.Context, keys []string) error {
+	return notSupported
+}
+
+// DeletePrefix 默认不支持按前缀删除
+func (s DefaultObjectStorage) DeletePrefix(ctx context.Context, prefix string) error {
+	return notSupported
+}
+
 func (s DefaultObjectStorage) CreateMultipartUpload(ctx context.Context, key string) (*MultipartUpload, error) {
 	return nil, notSupported
 }

@@ -118,6 +118,30 @@ func (d *filestore) Delete(ctx context.Context, key string, getters ...AttrGette
 	return err
 }
 
+// DeleteBatch 批量删除本地文件列表
+func (d *filestore) DeleteBatch(ctx context.Context, keys []string) error {
+	for _, key := range keys {
+		if err := d.Delete(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeletePrefix 按前缀递归批量删除本地文件
+func (d *filestore) DeletePrefix(ctx context.Context, prefix string) error {
+	objs, _, _, err := d.List(ctx, prefix, "", "", "", 0, true)
+	if err != nil {
+		return err
+	}
+	for _, obj := range objs {
+		if err := d.Delete(ctx, obj.Key()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *filestore) List(ctx context.Context, prefix, marker, token, delimiter string, limit int64, followLink bool) ([]Object, bool, string, error) {
 	var objs []Object
 	err := filepath.Walk(d.root, func(p string, info os.FileInfo, err error) error {

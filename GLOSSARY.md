@@ -31,3 +31,13 @@ _Avoid_: Metadata database, disk namespace
 **File Handle (fh)**:
 A server-allocated unique identifier tracking an open file state, I/O mode, and lease ownership within a mount session.
 _Avoid_: File descriptor, inode handle, file pointer
+
+**Cascade Physical Purge**:
+The asynchronous, eventually consistent reclamation of all physical data blocks in object storage and local NVMe staging triggered upon virtual disk deletion.
+_Avoid_: Lazy delete, soft purge, partial cleanup
+
+**Disk Cleanup Task**:
+A persistent background task record tracking the physical purge progress and status of a deleted virtual disk across object storage and NVMe staging.
+_Avoid_: GC job, delete thread, async hook
+
+

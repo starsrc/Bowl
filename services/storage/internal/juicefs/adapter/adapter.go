@@ -61,6 +61,12 @@ type MetaAdapter interface {
 	// TruncateChunkSlices 替换指定 Chunk 的切片列表（用于文件截断保留局部切片）
 	TruncateChunkSlices(ctx context.Context, diskID string, ino uint64, chunkIndx uint32, slices []Slice) error
 
+	// TruncateSlices 依据截断新尺寸截断/清理超出范围的切片，缩短边界切片，并安全递减淘汰切片的引用计数，返回成为孤儿切片的切片编号列表
+	TruncateSlices(ctx context.Context, diskID string, ino uint64, size uint64) ([]uint64, error)
+
+	// PunchHole 向指定区间打洞释放物理存储，向重叠 Chunk 原子追加空洞切片
+	PunchHole(ctx context.Context, diskID string, ino uint64, offset uint64, length uint64) error
+
 	// WithExecutor 绑定指定事务执行器，支持事务内原子执行
 	WithExecutor(exec DBExecutor) MetaAdapter
 }
@@ -143,8 +149,11 @@ DO UPDATE SET slices = "%s".chunks.slices || EXCLUDED.slices;
 		return fmt.Errorf("写入 chunks 表切片元数据失败: %w", err)
 	}
 
-	// 2. 维护 "<schema>".slice_refs 表的切片引用记录
+	// 2. 维护 "<schema>".slice_refs 表的切片引用记录 (稀疏空洞切片 ID == 0 无物理引用)
 	for _, s := range slices {
+		if s.ID == 0 {
+			continue
+		}
 		insertRefSQL := fmt.Sprintf(`
 INSERT INTO "%s".slice_refs (id, chunk_indx, size, refs)
 VALUES ($1, $2, $3, 1)
@@ -379,7 +388,9 @@ func (a *metaAdapter) DeleteInodeChunks(ctx context.Context, diskID string, ino 
 				return nil, fmt.Errorf("解码 Inode %d 的切片数据失败: %w", ino, err)
 			}
 			for _, s := range slices {
-				sliceCounts[s.ID]++
+				if s.ID > 0 {
+					sliceCounts[s.ID]++
+				}
 			}
 		}
 	}
@@ -413,3 +424,174 @@ func (a *metaAdapter) DeleteInodeChunks(ctx context.Context, diskID string, ino 
 
 	return orphanSliceIDs, nil
 }
+
+// TruncateSlices 依据截断新尺寸截断/清理超出范围的切片，缩短边界切片，并安全递减淘汰切片的引用计数，返回成为孤儿切片的切片编号列表
+func (a *metaAdapter) TruncateSlices(ctx context.Context, diskID string, ino uint64, size uint64) ([]uint64, error) {
+	schemaName, err := FormatDiskSchema(diskID)
+	if err != nil {
+		return nil, err
+	}
+
+	targetChunkIndx := uint32(size / ChunkSize)
+	targetChunkPos := uint32(size % ChunkSize)
+
+	discardedSliceCounts := make(map[uint64]int)
+
+	// 1. 查询并删除完全超出截断范围的全部 Chunk
+	var boundaryCondition string
+	if targetChunkPos == 0 {
+		boundaryCondition = fmt.Sprintf("indx >= %d", targetChunkIndx)
+	} else {
+		boundaryCondition = fmt.Sprintf("indx > %d", targetChunkIndx)
+	}
+
+	queryBeyondChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1 AND %s`, schemaName, boundaryCondition)
+	rows, err := a.db.Query(ctx, queryBeyondChunks, int64(ino))
+	if err != nil {
+		return nil, fmt.Errorf("查询越界 chunks 失败: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cIndx int32
+		var rawSlices []byte
+		if err := rows.Scan(&cIndx, &rawSlices); err != nil {
+			return nil, fmt.Errorf("扫描越界 chunk 失败: %w", err)
+		}
+		if len(rawSlices) > 0 {
+			slices, err := DecodeSlices(rawSlices)
+			if err != nil {
+				return nil, fmt.Errorf("解码越界 chunk 切片失败: %w", err)
+			}
+			for _, s := range slices {
+				if s.ID > 0 {
+					discardedSliceCounts[s.ID]++
+				}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历越界 chunks 失败: %w", err)
+	}
+	rows.Close()
+
+	deleteBeyondSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1 AND %s`, schemaName, boundaryCondition)
+	if _, err := a.db.Exec(ctx, deleteBeyondSQL, int64(ino)); err != nil {
+		return nil, fmt.Errorf("删除越界 chunks 失败: %w", err)
+	}
+
+	// 2. 若 targetChunkPos > 0，检查并裁剪边界 Chunk
+	if targetChunkPos > 0 {
+		var rawSlices []byte
+		queryBoundaryChunk := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
+		err := a.db.QueryRow(ctx, queryBoundaryChunk, int64(ino), int32(targetChunkIndx)).Scan(&rawSlices)
+		if err == nil && len(rawSlices) > 0 {
+			slices, err := DecodeSlices(rawSlices)
+			if err != nil {
+				return nil, fmt.Errorf("解码边界 chunk 切片失败: %w", err)
+			}
+
+			var preservedSlices []Slice
+			for _, s := range slices {
+				if s.Pos >= targetChunkPos {
+					if s.ID > 0 {
+						discardedSliceCounts[s.ID]++
+					}
+				} else if s.Pos+s.Len > targetChunkPos {
+					adjusted := Slice{
+						Pos:  s.Pos,
+						ID:   s.ID,
+						Size: s.Size,
+						Off:  s.Off,
+						Len:  targetChunkPos - s.Pos,
+					}
+					preservedSlices = append(preservedSlices, adjusted)
+				} else {
+					preservedSlices = append(preservedSlices, s)
+				}
+			}
+
+			if len(preservedSlices) == 0 {
+				deleteBoundarySQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
+				if _, err := a.db.Exec(ctx, deleteBoundarySQL, int64(ino), int32(targetChunkIndx)); err != nil {
+					return nil, fmt.Errorf("删除空边界 chunk 失败: %w", err)
+				}
+			} else {
+				if err := a.TruncateChunkSlices(ctx, diskID, ino, targetChunkIndx, preservedSlices); err != nil {
+					return nil, fmt.Errorf("更新边界 chunk 切片失败: %w", err)
+				}
+			}
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("查询边界 chunk 失败: %w", err)
+		}
+	}
+
+	// 3. 递减淘汰切片的引用计数并排查孤儿切片
+	var orphanSliceIDs []uint64
+	for sliceID, count := range discardedSliceCounts {
+		if err := a.DecSliceRef(ctx, diskID, sliceID, count); err != nil {
+			return nil, fmt.Errorf("递减切片引用计数失败 (ID=%d): %w", sliceID, err)
+		}
+		var currentRefs int32
+		checkRefSQL := fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName)
+		if err := a.db.QueryRow(ctx, checkRefSQL, int64(sliceID)).Scan(&currentRefs); err == nil && currentRefs <= 0 {
+			orphanSliceIDs = append(orphanSliceIDs, sliceID)
+		}
+	}
+
+	return orphanSliceIDs, nil
+}
+
+// PunchHole 向指定区间打洞释放物理存储，向重叠 Chunk 原子追加空洞切片
+func (a *metaAdapter) PunchHole(ctx context.Context, diskID string, ino uint64, offset uint64, length uint64) error {
+	if length == 0 {
+		return nil
+	}
+	schemaName, err := FormatDiskSchema(diskID)
+	if err != nil {
+		return err
+	}
+
+	curOffset := offset
+	remainingLen := length
+
+	for remainingLen > 0 {
+		curChunk := uint32(curOffset / ChunkSize)
+		chunkEnd := uint64(curChunk+1) * ChunkSize
+		chunkRemaining := chunkEnd - curOffset
+
+		pieceLen := remainingLen
+		if pieceLen > chunkRemaining {
+			pieceLen = chunkRemaining
+		}
+		chunkPos := uint32(curOffset % ChunkSize)
+
+		holeSlice := Slice{
+			Pos:  chunkPos,
+			ID:   0,
+			Size: 0,
+			Off:  0,
+			Len:  uint32(pieceLen),
+		}
+
+		encoded := EncodeSlice(holeSlice)
+
+		// 原子追加至 chunks 表 (若 chunk 存在则追加，若不存在则插入)
+		insertChunkSQL := fmt.Sprintf(`
+INSERT INTO "%s".chunks (ino, indx, slices)
+VALUES ($1, $2, $3)
+ON CONFLICT (ino, indx)
+DO UPDATE SET slices = "%s".chunks.slices || EXCLUDED.slices;
+`, schemaName, schemaName)
+
+		if _, err := a.db.Exec(ctx, insertChunkSQL, int64(ino), int32(curChunk), encoded); err != nil {
+			return fmt.Errorf("写入打洞空洞切片元数据失败 (ino=%d, chunk=%d): %w", ino, curChunk, err)
+		}
+
+		curOffset += pieceLen
+		remainingLen -= pieceLen
+	}
+
+	return nil
+}
+

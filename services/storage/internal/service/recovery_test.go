@@ -12,6 +12,7 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
 func TestChunkDriver_LocateSlice_PostgreSQL(t *testing.T) {
@@ -163,8 +164,8 @@ func TestChunkDriver_CrashRecovery_ReplaysUnflushedSlicesToS3(t *testing.T) {
 
 	// Verify S3 now contains both slices (0 data loss)
 	objs := mockClient.getObjects()
-	key1 := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
-	key2 := chunk.FormatObjectKey(diskID.String(), 0, 2, 0)
+	key1 := object.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key2 := object.FormatObjectKey(diskID.String(), 0, 2, 0)
 	assert.Contains(t, objs, key1)
 	assert.Contains(t, objs, key2)
 	assert.Equal(t, payload1, objs[key1])
@@ -275,7 +276,7 @@ func TestChunkDriver_CrashRecovery_TransparentReadFromStagingBeforeAndAfterUploa
 	assert.Equal(t, payload, readResp3.GetData(), "must read transparently after recovery completion")
 
 	// Verify object has landed in S3
-	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key := object.FormatObjectKey(diskID.String(), 0, 1, 0)
 	objs := mockClient.getObjects()
 	assert.Contains(t, objs, key)
 	assert.Equal(t, payload, objs[key])

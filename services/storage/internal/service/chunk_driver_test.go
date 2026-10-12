@@ -25,6 +25,7 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	jfsChunk "github.com/starsrc/bowl/services/storage/internal/juicefs/chunk"
+	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
 
@@ -110,9 +111,9 @@ func TestChunkDriver_Write_EndToEnd_SingleSlice(t *testing.T) {
 	querySQL := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
 	err = h.dbPool.QueryRow(ctx, querySQL, int64(ino), int32(0)).Scan(&rawSlices)
 	require.NoError(t, err)
-	assert.Len(t, rawSlices, chunk.SliceBytes, "single write must produce exactly 24 bytes in chunks table")
+	assert.Len(t, rawSlices, SliceBytes, "single write must produce exactly 24 bytes in chunks table")
 
-	slices, err := chunk.DecodeSlices(rawSlices)
+	slices, err := DecodeSlices(rawSlices)
 	require.NoError(t, err)
 	require.Len(t, slices, 1)
 
@@ -203,14 +204,14 @@ func TestChunkDriver_Write_EndToEnd_MultipleAppendsSameChunk(t *testing.T) {
 	querySQL := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
 	err = h.dbPool.QueryRow(ctx, querySQL, int64(ino), int32(0)).Scan(&rawSlices)
 	require.NoError(t, err)
-	assert.Len(t, rawSlices, 2*chunk.SliceBytes)
+	assert.Len(t, rawSlices, 2*SliceBytes)
 
-	slices, err := chunk.DecodeSlices(rawSlices)
+	slices, err := DecodeSlices(rawSlices)
 	require.NoError(t, err)
 	require.Len(t, slices, 2)
 
-	assert.Equal(t, chunk.Slice{Pos: 0, ID: 1, Size: 1024, Off: 0, Len: 1024}, slices[0])
-	assert.Equal(t, chunk.Slice{Pos: 1024, ID: 2, Size: 2048, Off: 0, Len: 2048}, slices[1])
+	assert.Equal(t, Slice{Pos: 0, ID: 1, Size: 1024, Off: 0, Len: 1024}, slices[0])
+	assert.Equal(t, Slice{Pos: 1024, ID: 2, Size: 2048, Off: 0, Len: 2048}, slices[1])
 
 	// Inode size should be 3072
 	var inodeSize int64
@@ -263,7 +264,7 @@ func TestChunkDriver_Write_EndToEnd_AcrossChunks(t *testing.T) {
 
 	// Write at chunk 1 (offset 64 MiB = 67108864)
 	payload1 := []byte("chunk 1 data")
-	offset1 := uint64(chunk.ChunkSize)
+	offset1 := uint64(ChunkSize)
 	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
 		SessionId: sessionID,
 		Fh:        fh,
@@ -416,7 +417,7 @@ func TestChunkDriver_DirectOperations(t *testing.T) {
 	var rawSlices []byte
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName), int64(100), int32(0)).Scan(&rawSlices)
 	require.NoError(t, err)
-	assert.Len(t, rawSlices, chunk.SliceBytes)
+	assert.Len(t, rawSlices, SliceBytes)
 
 	// Insert inode 100 into inodes table to allow driver.Read
 	insertInodeSQL := fmt.Sprintf(`
@@ -729,7 +730,7 @@ func TestChunkDriver_DirectWrite_SpanningBoundary(t *testing.T) {
 	// Chunk 2 starts at 2 * ChunkSize = 134217728.
 	// Offset: Chunk 2 at 63 MiB offset = 2 * ChunkSize + 63 MiB
 	// Length: 2 MiB (1 MiB in Chunk 2, 1 MiB in Chunk 3)
-	offset := uint64(2*chunk.ChunkSize + 63*1024*1024)
+	offset := uint64(2*ChunkSize + 63*1024*1024)
 	payload := []byte("first-half-chunk2-data" + string(bytes.Repeat([]byte("A"), 1024*1024-22)) +
 		"second-half-chunk3-data" + string(bytes.Repeat([]byte("B"), 1024*1024-23)))
 
@@ -741,7 +742,7 @@ func TestChunkDriver_DirectWrite_SpanningBoundary(t *testing.T) {
 	var rawSlices2 []byte
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = 200 AND indx = 2`, schemaName)).Scan(&rawSlices2)
 	require.NoError(t, err)
-	slices2, err := chunk.DecodeSlices(rawSlices2)
+	slices2, err := DecodeSlices(rawSlices2)
 	require.NoError(t, err)
 	require.Len(t, slices2, 1)
 	assert.Equal(t, uint32(63*1024*1024), slices2[0].Pos)
@@ -751,7 +752,7 @@ func TestChunkDriver_DirectWrite_SpanningBoundary(t *testing.T) {
 	var rawSlices3 []byte
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = 200 AND indx = 3`, schemaName)).Scan(&rawSlices3)
 	require.NoError(t, err)
-	slices3, err := chunk.DecodeSlices(rawSlices3)
+	slices3, err := DecodeSlices(rawSlices3)
 	require.NoError(t, err)
 	require.Len(t, slices3, 1)
 	assert.Equal(t, uint32(0), slices3[0].Pos)
@@ -822,7 +823,7 @@ func TestChunkDriver_Write_EndToEnd_SpanningBoundary(t *testing.T) {
 	query0 := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName)
 	err = h.dbPool.QueryRow(ctx, query0, int64(ino)).Scan(&rawSlices0)
 	require.NoError(t, err)
-	slices0, err := chunk.DecodeSlices(rawSlices0)
+	slices0, err := DecodeSlices(rawSlices0)
 	require.NoError(t, err)
 	require.Len(t, slices0, 1)
 
@@ -837,7 +838,7 @@ func TestChunkDriver_Write_EndToEnd_SpanningBoundary(t *testing.T) {
 	query1 := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName)
 	err = h.dbPool.QueryRow(ctx, query1, int64(ino)).Scan(&rawSlices1)
 	require.NoError(t, err)
-	slices1, err := chunk.DecodeSlices(rawSlices1)
+	slices1, err := DecodeSlices(rawSlices1)
 	require.NoError(t, err)
 	require.Len(t, slices1, 1)
 
@@ -925,7 +926,7 @@ func TestChunkDriver_Write_EndToEnd_MultiChunk_ThreeChunks(t *testing.T) {
 
 	type chunkInfo struct {
 		indx   int32
-		slices []chunk.Slice
+		slices []Slice
 	}
 	var chunks []chunkInfo
 	for rows.Next() {
@@ -933,7 +934,7 @@ func TestChunkDriver_Write_EndToEnd_MultiChunk_ThreeChunks(t *testing.T) {
 		var raw []byte
 		err := rows.Scan(&indx, &raw)
 		require.NoError(t, err)
-		decoded, err := chunk.DecodeSlices(raw)
+		decoded, err := DecodeSlices(raw)
 		require.NoError(t, err)
 		chunks = append(chunks, chunkInfo{indx: indx, slices: decoded})
 	}
@@ -945,15 +946,15 @@ func TestChunkDriver_Write_EndToEnd_MultiChunk_ThreeChunks(t *testing.T) {
 	assert.Equal(t, int32(0), chunks[0].indx)
 	require.Len(t, chunks[0].slices, 1)
 	assert.Equal(t, uint32(0), chunks[0].slices[0].Pos)
-	assert.Equal(t, uint32(chunk.ChunkSize), chunks[0].slices[0].Size)
-	assert.Equal(t, uint32(chunk.ChunkSize), chunks[0].slices[0].Len)
+	assert.Equal(t, uint32(ChunkSize), chunks[0].slices[0].Size)
+	assert.Equal(t, uint32(ChunkSize), chunks[0].slices[0].Len)
 
 	// Chunk 1: 64 MiB
 	assert.Equal(t, int32(1), chunks[1].indx)
 	require.Len(t, chunks[1].slices, 1)
 	assert.Equal(t, uint32(0), chunks[1].slices[0].Pos)
-	assert.Equal(t, uint32(chunk.ChunkSize), chunks[1].slices[0].Size)
-	assert.Equal(t, uint32(chunk.ChunkSize), chunks[1].slices[0].Len)
+	assert.Equal(t, uint32(ChunkSize), chunks[1].slices[0].Size)
+	assert.Equal(t, uint32(ChunkSize), chunks[1].slices[0].Len)
 
 	// Chunk 2: 2 MiB
 	expectedChunk2Len := uint32(2 * 1024 * 1024)
@@ -1055,7 +1056,7 @@ func TestChunkDriver_Write_S3AsyncUploadPipeline(t *testing.T) {
 	require.NoError(t, err)
 
 	// 6. Verify object exists in MinIO
-	expectedKey := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	expectedKey := object.FormatObjectKey(diskID.String(), 0, 1, 0)
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
 
@@ -1372,7 +1373,7 @@ VALUES (300, 1, 'direct-multichunk', 1, 0644, 1, $1, NOW(), NOW(), NOW())
 
 	// Case 1: Read exactly within data spanning Chunk 0 and Chunk 1 (not hitting EOF)
 	// Read 512 KiB spanning the 64 MiB boundary: 256 KiB in Chunk 0, 256 KiB in Chunk 1
-	subOffset := uint64(chunk.ChunkSize - 256*1024)
+	subOffset := uint64(ChunkSize - 256*1024)
 	subSize := uint32(512 * 1024)
 	data, eof, err := driver.Read(ctx, handle, diskID.String(), 300, subOffset, subSize)
 	require.NoError(t, err)
@@ -1467,7 +1468,7 @@ func TestChunkDriver_Read_S3TransparentReadPenetration_EndToEnd(t *testing.T) {
 	querySQL := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName)
 	err = h.dbPool.QueryRow(ctx, querySQL, int64(ino)).Scan(&rawSlices)
 	require.NoError(t, err)
-	slices, err := chunk.DecodeSlices(rawSlices)
+	slices, err := DecodeSlices(rawSlices)
 	require.NoError(t, err)
 	require.Len(t, slices, 1)
 	sliceID := slices[0].ID
@@ -1482,7 +1483,7 @@ func TestChunkDriver_Read_S3TransparentReadPenetration_EndToEnd(t *testing.T) {
 	// Verify object exists in S3
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
-	objectKey := chunk.FormatObjectKey(diskID.String(), 0, sliceID, 0)
+	objectKey := object.FormatObjectKey(diskID.String(), 0, sliceID, 0)
 	stat, err := minioClient.StatObject(ctx, cfg.Bucket, objectKey, minio.StatObjectOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(payloadSize), stat.Size)
@@ -1602,7 +1603,7 @@ func TestChunkDriver_Read_MixedHotStagingAndColdS3(t *testing.T) {
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
 	defer func() {
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
 	}()
 
 	// 2. Write second slice (Slice 2): 2048 bytes of 'B' at offset 2048 (remains HOT in NVMe staging)
@@ -1747,8 +1748,8 @@ func TestChunkDriver_Read_MultiChunk_ColdS3SpanningBoundary(t *testing.T) {
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
 	defer func() {
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 1, 2, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 1, 2, 0), minio.RemoveObjectOptions{})
 	}()
 
 	// Purge BOTH slices from staging -> both are now COLD in S3
@@ -1925,7 +1926,7 @@ func TestChunkDriver_CopyFileRange_ZeroCopyAndRead(t *testing.T) {
 	var dstRawSlices []byte
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(dstIno)).Scan(&dstRawSlices)
 	require.NoError(t, err)
-	dstSlices, err := chunk.DecodeSlices(dstRawSlices)
+	dstSlices, err := DecodeSlices(dstRawSlices)
 	require.NoError(t, err)
 	require.Len(t, dstSlices, 1)
 	assert.Equal(t, uint64(1), dstSlices[0].ID)
@@ -1999,18 +2000,18 @@ func TestChunkDriver_CopyFileRange_Simulated1GB_Sub50ms(t *testing.T) {
 	// Insert 16 chunk rows and slice_refs rows (1 slice of 64MB per chunk)
 	for i := 0; i < numChunks; i++ {
 		sliceID := uint64(100 + i)
-		s := chunk.Slice{
+		s := Slice{
 			Pos:  0,
 			ID:   sliceID,
-			Size: chunk.ChunkSize,
+			Size: ChunkSize,
 			Off:  0,
-			Len:  chunk.ChunkSize,
+			Len:  ChunkSize,
 		}
-		encoded := chunk.EncodeSlice(s)
+		encoded := EncodeSlice(s)
 		_, err = h.dbPool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".chunks (ino, indx, slices) VALUES ($1, $2, $3)`, schemaName), int64(srcIno), int32(i), encoded)
 		require.NoError(t, err)
 
-		_, err = h.dbPool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".slice_refs (id, size, refs) VALUES ($1, $2, 1)`, schemaName), int64(sliceID), int32(chunk.ChunkSize))
+		_, err = h.dbPool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s".slice_refs (id, size, refs) VALUES ($1, $2, 1)`, schemaName), int64(sliceID), int32(ChunkSize))
 		require.NoError(t, err)
 	}
 
@@ -2196,9 +2197,9 @@ func TestChunkDriver_CopyFileRange_OffsetAndCrossBoundary(t *testing.T) {
 	crossDstIno := crossDstResp.GetInode().GetIno()
 	crossDstFH := crossDstResp.GetFileHandle().GetFh()
 
-	// Destination offset is chunk.ChunkSize - 2048, length is 4096
+	// Destination offset is ChunkSize - 2048, length is 4096
 	// This forces 2048 bytes in chunk 0 and 2048 bytes in chunk 1
-	dstCrossOffset := uint64(chunk.ChunkSize - 2048)
+	dstCrossOffset := uint64(ChunkSize - 2048)
 	crossCopyResp, err := h.storageClient.CopyFileRange(ctx, &bowlv1.CopyFileRangeRequest{
 		SessionId: sessionID,
 		SrcIno:    crossSrcIno,
@@ -2216,16 +2217,16 @@ func TestChunkDriver_CopyFileRange_OffsetAndCrossBoundary(t *testing.T) {
 	var chunk0Slices, chunk1Slices []byte
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(crossDstIno)).Scan(&chunk0Slices)
 	require.NoError(t, err)
-	s0, err := chunk.DecodeSlices(chunk0Slices)
+	s0, err := DecodeSlices(chunk0Slices)
 	require.NoError(t, err)
 	require.Len(t, s0, 1)
-	assert.Equal(t, uint32(chunk.ChunkSize-2048), s0[0].Pos)
+	assert.Equal(t, uint32(ChunkSize-2048), s0[0].Pos)
 	assert.Equal(t, uint32(0), s0[0].Off)
 	assert.Equal(t, uint32(2048), s0[0].Len)
 
 	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 1`, schemaName), int64(crossDstIno)).Scan(&chunk1Slices)
 	require.NoError(t, err)
-	s1, err := chunk.DecodeSlices(chunk1Slices)
+	s1, err := DecodeSlices(chunk1Slices)
 	require.NoError(t, err)
 	require.Len(t, s1, 1)
 	assert.Equal(t, uint32(0), s1[0].Pos)
@@ -2247,7 +2248,7 @@ func TestChunkDriver_CopyFileRange_OffsetAndCrossBoundary(t *testing.T) {
 		SessionId: sessionID,
 		Fh:        crossDstFH,
 		Ino:       crossDstIno,
-		Offset:    uint64(chunk.ChunkSize),
+		Offset:    uint64(ChunkSize),
 		Size:      2048,
 	})
 	require.NoError(t, err)
@@ -2665,7 +2666,7 @@ func TestChunkDriver_Fsync_BlocksUntilS3UploadsFinish(t *testing.T) {
 	fh := createResp.GetFileHandle().GetFh()
 
 	// Write 3 slices: 4MB, 4MB, 1MB
-	blockSize := chunk.BlockSize // 4MB
+	blockSize := BlockSize // 4MB
 	payload1 := bytes.Repeat([]byte("A"), blockSize)
 	payload2 := bytes.Repeat([]byte("B"), blockSize)
 	payload3 := bytes.Repeat([]byte("C"), 1024*1024)
@@ -2716,9 +2717,9 @@ func TestChunkDriver_Fsync_BlocksUntilS3UploadsFinish(t *testing.T) {
 	assert.Equal(t, int32(3), mockClient.putCalls.Load())
 	assert.Len(t, objs, 3)
 
-	key1 := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
-	key2 := chunk.FormatObjectKey(diskID.String(), 0, 2, 0)
-	key3 := chunk.FormatObjectKey(diskID.String(), 0, 3, 0)
+	key1 := object.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key2 := object.FormatObjectKey(diskID.String(), 0, 2, 0)
+	key3 := object.FormatObjectKey(diskID.String(), 0, 3, 0)
 	assert.Contains(t, objs, key1)
 	assert.Contains(t, objs, key2)
 	assert.Contains(t, objs, key3)
@@ -2795,7 +2796,7 @@ func TestChunkDriver_Flush_BlocksUntilS3UploadsFinish(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, 70*time.Millisecond, "Flush must block until simulated S3 upload finishes")
 
 	objs := mockClient.getObjects()
-	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key := object.FormatObjectKey(diskID.String(), 0, 1, 0)
 	assert.Contains(t, objs, key)
 	assert.Equal(t, payload, objs[key])
 }
@@ -3087,7 +3088,7 @@ func TestChunkDriver_Fsync_TransientRetry_SucceedsAfterBackoff(t *testing.T) {
 	assert.GreaterOrEqual(t, attempts.Load(), int32(3), "应当经历至少 2 次瞬时失败与 1 次成功重试")
 
 	objs := mockClient.getObjects()
-	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key := object.FormatObjectKey(diskID.String(), 0, 1, 0)
 	assert.Equal(t, payload, objs[key], "重试成功后 S3 物理对象必须完整存在")
 }
 
@@ -3175,7 +3176,7 @@ func TestChunkDriver_Fsync_ConcurrentCalls_SameInode(t *testing.T) {
 	require.NoError(t, errFsync, "并发 Fsync 必须成功")
 
 	objs := mockClient.getObjects()
-	key := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key := object.FormatObjectKey(diskID.String(), 0, 1, 0)
 	assert.Equal(t, payload, objs[key])
 }
 
@@ -3308,7 +3309,7 @@ func TestChunkDriver_Fsync_EndToEnd_MinIO_MultiBlock(t *testing.T) {
 	ino := createResp.GetInode().GetIno()
 	fh := createResp.GetFileHandle().GetFh()
 
-	blockSize := chunk.BlockSize // 4MB
+	blockSize := BlockSize // 4MB
 	payload1 := make([]byte, blockSize)
 	_, _ = rand.Read(payload1)
 	payload2 := make([]byte, blockSize)
@@ -3360,9 +3361,9 @@ func TestChunkDriver_Fsync_EndToEnd_MinIO_MultiBlock(t *testing.T) {
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
 
-	key1 := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
-	key2 := chunk.FormatObjectKey(diskID.String(), 0, 2, 0)
-	key3 := chunk.FormatObjectKey(diskID.String(), 0, 3, 0)
+	key1 := object.FormatObjectKey(diskID.String(), 0, 1, 0)
+	key2 := object.FormatObjectKey(diskID.String(), 0, 2, 0)
+	key3 := object.FormatObjectKey(diskID.String(), 0, 3, 0)
 
 	defer func() {
 		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, key1, minio.RemoveObjectOptions{})
@@ -3414,7 +3415,7 @@ func TestChunkDriver_DeleteInode_DecrementsSliceRefs_AndDeletesChunks(t *testing
 	fh := createResp.GetFileHandle().GetFh()
 
 	// Write data spanning 2 chunks (64MB - 1KB to 64MB + 1KB, total 2KB)
-	writeOffset := uint64(chunk.ChunkSize - 1024)
+	writeOffset := uint64(ChunkSize - 1024)
 	payload := make([]byte, 2048)
 	_, err = rand.Read(payload)
 	require.NoError(t, err)
@@ -3612,7 +3613,7 @@ func TestChunkDriver_Truncate_Shrink_AdjustsSlicesAndDecrementsRefs(t *testing.T
 		SessionId: sessionID,
 		Fh:        fh,
 		Ino:       ino,
-		Offset:    uint64(chunk.ChunkSize),
+		Offset:    uint64(ChunkSize),
 		Data:      p3,
 	})
 	require.NoError(t, err)
@@ -3627,7 +3628,7 @@ func TestChunkDriver_Truncate_Shrink_AdjustsSlicesAndDecrementsRefs(t *testing.T
 	assert.Equal(t, int32(1), r3)
 
 	// Step A: Truncate to 64MB (Chunk 1 discarded completely)
-	err = chunkDriver.Truncate(ctx, diskID.String(), ino, uint64(chunk.ChunkSize))
+	err = chunkDriver.Truncate(ctx, diskID.String(), ino, uint64(ChunkSize))
 	require.NoError(t, err)
 
 	// Chunk 1 row deleted
@@ -3650,7 +3651,7 @@ func TestChunkDriver_Truncate_Shrink_AdjustsSlicesAndDecrementsRefs(t *testing.T
 	// Check chunk 0 slices
 	var rawSlices []byte
 	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&rawSlices))
-	sList, err := chunk.DecodeSlices(rawSlices)
+	sList, err := DecodeSlices(rawSlices)
 	require.NoError(t, err)
 	require.Len(t, sList, 2)
 	assert.Equal(t, uint32(4096), sList[0].Len)
@@ -3667,7 +3668,7 @@ func TestChunkDriver_Truncate_Shrink_AdjustsSlicesAndDecrementsRefs(t *testing.T
 	require.NoError(t, err)
 
 	require.NoError(t, h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = 0`, schemaName), int64(ino)).Scan(&rawSlices))
-	sList, err = chunk.DecodeSlices(rawSlices)
+	sList, err = DecodeSlices(rawSlices)
 	require.NoError(t, err)
 	require.Len(t, sList, 1)
 	assert.Equal(t, uint32(2000), sList[0].Len, "slice 1 Len must be adjusted to 2000")
@@ -3738,7 +3739,7 @@ func TestStorageService_SetAttr_TruncateShrink_DecrementsSliceRefs(t *testing.T)
 		SessionId: sessionID,
 		Fh:        fh,
 		Ino:       ino,
-		Offset:    uint64(chunk.ChunkSize),
+		Offset:    uint64(ChunkSize),
 		Data:      p2,
 	})
 	require.NoError(t, err)
@@ -3882,7 +3883,7 @@ func TestChunkDriver_COWClone_S3AndStaging_GCLifecycle(t *testing.T) {
 	// Verify S3 block exists in MinIO
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
-	expectedObjectKey := chunk.FormatObjectKey(diskID.String(), 0, 1, 0)
+	expectedObjectKey := object.FormatObjectKey(diskID.String(), 0, 1, 0)
 	objInfo, err := minioClient.StatObject(ctx, cfg.Bucket, expectedObjectKey, minio.StatObjectOptions{})
 	require.NoError(t, err, "S3 object must exist in bucket")
 	assert.Equal(t, int64(4096), objInfo.Size)
@@ -4593,8 +4594,8 @@ func TestChunkDriver_Read_SparseHoles_ZeroFill(t *testing.T) {
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
 	defer func() {
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 2, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 0, 2, 0), minio.RemoveObjectOptions{})
 	}()
 
 	// 5. 校验中间稀疏空洞区间 (32KB..1MB) 读取: 必须返回全零且不报错
@@ -4715,8 +4716,8 @@ func TestChunkDriver_Read_ColdS3_HTTPRange_SubBlock(t *testing.T) {
 	minioClient, err := chunk.NewMinIOClient(cfg)
 	require.NoError(t, err)
 	defer func() {
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
-		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, chunk.FormatObjectKey(diskID.String(), 0, 1, 1), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 0, 1, 0), minio.RemoveObjectOptions{})
+		_ = minioClient.RemoveObject(context.Background(), cfg.Bucket, object.FormatObjectKey(diskID.String(), 0, 1, 1), minio.RemoveObjectOptions{})
 	}()
 
 	// 5. 跨越 4MB Block 边界发起局部 Range 读取: 从 4MB-32KB 读取 64KB

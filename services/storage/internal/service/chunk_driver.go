@@ -1069,7 +1069,7 @@ func (d *ChunkDriver) DeleteInode(ctx context.Context, diskID string, ino uint64
 				return connect.Errorf(connect.CodeInternal, "failed to scan chunk slices: %s", err)
 			}
 			if len(rawSlices) > 0 {
-				slices, err := chunk.DecodeSlices(rawSlices)
+				slices, err := DecodeSlices(rawSlices)
 				if err != nil {
 					return connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
 				}

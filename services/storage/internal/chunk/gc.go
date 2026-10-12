@@ -14,14 +14,14 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-// GCDBExecutor abstracts PostgreSQL execution required by GarbageCollector.
+// GCDBExecutor 抽象垃圾回收器所需的 PostgreSQL 数据库操作接口
 type GCDBExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// FormatDiskSchemaName returns the schema name for a given virtual disk identifier.
+// FormatDiskSchemaName 格式化虚拟磁盘独立的 PostgreSQL Schema 名称
 func FormatDiskSchemaName(diskID string) string {
 	if strings.HasPrefix(diskID, "disk_") {
 		return diskID
@@ -33,20 +33,18 @@ func FormatDiskSchemaName(diskID string) string {
 	return "disk_" + strings.ReplaceAll(diskID, "-", "_")
 }
 
-// ParseDiskSchemaName converts a PostgreSQL schema name (format "disk_<uuid_with_underscores>")
-// back into the canonical disk UUID string format.
+// ParseDiskSchemaName 将 PostgreSQL Schema 名称转换为标准磁盘 UUID 字符串
 func ParseDiskSchemaName(schema string) (string, error) {
 	raw := strings.TrimPrefix(schema, "disk_")
 	uuidStr := strings.ReplaceAll(raw, "_", "-")
 	parsed, err := uuid.Parse(uuidStr)
 	if err != nil {
-		return raw, fmt.Errorf("invalid disk schema name %q: %w", schema, err)
+		return raw, fmt.Errorf("非法磁盘 Schema 名称 %q: %w", schema, err)
 	}
 	return parsed.String(), nil
 }
 
-// GarbageCollector removes stale local staging files, S3 physical blocks, and database references
-// for slices whose reference count has dropped to zero or below (refs <= 0).
+// GarbageCollector 清理引用计数归零 (refs <= 0) 的废弃本地暂存文件、S3 物理对象及数据库元数据
 type GarbageCollector struct {
 	db        GCDBExecutor
 	staging   *StagingManager
@@ -64,10 +62,10 @@ type GarbageCollector struct {
 	stopOnce     sync.Once
 }
 
-// GCOption configures a GarbageCollector instance.
+// GCOption 配置 GarbageCollector 实例的可选函数
 type GCOption func(*GarbageCollector)
 
-// WithGCInterval sets the periodic GC scanning interval.
+// WithGCInterval 配置后台周期性垃圾回收扫描间隔
 func WithGCInterval(d time.Duration) GCOption {
 	return func(gc *GarbageCollector) {
 		if d > 0 {
@@ -76,7 +74,7 @@ func WithGCInterval(d time.Duration) GCOption {
 	}
 }
 
-// WithGCBatchSize sets the maximum number of expired slice records to process per run.
+// WithGCBatchSize 设置单次 GC 周期处理的最大过期切片数量
 func WithGCBatchSize(n int) GCOption {
 	return func(gc *GarbageCollector) {
 		if n > 0 {
@@ -85,7 +83,7 @@ func WithGCBatchSize(n int) GCOption {
 	}
 }
 
-// WithGCClient configures the ObjectStorageClient and bucket for S3 block removal.
+// WithGCClient 配置用于物理删除 S3 分块对象的客户端及存储桶
 func WithGCClient(client ObjectStorageClient, bucket string) GCOption {
 	return func(gc *GarbageCollector) {
 		gc.client = client
@@ -93,14 +91,14 @@ func WithGCClient(client ObjectStorageClient, bucket string) GCOption {
 	}
 }
 
-// WithGCBatcher configures the BlockBatcher.
+// WithGCBatcher 配置分块批处理器 BlockBatcher
 func WithGCBatcher(batcher *BlockBatcher) GCOption {
 	return func(gc *GarbageCollector) {
 		gc.batcher = batcher
 	}
 }
 
-// NewGarbageCollector initializes a new GarbageCollector.
+// NewGarbageCollector 构造 GarbageCollector 实例
 func NewGarbageCollector(db GCDBExecutor, staging *StagingManager, opts ...GCOption) *GarbageCollector {
 	gc := &GarbageCollector{
 		db:           db,
@@ -119,7 +117,7 @@ func NewGarbageCollector(db GCDBExecutor, staging *StagingManager, opts ...GCOpt
 	return gc
 }
 
-// SetClient updates the ObjectStorageClient and bucket for S3 block deletion.
+// SetClient 更新 S3 物理删除所使用的客户端与目标存储桶
 func (gc *GarbageCollector) SetClient(client ObjectStorageClient, bucket string) {
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
@@ -127,14 +125,14 @@ func (gc *GarbageCollector) SetClient(client ObjectStorageClient, bucket string)
 	gc.bucket = bucket
 }
 
-// RegisterDisk registers a virtual disk to be periodically garbage collected.
+// RegisterDisk 登记虚拟磁盘以纳入周期性垃圾回收调度范围
 func (gc *GarbageCollector) RegisterDisk(diskID string) {
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
 	gc.disks[diskID] = struct{}{}
 }
 
-// UnregisterDisk removes a virtual disk from periodic GC monitoring.
+// UnregisterDisk 从周期性垃圾回收监控列表中移除指定虚拟磁盘
 func (gc *GarbageCollector) UnregisterDisk(diskID string) {
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
@@ -168,9 +166,8 @@ type expiredSlice struct {
 	size      uint32
 }
 
-// RunGC performs a single garbage collection cycle on the specified virtual disk.
-// It retrieves slices with refs <= 0, deletes their NVMe staging files and S3 blocks,
-// and removes the corresponding rows from slice_refs.
+// RunGC 对指定虚拟磁盘执行单个周期的垃圾回收操作：
+// 查询 refs <= 0 的切片，物理删除对应的本地 NVMe Staging 文件与 S3 对象，并从 slice_refs 移除元数据行。
 func (gc *GarbageCollector) RunGC(ctx context.Context, diskID string) (int, error) {
 	if gc.db == nil {
 		return 0, nil
@@ -178,7 +175,7 @@ func (gc *GarbageCollector) RunGC(ctx context.Context, diskID string) (int, erro
 
 	schemaName := FormatDiskSchemaName(diskID)
 
-	// 1. Query expired slices from slice_refs
+	// 1. 查询 slice_refs 中已过期切片 (refs <= 0)
 	querySQL := fmt.Sprintf(`
 SELECT id, chunk_indx, size
 FROM "%s".slice_refs
@@ -188,7 +185,7 @@ LIMIT $1;
 
 	rows, err := gc.db.Query(ctx, querySQL, gc.batchSize)
 	if err != nil {
-		return 0, fmt.Errorf("query expired slices: %w", err)
+		return 0, fmt.Errorf("查询过期切片失败: %w", err)
 	}
 	defer rows.Close()
 
@@ -198,7 +195,7 @@ LIMIT $1;
 		var cIndx int32
 		var sz int32
 		if err := rows.Scan(&sID, &cIndx, &sz); err != nil {
-			return 0, fmt.Errorf("scan expired slice: %w", err)
+			return 0, fmt.Errorf("扫描过期切片失败: %w", err)
 		}
 		expired = append(expired, expiredSlice{
 			id:        uint64(sID),
@@ -207,7 +204,7 @@ LIMIT $1;
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate expired slices: %w", err)
+		return 0, fmt.Errorf("遍历过期切片失败: %w", err)
 	}
 	rows.Close()
 
@@ -222,17 +219,17 @@ LIMIT $1;
 
 	blockSize := uint32(gc.batcher.BlockSize())
 
-	// 2. For each expired slice: remove staging file, remove S3 blocks, delete DB row
+	// 2. 针对每个过期切片：清理本地暂存文件、物理删除 S3 分块、删除数据库行
 	reclaimedCount := 0
 	for _, s := range expired {
-		// 2.1. Remove local NVMe staging cache file
+		// 2.1. 移除本地 NVMe Staging 缓存文件
 		if gc.staging != nil {
 			if err := gc.staging.DeleteSlice(diskID, s.id); err != nil && !os.IsNotExist(err) {
-				// Ignore non-fatal deletion failure
+				// 忽略非致命删除错误
 			}
 		}
 
-		// 2.2. Remove physical S3 blocks if S3 client is configured
+		// 2.2. 若配置了 S3 客户端，删除 S3 物理对象
 		if client != nil && bucket != "" {
 			numBlocks := (s.size + blockSize - 1) / blockSize
 			if numBlocks == 0 {
@@ -244,10 +241,10 @@ LIMIT $1;
 			}
 		}
 
-		// 2.3. Delete slice_refs row
+		// 2.3. 删除 slice_refs 行
 		deleteSQL := fmt.Sprintf(`DELETE FROM "%s".slice_refs WHERE id = $1;`, schemaName)
 		if _, err := gc.db.Exec(ctx, deleteSQL, int64(s.id)); err != nil {
-			return reclaimedCount, fmt.Errorf("delete slice_refs row %d: %w", s.id, err)
+			return reclaimedCount, fmt.Errorf("删除 slice_refs 行 %d 失败: %w", s.id, err)
 		}
 		reclaimedCount++
 	}
@@ -259,7 +256,7 @@ LIMIT $1;
 	return reclaimedCount, nil
 }
 
-// Start launches the background periodic garbage collection loop.
+// Start 启动后台周期性垃圾回收工作协程
 func (gc *GarbageCollector) Start(ctx context.Context) {
 	go func() {
 		defer close(gc.stopped)
@@ -287,7 +284,7 @@ func (gc *GarbageCollector) tick(ctx context.Context) {
 	}
 	gc.mu.Unlock()
 
-	// If no disks were explicitly registered, discover disks from database schemata
+	// 若未显式登记磁盘，自动从数据库模式中发现
 	if len(disks) == 0 && gc.db != nil {
 		rows, err := gc.db.Query(ctx, "SELECT table_schema FROM information_schema.tables WHERE table_name = 'slice_refs';")
 		if err == nil {
@@ -311,7 +308,7 @@ func (gc *GarbageCollector) tick(ctx context.Context) {
 	}
 }
 
-// Stop cleanly terminates the background periodic GC goroutine.
+// Stop 安全停止后台周期性垃圾回收协程
 func (gc *GarbageCollector) Stop() {
 	gc.stopOnce.Do(func() {
 		close(gc.stopCh)

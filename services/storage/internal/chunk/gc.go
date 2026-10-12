@@ -56,11 +56,12 @@ type GarbageCollector struct {
 	interval  time.Duration
 	batchSize int
 
-	mu       sync.Mutex
-	disks    map[string]struct{}
-	stopCh   chan struct{}
-	stopped  chan struct{}
-	stopOnce sync.Once
+	mu           sync.Mutex
+	disks        map[string]struct{}
+	orphanSlices map[string][]uint64 // 按虚拟磁盘 diskID 记录的待物理回收孤儿切片编号列表
+	stopCh       chan struct{}
+	stopped      chan struct{}
+	stopOnce     sync.Once
 }
 
 // GCOption configures a GarbageCollector instance.
@@ -102,14 +103,15 @@ func WithGCBatcher(batcher *BlockBatcher) GCOption {
 // NewGarbageCollector initializes a new GarbageCollector.
 func NewGarbageCollector(db GCDBExecutor, staging *StagingManager, opts ...GCOption) *GarbageCollector {
 	gc := &GarbageCollector{
-		db:        db,
-		staging:   staging,
-		batcher:   NewBlockBatcher(),
-		interval:  1 * time.Minute,
-		batchSize: 1000,
-		disks:     make(map[string]struct{}),
-		stopCh:    make(chan struct{}),
-		stopped:   make(chan struct{}),
+		db:           db,
+		staging:      staging,
+		batcher:      NewBlockBatcher(),
+		interval:     1 * time.Minute,
+		batchSize:    1000,
+		disks:        make(map[string]struct{}),
+		orphanSlices: make(map[string][]uint64),
+		stopCh:       make(chan struct{}),
+		stopped:      make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(gc)
@@ -137,6 +139,27 @@ func (gc *GarbageCollector) UnregisterDisk(diskID string) {
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
 	delete(gc.disks, diskID)
+	delete(gc.orphanSlices, diskID)
+}
+
+// TrackOrphans 登记并跟踪待物理回收的孤儿切片编号
+func (gc *GarbageCollector) TrackOrphans(diskID string, sliceIDs ...uint64) {
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	gc.disks[diskID] = struct{}{}
+	if len(sliceIDs) > 0 {
+		gc.orphanSlices[diskID] = append(gc.orphanSlices[diskID], sliceIDs...)
+	}
+}
+
+// TrackedOrphans 返回指定虚拟磁盘当前已跟踪的物理孤儿切片编号副本
+func (gc *GarbageCollector) TrackedOrphans(diskID string) []uint64 {
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	slices := gc.orphanSlices[diskID]
+	res := make([]uint64, len(slices))
+	copy(res, slices)
+	return res
 }
 
 type expiredSlice struct {
@@ -228,6 +251,10 @@ LIMIT $1;
 		}
 		reclaimedCount++
 	}
+
+	gc.mu.Lock()
+	delete(gc.orphanSlices, diskID)
+	gc.mu.Unlock()
 
 	return reclaimedCount, nil
 }

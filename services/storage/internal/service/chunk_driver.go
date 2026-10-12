@@ -14,16 +14,50 @@ import (
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
+	jfsChunk "github.com/starsrc/bowl/services/storage/internal/juicefs/chunk"
 	"github.com/starsrc/bowl/services/storage/internal/juicefs/object"
 )
 
-// chunkFileHandle represents open file context for ChunkDriver.
+// chunkFileHandle 维护切片驱动层面的打开文件上下文、读写状态与内存缓存页
 type chunkFileHandle struct {
 	mu       sync.Mutex
 	diskID   string
 	ino      uint64
 	openMode bowlv1.OpenMode
 	flags    uint32
+	closed   bool
+	pages    []*jfsChunk.Page
+	buffer   []byte
+}
+
+// AttachPage 向当前文件句柄移交内存 Page 缓冲区所有权，交由句柄生命周期统一管理与释放
+func (h *chunkFileHandle) AttachPage(p *jfsChunk.Page) {
+	if p == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.closed {
+		h.pages = append(h.pages, p)
+	} else {
+		p.Release()
+	}
+}
+
+// Pages 获取当前文件句柄持有的全部内存 Page 缓冲区列表副本（主要用于测试与状态断言）
+func (h *chunkFileHandle) Pages() []*jfsChunk.Page {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	res := make([]*jfsChunk.Page, len(h.pages))
+	copy(res, h.pages)
+	return res
+}
+
+// IsClosed 检查当前文件句柄是否已安全关闭
+func (h *chunkFileHandle) IsClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
 }
 
 // ChunkDriver 基于 NVMe Staging 本地暂存缓存与 PostgreSQL 元数据适配层实现 FileStorageDriver 接口
@@ -142,6 +176,14 @@ func (d *ChunkDriver) RunGC(ctx context.Context, diskID string) (int, error) {
 	return d.gc.RunGC(ctx, diskID)
 }
 
+// TrackedOrphans 查询指定磁盘当前记录的待物理回收孤儿切片编号列表（主要用于测试与状态断言）
+func (d *ChunkDriver) TrackedOrphans(diskID string) []uint64 {
+	if d.gc == nil {
+		return nil
+	}
+	return d.gc.TrackedOrphans(diskID)
+}
+
 
 
 // StagingManager returns the underlying StagingManager.
@@ -192,6 +234,10 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
 			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return nil, false, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+			}
 			if diskID == "" {
 				diskID = ch.diskID
 			}
@@ -344,6 +390,10 @@ func (d *ChunkDriver) Write(ctx context.Context, handle HandleContext, diskID st
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
 			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return 0, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+			}
 			if diskID == "" {
 				diskID = ch.diskID
 			}
@@ -470,6 +520,10 @@ func (d *ChunkDriver) Flush(ctx context.Context, handle HandleContext, diskID st
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
 			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+			}
 			if diskID == "" {
 				diskID = ch.diskID
 			}
@@ -488,6 +542,10 @@ func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID st
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
 			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+			}
 			if diskID == "" {
 				diskID = ch.diskID
 			}
@@ -660,6 +718,22 @@ WHERE ino = $3;
 
 // Fallocate preallocates space or punches a hole in the file.
 func (d *ChunkDriver) Fallocate(ctx context.Context, handle HandleContext, diskID string, ino uint64, mode uint32, offset uint64, length uint64) error {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+			}
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
 	return nil
 }
 
@@ -668,6 +742,10 @@ func (d *ChunkDriver) CopyFileRange(ctx context.Context, srcHandle HandleContext
 	if srcHandle != nil {
 		if ch, ok := srcHandle.(*chunkFileHandle); ok {
 			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return 0, connect.Errorf(connect.CodeFailedPrecondition, "源文件句柄已关闭")
+			}
 			if srcDiskID == "" {
 				srcDiskID = ch.diskID
 			}
@@ -680,6 +758,10 @@ func (d *ChunkDriver) CopyFileRange(ctx context.Context, srcHandle HandleContext
 	if dstHandle != nil {
 		if ch, ok := dstHandle.(*chunkFileHandle); ok {
 			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return 0, connect.Errorf(connect.CodeFailedPrecondition, "目标文件句柄已关闭")
+			}
 			if dstDiskID == "" {
 				dstDiskID = ch.diskID
 			}
@@ -953,66 +1035,125 @@ WHERE ino = $3;
 	return toCopy, nil
 }
 
-// Lseek seeks for data or holes within the file.
+// Lseek 定位文件内部数据或稀疏空洞偏移量
 func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, whence uint32) (uint64, error) {
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if ch.closed {
+				ch.mu.Unlock()
+				return 0, connect.Errorf(connect.CodeFailedPrecondition, "文件句柄已关闭")
+			}
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
+	}
 	return offset, nil
 }
 
-// Close closes the driver handle and frees resources.
+// Close 关闭文件句柄，安全释放关联的内存 Page 缓冲区并置位关闭状态，防止后续 I/O 操作
 func (d *ChunkDriver) Close(ctx context.Context, handle HandleContext) error {
+	if handle == nil {
+		return nil
+	}
+	ch, ok := handle.(*chunkFileHandle)
+	if !ok {
+		return nil
+	}
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if ch.closed {
+		return nil
+	}
+	ch.closed = true
+	for _, p := range ch.pages {
+		if p != nil {
+			p.Release()
+		}
+	}
+	ch.pages = nil
+	ch.buffer = nil
 	return nil
 }
 
-// DeleteInode reclaims chunks metadata and decrements slice reference counts for an unlinked/deleted Inode.
+// DeleteInode 删除指定 Inode 时，安全递减切片引用计数，删除元数据，并联动触发物理孤儿切片追踪与 GC 回收登记
 func (d *ChunkDriver) DeleteInode(ctx context.Context, diskID string, ino uint64) error {
-	parsedDiskUUID, err := uuid.Parse(diskID)
-	if err != nil {
-		return connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
-	}
-	schemaName := FormatDiskSchema(parsedDiskUUID)
-
-	// 1. Fetch all chunks rows for the Inode
-	queryChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1`, schemaName)
-	rows, err := d.db.Query(ctx, queryChunks, int64(ino))
-	if err != nil {
-		return connect.Errorf(connect.CodeInternal, "failed to query inode chunks: %s", err)
-	}
-	defer rows.Close()
-
-	sliceCounts := make(map[uint64]int)
-	for rows.Next() {
-		var indx int32
-		var rawSlices []byte
-		if err := rows.Scan(&indx, &rawSlices); err != nil {
-			return connect.Errorf(connect.CodeInternal, "failed to scan chunk slices: %s", err)
+	var orphanSliceIDs []uint64
+	meta := d.MetaAdapter()
+	if meta != nil {
+		var err error
+		orphanSliceIDs, err = meta.DeleteInodeChunks(ctx, diskID, ino)
+		if err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to delete inode chunks via meta adapter: %s", err)
 		}
-		if len(rawSlices) > 0 {
-			slices, err := chunk.DecodeSlices(rawSlices)
-			if err != nil {
-				return connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
+	} else {
+		parsedDiskUUID, err := uuid.Parse(diskID)
+		if err != nil {
+			return connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
+		}
+		schemaName := FormatDiskSchema(parsedDiskUUID)
+
+		// 1. 查询该 Inode 下属的所有 Chunk 行及切片二进制数据
+		queryChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1`, schemaName)
+		rows, err := d.db.Query(ctx, queryChunks, int64(ino))
+		if err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to query inode chunks: %s", err)
+		}
+		defer rows.Close()
+
+		sliceCounts := make(map[uint64]int)
+		for rows.Next() {
+			var indx int32
+			var rawSlices []byte
+			if err := rows.Scan(&indx, &rawSlices); err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to scan chunk slices: %s", err)
 			}
-			for _, s := range slices {
-				sliceCounts[s.ID]++
+			if len(rawSlices) > 0 {
+				slices, err := chunk.DecodeSlices(rawSlices)
+				if err != nil {
+					return connect.Errorf(connect.CodeInternal, "failed to decode chunk slices: %s", err)
+				}
+				for _, s := range slices {
+					sliceCounts[s.ID]++
+				}
 			}
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return connect.Errorf(connect.CodeInternal, "failed to iterate inode chunks: %s", err)
-	}
-	rows.Close()
+		if err := rows.Err(); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to iterate inode chunks: %s", err)
+		}
+		rows.Close()
 
-	// 2. Decrement reference count in slice_refs for each discarded slice
-	for sliceID, count := range sliceCounts {
-		updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs - $1 WHERE id = $2;`, schemaName)
-		if _, err := d.db.Exec(ctx, updateRefSQL, int32(count), int64(sliceID)); err != nil {
-			return connect.Errorf(connect.CodeInternal, "failed to decrement slice ref: %s", err)
+		// 2. 依次递减切片引用计数，并查验标记物理孤儿切片 (refs <= 0)
+		for sliceID, count := range sliceCounts {
+			updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs - $1 WHERE id = $2;`, schemaName)
+			if _, err := d.db.Exec(ctx, updateRefSQL, int32(count), int64(sliceID)); err != nil {
+				return connect.Errorf(connect.CodeInternal, "failed to decrement slice ref: %s", err)
+			}
+			var currentRefs int32
+			checkRefSQL := fmt.Sprintf(`SELECT refs FROM "%s".slice_refs WHERE id = $1`, schemaName)
+			if err := d.db.QueryRow(ctx, checkRefSQL, int64(sliceID)).Scan(&currentRefs); err == nil && currentRefs <= 0 {
+				orphanSliceIDs = append(orphanSliceIDs, sliceID)
+			}
+		}
+
+		// 3. 删除该 Inode 的全部 chunks 行
+		deleteChunksSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1;`, schemaName)
+		if _, err := d.db.Exec(ctx, deleteChunksSQL, int64(ino)); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to delete inode chunks: %s", err)
 		}
 	}
 
-	// 3. Delete chunks rows for this Inode
-	deleteChunksSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1;`, schemaName)
-	if _, err := d.db.Exec(ctx, deleteChunksSQL, int64(ino)); err != nil {
-		return connect.Errorf(connect.CodeInternal, "failed to delete inode chunks: %s", err)
+	// 联动垃圾回收器：登记该磁盘并跟踪孤儿切片编号，等待 GC 周期物理清理
+	if d.gc != nil {
+		d.gc.RegisterDisk(diskID)
+		if len(orphanSliceIDs) > 0 {
+			d.gc.TrackOrphans(diskID, orphanSliceIDs...)
+		}
 	}
 
 	return nil

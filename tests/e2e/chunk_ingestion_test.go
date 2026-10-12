@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -516,12 +517,13 @@ func TestE2E_ChunkDriver_Read_JuiceFSOverlayAndColdS3Fallback(t *testing.T) {
 	assert.Equal(t, make([]byte, size64K), readHoleResp.GetData(), "稀疏空洞区间必须全为 0x00")
 
 	// 11. 阶段三：等待后台 S3 上传并将切片 3 转换为冷数据
-	// 触发 Fsync 等待 S3 持久化完成
-	_, _ = storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+	// 触发 Fsync 等待 S3 持久化屏障达成（阻塞直至全部在途分块提交成功，无需额外 sleep）
+	fsyncResp, err := storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
 		SessionId: sessionID,
 		Fh:        fh,
 	})
-	time.Sleep(1 * time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, fsyncResp)
 
 	// 清除切片 3 的本地 Staging 文件
 	slice3Path := filepath.Join(stagingDir, diskIDStr, "slice_3.bin")
@@ -545,3 +547,268 @@ func TestE2E_ChunkDriver_Read_JuiceFSOverlayAndColdS3Fallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// TestE2E_ChunkDriver_S3AsyncPipeline_FlushFsyncDurabilityBarrier 验证 S3 后台 4MB 分块异步推流管道与 Flush/Fsync 持久化同步屏障，并立即从冷存储校验物理数据完整性
+func TestE2E_ChunkDriver_S3AsyncPipeline_FlushFsyncDurabilityBarrier(t *testing.T) {
+	ctx := context.Background()
+
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	// 1. 初始化数据库连接池
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// 2. 初始化 MinIO 客户端并确保 bucket 存在
+	minioEndpoint := "127.0.0.1:9000"
+	minioBucket := "bowl-data"
+	minioClient, err := minio.New(minioEndpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4("minioadmin", "minioadmin", ""),
+		Secure: false,
+	})
+	require.NoError(t, err)
+
+	bucketExists, err := minioClient.BucketExists(ctx, minioBucket)
+	require.NoError(t, err)
+	if !bucketExists {
+		err = minioClient.MakeBucket(ctx, minioBucket, minio.MakeBucketOptions{})
+		require.NoError(t, err)
+	}
+
+	// 3. 准备独立临时目录
+	baseDir := t.TempDir()
+	binDir := filepath.Join(baseDir, "bin")
+	dataDir := filepath.Join(baseDir, "data")
+	stagingDir := filepath.Join(baseDir, "staging")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+
+	repoRoot, err := filepath.Abs("../..")
+	require.NoError(t, err)
+
+	diskBin := filepath.Join(binDir, "disk-service")
+	storageBin := filepath.Join(binDir, "storage-service")
+
+	// 4. 静态编译真实服务二进制
+	cmdDiskBuild := exec.Command("go", "build", "-o", diskBin, "./services/disk/cmd")
+	cmdDiskBuild.Dir = repoRoot
+	out, err := cmdDiskBuild.CombinedOutput()
+	require.NoError(t, err, "编译 disk-service 失败: %s", string(out))
+
+	cmdStorageBuild := exec.Command("go", "build", "-o", storageBin, "./services/storage/cmd")
+	cmdStorageBuild.Dir = repoRoot
+	out, err = cmdStorageBuild.CombinedOutput()
+	require.NoError(t, err, "编译 storage-service 失败: %s", string(out))
+
+	// 5. 启动 DiskService 进程
+	diskPort := getFreePort(t)
+	diskAddr := fmt.Sprintf("http://127.0.0.1:%d", diskPort)
+
+	ctxDisk, cancelDisk := context.WithCancel(context.Background())
+	defer cancelDisk()
+
+	cmdDisk := exec.CommandContext(ctxDisk, diskBin)
+	cmdDisk.Dir = repoRoot
+	cmdDisk.Env = append(os.Environ(),
+		fmt.Sprintf("SERVER_PORT=%d", diskPort),
+		fmt.Sprintf("PORT=%d", diskPort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+	)
+	cmdDisk.Stdout = os.Stdout
+	cmdDisk.Stderr = os.Stderr
+	require.NoError(t, cmdDisk.Start())
+	defer func() {
+		cancelDisk()
+		_ = cmdDisk.Wait()
+	}()
+
+	waitForHTTP(t, diskAddr, 10*time.Second)
+
+	// 6. 启动 StorageService 进程 (启用 STORAGE_DRIVER=chunk, S3=true)
+	storagePort := getFreePort(t)
+	storageAddr := fmt.Sprintf("http://127.0.0.1:%d", storagePort)
+
+	ctxStorage, cancelStorage := context.WithCancel(context.Background())
+	defer cancelStorage()
+
+	cmdStorage := exec.CommandContext(ctxStorage, storageBin)
+	cmdStorage.Dir = repoRoot
+	cmdStorage.Env = append(os.Environ(),
+		fmt.Sprintf("PORT=%d", storagePort),
+		fmt.Sprintf("SERVER_PORT=%d", storagePort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+		"STAGING_DIR="+stagingDir,
+		"STORAGE_DRIVER=chunk",
+		"DISK_SERVICE_ADDR="+diskAddr,
+		"S3_ENABLED=true",
+		"S3_ENDPOINT=http://127.0.0.1:9000",
+		"S3_BUCKET="+minioBucket,
+		"S3_ACCESS_KEY=minioadmin",
+		"S3_SECRET_KEY=minioadmin",
+		"S3_REGION=us-east-1",
+		"S3_USE_SSL=false",
+		"S3_FORCE_PATH_STYLE=true",
+	)
+	cmdStorage.Stdout = os.Stdout
+	cmdStorage.Stderr = os.Stderr
+	require.NoError(t, cmdStorage.Start())
+	defer func() {
+		cancelStorage()
+		_ = cmdStorage.Wait()
+	}()
+
+	waitForHTTP(t, storageAddr, 10*time.Second)
+
+	// 7. 构造客户端并创建测试磁盘
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	diskClient := bowlv1connect.NewDiskServiceClient(connect.NewClient(connecthttp.NewTransport(httpClient, diskAddr)))
+	storageClient := bowlv1connect.NewStorageServiceClient(connect.NewClient(connecthttp.NewTransport(httpClient, storageAddr)))
+
+	createDiskResp, err := diskClient.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "e2e-durability-barrier-disk",
+		CapacityBytes: 10 * 1024 * 1024 * 1024,
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskIDStr := createDiskResp.GetDisk().GetDiskId()
+	parsedDiskUUID, err := uuid.Parse(diskIDStr)
+	require.NoError(t, err)
+
+	schemaName := fmt.Sprintf("disk_%s", strings.ReplaceAll(parsedDiskUUID.String(), "-", "_"))
+	defer func() {
+		_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	// 8. 挂载虚拟磁盘并创建测试文件
+	clientID := "e2e-durability-client"
+	mountResp, err := storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskIDStr,
+		ClientId: clientID,
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "barrier-persistence-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 9. 写入 10MB 数据 (跨越两个 4MB 物理分块边界: 4MB block 0, 4MB block 1, 2MB block 2)
+	totalSize := 10 * 1024 * 1024
+	blockSize4MB := 4 * 1024 * 1024
+	payload10MB := make([]byte, totalSize)
+	for i := range payload10MB {
+		payload10MB[i] = byte((i*73 + 19) % 256)
+	}
+
+	startWrite := time.Now()
+	writeResp, err := storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload10MB,
+	})
+	elapsedWrite := time.Since(startWrite)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(totalSize), writeResp.GetWritten())
+	assert.Less(t, elapsedWrite, 50*time.Millisecond, "前台 10MB 写入 NVMe Staging 耗时应极短")
+
+	// 10. 触发 Fsync 持久化同步屏障：服务端挂起直至在途 4MB 分块全部完成持久化
+	startFsync := time.Now()
+	fsyncResp, err := storageClient.Fsync(ctx, &bowlv1.FsyncRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+	})
+	elapsedFsync := time.Since(startFsync)
+	require.NoError(t, err)
+	require.NotNil(t, fsyncResp)
+	t.Logf("Fsync 持久化屏障同步耗时: %v", elapsedFsync)
+
+	// 11. 立即从冷存储 (MinIO S3) 直接校验 4MB 物理分块完整性 (无需 sleep 等待)
+	slice1Key0 := fmt.Sprintf("chunks/%s/000/0/1_0", diskIDStr)
+	slice1Key1 := fmt.Sprintf("chunks/%s/000/0/1_1", diskIDStr)
+	slice1Key2 := fmt.Sprintf("chunks/%s/000/0/1_2", diskIDStr)
+
+	// 校验分块 0 (4MB)
+	stat0, err := minioClient.StatObject(ctx, minioBucket, slice1Key0, minio.StatObjectOptions{})
+	require.NoError(t, err, "S3 物理分块 0 必须立即存在")
+	assert.Equal(t, int64(blockSize4MB), stat0.Size)
+
+	obj0, err := minioClient.GetObject(ctx, minioBucket, slice1Key0, minio.GetObjectOptions{})
+	require.NoError(t, err)
+	data0, err := io.ReadAll(obj0)
+	require.NoError(t, err)
+	_ = obj0.Close()
+	assert.Equal(t, payload10MB[:blockSize4MB], data0, "S3 分块 0 数据载荷必须与原始数据一致")
+
+	// 校验分块 1 (4MB)
+	stat1, err := minioClient.StatObject(ctx, minioBucket, slice1Key1, minio.StatObjectOptions{})
+	require.NoError(t, err, "S3 物理分块 1 必须立即存在")
+	assert.Equal(t, int64(blockSize4MB), stat1.Size)
+
+	obj1, err := minioClient.GetObject(ctx, minioBucket, slice1Key1, minio.GetObjectOptions{})
+	require.NoError(t, err)
+	data1, err := io.ReadAll(obj1)
+	require.NoError(t, err)
+	_ = obj1.Close()
+	assert.Equal(t, payload10MB[blockSize4MB:2*blockSize4MB], data1, "S3 分块 1 数据载荷必须与原始数据一致")
+
+	// 校验分块 2 (2MB)
+	stat2, err := minioClient.StatObject(ctx, minioBucket, slice1Key2, minio.StatObjectOptions{})
+	require.NoError(t, err, "S3 物理分块 2 必须立即存在")
+	assert.Equal(t, int64(2*1024*1024), stat2.Size)
+
+	obj2, err := minioClient.GetObject(ctx, minioBucket, slice1Key2, minio.GetObjectOptions{})
+	require.NoError(t, err)
+	data2, err := io.ReadAll(obj2)
+	require.NoError(t, err)
+	_ = obj2.Close()
+	assert.Equal(t, payload10MB[2*blockSize4MB:], data2, "S3 分块 2 数据载荷必须与原始数据一致")
+
+	// 12. 删除本地 NVMe Staging 缓存切片，模拟本地缓存完全丢失
+	stagingSlicePath := filepath.Join(stagingDir, diskIDStr, "slice_1.bin")
+	require.NoError(t, os.Remove(stagingSlicePath))
+
+	// 13. Connect-RPC 客户端调用 Read，按 2MB 分块验证透明从冷存储 S3 HTTP Range 回源读取数据完整性
+	var readBackAll []byte
+	chunkReadSize := uint32(2 * 1024 * 1024)
+	for off := uint64(0); off < uint64(totalSize); off += uint64(chunkReadSize) {
+		sz := chunkReadSize
+		if off+uint64(sz) > uint64(totalSize) {
+			sz = uint32(uint64(totalSize) - off)
+		}
+		readResp, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+			SessionId: sessionID,
+			Fh:        fh,
+			Ino:       ino,
+			Offset:    off,
+			Size:      sz,
+		})
+		require.NoError(t, err)
+		readBackAll = append(readBackAll, readResp.GetData()...)
+	}
+	assert.Equal(t, payload10MB, readBackAll, "冷存储回源读取的数据必须与原始写入完全一致")
+
+	// 14. 释放句柄
+	_, err = storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+

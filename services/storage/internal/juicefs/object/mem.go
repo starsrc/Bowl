@@ -156,6 +156,12 @@ func newMem(endpoint, accesskey, secretkey, token string) (ObjectStorage, error)
 	return store, nil
 }
 
+// NewMemStorage 构造用于内存模拟与测试的 ObjectStorage 实例
+func NewMemStorage() ObjectStorage {
+	store, _ := newMem("mem", "", "", "")
+	return store
+}
+
 func init() {
 	Register("mem", newMem)
 }

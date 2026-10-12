@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	connect "connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	bowlv1 "github.com/starsrc/bowl/gen/go/bowl/v1"
 	"github.com/starsrc/bowl/services/storage/internal/chunk"
@@ -27,19 +25,20 @@ type chunkFileHandle struct {
 	flags    uint32
 }
 
-// ChunkDriver implements FileStorageDriver using NVMe staging slices and PostgreSQL chunk metadata.
+// ChunkDriver 基于 NVMe Staging 本地暂存缓存与 PostgreSQL 元数据适配层实现 FileStorageDriver 接口
 type ChunkDriver struct {
-	staging  *chunk.StagingManager
-	db       DBExecutor
-	uploader *chunk.S3Uploader
-	reader   *chunk.S3Reader
-	gc       *chunk.GarbageCollector
+	staging     *chunk.StagingManager
+	db          DBExecutor
+	metaAdapter MetaAdapter
+	uploader    *chunk.S3Uploader
+	reader      *chunk.S3Reader
+	gc          *chunk.GarbageCollector
 }
 
 var _ FileStorageDriver = (*ChunkDriver)(nil)
 
-// NewChunkDriver constructs a new ChunkDriver backed by a StagingManager and database executor.
-// An optional S3Uploader can be provided for background S3 block persistence.
+// NewChunkDriver 构造基于 NVMe Staging 缓存与数据库执行器的切片存储驱动实例。
+// 可选传入 S3Uploader 实现后台异步 S3 推流与持久化。
 func NewChunkDriver(staging *chunk.StagingManager, db DBExecutor, uploader ...*chunk.S3Uploader) *ChunkDriver {
 	var up *chunk.S3Uploader
 	if len(uploader) > 0 {
@@ -53,13 +52,31 @@ func NewChunkDriver(staging *chunk.StagingManager, db DBExecutor, uploader ...*c
 	} else {
 		gc = chunk.NewGarbageCollector(db, staging)
 	}
-	return &ChunkDriver{
-		staging:  staging,
-		db:       db,
-		uploader: up,
-		reader:   r,
-		gc:       gc,
+	var meta MetaAdapter
+	if db != nil {
+		meta = NewMetaAdapter(db)
 	}
+	return &ChunkDriver{
+		staging:     staging,
+		db:          db,
+		metaAdapter: meta,
+		uploader:    up,
+		reader:      r,
+		gc:          gc,
+	}
+}
+
+// MetaAdapter 返回当前绑定的 JuiceFS 元数据切片账本适配器
+func (d *ChunkDriver) MetaAdapter() MetaAdapter {
+	if d.metaAdapter == nil && d.db != nil {
+		d.metaAdapter = NewMetaAdapter(d.db)
+	}
+	return d.metaAdapter
+}
+
+// SetMetaAdapter 设置或更新 JuiceFS 元数据切片账本适配器
+func (d *ChunkDriver) SetMetaAdapter(meta MetaAdapter) {
+	d.metaAdapter = meta
 }
 
 // Uploader returns the configured S3Uploader, if any.
@@ -118,51 +135,13 @@ func (d *ChunkDriver) DB() DBExecutor {
 	return d.db
 }
 
-// LocateSlice queries the PostgreSQL chunks table for the given diskID to find the (ino, chunk_indx)
-// referencing the given sliceID.
+// LocateSlice 查询指定切片编号所归属的 (ino, chunk_indx)
 func (d *ChunkDriver) LocateSlice(ctx context.Context, diskID string, sliceID uint64) (uint64, uint32, bool, error) {
-	parsedDiskUUID, err := uuid.Parse(diskID)
-	if err != nil {
-		return 0, 0, false, fmt.Errorf("invalid disk id %q: %w", diskID, err)
+	meta := d.MetaAdapter()
+	if meta != nil {
+		return meta.LocateSlice(ctx, diskID, sliceID)
 	}
-	schemaName := FormatDiskSchema(parsedDiskUUID)
-
-	sliceIDBytes := binary.BigEndian.AppendUint64(nil, sliceID)
-	query := fmt.Sprintf(`SELECT ino, indx, slices FROM "%s".chunks WHERE position($1 IN slices) > 0;`, schemaName)
-
-	rows, err := d.db.Query(ctx, query, sliceIDBytes)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && (pgErr.Code == "3F000" || pgErr.Code == "42P01") {
-			return 0, 0, false, nil
-		}
-		return 0, 0, false, fmt.Errorf("query chunk slices for disk %s: %w", diskID, err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var ino int64
-		var indx int32
-		var rawSlices []byte
-		if err := rows.Scan(&ino, &indx, &rawSlices); err != nil {
-			return 0, 0, false, fmt.Errorf("scan chunk row: %w", err)
-		}
-
-		slices, err := chunk.DecodeSlices(rawSlices)
-		if err != nil {
-			continue
-		}
-		for _, s := range slices {
-			if s.ID == sliceID {
-				return uint64(ino), uint32(indx), true, nil
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, 0, false, fmt.Errorf("iterate chunk rows: %w", err)
-	}
-
-	return 0, 0, false, nil
+	return 0, 0, false, errors.New("元数据适配器未初始化")
 }
 
 // RecoverStaging triggers the recovery pipeline, scanning local NVMe staging for unflushed slices,
@@ -281,81 +260,81 @@ func (d *ChunkDriver) Read(ctx context.Context, handle HandleContext, diskID str
 	return result, isEOF, nil
 }
 
-// Write writes file data at a given offset by creating NVMe staging slices and appending their 24-byte metadata to chunks table.
-// If the write interval [offset, offset+len(data)) crosses 64MB Chunk boundaries, it is automatically split into multiple slices.
+// Write 将指定数据分片写入 NVMe 本地暂存缓存并提交 24 字节切片账本元数据至 PostgreSQL。
+// 若写入区间跨越 64MB Chunk 边界，将自动切分为独立切片并提交至各自 Chunk 的元数据行。
 func (d *ChunkDriver) Write(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, data []byte) (uint32, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
 
-	// 1. Resolve schema name from diskID
-	parsedDiskUUID, err := uuid.Parse(diskID)
-	if err != nil {
-		return 0, connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
+	if handle != nil {
+		if ch, ok := handle.(*chunkFileHandle); ok {
+			ch.mu.Lock()
+			if diskID == "" {
+				diskID = ch.diskID
+			}
+			if ino == 0 {
+				ino = ch.ino
+			}
+			ch.mu.Unlock()
+		}
 	}
-	schemaName := FormatDiskSchema(parsedDiskUUID)
 
-	query := fmt.Sprintf(`
-INSERT INTO "%s".chunks (ino, indx, slices)
-VALUES ($1, $2, $3)
-ON CONFLICT (ino, indx)
-DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
-`, schemaName)
+	if diskID == "" {
+		return 0, connect.Errorf(connect.CodeInvalidArgument, "缺少虚拟磁盘标识 diskID")
+	}
+	if ino == 0 {
+		return 0, connect.Errorf(connect.CodeInvalidArgument, "无效的 Inode 编号 %d", ino)
+	}
+
+	if d.staging == nil {
+		return 0, connect.Errorf(connect.CodeInternal, "NVMe staging 缓存管理器未初始化")
+	}
+	meta := d.MetaAdapter()
+	if meta == nil {
+		return 0, connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
+	}
 
 	curOffset := offset
 	remaining := data
 	endOffset := offset + uint64(len(data))
 
-	// 2. Iterate and split data across 64MB chunk boundaries
+	// 循环切分并处理跨 64MB Chunk 边界的数据切片
 	for curOffset < endOffset {
-		curChunk := uint32(curOffset / chunk.ChunkSize)
-		chunkEnd := uint64(curChunk+1) * chunk.ChunkSize
+		curChunk := uint32(curOffset / ChunkSize)
+		chunkEnd := uint64(curChunk+1) * ChunkSize
 		chunkRemaining := chunkEnd - curOffset
 
 		toWrite := uint64(len(remaining))
 		if toWrite > chunkRemaining {
 			toWrite = chunkRemaining
 		}
-		chunkPos := uint32(curOffset % chunk.ChunkSize)
+		chunkPos := uint32(curOffset % ChunkSize)
 		chunkData := remaining[:toWrite]
 
-		// 2.1. Generate unique slice ID
+		// 1. 分配单调递增的切片唯一编号
 		sliceID := d.staging.NextSliceID()
 
-		// 2.2. Write payload to local NVMe staging file
+		// 2. 极速写入本地 NVMe Staging 缓存文件 (<10ms ACK)
 		if err := d.staging.WriteSlice(diskID, sliceID, chunkData); err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to write staging slice: %s", err)
+			return 0, connect.Errorf(connect.CodeInternal, "写入 NVMe Staging 缓存切片失败: %s", err)
 		}
 
-		// 2.3. Encode 24-byte big-endian slice
-		s := chunk.Slice{
+		// 3. 构建 JuiceFS 24 字节大端序二进制切片元数据结构
+		s := Slice{
 			Pos:  chunkPos,
 			ID:   sliceID,
 			Size: uint32(toWrite),
 			Off:  0,
 			Len:  uint32(toWrite),
 		}
-		if err := s.Validate(); err != nil {
-			return 0, connect.Errorf(connect.CodeInvalidArgument, "invalid slice: %s", err)
-		}
-		encoded := chunk.EncodeSlice(s)
 
-		// 2.4. Atomically append the 24-byte slice to "<schema>".chunks table
-		if _, err := d.db.Exec(ctx, query, int64(ino), int32(curChunk), encoded); err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to append chunk slice metadata: %s", err)
+		// 4. 通过 MetaAdapter 将切片原子追加至 PostgreSQL chunks 表并同步维护 slice_refs 引用账本
+		if err := meta.WriteSlice(ctx, diskID, ino, curChunk, s); err != nil {
+			return 0, connect.Errorf(connect.CodeInternal, "提交 JuiceFS 切片元数据失败: %s", err)
 		}
 
-		// 2.5. Record slice reference in slice_refs table
-		insertRefQuery := fmt.Sprintf(`
-INSERT INTO "%s".slice_refs (id, chunk_indx, size, refs)
-VALUES ($1, $2, $3, 1)
-ON CONFLICT (id) DO NOTHING;
-`, schemaName)
-		if _, err := d.db.Exec(ctx, insertRefQuery, int64(sliceID), int32(curChunk), int32(toWrite)); err != nil {
-			return 0, connect.Errorf(connect.CodeInternal, "failed to record slice reference: %s", err)
-		}
-
-		// 2.6. Asynchronously enqueue slice to S3 uploader if configured
+		// 5. 若配置了后台 S3 上传器，异步入队推流任务
 		if d.uploader != nil {
 			_ = d.uploader.Enqueue(ctx, &chunk.UploadTask{
 				DiskID:    diskID,

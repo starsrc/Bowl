@@ -49,7 +49,14 @@ type Slice struct {
 // Validate 校验切片结构体字段完整性与边界不变量
 func (s Slice) Validate() error {
 	if s.ID == 0 {
-		return ErrInvalidSliceID
+		// ID 为 0 代表稀疏空洞切片 (Sparse Hole)，物理尺寸与对象偏移必须为 0
+		if s.Size != 0 || s.Off != 0 {
+			return ErrInvalidSliceID
+		}
+		if uint64(s.Pos)+uint64(s.Len) > ChunkSize {
+			return fmt.Errorf("%w: pos (%d) + len (%d) > chunk size (%d)", ErrOutOfBounds, s.Pos, s.Len, ChunkSize)
+		}
+		return nil
 	}
 	// 防范整数溢出并确保切片内载荷引用未超出物理尺寸
 	if uint64(s.Off)+uint64(s.Len) > uint64(s.Size) {

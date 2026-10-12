@@ -559,17 +559,24 @@ func (d *ChunkDriver) Fsync(ctx context.Context, handle HandleContext, diskID st
 	return d.syncInodeBarrier(ctx, diskID, ino)
 }
 
-// Truncate truncates or extends a file to the specified size.
-// If shrinking to size, finds chunks and slices beyond size, decrements slice_refs for discarded slices,
-// and adjusts or removes truncated slices.
+// Truncate 截断或扩容文件至指定大小。
+// 缩短时：通过 MetaAdapter 裁剪边界切片并清除越界切片元数据，递减引用计数并联动 GC 孤儿追踪；读取超出新大小的区间将返回 EOF。
+// 扩容时：文件扩展形成稀疏空洞，无需分配物理块，读取扩容区间自动返回全零 (0x00)。
 func (d *ChunkDriver) Truncate(ctx context.Context, diskID string, ino uint64, size uint64) error {
+	if diskID == "" {
+		return connect.Errorf(connect.CodeInvalidArgument, "缺少虚拟磁盘标识 diskID")
+	}
+	if ino == 0 {
+		return connect.Errorf(connect.CodeInvalidArgument, "无效的 Inode 编号 %d", ino)
+	}
+
 	parsedDiskUUID, err := uuid.Parse(diskID)
 	if err != nil {
 		return connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
 	}
 	schemaName := FormatDiskSchema(parsedDiskUUID)
 
-	// 1. Query current file size from database
+	// 1. 从数据库查询当前文件大小
 	var currentSize int64
 	querySizeSQL := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
 	if err := d.db.QueryRow(ctx, querySizeSQL, int64(ino)).Scan(&currentSize); err != nil {
@@ -579,7 +586,7 @@ func (d *ChunkDriver) Truncate(ctx context.Context, diskID string, ino uint64, s
 		return connect.Errorf(connect.CodeInternal, "failed to query inode size: %s", err)
 	}
 
-	// If expanding or keeping size unchanged, no slices need to be discarded.
+	// 2. 若扩容或保持大小不变，无需淘汰切片，扩容区间自然形成稀疏空洞
 	if size >= uint64(currentSize) {
 		now := time.Now()
 		updateInodeSQL := fmt.Sprintf(`
@@ -590,116 +597,30 @@ SET size = $1,
     ctime = $2
 WHERE ino = $3;
 `, schemaName)
-		_, _ = d.db.Exec(ctx, updateInodeSQL, int64(size), now, int64(ino))
+		if _, err := d.db.Exec(ctx, updateInodeSQL, int64(size), now, int64(ino)); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to update inode size: %s", err)
+		}
 		return nil
 	}
 
-	// 2. Shrinking: calculate boundary chunk and position within chunk
-	targetChunkIndx := uint32(size / chunk.ChunkSize)
-	targetChunkPos := uint32(size % chunk.ChunkSize)
-
-	discardedSliceCounts := make(map[uint64]int)
-
-	// 2.1. Find all chunks strictly beyond targetChunkIndx (or targetChunkIndx itself if targetChunkPos == 0)
-	var boundaryCondition string
-	if targetChunkPos == 0 {
-		boundaryCondition = fmt.Sprintf("indx >= %d", targetChunkIndx)
-	} else {
-		boundaryCondition = fmt.Sprintf("indx > %d", targetChunkIndx)
+	// 3. 缩短截断：通过 MetaAdapter 清理越界切片并裁剪边界切片
+	meta := d.MetaAdapter()
+	if meta == nil {
+		return connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
 	}
 
-	queryBeyondChunks := fmt.Sprintf(`SELECT indx, slices FROM "%s".chunks WHERE ino = $1 AND %s`, schemaName, boundaryCondition)
-	rows, err := d.db.Query(ctx, queryBeyondChunks, int64(ino))
+	orphans, err := meta.TruncateSlices(ctx, diskID, ino, size)
 	if err != nil {
-		return connect.Errorf(connect.CodeInternal, "failed to query beyond chunks: %s", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cIndx int32
-		var rawSlices []byte
-		if err := rows.Scan(&cIndx, &rawSlices); err != nil {
-			return connect.Errorf(connect.CodeInternal, "failed to scan beyond chunk: %s", err)
-		}
-		if len(rawSlices) > 0 {
-			slices, err := chunk.DecodeSlices(rawSlices)
-			if err != nil {
-				return connect.Errorf(connect.CodeInternal, "failed to decode beyond chunk slices: %s", err)
-			}
-			for _, s := range slices {
-				discardedSliceCounts[s.ID]++
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return connect.Errorf(connect.CodeInternal, "failed to iterate beyond chunks: %s", err)
-	}
-	rows.Close()
-
-	// Delete fully discarded chunks rows
-	deleteBeyondSQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1 AND %s`, schemaName, boundaryCondition)
-	if _, err := d.db.Exec(ctx, deleteBeyondSQL, int64(ino)); err != nil {
-		return connect.Errorf(connect.CodeInternal, "failed to delete beyond chunks: %s", err)
+		return connect.Errorf(connect.CodeInternal, "截断切片元数据失败: %s", err)
 	}
 
-	// 2.2. If targetChunkPos > 0, inspect boundary chunk at targetChunkIndx
-	if targetChunkPos > 0 {
-		var rawSlices []byte
-		queryBoundaryChunk := fmt.Sprintf(`SELECT slices FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
-		err := d.db.QueryRow(ctx, queryBoundaryChunk, int64(ino), int32(targetChunkIndx)).Scan(&rawSlices)
-		if err == nil && len(rawSlices) > 0 {
-			slices, err := chunk.DecodeSlices(rawSlices)
-			if err != nil {
-				return connect.Errorf(connect.CodeInternal, "failed to decode boundary chunk slices: %s", err)
-			}
-
-			var preservedSlices []chunk.Slice
-			for _, s := range slices {
-				if s.Pos >= targetChunkPos {
-					// Subcase B1: Slice starts at or after targetChunkPos -> fully discarded
-					discardedSliceCounts[s.ID]++
-				} else if s.Pos+s.Len > targetChunkPos {
-					// Subcase B2: Slice crosses targetChunkPos -> partially truncated
-					adjusted := chunk.Slice{
-						Pos:  s.Pos,
-						ID:   s.ID,
-						Size: s.Size,
-						Off:  s.Off,
-						Len:  targetChunkPos - s.Pos,
-					}
-					preservedSlices = append(preservedSlices, adjusted)
-				} else {
-					// Subcase B3: Slice is entirely within [0, targetChunkPos) -> fully preserved
-					preservedSlices = append(preservedSlices, s)
-				}
-			}
-
-			if len(preservedSlices) == 0 {
-				deleteBoundarySQL := fmt.Sprintf(`DELETE FROM "%s".chunks WHERE ino = $1 AND indx = $2`, schemaName)
-				if _, err := d.db.Exec(ctx, deleteBoundarySQL, int64(ino), int32(targetChunkIndx)); err != nil {
-					return connect.Errorf(connect.CodeInternal, "failed to delete boundary chunk: %s", err)
-				}
-			} else {
-				encoded := chunk.EncodeSlices(preservedSlices)
-				updateBoundarySQL := fmt.Sprintf(`UPDATE "%s".chunks SET slices = $1 WHERE ino = $2 AND indx = $3`, schemaName)
-				if _, err := d.db.Exec(ctx, updateBoundarySQL, encoded, int64(ino), int32(targetChunkIndx)); err != nil {
-					return connect.Errorf(connect.CodeInternal, "failed to update boundary chunk slices: %s", err)
-				}
-			}
-		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return connect.Errorf(connect.CodeInternal, "failed to query boundary chunk: %s", err)
-		}
+	// 联动垃圾回收器跟踪孤儿切片
+	if d.gc != nil && len(orphans) > 0 {
+		d.gc.RegisterDisk(diskID)
+		d.gc.TrackOrphans(diskID, orphans...)
 	}
 
-	// 2.3. Decrement reference count in slice_refs for each fully discarded slice
-	for sliceID, count := range discardedSliceCounts {
-		updateRefSQL := fmt.Sprintf(`UPDATE "%s".slice_refs SET refs = refs - $1 WHERE id = $2;`, schemaName)
-		if _, err := d.db.Exec(ctx, updateRefSQL, int32(count), int64(sliceID)); err != nil {
-			return connect.Errorf(connect.CodeInternal, "failed to decrement slice ref: %s", err)
-		}
-	}
-
-	// 2.4. Update inode size in PostgreSQL
+	// 4. 更新 Inode 元数据 (size/blocks/mtime/ctime)
 	now := time.Now()
 	updateInodeSQL := fmt.Sprintf(`
 UPDATE "%s".inodes
@@ -716,7 +637,8 @@ WHERE ino = $3;
 	return nil
 }
 
-// Fallocate preallocates space or punches a hole in the file.
+// Fallocate 空间预分配与区间打洞 (FALLOC_FL_PUNCH_HOLE)。
+// 打洞模式下通过 MetaAdapter 覆盖空洞切片释放物理存储；预分配模式下扩展文件大小形成稀疏空洞。
 func (d *ChunkDriver) Fallocate(ctx context.Context, handle HandleContext, diskID string, ino uint64, mode uint32, offset uint64, length uint64) error {
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
@@ -734,6 +656,81 @@ func (d *ChunkDriver) Fallocate(ctx context.Context, handle HandleContext, diskI
 			ch.mu.Unlock()
 		}
 	}
+
+	if diskID == "" {
+		return connect.Errorf(connect.CodeInvalidArgument, "缺少虚拟磁盘标识 diskID")
+	}
+	if ino == 0 {
+		return connect.Errorf(connect.CodeInvalidArgument, "无效的 Inode 编号 %d", ino)
+	}
+	if length == 0 {
+		return connect.Errorf(connect.CodeInvalidArgument, "length must be greater than 0")
+	}
+
+	parsedDiskUUID, err := uuid.Parse(diskID)
+	if err != nil {
+		return connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
+	}
+	schemaName := FormatDiskSchema(parsedDiskUUID)
+
+	// 1. 查询当前 Inode 大小
+	var currentSize int64
+	querySizeSQL := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
+	if err := d.db.QueryRow(ctx, querySizeSQL, int64(ino)).Scan(&currentSize); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return connect.Errorf(connect.CodeNotFound, "inode %d not found", ino)
+		}
+		return connect.Errorf(connect.CodeInternal, "failed to query inode size: %s", err)
+	}
+
+	// 2. 区分打洞模式 (FALLOC_FL_PUNCH_HOLE = 2) 与标准预分配模式
+	isPunchHole := (mode & uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE)) != 0 || mode == 2
+	if isPunchHole {
+		// 打洞超出 EOF 为合法空操作
+		if offset >= uint64(currentSize) {
+			return nil
+		}
+		punchEnd := offset + length
+		if punchEnd > uint64(currentSize) {
+			punchEnd = uint64(currentSize)
+		}
+		punchLen := punchEnd - offset
+
+		meta := d.MetaAdapter()
+		if meta == nil {
+			return connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
+		}
+
+		if err := meta.PunchHole(ctx, diskID, ino, offset, punchLen); err != nil {
+			return connect.Errorf(connect.CodeInternal, "打洞失败: %s", err)
+		}
+
+		now := time.Now()
+		updateInodeSQL := fmt.Sprintf(`UPDATE "%s".inodes SET mtime = $1, ctime = $1 WHERE ino = $2;`, schemaName)
+		if _, err := d.db.Exec(ctx, updateInodeSQL, now, int64(ino)); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to update inode metadata: %s", err)
+		}
+		return nil
+	}
+
+	// 标准预分配行为：若未设置 FALLOC_FL_KEEP_SIZE 且超出当前文件大小，则扩容 Inode
+	keepSize := (mode & uint32(bowlv1.FallocateMode_FALLOCATE_MODE_KEEP_SIZE)) != 0
+	if !keepSize && offset+length > uint64(currentSize) {
+		newSize := offset + length
+		now := time.Now()
+		updateInodeSQL := fmt.Sprintf(`
+UPDATE "%s".inodes
+SET size = GREATEST(size, $1::bigint),
+    blocks = (GREATEST(size, $1::bigint) + 511) / 512,
+    mtime = $2,
+    ctime = $2
+WHERE ino = $3;
+`, schemaName)
+		if _, err := d.db.Exec(ctx, updateInodeSQL, int64(newSize), now, int64(ino)); err != nil {
+			return connect.Errorf(connect.CodeInternal, "failed to preallocate space: %s", err)
+		}
+	}
+
 	return nil
 }
 
@@ -1035,7 +1032,7 @@ WHERE ino = $3;
 	return toCopy, nil
 }
 
-// Lseek 定位文件内部数据或稀疏空洞偏移量
+// Lseek 定位文件内部数据或稀疏空洞偏移量 (SEEK_DATA / SEEK_HOLE / 标准 whence)
 func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID string, ino uint64, offset uint64, whence uint32) (uint64, error) {
 	if handle != nil {
 		if ch, ok := handle.(*chunkFileHandle); ok {
@@ -1053,7 +1050,192 @@ func (d *ChunkDriver) Lseek(ctx context.Context, handle HandleContext, diskID st
 			ch.mu.Unlock()
 		}
 	}
-	return offset, nil
+
+	if diskID == "" {
+		return 0, connect.Errorf(connect.CodeInvalidArgument, "缺少虚拟磁盘标识 diskID")
+	}
+	if ino == 0 {
+		return 0, connect.Errorf(connect.CodeInvalidArgument, "无效的 Inode 编号 %d", ino)
+	}
+
+	parsedDiskUUID, err := uuid.Parse(diskID)
+	if err != nil {
+		return 0, connect.Errorf(connect.CodeInvalidArgument, "invalid disk id: %s", err)
+	}
+	schemaName := FormatDiskSchema(parsedDiskUUID)
+
+	var currentSize int64
+	querySizeSQL := fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName)
+	if err := d.db.QueryRow(ctx, querySizeSQL, int64(ino)).Scan(&currentSize); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, connect.Errorf(connect.CodeNotFound, "inode %d not found", ino)
+		}
+		return 0, connect.Errorf(connect.CodeInternal, "failed to query inode size: %s", err)
+	}
+	fileSize := uint64(currentSize)
+
+	switch whence {
+	case 0, 1: // SEEK_SET (0), SEEK_CUR (1)
+		return offset, nil
+	case 2: // SEEK_END (2)
+		return fileSize + offset, nil
+	case uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA): // 3
+		if offset >= fileSize {
+			return 0, connect.Errorf(connect.CodeOutOfRange, "offset %d is at or beyond EOF %d", offset, fileSize)
+		}
+		foundOffset, found, err := d.scanData(ctx, diskID, ino, offset, fileSize)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			return 0, connect.Errorf(connect.CodeOutOfRange, "no data found at or after offset %d", offset)
+		}
+		return foundOffset, nil
+	case uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE): // 4
+		if offset > fileSize {
+			return 0, connect.Errorf(connect.CodeOutOfRange, "offset %d is beyond EOF %d", offset, fileSize)
+		}
+		if offset == fileSize {
+			return fileSize, nil
+		}
+		return d.scanHole(ctx, diskID, ino, offset, fileSize)
+	default:
+		return 0, connect.Errorf(connect.CodeInvalidArgument, "unsupported lseek whence: %d", whence)
+	}
+}
+
+// scanData 扫描文件在 [startOffset, fileSize) 区间内的第一个有效数据偏移量
+func (d *ChunkDriver) scanData(ctx context.Context, diskID string, ino uint64, startOffset, fileSize uint64) (uint64, bool, error) {
+	meta := d.MetaAdapter()
+	if meta == nil {
+		return 0, false, connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
+	}
+
+	curOffset := startOffset
+	for curOffset < fileSize {
+		curChunk := uint32(curOffset / ChunkSize)
+		chunkEnd := uint64(curChunk+1) * ChunkSize
+		if chunkEnd > fileSize {
+			chunkEnd = fileSize
+		}
+
+		reconstitutedSlices, err := meta.ReadReconstitutedSlices(ctx, diskID, ino, curChunk)
+		if err != nil {
+			return 0, false, connect.Errorf(connect.CodeInternal, "读取重构切片失败: %s", err)
+		}
+
+		if len(reconstitutedSlices) == 0 {
+			// 当前 64MB Chunk 完全未分配，属于纯稀疏空洞，跳至下一个 Chunk
+			curOffset = chunkEnd
+			continue
+		}
+
+		reqStart := uint32(curOffset % ChunkSize)
+		var curSlicePos uint32 = 0
+		foundDataInChunk := false
+		var dataOffsetInFile uint64
+
+		for _, s := range reconstitutedSlices {
+			sliceStart := curSlicePos
+			sliceEnd := curSlicePos + s.Len
+			curSlicePos += s.Len
+
+			if sliceEnd <= reqStart {
+				continue
+			}
+
+			if s.Id > 0 {
+				dataStartInChunk := max(sliceStart, reqStart)
+				candidateOffset := uint64(curChunk)*ChunkSize + uint64(dataStartInChunk)
+				if candidateOffset < fileSize {
+					dataOffsetInFile = candidateOffset
+					foundDataInChunk = true
+					break
+				}
+			}
+		}
+
+		if foundDataInChunk {
+			return dataOffsetInFile, true, nil
+		}
+
+		curOffset = chunkEnd
+	}
+
+	return 0, false, nil
+}
+
+// scanHole 扫描文件在 [startOffset, fileSize) 区间内的第一个稀疏空洞偏移量
+func (d *ChunkDriver) scanHole(ctx context.Context, diskID string, ino uint64, startOffset, fileSize uint64) (uint64, error) {
+	meta := d.MetaAdapter()
+	if meta == nil {
+		return 0, connect.Errorf(connect.CodeInternal, "JuiceFS 元数据适配器未初始化")
+	}
+
+	curOffset := startOffset
+	for curOffset < fileSize {
+		curChunk := uint32(curOffset / ChunkSize)
+		chunkEnd := uint64(curChunk+1) * ChunkSize
+		if chunkEnd > fileSize {
+			chunkEnd = fileSize
+		}
+
+		reconstitutedSlices, err := meta.ReadReconstitutedSlices(ctx, diskID, ino, curChunk)
+		if err != nil {
+			return 0, connect.Errorf(connect.CodeInternal, "读取重构切片失败: %s", err)
+		}
+
+		if len(reconstitutedSlices) == 0 {
+			// 当前 64MB Chunk 未分配，属于稀疏空洞，curOffset 本身即处于空洞内
+			return curOffset, nil
+		}
+
+		reqStart := uint32(curOffset % ChunkSize)
+		var curSlicePos uint32 = 0
+		foundHoleInChunk := false
+		var holeOffsetInFile uint64
+
+		for _, s := range reconstitutedSlices {
+			sliceStart := curSlicePos
+			sliceEnd := curSlicePos + s.Len
+			curSlicePos += s.Len
+
+			if sliceEnd <= reqStart {
+				continue
+			}
+
+			if s.Id == 0 {
+				holeStartInChunk := max(sliceStart, reqStart)
+				candidateOffset := uint64(curChunk)*ChunkSize + uint64(holeStartInChunk)
+				if candidateOffset < fileSize {
+					holeOffsetInFile = candidateOffset
+					foundHoleInChunk = true
+					break
+				} else {
+					return fileSize, nil
+				}
+			}
+		}
+
+		if foundHoleInChunk {
+			return holeOffsetInFile, nil
+		}
+
+		// 检查 Chunk 尾部未被切片覆盖的区间是否构成空洞
+		chunkLenInFile := uint32(chunkEnd - uint64(curChunk)*ChunkSize)
+		if curSlicePos < chunkLenInFile {
+			holeStartInChunk := max(curSlicePos, reqStart)
+			candidateOffset := uint64(curChunk)*ChunkSize + uint64(holeStartInChunk)
+			if candidateOffset < fileSize {
+				return candidateOffset, nil
+			}
+			return fileSize, nil
+		}
+
+		curOffset = chunkEnd
+	}
+
+	return fileSize, nil
 }
 
 // Close 关闭文件句柄，安全释放关联的内存 Page 缓冲区并置位关闭状态，防止后续 I/O 操作

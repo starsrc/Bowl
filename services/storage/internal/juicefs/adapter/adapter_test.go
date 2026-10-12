@@ -458,4 +458,104 @@ func TestMetaAdapter_DeleteInodeChunks_DecrementsRefsAndReturnsOrphans(t *testin
 	assert.Nil(t, slices1)
 }
 
+// TestMetaAdapter_TruncateSlices 测试切片截断与边界切片裁剪及孤儿切片查验
+func TestMetaAdapter_TruncateSlices(t *testing.T) {
+	pool, diskID, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	adapter := NewMetaAdapter(pool)
+	ino := uint64(600)
+
+	// Chunk 0: Slice 201 (0..4096), Slice 202 (4096..8192)
+	s1 := Slice{Pos: 0, ID: 201, Size: 4096, Off: 0, Len: 4096}
+	s2 := Slice{Pos: 4096, ID: 202, Size: 4096, Off: 0, Len: 4096}
+	require.NoError(t, adapter.WriteSlices(ctx, diskID, ino, 0, []Slice{s1, s2}))
+
+	// Chunk 1: Slice 203 (0..4096)
+	s3 := Slice{Pos: 0, ID: 203, Size: 4096, Off: 0, Len: 4096}
+	require.NoError(t, adapter.WriteSlice(ctx, diskID, ino, 1, s3))
+
+	// 阶段 1: 截断至 64MB (Chunk 1 完全淘汰)
+	orphans, err := adapter.TruncateSlices(ctx, diskID, ino, uint64(ChunkSize))
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{203}, orphans)
+
+	c1Slices, err := adapter.ReadSlices(ctx, diskID, ino, 1)
+	require.NoError(t, err)
+	assert.Nil(t, c1Slices, "Chunk 1 必须被物理删除")
+
+	ref203, _, err := adapter.GetSliceRef(ctx, diskID, 203)
+	require.NoError(t, err)
+	assert.Equal(t, 0, ref203)
+
+	// 阶段 2: 截断至 6000 字节 (Slice 202 局部缩短为 6000-4096=1904)
+	orphans, err = adapter.TruncateSlices(ctx, diskID, ino, 6000)
+	require.NoError(t, err)
+	assert.Empty(t, orphans)
+
+	c0Slices, err := adapter.ReadSlices(ctx, diskID, ino, 0)
+	require.NoError(t, err)
+	require.Len(t, c0Slices, 2)
+	assert.Equal(t, uint32(4096), c0Slices[0].Len)
+	assert.Equal(t, uint32(1904), c0Slices[1].Len)
+
+	// 阶段 3: 截断至 2000 字节 (Slice 202 完全淘汰为孤儿，Slice 201 缩短为 2000)
+	orphans, err = adapter.TruncateSlices(ctx, diskID, ino, 2000)
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{202}, orphans)
+
+	c0Slices, err = adapter.ReadSlices(ctx, diskID, ino, 0)
+	require.NoError(t, err)
+	require.Len(t, c0Slices, 1)
+	assert.Equal(t, uint32(2000), c0Slices[0].Len)
+
+	// 阶段 4: 截断至 0 字节 (Chunk 0 完全删除，Slice 201 成为孤儿)
+	orphans, err = adapter.TruncateSlices(ctx, diskID, ino, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{201}, orphans)
+
+	c0Slices, err = adapter.ReadSlices(ctx, diskID, ino, 0)
+	require.NoError(t, err)
+	assert.Nil(t, c0Slices)
+}
+
+// TestMetaAdapter_PunchHole 测试区间打洞与图层重组稀疏空洞视图
+func TestMetaAdapter_PunchHole(t *testing.T) {
+	pool, diskID, _, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	adapter := NewMetaAdapter(pool)
+	ino := uint64(700)
+
+	// 写入基础切片: 0..16
+	s1 := Slice{Pos: 0, ID: 301, Size: 16, Off: 0, Len: 16}
+	require.NoError(t, adapter.WriteSlice(ctx, diskID, ino, 0, s1))
+
+	// 在区间 [4, 10) 打洞 (长度 6)
+	err := adapter.PunchHole(ctx, diskID, ino, 4, 6)
+	require.NoError(t, err)
+
+	// 验证重组图层中的切片与稀疏空洞分布
+	recon, err := adapter.ReadReconstitutedSlices(ctx, diskID, ino, 0)
+	require.NoError(t, err)
+	require.Len(t, recon, 3)
+
+	// 段 1: 0..4 (数据切片 301)
+	assert.Equal(t, uint64(301), recon[0].Id)
+	assert.Equal(t, uint32(0), recon[0].Off)
+	assert.Equal(t, uint32(4), recon[0].Len)
+
+	// 段 2: 4..10 (稀疏空洞 Id == 0)
+	assert.Equal(t, uint64(0), recon[1].Id)
+	assert.Equal(t, uint32(6), recon[1].Len)
+
+	// 段 3: 10..16 (数据切片 301)
+	assert.Equal(t, uint64(301), recon[2].Id)
+	assert.Equal(t, uint32(10), recon[2].Off)
+	assert.Equal(t, uint32(6), recon[2].Len)
+}
+
+
 

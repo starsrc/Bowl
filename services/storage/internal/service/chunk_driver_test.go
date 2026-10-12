@@ -4673,4 +4673,503 @@ func TestChunkDriver_DeleteInode_TracksOrphans(t *testing.T) {
 	assert.Empty(t, chunkDriver.TrackedOrphans(diskID.String()), "GC 运行后孤儿切片跟踪队列必须被清空")
 }
 
+// TestChunkDriver_Truncate_Extend_FormsSparseHolesAndReadsZeroBytes 测试 Truncate 扩容形成稀疏空洞且读取返回全零数据
+func TestChunkDriver_Truncate_Extend_FormsSparseHolesAndReadsZeroBytes(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-truncate-extend",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "trunc-extend.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. 初始写入 16 字节
+	initialData := []byte("0123456789ABCDEF")
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      initialData,
+	})
+	require.NoError(t, err)
+
+	// 2. 将文件通过 Truncate 扩容至 1MB (1048576 字节)
+	targetExtendSize := uint64(1024 * 1024)
+	err = chunkDriver.Truncate(ctx, diskID.String(), ino, targetExtendSize)
+	require.NoError(t, err)
+
+	// 3. 校验 Inode 大小已变为 1MB 且 blocks 正确计算
+	var currentSize int64
+	var currentBlocks int64
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT size, blocks FROM "%s".inodes WHERE ino = $1`, schemaName), int64(ino)).Scan(&currentSize, &currentBlocks)
+	require.NoError(t, err)
+	assert.Equal(t, int64(targetExtendSize), currentSize)
+	assert.Equal(t, int64((targetExtendSize+511)/512), currentBlocks)
+
+	// 4. 校验未分配额外的 Chunk 行 (仍仅有 Chunk 0 且包含初始写入切片)
+	var chunkCount int
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s".chunks WHERE ino = $1`, schemaName), int64(ino)).Scan(&chunkCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, chunkCount)
+
+	// 5. 校验读取前 16 字节仍为原始数据
+	readOrig, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      16,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, initialData, readOrig.GetData())
+
+	// 6. 校验读取扩容稀疏空洞区间 [16, 4096) 返回全零 0x00
+	readZero, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    16,
+		Size:      4080,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 4080), readZero.GetData())
+
+	// 7. 校验读取远端空洞区间 [65536, 69632) 返回全零 0x00
+	readFarZero, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    65536,
+		Size:      4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 4096), readFarZero.GetData())
+
+	// 8. 校验读取超出扩容尺寸 (>= 1MB) 返回空数据与 EOF
+	readEOF, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    targetExtendSize,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.True(t, readEOF.GetEof())
+	assert.Empty(t, readEOF.GetData())
+}
+
+// TestChunkDriver_Fallocate_Preallocate_And_PunchHole 测试 ChunkDriver 预分配与打洞释放空间语义
+func TestChunkDriver_Fallocate_Preallocate_And_PunchHole(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-fallocate-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "falloc-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. 写入 4096 字节固定数据
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// 2. 空间预分配：Mode 0 预分配扩展至 8192 字节
+	handle, err := chunkDriver.Open(ctx, diskID.String(), ino, bowlv1.OpenMode_OPEN_MODE_READ_WRITE, 2)
+	require.NoError(t, err)
+	defer chunkDriver.Close(ctx, handle)
+
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, 0, 0, 8192)
+	require.NoError(t, err)
+
+	var currentSize int64
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName), int64(ino)).Scan(&currentSize)
+	require.NoError(t, err)
+	assert.Equal(t, int64(8192), currentSize, "预分配扩容后大小必须为 8192")
+
+	// 验证扩展区间 [4096, 8192) 读取为零
+	readExtend, isEOF, err := chunkDriver.Read(ctx, handle, diskID.String(), ino, 4096, 4096)
+	require.NoError(t, err)
+	assert.True(t, isEOF)
+	assert.Equal(t, make([]byte, 4096), readExtend)
+
+	// 3. 区间打洞：FALLOC_FL_PUNCH_HOLE 在 [1024, 2048) 打洞 (长度 1024)
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE), 1024, 1024)
+	require.NoError(t, err)
+
+	// 文件大小在打洞后必须保持 8192 不变
+	err = h.dbPool.QueryRow(ctx, fmt.Sprintf(`SELECT size FROM "%s".inodes WHERE ino = $1`, schemaName), int64(ino)).Scan(&currentSize)
+	require.NoError(t, err)
+	assert.Equal(t, int64(8192), currentSize)
+
+	// 校验打洞前区间 [0, 1024) 保持原样
+	readBeforeHole, _, err := chunkDriver.Read(ctx, handle, diskID.String(), ino, 0, 1024)
+	require.NoError(t, err)
+	assert.Equal(t, payload[:1024], readBeforeHole)
+
+	// 校验打洞区间 [1024, 2048) 已被清零 (0x00)
+	readHole, _, err := chunkDriver.Read(ctx, handle, diskID.String(), ino, 1024, 1024)
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 1024), readHole)
+
+	// 校验打洞后区间 [2048, 4096) 保持原样
+	readAfterHole, _, err := chunkDriver.Read(ctx, handle, diskID.String(), ino, 2048, 2048)
+	require.NoError(t, err)
+	assert.Equal(t, payload[2048:4096], readAfterHole)
+
+	// 4. 边界校验：length = 0 必须返回 InvalidArgument
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, 0, 0, 0)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	// 5. 超出 EOF 打洞：应平稳返回且不改变文件内容
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE), 10000, 2048)
+	require.NoError(t, err)
+}
+
+// TestChunkDriver_Lseek_SeekData_SeekHole_AcrossSlicesAndHoles 测试 Lseek 跨切片与稀疏空洞探测
+func TestChunkDriver_Lseek_SeekData_SeekHole_AcrossSlicesAndHoles(t *testing.T) {
+	h, _, chunkDriver := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-lseek-test",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "lseek-test.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	handle, err := chunkDriver.Open(ctx, diskID.String(), ino, bowlv1.OpenMode_OPEN_MODE_READ_WRITE, 2)
+	require.NoError(t, err)
+	defer chunkDriver.Close(ctx, handle)
+
+	// 1. 预分配文件大小至 100 字节
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, 0, 0, 100)
+	require.NoError(t, err)
+
+	// 2. 在 [0, 10) 写入 "0123456789"
+	chunk1 := []byte("0123456789")
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+		Fh:        fh,
+		Offset:    0,
+		Data:      chunk1,
+	})
+	require.NoError(t, err)
+
+	// 3. 在 [30, 40) 写入 "ABCDEFGHIJ"
+	chunk2 := []byte("ABCDEFGHIJ")
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+		Fh:        fh,
+		Offset:    30,
+		Data:      chunk2,
+	})
+	require.NoError(t, err)
+
+	// 4. 在 [2, 5) 打洞释放空间 (使 [2, 5) 成为空洞)
+	err = chunkDriver.Fallocate(ctx, handle, diskID.String(), ino, uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE), 2, 3)
+	require.NoError(t, err)
+
+	// 当前文件布局：
+	// [0..2):   DATA (切片)
+	// [2..5):   HOLE (打洞空洞)
+	// [5..10):  DATA (切片)
+	// [10..30): HOLE (未分配稀疏空洞)
+	// [30..40): DATA (切片)
+	// [40..100):HOLE (未分配稀疏空洞)
+	// 100:      EOF
+
+	// --- 测试 SEEK_DATA ---
+	// offset 0: 数据起始位置 -> 0
+	off, err := chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 0, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), off)
+
+	// offset 1: 处于数据区间 [0..2) 内 -> 1
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 1, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), off)
+
+	// offset 2: 处于打洞空洞 [2..5) 内，下一个数据为 offset 5 -> 5
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 2, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), off)
+
+	// offset 3: 处于空洞内 -> 5
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 3, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), off)
+
+	// offset 10: 处于稀疏空洞 [10..30) 内，下一个数据为 offset 30 -> 30
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 10, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(30), off)
+
+	// offset 35: 处于数据区间 [30..40) 内 -> 35
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 35, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(35), off)
+
+	// offset 40: 处于末尾空洞 [40..100) 内，后续无数据 -> OutOfRange
+	_, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 40, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeOutOfRange, connect.CodeOf(err))
+
+	// offset 100: 到达 EOF -> OutOfRange
+	_, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 100, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_DATA))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeOutOfRange, connect.CodeOf(err))
+
+	// --- 测试 SEEK_HOLE ---
+	// offset 0: 处于数据区间，第一个空洞在打洞处 offset 2 -> 2
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 0, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), off)
+
+	// offset 2: 处于空洞内 -> 2
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 2, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), off)
+
+	// offset 5: 处于数据区间 [5..10)，下一个空洞在 offset 10 -> 10
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 5, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10), off)
+
+	// offset 15: 处于稀疏空洞内 -> 15
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 15, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(15), off)
+
+	// offset 30: 处于数据区间 [30..40)，下一个空洞在 offset 40 -> 40
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 30, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(40), off)
+
+	// offset 50: 处于末尾空洞内 -> 50
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 50, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(50), off)
+
+	// offset 100: EOF 本身视为空洞 -> 100
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 100, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), off)
+
+	// offset 101: 超出 EOF -> OutOfRange
+	_, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 101, uint32(bowlv1.LseekWhence_LSEEK_WHENCE_HOLE))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeOutOfRange, connect.CodeOf(err))
+
+	// --- 测试标准 whence ---
+	// SEEK_SET (0)
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 12, 0)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(12), off)
+
+	// SEEK_CUR (1)
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 24, 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(24), off)
+
+	// SEEK_END (2) -> 100 + 10 = 110
+	off, err = chunkDriver.Lseek(ctx, handle, diskID.String(), ino, 10, 2)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(110), off)
+}
+
+// TestStorageService_ChunkDriver_FallocateAndLseek_ConnectRPC 验证经由 ConnectRPC 接口层路由至 ChunkDriver 的 Fallocate 打洞与 Lseek 空洞探测
+func TestStorageService_ChunkDriver_FallocateAndLseek_ConnectRPC(t *testing.T) {
+	h, _, _ := setupChunkHarness(t)
+	defer h.cleanup()
+
+	ctx := context.Background()
+	diskID := uuid.New()
+	schemaName := FormatDiskSchema(diskID)
+	defer func() {
+		_, _ = h.dbPool.Exec(ctx, "DROP SCHEMA IF EXISTS \""+schemaName+"\" CASCADE")
+	}()
+
+	mountResp, err := h.storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskID.String(),
+		ClientId: "client-connectrpc-falloc-lseek",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	createResp, err := h.storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "rpc-falloc-lseek.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 1. 写入 4096 字节
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+	_, err = h.storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload,
+	})
+	require.NoError(t, err)
+
+	// 2. Fallocate 预分配至 8192 字节
+	fallocResp, err := h.storageClient.Fallocate(ctx, &bowlv1.FallocateRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Mode:      0,
+		Offset:    0,
+		Length:    8192,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fallocResp)
+
+	attrResp, err := h.storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8192), attrResp.GetInode().GetSize())
+
+	// 3. Fallocate 打洞 [1024, 2048)
+	punchResp, err := h.storageClient.Fallocate(ctx, &bowlv1.FallocateRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Mode:      uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE),
+		Offset:    1024,
+		Length:    1024,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, punchResp)
+
+	// 4. 读取打洞区域验证全零
+	readHole, err := h.storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1024,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 1024), readHole.GetData())
+
+	// 5. Lseek 探测
+	lseekData, err := h.storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1024,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_DATA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2048), lseekData.GetOffset())
+
+	lseekHole, err := h.storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_HOLE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1024), lseekHole.GetOffset())
+
+	lseekHoleEOF, err := h.storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    8192,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_HOLE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8192), lseekHoleEOF.GetOffset())
+}
+
+
+
 

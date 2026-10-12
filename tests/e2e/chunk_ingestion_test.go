@@ -812,3 +812,373 @@ func TestE2E_ChunkDriver_S3AsyncPipeline_FlushFsyncDurabilityBarrier(t *testing.
 	require.NoError(t, err)
 }
 
+// TestE2E_ChunkDriver_Truncate_Fallocate_Lseek 验证文件截断缩短与扩容空洞、打洞及 Lseek 跨切片探测的真实服务完整闭环
+func TestE2E_ChunkDriver_Truncate_Fallocate_Lseek(t *testing.T) {
+	ctx := context.Background()
+
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	// 1. 初始化数据库连接池
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// 2. 准备临时工作目录
+	baseDir := t.TempDir()
+	binDir := filepath.Join(baseDir, "bin")
+	dataDir := filepath.Join(baseDir, "data")
+	stagingDir := filepath.Join(baseDir, "staging")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+
+	repoRoot, err := filepath.Abs("../..")
+	require.NoError(t, err)
+
+	diskBin := filepath.Join(binDir, "disk-service")
+	storageBin := filepath.Join(binDir, "storage-service")
+
+	// 3. 编译服务二进制
+	cmdDiskBuild := exec.Command("go", "build", "-o", diskBin, "./services/disk/cmd")
+	cmdDiskBuild.Dir = repoRoot
+	out, err := cmdDiskBuild.CombinedOutput()
+	require.NoError(t, err, "编译 disk-service 失败: %s", string(out))
+
+	cmdStorageBuild := exec.Command("go", "build", "-o", storageBin, "./services/storage/cmd")
+	cmdStorageBuild.Dir = repoRoot
+	out, err = cmdStorageBuild.CombinedOutput()
+	require.NoError(t, err, "编译 storage-service 失败: %s", string(out))
+
+	// 4. 启动 DiskService 进程
+	diskPort := getFreePort(t)
+	diskAddr := fmt.Sprintf("http://127.0.0.1:%d", diskPort)
+
+	ctxDisk, cancelDisk := context.WithCancel(context.Background())
+	defer cancelDisk()
+
+	cmdDisk := exec.CommandContext(ctxDisk, diskBin)
+	cmdDisk.Dir = repoRoot
+	cmdDisk.Env = append(os.Environ(),
+		fmt.Sprintf("SERVER_PORT=%d", diskPort),
+		fmt.Sprintf("PORT=%d", diskPort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+	)
+	cmdDisk.Stdout = os.Stdout
+	cmdDisk.Stderr = os.Stderr
+	require.NoError(t, cmdDisk.Start())
+	defer func() {
+		cancelDisk()
+		_ = cmdDisk.Wait()
+	}()
+
+	waitForHTTP(t, diskAddr, 10*time.Second)
+
+	// 5. 启动 StorageService 进程 (启用 STORAGE_DRIVER=chunk)
+	storagePort := getFreePort(t)
+	storageAddr := fmt.Sprintf("http://127.0.0.1:%d", storagePort)
+
+	ctxStorage, cancelStorage := context.WithCancel(context.Background())
+	defer cancelStorage()
+
+	cmdStorage := exec.CommandContext(ctxStorage, storageBin)
+	cmdStorage.Dir = repoRoot
+	cmdStorage.Env = append(os.Environ(),
+		fmt.Sprintf("PORT=%d", storagePort),
+		fmt.Sprintf("SERVER_PORT=%d", storagePort),
+		"DB_DSN="+dsn,
+		"DATA_DIR="+dataDir,
+		"STAGING_DIR="+stagingDir,
+		"STORAGE_DRIVER=chunk",
+		"DISK_SERVICE_ADDR="+diskAddr,
+	)
+	cmdStorage.Stdout = os.Stdout
+	cmdStorage.Stderr = os.Stderr
+	require.NoError(t, cmdStorage.Start())
+	defer func() {
+		cancelStorage()
+		_ = cmdStorage.Wait()
+	}()
+
+	waitForHTTP(t, storageAddr, 10*time.Second)
+
+	// 6. 构造 DiskClient 与 StorageClient
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	diskConnectClient := connect.NewClient(connecthttp.NewTransport(httpClient, diskAddr))
+	diskClient := bowlv1connect.NewDiskServiceClient(diskConnectClient)
+
+	storageTransport := connecthttp.NewTransport(httpClient, storageAddr)
+	storageConnectClient := connect.NewClient(storageTransport)
+	storageClient := bowlv1connect.NewStorageServiceClient(storageConnectClient)
+
+	createDiskResp, err := diskClient.CreateDisk(ctx, &bowlv1.CreateDiskRequest{
+		Name:          "e2e-trunc-falloc-disk",
+		CapacityBytes: 10 * 1024 * 1024 * 1024,
+		InodesQuota:   100000,
+	})
+	require.NoError(t, err)
+	diskIDStr := createDiskResp.GetDisk().GetDiskId()
+	parsedDiskUUID, err := uuid.Parse(diskIDStr)
+	require.NoError(t, err)
+
+	schemaName := fmt.Sprintf("disk_%s", strings.ReplaceAll(parsedDiskUUID.String(), "-", "_"))
+	defer func() {
+		_, _ = pool.Exec(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE;`, schemaName))
+	}()
+
+	// 7. 挂载虚拟磁盘
+	mountResp, err := storageClient.Mount(ctx, &bowlv1.MountRequest{
+		DiskId:   diskIDStr,
+		ClientId: "client-e2e-trunc-falloc",
+		ReadOnly: false,
+	})
+	require.NoError(t, err)
+	sessionID := mountResp.GetSessionId()
+
+	// 8. 创建测试文件
+	createResp, err := storageClient.Create(ctx, &bowlv1.CreateRequest{
+		SessionId: sessionID,
+		ParentIno: 1,
+		Name:      "semantics_e2e.bin",
+		Mode:      0o644,
+		Flags:     2,
+	})
+	require.NoError(t, err)
+	ino := createResp.GetInode().GetIno()
+	fh := createResp.GetFileHandle().GetFh()
+
+	// 9. 写入 8192 字节基准数据
+	payload8K := make([]byte, 8192)
+	for i := range payload8K {
+		payload8K[i] = byte((i * 7) % 256)
+	}
+	_, err = storageClient.Write(ctx, &bowlv1.WriteRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Data:      payload8K,
+	})
+	require.NoError(t, err)
+
+	// 10. Truncate 扩容语义验证：将文件扩容至 1MB (1048576 字节)
+	target1MB := uint64(1024 * 1024)
+	setAttrExtend, err := storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_SIZE),
+		Size:      target1MB,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, target1MB, setAttrExtend.GetInode().GetSize())
+
+	// 校验基础写入数据完好
+	readOrig, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      8192,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload8K, readOrig.GetData())
+
+	// 校验扩容形成的稀疏空洞读取为全零 (0x00)
+	readZero, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    8192,
+		Size:      8192,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 8192), readZero.GetData())
+
+	// 校验读取超出 1MB 返回 EOF
+	readEOF, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    target1MB,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.True(t, readEOF.GetEof())
+	assert.Empty(t, readEOF.GetData())
+
+	// 11. Fallocate 打洞语义验证：在区间 [2048, 4096) 打洞清零 (长度 2048)
+	fallocPunch, err := storageClient.Fallocate(ctx, &bowlv1.FallocateRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Mode:      uint32(bowlv1.FallocateMode_FALLOCATE_MODE_PUNCH_HOLE),
+		Offset:    2048,
+		Length:    2048,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, fallocPunch)
+
+	// 校验打洞后文件大小不变
+	attrAfterPunch, err := storageClient.GetAttr(ctx, &bowlv1.GetAttrRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, target1MB, attrAfterPunch.GetInode().GetSize())
+
+	// 校验打洞前区间 [0, 2048) 保持不变
+	readPart1, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload8K[:2048], readPart1.GetData())
+
+	// 校验打洞区间 [2048, 4096) 读出全零 (0x00)
+	readPunchedHole, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Size:      2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, make([]byte, 2048), readPunchedHole.GetData())
+
+	// 校验打洞后区间 [4096, 8192) 保持不变
+	readPart2, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    4096,
+		Size:      4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload8K[4096:], readPart2.GetData())
+
+	// 12. Lseek 跨切片与稀疏空洞探测语义验证
+	// SEEK_DATA at offset 0 -> 0
+	lseekData0, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_DATA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), lseekData0.GetOffset())
+
+	// SEEK_DATA at offset 2048 (在打洞空洞内) -> 4096 (下一个有效数据点)
+	lseekDataHole, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_DATA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4096), lseekDataHole.GetOffset())
+
+	// SEEK_HOLE at offset 0 -> 2048 (第一个空洞起点)
+	lseekHole0, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_HOLE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2048), lseekHole0.GetOffset())
+
+	// SEEK_HOLE at offset 2048 (已经在空洞内) -> 2048
+	lseekHoleInside, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    2048,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_HOLE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2048), lseekHoleInside.GetOffset())
+
+	// SEEK_HOLE at offset 4096 (数据区间 [4096, 8192) 中) -> 8192 (下一个稀疏空洞)
+	lseekHoleNext, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    4096,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_HOLE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8192), lseekHoleNext.GetOffset())
+
+	// SEEK_DATA at offset 8192 (在尾部稀疏空洞内) -> OutOfRange
+	_, err = storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    8192,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_DATA,
+	})
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeOutOfRange, connect.CodeOf(err))
+
+	// SEEK_HOLE at offset 1048576 (EOF 处) -> 1048576 (隐式 EOF 空洞)
+	lseekHoleEOF, err := storageClient.Lseek(ctx, &bowlv1.LseekRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    target1MB,
+		Whence:    bowlv1.LseekWhence_LSEEK_WHENCE_HOLE,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, target1MB, lseekHoleEOF.GetOffset())
+
+	// 13. Truncate 缩短截断语义验证：将文件缩短至 1024 字节
+	setAttrShrink, err := storageClient.SetAttr(ctx, &bowlv1.SetAttrRequest{
+		SessionId: sessionID,
+		Ino:       ino,
+		Valid:     uint32(bowlv1.SetAttrMask_SET_ATTR_MASK_SIZE),
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1024), setAttrShrink.GetInode().GetSize())
+
+	// 读取前 1024 字节正常
+	readShrunk, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    0,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, payload8K[:1024], readShrunk.GetData())
+
+	// 读取 1024 处返回 EOF
+	readShrunkEOF, err := storageClient.Read(ctx, &bowlv1.ReadRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+		Ino:       ino,
+		Offset:    1024,
+		Size:      1024,
+	})
+	require.NoError(t, err)
+	assert.True(t, readShrunkEOF.GetEof())
+	assert.Empty(t, readShrunkEOF.GetData())
+
+	// 14. 释放句柄
+	_, err = storageClient.Release(ctx, &bowlv1.ReleaseRequest{
+		SessionId: sessionID,
+		Fh:        fh,
+	})
+	require.NoError(t, err)
+}
+
+

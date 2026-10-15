@@ -22,11 +22,11 @@ message LookupRequest {
   uint64 parent_ino = 1 [(buf.validate.field).uint64.gt = 0];
 
   // 待查找的子项名称（文件或目录名）。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/'。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   string name = 2 [
     (buf.validate.field).string.min_len = 1,
     (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.not_contains = "/"
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
   ];
 }
 

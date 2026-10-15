@@ -257,6 +257,34 @@ func TestLookup_InputValidation(t *testing.T) {
 			expectTx:   false,
 		},
 		{
+			name:       "name with embedded NUL byte invalid",
+			parentIno:  2,
+			entryName:  "a\x00b",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
+			name:       "name with single NUL byte invalid",
+			parentIno:  2,
+			entryName:  "\x00",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
+			name:       "name with leading NUL byte invalid",
+			parentIno:  2,
+			entryName:  "\x00file.txt",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
+			name:       "name with trailing NUL byte invalid",
+			parentIno:  2,
+			entryName:  "file.txt\x00",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
 			name:       "name with 256 chars invalid",
 			parentIno:  2,
 			entryName:  strings.Repeat("a", 256),
@@ -316,6 +344,30 @@ func TestLookup_InputValidation(t *testing.T) {
 
 func TestLookup_NegativeCases(t *testing.T) {
 	ctx := context.Background()
+
+	t.Run("entry name containing NUL byte returns ErrInvalidArgument and does not trigger db transaction", func(t *testing.T) {
+		testCases := []struct {
+			name      string
+			entryName string
+		}{
+			{name: "embedded NUL byte", entryName: "a\x00b"},
+			{name: "single NUL byte", entryName: "\x00"},
+			{name: "leading NUL byte", entryName: "\x00file.txt"},
+			{name: "trailing NUL byte", entryName: "file.txt\x00"},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mgr := meta.New(mockStore)
+
+				inode, err := mgr.Lookup(ctx, 2, tc.entryName)
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+				mockStore.AssertNotCalled(t, "ExecTxWithOptions")
+			})
+		}
+	})
 
 	t.Run("parent inode not found returns ErrNotFound", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)

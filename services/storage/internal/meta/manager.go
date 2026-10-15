@@ -38,7 +38,7 @@ var Module = fx.Module("meta",
 
 // Lookup 执行单级目录项查找与块属性动态推导。
 func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*Inode, error) {
-	if parentIno == 0 || len(name) == 0 || len(name) > 255 || strings.Contains(name, "/") {
+	if parentIno == 0 || len(name) == 0 || len(name) > 255 || strings.ContainsAny(name, "/\x00") {
 		return nil, ErrInvalidArgument
 	}
 

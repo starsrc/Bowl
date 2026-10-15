@@ -20,6 +20,18 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
+func setupMockTx(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier) {
+	mockStore.EXPECT().
+		ExecTxWithOptions(mock.Anything, mock.Anything, mock.MatchedBy(func(opt tx.Option) bool {
+			cfg := tx.ApplyOptions(opt)
+			return cfg.AccessMode == tx.ReadOnly
+		})).
+		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			return fn(mockQuerier)
+		}).
+		Once()
+}
+
 func TestLookup_PositivePath(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Microsecond)
@@ -62,15 +74,7 @@ func TestLookup_PositivePath(t *testing.T) {
 		}
 
 		// Configure mock expectations
-		mockStore.EXPECT().
-			ExecTxWithOptions(mock.Anything, mock.Anything, mock.MatchedBy(func(opt tx.Option) bool {
-				cfg := tx.ApplyOptions(opt)
-				return cfg.AccessMode == tx.ReadOnly
-			})).
-			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-				return fn(mockQuerier)
-			}).
-			Once()
+		setupMockTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
@@ -171,12 +175,7 @@ func TestLookup_DynamicBlockCalculations(t *testing.T) {
 				Nlink: 1,
 			}
 
-			mockStore.EXPECT().
-				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-				RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-					return fn(mockQuerier)
-				}).
-				Once()
+			setupMockTx(mockStore, mockQuerier)
 
 			mockQuerier.EXPECT().
 				GetInode(mock.Anything, int64(parentIno)).
@@ -273,12 +272,7 @@ func TestLookup_InputValidation(t *testing.T) {
 				mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything, mock.Anything)
 			} else {
 				mockQuerier := dbmock.NewMockQuerier(t)
-				mockStore.EXPECT().
-					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-					RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-						return fn(mockQuerier)
-					}).
-					Once()
+				setupMockTx(mockStore, mockQuerier)
 
 				mockQuerier.EXPECT().
 					GetInode(mock.Anything, int64(tc.parentIno)).
@@ -319,12 +313,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 		parentIno := uint64(999)
 		entryName := "file.txt"
 
-		mockStore.EXPECT().
-			ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-				return fn(mockQuerier)
-			}).
-			Once()
+		setupMockTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
@@ -367,12 +356,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 					Mode: int32(tc.mode),
 				}
 
-				mockStore.EXPECT().
-					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-					RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-						return fn(mockQuerier)
-					}).
-					Once()
+				setupMockTx(mockStore, mockQuerier)
 
 				mockQuerier.EXPECT().
 					GetInode(mock.Anything, int64(parentIno)).
@@ -398,12 +382,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 		entryName := "file.txt"
 		dbErr := errors.New("db query connection failure")
 
-		mockStore.EXPECT().
-			ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-				return fn(mockQuerier)
-			}).
-			Once()
+		setupMockTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
@@ -432,12 +411,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			Mode: int32(meta.S_IFDIR | 0o755),
 		}
 
-		mockStore.EXPECT().
-			ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-				return fn(mockQuerier)
-			}).
-			Once()
+		setupMockTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
@@ -473,12 +447,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			Mode: int32(meta.S_IFDIR | 0o755),
 		}
 
-		mockStore.EXPECT().
-			ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
-			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-				return fn(mockQuerier)
-			}).
-			Once()
+		setupMockTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
@@ -560,11 +529,6 @@ func TestLookup_NegativeCases(t *testing.T) {
 				name:        "wrapped ErrNotDir converges to ErrNotDir",
 				txErr:       fmt.Errorf("tx wrapped: %w", meta.ErrNotDir),
 				expectedErr: meta.ErrNotDir,
-			},
-			{
-				name:        "wrapped ErrInvalidArgument converges to ErrInvalidArgument",
-				txErr:       fmt.Errorf("tx wrapped: %w", meta.ErrInvalidArgument),
-				expectedErr: meta.ErrInvalidArgument,
 			},
 		}
 

@@ -13,7 +13,7 @@ Storage 元数据服务需要通过 RPC 对接 Linux FUSE 内核的 `lookup` 接
    - 抽象实体 `Inode` 承载节点唯一持久化标识 `ino`、代数 `generation` 及关联属性 `attr`。
    - 抽象物理属性 `InodeAttribute` 封装 POSIX `struct stat` 属性（`mode`, `size`, `nlink`, `uid`, `gid`, `rdev`, `blksize`, `blocks`, `atime`, `mtime`, `ctime`），便于未来在 `GetAttr`、`SetAttr`、`ReadDir` 等操作中直接复用。
 3. **Lookup 接口设计**：
-   - 请求体 `LookupRequest` 仅包含 `parent_ino` 与 `name`，通过 `buf.validate` 严格校验输入合法性（禁止空值、超长及包含路径分隔符 `/`）。
+   - 请求体 `LookupRequest` 仅包含 `parent_ino` 与 `name`，通过 `buf.validate` 严格校验输入合法性（禁止空值、超长及包含路径分隔符 `/` 或空字节 `\x00`）。
    - 响应体 `LookupResponse` 包含命中的 `Inode` 及内核缓存控制 `entry_timeout_seconds` 与 `attr_timeout_seconds`。
 4. **错误语义规范**：
    - 目标文件或父节点不存在时，统一返回 gRPC 标准状态码 `NotFound`（客户端映射至 POSIX `-ENOENT`），不使用报文内布尔标志位。

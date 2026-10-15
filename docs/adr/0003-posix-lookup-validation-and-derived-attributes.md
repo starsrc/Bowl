@@ -11,9 +11,9 @@
 ## 决策
 1. **数据访问与事务架构**：
    - 采用 `sqlc` + `pgx/v5` 生成类型安全的 `Querier` 接口，并结合 `github.com/starsrc/Aether/pkg/tx` 的泛型 `Transactor[Querier]` 构建 `Store` 抽象，确保编译期类型安全与事务生命周期安全。
-2. **只读事务两步校验**：
-   - `Lookup` 在进入数据库前先执行入参防御校验（`parent_ino > 0`、`name` 长度 `1..255` 且不含 `'/'`），非法时返回 `ErrInvalidArgument`。
-   - 通过 `ExecTxWithOptions(ctx, ..., tx.WithReadOnly())` 开启只读事务，按序执行两步查询：
+2. **只读可重复读事务两步校验**：
+   - `Lookup` 在进入数据库前先执行入参防御校验（`parent_ino > 0`、`name` 字节长度 `1..255` 且不含 `'/'` 与 `'\x00'`），非法时返回 `ErrInvalidArgument`。
+   - 通过 `ExecTxWithOptions(ctx, ..., tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))` 开启只读可重复读事务，冻结单一事务快照并按序执行两步查询：
      1. 查询父节点 `GetInode(parent_ino)`：若不存在则返回 `ErrNotFound`（`ENOENT`）；若存在但 `(mode & S_IFMT) != S_IFDIR`（`0o170000` / `0o040000`），立即返回 `ErrNotDir`（`ENOTDIR`）。
      2. 查询目标目录项对应的节点 `GetInodeByEntry(parent_ino, name)`：若不存在则返回 `ErrNotFound`（`ENOENT`）。
 3. **块属性内存动态推导**：

@@ -69,7 +69,7 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*I
 
 		result = newInodeFromDB(target)
 		return nil
-	}, tx.WithReadOnly())
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
 
 	if err != nil {
 		switch {

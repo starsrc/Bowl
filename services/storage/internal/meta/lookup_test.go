@@ -22,11 +22,23 @@ import (
 
 func setupMockTx(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier) {
 	mockStore.EXPECT().
-		ExecTxWithOptions(mock.Anything, mock.Anything, mock.MatchedBy(func(opt tx.Option) bool {
-			cfg := tx.ApplyOptions(opt)
-			return cfg.AccessMode == tx.ReadOnly
-		})).
+		ExecTxWithOptions(
+			mock.Anything,
+			mock.Anything,
+			mock.MatchedBy(func(opt tx.Option) bool {
+				cfg := tx.ApplyOptions(opt)
+				return cfg.AccessMode == tx.ReadOnly || cfg.IsoLevel == tx.RepeatableRead
+			}),
+			mock.MatchedBy(func(opt tx.Option) bool {
+				cfg := tx.ApplyOptions(opt)
+				return cfg.AccessMode == tx.ReadOnly || cfg.IsoLevel == tx.RepeatableRead
+			}),
+		).
 		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			cfg := tx.ApplyOptions(opts...)
+			if cfg.AccessMode != tx.ReadOnly || cfg.IsoLevel != tx.RepeatableRead {
+				return fmt.Errorf("unexpected tx options: AccessMode=%v, IsoLevel=%v", cfg.AccessMode, cfg.IsoLevel)
+			}
 			return fn(mockQuerier)
 		}).
 		Once()
@@ -269,7 +281,7 @@ func TestLookup_InputValidation(t *testing.T) {
 				inode, err := mgr.Lookup(ctx, tc.parentIno, tc.entryName)
 				assert.Nil(t, inode)
 				assert.ErrorIs(t, err, tc.wantErr)
-				mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything, mock.Anything)
+				mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 			} else {
 				mockQuerier := dbmock.NewMockQuerier(t)
 				setupMockTx(mockStore, mockQuerier)
@@ -480,7 +492,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			txErr := errors.New("connection pool closed")
 
 			mockStore.EXPECT().
-				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Return(txErr).
 				Once()
 
@@ -501,7 +513,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			commitErr := errors.New("tx commit failed")
 
 			mockStore.EXPECT().
-				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Return(commitErr).
 				Once()
 
@@ -541,7 +553,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 				entryName := "file.txt"
 
 				mockStore.EXPECT().
-					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 					Return(tc.txErr).
 					Once()
 
@@ -551,6 +563,41 @@ func TestLookup_NegativeCases(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestLookup_TransactionOptionsContract(t *testing.T) {
+	ctx := context.Background()
+	mockStore := dbmock.NewMockStore(t)
+	mockQuerier := dbmock.NewMockQuerier(t)
+	mgr := meta.New(mockStore)
+
+	var capturedOpts []tx.Option
+	mockStore.EXPECT().
+		ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			capturedOpts = opts
+			return fn(mockQuerier)
+		}).
+		Once()
+
+	mockQuerier.EXPECT().
+		GetInode(mock.Anything, int64(1)).
+		Return(db.Inode{Ino: 1, Mode: int32(meta.S_IFDIR | 0o755)}, nil).
+		Once()
+
+	mockQuerier.EXPECT().
+		GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{ParentIno: 1, Name: "child"}).
+		Return(db.Inode{Ino: 2, Mode: int32(0o100644)}, nil).
+		Once()
+
+	inode, err := mgr.Lookup(ctx, 1, "child")
+	require.NoError(t, err)
+	require.NotNil(t, inode)
+
+	require.Len(t, capturedOpts, 2)
+	cfg := tx.ApplyOptions(capturedOpts...)
+	assert.Equal(t, tx.ReadOnly, cfg.AccessMode)
+	assert.Equal(t, tx.RepeatableRead, cfg.IsoLevel)
 }
 
 func TestModule(t *testing.T) {

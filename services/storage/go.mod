@@ -2,14 +2,9 @@ module github.com/starsrc/bowl/services/storage
 
 go 1.26.5
 
-replace (
-	github.com/starsrc/Aether => /Users/fanxing/code/starsrc/Aether
-	github.com/starsrc/Aether/pkg/tx => /Users/fanxing/code/starsrc/Aether/pkg/tx
-)
-
 require (
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/starsrc/Aether/pkg/tx v0.0.0-00010101000000-000000000000
+	github.com/starsrc/Aether/pkg/tx v0.0.0-20261015162448-6c422ba5431b
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/fx v1.24.0
 )

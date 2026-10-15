@@ -6,6 +6,9 @@ vars:
   STORAGE_DB_DSN: '{{.STORAGE_DB_DSN | default "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"}}'
   STORAGE_MIGRATIONS_DIR: services/storage/db/migrations
 
+env:
+  GOWORK: "off"
+
 tasks:
   default:
     desc: "List all available tasks"
@@ -35,13 +38,21 @@ tasks:
   tidy:
     desc: "Run go mod tidy across all modules in workspace"
     cmds:
-      - go work sync || true
       - go mod tidy {{.CLI_ARGS}}
+      - go -C services/storage mod tidy {{.CLI_ARGS}}
 
-  test:
-    desc: "Run tests"
+  test:storage:
+    desc: "Run tests for storage service"
+    dir: services/storage
     cmds:
       - go test -v ./... {{.CLI_ARGS}}
+
+  test:
+    desc: "Run tests across all modules"
+    cmds:
+      - go test -v ./... {{.CLI_ARGS}}
+      - task: test:storage
+        vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
 
   goose:storage:up:
     desc: "执行 storage 服务的 goose 向上迁移 (Up)"

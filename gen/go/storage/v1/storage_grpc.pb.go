@@ -30,7 +30,8 @@ const (
 type StorageServiceClient interface {
 	// Lookup 执行单级目录项查找。
 	// 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
-	// 若目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(ctx context.Context, in *LookupRequest, opts ...grpc.CallOption) (*LookupResponse, error)
 }
 
@@ -60,7 +61,8 @@ func (c *storageServiceClient) Lookup(ctx context.Context, in *LookupRequest, op
 type StorageServiceServer interface {
 	// Lookup 执行单级目录项查找。
 	// 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
-	// 若目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *LookupRequest) (*LookupResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }

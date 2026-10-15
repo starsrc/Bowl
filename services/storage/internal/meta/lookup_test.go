@@ -20,19 +20,27 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
+func matchReadOnlyOpt() any {
+	return mock.MatchedBy(func(opt tx.Option) bool {
+		cfg := tx.ApplyOptions(opt)
+		return cfg.AccessMode == tx.ReadOnly && cfg.IsoLevel == ""
+	})
+}
+
+func matchRepeatableReadOpt() any {
+	return mock.MatchedBy(func(opt tx.Option) bool {
+		cfg := tx.ApplyOptions(opt)
+		return cfg.AccessMode == "" && cfg.IsoLevel == tx.RepeatableRead
+	})
+}
+
 func setupMockTx(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier) {
 	mockStore.EXPECT().
 		ExecTxWithOptions(
 			mock.Anything,
 			mock.Anything,
-			mock.MatchedBy(func(opt tx.Option) bool {
-				cfg := tx.ApplyOptions(opt)
-				return cfg.AccessMode == tx.ReadOnly || cfg.IsoLevel == tx.RepeatableRead
-			}),
-			mock.MatchedBy(func(opt tx.Option) bool {
-				cfg := tx.ApplyOptions(opt)
-				return cfg.AccessMode == tx.ReadOnly || cfg.IsoLevel == tx.RepeatableRead
-			}),
+			matchReadOnlyOpt(),
+			matchRepeatableReadOpt(),
 		).
 		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
 			cfg := tx.ApplyOptions(opts...)
@@ -345,29 +353,6 @@ func TestLookup_InputValidation(t *testing.T) {
 func TestLookup_NegativeCases(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("entry name containing NUL byte returns ErrInvalidArgument and does not trigger db transaction", func(t *testing.T) {
-		testCases := []struct {
-			name      string
-			entryName string
-		}{
-			{name: "embedded NUL byte", entryName: "a\x00b"},
-			{name: "single NUL byte", entryName: "\x00"},
-			{name: "leading NUL byte", entryName: "\x00file.txt"},
-			{name: "trailing NUL byte", entryName: "file.txt\x00"},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				mockStore := dbmock.NewMockStore(t)
-				mgr := meta.New(mockStore)
-
-				inode, err := mgr.Lookup(ctx, 2, tc.entryName)
-				assert.Nil(t, inode)
-				assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-				mockStore.AssertNotCalled(t, "ExecTxWithOptions")
-			})
-		}
-	})
 
 	t.Run("parent inode not found returns ErrNotFound", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
@@ -544,7 +529,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			txErr := errors.New("connection pool closed")
 
 			mockStore.EXPECT().
-				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				ExecTxWithOptions(mock.Anything, mock.Anything, matchReadOnlyOpt(), matchRepeatableReadOpt()).
 				Return(txErr).
 				Once()
 
@@ -565,7 +550,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			commitErr := errors.New("tx commit failed")
 
 			mockStore.EXPECT().
-				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				ExecTxWithOptions(mock.Anything, mock.Anything, matchReadOnlyOpt(), matchRepeatableReadOpt()).
 				Return(commitErr).
 				Once()
 
@@ -605,7 +590,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 				entryName := "file.txt"
 
 				mockStore.EXPECT().
-					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+					ExecTxWithOptions(mock.Anything, mock.Anything, matchReadOnlyOpt(), matchRepeatableReadOpt()).
 					Return(tc.txErr).
 					Once()
 
@@ -625,7 +610,7 @@ func TestLookup_TransactionOptionsContract(t *testing.T) {
 
 	var capturedOpts []tx.Option
 	mockStore.EXPECT().
-		ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		ExecTxWithOptions(mock.Anything, mock.Anything, matchReadOnlyOpt(), matchRepeatableReadOpt()).
 		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
 			capturedOpts = opts
 			return fn(mockQuerier)

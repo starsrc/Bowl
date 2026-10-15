@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -48,7 +49,7 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*I
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return err
+			return fmt.Errorf("get parent inode %d: %w", parentIno, err)
 		}
 
 		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
@@ -63,7 +64,7 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*I
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return err
+			return fmt.Errorf("get inode by entry %q in parent %d: %w", name, parentIno, err)
 		}
 
 		var blocks uint64
@@ -92,7 +93,16 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*I
 	}, tx.WithReadOnly())
 
 	if err != nil {
-		return nil, err
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, ErrInvalidArgument
+		default:
+			return nil, fmt.Errorf("lookup tx: %w", err)
+		}
 	}
 	return result, nil
 }

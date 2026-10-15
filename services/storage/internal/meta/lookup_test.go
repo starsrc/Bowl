@@ -3,6 +3,7 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -203,29 +204,60 @@ func TestLookup_InputValidation(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name      string
-		parentIno uint64
-		entryName string
+		name       string
+		parentIno  uint64
+		entryName  string
+		wantErr    error
+		expectTx   bool
 	}{
 		{
-			name:      "zero parent Ino",
-			parentIno: 0,
-			entryName: "file.txt",
+			name:       "parentIno 0 invalid",
+			parentIno:  0,
+			entryName:  "file.txt",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
 		},
 		{
-			name:      "empty entry name",
-			parentIno: 2,
-			entryName: "",
+			name:       "empty name invalid",
+			parentIno:  2,
+			entryName:  "",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
 		},
 		{
-			name:      "entry name with path separator",
-			parentIno: 2,
-			entryName: "dir/file.txt",
+			name:       "name with slash invalid",
+			parentIno:  2,
+			entryName:  "dir/file.txt",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
 		},
 		{
-			name:      "entry name exceeding 255 bytes",
-			parentIno: 2,
-			entryName: strings.Repeat("a", 256),
+			name:       "name with leading slash invalid",
+			parentIno:  2,
+			entryName:  "/file.txt",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
+			name:       "name with trailing slash invalid",
+			parentIno:  2,
+			entryName:  "file.txt/",
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
+			name:       "name with 256 chars invalid",
+			parentIno:  2,
+			entryName:  strings.Repeat("a", 256),
+			wantErr:    meta.ErrInvalidArgument,
+			expectTx:   false,
+		},
+		{
+			name:       "name with exactly 255 chars valid",
+			parentIno:  2,
+			entryName:  strings.Repeat("a", 255),
+			wantErr:    nil,
+			expectTx:   true,
 		},
 	}
 
@@ -234,9 +266,44 @@ func TestLookup_InputValidation(t *testing.T) {
 			mockStore := dbmock.NewMockStore(t)
 			mgr := meta.New(mockStore)
 
-			inode, err := mgr.Lookup(ctx, tc.parentIno, tc.entryName)
-			assert.Nil(t, inode)
-			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			if !tc.expectTx {
+				inode, err := mgr.Lookup(ctx, tc.parentIno, tc.entryName)
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, tc.wantErr)
+				mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything, mock.Anything)
+			} else {
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mockStore.EXPECT().
+					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+					RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+						return fn(mockQuerier)
+					}).
+					Once()
+
+				mockQuerier.EXPECT().
+					GetInode(mock.Anything, int64(tc.parentIno)).
+					Return(db.Inode{
+						Ino:  int64(tc.parentIno),
+						Mode: int32(meta.S_IFDIR | 0o755),
+					}, nil).
+					Once()
+
+				mockQuerier.EXPECT().
+					GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{
+						ParentIno: int64(tc.parentIno),
+						Name:      tc.entryName,
+					}).
+					Return(db.Inode{
+						Ino:  100,
+						Mode: int32(0o100644),
+					}, nil).
+					Once()
+
+				inode, err := mgr.Lookup(ctx, tc.parentIno, tc.entryName)
+				require.NoError(t, err)
+				require.NotNil(t, inode)
+				assert.Equal(t, uint64(100), inode.Ino)
+			}
 		})
 	}
 }
@@ -267,20 +334,69 @@ func TestLookup_NegativeCases(t *testing.T) {
 		inode, err := mgr.Lookup(ctx, parentIno, entryName)
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrNotFound)
+		assert.NotErrorIs(t, err, meta.ErrNotDir)
+		assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
 	})
 
-	t.Run("parent inode is not a directory returns ErrNotDir", func(t *testing.T) {
+	t.Run("parent inode is not a directory returns ErrNotDir and does not call GetInodeByEntry", func(t *testing.T) {
+		nonDirModes := []struct {
+			name string
+			mode uint32
+		}{
+			{name: "regular file 0o100644", mode: 0o100644},
+			{name: "regular executable 0o100755", mode: 0o100755},
+			{name: "symbolic link 0o120777", mode: 0o120777},
+			{name: "fifo pipe 0o010666", mode: 0o010666},
+			{name: "socket 0o140777", mode: 0o140777},
+			{name: "block device 0o060660", mode: 0o060660},
+			{name: "character device 0o020660", mode: 0o020660},
+		}
+
+		for _, tc := range nonDirModes {
+			t.Run(tc.name, func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mgr := meta.New(mockStore)
+
+				parentIno := uint64(2)
+				entryName := "file.txt"
+
+				parentRow := db.Inode{
+					Ino:  int64(parentIno),
+					Mode: int32(tc.mode),
+				}
+
+				mockStore.EXPECT().
+					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+					RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+						return fn(mockQuerier)
+					}).
+					Once()
+
+				mockQuerier.EXPECT().
+					GetInode(mock.Anything, int64(parentIno)).
+					Return(parentRow, nil).
+					Once()
+
+				inode, err := mgr.Lookup(ctx, parentIno, entryName)
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, meta.ErrNotDir)
+				assert.NotErrorIs(t, err, meta.ErrNotFound)
+				assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+				mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+			})
+		}
+	})
+
+	t.Run("parent DB error returns wrapped error and is not ErrNotFound or ErrNotDir", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(2)
 		entryName := "file.txt"
-
-		parentRow := db.Inode{
-			Ino:  int64(parentIno),
-			Mode: int32(0o100644), // regular file, NOT a directory
-		}
+		dbErr := errors.New("db query connection failure")
 
 		mockStore.EXPECT().
 			ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
@@ -291,15 +407,19 @@ func TestLookup_NegativeCases(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
-			Return(parentRow, nil).
+			Return(db.Inode{}, dbErr).
 			Once()
 
 		inode, err := mgr.Lookup(ctx, parentIno, entryName)
 		assert.Nil(t, inode)
-		assert.ErrorIs(t, err, meta.ErrNotDir)
+		assert.ErrorIs(t, err, dbErr)
+		assert.NotErrorIs(t, err, meta.ErrNotFound)
+		assert.NotErrorIs(t, err, meta.ErrNotDir)
+		assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
 	})
 
-	t.Run("target entry not found returns ErrNotFound", func(t *testing.T) {
+	t.Run("child entry not found returns ErrNotFound", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -335,16 +455,23 @@ func TestLookup_NegativeCases(t *testing.T) {
 		inode, err := mgr.Lookup(ctx, parentIno, entryName)
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrNotFound)
+		assert.NotErrorIs(t, err, meta.ErrNotDir)
+		assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
 	})
 
-	t.Run("database error on query returns underlying error", func(t *testing.T) {
+	t.Run("child entry DB error returns wrapped error and is not ErrNotFound or ErrNotDir", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(2)
 		entryName := "file.txt"
-		dbErr := errors.New("connection failed")
+		dbErr := errors.New("db query entry read timeout")
+
+		parentRow := db.Inode{
+			Ino:  int64(parentIno),
+			Mode: int32(meta.S_IFDIR | 0o755),
+		}
 
 		mockStore.EXPECT().
 			ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
@@ -355,16 +482,113 @@ func TestLookup_NegativeCases(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetInode(mock.Anything, int64(parentIno)).
+			Return(parentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      entryName,
+			}).
 			Return(db.Inode{}, dbErr).
 			Once()
 
 		inode, err := mgr.Lookup(ctx, parentIno, entryName)
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, dbErr)
+		assert.NotErrorIs(t, err, meta.ErrNotFound)
+		assert.NotErrorIs(t, err, meta.ErrNotDir)
+		assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+	})
+
+	t.Run("transaction execution failure wraps underlying error", func(t *testing.T) {
+		t.Run("tx begin or pool failure", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mgr := meta.New(mockStore)
+
+			parentIno := uint64(2)
+			entryName := "file.txt"
+			txErr := errors.New("connection pool closed")
+
+			mockStore.EXPECT().
+				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+				Return(txErr).
+				Once()
+
+			inode, err := mgr.Lookup(ctx, parentIno, entryName)
+			assert.Nil(t, inode)
+			assert.ErrorIs(t, err, txErr)
+			assert.NotErrorIs(t, err, meta.ErrNotFound)
+			assert.NotErrorIs(t, err, meta.ErrNotDir)
+			assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+		})
+
+		t.Run("tx commit failure", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mgr := meta.New(mockStore)
+
+			parentIno := uint64(2)
+			entryName := "file.txt"
+			commitErr := errors.New("tx commit failed")
+
+			mockStore.EXPECT().
+				ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+				Return(commitErr).
+				Once()
+
+			inode, err := mgr.Lookup(ctx, parentIno, entryName)
+			assert.Nil(t, inode)
+			assert.ErrorIs(t, err, commitErr)
+			assert.NotErrorIs(t, err, meta.ErrNotFound)
+			assert.NotErrorIs(t, err, meta.ErrNotDir)
+			assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+		})
+	})
+
+	t.Run("transaction propagates wrapped domain errors as expected", func(t *testing.T) {
+		testCases := []struct {
+			name        string
+			txErr       error
+			expectedErr error
+		}{
+			{
+				name:        "wrapped ErrNotFound converges to ErrNotFound",
+				txErr:       fmt.Errorf("tx wrapped: %w", meta.ErrNotFound),
+				expectedErr: meta.ErrNotFound,
+			},
+			{
+				name:        "wrapped ErrNotDir converges to ErrNotDir",
+				txErr:       fmt.Errorf("tx wrapped: %w", meta.ErrNotDir),
+				expectedErr: meta.ErrNotDir,
+			},
+			{
+				name:        "wrapped ErrInvalidArgument converges to ErrInvalidArgument",
+				txErr:       fmt.Errorf("tx wrapped: %w", meta.ErrInvalidArgument),
+				expectedErr: meta.ErrInvalidArgument,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mgr := meta.New(mockStore)
+
+				parentIno := uint64(2)
+				entryName := "file.txt"
+
+				mockStore.EXPECT().
+					ExecTxWithOptions(mock.Anything, mock.Anything, mock.Anything).
+					Return(tc.txErr).
+					Once()
+
+				inode, err := mgr.Lookup(ctx, parentIno, entryName)
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, tc.expectedErr)
+			})
+		}
 	})
 }
 
 func TestModule(t *testing.T) {
 	assert.NotNil(t, meta.Module)
 }
-

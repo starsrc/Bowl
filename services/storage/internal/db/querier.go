@@ -9,8 +9,12 @@ import (
 )
 
 type Querier interface {
+	CreateEntry(ctx context.Context, arg CreateEntryParams) error
+	CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
+	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
+	TouchInodeTimestamps(ctx context.Context, ino int64) error
 }
 
 var _ Querier = (*Queries)(nil)

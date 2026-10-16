@@ -9,6 +9,61 @@ import (
 	"context"
 )
 
+const createEntry = `-- name: CreateEntry :exec
+INSERT INTO entries (parent_ino, name, ino)
+VALUES ($1, $2, $3)
+`
+
+type CreateEntryParams struct {
+	ParentIno int64  `json:"parent_ino"`
+	Name      string `json:"name"`
+	Ino       int64  `json:"ino"`
+}
+
+func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) error {
+	_, err := q.db.Exec(ctx, createEntry, arg.ParentIno, arg.Name, arg.Ino)
+	return err
+}
+
+const createInode = `-- name: CreateInode :one
+INSERT INTO inodes (mode, nlink, uid, gid, rdev)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
+`
+
+type CreateInodeParams struct {
+	Mode  int32 `json:"mode"`
+	Nlink int32 `json:"nlink"`
+	Uid   int32 `json:"uid"`
+	Gid   int32 `json:"gid"`
+	Rdev  int64 `json:"rdev"`
+}
+
+func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error) {
+	row := q.db.QueryRow(ctx, createInode,
+		arg.Mode,
+		arg.Nlink,
+		arg.Uid,
+		arg.Gid,
+		arg.Rdev,
+	)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+	)
+	return i, err
+}
+
 const getInode = `-- name: GetInode :one
 SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
 FROM inodes
@@ -63,4 +118,41 @@ func (q *Queries) GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams
 		&i.Ctime,
 	)
 	return i, err
+}
+
+const getInodeForUpdate = `-- name: GetInodeForUpdate :one
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
+FROM inodes
+WHERE ino = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error) {
+	row := q.db.QueryRow(ctx, getInodeForUpdate, ino)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+	)
+	return i, err
+}
+
+const touchInodeTimestamps = `-- name: TouchInodeTimestamps :exec
+UPDATE inodes
+SET mtime = NOW(), ctime = NOW()
+WHERE ino = $1
+`
+
+func (q *Queries) TouchInodeTimestamps(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, touchInodeTimestamps, ino)
+	return err
 }

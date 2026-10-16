@@ -69,3 +69,15 @@ tasks:
     cmds:
       - goose -dir {{.STORAGE_MIGRATIONS_DIR}} postgres "{{.STORAGE_DB_DSN}}" status {{.CLI_ARGS}}
 
+  sqlc:storage:generate:
+    desc: "Generate sqlc code for storage service"
+    dir: services/storage
+    cmds:
+      - sqlc generate {{.CLI_ARGS}}
+
+  mockery:storage:
+    desc: "Generate mockery mocks for storage service"
+    dir: services/storage
+    cmds:
+      - mockery {{.CLI_ARGS}}
+

@@ -28,6 +28,8 @@ const (
 	StorageServiceLookupProcedure = "/storage.v1.StorageService/Lookup"
 	// StorageServiceGetAttrProcedure is the procedure name of the StorageService's GetAttr RPC.
 	StorageServiceGetAttrProcedure = "/storage.v1.StorageService/GetAttr"
+	// StorageServiceMknodProcedure is the procedure name of the StorageService's Mknod RPC.
+	StorageServiceMknodProcedure = "/storage.v1.StorageService/Mknod"
 )
 
 var (
@@ -45,6 +47,13 @@ var (
 			Procedure:  StorageServiceGetAttrProcedure,
 		}
 	})
+	storageServiceMknodSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Mknod"),
+			Procedure:  StorageServiceMknodProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -58,6 +67,11 @@ type StorageServiceClient interface {
 	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
 	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	GetAttr(context.Context, *v1.GetAttrRequest) (*v1.GetAttrResponse, error)
+	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -77,6 +91,11 @@ type StorageServiceHandler interface {
 	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
 	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	GetAttr(context.Context, *v1.GetAttrRequest) (*v1.GetAttrResponse, error)
+	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -86,6 +105,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 	server.Register(
 		connect.Method{Spec: storageServiceLookupSpec(), Handler: adapter.lookup},
 		connect.Method{Spec: storageServiceGetAttrSpec(), Handler: adapter.getAttr},
+		connect.Method{Spec: storageServiceMknodSpec(), Handler: adapter.mknod},
 	)
 }
 
@@ -98,6 +118,10 @@ func (UnimplementedStorageServiceHandler) Lookup(context.Context, *v1.LookupRequ
 
 func (UnimplementedStorageServiceHandler) GetAttr(context.Context, *v1.GetAttrRequest) (*v1.GetAttrResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetAttr is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Mknod is not implemented")
 }
 
 type storageServiceClient struct {
@@ -115,6 +139,14 @@ func (c *storageServiceClient) Lookup(ctx context.Context, req *v1.LookupRequest
 func (c *storageServiceClient) GetAttr(ctx context.Context, req *v1.GetAttrRequest) (*v1.GetAttrResponse, error) {
 	var res v1.GetAttrResponse
 	if err := c.client.CallUnary(ctx, storageServiceGetAttrSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Mknod(ctx context.Context, req *v1.MknodRequest) (*v1.MknodResponse, error) {
+	var res v1.MknodResponse
+	if err := c.client.CallUnary(ctx, storageServiceMknodSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -140,6 +172,18 @@ func (h storageServiceHandler) getAttr(ctx context.Context, _ connect.Spec, stre
 		return err
 	}
 	res, err := h.svc.GetAttr(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) mknod(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.MknodRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Mknod(ctx, &req)
 	if err != nil {
 		return err
 	}

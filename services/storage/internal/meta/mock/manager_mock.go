@@ -179,3 +179,71 @@ func (_c *MockManager_Lookup_Call) RunAndReturn(run func(ctx context.Context, pa
 	_c.Call.Return(run)
 	return _c
 }
+
+// Mknod provides a mock function for the type MockManager
+func (_mock *MockManager) Mknod(ctx context.Context, params meta.MknodParams) (*meta.Inode, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Mknod")
+	}
+
+	var r0 *meta.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.MknodParams) (*meta.Inode, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.MknodParams) *meta.Inode); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.Inode)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.MknodParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_Mknod_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Mknod'
+type MockManager_Mknod_Call struct {
+	*mock.Call
+}
+
+// Mknod is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.MknodParams
+func (_e *MockManager_Expecter) Mknod(ctx any, params any) *MockManager_Mknod_Call {
+	return &MockManager_Mknod_Call{Call: _e.mock.On("Mknod", ctx, params)}
+}
+
+func (_c *MockManager_Mknod_Call) Run(run func(ctx context.Context, params meta.MknodParams)) *MockManager_Mknod_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.MknodParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.MknodParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Mknod_Call) Return(inode *meta.Inode, err error) *MockManager_Mknod_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockManager_Mknod_Call) RunAndReturn(run func(ctx context.Context, params meta.MknodParams) (*meta.Inode, error)) *MockManager_Mknod_Call {
+	_c.Call.Return(run)
+	return _c
+}

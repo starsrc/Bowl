@@ -513,4 +513,61 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, dbErr)
 	})
+
+	t.Run("全局 Inode 升序加锁: 当源节点 ino 小于目标父目录 new_parent_ino 时严格按 min->max 顺序加锁", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		olderSrcIno := uint64(5)
+		newerParentIno := uint64(50)
+
+		var lockOrder []int64
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(olderSrcIno)).
+			RunAndReturn(func(_ context.Context, ino int64) (db.Inode, error) {
+				lockOrder = append(lockOrder, ino)
+				return db.Inode{Ino: ino, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}, nil
+			}).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(newerParentIno)).
+			RunAndReturn(func(_ context.Context, ino int64) (db.Inode, error) {
+				lockOrder = append(lockOrder, ino)
+				return db.Inode{Ino: ino, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil
+			}).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(newerParentIno),
+				Name:      "ordered.txt",
+				Ino:       int64(olderSrcIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouchCtime(mock.Anything, int64(olderSrcIno)).
+			Return(db.Inode{Ino: int64(olderSrcIno), Mode: int32(meta.S_IFREG | 0o644), Nlink: 2}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(newerParentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          olderSrcIno,
+			NewParentIno: newerParentIno,
+			NewName:      "ordered.txt",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, []int64{int64(olderSrcIno), int64(newerParentIno)}, lockOrder)
+	})
 }
+

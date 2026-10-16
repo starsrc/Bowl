@@ -114,17 +114,23 @@ WHERE ino = $1;
 
 -- name: IsSubdirectory :one
 WITH RECURSIVE ancestors AS (
-    SELECT parent_ino, 1 AS depth
+    SELECT
+        parent_ino,
+        ARRAY[@child_ino::bigint, parent_ino] AS visited,
+        (parent_ino = @child_ino::bigint) AS has_cycle
     FROM entries
     WHERE ino = @child_ino::bigint
     UNION ALL
-    SELECT e.parent_ino, a.depth + 1
+    SELECT
+        e.parent_ino,
+        a.visited || e.parent_ino,
+        (e.parent_ino = ANY(a.visited)) AS has_cycle
     FROM entries e
     JOIN ancestors a ON e.ino = a.parent_ino
-    WHERE a.depth < 1024 AND a.parent_ino > 1
+    WHERE NOT a.has_cycle
 )
 SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
-    SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint
+    SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint OR has_cycle
 ), false)::boolean AS is_sub;
 
 

@@ -807,6 +807,35 @@ func TestSetAttr_POSIX_ModeFileTypeTampering(t *testing.T) {
 		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
 	})
 
+	t.Run("符号链接传入 mode 返回 ErrInvalidArgument（符号链接权限固定为 S_IFLNK | 0o777）", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		symlinkRow := db.Inode{
+			Ino:        int64(ino),
+			Generation: 1,
+			Mode:       int32(meta.S_IFLNK | 0o777),
+			Size:       10,
+			Uid:        1000,
+			Gid:        1000,
+		}
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(symlinkRow, nil).
+			Once()
+
+		inode, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Mode: ptr(uint32(0o755)),
+		})
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+
 	t.Run("常规文件传入 mode 携带相同文件类型位（S_IFREG）成功更新并保留文件类型", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)

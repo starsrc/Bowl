@@ -246,11 +246,8 @@ message MkdirRequest {
     (buf.validate.field).string.pattern = "^[^/\\x00]+$"
   ];
 
-  // 目录模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
-  uint32 mode = 3 [
-    (buf.validate.field).uint32.gt = 0,
-    (buf.validate.field).uint32.lte = 65535
-  ];
+  // 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位，取值范围必须在 0 到 0o177777 / 65535 之间）。
+  uint32 mode = 3 [(buf.validate.field).uint32.lte = 65535];
 
   // 所属用户 ID。
   uint32 uid = 4;

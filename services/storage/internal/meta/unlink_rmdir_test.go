@@ -59,13 +59,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
 		}
 
-		// 1. 锁定父目录
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(baseParentRow, nil).
-			Once()
-
-		// 2. 查找目录项
+		// 1. 预读与持锁二次校验目录项
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
@@ -76,9 +70,14 @@ func TestUnlink_PositivePath(t *testing.T) {
 				Name:      "file.txt",
 				Ino:       int64(childIno),
 			}, nil).
+			Twice()
+
+		// 2. 按全局 ino 升序锁定父目录与子节点
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
 			Once()
 
-		// 3. 锁定子节点
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(childIno)).
 			Return(childRow, nil).
@@ -132,11 +131,6 @@ func TestUnlink_PositivePath(t *testing.T) {
 		}
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(baseParentRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "orphan.txt",
@@ -146,6 +140,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 				Name:      "orphan.txt",
 				Ino:       int64(childIno),
 			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -199,11 +198,6 @@ func TestUnlink_PositivePath(t *testing.T) {
 		}
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(baseParentRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "symlink",
@@ -213,6 +207,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 				Name:      "symlink",
 				Ino:       int64(childIno),
 			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -242,6 +241,76 @@ func TestUnlink_PositivePath(t *testing.T) {
 
 		err := mgr.Unlink(ctx, parentIno, "symlink")
 		require.NoError(t, err)
+	})
+
+	t.Run("全局 Inode 升序加锁与并发漂移重试: 当 child_ino < parent_ino 时严格按升序加锁，且目录项并发漂移时自动重试", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier1 := dbmock.NewMockQuerier(t)
+		mockQuerier2 := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		olderChildIno := int64(5)
+		driftedChildIno := int64(8)
+		newerParentIno := uint64(50)
+
+		// 第一次事务：预读到 olderChildIno(5)，加锁后二次校验发现漂移为 driftedChildIno(8)，触发重试
+		setupMockWriteTx(mockStore, mockQuerier1)
+
+		mockQuerier1.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
+			Return(db.Entry{ParentIno: int64(newerParentIno), Name: "drift.txt", Ino: olderChildIno}, nil).
+			Once()
+		mockQuerier1.EXPECT().
+			GetInodeForUpdate(mock.Anything, olderChildIno).
+			Return(db.Inode{Ino: olderChildIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}, nil).
+			Once()
+		mockQuerier1.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(newerParentIno)).
+			Return(db.Inode{Ino: int64(newerParentIno), Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil).
+			Once()
+		mockQuerier1.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
+			Return(db.Entry{ParentIno: int64(newerParentIno), Name: "drift.txt", Ino: driftedChildIno}, nil).
+			Once()
+
+		// 第二次事务：预读到 driftedChildIno(8)，按 8 -> 50 升序加锁并顺利完成删除
+		setupMockWriteTx(mockStore, mockQuerier2)
+
+		var lockOrder []int64
+		mockQuerier2.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
+			Return(db.Entry{ParentIno: int64(newerParentIno), Name: "drift.txt", Ino: driftedChildIno}, nil).
+			Twice()
+		mockQuerier2.EXPECT().
+			GetInodeForUpdate(mock.Anything, driftedChildIno).
+			RunAndReturn(func(_ context.Context, ino int64) (db.Inode, error) {
+				lockOrder = append(lockOrder, ino)
+				return db.Inode{Ino: ino, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}, nil
+			}).
+			Once()
+		mockQuerier2.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(newerParentIno)).
+			RunAndReturn(func(_ context.Context, ino int64) (db.Inode, error) {
+				lockOrder = append(lockOrder, ino)
+				return db.Inode{Ino: ino, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil
+			}).
+			Once()
+		mockQuerier2.EXPECT().
+			DeleteEntry(mock.Anything, db.DeleteEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
+			Return(nil).
+			Once()
+		mockQuerier2.EXPECT().
+			DecrementInodeNlinkAndTouchCtime(mock.Anything, driftedChildIno).
+			Return(db.Inode{Ino: driftedChildIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 0}, nil).
+			Once()
+		mockQuerier2.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(newerParentIno)).
+			Return(nil).
+			Once()
+
+		err := mgr.Unlink(ctx, newerParentIno, "drift.txt")
+		require.NoError(t, err)
+		assert.Equal(t, []int64{driftedChildIno, int64(newerParentIno)}, lockOrder)
 	})
 }
 
@@ -284,6 +353,14 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "file.txt",
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
 			Return(db.Inode{}, pgx.ErrNoRows).
 			Once()
@@ -298,6 +375,14 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "file.txt",
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
 
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
@@ -320,6 +405,18 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "file.txt",
+			}).
+			Return(db.Entry{
+				ParentIno: int64(parentIno),
+				Name:      "file.txt",
+				Ino:       int64(childIno),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
 			Return(db.Inode{
 				Ino:   int64(parentIno),
@@ -340,20 +437,20 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "missing.txt",
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
 			Return(db.Inode{
 				Ino:   int64(parentIno),
 				Mode:  int32(meta.S_IFDIR | 0o755),
 				Nlink: 2,
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetEntry(mock.Anything, db.GetEntryParams{
-				ParentIno: int64(parentIno),
-				Name:      "missing.txt",
-			}).
-			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
 
 		err := mgr.Unlink(ctx, parentIno, "missing.txt")
@@ -368,15 +465,6 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{
-				Ino:   int64(parentIno),
-				Mode:  int32(meta.S_IFDIR | 0o755),
-				Nlink: 2,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "ghost.txt",
@@ -385,6 +473,15 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 				ParentIno: int64(parentIno),
 				Name:      "ghost.txt",
 				Ino:       int64(childIno),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
 			}, nil).
 			Once()
 
@@ -405,15 +502,6 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{
-				Ino:   int64(parentIno),
-				Mode:  int32(meta.S_IFDIR | 0o755),
-				Nlink: 3,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "subdir",
@@ -422,6 +510,15 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 				ParentIno: int64(parentIno),
 				Name:      "subdir",
 				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 3,
 			}, nil).
 			Once()
 
@@ -471,8 +568,11 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 
 		dbErr := errors.New("db error")
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{}, dbErr).
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "file.txt",
+			}).
+			Return(db.Entry{}, dbErr).
 			Once()
 
 		err := mgr.Unlink(ctx, parentIno, "file.txt")
@@ -520,13 +620,7 @@ func TestRmdir_PositivePath(t *testing.T) {
 			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
 		}
 
-		// 1. 锁定父目录
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(baseParentRow, nil).
-			Once()
-
-		// 2. 查找目录项
+		// 1. 预读与持锁二次校验目录项
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
@@ -537,9 +631,14 @@ func TestRmdir_PositivePath(t *testing.T) {
 				Name:      "emptydir",
 				Ino:       int64(childIno),
 			}, nil).
+			Twice()
+
+		// 2. 按全局 ino 升序锁定父目录与子目录
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
 			Once()
 
-		// 3. 锁定子目录
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(childIno)).
 			Return(childRow, nil).
@@ -619,6 +718,14 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "sub",
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
 			Return(db.Inode{}, pgx.ErrNoRows).
 			Once()
@@ -633,6 +740,14 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "sub",
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
 
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
@@ -655,6 +770,18 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "sub",
+			}).
+			Return(db.Entry{
+				ParentIno: int64(parentIno),
+				Name:      "sub",
+				Ino:       int64(childIno),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
 			Return(db.Inode{
 				Ino:   int64(parentIno),
@@ -675,20 +802,20 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "missing_dir",
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
 			Return(db.Inode{
 				Ino:   int64(parentIno),
 				Mode:  int32(meta.S_IFDIR | 0o755),
 				Nlink: 2,
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetEntry(mock.Anything, db.GetEntryParams{
-				ParentIno: int64(parentIno),
-				Name:      "missing_dir",
-			}).
-			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
 
 		err := mgr.Rmdir(ctx, parentIno, "missing_dir")
@@ -703,15 +830,6 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{
-				Ino:   int64(parentIno),
-				Mode:  int32(meta.S_IFDIR | 0o755),
-				Nlink: 2,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "ghost_dir",
@@ -720,6 +838,15 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 				ParentIno: int64(parentIno),
 				Name:      "ghost_dir",
 				Ino:       int64(childIno),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
 			}, nil).
 			Once()
 
@@ -740,15 +867,6 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{
-				Ino:   int64(parentIno),
-				Mode:  int32(meta.S_IFDIR | 0o755),
-				Nlink: 2,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "file.txt",
@@ -757,6 +875,15 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 				ParentIno: int64(parentIno),
 				Name:      "file.txt",
 				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
 			}, nil).
 			Once()
 
@@ -781,15 +908,6 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{
-				Ino:   int64(parentIno),
-				Mode:  int32(meta.S_IFDIR | 0o755),
-				Nlink: 3,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      "nonempty_dir",
@@ -798,6 +916,15 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 				ParentIno: int64(parentIno),
 				Name:      "nonempty_dir",
 				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 3,
 			}, nil).
 			Once()
 
@@ -868,11 +995,15 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		dbErr := errors.New("db error")
 		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{}, dbErr).
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "sub",
+			}).
+			Return(db.Entry{}, dbErr).
 			Once()
 
 		err := mgr.Rmdir(ctx, parentIno, "sub")
 		assert.ErrorIs(t, err, dbErr)
 	})
 }
+

@@ -82,16 +82,7 @@ func TestRename_ShortCircuit(t *testing.T) {
 				Name:      "same.txt",
 			}).
 			Return(db.Entry{ParentIno: int64(parentIno), Name: "same.txt", Ino: 100}, nil).
-			Once()
-
-		// newEntry 也查询相同的 key，返回同条目
-		mockQuerier.EXPECT().
-			GetEntry(mock.Anything, db.GetEntryParams{
-				ParentIno: int64(parentIno),
-				Name:      "same.txt",
-			}).
-			Return(db.Entry{ParentIno: int64(parentIno), Name: "same.txt", Ino: 100}, nil).
-			Once()
+			Twice()
 
 		err := mgr.Rename(ctx, meta.RenameParams{
 			OldParentIno: parentIno,
@@ -120,7 +111,7 @@ func TestRename_ShortCircuit(t *testing.T) {
 				Name:      "link1",
 			}).
 			Return(db.Entry{ParentIno: int64(parentIno), Name: "link1", Ino: 100}, nil).
-			Once()
+			Twice()
 
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
@@ -128,7 +119,7 @@ func TestRename_ShortCircuit(t *testing.T) {
 				Name:      "link2",
 			}).
 			Return(db.Entry{ParentIno: int64(parentIno), Name: "link2", Ino: 100}, nil).
-			Once()
+			Twice()
 
 		err := mgr.Rename(ctx, meta.RenameParams{
 			OldParentIno: parentIno,
@@ -181,17 +172,15 @@ func TestRename_File_Positive(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		// 1. 父目录升序加锁: 10 -> 20
+		// 1. 预读与持锁二次校验源目录项与目标目录项
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a.txt"}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "a.txt", Ino: srcFileIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "b.txt"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Twice()
+
+		// 2. 全局升序加锁: 10 -> 20 -> 100
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
-
-		// 2. 查源目录项与目标目录项
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a.txt"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "a.txt", Ino: srcFileIno}, nil).Once()
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "b.txt"}).
-			Return(db.Entry{}, pgx.ErrNoRows).Once()
-
-		// 3. 子节点加锁 (仅源节点)
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcFileIno).Return(srcFileRow, nil).Once()
 
 		// 4. 更新目录项
@@ -232,17 +221,15 @@ func TestRename_File_Positive(t *testing.T) {
 			Nlink: 2,
 		}
 
-		// 1. 父目录加锁
+		// 1. 预读与持锁二次校验目录项
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a.txt"}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "a.txt", Ino: srcFileIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "b.txt"}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: "b.txt", Ino: targetFileIno}, nil).Twice()
+
+		// 2. 全局升序加锁: 10 -> 20 -> 100 -> 200
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
-
-		// 2. 查目录项
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a.txt"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "a.txt", Ino: srcFileIno}, nil).Once()
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "b.txt"}).
-			Return(db.Entry{ParentIno: int64(newParentIno), Name: "b.txt", Ino: targetFileIno}, nil).Once()
-
-		// 3. 子节点升序加锁: min(100, 200) -> 100, max -> 200
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcFileIno).Return(srcFileRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetFileIno).Return(targetFileRow, nil).Once()
 
@@ -323,17 +310,15 @@ func TestRename_Directory_Positive(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		// 1. 父目录加锁
+		// 1. 预读与持锁二次校验目录项
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "subdir"}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "subdir", Ino: srcDirIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "destdir"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Twice()
+
+		// 2. 全局升序加锁
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
-
-		// 2. 查目录项
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "subdir"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "subdir", Ino: srcDirIno}, nil).Once()
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "destdir"}).
-			Return(db.Entry{}, pgx.ErrNoRows).Once()
-
-		// 3. 子目录加锁
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcDirIno).Return(srcDirRow, nil).Once()
 
 		// 4. 环检测: IsSubdirectory 返回 false
@@ -380,15 +365,13 @@ func TestRename_Directory_Positive(t *testing.T) {
 			Nlink: 2,
 		}
 
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "subdir"}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "subdir", Ino: srcDirIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "targetdir"}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: "targetdir", Ino: targetDirIno}, nil).Twice()
+
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
-
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "subdir"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "subdir", Ino: srcDirIno}, nil).Once()
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "targetdir"}).
-			Return(db.Entry{ParentIno: int64(newParentIno), Name: "targetdir", Ino: targetDirIno}, nil).Once()
-
-		// 子节点按 300 -> 400 升序锁
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcDirIno).Return(srcDirRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetDirIno).Return(targetDirRow, nil).Once()
 
@@ -452,13 +435,12 @@ func TestRename_Directory_Positive(t *testing.T) {
 			Nlink: 2,
 		}
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
-
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "dir1"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir1", Ino: srcDirIno}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir1", Ino: srcDirIno}, nil).Twice()
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "dir2"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir2", Ino: targetDirIno}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir2", Ino: targetDirIno}, nil).Twice()
 
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcDirIno).Return(srcDirRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetDirIno).Return(targetDirRow, nil).Once()
 
@@ -491,6 +473,60 @@ func TestRename_Directory_Positive(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+
+	t.Run("全局 Inode 升序加锁: 当旧子节点 ino 小于父目录 ino 时严格按全局 min->max 顺序加锁，消除跨层死锁", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		// 模拟较早创建的子目录 B(ino=10) 曾被移入较晚创建的父目录 A(ino=20)，现移往另一目录 C(ino=15)
+		parentA := uint64(20)
+		parentC := uint64(15)
+		childB := int64(10)
+
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(parentA), Name: "b"}).
+			Return(db.Entry{ParentIno: int64(parentA), Name: "b", Ino: childB}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(parentC), Name: "b_moved"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Twice()
+
+		var lockOrder []int64
+		for _, ino := range []int64{childB, int64(parentC), int64(parentA)} {
+			mockQuerier.EXPECT().
+				GetInodeForUpdate(mock.Anything, ino).
+				RunAndReturn(func(_ context.Context, lockedIno int64) (db.Inode, error) {
+					lockOrder = append(lockOrder, lockedIno)
+					return db.Inode{Ino: lockedIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil
+				}).
+				Once()
+		}
+
+		mockQuerier.EXPECT().IsSubdirectory(mock.Anything, db.IsSubdirectoryParams{
+			ChildIno:    int64(parentC),
+			AncestorIno: childB,
+		}).Return(false, nil).Once()
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(parentA),
+			OldName:      "b",
+			NewParentIno: int64(parentC),
+			NewName:      "b_moved",
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().TouchInodeCtime(mock.Anything, childB).Return(nil).Once()
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouch(mock.Anything, int64(parentA)).Return(nil).Once()
+		mockQuerier.EXPECT().IncrementInodeNlinkAndTouch(mock.Anything, int64(parentC)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: parentA,
+			OldName:      "b",
+			NewParentIno: parentC,
+			NewName:      "b_moved",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []int64{10, 15, 20}, lockOrder)
+	})
 }
 
 func TestRename_NegativeCases(t *testing.T) {
@@ -516,6 +552,8 @@ func TestRename_NegativeCases(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(db.Inode{}, pgx.ErrNoRows).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{OldParentIno: oldParentIno, OldName: "a", NewParentIno: oldParentIno, NewName: "b"})
@@ -531,6 +569,8 @@ func TestRename_NegativeCases(t *testing.T) {
 
 		notDirParent := parentRow
 		notDirParent.Mode = int32(meta.S_IFREG | 0o644)
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(notDirParent, nil).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{OldParentIno: oldParentIno, OldName: "a", NewParentIno: oldParentIno, NewName: "b"})
@@ -546,6 +586,8 @@ func TestRename_NegativeCases(t *testing.T) {
 
 		orphanParent := parentRow
 		orphanParent.Nlink = 0
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(orphanParent, nil).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{OldParentIno: oldParentIno, OldName: "a", NewParentIno: oldParentIno, NewName: "b"})
@@ -559,9 +601,9 @@ func TestRename_NegativeCases(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "missing"}).
 			Return(db.Entry{}, pgx.ErrNoRows).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{OldParentIno: oldParentIno, OldName: "missing", NewParentIno: oldParentIno, NewName: "b"})
 		assert.ErrorIs(t, err, meta.ErrNotFound)
@@ -575,17 +617,14 @@ func TestRename_NegativeCases(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		dirIno := int64(20) // new_parent_ino == old_ino == 20
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(10)).Return(parentRow, nil).Once()
-		newParent := parentRow
-		newParent.Ino = dirIno
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, dirIno).Return(newParent, nil).Once()
-
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(10), Name: "dir"}).
-			Return(db.Entry{ParentIno: 10, Name: "dir", Ino: dirIno}, nil).Once()
+			Return(db.Entry{ParentIno: 10, Name: "dir", Ino: dirIno}, nil).Twice()
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: dirIno, Name: "dest"}).
-			Return(db.Entry{}, pgx.ErrNoRows).Once()
+			Return(db.Entry{}, pgx.ErrNoRows).Twice()
 
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(10)).Return(parentRow, nil).Once()
 		dirRow := db.Inode{Ino: dirIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}
+		// new_parent_ino 与 old_ino 同为 20，uniqueSortedInos 自动去重，仅锁定一次
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, dirIno).Return(dirRow, nil).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{OldParentIno: 10, OldName: "dir", NewParentIno: uint64(dirIno), NewName: "dest"})
@@ -600,15 +639,15 @@ func TestRename_NegativeCases(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		dirIno := int64(30)
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(10), Name: "dir"}).
+			Return(db.Entry{ParentIno: 10, Name: "dir", Ino: dirIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "dest"}).
+			Return(db.Entry{}, pgx.ErrNoRows).Twice()
+
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(10)).Return(parentRow, nil).Once()
 		newParent := parentRow
 		newParent.Ino = int64(newParentIno)
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParent, nil).Once()
-
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(10), Name: "dir"}).
-			Return(db.Entry{ParentIno: 10, Name: "dir", Ino: dirIno}, nil).Once()
-		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "dest"}).
-			Return(db.Entry{}, pgx.ErrNoRows).Once()
 
 		dirRow := db.Inode{Ino: dirIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, dirIno).Return(dirRow, nil).Once()
@@ -633,12 +672,12 @@ func TestRename_NegativeCases(t *testing.T) {
 		dirIno := int64(100)
 		fileIno := int64(200)
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
-
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "dir"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir", Ino: dirIno}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir", Ino: dirIno}, nil).Twice()
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "file"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "file", Ino: fileIno}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "file", Ino: fileIno}, nil).Twice()
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
 
 		dirRow := db.Inode{Ino: dirIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}
 		fileRow := db.Inode{Ino: fileIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}
@@ -660,12 +699,12 @@ func TestRename_NegativeCases(t *testing.T) {
 		fileIno := int64(100)
 		dirIno := int64(200)
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
-
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "file"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "file", Ino: fileIno}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "file", Ino: fileIno}, nil).Twice()
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "dir"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir", Ino: dirIno}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir", Ino: dirIno}, nil).Twice()
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
 
 		fileRow := db.Inode{Ino: fileIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}
 		dirRow := db.Inode{Ino: dirIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}
@@ -687,12 +726,12 @@ func TestRename_NegativeCases(t *testing.T) {
 		dir1Ino := int64(100)
 		dir2Ino := int64(200)
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
-
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "dir1"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir1", Ino: dir1Ino}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir1", Ino: dir1Ino}, nil).Twice()
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "dir2"}).
-			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir2", Ino: dir2Ino}, nil).Once()
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "dir2", Ino: dir2Ino}, nil).Twice()
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(parentRow, nil).Once()
 
 		dir1Row := db.Inode{Ino: dir1Ino, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}
 		dir2Row := db.Inode{Ino: dir2Ino, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 3}
@@ -743,10 +782,96 @@ func TestRename_NegativeCases(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		dbErr := errors.New("db connection failure")
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(db.Inode{}, dbErr).Once()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "a"}).
+			Return(db.Entry{}, dbErr).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{OldParentIno: oldParentIno, OldName: "a", NewParentIno: oldParentIno, NewName: "b"})
 		assert.ErrorIs(t, err, dbErr)
 	})
 }
+
+func TestRename_GlobalLockOrderAndDriftRetry(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("所有涉及的父目录与子节点按全局 Ino 严格升序加锁，且并发漂移时自动重试", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier1 := dbmock.NewMockQuerier(t)
+		mockQuerier2 := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		// 刻意构造子节点 ino (5, 8) 小于父目录 ino (50, 30) 的反向拓扑
+		oldParentIno := uint64(50)
+		newParentIno := uint64(30)
+		srcIno := int64(8)
+		initialTargetIno := int64(5)
+		driftedTargetIno := int64(6)
+
+		// 第一次事务：预读到 target=5，按 5 -> 8 -> 30 -> 50 加锁后发现 target 漂移为 6，触发重试
+		setupMockWriteTx(mockStore, mockQuerier1)
+		mockQuerier1.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "src"}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "src", Ino: srcIno}, nil).Twice()
+		mockQuerier1.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "dst"}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: "dst", Ino: initialTargetIno}, nil).Once()
+
+		mockQuerier1.EXPECT().GetInodeForUpdate(mock.Anything, initialTargetIno).
+			Return(db.Inode{Ino: initialTargetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}, nil).Once()
+		mockQuerier1.EXPECT().GetInodeForUpdate(mock.Anything, srcIno).
+			Return(db.Inode{Ino: srcIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}, nil).Once()
+		mockQuerier1.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).
+			Return(db.Inode{Ino: int64(newParentIno), Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil).Once()
+		mockQuerier1.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).
+			Return(db.Inode{Ino: int64(oldParentIno), Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil).Once()
+
+		mockQuerier1.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "dst"}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: "dst", Ino: driftedTargetIno}, nil).Once()
+
+		// 第二次事务：预读到 target=6，严格按 6 -> 8 -> 30 -> 50 升序加锁并完成覆盖重命名
+		setupMockWriteTx(mockStore, mockQuerier2)
+		var lockOrder []int64
+
+		mockQuerier2.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: "src"}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: "src", Ino: srcIno}, nil).Twice()
+		mockQuerier2.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: "dst"}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: "dst", Ino: driftedTargetIno}, nil).Twice()
+
+		for _, ino := range []int64{driftedTargetIno, srcIno, int64(newParentIno), int64(oldParentIno)} {
+			mode := int32(meta.S_IFREG | 0o644)
+			nlink := int32(1)
+			if ino == int64(newParentIno) || ino == int64(oldParentIno) {
+				mode = int32(meta.S_IFDIR | 0o755)
+				nlink = 2
+			}
+			mockQuerier2.EXPECT().GetInodeForUpdate(mock.Anything, ino).
+				RunAndReturn(func(_ context.Context, lockedIno int64) (db.Inode, error) {
+					lockOrder = append(lockOrder, lockedIno)
+					return db.Inode{Ino: lockedIno, Mode: mode, Nlink: nlink}, nil
+				}).Once()
+		}
+
+		mockQuerier2.EXPECT().DeleteEntry(mock.Anything, db.DeleteEntryParams{ParentIno: int64(newParentIno), Name: "dst"}).
+			Return(nil).Once()
+		mockQuerier2.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, driftedTargetIno).
+			Return(db.Inode{Ino: driftedTargetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 0}, nil).Once()
+		mockQuerier2.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      "src",
+			NewParentIno: int64(newParentIno),
+			NewName:      "dst",
+		}).Return(nil).Once()
+		mockQuerier2.EXPECT().TouchInodeCtime(mock.Anything, srcIno).Return(nil).Once()
+		mockQuerier2.EXPECT().TouchInodeTimestamps(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier2.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      "src",
+			NewParentIno: newParentIno,
+			NewName:      "dst",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []int64{driftedTargetIno, srcIno, int64(newParentIno), int64(oldParentIno)}, lockOrder)
+	})
+}
+
+
 

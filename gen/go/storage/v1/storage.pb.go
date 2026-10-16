@@ -583,7 +583,7 @@ type MkdirRequest struct {
 	// 待创建的新目录名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// 目录模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
+	// 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位，取值范围必须在 0 到 0o177777 / 65535 之间）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
 	Uid uint32 `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
@@ -1642,12 +1642,12 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\rMknodResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xb2\x01\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xb0\x01\n" +
 	"\fMkdirRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x1f\n" +
-	"\x04mode\x18\x03 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\x03 \x00R\x04mode\x12\x10\n" +
+	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x1d\n" +
+	"\x04mode\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x05 \x01(\rR\x03gid\"\xc6\x01\n" +
 	"\rMkdirResponse\x12/\n" +

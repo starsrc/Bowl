@@ -167,15 +167,14 @@ func TestMkdirRequestValidation(t *testing.T) {
 			valid:     false,
 		},
 
-		// 负向边界用例: mode 校验
 		{
-			name:      "非法: mode 为 0",
+			name:      "合法: mode 处于有效下限 0 (零权限目录 0000)",
 			parentIno: 1,
 			entryName: "dir",
 			mode:      0,
 			uid:       0,
 			gid:       0,
-			valid:     false,
+			valid:     true,
 		},
 		{
 			name:      "非法: mode 超过 65535",

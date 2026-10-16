@@ -247,6 +247,71 @@ func TestMkdir_PositivePath(t *testing.T) {
 		assert.Equal(t, uint32(expectedTargetMode), inode.Attr.Mode)
 		assert.NotZero(t, inode.Attr.Mode&meta.S_ISGID)
 	})
+
+	t.Run("创建子目录: 零权限模式 (mode = 0) 合成为 S_IFDIR | 0", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		expectedTargetMode := int32(meta.S_IFDIR)
+		createdInodeRow := db.Inode{
+			Ino:        int64(newIno),
+			Generation: 0,
+			Mode:       expectedTargetMode,
+			Size:       0,
+			Nlink:      2,
+			Uid:        1001,
+			Gid:        1002,
+			Rdev:       0,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:  expectedTargetMode,
+				Nlink: 2,
+				Uid:   1001,
+				Gid:   1002,
+				Rdev:  0,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      "zero_perm_dir",
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      "zero_perm_dir",
+			Mode:      0,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint32(meta.S_IFDIR), inode.Attr.Mode)
+	})
 }
 
 func TestMkdir_InputValidation(t *testing.T) {
@@ -302,14 +367,6 @@ func TestMkdir_InputValidation(t *testing.T) {
 				ParentIno: 1,
 				Name:      "sub\x00dir",
 				Mode:      0o755,
-			},
-		},
-		{
-			name: "mode 为 0",
-			params: meta.MkdirParams{
-				ParentIno: 1,
-				Name:      "sub",
-				Mode:      0,
 			},
 		},
 		{

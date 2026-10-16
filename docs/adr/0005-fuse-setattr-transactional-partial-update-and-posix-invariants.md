@@ -18,7 +18,7 @@ Storage 元数据服务在支持 `Lookup` 与 `GetAttr` 后，需要实现对接
    - 在 `sqlc` 查询层新增 `GetInodeForUpdate`（`SELECT ... FROM inodes WHERE ino = $1 FOR UPDATE`）与 `UpdateInodeAttr`（更新 `mode, size, uid, gid, atime, mtime` 并将 `ctime` 强制设为 `NOW()`，`RETURNING` 完整记录）。
    - `meta.Manager.SetAttr` 通过 `Store.ExecTxWithOptions(ctx, ...)` 开启读写事务：先以 `GetInodeForUpdate` 锁定并读取目标 `Inode`（不存在则返回 `ErrNotFound`），在 Go 领域层完成 POSIX 状态校验与新旧字段合流后，再调用 `UpdateInodeAttr` 完成持久化并动态推导 `Blksize` 与 `Blocks`。
 3. **POSIX 属性不变量与特权位安全剥离**：
-   - **文件类型不可变**：若传入 `mode` 携带非零文件类型位（`mode & S_IFMT != 0`）且与原 `Inode` 的 `mode & S_IFMT` 不一致，返回 `ErrInvalidArgument`；最终写入的 `mode` 始终保留原文件类型位 `(old_mode & S_IFMT) | (new_mode & 0o7777)`。
+   - **文件类型不可变与符号链接权限固定**：若目标为符号链接（`S_IFLNK`）且请求修改 `mode`，直接返回 `ErrInvalidArgument`（POSIX 符号链接权限固定为 `0777` 且不可通过 `chmod` 修改）；若传入 `mode` 携带非零文件类型位（`mode & S_IFMT != 0`）且与原 `Inode` 的 `mode & S_IFMT` 不一致，返回 `ErrInvalidArgument`；最终写入的 `mode` 始终保留原文件类型位 `(old_mode & S_IFMT) | (new_mode & 0o7777)`。
    - **常规文件 `size` 变更限制**：当传入 `size` 时，若目标为目录（`S_IFDIR`）则返回领域错误 `ErrIsDir`（对应 `EISDIR`）；若为其他非常规文件（`!= S_IFREG`）则返回 `ErrInvalidArgument`（对应 `EINVAL`）。
    - **特权位自动清理**：当未显式传入 `mode`，但对常规文件（`S_IFREG`）修改了 `uid`、`gid` 或 `size` 时，自动清除原 `mode` 中的 `S_ISUID (0o4000)` 与 `S_ISGID (0o2000)` 位。
    - **时间戳权威刷新**：每次 `SetAttr` 更新总是将 `ctime` 刷新为事务当前时间 `NOW()`；当修改了 `size` 且未显式指定 `mtime` 或 `mtime_now` 时，自动将 `mtime` 同步刷新为 `NOW()`。

@@ -372,17 +372,23 @@ func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 
 const isSubdirectory = `-- name: IsSubdirectory :one
 WITH RECURSIVE ancestors AS (
-    SELECT parent_ino, 1 AS depth
+    SELECT
+        parent_ino,
+        ARRAY[$1::bigint, parent_ino] AS visited,
+        (parent_ino = $1::bigint) AS has_cycle
     FROM entries
     WHERE ino = $1::bigint
     UNION ALL
-    SELECT e.parent_ino, a.depth + 1
+    SELECT
+        e.parent_ino,
+        a.visited || e.parent_ino,
+        (e.parent_ino = ANY(a.visited)) AS has_cycle
     FROM entries e
     JOIN ancestors a ON e.ino = a.parent_ino
-    WHERE a.depth < 1024 AND a.parent_ino > 1
+    WHERE NOT a.has_cycle
 )
 SELECT COALESCE(($1::bigint = $2::bigint) OR EXISTS (
-    SELECT 1 FROM ancestors WHERE parent_ino = $2::bigint
+    SELECT 1 FROM ancestors WHERE parent_ino = $2::bigint OR has_cycle
 ), false)::boolean AS is_sub
 `
 

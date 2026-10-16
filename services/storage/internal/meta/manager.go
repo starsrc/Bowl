@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -204,6 +205,9 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		// POSIX Mode 篡改防御、文件类型保留与特权位剥离
 		targetMode := currentMode
 		if input.Mode != nil {
+			if fileType == S_IFLNK {
+				return ErrInvalidArgument
+			}
 			inputType := *input.Mode & S_IFMT
 			if inputType != 0 && inputType != fileType {
 				return ErrInvalidArgument
@@ -391,7 +395,7 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
 		return nil, ErrInvalidArgument
 	}
-	if params.Mode == 0 || params.Mode > 65535 {
+	if params.Mode > 65535 {
 		return nil, ErrInvalidArgument
 	}
 
@@ -591,6 +595,53 @@ func (m *manager) Readlink(ctx context.Context, ino uint64) (string, error) {
 	return row.SymlinkTarget.String, nil
 }
 
+// errRetryTx 表示事务预读的目录项映射在加锁前发生并发漂移，需回滚并重试当前事务。
+var errRetryTx = errors.New("retry transaction due to concurrent entry drift")
+
+const maxTxRetries = 16
+
+func (m *manager) execWriteTxWithRetry(ctx context.Context, fn func(q db.Querier) error) error {
+	for range maxTxRetries {
+		err := m.store.ExecTxWithOptions(ctx, fn)
+		if !errors.Is(err, errRetryTx) {
+			return err
+		}
+	}
+	return fmt.Errorf("exceeded max transaction retries (%d): %w", maxTxRetries, errRetryTx)
+}
+
+// uniqueSortedInos 将一组 Inode 号按全局升序排列并去重，确保所有多 Inode 事务遵循单一全局加锁顺序。
+func uniqueSortedInos(inos ...int64) []int64 {
+	slices.Sort(inos)
+	return slices.Compact(inos)
+}
+
+func lockAndValidateParents(ctx context.Context, q db.Querier, oldParentIno, newParentIno uint64) (db.Inode, db.Inode, error) {
+	var oldParent, newParent db.Inode
+	for _, ino := range uniqueSortedInos(int64(oldParentIno), int64(newParentIno)) {
+		row, err := q.GetInodeForUpdate(ctx, ino)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return db.Inode{}, db.Inode{}, ErrNotFound
+			}
+			return db.Inode{}, db.Inode{}, fmt.Errorf("get parent inode %d for update: %w", ino, err)
+		}
+		if (uint32(row.Mode) & S_IFMT) != S_IFDIR {
+			return db.Inode{}, db.Inode{}, ErrNotDir
+		}
+		if row.Nlink == 0 {
+			return db.Inode{}, db.Inode{}, ErrNotFound
+		}
+		if ino == int64(oldParentIno) {
+			oldParent = row
+		}
+		if ino == int64(newParentIno) {
+			newParent = row
+		}
+	}
+	return oldParent, newParent, nil
+}
+
 // Link 为已有非目录 Inode 在目标父目录下创建硬链接。
 func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 {
@@ -605,48 +656,56 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 
 	var result *Inode
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		// 第一级：锁定目标父目录 new_parent_ino
-		parent, err := q.GetInodeForUpdate(ctx, int64(params.NewParentIno))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+		if params.NewName == "." || params.NewName == ".." {
+			parent, err := q.GetInodeForUpdate(ctx, int64(params.NewParentIno))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get new parent inode for update %d: %w", params.NewParentIno, err)
+			}
+			if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+				return ErrNotDir
+			}
+			if parent.Nlink == 0 {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get new parent inode for update %d: %w", params.NewParentIno, err)
-		}
-
-		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
-			return ErrNotDir
-		}
-
-		if parent.Nlink == 0 {
-			return ErrNotFound
-		}
-
-		if params.NewName == "." || params.NewName == ".." {
 			return ErrAlreadyExists
 		}
 
-		// 第二级：锁定源节点 ino
-		src, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
+		// 按全局 ino 升序锁定目标父目录与源节点，避免跨层操作逆序死锁
+		var parent db.Inode
+		for _, ino := range uniqueSortedInos(int64(params.NewParentIno), int64(params.Ino)) {
+			row, err := q.GetInodeForUpdate(ctx, ino)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get inode for update %d: %w", ino, err)
 			}
-			return fmt.Errorf("get source inode for update %d: %w", params.Ino, err)
-		}
-
-		// 禁止目录硬链接
-		if (uint32(src.Mode) & S_IFMT) == S_IFDIR {
-			return ErrPerm
-		}
-
-		// 禁止复活孤儿节点
-		if src.Nlink == 0 {
-			return ErrNotFound
+			if ino == int64(params.NewParentIno) {
+				if (uint32(row.Mode) & S_IFMT) != S_IFDIR {
+					return ErrNotDir
+				}
+				if row.Nlink == 0 {
+					return ErrNotFound
+				}
+				parent = row
+			}
+			if ino == int64(params.Ino) {
+				// 禁止目录硬链接
+				if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
+					return ErrPerm
+				}
+				// 禁止复活孤儿节点
+				if row.Nlink == 0 {
+					return ErrNotFound
+				}
+			}
 		}
 
 		// 插入新目录项
-		err = q.CreateEntry(ctx, db.CreateEntryParams{
+		err := q.CreateEntry(ctx, db.CreateEntryParams{
 			ParentIno: int64(params.NewParentIno),
 			Name:      params.NewName,
 			Ino:       int64(params.Ino),
@@ -701,29 +760,70 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) err
 		return ErrInvalidArgument
 	}
 
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		// 第一级加锁：锁定父目录 parent_ino
-		parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		if name == "." || name == ".." {
+			parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get parent inode for update %d: %w", parentIno, err)
+			}
+			if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+				return ErrNotDir
+			}
+			if parent.Nlink == 0 {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get parent inode for update %d: %w", parentIno, err)
-		}
-
-		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
-			return ErrNotDir
-		}
-
-		if parent.Nlink == 0 {
-			return ErrNotFound
-		}
-
-		if name == "." || name == ".." {
 			return ErrInvalidArgument
 		}
 
-		// 查询目标目录项
+		// 预读目标目录项以获知 child_ino，从而按全局 ino 升序加锁
+		preEntry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(parentIno),
+			Name:      name,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				parent, pErr := q.GetInodeForUpdate(ctx, int64(parentIno))
+				if pErr != nil {
+					if errors.Is(pErr, pgx.ErrNoRows) {
+						return ErrNotFound
+					}
+					return fmt.Errorf("get parent inode for update %d: %w", parentIno, pErr)
+				}
+				if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+					return ErrNotDir
+				}
+				return ErrNotFound
+			}
+			return fmt.Errorf("get entry %d/%s: %w", parentIno, name, err)
+		}
+
+		var parent, child db.Inode
+		for _, ino := range uniqueSortedInos(int64(parentIno), preEntry.Ino) {
+			row, err := q.GetInodeForUpdate(ctx, ino)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get inode for update %d: %w", ino, err)
+			}
+			if ino == int64(parentIno) {
+				if (uint32(row.Mode) & S_IFMT) != S_IFDIR {
+					return ErrNotDir
+				}
+				if row.Nlink == 0 {
+					return ErrNotFound
+				}
+				parent = row
+			}
+			if ino == preEntry.Ino {
+				child = row
+			}
+		}
+
+		// 持锁二次校验目录项，防止预读与加锁之间目录项被并发删除或重绑定
 		entry, err := q.GetEntry(ctx, db.GetEntryParams{
 			ParentIno: int64(parentIno),
 			Name:      name,
@@ -732,16 +832,10 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) err
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get entry %d/%s: %w", parentIno, name, err)
+			return fmt.Errorf("verify entry %d/%s: %w", parentIno, name, err)
 		}
-
-		// 第二级加锁：锁定目标 child_ino
-		child, err := q.GetInodeForUpdate(ctx, entry.Ino)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get child inode for update %d: %w", entry.Ino, err)
+		if entry.Ino != preEntry.Ino {
+			return errRetryTx
 		}
 
 		// Unlink 严禁删除目录项 (POSIX EISDIR)
@@ -797,32 +891,73 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) erro
 		return ErrInvalidArgument
 	}
 
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		// 第一级加锁：锁定父目录 parent_ino
-		parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		if name == "." || name == ".." {
+			parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get parent inode for update %d: %w", parentIno, err)
+			}
+			if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+				return ErrNotDir
+			}
+			if parent.Nlink == 0 {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get parent inode for update %d: %w", parentIno, err)
-		}
-
-		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
-			return ErrNotDir
-		}
-
-		if parent.Nlink == 0 {
-			return ErrNotFound
-		}
-
-		if name == "." {
-			return ErrInvalidArgument
-		}
-		if name == ".." {
+			if name == "." {
+				return ErrInvalidArgument
+			}
 			return ErrNotEmpty
 		}
 
-		// 查询目标目录项
+		// 预读目标目录项以获知 child_ino，从而按全局 ino 升序加锁
+		preEntry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(parentIno),
+			Name:      name,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				parent, pErr := q.GetInodeForUpdate(ctx, int64(parentIno))
+				if pErr != nil {
+					if errors.Is(pErr, pgx.ErrNoRows) {
+						return ErrNotFound
+					}
+					return fmt.Errorf("get parent inode for update %d: %w", parentIno, pErr)
+				}
+				if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+					return ErrNotDir
+				}
+				return ErrNotFound
+			}
+			return fmt.Errorf("get entry %d/%s: %w", parentIno, name, err)
+		}
+
+		var parent, child db.Inode
+		for _, ino := range uniqueSortedInos(int64(parentIno), preEntry.Ino) {
+			row, err := q.GetInodeForUpdate(ctx, ino)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get inode for update %d: %w", ino, err)
+			}
+			if ino == int64(parentIno) {
+				if (uint32(row.Mode) & S_IFMT) != S_IFDIR {
+					return ErrNotDir
+				}
+				if row.Nlink == 0 {
+					return ErrNotFound
+				}
+				parent = row
+			}
+			if ino == preEntry.Ino {
+				child = row
+			}
+		}
+
+		// 持锁二次校验目录项，防止预读与加锁之间目录项被并发删除或重绑定
 		entry, err := q.GetEntry(ctx, db.GetEntryParams{
 			ParentIno: int64(parentIno),
 			Name:      name,
@@ -831,16 +966,10 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) erro
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get entry %d/%s: %w", parentIno, name, err)
+			return fmt.Errorf("verify entry %d/%s: %w", parentIno, name, err)
 		}
-
-		// 第二级加锁：锁定目标 child_ino
-		child, err := q.GetInodeForUpdate(ctx, entry.Ino)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get child inode for update %d: %w", entry.Ino, err)
+		if entry.Ino != preEntry.Ino {
+			return errRetryTx
 		}
 
 		// Rmdir 目标节点必须为目录 (POSIX ENOTDIR)
@@ -911,68 +1040,89 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		return ErrInvalidArgument
 	}
 
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		// 第一级加锁：按 ino 升序锁定父目录
-		var oldParent, newParent db.Inode
-		if params.OldParentIno == params.NewParentIno {
-			parent, err := q.GetInodeForUpdate(ctx, int64(params.OldParentIno))
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
-				}
-				return fmt.Errorf("get parent inode %d for update: %w", params.OldParentIno, err)
-			}
-			if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
-				return ErrNotDir
-			}
-			if parent.Nlink == 0 {
-				return ErrNotFound
-			}
-			oldParent = parent
-			newParent = parent
-		} else {
-			firstIno := min(params.OldParentIno, params.NewParentIno)
-			secondIno := max(params.OldParentIno, params.NewParentIno)
-
-			firstRow, err := q.GetInodeForUpdate(ctx, int64(firstIno))
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
-				}
-				return fmt.Errorf("get parent inode %d for update: %w", firstIno, err)
-			}
-			secondRow, err := q.GetInodeForUpdate(ctx, int64(secondIno))
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
-				}
-				return fmt.Errorf("get parent inode %d for update: %w", secondIno, err)
-			}
-
-			if params.OldParentIno == firstIno {
-				oldParent = firstRow
-				newParent = secondRow
-			} else {
-				oldParent = secondRow
-				newParent = firstRow
-			}
-
-			if (uint32(oldParent.Mode) & S_IFMT) != S_IFDIR {
-				return ErrNotDir
-			}
-			if (uint32(newParent.Mode) & S_IFMT) != S_IFDIR {
-				return ErrNotDir
-			}
-			if oldParent.Nlink == 0 || newParent.Nlink == 0 {
-				return ErrNotFound
-			}
-		}
-
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		if params.OldName == "." || params.OldName == ".." || params.NewName == "." || params.NewName == ".." {
+			if _, _, err := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); err != nil {
+				return err
+			}
 			return ErrInvalidArgument
 		}
 
-		// 查询源目录项
+		// 预读源目录项与目标目录项，以便连同父目录一起按全局 ino 升序一次性加锁
+		preOldEntry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(params.OldParentIno),
+			Name:      params.OldName,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				if _, _, pErr := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); pErr != nil {
+					return pErr
+				}
+				return ErrNotFound
+			}
+			return fmt.Errorf("get old entry %d/%s: %w", params.OldParentIno, params.OldName, err)
+		}
+		oldIno := preOldEntry.Ino
+
+		// 同路径短路 (POSIX No-op)：锁定父目录并确认源目录项仍存在
+		if params.OldParentIno == params.NewParentIno && params.OldName == params.NewName {
+			if _, _, err := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); err != nil {
+				return err
+			}
+			if _, err := q.GetEntry(ctx, db.GetEntryParams{
+				ParentIno: int64(params.OldParentIno),
+				Name:      params.OldName,
+			}); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("verify old entry %d/%s: %w", params.OldParentIno, params.OldName, err)
+			}
+			return nil
+		}
+
+		preNewEntry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(params.NewParentIno),
+			Name:      params.NewName,
+		})
+		var hasNewEntry bool
+		var newIno int64
+		if err == nil {
+			hasNewEntry = true
+			newIno = preNewEntry.Ino
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("get new entry %d/%s: %w", params.NewParentIno, params.NewName, err)
+		}
+
+		inosToLock := []int64{int64(params.OldParentIno), int64(params.NewParentIno)}
+		if !hasNewEntry || oldIno != newIno {
+			inosToLock = append(inosToLock, oldIno)
+			if hasNewEntry {
+				inosToLock = append(inosToLock, newIno)
+			}
+		}
+
+		locked := make(map[int64]db.Inode, len(inosToLock))
+		for _, ino := range uniqueSortedInos(inosToLock...) {
+			row, err := q.GetInodeForUpdate(ctx, ino)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get inode %d for update: %w", ino, err)
+			}
+			if ino == int64(params.OldParentIno) || ino == int64(params.NewParentIno) {
+				if (uint32(row.Mode) & S_IFMT) != S_IFDIR {
+					return ErrNotDir
+				}
+				if row.Nlink == 0 {
+					return ErrNotFound
+				}
+			}
+			locked[ino] = row
+		}
+
+		// 持锁二次校验源与目标目录项，若在加锁窗口内发生并发漂移则回滚重试
 		oldEntry, err := q.GetEntry(ctx, db.GetEntryParams{
 			ParentIno: int64(params.OldParentIno),
 			Name:      params.OldName,
@@ -981,67 +1131,37 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get old entry %d/%s: %w", params.OldParentIno, params.OldName, err)
+			return fmt.Errorf("verify old entry %d/%s: %w", params.OldParentIno, params.OldName, err)
 		}
-		oldIno := oldEntry.Ino
+		if oldEntry.Ino != oldIno {
+			return errRetryTx
+		}
 
-		// 查询目标目录项（可能不存在）
 		newEntry, err := q.GetEntry(ctx, db.GetEntryParams{
 			ParentIno: int64(params.NewParentIno),
 			Name:      params.NewName,
 		})
-		var hasNewEntry bool
-		var newIno int64
+		var currHasNewEntry bool
+		var currNewIno int64
 		if err == nil {
-			hasNewEntry = true
-			newIno = newEntry.Ino
+			currHasNewEntry = true
+			currNewIno = newEntry.Ino
 		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("get new entry %d/%s: %w", params.NewParentIno, params.NewName, err)
+			return fmt.Errorf("verify new entry %d/%s: %w", params.NewParentIno, params.NewName, err)
+		}
+		if currHasNewEntry != hasNewEntry || (currHasNewEntry && currNewIno != newIno) {
+			return errRetryTx
 		}
 
-		// 同路径或同节点硬链接短路 (POSIX No-op)
-		if (params.OldParentIno == params.NewParentIno && params.OldName == params.NewName) || (hasNewEntry && oldIno == newIno) {
+		// 同节点硬链接短路 (POSIX No-op)
+		if hasNewEntry && oldIno == newIno {
 			return nil
 		}
 
-		// 第二级加锁：按 ino 升序锁定子节点
-		var oldInode, newInode db.Inode
-		if !hasNewEntry {
-			row, err := q.GetInodeForUpdate(ctx, oldIno)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
-				}
-				return fmt.Errorf("get old inode %d for update: %w", oldIno, err)
-			}
-			oldInode = row
-		} else {
-			firstChildIno := min(oldIno, newIno)
-			secondChildIno := max(oldIno, newIno)
-
-			firstRow, err := q.GetInodeForUpdate(ctx, firstChildIno)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
-				}
-				return fmt.Errorf("get child inode %d for update: %w", firstChildIno, err)
-			}
-			secondRow, err := q.GetInodeForUpdate(ctx, secondChildIno)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
-				}
-				return fmt.Errorf("get child inode %d for update: %w", secondChildIno, err)
-			}
-
-			if oldIno == firstChildIno {
-				oldInode = firstRow
-				newInode = secondRow
-			} else {
-				oldInode = secondRow
-				newInode = firstRow
-			}
-		}
+		oldParent := locked[int64(params.OldParentIno)]
+		newParent := locked[int64(params.NewParentIno)]
+		oldInode := locked[oldIno]
+		newInode := locked[newIno]
 
 		oldIsDir := (uint32(oldInode.Mode) & S_IFMT) == S_IFDIR
 
@@ -1189,6 +1309,7 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 
 	return nil
 }
+
 
 
 

@@ -25,6 +25,7 @@ type Manager interface {
 	Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	Symlink(ctx context.Context, params SymlinkParams) (*Inode, error)
 	Readlink(ctx context.Context, ino uint64) (string, error)
+	Link(ctx context.Context, params LinkParams) (*Inode, error)
 }
 
 type manager struct {
@@ -586,5 +587,107 @@ func (m *manager) Readlink(ctx context.Context, ino uint64) (string, error) {
 
 	return row.SymlinkTarget.String, nil
 }
+
+// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
+func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if params.NewParentIno == 0 || params.NewParentIno > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if len(params.NewName) == 0 || len(params.NewName) > MaxFileNameBytes || strings.ContainsAny(params.NewName, "/\x00") {
+		return nil, ErrInvalidArgument
+	}
+
+	var result *Inode
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第一级：锁定目标父目录 new_parent_ino
+		parent, err := q.GetInodeForUpdate(ctx, int64(params.NewParentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get new parent inode for update %d: %w", params.NewParentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		if params.NewName == "." || params.NewName == ".." {
+			return ErrAlreadyExists
+		}
+
+		// 第二级：锁定源节点 ino
+		src, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get source inode for update %d: %w", params.Ino, err)
+		}
+
+		// 禁止目录硬链接
+		if (uint32(src.Mode) & S_IFMT) == S_IFDIR {
+			return ErrPerm
+		}
+
+		// 禁止复活孤儿节点
+		if src.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		// 插入新目录项
+		err = q.CreateEntry(ctx, db.CreateEntryParams{
+			ParentIno: int64(params.NewParentIno),
+			Name:      params.NewName,
+			Ino:       int64(params.Ino),
+		})
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAlreadyExists
+			}
+			return fmt.Errorf("create entry: %w", err)
+		}
+
+		// 递增源节点 nlink 并刷新 ctime
+		updatedSrc, err := q.IncrementInodeNlinkAndTouchCtime(ctx, int64(params.Ino))
+		if err != nil {
+			return fmt.Errorf("increment source inode %d nlink and touch ctime: %w", params.Ino, err)
+		}
+
+		// 刷新目标父目录 mtime 与 ctime (父目录 nlink 保持不变)
+		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("touch new parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		result = newInodeFromDB(updatedSrc)
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrPerm):
+			return nil, ErrPerm
+		case errors.Is(err, ErrAlreadyExists):
+			return nil, ErrAlreadyExists
+		default:
+			return nil, fmt.Errorf("link tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
 
 

@@ -17,6 +17,7 @@ type Querier interface {
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
+	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
 }

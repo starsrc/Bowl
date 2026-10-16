@@ -548,6 +548,72 @@ func (_c *MockQuerier_IncrementInodeNlinkAndTouch_Call) RunAndReturn(run func(ct
 	return _c
 }
 
+// IncrementInodeNlinkAndTouchCtime provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for IncrementInodeNlinkAndTouchCtime")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Inode, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Inode); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_IncrementInodeNlinkAndTouchCtime_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'IncrementInodeNlinkAndTouchCtime'
+type MockQuerier_IncrementInodeNlinkAndTouchCtime_Call struct {
+	*mock.Call
+}
+
+// IncrementInodeNlinkAndTouchCtime is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) IncrementInodeNlinkAndTouchCtime(ctx any, ino any) *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call {
+	return &MockQuerier_IncrementInodeNlinkAndTouchCtime_Call{Call: _e.mock.On("IncrementInodeNlinkAndTouchCtime", ctx, ino)}
+}
+
+func (_c *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call) Return(inode db.Inode, err error) *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // TouchInodeTimestamps provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) TouchInodeTimestamps(ctx context.Context, ino int64) error {
 	ret := _mock.Called(ctx, ino)

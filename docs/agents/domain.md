@@ -17,8 +17,6 @@ Single-context repo:
 /
 ├── GLOSSARY.md
 ├── docs/adr/
-│   ├── 0001-minimal-fuse-lookup-metadata-structure.md
-│   └── 0002-disk-concept-and-client-root-inode-mapping.md
 └── services/
 ```
 

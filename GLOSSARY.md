@@ -16,6 +16,18 @@ _Avoid_: Dentry, FileItem, DirRecord, Record
 根据父级 Inode 与目标名称，解析并获取对应 Entry 及其 Inode 属性的元数据检索操作。
 _Avoid_: Find, Search, GetFile, Query
 
+**GetAttr (属性获取)**:
+根据目标 Inode 编号，直接检索并获取该 Inode 及其 Attribute 的元数据检索操作。
+_Avoid_: Stat, GetFileInfo, FetchAttr, DescribeNode
+
+**SetAttr (属性设置)**:
+根据目标 Inode 编号，按需修改该 Inode 的可变 Attribute（如权限模式、文件大小、所属用户与组、访问与修改时间戳）并刷新状态变更时间的元数据变更操作。
+_Avoid_: Chmod, Chown, Truncate, UpdateAttr, ModifyNode, PatchInode
+
+**Mknod (节点创建)**:
+在指定父目录 Inode 下创建非目录文件节点并绑定同名 Entry 的元数据变更操作。
+_Avoid_: CreateNode, MakeNode, Touch, CreateFile
+
 **Attribute (文件属性)**:
 描述 Inode 的物理状态与内核控制参数的集合（如大小、权限模式、硬链接数、时间戳等）。
 _Avoid_: Stat, Meta, Properties, Info

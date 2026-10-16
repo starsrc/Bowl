@@ -26,6 +26,8 @@ const (
 const (
 	// StorageServiceLookupProcedure is the procedure name of the StorageService's Lookup RPC.
 	StorageServiceLookupProcedure = "/storage.v1.StorageService/Lookup"
+	// StorageServiceSetAttrProcedure is the procedure name of the StorageService's SetAttr RPC.
+	StorageServiceSetAttrProcedure = "/storage.v1.StorageService/SetAttr"
 )
 
 var (
@@ -34,6 +36,13 @@ var (
 			StreamType: connect.StreamTypeUnary,
 			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Lookup"),
 			Procedure:  StorageServiceLookupProcedure,
+		}
+	})
+	storageServiceSetAttrSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetAttr"),
+			Procedure:  StorageServiceSetAttrProcedure,
 		}
 	})
 )
@@ -45,6 +54,10 @@ type StorageServiceClient interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error)
+	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
+	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
+	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
+	SetAttr(context.Context, *v1.SetAttrRequest) (*v1.SetAttrResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -60,6 +73,10 @@ type StorageServiceHandler interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error)
+	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
+	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
+	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
+	SetAttr(context.Context, *v1.SetAttrRequest) (*v1.SetAttrResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -68,6 +85,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 	adapter := storageServiceHandler{svc: svc}
 	server.Register(
 		connect.Method{Spec: storageServiceLookupSpec(), Handler: adapter.lookup},
+		connect.Method{Spec: storageServiceSetAttrSpec(), Handler: adapter.setAttr},
 	)
 }
 
@@ -76,6 +94,10 @@ type UnimplementedStorageServiceHandler struct{}
 
 func (UnimplementedStorageServiceHandler) Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Lookup is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) SetAttr(context.Context, *v1.SetAttrRequest) (*v1.SetAttrResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetAttr is not implemented")
 }
 
 type storageServiceClient struct {
@@ -90,6 +112,14 @@ func (c *storageServiceClient) Lookup(ctx context.Context, req *v1.LookupRequest
 	return &res, nil
 }
 
+func (c *storageServiceClient) SetAttr(ctx context.Context, req *v1.SetAttrRequest) (*v1.SetAttrResponse, error) {
+	var res v1.SetAttrResponse
+	if err := c.client.CallUnary(ctx, storageServiceSetAttrSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 type storageServiceHandler struct{ svc StorageServiceHandler }
 
 func (h storageServiceHandler) lookup(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
@@ -98,6 +128,18 @@ func (h storageServiceHandler) lookup(ctx context.Context, _ connect.Spec, strea
 		return err
 	}
 	res, err := h.svc.Lookup(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) setAttr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.SetAttrRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.SetAttr(ctx, &req)
 	if err != nil {
 		return err
 	}

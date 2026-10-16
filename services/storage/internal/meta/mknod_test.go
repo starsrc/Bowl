@@ -388,7 +388,6 @@ func TestMknod_PositivePath(t *testing.T) {
 
 func TestMknod_InputValidation(t *testing.T) {
 	ctx := context.Background()
-	mgr := meta.New(nil)
 
 	validParams := meta.MknodParams{
 		ParentIno: 1,
@@ -413,6 +412,12 @@ func TestMknod_InputValidation(t *testing.T) {
 			name: "ParentIno 超过 MaxInt64",
 			mutate: func(p *meta.MknodParams) {
 				p.ParentIno = uint64(math.MaxInt64) + 1
+			},
+		},
+		{
+			name: "ParentIno 为 MaxUint64",
+			mutate: func(p *meta.MknodParams) {
+				p.ParentIno = math.MaxUint64
 			},
 		},
 		{
@@ -463,15 +468,38 @@ func TestMknod_InputValidation(t *testing.T) {
 				p.Mode = meta.S_IFLNK | 0o777
 			},
 		},
+		{
+			name: "Mode 文件类型为未知类型 (0o030000)",
+			mutate: func(p *meta.MknodParams) {
+				p.Mode = 0o030000 | 0o644
+			},
+		},
+		{
+			name: "Mode 文件类型为未知类型 (0o070000)",
+			mutate: func(p *meta.MknodParams) {
+				p.Mode = 0o070000 | 0o644
+			},
+		},
+		{
+			name: "Mode 文件类型为未知类型 (0o160000)",
+			mutate: func(p *meta.MknodParams) {
+				p.Mode = 0o160000 | 0o644
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mgr := meta.New(mockStore)
+
 			p := validParams
 			tc.mutate(&p)
 			inode, err := mgr.Mknod(ctx, p)
 			assert.Nil(t, inode)
 			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			// 断言前置校验拦截绝不触发数据库事务
+			mockStore.AssertExpectations(t)
 		})
 	}
 }
@@ -486,76 +514,125 @@ func TestMknod_NegativeCases(t *testing.T) {
 		Nlink: 2,
 	}
 
-	t.Run("父目录不存在返回 ErrNotFound", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
+	t.Run("父节点不存在或为已解链孤儿目录返回 ErrNotFound 且不调用 CreateInode", func(t *testing.T) {
+		testCases := []struct {
+			name        string
+			setupParent func(mockQuerier *dbmock.MockQuerier)
+		}{
+			{
+				name: "父目录在数据库中不存在",
+				setupParent: func(mockQuerier *dbmock.MockQuerier) {
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(db.Inode{}, pgx.ErrNoRows).
+						Once()
+				},
+			},
+			{
+				name: "父目录为已解链孤儿目录 (nlink=0)",
+				setupParent: func(mockQuerier *dbmock.MockQuerier) {
+					deadParent := baseParentRow
+					deadParent.Nlink = 0
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(deadParent, nil).
+						Once()
+				},
+			},
+		}
 
-		setupMockWriteTx(mockStore, mockQuerier)
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mgr := meta.New(mockStore)
 
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(db.Inode{}, pgx.ErrNoRows).
-			Once()
+				setupMockWriteTx(mockStore, mockQuerier)
+				tc.setupParent(mockQuerier)
 
-		inode, err := mgr.Mknod(ctx, meta.MknodParams{
-			ParentIno: parentIno,
-			Name:      "child",
-			Mode:      meta.S_IFREG | 0o644,
-		})
-		assert.Nil(t, inode)
-		assert.ErrorIs(t, err, meta.ErrNotFound)
+				inode, err := mgr.Mknod(ctx, meta.MknodParams{
+					ParentIno: parentIno,
+					Name:      "child",
+					Mode:      meta.S_IFREG | 0o644,
+				})
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, meta.ErrNotFound)
+				mockQuerier.AssertExpectations(t)
+			})
+		}
 	})
 
-	t.Run("父目录 Nlink 为 0 (孤儿目录) 返回 ErrNotFound", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
+	t.Run("父节点非目录返回 ErrNotDir 且断言不调用 CreateInode", func(t *testing.T) {
+		nonDirTypes := []struct {
+			typeName string
+			mode     uint32
+		}{
+			{typeName: "普通文件", mode: meta.S_IFREG | 0o644},
+			{typeName: "字符设备", mode: meta.S_IFCHR | 0o660},
+			{typeName: "块设备", mode: meta.S_IFBLK | 0o660},
+			{typeName: "FIFO管道", mode: meta.S_IFIFO | 0o644},
+			{typeName: "套接字", mode: meta.S_IFSOCK | 0o777},
+		}
 
-		setupMockWriteTx(mockStore, mockQuerier)
+		for _, dt := range nonDirTypes {
+			// 测试场景 1: 普通名称
+			t.Run(fmt.Sprintf("父节点为%s且名称为普通文件名", dt.typeName), func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mgr := meta.New(mockStore)
 
-		deadParent := baseParentRow
-		deadParent.Nlink = 0
+				setupMockWriteTx(mockStore, mockQuerier)
 
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(deadParent, nil).
-			Once()
+				nonDirParent := baseParentRow
+				nonDirParent.Mode = int32(dt.mode)
 
-		inode, err := mgr.Mknod(ctx, meta.MknodParams{
-			ParentIno: parentIno,
-			Name:      "child",
-			Mode:      meta.S_IFREG | 0o644,
-		})
-		assert.Nil(t, inode)
-		assert.ErrorIs(t, err, meta.ErrNotFound)
+				mockQuerier.EXPECT().
+					GetInodeForUpdate(mock.Anything, int64(parentIno)).
+					Return(nonDirParent, nil).
+					Once()
+
+				inode, err := mgr.Mknod(ctx, meta.MknodParams{
+					ParentIno: parentIno,
+					Name:      "child",
+					Mode:      meta.S_IFREG | 0o644,
+				})
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, meta.ErrNotDir)
+				mockQuerier.AssertExpectations(t)
+			})
+
+			// 测试场景 2: 名称为保留名 . 或 .. 时优先返回 ErrNotDir 而非 ErrAlreadyExists
+			for _, reservedName := range []string{".", ".."} {
+				t.Run(fmt.Sprintf("父节点为%s且名称为保留名%s优先返回 ErrNotDir", dt.typeName, reservedName), func(t *testing.T) {
+					mockStore := dbmock.NewMockStore(t)
+					mockQuerier := dbmock.NewMockQuerier(t)
+					mgr := meta.New(mockStore)
+
+					setupMockWriteTx(mockStore, mockQuerier)
+
+					nonDirParent := baseParentRow
+					nonDirParent.Mode = int32(dt.mode)
+
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(nonDirParent, nil).
+						Once()
+
+					inode, err := mgr.Mknod(ctx, meta.MknodParams{
+						ParentIno: parentIno,
+						Name:      reservedName,
+						Mode:      meta.S_IFREG | 0o644,
+					})
+					assert.Nil(t, inode)
+					assert.ErrorIs(t, err, meta.ErrNotDir)
+					assert.NotErrorIs(t, err, meta.ErrAlreadyExists)
+					mockQuerier.AssertExpectations(t)
+				})
+			}
+		}
 	})
 
-	t.Run("父目录不是目录返回 ErrNotDir", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		regParent := baseParentRow
-		regParent.Mode = int32(meta.S_IFREG | 0o644)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(regParent, nil).
-			Once()
-
-		inode, err := mgr.Mknod(ctx, meta.MknodParams{
-			ParentIno: parentIno,
-			Name:      "child",
-			Mode:      meta.S_IFREG | 0o644,
-		})
-		assert.Nil(t, inode)
-		assert.ErrorIs(t, err, meta.ErrNotDir)
-	})
-
-	t.Run("保留名 . 或 .. 直接返回 ErrAlreadyExists 且不调用 CreateInode", func(t *testing.T) {
+	t.Run("父节点为有效目录且 Name 为 . 或 .. 直接返回 ErrAlreadyExists 且不调用 CreateInode", func(t *testing.T) {
 		for _, reservedName := range []string{".", ".."} {
 			t.Run(reservedName, func(t *testing.T) {
 				mockStore := dbmock.NewMockStore(t)
@@ -576,11 +653,12 @@ func TestMknod_NegativeCases(t *testing.T) {
 				})
 				assert.Nil(t, inode)
 				assert.ErrorIs(t, err, meta.ErrAlreadyExists)
+				mockQuerier.AssertExpectations(t)
 			})
 		}
 	})
 
-	t.Run("条目已存在唯一键冲突 (23505) 返回 ErrAlreadyExists", func(t *testing.T) {
+	t.Run("条目已存在唯一键冲突 (23505) 事务回滚并返回 ErrAlreadyExists", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -609,91 +687,135 @@ func TestMknod_NegativeCases(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrAlreadyExists)
+		mockQuerier.AssertExpectations(t)
 	})
 
-	t.Run("底层数据库错误被正确包裹", func(t *testing.T) {
-		t.Run("GetInodeForUpdate 报错", func(t *testing.T) {
-			mockStore := dbmock.NewMockStore(t)
-			mockQuerier := dbmock.NewMockQuerier(t)
-			mgr := meta.New(mockStore)
+	t.Run("底层数据库非预期错误正确被包装透传且保留原始错误链", func(t *testing.T) {
+		testCases := []struct {
+			name        string
+			setupMock   func(mockQuerier *dbmock.MockQuerier, expectedErr error)
+			expectedErr error
+		}{
+			{
+				name:        "GetInodeForUpdate 出错",
+				expectedErr: errors.New("get inode for update failed"),
+				setupMock: func(mockQuerier *dbmock.MockQuerier, expectedErr error) {
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(db.Inode{}, expectedErr).
+						Once()
+				},
+			},
+			{
+				name:        "CreateInode 出错",
+				expectedErr: errors.New("create inode db error"),
+				setupMock: func(mockQuerier *dbmock.MockQuerier, expectedErr error) {
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(baseParentRow, nil).
+						Once()
+					mockQuerier.EXPECT().
+						CreateInode(mock.Anything, mock.Anything).
+						Return(db.Inode{}, expectedErr).
+						Once()
+				},
+			},
+			{
+				name:        "CreateEntry 出错 (非 23505 数据库错误)",
+				expectedErr: errors.New("create entry network timeout"),
+				setupMock: func(mockQuerier *dbmock.MockQuerier, expectedErr error) {
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(baseParentRow, nil).
+						Once()
+					mockQuerier.EXPECT().
+						CreateInode(mock.Anything, mock.Anything).
+						Return(db.Inode{Ino: 101}, nil).
+						Once()
+					mockQuerier.EXPECT().
+						CreateEntry(mock.Anything, mock.Anything).
+						Return(expectedErr).
+						Once()
+				},
+			},
+			{
+				name:        "TouchInodeTimestamps 出错",
+				expectedErr: errors.New("touch timestamps disk full"),
+				setupMock: func(mockQuerier *dbmock.MockQuerier, expectedErr error) {
+					mockQuerier.EXPECT().
+						GetInodeForUpdate(mock.Anything, int64(parentIno)).
+						Return(baseParentRow, nil).
+						Once()
+					mockQuerier.EXPECT().
+						CreateInode(mock.Anything, mock.Anything).
+						Return(db.Inode{Ino: 101}, nil).
+						Once()
+					mockQuerier.EXPECT().
+						CreateEntry(mock.Anything, mock.Anything).
+						Return(nil).
+						Once()
+					mockQuerier.EXPECT().
+						TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+						Return(expectedErr).
+						Once()
+				},
+			},
+		}
 
-			setupMockWriteTx(mockStore, mockQuerier)
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mgr := meta.New(mockStore)
 
-			mockQuerier.EXPECT().
-				GetInodeForUpdate(mock.Anything, int64(parentIno)).
-				Return(db.Inode{}, errors.New("db connection down")).
-				Once()
+				setupMockWriteTx(mockStore, mockQuerier)
+				tc.setupMock(mockQuerier, tc.expectedErr)
 
-			inode, err := mgr.Mknod(ctx, meta.MknodParams{
-				ParentIno: parentIno,
-				Name:      "test",
-				Mode:      meta.S_IFREG | 0o644,
+				inode, err := mgr.Mknod(ctx, meta.MknodParams{
+					ParentIno: parentIno,
+					Name:      "test_node",
+					Mode:      meta.S_IFREG | 0o644,
+				})
+				assert.Nil(t, inode)
+				require.Error(t, err)
+
+				// 必须保留底层原始错误链
+				assert.ErrorIs(t, err, tc.expectedErr)
+
+				// 绝不能被误判为业务领域哨兵错误
+				assert.NotErrorIs(t, err, meta.ErrNotFound)
+				assert.NotErrorIs(t, err, meta.ErrNotDir)
+				assert.NotErrorIs(t, err, meta.ErrAlreadyExists)
+				assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+
+				mockQuerier.AssertExpectations(t)
 			})
-			assert.Nil(t, inode)
-			assert.ErrorContains(t, err, "db connection down")
+		}
+	})
+
+	t.Run("事务执行自身失败透传原始错误链", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		txErr := errors.New("connection pool exhausted")
+		mockStore.EXPECT().
+			ExecTxWithOptions(mock.Anything, mock.Anything).
+			Return(txErr).
+			Once()
+
+		inode, err := mgr.Mknod(ctx, meta.MknodParams{
+			ParentIno: parentIno,
+			Name:      "test_node",
+			Mode:      meta.S_IFREG | 0o644,
 		})
-
-		t.Run("CreateInode 报错", func(t *testing.T) {
-			mockStore := dbmock.NewMockStore(t)
-			mockQuerier := dbmock.NewMockQuerier(t)
-			mgr := meta.New(mockStore)
-
-			setupMockWriteTx(mockStore, mockQuerier)
-
-			mockQuerier.EXPECT().
-				GetInodeForUpdate(mock.Anything, int64(parentIno)).
-				Return(baseParentRow, nil).
-				Once()
-
-			mockQuerier.EXPECT().
-				CreateInode(mock.Anything, mock.Anything).
-				Return(db.Inode{}, errors.New("failed to insert inode")).
-				Once()
-
-			inode, err := mgr.Mknod(ctx, meta.MknodParams{
-				ParentIno: parentIno,
-				Name:      "test",
-				Mode:      meta.S_IFREG | 0o644,
-			})
-			assert.Nil(t, inode)
-			assert.ErrorContains(t, err, "failed to insert inode")
-		})
-
-		t.Run("TouchInodeTimestamps 报错", func(t *testing.T) {
-			mockStore := dbmock.NewMockStore(t)
-			mockQuerier := dbmock.NewMockQuerier(t)
-			mgr := meta.New(mockStore)
-
-			setupMockWriteTx(mockStore, mockQuerier)
-
-			mockQuerier.EXPECT().
-				GetInodeForUpdate(mock.Anything, int64(parentIno)).
-				Return(baseParentRow, nil).
-				Once()
-
-			mockQuerier.EXPECT().
-				CreateInode(mock.Anything, mock.Anything).
-				Return(db.Inode{Ino: 101}, nil).
-				Once()
-
-			mockQuerier.EXPECT().
-				CreateEntry(mock.Anything, mock.Anything).
-				Return(nil).
-				Once()
-
-			mockQuerier.EXPECT().
-				TouchInodeTimestamps(mock.Anything, int64(parentIno)).
-				Return(errors.New("touch timestamp error")).
-				Once()
-
-			inode, err := mgr.Mknod(ctx, meta.MknodParams{
-				ParentIno: parentIno,
-				Name:      "test",
-				Mode:      meta.S_IFREG | 0o644,
-			})
-			assert.Nil(t, inode)
-			assert.ErrorContains(t, err, "touch timestamp error")
-		})
+		assert.Nil(t, inode)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, txErr)
+		assert.NotErrorIs(t, err, meta.ErrNotFound)
+		assert.NotErrorIs(t, err, meta.ErrNotDir)
+		assert.NotErrorIs(t, err, meta.ErrAlreadyExists)
+		assert.NotErrorIs(t, err, meta.ErrInvalidArgument)
+		mockStore.AssertExpectations(t)
 	})
 }
 
@@ -730,3 +852,9 @@ func TestMknod_TransactionOptionsContract(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, meta.ErrNotFound)
 }
+
+func TestErrAlreadyExists_Exported(t *testing.T) {
+	require.NotNil(t, meta.ErrAlreadyExists)
+	assert.True(t, errors.Is(meta.ErrAlreadyExists, meta.ErrAlreadyExists))
+}
+

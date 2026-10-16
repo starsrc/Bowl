@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getInode = `-- name: GetInode :one
@@ -48,6 +50,87 @@ type GetInodeByEntryParams struct {
 
 func (q *Queries) GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error) {
 	row := q.db.QueryRow(ctx, getInodeByEntry, arg.ParentIno, arg.Name)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+	)
+	return i, err
+}
+
+const getInodeForUpdate = `-- name: GetInodeForUpdate :one
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
+FROM inodes
+WHERE ino = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error) {
+	row := q.db.QueryRow(ctx, getInodeForUpdate, ino)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+	)
+	return i, err
+}
+
+const updateInodeAttr = `-- name: UpdateInodeAttr :one
+UPDATE inodes
+SET
+  mode = $2,
+  size = $3,
+  uid = $4,
+  gid = $5,
+  atime = CASE WHEN $6::boolean THEN NOW() ELSE $7::timestamptz END,
+  mtime = CASE WHEN $8::boolean THEN NOW() ELSE $9::timestamptz END,
+  ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
+`
+
+type UpdateInodeAttrParams struct {
+	Ino         int64              `json:"ino"`
+	Mode        int32              `json:"mode"`
+	Size        int64              `json:"size"`
+	Uid         int32              `json:"uid"`
+	Gid         int32              `json:"gid"`
+	SetAtimeNow bool               `json:"set_atime_now"`
+	Atime       pgtype.Timestamptz `json:"atime"`
+	SetMtimeNow bool               `json:"set_mtime_now"`
+	Mtime       pgtype.Timestamptz `json:"mtime"`
+}
+
+func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error) {
+	row := q.db.QueryRow(ctx, updateInodeAttr,
+		arg.Ino,
+		arg.Mode,
+		arg.Size,
+		arg.Uid,
+		arg.Gid,
+		arg.SetAtimeNow,
+		arg.Atime,
+		arg.SetMtimeNow,
+		arg.Mtime,
+	)
 	var i Inode
 	err := row.Scan(
 		&i.Ino,

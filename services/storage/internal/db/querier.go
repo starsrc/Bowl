@@ -11,9 +11,11 @@ import (
 type Querier interface {
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error)
+	CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
+	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)

@@ -1,16 +1,16 @@
 -- name: GetInode :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
 FROM inodes
 WHERE ino = $1;
 
 -- name: GetInodeByEntry :one
-SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime
+SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name = $2;
 
 -- name: GetInodeForUpdate :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
 FROM inodes
 WHERE ino = $1
 FOR UPDATE;
@@ -26,12 +26,12 @@ SET
   mtime = CASE WHEN @set_mtime_now::boolean THEN clock_timestamp() ELSE @mtime::timestamptz END,
   ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
 
 -- name: CreateInode :one
 INSERT INTO inodes (mode, nlink, uid, gid, rdev)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
 
 -- name: CreateEntry :exec
 INSERT INTO entries (parent_ino, name, ino)
@@ -48,4 +48,15 @@ SET nlink = nlink + 1,
     mtime = NOW(),
     ctime = NOW()
 WHERE ino = $1;
+
+-- name: CreateSymlinkInode :one
+INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+
+-- name: GetSymlinkTarget :one
+SELECT mode, symlink_target
+FROM inodes
+WHERE ino = $1;
+
 

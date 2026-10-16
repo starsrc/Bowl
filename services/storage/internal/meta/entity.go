@@ -17,8 +17,9 @@ const (
 	S_IFSOCK         uint32 = 0o140000
 	S_ISUID          uint32 = 0o4000
 	S_ISGID          uint32 = 0o2000
-	PermMask         uint32 = 0o7777
-	MaxFileNameBytes        = 255
+	PermMask              uint32 = 0o7777
+	MaxFileNameBytes             = 255
+	MaxSymlinkTargetBytes        = 4096
 )
 
 // SetAttrInput 定义修改 Inode 属性的输入参数。
@@ -48,6 +49,15 @@ type MkdirParams struct {
 	ParentIno uint64
 	Name      string
 	Mode      uint32
+	UID       uint32
+	GID       uint32
+}
+
+// SymlinkParams 定义创建符号链接的输入参数。
+type SymlinkParams struct {
+	ParentIno uint64
+	Name      string
+	Target    string
 	UID       uint32
 	GID       uint32
 }

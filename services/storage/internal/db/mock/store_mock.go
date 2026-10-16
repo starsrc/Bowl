@@ -162,6 +162,72 @@ func (_c *MockStore_CreateInode_Call) RunAndReturn(run func(ctx context.Context,
 	return _c
 }
 
+// CreateSymlinkInode provides a mock function for the type MockStore
+func (_mock *MockStore) CreateSymlinkInode(ctx context.Context, arg db.CreateSymlinkInodeParams) (db.Inode, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateSymlinkInode")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateSymlinkInodeParams) (db.Inode, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateSymlinkInodeParams) db.Inode); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateSymlinkInodeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_CreateSymlinkInode_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateSymlinkInode'
+type MockStore_CreateSymlinkInode_Call struct {
+	*mock.Call
+}
+
+// CreateSymlinkInode is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateSymlinkInodeParams
+func (_e *MockStore_Expecter) CreateSymlinkInode(ctx any, arg any) *MockStore_CreateSymlinkInode_Call {
+	return &MockStore_CreateSymlinkInode_Call{Call: _e.mock.On("CreateSymlinkInode", ctx, arg)}
+}
+
+func (_c *MockStore_CreateSymlinkInode_Call) Run(run func(ctx context.Context, arg db.CreateSymlinkInodeParams)) *MockStore_CreateSymlinkInode_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateSymlinkInodeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateSymlinkInodeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_CreateSymlinkInode_Call) Return(inode db.Inode, err error) *MockStore_CreateSymlinkInode_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_CreateSymlinkInode_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateSymlinkInodeParams) (db.Inode, error)) *MockStore_CreateSymlinkInode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ExecTx provides a mock function for the type MockStore
 func (_mock *MockStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
 	ret := _mock.Called(ctx, fn)
@@ -489,6 +555,72 @@ func (_c *MockStore_GetInodeForUpdate_Call) Return(inode db.Inode, err error) *M
 }
 
 func (_c *MockStore_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_GetInodeForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetSymlinkTarget provides a mock function for the type MockStore
+func (_mock *MockStore) GetSymlinkTarget(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetSymlinkTarget")
+	}
+
+	var r0 db.GetSymlinkTargetRow
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.GetSymlinkTargetRow, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.GetSymlinkTargetRow); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(db.GetSymlinkTargetRow)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetSymlinkTarget_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetSymlinkTarget'
+type MockStore_GetSymlinkTarget_Call struct {
+	*mock.Call
+}
+
+// GetSymlinkTarget is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) GetSymlinkTarget(ctx any, ino any) *MockStore_GetSymlinkTarget_Call {
+	return &MockStore_GetSymlinkTarget_Call{Call: _e.mock.On("GetSymlinkTarget", ctx, ino)}
+}
+
+func (_c *MockStore_GetSymlinkTarget_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_GetSymlinkTarget_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetSymlinkTarget_Call) Return(getSymlinkTargetRow db.GetSymlinkTargetRow, err error) *MockStore_GetSymlinkTarget_Call {
+	_c.Call.Return(getSymlinkTargetRow, err)
+	return _c
+}
+
+func (_c *MockStore_GetSymlinkTarget_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error)) *MockStore_GetSymlinkTarget_Call {
 	_c.Call.Return(run)
 	return _c
 }

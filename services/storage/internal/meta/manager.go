@@ -23,6 +23,8 @@ type Manager interface {
 	SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (*Inode, error)
 	Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 	Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
+	Symlink(ctx context.Context, params SymlinkParams) (*Inode, error)
+	Readlink(ctx context.Context, ino uint64) (string, error)
 }
 
 type manager struct {
@@ -469,6 +471,120 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	}
 
 	return result, nil
+}
+
+// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
+func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, error) {
+	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
+		return nil, ErrInvalidArgument
+	}
+	if len(params.Target) == 0 || len(params.Target) > MaxSymlinkTargetBytes || strings.ContainsRune(params.Target, 0) {
+		return nil, ErrInvalidArgument
+	}
+
+	var result *Inode
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", params.ParentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		if params.Name == "." || params.Name == ".." {
+			return ErrAlreadyExists
+		}
+
+		gid := params.GID
+		if (uint32(parent.Mode) & S_ISGID) != 0 {
+			gid = uint32(parent.Gid)
+		}
+
+		newInode, err := q.CreateSymlinkInode(ctx, db.CreateSymlinkInodeParams{
+			Mode:          int32(S_IFLNK | 0o777),
+			Size:          int64(len(params.Target)),
+			Nlink:         1,
+			Uid:           int32(params.UID),
+			Gid:           int32(gid),
+			Rdev:          0,
+			SymlinkTarget: pgtype.Text{String: params.Target, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("create symlink inode: %w", err)
+		}
+
+		err = q.CreateEntry(ctx, db.CreateEntryParams{
+			ParentIno: int64(params.ParentIno),
+			Name:      params.Name,
+			Ino:       newInode.Ino,
+		})
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAlreadyExists
+			}
+			return fmt.Errorf("create entry: %w", err)
+		}
+
+		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		result = newInodeFromDB(newInode)
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrAlreadyExists):
+			return nil, ErrAlreadyExists
+		default:
+			return nil, fmt.Errorf("symlink tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// Readlink 获取符号链接节点指向的目标路径。
+func (m *manager) Readlink(ctx context.Context, ino uint64) (string, error) {
+	if ino == 0 || ino > math.MaxInt64 {
+		return "", ErrInvalidArgument
+	}
+
+	row, err := m.store.GetSymlinkTarget(ctx, int64(ino))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("get symlink target %d: %w", ino, err)
+	}
+
+	if (uint32(row.Mode) & S_IFMT) != S_IFLNK {
+		return "", ErrInvalidArgument
+	}
+
+	if !row.SymlinkTarget.Valid {
+		return "", ErrInvalidArgument
+	}
+
+	return row.SymlinkTarget.String, nil
 }
 
 

@@ -26,6 +26,8 @@ type Manager interface {
 	Symlink(ctx context.Context, params SymlinkParams) (*Inode, error)
 	Readlink(ctx context.Context, ino uint64) (string, error)
 	Link(ctx context.Context, params LinkParams) (*Inode, error)
+	Unlink(ctx context.Context, parentIno uint64, name string) error
+	Rmdir(ctx context.Context, parentIno uint64, name string) error
 }
 
 type manager struct {
@@ -688,6 +690,209 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 
 	return result, nil
 }
+
+// Unlink 删除指定父目录下的非目录项（解链）。
+func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) error {
+	if parentIno == 0 || parentIno > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if len(name) == 0 || len(name) > MaxFileNameBytes || strings.ContainsAny(name, "/\x00") {
+		return ErrInvalidArgument
+	}
+	if name == "." || name == ".." {
+		return ErrInvalidArgument
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第一级加锁：锁定父目录 parent_ino
+		parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", parentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		// 查询目标目录项
+		entry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(parentIno),
+			Name:      name,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get entry %d/%s: %w", parentIno, name, err)
+		}
+
+		// 第二级加锁：锁定目标 child_ino
+		child, err := q.GetInodeForUpdate(ctx, entry.Ino)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get child inode for update %d: %w", entry.Ino, err)
+		}
+
+		// Unlink 严禁删除目录项 (POSIX EISDIR)
+		if (uint32(child.Mode) & S_IFMT) == S_IFDIR {
+			return ErrIsDir
+		}
+
+		// 从 entries 删除目录项
+		if err := q.DeleteEntry(ctx, db.DeleteEntryParams{
+			ParentIno: int64(parentIno),
+			Name:      name,
+		}); err != nil {
+			return fmt.Errorf("delete entry %d/%s: %w", parentIno, name, err)
+		}
+
+		// 递减子节点硬链接数并刷新 ctime (即使 nlink 降为 0 也保留 Inode 行)
+		if _, err := q.DecrementInodeNlinkAndTouchCtime(ctx, child.Ino); err != nil {
+			return fmt.Errorf("decrement child inode %d nlink and touch ctime: %w", child.Ino, err)
+		}
+
+		// 刷新父目录 mtime 与 ctime (父目录 nlink 保持不变)
+		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return ErrNotDir
+		case errors.Is(err, ErrIsDir):
+			return ErrIsDir
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		default:
+			return fmt.Errorf("unlink tx: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Rmdir 移除指定父目录下的空目录项。
+func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) error {
+	if parentIno == 0 || parentIno > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if len(name) == 0 || len(name) > MaxFileNameBytes || strings.ContainsAny(name, "/\x00") {
+		return ErrInvalidArgument
+	}
+	if name == "." {
+		return ErrInvalidArgument
+	}
+	if name == ".." {
+		return ErrNotEmpty
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第一级加锁：锁定父目录 parent_ino
+		parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", parentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		// 查询目标目录项
+		entry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(parentIno),
+			Name:      name,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get entry %d/%s: %w", parentIno, name, err)
+		}
+
+		// 第二级加锁：锁定目标 child_ino
+		child, err := q.GetInodeForUpdate(ctx, entry.Ino)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get child inode for update %d: %w", entry.Ino, err)
+		}
+
+		// Rmdir 目标节点必须为目录 (POSIX ENOTDIR)
+		if (uint32(child.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		// 空目录校验：目标目录严禁包含任何子目录项 (POSIX ENOTEMPTY)
+		hasChildren, err := q.HasChildEntries(ctx, child.Ino)
+		if err != nil {
+			return fmt.Errorf("check child dir %d has child entries: %w", child.Ino, err)
+		}
+		if hasChildren {
+			return ErrNotEmpty
+		}
+
+		// 从 entries 删除目录项
+		if err := q.DeleteEntry(ctx, db.DeleteEntryParams{
+			ParentIno: int64(parentIno),
+			Name:      name,
+		}); err != nil {
+			return fmt.Errorf("delete entry %d/%s: %w", parentIno, name, err)
+		}
+
+		// 目标目录置 nlink = 0 并刷新 ctime (保留 Inode 行)
+		if _, err := q.ClearInodeNlinkAndTouchCtime(ctx, child.Ino); err != nil {
+			return fmt.Errorf("clear child dir %d nlink and touch ctime: %w", child.Ino, err)
+		}
+
+		// 父目录 nlink 递减 1 并刷新 mtime 与 ctime
+		if err := q.DecrementInodeNlinkAndTouch(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("decrement parent inode %d nlink and touch: %w", parent.Ino, err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return ErrNotDir
+		case errors.Is(err, ErrNotEmpty):
+			return ErrNotEmpty
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		default:
+			return fmt.Errorf("rmdir tx: %w", err)
+		}
+	}
+
+	return nil
+}
+
 
 
 

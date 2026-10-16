@@ -450,6 +450,69 @@ func (_c *MockManager_Readlink_Call) RunAndReturn(run func(ctx context.Context, 
 	return _c
 }
 
+// Rmdir provides a mock function for the type MockManager
+func (_mock *MockManager) Rmdir(ctx context.Context, parentIno uint64, name string) error {
+	ret := _mock.Called(ctx, parentIno, name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Rmdir")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, string) error); ok {
+		r0 = returnFunc(ctx, parentIno, name)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_Rmdir_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Rmdir'
+type MockManager_Rmdir_Call struct {
+	*mock.Call
+}
+
+// Rmdir is a helper method to define mock.On call
+//   - ctx context.Context
+//   - parentIno uint64
+//   - name string
+func (_e *MockManager_Expecter) Rmdir(ctx any, parentIno any, name any) *MockManager_Rmdir_Call {
+	return &MockManager_Rmdir_Call{Call: _e.mock.On("Rmdir", ctx, parentIno, name)}
+}
+
+func (_c *MockManager_Rmdir_Call) Run(run func(ctx context.Context, parentIno uint64, name string)) *MockManager_Rmdir_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Rmdir_Call) Return(err error) *MockManager_Rmdir_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_Rmdir_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name string) error) *MockManager_Rmdir_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // SetAttr provides a mock function for the type MockManager
 func (_mock *MockManager) SetAttr(ctx context.Context, ino uint64, input meta.SetAttrInput) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, ino, input)
@@ -588,6 +651,69 @@ func (_c *MockManager_Symlink_Call) Return(inode *meta.Inode, err error) *MockMa
 }
 
 func (_c *MockManager_Symlink_Call) RunAndReturn(run func(ctx context.Context, params meta.SymlinkParams) (*meta.Inode, error)) *MockManager_Symlink_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Unlink provides a mock function for the type MockManager
+func (_mock *MockManager) Unlink(ctx context.Context, parentIno uint64, name string) error {
+	ret := _mock.Called(ctx, parentIno, name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Unlink")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, string) error); ok {
+		r0 = returnFunc(ctx, parentIno, name)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_Unlink_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Unlink'
+type MockManager_Unlink_Call struct {
+	*mock.Call
+}
+
+// Unlink is a helper method to define mock.On call
+//   - ctx context.Context
+//   - parentIno uint64
+//   - name string
+func (_e *MockManager_Expecter) Unlink(ctx any, parentIno any, name any) *MockManager_Unlink_Call {
+	return &MockManager_Unlink_Call{Call: _e.mock.On("Unlink", ctx, parentIno, name)}
+}
+
+func (_c *MockManager_Unlink_Call) Run(run func(ctx context.Context, parentIno uint64, name string)) *MockManager_Unlink_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Unlink_Call) Return(err error) *MockManager_Unlink_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_Unlink_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name string) error) *MockManager_Unlink_Call {
 	_c.Call.Return(run)
 	return _c
 }

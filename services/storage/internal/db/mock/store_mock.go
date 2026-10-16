@@ -39,6 +39,72 @@ func (_m *MockStore) EXPECT() *MockStore_Expecter {
 	return &MockStore_Expecter{mock: &_m.Mock}
 }
 
+// ClearInodeNlinkAndTouchCtime provides a mock function for the type MockStore
+func (_mock *MockStore) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ClearInodeNlinkAndTouchCtime")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Inode, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Inode); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_ClearInodeNlinkAndTouchCtime_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ClearInodeNlinkAndTouchCtime'
+type MockStore_ClearInodeNlinkAndTouchCtime_Call struct {
+	*mock.Call
+}
+
+// ClearInodeNlinkAndTouchCtime is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) ClearInodeNlinkAndTouchCtime(ctx any, ino any) *MockStore_ClearInodeNlinkAndTouchCtime_Call {
+	return &MockStore_ClearInodeNlinkAndTouchCtime_Call{Call: _e.mock.On("ClearInodeNlinkAndTouchCtime", ctx, ino)}
+}
+
+func (_c *MockStore_ClearInodeNlinkAndTouchCtime_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_ClearInodeNlinkAndTouchCtime_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ClearInodeNlinkAndTouchCtime_Call) Return(inode db.Inode, err error) *MockStore_ClearInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_ClearInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_ClearInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateEntry provides a mock function for the type MockStore
 func (_mock *MockStore) CreateEntry(ctx context.Context, arg db.CreateEntryParams) error {
 	ret := _mock.Called(ctx, arg)
@@ -228,6 +294,186 @@ func (_c *MockStore_CreateSymlinkInode_Call) RunAndReturn(run func(ctx context.C
 	return _c
 }
 
+// DecrementInodeNlinkAndTouch provides a mock function for the type MockStore
+func (_mock *MockStore) DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DecrementInodeNlinkAndTouch")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_DecrementInodeNlinkAndTouch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DecrementInodeNlinkAndTouch'
+type MockStore_DecrementInodeNlinkAndTouch_Call struct {
+	*mock.Call
+}
+
+// DecrementInodeNlinkAndTouch is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) DecrementInodeNlinkAndTouch(ctx any, ino any) *MockStore_DecrementInodeNlinkAndTouch_Call {
+	return &MockStore_DecrementInodeNlinkAndTouch_Call{Call: _e.mock.On("DecrementInodeNlinkAndTouch", ctx, ino)}
+}
+
+func (_c *MockStore_DecrementInodeNlinkAndTouch_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_DecrementInodeNlinkAndTouch_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DecrementInodeNlinkAndTouch_Call) Return(err error) *MockStore_DecrementInodeNlinkAndTouch_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_DecrementInodeNlinkAndTouch_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_DecrementInodeNlinkAndTouch_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DecrementInodeNlinkAndTouchCtime provides a mock function for the type MockStore
+func (_mock *MockStore) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DecrementInodeNlinkAndTouchCtime")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Inode, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Inode); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DecrementInodeNlinkAndTouchCtime_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DecrementInodeNlinkAndTouchCtime'
+type MockStore_DecrementInodeNlinkAndTouchCtime_Call struct {
+	*mock.Call
+}
+
+// DecrementInodeNlinkAndTouchCtime is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) DecrementInodeNlinkAndTouchCtime(ctx any, ino any) *MockStore_DecrementInodeNlinkAndTouchCtime_Call {
+	return &MockStore_DecrementInodeNlinkAndTouchCtime_Call{Call: _e.mock.On("DecrementInodeNlinkAndTouchCtime", ctx, ino)}
+}
+
+func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_DecrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) Return(inode db.Inode, err error) *MockStore_DecrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_DecrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteEntry provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteEntry(ctx context.Context, arg db.DeleteEntryParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteEntry")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteEntryParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_DeleteEntry_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteEntry'
+type MockStore_DeleteEntry_Call struct {
+	*mock.Call
+}
+
+// DeleteEntry is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteEntryParams
+func (_e *MockStore_Expecter) DeleteEntry(ctx any, arg any) *MockStore_DeleteEntry_Call {
+	return &MockStore_DeleteEntry_Call{Call: _e.mock.On("DeleteEntry", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteEntry_Call) Run(run func(ctx context.Context, arg db.DeleteEntryParams)) *MockStore_DeleteEntry_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteEntryParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteEntryParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteEntry_Call) Return(err error) *MockStore_DeleteEntry_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_DeleteEntry_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteEntryParams) error) *MockStore_DeleteEntry_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ExecTx provides a mock function for the type MockStore
 func (_mock *MockStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
 	ret := _mock.Called(ctx, fn)
@@ -357,6 +603,72 @@ func (_c *MockStore_ExecTxWithOptions_Call) Return(err error) *MockStore_ExecTxW
 }
 
 func (_c *MockStore_ExecTxWithOptions_Call) RunAndReturn(run func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error) *MockStore_ExecTxWithOptions_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetEntry provides a mock function for the type MockStore
+func (_mock *MockStore) GetEntry(ctx context.Context, arg db.GetEntryParams) (db.Entry, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetEntry")
+	}
+
+	var r0 db.Entry
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetEntryParams) (db.Entry, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetEntryParams) db.Entry); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Entry)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetEntryParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetEntry_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetEntry'
+type MockStore_GetEntry_Call struct {
+	*mock.Call
+}
+
+// GetEntry is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetEntryParams
+func (_e *MockStore_Expecter) GetEntry(ctx any, arg any) *MockStore_GetEntry_Call {
+	return &MockStore_GetEntry_Call{Call: _e.mock.On("GetEntry", ctx, arg)}
+}
+
+func (_c *MockStore_GetEntry_Call) Run(run func(ctx context.Context, arg db.GetEntryParams)) *MockStore_GetEntry_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetEntryParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetEntryParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetEntry_Call) Return(entry db.Entry, err error) *MockStore_GetEntry_Call {
+	_c.Call.Return(entry, err)
+	return _c
+}
+
+func (_c *MockStore_GetEntry_Call) RunAndReturn(run func(ctx context.Context, arg db.GetEntryParams) (db.Entry, error)) *MockStore_GetEntry_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -621,6 +933,72 @@ func (_c *MockStore_GetSymlinkTarget_Call) Return(getSymlinkTargetRow db.GetSyml
 }
 
 func (_c *MockStore_GetSymlinkTarget_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error)) *MockStore_GetSymlinkTarget_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// HasChildEntries provides a mock function for the type MockStore
+func (_mock *MockStore) HasChildEntries(ctx context.Context, parentIno int64) (bool, error) {
+	ret := _mock.Called(ctx, parentIno)
+
+	if len(ret) == 0 {
+		panic("no return value specified for HasChildEntries")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (bool, error)); ok {
+		return returnFunc(ctx, parentIno)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) bool); ok {
+		r0 = returnFunc(ctx, parentIno)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, parentIno)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_HasChildEntries_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HasChildEntries'
+type MockStore_HasChildEntries_Call struct {
+	*mock.Call
+}
+
+// HasChildEntries is a helper method to define mock.On call
+//   - ctx context.Context
+//   - parentIno int64
+func (_e *MockStore_Expecter) HasChildEntries(ctx any, parentIno any) *MockStore_HasChildEntries_Call {
+	return &MockStore_HasChildEntries_Call{Call: _e.mock.On("HasChildEntries", ctx, parentIno)}
+}
+
+func (_c *MockStore_HasChildEntries_Call) Run(run func(ctx context.Context, parentIno int64)) *MockStore_HasChildEntries_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_HasChildEntries_Call) Return(b bool, err error) *MockStore_HasChildEntries_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockStore_HasChildEntries_Call) RunAndReturn(run func(ctx context.Context, parentIno int64) (bool, error)) *MockStore_HasChildEntries_Call {
 	_c.Call.Return(run)
 	return _c
 }

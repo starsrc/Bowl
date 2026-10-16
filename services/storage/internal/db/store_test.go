@@ -34,7 +34,17 @@ type LinkQuerier interface {
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error)
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier 与 LinkQuerier 接口契约。
+// UnlinkRmdirQuerier 提取 Unlink 与 Rmdir 目录项解链与计数更新接口契约。
+type UnlinkRmdirQuerier interface {
+	GetEntry(ctx context.Context, arg db.GetEntryParams) (db.Entry, error)
+	DeleteEntry(ctx context.Context, arg db.DeleteEntryParams) error
+	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
+	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error)
+	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error)
+	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier 与 UnlinkRmdirQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -47,6 +57,10 @@ var (
 	_ LinkQuerier = (db.Querier)(nil)
 	_ LinkQuerier = (db.Store)(nil)
 	_ LinkQuerier = (*db.Queries)(nil)
+
+	_ UnlinkRmdirQuerier = (db.Querier)(nil)
+	_ UnlinkRmdirQuerier = (db.Store)(nil)
+	_ UnlinkRmdirQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -386,6 +400,159 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 			var q db.Querier = mockQuerier
 			_, err := q.IncrementInodeNlinkAndTouchCtime(ctx, ino)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("GetEntry 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功获取目录项", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.GetEntryParams{ParentIno: 1, Name: "file.txt"}
+			expected := db.Entry{ParentIno: 1, Name: "file.txt", Ino: 100}
+			mockQuerier.EXPECT().GetEntry(ctx, params).Return(expected, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.GetEntry(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, expected, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.GetEntryParams{ParentIno: 1, Name: "missing"}
+			expectedErr := errors.New("not found")
+			mockQuerier.EXPECT().GetEntry(ctx, params).Return(db.Entry{}, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.GetEntry(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("DeleteEntry 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功删除目录项", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.DeleteEntryParams{ParentIno: 1, Name: "file.txt"}
+			mockQuerier.EXPECT().DeleteEntry(ctx, params).Return(nil).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.DeleteEntry(ctx, params)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.DeleteEntryParams{ParentIno: 1, Name: "file.txt"}
+			expectedErr := errors.New("delete error")
+			mockQuerier.EXPECT().DeleteEntry(ctx, params).Return(expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.DeleteEntry(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("HasChildEntries 算子调用与参数透传", func(t *testing.T) {
+		t.Run("目录包含子项返回 true", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			mockQuerier.EXPECT().HasChildEntries(ctx, int64(10)).Return(true, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.HasChildEntries(ctx, 10)
+			require.NoError(t, err)
+			assert.True(t, res)
+		})
+
+		t.Run("空目录返回 false", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			mockQuerier.EXPECT().HasChildEntries(ctx, int64(10)).Return(false, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.HasChildEntries(ctx, 10)
+			require.NoError(t, err)
+			assert.False(t, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			expectedErr := errors.New("exists query error")
+			mockQuerier.EXPECT().HasChildEntries(ctx, int64(10)).Return(false, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.HasChildEntries(ctx, 10)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("DecrementInodeNlinkAndTouchCtime 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功递减子节点硬链接数并刷新 ctime", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(100)
+			expected := db.Inode{Ino: ino, Nlink: 1}
+			mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(ctx, ino).Return(expected, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.DecrementInodeNlinkAndTouchCtime(ctx, ino)
+			require.NoError(t, err)
+			assert.Equal(t, expected, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(100)
+			expectedErr := errors.New("decrement error")
+			mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(ctx, ino).Return(db.Inode{}, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.DecrementInodeNlinkAndTouchCtime(ctx, ino)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("ClearInodeNlinkAndTouchCtime 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功将目录硬链接数置 0 并刷新 ctime", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(200)
+			expected := db.Inode{Ino: ino, Nlink: 0}
+			mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(ctx, ino).Return(expected, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.ClearInodeNlinkAndTouchCtime(ctx, ino)
+			require.NoError(t, err)
+			assert.Equal(t, expected, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(200)
+			expectedErr := errors.New("clear error")
+			mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(ctx, ino).Return(db.Inode{}, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.ClearInodeNlinkAndTouchCtime(ctx, ino)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("DecrementInodeNlinkAndTouch 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功递减父目录硬链接数并刷新 mtime/ctime", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(1)
+			mockQuerier.EXPECT().DecrementInodeNlinkAndTouch(ctx, ino).Return(nil).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.DecrementInodeNlinkAndTouch(ctx, ino)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(1)
+			expectedErr := errors.New("parent decrement error")
+			mockQuerier.EXPECT().DecrementInodeNlinkAndTouch(ctx, ino).Return(expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.DecrementInodeNlinkAndTouch(ctx, ino)
 			assert.ErrorIs(t, err, expectedErr)
 		})
 	})

@@ -54,6 +54,21 @@ service StorageService {
   // 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   // 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
   rpc Link(LinkRequest) returns (LinkResponse);
+
+  // Unlink 删除指定父目录下的非目录项（解链）。
+  // 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  // 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 对 "." 或 ".."，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
+
+  // Rmdir 移除指定父目录下的空目录项。
+  // 若目标节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 若目标目录非空，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
+  // 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
+  rpc Rmdir(RmdirRequest) returns (RmdirResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -337,6 +352,46 @@ message LinkResponse {
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
+
+// UnlinkRequest 定义 Unlink 接口输入参数。
+message UnlinkRequest {
+  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 parent_ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待删除的非目录项名称。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  string name = 2 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  ];
+}
+
+// UnlinkResponse 定义 Unlink 接口返回参数。
+message UnlinkResponse {}
+
+// RmdirRequest 定义 Rmdir 接口输入参数。
+message RmdirRequest {
+  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 parent_ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待移除的空目录项名称。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  string name = 2 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  ];
+}
+
+// RmdirResponse 定义 Rmdir 接口返回参数。
+message RmdirResponse {}
 
 // Inode 代表文件系统中的实体节点。
 message Inode {

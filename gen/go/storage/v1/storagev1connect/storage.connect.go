@@ -26,6 +26,8 @@ const (
 const (
 	// StorageServiceLookupProcedure is the procedure name of the StorageService's Lookup RPC.
 	StorageServiceLookupProcedure = "/storage.v1.StorageService/Lookup"
+	// StorageServiceMknodProcedure is the procedure name of the StorageService's Mknod RPC.
+	StorageServiceMknodProcedure = "/storage.v1.StorageService/Mknod"
 )
 
 var (
@@ -34,6 +36,13 @@ var (
 			StreamType: connect.StreamTypeUnary,
 			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Lookup"),
 			Procedure:  StorageServiceLookupProcedure,
+		}
+	})
+	storageServiceMknodSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Mknod"),
+			Procedure:  StorageServiceMknodProcedure,
 		}
 	})
 )
@@ -45,6 +54,11 @@ type StorageServiceClient interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error)
+	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -60,6 +74,11 @@ type StorageServiceHandler interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error)
+	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -68,6 +87,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 	adapter := storageServiceHandler{svc: svc}
 	server.Register(
 		connect.Method{Spec: storageServiceLookupSpec(), Handler: adapter.lookup},
+		connect.Method{Spec: storageServiceMknodSpec(), Handler: adapter.mknod},
 	)
 }
 
@@ -76,6 +96,10 @@ type UnimplementedStorageServiceHandler struct{}
 
 func (UnimplementedStorageServiceHandler) Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Lookup is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Mknod is not implemented")
 }
 
 type storageServiceClient struct {
@@ -90,6 +114,14 @@ func (c *storageServiceClient) Lookup(ctx context.Context, req *v1.LookupRequest
 	return &res, nil
 }
 
+func (c *storageServiceClient) Mknod(ctx context.Context, req *v1.MknodRequest) (*v1.MknodResponse, error) {
+	var res v1.MknodResponse
+	if err := c.client.CallUnary(ctx, storageServiceMknodSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 type storageServiceHandler struct{ svc StorageServiceHandler }
 
 func (h storageServiceHandler) lookup(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
@@ -98,6 +130,18 @@ func (h storageServiceHandler) lookup(ctx context.Context, _ connect.Spec, strea
 		return err
 	}
 	res, err := h.svc.Lookup(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) mknod(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.MknodRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Mknod(ctx, &req)
 	if err != nil {
 		return err
 	}

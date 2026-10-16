@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StorageService_Lookup_FullMethodName = "/storage.v1.StorageService/Lookup"
+	StorageService_Lookup_FullMethodName  = "/storage.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName = "/storage.v1.StorageService/GetAttr"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -33,6 +34,10 @@ type StorageServiceClient interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(ctx context.Context, in *LookupRequest, opts ...grpc.CallOption) (*LookupResponse, error)
+	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
+	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
+	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	GetAttr(ctx context.Context, in *GetAttrRequest, opts ...grpc.CallOption) (*GetAttrResponse, error)
 }
 
 type storageServiceClient struct {
@@ -53,6 +58,16 @@ func (c *storageServiceClient) Lookup(ctx context.Context, in *LookupRequest, op
 	return out, nil
 }
 
+func (c *storageServiceClient) GetAttr(ctx context.Context, in *GetAttrRequest, opts ...grpc.CallOption) (*GetAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -64,6 +79,10 @@ type StorageServiceServer interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *LookupRequest) (*LookupResponse, error)
+	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
+	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
+	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	GetAttr(context.Context, *GetAttrRequest) (*GetAttrResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -76,6 +95,9 @@ type UnimplementedStorageServiceServer struct{}
 
 func (UnimplementedStorageServiceServer) Lookup(context.Context, *LookupRequest) (*LookupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Lookup not implemented")
+}
+func (UnimplementedStorageServiceServer) GetAttr(context.Context, *GetAttrRequest) (*GetAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttr not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -116,6 +138,24 @@ func _StorageService_Lookup_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_GetAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetAttr(ctx, req.(*GetAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -126,6 +166,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Lookup",
 			Handler:    _StorageService_Lookup_Handler,
+		},
+		{
+			MethodName: "GetAttr",
+			Handler:    _StorageService_GetAttr_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

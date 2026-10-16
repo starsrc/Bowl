@@ -246,8 +246,8 @@ func TestGetAttr_InputValidation(t *testing.T) {
 			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
 
 			// 断言未调用底层数据库查询与事务
-			mockStore.AssertNotCalled(t, "GetInode", mock.Anything, mock.Anything)
-			mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything, mock.Anything)
+			mockStore.AssertNotCalled(t, "GetInode")
+			mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 		})
 	}
 }
@@ -310,6 +310,6 @@ func TestGetAttr_DirectQueryContract(t *testing.T) {
 		require.NotNil(t, inode)
 
 		mockStore.AssertCalled(t, "GetInode", mock.Anything, int64(ino))
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 }

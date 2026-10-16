@@ -370,6 +370,45 @@ func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 	return i, err
 }
 
+const isSubdirectory = `-- name: IsSubdirectory :one
+WITH RECURSIVE ancestors AS (
+    SELECT parent_ino, 1 AS depth
+    FROM entries
+    WHERE ino = $1::bigint
+    UNION ALL
+    SELECT e.parent_ino, a.depth + 1
+    FROM entries e
+    JOIN ancestors a ON e.ino = a.parent_ino
+    WHERE a.depth < 100 AND a.parent_ino > 1
+)
+SELECT COALESCE(($1::bigint = $2::bigint) OR EXISTS (
+    SELECT 1 FROM ancestors WHERE parent_ino = $2::bigint
+), false)::boolean AS is_sub
+`
+
+type IsSubdirectoryParams struct {
+	ChildIno    int64 `json:"child_ino"`
+	AncestorIno int64 `json:"ancestor_ino"`
+}
+
+func (q *Queries) IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isSubdirectory, arg.ChildIno, arg.AncestorIno)
+	var is_sub bool
+	err := row.Scan(&is_sub)
+	return is_sub, err
+}
+
+const touchInodeCtime = `-- name: TouchInodeCtime :exec
+UPDATE inodes
+SET ctime = NOW()
+WHERE ino = $1
+`
+
+func (q *Queries) TouchInodeCtime(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, touchInodeCtime, ino)
+	return err
+}
+
 const touchInodeTimestamps = `-- name: TouchInodeTimestamps :exec
 UPDATE inodes
 SET mtime = NOW(), ctime = NOW()
@@ -378,6 +417,30 @@ WHERE ino = $1
 
 func (q *Queries) TouchInodeTimestamps(ctx context.Context, ino int64) error {
 	_, err := q.db.Exec(ctx, touchInodeTimestamps, ino)
+	return err
+}
+
+const updateEntry = `-- name: UpdateEntry :exec
+UPDATE entries
+SET parent_ino = $3,
+    name = $4
+WHERE parent_ino = $1 AND name = $2
+`
+
+type UpdateEntryParams struct {
+	ParentIno   int64  `json:"parent_ino"`
+	Name        string `json:"name"`
+	ParentIno_2 int64  `json:"parent_ino_2"`
+	Name_2      string `json:"name_2"`
+}
+
+func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) error {
+	_, err := q.db.Exec(ctx, updateEntry,
+		arg.ParentIno,
+		arg.Name,
+		arg.ParentIno_2,
+		arg.Name_2,
+	)
 	return err
 }
 

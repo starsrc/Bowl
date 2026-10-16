@@ -69,6 +69,15 @@ type LinkParams struct {
 	NewName      string
 }
 
+// RenameParams 定义重命名与移动操作的输入参数。
+type RenameParams struct {
+	OldParentIno uint64
+	OldName      string
+	NewParentIno uint64
+	NewName      string
+}
+
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

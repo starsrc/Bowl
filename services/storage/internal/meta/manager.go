@@ -28,6 +28,7 @@ type Manager interface {
 	Link(ctx context.Context, params LinkParams) (*Inode, error)
 	Unlink(ctx context.Context, parentIno uint64, name string) error
 	Rmdir(ctx context.Context, parentIno uint64, name string) error
+	Rename(ctx context.Context, params RenameParams) error
 }
 
 type manager struct {
@@ -892,6 +893,300 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) erro
 
 	return nil
 }
+
+// Rename 执行原子文件/目录重命名或移动（支持覆盖已存在的目标项）。
+func (m *manager) Rename(ctx context.Context, params RenameParams) error {
+	if params.OldParentIno == 0 || params.OldParentIno > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if params.NewParentIno == 0 || params.NewParentIno > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if len(params.OldName) == 0 || len(params.OldName) > MaxFileNameBytes || strings.ContainsAny(params.OldName, "/\x00") {
+		return ErrInvalidArgument
+	}
+	if len(params.NewName) == 0 || len(params.NewName) > MaxFileNameBytes || strings.ContainsAny(params.NewName, "/\x00") {
+		return ErrInvalidArgument
+	}
+	if params.OldName == "." || params.OldName == ".." || params.NewName == "." || params.NewName == ".." {
+		return ErrInvalidArgument
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第一级加锁：按 ino 升序锁定父目录
+		var oldParent, newParent db.Inode
+		if params.OldParentIno == params.NewParentIno {
+			parent, err := q.GetInodeForUpdate(ctx, int64(params.OldParentIno))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get parent inode %d for update: %w", params.OldParentIno, err)
+			}
+			if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+				return ErrNotDir
+			}
+			if parent.Nlink == 0 {
+				return ErrNotFound
+			}
+			oldParent = parent
+			newParent = parent
+		} else {
+			firstIno := min(params.OldParentIno, params.NewParentIno)
+			secondIno := max(params.OldParentIno, params.NewParentIno)
+
+			firstRow, err := q.GetInodeForUpdate(ctx, int64(firstIno))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get parent inode %d for update: %w", firstIno, err)
+			}
+			secondRow, err := q.GetInodeForUpdate(ctx, int64(secondIno))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get parent inode %d for update: %w", secondIno, err)
+			}
+
+			if params.OldParentIno == firstIno {
+				oldParent = firstRow
+				newParent = secondRow
+			} else {
+				oldParent = secondRow
+				newParent = firstRow
+			}
+
+			if (uint32(oldParent.Mode) & S_IFMT) != S_IFDIR {
+				return ErrNotDir
+			}
+			if (uint32(newParent.Mode) & S_IFMT) != S_IFDIR {
+				return ErrNotDir
+			}
+			if oldParent.Nlink == 0 || newParent.Nlink == 0 {
+				return ErrNotFound
+			}
+		}
+
+		// 查询源目录项
+		oldEntry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(params.OldParentIno),
+			Name:      params.OldName,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get old entry %d/%s: %w", params.OldParentIno, params.OldName, err)
+		}
+		oldIno := oldEntry.Ino
+
+		// 查询目标目录项（可能不存在）
+		newEntry, err := q.GetEntry(ctx, db.GetEntryParams{
+			ParentIno: int64(params.NewParentIno),
+			Name:      params.NewName,
+		})
+		var hasNewEntry bool
+		var newIno int64
+		if err == nil {
+			hasNewEntry = true
+			newIno = newEntry.Ino
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("get new entry %d/%s: %w", params.NewParentIno, params.NewName, err)
+		}
+
+		// 同路径或同节点硬链接短路 (POSIX No-op)
+		if (params.OldParentIno == params.NewParentIno && params.OldName == params.NewName) || (hasNewEntry && oldIno == newIno) {
+			return nil
+		}
+
+		// 第二级加锁：按 ino 升序锁定子节点
+		var oldInode, newInode db.Inode
+		if !hasNewEntry {
+			row, err := q.GetInodeForUpdate(ctx, oldIno)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get old inode %d for update: %w", oldIno, err)
+			}
+			oldInode = row
+		} else {
+			firstChildIno := min(oldIno, newIno)
+			secondChildIno := max(oldIno, newIno)
+
+			firstRow, err := q.GetInodeForUpdate(ctx, firstChildIno)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get child inode %d for update: %w", firstChildIno, err)
+			}
+			secondRow, err := q.GetInodeForUpdate(ctx, secondChildIno)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get child inode %d for update: %w", secondChildIno, err)
+			}
+
+			if oldIno == firstChildIno {
+				oldInode = firstRow
+				newInode = secondRow
+			} else {
+				oldInode = secondRow
+				newInode = firstRow
+			}
+		}
+
+		oldIsDir := (uint32(oldInode.Mode) & S_IFMT) == S_IFDIR
+
+		// 祖先环检测：当源节点为目录且跨目录移动时
+		if oldIsDir && params.OldParentIno != params.NewParentIno {
+			if params.NewParentIno == uint64(oldIno) {
+				return ErrInvalidArgument
+			}
+			isSub, err := q.IsSubdirectory(ctx, db.IsSubdirectoryParams{
+				ChildIno:    int64(params.NewParentIno),
+				AncestorIno: oldIno,
+			})
+			if err != nil {
+				return fmt.Errorf("check is subdirectory %d in %d: %w", params.NewParentIno, oldIno, err)
+			}
+			if isSub {
+				return ErrInvalidArgument
+			}
+		}
+
+		// 异节点覆盖兼容矩阵校验
+		if hasNewEntry {
+			newIsDir := (uint32(newInode.Mode) & S_IFMT) == S_IFDIR
+			if oldIsDir && !newIsDir {
+				return ErrNotDir // POSIX ENOTDIR: old is dir, new is not dir
+			}
+			if !oldIsDir && newIsDir {
+				return ErrIsDir // POSIX EISDIR: old is not dir, new is dir
+			}
+			if oldIsDir && newIsDir {
+				// 目录覆盖目录：目标目录必须为空
+				hasChildren, err := q.HasChildEntries(ctx, newIno)
+				if err != nil {
+					return fmt.Errorf("check new dir %d has child entries: %w", newIno, err)
+				}
+				if hasChildren {
+					return ErrNotEmpty
+				}
+			}
+
+			// 覆盖旧目标项：从 entries 删除原 newEntry
+			if err := q.DeleteEntry(ctx, db.DeleteEntryParams{
+				ParentIno: int64(params.NewParentIno),
+				Name:      params.NewName,
+			}); err != nil {
+				return fmt.Errorf("delete target entry %d/%s: %w", params.NewParentIno, params.NewName, err)
+			}
+
+			if newIsDir {
+				// 被覆盖目标为空目录：nlink 直接置 0，刷新 ctime (保留 Inode 行)
+				if _, err := q.ClearInodeNlinkAndTouchCtime(ctx, newIno); err != nil {
+					return fmt.Errorf("clear target dir %d nlink: %w", newIno, err)
+				}
+			} else {
+				// 被覆盖目标为非目录：nlink 递减 1，刷新 ctime (保留 Inode 行)
+				if _, err := q.DecrementInodeNlinkAndTouchCtime(ctx, newIno); err != nil {
+					return fmt.Errorf("decrement target file %d nlink: %w", newIno, err)
+				}
+			}
+		}
+
+		// 原子更新目录项至新位置
+		if err := q.UpdateEntry(ctx, db.UpdateEntryParams{
+			ParentIno:   int64(params.OldParentIno),
+			Name:        params.OldName,
+			ParentIno_2: int64(params.NewParentIno),
+			Name_2:      params.NewName,
+		}); err != nil {
+			return fmt.Errorf("update entry %d/%s -> %d/%s: %w", params.OldParentIno, params.OldName, params.NewParentIno, params.NewName, err)
+		}
+
+		// 刷新源节点 ctime
+		if err := q.TouchInodeCtime(ctx, oldIno); err != nil {
+			return fmt.Errorf("touch old inode %d ctime: %w", oldIno, err)
+		}
+
+		// 维护父目录 nlink 与时间戳
+		if !oldIsDir {
+			// 源为非目录：父目录 nlink 恒定不变，仅刷新时间戳
+			if params.OldParentIno == params.NewParentIno {
+				if err := q.TouchInodeTimestamps(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("touch parent inode %d timestamps: %w", oldParent.Ino, err)
+				}
+			} else {
+				if err := q.TouchInodeTimestamps(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("touch old parent inode %d timestamps: %w", oldParent.Ino, err)
+				}
+				if err := q.TouchInodeTimestamps(ctx, newParent.Ino); err != nil {
+					return fmt.Errorf("touch new parent inode %d timestamps: %w", newParent.Ino, err)
+				}
+			}
+		} else {
+			// 源为目录
+			if params.OldParentIno == params.NewParentIno {
+				if hasNewEntry {
+					// 同父目录下覆盖了空目录：被覆盖空目录移除，父目录 nlink 减 1
+					if err := q.DecrementInodeNlinkAndTouch(ctx, oldParent.Ino); err != nil {
+						return fmt.Errorf("decrement parent inode %d nlink and touch: %w", oldParent.Ino, err)
+					}
+				} else {
+					// 同父目录下普通重命名：nlink 不变
+					if err := q.TouchInodeTimestamps(ctx, oldParent.Ino); err != nil {
+						return fmt.Errorf("touch parent inode %d timestamps: %w", oldParent.Ino, err)
+					}
+				}
+			} else {
+				// 跨父目录移动目录：源父目录 nlink 必须减 1
+				if err := q.DecrementInodeNlinkAndTouch(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("decrement old parent inode %d nlink and touch: %w", oldParent.Ino, err)
+				}
+
+				if hasNewEntry {
+					// 跨父目录下覆盖了空目录：+1（移入）与 -1（覆盖空目录）相抵，目标父目录 nlink 不变
+					if err := q.TouchInodeTimestamps(ctx, newParent.Ino); err != nil {
+						return fmt.Errorf("touch new parent inode %d timestamps: %w", newParent.Ino, err)
+					}
+				} else {
+					// 跨父目录下未覆盖：目标父目录 nlink 加 1
+					if err := q.IncrementInodeNlinkAndTouch(ctx, newParent.Ino); err != nil {
+						return fmt.Errorf("increment new parent inode %d nlink and touch: %w", newParent.Ino, err)
+					}
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return ErrNotDir
+		case errors.Is(err, ErrIsDir):
+			return ErrIsDir
+		case errors.Is(err, ErrNotEmpty):
+			return ErrNotEmpty
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		default:
+			return fmt.Errorf("rename tx: %w", err)
+		}
+	}
+
+	return nil
+}
+
 
 
 

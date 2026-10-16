@@ -450,6 +450,63 @@ func (_c *MockManager_Readlink_Call) RunAndReturn(run func(ctx context.Context, 
 	return _c
 }
 
+// Rename provides a mock function for the type MockManager
+func (_mock *MockManager) Rename(ctx context.Context, params meta.RenameParams) error {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Rename")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.RenameParams) error); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_Rename_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Rename'
+type MockManager_Rename_Call struct {
+	*mock.Call
+}
+
+// Rename is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.RenameParams
+func (_e *MockManager_Expecter) Rename(ctx any, params any) *MockManager_Rename_Call {
+	return &MockManager_Rename_Call{Call: _e.mock.On("Rename", ctx, params)}
+}
+
+func (_c *MockManager_Rename_Call) Run(run func(ctx context.Context, params meta.RenameParams)) *MockManager_Rename_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.RenameParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.RenameParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Rename_Call) Return(err error) *MockManager_Rename_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_Rename_Call) RunAndReturn(run func(ctx context.Context, params meta.RenameParams) error) *MockManager_Rename_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Rmdir provides a mock function for the type MockManager
 func (_mock *MockManager) Rmdir(ctx context.Context, parentIno uint64, name string) error {
 	ret := _mock.Called(ctx, parentIno, name)

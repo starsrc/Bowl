@@ -44,6 +44,8 @@ const (
 	StorageServiceUnlinkProcedure = "/storage.v1.StorageService/Unlink"
 	// StorageServiceRmdirProcedure is the procedure name of the StorageService's Rmdir RPC.
 	StorageServiceRmdirProcedure = "/storage.v1.StorageService/Rmdir"
+	// StorageServiceRenameProcedure is the procedure name of the StorageService's Rename RPC.
+	StorageServiceRenameProcedure = "/storage.v1.StorageService/Rename"
 )
 
 var (
@@ -117,6 +119,13 @@ var (
 			Procedure:  StorageServiceRmdirProcedure,
 		}
 	})
+	storageServiceRenameSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Rename"),
+			Procedure:  StorageServiceRenameProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -172,6 +181,16 @@ type StorageServiceClient interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
 	Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error)
+	// Rename 执行原子文件/目录重命名或移动（支持覆盖已存在的目标项）。
+	// 若源与目标为同一路径或同一 Inode 的硬链接，执行 POSIX 规范要求的无副作用短路成功返回。
+	// 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若源为目录而目标为非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若源为非目录而目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若源为目录而目标为非空目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
+	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -233,6 +252,16 @@ type StorageServiceHandler interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
 	Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error)
+	// Rename 执行原子文件/目录重命名或移动（支持覆盖已存在的目标项）。
+	// 若源与目标为同一路径或同一 Inode 的硬链接，执行 POSIX 规范要求的无副作用短路成功返回。
+	// 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若源为目录而目标为非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若源为非目录而目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若源为目录而目标为非空目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
+	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -250,6 +279,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceLinkSpec(), Handler: adapter.link},
 		connect.Method{Spec: storageServiceUnlinkSpec(), Handler: adapter.unlink},
 		connect.Method{Spec: storageServiceRmdirSpec(), Handler: adapter.rmdir},
+		connect.Method{Spec: storageServiceRenameSpec(), Handler: adapter.rename},
 	)
 }
 
@@ -294,6 +324,10 @@ func (UnimplementedStorageServiceHandler) Unlink(context.Context, *v1.UnlinkRequ
 
 func (UnimplementedStorageServiceHandler) Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Rmdir is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Rename is not implemented")
 }
 
 type storageServiceClient struct {
@@ -375,6 +409,14 @@ func (c *storageServiceClient) Unlink(ctx context.Context, req *v1.UnlinkRequest
 func (c *storageServiceClient) Rmdir(ctx context.Context, req *v1.RmdirRequest) (*v1.RmdirResponse, error) {
 	var res v1.RmdirResponse
 	if err := c.client.CallUnary(ctx, storageServiceRmdirSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Rename(ctx context.Context, req *v1.RenameRequest) (*v1.RenameResponse, error) {
+	var res v1.RenameResponse
+	if err := c.client.CallUnary(ctx, storageServiceRenameSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -496,6 +538,18 @@ func (h storageServiceHandler) rmdir(ctx context.Context, _ connect.Spec, stream
 		return err
 	}
 	res, err := h.svc.Rmdir(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) rename(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.RenameRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Rename(ctx, &req)
 	if err != nil {
 		return err
 	}

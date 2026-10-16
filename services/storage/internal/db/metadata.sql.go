@@ -11,6 +11,34 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearInodeNlinkAndTouchCtime = `-- name: ClearInodeNlinkAndTouchCtime :one
+UPDATE inodes
+SET nlink = 0,
+    ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+`
+
+func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
+	row := q.db.QueryRow(ctx, clearInodeNlinkAndTouchCtime, ino)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+	)
+	return i, err
+}
+
 const createEntry = `-- name: CreateEntry :exec
 INSERT INTO entries (parent_ino, name, ino)
 VALUES ($1, $2, $3)
@@ -108,6 +136,80 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 		&i.Ctime,
 		&i.SymlinkTarget,
 	)
+	return i, err
+}
+
+const decrementInodeNlinkAndTouch = `-- name: DecrementInodeNlinkAndTouch :exec
+UPDATE inodes
+SET nlink = nlink - 1,
+    mtime = NOW(),
+    ctime = NOW()
+WHERE ino = $1
+`
+
+func (q *Queries) DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, decrementInodeNlinkAndTouch, ino)
+	return err
+}
+
+const decrementInodeNlinkAndTouchCtime = `-- name: DecrementInodeNlinkAndTouchCtime :one
+UPDATE inodes
+SET nlink = nlink - 1,
+    ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+`
+
+func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
+	row := q.db.QueryRow(ctx, decrementInodeNlinkAndTouchCtime, ino)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+	)
+	return i, err
+}
+
+const deleteEntry = `-- name: DeleteEntry :exec
+DELETE FROM entries
+WHERE parent_ino = $1 AND name = $2
+`
+
+type DeleteEntryParams struct {
+	ParentIno int64  `json:"parent_ino"`
+	Name      string `json:"name"`
+}
+
+func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) error {
+	_, err := q.db.Exec(ctx, deleteEntry, arg.ParentIno, arg.Name)
+	return err
+}
+
+const getEntry = `-- name: GetEntry :one
+SELECT parent_ino, name, ino
+FROM entries
+WHERE parent_ino = $1 AND name = $2
+`
+
+type GetEntryParams struct {
+	ParentIno int64  `json:"parent_ino"`
+	Name      string `json:"name"`
+}
+
+func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error) {
+	row := q.db.QueryRow(ctx, getEntry, arg.ParentIno, arg.Name)
+	var i Entry
+	err := row.Scan(&i.ParentIno, &i.Name, &i.Ino)
 	return i, err
 }
 
@@ -212,6 +314,19 @@ func (q *Queries) GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTa
 	var i GetSymlinkTargetRow
 	err := row.Scan(&i.Mode, &i.SymlinkTarget)
 	return i, err
+}
+
+const hasChildEntries = `-- name: HasChildEntries :one
+SELECT EXISTS(
+    SELECT 1 FROM entries WHERE parent_ino = $1
+)
+`
+
+func (q *Queries) HasChildEntries(ctx context.Context, parentIno int64) (bool, error) {
+	row := q.db.QueryRow(ctx, hasChildEntries, parentIno)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const incrementInodeNlinkAndTouch = `-- name: IncrementInodeNlinkAndTouch :exec

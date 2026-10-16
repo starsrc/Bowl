@@ -66,5 +66,41 @@ SET nlink = nlink + 1,
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
 
+-- name: GetEntry :one
+SELECT parent_ino, name, ino
+FROM entries
+WHERE parent_ino = $1 AND name = $2;
+
+-- name: DeleteEntry :exec
+DELETE FROM entries
+WHERE parent_ino = $1 AND name = $2;
+
+-- name: HasChildEntries :one
+SELECT EXISTS(
+    SELECT 1 FROM entries WHERE parent_ino = $1
+);
+
+-- name: DecrementInodeNlinkAndTouchCtime :one
+UPDATE inodes
+SET nlink = nlink - 1,
+    ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+
+-- name: ClearInodeNlinkAndTouchCtime :one
+UPDATE inodes
+SET nlink = 0,
+    ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+
+-- name: DecrementInodeNlinkAndTouch :exec
+UPDATE inodes
+SET nlink = nlink - 1,
+    mtime = NOW(),
+    ctime = NOW()
+WHERE ino = $1;
+
+
 
 

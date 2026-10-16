@@ -77,6 +77,7 @@ var (
 	ErrIsDir           = errors.New("meta: is a directory")
 	ErrPerm            = errors.New("meta: operation not permitted")
 	ErrAlreadyExists   = errors.New("meta: entry already exists")
+	ErrNotEmpty        = errors.New("meta: directory not empty")
 )
 
 // Inode 表示文件系统节点的领域实体。

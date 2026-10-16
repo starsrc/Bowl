@@ -9,13 +9,19 @@ import (
 )
 
 type Querier interface {
+	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error)
 	CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error)
+	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
+	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
+	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
+	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
+	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	TouchInodeTimestamps(ctx context.Context, ino int64) error

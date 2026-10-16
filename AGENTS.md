@@ -7,7 +7,7 @@
   - `task goose:storage:up` / `down` / `status`：执行 `services/storage/db/migrations` 数据库迁移（默认 DSN：`postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable`，共享本地容器 `aether-postgres`）。
 - **跨仓事务契约与 Mock 规范**：
   - 事务管理依赖 `github.com/starsrc/Aether/pkg/tx`（`Transactor[Querier]`、`ExecTx`、`WithReadOnly()`、`WithIsoLevel(...)`）。
-  - [`services/storage/.mockery.yaml`](services/storage/.mockery.yaml) 启用了 `unroll-variadic: true`。对 `ExecTx(ctx, fn, opts ...tx.Option)` 打桩时，若被测代码未传 `opts`，底层 `mock.On` 仅匹配 `(ctx, fn)` 两个参数；若传入了 `opts`，则按展开后的变参顺序逐个匹配。
+  - [`services/storage/.mockery.yml`](services/storage/.mockery.yml) 启用了 `unroll-variadic: true`。对 `ExecTxWithOptions(ctx, fn, opts ...tx.Option)` 打桩时，若被测代码未传 `opts`，底层 `mock.On` 仅匹配 `(ctx, fn)` 两个参数；若传入了 `opts`，则按展开后的变参顺序逐个匹配。
 
 ## Agent skills
 

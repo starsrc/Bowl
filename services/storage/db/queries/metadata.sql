@@ -15,19 +15,6 @@ FROM inodes
 WHERE ino = $1
 FOR UPDATE;
 
--- name: UpdateInodeAttr :one
-UPDATE inodes
-SET
-  mode = $2,
-  size = $3,
-  uid = $4,
-  gid = $5,
-  atime = CASE WHEN @set_atime_now::boolean THEN NOW() ELSE @atime::timestamptz END,
-  mtime = CASE WHEN @set_mtime_now::boolean THEN NOW() ELSE @mtime::timestamptz END,
-  ctime = NOW()
-WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime;
-
 -- name: CreateInode :one
 INSERT INTO inodes (mode, nlink, uid, gid, rdev)
 VALUES ($1, $2, $3, $4, $5)

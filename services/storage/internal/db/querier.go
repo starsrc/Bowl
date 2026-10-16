@@ -15,7 +15,6 @@ type Querier interface {
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
-	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
 }
 
 var _ Querier = (*Queries)(nil)

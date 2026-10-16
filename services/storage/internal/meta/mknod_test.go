@@ -22,6 +22,22 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
+func setupMockWriteTx(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier) {
+	mockStore.EXPECT().
+		ExecTxWithOptions(
+			mock.Anything,
+			mock.Anything,
+		).
+		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			cfg := tx.ApplyOptions(opts...)
+			if cfg.AccessMode == tx.ReadOnly {
+				return fmt.Errorf("expected write transaction, got read-only")
+			}
+			return fn(mockQuerier)
+		}).
+		Once()
+}
+
 func TestMknod_PositivePath(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Microsecond)
@@ -629,6 +645,34 @@ func TestMknod_NegativeCases(t *testing.T) {
 					mockQuerier.AssertExpectations(t)
 				})
 			}
+
+			// 测试场景 3: 父节点为非目录且 nlink 为 0 时优先返回 ErrNotDir 而非 ErrNotFound
+			t.Run(fmt.Sprintf("父节点为%s且nlink为0优先返回 ErrNotDir", dt.typeName), func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mgr := meta.New(mockStore)
+
+				setupMockWriteTx(mockStore, mockQuerier)
+
+				nonDirParent := baseParentRow
+				nonDirParent.Mode = int32(dt.mode)
+				nonDirParent.Nlink = 0
+
+				mockQuerier.EXPECT().
+					GetInodeForUpdate(mock.Anything, int64(parentIno)).
+					Return(nonDirParent, nil).
+					Once()
+
+				inode, err := mgr.Mknod(ctx, meta.MknodParams{
+					ParentIno: parentIno,
+					Name:      "child",
+					Mode:      meta.S_IFREG | 0o644,
+				})
+				assert.Nil(t, inode)
+				assert.ErrorIs(t, err, meta.ErrNotDir)
+				assert.NotErrorIs(t, err, meta.ErrNotFound)
+				mockQuerier.AssertExpectations(t)
+			})
 		}
 	})
 

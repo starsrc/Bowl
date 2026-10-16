@@ -15,11 +15,6 @@ service StorageService {
   // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   rpc Lookup(LookupRequest) returns (LookupResponse);
 
-  // SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
-  // 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
-  // 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
-  rpc SetAttr(SetAttrRequest) returns (SetAttrResponse);
-
   // Mknod 在指定父目录下创建常规文件或特殊设备节点。
   // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
   // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -51,65 +46,6 @@ message LookupResponse {
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
-}
-
-// SetAttrRequest 定义 SetAttr 接口输入参数。
-// 遵循按需部分更新语义，未显式设置的属性保持原值不变。
-message SetAttrRequest {
-  option (buf.validate.message).cel = {
-    id: "setattr_atime_conflict"
-    message: "atime and atime_now cannot both be set"
-    expression: "!(has(this.atime) && this.atime_now)"
-  };
-  option (buf.validate.message).cel = {
-    id: "setattr_mtime_conflict"
-    message: "mtime and mtime_now cannot both be set"
-    expression: "!(has(this.mtime) && this.mtime_now)"
-  };
-  option (buf.validate.message).cel = {
-    id: "setattr_has_update"
-    message: "at least one attribute must be updated"
-    expression: "has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_now"
-  };
-
-  // 待修改属性的目标 Inode 编号。
-  uint64 ino = 1 [
-    (buf.validate.field).uint64.gt = 0,
-    (buf.validate.field).uint64.lte = 9223372036854775807
-  ];
-
-  // 待修改的文件模式与权限位（不超过 0o177777）。
-  optional uint32 mode = 2 [(buf.validate.field).uint32.lte = 65535];
-
-  // 待修改的属主用户 ID。
-  optional uint32 uid = 3;
-
-  // 待修改的属组 ID。
-  optional uint32 gid = 4;
-
-  // 待修改的文件物理大小（字节数）。
-  optional uint64 size = 5 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 待修改的最后访问时间。
-  optional google.protobuf.Timestamp atime = 6;
-
-  // 待修改的最后修改时间。
-  optional google.protobuf.Timestamp mtime = 7;
-
-  // 是否将最后访问时间设置为当前服务端时间。与 atime 互斥。
-  bool atime_now = 8;
-
-  // 是否将最后修改时间设置为当前服务端时间。与 mtime 互斥。
-  bool mtime_now = 9;
-}
-
-// SetAttrResponse 包含更新后的 Inode 实体元数据及内核属性缓存时长。
-message SetAttrResponse {
-  // 更新后的目标 Inode 实体元数据。
-  Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
-  double attr_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 }
 
 // MknodRequest 定义 Mknod 接口输入参数。

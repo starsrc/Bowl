@@ -143,180 +143,6 @@ func (x *LookupResponse) GetAttrTimeoutSeconds() float64 {
 	return 0
 }
 
-// SetAttrRequest 定义 SetAttr 接口输入参数。
-// 遵循按需部分更新语义，未显式设置的属性保持原值不变。
-type SetAttrRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// 待修改属性的目标 Inode 编号。
-	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
-	// 待修改的文件模式与权限位（不超过 0o177777）。
-	Mode *uint32 `protobuf:"varint,2,opt,name=mode,proto3,oneof" json:"mode,omitempty"`
-	// 待修改的属主用户 ID。
-	Uid *uint32 `protobuf:"varint,3,opt,name=uid,proto3,oneof" json:"uid,omitempty"`
-	// 待修改的属组 ID。
-	Gid *uint32 `protobuf:"varint,4,opt,name=gid,proto3,oneof" json:"gid,omitempty"`
-	// 待修改的文件物理大小（字节数）。
-	Size *uint64 `protobuf:"varint,5,opt,name=size,proto3,oneof" json:"size,omitempty"`
-	// 待修改的最后访问时间。
-	Atime *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=atime,proto3,oneof" json:"atime,omitempty"`
-	// 待修改的最后修改时间。
-	Mtime *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=mtime,proto3,oneof" json:"mtime,omitempty"`
-	// 是否将最后访问时间设置为当前服务端时间。与 atime 互斥。
-	AtimeNow bool `protobuf:"varint,8,opt,name=atime_now,json=atimeNow,proto3" json:"atime_now,omitempty"`
-	// 是否将最后修改时间设置为当前服务端时间。与 mtime 互斥。
-	MtimeNow      bool `protobuf:"varint,9,opt,name=mtime_now,json=mtimeNow,proto3" json:"mtime_now,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetAttrRequest) Reset() {
-	*x = SetAttrRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetAttrRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetAttrRequest) ProtoMessage() {}
-
-func (x *SetAttrRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetAttrRequest.ProtoReflect.Descriptor instead.
-func (*SetAttrRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *SetAttrRequest) GetIno() uint64 {
-	if x != nil {
-		return x.Ino
-	}
-	return 0
-}
-
-func (x *SetAttrRequest) GetMode() uint32 {
-	if x != nil && x.Mode != nil {
-		return *x.Mode
-	}
-	return 0
-}
-
-func (x *SetAttrRequest) GetUid() uint32 {
-	if x != nil && x.Uid != nil {
-		return *x.Uid
-	}
-	return 0
-}
-
-func (x *SetAttrRequest) GetGid() uint32 {
-	if x != nil && x.Gid != nil {
-		return *x.Gid
-	}
-	return 0
-}
-
-func (x *SetAttrRequest) GetSize() uint64 {
-	if x != nil && x.Size != nil {
-		return *x.Size
-	}
-	return 0
-}
-
-func (x *SetAttrRequest) GetAtime() *timestamppb.Timestamp {
-	if x != nil {
-		return x.Atime
-	}
-	return nil
-}
-
-func (x *SetAttrRequest) GetMtime() *timestamppb.Timestamp {
-	if x != nil {
-		return x.Mtime
-	}
-	return nil
-}
-
-func (x *SetAttrRequest) GetAtimeNow() bool {
-	if x != nil {
-		return x.AtimeNow
-	}
-	return false
-}
-
-func (x *SetAttrRequest) GetMtimeNow() bool {
-	if x != nil {
-		return x.MtimeNow
-	}
-	return false
-}
-
-// SetAttrResponse 包含更新后的 Inode 实体元数据及内核属性缓存时长。
-type SetAttrResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// 更新后的目标 Inode 实体元数据。
-	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
-	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
-	AttrTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *SetAttrResponse) Reset() {
-	*x = SetAttrResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetAttrResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetAttrResponse) ProtoMessage() {}
-
-func (x *SetAttrResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetAttrResponse.ProtoReflect.Descriptor instead.
-func (*SetAttrResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *SetAttrResponse) GetInode() *Inode {
-	if x != nil {
-		return x.Inode
-	}
-	return nil
-}
-
-func (x *SetAttrResponse) GetAttrTimeoutSeconds() float64 {
-	if x != nil {
-		return x.AttrTimeoutSeconds
-	}
-	return 0
-}
-
 // MknodRequest 定义 Mknod 接口输入参数。
 type MknodRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -339,7 +165,7 @@ type MknodRequest struct {
 
 func (x *MknodRequest) Reset() {
 	*x = MknodRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[4]
+	mi := &file_storage_v1_storage_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +177,7 @@ func (x *MknodRequest) String() string {
 func (*MknodRequest) ProtoMessage() {}
 
 func (x *MknodRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[4]
+	mi := &file_storage_v1_storage_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +190,7 @@ func (x *MknodRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MknodRequest.ProtoReflect.Descriptor instead.
 func (*MknodRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{4}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *MknodRequest) GetParentIno() uint64 {
@@ -424,7 +250,7 @@ type MknodResponse struct {
 
 func (x *MknodResponse) Reset() {
 	*x = MknodResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[5]
+	mi := &file_storage_v1_storage_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -436,7 +262,7 @@ func (x *MknodResponse) String() string {
 func (*MknodResponse) ProtoMessage() {}
 
 func (x *MknodResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[5]
+	mi := &file_storage_v1_storage_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -449,7 +275,7 @@ func (x *MknodResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MknodResponse.ProtoReflect.Descriptor instead.
 func (*MknodResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{5}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *MknodResponse) GetInode() *Inode {
@@ -488,7 +314,7 @@ type Inode struct {
 
 func (x *Inode) Reset() {
 	*x = Inode{}
-	mi := &file_storage_v1_storage_proto_msgTypes[6]
+	mi := &file_storage_v1_storage_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -500,7 +326,7 @@ func (x *Inode) String() string {
 func (*Inode) ProtoMessage() {}
 
 func (x *Inode) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[6]
+	mi := &file_storage_v1_storage_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -513,7 +339,7 @@ func (x *Inode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inode.ProtoReflect.Descriptor instead.
 func (*Inode) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{6}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Inode) GetIno() uint64 {
@@ -568,7 +394,7 @@ type InodeAttribute struct {
 
 func (x *InodeAttribute) Reset() {
 	*x = InodeAttribute{}
-	mi := &file_storage_v1_storage_proto_msgTypes[7]
+	mi := &file_storage_v1_storage_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -580,7 +406,7 @@ func (x *InodeAttribute) String() string {
 func (*InodeAttribute) ProtoMessage() {}
 
 func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[7]
+	mi := &file_storage_v1_storage_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -593,7 +419,7 @@ func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InodeAttribute.ProtoReflect.Descriptor instead.
 func (*InodeAttribute) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{7}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InodeAttribute) GetMode() uint32 {
@@ -686,30 +512,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x0eLookupResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xb4\x06\n" +
-	"\x0eSetAttrRequest\x12#\n" +
-	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\"\n" +
-	"\x04mode\x18\x02 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03H\x00R\x04mode\x88\x01\x01\x12\x15\n" +
-	"\x03uid\x18\x03 \x01(\rH\x01R\x03uid\x88\x01\x01\x12\x15\n" +
-	"\x03gid\x18\x04 \x01(\rH\x02R\x03gid\x88\x01\x01\x12(\n" +
-	"\x04size\x18\x05 \x01(\x04B\x0f\xbaH\f2\n" +
-	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fH\x03R\x04size\x88\x01\x01\x125\n" +
-	"\x05atime\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampH\x04R\x05atime\x88\x01\x01\x125\n" +
-	"\x05mtime\x18\a \x01(\v2\x1a.google.protobuf.TimestampH\x05R\x05mtime\x88\x01\x01\x12\x1b\n" +
-	"\tatime_now\x18\b \x01(\bR\batimeNow\x12\x1b\n" +
-	"\tmtime_now\x18\t \x01(\bR\bmtimeNow:\xa2\x03\xbaH\x9e\x03\x1af\n" +
-	"\x16setattr_atime_conflict\x12&atime and atime_now cannot both be set\x1a$!(has(this.atime) && this.atime_now)\x1af\n" +
-	"\x16setattr_mtime_conflict\x12&mtime and mtime_now cannot both be set\x1a$!(has(this.mtime) && this.mtime_now)\x1a\xcb\x01\n" +
-	"\x12setattr_has_update\x12&at least one attribute must be updated\x1a\x8c\x01has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_nowB\a\n" +
-	"\x05_modeB\x06\n" +
-	"\x04_uidB\x06\n" +
-	"\x04_gidB\a\n" +
-	"\x05_sizeB\b\n" +
-	"\x06_atimeB\b\n" +
-	"\x06_mtime\"\x84\x01\n" +
-	"\x0fSetAttrResponse\x12/\n" +
-	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xc6\x01\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xc6\x01\n" +
 	"\fMknodRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
@@ -740,10 +543,9 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x05atime\x120\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\x05mtime\x120\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\x05ctime2\xd3\x01\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\x05ctime2\x8f\x01\n" +
 	"\x0eStorageService\x12?\n" +
-	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
-	"\aSetAttr\x12\x1a.storage.v1.SetAttrRequest\x1a\x1b.storage.v1.SetAttrResponse\x12<\n" +
+	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12<\n" +
 	"\x05Mknod\x12\x18.storage.v1.MknodRequest\x1a\x19.storage.v1.MknodResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
 
 var (
@@ -758,39 +560,32 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 	return file_storage_v1_storage_proto_rawDescData
 }
 
-var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_storage_v1_storage_proto_goTypes = []any{
 	(*LookupRequest)(nil),         // 0: storage.v1.LookupRequest
 	(*LookupResponse)(nil),        // 1: storage.v1.LookupResponse
-	(*SetAttrRequest)(nil),        // 2: storage.v1.SetAttrRequest
-	(*SetAttrResponse)(nil),       // 3: storage.v1.SetAttrResponse
-	(*MknodRequest)(nil),          // 4: storage.v1.MknodRequest
-	(*MknodResponse)(nil),         // 5: storage.v1.MknodResponse
-	(*Inode)(nil),                 // 6: storage.v1.Inode
-	(*InodeAttribute)(nil),        // 7: storage.v1.InodeAttribute
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*MknodRequest)(nil),          // 2: storage.v1.MknodRequest
+	(*MknodResponse)(nil),         // 3: storage.v1.MknodResponse
+	(*Inode)(nil),                 // 4: storage.v1.Inode
+	(*InodeAttribute)(nil),        // 5: storage.v1.InodeAttribute
+	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
-	6,  // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
-	8,  // 1: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
-	8,  // 2: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
-	6,  // 3: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
-	6,  // 4: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
-	7,  // 5: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
-	8,  // 6: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
-	8,  // 7: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
-	8,  // 8: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
-	0,  // 9: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
-	2,  // 10: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
-	4,  // 11: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
-	1,  // 12: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
-	3,  // 13: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
-	5,  // 14: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
-	12, // [12:15] is the sub-list for method output_type
-	9,  // [9:12] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	4, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
+	4, // 1: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
+	5, // 2: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
+	6, // 3: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
+	6, // 4: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
+	6, // 5: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
+	0, // 6: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
+	2, // 7: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
+	1, // 8: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
+	3, // 9: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
+	8, // [8:10] is the sub-list for method output_type
+	6, // [6:8] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_storage_v1_storage_proto_init() }
@@ -798,14 +593,13 @@ func file_storage_v1_storage_proto_init() {
 	if File_storage_v1_storage_proto != nil {
 		return
 	}
-	file_storage_v1_storage_proto_msgTypes[2].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_v1_storage_proto_rawDesc), len(file_storage_v1_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

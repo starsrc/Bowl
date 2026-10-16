@@ -9,10 +9,11 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
+// TestMknodRequestValidation 验证 MknodRequest 的字段约束与边界逻辑。
 func TestMknodRequestValidation(t *testing.T) {
 	validator, err := protovalidate.New()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
 	for _, tc := range []struct {
@@ -27,7 +28,7 @@ func TestMknodRequestValidation(t *testing.T) {
 	}{
 		// 正向边界用例
 		{
-			name:      "ordinary regular file",
+			name:      "合法: 普通文件",
 			parentIno: 1,
 			entryName: "file.txt",
 			mode:      0o100644,
@@ -37,7 +38,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "name exactly 255 bytes",
+			name:      "合法: 节点名称恰好 255 字节",
 			parentIno: 1,
 			entryName: strings.Repeat("a", 255),
 			mode:      0o100644,
@@ -47,7 +48,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "multibyte name exactly 255 bytes",
+			name:      "合法: 多字节 UTF-8 节点名称恰好 255 字节",
 			parentIno: 1,
 			entryName: strings.Repeat("界", 85),
 			mode:      0o100644,
@@ -57,7 +58,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "newline allowed in name",
+			name:      "合法: 节点名称包含换行符",
 			parentIno: 1,
 			entryName: "a\nb",
 			mode:      0o100644,
@@ -67,7 +68,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "parent_ino upper boundary math.MaxInt64",
+			name:      "合法: 父节点 parent_ino 处于正整数上限 math.MaxInt64",
 			parentIno: math.MaxInt64,
 			entryName: "file.txt",
 			mode:      0o100644,
@@ -77,7 +78,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "mode lower boundary 1",
+			name:      "合法: mode 处于有效下限 1",
 			parentIno: 1,
 			entryName: "file.txt",
 			mode:      1,
@@ -87,7 +88,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "mode upper boundary 0o177777 (65535)",
+			name:      "合法: mode 处于有效上限 0o177777 (65535)",
 			parentIno: 1,
 			entryName: "file.txt",
 			mode:      65535,
@@ -97,7 +98,7 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
-			name:      "device file with rdev",
+			name:      "合法: 设备文件携带 rdev",
 			parentIno: 1,
 			entryName: "null",
 			mode:      0o020666,
@@ -109,15 +110,22 @@ func TestMknodRequestValidation(t *testing.T) {
 
 		// 负向边界用例 - parent_ino
 		{
-			name:      "zero parent_ino invalid",
+			name:      "非法: parent_ino 为 0",
 			parentIno: 0,
 			entryName: "file.txt",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "parent_ino exceeding math.MaxInt64 invalid",
+			name:      "非法: parent_ino 超过 math.MaxInt64",
 			parentIno: uint64(math.MaxInt64) + 1,
+			entryName: "file.txt",
+			mode:      0o100644,
+			valid:     false,
+		},
+		{
+			name:      "非法: parent_ino 为 uint64 最大值 math.MaxUint64",
+			parentIno: math.MaxUint64,
 			entryName: "file.txt",
 			mode:      0o100644,
 			valid:     false,
@@ -125,63 +133,63 @@ func TestMknodRequestValidation(t *testing.T) {
 
 		// 负向边界用例 - name
 		{
-			name:      "empty name invalid",
+			name:      "非法: 节点名称为空",
 			parentIno: 1,
 			entryName: "",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "name 256 bytes invalid",
+			name:      "非法: 节点名称达到 256 字节",
 			parentIno: 1,
 			entryName: strings.Repeat("a", 256),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "multibyte name too long invalid",
+			name:      "非法: 多字节 UTF-8 节点名称超过 255 字节",
 			parentIno: 1,
 			entryName: strings.Repeat("界", 86),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "slash in name invalid",
+			name:      "非法: 节点名称包含斜杠 /",
 			parentIno: 1,
 			entryName: "a/b",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "leading slash in name invalid",
+			name:      "非法: 节点名称以斜杠 / 开头",
 			parentIno: 1,
 			entryName: "/file",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "embedded NUL in name invalid",
+			name:      "非法: 节点名称中间包含空字符 NUL",
 			parentIno: 1,
 			entryName: "a\x00b",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "NUL only in name invalid",
+			name:      "非法: 节点名称仅包含空字符 NUL",
 			parentIno: 1,
 			entryName: "\x00",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "leading NUL in name invalid",
+			name:      "非法: 节点名称以空字符 NUL 开头",
 			parentIno: 1,
 			entryName: "\x00file",
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
-			name:      "trailing NUL in name invalid",
+			name:      "非法: 节点名称以空字符 NUL 结尾",
 			parentIno: 1,
 			entryName: "file\x00",
 			mode:      0o100644,
@@ -190,14 +198,14 @@ func TestMknodRequestValidation(t *testing.T) {
 
 		// 负向边界用例 - mode
 		{
-			name:      "zero mode invalid",
+			name:      "非法: mode 为 0",
 			parentIno: 1,
 			entryName: "file.txt",
 			mode:      0,
 			valid:     false,
 		},
 		{
-			name:      "mode exceeding 65535 invalid",
+			name:      "非法: mode 超过 65535",
 			parentIno: 1,
 			entryName: "file.txt",
 			mode:      65536,
@@ -214,17 +222,21 @@ func TestMknodRequestValidation(t *testing.T) {
 				Rdev:      tc.rdev,
 			}
 			err := validator.Validate(req)
-			if (err == nil) != tc.valid {
-				t.Fatalf("valid = %v, validation error = %v", tc.valid, err)
+			if tc.valid && err != nil {
+				t.Fatalf("用例 %q 期望验证通过，但返回错误: %v", tc.name, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("用例 %q 期望验证失败，但返回成功", tc.name)
 			}
 		})
 	}
 }
 
+// TestMknodResponseValidation 验证 MknodResponse 的约束规则。
 func TestMknodResponseValidation(t *testing.T) {
 	validator, err := protovalidate.New()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
 	validInode := &storagev1.Inode{
@@ -239,40 +251,40 @@ func TestMknodResponseValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		inode        *storagev1.Inode
-		entryTimeout doubleEntryTimeout
-		attrTimeout  doubleAttrTimeout
+		entryTimeout float64
+		attrTimeout  float64
 		valid        bool
 	}{
 		{
-			name:         "valid response with positive timeouts",
+			name:         "合法: 响应包含正常超时时长",
 			inode:        validInode,
 			entryTimeout: 1.0,
 			attrTimeout:  1.0,
 			valid:        true,
 		},
 		{
-			name:         "valid response with zero timeouts",
+			name:         "合法: 响应包含零超时时长",
 			inode:        validInode,
 			entryTimeout: 0.0,
 			attrTimeout:  0.0,
 			valid:        true,
 		},
 		{
-			name:         "nil inode invalid",
+			name:         "非法: inode 为空指针",
 			inode:        nil,
 			entryTimeout: 1.0,
 			attrTimeout:  1.0,
 			valid:        false,
 		},
 		{
-			name:         "negative entry timeout invalid",
+			name:         "非法: entry_timeout 为负数",
 			inode:        validInode,
 			entryTimeout: -0.1,
 			attrTimeout:  1.0,
 			valid:        false,
 		},
 		{
-			name:         "negative attr timeout invalid",
+			name:         "非法: attr_timeout 为负数",
 			inode:        validInode,
 			entryTimeout: 1.0,
 			attrTimeout:  -0.1,
@@ -282,18 +294,16 @@ func TestMknodResponseValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := &storagev1.MknodResponse{
 				Inode:               tc.inode,
-				EntryTimeoutSeconds: float64(tc.entryTimeout),
-				AttrTimeoutSeconds:  float64(tc.attrTimeout),
+				EntryTimeoutSeconds: tc.entryTimeout,
+				AttrTimeoutSeconds:  tc.attrTimeout,
 			}
 			err := validator.Validate(resp)
-			if (err == nil) != tc.valid {
-				t.Fatalf("valid = %v, validation error = %v", tc.valid, err)
+			if tc.valid && err != nil {
+				t.Fatalf("用例 %q 期望验证通过，但返回错误: %v", tc.name, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("用例 %q 期望验证失败，但返回成功", tc.name)
 			}
 		})
 	}
 }
-
-type (
-	doubleEntryTimeout = float64
-	doubleAttrTimeout  = float64
-)

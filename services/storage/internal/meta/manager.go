@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/fx"
 
 	"github.com/starsrc/Aether/pkg/tx"
@@ -19,7 +18,6 @@ import (
 // Manager 定义元数据领域层管理器接口。
 type Manager interface {
 	Lookup(ctx context.Context, parentIno uint64, name string) (*Inode, error)
-	SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (*Inode, error)
 	Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 }
 
@@ -115,87 +113,6 @@ func newInodeFromDB(target db.Inode) *Inode {
 	}
 }
 
-// SetAttr 修改指定 Inode 的属性并实现读写事务悲观锁更新与时间戳联动。
-func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (*Inode, error) {
-	var result *Inode
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		current, err := q.GetInodeForUpdate(ctx, int64(ino))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get inode for update %d: %w", ino, err)
-		}
-
-		targetMode := uint32(current.Mode)
-		if input.Mode != nil {
-			targetMode = (targetMode & S_IFMT) | (*input.Mode & PermMask)
-		}
-
-		targetUID := uint32(current.Uid)
-		if input.UID != nil {
-			targetUID = *input.UID
-		}
-
-		targetGID := uint32(current.Gid)
-		if input.GID != nil {
-			targetGID = *input.GID
-		}
-
-		targetSize := uint64(current.Size)
-		if input.Size != nil {
-			targetSize = *input.Size
-		}
-
-		var setAtimeNow bool
-		var atime pgtype.Timestamptz
-		if input.AtimeNow {
-			setAtimeNow = true
-		} else if input.Atime != nil {
-			atime = pgtype.Timestamptz{Time: *input.Atime, Valid: true}
-		} else {
-			atime = current.Atime
-		}
-
-		var setMtimeNow bool
-		var mtime pgtype.Timestamptz
-		if input.MtimeNow || (input.Size != nil && input.Mtime == nil) {
-			setMtimeNow = true
-		} else if input.Mtime != nil {
-			mtime = pgtype.Timestamptz{Time: *input.Mtime, Valid: true}
-		} else {
-			mtime = current.Mtime
-		}
-
-		updated, err := q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
-			Ino:         int64(ino),
-			Mode:        int32(targetMode),
-			Size:        int64(targetSize),
-			Uid:         int32(targetUID),
-			Gid:         int32(targetGID),
-			SetAtimeNow: setAtimeNow,
-			Atime:       atime,
-			SetMtimeNow: setMtimeNow,
-			Mtime:       mtime,
-		})
-		if err != nil {
-			return fmt.Errorf("update inode attr %d: %w", ino, err)
-		}
-
-		result = newInodeFromDB(updated)
-		return nil
-	})
-
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("setattr tx: %w", err)
-	}
-
-	return result, nil
-}
-
 // Mknod 创建特殊文件或普通文件节点并与父目录联动。
 func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error) {
 	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
@@ -230,12 +147,12 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 			return fmt.Errorf("get parent inode for update %d: %w", params.ParentIno, err)
 		}
 
-		if parent.Nlink == 0 {
-			return ErrNotFound
-		}
-
 		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
 			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
 		}
 
 		if params.Name == "." || params.Name == ".." {

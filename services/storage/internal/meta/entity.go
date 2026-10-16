@@ -20,17 +20,6 @@ const (
 	MaxFileNameBytes        = 255
 )
 
-// SetAttrInput 定义修改 Inode 属性的输入参数。
-type SetAttrInput struct {
-	Mode     *uint32
-	UID      *uint32
-	GID      *uint32
-	Size     *uint64
-	Atime    *time.Time
-	Mtime    *time.Time
-	AtimeNow bool
-	MtimeNow bool
-}
 
 // MknodParams 定义创建节点的输入参数。
 type MknodParams struct {

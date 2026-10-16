@@ -5,10 +5,14 @@ import (
 	"time"
 )
 
-// POSIX 文件类型掩码与目录常量。
+// POSIX 文件类型掩码与权限特权位常量。
 const (
 	S_IFMT   uint32 = 0o170000
 	S_IFDIR  uint32 = 0o040000
+	S_IFREG  uint32 = 0o100000
+	S_ISUID  uint32 = 0o4000
+	S_ISGID  uint32 = 0o2000
+	S_ISVTX  uint32 = 0o1000
 	PermMask uint32 = 0o7777
 )
 
@@ -24,12 +28,12 @@ type SetAttrInput struct {
 	MtimeNow bool
 }
 
-
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")
 	ErrNotFound        = errors.New("meta: not found")
 	ErrNotDir          = errors.New("meta: not a directory")
+	ErrIsDir           = errors.New("meta: is a directory")
 )
 
 // Inode 表示文件系统节点的领域实体。

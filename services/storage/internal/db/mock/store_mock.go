@@ -303,3 +303,135 @@ func (_c *MockStore_GetInodeByEntry_Call) RunAndReturn(run func(ctx context.Cont
 	_c.Call.Return(run)
 	return _c
 }
+
+// GetInodeForUpdate provides a mock function for the type MockStore
+func (_mock *MockStore) GetInodeForUpdate(ctx context.Context, ino int64) (db.Inode, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetInodeForUpdate")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Inode, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Inode); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetInodeForUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetInodeForUpdate'
+type MockStore_GetInodeForUpdate_Call struct {
+	*mock.Call
+}
+
+// GetInodeForUpdate is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) GetInodeForUpdate(ctx any, ino any) *MockStore_GetInodeForUpdate_Call {
+	return &MockStore_GetInodeForUpdate_Call{Call: _e.mock.On("GetInodeForUpdate", ctx, ino)}
+}
+
+func (_c *MockStore_GetInodeForUpdate_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_GetInodeForUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetInodeForUpdate_Call) Return(inode db.Inode, err error) *MockStore_GetInodeForUpdate_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_GetInodeForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateInodeAttr provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateInodeAttr(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateInodeAttr")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateInodeAttrParams) (db.Inode, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateInodeAttrParams) db.Inode); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateInodeAttrParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_UpdateInodeAttr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateInodeAttr'
+type MockStore_UpdateInodeAttr_Call struct {
+	*mock.Call
+}
+
+// UpdateInodeAttr is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateInodeAttrParams
+func (_e *MockStore_Expecter) UpdateInodeAttr(ctx any, arg any) *MockStore_UpdateInodeAttr_Call {
+	return &MockStore_UpdateInodeAttr_Call{Call: _e.mock.On("UpdateInodeAttr", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateInodeAttr_Call) Run(run func(ctx context.Context, arg db.UpdateInodeAttrParams)) *MockStore_UpdateInodeAttr_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateInodeAttrParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateInodeAttrParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeAttr_Call) Return(inode db.Inode, err error) *MockStore_UpdateInodeAttr_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeAttr_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error)) *MockStore_UpdateInodeAttr_Call {
+	_c.Call.Return(run)
+	return _c
+}

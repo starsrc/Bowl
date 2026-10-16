@@ -7,9 +7,23 @@ import (
 
 // POSIX 文件类型掩码与目录常量。
 const (
-	S_IFMT  uint32 = 0o170000
-	S_IFDIR uint32 = 0o040000
+	S_IFMT   uint32 = 0o170000
+	S_IFDIR  uint32 = 0o040000
+	PermMask uint32 = 0o7777
 )
+
+// SetAttrInput 定义修改 Inode 属性的输入参数。
+type SetAttrInput struct {
+	Mode     *uint32
+	UID      *uint32
+	GID      *uint32
+	Size     *uint64
+	Atime    *time.Time
+	Mtime    *time.Time
+	AtimeNow bool
+	MtimeNow bool
+}
+
 
 // 领域哨兵错误。
 var (

@@ -18,3 +18,8 @@ func TestNewStore(t *testing.T) {
 func TestModule(t *testing.T) {
 	assert.NotNil(t, db.Module)
 }
+
+func TestQuerierInterface(t *testing.T) {
+	var _ db.Querier = (*db.Queries)(nil)
+}
+

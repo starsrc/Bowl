@@ -992,6 +992,129 @@ func (_c *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run fu
 	return _c
 }
 
+// IsSubdirectory provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) IsSubdirectory(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for IsSubdirectory")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.IsSubdirectoryParams) (bool, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.IsSubdirectoryParams) bool); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.IsSubdirectoryParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_IsSubdirectory_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'IsSubdirectory'
+type MockQuerier_IsSubdirectory_Call struct {
+	*mock.Call
+}
+
+// IsSubdirectory is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.IsSubdirectoryParams
+func (_e *MockQuerier_Expecter) IsSubdirectory(ctx any, arg any) *MockQuerier_IsSubdirectory_Call {
+	return &MockQuerier_IsSubdirectory_Call{Call: _e.mock.On("IsSubdirectory", ctx, arg)}
+}
+
+func (_c *MockQuerier_IsSubdirectory_Call) Run(run func(ctx context.Context, arg db.IsSubdirectoryParams)) *MockQuerier_IsSubdirectory_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.IsSubdirectoryParams
+		if args[1] != nil {
+			arg1 = args[1].(db.IsSubdirectoryParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_IsSubdirectory_Call) Return(b bool, err error) *MockQuerier_IsSubdirectory_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockQuerier_IsSubdirectory_Call) RunAndReturn(run func(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error)) *MockQuerier_IsSubdirectory_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// TouchInodeCtime provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) TouchInodeCtime(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for TouchInodeCtime")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_TouchInodeCtime_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TouchInodeCtime'
+type MockQuerier_TouchInodeCtime_Call struct {
+	*mock.Call
+}
+
+// TouchInodeCtime is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) TouchInodeCtime(ctx any, ino any) *MockQuerier_TouchInodeCtime_Call {
+	return &MockQuerier_TouchInodeCtime_Call{Call: _e.mock.On("TouchInodeCtime", ctx, ino)}
+}
+
+func (_c *MockQuerier_TouchInodeCtime_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_TouchInodeCtime_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_TouchInodeCtime_Call) Return(err error) *MockQuerier_TouchInodeCtime_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_TouchInodeCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockQuerier_TouchInodeCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // TouchInodeTimestamps provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) TouchInodeTimestamps(ctx context.Context, ino int64) error {
 	ret := _mock.Called(ctx, ino)
@@ -1045,6 +1168,63 @@ func (_c *MockQuerier_TouchInodeTimestamps_Call) Return(err error) *MockQuerier_
 }
 
 func (_c *MockQuerier_TouchInodeTimestamps_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockQuerier_TouchInodeTimestamps_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateEntry provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) UpdateEntry(ctx context.Context, arg db.UpdateEntryParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateEntry")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateEntryParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_UpdateEntry_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateEntry'
+type MockQuerier_UpdateEntry_Call struct {
+	*mock.Call
+}
+
+// UpdateEntry is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateEntryParams
+func (_e *MockQuerier_Expecter) UpdateEntry(ctx any, arg any) *MockQuerier_UpdateEntry_Call {
+	return &MockQuerier_UpdateEntry_Call{Call: _e.mock.On("UpdateEntry", ctx, arg)}
+}
+
+func (_c *MockQuerier_UpdateEntry_Call) Run(run func(ctx context.Context, arg db.UpdateEntryParams)) *MockQuerier_UpdateEntry_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateEntryParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateEntryParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_UpdateEntry_Call) Return(err error) *MockQuerier_UpdateEntry_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_UpdateEntry_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateEntryParams) error) *MockQuerier_UpdateEntry_Call {
 	_c.Call.Return(run)
 	return _c
 }

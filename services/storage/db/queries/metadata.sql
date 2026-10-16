@@ -101,6 +101,29 @@ SET nlink = nlink - 1,
     ctime = NOW()
 WHERE ino = $1;
 
+-- name: UpdateEntry :exec
+UPDATE entries
+SET parent_ino = $3,
+    name = $4
+WHERE parent_ino = $1 AND name = $2;
 
+-- name: TouchInodeCtime :exec
+UPDATE inodes
+SET ctime = NOW()
+WHERE ino = $1;
 
+-- name: IsSubdirectory :one
+WITH RECURSIVE ancestors AS (
+    SELECT parent_ino, 1 AS depth
+    FROM entries
+    WHERE ino = @child_ino::bigint
+    UNION ALL
+    SELECT e.parent_ino, a.depth + 1
+    FROM entries e
+    JOIN ancestors a ON e.ino = a.parent_ino
+    WHERE a.depth < 100 AND a.parent_ino > 1
+)
+SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
+    SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint
+), false)::boolean AS is_sub;
 

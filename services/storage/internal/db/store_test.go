@@ -44,7 +44,14 @@ type UnlinkRmdirQuerier interface {
 	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier 与 UnlinkRmdirQuerier 接口契约。
+// RenameQuerier 提取 Rename 原子重命名、更新目录项与递归环检测接口契约。
+type RenameQuerier interface {
+	UpdateEntry(ctx context.Context, arg db.UpdateEntryParams) error
+	TouchInodeCtime(ctx context.Context, ino int64) error
+	IsSubdirectory(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error)
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier 与 RenameQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -61,6 +68,10 @@ var (
 	_ UnlinkRmdirQuerier = (db.Querier)(nil)
 	_ UnlinkRmdirQuerier = (db.Store)(nil)
 	_ UnlinkRmdirQuerier = (*db.Queries)(nil)
+
+	_ RenameQuerier = (db.Querier)(nil)
+	_ RenameQuerier = (db.Store)(nil)
+	_ RenameQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -556,4 +567,96 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			assert.ErrorIs(t, err, expectedErr)
 		})
 	})
+
+	t.Run("UpdateEntry 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功更新目录项位置与名称", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.UpdateEntryParams{
+				ParentIno:   1,
+				Name:        "old.txt",
+				ParentIno_2: 2,
+				Name_2:      "new.txt",
+			}
+			mockQuerier.EXPECT().UpdateEntry(ctx, params).Return(nil).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.UpdateEntry(ctx, params)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.UpdateEntryParams{
+				ParentIno:   1,
+				Name:        "old.txt",
+				ParentIno_2: 2,
+				Name_2:      "new.txt",
+			}
+			expectedErr := errors.New("update entry error")
+			mockQuerier.EXPECT().UpdateEntry(ctx, params).Return(expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.UpdateEntry(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("TouchInodeCtime 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功刷新 Inode ctime", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(42)
+			mockQuerier.EXPECT().TouchInodeCtime(ctx, ino).Return(nil).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.TouchInodeCtime(ctx, ino)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(42)
+			expectedErr := errors.New("touch ctime error")
+			mockQuerier.EXPECT().TouchInodeCtime(ctx, ino).Return(expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.TouchInodeCtime(ctx, ino)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("IsSubdirectory 算子调用与参数透传", func(t *testing.T) {
+		t.Run("祖先链中包含目标目录返回 true", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.IsSubdirectoryParams{ChildIno: 30, AncestorIno: 10}
+			mockQuerier.EXPECT().IsSubdirectory(ctx, params).Return(true, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.IsSubdirectory(ctx, params)
+			require.NoError(t, err)
+			assert.True(t, res)
+		})
+
+		t.Run("非子目录关系返回 false", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.IsSubdirectoryParams{ChildIno: 10, AncestorIno: 30}
+			mockQuerier.EXPECT().IsSubdirectory(ctx, params).Return(false, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.IsSubdirectory(ctx, params)
+			require.NoError(t, err)
+			assert.False(t, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.IsSubdirectoryParams{ChildIno: 30, AncestorIno: 10}
+			expectedErr := errors.New("recursive query failed")
+			mockQuerier.EXPECT().IsSubdirectory(ctx, params).Return(false, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.IsSubdirectory(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
 }
+

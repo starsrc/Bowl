@@ -41,3 +41,11 @@ VALUES ($1, $2, $3);
 UPDATE inodes
 SET mtime = NOW(), ctime = NOW()
 WHERE ino = $1;
+
+-- name: IncrementInodeNlinkAndTouch :exec
+UPDATE inodes
+SET nlink = nlink + 1,
+    mtime = NOW(),
+    ctime = NOW()
+WHERE ino = $1;
+

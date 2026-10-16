@@ -572,10 +572,10 @@ func TestQuerier_MknodOperators(t *testing.T) {
 		t.Run("成功更新目录项位置与名称", func(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			params := db.UpdateEntryParams{
-				ParentIno:   1,
-				Name:        "old.txt",
-				ParentIno_2: 2,
-				Name_2:      "new.txt",
+				OldParentIno: 1,
+				OldName:      "old.txt",
+				NewParentIno: 2,
+				NewName:      "new.txt",
 			}
 			mockQuerier.EXPECT().UpdateEntry(ctx, params).Return(nil).Once()
 
@@ -587,10 +587,10 @@ func TestQuerier_MknodOperators(t *testing.T) {
 		t.Run("底层执行失败透传错误", func(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			params := db.UpdateEntryParams{
-				ParentIno:   1,
-				Name:        "old.txt",
-				ParentIno_2: 2,
-				Name_2:      "new.txt",
+				OldParentIno: 1,
+				OldName:      "old.txt",
+				NewParentIno: 2,
+				NewName:      "new.txt",
 			}
 			expectedErr := errors.New("update entry error")
 			mockQuerier.EXPECT().UpdateEntry(ctx, params).Return(expectedErr).Once()

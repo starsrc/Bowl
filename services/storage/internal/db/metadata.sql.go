@@ -379,7 +379,7 @@ WITH RECURSIVE ancestors AS (
     SELECT e.parent_ino, a.depth + 1
     FROM entries e
     JOIN ancestors a ON e.ino = a.parent_ino
-    WHERE a.depth < 100 AND a.parent_ino > 1
+    WHERE a.depth < 1024 AND a.parent_ino > 1
 )
 SELECT COALESCE(($1::bigint = $2::bigint) OR EXISTS (
     SELECT 1 FROM ancestors WHERE parent_ino = $2::bigint
@@ -422,24 +422,24 @@ func (q *Queries) TouchInodeTimestamps(ctx context.Context, ino int64) error {
 
 const updateEntry = `-- name: UpdateEntry :exec
 UPDATE entries
-SET parent_ino = $3,
-    name = $4
-WHERE parent_ino = $1 AND name = $2
+SET parent_ino = $1,
+    name = $2
+WHERE parent_ino = $3 AND name = $4
 `
 
 type UpdateEntryParams struct {
-	ParentIno   int64  `json:"parent_ino"`
-	Name        string `json:"name"`
-	ParentIno_2 int64  `json:"parent_ino_2"`
-	Name_2      string `json:"name_2"`
+	NewParentIno int64  `json:"new_parent_ino"`
+	NewName      string `json:"new_name"`
+	OldParentIno int64  `json:"old_parent_ino"`
+	OldName      string `json:"old_name"`
 }
 
 func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) error {
 	_, err := q.db.Exec(ctx, updateEntry,
-		arg.ParentIno,
-		arg.Name,
-		arg.ParentIno_2,
-		arg.Name_2,
+		arg.NewParentIno,
+		arg.NewName,
+		arg.OldParentIno,
+		arg.OldName,
 	)
 	return err
 }

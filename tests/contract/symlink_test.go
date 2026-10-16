@@ -308,8 +308,18 @@ func TestReadlinkResponseValidation(t *testing.T) {
 			valid:  true,
 		},
 		{
+			name:   "合法: target 恰好 4096 字节",
+			target: strings.Repeat("a", 4096),
+			valid:  true,
+		},
+		{
 			name:   "非法: 空 target",
 			target: "",
+			valid:  false,
+		},
+		{
+			name:   "非法: target 超过 4096 字节",
+			target: strings.Repeat("a", 4097),
 			valid:  false,
 		},
 	} {

@@ -261,8 +261,6 @@ func TestUnlink_InputValidation(t *testing.T) {
 		{name: "name 长度超过 255 字节", parentIno: 1, entryName: strings.Repeat("a", 256)},
 		{name: "name 包含斜杠 /", parentIno: 1, entryName: "sub/file"},
 		{name: "name 包含空字符 \\x00", parentIno: 1, entryName: "file\x00name"},
-		{name: "name 为 .", parentIno: 1, entryName: "."},
-		{name: "name 为 ..", parentIno: 1, entryName: ".."},
 	}
 
 	for _, tc := range testCases {
@@ -440,6 +438,30 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		assert.ErrorIs(t, err, meta.ErrIsDir)
 	})
 
+	t.Run("name 为 . 或 .. 时在确认父目录有效后返回 ErrInvalidArgument", func(t *testing.T) {
+		for _, name := range []string{".", ".."} {
+			t.Run(name, func(t *testing.T) {
+				mockStore := dbmock.NewMockStore(t)
+				mockQuerier := dbmock.NewMockQuerier(t)
+				mgr := meta.New(mockStore)
+
+				setupMockWriteTx(mockStore, mockQuerier)
+
+				mockQuerier.EXPECT().
+					GetInodeForUpdate(mock.Anything, int64(parentIno)).
+					Return(db.Inode{
+						Ino:   int64(parentIno),
+						Mode:  int32(meta.S_IFDIR | 0o755),
+						Nlink: 2,
+					}, nil).
+					Once()
+
+				err := mgr.Unlink(ctx, parentIno, name)
+				assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			})
+		}
+	})
+
 	t.Run("底层未捕获数据库错误返回包装错误", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
@@ -574,8 +596,6 @@ func TestRmdir_InputValidation(t *testing.T) {
 		{name: "name 长度超过 255 字节", parentIno: 1, entryName: strings.Repeat("a", 256), expectedErr: meta.ErrInvalidArgument},
 		{name: "name 包含斜杠 /", parentIno: 1, entryName: "sub/dir", expectedErr: meta.ErrInvalidArgument},
 		{name: "name 包含空字符 \\x00", parentIno: 1, entryName: "dir\x00name", expectedErr: meta.ErrInvalidArgument},
-		{name: "name 为 . 返回 ErrInvalidArgument", parentIno: 1, entryName: ".", expectedErr: meta.ErrInvalidArgument},
-		{name: "name 为 .. 返回 ErrNotEmpty (POSIX ENOTEMPTY)", parentIno: 1, entryName: "..", expectedErr: meta.ErrNotEmpty},
 	}
 
 	for _, tc := range testCases {
@@ -796,6 +816,46 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			Once()
 
 		err := mgr.Rmdir(ctx, parentIno, "nonempty_dir")
+		assert.ErrorIs(t, err, meta.ErrNotEmpty)
+	})
+
+	t.Run("name 为 . 时在确认父目录有效后返回 ErrInvalidArgument", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
+			}, nil).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, ".")
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+	})
+
+	t.Run("name 为 .. 时在确认父目录有效后返回 ErrNotEmpty (POSIX ENOTEMPTY)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
+			}, nil).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, "..")
 		assert.ErrorIs(t, err, meta.ErrNotEmpty)
 	})
 

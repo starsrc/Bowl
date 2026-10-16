@@ -700,9 +700,6 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) err
 	if len(name) == 0 || len(name) > MaxFileNameBytes || strings.ContainsAny(name, "/\x00") {
 		return ErrInvalidArgument
 	}
-	if name == "." || name == ".." {
-		return ErrInvalidArgument
-	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
 		// 第一级加锁：锁定父目录 parent_ino
@@ -720,6 +717,10 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) err
 
 		if parent.Nlink == 0 {
 			return ErrNotFound
+		}
+
+		if name == "." || name == ".." {
+			return ErrInvalidArgument
 		}
 
 		// 查询目标目录项
@@ -795,12 +796,6 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) erro
 	if len(name) == 0 || len(name) > MaxFileNameBytes || strings.ContainsAny(name, "/\x00") {
 		return ErrInvalidArgument
 	}
-	if name == "." {
-		return ErrInvalidArgument
-	}
-	if name == ".." {
-		return ErrNotEmpty
-	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
 		// 第一级加锁：锁定父目录 parent_ino
@@ -818,6 +813,13 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) erro
 
 		if parent.Nlink == 0 {
 			return ErrNotFound
+		}
+
+		if name == "." {
+			return ErrInvalidArgument
+		}
+		if name == ".." {
+			return ErrNotEmpty
 		}
 
 		// 查询目标目录项
@@ -908,9 +910,6 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	if len(params.NewName) == 0 || len(params.NewName) > MaxFileNameBytes || strings.ContainsAny(params.NewName, "/\x00") {
 		return ErrInvalidArgument
 	}
-	if params.OldName == "." || params.OldName == ".." || params.NewName == "." || params.NewName == ".." {
-		return ErrInvalidArgument
-	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
 		// 第一级加锁：按 ino 升序锁定父目录
@@ -967,6 +966,10 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			if oldParent.Nlink == 0 || newParent.Nlink == 0 {
 				return ErrNotFound
 			}
+		}
+
+		if params.OldName == "." || params.OldName == ".." || params.NewName == "." || params.NewName == ".." {
+			return ErrInvalidArgument
 		}
 
 		// 查询源目录项
@@ -1102,10 +1105,10 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 
 		// 原子更新目录项至新位置
 		if err := q.UpdateEntry(ctx, db.UpdateEntryParams{
-			ParentIno:   int64(params.OldParentIno),
-			Name:        params.OldName,
-			ParentIno_2: int64(params.NewParentIno),
-			Name_2:      params.NewName,
+			OldParentIno: int64(params.OldParentIno),
+			OldName:      params.OldName,
+			NewParentIno: int64(params.NewParentIno),
+			NewName:      params.NewName,
 		}); err != nil {
 			return fmt.Errorf("update entry %d/%s -> %d/%s: %w", params.OldParentIno, params.OldName, params.NewParentIno, params.NewName, err)
 		}

@@ -326,7 +326,10 @@ message ReadlinkRequest {
 // ReadlinkResponse 包含符号链接指向的目标路径字符串。
 message ReadlinkResponse {
   // 目标路径字符串。
-  string target = 1 [(buf.validate.field).string.min_len = 1];
+  string target = 1 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 4096
+  ];
 }
 
 // LinkRequest 定义 Link 接口输入参数。

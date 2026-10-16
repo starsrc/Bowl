@@ -103,9 +103,9 @@ WHERE ino = $1;
 
 -- name: UpdateEntry :exec
 UPDATE entries
-SET parent_ino = $3,
-    name = $4
-WHERE parent_ino = $1 AND name = $2;
+SET parent_ino = @new_parent_ino,
+    name = @new_name
+WHERE parent_ino = @old_parent_ino AND name = @old_name;
 
 -- name: TouchInodeCtime :exec
 UPDATE inodes
@@ -121,9 +121,10 @@ WITH RECURSIVE ancestors AS (
     SELECT e.parent_ino, a.depth + 1
     FROM entries e
     JOIN ancestors a ON e.ino = a.parent_ino
-    WHERE a.depth < 100 AND a.parent_ino > 1
+    WHERE a.depth < 1024 AND a.parent_ino > 1
 )
 SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
     SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint
 ), false)::boolean AS is_sub;
+
 

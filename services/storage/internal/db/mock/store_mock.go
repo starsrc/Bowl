@@ -493,6 +493,63 @@ func (_c *MockStore_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Co
 	return _c
 }
 
+// IncrementInodeNlinkAndTouch provides a mock function for the type MockStore
+func (_mock *MockStore) IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for IncrementInodeNlinkAndTouch")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_IncrementInodeNlinkAndTouch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'IncrementInodeNlinkAndTouch'
+type MockStore_IncrementInodeNlinkAndTouch_Call struct {
+	*mock.Call
+}
+
+// IncrementInodeNlinkAndTouch is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) IncrementInodeNlinkAndTouch(ctx any, ino any) *MockStore_IncrementInodeNlinkAndTouch_Call {
+	return &MockStore_IncrementInodeNlinkAndTouch_Call{Call: _e.mock.On("IncrementInodeNlinkAndTouch", ctx, ino)}
+}
+
+func (_c *MockStore_IncrementInodeNlinkAndTouch_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_IncrementInodeNlinkAndTouch_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_IncrementInodeNlinkAndTouch_Call) Return(err error) *MockStore_IncrementInodeNlinkAndTouch_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_IncrementInodeNlinkAndTouch_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_IncrementInodeNlinkAndTouch_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // TouchInodeTimestamps provides a mock function for the type MockStore
 func (_mock *MockStore) TouchInodeTimestamps(ctx context.Context, ino int64) error {
 	ret := _mock.Called(ctx, ino)

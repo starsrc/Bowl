@@ -23,6 +23,7 @@ const (
 	StorageService_GetAttr_FullMethodName = "/storage.v1.StorageService/GetAttr"
 	StorageService_SetAttr_FullMethodName = "/storage.v1.StorageService/SetAttr"
 	StorageService_Mknod_FullMethodName   = "/storage.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName   = "/storage.v1.StorageService/Mkdir"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -49,6 +50,11 @@ type StorageServiceClient interface {
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Mknod(ctx context.Context, in *MknodRequest, opts ...grpc.CallOption) (*MknodResponse, error)
+	// Mkdir 在指定父目录下创建子目录。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error)
 }
 
 type storageServiceClient struct {
@@ -99,6 +105,16 @@ func (c *storageServiceClient) Mknod(ctx context.Context, in *MknodRequest, opts
 	return out, nil
 }
 
+func (c *storageServiceClient) Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MkdirResponse)
+	err := c.cc.Invoke(ctx, StorageService_Mkdir_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -123,6 +139,11 @@ type StorageServiceServer interface {
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Mknod(context.Context, *MknodRequest) (*MknodResponse, error)
+	// Mkdir 在指定父目录下创建子目录。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -144,6 +165,9 @@ func (UnimplementedStorageServiceServer) SetAttr(context.Context, *SetAttrReques
 }
 func (UnimplementedStorageServiceServer) Mknod(context.Context, *MknodRequest) (*MknodResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Mknod not implemented")
+}
+func (UnimplementedStorageServiceServer) Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mkdir not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -238,6 +262,24 @@ func _StorageService_Mknod_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Mkdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MkdirRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Mkdir(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Mkdir_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Mkdir(ctx, req.(*MkdirRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -260,6 +302,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Mknod",
 			Handler:    _StorageService_Mknod_Handler,
+		},
+		{
+			MethodName: "Mkdir",
+			Handler:    _StorageService_Mkdir_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

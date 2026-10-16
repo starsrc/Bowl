@@ -148,6 +148,19 @@ func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, erro
 	return i, err
 }
 
+const incrementInodeNlinkAndTouch = `-- name: IncrementInodeNlinkAndTouch :exec
+UPDATE inodes
+SET nlink = nlink + 1,
+    mtime = NOW(),
+    ctime = NOW()
+WHERE ino = $1
+`
+
+func (q *Queries) IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, incrementInodeNlinkAndTouch, ino)
+	return err
+}
+
 const touchInodeTimestamps = `-- name: TouchInodeTimestamps :exec
 UPDATE inodes
 SET mtime = NOW(), ctime = NOW()

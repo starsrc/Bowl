@@ -43,6 +43,15 @@ type MknodParams struct {
 	Rdev      uint32
 }
 
+// MkdirParams 定义创建子目录的输入参数。
+type MkdirParams struct {
+	ParentIno uint64
+	Name      string
+	Mode      uint32
+	UID       uint32
+	GID       uint32
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

@@ -32,6 +32,8 @@ const (
 	StorageServiceSetAttrProcedure = "/storage.v1.StorageService/SetAttr"
 	// StorageServiceMknodProcedure is the procedure name of the StorageService's Mknod RPC.
 	StorageServiceMknodProcedure = "/storage.v1.StorageService/Mknod"
+	// StorageServiceMkdirProcedure is the procedure name of the StorageService's Mkdir RPC.
+	StorageServiceMkdirProcedure = "/storage.v1.StorageService/Mkdir"
 )
 
 var (
@@ -63,6 +65,13 @@ var (
 			Procedure:  StorageServiceMknodProcedure,
 		}
 	})
+	storageServiceMkdirSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Mkdir"),
+			Procedure:  StorageServiceMkdirProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -85,6 +94,11 @@ type StorageServiceClient interface {
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
+	// Mkdir 在指定父目录下创建子目录。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mkdir(context.Context, *v1.MkdirRequest) (*v1.MkdirResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -113,6 +127,11 @@ type StorageServiceHandler interface {
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
+	// Mkdir 在指定父目录下创建子目录。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mkdir(context.Context, *v1.MkdirRequest) (*v1.MkdirResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -124,6 +143,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceGetAttrSpec(), Handler: adapter.getAttr},
 		connect.Method{Spec: storageServiceSetAttrSpec(), Handler: adapter.setAttr},
 		connect.Method{Spec: storageServiceMknodSpec(), Handler: adapter.mknod},
+		connect.Method{Spec: storageServiceMkdirSpec(), Handler: adapter.mkdir},
 	)
 }
 
@@ -144,6 +164,10 @@ func (UnimplementedStorageServiceHandler) SetAttr(context.Context, *v1.SetAttrRe
 
 func (UnimplementedStorageServiceHandler) Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Mknod is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Mkdir(context.Context, *v1.MkdirRequest) (*v1.MkdirResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Mkdir is not implemented")
 }
 
 type storageServiceClient struct {
@@ -177,6 +201,14 @@ func (c *storageServiceClient) SetAttr(ctx context.Context, req *v1.SetAttrReque
 func (c *storageServiceClient) Mknod(ctx context.Context, req *v1.MknodRequest) (*v1.MknodResponse, error) {
 	var res v1.MknodResponse
 	if err := c.client.CallUnary(ctx, storageServiceMknodSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Mkdir(ctx context.Context, req *v1.MkdirRequest) (*v1.MkdirResponse, error) {
+	var res v1.MkdirResponse
+	if err := c.client.CallUnary(ctx, storageServiceMkdirSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -226,6 +258,18 @@ func (h storageServiceHandler) mknod(ctx context.Context, _ connect.Spec, stream
 		return err
 	}
 	res, err := h.svc.Mknod(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) mkdir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.MkdirRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Mkdir(ctx, &req)
 	if err != nil {
 		return err
 	}

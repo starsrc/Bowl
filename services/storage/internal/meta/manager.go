@@ -22,6 +22,7 @@ type Manager interface {
 	GetAttr(ctx context.Context, ino uint64) (*Inode, error)
 	SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (*Inode, error)
 	Mknod(ctx context.Context, params MknodParams) (*Inode, error)
+	Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 }
 
 type manager struct {
@@ -370,6 +371,100 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 			return nil, ErrAlreadyExists
 		default:
 			return nil, fmt.Errorf("mknod tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// Mkdir 在指定父目录下创建子目录并与父目录硬链接联动。
+func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error) {
+	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
+		return nil, ErrInvalidArgument
+	}
+	if params.Mode == 0 || params.Mode > 65535 {
+		return nil, ErrInvalidArgument
+	}
+
+	modeType := params.Mode & S_IFMT
+	if modeType != 0 && modeType != S_IFDIR {
+		return nil, ErrInvalidArgument
+	}
+
+	var result *Inode
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", params.ParentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		if params.Name == "." || params.Name == ".." {
+			return ErrAlreadyExists
+		}
+
+		gid := params.GID
+		targetMode := S_IFDIR | (params.Mode & PermMask)
+		if (uint32(parent.Mode) & S_ISGID) != 0 {
+			gid = uint32(parent.Gid)
+			targetMode |= S_ISGID
+		}
+
+		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(targetMode),
+			Nlink: 2,
+			Uid:   int32(params.UID),
+			Gid:   int32(gid),
+			Rdev:  0,
+		})
+		if err != nil {
+			return fmt.Errorf("create inode: %w", err)
+		}
+
+		err = q.CreateEntry(ctx, db.CreateEntryParams{
+			ParentIno: int64(params.ParentIno),
+			Name:      params.Name,
+			Ino:       newInode.Ino,
+		})
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAlreadyExists
+			}
+			return fmt.Errorf("create entry: %w", err)
+		}
+
+		if err := q.IncrementInodeNlinkAndTouch(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("increment parent inode %d nlink and touch: %w", parent.Ino, err)
+		}
+
+		result = newInodeFromDB(newInode)
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrAlreadyExists):
+			return nil, ErrAlreadyExists
+		default:
+			return nil, fmt.Errorf("mkdir tx: %w", err)
 		}
 	}
 

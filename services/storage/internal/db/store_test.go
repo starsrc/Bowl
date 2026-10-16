@@ -20,6 +20,7 @@ import (
 type InodeAttrQuerier interface {
 	GetInodeForUpdate(ctx context.Context, ino int64) (db.Inode, error)
 	UpdateInodeAttr(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error)
+	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 }
 
 // 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier 接口契约。
@@ -259,6 +260,29 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 			var q db.Querier = mockQuerier
 			err := q.TouchInodeTimestamps(ctx, ino)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("IncrementInodeNlinkAndTouch 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功递增硬链接计数并刷新时间戳", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(42)
+			mockQuerier.EXPECT().IncrementInodeNlinkAndTouch(ctx, ino).Return(nil).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.IncrementInodeNlinkAndTouch(ctx, ino)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(42)
+			expectedErr := errors.New("increment nlink error")
+			mockQuerier.EXPECT().IncrementInodeNlinkAndTouch(ctx, ino).Return(expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.IncrementInodeNlinkAndTouch(ctx, ino)
 			assert.ErrorIs(t, err, expectedErr)
 		})
 	})

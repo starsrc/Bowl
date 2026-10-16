@@ -62,12 +62,20 @@ type SymlinkParams struct {
 	GID       uint32
 }
 
+// LinkParams 定义创建硬链接的输入参数。
+type LinkParams struct {
+	Ino          uint64
+	NewParentIno uint64
+	NewName      string
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")
 	ErrNotFound        = errors.New("meta: not found")
 	ErrNotDir          = errors.New("meta: not a directory")
 	ErrIsDir           = errors.New("meta: is a directory")
+	ErrPerm            = errors.New("meta: operation not permitted")
 	ErrAlreadyExists   = errors.New("meta: entry already exists")
 )
 

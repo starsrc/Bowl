@@ -962,6 +962,135 @@ func (x *ReadlinkResponse) GetTarget() string {
 	return ""
 }
 
+// LinkRequest 定义 Link 接口输入参数。
+type LinkRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 待创建硬链接的源节点 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 目标父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	NewParentIno uint64 `protobuf:"varint,2,opt,name=new_parent_ino,json=newParentIno,proto3" json:"new_parent_ino,omitempty"`
+	// 待创建的新目录项名称。
+	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+	NewName       string `protobuf:"bytes,3,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LinkRequest) Reset() {
+	*x = LinkRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkRequest) ProtoMessage() {}
+
+func (x *LinkRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkRequest.ProtoReflect.Descriptor instead.
+func (*LinkRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *LinkRequest) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *LinkRequest) GetNewParentIno() uint64 {
+	if x != nil {
+		return x.NewParentIno
+	}
+	return 0
+}
+
+func (x *LinkRequest) GetNewName() string {
+	if x != nil {
+		return x.NewName
+	}
+	return ""
+}
+
+// LinkResponse 包含硬链接创建后更新的源节点元数据及内核缓存时长。
+type LinkResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 硬链接计数递增后的 Inode 实体元数据。
+	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
+	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	EntryTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
+	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
+	AttrTimeoutSeconds float64 `protobuf:"fixed64,3,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *LinkResponse) Reset() {
+	*x = LinkResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkResponse) ProtoMessage() {}
+
+func (x *LinkResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkResponse.ProtoReflect.Descriptor instead.
+func (*LinkResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *LinkResponse) GetInode() *Inode {
+	if x != nil {
+		return x.Inode
+	}
+	return nil
+}
+
+func (x *LinkResponse) GetEntryTimeoutSeconds() float64 {
+	if x != nil {
+		return x.EntryTimeoutSeconds
+	}
+	return 0
+}
+
+func (x *LinkResponse) GetAttrTimeoutSeconds() float64 {
+	if x != nil {
+		return x.AttrTimeoutSeconds
+	}
+	return 0
+}
+
 // Inode 代表文件系统中的实体节点。
 type Inode struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -977,7 +1106,7 @@ type Inode struct {
 
 func (x *Inode) Reset() {
 	*x = Inode{}
-	mi := &file_storage_v1_storage_proto_msgTypes[14]
+	mi := &file_storage_v1_storage_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -989,7 +1118,7 @@ func (x *Inode) String() string {
 func (*Inode) ProtoMessage() {}
 
 func (x *Inode) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[14]
+	mi := &file_storage_v1_storage_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1002,7 +1131,7 @@ func (x *Inode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inode.ProtoReflect.Descriptor instead.
 func (*Inode) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{14}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Inode) GetIno() uint64 {
@@ -1057,7 +1186,7 @@ type InodeAttribute struct {
 
 func (x *InodeAttribute) Reset() {
 	*x = InodeAttribute{}
-	mi := &file_storage_v1_storage_proto_msgTypes[15]
+	mi := &file_storage_v1_storage_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1069,7 +1198,7 @@ func (x *InodeAttribute) String() string {
 func (*InodeAttribute) ProtoMessage() {}
 
 func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[15]
+	mi := &file_storage_v1_storage_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1082,7 +1211,7 @@ func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InodeAttribute.ProtoReflect.Descriptor instead.
 func (*InodeAttribute) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{15}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *InodeAttribute) GetMode() uint32 {
@@ -1241,7 +1370,15 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x0fReadlinkRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\"3\n" +
 	"\x10ReadlinkResponse\x12\x1f\n" +
-	"\x06target\x18\x01 \x01(\tB\a\xbaH\x04r\x02\x10\x01R\x06target\"z\n" +
+	"\x06target\x18\x01 \x01(\tB\a\xbaH\x04r\x02\x10\x01R\x06target\"\x9f\x01\n" +
+	"\vLinkRequest\x12#\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x127\n" +
+	"\x0enew_parent_ino\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x122\n" +
+	"\bnew_name\x18\x03 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\anewName\"\xc5\x01\n" +
+	"\fLinkResponse\x12/\n" +
+	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
+	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"z\n" +
 	"\x05Inode\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x1e\n" +
 	"\n" +
@@ -1260,7 +1397,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05atime\x128\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05mtime\x128\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xe0\x03\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\x9b\x04\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +
@@ -1268,7 +1405,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05Mknod\x12\x18.storage.v1.MknodRequest\x1a\x19.storage.v1.MknodResponse\x12<\n" +
 	"\x05Mkdir\x12\x18.storage.v1.MkdirRequest\x1a\x19.storage.v1.MkdirResponse\x12B\n" +
 	"\aSymlink\x12\x1a.storage.v1.SymlinkRequest\x1a\x1b.storage.v1.SymlinkResponse\x12E\n" +
-	"\bReadlink\x12\x1b.storage.v1.ReadlinkRequest\x1a\x1c.storage.v1.ReadlinkResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
+	"\bReadlink\x12\x1b.storage.v1.ReadlinkRequest\x1a\x1c.storage.v1.ReadlinkResponse\x129\n" +
+	"\x04Link\x12\x17.storage.v1.LinkRequest\x1a\x18.storage.v1.LinkResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
 
 var (
 	file_storage_v1_storage_proto_rawDescOnce sync.Once
@@ -1282,7 +1420,7 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 	return file_storage_v1_storage_proto_rawDescData
 }
 
-var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_storage_v1_storage_proto_goTypes = []any{
 	(*LookupRequest)(nil),         // 0: storage.v1.LookupRequest
 	(*LookupResponse)(nil),        // 1: storage.v1.LookupResponse
@@ -1298,42 +1436,47 @@ var file_storage_v1_storage_proto_goTypes = []any{
 	(*SymlinkResponse)(nil),       // 11: storage.v1.SymlinkResponse
 	(*ReadlinkRequest)(nil),       // 12: storage.v1.ReadlinkRequest
 	(*ReadlinkResponse)(nil),      // 13: storage.v1.ReadlinkResponse
-	(*Inode)(nil),                 // 14: storage.v1.Inode
-	(*InodeAttribute)(nil),        // 15: storage.v1.InodeAttribute
-	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
+	(*LinkRequest)(nil),           // 14: storage.v1.LinkRequest
+	(*LinkResponse)(nil),          // 15: storage.v1.LinkResponse
+	(*Inode)(nil),                 // 16: storage.v1.Inode
+	(*InodeAttribute)(nil),        // 17: storage.v1.InodeAttribute
+	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
-	14, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
-	14, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
-	16, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
-	16, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
-	14, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
-	14, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
-	14, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
-	14, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
-	15, // 8: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
-	16, // 9: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
-	16, // 10: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
-	16, // 11: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
-	0,  // 12: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
-	2,  // 13: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
-	4,  // 14: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
-	6,  // 15: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
-	8,  // 16: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
-	10, // 17: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
-	12, // 18: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
-	1,  // 19: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
-	3,  // 20: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
-	5,  // 21: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
-	7,  // 22: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
-	9,  // 23: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
-	11, // 24: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
-	13, // 25: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
-	19, // [19:26] is the sub-list for method output_type
-	12, // [12:19] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	16, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
+	16, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
+	18, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
+	18, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
+	16, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
+	16, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
+	16, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
+	16, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
+	16, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
+	17, // 9: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
+	18, // 10: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
+	18, // 11: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
+	18, // 12: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
+	0,  // 13: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
+	2,  // 14: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
+	4,  // 15: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
+	6,  // 16: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
+	8,  // 17: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
+	10, // 18: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
+	12, // 19: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
+	14, // 20: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
+	1,  // 21: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
+	3,  // 22: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
+	5,  // 23: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
+	7,  // 24: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
+	9,  // 25: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
+	11, // 26: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
+	13, // 27: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
+	15, // 28: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
+	21, // [21:29] is the sub-list for method output_type
+	13, // [13:21] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_storage_v1_storage_proto_init() }
@@ -1348,7 +1491,7 @@ func file_storage_v1_storage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_v1_storage_proto_rawDesc), len(file_storage_v1_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

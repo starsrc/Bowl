@@ -38,6 +38,8 @@ const (
 	StorageServiceSymlinkProcedure = "/storage.v1.StorageService/Symlink"
 	// StorageServiceReadlinkProcedure is the procedure name of the StorageService's Readlink RPC.
 	StorageServiceReadlinkProcedure = "/storage.v1.StorageService/Readlink"
+	// StorageServiceLinkProcedure is the procedure name of the StorageService's Link RPC.
+	StorageServiceLinkProcedure = "/storage.v1.StorageService/Link"
 )
 
 var (
@@ -90,6 +92,13 @@ var (
 			Procedure:  StorageServiceReadlinkProcedure,
 		}
 	})
+	storageServiceLinkSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Link"),
+			Procedure:  StorageServiceLinkProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -126,6 +135,12 @@ type StorageServiceClient interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Readlink(context.Context, *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error)
+	// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	Link(context.Context, *v1.LinkRequest) (*v1.LinkResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -168,6 +183,12 @@ type StorageServiceHandler interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Readlink(context.Context, *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error)
+	// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	Link(context.Context, *v1.LinkRequest) (*v1.LinkResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -182,6 +203,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceMkdirSpec(), Handler: adapter.mkdir},
 		connect.Method{Spec: storageServiceSymlinkSpec(), Handler: adapter.symlink},
 		connect.Method{Spec: storageServiceReadlinkSpec(), Handler: adapter.readlink},
+		connect.Method{Spec: storageServiceLinkSpec(), Handler: adapter.link},
 	)
 }
 
@@ -214,6 +236,10 @@ func (UnimplementedStorageServiceHandler) Symlink(context.Context, *v1.SymlinkRe
 
 func (UnimplementedStorageServiceHandler) Readlink(context.Context, *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Readlink is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Link(context.Context, *v1.LinkRequest) (*v1.LinkResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Link is not implemented")
 }
 
 type storageServiceClient struct {
@@ -271,6 +297,14 @@ func (c *storageServiceClient) Symlink(ctx context.Context, req *v1.SymlinkReque
 func (c *storageServiceClient) Readlink(ctx context.Context, req *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error) {
 	var res v1.ReadlinkResponse
 	if err := c.client.CallUnary(ctx, storageServiceReadlinkSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Link(ctx context.Context, req *v1.LinkRequest) (*v1.LinkResponse, error) {
+	var res v1.LinkResponse
+	if err := c.client.CallUnary(ctx, storageServiceLinkSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -356,6 +390,18 @@ func (h storageServiceHandler) readlink(ctx context.Context, _ connect.Spec, str
 		return err
 	}
 	res, err := h.svc.Readlink(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) link(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.LinkRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Link(ctx, &req)
 	if err != nil {
 		return err
 	}

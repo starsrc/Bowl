@@ -29,7 +29,12 @@ type SymlinkQuerier interface {
 	GetSymlinkTarget(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error)
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier 与 SymlinkQuerier 接口契约。
+// LinkQuerier 提取硬链接原子递增与 ctime 刷新接口契约。
+type LinkQuerier interface {
+	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error)
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier 与 LinkQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -38,6 +43,10 @@ var (
 	_ SymlinkQuerier = (db.Querier)(nil)
 	_ SymlinkQuerier = (db.Store)(nil)
 	_ SymlinkQuerier = (*db.Queries)(nil)
+
+	_ LinkQuerier = (db.Querier)(nil)
+	_ LinkQuerier = (db.Store)(nil)
+	_ LinkQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -352,6 +361,31 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 			var q db.Querier = mockQuerier
 			_, err := q.GetSymlinkTarget(ctx, 100)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("IncrementInodeNlinkAndTouchCtime 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功递增硬链接计数并仅刷新 ctime", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(42)
+			expected := db.Inode{Ino: ino, Nlink: 2}
+			mockQuerier.EXPECT().IncrementInodeNlinkAndTouchCtime(ctx, ino).Return(expected, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.IncrementInodeNlinkAndTouchCtime(ctx, ino)
+			require.NoError(t, err)
+			assert.Equal(t, expected, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			ino := int64(42)
+			expectedErr := errors.New("update ctime error")
+			mockQuerier.EXPECT().IncrementInodeNlinkAndTouchCtime(ctx, ino).Return(db.Inode{}, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.IncrementInodeNlinkAndTouchCtime(ctx, ino)
 			assert.ErrorIs(t, err, expectedErr)
 		})
 	})

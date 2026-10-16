@@ -59,4 +59,12 @@ SELECT mode, symlink_target
 FROM inodes
 WHERE ino = $1;
 
+-- name: IncrementInodeNlinkAndTouchCtime :one
+UPDATE inodes
+SET nlink = nlink + 1,
+    ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+
+
 

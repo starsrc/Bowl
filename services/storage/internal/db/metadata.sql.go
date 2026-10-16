@@ -227,6 +227,34 @@ func (q *Queries) IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) er
 	return err
 }
 
+const incrementInodeNlinkAndTouchCtime = `-- name: IncrementInodeNlinkAndTouchCtime :one
+UPDATE inodes
+SET nlink = nlink + 1,
+    ctime = NOW()
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+`
+
+func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
+	row := q.db.QueryRow(ctx, incrementInodeNlinkAndTouchCtime, ino)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+	)
+	return i, err
+}
+
 const touchInodeTimestamps = `-- name: TouchInodeTimestamps :exec
 UPDATE inodes
 SET mtime = NOW(), ctime = NOW()

@@ -23,11 +23,21 @@ type InodeAttrQuerier interface {
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier 接口契约。
+// SymlinkQuerier 提取符号链接创建与读取接口契约。
+type SymlinkQuerier interface {
+	CreateSymlinkInode(ctx context.Context, arg db.CreateSymlinkInodeParams) (db.Inode, error)
+	GetSymlinkTarget(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error)
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier 与 SymlinkQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
 	_ InodeAttrQuerier = (*db.Queries)(nil)
+
+	_ SymlinkQuerier = (db.Querier)(nil)
+	_ SymlinkQuerier = (db.Store)(nil)
+	_ SymlinkQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -283,6 +293,65 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 			var q db.Querier = mockQuerier
 			err := q.IncrementInodeNlinkAndTouch(ctx, ino)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("CreateSymlinkInode 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功插入符号链接 Inode", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.CreateSymlinkInodeParams{
+				Mode:          0o120777,
+				Size:          11,
+				Nlink:         1,
+				Uid:           1000,
+				Gid:           1000,
+				Rdev:          0,
+				SymlinkTarget: pgtype.Text{String: "/var/target", Valid: true},
+			}
+			expected := db.Inode{Ino: 50, Mode: params.Mode, Size: params.Size, SymlinkTarget: params.SymlinkTarget}
+			mockQuerier.EXPECT().CreateSymlinkInode(ctx, params).Return(expected, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.CreateSymlinkInode(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, expected, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.CreateSymlinkInodeParams{Mode: 0o120777}
+			expectedErr := errors.New("check constraint violated")
+			mockQuerier.EXPECT().CreateSymlinkInode(ctx, params).Return(db.Inode{}, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.CreateSymlinkInode(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("GetSymlinkTarget 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功获取符号链接目标路径", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			expected := db.GetSymlinkTargetRow{
+				Mode:          0o120777,
+				SymlinkTarget: pgtype.Text{String: "/etc/hosts", Valid: true},
+			}
+			mockQuerier.EXPECT().GetSymlinkTarget(ctx, int64(100)).Return(expected, nil).Once()
+
+			var q db.Querier = mockQuerier
+			res, err := q.GetSymlinkTarget(ctx, 100)
+			require.NoError(t, err)
+			assert.Equal(t, expected, res)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			expectedErr := errors.New("query failed")
+			mockQuerier.EXPECT().GetSymlinkTarget(ctx, int64(100)).Return(db.GetSymlinkTargetRow{}, expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			_, err := q.GetSymlinkTarget(ctx, 100)
 			assert.ErrorIs(t, err, expectedErr)
 		})
 	})

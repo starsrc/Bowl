@@ -15,15 +15,16 @@ type Entry struct {
 }
 
 type Inode struct {
-	Ino        int64              `json:"ino"`
-	Generation int64              `json:"generation"`
-	Mode       int32              `json:"mode"`
-	Size       int64              `json:"size"`
-	Nlink      int32              `json:"nlink"`
-	Uid        int32              `json:"uid"`
-	Gid        int32              `json:"gid"`
-	Rdev       int64              `json:"rdev"`
-	Atime      pgtype.Timestamptz `json:"atime"`
-	Mtime      pgtype.Timestamptz `json:"mtime"`
-	Ctime      pgtype.Timestamptz `json:"ctime"`
+	Ino           int64              `json:"ino"`
+	Generation    int64              `json:"generation"`
+	Mode          int32              `json:"mode"`
+	Size          int64              `json:"size"`
+	Nlink         int32              `json:"nlink"`
+	Uid           int32              `json:"uid"`
+	Gid           int32              `json:"gid"`
+	Rdev          int64              `json:"rdev"`
+	Atime         pgtype.Timestamptz `json:"atime"`
+	Mtime         pgtype.Timestamptz `json:"mtime"`
+	Ctime         pgtype.Timestamptz `json:"ctime"`
+	SymlinkTarget pgtype.Text        `json:"symlink_target"`
 }

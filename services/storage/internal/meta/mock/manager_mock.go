@@ -316,6 +316,72 @@ func (_c *MockManager_Mknod_Call) RunAndReturn(run func(ctx context.Context, par
 	return _c
 }
 
+// Readlink provides a mock function for the type MockManager
+func (_mock *MockManager) Readlink(ctx context.Context, ino uint64) (string, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Readlink")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) (string, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) string); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_Readlink_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Readlink'
+type MockManager_Readlink_Call struct {
+	*mock.Call
+}
+
+// Readlink is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino uint64
+func (_e *MockManager_Expecter) Readlink(ctx any, ino any) *MockManager_Readlink_Call {
+	return &MockManager_Readlink_Call{Call: _e.mock.On("Readlink", ctx, ino)}
+}
+
+func (_c *MockManager_Readlink_Call) Run(run func(ctx context.Context, ino uint64)) *MockManager_Readlink_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Readlink_Call) Return(s string, err error) *MockManager_Readlink_Call {
+	_c.Call.Return(s, err)
+	return _c
+}
+
+func (_c *MockManager_Readlink_Call) RunAndReturn(run func(ctx context.Context, ino uint64) (string, error)) *MockManager_Readlink_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // SetAttr provides a mock function for the type MockManager
 func (_mock *MockManager) SetAttr(ctx context.Context, ino uint64, input meta.SetAttrInput) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, ino, input)
@@ -386,6 +452,74 @@ func (_c *MockManager_SetAttr_Call) Return(inode *meta.Inode, err error) *MockMa
 }
 
 func (_c *MockManager_SetAttr_Call) RunAndReturn(run func(ctx context.Context, ino uint64, input meta.SetAttrInput) (*meta.Inode, error)) *MockManager_SetAttr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Symlink provides a mock function for the type MockManager
+func (_mock *MockManager) Symlink(ctx context.Context, params meta.SymlinkParams) (*meta.Inode, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Symlink")
+	}
+
+	var r0 *meta.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.SymlinkParams) (*meta.Inode, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.SymlinkParams) *meta.Inode); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.Inode)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.SymlinkParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_Symlink_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Symlink'
+type MockManager_Symlink_Call struct {
+	*mock.Call
+}
+
+// Symlink is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.SymlinkParams
+func (_e *MockManager_Expecter) Symlink(ctx any, params any) *MockManager_Symlink_Call {
+	return &MockManager_Symlink_Call{Call: _e.mock.On("Symlink", ctx, params)}
+}
+
+func (_c *MockManager_Symlink_Call) Run(run func(ctx context.Context, params meta.SymlinkParams)) *MockManager_Symlink_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.SymlinkParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.SymlinkParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Symlink_Call) Return(inode *meta.Inode, err error) *MockManager_Symlink_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockManager_Symlink_Call) RunAndReturn(run func(ctx context.Context, params meta.SymlinkParams) (*meta.Inode, error)) *MockManager_Symlink_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -36,6 +36,17 @@ service StorageService {
   // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   rpc Mkdir(MkdirRequest) returns (MkdirResponse);
+
+  // Symlink 在指定父目录下创建指向目标路径的符号链接节点。
+  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+  // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  rpc Symlink(SymlinkRequest) returns (SymlinkResponse);
+
+  // Readlink 获取符号链接节点指向的目标路径。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -225,6 +236,64 @@ message MkdirResponse {
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
+}
+
+// SymlinkRequest 定义 Symlink 接口输入参数。
+message SymlinkRequest {
+  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 parent_ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待创建的符号链接名称。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  string name = 2 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  ];
+
+  // 符号链接指向的目标路径。
+  // 长度必须在 1 到 4096 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
+  string target = 3 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 4096,
+    (buf.validate.field).string.not_contains = "\x00"
+  ];
+
+  // 所属用户 ID。
+  uint32 uid = 4;
+
+  // 所属组 ID。
+  uint32 gid = 5;
+}
+
+// SymlinkResponse 包含新创建符号链接的元数据以及 FUSE 内核缓存有效时间。
+message SymlinkResponse {
+  // 新创建的 Inode 实体元数据。
+  Inode inode = 1 [(buf.validate.field).required = true];
+
+  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
+
+  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
+  double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
+}
+
+// ReadlinkRequest 定义 Readlink 接口输入参数。
+message ReadlinkRequest {
+  // 目标符号链接的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+}
+
+// ReadlinkResponse 包含符号链接指向的目标路径字符串。
+message ReadlinkResponse {
+  // 目标路径字符串。
+  string target = 1 [(buf.validate.field).string.min_len = 1];
 }
 
 // Inode 代表文件系统中的实体节点。

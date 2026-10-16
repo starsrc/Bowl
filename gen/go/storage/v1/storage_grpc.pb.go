@@ -19,11 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StorageService_Lookup_FullMethodName  = "/storage.v1.StorageService/Lookup"
-	StorageService_GetAttr_FullMethodName = "/storage.v1.StorageService/GetAttr"
-	StorageService_SetAttr_FullMethodName = "/storage.v1.StorageService/SetAttr"
-	StorageService_Mknod_FullMethodName   = "/storage.v1.StorageService/Mknod"
-	StorageService_Mkdir_FullMethodName   = "/storage.v1.StorageService/Mkdir"
+	StorageService_Lookup_FullMethodName   = "/storage.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName  = "/storage.v1.StorageService/GetAttr"
+	StorageService_SetAttr_FullMethodName  = "/storage.v1.StorageService/SetAttr"
+	StorageService_Mknod_FullMethodName    = "/storage.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName    = "/storage.v1.StorageService/Mkdir"
+	StorageService_Symlink_FullMethodName  = "/storage.v1.StorageService/Symlink"
+	StorageService_Readlink_FullMethodName = "/storage.v1.StorageService/Readlink"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -55,6 +57,15 @@ type StorageServiceClient interface {
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error)
+	// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Symlink(ctx context.Context, in *SymlinkRequest, opts ...grpc.CallOption) (*SymlinkResponse, error)
+	// Readlink 获取符号链接节点指向的目标路径。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	Readlink(ctx context.Context, in *ReadlinkRequest, opts ...grpc.CallOption) (*ReadlinkResponse, error)
 }
 
 type storageServiceClient struct {
@@ -115,6 +126,26 @@ func (c *storageServiceClient) Mkdir(ctx context.Context, in *MkdirRequest, opts
 	return out, nil
 }
 
+func (c *storageServiceClient) Symlink(ctx context.Context, in *SymlinkRequest, opts ...grpc.CallOption) (*SymlinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SymlinkResponse)
+	err := c.cc.Invoke(ctx, StorageService_Symlink_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Readlink(ctx context.Context, in *ReadlinkRequest, opts ...grpc.CallOption) (*ReadlinkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadlinkResponse)
+	err := c.cc.Invoke(ctx, StorageService_Readlink_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -144,6 +175,15 @@ type StorageServiceServer interface {
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error)
+	// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Symlink(context.Context, *SymlinkRequest) (*SymlinkResponse, error)
+	// Readlink 获取符号链接节点指向的目标路径。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	Readlink(context.Context, *ReadlinkRequest) (*ReadlinkResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -168,6 +208,12 @@ func (UnimplementedStorageServiceServer) Mknod(context.Context, *MknodRequest) (
 }
 func (UnimplementedStorageServiceServer) Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Mkdir not implemented")
+}
+func (UnimplementedStorageServiceServer) Symlink(context.Context, *SymlinkRequest) (*SymlinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Symlink not implemented")
+}
+func (UnimplementedStorageServiceServer) Readlink(context.Context, *ReadlinkRequest) (*ReadlinkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Readlink not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -280,6 +326,42 @@ func _StorageService_Mkdir_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Symlink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SymlinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Symlink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Symlink_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Symlink(ctx, req.(*SymlinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Readlink_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadlinkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Readlink(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Readlink_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Readlink(ctx, req.(*ReadlinkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -306,6 +388,14 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Mkdir",
 			Handler:    _StorageService_Mkdir_Handler,
+		},
+		{
+			MethodName: "Symlink",
+			Handler:    _StorageService_Symlink_Handler,
+		},
+		{
+			MethodName: "Readlink",
+			Handler:    _StorageService_Readlink_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

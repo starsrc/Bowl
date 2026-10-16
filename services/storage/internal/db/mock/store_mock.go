@@ -39,6 +39,129 @@ func (_m *MockStore) EXPECT() *MockStore_Expecter {
 	return &MockStore_Expecter{mock: &_m.Mock}
 }
 
+// CreateEntry provides a mock function for the type MockStore
+func (_mock *MockStore) CreateEntry(ctx context.Context, arg db.CreateEntryParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateEntry")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateEntryParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_CreateEntry_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateEntry'
+type MockStore_CreateEntry_Call struct {
+	*mock.Call
+}
+
+// CreateEntry is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateEntryParams
+func (_e *MockStore_Expecter) CreateEntry(ctx any, arg any) *MockStore_CreateEntry_Call {
+	return &MockStore_CreateEntry_Call{Call: _e.mock.On("CreateEntry", ctx, arg)}
+}
+
+func (_c *MockStore_CreateEntry_Call) Run(run func(ctx context.Context, arg db.CreateEntryParams)) *MockStore_CreateEntry_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateEntryParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateEntryParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_CreateEntry_Call) Return(err error) *MockStore_CreateEntry_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_CreateEntry_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateEntryParams) error) *MockStore_CreateEntry_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CreateInode provides a mock function for the type MockStore
+func (_mock *MockStore) CreateInode(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateInode")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateInodeParams) (db.Inode, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateInodeParams) db.Inode); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateInodeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_CreateInode_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateInode'
+type MockStore_CreateInode_Call struct {
+	*mock.Call
+}
+
+// CreateInode is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateInodeParams
+func (_e *MockStore_Expecter) CreateInode(ctx any, arg any) *MockStore_CreateInode_Call {
+	return &MockStore_CreateInode_Call{Call: _e.mock.On("CreateInode", ctx, arg)}
+}
+
+func (_c *MockStore_CreateInode_Call) Run(run func(ctx context.Context, arg db.CreateInodeParams)) *MockStore_CreateInode_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateInodeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateInodeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_CreateInode_Call) Return(inode db.Inode, err error) *MockStore_CreateInode_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_CreateInode_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error)) *MockStore_CreateInode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ExecTx provides a mock function for the type MockStore
 func (_mock *MockStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
 	ret := _mock.Called(ctx, fn)
@@ -366,6 +489,63 @@ func (_c *MockStore_GetInodeForUpdate_Call) Return(inode db.Inode, err error) *M
 }
 
 func (_c *MockStore_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_GetInodeForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// TouchInodeTimestamps provides a mock function for the type MockStore
+func (_mock *MockStore) TouchInodeTimestamps(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for TouchInodeTimestamps")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_TouchInodeTimestamps_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TouchInodeTimestamps'
+type MockStore_TouchInodeTimestamps_Call struct {
+	*mock.Call
+}
+
+// TouchInodeTimestamps is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) TouchInodeTimestamps(ctx any, ino any) *MockStore_TouchInodeTimestamps_Call {
+	return &MockStore_TouchInodeTimestamps_Call{Call: _e.mock.On("TouchInodeTimestamps", ctx, ino)}
+}
+
+func (_c *MockStore_TouchInodeTimestamps_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_TouchInodeTimestamps_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_TouchInodeTimestamps_Call) Return(err error) *MockStore_TouchInodeTimestamps_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_TouchInodeTimestamps_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_TouchInodeTimestamps_Call {
 	_c.Call.Return(run)
 	return _c
 }

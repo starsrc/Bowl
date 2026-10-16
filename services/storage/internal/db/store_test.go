@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,5 +22,16 @@ func TestModule(t *testing.T) {
 
 func TestQuerierInterface(t *testing.T) {
 	var _ db.Querier = (*db.Queries)(nil)
+}
+
+func TestQuerierInterface_MknodOperators(t *testing.T) {
+	type mknodQuerier interface {
+		CreateInode(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error)
+		CreateEntry(ctx context.Context, arg db.CreateEntryParams) error
+		TouchInodeTimestamps(ctx context.Context, ino int64) error
+	}
+
+	var _ mknodQuerier = (db.Querier)(nil)
+	var _ mknodQuerier = (db.Store)(nil)
 }
 

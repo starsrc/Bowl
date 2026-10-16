@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/fx"
 
@@ -18,7 +19,9 @@ import (
 // Manager 定义元数据领域层管理器接口。
 type Manager interface {
 	Lookup(ctx context.Context, parentIno uint64, name string) (*Inode, error)
+	GetAttr(ctx context.Context, ino uint64) (*Inode, error)
 	SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (*Inode, error)
+	Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 }
 
 type manager struct {
@@ -86,6 +89,23 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*I
 		}
 	}
 	return result, nil
+}
+
+// GetAttr 执行单节点单语句直查与属性推导，支持所有文件类型与孤儿节点。
+func (m *manager) GetAttr(ctx context.Context, ino uint64) (*Inode, error) {
+	if ino == 0 || ino > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+
+	target, err := m.store.GetInode(ctx, int64(ino))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get inode %d: %w", ino, err)
+	}
+
+	return newInodeFromDB(target), nil
 }
 
 func newInodeFromDB(target db.Inode) *Inode {
@@ -241,6 +261,105 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			return nil, ErrInvalidArgument
 		default:
 			return nil, fmt.Errorf("setattr tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// Mknod 创建特殊文件或普通文件节点并与父目录联动。
+func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error) {
+	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
+		return nil, ErrInvalidArgument
+	}
+	if params.Mode > 0o177777 {
+		return nil, ErrInvalidArgument
+	}
+
+	modeType := params.Mode & S_IFMT
+	switch modeType {
+	case S_IFREG, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK:
+	default:
+		return nil, ErrInvalidArgument
+	}
+
+	rdev := uint32(0)
+	if modeType == S_IFCHR || modeType == S_IFBLK {
+		rdev = params.Rdev
+	}
+
+	var result *Inode
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", params.ParentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		if params.Name == "." || params.Name == ".." {
+			return ErrAlreadyExists
+		}
+
+		gid := params.GID
+		if (uint32(parent.Mode) & S_ISGID) != 0 {
+			gid = uint32(parent.Gid)
+		}
+
+		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(params.Mode),
+			Nlink: 1,
+			Uid:   int32(params.UID),
+			Gid:   int32(gid),
+			Rdev:  int64(rdev),
+		})
+		if err != nil {
+			return fmt.Errorf("create inode: %w", err)
+		}
+
+		err = q.CreateEntry(ctx, db.CreateEntryParams{
+			ParentIno: int64(params.ParentIno),
+			Name:      params.Name,
+			Ino:       newInode.Ino,
+		})
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAlreadyExists
+			}
+			return fmt.Errorf("create entry: %w", err)
+		}
+
+		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		result = newInodeFromDB(newInode)
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrAlreadyExists):
+			return nil, ErrAlreadyExists
+		default:
+			return nil, fmt.Errorf("mknod tx: %w", err)
 		}
 	}
 

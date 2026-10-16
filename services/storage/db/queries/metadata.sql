@@ -28,3 +28,16 @@ SET
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime;
 
+-- name: CreateInode :one
+INSERT INTO inodes (mode, nlink, uid, gid, rdev)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime;
+
+-- name: CreateEntry :exec
+INSERT INTO entries (parent_ino, name, ino)
+VALUES ($1, $2, $3);
+
+-- name: TouchInodeTimestamps :exec
+UPDATE inodes
+SET mtime = NOW(), ctime = NOW()
+WHERE ino = $1;

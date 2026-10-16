@@ -20,21 +20,7 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-func setupMockWriteTx(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier) {
-	mockStore.EXPECT().
-		ExecTxWithOptions(
-			mock.Anything,
-			mock.Anything,
-		).
-		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
-			cfg := tx.ApplyOptions(opts...)
-			if cfg.AccessMode == tx.ReadOnly {
-				return fmt.Errorf("expected write transaction, got read-only")
-			}
-			return fn(mockQuerier)
-		}).
-		Once()
-}
+
 
 func ptr[T any](v T) *T {
 	return &v

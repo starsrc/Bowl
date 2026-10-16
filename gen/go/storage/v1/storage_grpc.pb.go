@@ -20,7 +20,9 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	StorageService_Lookup_FullMethodName  = "/storage.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName = "/storage.v1.StorageService/GetAttr"
 	StorageService_SetAttr_FullMethodName = "/storage.v1.StorageService/SetAttr"
+	StorageService_Mknod_FullMethodName   = "/storage.v1.StorageService/Mknod"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -34,10 +36,19 @@ type StorageServiceClient interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(ctx context.Context, in *LookupRequest, opts ...grpc.CallOption) (*LookupResponse, error)
+	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
+	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
+	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	GetAttr(ctx context.Context, in *GetAttrRequest, opts ...grpc.CallOption) (*GetAttrResponse, error)
 	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
 	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
 	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
 	SetAttr(ctx context.Context, in *SetAttrRequest, opts ...grpc.CallOption) (*SetAttrResponse, error)
+	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mknod(ctx context.Context, in *MknodRequest, opts ...grpc.CallOption) (*MknodResponse, error)
 }
 
 type storageServiceClient struct {
@@ -58,10 +69,30 @@ func (c *storageServiceClient) Lookup(ctx context.Context, in *LookupRequest, op
 	return out, nil
 }
 
+func (c *storageServiceClient) GetAttr(ctx context.Context, in *GetAttrRequest, opts ...grpc.CallOption) (*GetAttrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAttrResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *storageServiceClient) SetAttr(ctx context.Context, in *SetAttrRequest, opts ...grpc.CallOption) (*SetAttrResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetAttrResponse)
 	err := c.cc.Invoke(ctx, StorageService_SetAttr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Mknod(ctx context.Context, in *MknodRequest, opts ...grpc.CallOption) (*MknodResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MknodResponse)
+	err := c.cc.Invoke(ctx, StorageService_Mknod_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -79,10 +110,19 @@ type StorageServiceServer interface {
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	Lookup(context.Context, *LookupRequest) (*LookupResponse, error)
+	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
+	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
+	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	GetAttr(context.Context, *GetAttrRequest) (*GetAttrResponse, error)
 	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
 	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
 	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
 	SetAttr(context.Context, *SetAttrRequest) (*SetAttrResponse, error)
+	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	Mknod(context.Context, *MknodRequest) (*MknodResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -96,8 +136,14 @@ type UnimplementedStorageServiceServer struct{}
 func (UnimplementedStorageServiceServer) Lookup(context.Context, *LookupRequest) (*LookupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Lookup not implemented")
 }
+func (UnimplementedStorageServiceServer) GetAttr(context.Context, *GetAttrRequest) (*GetAttrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttr not implemented")
+}
 func (UnimplementedStorageServiceServer) SetAttr(context.Context, *SetAttrRequest) (*SetAttrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetAttr not implemented")
+}
+func (UnimplementedStorageServiceServer) Mknod(context.Context, *MknodRequest) (*MknodResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mknod not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -138,6 +184,24 @@ func _StorageService_Lookup_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_GetAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAttrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetAttr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetAttr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetAttr(ctx, req.(*GetAttrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StorageService_SetAttr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetAttrRequest)
 	if err := dec(in); err != nil {
@@ -156,6 +220,24 @@ func _StorageService_SetAttr_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Mknod_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MknodRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Mknod(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Mknod_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Mknod(ctx, req.(*MknodRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -168,8 +250,16 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _StorageService_Lookup_Handler,
 		},
 		{
+			MethodName: "GetAttr",
+			Handler:    _StorageService_GetAttr_Handler,
+		},
+		{
 			MethodName: "SetAttr",
 			Handler:    _StorageService_SetAttr_Handler,
+		},
+		{
+			MethodName: "Mknod",
+			Handler:    _StorageService_Mknod_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

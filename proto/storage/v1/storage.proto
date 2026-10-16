@@ -15,10 +15,21 @@ service StorageService {
   // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   rpc Lookup(LookupRequest) returns (LookupResponse);
 
+  // GetAttr 获取指定 Inode 的属性与内核缓存时效。
+  // 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
+  // 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  rpc GetAttr(GetAttrRequest) returns (GetAttrResponse);
+
   // SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
   // 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
   // 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
   rpc SetAttr(SetAttrRequest) returns (SetAttrResponse);
+
+  // Mknod 在指定父目录下创建常规文件或特殊设备节点。
+  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+  // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  rpc Mknod(MknodRequest) returns (MknodResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -45,6 +56,25 @@ message LookupResponse {
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
+}
+
+// GetAttrRequest 定义 GetAttr 接口输入参数。
+message GetAttrRequest {
+  // 目标节点的 Inode 编号。
+  // 必须大于 0 且小于等于 int64 最大值 (9223372036854775807)，防止向数据库 BIGINT 转换时发生整型溢出。
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// GetAttrResponse 包含目标节点元数据以及 FUSE 属性缓存有效时间。
+message GetAttrResponse {
+  // 目标 Inode 实体元数据。
+  Inode inode = 1 [(buf.validate.field).required = true];
+
+  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
+  double attr_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 }
 
 // SetAttrRequest 定义 SetAttr 接口输入参数。
@@ -106,6 +136,49 @@ message SetAttrResponse {
   double attr_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 }
 
+// MknodRequest 定义 Mknod 接口输入参数。
+message MknodRequest {
+  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 parent_ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待创建的新节点名称。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  string name = 2 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  ];
+
+  // 节点模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
+  uint32 mode = 3 [
+    (buf.validate.field).uint32.gt = 0,
+    (buf.validate.field).uint32.lte = 65535
+  ];
+
+  // 所属用户 ID。
+  uint32 uid = 4;
+
+  // 所属组 ID。
+  uint32 gid = 5;
+
+  // 特殊设备号（仅当创建字符/块设备文件时有效，其余节点为 0）。
+  uint32 rdev = 6;
+}
+
+// MknodResponse 包含新创建节点的元数据以及 FUSE 内核缓存有效时间。
+message MknodResponse {
+  // 新创建的 Inode 实体元数据。
+  Inode inode = 1 [(buf.validate.field).required = true];
+
+  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
+
+  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
+  double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
+}
 // Inode 代表文件系统中的实体节点。
 message Inode {
   // 节点的全局唯一持久化标识。
@@ -126,8 +199,8 @@ message InodeAttribute {
   // 文件物理大小（字节数）。
   uint64 size = 2;
 
-  // 硬链接数量。文件默认为 1；目录通常至少为 2。
-  uint32 nlink = 3 [(buf.validate.field).uint32.gt = 0];
+  // 硬链接数量。文件默认为 1；目录通常至少为 2；已解链但仍处于打开状态的孤儿节点允许为 0。
+  uint32 nlink = 3;
 
   // 所属用户 ID。
   uint32 uid = 4;
@@ -145,11 +218,11 @@ message InodeAttribute {
   uint64 blocks = 8;
 
   // 最后访问时间。
-  google.protobuf.Timestamp atime = 9;
+  google.protobuf.Timestamp atime = 9 [(buf.validate.field).required = true];
 
   // 最后修改时间。
-  google.protobuf.Timestamp mtime = 10;
+  google.protobuf.Timestamp mtime = 10 [(buf.validate.field).required = true];
 
   // 状态变更时间。
-  google.protobuf.Timestamp ctime = 11;
+  google.protobuf.Timestamp ctime = 11 [(buf.validate.field).required = true];
 }

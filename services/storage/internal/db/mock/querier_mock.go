@@ -38,6 +38,129 @@ func (_m *MockQuerier) EXPECT() *MockQuerier_Expecter {
 	return &MockQuerier_Expecter{mock: &_m.Mock}
 }
 
+// CreateEntry provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) CreateEntry(ctx context.Context, arg db.CreateEntryParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateEntry")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateEntryParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_CreateEntry_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateEntry'
+type MockQuerier_CreateEntry_Call struct {
+	*mock.Call
+}
+
+// CreateEntry is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateEntryParams
+func (_e *MockQuerier_Expecter) CreateEntry(ctx any, arg any) *MockQuerier_CreateEntry_Call {
+	return &MockQuerier_CreateEntry_Call{Call: _e.mock.On("CreateEntry", ctx, arg)}
+}
+
+func (_c *MockQuerier_CreateEntry_Call) Run(run func(ctx context.Context, arg db.CreateEntryParams)) *MockQuerier_CreateEntry_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateEntryParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateEntryParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_CreateEntry_Call) Return(err error) *MockQuerier_CreateEntry_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_CreateEntry_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateEntryParams) error) *MockQuerier_CreateEntry_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CreateInode provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) CreateInode(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateInode")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateInodeParams) (db.Inode, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateInodeParams) db.Inode); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateInodeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_CreateInode_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateInode'
+type MockQuerier_CreateInode_Call struct {
+	*mock.Call
+}
+
+// CreateInode is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateInodeParams
+func (_e *MockQuerier_Expecter) CreateInode(ctx any, arg any) *MockQuerier_CreateInode_Call {
+	return &MockQuerier_CreateInode_Call{Call: _e.mock.On("CreateInode", ctx, arg)}
+}
+
+func (_c *MockQuerier_CreateInode_Call) Run(run func(ctx context.Context, arg db.CreateInodeParams)) *MockQuerier_CreateInode_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateInodeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateInodeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_CreateInode_Call) Return(inode db.Inode, err error) *MockQuerier_CreateInode_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockQuerier_CreateInode_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error)) *MockQuerier_CreateInode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetInode provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) GetInode(ctx context.Context, ino int64) (db.Inode, error) {
 	ret := _mock.Called(ctx, ino)
@@ -232,6 +355,63 @@ func (_c *MockQuerier_GetInodeForUpdate_Call) Return(inode db.Inode, err error) 
 }
 
 func (_c *MockQuerier_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockQuerier_GetInodeForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// TouchInodeTimestamps provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) TouchInodeTimestamps(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for TouchInodeTimestamps")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_TouchInodeTimestamps_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TouchInodeTimestamps'
+type MockQuerier_TouchInodeTimestamps_Call struct {
+	*mock.Call
+}
+
+// TouchInodeTimestamps is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) TouchInodeTimestamps(ctx any, ino any) *MockQuerier_TouchInodeTimestamps_Call {
+	return &MockQuerier_TouchInodeTimestamps_Call{Call: _e.mock.On("TouchInodeTimestamps", ctx, ino)}
+}
+
+func (_c *MockQuerier_TouchInodeTimestamps_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_TouchInodeTimestamps_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_TouchInodeTimestamps_Call) Return(err error) *MockQuerier_TouchInodeTimestamps_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_TouchInodeTimestamps_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockQuerier_TouchInodeTimestamps_Call {
 	_c.Call.Return(run)
 	return _c
 }

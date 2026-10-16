@@ -209,6 +209,7 @@ func TestSetAttrResponseValidation(t *testing.T) {
 		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
+	now := timestamppb.Now()
 	validInode := &storagev1.Inode{
 		Ino:        1,
 		Generation: 1,
@@ -218,6 +219,9 @@ func TestSetAttrResponseValidation(t *testing.T) {
 			Nlink:   1,
 			Blksize: 4096,
 			Blocks:  2,
+			Atime:   now,
+			Mtime:   now,
+			Ctime:   now,
 		},
 	}
 

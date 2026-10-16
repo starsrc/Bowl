@@ -10,11 +10,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func uint32Ptr(v uint32) *uint32 {
-	return &v
-}
-
-func uint64Ptr(v uint64) *uint64 {
+func ptr[T any](v T) *T {
 	return &v
 }
 
@@ -37,7 +33,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: 仅更新 mode",
 			req: &storagev1.SetAttrRequest{
 				Ino:  1,
-				Mode: uint32Ptr(0o644),
+				Mode: ptr[uint32](0o644),
 			},
 			isValid: true,
 		},
@@ -45,7 +41,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: 仅更新 uid",
 			req: &storagev1.SetAttrRequest{
 				Ino: 1,
-				Uid: uint32Ptr(1000),
+				Uid: ptr[uint32](1000),
 			},
 			isValid: true,
 		},
@@ -53,7 +49,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: 仅更新 gid",
 			req: &storagev1.SetAttrRequest{
 				Ino: 1,
-				Gid: uint32Ptr(1000),
+				Gid: ptr[uint32](1000),
 			},
 			isValid: true,
 		},
@@ -61,7 +57,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: 仅更新 size",
 			req: &storagev1.SetAttrRequest{
 				Ino:  1,
-				Size: uint64Ptr(1024),
+				Size: ptr[uint64](1024),
 			},
 			isValid: true,
 		},
@@ -101,10 +97,10 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: 组合更新 mode, uid, gid, size 与 mtime_now",
 			req: &storagev1.SetAttrRequest{
 				Ino:      2,
-				Mode:     uint32Ptr(0o755),
-				Uid:      uint32Ptr(500),
-				Gid:      uint32Ptr(500),
-				Size:     uint64Ptr(4096),
+				Mode:     ptr[uint32](0o755),
+				Uid:      ptr[uint32](500),
+				Gid:      ptr[uint32](500),
+				Size:     ptr[uint64](4096),
 				MtimeNow: true,
 			},
 			isValid: true,
@@ -113,7 +109,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: ino 与 size 处于 MaxInt64 临界值",
 			req: &storagev1.SetAttrRequest{
 				Ino:  math.MaxInt64,
-				Size: uint64Ptr(math.MaxInt64),
+				Size: ptr[uint64](math.MaxInt64),
 			},
 			isValid: true,
 		},
@@ -121,7 +117,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "合法: mode 处于 65535 (0o177777) 临界值",
 			req: &storagev1.SetAttrRequest{
 				Ino:  1,
-				Mode: uint32Ptr(65535),
+				Mode: ptr[uint32](65535),
 			},
 			isValid: true,
 		},
@@ -162,7 +158,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "非法: ino 为 0",
 			req: &storagev1.SetAttrRequest{
 				Ino:  0,
-				Mode: uint32Ptr(0o644),
+				Mode: ptr[uint32](0o644),
 			},
 			isValid: false,
 		},
@@ -170,7 +166,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "非法: ino 超过 MaxInt64 (防止转 PostgreSQL BIGINT 溢出)",
 			req: &storagev1.SetAttrRequest{
 				Ino:  math.MaxInt64 + 1,
-				Mode: uint32Ptr(0o644),
+				Mode: ptr[uint32](0o644),
 			},
 			isValid: false,
 		},
@@ -180,7 +176,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "非法: mode 超过 65535",
 			req: &storagev1.SetAttrRequest{
 				Ino:  1,
-				Mode: uint32Ptr(65536),
+				Mode: ptr[uint32](65536),
 			},
 			isValid: false,
 		},
@@ -190,7 +186,7 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			name: "非法: size 超过 MaxInt64",
 			req: &storagev1.SetAttrRequest{
 				Ino:  1,
-				Size: uint64Ptr(math.MaxInt64 + 1),
+				Size: ptr[uint64](math.MaxInt64 + 1),
 			},
 			isValid: false,
 		},

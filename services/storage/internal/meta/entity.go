@@ -12,7 +12,6 @@ const (
 	S_IFREG  uint32 = 0o100000
 	S_ISUID  uint32 = 0o4000
 	S_ISGID  uint32 = 0o2000
-	S_ISVTX  uint32 = 0o1000
 	PermMask uint32 = 0o7777
 )
 

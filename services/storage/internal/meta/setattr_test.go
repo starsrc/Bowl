@@ -325,6 +325,58 @@ func TestSetAttr_PositivePath(t *testing.T) {
 		assert.Equal(t, updatedRow.Mtime.Time, inode.Attr.Mtime)
 	})
 
+	t.Run("successfully update orphaned inode attributes with nlink 0 (fchmod and ftruncate scenarios)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanedRow := baseInodeRow
+		orphanedRow.Nlink = 0 // 已解链孤儿节点（文件已被 unlink 但句柄依然打开）
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanedRow, nil).
+			Once()
+
+		expectedNewMode := int32(0o100600)
+		updatedRow := orphanedRow
+		updatedRow.Mode = expectedNewMode
+		updatedRow.Size = 8192
+		updatedRow.Mtime = pgtype.Timestamptz{Time: now, Valid: true}
+		updatedRow.Ctime = pgtype.Timestamptz{Time: now, Valid: true}
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         int64(ino),
+				Mode:        expectedNewMode,
+				Size:        8192,
+				Uid:         orphanedRow.Uid,
+				Gid:         orphanedRow.Gid,
+				SetAtimeNow: false,
+				Atime:       orphanedRow.Atime,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{Valid: false},
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		inode, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Mode: ptr(uint32(0o600)), // fchmod 场景
+			Size: ptr(uint64(8192)),  // ftruncate 场景
+		})
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+
+		assert.Equal(t, ino, inode.Ino)
+		assert.Equal(t, uint32(0), inode.Attr.Nlink)
+		assert.Equal(t, uint32(0o100600), inode.Attr.Mode)
+		assert.Equal(t, uint64(8192), inode.Attr.Size)
+		assert.Equal(t, uint64(16), inode.Attr.Blocks) // (8192 + 511) / 512 = 16
+		assert.Equal(t, updatedRow.Ctime.Time, inode.Attr.Ctime)
+	})
+
 	t.Run("node not found returns ErrNotFound", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)

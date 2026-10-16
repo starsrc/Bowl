@@ -166,9 +166,9 @@ SET
   size = $3,
   uid = $4,
   gid = $5,
-  atime = CASE WHEN $6::boolean THEN NOW() ELSE $7::timestamptz END,
-  mtime = CASE WHEN $8::boolean THEN NOW() ELSE $9::timestamptz END,
-  ctime = NOW()
+  atime = CASE WHEN $6::boolean THEN clock_timestamp() ELSE $7::timestamptz END,
+  mtime = CASE WHEN $8::boolean THEN clock_timestamp() ELSE $9::timestamptz END,
+  ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime
 `

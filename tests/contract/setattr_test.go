@@ -190,6 +190,24 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			},
 			isValid: false,
 		},
+
+		// 8. UID / GID 字段边界校验 (防止转 PostgreSQL INTEGER 符号位溢出)
+		{
+			name: "非法: uid 超过 MaxInt32",
+			req: &storagev1.SetAttrRequest{
+				Ino: 1,
+				Uid: ptr[uint32](math.MaxInt32 + 1),
+			},
+			isValid: false,
+		},
+		{
+			name: "非法: gid 超过 MaxInt32",
+			req: &storagev1.SetAttrRequest{
+				Ino: 1,
+				Gid: ptr[uint32](math.MaxInt32 + 1),
+			},
+			isValid: false,
+		},
 	}
 
 	for _, tc := range testCases {

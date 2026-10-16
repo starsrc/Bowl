@@ -22,9 +22,9 @@ SET
   size = $3,
   uid = $4,
   gid = $5,
-  atime = CASE WHEN @set_atime_now::boolean THEN NOW() ELSE @atime::timestamptz END,
-  mtime = CASE WHEN @set_mtime_now::boolean THEN NOW() ELSE @mtime::timestamptz END,
-  ctime = NOW()
+  atime = CASE WHEN @set_atime_now::boolean THEN clock_timestamp() ELSE @atime::timestamptz END,
+  mtime = CASE WHEN @set_mtime_now::boolean THEN clock_timestamp() ELSE @mtime::timestamptz END,
+  ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime;
 

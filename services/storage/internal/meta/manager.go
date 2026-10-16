@@ -156,6 +156,16 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		return nil, ErrInvalidArgument
 	}
 
+	// UID 范围边界防御（防止转换为 PostgreSQL INTEGER 符号位溢出）
+	if input.UID != nil && *input.UID > math.MaxInt32 {
+		return nil, ErrInvalidArgument
+	}
+
+	// GID 范围边界防御（防止转换为 PostgreSQL INTEGER 符号位溢出）
+	if input.GID != nil && *input.GID > math.MaxInt32 {
+		return nil, ErrInvalidArgument
+	}
+
 	// Size 范围边界防御（防止转换为 PostgreSQL BIGINT 符号位溢出）
 	if input.Size != nil && *input.Size > math.MaxInt64 {
 		return nil, ErrInvalidArgument

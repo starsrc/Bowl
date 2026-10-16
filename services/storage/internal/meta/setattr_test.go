@@ -561,7 +561,7 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 
 	t.Run("ino 超过 math.MaxInt64 时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
@@ -573,7 +573,7 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 
 	t.Run("空更新请求（全部字段为 nil 且布尔为 false）直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
@@ -583,7 +583,7 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		inode, err := mgr.SetAttr(ctx, 100, meta.SetAttrInput{})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 
 	t.Run("atime 与 atime_now 冲突时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
@@ -596,7 +596,7 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 
 	t.Run("mtime 与 mtime_now 冲突时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
@@ -609,7 +609,7 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 
 	t.Run("mode 超过 0o177777（65535）时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
@@ -621,7 +621,31 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
+	})
+
+	t.Run("uid 超过 math.MaxInt32 时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		inode, err := mgr.SetAttr(ctx, 100, meta.SetAttrInput{
+			UID: ptr(uint32(math.MaxInt32) + 1),
+		})
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
+	})
+
+	t.Run("gid 超过 math.MaxInt32 时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		inode, err := mgr.SetAttr(ctx, 100, meta.SetAttrInput{
+			GID: ptr(uint32(math.MaxInt32) + 1),
+		})
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 
 	t.Run("size 超过 math.MaxInt64 时直接返回 ErrInvalidArgument 且不开启事务", func(t *testing.T) {
@@ -633,7 +657,7 @@ func TestSetAttr_InputValidation(t *testing.T) {
 		})
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
-		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
 }
 

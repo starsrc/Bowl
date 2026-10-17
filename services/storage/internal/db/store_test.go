@@ -64,7 +64,13 @@ type InodeLifecycleQuerier interface {
 	DeleteInode(ctx context.Context, ino int64) error
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier 与 InodeLifecycleQuerier 接口契约。
+// ReadDirQuerier 提取目录遍历与父节点查询接口契约。
+type ReadDirQuerier interface {
+	GetParentInode(ctx context.Context, ino int64) (db.Inode, error)
+	ListDirEntries(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error)
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier、InodeLifecycleQuerier 与 ReadDirQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -93,6 +99,10 @@ var (
 	_ InodeLifecycleQuerier = (db.Querier)(nil)
 	_ InodeLifecycleQuerier = (db.Store)(nil)
 	_ InodeLifecycleQuerier = (*db.Queries)(nil)
+
+	_ ReadDirQuerier = (db.Querier)(nil)
+	_ ReadDirQuerier = (db.Store)(nil)
+	_ ReadDirQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -904,6 +914,135 @@ func TestQuerier_MknodOperators(t *testing.T) {
 				Once()
 
 			err := store.DeleteInode(ctx, targetIno)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
+
+	t.Run("GetParentInode 算子调用与参数透传", func(t *testing.T) {
+		const targetIno int64 = 42
+		now := time.Now()
+		expectedInode := db.Inode{
+			Ino:        1,
+			Generation: 1,
+			Mode:       0o040755,
+			Size:       4096,
+			Nlink:      2,
+			Uid:        1000,
+			Gid:        1000,
+			Rdev:       0,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		t.Run("成功查询并返回父节点 Inode", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetParentInode(mock.Anything, targetIno).
+				Return(expectedInode, nil).
+				Once()
+
+			result, err := store.GetParentInode(ctx, targetIno)
+			require.NoError(t, err)
+			assert.Equal(t, expectedInode, result)
+		})
+
+		t.Run("父节点不存在返回 pgx.ErrNoRows", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetParentInode(mock.Anything, targetIno).
+				Return(db.Inode{}, pgx.ErrNoRows).
+				Once()
+
+			_, err := store.GetParentInode(ctx, targetIno)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, pgx.ErrNoRows))
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database connection failed")
+			mockStore.EXPECT().
+				GetParentInode(mock.Anything, targetIno).
+				Return(db.Inode{}, expectedErr).
+				Once()
+
+			_, err := store.GetParentInode(ctx, targetIno)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
+
+	t.Run("ListDirEntries 算子调用与参数透传", func(t *testing.T) {
+		params := db.ListDirEntriesParams{
+			ParentIno: 1,
+			Limit:     10,
+			Offset:    0,
+		}
+		now := time.Now()
+		expectedRows := []db.ListDirEntriesRow{
+			{
+				Name:       "file.txt",
+				Ino:        42,
+				Generation: 1,
+				Mode:       0o100644,
+				Size:       1024,
+				Nlink:      1,
+				Uid:        1000,
+				Gid:        1000,
+				Rdev:       0,
+				Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+				Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+				Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+			},
+		}
+
+		t.Run("成功查询并返回子项列表", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				ListDirEntries(mock.Anything, params).
+				Return(expectedRows, nil).
+				Once()
+
+			result, err := store.ListDirEntries(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, expectedRows, result)
+		})
+
+		t.Run("无子项返回空列表", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				ListDirEntries(mock.Anything, params).
+				Return([]db.ListDirEntriesRow{}, nil).
+				Once()
+
+			result, err := store.ListDirEntries(ctx, params)
+			require.NoError(t, err)
+			assert.Empty(t, result)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database connection failed")
+			mockStore.EXPECT().
+				ListDirEntries(mock.Anything, params).
+				Return(nil, expectedErr).
+				Once()
+
+			_, err := store.ListDirEntries(ctx, params)
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, expectedErr))
 		})

@@ -992,6 +992,72 @@ func (_c *MockQuerier_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.
 	return _c
 }
 
+// GetParentInode provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetParentInode(ctx context.Context, ino int64) (db.Inode, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetParentInode")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Inode, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Inode); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetParentInode_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetParentInode'
+type MockQuerier_GetParentInode_Call struct {
+	*mock.Call
+}
+
+// GetParentInode is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) GetParentInode(ctx any, ino any) *MockQuerier_GetParentInode_Call {
+	return &MockQuerier_GetParentInode_Call{Call: _e.mock.On("GetParentInode", ctx, ino)}
+}
+
+func (_c *MockQuerier_GetParentInode_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_GetParentInode_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetParentInode_Call) Return(inode db.Inode, err error) *MockQuerier_GetParentInode_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetParentInode_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockQuerier_GetParentInode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetSymlinkTarget provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) GetSymlinkTarget(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error) {
 	ret := _mock.Called(ctx, ino)
@@ -1375,6 +1441,74 @@ func (_c *MockQuerier_IsSubdirectory_Call) Return(b bool, err error) *MockQuerie
 }
 
 func (_c *MockQuerier_IsSubdirectory_Call) RunAndReturn(run func(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error)) *MockQuerier_IsSubdirectory_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListDirEntries provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListDirEntries(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListDirEntries")
+	}
+
+	var r0 []db.ListDirEntriesRow
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDirEntriesParams) []db.ListDirEntriesRow); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.ListDirEntriesRow)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListDirEntriesParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListDirEntries_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDirEntries'
+type MockQuerier_ListDirEntries_Call struct {
+	*mock.Call
+}
+
+// ListDirEntries is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListDirEntriesParams
+func (_e *MockQuerier_Expecter) ListDirEntries(ctx any, arg any) *MockQuerier_ListDirEntries_Call {
+	return &MockQuerier_ListDirEntries_Call{Call: _e.mock.On("ListDirEntries", ctx, arg)}
+}
+
+func (_c *MockQuerier_ListDirEntries_Call) Run(run func(ctx context.Context, arg db.ListDirEntriesParams)) *MockQuerier_ListDirEntries_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListDirEntriesParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListDirEntriesParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListDirEntries_Call) Return(listDirEntriesRows []db.ListDirEntriesRow, err error) *MockQuerier_ListDirEntries_Call {
+	_c.Call.Return(listDirEntriesRows, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListDirEntries_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error)) *MockQuerier_ListDirEntries_Call {
 	_c.Call.Return(run)
 	return _c
 }

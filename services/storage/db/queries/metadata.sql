@@ -156,4 +156,30 @@ RETURNING fh;
 DELETE FROM inodes
 WHERE ino = $1;
 
+-- name: GetParentInode :one
+SELECT i.*
+FROM entries e
+JOIN inodes i ON e.parent_ino = i.ino
+WHERE e.ino = $1
+LIMIT 1;
 
+-- name: ListDirEntries :many
+SELECT
+    e.name,
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target
+FROM entries e
+JOIN inodes i ON e.ino = i.ino
+WHERE e.parent_ino = $1
+ORDER BY e.name ASC
+LIMIT $2 OFFSET $3;

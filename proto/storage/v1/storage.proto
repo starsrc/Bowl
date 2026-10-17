@@ -123,6 +123,20 @@ service StorageService {
   // 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
   // 当目标目录的硬链接数已为 0 (孤儿目录) 且所有活跃句柄均已销毁时，将触发底层物理回收。
   rpc ReleaseDir(ReleaseDirRequest) returns (ReleaseDirResponse);
+
+  // ReadDir 读取指定目录的子项流（基本条目）。
+  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  // 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+  rpc ReadDir(ReadDirRequest) returns (ReadDirResponse);
+
+  // ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
+  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  // 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+  rpc ReadDirPlus(ReadDirPlusRequest) returns (ReadDirPlusResponse);
 }
 
 
@@ -651,6 +665,112 @@ message ReleaseDirRequest {
 
 // ReleaseDirResponse 定义 ReleaseDir 接口响应结果。
 message ReleaseDirResponse {}
+
+// DirEntry 定义 ReadDir 返回的基本目录项。
+message DirEntry {
+  // 子项对应的 Inode 编号。
+  uint64 ino = 1 [(buf.validate.field).uint64.gt = 0];
+
+  // 子项名称（支持 "." 与 ".."）。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  string name = 2 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  ];
+
+  // 文件的模式位（包含文件类型与权限位）。
+  uint32 mode = 3 [(buf.validate.field).uint32.gt = 0];
+
+  // 下一个条目的游标偏移量（单调递增，大于 0）。
+  uint64 next_offset = 4 [(buf.validate.field).uint64.gt = 0];
+}
+
+// ReadDirRequest 定义 ReadDir 接口输入参数。
+message ReadDirRequest {
+  // 目标目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 活跃目录句柄标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 读取起始游标偏移量。0 表示从头开始读取（包含 "." 与 ".."）。
+  uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 单次最大读取条目数配额（最大 4096）。
+  uint32 limit = 4 [
+    (buf.validate.field).uint32.gt = 0,
+    (buf.validate.field).uint32.lte = 4096
+  ];
+}
+
+// ReadDirResponse 定义 ReadDir 接口响应结果。
+message ReadDirResponse {
+  // 目录项列表。
+  repeated DirEntry entries = 1;
+}
+
+// DirEntryPlus 定义 ReadDirPlus 返回的扩展目录项（内联属性与缓存时效）。
+message DirEntryPlus {
+  // 子项对应的 Inode 编号。
+  uint64 ino = 1 [(buf.validate.field).uint64.gt = 0];
+
+  // 子项名称（支持 "." 与 ".."）。
+  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  string name = 2 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  ];
+
+  // 下一个条目的游标偏移量（单调递增，大于 0）。
+  uint64 next_offset = 3 [(buf.validate.field).uint64.gt = 0];
+
+  // 子项的完整 Inode 元数据。
+  Inode inode = 4 [(buf.validate.field).required = true];
+
+  // 目录项在内核中的缓存有效时间（秒）。对 "." 与 ".." 固定为 0。
+  double entry_timeout_seconds = 5 [(buf.validate.field).double.gte = 0];
+
+  // 属性在内核中的缓存有效时间（秒）。
+  double attr_timeout_seconds = 6 [(buf.validate.field).double.gte = 0];
+}
+
+// ReadDirPlusRequest 定义 ReadDirPlus 接口输入参数。
+message ReadDirPlusRequest {
+  // 目标目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 活跃目录句柄标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 读取起始游标偏移量。0 表示从头开始读取（包含 "." 与 ".."）。
+  uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 单次最大读取条目数配额（最大 4096）。
+  uint32 limit = 4 [
+    (buf.validate.field).uint32.gt = 0,
+    (buf.validate.field).uint32.lte = 4096
+  ];
+}
+
+// ReadDirPlusResponse 定义 ReadDirPlus 接口响应结果。
+message ReadDirPlusResponse {
+  // 扩展目录项列表。
+  repeated DirEntryPlus entries = 1;
+}
 
 // Inode 代表文件系统中的实体节点。
 

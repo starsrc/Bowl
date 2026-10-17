@@ -700,6 +700,142 @@ func (_c *MockManager_OpenDir_Call) RunAndReturn(run func(ctx context.Context, p
 	return _c
 }
 
+// ReadDir provides a mock function for the type MockManager
+func (_mock *MockManager) ReadDir(ctx context.Context, params meta.ReadDirParams) ([]meta.DirEntry, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ReadDir")
+	}
+
+	var r0 []meta.DirEntry
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ReadDirParams) ([]meta.DirEntry, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ReadDirParams) []meta.DirEntry); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]meta.DirEntry)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.ReadDirParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_ReadDir_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReadDir'
+type MockManager_ReadDir_Call struct {
+	*mock.Call
+}
+
+// ReadDir is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.ReadDirParams
+func (_e *MockManager_Expecter) ReadDir(ctx any, params any) *MockManager_ReadDir_Call {
+	return &MockManager_ReadDir_Call{Call: _e.mock.On("ReadDir", ctx, params)}
+}
+
+func (_c *MockManager_ReadDir_Call) Run(run func(ctx context.Context, params meta.ReadDirParams)) *MockManager_ReadDir_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.ReadDirParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.ReadDirParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ReadDir_Call) Return(dirEntrys []meta.DirEntry, err error) *MockManager_ReadDir_Call {
+	_c.Call.Return(dirEntrys, err)
+	return _c
+}
+
+func (_c *MockManager_ReadDir_Call) RunAndReturn(run func(ctx context.Context, params meta.ReadDirParams) ([]meta.DirEntry, error)) *MockManager_ReadDir_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ReadDirPlus provides a mock function for the type MockManager
+func (_mock *MockManager) ReadDirPlus(ctx context.Context, params meta.ReadDirPlusParams) ([]meta.DirEntryPlus, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ReadDirPlus")
+	}
+
+	var r0 []meta.DirEntryPlus
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ReadDirPlusParams) ([]meta.DirEntryPlus, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ReadDirPlusParams) []meta.DirEntryPlus); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]meta.DirEntryPlus)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.ReadDirPlusParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_ReadDirPlus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReadDirPlus'
+type MockManager_ReadDirPlus_Call struct {
+	*mock.Call
+}
+
+// ReadDirPlus is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.ReadDirPlusParams
+func (_e *MockManager_Expecter) ReadDirPlus(ctx any, params any) *MockManager_ReadDirPlus_Call {
+	return &MockManager_ReadDirPlus_Call{Call: _e.mock.On("ReadDirPlus", ctx, params)}
+}
+
+func (_c *MockManager_ReadDirPlus_Call) Run(run func(ctx context.Context, params meta.ReadDirPlusParams)) *MockManager_ReadDirPlus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.ReadDirPlusParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.ReadDirPlusParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ReadDirPlus_Call) Return(dirEntryPluss []meta.DirEntryPlus, err error) *MockManager_ReadDirPlus_Call {
+	_c.Call.Return(dirEntryPluss, err)
+	return _c
+}
+
+func (_c *MockManager_ReadDirPlus_Call) RunAndReturn(run func(ctx context.Context, params meta.ReadDirPlusParams) ([]meta.DirEntryPlus, error)) *MockManager_ReadDirPlus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Readlink provides a mock function for the type MockManager
 func (_mock *MockManager) Readlink(ctx context.Context, ino uint64) (string, error) {
 	ret := _mock.Called(ctx, ino)

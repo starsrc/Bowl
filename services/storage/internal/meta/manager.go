@@ -37,10 +37,14 @@ type Manager interface {
 	Release(ctx context.Context, params ReleaseParams) error
 	OpenDir(ctx context.Context, params OpenDirParams) (OpenDirResult, error)
 	ReleaseDir(ctx context.Context, params ReleaseDirParams) error
+	ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry, error)
+	ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error)
 }
 
 type manager struct {
-	store db.Store
+	store        db.Store
+	entryTimeout float64
+	attrTimeout  float64
 }
 
 var _ Manager = (*manager)(nil)
@@ -48,7 +52,9 @@ var _ Manager = (*manager)(nil)
 // New 创建 Manager 实例。
 func New(store db.Store) Manager {
 	return &manager{
-		store: store,
+		store:        store,
+		entryTimeout: DefaultEntryTimeoutSeconds,
+		attrTimeout:  DefaultAttrTimeoutSeconds,
 	}
 }
 
@@ -1750,4 +1756,271 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 	}
 
 	return nil
+}
+
+func newInodeFromListDirRow(target db.ListDirEntriesRow) *Inode {
+	var blocks uint64
+	if target.Size > 0 {
+		blocks = (uint64(target.Size) + 511) / 512
+	}
+
+	return &Inode{
+		Ino:        uint64(target.Ino),
+		Generation: uint64(target.Generation),
+		Attr: Attribute{
+			Mode:    uint32(target.Mode),
+			Size:    uint64(target.Size),
+			Nlink:   uint32(target.Nlink),
+			UID:     uint32(target.Uid),
+			GID:     uint32(target.Gid),
+			Rdev:    uint32(target.Rdev),
+			Blksize: 4096,
+			Blocks:  blocks,
+			Atime:   target.Atime.Time,
+			Mtime:   target.Mtime.Time,
+			Ctime:   target.Ctime.Time,
+		},
+	}
+}
+
+// ReadDir 读取指定目录的子项流（基本条目），支持确定性分页游标与 . / .. 合成。
+func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry, error) {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
+		params.Fh == 0 || params.Fh > math.MaxInt64 ||
+		params.Limit == 0 || params.Limit > MaxReadDirLimit ||
+		params.Offset > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+
+	var entries []DirEntry
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		dirInode, err := q.GetInode(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get dir inode %d: %w", params.Ino, err)
+		}
+
+		if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if dirInode.Nlink == 0 {
+			entries = []DirEntry{}
+			return nil
+		}
+
+		rem := int(params.Limit)
+		entries = make([]DirEntry, 0, min(rem, 16))
+
+		if params.Offset < 1 && rem > 0 {
+			entries = append(entries, DirEntry{
+				Ino:        uint64(dirInode.Ino),
+				Name:       ".",
+				Mode:       uint32(dirInode.Mode),
+				NextOffset: 1,
+			})
+			rem--
+		}
+
+		if params.Offset < 2 && rem > 0 {
+			parentInode, err := q.GetParentInode(ctx, int64(params.Ino))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					parentInode = dirInode
+				} else {
+					return fmt.Errorf("get parent inode for %d: %w", params.Ino, err)
+				}
+			}
+			entries = append(entries, DirEntry{
+				Ino:        uint64(parentInode.Ino),
+				Name:       "..",
+				Mode:       uint32(parentInode.Mode),
+				NextOffset: 2,
+			})
+			rem--
+		}
+
+		if rem > 0 {
+			sqlOffset := 0
+			if params.Offset >= 2 {
+				sqlOffset = int(params.Offset - 2)
+			}
+			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
+				ParentIno: int64(params.Ino),
+				Limit:     int32(rem),
+				Offset:    int32(sqlOffset),
+			})
+			if err != nil {
+				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+			}
+
+			for i, row := range rows {
+				entries = append(entries, DirEntry{
+					Ino:        uint64(row.Ino),
+					Name:       row.Name,
+					Mode:       uint32(row.Mode),
+					NextOffset: uint64(sqlOffset) + uint64(i) + 3,
+				})
+			}
+		}
+
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrBadFileHandle):
+			return nil, ErrBadFileHandle
+		default:
+			return nil, fmt.Errorf("readdir tx: %w", err)
+		}
+	}
+
+	if entries == nil {
+		entries = []DirEntry{}
+	}
+	return entries, nil
+}
+
+// ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效，支持确定性分页游标与 . / .. 合成。
+func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error) {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
+		params.Fh == 0 || params.Fh > math.MaxInt64 ||
+		params.Limit == 0 || params.Limit > MaxReadDirLimit ||
+		params.Offset > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+
+	var entries []DirEntryPlus
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		dirInode, err := q.GetInode(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get dir inode %d: %w", params.Ino, err)
+		}
+
+		if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if dirInode.Nlink == 0 {
+			entries = []DirEntryPlus{}
+			return nil
+		}
+
+		rem := int(params.Limit)
+		entries = make([]DirEntryPlus, 0, min(rem, 16))
+
+		if params.Offset < 1 && rem > 0 {
+			entries = append(entries, DirEntryPlus{
+				Ino:                 uint64(dirInode.Ino),
+				Name:                ".",
+				NextOffset:          1,
+				Inode:               newInodeFromDB(dirInode),
+				EntryTimeoutSeconds: 0,
+				AttrTimeoutSeconds:  m.attrTimeout,
+			})
+			rem--
+		}
+
+		if params.Offset < 2 && rem > 0 {
+			parentInode, err := q.GetParentInode(ctx, int64(params.Ino))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					parentInode = dirInode
+				} else {
+					return fmt.Errorf("get parent inode for %d: %w", params.Ino, err)
+				}
+			}
+			entries = append(entries, DirEntryPlus{
+				Ino:                 uint64(parentInode.Ino),
+				Name:                "..",
+				NextOffset:          2,
+				Inode:               newInodeFromDB(parentInode),
+				EntryTimeoutSeconds: 0,
+				AttrTimeoutSeconds:  m.attrTimeout,
+			})
+			rem--
+		}
+
+		if rem > 0 {
+			sqlOffset := 0
+			if params.Offset >= 2 {
+				sqlOffset = int(params.Offset - 2)
+			}
+			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
+				ParentIno: int64(params.Ino),
+				Limit:     int32(rem),
+				Offset:    int32(sqlOffset),
+			})
+			if err != nil {
+				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+			}
+
+			for i, row := range rows {
+				entries = append(entries, DirEntryPlus{
+					Ino:                 uint64(row.Ino),
+					Name:                row.Name,
+					NextOffset:          uint64(sqlOffset) + uint64(i) + 3,
+					Inode:               newInodeFromListDirRow(row),
+					EntryTimeoutSeconds: m.entryTimeout,
+					AttrTimeoutSeconds:  m.attrTimeout,
+				})
+			}
+		}
+
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrBadFileHandle):
+			return nil, ErrBadFileHandle
+		default:
+			return nil, fmt.Errorf("readdirplus tx: %w", err)
+		}
+	}
+
+	if entries == nil {
+		entries = []DirEntryPlus{}
+	}
+	return entries, nil
 }

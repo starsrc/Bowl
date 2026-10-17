@@ -371,6 +371,34 @@ func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, erro
 	return i, err
 }
 
+const getParentInode = `-- name: GetParentInode :one
+SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target
+FROM entries e
+JOIN inodes i ON e.parent_ino = i.ino
+WHERE e.ino = $1
+LIMIT 1
+`
+
+func (q *Queries) GetParentInode(ctx context.Context, ino int64) (Inode, error) {
+	row := q.db.QueryRow(ctx, getParentInode, ino)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+	)
+	return i, err
+}
+
 const getSymlinkTarget = `-- name: GetSymlinkTarget :one
 SELECT mode, symlink_target
 FROM inodes
@@ -488,6 +516,84 @@ func (q *Queries) IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) 
 	var is_sub bool
 	err := row.Scan(&is_sub)
 	return is_sub, err
+}
+
+const listDirEntries = `-- name: ListDirEntries :many
+SELECT
+    e.name,
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target
+FROM entries e
+JOIN inodes i ON e.ino = i.ino
+WHERE e.parent_ino = $1
+ORDER BY e.name ASC
+LIMIT $2 OFFSET $3
+`
+
+type ListDirEntriesParams struct {
+	ParentIno int64 `json:"parent_ino"`
+	Limit     int32 `json:"limit"`
+	Offset    int32 `json:"offset"`
+}
+
+type ListDirEntriesRow struct {
+	Name          string             `json:"name"`
+	Ino           int64              `json:"ino"`
+	Generation    int64              `json:"generation"`
+	Mode          int32              `json:"mode"`
+	Size          int64              `json:"size"`
+	Nlink         int32              `json:"nlink"`
+	Uid           int32              `json:"uid"`
+	Gid           int32              `json:"gid"`
+	Rdev          int64              `json:"rdev"`
+	Atime         pgtype.Timestamptz `json:"atime"`
+	Mtime         pgtype.Timestamptz `json:"mtime"`
+	Ctime         pgtype.Timestamptz `json:"ctime"`
+	SymlinkTarget pgtype.Text        `json:"symlink_target"`
+}
+
+func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error) {
+	rows, err := q.db.Query(ctx, listDirEntries, arg.ParentIno, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDirEntriesRow
+	for rows.Next() {
+		var i ListDirEntriesRow
+		if err := rows.Scan(
+			&i.Name,
+			&i.Ino,
+			&i.Generation,
+			&i.Mode,
+			&i.Size,
+			&i.Nlink,
+			&i.Uid,
+			&i.Gid,
+			&i.Rdev,
+			&i.Atime,
+			&i.Mtime,
+			&i.Ctime,
+			&i.SymlinkTarget,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const touchInodeCtime = `-- name: TouchInodeCtime :exec

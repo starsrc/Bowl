@@ -24,12 +24,14 @@ type Querier interface {
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
+	GetParentInode(ctx context.Context, ino int64) (Inode, error)
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)
+	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error

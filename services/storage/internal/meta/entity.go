@@ -156,6 +156,49 @@ type ReleaseDirParams struct {
 	Fh  uint64
 }
 
+// 目录遍历最大单次条目配额限制。
+const MaxReadDirLimit uint32 = 4096
+
+// 默认内核条目与属性缓存时效（秒）。
+const (
+	DefaultEntryTimeoutSeconds float64 = 1.0
+	DefaultAttrTimeoutSeconds  float64 = 1.0
+)
+
+// DirEntry 定义 ReadDir 返回的基本目录项实体。
+type DirEntry struct {
+	Ino        uint64
+	Name       string
+	Mode       uint32
+	NextOffset uint64
+}
+
+// ReadDirParams 定义目录项流式遍历输入参数。
+type ReadDirParams struct {
+	Ino    uint64
+	Fh     uint64
+	Offset uint64
+	Limit  uint32
+}
+
+// DirEntryPlus 定义 ReadDirPlus 返回的扩展目录项实体（包含完整 Inode 属性与内核缓存时效）。
+type DirEntryPlus struct {
+	Ino                 uint64
+	Name                string
+	NextOffset          uint64
+	Inode               *Inode
+	EntryTimeoutSeconds float64
+	AttrTimeoutSeconds  float64
+}
+
+// ReadDirPlusParams 定义扩展目录项流式遍历输入参数。
+type ReadDirPlusParams struct {
+	Ino    uint64
+	Fh     uint64
+	Offset uint64
+	Limit  uint32
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

@@ -39,6 +39,7 @@ const (
 	StorageService_ReleaseDir_FullMethodName  = "/storage.v1.StorageService/ReleaseDir"
 	StorageService_ReadDir_FullMethodName     = "/storage.v1.StorageService/ReadDir"
 	StorageService_ReadDirPlus_FullMethodName = "/storage.v1.StorageService/ReadDirPlus"
+	StorageService_Fallocate_FullMethodName   = "/storage.v1.StorageService/Fallocate"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -156,6 +157,9 @@ type StorageServiceClient interface {
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
 	ReadDirPlus(ctx context.Context, in *ReadDirPlusRequest, opts ...grpc.CallOption) (*ReadDirPlusResponse, error)
+	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
+	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+	Fallocate(ctx context.Context, in *FallocateRequest, opts ...grpc.CallOption) (*FallocateResponse, error)
 }
 
 type storageServiceClient struct {
@@ -366,6 +370,16 @@ func (c *storageServiceClient) ReadDirPlus(ctx context.Context, in *ReadDirPlusR
 	return out, nil
 }
 
+func (c *storageServiceClient) Fallocate(ctx context.Context, in *FallocateRequest, opts ...grpc.CallOption) (*FallocateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FallocateResponse)
+	err := c.cc.Invoke(ctx, StorageService_Fallocate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -481,6 +495,9 @@ type StorageServiceServer interface {
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
 	ReadDirPlus(context.Context, *ReadDirPlusRequest) (*ReadDirPlusResponse, error)
+	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
+	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+	Fallocate(context.Context, *FallocateRequest) (*FallocateResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -550,6 +567,9 @@ func (UnimplementedStorageServiceServer) ReadDir(context.Context, *ReadDirReques
 }
 func (UnimplementedStorageServiceServer) ReadDirPlus(context.Context, *ReadDirPlusRequest) (*ReadDirPlusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadDirPlus not implemented")
+}
+func (UnimplementedStorageServiceServer) Fallocate(context.Context, *FallocateRequest) (*FallocateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Fallocate not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -932,6 +952,24 @@ func _StorageService_ReadDirPlus_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Fallocate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FallocateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Fallocate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Fallocate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Fallocate(ctx, req.(*FallocateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1018,6 +1056,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadDirPlus",
 			Handler:    _StorageService_ReadDirPlus_Handler,
+		},
+		{
+			MethodName: "Fallocate",
+			Handler:    _StorageService_Fallocate_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -34,6 +34,12 @@ const (
 	O_APPEND  = 0o2000
 )
 
+// Linux FUSE / POSIX fallocate 模式标志位常量（平台无关固定值）。
+const (
+	FallocFlKeepSize  uint32 = 0x01
+	FallocFlPunchHole uint32 = 0x02
+)
+
 // SetAttrInput 定义修改 Inode 属性的输入参数。
 type SetAttrInput struct {
 	Mode     *uint32
@@ -199,6 +205,15 @@ type ReadDirPlusParams struct {
 	Limit  uint32
 }
 
+// FallocateParams 定义文件空间预分配与打洞操作的输入参数。
+type FallocateParams struct {
+	Ino    uint64
+	Fh     uint64
+	Offset uint64
+	Length uint64
+	Mode   uint32
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")
@@ -209,6 +224,7 @@ var (
 	ErrAlreadyExists   = errors.New("meta: entry already exists")
 	ErrNotEmpty        = errors.New("meta: directory not empty")
 	ErrBadFileHandle   = errors.New("meta: bad file handle")
+	ErrNotSupported    = errors.New("meta: operation not supported")
 )
 
 // Inode 表示文件系统节点的领域实体。

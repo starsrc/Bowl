@@ -137,6 +137,10 @@ service StorageService {
   // 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
   // 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
   rpc ReadDirPlus(ReadDirPlusRequest) returns (ReadDirPlusResponse);
+
+  // Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
+  // 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+  rpc Fallocate(FallocateRequest) returns (FallocateResponse);
 }
 
 
@@ -771,6 +775,36 @@ message ReadDirPlusResponse {
   // 扩展目录项列表。
   repeated DirEntryPlus entries = 1;
 }
+
+// FallocateRequest 定义 Fallocate 接口输入参数。
+message FallocateRequest {
+  // 目标常规文件的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 活跃文件句柄标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 操作起始偏移量（字节）。必须在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 操作区间长度（字节）。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 length = 4 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
+  uint32 mode = 5;
+}
+
+// FallocateResponse 定义 Fallocate 接口响应结果。
+message FallocateResponse {}
 
 // Inode 代表文件系统中的实体节点。
 

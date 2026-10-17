@@ -64,6 +64,8 @@ const (
 	StorageServiceReadDirProcedure = "/storage.v1.StorageService/ReadDir"
 	// StorageServiceReadDirPlusProcedure is the procedure name of the StorageService's ReadDirPlus RPC.
 	StorageServiceReadDirPlusProcedure = "/storage.v1.StorageService/ReadDirPlus"
+	// StorageServiceFallocateProcedure is the procedure name of the StorageService's Fallocate RPC.
+	StorageServiceFallocateProcedure = "/storage.v1.StorageService/Fallocate"
 )
 
 var (
@@ -207,6 +209,13 @@ var (
 			Procedure:  StorageServiceReadDirPlusProcedure,
 		}
 	})
+	storageServiceFallocateSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Fallocate"),
+			Procedure:  StorageServiceFallocateProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -320,6 +329,9 @@ type StorageServiceClient interface {
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
 	ReadDirPlus(context.Context, *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error)
+	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
+	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+	Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -439,6 +451,9 @@ type StorageServiceHandler interface {
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
 	ReadDirPlus(context.Context, *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error)
+	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
+	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+	Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -466,6 +481,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceReleaseDirSpec(), Handler: adapter.releaseDir},
 		connect.Method{Spec: storageServiceReadDirSpec(), Handler: adapter.readDir},
 		connect.Method{Spec: storageServiceReadDirPlusSpec(), Handler: adapter.readDirPlus},
+		connect.Method{Spec: storageServiceFallocateSpec(), Handler: adapter.fallocate},
 	)
 }
 
@@ -550,6 +566,10 @@ func (UnimplementedStorageServiceHandler) ReadDir(context.Context, *v1.ReadDirRe
 
 func (UnimplementedStorageServiceHandler) ReadDirPlus(context.Context, *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.ReadDirPlus is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Fallocate is not implemented")
 }
 
 type storageServiceClient struct {
@@ -711,6 +731,14 @@ func (c *storageServiceClient) ReadDir(ctx context.Context, req *v1.ReadDirReque
 func (c *storageServiceClient) ReadDirPlus(ctx context.Context, req *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error) {
 	var res v1.ReadDirPlusResponse
 	if err := c.client.CallUnary(ctx, storageServiceReadDirPlusSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Fallocate(ctx context.Context, req *v1.FallocateRequest) (*v1.FallocateResponse, error) {
+	var res v1.FallocateResponse
+	if err := c.client.CallUnary(ctx, storageServiceFallocateSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -952,6 +980,18 @@ func (h storageServiceHandler) readDirPlus(ctx context.Context, _ connect.Spec, 
 		return err
 	}
 	res, err := h.svc.ReadDirPlus(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) fallocate(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.FallocateRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Fallocate(ctx, &req)
 	if err != nil {
 		return err
 	}

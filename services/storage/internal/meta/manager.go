@@ -39,6 +39,7 @@ type Manager interface {
 	ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 	ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry, error)
 	ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error)
+	Fallocate(ctx context.Context, params FallocateParams) error
 }
 
 type manager struct {
@@ -2024,3 +2025,127 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 	}
 	return entries, nil
 }
+
+// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
+// 遵循 Linux fallocate(2) 与 ADR-0010 规范。
+func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
+	// 1. 入参边界与整型溢出防御
+	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
+		params.Fh == 0 || params.Fh > math.MaxInt64 ||
+		params.Length == 0 || params.Length > math.MaxInt64 ||
+		params.Offset > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if params.Offset > uint64(math.MaxInt64)-params.Length {
+		return ErrInvalidArgument
+	}
+
+	// 2. 模式位校验
+	if params.Mode == FallocFlPunchHole {
+		return ErrInvalidArgument
+	}
+	if params.Mode != 0 && params.Mode != FallocFlKeepSize && params.Mode != (FallocFlPunchHole|FallocFlKeepSize) {
+		return ErrNotSupported
+	}
+
+	// 3. 开启读写事务
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		current, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
+		}
+
+		fileType := uint32(current.Mode) & S_IFMT
+		if fileType == S_IFDIR {
+			return ErrIsDir
+		}
+		if fileType != S_IFREG {
+			return ErrNotSupported
+		}
+
+		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if (uint32(handle.Flags) & O_ACCMODE) == O_RDONLY {
+			return ErrBadFileHandle
+		}
+
+		switch params.Mode {
+		case 0:
+			targetSize := params.Offset + params.Length
+			if targetSize > uint64(current.Size) {
+				_, err = q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
+					Ino:         current.Ino,
+					Mode:        current.Mode,
+					Size:        int64(targetSize),
+					Uid:         current.Uid,
+					Gid:         current.Gid,
+					SetAtimeNow: false,
+					Atime:       current.Atime,
+					SetMtimeNow: true,
+					Mtime:       pgtype.Timestamptz{},
+				})
+				if err != nil {
+					return fmt.Errorf("update inode attr %d: %w", current.Ino, err)
+				}
+			} else {
+				if err := q.TouchInodeCtime(ctx, int64(params.Ino)); err != nil {
+					return fmt.Errorf("touch inode ctime %d: %w", params.Ino, err)
+				}
+			}
+		case FallocFlKeepSize:
+			if err := q.TouchInodeCtime(ctx, int64(params.Ino)); err != nil {
+				return fmt.Errorf("touch inode ctime %d: %w", params.Ino, err)
+			}
+		case FallocFlPunchHole | FallocFlKeepSize:
+			newMode := uint32(current.Mode) &^ (S_ISUID | S_ISGID)
+			_, err = q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
+				Ino:         current.Ino,
+				Mode:        int32(newMode),
+				Size:        current.Size,
+				Uid:         current.Uid,
+				Gid:         current.Gid,
+				SetAtimeNow: false,
+				Atime:       current.Atime,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{},
+			})
+			if err != nil {
+				return fmt.Errorf("update inode attr %d: %w", current.Ino, err)
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrIsDir):
+			return ErrIsDir
+		case errors.Is(err, ErrNotSupported):
+			return ErrNotSupported
+		case errors.Is(err, ErrBadFileHandle):
+			return ErrBadFileHandle
+		default:
+			return fmt.Errorf("fallocate (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+		}
+	}
+
+	return nil
+}
+

@@ -63,11 +63,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -87,7 +87,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteEntry(mock.Anything, db.DeleteEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(nil).
 			Once()
@@ -106,7 +106,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "file.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		require.NoError(t, err)
 	})
 
@@ -133,11 +133,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "orphan.txt",
+				Name:      []byte("orphan.txt"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "orphan.txt",
+				Name:      []byte("orphan.txt"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -155,7 +155,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteEntry(mock.Anything, db.DeleteEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "orphan.txt",
+				Name:      []byte("orphan.txt"),
 			}).
 			Return(nil).
 			Once()
@@ -172,7 +172,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "orphan.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("orphan.txt"))
 		require.NoError(t, err)
 	})
 
@@ -200,11 +200,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "symlink",
+				Name:      []byte("symlink"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "symlink",
+				Name:      []byte("symlink"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -222,7 +222,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteEntry(mock.Anything, db.DeleteEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "symlink",
+				Name:      []byte("symlink"),
 			}).
 			Return(nil).
 			Once()
@@ -239,7 +239,74 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "symlink")
+		err := mgr.Unlink(ctx, parentIno, []byte("symlink"))
+		require.NoError(t, err)
+	})
+
+	t.Run("成功删除非 UTF-8 原始字节名称文件", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		rawName := []byte{0xfa, 0xfb, 0xfc}
+		childRow := db.Inode{
+			Ino:        int64(childIno),
+			Generation: 1,
+			Mode:       int32(meta.S_IFREG | 0o644),
+			Size:       512,
+			Nlink:      1,
+			Uid:        1001,
+			Gid:        1001,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+			}).
+			Return(db.Entry{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(childIno)).
+			Return(childRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteEntry(mock.Anything, db.DeleteEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+			}).
+			Return(nil).
+			Once()
+
+		orphanRow := childRow
+		orphanRow.Nlink = 0
+		mockQuerier.EXPECT().
+			DecrementInodeNlinkAndTouchCtime(mock.Anything, int64(childIno)).
+			Return(orphanRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		err := mgr.Unlink(ctx, parentIno, rawName)
 		require.NoError(t, err)
 	})
 
@@ -257,8 +324,8 @@ func TestUnlink_PositivePath(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier1)
 
 		mockQuerier1.EXPECT().
-			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
-			Return(db.Entry{ParentIno: int64(newerParentIno), Name: "drift.txt", Ino: olderChildIno}, nil).
+			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: []byte("drift.txt")}).
+			Return(db.Entry{ParentIno: int64(newerParentIno), Name: []byte("drift.txt"), Ino: olderChildIno}, nil).
 			Once()
 		mockQuerier1.EXPECT().
 			GetInodeForUpdate(mock.Anything, olderChildIno).
@@ -269,8 +336,8 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(db.Inode{Ino: int64(newerParentIno), Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil).
 			Once()
 		mockQuerier1.EXPECT().
-			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
-			Return(db.Entry{ParentIno: int64(newerParentIno), Name: "drift.txt", Ino: driftedChildIno}, nil).
+			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: []byte("drift.txt")}).
+			Return(db.Entry{ParentIno: int64(newerParentIno), Name: []byte("drift.txt"), Ino: driftedChildIno}, nil).
 			Once()
 
 		// 第二次事务：预读到 driftedChildIno(8)，按 8 -> 50 升序加锁并顺利完成删除
@@ -278,8 +345,8 @@ func TestUnlink_PositivePath(t *testing.T) {
 
 		var lockOrder []int64
 		mockQuerier2.EXPECT().
-			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
-			Return(db.Entry{ParentIno: int64(newerParentIno), Name: "drift.txt", Ino: driftedChildIno}, nil).
+			GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newerParentIno), Name: []byte("drift.txt")}).
+			Return(db.Entry{ParentIno: int64(newerParentIno), Name: []byte("drift.txt"), Ino: driftedChildIno}, nil).
 			Twice()
 		mockQuerier2.EXPECT().
 			GetInodeForUpdate(mock.Anything, driftedChildIno).
@@ -296,7 +363,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 			}).
 			Once()
 		mockQuerier2.EXPECT().
-			DeleteEntry(mock.Anything, db.DeleteEntryParams{ParentIno: int64(newerParentIno), Name: "drift.txt"}).
+			DeleteEntry(mock.Anything, db.DeleteEntryParams{ParentIno: int64(newerParentIno), Name: []byte("drift.txt")}).
 			Return(nil).
 			Once()
 		mockQuerier2.EXPECT().
@@ -308,7 +375,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
-		err := mgr.Unlink(ctx, newerParentIno, "drift.txt")
+		err := mgr.Unlink(ctx, newerParentIno, []byte("drift.txt"))
 		require.NoError(t, err)
 		assert.Equal(t, []int64{driftedChildIno, int64(newerParentIno)}, lockOrder)
 	})
@@ -320,22 +387,23 @@ func TestUnlink_InputValidation(t *testing.T) {
 	mgr := meta.New(mockStore)
 
 	testCases := []struct {
-		name      string
-		parentIno uint64
-		entryName string
+		name        string
+		parentIno   uint64
+		entryName   []byte
+		expectedErr error
 	}{
-		{name: "parent_ino 为 0", parentIno: 0, entryName: "file.txt"},
-		{name: "parent_ino 超过 math.MaxInt64", parentIno: uint64(math.MaxInt64) + 1, entryName: "file.txt"},
-		{name: "name 为空字符串", parentIno: 1, entryName: ""},
-		{name: "name 长度超过 255 字节", parentIno: 1, entryName: strings.Repeat("a", 256)},
-		{name: "name 包含斜杠 /", parentIno: 1, entryName: "sub/file"},
-		{name: "name 包含空字符 \\x00", parentIno: 1, entryName: "file\x00name"},
+		{name: "parent_ino 为 0", parentIno: 0, entryName: []byte("file.txt"), expectedErr: meta.ErrInvalidArgument},
+		{name: "parent_ino 超过 math.MaxInt64", parentIno: uint64(math.MaxInt64) + 1, entryName: []byte("file.txt"), expectedErr: meta.ErrInvalidArgument},
+		{name: "name 为空切片", parentIno: 1, entryName: []byte{}, expectedErr: meta.ErrInvalidArgument},
+		{name: "name 长度超过 255 字节", parentIno: 1, entryName: []byte(strings.Repeat("a", 256)), expectedErr: meta.ErrNameTooLong},
+		{name: "name 包含斜杠 /", parentIno: 1, entryName: []byte("sub/file"), expectedErr: meta.ErrInvalidArgument},
+		{name: "name 包含空字符 \\x00", parentIno: 1, entryName: []byte("file\x00name"), expectedErr: meta.ErrInvalidArgument},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := mgr.Unlink(ctx, tc.parentIno, tc.entryName)
-			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			assert.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
 }
@@ -355,7 +423,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
@@ -365,7 +433,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 			Return(db.Inode{}, pgx.ErrNoRows).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "file.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -379,7 +447,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
@@ -393,7 +461,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "file.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, meta.ErrNotDir)
 	})
 
@@ -407,11 +475,11 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Ino:       int64(childIno),
 			}, nil).
 			Once()
@@ -425,7 +493,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "file.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -439,7 +507,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "missing.txt",
+				Name:      []byte("missing.txt"),
 			}).
 			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
@@ -453,7 +521,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "missing.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("missing.txt"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -467,11 +535,11 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "ghost.txt",
+				Name:      []byte("ghost.txt"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "ghost.txt",
+				Name:      []byte("ghost.txt"),
 				Ino:       int64(childIno),
 			}, nil).
 			Once()
@@ -490,7 +558,7 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 			Return(db.Inode{}, pgx.ErrNoRows).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "ghost.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("ghost.txt"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -504,11 +572,11 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "subdir",
+				Name:      []byte("subdir"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "subdir",
+				Name:      []byte("subdir"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -531,13 +599,13 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "subdir")
+		err := mgr.Unlink(ctx, parentIno, []byte("subdir"))
 		assert.ErrorIs(t, err, meta.ErrIsDir)
 	})
 
 	t.Run("name 为 . 或 .. 时在确认父目录有效后返回 ErrInvalidArgument", func(t *testing.T) {
-		for _, name := range []string{".", ".."} {
-			t.Run(name, func(t *testing.T) {
+		for _, name := range [][]byte{[]byte("."), []byte("..")} {
+			t.Run(string(name), func(t *testing.T) {
 				mockStore := dbmock.NewMockStore(t)
 				mockQuerier := dbmock.NewMockQuerier(t)
 				mgr := meta.New(mockStore)
@@ -570,12 +638,12 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(db.Entry{}, dbErr).
 			Once()
 
-		err := mgr.Unlink(ctx, parentIno, "file.txt")
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, dbErr)
 	})
 }
@@ -624,11 +692,11 @@ func TestRmdir_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "emptydir",
+				Name:      []byte("emptydir"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "emptydir",
+				Name:      []byte("emptydir"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -654,7 +722,7 @@ func TestRmdir_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteEntry(mock.Anything, db.DeleteEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "emptydir",
+				Name:      []byte("emptydir"),
 			}).
 			Return(nil).
 			Once()
@@ -673,7 +741,79 @@ func TestRmdir_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "emptydir")
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		require.NoError(t, err)
+	})
+
+	t.Run("成功移除非 UTF-8 原始字节名称空子目录", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		rawDirName := []byte{0xf0, 0xf1, 0xf2}
+		childRow := db.Inode{
+			Ino:        int64(childIno),
+			Generation: 1,
+			Mode:       int32(meta.S_IFDIR | 0o755),
+			Size:       4096,
+			Nlink:      2,
+			Uid:        1001,
+			Gid:        1001,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawDirName,
+			}).
+			Return(db.Entry{
+				ParentIno: int64(parentIno),
+				Name:      rawDirName,
+				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(childIno)).
+			Return(childRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasChildEntries(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteEntry(mock.Anything, db.DeleteEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawDirName,
+			}).
+			Return(nil).
+			Once()
+
+		orphanChild := childRow
+		orphanChild.Nlink = 0
+		mockQuerier.EXPECT().
+			ClearInodeNlinkAndTouchCtime(mock.Anything, int64(childIno)).
+			Return(orphanChild, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DecrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, rawDirName)
 		require.NoError(t, err)
 	})
 }
@@ -686,15 +826,15 @@ func TestRmdir_InputValidation(t *testing.T) {
 	testCases := []struct {
 		name        string
 		parentIno   uint64
-		entryName   string
+		entryName   []byte
 		expectedErr error
 	}{
-		{name: "parent_ino 为 0", parentIno: 0, entryName: "sub", expectedErr: meta.ErrInvalidArgument},
-		{name: "parent_ino 超过 math.MaxInt64", parentIno: uint64(math.MaxInt64) + 1, entryName: "sub", expectedErr: meta.ErrInvalidArgument},
-		{name: "name 为空字符串", parentIno: 1, entryName: "", expectedErr: meta.ErrInvalidArgument},
-		{name: "name 长度超过 255 字节", parentIno: 1, entryName: strings.Repeat("a", 256), expectedErr: meta.ErrInvalidArgument},
-		{name: "name 包含斜杠 /", parentIno: 1, entryName: "sub/dir", expectedErr: meta.ErrInvalidArgument},
-		{name: "name 包含空字符 \\x00", parentIno: 1, entryName: "dir\x00name", expectedErr: meta.ErrInvalidArgument},
+		{name: "parent_ino 为 0", parentIno: 0, entryName: []byte("sub"), expectedErr: meta.ErrInvalidArgument},
+		{name: "parent_ino 超过 math.MaxInt64", parentIno: uint64(math.MaxInt64) + 1, entryName: []byte("sub"), expectedErr: meta.ErrInvalidArgument},
+		{name: "name 为空切片", parentIno: 1, entryName: []byte{}, expectedErr: meta.ErrInvalidArgument},
+		{name: "name 长度超过 255 字节", parentIno: 1, entryName: []byte(strings.Repeat("a", 256)), expectedErr: meta.ErrNameTooLong},
+		{name: "name 包含斜杠 /", parentIno: 1, entryName: []byte("sub/dir"), expectedErr: meta.ErrInvalidArgument},
+		{name: "name 包含空字符 \\x00", parentIno: 1, entryName: []byte("dir\x00name"), expectedErr: meta.ErrInvalidArgument},
 	}
 
 	for _, tc := range testCases {
@@ -720,7 +860,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "sub",
+				Name:      []byte("sub"),
 			}).
 			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
@@ -730,7 +870,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			Return(db.Inode{}, pgx.ErrNoRows).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "sub")
+		err := mgr.Rmdir(ctx, parentIno, []byte("sub"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -744,7 +884,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "sub",
+				Name:      []byte("sub"),
 			}).
 			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
@@ -758,7 +898,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "sub")
+		err := mgr.Rmdir(ctx, parentIno, []byte("sub"))
 		assert.ErrorIs(t, err, meta.ErrNotDir)
 	})
 
@@ -772,11 +912,11 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "sub",
+				Name:      []byte("sub"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Ino:       int64(childIno),
 			}, nil).
 			Once()
@@ -790,7 +930,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "sub")
+		err := mgr.Rmdir(ctx, parentIno, []byte("sub"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -804,7 +944,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "missing_dir",
+				Name:      []byte("missing_dir"),
 			}).
 			Return(db.Entry{}, pgx.ErrNoRows).
 			Once()
@@ -818,7 +958,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "missing_dir")
+		err := mgr.Rmdir(ctx, parentIno, []byte("missing_dir"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -832,11 +972,11 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "ghost_dir",
+				Name:      []byte("ghost_dir"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "ghost_dir",
+				Name:      []byte("ghost_dir"),
 				Ino:       int64(childIno),
 			}, nil).
 			Once()
@@ -855,7 +995,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			Return(db.Inode{}, pgx.ErrNoRows).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "ghost_dir")
+		err := mgr.Rmdir(ctx, parentIno, []byte("ghost_dir"))
 		assert.ErrorIs(t, err, meta.ErrNotFound)
 	})
 
@@ -869,11 +1009,11 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -896,7 +1036,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "file.txt")
+		err := mgr.Rmdir(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, meta.ErrNotDir)
 	})
 
@@ -910,11 +1050,11 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "nonempty_dir",
+				Name:      []byte("nonempty_dir"),
 			}).
 			Return(db.Entry{
 				ParentIno: int64(parentIno),
-				Name:      "nonempty_dir",
+				Name:      []byte("nonempty_dir"),
 				Ino:       int64(childIno),
 			}, nil).
 			Twice()
@@ -942,7 +1082,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			Return(true, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "nonempty_dir")
+		err := mgr.Rmdir(ctx, parentIno, []byte("nonempty_dir"))
 		assert.ErrorIs(t, err, meta.ErrNotEmpty)
 	})
 
@@ -962,7 +1102,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, ".")
+		err := mgr.Rmdir(ctx, parentIno, []byte("."))
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
 	})
 
@@ -982,7 +1122,7 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			}, nil).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "..")
+		err := mgr.Rmdir(ctx, parentIno, []byte(".."))
 		assert.ErrorIs(t, err, meta.ErrNotEmpty)
 	})
 
@@ -997,12 +1137,12 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "sub",
+				Name:      []byte("sub"),
 			}).
 			Return(db.Entry{}, dbErr).
 			Once()
 
-		err := mgr.Rmdir(ctx, parentIno, "sub")
+		err := mgr.Rmdir(ctx, parentIno, []byte("sub"))
 		assert.ErrorIs(t, err, dbErr)
 	})
 }

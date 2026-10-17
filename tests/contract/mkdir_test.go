@@ -20,7 +20,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		parentIno uint64
-		entryName string
+		entryName []byte
 		mode      uint32
 		uid       uint32
 		gid       uint32
@@ -30,7 +30,16 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 子目录标准模式",
 			parentIno: 1,
-			entryName: "subdir",
+			entryName: []byte("subdir"),
+			mode:      0o040755,
+			uid:       1000,
+			gid:       1000,
+			valid:     true,
+		},
+		{
+			name:      "合法: 非 UTF-8 字节序列目录名称",
+			parentIno: 1,
+			entryName: []byte{0xff, 0xfe, 0x80, 0x81},
 			mode:      0o040755,
 			uid:       1000,
 			gid:       1000,
@@ -39,7 +48,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 目录名称恰好 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("d", 255),
+			entryName: []byte(strings.Repeat("d", 255)),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -48,7 +57,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 多字节 UTF-8 目录名称恰好 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("字", 85),
+			entryName: []byte(strings.Repeat("字", 85)),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -57,7 +66,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 目录名称包含换行符",
 			parentIno: 1,
-			entryName: "dir\nname",
+			entryName: []byte("dir\nname"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -66,7 +75,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 父节点 parent_ino 处于正整数上限 math.MaxInt64",
 			parentIno: math.MaxInt64,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -75,7 +84,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效下限 1",
 			parentIno: 1,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      1,
 			uid:       0,
 			gid:       0,
@@ -84,7 +93,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效上限 0o177777 (65535)",
 			parentIno: 1,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      65535,
 			uid:       0,
 			gid:       0,
@@ -95,7 +104,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: parent_ino 为 0",
 			parentIno: 0,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -104,7 +113,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: parent_ino 超过 math.MaxInt64",
 			parentIno: uint64(math.MaxInt64) + 1,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -115,7 +124,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 为空字符串",
 			parentIno: 1,
-			entryName: "",
+			entryName: []byte(""),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -124,7 +133,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 长度超过 255 字节 (256 字节)",
 			parentIno: 1,
-			entryName: strings.Repeat("a", 256),
+			entryName: []byte(strings.Repeat("a", 256)),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -133,7 +142,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 包含路径分隔符 /",
 			parentIno: 1,
-			entryName: "sub/dir",
+			entryName: []byte("sub/dir"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -142,7 +151,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 仅为单个路径分隔符 /",
 			parentIno: 1,
-			entryName: "/",
+			entryName: []byte("/"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -151,7 +160,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 包含空字节 \\x00",
 			parentIno: 1,
-			entryName: "dir\x00name",
+			entryName: []byte("dir\x00name"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -160,7 +169,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 仅包含空字节 \\x00",
 			parentIno: 1,
-			entryName: "\x00",
+			entryName: []byte("\x00"),
 			mode:      0o040755,
 			uid:       0,
 			gid:       0,
@@ -170,7 +179,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效下限 0 (零权限目录 0000)",
 			parentIno: 1,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      0,
 			uid:       0,
 			gid:       0,
@@ -179,7 +188,7 @@ func TestMkdirRequestValidation(t *testing.T) {
 		{
 			name:      "非法: mode 超过 65535",
 			parentIno: 1,
-			entryName: "dir",
+			entryName: []byte("dir"),
 			mode:      65536,
 			uid:       0,
 			gid:       0,

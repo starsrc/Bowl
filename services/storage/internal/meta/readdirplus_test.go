@@ -131,7 +131,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 	}
 
 	childRow1 := db.ListDirEntriesRow{
-		Name:       "apple.txt",
+		Name:       []byte("apple.txt"),
 		Ino:        201,
 		Generation: 1,
 		Mode:       int32(meta.S_IFREG | 0o644),
@@ -146,7 +146,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 	}
 
 	childRow2 := db.ListDirEntriesRow{
-		Name:       "banana.txt",
+		Name:       []byte("banana.txt"),
 		Ino:        202,
 		Generation: 1,
 		Mode:       int32(meta.S_IFREG | 0o644),
@@ -197,7 +197,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 
 		// 验证 . 条目
 		assert.Equal(t, uint64(dirIno), entries[0].Ino)
-		assert.Equal(t, ".", entries[0].Name)
+		assert.Equal(t, []byte("."), entries[0].Name)
 		assert.Equal(t, uint64(1), entries[0].NextOffset)
 		assert.Equal(t, 0.0, entries[0].EntryTimeoutSeconds)
 		assert.Equal(t, meta.DefaultAttrTimeoutSeconds, entries[0].AttrTimeoutSeconds)
@@ -209,7 +209,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 
 		// 验证 .. 条目
 		assert.Equal(t, uint64(parentIno), entries[1].Ino)
-		assert.Equal(t, "..", entries[1].Name)
+		assert.Equal(t, []byte(".."), entries[1].Name)
 		assert.Equal(t, uint64(2), entries[1].NextOffset)
 		assert.Equal(t, 0.0, entries[1].EntryTimeoutSeconds)
 		assert.Equal(t, meta.DefaultAttrTimeoutSeconds, entries[1].AttrTimeoutSeconds)
@@ -219,7 +219,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 
 		// 验证子项 1 (apple.txt)
 		assert.Equal(t, uint64(childRow1.Ino), entries[2].Ino)
-		assert.Equal(t, "apple.txt", entries[2].Name)
+		assert.Equal(t, []byte("apple.txt"), entries[2].Name)
 		assert.Equal(t, uint64(3), entries[2].NextOffset)
 		assert.Equal(t, meta.DefaultEntryTimeoutSeconds, entries[2].EntryTimeoutSeconds)
 		assert.Equal(t, meta.DefaultAttrTimeoutSeconds, entries[2].AttrTimeoutSeconds)
@@ -232,7 +232,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 
 		// 验证子项 2 (banana.txt)
 		assert.Equal(t, uint64(childRow2.Ino), entries[3].Ino)
-		assert.Equal(t, "banana.txt", entries[3].Name)
+		assert.Equal(t, []byte("banana.txt"), entries[3].Name)
 		assert.Equal(t, uint64(4), entries[3].NextOffset)
 		assert.Equal(t, meta.DefaultEntryTimeoutSeconds, entries[3].EntryTimeoutSeconds)
 		assert.Equal(t, meta.DefaultAttrTimeoutSeconds, entries[3].AttrTimeoutSeconds)
@@ -260,7 +260,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries1, 1)
-		assert.Equal(t, ".", entries1[0].Name)
+		assert.Equal(t, []byte("."), entries1[0].Name)
 		assert.Equal(t, uint64(1), entries1[0].NextOffset)
 		assert.Equal(t, 0.0, entries1[0].EntryTimeoutSeconds)
 
@@ -276,7 +276,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries2, 1)
-		assert.Equal(t, "..", entries2[0].Name)
+		assert.Equal(t, []byte(".."), entries2[0].Name)
 		assert.Equal(t, uint64(2), entries2[0].NextOffset)
 		assert.Equal(t, 0.0, entries2[0].EntryTimeoutSeconds)
 
@@ -296,7 +296,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries3, 1)
-		assert.Equal(t, "apple.txt", entries3[0].Name)
+		assert.Equal(t, []byte("apple.txt"), entries3[0].Name)
 		assert.Equal(t, uint64(3), entries3[0].NextOffset)
 		assert.Equal(t, meta.DefaultEntryTimeoutSeconds, entries3[0].EntryTimeoutSeconds)
 
@@ -316,7 +316,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries4, 1)
-		assert.Equal(t, "banana.txt", entries4[0].Name)
+		assert.Equal(t, []byte("banana.txt"), entries4[0].Name)
 		assert.Equal(t, uint64(4), entries4[0].NextOffset)
 		assert.Equal(t, meta.DefaultEntryTimeoutSeconds, entries4[0].EntryTimeoutSeconds)
 
@@ -362,10 +362,10 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries, 2)
-		assert.Equal(t, "..", entries[0].Name)
+		assert.Equal(t, []byte(".."), entries[0].Name)
 		assert.Equal(t, uint64(2), entries[0].NextOffset)
 		assert.Equal(t, 0.0, entries[0].EntryTimeoutSeconds)
-		assert.Equal(t, "apple.txt", entries[1].Name)
+		assert.Equal(t, []byte("apple.txt"), entries[1].Name)
 		assert.Equal(t, uint64(3), entries[1].NextOffset)
 		assert.Equal(t, meta.DefaultEntryTimeoutSeconds, entries[1].EntryTimeoutSeconds)
 	})
@@ -396,7 +396,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
-		assert.Equal(t, "apple.txt", entries[0].Name)
+		assert.Equal(t, []byte("apple.txt"), entries[0].Name)
 		assert.Equal(t, uint64(expectedSQLOffset)+3, entries[0].NextOffset)
 	})
 
@@ -443,11 +443,54 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries, 2)
-		assert.Equal(t, ".", entries[0].Name)
+		assert.Equal(t, []byte("."), entries[0].Name)
 		assert.Equal(t, uint64(rootIno), entries[0].Ino)
-		assert.Equal(t, "..", entries[1].Name)
+		assert.Equal(t, []byte(".."), entries[1].Name)
 		assert.Equal(t, uint64(rootIno), entries[1].Ino)
 		assert.Equal(t, 0.0, entries[1].EntryTimeoutSeconds)
+	})
+
+	t.Run("非 UTF-8 目录项名称读取", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
+
+		rawName := []byte{0xff, 0xfe, 0xfd}
+		nonUTF8Row := db.ListDirEntriesRow{
+			Ino:        1001,
+			Generation: 1,
+			Mode:       int32(meta.S_IFREG | 0o644),
+			Nlink:      1,
+			Uid:        1000,
+			Gid:        1000,
+			Rdev:       0,
+			Size:       128,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Name:       rawName,
+		}
+
+		mockQuerier.EXPECT().GetInode(mock.Anything, dirIno).Return(dirDBInode, nil).Once()
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{Fh: fh, Ino: dirIno}).Return(activeHandle, nil).Once()
+		mockQuerier.EXPECT().ListDirEntries(mock.Anything, db.ListDirEntriesParams{
+			ParentIno: dirIno,
+			Limit:     1,
+			Offset:    0,
+		}).Return([]db.ListDirEntriesRow{nonUTF8Row}, nil).Once()
+
+		entries, err := mgr.ReadDirPlus(ctx, meta.ReadDirPlusParams{
+			Ino:    uint64(dirIno),
+			Fh:     uint64(fh),
+			Offset: 2,
+			Limit:  1,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		assert.Equal(t, rawName, entries[0].Name)
+		assert.Equal(t, uint64(3), entries[0].NextOffset)
 	})
 
 	t.Run("孤儿目录拦截: nlink == 0 时直接返回空切片", func(t *testing.T) {

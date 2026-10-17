@@ -62,7 +62,7 @@ func TestLookup_PositivePath(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(2)
-		targetName := "file.txt"
+		targetName := []byte("file.txt")
 		targetIno := uint64(10)
 
 		parentRow := db.Inode{
@@ -127,6 +127,48 @@ func TestLookup_PositivePath(t *testing.T) {
 		assert.Equal(t, targetRow.Mtime.Time, inode.Attr.Mtime)
 		assert.Equal(t, targetRow.Ctime.Time, inode.Attr.Ctime)
 	})
+
+	t.Run("successfully lookup non-UTF8 raw bytes entry", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		parentIno := uint64(2)
+		rawTargetName := []byte{0xff, 0xfe, 0x80, 0x81, 'b', 'i', 'n'}
+		targetIno := uint64(11)
+
+		parentRow := db.Inode{
+			Ino:  int64(parentIno),
+			Mode: int32(meta.S_IFDIR | 0o755),
+		}
+
+		targetRow := db.Inode{
+			Ino:   int64(targetIno),
+			Mode:  int32(0o100644),
+			Size:  512,
+			Nlink: 1,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInode(mock.Anything, int64(parentIno)).
+			Return(parentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawTargetName,
+			}).
+			Return(targetRow, nil).
+			Once()
+
+		inode, err := mgr.Lookup(ctx, parentIno, rawTargetName)
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, targetIno, inode.Ino)
+	})
 }
 
 func TestLookup_DynamicBlockCalculations(t *testing.T) {
@@ -181,7 +223,7 @@ func TestLookup_DynamicBlockCalculations(t *testing.T) {
 			mgr := meta.New(mockStore)
 
 			parentIno := uint64(2)
-			entryName := "test_file"
+			entryName := []byte("test_file")
 
 			parentRow := db.Inode{
 				Ino:  int64(parentIno),
@@ -225,84 +267,84 @@ func TestLookup_InputValidation(t *testing.T) {
 	testCases := []struct {
 		name       string
 		parentIno  uint64
-		entryName  string
+		entryName  []byte
 		wantErr    error
 		expectTx   bool
 	}{
 		{
 			name:       "parentIno 0 invalid",
 			parentIno:  0,
-			entryName:  "file.txt",
+			entryName:  []byte("file.txt"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "empty name invalid",
 			parentIno:  2,
-			entryName:  "",
+			entryName:  []byte(""),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with slash invalid",
 			parentIno:  2,
-			entryName:  "dir/file.txt",
+			entryName:  []byte("dir/file.txt"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with leading slash invalid",
 			parentIno:  2,
-			entryName:  "/file.txt",
+			entryName:  []byte("/file.txt"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with trailing slash invalid",
 			parentIno:  2,
-			entryName:  "file.txt/",
+			entryName:  []byte("file.txt/"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with embedded NUL byte invalid",
 			parentIno:  2,
-			entryName:  "a\x00b",
+			entryName:  []byte("a\x00b"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with single NUL byte invalid",
 			parentIno:  2,
-			entryName:  "\x00",
+			entryName:  []byte("\x00"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with leading NUL byte invalid",
 			parentIno:  2,
-			entryName:  "\x00file.txt",
+			entryName:  []byte("\x00file.txt"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with trailing NUL byte invalid",
 			parentIno:  2,
-			entryName:  "file.txt\x00",
+			entryName:  []byte("file.txt\x00"),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
 		{
 			name:       "name with 256 chars invalid",
 			parentIno:  2,
-			entryName:  strings.Repeat("a", 256),
-			wantErr:    meta.ErrInvalidArgument,
+			entryName:  []byte(strings.Repeat("a", 256)),
+			wantErr:    meta.ErrNameTooLong,
 			expectTx:   false,
 		},
 		{
 			name:       "name with exactly 255 chars valid",
 			parentIno:  2,
-			entryName:  strings.Repeat("a", 255),
+			entryName:  []byte(strings.Repeat("a", 255)),
 			wantErr:    nil,
 			expectTx:   true,
 		},
@@ -353,14 +395,13 @@ func TestLookup_InputValidation(t *testing.T) {
 func TestLookup_NegativeCases(t *testing.T) {
 	ctx := context.Background()
 
-
 	t.Run("parent inode not found returns ErrNotFound", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(999)
-		entryName := "file.txt"
+		entryName := []byte("file.txt")
 
 		setupMockTx(mockStore, mockQuerier)
 
@@ -398,7 +439,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 				mgr := meta.New(mockStore)
 
 				parentIno := uint64(2)
-				entryName := "file.txt"
+				entryName := []byte("file.txt")
 
 				parentRow := db.Inode{
 					Ino:  int64(parentIno),
@@ -428,7 +469,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(2)
-		entryName := "file.txt"
+		entryName := []byte("file.txt")
 		dbErr := errors.New("db query connection failure")
 
 		setupMockTx(mockStore, mockQuerier)
@@ -453,7 +494,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(2)
-		entryName := "nonexistent.txt"
+		entryName := []byte("nonexistent.txt")
 
 		parentRow := db.Inode{
 			Ino:  int64(parentIno),
@@ -488,7 +529,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		parentIno := uint64(2)
-		entryName := "file.txt"
+		entryName := []byte("file.txt")
 		dbErr := errors.New("db query entry read timeout")
 
 		parentRow := db.Inode{
@@ -525,7 +566,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			mgr := meta.New(mockStore)
 
 			parentIno := uint64(2)
-			entryName := "file.txt"
+			entryName := []byte("file.txt")
 			txErr := errors.New("connection pool closed")
 
 			mockStore.EXPECT().
@@ -546,7 +587,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 			mgr := meta.New(mockStore)
 
 			parentIno := uint64(2)
-			entryName := "file.txt"
+			entryName := []byte("file.txt")
 			commitErr := errors.New("tx commit failed")
 
 			mockStore.EXPECT().
@@ -587,7 +628,7 @@ func TestLookup_NegativeCases(t *testing.T) {
 				mgr := meta.New(mockStore)
 
 				parentIno := uint64(2)
-				entryName := "file.txt"
+				entryName := []byte("file.txt")
 
 				mockStore.EXPECT().
 					ExecTxWithOptions(mock.Anything, mock.Anything, matchReadOnlyOpt(), matchRepeatableReadOpt()).
@@ -623,11 +664,11 @@ func TestLookup_TransactionOptionsContract(t *testing.T) {
 		Once()
 
 	mockQuerier.EXPECT().
-		GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{ParentIno: 1, Name: "child"}).
+		GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{ParentIno: 1, Name: []byte("child")}).
 		Return(db.Inode{Ino: 2, Mode: int32(0o100644)}, nil).
 		Once()
 
-	inode, err := mgr.Lookup(ctx, 1, "child")
+	inode, err := mgr.Lookup(ctx, 1, []byte("child"))
 	require.NoError(t, err)
 	require.NotNil(t, inode)
 

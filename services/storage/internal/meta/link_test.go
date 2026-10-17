@@ -75,7 +75,7 @@ func TestLink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "hardlink.txt",
+				Name:      []byte("hardlink.txt"),
 				Ino:       int64(srcIno),
 			}).
 			Return(nil).
@@ -98,7 +98,7 @@ func TestLink_PositivePath(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "hardlink.txt",
+			NewName:      []byte("hardlink.txt"),
 		})
 
 		require.NoError(t, err)
@@ -133,7 +133,7 @@ func TestLink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "symlink_alias",
+				Name:      []byte("symlink_alias"),
 				Ino:       int64(srcIno),
 			}).
 			Return(nil).
@@ -156,7 +156,7 @@ func TestLink_PositivePath(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "symlink_alias",
+			NewName:      []byte("symlink_alias"),
 		})
 
 		require.NoError(t, err)
@@ -164,21 +164,76 @@ func TestLink_PositivePath(t *testing.T) {
 		assert.Equal(t, uint32(2), inode.Attr.Nlink)
 		assert.Equal(t, uint32(meta.S_IFLNK|0o777), inode.Attr.Mode)
 	})
+
+	t.Run("非 UTF-8 原始字节序列名称正常创建硬链接", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		rawName := []byte{0xfe, 0xff, 0x88, 0x99}
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(srcIno)).
+			Return(baseSrcRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+				Ino:       int64(srcIno),
+			}).
+			Return(nil).
+			Once()
+
+		updatedSrcRow := baseSrcRow
+		updatedSrcRow.Nlink = 2
+		updatedSrcRow.Ctime = pgtype.Timestamptz{Time: now, Valid: true}
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouchCtime(mock.Anything, int64(srcIno)).
+			Return(updatedSrcRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          srcIno,
+			NewParentIno: parentIno,
+			NewName:      rawName,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, srcIno, inode.Ino)
+		assert.Equal(t, uint32(2), inode.Attr.Nlink)
+	})
 }
 
 func TestLink_InputValidation(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name   string
-		params meta.LinkParams
+		name        string
+		params      meta.LinkParams
+		expectedErr error
 	}{
 		{
 			name: "ino 为 0",
 			params: meta.LinkParams{
 				Ino:          0,
 				NewParentIno: 1,
-				NewName:      "link",
+				NewName:      []byte("link"),
 			},
 		},
 		{
@@ -186,7 +241,7 @@ func TestLink_InputValidation(t *testing.T) {
 			params: meta.LinkParams{
 				Ino:          uint64(math.MaxInt64) + 1,
 				NewParentIno: 1,
-				NewName:      "link",
+				NewName:      []byte("link"),
 			},
 		},
 		{
@@ -194,7 +249,7 @@ func TestLink_InputValidation(t *testing.T) {
 			params: meta.LinkParams{
 				Ino:          100,
 				NewParentIno: 0,
-				NewName:      "link",
+				NewName:      []byte("link"),
 			},
 		},
 		{
@@ -202,7 +257,7 @@ func TestLink_InputValidation(t *testing.T) {
 			params: meta.LinkParams{
 				Ino:          100,
 				NewParentIno: uint64(math.MaxInt64) + 1,
-				NewName:      "link",
+				NewName:      []byte("link"),
 			},
 		},
 		{
@@ -210,7 +265,7 @@ func TestLink_InputValidation(t *testing.T) {
 			params: meta.LinkParams{
 				Ino:          100,
 				NewParentIno: 1,
-				NewName:      "",
+				NewName:      []byte(""),
 			},
 		},
 		{
@@ -218,15 +273,16 @@ func TestLink_InputValidation(t *testing.T) {
 			params: meta.LinkParams{
 				Ino:          100,
 				NewParentIno: 1,
-				NewName:      strings.Repeat("a", 256),
+				NewName:      []byte(strings.Repeat("a", 256)),
 			},
+			expectedErr: meta.ErrNameTooLong,
 		},
 		{
 			name: "new_name 包含斜杠 /",
 			params: meta.LinkParams{
 				Ino:          100,
 				NewParentIno: 1,
-				NewName:      "sub/link",
+				NewName:      []byte("sub/link"),
 			},
 		},
 		{
@@ -234,7 +290,7 @@ func TestLink_InputValidation(t *testing.T) {
 			params: meta.LinkParams{
 				Ino:          100,
 				NewParentIno: 1,
-				NewName:      "link\x00name",
+				NewName:      []byte("link\x00name"),
 			},
 		},
 	}
@@ -246,7 +302,11 @@ func TestLink_InputValidation(t *testing.T) {
 
 			inode, err := mgr.Link(ctx, tc.params)
 			assert.Nil(t, inode)
-			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			exp := tc.expectedErr
+			if exp == nil {
+				exp = meta.ErrInvalidArgument
+			}
+			assert.ErrorIs(t, err, exp)
 		})
 	}
 }
@@ -283,7 +343,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "link",
+			NewName:      []byte("link"),
 		})
 
 		assert.Nil(t, inode)
@@ -305,7 +365,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "link",
+			NewName:      []byte("link"),
 		})
 
 		assert.Nil(t, inode)
@@ -327,7 +387,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "link",
+			NewName:      []byte("link"),
 		})
 
 		assert.Nil(t, inode)
@@ -354,7 +414,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "link",
+			NewName:      []byte("link"),
 		})
 
 		assert.Nil(t, inode)
@@ -381,7 +441,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "dir_link",
+			NewName:      []byte("dir_link"),
 		})
 
 		assert.Nil(t, inode)
@@ -408,7 +468,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "resurrect_link",
+			NewName:      []byte("resurrect_link"),
 		})
 
 		assert.Nil(t, inode)
@@ -430,7 +490,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      ".",
+			NewName:      []byte("."),
 		})
 
 		assert.Nil(t, inode)
@@ -452,7 +512,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "..",
+			NewName:      []byte(".."),
 		})
 
 		assert.Nil(t, inode)
@@ -484,7 +544,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "existing_link",
+			NewName:      []byte("existing_link"),
 		})
 
 		assert.Nil(t, inode)
@@ -507,7 +567,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
-			NewName:      "link",
+			NewName:      []byte("link"),
 		})
 
 		assert.Nil(t, inode)
@@ -544,7 +604,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(newerParentIno),
-				Name:      "ordered.txt",
+				Name:      []byte("ordered.txt"),
 				Ino:       int64(olderSrcIno),
 			}).
 			Return(nil).
@@ -563,7 +623,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          olderSrcIno,
 			NewParentIno: newerParentIno,
-			NewName:      "ordered.txt",
+			NewName:      []byte("ordered.txt"),
 		})
 		require.NoError(t, err)
 		require.NotNil(t, inode)

@@ -19,34 +19,42 @@ func TestRenameRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		oldParentIno uint64
-		oldName      string
+		oldName      []byte
 		newParentIno uint64
-		newName      string
+		newName      []byte
 		valid        bool
 	}{
 		// 正向边界用例
 		{
 			name:         "合法: 正常重命名请求",
 			oldParentIno: 1,
-			oldName:      "old_file.txt",
+			oldName:      []byte("old_file.txt"),
 			newParentIno: 2,
-			newName:      "new_file.txt",
+			newName:      []byte("new_file.txt"),
+			valid:        true,
+		},
+		{
+			name:         "合法: 非 UTF-8 字节序列目录项重命名",
+			oldParentIno: 1,
+			oldName:      []byte{0xff, 0xfe, 0x80, 0x81},
+			newParentIno: 2,
+			newName:      []byte{0xfd, 0xfc, 0x82, 0x83},
 			valid:        true,
 		},
 		{
 			name:         "合法: 文件名恰好 255 字节",
 			oldParentIno: 1,
-			oldName:      strings.Repeat("a", 255),
+			oldName:      []byte(strings.Repeat("a", 255)),
 			newParentIno: 2,
-			newName:      strings.Repeat("b", 255),
+			newName:      []byte(strings.Repeat("b", 255)),
 			valid:        true,
 		},
 		{
 			name:         "合法: Ino 处于上限 math.MaxInt64",
 			oldParentIno: math.MaxInt64,
-			oldName:      "a",
+			oldName:      []byte("a"),
 			newParentIno: math.MaxInt64,
-			newName:      "b",
+			newName:      []byte("b"),
 			valid:        true,
 		},
 
@@ -54,17 +62,17 @@ func TestRenameRequestValidation(t *testing.T) {
 		{
 			name:         "非法: old_parent_ino 为 0",
 			oldParentIno: 0,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 		{
 			name:         "非法: old_parent_ino 超过 math.MaxInt64",
 			oldParentIno: uint64(math.MaxInt64) + 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 
@@ -72,17 +80,17 @@ func TestRenameRequestValidation(t *testing.T) {
 		{
 			name:         "非法: new_parent_ino 为 0",
 			oldParentIno: 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 0,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_parent_ino 超过 math.MaxInt64",
 			oldParentIno: 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: uint64(math.MaxInt64) + 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 
@@ -90,33 +98,33 @@ func TestRenameRequestValidation(t *testing.T) {
 		{
 			name:         "非法: old_name 为空",
 			oldParentIno: 1,
-			oldName:      "",
+			oldName:      []byte(""),
 			newParentIno: 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 		{
 			name:         "非法: old_name 超过 255 字节",
 			oldParentIno: 1,
-			oldName:      strings.Repeat("a", 256),
+			oldName:      []byte(strings.Repeat("a", 256)),
 			newParentIno: 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 		{
 			name:         "非法: old_name 包含 /",
 			oldParentIno: 1,
-			oldName:      "sub/file",
+			oldName:      []byte("sub/file"),
 			newParentIno: 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 		{
 			name:         "非法: old_name 包含 \\x00",
 			oldParentIno: 1,
-			oldName:      "file\x00name",
+			oldName:      []byte("file\x00name"),
 			newParentIno: 1,
-			newName:      "new",
+			newName:      []byte("new"),
 			valid:        false,
 		},
 
@@ -124,33 +132,33 @@ func TestRenameRequestValidation(t *testing.T) {
 		{
 			name:         "非法: new_name 为空",
 			oldParentIno: 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 1,
-			newName:      "",
+			newName:      []byte(""),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_name 超过 255 字节",
 			oldParentIno: 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 1,
-			newName:      strings.Repeat("b", 256),
+			newName:      []byte(strings.Repeat("b", 256)),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_name 包含 /",
 			oldParentIno: 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 1,
-			newName:      "sub/file",
+			newName:      []byte("sub/file"),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_name 包含 \\x00",
 			oldParentIno: 1,
-			oldName:      "old",
+			oldName:      []byte("old"),
 			newParentIno: 1,
-			newName:      "file\x00name",
+			newName:      []byte("file\x00name"),
 			valid:        false,
 		},
 	} {

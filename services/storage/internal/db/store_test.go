@@ -290,7 +290,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			params := db.CreateEntryParams{
 				ParentIno: 1,
-				Name:      "test.txt",
+				Name:      []byte("test.txt"),
 				Ino:       100,
 			}
 			mockQuerier.EXPECT().CreateEntry(ctx, params).Return(nil).Once()
@@ -304,7 +304,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			params := db.CreateEntryParams{
 				ParentIno: 1,
-				Name:      "test.txt",
+				Name:      []byte("test.txt"),
 				Ino:       100,
 			}
 			expectedErr := errors.New("unique violation")
@@ -449,8 +449,8 @@ func TestQuerier_MknodOperators(t *testing.T) {
 	t.Run("GetEntry 算子调用与参数透传", func(t *testing.T) {
 		t.Run("成功获取目录项", func(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
-			params := db.GetEntryParams{ParentIno: 1, Name: "file.txt"}
-			expected := db.Entry{ParentIno: 1, Name: "file.txt", Ino: 100}
+			params := db.GetEntryParams{ParentIno: 1, Name: []byte("file.txt")}
+			expected := db.Entry{ParentIno: 1, Name: []byte("file.txt"), Ino: 100}
 			mockQuerier.EXPECT().GetEntry(ctx, params).Return(expected, nil).Once()
 
 			var q db.Querier = mockQuerier
@@ -461,7 +461,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 		t.Run("底层执行失败透传错误", func(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
-			params := db.GetEntryParams{ParentIno: 1, Name: "missing"}
+			params := db.GetEntryParams{ParentIno: 1, Name: []byte("missing")}
 			expectedErr := errors.New("not found")
 			mockQuerier.EXPECT().GetEntry(ctx, params).Return(db.Entry{}, expectedErr).Once()
 
@@ -474,7 +474,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 	t.Run("DeleteEntry 算子调用与参数透传", func(t *testing.T) {
 		t.Run("成功删除目录项", func(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
-			params := db.DeleteEntryParams{ParentIno: 1, Name: "file.txt"}
+			params := db.DeleteEntryParams{ParentIno: 1, Name: []byte("file.txt")}
 			mockQuerier.EXPECT().DeleteEntry(ctx, params).Return(nil).Once()
 
 			var q db.Querier = mockQuerier
@@ -484,7 +484,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 		t.Run("底层执行失败透传错误", func(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
-			params := db.DeleteEntryParams{ParentIno: 1, Name: "file.txt"}
+			params := db.DeleteEntryParams{ParentIno: 1, Name: []byte("file.txt")}
 			expectedErr := errors.New("delete error")
 			mockQuerier.EXPECT().DeleteEntry(ctx, params).Return(expectedErr).Once()
 
@@ -604,9 +604,9 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			params := db.UpdateEntryParams{
 				OldParentIno: 1,
-				OldName:      "old.txt",
+				OldName:      []byte("old.txt"),
 				NewParentIno: 2,
-				NewName:      "new.txt",
+				NewName:      []byte("new.txt"),
 			}
 			mockQuerier.EXPECT().UpdateEntry(ctx, params).Return(nil).Once()
 
@@ -619,9 +619,9 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			params := db.UpdateEntryParams{
 				OldParentIno: 1,
-				OldName:      "old.txt",
+				OldName:      []byte("old.txt"),
 				NewParentIno: 2,
-				NewName:      "new.txt",
+				NewName:      []byte("new.txt"),
 			}
 			expectedErr := errors.New("update entry error")
 			mockQuerier.EXPECT().UpdateEntry(ctx, params).Return(expectedErr).Once()
@@ -989,7 +989,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 		now := time.Now()
 		expectedRows := []db.ListDirEntriesRow{
 			{
-				Name:       "file.txt",
+				Name:       []byte("file.txt"),
 				Ino:        42,
 				Generation: 1,
 				Mode:       0o100644,

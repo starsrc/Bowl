@@ -20,7 +20,7 @@ func TestMknodRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		parentIno uint64
-		entryName string
+		entryName []byte
 		mode      uint32
 		uid       uint32
 		gid       uint32
@@ -31,7 +31,17 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 普通文件",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
+			mode:      0o100644,
+			uid:       1000,
+			gid:       1000,
+			rdev:      0,
+			valid:     true,
+		},
+		{
+			name:      "合法: 非 UTF-8 字节序列节点名称",
+			parentIno: 1,
+			entryName: []byte{0xff, 0xfe, 0x80, 0x81},
 			mode:      0o100644,
 			uid:       1000,
 			gid:       1000,
@@ -41,7 +51,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 节点名称恰好 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("a", 255),
+			entryName: []byte(strings.Repeat("a", 255)),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -51,7 +61,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 多字节 UTF-8 节点名称恰好 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("界", 85),
+			entryName: []byte(strings.Repeat("界", 85)),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -61,7 +71,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 节点名称包含换行符",
 			parentIno: 1,
-			entryName: "a\nb",
+			entryName: []byte("a\nb"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -71,7 +81,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 父节点 parent_ino 处于正整数上限 math.MaxInt64",
 			parentIno: math.MaxInt64,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -81,7 +91,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效下限 1",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      1,
 			uid:       0,
 			gid:       0,
@@ -91,7 +101,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效上限 0o177777 (65535)",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      65535,
 			uid:       0,
 			gid:       0,
@@ -101,7 +111,7 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 设备文件携带 rdev",
 			parentIno: 1,
-			entryName: "null",
+			entryName: []byte("null"),
 			mode:      0o020666,
 			uid:       0,
 			gid:       0,
@@ -113,21 +123,21 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "非法: parent_ino 为 0",
 			parentIno: 0,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: parent_ino 超过 math.MaxInt64",
 			parentIno: uint64(math.MaxInt64) + 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: parent_ino 为 uint64 最大值 math.MaxUint64",
 			parentIno: math.MaxUint64,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			valid:     false,
 		},
@@ -136,63 +146,63 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "非法: 节点名称为空",
 			parentIno: 1,
-			entryName: "",
+			entryName: []byte(""),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称达到 256 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("a", 256),
+			entryName: []byte(strings.Repeat("a", 256)),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 多字节 UTF-8 节点名称超过 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("界", 86),
+			entryName: []byte(strings.Repeat("界", 86)),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称包含斜杠 /",
 			parentIno: 1,
-			entryName: "a/b",
+			entryName: []byte("a/b"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称以斜杠 / 开头",
 			parentIno: 1,
-			entryName: "/file",
+			entryName: []byte("/file"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称中间包含空字符 NUL",
 			parentIno: 1,
-			entryName: "a\x00b",
+			entryName: []byte("a\x00b"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称仅包含空字符 NUL",
 			parentIno: 1,
-			entryName: "\x00",
+			entryName: []byte("\x00"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称以空字符 NUL 开头",
 			parentIno: 1,
-			entryName: "\x00file",
+			entryName: []byte("\x00file"),
 			mode:      0o100644,
 			valid:     false,
 		},
 		{
 			name:      "非法: 节点名称以空字符 NUL 结尾",
 			parentIno: 1,
-			entryName: "file\x00",
+			entryName: []byte("file\x00"),
 			mode:      0o100644,
 			valid:     false,
 		},
@@ -201,14 +211,14 @@ func TestMknodRequestValidation(t *testing.T) {
 		{
 			name:      "非法: mode 为 0",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0,
 			valid:     false,
 		},
 		{
 			name:      "非法: mode 超过 65535",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      65536,
 			valid:     false,
 		},

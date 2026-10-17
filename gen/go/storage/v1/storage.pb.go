@@ -30,7 +30,7 @@ type LookupRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待查找的子项名称（文件或目录名）。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -72,11 +72,11 @@ func (x *LookupRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *LookupRequest) GetName() string {
+func (x *LookupRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 // LookupResponse 包含查找命中的节点元数据以及 FUSE 内核缓存有效时间。
@@ -426,7 +426,7 @@ type MknodRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待创建的新节点名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 节点模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
@@ -476,11 +476,11 @@ func (x *MknodRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *MknodRequest) GetName() string {
+func (x *MknodRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 func (x *MknodRequest) GetMode() uint32 {
@@ -582,7 +582,7 @@ type MkdirRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待创建的新目录名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位，取值范围必须在 0 到 0o177777 / 65535 之间）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
@@ -630,11 +630,11 @@ func (x *MkdirRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *MkdirRequest) GetName() string {
+func (x *MkdirRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 func (x *MkdirRequest) GetMode() uint32 {
@@ -729,7 +729,7 @@ type SymlinkRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待创建的符号链接名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 符号链接指向的目标路径。
 	// 长度必须在 1 到 4095 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
 	Target []byte `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
@@ -778,11 +778,11 @@ func (x *SymlinkRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *SymlinkRequest) GetName() string {
+func (x *SymlinkRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 func (x *SymlinkRequest) GetTarget() []byte {
@@ -971,7 +971,7 @@ type LinkRequest struct {
 	NewParentIno uint64 `protobuf:"varint,2,opt,name=new_parent_ino,json=newParentIno,proto3" json:"new_parent_ino,omitempty"`
 	// 待创建的新目录项名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	NewName       string `protobuf:"bytes,3,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	NewName       []byte `protobuf:"bytes,3,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1020,11 +1020,11 @@ func (x *LinkRequest) GetNewParentIno() uint64 {
 	return 0
 }
 
-func (x *LinkRequest) GetNewName() string {
+func (x *LinkRequest) GetNewName() []byte {
 	if x != nil {
 		return x.NewName
 	}
-	return ""
+	return nil
 }
 
 // LinkResponse 包含硬链接创建后更新的源节点元数据及内核缓存时长。
@@ -1098,7 +1098,7 @@ type UnlinkRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待删除的非目录项名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1140,11 +1140,11 @@ func (x *UnlinkRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *UnlinkRequest) GetName() string {
+func (x *UnlinkRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 // UnlinkResponse 定义 Unlink 接口返回参数。
@@ -1191,7 +1191,7 @@ type RmdirRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待移除的空目录项名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1233,11 +1233,11 @@ func (x *RmdirRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *RmdirRequest) GetName() string {
+func (x *RmdirRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 // RmdirResponse 定义 Rmdir 接口返回参数。
@@ -1284,12 +1284,12 @@ type RenameRequest struct {
 	OldParentIno uint64 `protobuf:"varint,1,opt,name=old_parent_ino,json=oldParentIno,proto3" json:"old_parent_ino,omitempty"`
 	// 待重命名的源项名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	OldName string `protobuf:"bytes,2,opt,name=old_name,json=oldName,proto3" json:"old_name,omitempty"`
+	OldName []byte `protobuf:"bytes,2,opt,name=old_name,json=oldName,proto3" json:"old_name,omitempty"`
 	// 目标父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	NewParentIno uint64 `protobuf:"varint,3,opt,name=new_parent_ino,json=newParentIno,proto3" json:"new_parent_ino,omitempty"`
 	// 目标项新名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	NewName       string `protobuf:"bytes,4,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	NewName       []byte `protobuf:"bytes,4,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1331,11 +1331,11 @@ func (x *RenameRequest) GetOldParentIno() uint64 {
 	return 0
 }
 
-func (x *RenameRequest) GetOldName() string {
+func (x *RenameRequest) GetOldName() []byte {
 	if x != nil {
 		return x.OldName
 	}
-	return ""
+	return nil
 }
 
 func (x *RenameRequest) GetNewParentIno() uint64 {
@@ -1345,11 +1345,11 @@ func (x *RenameRequest) GetNewParentIno() uint64 {
 	return 0
 }
 
-func (x *RenameRequest) GetNewName() string {
+func (x *RenameRequest) GetNewName() []byte {
 	if x != nil {
 		return x.NewName
 	}
-	return ""
+	return nil
 }
 
 // RenameResponse 定义 Rename 接口返回参数。
@@ -1396,7 +1396,7 @@ type CreateRequest struct {
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待创建的新常规文件名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 节点模式位（包含可选的 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
@@ -1446,11 +1446,11 @@ func (x *CreateRequest) GetParentIno() uint64 {
 	return 0
 }
 
-func (x *CreateRequest) GetName() string {
+func (x *CreateRequest) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 func (x *CreateRequest) GetMode() uint32 {
@@ -2176,7 +2176,7 @@ type DirEntry struct {
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 子项名称（支持 "." 与 ".."）。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 文件的模式位（包含文件类型与权限位）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 下一个条目的游标偏移量（单调递增，大于 0）。
@@ -2222,11 +2222,11 @@ func (x *DirEntry) GetIno() uint64 {
 	return 0
 }
 
-func (x *DirEntry) GetName() string {
+func (x *DirEntry) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 func (x *DirEntry) GetMode() uint32 {
@@ -2369,7 +2369,7 @@ type DirEntryPlus struct {
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 子项名称（支持 "." 与 ".."）。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 下一个条目的游标偏移量（单调递增，大于 0）。
 	NextOffset uint64 `protobuf:"varint,3,opt,name=next_offset,json=nextOffset,proto3" json:"next_offset,omitempty"`
 	// 子项的完整 Inode 元数据。
@@ -2419,11 +2419,11 @@ func (x *DirEntryPlus) GetIno() uint64 {
 	return 0
 }
 
-func (x *DirEntryPlus) GetName() string {
+func (x *DirEntryPlus) GetName() []byte {
 	if x != nil {
 		return x.Name
 	}
-	return ""
+	return nil
 }
 
 func (x *DirEntryPlus) GetNextOffset() uint64 {
@@ -2896,11 +2896,12 @@ var File_storage_v1_storage_proto protoreflect.FileDescriptor
 const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"\x18storage/v1/storage.proto\x12\n" +
-	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"d\n" +
+	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcd\x01\n" +
 	"\rLookupRequest\x12&\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\"\xc7\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\xc7\x01\n" +
 	"\x0eLookupResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
@@ -2932,11 +2933,12 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x06_mtime\"\x84\x01\n" +
 	"\x0fSetAttrResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xc6\x01\n" +
+	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xaf\x02\n" +
 	"\fMknodRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x1f\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1f\n" +
 	"\x04mode\x18\x03 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\x03 \x00R\x04mode\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x05 \x01(\rR\x03gid\x12\x12\n" +
@@ -2944,22 +2946,24 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\rMknodResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xb0\x01\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x99\x02\n" +
 	"\fMkdirRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x1d\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1d\n" +
 	"\x04mode\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x05 \x01(\rR\x03gid\"\xc6\x01\n" +
 	"\rMkdirResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x9f\x02\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x88\x03\n" +
 	"\x0eSymlinkRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x89\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x89\x01\n" +
 	"\x06target\x18\x03 \x01(\fBq\xbaHn\xba\x01d\n" +
 	"\x1esymlink_request_target_no_null\x12)symlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
@@ -2972,35 +2976,41 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\"\xa1\x01\n" +
 	"\x10ReadlinkResponse\x12\x8c\x01\n" +
 	"\x06target\x18\x01 \x01(\fBt\xbaHq\xba\x01g\n" +
-	" readlink_response_target_no_null\x12*readlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\"\x9f\x01\n" +
+	" readlink_response_target_no_null\x12*readlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\"\x88\x02\n" +
 	"\vLinkRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x127\n" +
-	"\x0enew_parent_ino\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x122\n" +
-	"\bnew_name\x18\x03 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\anewName\"\xc5\x01\n" +
+	"\x0enew_parent_ino\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x12\x9a\x01\n" +
+	"\bnew_name\x18\x03 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\"\xc5\x01\n" +
 	"\fLinkResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"n\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xd7\x01\n" +
 	"\rUnlinkRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\"\x10\n" +
-	"\x0eUnlinkResponse\"m\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\x10\n" +
+	"\x0eUnlinkResponse\"\xd6\x01\n" +
 	"\fRmdirRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\"\x0f\n" +
-	"\rRmdirResponse\"\xe9\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\x0f\n" +
+	"\rRmdirResponse\"\xbb\x03\n" +
 	"\rRenameRequest\x127\n" +
-	"\x0eold_parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\foldParentIno\x122\n" +
-	"\bold_name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\aoldName\x127\n" +
-	"\x0enew_parent_ino\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x122\n" +
-	"\bnew_name\x18\x04 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\anewName\"\x10\n" +
-	"\x0eRenameResponse\"\xc7\x01\n" +
+	"\x0eold_parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\foldParentIno\x12\x9a\x01\n" +
+	"\bold_name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\aoldName\x127\n" +
+	"\x0enew_parent_ino\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x12\x9a\x01\n" +
+	"\bnew_name\x18\x04 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\"\x10\n" +
+	"\x0eRenameResponse\"\xb0\x02\n" +
 	"\rCreateRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x1d\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1d\n" +
 	"\x04mode\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x05 \x01(\rR\x03gid\x12\x14\n" +
@@ -3045,10 +3055,11 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x11ReleaseDirRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\"\x14\n" +
-	"\x12ReleaseDirResponse\"\x99\x01\n" +
+	"\x12ReleaseDirResponse\"\x82\x02\n" +
 	"\bDirEntry\x12\x19\n" +
-	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x1b\n" +
+	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1b\n" +
 	"\x04mode\x18\x03 \x01(\rB\a\xbaH\x04*\x02 \x00R\x04mode\x12(\n" +
 	"\vnext_offset\x18\x04 \x01(\x04B\a\xbaH\x042\x02 \x00R\n" +
 	"nextOffset\"\xa3\x01\n" +
@@ -3060,10 +3071,11 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05limit\x18\x04 \x01(\rB\n" +
 	"\xbaH\a*\x05\x18\x80  \x00R\x05limit\"A\n" +
 	"\x0fReadDirResponse\x12.\n" +
-	"\aentries\x18\x01 \x03(\v2\x14.storage.v1.DirEntryR\aentries\"\xb7\x02\n" +
+	"\aentries\x18\x01 \x03(\v2\x14.storage.v1.DirEntryR\aentries\"\xa0\x03\n" +
 	"\fDirEntryPlus\x12\x19\n" +
-	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12(\n" +
+	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x93\x01\n" +
+	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12(\n" +
 	"\vnext_offset\x18\x03 \x01(\x04B\a\xbaH\x042\x02 \x00R\n" +
 	"nextOffset\x12/\n" +
 	"\x05inode\x18\x04 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +

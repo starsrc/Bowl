@@ -81,7 +81,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "subfolder",
+				Name:      []byte("subfolder"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -94,7 +94,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "subfolder",
+			Name:      []byte("subfolder"),
 			Mode:      0o755,
 			UID:       1001,
 			GID:       1002,
@@ -152,7 +152,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "subfolder",
+				Name:      []byte("subfolder"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -165,7 +165,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "subfolder",
+			Name:      []byte("subfolder"),
 			Mode:      meta.S_IFDIR | 0o755,
 			UID:       1001,
 			GID:       1002,
@@ -222,7 +222,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "shared_subfolder",
+				Name:      []byte("shared_subfolder"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -235,7 +235,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "shared_subfolder",
+			Name:      []byte("shared_subfolder"),
 			Mode:      0o750,
 			UID:       1001,
 			GID:       3000, // 应当被父目录 GID 覆盖
@@ -289,7 +289,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "zero_perm_dir",
+				Name:      []byte("zero_perm_dir"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -302,7 +302,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "zero_perm_dir",
+			Name:      []byte("zero_perm_dir"),
 			Mode:      0,
 			UID:       1001,
 			GID:       1002,
@@ -312,20 +312,87 @@ func TestMkdir_PositivePath(t *testing.T) {
 		require.NotNil(t, inode)
 		assert.Equal(t, uint32(meta.S_IFDIR), inode.Attr.Mode)
 	})
+
+	t.Run("非 UTF-8 原始字节序列正常创建子目录", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		rawName := []byte{0xbb, 0xcc, 0xdd, 0xee}
+		expectedTargetMode := int32(meta.S_IFDIR | 0o755)
+		createdInodeRow := db.Inode{
+			Ino:        int64(newIno),
+			Generation: 0,
+			Mode:       expectedTargetMode,
+			Size:       0,
+			Nlink:      2,
+			Uid:        1001,
+			Gid:        1002,
+			Rdev:       0,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:  expectedTargetMode,
+				Nlink: 2,
+				Uid:   1001,
+				Gid:   1002,
+				Rdev:  0,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      rawName,
+			Mode:      0o755,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, newIno, inode.Ino)
+	})
 }
 
 func TestMkdir_InputValidation(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name   string
-		params meta.MkdirParams
+		name        string
+		params      meta.MkdirParams
+		expectedErr error
 	}{
 		{
 			name: "parent_ino 为 0",
 			params: meta.MkdirParams{
 				ParentIno: 0,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      0o755,
 			},
 		},
@@ -333,7 +400,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "parent_ino 超过 math.MaxInt64",
 			params: meta.MkdirParams{
 				ParentIno: uint64(math.MaxInt64) + 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      0o755,
 			},
 		},
@@ -341,7 +408,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "name 为空字符串",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "",
+				Name:      []byte(""),
 				Mode:      0o755,
 			},
 		},
@@ -349,15 +416,16 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "name 长度超过 255 字节 (256 字节)",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      strings.Repeat("a", 256),
+				Name:      []byte(strings.Repeat("a", 256)),
 				Mode:      0o755,
 			},
+			expectedErr: meta.ErrNameTooLong,
 		},
 		{
 			name: "name 包含斜杠 /",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub/dir",
+				Name:      []byte("sub/dir"),
 				Mode:      0o755,
 			},
 		},
@@ -365,7 +433,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "name 包含空字符 \\x00",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub\x00dir",
+				Name:      []byte("sub\x00dir"),
 				Mode:      0o755,
 			},
 		},
@@ -373,7 +441,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 超过 65535",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      65536,
 			},
 		},
@@ -381,7 +449,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 包含 S_IFREG 常规文件类型位",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      meta.S_IFREG | 0o755,
 			},
 		},
@@ -389,7 +457,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 包含 S_IFLNK 符号链接类型位",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      meta.S_IFLNK | 0o755,
 			},
 		},
@@ -397,7 +465,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 包含 S_IFCHR 字符设备类型位",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      meta.S_IFCHR | 0o755,
 			},
 		},
@@ -405,7 +473,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 包含 S_IFBLK 块设备类型位",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      meta.S_IFBLK | 0o755,
 			},
 		},
@@ -413,7 +481,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 包含 S_IFIFO 管道类型位",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      meta.S_IFIFO | 0o755,
 			},
 		},
@@ -421,7 +489,7 @@ func TestMkdir_InputValidation(t *testing.T) {
 			name: "mode 包含 S_IFSOCK 套接字类型位",
 			params: meta.MkdirParams{
 				ParentIno: 1,
-				Name:      "sub",
+				Name:      []byte("sub"),
 				Mode:      meta.S_IFSOCK | 0o755,
 			},
 		},
@@ -432,10 +500,14 @@ func TestMkdir_InputValidation(t *testing.T) {
 			mockStore := dbmock.NewMockStore(t)
 			mgr := meta.New(mockStore)
 
-			// 验证不发起数据库交互，直接返回 ErrInvalidArgument
+			// 验证不发起数据库交互，直接返回预期错误
 			inode, err := mgr.Mkdir(ctx, tc.params)
 			assert.Nil(t, inode)
-			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			exp := tc.expectedErr
+			if exp == nil {
+				exp = meta.ErrInvalidArgument
+			}
+			assert.ErrorIs(t, err, exp)
 		})
 	}
 }
@@ -466,7 +538,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "sub",
+			Name:      []byte("sub"),
 			Mode:      0o755,
 		})
 
@@ -491,7 +563,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "sub",
+			Name:      []byte("sub"),
 			Mode:      0o755,
 		})
 
@@ -516,7 +588,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "sub",
+			Name:      []byte("sub"),
 			Mode:      0o755,
 		})
 
@@ -538,7 +610,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      ".",
+			Name:      []byte("."),
 			Mode:      0o755,
 		})
 
@@ -560,7 +632,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "..",
+			Name:      []byte(".."),
 			Mode:      0o755,
 		})
 
@@ -592,7 +664,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "duplicate_folder",
+			Name:      []byte("duplicate_folder"),
 			Mode:      0o755,
 		})
 
@@ -615,7 +687,7 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: parentIno,
-			Name:      "sub",
+			Name:      []byte("sub"),
 			Mode:      0o755,
 		})
 

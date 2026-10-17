@@ -46,7 +46,7 @@ VALUES ($1, $2, $3)
 
 type CreateEntryParams struct {
 	ParentIno int64  `json:"parent_ino"`
-	Name      string `json:"name"`
+	Name      []byte `json:"name"`
 	Ino       int64  `json:"ino"`
 }
 
@@ -210,7 +210,7 @@ WHERE parent_ino = $1 AND name = $2
 
 type DeleteEntryParams struct {
 	ParentIno int64  `json:"parent_ino"`
-	Name      string `json:"name"`
+	Name      []byte `json:"name"`
 }
 
 func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) error {
@@ -254,7 +254,7 @@ WHERE parent_ino = $1 AND name = $2
 
 type GetEntryParams struct {
 	ParentIno int64  `json:"parent_ino"`
-	Name      string `json:"name"`
+	Name      []byte `json:"name"`
 }
 
 func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error) {
@@ -321,7 +321,7 @@ WHERE e.parent_ino = $1 AND e.name = $2
 
 type GetInodeByEntryParams struct {
 	ParentIno int64  `json:"parent_ino"`
-	Name      string `json:"name"`
+	Name      []byte `json:"name"`
 }
 
 func (q *Queries) GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error) {
@@ -547,7 +547,7 @@ type ListDirEntriesParams struct {
 }
 
 type ListDirEntriesRow struct {
-	Name          string             `json:"name"`
+	Name          []byte             `json:"name"`
 	Ino           int64              `json:"ino"`
 	Generation    int64              `json:"generation"`
 	Mode          int32              `json:"mode"`
@@ -627,9 +627,9 @@ WHERE parent_ino = $3 AND name = $4
 
 type UpdateEntryParams struct {
 	NewParentIno int64  `json:"new_parent_ino"`
-	NewName      string `json:"new_name"`
+	NewName      []byte `json:"new_name"`
 	OldParentIno int64  `json:"old_parent_ino"`
-	OldName      string `json:"old_name"`
+	OldName      []byte `json:"old_name"`
 }
 
 func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) error {

@@ -145,7 +145,7 @@ func TestDirEntryValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		ino        uint64
-		entryName  string
+		entryName  []byte
 		mode       uint32
 		nextOffset uint64
 		valid      bool
@@ -153,7 +153,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "合法: 目录自引用项 .",
 			ino:        1,
-			entryName:  ".",
+			entryName:  []byte("."),
 			mode:       0o040755,
 			nextOffset: 1,
 			valid:      true,
@@ -161,7 +161,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "合法: 父目录引用项 ..",
 			ino:        1,
-			entryName:  "..",
+			entryName:  []byte(".."),
 			mode:       0o040755,
 			nextOffset: 2,
 			valid:      true,
@@ -169,7 +169,15 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "合法: 常规文件项",
 			ino:        42,
-			entryName:  "file.txt",
+			entryName:  []byte("file.txt"),
+			mode:       0o100644,
+			nextOffset: 3,
+			valid:      true,
+		},
+		{
+			name:       "合法: 非 UTF-8 字节序列目录项名称",
+			ino:        42,
+			entryName:  []byte{0xff, 0xfe, 0x80, 0x81},
 			mode:       0o100644,
 			nextOffset: 3,
 			valid:      true,
@@ -177,7 +185,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "合法: 255 字节最长文件名",
 			ino:        42,
-			entryName:  strings.Repeat("a", 255),
+			entryName:  []byte(strings.Repeat("a", 255)),
 			mode:       0o100644,
 			nextOffset: 3,
 			valid:      true,
@@ -185,7 +193,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: ino 为 0",
 			ino:        0,
-			entryName:  "file.txt",
+			entryName:  []byte("file.txt"),
 			mode:       0o100644,
 			nextOffset: 3,
 			valid:      false,
@@ -193,7 +201,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: name 为空",
 			ino:        42,
-			entryName:  "",
+			entryName:  []byte(""),
 			mode:       0o100644,
 			nextOffset: 3,
 			valid:      false,
@@ -201,7 +209,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: name 包含斜杠",
 			ino:        42,
-			entryName:  "sub/dir",
+			entryName:  []byte("sub/dir"),
 			mode:       0o040755,
 			nextOffset: 3,
 			valid:      false,
@@ -209,7 +217,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: name 包含空字节",
 			ino:        42,
-			entryName:  "file\x00.txt",
+			entryName:  []byte("file\x00.txt"),
 			mode:       0o100644,
 			nextOffset: 3,
 			valid:      false,
@@ -217,7 +225,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: name 超过 255 字节",
 			ino:        42,
-			entryName:  strings.Repeat("a", 256),
+			entryName:  []byte(strings.Repeat("a", 256)),
 			mode:       0o100644,
 			nextOffset: 3,
 			valid:      false,
@@ -225,7 +233,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: mode 为 0",
 			ino:        42,
-			entryName:  "file.txt",
+			entryName:  []byte("file.txt"),
 			mode:       0,
 			nextOffset: 3,
 			valid:      false,
@@ -233,7 +241,7 @@ func TestDirEntryValidation(t *testing.T) {
 		{
 			name:       "非法: next_offset 为 0",
 			ino:        42,
-			entryName:  "file.txt",
+			entryName:  []byte("file.txt"),
 			mode:       0o100644,
 			nextOffset: 0,
 			valid:      false,
@@ -279,13 +287,13 @@ func TestReadDirResponseValidation(t *testing.T) {
 			Entries: []*storagev1.DirEntry{
 				{
 					Ino:        1,
-					Name:       ".",
+					Name:       []byte("."),
 					Mode:       0o040755,
 					NextOffset: 1,
 				},
 				{
 					Ino:        1,
-					Name:       "..",
+					Name:       []byte(".."),
 					Mode:       0o040755,
 					NextOffset: 2,
 				},
@@ -301,7 +309,7 @@ func TestReadDirResponseValidation(t *testing.T) {
 			Entries: []*storagev1.DirEntry{
 				{
 					Ino:        0, // 非法
-					Name:       ".",
+					Name:       []byte("."),
 					Mode:       0o040755,
 					NextOffset: 1,
 				},

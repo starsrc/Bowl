@@ -21,7 +21,7 @@ func TestLinkRequestValidation(t *testing.T) {
 		name         string
 		ino          uint64
 		newParentIno uint64
-		newName      string
+		newName      []byte
 		valid        bool
 	}{
 		// 正向边界用例
@@ -29,21 +29,28 @@ func TestLinkRequestValidation(t *testing.T) {
 			name:         "合法: 正常创建硬链接请求",
 			ino:          100,
 			newParentIno: 1,
-			newName:      "hardlink.txt",
+			newName:      []byte("hardlink.txt"),
+			valid:        true,
+		},
+		{
+			name:         "合法: 非 UTF-8 字节序列新目录项名称",
+			ino:          100,
+			newParentIno: 1,
+			newName:      []byte{0xff, 0xfe, 0x80, 0x81},
 			valid:        true,
 		},
 		{
 			name:         "合法: new_name 恰好 255 字节",
 			ino:          100,
 			newParentIno: 1,
-			newName:      strings.Repeat("h", 255),
+			newName:      []byte(strings.Repeat("h", 255)),
 			valid:        true,
 		},
 		{
 			name:         "合法: ino 与 new_parent_ino 处于上限 math.MaxInt64",
 			ino:          math.MaxInt64,
 			newParentIno: math.MaxInt64,
-			newName:      "link",
+			newName:      []byte("link"),
 			valid:        true,
 		},
 
@@ -52,14 +59,14 @@ func TestLinkRequestValidation(t *testing.T) {
 			name:         "非法: ino 为 0",
 			ino:          0,
 			newParentIno: 1,
-			newName:      "link",
+			newName:      []byte("link"),
 			valid:        false,
 		},
 		{
 			name:         "非法: ino 超过 math.MaxInt64",
 			ino:          uint64(math.MaxInt64) + 1,
 			newParentIno: 1,
-			newName:      "link",
+			newName:      []byte("link"),
 			valid:        false,
 		},
 
@@ -68,14 +75,14 @@ func TestLinkRequestValidation(t *testing.T) {
 			name:         "非法: new_parent_ino 为 0",
 			ino:          100,
 			newParentIno: 0,
-			newName:      "link",
+			newName:      []byte("link"),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_parent_ino 超过 math.MaxInt64",
 			ino:          100,
 			newParentIno: uint64(math.MaxInt64) + 1,
-			newName:      "link",
+			newName:      []byte("link"),
 			valid:        false,
 		},
 
@@ -84,28 +91,28 @@ func TestLinkRequestValidation(t *testing.T) {
 			name:         "非法: new_name 为空",
 			ino:          100,
 			newParentIno: 1,
-			newName:      "",
+			newName:      []byte(""),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_name 超过 255 字节",
 			ino:          100,
 			newParentIno: 1,
-			newName:      strings.Repeat("a", 256),
+			newName:      []byte(strings.Repeat("a", 256)),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_name 包含 /",
 			ino:          100,
 			newParentIno: 1,
-			newName:      "sub/link",
+			newName:      []byte("sub/link"),
 			valid:        false,
 		},
 		{
 			name:         "非法: new_name 包含 \\x00",
 			ino:          100,
 			newParentIno: 1,
-			newName:      "link\x00name",
+			newName:      []byte("link\x00name"),
 			valid:        false,
 		},
 	} {

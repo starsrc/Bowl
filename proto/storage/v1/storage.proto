@@ -150,10 +150,14 @@ message LookupRequest {
 
   // 待查找的子项名称（文件或目录名）。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 }
 
@@ -257,10 +261,14 @@ message MknodRequest {
 
   // 待创建的新节点名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 节点模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
@@ -301,10 +309,14 @@ message MkdirRequest {
 
   // 待创建的新目录名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位，取值范围必须在 0 到 0o177777 / 65535 之间）。
@@ -339,10 +351,14 @@ message SymlinkRequest {
 
   // 待创建的符号链接名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 符号链接指向的目标路径。
@@ -415,10 +431,14 @@ message LinkRequest {
 
   // 待创建的新目录项名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string new_name = 3 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes new_name = 3 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 }
 
@@ -444,10 +464,14 @@ message UnlinkRequest {
 
   // 待删除的非目录项名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 }
 
@@ -464,10 +488,14 @@ message RmdirRequest {
 
   // 待移除的空目录项名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 }
 
@@ -484,10 +512,14 @@ message RenameRequest {
 
   // 待重命名的源项名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string old_name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes old_name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 目标父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
@@ -498,10 +530,14 @@ message RenameRequest {
 
   // 目标项新名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string new_name = 4 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes new_name = 4 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 }
 
@@ -518,10 +554,14 @@ message CreateRequest {
 
   // 待创建的新常规文件名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 节点模式位（包含可选的 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
@@ -685,10 +725,14 @@ message DirEntry {
 
   // 子项名称（支持 "." 与 ".."）。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 文件的模式位（包含文件类型与权限位）。
@@ -735,10 +779,14 @@ message DirEntryPlus {
 
   // 子项名称（支持 "." 与 ".."）。
   // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-  string name = 2 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).string.pattern = "^[^/\\x00]+$"
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "bytes_name_no_slash_or_nul"
+      message: "name cannot contain '/' or NUL byte"
+      expression: "!this.contains(b'\\x00') && !this.contains(b'/')"
+    }
   ];
 
   // 下一个条目的游标偏移量（单调递增，大于 0）。

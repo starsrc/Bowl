@@ -19,63 +19,69 @@ func TestUnlinkRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		parentIno uint64
-		reqName   string
+		reqName   []byte
 		valid     bool
 	}{
 		{
 			name:      "合法: 正常删除非目录项请求",
 			parentIno: 1,
-			reqName:   "file.txt",
+			reqName:   []byte("file.txt"),
+			valid:     true,
+		},
+		{
+			name:      "合法: 非 UTF-8 字节序列删除非目录项请求",
+			parentIno: 1,
+			reqName:   []byte{0xff, 0xfe, 0x80, 0x81},
 			valid:     true,
 		},
 		{
 			name:      "合法: name 恰好 255 字节",
 			parentIno: 1,
-			reqName:   strings.Repeat("f", 255),
+			reqName:   []byte(strings.Repeat("f", 255)),
 			valid:     true,
 		},
 		{
 			name:      "合法: parent_ino 处于上限 math.MaxInt64",
 			parentIno: math.MaxInt64,
-			reqName:   "file.txt",
+			reqName:   []byte("file.txt"),
 			valid:     true,
 		},
 		// 负向用例: parent_ino
 		{
 			name:      "非法: parent_ino 为 0",
 			parentIno: 0,
-			reqName:   "file.txt",
+			reqName:   []byte("file.txt"),
 			valid:     false,
 		},
 		{
 			name:      "非法: parent_ino 超过 math.MaxInt64",
 			parentIno: uint64(math.MaxInt64) + 1,
-			reqName:   "file.txt",
+			reqName:   []byte("file.txt"),
 			valid:     false,
 		},
 		// 负向用例: name
 		{
 			name:      "非法: name 为空",
 			parentIno: 1,
-			reqName:   "",
+			reqName:   []byte(""),
 			valid:     false,
 		},
 		{
 			name:      "非法: name 超过 255 字节",
 			parentIno: 1,
-			reqName:   strings.Repeat("a", 256),
+			reqName:   []byte(strings.Repeat("a", 256)),
 			valid:     false,
 		},
 		{
 			name:      "非法: name 包含 /",
 			parentIno: 1,
-			reqName:   "sub/file",
+			reqName:   []byte("sub/file"),
 			valid:     false,
 		},
 		{
 			name:      "非法: name 包含 \\x00",
 			parentIno: 1,
-			reqName:   "file\x00name",
+			reqName:   []byte("file\x00name"),
 			valid:     false,
 		},
 	} {
@@ -119,63 +125,69 @@ func TestRmdirRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		parentIno uint64
-		reqName   string
+		reqName   []byte
 		valid     bool
 	}{
 		{
 			name:      "合法: 正常删除空目录请求",
 			parentIno: 1,
-			reqName:   "sub_dir",
+			reqName:   []byte("sub_dir"),
+			valid:     true,
+		},
+		{
+			name:      "合法: 非 UTF-8 字节序列删除空目录请求",
+			parentIno: 1,
+			reqName:   []byte{0xff, 0xfe, 0x80, 0x81},
 			valid:     true,
 		},
 		{
 			name:      "合法: name 恰好 255 字节",
 			parentIno: 1,
-			reqName:   strings.Repeat("d", 255),
+			reqName:   []byte(strings.Repeat("d", 255)),
 			valid:     true,
 		},
 		{
 			name:      "合法: parent_ino 处于上限 math.MaxInt64",
 			parentIno: math.MaxInt64,
-			reqName:   "sub_dir",
+			reqName:   []byte("sub_dir"),
 			valid:     true,
 		},
 		// 负向用例: parent_ino
 		{
 			name:      "非法: parent_ino 为 0",
 			parentIno: 0,
-			reqName:   "sub_dir",
+			reqName:   []byte("sub_dir"),
 			valid:     false,
 		},
 		{
 			name:      "非法: parent_ino 超过 math.MaxInt64",
 			parentIno: uint64(math.MaxInt64) + 1,
-			reqName:   "sub_dir",
+			reqName:   []byte("sub_dir"),
 			valid:     false,
 		},
 		// 负向用例: name
 		{
 			name:      "非法: name 为空",
 			parentIno: 1,
-			reqName:   "",
+			reqName:   []byte(""),
 			valid:     false,
 		},
 		{
 			name:      "非法: name 超过 255 字节",
 			parentIno: 1,
-			reqName:   strings.Repeat("a", 256),
+			reqName:   []byte(strings.Repeat("a", 256)),
 			valid:     false,
 		},
 		{
 			name:      "非法: name 包含 /",
 			parentIno: 1,
-			reqName:   "sub/dir",
+			reqName:   []byte("sub/dir"),
 			valid:     false,
 		},
 		{
 			name:      "非法: name 包含 \\x00",
 			parentIno: 1,
-			reqName:   "dir\x00name",
+			reqName:   []byte("dir\x00name"),
 			valid:     false,
 		},
 	} {

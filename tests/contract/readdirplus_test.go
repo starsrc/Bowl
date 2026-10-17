@@ -164,7 +164,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		ino          uint64
-		entryName    string
+		entryName    []byte
 		nextOffset   uint64
 		inode        *storagev1.Inode
 		entryTimeout float64
@@ -174,7 +174,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "合法: 目录自引用项 . (entry_timeout=0)",
 			ino:          1,
-			entryName:    ".",
+			entryName:    []byte("."),
 			nextOffset:   1,
 			inode:        validInode,
 			entryTimeout: 0,
@@ -184,7 +184,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "合法: 父目录引用项 .. (entry_timeout=0)",
 			ino:          1,
-			entryName:    "..",
+			entryName:    []byte(".."),
 			nextOffset:   2,
 			inode:        validInode,
 			entryTimeout: 0,
@@ -194,7 +194,17 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "合法: 常规文件子项 (正常缓存时效)",
 			ino:          42,
-			entryName:    "file.txt",
+			entryName:    []byte("file.txt"),
+			nextOffset:   3,
+			inode:        validInode,
+			entryTimeout: 1.0,
+			attrTimeout:  1.0,
+			valid:        true,
+		},
+		{
+			name:         "合法: 非 UTF-8 字节序列目录项名称",
+			ino:          42,
+			entryName:    []byte{0xff, 0xfe, 0x80, 0x81},
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -204,7 +214,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "合法: 255 字节最长文件名",
 			ino:          42,
-			entryName:    strings.Repeat("a", 255),
+			entryName:    []byte(strings.Repeat("a", 255)),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -214,7 +224,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: ino 为 0",
 			ino:          0,
-			entryName:    "file.txt",
+			entryName:    []byte("file.txt"),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -224,7 +234,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: name 为空",
 			ino:          42,
-			entryName:    "",
+			entryName:    []byte(""),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -234,7 +244,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: name 包含斜杠",
 			ino:          42,
-			entryName:    "sub/dir",
+			entryName:    []byte("sub/dir"),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -244,7 +254,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: name 包含空字节",
 			ino:          42,
-			entryName:    "file\x00.txt",
+			entryName:    []byte("file\x00.txt"),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -254,7 +264,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: name 超过 255 字节",
 			ino:          42,
-			entryName:    strings.Repeat("a", 256),
+			entryName:    []byte(strings.Repeat("a", 256)),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -264,7 +274,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: next_offset 为 0",
 			ino:          42,
-			entryName:    "file.txt",
+			entryName:    []byte("file.txt"),
 			nextOffset:   0,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -274,7 +284,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: inode 为 nil (required)",
 			ino:          42,
-			entryName:    "file.txt",
+			entryName:    []byte("file.txt"),
 			nextOffset:   3,
 			inode:        nil,
 			entryTimeout: 1.0,
@@ -284,7 +294,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: entry_timeout 为负数",
 			ino:          42,
-			entryName:    "file.txt",
+			entryName:    []byte("file.txt"),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: -0.1,
@@ -294,7 +304,7 @@ func TestDirEntryPlusValidation(t *testing.T) {
 		{
 			name:         "非法: attr_timeout 为负数",
 			ino:          42,
-			entryName:    "file.txt",
+			entryName:    []byte("file.txt"),
 			nextOffset:   3,
 			inode:        validInode,
 			entryTimeout: 1.0,
@@ -362,7 +372,7 @@ func TestReadDirPlusResponseValidation(t *testing.T) {
 			Entries: []*storagev1.DirEntryPlus{
 				{
 					Ino:                 1,
-					Name:                ".",
+					Name:                []byte("."),
 					NextOffset:          1,
 					Inode:               validInode,
 					EntryTimeoutSeconds: 0,
@@ -370,7 +380,7 @@ func TestReadDirPlusResponseValidation(t *testing.T) {
 				},
 				{
 					Ino:                 1,
-					Name:                "..",
+					Name:                []byte(".."),
 					NextOffset:          2,
 					Inode:               validInode,
 					EntryTimeoutSeconds: 0,
@@ -388,7 +398,7 @@ func TestReadDirPlusResponseValidation(t *testing.T) {
 			Entries: []*storagev1.DirEntryPlus{
 				{
 					Ino:                 0, // 非法
-					Name:                ".",
+					Name:                []byte("."),
 					NextOffset:          1,
 					Inode:               validInode,
 					EntryTimeoutSeconds: 0,

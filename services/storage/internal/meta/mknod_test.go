@@ -98,7 +98,7 @@ func TestMknod_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "test_file.txt",
+				Name:      []byte("test_file.txt"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -111,7 +111,7 @@ func TestMknod_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "test_file.txt",
+			Name:      []byte("test_file.txt"),
 			Mode:      meta.S_IFREG | 0o644,
 			UID:       1001,
 			GID:       1002,
@@ -175,7 +175,7 @@ func TestMknod_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "chardev",
+				Name:      []byte("chardev"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -188,7 +188,7 @@ func TestMknod_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "chardev",
+			Name:      []byte("chardev"),
 			Mode:      meta.S_IFCHR | 0o660,
 			UID:       1001,
 			GID:       1002,
@@ -240,7 +240,7 @@ func TestMknod_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "blkdev",
+				Name:      []byte("blkdev"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -253,7 +253,7 @@ func TestMknod_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "blkdev",
+			Name:      []byte("blkdev"),
 			Mode:      meta.S_IFBLK | 0o660,
 			UID:       1001,
 			GID:       1002,
@@ -305,7 +305,7 @@ func TestMknod_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "test_sock",
+				Name:      []byte("test_sock"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -318,7 +318,7 @@ func TestMknod_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "test_sock",
+			Name:      []byte("test_sock"),
 			Mode:      meta.S_IFSOCK | 0o777,
 			UID:       1001,
 			GID:       1002,
@@ -375,7 +375,7 @@ func TestMknod_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "fifo_pipe",
+				Name:      []byte("fifo_pipe"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -388,7 +388,7 @@ func TestMknod_PositivePath(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "fifo_pipe",
+			Name:      []byte("fifo_pipe"),
 			Mode:      meta.S_IFIFO | 0o644,
 			UID:       1001,
 			GID:       2002, // 传入的不同 GID，应被父目录 GID 覆盖
@@ -400,6 +400,72 @@ func TestMknod_PositivePath(t *testing.T) {
 		assert.Equal(t, uint32(8888), inode.Attr.GID)
 		assert.Equal(t, uint32(0), inode.Attr.Rdev)
 	})
+
+	t.Run("非 UTF-8 原始字节序列正常创建节点", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		rawName := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+		createdInodeRow := db.Inode{
+			Ino:        int64(newIno),
+			Generation: 0,
+			Mode:       int32(meta.S_IFREG | 0o644),
+			Size:       0,
+			Nlink:      1,
+			Uid:        1001,
+			Gid:        1002,
+			Rdev:       0,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:  int32(meta.S_IFREG | 0o644),
+				Nlink: 1,
+				Uid:   1001,
+				Gid:   1002,
+				Rdev:  0,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Mknod(ctx, meta.MknodParams{
+			ParentIno: parentIno,
+			Name:      rawName,
+			Mode:      meta.S_IFREG | 0o644,
+			UID:       1001,
+			GID:       1002,
+			Rdev:      0,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, newIno, inode.Ino)
+	})
 }
 
 func TestMknod_InputValidation(t *testing.T) {
@@ -407,7 +473,7 @@ func TestMknod_InputValidation(t *testing.T) {
 
 	validParams := meta.MknodParams{
 		ParentIno: 1,
-		Name:      "valid_node",
+		Name:      []byte("valid_node"),
 		Mode:      meta.S_IFREG | 0o644,
 		UID:       1000,
 		GID:       1000,
@@ -415,8 +481,9 @@ func TestMknod_InputValidation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		mutate func(p *meta.MknodParams)
+		name        string
+		mutate      func(p *meta.MknodParams)
+		expectedErr error
 	}{
 		{
 			name: "ParentIno 为 0",
@@ -439,25 +506,26 @@ func TestMknod_InputValidation(t *testing.T) {
 		{
 			name: "Name 为空",
 			mutate: func(p *meta.MknodParams) {
-				p.Name = ""
+				p.Name = []byte("")
 			},
 		},
 		{
 			name: "Name 长度超过 255 字节",
 			mutate: func(p *meta.MknodParams) {
-				p.Name = strings.Repeat("a", 256)
+				p.Name = []byte(strings.Repeat("a", 256))
 			},
+			expectedErr: meta.ErrNameTooLong,
 		},
 		{
 			name: "Name 包含斜杠 /",
 			mutate: func(p *meta.MknodParams) {
-				p.Name = "foo/bar"
+				p.Name = []byte("foo/bar")
 			},
 		},
 		{
 			name: "Name 包含空字符 NUL",
 			mutate: func(p *meta.MknodParams) {
-				p.Name = "foo\x00bar"
+				p.Name = []byte("foo\x00bar")
 			},
 		},
 		{
@@ -513,7 +581,11 @@ func TestMknod_InputValidation(t *testing.T) {
 			tc.mutate(&p)
 			inode, err := mgr.Mknod(ctx, p)
 			assert.Nil(t, inode)
-			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			exp := tc.expectedErr
+			if exp == nil {
+				exp = meta.ErrInvalidArgument
+			}
+			assert.ErrorIs(t, err, exp)
 			// 断言前置校验拦截绝不触发数据库事务
 			mockStore.AssertExpectations(t)
 		})
@@ -568,7 +640,7 @@ func TestMknod_NegativeCases(t *testing.T) {
 
 				inode, err := mgr.Mknod(ctx, meta.MknodParams{
 					ParentIno: parentIno,
-					Name:      "child",
+					Name:      []byte("child"),
 					Mode:      meta.S_IFREG | 0o644,
 				})
 				assert.Nil(t, inode)
@@ -609,7 +681,7 @@ func TestMknod_NegativeCases(t *testing.T) {
 
 				inode, err := mgr.Mknod(ctx, meta.MknodParams{
 					ParentIno: parentIno,
-					Name:      "child",
+					Name:      []byte("child"),
 					Mode:      meta.S_IFREG | 0o644,
 				})
 				assert.Nil(t, inode)
@@ -618,8 +690,8 @@ func TestMknod_NegativeCases(t *testing.T) {
 			})
 
 			// 测试场景 2: 名称为保留名 . 或 .. 时优先返回 ErrNotDir 而非 ErrAlreadyExists
-			for _, reservedName := range []string{".", ".."} {
-				t.Run(fmt.Sprintf("父节点为%s且名称为保留名%s优先返回 ErrNotDir", dt.typeName, reservedName), func(t *testing.T) {
+			for _, reservedName := range [][]byte{[]byte("."), []byte("..")} {
+				t.Run(fmt.Sprintf("父节点为%s且名称为保留名%s优先返回 ErrNotDir", dt.typeName, string(reservedName)), func(t *testing.T) {
 					mockStore := dbmock.NewMockStore(t)
 					mockQuerier := dbmock.NewMockQuerier(t)
 					mgr := meta.New(mockStore)
@@ -665,7 +737,7 @@ func TestMknod_NegativeCases(t *testing.T) {
 
 				inode, err := mgr.Mknod(ctx, meta.MknodParams{
 					ParentIno: parentIno,
-					Name:      "child",
+					Name:      []byte("child"),
 					Mode:      meta.S_IFREG | 0o644,
 				})
 				assert.Nil(t, inode)
@@ -677,8 +749,8 @@ func TestMknod_NegativeCases(t *testing.T) {
 	})
 
 	t.Run("父节点为有效目录且 Name 为 . 或 .. 直接返回 ErrAlreadyExists 且不调用 CreateInode", func(t *testing.T) {
-		for _, reservedName := range []string{".", ".."} {
-			t.Run(reservedName, func(t *testing.T) {
+		for _, reservedName := range [][]byte{[]byte("."), []byte("..")} {
+			t.Run(string(reservedName), func(t *testing.T) {
 				mockStore := dbmock.NewMockStore(t)
 				mockQuerier := dbmock.NewMockQuerier(t)
 				mgr := meta.New(mockStore)
@@ -726,7 +798,7 @@ func TestMknod_NegativeCases(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "conflict_file",
+			Name:      []byte("conflict_file"),
 			Mode:      meta.S_IFREG | 0o644,
 		})
 		assert.Nil(t, inode)
@@ -817,7 +889,7 @@ func TestMknod_NegativeCases(t *testing.T) {
 
 				inode, err := mgr.Mknod(ctx, meta.MknodParams{
 					ParentIno: parentIno,
-					Name:      "test_node",
+					Name:      []byte("test_node"),
 					Mode:      meta.S_IFREG | 0o644,
 				})
 				assert.Nil(t, inode)
@@ -849,7 +921,7 @@ func TestMknod_NegativeCases(t *testing.T) {
 
 		inode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: parentIno,
-			Name:      "test_node",
+			Name:      []byte("test_node"),
 			Mode:      meta.S_IFREG | 0o644,
 		})
 		assert.Nil(t, inode)
@@ -891,7 +963,7 @@ func TestMknod_TransactionOptionsContract(t *testing.T) {
 
 	_, err := mgr.Mknod(ctx, meta.MknodParams{
 		ParentIno: 1,
-		Name:      "test",
+		Name:      []byte("test"),
 		Mode:      meta.S_IFREG | 0o644,
 	})
 	assert.ErrorIs(t, err, meta.ErrNotFound)

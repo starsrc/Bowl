@@ -16,22 +16,23 @@ func TestLookupRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		parent uint64
-		entry  string
+		entry  []byte
 		valid  bool
 	}{
-		{"ordinary", 1, "file.txt", true},
-		{"255 bytes", 1, strings.Repeat("a", 255), true},
-		{"multibyte 255 bytes", 1, strings.Repeat("界", 85), true},
-		{"newline allowed", 1, "a\nb", true},
-		{"empty", 1, "", false},
-		{"zero parent", 0, "file", false},
-		{"256 bytes", 1, strings.Repeat("a", 256), false},
-		{"multibyte too long", 1, strings.Repeat("界", 86), false},
-		{"slash", 1, "a/b", false},
-		{"embedded NUL", 1, "a\x00b", false},
-		{"NUL only", 1, "\x00", false},
-		{"leading NUL", 1, "\x00file", false},
-		{"trailing NUL", 1, "file\x00", false},
+		{"ordinary", 1, []byte("file.txt"), true},
+		{"non-utf8 bytes", 1, []byte{0xff, 0xfe, 0x80, 0x81}, true},
+		{"255 bytes", 1, []byte(strings.Repeat("a", 255)), true},
+		{"multibyte 255 bytes", 1, []byte(strings.Repeat("界", 85)), true},
+		{"newline allowed", 1, []byte("a\nb"), true},
+		{"empty", 1, []byte(""), false},
+		{"zero parent", 0, []byte("file"), false},
+		{"256 bytes", 1, []byte(strings.Repeat("a", 256)), false},
+		{"multibyte too long", 1, []byte(strings.Repeat("界", 86)), false},
+		{"slash", 1, []byte("a/b"), false},
+		{"embedded NUL", 1, []byte("a\x00b"), false},
+		{"NUL only", 1, []byte("\x00"), false},
+		{"leading NUL", 1, []byte("\x00file"), false},
+		{"trailing NUL", 1, []byte("file\x00"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validator.Validate(&storagev1.LookupRequest{ParentIno: tc.parent, Name: tc.entry})

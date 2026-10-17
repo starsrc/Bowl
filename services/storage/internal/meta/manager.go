@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -18,9 +17,27 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
+// validateEntryName 校验目录项名称合法性。
+// len(name) > MaxFileNameBytes 时返回 ErrNameTooLong；
+// len(name) == 0 或包含 '/' 或 '\x00' 时返回 ErrInvalidArgument。
+func validateEntryName(name []byte) error {
+	if len(name) > MaxFileNameBytes {
+		return ErrNameTooLong
+	}
+	if len(name) == 0 || bytes.IndexByte(name, '/') >= 0 || bytes.IndexByte(name, 0) >= 0 {
+		return ErrInvalidArgument
+	}
+	return nil
+}
+
+// isDotOrDotDot 判断目录项名称是否为 "." 或 ".."。
+func isDotOrDotDot(name []byte) bool {
+	return bytes.Equal(name, []byte(".")) || bytes.Equal(name, []byte(".."))
+}
+
 // Manager 定义元数据领域层管理器接口。
 type Manager interface {
-	Lookup(ctx context.Context, parentIno uint64, name string) (*Inode, error)
+	Lookup(ctx context.Context, parentIno uint64, name []byte) (*Inode, error)
 	GetAttr(ctx context.Context, ino uint64) (*Inode, error)
 	SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (*Inode, error)
 	Mknod(ctx context.Context, params MknodParams) (*Inode, error)
@@ -28,8 +45,8 @@ type Manager interface {
 	Symlink(ctx context.Context, params SymlinkParams) (*Inode, error)
 	Readlink(ctx context.Context, ino uint64) ([]byte, error)
 	Link(ctx context.Context, params LinkParams) (*Inode, error)
-	Unlink(ctx context.Context, parentIno uint64, name string) error
-	Rmdir(ctx context.Context, parentIno uint64, name string) error
+	Unlink(ctx context.Context, parentIno uint64, name []byte) error
+	Rmdir(ctx context.Context, parentIno uint64, name []byte) error
 	Rename(ctx context.Context, params RenameParams) error
 	Create(ctx context.Context, params CreateParams) (*CreateResult, error)
 	Open(ctx context.Context, params OpenParams) (*OpenResult, error)
@@ -66,9 +83,12 @@ var Module = fx.Module("meta",
 )
 
 // Lookup 执行单级目录项查找与块属性动态推导。
-func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*Inode, error) {
-	if parentIno == 0 || len(name) == 0 || len(name) > 255 || strings.ContainsAny(name, "/\x00") {
+func (m *manager) Lookup(ctx context.Context, parentIno uint64, name []byte) (*Inode, error) {
+	if parentIno == 0 || parentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
+	}
+	if err := validateEntryName(name); err != nil {
+		return nil, err
 	}
 
 	var result *Inode
@@ -93,7 +113,7 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name string) (*I
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
-			return fmt.Errorf("get inode by entry %q in parent %d: %w", name, parentIno, err)
+			return fmt.Errorf("get inode by entry %s in parent %d: %w", name, parentIno, err)
 		}
 
 		result = newInodeFromDB(target)
@@ -307,8 +327,8 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
-	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
-		return nil, ErrInvalidArgument
+	if err := validateEntryName(params.Name); err != nil {
+		return nil, err
 	}
 	if params.Mode > 0o177777 {
 		return nil, ErrInvalidArgument
@@ -344,7 +364,7 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 			return ErrNotFound
 		}
 
-		if params.Name == "." || params.Name == ".." {
+		if isDotOrDotDot(params.Name) {
 			return ErrAlreadyExists
 		}
 
@@ -406,8 +426,8 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
-	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
-		return nil, ErrInvalidArgument
+	if err := validateEntryName(params.Name); err != nil {
+		return nil, err
 	}
 	if params.Mode > 65535 {
 		return nil, ErrInvalidArgument
@@ -436,7 +456,7 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			return ErrNotFound
 		}
 
-		if params.Name == "." || params.Name == ".." {
+		if isDotOrDotDot(params.Name) {
 			return ErrAlreadyExists
 		}
 
@@ -500,8 +520,8 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
-	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
-		return nil, ErrInvalidArgument
+	if err := validateEntryName(params.Name); err != nil {
+		return nil, err
 	}
 	if len(params.Target) == 0 || bytes.IndexByte(params.Target, 0) >= 0 {
 		return nil, ErrInvalidArgument
@@ -528,7 +548,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 			return ErrNotFound
 		}
 
-		if params.Name == "." || params.Name == ".." {
+		if isDotOrDotDot(params.Name) {
 			return ErrAlreadyExists
 		}
 
@@ -667,13 +687,13 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 	if params.NewParentIno == 0 || params.NewParentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
-	if len(params.NewName) == 0 || len(params.NewName) > MaxFileNameBytes || strings.ContainsAny(params.NewName, "/\x00") {
-		return nil, ErrInvalidArgument
+	if err := validateEntryName(params.NewName); err != nil {
+		return nil, err
 	}
 
 	var result *Inode
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		if params.NewName == "." || params.NewName == ".." {
+		if isDotOrDotDot(params.NewName) {
 			parent, err := q.GetInodeForUpdate(ctx, int64(params.NewParentIno))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -769,16 +789,16 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 }
 
 // Unlink 删除指定父目录下的非目录项（解链）。
-func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) error {
+func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) error {
 	if parentIno == 0 || parentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if len(name) == 0 || len(name) > MaxFileNameBytes || strings.ContainsAny(name, "/\x00") {
-		return ErrInvalidArgument
+	if err := validateEntryName(name); err != nil {
+		return err
 	}
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		if name == "." || name == ".." {
+		if isDotOrDotDot(name) {
 			parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -900,16 +920,16 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name string) err
 }
 
 // Rmdir 移除指定父目录下的空目录项。
-func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) error {
+func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) error {
 	if parentIno == 0 || parentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if len(name) == 0 || len(name) > MaxFileNameBytes || strings.ContainsAny(name, "/\x00") {
-		return ErrInvalidArgument
+	if err := validateEntryName(name); err != nil {
+		return err
 	}
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		if name == "." || name == ".." {
+		if isDotOrDotDot(name) {
 			parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -923,7 +943,7 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name string) erro
 			if parent.Nlink == 0 {
 				return ErrNotFound
 			}
-			if name == "." {
+			if bytes.Equal(name, []byte(".")) {
 				return ErrInvalidArgument
 			}
 			return ErrNotEmpty
@@ -1050,15 +1070,15 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	if params.NewParentIno == 0 || params.NewParentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if len(params.OldName) == 0 || len(params.OldName) > MaxFileNameBytes || strings.ContainsAny(params.OldName, "/\x00") {
-		return ErrInvalidArgument
+	if err := validateEntryName(params.OldName); err != nil {
+		return err
 	}
-	if len(params.NewName) == 0 || len(params.NewName) > MaxFileNameBytes || strings.ContainsAny(params.NewName, "/\x00") {
-		return ErrInvalidArgument
+	if err := validateEntryName(params.NewName); err != nil {
+		return err
 	}
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		if params.OldName == "." || params.OldName == ".." || params.NewName == "." || params.NewName == ".." {
+		if isDotOrDotDot(params.OldName) || isDotOrDotDot(params.NewName) {
 			if _, _, err := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); err != nil {
 				return err
 			}
@@ -1082,7 +1102,7 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		oldIno := preOldEntry.Ino
 
 		// 同路径短路 (POSIX No-op)：锁定父目录并确认源目录项仍存在
-		if params.OldParentIno == params.NewParentIno && params.OldName == params.NewName {
+		if params.OldParentIno == params.NewParentIno && bytes.Equal(params.OldName, params.NewName) {
 			if _, _, err := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); err != nil {
 				return err
 			}
@@ -1332,8 +1352,8 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
-	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
-		return nil, ErrInvalidArgument
+	if err := validateEntryName(params.Name); err != nil {
+		return nil, err
 	}
 	if params.Mode > 0xffff {
 		return nil, ErrInvalidArgument
@@ -1364,7 +1384,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return ErrNotFound
 		}
 
-		if params.Name == "." || params.Name == ".." {
+		if isDotOrDotDot(params.Name) {
 			return ErrAlreadyExists
 		}
 
@@ -1851,7 +1871,7 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		if params.Offset < 1 && rem > 0 {
 			entries = append(entries, DirEntry{
 				Ino:        uint64(dirInode.Ino),
-				Name:       ".",
+				Name:       []byte("."),
 				Mode:       uint32(dirInode.Mode),
 				NextOffset: 1,
 			})
@@ -1869,7 +1889,7 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 			}
 			entries = append(entries, DirEntry{
 				Ino:        uint64(parentInode.Ino),
-				Name:       "..",
+				Name:       []byte(".."),
 				Mode:       uint32(parentInode.Mode),
 				NextOffset: 2,
 			})
@@ -1951,7 +1971,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		if params.Offset < 1 && rem > 0 {
 			entries = append(entries, DirEntryPlus{
 				Ino:                 uint64(dirInode.Ino),
-				Name:                ".",
+				Name:                []byte("."),
 				NextOffset:          1,
 				Inode:               newInodeFromDB(*dirInode),
 				EntryTimeoutSeconds: 0,
@@ -1971,7 +1991,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 			}
 			entries = append(entries, DirEntryPlus{
 				Ino:                 uint64(parentInode.Ino),
-				Name:                "..",
+				Name:                []byte(".."),
 				NextOffset:          2,
 				Inode:               newInodeFromDB(parentInode),
 				EntryTimeoutSeconds: 0,

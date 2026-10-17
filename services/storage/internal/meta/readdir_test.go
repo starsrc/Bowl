@@ -131,7 +131,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 	}
 
 	childRow1 := db.ListDirEntriesRow{
-		Name:       "apple.txt",
+		Name:       []byte("apple.txt"),
 		Ino:        201,
 		Generation: 1,
 		Mode:       int32(meta.S_IFREG | 0o644),
@@ -146,7 +146,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 	}
 
 	childRow2 := db.ListDirEntriesRow{
-		Name:       "banana.txt",
+		Name:       []byte("banana.txt"),
 		Ino:        202,
 		Generation: 1,
 		Mode:       int32(meta.S_IFREG | 0o644),
@@ -197,28 +197,28 @@ func TestReadDir_PositivePath(t *testing.T) {
 
 		assert.Equal(t, meta.DirEntry{
 			Ino:        uint64(dirIno),
-			Name:       ".",
+			Name:       []byte("."),
 			Mode:       uint32(dirDBInode.Mode),
 			NextOffset: 1,
 		}, entries[0])
 
 		assert.Equal(t, meta.DirEntry{
 			Ino:        uint64(parentIno),
-			Name:       "..",
+			Name:       []byte(".."),
 			Mode:       uint32(parentDBInode.Mode),
 			NextOffset: 2,
 		}, entries[1])
 
 		assert.Equal(t, meta.DirEntry{
 			Ino:        uint64(childRow1.Ino),
-			Name:       "apple.txt",
+			Name:       []byte("apple.txt"),
 			Mode:       uint32(childRow1.Mode),
 			NextOffset: 3,
 		}, entries[2])
 
 		assert.Equal(t, meta.DirEntry{
 			Ino:        uint64(childRow2.Ino),
-			Name:       "banana.txt",
+			Name:       []byte("banana.txt"),
 			Mode:       uint32(childRow2.Mode),
 			NextOffset: 4,
 		}, entries[3])
@@ -242,7 +242,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries1, 1)
-		assert.Equal(t, ".", entries1[0].Name)
+		assert.Equal(t, []byte("."), entries1[0].Name)
 		assert.Equal(t, uint64(1), entries1[0].NextOffset)
 
 		// 批次 2: offset=1, limit=1 -> 返回 [..]
@@ -257,7 +257,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries2, 1)
-		assert.Equal(t, "..", entries2[0].Name)
+		assert.Equal(t, []byte(".."), entries2[0].Name)
 		assert.Equal(t, uint64(2), entries2[0].NextOffset)
 
 		// 批次 3: offset=2, limit=1 -> 返回 [apple.txt]
@@ -276,7 +276,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries3, 1)
-		assert.Equal(t, "apple.txt", entries3[0].Name)
+		assert.Equal(t, []byte("apple.txt"), entries3[0].Name)
 		assert.Equal(t, uint64(3), entries3[0].NextOffset)
 
 		// 批次 4: offset=3, limit=1 -> 返回 [banana.txt]
@@ -295,7 +295,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries4, 1)
-		assert.Equal(t, "banana.txt", entries4[0].Name)
+		assert.Equal(t, []byte("banana.txt"), entries4[0].Name)
 		assert.Equal(t, uint64(4), entries4[0].NextOffset)
 
 		// 批次 5: offset=4, limit=10 -> EOF (返回空切片)
@@ -340,9 +340,9 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries, 2)
-		assert.Equal(t, "..", entries[0].Name)
+		assert.Equal(t, []byte(".."), entries[0].Name)
 		assert.Equal(t, uint64(2), entries[0].NextOffset)
-		assert.Equal(t, "apple.txt", entries[1].Name)
+		assert.Equal(t, []byte("apple.txt"), entries[1].Name)
 		assert.Equal(t, uint64(3), entries[1].NextOffset)
 	})
 
@@ -372,7 +372,7 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
-		assert.Equal(t, "apple.txt", entries[0].Name)
+		assert.Equal(t, []byte("apple.txt"), entries[0].Name)
 		assert.Equal(t, uint64(expectedSQLOffset)+3, entries[0].NextOffset)
 	})
 
@@ -420,10 +420,46 @@ func TestReadDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, entries, 2)
-		assert.Equal(t, ".", entries[0].Name)
+		assert.Equal(t, []byte("."), entries[0].Name)
 		assert.Equal(t, uint64(rootIno), entries[0].Ino)
-		assert.Equal(t, "..", entries[1].Name)
+		assert.Equal(t, []byte(".."), entries[1].Name)
 		assert.Equal(t, uint64(rootIno), entries[1].Ino) // 回退指向根目录自身
+	})
+
+	t.Run("非 UTF-8 原始字节序列条目正常按字节返回", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
+
+		rawChildRow := db.ListDirEntriesRow{
+			Name:       []byte{0x80, 0x81, 0xfe, 0xff},
+			Ino:        203,
+			Generation: 1,
+			Mode:       int32(meta.S_IFREG | 0o644),
+			Size:       512,
+			Nlink:      1,
+		}
+
+		mockQuerier.EXPECT().GetInode(mock.Anything, dirIno).Return(dirDBInode, nil).Once()
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{Fh: fh, Ino: dirIno}).Return(activeHandle, nil).Once()
+		mockQuerier.EXPECT().ListDirEntries(mock.Anything, db.ListDirEntriesParams{
+			ParentIno: dirIno,
+			Limit:     1,
+			Offset:    0,
+		}).Return([]db.ListDirEntriesRow{rawChildRow}, nil).Once()
+
+		entries, err := mgr.ReadDir(ctx, meta.ReadDirParams{
+			Ino:    uint64(dirIno),
+			Fh:     uint64(fh),
+			Offset: 2,
+			Limit:  1,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		assert.Equal(t, []byte{0x80, 0x81, 0xfe, 0xff}, entries[0].Name)
+		assert.Equal(t, uint64(203), entries[0].Ino)
 	})
 
 	t.Run("孤儿目录拦截: nlink == 0 时直接返回空切片", func(t *testing.T) {

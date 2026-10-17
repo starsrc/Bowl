@@ -414,7 +414,7 @@ func (_c *MockManager_Link_Call) RunAndReturn(run func(ctx context.Context, para
 }
 
 // Lookup provides a mock function for the type MockManager
-func (_mock *MockManager) Lookup(ctx context.Context, parentIno uint64, name string) (*meta.Inode, error) {
+func (_mock *MockManager) Lookup(ctx context.Context, parentIno uint64, name []byte) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, parentIno, name)
 
 	if len(ret) == 0 {
@@ -423,17 +423,17 @@ func (_mock *MockManager) Lookup(ctx context.Context, parentIno uint64, name str
 
 	var r0 *meta.Inode
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, string) (*meta.Inode, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, []byte) (*meta.Inode, error)); ok {
 		return returnFunc(ctx, parentIno, name)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, string) *meta.Inode); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, []byte) *meta.Inode); ok {
 		r0 = returnFunc(ctx, parentIno, name)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*meta.Inode)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64, string) error); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64, []byte) error); ok {
 		r1 = returnFunc(ctx, parentIno, name)
 	} else {
 		r1 = ret.Error(1)
@@ -449,12 +449,12 @@ type MockManager_Lookup_Call struct {
 // Lookup is a helper method to define mock.On call
 //   - ctx context.Context
 //   - parentIno uint64
-//   - name string
+//   - name []byte
 func (_e *MockManager_Expecter) Lookup(ctx any, parentIno any, name any) *MockManager_Lookup_Call {
 	return &MockManager_Lookup_Call{Call: _e.mock.On("Lookup", ctx, parentIno, name)}
 }
 
-func (_c *MockManager_Lookup_Call) Run(run func(ctx context.Context, parentIno uint64, name string)) *MockManager_Lookup_Call {
+func (_c *MockManager_Lookup_Call) Run(run func(ctx context.Context, parentIno uint64, name []byte)) *MockManager_Lookup_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -464,9 +464,9 @@ func (_c *MockManager_Lookup_Call) Run(run func(ctx context.Context, parentIno u
 		if args[1] != nil {
 			arg1 = args[1].(uint64)
 		}
-		var arg2 string
+		var arg2 []byte
 		if args[2] != nil {
-			arg2 = args[2].(string)
+			arg2 = args[2].([]byte)
 		}
 		run(
 			arg0,
@@ -482,7 +482,7 @@ func (_c *MockManager_Lookup_Call) Return(inode *meta.Inode, err error) *MockMan
 	return _c
 }
 
-func (_c *MockManager_Lookup_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name string) (*meta.Inode, error)) *MockManager_Lookup_Call {
+func (_c *MockManager_Lookup_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name []byte) (*meta.Inode, error)) *MockManager_Lookup_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1135,7 +1135,7 @@ func (_c *MockManager_Rename_Call) RunAndReturn(run func(ctx context.Context, pa
 }
 
 // Rmdir provides a mock function for the type MockManager
-func (_mock *MockManager) Rmdir(ctx context.Context, parentIno uint64, name string) error {
+func (_mock *MockManager) Rmdir(ctx context.Context, parentIno uint64, name []byte) error {
 	ret := _mock.Called(ctx, parentIno, name)
 
 	if len(ret) == 0 {
@@ -1143,7 +1143,7 @@ func (_mock *MockManager) Rmdir(ctx context.Context, parentIno uint64, name stri
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, string) error); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, []byte) error); ok {
 		r0 = returnFunc(ctx, parentIno, name)
 	} else {
 		r0 = ret.Error(0)
@@ -1159,12 +1159,12 @@ type MockManager_Rmdir_Call struct {
 // Rmdir is a helper method to define mock.On call
 //   - ctx context.Context
 //   - parentIno uint64
-//   - name string
+//   - name []byte
 func (_e *MockManager_Expecter) Rmdir(ctx any, parentIno any, name any) *MockManager_Rmdir_Call {
 	return &MockManager_Rmdir_Call{Call: _e.mock.On("Rmdir", ctx, parentIno, name)}
 }
 
-func (_c *MockManager_Rmdir_Call) Run(run func(ctx context.Context, parentIno uint64, name string)) *MockManager_Rmdir_Call {
+func (_c *MockManager_Rmdir_Call) Run(run func(ctx context.Context, parentIno uint64, name []byte)) *MockManager_Rmdir_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -1174,9 +1174,9 @@ func (_c *MockManager_Rmdir_Call) Run(run func(ctx context.Context, parentIno ui
 		if args[1] != nil {
 			arg1 = args[1].(uint64)
 		}
-		var arg2 string
+		var arg2 []byte
 		if args[2] != nil {
-			arg2 = args[2].(string)
+			arg2 = args[2].([]byte)
 		}
 		run(
 			arg0,
@@ -1192,7 +1192,7 @@ func (_c *MockManager_Rmdir_Call) Return(err error) *MockManager_Rmdir_Call {
 	return _c
 }
 
-func (_c *MockManager_Rmdir_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name string) error) *MockManager_Rmdir_Call {
+func (_c *MockManager_Rmdir_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name []byte) error) *MockManager_Rmdir_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1340,7 +1340,7 @@ func (_c *MockManager_Symlink_Call) RunAndReturn(run func(ctx context.Context, p
 }
 
 // Unlink provides a mock function for the type MockManager
-func (_mock *MockManager) Unlink(ctx context.Context, parentIno uint64, name string) error {
+func (_mock *MockManager) Unlink(ctx context.Context, parentIno uint64, name []byte) error {
 	ret := _mock.Called(ctx, parentIno, name)
 
 	if len(ret) == 0 {
@@ -1348,7 +1348,7 @@ func (_mock *MockManager) Unlink(ctx context.Context, parentIno uint64, name str
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, string) error); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, []byte) error); ok {
 		r0 = returnFunc(ctx, parentIno, name)
 	} else {
 		r0 = ret.Error(0)
@@ -1364,12 +1364,12 @@ type MockManager_Unlink_Call struct {
 // Unlink is a helper method to define mock.On call
 //   - ctx context.Context
 //   - parentIno uint64
-//   - name string
+//   - name []byte
 func (_e *MockManager_Expecter) Unlink(ctx any, parentIno any, name any) *MockManager_Unlink_Call {
 	return &MockManager_Unlink_Call{Call: _e.mock.On("Unlink", ctx, parentIno, name)}
 }
 
-func (_c *MockManager_Unlink_Call) Run(run func(ctx context.Context, parentIno uint64, name string)) *MockManager_Unlink_Call {
+func (_c *MockManager_Unlink_Call) Run(run func(ctx context.Context, parentIno uint64, name []byte)) *MockManager_Unlink_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -1379,9 +1379,9 @@ func (_c *MockManager_Unlink_Call) Run(run func(ctx context.Context, parentIno u
 		if args[1] != nil {
 			arg1 = args[1].(uint64)
 		}
-		var arg2 string
+		var arg2 []byte
 		if args[2] != nil {
-			arg2 = args[2].(string)
+			arg2 = args[2].([]byte)
 		}
 		run(
 			arg0,
@@ -1397,7 +1397,7 @@ func (_c *MockManager_Unlink_Call) Return(err error) *MockManager_Unlink_Call {
 	return _c
 }
 
-func (_c *MockManager_Unlink_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name string) error) *MockManager_Unlink_Call {
+func (_c *MockManager_Unlink_Call) RunAndReturn(run func(ctx context.Context, parentIno uint64, name []byte) error) *MockManager_Unlink_Call {
 	_c.Call.Return(run)
 	return _c
 }

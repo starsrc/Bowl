@@ -81,7 +81,7 @@ func TestCreate_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "test_create.txt",
+				Name:      []byte("test_create.txt"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -109,7 +109,7 @@ func TestCreate_PositivePath(t *testing.T) {
 
 		res, err := mgr.Create(ctx, meta.CreateParams{
 			ParentIno: parentIno,
-			Name:      "test_create.txt",
+			Name:      []byte("test_create.txt"),
 			Mode:      0o644, // 仅传入权限位，预期自动补齐 S_IFREG
 			UID:       1001,
 			GID:       1002,
@@ -170,7 +170,7 @@ func TestCreate_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "script.sh",
+				Name:      []byte("script.sh"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -198,7 +198,7 @@ func TestCreate_PositivePath(t *testing.T) {
 
 		res, err := mgr.Create(ctx, meta.CreateParams{
 			ParentIno: parentIno,
-			Name:      "script.sh",
+			Name:      []byte("script.sh"),
 			Mode:      meta.S_IFREG | 0o755,
 			UID:       1001,
 			GID:       1002,
@@ -256,7 +256,7 @@ func TestCreate_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
-				Name:      "sgid_child.txt",
+				Name:      []byte("sgid_child.txt"),
 				Ino:       int64(newIno),
 			}).
 			Return(nil).
@@ -284,7 +284,7 @@ func TestCreate_PositivePath(t *testing.T) {
 
 		res, err := mgr.Create(ctx, meta.CreateParams{
 			ParentIno: parentIno,
-			Name:      "sgid_child.txt",
+			Name:      []byte("sgid_child.txt"),
 			Mode:      0o644,
 			UID:       1001,
 			GID:       1002, // 传入 1002，但由于父目录开启 S_ISGID，预期被覆盖为 9999
@@ -295,6 +295,89 @@ func TestCreate_PositivePath(t *testing.T) {
 		require.NotNil(t, res)
 		assert.Equal(t, uint32(9999), res.Inode.Attr.GID)
 	})
+
+	t.Run("非 UTF-8 原始字节序列正常创建文件与目录项", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		createdInodeRow := db.Inode{
+			Ino:        int64(newIno),
+			Generation: 0,
+			Mode:       int32(meta.S_IFREG | 0o644),
+			Size:       0,
+			Nlink:      1,
+			Uid:        1001,
+			Gid:        1002,
+			Rdev:       0,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		rawName := []byte{0xff, 0xfe, 0x80, 0x81, 't', 'e', 's', 't'}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:  int32(meta.S_IFREG | 0o644),
+				Nlink: 1,
+				Uid:   1001,
+				Gid:   1002,
+				Rdev:  0,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      rawName,
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		createdHandleRow := db.FileHandle{
+			Fh:        4,
+			Ino:       int64(newIno),
+			Flags:     int32(meta.O_CREAT | meta.O_RDWR),
+			CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(newIno),
+				Flags: int32(meta.O_CREAT | meta.O_RDWR),
+			}).
+			Return(createdHandleRow, nil).
+			Once()
+
+		res, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: parentIno,
+			Name:      rawName,
+			Mode:      0o644,
+			UID:       1001,
+			GID:       1002,
+			Flags:     meta.O_CREAT | meta.O_RDWR,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(4), res.Fh)
+		assert.Equal(t, newIno, res.Inode.Ino)
+	})
 }
 
 func TestCreate_InputValidation(t *testing.T) {
@@ -303,14 +386,15 @@ func TestCreate_InputValidation(t *testing.T) {
 	mgr := meta.New(mockStore)
 
 	testCases := []struct {
-		name   string
-		params meta.CreateParams
+		name        string
+		params      meta.CreateParams
+		expectedErr error
 	}{
 		{
 			name: "parent_ino 为 0",
 			params: meta.CreateParams{
 				ParentIno: 0,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      0o644,
 			},
 		},
@@ -318,7 +402,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "parent_ino 超过 math.MaxInt64",
 			params: meta.CreateParams{
 				ParentIno: uint64(math.MaxInt64) + 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      0o644,
 			},
 		},
@@ -326,7 +410,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "name 为空字符串",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "",
+				Name:      []byte(""),
 				Mode:      0o644,
 			},
 		},
@@ -334,15 +418,16 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "name 长度超过 255 字节",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      strings.Repeat("a", 256),
+				Name:      []byte(strings.Repeat("a", 256)),
 				Mode:      0o644,
 			},
+			expectedErr: meta.ErrNameTooLong,
 		},
 		{
 			name: "name 包含斜杠 /",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "sub/file.txt",
+				Name:      []byte("sub/file.txt"),
 				Mode:      0o644,
 			},
 		},
@@ -350,7 +435,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "name 包含空字符 \\x00",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file\x00.txt",
+				Name:      []byte("file\x00.txt"),
 				Mode:      0o644,
 			},
 		},
@@ -358,7 +443,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 超过 0xffff (65535)",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      65536,
 			},
 		},
@@ -366,7 +451,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 文件类型为目录 S_IFDIR",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      meta.S_IFDIR | 0o755,
 			},
 		},
@@ -374,7 +459,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 文件类型为符号链接 S_IFLNK",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      meta.S_IFLNK | 0o777,
 			},
 		},
@@ -382,7 +467,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 文件类型为字符设备 S_IFCHR",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      meta.S_IFCHR | 0o666,
 			},
 		},
@@ -390,7 +475,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 文件类型为块设备 S_IFBLK",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      meta.S_IFBLK | 0o666,
 			},
 		},
@@ -398,7 +483,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 文件类型为管道 S_IFIFO",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      meta.S_IFIFO | 0o644,
 			},
 		},
@@ -406,7 +491,7 @@ func TestCreate_InputValidation(t *testing.T) {
 			name: "mode 文件类型为套接字 S_IFSOCK",
 			params: meta.CreateParams{
 				ParentIno: 1,
-				Name:      "file.txt",
+				Name:      []byte("file.txt"),
 				Mode:      meta.S_IFSOCK | 0o666,
 			},
 		},
@@ -416,7 +501,11 @@ func TestCreate_InputValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			res, err := mgr.Create(ctx, tc.params)
 			assert.Nil(t, res)
-			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			exp := tc.expectedErr
+			if exp == nil {
+				exp = meta.ErrInvalidArgument
+			}
+			assert.ErrorIs(t, err, exp)
 		})
 	}
 }
@@ -442,7 +531,7 @@ func TestCreate_ParentInvariantsAndErrors(t *testing.T) {
 
 	validParams := meta.CreateParams{
 		ParentIno: parentIno,
-		Name:      "valid_file.txt",
+		Name:      []byte("valid_file.txt"),
 		Mode:      0o644,
 		UID:       1000,
 		GID:       1000,
@@ -507,8 +596,8 @@ func TestCreate_ParentInvariantsAndErrors(t *testing.T) {
 	})
 
 	t.Run("name 为 . 或 .. 时在确认父目录有效后返回 ErrAlreadyExists", func(t *testing.T) {
-		for _, reserved := range []string{".", ".."} {
-			t.Run(reserved, func(t *testing.T) {
+		for _, reserved := range [][]byte{[]byte("."), []byte("..")} {
+			t.Run(string(reserved), func(t *testing.T) {
 				mockStore := dbmock.NewMockStore(t)
 				mockQuerier := dbmock.NewMockQuerier(t)
 				mgr := meta.New(mockStore)
@@ -572,7 +661,7 @@ func TestCreate_AlreadyExistsAndFailureHandling(t *testing.T) {
 
 	validParams := meta.CreateParams{
 		ParentIno: parentIno,
-		Name:      "conflict_file.txt",
+		Name:      []byte("conflict_file.txt"),
 		Mode:      0o644,
 		UID:       1000,
 		GID:       1000,

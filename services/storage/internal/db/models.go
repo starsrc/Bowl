@@ -10,7 +10,7 @@ import (
 
 type Entry struct {
 	ParentIno int64  `json:"parent_ino"`
-	Name      string `json:"name"`
+	Name      []byte `json:"name"`
 	Ino       int64  `json:"ino"`
 }
 

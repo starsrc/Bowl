@@ -55,7 +55,7 @@ type SetAttrInput struct {
 // MknodParams 定义创建节点的输入参数。
 type MknodParams struct {
 	ParentIno uint64
-	Name      string
+	Name      []byte
 	Mode      uint32
 	UID       uint32
 	GID       uint32
@@ -65,7 +65,7 @@ type MknodParams struct {
 // MkdirParams 定义创建子目录的输入参数。
 type MkdirParams struct {
 	ParentIno uint64
-	Name      string
+	Name      []byte
 	Mode      uint32
 	UID       uint32
 	GID       uint32
@@ -74,7 +74,7 @@ type MkdirParams struct {
 // SymlinkParams 定义创建符号链接的输入参数。
 type SymlinkParams struct {
 	ParentIno uint64
-	Name      string
+	Name      []byte
 	Target    []byte
 	UID       uint32
 	GID       uint32
@@ -84,21 +84,21 @@ type SymlinkParams struct {
 type LinkParams struct {
 	Ino          uint64
 	NewParentIno uint64
-	NewName      string
+	NewName      []byte
 }
 
 // RenameParams 定义重命名与移动操作的输入参数。
 type RenameParams struct {
 	OldParentIno uint64
-	OldName      string
+	OldName      []byte
 	NewParentIno uint64
-	NewName      string
+	NewName      []byte
 }
 
 // CreateParams 定义原子创建常规文件并分配初始文件句柄的输入参数。
 type CreateParams struct {
 	ParentIno uint64
-	Name      string
+	Name      []byte
 	Mode      uint32
 	UID       uint32
 	GID       uint32
@@ -174,7 +174,7 @@ const (
 // DirEntry 定义 ReadDir 返回的基本目录项实体。
 type DirEntry struct {
 	Ino        uint64
-	Name       string
+	Name       []byte
 	Mode       uint32
 	NextOffset uint64
 }
@@ -190,7 +190,7 @@ type ReadDirParams struct {
 // DirEntryPlus 定义 ReadDirPlus 返回的扩展目录项实体（包含完整 Inode 属性与内核缓存时效）。
 type DirEntryPlus struct {
 	Ino                 uint64
-	Name                string
+	Name                []byte
 	NextOffset          uint64
 	Inode               *Inode
 	EntryTimeoutSeconds float64

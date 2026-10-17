@@ -20,7 +20,7 @@ func TestCreateRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		parentIno uint64
-		entryName string
+		entryName []byte
 		mode      uint32
 		uid       uint32
 		gid       uint32
@@ -31,7 +31,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 常规文件标准模式",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			uid:       1000,
 			gid:       1000,
@@ -39,9 +39,19 @@ func TestCreateRequestValidation(t *testing.T) {
 			valid:     true,
 		},
 		{
+			name:      "合法: 非 UTF-8 字节序列文件名",
+			parentIno: 1,
+			entryName: []byte{0xff, 0xfe, 0x80, 0x81},
+			mode:      0o100644,
+			uid:       1000,
+			gid:       1000,
+			flags:     0o100 | 0o2,
+			valid:     true,
+		},
+		{
 			name:      "合法: 仅包含权限位模式",
 			parentIno: 1,
-			entryName: "newfile",
+			entryName: []byte("newfile"),
 			mode:      0o644,
 			uid:       0,
 			gid:       0,
@@ -51,7 +61,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 文件名称恰好 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("f", 255),
+			entryName: []byte(strings.Repeat("f", 255)),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -61,7 +71,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 多字节 UTF-8 文件名称恰好 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("字", 85),
+			entryName: []byte(strings.Repeat("字", 85)),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -71,7 +81,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 文件名称包含换行符",
 			parentIno: 1,
-			entryName: "file\nname",
+			entryName: []byte("file\nname"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -81,7 +91,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: 父节点 parent_ino 处于正整数上限 math.MaxInt64",
 			parentIno: math.MaxInt64,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -91,7 +101,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效下限 0 (零权限文件 0000)",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0,
 			uid:       0,
 			gid:       0,
@@ -101,7 +111,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "合法: mode 处于有效上限 0o177777 (65535)",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      65535,
 			uid:       0,
 			gid:       0,
@@ -113,7 +123,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: parent_ino 为 0",
 			parentIno: 0,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -123,7 +133,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: parent_ino 超过 math.MaxInt64",
 			parentIno: uint64(math.MaxInt64) + 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -133,7 +143,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 为空字符串",
 			parentIno: 1,
-			entryName: "",
+			entryName: []byte(""),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -143,7 +153,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 超过 255 字节",
 			parentIno: 1,
-			entryName: strings.Repeat("a", 256),
+			entryName: []byte(strings.Repeat("a", 256)),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -153,7 +163,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 包含路径分隔符 /",
 			parentIno: 1,
-			entryName: "dir/file.txt",
+			entryName: []byte("dir/file.txt"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -163,7 +173,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 包含空字节 \\x00",
 			parentIno: 1,
-			entryName: "file\x00.txt",
+			entryName: []byte("file\x00.txt"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -173,7 +183,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: name 仅包含空字节 \\x00",
 			parentIno: 1,
-			entryName: "\x00",
+			entryName: []byte("\x00"),
 			mode:      0o100644,
 			uid:       0,
 			gid:       0,
@@ -183,7 +193,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		{
 			name:      "非法: mode 超过 65535",
 			parentIno: 1,
-			entryName: "file.txt",
+			entryName: []byte("file.txt"),
 			mode:      65536,
 			uid:       0,
 			gid:       0,

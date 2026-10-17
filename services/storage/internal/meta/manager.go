@@ -31,7 +31,9 @@ type Manager interface {
 	Rmdir(ctx context.Context, parentIno uint64, name string) error
 	Rename(ctx context.Context, params RenameParams) error
 	Create(ctx context.Context, params CreateParams) (*CreateResult, error)
+	Open(ctx context.Context, params OpenParams) (*OpenResult, error)
 }
+
 
 type manager struct {
 	store db.Store
@@ -1416,4 +1418,94 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 
 	return result, nil
 }
+
+// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
+func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, error) {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+
+	var result *OpenResult
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
+		}
+
+		fileType := uint32(inode.Mode) & S_IFMT
+		if fileType == S_IFDIR {
+			return ErrIsDir
+		}
+		if fileType == S_IFLNK {
+			return ErrInvalidArgument
+		}
+
+		if inode.Nlink == 0 {
+			hasHandles, err := q.HasFileHandlesByIno(ctx, inode.Ino)
+			if err != nil {
+				return fmt.Errorf("check has file handles for inode %d: %w", inode.Ino, err)
+			}
+			if !hasHandles {
+				return ErrNotFound
+			}
+		}
+
+		if (params.Flags & O_TRUNC) != 0 {
+			if (params.Flags & O_ACCMODE) == O_RDONLY {
+				return ErrInvalidArgument
+			}
+			if fileType == S_IFREG {
+				truncatedMode := uint32(inode.Mode) &^ (S_ISUID | S_ISGID)
+				_, err = q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
+					Ino:         inode.Ino,
+					Mode:        int32(truncatedMode),
+					Size:        0,
+					Uid:         inode.Uid,
+					Gid:         inode.Gid,
+					SetAtimeNow: false,
+					Atime:       inode.Atime,
+					SetMtimeNow: true,
+					Mtime:       pgtype.Timestamptz{},
+				})
+				if err != nil {
+					return fmt.Errorf("truncate inode attr for inode %d: %w", inode.Ino, err)
+				}
+			}
+		}
+
+		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
+			Ino:   inode.Ino,
+			Flags: int32(params.Flags),
+		})
+		if err != nil {
+			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
+		}
+
+		result = &OpenResult{
+			Fh:        uint64(handle.Fh),
+			OpenFlags: 0,
+		}
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrIsDir):
+			return nil, ErrIsDir
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, ErrInvalidArgument
+		default:
+			return nil, fmt.Errorf("open tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+
 

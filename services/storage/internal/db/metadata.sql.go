@@ -352,6 +352,19 @@ func (q *Queries) HasChildEntries(ctx context.Context, parentIno int64) (bool, e
 	return exists, err
 }
 
+const hasFileHandlesByIno = `-- name: HasFileHandlesByIno :one
+SELECT EXISTS (
+    SELECT 1 FROM file_handles WHERE ino = $1
+)
+`
+
+func (q *Queries) HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error) {
+	row := q.db.QueryRow(ctx, hasFileHandlesByIno, ino)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const incrementInodeNlinkAndTouch = `-- name: IncrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink + 1,

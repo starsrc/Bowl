@@ -137,3 +137,9 @@ SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
 INSERT INTO file_handles (ino, flags)
 VALUES ($1, $2)
 RETURNING *;
+
+-- name: HasFileHandlesByIno :one
+SELECT EXISTS (
+    SELECT 1 FROM file_handles WHERE ino = $1
+);
+

@@ -106,6 +106,19 @@ type CreateResult struct {
 	OpenFlags uint32
 }
 
+// OpenParams 定义打开文件并分配文件句柄的输入参数。
+type OpenParams struct {
+	Ino   uint64
+	Flags uint32
+}
+
+// OpenResult 包含打开文件分配的 FileHandle 与打开响应标志。
+type OpenResult struct {
+	Fh        uint64
+	OpenFlags uint32
+}
+
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

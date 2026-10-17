@@ -1563,7 +1563,116 @@ func (x *CreateResponse) GetAttrTimeoutSeconds() float64 {
 	return 0
 }
 
-// Inode 代表文件系统中的实体节点。
+// OpenRequest 定义 Open 接口输入参数。
+type OpenRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 待打开节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等)。
+	Flags         uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OpenRequest) Reset() {
+	*x = OpenRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OpenRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OpenRequest) ProtoMessage() {}
+
+func (x *OpenRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OpenRequest.ProtoReflect.Descriptor instead.
+func (*OpenRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *OpenRequest) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *OpenRequest) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+// OpenResponse 包含打开文件所分配的文件句柄及打开响应标志位。
+type OpenResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 分配的文件句柄 (FileHandle)。必须大于 0。
+	Fh uint64 `protobuf:"varint,1,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 打开响应标志位 (open flags)。
+	OpenFlags     uint32 `protobuf:"varint,2,opt,name=open_flags,json=openFlags,proto3" json:"open_flags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OpenResponse) Reset() {
+	*x = OpenResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OpenResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OpenResponse) ProtoMessage() {}
+
+func (x *OpenResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OpenResponse.ProtoReflect.Descriptor instead.
+func (*OpenResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *OpenResponse) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *OpenResponse) GetOpenFlags() uint32 {
+	if x != nil {
+		return x.OpenFlags
+	}
+	return 0
+}
+
 type Inode struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 节点的全局唯一持久化标识。
@@ -1578,7 +1687,7 @@ type Inode struct {
 
 func (x *Inode) Reset() {
 	*x = Inode{}
-	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	mi := &file_storage_v1_storage_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1590,7 +1699,7 @@ func (x *Inode) String() string {
 func (*Inode) ProtoMessage() {}
 
 func (x *Inode) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	mi := &file_storage_v1_storage_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1603,7 +1712,7 @@ func (x *Inode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inode.ProtoReflect.Descriptor instead.
 func (*Inode) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{24}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Inode) GetIno() uint64 {
@@ -1658,7 +1767,7 @@ type InodeAttribute struct {
 
 func (x *InodeAttribute) Reset() {
 	*x = InodeAttribute{}
-	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	mi := &file_storage_v1_storage_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1670,7 +1779,7 @@ func (x *InodeAttribute) String() string {
 func (*InodeAttribute) ProtoMessage() {}
 
 func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	mi := &file_storage_v1_storage_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1683,7 +1792,7 @@ func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InodeAttribute.ProtoReflect.Descriptor instead.
 func (*InodeAttribute) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{25}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *InodeAttribute) GetMode() uint32 {
@@ -1882,7 +1991,14 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"open_flags\x18\x03 \x01(\rR\topenFlags\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x04 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"z\n" +
+	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"H\n" +
+	"\vOpenRequest\x12#\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x14\n" +
+	"\x05flags\x18\x02 \x01(\rR\x05flags\"F\n" +
+	"\fOpenResponse\x12\x17\n" +
+	"\x02fh\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x02fh\x12\x1d\n" +
+	"\n" +
+	"open_flags\x18\x02 \x01(\rR\topenFlags\"z\n" +
 	"\x05Inode\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x1e\n" +
 	"\n" +
@@ -1901,7 +2017,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05atime\x128\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05mtime\x128\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\x9c\x06\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xd7\x06\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +
@@ -1914,7 +2030,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x06Unlink\x12\x19.storage.v1.UnlinkRequest\x1a\x1a.storage.v1.UnlinkResponse\x12<\n" +
 	"\x05Rmdir\x12\x18.storage.v1.RmdirRequest\x1a\x19.storage.v1.RmdirResponse\x12?\n" +
 	"\x06Rename\x12\x19.storage.v1.RenameRequest\x1a\x1a.storage.v1.RenameResponse\x12?\n" +
-	"\x06Create\x12\x19.storage.v1.CreateRequest\x1a\x1a.storage.v1.CreateResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
+	"\x06Create\x12\x19.storage.v1.CreateRequest\x1a\x1a.storage.v1.CreateResponse\x129\n" +
+	"\x04Open\x12\x17.storage.v1.OpenRequest\x1a\x18.storage.v1.OpenResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
 
 var (
 	file_storage_v1_storage_proto_rawDescOnce sync.Once
@@ -1928,7 +2045,7 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 	return file_storage_v1_storage_proto_rawDescData
 }
 
-var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_storage_v1_storage_proto_goTypes = []any{
 	(*LookupRequest)(nil),         // 0: storage.v1.LookupRequest
 	(*LookupResponse)(nil),        // 1: storage.v1.LookupResponse
@@ -1954,25 +2071,27 @@ var file_storage_v1_storage_proto_goTypes = []any{
 	(*RenameResponse)(nil),        // 21: storage.v1.RenameResponse
 	(*CreateRequest)(nil),         // 22: storage.v1.CreateRequest
 	(*CreateResponse)(nil),        // 23: storage.v1.CreateResponse
-	(*Inode)(nil),                 // 24: storage.v1.Inode
-	(*InodeAttribute)(nil),        // 25: storage.v1.InodeAttribute
-	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
+	(*OpenRequest)(nil),           // 24: storage.v1.OpenRequest
+	(*OpenResponse)(nil),          // 25: storage.v1.OpenResponse
+	(*Inode)(nil),                 // 26: storage.v1.Inode
+	(*InodeAttribute)(nil),        // 27: storage.v1.InodeAttribute
+	(*timestamppb.Timestamp)(nil), // 28: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
-	24, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
-	24, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
-	26, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
-	26, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
-	24, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
-	24, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
-	24, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
-	24, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
-	24, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
-	24, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
-	25, // 10: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
-	26, // 11: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
-	26, // 12: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
-	26, // 13: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
+	26, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
+	26, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
+	28, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
+	28, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
+	26, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
+	26, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
+	26, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
+	26, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
+	26, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
+	26, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
+	27, // 10: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
+	28, // 11: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
+	28, // 12: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
+	28, // 13: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
 	0,  // 14: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
 	2,  // 15: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
 	4,  // 16: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
@@ -1985,20 +2104,22 @@ var file_storage_v1_storage_proto_depIdxs = []int32{
 	18, // 23: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
 	20, // 24: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
 	22, // 25: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
-	1,  // 26: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
-	3,  // 27: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
-	5,  // 28: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
-	7,  // 29: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
-	9,  // 30: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
-	11, // 31: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
-	13, // 32: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
-	15, // 33: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
-	17, // 34: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
-	19, // 35: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
-	21, // 36: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
-	23, // 37: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
-	26, // [26:38] is the sub-list for method output_type
-	14, // [14:26] is the sub-list for method input_type
+	24, // 26: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
+	1,  // 27: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
+	3,  // 28: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
+	5,  // 29: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
+	7,  // 30: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
+	9,  // 31: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
+	11, // 32: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
+	13, // 33: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
+	15, // 34: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
+	17, // 35: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
+	19, // 36: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
+	21, // 37: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
+	23, // 38: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
+	25, // 39: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
+	27, // [27:40] is the sub-list for method output_type
+	14, // [14:27] is the sub-list for method input_type
 	14, // [14:14] is the sub-list for extension type_name
 	14, // [14:14] is the sub-list for extension extendee
 	0,  // [0:14] is the sub-list for field type_name
@@ -2016,7 +2137,7 @@ func file_storage_v1_storage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_v1_storage_proto_rawDesc), len(file_storage_v1_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   26,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -54,7 +54,9 @@ type RenameQuerier interface {
 // FileHandleQuerier 提取文件句柄创建与持久化接口契约。
 type FileHandleQuerier interface {
 	CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error)
+	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
 }
+
 
 // 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier 与 FileHandleQuerier 接口契约。
 var (
@@ -710,5 +712,53 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			assert.True(t, errors.Is(err, expectedErr))
 		})
 	})
+
+	t.Run("HasFileHandlesByIno 算子调用与参数透传", func(t *testing.T) {
+		const targetIno int64 = 42
+
+		t.Run("成功查询并返回存在活跃句柄", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				HasFileHandlesByIno(mock.Anything, targetIno).
+				Return(true, nil).
+				Once()
+
+			exists, err := store.HasFileHandlesByIno(ctx, targetIno)
+			require.NoError(t, err)
+			assert.True(t, exists)
+		})
+
+		t.Run("成功查询并返回无活跃句柄", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				HasFileHandlesByIno(mock.Anything, targetIno).
+				Return(false, nil).
+				Once()
+
+			exists, err := store.HasFileHandlesByIno(ctx, targetIno)
+			require.NoError(t, err)
+			assert.False(t, exists)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database query error")
+			mockStore.EXPECT().
+				HasFileHandlesByIno(mock.Anything, targetIno).
+				Return(false, expectedErr).
+				Once()
+
+			_, err := store.HasFileHandlesByIno(ctx, targetIno)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
 }
+
 

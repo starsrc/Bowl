@@ -87,7 +87,15 @@ service StorageService {
   // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   // 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
   rpc Create(CreateRequest) returns (CreateResponse);
+
+  // Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
+  // 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  // 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc Open(OpenRequest) returns (OpenResponse);
 }
+
 
 // LookupRequest 定义 Lookup 接口输入参数。
 message LookupRequest {
@@ -492,7 +500,29 @@ message CreateResponse {
   double attr_timeout_seconds = 5 [(buf.validate.field).double.gte = 0];
 }
 
+// OpenRequest 定义 Open 接口输入参数。
+message OpenRequest {
+  // 待打开节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等)。
+  uint32 flags = 2;
+}
+
+// OpenResponse 包含打开文件所分配的文件句柄及打开响应标志位。
+message OpenResponse {
+  // 分配的文件句柄 (FileHandle)。必须大于 0。
+  uint64 fh = 1 [(buf.validate.field).uint64.gt = 0];
+
+  // 打开响应标志位 (open flags)。
+  uint32 open_flags = 2;
+}
+
 // Inode 代表文件系统中的实体节点。
+
 message Inode {
   // 节点的全局唯一持久化标识。
   uint64 ino = 1 [(buf.validate.field).uint64.gt = 0];

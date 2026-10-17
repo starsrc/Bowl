@@ -452,6 +452,74 @@ func (_c *MockManager_Mknod_Call) RunAndReturn(run func(ctx context.Context, par
 	return _c
 }
 
+// Open provides a mock function for the type MockManager
+func (_mock *MockManager) Open(ctx context.Context, params meta.OpenParams) (*meta.OpenResult, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Open")
+	}
+
+	var r0 *meta.OpenResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenParams) (*meta.OpenResult, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenParams) *meta.OpenResult); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.OpenResult)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.OpenParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_Open_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Open'
+type MockManager_Open_Call struct {
+	*mock.Call
+}
+
+// Open is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.OpenParams
+func (_e *MockManager_Expecter) Open(ctx any, params any) *MockManager_Open_Call {
+	return &MockManager_Open_Call{Call: _e.mock.On("Open", ctx, params)}
+}
+
+func (_c *MockManager_Open_Call) Run(run func(ctx context.Context, params meta.OpenParams)) *MockManager_Open_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.OpenParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.OpenParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Open_Call) Return(openResult *meta.OpenResult, err error) *MockManager_Open_Call {
+	_c.Call.Return(openResult, err)
+	return _c
+}
+
+func (_c *MockManager_Open_Call) RunAndReturn(run func(ctx context.Context, params meta.OpenParams) (*meta.OpenResult, error)) *MockManager_Open_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Readlink provides a mock function for the type MockManager
 func (_mock *MockManager) Readlink(ctx context.Context, ino uint64) (string, error) {
 	ret := _mock.Called(ctx, ino)

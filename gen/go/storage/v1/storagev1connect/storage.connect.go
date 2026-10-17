@@ -48,6 +48,8 @@ const (
 	StorageServiceRenameProcedure = "/storage.v1.StorageService/Rename"
 	// StorageServiceCreateProcedure is the procedure name of the StorageService's Create RPC.
 	StorageServiceCreateProcedure = "/storage.v1.StorageService/Create"
+	// StorageServiceOpenProcedure is the procedure name of the StorageService's Open RPC.
+	StorageServiceOpenProcedure = "/storage.v1.StorageService/Open"
 )
 
 var (
@@ -135,6 +137,13 @@ var (
 			Procedure:  StorageServiceCreateProcedure,
 		}
 	})
+	storageServiceOpenSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Open"),
+			Procedure:  StorageServiceOpenProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -206,6 +215,12 @@ type StorageServiceClient interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
+	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
+	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -283,6 +298,12 @@ type StorageServiceHandler interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
+	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
+	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -302,6 +323,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceRmdirSpec(), Handler: adapter.rmdir},
 		connect.Method{Spec: storageServiceRenameSpec(), Handler: adapter.rename},
 		connect.Method{Spec: storageServiceCreateSpec(), Handler: adapter.create},
+		connect.Method{Spec: storageServiceOpenSpec(), Handler: adapter.open},
 	)
 }
 
@@ -354,6 +376,10 @@ func (UnimplementedStorageServiceHandler) Rename(context.Context, *v1.RenameRequ
 
 func (UnimplementedStorageServiceHandler) Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Create is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Open is not implemented")
 }
 
 type storageServiceClient struct {
@@ -451,6 +477,14 @@ func (c *storageServiceClient) Rename(ctx context.Context, req *v1.RenameRequest
 func (c *storageServiceClient) Create(ctx context.Context, req *v1.CreateRequest) (*v1.CreateResponse, error) {
 	var res v1.CreateResponse
 	if err := c.client.CallUnary(ctx, storageServiceCreateSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Open(ctx context.Context, req *v1.OpenRequest) (*v1.OpenResponse, error) {
+	var res v1.OpenResponse
+	if err := c.client.CallUnary(ctx, storageServiceOpenSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -596,6 +630,18 @@ func (h storageServiceHandler) create(ctx context.Context, _ connect.Spec, strea
 		return err
 	}
 	res, err := h.svc.Create(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) open(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.OpenRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Open(ctx, &req)
 	if err != nil {
 		return err
 	}

@@ -23,6 +23,7 @@ type Querier interface {
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
+	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)

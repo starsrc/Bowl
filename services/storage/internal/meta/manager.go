@@ -59,6 +59,7 @@ type Manager interface {
 	ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error)
 	Fallocate(ctx context.Context, params FallocateParams) error
 	SetXattr(ctx context.Context, params SetXattrParams) error
+	GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error)
 }
 
 type manager struct {
@@ -2301,5 +2302,79 @@ func (m *manager) SetXattr(ctx context.Context, params SetXattrParams) error {
 
 	return nil
 }
+
+// GetXattr 获取指定 Inode 的扩展属性值。
+// 遵循 Linux FUSE FUSE_GETXATTR 协议与 POSIX getxattr(2) 语义，执行 4 步求值状态机：
+// 1. 入参静态校验（不查库）：校验 Ino 与 Name 边界及非法空字符；
+// 2. 只读快照隔离与存在性校验：在 RepeatableRead 只读事务内通过 GetInode 查询节点，支持孤儿节点；
+// 3. user.* 文件类型准入校验：针对 user.* 命名空间限制仅常规文件、目录与套接字，对其它非法文件类型直接返回 ErrNoData（对齐 Linux xattr_permission 读掩码行为），非 user.* 命名空间不限制；
+// 4. 读取属性值：调用 GetInodeXattr 读取扩展属性值，未命中返回 ErrNoData，命中则原样返回 value（含 0 字节空切片与非 UTF-8 原始字节）。遵循 noatime 策略不刷新 atime。
+func (m *manager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error) {
+	// 第 1 步：入参静态校验（不查库）
+	if ino == 0 || ino > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if len(name) == 0 || len(name) > MaxXattrNameBytes {
+		return nil, ErrRange
+	}
+	if bytes.IndexByte(name, 0) >= 0 {
+		return nil, ErrInvalidArgument
+	}
+
+	var value []byte
+
+	// 开启只读事务 (RepeatableRead)
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第 2 步：Inode 存在性校验
+		inode, err := q.GetInode(ctx, int64(ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode %d: %w", ino, err)
+		}
+
+		// 第 3 步：user.* 文件类型准入校验
+		if bytes.HasPrefix(name, []byte("user.")) {
+			fileType := uint32(inode.Mode) & S_IFMT
+			if fileType != S_IFREG && fileType != S_IFDIR && fileType != S_IFSOCK {
+				return ErrNoData
+			}
+		}
+
+		// 第 4 步：读取属性值
+		xattr, err := q.GetInodeXattr(ctx, db.GetInodeXattrParams{
+			Ino:  int64(ino),
+			Name: name,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNoData
+			}
+			return fmt.Errorf("get inode xattr (ino=%d): %w", ino, err)
+		}
+
+		value = xattr.Value
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, ErrInvalidArgument
+		case errors.Is(err, ErrRange):
+			return nil, ErrRange
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNoData):
+			return nil, ErrNoData
+		default:
+			return nil, fmt.Errorf("getxattr (ino=%d): %w", ino, err)
+		}
+	}
+
+	return value, nil
+}
+
 
 

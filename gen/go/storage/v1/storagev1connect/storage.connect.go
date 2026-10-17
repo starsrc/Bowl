@@ -68,6 +68,8 @@ const (
 	StorageServiceFallocateProcedure = "/storage.v1.StorageService/Fallocate"
 	// StorageServiceSetXattrProcedure is the procedure name of the StorageService's SetXattr RPC.
 	StorageServiceSetXattrProcedure = "/storage.v1.StorageService/SetXattr"
+	// StorageServiceGetXattrProcedure is the procedure name of the StorageService's GetXattr RPC.
+	StorageServiceGetXattrProcedure = "/storage.v1.StorageService/GetXattr"
 )
 
 var (
@@ -225,6 +227,13 @@ var (
 			Procedure:  StorageServiceSetXattrProcedure,
 		}
 	})
+	storageServiceGetXattrSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetXattr"),
+			Procedure:  StorageServiceGetXattrProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -348,6 +357,12 @@ type StorageServiceClient interface {
 	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
 	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
 	SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error)
+	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
+	// 遵循 POSIX getxattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	GetXattr(context.Context, *v1.GetXattrRequest) (*v1.GetXattrResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -477,6 +492,12 @@ type StorageServiceHandler interface {
 	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
 	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
 	SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error)
+	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
+	// 遵循 POSIX getxattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	GetXattr(context.Context, *v1.GetXattrRequest) (*v1.GetXattrResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -506,6 +527,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceReadDirPlusSpec(), Handler: adapter.readDirPlus},
 		connect.Method{Spec: storageServiceFallocateSpec(), Handler: adapter.fallocate},
 		connect.Method{Spec: storageServiceSetXattrSpec(), Handler: adapter.setXattr},
+		connect.Method{Spec: storageServiceGetXattrSpec(), Handler: adapter.getXattr},
 	)
 }
 
@@ -598,6 +620,10 @@ func (UnimplementedStorageServiceHandler) Fallocate(context.Context, *v1.Falloca
 
 func (UnimplementedStorageServiceHandler) SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetXattr is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) GetXattr(context.Context, *v1.GetXattrRequest) (*v1.GetXattrResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetXattr is not implemented")
 }
 
 type storageServiceClient struct {
@@ -775,6 +801,14 @@ func (c *storageServiceClient) Fallocate(ctx context.Context, req *v1.FallocateR
 func (c *storageServiceClient) SetXattr(ctx context.Context, req *v1.SetXattrRequest) (*v1.SetXattrResponse, error) {
 	var res v1.SetXattrResponse
 	if err := c.client.CallUnary(ctx, storageServiceSetXattrSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) GetXattr(ctx context.Context, req *v1.GetXattrRequest) (*v1.GetXattrResponse, error) {
+	var res v1.GetXattrResponse
+	if err := c.client.CallUnary(ctx, storageServiceGetXattrSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1040,6 +1074,18 @@ func (h storageServiceHandler) setXattr(ctx context.Context, _ connect.Spec, str
 		return err
 	}
 	res, err := h.svc.SetXattr(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) getXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.GetXattrRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.GetXattr(ctx, &req)
 	if err != nil {
 		return err
 	}

@@ -345,6 +345,80 @@ func (_c *MockManager_GetAttr_Call) RunAndReturn(run func(ctx context.Context, i
 	return _c
 }
 
+// GetXattr provides a mock function for the type MockManager
+func (_mock *MockManager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error) {
+	ret := _mock.Called(ctx, ino, name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetXattr")
+	}
+
+	var r0 []byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, []byte) ([]byte, error)); ok {
+		return returnFunc(ctx, ino, name)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, []byte) []byte); ok {
+		r0 = returnFunc(ctx, ino, name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64, []byte) error); ok {
+		r1 = returnFunc(ctx, ino, name)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_GetXattr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetXattr'
+type MockManager_GetXattr_Call struct {
+	*mock.Call
+}
+
+// GetXattr is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino uint64
+//   - name []byte
+func (_e *MockManager_Expecter) GetXattr(ctx any, ino any, name any) *MockManager_GetXattr_Call {
+	return &MockManager_GetXattr_Call{Call: _e.mock.On("GetXattr", ctx, ino, name)}
+}
+
+func (_c *MockManager_GetXattr_Call) Run(run func(ctx context.Context, ino uint64, name []byte)) *MockManager_GetXattr_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		var arg2 []byte
+		if args[2] != nil {
+			arg2 = args[2].([]byte)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_GetXattr_Call) Return(bytes []byte, err error) *MockManager_GetXattr_Call {
+	_c.Call.Return(bytes, err)
+	return _c
+}
+
+func (_c *MockManager_GetXattr_Call) RunAndReturn(run func(ctx context.Context, ino uint64, name []byte) ([]byte, error)) *MockManager_GetXattr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Link provides a mock function for the type MockManager
 func (_mock *MockManager) Link(ctx context.Context, params meta.LinkParams) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, params)

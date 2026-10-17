@@ -41,6 +41,7 @@ const (
 	StorageService_ReadDirPlus_FullMethodName = "/storage.v1.StorageService/ReadDirPlus"
 	StorageService_Fallocate_FullMethodName   = "/storage.v1.StorageService/Fallocate"
 	StorageService_SetXattr_FullMethodName    = "/storage.v1.StorageService/SetXattr"
+	StorageService_GetXattr_FullMethodName    = "/storage.v1.StorageService/GetXattr"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -168,6 +169,12 @@ type StorageServiceClient interface {
 	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
 	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
 	SetXattr(ctx context.Context, in *SetXattrRequest, opts ...grpc.CallOption) (*SetXattrResponse, error)
+	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
+	// 遵循 POSIX getxattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	GetXattr(ctx context.Context, in *GetXattrRequest, opts ...grpc.CallOption) (*GetXattrResponse, error)
 }
 
 type storageServiceClient struct {
@@ -398,6 +405,16 @@ func (c *storageServiceClient) SetXattr(ctx context.Context, in *SetXattrRequest
 	return out, nil
 }
 
+func (c *storageServiceClient) GetXattr(ctx context.Context, in *GetXattrRequest, opts ...grpc.CallOption) (*GetXattrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetXattrResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetXattr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -523,6 +540,12 @@ type StorageServiceServer interface {
 	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
 	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
 	SetXattr(context.Context, *SetXattrRequest) (*SetXattrResponse, error)
+	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
+	// 遵循 POSIX getxattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	GetXattr(context.Context, *GetXattrRequest) (*GetXattrResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -598,6 +621,9 @@ func (UnimplementedStorageServiceServer) Fallocate(context.Context, *FallocateRe
 }
 func (UnimplementedStorageServiceServer) SetXattr(context.Context, *SetXattrRequest) (*SetXattrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetXattr not implemented")
+}
+func (UnimplementedStorageServiceServer) GetXattr(context.Context, *GetXattrRequest) (*GetXattrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetXattr not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1016,6 +1042,24 @@ func _StorageService_SetXattr_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_GetXattr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetXattrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetXattr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetXattr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetXattr(ctx, req.(*GetXattrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1110,6 +1154,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetXattr",
 			Handler:    _StorageService_SetXattr_Handler,
+		},
+		{
+			MethodName: "GetXattr",
+			Handler:    _StorageService_GetXattr_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

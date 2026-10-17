@@ -149,6 +149,13 @@ service StorageService {
   // 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
   // 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
   rpc SetXattr(SetXattrRequest) returns (SetXattrResponse);
+
+  // GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
+  // 遵循 POSIX getxattr(2) 语义。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+  // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+  rpc GetXattr(GetXattrRequest) returns (GetXattrResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -897,6 +904,31 @@ message SetXattrRequest {
 
 // SetXattrResponse 定义 SetXattr 接口响应结果。
 message SetXattrResponse {}
+
+// GetXattrRequest 定义 GetXattr 接口输入参数。
+message GetXattrRequest {
+  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [(buf.validate.field).uint64 = { gt: 0, lte: 9223372036854775807 }];
+
+  // 扩展属性名称。
+  // 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "xattr_name_no_nul"
+      message: "xattr name cannot contain NUL byte"
+      expression: "!this.contains(b'\\x00')"
+    }
+  ];
+}
+
+// GetXattrResponse 定义 GetXattr 接口响应结果。
+message GetXattrResponse {
+  // 扩展属性值。
+  // 长度最大允许 65536 字节。
+  bytes value = 1 [(buf.validate.field).bytes.max_len = 65536];
+}
 
 // Inode 代表文件系统中的实体节点。
 

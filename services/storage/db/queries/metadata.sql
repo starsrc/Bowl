@@ -206,7 +206,7 @@ FROM inode_xattrs
 WHERE ino = $1
 ORDER BY name ASC;
 
--- name: DeleteInodeXattr :exec
+-- name: DeleteInodeXattr :execrows
 DELETE FROM inode_xattrs
 WHERE ino = $1 AND name = $2;
 

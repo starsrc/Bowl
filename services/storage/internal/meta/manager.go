@@ -61,6 +61,7 @@ type Manager interface {
 	SetXattr(ctx context.Context, params SetXattrParams) error
 	GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error)
 	ListXattr(ctx context.Context, ino uint64) ([][]byte, error)
+	RemoveXattr(ctx context.Context, ino uint64, name []byte) error
 }
 
 type manager struct {
@@ -2428,5 +2429,83 @@ func (m *manager) ListXattr(ctx context.Context, ino uint64) ([][]byte, error) {
 	}
 
 	return names, nil
+}
+
+// RemoveXattr 移除指定 Inode 的扩展属性。
+// 遵循 Linux FUSE FUSE_REMOVEXATTR 协议与 POSIX removexattr(2) 语义，执行 4 步求值状态机：
+// 1. 入参静态校验（不查库）：
+//    - ino == 0 || ino > math.MaxInt64 返回 ErrInvalidArgument；
+//    - len(name) == 0 || len(name) > MaxXattrNameBytes 返回 ErrRange；
+//    - bytes.IndexByte(name, 0) >= 0 返回 ErrInvalidArgument；
+// 2. Inode 行级排他锁与存在性校验：在读写事务内调用 GetInodeForUpdate(ino)；未命中返回 ErrNotFound；支持孤儿节点 (nlink == 0)；
+// 3. user.* 文件类型准入校验：若以 user. 为前缀，仅允许常规文件 (S_IFREG)、目录 (S_IFDIR) 与套接字 (S_IFSOCK)；对符号链接、字符设备、块设备、FIFO 返回 ErrPerm（对齐 Linux xattr_permission 写掩码行为）；非 user.* 命名空间不限制；
+// 4. 删除属性与刷新 ctime：调用 DeleteInodeXattr(ino, name)；若受影响行数为 0 返回 ErrNoData；删除成功后调用 TouchInodeCtime(ino) 刷新 ctime（使用 clock_timestamp()，不修改 mtime 与 atime）。
+func (m *manager) RemoveXattr(ctx context.Context, ino uint64, name []byte) error {
+	// 第 1 步：入参静态校验（不查库）
+	if ino == 0 || ino > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if len(name) == 0 || len(name) > MaxXattrNameBytes {
+		return ErrRange
+	}
+	if bytes.IndexByte(name, 0) >= 0 {
+		return ErrInvalidArgument
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第 2 步：Inode 行级排他锁与存在性校验
+		inode, err := q.GetInodeForUpdate(ctx, int64(ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode for update %d: %w", ino, err)
+		}
+
+		// 第 3 步：user.* 文件类型准入校验
+		if bytes.HasPrefix(name, []byte("user.")) {
+			fileType := uint32(inode.Mode) & S_IFMT
+			if fileType != S_IFREG && fileType != S_IFDIR && fileType != S_IFSOCK {
+				return ErrPerm
+			}
+		}
+
+		// 第 4 步：删除属性与刷新 ctime
+		rowsAffected, err := q.DeleteInodeXattr(ctx, db.DeleteInodeXattrParams{
+			Ino:  int64(ino),
+			Name: name,
+		})
+		if err != nil {
+			return fmt.Errorf("delete inode xattr (ino=%d): %w", ino, err)
+		}
+		if rowsAffected == 0 {
+			return ErrNoData
+		}
+
+		if err := q.TouchInodeCtime(ctx, int64(ino)); err != nil {
+			return fmt.Errorf("touch inode ctime %d: %w", ino, err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrPerm):
+			return ErrPerm
+		case errors.Is(err, ErrNoData):
+			return ErrNoData
+		case errors.Is(err, ErrRange):
+			return ErrRange
+		default:
+			return fmt.Errorf("removexattr (ino=%d): %w", ino, err)
+		}
+	}
+
+	return nil
 }
 

@@ -43,6 +43,7 @@ const (
 	StorageService_SetXattr_FullMethodName    = "/storage.v1.StorageService/SetXattr"
 	StorageService_GetXattr_FullMethodName    = "/storage.v1.StorageService/GetXattr"
 	StorageService_ListXattr_FullMethodName   = "/storage.v1.StorageService/ListXattr"
+	StorageService_RemoveXattr_FullMethodName = "/storage.v1.StorageService/RemoveXattr"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -182,6 +183,12 @@ type StorageServiceClient interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若无属性，返回空列表。
 	ListXattr(ctx context.Context, in *ListXattrRequest, opts ...grpc.CallOption) (*ListXattrResponse, error)
+	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
+	// 遵循 POSIX removexattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	RemoveXattr(ctx context.Context, in *RemoveXattrRequest, opts ...grpc.CallOption) (*RemoveXattrResponse, error)
 }
 
 type storageServiceClient struct {
@@ -432,6 +439,16 @@ func (c *storageServiceClient) ListXattr(ctx context.Context, in *ListXattrReque
 	return out, nil
 }
 
+func (c *storageServiceClient) RemoveXattr(ctx context.Context, in *RemoveXattrRequest, opts ...grpc.CallOption) (*RemoveXattrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveXattrResponse)
+	err := c.cc.Invoke(ctx, StorageService_RemoveXattr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -569,6 +586,12 @@ type StorageServiceServer interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若无属性，返回空列表。
 	ListXattr(context.Context, *ListXattrRequest) (*ListXattrResponse, error)
+	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
+	// 遵循 POSIX removexattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	RemoveXattr(context.Context, *RemoveXattrRequest) (*RemoveXattrResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -650,6 +673,9 @@ func (UnimplementedStorageServiceServer) GetXattr(context.Context, *GetXattrRequ
 }
 func (UnimplementedStorageServiceServer) ListXattr(context.Context, *ListXattrRequest) (*ListXattrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListXattr not implemented")
+}
+func (UnimplementedStorageServiceServer) RemoveXattr(context.Context, *RemoveXattrRequest) (*RemoveXattrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveXattr not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1104,6 +1130,24 @@ func _StorageService_ListXattr_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_RemoveXattr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveXattrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).RemoveXattr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_RemoveXattr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).RemoveXattr(ctx, req.(*RemoveXattrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1206,6 +1250,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListXattr",
 			Handler:    _StorageService_ListXattr_Handler,
+		},
+		{
+			MethodName: "RemoveXattr",
+			Handler:    _StorageService_RemoveXattr_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

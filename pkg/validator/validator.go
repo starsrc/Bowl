@@ -34,6 +34,7 @@ var storageMessages = []proto.Message{
 	&storagev1.SetXattrRequest{},
 	&storagev1.GetXattrRequest{},
 	&storagev1.ListXattrRequest{},
+	&storagev1.RemoveXattrRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.LookupResponse{},
@@ -60,6 +61,7 @@ var storageMessages = []proto.Message{
 	&storagev1.SetXattrResponse{},
 	&storagev1.GetXattrResponse{},
 	&storagev1.ListXattrResponse{},
+	&storagev1.RemoveXattrResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},

@@ -76,7 +76,7 @@ type XattrQuerier interface {
 	UpsertInodeXattr(ctx context.Context, arg db.UpsertInodeXattrParams) error
 	GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error)
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
-	DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) error
+	DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) (int64, error)
 }
 
 // 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier、InodeLifecycleQuerier、ReadDirQuerier 与 XattrQuerier 接口契约。
@@ -1184,11 +1184,41 @@ func TestStore_XattrBehavior(t *testing.T) {
 
 			mockStore.EXPECT().
 				DeleteInodeXattr(mock.Anything, params).
-				Return(nil).
+				Return(int64(1), nil).
 				Once()
 
-			err := store.DeleteInodeXattr(ctx, params)
+			rows, err := store.DeleteInodeXattr(ctx, params)
 			require.NoError(t, err)
+			assert.Equal(t, int64(1), rows)
+		})
+
+		t.Run("扩展属性不存在返回 0 行", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				DeleteInodeXattr(mock.Anything, params).
+				Return(int64(0), nil).
+				Once()
+
+			rows, err := store.DeleteInodeXattr(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, int64(0), rows)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+			expectedErr := errors.New("db error")
+
+			mockStore.EXPECT().
+				DeleteInodeXattr(mock.Anything, params).
+				Return(int64(0), expectedErr).
+				Once()
+
+			rows, err := store.DeleteInodeXattr(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+			assert.Equal(t, int64(0), rows)
 		})
 	})
 }

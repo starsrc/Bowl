@@ -246,7 +246,7 @@ func (q *Queries) DeleteInode(ctx context.Context, ino int64) error {
 	return err
 }
 
-const deleteInodeXattr = `-- name: DeleteInodeXattr :exec
+const deleteInodeXattr = `-- name: DeleteInodeXattr :execrows
 DELETE FROM inode_xattrs
 WHERE ino = $1 AND name = $2
 `
@@ -256,9 +256,12 @@ type DeleteInodeXattrParams struct {
 	Name []byte `json:"name"`
 }
 
-func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) error {
-	_, err := q.db.Exec(ctx, deleteInodeXattr, arg.Ino, arg.Name)
-	return err
+func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteInodeXattr, arg.Ino, arg.Name)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getEntry = `-- name: GetEntry :one

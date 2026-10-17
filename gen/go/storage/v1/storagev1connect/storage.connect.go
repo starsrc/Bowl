@@ -72,6 +72,8 @@ const (
 	StorageServiceGetXattrProcedure = "/storage.v1.StorageService/GetXattr"
 	// StorageServiceListXattrProcedure is the procedure name of the StorageService's ListXattr RPC.
 	StorageServiceListXattrProcedure = "/storage.v1.StorageService/ListXattr"
+	// StorageServiceRemoveXattrProcedure is the procedure name of the StorageService's RemoveXattr RPC.
+	StorageServiceRemoveXattrProcedure = "/storage.v1.StorageService/RemoveXattr"
 )
 
 var (
@@ -243,6 +245,13 @@ var (
 			Procedure:  StorageServiceListXattrProcedure,
 		}
 	})
+	storageServiceRemoveXattrSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("RemoveXattr"),
+			Procedure:  StorageServiceRemoveXattrProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -378,6 +387,12 @@ type StorageServiceClient interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若无属性，返回空列表。
 	ListXattr(context.Context, *v1.ListXattrRequest) (*v1.ListXattrResponse, error)
+	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
+	// 遵循 POSIX removexattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -519,6 +534,12 @@ type StorageServiceHandler interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若无属性，返回空列表。
 	ListXattr(context.Context, *v1.ListXattrRequest) (*v1.ListXattrResponse, error)
+	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
+	// 遵循 POSIX removexattr(2) 语义。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -550,6 +571,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceSetXattrSpec(), Handler: adapter.setXattr},
 		connect.Method{Spec: storageServiceGetXattrSpec(), Handler: adapter.getXattr},
 		connect.Method{Spec: storageServiceListXattrSpec(), Handler: adapter.listXattr},
+		connect.Method{Spec: storageServiceRemoveXattrSpec(), Handler: adapter.removeXattr},
 	)
 }
 
@@ -650,6 +672,10 @@ func (UnimplementedStorageServiceHandler) GetXattr(context.Context, *v1.GetXattr
 
 func (UnimplementedStorageServiceHandler) ListXattr(context.Context, *v1.ListXattrRequest) (*v1.ListXattrResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.ListXattr is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.RemoveXattr is not implemented")
 }
 
 type storageServiceClient struct {
@@ -843,6 +869,14 @@ func (c *storageServiceClient) GetXattr(ctx context.Context, req *v1.GetXattrReq
 func (c *storageServiceClient) ListXattr(ctx context.Context, req *v1.ListXattrRequest) (*v1.ListXattrResponse, error) {
 	var res v1.ListXattrResponse
 	if err := c.client.CallUnary(ctx, storageServiceListXattrSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) RemoveXattr(ctx context.Context, req *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error) {
+	var res v1.RemoveXattrResponse
+	if err := c.client.CallUnary(ctx, storageServiceRemoveXattrSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1132,6 +1166,18 @@ func (h storageServiceHandler) listXattr(ctx context.Context, _ connect.Spec, st
 		return err
 	}
 	res, err := h.svc.ListXattr(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) removeXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.RemoveXattrRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.RemoveXattr(ctx, &req)
 	if err != nil {
 		return err
 	}

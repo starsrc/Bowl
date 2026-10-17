@@ -663,20 +663,29 @@ func (_c *MockQuerier_DeleteInode_Call) RunAndReturn(run func(ctx context.Contex
 }
 
 // DeleteInodeXattr provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) error {
+func (_mock *MockQuerier) DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) (int64, error) {
 	ret := _mock.Called(ctx, arg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteInodeXattr")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteInodeXattrParams) error); ok {
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteInodeXattrParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteInodeXattrParams) int64); ok {
 		r0 = returnFunc(ctx, arg)
 	} else {
-		r0 = ret.Error(0)
+		r0 = ret.Get(0).(int64)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteInodeXattrParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockQuerier_DeleteInodeXattr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteInodeXattr'
@@ -709,12 +718,12 @@ func (_c *MockQuerier_DeleteInodeXattr_Call) Run(run func(ctx context.Context, a
 	return _c
 }
 
-func (_c *MockQuerier_DeleteInodeXattr_Call) Return(err error) *MockQuerier_DeleteInodeXattr_Call {
-	_c.Call.Return(err)
+func (_c *MockQuerier_DeleteInodeXattr_Call) Return(n int64, err error) *MockQuerier_DeleteInodeXattr_Call {
+	_c.Call.Return(n, err)
 	return _c
 }
 
-func (_c *MockQuerier_DeleteInodeXattr_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteInodeXattrParams) error) *MockQuerier_DeleteInodeXattr_Call {
+func (_c *MockQuerier_DeleteInodeXattr_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteInodeXattrParams) (int64, error)) *MockQuerier_DeleteInodeXattr_Call {
 	_c.Call.Return(run)
 	return _c
 }

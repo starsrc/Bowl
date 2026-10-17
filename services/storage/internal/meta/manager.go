@@ -1554,11 +1554,13 @@ func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh ui
 }
 
 // Flush 冲刷会话句柄并校验合法性（不销毁文件句柄）。
+// 注：params.LockOwner 保留用于 Linux FUSE / POSIX 协议契约对齐，当前元数据存储层无需记录锁所有者。
 func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "flush")
 }
 
 // Fsync 同步文件节点与句柄关联的状态。
+// 注：params.Datasync 保留用于 Linux FUSE / POSIX 协议契约对齐，当前元数据在 PostgreSQL 事务提交时已完成持久化。
 func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
 	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "fsync")
 }

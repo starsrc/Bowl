@@ -285,6 +285,35 @@ func TestFallocate_PreconditionsAndHandles(t *testing.T) {
 		err := mgr.Fallocate(ctx, validParams)
 		require.ErrorIs(t, err, meta.ErrBadFileHandle)
 	})
+
+	t.Run("句柄以保留模式 (flags & O_ACCMODE == 3) 打开返回 ErrBadFileHandle", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(10)).
+			Return(db.Inode{
+				Ino:  10,
+				Mode: int32(meta.S_IFREG | 0o644),
+				Size: 100,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  100,
+				Ino: 10,
+			}).
+			Return(db.FileHandle{
+				Fh:    100,
+				Ino:   10,
+				Flags: 3, // 保留/非法访问模式
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, validParams)
+		require.ErrorIs(t, err, meta.ErrBadFileHandle)
+	})
 }
 
 // TestFallocate_PositivePaths 验证合法模式的行为（模式 0、保留大小模式、打洞模式）。

@@ -253,6 +253,29 @@ func TestFlush_InvariantsAndErrors(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
 	})
 
+	t.Run("节点为目录返回 ErrIsDir", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
+
+		mockQuerier.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:  int64(ino),
+				Mode: int32(meta.S_IFDIR | 0o755),
+			}, nil).
+			Once()
+
+		err := mgr.Flush(ctx, meta.FlushParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrIsDir))
+	})
+
 	t.Run("句柄不存在或归属不匹配返回 ErrBadFileHandle", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
@@ -455,6 +478,30 @@ func TestFsync_InvariantsAndErrors(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("节点为目录返回 ErrIsDir", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
+
+		mockQuerier.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:  int64(ino),
+				Mode: int32(meta.S_IFDIR | 0o755),
+			}, nil).
+			Once()
+
+		err := mgr.Fsync(ctx, meta.FsyncParams{
+			Ino:      ino,
+			Fh:       fh,
+			Datasync: false,
+		})
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrIsDir))
 	})
 
 	t.Run("句柄不存在或归属不匹配返回 ErrBadFileHandle", func(t *testing.T) {

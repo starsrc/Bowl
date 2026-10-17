@@ -182,4 +182,4 @@ FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
 ORDER BY e.name ASC
-LIMIT $2 OFFSET $3;
+LIMIT $2 OFFSET sqlc.arg('offset')::bigint;

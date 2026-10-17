@@ -1524,12 +1524,16 @@ func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh ui
 	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		_, err := q.GetInode(ctx, int64(ino))
+		inode, err := q.GetInode(ctx, int64(ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
 			return fmt.Errorf("get inode %d: %w", ino, err)
+		}
+
+		if (uint32(inode.Mode) & S_IFMT) == S_IFDIR {
+			return ErrIsDir
 		}
 
 		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
@@ -1550,6 +1554,8 @@ func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh ui
 		switch {
 		case errors.Is(err, ErrNotFound):
 			return ErrNotFound
+		case errors.Is(err, ErrIsDir):
+			return ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
 			return ErrBadFileHandle
 		default:
@@ -1867,14 +1873,14 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		}
 
 		if rem > 0 {
-			sqlOffset := 0
+			var sqlOffset int64
 			if params.Offset >= 2 {
-				sqlOffset = int(params.Offset - 2)
+				sqlOffset = int64(params.Offset - 2)
 			}
 			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
 				ParentIno: int64(params.Ino),
 				Limit:     int32(rem),
-				Offset:    int32(sqlOffset),
+				Offset:    sqlOffset,
 			})
 			if err != nil {
 				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
@@ -1971,14 +1977,14 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		}
 
 		if rem > 0 {
-			sqlOffset := 0
+			var sqlOffset int64
 			if params.Offset >= 2 {
-				sqlOffset = int(params.Offset - 2)
+				sqlOffset = int64(params.Offset - 2)
 			}
 			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
 				ParentIno: int64(params.Ino),
 				Limit:     int32(rem),
-				Offset:    int32(sqlOffset),
+				Offset:    sqlOffset,
 			})
 			if err != nil {
 				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
@@ -2071,7 +2077,8 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
 		}
 
-		if (uint32(handle.Flags) & O_ACCMODE) == O_RDONLY {
+		accMode := uint32(handle.Flags) & O_ACCMODE
+		if accMode != O_WRONLY && accMode != O_RDWR {
 			return ErrBadFileHandle
 		}
 

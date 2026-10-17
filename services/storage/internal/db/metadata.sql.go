@@ -537,13 +537,13 @@ FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
 ORDER BY e.name ASC
-LIMIT $2 OFFSET $3
+LIMIT $2 OFFSET $3::bigint
 `
 
 type ListDirEntriesParams struct {
 	ParentIno int64 `json:"parent_ino"`
 	Limit     int32 `json:"limit"`
-	Offset    int32 `json:"offset"`
+	Offset    int64 `json:"offset"`
 }
 
 type ListDirEntriesRow struct {

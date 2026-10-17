@@ -370,6 +370,36 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		assert.Equal(t, meta.DefaultEntryTimeoutSeconds, entries[1].EntryTimeoutSeconds)
 	})
 
+	t.Run("游标超过 math.MaxInt32 保持 64 位整型传递而不截断", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
+
+		largeOffset := uint64(math.MaxInt32) + 100
+		expectedSQLOffset := int64(largeOffset - 2)
+
+		mockQuerier.EXPECT().GetInode(mock.Anything, dirIno).Return(dirDBInode, nil).Once()
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{Fh: fh, Ino: dirIno}).Return(activeHandle, nil).Once()
+		mockQuerier.EXPECT().ListDirEntries(mock.Anything, db.ListDirEntriesParams{
+			ParentIno: dirIno,
+			Limit:     1,
+			Offset:    expectedSQLOffset,
+		}).Return([]db.ListDirEntriesRow{childRow1}, nil).Once()
+
+		entries, err := mgr.ReadDirPlus(ctx, meta.ReadDirPlusParams{
+			Ino:    uint64(dirIno),
+			Fh:     uint64(fh),
+			Offset: largeOffset,
+			Limit:  1,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "apple.txt", entries[0].Name)
+		assert.Equal(t, uint64(expectedSQLOffset)+3, entries[0].NextOffset)
+	})
+
 	t.Run("根目录 .. 回退: 无父目录时 .. 回退指向自身 Inode", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)

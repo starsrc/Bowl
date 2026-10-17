@@ -95,3 +95,23 @@ _Avoid_: Sync, CommitFile, FlushDisk
 **Release (句柄释放)**:
 销毁指定 FileHandle 并在目标 Inode 无剩余活跃 FileHandle 且处于 Orphan Inode 状态时触发物理回收的会话终止操作。
 _Avoid_: CloseFile, DestroyHandle, FreeHandle
+
+**OpenDir (目录打开)**:
+针对已存在的目录 Inode 建立只读打开会话并分配 FileHandle 的生命周期操作。
+_Avoid_: OpenDirectory, AcquireDirHandle, StartDirStream
+
+**ReadDir (目录读取)**:
+根据目录 Inode、活跃 FileHandle 与游标偏移量，合成 `.` / `..` 并分页拉取子项 Entry 列表的元数据检索操作。
+_Avoid_: ListDir, ReadEntries, FetchDir, ScanDir
+
+**ReadDirPlus (增强目录读取)**:
+在 ReadDir 基础之上，内联预取并返回子项完整 Inode 属性与内核缓存时效的批量元数据检索操作。
+_Avoid_: ReadDirWithAttr, BatchLookup, ScanDirPlus
+
+**ReleaseDir (目录句柄释放)**:
+销毁指定目录 FileHandle 并在目标目录 Inode 无剩余活跃 FileHandle 且处于 Orphan Inode 状态时触发物理回收的会话终止操作。
+_Avoid_: CloseDir, DestroyDirHandle, FreeDirHandle
+
+**Fallocate (空间预分配与打洞)**:
+针对已打开常规文件 Inode 的活跃写句柄，执行空间预留扩展或指定区间零字节打洞并联动权限与时间戳的元数据操作。
+_Avoid_: AllocSpace, PunchHole, Preallocate, ReserveBlocks

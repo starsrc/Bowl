@@ -72,3 +72,26 @@ _Avoid_: Version, Revision, Epoch
 客户端挂载呈现的独立文件系统实例；在元数据层无实体感知，仅表现为普通的递增根目录 Inode，由客户端在挂载时将其 Inode 强制重写映射为 1。
 _Avoid_: Volume, Drive, MountPoint, Partition
 
+**FileHandle (文件句柄)**:
+文件系统为单次文件打开会话分配的唯一持久化数字标识符，用于在打开生命周期内关联后续的冲刷、同步与释放操作。
+_Avoid_: Fd, FileDescriptor, SessionID, HandleID, StreamID
+
+**Create (文件创建并打开)**:
+在指定父目录下原子性地创建常规文件 Inode、绑定同名 Entry 并分配初始 FileHandle 的元数据变更与会话建立操作。
+_Avoid_: CreateAndOpen, TouchAndOpen, NewFile
+
+**Open (文件打开)**:
+针对已存在的非目录 Inode 建立打开会话并分配 FileHandle（可按需伴随文件截断）的生命周期操作。
+_Avoid_: OpenFile, AcquireHandle, ConnectFile
+
+**Flush (句柄冲刷)**:
+在单个文件描述符关闭时触发、校验目标 Inode 与活跃 FileHandle 归属有效性的会话同步操作（不销毁 FileHandle）。
+_Avoid_: Close, SyncHandle, Drain
+
+**Fsync (文件同步)**:
+确认目标 Inode 及其活跃 FileHandle 关联状态（支持完整同步与仅数据同步语义）已持久化的同步操作。
+_Avoid_: Sync, CommitFile, FlushDisk
+
+**Release (句柄释放)**:
+销毁指定 FileHandle 并在目标 Inode 无剩余活跃 FileHandle 且处于 Orphan Inode 状态时触发物理回收的会话终止操作。
+_Avoid_: CloseFile, DestroyHandle, FreeHandle

@@ -66,6 +66,8 @@ const (
 	StorageServiceReadDirPlusProcedure = "/storage.v1.StorageService/ReadDirPlus"
 	// StorageServiceFallocateProcedure is the procedure name of the StorageService's Fallocate RPC.
 	StorageServiceFallocateProcedure = "/storage.v1.StorageService/Fallocate"
+	// StorageServiceSetXattrProcedure is the procedure name of the StorageService's SetXattr RPC.
+	StorageServiceSetXattrProcedure = "/storage.v1.StorageService/SetXattr"
 )
 
 var (
@@ -216,6 +218,13 @@ var (
 			Procedure:  StorageServiceFallocateProcedure,
 		}
 	})
+	storageServiceSetXattrSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetXattr"),
+			Procedure:  StorageServiceSetXattrProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -332,6 +341,13 @@ type StorageServiceClient interface {
 	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
 	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
 	Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error)
+	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
+	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
+	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+	SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -454,6 +470,13 @@ type StorageServiceHandler interface {
 	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
 	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
 	Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error)
+	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
+	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
+	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+	SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -482,6 +505,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceReadDirSpec(), Handler: adapter.readDir},
 		connect.Method{Spec: storageServiceReadDirPlusSpec(), Handler: adapter.readDirPlus},
 		connect.Method{Spec: storageServiceFallocateSpec(), Handler: adapter.fallocate},
+		connect.Method{Spec: storageServiceSetXattrSpec(), Handler: adapter.setXattr},
 	)
 }
 
@@ -570,6 +594,10 @@ func (UnimplementedStorageServiceHandler) ReadDirPlus(context.Context, *v1.ReadD
 
 func (UnimplementedStorageServiceHandler) Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Fallocate is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetXattr is not implemented")
 }
 
 type storageServiceClient struct {
@@ -739,6 +767,14 @@ func (c *storageServiceClient) ReadDirPlus(ctx context.Context, req *v1.ReadDirP
 func (c *storageServiceClient) Fallocate(ctx context.Context, req *v1.FallocateRequest) (*v1.FallocateResponse, error) {
 	var res v1.FallocateResponse
 	if err := c.client.CallUnary(ctx, storageServiceFallocateSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) SetXattr(ctx context.Context, req *v1.SetXattrRequest) (*v1.SetXattrResponse, error) {
+	var res v1.SetXattrResponse
+	if err := c.client.CallUnary(ctx, storageServiceSetXattrSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -992,6 +1028,18 @@ func (h storageServiceHandler) fallocate(ctx context.Context, _ connect.Spec, st
 		return err
 	}
 	res, err := h.svc.Fallocate(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) setXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.SetXattrRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.SetXattr(ctx, &req)
 	if err != nil {
 		return err
 	}

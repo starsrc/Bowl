@@ -40,6 +40,7 @@ const (
 	StorageService_ReadDir_FullMethodName     = "/storage.v1.StorageService/ReadDir"
 	StorageService_ReadDirPlus_FullMethodName = "/storage.v1.StorageService/ReadDirPlus"
 	StorageService_Fallocate_FullMethodName   = "/storage.v1.StorageService/Fallocate"
+	StorageService_SetXattr_FullMethodName    = "/storage.v1.StorageService/SetXattr"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -160,6 +161,13 @@ type StorageServiceClient interface {
 	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
 	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
 	Fallocate(ctx context.Context, in *FallocateRequest, opts ...grpc.CallOption) (*FallocateResponse, error)
+	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
+	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
+	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+	SetXattr(ctx context.Context, in *SetXattrRequest, opts ...grpc.CallOption) (*SetXattrResponse, error)
 }
 
 type storageServiceClient struct {
@@ -380,6 +388,16 @@ func (c *storageServiceClient) Fallocate(ctx context.Context, in *FallocateReque
 	return out, nil
 }
 
+func (c *storageServiceClient) SetXattr(ctx context.Context, in *SetXattrRequest, opts ...grpc.CallOption) (*SetXattrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetXattrResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetXattr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -498,6 +516,13 @@ type StorageServiceServer interface {
 	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
 	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
 	Fallocate(context.Context, *FallocateRequest) (*FallocateResponse, error)
+	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
+	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
+	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+	SetXattr(context.Context, *SetXattrRequest) (*SetXattrResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -570,6 +595,9 @@ func (UnimplementedStorageServiceServer) ReadDirPlus(context.Context, *ReadDirPl
 }
 func (UnimplementedStorageServiceServer) Fallocate(context.Context, *FallocateRequest) (*FallocateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Fallocate not implemented")
+}
+func (UnimplementedStorageServiceServer) SetXattr(context.Context, *SetXattrRequest) (*SetXattrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetXattr not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -970,6 +998,24 @@ func _StorageService_Fallocate_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_SetXattr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetXattrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetXattr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetXattr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetXattr(ctx, req.(*SetXattrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1060,6 +1106,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Fallocate",
 			Handler:    _StorageService_Fallocate_Handler,
+		},
+		{
+			MethodName: "SetXattr",
+			Handler:    _StorageService_SetXattr_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

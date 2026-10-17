@@ -183,3 +183,30 @@ JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
 ORDER BY e.name ASC
 LIMIT $2 OFFSET sqlc.arg('offset')::bigint;
+
+-- name: GetInodeXattr :one
+SELECT ino, name, value
+FROM inode_xattrs
+WHERE ino = $1 AND name = $2;
+
+-- name: UpsertInodeXattr :exec
+INSERT INTO inode_xattrs (ino, name, value)
+VALUES ($1, $2, $3)
+ON CONFLICT (ino, name) DO UPDATE
+SET value = EXCLUDED.value;
+
+-- name: GetInodeXattrNamesTotalBytes :one
+SELECT COALESCE(SUM(octet_length(name) + 1), 0)::bigint AS total_bytes
+FROM inode_xattrs
+WHERE ino = $1;
+
+-- name: ListInodeXattrNames :many
+SELECT name
+FROM inode_xattrs
+WHERE ino = $1
+ORDER BY name ASC;
+
+-- name: DeleteInodeXattr :exec
+DELETE FROM inode_xattrs
+WHERE ino = $1 AND name = $2;
+

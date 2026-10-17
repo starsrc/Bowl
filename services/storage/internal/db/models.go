@@ -35,3 +35,9 @@ type Inode struct {
 	Ctime         pgtype.Timestamptz `json:"ctime"`
 	SymlinkTarget []byte             `json:"symlink_target"`
 }
+
+type InodeXattr struct {
+	Ino   int64  `json:"ino"`
+	Name  []byte `json:"name"`
+	Value []byte `json:"value"`
+}

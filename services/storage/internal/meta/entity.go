@@ -40,6 +40,16 @@ const (
 	FallocFlPunchHole uint32 = 0x02
 )
 
+// Linux 扩展属性（xattr）规格常量与操作标志位。
+const (
+	MaxXattrNameBytes  = 255
+	MaxXattrValueBytes = 65536
+	MaxXattrListBytes  = 65536
+
+	XattrCreate  uint32 = 0x1
+	XattrReplace uint32 = 0x2
+)
+
 // SetAttrInput 定义修改 Inode 属性的输入参数。
 type SetAttrInput struct {
 	Mode     *uint32
@@ -212,6 +222,14 @@ type FallocateParams struct {
 	Offset uint64
 	Length uint64
 	Mode   uint32
+}
+
+// SetXattrParams 定义设置扩展属性的输入参数。
+type SetXattrParams struct {
+	Ino   uint64
+	Name  []byte
+	Value []byte
+	Flags uint32
 }
 
 // 领域哨兵错误。

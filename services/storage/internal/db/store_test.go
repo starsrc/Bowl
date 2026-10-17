@@ -70,7 +70,16 @@ type ReadDirQuerier interface {
 	ListDirEntries(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error)
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier、InodeLifecycleQuerier 与 ReadDirQuerier 接口契约。
+// XattrQuerier 提取扩展属性存取与配额查询接口契约。
+type XattrQuerier interface {
+	GetInodeXattr(ctx context.Context, arg db.GetInodeXattrParams) (db.InodeXattr, error)
+	UpsertInodeXattr(ctx context.Context, arg db.UpsertInodeXattrParams) error
+	GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error)
+	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
+	DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) error
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier、InodeLifecycleQuerier、ReadDirQuerier 与 XattrQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -103,6 +112,10 @@ var (
 	_ ReadDirQuerier = (db.Querier)(nil)
 	_ ReadDirQuerier = (db.Store)(nil)
 	_ ReadDirQuerier = (*db.Queries)(nil)
+
+	_ XattrQuerier = (db.Querier)(nil)
+	_ XattrQuerier = (db.Store)(nil)
+	_ XattrQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -1049,5 +1062,133 @@ func TestQuerier_MknodOperators(t *testing.T) {
 	})
 }
 
+func TestStore_XattrBehavior(t *testing.T) {
+	ctx := context.Background()
 
+	t.Run("GetInodeXattr", func(t *testing.T) {
+		params := db.GetInodeXattrParams{
+			Ino:  42,
+			Name: []byte("user.test"),
+		}
+		expected := db.InodeXattr{
+			Ino:   42,
+			Name:  []byte("user.test"),
+			Value: []byte("value-data"),
+		}
 
+		t.Run("成功查询扩展属性", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetInodeXattr(mock.Anything, params).
+				Return(expected, nil).
+				Once()
+
+			result, err := store.GetInodeXattr(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, expected, result)
+		})
+
+		t.Run("属性不存在返回 pgx.ErrNoRows", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetInodeXattr(mock.Anything, params).
+				Return(db.InodeXattr{}, pgx.ErrNoRows).
+				Once()
+
+			_, err := store.GetInodeXattr(ctx, params)
+			require.ErrorIs(t, err, pgx.ErrNoRows)
+		})
+	})
+
+	t.Run("UpsertInodeXattr", func(t *testing.T) {
+		params := db.UpsertInodeXattrParams{
+			Ino:   42,
+			Name:  []byte("user.test"),
+			Value: []byte("value-data"),
+		}
+
+		t.Run("成功插入或更新扩展属性", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				UpsertInodeXattr(mock.Anything, params).
+				Return(nil).
+				Once()
+
+			err := store.UpsertInodeXattr(ctx, params)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("db write failed")
+			mockStore.EXPECT().
+				UpsertInodeXattr(mock.Anything, params).
+				Return(expectedErr).
+				Once()
+
+			err := store.UpsertInodeXattr(ctx, params)
+			require.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("GetInodeXattrNamesTotalBytes", func(t *testing.T) {
+		t.Run("成功统计全部属性名总字节", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetInodeXattrNamesTotalBytes(mock.Anything, int64(42)).
+				Return(int64(128), nil).
+				Once()
+
+			total, err := store.GetInodeXattrNamesTotalBytes(ctx, 42)
+			require.NoError(t, err)
+			assert.Equal(t, int64(128), total)
+		})
+	})
+
+	t.Run("ListInodeXattrNames", func(t *testing.T) {
+		t.Run("成功返回属性名列表", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedNames := [][]byte{[]byte("user.a"), []byte("user.b")}
+			mockStore.EXPECT().
+				ListInodeXattrNames(mock.Anything, int64(42)).
+				Return(expectedNames, nil).
+				Once()
+
+			names, err := store.ListInodeXattrNames(ctx, 42)
+			require.NoError(t, err)
+			assert.Equal(t, expectedNames, names)
+		})
+	})
+
+	t.Run("DeleteInodeXattr", func(t *testing.T) {
+		params := db.DeleteInodeXattrParams{
+			Ino:  42,
+			Name: []byte("user.test"),
+		}
+
+		t.Run("成功删除扩展属性", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				DeleteInodeXattr(mock.Anything, params).
+				Return(nil).
+				Once()
+
+			err := store.DeleteInodeXattr(ctx, params)
+			require.NoError(t, err)
+		})
+	})
+}

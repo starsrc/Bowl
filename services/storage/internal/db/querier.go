@@ -19,11 +19,14 @@ type Querier interface {
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error)
 	DeleteInode(ctx context.Context, ino int64) error
+	DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) error
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
+	GetInodeXattr(ctx context.Context, arg GetInodeXattrParams) (InodeXattr, error)
+	GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error)
 	GetParentInode(ctx context.Context, ino int64) (Inode, error)
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
@@ -32,10 +35,12 @@ type Querier interface {
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
+	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
+	UpsertInodeXattr(ctx context.Context, arg UpsertInodeXattrParams) error
 }
 
 var _ Querier = (*Queries)(nil)

@@ -141,6 +141,14 @@ service StorageService {
   // Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
   // 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
   rpc Fallocate(FallocateRequest) returns (FallocateResponse);
+
+  // SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
+  // 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+  // 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
+  // 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+  rpc SetXattr(SetXattrRequest) returns (SetXattrResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -861,6 +869,34 @@ message FallocateRequest {
 
 // FallocateResponse 定义 Fallocate 接口响应结果。
 message FallocateResponse {}
+
+// SetXattrRequest 定义 SetXattr 接口输入参数。
+message SetXattrRequest {
+  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [(buf.validate.field).uint64 = { gt: 0, lte: 9223372036854775807 }];
+
+  // 扩展属性名称。
+  // 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+  bytes name = 2 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 255,
+    (buf.validate.field).cel = {
+      id: "xattr_name_no_nul"
+      message: "xattr name cannot contain NUL byte"
+      expression: "!this.contains(b'\\x00')"
+    }
+  ];
+
+  // 扩展属性值。
+  // 长度最大允许 65536 字节。
+  bytes value = 3 [(buf.validate.field).bytes.max_len = 65536];
+
+  // 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE, 3: 两者皆设)。
+  uint32 flags = 4 [(buf.validate.field).uint32.lte = 3];
+}
+
+// SetXattrResponse 定义 SetXattr 接口响应结果。
+message SetXattrResponse {}
 
 // Inode 代表文件系统中的实体节点。
 

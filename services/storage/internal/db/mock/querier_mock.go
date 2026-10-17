@@ -662,6 +662,63 @@ func (_c *MockQuerier_DeleteInode_Call) RunAndReturn(run func(ctx context.Contex
 	return _c
 }
 
+// DeleteInodeXattr provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteInodeXattr")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteInodeXattrParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_DeleteInodeXattr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteInodeXattr'
+type MockQuerier_DeleteInodeXattr_Call struct {
+	*mock.Call
+}
+
+// DeleteInodeXattr is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteInodeXattrParams
+func (_e *MockQuerier_Expecter) DeleteInodeXattr(ctx any, arg any) *MockQuerier_DeleteInodeXattr_Call {
+	return &MockQuerier_DeleteInodeXattr_Call{Call: _e.mock.On("DeleteInodeXattr", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteInodeXattr_Call) Run(run func(ctx context.Context, arg db.DeleteInodeXattrParams)) *MockQuerier_DeleteInodeXattr_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteInodeXattrParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteInodeXattrParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteInodeXattr_Call) Return(err error) *MockQuerier_DeleteInodeXattr_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteInodeXattr_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteInodeXattrParams) error) *MockQuerier_DeleteInodeXattr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetEntry provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) GetEntry(ctx context.Context, arg db.GetEntryParams) (db.Entry, error) {
 	ret := _mock.Called(ctx, arg)
@@ -988,6 +1045,138 @@ func (_c *MockQuerier_GetInodeForUpdate_Call) Return(inode db.Inode, err error) 
 }
 
 func (_c *MockQuerier_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockQuerier_GetInodeForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetInodeXattr provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetInodeXattr(ctx context.Context, arg db.GetInodeXattrParams) (db.InodeXattr, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetInodeXattr")
+	}
+
+	var r0 db.InodeXattr
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetInodeXattrParams) (db.InodeXattr, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetInodeXattrParams) db.InodeXattr); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.InodeXattr)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetInodeXattrParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetInodeXattr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetInodeXattr'
+type MockQuerier_GetInodeXattr_Call struct {
+	*mock.Call
+}
+
+// GetInodeXattr is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetInodeXattrParams
+func (_e *MockQuerier_Expecter) GetInodeXattr(ctx any, arg any) *MockQuerier_GetInodeXattr_Call {
+	return &MockQuerier_GetInodeXattr_Call{Call: _e.mock.On("GetInodeXattr", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetInodeXattr_Call) Run(run func(ctx context.Context, arg db.GetInodeXattrParams)) *MockQuerier_GetInodeXattr_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetInodeXattrParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetInodeXattrParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetInodeXattr_Call) Return(inodeXattr db.InodeXattr, err error) *MockQuerier_GetInodeXattr_Call {
+	_c.Call.Return(inodeXattr, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetInodeXattr_Call) RunAndReturn(run func(ctx context.Context, arg db.GetInodeXattrParams) (db.InodeXattr, error)) *MockQuerier_GetInodeXattr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetInodeXattrNamesTotalBytes provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetInodeXattrNamesTotalBytes")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (int64, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) int64); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetInodeXattrNamesTotalBytes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetInodeXattrNamesTotalBytes'
+type MockQuerier_GetInodeXattrNamesTotalBytes_Call struct {
+	*mock.Call
+}
+
+// GetInodeXattrNamesTotalBytes is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) GetInodeXattrNamesTotalBytes(ctx any, ino any) *MockQuerier_GetInodeXattrNamesTotalBytes_Call {
+	return &MockQuerier_GetInodeXattrNamesTotalBytes_Call{Call: _e.mock.On("GetInodeXattrNamesTotalBytes", ctx, ino)}
+}
+
+func (_c *MockQuerier_GetInodeXattrNamesTotalBytes_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_GetInodeXattrNamesTotalBytes_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetInodeXattrNamesTotalBytes_Call) Return(n int64, err error) *MockQuerier_GetInodeXattrNamesTotalBytes_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetInodeXattrNamesTotalBytes_Call) RunAndReturn(run func(ctx context.Context, ino int64) (int64, error)) *MockQuerier_GetInodeXattrNamesTotalBytes_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1513,6 +1702,74 @@ func (_c *MockQuerier_ListDirEntries_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// ListInodeXattrNames provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListInodeXattrNames")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([][]byte, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) [][]byte); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListInodeXattrNames_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListInodeXattrNames'
+type MockQuerier_ListInodeXattrNames_Call struct {
+	*mock.Call
+}
+
+// ListInodeXattrNames is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) ListInodeXattrNames(ctx any, ino any) *MockQuerier_ListInodeXattrNames_Call {
+	return &MockQuerier_ListInodeXattrNames_Call{Call: _e.mock.On("ListInodeXattrNames", ctx, ino)}
+}
+
+func (_c *MockQuerier_ListInodeXattrNames_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_ListInodeXattrNames_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListInodeXattrNames_Call) Return(bytess [][]byte, err error) *MockQuerier_ListInodeXattrNames_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListInodeXattrNames_Call) RunAndReturn(run func(ctx context.Context, ino int64) ([][]byte, error)) *MockQuerier_ListInodeXattrNames_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // TouchInodeCtime provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) TouchInodeCtime(ctx context.Context, ino int64) error {
 	ret := _mock.Called(ctx, ino)
@@ -1746,6 +2003,63 @@ func (_c *MockQuerier_UpdateInodeAttr_Call) Return(inode db.Inode, err error) *M
 }
 
 func (_c *MockQuerier_UpdateInodeAttr_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error)) *MockQuerier_UpdateInodeAttr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpsertInodeXattr provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) UpsertInodeXattr(ctx context.Context, arg db.UpsertInodeXattrParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpsertInodeXattr")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpsertInodeXattrParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_UpsertInodeXattr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpsertInodeXattr'
+type MockQuerier_UpsertInodeXattr_Call struct {
+	*mock.Call
+}
+
+// UpsertInodeXattr is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpsertInodeXattrParams
+func (_e *MockQuerier_Expecter) UpsertInodeXattr(ctx any, arg any) *MockQuerier_UpsertInodeXattr_Call {
+	return &MockQuerier_UpsertInodeXattr_Call{Call: _e.mock.On("UpsertInodeXattr", ctx, arg)}
+}
+
+func (_c *MockQuerier_UpsertInodeXattr_Call) Run(run func(ctx context.Context, arg db.UpsertInodeXattrParams)) *MockQuerier_UpsertInodeXattr_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpsertInodeXattrParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpsertInodeXattrParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_UpsertInodeXattr_Call) Return(err error) *MockQuerier_UpsertInodeXattr_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_UpsertInodeXattr_Call) RunAndReturn(run func(ctx context.Context, arg db.UpsertInodeXattrParams) error) *MockQuerier_UpsertInodeXattr_Call {
 	_c.Call.Return(run)
 	return _c
 }

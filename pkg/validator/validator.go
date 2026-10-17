@@ -31,6 +31,7 @@ var storageMessages = []proto.Message{
 	&storagev1.ReadDirRequest{},
 	&storagev1.ReadDirPlusRequest{},
 	&storagev1.FallocateRequest{},
+	&storagev1.SetXattrRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.LookupResponse{},
@@ -54,6 +55,7 @@ var storageMessages = []proto.Message{
 	&storagev1.ReadDirResponse{},
 	&storagev1.ReadDirPlusResponse{},
 	&storagev1.FallocateResponse{},
+	&storagev1.SetXattrResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},

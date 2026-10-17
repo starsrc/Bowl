@@ -246,6 +246,21 @@ func (q *Queries) DeleteInode(ctx context.Context, ino int64) error {
 	return err
 }
 
+const deleteInodeXattr = `-- name: DeleteInodeXattr :exec
+DELETE FROM inode_xattrs
+WHERE ino = $1 AND name = $2
+`
+
+type DeleteInodeXattrParams struct {
+	Ino  int64  `json:"ino"`
+	Name []byte `json:"name"`
+}
+
+func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) error {
+	_, err := q.db.Exec(ctx, deleteInodeXattr, arg.Ino, arg.Name)
+	return err
+}
+
 const getEntry = `-- name: GetEntry :one
 SELECT parent_ino, name, ino
 FROM entries
@@ -369,6 +384,37 @@ func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, erro
 		&i.SymlinkTarget,
 	)
 	return i, err
+}
+
+const getInodeXattr = `-- name: GetInodeXattr :one
+SELECT ino, name, value
+FROM inode_xattrs
+WHERE ino = $1 AND name = $2
+`
+
+type GetInodeXattrParams struct {
+	Ino  int64  `json:"ino"`
+	Name []byte `json:"name"`
+}
+
+func (q *Queries) GetInodeXattr(ctx context.Context, arg GetInodeXattrParams) (InodeXattr, error) {
+	row := q.db.QueryRow(ctx, getInodeXattr, arg.Ino, arg.Name)
+	var i InodeXattr
+	err := row.Scan(&i.Ino, &i.Name, &i.Value)
+	return i, err
+}
+
+const getInodeXattrNamesTotalBytes = `-- name: GetInodeXattrNamesTotalBytes :one
+SELECT COALESCE(SUM(octet_length(name) + 1), 0)::bigint AS total_bytes
+FROM inode_xattrs
+WHERE ino = $1
+`
+
+func (q *Queries) GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error) {
+	row := q.db.QueryRow(ctx, getInodeXattrNamesTotalBytes, ino)
+	var total_bytes int64
+	err := row.Scan(&total_bytes)
+	return total_bytes, err
 }
 
 const getParentInode = `-- name: GetParentInode :one
@@ -596,6 +642,33 @@ func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) 
 	return items, nil
 }
 
+const listInodeXattrNames = `-- name: ListInodeXattrNames :many
+SELECT name
+FROM inode_xattrs
+WHERE ino = $1
+ORDER BY name ASC
+`
+
+func (q *Queries) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error) {
+	rows, err := q.db.Query(ctx, listInodeXattrNames, ino)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var name []byte
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const touchInodeCtime = `-- name: TouchInodeCtime :exec
 UPDATE inodes
 SET ctime = clock_timestamp()
@@ -696,4 +769,22 @@ func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams
 		&i.SymlinkTarget,
 	)
 	return i, err
+}
+
+const upsertInodeXattr = `-- name: UpsertInodeXattr :exec
+INSERT INTO inode_xattrs (ino, name, value)
+VALUES ($1, $2, $3)
+ON CONFLICT (ino, name) DO UPDATE
+SET value = EXCLUDED.value
+`
+
+type UpsertInodeXattrParams struct {
+	Ino   int64  `json:"ino"`
+	Name  []byte `json:"name"`
+	Value []byte `json:"value"`
+}
+
+func (q *Queries) UpsertInodeXattr(ctx context.Context, arg UpsertInodeXattrParams) error {
+	_, err := q.db.Exec(ctx, upsertInodeXattr, arg.Ino, arg.Name, arg.Value)
+	return err
 }

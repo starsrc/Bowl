@@ -58,6 +58,7 @@ type Manager interface {
 	ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry, error)
 	ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error)
 	Fallocate(ctx context.Context, params FallocateParams) error
+	SetXattr(ctx context.Context, params SetXattrParams) error
 }
 
 type manager struct {
@@ -2173,4 +2174,132 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 
 	return nil
 }
+
+// SetXattr 设置指定 Inode 的扩展属性。
+// 遵循 Linux FUSE FUSE_SETXATTR 协议与 POSIX setxattr(2) 语义，执行 4 步求值状态机：
+// 1. 入参静态校验（不查库）：校验 Ino、Flags、Name 与 Value 边界及非法字符；
+// 2. 排他锁与存在性校验：读写事务内通过 GetInodeForUpdate 获取行锁，支持孤儿节点；
+// 3. user.* 文件类型准入校验：针对 user.* 命名空间限制仅常规文件、目录与套接字，非 user.* 命名空间直接放行；
+// 4. 属性存在性、Flags 状态机、配额校验、空值归一化与持久化：判断 XATTR_CREATE / XATTR_REPLACE 状态，
+//    并在新增属性时执行 65536 字节名称列表配额拦截（覆盖不拦截），写入后刷新 Inode ctime。
+func (m *manager) SetXattr(ctx context.Context, params SetXattrParams) error {
+	// 第 1 步：入参静态校验（不查库）
+	if params.Ino == 0 || params.Ino > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if params.Flags&^(XattrCreate|XattrReplace) != 0 {
+		return ErrInvalidArgument
+	}
+	if len(params.Name) == 0 || len(params.Name) > MaxXattrNameBytes {
+		return ErrRange
+	}
+	if bytes.IndexByte(params.Name, 0) >= 0 {
+		return ErrInvalidArgument
+	}
+	if len(params.Value) > MaxXattrValueBytes {
+		return ErrTooBig
+	}
+
+	// 开启读写事务
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第 2 步：排他锁与存在性校验
+		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
+		}
+
+		// 第 3 步：user.* 文件类型准入校验
+		if bytes.HasPrefix(params.Name, []byte("user.")) {
+			fileType := uint32(inode.Mode) & S_IFMT
+			if fileType != S_IFREG && fileType != S_IFDIR && fileType != S_IFSOCK {
+				return ErrPerm
+			}
+		}
+
+		// 第 4 步：属性存在性、flags 独立判定、配额与 Upsert
+		_, err = q.GetInodeXattr(ctx, db.GetInodeXattrParams{
+			Ino:  int64(params.Ino),
+			Name: params.Name,
+		})
+
+		exists := true
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				exists = false
+			} else {
+				return fmt.Errorf("get inode xattr (ino=%d): %w", params.Ino, err)
+			}
+		}
+
+		if exists {
+			if (params.Flags & XattrCreate) != 0 {
+				return ErrAlreadyExists
+			}
+		} else {
+			if (params.Flags & XattrReplace) != 0 {
+				return ErrNoData
+			}
+
+			// 仅当新增属性名时，查询该 Inode 现有全部属性名总长，校验 65536 字节配额
+			totalBytes, err := q.GetInodeXattrNamesTotalBytes(ctx, int64(params.Ino))
+			if err != nil {
+				return fmt.Errorf("get inode xattr names total bytes %d: %w", params.Ino, err)
+			}
+			if totalBytes+int64(len(params.Name))+1 > MaxXattrListBytes {
+				return ErrNoSpace
+			}
+		}
+
+		// 若 value == nil，归一化为 []byte{}，防止 pgx 序列化为 SQL NULL
+		val := params.Value
+		if val == nil {
+			val = []byte{}
+		}
+
+		// 写入数据库
+		if err := q.UpsertInodeXattr(ctx, db.UpsertInodeXattrParams{
+			Ino:   int64(params.Ino),
+			Name:  params.Name,
+			Value: val,
+		}); err != nil {
+			return fmt.Errorf("upsert inode xattr (ino=%d): %w", params.Ino, err)
+		}
+
+		// 刷新 Inode ctime
+		if err := q.TouchInodeCtime(ctx, int64(params.Ino)); err != nil {
+			return fmt.Errorf("touch inode ctime %d: %w", params.Ino, err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrPerm):
+			return ErrPerm
+		case errors.Is(err, ErrAlreadyExists):
+			return ErrAlreadyExists
+		case errors.Is(err, ErrNoData):
+			return ErrNoData
+		case errors.Is(err, ErrNoSpace):
+			return ErrNoSpace
+		case errors.Is(err, ErrRange):
+			return ErrRange
+		case errors.Is(err, ErrTooBig):
+			return ErrTooBig
+		default:
+			return fmt.Errorf("setxattr (ino=%d): %w", params.Ino, err)
+		}
+	}
+
+	return nil
+}
+
 

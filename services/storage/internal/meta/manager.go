@@ -2178,6 +2178,26 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 	return nil
 }
 
+// validateXattrName 校验扩展属性名称合法性。
+// len(name) == 0 或 len(name) > MaxXattrNameBytes 时返回 ErrRange；
+// name 包含 NUL 字节 (\x00) 时返回 ErrInvalidArgument。
+func validateXattrName(name []byte) error {
+	if len(name) == 0 || len(name) > MaxXattrNameBytes {
+		return ErrRange
+	}
+	if bytes.IndexByte(name, 0) >= 0 {
+		return ErrInvalidArgument
+	}
+	return nil
+}
+
+// isAllowedUserXattrFileType 判定文件模式是否允许访问 user.* 命名空间扩展属性。
+// 仅允许常规文件 (S_IFREG)、目录 (S_IFDIR) 与套接字 (S_IFSOCK)。
+func isAllowedUserXattrFileType(mode uint32) bool {
+	fileType := mode & S_IFMT
+	return fileType == S_IFREG || fileType == S_IFDIR || fileType == S_IFSOCK
+}
+
 // SetXattr 设置指定 Inode 的扩展属性。
 // 遵循 Linux FUSE FUSE_SETXATTR 协议与 POSIX setxattr(2) 语义，执行 4 步求值状态机：
 // 1. 入参静态校验（不查库）：校验 Ino、Flags、Name 与 Value 边界及非法字符；
@@ -2193,11 +2213,8 @@ func (m *manager) SetXattr(ctx context.Context, params SetXattrParams) error {
 	if params.Flags&^(XattrCreate|XattrReplace) != 0 {
 		return ErrInvalidArgument
 	}
-	if len(params.Name) == 0 || len(params.Name) > MaxXattrNameBytes {
-		return ErrRange
-	}
-	if bytes.IndexByte(params.Name, 0) >= 0 {
-		return ErrInvalidArgument
+	if err := validateXattrName(params.Name); err != nil {
+		return err
 	}
 	if len(params.Value) > MaxXattrValueBytes {
 		return ErrTooBig
@@ -2215,11 +2232,8 @@ func (m *manager) SetXattr(ctx context.Context, params SetXattrParams) error {
 		}
 
 		// 第 3 步：user.* 文件类型准入校验
-		if bytes.HasPrefix(params.Name, []byte("user.")) {
-			fileType := uint32(inode.Mode) & S_IFMT
-			if fileType != S_IFREG && fileType != S_IFDIR && fileType != S_IFSOCK {
-				return ErrPerm
-			}
+		if bytes.HasPrefix(params.Name, []byte("user.")) && !isAllowedUserXattrFileType(uint32(inode.Mode)) {
+			return ErrPerm
 		}
 
 		// 第 4 步：属性存在性、flags 独立判定、配额与 Upsert
@@ -2316,11 +2330,8 @@ func (m *manager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte
 	if ino == 0 || ino > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
-	if len(name) == 0 || len(name) > MaxXattrNameBytes {
-		return nil, ErrRange
-	}
-	if bytes.IndexByte(name, 0) >= 0 {
-		return nil, ErrInvalidArgument
+	if err := validateXattrName(name); err != nil {
+		return nil, err
 	}
 
 	var value []byte
@@ -2337,11 +2348,8 @@ func (m *manager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte
 		}
 
 		// 第 3 步：user.* 文件类型准入校验
-		if bytes.HasPrefix(name, []byte("user.")) {
-			fileType := uint32(inode.Mode) & S_IFMT
-			if fileType != S_IFREG && fileType != S_IFDIR && fileType != S_IFSOCK {
-				return ErrNoData
-			}
+		if bytes.HasPrefix(name, []byte("user.")) && !isAllowedUserXattrFileType(uint32(inode.Mode)) {
+			return ErrNoData
 		}
 
 		// 第 4 步：读取属性值
@@ -2445,11 +2453,8 @@ func (m *manager) RemoveXattr(ctx context.Context, ino uint64, name []byte) erro
 	if ino == 0 || ino > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if len(name) == 0 || len(name) > MaxXattrNameBytes {
-		return ErrRange
-	}
-	if bytes.IndexByte(name, 0) >= 0 {
-		return ErrInvalidArgument
+	if err := validateXattrName(name); err != nil {
+		return err
 	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
@@ -2463,11 +2468,8 @@ func (m *manager) RemoveXattr(ctx context.Context, ino uint64, name []byte) erro
 		}
 
 		// 第 3 步：user.* 文件类型准入校验
-		if bytes.HasPrefix(name, []byte("user.")) {
-			fileType := uint32(inode.Mode) & S_IFMT
-			if fileType != S_IFREG && fileType != S_IFDIR && fileType != S_IFSOCK {
-				return ErrPerm
-			}
+		if bytes.HasPrefix(name, []byte("user.")) && !isAllowedUserXattrFileType(uint32(inode.Mode)) {
+			return ErrPerm
 		}
 
 		// 第 4 步：删除属性与刷新 ctime

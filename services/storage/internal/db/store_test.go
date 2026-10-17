@@ -56,10 +56,15 @@ type FileHandleQuerier interface {
 	CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
 	GetFileHandle(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error)
+	DeleteFileHandle(ctx context.Context, arg db.DeleteFileHandleParams) (int64, error)
 }
 
+// InodeLifecycleQuerier 提取 Inode 生命周期物理回收接口契约。
+type InodeLifecycleQuerier interface {
+	DeleteInode(ctx context.Context, ino int64) error
+}
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier 与 FileHandleQuerier 接口契约。
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier 与 InodeLifecycleQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -84,6 +89,10 @@ var (
 	_ FileHandleQuerier = (db.Querier)(nil)
 	_ FileHandleQuerier = (db.Store)(nil)
 	_ FileHandleQuerier = (*db.Queries)(nil)
+
+	_ InodeLifecycleQuerier = (db.Querier)(nil)
+	_ InodeLifecycleQuerier = (db.Store)(nil)
+	_ InodeLifecycleQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -813,6 +822,88 @@ func TestQuerier_MknodOperators(t *testing.T) {
 				Once()
 
 			_, err := store.GetFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
+
+	t.Run("DeleteFileHandle 算子调用与参数透传", func(t *testing.T) {
+		params := db.DeleteFileHandleParams{
+			Fh:  10,
+			Ino: 42,
+		}
+
+		t.Run("成功删除并返回 fh", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				DeleteFileHandle(mock.Anything, params).
+				Return(int64(10), nil).
+				Once()
+
+			deletedFh, err := store.DeleteFileHandle(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, int64(10), deletedFh)
+		})
+
+		t.Run("目标句柄不存在返回 pgx.ErrNoRows", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				DeleteFileHandle(mock.Anything, params).
+				Return(int64(0), pgx.ErrNoRows).
+				Once()
+
+			_, err := store.DeleteFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, pgx.ErrNoRows))
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database connection failed")
+			mockStore.EXPECT().
+				DeleteFileHandle(mock.Anything, params).
+				Return(int64(0), expectedErr).
+				Once()
+
+			_, err := store.DeleteFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
+
+	t.Run("DeleteInode 算子调用与参数透传", func(t *testing.T) {
+		targetIno := int64(42)
+
+		t.Run("成功删除孤儿 Inode", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				DeleteInode(mock.Anything, targetIno).
+				Return(nil).
+				Once()
+
+			err := store.DeleteInode(ctx, targetIno)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database connection failed")
+			mockStore.EXPECT().
+				DeleteInode(mock.Anything, targetIno).
+				Return(expectedErr).
+				Once()
+
+			err := store.DeleteInode(ctx, targetIno)
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, expectedErr))
 		})

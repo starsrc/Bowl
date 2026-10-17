@@ -34,6 +34,7 @@ const (
 	StorageService_Open_FullMethodName     = "/storage.v1.StorageService/Open"
 	StorageService_Flush_FullMethodName    = "/storage.v1.StorageService/Flush"
 	StorageService_Fsync_FullMethodName    = "/storage.v1.StorageService/Fsync"
+	StorageService_Release_FullMethodName  = "/storage.v1.StorageService/Release"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -123,6 +124,11 @@ type StorageServiceClient interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	Fsync(ctx context.Context, in *FsyncRequest, opts ...grpc.CallOption) (*FsyncResponse, error)
+	// Release 关闭并销毁文件句柄 (FileHandle)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
+	Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*ReleaseResponse, error)
 }
 
 type storageServiceClient struct {
@@ -283,6 +289,16 @@ func (c *storageServiceClient) Fsync(ctx context.Context, in *FsyncRequest, opts
 	return out, nil
 }
 
+func (c *storageServiceClient) Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*ReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseResponse)
+	err := c.cc.Invoke(ctx, StorageService_Release_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -370,6 +386,11 @@ type StorageServiceServer interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	Fsync(context.Context, *FsyncRequest) (*FsyncResponse, error)
+	// Release 关闭并销毁文件句柄 (FileHandle)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
+	Release(context.Context, *ReleaseRequest) (*ReleaseResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -424,6 +445,9 @@ func (UnimplementedStorageServiceServer) Flush(context.Context, *FlushRequest) (
 }
 func (UnimplementedStorageServiceServer) Fsync(context.Context, *FsyncRequest) (*FsyncResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Fsync not implemented")
+}
+func (UnimplementedStorageServiceServer) Release(context.Context, *ReleaseRequest) (*ReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Release not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -716,6 +740,24 @@ func _StorageService_Fsync_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Release_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Release(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Release_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Release(ctx, req.(*ReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -782,6 +824,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Fsync",
 			Handler:    _StorageService_Fsync_Handler,
+		},
+		{
+			MethodName: "Release",
+			Handler:    _StorageService_Release_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

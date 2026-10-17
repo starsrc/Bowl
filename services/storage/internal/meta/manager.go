@@ -34,6 +34,7 @@ type Manager interface {
 	Open(ctx context.Context, params OpenParams) (*OpenResult, error)
 	Flush(ctx context.Context, params FlushParams) error
 	Fsync(ctx context.Context, params FsyncParams) error
+	Release(ctx context.Context, params ReleaseParams) error
 }
 
 
@@ -1560,6 +1561,63 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 // Fsync 同步文件节点与句柄关联的状态。
 func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
 	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "fsync")
+}
+
+// Release 关闭并销毁文件句柄，且在孤儿节点无活跃句柄时执行最终物理回收。
+func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 || params.Fh == 0 || params.Fh > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode %d for update: %w", params.Ino, err)
+		}
+
+		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("delete file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if inode.Nlink == 0 {
+			hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(params.Ino))
+			if err != nil {
+				return fmt.Errorf("check remaining file handles for inode %d: %w", params.Ino, err)
+			}
+			if !hasRemaining {
+				if err := q.DeleteInode(ctx, int64(params.Ino)); err != nil {
+					return fmt.Errorf("delete orphan inode %d: %w", params.Ino, err)
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrBadFileHandle):
+			return ErrBadFileHandle
+		default:
+			return fmt.Errorf("release tx: %w", err)
+		}
+	}
+
+	return nil
 }
 
 

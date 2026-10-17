@@ -17,6 +17,8 @@ type Querier interface {
 	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
+	DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error)
+	DeleteInode(ctx context.Context, ino int64) error
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)

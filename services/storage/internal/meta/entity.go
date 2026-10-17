@@ -132,6 +132,12 @@ type FsyncParams struct {
 	Datasync bool
 }
 
+// ReleaseParams 定义文件句柄销毁与孤儿回收操作的输入参数。
+type ReleaseParams struct {
+	Ino uint64
+	Fh  uint64
+}
+
 
 
 // 领域哨兵错误。

@@ -218,6 +218,34 @@ func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) error 
 	return err
 }
 
+const deleteFileHandle = `-- name: DeleteFileHandle :one
+DELETE FROM file_handles
+WHERE fh = $1 AND ino = $2
+RETURNING fh
+`
+
+type DeleteFileHandleParams struct {
+	Fh  int64 `json:"fh"`
+	Ino int64 `json:"ino"`
+}
+
+func (q *Queries) DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error) {
+	row := q.db.QueryRow(ctx, deleteFileHandle, arg.Fh, arg.Ino)
+	var fh int64
+	err := row.Scan(&fh)
+	return fh, err
+}
+
+const deleteInode = `-- name: DeleteInode :exec
+DELETE FROM inodes
+WHERE ino = $1
+`
+
+func (q *Queries) DeleteInode(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, deleteInode, ino)
+	return err
+}
+
 const getEntry = `-- name: GetEntry :one
 SELECT parent_ino, name, ino
 FROM entries

@@ -54,6 +54,8 @@ const (
 	StorageServiceFlushProcedure = "/storage.v1.StorageService/Flush"
 	// StorageServiceFsyncProcedure is the procedure name of the StorageService's Fsync RPC.
 	StorageServiceFsyncProcedure = "/storage.v1.StorageService/Fsync"
+	// StorageServiceReleaseProcedure is the procedure name of the StorageService's Release RPC.
+	StorageServiceReleaseProcedure = "/storage.v1.StorageService/Release"
 )
 
 var (
@@ -162,6 +164,13 @@ var (
 			Procedure:  StorageServiceFsyncProcedure,
 		}
 	})
+	storageServiceReleaseSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Release"),
+			Procedure:  StorageServiceReleaseProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -247,6 +256,11 @@ type StorageServiceClient interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error)
+	// Release 关闭并销毁文件句柄 (FileHandle)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
+	Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -338,6 +352,11 @@ type StorageServiceHandler interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error)
+	// Release 关闭并销毁文件句柄 (FileHandle)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
+	Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -360,6 +379,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceOpenSpec(), Handler: adapter.open},
 		connect.Method{Spec: storageServiceFlushSpec(), Handler: adapter.flush},
 		connect.Method{Spec: storageServiceFsyncSpec(), Handler: adapter.fsync},
+		connect.Method{Spec: storageServiceReleaseSpec(), Handler: adapter.release},
 	)
 }
 
@@ -424,6 +444,10 @@ func (UnimplementedStorageServiceHandler) Flush(context.Context, *v1.FlushReques
 
 func (UnimplementedStorageServiceHandler) Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Fsync is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Release is not implemented")
 }
 
 type storageServiceClient struct {
@@ -545,6 +569,14 @@ func (c *storageServiceClient) Flush(ctx context.Context, req *v1.FlushRequest) 
 func (c *storageServiceClient) Fsync(ctx context.Context, req *v1.FsyncRequest) (*v1.FsyncResponse, error) {
 	var res v1.FsyncResponse
 	if err := c.client.CallUnary(ctx, storageServiceFsyncSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Release(ctx context.Context, req *v1.ReleaseRequest) (*v1.ReleaseResponse, error) {
+	var res v1.ReleaseResponse
+	if err := c.client.CallUnary(ctx, storageServiceReleaseSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -726,6 +758,18 @@ func (h storageServiceHandler) fsync(ctx context.Context, _ connect.Spec, stream
 		return err
 	}
 	res, err := h.svc.Fsync(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) release(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.ReleaseRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Release(ctx, &req)
 	if err != nil {
 		return err
 	}

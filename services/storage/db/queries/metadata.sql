@@ -147,4 +147,13 @@ SELECT EXISTS (
 SELECT * FROM file_handles
 WHERE fh = $1 AND ino = $2;
 
+-- name: DeleteFileHandle :one
+DELETE FROM file_handles
+WHERE fh = $1 AND ino = $2
+RETURNING fh;
+
+-- name: DeleteInode :exec
+DELETE FROM inodes
+WHERE ino = $1;
+
 

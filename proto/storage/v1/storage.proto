@@ -156,6 +156,13 @@ service StorageService {
   // 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
   // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
   rpc GetXattr(GetXattrRequest) returns (GetXattrResponse);
+
+  // ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
+  // 遵循 POSIX listxattr(2) 语义。
+  // 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若无属性，返回空列表。
+  rpc ListXattr(ListXattrRequest) returns (ListXattrResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -880,7 +887,10 @@ message FallocateResponse {}
 // SetXattrRequest 定义 SetXattr 接口输入参数。
 message SetXattrRequest {
   // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
-  uint64 ino = 1 [(buf.validate.field).uint64 = { gt: 0, lte: 9223372036854775807 }];
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 
   // 扩展属性名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
@@ -908,7 +918,10 @@ message SetXattrResponse {}
 // GetXattrRequest 定义 GetXattr 接口输入参数。
 message GetXattrRequest {
   // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
-  uint64 ino = 1 [(buf.validate.field).uint64 = { gt: 0, lte: 9223372036854775807 }];
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 
   // 扩展属性名称。
   // 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
@@ -928,6 +941,34 @@ message GetXattrResponse {
   // 扩展属性值。
   // 长度最大允许 65536 字节。
   bytes value = 1 [(buf.validate.field).bytes.max_len = 65536];
+}
+
+// ListXattrRequest 定义 ListXattr 接口输入参数。
+message ListXattrRequest {
+  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// ListXattrResponse 定义 ListXattr 接口响应结果。
+message ListXattrResponse {
+  // 节点绑定的扩展属性名称列表，按原始字节序升序（BYTEA ASC）排列。
+  // 每一项名称长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+  repeated bytes names = 1 [(buf.validate.field).repeated.items = {
+    bytes: {
+      min_len: 1
+      max_len: 255
+    }
+    cel: [
+      {
+        id: "xattr_name_no_nul"
+        message: "xattr name cannot contain NUL byte"
+        expression: "!this.contains(b'\\x00')"
+      }
+    ]
+  }];
 }
 
 // Inode 代表文件系统中的实体节点。

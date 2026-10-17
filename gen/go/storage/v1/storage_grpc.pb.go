@@ -42,6 +42,7 @@ const (
 	StorageService_Fallocate_FullMethodName   = "/storage.v1.StorageService/Fallocate"
 	StorageService_SetXattr_FullMethodName    = "/storage.v1.StorageService/SetXattr"
 	StorageService_GetXattr_FullMethodName    = "/storage.v1.StorageService/GetXattr"
+	StorageService_ListXattr_FullMethodName   = "/storage.v1.StorageService/ListXattr"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -175,6 +176,12 @@ type StorageServiceClient interface {
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	GetXattr(ctx context.Context, in *GetXattrRequest, opts ...grpc.CallOption) (*GetXattrResponse, error)
+	// ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
+	// 遵循 POSIX listxattr(2) 语义。
+	// 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若无属性，返回空列表。
+	ListXattr(ctx context.Context, in *ListXattrRequest, opts ...grpc.CallOption) (*ListXattrResponse, error)
 }
 
 type storageServiceClient struct {
@@ -415,6 +422,16 @@ func (c *storageServiceClient) GetXattr(ctx context.Context, in *GetXattrRequest
 	return out, nil
 }
 
+func (c *storageServiceClient) ListXattr(ctx context.Context, in *ListXattrRequest, opts ...grpc.CallOption) (*ListXattrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListXattrResponse)
+	err := c.cc.Invoke(ctx, StorageService_ListXattr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -546,6 +563,12 @@ type StorageServiceServer interface {
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	GetXattr(context.Context, *GetXattrRequest) (*GetXattrResponse, error)
+	// ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
+	// 遵循 POSIX listxattr(2) 语义。
+	// 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若无属性，返回空列表。
+	ListXattr(context.Context, *ListXattrRequest) (*ListXattrResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -624,6 +647,9 @@ func (UnimplementedStorageServiceServer) SetXattr(context.Context, *SetXattrRequ
 }
 func (UnimplementedStorageServiceServer) GetXattr(context.Context, *GetXattrRequest) (*GetXattrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetXattr not implemented")
+}
+func (UnimplementedStorageServiceServer) ListXattr(context.Context, *ListXattrRequest) (*ListXattrResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListXattr not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1060,6 +1086,24 @@ func _StorageService_GetXattr_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_ListXattr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListXattrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ListXattr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ListXattr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ListXattr(ctx, req.(*ListXattrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1158,6 +1202,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetXattr",
 			Handler:    _StorageService_GetXattr_Handler,
+		},
+		{
+			MethodName: "ListXattr",
+			Handler:    _StorageService_ListXattr_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

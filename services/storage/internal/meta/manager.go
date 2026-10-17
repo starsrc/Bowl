@@ -60,6 +60,7 @@ type Manager interface {
 	Fallocate(ctx context.Context, params FallocateParams) error
 	SetXattr(ctx context.Context, params SetXattrParams) error
 	GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error)
+	ListXattr(ctx context.Context, ino uint64) ([][]byte, error)
 }
 
 type manager struct {
@@ -2376,5 +2377,56 @@ func (m *manager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte
 	return value, nil
 }
 
+// ListXattr 列出指定 Inode 的全部扩展属性名称列表。
+// 遵循 Linux FUSE FUSE_LISTXATTR 协议与 POSIX listxattr(2) 语义，执行 3 步求值状态机：
+// 1. 入参静态校验（不查库）：校验 Ino 必须大于 0 且在 int64 正数范围内 (<= math.MaxInt64)，否则返回 ErrInvalidArgument；
+// 2. 只读快照隔离与 Inode 存在性校验：在 RepeatableRead 只读事务（tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead)）中调用 GetInode(ino)；若未命中返回 ErrNotFound；支持孤儿节点 (nlink == 0)；
+// 3. 查询属性名列表：调用 ListInodeXattrNames(ino) 查询该节点绑定的全部属性名称；
+//    - 结果按名称原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）；
+//    - 若无属性，返回空切片 [][]byte{}；
+//    - 遵循 noatime 策略不刷新 atime。
+func (m *manager) ListXattr(ctx context.Context, ino uint64) ([][]byte, error) {
+	// 第 1 步：入参静态校验（不查库）
+	if ino == 0 || ino > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
 
+	names := [][]byte{}
+
+	// 开启只读事务 (RepeatableRead)
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		// 第 2 步：Inode 存在性校验
+		_, err := q.GetInode(ctx, int64(ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode %d: %w", ino, err)
+		}
+
+		// 第 3 步：查询属性名列表（按 BYTEA ASC 升序排列，不按命名空间过滤）
+		items, err := q.ListInodeXattrNames(ctx, int64(ino))
+		if err != nil {
+			return fmt.Errorf("list inode xattr names (ino=%d): %w", ino, err)
+		}
+
+		if len(items) > 0 {
+			names = items
+		}
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		default:
+			return nil, fmt.Errorf("listxattr (ino=%d): %w", ino, err)
+		}
+	}
+
+	return names, nil
+}
 

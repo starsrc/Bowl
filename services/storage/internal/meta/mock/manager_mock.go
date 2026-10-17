@@ -487,6 +487,74 @@ func (_c *MockManager_Link_Call) RunAndReturn(run func(ctx context.Context, para
 	return _c
 }
 
+// ListXattr provides a mock function for the type MockManager
+func (_mock *MockManager) ListXattr(ctx context.Context, ino uint64) ([][]byte, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListXattr")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) ([][]byte, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) [][]byte); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_ListXattr_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListXattr'
+type MockManager_ListXattr_Call struct {
+	*mock.Call
+}
+
+// ListXattr is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino uint64
+func (_e *MockManager_Expecter) ListXattr(ctx any, ino any) *MockManager_ListXattr_Call {
+	return &MockManager_ListXattr_Call{Call: _e.mock.On("ListXattr", ctx, ino)}
+}
+
+func (_c *MockManager_ListXattr_Call) Run(run func(ctx context.Context, ino uint64)) *MockManager_ListXattr_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ListXattr_Call) Return(bytess [][]byte, err error) *MockManager_ListXattr_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockManager_ListXattr_Call) RunAndReturn(run func(ctx context.Context, ino uint64) ([][]byte, error)) *MockManager_ListXattr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Lookup provides a mock function for the type MockManager
 func (_mock *MockManager) Lookup(ctx context.Context, parentIno uint64, name []byte) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, parentIno, name)

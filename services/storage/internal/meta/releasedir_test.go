@@ -402,6 +402,6 @@ func TestReleaseDir_NegativeAndErrorPaths(t *testing.T) {
 			Fh:  fh,
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "delete orphan dir inode")
+		assert.Contains(t, err.Error(), "delete orphan inode")
 	})
 }

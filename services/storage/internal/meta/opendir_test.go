@@ -62,7 +62,7 @@ func TestOpenDir_InputValidation(t *testing.T) {
 			})
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
-			assert.Equal(t, meta.OpenDirResult{}, res)
+			assert.Nil(t, res)
 		})
 	}
 }
@@ -117,6 +117,7 @@ func TestOpenDir_PositivePath(t *testing.T) {
 		})
 
 		require.NoError(t, err)
+		require.NotNil(t, res)
 		assert.Equal(t, uint64(1), res.Fh)
 		assert.Equal(t, uint32(0), res.OpenFlags)
 	})
@@ -160,6 +161,7 @@ func TestOpenDir_PositivePath(t *testing.T) {
 		})
 
 		require.NoError(t, err)
+		require.NotNil(t, res)
 		assert.Equal(t, uint64(2), res.Fh)
 		assert.Equal(t, uint32(0), res.OpenFlags)
 	})
@@ -203,7 +205,7 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
-		assert.Equal(t, meta.OpenDirResult{}, res)
+		assert.Nil(t, res)
 	})
 
 	t.Run("目标节点为普通文件返回 ErrNotDir", func(t *testing.T) {
@@ -228,7 +230,7 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, meta.ErrNotDir))
-		assert.Equal(t, meta.OpenDirResult{}, res)
+		assert.Nil(t, res)
 	})
 
 	t.Run("死孤儿目录 (nlink == 0 且无活跃句柄) 返回 ErrNotFound", func(t *testing.T) {
@@ -258,7 +260,7 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
-		assert.Equal(t, meta.OpenDirResult{}, res)
+		assert.Nil(t, res)
 	})
 
 	t.Run("底层 GetInodeForUpdate 错误返回包装错误", func(t *testing.T) {
@@ -273,12 +275,13 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 			Return(db.Inode{}, errors.New("db error")).
 			Once()
 
-		_, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
 			Ino:   ino,
 			Flags: meta.O_RDONLY,
 		})
 
 		require.Error(t, err)
+		assert.Nil(t, res)
 		assert.Contains(t, err.Error(), "get inode for update")
 	})
 
@@ -302,12 +305,13 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 			Return(false, errors.New("db query handles error")).
 			Once()
 
-		_, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
 			Ino:   ino,
 			Flags: meta.O_RDONLY,
 		})
 
 		require.Error(t, err)
+		assert.Nil(t, res)
 		assert.Contains(t, err.Error(), "check has file handles")
 	})
 
@@ -331,12 +335,13 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 			Return(db.FileHandle{}, errors.New("create handle error")).
 			Once()
 
-		_, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
 			Ino:   ino,
 			Flags: meta.O_RDONLY,
 		})
 
 		require.Error(t, err)
+		assert.Nil(t, res)
 		assert.Contains(t, err.Error(), "create file handle")
 	})
 }

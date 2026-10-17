@@ -35,7 +35,7 @@ type Manager interface {
 	Flush(ctx context.Context, params FlushParams) error
 	Fsync(ctx context.Context, params FsyncParams) error
 	Release(ctx context.Context, params ReleaseParams) error
-	OpenDir(ctx context.Context, params OpenDirParams) (OpenDirResult, error)
+	OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirResult, error)
 	ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 	ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry, error)
 	ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error)
@@ -1603,14 +1603,8 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		}
 
 		if inode.Nlink == 0 {
-			hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(params.Ino))
-			if err != nil {
-				return fmt.Errorf("check remaining file handles for inode %d: %w", params.Ino, err)
-			}
-			if !hasRemaining {
-				if err := q.DeleteInode(ctx, int64(params.Ino)); err != nil {
-					return fmt.Errorf("delete orphan inode %d: %w", params.Ino, err)
-				}
+			if err := m.reclaimOrphanIfNoHandles(ctx, q, params.Ino); err != nil {
+				return err
 			}
 		}
 
@@ -1636,12 +1630,12 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 }
 
 // OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
-func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (OpenDirResult, error) {
+func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirResult, error) {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 || (params.Flags&O_ACCMODE) != O_RDONLY || (params.Flags&O_TRUNC) != 0 {
-		return OpenDirResult{}, ErrInvalidArgument
+		return nil, ErrInvalidArgument
 	}
 
-	var result OpenDirResult
+	var result *OpenDirResult
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
@@ -1673,7 +1667,7 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (OpenDirRes
 			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
 		}
 
-		result = OpenDirResult{
+		result = &OpenDirResult{
 			Fh:        uint64(handle.Fh),
 			OpenFlags: 0,
 		}
@@ -1683,13 +1677,13 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (OpenDirRes
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrNotFound):
-			return OpenDirResult{}, ErrNotFound
+			return nil, ErrNotFound
 		case errors.Is(err, ErrNotDir):
-			return OpenDirResult{}, ErrNotDir
+			return nil, ErrNotDir
 		case errors.Is(err, ErrInvalidArgument):
-			return OpenDirResult{}, ErrInvalidArgument
+			return nil, ErrInvalidArgument
 		default:
-			return OpenDirResult{}, fmt.Errorf("opendir tx: %w", err)
+			return nil, fmt.Errorf("opendir tx: %w", err)
 		}
 	}
 
@@ -1727,14 +1721,8 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 		}
 
 		if inode.Nlink == 0 {
-			hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(params.Ino))
-			if err != nil {
-				return fmt.Errorf("check remaining file handles for inode %d: %w", params.Ino, err)
-			}
-			if !hasRemaining {
-				if err := q.DeleteInode(ctx, int64(params.Ino)); err != nil {
-					return fmt.Errorf("delete orphan dir inode %d: %w", params.Ino, err)
-				}
+			if err := m.reclaimOrphanIfNoHandles(ctx, q, params.Ino); err != nil {
+				return err
 			}
 		}
 
@@ -1759,29 +1747,71 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 	return nil
 }
 
-func newInodeFromListDirRow(target db.ListDirEntriesRow) *Inode {
+// reclaimOrphanIfNoHandles 检查孤儿节点是否存在未释放句柄，若无任何句柄则执行物理删除。
+func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, ino uint64) error {
+	hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(ino))
+	if err != nil {
+		return fmt.Errorf("check remaining file handles for inode %d: %w", ino, err)
+	}
+	if !hasRemaining {
+		if err := q.DeleteInode(ctx, int64(ino)); err != nil {
+			return fmt.Errorf("delete orphan inode %d: %w", ino, err)
+		}
+	}
+	return nil
+}
+
+func newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
 	var blocks uint64
-	if target.Size > 0 {
-		blocks = (uint64(target.Size) + 511) / 512
+	if row.Size > 0 {
+		blocks = (uint64(row.Size) + 511) / 512
 	}
 
 	return &Inode{
-		Ino:        uint64(target.Ino),
-		Generation: uint64(target.Generation),
+		Ino:        uint64(row.Ino),
+		Generation: uint64(row.Generation),
 		Attr: Attribute{
-			Mode:    uint32(target.Mode),
-			Size:    uint64(target.Size),
-			Nlink:   uint32(target.Nlink),
-			UID:     uint32(target.Uid),
-			GID:     uint32(target.Gid),
-			Rdev:    uint32(target.Rdev),
+			Mode:    uint32(row.Mode),
+			Size:    uint64(row.Size),
+			Nlink:   uint32(row.Nlink),
+			UID:     uint32(row.Uid),
+			GID:     uint32(row.Gid),
+			Rdev:    uint32(row.Rdev),
 			Blksize: 4096,
 			Blocks:  blocks,
-			Atime:   target.Atime.Time,
-			Mtime:   target.Mtime.Time,
-			Ctime:   target.Ctime.Time,
+			Atime:   row.Atime.Time,
+			Mtime:   row.Mtime.Time,
+			Ctime:   row.Ctime.Time,
 		},
 	}
+}
+
+// validateDirHandle 校验目录会话有效性，确认 Inode 存在、为目录且 FileHandle 属于该 Inode。
+func (m *manager) validateDirHandle(ctx context.Context, q db.Querier, ino, fh uint64) (*db.Inode, error) {
+	dirInode, err := q.GetInode(ctx, int64(ino))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get dir inode %d: %w", ino, err)
+	}
+
+	if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
+		return nil, ErrNotDir
+	}
+
+	_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
+		Fh:  int64(fh),
+		Ino: int64(ino),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrBadFileHandle
+		}
+		return nil, fmt.Errorf("get file handle (fh=%d, ino=%d): %w", fh, ino, err)
+	}
+
+	return &dirInode, nil
 }
 
 // ReadDir 读取指定目录的子项流（基本条目），支持确定性分页游标与 . / .. 合成。
@@ -1795,27 +1825,9 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 
 	var entries []DirEntry
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := q.GetInode(ctx, int64(params.Ino))
+		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get dir inode %d: %w", params.Ino, err)
-		}
-
-		if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
-			return ErrNotDir
-		}
-
-		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
-		})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrBadFileHandle
-			}
-			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+			return err
 		}
 
 		if dirInode.Nlink == 0 {
@@ -1840,7 +1852,7 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 			parentInode, err := q.GetParentInode(ctx, int64(params.Ino))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					parentInode = dirInode
+					parentInode = *dirInode
 				} else {
 					return fmt.Errorf("get parent inode for %d: %w", params.Ino, err)
 				}
@@ -1913,27 +1925,9 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 
 	var entries []DirEntryPlus
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := q.GetInode(ctx, int64(params.Ino))
+		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get dir inode %d: %w", params.Ino, err)
-		}
-
-		if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
-			return ErrNotDir
-		}
-
-		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
-		})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrBadFileHandle
-			}
-			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+			return err
 		}
 
 		if dirInode.Nlink == 0 {
@@ -1949,7 +1943,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 				Ino:                 uint64(dirInode.Ino),
 				Name:                ".",
 				NextOffset:          1,
-				Inode:               newInodeFromDB(dirInode),
+				Inode:               newInodeFromDB(*dirInode),
 				EntryTimeoutSeconds: 0,
 				AttrTimeoutSeconds:  m.attrTimeout,
 			})
@@ -1960,7 +1954,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 			parentInode, err := q.GetParentInode(ctx, int64(params.Ino))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					parentInode = dirInode
+					parentInode = *dirInode
 				} else {
 					return fmt.Errorf("get parent inode for %d: %w", params.Ino, err)
 				}

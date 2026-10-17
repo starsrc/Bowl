@@ -692,22 +692,24 @@ func (_c *MockManager_Open_Call) RunAndReturn(run func(ctx context.Context, para
 }
 
 // OpenDir provides a mock function for the type MockManager
-func (_mock *MockManager) OpenDir(ctx context.Context, params meta.OpenDirParams) (meta.OpenDirResult, error) {
+func (_mock *MockManager) OpenDir(ctx context.Context, params meta.OpenDirParams) (*meta.OpenDirResult, error) {
 	ret := _mock.Called(ctx, params)
 
 	if len(ret) == 0 {
 		panic("no return value specified for OpenDir")
 	}
 
-	var r0 meta.OpenDirResult
+	var r0 *meta.OpenDirResult
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenDirParams) (meta.OpenDirResult, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenDirParams) (*meta.OpenDirResult, error)); ok {
 		return returnFunc(ctx, params)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenDirParams) meta.OpenDirResult); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenDirParams) *meta.OpenDirResult); ok {
 		r0 = returnFunc(ctx, params)
 	} else {
-		r0 = ret.Get(0).(meta.OpenDirResult)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.OpenDirResult)
+		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.OpenDirParams) error); ok {
 		r1 = returnFunc(ctx, params)
@@ -747,12 +749,12 @@ func (_c *MockManager_OpenDir_Call) Run(run func(ctx context.Context, params met
 	return _c
 }
 
-func (_c *MockManager_OpenDir_Call) Return(openDirResult meta.OpenDirResult, err error) *MockManager_OpenDir_Call {
+func (_c *MockManager_OpenDir_Call) Return(openDirResult *meta.OpenDirResult, err error) *MockManager_OpenDir_Call {
 	_c.Call.Return(openDirResult, err)
 	return _c
 }
 
-func (_c *MockManager_OpenDir_Call) RunAndReturn(run func(ctx context.Context, params meta.OpenDirParams) (meta.OpenDirResult, error)) *MockManager_OpenDir_Call {
+func (_c *MockManager_OpenDir_Call) RunAndReturn(run func(ctx context.Context, params meta.OpenDirParams) (*meta.OpenDirResult, error)) *MockManager_OpenDir_Call {
 	_c.Call.Return(run)
 	return _c
 }

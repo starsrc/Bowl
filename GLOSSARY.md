@@ -49,11 +49,11 @@ _Avoid_: Move, Mv, Relocate, Rebind
 _Avoid_: HardLink, AddLink, AliasNode
 
 **Symlink (符号链接创建)**:
-在指定父目录下创建存储目标路径字符串的符号链接 Inode 并绑定同名 Entry 的元数据变更操作。
+在指定父目录下创建存储目标路径字节序列的符号链接 Inode 并绑定同名 Entry 的元数据变更操作。
 _Avoid_: SoftLink, CreateShortcut, MakeAlias
 
 **Readlink (符号链接读取)**:
-根据目标符号链接 Inode 编号，直接读取其目标路径字符串的元数据检索操作。
+根据目标符号链接 Inode 编号，直接读取其目标路径字节序列的元数据检索操作。
 _Avoid_: GetSymlink, ResolveLink, ReadTarget
 
 **Orphan Inode (孤儿节点)**:
@@ -115,3 +115,24 @@ _Avoid_: CloseDir, DestroyDirHandle, FreeDirHandle
 **Fallocate (空间预分配与打洞)**:
 针对已打开常规文件 Inode 的活跃写句柄，执行空间预留扩展或指定区间零字节打洞并联动权限与时间戳的元数据操作。
 _Avoid_: AllocSpace, PunchHole, Preallocate, ReserveBlocks
+
+**Xattr (扩展属性)**:
+关联于 Inode 的持久化名称-二进制值键值对元数据。
+_Avoid_: ExtendedAttr, CustomMeta, Tag, Property, UserAttr
+
+**SetXattr (扩展属性设置)**:
+根据目标 Inode 编号、属性名称、二进制值与创建或替换语义标志，新增或更新目标 Inode 的 Xattr 并刷新状态变更时间的元数据变更操作。
+_Avoid_: PutXattr, WriteXattr, UpdateXattr, AddTag
+
+**GetXattr (扩展属性获取)**:
+根据目标 Inode 编号与属性名称，检索并获取对应 Xattr 二进制值的元数据检索操作。
+_Avoid_: ReadXattr, FetchXattr, QueryXattr
+
+**ListXattr (扩展属性列表获取)**:
+根据目标 Inode 编号，检索并按名称字节序升序返回该 Inode 绑定的全部 Xattr 名称列表的元数据检索操作。
+_Avoid_: GetXattrs, ScanXattr, EnumXattr
+
+**RemoveXattr (扩展属性移除)**:
+根据目标 Inode 编号与属性名称，删除指定 Xattr 并刷新目标 Inode 状态变更时间的元数据变更操作。
+_Avoid_: DeleteXattr, DelXattr, UnsetXattr, DropXattr
+

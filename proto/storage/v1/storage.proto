@@ -110,6 +110,19 @@ service StorageService {
   // 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
   // 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
+  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc OpenDir(OpenDirRequest) returns (OpenDirResponse);
+
+  // ReleaseDir 关闭并销毁目录句柄 (DirHandle)。
+  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  // 当目标目录的硬链接数已为 0 (孤儿目录) 且所有活跃句柄均已销毁时，将触发底层物理回收。
+  rpc ReleaseDir(ReleaseDirRequest) returns (ReleaseDirResponse);
 }
 
 
@@ -596,6 +609,48 @@ message ReleaseRequest {
 
 // ReleaseResponse 定义 Release 接口响应结果。
 message ReleaseResponse {}
+
+// OpenDirRequest 定义 OpenDir 接口输入参数。
+message OpenDirRequest {
+  // 待打开目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 打开标志位 (open flags, 如 O_RDONLY)。
+  uint32 flags = 2;
+}
+
+// OpenDirResponse 包含打开目录所分配的目录句柄及打开响应标志位。
+message OpenDirResponse {
+  // 分配的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 打开响应标志位 (open flags)。
+  uint32 open_flags = 2;
+}
+
+// ReleaseDirRequest 定义 ReleaseDir 接口输入参数。
+message ReleaseDirRequest {
+  // 目标目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待关闭并销毁的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+}
+
+// ReleaseDirResponse 定义 ReleaseDir 接口响应结果。
+message ReleaseDirResponse {}
 
 // Inode 代表文件系统中的实体节点。
 

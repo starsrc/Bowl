@@ -35,15 +35,15 @@ type Manager interface {
 	Flush(ctx context.Context, params FlushParams) error
 	Fsync(ctx context.Context, params FsyncParams) error
 	Release(ctx context.Context, params ReleaseParams) error
+	OpenDir(ctx context.Context, params OpenDirParams) (OpenDirResult, error)
+	ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 }
-
 
 type manager struct {
 	store db.Store
 }
 
 var _ Manager = (*manager)(nil)
-
 
 // New 创建 Manager 实例。
 func New(store db.Store) Manager {
@@ -1580,6 +1580,10 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 			return fmt.Errorf("get inode %d for update: %w", params.Ino, err)
 		}
 
+		if (uint32(inode.Mode) & S_IFMT) == S_IFDIR {
+			return ErrIsDir
+		}
+
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
 			Fh:  int64(params.Fh),
 			Ino: int64(params.Ino),
@@ -1612,6 +1616,8 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 			return ErrInvalidArgument
 		case errors.Is(err, ErrNotFound):
 			return ErrNotFound
+		case errors.Is(err, ErrIsDir):
+			return ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
 			return ErrBadFileHandle
 		default:
@@ -1622,6 +1628,126 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 	return nil
 }
 
+// OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
+func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (OpenDirResult, error) {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 || (params.Flags&O_ACCMODE) != O_RDONLY || (params.Flags&O_TRUNC) != 0 {
+		return OpenDirResult{}, ErrInvalidArgument
+	}
 
+	var result OpenDirResult
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
+		}
 
+		if (uint32(inode.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
 
+		if inode.Nlink == 0 {
+			hasHandles, err := q.HasFileHandlesByIno(ctx, inode.Ino)
+			if err != nil {
+				return fmt.Errorf("check has file handles for inode %d: %w", inode.Ino, err)
+			}
+			if !hasHandles {
+				return ErrNotFound
+			}
+		}
+
+		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
+			Ino:   inode.Ino,
+			Flags: int32(params.Flags),
+		})
+		if err != nil {
+			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
+		}
+
+		result = OpenDirResult{
+			Fh:        uint64(handle.Fh),
+			OpenFlags: 0,
+		}
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return OpenDirResult{}, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return OpenDirResult{}, ErrNotDir
+		case errors.Is(err, ErrInvalidArgument):
+			return OpenDirResult{}, ErrInvalidArgument
+		default:
+			return OpenDirResult{}, fmt.Errorf("opendir tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// ReleaseDir 关闭并销毁目录句柄，且在孤儿目录无活跃句柄时执行最终物理回收。
+func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 || params.Fh == 0 || params.Fh > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode %d for update: %w", params.Ino, err)
+		}
+
+		if (uint32(inode.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("delete file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if inode.Nlink == 0 {
+			hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(params.Ino))
+			if err != nil {
+				return fmt.Errorf("check remaining file handles for inode %d: %w", params.Ino, err)
+			}
+			if !hasRemaining {
+				if err := q.DeleteInode(ctx, int64(params.Ino)); err != nil {
+					return fmt.Errorf("delete orphan dir inode %d: %w", params.Ino, err)
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return ErrNotDir
+		case errors.Is(err, ErrBadFileHandle):
+			return ErrBadFileHandle
+		default:
+			return fmt.Errorf("releasedir tx: %w", err)
+		}
+	}
+
+	return nil
+}

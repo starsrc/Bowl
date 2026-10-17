@@ -634,6 +634,72 @@ func (_c *MockManager_Open_Call) RunAndReturn(run func(ctx context.Context, para
 	return _c
 }
 
+// OpenDir provides a mock function for the type MockManager
+func (_mock *MockManager) OpenDir(ctx context.Context, params meta.OpenDirParams) (meta.OpenDirResult, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OpenDir")
+	}
+
+	var r0 meta.OpenDirResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenDirParams) (meta.OpenDirResult, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.OpenDirParams) meta.OpenDirResult); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Get(0).(meta.OpenDirResult)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.OpenDirParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_OpenDir_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OpenDir'
+type MockManager_OpenDir_Call struct {
+	*mock.Call
+}
+
+// OpenDir is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.OpenDirParams
+func (_e *MockManager_Expecter) OpenDir(ctx any, params any) *MockManager_OpenDir_Call {
+	return &MockManager_OpenDir_Call{Call: _e.mock.On("OpenDir", ctx, params)}
+}
+
+func (_c *MockManager_OpenDir_Call) Run(run func(ctx context.Context, params meta.OpenDirParams)) *MockManager_OpenDir_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.OpenDirParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.OpenDirParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_OpenDir_Call) Return(openDirResult meta.OpenDirResult, err error) *MockManager_OpenDir_Call {
+	_c.Call.Return(openDirResult, err)
+	return _c
+}
+
+func (_c *MockManager_OpenDir_Call) RunAndReturn(run func(ctx context.Context, params meta.OpenDirParams) (meta.OpenDirResult, error)) *MockManager_OpenDir_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Readlink provides a mock function for the type MockManager
 func (_mock *MockManager) Readlink(ctx context.Context, ino uint64) (string, error) {
 	ret := _mock.Called(ctx, ino)
@@ -753,6 +819,63 @@ func (_c *MockManager_Release_Call) Return(err error) *MockManager_Release_Call 
 }
 
 func (_c *MockManager_Release_Call) RunAndReturn(run func(ctx context.Context, params meta.ReleaseParams) error) *MockManager_Release_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ReleaseDir provides a mock function for the type MockManager
+func (_mock *MockManager) ReleaseDir(ctx context.Context, params meta.ReleaseDirParams) error {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ReleaseDir")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ReleaseDirParams) error); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_ReleaseDir_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ReleaseDir'
+type MockManager_ReleaseDir_Call struct {
+	*mock.Call
+}
+
+// ReleaseDir is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.ReleaseDirParams
+func (_e *MockManager_Expecter) ReleaseDir(ctx any, params any) *MockManager_ReleaseDir_Call {
+	return &MockManager_ReleaseDir_Call{Call: _e.mock.On("ReleaseDir", ctx, params)}
+}
+
+func (_c *MockManager_ReleaseDir_Call) Run(run func(ctx context.Context, params meta.ReleaseDirParams)) *MockManager_ReleaseDir_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.ReleaseDirParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.ReleaseDirParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ReleaseDir_Call) Return(err error) *MockManager_ReleaseDir_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_ReleaseDir_Call) RunAndReturn(run func(ctx context.Context, params meta.ReleaseDirParams) error) *MockManager_ReleaseDir_Call {
 	_c.Call.Return(run)
 	return _c
 }

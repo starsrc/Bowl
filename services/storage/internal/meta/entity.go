@@ -7,16 +7,16 @@ import (
 
 // POSIX 文件类型掩码与模式常量。
 const (
-	S_IFMT           uint32 = 0o170000
-	S_IFIFO          uint32 = 0o010000
-	S_IFCHR          uint32 = 0o020000
-	S_IFDIR          uint32 = 0o040000
-	S_IFBLK          uint32 = 0o060000
-	S_IFREG          uint32 = 0o100000
-	S_IFLNK          uint32 = 0o120000
-	S_IFSOCK         uint32 = 0o140000
-	S_ISUID          uint32 = 0o4000
-	S_ISGID          uint32 = 0o2000
+	S_IFMT                uint32 = 0o170000
+	S_IFIFO               uint32 = 0o010000
+	S_IFCHR               uint32 = 0o020000
+	S_IFDIR               uint32 = 0o040000
+	S_IFBLK               uint32 = 0o060000
+	S_IFREG               uint32 = 0o100000
+	S_IFLNK               uint32 = 0o120000
+	S_IFSOCK              uint32 = 0o140000
+	S_ISUID               uint32 = 0o4000
+	S_ISGID               uint32 = 0o2000
 	PermMask              uint32 = 0o7777
 	MaxFileNameBytes             = 255
 	MaxSymlinkTargetBytes        = 4096
@@ -138,7 +138,23 @@ type ReleaseParams struct {
 	Fh  uint64
 }
 
+// OpenDirParams 定义打开目录并分配目录句柄的输入参数。
+type OpenDirParams struct {
+	Ino   uint64
+	Flags uint32
+}
 
+// OpenDirResult 包含打开目录分配的 DirHandle 与打开响应标志。
+type OpenDirResult struct {
+	Fh        uint64
+	OpenFlags uint32
+}
+
+// ReleaseDirParams 定义目录句柄销毁与孤儿回收操作的输入参数。
+type ReleaseDirParams struct {
+	Ino uint64
+	Fh  uint64
+}
 
 // 领域哨兵错误。
 var (

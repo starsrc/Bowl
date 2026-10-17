@@ -229,6 +229,29 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
 	})
 
+	t.Run("目标节点为目录返回 ErrIsDir", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		dirInode := baseInode
+		dirInode.Mode = int32(meta.S_IFDIR | 0o755)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(dirInode, nil).
+			Once()
+
+		err := mgr.Release(ctx, meta.ReleaseParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrIsDir))
+	})
+
 	t.Run("句柄不存在或归属不匹配返回 ErrBadFileHandle", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)

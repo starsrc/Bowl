@@ -1,0 +1,342 @@
+package meta_test
+
+import (
+	"context"
+	"errors"
+	"math"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
+	"github.com/starsrc/bowl/services/storage/internal/db"
+	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
+	"github.com/starsrc/bowl/services/storage/internal/meta"
+)
+
+func TestOpenDir_InputValidation(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		ino   uint64
+		flags uint32
+	}{
+		{
+			name:  "ino 为 0",
+			ino:   0,
+			flags: meta.O_RDONLY,
+		},
+		{
+			name:  "ino 超过 math.MaxInt64",
+			ino:   uint64(math.MaxInt64) + 1,
+			flags: meta.O_RDONLY,
+		},
+		{
+			name:  "flags 包含 O_WRONLY",
+			ino:   100,
+			flags: meta.O_WRONLY,
+		},
+		{
+			name:  "flags 包含 O_RDWR",
+			ino:   100,
+			flags: meta.O_RDWR,
+		},
+		{
+			name:  "flags 包含 O_TRUNC",
+			ino:   100,
+			flags: meta.O_RDONLY | meta.O_TRUNC,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mgr := meta.New(mockStore)
+
+			res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+				Ino:   tc.ino,
+				Flags: tc.flags,
+			})
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+			assert.Equal(t, meta.OpenDirResult{}, res)
+		})
+	}
+}
+
+func TestOpenDir_PositivePath(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	ino := uint64(100)
+
+	baseDirRow := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      2,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	t.Run("常规目录只读模式正常打开", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseDirRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDONLY),
+			}).
+			Return(db.FileHandle{
+				Fh:        1,
+				Ino:       int64(ino),
+				Flags:     int32(meta.O_RDONLY),
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil).
+			Once()
+
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), res.Fh)
+		assert.Equal(t, uint32(0), res.OpenFlags)
+	})
+
+	t.Run("孤儿目录 (nlink == 0) 存在活跃句柄时允许打开", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanDirRow := baseDirRow
+		orphanDirRow.Nlink = 0
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanDirRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(true, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDONLY),
+			}).
+			Return(db.FileHandle{
+				Fh:        2,
+				Ino:       int64(ino),
+				Flags:     int32(meta.O_RDONLY),
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil).
+			Once()
+
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), res.Fh)
+		assert.Equal(t, uint32(0), res.OpenFlags)
+	})
+}
+
+func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	ino := uint64(100)
+
+	baseDirRow := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      2,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	t.Run("目标节点不存在返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(db.Inode{}, pgx.ErrNoRows).
+			Once()
+
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		assert.Equal(t, meta.OpenDirResult{}, res)
+	})
+
+	t.Run("目标节点为普通文件返回 ErrNotDir", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		fileRow := baseDirRow
+		fileRow.Mode = int32(meta.S_IFREG | 0o644)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(fileRow, nil).
+			Once()
+
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotDir))
+		assert.Equal(t, meta.OpenDirResult{}, res)
+	})
+
+	t.Run("死孤儿目录 (nlink == 0 且无活跃句柄) 返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		deadOrphanRow := baseDirRow
+		deadOrphanRow.Nlink = 0
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(deadOrphanRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		assert.Equal(t, meta.OpenDirResult{}, res)
+	})
+
+	t.Run("底层 GetInodeForUpdate 错误返回包装错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(db.Inode{}, errors.New("db error")).
+			Once()
+
+		_, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "get inode for update")
+	})
+
+	t.Run("底层 HasFileHandlesByIno 错误返回包装错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanDirRow := baseDirRow
+		orphanDirRow.Nlink = 0
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanDirRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, errors.New("db query handles error")).
+			Once()
+
+		_, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "check has file handles")
+	})
+
+	t.Run("底层 CreateFileHandle 错误返回包装错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseDirRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDONLY),
+			}).
+			Return(db.FileHandle{}, errors.New("create handle error")).
+			Once()
+
+		_, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create file handle")
+	})
+}

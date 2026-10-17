@@ -55,6 +55,7 @@ type RenameQuerier interface {
 type FileHandleQuerier interface {
 	CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
+	GetFileHandle(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error)
 }
 
 
@@ -759,6 +760,64 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			assert.True(t, errors.Is(err, expectedErr))
 		})
 	})
+
+	t.Run("GetFileHandle 算子调用与参数透传", func(t *testing.T) {
+		now := time.Now()
+		params := db.GetFileHandleParams{
+			Fh:  10,
+			Ino: 42,
+		}
+		expected := db.FileHandle{
+			Fh:        10,
+			Ino:       42,
+			Flags:     0o2,
+			CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		t.Run("成功查询并返回目标 FileHandle", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetFileHandle(mock.Anything, params).
+				Return(expected, nil).
+				Once()
+
+			result, err := store.GetFileHandle(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, expected, result)
+		})
+
+		t.Run("目标句柄不存在返回 pgx.ErrNoRows", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				GetFileHandle(mock.Anything, params).
+				Return(db.FileHandle{}, pgx.ErrNoRows).
+				Once()
+
+			_, err := store.GetFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, pgx.ErrNoRows))
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database connection failed")
+			mockStore.EXPECT().
+				GetFileHandle(mock.Anything, params).
+				Return(db.FileHandle{}, expectedErr).
+				Once()
+
+			_, err := store.GetFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
 }
+
 
 

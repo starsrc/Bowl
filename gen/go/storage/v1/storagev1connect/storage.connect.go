@@ -50,6 +50,10 @@ const (
 	StorageServiceCreateProcedure = "/storage.v1.StorageService/Create"
 	// StorageServiceOpenProcedure is the procedure name of the StorageService's Open RPC.
 	StorageServiceOpenProcedure = "/storage.v1.StorageService/Open"
+	// StorageServiceFlushProcedure is the procedure name of the StorageService's Flush RPC.
+	StorageServiceFlushProcedure = "/storage.v1.StorageService/Flush"
+	// StorageServiceFsyncProcedure is the procedure name of the StorageService's Fsync RPC.
+	StorageServiceFsyncProcedure = "/storage.v1.StorageService/Fsync"
 )
 
 var (
@@ -144,6 +148,20 @@ var (
 			Procedure:  StorageServiceOpenProcedure,
 		}
 	})
+	storageServiceFlushSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Flush"),
+			Procedure:  StorageServiceFlushProcedure,
+		}
+	})
+	storageServiceFsyncSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Fsync"),
+			Procedure:  StorageServiceFsyncProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -221,6 +239,14 @@ type StorageServiceClient interface {
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error)
+	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Flush(context.Context, *v1.FlushRequest) (*v1.FlushResponse, error)
+	// Fsync 同步并持久化文件节点与句柄关联的状态。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -304,6 +330,14 @@ type StorageServiceHandler interface {
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error)
+	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Flush(context.Context, *v1.FlushRequest) (*v1.FlushResponse, error)
+	// Fsync 同步并持久化文件节点与句柄关联的状态。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -324,6 +358,8 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceRenameSpec(), Handler: adapter.rename},
 		connect.Method{Spec: storageServiceCreateSpec(), Handler: adapter.create},
 		connect.Method{Spec: storageServiceOpenSpec(), Handler: adapter.open},
+		connect.Method{Spec: storageServiceFlushSpec(), Handler: adapter.flush},
+		connect.Method{Spec: storageServiceFsyncSpec(), Handler: adapter.fsync},
 	)
 }
 
@@ -380,6 +416,14 @@ func (UnimplementedStorageServiceHandler) Create(context.Context, *v1.CreateRequ
 
 func (UnimplementedStorageServiceHandler) Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Open is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Flush(context.Context, *v1.FlushRequest) (*v1.FlushResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Flush is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Fsync is not implemented")
 }
 
 type storageServiceClient struct {
@@ -485,6 +529,22 @@ func (c *storageServiceClient) Create(ctx context.Context, req *v1.CreateRequest
 func (c *storageServiceClient) Open(ctx context.Context, req *v1.OpenRequest) (*v1.OpenResponse, error) {
 	var res v1.OpenResponse
 	if err := c.client.CallUnary(ctx, storageServiceOpenSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Flush(ctx context.Context, req *v1.FlushRequest) (*v1.FlushResponse, error) {
+	var res v1.FlushResponse
+	if err := c.client.CallUnary(ctx, storageServiceFlushSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Fsync(ctx context.Context, req *v1.FsyncRequest) (*v1.FsyncResponse, error) {
+	var res v1.FsyncResponse
+	if err := c.client.CallUnary(ctx, storageServiceFsyncSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -642,6 +702,30 @@ func (h storageServiceHandler) open(ctx context.Context, _ connect.Spec, stream 
 		return err
 	}
 	res, err := h.svc.Open(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) flush(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.FlushRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Flush(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) fsync(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.FsyncRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Fsync(ctx, &req)
 	if err != nil {
 		return err
 	}

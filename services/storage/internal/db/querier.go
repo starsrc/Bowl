@@ -18,6 +18,7 @@ type Querier interface {
 	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
+	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)

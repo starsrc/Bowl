@@ -605,6 +605,72 @@ func (_c *MockQuerier_GetEntry_Call) RunAndReturn(run func(ctx context.Context, 
 	return _c
 }
 
+// GetFileHandle provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetFileHandle(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetFileHandle")
+	}
+
+	var r0 db.FileHandle
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetFileHandleParams) (db.FileHandle, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetFileHandleParams) db.FileHandle); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.FileHandle)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetFileHandleParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetFileHandle_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetFileHandle'
+type MockQuerier_GetFileHandle_Call struct {
+	*mock.Call
+}
+
+// GetFileHandle is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetFileHandleParams
+func (_e *MockQuerier_Expecter) GetFileHandle(ctx any, arg any) *MockQuerier_GetFileHandle_Call {
+	return &MockQuerier_GetFileHandle_Call{Call: _e.mock.On("GetFileHandle", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetFileHandle_Call) Run(run func(ctx context.Context, arg db.GetFileHandleParams)) *MockQuerier_GetFileHandle_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetFileHandleParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetFileHandleParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetFileHandle_Call) Return(fileHandle db.FileHandle, err error) *MockQuerier_GetFileHandle_Call {
+	_c.Call.Return(fileHandle, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetFileHandle_Call) RunAndReturn(run func(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error)) *MockQuerier_GetFileHandle_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetInode provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) GetInode(ctx context.Context, ino int64) (db.Inode, error) {
 	ret := _mock.Called(ctx, ino)

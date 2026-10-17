@@ -94,6 +94,16 @@ service StorageService {
   // 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
   rpc Open(OpenRequest) returns (OpenResponse);
+
+  // Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  rpc Flush(FlushRequest) returns (FlushResponse);
+
+  // Fsync 同步并持久化文件节点与句柄关联的状态。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  rpc Fsync(FsyncRequest) returns (FsyncResponse);
 }
 
 
@@ -520,6 +530,48 @@ message OpenResponse {
   // 打开响应标志位 (open flags)。
   uint32 open_flags = 2;
 }
+
+// FlushRequest 定义 Flush 接口输入参数。
+message FlushRequest {
+  // 目标文件节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待冲刷的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 可选的文件锁拥有者标识 (lock owner)。
+  optional uint64 lock_owner = 3;
+}
+
+// FlushResponse 定义 Flush 接口响应结果。
+message FlushResponse {}
+
+// FsyncRequest 定义 Fsync 接口输入参数。
+message FsyncRequest {
+  // 目标文件节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 待同步的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 是否仅同步数据内容 (fdatasync 语义)。若为 true，仅同步文件数据而不强制刷写非必要元数据。
+  bool datasync = 3;
+}
+
+// FsyncResponse 定义 Fsync 接口响应结果。
+message FsyncResponse {}
 
 // Inode 代表文件系统中的实体节点。
 

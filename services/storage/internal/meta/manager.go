@@ -32,6 +32,8 @@ type Manager interface {
 	Rename(ctx context.Context, params RenameParams) error
 	Create(ctx context.Context, params CreateParams) (*CreateResult, error)
 	Open(ctx context.Context, params OpenParams) (*OpenResult, error)
+	Flush(ctx context.Context, params FlushParams) error
+	Fsync(ctx context.Context, params FsyncParams) error
 }
 
 
@@ -1506,6 +1508,60 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 
 	return result, nil
 }
+
+// checkFileHandleReadOnly 在只读 RepeatableRead 事务内校验 Inode 与 FileHandle 归属有效性。
+func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh uint64, opName string) error {
+	if ino == 0 || ino > math.MaxInt64 || fh == 0 || fh > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		_, err := q.GetInode(ctx, int64(ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode %d: %w", ino, err)
+		}
+
+		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(fh),
+			Ino: int64(ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", fh, ino, err)
+		}
+
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrBadFileHandle):
+			return ErrBadFileHandle
+		default:
+			return fmt.Errorf("%s tx: %w", opName, err)
+		}
+	}
+
+	return nil
+}
+
+// Flush 冲刷会话句柄并校验合法性（不销毁文件句柄）。
+func (m *manager) Flush(ctx context.Context, params FlushParams) error {
+	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "flush")
+}
+
+// Fsync 同步文件节点与句柄关联的状态。
+func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
+	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "fsync")
+}
+
 
 
 

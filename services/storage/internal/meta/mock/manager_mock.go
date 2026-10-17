@@ -106,6 +106,120 @@ func (_c *MockManager_Create_Call) RunAndReturn(run func(ctx context.Context, pa
 	return _c
 }
 
+// Flush provides a mock function for the type MockManager
+func (_mock *MockManager) Flush(ctx context.Context, params meta.FlushParams) error {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Flush")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.FlushParams) error); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_Flush_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Flush'
+type MockManager_Flush_Call struct {
+	*mock.Call
+}
+
+// Flush is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.FlushParams
+func (_e *MockManager_Expecter) Flush(ctx any, params any) *MockManager_Flush_Call {
+	return &MockManager_Flush_Call{Call: _e.mock.On("Flush", ctx, params)}
+}
+
+func (_c *MockManager_Flush_Call) Run(run func(ctx context.Context, params meta.FlushParams)) *MockManager_Flush_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.FlushParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.FlushParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Flush_Call) Return(err error) *MockManager_Flush_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_Flush_Call) RunAndReturn(run func(ctx context.Context, params meta.FlushParams) error) *MockManager_Flush_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Fsync provides a mock function for the type MockManager
+func (_mock *MockManager) Fsync(ctx context.Context, params meta.FsyncParams) error {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Fsync")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.FsyncParams) error); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_Fsync_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Fsync'
+type MockManager_Fsync_Call struct {
+	*mock.Call
+}
+
+// Fsync is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.FsyncParams
+func (_e *MockManager_Expecter) Fsync(ctx any, params any) *MockManager_Fsync_Call {
+	return &MockManager_Fsync_Call{Call: _e.mock.On("Fsync", ctx, params)}
+}
+
+func (_c *MockManager_Fsync_Call) Run(run func(ctx context.Context, params meta.FsyncParams)) *MockManager_Fsync_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.FsyncParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.FsyncParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Fsync_Call) Return(err error) *MockManager_Fsync_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_Fsync_Call) RunAndReturn(run func(ctx context.Context, params meta.FsyncParams) error) *MockManager_Fsync_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetAttr provides a mock function for the type MockManager
 func (_mock *MockManager) GetAttr(ctx context.Context, ino uint64) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, ino)

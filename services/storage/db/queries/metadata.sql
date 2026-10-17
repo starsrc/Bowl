@@ -143,3 +143,8 @@ SELECT EXISTS (
     SELECT 1 FROM file_handles WHERE ino = $1
 );
 
+-- name: GetFileHandle :one
+SELECT * FROM file_handles
+WHERE fh = $1 AND ino = $2;
+
+

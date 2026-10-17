@@ -236,6 +236,28 @@ func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) (Entry, erro
 	return i, err
 }
 
+const getFileHandle = `-- name: GetFileHandle :one
+SELECT fh, ino, flags, created_at FROM file_handles
+WHERE fh = $1 AND ino = $2
+`
+
+type GetFileHandleParams struct {
+	Fh  int64 `json:"fh"`
+	Ino int64 `json:"ino"`
+}
+
+func (q *Queries) GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error) {
+	row := q.db.QueryRow(ctx, getFileHandle, arg.Fh, arg.Ino)
+	var i FileHandle
+	err := row.Scan(
+		&i.Fh,
+		&i.Ino,
+		&i.Flags,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getInode = `-- name: GetInode :one
 SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
 FROM inodes

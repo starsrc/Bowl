@@ -32,6 +32,8 @@ const (
 	StorageService_Rename_FullMethodName   = "/storage.v1.StorageService/Rename"
 	StorageService_Create_FullMethodName   = "/storage.v1.StorageService/Create"
 	StorageService_Open_FullMethodName     = "/storage.v1.StorageService/Open"
+	StorageService_Flush_FullMethodName    = "/storage.v1.StorageService/Flush"
+	StorageService_Fsync_FullMethodName    = "/storage.v1.StorageService/Fsync"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -113,6 +115,14 @@ type StorageServiceClient interface {
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Open(ctx context.Context, in *OpenRequest, opts ...grpc.CallOption) (*OpenResponse, error)
+	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error)
+	// Fsync 同步并持久化文件节点与句柄关联的状态。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Fsync(ctx context.Context, in *FsyncRequest, opts ...grpc.CallOption) (*FsyncResponse, error)
 }
 
 type storageServiceClient struct {
@@ -253,6 +263,26 @@ func (c *storageServiceClient) Open(ctx context.Context, in *OpenRequest, opts .
 	return out, nil
 }
 
+func (c *storageServiceClient) Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FlushResponse)
+	err := c.cc.Invoke(ctx, StorageService_Flush_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) Fsync(ctx context.Context, in *FsyncRequest, opts ...grpc.CallOption) (*FsyncResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FsyncResponse)
+	err := c.cc.Invoke(ctx, StorageService_Fsync_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -332,6 +362,14 @@ type StorageServiceServer interface {
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Open(context.Context, *OpenRequest) (*OpenResponse, error)
+	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Flush(context.Context, *FlushRequest) (*FlushResponse, error)
+	// Fsync 同步并持久化文件节点与句柄关联的状态。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	Fsync(context.Context, *FsyncRequest) (*FsyncResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -380,6 +418,12 @@ func (UnimplementedStorageServiceServer) Create(context.Context, *CreateRequest)
 }
 func (UnimplementedStorageServiceServer) Open(context.Context, *OpenRequest) (*OpenResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Open not implemented")
+}
+func (UnimplementedStorageServiceServer) Flush(context.Context, *FlushRequest) (*FlushResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Flush not implemented")
+}
+func (UnimplementedStorageServiceServer) Fsync(context.Context, *FsyncRequest) (*FsyncResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Fsync not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -636,6 +680,42 @@ func _StorageService_Open_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Flush_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FlushRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Flush(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Flush_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Flush(ctx, req.(*FlushRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_Fsync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FsyncRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Fsync(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Fsync_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Fsync(ctx, req.(*FsyncRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -694,6 +774,14 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Open",
 			Handler:    _StorageService_Open_Handler,
+		},
+		{
+			MethodName: "Flush",
+			Handler:    _StorageService_Flush_Handler,
+		},
+		{
+			MethodName: "Fsync",
+			Handler:    _StorageService_Fsync_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

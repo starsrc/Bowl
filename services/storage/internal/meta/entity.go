@@ -118,6 +118,21 @@ type OpenResult struct {
 	OpenFlags uint32
 }
 
+// FlushParams 定义会话句柄冲刷操作的输入参数。
+type FlushParams struct {
+	Ino       uint64
+	Fh        uint64
+	LockOwner *uint64
+}
+
+// FsyncParams 定义文件同步操作的输入参数。
+type FsyncParams struct {
+	Ino      uint64
+	Fh       uint64
+	Datasync bool
+}
+
+
 
 // 领域哨兵错误。
 var (

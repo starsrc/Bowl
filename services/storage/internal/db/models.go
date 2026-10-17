@@ -33,5 +33,5 @@ type Inode struct {
 	Atime         pgtype.Timestamptz `json:"atime"`
 	Mtime         pgtype.Timestamptz `json:"mtime"`
 	Ctime         pgtype.Timestamptz `json:"ctime"`
-	SymlinkTarget pgtype.Text        `json:"symlink_target"`
+	SymlinkTarget []byte             `json:"symlink_target"`
 }

@@ -19,7 +19,7 @@ const (
 	S_ISGID               uint32 = 0o2000
 	PermMask              uint32 = 0o7777
 	MaxFileNameBytes             = 255
-	MaxSymlinkTargetBytes        = 4096
+	MaxSymlinkTargetBytes        = 4095
 )
 
 // Linux FUSE / POSIX 打开标志位常量（平台无关固定值，严禁依赖宿主机 syscall.O_*）。
@@ -75,7 +75,7 @@ type MkdirParams struct {
 type SymlinkParams struct {
 	ParentIno uint64
 	Name      string
-	Target    string
+	Target    []byte
 	UID       uint32
 	GID       uint32
 }

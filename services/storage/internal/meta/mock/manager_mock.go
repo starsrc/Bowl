@@ -896,22 +896,24 @@ func (_c *MockManager_ReadDirPlus_Call) RunAndReturn(run func(ctx context.Contex
 }
 
 // Readlink provides a mock function for the type MockManager
-func (_mock *MockManager) Readlink(ctx context.Context, ino uint64) (string, error) {
+func (_mock *MockManager) Readlink(ctx context.Context, ino uint64) ([]byte, error) {
 	ret := _mock.Called(ctx, ino)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Readlink")
 	}
 
-	var r0 string
+	var r0 []byte
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) (string, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) ([]byte, error)); ok {
 		return returnFunc(ctx, ino)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) string); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) []byte); ok {
 		r0 = returnFunc(ctx, ino)
 	} else {
-		r0 = ret.Get(0).(string)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]byte)
+		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64) error); ok {
 		r1 = returnFunc(ctx, ino)
@@ -951,12 +953,12 @@ func (_c *MockManager_Readlink_Call) Run(run func(ctx context.Context, ino uint6
 	return _c
 }
 
-func (_c *MockManager_Readlink_Call) Return(s string, err error) *MockManager_Readlink_Call {
-	_c.Call.Return(s, err)
+func (_c *MockManager_Readlink_Call) Return(bytes []byte, err error) *MockManager_Readlink_Call {
+	_c.Call.Return(bytes, err)
 	return _c
 }
 
-func (_c *MockManager_Readlink_Call) RunAndReturn(run func(ctx context.Context, ino uint64) (string, error)) *MockManager_Readlink_Call {
+func (_c *MockManager_Readlink_Call) RunAndReturn(run func(ctx context.Context, ino uint64) ([]byte, error)) *MockManager_Readlink_Call {
 	_c.Call.Return(run)
 	return _c
 }

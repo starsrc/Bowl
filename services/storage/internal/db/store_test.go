@@ -372,7 +372,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 				Uid:           1000,
 				Gid:           1000,
 				Rdev:          0,
-				SymlinkTarget: pgtype.Text{String: "/var/target", Valid: true},
+				SymlinkTarget: []byte("/var/target"),
 			}
 			expected := db.Inode{Ino: 50, Mode: params.Mode, Size: params.Size, SymlinkTarget: params.SymlinkTarget}
 			mockQuerier.EXPECT().CreateSymlinkInode(ctx, params).Return(expected, nil).Once()
@@ -400,7 +400,7 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			mockQuerier := dbmock.NewMockQuerier(t)
 			expected := db.GetSymlinkTargetRow{
 				Mode:          0o120777,
-				SymlinkTarget: pgtype.Text{String: "/etc/hosts", Valid: true},
+				SymlinkTarget: []byte("/etc/hosts"),
 			}
 			mockQuerier.EXPECT().GetSymlinkTarget(ctx, int64(100)).Return(expected, nil).Once()
 

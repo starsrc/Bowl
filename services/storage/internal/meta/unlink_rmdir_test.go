@@ -191,7 +191,7 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Nlink:         1,
 			Uid:           1001,
 			Gid:           1001,
-			SymlinkTarget: pgtype.Text{String: "/tmp/foo", Valid: true},
+			SymlinkTarget: []byte("/tmp/foo"),
 			Atime:         pgtype.Timestamptz{Time: now, Valid: true},
 			Mtime:         pgtype.Timestamptz{Time: now, Valid: true},
 			Ctime:         pgtype.Timestamptz{Time: now, Valid: true},

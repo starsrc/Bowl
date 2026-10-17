@@ -731,8 +731,8 @@ type SymlinkRequest struct {
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 符号链接指向的目标路径。
-	// 长度必须在 1 到 4096 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
-	Target string `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
+	// 长度必须在 1 到 4095 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
+	Target []byte `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
 	// 所属用户 ID。
 	Uid uint32 `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
 	// 所属组 ID。
@@ -785,11 +785,11 @@ func (x *SymlinkRequest) GetName() string {
 	return ""
 }
 
-func (x *SymlinkRequest) GetTarget() string {
+func (x *SymlinkRequest) GetTarget() []byte {
 	if x != nil {
 		return x.Target
 	}
-	return ""
+	return nil
 }
 
 func (x *SymlinkRequest) GetUid() uint32 {
@@ -916,11 +916,11 @@ func (x *ReadlinkRequest) GetIno() uint64 {
 	return 0
 }
 
-// ReadlinkResponse 包含符号链接指向的目标路径字符串。
+// ReadlinkResponse 包含符号链接指向的目标路径。
 type ReadlinkResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 目标路径字符串。
-	Target        string `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	// 目标路径。
+	Target        []byte `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -955,11 +955,11 @@ func (*ReadlinkResponse) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{13}
 }
 
-func (x *ReadlinkResponse) GetTarget() string {
+func (x *ReadlinkResponse) GetTarget() []byte {
 	if x != nil {
 		return x.Target
 	}
-	return ""
+	return nil
 }
 
 // LinkRequest 定义 Link 接口输入参数。
@@ -2955,12 +2955,13 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\rMkdirResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xbb\x01\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x9f\x02\n" +
 	"\x0eSymlinkRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12+\n" +
-	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12&\n" +
-	"\x06target\x18\x03 \x01(\tB\x0e\xbaH\vr\t\x10\x01(\x80 \xba\x01\x01\x00R\x06target\x12\x10\n" +
+	"\x04name\x18\x02 \x01(\tB\x17\xbaH\x14r\x12\x10\x01(\xff\x012\v^[^/\\x00]+$R\x04name\x12\x89\x01\n" +
+	"\x06target\x18\x03 \x01(\fBq\xbaHn\xba\x01d\n" +
+	"\x1esymlink_request_target_no_null\x12)symlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x05 \x01(\rR\x03gid\"\xc8\x01\n" +
 	"\x0fSymlinkResponse\x12/\n" +
@@ -2968,10 +2969,10 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
 	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"6\n" +
 	"\x0fReadlinkRequest\x12#\n" +
-	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\"6\n" +
-	"\x10ReadlinkResponse\x12\"\n" +
-	"\x06target\x18\x01 \x01(\tB\n" +
-	"\xbaH\ar\x05\x10\x01(\x80 R\x06target\"\x9f\x01\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\"\xa1\x01\n" +
+	"\x10ReadlinkResponse\x12\x8c\x01\n" +
+	"\x06target\x18\x01 \x01(\fBt\xbaHq\xba\x01g\n" +
+	" readlink_response_target_no_null\x12*readlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\"\x9f\x01\n" +
 	"\vLinkRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x127\n" +
 	"\x0enew_parent_ino\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x122\n" +

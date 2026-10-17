@@ -118,7 +118,7 @@ func TestLink_PositivePath(t *testing.T) {
 
 		symlinkRow := baseSrcRow
 		symlinkRow.Mode = int32(meta.S_IFLNK | 0o777)
-		symlinkRow.SymlinkTarget = pgtype.Text{String: "/tmp/foo", Valid: true}
+		symlinkRow.SymlinkTarget = []byte("/tmp/foo")
 
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).

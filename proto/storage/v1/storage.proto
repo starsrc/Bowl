@@ -143,7 +143,6 @@ service StorageService {
   rpc Fallocate(FallocateRequest) returns (FallocateResponse);
 }
 
-
 // LookupRequest 定义 Lookup 接口输入参数。
 message LookupRequest {
   // 父目录的 Inode 编号。根目录通常为 1。
@@ -347,11 +346,15 @@ message SymlinkRequest {
   ];
 
   // 符号链接指向的目标路径。
-  // 长度必须在 1 到 4096 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
-  string target = 3 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 4096,
-    (buf.validate.field).string.not_contains = "\x00"
+  // 长度必须在 1 到 4095 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
+  bytes target = 3 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 4095,
+    (buf.validate.field).cel = {
+      id: "symlink_request_target_no_null"
+      message: "symlink target must not contain null byte"
+      expression: "!this.contains(b'\\x00')"
+    }
   ];
 
   // 所属用户 ID。
@@ -382,12 +385,17 @@ message ReadlinkRequest {
   ];
 }
 
-// ReadlinkResponse 包含符号链接指向的目标路径字符串。
+// ReadlinkResponse 包含符号链接指向的目标路径。
 message ReadlinkResponse {
-  // 目标路径字符串。
-  string target = 1 [
-    (buf.validate.field).string.min_len = 1,
-    (buf.validate.field).string.max_bytes = 4096
+  // 目标路径。
+  bytes target = 1 [
+    (buf.validate.field).bytes.min_len = 1,
+    (buf.validate.field).bytes.max_len = 4095,
+    (buf.validate.field).cel = {
+      id: "readlink_response_target_no_null"
+      message: "readlink target must not contain null byte"
+      expression: "!this.contains(b'\\x00')"
+    }
   ];
 }
 

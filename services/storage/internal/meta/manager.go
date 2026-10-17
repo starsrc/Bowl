@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,7 +26,7 @@ type Manager interface {
 	Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 	Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	Symlink(ctx context.Context, params SymlinkParams) (*Inode, error)
-	Readlink(ctx context.Context, ino uint64) (string, error)
+	Readlink(ctx context.Context, ino uint64) ([]byte, error)
 	Link(ctx context.Context, params LinkParams) (*Inode, error)
 	Unlink(ctx context.Context, parentIno uint64, name string) error
 	Rmdir(ctx context.Context, parentIno uint64, name string) error
@@ -502,8 +503,11 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
 		return nil, ErrInvalidArgument
 	}
-	if len(params.Target) == 0 || len(params.Target) > MaxSymlinkTargetBytes || strings.ContainsRune(params.Target, 0) {
+	if len(params.Target) == 0 || bytes.IndexByte(params.Target, 0) >= 0 {
 		return nil, ErrInvalidArgument
+	}
+	if len(params.Target) > MaxSymlinkTargetBytes {
+		return nil, ErrNameTooLong
 	}
 
 	var result *Inode
@@ -540,7 +544,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 			Uid:           int32(params.UID),
 			Gid:           int32(gid),
 			Rdev:          0,
-			SymlinkTarget: pgtype.Text{String: params.Target, Valid: true},
+			SymlinkTarget: params.Target,
 		})
 		if err != nil {
 			return fmt.Errorf("create symlink inode: %w", err)
@@ -584,28 +588,28 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 }
 
 // Readlink 获取符号链接节点指向的目标路径。
-func (m *manager) Readlink(ctx context.Context, ino uint64) (string, error) {
+func (m *manager) Readlink(ctx context.Context, ino uint64) ([]byte, error) {
 	if ino == 0 || ino > math.MaxInt64 {
-		return "", ErrInvalidArgument
+		return nil, ErrInvalidArgument
 	}
 
 	row, err := m.store.GetSymlinkTarget(ctx, int64(ino))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrNotFound
+			return nil, ErrNotFound
 		}
-		return "", fmt.Errorf("get symlink target %d: %w", ino, err)
+		return nil, fmt.Errorf("get symlink target %d: %w", ino, err)
 	}
 
 	if (uint32(row.Mode) & S_IFMT) != S_IFLNK {
-		return "", ErrInvalidArgument
+		return nil, ErrInvalidArgument
 	}
 
-	if !row.SymlinkTarget.Valid {
-		return "", ErrInvalidArgument
+	if len(row.SymlinkTarget) == 0 {
+		return nil, ErrInvalidArgument
 	}
 
-	return row.SymlinkTarget.String, nil
+	return row.SymlinkTarget, nil
 }
 
 // errRetryTx 表示事务预读的目录项映射在加锁前发生并发漂移，需回滚并重试当前事务。

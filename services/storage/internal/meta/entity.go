@@ -225,6 +225,11 @@ var (
 	ErrNotEmpty        = errors.New("meta: directory not empty")
 	ErrBadFileHandle   = errors.New("meta: bad file handle")
 	ErrNotSupported    = errors.New("meta: operation not supported")
+	ErrNameTooLong     = errors.New("meta: file name too long")
+	ErrRange           = errors.New("meta: numerical result out of range")
+	ErrTooBig          = errors.New("meta: argument list too long")
+	ErrNoData          = errors.New("meta: no data available")
+	ErrNoSpace         = errors.New("meta: no space left on device")
 )
 
 // Inode 表示文件系统节点的领域实体。

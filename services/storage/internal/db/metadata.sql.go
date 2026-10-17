@@ -14,7 +14,7 @@ import (
 const clearInodeNlinkAndTouchCtime = `-- name: ClearInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = 0,
-    ctime = NOW()
+    ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
 `
@@ -165,8 +165,8 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 const decrementInodeNlinkAndTouch = `-- name: DecrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink - 1,
-    mtime = NOW(),
-    ctime = NOW()
+    mtime = clock_timestamp(),
+    ctime = clock_timestamp()
 WHERE ino = $1
 `
 
@@ -178,7 +178,7 @@ func (q *Queries) DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) er
 const decrementInodeNlinkAndTouchCtime = `-- name: DecrementInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = nlink - 1,
-    ctime = NOW()
+    ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
 `
@@ -446,8 +446,8 @@ func (q *Queries) HasFileHandlesByIno(ctx context.Context, ino int64) (bool, err
 const incrementInodeNlinkAndTouch = `-- name: IncrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink + 1,
-    mtime = NOW(),
-    ctime = NOW()
+    mtime = clock_timestamp(),
+    ctime = clock_timestamp()
 WHERE ino = $1
 `
 
@@ -459,7 +459,7 @@ func (q *Queries) IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) er
 const incrementInodeNlinkAndTouchCtime = `-- name: IncrementInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = nlink + 1,
-    ctime = NOW()
+    ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
 `
@@ -598,7 +598,7 @@ func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) 
 
 const touchInodeCtime = `-- name: TouchInodeCtime :exec
 UPDATE inodes
-SET ctime = NOW()
+SET ctime = clock_timestamp()
 WHERE ino = $1
 `
 
@@ -609,7 +609,7 @@ func (q *Queries) TouchInodeCtime(ctx context.Context, ino int64) error {
 
 const touchInodeTimestamps = `-- name: TouchInodeTimestamps :exec
 UPDATE inodes
-SET mtime = NOW(), ctime = NOW()
+SET mtime = clock_timestamp(), ctime = clock_timestamp()
 WHERE ino = $1
 `
 

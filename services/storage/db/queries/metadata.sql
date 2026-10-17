@@ -39,14 +39,14 @@ VALUES ($1, $2, $3);
 
 -- name: TouchInodeTimestamps :exec
 UPDATE inodes
-SET mtime = NOW(), ctime = NOW()
+SET mtime = clock_timestamp(), ctime = clock_timestamp()
 WHERE ino = $1;
 
 -- name: IncrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink + 1,
-    mtime = NOW(),
-    ctime = NOW()
+    mtime = clock_timestamp(),
+    ctime = clock_timestamp()
 WHERE ino = $1;
 
 -- name: CreateSymlinkInode :one
@@ -62,7 +62,7 @@ WHERE ino = $1;
 -- name: IncrementInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = nlink + 1,
-    ctime = NOW()
+    ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
 
@@ -83,22 +83,22 @@ SELECT EXISTS(
 -- name: DecrementInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = nlink - 1,
-    ctime = NOW()
+    ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
 
 -- name: ClearInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = 0,
-    ctime = NOW()
+    ctime = clock_timestamp()
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
 
 -- name: DecrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink - 1,
-    mtime = NOW(),
-    ctime = NOW()
+    mtime = clock_timestamp(),
+    ctime = clock_timestamp()
 WHERE ino = $1;
 
 -- name: UpdateEntry :exec
@@ -109,7 +109,7 @@ WHERE parent_ino = @old_parent_ino AND name = @old_name;
 
 -- name: TouchInodeCtime :exec
 UPDATE inodes
-SET ctime = NOW()
+SET ctime = clock_timestamp()
 WHERE ino = $1;
 
 -- name: IsSubdirectory :one

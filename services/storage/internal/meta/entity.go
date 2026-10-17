@@ -22,6 +22,18 @@ const (
 	MaxSymlinkTargetBytes        = 4096
 )
 
+// Linux FUSE / POSIX 打开标志位常量（平台无关固定值，严禁依赖宿主机 syscall.O_*）。
+const (
+	O_ACCMODE = 0o3
+	O_RDONLY  = 0o0
+	O_WRONLY  = 0o1
+	O_RDWR    = 0o2
+	O_CREAT   = 0o100
+	O_EXCL    = 0o200
+	O_TRUNC   = 0o1000
+	O_APPEND  = 0o2000
+)
+
 // SetAttrInput 定义修改 Inode 属性的输入参数。
 type SetAttrInput struct {
 	Mode     *uint32
@@ -77,6 +89,22 @@ type RenameParams struct {
 	NewName      string
 }
 
+// CreateParams 定义原子创建常规文件并分配初始文件句柄的输入参数。
+type CreateParams struct {
+	ParentIno uint64
+	Name      string
+	Mode      uint32
+	UID       uint32
+	GID       uint32
+	Flags     uint32
+}
+
+// CreateResult 包含新建文件的 Inode 元数据、初始分配的 FileHandle 与打开响应标志。
+type CreateResult struct {
+	Inode     *Inode
+	Fh        uint64
+	OpenFlags uint32
+}
 
 // 领域哨兵错误。
 var (
@@ -87,6 +115,7 @@ var (
 	ErrPerm            = errors.New("meta: operation not permitted")
 	ErrAlreadyExists   = errors.New("meta: entry already exists")
 	ErrNotEmpty        = errors.New("meta: directory not empty")
+	ErrBadFileHandle   = errors.New("meta: bad file handle")
 )
 
 // Inode 表示文件系统节点的领域实体。

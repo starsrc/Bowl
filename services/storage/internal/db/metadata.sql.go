@@ -55,6 +55,29 @@ func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) error 
 	return err
 }
 
+const createFileHandle = `-- name: CreateFileHandle :one
+INSERT INTO file_handles (ino, flags)
+VALUES ($1, $2)
+RETURNING fh, ino, flags, created_at
+`
+
+type CreateFileHandleParams struct {
+	Ino   int64 `json:"ino"`
+	Flags int32 `json:"flags"`
+}
+
+func (q *Queries) CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error) {
+	row := q.db.QueryRow(ctx, createFileHandle, arg.Ino, arg.Flags)
+	var i FileHandle
+	err := row.Scan(
+		&i.Fh,
+		&i.Ino,
+		&i.Flags,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createInode = `-- name: CreateInode :one
 INSERT INTO inodes (mode, nlink, uid, gid, rdev)
 VALUES ($1, $2, $3, $4, $5)

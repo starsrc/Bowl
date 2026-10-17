@@ -14,6 +14,13 @@ type Entry struct {
 	Ino       int64  `json:"ino"`
 }
 
+type FileHandle struct {
+	Fh        int64              `json:"fh"`
+	Ino       int64              `json:"ino"`
+	Flags     int32              `json:"flags"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Inode struct {
 	Ino           int64              `json:"ino"`
 	Generation    int64              `json:"generation"`

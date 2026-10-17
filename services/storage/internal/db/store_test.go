@@ -51,7 +51,12 @@ type RenameQuerier interface {
 	IsSubdirectory(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error)
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier 与 RenameQuerier 接口契约。
+// FileHandleQuerier 提取文件句柄创建与持久化接口契约。
+type FileHandleQuerier interface {
+	CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error)
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier 与 FileHandleQuerier 接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -72,6 +77,10 @@ var (
 	_ RenameQuerier = (db.Querier)(nil)
 	_ RenameQuerier = (db.Store)(nil)
 	_ RenameQuerier = (*db.Queries)(nil)
+
+	_ FileHandleQuerier = (db.Querier)(nil)
+	_ FileHandleQuerier = (db.Store)(nil)
+	_ FileHandleQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -656,6 +665,49 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			var q db.Querier = mockQuerier
 			_, err := q.IsSubdirectory(ctx, params)
 			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("CreateFileHandle 算子调用与参数透传", func(t *testing.T) {
+		now := time.Now()
+		params := db.CreateFileHandleParams{
+			Ino:   100,
+			Flags: 0o2, // O_RDWR
+		}
+		expected := db.FileHandle{
+			Fh:        1,
+			Ino:       100,
+			Flags:     0o2,
+			CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		t.Run("成功创建 FileHandle 并返回数据实体", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				CreateFileHandle(mock.Anything, params).
+				Return(expected, nil).
+				Once()
+
+			result, err := store.CreateFileHandle(ctx, params)
+			require.NoError(t, err)
+			assert.Equal(t, expected, result)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("database sequence error")
+			mockStore.EXPECT().
+				CreateFileHandle(mock.Anything, params).
+				Return(db.FileHandle{}, expectedErr).
+				Once()
+
+			_, err := store.CreateFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
 		})
 	})
 }

@@ -30,6 +30,7 @@ const (
 	StorageService_Unlink_FullMethodName   = "/storage.v1.StorageService/Unlink"
 	StorageService_Rmdir_FullMethodName    = "/storage.v1.StorageService/Rmdir"
 	StorageService_Rename_FullMethodName   = "/storage.v1.StorageService/Rename"
+	StorageService_Create_FullMethodName   = "/storage.v1.StorageService/Create"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -99,6 +100,12 @@ type StorageServiceClient interface {
 	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error)
+	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+	Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error)
 }
 
 type storageServiceClient struct {
@@ -219,6 +226,16 @@ func (c *storageServiceClient) Rename(ctx context.Context, in *RenameRequest, op
 	return out, nil
 }
 
+func (c *storageServiceClient) Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateResponse)
+	err := c.cc.Invoke(ctx, StorageService_Create_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -286,6 +303,12 @@ type StorageServiceServer interface {
 	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Rename(context.Context, *RenameRequest) (*RenameResponse, error)
+	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+	Create(context.Context, *CreateRequest) (*CreateResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -328,6 +351,9 @@ func (UnimplementedStorageServiceServer) Rmdir(context.Context, *RmdirRequest) (
 }
 func (UnimplementedStorageServiceServer) Rename(context.Context, *RenameRequest) (*RenameResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Rename not implemented")
+}
+func (UnimplementedStorageServiceServer) Create(context.Context, *CreateRequest) (*CreateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Create not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -548,6 +574,24 @@ func _StorageService_Rename_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).Create(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_Create_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).Create(ctx, req.(*CreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -598,6 +642,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Rename",
 			Handler:    _StorageService_Rename_Handler,
+		},
+		{
+			MethodName: "Create",
+			Handler:    _StorageService_Create_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

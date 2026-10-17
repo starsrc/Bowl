@@ -133,4 +133,7 @@ SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
     SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint OR has_cycle
 ), false)::boolean AS is_sub;
 
-
+-- name: CreateFileHandle :one
+INSERT INTO file_handles (ino, flags)
+VALUES ($1, $2)
+RETURNING *;

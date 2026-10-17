@@ -30,6 +30,7 @@ type Manager interface {
 	Unlink(ctx context.Context, parentIno uint64, name string) error
 	Rmdir(ctx context.Context, parentIno uint64, name string) error
 	Rename(ctx context.Context, params RenameParams) error
+	Create(ctx context.Context, params CreateParams) (*CreateResult, error)
 }
 
 type manager struct {
@@ -1310,8 +1311,109 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	return nil
 }
 
+// Create 在指定父目录下原子创建常规文件并分配初始文件句柄。
+func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResult, error) {
+	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if len(params.Name) == 0 || len(params.Name) > MaxFileNameBytes || strings.ContainsAny(params.Name, "/\x00") {
+		return nil, ErrInvalidArgument
+	}
+	if params.Mode > 0xffff {
+		return nil, ErrInvalidArgument
+	}
 
+	modeType := params.Mode & S_IFMT
+	if modeType != 0 && modeType != S_IFREG {
+		return nil, ErrInvalidArgument
+	}
 
+	targetMode := S_IFREG | (params.Mode & PermMask)
 
+	var result *CreateResult
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", params.ParentIno, err)
+		}
 
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		if params.Name == "." || params.Name == ".." {
+			return ErrAlreadyExists
+		}
+
+		gid := params.GID
+		if (uint32(parent.Mode) & S_ISGID) != 0 {
+			gid = uint32(parent.Gid)
+		}
+
+		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(targetMode),
+			Nlink: 1,
+			Uid:   int32(params.UID),
+			Gid:   int32(gid),
+			Rdev:  0,
+		})
+		if err != nil {
+			return fmt.Errorf("create inode: %w", err)
+		}
+
+		err = q.CreateEntry(ctx, db.CreateEntryParams{
+			ParentIno: int64(params.ParentIno),
+			Name:      params.Name,
+			Ino:       newInode.Ino,
+		})
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAlreadyExists
+			}
+			return fmt.Errorf("create entry: %w", err)
+		}
+
+		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
+			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
+			Ino:   newInode.Ino,
+			Flags: int32(params.Flags),
+		})
+		if err != nil {
+			return fmt.Errorf("create file handle for inode %d: %w", newInode.Ino, err)
+		}
+
+		result = &CreateResult{
+			Inode:     newInodeFromDB(newInode),
+			Fh:        uint64(handle.Fh),
+			OpenFlags: 0,
+		}
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		case errors.Is(err, ErrAlreadyExists):
+			return nil, ErrAlreadyExists
+		default:
+			return nil, fmt.Errorf("create tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
 

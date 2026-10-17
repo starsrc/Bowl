@@ -11,6 +11,7 @@ import (
 type Querier interface {
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
+	CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error)
 	CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error)
 	CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error)
 	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error

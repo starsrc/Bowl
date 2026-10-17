@@ -46,6 +46,8 @@ const (
 	StorageServiceRmdirProcedure = "/storage.v1.StorageService/Rmdir"
 	// StorageServiceRenameProcedure is the procedure name of the StorageService's Rename RPC.
 	StorageServiceRenameProcedure = "/storage.v1.StorageService/Rename"
+	// StorageServiceCreateProcedure is the procedure name of the StorageService's Create RPC.
+	StorageServiceCreateProcedure = "/storage.v1.StorageService/Create"
 )
 
 var (
@@ -126,6 +128,13 @@ var (
 			Procedure:  StorageServiceRenameProcedure,
 		}
 	})
+	storageServiceCreateSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Create"),
+			Procedure:  StorageServiceCreateProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -191,6 +200,12 @@ type StorageServiceClient interface {
 	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
+	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -262,6 +277,12 @@ type StorageServiceHandler interface {
 	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
+	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
+	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -280,6 +301,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceUnlinkSpec(), Handler: adapter.unlink},
 		connect.Method{Spec: storageServiceRmdirSpec(), Handler: adapter.rmdir},
 		connect.Method{Spec: storageServiceRenameSpec(), Handler: adapter.rename},
+		connect.Method{Spec: storageServiceCreateSpec(), Handler: adapter.create},
 	)
 }
 
@@ -328,6 +350,10 @@ func (UnimplementedStorageServiceHandler) Rmdir(context.Context, *v1.RmdirReques
 
 func (UnimplementedStorageServiceHandler) Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Rename is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Create is not implemented")
 }
 
 type storageServiceClient struct {
@@ -417,6 +443,14 @@ func (c *storageServiceClient) Rmdir(ctx context.Context, req *v1.RmdirRequest) 
 func (c *storageServiceClient) Rename(ctx context.Context, req *v1.RenameRequest) (*v1.RenameResponse, error) {
 	var res v1.RenameResponse
 	if err := c.client.CallUnary(ctx, storageServiceRenameSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) Create(ctx context.Context, req *v1.CreateRequest) (*v1.CreateResponse, error) {
+	var res v1.CreateResponse
+	if err := c.client.CallUnary(ctx, storageServiceCreateSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -550,6 +584,18 @@ func (h storageServiceHandler) rename(ctx context.Context, _ connect.Spec, strea
 		return err
 	}
 	res, err := h.svc.Rename(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) create(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.CreateRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.Create(ctx, &req)
 	if err != nil {
 		return err
 	}

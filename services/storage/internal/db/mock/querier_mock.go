@@ -161,6 +161,72 @@ func (_c *MockQuerier_CreateEntry_Call) RunAndReturn(run func(ctx context.Contex
 	return _c
 }
 
+// CreateFileHandle provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateFileHandle")
+	}
+
+	var r0 db.FileHandle
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateFileHandleParams) (db.FileHandle, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateFileHandleParams) db.FileHandle); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.FileHandle)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateFileHandleParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_CreateFileHandle_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateFileHandle'
+type MockQuerier_CreateFileHandle_Call struct {
+	*mock.Call
+}
+
+// CreateFileHandle is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateFileHandleParams
+func (_e *MockQuerier_Expecter) CreateFileHandle(ctx any, arg any) *MockQuerier_CreateFileHandle_Call {
+	return &MockQuerier_CreateFileHandle_Call{Call: _e.mock.On("CreateFileHandle", ctx, arg)}
+}
+
+func (_c *MockQuerier_CreateFileHandle_Call) Run(run func(ctx context.Context, arg db.CreateFileHandleParams)) *MockQuerier_CreateFileHandle_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateFileHandleParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateFileHandleParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_CreateFileHandle_Call) Return(fileHandle db.FileHandle, err error) *MockQuerier_CreateFileHandle_Call {
+	_c.Call.Return(fileHandle, err)
+	return _c
+}
+
+func (_c *MockQuerier_CreateFileHandle_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error)) *MockQuerier_CreateFileHandle_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateInode provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) CreateInode(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error) {
 	ret := _mock.Called(ctx, arg)

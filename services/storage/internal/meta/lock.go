@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
@@ -111,3 +113,403 @@ func (m *manager) GetLk(ctx context.Context, params GetLkParams) (*FileLock, err
 
 	return result, nil
 }
+
+// SetLk 执行 FUSE_SETLK (32) 非阻塞加解锁操作。
+// 遵循 ADR-0012：
+// 1. 采用 READ COMMITTED 写事务，通过 GetInodeForUpdate(ino) 串行化同一 Inode 上的并发锁变更；
+// 2. 校验 Inode 存在且非目录（支持 Orphan Inode），校验 FileHandle 存在且归属目标 Inode；
+// 3. 对 POSIX 记录锁（lk_flags == 0）校验打开句柄读写模式位（F_RDLCK 需读权限，F_WRLCK 需写权限，F_UNLCK 不限）；
+// 4. 清理 expires_at <= clock_timestamp() 的超期会话并续期当前 session_id 租约；
+// 5. 执行冲突检测与锁区间变更，冲突时返回 ErrAgain（EAGAIN），严格不修改 Inode 时间戳。
+func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
+		params.Fh == 0 || params.Fh > math.MaxInt64 ||
+		params.SessionID == 0 || params.SessionID > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if params.LkFlags > FuseLkFlock {
+		return ErrInvalidArgument
+	}
+	if params.Lk.Type != F_RDLCK && params.Lk.Type != F_WRLCK && params.Lk.Type != F_UNLCK {
+		return ErrInvalidArgument
+	}
+	if params.Lk.Start > OffsetMax || params.Lk.End > OffsetMax || params.Lk.Start > params.Lk.End {
+		return ErrInvalidArgument
+	}
+	if params.Lk.PID > math.MaxInt32 {
+		return ErrInvalidArgument
+	}
+	if params.LkFlags == FuseLkFlock && (params.Lk.Start != 0 || params.Lk.End != OffsetMax) {
+		return ErrInvalidArgument
+	}
+
+	leaseTTL := m.sessionLeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultSessionLeaseTTL
+	}
+
+	var flockConflictAfterDelete bool
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
+		}
+
+		if (uint32(inode.Mode) & S_IFMT) == S_IFDIR {
+			return ErrIsDir
+		}
+
+		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if params.LkFlags == 0 {
+			accMode := uint32(handle.Flags) & O_ACCMODE
+			switch params.Lk.Type {
+			case F_RDLCK:
+				if accMode != O_RDONLY && accMode != O_RDWR {
+					return ErrBadFileHandle
+				}
+			case F_WRLCK:
+				if accMode != O_WRONLY && accMode != O_RDWR {
+					return ErrBadFileHandle
+				}
+			}
+		}
+
+		if err := q.DeleteExpiredClientSessions(ctx); err != nil {
+			return fmt.Errorf("delete expired client sessions: %w", err)
+		}
+
+		_, err = q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+			SessionID: int64(params.SessionID),
+			ExpiresAt: pgtype.Timestamptz{
+				Time:  time.Now().Add(leaseTTL),
+				Valid: true,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("upsert client session %d: %w", params.SessionID, err)
+		}
+
+		if params.LkFlags == FuseLkFlock {
+			return applyFlockSetLk(ctx, q, params, &flockConflictAfterDelete)
+		}
+		return applyPosixSetLk(ctx, q, params)
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrIsDir):
+			return ErrIsDir
+		case errors.Is(err, ErrBadFileHandle):
+			return ErrBadFileHandle
+		case errors.Is(err, ErrAgain):
+			return ErrAgain
+		default:
+			return fmt.Errorf("setlk tx: %w", err)
+		}
+	}
+
+	if flockConflictAfterDelete {
+		return ErrAgain
+	}
+
+	return nil
+}
+
+func rangesOverlap(start1, end1, start2, end2 uint64) bool {
+	return start1 <= end2 && end1 >= start2
+}
+
+func locksConflict(type1, type2 uint32) bool {
+	return type1 == F_WRLCK || type2 == F_WRLCK
+}
+
+type lockSegment struct {
+	start uint64
+	end   uint64
+	ltype uint32
+	pid   uint32
+}
+
+func applyPosixSetLk(ctx context.Context, q db.Querier, params SetLkParams) error {
+	ino := int64(params.Ino)
+	sessionID := int64(params.SessionID)
+	owner := int64(params.LockOwner)
+	reqStart := params.Lk.Start
+	reqEnd := params.Lk.End
+	reqType := params.Lk.Type
+	reqPID := params.Lk.PID
+
+	activeLocks, err := q.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     ino,
+		LkFlags: 0,
+	})
+	if err != nil {
+		return fmt.Errorf("list active posix file locks (ino=%d): %w", params.Ino, err)
+	}
+
+	if reqType == F_UNLCK {
+		var deleteIDs []int64
+		var remnants []lockSegment
+		for _, l := range activeLocks {
+			if l.SessionID != sessionID || l.LockOwner != owner {
+				continue
+			}
+			lStart := uint64(l.StartOffset)
+			lEnd := uint64(l.EndOffset)
+			if !rangesOverlap(lStart, lEnd, reqStart, reqEnd) {
+				continue
+			}
+			deleteIDs = append(deleteIDs, l.ID)
+			if lStart < reqStart {
+				remnants = append(remnants, lockSegment{
+					start: lStart,
+					end:   reqStart - 1,
+					ltype: uint32(l.LockType),
+					pid:   uint32(l.Pid),
+				})
+			}
+			if lEnd > reqEnd && reqEnd < OffsetMax {
+				remnants = append(remnants, lockSegment{
+					start: reqEnd + 1,
+					end:   lEnd,
+					ltype: uint32(l.LockType),
+					pid:   uint32(l.Pid),
+				})
+			}
+		}
+
+		if len(deleteIDs) > 0 {
+			if err := q.DeleteFileLocksByIDs(ctx, deleteIDs); err != nil {
+				return fmt.Errorf("delete posix file locks (ino=%d): %w", params.Ino, err)
+			}
+		}
+		for _, seg := range remnants {
+			_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
+				SessionID:   sessionID,
+				Ino:         ino,
+				Fh:          int64(params.Fh),
+				LockOwner:   owner,
+				LkFlags:     0,
+				StartOffset: int64(seg.start),
+				EndOffset:   int64(seg.end),
+				LockType:    int16(seg.ltype),
+				Pid:         int32(seg.pid),
+			})
+			if err != nil {
+				return fmt.Errorf("create remnant posix file lock (ino=%d): %w", params.Ino, err)
+			}
+		}
+		return nil
+	}
+
+	var callerHasActiveLocks bool
+	for _, l := range activeLocks {
+		if l.SessionID == sessionID && l.LockOwner == owner {
+			callerHasActiveLocks = true
+			continue
+		}
+		lStart := uint64(l.StartOffset)
+		lEnd := uint64(l.EndOffset)
+		if rangesOverlap(lStart, lEnd, reqStart, reqEnd) && locksConflict(reqType, uint32(l.LockType)) {
+			return ErrAgain
+		}
+	}
+
+	if !callerHasActiveLocks {
+		waiters, err := q.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+			Ino:     ino,
+			LkFlags: 0,
+		})
+		if err != nil {
+			return fmt.Errorf("list pending posix lock waiters (ino=%d): %w", params.Ino, err)
+		}
+		for _, w := range waiters {
+			if w.SessionID == sessionID && w.LockOwner == owner {
+				continue
+			}
+			wStart := uint64(w.StartOffset)
+			wEnd := uint64(w.EndOffset)
+			if rangesOverlap(wStart, wEnd, reqStart, reqEnd) && locksConflict(reqType, uint32(w.LockType)) {
+				return ErrAgain
+			}
+		}
+	}
+
+	var deleteIDs []int64
+	var remnants []lockSegment
+	mergedStart := reqStart
+	mergedEnd := reqEnd
+
+	for _, l := range activeLocks {
+		if l.SessionID != sessionID || l.LockOwner != owner {
+			continue
+		}
+		lStart := uint64(l.StartOffset)
+		lEnd := uint64(l.EndOffset)
+		lType := uint32(l.LockType)
+
+		overlaps := rangesOverlap(lStart, lEnd, reqStart, reqEnd)
+		adjacentSameType := lType == reqType &&
+			((lEnd < OffsetMax && lEnd+1 == reqStart) || (reqEnd < OffsetMax && reqEnd+1 == lStart))
+
+		if !overlaps && !adjacentSameType {
+			continue
+		}
+
+		deleteIDs = append(deleteIDs, l.ID)
+		if lType == reqType {
+			if lStart < mergedStart {
+				mergedStart = lStart
+			}
+			if lEnd > mergedEnd {
+				mergedEnd = lEnd
+			}
+		} else {
+			if lStart < reqStart {
+				remnants = append(remnants, lockSegment{
+					start: lStart,
+					end:   reqStart - 1,
+					ltype: lType,
+					pid:   uint32(l.Pid),
+				})
+			}
+			if lEnd > reqEnd && reqEnd < OffsetMax {
+				remnants = append(remnants, lockSegment{
+					start: reqEnd + 1,
+					end:   lEnd,
+					ltype: lType,
+					pid:   uint32(l.Pid),
+				})
+			}
+		}
+	}
+
+	if len(deleteIDs) > 0 {
+		if err := q.DeleteFileLocksByIDs(ctx, deleteIDs); err != nil {
+			return fmt.Errorf("delete overlapping posix file locks (ino=%d): %w", params.Ino, err)
+		}
+	}
+
+	for _, seg := range remnants {
+		_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
+			SessionID:   sessionID,
+			Ino:         ino,
+			Fh:          int64(params.Fh),
+			LockOwner:   owner,
+			LkFlags:     0,
+			StartOffset: int64(seg.start),
+			EndOffset:   int64(seg.end),
+			LockType:    int16(seg.ltype),
+			Pid:         int32(seg.pid),
+		})
+		if err != nil {
+			return fmt.Errorf("create split posix file lock (ino=%d): %w", params.Ino, err)
+		}
+	}
+
+	_, err = q.CreateFileLock(ctx, db.CreateFileLockParams{
+		SessionID:   sessionID,
+		Ino:         ino,
+		Fh:          int64(params.Fh),
+		LockOwner:   owner,
+		LkFlags:     0,
+		StartOffset: int64(mergedStart),
+		EndOffset:   int64(mergedEnd),
+		LockType:    int16(reqType),
+		Pid:         int32(reqPID),
+	})
+	if err != nil {
+		return fmt.Errorf("create posix file lock (ino=%d): %w", params.Ino, err)
+	}
+
+	return nil
+}
+
+func applyFlockSetLk(ctx context.Context, q db.Querier, params SetLkParams, conflictAfterDelete *bool) error {
+	ino := int64(params.Ino)
+	sessionID := int64(params.SessionID)
+	fh := int64(params.Fh)
+	reqType := params.Lk.Type
+
+	if _, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
+		SessionID: sessionID,
+		Ino:       ino,
+		Fh:        fh,
+	}); err != nil {
+		return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+	}
+
+	if reqType == F_UNLCK {
+		return nil
+	}
+
+	activeLocks, err := q.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     ino,
+		LkFlags: int32(FuseLkFlock),
+	})
+	if err != nil {
+		return fmt.Errorf("list active flock file locks (ino=%d): %w", params.Ino, err)
+	}
+
+	for _, l := range activeLocks {
+		if l.SessionID == sessionID && l.Fh == fh {
+			continue
+		}
+		if locksConflict(reqType, uint32(l.LockType)) {
+			*conflictAfterDelete = true
+			return nil
+		}
+	}
+
+	waiters, err := q.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+		Ino:     ino,
+		LkFlags: int32(FuseLkFlock),
+	})
+	if err != nil {
+		return fmt.Errorf("list pending flock lock waiters (ino=%d): %w", params.Ino, err)
+	}
+	for _, w := range waiters {
+		if w.SessionID == sessionID && w.Fh == fh {
+			continue
+		}
+		if locksConflict(reqType, uint32(w.LockType)) {
+			*conflictAfterDelete = true
+			return nil
+		}
+	}
+
+	_, err = q.CreateFileLock(ctx, db.CreateFileLockParams{
+		SessionID:   sessionID,
+		Ino:         ino,
+		Fh:          fh,
+		LockOwner:   int64(params.LockOwner),
+		LkFlags:     int32(FuseLkFlock),
+		StartOffset: 0,
+		EndOffset:   int64(OffsetMax),
+		LockType:    int16(reqType),
+		Pid:         int32(params.Lk.PID),
+	})
+	if err != nil {
+		return fmt.Errorf("create flock file lock (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+	}
+
+	return nil
+}
+

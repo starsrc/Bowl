@@ -269,6 +269,16 @@ type GetLkParams struct {
 	SessionID uint64
 }
 
+// SetLkParams 定义 FUSE_SETLK (32) 非阻塞加解锁操作的输入参数。
+type SetLkParams struct {
+	Ino       uint64
+	Fh        uint64
+	LockOwner uint64
+	Lk        FileLock
+	LkFlags   uint32
+	SessionID uint64
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

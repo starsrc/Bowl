@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -63,28 +64,51 @@ type Manager interface {
 	ListXattr(ctx context.Context, ino uint64) ([][]byte, error)
 	RemoveXattr(ctx context.Context, ino uint64, name []byte) error
 	GetLk(ctx context.Context, params GetLkParams) (*FileLock, error)
+	SetLk(ctx context.Context, params SetLkParams) error
 }
 
 type manager struct {
-	store        db.Store
-	entryTimeout float64
-	attrTimeout  float64
+	store           db.Store
+	entryTimeout    float64
+	attrTimeout     float64
+	sessionLeaseTTL time.Duration
 }
 
 var _ Manager = (*manager)(nil)
 
-// New 创建 Manager 实例。
-func New(store db.Store) Manager {
-	return &manager{
-		store:        store,
-		entryTimeout: DefaultEntryTimeoutSeconds,
-		attrTimeout:  DefaultAttrTimeoutSeconds,
+// Option 定义 Manager 的配置选项。
+type Option func(*manager)
+
+// WithSessionLeaseTTL 配置客户端会话租约的续期时长（TTL <= 0 时忽略并保持默认值）。
+func WithSessionLeaseTTL(ttl time.Duration) Option {
+	return func(m *manager) {
+		if ttl > 0 {
+			m.sessionLeaseTTL = ttl
+		}
 	}
+}
+
+// New 创建 Manager 实例。
+func New(store db.Store, opts ...Option) Manager {
+	m := &manager{
+		store:           store,
+		entryTimeout:    DefaultEntryTimeoutSeconds,
+		attrTimeout:     DefaultAttrTimeoutSeconds,
+		sessionLeaseTTL: DefaultSessionLeaseTTL,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(m)
+		}
+	}
+	return m
 }
 
 // Module 提供 meta 依赖注入模块。
 var Module = fx.Module("meta",
-	fx.Provide(New),
+	fx.Provide(func(store db.Store) Manager {
+		return New(store)
+	}),
 )
 
 // Lookup 执行单级目录项查找与块属性动态推导。

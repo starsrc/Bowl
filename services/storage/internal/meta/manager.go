@@ -57,6 +57,7 @@ type Manager interface {
 	Fsync(ctx context.Context, params FsyncParams) error
 	Release(ctx context.Context, params ReleaseParams) error
 	OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirResult, error)
+	FsyncDir(ctx context.Context, params FsyncDirParams) error
 	ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 	ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry, error)
 	ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]DirEntryPlus, error)
@@ -2140,6 +2141,65 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirRe
 	}
 
 	return result, nil
+}
+
+// FsyncDir 同步目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
+// 注：params.Datasync 保留用于 Linux FUSE / POSIX 协议契约对齐，当前元数据在 PostgreSQL 事务提交时已完成持久化。
+func (m *manager) FsyncDir(ctx context.Context, params FsyncDirParams) error {
+	if params.Ino == 0 || params.Ino > math.MaxInt64 || params.Fh == 0 || params.Fh > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if err := validateOptionalSessionID(params.SessionID); err != nil {
+		return err
+	}
+
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		dirInode, err := q.GetInode(ctx, int64(params.Ino))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get dir inode %d: %w", params.Ino, err)
+		}
+
+		if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(params.Fh),
+			Ino: int64(params.Ino),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrBadFileHandle
+			}
+			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+		}
+
+		if params.SessionID != nil && (!handle.SessionID.Valid || uint64(handle.SessionID.Int64) != *params.SessionID) {
+			return ErrBadFileHandle
+		}
+
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			return ErrInvalidArgument
+		case errors.Is(err, ErrNotFound):
+			return ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return ErrNotDir
+		case errors.Is(err, ErrBadFileHandle):
+			return ErrBadFileHandle
+		default:
+			return fmt.Errorf("fsyncdir tx: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // ReleaseDir 关闭并销毁目录句柄，且在孤儿目录无活跃句柄时执行最终物理回收。

@@ -277,6 +277,63 @@ func (_c *MockManager_Fsync_Call) RunAndReturn(run func(ctx context.Context, par
 	return _c
 }
 
+// FsyncDir provides a mock function for the type MockManager
+func (_mock *MockManager) FsyncDir(ctx context.Context, params meta.FsyncDirParams) error {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FsyncDir")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.FsyncDirParams) error); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_FsyncDir_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FsyncDir'
+type MockManager_FsyncDir_Call struct {
+	*mock.Call
+}
+
+// FsyncDir is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.FsyncDirParams
+func (_e *MockManager_Expecter) FsyncDir(ctx any, params any) *MockManager_FsyncDir_Call {
+	return &MockManager_FsyncDir_Call{Call: _e.mock.On("FsyncDir", ctx, params)}
+}
+
+func (_c *MockManager_FsyncDir_Call) Run(run func(ctx context.Context, params meta.FsyncDirParams)) *MockManager_FsyncDir_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.FsyncDirParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.FsyncDirParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_FsyncDir_Call) Return(err error) *MockManager_FsyncDir_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_FsyncDir_Call) RunAndReturn(run func(ctx context.Context, params meta.FsyncDirParams) error) *MockManager_FsyncDir_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetAttr provides a mock function for the type MockManager
 func (_mock *MockManager) GetAttr(ctx context.Context, ino uint64) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, ino)

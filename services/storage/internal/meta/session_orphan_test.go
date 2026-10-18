@@ -59,6 +59,13 @@ func TestSessionID_InputValidation_AllHandleOps(t *testing.T) {
 		})
 		require.ErrorIs(t, err, meta.ErrInvalidArgument)
 
+		err = mgr.FsyncDir(ctx, meta.FsyncDirParams{
+			Ino:       1,
+			Fh:        10,
+			SessionID: badSession,
+		})
+		require.ErrorIs(t, err, meta.ErrInvalidArgument)
+
 		err = mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
 			Ino:       1,
 			Fh:        10,
@@ -548,6 +555,7 @@ func TestSessionHandleAndOrphanGC_PostgresIntegration(t *testing.T) {
 
 		// 1. 持已过期会话句柄执行只读/读写操作均返回 ErrBadFileHandle (EBADF)
 		assert.ErrorIs(t, mgr.Fsync(ctx, meta.FsyncParams{Ino: fileIno, Fh: fileFh, SessionID: &s1}), meta.ErrBadFileHandle)
+		assert.ErrorIs(t, mgr.FsyncDir(ctx, meta.FsyncDirParams{Ino: dirIno, Fh: dirFh, SessionID: &s1}), meta.ErrBadFileHandle)
 		_, err = mgr.ReadDir(ctx, meta.ReadDirParams{Ino: dirIno, Fh: dirFh, Limit: 10, SessionID: &s1})
 		assert.ErrorIs(t, err, meta.ErrBadFileHandle)
 		_, err = mgr.ReadDirPlus(ctx, meta.ReadDirPlusParams{Ino: dirIno, Fh: dirFh, Limit: 10, SessionID: &s1})

@@ -211,6 +211,14 @@ type OpenDirResult struct {
 	OpenFlags uint32
 }
 
+// FsyncDirParams 定义目录句柄同步操作的输入参数。
+type FsyncDirParams struct {
+	Ino       uint64
+	Fh        uint64
+	Datasync  bool
+	SessionID *uint64
+}
+
 // ReleaseDirParams 定义目录句柄销毁与孤儿回收操作的输入参数。
 type ReleaseDirParams struct {
 	Ino       uint64

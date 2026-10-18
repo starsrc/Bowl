@@ -17,6 +17,11 @@ func TestCreateRequestValidation(t *testing.T) {
 		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
+	validSessionID := uint64(1001)
+	maxSessionID := uint64(math.MaxInt64)
+	zeroSessionID := uint64(0)
+	overflowSessionID := uint64(math.MaxInt64) + 1
+
 	for _, tc := range []struct {
 		name      string
 		parentIno uint64
@@ -25,6 +30,7 @@ func TestCreateRequestValidation(t *testing.T) {
 		uid       uint32
 		gid       uint32
 		flags     uint32
+		sessionID *uint64
 		valid     bool
 	}{
 		// 正向边界用例
@@ -36,6 +42,28 @@ func TestCreateRequestValidation(t *testing.T) {
 			uid:       1000,
 			gid:       1000,
 			flags:     0o100 | 0o2, // O_CREAT | O_RDWR
+			valid:     true,
+		},
+		{
+			name:      "合法: 携带有效 session_id 及最大合法 int64 session_id",
+			parentIno: 1,
+			entryName: []byte("file.txt"),
+			mode:      0o100644,
+			uid:       1000,
+			gid:       1000,
+			flags:     0o100 | 0o2,
+			sessionID: &validSessionID,
+			valid:     true,
+		},
+		{
+			name:      "合法: session_id 处于正整数上限 math.MaxInt64",
+			parentIno: 1,
+			entryName: []byte("file.txt"),
+			mode:      0o100644,
+			uid:       1000,
+			gid:       1000,
+			flags:     0o100 | 0o2,
+			sessionID: &maxSessionID,
 			valid:     true,
 		},
 		{
@@ -200,6 +228,22 @@ func TestCreateRequestValidation(t *testing.T) {
 			flags:     0,
 			valid:     false,
 		},
+		{
+			name:      "非法: session_id 为 0",
+			parentIno: 1,
+			entryName: []byte("file.txt"),
+			mode:      0o100644,
+			sessionID: &zeroSessionID,
+			valid:     false,
+		},
+		{
+			name:      "非法: session_id 超过 math.MaxInt64",
+			parentIno: 1,
+			entryName: []byte("file.txt"),
+			mode:      0o100644,
+			sessionID: &overflowSessionID,
+			valid:     false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &storagev1.CreateRequest{
@@ -209,6 +253,7 @@ func TestCreateRequestValidation(t *testing.T) {
 				Uid:       tc.uid,
 				Gid:       tc.gid,
 				Flags:     tc.flags,
+				SessionId: tc.sessionID,
 			}
 
 			valErr := validator.Validate(req)

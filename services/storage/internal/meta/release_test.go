@@ -223,6 +223,11 @@ func TestRelease_PositivePath(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteFlockFileLocksBySessionAndFh(mock.Anything, db.DeleteFlockFileLocksBySessionAndFhParams{
 				SessionID: int64(sessionID),
 				Ino:       int64(ino),

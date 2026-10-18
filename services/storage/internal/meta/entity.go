@@ -132,6 +132,7 @@ type CreateParams struct {
 	UID       uint32
 	GID       uint32
 	Flags     uint32
+	SessionID *uint64
 }
 
 // CreateResult 包含新建文件的 Inode 元数据、初始分配的 FileHandle 与打开响应标志。
@@ -143,8 +144,9 @@ type CreateResult struct {
 
 // OpenParams 定义打开文件并分配文件句柄的输入参数。
 type OpenParams struct {
-	Ino   uint64
-	Flags uint32
+	Ino       uint64
+	Flags     uint32
+	SessionID *uint64
 }
 
 // OpenResult 包含打开文件分配的 FileHandle 与打开响应标志。
@@ -163,9 +165,10 @@ type FlushParams struct {
 
 // FsyncParams 定义文件同步操作的输入参数。
 type FsyncParams struct {
-	Ino      uint64
-	Fh       uint64
-	Datasync bool
+	Ino       uint64
+	Fh        uint64
+	Datasync  bool
+	SessionID *uint64
 }
 
 // ReleaseParams 定义文件句柄销毁、BSD flock 句柄锁清理与孤儿回收操作的输入参数。
@@ -179,8 +182,9 @@ type ReleaseParams struct {
 
 // OpenDirParams 定义打开目录并分配目录句柄的输入参数。
 type OpenDirParams struct {
-	Ino   uint64
-	Flags uint32
+	Ino       uint64
+	Flags     uint32
+	SessionID *uint64
 }
 
 // OpenDirResult 包含打开目录分配的 DirHandle 与打开响应标志。
@@ -191,8 +195,9 @@ type OpenDirResult struct {
 
 // ReleaseDirParams 定义目录句柄销毁与孤儿回收操作的输入参数。
 type ReleaseDirParams struct {
-	Ino uint64
-	Fh  uint64
+	Ino       uint64
+	Fh        uint64
+	SessionID *uint64
 }
 
 // 目录遍历最大单次条目配额限制。
@@ -214,10 +219,11 @@ type DirEntry struct {
 
 // ReadDirParams 定义目录项流式遍历输入参数。
 type ReadDirParams struct {
-	Ino    uint64
-	Fh     uint64
-	Offset uint64
-	Limit  uint32
+	Ino       uint64
+	Fh        uint64
+	Offset    uint64
+	Limit     uint32
+	SessionID *uint64
 }
 
 // DirEntryPlus 定义 ReadDirPlus 返回的扩展目录项实体（包含完整 Inode 属性与内核缓存时效）。
@@ -232,19 +238,21 @@ type DirEntryPlus struct {
 
 // ReadDirPlusParams 定义扩展目录项流式遍历输入参数。
 type ReadDirPlusParams struct {
-	Ino    uint64
-	Fh     uint64
-	Offset uint64
-	Limit  uint32
+	Ino       uint64
+	Fh        uint64
+	Offset    uint64
+	Limit     uint32
+	SessionID *uint64
 }
 
 // FallocateParams 定义文件空间预分配与打洞操作的输入参数。
 type FallocateParams struct {
-	Ino    uint64
-	Fh     uint64
-	Offset uint64
-	Length uint64
-	Mode   uint32
+	Ino       uint64
+	Fh        uint64
+	Offset    uint64
+	Length    uint64
+	Mode      uint32
+	SessionID *uint64
 }
 
 // SetXattrParams 定义设置扩展属性的输入参数。

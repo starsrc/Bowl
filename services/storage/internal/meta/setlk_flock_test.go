@@ -65,6 +65,11 @@ func TestSetLk_FlockUnitSemantics(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteFlockFileLocksBySessionAndFh(mock.Anything, db.DeleteFlockFileLocksBySessionAndFhParams{
 				SessionID: 10,
 				Ino:       int64(ino),
@@ -152,6 +157,11 @@ func TestSetLk_FlockUnitSemantics(t *testing.T) {
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
 			Return(db.ClientSession{SessionID: 10}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -246,6 +256,11 @@ func TestSetLk_FlockUnitSemantics(t *testing.T) {
 			Return(db.ClientSession{SessionID: 10}, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+
 		// 第一步：在事务内删除 fh1 原本持有的 F_RDLCK (返回删除了 1 行)
 		mockQuerier.EXPECT().
 			DeleteFlockFileLocksBySessionAndFh(mock.Anything, db.DeleteFlockFileLocksBySessionAndFhParams{
@@ -328,6 +343,11 @@ func TestSetLk_FlockUnitSemantics(t *testing.T) {
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
 			Return(db.ClientSession{SessionID: 10}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
 			Once()
 
 		// fh1 先前已持有排他 flock，DeleteFlockFileLocksBySessionAndFh 删除 1 条记录

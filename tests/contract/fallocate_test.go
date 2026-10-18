@@ -15,14 +15,20 @@ func TestFallocateRequestValidation(t *testing.T) {
 		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
+	validSessionID := uint64(1001)
+	maxSessionID := uint64(math.MaxInt64)
+	zeroSessionID := uint64(0)
+	overflowSessionID := uint64(math.MaxInt64) + 1
+
 	for _, tc := range []struct {
-		name   string
-		ino    uint64
-		fh     uint64
-		offset uint64
-		length uint64
-		mode   uint32
-		valid  bool
+		name      string
+		ino       uint64
+		fh        uint64
+		offset    uint64
+		length    uint64
+		mode      uint32
+		sessionID *uint64
+		valid     bool
 	}{
 		// 正向边界用例
 		{
@@ -35,13 +41,14 @@ func TestFallocateRequestValidation(t *testing.T) {
 			valid:  true,
 		},
 		{
-			name:   "合法: 常规预分配 (offset > 0, mode=0x01)",
-			ino:    100,
-			fh:     42,
-			offset: 4096,
-			length: 8192,
-			mode:   0x01,
-			valid:  true,
+			name:      "合法: 常规预分配 (offset > 0, mode=0x01, 携带有效 session_id)",
+			ino:       100,
+			fh:        42,
+			offset:    4096,
+			length:    8192,
+			mode:      0x01,
+			sessionID: &validSessionID,
+			valid:     true,
 		},
 		{
 			name:   "合法: 打洞保留大小 (mode=0x03)",
@@ -53,13 +60,14 @@ func TestFallocateRequestValidation(t *testing.T) {
 			valid:  true,
 		},
 		{
-			name:   "合法: 最大合法 int64 边界参数",
-			ino:    math.MaxInt64,
-			fh:     math.MaxInt64,
-			offset: math.MaxInt64,
-			length: math.MaxInt64,
-			mode:   0,
-			valid:  true,
+			name:      "合法: 最大合法 int64 边界参数与 session_id",
+			ino:       math.MaxInt64,
+			fh:        math.MaxInt64,
+			offset:    math.MaxInt64,
+			length:    math.MaxInt64,
+			mode:      0,
+			sessionID: &maxSessionID,
+			valid:     true,
 		},
 
 		// 边界与防御负向用例：ino
@@ -168,14 +176,35 @@ func TestFallocateRequestValidation(t *testing.T) {
 			mode:   0,
 			valid:  false,
 		},
+		{
+			name:      "非法: session_id 为 0",
+			ino:       1,
+			fh:        1,
+			offset:    0,
+			length:    1,
+			mode:      0,
+			sessionID: &zeroSessionID,
+			valid:     false,
+		},
+		{
+			name:      "非法: session_id 超过 math.MaxInt64",
+			ino:       1,
+			fh:        1,
+			offset:    0,
+			length:    1,
+			mode:      0,
+			sessionID: &overflowSessionID,
+			valid:     false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &storagev1.FallocateRequest{
-				Ino:    tc.ino,
-				Fh:     tc.fh,
-				Offset: tc.offset,
-				Length: tc.length,
-				Mode:   tc.mode,
+				Ino:       tc.ino,
+				Fh:        tc.fh,
+				Offset:    tc.offset,
+				Length:    tc.length,
+				Mode:      tc.mode,
+				SessionId: tc.sessionID,
 			}
 
 			valErr := validator.Validate(req)

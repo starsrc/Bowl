@@ -147,12 +147,18 @@ func TestFsyncRequestValidation(t *testing.T) {
 		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
+	validSessionID := uint64(1001)
+	maxSessionID := uint64(math.MaxInt64)
+	zeroSessionID := uint64(0)
+	overflowSessionID := uint64(math.MaxInt64) + 1
+
 	for _, tc := range []struct {
-		name     string
-		ino      uint64
-		fh       uint64
-		datasync bool
-		valid    bool
+		name      string
+		ino       uint64
+		fh        uint64
+		datasync  bool
+		sessionID *uint64
+		valid     bool
 	}{
 		// 正向边界用例
 		{
@@ -163,18 +169,20 @@ func TestFsyncRequestValidation(t *testing.T) {
 			valid:    true,
 		},
 		{
-			name:     "合法: 仅数据同步 (datasync = true)",
-			ino:      100,
-			fh:       42,
-			datasync: true,
-			valid:    true,
+			name:      "合法: 仅数据同步 (datasync = true, 携带有效 session_id)",
+			ino:       100,
+			fh:        42,
+			datasync:  true,
+			sessionID: &validSessionID,
+			valid:     true,
 		},
 		{
-			name:     "合法: 最大合法 int64 边界 Inode 与句柄",
-			ino:      math.MaxInt64,
-			fh:       math.MaxInt64,
-			datasync: true,
-			valid:    true,
+			name:      "合法: 最大合法 int64 边界 Inode、句柄与 session_id",
+			ino:       math.MaxInt64,
+			fh:        math.MaxInt64,
+			datasync:  true,
+			sessionID: &maxSessionID,
+			valid:     true,
 		},
 
 		// 边界与防御负向用例
@@ -220,12 +228,29 @@ func TestFsyncRequestValidation(t *testing.T) {
 			datasync: false,
 			valid:    false,
 		},
+		{
+			name:      "非法: session_id 为 0",
+			ino:       1,
+			fh:        1,
+			datasync:  false,
+			sessionID: &zeroSessionID,
+			valid:     false,
+		},
+		{
+			name:      "非法: session_id 超过 math.MaxInt64",
+			ino:       1,
+			fh:        1,
+			datasync:  false,
+			sessionID: &overflowSessionID,
+			valid:     false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &storagev1.FsyncRequest{
-				Ino:      tc.ino,
-				Fh:       tc.fh,
-				Datasync: tc.datasync,
+				Ino:       tc.ino,
+				Fh:        tc.fh,
+				Datasync:  tc.datasync,
+				SessionId: tc.sessionID,
 			}
 
 			valErr := validator.Validate(req)

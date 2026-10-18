@@ -56,24 +56,26 @@ func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) error 
 }
 
 const createFileHandle = `-- name: CreateFileHandle :one
-INSERT INTO file_handles (ino, flags)
-VALUES ($1, $2)
-RETURNING fh, ino, flags, created_at
+INSERT INTO file_handles (ino, flags, session_id)
+VALUES ($1, $2, $3)
+RETURNING fh, ino, flags, created_at, session_id
 `
 
 type CreateFileHandleParams struct {
-	Ino   int64 `json:"ino"`
-	Flags int32 `json:"flags"`
+	Ino       int64       `json:"ino"`
+	Flags     int32       `json:"flags"`
+	SessionID pgtype.Int8 `json:"session_id"`
 }
 
 func (q *Queries) CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error) {
-	row := q.db.QueryRow(ctx, createFileHandle, arg.Ino, arg.Flags)
+	row := q.db.QueryRow(ctx, createFileHandle, arg.Ino, arg.Flags, arg.SessionID)
 	var i FileHandle
 	err := row.Scan(
 		&i.Fh,
 		&i.Ino,
 		&i.Flags,
 		&i.CreatedAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -280,9 +282,19 @@ func (q *Queries) DeleteExpiredClientSessions(ctx context.Context) error {
 }
 
 const deleteFileHandle = `-- name: DeleteFileHandle :one
-DELETE FROM file_handles
-WHERE fh = $1 AND ino = $2
-RETURNING fh
+DELETE FROM file_handles fh
+WHERE fh.fh = $1
+  AND fh.ino = $2
+  AND (
+      fh.session_id IS NULL
+      OR EXISTS (
+          SELECT 1
+          FROM client_sessions s
+          WHERE s.session_id = fh.session_id
+              AND s.expires_at > clock_timestamp()
+      )
+  )
+RETURNING fh.fh
 `
 
 type DeleteFileHandleParams struct {
@@ -437,6 +449,28 @@ func (q *Queries) DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg
 	return result.RowsAffected(), nil
 }
 
+const deleteUnreferencedOrphanInodes = `-- name: DeleteUnreferencedOrphanInodes :exec
+DELETE FROM inodes
+WHERE ino IN (
+    SELECT i.ino
+    FROM inodes i
+    WHERE i.nlink = 0
+      AND NOT EXISTS (
+          SELECT 1
+          FROM file_handles fh
+          LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+          WHERE fh.ino = i.ino
+            AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
+      )
+    FOR UPDATE SKIP LOCKED
+)
+`
+
+func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteUnreferencedOrphanInodes)
+	return err
+}
+
 const getEntry = `-- name: GetEntry :one
 SELECT parent_ino, name, ino
 FROM entries
@@ -456,8 +490,12 @@ func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) (Entry, erro
 }
 
 const getFileHandle = `-- name: GetFileHandle :one
-SELECT fh, ino, flags, created_at FROM file_handles
-WHERE fh = $1 AND ino = $2
+SELECT fh.fh, fh.ino, fh.flags, fh.created_at, fh.session_id
+FROM file_handles fh
+LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+WHERE fh.fh = $1
+  AND fh.ino = $2
+  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
 `
 
 type GetFileHandleParams struct {
@@ -473,6 +511,7 @@ func (q *Queries) GetFileHandle(ctx context.Context, arg GetFileHandleParams) (F
 		&i.Ino,
 		&i.Flags,
 		&i.CreatedAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -743,7 +782,11 @@ func (q *Queries) HasChildEntries(ctx context.Context, parentIno int64) (bool, e
 
 const hasFileHandlesByIno = `-- name: HasFileHandlesByIno :one
 SELECT EXISTS (
-    SELECT 1 FROM file_handles WHERE ino = $1
+    SELECT 1
+    FROM file_handles fh
+    LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+    WHERE fh.ino = $1
+      AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
 )
 `
 

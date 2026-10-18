@@ -54,6 +54,10 @@ func TestSetLk_PosixRangeSplitAndCoalesce(t *testing.T) {
 			UpsertClientSession(mock.Anything, mock.Anything).
 			Return(db.ClientSession{SessionID: sessionID}, nil).
 			Once()
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
 	}
 
 	t.Run("中间挖空解锁: [0, 100] (pid=1001) 对 [20, 50] 执行 F_UNLCK 裂解为 [0, 19] 与 [51, 100] 且均保留 pid=1001", func(t *testing.T) {

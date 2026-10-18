@@ -1404,7 +1404,9 @@ type CreateRequest struct {
 	// 所属组 ID。
 	Gid uint32 `protobuf:"varint,5,opt,name=gid,proto3" json:"gid,omitempty"`
 	// 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等)。
-	Flags         uint32 `protobuf:"varint,6,opt,name=flags,proto3" json:"flags,omitempty"`
+	Flags uint32 `protobuf:"varint,6,opt,name=flags,proto3" json:"flags,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,7,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1477,6 +1479,13 @@ func (x *CreateRequest) GetGid() uint32 {
 func (x *CreateRequest) GetFlags() uint32 {
 	if x != nil {
 		return x.Flags
+	}
+	return 0
+}
+
+func (x *CreateRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -1569,7 +1578,9 @@ type OpenRequest struct {
 	// 待打开节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等)。
-	Flags         uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
+	Flags uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1614,6 +1625,13 @@ func (x *OpenRequest) GetIno() uint64 {
 func (x *OpenRequest) GetFlags() uint32 {
 	if x != nil {
 		return x.Flags
+	}
+	return 0
+}
+
+func (x *OpenRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -1791,7 +1809,9 @@ type FsyncRequest struct {
 	// 待同步的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 是否仅同步数据内容 (fdatasync 语义)。若为 true，仅同步文件数据而不强制刷写非必要元数据。
-	Datasync      bool `protobuf:"varint,3,opt,name=datasync,proto3" json:"datasync,omitempty"`
+	Datasync bool `protobuf:"varint,3,opt,name=datasync,proto3" json:"datasync,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,4,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1845,6 +1865,13 @@ func (x *FsyncRequest) GetDatasync() bool {
 		return x.Datasync
 	}
 	return false
+}
+
+func (x *FsyncRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
+	}
+	return 0
 }
 
 // FsyncResponse 定义 Fsync 接口响应结果。
@@ -2009,7 +2036,9 @@ type OpenDirRequest struct {
 	// 待打开目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 打开标志位 (open flags, 如 O_RDONLY)。
-	Flags         uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
+	Flags uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2054,6 +2083,13 @@ func (x *OpenDirRequest) GetIno() uint64 {
 func (x *OpenDirRequest) GetFlags() uint32 {
 	if x != nil {
 		return x.Flags
+	}
+	return 0
+}
+
+func (x *OpenDirRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -2119,7 +2155,9 @@ type ReleaseDirRequest struct {
 	// 目标目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 待关闭并销毁的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
-	Fh            uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2164,6 +2202,13 @@ func (x *ReleaseDirRequest) GetIno() uint64 {
 func (x *ReleaseDirRequest) GetFh() uint64 {
 	if x != nil {
 		return x.Fh
+	}
+	return 0
+}
+
+func (x *ReleaseDirRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -2289,7 +2334,9 @@ type ReadDirRequest struct {
 	// 读取起始游标偏移量。0 表示从头开始读取（包含 "." 与 ".."）。
 	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	// 单次最大读取条目数配额（最大 4096）。
-	Limit         uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,5,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2348,6 +2395,13 @@ func (x *ReadDirRequest) GetOffset() uint64 {
 func (x *ReadDirRequest) GetLimit() uint32 {
 	if x != nil {
 		return x.Limit
+	}
+	return 0
+}
+
+func (x *ReadDirRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -2500,7 +2554,9 @@ type ReadDirPlusRequest struct {
 	// 读取起始游标偏移量。0 表示从头开始读取（包含 "." 与 ".."）。
 	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	// 单次最大读取条目数配额（最大 4096）。
-	Limit         uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,5,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2563,6 +2619,13 @@ func (x *ReadDirPlusRequest) GetLimit() uint32 {
 	return 0
 }
 
+func (x *ReadDirPlusRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
+	}
+	return 0
+}
+
 // ReadDirPlusResponse 定义 ReadDirPlus 接口响应结果。
 type ReadDirPlusResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -2621,7 +2684,9 @@ type FallocateRequest struct {
 	// 操作区间长度（字节）。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Length uint64 `protobuf:"varint,4,opt,name=length,proto3" json:"length,omitempty"`
 	// fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
-	Mode          uint32 `protobuf:"varint,5,opt,name=mode,proto3" json:"mode,omitempty"`
+	Mode uint32 `protobuf:"varint,5,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,6,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2687,6 +2752,13 @@ func (x *FallocateRequest) GetLength() uint64 {
 func (x *FallocateRequest) GetMode() uint32 {
 	if x != nil {
 		return x.Mode
+	}
+	return 0
+}
+
+func (x *FallocateRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -3919,7 +3991,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x0enew_parent_ino\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x12\x9a\x01\n" +
 	"\bnew_name\x18\x04 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\"\x10\n" +
-	"\x0eRenameResponse\"\xb0\x02\n" +
+	"\x0eRenameResponse\"\xf6\x02\n" +
 	"\rCreateRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
@@ -3928,17 +4000,23 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x04mode\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x05 \x01(\rR\x03gid\x12\x14\n" +
-	"\x05flags\x18\x06 \x01(\rR\x05flags\"\xff\x01\n" +
+	"\x05flags\x18\x06 \x01(\rR\x05flags\x125\n" +
+	"\n" +
+	"session_id\x18\a \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"\xff\x01\n" +
 	"\x0eCreateResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12\x17\n" +
 	"\x02fh\x18\x02 \x01(\x04B\a\xbaH\x042\x02 \x00R\x02fh\x12\x1d\n" +
 	"\n" +
 	"open_flags\x18\x03 \x01(\rR\topenFlags\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x04 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"H\n" +
+	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x8e\x01\n" +
 	"\vOpenRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x14\n" +
-	"\x05flags\x18\x02 \x01(\rR\x05flags\"F\n" +
+	"\x05flags\x18\x02 \x01(\rR\x05flags\x125\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"F\n" +
 	"\fOpenResponse\x12\x17\n" +
 	"\x02fh\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x02fh\x12\x1d\n" +
 	"\n" +
@@ -3952,11 +4030,14 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"session_id\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x01R\tsessionId\x88\x01\x01B\r\n" +
 	"\v_lock_ownerB\r\n" +
 	"\v_session_id\"\x0f\n" +
-	"\rFlushResponse\"r\n" +
+	"\rFlushResponse\"\xb8\x01\n" +
 	"\fFsyncRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1a\n" +
-	"\bdatasync\x18\x03 \x01(\bR\bdatasync\"\x0f\n" +
+	"\bdatasync\x18\x03 \x01(\bR\bdatasync\x125\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"\x0f\n" +
 	"\rFsyncResponse\"\xc4\x02\n" +
 	"\x0eReleaseRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
@@ -3969,17 +4050,23 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"session_id\x18\x05 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x01R\tsessionId\x88\x01\x01B\r\n" +
 	"\v_lock_ownerB\r\n" +
 	"\v_session_id\"\x11\n" +
-	"\x0fReleaseResponse\"K\n" +
+	"\x0fReleaseResponse\"\x91\x01\n" +
 	"\x0eOpenDirRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x14\n" +
-	"\x05flags\x18\x02 \x01(\rR\x05flags\"S\n" +
+	"\x05flags\x18\x02 \x01(\rR\x05flags\x125\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"S\n" +
 	"\x0fOpenDirResponse\x12!\n" +
 	"\x02fh\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1d\n" +
 	"\n" +
-	"open_flags\x18\x02 \x01(\rR\topenFlags\"[\n" +
+	"open_flags\x18\x02 \x01(\rR\topenFlags\"\xa1\x01\n" +
 	"\x11ReleaseDirRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
-	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\"\x14\n" +
+	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x125\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"\x14\n" +
 	"\x12ReleaseDirResponse\"\x82\x02\n" +
 	"\bDirEntry\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x93\x01\n" +
@@ -3987,14 +4074,17 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1b\n" +
 	"\x04mode\x18\x03 \x01(\rB\a\xbaH\x04*\x02 \x00R\x04mode\x12(\n" +
 	"\vnext_offset\x18\x04 \x01(\x04B\a\xbaH\x042\x02 \x00R\n" +
-	"nextOffset\"\xa3\x01\n" +
+	"nextOffset\"\xe9\x01\n" +
 	"\x0eReadDirRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12'\n" +
 	"\x06offset\x18\x03 \x01(\x04B\x0f\xbaH\f2\n" +
 	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x06offset\x12 \n" +
 	"\x05limit\x18\x04 \x01(\rB\n" +
-	"\xbaH\a*\x05\x18\x80  \x00R\x05limit\"A\n" +
+	"\xbaH\a*\x05\x18\x80  \x00R\x05limit\x125\n" +
+	"\n" +
+	"session_id\x18\x05 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"A\n" +
 	"\x0fReadDirResponse\x12.\n" +
 	"\aentries\x18\x01 \x03(\v2\x14.storage.v1.DirEntryR\aentries\"\xa0\x03\n" +
 	"\fDirEntryPlus\x12\x19\n" +
@@ -4005,23 +4095,29 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"nextOffset\x12/\n" +
 	"\x05inode\x18\x04 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x06 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xa7\x01\n" +
+	"\x14attr_timeout_seconds\x18\x06 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xed\x01\n" +
 	"\x12ReadDirPlusRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12'\n" +
 	"\x06offset\x18\x03 \x01(\x04B\x0f\xbaH\f2\n" +
 	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x06offset\x12 \n" +
 	"\x05limit\x18\x04 \x01(\rB\n" +
-	"\xbaH\a*\x05\x18\x80  \x00R\x05limit\"I\n" +
+	"\xbaH\a*\x05\x18\x80  \x00R\x05limit\x125\n" +
+	"\n" +
+	"session_id\x18\x05 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"I\n" +
 	"\x13ReadDirPlusResponse\x122\n" +
-	"\aentries\x18\x01 \x03(\v2\x18.storage.v1.DirEntryPlusR\aentries\"\xc2\x01\n" +
+	"\aentries\x18\x01 \x03(\v2\x18.storage.v1.DirEntryPlusR\aentries\"\x88\x02\n" +
 	"\x10FallocateRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12'\n" +
 	"\x06offset\x18\x03 \x01(\x04B\x0f\xbaH\f2\n" +
 	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x06offset\x12)\n" +
 	"\x06length\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x06length\x12\x12\n" +
-	"\x04mode\x18\x05 \x01(\rR\x04mode\"\x13\n" +
+	"\x04mode\x18\x05 \x01(\rR\x04mode\x125\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"\x13\n" +
 	"\x11FallocateResponse\"\xe9\x01\n" +
 	"\x0fSetXattrRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12q\n" +
@@ -4309,8 +4405,16 @@ func file_storage_v1_storage_proto_init() {
 		return
 	}
 	file_storage_v1_storage_proto_msgTypes[4].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[22].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[24].OneofWrappers = []any{}
 	file_storage_v1_storage_proto_msgTypes[26].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[28].OneofWrappers = []any{}
 	file_storage_v1_storage_proto_msgTypes[30].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[32].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[34].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[37].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[40].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[42].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

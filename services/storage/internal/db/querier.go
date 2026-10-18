@@ -28,6 +28,7 @@ type Querier interface {
 	DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) (int64, error)
 	DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error)
 	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
+	DeleteUnreferencedOrphanInodes(ctx context.Context) error
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
 	GetFileLockWaiter(ctx context.Context, arg GetFileLockWaiterParams) (FileLockWaiter, error)

@@ -622,6 +622,12 @@ message CreateRequest {
 
   // 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等)。
   uint32 flags = 6;
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 7 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // CreateResponse 包含新创建常规文件的元数据、分配的文件句柄以及 FUSE 内核缓存有效时间。
@@ -652,6 +658,12 @@ message OpenRequest {
 
   // 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等)。
   uint32 flags = 2;
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 3 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // OpenResponse 包含打开文件所分配的文件句柄及打开响应标志位。
@@ -706,6 +718,12 @@ message FsyncRequest {
 
   // 是否仅同步数据内容 (fdatasync 语义)。若为 true，仅同步文件数据而不强制刷写非必要元数据。
   bool datasync = 3;
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 4 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // FsyncResponse 定义 Fsync 接口响应结果。
@@ -755,6 +773,12 @@ message OpenDirRequest {
 
   // 打开标志位 (open flags, 如 O_RDONLY)。
   uint32 flags = 2;
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 3 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // OpenDirResponse 包含打开目录所分配的目录句柄及打开响应标志位。
@@ -782,6 +806,12 @@ message ReleaseDirRequest {
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 3 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // ReleaseDirResponse 定义 ReleaseDir 接口响应结果。
@@ -833,6 +863,12 @@ message ReadDirRequest {
     (buf.validate.field).uint32.gt = 0,
     (buf.validate.field).uint32.lte = 4096
   ];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 5 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // ReadDirResponse 定义 ReadDir 接口响应结果。
@@ -893,6 +929,12 @@ message ReadDirPlusRequest {
     (buf.validate.field).uint32.gt = 0,
     (buf.validate.field).uint32.lte = 4096
   ];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 5 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // ReadDirPlusResponse 定义 ReadDirPlus 接口响应结果。
@@ -926,6 +968,12 @@ message FallocateRequest {
 
   // fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
   uint32 mode = 5;
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 6 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // FallocateResponse 定义 Fallocate 接口响应结果。

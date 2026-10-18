@@ -15,11 +15,17 @@ func TestOpenDirRequestValidation(t *testing.T) {
 		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
+	validSessionID := uint64(1001)
+	maxSessionID := uint64(math.MaxInt64)
+	zeroSessionID := uint64(0)
+	overflowSessionID := uint64(math.MaxInt64) + 1
+
 	for _, tc := range []struct {
-		name  string
-		ino   uint64
-		flags uint32
-		valid bool
+		name      string
+		ino       uint64
+		flags     uint32
+		sessionID *uint64
+		valid     bool
 	}{
 		// 正向边界用例
 		{
@@ -29,16 +35,18 @@ func TestOpenDirRequestValidation(t *testing.T) {
 			valid: true,
 		},
 		{
-			name:  "合法: 常规目录 Inode 打开",
-			ino:   100,
-			flags: 0o0,
-			valid: true,
+			name:      "合法: 常规目录 Inode 打开 (携带有效 session_id)",
+			ino:       100,
+			flags:     0o0,
+			sessionID: &validSessionID,
+			valid:     true,
 		},
 		{
-			name:  "合法: 最大合法 int64 边界 Inode",
-			ino:   math.MaxInt64,
-			flags: 0o0,
-			valid: true,
+			name:      "合法: 最大合法 int64 边界 Inode 与 session_id",
+			ino:       math.MaxInt64,
+			flags:     0o0,
+			sessionID: &maxSessionID,
+			valid:     true,
 		},
 		{
 			name:  "合法: flags 为 0",
@@ -66,11 +74,26 @@ func TestOpenDirRequestValidation(t *testing.T) {
 			flags: 0o0,
 			valid: false,
 		},
+		{
+			name:      "非法: session_id 为 0",
+			ino:       1,
+			flags:     0o0,
+			sessionID: &zeroSessionID,
+			valid:     false,
+		},
+		{
+			name:      "非法: session_id 超过 math.MaxInt64",
+			ino:       1,
+			flags:     0o0,
+			sessionID: &overflowSessionID,
+			valid:     false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &storagev1.OpenDirRequest{
-				Ino:   tc.ino,
-				Flags: tc.flags,
+				Ino:       tc.ino,
+				Flags:     tc.flags,
+				SessionId: tc.sessionID,
 			}
 
 			valErr := validator.Validate(req)

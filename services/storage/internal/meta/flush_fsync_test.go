@@ -175,6 +175,11 @@ func TestFlush_PositivePath(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeletePosixFileLocksBySessionAndOwner(mock.Anything, db.DeletePosixFileLocksBySessionAndOwnerParams{
 				SessionID: int64(sessionID),
 				Ino:       int64(ino),

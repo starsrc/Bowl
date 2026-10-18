@@ -83,6 +83,7 @@ type XattrQuerier interface {
 type FileLockQuerier interface {
 	DeleteExpiredClientSessions(ctx context.Context) error
 	UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error)
+	DeleteUnreferencedOrphanInodes(ctx context.Context) error
 	GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)
 	CreateFileLock(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error)
@@ -752,6 +753,33 @@ func TestQuerier_MknodOperators(t *testing.T) {
 			assert.Equal(t, expected, result)
 		})
 
+		t.Run("成功创建绑定 session_id 的 FileHandle 并返回数据实体", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			withSessParams := db.CreateFileHandleParams{
+				Ino:       100,
+				Flags:     0o2,
+				SessionID: pgtype.Int8{Int64: 1001, Valid: true},
+			}
+			withSessExpected := db.FileHandle{
+				Fh:        2,
+				Ino:       100,
+				Flags:     0o2,
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+				SessionID: pgtype.Int8{Int64: 1001, Valid: true},
+			}
+
+			mockStore.EXPECT().
+				CreateFileHandle(mock.Anything, withSessParams).
+				Return(withSessExpected, nil).
+				Once()
+
+			result, err := store.CreateFileHandle(ctx, withSessParams)
+			require.NoError(t, err)
+			assert.Equal(t, withSessExpected, result)
+		})
+
 		t.Run("底层执行失败透传错误", func(t *testing.T) {
 			mockStore := dbmock.NewMockStore(t)
 			var store db.Store = mockStore
@@ -1276,6 +1304,12 @@ func TestStore_FileLockBehavior(t *testing.T) {
 		session, err := store.UpsertClientSession(ctx, upsertParams)
 		require.NoError(t, err)
 		assert.Equal(t, expectedSession, session)
+
+		mockStore.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+		require.NoError(t, store.DeleteUnreferencedOrphanInodes(ctx))
 	})
 
 	t.Run("GetFirstConflictingFileLock 与 ListActiveFileLocksByInoAndFlags", func(t *testing.T) {

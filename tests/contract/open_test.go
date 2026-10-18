@@ -15,11 +15,17 @@ func TestOpenRequestValidation(t *testing.T) {
 		t.Fatalf("初始化 protovalidate 验证器失败: %v", err)
 	}
 
+	validSessionID := uint64(1001)
+	maxSessionID := uint64(math.MaxInt64)
+	zeroSessionID := uint64(0)
+	overflowSessionID := uint64(math.MaxInt64) + 1
+
 	for _, tc := range []struct {
-		name  string
-		ino   uint64
-		flags uint32
-		valid bool
+		name      string
+		ino       uint64
+		flags     uint32
+		sessionID *uint64
+		valid     bool
 	}{
 		// 正向边界用例
 		{
@@ -29,10 +35,18 @@ func TestOpenRequestValidation(t *testing.T) {
 			valid: true,
 		},
 		{
-			name:  "合法: 常规 Inode 打开 (读写且截断)",
-			ino:   100,
-			flags: 0o2 | 0o1000, // O_RDWR | O_TRUNC
-			valid: true,
+			name:      "合法: 携带有效 session_id 打开",
+			ino:       100,
+			flags:     0o2,
+			sessionID: &validSessionID,
+			valid:     true,
+		},
+		{
+			name:      "合法: 常规 Inode 打开 (读写且截断, 最大合法 int64 session_id)",
+			ino:       100,
+			flags:     0o2 | 0o1000, // O_RDWR | O_TRUNC
+			sessionID: &maxSessionID,
+			valid:     true,
 		},
 		{
 			name:  "合法: 最大合法 int64 边界 Inode",
@@ -66,11 +80,26 @@ func TestOpenRequestValidation(t *testing.T) {
 			flags: 0o2,
 			valid: false,
 		},
+		{
+			name:      "非法: session_id 为 0",
+			ino:       1,
+			flags:     0o2,
+			sessionID: &zeroSessionID,
+			valid:     false,
+		},
+		{
+			name:      "非法: session_id 超过 math.MaxInt64",
+			ino:       1,
+			flags:     0o2,
+			sessionID: &overflowSessionID,
+			valid:     false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &storagev1.OpenRequest{
-				Ino:   tc.ino,
-				Flags: tc.flags,
+				Ino:       tc.ino,
+				Flags:     tc.flags,
+				SessionId: tc.sessionID,
 			}
 
 			valErr := validator.Validate(req)

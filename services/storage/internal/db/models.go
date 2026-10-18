@@ -25,6 +25,7 @@ type FileHandle struct {
 	Ino       int64              `json:"ino"`
 	Flags     int32              `json:"flags"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	SessionID pgtype.Int8        `json:"session_id"`
 }
 
 type FileLock struct {

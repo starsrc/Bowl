@@ -331,6 +331,11 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 			Return(db.ClientSession{SessionID: 10}, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+
 		// 已有另一持有者 (session=20, owner=2002) 在重叠区间 [0, 200] 持有 F_RDLCK，读读不冲突
 		mockQuerier.EXPECT().
 			ListActiveFileLocksByInoAndFlags(mock.Anything, db.ListActiveFileLocksByInoAndFlagsParams{
@@ -429,6 +434,11 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			ListActiveFileLocksByInoAndFlags(mock.Anything, db.ListActiveFileLocksByInoAndFlagsParams{
 				Ino:     int64(ino),
 				LkFlags: 0,
@@ -498,6 +508,11 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
 			Return(db.ClientSession{SessionID: 10}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
 			Once()
 
 		// 同一 lock_owner 但不同 session_id 属于异主，写锁冲突返回 ErrAgain
@@ -575,6 +590,11 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
 			Return(db.ClientSession{SessionID: 10}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil).
 			Once()
 
 		mockQuerier.EXPECT().

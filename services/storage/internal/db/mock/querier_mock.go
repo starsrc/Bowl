@@ -1232,6 +1232,57 @@ func (_c *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call) RunAndReturn(r
 	return _c
 }
 
+// DeleteUnreferencedOrphanInodes provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteUnreferencedOrphanInodes(ctx context.Context) error {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteUnreferencedOrphanInodes")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) error); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_DeleteUnreferencedOrphanInodes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteUnreferencedOrphanInodes'
+type MockQuerier_DeleteUnreferencedOrphanInodes_Call struct {
+	*mock.Call
+}
+
+// DeleteUnreferencedOrphanInodes is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockQuerier_Expecter) DeleteUnreferencedOrphanInodes(ctx any) *MockQuerier_DeleteUnreferencedOrphanInodes_Call {
+	return &MockQuerier_DeleteUnreferencedOrphanInodes_Call{Call: _e.mock.On("DeleteUnreferencedOrphanInodes", ctx)}
+}
+
+func (_c *MockQuerier_DeleteUnreferencedOrphanInodes_Call) Run(run func(ctx context.Context)) *MockQuerier_DeleteUnreferencedOrphanInodes_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteUnreferencedOrphanInodes_Call) Return(err error) *MockQuerier_DeleteUnreferencedOrphanInodes_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteUnreferencedOrphanInodes_Call) RunAndReturn(run func(ctx context.Context) error) *MockQuerier_DeleteUnreferencedOrphanInodes_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetEntry provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) GetEntry(ctx context.Context, arg db.GetEntryParams) (db.Entry, error) {
 	ret := _mock.Called(ctx, arg)

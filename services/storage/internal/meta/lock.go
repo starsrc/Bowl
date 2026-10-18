@@ -66,6 +66,9 @@ func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionI
 	if err != nil {
 		return fmt.Errorf("upsert client session %d: %w", sessionID, err)
 	}
+	if err := q.DeleteUnreferencedOrphanInodes(ctx); err != nil {
+		return fmt.Errorf("delete unreferenced orphan inodes: %w", err)
+	}
 	return nil
 }
 

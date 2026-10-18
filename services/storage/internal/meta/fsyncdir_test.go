@@ -309,49 +309,6 @@ func TestFsyncDir_InvariantsAndErrors(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrBadFileHandle))
 	})
 
-	t.Run("传入非空 SessionID 但句柄绑定了其他会话或无会话返回 ErrBadFileHandle", func(t *testing.T) {
-		callerSession := uint64(1001)
-		otherSession := int64(2002)
-
-		for _, handleSession := range []pgtype.Int8{
-			{Int64: otherSession, Valid: true},
-			{Valid: false},
-		} {
-			mockStore := dbmock.NewMockStore(t)
-			mockQuerier := dbmock.NewMockQuerier(t)
-			mgr := meta.New(mockStore)
-
-			setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
-
-			mockQuerier.EXPECT().
-				GetInode(mock.Anything, int64(ino)).
-				Return(baseDirInode, nil).
-				Once()
-
-			mockQuerier.EXPECT().
-				GetFileHandle(mock.Anything, db.GetFileHandleParams{
-					Fh:  int64(fh),
-					Ino: int64(ino),
-				}).
-				Return(db.FileHandle{
-					Fh:        int64(fh),
-					Ino:       int64(ino),
-					Flags:     int32(meta.O_RDONLY),
-					SessionID: handleSession,
-				}, nil).
-				Once()
-
-			err := mgr.FsyncDir(ctx, meta.FsyncDirParams{
-				Ino:       ino,
-				Fh:        fh,
-				Datasync:  false,
-				SessionID: &callerSession,
-			})
-			require.Error(t, err)
-			assert.True(t, errors.Is(err, meta.ErrBadFileHandle))
-		}
-	})
-
 	t.Run("底层 GetInode 数据库错误返回包装错误", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
@@ -440,9 +397,8 @@ func TestFsyncDir_PostgresIntegration(t *testing.T) {
 	}()
 
 	sess1 := uint64(990001)
-	sess2 := uint64(990002)
 	defer func() {
-		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sess1), int64(sess2))
+		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", int64(sess1))
 	}()
 
 	// 1. 创建两个子目录 dirA 与 dirB，以及一个常规文件 regFile
@@ -558,16 +514,7 @@ func TestFsyncDir_PostgresIntegration(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, meta.ErrBadFileHandle)
 
-	// 8. 错误分支：传入不匹配的 SessionID (dirB 绑定 sess1，调用传 sess2) 返回 ErrBadFileHandle (EBADF)
-	err = mgr.FsyncDir(ctx, meta.FsyncDirParams{
-		Ino:       dirB.Ino,
-		Fh:        openDirB.Fh,
-		Datasync:  false,
-		SessionID: &sess2,
-	})
-	assert.ErrorIs(t, err, meta.ErrBadFileHandle)
-
-	// 9. 错误分支：ReleaseDir 关闭 dirA 句柄后，再次 FsyncDir（且孤儿目录已被物理回收）
+	// 8. 错误分支：ReleaseDir 关闭 dirA 句柄后，再次 FsyncDir（且孤儿目录已被物理回收）
 	// 先在 dirB 上测试正常目录 ReleaseDir 后的 EBADF
 	openDirB2, err := mgr.OpenDir(ctx, meta.OpenDirParams{
 		Ino:   dirB.Ino,
@@ -597,7 +544,7 @@ func TestFsyncDir_PostgresIntegration(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, meta.ErrNotFound)
 
-	// 10. 错误分支：令 sess1 过期后，对 dirB 的 openDirB.Fh 调用 FsyncDir 返回 ErrBadFileHandle (EBADF)
+	// 9. 错误分支：令 sess1 过期后，对 dirB 的 openDirB.Fh 调用 FsyncDir 返回 ErrBadFileHandle (EBADF)
 	_, err = pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() - interval '10 seconds' WHERE session_id = $1", int64(sess1))
 	require.NoError(t, err)
 

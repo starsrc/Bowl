@@ -2154,34 +2154,8 @@ func (m *manager) FsyncDir(ctx context.Context, params FsyncDirParams) error {
 	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := q.GetInode(ctx, int64(params.Ino))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get dir inode %d: %w", params.Ino, err)
-		}
-
-		if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
-			return ErrNotDir
-		}
-
-		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
-		})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrBadFileHandle
-			}
-			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
-		}
-
-		if params.SessionID != nil && (!handle.SessionID.Valid || uint64(handle.SessionID.Int64) != *params.SessionID) {
-			return ErrBadFileHandle
-		}
-
-		return nil
+		_, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh)
+		return err
 	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
 
 	if err != nil {

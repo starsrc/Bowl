@@ -22,15 +22,35 @@ func TestRenameRequestValidation(t *testing.T) {
 		oldName      []byte
 		newParentIno uint64
 		newName      []byte
+		flags        uint32
 		valid        bool
 	}{
 		// 正向边界用例
 		{
-			name:         "合法: 正常重命名请求",
+			name:         "合法: 正常重命名请求 (flags = 0)",
 			oldParentIno: 1,
 			oldName:      []byte("old_file.txt"),
 			newParentIno: 2,
 			newName:      []byte("new_file.txt"),
+			flags:        0,
+			valid:        true,
+		},
+		{
+			name:         "合法: RENAME_NOREPLACE (flags = 1)",
+			oldParentIno: 1,
+			oldName:      []byte("old_file.txt"),
+			newParentIno: 2,
+			newName:      []byte("new_file.txt"),
+			flags:        1,
+			valid:        true,
+		},
+		{
+			name:         "合法: RENAME_EXCHANGE (flags = 2)",
+			oldParentIno: 1,
+			oldName:      []byte("old_file.txt"),
+			newParentIno: 2,
+			newName:      []byte("new_file.txt"),
+			flags:        2,
 			valid:        true,
 		},
 		{
@@ -56,6 +76,35 @@ func TestRenameRequestValidation(t *testing.T) {
 			newParentIno: math.MaxInt64,
 			newName:      []byte("b"),
 			valid:        true,
+		},
+
+		// 负向边界用例: flags
+		{
+			name:         "非法: flags 互斥组合 RENAME_NOREPLACE | RENAME_EXCHANGE (3)",
+			oldParentIno: 1,
+			oldName:      []byte("old"),
+			newParentIno: 1,
+			newName:      []byte("new"),
+			flags:        3,
+			valid:        false,
+		},
+		{
+			name:         "非法: flags 为 RENAME_WHITEOUT (4)",
+			oldParentIno: 1,
+			oldName:      []byte("old"),
+			newParentIno: 1,
+			newName:      []byte("new"),
+			flags:        4,
+			valid:        false,
+		},
+		{
+			name:         "非法: flags 为未知标志位 (math.MaxUint32)",
+			oldParentIno: 1,
+			oldName:      []byte("old"),
+			newParentIno: 1,
+			newName:      []byte("new"),
+			flags:        math.MaxUint32,
+			valid:        false,
 		},
 
 		// 负向边界用例: old_parent_ino
@@ -168,6 +217,7 @@ func TestRenameRequestValidation(t *testing.T) {
 				OldName:      tc.oldName,
 				NewParentIno: tc.newParentIno,
 				NewName:      tc.newName,
+				Flags:        tc.flags,
 			}
 
 			valErr := validator.Validate(req)

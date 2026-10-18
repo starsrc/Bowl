@@ -47,6 +47,7 @@ type UnlinkRmdirQuerier interface {
 // RenameQuerier 提取 Rename 原子重命名、更新目录项与递归环检测接口契约。
 type RenameQuerier interface {
 	UpdateEntry(ctx context.Context, arg db.UpdateEntryParams) error
+	UpdateEntryIno(ctx context.Context, arg db.UpdateEntryInoParams) error
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	IsSubdirectory(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error)
 }
@@ -663,6 +664,37 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 			var q db.Querier = mockQuerier
 			err := q.UpdateEntry(ctx, params)
+			assert.ErrorIs(t, err, expectedErr)
+		})
+	})
+
+	t.Run("UpdateEntryIno 算子调用与参数透传", func(t *testing.T) {
+		t.Run("成功原地更新目录项的目标 Ino", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.UpdateEntryInoParams{
+				ParentIno: 1,
+				Name:      []byte("swap.txt"),
+				Ino:       200,
+			}
+			mockQuerier.EXPECT().UpdateEntryIno(ctx, params).Return(nil).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.UpdateEntryIno(ctx, params)
+			require.NoError(t, err)
+		})
+
+		t.Run("底层执行失败透传错误", func(t *testing.T) {
+			mockQuerier := dbmock.NewMockQuerier(t)
+			params := db.UpdateEntryInoParams{
+				ParentIno: 1,
+				Name:      []byte("swap.txt"),
+				Ino:       200,
+			}
+			expectedErr := errors.New("update entry ino error")
+			mockQuerier.EXPECT().UpdateEntryIno(ctx, params).Return(expectedErr).Once()
+
+			var q db.Querier = mockQuerier
+			err := q.UpdateEntryIno(ctx, params)
 			assert.ErrorIs(t, err, expectedErr)
 		})
 	})

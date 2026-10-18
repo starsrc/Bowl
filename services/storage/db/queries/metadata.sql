@@ -107,6 +107,11 @@ SET parent_ino = @new_parent_ino,
     name = @new_name
 WHERE parent_ino = @old_parent_ino AND name = @old_name;
 
+-- name: UpdateEntryIno :exec
+UPDATE entries
+SET ino = $3
+WHERE parent_ino = $1 AND name = $2;
+
 -- name: TouchInodeCtime :exec
 UPDATE inodes
 SET ctime = clock_timestamp()

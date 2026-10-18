@@ -1076,6 +1076,23 @@ func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) error 
 	return err
 }
 
+const updateEntryIno = `-- name: UpdateEntryIno :exec
+UPDATE entries
+SET ino = $3
+WHERE parent_ino = $1 AND name = $2
+`
+
+type UpdateEntryInoParams struct {
+	ParentIno int64  `json:"parent_ino"`
+	Name      []byte `json:"name"`
+	Ino       int64  `json:"ino"`
+}
+
+func (q *Queries) UpdateEntryIno(ctx context.Context, arg UpdateEntryInoParams) error {
+	_, err := q.db.Exec(ctx, updateEntryIno, arg.ParentIno, arg.Name, arg.Ino)
+	return err
+}
+
 const updateInodeAttr = `-- name: UpdateInodeAttr :one
 UPDATE inodes
 SET

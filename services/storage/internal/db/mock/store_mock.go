@@ -2856,6 +2856,63 @@ func (_c *MockStore_UpdateEntry_Call) RunAndReturn(run func(ctx context.Context,
 	return _c
 }
 
+// UpdateEntryIno provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateEntryIno(ctx context.Context, arg db.UpdateEntryInoParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateEntryIno")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateEntryInoParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_UpdateEntryIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateEntryIno'
+type MockStore_UpdateEntryIno_Call struct {
+	*mock.Call
+}
+
+// UpdateEntryIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateEntryInoParams
+func (_e *MockStore_Expecter) UpdateEntryIno(ctx any, arg any) *MockStore_UpdateEntryIno_Call {
+	return &MockStore_UpdateEntryIno_Call{Call: _e.mock.On("UpdateEntryIno", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateEntryIno_Call) Run(run func(ctx context.Context, arg db.UpdateEntryInoParams)) *MockStore_UpdateEntryIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateEntryInoParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateEntryInoParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateEntryIno_Call) Return(err error) *MockStore_UpdateEntryIno_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_UpdateEntryIno_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateEntryInoParams) error) *MockStore_UpdateEntryIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // UpdateInodeAttr provides a mock function for the type MockStore
 func (_mock *MockStore) UpdateInodeAttr(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error) {
 	ret := _mock.Called(ctx, arg)

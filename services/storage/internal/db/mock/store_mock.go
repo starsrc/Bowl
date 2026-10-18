@@ -105,6 +105,63 @@ func (_c *MockStore_ClearInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx
 	return _c
 }
 
+// ClearTmpFileFlagByIno provides a mock function for the type MockStore
+func (_mock *MockStore) ClearTmpFileFlagByIno(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ClearTmpFileFlagByIno")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_ClearTmpFileFlagByIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ClearTmpFileFlagByIno'
+type MockStore_ClearTmpFileFlagByIno_Call struct {
+	*mock.Call
+}
+
+// ClearTmpFileFlagByIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) ClearTmpFileFlagByIno(ctx any, ino any) *MockStore_ClearTmpFileFlagByIno_Call {
+	return &MockStore_ClearTmpFileFlagByIno_Call{Call: _e.mock.On("ClearTmpFileFlagByIno", ctx, ino)}
+}
+
+func (_c *MockStore_ClearTmpFileFlagByIno_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_ClearTmpFileFlagByIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ClearTmpFileFlagByIno_Call) Return(err error) *MockStore_ClearTmpFileFlagByIno_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_ClearTmpFileFlagByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_ClearTmpFileFlagByIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateEntry provides a mock function for the type MockStore
 func (_mock *MockStore) CreateEntry(ctx context.Context, arg db.CreateEntryParams) error {
 	ret := _mock.Called(ctx, arg)
@@ -2271,6 +2328,72 @@ func (_c *MockStore_HasFileHandlesByIno_Call) Return(b bool, err error) *MockSto
 }
 
 func (_c *MockStore_HasFileHandlesByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) (bool, error)) *MockStore_HasFileHandlesByIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// HasLinkableTmpFileHandleByIno provides a mock function for the type MockStore
+func (_mock *MockStore) HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for HasLinkableTmpFileHandleByIno")
+	}
+
+	var r0 bool
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (bool, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) bool); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_HasLinkableTmpFileHandleByIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HasLinkableTmpFileHandleByIno'
+type MockStore_HasLinkableTmpFileHandleByIno_Call struct {
+	*mock.Call
+}
+
+// HasLinkableTmpFileHandleByIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) HasLinkableTmpFileHandleByIno(ctx any, ino any) *MockStore_HasLinkableTmpFileHandleByIno_Call {
+	return &MockStore_HasLinkableTmpFileHandleByIno_Call{Call: _e.mock.On("HasLinkableTmpFileHandleByIno", ctx, ino)}
+}
+
+func (_c *MockStore_HasLinkableTmpFileHandleByIno_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_HasLinkableTmpFileHandleByIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_HasLinkableTmpFileHandleByIno_Call) Return(b bool, err error) *MockStore_HasLinkableTmpFileHandleByIno_Call {
+	_c.Call.Return(b, err)
+	return _c
+}
+
+func (_c *MockStore_HasLinkableTmpFileHandleByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) (bool, error)) *MockStore_HasLinkableTmpFileHandleByIno_Call {
 	_c.Call.Return(run)
 	return _c
 }

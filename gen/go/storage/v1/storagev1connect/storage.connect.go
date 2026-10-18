@@ -48,6 +48,8 @@ const (
 	StorageServiceRenameProcedure = "/storage.v1.StorageService/Rename"
 	// StorageServiceCreateProcedure is the procedure name of the StorageService's Create RPC.
 	StorageServiceCreateProcedure = "/storage.v1.StorageService/Create"
+	// StorageServiceTmpFileProcedure is the procedure name of the StorageService's TmpFile RPC.
+	StorageServiceTmpFileProcedure = "/storage.v1.StorageService/TmpFile"
 	// StorageServiceOpenProcedure is the procedure name of the StorageService's Open RPC.
 	StorageServiceOpenProcedure = "/storage.v1.StorageService/Open"
 	// StorageServiceFlushProcedure is the procedure name of the StorageService's Flush RPC.
@@ -167,6 +169,13 @@ var (
 			StreamType: connect.StreamTypeUnary,
 			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Create"),
 			Procedure:  StorageServiceCreateProcedure,
+		}
+	})
+	storageServiceTmpFileSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("TmpFile"),
+			Procedure:  StorageServiceTmpFileProcedure,
 		}
 	})
 	storageServiceOpenSpec = sync.OnceValue(func() connect.Spec {
@@ -360,6 +369,11 @@ type StorageServiceClient interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
+	// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+	// 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
+	TmpFile(context.Context, *v1.TmpFileRequest) (*v1.TmpFileResponse, error)
 	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
 	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -529,6 +543,11 @@ type StorageServiceHandler interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
+	// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+	// 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
+	TmpFile(context.Context, *v1.TmpFileRequest) (*v1.TmpFileResponse, error)
 	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
 	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -639,6 +658,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceRmdirSpec(), Handler: adapter.rmdir},
 		connect.Method{Spec: storageServiceRenameSpec(), Handler: adapter.rename},
 		connect.Method{Spec: storageServiceCreateSpec(), Handler: adapter.create},
+		connect.Method{Spec: storageServiceTmpFileSpec(), Handler: adapter.tmpFile},
 		connect.Method{Spec: storageServiceOpenSpec(), Handler: adapter.open},
 		connect.Method{Spec: storageServiceFlushSpec(), Handler: adapter.flush},
 		connect.Method{Spec: storageServiceFsyncSpec(), Handler: adapter.fsync},
@@ -708,6 +728,10 @@ func (UnimplementedStorageServiceHandler) Rename(context.Context, *v1.RenameRequ
 
 func (UnimplementedStorageServiceHandler) Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Create is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) TmpFile(context.Context, *v1.TmpFileRequest) (*v1.TmpFileResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.TmpFile is not implemented")
 }
 
 func (UnimplementedStorageServiceHandler) Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error) {
@@ -873,6 +897,14 @@ func (c *storageServiceClient) Rename(ctx context.Context, req *v1.RenameRequest
 func (c *storageServiceClient) Create(ctx context.Context, req *v1.CreateRequest) (*v1.CreateResponse, error) {
 	var res v1.CreateResponse
 	if err := c.client.CallUnary(ctx, storageServiceCreateSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) TmpFile(ctx context.Context, req *v1.TmpFileRequest) (*v1.TmpFileResponse, error) {
+	var res v1.TmpFileResponse
+	if err := c.client.CallUnary(ctx, storageServiceTmpFileSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1154,6 +1186,18 @@ func (h storageServiceHandler) create(ctx context.Context, _ connect.Spec, strea
 		return err
 	}
 	res, err := h.svc.Create(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) tmpFile(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.TmpFileRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.TmpFile(ctx, &req)
 	if err != nil {
 		return err
 	}

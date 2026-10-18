@@ -39,6 +39,17 @@ func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (
 	return i, err
 }
 
+const clearTmpFileFlagByIno = `-- name: ClearTmpFileFlagByIno :exec
+UPDATE file_handles
+SET flags = flags & ~4194304
+WHERE ino = $1
+`
+
+func (q *Queries) ClearTmpFileFlagByIno(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, clearTmpFileFlagByIno, ino)
+	return err
+}
+
 const createEntry = `-- name: CreateEntry :exec
 INSERT INTO entries (parent_ino, name, ino)
 VALUES ($1, $2, $3)
@@ -792,6 +803,25 @@ SELECT EXISTS (
 
 func (q *Queries) HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error) {
 	row := q.db.QueryRow(ctx, hasFileHandlesByIno, ino)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const hasLinkableTmpFileHandleByIno = `-- name: HasLinkableTmpFileHandleByIno :one
+SELECT EXISTS (
+    SELECT 1
+    FROM file_handles fh
+    LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+    WHERE fh.ino = $1
+      AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
+      AND (fh.flags & 4194304) <> 0
+      AND (fh.flags & 128) = 0
+)
+`
+
+func (q *Queries) HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error) {
+	row := q.db.QueryRow(ctx, hasLinkableTmpFileHandleByIno, ino)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err

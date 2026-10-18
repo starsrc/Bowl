@@ -1581,6 +1581,179 @@ func (x *CreateResponse) GetAttrTimeoutSeconds() float64 {
 	return 0
 }
 
+// TmpFileRequest 定义 TmpFile 接口输入参数（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+type TmpFileRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
+	// 节点模式位（仅允许 0 或 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
+	Mode uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
+	// 所属用户 ID。
+	Uid uint32 `protobuf:"varint,3,opt,name=uid,proto3" json:"uid,omitempty"`
+	// 所属组 ID。
+	Gid uint32 `protobuf:"varint,4,opt,name=gid,proto3" json:"gid,omitempty"`
+	// 打开标志位（必须为 O_WRONLY (1) 或 O_RDWR (2)，可携带 O_EXCL 等标志）。
+	Flags uint32 `protobuf:"varint,5,opt,name=flags,proto3" json:"flags,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,6,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TmpFileRequest) Reset() {
+	*x = TmpFileRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TmpFileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TmpFileRequest) ProtoMessage() {}
+
+func (x *TmpFileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TmpFileRequest.ProtoReflect.Descriptor instead.
+func (*TmpFileRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *TmpFileRequest) GetParentIno() uint64 {
+	if x != nil {
+		return x.ParentIno
+	}
+	return 0
+}
+
+func (x *TmpFileRequest) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *TmpFileRequest) GetUid() uint32 {
+	if x != nil {
+		return x.Uid
+	}
+	return 0
+}
+
+func (x *TmpFileRequest) GetGid() uint32 {
+	if x != nil {
+		return x.Gid
+	}
+	return 0
+}
+
+func (x *TmpFileRequest) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
+func (x *TmpFileRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
+	}
+	return 0
+}
+
+// TmpFileResponse 包含新创建匿名临时文件的元数据、分配的文件句柄以及 FUSE 内核缓存有效时间。
+type TmpFileResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 新创建的匿名 Inode 实体元数据 (nlink = 0)。
+	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
+	// 分配的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 打开响应标志位 (open flags)。
+	OpenFlags uint32 `protobuf:"varint,3,opt,name=open_flags,json=openFlags,proto3" json:"open_flags,omitempty"`
+	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	EntryTimeoutSeconds float64 `protobuf:"fixed64,4,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
+	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
+	AttrTimeoutSeconds float64 `protobuf:"fixed64,5,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *TmpFileResponse) Reset() {
+	*x = TmpFileResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TmpFileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TmpFileResponse) ProtoMessage() {}
+
+func (x *TmpFileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TmpFileResponse.ProtoReflect.Descriptor instead.
+func (*TmpFileResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *TmpFileResponse) GetInode() *Inode {
+	if x != nil {
+		return x.Inode
+	}
+	return nil
+}
+
+func (x *TmpFileResponse) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *TmpFileResponse) GetOpenFlags() uint32 {
+	if x != nil {
+		return x.OpenFlags
+	}
+	return 0
+}
+
+func (x *TmpFileResponse) GetEntryTimeoutSeconds() float64 {
+	if x != nil {
+		return x.EntryTimeoutSeconds
+	}
+	return 0
+}
+
+func (x *TmpFileResponse) GetAttrTimeoutSeconds() float64 {
+	if x != nil {
+		return x.AttrTimeoutSeconds
+	}
+	return 0
+}
+
 // OpenRequest 定义 Open 接口输入参数。
 type OpenRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1596,7 +1769,7 @@ type OpenRequest struct {
 
 func (x *OpenRequest) Reset() {
 	*x = OpenRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	mi := &file_storage_v1_storage_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1608,7 +1781,7 @@ func (x *OpenRequest) String() string {
 func (*OpenRequest) ProtoMessage() {}
 
 func (x *OpenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[24]
+	mi := &file_storage_v1_storage_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1621,7 +1794,7 @@ func (x *OpenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenRequest.ProtoReflect.Descriptor instead.
 func (*OpenRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{24}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *OpenRequest) GetIno() uint64 {
@@ -1658,7 +1831,7 @@ type OpenResponse struct {
 
 func (x *OpenResponse) Reset() {
 	*x = OpenResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	mi := &file_storage_v1_storage_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1670,7 +1843,7 @@ func (x *OpenResponse) String() string {
 func (*OpenResponse) ProtoMessage() {}
 
 func (x *OpenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[25]
+	mi := &file_storage_v1_storage_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1683,7 +1856,7 @@ func (x *OpenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenResponse.ProtoReflect.Descriptor instead.
 func (*OpenResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{25}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *OpenResponse) GetFh() uint64 {
@@ -1717,7 +1890,7 @@ type FlushRequest struct {
 
 func (x *FlushRequest) Reset() {
 	*x = FlushRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[26]
+	mi := &file_storage_v1_storage_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1729,7 +1902,7 @@ func (x *FlushRequest) String() string {
 func (*FlushRequest) ProtoMessage() {}
 
 func (x *FlushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[26]
+	mi := &file_storage_v1_storage_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1742,7 +1915,7 @@ func (x *FlushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushRequest.ProtoReflect.Descriptor instead.
 func (*FlushRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{26}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *FlushRequest) GetIno() uint64 {
@@ -1782,7 +1955,7 @@ type FlushResponse struct {
 
 func (x *FlushResponse) Reset() {
 	*x = FlushResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[27]
+	mi := &file_storage_v1_storage_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1794,7 +1967,7 @@ func (x *FlushResponse) String() string {
 func (*FlushResponse) ProtoMessage() {}
 
 func (x *FlushResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[27]
+	mi := &file_storage_v1_storage_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1807,7 +1980,7 @@ func (x *FlushResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushResponse.ProtoReflect.Descriptor instead.
 func (*FlushResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{27}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{29}
 }
 
 // FsyncRequest 定义 Fsync 接口输入参数。
@@ -1827,7 +2000,7 @@ type FsyncRequest struct {
 
 func (x *FsyncRequest) Reset() {
 	*x = FsyncRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[28]
+	mi := &file_storage_v1_storage_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1839,7 +2012,7 @@ func (x *FsyncRequest) String() string {
 func (*FsyncRequest) ProtoMessage() {}
 
 func (x *FsyncRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[28]
+	mi := &file_storage_v1_storage_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1852,7 +2025,7 @@ func (x *FsyncRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FsyncRequest.ProtoReflect.Descriptor instead.
 func (*FsyncRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{28}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *FsyncRequest) GetIno() uint64 {
@@ -1892,7 +2065,7 @@ type FsyncResponse struct {
 
 func (x *FsyncResponse) Reset() {
 	*x = FsyncResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[29]
+	mi := &file_storage_v1_storage_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1904,7 +2077,7 @@ func (x *FsyncResponse) String() string {
 func (*FsyncResponse) ProtoMessage() {}
 
 func (x *FsyncResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[29]
+	mi := &file_storage_v1_storage_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1917,7 +2090,7 @@ func (x *FsyncResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FsyncResponse.ProtoReflect.Descriptor instead.
 func (*FsyncResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{29}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{31}
 }
 
 // ReleaseRequest 定义 Release 接口输入参数。
@@ -1939,7 +2112,7 @@ type ReleaseRequest struct {
 
 func (x *ReleaseRequest) Reset() {
 	*x = ReleaseRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[30]
+	mi := &file_storage_v1_storage_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1951,7 +2124,7 @@ func (x *ReleaseRequest) String() string {
 func (*ReleaseRequest) ProtoMessage() {}
 
 func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[30]
+	mi := &file_storage_v1_storage_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1964,7 +2137,7 @@ func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{30}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReleaseRequest) GetIno() uint64 {
@@ -2011,7 +2184,7 @@ type ReleaseResponse struct {
 
 func (x *ReleaseResponse) Reset() {
 	*x = ReleaseResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[31]
+	mi := &file_storage_v1_storage_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2023,7 +2196,7 @@ func (x *ReleaseResponse) String() string {
 func (*ReleaseResponse) ProtoMessage() {}
 
 func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[31]
+	mi := &file_storage_v1_storage_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2036,7 +2209,7 @@ func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{31}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{33}
 }
 
 // OpenDirRequest 定义 OpenDir 接口输入参数。
@@ -2054,7 +2227,7 @@ type OpenDirRequest struct {
 
 func (x *OpenDirRequest) Reset() {
 	*x = OpenDirRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[32]
+	mi := &file_storage_v1_storage_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2066,7 +2239,7 @@ func (x *OpenDirRequest) String() string {
 func (*OpenDirRequest) ProtoMessage() {}
 
 func (x *OpenDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[32]
+	mi := &file_storage_v1_storage_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2079,7 +2252,7 @@ func (x *OpenDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenDirRequest.ProtoReflect.Descriptor instead.
 func (*OpenDirRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{32}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *OpenDirRequest) GetIno() uint64 {
@@ -2116,7 +2289,7 @@ type OpenDirResponse struct {
 
 func (x *OpenDirResponse) Reset() {
 	*x = OpenDirResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[33]
+	mi := &file_storage_v1_storage_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2128,7 +2301,7 @@ func (x *OpenDirResponse) String() string {
 func (*OpenDirResponse) ProtoMessage() {}
 
 func (x *OpenDirResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[33]
+	mi := &file_storage_v1_storage_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2141,7 +2314,7 @@ func (x *OpenDirResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenDirResponse.ProtoReflect.Descriptor instead.
 func (*OpenDirResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{33}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *OpenDirResponse) GetFh() uint64 {
@@ -2175,7 +2348,7 @@ type FsyncDirRequest struct {
 
 func (x *FsyncDirRequest) Reset() {
 	*x = FsyncDirRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[34]
+	mi := &file_storage_v1_storage_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2187,7 +2360,7 @@ func (x *FsyncDirRequest) String() string {
 func (*FsyncDirRequest) ProtoMessage() {}
 
 func (x *FsyncDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[34]
+	mi := &file_storage_v1_storage_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2200,7 +2373,7 @@ func (x *FsyncDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FsyncDirRequest.ProtoReflect.Descriptor instead.
 func (*FsyncDirRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{34}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *FsyncDirRequest) GetIno() uint64 {
@@ -2240,7 +2413,7 @@ type FsyncDirResponse struct {
 
 func (x *FsyncDirResponse) Reset() {
 	*x = FsyncDirResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[35]
+	mi := &file_storage_v1_storage_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2252,7 +2425,7 @@ func (x *FsyncDirResponse) String() string {
 func (*FsyncDirResponse) ProtoMessage() {}
 
 func (x *FsyncDirResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[35]
+	mi := &file_storage_v1_storage_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2265,7 +2438,7 @@ func (x *FsyncDirResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FsyncDirResponse.ProtoReflect.Descriptor instead.
 func (*FsyncDirResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{35}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{37}
 }
 
 // ReleaseDirRequest 定义 ReleaseDir 接口输入参数。
@@ -2283,7 +2456,7 @@ type ReleaseDirRequest struct {
 
 func (x *ReleaseDirRequest) Reset() {
 	*x = ReleaseDirRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[36]
+	mi := &file_storage_v1_storage_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2295,7 +2468,7 @@ func (x *ReleaseDirRequest) String() string {
 func (*ReleaseDirRequest) ProtoMessage() {}
 
 func (x *ReleaseDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[36]
+	mi := &file_storage_v1_storage_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2308,7 +2481,7 @@ func (x *ReleaseDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseDirRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseDirRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{36}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ReleaseDirRequest) GetIno() uint64 {
@@ -2341,7 +2514,7 @@ type ReleaseDirResponse struct {
 
 func (x *ReleaseDirResponse) Reset() {
 	*x = ReleaseDirResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[37]
+	mi := &file_storage_v1_storage_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2353,7 +2526,7 @@ func (x *ReleaseDirResponse) String() string {
 func (*ReleaseDirResponse) ProtoMessage() {}
 
 func (x *ReleaseDirResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[37]
+	mi := &file_storage_v1_storage_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2366,7 +2539,7 @@ func (x *ReleaseDirResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseDirResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseDirResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{37}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{39}
 }
 
 // DirEntry 定义 ReadDir 返回的基本目录项。
@@ -2387,7 +2560,7 @@ type DirEntry struct {
 
 func (x *DirEntry) Reset() {
 	*x = DirEntry{}
-	mi := &file_storage_v1_storage_proto_msgTypes[38]
+	mi := &file_storage_v1_storage_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2399,7 +2572,7 @@ func (x *DirEntry) String() string {
 func (*DirEntry) ProtoMessage() {}
 
 func (x *DirEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[38]
+	mi := &file_storage_v1_storage_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2412,7 +2585,7 @@ func (x *DirEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirEntry.ProtoReflect.Descriptor instead.
 func (*DirEntry) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{38}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *DirEntry) GetIno() uint64 {
@@ -2462,7 +2635,7 @@ type ReadDirRequest struct {
 
 func (x *ReadDirRequest) Reset() {
 	*x = ReadDirRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[39]
+	mi := &file_storage_v1_storage_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2474,7 +2647,7 @@ func (x *ReadDirRequest) String() string {
 func (*ReadDirRequest) ProtoMessage() {}
 
 func (x *ReadDirRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[39]
+	mi := &file_storage_v1_storage_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2487,7 +2660,7 @@ func (x *ReadDirRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadDirRequest.ProtoReflect.Descriptor instead.
 func (*ReadDirRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{39}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ReadDirRequest) GetIno() uint64 {
@@ -2536,7 +2709,7 @@ type ReadDirResponse struct {
 
 func (x *ReadDirResponse) Reset() {
 	*x = ReadDirResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[40]
+	mi := &file_storage_v1_storage_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2548,7 +2721,7 @@ func (x *ReadDirResponse) String() string {
 func (*ReadDirResponse) ProtoMessage() {}
 
 func (x *ReadDirResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[40]
+	mi := &file_storage_v1_storage_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2561,7 +2734,7 @@ func (x *ReadDirResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadDirResponse.ProtoReflect.Descriptor instead.
 func (*ReadDirResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{40}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ReadDirResponse) GetEntries() []*DirEntry {
@@ -2593,7 +2766,7 @@ type DirEntryPlus struct {
 
 func (x *DirEntryPlus) Reset() {
 	*x = DirEntryPlus{}
-	mi := &file_storage_v1_storage_proto_msgTypes[41]
+	mi := &file_storage_v1_storage_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2605,7 +2778,7 @@ func (x *DirEntryPlus) String() string {
 func (*DirEntryPlus) ProtoMessage() {}
 
 func (x *DirEntryPlus) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[41]
+	mi := &file_storage_v1_storage_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2618,7 +2791,7 @@ func (x *DirEntryPlus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirEntryPlus.ProtoReflect.Descriptor instead.
 func (*DirEntryPlus) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{41}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *DirEntryPlus) GetIno() uint64 {
@@ -2682,7 +2855,7 @@ type ReadDirPlusRequest struct {
 
 func (x *ReadDirPlusRequest) Reset() {
 	*x = ReadDirPlusRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[42]
+	mi := &file_storage_v1_storage_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2694,7 +2867,7 @@ func (x *ReadDirPlusRequest) String() string {
 func (*ReadDirPlusRequest) ProtoMessage() {}
 
 func (x *ReadDirPlusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[42]
+	mi := &file_storage_v1_storage_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2707,7 +2880,7 @@ func (x *ReadDirPlusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadDirPlusRequest.ProtoReflect.Descriptor instead.
 func (*ReadDirPlusRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{42}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ReadDirPlusRequest) GetIno() uint64 {
@@ -2756,7 +2929,7 @@ type ReadDirPlusResponse struct {
 
 func (x *ReadDirPlusResponse) Reset() {
 	*x = ReadDirPlusResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[43]
+	mi := &file_storage_v1_storage_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2768,7 +2941,7 @@ func (x *ReadDirPlusResponse) String() string {
 func (*ReadDirPlusResponse) ProtoMessage() {}
 
 func (x *ReadDirPlusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[43]
+	mi := &file_storage_v1_storage_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2781,7 +2954,7 @@ func (x *ReadDirPlusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadDirPlusResponse.ProtoReflect.Descriptor instead.
 func (*ReadDirPlusResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{43}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ReadDirPlusResponse) GetEntries() []*DirEntryPlus {
@@ -2812,7 +2985,7 @@ type FallocateRequest struct {
 
 func (x *FallocateRequest) Reset() {
 	*x = FallocateRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[44]
+	mi := &file_storage_v1_storage_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2824,7 +2997,7 @@ func (x *FallocateRequest) String() string {
 func (*FallocateRequest) ProtoMessage() {}
 
 func (x *FallocateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[44]
+	mi := &file_storage_v1_storage_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2837,7 +3010,7 @@ func (x *FallocateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FallocateRequest.ProtoReflect.Descriptor instead.
 func (*FallocateRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{44}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *FallocateRequest) GetIno() uint64 {
@@ -2891,7 +3064,7 @@ type FallocateResponse struct {
 
 func (x *FallocateResponse) Reset() {
 	*x = FallocateResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[45]
+	mi := &file_storage_v1_storage_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2903,7 +3076,7 @@ func (x *FallocateResponse) String() string {
 func (*FallocateResponse) ProtoMessage() {}
 
 func (x *FallocateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[45]
+	mi := &file_storage_v1_storage_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2916,7 +3089,7 @@ func (x *FallocateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FallocateResponse.ProtoReflect.Descriptor instead.
 func (*FallocateResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{45}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{47}
 }
 
 // SetXattrRequest 定义 SetXattr 接口输入参数。
@@ -2939,7 +3112,7 @@ type SetXattrRequest struct {
 
 func (x *SetXattrRequest) Reset() {
 	*x = SetXattrRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[46]
+	mi := &file_storage_v1_storage_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2951,7 +3124,7 @@ func (x *SetXattrRequest) String() string {
 func (*SetXattrRequest) ProtoMessage() {}
 
 func (x *SetXattrRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[46]
+	mi := &file_storage_v1_storage_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2964,7 +3137,7 @@ func (x *SetXattrRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetXattrRequest.ProtoReflect.Descriptor instead.
 func (*SetXattrRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{46}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *SetXattrRequest) GetIno() uint64 {
@@ -3004,7 +3177,7 @@ type SetXattrResponse struct {
 
 func (x *SetXattrResponse) Reset() {
 	*x = SetXattrResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[47]
+	mi := &file_storage_v1_storage_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3016,7 +3189,7 @@ func (x *SetXattrResponse) String() string {
 func (*SetXattrResponse) ProtoMessage() {}
 
 func (x *SetXattrResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[47]
+	mi := &file_storage_v1_storage_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3029,7 +3202,7 @@ func (x *SetXattrResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetXattrResponse.ProtoReflect.Descriptor instead.
 func (*SetXattrResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{47}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{49}
 }
 
 // GetXattrRequest 定义 GetXattr 接口输入参数。
@@ -3047,7 +3220,7 @@ type GetXattrRequest struct {
 
 func (x *GetXattrRequest) Reset() {
 	*x = GetXattrRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[48]
+	mi := &file_storage_v1_storage_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3059,7 +3232,7 @@ func (x *GetXattrRequest) String() string {
 func (*GetXattrRequest) ProtoMessage() {}
 
 func (x *GetXattrRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[48]
+	mi := &file_storage_v1_storage_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3072,7 +3245,7 @@ func (x *GetXattrRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetXattrRequest.ProtoReflect.Descriptor instead.
 func (*GetXattrRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{48}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *GetXattrRequest) GetIno() uint64 {
@@ -3101,7 +3274,7 @@ type GetXattrResponse struct {
 
 func (x *GetXattrResponse) Reset() {
 	*x = GetXattrResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[49]
+	mi := &file_storage_v1_storage_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3113,7 +3286,7 @@ func (x *GetXattrResponse) String() string {
 func (*GetXattrResponse) ProtoMessage() {}
 
 func (x *GetXattrResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[49]
+	mi := &file_storage_v1_storage_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3126,7 +3299,7 @@ func (x *GetXattrResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetXattrResponse.ProtoReflect.Descriptor instead.
 func (*GetXattrResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{49}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *GetXattrResponse) GetValue() []byte {
@@ -3147,7 +3320,7 @@ type ListXattrRequest struct {
 
 func (x *ListXattrRequest) Reset() {
 	*x = ListXattrRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[50]
+	mi := &file_storage_v1_storage_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3159,7 +3332,7 @@ func (x *ListXattrRequest) String() string {
 func (*ListXattrRequest) ProtoMessage() {}
 
 func (x *ListXattrRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[50]
+	mi := &file_storage_v1_storage_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3172,7 +3345,7 @@ func (x *ListXattrRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListXattrRequest.ProtoReflect.Descriptor instead.
 func (*ListXattrRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{50}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ListXattrRequest) GetIno() uint64 {
@@ -3194,7 +3367,7 @@ type ListXattrResponse struct {
 
 func (x *ListXattrResponse) Reset() {
 	*x = ListXattrResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[51]
+	mi := &file_storage_v1_storage_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3206,7 +3379,7 @@ func (x *ListXattrResponse) String() string {
 func (*ListXattrResponse) ProtoMessage() {}
 
 func (x *ListXattrResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[51]
+	mi := &file_storage_v1_storage_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3219,7 +3392,7 @@ func (x *ListXattrResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListXattrResponse.ProtoReflect.Descriptor instead.
 func (*ListXattrResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{51}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ListXattrResponse) GetNames() [][]byte {
@@ -3243,7 +3416,7 @@ type RemoveXattrRequest struct {
 
 func (x *RemoveXattrRequest) Reset() {
 	*x = RemoveXattrRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[52]
+	mi := &file_storage_v1_storage_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3255,7 +3428,7 @@ func (x *RemoveXattrRequest) String() string {
 func (*RemoveXattrRequest) ProtoMessage() {}
 
 func (x *RemoveXattrRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[52]
+	mi := &file_storage_v1_storage_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3268,7 +3441,7 @@ func (x *RemoveXattrRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveXattrRequest.ProtoReflect.Descriptor instead.
 func (*RemoveXattrRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{52}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *RemoveXattrRequest) GetIno() uint64 {
@@ -3294,7 +3467,7 @@ type RemoveXattrResponse struct {
 
 func (x *RemoveXattrResponse) Reset() {
 	*x = RemoveXattrResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[53]
+	mi := &file_storage_v1_storage_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3306,7 +3479,7 @@ func (x *RemoveXattrResponse) String() string {
 func (*RemoveXattrResponse) ProtoMessage() {}
 
 func (x *RemoveXattrResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[53]
+	mi := &file_storage_v1_storage_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3319,7 +3492,7 @@ func (x *RemoveXattrResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveXattrResponse.ProtoReflect.Descriptor instead.
 func (*RemoveXattrResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{53}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{55}
 }
 
 // FileLock 定义 FUSE 文件锁描述符（涵盖 POSIX 记录锁与 BSD flock 整文件锁）。
@@ -3339,7 +3512,7 @@ type FileLock struct {
 
 func (x *FileLock) Reset() {
 	*x = FileLock{}
-	mi := &file_storage_v1_storage_proto_msgTypes[54]
+	mi := &file_storage_v1_storage_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3351,7 +3524,7 @@ func (x *FileLock) String() string {
 func (*FileLock) ProtoMessage() {}
 
 func (x *FileLock) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[54]
+	mi := &file_storage_v1_storage_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3364,7 +3537,7 @@ func (x *FileLock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileLock.ProtoReflect.Descriptor instead.
 func (*FileLock) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{54}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *FileLock) GetStart() uint64 {
@@ -3416,7 +3589,7 @@ type GetLkRequest struct {
 
 func (x *GetLkRequest) Reset() {
 	*x = GetLkRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[55]
+	mi := &file_storage_v1_storage_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3428,7 +3601,7 @@ func (x *GetLkRequest) String() string {
 func (*GetLkRequest) ProtoMessage() {}
 
 func (x *GetLkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[55]
+	mi := &file_storage_v1_storage_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3441,7 +3614,7 @@ func (x *GetLkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLkRequest.ProtoReflect.Descriptor instead.
 func (*GetLkRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{55}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *GetLkRequest) GetIno() uint64 {
@@ -3497,7 +3670,7 @@ type GetLkResponse struct {
 
 func (x *GetLkResponse) Reset() {
 	*x = GetLkResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[56]
+	mi := &file_storage_v1_storage_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3509,7 +3682,7 @@ func (x *GetLkResponse) String() string {
 func (*GetLkResponse) ProtoMessage() {}
 
 func (x *GetLkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[56]
+	mi := &file_storage_v1_storage_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3522,7 +3695,7 @@ func (x *GetLkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLkResponse.ProtoReflect.Descriptor instead.
 func (*GetLkResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{56}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *GetLkResponse) GetLk() *FileLock {
@@ -3553,7 +3726,7 @@ type SetLkRequest struct {
 
 func (x *SetLkRequest) Reset() {
 	*x = SetLkRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[57]
+	mi := &file_storage_v1_storage_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3565,7 +3738,7 @@ func (x *SetLkRequest) String() string {
 func (*SetLkRequest) ProtoMessage() {}
 
 func (x *SetLkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[57]
+	mi := &file_storage_v1_storage_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3578,7 +3751,7 @@ func (x *SetLkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLkRequest.ProtoReflect.Descriptor instead.
 func (*SetLkRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{57}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *SetLkRequest) GetIno() uint64 {
@@ -3632,7 +3805,7 @@ type SetLkResponse struct {
 
 func (x *SetLkResponse) Reset() {
 	*x = SetLkResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[58]
+	mi := &file_storage_v1_storage_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3644,7 +3817,7 @@ func (x *SetLkResponse) String() string {
 func (*SetLkResponse) ProtoMessage() {}
 
 func (x *SetLkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[58]
+	mi := &file_storage_v1_storage_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3657,7 +3830,7 @@ func (x *SetLkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLkResponse.ProtoReflect.Descriptor instead.
 func (*SetLkResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{58}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{60}
 }
 
 // SetLkwRequest 定义 SetLkw (FUSE_SETLKW = 33) 接口输入参数。
@@ -3683,7 +3856,7 @@ type SetLkwRequest struct {
 
 func (x *SetLkwRequest) Reset() {
 	*x = SetLkwRequest{}
-	mi := &file_storage_v1_storage_proto_msgTypes[59]
+	mi := &file_storage_v1_storage_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3695,7 +3868,7 @@ func (x *SetLkwRequest) String() string {
 func (*SetLkwRequest) ProtoMessage() {}
 
 func (x *SetLkwRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[59]
+	mi := &file_storage_v1_storage_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3708,7 +3881,7 @@ func (x *SetLkwRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLkwRequest.ProtoReflect.Descriptor instead.
 func (*SetLkwRequest) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{59}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *SetLkwRequest) GetIno() uint64 {
@@ -3769,7 +3942,7 @@ type SetLkwResponse struct {
 
 func (x *SetLkwResponse) Reset() {
 	*x = SetLkwResponse{}
-	mi := &file_storage_v1_storage_proto_msgTypes[60]
+	mi := &file_storage_v1_storage_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3781,7 +3954,7 @@ func (x *SetLkwResponse) String() string {
 func (*SetLkwResponse) ProtoMessage() {}
 
 func (x *SetLkwResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[60]
+	mi := &file_storage_v1_storage_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3794,7 +3967,7 @@ func (x *SetLkwResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLkwResponse.ProtoReflect.Descriptor instead.
 func (*SetLkwResponse) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{60}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{62}
 }
 
 type Inode struct {
@@ -3811,7 +3984,7 @@ type Inode struct {
 
 func (x *Inode) Reset() {
 	*x = Inode{}
-	mi := &file_storage_v1_storage_proto_msgTypes[61]
+	mi := &file_storage_v1_storage_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3823,7 +3996,7 @@ func (x *Inode) String() string {
 func (*Inode) ProtoMessage() {}
 
 func (x *Inode) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[61]
+	mi := &file_storage_v1_storage_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3836,7 +4009,7 @@ func (x *Inode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inode.ProtoReflect.Descriptor instead.
 func (*Inode) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{61}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *Inode) GetIno() uint64 {
@@ -3891,7 +4064,7 @@ type InodeAttribute struct {
 
 func (x *InodeAttribute) Reset() {
 	*x = InodeAttribute{}
-	mi := &file_storage_v1_storage_proto_msgTypes[62]
+	mi := &file_storage_v1_storage_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3903,7 +4076,7 @@ func (x *InodeAttribute) String() string {
 func (*InodeAttribute) ProtoMessage() {}
 
 func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[62]
+	mi := &file_storage_v1_storage_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3916,7 +4089,7 @@ func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InodeAttribute.ProtoReflect.Descriptor instead.
 func (*InodeAttribute) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{62}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *InodeAttribute) GetMode() uint32 {
@@ -4130,7 +4303,26 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"open_flags\x18\x03 \x01(\rR\topenFlags\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x04 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x8e\x01\n" +
+	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xe4\x03\n" +
+	"\x0eTmpFileRequest\x120\n" +
+	"\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\xa0\x01\n" +
+	"\x04mode\x18\x02 \x01(\rB\x8b\x01\xbaH\x87\x01\xba\x01~\n" +
+	"\x19tmpfile_mode_regular_only\x12.mode file type must be 0 or S_IFREG (0o100000)\x1a1this < 4096u || (this >= 32768u && this < 36864u)*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
+	"\x03uid\x18\x03 \x01(\rR\x03uid\x12\x10\n" +
+	"\x03gid\x18\x04 \x01(\rR\x03gid\x12\x92\x01\n" +
+	"\x05flags\x18\x05 \x01(\rB|\xbaHy\xba\x01v\n" +
+	"\x16tmpfile_flags_writable\x124flags access mode must be O_WRONLY (1) or O_RDWR (2)\x1a&(this % 4u) == 1u || (this % 4u) == 2uR\x05flags\x125\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_session_id\"\x8e\x02\n" +
+	"\x0fTmpFileResponse\x12/\n" +
+	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12!\n" +
+	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1d\n" +
+	"\n" +
+	"open_flags\x18\x03 \x01(\rR\topenFlags\x12D\n" +
+	"\x15entry_timeout_seconds\x18\x04 \x01(\x01B\x10\xbaH\r\x12\v@\x01)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12B\n" +
+	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x10\xbaH\r\x12\v@\x01)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x8e\x01\n" +
 	"\vOpenRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x14\n" +
 	"\x05flags\x18\x02 \x01(\rR\x05flags\x125\n" +
@@ -4333,7 +4525,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05atime\x128\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05mtime\x128\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xb2\x0f\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xf6\x0f\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +
@@ -4346,7 +4538,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x06Unlink\x12\x19.storage.v1.UnlinkRequest\x1a\x1a.storage.v1.UnlinkResponse\x12<\n" +
 	"\x05Rmdir\x12\x18.storage.v1.RmdirRequest\x1a\x19.storage.v1.RmdirResponse\x12?\n" +
 	"\x06Rename\x12\x19.storage.v1.RenameRequest\x1a\x1a.storage.v1.RenameResponse\x12?\n" +
-	"\x06Create\x12\x19.storage.v1.CreateRequest\x1a\x1a.storage.v1.CreateResponse\x129\n" +
+	"\x06Create\x12\x19.storage.v1.CreateRequest\x1a\x1a.storage.v1.CreateResponse\x12B\n" +
+	"\aTmpFile\x12\x1a.storage.v1.TmpFileRequest\x1a\x1b.storage.v1.TmpFileResponse\x129\n" +
 	"\x04Open\x12\x17.storage.v1.OpenRequest\x1a\x18.storage.v1.OpenResponse\x12<\n" +
 	"\x05Flush\x12\x18.storage.v1.FlushRequest\x1a\x19.storage.v1.FlushResponse\x12<\n" +
 	"\x05Fsync\x12\x18.storage.v1.FsyncRequest\x1a\x19.storage.v1.FsyncResponse\x12B\n" +
@@ -4378,7 +4571,7 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 	return file_storage_v1_storage_proto_rawDescData
 }
 
-var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 63)
+var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 65)
 var file_storage_v1_storage_proto_goTypes = []any{
 	(*LookupRequest)(nil),         // 0: storage.v1.LookupRequest
 	(*LookupResponse)(nil),        // 1: storage.v1.LookupResponse
@@ -4404,132 +4597,137 @@ var file_storage_v1_storage_proto_goTypes = []any{
 	(*RenameResponse)(nil),        // 21: storage.v1.RenameResponse
 	(*CreateRequest)(nil),         // 22: storage.v1.CreateRequest
 	(*CreateResponse)(nil),        // 23: storage.v1.CreateResponse
-	(*OpenRequest)(nil),           // 24: storage.v1.OpenRequest
-	(*OpenResponse)(nil),          // 25: storage.v1.OpenResponse
-	(*FlushRequest)(nil),          // 26: storage.v1.FlushRequest
-	(*FlushResponse)(nil),         // 27: storage.v1.FlushResponse
-	(*FsyncRequest)(nil),          // 28: storage.v1.FsyncRequest
-	(*FsyncResponse)(nil),         // 29: storage.v1.FsyncResponse
-	(*ReleaseRequest)(nil),        // 30: storage.v1.ReleaseRequest
-	(*ReleaseResponse)(nil),       // 31: storage.v1.ReleaseResponse
-	(*OpenDirRequest)(nil),        // 32: storage.v1.OpenDirRequest
-	(*OpenDirResponse)(nil),       // 33: storage.v1.OpenDirResponse
-	(*FsyncDirRequest)(nil),       // 34: storage.v1.FsyncDirRequest
-	(*FsyncDirResponse)(nil),      // 35: storage.v1.FsyncDirResponse
-	(*ReleaseDirRequest)(nil),     // 36: storage.v1.ReleaseDirRequest
-	(*ReleaseDirResponse)(nil),    // 37: storage.v1.ReleaseDirResponse
-	(*DirEntry)(nil),              // 38: storage.v1.DirEntry
-	(*ReadDirRequest)(nil),        // 39: storage.v1.ReadDirRequest
-	(*ReadDirResponse)(nil),       // 40: storage.v1.ReadDirResponse
-	(*DirEntryPlus)(nil),          // 41: storage.v1.DirEntryPlus
-	(*ReadDirPlusRequest)(nil),    // 42: storage.v1.ReadDirPlusRequest
-	(*ReadDirPlusResponse)(nil),   // 43: storage.v1.ReadDirPlusResponse
-	(*FallocateRequest)(nil),      // 44: storage.v1.FallocateRequest
-	(*FallocateResponse)(nil),     // 45: storage.v1.FallocateResponse
-	(*SetXattrRequest)(nil),       // 46: storage.v1.SetXattrRequest
-	(*SetXattrResponse)(nil),      // 47: storage.v1.SetXattrResponse
-	(*GetXattrRequest)(nil),       // 48: storage.v1.GetXattrRequest
-	(*GetXattrResponse)(nil),      // 49: storage.v1.GetXattrResponse
-	(*ListXattrRequest)(nil),      // 50: storage.v1.ListXattrRequest
-	(*ListXattrResponse)(nil),     // 51: storage.v1.ListXattrResponse
-	(*RemoveXattrRequest)(nil),    // 52: storage.v1.RemoveXattrRequest
-	(*RemoveXattrResponse)(nil),   // 53: storage.v1.RemoveXattrResponse
-	(*FileLock)(nil),              // 54: storage.v1.FileLock
-	(*GetLkRequest)(nil),          // 55: storage.v1.GetLkRequest
-	(*GetLkResponse)(nil),         // 56: storage.v1.GetLkResponse
-	(*SetLkRequest)(nil),          // 57: storage.v1.SetLkRequest
-	(*SetLkResponse)(nil),         // 58: storage.v1.SetLkResponse
-	(*SetLkwRequest)(nil),         // 59: storage.v1.SetLkwRequest
-	(*SetLkwResponse)(nil),        // 60: storage.v1.SetLkwResponse
-	(*Inode)(nil),                 // 61: storage.v1.Inode
-	(*InodeAttribute)(nil),        // 62: storage.v1.InodeAttribute
-	(*timestamppb.Timestamp)(nil), // 63: google.protobuf.Timestamp
+	(*TmpFileRequest)(nil),        // 24: storage.v1.TmpFileRequest
+	(*TmpFileResponse)(nil),       // 25: storage.v1.TmpFileResponse
+	(*OpenRequest)(nil),           // 26: storage.v1.OpenRequest
+	(*OpenResponse)(nil),          // 27: storage.v1.OpenResponse
+	(*FlushRequest)(nil),          // 28: storage.v1.FlushRequest
+	(*FlushResponse)(nil),         // 29: storage.v1.FlushResponse
+	(*FsyncRequest)(nil),          // 30: storage.v1.FsyncRequest
+	(*FsyncResponse)(nil),         // 31: storage.v1.FsyncResponse
+	(*ReleaseRequest)(nil),        // 32: storage.v1.ReleaseRequest
+	(*ReleaseResponse)(nil),       // 33: storage.v1.ReleaseResponse
+	(*OpenDirRequest)(nil),        // 34: storage.v1.OpenDirRequest
+	(*OpenDirResponse)(nil),       // 35: storage.v1.OpenDirResponse
+	(*FsyncDirRequest)(nil),       // 36: storage.v1.FsyncDirRequest
+	(*FsyncDirResponse)(nil),      // 37: storage.v1.FsyncDirResponse
+	(*ReleaseDirRequest)(nil),     // 38: storage.v1.ReleaseDirRequest
+	(*ReleaseDirResponse)(nil),    // 39: storage.v1.ReleaseDirResponse
+	(*DirEntry)(nil),              // 40: storage.v1.DirEntry
+	(*ReadDirRequest)(nil),        // 41: storage.v1.ReadDirRequest
+	(*ReadDirResponse)(nil),       // 42: storage.v1.ReadDirResponse
+	(*DirEntryPlus)(nil),          // 43: storage.v1.DirEntryPlus
+	(*ReadDirPlusRequest)(nil),    // 44: storage.v1.ReadDirPlusRequest
+	(*ReadDirPlusResponse)(nil),   // 45: storage.v1.ReadDirPlusResponse
+	(*FallocateRequest)(nil),      // 46: storage.v1.FallocateRequest
+	(*FallocateResponse)(nil),     // 47: storage.v1.FallocateResponse
+	(*SetXattrRequest)(nil),       // 48: storage.v1.SetXattrRequest
+	(*SetXattrResponse)(nil),      // 49: storage.v1.SetXattrResponse
+	(*GetXattrRequest)(nil),       // 50: storage.v1.GetXattrRequest
+	(*GetXattrResponse)(nil),      // 51: storage.v1.GetXattrResponse
+	(*ListXattrRequest)(nil),      // 52: storage.v1.ListXattrRequest
+	(*ListXattrResponse)(nil),     // 53: storage.v1.ListXattrResponse
+	(*RemoveXattrRequest)(nil),    // 54: storage.v1.RemoveXattrRequest
+	(*RemoveXattrResponse)(nil),   // 55: storage.v1.RemoveXattrResponse
+	(*FileLock)(nil),              // 56: storage.v1.FileLock
+	(*GetLkRequest)(nil),          // 57: storage.v1.GetLkRequest
+	(*GetLkResponse)(nil),         // 58: storage.v1.GetLkResponse
+	(*SetLkRequest)(nil),          // 59: storage.v1.SetLkRequest
+	(*SetLkResponse)(nil),         // 60: storage.v1.SetLkResponse
+	(*SetLkwRequest)(nil),         // 61: storage.v1.SetLkwRequest
+	(*SetLkwResponse)(nil),        // 62: storage.v1.SetLkwResponse
+	(*Inode)(nil),                 // 63: storage.v1.Inode
+	(*InodeAttribute)(nil),        // 64: storage.v1.InodeAttribute
+	(*timestamppb.Timestamp)(nil), // 65: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
-	61, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
-	61, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
-	63, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
-	63, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
-	61, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
-	61, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
-	61, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
-	61, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
-	61, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
-	61, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
-	38, // 10: storage.v1.ReadDirResponse.entries:type_name -> storage.v1.DirEntry
-	61, // 11: storage.v1.DirEntryPlus.inode:type_name -> storage.v1.Inode
-	41, // 12: storage.v1.ReadDirPlusResponse.entries:type_name -> storage.v1.DirEntryPlus
-	54, // 13: storage.v1.GetLkRequest.lk:type_name -> storage.v1.FileLock
-	54, // 14: storage.v1.GetLkResponse.lk:type_name -> storage.v1.FileLock
-	54, // 15: storage.v1.SetLkRequest.lk:type_name -> storage.v1.FileLock
-	54, // 16: storage.v1.SetLkwRequest.lk:type_name -> storage.v1.FileLock
-	62, // 17: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
-	63, // 18: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
-	63, // 19: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
-	63, // 20: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
-	0,  // 21: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
-	2,  // 22: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
-	4,  // 23: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
-	6,  // 24: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
-	8,  // 25: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
-	10, // 26: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
-	12, // 27: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
-	14, // 28: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
-	16, // 29: storage.v1.StorageService.Unlink:input_type -> storage.v1.UnlinkRequest
-	18, // 30: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
-	20, // 31: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
-	22, // 32: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
-	24, // 33: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
-	26, // 34: storage.v1.StorageService.Flush:input_type -> storage.v1.FlushRequest
-	28, // 35: storage.v1.StorageService.Fsync:input_type -> storage.v1.FsyncRequest
-	30, // 36: storage.v1.StorageService.Release:input_type -> storage.v1.ReleaseRequest
-	32, // 37: storage.v1.StorageService.OpenDir:input_type -> storage.v1.OpenDirRequest
-	34, // 38: storage.v1.StorageService.FsyncDir:input_type -> storage.v1.FsyncDirRequest
-	36, // 39: storage.v1.StorageService.ReleaseDir:input_type -> storage.v1.ReleaseDirRequest
-	39, // 40: storage.v1.StorageService.ReadDir:input_type -> storage.v1.ReadDirRequest
-	42, // 41: storage.v1.StorageService.ReadDirPlus:input_type -> storage.v1.ReadDirPlusRequest
-	44, // 42: storage.v1.StorageService.Fallocate:input_type -> storage.v1.FallocateRequest
-	46, // 43: storage.v1.StorageService.SetXattr:input_type -> storage.v1.SetXattrRequest
-	48, // 44: storage.v1.StorageService.GetXattr:input_type -> storage.v1.GetXattrRequest
-	50, // 45: storage.v1.StorageService.ListXattr:input_type -> storage.v1.ListXattrRequest
-	52, // 46: storage.v1.StorageService.RemoveXattr:input_type -> storage.v1.RemoveXattrRequest
-	55, // 47: storage.v1.StorageService.GetLk:input_type -> storage.v1.GetLkRequest
-	57, // 48: storage.v1.StorageService.SetLk:input_type -> storage.v1.SetLkRequest
-	59, // 49: storage.v1.StorageService.SetLkw:input_type -> storage.v1.SetLkwRequest
-	1,  // 50: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
-	3,  // 51: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
-	5,  // 52: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
-	7,  // 53: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
-	9,  // 54: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
-	11, // 55: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
-	13, // 56: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
-	15, // 57: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
-	17, // 58: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
-	19, // 59: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
-	21, // 60: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
-	23, // 61: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
-	25, // 62: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
-	27, // 63: storage.v1.StorageService.Flush:output_type -> storage.v1.FlushResponse
-	29, // 64: storage.v1.StorageService.Fsync:output_type -> storage.v1.FsyncResponse
-	31, // 65: storage.v1.StorageService.Release:output_type -> storage.v1.ReleaseResponse
-	33, // 66: storage.v1.StorageService.OpenDir:output_type -> storage.v1.OpenDirResponse
-	35, // 67: storage.v1.StorageService.FsyncDir:output_type -> storage.v1.FsyncDirResponse
-	37, // 68: storage.v1.StorageService.ReleaseDir:output_type -> storage.v1.ReleaseDirResponse
-	40, // 69: storage.v1.StorageService.ReadDir:output_type -> storage.v1.ReadDirResponse
-	43, // 70: storage.v1.StorageService.ReadDirPlus:output_type -> storage.v1.ReadDirPlusResponse
-	45, // 71: storage.v1.StorageService.Fallocate:output_type -> storage.v1.FallocateResponse
-	47, // 72: storage.v1.StorageService.SetXattr:output_type -> storage.v1.SetXattrResponse
-	49, // 73: storage.v1.StorageService.GetXattr:output_type -> storage.v1.GetXattrResponse
-	51, // 74: storage.v1.StorageService.ListXattr:output_type -> storage.v1.ListXattrResponse
-	53, // 75: storage.v1.StorageService.RemoveXattr:output_type -> storage.v1.RemoveXattrResponse
-	56, // 76: storage.v1.StorageService.GetLk:output_type -> storage.v1.GetLkResponse
-	58, // 77: storage.v1.StorageService.SetLk:output_type -> storage.v1.SetLkResponse
-	60, // 78: storage.v1.StorageService.SetLkw:output_type -> storage.v1.SetLkwResponse
-	50, // [50:79] is the sub-list for method output_type
-	21, // [21:50] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	63, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
+	63, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
+	65, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
+	65, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
+	63, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
+	63, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
+	63, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
+	63, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
+	63, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
+	63, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
+	63, // 10: storage.v1.TmpFileResponse.inode:type_name -> storage.v1.Inode
+	40, // 11: storage.v1.ReadDirResponse.entries:type_name -> storage.v1.DirEntry
+	63, // 12: storage.v1.DirEntryPlus.inode:type_name -> storage.v1.Inode
+	43, // 13: storage.v1.ReadDirPlusResponse.entries:type_name -> storage.v1.DirEntryPlus
+	56, // 14: storage.v1.GetLkRequest.lk:type_name -> storage.v1.FileLock
+	56, // 15: storage.v1.GetLkResponse.lk:type_name -> storage.v1.FileLock
+	56, // 16: storage.v1.SetLkRequest.lk:type_name -> storage.v1.FileLock
+	56, // 17: storage.v1.SetLkwRequest.lk:type_name -> storage.v1.FileLock
+	64, // 18: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
+	65, // 19: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
+	65, // 20: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
+	65, // 21: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
+	0,  // 22: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
+	2,  // 23: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
+	4,  // 24: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
+	6,  // 25: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
+	8,  // 26: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
+	10, // 27: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
+	12, // 28: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
+	14, // 29: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
+	16, // 30: storage.v1.StorageService.Unlink:input_type -> storage.v1.UnlinkRequest
+	18, // 31: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
+	20, // 32: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
+	22, // 33: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
+	24, // 34: storage.v1.StorageService.TmpFile:input_type -> storage.v1.TmpFileRequest
+	26, // 35: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
+	28, // 36: storage.v1.StorageService.Flush:input_type -> storage.v1.FlushRequest
+	30, // 37: storage.v1.StorageService.Fsync:input_type -> storage.v1.FsyncRequest
+	32, // 38: storage.v1.StorageService.Release:input_type -> storage.v1.ReleaseRequest
+	34, // 39: storage.v1.StorageService.OpenDir:input_type -> storage.v1.OpenDirRequest
+	36, // 40: storage.v1.StorageService.FsyncDir:input_type -> storage.v1.FsyncDirRequest
+	38, // 41: storage.v1.StorageService.ReleaseDir:input_type -> storage.v1.ReleaseDirRequest
+	41, // 42: storage.v1.StorageService.ReadDir:input_type -> storage.v1.ReadDirRequest
+	44, // 43: storage.v1.StorageService.ReadDirPlus:input_type -> storage.v1.ReadDirPlusRequest
+	46, // 44: storage.v1.StorageService.Fallocate:input_type -> storage.v1.FallocateRequest
+	48, // 45: storage.v1.StorageService.SetXattr:input_type -> storage.v1.SetXattrRequest
+	50, // 46: storage.v1.StorageService.GetXattr:input_type -> storage.v1.GetXattrRequest
+	52, // 47: storage.v1.StorageService.ListXattr:input_type -> storage.v1.ListXattrRequest
+	54, // 48: storage.v1.StorageService.RemoveXattr:input_type -> storage.v1.RemoveXattrRequest
+	57, // 49: storage.v1.StorageService.GetLk:input_type -> storage.v1.GetLkRequest
+	59, // 50: storage.v1.StorageService.SetLk:input_type -> storage.v1.SetLkRequest
+	61, // 51: storage.v1.StorageService.SetLkw:input_type -> storage.v1.SetLkwRequest
+	1,  // 52: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
+	3,  // 53: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
+	5,  // 54: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
+	7,  // 55: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
+	9,  // 56: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
+	11, // 57: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
+	13, // 58: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
+	15, // 59: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
+	17, // 60: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
+	19, // 61: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
+	21, // 62: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
+	23, // 63: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
+	25, // 64: storage.v1.StorageService.TmpFile:output_type -> storage.v1.TmpFileResponse
+	27, // 65: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
+	29, // 66: storage.v1.StorageService.Flush:output_type -> storage.v1.FlushResponse
+	31, // 67: storage.v1.StorageService.Fsync:output_type -> storage.v1.FsyncResponse
+	33, // 68: storage.v1.StorageService.Release:output_type -> storage.v1.ReleaseResponse
+	35, // 69: storage.v1.StorageService.OpenDir:output_type -> storage.v1.OpenDirResponse
+	37, // 70: storage.v1.StorageService.FsyncDir:output_type -> storage.v1.FsyncDirResponse
+	39, // 71: storage.v1.StorageService.ReleaseDir:output_type -> storage.v1.ReleaseDirResponse
+	42, // 72: storage.v1.StorageService.ReadDir:output_type -> storage.v1.ReadDirResponse
+	45, // 73: storage.v1.StorageService.ReadDirPlus:output_type -> storage.v1.ReadDirPlusResponse
+	47, // 74: storage.v1.StorageService.Fallocate:output_type -> storage.v1.FallocateResponse
+	49, // 75: storage.v1.StorageService.SetXattr:output_type -> storage.v1.SetXattrResponse
+	51, // 76: storage.v1.StorageService.GetXattr:output_type -> storage.v1.GetXattrResponse
+	53, // 77: storage.v1.StorageService.ListXattr:output_type -> storage.v1.ListXattrResponse
+	55, // 78: storage.v1.StorageService.RemoveXattr:output_type -> storage.v1.RemoveXattrResponse
+	58, // 79: storage.v1.StorageService.GetLk:output_type -> storage.v1.GetLkResponse
+	60, // 80: storage.v1.StorageService.SetLk:output_type -> storage.v1.SetLkResponse
+	62, // 81: storage.v1.StorageService.SetLkw:output_type -> storage.v1.SetLkwResponse
+	52, // [52:82] is the sub-list for method output_type
+	22, // [22:52] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_storage_v1_storage_proto_init() }
@@ -4546,16 +4744,17 @@ func file_storage_v1_storage_proto_init() {
 	file_storage_v1_storage_proto_msgTypes[32].OneofWrappers = []any{}
 	file_storage_v1_storage_proto_msgTypes[34].OneofWrappers = []any{}
 	file_storage_v1_storage_proto_msgTypes[36].OneofWrappers = []any{}
-	file_storage_v1_storage_proto_msgTypes[39].OneofWrappers = []any{}
-	file_storage_v1_storage_proto_msgTypes[42].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[38].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[41].OneofWrappers = []any{}
 	file_storage_v1_storage_proto_msgTypes[44].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[46].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_v1_storage_proto_rawDesc), len(file_storage_v1_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   63,
+			NumMessages:   65,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

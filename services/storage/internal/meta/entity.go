@@ -33,6 +33,7 @@ const (
 	O_EXCL    = 0o200
 	O_TRUNC   = 0o1000
 	O_APPEND  = 0o2000
+	O_TMPFILE = 0o20000000
 )
 
 // Linux FUSE / POSIX fallocate 模式标志位常量（平台无关固定值）。
@@ -147,6 +148,16 @@ type CreateResult struct {
 	Inode     *Inode
 	Fh        uint64
 	OpenFlags uint32
+}
+
+// TmpFileParams 定义原子创建匿名临时常规文件并分配初始文件句柄的输入参数。
+type TmpFileParams struct {
+	ParentIno uint64
+	Mode      uint32
+	UID       uint32
+	GID       uint32
+	Flags     uint32
+	SessionID *uint64
 }
 
 // OpenParams 定义打开文件并分配文件句柄的输入参数。

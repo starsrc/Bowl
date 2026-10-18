@@ -41,6 +41,12 @@ const (
 	FallocFlPunchHole uint32 = 0x02
 )
 
+// Linux FUSE_RENAME2 (45) 重命名标志位常量（平台无关固定值，严禁依赖宿主机 syscall）。
+const (
+	RenameNoReplace uint32 = 0x1
+	RenameExchange  uint32 = 0x2
+)
+
 // Linux 扩展属性（xattr）规格常量与操作标志位。
 const (
 	MaxXattrNameBytes  = 255
@@ -116,12 +122,13 @@ type LinkParams struct {
 	NewName      []byte
 }
 
-// RenameParams 定义重命名与移动操作的输入参数。
+// RenameParams 定义重命名、移动与交换操作的输入参数。
 type RenameParams struct {
 	OldParentIno uint64
 	OldName      []byte
 	NewParentIno uint64
 	NewName      []byte
+	Flags        uint32
 }
 
 // CreateParams 定义原子创建常规文件并分配初始文件句柄的输入参数。

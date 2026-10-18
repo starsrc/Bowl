@@ -1095,12 +1095,15 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 	return nil
 }
 
-// Rename 执行原子文件/目录重命名或移动（支持覆盖已存在的目标项）。
+// Rename 执行原子文件/目录重命名、移动或交换（支持 FUSE_RENAME2 标志位）。
 func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	if params.OldParentIno == 0 || params.OldParentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
 	if params.NewParentIno == 0 || params.NewParentIno > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if params.Flags != 0 && params.Flags != RenameNoReplace && params.Flags != RenameExchange {
 		return ErrInvalidArgument
 	}
 	if err := validateEntryName(params.OldName); err != nil {
@@ -1148,6 +1151,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 				}
 				return fmt.Errorf("verify old entry %d/%s: %w", params.OldParentIno, params.OldName, err)
 			}
+			if params.Flags == RenameNoReplace {
+				return ErrAlreadyExists
+			}
 			return nil
 		}
 
@@ -1160,7 +1166,14 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		if err == nil {
 			hasNewEntry = true
 			newIno = preNewEntry.Ino
-		} else if !errors.Is(err, pgx.ErrNoRows) {
+		} else if errors.Is(err, pgx.ErrNoRows) {
+			if params.Flags == RenameExchange {
+				if _, _, pErr := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); pErr != nil {
+					return pErr
+				}
+				return ErrNotFound
+			}
+		} else {
 			return fmt.Errorf("get new entry %d/%s: %w", params.NewParentIno, params.NewName, err)
 		}
 
@@ -1223,7 +1236,12 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return errRetryTx
 		}
 
-		// 同节点硬链接短路 (POSIX No-op)
+		// RenameNoReplace：只要目标 Entry 已存在（包含同一 Inode 的不同硬链接与异 Inode），一律返回 ErrAlreadyExists
+		if params.Flags == RenameNoReplace && hasNewEntry {
+			return ErrAlreadyExists
+		}
+
+		// 同节点硬链接短路 (POSIX No-op / RenameExchange 同节点短路)
 		if hasNewEntry && oldIno == newIno {
 			return nil
 		}
@@ -1234,8 +1252,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		newInode := locked[newIno]
 
 		oldIsDir := (uint32(oldInode.Mode) & S_IFMT) == S_IFDIR
+		newIsDir := hasNewEntry && (uint32(newInode.Mode)&S_IFMT) == S_IFDIR
 
-		// 祖先环检测：当源节点为目录且跨目录移动时
+		// 祖先环检测：当源节点为目录且跨目录移动或交换时（正向检测）
 		if oldIsDir && params.OldParentIno != params.NewParentIno {
 			if params.NewParentIno == uint64(oldIno) {
 				return ErrInvalidArgument
@@ -1252,9 +1271,85 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			}
 		}
 
+		// RenameExchange 双向原子交换分支
+		if params.Flags == RenameExchange {
+			// 反向祖先环检测：当目标节点为目录且跨目录交换时
+			if newIsDir && params.OldParentIno != params.NewParentIno {
+				if params.OldParentIno == uint64(newIno) {
+					return ErrInvalidArgument
+				}
+				isSub, err := q.IsSubdirectory(ctx, db.IsSubdirectoryParams{
+					ChildIno:    int64(params.OldParentIno),
+					AncestorIno: newIno,
+				})
+				if err != nil {
+					return fmt.Errorf("check reverse is subdirectory %d in %d: %w", params.OldParentIno, newIno, err)
+				}
+				if isSub {
+					return ErrInvalidArgument
+				}
+			}
+
+			// 原地互换两个目录项的目标 Ino
+			if err := q.UpdateEntryIno(ctx, db.UpdateEntryInoParams{
+				ParentIno: int64(params.OldParentIno),
+				Name:      params.OldName,
+				Ino:       newIno,
+			}); err != nil {
+				return fmt.Errorf("update old entry %d/%s ino -> %d: %w", params.OldParentIno, params.OldName, newIno, err)
+			}
+			if err := q.UpdateEntryIno(ctx, db.UpdateEntryInoParams{
+				ParentIno: int64(params.NewParentIno),
+				Name:      params.NewName,
+				Ino:       oldIno,
+			}); err != nil {
+				return fmt.Errorf("update new entry %d/%s ino -> %d: %w", params.NewParentIno, params.NewName, oldIno, err)
+			}
+
+			// 刷新双节点 ctime
+			if err := q.TouchInodeCtime(ctx, oldIno); err != nil {
+				return fmt.Errorf("touch old inode %d ctime: %w", oldIno, err)
+			}
+			if err := q.TouchInodeCtime(ctx, newIno); err != nil {
+				return fmt.Errorf("touch new inode %d ctime: %w", newIno, err)
+			}
+
+			// 维护父目录 nlink 与时间戳
+			if params.OldParentIno == params.NewParentIno {
+				if err := q.TouchInodeTimestamps(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("touch parent inode %d timestamps: %w", oldParent.Ino, err)
+				}
+			} else if oldIsDir == newIsDir {
+				// 跨父目录且双方同为目录或同为非目录：双父目录 nlink 不变，仅刷新时间戳
+				if err := q.TouchInodeTimestamps(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("touch old parent inode %d timestamps: %w", oldParent.Ino, err)
+				}
+				if err := q.TouchInodeTimestamps(ctx, newParent.Ino); err != nil {
+					return fmt.Errorf("touch new parent inode %d timestamps: %w", newParent.Ino, err)
+				}
+			} else if oldIsDir && !newIsDir {
+				// 跨父目录且源为目录、目标为非目录：oldParent 移出目录 nlink - 1，newParent 移入目录 nlink + 1
+				if err := q.DecrementInodeNlinkAndTouch(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("decrement old parent inode %d nlink and touch: %w", oldParent.Ino, err)
+				}
+				if err := q.IncrementInodeNlinkAndTouch(ctx, newParent.Ino); err != nil {
+					return fmt.Errorf("increment new parent inode %d nlink and touch: %w", newParent.Ino, err)
+				}
+			} else {
+				// 跨父目录且源为非目录、目标为目录：oldParent 移入目录 nlink + 1，newParent 移出目录 nlink - 1
+				if err := q.IncrementInodeNlinkAndTouch(ctx, oldParent.Ino); err != nil {
+					return fmt.Errorf("increment old parent inode %d nlink and touch: %w", oldParent.Ino, err)
+				}
+				if err := q.DecrementInodeNlinkAndTouch(ctx, newParent.Ino); err != nil {
+					return fmt.Errorf("decrement new parent inode %d nlink and touch: %w", newParent.Ino, err)
+				}
+			}
+
+			return nil
+		}
+
 		// 异节点覆盖兼容矩阵校验
 		if hasNewEntry {
-			newIsDir := (uint32(newInode.Mode) & S_IFMT) == S_IFDIR
 			if oldIsDir && !newIsDir {
 				return ErrNotDir // POSIX ENOTDIR: old is dir, new is not dir
 			}
@@ -1364,6 +1459,8 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		switch {
 		case errors.Is(err, ErrNotFound):
 			return ErrNotFound
+		case errors.Is(err, ErrAlreadyExists):
+			return ErrAlreadyExists
 		case errors.Is(err, ErrNotDir):
 			return ErrNotDir
 		case errors.Is(err, ErrIsDir):

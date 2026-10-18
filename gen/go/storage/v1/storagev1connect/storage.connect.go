@@ -334,14 +334,15 @@ type StorageServiceClient interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
 	Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error)
-	// Rename 执行原子文件/目录重命名或移动（支持覆盖已存在的目标项）。
-	// 若源与目标为同一路径或同一 Inode 的硬链接，执行 POSIX 规范要求的无副作用短路成功返回。
+	// Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
+	// 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
+	// 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
+	// 当 flags 为 RENAME_EXCHANGE (0x2) 时，要求源与目标均存在（任一不存在返回 NotFound / ENOENT），原子交换两个目录项的 Inode 绑定并执行双向祖先环检测。
+	// 若传入互斥组合（RENAME_NOREPLACE | RENAME_EXCHANGE）、RENAME_WHITEOUT (0x4) 或未知标志位，返回 InvalidArgument (EINVAL)。
 	// 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若源为目录而目标为非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若源为非目录而目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-	// 若源为目录而目标为非空目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
-	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
+	// 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
 	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
@@ -496,14 +497,15 @@ type StorageServiceHandler interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
 	Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error)
-	// Rename 执行原子文件/目录重命名或移动（支持覆盖已存在的目标项）。
-	// 若源与目标为同一路径或同一 Inode 的硬链接，执行 POSIX 规范要求的无副作用短路成功返回。
+	// Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
+	// 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
+	// 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
+	// 当 flags 为 RENAME_EXCHANGE (0x2) 时，要求源与目标均存在（任一不存在返回 NotFound / ENOENT），原子交换两个目录项的 Inode 绑定并执行双向祖先环检测。
+	// 若传入互斥组合（RENAME_NOREPLACE | RENAME_EXCHANGE）、RENAME_WHITEOUT (0x4) 或未知标志位，返回 InvalidArgument (EINVAL)。
 	// 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若源为目录而目标为非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若源为非目录而目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-	// 若源为目录而目标为非空目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
-	// 若尝试将目录移动为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
+	// 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
 	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。

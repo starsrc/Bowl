@@ -52,6 +52,7 @@ type Querier interface {
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error
+	UpdateEntryIno(ctx context.Context, arg UpdateEntryInoParams) error
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
 	UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error)
 	UpsertFileLockWaiter(ctx context.Context, arg UpsertFileLockWaiterParams) (FileLockWaiter, error)

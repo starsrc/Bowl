@@ -1289,7 +1289,9 @@ type RenameRequest struct {
 	NewParentIno uint64 `protobuf:"varint,3,opt,name=new_parent_ino,json=newParentIno,proto3" json:"new_parent_ino,omitempty"`
 	// 目标项新名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
-	NewName       []byte `protobuf:"bytes,4,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	NewName []byte `protobuf:"bytes,4,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
+	// 重命名标志位 (0: 默认覆盖, 1: RENAME_NOREPLACE 禁止覆盖, 2: RENAME_EXCHANGE 双向交换)。
+	Flags         uint32 `protobuf:"varint,5,opt,name=flags,proto3" json:"flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1350,6 +1352,13 @@ func (x *RenameRequest) GetNewName() []byte {
 		return x.NewName
 	}
 	return nil
+}
+
+func (x *RenameRequest) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
 }
 
 // RenameResponse 定义 Rename 接口返回参数。
@@ -3983,14 +3992,15 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
 	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\x0f\n" +
-	"\rRmdirResponse\"\xbb\x03\n" +
+	"\rRmdirResponse\"\xda\x03\n" +
 	"\rRenameRequest\x127\n" +
 	"\x0eold_parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\foldParentIno\x12\x9a\x01\n" +
 	"\bold_name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\aoldName\x127\n" +
 	"\x0enew_parent_ino\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x12\x9a\x01\n" +
 	"\bnew_name\x18\x04 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\"\x10\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\x12\x1d\n" +
+	"\x05flags\x18\x05 \x01(\rB\a\xbaH\x04*\x02\x18\x02R\x05flags\"\x10\n" +
 	"\x0eRenameResponse\"\xf6\x02\n" +
 	"\rCreateRequest\x120\n" +
 	"\n" +

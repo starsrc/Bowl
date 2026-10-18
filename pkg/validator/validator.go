@@ -52,6 +52,9 @@ var storageMessages = []proto.Message{
 	&storagev1.GetXattrRequest{},
 	&storagev1.ListXattrRequest{},
 	&storagev1.RemoveXattrRequest{},
+	&storagev1.GetLkRequest{},
+	&storagev1.SetLkRequest{},
+	&storagev1.SetLkwRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.LookupResponse{},
@@ -79,10 +82,14 @@ var storageMessages = []proto.Message{
 	&storagev1.GetXattrResponse{},
 	&storagev1.ListXattrResponse{},
 	&storagev1.RemoveXattrResponse{},
+	&storagev1.GetLkResponse{},
+	&storagev1.SetLkResponse{},
+	&storagev1.SetLkwResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},
 	&storagev1.DirEntryPlus{},
+	&storagev1.FileLock{},
 	&storagev1.Inode{},
 	&storagev1.InodeAttribute{},
 }
@@ -264,6 +271,9 @@ func classifyViolation(v *protovalidate.Violation) (int, string) {
 		"storage.v1.GetXattrRequest.ino",
 		"storage.v1.ListXattrRequest.ino",
 		"storage.v1.RemoveXattrRequest.ino",
+		"storage.v1.GetLkRequest.ino",
+		"storage.v1.SetLkRequest.ino",
+		"storage.v1.SetLkwRequest.ino",
 		"storage.v1.DirEntry.ino",
 		"storage.v1.DirEntryPlus.ino",
 		"storage.v1.Inode.ino":

@@ -74,6 +74,12 @@ const (
 	StorageServiceListXattrProcedure = "/storage.v1.StorageService/ListXattr"
 	// StorageServiceRemoveXattrProcedure is the procedure name of the StorageService's RemoveXattr RPC.
 	StorageServiceRemoveXattrProcedure = "/storage.v1.StorageService/RemoveXattr"
+	// StorageServiceGetLkProcedure is the procedure name of the StorageService's GetLk RPC.
+	StorageServiceGetLkProcedure = "/storage.v1.StorageService/GetLk"
+	// StorageServiceSetLkProcedure is the procedure name of the StorageService's SetLk RPC.
+	StorageServiceSetLkProcedure = "/storage.v1.StorageService/SetLk"
+	// StorageServiceSetLkwProcedure is the procedure name of the StorageService's SetLkw RPC.
+	StorageServiceSetLkwProcedure = "/storage.v1.StorageService/SetLkw"
 )
 
 var (
@@ -252,6 +258,27 @@ var (
 			Procedure:  StorageServiceRemoveXattrProcedure,
 		}
 	})
+	storageServiceGetLkSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetLk"),
+			Procedure:  StorageServiceGetLkProcedure,
+		}
+	})
+	storageServiceSetLkSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetLk"),
+			Procedure:  StorageServiceSetLkProcedure,
+		}
+	})
+	storageServiceSetLkwSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetLkw"),
+			Procedure:  StorageServiceSetLkwProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -393,6 +420,21 @@ type StorageServiceClient interface {
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error)
+	// GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
+	// 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
+	// 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	GetLk(context.Context, *v1.GetLkRequest) (*v1.GetLkResponse, error)
+	// SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
+	// 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
+	// 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	SetLk(context.Context, *v1.SetLkRequest) (*v1.SetLkResponse, error)
+	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
+	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
+	SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -540,6 +582,21 @@ type StorageServiceHandler interface {
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error)
+	// GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
+	// 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
+	// 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	GetLk(context.Context, *v1.GetLkRequest) (*v1.GetLkResponse, error)
+	// SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
+	// 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
+	// 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	SetLk(context.Context, *v1.SetLkRequest) (*v1.SetLkResponse, error)
+	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
+	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
+	SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -572,6 +629,9 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceGetXattrSpec(), Handler: adapter.getXattr},
 		connect.Method{Spec: storageServiceListXattrSpec(), Handler: adapter.listXattr},
 		connect.Method{Spec: storageServiceRemoveXattrSpec(), Handler: adapter.removeXattr},
+		connect.Method{Spec: storageServiceGetLkSpec(), Handler: adapter.getLk},
+		connect.Method{Spec: storageServiceSetLkSpec(), Handler: adapter.setLk},
+		connect.Method{Spec: storageServiceSetLkwSpec(), Handler: adapter.setLkw},
 	)
 }
 
@@ -676,6 +736,18 @@ func (UnimplementedStorageServiceHandler) ListXattr(context.Context, *v1.ListXat
 
 func (UnimplementedStorageServiceHandler) RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.RemoveXattr is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) GetLk(context.Context, *v1.GetLkRequest) (*v1.GetLkResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetLk is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) SetLk(context.Context, *v1.SetLkRequest) (*v1.SetLkResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetLk is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetLkw is not implemented")
 }
 
 type storageServiceClient struct {
@@ -877,6 +949,30 @@ func (c *storageServiceClient) ListXattr(ctx context.Context, req *v1.ListXattrR
 func (c *storageServiceClient) RemoveXattr(ctx context.Context, req *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error) {
 	var res v1.RemoveXattrResponse
 	if err := c.client.CallUnary(ctx, storageServiceRemoveXattrSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) GetLk(ctx context.Context, req *v1.GetLkRequest) (*v1.GetLkResponse, error) {
+	var res v1.GetLkResponse
+	if err := c.client.CallUnary(ctx, storageServiceGetLkSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) SetLk(ctx context.Context, req *v1.SetLkRequest) (*v1.SetLkResponse, error) {
+	var res v1.SetLkResponse
+	if err := c.client.CallUnary(ctx, storageServiceSetLkSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) SetLkw(ctx context.Context, req *v1.SetLkwRequest) (*v1.SetLkwResponse, error) {
+	var res v1.SetLkwResponse
+	if err := c.client.CallUnary(ctx, storageServiceSetLkwSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1178,6 +1274,42 @@ func (h storageServiceHandler) removeXattr(ctx context.Context, _ connect.Spec, 
 		return err
 	}
 	res, err := h.svc.RemoveXattr(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) getLk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.GetLkRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.GetLk(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) setLk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.SetLkRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.SetLk(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) setLkw(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.SetLkwRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.SetLkw(ctx, &req)
 	if err != nil {
 		return err
 	}

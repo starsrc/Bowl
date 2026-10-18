@@ -2,6 +2,7 @@ package meta
 
 import (
 	"errors"
+	"math"
 	"time"
 )
 
@@ -48,6 +49,24 @@ const (
 
 	XattrCreate  uint32 = 0x1
 	XattrReplace uint32 = 0x2
+)
+
+// Linux FUSE 文件锁类型、标志位、最大偏移量与会话租约常量（平台无关固定值，严禁依赖宿主机 syscall.F_*）。
+const (
+	F_RDLCK uint32 = 0
+	F_WRLCK uint32 = 1
+	F_UNLCK uint32 = 2
+
+	FuseLkFlock            uint32 = 0x1
+	FuseReleaseFlockUnlock uint32 = 0x2
+
+	OffsetMax uint64 = math.MaxInt64
+
+	DefaultSessionLeaseTTL = 60 * time.Second
+
+	WaiterStatusPending   int16 = 1
+	WaiterStatusGranted   int16 = 2
+	WaiterStatusCancelled int16 = 3
 )
 
 // SetAttrInput 定义修改 Inode 属性的输入参数。
@@ -248,6 +267,9 @@ var (
 	ErrTooBig          = errors.New("meta: argument list too long")
 	ErrNoData          = errors.New("meta: no data available")
 	ErrNoSpace         = errors.New("meta: no space left on device")
+	ErrAgain           = errors.New("meta: resource temporarily unavailable")
+	ErrDeadlock        = errors.New("meta: resource deadlock avoided")
+	ErrInterrupted     = errors.New("meta: interrupted system call")
 )
 
 // Inode 表示文件系统节点的领域实体。

@@ -16,34 +16,43 @@ func TestFlushRequestValidation(t *testing.T) {
 	}
 
 	lockOwnerVal := uint64(123456)
+	lockOwnerHighBit := uint64(1)<<63 | 0xdeadbeef
+	validSessionID := uint64(1001)
+	maxSessionID := uint64(math.MaxInt64)
+	zeroSessionID := uint64(0)
+	overflowSessionID := uint64(math.MaxInt64) + 1
 
 	for _, tc := range []struct {
 		name      string
 		ino       uint64
 		fh        uint64
 		lockOwner *uint64
+		sessionID *uint64
 		valid     bool
 	}{
 		// 正向边界用例
 		{
-			name:      "合法: 根目录 Inode 与有效句柄冲刷 (无 lock_owner)",
+			name:      "合法: 根目录 Inode 与有效句柄冲刷 (无 lock_owner 与 session_id)",
 			ino:       1,
 			fh:        1,
 			lockOwner: nil,
+			sessionID: nil,
 			valid:     true,
 		},
 		{
-			name:      "合法: 常规 Inode 与句柄冲刷 (携带 lock_owner)",
+			name:      "合法: 常规 Inode 与句柄冲刷 (携带 lock_owner 与 session_id)",
 			ino:       100,
 			fh:        42,
 			lockOwner: &lockOwnerVal,
+			sessionID: &validSessionID,
 			valid:     true,
 		},
 		{
-			name:      "合法: 最大合法 int64 边界 Inode 与句柄",
+			name:      "合法: 最高位为 1 的全范围 uint64 lock_owner 与最大合法 int64 session_id",
 			ino:       math.MaxInt64,
 			fh:        math.MaxInt64,
-			lockOwner: nil,
+			lockOwner: &lockOwnerHighBit,
+			sessionID: &maxSessionID,
 			valid:     true,
 		},
 
@@ -84,12 +93,27 @@ func TestFlushRequestValidation(t *testing.T) {
 			fh:    math.MaxUint64,
 			valid: false,
 		},
+		{
+			name:      "非法: session_id 为 0",
+			ino:       1,
+			fh:        1,
+			sessionID: &zeroSessionID,
+			valid:     false,
+		},
+		{
+			name:      "非法: session_id 超过 math.MaxInt64",
+			ino:       1,
+			fh:        1,
+			sessionID: &overflowSessionID,
+			valid:     false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &storagev1.FlushRequest{
 				Ino:       tc.ino,
 				Fh:        tc.fh,
 				LockOwner: tc.lockOwner,
+				SessionId: tc.sessionID,
 			}
 
 			valErr := validator.Validate(req)

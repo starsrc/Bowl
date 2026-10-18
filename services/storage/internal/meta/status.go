@@ -32,12 +32,15 @@ var mappings = []errorMapping{
 	{sentinel: ErrNotEmpty, code: codes.FailedPrecondition, reason: "ENOTEMPTY"},
 	{sentinel: ErrBadFileHandle, code: codes.FailedPrecondition, reason: "EBADF"},
 	{sentinel: ErrNoSpace, code: codes.ResourceExhausted, reason: "ENOSPC"},
+	{sentinel: ErrAgain, code: codes.ResourceExhausted, reason: "EAGAIN"},
+	{sentinel: ErrDeadlock, code: codes.Aborted, reason: "EDEADLK"},
+	{sentinel: ErrInterrupted, code: codes.Canceled, reason: "EINTR"},
 	{sentinel: ErrNotSupported, code: codes.Unimplemented, reason: "EOPNOTSUPP"},
 }
 
 // ToStatus 将领域层返回的 error 映射为携带 google.rpc.ErrorInfo 详情的 gRPC status.Status。
 // 若 err == nil，直接返回 nil。
-// 若 err 命中 14 个领域哨兵错误之一，映射为对应的 gRPC 状态码并在 ErrorInfo 中注入 POSIX errno reason 与 bowl.storage domain。
+// 若 err 命中 17 个领域哨兵错误之一，映射为对应的 gRPC 状态码并在 ErrorInfo 中注入 POSIX errno reason 与 bowl.storage domain。
 // 若 err 为未知错误，映射为 codes.Unknown。
 func ToStatus(err error) *status.Status {
 	if err == nil {

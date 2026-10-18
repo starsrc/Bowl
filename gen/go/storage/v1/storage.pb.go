@@ -1680,8 +1680,10 @@ type FlushRequest struct {
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 待冲刷的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
-	// 可选的文件锁拥有者标识 (lock owner)。
-	LockOwner     *uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3,oneof" json:"lock_owner,omitempty"`
+	// 可选的文件锁拥有者标识 (lock owner)。允许全范围 uint64。
+	LockOwner *uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3,oneof" json:"lock_owner,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,4,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1733,6 +1735,13 @@ func (x *FlushRequest) GetFh() uint64 {
 func (x *FlushRequest) GetLockOwner() uint64 {
 	if x != nil && x.LockOwner != nil {
 		return *x.LockOwner
+	}
+	return 0
+}
+
+func (x *FlushRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -1881,7 +1890,13 @@ type ReleaseRequest struct {
 	// 目标文件节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 待关闭并销毁的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
-	Fh            uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 可选的文件锁拥有者标识 (lock owner)。允许全范围 uint64。
+	LockOwner *uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3,oneof" json:"lock_owner,omitempty"`
+	// 释放标志位掩码（仅允许 0 或 FUSE_RELEASE_FLOCK_UNLOCK = 0x2）。
+	ReleaseFlags uint32 `protobuf:"varint,4,opt,name=release_flags,json=releaseFlags,proto3" json:"release_flags,omitempty"`
+	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     *uint64 `protobuf:"varint,5,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1926,6 +1941,27 @@ func (x *ReleaseRequest) GetIno() uint64 {
 func (x *ReleaseRequest) GetFh() uint64 {
 	if x != nil {
 		return x.Fh
+	}
+	return 0
+}
+
+func (x *ReleaseRequest) GetLockOwner() uint64 {
+	if x != nil && x.LockOwner != nil {
+		return *x.LockOwner
+	}
+	return 0
+}
+
+func (x *ReleaseRequest) GetReleaseFlags() uint32 {
+	if x != nil {
+		return x.ReleaseFlags
+	}
+	return 0
+}
+
+func (x *ReleaseRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
 	}
 	return 0
 }
@@ -3095,6 +3131,481 @@ func (*RemoveXattrResponse) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{51}
 }
 
+// FileLock 定义 FUSE 文件锁描述符（涵盖 POSIX 记录锁与 BSD flock 整文件锁）。
+type FileLock struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 锁定起始字节偏移量（闭区间起点，<= 9223372036854775807）。
+	Start uint64 `protobuf:"varint,1,opt,name=start,proto3" json:"start,omitempty"`
+	// 锁定结束字节偏移量（闭区间终点，<= 9223372036854775807；9223372036854775807 代表延伸至无穷远）。
+	End uint64 `protobuf:"varint,2,opt,name=end,proto3" json:"end,omitempty"`
+	// 锁类型（0: F_RDLCK 共享读锁, 1: F_WRLCK 排他写锁, 2: F_UNLCK 解锁）。
+	Type uint32 `protobuf:"varint,3,opt,name=type,proto3" json:"type,omitempty"`
+	// 持锁或请求锁的进程标识符 (PID)。
+	Pid           uint32 `protobuf:"varint,4,opt,name=pid,proto3" json:"pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileLock) Reset() {
+	*x = FileLock{}
+	mi := &file_storage_v1_storage_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileLock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileLock) ProtoMessage() {}
+
+func (x *FileLock) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileLock.ProtoReflect.Descriptor instead.
+func (*FileLock) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *FileLock) GetStart() uint64 {
+	if x != nil {
+		return x.Start
+	}
+	return 0
+}
+
+func (x *FileLock) GetEnd() uint64 {
+	if x != nil {
+		return x.End
+	}
+	return 0
+}
+
+func (x *FileLock) GetType() uint32 {
+	if x != nil {
+		return x.Type
+	}
+	return 0
+}
+
+func (x *FileLock) GetPid() uint32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+// GetLkRequest 定义 GetLk (FUSE_GETLK = 31) 接口输入参数。
+type GetLkRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 活跃文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 锁拥有者 64 位不透明令牌（允许全范围 uint64，包括最高位为 1 的哈希值）。
+	LockOwner uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3" json:"lock_owner,omitempty"`
+	// 待探测冲突的目标文件锁描述符。
+	Lk *FileLock `protobuf:"bytes,4,opt,name=lk,proto3" json:"lk,omitempty"`
+	// 锁命名空间标志位（0: POSIX 记录锁, 1: FUSE_LK_FLOCK / BSD flock）。
+	LkFlags uint32 `protobuf:"varint,5,opt,name=lk_flags,json=lkFlags,proto3" json:"lk_flags,omitempty"`
+	// 客户端会话租约标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     uint64 `protobuf:"varint,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetLkRequest) Reset() {
+	*x = GetLkRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetLkRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetLkRequest) ProtoMessage() {}
+
+func (x *GetLkRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetLkRequest.ProtoReflect.Descriptor instead.
+func (*GetLkRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *GetLkRequest) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *GetLkRequest) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *GetLkRequest) GetLockOwner() uint64 {
+	if x != nil {
+		return x.LockOwner
+	}
+	return 0
+}
+
+func (x *GetLkRequest) GetLk() *FileLock {
+	if x != nil {
+		return x.Lk
+	}
+	return nil
+}
+
+func (x *GetLkRequest) GetLkFlags() uint32 {
+	if x != nil {
+		return x.LkFlags
+	}
+	return 0
+}
+
+func (x *GetLkRequest) GetSessionId() uint64 {
+	if x != nil {
+		return x.SessionId
+	}
+	return 0
+}
+
+// GetLkResponse 定义 GetLk 接口响应结果。
+type GetLkResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 探测结果文件锁描述符（若无冲突则 type 为 F_UNLCK = 2；若有冲突则为首个冲突锁详情）。
+	Lk            *FileLock `protobuf:"bytes,1,opt,name=lk,proto3" json:"lk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetLkResponse) Reset() {
+	*x = GetLkResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetLkResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetLkResponse) ProtoMessage() {}
+
+func (x *GetLkResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetLkResponse.ProtoReflect.Descriptor instead.
+func (*GetLkResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *GetLkResponse) GetLk() *FileLock {
+	if x != nil {
+		return x.Lk
+	}
+	return nil
+}
+
+// SetLkRequest 定义 SetLk (FUSE_SETLK = 32) 接口输入参数。
+type SetLkRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 活跃文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 锁拥有者 64 位不透明令牌（允许全范围 uint64，包括最高位为 1 的哈希值）。
+	LockOwner uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3" json:"lock_owner,omitempty"`
+	// 待设置或释放的目标文件锁描述符。
+	Lk *FileLock `protobuf:"bytes,4,opt,name=lk,proto3" json:"lk,omitempty"`
+	// 锁命名空间标志位（0: POSIX 记录锁, 1: FUSE_LK_FLOCK / BSD flock）。
+	LkFlags uint32 `protobuf:"varint,5,opt,name=lk_flags,json=lkFlags,proto3" json:"lk_flags,omitempty"`
+	// 客户端会话租约标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     uint64 `protobuf:"varint,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetLkRequest) Reset() {
+	*x = SetLkRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetLkRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetLkRequest) ProtoMessage() {}
+
+func (x *SetLkRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetLkRequest.ProtoReflect.Descriptor instead.
+func (*SetLkRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *SetLkRequest) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *SetLkRequest) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *SetLkRequest) GetLockOwner() uint64 {
+	if x != nil {
+		return x.LockOwner
+	}
+	return 0
+}
+
+func (x *SetLkRequest) GetLk() *FileLock {
+	if x != nil {
+		return x.Lk
+	}
+	return nil
+}
+
+func (x *SetLkRequest) GetLkFlags() uint32 {
+	if x != nil {
+		return x.LkFlags
+	}
+	return 0
+}
+
+func (x *SetLkRequest) GetSessionId() uint64 {
+	if x != nil {
+		return x.SessionId
+	}
+	return 0
+}
+
+// SetLkResponse 定义 SetLk 接口响应结果。
+type SetLkResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetLkResponse) Reset() {
+	*x = SetLkResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetLkResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetLkResponse) ProtoMessage() {}
+
+func (x *SetLkResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetLkResponse.ProtoReflect.Descriptor instead.
+func (*SetLkResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{56}
+}
+
+// SetLkwRequest 定义 SetLkw (FUSE_SETLKW = 33) 接口输入参数。
+type SetLkwRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
+	// 活跃文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
+	// 锁拥有者 64 位不透明令牌（允许全范围 uint64，包括最高位为 1 的哈希值）。
+	LockOwner uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3" json:"lock_owner,omitempty"`
+	// 待阻塞设置或释放的目标文件锁描述符。
+	Lk *FileLock `protobuf:"bytes,4,opt,name=lk,proto3" json:"lk,omitempty"`
+	// 锁命名空间标志位（0: POSIX 记录锁, 1: FUSE_LK_FLOCK / BSD flock）。
+	LkFlags uint32 `protobuf:"varint,5,opt,name=lk_flags,json=lkFlags,proto3" json:"lk_flags,omitempty"`
+	// 客户端会话租约标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId uint64 `protobuf:"varint,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// 阻塞请求唯一标识（与 session_id 联合驱动 PENDING / GRANTED / CANCELLED 状态机）。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	RequestId     uint64 `protobuf:"varint,7,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetLkwRequest) Reset() {
+	*x = SetLkwRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetLkwRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetLkwRequest) ProtoMessage() {}
+
+func (x *SetLkwRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetLkwRequest.ProtoReflect.Descriptor instead.
+func (*SetLkwRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *SetLkwRequest) GetIno() uint64 {
+	if x != nil {
+		return x.Ino
+	}
+	return 0
+}
+
+func (x *SetLkwRequest) GetFh() uint64 {
+	if x != nil {
+		return x.Fh
+	}
+	return 0
+}
+
+func (x *SetLkwRequest) GetLockOwner() uint64 {
+	if x != nil {
+		return x.LockOwner
+	}
+	return 0
+}
+
+func (x *SetLkwRequest) GetLk() *FileLock {
+	if x != nil {
+		return x.Lk
+	}
+	return nil
+}
+
+func (x *SetLkwRequest) GetLkFlags() uint32 {
+	if x != nil {
+		return x.LkFlags
+	}
+	return 0
+}
+
+func (x *SetLkwRequest) GetSessionId() uint64 {
+	if x != nil {
+		return x.SessionId
+	}
+	return 0
+}
+
+func (x *SetLkwRequest) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+// SetLkwResponse 定义 SetLkw 接口响应结果。
+type SetLkwResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetLkwResponse) Reset() {
+	*x = SetLkwResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetLkwResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetLkwResponse) ProtoMessage() {}
+
+func (x *SetLkwResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetLkwResponse.ProtoReflect.Descriptor instead.
+func (*SetLkwResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{58}
+}
+
 type Inode struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 节点的全局唯一持久化标识。
@@ -3109,7 +3620,7 @@ type Inode struct {
 
 func (x *Inode) Reset() {
 	*x = Inode{}
-	mi := &file_storage_v1_storage_proto_msgTypes[52]
+	mi := &file_storage_v1_storage_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3121,7 +3632,7 @@ func (x *Inode) String() string {
 func (*Inode) ProtoMessage() {}
 
 func (x *Inode) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[52]
+	mi := &file_storage_v1_storage_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3134,7 +3645,7 @@ func (x *Inode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inode.ProtoReflect.Descriptor instead.
 func (*Inode) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{52}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *Inode) GetIno() uint64 {
@@ -3189,7 +3700,7 @@ type InodeAttribute struct {
 
 func (x *InodeAttribute) Reset() {
 	*x = InodeAttribute{}
-	mi := &file_storage_v1_storage_proto_msgTypes[53]
+	mi := &file_storage_v1_storage_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3201,7 +3712,7 @@ func (x *InodeAttribute) String() string {
 func (*InodeAttribute) ProtoMessage() {}
 
 func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[53]
+	mi := &file_storage_v1_storage_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3214,7 +3725,7 @@ func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InodeAttribute.ProtoReflect.Descriptor instead.
 func (*InodeAttribute) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{53}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *InodeAttribute) GetMode() uint32 {
@@ -3431,22 +3942,33 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\fOpenResponse\x12\x17\n" +
 	"\x02fh\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x02fh\x12\x1d\n" +
 	"\n" +
-	"open_flags\x18\x02 \x01(\rR\topenFlags\"\x89\x01\n" +
+	"open_flags\x18\x02 \x01(\rR\topenFlags\"\xcf\x01\n" +
 	"\fFlushRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\"\n" +
 	"\n" +
-	"lock_owner\x18\x03 \x01(\x04H\x00R\tlockOwner\x88\x01\x01B\r\n" +
-	"\v_lock_owner\"\x0f\n" +
+	"lock_owner\x18\x03 \x01(\x04H\x00R\tlockOwner\x88\x01\x01\x125\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x01R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_lock_ownerB\r\n" +
+	"\v_session_id\"\x0f\n" +
 	"\rFlushResponse\"r\n" +
 	"\fFsyncRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1a\n" +
 	"\bdatasync\x18\x03 \x01(\bR\bdatasync\"\x0f\n" +
-	"\rFsyncResponse\"X\n" +
+	"\rFsyncResponse\"\xc4\x02\n" +
 	"\x0eReleaseRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
-	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\"\x11\n" +
+	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\"\n" +
+	"\n" +
+	"lock_owner\x18\x03 \x01(\x04H\x00R\tlockOwner\x88\x01\x01\x12q\n" +
+	"\rrelease_flags\x18\x04 \x01(\rBL\xbaHI\xba\x01F\n" +
+	"\x13release_flags_valid\x12\x15invalid release_flags\x1a\x18this == 0u || this == 2uR\freleaseFlags\x125\n" +
+	"\n" +
+	"session_id\x18\x05 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x01R\tsessionId\x88\x01\x01B\r\n" +
+	"\v_lock_ownerB\r\n" +
+	"\v_session_id\"\x11\n" +
 	"\x0fReleaseResponse\"K\n" +
 	"\x0eOpenDirRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x14\n" +
@@ -3523,7 +4045,52 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12q\n" +
 	"\x04name\x18\x02 \x01(\fB]\xbaHZ\xba\x01P\n" +
 	"\x11xattr_name_no_nul\x12\"xattr name cannot contain NUL byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x01R\x04name\"\x15\n" +
-	"\x13RemoveXattrResponse\"z\n" +
+	"\x13RemoveXattrResponse\"\xfa\x01\n" +
+	"\bFileLock\x12%\n" +
+	"\x05start\x18\x01 \x01(\x04B\x0f\xbaH\f2\n" +
+	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x05start\x12!\n" +
+	"\x03end\x18\x02 \x01(\x04B\x0f\xbaH\f2\n" +
+	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x03end\x12\x1b\n" +
+	"\x04type\x18\x03 \x01(\rB\a\xbaH\x04*\x02\x18\x02R\x04type\x12\x10\n" +
+	"\x03pid\x18\x04 \x01(\rR\x03pid:u\xbaHr\x1ap\n" +
+	"\x15file_lock_range_valid\x12?file lock start offset must be less than or equal to end offset\x1a\x16this.start <= this.end\"\x87\x04\n" +
+	"\fGetLkRequest\x12#\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
+	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1d\n" +
+	"\n" +
+	"lock_owner\x18\x03 \x01(\x04R\tlockOwner\x12,\n" +
+	"\x02lk\x18\x04 \x01(\v2\x14.storage.v1.FileLockB\x06\xbaH\x03\xc8\x01\x01R\x02lk\x12\"\n" +
+	"\blk_flags\x18\x05 \x01(\rB\a\xbaH\x04*\x02\x18\x01R\alkFlags\x120\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId:\x8b\x02\xbaH\x87\x02\x1aM\n" +
+	"\x15getlk_type_not_unlock\x12 GetLk does not allow F_UNLCK (2)\x1a\x12this.lk.type != 2u\x1a\xb5\x01\n" +
+	"\x1cgetlk_flock_whole_file_range\x12@FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]\x1aSthis.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)\"=\n" +
+	"\rGetLkResponse\x12,\n" +
+	"\x02lk\x18\x01 \x01(\v2\x14.storage.v1.FileLockB\x06\xbaH\x03\xc8\x01\x01R\x02lk\"\xb8\x03\n" +
+	"\fSetLkRequest\x12#\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
+	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1d\n" +
+	"\n" +
+	"lock_owner\x18\x03 \x01(\x04R\tlockOwner\x12,\n" +
+	"\x02lk\x18\x04 \x01(\v2\x14.storage.v1.FileLockB\x06\xbaH\x03\xc8\x01\x01R\x02lk\x12\"\n" +
+	"\blk_flags\x18\x05 \x01(\rB\a\xbaH\x04*\x02\x18\x01R\alkFlags\x120\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId:\xbc\x01\xbaH\xb8\x01\x1a\xb5\x01\n" +
+	"\x1csetlk_flock_whole_file_range\x12@FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]\x1aSthis.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)\"\x0f\n" +
+	"\rSetLkResponse\"\xec\x03\n" +
+	"\rSetLkwRequest\x12#\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
+	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1d\n" +
+	"\n" +
+	"lock_owner\x18\x03 \x01(\x04R\tlockOwner\x12,\n" +
+	"\x02lk\x18\x04 \x01(\v2\x14.storage.v1.FileLockB\x06\xbaH\x03\xc8\x01\x01R\x02lk\x12\"\n" +
+	"\blk_flags\x18\x05 \x01(\rB\a\xbaH\x04*\x02\x18\x01R\alkFlags\x120\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId\x120\n" +
+	"\n" +
+	"request_id\x18\a \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\trequestId:\xbd\x01\xbaH\xb9\x01\x1a\xb6\x01\n" +
+	"\x1dsetlkw_flock_whole_file_range\x12@FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]\x1aSthis.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)\"\x10\n" +
+	"\x0eSetLkwResponse\"z\n" +
 	"\x05Inode\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x1e\n" +
 	"\n" +
@@ -3542,7 +4109,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05atime\x128\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05mtime\x128\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xae\r\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xeb\x0e\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +
@@ -3569,7 +4136,10 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\bSetXattr\x12\x1b.storage.v1.SetXattrRequest\x1a\x1c.storage.v1.SetXattrResponse\x12E\n" +
 	"\bGetXattr\x12\x1b.storage.v1.GetXattrRequest\x1a\x1c.storage.v1.GetXattrResponse\x12H\n" +
 	"\tListXattr\x12\x1c.storage.v1.ListXattrRequest\x1a\x1d.storage.v1.ListXattrResponse\x12N\n" +
-	"\vRemoveXattr\x12\x1e.storage.v1.RemoveXattrRequest\x1a\x1f.storage.v1.RemoveXattrResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
+	"\vRemoveXattr\x12\x1e.storage.v1.RemoveXattrRequest\x1a\x1f.storage.v1.RemoveXattrResponse\x12<\n" +
+	"\x05GetLk\x12\x18.storage.v1.GetLkRequest\x1a\x19.storage.v1.GetLkResponse\x12<\n" +
+	"\x05SetLk\x12\x18.storage.v1.SetLkRequest\x1a\x19.storage.v1.SetLkResponse\x12?\n" +
+	"\x06SetLkw\x12\x19.storage.v1.SetLkwRequest\x1a\x1a.storage.v1.SetLkwResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
 
 var (
 	file_storage_v1_storage_proto_rawDescOnce sync.Once
@@ -3583,7 +4153,7 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 	return file_storage_v1_storage_proto_rawDescData
 }
 
-var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
+var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 61)
 var file_storage_v1_storage_proto_goTypes = []any{
 	(*LookupRequest)(nil),         // 0: storage.v1.LookupRequest
 	(*LookupResponse)(nil),        // 1: storage.v1.LookupResponse
@@ -3637,83 +4207,100 @@ var file_storage_v1_storage_proto_goTypes = []any{
 	(*ListXattrResponse)(nil),     // 49: storage.v1.ListXattrResponse
 	(*RemoveXattrRequest)(nil),    // 50: storage.v1.RemoveXattrRequest
 	(*RemoveXattrResponse)(nil),   // 51: storage.v1.RemoveXattrResponse
-	(*Inode)(nil),                 // 52: storage.v1.Inode
-	(*InodeAttribute)(nil),        // 53: storage.v1.InodeAttribute
-	(*timestamppb.Timestamp)(nil), // 54: google.protobuf.Timestamp
+	(*FileLock)(nil),              // 52: storage.v1.FileLock
+	(*GetLkRequest)(nil),          // 53: storage.v1.GetLkRequest
+	(*GetLkResponse)(nil),         // 54: storage.v1.GetLkResponse
+	(*SetLkRequest)(nil),          // 55: storage.v1.SetLkRequest
+	(*SetLkResponse)(nil),         // 56: storage.v1.SetLkResponse
+	(*SetLkwRequest)(nil),         // 57: storage.v1.SetLkwRequest
+	(*SetLkwResponse)(nil),        // 58: storage.v1.SetLkwResponse
+	(*Inode)(nil),                 // 59: storage.v1.Inode
+	(*InodeAttribute)(nil),        // 60: storage.v1.InodeAttribute
+	(*timestamppb.Timestamp)(nil), // 61: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
-	52, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
-	52, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
-	54, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
-	54, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
-	52, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
-	52, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
-	52, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
-	52, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
-	52, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
-	52, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
+	59, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
+	59, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
+	61, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
+	61, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
+	59, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
+	59, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
+	59, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
+	59, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
+	59, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
+	59, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
 	36, // 10: storage.v1.ReadDirResponse.entries:type_name -> storage.v1.DirEntry
-	52, // 11: storage.v1.DirEntryPlus.inode:type_name -> storage.v1.Inode
+	59, // 11: storage.v1.DirEntryPlus.inode:type_name -> storage.v1.Inode
 	39, // 12: storage.v1.ReadDirPlusResponse.entries:type_name -> storage.v1.DirEntryPlus
-	53, // 13: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
-	54, // 14: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
-	54, // 15: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
-	54, // 16: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
-	0,  // 17: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
-	2,  // 18: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
-	4,  // 19: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
-	6,  // 20: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
-	8,  // 21: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
-	10, // 22: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
-	12, // 23: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
-	14, // 24: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
-	16, // 25: storage.v1.StorageService.Unlink:input_type -> storage.v1.UnlinkRequest
-	18, // 26: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
-	20, // 27: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
-	22, // 28: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
-	24, // 29: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
-	26, // 30: storage.v1.StorageService.Flush:input_type -> storage.v1.FlushRequest
-	28, // 31: storage.v1.StorageService.Fsync:input_type -> storage.v1.FsyncRequest
-	30, // 32: storage.v1.StorageService.Release:input_type -> storage.v1.ReleaseRequest
-	32, // 33: storage.v1.StorageService.OpenDir:input_type -> storage.v1.OpenDirRequest
-	34, // 34: storage.v1.StorageService.ReleaseDir:input_type -> storage.v1.ReleaseDirRequest
-	37, // 35: storage.v1.StorageService.ReadDir:input_type -> storage.v1.ReadDirRequest
-	40, // 36: storage.v1.StorageService.ReadDirPlus:input_type -> storage.v1.ReadDirPlusRequest
-	42, // 37: storage.v1.StorageService.Fallocate:input_type -> storage.v1.FallocateRequest
-	44, // 38: storage.v1.StorageService.SetXattr:input_type -> storage.v1.SetXattrRequest
-	46, // 39: storage.v1.StorageService.GetXattr:input_type -> storage.v1.GetXattrRequest
-	48, // 40: storage.v1.StorageService.ListXattr:input_type -> storage.v1.ListXattrRequest
-	50, // 41: storage.v1.StorageService.RemoveXattr:input_type -> storage.v1.RemoveXattrRequest
-	1,  // 42: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
-	3,  // 43: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
-	5,  // 44: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
-	7,  // 45: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
-	9,  // 46: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
-	11, // 47: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
-	13, // 48: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
-	15, // 49: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
-	17, // 50: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
-	19, // 51: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
-	21, // 52: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
-	23, // 53: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
-	25, // 54: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
-	27, // 55: storage.v1.StorageService.Flush:output_type -> storage.v1.FlushResponse
-	29, // 56: storage.v1.StorageService.Fsync:output_type -> storage.v1.FsyncResponse
-	31, // 57: storage.v1.StorageService.Release:output_type -> storage.v1.ReleaseResponse
-	33, // 58: storage.v1.StorageService.OpenDir:output_type -> storage.v1.OpenDirResponse
-	35, // 59: storage.v1.StorageService.ReleaseDir:output_type -> storage.v1.ReleaseDirResponse
-	38, // 60: storage.v1.StorageService.ReadDir:output_type -> storage.v1.ReadDirResponse
-	41, // 61: storage.v1.StorageService.ReadDirPlus:output_type -> storage.v1.ReadDirPlusResponse
-	43, // 62: storage.v1.StorageService.Fallocate:output_type -> storage.v1.FallocateResponse
-	45, // 63: storage.v1.StorageService.SetXattr:output_type -> storage.v1.SetXattrResponse
-	47, // 64: storage.v1.StorageService.GetXattr:output_type -> storage.v1.GetXattrResponse
-	49, // 65: storage.v1.StorageService.ListXattr:output_type -> storage.v1.ListXattrResponse
-	51, // 66: storage.v1.StorageService.RemoveXattr:output_type -> storage.v1.RemoveXattrResponse
-	42, // [42:67] is the sub-list for method output_type
-	17, // [17:42] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	52, // 13: storage.v1.GetLkRequest.lk:type_name -> storage.v1.FileLock
+	52, // 14: storage.v1.GetLkResponse.lk:type_name -> storage.v1.FileLock
+	52, // 15: storage.v1.SetLkRequest.lk:type_name -> storage.v1.FileLock
+	52, // 16: storage.v1.SetLkwRequest.lk:type_name -> storage.v1.FileLock
+	60, // 17: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
+	61, // 18: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
+	61, // 19: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
+	61, // 20: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
+	0,  // 21: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
+	2,  // 22: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
+	4,  // 23: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
+	6,  // 24: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
+	8,  // 25: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
+	10, // 26: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
+	12, // 27: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
+	14, // 28: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
+	16, // 29: storage.v1.StorageService.Unlink:input_type -> storage.v1.UnlinkRequest
+	18, // 30: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
+	20, // 31: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
+	22, // 32: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
+	24, // 33: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
+	26, // 34: storage.v1.StorageService.Flush:input_type -> storage.v1.FlushRequest
+	28, // 35: storage.v1.StorageService.Fsync:input_type -> storage.v1.FsyncRequest
+	30, // 36: storage.v1.StorageService.Release:input_type -> storage.v1.ReleaseRequest
+	32, // 37: storage.v1.StorageService.OpenDir:input_type -> storage.v1.OpenDirRequest
+	34, // 38: storage.v1.StorageService.ReleaseDir:input_type -> storage.v1.ReleaseDirRequest
+	37, // 39: storage.v1.StorageService.ReadDir:input_type -> storage.v1.ReadDirRequest
+	40, // 40: storage.v1.StorageService.ReadDirPlus:input_type -> storage.v1.ReadDirPlusRequest
+	42, // 41: storage.v1.StorageService.Fallocate:input_type -> storage.v1.FallocateRequest
+	44, // 42: storage.v1.StorageService.SetXattr:input_type -> storage.v1.SetXattrRequest
+	46, // 43: storage.v1.StorageService.GetXattr:input_type -> storage.v1.GetXattrRequest
+	48, // 44: storage.v1.StorageService.ListXattr:input_type -> storage.v1.ListXattrRequest
+	50, // 45: storage.v1.StorageService.RemoveXattr:input_type -> storage.v1.RemoveXattrRequest
+	53, // 46: storage.v1.StorageService.GetLk:input_type -> storage.v1.GetLkRequest
+	55, // 47: storage.v1.StorageService.SetLk:input_type -> storage.v1.SetLkRequest
+	57, // 48: storage.v1.StorageService.SetLkw:input_type -> storage.v1.SetLkwRequest
+	1,  // 49: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
+	3,  // 50: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
+	5,  // 51: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
+	7,  // 52: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
+	9,  // 53: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
+	11, // 54: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
+	13, // 55: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
+	15, // 56: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
+	17, // 57: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
+	19, // 58: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
+	21, // 59: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
+	23, // 60: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
+	25, // 61: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
+	27, // 62: storage.v1.StorageService.Flush:output_type -> storage.v1.FlushResponse
+	29, // 63: storage.v1.StorageService.Fsync:output_type -> storage.v1.FsyncResponse
+	31, // 64: storage.v1.StorageService.Release:output_type -> storage.v1.ReleaseResponse
+	33, // 65: storage.v1.StorageService.OpenDir:output_type -> storage.v1.OpenDirResponse
+	35, // 66: storage.v1.StorageService.ReleaseDir:output_type -> storage.v1.ReleaseDirResponse
+	38, // 67: storage.v1.StorageService.ReadDir:output_type -> storage.v1.ReadDirResponse
+	41, // 68: storage.v1.StorageService.ReadDirPlus:output_type -> storage.v1.ReadDirPlusResponse
+	43, // 69: storage.v1.StorageService.Fallocate:output_type -> storage.v1.FallocateResponse
+	45, // 70: storage.v1.StorageService.SetXattr:output_type -> storage.v1.SetXattrResponse
+	47, // 71: storage.v1.StorageService.GetXattr:output_type -> storage.v1.GetXattrResponse
+	49, // 72: storage.v1.StorageService.ListXattr:output_type -> storage.v1.ListXattrResponse
+	51, // 73: storage.v1.StorageService.RemoveXattr:output_type -> storage.v1.RemoveXattrResponse
+	54, // 74: storage.v1.StorageService.GetLk:output_type -> storage.v1.GetLkResponse
+	56, // 75: storage.v1.StorageService.SetLk:output_type -> storage.v1.SetLkResponse
+	58, // 76: storage.v1.StorageService.SetLkw:output_type -> storage.v1.SetLkwResponse
+	49, // [49:77] is the sub-list for method output_type
+	21, // [21:49] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_storage_v1_storage_proto_init() }
@@ -3723,13 +4310,14 @@ func file_storage_v1_storage_proto_init() {
 	}
 	file_storage_v1_storage_proto_msgTypes[4].OneofWrappers = []any{}
 	file_storage_v1_storage_proto_msgTypes[26].OneofWrappers = []any{}
+	file_storage_v1_storage_proto_msgTypes[30].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_v1_storage_proto_rawDesc), len(file_storage_v1_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   54,
+			NumMessages:   61,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

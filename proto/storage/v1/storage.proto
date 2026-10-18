@@ -170,6 +170,24 @@ service StorageService {
   // 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
   // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
   rpc RemoveXattr(RemoveXattrRequest) returns (RemoveXattrResponse);
+
+  // GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
+  // 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
+  // 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  rpc GetLk(GetLkRequest) returns (GetLkResponse);
+
+  // SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
+  // 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
+  // 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  // 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  rpc SetLk(SetLkRequest) returns (SetLkResponse);
+
+  // SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
+  // 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
+  rpc SetLkw(SetLkwRequest) returns (SetLkwResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -659,8 +677,14 @@ message FlushRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 可选的文件锁拥有者标识 (lock owner)。
+  // 可选的文件锁拥有者标识 (lock owner)。允许全范围 uint64。
   optional uint64 lock_owner = 3;
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 4 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // FlushResponse 定义 Flush 接口响应结果。
@@ -700,6 +724,22 @@ message ReleaseRequest {
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
+
+  // 可选的文件锁拥有者标识 (lock owner)。允许全范围 uint64。
+  optional uint64 lock_owner = 3;
+
+  // 释放标志位掩码（仅允许 0 或 FUSE_RELEASE_FLOCK_UNLOCK = 0x2）。
+  uint32 release_flags = 4 [(buf.validate.field).cel = {
+    id: "release_flags_valid"
+    message: "invalid release_flags"
+    expression: "this == 0u || this == 2u"
+  }];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 5 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // ReleaseResponse 定义 Release 接口响应结果。
@@ -1003,6 +1043,158 @@ message RemoveXattrRequest {
 
 // RemoveXattrResponse 定义 RemoveXattr 接口响应结果。
 message RemoveXattrResponse {}
+
+// FileLock 定义 FUSE 文件锁描述符（涵盖 POSIX 记录锁与 BSD flock 整文件锁）。
+message FileLock {
+  option (buf.validate.message).cel = {
+    id: "file_lock_range_valid"
+    message: "file lock start offset must be less than or equal to end offset"
+    expression: "this.start <= this.end"
+  };
+
+  // 锁定起始字节偏移量（闭区间起点，<= 9223372036854775807）。
+  uint64 start = 1 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 锁定结束字节偏移量（闭区间终点，<= 9223372036854775807；9223372036854775807 代表延伸至无穷远）。
+  uint64 end = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 锁类型（0: F_RDLCK 共享读锁, 1: F_WRLCK 排他写锁, 2: F_UNLCK 解锁）。
+  uint32 type = 3 [(buf.validate.field).uint32.lte = 2];
+
+  // 持锁或请求锁的进程标识符 (PID)。
+  uint32 pid = 4;
+}
+
+// GetLkRequest 定义 GetLk (FUSE_GETLK = 31) 接口输入参数。
+message GetLkRequest {
+  option (buf.validate.message).cel = {
+    id: "getlk_type_not_unlock"
+    message: "GetLk does not allow F_UNLCK (2)"
+    expression: "this.lk.type != 2u"
+  };
+  option (buf.validate.message).cel = {
+    id: "getlk_flock_whole_file_range"
+    message: "FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]"
+    expression: "this.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)"
+  };
+
+  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 活跃文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 锁拥有者 64 位不透明令牌（允许全范围 uint64，包括最高位为 1 的哈希值）。
+  uint64 lock_owner = 3;
+
+  // 待探测冲突的目标文件锁描述符。
+  FileLock lk = 4 [(buf.validate.field).required = true];
+
+  // 锁命名空间标志位（0: POSIX 记录锁, 1: FUSE_LK_FLOCK / BSD flock）。
+  uint32 lk_flags = 5 [(buf.validate.field).uint32.lte = 1];
+
+  // 客户端会话租约标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 session_id = 6 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// GetLkResponse 定义 GetLk 接口响应结果。
+message GetLkResponse {
+  // 探测结果文件锁描述符（若无冲突则 type 为 F_UNLCK = 2；若有冲突则为首个冲突锁详情）。
+  FileLock lk = 1 [(buf.validate.field).required = true];
+}
+
+// SetLkRequest 定义 SetLk (FUSE_SETLK = 32) 接口输入参数。
+message SetLkRequest {
+  option (buf.validate.message).cel = {
+    id: "setlk_flock_whole_file_range"
+    message: "FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]"
+    expression: "this.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)"
+  };
+
+  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 活跃文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 锁拥有者 64 位不透明令牌（允许全范围 uint64，包括最高位为 1 的哈希值）。
+  uint64 lock_owner = 3;
+
+  // 待设置或释放的目标文件锁描述符。
+  FileLock lk = 4 [(buf.validate.field).required = true];
+
+  // 锁命名空间标志位（0: POSIX 记录锁, 1: FUSE_LK_FLOCK / BSD flock）。
+  uint32 lk_flags = 5 [(buf.validate.field).uint32.lte = 1];
+
+  // 客户端会话租约标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 session_id = 6 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// SetLkResponse 定义 SetLk 接口响应结果。
+message SetLkResponse {}
+
+// SetLkwRequest 定义 SetLkw (FUSE_SETLKW = 33) 接口输入参数。
+message SetLkwRequest {
+  option (buf.validate.message).cel = {
+    id: "setlkw_flock_whole_file_range"
+    message: "FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]"
+    expression: "this.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)"
+  };
+
+  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 活跃文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 锁拥有者 64 位不透明令牌（允许全范围 uint64，包括最高位为 1 的哈希值）。
+  uint64 lock_owner = 3;
+
+  // 待阻塞设置或释放的目标文件锁描述符。
+  FileLock lk = 4 [(buf.validate.field).required = true];
+
+  // 锁命名空间标志位（0: POSIX 记录锁, 1: FUSE_LK_FLOCK / BSD flock）。
+  uint32 lk_flags = 5 [(buf.validate.field).uint32.lte = 1];
+
+  // 客户端会话租约标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 session_id = 6 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 阻塞请求唯一标识（与 session_id 联合驱动 PENDING / GRANTED / CANCELLED 状态机）。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 request_id = 7 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// SetLkwResponse 定义 SetLkw 接口响应结果。
+message SetLkwResponse {}
 
 // Inode 代表文件系统中的实体节点。
 

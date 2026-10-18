@@ -14,7 +14,7 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-func TestToStatus_All14SentinelErrors(t *testing.T) {
+func TestToStatus_All17SentinelErrors(t *testing.T) {
 	testCases := []struct {
 		name           string
 		err            error
@@ -100,6 +100,24 @@ func TestToStatus_All14SentinelErrors(t *testing.T) {
 			expectedReason: "ENOSPC",
 		},
 		{
+			name:           "ErrAgain 映射为 ResourceExhausted 与 EAGAIN",
+			err:            meta.ErrAgain,
+			expectedCode:   codes.ResourceExhausted,
+			expectedReason: "EAGAIN",
+		},
+		{
+			name:           "ErrDeadlock 映射为 Aborted 与 EDEADLK",
+			err:            meta.ErrDeadlock,
+			expectedCode:   codes.Aborted,
+			expectedReason: "EDEADLK",
+		},
+		{
+			name:           "ErrInterrupted 映射为 Canceled 与 EINTR",
+			err:            meta.ErrInterrupted,
+			expectedCode:   codes.Canceled,
+			expectedReason: "EINTR",
+		},
+		{
 			name:           "ErrNotSupported 映射为 Unimplemented 与 EOPNOTSUPP",
 			err:            meta.ErrNotSupported,
 			expectedCode:   codes.Unimplemented,
@@ -107,7 +125,7 @@ func TestToStatus_All14SentinelErrors(t *testing.T) {
 		},
 	}
 
-	require.Equal(t, 14, len(testCases), "必须完整覆盖全部 14 个领域哨兵错误")
+	require.Equal(t, 17, len(testCases), "必须完整覆盖全部 17 个领域哨兵错误")
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,6 +144,15 @@ func TestToStatus_All14SentinelErrors(t *testing.T) {
 			assert.Equal(t, tc.expectedReason, info.GetReason())
 		})
 	}
+}
+
+func TestFileLockConstants(t *testing.T) {
+	assert.Equal(t, uint32(0), meta.F_RDLCK)
+	assert.Equal(t, uint32(1), meta.F_WRLCK)
+	assert.Equal(t, uint32(2), meta.F_UNLCK)
+	assert.Equal(t, uint32(0x1), meta.FuseLkFlock)
+	assert.Equal(t, uint32(0x2), meta.FuseReleaseFlockUnlock)
+	assert.Equal(t, uint64(0x7fffffffffffffff), meta.OffsetMax)
 }
 
 func TestToStatus_WrappedError(t *testing.T) {

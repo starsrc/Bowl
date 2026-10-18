@@ -44,6 +44,9 @@ const (
 	StorageService_GetXattr_FullMethodName    = "/storage.v1.StorageService/GetXattr"
 	StorageService_ListXattr_FullMethodName   = "/storage.v1.StorageService/ListXattr"
 	StorageService_RemoveXattr_FullMethodName = "/storage.v1.StorageService/RemoveXattr"
+	StorageService_GetLk_FullMethodName       = "/storage.v1.StorageService/GetLk"
+	StorageService_SetLk_FullMethodName       = "/storage.v1.StorageService/SetLk"
+	StorageService_SetLkw_FullMethodName      = "/storage.v1.StorageService/SetLkw"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -189,6 +192,21 @@ type StorageServiceClient interface {
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(ctx context.Context, in *RemoveXattrRequest, opts ...grpc.CallOption) (*RemoveXattrResponse, error)
+	// GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
+	// 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
+	// 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	GetLk(ctx context.Context, in *GetLkRequest, opts ...grpc.CallOption) (*GetLkResponse, error)
+	// SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
+	// 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
+	// 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	SetLk(ctx context.Context, in *SetLkRequest, opts ...grpc.CallOption) (*SetLkResponse, error)
+	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
+	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
+	SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error)
 }
 
 type storageServiceClient struct {
@@ -449,6 +467,36 @@ func (c *storageServiceClient) RemoveXattr(ctx context.Context, in *RemoveXattrR
 	return out, nil
 }
 
+func (c *storageServiceClient) GetLk(ctx context.Context, in *GetLkRequest, opts ...grpc.CallOption) (*GetLkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetLkResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetLk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetLk(ctx context.Context, in *SetLkRequest, opts ...grpc.CallOption) (*SetLkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetLkResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetLk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetLkwResponse)
+	err := c.cc.Invoke(ctx, StorageService_SetLkw_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -592,6 +640,21 @@ type StorageServiceServer interface {
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(context.Context, *RemoveXattrRequest) (*RemoveXattrResponse, error)
+	// GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
+	// 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
+	// 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	GetLk(context.Context, *GetLkRequest) (*GetLkResponse, error)
+	// SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
+	// 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
+	// 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	SetLk(context.Context, *SetLkRequest) (*SetLkResponse, error)
+	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
+	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
+	SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -676,6 +739,15 @@ func (UnimplementedStorageServiceServer) ListXattr(context.Context, *ListXattrRe
 }
 func (UnimplementedStorageServiceServer) RemoveXattr(context.Context, *RemoveXattrRequest) (*RemoveXattrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RemoveXattr not implemented")
+}
+func (UnimplementedStorageServiceServer) GetLk(context.Context, *GetLkRequest) (*GetLkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLk not implemented")
+}
+func (UnimplementedStorageServiceServer) SetLk(context.Context, *SetLkRequest) (*SetLkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetLk not implemented")
+}
+func (UnimplementedStorageServiceServer) SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetLkw not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1148,6 +1220,60 @@ func _StorageService_RemoveXattr_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_GetLk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetLk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetLk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetLk(ctx, req.(*GetLkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetLk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetLkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetLk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetLk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetLk(ctx, req.(*SetLkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_SetLkw_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetLkwRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).SetLkw(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_SetLkw_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).SetLkw(ctx, req.(*SetLkwRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1254,6 +1380,18 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RemoveXattr",
 			Handler:    _StorageService_RemoveXattr_Handler,
+		},
+		{
+			MethodName: "GetLk",
+			Handler:    _StorageService_GetLk_Handler,
+		},
+		{
+			MethodName: "SetLk",
+			Handler:    _StorageService_SetLk_Handler,
+		},
+		{
+			MethodName: "SetLkw",
+			Handler:    _StorageService_SetLkw_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

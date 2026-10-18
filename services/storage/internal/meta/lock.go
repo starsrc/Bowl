@@ -448,11 +448,12 @@ func applyFlockSetLk(ctx context.Context, q db.Querier, params SetLkParams, conf
 	fh := int64(params.Fh)
 	reqType := params.Lk.Type
 
-	if _, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
+	deletedCount, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
 		SessionID: sessionID,
 		Ino:       ino,
 		Fh:        fh,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 	}
 
@@ -478,20 +479,22 @@ func applyFlockSetLk(ctx context.Context, q db.Querier, params SetLkParams, conf
 		}
 	}
 
-	waiters, err := q.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
-		Ino:     ino,
-		LkFlags: int32(FuseLkFlock),
-	})
-	if err != nil {
-		return fmt.Errorf("list pending flock lock waiters (ino=%d): %w", params.Ino, err)
-	}
-	for _, w := range waiters {
-		if w.SessionID == sessionID && w.Fh == fh {
-			continue
+	if deletedCount == 0 {
+		waiters, err := q.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+			Ino:     ino,
+			LkFlags: int32(FuseLkFlock),
+		})
+		if err != nil {
+			return fmt.Errorf("list pending flock lock waiters (ino=%d): %w", params.Ino, err)
 		}
-		if locksConflict(reqType, uint32(w.LockType)) {
-			*conflictAfterDelete = true
-			return nil
+		for _, w := range waiters {
+			if w.SessionID == sessionID && w.Fh == fh {
+				continue
+			}
+			if locksConflict(reqType, uint32(w.LockType)) {
+				*conflictAfterDelete = true
+				return nil
+			}
 		}
 	}
 

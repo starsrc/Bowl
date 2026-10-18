@@ -58,6 +58,8 @@ const (
 	StorageServiceReleaseProcedure = "/storage.v1.StorageService/Release"
 	// StorageServiceOpenDirProcedure is the procedure name of the StorageService's OpenDir RPC.
 	StorageServiceOpenDirProcedure = "/storage.v1.StorageService/OpenDir"
+	// StorageServiceFsyncDirProcedure is the procedure name of the StorageService's FsyncDir RPC.
+	StorageServiceFsyncDirProcedure = "/storage.v1.StorageService/FsyncDir"
 	// StorageServiceReleaseDirProcedure is the procedure name of the StorageService's ReleaseDir RPC.
 	StorageServiceReleaseDirProcedure = "/storage.v1.StorageService/ReleaseDir"
 	// StorageServiceReadDirProcedure is the procedure name of the StorageService's ReadDir RPC.
@@ -200,6 +202,13 @@ var (
 			StreamType: connect.StreamTypeUnary,
 			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("OpenDir"),
 			Procedure:  StorageServiceOpenDirProcedure,
+		}
+	})
+	storageServiceFsyncDirSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("FsyncDir"),
+			Procedure:  StorageServiceFsyncDirProcedure,
 		}
 	})
 	storageServiceReleaseDirSpec = sync.OnceValue(func() connect.Spec {
@@ -375,6 +384,12 @@ type StorageServiceClient interface {
 	// 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	OpenDir(context.Context, *v1.OpenDirRequest) (*v1.OpenDirResponse, error)
+	// FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
+	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若目录句柄不存在、与 Inode 不匹配或所属会话已过期，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
+	FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error)
 	// ReleaseDir 关闭并销毁目录句柄 (DirHandle)。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -538,6 +553,12 @@ type StorageServiceHandler interface {
 	// 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	OpenDir(context.Context, *v1.OpenDirRequest) (*v1.OpenDirResponse, error)
+	// FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
+	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若目录句柄不存在、与 Inode 不匹配或所属会话已过期，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
+	FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error)
 	// ReleaseDir 关闭并销毁目录句柄 (DirHandle)。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -623,6 +644,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceFsyncSpec(), Handler: adapter.fsync},
 		connect.Method{Spec: storageServiceReleaseSpec(), Handler: adapter.release},
 		connect.Method{Spec: storageServiceOpenDirSpec(), Handler: adapter.openDir},
+		connect.Method{Spec: storageServiceFsyncDirSpec(), Handler: adapter.fsyncDir},
 		connect.Method{Spec: storageServiceReleaseDirSpec(), Handler: adapter.releaseDir},
 		connect.Method{Spec: storageServiceReadDirSpec(), Handler: adapter.readDir},
 		connect.Method{Spec: storageServiceReadDirPlusSpec(), Handler: adapter.readDirPlus},
@@ -706,6 +728,10 @@ func (UnimplementedStorageServiceHandler) Release(context.Context, *v1.ReleaseRe
 
 func (UnimplementedStorageServiceHandler) OpenDir(context.Context, *v1.OpenDirRequest) (*v1.OpenDirResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.OpenDir is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.FsyncDir is not implemented")
 }
 
 func (UnimplementedStorageServiceHandler) ReleaseDir(context.Context, *v1.ReleaseDirRequest) (*v1.ReleaseDirResponse, error) {
@@ -887,6 +913,14 @@ func (c *storageServiceClient) Release(ctx context.Context, req *v1.ReleaseReque
 func (c *storageServiceClient) OpenDir(ctx context.Context, req *v1.OpenDirRequest) (*v1.OpenDirResponse, error) {
 	var res v1.OpenDirResponse
 	if err := c.client.CallUnary(ctx, storageServiceOpenDirSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) FsyncDir(ctx context.Context, req *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error) {
+	var res v1.FsyncDirResponse
+	if err := c.client.CallUnary(ctx, storageServiceFsyncDirSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1180,6 +1214,18 @@ func (h storageServiceHandler) openDir(ctx context.Context, _ connect.Spec, stre
 		return err
 	}
 	res, err := h.svc.OpenDir(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) fsyncDir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.FsyncDirRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.FsyncDir(ctx, &req)
 	if err != nil {
 		return err
 	}

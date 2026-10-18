@@ -134,10 +134,11 @@ func TestFlush_PositivePath(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("常规文件合法句柄冲刷成功 (同时携带 lock_owner 与 session_id: 续期会话并按 (session_id, ino, lock_owner) 清理 POSIX 锁)", func(t *testing.T) {
+	t.Run("常规文件合法句柄冲刷成功 (同时携带 lock_owner 与 session_id: 按配置的 WithSessionLeaseTTL 续期会话并按 (session_id, ino, lock_owner) 清理 POSIX 锁)", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
+		customTTL := 30 * time.Second
+		mgr := meta.New(mockStore, meta.WithSessionLeaseTTL(customTTL))
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
@@ -162,9 +163,13 @@ func TestFlush_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
+		beforeCall := time.Now()
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
-				return arg.SessionID == int64(sessionID) && arg.ExpiresAt.Valid && arg.ExpiresAt.Time.After(time.Now())
+				return arg.SessionID == int64(sessionID) &&
+					arg.ExpiresAt.Valid &&
+					arg.ExpiresAt.Time.After(beforeCall.Add(25*time.Second)) &&
+					arg.ExpiresAt.Time.Before(beforeCall.Add(35*time.Second))
 			})).
 			Return(db.ClientSession{SessionID: int64(sessionID)}, nil).
 			Once()

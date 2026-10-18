@@ -94,10 +94,6 @@ func TestSetLk_InputValidation(t *testing.T) {
 			mutate: func(p *meta.SetLkParams) { p.Lk.End = meta.OffsetMax + 1 },
 		},
 		{
-			name:   "lk.PID 超过 math.MaxInt32",
-			mutate: func(p *meta.SetLkParams) { p.Lk.PID = uint32(math.MaxInt32) + 1 },
-		},
-		{
 			name: "FUSE_LK_FLOCK 但 start != 0",
 			mutate: func(p *meta.SetLkParams) {
 				p.LkFlags = meta.FuseLkFlock
@@ -366,6 +362,7 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 			Once()
 
 		highBitOwner := uint64(0x9000000000000001)
+		highBitPID := uint32(math.MaxInt32) + 42
 		mockQuerier.EXPECT().
 			CreateFileLock(mock.Anything, db.CreateFileLockParams{
 				SessionID:   10,
@@ -376,7 +373,7 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 				StartOffset: 50,
 				EndOffset:   150,
 				LockType:    int16(meta.F_RDLCK),
-				Pid:         1234,
+				Pid:         int32(highBitPID),
 			}).
 			Return(db.FileLock{ID: 2}, nil).
 			Once()
@@ -389,7 +386,7 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 				Start: 50,
 				End:   150,
 				Type:  meta.F_RDLCK,
-				PID:   1234,
+				PID:   highBitPID,
 			},
 			LkFlags:   0,
 			SessionID: 10,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +15,60 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
+func validateCommonLockRequest(ino, fh, sessionID uint64, lkFlags uint32, lk FileLock) error {
+	if ino == 0 || ino > math.MaxInt64 ||
+		fh == 0 || fh > math.MaxInt64 ||
+		sessionID == 0 || sessionID > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+	if lkFlags > FuseLkFlock {
+		return ErrInvalidArgument
+	}
+	if lk.Start > OffsetMax || lk.End > OffsetMax || lk.Start > lk.End {
+		return ErrInvalidArgument
+	}
+	if lkFlags == FuseLkFlock && (lk.Start != 0 || lk.End != OffsetMax) {
+		return ErrInvalidArgument
+	}
+	return nil
+}
+
+func validatePosixOpenMode(lockType uint32, handleFlags int32) error {
+	accMode := uint32(handleFlags) & O_ACCMODE
+	switch lockType {
+	case F_RDLCK:
+		if accMode != O_RDONLY && accMode != O_RDWR {
+			return ErrBadFileHandle
+		}
+	case F_WRLCK:
+		if accMode != O_WRONLY && accMode != O_RDWR {
+			return ErrBadFileHandle
+		}
+	}
+	return nil
+}
+
+func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionID uint64) error {
+	leaseTTL := m.sessionLeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultSessionLeaseTTL
+	}
+	if err := q.DeleteExpiredClientSessions(ctx); err != nil {
+		return fmt.Errorf("delete expired client sessions: %w", err)
+	}
+	_, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+		SessionID: int64(sessionID),
+		ExpiresAt: pgtype.Timestamptz{
+			Time:  time.Now().Add(leaseTTL),
+			Valid: true,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("upsert client session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
 // GetLk 执行 FUSE_GETLK (31) 冲突锁探测操作。
 // 遵循 ADR-0012：
 // 1. 静态校验参数合法性（拒绝 F_UNLCK、start > end、非法 lk_flags 及非整文件区间 flock）；
@@ -21,21 +76,10 @@ import (
 // 3. 过滤已超期的 client_sessions 租约，在目标命名空间（lk_flags == 0 排除同一 (session_id, lock_owner)，lk_flags == FuseLkFlock 排除同一 (session_id, fh)）内按确定性顺序检索首个冲突锁；
 // 4. 若无冲突则返回 {Start: req.Start, End: req.End, Type: F_UNLCK, PID: 0}，不修改 Inode 时间戳。
 func (m *manager) GetLk(ctx context.Context, params GetLkParams) (*FileLock, error) {
-	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
-		params.Fh == 0 || params.Fh > math.MaxInt64 ||
-		params.SessionID == 0 || params.SessionID > math.MaxInt64 {
-		return nil, ErrInvalidArgument
-	}
-	if params.LkFlags > FuseLkFlock {
-		return nil, ErrInvalidArgument
+	if err := validateCommonLockRequest(params.Ino, params.Fh, params.SessionID, params.LkFlags, params.Lk); err != nil {
+		return nil, err
 	}
 	if params.Lk.Type != F_RDLCK && params.Lk.Type != F_WRLCK {
-		return nil, ErrInvalidArgument
-	}
-	if params.Lk.Start > OffsetMax || params.Lk.End > OffsetMax || params.Lk.Start > params.Lk.End {
-		return nil, ErrInvalidArgument
-	}
-	if params.LkFlags == FuseLkFlock && (params.Lk.Start != 0 || params.Lk.End != OffsetMax) {
 		return nil, ErrInvalidArgument
 	}
 
@@ -148,30 +192,11 @@ func (m *manager) notifyLockWaiters(ino uint64) {
 // 4. 清理 expires_at <= clock_timestamp() 的超期会话并续期当前 session_id 租约；
 // 5. 执行冲突检测与锁区间变更，冲突时返回 ErrAgain（EAGAIN），严格不修改 Inode 时间戳。
 func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
-	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
-		params.Fh == 0 || params.Fh > math.MaxInt64 ||
-		params.SessionID == 0 || params.SessionID > math.MaxInt64 {
-		return ErrInvalidArgument
-	}
-	if params.LkFlags > FuseLkFlock {
-		return ErrInvalidArgument
+	if err := validateCommonLockRequest(params.Ino, params.Fh, params.SessionID, params.LkFlags, params.Lk); err != nil {
+		return err
 	}
 	if params.Lk.Type != F_RDLCK && params.Lk.Type != F_WRLCK && params.Lk.Type != F_UNLCK {
 		return ErrInvalidArgument
-	}
-	if params.Lk.Start > OffsetMax || params.Lk.End > OffsetMax || params.Lk.Start > params.Lk.End {
-		return ErrInvalidArgument
-	}
-	if params.Lk.PID > math.MaxInt32 {
-		return ErrInvalidArgument
-	}
-	if params.LkFlags == FuseLkFlock && (params.Lk.Start != 0 || params.Lk.End != OffsetMax) {
-		return ErrInvalidArgument
-	}
-
-	leaseTTL := m.sessionLeaseTTL
-	if leaseTTL <= 0 {
-		leaseTTL = DefaultSessionLeaseTTL
 	}
 
 	var flockConflictAfterDelete bool
@@ -201,32 +226,13 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 		}
 
 		if params.LkFlags == 0 {
-			accMode := uint32(handle.Flags) & O_ACCMODE
-			switch params.Lk.Type {
-			case F_RDLCK:
-				if accMode != O_RDONLY && accMode != O_RDWR {
-					return ErrBadFileHandle
-				}
-			case F_WRLCK:
-				if accMode != O_WRONLY && accMode != O_RDWR {
-					return ErrBadFileHandle
-				}
+			if err := validatePosixOpenMode(params.Lk.Type, handle.Flags); err != nil {
+				return err
 			}
 		}
 
-		if err := q.DeleteExpiredClientSessions(ctx); err != nil {
-			return fmt.Errorf("delete expired client sessions: %w", err)
-		}
-
-		_, err = q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
-			SessionID: int64(params.SessionID),
-			ExpiresAt: pgtype.Timestamptz{
-				Time:  time.Now().Add(leaseTTL),
-				Valid: true,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("upsert client session %d: %w", params.SessionID, err)
+		if err := m.renewClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		if params.LkFlags == FuseLkFlock {
@@ -687,31 +693,14 @@ func hasDeadlockCycle(
 // 3. 对未持有该节点活跃锁的新请求执行防写锁饥饿排队拦截，并在冲突时释放数据库行锁于事务外阻塞等待；
 // 4. 对于 BSD flock 模式转换遇冲突进入等待时，首轮事务即持久化删除调用方原有的旧 flock 锁并广播唤醒。
 func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
-	if params.Ino == 0 || params.Ino > math.MaxInt64 ||
-		params.Fh == 0 || params.Fh > math.MaxInt64 ||
-		params.SessionID == 0 || params.SessionID > math.MaxInt64 ||
-		params.RequestID == 0 || params.RequestID > OffsetMax {
-		return ErrInvalidArgument
+	if err := validateCommonLockRequest(params.Ino, params.Fh, params.SessionID, params.LkFlags, params.Lk); err != nil {
+		return err
 	}
-	if params.LkFlags > FuseLkFlock {
+	if params.RequestID == 0 || params.RequestID > OffsetMax {
 		return ErrInvalidArgument
 	}
 	if params.Lk.Type != F_RDLCK && params.Lk.Type != F_WRLCK && params.Lk.Type != F_UNLCK {
 		return ErrInvalidArgument
-	}
-	if params.Lk.Start > OffsetMax || params.Lk.End > OffsetMax || params.Lk.Start > params.Lk.End {
-		return ErrInvalidArgument
-	}
-	if params.Lk.PID > math.MaxInt32 {
-		return ErrInvalidArgument
-	}
-	if params.LkFlags == FuseLkFlock && (params.Lk.Start != 0 || params.Lk.End != OffsetMax) {
-		return ErrInvalidArgument
-	}
-
-	leaseTTL := m.sessionLeaseTTL
-	if leaseTTL <= 0 {
-		leaseTTL = DefaultSessionLeaseTTL
 	}
 
 	setLkParams := SetLkParams{
@@ -740,6 +729,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 	backoff := 5 * time.Millisecond
 	const maxBackoff = 50 * time.Millisecond
 
+	var flockOriginallyHeld bool
 	for attempt := 0; ; attempt++ {
 		notifyCh := m.waitLockChan(params.Ino)
 
@@ -793,35 +783,15 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			}
 
 			if params.LkFlags == 0 {
-				accMode := uint32(handle.Flags) & O_ACCMODE
-				switch reqType {
-				case F_RDLCK:
-					if accMode != O_RDONLY && accMode != O_RDWR {
-						return ErrBadFileHandle
-					}
-				case F_WRLCK:
-					if accMode != O_WRONLY && accMode != O_RDWR {
-						return ErrBadFileHandle
-					}
+				if err := validatePosixOpenMode(reqType, handle.Flags); err != nil {
+					return err
 				}
 			}
 
-			if err := q.DeleteExpiredClientSessions(ctx); err != nil {
-				return fmt.Errorf("delete expired client sessions: %w", err)
+			if err := m.renewClientSession(ctx, q, params.SessionID); err != nil {
+				return err
 			}
 
-			_, err = q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
-				SessionID: sessionID,
-				ExpiresAt: pgtype.Timestamptz{
-					Time:  time.Now().Add(leaseTTL),
-					Valid: true,
-				},
-			})
-			if err != nil {
-				return fmt.Errorf("upsert client session %d: %w", params.SessionID, err)
-			}
-
-			var flockDeletedOld bool
 			if params.LkFlags == FuseLkFlock && (attempt == 0 || reqType == F_UNLCK) {
 				deletedCount, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
 					SessionID: sessionID,
@@ -832,7 +802,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 					return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 				}
 				if deletedCount > 0 {
-					flockDeletedOld = true
+					flockOriginallyHeld = true
 					shouldNotify = true
 				}
 			}
@@ -876,7 +846,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 				return fmt.Errorf("list pending file lock waiters (ino=%d, lk_flags=%d): %w", params.Ino, params.LkFlags, err)
 			}
 
-			callerHasActiveLocks := flockDeletedOld
+			callerHasActiveLocks := flockOriginallyHeld
 			var hasActiveConflict bool
 			for _, l := range activeLocks {
 				h := holderOfLock(l, params.LkFlags)
@@ -1018,7 +988,9 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			return nil
 		}
 
-		timer := time.NewTimer(backoff)
+		half := backoff / 2
+		waitDuration := half + rand.N(half+1)
+		timer := time.NewTimer(waitDuration)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

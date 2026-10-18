@@ -86,7 +86,6 @@ type FileLockQuerier interface {
 	GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)
 	CreateFileLock(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error)
-	DeleteFileLockByID(ctx context.Context, id int64) error
 	DeleteFileLocksByIDs(ctx context.Context, ids []int64) error
 	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg db.DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
 	DeletePosixFileLocksByOwner(ctx context.Context, arg db.DeletePosixFileLocksByOwnerParams) (int64, error)
@@ -95,7 +94,6 @@ type FileLockQuerier interface {
 	GetFileLockWaiter(ctx context.Context, arg db.GetFileLockWaiterParams) (db.FileLockWaiter, error)
 	ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error)
 	UpsertFileLockWaiter(ctx context.Context, arg db.UpsertFileLockWaiterParams) (db.FileLockWaiter, error)
-	UpdateFileLockWaiterStatus(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams) (int64, error)
 	DeleteFileLockWaiter(ctx context.Context, arg db.DeleteFileLockWaiterParams) (int64, error)
 }
 
@@ -1369,12 +1367,6 @@ func TestStore_FileLockBehavior(t *testing.T) {
 		assert.Equal(t, expectedLock, created)
 
 		mockStore.EXPECT().
-			DeleteFileLockByID(mock.Anything, int64(5)).
-			Return(nil).
-			Once()
-		require.NoError(t, store.DeleteFileLockByID(ctx, 5))
-
-		mockStore.EXPECT().
 			DeleteFileLocksByIDs(mock.Anything, []int64{5, 6}).
 			Return(nil).
 			Once()
@@ -1495,19 +1487,6 @@ func TestStore_FileLockBehavior(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []db.FileLockWaiter{expectedWaiter}, waiters)
 
-		updateParams := db.UpdateFileLockWaiterStatusParams{
-			Status:    3,
-			SessionID: 1001,
-			RequestID: 77,
-		}
-		mockStore.EXPECT().
-			UpdateFileLockWaiterStatus(mock.Anything, updateParams).
-			Return(int64(1), nil).
-			Once()
-		rows, err := store.UpdateFileLockWaiterStatus(ctx, updateParams)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1), rows)
-
 		delParams := db.DeleteFileLockWaiterParams{
 			SessionID: 1001,
 			RequestID: 77,
@@ -1516,7 +1495,7 @@ func TestStore_FileLockBehavior(t *testing.T) {
 			DeleteFileLockWaiter(mock.Anything, delParams).
 			Return(int64(1), nil).
 			Once()
-		rows, err = store.DeleteFileLockWaiter(ctx, delParams)
+		rows, err := store.DeleteFileLockWaiter(ctx, delParams)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), rows)
 	})

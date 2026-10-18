@@ -102,10 +102,6 @@ func TestSetLkw_InputValidation(t *testing.T) {
 			mutate: func(p *meta.SetLkwParams) { p.Lk.End = meta.OffsetMax + 1 },
 		},
 		{
-			name:   "lk.PID 超过 math.MaxInt32",
-			mutate: func(p *meta.SetLkwParams) { p.Lk.PID = uint32(math.MaxInt32) + 1 },
-		},
-		{
 			name: "FUSE_LK_FLOCK 但 start != 0",
 			mutate: func(p *meta.SetLkwParams) {
 				p.LkFlags = meta.FuseLkFlock
@@ -243,6 +239,7 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		highLockOwner := uint64(0x9000000000000099)
+		highPID := uint32(math.MaxInt32) + 99
 
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(ino)).
@@ -308,7 +305,7 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 				StartOffset: 0,
 				EndOffset:   100,
 				LockType:    int16(meta.F_WRLCK),
-				Pid:         1234,
+				Pid:         int32(highPID),
 			}).
 			Return(db.FileLock{ID: 1}, nil).
 			Once()
@@ -323,6 +320,7 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 
 		p := validParams
 		p.LockOwner = highLockOwner
+		p.Lk.PID = highPID
 		p.RequestID = 5002
 		err := mgr.SetLkw(ctx, p)
 		require.NoError(t, err)

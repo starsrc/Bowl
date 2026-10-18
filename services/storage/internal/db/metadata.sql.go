@@ -297,16 +297,6 @@ func (q *Queries) DeleteFileHandle(ctx context.Context, arg DeleteFileHandlePara
 	return fh, err
 }
 
-const deleteFileLockByID = `-- name: DeleteFileLockByID :exec
-DELETE FROM file_locks
-WHERE id = $1
-`
-
-func (q *Queries) DeleteFileLockByID(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, deleteFileLockByID, id)
-	return err
-}
-
 const deleteFileLockWaiter = `-- name: DeleteFileLockWaiter :execrows
 DELETE FROM file_lock_waiters
 WHERE session_id = $1 AND request_id = $2
@@ -1084,26 +1074,6 @@ func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) error 
 		arg.OldName,
 	)
 	return err
-}
-
-const updateFileLockWaiterStatus = `-- name: UpdateFileLockWaiterStatus :execrows
-UPDATE file_lock_waiters
-SET status = $1
-WHERE session_id = $2 AND request_id = $3
-`
-
-type UpdateFileLockWaiterStatusParams struct {
-	Status    int16 `json:"status"`
-	SessionID int64 `json:"session_id"`
-	RequestID int64 `json:"request_id"`
-}
-
-func (q *Queries) UpdateFileLockWaiterStatus(ctx context.Context, arg UpdateFileLockWaiterStatusParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateFileLockWaiterStatus, arg.Status, arg.SessionID, arg.RequestID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }
 
 const updateInodeAttr = `-- name: UpdateInodeAttr :one

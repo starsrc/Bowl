@@ -20,7 +20,6 @@ type Querier interface {
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	DeleteExpiredClientSessions(ctx context.Context) error
 	DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error)
-	DeleteFileLockByID(ctx context.Context, id int64) error
 	DeleteFileLockWaiter(ctx context.Context, arg DeleteFileLockWaiterParams) (int64, error)
 	DeleteFileLocksByIDs(ctx context.Context, ids []int64) error
 	DeleteFlockFileLocksByFh(ctx context.Context, arg DeleteFlockFileLocksByFhParams) (int64, error)
@@ -52,7 +51,6 @@ type Querier interface {
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error
-	UpdateFileLockWaiterStatus(ctx context.Context, arg UpdateFileLockWaiterStatusParams) (int64, error)
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
 	UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error)
 	UpsertFileLockWaiter(ctx context.Context, arg UpsertFileLockWaiterParams) (FileLockWaiter, error)

@@ -258,10 +258,6 @@ VALUES (
 )
 RETURNING id, session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, created_at;
 
--- name: DeleteFileLockByID :exec
-DELETE FROM file_locks
-WHERE id = $1;
-
 -- name: DeleteFileLocksByIDs :exec
 DELETE FROM file_locks
 WHERE id = ANY(@ids::bigint[]);
@@ -321,11 +317,6 @@ SET start_offset = EXCLUDED.start_offset,
     pid = EXCLUDED.pid,
     status = EXCLUDED.status
 RETURNING session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status, created_at;
-
--- name: UpdateFileLockWaiterStatus :execrows
-UPDATE file_lock_waiters
-SET status = @status
-WHERE session_id = @session_id AND request_id = @request_id;
 
 -- name: DeleteFileLockWaiter :execrows
 DELETE FROM file_lock_waiters

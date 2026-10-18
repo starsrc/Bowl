@@ -1666,18 +1666,8 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		}
 
 		if params.SessionID != nil {
-			if err := q.DeleteExpiredClientSessions(ctx); err != nil {
-				return fmt.Errorf("delete expired client sessions: %w", err)
-			}
-			_, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
-				SessionID: int64(*params.SessionID),
-				ExpiresAt: pgtype.Timestamptz{
-					Time:  time.Now().Add(DefaultSessionLeaseTTL),
-					Valid: true,
-				},
-			})
-			if err != nil {
-				return fmt.Errorf("upsert client session %d: %w", *params.SessionID, err)
+			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+				return err
 			}
 			_, err = q.DeletePosixFileLocksBySessionAndOwner(ctx, db.DeletePosixFileLocksBySessionAndOwnerParams{
 				SessionID: int64(*params.SessionID),
@@ -1768,18 +1758,8 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 
 		if (params.ReleaseFlags & FuseReleaseFlockUnlock) != 0 {
 			if params.SessionID != nil {
-				if err := q.DeleteExpiredClientSessions(ctx); err != nil {
-					return fmt.Errorf("delete expired client sessions: %w", err)
-				}
-				_, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
-					SessionID: int64(*params.SessionID),
-					ExpiresAt: pgtype.Timestamptz{
-						Time:  time.Now().Add(DefaultSessionLeaseTTL),
-						Valid: true,
-					},
-				})
-				if err != nil {
-					return fmt.Errorf("upsert client session %d: %w", *params.SessionID, err)
+				if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+					return err
 				}
 				_, err = q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
 					SessionID: int64(*params.SessionID),

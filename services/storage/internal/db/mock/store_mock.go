@@ -723,63 +723,6 @@ func (_c *MockStore_DeleteFileHandle_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
-// DeleteFileLockByID provides a mock function for the type MockStore
-func (_mock *MockStore) DeleteFileLockByID(ctx context.Context, id int64) error {
-	ret := _mock.Called(ctx, id)
-
-	if len(ret) == 0 {
-		panic("no return value specified for DeleteFileLockByID")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
-		r0 = returnFunc(ctx, id)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockStore_DeleteFileLockByID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFileLockByID'
-type MockStore_DeleteFileLockByID_Call struct {
-	*mock.Call
-}
-
-// DeleteFileLockByID is a helper method to define mock.On call
-//   - ctx context.Context
-//   - id int64
-func (_e *MockStore_Expecter) DeleteFileLockByID(ctx any, id any) *MockStore_DeleteFileLockByID_Call {
-	return &MockStore_DeleteFileLockByID_Call{Call: _e.mock.On("DeleteFileLockByID", ctx, id)}
-}
-
-func (_c *MockStore_DeleteFileLockByID_Call) Run(run func(ctx context.Context, id int64)) *MockStore_DeleteFileLockByID_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 int64
-		if args[1] != nil {
-			arg1 = args[1].(int64)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockStore_DeleteFileLockByID_Call) Return(err error) *MockStore_DeleteFileLockByID_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockStore_DeleteFileLockByID_Call) RunAndReturn(run func(ctx context.Context, id int64) error) *MockStore_DeleteFileLockByID_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // DeleteFileLockWaiter provides a mock function for the type MockStore
 func (_mock *MockStore) DeleteFileLockWaiter(ctx context.Context, arg db.DeleteFileLockWaiterParams) (int64, error) {
 	ret := _mock.Called(ctx, arg)
@@ -2909,72 +2852,6 @@ func (_c *MockStore_UpdateEntry_Call) Return(err error) *MockStore_UpdateEntry_C
 }
 
 func (_c *MockStore_UpdateEntry_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateEntryParams) error) *MockStore_UpdateEntry_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// UpdateFileLockWaiterStatus provides a mock function for the type MockStore
-func (_mock *MockStore) UpdateFileLockWaiterStatus(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams) (int64, error) {
-	ret := _mock.Called(ctx, arg)
-
-	if len(ret) == 0 {
-		panic("no return value specified for UpdateFileLockWaiterStatus")
-	}
-
-	var r0 int64
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateFileLockWaiterStatusParams) (int64, error)); ok {
-		return returnFunc(ctx, arg)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateFileLockWaiterStatusParams) int64); ok {
-		r0 = returnFunc(ctx, arg)
-	} else {
-		r0 = ret.Get(0).(int64)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateFileLockWaiterStatusParams) error); ok {
-		r1 = returnFunc(ctx, arg)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockStore_UpdateFileLockWaiterStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateFileLockWaiterStatus'
-type MockStore_UpdateFileLockWaiterStatus_Call struct {
-	*mock.Call
-}
-
-// UpdateFileLockWaiterStatus is a helper method to define mock.On call
-//   - ctx context.Context
-//   - arg db.UpdateFileLockWaiterStatusParams
-func (_e *MockStore_Expecter) UpdateFileLockWaiterStatus(ctx any, arg any) *MockStore_UpdateFileLockWaiterStatus_Call {
-	return &MockStore_UpdateFileLockWaiterStatus_Call{Call: _e.mock.On("UpdateFileLockWaiterStatus", ctx, arg)}
-}
-
-func (_c *MockStore_UpdateFileLockWaiterStatus_Call) Run(run func(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams)) *MockStore_UpdateFileLockWaiterStatus_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 db.UpdateFileLockWaiterStatusParams
-		if args[1] != nil {
-			arg1 = args[1].(db.UpdateFileLockWaiterStatusParams)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockStore_UpdateFileLockWaiterStatus_Call) Return(n int64, err error) *MockStore_UpdateFileLockWaiterStatus_Call {
-	_c.Call.Return(n, err)
-	return _c
-}
-
-func (_c *MockStore_UpdateFileLockWaiterStatus_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams) (int64, error)) *MockStore_UpdateFileLockWaiterStatus_Call {
 	_c.Call.Return(run)
 	return _c
 }

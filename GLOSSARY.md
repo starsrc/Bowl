@@ -136,3 +136,22 @@ _Avoid_: GetXattrs, ScanXattr, EnumXattr
 根据目标 Inode 编号与属性名称，删除指定 Xattr 并刷新目标 Inode 状态变更时间的元数据变更操作。
 _Avoid_: DeleteXattr, DelXattr, UnsetXattr, DropXattr
 
+**FileLock (文件锁)**:
+受会话租约管辖、关联于目标 Inode 的运行期同步契约，涵盖 POSIX 字节区间记录锁与 BSD `flock` 整文件锁，描述锁定字节区间 `[start, end]`、锁类型（读锁/写锁/解锁）及持锁进程标识符（`pid`）。
+_Avoid_: RecordLock, RangeLock, Flock, LockEntry
+
+**LockOwner (锁拥有者)**:
+FUSE 内核为锁持有主体（POSIX 进程文件表或 BSD `flock` 打开文件表项）分配的、在会话生命周期内有效的 64 位不透明令牌。
+_Avoid_: OwnerID, LockHolder, ClientID, HolderID
+
+**GetLk (文件锁冲突探测)**:
+根据目标 Inode、活跃 FileHandle、LockOwner 与期望的 FileLock 描述符，在对应锁命名空间内检索是否存在冲突锁并返回首个冲突锁详情（无冲突时返回解锁状态）的同步状态检索操作。
+_Avoid_: QueryLock, CheckLock, TestLock, InspectLock
+
+**SetLk (非阻塞文件锁设置)**:
+根据目标 Inode、活跃 FileHandle、LockOwner 与目标 FileLock 描述符，在对应锁命名空间内非阻塞地申请、转换、裂解合并或释放文件锁，遇冲突立即拒绝的同步操作。
+_Avoid_: TryLock, AcquireLock, LockNonBlock, UpdateLock
+
+**SetLkw (阻塞文件锁设置)**:
+在 SetLk 语义基础上，遇冲突锁时阻塞等待直至锁可用、检测到同节点死锁或收到中断信号的同步操作。
+_Avoid_: WaitLock, LockBlock, AcquireLockWait

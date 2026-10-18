@@ -1601,6 +1601,63 @@ func (_c *MockManager_SetLk_Call) RunAndReturn(run func(ctx context.Context, par
 	return _c
 }
 
+// SetLkw provides a mock function for the type MockManager
+func (_mock *MockManager) SetLkw(ctx context.Context, params meta.SetLkwParams) error {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetLkw")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.SetLkwParams) error); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_SetLkw_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetLkw'
+type MockManager_SetLkw_Call struct {
+	*mock.Call
+}
+
+// SetLkw is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.SetLkwParams
+func (_e *MockManager_Expecter) SetLkw(ctx any, params any) *MockManager_SetLkw_Call {
+	return &MockManager_SetLkw_Call{Call: _e.mock.On("SetLkw", ctx, params)}
+}
+
+func (_c *MockManager_SetLkw_Call) Run(run func(ctx context.Context, params meta.SetLkwParams)) *MockManager_SetLkw_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.SetLkwParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.SetLkwParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_SetLkw_Call) Return(err error) *MockManager_SetLkw_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_SetLkw_Call) RunAndReturn(run func(ctx context.Context, params meta.SetLkwParams) error) *MockManager_SetLkw_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // SetXattr provides a mock function for the type MockManager
 func (_mock *MockManager) SetXattr(ctx context.Context, params meta.SetXattrParams) error {
 	ret := _mock.Called(ctx, params)

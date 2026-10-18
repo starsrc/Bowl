@@ -283,6 +283,17 @@ type SetLkParams struct {
 	SessionID uint64
 }
 
+// SetLkwParams 定义 FUSE_SETLKW (33) 阻塞等待加解锁操作的输入参数。
+type SetLkwParams struct {
+	Ino       uint64
+	Fh        uint64
+	LockOwner uint64
+	Lk        FileLock
+	LkFlags   uint32
+	SessionID uint64
+	RequestID uint64
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

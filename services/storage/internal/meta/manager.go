@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -65,6 +66,7 @@ type Manager interface {
 	RemoveXattr(ctx context.Context, ino uint64, name []byte) error
 	GetLk(ctx context.Context, params GetLkParams) (*FileLock, error)
 	SetLk(ctx context.Context, params SetLkParams) error
+	SetLkw(ctx context.Context, params SetLkwParams) error
 }
 
 type manager struct {
@@ -72,6 +74,8 @@ type manager struct {
 	entryTimeout    float64
 	attrTimeout     float64
 	sessionLeaseTTL time.Duration
+	lockNotifyMu    sync.Mutex
+	lockNotifyChans map[uint64]chan struct{}
 }
 
 var _ Manager = (*manager)(nil)
@@ -1711,6 +1715,7 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		}
 	}
 
+	m.notifyLockWaiters(params.Ino)
 	return nil
 }
 
@@ -1819,6 +1824,9 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		}
 	}
 
+	if (params.ReleaseFlags & FuseReleaseFlockUnlock) != 0 {
+		m.notifyLockWaiters(params.Ino)
+	}
 	return nil
 }
 

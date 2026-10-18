@@ -448,7 +448,7 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		assert.ErrorIs(t, err, meta.ErrPerm)
 	})
 
-	t.Run("禁止复活孤儿节点: 源节点 nlink == 0 时返回 ErrNotFound", func(t *testing.T) {
+	t.Run("禁止复活孤儿节点: 源节点为常规文件且 nlink == 0 但无有效非 O_EXCL TmpFile 句柄时返回 ErrNotFound", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -465,6 +465,11 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 			Return(db.Inode{Ino: int64(srcIno), Mode: int32(meta.S_IFREG | 0o644), Nlink: 0}, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			HasLinkableTmpFileHandleByIno(mock.Anything, int64(srcIno)).
+			Return(false, nil).
+			Once()
+
 		inode, err := mgr.Link(ctx, meta.LinkParams{
 			Ino:          srcIno,
 			NewParentIno: parentIno,
@@ -473,6 +478,91 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, meta.ErrNotFound)
+	})
+
+	t.Run("禁止复活非常规文件孤儿节点: 源节点为符号链接且 nlink == 0 时直接返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(srcIno)).
+			Return(db.Inode{Ino: int64(srcIno), Mode: int32(meta.S_IFLNK | 0o777), Nlink: 0}, nil).
+			Once()
+
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          srcIno,
+			NewParentIno: parentIno,
+			NewName:      []byte("resurrect_symlink"),
+		})
+
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+	})
+
+	t.Run("成功具名化匿名 TmpFile: nlink == 0 且存在可具名化句柄时插入 Entry、nlink 置 1 并清除 O_TMPFILE 标志", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(srcIno)).
+			Return(db.Inode{Ino: int64(srcIno), Mode: int32(meta.S_IFREG | 0o600), Nlink: 0}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasLinkableTmpFileHandleByIno(mock.Anything, int64(srcIno)).
+			Return(true, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("materialized.txt"),
+				Ino:       int64(srcIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouchCtime(mock.Anything, int64(srcIno)).
+			Return(db.Inode{Ino: int64(srcIno), Mode: int32(meta.S_IFREG | 0o600), Nlink: 1}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ClearTmpFileFlagByIno(mock.Anything, int64(srcIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          srcIno,
+			NewParentIno: parentIno,
+			NewName:      []byte("materialized.txt"),
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, srcIno, inode.Ino)
+		assert.Equal(t, uint32(1), inode.Attr.Nlink)
 	})
 
 	t.Run("new_name 为 . 时返回 ErrAlreadyExists", func(t *testing.T) {

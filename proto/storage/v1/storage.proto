@@ -89,6 +89,12 @@ service StorageService {
   // 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
   rpc Create(CreateRequest) returns (CreateResponse);
 
+  // TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+  // 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc TmpFile(TmpFileRequest) returns (TmpFileResponse);
+
   // Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
   // 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
   // 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -650,6 +656,71 @@ message CreateResponse {
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 5 [(buf.validate.field).double.gte = 0];
+}
+
+// TmpFileRequest 定义 TmpFile 接口输入参数（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+message TmpFileRequest {
+  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 parent_ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 节点模式位（仅允许 0 或 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
+  uint32 mode = 2 [
+    (buf.validate.field).uint32.lte = 65535,
+    (buf.validate.field).cel = {
+      id: "tmpfile_mode_regular_only"
+      message: "mode file type must be 0 or S_IFREG (0o100000)"
+      expression: "this < 4096u || (this >= 32768u && this < 36864u)"
+    }
+  ];
+
+  // 所属用户 ID。
+  uint32 uid = 3;
+
+  // 所属组 ID。
+  uint32 gid = 4;
+
+  // 打开标志位（必须为 O_WRONLY (1) 或 O_RDWR (2)，可携带 O_EXCL 等标志）。
+  uint32 flags = 5 [(buf.validate.field).cel = {
+    id: "tmpfile_flags_writable"
+    message: "flags access mode must be O_WRONLY (1) or O_RDWR (2)"
+    expression: "(this % 4u) == 1u || (this % 4u) == 2u"
+  }];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 6 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// TmpFileResponse 包含新创建匿名临时文件的元数据、分配的文件句柄以及 FUSE 内核缓存有效时间。
+message TmpFileResponse {
+  // 新创建的匿名 Inode 实体元数据 (nlink = 0)。
+  Inode inode = 1 [(buf.validate.field).required = true];
+
+  // 分配的文件句柄 (FileHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 打开响应标志位 (open flags)。
+  uint32 open_flags = 3;
+
+  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  double entry_timeout_seconds = 4 [
+    (buf.validate.field).double.gte = 0,
+    (buf.validate.field).double.finite = true
+  ];
+
+  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
+  double attr_timeout_seconds = 5 [
+    (buf.validate.field).double.gte = 0,
+    (buf.validate.field).double.finite = true
+  ];
 }
 
 // OpenRequest 定义 Open 接口输入参数。

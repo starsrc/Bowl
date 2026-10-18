@@ -10,6 +10,7 @@ import (
 
 type Querier interface {
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
+	ClearTmpFileFlagByIno(ctx context.Context, ino int64) error
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error)
 	CreateFileLock(ctx context.Context, arg CreateFileLockParams) (FileLock, error)
@@ -42,6 +43,7 @@ type Querier interface {
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
+	HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)

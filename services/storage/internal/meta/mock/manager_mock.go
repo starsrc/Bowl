@@ -1783,6 +1783,74 @@ func (_c *MockManager_Symlink_Call) RunAndReturn(run func(ctx context.Context, p
 	return _c
 }
 
+// TmpFile provides a mock function for the type MockManager
+func (_mock *MockManager) TmpFile(ctx context.Context, params meta.TmpFileParams) (*meta.CreateResult, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for TmpFile")
+	}
+
+	var r0 *meta.CreateResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.TmpFileParams) (*meta.CreateResult, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.TmpFileParams) *meta.CreateResult); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.CreateResult)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.TmpFileParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_TmpFile_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TmpFile'
+type MockManager_TmpFile_Call struct {
+	*mock.Call
+}
+
+// TmpFile is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.TmpFileParams
+func (_e *MockManager_Expecter) TmpFile(ctx any, params any) *MockManager_TmpFile_Call {
+	return &MockManager_TmpFile_Call{Call: _e.mock.On("TmpFile", ctx, params)}
+}
+
+func (_c *MockManager_TmpFile_Call) Run(run func(ctx context.Context, params meta.TmpFileParams)) *MockManager_TmpFile_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.TmpFileParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.TmpFileParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_TmpFile_Call) Return(createResult *meta.CreateResult, err error) *MockManager_TmpFile_Call {
+	_c.Call.Return(createResult, err)
+	return _c
+}
+
+func (_c *MockManager_TmpFile_Call) RunAndReturn(run func(ctx context.Context, params meta.TmpFileParams) (*meta.CreateResult, error)) *MockManager_TmpFile_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Unlink provides a mock function for the type MockManager
 func (_mock *MockManager) Unlink(ctx context.Context, parentIno uint64, name []byte) error {
 	ret := _mock.Called(ctx, parentIno, name)

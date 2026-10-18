@@ -160,6 +160,22 @@ WHERE fh.fh = $1
   AND fh.ino = $2
   AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp());
 
+-- name: HasLinkableTmpFileHandleByIno :one
+SELECT EXISTS (
+    SELECT 1
+    FROM file_handles fh
+    LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+    WHERE fh.ino = $1
+      AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
+      AND (fh.flags & 4194304) <> 0
+      AND (fh.flags & 128) = 0
+);
+
+-- name: ClearTmpFileFlagByIno :exec
+UPDATE file_handles
+SET flags = flags & ~4194304
+WHERE ino = $1;
+
 -- name: DeleteFileHandle :one
 DELETE FROM file_handles fh
 WHERE fh.fh = $1

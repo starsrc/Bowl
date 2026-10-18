@@ -31,6 +31,7 @@ const (
 	StorageService_Rmdir_FullMethodName       = "/storage.v1.StorageService/Rmdir"
 	StorageService_Rename_FullMethodName      = "/storage.v1.StorageService/Rename"
 	StorageService_Create_FullMethodName      = "/storage.v1.StorageService/Create"
+	StorageService_TmpFile_FullMethodName     = "/storage.v1.StorageService/TmpFile"
 	StorageService_Open_FullMethodName        = "/storage.v1.StorageService/Open"
 	StorageService_Flush_FullMethodName       = "/storage.v1.StorageService/Flush"
 	StorageService_Fsync_FullMethodName       = "/storage.v1.StorageService/Fsync"
@@ -123,6 +124,11 @@ type StorageServiceClient interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error)
+	// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+	// 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
+	TmpFile(ctx context.Context, in *TmpFileRequest, opts ...grpc.CallOption) (*TmpFileResponse, error)
 	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
 	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -332,6 +338,16 @@ func (c *storageServiceClient) Create(ctx context.Context, in *CreateRequest, op
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateResponse)
 	err := c.cc.Invoke(ctx, StorageService_Create_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) TmpFile(ctx context.Context, in *TmpFileRequest, opts ...grpc.CallOption) (*TmpFileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TmpFileResponse)
+	err := c.cc.Invoke(ctx, StorageService_TmpFile_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -572,6 +588,11 @@ type StorageServiceServer interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *CreateRequest) (*CreateResponse, error)
+	// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
+	// 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
+	TmpFile(context.Context, *TmpFileRequest) (*TmpFileResponse, error)
 	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
 	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -702,6 +723,9 @@ func (UnimplementedStorageServiceServer) Rename(context.Context, *RenameRequest)
 }
 func (UnimplementedStorageServiceServer) Create(context.Context, *CreateRequest) (*CreateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Create not implemented")
+}
+func (UnimplementedStorageServiceServer) TmpFile(context.Context, *TmpFileRequest) (*TmpFileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TmpFile not implemented")
 }
 func (UnimplementedStorageServiceServer) Open(context.Context, *OpenRequest) (*OpenResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Open not implemented")
@@ -984,6 +1008,24 @@ func _StorageService_Create_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(StorageServiceServer).Create(ctx, req.(*CreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_TmpFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TmpFileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).TmpFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_TmpFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).TmpFile(ctx, req.(*TmpFileRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1330,6 +1372,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Create",
 			Handler:    _StorageService_Create_Handler,
+		},
+		{
+			MethodName: "TmpFile",
+			Handler:    _StorageService_TmpFile_Handler,
 		},
 		{
 			MethodName: "Open",

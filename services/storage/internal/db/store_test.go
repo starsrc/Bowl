@@ -57,6 +57,8 @@ type FileHandleQuerier interface {
 	CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
 	GetFileHandle(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error)
+	HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error)
+	ClearTmpFileFlagByIno(ctx context.Context, ino int64) error
 	DeleteFileHandle(ctx context.Context, arg db.DeleteFileHandleParams) (int64, error)
 }
 
@@ -927,6 +929,67 @@ func TestQuerier_MknodOperators(t *testing.T) {
 				Once()
 
 			_, err := store.GetFileHandle(ctx, params)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+	})
+
+	t.Run("HasLinkableTmpFileHandleByIno 与 ClearTmpFileFlagByIno 算子调用与参数透传", func(t *testing.T) {
+		const targetIno int64 = 42
+
+		t.Run("HasLinkableTmpFileHandleByIno 成功查询并返回存在可具名化临时文件句柄", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				HasLinkableTmpFileHandleByIno(mock.Anything, targetIno).
+				Return(true, nil).
+				Once()
+
+			linkable, err := store.HasLinkableTmpFileHandleByIno(ctx, targetIno)
+			require.NoError(t, err)
+			assert.True(t, linkable)
+		})
+
+		t.Run("HasLinkableTmpFileHandleByIno 底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("db query failed")
+			mockStore.EXPECT().
+				HasLinkableTmpFileHandleByIno(mock.Anything, targetIno).
+				Return(false, expectedErr).
+				Once()
+
+			_, err := store.HasLinkableTmpFileHandleByIno(ctx, targetIno)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, expectedErr))
+		})
+
+		t.Run("ClearTmpFileFlagByIno 成功清除 O_TMPFILE 标志位", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			mockStore.EXPECT().
+				ClearTmpFileFlagByIno(mock.Anything, targetIno).
+				Return(nil).
+				Once()
+
+			err := store.ClearTmpFileFlagByIno(ctx, targetIno)
+			require.NoError(t, err)
+		})
+
+		t.Run("ClearTmpFileFlagByIno 底层执行失败透传错误", func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			var store db.Store = mockStore
+
+			expectedErr := errors.New("db update failed")
+			mockStore.EXPECT().
+				ClearTmpFileFlagByIno(mock.Anything, targetIno).
+				Return(expectedErr).
+				Once()
+
+			err := store.ClearTmpFileFlagByIno(ctx, targetIno)
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, expectedErr))
 		})

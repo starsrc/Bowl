@@ -51,6 +51,7 @@ type Manager interface {
 	Rmdir(ctx context.Context, parentIno uint64, name []byte) error
 	Rename(ctx context.Context, params RenameParams) error
 	Create(ctx context.Context, params CreateParams) (*CreateResult, error)
+	TmpFile(ctx context.Context, params TmpFileParams) (*CreateResult, error)
 	Open(ctx context.Context, params OpenParams) (*OpenResult, error)
 	Flush(ctx context.Context, params FlushParams) error
 	Fsync(ctx context.Context, params FsyncParams) error
@@ -745,6 +746,7 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 
 		// 按全局 ino 升序锁定目标父目录与源节点，避免跨层操作逆序死锁
 		var parent db.Inode
+		var isTmpFileMaterializing bool
 		for _, ino := range uniqueSortedInos(int64(params.NewParentIno), int64(params.Ino)) {
 			row, err := q.GetInodeForUpdate(ctx, ino)
 			if err != nil {
@@ -767,9 +769,19 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 				if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
 					return ErrPerm
 				}
-				// 禁止复活孤儿节点
+				// 当 nlink == 0 时，仅允许持有有效且未携带 O_EXCL 的 O_TMPFILE 常规文件一次性具名化，严禁复活已 Unlink 孤儿节点
 				if row.Nlink == 0 {
-					return ErrNotFound
+					if (uint32(row.Mode) & S_IFMT) != S_IFREG {
+						return ErrNotFound
+					}
+					linkable, err := q.HasLinkableTmpFileHandleByIno(ctx, row.Ino)
+					if err != nil {
+						return fmt.Errorf("check linkable tmpfile handle for inode %d: %w", row.Ino, err)
+					}
+					if !linkable {
+						return ErrNotFound
+					}
+					isTmpFileMaterializing = true
 				}
 			}
 		}
@@ -792,6 +804,13 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 		updatedSrc, err := q.IncrementInodeNlinkAndTouchCtime(ctx, int64(params.Ino))
 		if err != nil {
 			return fmt.Errorf("increment source inode %d nlink and touch ctime: %w", params.Ino, err)
+		}
+
+		// 若为匿名 TmpFile 首次具名化，原子清除关联句柄的 O_TMPFILE 位，防止后续被 Unlink 后二次复活
+		if isTmpFileMaterializing {
+			if err := q.ClearTmpFileFlagByIno(ctx, int64(params.Ino)); err != nil {
+				return fmt.Errorf("clear tmpfile flag for inode %d: %w", params.Ino, err)
+			}
 		}
 
 		// 刷新目标父目录 mtime 与 ctime (父目录 nlink 保持不变)
@@ -1604,6 +1623,101 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return nil, ErrAlreadyExists
 		default:
 			return nil, fmt.Errorf("create tx: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄。
+func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateResult, error) {
+	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	if err := validateOptionalSessionID(params.SessionID); err != nil {
+		return nil, err
+	}
+	if params.Mode > 0xffff {
+		return nil, ErrInvalidArgument
+	}
+
+	modeType := params.Mode & S_IFMT
+	if modeType != 0 && modeType != S_IFREG {
+		return nil, ErrInvalidArgument
+	}
+
+	accMode := params.Flags & O_ACCMODE
+	if accMode != O_WRONLY && accMode != O_RDWR {
+		return nil, ErrInvalidArgument
+	}
+
+	targetMode := S_IFREG | (params.Mode & PermMask)
+
+	var result *CreateResult
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get parent inode for update %d: %w", params.ParentIno, err)
+		}
+
+		if (uint32(parent.Mode) & S_IFMT) != S_IFDIR {
+			return ErrNotDir
+		}
+
+		if parent.Nlink == 0 {
+			return ErrNotFound
+		}
+
+		if params.SessionID != nil {
+			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+				return err
+			}
+		}
+
+		gid := params.GID
+		if (uint32(parent.Mode) & S_ISGID) != 0 {
+			gid = uint32(parent.Gid)
+		}
+
+		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(targetMode),
+			Nlink: 0,
+			Uid:   int32(params.UID),
+			Gid:   int32(gid),
+			Rdev:  0,
+		})
+		if err != nil {
+			return fmt.Errorf("create tmpfile inode: %w", err)
+		}
+
+		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
+			Ino:       newInode.Ino,
+			Flags:     int32(params.Flags | O_TMPFILE),
+			SessionID: toPgSessionID(params.SessionID),
+		})
+		if err != nil {
+			return fmt.Errorf("create file handle for tmpfile inode %d: %w", newInode.Ino, err)
+		}
+
+		result = &CreateResult{
+			Inode:     newInodeFromDB(newInode),
+			Fh:        uint64(handle.Fh),
+			OpenFlags: 0,
+		}
+		return nil
+	})
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return nil, ErrNotFound
+		case errors.Is(err, ErrNotDir):
+			return nil, ErrNotDir
+		default:
+			return nil, fmt.Errorf("tmpfile tx: %w", err)
 		}
 	}
 

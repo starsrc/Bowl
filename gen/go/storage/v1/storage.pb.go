@@ -2698,10 +2698,11 @@ type SetXattrRequest struct {
 	// 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 扩展属性名称。
-	// 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+	// 长度必须在 1 到 255 字节之间（越界违规由校验器显式映射为 ErrorInfo.reason = "ERANGE"），
+	// 且严禁包含空字节 '\x00'（违规映射为 ErrorInfo.reason = "EINVAL"）。
 	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// 扩展属性值。
-	// 长度最大允许 65536 字节。
+	// 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "E2BIG"）。
 	Value []byte `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
 	// 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE, 3: 两者皆设)。
 	Flags         uint32 `protobuf:"varint,4,opt,name=flags,proto3" json:"flags,omitempty"`
@@ -2810,7 +2811,8 @@ type GetXattrRequest struct {
 	// 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 扩展属性名称。
-	// 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+	// 长度必须在 1 到 255 字节之间（越界违规由校验器显式映射为 ErrorInfo.reason = "ERANGE"），
+	// 且严禁包含空字节 '\x00'（违规映射为 ErrorInfo.reason = "EINVAL"）。
 	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2864,7 +2866,7 @@ func (x *GetXattrRequest) GetName() []byte {
 type GetXattrResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 扩展属性值。
-	// 长度最大允许 65536 字节。
+	// 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "E2BIG"）。
 	Value         []byte `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

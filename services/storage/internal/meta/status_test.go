@@ -175,3 +175,43 @@ func TestToGRPCError_Conversion(t *testing.T) {
 	assert.Equal(t, meta.ErrorDomain, info.GetDomain())
 	assert.Equal(t, "ENOSPC", info.GetReason())
 }
+
+type mockGRPCStatusError struct {
+	msg    string
+	reason string
+}
+
+func (e *mockGRPCStatusError) Error() string { return e.msg }
+
+func (e *mockGRPCStatusError) GRPCStatus() *status.Status {
+	st := status.New(codes.InvalidArgument, e.msg)
+	withDetails, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: e.reason,
+		Domain: meta.ErrorDomain,
+	})
+	if err == nil {
+		return withDetails
+	}
+	return st
+}
+
+func TestToStatus_PreservesValidatorGRPCStatus(t *testing.T) {
+	for _, reason := range []string{"ERANGE", "E2BIG", "ENAMETOOLONG", "EINVAL"} {
+		t.Run(reason, func(t *testing.T) {
+			valErr := &mockGRPCStatusError{
+				msg:    "validation failure: " + reason,
+				reason: reason,
+			}
+			st := meta.ToStatus(valErr)
+			require.NotNil(t, st)
+			assert.Equal(t, codes.InvalidArgument, st.Code())
+
+			details := st.Details()
+			require.Len(t, details, 1)
+			info, ok := details[0].(*errdetails.ErrorInfo)
+			require.True(t, ok)
+			assert.Equal(t, meta.ErrorDomain, info.GetDomain())
+			assert.Equal(t, reason, info.GetReason())
+		})
+	}
+}

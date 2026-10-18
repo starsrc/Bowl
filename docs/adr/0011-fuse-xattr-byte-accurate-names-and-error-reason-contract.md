@@ -14,10 +14,10 @@ Storage 元数据引擎在完成目录流遍历与 `Fallocate`（ADR-0010）后�
 
 ## 决策
 1. **全项目名称与符号链接目标统一字节化（`bytes` / `BYTEA`）、`CASE` 约束防护及 `protovalidate` 预编译**：
-   - **数据库迁移与 `USING convert_to(..., 'UTF8')` 显式转换**：
+   - **数据库迁移、存量边界收敛与非 UTF-8 可逆回滚编码**：
      - 新建 `inode_xattrs` 表：`ino BIGINT NOT NULL REFERENCES inodes(ino) ON DELETE CASCADE`、`name BYTEA NOT NULL`、`value BYTEA NOT NULL`，主键为 `(ino, name)`；附加约束 `chk_inode_xattrs_name CHECK (octet_length(name) BETWEEN 1 AND 255 AND position('\x00'::bytea IN name) = 0)` 与 `chk_inode_xattrs_value CHECK (octet_length(value) <= 65536)`。
-     - 将 `entries.name` 显式通过 `USING convert_to(name, 'UTF8')` 从 `VARCHAR(255)` 迁移为 `BYTEA NOT NULL`，附加约束 `chk_entries_name CHECK (octet_length(name) BETWEEN 1 AND 255 AND position('\x00'::bytea IN name) = 0 AND position('\x2f'::bytea IN name) = 0)`（更新 ADR-0001 中关于 `VARCHAR(255)` 的定义）。
-     - 将 `inodes.symlink_target` 显式通过 `USING convert_to(symlink_target, 'UTF8')` 从 `TEXT` 迁移为 `BYTEA`，并将最大有效载荷上限调整为 `4095` 字节（对齐 Linux `PATH_MAX - 1`，预留末尾 NUL 字节，更新 ADR-0007 中关于 `TEXT` 与 `4096` 上限的定义）；使用基于 `(mode & 61440) = 40960` 的 `CASE` 完整结构更新 `chk_inodes_symlink_target` 约束，防止 SQL 三值逻辑下的 `NULL` 穿透：
+     - 将 `entries.name` 从 `VARCHAR(255)` 迁移为 `BYTEA NOT NULL`，附加约束 `chk_entries_name CHECK (octet_length(name) BETWEEN 1 AND 255 AND position('\x00'::bytea IN name) = 0 AND position('\x2f'::bytea IN name) = 0)`（更新 ADR-0001 中关于 `VARCHAR(255)` 的定义）；回滚（`Down`）时对非 UTF-8 原始字节采用 Unicode 私用区（PUA `U+E000..U+E0FF`）单字节一字符可逆编码（`Up` 时自动解码还原），确保回滚兼容非 UTF-8 存量数据且不超出 `VARCHAR(255)` 字符上限。
+     - 将 `inodes.symlink_target` 从 `TEXT` 迁移为 `BYTEA`，在添加新 `CHECK` 约束前先将存量 `> 4095` 字节（旧版允许 `4096` 字节）的符号链接目标平滑截断至 `4095` 字节并同步收敛 `size = LEAST(size, 4095)`，随后将最大有效载荷上限调整为 `4095` 字节（对齐 Linux `PATH_MAX - 1`，预留末尾 NUL 字节，更新 ADR-0007 中关于 `TEXT` 与 `4096` 上限的定义）；回滚（`Down`）同样采用 PUA 可逆编码；使用基于 `(mode & 61440) = 40960` 的 `CASE` 完整结构更新 `chk_inodes_symlink_target` 约束，防止 SQL 三值逻辑下的 `NULL` 穿透：
        ```sql
        ALTER TABLE inodes ADD CONSTRAINT chk_inodes_symlink_target CHECK (
            CASE
@@ -32,9 +32,9 @@ Storage 元数据引擎在完成目录流遍历与 `Fallocate`（ADR-0010）后�
        ```
    - **时间戳统一采用 `clock_timestamp()`**：
      - 在 `TouchInodeCtime`、`TouchInodeTimestamps` 等 SQL 语句中，统一使用 `clock_timestamp()` 替代 `NOW()`（`transaction_timestamp()`），确保同一事务或高频操作内 `ctime` / `mtime` 单调推进。
-   - **Protobuf 契约与 `protovalidate` CEL 字节规则**：
+   - **Protobuf 契约、`protovalidate` CEL 字节规则与违规 `errno` 显式转换**：
      - 全项目请求与响应中的目录项名称（`Lookup`、`Mknod`、`Mkdir`、`Symlink`、`Link`、`Unlink`、`Rmdir`、`Rename`、`Create`、`DirEntry`、`DirEntryPlus`）、扩展属性名称（`SetXattr`、`GetXattr`、`RemoveXattr`、`ListXattrResponse.names`）及符号链接路径（`SymlinkRequest.target`、`ReadlinkResponse.target`）统一定义为 `bytes`（Go 领域层对应 `[]byte`）。
-     - 弃用会触发 UTF-8 强转的 `bytes.pattern`，改用 `bytes.min_len` / `bytes.max_len` 配合字段级 CEL 原生字节函数 `!this.contains(b'\\x00')`（目录项名称额外叠加 `&& !this.contains(b'/')`），并在 `ListXattrResponse.names` 上配置 `repeated.items` 约束；服务启动阶段通过 `protovalidate.WithMessages(...)` 预编译全部消息校验器。
+     - 弃用会触发 UTF-8 强转的 `bytes.pattern`，改用 `bytes.min_len` / `bytes.max_len` 配合字段级 CEL 原生字节函数 `!this.contains(b'\\x00')`（目录项名称额外叠加 `&& !this.contains(b'/')`），并在 `ListXattrResponse.names` 上配置 `repeated.items` 约束；服务启动阶段通过 `protovalidate.WithMessages(...)` 预编译全部消息校验器，并在 `pkg/validator` 中将字段边界违规按领域层求值顺序显式转换为携带 `google.rpc.ErrorInfo`（`ERANGE`、`E2BIG`、`ENAMETOOLONG`、`EINVAL`）的 gRPC `InvalidArgument` 状态错误。
    - **`nil` 空字节切片写库防御**：由于 `protobuf-go` 将 0 字节 `bytes` 解码为 `nil` 且 `pgx` 会将 `nil []byte` 序列化为 SQL `NULL`，`meta.Manager` 在写入 `inode_xattrs.value` 前必须将 `nil` 归一化为非空切片 `[]byte{}`，确保 0 字节属性值正常持久化。
 2. **结构化 Xattr RPC 契约与确定性字节序列表**：
    - `GetXattr` 接收 `(ino, name)` 并返回 `bytes value`；`ListXattr` 接收 `(ino)` 并按 `ORDER BY name ASC`（`BYTEA` 原始字节序升序，作为 Bowl 确定性输出约定）返回 `repeated bytes names`。

@@ -900,7 +900,8 @@ message SetXattrRequest {
   }];
 
   // 扩展属性名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+  // 长度必须在 1 到 255 字节之间（越界违规由校验器显式映射为 ErrorInfo.reason = "ERANGE"），
+  // 且严禁包含空字节 '\x00'（违规映射为 ErrorInfo.reason = "EINVAL"）。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -912,7 +913,7 @@ message SetXattrRequest {
   ];
 
   // 扩展属性值。
-  // 长度最大允许 65536 字节。
+  // 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "E2BIG"）。
   bytes value = 3 [(buf.validate.field).bytes.max_len = 65536];
 
   // 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE, 3: 两者皆设)。
@@ -931,7 +932,8 @@ message GetXattrRequest {
   }];
 
   // 扩展属性名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
+  // 长度必须在 1 到 255 字节之间（越界违规由校验器显式映射为 ErrorInfo.reason = "ERANGE"），
+  // 且严禁包含空字节 '\x00'（违规映射为 ErrorInfo.reason = "EINVAL"）。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -946,7 +948,7 @@ message GetXattrRequest {
 // GetXattrResponse 定义 GetXattr 接口响应结果。
 message GetXattrResponse {
   // 扩展属性值。
-  // 长度最大允许 65536 字节。
+  // 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "E2BIG"）。
   bytes value = 1 [(buf.validate.field).bytes.max_len = 65536];
 }
 

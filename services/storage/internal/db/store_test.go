@@ -79,7 +79,27 @@ type XattrQuerier interface {
 	DeleteInodeXattr(ctx context.Context, arg db.DeleteInodeXattrParams) (int64, error)
 }
 
-// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现 InodeAttrQuerier、SymlinkQuerier、LinkQuerier、UnlinkRmdirQuerier、RenameQuerier、FileHandleQuerier、InodeLifecycleQuerier、ReadDirQuerier 与 XattrQuerier 接口契约。
+// FileLockQuerier 提取文件锁、阻塞等待者与客户端会话租约存取接口契约。
+type FileLockQuerier interface {
+	DeleteExpiredClientSessions(ctx context.Context) error
+	UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error)
+	GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)
+	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)
+	CreateFileLock(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error)
+	DeleteFileLockByID(ctx context.Context, id int64) error
+	DeleteFileLocksByIDs(ctx context.Context, ids []int64) error
+	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg db.DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
+	DeletePosixFileLocksByOwner(ctx context.Context, arg db.DeletePosixFileLocksByOwnerParams) (int64, error)
+	DeleteFlockFileLocksBySessionAndFh(ctx context.Context, arg db.DeleteFlockFileLocksBySessionAndFhParams) (int64, error)
+	DeleteFlockFileLocksByFh(ctx context.Context, arg db.DeleteFlockFileLocksByFhParams) (int64, error)
+	GetFileLockWaiter(ctx context.Context, arg db.GetFileLockWaiterParams) (db.FileLockWaiter, error)
+	ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error)
+	UpsertFileLockWaiter(ctx context.Context, arg db.UpsertFileLockWaiterParams) (db.FileLockWaiter, error)
+	UpdateFileLockWaiterStatus(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams) (int64, error)
+	DeleteFileLockWaiter(ctx context.Context, arg db.DeleteFileLockWaiterParams) (int64, error)
+}
+
+// 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现各接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
 	_ InodeAttrQuerier = (db.Store)(nil)
@@ -116,6 +136,10 @@ var (
 	_ XattrQuerier = (db.Querier)(nil)
 	_ XattrQuerier = (db.Store)(nil)
 	_ XattrQuerier = (*db.Queries)(nil)
+
+	_ FileLockQuerier = (db.Querier)(nil)
+	_ FileLockQuerier = (db.Store)(nil)
+	_ FileLockQuerier = (*db.Queries)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -1220,5 +1244,280 @@ func TestStore_XattrBehavior(t *testing.T) {
 			assert.ErrorIs(t, err, expectedErr)
 			assert.Equal(t, int64(0), rows)
 		})
+	})
+}
+
+func TestStore_FileLockBehavior(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+
+	t.Run("ClientSession 租约清理与续期", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		var store db.Store = mockStore
+
+		mockStore.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(nil).
+			Once()
+		require.NoError(t, store.DeleteExpiredClientSessions(ctx))
+
+		upsertParams := db.UpsertClientSessionParams{
+			SessionID: 1001,
+			ExpiresAt: pgtype.Timestamptz{Time: now.Add(60 * time.Second), Valid: true},
+		}
+		expectedSession := db.ClientSession{
+			SessionID: 1001,
+			ExpiresAt: upsertParams.ExpiresAt,
+			UpdatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		}
+		mockStore.EXPECT().
+			UpsertClientSession(mock.Anything, upsertParams).
+			Return(expectedSession, nil).
+			Once()
+
+		session, err := store.UpsertClientSession(ctx, upsertParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedSession, session)
+	})
+
+	t.Run("GetFirstConflictingFileLock 与 ListActiveFileLocksByInoAndFlags", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		var store db.Store = mockStore
+
+		conflictParams := db.GetFirstConflictingFileLockParams{
+			Ino:         42,
+			LkFlags:     0,
+			StartOffset: 0,
+			EndOffset:   100,
+			ReqType:     1,
+			SessionID:   1001,
+			LockOwner:   9001,
+			Fh:          10,
+		}
+		expectedLock := db.FileLock{
+			ID:          1,
+			SessionID:   1002,
+			Ino:         42,
+			Fh:          11,
+			LockOwner:   9002,
+			LkFlags:     0,
+			StartOffset: 50,
+			EndOffset:   150,
+			LockType:    1,
+			Pid:         1234,
+			CreatedAt:   pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockStore.EXPECT().
+			GetFirstConflictingFileLock(mock.Anything, conflictParams).
+			Return(expectedLock, nil).
+			Once()
+
+		lock, err := store.GetFirstConflictingFileLock(ctx, conflictParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedLock, lock)
+
+		listParams := db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     42,
+			LkFlags: 0,
+		}
+		mockStore.EXPECT().
+			ListActiveFileLocksByInoAndFlags(mock.Anything, listParams).
+			Return([]db.FileLock{expectedLock}, nil).
+			Once()
+
+		locks, err := store.ListActiveFileLocksByInoAndFlags(ctx, listParams)
+		require.NoError(t, err)
+		assert.Equal(t, []db.FileLock{expectedLock}, locks)
+	})
+
+	t.Run("CreateFileLock 与锁删除算子", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		var store db.Store = mockStore
+
+		createParams := db.CreateFileLockParams{
+			SessionID:   1001,
+			Ino:         42,
+			Fh:          10,
+			LockOwner:   9001,
+			LkFlags:     0,
+			StartOffset: 0,
+			EndOffset:   100,
+			LockType:    0,
+			Pid:         1234,
+		}
+		expectedLock := db.FileLock{
+			ID:          5,
+			SessionID:   1001,
+			Ino:         42,
+			Fh:          10,
+			LockOwner:   9001,
+			LkFlags:     0,
+			StartOffset: 0,
+			EndOffset:   100,
+			LockType:    0,
+			Pid:         1234,
+			CreatedAt:   pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockStore.EXPECT().
+			CreateFileLock(mock.Anything, createParams).
+			Return(expectedLock, nil).
+			Once()
+		created, err := store.CreateFileLock(ctx, createParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedLock, created)
+
+		mockStore.EXPECT().
+			DeleteFileLockByID(mock.Anything, int64(5)).
+			Return(nil).
+			Once()
+		require.NoError(t, store.DeleteFileLockByID(ctx, 5))
+
+		mockStore.EXPECT().
+			DeleteFileLocksByIDs(mock.Anything, []int64{5, 6}).
+			Return(nil).
+			Once()
+		require.NoError(t, store.DeleteFileLocksByIDs(ctx, []int64{5, 6}))
+
+		delPosixSessionParams := db.DeletePosixFileLocksBySessionAndOwnerParams{
+			SessionID: 1001,
+			Ino:       42,
+			LockOwner: 9001,
+		}
+		mockStore.EXPECT().
+			DeletePosixFileLocksBySessionAndOwner(mock.Anything, delPosixSessionParams).
+			Return(int64(2), nil).
+			Once()
+		rows, err := store.DeletePosixFileLocksBySessionAndOwner(ctx, delPosixSessionParams)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), rows)
+
+		delPosixOwnerParams := db.DeletePosixFileLocksByOwnerParams{
+			Ino:       42,
+			LockOwner: 9001,
+		}
+		mockStore.EXPECT().
+			DeletePosixFileLocksByOwner(mock.Anything, delPosixOwnerParams).
+			Return(int64(1), nil).
+			Once()
+		rows, err = store.DeletePosixFileLocksByOwner(ctx, delPosixOwnerParams)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), rows)
+
+		delFlockSessionParams := db.DeleteFlockFileLocksBySessionAndFhParams{
+			SessionID: 1001,
+			Ino:       42,
+			Fh:        10,
+		}
+		mockStore.EXPECT().
+			DeleteFlockFileLocksBySessionAndFh(mock.Anything, delFlockSessionParams).
+			Return(int64(1), nil).
+			Once()
+		rows, err = store.DeleteFlockFileLocksBySessionAndFh(ctx, delFlockSessionParams)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), rows)
+
+		delFlockFhParams := db.DeleteFlockFileLocksByFhParams{
+			Ino: 42,
+			Fh:  10,
+		}
+		mockStore.EXPECT().
+			DeleteFlockFileLocksByFh(mock.Anything, delFlockFhParams).
+			Return(int64(1), nil).
+			Once()
+		rows, err = store.DeleteFlockFileLocksByFh(ctx, delFlockFhParams)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), rows)
+	})
+
+	t.Run("FileLockWaiter 状态管理算子", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		var store db.Store = mockStore
+
+		upsertParams := db.UpsertFileLockWaiterParams{
+			SessionID:   1001,
+			RequestID:   77,
+			Ino:         42,
+			Fh:          10,
+			LockOwner:   9001,
+			LkFlags:     0,
+			StartOffset: 0,
+			EndOffset:   100,
+			LockType:    1,
+			Pid:         1234,
+			Status:      1,
+		}
+		expectedWaiter := db.FileLockWaiter{
+			SessionID:   1001,
+			RequestID:   77,
+			Ino:         42,
+			Fh:          10,
+			LockOwner:   9001,
+			LkFlags:     0,
+			StartOffset: 0,
+			EndOffset:   100,
+			LockType:    1,
+			Pid:         1234,
+			Status:      1,
+			CreatedAt:   pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockStore.EXPECT().
+			UpsertFileLockWaiter(mock.Anything, upsertParams).
+			Return(expectedWaiter, nil).
+			Once()
+		waiter, err := store.UpsertFileLockWaiter(ctx, upsertParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedWaiter, waiter)
+
+		getParams := db.GetFileLockWaiterParams{
+			SessionID: 1001,
+			RequestID: 77,
+		}
+		mockStore.EXPECT().
+			GetFileLockWaiter(mock.Anything, getParams).
+			Return(expectedWaiter, nil).
+			Once()
+		got, err := store.GetFileLockWaiter(ctx, getParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedWaiter, got)
+
+		listParams := db.ListPendingFileLockWaitersByInoAndFlagsParams{
+			Ino:     42,
+			LkFlags: 0,
+		}
+		mockStore.EXPECT().
+			ListPendingFileLockWaitersByInoAndFlags(mock.Anything, listParams).
+			Return([]db.FileLockWaiter{expectedWaiter}, nil).
+			Once()
+		waiters, err := store.ListPendingFileLockWaitersByInoAndFlags(ctx, listParams)
+		require.NoError(t, err)
+		assert.Equal(t, []db.FileLockWaiter{expectedWaiter}, waiters)
+
+		updateParams := db.UpdateFileLockWaiterStatusParams{
+			Status:    3,
+			SessionID: 1001,
+			RequestID: 77,
+		}
+		mockStore.EXPECT().
+			UpdateFileLockWaiterStatus(mock.Anything, updateParams).
+			Return(int64(1), nil).
+			Once()
+		rows, err := store.UpdateFileLockWaiterStatus(ctx, updateParams)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), rows)
+
+		delParams := db.DeleteFileLockWaiterParams{
+			SessionID: 1001,
+			RequestID: 77,
+		}
+		mockStore.EXPECT().
+			DeleteFileLockWaiter(mock.Anything, delParams).
+			Return(int64(1), nil).
+			Once()
+		rows, err = store.DeleteFileLockWaiter(ctx, delParams)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), rows)
 	})
 }

@@ -251,6 +251,24 @@ type SetXattrParams struct {
 	Flags uint32
 }
 
+// FileLock 表示 FUSE 文件锁领域实体。
+type FileLock struct {
+	Start uint64
+	End   uint64
+	Type  uint32
+	PID   uint32
+}
+
+// GetLkParams 定义 FUSE_GETLK (31) 冲突锁探测操作的输入参数。
+type GetLkParams struct {
+	Ino       uint64
+	Fh        uint64
+	LockOwner uint64
+	Lk        FileLock
+	LkFlags   uint32
+	SessionID uint64
+}
+
 // 领域哨兵错误。
 var (
 	ErrInvalidArgument = errors.New("meta: invalid argument")

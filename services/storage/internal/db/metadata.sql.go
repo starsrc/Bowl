@@ -78,6 +78,57 @@ func (q *Queries) CreateFileHandle(ctx context.Context, arg CreateFileHandlePara
 	return i, err
 }
 
+const createFileLock = `-- name: CreateFileLock :one
+INSERT INTO file_locks (
+    session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9
+)
+RETURNING id, session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, created_at
+`
+
+type CreateFileLockParams struct {
+	SessionID   int64 `json:"session_id"`
+	Ino         int64 `json:"ino"`
+	Fh          int64 `json:"fh"`
+	LockOwner   int64 `json:"lock_owner"`
+	LkFlags     int32 `json:"lk_flags"`
+	StartOffset int64 `json:"start_offset"`
+	EndOffset   int64 `json:"end_offset"`
+	LockType    int16 `json:"lock_type"`
+	Pid         int32 `json:"pid"`
+}
+
+func (q *Queries) CreateFileLock(ctx context.Context, arg CreateFileLockParams) (FileLock, error) {
+	row := q.db.QueryRow(ctx, createFileLock,
+		arg.SessionID,
+		arg.Ino,
+		arg.Fh,
+		arg.LockOwner,
+		arg.LkFlags,
+		arg.StartOffset,
+		arg.EndOffset,
+		arg.LockType,
+		arg.Pid,
+	)
+	var i FileLock
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.Ino,
+		&i.Fh,
+		&i.LockOwner,
+		&i.LkFlags,
+		&i.StartOffset,
+		&i.EndOffset,
+		&i.LockType,
+		&i.Pid,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createInode = `-- name: CreateInode :one
 INSERT INTO inodes (mode, nlink, uid, gid, rdev)
 VALUES ($1, $2, $3, $4, $5)
@@ -218,6 +269,16 @@ func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) error 
 	return err
 }
 
+const deleteExpiredClientSessions = `-- name: DeleteExpiredClientSessions :exec
+DELETE FROM client_sessions
+WHERE expires_at <= clock_timestamp()
+`
+
+func (q *Queries) DeleteExpiredClientSessions(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteExpiredClientSessions)
+	return err
+}
+
 const deleteFileHandle = `-- name: DeleteFileHandle :one
 DELETE FROM file_handles
 WHERE fh = $1 AND ino = $2
@@ -234,6 +295,86 @@ func (q *Queries) DeleteFileHandle(ctx context.Context, arg DeleteFileHandlePara
 	var fh int64
 	err := row.Scan(&fh)
 	return fh, err
+}
+
+const deleteFileLockByID = `-- name: DeleteFileLockByID :exec
+DELETE FROM file_locks
+WHERE id = $1
+`
+
+func (q *Queries) DeleteFileLockByID(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, deleteFileLockByID, id)
+	return err
+}
+
+const deleteFileLockWaiter = `-- name: DeleteFileLockWaiter :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = $1 AND request_id = $2
+`
+
+type DeleteFileLockWaiterParams struct {
+	SessionID int64 `json:"session_id"`
+	RequestID int64 `json:"request_id"`
+}
+
+func (q *Queries) DeleteFileLockWaiter(ctx context.Context, arg DeleteFileLockWaiterParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFileLockWaiter, arg.SessionID, arg.RequestID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteFileLocksByIDs = `-- name: DeleteFileLocksByIDs :exec
+DELETE FROM file_locks
+WHERE id = ANY($1::bigint[])
+`
+
+func (q *Queries) DeleteFileLocksByIDs(ctx context.Context, ids []int64) error {
+	_, err := q.db.Exec(ctx, deleteFileLocksByIDs, ids)
+	return err
+}
+
+const deleteFlockFileLocksByFh = `-- name: DeleteFlockFileLocksByFh :execrows
+DELETE FROM file_locks
+WHERE ino = $1
+  AND fh = $2
+  AND lk_flags = 1
+`
+
+type DeleteFlockFileLocksByFhParams struct {
+	Ino int64 `json:"ino"`
+	Fh  int64 `json:"fh"`
+}
+
+func (q *Queries) DeleteFlockFileLocksByFh(ctx context.Context, arg DeleteFlockFileLocksByFhParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFlockFileLocksByFh, arg.Ino, arg.Fh)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteFlockFileLocksBySessionAndFh = `-- name: DeleteFlockFileLocksBySessionAndFh :execrows
+DELETE FROM file_locks
+WHERE session_id = $1
+  AND ino = $2
+  AND fh = $3
+  AND lk_flags = 1
+`
+
+type DeleteFlockFileLocksBySessionAndFhParams struct {
+	SessionID int64 `json:"session_id"`
+	Ino       int64 `json:"ino"`
+	Fh        int64 `json:"fh"`
+}
+
+func (q *Queries) DeleteFlockFileLocksBySessionAndFh(ctx context.Context, arg DeleteFlockFileLocksBySessionAndFhParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFlockFileLocksBySessionAndFh, arg.SessionID, arg.Ino, arg.Fh)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteInode = `-- name: DeleteInode :exec
@@ -258,6 +399,48 @@ type DeleteInodeXattrParams struct {
 
 func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteInodeXattr, arg.Ino, arg.Name)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deletePosixFileLocksByOwner = `-- name: DeletePosixFileLocksByOwner :execrows
+DELETE FROM file_locks
+WHERE ino = $1
+  AND lock_owner = $2
+  AND lk_flags = 0
+`
+
+type DeletePosixFileLocksByOwnerParams struct {
+	Ino       int64 `json:"ino"`
+	LockOwner int64 `json:"lock_owner"`
+}
+
+func (q *Queries) DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePosixFileLocksByOwner, arg.Ino, arg.LockOwner)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deletePosixFileLocksBySessionAndOwner = `-- name: DeletePosixFileLocksBySessionAndOwner :execrows
+DELETE FROM file_locks
+WHERE session_id = $1
+  AND ino = $2
+  AND lock_owner = $3
+  AND lk_flags = 0
+`
+
+type DeletePosixFileLocksBySessionAndOwnerParams struct {
+	SessionID int64 `json:"session_id"`
+	Ino       int64 `json:"ino"`
+	LockOwner int64 `json:"lock_owner"`
+}
+
+func (q *Queries) DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePosixFileLocksBySessionAndOwner, arg.SessionID, arg.Ino, arg.LockOwner)
 	if err != nil {
 		return 0, err
 	}
@@ -299,6 +482,95 @@ func (q *Queries) GetFileHandle(ctx context.Context, arg GetFileHandleParams) (F
 		&i.Fh,
 		&i.Ino,
 		&i.Flags,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getFileLockWaiter = `-- name: GetFileLockWaiter :one
+SELECT session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status, created_at
+FROM file_lock_waiters
+WHERE session_id = $1 AND request_id = $2
+`
+
+type GetFileLockWaiterParams struct {
+	SessionID int64 `json:"session_id"`
+	RequestID int64 `json:"request_id"`
+}
+
+func (q *Queries) GetFileLockWaiter(ctx context.Context, arg GetFileLockWaiterParams) (FileLockWaiter, error) {
+	row := q.db.QueryRow(ctx, getFileLockWaiter, arg.SessionID, arg.RequestID)
+	var i FileLockWaiter
+	err := row.Scan(
+		&i.SessionID,
+		&i.RequestID,
+		&i.Ino,
+		&i.Fh,
+		&i.LockOwner,
+		&i.LkFlags,
+		&i.StartOffset,
+		&i.EndOffset,
+		&i.LockType,
+		&i.Pid,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getFirstConflictingFileLock = `-- name: GetFirstConflictingFileLock :one
+SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.lk_flags, l.start_offset, l.end_offset, l.lock_type, l.pid, l.created_at
+FROM file_locks l
+JOIN client_sessions s ON l.session_id = s.session_id
+WHERE l.ino = $1
+  AND l.lk_flags = $2
+  AND s.expires_at > clock_timestamp()
+  AND l.start_offset <= $3
+  AND l.end_offset >= $4
+  AND ($5::smallint = 1 OR l.lock_type = 1)
+  AND (
+    ($2 = 0 AND NOT (l.session_id = $6 AND l.lock_owner = $7))
+    OR
+    ($2 = 1 AND NOT (l.session_id = $6 AND l.fh = $8))
+  )
+ORDER BY l.start_offset ASC, l.end_offset ASC, l.id ASC
+LIMIT 1
+`
+
+type GetFirstConflictingFileLockParams struct {
+	Ino         int64 `json:"ino"`
+	LkFlags     int32 `json:"lk_flags"`
+	EndOffset   int64 `json:"end_offset"`
+	StartOffset int64 `json:"start_offset"`
+	ReqType     int16 `json:"req_type"`
+	SessionID   int64 `json:"session_id"`
+	LockOwner   int64 `json:"lock_owner"`
+	Fh          int64 `json:"fh"`
+}
+
+func (q *Queries) GetFirstConflictingFileLock(ctx context.Context, arg GetFirstConflictingFileLockParams) (FileLock, error) {
+	row := q.db.QueryRow(ctx, getFirstConflictingFileLock,
+		arg.Ino,
+		arg.LkFlags,
+		arg.EndOffset,
+		arg.StartOffset,
+		arg.ReqType,
+		arg.SessionID,
+		arg.LockOwner,
+		arg.Fh,
+	)
+	var i FileLock
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.Ino,
+		&i.Fh,
+		&i.LockOwner,
+		&i.LkFlags,
+		&i.StartOffset,
+		&i.EndOffset,
+		&i.LockType,
+		&i.Pid,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -567,6 +839,53 @@ func (q *Queries) IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) 
 	return is_sub, err
 }
 
+const listActiveFileLocksByInoAndFlags = `-- name: ListActiveFileLocksByInoAndFlags :many
+SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.lk_flags, l.start_offset, l.end_offset, l.lock_type, l.pid, l.created_at
+FROM file_locks l
+JOIN client_sessions s ON l.session_id = s.session_id
+WHERE l.ino = $1
+  AND l.lk_flags = $2
+  AND s.expires_at > clock_timestamp()
+ORDER BY l.start_offset ASC, l.end_offset ASC, l.id ASC
+`
+
+type ListActiveFileLocksByInoAndFlagsParams struct {
+	Ino     int64 `json:"ino"`
+	LkFlags int32 `json:"lk_flags"`
+}
+
+func (q *Queries) ListActiveFileLocksByInoAndFlags(ctx context.Context, arg ListActiveFileLocksByInoAndFlagsParams) ([]FileLock, error) {
+	rows, err := q.db.Query(ctx, listActiveFileLocksByInoAndFlags, arg.Ino, arg.LkFlags)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FileLock
+	for rows.Next() {
+		var i FileLock
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Ino,
+			&i.Fh,
+			&i.LockOwner,
+			&i.LkFlags,
+			&i.StartOffset,
+			&i.EndOffset,
+			&i.LockType,
+			&i.Pid,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDirEntries = `-- name: ListDirEntries :many
 SELECT
     e.name,
@@ -672,6 +991,55 @@ func (q *Queries) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte,
 	return items, nil
 }
 
+const listPendingFileLockWaitersByInoAndFlags = `-- name: ListPendingFileLockWaitersByInoAndFlags :many
+SELECT w.session_id, w.request_id, w.ino, w.fh, w.lock_owner, w.lk_flags, w.start_offset, w.end_offset, w.lock_type, w.pid, w.status, w.created_at
+FROM file_lock_waiters w
+JOIN client_sessions s ON w.session_id = s.session_id
+WHERE w.ino = $1
+  AND w.lk_flags = $2
+  AND w.status = 1
+  AND s.expires_at > clock_timestamp()
+ORDER BY w.created_at ASC, w.session_id ASC, w.request_id ASC
+`
+
+type ListPendingFileLockWaitersByInoAndFlagsParams struct {
+	Ino     int64 `json:"ino"`
+	LkFlags int32 `json:"lk_flags"`
+}
+
+func (q *Queries) ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg ListPendingFileLockWaitersByInoAndFlagsParams) ([]FileLockWaiter, error) {
+	rows, err := q.db.Query(ctx, listPendingFileLockWaitersByInoAndFlags, arg.Ino, arg.LkFlags)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FileLockWaiter
+	for rows.Next() {
+		var i FileLockWaiter
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.RequestID,
+			&i.Ino,
+			&i.Fh,
+			&i.LockOwner,
+			&i.LkFlags,
+			&i.StartOffset,
+			&i.EndOffset,
+			&i.LockType,
+			&i.Pid,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const touchInodeCtime = `-- name: TouchInodeCtime :exec
 UPDATE inodes
 SET ctime = clock_timestamp()
@@ -716,6 +1084,26 @@ func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) error 
 		arg.OldName,
 	)
 	return err
+}
+
+const updateFileLockWaiterStatus = `-- name: UpdateFileLockWaiterStatus :execrows
+UPDATE file_lock_waiters
+SET status = $1
+WHERE session_id = $2 AND request_id = $3
+`
+
+type UpdateFileLockWaiterStatusParams struct {
+	Status    int16 `json:"status"`
+	SessionID int64 `json:"session_id"`
+	RequestID int64 `json:"request_id"`
+}
+
+func (q *Queries) UpdateFileLockWaiterStatus(ctx context.Context, arg UpdateFileLockWaiterStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateFileLockWaiterStatus, arg.Status, arg.SessionID, arg.RequestID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateInodeAttr = `-- name: UpdateInodeAttr :one
@@ -770,6 +1158,89 @@ func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+	)
+	return i, err
+}
+
+const upsertClientSession = `-- name: UpsertClientSession :one
+INSERT INTO client_sessions (session_id, expires_at, updated_at)
+VALUES ($1, $2, clock_timestamp())
+ON CONFLICT (session_id) DO UPDATE
+SET expires_at = EXCLUDED.expires_at,
+    updated_at = clock_timestamp()
+RETURNING session_id, expires_at, updated_at
+`
+
+type UpsertClientSessionParams struct {
+	SessionID int64              `json:"session_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error) {
+	row := q.db.QueryRow(ctx, upsertClientSession, arg.SessionID, arg.ExpiresAt)
+	var i ClientSession
+	err := row.Scan(&i.SessionID, &i.ExpiresAt, &i.UpdatedAt)
+	return i, err
+}
+
+const upsertFileLockWaiter = `-- name: UpsertFileLockWaiter :one
+INSERT INTO file_lock_waiters (
+    session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+)
+ON CONFLICT (session_id, request_id) DO UPDATE
+SET start_offset = EXCLUDED.start_offset,
+    end_offset = EXCLUDED.end_offset,
+    lock_type = EXCLUDED.lock_type,
+    pid = EXCLUDED.pid,
+    status = EXCLUDED.status
+RETURNING session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status, created_at
+`
+
+type UpsertFileLockWaiterParams struct {
+	SessionID   int64 `json:"session_id"`
+	RequestID   int64 `json:"request_id"`
+	Ino         int64 `json:"ino"`
+	Fh          int64 `json:"fh"`
+	LockOwner   int64 `json:"lock_owner"`
+	LkFlags     int32 `json:"lk_flags"`
+	StartOffset int64 `json:"start_offset"`
+	EndOffset   int64 `json:"end_offset"`
+	LockType    int16 `json:"lock_type"`
+	Pid         int32 `json:"pid"`
+	Status      int16 `json:"status"`
+}
+
+func (q *Queries) UpsertFileLockWaiter(ctx context.Context, arg UpsertFileLockWaiterParams) (FileLockWaiter, error) {
+	row := q.db.QueryRow(ctx, upsertFileLockWaiter,
+		arg.SessionID,
+		arg.RequestID,
+		arg.Ino,
+		arg.Fh,
+		arg.LockOwner,
+		arg.LkFlags,
+		arg.StartOffset,
+		arg.EndOffset,
+		arg.LockType,
+		arg.Pid,
+		arg.Status,
+	)
+	var i FileLockWaiter
+	err := row.Scan(
+		&i.SessionID,
+		&i.RequestID,
+		&i.Ino,
+		&i.Fh,
+		&i.LockOwner,
+		&i.LkFlags,
+		&i.StartOffset,
+		&i.EndOffset,
+		&i.LockType,
+		&i.Pid,
+		&i.Status,
+		&i.CreatedAt,
 	)
 	return i, err
 }

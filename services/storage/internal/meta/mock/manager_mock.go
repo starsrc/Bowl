@@ -345,6 +345,74 @@ func (_c *MockManager_GetAttr_Call) RunAndReturn(run func(ctx context.Context, i
 	return _c
 }
 
+// GetLk provides a mock function for the type MockManager
+func (_mock *MockManager) GetLk(ctx context.Context, params meta.GetLkParams) (*meta.FileLock, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetLk")
+	}
+
+	var r0 *meta.FileLock
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.GetLkParams) (*meta.FileLock, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.GetLkParams) *meta.FileLock); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.FileLock)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.GetLkParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_GetLk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetLk'
+type MockManager_GetLk_Call struct {
+	*mock.Call
+}
+
+// GetLk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.GetLkParams
+func (_e *MockManager_Expecter) GetLk(ctx any, params any) *MockManager_GetLk_Call {
+	return &MockManager_GetLk_Call{Call: _e.mock.On("GetLk", ctx, params)}
+}
+
+func (_c *MockManager_GetLk_Call) Run(run func(ctx context.Context, params meta.GetLkParams)) *MockManager_GetLk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.GetLkParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.GetLkParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_GetLk_Call) Return(fileLock *meta.FileLock, err error) *MockManager_GetLk_Call {
+	_c.Call.Return(fileLock, err)
+	return _c
+}
+
+func (_c *MockManager_GetLk_Call) RunAndReturn(run func(ctx context.Context, params meta.GetLkParams) (*meta.FileLock, error)) *MockManager_GetLk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetXattr provides a mock function for the type MockManager
 func (_mock *MockManager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error) {
 	ret := _mock.Called(ctx, ino, name)

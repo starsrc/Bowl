@@ -8,6 +8,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ClientSession struct {
+	SessionID int64              `json:"session_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Entry struct {
 	ParentIno int64  `json:"parent_ino"`
 	Name      []byte `json:"name"`
@@ -19,6 +25,35 @@ type FileHandle struct {
 	Ino       int64              `json:"ino"`
 	Flags     int32              `json:"flags"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type FileLock struct {
+	ID          int64              `json:"id"`
+	SessionID   int64              `json:"session_id"`
+	Ino         int64              `json:"ino"`
+	Fh          int64              `json:"fh"`
+	LockOwner   int64              `json:"lock_owner"`
+	LkFlags     int32              `json:"lk_flags"`
+	StartOffset int64              `json:"start_offset"`
+	EndOffset   int64              `json:"end_offset"`
+	LockType    int16              `json:"lock_type"`
+	Pid         int32              `json:"pid"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type FileLockWaiter struct {
+	SessionID   int64              `json:"session_id"`
+	RequestID   int64              `json:"request_id"`
+	Ino         int64              `json:"ino"`
+	Fh          int64              `json:"fh"`
+	LockOwner   int64              `json:"lock_owner"`
+	LkFlags     int32              `json:"lk_flags"`
+	StartOffset int64              `json:"start_offset"`
+	EndOffset   int64              `json:"end_offset"`
+	LockType    int16              `json:"lock_type"`
+	Pid         int32              `json:"pid"`
+	Status      int16              `json:"status"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type Inode struct {

@@ -210,3 +210,123 @@ ORDER BY name ASC;
 DELETE FROM inode_xattrs
 WHERE ino = $1 AND name = $2;
 
+-- name: DeleteExpiredClientSessions :exec
+DELETE FROM client_sessions
+WHERE expires_at <= clock_timestamp();
+
+-- name: UpsertClientSession :one
+INSERT INTO client_sessions (session_id, expires_at, updated_at)
+VALUES ($1, $2, clock_timestamp())
+ON CONFLICT (session_id) DO UPDATE
+SET expires_at = EXCLUDED.expires_at,
+    updated_at = clock_timestamp()
+RETURNING session_id, expires_at, updated_at;
+
+-- name: GetFirstConflictingFileLock :one
+SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.lk_flags, l.start_offset, l.end_offset, l.lock_type, l.pid, l.created_at
+FROM file_locks l
+JOIN client_sessions s ON l.session_id = s.session_id
+WHERE l.ino = @ino
+  AND l.lk_flags = @lk_flags
+  AND s.expires_at > clock_timestamp()
+  AND l.start_offset <= @end_offset
+  AND l.end_offset >= @start_offset
+  AND (@req_type::smallint = 1 OR l.lock_type = 1)
+  AND (
+    (@lk_flags = 0 AND NOT (l.session_id = @session_id AND l.lock_owner = @lock_owner))
+    OR
+    (@lk_flags = 1 AND NOT (l.session_id = @session_id AND l.fh = @fh))
+  )
+ORDER BY l.start_offset ASC, l.end_offset ASC, l.id ASC
+LIMIT 1;
+
+-- name: ListActiveFileLocksByInoAndFlags :many
+SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.lk_flags, l.start_offset, l.end_offset, l.lock_type, l.pid, l.created_at
+FROM file_locks l
+JOIN client_sessions s ON l.session_id = s.session_id
+WHERE l.ino = @ino
+  AND l.lk_flags = @lk_flags
+  AND s.expires_at > clock_timestamp()
+ORDER BY l.start_offset ASC, l.end_offset ASC, l.id ASC;
+
+-- name: CreateFileLock :one
+INSERT INTO file_locks (
+    session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid
+)
+VALUES (
+    @session_id, @ino, @fh, @lock_owner, @lk_flags, @start_offset, @end_offset, @lock_type, @pid
+)
+RETURNING id, session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, created_at;
+
+-- name: DeleteFileLockByID :exec
+DELETE FROM file_locks
+WHERE id = $1;
+
+-- name: DeleteFileLocksByIDs :exec
+DELETE FROM file_locks
+WHERE id = ANY(@ids::bigint[]);
+
+-- name: DeletePosixFileLocksBySessionAndOwner :execrows
+DELETE FROM file_locks
+WHERE session_id = @session_id
+  AND ino = @ino
+  AND lock_owner = @lock_owner
+  AND lk_flags = 0;
+
+-- name: DeletePosixFileLocksByOwner :execrows
+DELETE FROM file_locks
+WHERE ino = @ino
+  AND lock_owner = @lock_owner
+  AND lk_flags = 0;
+
+-- name: DeleteFlockFileLocksBySessionAndFh :execrows
+DELETE FROM file_locks
+WHERE session_id = @session_id
+  AND ino = @ino
+  AND fh = @fh
+  AND lk_flags = 1;
+
+-- name: DeleteFlockFileLocksByFh :execrows
+DELETE FROM file_locks
+WHERE ino = @ino
+  AND fh = @fh
+  AND lk_flags = 1;
+
+-- name: GetFileLockWaiter :one
+SELECT session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status, created_at
+FROM file_lock_waiters
+WHERE session_id = @session_id AND request_id = @request_id;
+
+-- name: ListPendingFileLockWaitersByInoAndFlags :many
+SELECT w.session_id, w.request_id, w.ino, w.fh, w.lock_owner, w.lk_flags, w.start_offset, w.end_offset, w.lock_type, w.pid, w.status, w.created_at
+FROM file_lock_waiters w
+JOIN client_sessions s ON w.session_id = s.session_id
+WHERE w.ino = @ino
+  AND w.lk_flags = @lk_flags
+  AND w.status = 1
+  AND s.expires_at > clock_timestamp()
+ORDER BY w.created_at ASC, w.session_id ASC, w.request_id ASC;
+
+-- name: UpsertFileLockWaiter :one
+INSERT INTO file_lock_waiters (
+    session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status
+)
+VALUES (
+    @session_id, @request_id, @ino, @fh, @lock_owner, @lk_flags, @start_offset, @end_offset, @lock_type, @pid, @status
+)
+ON CONFLICT (session_id, request_id) DO UPDATE
+SET start_offset = EXCLUDED.start_offset,
+    end_offset = EXCLUDED.end_offset,
+    lock_type = EXCLUDED.lock_type,
+    pid = EXCLUDED.pid,
+    status = EXCLUDED.status
+RETURNING session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status, created_at;
+
+-- name: UpdateFileLockWaiterStatus :execrows
+UPDATE file_lock_waiters
+SET status = @status
+WHERE session_id = @session_id AND request_id = @request_id;
+
+-- name: DeleteFileLockWaiter :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = @session_id AND request_id = @request_id;

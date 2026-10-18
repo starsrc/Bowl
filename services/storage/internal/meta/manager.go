@@ -62,6 +62,7 @@ type Manager interface {
 	GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error)
 	ListXattr(ctx context.Context, ino uint64) ([][]byte, error)
 	RemoveXattr(ctx context.Context, ino uint64, name []byte) error
+	GetLk(ctx context.Context, params GetLkParams) (*FileLock, error)
 }
 
 type manager struct {

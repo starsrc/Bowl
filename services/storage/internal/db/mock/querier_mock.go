@@ -227,6 +227,72 @@ func (_c *MockQuerier_CreateFileHandle_Call) RunAndReturn(run func(ctx context.C
 	return _c
 }
 
+// CreateFileLock provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) CreateFileLock(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateFileLock")
+	}
+
+	var r0 db.FileLock
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateFileLockParams) (db.FileLock, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateFileLockParams) db.FileLock); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.FileLock)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateFileLockParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_CreateFileLock_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateFileLock'
+type MockQuerier_CreateFileLock_Call struct {
+	*mock.Call
+}
+
+// CreateFileLock is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateFileLockParams
+func (_e *MockQuerier_Expecter) CreateFileLock(ctx any, arg any) *MockQuerier_CreateFileLock_Call {
+	return &MockQuerier_CreateFileLock_Call{Call: _e.mock.On("CreateFileLock", ctx, arg)}
+}
+
+func (_c *MockQuerier_CreateFileLock_Call) Run(run func(ctx context.Context, arg db.CreateFileLockParams)) *MockQuerier_CreateFileLock_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateFileLockParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateFileLockParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_CreateFileLock_Call) Return(fileLock db.FileLock, err error) *MockQuerier_CreateFileLock_Call {
+	_c.Call.Return(fileLock, err)
+	return _c
+}
+
+func (_c *MockQuerier_CreateFileLock_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error)) *MockQuerier_CreateFileLock_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateInode provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) CreateInode(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error) {
 	ret := _mock.Called(ctx, arg)
@@ -539,6 +605,57 @@ func (_c *MockQuerier_DeleteEntry_Call) RunAndReturn(run func(ctx context.Contex
 	return _c
 }
 
+// DeleteExpiredClientSessions provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteExpiredClientSessions(ctx context.Context) error {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteExpiredClientSessions")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) error); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_DeleteExpiredClientSessions_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteExpiredClientSessions'
+type MockQuerier_DeleteExpiredClientSessions_Call struct {
+	*mock.Call
+}
+
+// DeleteExpiredClientSessions is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockQuerier_Expecter) DeleteExpiredClientSessions(ctx any) *MockQuerier_DeleteExpiredClientSessions_Call {
+	return &MockQuerier_DeleteExpiredClientSessions_Call{Call: _e.mock.On("DeleteExpiredClientSessions", ctx)}
+}
+
+func (_c *MockQuerier_DeleteExpiredClientSessions_Call) Run(run func(ctx context.Context)) *MockQuerier_DeleteExpiredClientSessions_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteExpiredClientSessions_Call) Return(err error) *MockQuerier_DeleteExpiredClientSessions_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteExpiredClientSessions_Call) RunAndReturn(run func(ctx context.Context) error) *MockQuerier_DeleteExpiredClientSessions_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteFileHandle provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) DeleteFileHandle(ctx context.Context, arg db.DeleteFileHandleParams) (int64, error) {
 	ret := _mock.Called(ctx, arg)
@@ -601,6 +718,318 @@ func (_c *MockQuerier_DeleteFileHandle_Call) Return(n int64, err error) *MockQue
 }
 
 func (_c *MockQuerier_DeleteFileHandle_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteFileHandleParams) (int64, error)) *MockQuerier_DeleteFileHandle_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFileLockByID provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteFileLockByID(ctx context.Context, id int64) error {
+	ret := _mock.Called(ctx, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFileLockByID")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, id)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_DeleteFileLockByID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFileLockByID'
+type MockQuerier_DeleteFileLockByID_Call struct {
+	*mock.Call
+}
+
+// DeleteFileLockByID is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id int64
+func (_e *MockQuerier_Expecter) DeleteFileLockByID(ctx any, id any) *MockQuerier_DeleteFileLockByID_Call {
+	return &MockQuerier_DeleteFileLockByID_Call{Call: _e.mock.On("DeleteFileLockByID", ctx, id)}
+}
+
+func (_c *MockQuerier_DeleteFileLockByID_Call) Run(run func(ctx context.Context, id int64)) *MockQuerier_DeleteFileLockByID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFileLockByID_Call) Return(err error) *MockQuerier_DeleteFileLockByID_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFileLockByID_Call) RunAndReturn(run func(ctx context.Context, id int64) error) *MockQuerier_DeleteFileLockByID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFileLockWaiter provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteFileLockWaiter(ctx context.Context, arg db.DeleteFileLockWaiterParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFileLockWaiter")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFileLockWaiterParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFileLockWaiterParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteFileLockWaiterParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteFileLockWaiter_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFileLockWaiter'
+type MockQuerier_DeleteFileLockWaiter_Call struct {
+	*mock.Call
+}
+
+// DeleteFileLockWaiter is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteFileLockWaiterParams
+func (_e *MockQuerier_Expecter) DeleteFileLockWaiter(ctx any, arg any) *MockQuerier_DeleteFileLockWaiter_Call {
+	return &MockQuerier_DeleteFileLockWaiter_Call{Call: _e.mock.On("DeleteFileLockWaiter", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteFileLockWaiter_Call) Run(run func(ctx context.Context, arg db.DeleteFileLockWaiterParams)) *MockQuerier_DeleteFileLockWaiter_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteFileLockWaiterParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteFileLockWaiterParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFileLockWaiter_Call) Return(n int64, err error) *MockQuerier_DeleteFileLockWaiter_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFileLockWaiter_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteFileLockWaiterParams) (int64, error)) *MockQuerier_DeleteFileLockWaiter_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFileLocksByIDs provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteFileLocksByIDs(ctx context.Context, ids []int64) error {
+	ret := _mock.Called(ctx, ids)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFileLocksByIDs")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) error); ok {
+		r0 = returnFunc(ctx, ids)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_DeleteFileLocksByIDs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFileLocksByIDs'
+type MockQuerier_DeleteFileLocksByIDs_Call struct {
+	*mock.Call
+}
+
+// DeleteFileLocksByIDs is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ids []int64
+func (_e *MockQuerier_Expecter) DeleteFileLocksByIDs(ctx any, ids any) *MockQuerier_DeleteFileLocksByIDs_Call {
+	return &MockQuerier_DeleteFileLocksByIDs_Call{Call: _e.mock.On("DeleteFileLocksByIDs", ctx, ids)}
+}
+
+func (_c *MockQuerier_DeleteFileLocksByIDs_Call) Run(run func(ctx context.Context, ids []int64)) *MockQuerier_DeleteFileLocksByIDs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 []int64
+		if args[1] != nil {
+			arg1 = args[1].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFileLocksByIDs_Call) Return(err error) *MockQuerier_DeleteFileLocksByIDs_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFileLocksByIDs_Call) RunAndReturn(run func(ctx context.Context, ids []int64) error) *MockQuerier_DeleteFileLocksByIDs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFlockFileLocksByFh provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteFlockFileLocksByFh(ctx context.Context, arg db.DeleteFlockFileLocksByFhParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFlockFileLocksByFh")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLocksByFhParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLocksByFhParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteFlockFileLocksByFhParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteFlockFileLocksByFh_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFlockFileLocksByFh'
+type MockQuerier_DeleteFlockFileLocksByFh_Call struct {
+	*mock.Call
+}
+
+// DeleteFlockFileLocksByFh is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteFlockFileLocksByFhParams
+func (_e *MockQuerier_Expecter) DeleteFlockFileLocksByFh(ctx any, arg any) *MockQuerier_DeleteFlockFileLocksByFh_Call {
+	return &MockQuerier_DeleteFlockFileLocksByFh_Call{Call: _e.mock.On("DeleteFlockFileLocksByFh", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteFlockFileLocksByFh_Call) Run(run func(ctx context.Context, arg db.DeleteFlockFileLocksByFhParams)) *MockQuerier_DeleteFlockFileLocksByFh_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteFlockFileLocksByFhParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteFlockFileLocksByFhParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFlockFileLocksByFh_Call) Return(n int64, err error) *MockQuerier_DeleteFlockFileLocksByFh_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFlockFileLocksByFh_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteFlockFileLocksByFhParams) (int64, error)) *MockQuerier_DeleteFlockFileLocksByFh_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFlockFileLocksBySessionAndFh provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteFlockFileLocksBySessionAndFh(ctx context.Context, arg db.DeleteFlockFileLocksBySessionAndFhParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFlockFileLocksBySessionAndFh")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLocksBySessionAndFhParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLocksBySessionAndFhParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteFlockFileLocksBySessionAndFhParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFlockFileLocksBySessionAndFh'
+type MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call struct {
+	*mock.Call
+}
+
+// DeleteFlockFileLocksBySessionAndFh is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteFlockFileLocksBySessionAndFhParams
+func (_e *MockQuerier_Expecter) DeleteFlockFileLocksBySessionAndFh(ctx any, arg any) *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call {
+	return &MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call{Call: _e.mock.On("DeleteFlockFileLocksBySessionAndFh", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call) Run(run func(ctx context.Context, arg db.DeleteFlockFileLocksBySessionAndFhParams)) *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteFlockFileLocksBySessionAndFhParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteFlockFileLocksBySessionAndFhParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call) Return(n int64, err error) *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteFlockFileLocksBySessionAndFhParams) (int64, error)) *MockQuerier_DeleteFlockFileLocksBySessionAndFh_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -724,6 +1153,138 @@ func (_c *MockQuerier_DeleteInodeXattr_Call) Return(n int64, err error) *MockQue
 }
 
 func (_c *MockQuerier_DeleteInodeXattr_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteInodeXattrParams) (int64, error)) *MockQuerier_DeleteInodeXattr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeletePosixFileLocksByOwner provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeletePosixFileLocksByOwner(ctx context.Context, arg db.DeletePosixFileLocksByOwnerParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeletePosixFileLocksByOwner")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLocksByOwnerParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLocksByOwnerParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeletePosixFileLocksByOwnerParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeletePosixFileLocksByOwner_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeletePosixFileLocksByOwner'
+type MockQuerier_DeletePosixFileLocksByOwner_Call struct {
+	*mock.Call
+}
+
+// DeletePosixFileLocksByOwner is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeletePosixFileLocksByOwnerParams
+func (_e *MockQuerier_Expecter) DeletePosixFileLocksByOwner(ctx any, arg any) *MockQuerier_DeletePosixFileLocksByOwner_Call {
+	return &MockQuerier_DeletePosixFileLocksByOwner_Call{Call: _e.mock.On("DeletePosixFileLocksByOwner", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeletePosixFileLocksByOwner_Call) Run(run func(ctx context.Context, arg db.DeletePosixFileLocksByOwnerParams)) *MockQuerier_DeletePosixFileLocksByOwner_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeletePosixFileLocksByOwnerParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeletePosixFileLocksByOwnerParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeletePosixFileLocksByOwner_Call) Return(n int64, err error) *MockQuerier_DeletePosixFileLocksByOwner_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeletePosixFileLocksByOwner_Call) RunAndReturn(run func(ctx context.Context, arg db.DeletePosixFileLocksByOwnerParams) (int64, error)) *MockQuerier_DeletePosixFileLocksByOwner_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeletePosixFileLocksBySessionAndOwner provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg db.DeletePosixFileLocksBySessionAndOwnerParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeletePosixFileLocksBySessionAndOwner")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLocksBySessionAndOwnerParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeletePosixFileLocksBySessionAndOwnerParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeletePosixFileLocksBySessionAndOwner'
+type MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call struct {
+	*mock.Call
+}
+
+// DeletePosixFileLocksBySessionAndOwner is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeletePosixFileLocksBySessionAndOwnerParams
+func (_e *MockQuerier_Expecter) DeletePosixFileLocksBySessionAndOwner(ctx any, arg any) *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call {
+	return &MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call{Call: _e.mock.On("DeletePosixFileLocksBySessionAndOwner", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call) Run(run func(ctx context.Context, arg db.DeletePosixFileLocksBySessionAndOwnerParams)) *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeletePosixFileLocksBySessionAndOwnerParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeletePosixFileLocksBySessionAndOwnerParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call) Return(n int64, err error) *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call) RunAndReturn(run func(ctx context.Context, arg db.DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)) *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -856,6 +1417,138 @@ func (_c *MockQuerier_GetFileHandle_Call) Return(fileHandle db.FileHandle, err e
 }
 
 func (_c *MockQuerier_GetFileHandle_Call) RunAndReturn(run func(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error)) *MockQuerier_GetFileHandle_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetFileLockWaiter provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetFileLockWaiter(ctx context.Context, arg db.GetFileLockWaiterParams) (db.FileLockWaiter, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetFileLockWaiter")
+	}
+
+	var r0 db.FileLockWaiter
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetFileLockWaiterParams) (db.FileLockWaiter, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetFileLockWaiterParams) db.FileLockWaiter); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.FileLockWaiter)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetFileLockWaiterParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetFileLockWaiter_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetFileLockWaiter'
+type MockQuerier_GetFileLockWaiter_Call struct {
+	*mock.Call
+}
+
+// GetFileLockWaiter is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetFileLockWaiterParams
+func (_e *MockQuerier_Expecter) GetFileLockWaiter(ctx any, arg any) *MockQuerier_GetFileLockWaiter_Call {
+	return &MockQuerier_GetFileLockWaiter_Call{Call: _e.mock.On("GetFileLockWaiter", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetFileLockWaiter_Call) Run(run func(ctx context.Context, arg db.GetFileLockWaiterParams)) *MockQuerier_GetFileLockWaiter_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetFileLockWaiterParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetFileLockWaiterParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetFileLockWaiter_Call) Return(fileLockWaiter db.FileLockWaiter, err error) *MockQuerier_GetFileLockWaiter_Call {
+	_c.Call.Return(fileLockWaiter, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetFileLockWaiter_Call) RunAndReturn(run func(ctx context.Context, arg db.GetFileLockWaiterParams) (db.FileLockWaiter, error)) *MockQuerier_GetFileLockWaiter_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetFirstConflictingFileLock provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetFirstConflictingFileLock")
+	}
+
+	var r0 db.FileLock
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetFirstConflictingFileLockParams) (db.FileLock, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetFirstConflictingFileLockParams) db.FileLock); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.FileLock)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetFirstConflictingFileLockParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetFirstConflictingFileLock_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetFirstConflictingFileLock'
+type MockQuerier_GetFirstConflictingFileLock_Call struct {
+	*mock.Call
+}
+
+// GetFirstConflictingFileLock is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetFirstConflictingFileLockParams
+func (_e *MockQuerier_Expecter) GetFirstConflictingFileLock(ctx any, arg any) *MockQuerier_GetFirstConflictingFileLock_Call {
+	return &MockQuerier_GetFirstConflictingFileLock_Call{Call: _e.mock.On("GetFirstConflictingFileLock", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetFirstConflictingFileLock_Call) Run(run func(ctx context.Context, arg db.GetFirstConflictingFileLockParams)) *MockQuerier_GetFirstConflictingFileLock_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetFirstConflictingFileLockParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetFirstConflictingFileLockParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetFirstConflictingFileLock_Call) Return(fileLock db.FileLock, err error) *MockQuerier_GetFirstConflictingFileLock_Call {
+	_c.Call.Return(fileLock, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetFirstConflictingFileLock_Call) RunAndReturn(run func(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)) *MockQuerier_GetFirstConflictingFileLock_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1643,6 +2336,74 @@ func (_c *MockQuerier_IsSubdirectory_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// ListActiveFileLocksByInoAndFlags provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListActiveFileLocksByInoAndFlags(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListActiveFileLocksByInoAndFlags")
+	}
+
+	var r0 []db.FileLock
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListActiveFileLocksByInoAndFlagsParams) []db.FileLock); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.FileLock)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListActiveFileLocksByInoAndFlagsParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListActiveFileLocksByInoAndFlags_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListActiveFileLocksByInoAndFlags'
+type MockQuerier_ListActiveFileLocksByInoAndFlags_Call struct {
+	*mock.Call
+}
+
+// ListActiveFileLocksByInoAndFlags is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListActiveFileLocksByInoAndFlagsParams
+func (_e *MockQuerier_Expecter) ListActiveFileLocksByInoAndFlags(ctx any, arg any) *MockQuerier_ListActiveFileLocksByInoAndFlags_Call {
+	return &MockQuerier_ListActiveFileLocksByInoAndFlags_Call{Call: _e.mock.On("ListActiveFileLocksByInoAndFlags", ctx, arg)}
+}
+
+func (_c *MockQuerier_ListActiveFileLocksByInoAndFlags_Call) Run(run func(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams)) *MockQuerier_ListActiveFileLocksByInoAndFlags_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListActiveFileLocksByInoAndFlagsParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListActiveFileLocksByInoAndFlagsParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListActiveFileLocksByInoAndFlags_Call) Return(fileLocks []db.FileLock, err error) *MockQuerier_ListActiveFileLocksByInoAndFlags_Call {
+	_c.Call.Return(fileLocks, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListActiveFileLocksByInoAndFlags_Call) RunAndReturn(run func(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)) *MockQuerier_ListActiveFileLocksByInoAndFlags_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListDirEntries provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) ListDirEntries(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error) {
 	ret := _mock.Called(ctx, arg)
@@ -1775,6 +2536,74 @@ func (_c *MockQuerier_ListInodeXattrNames_Call) Return(bytess [][]byte, err erro
 }
 
 func (_c *MockQuerier_ListInodeXattrNames_Call) RunAndReturn(run func(ctx context.Context, ino int64) ([][]byte, error)) *MockQuerier_ListInodeXattrNames_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListPendingFileLockWaitersByInoAndFlags provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListPendingFileLockWaitersByInoAndFlags")
+	}
+
+	var r0 []db.FileLockWaiter
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListPendingFileLockWaitersByInoAndFlagsParams) []db.FileLockWaiter); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.FileLockWaiter)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListPendingFileLockWaitersByInoAndFlagsParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListPendingFileLockWaitersByInoAndFlags'
+type MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call struct {
+	*mock.Call
+}
+
+// ListPendingFileLockWaitersByInoAndFlags is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListPendingFileLockWaitersByInoAndFlagsParams
+func (_e *MockQuerier_Expecter) ListPendingFileLockWaitersByInoAndFlags(ctx any, arg any) *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call {
+	return &MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call{Call: _e.mock.On("ListPendingFileLockWaitersByInoAndFlags", ctx, arg)}
+}
+
+func (_c *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call) Run(run func(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams)) *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListPendingFileLockWaitersByInoAndFlagsParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListPendingFileLockWaitersByInoAndFlagsParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call) Return(fileLockWaiters []db.FileLockWaiter, err error) *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call {
+	_c.Call.Return(fileLockWaiters, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call) RunAndReturn(run func(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error)) *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1950,6 +2779,72 @@ func (_c *MockQuerier_UpdateEntry_Call) RunAndReturn(run func(ctx context.Contex
 	return _c
 }
 
+// UpdateFileLockWaiterStatus provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) UpdateFileLockWaiterStatus(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateFileLockWaiterStatus")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateFileLockWaiterStatusParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateFileLockWaiterStatusParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateFileLockWaiterStatusParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_UpdateFileLockWaiterStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateFileLockWaiterStatus'
+type MockQuerier_UpdateFileLockWaiterStatus_Call struct {
+	*mock.Call
+}
+
+// UpdateFileLockWaiterStatus is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateFileLockWaiterStatusParams
+func (_e *MockQuerier_Expecter) UpdateFileLockWaiterStatus(ctx any, arg any) *MockQuerier_UpdateFileLockWaiterStatus_Call {
+	return &MockQuerier_UpdateFileLockWaiterStatus_Call{Call: _e.mock.On("UpdateFileLockWaiterStatus", ctx, arg)}
+}
+
+func (_c *MockQuerier_UpdateFileLockWaiterStatus_Call) Run(run func(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams)) *MockQuerier_UpdateFileLockWaiterStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateFileLockWaiterStatusParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateFileLockWaiterStatusParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_UpdateFileLockWaiterStatus_Call) Return(n int64, err error) *MockQuerier_UpdateFileLockWaiterStatus_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_UpdateFileLockWaiterStatus_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateFileLockWaiterStatusParams) (int64, error)) *MockQuerier_UpdateFileLockWaiterStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // UpdateInodeAttr provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) UpdateInodeAttr(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error) {
 	ret := _mock.Called(ctx, arg)
@@ -2012,6 +2907,138 @@ func (_c *MockQuerier_UpdateInodeAttr_Call) Return(inode db.Inode, err error) *M
 }
 
 func (_c *MockQuerier_UpdateInodeAttr_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error)) *MockQuerier_UpdateInodeAttr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpsertClientSession provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpsertClientSession")
+	}
+
+	var r0 db.ClientSession
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpsertClientSessionParams) (db.ClientSession, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpsertClientSessionParams) db.ClientSession); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.ClientSession)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpsertClientSessionParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_UpsertClientSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpsertClientSession'
+type MockQuerier_UpsertClientSession_Call struct {
+	*mock.Call
+}
+
+// UpsertClientSession is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpsertClientSessionParams
+func (_e *MockQuerier_Expecter) UpsertClientSession(ctx any, arg any) *MockQuerier_UpsertClientSession_Call {
+	return &MockQuerier_UpsertClientSession_Call{Call: _e.mock.On("UpsertClientSession", ctx, arg)}
+}
+
+func (_c *MockQuerier_UpsertClientSession_Call) Run(run func(ctx context.Context, arg db.UpsertClientSessionParams)) *MockQuerier_UpsertClientSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpsertClientSessionParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpsertClientSessionParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_UpsertClientSession_Call) Return(clientSession db.ClientSession, err error) *MockQuerier_UpsertClientSession_Call {
+	_c.Call.Return(clientSession, err)
+	return _c
+}
+
+func (_c *MockQuerier_UpsertClientSession_Call) RunAndReturn(run func(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error)) *MockQuerier_UpsertClientSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpsertFileLockWaiter provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) UpsertFileLockWaiter(ctx context.Context, arg db.UpsertFileLockWaiterParams) (db.FileLockWaiter, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpsertFileLockWaiter")
+	}
+
+	var r0 db.FileLockWaiter
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpsertFileLockWaiterParams) (db.FileLockWaiter, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpsertFileLockWaiterParams) db.FileLockWaiter); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.FileLockWaiter)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpsertFileLockWaiterParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_UpsertFileLockWaiter_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpsertFileLockWaiter'
+type MockQuerier_UpsertFileLockWaiter_Call struct {
+	*mock.Call
+}
+
+// UpsertFileLockWaiter is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpsertFileLockWaiterParams
+func (_e *MockQuerier_Expecter) UpsertFileLockWaiter(ctx any, arg any) *MockQuerier_UpsertFileLockWaiter_Call {
+	return &MockQuerier_UpsertFileLockWaiter_Call{Call: _e.mock.On("UpsertFileLockWaiter", ctx, arg)}
+}
+
+func (_c *MockQuerier_UpsertFileLockWaiter_Call) Run(run func(ctx context.Context, arg db.UpsertFileLockWaiterParams)) *MockQuerier_UpsertFileLockWaiter_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpsertFileLockWaiterParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpsertFileLockWaiterParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_UpsertFileLockWaiter_Call) Return(fileLockWaiter db.FileLockWaiter, err error) *MockQuerier_UpsertFileLockWaiter_Call {
+	_c.Call.Return(fileLockWaiter, err)
+	return _c
+}
+
+func (_c *MockQuerier_UpsertFileLockWaiter_Call) RunAndReturn(run func(ctx context.Context, arg db.UpsertFileLockWaiterParams) (db.FileLockWaiter, error)) *MockQuerier_UpsertFileLockWaiter_Call {
 	_c.Call.Return(run)
 	return _c
 }

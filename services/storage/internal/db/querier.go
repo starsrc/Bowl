@@ -12,16 +12,27 @@ type Querier interface {
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error)
+	CreateFileLock(ctx context.Context, arg CreateFileLockParams) (FileLock, error)
 	CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error)
 	CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error)
 	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
+	DeleteExpiredClientSessions(ctx context.Context) error
 	DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error)
+	DeleteFileLockByID(ctx context.Context, id int64) error
+	DeleteFileLockWaiter(ctx context.Context, arg DeleteFileLockWaiterParams) (int64, error)
+	DeleteFileLocksByIDs(ctx context.Context, ids []int64) error
+	DeleteFlockFileLocksByFh(ctx context.Context, arg DeleteFlockFileLocksByFhParams) (int64, error)
+	DeleteFlockFileLocksBySessionAndFh(ctx context.Context, arg DeleteFlockFileLocksBySessionAndFhParams) (int64, error)
 	DeleteInode(ctx context.Context, ino int64) error
 	DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) (int64, error)
+	DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error)
+	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
+	GetFileLockWaiter(ctx context.Context, arg GetFileLockWaiterParams) (FileLockWaiter, error)
+	GetFirstConflictingFileLock(ctx context.Context, arg GetFirstConflictingFileLockParams) (FileLock, error)
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
@@ -34,12 +45,17 @@ type Querier interface {
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)
+	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg ListActiveFileLocksByInoAndFlagsParams) ([]FileLock, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
+	ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg ListPendingFileLockWaitersByInoAndFlagsParams) ([]FileLockWaiter, error)
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error
+	UpdateFileLockWaiterStatus(ctx context.Context, arg UpdateFileLockWaiterStatusParams) (int64, error)
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
+	UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error)
+	UpsertFileLockWaiter(ctx context.Context, arg UpsertFileLockWaiterParams) (FileLockWaiter, error)
 	UpsertInodeXattr(ctx context.Context, arg UpsertInodeXattrParams) error
 }
 

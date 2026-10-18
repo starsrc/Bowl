@@ -153,11 +153,12 @@ type OpenResult struct {
 	OpenFlags uint32
 }
 
-// FlushParams 定义会话句柄冲刷操作的输入参数。
+// FlushParams 定义会话句柄冲刷与进程级 POSIX 记录锁清理操作的输入参数。
 type FlushParams struct {
 	Ino       uint64
 	Fh        uint64
 	LockOwner *uint64
+	SessionID *uint64
 }
 
 // FsyncParams 定义文件同步操作的输入参数。
@@ -167,10 +168,13 @@ type FsyncParams struct {
 	Datasync bool
 }
 
-// ReleaseParams 定义文件句柄销毁与孤儿回收操作的输入参数。
+// ReleaseParams 定义文件句柄销毁、BSD flock 句柄锁清理与孤儿回收操作的输入参数。
 type ReleaseParams struct {
-	Ino uint64
-	Fh  uint64
+	Ino          uint64
+	Fh           uint64
+	LockOwner    *uint64
+	ReleaseFlags uint32
+	SessionID    *uint64
 }
 
 // OpenDirParams 定义打开目录并分配目录句柄的输入参数。

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -495,6 +496,33 @@ func TestCreate_InputValidation(t *testing.T) {
 				Mode:      meta.S_IFSOCK | 0o666,
 			},
 		},
+		{
+			name: "flags 携带 O_TMPFILE 标志位",
+			params: meta.CreateParams{
+				ParentIno: 1,
+				Name:      []byte("file.txt"),
+				Mode:      0o644,
+				Flags:     meta.O_TMPFILE,
+			},
+		},
+		{
+			name: "flags 携带 O_TMPFILE | O_RDWR 组合标志位",
+			params: meta.CreateParams{
+				ParentIno: 1,
+				Name:      []byte("file.txt"),
+				Mode:      0o644,
+				Flags:     meta.O_TMPFILE | meta.O_RDWR,
+			},
+		},
+		{
+			name: "flags 携带 O_TMPFILE | O_CREAT | O_WRONLY 组合标志位",
+			params: meta.CreateParams{
+				ParentIno: 1,
+				Name:      []byte("file.txt"),
+				Mode:      0o644,
+				Flags:     meta.O_TMPFILE | meta.O_CREAT | meta.O_WRONLY,
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -786,3 +814,35 @@ func TestCreate_AlreadyExistsAndFailureHandling(t *testing.T) {
 		assert.Contains(t, err.Error(), "create file handle")
 	})
 }
+
+// TestCreate_RejectOTmpfile 验证 Create 收到携带 O_TMPFILE 标志位时静态入参校验直接拒绝。
+func TestCreate_RejectOTmpfile(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Create 收到 flags 携带 O_TMPFILE 时直接静态拒绝并映射为 EINVAL", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		// 零 Mock 预期设置：静态入参校验严禁触发任何数据库读写算子
+		res, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: 1,
+			Name:      []byte("forged_tmpfile.txt"),
+			Mode:      0o644,
+			Flags:     meta.O_CREAT | meta.O_RDWR | meta.O_TMPFILE,
+		})
+
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+		// 验证错误契约映射为 EINVAL
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		require.NotEmpty(t, st.Details())
+		info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "EINVAL", info.Reason)
+		assert.Equal(t, meta.ErrorDomain, info.Domain)
+	})
+}
+

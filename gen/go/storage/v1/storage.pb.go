@@ -1412,7 +1412,7 @@ type CreateRequest struct {
 	Uid uint32 `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
 	// 所属组 ID。
 	Gid uint32 `protobuf:"varint,5,opt,name=gid,proto3" json:"gid,omitempty"`
-	// 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等)。
+	// 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等，严禁携带 O_TMPFILE = 0o20000000)。
 	Flags uint32 `protobuf:"varint,6,opt,name=flags,proto3" json:"flags,omitempty"`
 	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	SessionId     *uint64 `protobuf:"varint,7,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
@@ -1759,7 +1759,7 @@ type OpenRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 待打开节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
-	// 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等)。
+	// 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等，严禁携带 O_TMPFILE = 0o20000000)。
 	Flags uint32 `protobuf:"varint,2,opt,name=flags,proto3" json:"flags,omitempty"`
 	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	SessionId     *uint64 `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`

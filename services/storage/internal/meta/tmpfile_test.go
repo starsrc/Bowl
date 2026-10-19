@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -700,4 +701,199 @@ func TestTmpFileAndLinkMaterialization_PostgresIntegration(t *testing.T) {
 		})
 		assert.ErrorIs(t, err, meta.ErrNotFound, "普通 Unlink 孤儿文件严禁 Link 复活")
 	})
+
+	// AC3: 普通文件拦截 Create 与 Open 伪造 O_TMPFILE 标志位，严防 Unlink 降为 nlink == 0 后被 Link 非法复活
+	t.Run("AC3_普通文件拦截Create与Open伪造O_TMPFILE标志位严防Unlink后Link非法复活", func(t *testing.T) {
+		// 1. 尝试通过 Create(..., O_TMPFILE) 伪造标志位，静态入参校验必须拒绝且不落库任何实体
+		createForgedRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: rootIno,
+			Name:      []byte("forged_via_create.txt"),
+			Mode:      0o644,
+			UID:       1000,
+			GID:       1000,
+			Flags:     meta.O_CREAT | meta.O_RDWR | meta.O_TMPFILE,
+		})
+		assert.Nil(t, createForgedRes)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		stCreate := meta.ToStatus(err)
+		require.NotNil(t, stCreate)
+		require.NotEmpty(t, stCreate.Details())
+		infoCreate, ok := stCreate.Details()[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "EINVAL", infoCreate.Reason)
+
+		// 验证目录项未被创建
+		_, err = mgr.Lookup(ctx, rootIno, []byte("forged_via_create.txt"))
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+
+		// 2. 正常创建常规文件
+		normalRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: rootIno,
+			Name:      []byte("legit_file.txt"),
+			Mode:      0o644,
+			UID:       1000,
+			GID:       1000,
+			Flags:     meta.O_CREAT | meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		normalIno := normalRes.Inode.Ino
+		defer func() {
+			_ = mgr.Unlink(context.Background(), rootIno, []byte("legit_file.txt"))
+			_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: normalIno, Fh: normalRes.Fh})
+			_ = store.DeleteInode(context.Background(), int64(normalIno))
+		}()
+
+		// 3. 尝试对已有常规文件调用 Open(..., O_TMPFILE) 伪造注入 O_TMPFILE 标志位
+		openForgedRes, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   normalIno,
+			Flags: meta.O_RDWR | meta.O_TMPFILE,
+		})
+		assert.Nil(t, openForgedRes)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		stOpen := meta.ToStatus(err)
+		require.NotNil(t, stOpen)
+		require.NotEmpty(t, stOpen.Details())
+		infoOpen, ok := stOpen.Details()[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "EINVAL", infoOpen.Reason)
+
+		// 4. 正常二次打开该文件，验证句柄正常分配且库中 flags 不含 O_TMPFILE
+		openLegitRes, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   normalIno,
+			Flags: meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: normalIno, Fh: openLegitRes.Fh})
+		}()
+		fhRow, err := store.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(openLegitRes.Fh),
+			Ino: int64(normalIno),
+		})
+		require.NoError(t, err)
+		assert.Zero(t, uint32(fhRow.Flags)&meta.O_TMPFILE, "普通 Open 句柄严禁携带 O_TMPFILE 标志位")
+
+		// 5. 对该文件执行 Unlink，使其硬链接降为 nlink == 0（但仍持有活跃句柄处于孤儿状态）
+		require.NoError(t, mgr.Unlink(ctx, rootIno, []byte("legit_file.txt")))
+		attrAfterUnlink, err := mgr.GetAttr(ctx, normalIno)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), attrAfterUnlink.Attr.Nlink)
+
+		// 6. 尝试调用 Link 试图使该孤儿文件复活，必须继续返回 ErrNotFound (ENOENT)，杜绝非法复活
+		_, err = mgr.Link(ctx, meta.LinkParams{
+			Ino:          normalIno,
+			NewParentIno: rootIno,
+			NewName:      []byte("resurrect_forged_should_fail.txt"),
+		})
+		assert.ErrorIs(t, err, meta.ErrNotFound, "普通文件 Unlink 后严禁通过 Link 非法复活")
+	})
+
+	// AC4: 由 TmpFile(..., O_EXCL) 创建的独占匿名文件无法通过二次调用 Open(..., O_TMPFILE) 绕过独占限制并在 Link 中具名化
+	t.Run("AC4_独占TmpFile严禁通过Open伪造O_TMPFILE绕过O_EXCL并在Link中具名化", func(t *testing.T) {
+		// 1. 创建携带 O_EXCL 的独占匿名临时文件
+		exclRes, err := mgr.TmpFile(ctx, meta.TmpFileParams{
+			ParentIno: rootIno,
+			Mode:      0o600,
+			UID:       1000,
+			GID:       1000,
+			Flags:     meta.O_RDWR | meta.O_EXCL,
+		})
+		require.NoError(t, err)
+		exclIno := exclRes.Inode.Ino
+		defer func() {
+			_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: exclIno, Fh: exclRes.Fh})
+			_ = store.DeleteInode(context.Background(), int64(exclIno))
+		}()
+
+		// 验证初始句柄携带 O_EXCL 与 O_TMPFILE
+		fhRow1, err := store.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(exclRes.Fh),
+			Ino: int64(exclIno),
+		})
+		require.NoError(t, err)
+		assert.NotZero(t, uint32(fhRow1.Flags)&meta.O_EXCL)
+		assert.NotZero(t, uint32(fhRow1.Flags)&meta.O_TMPFILE)
+
+		// 2. 此时调用 Link 具名化必定失败（因携带 O_EXCL）
+		_, err = mgr.Link(ctx, meta.LinkParams{
+			Ino:          exclIno,
+			NewParentIno: rootIno,
+			NewName:      []byte("excl_materialize_1.txt"),
+		})
+		assert.ErrorIs(t, err, meta.ErrNotFound, "携带 O_EXCL 的独占临时文件首次 Link 必须返回 ErrNotFound")
+
+		// 3. 尝试通过二次调用 Open(..., O_TMPFILE)（未带 O_EXCL）伪造分配可具名化句柄
+		openForgedRes, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   exclIno,
+			Flags: meta.O_RDWR | meta.O_TMPFILE,
+		})
+		assert.Nil(t, openForgedRes)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		require.NotEmpty(t, st.Details())
+		info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "EINVAL", info.Reason)
+
+		// 4. 调用合法普通 Open(..., O_RDWR) 获取第二句柄，验证其 flags 严禁包含 O_TMPFILE
+		openLegitRes, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   exclIno,
+			Flags: meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: exclIno, Fh: openLegitRes.Fh})
+		}()
+		fhRow2, err := store.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:  int64(openLegitRes.Fh),
+			Ino: int64(exclIno),
+		})
+		require.NoError(t, err)
+		assert.Zero(t, uint32(fhRow2.Flags)&meta.O_TMPFILE, "二次 Open 句柄严禁携带 O_TMPFILE 标志位")
+
+		// 5. 再次尝试调用 Link 试图具名化该独占临时文件：
+		// 句柄 1 携带 O_EXCL，句柄 2 不含 O_TMPFILE，两者均不符合具名化条件，必须继续返回 ErrNotFound (ENOENT)
+		_, err = mgr.Link(ctx, meta.LinkParams{
+			Ino:          exclIno,
+			NewParentIno: rootIno,
+			NewName:      []byte("excl_materialize_bypassed.txt"),
+		})
+		assert.ErrorIs(t, err, meta.ErrNotFound, "独占 TmpFile 严禁通过二次 Open 绕过独占限制并在 Link 中具名化")
+	})
 }
+
+// TestTmpFile_OrphanPreventionAndExclBypassWithMock 通过单元 Mock 隔离验证 AC3 与 AC4 的安全不变量。
+func TestTmpFile_OrphanPreventionAndExclBypassWithMock(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Create 拦截 O_TMPFILE 确保普通文件无法注入 O_TMPFILE 凭证", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		res, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: 1,
+			Name:      []byte("mock_forged.txt"),
+			Mode:      0o644,
+			Flags:     meta.O_CREAT | meta.O_RDWR | meta.O_TMPFILE,
+		})
+		assert.Nil(t, res)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+	})
+
+	t.Run("Open 拦截 O_TMPFILE 确保独占 TmpFile 无法通过二次 Open 获得可具名化句柄", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		res, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   100,
+			Flags: meta.O_RDWR | meta.O_TMPFILE,
+		})
+		assert.Nil(t, res)
+		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+	})
+}
+

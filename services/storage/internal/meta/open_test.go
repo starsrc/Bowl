@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -250,6 +251,41 @@ func TestOpen_InputValidation(t *testing.T) {
 		assert.Nil(t, res)
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
 	})
+
+	for _, tc := range []struct {
+		name  string
+		flags uint32
+	}{
+		{name: "flags 仅携带 O_TMPFILE", flags: meta.O_TMPFILE},
+		{name: "flags 携带 O_TMPFILE | O_RDONLY", flags: meta.O_TMPFILE | meta.O_RDONLY},
+		{name: "flags 携带 O_TMPFILE | O_WRONLY", flags: meta.O_TMPFILE | meta.O_WRONLY},
+		{name: "flags 携带 O_TMPFILE | O_RDWR", flags: meta.O_TMPFILE | meta.O_RDWR},
+		{name: "flags 携带 O_TMPFILE | O_EXCL | O_RDWR", flags: meta.O_TMPFILE | meta.O_EXCL | meta.O_RDWR},
+	} {
+		t.Run("flags 伪造 O_TMPFILE 标志位时静态入参校验直接拒绝: "+tc.name, func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mgr := meta.New(mockStore)
+
+			// 零 Mock 预期设置：静态入参校验严禁触发任何数据库读写算子，不分配新 FileHandle
+			res, err := mgr.Open(ctx, meta.OpenParams{
+				Ino:   100,
+				Flags: tc.flags,
+			})
+
+			assert.Nil(t, res)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+			// 验证错误契约映射为 EINVAL
+			st := meta.ToStatus(err)
+			require.NotNil(t, st)
+			require.NotEmpty(t, st.Details())
+			info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+			require.True(t, ok)
+			assert.Equal(t, "EINVAL", info.Reason)
+			assert.Equal(t, meta.ErrorDomain, info.Domain)
+		})
+	}
 }
 
 func TestOpen_TypeChecking(t *testing.T) {

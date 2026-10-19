@@ -637,7 +637,7 @@ message CreateRequest {
   // 所属组 ID。
   uint32 gid = 5;
 
-  // 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等)。
+  // 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等，严禁携带 O_TMPFILE = 0o20000000)。
   uint32 flags = 6;
 
   // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
@@ -738,7 +738,7 @@ message OpenRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等)。
+  // 打开标志位 (open flags, 如 O_RDONLY, O_WRONLY, O_RDWR, O_TRUNC 等，严禁携带 O_TMPFILE = 0o20000000)。
   uint32 flags = 2;
 
   // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。

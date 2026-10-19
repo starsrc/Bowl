@@ -1515,6 +1515,7 @@ func toPgSessionID(sessionID *uint64) pgtype.Int8 {
 }
 
 // Create 在指定父目录下原子创建常规文件并分配初始文件句柄。
+// 严禁在 flags 中携带 O_TMPFILE 标志位（匿名临时文件必须使用 TmpFile 接口创建），否则静态入参校验直接返回 ErrInvalidArgument。
 func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResult, error) {
 	if params.ParentIno == 0 || params.ParentIno > math.MaxInt64 {
 		return nil, ErrInvalidArgument
@@ -1526,6 +1527,9 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 		return nil, err
 	}
 	if params.Mode > 0xffff {
+		return nil, ErrInvalidArgument
+	}
+	if (params.Flags & O_TMPFILE) != 0 {
 		return nil, ErrInvalidArgument
 	}
 
@@ -1726,12 +1730,16 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 }
 
 // Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
+// 严禁在 flags 中携带 O_TMPFILE 标志位（严防伪造 O_TMPFILE 绕过独占限制或非法复活孤儿节点），否则静态入参校验直接返回 ErrInvalidArgument。
 func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, error) {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 {
 		return nil, ErrInvalidArgument
 	}
 	if err := validateOptionalSessionID(params.SessionID); err != nil {
 		return nil, err
+	}
+	if (params.Flags & O_TMPFILE) != 0 {
+		return nil, ErrInvalidArgument
 	}
 
 	var result *OpenResult

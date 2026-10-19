@@ -118,7 +118,7 @@ service StorageService {
   // 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
 
-  // OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
+  // OpenDir 打开指定目录 Inode 节点并分配目录 FileHandle。
   // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   // 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -131,7 +131,7 @@ service StorageService {
   // 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
   rpc FsyncDir(FsyncDirRequest) returns (FsyncDirResponse);
 
-  // ReleaseDir 关闭并销毁目录句柄 (DirHandle)。
+  // ReleaseDir 关闭并销毁目录 FileHandle。
   // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
@@ -232,7 +232,7 @@ message LookupResponse {
   // 命中的目标 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
@@ -358,7 +358,7 @@ message MknodResponse {
   // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
@@ -400,7 +400,7 @@ message MkdirResponse {
   // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
@@ -451,7 +451,7 @@ message SymlinkResponse {
   // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
@@ -513,7 +513,7 @@ message LinkResponse {
   // 硬链接计数递增后的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
@@ -663,7 +663,7 @@ message CreateResponse {
   // 打开响应标志位 (open flags)。
   uint32 open_flags = 3;
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 4 [(buf.validate.field).double.gte = 0];
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
@@ -722,7 +722,7 @@ message TmpFileResponse {
   // 打开响应标志位 (open flags)。
   uint32 open_flags = 3;
 
-  // 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 4 [
     (buf.validate.field).double.gte = 0,
     (buf.validate.field).double.finite = true
@@ -870,7 +870,7 @@ message OpenDirRequest {
 
 // OpenDirResponse 包含打开目录所分配的目录句柄及打开响应标志位。
 message OpenDirResponse {
-  // 分配的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  // 分配的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 fh = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
@@ -888,7 +888,7 @@ message FsyncDirRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待同步的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  // 待同步的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 fh = 2 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
@@ -915,7 +915,7 @@ message ReleaseDirRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待关闭并销毁的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  // 待关闭并销毁的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 fh = 2 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807

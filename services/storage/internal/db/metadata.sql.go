@@ -41,10 +41,11 @@ func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (
 
 const clearTmpFileFlagByIno = `-- name: ClearTmpFileFlagByIno :exec
 UPDATE file_handles
-SET flags = flags & ~4194304
+SET flags = flags & ~4194304 -- 4194304 = 0o20000000 (O_TMPFILE)
 WHERE ino = $1
 `
 
+// 4194304 = 0o20000000 (O_TMPFILE)
 func (q *Queries) ClearTmpFileFlagByIno(ctx context.Context, ino int64) error {
 	_, err := q.db.Exec(ctx, clearTmpFileFlagByIno, ino)
 	return err
@@ -819,11 +820,12 @@ SELECT EXISTS (
     LEFT JOIN client_sessions s ON fh.session_id = s.session_id
     WHERE fh.ino = $1
       AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
-      AND (fh.flags & 4194304) <> 0
-      AND (fh.flags & 128) = 0
+      AND (fh.flags & 4194304) <> 0 -- 4194304 = 0o20000000 (O_TMPFILE)
+      AND (fh.flags & 128) = 0      -- 128 = 0o200 (O_EXCL)
 )
 `
 
+// 4194304 = 0o20000000 (O_TMPFILE), 128 = 0o200 (O_EXCL)
 func (q *Queries) HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error) {
 	row := q.db.QueryRow(ctx, hasLinkableTmpFileHandleByIno, ino)
 	var exists bool

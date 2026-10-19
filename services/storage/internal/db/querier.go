@@ -10,6 +10,7 @@ import (
 
 type Querier interface {
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
+	// 4194304 = 0o20000000 (O_TMPFILE)
 	ClearTmpFileFlagByIno(ctx context.Context, ino int64) error
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error)
@@ -43,6 +44,7 @@ type Querier interface {
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
+	// 4194304 = 0o20000000 (O_TMPFILE), 128 = 0o200 (O_EXCL)
 	HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)

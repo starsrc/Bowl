@@ -1515,6 +1515,15 @@ func toPgSessionID(sessionID *uint64) pgtype.Int8 {
 	}
 }
 
+// renewOptionalClientSession 若传入了有效的客户端会话标识，则在当前事务中执行会话租约续期并清理相关孤儿节点。
+func (m *manager) renewOptionalClientSession(ctx context.Context, q db.Querier, sessionID *uint64) error {
+	if sessionID == nil {
+		return nil
+	}
+	_, err := m.renewClientSession(ctx, q, *sessionID)
+	return err
+}
+
 // Create 在指定父目录下原子创建常规文件并分配初始文件句柄。
 // 严禁在 flags 中携带 O_TMPFILE 标志位（匿名临时文件必须使用 TmpFile 接口创建），否则静态入参校验直接返回 ErrInvalidArgument。
 func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResult, error) {
@@ -1596,10 +1605,8 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
@@ -1677,10 +1684,8 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			return ErrNotFound
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		gid := params.GID
@@ -1794,10 +1799,8 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 			}
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
@@ -1925,10 +1928,8 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		if params.LockOwner != nil {
@@ -2027,10 +2028,8 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 			return fmt.Errorf("delete file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		if (params.ReleaseFlags & FuseReleaseFlockUnlock) != 0 {
@@ -2084,7 +2083,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 	return nil
 }
 
-// OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
+// OpenDir 打开指定目录 Inode 节点并分配目录 FileHandle。
 func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirResult, error) {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 || (params.Flags&O_ACCMODE) != O_RDONLY || (params.Flags&O_TRUNC) != 0 {
 		return nil, ErrInvalidArgument
@@ -2117,10 +2116,8 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirRe
 			}
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
@@ -2222,10 +2219,8 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 			return fmt.Errorf("delete file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		if inode.Nlink == 0 {
@@ -2595,10 +2590,8 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			return ErrBadFileHandle
 		}
 
-		if params.SessionID != nil {
-			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
-				return err
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		switch params.Mode {

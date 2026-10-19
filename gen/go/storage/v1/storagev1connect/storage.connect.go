@@ -403,7 +403,7 @@ type StorageServiceClient interface {
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
 	Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error)
-	// OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
+	// OpenDir 打开指定目录 Inode 节点并分配目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -414,7 +414,7 @@ type StorageServiceClient interface {
 	// 若目录句柄不存在、与 Inode 不匹配或所属会话已过期，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
 	FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error)
-	// ReleaseDir 关闭并销毁目录句柄 (DirHandle)。
+	// ReleaseDir 关闭并销毁目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
@@ -581,7 +581,7 @@ type StorageServiceHandler interface {
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
 	Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error)
-	// OpenDir 打开指定目录 Inode 节点并分配目录句柄 (DirHandle)。
+	// OpenDir 打开指定目录 Inode 节点并分配目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
@@ -592,7 +592,7 @@ type StorageServiceHandler interface {
 	// 若目录句柄不存在、与 Inode 不匹配或所属会话已过期，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
 	FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error)
-	// ReleaseDir 关闭并销毁目录句柄 (DirHandle)。
+	// ReleaseDir 关闭并销毁目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。

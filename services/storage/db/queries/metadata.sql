@@ -162,19 +162,21 @@ WHERE fh.fh = $1
   AND (sqlc.narg('session_id') IS NULL OR s.expires_at > clock_timestamp());
 
 -- name: HasLinkableTmpFileHandleByIno :one
+-- 4194304 = 0o20000000 (O_TMPFILE), 128 = 0o200 (O_EXCL)
 SELECT EXISTS (
     SELECT 1
     FROM file_handles fh
     LEFT JOIN client_sessions s ON fh.session_id = s.session_id
     WHERE fh.ino = $1
       AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
-      AND (fh.flags & 4194304) <> 0
-      AND (fh.flags & 128) = 0
+      AND (fh.flags & 4194304) <> 0 -- 4194304 = 0o20000000 (O_TMPFILE)
+      AND (fh.flags & 128) = 0      -- 128 = 0o200 (O_EXCL)
 );
 
 -- name: ClearTmpFileFlagByIno :exec
+-- 4194304 = 0o20000000 (O_TMPFILE)
 UPDATE file_handles
-SET flags = flags & ~4194304
+SET flags = flags & ~4194304 -- 4194304 = 0o20000000 (O_TMPFILE)
 WHERE ino = $1;
 
 -- name: DeleteFileHandle :one

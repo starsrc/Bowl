@@ -207,7 +207,7 @@ type OpenDirParams struct {
 	SessionID *uint64
 }
 
-// OpenDirResult 包含打开目录分配的 DirHandle 与打开响应标志。
+// OpenDirResult 包含打开目录分配的 FileHandle 与打开响应标志。
 type OpenDirResult struct {
 	Fh        uint64
 	OpenFlags uint32

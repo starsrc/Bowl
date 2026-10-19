@@ -84,7 +84,7 @@ type LookupResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 命中的目标 Inode 实体元数据。
 	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,3,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -516,7 +516,7 @@ type MknodResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 新创建的 Inode 实体元数据。
 	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,3,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -663,7 +663,7 @@ type MkdirResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 新创建的 Inode 实体元数据。
 	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,3,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -811,7 +811,7 @@ type SymlinkResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 新创建的 Inode 实体元数据。
 	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,3,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -1032,7 +1032,7 @@ type LinkResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 硬链接计数递增后的 Inode 实体元数据。
 	Inode *Inode `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,2,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,3,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -1508,7 +1508,7 @@ type CreateResponse struct {
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 打开响应标志位 (open flags)。
 	OpenFlags uint32 `protobuf:"varint,3,opt,name=open_flags,json=openFlags,proto3" json:"open_flags,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,4,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,5,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -1681,7 +1681,7 @@ type TmpFileResponse struct {
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 打开响应标志位 (open flags)。
 	OpenFlags uint32 `protobuf:"varint,3,opt,name=open_flags,json=openFlags,proto3" json:"open_flags,omitempty"`
-	// 目录项 (dentry) 在 FUSE 内核中的有效缓存时长（秒）。
+	// 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
 	EntryTimeoutSeconds float64 `protobuf:"fixed64,4,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	// 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
 	AttrTimeoutSeconds float64 `protobuf:"fixed64,5,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
@@ -2279,7 +2279,7 @@ func (x *OpenDirRequest) GetSessionId() uint64 {
 // OpenDirResponse 包含打开目录所分配的目录句柄及打开响应标志位。
 type OpenDirResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 分配的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	// 分配的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Fh uint64 `protobuf:"varint,1,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 打开响应标志位 (open flags)。
 	OpenFlags     uint32 `protobuf:"varint,2,opt,name=open_flags,json=openFlags,proto3" json:"open_flags,omitempty"`
@@ -2336,7 +2336,7 @@ type FsyncDirRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 目标目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
-	// 待同步的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	// 待同步的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 是否仅同步数据内容 (fdatasync 语义)。若为 true，仅同步目录数据而不强制刷写非必要元数据。
 	Datasync bool `protobuf:"varint,3,opt,name=datasync,proto3" json:"datasync,omitempty"`
@@ -2446,7 +2446,7 @@ type ReleaseDirRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 目标目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
-	// 待关闭并销毁的目录句柄 (DirHandle)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	// 待关闭并销毁的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	SessionId     *uint64 `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`

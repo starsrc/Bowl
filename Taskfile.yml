@@ -75,6 +75,12 @@ tasks:
     cmds:
       - sqlc generate {{.CLI_ARGS}}
 
+  sqlc:generate:
+    desc: "Generate sqlc code across all services"
+    cmds:
+      - task: sqlc:storage:generate
+        vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
+
   mockery:storage:
     desc: "Generate mockery mocks for storage service"
     dir: services/storage

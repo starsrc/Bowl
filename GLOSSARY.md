@@ -163,3 +163,8 @@ _Avoid_: TryLock, AcquireLock, LockNonBlock, UpdateLock
 **SetLkw (阻塞文件锁设置)**:
 在 SetLk 语义基础上，遇冲突锁时阻塞等待直至锁可用、检测到同节点死锁或收到中断信号的同步操作。
 _Avoid_: WaitLock, LockBlock, AcquireLockWait
+
+**RenewSession (会话续期)**:
+客户端显式延长其会话租约有效期的保活操作，同步触发已超期会话清理与无剩余活跃 FileHandle 的 Orphan Inode 物理回收。
+_Avoid_: Heartbeat, PingSession, KeepAlive, TouchSession
+

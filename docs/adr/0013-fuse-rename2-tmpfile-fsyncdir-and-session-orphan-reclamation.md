@@ -23,16 +23,20 @@ Storage 元数据引擎在完成目录树拓扑（ADR-0008）、文件句柄生�
 
 2. **原生匿名 `TmpFile`（`FUSE_TMPFILE = 51`）直建与一次性 `Link` 具名化（演进 ADR-0008）**：
    - **独立 `TmpFile` RPC 与入参不变量**：新增 `TmpFile(TmpFileRequest) returns (TmpFileResponse)`（请求含 `parent_ino`、`mode`、`uid`、`gid`、`flags`、`optional session_id`；响应与 `CreateResponse` 对齐）。强制要求 `flags & O_ACCMODE` 为 `O_WRONLY` 或 `O_RDWR`（传入 `O_RDONLY` 返回 `ErrInvalidArgument` / `EINVAL`）；`mode & S_IFMT` 仅允许为 `0` 或 `S_IFREG`，归一化为 `S_IFREG | (mode & 0o7777)`。
+   - **严禁 `Create` 与 `Open` 伪造 `O_TMPFILE` 来源**：`Create` 与 `Open` 在入参校验阶段强制拒绝包含 `O_TMPFILE (0o20000000)` 标志位的 `flags`（直接返回 `ErrInvalidArgument` / `EINVAL`），确保 `file_handles.flags` 中的 `O_TMPFILE` 位仅能由 `TmpFile` 唯一写入，杜绝普通具名文件通过伪造 `O_TMPFILE` 在 `Unlink` 后被 `Link` 非法复活，以及杜绝 `TmpFile(O_EXCL)` 节点通过二次 `Open(O_TMPFILE)` 绕过独占限制。
    - **单事务直建 `nlink = 0` 节点**：在读写事务中锁定父目录 `parent_ino`（校验存在、为 `S_IFDIR` 且 `nlink > 0`；若父目录含 `S_ISGID` 则继承父目录 `gid`），直接插入 `nlink = 0` 的常规文件 `Inode`（**不写入 `entries` 表，亦不刷新父目录 `mtime` / `ctime`**），并在 `file_handles` 表分配初始句柄（落库 `flags` 强制置位平台无关常量 `O_TMPFILE = 0o20000000`，即 `params.Flags | O_TMPFILE`）。
    - **`Link` 具名化准入与防二次复活**：当 `Link` 锁定源 `Inode` 发现 `nlink == 0` 时，查询该 `Inode` 是否存在有效（所属会话未过期）的 `FileHandle` 满足 `(flags & O_TMPFILE) != 0 && (flags & O_EXCL) == 0`：
      - 若不满足（如普通被 `Unlink` 解链的孤儿文件、创建时携带了 `O_EXCL` 的 `TmpFile`、或句柄已关闭/过期），继续返回 `ErrNotFound`（`ENOENT`）；
      - 若满足，则允许插入目标 `Entry`、将源 `Inode` 的 `nlink` 递增为 `1` 并刷新 `ctime`，**且在同一事务内清除该 `Inode` 关联 `file_handles.flags` 中的 `O_TMPFILE` 位（`flags = flags & ~O_TMPFILE`）**。一旦具名化后再次被 `Unlink` 降回 `nlink == 0`，其 `O_TMPFILE` 资格已被消费，严禁二次复活。
 
-3. **`file_handles` 会话租约绑定与 `FOR UPDATE SKIP LOCKED` 无死锁孤儿回收（演进 ADR-0009 / ADR-0012）**：
+3. **`file_handles` 会话租约对称绑定、独立 `RenewSession` 续期与 `FOR UPDATE SKIP LOCKED` 无死锁孤儿回收（演进 ADR-0009 / ADR-0012）**：
    - **数据库迁移与向后兼容契约**：新增迁移为 `file_handles` 表添加可空外键列 `session_id BIGINT REFERENCES client_sessions(session_id) ON DELETE CASCADE` 及索引 `idx_file_handles_session_id ON file_handles(session_id)`。在 `Create`、`TmpFile`、`Open`、`OpenDir`、`Fsync`、`FsyncDir`、`ReadDir`、`ReadDirPlus`、`ReleaseDir`、`Fallocate` 请求中增加 `optional uint64 session_id`（未传入时落库 `NULL`，保持存量无会话调用 100% 向后兼容）。
-   - **读写续期与只读过滤分流**：
-     - 写路径接口（`Create`、`TmpFile`、`Open`、`OpenDir`、`Flush`、`Release`、`ReleaseDir`、`Fallocate`、`SetLk`、`SetLkw`）携带非空 `session_id` 时，统一调用 `renewClientSession` 续期会话租约并触发过期清理；
-     - 只读路径接口（`Fsync`、`FsyncDir`、`ReadDir`、`ReadDirPlus`、`GetLk`）保持只读事务不写库续期，但在 `GetFileHandle` 与 `HasFileHandlesByIno` SQL 中通过 `LEFT JOIN client_sessions` 过滤掉 `fh.session_id IS NOT NULL AND (s.session_id IS NULL OR s.expires_at <= clock_timestamp())` 的过期句柄（对已过期句柄返回 `ErrBadFileHandle` / `EBADF`）。
+   - **句柄会话归属严格对称匹配**：`GetFileHandle` 与 `DeleteFileHandle` 强制要求请求的 `req_session_id` 与句柄持久化的 `fh.session_id` 严格对称匹配（`fh.session_id IS NOT DISTINCT FROM req_session_id`）：当传入非空 `req_session_id` 时，要求 `fh.session_id = req_session_id` 且关联 `client_sessions.expires_at > clock_timestamp()`；当未传 `req_session_id`（`NULL`）时，仅允许操作 `fh.session_id IS NULL` 的无会话句柄。任何跨会话访问、有会话访问无会话句柄、或无会话访问有会话句柄均返回 `ErrBadFileHandle`（`EBADF`）。
+   - **读写续期顺序、只读过滤与独立 `RenewSession` 保活**：
+     - 分配新 `FileHandle` 的写接口（`Create`、`TmpFile`、`Open`、`OpenDir`）携带非空 `session_id` 时，先调用 `renewClientSession` 确保会话记录存在，再插入 `file_handles`；
+     - 操作已有 `FileHandle` 的写接口（`Flush`、`Release`、`ReleaseDir`、`Fallocate`、`SetLk`、`SetLkw`）携带非空 `session_id` 时，**必须先通过 `GetFileHandle` / `DeleteFileHandle` 校验句柄存在、归属当前 `session_id` 且会话未过期，校验通过后再调用 `renewClientSession` 续期**，严防已过期会话通过操作失效句柄“诈尸”自救；
+     - 只读路径接口（`Fsync`、`FsyncDir`、`ReadDir`、`ReadDirPlus`、`GetLk`）保持只读事务不写库续期，通过 `GetFileHandle` 校验句柄归属与会话未过期（过期或不匹配返回 `ErrBadFileHandle` / `EBADF`）；
+     - 新增独立 `RenewSession(RenewSessionRequest) returns (RenewSessionResponse)` RPC（入参 `uint64 session_id`，响应 `google.protobuf.Timestamp expires_at`），供长期只读或空闲持有句柄的客户端显式续期租约并顺带触发过期会话与孤儿节点清理。
    - **`FOR UPDATE SKIP LOCKED` 非阻塞物理回收**：由于 `renewClientSession` 调用点可能已持有当前请求目标 `Inode` 的行级排他锁，在清理过期 `client_sessions`（级联删除过期 `file_handles`）后，通过 `SELECT i.ino FROM inodes i WHERE i.nlink = 0 AND NOT EXISTS (...) FOR UPDATE SKIP LOCKED` 非阻塞锁定所有无剩余有效 `FileHandle` 的孤儿 `Inode` 并执行物理删除。被其他并发事务锁定的孤儿节点直接跳过，从根源上消除跨 `Inode` 锁等待环（SQLSTATE `40P01`）。
 
 4. **`FUSE_FSYNCDIR (30)` 目录同步契约**：

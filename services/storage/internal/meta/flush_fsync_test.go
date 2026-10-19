@@ -152,8 +152,9 @@ func TestFlush_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
 			}).
 			Return(baseHandle, nil).
 			Once()
@@ -544,13 +545,6 @@ func TestFlush_PostgresLockCleanupSemantics(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), int64(fileIno))
 	}()
 
-	openRes2, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   fileIno,
-		Flags: meta.O_RDWR,
-	})
-	require.NoError(t, err)
-	fh2 := openRes2.Fh
-
 	now := time.Now()
 	sess1 := uint64(920001)
 	sess2 := uint64(920002)
@@ -569,6 +563,14 @@ func TestFlush_PostgresLockCleanupSemantics(t *testing.T) {
 		ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
 	})
 	require.NoError(t, err)
+
+	openRes2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	fh2 := openRes2.Fh
 
 	ownerA := uint64(0x9000000000000001)
 	ownerB := uint64(2002)
@@ -660,7 +662,7 @@ func TestFlush_PostgresLockCleanupSemantics(t *testing.T) {
 	// AC5: 存量未传 session_id 的 Flush 调用按 (ino, lock_owner) 清理 ownerB 的 POSIX 锁
 	err = mgr.Flush(ctx, meta.FlushParams{
 		Ino:       fileIno,
-		Fh:        fh2,
+		Fh:        fh1,
 		LockOwner: &ownerB,
 	})
 	require.NoError(t, err)

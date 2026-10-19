@@ -199,8 +199,9 @@ func TestSetLk_InodeAndOpenModeValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(validParams.SessionID), Valid: true},
 			}).
 			Return(db.FileHandle{}, pgx.ErrNoRows).
 			Once()
@@ -227,8 +228,9 @@ func TestSetLk_InodeAndOpenModeValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(validParams.SessionID), Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -261,8 +263,9 @@ func TestSetLk_InodeAndOpenModeValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(validParams.SessionID), Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -305,8 +308,9 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 10, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -413,8 +417,9 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 10, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -490,8 +495,9 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 10, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -572,8 +578,9 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 		// 即使该锁曾是写锁，通过只读句柄 (O_RDONLY) 执行 F_UNLCK 也必须成功
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 10, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -685,6 +692,13 @@ func TestSetLk_PostgresSemantics(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), rootDir.Ino)
 	}()
 
+	session1 := uint64(920001)
+	session2 := uint64(920002)
+	expiredSession := int64(920003)
+	defer func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2, $3)", int64(session1), int64(session2), expiredSession)
+	}()
+
 	createRes, err := mgr.Create(ctx, meta.CreateParams{
 		ParentIno: uint64(rootDir.Ino),
 		Name:      []byte("setlk_posix_test.txt"),
@@ -692,6 +706,7 @@ func TestSetLk_PostgresSemantics(t *testing.T) {
 		UID:       1000,
 		GID:       1000,
 		Flags:     meta.O_RDWR,
+		SessionID: &session1,
 	})
 	require.NoError(t, err)
 	fileIno := createRes.Inode.Ino
@@ -701,25 +716,36 @@ func TestSetLk_PostgresSemantics(t *testing.T) {
 	}()
 
 	openRO, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   fileIno,
-		Flags: meta.O_RDONLY,
+		Ino:       fileIno,
+		Flags:     meta.O_RDONLY,
+		SessionID: &session1,
 	})
 	require.NoError(t, err)
 	fhRO := openRO.Fh
 
 	openWO, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   fileIno,
-		Flags: meta.O_WRONLY,
+		Ino:       fileIno,
+		Flags:     meta.O_WRONLY,
+		SessionID: &session1,
 	})
 	require.NoError(t, err)
 	fhWO := openWO.Fh
 
-	session1 := uint64(920001)
-	session2 := uint64(920002)
-	expiredSession := int64(920003)
-	defer func() {
-		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2, $3)", int64(session1), int64(session2), expiredSession)
-	}()
+	openRDWR2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &session2,
+	})
+	require.NoError(t, err)
+	fhRDWR2 := openRDWR2.Fh
+
+	openWO2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_WRONLY,
+		SessionID: &session2,
+	})
+	require.NoError(t, err)
+	fhWO2 := openWO2.Fh
 
 	// 1. 对目录 Inode 调用 SetLk 返回 ErrIsDir
 	err = mgr.SetLk(ctx, meta.SetLkParams{
@@ -818,7 +844,7 @@ func TestSetLk_PostgresSemantics(t *testing.T) {
 	// 4. 多个不同 (session_id, lock_owner) 在同一区间并发持有共享读锁 (F_RDLCK)
 	err = mgr.SetLk(ctx, meta.SetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRDWR,
+		Fh:        fhRDWR2,
 		LockOwner: 2002,
 		Lk: meta.FileLock{
 			Start: 50,
@@ -834,7 +860,7 @@ func TestSetLk_PostgresSemantics(t *testing.T) {
 	// 5. 写锁 (F_WRLCK) 与异主读锁冲突返回 ErrAgain
 	err = mgr.SetLk(ctx, meta.SetLkParams{
 		Ino:       fileIno,
-		Fh:        fhWO,
+		Fh:        fhWO2,
 		LockOwner: 3003,
 		Lk: meta.FileLock{
 			Start: 100,
@@ -866,7 +892,7 @@ func TestSetLk_PostgresSemantics(t *testing.T) {
 
 	err = mgr.SetLk(ctx, meta.SetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRO,
+		Fh:        fhRDWR2,
 		LockOwner: 2002,
 		Lk: meta.FileLock{
 			Start: 50,

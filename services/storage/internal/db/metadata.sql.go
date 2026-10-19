@@ -296,8 +296,9 @@ const deleteFileHandle = `-- name: DeleteFileHandle :one
 DELETE FROM file_handles fh
 WHERE fh.fh = $1
   AND fh.ino = $2
+  AND fh.session_id IS NOT DISTINCT FROM $3
   AND (
-      fh.session_id IS NULL
+      $3 IS NULL
       OR EXISTS (
           SELECT 1
           FROM client_sessions s
@@ -309,12 +310,13 @@ RETURNING fh.fh
 `
 
 type DeleteFileHandleParams struct {
-	Fh  int64 `json:"fh"`
-	Ino int64 `json:"ino"`
+	Fh        int64       `json:"fh"`
+	Ino       int64       `json:"ino"`
+	SessionID pgtype.Int8 `json:"session_id"`
 }
 
 func (q *Queries) DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error) {
-	row := q.db.QueryRow(ctx, deleteFileHandle, arg.Fh, arg.Ino)
+	row := q.db.QueryRow(ctx, deleteFileHandle, arg.Fh, arg.Ino, arg.SessionID)
 	var fh int64
 	err := row.Scan(&fh)
 	return fh, err
@@ -506,16 +508,18 @@ FROM file_handles fh
 LEFT JOIN client_sessions s ON fh.session_id = s.session_id
 WHERE fh.fh = $1
   AND fh.ino = $2
-  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
+  AND fh.session_id IS NOT DISTINCT FROM $3
+  AND ($3 IS NULL OR s.expires_at > clock_timestamp())
 `
 
 type GetFileHandleParams struct {
-	Fh  int64 `json:"fh"`
-	Ino int64 `json:"ino"`
+	Fh        int64       `json:"fh"`
+	Ino       int64       `json:"ino"`
+	SessionID pgtype.Int8 `json:"session_id"`
 }
 
 func (q *Queries) GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error) {
-	row := q.db.QueryRow(ctx, getFileHandle, arg.Fh, arg.Ino)
+	row := q.db.QueryRow(ctx, getFileHandle, arg.Fh, arg.Ino, arg.SessionID)
 	var i FileHandle
 	err := row.Scan(
 		&i.Fh,

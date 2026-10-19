@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -216,8 +217,9 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 1, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -259,8 +261,9 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 1, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -366,8 +369,9 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh2),
-				Ino: int64(ino),
+				Fh:        int64(fh2),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 2, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh2),
@@ -489,8 +493,9 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh1),
-				Ino: int64(ino),
+				Fh:        int64(fh1),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 3, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh1),
@@ -695,6 +700,13 @@ func TestSetLkw_PostgresAcceptanceCriteria(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), rootDir.Ino)
 	}()
 
+	s1 := uint64(950001)
+	s2 := uint64(950002)
+	s3 := uint64(950003)
+	defer func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2, $3)", int64(s1), int64(s2), int64(s3))
+	}()
+
 	createRes, err := mgr.Create(ctx, meta.CreateParams{
 		ParentIno: uint64(rootDir.Ino),
 		Name:      []byte("setlkw_acceptance.txt"),
@@ -702,6 +714,7 @@ func TestSetLkw_PostgresAcceptanceCriteria(t *testing.T) {
 		UID:       1000,
 		GID:       1000,
 		Flags:     meta.O_RDWR,
+		SessionID: &s1,
 	})
 	require.NoError(t, err)
 	fileIno := createRes.Inode.Ino
@@ -710,20 +723,13 @@ func TestSetLkw_PostgresAcceptanceCriteria(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), int64(fileIno))
 	}()
 
-	open2, err := mgr.Open(ctx, meta.OpenParams{Ino: fileIno, Flags: meta.O_RDWR})
+	open2, err := mgr.Open(ctx, meta.OpenParams{Ino: fileIno, Flags: meta.O_RDWR, SessionID: &s2})
 	require.NoError(t, err)
 	fh2 := open2.Fh
 
-	open3, err := mgr.Open(ctx, meta.OpenParams{Ino: fileIno, Flags: meta.O_RDWR})
+	open3, err := mgr.Open(ctx, meta.OpenParams{Ino: fileIno, Flags: meta.O_RDWR, SessionID: &s3})
 	require.NoError(t, err)
 	fh3 := open3.Fh
-
-	s1 := uint64(950001)
-	s2 := uint64(950002)
-	s3 := uint64(950003)
-	defer func() {
-		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2, $3)", int64(s1), int64(s2), int64(s3))
-	}()
 
 	waitForWaiterCount := func(t *testing.T, lkFlags uint32, expected int) {
 		t.Helper()
@@ -862,7 +868,7 @@ func TestSetLkw_PostgresAcceptanceCriteria(t *testing.T) {
 		}))
 
 		// 1.4 Release(FUSE_RELEASE_FLOCK_UNLOCK) 唤醒 BSD flock SetLkw
-		openTemp, err := mgr.Open(ctx, meta.OpenParams{Ino: fileIno, Flags: meta.O_RDONLY})
+		openTemp, err := mgr.Open(ctx, meta.OpenParams{Ino: fileIno, Flags: meta.O_RDONLY, SessionID: &s1})
 		require.NoError(t, err)
 		fhTemp := openTemp.Fh
 

@@ -880,8 +880,9 @@ func TestQuerier_MknodOperators(t *testing.T) {
 	t.Run("GetFileHandle 算子调用与参数透传", func(t *testing.T) {
 		now := time.Now()
 		params := db.GetFileHandleParams{
-			Fh:  10,
-			Ino: 42,
+			Fh:        10,
+			Ino:       42,
+			SessionID: pgtype.Int8{Int64: 100, Valid: true},
 		}
 		expected := db.FileHandle{
 			Fh:        10,
@@ -997,8 +998,9 @@ func TestQuerier_MknodOperators(t *testing.T) {
 
 	t.Run("DeleteFileHandle 算子调用与参数透传", func(t *testing.T) {
 		params := db.DeleteFileHandleParams{
-			Fh:  10,
-			Ino: 42,
+			Fh:        10,
+			Ino:       42,
+			SessionID: pgtype.Int8{Int64: 100, Valid: true},
 		}
 
 		t.Run("成功删除并返回 fh", func(t *testing.T) {

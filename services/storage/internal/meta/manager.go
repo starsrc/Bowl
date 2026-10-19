@@ -1832,7 +1832,7 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 }
 
 // checkFileHandleReadOnly 在只读 RepeatableRead 事务内校验 Inode 与 FileHandle 归属有效性。
-func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh uint64, opName string) error {
+func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh uint64, sessionID *uint64, opName string) error {
 	if ino == 0 || ino > math.MaxInt64 || fh == 0 || fh > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
@@ -1851,8 +1851,9 @@ func (m *manager) checkFileHandleReadOnly(ctx context.Context, ino uint64, fh ui
 		}
 
 		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(fh),
-			Ino: int64(ino),
+			Fh:        int64(fh),
+			Ino:       int64(ino),
+			SessionID: toPgSessionID(sessionID),
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1895,7 +1896,7 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 	}
 
 	if params.LockOwner == nil && params.SessionID == nil {
-		return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "flush")
+		return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, nil, "flush")
 	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
@@ -1912,8 +1913,9 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		}
 
 		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
+			Fh:        int64(params.Fh),
+			Ino:       int64(params.Ino),
+			SessionID: toPgSessionID(params.SessionID),
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1979,7 +1981,7 @@ func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
 	if err := validateOptionalSessionID(params.SessionID); err != nil {
 		return err
 	}
-	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, "fsync")
+	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, params.SessionID, "fsync")
 }
 
 // Release 关闭并销毁文件句柄，按标志位清理 BSD flock 句柄锁，且在孤儿节点无活跃句柄时执行最终物理回收。
@@ -2013,8 +2015,9 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		}
 
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
+			Fh:        int64(params.Fh),
+			Ino:       int64(params.Ino),
+			SessionID: toPgSessionID(params.SessionID),
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -2162,7 +2165,7 @@ func (m *manager) FsyncDir(ctx context.Context, params FsyncDirParams) error {
 	}
 
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		_, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh)
+		_, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
 		return err
 	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
 
@@ -2207,8 +2210,9 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 		}
 
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
+			Fh:        int64(params.Fh),
+			Ino:       int64(params.Ino),
+			SessionID: toPgSessionID(params.SessionID),
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -2290,7 +2294,7 @@ func newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
 }
 
 // validateDirHandle 校验目录会话有效性，确认 Inode 存在、为目录且 FileHandle 属于该 Inode。
-func (m *manager) validateDirHandle(ctx context.Context, q db.Querier, ino, fh uint64) (*db.Inode, error) {
+func (m *manager) validateDirHandle(ctx context.Context, q db.Querier, ino, fh uint64, sessionID *uint64) (*db.Inode, error) {
 	dirInode, err := q.GetInode(ctx, int64(ino))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2304,8 +2308,9 @@ func (m *manager) validateDirHandle(ctx context.Context, q db.Querier, ino, fh u
 	}
 
 	_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
-		Fh:  int64(fh),
-		Ino: int64(ino),
+		Fh:        int64(fh),
+		Ino:       int64(ino),
+		SessionID: toPgSessionID(sessionID),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2331,7 +2336,7 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 
 	var entries []DirEntry
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh)
+		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
 		if err != nil {
 			return err
 		}
@@ -2434,7 +2439,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 
 	var entries []DirEntryPlus
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh)
+		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
 		if err != nil {
 			return err
 		}
@@ -2573,8 +2578,9 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 		}
 
 		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
+			Fh:        int64(params.Fh),
+			Ino:       int64(params.Ino),
+			SessionID: toPgSessionID(params.SessionID),
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

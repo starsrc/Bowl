@@ -158,7 +158,8 @@ FROM file_handles fh
 LEFT JOIN client_sessions s ON fh.session_id = s.session_id
 WHERE fh.fh = $1
   AND fh.ino = $2
-  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp());
+  AND fh.session_id IS NOT DISTINCT FROM sqlc.narg('session_id')
+  AND (sqlc.narg('session_id') IS NULL OR s.expires_at > clock_timestamp());
 
 -- name: HasLinkableTmpFileHandleByIno :one
 SELECT EXISTS (
@@ -180,8 +181,9 @@ WHERE ino = $1;
 DELETE FROM file_handles fh
 WHERE fh.fh = $1
   AND fh.ino = $2
+  AND fh.session_id IS NOT DISTINCT FROM sqlc.narg('session_id')
   AND (
-      fh.session_id IS NULL
+      sqlc.narg('session_id') IS NULL
       OR EXISTS (
           SELECT 1
           FROM client_sessions s

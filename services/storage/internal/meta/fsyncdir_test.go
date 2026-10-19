@@ -158,8 +158,9 @@ func TestFsyncDir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
 			}).
 			Return(handleWithSession, nil).
 			Once()

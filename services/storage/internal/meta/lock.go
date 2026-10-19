@@ -101,8 +101,9 @@ func (m *manager) GetLk(ctx context.Context, params GetLkParams) (*FileLock, err
 		}
 
 		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
+			Fh:        int64(params.Fh),
+			Ino:       int64(params.Ino),
+			SessionID: pgtype.Int8{Int64: int64(params.SessionID), Valid: true},
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -218,8 +219,9 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 		}
 
 		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(params.Fh),
-			Ino: int64(params.Ino),
+			Fh:        int64(params.Fh),
+			Ino:       int64(params.Ino),
+			SessionID: pgtype.Int8{Int64: int64(params.SessionID), Valid: true},
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -775,8 +777,9 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			}
 
 			handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
-				Fh:  fh,
-				Ino: ino,
+				Fh:        fh,
+				Ino:       ino,
+				SessionID: pgtype.Int8{Int64: sessionID, Valid: true},
 			})
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {

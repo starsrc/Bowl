@@ -200,8 +200,9 @@ func TestRelease_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
 			}).
 			Return(int64(fh), nil).
 			Once()
@@ -608,35 +609,6 @@ func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), rootDir.Ino)
 	}()
 
-	createRes, err := mgr.Create(ctx, meta.CreateParams{
-		ParentIno: uint64(rootDir.Ino),
-		Name:      []byte("release_lock_test.txt"),
-		Mode:      meta.S_IFREG | 0o644,
-		UID:       1000,
-		GID:       1000,
-		Flags:     meta.O_RDWR,
-	})
-	require.NoError(t, err)
-	fileIno := createRes.Inode.Ino
-	fh1 := createRes.Fh
-	defer func() {
-		_ = store.DeleteInode(context.Background(), int64(fileIno))
-	}()
-
-	openRes2, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   fileIno,
-		Flags: meta.O_RDWR,
-	})
-	require.NoError(t, err)
-	fh2 := openRes2.Fh
-
-	openRes3, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   fileIno,
-		Flags: meta.O_RDWR,
-	})
-	require.NoError(t, err)
-	fh3 := openRes3.Fh
-
 	now := time.Now()
 	sess1 := uint64(930001)
 	defer func() {
@@ -648,6 +620,37 @@ func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
 		ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
 	})
 	require.NoError(t, err)
+
+	createRes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: uint64(rootDir.Ino),
+		Name:      []byte("release_lock_test.txt"),
+		Mode:      meta.S_IFREG | 0o644,
+		UID:       1000,
+		GID:       1000,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	fileIno := createRes.Inode.Ino
+	fh1 := createRes.Fh
+	defer func() {
+		_ = store.DeleteInode(context.Background(), int64(fileIno))
+	}()
+
+	openRes2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	fh2 := openRes2.Fh
+
+	openRes3, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   fileIno,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh3 := openRes3.Fh
 
 	ownerA := uint64(3001)
 

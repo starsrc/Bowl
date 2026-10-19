@@ -279,8 +279,9 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  502,
-				Ino: 100,
+				Fh:        502,
+				Ino:       100,
+				SessionID: pgtype.Int8{Int64: int64(sessID), Valid: true},
 			}).
 			Return(db.FileHandle{Fh: 502, Ino: 100}, nil).
 			Once()
@@ -307,8 +308,9 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
-				Fh:  502,
-				Ino: 100,
+				Fh:        502,
+				Ino:       100,
+				SessionID: pgtype.Int8{Int64: int64(sessID), Valid: true},
 			}).
 			Return(int64(502), nil).
 			Once()
@@ -335,8 +337,9 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
-				Fh:  503,
-				Ino: 1,
+				Fh:        503,
+				Ino:       1,
+				SessionID: pgtype.Int8{Int64: int64(sessID), Valid: true},
 			}).
 			Return(int64(503), nil).
 			Once()
@@ -363,8 +366,9 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  501,
-				Ino: 100,
+				Fh:        501,
+				Ino:       100,
+				SessionID: pgtype.Int8{Int64: int64(sessID), Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    501,

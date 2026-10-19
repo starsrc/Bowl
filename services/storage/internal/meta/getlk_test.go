@@ -204,8 +204,9 @@ func TestGetLk_InodeAndHandleValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 1, Valid: true},
 			}).
 			Return(db.FileHandle{}, pgx.ErrNoRows).
 			Once()
@@ -271,8 +272,9 @@ func TestGetLk_ConflictDetection(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 77, Valid: true},
 			}).
 			Return(roHandle, nil).
 			Once()
@@ -335,8 +337,9 @@ func TestGetLk_ConflictDetection(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 1, Valid: true},
 			}).
 			Return(woHandle, nil).
 			Once()
@@ -406,8 +409,9 @@ func TestGetLk_ConflictDetection(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: 10, Valid: true},
 			}).
 			Return(db.FileHandle{
 				Fh:    int64(fh),
@@ -514,13 +518,6 @@ func TestGetLk_PostgresSemantics(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), int64(fileIno))
 	}()
 
-	openRes2, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   fileIno,
-		Flags: meta.O_RDONLY,
-	})
-	require.NoError(t, err)
-	fh2 := openRes2.Fh
-
 	now := time.Now()
 	activeSession1 := int64(910001)
 	activeSession2 := int64(910002)
@@ -540,6 +537,24 @@ func TestGetLk_PostgresSemantics(t *testing.T) {
 		ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
 	})
 	require.NoError(t, err)
+
+	actSess1 := uint64(activeSession1)
+	openRes2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDONLY,
+		SessionID: &actSess1,
+	})
+	require.NoError(t, err)
+	fh2 := openRes2.Fh
+
+	actSess2 := uint64(activeSession2)
+	openRes3, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDONLY,
+		SessionID: &actSess2,
+	})
+	require.NoError(t, err)
+	fh3 := openRes3.Fh
 
 	_, err = store.UpsertClientSession(ctx, db.UpsertClientSessionParams{
 		SessionID: expiredSession,
@@ -607,7 +622,7 @@ func TestGetLk_PostgresSemantics(t *testing.T) {
 	// 同一持有者 (activeSession2, 2003) 探测 [100, 300] 不与自身冲突，但会与 2002 的 [200, 400] 冲突
 	resSelf, err := mgr.GetLk(ctx, meta.GetLkParams{
 		Ino:       fileIno,
-		Fh:        fh2,
+		Fh:        fh3,
 		LockOwner: 2003,
 		Lk: meta.FileLock{
 			Start: 100,

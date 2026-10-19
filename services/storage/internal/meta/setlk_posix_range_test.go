@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -41,8 +42,9 @@ func TestSetLk_PosixRangeSplitAndCoalesce(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: sessionID, Valid: true},
 			}).
 			Return(rwHandle, nil).
 			Once()
@@ -573,6 +575,14 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), rootDir.Ino)
 	}()
 
+	session1 := uint64(930001)
+	session2 := uint64(930002)
+	owner1 := uint64(10001)
+	owner2 := uint64(20002)
+	defer func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(session1), int64(session2))
+	}()
+
 	createRes, err := mgr.Create(ctx, meta.CreateParams{
 		ParentIno: uint64(rootDir.Ino),
 		Name:      []byte("posix_range_split_coalesce.txt"),
@@ -580,6 +590,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 		UID:       1000,
 		GID:       1000,
 		Flags:     meta.O_RDWR,
+		SessionID: &session1,
 	})
 	require.NoError(t, err)
 	fileIno := createRes.Inode.Ino
@@ -588,13 +599,13 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 		_ = store.DeleteInode(context.Background(), int64(fileIno))
 	}()
 
-	session1 := uint64(930001)
-	session2 := uint64(930002)
-	owner1 := uint64(10001)
-	owner2 := uint64(20002)
-	defer func() {
-		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(session1), int64(session2))
-	}()
+	openRDWR2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &session2,
+	})
+	require.NoError(t, err)
+	fhRDWR2 := openRDWR2.Fh
 
 	assertOwnerLocks := func(t *testing.T, expected []meta.FileLock) {
 		t.Helper()
@@ -642,7 +653,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 	// 通过 GetLk 验证裂解后的外部可观测行为：[20, 50] 已无锁，[0, 100] 首个冲突段为 [0, 19] (pid=1001)，[50, 100] 首个冲突段为 [51, 100] (pid=1001)
 	probeHole, err := mgr.GetLk(ctx, meta.GetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRDWR,
+		Fh:        fhRDWR2,
 		LockOwner: owner2,
 		Lk:        meta.FileLock{Start: 20, End: 50, Type: meta.F_RDLCK},
 		LkFlags:   0,
@@ -653,7 +664,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 
 	probeLeft, err := mgr.GetLk(ctx, meta.GetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRDWR,
+		Fh:        fhRDWR2,
 		LockOwner: owner2,
 		Lk:        meta.FileLock{Start: 0, End: 100, Type: meta.F_RDLCK},
 		LkFlags:   0,
@@ -664,7 +675,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 
 	probeRight, err := mgr.GetLk(ctx, meta.GetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRDWR,
+		Fh:        fhRDWR2,
 		LockOwner: owner2,
 		Lk:        meta.FileLock{Start: 50, End: 100, Type: meta.F_RDLCK},
 		LkFlags:   0,
@@ -795,7 +806,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 	// 异主 (session2, owner2) 在 [40, 60] 持有 F_RDLCK
 	require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRDWR,
+		Fh:        fhRDWR2,
 		LockOwner: owner2,
 		Lk:        meta.FileLock{Start: 40, End: 60, Type: meta.F_RDLCK, PID: 2002},
 		LkFlags:   0,
@@ -820,7 +831,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce_Postgres(t *testing.T) {
 	// 异主释放 [40, 60] 读锁后，持有者 1 再次对 [20, 50] 申请 F_WRLCK (pid=1005) -> 裂解为 [0, 19] F_RDLCK (1001)、[20, 50] F_WRLCK (1005)、[51, 100] F_RDLCK (1001)
 	require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
 		Ino:       fileIno,
-		Fh:        fhRDWR,
+		Fh:        fhRDWR2,
 		LockOwner: owner2,
 		Lk:        meta.FileLock{Start: 40, End: 60, Type: meta.F_UNLCK, PID: 2002},
 		LkFlags:   0,

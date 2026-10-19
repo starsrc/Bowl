@@ -617,8 +617,9 @@ func TestTmpFileAndLinkMaterialization_PostgresIntegration(t *testing.T) {
 
 		// 验证句柄上的 O_TMPFILE 位已被原子清除
 		fhRow, err := store.GetFileHandle(ctx, db.GetFileHandleParams{
-			Fh:  int64(tmpRes.Fh),
-			Ino: int64(tmpIno),
+			Fh:        int64(tmpRes.Fh),
+			Ino:       int64(tmpIno),
+			SessionID: pgtype.Int8{Int64: int64(s2), Valid: true},
 		})
 		require.NoError(t, err)
 		assert.Zero(t, uint32(fhRow.Flags)&meta.O_TMPFILE, "具名化后 file_handles.flags 的 O_TMPFILE 位必须被清除")

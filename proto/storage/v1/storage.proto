@@ -202,6 +202,11 @@ service StorageService {
   // SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
   // 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
   rpc SetLkw(SetLkwRequest) returns (SetLkwResponse);
+
+  // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
+  // 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // 续期成功返回刷新后的租约截止时间 expires_at。
+  rpc RenewSession(RenewSessionRequest) returns (RenewSessionResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -1352,6 +1357,22 @@ message SetLkwRequest {
 
 // SetLkwResponse 定义 SetLkw 接口响应结果。
 message SetLkwResponse {}
+
+// RenewSessionRequest 定义 RenewSession 接口输入参数。
+message RenewSessionRequest {
+  // 待续期的客户端会话租约标识 (session_id)。
+  // 必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 session_id = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// RenewSessionResponse 包含续期后刷新得到的会话租约绝对截止时间。
+message RenewSessionResponse {
+  // 续期后的会话租约截止时间。
+  google.protobuf.Timestamp expires_at = 1 [(buf.validate.field).required = true];
+}
 
 // Inode 代表文件系统中的实体节点。
 

@@ -84,6 +84,9 @@ const (
 	StorageServiceSetLkProcedure = "/storage.v1.StorageService/SetLk"
 	// StorageServiceSetLkwProcedure is the procedure name of the StorageService's SetLkw RPC.
 	StorageServiceSetLkwProcedure = "/storage.v1.StorageService/SetLkw"
+	// StorageServiceRenewSessionProcedure is the procedure name of the StorageService's RenewSession
+	// RPC.
+	StorageServiceRenewSessionProcedure = "/storage.v1.StorageService/RenewSession"
 )
 
 var (
@@ -297,6 +300,13 @@ var (
 			Procedure:  StorageServiceSetLkwProcedure,
 		}
 	})
+	storageServiceRenewSessionSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("RenewSession"),
+			Procedure:  StorageServiceRenewSessionProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -465,6 +475,10 @@ type StorageServiceClient interface {
 	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
 	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
 	SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error)
+	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 续期成功返回刷新后的租约截止时间 expires_at。
+	RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -639,6 +653,10 @@ type StorageServiceHandler interface {
 	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
 	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
 	SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error)
+	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 续期成功返回刷新后的租约截止时间 expires_at。
+	RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -676,6 +694,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceGetLkSpec(), Handler: adapter.getLk},
 		connect.Method{Spec: storageServiceSetLkSpec(), Handler: adapter.setLk},
 		connect.Method{Spec: storageServiceSetLkwSpec(), Handler: adapter.setLkw},
+		connect.Method{Spec: storageServiceRenewSessionSpec(), Handler: adapter.renewSession},
 	)
 }
 
@@ -800,6 +819,10 @@ func (UnimplementedStorageServiceHandler) SetLk(context.Context, *v1.SetLkReques
 
 func (UnimplementedStorageServiceHandler) SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetLkw is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.RenewSession is not implemented")
 }
 
 type storageServiceClient struct {
@@ -1041,6 +1064,14 @@ func (c *storageServiceClient) SetLk(ctx context.Context, req *v1.SetLkRequest) 
 func (c *storageServiceClient) SetLkw(ctx context.Context, req *v1.SetLkwRequest) (*v1.SetLkwResponse, error) {
 	var res v1.SetLkwResponse
 	if err := c.client.CallUnary(ctx, storageServiceSetLkwSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) RenewSession(ctx context.Context, req *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error) {
+	var res v1.RenewSessionResponse
+	if err := c.client.CallUnary(ctx, storageServiceRenewSessionSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1402,6 +1433,18 @@ func (h storageServiceHandler) setLkw(ctx context.Context, _ connect.Spec, strea
 		return err
 	}
 	res, err := h.svc.SetLkw(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) renewSession(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.RenewSessionRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.RenewSession(ctx, &req)
 	if err != nil {
 		return err
 	}

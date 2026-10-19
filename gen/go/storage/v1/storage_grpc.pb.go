@@ -19,36 +19,37 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StorageService_Lookup_FullMethodName      = "/storage.v1.StorageService/Lookup"
-	StorageService_GetAttr_FullMethodName     = "/storage.v1.StorageService/GetAttr"
-	StorageService_SetAttr_FullMethodName     = "/storage.v1.StorageService/SetAttr"
-	StorageService_Mknod_FullMethodName       = "/storage.v1.StorageService/Mknod"
-	StorageService_Mkdir_FullMethodName       = "/storage.v1.StorageService/Mkdir"
-	StorageService_Symlink_FullMethodName     = "/storage.v1.StorageService/Symlink"
-	StorageService_Readlink_FullMethodName    = "/storage.v1.StorageService/Readlink"
-	StorageService_Link_FullMethodName        = "/storage.v1.StorageService/Link"
-	StorageService_Unlink_FullMethodName      = "/storage.v1.StorageService/Unlink"
-	StorageService_Rmdir_FullMethodName       = "/storage.v1.StorageService/Rmdir"
-	StorageService_Rename_FullMethodName      = "/storage.v1.StorageService/Rename"
-	StorageService_Create_FullMethodName      = "/storage.v1.StorageService/Create"
-	StorageService_TmpFile_FullMethodName     = "/storage.v1.StorageService/TmpFile"
-	StorageService_Open_FullMethodName        = "/storage.v1.StorageService/Open"
-	StorageService_Flush_FullMethodName       = "/storage.v1.StorageService/Flush"
-	StorageService_Fsync_FullMethodName       = "/storage.v1.StorageService/Fsync"
-	StorageService_Release_FullMethodName     = "/storage.v1.StorageService/Release"
-	StorageService_OpenDir_FullMethodName     = "/storage.v1.StorageService/OpenDir"
-	StorageService_FsyncDir_FullMethodName    = "/storage.v1.StorageService/FsyncDir"
-	StorageService_ReleaseDir_FullMethodName  = "/storage.v1.StorageService/ReleaseDir"
-	StorageService_ReadDir_FullMethodName     = "/storage.v1.StorageService/ReadDir"
-	StorageService_ReadDirPlus_FullMethodName = "/storage.v1.StorageService/ReadDirPlus"
-	StorageService_Fallocate_FullMethodName   = "/storage.v1.StorageService/Fallocate"
-	StorageService_SetXattr_FullMethodName    = "/storage.v1.StorageService/SetXattr"
-	StorageService_GetXattr_FullMethodName    = "/storage.v1.StorageService/GetXattr"
-	StorageService_ListXattr_FullMethodName   = "/storage.v1.StorageService/ListXattr"
-	StorageService_RemoveXattr_FullMethodName = "/storage.v1.StorageService/RemoveXattr"
-	StorageService_GetLk_FullMethodName       = "/storage.v1.StorageService/GetLk"
-	StorageService_SetLk_FullMethodName       = "/storage.v1.StorageService/SetLk"
-	StorageService_SetLkw_FullMethodName      = "/storage.v1.StorageService/SetLkw"
+	StorageService_Lookup_FullMethodName       = "/storage.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName      = "/storage.v1.StorageService/GetAttr"
+	StorageService_SetAttr_FullMethodName      = "/storage.v1.StorageService/SetAttr"
+	StorageService_Mknod_FullMethodName        = "/storage.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName        = "/storage.v1.StorageService/Mkdir"
+	StorageService_Symlink_FullMethodName      = "/storage.v1.StorageService/Symlink"
+	StorageService_Readlink_FullMethodName     = "/storage.v1.StorageService/Readlink"
+	StorageService_Link_FullMethodName         = "/storage.v1.StorageService/Link"
+	StorageService_Unlink_FullMethodName       = "/storage.v1.StorageService/Unlink"
+	StorageService_Rmdir_FullMethodName        = "/storage.v1.StorageService/Rmdir"
+	StorageService_Rename_FullMethodName       = "/storage.v1.StorageService/Rename"
+	StorageService_Create_FullMethodName       = "/storage.v1.StorageService/Create"
+	StorageService_TmpFile_FullMethodName      = "/storage.v1.StorageService/TmpFile"
+	StorageService_Open_FullMethodName         = "/storage.v1.StorageService/Open"
+	StorageService_Flush_FullMethodName        = "/storage.v1.StorageService/Flush"
+	StorageService_Fsync_FullMethodName        = "/storage.v1.StorageService/Fsync"
+	StorageService_Release_FullMethodName      = "/storage.v1.StorageService/Release"
+	StorageService_OpenDir_FullMethodName      = "/storage.v1.StorageService/OpenDir"
+	StorageService_FsyncDir_FullMethodName     = "/storage.v1.StorageService/FsyncDir"
+	StorageService_ReleaseDir_FullMethodName   = "/storage.v1.StorageService/ReleaseDir"
+	StorageService_ReadDir_FullMethodName      = "/storage.v1.StorageService/ReadDir"
+	StorageService_ReadDirPlus_FullMethodName  = "/storage.v1.StorageService/ReadDirPlus"
+	StorageService_Fallocate_FullMethodName    = "/storage.v1.StorageService/Fallocate"
+	StorageService_SetXattr_FullMethodName     = "/storage.v1.StorageService/SetXattr"
+	StorageService_GetXattr_FullMethodName     = "/storage.v1.StorageService/GetXattr"
+	StorageService_ListXattr_FullMethodName    = "/storage.v1.StorageService/ListXattr"
+	StorageService_RemoveXattr_FullMethodName  = "/storage.v1.StorageService/RemoveXattr"
+	StorageService_GetLk_FullMethodName        = "/storage.v1.StorageService/GetLk"
+	StorageService_SetLk_FullMethodName        = "/storage.v1.StorageService/SetLk"
+	StorageService_SetLkw_FullMethodName       = "/storage.v1.StorageService/SetLkw"
+	StorageService_RenewSession_FullMethodName = "/storage.v1.StorageService/RenewSession"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -221,6 +222,10 @@ type StorageServiceClient interface {
 	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
 	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
 	SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error)
+	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 续期成功返回刷新后的租约截止时间 expires_at。
+	RenewSession(ctx context.Context, in *RenewSessionRequest, opts ...grpc.CallOption) (*RenewSessionResponse, error)
 }
 
 type storageServiceClient struct {
@@ -531,6 +536,16 @@ func (c *storageServiceClient) SetLkw(ctx context.Context, in *SetLkwRequest, op
 	return out, nil
 }
 
+func (c *storageServiceClient) RenewSession(ctx context.Context, in *RenewSessionRequest, opts ...grpc.CallOption) (*RenewSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewSessionResponse)
+	err := c.cc.Invoke(ctx, StorageService_RenewSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -701,6 +716,10 @@ type StorageServiceServer interface {
 	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
 	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
 	SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error)
+	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 续期成功返回刷新后的租约截止时间 expires_at。
+	RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -800,6 +819,9 @@ func (UnimplementedStorageServiceServer) SetLk(context.Context, *SetLkRequest) (
 }
 func (UnimplementedStorageServiceServer) SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetLkw not implemented")
+}
+func (UnimplementedStorageServiceServer) RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewSession not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1362,6 +1384,24 @@ func _StorageService_SetLkw_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_RenewSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).RenewSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_RenewSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).RenewSession(ctx, req.(*RenewSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1488,6 +1528,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetLkw",
 			Handler:    _StorageService_SetLkw_Handler,
+		},
+		{
+			MethodName: "RenewSession",
+			Handler:    _StorageService_RenewSession_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

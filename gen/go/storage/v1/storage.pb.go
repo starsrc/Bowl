@@ -3970,6 +3970,99 @@ func (*SetLkwResponse) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{62}
 }
 
+// RenewSessionRequest 定义 RenewSession 接口输入参数。
+type RenewSessionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 待续期的客户端会话租约标识 (session_id)。
+	// 必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+	SessionId     uint64 `protobuf:"varint,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewSessionRequest) Reset() {
+	*x = RenewSessionRequest{}
+	mi := &file_storage_v1_storage_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewSessionRequest) ProtoMessage() {}
+
+func (x *RenewSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewSessionRequest.ProtoReflect.Descriptor instead.
+func (*RenewSessionRequest) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{63}
+}
+
+func (x *RenewSessionRequest) GetSessionId() uint64 {
+	if x != nil {
+		return x.SessionId
+	}
+	return 0
+}
+
+// RenewSessionResponse 包含续期后刷新得到的会话租约绝对截止时间。
+type RenewSessionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 续期后的会话租约截止时间。
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewSessionResponse) Reset() {
+	*x = RenewSessionResponse{}
+	mi := &file_storage_v1_storage_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewSessionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewSessionResponse) ProtoMessage() {}
+
+func (x *RenewSessionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_v1_storage_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewSessionResponse.ProtoReflect.Descriptor instead.
+func (*RenewSessionResponse) Descriptor() ([]byte, []int) {
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *RenewSessionResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
 type Inode struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 节点的全局唯一持久化标识。
@@ -3984,7 +4077,7 @@ type Inode struct {
 
 func (x *Inode) Reset() {
 	*x = Inode{}
-	mi := &file_storage_v1_storage_proto_msgTypes[63]
+	mi := &file_storage_v1_storage_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3996,7 +4089,7 @@ func (x *Inode) String() string {
 func (*Inode) ProtoMessage() {}
 
 func (x *Inode) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[63]
+	mi := &file_storage_v1_storage_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4009,7 +4102,7 @@ func (x *Inode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Inode.ProtoReflect.Descriptor instead.
 func (*Inode) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{63}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *Inode) GetIno() uint64 {
@@ -4064,7 +4157,7 @@ type InodeAttribute struct {
 
 func (x *InodeAttribute) Reset() {
 	*x = InodeAttribute{}
-	mi := &file_storage_v1_storage_proto_msgTypes[64]
+	mi := &file_storage_v1_storage_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4076,7 +4169,7 @@ func (x *InodeAttribute) String() string {
 func (*InodeAttribute) ProtoMessage() {}
 
 func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_v1_storage_proto_msgTypes[64]
+	mi := &file_storage_v1_storage_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4089,7 +4182,7 @@ func (x *InodeAttribute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InodeAttribute.ProtoReflect.Descriptor instead.
 func (*InodeAttribute) Descriptor() ([]byte, []int) {
-	return file_storage_v1_storage_proto_rawDescGZIP(), []int{64}
+	return file_storage_v1_storage_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *InodeAttribute) GetMode() uint32 {
@@ -4506,7 +4599,13 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\a \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\trequestId:\xbd\x01\xbaH\xb9\x01\x1a\xb6\x01\n" +
 	"\x1dsetlkw_flock_whole_file_range\x12@FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]\x1aSthis.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)\"\x10\n" +
-	"\x0eSetLkwResponse\"z\n" +
+	"\x0eSetLkwResponse\"G\n" +
+	"\x13RenewSessionRequest\x120\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId\"Y\n" +
+	"\x14RenewSessionResponse\x12A\n" +
+	"\n" +
+	"expires_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\texpiresAt\"z\n" +
 	"\x05Inode\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x1e\n" +
 	"\n" +
@@ -4525,7 +4624,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05atime\x128\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05mtime\x128\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xf6\x0f\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xc9\x10\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +
@@ -4557,7 +4656,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\vRemoveXattr\x12\x1e.storage.v1.RemoveXattrRequest\x1a\x1f.storage.v1.RemoveXattrResponse\x12<\n" +
 	"\x05GetLk\x12\x18.storage.v1.GetLkRequest\x1a\x19.storage.v1.GetLkResponse\x12<\n" +
 	"\x05SetLk\x12\x18.storage.v1.SetLkRequest\x1a\x19.storage.v1.SetLkResponse\x12?\n" +
-	"\x06SetLkw\x12\x19.storage.v1.SetLkwRequest\x1a\x1a.storage.v1.SetLkwResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
+	"\x06SetLkw\x12\x19.storage.v1.SetLkwRequest\x1a\x1a.storage.v1.SetLkwResponse\x12Q\n" +
+	"\fRenewSession\x12\x1f.storage.v1.RenewSessionRequest\x1a .storage.v1.RenewSessionResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
 
 var (
 	file_storage_v1_storage_proto_rawDescOnce sync.Once
@@ -4571,7 +4671,7 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 	return file_storage_v1_storage_proto_rawDescData
 }
 
-var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 65)
+var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 67)
 var file_storage_v1_storage_proto_goTypes = []any{
 	(*LookupRequest)(nil),         // 0: storage.v1.LookupRequest
 	(*LookupResponse)(nil),        // 1: storage.v1.LookupResponse
@@ -4636,98 +4736,103 @@ var file_storage_v1_storage_proto_goTypes = []any{
 	(*SetLkResponse)(nil),         // 60: storage.v1.SetLkResponse
 	(*SetLkwRequest)(nil),         // 61: storage.v1.SetLkwRequest
 	(*SetLkwResponse)(nil),        // 62: storage.v1.SetLkwResponse
-	(*Inode)(nil),                 // 63: storage.v1.Inode
-	(*InodeAttribute)(nil),        // 64: storage.v1.InodeAttribute
-	(*timestamppb.Timestamp)(nil), // 65: google.protobuf.Timestamp
+	(*RenewSessionRequest)(nil),   // 63: storage.v1.RenewSessionRequest
+	(*RenewSessionResponse)(nil),  // 64: storage.v1.RenewSessionResponse
+	(*Inode)(nil),                 // 65: storage.v1.Inode
+	(*InodeAttribute)(nil),        // 66: storage.v1.InodeAttribute
+	(*timestamppb.Timestamp)(nil), // 67: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
-	63, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
-	63, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
-	65, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
-	65, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
-	63, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
-	63, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
-	63, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
-	63, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
-	63, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
-	63, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
-	63, // 10: storage.v1.TmpFileResponse.inode:type_name -> storage.v1.Inode
+	65, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
+	65, // 1: storage.v1.GetAttrResponse.inode:type_name -> storage.v1.Inode
+	67, // 2: storage.v1.SetAttrRequest.atime:type_name -> google.protobuf.Timestamp
+	67, // 3: storage.v1.SetAttrRequest.mtime:type_name -> google.protobuf.Timestamp
+	65, // 4: storage.v1.SetAttrResponse.inode:type_name -> storage.v1.Inode
+	65, // 5: storage.v1.MknodResponse.inode:type_name -> storage.v1.Inode
+	65, // 6: storage.v1.MkdirResponse.inode:type_name -> storage.v1.Inode
+	65, // 7: storage.v1.SymlinkResponse.inode:type_name -> storage.v1.Inode
+	65, // 8: storage.v1.LinkResponse.inode:type_name -> storage.v1.Inode
+	65, // 9: storage.v1.CreateResponse.inode:type_name -> storage.v1.Inode
+	65, // 10: storage.v1.TmpFileResponse.inode:type_name -> storage.v1.Inode
 	40, // 11: storage.v1.ReadDirResponse.entries:type_name -> storage.v1.DirEntry
-	63, // 12: storage.v1.DirEntryPlus.inode:type_name -> storage.v1.Inode
+	65, // 12: storage.v1.DirEntryPlus.inode:type_name -> storage.v1.Inode
 	43, // 13: storage.v1.ReadDirPlusResponse.entries:type_name -> storage.v1.DirEntryPlus
 	56, // 14: storage.v1.GetLkRequest.lk:type_name -> storage.v1.FileLock
 	56, // 15: storage.v1.GetLkResponse.lk:type_name -> storage.v1.FileLock
 	56, // 16: storage.v1.SetLkRequest.lk:type_name -> storage.v1.FileLock
 	56, // 17: storage.v1.SetLkwRequest.lk:type_name -> storage.v1.FileLock
-	64, // 18: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
-	65, // 19: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
-	65, // 20: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
-	65, // 21: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
-	0,  // 22: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
-	2,  // 23: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
-	4,  // 24: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
-	6,  // 25: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
-	8,  // 26: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
-	10, // 27: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
-	12, // 28: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
-	14, // 29: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
-	16, // 30: storage.v1.StorageService.Unlink:input_type -> storage.v1.UnlinkRequest
-	18, // 31: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
-	20, // 32: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
-	22, // 33: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
-	24, // 34: storage.v1.StorageService.TmpFile:input_type -> storage.v1.TmpFileRequest
-	26, // 35: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
-	28, // 36: storage.v1.StorageService.Flush:input_type -> storage.v1.FlushRequest
-	30, // 37: storage.v1.StorageService.Fsync:input_type -> storage.v1.FsyncRequest
-	32, // 38: storage.v1.StorageService.Release:input_type -> storage.v1.ReleaseRequest
-	34, // 39: storage.v1.StorageService.OpenDir:input_type -> storage.v1.OpenDirRequest
-	36, // 40: storage.v1.StorageService.FsyncDir:input_type -> storage.v1.FsyncDirRequest
-	38, // 41: storage.v1.StorageService.ReleaseDir:input_type -> storage.v1.ReleaseDirRequest
-	41, // 42: storage.v1.StorageService.ReadDir:input_type -> storage.v1.ReadDirRequest
-	44, // 43: storage.v1.StorageService.ReadDirPlus:input_type -> storage.v1.ReadDirPlusRequest
-	46, // 44: storage.v1.StorageService.Fallocate:input_type -> storage.v1.FallocateRequest
-	48, // 45: storage.v1.StorageService.SetXattr:input_type -> storage.v1.SetXattrRequest
-	50, // 46: storage.v1.StorageService.GetXattr:input_type -> storage.v1.GetXattrRequest
-	52, // 47: storage.v1.StorageService.ListXattr:input_type -> storage.v1.ListXattrRequest
-	54, // 48: storage.v1.StorageService.RemoveXattr:input_type -> storage.v1.RemoveXattrRequest
-	57, // 49: storage.v1.StorageService.GetLk:input_type -> storage.v1.GetLkRequest
-	59, // 50: storage.v1.StorageService.SetLk:input_type -> storage.v1.SetLkRequest
-	61, // 51: storage.v1.StorageService.SetLkw:input_type -> storage.v1.SetLkwRequest
-	1,  // 52: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
-	3,  // 53: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
-	5,  // 54: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
-	7,  // 55: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
-	9,  // 56: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
-	11, // 57: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
-	13, // 58: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
-	15, // 59: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
-	17, // 60: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
-	19, // 61: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
-	21, // 62: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
-	23, // 63: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
-	25, // 64: storage.v1.StorageService.TmpFile:output_type -> storage.v1.TmpFileResponse
-	27, // 65: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
-	29, // 66: storage.v1.StorageService.Flush:output_type -> storage.v1.FlushResponse
-	31, // 67: storage.v1.StorageService.Fsync:output_type -> storage.v1.FsyncResponse
-	33, // 68: storage.v1.StorageService.Release:output_type -> storage.v1.ReleaseResponse
-	35, // 69: storage.v1.StorageService.OpenDir:output_type -> storage.v1.OpenDirResponse
-	37, // 70: storage.v1.StorageService.FsyncDir:output_type -> storage.v1.FsyncDirResponse
-	39, // 71: storage.v1.StorageService.ReleaseDir:output_type -> storage.v1.ReleaseDirResponse
-	42, // 72: storage.v1.StorageService.ReadDir:output_type -> storage.v1.ReadDirResponse
-	45, // 73: storage.v1.StorageService.ReadDirPlus:output_type -> storage.v1.ReadDirPlusResponse
-	47, // 74: storage.v1.StorageService.Fallocate:output_type -> storage.v1.FallocateResponse
-	49, // 75: storage.v1.StorageService.SetXattr:output_type -> storage.v1.SetXattrResponse
-	51, // 76: storage.v1.StorageService.GetXattr:output_type -> storage.v1.GetXattrResponse
-	53, // 77: storage.v1.StorageService.ListXattr:output_type -> storage.v1.ListXattrResponse
-	55, // 78: storage.v1.StorageService.RemoveXattr:output_type -> storage.v1.RemoveXattrResponse
-	58, // 79: storage.v1.StorageService.GetLk:output_type -> storage.v1.GetLkResponse
-	60, // 80: storage.v1.StorageService.SetLk:output_type -> storage.v1.SetLkResponse
-	62, // 81: storage.v1.StorageService.SetLkw:output_type -> storage.v1.SetLkwResponse
-	52, // [52:82] is the sub-list for method output_type
-	22, // [22:52] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	67, // 18: storage.v1.RenewSessionResponse.expires_at:type_name -> google.protobuf.Timestamp
+	66, // 19: storage.v1.Inode.attr:type_name -> storage.v1.InodeAttribute
+	67, // 20: storage.v1.InodeAttribute.atime:type_name -> google.protobuf.Timestamp
+	67, // 21: storage.v1.InodeAttribute.mtime:type_name -> google.protobuf.Timestamp
+	67, // 22: storage.v1.InodeAttribute.ctime:type_name -> google.protobuf.Timestamp
+	0,  // 23: storage.v1.StorageService.Lookup:input_type -> storage.v1.LookupRequest
+	2,  // 24: storage.v1.StorageService.GetAttr:input_type -> storage.v1.GetAttrRequest
+	4,  // 25: storage.v1.StorageService.SetAttr:input_type -> storage.v1.SetAttrRequest
+	6,  // 26: storage.v1.StorageService.Mknod:input_type -> storage.v1.MknodRequest
+	8,  // 27: storage.v1.StorageService.Mkdir:input_type -> storage.v1.MkdirRequest
+	10, // 28: storage.v1.StorageService.Symlink:input_type -> storage.v1.SymlinkRequest
+	12, // 29: storage.v1.StorageService.Readlink:input_type -> storage.v1.ReadlinkRequest
+	14, // 30: storage.v1.StorageService.Link:input_type -> storage.v1.LinkRequest
+	16, // 31: storage.v1.StorageService.Unlink:input_type -> storage.v1.UnlinkRequest
+	18, // 32: storage.v1.StorageService.Rmdir:input_type -> storage.v1.RmdirRequest
+	20, // 33: storage.v1.StorageService.Rename:input_type -> storage.v1.RenameRequest
+	22, // 34: storage.v1.StorageService.Create:input_type -> storage.v1.CreateRequest
+	24, // 35: storage.v1.StorageService.TmpFile:input_type -> storage.v1.TmpFileRequest
+	26, // 36: storage.v1.StorageService.Open:input_type -> storage.v1.OpenRequest
+	28, // 37: storage.v1.StorageService.Flush:input_type -> storage.v1.FlushRequest
+	30, // 38: storage.v1.StorageService.Fsync:input_type -> storage.v1.FsyncRequest
+	32, // 39: storage.v1.StorageService.Release:input_type -> storage.v1.ReleaseRequest
+	34, // 40: storage.v1.StorageService.OpenDir:input_type -> storage.v1.OpenDirRequest
+	36, // 41: storage.v1.StorageService.FsyncDir:input_type -> storage.v1.FsyncDirRequest
+	38, // 42: storage.v1.StorageService.ReleaseDir:input_type -> storage.v1.ReleaseDirRequest
+	41, // 43: storage.v1.StorageService.ReadDir:input_type -> storage.v1.ReadDirRequest
+	44, // 44: storage.v1.StorageService.ReadDirPlus:input_type -> storage.v1.ReadDirPlusRequest
+	46, // 45: storage.v1.StorageService.Fallocate:input_type -> storage.v1.FallocateRequest
+	48, // 46: storage.v1.StorageService.SetXattr:input_type -> storage.v1.SetXattrRequest
+	50, // 47: storage.v1.StorageService.GetXattr:input_type -> storage.v1.GetXattrRequest
+	52, // 48: storage.v1.StorageService.ListXattr:input_type -> storage.v1.ListXattrRequest
+	54, // 49: storage.v1.StorageService.RemoveXattr:input_type -> storage.v1.RemoveXattrRequest
+	57, // 50: storage.v1.StorageService.GetLk:input_type -> storage.v1.GetLkRequest
+	59, // 51: storage.v1.StorageService.SetLk:input_type -> storage.v1.SetLkRequest
+	61, // 52: storage.v1.StorageService.SetLkw:input_type -> storage.v1.SetLkwRequest
+	63, // 53: storage.v1.StorageService.RenewSession:input_type -> storage.v1.RenewSessionRequest
+	1,  // 54: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
+	3,  // 55: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
+	5,  // 56: storage.v1.StorageService.SetAttr:output_type -> storage.v1.SetAttrResponse
+	7,  // 57: storage.v1.StorageService.Mknod:output_type -> storage.v1.MknodResponse
+	9,  // 58: storage.v1.StorageService.Mkdir:output_type -> storage.v1.MkdirResponse
+	11, // 59: storage.v1.StorageService.Symlink:output_type -> storage.v1.SymlinkResponse
+	13, // 60: storage.v1.StorageService.Readlink:output_type -> storage.v1.ReadlinkResponse
+	15, // 61: storage.v1.StorageService.Link:output_type -> storage.v1.LinkResponse
+	17, // 62: storage.v1.StorageService.Unlink:output_type -> storage.v1.UnlinkResponse
+	19, // 63: storage.v1.StorageService.Rmdir:output_type -> storage.v1.RmdirResponse
+	21, // 64: storage.v1.StorageService.Rename:output_type -> storage.v1.RenameResponse
+	23, // 65: storage.v1.StorageService.Create:output_type -> storage.v1.CreateResponse
+	25, // 66: storage.v1.StorageService.TmpFile:output_type -> storage.v1.TmpFileResponse
+	27, // 67: storage.v1.StorageService.Open:output_type -> storage.v1.OpenResponse
+	29, // 68: storage.v1.StorageService.Flush:output_type -> storage.v1.FlushResponse
+	31, // 69: storage.v1.StorageService.Fsync:output_type -> storage.v1.FsyncResponse
+	33, // 70: storage.v1.StorageService.Release:output_type -> storage.v1.ReleaseResponse
+	35, // 71: storage.v1.StorageService.OpenDir:output_type -> storage.v1.OpenDirResponse
+	37, // 72: storage.v1.StorageService.FsyncDir:output_type -> storage.v1.FsyncDirResponse
+	39, // 73: storage.v1.StorageService.ReleaseDir:output_type -> storage.v1.ReleaseDirResponse
+	42, // 74: storage.v1.StorageService.ReadDir:output_type -> storage.v1.ReadDirResponse
+	45, // 75: storage.v1.StorageService.ReadDirPlus:output_type -> storage.v1.ReadDirPlusResponse
+	47, // 76: storage.v1.StorageService.Fallocate:output_type -> storage.v1.FallocateResponse
+	49, // 77: storage.v1.StorageService.SetXattr:output_type -> storage.v1.SetXattrResponse
+	51, // 78: storage.v1.StorageService.GetXattr:output_type -> storage.v1.GetXattrResponse
+	53, // 79: storage.v1.StorageService.ListXattr:output_type -> storage.v1.ListXattrResponse
+	55, // 80: storage.v1.StorageService.RemoveXattr:output_type -> storage.v1.RemoveXattrResponse
+	58, // 81: storage.v1.StorageService.GetLk:output_type -> storage.v1.GetLkResponse
+	60, // 82: storage.v1.StorageService.SetLk:output_type -> storage.v1.SetLkResponse
+	62, // 83: storage.v1.StorageService.SetLkw:output_type -> storage.v1.SetLkwResponse
+	64, // 84: storage.v1.StorageService.RenewSession:output_type -> storage.v1.RenewSessionResponse
+	54, // [54:85] is the sub-list for method output_type
+	23, // [23:54] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_storage_v1_storage_proto_init() }
@@ -4754,7 +4859,7 @@ func file_storage_v1_storage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_v1_storage_proto_rawDesc), len(file_storage_v1_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   65,
+			NumMessages:   67,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

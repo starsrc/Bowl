@@ -69,6 +69,7 @@ type Manager interface {
 	GetLk(ctx context.Context, params GetLkParams) (*FileLock, error)
 	SetLk(ctx context.Context, params SetLkParams) error
 	SetLkw(ctx context.Context, params SetLkwParams) error
+	RenewSession(ctx context.Context, sessionID uint64) (time.Time, error)
 }
 
 type manager struct {
@@ -1596,7 +1597,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -1677,7 +1678,7 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -1794,7 +1795,7 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -1925,7 +1926,7 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -2027,7 +2028,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -2117,7 +2118,7 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirRe
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -2222,7 +2223,7 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -2595,7 +2596,7 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 		}
 
 		if params.SessionID != nil {
-			if err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
+			if _, err := m.renewClientSession(ctx, q, *params.SessionID); err != nil {
 				return err
 			}
 		}
@@ -2999,5 +3000,35 @@ func (m *manager) RemoveXattr(ctx context.Context, ino uint64, name []byte) erro
 	}
 
 	return nil
+}
+
+// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
+// 遵循 ADR-0013：
+// 1. 静态校验入参合法性（sessionID == 0 或 > math.MaxInt64 返回 ErrInvalidArgument / EINVAL）；
+// 2. 在读写事务中执行 m.renewClientSession(ctx, q, sessionID)；
+// 3. 自动清理超期会话、更新当前会话租约、通过 FOR UPDATE SKIP LOCKED 非阻塞物理回收无有效句柄引用的 Orphan Inode；
+// 4. 成功时返回刷新后的租约绝对截止时间 expires_at。
+func (m *manager) RenewSession(ctx context.Context, sessionID uint64) (time.Time, error) {
+	if sessionID == 0 || sessionID > math.MaxInt64 {
+		return time.Time{}, ErrInvalidArgument
+	}
+
+	var expiresAt time.Time
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		exp, err := m.renewClientSession(ctx, q, sessionID)
+		if err != nil {
+			return err
+		}
+		expiresAt = exp
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrInvalidArgument) {
+			return time.Time{}, ErrInvalidArgument
+		}
+		return time.Time{}, fmt.Errorf("renew session tx: %w", err)
+	}
+
+	return expiresAt, nil
 }
 

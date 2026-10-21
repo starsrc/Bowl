@@ -138,8 +138,9 @@ func TestLookup_PositivePath(t *testing.T) {
 		targetIno := uint64(11)
 
 		parentRow := db.Inode{
-			Ino:  int64(parentIno),
-			Mode: int32(meta.S_IFDIR | 0o755),
+			Ino:   int64(parentIno),
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
 		}
 
 		targetRow := db.Inode{
@@ -226,8 +227,9 @@ func TestLookup_DynamicBlockCalculations(t *testing.T) {
 			entryName := []byte("test_file")
 
 			parentRow := db.Inode{
-				Ino:  int64(parentIno),
-				Mode: int32(meta.S_IFDIR | 0o755),
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
 			}
 
 			targetRow := db.Inode{
@@ -275,13 +277,6 @@ func TestLookup_InputValidation(t *testing.T) {
 			name:       "parentIno 0 invalid",
 			parentIno:  0,
 			entryName:  []byte("file.txt"),
-			wantErr:    meta.ErrInvalidArgument,
-			expectTx:   false,
-		},
-		{
-			name:       "empty name invalid",
-			parentIno:  2,
-			entryName:  []byte(""),
 			wantErr:    meta.ErrInvalidArgument,
 			expectTx:   false,
 		},
@@ -367,8 +362,9 @@ func TestLookup_InputValidation(t *testing.T) {
 				mockQuerier.EXPECT().
 					GetInode(mock.Anything, int64(tc.parentIno)).
 					Return(db.Inode{
-						Ino:  int64(tc.parentIno),
-						Mode: int32(meta.S_IFDIR | 0o755),
+						Ino:   int64(tc.parentIno),
+						Mode:  int32(meta.S_IFDIR | 0o755),
+						Nlink: 2,
 					}, nil).
 					Once()
 
@@ -497,8 +493,9 @@ func TestLookup_NegativeCases(t *testing.T) {
 		entryName := []byte("nonexistent.txt")
 
 		parentRow := db.Inode{
-			Ino:  int64(parentIno),
-			Mode: int32(meta.S_IFDIR | 0o755),
+			Ino:   int64(parentIno),
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
 		}
 
 		setupMockTx(mockStore, mockQuerier)
@@ -533,8 +530,9 @@ func TestLookup_NegativeCases(t *testing.T) {
 		dbErr := errors.New("db query entry read timeout")
 
 		parentRow := db.Inode{
-			Ino:  int64(parentIno),
-			Mode: int32(meta.S_IFDIR | 0o755),
+			Ino:   int64(parentIno),
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
 		}
 
 		setupMockTx(mockStore, mockQuerier)
@@ -660,7 +658,7 @@ func TestLookup_TransactionOptionsContract(t *testing.T) {
 
 	mockQuerier.EXPECT().
 		GetInode(mock.Anything, int64(1)).
-		Return(db.Inode{Ino: 1, Mode: int32(meta.S_IFDIR | 0o755)}, nil).
+		Return(db.Inode{Ino: 1, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -676,6 +674,408 @@ func TestLookup_TransactionOptionsContract(t *testing.T) {
 	cfg := tx.ApplyOptions(capturedOpts...)
 	assert.Equal(t, tx.ReadOnly, cfg.AccessMode)
 	assert.Equal(t, tx.RepeatableRead, cfg.IsoLevel)
+}
+
+func TestLookup_SpecialEntries_DotAndDotDot(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("根目录下查找 '.' 返回根目录自身", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		rootRow := db.Inode{
+			Ino:       1,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 1,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(rootRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 1, []byte("."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(1), inode.Ino)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+	})
+
+	t.Run("根目录下查找 '..' 返回根目录自身 (自指)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		rootRow := db.Inode{
+			Ino:       1,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 1,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(rootRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 1, []byte(".."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(1), inode.Ino)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+	})
+
+	t.Run("子目录下查找 '.' 返回子目录自身", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		subDirRow := db.Inode{
+			Ino:       2,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 1,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(2)).Return(subDirRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 2, []byte("."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(2), inode.Ino)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+	})
+
+	t.Run("正常子目录下查找 '..' 通过 parent.ParentIno 返回父目录 Inode", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		subDirRow := db.Inode{
+			Ino:       2,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 1,
+		}
+		grandParentRow := db.Inode{
+			Ino:   1,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(2)).Return(subDirRow, nil).Once()
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(grandParentRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 2, []byte(".."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(1), inode.Ino)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+	})
+
+	t.Run("已解链孤儿目录 (rmdir-whilst-open, nlink==0) 查找 '..' 仍能解析原父目录 (STARSRC-342)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		orphanDirRow := db.Inode{
+			Ino:       3,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     0, // 已被 rmdir 解链
+			ParentIno: 1, // 但仍保留原父节点 1
+		}
+		grandParentRow := db.Inode{
+			Ino:   1,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(3)).Return(orphanDirRow, nil).Once()
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(grandParentRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 3, []byte(".."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(1), inode.Ino)
+	})
+
+	t.Run("parent.ParentIno 查询不存在时回退 GetParentInode 查询", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		subDirRow := db.Inode{
+			Ino:       4,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 10,
+		}
+		fallbackGPRow := db.Inode{
+			Ino:   1,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(4)).Return(subDirRow, nil).Once()
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(10)).Return(db.Inode{}, pgx.ErrNoRows).Once()
+		mockQuerier.EXPECT().GetParentInode(mock.Anything, int64(4)).Return(fallbackGPRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 4, []byte(".."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(1), inode.Ino)
+	})
+
+	t.Run("ParentIno <= 0 老数据回退 GetParentInode 成功", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		subDirRow := db.Inode{
+			Ino:       5,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 0,
+		}
+		fallbackGPRow := db.Inode{
+			Ino:   1,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(5)).Return(subDirRow, nil).Once()
+		mockQuerier.EXPECT().GetParentInode(mock.Anything, int64(5)).Return(fallbackGPRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 5, []byte(".."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(1), inode.Ino)
+	})
+
+	t.Run("ParentIno <= 0 且 GetParentInode 未找到但 nlink > 0 回退为 parent 自身", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		subDirRow := db.Inode{
+			Ino:       6,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: 0,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(6)).Return(subDirRow, nil).Once()
+		mockQuerier.EXPECT().GetParentInode(mock.Anything, int64(6)).Return(db.Inode{}, pgx.ErrNoRows).Once()
+
+		inode, err := mgr.Lookup(ctx, 6, []byte(".."))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint64(6), inode.Ino)
+	})
+}
+
+func TestLookup_OrphanParentIntercept(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("parent.Nlink == 0 时查找常规文件返回 ErrNotFound 且不查 entries (STARSRC-323)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		orphanParent := db.Inode{
+			Ino:   10,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 0,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(10)).Return(orphanParent, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 10, []byte("file.txt"))
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+	})
+
+	t.Run("parent.Nlink == 0 时查找 '.' 返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		orphanParent := db.Inode{
+			Ino:   10,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 0,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(10)).Return(orphanParent, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 10, []byte("."))
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+	})
+
+	t.Run("parent.Nlink == 0 时查找 '' 返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		orphanParent := db.Inode{
+			Ino:   10,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 0,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(10)).Return(orphanParent, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 10, []byte(""))
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+	})
+}
+
+func TestLookup_EmptyNameSemantics(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("空名称在父目录不存在时返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(999)).Return(db.Inode{}, pgx.ErrNoRows).Once()
+
+		inode, err := mgr.Lookup(ctx, 999, []byte(""))
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+	})
+
+	t.Run("空名称在父节点非目录时返回 ErrNotDir", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		fileParent := db.Inode{
+			Ino:   2,
+			Mode:  int32(meta.S_IFREG | 0o644),
+			Nlink: 1,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(2)).Return(fileParent, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 2, []byte(""))
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotDir)
+	})
+
+	t.Run("空名称在父目录合法时进入事务校验后返回 ErrNotFound (ENOENT, STARSRC-335)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		dirParent := db.Inode{
+			Ino:   2,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(2)).Return(dirParent, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 2, []byte(""))
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+		mockQuerier.AssertNotCalled(t, "GetInodeByEntry", mock.Anything, mock.Anything)
+	})
+}
+
+func TestLookup_TrashNamespace(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("开启回收站 (trashDays > 0) 时根目录下查找 .trash 返回 TrashIno 节点", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore, meta.WithTrashDays(7))
+
+		rootRow := db.Inode{
+			Ino:   1,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+		trashRow := db.Inode{
+			Ino:   int64(meta.TrashIno),
+			Mode:  int32(meta.S_IFDIR | 0o700),
+			Nlink: 2,
+		}
+
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(rootRow, nil).Once()
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(meta.TrashIno)).Return(trashRow, nil).Once()
+
+		inode, err := mgr.Lookup(ctx, 1, []byte(".trash"))
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, meta.TrashIno, inode.Ino)
+	})
+}
+
+func TestLookup_CacheTimeouts(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("配置 WithDirEntryTimeout/WithEntryTimeout/WithAttrTimeout 独立生效", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore,
+			meta.WithEntryTimeout(3.0),
+			meta.WithDirEntryTimeout(6.0),
+			meta.WithAttrTimeout(4.5),
+		)
+
+		parentRow := db.Inode{
+			Ino:   1,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+		dirChildRow := db.Inode{
+			Ino:   2,
+			Mode:  int32(meta.S_IFDIR | 0o755),
+			Nlink: 2,
+		}
+		fileChildRow := db.Inode{
+			Ino:   3,
+			Mode:  0o100644,
+			Nlink: 1,
+		}
+
+		// 查找目录子项
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(parentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{ParentIno: 1, Name: []byte("sub")}).Return(dirChildRow, nil).Once()
+
+		dirInode, err := mgr.Lookup(ctx, 1, []byte("sub"))
+		require.NoError(t, err)
+		require.NotNil(t, dirInode)
+		assert.Equal(t, 6.0, dirInode.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, dirInode.AttrTimeoutSeconds)
+
+		// 查找普通文件子项
+		setupMockTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(parentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeByEntry(mock.Anything, db.GetInodeByEntryParams{ParentIno: 1, Name: []byte("file")}).Return(fileChildRow, nil).Once()
+
+		fileInode, err := mgr.Lookup(ctx, 1, []byte("file"))
+		require.NoError(t, err)
+		require.NotNil(t, fileInode)
+		assert.Equal(t, 3.0, fileInode.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, fileInode.AttrTimeoutSeconds)
+	})
 }
 
 func TestModule(t *testing.T) {

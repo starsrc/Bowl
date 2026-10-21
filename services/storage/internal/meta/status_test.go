@@ -14,7 +14,7 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-func TestToStatus_All17SentinelErrors(t *testing.T) {
+func TestToStatus_All22SentinelErrors(t *testing.T) {
 	testCases := []struct {
 		name           string
 		err            error
@@ -123,9 +123,39 @@ func TestToStatus_All17SentinelErrors(t *testing.T) {
 			expectedCode:   codes.Unimplemented,
 			expectedReason: "EOPNOTSUPP",
 		},
+		{
+			name:           "ErrTooManyLinks 映射为 ResourceExhausted 与 EMLINK",
+			err:            meta.ErrTooManyLinks,
+			expectedCode:   codes.ResourceExhausted,
+			expectedReason: "EMLINK",
+		},
+		{
+			name:           "ErrFileTooLarge 映射为 InvalidArgument 与 EFBIG",
+			err:            meta.ErrFileTooLarge,
+			expectedCode:   codes.InvalidArgument,
+			expectedReason: "EFBIG",
+		},
+		{
+			name:           "ErrIllegalSeek 映射为 InvalidArgument 与 ESPIPE",
+			err:            meta.ErrIllegalSeek,
+			expectedCode:   codes.InvalidArgument,
+			expectedReason: "ESPIPE",
+		},
+		{
+			name:           "ErrIO 映射为 Internal 与 EIO",
+			err:            meta.ErrIO,
+			expectedCode:   codes.Internal,
+			expectedReason: "EIO",
+		},
+		{
+			name:           "ErrAccess 映射为 PermissionDenied 与 EACCES",
+			err:            meta.ErrAccess,
+			expectedCode:   codes.PermissionDenied,
+			expectedReason: "EACCES",
+		},
 	}
 
-	require.Equal(t, 17, len(testCases), "必须完整覆盖全部 17 个领域哨兵错误")
+	require.Equal(t, 22, len(testCases), "必须完整覆盖全部 22 个领域哨兵错误")
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

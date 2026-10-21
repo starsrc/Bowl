@@ -1,22 +1,31 @@
-# 0004. FUSE GetAttr 单语句直查与已解链孤儿节点属性支持设计
+# 0004. FUSE GetAttr 单语句直查、孤儿节点活跃句柄校验与属性映射设计
 
 ## 状态
 已采纳 (accepted)
 
 ## 背景
-Storage 元数据服务在完成 `Lookup` 后，需要实现对接 Linux FUSE 内核 `FUSE_GETATTR` 协议的 `GetAttr` 能力。在遵循强 FUSE 规范时，面临两项关键设计权衡：
-1. **单节点读取的事务开销**：`Lookup` 因涉及“父节点类型校验 + 子目录项解析”两步读取，在 ADR-0003 中采用了 `RepeatableRead` 只读事务以冻结一致性快照。而 `GetAttr` 仅根据主键 `ino` 查询单行 `inodes` 记录，若同样包裹显式只读事务，会在高频 `getattr` 调用下产生不必要的 `BEGIN READ ONLY` / `COMMIT` 往返开销。
-2. **`unlink-whilst-open`（已删除但仍打开的文件）属性读取与整型边界**：POSIX 与 FUSE 规范允许进程在打开文件后执行 `unlink`，此时目录项已移除且 Inode 的硬链接数 `nlink` 归零，但在文件描述符关闭（`FUSE_RELEASE`）前，内核仍会针对该 `ino` 发起 `FUSE_GETATTR`（如 `fstat`）并要求正常返回 `st_nlink = 0` 的属性。此外，FUSE 协议中 `fuse_ino_t` 为无符号 64 位整数（含哨兵值 `FUSE_UNKNOWN_INO = 0xffffffffffffffffULL`），而 PostgreSQL `inodes.ino` 为有符号 64 位整数 `BIGINT`。
+Storage 元数据服务对接 Linux FUSE 内核 `FUSE_GETATTR` 协议的 `GetAttr` 能力，面临以下关键设计权衡：
+1. **单节点读取的事务开销**：`GetAttr` 仅根据主键 `ino` 查询单行 `inodes` 记录，无需包裹显式只读事务，直接利用 PostgreSQL 单条 `SELECT` 语句天然具备的语句级快照以消除事务往返延迟。
+2. **`unlink-whilst-open` 孤儿节点生命周期校验 (STARSRC-279)**：POSIX 规范允许已解链节点（`nlink == 0`）在持有打开文件句柄期间继续执行 `fstat`。但对于已解链且**无任何活跃打开句柄**的孤儿节点，必须严格拦截其属性访问并返回 `ENOENT`，杜绝未回收孤儿节点的脏读。
+3. **内核缓存超时与属性隔离对齐**：返回实体统一暴露 `EntryTimeoutSeconds` 与 `AttrTimeoutSeconds`，并对齐 `Blksize = 65536` 及文件类型隔离。
 
 ## 决策
 1. **单语句直查跳过显式事务**：
-   - `meta.Manager.GetAttr` 直接调用 `Store.GetInode(ctx, int64(ino))`，不开启 `ExecTxWithOptions` 显式事务，直接利用 PostgreSQL 单条 `SELECT` 语句天然具备的语句级一致性快照。
-2. **支持 `nlink == 0` 孤儿节点并补齐时间戳必填契约**：
-   - 移除 `proto/storage/v1/storage.proto` 中 `InodeAttribute.nlink` 的 `gt = 0` 校验约束，允许 `GetAttr` 正常返回 `nlink = 0` 的未释放 Inode。
-   - 为 `InodeAttribute` 的 `atime`、`mtime`、`ctime` 补齐 `[(buf.validate.field).required = true]` 约束，严格对齐 FUSE `struct fuse_attr` 非空时间戳语义与数据库 `NOT NULL` 约束。
-3. **`uint64` 至 `BIGINT` 的上界溢出防御**：
-   - 在 `GetAttrRequest.ino` 的 Protobuf 校验规则中同时声明 `gt = 0` 与 `lte = 9223372036854775807`（`math.MaxInt64`），并在 `meta.Manager.GetAttr` 入口拦截 `ino == 0 || ino > math.MaxInt64` 返回 `ErrInvalidArgument`，防止无符号 64 位整数向 `int64` 转换时发生符号位溢出。
+   - `meta.Manager.GetAttr` 入参校验 `ino == 0 || ino > math.MaxInt64`（返回 `ErrInvalidArgument`）。
+   - 直接调用 `Store.GetInode(ctx, int64(ino))`，若记录不存在返回 `ErrNotFound`（`ENOENT`）。
+2. **孤儿节点活跃句柄严格校验 (STARSRC-279)**：
+   - 当读取到 `target.Nlink == 0` 时，调用 `Store.HasFileHandlesByIno(ctx, int64(ino))` 探测是否存在活跃打开句柄。
+   - 若不存在活跃句柄（`!hasHandles`），立即返回 `ErrNotFound`（`ENOENT`）。
+   - 仅当存在打开句柄时，允许正常返回 `st_nlink = 0` 的属性。
+3. **统一属性推导与缓存超时暴露**：
+   - 使用 `m.newInode(target)` 进行实体构建，继承全局配置的 `attrTimeout` 以及针对目录（`dirEntryTimeout`）/非目录（`entryTimeout`）的条目缓存有效期。
+   - 对齐 `Blksize = 65536` (`0x10000`)；目录默认 `Size = 4096`、`Blocks = 8`；特殊文件（`S_IFCHR`, `S_IFBLK`, `S_IFIFO`, `S_IFSOCK`）隔离 `Size = 0` 与 `Blocks = 0`。
+4. **全链路 gRPC Status 与 POSIX errno 契约映射**：
+   - 全领域 22 个哨兵错误在 `ToStatus` 中映射为对应的 gRPC Code 并在 `google.rpc.ErrorInfo` 中注入 `reason`（如 `ENOENT`, `EINVAL`, `ENOTDIR`, `EIO`, `EACCES`）与 `domain: bowl.storage`。
 
 ## 结果
-- **积极影响**：`GetAttr` 消除了多余的数据库事务往返，完整兼容 FUSE `unlink-whilst-open` 语义，并在契约与领域双层阻断了 64 位整型溢出风险。
-- **代价考量**：`GetAttr` 与 `Lookup` 在 `meta` 层的 `Store` 调用形态不同（直调 `GetInode` vs `ExecTxWithOptions`），测试打桩需分别针对单方法调用与事务闭包进行断言。
+- **积极影响**：
+  - 杜绝了无句柄孤儿节点在异步 GC 延迟回收期间被外部 `GetAttr` 访问的数据不一致问题。
+  - 保证持有活跃打开句柄的孤儿文件合法 `fstat` 正常工作。
+  - 统一暴露内核属性与条目缓存超时参数，支持客户端灵活配置。
+- **代价考量**：对 `nlink == 0` 的孤儿节点增加了一次轻量句柄表点查（`HasFileHandlesByIno`），但仅在已解链文件访问时触发，对常规热点文件零额外开销。

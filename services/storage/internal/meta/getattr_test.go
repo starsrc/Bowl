@@ -155,6 +155,13 @@ func TestGetAttr_PositivePath(t *testing.T) {
 				Ctime:      pgtype.Timestamptz{Time: ctime, Valid: true},
 			}
 
+			if tc.nlink == 0 {
+				mockStore.EXPECT().
+					HasFileHandlesByIno(mock.Anything, int64(tc.ino)).
+					Return(true, nil).
+					Once()
+			}
+
 			mockStore.EXPECT().
 				GetInode(mock.Anything, int64(tc.ino)).
 				Return(row, nil).
@@ -205,9 +212,10 @@ func TestGetAttr_DynamicBlockCalculations(t *testing.T) {
 
 			ino := uint64(42)
 			row := db.Inode{
-				Ino:  int64(ino),
-				Mode: 0o100644,
-				Size: tc.size,
+				Ino:   int64(ino),
+				Mode:  0o100644,
+				Size:  tc.size,
+				Nlink: 1,
 			}
 
 			mockStore.EXPECT().
@@ -302,7 +310,7 @@ func TestGetAttr_DirectQueryContract(t *testing.T) {
 		ino := uint64(88)
 		mockStore.EXPECT().
 			GetInode(mock.Anything, int64(ino)).
-			Return(db.Inode{Ino: int64(ino), Mode: 0o100644}, nil).
+			Return(db.Inode{Ino: int64(ino), Mode: 0o100644, Nlink: 1}, nil).
 			Once()
 
 		inode, err := mgr.GetAttr(ctx, ino)
@@ -312,4 +320,211 @@ func TestGetAttr_DirectQueryContract(t *testing.T) {
 		mockStore.AssertCalled(t, "GetInode", mock.Anything, int64(ino))
 		mockStore.AssertNotCalled(t, "ExecTxWithOptions")
 	})
+}
+
+func TestGetAttr_OrphanInodeSemantics(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nlink == 0 且无活跃打开句柄时返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		ino := uint64(701)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Mode:  0o100644,
+				Nlink: 0,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		inode, err := mgr.GetAttr(ctx, ino)
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+	})
+
+	t.Run("nlink == 0 且存在活跃打开句柄时正常返回 Inode", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		ino := uint64(702)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Mode:  0o100644,
+				Nlink: 0,
+				Size:  1024,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(true, nil).
+			Once()
+
+		inode, err := mgr.GetAttr(ctx, ino)
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, ino, inode.Ino)
+		assert.Equal(t, uint32(0), inode.Attr.Nlink)
+	})
+
+	t.Run("nlink == 0 句柄检查发生数据库错误时透传包装错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		ino := uint64(703)
+		dbErr := errors.New("check handles query failed")
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Mode:  0o100644,
+				Nlink: 0,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, dbErr).
+			Once()
+
+		inode, err := mgr.GetAttr(ctx, ino)
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, dbErr)
+	})
+}
+
+func TestGetAttr_TimeoutsAndOptions(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("自定义超时配置对目录与非目录节点生效", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore,
+			meta.WithEntryTimeout(3.0),
+			meta.WithDirEntryTimeout(5.0),
+			meta.WithAttrTimeout(2.5),
+		)
+
+		dirIno := uint64(2)
+		fileIno := uint64(10)
+
+		// 目录节点
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(dirIno)).
+			Return(db.Inode{
+				Ino:   int64(dirIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
+				Size:  0,
+			}, nil).
+			Once()
+
+		dirEntity, err := mgr.GetAttr(ctx, dirIno)
+		require.NoError(t, err)
+		require.NotNil(t, dirEntity)
+		assert.Equal(t, 5.0, dirEntity.EntryTimeoutSeconds)
+		assert.Equal(t, 2.5, dirEntity.AttrTimeoutSeconds)
+		assert.Equal(t, meta.DefaultDirSize, dirEntity.Attr.Size)
+		assert.Equal(t, uint64(8), dirEntity.Attr.Blocks)
+		assert.Equal(t, meta.DefaultBlockSize, dirEntity.Attr.Blksize)
+
+		// 非目录文件
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(fileIno)).
+			Return(db.Inode{
+				Ino:   int64(fileIno),
+				Mode:  0o100644,
+				Nlink: 1,
+				Size:  1024,
+			}, nil).
+			Once()
+
+		fileEntity, err := mgr.GetAttr(ctx, fileIno)
+		require.NoError(t, err)
+		require.NotNil(t, fileEntity)
+		assert.Equal(t, 3.0, fileEntity.EntryTimeoutSeconds)
+		assert.Equal(t, 2.5, fileEntity.AttrTimeoutSeconds)
+		assert.Equal(t, meta.DefaultBlockSize, fileEntity.Attr.Blksize)
+	})
+}
+
+func TestGetAttr_SpecialFileAttributeIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	testCases := []struct {
+		name         string
+		mode         uint32
+		rdevIn       int64
+		expectedSize uint64
+		expectedBlk  uint64
+		expectedRdev uint32
+	}{
+		{
+			name:         "字符设备 S_IFCHR 隔离 Size/Blocks 并暴露 Rdev",
+			mode:         meta.S_IFCHR | 0o660,
+			rdevIn:       0x0103,
+			expectedSize: 0,
+			expectedBlk:  0,
+			expectedRdev: 0x0103,
+		},
+		{
+			name:         "块设备 S_IFBLK 隔离 Size/Blocks 并暴露 Rdev",
+			mode:         meta.S_IFBLK | 0o660,
+			rdevIn:       0x0801,
+			expectedSize: 0,
+			expectedBlk:  0,
+			expectedRdev: 0x0801,
+		},
+		{
+			name:         "管道 S_IFIFO 隔离 Size/Blocks 且 Rdev 为 0",
+			mode:         meta.S_IFIFO | 0o666,
+			rdevIn:       0,
+			expectedSize: 0,
+			expectedBlk:  0,
+			expectedRdev: 0,
+		},
+		{
+			name:         "套接字 S_IFSOCK 隔离 Size/Blocks 且 Rdev 为 0",
+			mode:         meta.S_IFSOCK | 0o777,
+			rdevIn:       0,
+			expectedSize: 0,
+			expectedBlk:  0,
+			expectedRdev: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mgr := meta.New(mockStore)
+
+			ino := uint64(500)
+			mockStore.EXPECT().
+				GetInode(mock.Anything, int64(ino)).
+				Return(db.Inode{
+					Ino:   int64(ino),
+					Mode:  int32(tc.mode),
+					Nlink: 1,
+					Size:  1024, // 数据库内即使存在脏数据
+					Rdev:  tc.rdevIn,
+				}, nil).
+				Once()
+
+			entity, err := mgr.GetAttr(ctx, ino)
+			require.NoError(t, err)
+			require.NotNil(t, entity)
+			assert.Equal(t, tc.expectedSize, entity.Attr.Size)
+			assert.Equal(t, tc.expectedBlk, entity.Attr.Blocks)
+			assert.Equal(t, tc.expectedRdev, entity.Attr.Rdev)
+			assert.Equal(t, meta.DefaultBlockSize, entity.Attr.Blksize)
+		})
+	}
 }

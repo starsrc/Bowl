@@ -5,14 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/fx"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
@@ -67,13 +70,36 @@ type Manager interface {
 	SetLk(ctx context.Context, params SetLkParams) error
 	SetLkw(ctx context.Context, params SetLkwParams) error
 	RenewSession(ctx context.Context, sessionID uint64) (time.Time, error)
+	RenewSessionWithStatus(ctx context.Context, sessionID uint64) (RenewSessionResult, error)
+	GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error)
+}
+
+type dirCursorKey struct {
+	ino uint64
+	fh  uint64
+}
+
+type openFileTimeState struct {
+	mtime time.Time
+	atime time.Time
 }
 
 type manager struct {
 	store           db.Store
 	entryTimeout    float64
 	attrTimeout     float64
+	dirEntryTimeout float64
+	negEntryTimeout float64
+	openKeepCache   bool
+	openDirCache    bool
+	atimeMode       AtimeMode
+	skipDirMtime    time.Duration
+	trashDays       int
 	sessionLeaseTTL time.Duration
+	dirCursorMu     sync.Mutex
+	dirCursors      map[dirCursorKey][]byte
+	openFileTimesMu sync.Mutex
+	openFileTimes   map[uint64]openFileTimeState
 	lockNotifyMu    sync.Mutex
 	lockNotifyChans map[uint64]chan struct{}
 }
@@ -92,13 +118,89 @@ func WithSessionLeaseTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithEntryTimeout 配置非目录节点内核条目缓存有效时间（秒）。
+func WithEntryTimeout(d float64) Option {
+	return func(m *manager) {
+		if d >= 0 {
+			m.entryTimeout = d
+		}
+	}
+}
+
+// WithAttrTimeout 配置节点内核属性缓存有效时间（秒）。
+func WithAttrTimeout(d float64) Option {
+	return func(m *manager) {
+		if d >= 0 {
+			m.attrTimeout = d
+		}
+	}
+}
+
+// WithDirEntryTimeout 配置目录节点内核条目缓存有效时间（秒）。
+func WithDirEntryTimeout(d float64) Option {
+	return func(m *manager) {
+		if d >= 0 {
+			m.dirEntryTimeout = d
+		}
+	}
+}
+
+// WithNegEntryTimeout 配置负缓存内核条目缓存有效时间（秒）。
+func WithNegEntryTimeout(d float64) Option {
+	return func(m *manager) {
+		if d >= 0 {
+			m.negEntryTimeout = d
+		}
+	}
+}
+
+// WithOpenKeepCache 配置打开文件是否保留内核页缓存。
+func WithOpenKeepCache(enable bool) Option {
+	return func(m *manager) {
+		m.openKeepCache = enable
+	}
+}
+
+// WithOpenDirCache 配置打开目录是否保留内核目录缓存。
+func WithOpenDirCache(enable bool) Option {
+	return func(m *manager) {
+		m.openDirCache = enable
+	}
+}
+
+// WithAtimeMode 配置访问时间更新策略。
+func WithAtimeMode(mode AtimeMode) Option {
+	return func(m *manager) {
+		m.atimeMode = mode
+	}
+}
+
+// WithSkipDirMtime 配置目录修改时间跳过阈值。
+func WithSkipDirMtime(d time.Duration) Option {
+	return func(m *manager) {
+		m.skipDirMtime = d
+	}
+}
+
+// WithTrashDays 配置回收站保留天数。
+func WithTrashDays(days int) Option {
+	return func(m *manager) {
+		m.trashDays = days
+	}
+}
+
 // New 创建 Manager 实例。
 func New(store db.Store, opts ...Option) Manager {
 	m := &manager{
 		store:           store,
 		entryTimeout:    DefaultEntryTimeoutSeconds,
 		attrTimeout:     DefaultAttrTimeoutSeconds,
+		dirEntryTimeout: DefaultEntryTimeoutSeconds,
+		negEntryTimeout: DefaultEntryTimeoutSeconds,
 		sessionLeaseTTL: DefaultSessionLeaseTTL,
+		dirCursors:      make(map[dirCursorKey][]byte),
+		openFileTimes:   make(map[uint64]openFileTimeState),
+		lockNotifyChans: make(map[uint64]chan struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -115,52 +217,121 @@ var Module = fx.Module("meta",
 	}),
 )
 
-func newInodeFromDB(target db.Inode) *Inode {
+func convertDBInodeToEntity(target db.Inode, entryTimeout, attrTimeout float64) *Inode {
+	mode := uint32(target.Mode)
+	fileType := mode & S_IFMT
+
+	var size uint64
 	var blocks uint64
-	if target.Size > 0 {
-		blocks = (uint64(target.Size) + 511) / 512
+	var rdev uint32
+
+	switch fileType {
+	case S_IFDIR:
+		size = uint64(target.Size)
+		if size == 0 {
+			size = DefaultDirSize
+		}
+		blocks = (size + 511) / 512
+	case S_IFREG, S_IFLNK:
+		size = uint64(target.Size)
+		if size > 0 {
+			blocks = (size + 511) / 512
+		}
+	case S_IFCHR, S_IFBLK:
+		size = 0
+		blocks = 0
+		rdev = uint32(target.Rdev)
+	default:
+		// FIFO, SOCK 等特殊文件
+		size = 0
+		blocks = 0
+		rdev = 0
 	}
 
 	return &Inode{
-		Ino:        uint64(target.Ino),
-		Generation: uint64(target.Generation),
+		Ino:                 uint64(target.Ino),
+		Generation:          uint64(target.Generation),
+		EntryTimeoutSeconds: entryTimeout,
+		AttrTimeoutSeconds:  attrTimeout,
 		Attr: Attribute{
-			Mode:    uint32(target.Mode),
-			Size:    uint64(target.Size),
-			Nlink:   uint32(target.Nlink),
-			UID:     uint32(target.Uid),
-			GID:     uint32(target.Gid),
-			Rdev:    uint32(target.Rdev),
-			Blksize: 4096,
-			Blocks:  blocks,
-			Atime:   target.Atime.Time,
-			Mtime:   target.Mtime.Time,
-			Ctime:   target.Ctime.Time,
+			Mode:      mode,
+			Size:      size,
+			Nlink:     uint32(target.Nlink),
+			UID:       uint32(target.Uid),
+			GID:       uint32(target.Gid),
+			Rdev:      rdev,
+			Blksize:   DefaultBlockSize,
+			Blocks:    blocks,
+			Atime:     target.Atime.Time,
+			Mtime:     target.Mtime.Time,
+			Ctime:     target.Ctime.Time,
+			Flags:     uint32(target.Flags),
+			ParentIno: uint64(target.ParentIno),
 		},
 	}
 }
 
+func newInodeFromDB(target db.Inode) *Inode {
+	return convertDBInodeToEntity(target, DefaultEntryTimeoutSeconds, DefaultAttrTimeoutSeconds)
+}
+
+func (m *manager) newInode(target db.Inode) *Inode {
+	entryTimeout := m.entryTimeout
+	if (uint32(target.Mode) & S_IFMT) == S_IFDIR {
+		entryTimeout = m.dirEntryTimeout
+	}
+	return convertDBInodeToEntity(target, entryTimeout, m.attrTimeout)
+}
+
 func newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
+	mode := uint32(row.Mode)
+	fileType := mode & S_IFMT
+
+	var size uint64
 	var blocks uint64
-	if row.Size > 0 {
-		blocks = (uint64(row.Size) + 511) / 512
+	var rdev uint32
+
+	switch fileType {
+	case S_IFDIR:
+		size = uint64(row.Size)
+		if size == 0 {
+			size = DefaultDirSize
+		}
+		blocks = (size + 511) / 512
+	case S_IFREG, S_IFLNK:
+		size = uint64(row.Size)
+		if size > 0 {
+			blocks = (size + 511) / 512
+		}
+	case S_IFCHR, S_IFBLK:
+		size = 0
+		blocks = 0
+		rdev = uint32(row.Rdev)
+	default:
+		size = 0
+		blocks = 0
+		rdev = 0
 	}
 
 	return &Inode{
-		Ino:        uint64(row.Ino),
-		Generation: uint64(row.Generation),
+		Ino:                 uint64(row.Ino),
+		Generation:          uint64(row.Generation),
+		EntryTimeoutSeconds: DefaultEntryTimeoutSeconds,
+		AttrTimeoutSeconds:  DefaultAttrTimeoutSeconds,
 		Attr: Attribute{
-			Mode:    uint32(row.Mode),
-			Size:    uint64(row.Size),
-			Nlink:   uint32(row.Nlink),
-			UID:     uint32(row.Uid),
-			GID:     uint32(row.Gid),
-			Rdev:    uint32(row.Rdev),
-			Blksize: 4096,
-			Blocks:  blocks,
-			Atime:   row.Atime.Time,
-			Mtime:   row.Mtime.Time,
-			Ctime:   row.Ctime.Time,
+			Mode:      mode,
+			Size:      size,
+			Nlink:     uint32(row.Nlink),
+			UID:       uint32(row.Uid),
+			GID:       uint32(row.Gid),
+			Rdev:      rdev,
+			Blksize:   DefaultBlockSize,
+			Blocks:    blocks,
+			Atime:     row.Atime.Time,
+			Mtime:     row.Mtime.Time,
+			Ctime:     row.Ctime.Time,
+			Flags:     uint32(row.Flags),
+			ParentIno: uint64(row.ParentIno),
 		},
 	}
 }
@@ -170,14 +341,43 @@ var errRetryTx = errors.New("retry transaction due to concurrent entry drift")
 
 const maxTxRetries = 16
 
+func isRetryableTxError(err error) bool {
+	if errors.Is(err, errRetryTx) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// 40001: serialization_failure, 40P01: deadlock_detected
+		return pgErr.Code == "40001" || pgErr.Code == "40P01"
+	}
+	return false
+}
+
 func (m *manager) execWriteTxWithRetry(ctx context.Context, fn func(q db.Querier) error) error {
-	for range maxTxRetries {
-		err := m.store.ExecTxWithOptions(ctx, fn)
-		if !errors.Is(err, errRetryTx) {
+	var lastErr error
+	backoff := 5 * time.Millisecond
+	for attempt := 0; attempt < maxTxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
+		err := m.store.ExecTxWithOptions(ctx, fn)
+		if err == nil {
+			return nil
+		}
+		if !isRetryableTxError(err) {
+			return err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+			if backoff < 50*time.Millisecond {
+				backoff *= 2
+			}
+		}
 	}
-	return fmt.Errorf("exceeded max transaction retries (%d): %w", maxTxRetries, errRetryTx)
+	return fmt.Errorf("exceeded max transaction retries (%d): %w", maxTxRetries, lastErr)
 }
 
 // uniqueSortedInos 将一组 Inode 号按全局升序排列并去重，确保所有多 Inode 事务遵循单一全局加锁顺序。
@@ -236,4 +436,75 @@ func (m *manager) renewOptionalClientSession(ctx context.Context, q db.Querier, 
 	}
 	_, err := m.renewClientSession(ctx, q, *sessionID)
 	return err
+}
+
+// GetParents 返回指定 Inode 挂载在各个父目录下的目录项数量统计。
+func (m *manager) GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error) {
+	if ino == 0 || ino > math.MaxInt64 {
+		return nil, ErrInvalidArgument
+	}
+	var result map[uint64]uint32
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		rows, err := q.ListParentEntryCountsByIno(ctx, int64(ino))
+		if err != nil {
+			return fmt.Errorf("list parent entry counts for ino %d: %w", ino, err)
+		}
+		result = make(map[uint64]uint32, len(rows))
+		for _, row := range rows {
+			result[uint64(row.ParentIno)] = uint32(row.EntryCount)
+		}
+		return nil
+	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// RenewSessionWithStatus 续期客户端会话并返回详细状态（包括是否为新创建或过期重建）。
+func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) (RenewSessionResult, error) {
+	if sessionID == 0 || sessionID > math.MaxInt64 {
+		return RenewSessionResult{}, ErrInvalidArgument
+	}
+	var res RenewSessionResult
+	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		leaseTTL := m.sessionLeaseTTL
+		if leaseTTL <= 0 {
+			leaseTTL = DefaultSessionLeaseTTL
+		}
+		deletedCount, err := q.DeleteExpiredClientSessions(ctx)
+		if err != nil {
+			return fmt.Errorf("delete expired client sessions: %w", err)
+		}
+		if deletedCount > 0 {
+			m.notifyAllLockWaiters()
+		}
+		session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+			SessionID: int64(sessionID),
+			ExpiresAt: pgtype.Timestamptz{
+				Time:  time.Now().Add(leaseTTL),
+				Valid: true,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("upsert client session %d: %w", sessionID, err)
+		}
+		deletedInos, err := q.DeleteUnreferencedOrphanInodes(ctx)
+		if err != nil {
+			return fmt.Errorf("delete unreferenced orphan inodes: %w", err)
+		}
+		if len(deletedInos) > 0 {
+			m.cleanLockWaitersForInos(deletedInos)
+		}
+		res.ExpiresAt = session.ExpiresAt.Time
+		res.SessionRecreated = session.CreatedAt.Time.Equal(session.UpdatedAt.Time)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrInvalidArgument) {
+			return RenewSessionResult{}, ErrInvalidArgument
+		}
+		return RenewSessionResult{}, fmt.Errorf("renew session with status tx: %w", err)
+	}
+	return res, nil
 }

@@ -29,7 +29,7 @@ type LookupRequest struct {
 	// 父目录的 Inode 编号。根目录通常为 1。
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待查找的子项名称（文件或目录名）。
-	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+	// 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -251,7 +251,7 @@ type SetAttrRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 待修改属性的目标 Inode 编号。
 	Ino uint64 `protobuf:"varint,1,opt,name=ino,proto3" json:"ino,omitempty"`
-	// 待修改的文件模式与权限位（不超过 0o177777）。
+	// 待修改的文件模式与权限位。
 	Mode *uint32 `protobuf:"varint,2,opt,name=mode,proto3,oneof" json:"mode,omitempty"`
 	// 待修改的属主用户 ID。
 	Uid *uint32 `protobuf:"varint,3,opt,name=uid,proto3,oneof" json:"uid,omitempty"`
@@ -266,7 +266,15 @@ type SetAttrRequest struct {
 	// 是否将最后访问时间设置为当前服务端时间。与 atime 互斥。
 	AtimeNow bool `protobuf:"varint,8,opt,name=atime_now,json=atimeNow,proto3" json:"atime_now,omitempty"`
 	// 是否将最后修改时间设置为当前服务端时间。与 mtime 互斥。
-	MtimeNow      bool `protobuf:"varint,9,opt,name=mtime_now,json=mtimeNow,proto3" json:"mtime_now,omitempty"`
+	MtimeNow bool `protobuf:"varint,9,opt,name=mtime_now,json=mtimeNow,proto3" json:"mtime_now,omitempty"`
+	// 可选的文件句柄。
+	Fh *uint64 `protobuf:"varint,10,opt,name=fh,proto3,oneof" json:"fh,omitempty"`
+	// 可选的客户端会话租约标识。
+	SessionId *uint64 `protobuf:"varint,11,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
+	// 是否将状态变更时间设置为当前服务端时间。
+	CtimeNow bool `protobuf:"varint,12,opt,name=ctime_now,json=ctimeNow,proto3" json:"ctime_now,omitempty"`
+	// 可选的文件系统标志位（如 chattr 所设）。
+	Flags         *uint32 `protobuf:"varint,13,opt,name=flags,proto3,oneof" json:"flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -364,6 +372,34 @@ func (x *SetAttrRequest) GetMtimeNow() bool {
 	return false
 }
 
+func (x *SetAttrRequest) GetFh() uint64 {
+	if x != nil && x.Fh != nil {
+		return *x.Fh
+	}
+	return 0
+}
+
+func (x *SetAttrRequest) GetSessionId() uint64 {
+	if x != nil && x.SessionId != nil {
+		return *x.SessionId
+	}
+	return 0
+}
+
+func (x *SetAttrRequest) GetCtimeNow() bool {
+	if x != nil {
+		return x.CtimeNow
+	}
+	return false
+}
+
+func (x *SetAttrRequest) GetFlags() uint32 {
+	if x != nil && x.Flags != nil {
+		return *x.Flags
+	}
+	return 0
+}
+
 // SetAttrResponse 包含更新后的 Inode 实体元数据及内核属性缓存时长。
 type SetAttrResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -427,7 +463,7 @@ type MknodRequest struct {
 	// 待创建的新节点名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// 节点模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
+	// 节点模式位（包含文件类型及权限位）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
 	Uid uint32 `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
@@ -583,7 +619,7 @@ type MkdirRequest struct {
 	// 待创建的新目录名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位，取值范围必须在 0 到 0o177777 / 65535 之间）。
+	// 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
 	Uid uint32 `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
@@ -1097,7 +1133,7 @@ type UnlinkRequest struct {
 	// 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待删除的非目录项名称。
-	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+	// 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1190,7 +1226,7 @@ type RmdirRequest struct {
 	// 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
 	// 待移除的空目录项名称。
-	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+	// 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name          []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1283,14 +1319,14 @@ type RenameRequest struct {
 	// 源父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	OldParentIno uint64 `protobuf:"varint,1,opt,name=old_parent_ino,json=oldParentIno,proto3" json:"old_parent_ino,omitempty"`
 	// 待重命名的源项名称。
-	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+	// 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	OldName []byte `protobuf:"bytes,2,opt,name=old_name,json=oldName,proto3" json:"old_name,omitempty"`
 	// 目标父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	NewParentIno uint64 `protobuf:"varint,3,opt,name=new_parent_ino,json=newParentIno,proto3" json:"new_parent_ino,omitempty"`
 	// 目标项新名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	NewName []byte `protobuf:"bytes,4,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
-	// 重命名标志位 (0: 默认覆盖, 1: RENAME_NOREPLACE 禁止覆盖, 2: RENAME_EXCHANGE 双向交换)。
+	// 重命名标志位。
 	Flags         uint32 `protobuf:"varint,5,opt,name=flags,proto3" json:"flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1406,7 +1442,7 @@ type CreateRequest struct {
 	// 待创建的新常规文件名称。
 	// 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
 	Name []byte `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// 节点模式位（包含可选的 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
+	// 节点模式位（包含可选的 S_IFREG 文件类型位及权限位）。
 	Mode uint32 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
 	Uid uint32 `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
@@ -1586,7 +1622,7 @@ type TmpFileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	ParentIno uint64 `protobuf:"varint,1,opt,name=parent_ino,json=parentIno,proto3" json:"parent_ino,omitempty"`
-	// 节点模式位（仅允许 0 或 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
+	// 节点模式位（包含可选的文件类型位及权限位）。
 	Mode uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 所属用户 ID。
 	Uid uint32 `protobuf:"varint,3,opt,name=uid,proto3" json:"uid,omitempty"`
@@ -2102,7 +2138,7 @@ type ReleaseRequest struct {
 	Fh uint64 `protobuf:"varint,2,opt,name=fh,proto3" json:"fh,omitempty"`
 	// 可选的文件锁拥有者标识 (lock owner)。允许全范围 uint64。
 	LockOwner *uint64 `protobuf:"varint,3,opt,name=lock_owner,json=lockOwner,proto3,oneof" json:"lock_owner,omitempty"`
-	// 释放标志位掩码（仅允许 0 或 FUSE_RELEASE_FLOCK_UNLOCK = 0x2）。
+	// 释放标志位掩码（允许 0 到 3，支持 FUSE_RELEASE_FLUSH 与 FUSE_RELEASE_FLOCK_UNLOCK）。
 	ReleaseFlags uint32 `protobuf:"varint,4,opt,name=release_flags,json=releaseFlags,proto3" json:"release_flags,omitempty"`
 	// 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	SessionId     *uint64 `protobuf:"varint,5,opt,name=session_id,json=sessionId,proto3,oneof" json:"session_id,omitempty"`
@@ -3104,7 +3140,7 @@ type SetXattrRequest struct {
 	// 扩展属性值。
 	// 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "E2BIG"）。
 	Value []byte `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
-	// 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE, 3: 两者皆设)。
+	// 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE)。
 	Flags         uint32 `protobuf:"varint,4,opt,name=flags,proto3" json:"flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4021,9 +4057,11 @@ func (x *RenewSessionRequest) GetSessionId() uint64 {
 type RenewSessionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 续期后的会话租约截止时间。
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// 会话是否为新创建或过期重建。
+	SessionRecreated bool `protobuf:"varint,2,opt,name=session_recreated,json=sessionRecreated,proto3" json:"session_recreated,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RenewSessionResponse) Reset() {
@@ -4061,6 +4099,13 @@ func (x *RenewSessionResponse) GetExpiresAt() *timestamppb.Timestamp {
 		return x.ExpiresAt
 	}
 	return nil
+}
+
+func (x *RenewSessionResponse) GetSessionRecreated() bool {
+	if x != nil {
+		return x.SessionRecreated
+	}
+	return false
 }
 
 type Inode struct {
@@ -4141,7 +4186,7 @@ type InodeAttribute struct {
 	Gid uint32 `protobuf:"varint,5,opt,name=gid,proto3" json:"gid,omitempty"`
 	// 特殊设备号（仅当为设备文件时有效，常规文件为 0）。
 	Rdev uint32 `protobuf:"varint,6,opt,name=rdev,proto3" json:"rdev,omitempty"`
-	// 块大小（字节数，例如 4096）。
+	// 块大小（字节数，默认 65536 即 0x10000）。
 	Blksize uint32 `protobuf:"varint,7,opt,name=blksize,proto3" json:"blksize,omitempty"`
 	// 占用的 512 字节块数量。
 	Blocks uint64 `protobuf:"varint,8,opt,name=blocks,proto3" json:"blocks,omitempty"`
@@ -4267,12 +4312,12 @@ var File_storage_v1_storage_proto protoreflect.FileDescriptor
 const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"\x18storage/v1/storage.proto\x12\n" +
-	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcd\x01\n" +
+	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcb\x01\n" +
 	"\rLookupRequest\x12&\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\tparentIno\x12\x93\x01\n" +
-	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\xc7\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\tparentIno\x12\x91\x01\n" +
+	"\x04name\x18\x02 \x01(\fB}\xbaHz\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x03\x18\xff\x01R\x04name\"\xc7\x01\n" +
 	"\x0eLookupResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
@@ -4281,10 +4326,10 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\"\x84\x01\n" +
 	"\x0fGetAttrResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xce\x06\n" +
+	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x9f\b\n" +
 	"\x0eSetAttrRequest\x12#\n" +
-	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\"\n" +
-	"\x04mode\x18\x02 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03H\x00R\x04mode\x88\x01\x01\x12\"\n" +
+	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x17\n" +
+	"\x04mode\x18\x02 \x01(\rH\x00R\x04mode\x88\x01\x01\x12\"\n" +
 	"\x03uid\x18\x03 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aH\x01R\x03uid\x88\x01\x01\x12\"\n" +
 	"\x03gid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aH\x02R\x03gid\x88\x01\x01\x12(\n" +
 	"\x04size\x18\x05 \x01(\x04B\x0f\xbaH\f2\n" +
@@ -4292,53 +4337,62 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampH\x04R\x05atime\x88\x01\x01\x125\n" +
 	"\x05mtime\x18\a \x01(\v2\x1a.google.protobuf.TimestampH\x05R\x05mtime\x88\x01\x01\x12\x1b\n" +
 	"\tatime_now\x18\b \x01(\bR\batimeNow\x12\x1b\n" +
-	"\tmtime_now\x18\t \x01(\bR\bmtimeNow:\xa2\x03\xbaH\x9e\x03\x1af\n" +
+	"\tmtime_now\x18\t \x01(\bR\bmtimeNow\x12&\n" +
+	"\x02fh\x18\n" +
+	" \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x06R\x02fh\x88\x01\x01\x125\n" +
+	"\n" +
+	"session_id\x18\v \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\aR\tsessionId\x88\x01\x01\x12\x1b\n" +
+	"\tctime_now\x18\f \x01(\bR\bctimeNow\x12\x19\n" +
+	"\x05flags\x18\r \x01(\rH\bR\x05flags\x88\x01\x01:\xc7\x03\xbaH\xc3\x03\x1af\n" +
 	"\x16setattr_atime_conflict\x12&atime and atime_now cannot both be set\x1a$!(has(this.atime) && this.atime_now)\x1af\n" +
-	"\x16setattr_mtime_conflict\x12&mtime and mtime_now cannot both be set\x1a$!(has(this.mtime) && this.mtime_now)\x1a\xcb\x01\n" +
-	"\x12setattr_has_update\x12&at least one attribute must be updated\x1a\x8c\x01has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_nowB\a\n" +
+	"\x16setattr_mtime_conflict\x12&mtime and mtime_now cannot both be set\x1a$!(has(this.mtime) && this.mtime_now)\x1a\xf0\x01\n" +
+	"\x12setattr_has_update\x12&at least one attribute must be updated\x1a\xb1\x01has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_now || this.ctime_now || has(this.flags)B\a\n" +
 	"\x05_modeB\x06\n" +
 	"\x04_uidB\x06\n" +
 	"\x04_gidB\a\n" +
 	"\x05_sizeB\b\n" +
 	"\x06_atimeB\b\n" +
-	"\x06_mtime\"\x84\x01\n" +
+	"\x06_mtimeB\x05\n" +
+	"\x03_fhB\r\n" +
+	"\v_session_idB\b\n" +
+	"\x06_flags\"\x84\x01\n" +
 	"\x0fSetAttrResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xaf\x02\n" +
+	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xbc\x02\n" +
 	"\fMknodRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
 	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1f\n" +
-	"\x04mode\x18\x03 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\x03 \x00R\x04mode\x12\x10\n" +
-	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
-	"\x03gid\x18\x05 \x01(\rR\x03gid\x12\x12\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x1d\n" +
+	"\x03uid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03uid\x12\x1d\n" +
+	"\x03gid\x18\x05 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03gid\x12\x12\n" +
 	"\x04rdev\x18\x06 \x01(\rR\x04rdev\"\xc6\x01\n" +
 	"\rMknodResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x99\x02\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xa8\x02\n" +
 	"\fMkdirRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
 	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1d\n" +
-	"\x04mode\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
-	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
-	"\x03gid\x18\x05 \x01(\rR\x03gid\"\xc6\x01\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x1d\n" +
+	"\x03uid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03uid\x12\x1d\n" +
+	"\x03gid\x18\x05 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03gid\"\xc6\x01\n" +
 	"\rMkdirResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x88\x03\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xa2\x03\n" +
 	"\x0eSymlinkRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
 	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x89\x01\n" +
 	"\x06target\x18\x03 \x01(\fBq\xbaHn\xba\x01d\n" +
-	"\x1esymlink_request_target_no_null\x12)symlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\x12\x10\n" +
-	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
-	"\x03gid\x18\x05 \x01(\rR\x03gid\"\xc8\x01\n" +
+	"\x1esymlink_request_target_no_null\x12)symlink target must not contain null byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x1fR\x06target\x12\x1d\n" +
+	"\x03uid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03uid\x12\x1d\n" +
+	"\x03gid\x18\x05 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03gid\"\xc8\x01\n" +
 	"\x0fSymlinkResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
@@ -4356,36 +4410,36 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\fLinkResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xd7\x01\n" +
+	"\x14attr_timeout_seconds\x18\x03 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xd5\x01\n" +
 	"\rUnlinkRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
-	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\x10\n" +
-	"\x0eUnlinkResponse\"\xd6\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x91\x01\n" +
+	"\x04name\x18\x02 \x01(\fB}\xbaHz\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x03\x18\xff\x01R\x04name\"\x10\n" +
+	"\x0eUnlinkResponse\"\xd4\x01\n" +
 	"\fRmdirRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
-	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\"\x0f\n" +
-	"\rRmdirResponse\"\xda\x03\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x91\x01\n" +
+	"\x04name\x18\x02 \x01(\fB}\xbaHz\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x03\x18\xff\x01R\x04name\"\x0f\n" +
+	"\rRmdirResponse\"\xcf\x03\n" +
 	"\rRenameRequest\x127\n" +
-	"\x0eold_parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\foldParentIno\x12\x9a\x01\n" +
-	"\bold_name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\aoldName\x127\n" +
+	"\x0eold_parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\foldParentIno\x12\x98\x01\n" +
+	"\bold_name\x18\x02 \x01(\fB}\xbaHz\xba\x01r\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x03\x18\xff\x01R\aoldName\x127\n" +
 	"\x0enew_parent_ino\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\fnewParentIno\x12\x9a\x01\n" +
 	"\bnew_name\x18\x04 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\x12\x1d\n" +
-	"\x05flags\x18\x05 \x01(\rB\a\xbaH\x04*\x02\x18\x02R\x05flags\"\x10\n" +
-	"\x0eRenameResponse\"\xf6\x02\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\anewName\x12\x14\n" +
+	"\x05flags\x18\x05 \x01(\rR\x05flags\"\x10\n" +
+	"\x0eRenameResponse\"\x85\x03\n" +
 	"\rCreateRequest\x120\n" +
 	"\n" +
 	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x93\x01\n" +
 	"\x04name\x18\x02 \x01(\fB\x7f\xbaH|\xba\x01r\n" +
-	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1d\n" +
-	"\x04mode\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
-	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
-	"\x03gid\x18\x05 \x01(\rR\x03gid\x12\x14\n" +
+	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12\x1d\n" +
+	"\x03uid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03uid\x12\x1d\n" +
+	"\x03gid\x18\x05 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03gid\x12\x14\n" +
 	"\x05flags\x18\x06 \x01(\rR\x05flags\x125\n" +
 	"\n" +
 	"session_id\x18\a \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
@@ -4396,14 +4450,13 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"open_flags\x18\x03 \x01(\rR\topenFlags\x12B\n" +
 	"\x15entry_timeout_seconds\x18\x04 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x13entryTimeoutSeconds\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xe4\x03\n" +
+	"\x14attr_timeout_seconds\x18\x05 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xef\x02\n" +
 	"\x0eTmpFileRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\xa0\x01\n" +
-	"\x04mode\x18\x02 \x01(\rB\x8b\x01\xbaH\x87\x01\xba\x01~\n" +
-	"\x19tmpfile_mode_regular_only\x12.mode file type must be 0 or S_IFREG (0o100000)\x1a1this < 4096u || (this >= 32768u && this < 36864u)*\x04\x18\xff\xff\x03R\x04mode\x12\x10\n" +
-	"\x03uid\x18\x03 \x01(\rR\x03uid\x12\x10\n" +
-	"\x03gid\x18\x04 \x01(\rR\x03gid\x12\x92\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x12\n" +
+	"\x04mode\x18\x02 \x01(\rR\x04mode\x12\x1d\n" +
+	"\x03uid\x18\x03 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03uid\x12\x1d\n" +
+	"\x03gid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03gid\x12\x92\x01\n" +
 	"\x05flags\x18\x05 \x01(\rB|\xbaHy\xba\x01v\n" +
 	"\x16tmpfile_flags_writable\x124flags access mode must be O_WRONLY (1) or O_RDWR (2)\x1a&(this % 4u) == 1u || (this % 4u) == 2uR\x05flags\x125\n" +
 	"\n" +
@@ -4443,14 +4496,13 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x00R\tsessionId\x88\x01\x01B\r\n" +
 	"\v_session_id\"\x0f\n" +
-	"\rFsyncResponse\"\xc4\x02\n" +
+	"\rFsyncResponse\"\xff\x01\n" +
 	"\x0eReleaseRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\"\n" +
 	"\n" +
-	"lock_owner\x18\x03 \x01(\x04H\x00R\tlockOwner\x88\x01\x01\x12q\n" +
-	"\rrelease_flags\x18\x04 \x01(\rBL\xbaHI\xba\x01F\n" +
-	"\x13release_flags_valid\x12\x15invalid release_flags\x1a\x18this == 0u || this == 2uR\freleaseFlags\x125\n" +
+	"lock_owner\x18\x03 \x01(\x04H\x00R\tlockOwner\x88\x01\x01\x12,\n" +
+	"\rrelease_flags\x18\x04 \x01(\rB\a\xbaH\x04*\x02\x18\x03R\freleaseFlags\x125\n" +
 	"\n" +
 	"session_id\x18\x05 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x01R\tsessionId\x88\x01\x01B\r\n" +
 	"\v_lock_ownerB\r\n" +
@@ -4537,7 +4589,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\fB]\xbaHZ\xba\x01P\n" +
 	"\x11xattr_name_no_nul\x12\"xattr name cannot contain NUL byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x01R\x04name\x12\x1f\n" +
 	"\x05value\x18\x03 \x01(\fB\t\xbaH\x06z\x04\x18\x80\x80\x04R\x05value\x12\x1d\n" +
-	"\x05flags\x18\x04 \x01(\rB\a\xbaH\x04*\x02\x18\x03R\x05flags\"\x12\n" +
+	"\x05flags\x18\x04 \x01(\rB\a\xbaH\x04*\x02\x18\x02R\x05flags\"\x12\n" +
 	"\x10SetXattrResponse\"\xa9\x01\n" +
 	"\x0fGetXattrRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12q\n" +
@@ -4554,15 +4606,15 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12q\n" +
 	"\x04name\x18\x02 \x01(\fB]\xbaHZ\xba\x01P\n" +
 	"\x11xattr_name_no_nul\x12\"xattr name cannot contain NUL byte\x1a\x17!this.contains(b'\\x00')z\x05\x10\x01\x18\xff\x01R\x04name\"\x15\n" +
-	"\x13RemoveXattrResponse\"\xfa\x01\n" +
+	"\x13RemoveXattrResponse\"\x87\x02\n" +
 	"\bFileLock\x12%\n" +
 	"\x05start\x18\x01 \x01(\x04B\x0f\xbaH\f2\n" +
 	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x05start\x12!\n" +
 	"\x03end\x18\x02 \x01(\x04B\x0f\xbaH\f2\n" +
 	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x03end\x12\x1b\n" +
-	"\x04type\x18\x03 \x01(\rB\a\xbaH\x04*\x02\x18\x02R\x04type\x12\x10\n" +
-	"\x03pid\x18\x04 \x01(\rR\x03pid:u\xbaHr\x1ap\n" +
-	"\x15file_lock_range_valid\x12?file lock start offset must be less than or equal to end offset\x1a\x16this.start <= this.end\"\x87\x04\n" +
+	"\x04type\x18\x03 \x01(\rB\a\xbaH\x04*\x02\x18\x02R\x04type\x12\x1d\n" +
+	"\x03pid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03pid:u\xbaHr\x1ap\n" +
+	"\x15file_lock_range_valid\x12?file lock start offset must be less than or equal to end offset\x1a\x16this.start <= this.end\"\xb8\x03\n" +
 	"\fGetLkRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12!\n" +
 	"\x02fh\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x02fh\x12\x1d\n" +
@@ -4571,8 +4623,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x02lk\x18\x04 \x01(\v2\x14.storage.v1.FileLockB\x06\xbaH\x03\xc8\x01\x01R\x02lk\x12\"\n" +
 	"\blk_flags\x18\x05 \x01(\rB\a\xbaH\x04*\x02\x18\x01R\alkFlags\x120\n" +
 	"\n" +
-	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId:\x8b\x02\xbaH\x87\x02\x1aM\n" +
-	"\x15getlk_type_not_unlock\x12 GetLk does not allow F_UNLCK (2)\x1a\x12this.lk.type != 2u\x1a\xb5\x01\n" +
+	"session_id\x18\x06 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId:\xbc\x01\xbaH\xb8\x01\x1a\xb5\x01\n" +
 	"\x1cgetlk_flock_whole_file_range\x12@FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]\x1aSthis.lk_flags != 1u || (this.lk.start == 0u && this.lk.end == 9223372036854775807u)\"=\n" +
 	"\rGetLkResponse\x12,\n" +
 	"\x02lk\x18\x01 \x01(\v2\x14.storage.v1.FileLockB\x06\xbaH\x03\xc8\x01\x01R\x02lk\"\xb8\x03\n" +
@@ -4602,22 +4653,23 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x0eSetLkwResponse\"G\n" +
 	"\x13RenewSessionRequest\x120\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId\"Y\n" +
+	"session_id\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tsessionId\"\x86\x01\n" +
 	"\x14RenewSessionResponse\x12A\n" +
 	"\n" +
-	"expires_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\texpiresAt\"z\n" +
+	"expires_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\texpiresAt\x12+\n" +
+	"\x11session_recreated\x18\x02 \x01(\bR\x10sessionRecreated\"z\n" +
 	"\x05Inode\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x02 \x01(\x04R\n" +
 	"generation\x126\n" +
-	"\x04attr\x18\x03 \x01(\v2\x1a.storage.v1.InodeAttributeB\x06\xbaH\x03\xc8\x01\x01R\x04attr\"\xef\x02\n" +
+	"\x04attr\x18\x03 \x01(\v2\x1a.storage.v1.InodeAttributeB\x06\xbaH\x03\xc8\x01\x01R\x04attr\"\x89\x03\n" +
 	"\x0eInodeAttribute\x12\x1b\n" +
 	"\x04mode\x18\x01 \x01(\rB\a\xbaH\x04*\x02 \x00R\x04mode\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x14\n" +
-	"\x05nlink\x18\x03 \x01(\rR\x05nlink\x12\x10\n" +
-	"\x03uid\x18\x04 \x01(\rR\x03uid\x12\x10\n" +
-	"\x03gid\x18\x05 \x01(\rR\x03gid\x12\x12\n" +
+	"\x05nlink\x18\x03 \x01(\rR\x05nlink\x12\x1d\n" +
+	"\x03uid\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03uid\x12\x1d\n" +
+	"\x03gid\x18\x05 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x03gid\x12\x12\n" +
 	"\x04rdev\x18\x06 \x01(\rR\x04rdev\x12\x18\n" +
 	"\ablksize\x18\a \x01(\rR\ablksize\x12\x16\n" +
 	"\x06blocks\x18\b \x01(\x04R\x06blocks\x128\n" +

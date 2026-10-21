@@ -96,17 +96,24 @@ func TestReleaseRequestValidation(t *testing.T) {
 			valid: false,
 		},
 		{
-			name:         "非法: release_flags 为未知位 0x1",
+			name:         "合法: release_flags 包含 FUSE_RELEASE_FLUSH (0x1)",
 			ino:          1,
 			fh:           1,
 			releaseFlags: 0x1,
-			valid:        false,
+			valid:        true,
 		},
 		{
-			name:         "非法: release_flags 包含未知组合位 0x3",
+			name:         "合法: release_flags 包含组合位 0x3",
 			ino:          1,
 			fh:           1,
 			releaseFlags: 0x3,
+			valid:        true,
+		},
+		{
+			name:         "非法: release_flags 超过 3 (如 0x4)",
+			ino:          1,
+			fh:           1,
+			releaseFlags: 0x4,
 			valid:        false,
 		},
 		{

@@ -209,7 +209,7 @@ func TestRelease_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 
 		beforeCall := time.Now()
@@ -225,7 +225,7 @@ func TestRelease_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(nil).
+			Return([]int64(nil), nil).
 			Once()
 
 		mockQuerier.EXPECT().

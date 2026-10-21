@@ -105,7 +105,7 @@ func TestMkdir_PositivePath(t *testing.T) {
 		assert.Equal(t, newIno, inode.Ino)
 		assert.Equal(t, uint32(expectedTargetMode), inode.Attr.Mode)
 		assert.Equal(t, uint32(2), inode.Attr.Nlink)
-		assert.Equal(t, uint64(0), inode.Attr.Size)
+		assert.Equal(t, meta.DefaultDirSize, inode.Attr.Size)
 		assert.Equal(t, uint32(1001), inode.Attr.UID)
 		assert.Equal(t, uint32(1002), inode.Attr.GID)
 		assert.Equal(t, uint32(0), inode.Attr.Rdev)

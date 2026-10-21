@@ -24,7 +24,7 @@ func TestLookupRequestValidation(t *testing.T) {
 		{"255 bytes", 1, []byte(strings.Repeat("a", 255)), true},
 		{"multibyte 255 bytes", 1, []byte(strings.Repeat("界", 85)), true},
 		{"newline allowed", 1, []byte("a\nb"), true},
-		{"empty", 1, []byte(""), false},
+		{"empty allowed to reach domain layer", 1, []byte(""), true},
 		{"zero parent", 0, []byte("file"), false},
 		{"256 bytes", 1, []byte(strings.Repeat("a", 256)), false},
 		{"multibyte too long", 1, []byte(strings.Repeat("界", 86)), false},

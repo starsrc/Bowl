@@ -128,7 +128,7 @@ func TestMknod_PositivePath(t *testing.T) {
 		assert.Equal(t, uint32(1001), inode.Attr.UID)
 		assert.Equal(t, uint32(1002), inode.Attr.GID)
 		assert.Equal(t, uint32(0), inode.Attr.Rdev)
-		assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+		assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 		assert.Equal(t, uint64(0), inode.Attr.Blocks)
 		assert.Equal(t, now, inode.Attr.Atime)
 		assert.Equal(t, now, inode.Attr.Mtime)

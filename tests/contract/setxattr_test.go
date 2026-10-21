@@ -74,11 +74,11 @@ func TestSetXattrRequestValidation(t *testing.T) {
 			valid: true,
 		},
 		{
-			name:  "合法: ino 边界为 math.MaxInt64 且 flags=3 (XATTR_CREATE | XATTR_REPLACE)",
+			name:  "合法: ino 边界为 math.MaxInt64 且 flags=2 (XATTR_REPLACE)",
 			ino:   math.MaxInt64,
 			xName: []byte("user.both_flags"),
 			value: []byte("val"),
-			flags: 3,
+			flags: 2,
 			valid: true,
 		},
 
@@ -169,6 +169,14 @@ func TestSetXattrRequestValidation(t *testing.T) {
 		},
 
 		// 边界与防御负向用例：flags
+		{
+			name:  "非法: flags 为 3 (XATTR_CREATE | XATTR_REPLACE 互斥)",
+			ino:   1,
+			xName: []byte("user.test"),
+			value: []byte("val"),
+			flags: 3,
+			valid: false,
+		},
 		{
 			name:  "非法: flags 超过 3 (flags=4)",
 			ino:   1,

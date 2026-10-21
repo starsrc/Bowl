@@ -85,6 +85,22 @@ func TestNewStorageValidator(t *testing.T) {
 		if err := v.Validate(validMkdir); err != nil {
 			t.Errorf("expected valid MkdirRequest, got error: %v", err)
 		}
+
+		validGetLkUnlock := &storagev1.GetLkRequest{
+			Ino:       1,
+			Fh:        1,
+			LockOwner: 1,
+			Lk: &storagev1.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  2, // F_UNLCK 允许通过
+			},
+			LkFlags:   0,
+			SessionId: 1,
+		}
+		if err := v.Validate(validGetLkUnlock); err != nil {
+			t.Errorf("expected valid GetLkRequest with F_UNLCK, got error: %v", err)
+		}
 	})
 
 	t.Run("非法请求校验失败并精确映射 ErrorInfo.reason", func(t *testing.T) {
@@ -120,13 +136,13 @@ func TestNewStorageValidator(t *testing.T) {
 			expectedReason string
 		}{
 			{
-				name: "SetXattr 空名称映射为 ERANGE",
+				name: "SetXattr 空名称映射为 EINVAL",
 				msg: &storagev1.SetXattrRequest{
 					Ino:   1,
 					Name:  []byte{},
 					Value: []byte("val"),
 				},
-				expectedReason: validator.ReasonRange,
+				expectedReason: validator.ReasonInvalidArgument,
 			},
 			{
 				name: "SetXattr 名称超过 255 字节映射为 ERANGE",
@@ -156,21 +172,21 @@ func TestNewStorageValidator(t *testing.T) {
 				expectedReason: validator.ReasonInvalidArgument,
 			},
 			{
-				name: "SetXattr 值超过 65536 字节映射为 E2BIG",
+				name: "SetXattr 值超过 65536 字节映射为 ERANGE",
 				msg: &storagev1.SetXattrRequest{
 					Ino:   1,
 					Name:  []byte("user.test"),
 					Value: bytes.Repeat([]byte("v"), 65537),
 				},
-				expectedReason: validator.ReasonTooBig,
+				expectedReason: validator.ReasonRange,
 			},
 			{
-				name: "GetXattr 空名称映射为 ERANGE",
+				name: "GetXattr 空名称映射为 EINVAL",
 				msg: &storagev1.GetXattrRequest{
 					Ino:  1,
 					Name: nil,
 				},
-				expectedReason: validator.ReasonRange,
+				expectedReason: validator.ReasonInvalidArgument,
 			},
 			{
 				name: "RemoveXattr 名称超过 255 字节映射为 ERANGE",
@@ -181,18 +197,18 @@ func TestNewStorageValidator(t *testing.T) {
 				expectedReason: validator.ReasonRange,
 			},
 			{
-				name: "ListXattrResponse 包含空名称项映射为 ERANGE",
+				name: "ListXattrResponse 包含空名称项映射为 EINVAL",
 				msg: &storagev1.ListXattrResponse{
 					Names: [][]byte{[]byte("user.ok"), {}},
 				},
-				expectedReason: validator.ReasonRange,
+				expectedReason: validator.ReasonInvalidArgument,
 			},
 			{
-				name: "GetXattrResponse 值超过 65536 字节映射为 E2BIG",
+				name: "GetXattrResponse 值超过 65536 字节映射为 ERANGE",
 				msg: &storagev1.GetXattrResponse{
 					Value: bytes.Repeat([]byte("v"), 65537),
 				},
-				expectedReason: validator.ReasonTooBig,
+				expectedReason: validator.ReasonRange,
 			},
 			{
 				name: "Mkdir 目录名超过 255 字节映射为 ENAMETOOLONG",
@@ -265,7 +281,7 @@ func TestNewStorageValidator(t *testing.T) {
 
 		rawErr := rawValidator.Validate(&storagev1.SetXattrRequest{
 			Ino:   1,
-			Name:  []byte{},
+			Name:  bytes.Repeat([]byte("a"), 256),
 			Value: []byte("v"),
 		})
 		require.Error(t, rawErr)
@@ -294,7 +310,7 @@ func TestNewStorageValidator(t *testing.T) {
 				},
 			},
 			{
-				name: "GetLkRequest 传入 F_UNLCK (2) 映射为 EINVAL",
+				name: "GetLkRequest 传入非法锁类型 (3) 映射为 EINVAL",
 				msg: &storagev1.GetLkRequest{
 					Ino:       1,
 					Fh:        1,
@@ -302,7 +318,7 @@ func TestNewStorageValidator(t *testing.T) {
 					Lk: &storagev1.FileLock{
 						Start: 0,
 						End:   100,
-						Type:  2,
+						Type:  3,
 					},
 					LkFlags:   0,
 					SessionId: 1,
@@ -359,7 +375,7 @@ func TestNewStorageValidator(t *testing.T) {
 				msg: &storagev1.ReleaseRequest{
 					Ino:          1,
 					Fh:           1,
-					ReleaseFlags: 0x1,
+					ReleaseFlags: 0x4,
 				},
 			},
 		}

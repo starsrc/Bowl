@@ -162,7 +162,7 @@ func TestGetLkRequestValidation(t *testing.T) {
 			valid: true,
 		},
 		{
-			name: "非法: GetLk 禁止传入 lk.type == 2 (F_UNLCK)",
+			name: "合法: GetLk 允许传入 lk.type == 2 (F_UNLCK)",
 			req: &storagev1.GetLkRequest{
 				Ino:       10,
 				Fh:        20,
@@ -171,6 +171,22 @@ func TestGetLkRequestValidation(t *testing.T) {
 					Start: 0,
 					End:   100,
 					Type:  2, // F_UNLCK
+				},
+				LkFlags:   0,
+				SessionId: 1,
+			},
+			valid: true,
+		},
+		{
+			name: "非法: GetLk 传入非法 lk.type == 3",
+			req: &storagev1.GetLkRequest{
+				Ino:       10,
+				Fh:        20,
+				LockOwner: 1,
+				Lk: &storagev1.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  3,
 				},
 				LkFlags:   0,
 				SessionId: 1,

@@ -18,9 +18,35 @@ const (
 	S_IFSOCK              uint32 = 0o140000
 	S_ISUID               uint32 = 0o4000
 	S_ISGID               uint32 = 0o2000
+	S_ISVTX               uint32 = 0o1000
 	PermMask              uint32 = 0o7777
 	MaxFileNameBytes             = 255
 	MaxSymlinkTargetBytes        = 4095
+)
+
+// 根节点与特殊节点编号。
+const (
+	RootIno   uint64 = 1
+	TrashIno  uint64 = 0x7FFFFFFF10000000
+	TrashName        = ".trash"
+)
+
+// 节点链接与大小上限。
+const (
+	MaxNlink    uint32 = 65000
+	MaxFileSize uint64 = math.MaxInt64
+)
+
+// 默认块大小与目录默认物理大小。
+const (
+	DefaultBlockSize uint32 = 65536
+	DefaultDirSize   uint64 = 4096
+)
+
+// Inode 文件系统标志位常量（对齐 Linux chattr / FS_*_FL）。
+const (
+	FlagImmutable uint32 = 0x1 // FS_IMMUTABLE_FL
+	FlagAppend    uint32 = 0x2 // FS_APPEND_FL
 )
 
 // Linux FUSE / POSIX 打开标志位常量（平台无关固定值，严禁依赖宿主机 syscall.O_*）。
@@ -36,16 +62,37 @@ const (
 	O_TMPFILE = 0o20000000
 )
 
+// FUSE Open 响应标志常量（平台无关固定值）。
+const (
+	FOPEN_DIRECT_IO   uint32 = 1 << 0
+	FOPEN_KEEP_CACHE  uint32 = 1 << 1
+	FOPEN_NONSEEKABLE uint32 = 1 << 2
+	FOPEN_CACHE_DIR   uint32 = 1 << 3
+)
+
 // Linux FUSE / POSIX fallocate 模式标志位常量（平台无关固定值）。
 const (
-	FallocFlKeepSize  uint32 = 0x01
-	FallocFlPunchHole uint32 = 0x02
+	FallocFlKeepSize      uint32 = 0x01
+	FallocFlPunchHole     uint32 = 0x02
+	FallocFlCollapseRange uint32 = 0x08
+	FallocFlZeroRange     uint32 = 0x10
+	FallocFlInsertRange   uint32 = 0x20
 )
 
 // Linux FUSE_RENAME2 (45) 重命名标志位常量（平台无关固定值，严禁依赖宿主机 syscall）。
 const (
 	RenameNoReplace uint32 = 0x1
 	RenameExchange  uint32 = 0x2
+	RenameWhiteout  uint32 = 0x4
+)
+
+// AtimeMode 定义最后访问时间更新策略枚举。
+type AtimeMode int
+
+const (
+	AtimeModeNoAtime     AtimeMode = 0 // 默认：不更新 atime
+	AtimeModeRelAtime    AtimeMode = 1 // relatime：仅当 atime <= mtime 或 atime 超过 24h 时更新
+	AtimeModeStrictAtime AtimeMode = 2 // strictatime：每次读取均更新 atime
 )
 
 // Linux 扩展属性（xattr）规格常量与操作标志位。
@@ -65,6 +112,7 @@ const (
 	F_UNLCK uint32 = 2
 
 	FuseLkFlock            uint32 = 0x1
+	FuseReleaseFlush       uint32 = 0x1
 	FuseReleaseFlockUnlock uint32 = 0x2
 
 	OffsetMax uint64 = math.MaxInt64
@@ -78,14 +126,20 @@ const (
 
 // SetAttrInput 定义修改 Inode 属性的输入参数。
 type SetAttrInput struct {
-	Mode     *uint32
-	UID      *uint32
-	GID      *uint32
-	Size     *uint64
-	Atime    *time.Time
-	Mtime    *time.Time
-	AtimeNow bool
-	MtimeNow bool
+	Mode      *uint32
+	UID       *uint32
+	GID       *uint32
+	Size      *uint64
+	Atime     *time.Time
+	Mtime     *time.Time
+	AtimeNow  bool
+	MtimeNow  bool
+	Fh        *uint64
+	SessionID *uint64
+	CtimeNow  bool
+	Flags     *uint32
+	CallerUID uint32
+	CallerGID uint32
 }
 
 // MknodParams 定义创建节点的输入参数。
@@ -96,6 +150,7 @@ type MknodParams struct {
 	UID       uint32
 	GID       uint32
 	Rdev      uint32
+	Umask     uint32
 }
 
 // MkdirParams 定义创建子目录的输入参数。
@@ -105,6 +160,7 @@ type MkdirParams struct {
 	Mode      uint32
 	UID       uint32
 	GID       uint32
+	Umask     uint32
 }
 
 // SymlinkParams 定义创建符号链接的输入参数。
@@ -142,13 +198,16 @@ type CreateParams struct {
 	GID       uint32
 	Flags     uint32
 	SessionID *uint64
+	Umask     uint32
 }
 
 // CreateResult 包含新建文件的 Inode 元数据、初始分配的 FileHandle 与打开响应标志。
 type CreateResult struct {
-	Inode     *Inode
-	Fh        uint64
-	OpenFlags uint32
+	Inode               *Inode
+	Fh                  uint64
+	OpenFlags           uint32
+	EntryTimeoutSeconds float64
+	AttrTimeoutSeconds  float64
 }
 
 // TmpFileParams 定义原子创建匿名临时常规文件并分配初始文件句柄的输入参数。
@@ -159,6 +218,7 @@ type TmpFileParams struct {
 	GID       uint32
 	Flags     uint32
 	SessionID *uint64
+	Umask     uint32
 }
 
 // OpenParams 定义打开文件并分配文件句柄的输入参数。
@@ -349,26 +409,54 @@ var (
 	ErrAgain           = errors.New("meta: resource temporarily unavailable")
 	ErrDeadlock        = errors.New("meta: resource deadlock avoided")
 	ErrInterrupted     = errors.New("meta: interrupted system call")
+	ErrTooManyLinks    = errors.New("meta: too many links")
+	ErrFileTooLarge    = errors.New("meta: file too large")
+	ErrIllegalSeek     = errors.New("meta: illegal seek")
+	ErrIO              = errors.New("meta: input/output error")
+	ErrAccess          = errors.New("meta: permission denied")
 )
 
 // Inode 表示文件系统节点的领域实体。
 type Inode struct {
-	Ino        uint64
-	Generation uint64
-	Attr       Attribute
+	Ino                 uint64
+	Generation          uint64
+	Attr                Attribute
+	EntryTimeoutSeconds float64
+	AttrTimeoutSeconds  float64
 }
 
 // Attribute 表示节点的 POSIX 物理属性。
 type Attribute struct {
-	Mode    uint32
-	Size    uint64
-	Nlink   uint32
-	UID     uint32
-	GID     uint32
-	Rdev    uint32
-	Blksize uint32
-	Blocks  uint64
-	Atime   time.Time
-	Mtime   time.Time
-	Ctime   time.Time
+	Mode      uint32
+	Size      uint64
+	Nlink     uint32
+	UID       uint32
+	GID       uint32
+	Rdev      uint32
+	Blksize   uint32
+	Blocks    uint64
+	Atime     time.Time
+	Mtime     time.Time
+	Ctime     time.Time
+	Flags     uint32
+	ParentIno uint64
+}
+
+// GetXattrParams 定义获取扩展属性的输入参数。
+type GetXattrParams struct {
+	Ino  uint64
+	Name []byte
+	Size uint32
+}
+
+// ListXattrParams 定义列出扩展属性名称的输入参数。
+type ListXattrParams struct {
+	Ino  uint64
+	Size uint32
+}
+
+// RenewSessionResult 包含续期后刷新得到的会话租约截止时间与是否为新创建或过期重建标识。
+type RenewSessionResult struct {
+	ExpiresAt        time.Time
+	SessionRecreated bool
 }

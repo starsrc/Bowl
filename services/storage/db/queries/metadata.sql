@@ -1,16 +1,16 @@
 -- name: GetInode :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 FROM inodes
 WHERE ino = $1;
 
 -- name: GetInodeByEntry :one
-SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target
+SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target, i.flags, i.parent_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name = $2;
 
 -- name: GetInodeForUpdate :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 FROM inodes
 WHERE ino = $1
 FOR UPDATE;
@@ -22,16 +22,19 @@ SET
   size = $3,
   uid = $4,
   gid = $5,
-  atime = CASE WHEN @set_atime_now::boolean THEN clock_timestamp() ELSE @atime::timestamptz END,
-  mtime = CASE WHEN @set_mtime_now::boolean THEN clock_timestamp() ELSE @mtime::timestamptz END,
-  ctime = clock_timestamp()
+  atime = CASE WHEN @set_atime_now::boolean THEN ts.now ELSE @atime::timestamptz END,
+  mtime = CASE WHEN @set_mtime_now::boolean THEN ts.now ELSE @mtime::timestamptz END,
+  ctime = ts.now,
+  flags = @flags::integer
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: CreateInode :one
-INSERT INTO inodes (mode, nlink, uid, gid, rdev)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, @size::bigint, CASE WHEN @parent_ino::bigint > 0 THEN @parent_ino::bigint ELSE 1 END, ts.now, ts.now, ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: CreateEntry :exec
 INSERT INTO entries (parent_ino, name, ino)
@@ -39,20 +42,23 @@ VALUES ($1, $2, $3);
 
 -- name: TouchInodeTimestamps :exec
 UPDATE inodes
-SET mtime = clock_timestamp(), ctime = clock_timestamp()
+SET mtime = ts.now, ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1;
 
 -- name: IncrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink + 1,
-    mtime = clock_timestamp(),
-    ctime = clock_timestamp()
+    mtime = ts.now,
+    ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1;
 
 -- name: CreateSymlinkInode :one
-INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, $6, $7, CASE WHEN @parent_ino::bigint > 0 THEN @parent_ino::bigint ELSE 1 END, ts.now, ts.now, ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: GetSymlinkTarget :one
 SELECT mode, symlink_target
@@ -64,7 +70,7 @@ UPDATE inodes
 SET nlink = nlink + 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: GetEntry :one
 SELECT parent_ino, name, ino
@@ -85,20 +91,21 @@ UPDATE inodes
 SET nlink = nlink - 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: ClearInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = 0,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: DecrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink - 1,
-    mtime = clock_timestamp(),
-    ctime = clock_timestamp()
+    mtime = ts.now,
+    ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1;
 
 -- name: UpdateEntry :exec
@@ -116,6 +123,28 @@ WHERE parent_ino = $1 AND name = $2;
 UPDATE inodes
 SET ctime = clock_timestamp()
 WHERE ino = $1;
+
+-- name: TouchInodeAtime :exec
+UPDATE inodes
+SET atime = clock_timestamp()
+WHERE ino = $1;
+
+-- name: UpdateInodeParentInoAndTouchCtime :exec
+UPDATE inodes
+SET parent_ino = $2,
+    ctime = clock_timestamp()
+WHERE ino = $1;
+
+-- name: UpdateInodeParentIno :exec
+UPDATE inodes
+SET parent_ino = $2
+WHERE ino = $1;
+
+-- name: ListParentEntryCountsByIno :many
+SELECT parent_ino, COUNT(*)::bigint AS entry_count
+FROM entries
+WHERE ino = $1
+GROUP BY parent_ino;
 
 -- name: IsSubdirectory :one
 WITH RECURSIVE ancestors AS (
@@ -159,7 +188,7 @@ LEFT JOIN client_sessions s ON fh.session_id = s.session_id
 WHERE fh.fh = $1
   AND fh.ino = $2
   AND fh.session_id IS NOT DISTINCT FROM sqlc.narg('session_id')
-  AND (sqlc.narg('session_id') IS NULL OR s.expires_at > clock_timestamp());
+  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp());
 
 -- name: HasLinkableTmpFileHandleByIno :one
 -- 4194304 = 0o20000000 (O_TMPFILE), 128 = 0o200 (O_EXCL)
@@ -185,12 +214,12 @@ WHERE fh.fh = $1
   AND fh.ino = $2
   AND fh.session_id IS NOT DISTINCT FROM sqlc.narg('session_id')
   AND (
-      sqlc.narg('session_id') IS NULL
+      fh.session_id IS NULL
       OR EXISTS (
           SELECT 1
           FROM client_sessions s
           WHERE s.session_id = fh.session_id
-              AND s.expires_at > clock_timestamp()
+            AND s.expires_at > clock_timestamp()
       )
   )
 RETURNING fh.fh;
@@ -200,10 +229,25 @@ DELETE FROM inodes
 WHERE ino = $1;
 
 -- name: GetParentInode :one
-SELECT i.*
+SELECT
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target,
+    i.flags,
+    i.parent_ino
 FROM entries e
 JOIN inodes i ON e.parent_ino = i.ino
 WHERE e.ino = $1
+ORDER BY e.parent_ino ASC, e.name ASC
 LIMIT 1;
 
 -- name: ListDirEntries :many
@@ -220,12 +264,37 @@ SELECT
     i.atime,
     i.mtime,
     i.ctime,
-    i.symlink_target
+    i.symlink_target,
+    i.flags,
+    i.parent_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
 ORDER BY e.name ASC
 LIMIT $2 OFFSET sqlc.arg('offset')::bigint;
+
+-- name: ListDirEntriesAfterName :many
+SELECT
+    e.name,
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target,
+    i.flags,
+    i.parent_ino
+FROM entries e
+JOIN inodes i ON e.ino = i.ino
+WHERE e.parent_ino = $1 AND e.name > @after_name::bytea
+ORDER BY e.name ASC
+LIMIT $2;
 
 -- name: GetInodeXattr :one
 SELECT ino, name, value
@@ -253,19 +322,20 @@ ORDER BY name ASC;
 DELETE FROM inode_xattrs
 WHERE ino = $1 AND name = $2;
 
--- name: DeleteExpiredClientSessions :exec
+-- name: DeleteExpiredClientSessions :execrows
 DELETE FROM client_sessions
 WHERE expires_at <= clock_timestamp();
 
 -- name: UpsertClientSession :one
-INSERT INTO client_sessions (session_id, expires_at, updated_at)
-VALUES ($1, $2, clock_timestamp())
+WITH ts AS (SELECT clock_timestamp() AS now)
+INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
+SELECT $1, $2, ts.now, ts.now FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
-    updated_at = clock_timestamp()
-RETURNING session_id, expires_at, updated_at;
+    updated_at = (SELECT now FROM ts)
+RETURNING session_id, expires_at, updated_at, created_at;
 
--- name: DeleteUnreferencedOrphanInodes :exec
+-- name: DeleteUnreferencedOrphanInodes :many
 DELETE FROM inodes
 WHERE ino IN (
     SELECT i.ino
@@ -279,7 +349,8 @@ WHERE ino IN (
             AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
       )
     FOR UPDATE SKIP LOCKED
-);
+)
+RETURNING ino;
 
 -- name: GetFirstConflictingFileLock :one
 SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.lk_flags, l.start_offset, l.end_offset, l.lock_type, l.pid, l.created_at
@@ -380,3 +451,38 @@ RETURNING session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, e
 -- name: DeleteFileLockWaiter :execrows
 DELETE FROM file_lock_waiters
 WHERE session_id = @session_id AND request_id = @request_id;
+
+-- name: DeleteFlockFileLockWaitersBySessionAndFh :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = @session_id
+  AND ino = @ino
+  AND fh = @fh
+  AND lk_flags = 1;
+
+-- name: DeleteFlockFileLockWaitersByFh :execrows
+DELETE FROM file_lock_waiters
+WHERE ino = @ino
+  AND fh = @fh
+  AND lk_flags = 1;
+
+-- name: DeletePosixFileLockWaitersBySessionAndOwner :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = @session_id
+  AND ino = @ino
+  AND lock_owner = @lock_owner
+  AND lk_flags = 0;
+
+-- name: DeletePosixFileLockWaitersByOwner :execrows
+DELETE FROM file_lock_waiters
+WHERE ino = @ino
+  AND lock_owner = @lock_owner
+  AND lk_flags = 0;
+
+-- name: DeleteOverlappingPosixFileLockWaiters :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = @session_id
+  AND ino = @ino
+  AND lock_owner = @lock_owner
+  AND lk_flags = 0
+  AND start_offset <= @end_offset
+  AND end_offset >= @start_offset;

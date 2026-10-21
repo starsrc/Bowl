@@ -36,6 +36,11 @@ var mappings = []errorMapping{
 	{sentinel: ErrDeadlock, code: codes.Aborted, reason: "EDEADLK"},
 	{sentinel: ErrInterrupted, code: codes.Canceled, reason: "EINTR"},
 	{sentinel: ErrNotSupported, code: codes.Unimplemented, reason: "EOPNOTSUPP"},
+	{sentinel: ErrTooManyLinks, code: codes.ResourceExhausted, reason: "EMLINK"},
+	{sentinel: ErrFileTooLarge, code: codes.InvalidArgument, reason: "EFBIG"},
+	{sentinel: ErrIllegalSeek, code: codes.InvalidArgument, reason: "ESPIPE"},
+	{sentinel: ErrIO, code: codes.Internal, reason: "EIO"},
+	{sentinel: ErrAccess, code: codes.PermissionDenied, reason: "EACCES"},
 }
 
 // ToStatus 将领域层返回的 error 映射为携带 google.rpc.ErrorInfo 详情的 gRPC status.Status。

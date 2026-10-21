@@ -84,9 +84,9 @@ type XattrQuerier interface {
 
 // FileLockQuerier 提取文件锁、阻塞等待者与客户端会话租约存取接口契约。
 type FileLockQuerier interface {
-	DeleteExpiredClientSessions(ctx context.Context) error
+	DeleteExpiredClientSessions(ctx context.Context) (int64, error)
 	UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error)
-	DeleteUnreferencedOrphanInodes(ctx context.Context) error
+	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error)
 	GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)
 	CreateFileLock(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error)
@@ -1380,9 +1380,11 @@ func TestStore_FileLockBehavior(t *testing.T) {
 
 		mockStore.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
-		require.NoError(t, store.DeleteExpiredClientSessions(ctx))
+		count, err := store.DeleteExpiredClientSessions(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
 
 		upsertParams := db.UpsertClientSessionParams{
 			SessionID: 1001,
@@ -1404,9 +1406,11 @@ func TestStore_FileLockBehavior(t *testing.T) {
 
 		mockStore.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(nil).
+			Return([]int64(nil), nil).
 			Once()
-		require.NoError(t, store.DeleteUnreferencedOrphanInodes(ctx))
+		deletedInos, err := store.DeleteUnreferencedOrphanInodes(ctx)
+		require.NoError(t, err)
+		assert.Nil(t, deletedInos)
 	})
 
 	t.Run("GetFirstConflictingFileLock 与 ListActiveFileLocksByInoAndFlags", func(t *testing.T) {

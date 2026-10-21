@@ -215,9 +215,8 @@ message LookupRequest {
   uint64 parent_ino = 1 [(buf.validate.field).uint64.gt = 0];
 
   // 待查找的子项名称（文件或目录名）。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
-    (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
       id: "bytes_name_no_slash_or_nul"
@@ -274,7 +273,7 @@ message SetAttrRequest {
   option (buf.validate.message).cel = {
     id: "setattr_has_update"
     message: "at least one attribute must be updated"
-    expression: "has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_now"
+    expression: "has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_now || this.ctime_now || has(this.flags)"
   };
 
   // 待修改属性的目标 Inode 编号。
@@ -283,8 +282,8 @@ message SetAttrRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待修改的文件模式与权限位（不超过 0o177777）。
-  optional uint32 mode = 2 [(buf.validate.field).uint32.lte = 65535];
+  // 待修改的文件模式与权限位。
+  optional uint32 mode = 2;
 
   // 待修改的属主用户 ID。
   optional uint32 uid = 3 [(buf.validate.field).uint32.lte = 2147483647];
@@ -306,6 +305,18 @@ message SetAttrRequest {
 
   // 是否将最后修改时间设置为当前服务端时间。与 mtime 互斥。
   bool mtime_now = 9;
+
+  // 可选的文件句柄。
+  optional uint64 fh = 10 [(buf.validate.field).uint64 = {gt: 0, lte: 9223372036854775807}];
+
+  // 可选的客户端会话租约标识。
+  optional uint64 session_id = 11 [(buf.validate.field).uint64 = {gt: 0, lte: 9223372036854775807}];
+
+  // 是否将状态变更时间设置为当前服务端时间。
+  bool ctime_now = 12;
+
+  // 可选的文件系统标志位（如 chattr 所设）。
+  optional uint32 flags = 13;
 }
 
 // SetAttrResponse 包含更新后的 Inode 实体元数据及内核属性缓存时长。
@@ -337,17 +348,14 @@ message MknodRequest {
     }
   ];
 
-  // 节点模式位（包含文件类型及权限位，取值范围必须在 1 到 0o177777 / 65535 之间）。
-  uint32 mode = 3 [
-    (buf.validate.field).uint32.gt = 0,
-    (buf.validate.field).uint32.lte = 65535
-  ];
+  // 节点模式位（包含文件类型及权限位）。
+  uint32 mode = 3;
 
   // 所属用户 ID。
-  uint32 uid = 4;
+  uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 所属组 ID。
-  uint32 gid = 5;
+  uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 特殊设备号（仅当创建字符/块设备文件时有效，其余节点为 0）。
   uint32 rdev = 6;
@@ -385,14 +393,14 @@ message MkdirRequest {
     }
   ];
 
-  // 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位，取值范围必须在 0 到 0o177777 / 65535 之间）。
-  uint32 mode = 3 [(buf.validate.field).uint32.lte = 65535];
+  // 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位）。
+  uint32 mode = 3;
 
   // 所属用户 ID。
-  uint32 uid = 4;
+  uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 所属组 ID。
-  uint32 gid = 5;
+  uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 }
 
 // MkdirResponse 包含新创建目录的元数据以及 FUSE 内核缓存有效时间。
@@ -440,10 +448,10 @@ message SymlinkRequest {
   ];
 
   // 所属用户 ID。
-  uint32 uid = 4;
+  uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 所属组 ID。
-  uint32 gid = 5;
+  uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 }
 
 // SymlinkResponse 包含新创建符号链接的元数据以及 FUSE 内核缓存有效时间。
@@ -529,9 +537,8 @@ message UnlinkRequest {
   ];
 
   // 待删除的非目录项名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
-    (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
       id: "bytes_name_no_slash_or_nul"
@@ -553,9 +560,8 @@ message RmdirRequest {
   ];
 
   // 待移除的空目录项名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
-    (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
       id: "bytes_name_no_slash_or_nul"
@@ -577,9 +583,8 @@ message RenameRequest {
   ];
 
   // 待重命名的源项名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
+  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes old_name = 2 [
-    (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
       id: "bytes_name_no_slash_or_nul"
@@ -606,8 +611,8 @@ message RenameRequest {
     }
   ];
 
-  // 重命名标志位 (0: 默认覆盖, 1: RENAME_NOREPLACE 禁止覆盖, 2: RENAME_EXCHANGE 双向交换)。
-  uint32 flags = 5 [(buf.validate.field).uint32.lte = 2];
+  // 重命名标志位。
+  uint32 flags = 5;
 }
 
 // RenameResponse 定义 Rename 接口返回参数。
@@ -633,14 +638,14 @@ message CreateRequest {
     }
   ];
 
-  // 节点模式位（包含可选的 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
-  uint32 mode = 3 [(buf.validate.field).uint32.lte = 65535];
+  // 节点模式位（包含可选的 S_IFREG 文件类型位及权限位）。
+  uint32 mode = 3;
 
   // 所属用户 ID。
-  uint32 uid = 4;
+  uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 所属组 ID。
-  uint32 gid = 5;
+  uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等，严禁携带 O_TMPFILE = 0o20000000)。
   uint32 flags = 6;
@@ -678,21 +683,14 @@ message TmpFileRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 节点模式位（仅允许 0 或 S_IFREG 文件类型位及权限位，取值范围必须在 0 到 0xffff / 65535 之间）。
-  uint32 mode = 2 [
-    (buf.validate.field).uint32.lte = 65535,
-    (buf.validate.field).cel = {
-      id: "tmpfile_mode_regular_only"
-      message: "mode file type must be 0 or S_IFREG (0o100000)"
-      expression: "this < 4096u || (this >= 32768u && this < 36864u)"
-    }
-  ];
+  // 节点模式位（包含可选的文件类型位及权限位）。
+  uint32 mode = 2;
 
   // 所属用户 ID。
-  uint32 uid = 3;
+  uint32 uid = 3 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 所属组 ID。
-  uint32 gid = 4;
+  uint32 gid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 打开标志位（必须为 O_WRONLY (1) 或 O_RDWR (2)，可携带 O_EXCL 等标志）。
   uint32 flags = 5 [(buf.validate.field).cel = {
@@ -833,12 +831,8 @@ message ReleaseRequest {
   // 可选的文件锁拥有者标识 (lock owner)。允许全范围 uint64。
   optional uint64 lock_owner = 3;
 
-  // 释放标志位掩码（仅允许 0 或 FUSE_RELEASE_FLOCK_UNLOCK = 0x2）。
-  uint32 release_flags = 4 [(buf.validate.field).cel = {
-    id: "release_flags_valid"
-    message: "invalid release_flags"
-    expression: "this == 0u || this == 2u"
-  }];
+  // 释放标志位掩码（允许 0 到 3，支持 FUSE_RELEASE_FLUSH 与 FUSE_RELEASE_FLOCK_UNLOCK）。
+  uint32 release_flags = 4 [(buf.validate.field).uint32.lte = 3];
 
   // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   optional uint64 session_id = 5 [(buf.validate.field).uint64 = {
@@ -1118,8 +1112,8 @@ message SetXattrRequest {
   // 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "E2BIG"）。
   bytes value = 3 [(buf.validate.field).bytes.max_len = 65536];
 
-  // 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE, 3: 两者皆设)。
-  uint32 flags = 4 [(buf.validate.field).uint32.lte = 3];
+  // 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE)。
+  uint32 flags = 4 [(buf.validate.field).uint32.lte = 2];
 }
 
 // SetXattrResponse 定义 SetXattr 接口响应结果。
@@ -1224,16 +1218,11 @@ message FileLock {
   uint32 type = 3 [(buf.validate.field).uint32.lte = 2];
 
   // 持锁或请求锁的进程标识符 (PID)。
-  uint32 pid = 4;
+  uint32 pid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 }
 
 // GetLkRequest 定义 GetLk (FUSE_GETLK = 31) 接口输入参数。
 message GetLkRequest {
-  option (buf.validate.message).cel = {
-    id: "getlk_type_not_unlock"
-    message: "GetLk does not allow F_UNLCK (2)"
-    expression: "this.lk.type != 2u"
-  };
   option (buf.validate.message).cel = {
     id: "getlk_flock_whole_file_range"
     message: "FUSE_LK_FLOCK requires whole-file range [0, 9223372036854775807]"
@@ -1372,6 +1361,9 @@ message RenewSessionRequest {
 message RenewSessionResponse {
   // 续期后的会话租约截止时间。
   google.protobuf.Timestamp expires_at = 1 [(buf.validate.field).required = true];
+
+  // 会话是否为新创建或过期重建。
+  bool session_recreated = 2;
 }
 
 // Inode 代表文件系统中的实体节点。
@@ -1399,15 +1391,15 @@ message InodeAttribute {
   uint32 nlink = 3;
 
   // 所属用户 ID。
-  uint32 uid = 4;
+  uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 所属组 ID。
-  uint32 gid = 5;
+  uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 
   // 特殊设备号（仅当为设备文件时有效，常规文件为 0）。
   uint32 rdev = 6;
 
-  // 块大小（字节数，例如 4096）。
+  // 块大小（字节数，默认 65536 即 0x10000）。
   uint32 blksize = 7;
 
   // 占用的 512 字节块数量。

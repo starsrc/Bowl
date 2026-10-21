@@ -171,14 +171,30 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			isValid: false,
 		},
 
-		// 6. Mode 字段边界校验
+		// 6. Mode 字段边界校验 (允许携带高位由领域层截断)
 		{
-			name: "非法: mode 超过 65535",
+			name: "合法: mode 携带高位 (如 65536 或 S_IFREG 0o100644)",
 			req: &storagev1.SetAttrRequest{
 				Ino:  1,
 				Mode: ptr[uint32](65536),
 			},
-			isValid: false,
+			isValid: true,
+		},
+		{
+			name: "合法: 仅设置 ctime_now",
+			req: &storagev1.SetAttrRequest{
+				Ino:      1,
+				CtimeNow: true,
+			},
+			isValid: true,
+		},
+		{
+			name: "合法: 仅设置 flags",
+			req: &storagev1.SetAttrRequest{
+				Ino:   1,
+				Flags: ptr[uint32](1),
+			},
+			isValid: true,
 		},
 
 		// 7. Size 字段边界校验

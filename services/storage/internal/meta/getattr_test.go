@@ -172,7 +172,7 @@ func TestGetAttr_PositivePath(t *testing.T) {
 			assert.Equal(t, uint32(tc.uid), inode.Attr.UID)
 			assert.Equal(t, uint32(tc.gid), inode.Attr.GID)
 			assert.Equal(t, uint32(tc.rdev), inode.Attr.Rdev)
-			assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+			assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 			assert.Equal(t, tc.expectedBlk, inode.Attr.Blocks)
 			assert.True(t, atime.Equal(inode.Attr.Atime))
 			assert.True(t, mtime.Equal(inode.Attr.Mtime))
@@ -218,7 +218,7 @@ func TestGetAttr_DynamicBlockCalculations(t *testing.T) {
 			inode, err := mgr.GetAttr(ctx, ino)
 			require.NoError(t, err)
 			require.NotNil(t, inode)
-			assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+			assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 			assert.Equal(t, tc.expectedBlocks, inode.Attr.Blocks)
 		})
 	}

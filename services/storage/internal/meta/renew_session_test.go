@@ -68,7 +68,7 @@ func TestRenewSession_Unit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -83,7 +83,7 @@ func TestRenewSession_Unit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(nil).
+			Return([]int64(nil), nil).
 			Once()
 
 		expiresAt, err := mgr.RenewSession(ctx, sessID)
@@ -101,7 +101,7 @@ func TestRenewSession_Unit(t *testing.T) {
 		expectedErr := errors.New("delete expired sessions failed")
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(expectedErr).
+			Return(int64(0), expectedErr).
 			Once()
 
 		expiresAt, err := mgr.RenewSession(ctx, sessID)
@@ -119,7 +119,7 @@ func TestRenewSession_Unit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 
 		expectedErr := errors.New("upsert session failed")
@@ -143,7 +143,7 @@ func TestRenewSession_Unit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -157,7 +157,7 @@ func TestRenewSession_Unit(t *testing.T) {
 		expectedErr := errors.New("delete orphan inodes failed")
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(expectedErr).
+			Return([]int64(nil), expectedErr).
 			Once()
 
 		expiresAt, err := mgr.RenewSession(ctx, sessID)

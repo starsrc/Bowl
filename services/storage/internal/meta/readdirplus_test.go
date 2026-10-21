@@ -204,7 +204,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		require.NotNil(t, entries[0].Inode)
 		assert.Equal(t, uint64(dirIno), entries[0].Inode.Ino)
 		assert.Equal(t, uint32(dirDBInode.Mode), entries[0].Inode.Attr.Mode)
-		assert.Equal(t, uint32(4096), entries[0].Inode.Attr.Blksize)
+		assert.Equal(t, meta.DefaultBlockSize, entries[0].Inode.Attr.Blksize)
 		assert.Equal(t, uint64(8), entries[0].Inode.Attr.Blocks) // (4096+511)/512
 
 		// 验证 .. 条目
@@ -227,7 +227,7 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		assert.Equal(t, uint64(childRow1.Ino), entries[2].Inode.Ino)
 		assert.Equal(t, uint32(childRow1.Mode), entries[2].Inode.Attr.Mode)
 		assert.Equal(t, uint64(1024), entries[2].Inode.Attr.Size)
-		assert.Equal(t, uint32(4096), entries[2].Inode.Attr.Blksize)
+		assert.Equal(t, meta.DefaultBlockSize, entries[2].Inode.Attr.Blksize)
 		assert.Equal(t, uint64(2), entries[2].Inode.Attr.Blocks) // (1024+511)/512
 
 		// 验证子项 2 (banana.txt)

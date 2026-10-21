@@ -59,12 +59,12 @@ func TestUnlinkRequestValidation(t *testing.T) {
 			reqName:   []byte("file.txt"),
 			valid:     false,
 		},
-		// 负向用例: name
+		// 边界用例: name 为空允许进入领域层先校验父目录后返回 ENOENT
 		{
-			name:      "非法: name 为空",
+			name:      "合法: name 为空允许进入领域层",
 			parentIno: 1,
 			reqName:   []byte(""),
-			valid:     false,
+			valid:     true,
 		},
 		{
 			name:      "非法: name 超过 255 字节",
@@ -165,12 +165,12 @@ func TestRmdirRequestValidation(t *testing.T) {
 			reqName:   []byte("sub_dir"),
 			valid:     false,
 		},
-		// 负向用例: name
+		// 边界用例: name 为空允许进入领域层先校验父目录后返回 ENOENT
 		{
-			name:      "非法: name 为空",
+			name:      "合法: name 为空允许进入领域层",
 			parentIno: 1,
 			reqName:   []byte(""),
-			valid:     false,
+			valid:     true,
 		},
 		{
 			name:      "非法: name 超过 255 字节",

@@ -87,7 +87,7 @@ func TestSetAttr_PositivePath(t *testing.T) {
 		assert.Equal(t, ino, inode.Ino)
 		assert.Equal(t, uint32(0o100755), inode.Attr.Mode)
 		assert.Equal(t, uint64(1024), inode.Attr.Size)
-		assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+		assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 		assert.Equal(t, uint64(2), inode.Attr.Blocks)
 		assert.Equal(t, updatedRow.Ctime.Time, inode.Attr.Ctime)
 	})
@@ -175,7 +175,7 @@ func TestSetAttr_PositivePath(t *testing.T) {
 
 		assert.Equal(t, uint64(4097), inode.Attr.Size)
 		assert.Equal(t, uint64(9), inode.Attr.Blocks) // (4097 + 511) / 512 = 9
-		assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+		assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 		assert.Equal(t, updatedRow.Mtime.Time, inode.Attr.Mtime)
 	})
 

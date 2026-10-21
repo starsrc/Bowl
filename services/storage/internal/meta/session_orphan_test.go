@@ -129,7 +129,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 	expectRenewSession := func(mockQuerier *dbmock.MockQuerier, sid uint64) {
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
@@ -139,7 +139,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(nil).
+			Return([]int64(nil), nil).
 			Once()
 	}
 
@@ -406,7 +406,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
@@ -415,7 +415,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 		orphanErr := errors.New("orphan gc failed")
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(orphanErr).
+			Return([]int64(nil), orphanErr).
 			Once()
 
 		_, err := mgr.Open(ctx, meta.OpenParams{

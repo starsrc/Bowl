@@ -664,20 +664,29 @@ func (_c *MockStore_DeleteEntry_Call) RunAndReturn(run func(ctx context.Context,
 }
 
 // DeleteExpiredClientSessions provides a mock function for the type MockStore
-func (_mock *MockStore) DeleteExpiredClientSessions(ctx context.Context) error {
+func (_mock *MockStore) DeleteExpiredClientSessions(ctx context.Context) (int64, error) {
 	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteExpiredClientSessions")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) error); ok {
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
 		r0 = returnFunc(ctx)
 	} else {
-		r0 = ret.Error(0)
+		r0 = ret.Get(0).(int64)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockStore_DeleteExpiredClientSessions_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteExpiredClientSessions'
@@ -704,12 +713,12 @@ func (_c *MockStore_DeleteExpiredClientSessions_Call) Run(run func(ctx context.C
 	return _c
 }
 
-func (_c *MockStore_DeleteExpiredClientSessions_Call) Return(err error) *MockStore_DeleteExpiredClientSessions_Call {
-	_c.Call.Return(err)
+func (_c *MockStore_DeleteExpiredClientSessions_Call) Return(n int64, err error) *MockStore_DeleteExpiredClientSessions_Call {
+	_c.Call.Return(n, err)
 	return _c
 }
 
-func (_c *MockStore_DeleteExpiredClientSessions_Call) RunAndReturn(run func(ctx context.Context) error) *MockStore_DeleteExpiredClientSessions_Call {
+func (_c *MockStore_DeleteExpiredClientSessions_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockStore_DeleteExpiredClientSessions_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -899,6 +908,138 @@ func (_c *MockStore_DeleteFileLocksByIDs_Call) Return(err error) *MockStore_Dele
 }
 
 func (_c *MockStore_DeleteFileLocksByIDs_Call) RunAndReturn(run func(ctx context.Context, ids []int64) error) *MockStore_DeleteFileLocksByIDs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFlockFileLockWaitersByFh provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteFlockFileLockWaitersByFh(ctx context.Context, arg db.DeleteFlockFileLockWaitersByFhParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFlockFileLockWaitersByFh")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLockWaitersByFhParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLockWaitersByFhParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteFlockFileLockWaitersByFhParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteFlockFileLockWaitersByFh_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFlockFileLockWaitersByFh'
+type MockStore_DeleteFlockFileLockWaitersByFh_Call struct {
+	*mock.Call
+}
+
+// DeleteFlockFileLockWaitersByFh is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteFlockFileLockWaitersByFhParams
+func (_e *MockStore_Expecter) DeleteFlockFileLockWaitersByFh(ctx any, arg any) *MockStore_DeleteFlockFileLockWaitersByFh_Call {
+	return &MockStore_DeleteFlockFileLockWaitersByFh_Call{Call: _e.mock.On("DeleteFlockFileLockWaitersByFh", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteFlockFileLockWaitersByFh_Call) Run(run func(ctx context.Context, arg db.DeleteFlockFileLockWaitersByFhParams)) *MockStore_DeleteFlockFileLockWaitersByFh_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteFlockFileLockWaitersByFhParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteFlockFileLockWaitersByFhParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteFlockFileLockWaitersByFh_Call) Return(n int64, err error) *MockStore_DeleteFlockFileLockWaitersByFh_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteFlockFileLockWaitersByFh_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteFlockFileLockWaitersByFhParams) (int64, error)) *MockStore_DeleteFlockFileLockWaitersByFh_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteFlockFileLockWaitersBySessionAndFh provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteFlockFileLockWaitersBySessionAndFh(ctx context.Context, arg db.DeleteFlockFileLockWaitersBySessionAndFhParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteFlockFileLockWaitersBySessionAndFh")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLockWaitersBySessionAndFhParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteFlockFileLockWaitersBySessionAndFhParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteFlockFileLockWaitersBySessionAndFhParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteFlockFileLockWaitersBySessionAndFh'
+type MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call struct {
+	*mock.Call
+}
+
+// DeleteFlockFileLockWaitersBySessionAndFh is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteFlockFileLockWaitersBySessionAndFhParams
+func (_e *MockStore_Expecter) DeleteFlockFileLockWaitersBySessionAndFh(ctx any, arg any) *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call {
+	return &MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call{Call: _e.mock.On("DeleteFlockFileLockWaitersBySessionAndFh", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call) Run(run func(ctx context.Context, arg db.DeleteFlockFileLockWaitersBySessionAndFhParams)) *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteFlockFileLockWaitersBySessionAndFhParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteFlockFileLockWaitersBySessionAndFhParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call) Return(n int64, err error) *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteFlockFileLockWaitersBySessionAndFhParams) (int64, error)) *MockStore_DeleteFlockFileLockWaitersBySessionAndFh_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1158,6 +1299,204 @@ func (_c *MockStore_DeleteInodeXattr_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// DeleteOverlappingPosixFileLockWaiters provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteOverlappingPosixFileLockWaiters(ctx context.Context, arg db.DeleteOverlappingPosixFileLockWaitersParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteOverlappingPosixFileLockWaiters")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteOverlappingPosixFileLockWaitersParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteOverlappingPosixFileLockWaitersParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteOverlappingPosixFileLockWaitersParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteOverlappingPosixFileLockWaiters_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteOverlappingPosixFileLockWaiters'
+type MockStore_DeleteOverlappingPosixFileLockWaiters_Call struct {
+	*mock.Call
+}
+
+// DeleteOverlappingPosixFileLockWaiters is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteOverlappingPosixFileLockWaitersParams
+func (_e *MockStore_Expecter) DeleteOverlappingPosixFileLockWaiters(ctx any, arg any) *MockStore_DeleteOverlappingPosixFileLockWaiters_Call {
+	return &MockStore_DeleteOverlappingPosixFileLockWaiters_Call{Call: _e.mock.On("DeleteOverlappingPosixFileLockWaiters", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteOverlappingPosixFileLockWaiters_Call) Run(run func(ctx context.Context, arg db.DeleteOverlappingPosixFileLockWaitersParams)) *MockStore_DeleteOverlappingPosixFileLockWaiters_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteOverlappingPosixFileLockWaitersParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteOverlappingPosixFileLockWaitersParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteOverlappingPosixFileLockWaiters_Call) Return(n int64, err error) *MockStore_DeleteOverlappingPosixFileLockWaiters_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteOverlappingPosixFileLockWaiters_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteOverlappingPosixFileLockWaitersParams) (int64, error)) *MockStore_DeleteOverlappingPosixFileLockWaiters_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeletePosixFileLockWaitersByOwner provides a mock function for the type MockStore
+func (_mock *MockStore) DeletePosixFileLockWaitersByOwner(ctx context.Context, arg db.DeletePosixFileLockWaitersByOwnerParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeletePosixFileLockWaitersByOwner")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLockWaitersByOwnerParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLockWaitersByOwnerParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeletePosixFileLockWaitersByOwnerParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeletePosixFileLockWaitersByOwner_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeletePosixFileLockWaitersByOwner'
+type MockStore_DeletePosixFileLockWaitersByOwner_Call struct {
+	*mock.Call
+}
+
+// DeletePosixFileLockWaitersByOwner is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeletePosixFileLockWaitersByOwnerParams
+func (_e *MockStore_Expecter) DeletePosixFileLockWaitersByOwner(ctx any, arg any) *MockStore_DeletePosixFileLockWaitersByOwner_Call {
+	return &MockStore_DeletePosixFileLockWaitersByOwner_Call{Call: _e.mock.On("DeletePosixFileLockWaitersByOwner", ctx, arg)}
+}
+
+func (_c *MockStore_DeletePosixFileLockWaitersByOwner_Call) Run(run func(ctx context.Context, arg db.DeletePosixFileLockWaitersByOwnerParams)) *MockStore_DeletePosixFileLockWaitersByOwner_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeletePosixFileLockWaitersByOwnerParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeletePosixFileLockWaitersByOwnerParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeletePosixFileLockWaitersByOwner_Call) Return(n int64, err error) *MockStore_DeletePosixFileLockWaitersByOwner_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_DeletePosixFileLockWaitersByOwner_Call) RunAndReturn(run func(ctx context.Context, arg db.DeletePosixFileLockWaitersByOwnerParams) (int64, error)) *MockStore_DeletePosixFileLockWaitersByOwner_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeletePosixFileLockWaitersBySessionAndOwner provides a mock function for the type MockStore
+func (_mock *MockStore) DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg db.DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeletePosixFileLockWaitersBySessionAndOwner")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeletePosixFileLockWaitersBySessionAndOwnerParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeletePosixFileLockWaitersBySessionAndOwnerParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeletePosixFileLockWaitersBySessionAndOwner'
+type MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call struct {
+	*mock.Call
+}
+
+// DeletePosixFileLockWaitersBySessionAndOwner is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeletePosixFileLockWaitersBySessionAndOwnerParams
+func (_e *MockStore_Expecter) DeletePosixFileLockWaitersBySessionAndOwner(ctx any, arg any) *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call {
+	return &MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call{Call: _e.mock.On("DeletePosixFileLockWaitersBySessionAndOwner", ctx, arg)}
+}
+
+func (_c *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call) Run(run func(ctx context.Context, arg db.DeletePosixFileLockWaitersBySessionAndOwnerParams)) *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeletePosixFileLockWaitersBySessionAndOwnerParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeletePosixFileLockWaitersBySessionAndOwnerParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call) Return(n int64, err error) *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call) RunAndReturn(run func(ctx context.Context, arg db.DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error)) *MockStore_DeletePosixFileLockWaitersBySessionAndOwner_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeletePosixFileLocksByOwner provides a mock function for the type MockStore
 func (_mock *MockStore) DeletePosixFileLocksByOwner(ctx context.Context, arg db.DeletePosixFileLocksByOwnerParams) (int64, error) {
 	ret := _mock.Called(ctx, arg)
@@ -1291,20 +1630,31 @@ func (_c *MockStore_DeletePosixFileLocksBySessionAndOwner_Call) RunAndReturn(run
 }
 
 // DeleteUnreferencedOrphanInodes provides a mock function for the type MockStore
-func (_mock *MockStore) DeleteUnreferencedOrphanInodes(ctx context.Context) error {
+func (_mock *MockStore) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error) {
 	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteUnreferencedOrphanInodes")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) error); ok {
+	var r0 []int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]int64, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []int64); ok {
 		r0 = returnFunc(ctx)
 	} else {
-		r0 = ret.Error(0)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]int64)
+		}
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockStore_DeleteUnreferencedOrphanInodes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteUnreferencedOrphanInodes'
@@ -1331,12 +1681,12 @@ func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) Run(run func(ctx contex
 	return _c
 }
 
-func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) Return(err error) *MockStore_DeleteUnreferencedOrphanInodes_Call {
-	_c.Call.Return(err)
+func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) Return(int64s []int64, err error) *MockStore_DeleteUnreferencedOrphanInodes_Call {
+	_c.Call.Return(int64s, err)
 	return _c
 }
 
-func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) RunAndReturn(run func(ctx context.Context) error) *MockStore_DeleteUnreferencedOrphanInodes_Call {
+func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) RunAndReturn(run func(ctx context.Context) ([]int64, error)) *MockStore_DeleteUnreferencedOrphanInodes_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -2723,6 +3073,74 @@ func (_c *MockStore_ListDirEntries_Call) RunAndReturn(run func(ctx context.Conte
 	return _c
 }
 
+// ListDirEntriesAfterName provides a mock function for the type MockStore
+func (_mock *MockStore) ListDirEntriesAfterName(ctx context.Context, arg db.ListDirEntriesAfterNameParams) ([]db.ListDirEntriesAfterNameRow, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListDirEntriesAfterName")
+	}
+
+	var r0 []db.ListDirEntriesAfterNameRow
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDirEntriesAfterNameParams) ([]db.ListDirEntriesAfterNameRow, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDirEntriesAfterNameParams) []db.ListDirEntriesAfterNameRow); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.ListDirEntriesAfterNameRow)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListDirEntriesAfterNameParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_ListDirEntriesAfterName_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDirEntriesAfterName'
+type MockStore_ListDirEntriesAfterName_Call struct {
+	*mock.Call
+}
+
+// ListDirEntriesAfterName is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListDirEntriesAfterNameParams
+func (_e *MockStore_Expecter) ListDirEntriesAfterName(ctx any, arg any) *MockStore_ListDirEntriesAfterName_Call {
+	return &MockStore_ListDirEntriesAfterName_Call{Call: _e.mock.On("ListDirEntriesAfterName", ctx, arg)}
+}
+
+func (_c *MockStore_ListDirEntriesAfterName_Call) Run(run func(ctx context.Context, arg db.ListDirEntriesAfterNameParams)) *MockStore_ListDirEntriesAfterName_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListDirEntriesAfterNameParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListDirEntriesAfterNameParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ListDirEntriesAfterName_Call) Return(listDirEntriesAfterNameRows []db.ListDirEntriesAfterNameRow, err error) *MockStore_ListDirEntriesAfterName_Call {
+	_c.Call.Return(listDirEntriesAfterNameRows, err)
+	return _c
+}
+
+func (_c *MockStore_ListDirEntriesAfterName_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDirEntriesAfterNameParams) ([]db.ListDirEntriesAfterNameRow, error)) *MockStore_ListDirEntriesAfterName_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListInodeXattrNames provides a mock function for the type MockStore
 func (_mock *MockStore) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error) {
 	ret := _mock.Called(ctx, ino)
@@ -2791,6 +3209,74 @@ func (_c *MockStore_ListInodeXattrNames_Call) RunAndReturn(run func(ctx context.
 	return _c
 }
 
+// ListParentEntryCountsByIno provides a mock function for the type MockStore
+func (_mock *MockStore) ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]db.ListParentEntryCountsByInoRow, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListParentEntryCountsByIno")
+	}
+
+	var r0 []db.ListParentEntryCountsByInoRow
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([]db.ListParentEntryCountsByInoRow, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) []db.ListParentEntryCountsByInoRow); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.ListParentEntryCountsByInoRow)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_ListParentEntryCountsByIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListParentEntryCountsByIno'
+type MockStore_ListParentEntryCountsByIno_Call struct {
+	*mock.Call
+}
+
+// ListParentEntryCountsByIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) ListParentEntryCountsByIno(ctx any, ino any) *MockStore_ListParentEntryCountsByIno_Call {
+	return &MockStore_ListParentEntryCountsByIno_Call{Call: _e.mock.On("ListParentEntryCountsByIno", ctx, ino)}
+}
+
+func (_c *MockStore_ListParentEntryCountsByIno_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_ListParentEntryCountsByIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ListParentEntryCountsByIno_Call) Return(listParentEntryCountsByInoRows []db.ListParentEntryCountsByInoRow, err error) *MockStore_ListParentEntryCountsByIno_Call {
+	_c.Call.Return(listParentEntryCountsByInoRows, err)
+	return _c
+}
+
+func (_c *MockStore_ListParentEntryCountsByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) ([]db.ListParentEntryCountsByInoRow, error)) *MockStore_ListParentEntryCountsByIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListPendingFileLockWaitersByInoAndFlags provides a mock function for the type MockStore
 func (_mock *MockStore) ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error) {
 	ret := _mock.Called(ctx, arg)
@@ -2855,6 +3341,63 @@ func (_c *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call) Return(fileLoc
 }
 
 func (_c *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call) RunAndReturn(run func(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error)) *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// TouchInodeAtime provides a mock function for the type MockStore
+func (_mock *MockStore) TouchInodeAtime(ctx context.Context, ino int64) error {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for TouchInodeAtime")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_TouchInodeAtime_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TouchInodeAtime'
+type MockStore_TouchInodeAtime_Call struct {
+	*mock.Call
+}
+
+// TouchInodeAtime is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) TouchInodeAtime(ctx any, ino any) *MockStore_TouchInodeAtime_Call {
+	return &MockStore_TouchInodeAtime_Call{Call: _e.mock.On("TouchInodeAtime", ctx, ino)}
+}
+
+func (_c *MockStore_TouchInodeAtime_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_TouchInodeAtime_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_TouchInodeAtime_Call) Return(err error) *MockStore_TouchInodeAtime_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_TouchInodeAtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_TouchInodeAtime_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -3149,6 +3692,120 @@ func (_c *MockStore_UpdateInodeAttr_Call) Return(inode db.Inode, err error) *Moc
 }
 
 func (_c *MockStore_UpdateInodeAttr_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeAttrParams) (db.Inode, error)) *MockStore_UpdateInodeAttr_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateInodeParentIno provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateInodeParentIno(ctx context.Context, arg db.UpdateInodeParentInoParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateInodeParentIno")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateInodeParentInoParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_UpdateInodeParentIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateInodeParentIno'
+type MockStore_UpdateInodeParentIno_Call struct {
+	*mock.Call
+}
+
+// UpdateInodeParentIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateInodeParentInoParams
+func (_e *MockStore_Expecter) UpdateInodeParentIno(ctx any, arg any) *MockStore_UpdateInodeParentIno_Call {
+	return &MockStore_UpdateInodeParentIno_Call{Call: _e.mock.On("UpdateInodeParentIno", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateInodeParentIno_Call) Run(run func(ctx context.Context, arg db.UpdateInodeParentInoParams)) *MockStore_UpdateInodeParentIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateInodeParentInoParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateInodeParentInoParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeParentIno_Call) Return(err error) *MockStore_UpdateInodeParentIno_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeParentIno_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeParentInoParams) error) *MockStore_UpdateInodeParentIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateInodeParentInoAndTouchCtime provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateInodeParentInoAndTouchCtime(ctx context.Context, arg db.UpdateInodeParentInoAndTouchCtimeParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateInodeParentInoAndTouchCtime")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateInodeParentInoAndTouchCtimeParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_UpdateInodeParentInoAndTouchCtime_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateInodeParentInoAndTouchCtime'
+type MockStore_UpdateInodeParentInoAndTouchCtime_Call struct {
+	*mock.Call
+}
+
+// UpdateInodeParentInoAndTouchCtime is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateInodeParentInoAndTouchCtimeParams
+func (_e *MockStore_Expecter) UpdateInodeParentInoAndTouchCtime(ctx any, arg any) *MockStore_UpdateInodeParentInoAndTouchCtime_Call {
+	return &MockStore_UpdateInodeParentInoAndTouchCtime_Call{Call: _e.mock.On("UpdateInodeParentInoAndTouchCtime", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateInodeParentInoAndTouchCtime_Call) Run(run func(ctx context.Context, arg db.UpdateInodeParentInoAndTouchCtimeParams)) *MockStore_UpdateInodeParentInoAndTouchCtime_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateInodeParentInoAndTouchCtimeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateInodeParentInoAndTouchCtimeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeParentInoAndTouchCtime_Call) Return(err error) *MockStore_UpdateInodeParentInoAndTouchCtime_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeParentInoAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeParentInoAndTouchCtimeParams) error) *MockStore_UpdateInodeParentInoAndTouchCtime_Call {
 	_c.Call.Return(run)
 	return _c
 }

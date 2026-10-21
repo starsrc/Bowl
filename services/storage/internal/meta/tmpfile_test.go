@@ -301,7 +301,7 @@ func TestTmpFile_PositiveAndParentInvariants(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
-			Return(nil).
+			Return(int64(0), nil).
 			Once()
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
@@ -311,7 +311,7 @@ func TestTmpFile_PositiveAndParentInvariants(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return(nil).
+			Return([]int64(nil), nil).
 			Once()
 
 		mockQuerier.EXPECT().

@@ -53,8 +53,12 @@ func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionI
 	if leaseTTL <= 0 {
 		leaseTTL = DefaultSessionLeaseTTL
 	}
-	if err := q.DeleteExpiredClientSessions(ctx); err != nil {
+	deletedCount, err := q.DeleteExpiredClientSessions(ctx)
+	if err != nil {
 		return time.Time{}, fmt.Errorf("delete expired client sessions: %w", err)
+	}
+	if deletedCount > 0 {
+		m.notifyAllLockWaiters()
 	}
 	session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
 		SessionID: int64(sessionID),
@@ -66,8 +70,12 @@ func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionI
 	if err != nil {
 		return time.Time{}, fmt.Errorf("upsert client session %d: %w", sessionID, err)
 	}
-	if err := q.DeleteUnreferencedOrphanInodes(ctx); err != nil {
+	deletedInos, err := q.DeleteUnreferencedOrphanInodes(ctx)
+	if err != nil {
 		return time.Time{}, fmt.Errorf("delete unreferenced orphan inodes: %w", err)
+	}
+	if len(deletedInos) > 0 {
+		m.cleanLockWaitersForInos(deletedInos)
 	}
 	return session.ExpiresAt.Time, nil
 }
@@ -185,6 +193,33 @@ func (m *manager) notifyLockWaiters(ino uint64) {
 	if ch, ok := m.lockNotifyChans[ino]; ok {
 		close(ch)
 		delete(m.lockNotifyChans, ino)
+	}
+}
+
+func (m *manager) notifyAllLockWaiters() {
+	m.lockNotifyMu.Lock()
+	defer m.lockNotifyMu.Unlock()
+	if m.lockNotifyChans == nil {
+		return
+	}
+	for ino, ch := range m.lockNotifyChans {
+		close(ch)
+		delete(m.lockNotifyChans, ino)
+	}
+}
+
+func (m *manager) cleanLockWaitersForInos(inos []int64) {
+	m.lockNotifyMu.Lock()
+	defer m.lockNotifyMu.Unlock()
+	if m.lockNotifyChans == nil {
+		return
+	}
+	for _, ino := range inos {
+		uino := uint64(ino)
+		if ch, ok := m.lockNotifyChans[uino]; ok {
+			close(ch)
+			delete(m.lockNotifyChans, uino)
+		}
 	}
 }
 

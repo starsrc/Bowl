@@ -471,6 +471,74 @@ func (_c *MockManager_GetLk_Call) RunAndReturn(run func(ctx context.Context, par
 	return _c
 }
 
+// GetParents provides a mock function for the type MockManager
+func (_mock *MockManager) GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetParents")
+	}
+
+	var r0 map[uint64]uint32
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) (map[uint64]uint32, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) map[uint64]uint32); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[uint64]uint32)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_GetParents_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetParents'
+type MockManager_GetParents_Call struct {
+	*mock.Call
+}
+
+// GetParents is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino uint64
+func (_e *MockManager_Expecter) GetParents(ctx any, ino any) *MockManager_GetParents_Call {
+	return &MockManager_GetParents_Call{Call: _e.mock.On("GetParents", ctx, ino)}
+}
+
+func (_c *MockManager_GetParents_Call) Run(run func(ctx context.Context, ino uint64)) *MockManager_GetParents_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_GetParents_Call) Return(uint64ToUint32 map[uint64]uint32, err error) *MockManager_GetParents_Call {
+	_c.Call.Return(uint64ToUint32, err)
+	return _c
+}
+
+func (_c *MockManager_GetParents_Call) RunAndReturn(run func(ctx context.Context, ino uint64) (map[uint64]uint32, error)) *MockManager_GetParents_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetXattr provides a mock function for the type MockManager
 func (_mock *MockManager) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error) {
 	ret := _mock.Called(ctx, ino, name)
@@ -1527,6 +1595,72 @@ func (_c *MockManager_RenewSession_Call) Return(time1 time.Time, err error) *Moc
 }
 
 func (_c *MockManager_RenewSession_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64) (time.Time, error)) *MockManager_RenewSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RenewSessionWithStatus provides a mock function for the type MockManager
+func (_mock *MockManager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) (meta.RenewSessionResult, error) {
+	ret := _mock.Called(ctx, sessionID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RenewSessionWithStatus")
+	}
+
+	var r0 meta.RenewSessionResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) (meta.RenewSessionResult, error)); ok {
+		return returnFunc(ctx, sessionID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) meta.RenewSessionResult); ok {
+		r0 = returnFunc(ctx, sessionID)
+	} else {
+		r0 = ret.Get(0).(meta.RenewSessionResult)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64) error); ok {
+		r1 = returnFunc(ctx, sessionID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_RenewSessionWithStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RenewSessionWithStatus'
+type MockManager_RenewSessionWithStatus_Call struct {
+	*mock.Call
+}
+
+// RenewSessionWithStatus is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sessionID uint64
+func (_e *MockManager_Expecter) RenewSessionWithStatus(ctx any, sessionID any) *MockManager_RenewSessionWithStatus_Call {
+	return &MockManager_RenewSessionWithStatus_Call{Call: _e.mock.On("RenewSessionWithStatus", ctx, sessionID)}
+}
+
+func (_c *MockManager_RenewSessionWithStatus_Call) Run(run func(ctx context.Context, sessionID uint64)) *MockManager_RenewSessionWithStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_RenewSessionWithStatus_Call) Return(renewSessionResult meta.RenewSessionResult, err error) *MockManager_RenewSessionWithStatus_Call {
+	_c.Call.Return(renewSessionResult, err)
+	return _c
+}
+
+func (_c *MockManager_RenewSessionWithStatus_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64) (meta.RenewSessionResult, error)) *MockManager_RenewSessionWithStatus_Call {
 	_c.Call.Return(run)
 	return _c
 }

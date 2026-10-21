@@ -120,8 +120,8 @@ func TestLookup_PositivePath(t *testing.T) {
 		assert.Equal(t, uint32(1), inode.Attr.Nlink)
 		assert.Equal(t, uint32(1001), inode.Attr.UID)
 		assert.Equal(t, uint32(1001), inode.Attr.GID)
-		assert.Equal(t, uint32(42), inode.Attr.Rdev)
-		assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+		assert.Equal(t, uint32(0), inode.Attr.Rdev)
+		assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 		assert.Equal(t, uint64(2), inode.Attr.Blocks) // (1024 + 511) / 512 = 2
 		assert.Equal(t, targetRow.Atime.Time, inode.Attr.Atime)
 		assert.Equal(t, targetRow.Mtime.Time, inode.Attr.Mtime)
@@ -255,7 +255,7 @@ func TestLookup_DynamicBlockCalculations(t *testing.T) {
 			inode, err := mgr.Lookup(ctx, parentIno, entryName)
 			require.NoError(t, err)
 			require.NotNil(t, inode)
-			assert.Equal(t, uint32(4096), inode.Attr.Blksize)
+			assert.Equal(t, meta.DefaultBlockSize, inode.Attr.Blksize)
 			assert.Equal(t, tc.expectedBlocks, inode.Attr.Blocks)
 		})
 	}

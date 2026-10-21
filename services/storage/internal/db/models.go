@@ -12,6 +12,7 @@ type ClientSession struct {
 	SessionID int64              `json:"session_id"`
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type Entry struct {
@@ -70,6 +71,8 @@ type Inode struct {
 	Mtime         pgtype.Timestamptz `json:"mtime"`
 	Ctime         pgtype.Timestamptz `json:"ctime"`
 	SymlinkTarget []byte             `json:"symlink_target"`
+	Flags         int32              `json:"flags"`
+	ParentIno     int64              `json:"parent_ino"`
 }
 
 type InodeXattr struct {

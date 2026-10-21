@@ -207,19 +207,27 @@ func TestMknodRequestValidation(t *testing.T) {
 			valid:     false,
 		},
 
-		// 负向边界用例 - mode
+		// 边界用例 - mode 放宽至全量 uint32，由领域层校验；uid/gid 限制在 int32 范围内
 		{
-			name:      "非法: mode 为 0",
+			name:      "合法: mode 为 0 或携带高位 (由领域层防御拦截)",
 			parentIno: 1,
 			entryName: []byte("file.txt"),
 			mode:      0,
-			valid:     false,
+			valid:     true,
 		},
 		{
-			name:      "非法: mode 超过 65535",
+			name:      "合法: mode 超过 65535 (如 0o100644)",
 			parentIno: 1,
 			entryName: []byte("file.txt"),
 			mode:      65536,
+			valid:     true,
+		},
+		{
+			name:      "非法: uid 超过 math.MaxInt32",
+			parentIno: 1,
+			entryName: []byte("file.txt"),
+			mode:      0o100644,
+			uid:       2147483648,
 			valid:     false,
 		},
 	} {

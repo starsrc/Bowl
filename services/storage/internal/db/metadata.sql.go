@@ -16,7 +16,7 @@ UPDATE inodes
 SET nlink = 0,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 `
 
 func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
@@ -35,6 +35,8 @@ func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
@@ -144,17 +146,20 @@ func (q *Queries) CreateFileLock(ctx context.Context, arg CreateFileLockParams) 
 }
 
 const createInode = `-- name: CreateInode :one
-INSERT INTO inodes (mode, nlink, uid, gid, rdev)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, $6::bigint, CASE WHEN $7::bigint > 0 THEN $7::bigint ELSE 1 END, ts.now, ts.now, ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 `
 
 type CreateInodeParams struct {
-	Mode  int32 `json:"mode"`
-	Nlink int32 `json:"nlink"`
-	Uid   int32 `json:"uid"`
-	Gid   int32 `json:"gid"`
-	Rdev  int64 `json:"rdev"`
+	Mode      int32 `json:"mode"`
+	Nlink     int32 `json:"nlink"`
+	Uid       int32 `json:"uid"`
+	Gid       int32 `json:"gid"`
+	Rdev      int64 `json:"rdev"`
+	Size      int64 `json:"size"`
+	ParentIno int64 `json:"parent_ino"`
 }
 
 func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error) {
@@ -164,6 +169,8 @@ func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode
 		arg.Uid,
 		arg.Gid,
 		arg.Rdev,
+		arg.Size,
+		arg.ParentIno,
 	)
 	var i Inode
 	err := row.Scan(
@@ -179,14 +186,17 @@ func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
 
 const createSymlinkInode = `-- name: CreateSymlinkInode :one
-INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, $6, $7, CASE WHEN $8::bigint > 0 THEN $8::bigint ELSE 1 END, ts.now, ts.now, ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 `
 
 type CreateSymlinkInodeParams struct {
@@ -197,6 +207,7 @@ type CreateSymlinkInodeParams struct {
 	Gid           int32  `json:"gid"`
 	Rdev          int64  `json:"rdev"`
 	SymlinkTarget []byte `json:"symlink_target"`
+	ParentIno     int64  `json:"parent_ino"`
 }
 
 func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error) {
@@ -208,6 +219,7 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 		arg.Gid,
 		arg.Rdev,
 		arg.SymlinkTarget,
+		arg.ParentIno,
 	)
 	var i Inode
 	err := row.Scan(
@@ -223,6 +235,8 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
@@ -230,8 +244,9 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 const decrementInodeNlinkAndTouch = `-- name: DecrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink - 1,
-    mtime = clock_timestamp(),
-    ctime = clock_timestamp()
+    mtime = ts.now,
+    ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
 `
 
@@ -245,7 +260,7 @@ UPDATE inodes
 SET nlink = nlink - 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 `
 
 func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
@@ -264,6 +279,8 @@ func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
@@ -283,14 +300,17 @@ func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) error 
 	return err
 }
 
-const deleteExpiredClientSessions = `-- name: DeleteExpiredClientSessions :exec
+const deleteExpiredClientSessions = `-- name: DeleteExpiredClientSessions :execrows
 DELETE FROM client_sessions
 WHERE expires_at <= clock_timestamp()
 `
 
-func (q *Queries) DeleteExpiredClientSessions(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, deleteExpiredClientSessions)
-	return err
+func (q *Queries) DeleteExpiredClientSessions(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredClientSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteFileHandle = `-- name: DeleteFileHandle :one
@@ -299,12 +319,12 @@ WHERE fh.fh = $1
   AND fh.ino = $2
   AND fh.session_id IS NOT DISTINCT FROM $3
   AND (
-      $3 IS NULL
+      fh.session_id IS NULL
       OR EXISTS (
           SELECT 1
           FROM client_sessions s
           WHERE s.session_id = fh.session_id
-              AND s.expires_at > clock_timestamp()
+            AND s.expires_at > clock_timestamp()
       )
   )
 RETURNING fh.fh
@@ -349,6 +369,48 @@ WHERE id = ANY($1::bigint[])
 func (q *Queries) DeleteFileLocksByIDs(ctx context.Context, ids []int64) error {
 	_, err := q.db.Exec(ctx, deleteFileLocksByIDs, ids)
 	return err
+}
+
+const deleteFlockFileLockWaitersByFh = `-- name: DeleteFlockFileLockWaitersByFh :execrows
+DELETE FROM file_lock_waiters
+WHERE ino = $1
+  AND fh = $2
+  AND lk_flags = 1
+`
+
+type DeleteFlockFileLockWaitersByFhParams struct {
+	Ino int64 `json:"ino"`
+	Fh  int64 `json:"fh"`
+}
+
+func (q *Queries) DeleteFlockFileLockWaitersByFh(ctx context.Context, arg DeleteFlockFileLockWaitersByFhParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFlockFileLockWaitersByFh, arg.Ino, arg.Fh)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteFlockFileLockWaitersBySessionAndFh = `-- name: DeleteFlockFileLockWaitersBySessionAndFh :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = $1
+  AND ino = $2
+  AND fh = $3
+  AND lk_flags = 1
+`
+
+type DeleteFlockFileLockWaitersBySessionAndFhParams struct {
+	SessionID int64 `json:"session_id"`
+	Ino       int64 `json:"ino"`
+	Fh        int64 `json:"fh"`
+}
+
+func (q *Queries) DeleteFlockFileLockWaitersBySessionAndFh(ctx context.Context, arg DeleteFlockFileLockWaitersBySessionAndFhParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFlockFileLockWaitersBySessionAndFh, arg.SessionID, arg.Ino, arg.Fh)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteFlockFileLocksByFh = `-- name: DeleteFlockFileLocksByFh :execrows
@@ -421,6 +483,80 @@ func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrPara
 	return result.RowsAffected(), nil
 }
 
+const deleteOverlappingPosixFileLockWaiters = `-- name: DeleteOverlappingPosixFileLockWaiters :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = $1
+  AND ino = $2
+  AND lock_owner = $3
+  AND lk_flags = 0
+  AND start_offset <= $4
+  AND end_offset >= $5
+`
+
+type DeleteOverlappingPosixFileLockWaitersParams struct {
+	SessionID   int64 `json:"session_id"`
+	Ino         int64 `json:"ino"`
+	LockOwner   int64 `json:"lock_owner"`
+	EndOffset   int64 `json:"end_offset"`
+	StartOffset int64 `json:"start_offset"`
+}
+
+func (q *Queries) DeleteOverlappingPosixFileLockWaiters(ctx context.Context, arg DeleteOverlappingPosixFileLockWaitersParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOverlappingPosixFileLockWaiters,
+		arg.SessionID,
+		arg.Ino,
+		arg.LockOwner,
+		arg.EndOffset,
+		arg.StartOffset,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deletePosixFileLockWaitersByOwner = `-- name: DeletePosixFileLockWaitersByOwner :execrows
+DELETE FROM file_lock_waiters
+WHERE ino = $1
+  AND lock_owner = $2
+  AND lk_flags = 0
+`
+
+type DeletePosixFileLockWaitersByOwnerParams struct {
+	Ino       int64 `json:"ino"`
+	LockOwner int64 `json:"lock_owner"`
+}
+
+func (q *Queries) DeletePosixFileLockWaitersByOwner(ctx context.Context, arg DeletePosixFileLockWaitersByOwnerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePosixFileLockWaitersByOwner, arg.Ino, arg.LockOwner)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deletePosixFileLockWaitersBySessionAndOwner = `-- name: DeletePosixFileLockWaitersBySessionAndOwner :execrows
+DELETE FROM file_lock_waiters
+WHERE session_id = $1
+  AND ino = $2
+  AND lock_owner = $3
+  AND lk_flags = 0
+`
+
+type DeletePosixFileLockWaitersBySessionAndOwnerParams struct {
+	SessionID int64 `json:"session_id"`
+	Ino       int64 `json:"ino"`
+	LockOwner int64 `json:"lock_owner"`
+}
+
+func (q *Queries) DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePosixFileLockWaitersBySessionAndOwner, arg.SessionID, arg.Ino, arg.LockOwner)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deletePosixFileLocksByOwner = `-- name: DeletePosixFileLocksByOwner :execrows
 DELETE FROM file_locks
 WHERE ino = $1
@@ -463,7 +599,7 @@ func (q *Queries) DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg
 	return result.RowsAffected(), nil
 }
 
-const deleteUnreferencedOrphanInodes = `-- name: DeleteUnreferencedOrphanInodes :exec
+const deleteUnreferencedOrphanInodes = `-- name: DeleteUnreferencedOrphanInodes :many
 DELETE FROM inodes
 WHERE ino IN (
     SELECT i.ino
@@ -478,11 +614,27 @@ WHERE ino IN (
       )
     FOR UPDATE SKIP LOCKED
 )
+RETURNING ino
 `
 
-func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, deleteUnreferencedOrphanInodes)
-	return err
+func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.Query(ctx, deleteUnreferencedOrphanInodes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var ino int64
+		if err := rows.Scan(&ino); err != nil {
+			return nil, err
+		}
+		items = append(items, ino)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getEntry = `-- name: GetEntry :one
@@ -510,7 +662,7 @@ LEFT JOIN client_sessions s ON fh.session_id = s.session_id
 WHERE fh.fh = $1
   AND fh.ino = $2
   AND fh.session_id IS NOT DISTINCT FROM $3
-  AND ($3 IS NULL OR s.expires_at > clock_timestamp())
+  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
 `
 
 type GetFileHandleParams struct {
@@ -622,7 +774,7 @@ func (q *Queries) GetFirstConflictingFileLock(ctx context.Context, arg GetFirstC
 }
 
 const getInode = `-- name: GetInode :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 FROM inodes
 WHERE ino = $1
 `
@@ -643,12 +795,14 @@ func (q *Queries) GetInode(ctx context.Context, ino int64) (Inode, error) {
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
 
 const getInodeByEntry = `-- name: GetInodeByEntry :one
-SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target
+SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target, i.flags, i.parent_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name = $2
@@ -675,12 +829,14 @@ func (q *Queries) GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
 
 const getInodeForUpdate = `-- name: GetInodeForUpdate :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 FROM inodes
 WHERE ino = $1
 FOR UPDATE
@@ -702,6 +858,8 @@ func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, erro
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
@@ -738,10 +896,25 @@ func (q *Queries) GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (
 }
 
 const getParentInode = `-- name: GetParentInode :one
-SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target
+SELECT
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target,
+    i.flags,
+    i.parent_ino
 FROM entries e
 JOIN inodes i ON e.parent_ino = i.ino
 WHERE e.ino = $1
+ORDER BY e.parent_ino ASC, e.name ASC
 LIMIT 1
 `
 
@@ -761,6 +934,8 @@ func (q *Queries) GetParentInode(ctx context.Context, ino int64) (Inode, error) 
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
@@ -836,8 +1011,9 @@ func (q *Queries) HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) 
 const incrementInodeNlinkAndTouch = `-- name: IncrementInodeNlinkAndTouch :exec
 UPDATE inodes
 SET nlink = nlink + 1,
-    mtime = clock_timestamp(),
-    ctime = clock_timestamp()
+    mtime = ts.now,
+    ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
 `
 
@@ -851,7 +1027,7 @@ UPDATE inodes
 SET nlink = nlink + 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 `
 
 func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
@@ -870,6 +1046,8 @@ func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
@@ -969,7 +1147,9 @@ SELECT
     i.atime,
     i.mtime,
     i.ctime,
-    i.symlink_target
+    i.symlink_target,
+    i.flags,
+    i.parent_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
@@ -997,6 +1177,8 @@ type ListDirEntriesRow struct {
 	Mtime         pgtype.Timestamptz `json:"mtime"`
 	Ctime         pgtype.Timestamptz `json:"ctime"`
 	SymlinkTarget []byte             `json:"symlink_target"`
+	Flags         int32              `json:"flags"`
+	ParentIno     int64              `json:"parent_ino"`
 }
 
 func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error) {
@@ -1022,6 +1204,92 @@ func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) 
 			&i.Mtime,
 			&i.Ctime,
 			&i.SymlinkTarget,
+			&i.Flags,
+			&i.ParentIno,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDirEntriesAfterName = `-- name: ListDirEntriesAfterName :many
+SELECT
+    e.name,
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target,
+    i.flags,
+    i.parent_ino
+FROM entries e
+JOIN inodes i ON e.ino = i.ino
+WHERE e.parent_ino = $1 AND e.name > $3::bytea
+ORDER BY e.name ASC
+LIMIT $2
+`
+
+type ListDirEntriesAfterNameParams struct {
+	ParentIno int64  `json:"parent_ino"`
+	Limit     int32  `json:"limit"`
+	AfterName []byte `json:"after_name"`
+}
+
+type ListDirEntriesAfterNameRow struct {
+	Name          []byte             `json:"name"`
+	Ino           int64              `json:"ino"`
+	Generation    int64              `json:"generation"`
+	Mode          int32              `json:"mode"`
+	Size          int64              `json:"size"`
+	Nlink         int32              `json:"nlink"`
+	Uid           int32              `json:"uid"`
+	Gid           int32              `json:"gid"`
+	Rdev          int64              `json:"rdev"`
+	Atime         pgtype.Timestamptz `json:"atime"`
+	Mtime         pgtype.Timestamptz `json:"mtime"`
+	Ctime         pgtype.Timestamptz `json:"ctime"`
+	SymlinkTarget []byte             `json:"symlink_target"`
+	Flags         int32              `json:"flags"`
+	ParentIno     int64              `json:"parent_ino"`
+}
+
+func (q *Queries) ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error) {
+	rows, err := q.db.Query(ctx, listDirEntriesAfterName, arg.ParentIno, arg.Limit, arg.AfterName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDirEntriesAfterNameRow
+	for rows.Next() {
+		var i ListDirEntriesAfterNameRow
+		if err := rows.Scan(
+			&i.Name,
+			&i.Ino,
+			&i.Generation,
+			&i.Mode,
+			&i.Size,
+			&i.Nlink,
+			&i.Uid,
+			&i.Gid,
+			&i.Rdev,
+			&i.Atime,
+			&i.Mtime,
+			&i.Ctime,
+			&i.SymlinkTarget,
+			&i.Flags,
+			&i.ParentIno,
 		); err != nil {
 			return nil, err
 		}
@@ -1053,6 +1321,38 @@ func (q *Queries) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte,
 			return nil, err
 		}
 		items = append(items, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listParentEntryCountsByIno = `-- name: ListParentEntryCountsByIno :many
+SELECT parent_ino, COUNT(*)::bigint AS entry_count
+FROM entries
+WHERE ino = $1
+GROUP BY parent_ino
+`
+
+type ListParentEntryCountsByInoRow struct {
+	ParentIno  int64 `json:"parent_ino"`
+	EntryCount int64 `json:"entry_count"`
+}
+
+func (q *Queries) ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]ListParentEntryCountsByInoRow, error) {
+	rows, err := q.db.Query(ctx, listParentEntryCountsByIno, ino)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListParentEntryCountsByInoRow
+	for rows.Next() {
+		var i ListParentEntryCountsByInoRow
+		if err := rows.Scan(&i.ParentIno, &i.EntryCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1109,6 +1409,17 @@ func (q *Queries) ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, a
 	return items, nil
 }
 
+const touchInodeAtime = `-- name: TouchInodeAtime :exec
+UPDATE inodes
+SET atime = clock_timestamp()
+WHERE ino = $1
+`
+
+func (q *Queries) TouchInodeAtime(ctx context.Context, ino int64) error {
+	_, err := q.db.Exec(ctx, touchInodeAtime, ino)
+	return err
+}
+
 const touchInodeCtime = `-- name: TouchInodeCtime :exec
 UPDATE inodes
 SET ctime = clock_timestamp()
@@ -1122,7 +1433,8 @@ func (q *Queries) TouchInodeCtime(ctx context.Context, ino int64) error {
 
 const touchInodeTimestamps = `-- name: TouchInodeTimestamps :exec
 UPDATE inodes
-SET mtime = clock_timestamp(), ctime = clock_timestamp()
+SET mtime = ts.now, ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
 `
 
@@ -1179,11 +1491,13 @@ SET
   size = $3,
   uid = $4,
   gid = $5,
-  atime = CASE WHEN $6::boolean THEN clock_timestamp() ELSE $7::timestamptz END,
-  mtime = CASE WHEN $8::boolean THEN clock_timestamp() ELSE $9::timestamptz END,
-  ctime = clock_timestamp()
+  atime = CASE WHEN $6::boolean THEN ts.now ELSE $7::timestamptz END,
+  mtime = CASE WHEN $8::boolean THEN ts.now ELSE $9::timestamptz END,
+  ctime = ts.now,
+  flags = $10::integer
+FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
 `
 
 type UpdateInodeAttrParams struct {
@@ -1196,6 +1510,7 @@ type UpdateInodeAttrParams struct {
 	Atime       pgtype.Timestamptz `json:"atime"`
 	SetMtimeNow bool               `json:"set_mtime_now"`
 	Mtime       pgtype.Timestamptz `json:"mtime"`
+	Flags       int32              `json:"flags"`
 }
 
 func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error) {
@@ -1209,6 +1524,7 @@ func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams
 		arg.Atime,
 		arg.SetMtimeNow,
 		arg.Mtime,
+		arg.Flags,
 	)
 	var i Inode
 	err := row.Scan(
@@ -1224,17 +1540,53 @@ func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams
 		&i.Mtime,
 		&i.Ctime,
 		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
 	)
 	return i, err
 }
 
+const updateInodeParentIno = `-- name: UpdateInodeParentIno :exec
+UPDATE inodes
+SET parent_ino = $2
+WHERE ino = $1
+`
+
+type UpdateInodeParentInoParams struct {
+	Ino       int64 `json:"ino"`
+	ParentIno int64 `json:"parent_ino"`
+}
+
+func (q *Queries) UpdateInodeParentIno(ctx context.Context, arg UpdateInodeParentInoParams) error {
+	_, err := q.db.Exec(ctx, updateInodeParentIno, arg.Ino, arg.ParentIno)
+	return err
+}
+
+const updateInodeParentInoAndTouchCtime = `-- name: UpdateInodeParentInoAndTouchCtime :exec
+UPDATE inodes
+SET parent_ino = $2,
+    ctime = clock_timestamp()
+WHERE ino = $1
+`
+
+type UpdateInodeParentInoAndTouchCtimeParams struct {
+	Ino       int64 `json:"ino"`
+	ParentIno int64 `json:"parent_ino"`
+}
+
+func (q *Queries) UpdateInodeParentInoAndTouchCtime(ctx context.Context, arg UpdateInodeParentInoAndTouchCtimeParams) error {
+	_, err := q.db.Exec(ctx, updateInodeParentInoAndTouchCtime, arg.Ino, arg.ParentIno)
+	return err
+}
+
 const upsertClientSession = `-- name: UpsertClientSession :one
-INSERT INTO client_sessions (session_id, expires_at, updated_at)
-VALUES ($1, $2, clock_timestamp())
+WITH ts AS (SELECT clock_timestamp() AS now)
+INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
+SELECT $1, $2, ts.now, ts.now FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
-    updated_at = clock_timestamp()
-RETURNING session_id, expires_at, updated_at
+    updated_at = (SELECT now FROM ts)
+RETURNING session_id, expires_at, updated_at, created_at
 `
 
 type UpsertClientSessionParams struct {
@@ -1245,7 +1597,12 @@ type UpsertClientSessionParams struct {
 func (q *Queries) UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error) {
 	row := q.db.QueryRow(ctx, upsertClientSession, arg.SessionID, arg.ExpiresAt)
 	var i ClientSession
-	err := row.Scan(&i.SessionID, &i.ExpiresAt, &i.UpdatedAt)
+	err := row.Scan(
+		&i.SessionID,
+		&i.ExpiresAt,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+	)
 	return i, err
 }
 

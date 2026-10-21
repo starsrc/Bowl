@@ -234,7 +234,6 @@ func classifyViolation(v *protovalidate.Violation) (int, string) {
 	}
 
 	ruleID := v.Proto.GetRuleId()
-	isMinLen := ruleID == "bytes.min_len" || strings.HasSuffix(ruleID, ".bytes.min_len")
 	isMaxLen := ruleID == "bytes.max_len" || strings.HasSuffix(ruleID, ".bytes.max_len")
 
 	fullName := ""
@@ -248,13 +247,29 @@ func classifyViolation(v *protovalidate.Violation) (int, string) {
 	}
 
 	switch fullName {
-	// 第 1 优先级：Inode 编号与 SetXattr.flags 基础整型范围校验 -> EINVAL
+	// 第 1 优先级：基础整型/标识符与模式/标志字段校验 -> EINVAL
 	case "storage.v1.LookupRequest.parent_ino",
 		"storage.v1.GetAttrRequest.ino",
 		"storage.v1.SetAttrRequest.ino",
+		"storage.v1.SetAttrRequest.mode",
+		"storage.v1.SetAttrRequest.uid",
+		"storage.v1.SetAttrRequest.gid",
+		"storage.v1.SetAttrRequest.size",
+		"storage.v1.SetAttrRequest.fh",
+		"storage.v1.SetAttrRequest.session_id",
+		"storage.v1.SetAttrRequest.flags",
 		"storage.v1.MknodRequest.parent_ino",
+		"storage.v1.MknodRequest.mode",
+		"storage.v1.MknodRequest.uid",
+		"storage.v1.MknodRequest.gid",
+		"storage.v1.MknodRequest.rdev",
 		"storage.v1.MkdirRequest.parent_ino",
+		"storage.v1.MkdirRequest.mode",
+		"storage.v1.MkdirRequest.uid",
+		"storage.v1.MkdirRequest.gid",
 		"storage.v1.SymlinkRequest.parent_ino",
+		"storage.v1.SymlinkRequest.uid",
+		"storage.v1.SymlinkRequest.gid",
 		"storage.v1.ReadlinkRequest.ino",
 		"storage.v1.LinkRequest.ino",
 		"storage.v1.LinkRequest.new_parent_ino",
@@ -262,39 +277,107 @@ func classifyViolation(v *protovalidate.Violation) (int, string) {
 		"storage.v1.RmdirRequest.parent_ino",
 		"storage.v1.RenameRequest.old_parent_ino",
 		"storage.v1.RenameRequest.new_parent_ino",
+		"storage.v1.RenameRequest.flags",
 		"storage.v1.CreateRequest.parent_ino",
+		"storage.v1.CreateRequest.mode",
+		"storage.v1.CreateRequest.uid",
+		"storage.v1.CreateRequest.gid",
+		"storage.v1.CreateRequest.flags",
+		"storage.v1.CreateRequest.session_id",
 		"storage.v1.TmpFileRequest.parent_ino",
+		"storage.v1.TmpFileRequest.mode",
+		"storage.v1.TmpFileRequest.uid",
+		"storage.v1.TmpFileRequest.gid",
+		"storage.v1.TmpFileRequest.flags",
+		"storage.v1.TmpFileRequest.session_id",
 		"storage.v1.OpenRequest.ino",
+		"storage.v1.OpenRequest.flags",
+		"storage.v1.OpenRequest.session_id",
 		"storage.v1.FlushRequest.ino",
+		"storage.v1.FlushRequest.fh",
+		"storage.v1.FlushRequest.lock_owner",
+		"storage.v1.FlushRequest.session_id",
 		"storage.v1.FsyncRequest.ino",
+		"storage.v1.FsyncRequest.fh",
+		"storage.v1.FsyncRequest.datasync",
+		"storage.v1.FsyncRequest.session_id",
 		"storage.v1.ReleaseRequest.ino",
+		"storage.v1.ReleaseRequest.fh",
+		"storage.v1.ReleaseRequest.lock_owner",
+		"storage.v1.ReleaseRequest.release_flags",
+		"storage.v1.ReleaseRequest.session_id",
 		"storage.v1.OpenDirRequest.ino",
+		"storage.v1.OpenDirRequest.flags",
+		"storage.v1.OpenDirRequest.session_id",
 		"storage.v1.FsyncDirRequest.ino",
 		"storage.v1.FsyncDirRequest.fh",
+		"storage.v1.FsyncDirRequest.datasync",
+		"storage.v1.FsyncDirRequest.session_id",
 		"storage.v1.ReleaseDirRequest.ino",
+		"storage.v1.ReleaseDirRequest.fh",
+		"storage.v1.ReleaseDirRequest.release_flags",
+		"storage.v1.ReleaseDirRequest.session_id",
 		"storage.v1.ReadDirRequest.ino",
+		"storage.v1.ReadDirRequest.fh",
+		"storage.v1.ReadDirRequest.offset",
+		"storage.v1.ReadDirRequest.limit",
+		"storage.v1.ReadDirRequest.session_id",
 		"storage.v1.ReadDirPlusRequest.ino",
+		"storage.v1.ReadDirPlusRequest.fh",
+		"storage.v1.ReadDirPlusRequest.offset",
+		"storage.v1.ReadDirPlusRequest.limit",
+		"storage.v1.ReadDirPlusRequest.session_id",
 		"storage.v1.FallocateRequest.ino",
+		"storage.v1.FallocateRequest.fh",
+		"storage.v1.FallocateRequest.offset",
+		"storage.v1.FallocateRequest.length",
+		"storage.v1.FallocateRequest.mode",
+		"storage.v1.FallocateRequest.session_id",
 		"storage.v1.SetXattrRequest.ino",
 		"storage.v1.SetXattrRequest.flags",
 		"storage.v1.GetXattrRequest.ino",
 		"storage.v1.ListXattrRequest.ino",
 		"storage.v1.RemoveXattrRequest.ino",
 		"storage.v1.GetLkRequest.ino",
+		"storage.v1.GetLkRequest.fh",
+		"storage.v1.GetLkRequest.lock_owner",
+		"storage.v1.GetLkRequest.lk",
+		"storage.v1.GetLkRequest.lk_flags",
+		"storage.v1.GetLkRequest.session_id",
 		"storage.v1.SetLkRequest.ino",
+		"storage.v1.SetLkRequest.fh",
+		"storage.v1.SetLkRequest.lock_owner",
+		"storage.v1.SetLkRequest.lk",
+		"storage.v1.SetLkRequest.lk_flags",
+		"storage.v1.SetLkRequest.session_id",
 		"storage.v1.SetLkwRequest.ino",
+		"storage.v1.SetLkwRequest.fh",
+		"storage.v1.SetLkwRequest.lock_owner",
+		"storage.v1.SetLkwRequest.lk",
+		"storage.v1.SetLkwRequest.lk_flags",
+		"storage.v1.SetLkwRequest.session_id",
+		"storage.v1.SetLkwRequest.request_id",
 		"storage.v1.RenewSessionRequest.session_id",
+		"storage.v1.FileLock.start",
+		"storage.v1.FileLock.end",
+		"storage.v1.FileLock.type",
+		"storage.v1.FileLock.pid",
 		"storage.v1.DirEntry.ino",
 		"storage.v1.DirEntryPlus.ino",
-		"storage.v1.Inode.ino":
+		"storage.v1.Inode.ino",
+		"storage.v1.InodeAttribute.mode",
+		"storage.v1.InodeAttribute.uid",
+		"storage.v1.InodeAttribute.gid",
+		"storage.v1.InodeAttribute.rdev",
+		"storage.v1.InodeAttribute.size":
 		return 10, ReasonInvalidArgument
 
-	// 第 2/3 优先级：Xattr 属性名称长度边界 (0 或 >255) -> ERANGE；包含 NUL -> EINVAL
+	// 第 2/3 优先级：Xattr 属性名称长度边界 (仅 >255 为 ERANGE，空名称或含 NUL 为 EINVAL)
 	case "storage.v1.SetXattrRequest.name",
 		"storage.v1.GetXattrRequest.name",
 		"storage.v1.RemoveXattrRequest.name",
 		"storage.v1.ListXattrResponse.names":
-		if isMinLen || isMaxLen {
+		if isMaxLen {
 			return 20, ReasonRange
 		}
 		return 30, ReasonInvalidArgument
@@ -331,11 +414,11 @@ func classifyViolation(v *protovalidate.Violation) (int, string) {
 		}
 		return 40, ReasonInvalidArgument
 
-	// 第 4 优先级：Xattr 属性值超长 (>65536) -> E2BIG
+	// 第 4 优先级：Xattr 属性值超长 (>65536) -> ERANGE (对齐 JuiceFS Linux 行为)
 	case "storage.v1.SetXattrRequest.value",
 		"storage.v1.GetXattrResponse.value":
 		if isMaxLen {
-			return 40, ReasonTooBig
+			return 40, ReasonRange
 		}
 		return 45, ReasonInvalidArgument
 	}

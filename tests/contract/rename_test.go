@@ -78,33 +78,33 @@ func TestRenameRequestValidation(t *testing.T) {
 			valid:        true,
 		},
 
-		// 负向边界用例: flags
+		// 边界用例: flags 移至领域层校验互斥与支持情况
 		{
-			name:         "非法: flags 互斥组合 RENAME_NOREPLACE | RENAME_EXCHANGE (3)",
+			name:         "合法: flags 互斥组合 RENAME_NOREPLACE | RENAME_EXCHANGE (3) 允许进入领域层返回 EINVAL",
 			oldParentIno: 1,
 			oldName:      []byte("old"),
 			newParentIno: 1,
 			newName:      []byte("new"),
 			flags:        3,
-			valid:        false,
+			valid:        true,
 		},
 		{
-			name:         "非法: flags 为 RENAME_WHITEOUT (4)",
+			name:         "合法: flags 为 RENAME_WHITEOUT (4) 允许进入领域层返回 ENOTSUP",
 			oldParentIno: 1,
 			oldName:      []byte("old"),
 			newParentIno: 1,
 			newName:      []byte("new"),
 			flags:        4,
-			valid:        false,
+			valid:        true,
 		},
 		{
-			name:         "非法: flags 为未知标志位 (math.MaxUint32)",
+			name:         "合法: flags 为未知标志位 (math.MaxUint32) 允许进入领域层返回 EINVAL",
 			oldParentIno: 1,
 			oldName:      []byte("old"),
 			newParentIno: 1,
 			newName:      []byte("new"),
 			flags:        math.MaxUint32,
-			valid:        false,
+			valid:        true,
 		},
 
 		// 负向边界用例: old_parent_ino
@@ -145,12 +145,12 @@ func TestRenameRequestValidation(t *testing.T) {
 
 		// 负向边界用例: old_name
 		{
-			name:         "非法: old_name 为空",
+			name:         "合法: old_name 为空允许进入领域层校验父目录后返回 ENOENT",
 			oldParentIno: 1,
 			oldName:      []byte(""),
 			newParentIno: 1,
 			newName:      []byte("new"),
-			valid:        false,
+			valid:        true,
 		},
 		{
 			name:         "非法: old_name 超过 255 字节",

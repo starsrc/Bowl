@@ -796,16 +796,3 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	return nil
 }
 
-// reclaimOrphanIfNoHandles 检查孤儿节点是否存在未释放句柄，若无任何句柄则执行物理删除。
-func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, ino uint64) error {
-	hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(ino))
-	if err != nil {
-		return fmt.Errorf("check remaining file handles for inode %d: %w", ino, err)
-	}
-	if !hasRemaining {
-		if err := q.DeleteInode(ctx, int64(ino)); err != nil {
-			return fmt.Errorf("delete orphan inode %d: %w", ino, err)
-		}
-	}
-	return nil
-}

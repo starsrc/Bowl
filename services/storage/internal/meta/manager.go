@@ -508,3 +508,58 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 	}
 	return res, nil
 }
+
+// reclaimOrphanIfNoHandles 检查孤儿节点是否存在未释放句柄，若无任何句柄则执行物理删除并唤醒清理锁等待通道。
+func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, ino uint64) error {
+	hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(ino))
+	if err != nil {
+		return fmt.Errorf("check remaining file handles for inode %d: %w", ino, err)
+	}
+	if !hasRemaining {
+		if err := q.DeleteInode(ctx, int64(ino)); err != nil {
+			return fmt.Errorf("delete orphan inode %d: %w", ino, err)
+		}
+		m.notifyLockWaiters(ino)
+	}
+	return nil
+}
+
+// shouldTouchAtime 根据当前配置的 AtimeMode 判断是否需要刷新节点的访问时间 atime。
+func (m *manager) shouldTouchAtime(atime, mtime, ctime, now time.Time) bool {
+	switch m.atimeMode {
+	case AtimeModeStrictAtime:
+		return now.Sub(atime) >= time.Second
+	case AtimeModeRelAtime:
+		return atime.Before(mtime) || atime.Before(ctime) || now.Sub(atime) >= 24*time.Hour
+	default:
+		return false
+	}
+}
+
+// shouldTouchDirMtime 根据当前配置的 skipDirMtime 判断是否需要刷新父目录的 mtime 与 ctime。
+func (m *manager) shouldTouchDirMtime(parentMtime, now time.Time) bool {
+	if m.skipDirMtime <= 0 {
+		return true
+	}
+	return now.Sub(parentMtime) >= m.skipDirMtime
+}
+
+// isTrashIno 判断给定 Inode 号是否属于回收站命名空间。
+func isTrashIno(ino uint64) bool {
+	return ino >= TrashIno
+}
+
+// toTrash 判断在给定父目录下删除或覆盖条目时是否应移入回收站。
+func (m *manager) toTrash(parentIno uint64) bool {
+	return m.trashDays > 0 && !isTrashIno(parentIno)
+}
+
+// trashEntryName 生成回收站归档条目名称 "{parent}-{ino}-{name}"（超过 255 字节自动截断）。
+func trashEntryName(parentIno, ino uint64, name []byte) []byte {
+	s := fmt.Sprintf("%d-%d-%s", parentIno, ino, string(name))
+	if len(s) > MaxFileNameBytes {
+		s = s[:MaxFileNameBytes]
+	}
+	return []byte(s)
+}
+

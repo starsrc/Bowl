@@ -637,6 +637,49 @@ func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, 
 	return items, nil
 }
 
+const ensureTrashInode = `-- name: EnsureTrashInode :one
+INSERT INTO inodes (ino, mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
+SELECT $3::bigint, $1, $2, 0, 0, 0, 4096, $4::bigint, ts.now, ts.now, ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+ON CONFLICT (ino) DO UPDATE
+SET ino = EXCLUDED.ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+`
+
+type EnsureTrashInodeParams struct {
+	Mode      int32 `json:"mode"`
+	Nlink     int32 `json:"nlink"`
+	Ino       int64 `json:"ino"`
+	ParentIno int64 `json:"parent_ino"`
+}
+
+func (q *Queries) EnsureTrashInode(ctx context.Context, arg EnsureTrashInodeParams) (Inode, error) {
+	row := q.db.QueryRow(ctx, ensureTrashInode,
+		arg.Mode,
+		arg.Nlink,
+		arg.Ino,
+		arg.ParentIno,
+	)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
+	)
+	return i, err
+}
+
 const getEntry = `-- name: GetEntry :one
 SELECT parent_ino, name, ino
 FROM entries

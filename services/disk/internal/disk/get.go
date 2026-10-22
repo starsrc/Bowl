@@ -2,9 +2,29 @@ package disk
 
 import (
 	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // GetDisk 根据磁盘 ID 查询磁盘详情。
 func (s *service) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
-	return nil, nil
+	pgID, err := parseDiskID(diskID)
+	if err != nil {
+		return nil, err
+	}
+	if pgID.Bytes == [16]byte{} {
+		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+
+	row, err := s.store.GetDisk(ctx, pgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	return toDomainDisk(row), nil
 }

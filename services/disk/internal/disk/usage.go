@@ -18,9 +18,6 @@ func (s *service) UpdateDiskUsage(ctx context.Context, params UpdateDiskUsagePar
 	if err != nil {
 		return nil, err
 	}
-	if pgID.Bytes == [16]byte{} {
-		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
-	}
 
 	var result *Disk
 

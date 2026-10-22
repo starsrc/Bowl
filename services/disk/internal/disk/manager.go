@@ -3,6 +3,7 @@ package disk
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/fx"
@@ -37,13 +38,27 @@ var Module = fx.Module("disk",
 	fx.Provide(New),
 )
 
-// parseDiskID 解析字符串形式的 UUID 为 pgtype.UUID。
+// parseDiskID 解析字符串形式的 UUID 为 pgtype.UUID，并拦截全零 Nil UUID。
 func parseDiskID(diskID string) (pgtype.UUID, error) {
 	var id pgtype.UUID
 	if err := id.Scan(diskID); err != nil || !id.Valid {
 		return pgtype.UUID{}, fmt.Errorf("%w: invalid disk id %q", ErrInvalidArgument, diskID)
 	}
+	if id.Bytes == [16]byte{} {
+		return pgtype.UUID{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
 	return id, nil
+}
+
+// validateDiskName 校验磁盘名称的长度上限与非法空字节。
+func validateDiskName(name string) error {
+	if len(name) > MaxDiskNameBytes {
+		return fmt.Errorf("%w: disk name length %d exceeds max %d", ErrNameTooLong, len(name), MaxDiskNameBytes)
+	}
+	if strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("%w: disk name contains null byte", ErrInvalidArgument)
+	}
+	return nil
 }
 
 // toDomainDisk 将数据库持久层 Disk 行模型转换为领域层 Disk 实体。

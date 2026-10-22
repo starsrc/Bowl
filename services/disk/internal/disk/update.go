@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -19,9 +18,6 @@ func (s *service) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	if err != nil {
 		return nil, err
 	}
-	if pgID.Bytes == [16]byte{} {
-		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
-	}
 
 	if params.Name == nil && params.MaxBytes == nil {
 		return nil, fmt.Errorf("%w: at least one of name or max_bytes must be set", ErrInvalidArgument)
@@ -32,11 +28,8 @@ func (s *service) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	}
 
 	if params.Name != nil {
-		if len(*params.Name) > MaxDiskNameBytes {
-			return nil, fmt.Errorf("%w: disk name exceeds %d bytes", ErrNameTooLong, MaxDiskNameBytes)
-		}
-		if strings.IndexByte(*params.Name, 0) >= 0 {
-			return nil, fmt.Errorf("%w: disk name cannot contain NUL byte", ErrInvalidArgument)
+		if err := validateDiskName(*params.Name); err != nil {
+			return nil, err
 		}
 	}
 

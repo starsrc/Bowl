@@ -3,7 +3,6 @@ package disk
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -13,9 +12,6 @@ func (s *service) StatFS(ctx context.Context, diskID string) (*StatFSResult, err
 	pgID, err := parseDiskID(diskID)
 	if err != nil {
 		return nil, err
-	}
-	if pgID.Bytes == [16]byte{} {
-		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
 	}
 
 	row, err := s.store.GetDisk(ctx, pgID)

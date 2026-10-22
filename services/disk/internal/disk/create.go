@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -26,11 +25,8 @@ func (s *service) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 	}
 
 	// 2. 字符串边界校验：优先校验超长，后校验空字节
-	if len(params.Name) > MaxDiskNameBytes {
-		return nil, fmt.Errorf("%w: disk name length %d exceeds max %d", ErrNameTooLong, len(params.Name), MaxDiskNameBytes)
-	}
-	if strings.IndexByte(params.Name, 0) >= 0 {
-		return nil, fmt.Errorf("%w: disk name contains null byte", ErrInvalidArgument)
+	if err := validateDiskName(params.Name); err != nil {
+		return nil, err
 	}
 
 	// 3. 生成 UUIDv7 磁盘主键

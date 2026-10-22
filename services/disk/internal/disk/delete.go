@@ -2,7 +2,6 @@ package disk
 
 import (
 	"context"
-	"fmt"
 )
 
 // DeleteDisk 根据磁盘 ID 物理删除磁盘。
@@ -15,9 +14,6 @@ func (s *service) DeleteDisk(ctx context.Context, diskID string) error {
 	pgID, err := parseDiskID(diskID)
 	if err != nil {
 		return err
-	}
-	if pgID.Bytes == [16]byte{} {
-		return fmt.Errorf("%w: nil disk id", ErrInvalidArgument)
 	}
 
 	rows, err := s.store.DeleteDisk(ctx, pgID)

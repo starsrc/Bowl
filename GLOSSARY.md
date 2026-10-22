@@ -1,8 +1,8 @@
-# Storage 元数据引擎
+# Bowl 分布式存储系统
 
-Storage 元数据引擎负责管理分布式文件系统的目录树、节点索引及 POSIX 文件系统协议映射。
+Bowl 负责管理分布式文件系统的 POSIX 元数据目录树、商业化磁盘实例生命周期与容量配额核算。
 
-## 术语规范
+## Storage 元数据引擎
 
 **Inode (索引节点)**:
 文件系统中标识文件或目录实体的唯一持久化数字标识符与元数据载体。
@@ -67,10 +67,6 @@ _Avoid_: Stat, Meta, Properties, Info
 **Generation (代数)**:
 用于标识 Inode 复用周期的递增版本号，防止客户端缓存引用已释放后重新分配的 Inode。
 _Avoid_: Version, Revision, Epoch
-
-**Disk (磁盘)**:
-客户端挂载呈现的独立文件系统实例；在元数据层无实体感知，仅表现为普通的递增根目录 Inode，由客户端在挂载时将其 Inode 强制重写映射为 1。
-_Avoid_: Volume, Drive, MountPoint, Partition
 
 **FileHandle (文件句柄)**:
 文件系统为单次文件或目录打开会话分配的、受客户端会话租约管辖的唯一持久化数字标识符，用于在打开生命周期内关联后续的遍历、冲刷、同步与释放操作。
@@ -167,4 +163,15 @@ _Avoid_: WaitLock, LockBlock, AcquireLockWait
 **RenewSession (会话续期)**:
 客户端显式延长其会话租约有效期的保活操作，同步触发已超期会话清理与无剩余活跃 FileHandle 的 Orphan Inode 物理回收。
 _Avoid_: Heartbeat, PingSession, KeepAlive, TouchSession
+
+## Disk 磁盘管理服务
+
+**Disk (磁盘)**:
+对外交付的商业化独立文件系统实例，由全局唯一 UUID 标识，一对一绑定一个独立的根目录 Inode，并承载字节级容量配额上限与已用空间核算。
+_Avoid_: Volume, Drive, MountPoint, Partition, Bucket
+
+**StatFS (文件系统状态查询)**:
+根据目标 Disk 标识符，检索该 Disk 的总容量、已用空间、可用空间及派生 POSIX 文件系统块统计指标的状态检索操作。
+_Avoid_: GetDiskStat, StatVFS, DiskInfo, GetCapacity
+
 

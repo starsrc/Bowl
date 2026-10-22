@@ -1,7 +1,7 @@
 # 0002. Disk 概念隔离与客户端根 Inode 虚拟映射设计
 
 ## 状态
-已采纳 (accepted)
+部分被 [ADR-0014](0014-disk-service-and-quota-ledger.md) 替代 (partially superseded by ADR-0014)
 
 ## 背景
 本项目为一个 C/S 架构的分布式存储系统：服务端提供元数据及存储 RPC 接口，客户端通过 FUSE 协议挂载为本地磁盘供用户使用。在产品和使用形态上，系统引入了“Disk（磁盘）”的概念。

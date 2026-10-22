@@ -10,11 +10,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	diskv1 "github.com/starsrc/bowl/gen/go/disk/v1"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// ErrorDomain 定义与领域层一致的 ErrorInfo 错误领域标识符。
+// ErrorDomain 定义与 storage 领域层一致的 ErrorInfo 错误领域标识符。
 const ErrorDomain = "bowl.storage"
+
+// DiskErrorDomain 定义与 disk 领域层一致的 ErrorInfo 错误领域标识符。
+const DiskErrorDomain = "bowl.disk"
 
 // POSIX errno reason 常量，与 meta.ToStatus 映射契约保持严格一致。
 const (
@@ -100,12 +104,35 @@ var storageMessages = []proto.Message{
 	&storagev1.InodeAttribute{},
 }
 
+// diskMessages 汇总 DiskService 全部请求、响应与实体消息，用于启动期预编译校验规则。
+var diskMessages = []proto.Message{
+	// 请求消息 (Requests)
+	&diskv1.CreateDiskRequest{},
+	&diskv1.GetDiskRequest{},
+	&diskv1.UpdateDiskRequest{},
+	&diskv1.DeleteDiskRequest{},
+	&diskv1.StatFSRequest{},
+	&diskv1.UpdateDiskUsageRequest{},
+
+	// 响应消息 (Responses)
+	&diskv1.CreateDiskResponse{},
+	&diskv1.GetDiskResponse{},
+	&diskv1.UpdateDiskResponse{},
+	&diskv1.DeleteDiskResponse{},
+	&diskv1.StatFSResponse{},
+	&diskv1.UpdateDiskUsageResponse{},
+
+	// 实体消息 (Entities)
+	&diskv1.Disk{},
+}
+
 // ValidationError 包装 protovalidate.ValidationError，并将其边界违规映射为携带 google.rpc.ErrorInfo 的 gRPC Status。
 // 同时实现 Unwrap() error 与 GRPCStatus() *status.Status，确保 errors.As(..., **protovalidate.ValidationError)、
 // status.FromError 及 meta.ToStatus 均可无缝提取底层违规详情与对应的 POSIX errno reason。
 type ValidationError struct {
 	err    *protovalidate.ValidationError
 	reason string
+	domain string
 }
 
 // Error 返回底层 protovalidate 校验错误信息。
@@ -123,9 +150,17 @@ func (e *ValidationError) Reason() string {
 	return e.reason
 }
 
-// GRPCStatus 构造携带 google.rpc.ErrorInfo (domain = "bowl.storage") 的 InvalidArgument 状态。
+// Domain 返回错误所属的服务领域标识符（如 "bowl.storage" 或 "bowl.disk"）。
+func (e *ValidationError) Domain() string {
+	if e.domain != "" {
+		return e.domain
+	}
+	return ErrorDomain
+}
+
+// GRPCStatus 构造携带 google.rpc.ErrorInfo 的 InvalidArgument 状态。
 func (e *ValidationError) GRPCStatus() *status.Status {
-	return buildInvalidArgumentStatus(e.err.Error(), e.reason)
+	return buildInvalidArgumentStatus(e.err.Error(), e.reason, e.Domain())
 }
 
 type storageValidator struct {
@@ -139,19 +174,28 @@ func (v *storageValidator) Validate(msg proto.Message, options ...protovalidate.
 	}
 	var valErr *protovalidate.ValidationError
 	if errors.As(err, &valErr) {
+		defaultDomain := ErrorDomain
+		if msg != nil && strings.HasPrefix(string(msg.ProtoReflect().Descriptor().FullName()), "disk.v1.") {
+			defaultDomain = DiskErrorDomain
+		}
+		reason, domain := translateValidation(valErr, defaultDomain)
 		return &ValidationError{
 			err:    valErr,
-			reason: translateValidationReason(valErr),
+			reason: reason,
+			domain: domain,
 		}
 	}
 	return err
 }
 
-// NewStorageValidator 创建并初始化一个预编译好 StorageService 全部请求与响应消息的 protovalidate.Validator。
+// NewStorageValidator 创建并初始化一个预编译好 StorageService 与 DiskService 全部请求、响应与实体消息的 protovalidate.Validator。
 // 通过 protovalidate.WithMessages 选项在启动阶段编译 CEL 约束规则，避免在首次运行时产生编译延迟；
 // 同时将字段边界校验违规自动关联至对应的 POSIX errno reason（ERANGE、E2BIG、ENAMETOOLONG、EINVAL）。
 func NewStorageValidator() (protovalidate.Validator, error) {
-	inner, err := protovalidate.New(protovalidate.WithMessages(storageMessages...))
+	allMessages := make([]proto.Message, 0, len(storageMessages)+len(diskMessages))
+	allMessages = append(allMessages, storageMessages...)
+	allMessages = append(allMessages, diskMessages...)
+	inner, err := protovalidate.New(protovalidate.WithMessages(allMessages...))
 	if err != nil {
 		return nil, err
 	}
@@ -185,8 +229,14 @@ func ToStatus(err error) *status.Status {
 	if s, ok := status.FromError(err); ok {
 		return s
 	}
-	if reason, ok := ErrnoReason(err); ok {
-		return buildInvalidArgumentStatus(err.Error(), reason)
+	var storageValErr *ValidationError
+	if errors.As(err, &storageValErr) {
+		return buildInvalidArgumentStatus(err.Error(), storageValErr.Reason(), storageValErr.Domain())
+	}
+	var protoValErr *protovalidate.ValidationError
+	if errors.As(err, &protoValErr) {
+		reason, domain := translateValidation(protoValErr, ErrorDomain)
+		return buildInvalidArgumentStatus(err.Error(), reason, domain)
 	}
 	return status.New(codes.Unknown, err.Error())
 }
@@ -199,11 +249,14 @@ func ToGRPCError(err error) error {
 	return ToStatus(err).Err()
 }
 
-func buildInvalidArgumentStatus(msg, reason string) *status.Status {
+func buildInvalidArgumentStatus(msg, reason, domain string) *status.Status {
+	if domain == "" {
+		domain = ErrorDomain
+	}
 	st := status.New(codes.InvalidArgument, msg)
 	stWithDetails, detailErr := st.WithDetails(&errdetails.ErrorInfo{
 		Reason: reason,
-		Domain: ErrorDomain,
+		Domain: domain,
 	})
 	if detailErr == nil {
 		return stWithDetails
@@ -214,27 +267,60 @@ func buildInvalidArgumentStatus(msg, reason string) *status.Status {
 // translateValidationReason 按照与 meta.Manager 静态校验完全一致的求值优先级，
 // 将 protovalidate 违规项还原为对应的 POSIX errno reason。
 func translateValidationReason(valErr *protovalidate.ValidationError) string {
+	reason, _ := translateValidation(valErr, ErrorDomain)
+	return reason
+}
+
+func translateValidation(valErr *protovalidate.ValidationError, defaultDomain string) (string, string) {
 	bestPriority := 100
 	bestReason := ReasonInvalidArgument
+	bestDomain := defaultDomain
+	if bestDomain == "" {
+		bestDomain = ErrorDomain
+	}
 
 	for _, v := range valErr.Violations {
-		priority, reason := classifyViolation(v)
+		priority, reason, domain := classifyViolation(v)
 		if priority < bestPriority {
 			bestPriority = priority
 			bestReason = reason
+			if domain != "" {
+				bestDomain = domain
+			}
 		}
 	}
 
-	return bestReason
+	return bestReason, bestDomain
 }
 
-func classifyViolation(v *protovalidate.Violation) (int, string) {
+func classifyViolation(v *protovalidate.Violation) (int, string, string) {
+	priority, reason := classifyViolationInternal(v)
+	domain := ErrorDomain
+	fullName := ""
+	if v != nil && v.FieldDescriptor != nil {
+		fullName = string(v.FieldDescriptor.FullName())
+	}
+	ruleID := ""
+	if v != nil && v.Proto != nil {
+		ruleID = v.Proto.GetRuleId()
+	}
+	if strings.HasPrefix(fullName, "disk.v1.") || ruleID == "update_disk_has_update" ||
+		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
+		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
+		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_") {
+		domain = DiskErrorDomain
+	}
+	return priority, reason, domain
+}
+
+func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 	if v == nil || v.Proto == nil {
 		return 60, ReasonInvalidArgument
 	}
 
 	ruleID := v.Proto.GetRuleId()
-	isMaxLen := ruleID == "bytes.max_len" || strings.HasSuffix(ruleID, ".bytes.max_len")
+	isMaxLen := ruleID == "bytes.max_len" || strings.HasSuffix(ruleID, ".bytes.max_len") ||
+		ruleID == "string.max_bytes" || strings.HasSuffix(ruleID, ".string.max_bytes")
 
 	fullName := ""
 	if v.FieldDescriptor != nil {
@@ -243,6 +329,24 @@ func classifyViolation(v *protovalidate.Violation) (int, string) {
 		lastField := elems[len(elems)-1].GetFieldName()
 		if lastField == "names" {
 			fullName = "storage.v1.ListXattrResponse.names"
+		}
+	}
+
+	// 针对 disk.v1 消息的校验规则分类
+	if strings.HasPrefix(fullName, "disk.v1.") || ruleID == "update_disk_has_update" ||
+		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
+		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
+		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_") {
+		switch fullName {
+		case "disk.v1.Disk.name",
+			"disk.v1.CreateDiskRequest.name",
+			"disk.v1.UpdateDiskRequest.name":
+			if isMaxLen {
+				return 20, ReasonNameTooLong
+			}
+			return 30, ReasonInvalidArgument
+		default:
+			return 10, ReasonInvalidArgument
 		}
 	}
 

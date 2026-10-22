@@ -18,6 +18,6 @@ packages:
     interfaces:
       Store: {}
       Querier: {}
-  # github.com/starsrc/bowl/services/disk/internal/disk:
-  #   interfaces:
-  #     Manager: {}
+  github.com/starsrc/bowl/services/disk/internal/disk:
+    interfaces:
+      Manager: {}

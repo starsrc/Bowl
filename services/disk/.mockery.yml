@@ -1,0 +1,23 @@
+all: false
+dir: "{{.InterfaceDir}}/mock"
+filename: "{{.InterfaceName | lower}}_mock.go"
+force-file-write: true
+formatter: goimports
+generate: true
+include-auto-generated: true
+log-level: info
+structname: "Mock{{.InterfaceName}}"
+pkgname: "mock"
+recursive: false
+require-template-schema-exists: false
+template: testify
+template-data:
+  unroll-variadic: true
+packages:
+  github.com/starsrc/bowl/services/disk/internal/db:
+    interfaces:
+      Store: {}
+      Querier: {}
+  github.com/starsrc/bowl/services/disk/internal/disk:
+    interfaces:
+      Manager: {}

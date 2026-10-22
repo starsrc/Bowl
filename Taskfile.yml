@@ -5,6 +5,8 @@ vars:
   GEN_DIR: gen
   STORAGE_DB_DSN: '{{.STORAGE_DB_DSN | default "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"}}'
   STORAGE_MIGRATIONS_DIR: services/storage/db/migrations
+  DISK_DB_DSN: '{{.DISK_DB_DSN | default "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"}}'
+  DISK_MIGRATIONS_DIR: services/disk/db/migrations
 
 env:
   GOWORK: "off"
@@ -40,10 +42,17 @@ tasks:
     cmds:
       - go mod tidy {{.CLI_ARGS}}
       - go -C services/storage mod tidy {{.CLI_ARGS}}
+      - go -C services/disk mod tidy {{.CLI_ARGS}}
 
   test:storage:
     desc: "Run tests for storage service"
     dir: services/storage
+    cmds:
+      - go test -v ./... {{.CLI_ARGS}}
+
+  test:disk:
+    desc: "Run tests for disk service"
+    dir: services/disk
     cmds:
       - go test -v ./... {{.CLI_ARGS}}
 
@@ -52,6 +61,8 @@ tasks:
     cmds:
       - go test -v ./... {{.CLI_ARGS}}
       - task: test:storage
+        vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
+      - task: test:disk
         vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
 
   goose:storage:up:
@@ -69,9 +80,30 @@ tasks:
     cmds:
       - goose -dir {{.STORAGE_MIGRATIONS_DIR}} postgres "{{.STORAGE_DB_DSN}}" status {{.CLI_ARGS}}
 
+  goose:disk:up:
+    desc: "执行 disk 服务的 goose 向上迁移 (Up)"
+    cmds:
+      - goose -table goose_db_version_disk -dir {{.DISK_MIGRATIONS_DIR}} postgres "{{.DISK_DB_DSN}}" up {{.CLI_ARGS}}
+
+  goose:disk:down:
+    desc: "回滚 disk 服务的最近一次 goose 迁移 (Down)"
+    cmds:
+      - goose -table goose_db_version_disk -dir {{.DISK_MIGRATIONS_DIR}} postgres "{{.DISK_DB_DSN}}" down {{.CLI_ARGS}}
+
+  goose:disk:status:
+    desc: "打印 disk 服务的 goose 迁移状态 (Status)"
+    cmds:
+      - goose -table goose_db_version_disk -dir {{.DISK_MIGRATIONS_DIR}} postgres "{{.DISK_DB_DSN}}" status {{.CLI_ARGS}}
+
   sqlc:storage:generate:
     desc: "Generate sqlc code for storage service"
     dir: services/storage
+    cmds:
+      - sqlc generate {{.CLI_ARGS}}
+
+  sqlc:disk:generate:
+    desc: "Generate sqlc code for disk service"
+    dir: services/disk
     cmds:
       - sqlc generate {{.CLI_ARGS}}
 
@@ -80,10 +112,18 @@ tasks:
     cmds:
       - task: sqlc:storage:generate
         vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
+      - task: sqlc:disk:generate
+        vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
 
   mockery:storage:
     desc: "Generate mockery mocks for storage service"
     dir: services/storage
+    cmds:
+      - mockery {{.CLI_ARGS}}
+
+  mockery:disk:
+    desc: "Generate mockery mocks for disk service"
+    dir: services/disk
     cmds:
       - mockery {{.CLI_ARGS}}
 

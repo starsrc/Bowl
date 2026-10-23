@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -525,5 +526,472 @@ func TestGetDisk(t *testing.T) {
 		assert.Nil(t, result)
 		assert.True(t, errors.Is(err, dbErr))
 		assert.False(t, errors.Is(err, meta.ErrNotFound))
+	})
+}
+
+func TestUpdateDisk_StaticValidation(t *testing.T) {
+	ctx := context.Background()
+	const validDiskIDStr = "0192a3b4-c5d6-7e8f-9012-3456789abcde"
+
+	t.Run("非法 disk_id 拦截且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		name := "valid-name"
+
+		for _, badID := range []string{"", "not-a-uuid", "12345678-1234-1234-1234", "00000000-0000-0000-0000-000000000000"} {
+			disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+				DiskID: badID,
+				Name:   &name,
+			})
+			require.Nil(t, disk)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		}
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("name 与 max_bytes 均未指定时返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "at least one of name or max_bytes must be set")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("max_bytes 为 0 返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		zeroCap := uint64(0)
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			MaxBytes: &zeroCap,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "max_bytes must be in range")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("max_bytes 超过 math.MaxInt64 返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		overflowCap := uint64(math.MaxInt64) + 1
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			MaxBytes: &overflowCap,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "max_bytes must be in range")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("数值边界优先于名称校验：max_bytes 非法且名称超长时返回 ErrInvalidArgument", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		zeroCap := uint64(0)
+		tooLongName := strings.Repeat("a", 256)
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			Name:     &tooLongName,
+			MaxBytes: &zeroCap,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "max_bytes must be in range")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("name 长度超过 255 字节返回 ErrNameTooLong 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		tooLongName := strings.Repeat("a", 256)
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &tooLongName,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNameTooLong))
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("name 包含空字节返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		badName := "bad\x00name"
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &badName,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "disk name contains null byte")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("字符串边界校验优先超长后空字节：超长且含空字节时返回 ErrNameTooLong", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+		name := strings.Repeat("a", 255) + "\x00"
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &name,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNameTooLong))
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+}
+
+func TestUpdateDisk_BusinessLogic(t *testing.T) {
+	ctx := context.Background()
+	const validDiskIDStr = "0192a3b4-c5d6-7e8f-9012-3456789abcde"
+	now := time.Now().Truncate(time.Microsecond)
+
+	var validDiskID pgtype.UUID
+	require.NoError(t, validDiskID.Scan(validDiskIDStr))
+
+	t.Run("目标磁盘不存在时返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{}, pgx.ErrNoRows).
+			Once()
+
+		newName := "new-disk-name"
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &newName,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("缩容至当前已用空间以下触发保护并返回 ErrInvalidShrink", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		currentDiskRow := db.Disk{
+			DiskID:     validDiskID,
+			Name:       "old-name",
+			RootIno:    101,
+			MaxBytes:   10000,
+			UsedBytes:  5000,
+			UsedInodes: 10,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(currentDiskRow, nil).
+			Once()
+
+		// 试图将容量缩容至 4999（小于已用 5000）
+		shrinkCap := uint64(4999)
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			MaxBytes: &shrinkCap,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidShrink))
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+
+		// 状态码验证
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.FailedPrecondition, st.Code())
+	})
+
+	t.Run("允许缩容至恰好等于当前已用空间（边界水位线）", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		currentDiskRow := db.Disk{
+			DiskID:     validDiskID,
+			Name:       "disk-1",
+			RootIno:    101,
+			MaxBytes:   10000,
+			UsedBytes:  5000,
+			UsedInodes: 10,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(currentDiskRow, nil).
+			Once()
+
+		exactCap := uint64(5000)
+		mockQuerier.EXPECT().
+			UpdateDisk(mock.Anything, db.UpdateDiskParams{
+				DiskID:   validDiskID,
+				Name:     "disk-1",
+				MaxBytes: 5000,
+			}).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "disk-1",
+				RootIno:    101,
+				MaxBytes:   5000,
+				UsedBytes:  5000,
+				UsedInodes: 10,
+				CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+				UpdatedAt:  pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
+			}, nil).
+			Once()
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			MaxBytes: &exactCap,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		assert.Equal(t, uint64(5000), disk.MaxBytes)
+		assert.Equal(t, "disk-1", disk.Name)
+	})
+
+	t.Run("仅更新 name 时保持原 max_bytes 不变", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		currentDiskRow := db.Disk{
+			DiskID:     validDiskID,
+			Name:       "old-name",
+			RootIno:    101,
+			MaxBytes:   20000,
+			UsedBytes:  1000,
+			UsedInodes: 5,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(currentDiskRow, nil).
+			Once()
+
+		newName := "renamed-disk"
+		mockQuerier.EXPECT().
+			UpdateDisk(mock.Anything, db.UpdateDiskParams{
+				DiskID:   validDiskID,
+				Name:     newName,
+				MaxBytes: 20000,
+			}).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       newName,
+				RootIno:    101,
+				MaxBytes:   20000,
+				UsedBytes:  1000,
+				UsedInodes: 5,
+				CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+				UpdatedAt:  pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
+			}, nil).
+			Once()
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &newName,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		assert.Equal(t, newName, disk.Name)
+		assert.Equal(t, uint64(20000), disk.MaxBytes)
+	})
+
+	t.Run("仅更新 max_bytes 时保持原 name 不变（扩容）", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		currentDiskRow := db.Disk{
+			DiskID:     validDiskID,
+			Name:       "stable-name",
+			RootIno:    101,
+			MaxBytes:   20000,
+			UsedBytes:  1000,
+			UsedInodes: 5,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(currentDiskRow, nil).
+			Once()
+
+		expandedCap := uint64(50000)
+		mockQuerier.EXPECT().
+			UpdateDisk(mock.Anything, db.UpdateDiskParams{
+				DiskID:   validDiskID,
+				Name:     "stable-name",
+				MaxBytes: 50000,
+			}).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "stable-name",
+				RootIno:    101,
+				MaxBytes:   50000,
+				UsedBytes:  1000,
+				UsedInodes: 5,
+				CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+				UpdatedAt:  pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
+			}, nil).
+			Once()
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			MaxBytes: &expandedCap,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		assert.Equal(t, "stable-name", disk.Name)
+		assert.Equal(t, uint64(50000), disk.MaxBytes)
+	})
+
+	t.Run("同时更新 name 与 max_bytes 成功", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		currentDiskRow := db.Disk{
+			DiskID:     validDiskID,
+			Name:       "initial-name",
+			RootIno:    101,
+			MaxBytes:   20000,
+			UsedBytes:  1000,
+			UsedInodes: 5,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(currentDiskRow, nil).
+			Once()
+
+		newName := "final-name"
+		newCap := uint64(60000)
+		mockQuerier.EXPECT().
+			UpdateDisk(mock.Anything, db.UpdateDiskParams{
+				DiskID:   validDiskID,
+				Name:     newName,
+				MaxBytes: 60000,
+			}).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       newName,
+				RootIno:    101,
+				MaxBytes:   60000,
+				UsedBytes:  1000,
+				UsedInodes: 5,
+				CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+				UpdatedAt:  pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
+			}, nil).
+			Once()
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID:   validDiskIDStr,
+			Name:     &newName,
+			MaxBytes: &newCap,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		assert.Equal(t, newName, disk.Name)
+		assert.Equal(t, newCap, disk.MaxBytes)
+	})
+
+	t.Run("GetDiskForUpdate 数据库底层错误透明透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		dbErr := errors.New("query timeout")
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{}, dbErr).
+			Once()
+
+		newName := "new-name"
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &newName,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+	})
+
+	t.Run("UpdateDisk 数据库底层错误透明透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		currentDiskRow := db.Disk{
+			DiskID:     validDiskID,
+			Name:       "initial-name",
+			RootIno:    101,
+			MaxBytes:   20000,
+			UsedBytes:  1000,
+			UsedInodes: 5,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(currentDiskRow, nil).
+			Once()
+
+		updateErr := errors.New("disk write failure")
+		newName := "fail-name"
+		mockQuerier.EXPECT().
+			UpdateDisk(mock.Anything, mock.Anything).
+			Return(db.Disk{}, updateErr).
+			Once()
+
+		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+			DiskID: validDiskIDStr,
+			Name:   &newName,
+		})
+		require.Nil(t, disk)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, updateErr))
 	})
 }

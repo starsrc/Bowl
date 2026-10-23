@@ -138,3 +138,70 @@ func (m *manager) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
 	return toDomainDisk(row), nil
 }
 
+// UpdateDisk 更新虚拟磁盘属性（名称、最大容量）。
+// 在事务内通过 FOR UPDATE 行锁排他锁定磁盘，校验缩容水位线（new_max_bytes >= used_bytes）并原子持久化新配额与名称。
+func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error) {
+	// 静态参数校验（无需触达数据库）：
+	pgID, err := parseDiskID(params.DiskID)
+	if err != nil {
+		return nil, err
+	}
+
+	if params.Name == nil && params.MaxBytes == nil {
+		return nil, fmt.Errorf("%w: at least one of name or max_bytes must be set", ErrInvalidArgument)
+	}
+
+	if params.MaxBytes != nil && (*params.MaxBytes == 0 || *params.MaxBytes > math.MaxInt64) {
+		return nil, fmt.Errorf("%w: max_bytes must be in range [1, %d]", ErrInvalidArgument, int64(math.MaxInt64))
+	}
+
+	if params.Name != nil {
+		if err := validateDiskName(*params.Name); err != nil {
+			return nil, err
+		}
+	}
+
+	var result *Disk
+	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		current, err := q.GetDiskForUpdate(ctx, pgID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get disk for update %s: %w", params.DiskID, err)
+		}
+
+		newName := current.Name
+		if params.Name != nil {
+			newName = *params.Name
+		}
+
+		newMaxBytes := uint64(current.MaxBytes)
+		if params.MaxBytes != nil {
+			newMaxBytes = *params.MaxBytes
+		}
+
+		// 缩容水位保护：严禁缩容至当前已用空间以下
+		if params.MaxBytes != nil && *params.MaxBytes < uint64(current.UsedBytes) {
+			return ErrInvalidShrink
+		}
+
+		updated, err := q.UpdateDisk(ctx, db.UpdateDiskParams{
+			DiskID:   pgID,
+			Name:     newName,
+			MaxBytes: int64(newMaxBytes),
+		})
+		if err != nil {
+			return fmt.Errorf("update disk %s: %w", params.DiskID, err)
+		}
+
+		result = toDomainDisk(updated)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+

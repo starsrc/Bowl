@@ -114,6 +114,55 @@ func TestStorageDiskContract_ValidMessages(t *testing.T) {
 		assert.NoError(t, v.Validate(resp))
 	})
 
+	t.Run("有效 UpdateDiskRequest 校验通过", func(t *testing.T) {
+		name := "updated-disk"
+		maxBytes := uint64(20 * 1024 * 1024 * 1024)
+
+		reqOnlyName := &storagev1.UpdateDiskRequest{
+			DiskId: validStorageDiskUUID,
+			Name:   &name,
+		}
+		assert.NoError(t, v.Validate(reqOnlyName))
+
+		reqOnlyMaxBytes := &storagev1.UpdateDiskRequest{
+			DiskId:   validStorageDiskUUID,
+			MaxBytes: &maxBytes,
+		}
+		assert.NoError(t, v.Validate(reqOnlyMaxBytes))
+
+		reqBoth := &storagev1.UpdateDiskRequest{
+			DiskId:   validStorageDiskUUID,
+			Name:     &name,
+			MaxBytes: &maxBytes,
+		}
+		assert.NoError(t, v.Validate(reqBoth))
+
+		maxName := strings.Repeat("b", 255)
+		maxCap := uint64(math.MaxInt64)
+		reqMaxBoundary := &storagev1.UpdateDiskRequest{
+			DiskId:   validStorageDiskUUID,
+			Name:     &maxName,
+			MaxBytes: &maxCap,
+		}
+		assert.NoError(t, v.Validate(reqMaxBoundary))
+
+		minCap := uint64(1)
+		emptyName := ""
+		reqMinBoundary := &storagev1.UpdateDiskRequest{
+			DiskId:   validStorageDiskUUID,
+			Name:     &emptyName,
+			MaxBytes: &minCap,
+		}
+		assert.NoError(t, v.Validate(reqMinBoundary))
+	})
+
+	t.Run("有效 UpdateDiskResponse 校验通过", func(t *testing.T) {
+		resp := &storagev1.UpdateDiskResponse{
+			Disk: validSampleStorageDisk(),
+		}
+		assert.NoError(t, v.Validate(resp))
+	})
+
 	t.Run("有效 Disk 实体校验通过", func(t *testing.T) {
 		disk := validSampleStorageDisk()
 		assert.NoError(t, v.Validate(disk))
@@ -313,3 +362,91 @@ func TestStorageDiskContract_Disk_Invalid(t *testing.T) {
 		assertStorageErrorInfoReason(t, v.Validate(d), validator.ReasonInvalidArgument)
 	})
 }
+
+func TestStorageDiskContract_UpdateDiskRequest_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("disk_id 为空字符串返回 EINVAL", func(t *testing.T) {
+		name := "valid-name"
+		req := &storagev1.UpdateDiskRequest{
+			DiskId: "",
+			Name:   &name,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("disk_id 非 UUID 格式返回 EINVAL", func(t *testing.T) {
+		name := "valid-name"
+		req := &storagev1.UpdateDiskRequest{
+			DiskId: "invalid-uuid-format",
+			Name:   &name,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("disk_id 全零 Nil UUID 返回 EINVAL", func(t *testing.T) {
+		name := "valid-name"
+		req := &storagev1.UpdateDiskRequest{
+			DiskId: nilStorageDiskUUID,
+			Name:   &name,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("未指定 name 与 max_bytes 违反消息级约束返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.UpdateDiskRequest{
+			DiskId: validStorageDiskUUID,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("name 长度超过 255 字节返回 ENAMETOOLONG", func(t *testing.T) {
+		tooLongName := strings.Repeat("a", 256)
+		req := &storagev1.UpdateDiskRequest{
+			DiskId: validStorageDiskUUID,
+			Name:   &tooLongName,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonNameTooLong)
+	})
+
+	t.Run("name 包含空字节返回 EINVAL", func(t *testing.T) {
+		badName := "bad\x00name"
+		req := &storagev1.UpdateDiskRequest{
+			DiskId: validStorageDiskUUID,
+			Name:   &badName,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("max_bytes 为 0 返回 EINVAL", func(t *testing.T) {
+		zero := uint64(0)
+		req := &storagev1.UpdateDiskRequest{
+			DiskId:   validStorageDiskUUID,
+			MaxBytes: &zero,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("max_bytes 超过 math.MaxInt64 返回 EINVAL", func(t *testing.T) {
+		overflow := uint64(math.MaxInt64) + 1
+		req := &storagev1.UpdateDiskRequest{
+			DiskId:   validStorageDiskUUID,
+			MaxBytes: &overflow,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+}
+
+func TestStorageDiskContract_UpdateDiskResponse_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("缺少必填 disk 实体返回 EINVAL", func(t *testing.T) {
+		resp := &storagev1.UpdateDiskResponse{
+			Disk: nil,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(resp), validator.ReasonInvalidArgument)
+	})
+}
+

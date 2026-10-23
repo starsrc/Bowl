@@ -14,13 +14,19 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-func TestToStatus_All22SentinelErrors(t *testing.T) {
+func TestToStatus_All23SentinelErrors(t *testing.T) {
 	testCases := []struct {
 		name           string
 		err            error
 		expectedCode   codes.Code
 		expectedReason string
 	}{
+		{
+			name:           "ErrInvalidShrink 映射为 FailedPrecondition 与 EINVAL",
+			err:            meta.ErrInvalidShrink,
+			expectedCode:   codes.FailedPrecondition,
+			expectedReason: "EINVAL",
+		},
 		{
 			name:           "ErrInvalidArgument 映射为 InvalidArgument 与 EINVAL",
 			err:            meta.ErrInvalidArgument,
@@ -155,7 +161,7 @@ func TestToStatus_All22SentinelErrors(t *testing.T) {
 		},
 	}
 
-	require.Equal(t, 22, len(testCases), "必须完整覆盖全部 22 个领域哨兵错误")
+	require.Equal(t, 23, len(testCases), "必须完整覆盖全部 23 个领域哨兵错误")
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,6 +180,40 @@ func TestToStatus_All22SentinelErrors(t *testing.T) {
 			assert.Equal(t, tc.expectedReason, info.GetReason())
 		})
 	}
+}
+
+func TestErrInvalidShrink_HierarchyAndStatus(t *testing.T) {
+	err := meta.ErrInvalidShrink
+
+	// 1. 同时满足对 ErrInvalidShrink 与 ErrInvalidArgument 的匹配
+	assert.True(t, errors.Is(err, meta.ErrInvalidShrink), "必须满足 errors.Is(err, ErrInvalidShrink)")
+	assert.True(t, errors.Is(err, meta.ErrInvalidArgument), "必须满足 errors.Is(err, ErrInvalidArgument)")
+
+	// 2. ToStatus 优先匹配 ErrInvalidShrink，映射为 FailedPrecondition 与 EINVAL
+	st := meta.ToStatus(err)
+	require.NotNil(t, st)
+	assert.Equal(t, codes.FailedPrecondition, st.Code())
+	assert.Equal(t, err.Error(), st.Message())
+
+	details := st.Details()
+	require.Len(t, details, 1)
+	info, ok := details[0].(*errdetails.ErrorInfo)
+	require.True(t, ok)
+	assert.Equal(t, "bowl.storage", info.GetDomain())
+	assert.Equal(t, "EINVAL", info.GetReason())
+
+	// 3. 包装后的错误依然映射为 FailedPrecondition 与 EINVAL
+	wrapped := fmt.Errorf("disk shrink check failed: %w", err)
+	stWrapped := meta.ToStatus(wrapped)
+	require.NotNil(t, stWrapped)
+	assert.Equal(t, codes.FailedPrecondition, stWrapped.Code())
+	assert.Equal(t, wrapped.Error(), stWrapped.Message())
+	detailsWrapped := stWrapped.Details()
+	require.Len(t, detailsWrapped, 1)
+	infoWrapped, ok := detailsWrapped[0].(*errdetails.ErrorInfo)
+	require.True(t, ok)
+	assert.Equal(t, "bowl.storage", infoWrapped.GetDomain())
+	assert.Equal(t, "EINVAL", infoWrapped.GetReason())
 }
 
 func TestFileLockConstants(t *testing.T) {

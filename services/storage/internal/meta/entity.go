@@ -2,6 +2,7 @@ package meta
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -420,6 +421,7 @@ var (
 	ErrIllegalSeek     = errors.New("meta: illegal seek")
 	ErrIO              = errors.New("meta: input/output error")
 	ErrAccess          = errors.New("meta: permission denied")
+	ErrInvalidShrink   = fmt.Errorf("%w: cannot shrink disk capacity below current usage", ErrInvalidArgument)
 )
 
 // Inode 表示文件系统节点的领域实体。
@@ -483,4 +485,11 @@ type Disk struct {
 type CreateDiskParams struct {
 	Name     string
 	MaxBytes uint64
+}
+
+// UpdateDiskParams 描述更新虚拟磁盘入参。
+type UpdateDiskParams struct {
+	DiskID   string
+	Name     *string
+	MaxBytes *uint64
 }

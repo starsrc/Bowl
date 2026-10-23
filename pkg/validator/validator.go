@@ -64,6 +64,7 @@ var storageMessages = []proto.Message{
 	&storagev1.RenewSessionRequest{},
 	&storagev1.CreateDiskRequest{},
 	&storagev1.GetDiskRequest{},
+	&storagev1.UpdateDiskRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.LookupResponse{},
@@ -99,6 +100,7 @@ var storageMessages = []proto.Message{
 	&storagev1.RenewSessionResponse{},
 	&storagev1.CreateDiskResponse{},
 	&storagev1.GetDiskResponse{},
+	&storagev1.UpdateDiskResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},
@@ -300,7 +302,6 @@ func translateValidation(valErr *protovalidate.ValidationError, defaultDomain st
 
 func classifyViolation(v *protovalidate.Violation) (int, string, string) {
 	priority, reason := classifyViolationInternal(v)
-	domain := ErrorDomain
 	fullName := ""
 	if v != nil && v.FieldDescriptor != nil {
 		fullName = string(v.FieldDescriptor.FullName())
@@ -309,10 +310,16 @@ func classifyViolation(v *protovalidate.Violation) (int, string, string) {
 	if v != nil && v.Proto != nil {
 		ruleID = v.Proto.GetRuleId()
 	}
+
+	domain := ""
 	if strings.HasPrefix(fullName, "storage.v1.") {
 		domain = ErrorDomain
-	} else if strings.HasPrefix(fullName, "disk.v1.") || ruleID == "update_disk_has_update" ||
-		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
+	} else if strings.HasPrefix(fullName, "disk.v1.") {
+		domain = DiskErrorDomain
+	} else if fullName == "" {
+		// 消息级约束（如 update_disk_has_update）无 field descriptor，返回空 domain，保留调用方的 defaultDomain
+		domain = ""
+	} else if strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
 		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
 		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_") {
 		domain = DiskErrorDomain
@@ -329,6 +336,10 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 	isMaxLen := ruleID == "bytes.max_len" || strings.HasSuffix(ruleID, ".bytes.max_len") ||
 		ruleID == "string.max_bytes" || strings.HasSuffix(ruleID, ".string.max_bytes")
 
+	if ruleID == "update_disk_has_update" {
+		return 10, ReasonInvalidArgument
+	}
+
 	fullName := ""
 	if v.FieldDescriptor != nil {
 		fullName = string(v.FieldDescriptor.FullName())
@@ -340,7 +351,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 	}
 
 	// 针对 disk.v1 消息的校验规则分类
-	isDisk := strings.HasPrefix(fullName, "disk.v1.") || (!strings.HasPrefix(fullName, "storage.v1.") && (ruleID == "update_disk_has_update" ||
+	isDisk := strings.HasPrefix(fullName, "disk.v1.") || (!strings.HasPrefix(fullName, "storage.v1.") && (
 		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
 		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
 		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_")))
@@ -492,7 +503,10 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.CreateDiskRequest.max_bytes",
 		"storage.v1.CreateDiskResponse.disk",
 		"storage.v1.GetDiskRequest.disk_id",
-		"storage.v1.GetDiskResponse.disk":
+		"storage.v1.GetDiskResponse.disk",
+		"storage.v1.UpdateDiskRequest.disk_id",
+		"storage.v1.UpdateDiskRequest.max_bytes",
+		"storage.v1.UpdateDiskResponse.disk":
 		return 10, ReasonInvalidArgument
 
 	// 第 2/3 优先级：Xattr 属性名称长度边界 (仅 >255 为 ERANGE，空名称或含 NUL 为 EINVAL)
@@ -518,7 +532,8 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.DirEntry.name",
 		"storage.v1.DirEntryPlus.name",
 		"storage.v1.Disk.name",
-		"storage.v1.CreateDiskRequest.name":
+		"storage.v1.CreateDiskRequest.name",
+		"storage.v1.UpdateDiskRequest.name":
 		if isMaxLen {
 			return 20, ReasonNameTooLong
 		}

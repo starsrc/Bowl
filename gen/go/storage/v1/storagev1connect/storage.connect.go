@@ -91,6 +91,8 @@ const (
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
 	// StorageServiceGetDiskProcedure is the procedure name of the StorageService's GetDisk RPC.
 	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
+	// StorageServiceUpdateDiskProcedure is the procedure name of the StorageService's UpdateDisk RPC.
+	StorageServiceUpdateDiskProcedure = "/storage.v1.StorageService/UpdateDisk"
 )
 
 var (
@@ -325,6 +327,13 @@ var (
 			Procedure:  StorageServiceGetDiskProcedure,
 		}
 	})
+	storageServiceUpdateDiskSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("UpdateDisk"),
+			Procedure:  StorageServiceUpdateDiskProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -505,6 +514,12 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error)
+	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
+	// 支持按需单独或同时更新 name 与 max_bytes。
+	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
+	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -691,6 +706,12 @@ type StorageServiceHandler interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error)
+	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
+	// 支持按需单独或同时更新 name 与 max_bytes。
+	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
+	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -731,6 +752,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceRenewSessionSpec(), Handler: adapter.renewSession},
 		connect.Method{Spec: storageServiceCreateDiskSpec(), Handler: adapter.createDisk},
 		connect.Method{Spec: storageServiceGetDiskSpec(), Handler: adapter.getDisk},
+		connect.Method{Spec: storageServiceUpdateDiskSpec(), Handler: adapter.updateDisk},
 	)
 }
 
@@ -867,6 +889,10 @@ func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *v1.Create
 
 func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetDisk is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.UpdateDisk is not implemented")
 }
 
 type storageServiceClient struct {
@@ -1132,6 +1158,14 @@ func (c *storageServiceClient) CreateDisk(ctx context.Context, req *v1.CreateDis
 func (c *storageServiceClient) GetDisk(ctx context.Context, req *v1.GetDiskRequest) (*v1.GetDiskResponse, error) {
 	var res v1.GetDiskResponse
 	if err := c.client.CallUnary(ctx, storageServiceGetDiskSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) UpdateDisk(ctx context.Context, req *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
+	var res v1.UpdateDiskResponse
+	if err := c.client.CallUnary(ctx, storageServiceUpdateDiskSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1529,6 +1563,18 @@ func (h storageServiceHandler) getDisk(ctx context.Context, _ connect.Spec, stre
 		return err
 	}
 	res, err := h.svc.GetDisk(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) updateDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.UpdateDiskRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.UpdateDisk(ctx, &req)
 	if err != nil {
 		return err
 	}

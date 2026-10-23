@@ -260,14 +260,42 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 			return fmt.Errorf("delete entry %d/%s: %w", parentIno, name, err)
 		}
 
-		// 递减子节点硬链接数并刷新 ctime (即使 nlink 降为 0 也保留 Inode 行)
-		if _, err := q.DecrementInodeNlinkAndTouchCtime(ctx, child.Ino); err != nil {
+		// 递减子节点硬链接数并刷新 ctime
+		updatedChild, err := q.DecrementInodeNlinkAndTouchCtime(ctx, child.Ino)
+		if err != nil {
 			return fmt.Errorf("decrement child inode %d nlink and touch ctime: %w", child.Ino, err)
 		}
 
 		// 刷新父目录 mtime 与 ctime (父目录 nlink 保持不变)
 		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		// 当硬链接数降为 0 时，检查是否存在活跃句柄 (unlink-whilst-open)
+		if updatedChild.Nlink == 0 {
+			hasHandles, err := q.HasFileHandlesByIno(ctx, child.Ino)
+			if err != nil {
+				return fmt.Errorf("check has file handles for unlinked inode %d: %w", child.Ino, err)
+			}
+			// 若无活跃句柄，物理删除 Inode 行并按需扣减所属 Disk 配额
+			if !hasHandles {
+				if err := q.DeleteInode(ctx, child.Ino); err != nil {
+					return fmt.Errorf("delete unlinked inode %d: %w", child.Ino, err)
+				}
+				if child.RootIno > 0 {
+					var deltaBytes int64
+					if (uint32(child.Mode)&S_IFMT) == S_IFREG && child.Size > 0 {
+						deltaBytes = -child.Size
+					}
+					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+						RootIno:     child.RootIno,
+						DeltaBytes:  deltaBytes,
+						DeltaInodes: -1,
+					}); err != nil {
+						return fmt.Errorf("decrement disk quota on unlink for root_ino %d: %w", child.RootIno, err)
+					}
+				}
+			}
 		}
 
 		return nil

@@ -175,6 +175,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(true, nil).
+			Once()
+
 		err := mgr.Unlink(ctx, parentIno, []byte("orphan.txt"))
 		require.NoError(t, err)
 	})
@@ -240,6 +245,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
 			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(true, nil).
 			Once()
 
 		err := mgr.Unlink(ctx, parentIno, []byte("symlink"))
@@ -309,6 +319,16 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
 		err := mgr.Unlink(ctx, parentIno, rawName)
 		require.NoError(t, err)
 	})
@@ -375,6 +395,16 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Once()
 		mockQuerier2.EXPECT().
 			TouchInodeTimestamps(mock.Anything, int64(newerParentIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier2.EXPECT().
+			HasFileHandlesByIno(mock.Anything, driftedChildIno).
+			Return(false, nil).
+			Once()
+
+		mockQuerier2.EXPECT().
+			DeleteInode(mock.Anything, driftedChildIno).
 			Return(nil).
 			Once()
 
@@ -647,6 +677,314 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 
 		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, dbErr)
+	})
+}
+
+func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	parentIno := uint64(10)
+	childIno := uint64(100)
+	rootIno := int64(1)
+
+	baseParentRow := db.Inode{
+		Ino:        int64(parentIno),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      2,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		Atime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+	}
+
+	baseChildRow := db.Inode{
+		Ino:        int64(childIno),
+		Generation: 1,
+		Mode:       int32(meta.S_IFREG | 0o644),
+		Size:       4096,
+		Nlink:      1,
+		Uid:        1001,
+		Gid:        1001,
+		ParentIno:  int64(parentIno),
+		RootIno:    rootIno,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	setupCommonUnlinkMocks := func(mockQuerier *dbmock.MockQuerier, child db.Inode, decrementedChild db.Inode, entryName []byte) {
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      entryName,
+			}).
+			Return(db.Entry{
+				ParentIno: int64(parentIno),
+				Name:      entryName,
+				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(childIno)).
+			Return(child, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteEntry(mock.Anything, db.DeleteEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      entryName,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DecrementInodeNlinkAndTouchCtime(mock.Anything, int64(childIno)).
+			Return(decrementedChild, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+	}
+
+	t.Run("nlink > 0 (多硬链接文件解链其一): 不调用 HasFileHandlesByIno / DeleteInode / AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		multiChild := baseChildRow
+		multiChild.Nlink = 2
+		decrementedChild := multiChild
+		decrementedChild.Nlink = 1
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, multiChild, decrementedChild, []byte("file.txt"))
+
+		// 不调用 HasFileHandlesByIno / DeleteInode / AddDiskQuotaByRootIno
+
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
+		require.NoError(t, err)
+	})
+
+	t.Run("nlink == 0 且无活跃 FileHandle (常规文件，RootIno > 0, Size: 4096): 物理删除 Inode 并退还配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		child.Size = 4096
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("file.txt"))
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -4096,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
+		require.NoError(t, err)
+	})
+
+	t.Run("nlink == 0 且无活跃 FileHandle (符号链接，RootIno > 0, Size: 8): 物理删除 Inode 且仅扣减 used_inodes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		child.Mode = int32(meta.S_IFLNK | 0o777)
+		child.Size = 8
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("symlink"))
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.Unlink(ctx, parentIno, []byte("symlink"))
+		require.NoError(t, err)
+	})
+
+	t.Run("nlink == 0 但存在活跃 FileHandle (unlink-whilst-open): 保留孤儿 Inode 且不扣减配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("orphan.txt"))
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(true, nil).
+			Once()
+
+		// 不调用 DeleteInode 与 AddDiskQuotaByRootIno
+
+		err := mgr.Unlink(ctx, parentIno, []byte("orphan.txt"))
+		require.NoError(t, err)
+	})
+
+	t.Run("无活跃句柄但 child.RootIno == 0 时物理删除 Inode 但不调用 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		child.RootIno = 0
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("file.txt"))
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		// 不调用 AddDiskQuotaByRootIno
+
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
+		require.NoError(t, err)
+	})
+
+	t.Run("HasFileHandlesByIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("file.txt"))
+
+		handleErr := errors.New("check handle failed")
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, handleErr).
+			Once()
+
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
+		assert.ErrorIs(t, err, handleErr)
+	})
+
+	t.Run("DeleteInode 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("file.txt"))
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		delErr := errors.New("delete inode failed")
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(delErr).
+			Once()
+
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
+		assert.ErrorIs(t, err, delErr)
+	})
+
+	t.Run("AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		child := baseChildRow
+		decrementedChild := child
+		decrementedChild.Nlink = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("file.txt"))
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		quotaErr := errors.New("decrement disk quota failed")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -4096,
+				DeltaInodes: -1,
+			}).
+			Return(quotaErr).
+			Once()
+
+		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
+		assert.ErrorIs(t, err, quotaErr)
 	})
 }
 

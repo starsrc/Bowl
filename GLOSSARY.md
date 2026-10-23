@@ -164,14 +164,13 @@ _Avoid_: WaitLock, LockBlock, AcquireLockWait
 客户端显式延长其会话租约有效期的保活操作，同步触发已超期会话清理与无剩余活跃 FileHandle 的 Orphan Inode 物理回收。
 _Avoid_: Heartbeat, PingSession, KeepAlive, TouchSession
 
-## Disk 磁盘管理服务
-
 **Disk (磁盘)**:
-对外交付的商业化独立文件系统实例，由全局唯一 UUID 标识，一对一绑定一个独立的根目录 Inode，并承载字节级容量配额上限与已用空间核算。
+对外交付的商业化独立文件系统实例，由全局唯一 UUID 标识，一对一绑定一个独立的根目录 Inode，并承载容量配额上限与已用空间及节点数核算。
 _Avoid_: Volume, Drive, MountPoint, Partition, Bucket
 
 **StatFS (文件系统状态查询)**:
-根据目标 Disk 标识符，检索该 Disk 的总容量、已用空间、可用空间及派生 POSIX 文件系统块统计指标的状态检索操作。
+检索目标文件系统实例的总容量、已用空间、可用空间、Inode 节点统计及派生 POSIX 文件系统块指标的状态检索操作。
 _Avoid_: GetDiskStat, StatVFS, DiskInfo, GetCapacity
+
 
 

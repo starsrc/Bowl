@@ -1,7 +1,7 @@
 # 0014. Disk 磁盘管理服务、容量配额账本与 StatFS 契约设计
 
 ## 状态
-已采纳 (accepted) — 部分替代 [ADR-0002](0002-disk-concept-and-client-root-inode-mapping.md)
+已被 [ADR-0015](0015-unify-disk-and-storage-service-with-transactional-quota.md) 替代 (superseded by ADR-0015) — 早期部分替代 [ADR-0002](0002-disk-concept-and-client-root-inode-mapping.md)
 
 ## 背景
 在 [ADR-0002](0002-disk-concept-and-client-root-inode-mapping.md) 中，系统早期假定服务端完全不维护任何 `Disk` 实体表，仅由客户端承载 `Disk` 概念。随着商业化能力演进，系统需要按独立 `Disk`（UUID 标识）提供字节级容量限制（文件大小配额控制，不限制 Inode 数量）并对外支撑 POSIX `StatFS` 查询，同时后续将由独立网关（Gateway）项目对外接收 `disk_id` 并将其映射转换为对应的根目录 `Inode`（`root_ino`）。

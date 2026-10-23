@@ -808,14 +808,63 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			}
 
 			if newIsDir {
-				// 被覆盖目标为空目录：nlink 直接置 0，刷新 ctime (保留 Inode 行)
+				// 被覆盖目标为空目录：nlink 直接置 0，刷新 ctime
 				if _, err := q.ClearInodeNlinkAndTouchCtime(ctx, newIno); err != nil {
 					return fmt.Errorf("clear target dir %d nlink: %w", newIno, err)
 				}
+
+				// 检查被覆盖空目录是否存在活跃目录句柄 (rmdir-whilst-open)
+				hasHandles, err := q.HasFileHandlesByIno(ctx, newIno)
+				if err != nil {
+					return fmt.Errorf("check file handles for overwritten dir %d: %w", newIno, err)
+				}
+				// 若无活跃句柄，当场物理删除 Inode 行并按需退还配额
+				if !hasHandles {
+					if err := q.DeleteInode(ctx, newIno); err != nil {
+						return fmt.Errorf("delete overwritten dir inode %d: %w", newIno, err)
+					}
+					if newInode.RootIno > 0 {
+						if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+							RootIno:     newInode.RootIno,
+							DeltaBytes:  0,
+							DeltaInodes: -1,
+						}); err != nil {
+							return fmt.Errorf("decrement disk used_inodes for overwritten dir %d: %w", newIno, err)
+						}
+					}
+				}
 			} else {
-				// 被覆盖目标为非目录：nlink 递减 1，刷新 ctime (保留 Inode 行)
-				if _, err := q.DecrementInodeNlinkAndTouchCtime(ctx, newIno); err != nil {
+				// 被覆盖目标为非目录：nlink 递减 1，刷新 ctime
+				updatedTarget, err := q.DecrementInodeNlinkAndTouchCtime(ctx, newIno)
+				if err != nil {
 					return fmt.Errorf("decrement target file %d nlink: %w", newIno, err)
+				}
+
+				// 当硬链接数降为 0 时，检查是否存在活跃句柄 (unlink-whilst-open)
+				if updatedTarget.Nlink == 0 {
+					hasHandles, err := q.HasFileHandlesByIno(ctx, newIno)
+					if err != nil {
+						return fmt.Errorf("check file handles for overwritten inode %d: %w", newIno, err)
+					}
+					// 若无活跃句柄，当场物理删除 Inode 行并按需退还配额
+					if !hasHandles {
+						if err := q.DeleteInode(ctx, newIno); err != nil {
+							return fmt.Errorf("delete overwritten inode %d: %w", newIno, err)
+						}
+						if newInode.RootIno > 0 {
+							var deltaBytes int64
+							if (uint32(newInode.Mode)&S_IFMT) == S_IFREG && newInode.Size > 0 {
+								deltaBytes = -newInode.Size
+							}
+							if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+								RootIno:     newInode.RootIno,
+								DeltaBytes:  deltaBytes,
+								DeltaInodes: -1,
+							}); err != nil {
+								return fmt.Errorf("decrement disk quota on rename overwrite for root_ino %d: %w", newInode.RootIno, err)
+							}
+						}
+					}
 				}
 			}
 		}

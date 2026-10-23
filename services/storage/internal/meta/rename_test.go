@@ -443,6 +443,8 @@ func TestRename_Directory_Positive(t *testing.T) {
 		orphanTarget := targetDirRow
 		orphanTarget.Nlink = 0
 		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetDirIno).Return(orphanTarget, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetDirIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetDirIno).Return(nil).Once()
 
 		// 更新源项
 		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
@@ -504,6 +506,8 @@ func TestRename_Directory_Positive(t *testing.T) {
 		}).Return(nil).Once()
 
 		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetDirIno).Return(targetDirRow, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetDirIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetDirIno).Return(nil).Once()
 
 		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
 			OldParentIno: int64(oldParentIno),
@@ -907,6 +911,8 @@ func TestRename_GlobalLockOrderAndDriftRetry(t *testing.T) {
 			Return(nil).Once()
 		mockQuerier2.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, driftedTargetIno).
 			Return(db.Inode{Ino: driftedTargetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 0}, nil).Once()
+		mockQuerier2.EXPECT().HasFileHandlesByIno(mock.Anything, driftedTargetIno).Return(false, nil).Once()
+		mockQuerier2.EXPECT().DeleteInode(mock.Anything, driftedTargetIno).Return(nil).Once()
 		mockQuerier2.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
 			OldParentIno: int64(oldParentIno),
 			OldName:      []byte("src"),
@@ -1847,6 +1853,645 @@ func TestRename_EmptyOldNameAndMaxNlink(t *testing.T) {
 			NewName:      []byte("dst_dir"),
 		})
 		assert.ErrorIs(t, err, meta.ErrTooManyLinks)
+	})
+}
+
+func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+
+	oldParentIno := uint64(10)
+	newParentIno := uint64(20)
+	srcIno := int64(100)
+	targetIno := int64(200)
+	rootIno := int64(1)
+
+	oldParentRow := db.Inode{
+		Ino:   int64(oldParentIno),
+		Mode:  int32(meta.S_IFDIR | 0o755),
+		Nlink: 2,
+		Atime: pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime: pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime: pgtype.Timestamptz{Time: now, Valid: true},
+	}
+	newParentRow := db.Inode{
+		Ino:   int64(newParentIno),
+		Mode:  int32(meta.S_IFDIR | 0o755),
+		Nlink: 2,
+		Atime: pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime: pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime: pgtype.Timestamptz{Time: now, Valid: true},
+	}
+	srcFileRow := db.Inode{
+		Ino:     srcIno,
+		Mode:    int32(meta.S_IFREG | 0o644),
+		Nlink:   1,
+		RootIno: rootIno,
+		Size:    1024,
+	}
+
+	setupFileOverwriteBaseMocks := func(mockQuerier *dbmock.MockQuerier, targetRow db.Inode) {
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: []byte("src.txt")}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: []byte("src.txt"), Ino: srcIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: []byte("dst.txt")}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: []byte("dst.txt"), Ino: targetIno}, nil).Twice()
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcIno).Return(srcFileRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetIno).Return(targetRow, nil).Once()
+
+		mockQuerier.EXPECT().DeleteEntry(mock.Anything, db.DeleteEntryParams{
+			ParentIno: int64(newParentIno),
+			Name:      []byte("dst.txt"),
+		}).Return(nil).Once()
+	}
+
+	t.Run("Rename 覆盖普通非空文件 (nlink 从 1 降为 0 且无活跃句柄): 当场调用 DeleteInode 并退还 used_bytes 与 used_inodes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{
+			Ino:     targetIno,
+			Mode:    int32(meta.S_IFREG | 0o644),
+			Nlink:   1,
+			RootIno: rootIno,
+			Size:    4096,
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).
+			Return(targetDecremented, nil).Once()
+
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+			RootIno:     rootIno,
+			DeltaBytes:  -4096,
+			DeltaInodes: -1,
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src.txt"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst.txt"),
+		}).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeCtime(mock.Anything, srcIno).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("Rename 覆盖符号链接 (nlink 从 1 降为 0 且无活跃句柄): 当场物理删除 Inode 且退还 DeltaBytes: 0, DeltaInodes: -1", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{
+			Ino:     targetIno,
+			Mode:    int32(meta.S_IFLNK | 0o777),
+			Nlink:   1,
+			RootIno: rootIno,
+			Size:    24, // 符号链接 target 路径长度，不应作为 deltaBytes 扣减
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).
+			Return(targetDecremented, nil).Once()
+
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+			RootIno:     rootIno,
+			DeltaBytes:  0,
+			DeltaInodes: -1,
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src.txt"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst.txt"),
+		}).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeCtime(mock.Anything, srcIno).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("Rename 覆盖多硬链接文件 (nlink 从 2 降为 1): 不调用 HasFileHandlesByIno、DeleteInode 和 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{
+			Ino:     targetIno,
+			Mode:    int32(meta.S_IFREG | 0o644),
+			Nlink:   2,
+			RootIno: rootIno,
+			Size:    4096,
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 1
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).
+			Return(targetDecremented, nil).Once()
+
+		// 不应调用 HasFileHandlesByIno、DeleteInode、AddDiskQuotaByRootIno
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src.txt"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst.txt"),
+		}).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeCtime(mock.Anything, srcIno).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("Rename 覆盖正在打开中的文件 (nlink 降为 0 但 HasFileHandlesByIno 返回 true): 保留孤儿节点，不调用 DeleteInode 和 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{
+			Ino:     targetIno,
+			Mode:    int32(meta.S_IFREG | 0o644),
+			Nlink:   1,
+			RootIno: rootIno,
+			Size:    4096,
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).
+			Return(targetDecremented, nil).Once()
+
+		// 存在活跃打开句柄
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(true, nil).Once()
+
+		// 不应调用 DeleteInode 与 AddDiskQuotaByRootIno
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src.txt"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst.txt"),
+		}).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeCtime(mock.Anything, srcIno).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("Rename 覆盖无活跃句柄但 target.RootIno == 0 的文件: 物理删除 Inode 但不退还配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{
+			Ino:     targetIno,
+			Mode:    int32(meta.S_IFREG | 0o644),
+			Nlink:   1,
+			RootIno: 0,
+			Size:    4096,
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).
+			Return(targetDecremented, nil).Once()
+
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+
+		// 不应调用 AddDiskQuotaByRootIno
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src.txt"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst.txt"),
+		}).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeCtime(mock.Anything, srcIno).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		require.NoError(t, err)
+	})
+
+	setupDirOverwriteBaseMocks := func(mockQuerier *dbmock.MockQuerier, srcDirRow db.Inode, targetDirRow db.Inode) {
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(oldParentIno), Name: []byte("src_dir")}).
+			Return(db.Entry{ParentIno: int64(oldParentIno), Name: []byte("src_dir"), Ino: srcIno}, nil).Twice()
+		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: []byte("dst_dir")}).
+			Return(db.Entry{ParentIno: int64(newParentIno), Name: []byte("dst_dir"), Ino: targetIno}, nil).Twice()
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcIno).Return(srcDirRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetIno).Return(targetDirRow, nil).Once()
+
+		// 祖先环检测
+		mockQuerier.EXPECT().IsSubdirectory(mock.Anything, db.IsSubdirectoryParams{
+			ChildIno:    int64(newParentIno),
+			AncestorIno: srcIno,
+		}).Return(false, nil).Once()
+
+		// 空目录校验
+		mockQuerier.EXPECT().HasChildEntries(mock.Anything, targetIno).Return(false, nil).Once()
+
+		mockQuerier.EXPECT().DeleteEntry(mock.Anything, db.DeleteEntryParams{
+			ParentIno: int64(newParentIno),
+			Name:      []byte("dst_dir"),
+		}).Return(nil).Once()
+	}
+
+	t.Run("Rename 覆盖空目录 (无活跃句柄且 RootIno > 0): 当场物理删除并退还 DeltaInodes: -1", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		srcDirRow := db.Inode{
+			Ino:       srcIno,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: int64(oldParentIno),
+		}
+		targetDirRow := db.Inode{
+			Ino:       targetIno,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			RootIno:   rootIno,
+			ParentIno: int64(newParentIno),
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
+
+		orphanTarget := targetDirRow
+		orphanTarget.Nlink = 0
+		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+			RootIno:     rootIno,
+			DeltaBytes:  0,
+			DeltaInodes: -1,
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src_dir"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst_dir"),
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().UpdateInodeParentInoAndTouchCtime(mock.Anything, db.UpdateInodeParentInoAndTouchCtimeParams{
+			Ino:       srcIno,
+			ParentIno: int64(newParentIno),
+		}).Return(nil).Once()
+
+		// 跨父目录移动目录且目标覆盖空目录：oldParent nlink 减 1，newParent 时间戳刷新
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouch(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src_dir"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst_dir"),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("Rename 覆盖空目录 (存在活跃句柄): 保留孤儿目录，不调用 DeleteInode 和 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		srcDirRow := db.Inode{
+			Ino:       srcIno,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: int64(oldParentIno),
+		}
+		targetDirRow := db.Inode{
+			Ino:       targetIno,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			RootIno:   rootIno,
+			ParentIno: int64(newParentIno),
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
+
+		orphanTarget := targetDirRow
+		orphanTarget.Nlink = 0
+		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(true, nil).Once()
+
+		// 不应调用 DeleteInode 与 AddDiskQuotaByRootIno
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src_dir"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst_dir"),
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().UpdateInodeParentInoAndTouchCtime(mock.Anything, db.UpdateInodeParentInoAndTouchCtimeParams{
+			Ino:       srcIno,
+			ParentIno: int64(newParentIno),
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouch(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src_dir"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst_dir"),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("Rename 覆盖空目录 (无活跃句柄但 target.RootIno == 0): 物理删除 Inode 但不退还配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		srcDirRow := db.Inode{
+			Ino:       srcIno,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			ParentIno: int64(oldParentIno),
+		}
+		targetDirRow := db.Inode{
+			Ino:       targetIno,
+			Mode:      int32(meta.S_IFDIR | 0o755),
+			Nlink:     2,
+			RootIno:   0,
+			ParentIno: int64(newParentIno),
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
+
+		orphanTarget := targetDirRow
+		orphanTarget.Nlink = 0
+		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+
+		// 不应调用 AddDiskQuotaByRootIno
+
+		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
+			OldParentIno: int64(oldParentIno),
+			OldName:      []byte("src_dir"),
+			NewParentIno: int64(newParentIno),
+			NewName:      []byte("dst_dir"),
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().UpdateInodeParentInoAndTouchCtime(mock.Anything, db.UpdateInodeParentInoAndTouchCtimeParams{
+			Ino:       srcIno,
+			ParentIno: int64(newParentIno),
+		}).Return(nil).Once()
+
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouch(mock.Anything, int64(oldParentIno)).Return(nil).Once()
+		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(newParentIno)).Return(nil).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src_dir"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst_dir"),
+		})
+		require.NoError(t, err)
+	})
+
+	// 错误路径测试
+	t.Run("覆盖文件时 HasFileHandlesByIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1, RootIno: rootIno, Size: 4096}
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(targetDecremented, nil).Once()
+
+		dbErr := errors.New("db handle check failed")
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, dbErr).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		assert.ErrorIs(t, err, dbErr)
+	})
+
+	t.Run("覆盖文件时 DeleteInode 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1, RootIno: rootIno, Size: 4096}
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(targetDecremented, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+
+		delErr := errors.New("delete inode failed")
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(delErr).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		assert.ErrorIs(t, err, delErr)
+	})
+
+	t.Run("覆盖文件时 AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1, RootIno: rootIno, Size: 4096}
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
+
+		targetDecremented := targetRow
+		targetDecremented.Nlink = 0
+		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(targetDecremented, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+
+		quotaErr := errors.New("add disk quota failed")
+		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+			RootIno:     rootIno,
+			DeltaBytes:  -4096,
+			DeltaInodes: -1,
+		}).Return(quotaErr).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src.txt"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst.txt"),
+		})
+		assert.ErrorIs(t, err, quotaErr)
+	})
+
+	t.Run("覆盖空目录时 HasFileHandlesByIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, ParentIno: int64(oldParentIno)}
+		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
+
+		orphanTarget := targetDirRow
+		orphanTarget.Nlink = 0
+		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
+
+		dbErr := errors.New("check dir handles failed")
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, dbErr).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src_dir"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst_dir"),
+		})
+		assert.ErrorIs(t, err, dbErr)
+	})
+
+	t.Run("覆盖空目录时 DeleteInode 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, ParentIno: int64(oldParentIno)}
+		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
+
+		orphanTarget := targetDirRow
+		orphanTarget.Nlink = 0
+		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+
+		delErr := errors.New("delete dir inode failed")
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(delErr).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src_dir"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst_dir"),
+		})
+		assert.ErrorIs(t, err, delErr)
+	})
+
+	t.Run("覆盖空目录时 AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, ParentIno: int64(oldParentIno)}
+		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
+
+		orphanTarget := targetDirRow
+		orphanTarget.Nlink = 0
+		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
+		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
+
+		quotaErr := errors.New("quota refund failed")
+		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+			RootIno:     rootIno,
+			DeltaBytes:  0,
+			DeltaInodes: -1,
+		}).Return(quotaErr).Once()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: oldParentIno,
+			OldName:      []byte("src_dir"),
+			NewParentIno: newParentIno,
+			NewName:      []byte("dst_dir"),
+		})
+		assert.ErrorIs(t, err, quotaErr)
 	})
 }
 

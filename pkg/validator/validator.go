@@ -62,6 +62,7 @@ var storageMessages = []proto.Message{
 	&storagev1.SetLkRequest{},
 	&storagev1.SetLkwRequest{},
 	&storagev1.RenewSessionRequest{},
+	&storagev1.CreateDiskRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.LookupResponse{},
@@ -95,6 +96,7 @@ var storageMessages = []proto.Message{
 	&storagev1.SetLkResponse{},
 	&storagev1.SetLkwResponse{},
 	&storagev1.RenewSessionResponse{},
+	&storagev1.CreateDiskResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},
@@ -102,6 +104,7 @@ var storageMessages = []proto.Message{
 	&storagev1.FileLock{},
 	&storagev1.Inode{},
 	&storagev1.InodeAttribute{},
+	&storagev1.Disk{},
 }
 
 // diskMessages 汇总 DiskService 全部请求、响应与实体消息，用于启动期预编译校验规则。
@@ -304,7 +307,9 @@ func classifyViolation(v *protovalidate.Violation) (int, string, string) {
 	if v != nil && v.Proto != nil {
 		ruleID = v.Proto.GetRuleId()
 	}
-	if strings.HasPrefix(fullName, "disk.v1.") || ruleID == "update_disk_has_update" ||
+	if strings.HasPrefix(fullName, "storage.v1.") {
+		domain = ErrorDomain
+	} else if strings.HasPrefix(fullName, "disk.v1.") || ruleID == "update_disk_has_update" ||
 		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
 		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
 		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_") {
@@ -333,10 +338,11 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 	}
 
 	// 针对 disk.v1 消息的校验规则分类
-	if strings.HasPrefix(fullName, "disk.v1.") || ruleID == "update_disk_has_update" ||
+	isDisk := strings.HasPrefix(fullName, "disk.v1.") || (!strings.HasPrefix(fullName, "storage.v1.") && (ruleID == "update_disk_has_update" ||
 		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
 		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
-		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_") {
+		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_")))
+	if isDisk {
 		switch fullName {
 		case "disk.v1.Disk.name",
 			"disk.v1.CreateDiskRequest.name",
@@ -473,7 +479,16 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.InodeAttribute.uid",
 		"storage.v1.InodeAttribute.gid",
 		"storage.v1.InodeAttribute.rdev",
-		"storage.v1.InodeAttribute.size":
+		"storage.v1.InodeAttribute.size",
+		"storage.v1.Disk.disk_id",
+		"storage.v1.Disk.root_ino",
+		"storage.v1.Disk.max_bytes",
+		"storage.v1.Disk.used_bytes",
+		"storage.v1.Disk.used_inodes",
+		"storage.v1.Disk.created_at",
+		"storage.v1.Disk.updated_at",
+		"storage.v1.CreateDiskRequest.max_bytes",
+		"storage.v1.CreateDiskResponse.disk":
 		return 10, ReasonInvalidArgument
 
 	// 第 2/3 优先级：Xattr 属性名称长度边界 (仅 >255 为 ERANGE，空名称或含 NUL 为 EINVAL)
@@ -497,7 +512,9 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.RenameRequest.old_name",
 		"storage.v1.CreateRequest.name",
 		"storage.v1.DirEntry.name",
-		"storage.v1.DirEntryPlus.name":
+		"storage.v1.DirEntryPlus.name",
+		"storage.v1.Disk.name",
+		"storage.v1.CreateDiskRequest.name":
 		if isMaxLen {
 			return 20, ReasonNameTooLong
 		}

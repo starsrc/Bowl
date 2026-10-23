@@ -87,6 +87,8 @@ const (
 	// StorageServiceRenewSessionProcedure is the procedure name of the StorageService's RenewSession
 	// RPC.
 	StorageServiceRenewSessionProcedure = "/storage.v1.StorageService/RenewSession"
+	// StorageServiceCreateDiskProcedure is the procedure name of the StorageService's CreateDisk RPC.
+	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
 )
 
 var (
@@ -307,6 +309,13 @@ var (
 			Procedure:  StorageServiceRenewSessionProcedure,
 		}
 	})
+	storageServiceCreateDiskSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("CreateDisk"),
+			Procedure:  StorageServiceCreateDiskProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -479,6 +488,10 @@ type StorageServiceClient interface {
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error)
+	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
+	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
+	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
+	CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -657,6 +670,10 @@ type StorageServiceHandler interface {
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error)
+	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
+	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
+	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
+	CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -695,6 +712,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceSetLkSpec(), Handler: adapter.setLk},
 		connect.Method{Spec: storageServiceSetLkwSpec(), Handler: adapter.setLkw},
 		connect.Method{Spec: storageServiceRenewSessionSpec(), Handler: adapter.renewSession},
+		connect.Method{Spec: storageServiceCreateDiskSpec(), Handler: adapter.createDisk},
 	)
 }
 
@@ -823,6 +841,10 @@ func (UnimplementedStorageServiceHandler) SetLkw(context.Context, *v1.SetLkwRequ
 
 func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.RenewSession is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.CreateDisk is not implemented")
 }
 
 type storageServiceClient struct {
@@ -1072,6 +1094,14 @@ func (c *storageServiceClient) SetLkw(ctx context.Context, req *v1.SetLkwRequest
 func (c *storageServiceClient) RenewSession(ctx context.Context, req *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error) {
 	var res v1.RenewSessionResponse
 	if err := c.client.CallUnary(ctx, storageServiceRenewSessionSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) CreateDisk(ctx context.Context, req *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error) {
+	var res v1.CreateDiskResponse
+	if err := c.client.CallUnary(ctx, storageServiceCreateDiskSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1445,6 +1475,18 @@ func (h storageServiceHandler) renewSession(ctx context.Context, _ connect.Spec,
 		return err
 	}
 	res, err := h.svc.RenewSession(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) createDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.CreateDiskRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.CreateDisk(ctx, &req)
 	if err != nil {
 		return err
 	}

@@ -41,6 +41,14 @@ const (
 	DefaultDirSize   uint64 = 4096
 )
 
+// 磁盘与 StatFS 常量。
+const (
+	// MaxDiskNameBytes 定义磁盘名称最大字节长度（255 字节）。
+	MaxDiskNameBytes = 255
+	// DefaultStatFSBlockSize 定义 StatFS 默认换算块大小（4096 字节）。
+	DefaultStatFSBlockSize = 4096
+)
+
 // Inode 文件系统标志位常量（对齐 Linux chattr / FS_*_FL）。
 const (
 	FlagImmutable uint32 = 0x1 // FS_IMMUTABLE_FL
@@ -457,4 +465,22 @@ type ListXattrParams struct {
 type RenewSessionResult struct {
 	ExpiresAt        time.Time
 	SessionRecreated bool
+}
+
+// Disk 描述虚拟磁盘领域实体。
+type Disk struct {
+	DiskID     string
+	Name       string
+	RootIno    uint64
+	MaxBytes   uint64
+	UsedBytes  uint64
+	UsedInodes uint64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// CreateDiskParams 描述创建虚拟磁盘入参。
+type CreateDiskParams struct {
+	Name     string
+	MaxBytes uint64
 }

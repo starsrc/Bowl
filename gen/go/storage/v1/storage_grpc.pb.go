@@ -50,6 +50,7 @@ const (
 	StorageService_SetLk_FullMethodName        = "/storage.v1.StorageService/SetLk"
 	StorageService_SetLkw_FullMethodName       = "/storage.v1.StorageService/SetLkw"
 	StorageService_RenewSession_FullMethodName = "/storage.v1.StorageService/RenewSession"
+	StorageService_CreateDisk_FullMethodName   = "/storage.v1.StorageService/CreateDisk"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -226,6 +227,10 @@ type StorageServiceClient interface {
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(ctx context.Context, in *RenewSessionRequest, opts ...grpc.CallOption) (*RenewSessionResponse, error)
+	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
+	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
+	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
+	CreateDisk(ctx context.Context, in *CreateDiskRequest, opts ...grpc.CallOption) (*CreateDiskResponse, error)
 }
 
 type storageServiceClient struct {
@@ -546,6 +551,16 @@ func (c *storageServiceClient) RenewSession(ctx context.Context, in *RenewSessio
 	return out, nil
 }
 
+func (c *storageServiceClient) CreateDisk(ctx context.Context, in *CreateDiskRequest, opts ...grpc.CallOption) (*CreateDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateDiskResponse)
+	err := c.cc.Invoke(ctx, StorageService_CreateDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -720,6 +735,10 @@ type StorageServiceServer interface {
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error)
+	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
+	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
+	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
+	CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -822,6 +841,9 @@ func (UnimplementedStorageServiceServer) SetLkw(context.Context, *SetLkwRequest)
 }
 func (UnimplementedStorageServiceServer) RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RenewSession not implemented")
+}
+func (UnimplementedStorageServiceServer) CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateDisk not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1402,6 +1424,24 @@ func _StorageService_RenewSession_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_CreateDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).CreateDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_CreateDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).CreateDisk(ctx, req.(*CreateDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1532,6 +1572,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RenewSession",
 			Handler:    _StorageService_RenewSession_Handler,
+		},
+		{
+			MethodName: "CreateDisk",
+			Handler:    _StorageService_CreateDisk_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

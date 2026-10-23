@@ -207,6 +207,11 @@ service StorageService {
   // 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
   // 续期成功返回刷新后的租约截止时间 expires_at。
   rpc RenewSession(RenewSessionRequest) returns (RenewSessionResponse);
+
+  // CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
+  // 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
+  // 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
+  rpc CreateDisk(CreateDiskRequest) returns (CreateDiskResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -1416,4 +1421,76 @@ message InodeAttribute {
 
   // 文件系统标志位（如 chattr 所设）。
   uint32 flags = 12 [(buf.validate.field).uint32.lte = 2147483647];
+}
+
+// Disk 描述虚拟磁盘实体及其配额状态。
+message Disk {
+  // 磁盘全局唯一标识符（UUID 字符串格式，非全零 nil UUID）。
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "disk_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  // 磁盘名称（最大 255 字节，严禁包含空字节 '\x00'）。
+  string name = 2 [
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).cel = {
+      id: "disk_name_no_nul"
+      message: "name cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  // 一对一绑定的根目录 Inode 编号（必须在 int64 正数区间内）。
+  uint64 root_ino = 3 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 容量配额上限字节数（必须在 int64 正数区间内）。
+  uint64 max_bytes = 4 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 当前已用字节数（不能超过 int64 正数最大值）。
+  uint64 used_bytes = 5 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 当前已用 Inode 数量（不能超过 int64 正数最大值）。
+  uint64 used_inodes = 6 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 磁盘创建时间戳（必填）。
+  google.protobuf.Timestamp created_at = 7 [(buf.validate.field).required = true];
+
+  // 磁盘最后更新时间戳（必填）。
+  google.protobuf.Timestamp updated_at = 8 [(buf.validate.field).required = true];
+}
+
+// CreateDiskRequest 定义 CreateDisk 接口输入参数。
+message CreateDiskRequest {
+  // 磁盘名称（最大 255 字节，严禁包含空字节 '\x00'）。
+  string name = 1 [
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).cel = {
+      id: "create_disk_name_no_nul"
+      message: "name cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  // 容量配额上限字节数（必须在 int64 正数区间内）。
+  uint64 max_bytes = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+}
+
+// CreateDiskResponse 定义 CreateDisk 接口输出参数。
+message CreateDiskResponse {
+  // 创建成功的虚拟磁盘实体。
+  Disk disk = 1 [(buf.validate.field).required = true];
 }

@@ -3,6 +3,7 @@ module github.com/starsrc/bowl/services/storage
 go 1.26.5
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/starsrc/Aether/pkg/tx v0.0.0-20261015162448-6c422ba5431b
 	github.com/stretchr/testify v1.12.1

@@ -107,6 +107,74 @@ func (_c *MockManager_Create_Call) RunAndReturn(run func(ctx context.Context, pa
 	return _c
 }
 
+// CreateDisk provides a mock function for the type MockManager
+func (_mock *MockManager) CreateDisk(ctx context.Context, params meta.CreateDiskParams) (*meta.Disk, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateDisk")
+	}
+
+	var r0 *meta.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.CreateDiskParams) (*meta.Disk, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.CreateDiskParams) *meta.Disk); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.Disk)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.CreateDiskParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_CreateDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateDisk'
+type MockManager_CreateDisk_Call struct {
+	*mock.Call
+}
+
+// CreateDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.CreateDiskParams
+func (_e *MockManager_Expecter) CreateDisk(ctx any, params any) *MockManager_CreateDisk_Call {
+	return &MockManager_CreateDisk_Call{Call: _e.mock.On("CreateDisk", ctx, params)}
+}
+
+func (_c *MockManager_CreateDisk_Call) Run(run func(ctx context.Context, params meta.CreateDiskParams)) *MockManager_CreateDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.CreateDiskParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.CreateDiskParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_CreateDisk_Call) Return(disk *meta.Disk, err error) *MockManager_CreateDisk_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockManager_CreateDisk_Call) RunAndReturn(run func(ctx context.Context, params meta.CreateDiskParams) (*meta.Disk, error)) *MockManager_CreateDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Fallocate provides a mock function for the type MockManager
 func (_mock *MockManager) Fallocate(ctx context.Context, params meta.FallocateParams) error {
 	ret := _mock.Called(ctx, params)

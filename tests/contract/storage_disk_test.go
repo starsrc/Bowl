@@ -100,6 +100,20 @@ func TestStorageDiskContract_ValidMessages(t *testing.T) {
 		assert.NoError(t, v.Validate(resp))
 	})
 
+	t.Run("有效 GetDiskRequest 校验通过", func(t *testing.T) {
+		req := &storagev1.GetDiskRequest{
+			DiskId: validStorageDiskUUID,
+		}
+		assert.NoError(t, v.Validate(req))
+	})
+
+	t.Run("有效 GetDiskResponse 校验通过", func(t *testing.T) {
+		resp := &storagev1.GetDiskResponse{
+			Disk: validSampleStorageDisk(),
+		}
+		assert.NoError(t, v.Validate(resp))
+	})
+
 	t.Run("有效 Disk 实体校验通过", func(t *testing.T) {
 		disk := validSampleStorageDisk()
 		assert.NoError(t, v.Validate(disk))
@@ -173,6 +187,44 @@ func TestStorageDiskContract_CreateDiskResponse_Invalid(t *testing.T) {
 
 	t.Run("缺少必填 disk 实体返回 EINVAL", func(t *testing.T) {
 		resp := &storagev1.CreateDiskResponse{
+			Disk: nil,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(resp), validator.ReasonInvalidArgument)
+	})
+}
+
+func TestStorageDiskContract_GetDiskRequest_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("disk_id 为空字符串返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.GetDiskRequest{
+			DiskId: "",
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("disk_id 非 UUID 格式返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.GetDiskRequest{
+			DiskId: "invalid-uuid-format",
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("disk_id 全零 Nil UUID 返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.GetDiskRequest{
+			DiskId: nilStorageDiskUUID,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+}
+
+func TestStorageDiskContract_GetDiskResponse_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("缺少必填 disk 实体返回 EINVAL", func(t *testing.T) {
+		resp := &storagev1.GetDiskResponse{
 			Disk: nil,
 		}
 		assertStorageErrorInfoReason(t, v.Validate(resp), validator.ReasonInvalidArgument)

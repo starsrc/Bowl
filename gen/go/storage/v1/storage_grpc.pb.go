@@ -51,6 +51,7 @@ const (
 	StorageService_SetLkw_FullMethodName       = "/storage.v1.StorageService/SetLkw"
 	StorageService_RenewSession_FullMethodName = "/storage.v1.StorageService/RenewSession"
 	StorageService_CreateDisk_FullMethodName   = "/storage.v1.StorageService/CreateDisk"
+	StorageService_GetDisk_FullMethodName      = "/storage.v1.StorageService/GetDisk"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -231,6 +232,10 @@ type StorageServiceClient interface {
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
 	CreateDisk(ctx context.Context, in *CreateDiskRequest, opts ...grpc.CallOption) (*CreateDiskResponse, error)
+	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	GetDisk(ctx context.Context, in *GetDiskRequest, opts ...grpc.CallOption) (*GetDiskResponse, error)
 }
 
 type storageServiceClient struct {
@@ -561,6 +566,16 @@ func (c *storageServiceClient) CreateDisk(ctx context.Context, in *CreateDiskReq
 	return out, nil
 }
 
+func (c *storageServiceClient) GetDisk(ctx context.Context, in *GetDiskRequest, opts ...grpc.CallOption) (*GetDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDiskResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -739,6 +754,10 @@ type StorageServiceServer interface {
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
 	CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error)
+	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	GetDisk(context.Context, *GetDiskRequest) (*GetDiskResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -844,6 +863,9 @@ func (UnimplementedStorageServiceServer) RenewSession(context.Context, *RenewSes
 }
 func (UnimplementedStorageServiceServer) CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) GetDisk(context.Context, *GetDiskRequest) (*GetDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDisk not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1442,6 +1464,24 @@ func _StorageService_CreateDisk_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_GetDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetDisk(ctx, req.(*GetDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1576,6 +1616,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateDisk",
 			Handler:    _StorageService_CreateDisk_Handler,
+		},
+		{
+			MethodName: "GetDisk",
+			Handler:    _StorageService_GetDisk_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

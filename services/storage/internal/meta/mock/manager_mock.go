@@ -471,6 +471,74 @@ func (_c *MockManager_GetAttr_Call) RunAndReturn(run func(ctx context.Context, i
 	return _c
 }
 
+// GetDisk provides a mock function for the type MockManager
+func (_mock *MockManager) GetDisk(ctx context.Context, diskID string) (*meta.Disk, error) {
+	ret := _mock.Called(ctx, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDisk")
+	}
+
+	var r0 *meta.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (*meta.Disk, error)); ok {
+		return returnFunc(ctx, diskID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) *meta.Disk); ok {
+		r0 = returnFunc(ctx, diskID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.Disk)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, diskID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_GetDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDisk'
+type MockManager_GetDisk_Call struct {
+	*mock.Call
+}
+
+// GetDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - diskID string
+func (_e *MockManager_Expecter) GetDisk(ctx any, diskID any) *MockManager_GetDisk_Call {
+	return &MockManager_GetDisk_Call{Call: _e.mock.On("GetDisk", ctx, diskID)}
+}
+
+func (_c *MockManager_GetDisk_Call) Run(run func(ctx context.Context, diskID string)) *MockManager_GetDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_GetDisk_Call) Return(disk *meta.Disk, err error) *MockManager_GetDisk_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockManager_GetDisk_Call) RunAndReturn(run func(ctx context.Context, diskID string) (*meta.Disk, error)) *MockManager_GetDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetLk provides a mock function for the type MockManager
 func (_mock *MockManager) GetLk(ctx context.Context, params meta.GetLkParams) (*meta.FileLock, error) {
 	ret := _mock.Called(ctx, params)

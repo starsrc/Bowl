@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
@@ -407,5 +408,122 @@ func TestCreateDisk_DatabaseErrors(t *testing.T) {
 		require.Nil(t, disk)
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, txErr))
+	})
+}
+
+func TestGetDisk(t *testing.T) {
+	ctx := context.Background()
+	const (
+		validDiskIDStr = "0192a3b4-c5d6-7e8f-9012-3456789abcde"
+		nilDiskIDStr   = "00000000-0000-0000-0000-000000000000"
+	)
+
+	var validDiskID pgtype.UUID
+	err := validDiskID.Scan(validDiskIDStr)
+	require.NoError(t, err)
+
+	now := time.Now().Truncate(time.Microsecond)
+	sampleDBDisk := db.Disk{
+		DiskID:     validDiskID,
+		Name:       "primary-disk",
+		RootIno:    2001,
+		MaxBytes:   20 * 1024 * 1024 * 1024,
+		UsedBytes:  5 * 1024 * 1024 * 1024,
+		UsedInodes: 10,
+		CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	t.Run("成功查询存在的磁盘详情", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetDisk(mock.Anything, validDiskID).
+			Return(sampleDBDisk, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		result, err := mgr.GetDisk(ctx, validDiskIDStr)
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, validDiskIDStr, result.DiskID)
+		assert.Equal(t, sampleDBDisk.Name, result.Name)
+		assert.Equal(t, uint64(sampleDBDisk.RootIno), result.RootIno)
+		assert.Equal(t, uint64(sampleDBDisk.MaxBytes), result.MaxBytes)
+		assert.Equal(t, uint64(sampleDBDisk.UsedBytes), result.UsedBytes)
+		assert.Equal(t, uint64(sampleDBDisk.UsedInodes), result.UsedInodes)
+		assert.Equal(t, now, result.CreatedAt)
+		assert.Equal(t, now, result.UpdatedAt)
+	})
+
+	t.Run("静态校验拦截空 UUID 且不调用底层数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+
+		mgr := meta.New(mockStore)
+		result, err := mgr.GetDisk(ctx, "")
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "invalid disk id")
+		mockStore.AssertNotCalled(t, "GetDisk", mock.Anything, mock.Anything)
+	})
+
+	t.Run("静态校验拦截非法格式 UUID 且不调用底层数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+
+		mgr := meta.New(mockStore)
+		result, err := mgr.GetDisk(ctx, "invalid-uuid-format")
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "invalid disk id")
+		mockStore.AssertNotCalled(t, "GetDisk", mock.Anything, mock.Anything)
+	})
+
+	t.Run("静态校验拦截 Nil UUID 且不调用底层数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+
+		mgr := meta.New(mockStore)
+		result, err := mgr.GetDisk(ctx, nilDiskIDStr)
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "disk id cannot be nil uuid")
+		mockStore.AssertNotCalled(t, "GetDisk", mock.Anything, mock.Anything)
+	})
+
+	t.Run("磁盘不存在时映射 pgx.ErrNoRows 为 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetDisk(mock.Anything, validDiskID).
+			Return(db.Disk{}, pgx.ErrNoRows).
+			Once()
+
+		mgr := meta.New(mockStore)
+		result, err := mgr.GetDisk(ctx, validDiskIDStr)
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("底层数据库其他错误透明透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		dbErr := errors.New("database connection refused")
+		mockStore.EXPECT().
+			GetDisk(mock.Anything, validDiskID).
+			Return(db.Disk{}, dbErr).
+			Once()
+
+		mgr := meta.New(mockStore)
+		result, err := mgr.GetDisk(ctx, validDiskIDStr)
+
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.True(t, errors.Is(err, dbErr))
+		assert.False(t, errors.Is(err, meta.ErrNotFound))
 	})
 }

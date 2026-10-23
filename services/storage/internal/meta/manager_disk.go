@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -106,3 +107,34 @@ func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 
 	return toDomainDisk(createdDisk), nil
 }
+
+// parseDiskID 解析字符串形式的 UUID 为 pgtype.UUID，并拦截非法格式或全零 Nil UUID。
+func parseDiskID(diskID string) (pgtype.UUID, error) {
+	var id pgtype.UUID
+	if err := id.Scan(diskID); err != nil || !id.Valid {
+		return pgtype.UUID{}, fmt.Errorf("%w: invalid disk id %q", ErrInvalidArgument, diskID)
+	}
+	if id.Bytes == [16]byte{} {
+		return pgtype.UUID{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+	return id, nil
+}
+
+// GetDisk 根据磁盘 ID 查询虚拟磁盘详情与配额状态。
+func (m *manager) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
+	pgID, err := parseDiskID(diskID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := m.store.GetDisk(ctx, pgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	return toDomainDisk(row), nil
+}
+

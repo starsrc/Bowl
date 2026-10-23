@@ -73,6 +73,7 @@ type Manager interface {
 	RenewSessionWithStatus(ctx context.Context, sessionID uint64) (RenewSessionResult, error)
 	GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error)
 	CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error)
+	GetDisk(ctx context.Context, diskID string) (*Disk, error)
 }
 
 type manager struct {

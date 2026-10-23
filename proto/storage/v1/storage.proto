@@ -212,6 +212,11 @@ service StorageService {
   // 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
   // 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
   rpc CreateDisk(CreateDiskRequest) returns (CreateDiskResponse);
+
+  // GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
+  // 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc GetDisk(GetDiskRequest) returns (GetDiskResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -1494,3 +1499,23 @@ message CreateDiskResponse {
   // 创建成功的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
 }
+
+// GetDiskRequest 定义 GetDisk 接口输入参数。
+message GetDiskRequest {
+  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "get_disk_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// GetDiskResponse 定义 GetDisk 接口输出参数。
+message GetDiskResponse {
+  // 查询到的虚拟磁盘实体。
+  Disk disk = 1 [(buf.validate.field).required = true];
+}
+

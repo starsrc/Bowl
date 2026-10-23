@@ -63,6 +63,7 @@ var storageMessages = []proto.Message{
 	&storagev1.SetLkwRequest{},
 	&storagev1.RenewSessionRequest{},
 	&storagev1.CreateDiskRequest{},
+	&storagev1.GetDiskRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.LookupResponse{},
@@ -97,6 +98,7 @@ var storageMessages = []proto.Message{
 	&storagev1.SetLkwResponse{},
 	&storagev1.RenewSessionResponse{},
 	&storagev1.CreateDiskResponse{},
+	&storagev1.GetDiskResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},
@@ -488,7 +490,9 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.Disk.created_at",
 		"storage.v1.Disk.updated_at",
 		"storage.v1.CreateDiskRequest.max_bytes",
-		"storage.v1.CreateDiskResponse.disk":
+		"storage.v1.CreateDiskResponse.disk",
+		"storage.v1.GetDiskRequest.disk_id",
+		"storage.v1.GetDiskResponse.disk":
 		return 10, ReasonInvalidArgument
 
 	// 第 2/3 优先级：Xattr 属性名称长度边界 (仅 >255 为 ERANGE，空名称或含 NUL 为 EINVAL)

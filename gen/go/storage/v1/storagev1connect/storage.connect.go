@@ -89,6 +89,8 @@ const (
 	StorageServiceRenewSessionProcedure = "/storage.v1.StorageService/RenewSession"
 	// StorageServiceCreateDiskProcedure is the procedure name of the StorageService's CreateDisk RPC.
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
+	// StorageServiceGetDiskProcedure is the procedure name of the StorageService's GetDisk RPC.
+	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
 )
 
 var (
@@ -316,6 +318,13 @@ var (
 			Procedure:  StorageServiceCreateDiskProcedure,
 		}
 	})
+	storageServiceGetDiskSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetDisk"),
+			Procedure:  StorageServiceGetDiskProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -492,6 +501,10 @@ type StorageServiceClient interface {
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
 	CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error)
+	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -674,6 +687,10 @@ type StorageServiceHandler interface {
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
 	CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error)
+	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -713,6 +730,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceSetLkwSpec(), Handler: adapter.setLkw},
 		connect.Method{Spec: storageServiceRenewSessionSpec(), Handler: adapter.renewSession},
 		connect.Method{Spec: storageServiceCreateDiskSpec(), Handler: adapter.createDisk},
+		connect.Method{Spec: storageServiceGetDiskSpec(), Handler: adapter.getDisk},
 	)
 }
 
@@ -845,6 +863,10 @@ func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *v1.Rene
 
 func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.CreateDisk is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetDisk is not implemented")
 }
 
 type storageServiceClient struct {
@@ -1102,6 +1124,14 @@ func (c *storageServiceClient) RenewSession(ctx context.Context, req *v1.RenewSe
 func (c *storageServiceClient) CreateDisk(ctx context.Context, req *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error) {
 	var res v1.CreateDiskResponse
 	if err := c.client.CallUnary(ctx, storageServiceCreateDiskSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) GetDisk(ctx context.Context, req *v1.GetDiskRequest) (*v1.GetDiskResponse, error) {
+	var res v1.GetDiskResponse
+	if err := c.client.CallUnary(ctx, storageServiceGetDiskSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1487,6 +1517,18 @@ func (h storageServiceHandler) createDisk(ctx context.Context, _ connect.Spec, s
 		return err
 	}
 	res, err := h.svc.CreateDisk(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) getDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.GetDiskRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.GetDisk(ctx, &req)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2419,5 +2420,374 @@ func TestStore_Integration_TransactionRollbackAndCommit(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, diskID, disk.DiskID)
 		assert.Equal(t, "commit-disk", disk.Name)
+	})
+}
+
+// TestMigration_AddDisksAndInodeRootIno_BackfillAndDown 验证 20261023000000 迁移的存量目录树递归回填、子盘边界截断、孤儿节点归属及回滚数据保护。
+func TestMigration_AddDisksAndInodeRootIno_BackfillAndDown(t *testing.T) {
+	_, pool := setupTestDB(t)
+	ctx := context.Background()
+
+	migrationData, err := os.ReadFile("../../db/migrations/20261023000000_add_disks_and_inode_root_ino.sql")
+	require.NoError(t, err)
+
+	parts := strings.Split(string(migrationData), "-- +goose Down")
+	require.Len(t, parts, 2)
+
+	cleanSQL := func(s string) string {
+		s = strings.ReplaceAll(s, "-- +goose Up", "")
+		s = strings.ReplaceAll(s, "-- +goose StatementBegin", "")
+		s = strings.ReplaceAll(s, "-- +goose StatementEnd", "")
+		return strings.TrimSpace(s)
+	}
+
+	upSQL := cleanSQL(parts[0])
+	downSQL := cleanSQL(parts[1])
+
+	t.Run("单根环境下存量孤儿文件可安全回填至唯一根", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() {
+			_ = tx.Rollback(context.Background())
+		}()
+
+		// 清理事务内的表数据，确保单根环境无任何干扰
+		_, err = tx.Exec(ctx, "DELETE FROM entries; DELETE FROM inodes; DELETE FROM disks;")
+		require.NoError(t, err)
+
+		disk1ID := newTestUUID()
+		diskRoot1 := int64(1)
+		dirIno := int64(20)
+		fileIno := int64(21)
+		orphanIsolatedIno := int64(22)
+
+		// 1. 创建单根盘 1 与根节点 (root_ino 初始为 0)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $1, $2, 2, 1000, 1000, 0);
+		`, diskRoot1, int32(0o040755))
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+			VALUES ($1, 'root-disk-1', $2, 104857600, 0, 1);
+		`, disk1ID, diskRoot1)
+		require.NoError(t, err)
+
+		// 2. 创建普通子目录与文件 (root_ino 初始为 0)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $2, $3, 2, 1000, 1000, 0),
+			       ($4, $1, $5, 1, 1000, 1000, 0);
+		`, dirIno, diskRoot1, int32(0o040755), fileIno, int32(0o100644))
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO entries (parent_ino, name, ino)
+			VALUES ($1, 'subdir', $2),
+			       ($2, 'child.txt', $3);
+		`, diskRoot1, dirIno, fileIno)
+		require.NoError(t, err)
+
+		// 3. 创建存量孤立孤儿文件 (无 entries，parent_ino = 0，root_ino = 0)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, 0, $2, 0, 1000, 1000, 0);
+		`, orphanIsolatedIno, int32(0o100644))
+		require.NoError(t, err)
+
+		// 4. 执行 Up 迁移
+		_, err = tx.Exec(ctx, upSQL)
+		require.NoError(t, err)
+
+		// 5. 验证单根环境下孤儿节点及常规节点均成功回填为 root_ino = 1
+		var r1, rDir, rFile, rIsolated int64
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", diskRoot1).Scan(&r1)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, r1)
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", dirIno).Scan(&rDir)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rDir)
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", fileIno).Scan(&rFile)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rFile)
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", orphanIsolatedIno).Scan(&rIsolated)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rIsolated, "单根环境下孤立孤儿文件必须安全回填为唯一根 1")
+
+		// 6. 验证 disks.used_inodes 统计
+		var usedInodes1 int64
+		err = tx.QueryRow(ctx, "SELECT used_inodes FROM disks WHERE disk_id = $1", disk1ID).Scan(&usedInodes1)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), usedInodes1, "根盘 1 的 used_inodes 应包含根、子目录、子文件与孤立孤儿共 4 个 inode")
+	})
+
+	t.Run("多根环境下子盘边界截断与明确父目录孤儿正常回填", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() {
+			_ = tx.Rollback(context.Background())
+		}()
+
+		_, err = tx.Exec(ctx, "DELETE FROM entries; DELETE FROM inodes; DELETE FROM disks;")
+		require.NoError(t, err)
+
+		disk1ID := newTestUUID()
+		disk10ID := newTestUUID()
+
+		diskRoot1 := int64(1)
+		subdiskRoot10 := int64(10)
+		subdiskChild11 := int64(11)
+		dirIno := int64(20)
+		fileIno := int64(21)
+		orphanIno1 := int64(22)
+		orphanIno2 := int64(23)
+		orphanIno10 := int64(12)
+
+		// 1. 创建根盘 1 与根节点
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $1, $2, 2, 1000, 1000, 0);
+		`, diskRoot1, int32(0o040755))
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+			VALUES ($1, 'root-disk-1', $2, 104857600, 0, 1);
+		`, disk1ID, diskRoot1)
+		require.NoError(t, err)
+
+		// 2. 创建挂载在根 1 下的子盘根 10 及其磁盘记录，以及挂在 10 下的文件 11
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $2, $3, 2, 1000, 1000, 0),
+			       ($4, $1, $5, 1, 1000, 1000, 0);
+		`, subdiskRoot10, diskRoot1, int32(0o040755), subdiskChild11, int32(0o100644))
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+			VALUES ($1, 'sub-disk-10', $2, 104857600, 0, 1);
+		`, disk10ID, subdiskRoot10)
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO entries (parent_ino, name, ino)
+			VALUES ($1, 'subdisk', $2),
+			       ($2, 'child11.txt', $3);
+		`, diskRoot1, subdiskRoot10, subdiskChild11)
+		require.NoError(t, err)
+
+		// 3. 创建挂在根 1 下的普通目录与孙文件
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $2, $3, 2, 1000, 1000, 0),
+			       ($4, $1, $5, 1, 1000, 1000, 0);
+		`, dirIno, diskRoot1, int32(0o040755), fileIno, int32(0o100644))
+		require.NoError(t, err)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO entries (parent_ino, name, ino)
+			VALUES ($1, 'subdir', $2),
+			       ($2, 'child.txt', $3);
+		`, diskRoot1, dirIno, fileIno)
+		require.NoError(t, err)
+
+		// 4. 创建具有明确 parent_ino 的孤儿目录（无 entries）：
+		// orphanIno1: parent_ino = dirIno (归属于根 1)
+		// orphanIno2: parent_ino = orphanIno1 (二级孤儿目录，沿链归属于根 1)
+		// orphanIno10: parent_ino = subdiskRoot10 (归属于子盘 10)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $2, $3, 0, 1000, 1000, 0),
+			       ($4, $1, $3, 0, 1000, 1000, 0),
+			       ($5, $6, $3, 0, 1000, 1000, 0);
+		`, orphanIno1, dirIno, int32(0o040755), orphanIno2, orphanIno10, subdiskRoot10)
+		require.NoError(t, err)
+
+		// 5. 执行 Up 迁移
+		_, err = tx.Exec(ctx, upSQL)
+		require.NoError(t, err)
+
+		// 6. 验证子盘根 10 及其子节点 11 不会被根 1 覆盖，其 root_ino 均为 10
+		var r10, r11, rOrphan10 int64
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", subdiskRoot10).Scan(&r10)
+		require.NoError(t, err)
+		assert.Equal(t, subdiskRoot10, r10, "挂载在根 1 下的子盘根 10 的 root_ino 必须为 10，不能被根 1 覆盖")
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", subdiskChild11).Scan(&r11)
+		require.NoError(t, err)
+		assert.Equal(t, subdiskRoot10, r11, "子盘下的子节点 11 的 root_ino 必须为 10")
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", orphanIno10).Scan(&rOrphan10)
+		require.NoError(t, err)
+		assert.Equal(t, subdiskRoot10, rOrphan10, "子盘下的孤儿目录应继承父节点 10 的 root_ino")
+
+		// 7. 验证根 1 树节点归属
+		var r1, rDir, rFile, rOrphan1, rOrphan2 int64
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", diskRoot1).Scan(&r1)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, r1)
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", dirIno).Scan(&rDir)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rDir)
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", fileIno).Scan(&rFile)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rFile)
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", orphanIno1).Scan(&rOrphan1)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rOrphan1, "根 1 下的一级孤儿目录应继承父目录的 root_ino")
+
+		err = tx.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = $1", orphanIno2).Scan(&rOrphan2)
+		require.NoError(t, err)
+		assert.Equal(t, diskRoot1, rOrphan2, "二级孤儿目录应沿 parent_ino 链递归继承父孤儿目录的 root_ino")
+
+		// 8. 验证 disks.used_inodes 统计
+		var usedInodes10 int64
+		err = tx.QueryRow(ctx, "SELECT used_inodes FROM disks WHERE disk_id = $1", disk10ID).Scan(&usedInodes10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), usedInodes10, "子盘 10 应包含节点 10、11 及孤儿目录 12，共 3 个 inode")
+
+		var usedInodes1 int64
+		err = tx.QueryRow(ctx, "SELECT used_inodes FROM disks WHERE disk_id = $1", disk1ID).Scan(&usedInodes1)
+		require.NoError(t, err)
+		assert.Equal(t, int64(5), usedInodes1, "根盘 1 的 used_inodes 应包含节点 1、20、21 以及孤儿目录 22、23，共 5 个 inode")
+	})
+
+	t.Run("多根环境下存在归属不明孤儿或跨盘硬链接时阻止迁移并报错", func(t *testing.T) {
+		t.Run("多根环境下存在 parent_ino = 0 且无 entries 的孤立孤儿时阻止迁移", func(t *testing.T) {
+			tx, err := pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() {
+				_ = tx.Rollback(context.Background())
+			}()
+
+			_, err = tx.Exec(ctx, "DELETE FROM entries; DELETE FROM inodes; DELETE FROM disks;")
+			require.NoError(t, err)
+
+			// 插入根盘 1 与子盘 10
+			_, err = tx.Exec(ctx, `
+				INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+				VALUES (1, 1, $1, 2, 1000, 1000, 0),
+				       (10, 1, $1, 2, 1000, 1000, 0);
+			`, int32(0o040755))
+			require.NoError(t, err)
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+				VALUES ($1, 'disk-1', 1, 104857600, 0, 1),
+				       ($2, 'disk-10', 10, 104857600, 0, 1);
+			`, newTestUUID(), newTestUUID())
+			require.NoError(t, err)
+
+			// 插入归属不明的存量孤儿 (parent_ino = 0，无 entries)
+			_, err = tx.Exec(ctx, `
+				INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+				VALUES (99, 0, $1, 0, 1000, 1000, 0);
+			`, int32(0o100644))
+			require.NoError(t, err)
+
+			// 执行迁移应被拒绝
+			_, err = tx.Exec(ctx, upSQL)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "migration blocked: found inodes with ambiguous or unresolvable root_ino ownership")
+		})
+
+		t.Run("多根环境下存在跨磁盘硬链接导致多根可达歧义时阻止迁移", func(t *testing.T) {
+			tx, err := pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() {
+				_ = tx.Rollback(context.Background())
+			}()
+
+			_, err = tx.Exec(ctx, "DELETE FROM entries; DELETE FROM inodes; DELETE FROM disks;")
+			require.NoError(t, err)
+
+			// 插入根盘 1 与子盘 10
+			_, err = tx.Exec(ctx, `
+				INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+				VALUES (1, 1, $1, 2, 1000, 1000, 0),
+				       (10, 10, $1, 2, 1000, 1000, 0);
+			`, int32(0o040755))
+			require.NoError(t, err)
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+				VALUES ($1, 'disk-1', 1, 104857600, 0, 1),
+				       ($2, 'disk-10', 10, 104857600, 0, 1);
+			`, newTestUUID(), newTestUUID())
+			require.NoError(t, err)
+
+			// 插入跨盘硬链接文件 50（无唯一定义父节点，parent_ino = 0），分别在盘 1 和盘 10 下拥有 entry
+			_, err = tx.Exec(ctx, `
+				INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+				VALUES (50, 0, $1, 2, 1000, 1000, 0);
+			`, int32(0o100644))
+			require.NoError(t, err)
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO entries (parent_ino, name, ino)
+				VALUES (1, 'link_in_root1', 50),
+				       (10, 'link_in_disk10', 50);
+			`)
+			require.NoError(t, err)
+
+			// 执行迁移应因跨盘硬链接歧义被拒绝
+			_, err = tx.Exec(ctx, upSQL)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "migration blocked: found inodes with ambiguous or unresolvable root_ino ownership")
+		})
+	})
+
+	t.Run("Down 回滚保护测试：保留 disks 存量记录与表结构，仅还原约束与新增列", func(t *testing.T) {
+		diskID := newTestUUID()
+		rootIno := nextTestIno()
+
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM disks WHERE disk_id = $1", diskID)
+		})
+
+		// 插入存量磁盘数据
+		_, err := pool.Exec(ctx, `
+			INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+			VALUES ($1, 'rollback-safe-disk', $2, 50000000, 1024, 2);
+		`, diskID, rootIno)
+		require.NoError(t, err)
+
+		// 执行 Down 回滚逻辑（在隔离事务中验证，验证后回滚该事务以保持测试库处于最新 Up 状态）
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() {
+			_ = tx.Rollback(context.Background())
+		}()
+
+		_, err = tx.Exec(ctx, downSQL)
+		require.NoError(t, err)
+
+		// 验证 disks 表依然存在，且存量记录完整保留
+		var name string
+		var maxBytes, usedBytes int64
+		err = tx.QueryRow(ctx, "SELECT name, max_bytes, used_bytes FROM disks WHERE disk_id = $1", diskID).Scan(&name, &maxBytes, &usedBytes)
+		require.NoError(t, err)
+		assert.Equal(t, "rollback-safe-disk", name)
+		assert.Equal(t, int64(50000000), maxBytes)
+		assert.Equal(t, int64(1024), usedBytes)
+
+		// 验证 used_inodes 列已被删除
+		var columnExists bool
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'disks' AND column_name = 'used_inodes'
+			);
+		`).Scan(&columnExists)
+		require.NoError(t, err)
+		assert.False(t, columnExists, "Down 回滚后 used_inodes 列应不存在")
 	})
 }

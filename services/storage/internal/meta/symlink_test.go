@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -734,5 +735,191 @@ func TestReadlink_NegativeCases(t *testing.T) {
 
 		_, err := mgr.Readlink(ctx, ino)
 		assert.ErrorIs(t, err, dbErr)
+	})
+}
+
+func TestSymlink_DiskQuotaAndRootInoInheritance(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	parentIno := uint64(10)
+	rootIno := int64(200)
+	newIno := uint64(201)
+
+	parentRowWithRoot := db.Inode{
+		Ino:        int64(parentIno),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      2,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		RootIno:    rootIno,
+		Atime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+	}
+
+	target := []byte("../target/path")
+	expectedMode := int32(meta.S_IFLNK | 0o777)
+
+	t.Run("父目录包含 root_ino 时，CreateSymlinkInode 继承 root_ino 且同一事务内调用 AddDiskQuotaByRootIno 递增 used_inodes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentRowWithRoot, nil).
+			Once()
+
+		createdInodeRow := db.Inode{
+			Ino:           int64(newIno),
+			Generation:    0,
+			Mode:          expectedMode,
+			Size:          int64(len(target)),
+			Nlink:         1,
+			Uid:           1001,
+			Gid:           1002,
+			Rdev:          0,
+			SymlinkTarget: target,
+			RootIno:       rootIno,
+			Atime:         pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:         pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:         pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateSymlinkInode(mock.Anything, db.CreateSymlinkInodeParams{
+				Mode:          expectedMode,
+				Size:          int64(len(target)),
+				Nlink:         1,
+				Uid:           1001,
+				Gid:           1002,
+				Rdev:          0,
+				SymlinkTarget: target,
+				RootIno:       rootIno,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("symlink_with_quota"),
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Symlink(ctx, meta.SymlinkParams{
+			ParentIno: parentIno,
+			Name:      []byte("symlink_with_quota"),
+			Target:    target,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, newIno, inode.Ino)
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("AddDiskQuotaByRootIno 返回数据库错误时事务失败并向上传播错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentRowWithRoot, nil).
+			Once()
+
+		createdInodeRow := db.Inode{
+			Ino:           int64(newIno),
+			Generation:    0,
+			Mode:          expectedMode,
+			Size:          int64(len(target)),
+			Nlink:         1,
+			Uid:           1001,
+			Gid:           1002,
+			Rdev:          0,
+			SymlinkTarget: target,
+			RootIno:       rootIno,
+			Atime:         pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:         pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:         pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateSymlinkInode(mock.Anything, db.CreateSymlinkInodeParams{
+				Mode:          expectedMode,
+				Size:          int64(len(target)),
+				Nlink:         1,
+				Uid:           1001,
+				Gid:           1002,
+				Rdev:          0,
+				SymlinkTarget: target,
+				RootIno:       rootIno,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("symlink_fail"),
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		expectedErr := errors.New("db disk quota update connection refused")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}).
+			Return(expectedErr).
+			Once()
+
+		inode, err := mgr.Symlink(ctx, meta.SymlinkParams{
+			ParentIno: parentIno,
+			Name:      []byte("symlink_fail"),
+			Target:    target,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		assert.Nil(t, inode)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), fmt.Sprintf("increment disk used_inodes for root_ino %d", rootIno))
+		mockQuerier.AssertExpectations(t)
 	})
 }

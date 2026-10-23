@@ -68,11 +68,12 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 		targetMode := modeType | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
 
 		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
-			Mode:  int32(targetMode),
-			Nlink: 1,
-			Uid:   int32(params.UID),
-			Gid:   int32(gid),
-			Rdev:  int64(rdev),
+			Mode:    int32(targetMode),
+			Nlink:   1,
+			Uid:     int32(params.UID),
+			Gid:     int32(gid),
+			Rdev:    int64(rdev),
+			RootIno: parent.RootIno,
 		})
 		if err != nil {
 			return fmt.Errorf("create inode: %w", err)
@@ -93,6 +94,16 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 
 		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		if parent.RootIno > 0 {
+			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+				RootIno:     parent.RootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}); err != nil {
+				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+			}
 		}
 
 		result = m.newInode(newInode)
@@ -266,6 +277,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 			Gid:           int32(gid),
 			Rdev:          0,
 			SymlinkTarget: params.Target,
+			RootIno:       parent.RootIno,
 		})
 		if err != nil {
 			return fmt.Errorf("create symlink inode: %w", err)
@@ -286,6 +298,16 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 
 		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
+		}
+
+		if parent.RootIno > 0 {
+			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+				RootIno:     parent.RootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}); err != nil {
+				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+			}
 		}
 
 		result = m.newInode(newInode)

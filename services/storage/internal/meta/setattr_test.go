@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
 
 	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
@@ -1485,6 +1487,421 @@ func TestSetAttr_NegativeCases(t *testing.T) {
 		})
 		assert.Nil(t, res)
 		assert.ErrorIs(t, err, meta.ErrBadFileHandle)
+	})
+}
+
+func TestSetAttr_DiskQuota(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	ino := uint64(1001)
+	rootIno := int64(100)
+
+	baseInodeRow := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFREG | 0o644),
+		Size:       1000,
+		Nlink:      1,
+		Uid:        1000,
+		Gid:        1000,
+		RootIno:    rootIno,
+		Atime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now.Add(-30 * time.Minute), Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now.Add(-10 * time.Minute), Valid: true},
+	}
+
+	t.Run("扩容常规文件且未超出 max_bytes 时更新配额并成功更新文件大小", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		diskRow := db.Disk{
+			RootIno:   rootIno,
+			MaxBytes:  10000,
+			UsedBytes: 5000,
+		}
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
+			Return(diskRow, nil).
+			Once()
+
+		targetSize := uint64(2500)
+		deltaBytes := int64(1500)
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  deltaBytes,
+				DeltaInodes: 0,
+			}).
+			Return(nil).
+			Once()
+
+		updatedRow := baseInodeRow
+		updatedRow.Size = int64(targetSize)
+		updatedRow.Mtime = pgtype.Timestamptz{Time: now, Valid: true}
+		updatedRow.Ctime = pgtype.Timestamptz{Time: now, Valid: true}
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         int64(ino),
+				Mode:        baseInodeRow.Mode,
+				Size:        int64(targetSize),
+				Uid:         baseInodeRow.Uid,
+				Gid:         baseInodeRow.Gid,
+				SetAtimeNow: false,
+				Atime:       baseInodeRow.Atime,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{Valid: false},
+				Flags:       baseInodeRow.Flags,
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, targetSize, res.Attr.Size)
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("扩容常规文件超出 max_bytes 时返回 ErrNoSpace 且不调用 UpdateInodeAttr 或 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		diskRow := db.Disk{
+			RootIno:   rootIno,
+			MaxBytes:  10000,
+			UsedBytes: 5000,
+		}
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
+			Return(diskRow, nil).
+			Once()
+
+		targetSize := uint64(7000)
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrNoSpace)
+
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.ResourceExhausted, st.Code())
+		require.NotEmpty(t, st.Details())
+		info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+		require.True(t, ok, "Detail 必须为 *errdetails.ErrorInfo")
+		assert.Equal(t, "ENOSPC", info.Reason)
+		assert.Equal(t, meta.ErrorDomain, info.Domain)
+
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("扩容常规文件在已用容量超标时返回 ErrNoSpace", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		diskRow := db.Disk{
+			RootIno:   rootIno,
+			MaxBytes:  5000,
+			UsedBytes: 6000,
+		}
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
+			Return(diskRow, nil).
+			Once()
+
+		targetSize := uint64(1500)
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrNoSpace)
+
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("截断缩小常规文件调用 AddDiskQuotaByRootIno 释放配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		targetSize := uint64(400)
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -600,
+				DeltaInodes: 0,
+			}).
+			Return(nil).
+			Once()
+
+		updatedRow := baseInodeRow
+		updatedRow.Size = int64(targetSize)
+		updatedRow.Mtime = pgtype.Timestamptz{Time: now, Valid: true}
+		updatedRow.Ctime = pgtype.Timestamptz{Time: now, Valid: true}
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         int64(ino),
+				Mode:        baseInodeRow.Mode,
+				Size:        int64(targetSize),
+				Uid:         baseInodeRow.Uid,
+				Gid:         baseInodeRow.Gid,
+				SetAtimeNow: false,
+				Atime:       baseInodeRow.Atime,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{Valid: false},
+				Flags:       baseInodeRow.Flags,
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, targetSize, res.Attr.Size)
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("targetSize 等于 oldSize 时不触发配额变更", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		targetSize := uint64(1000)
+
+		updatedRow := baseInodeRow
+		updatedRow.Mtime = pgtype.Timestamptz{Time: now, Valid: true}
+		updatedRow.Ctime = pgtype.Timestamptz{Time: now, Valid: true}
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         int64(ino),
+				Mode:        baseInodeRow.Mode,
+				Size:        int64(targetSize),
+				Uid:         baseInodeRow.Uid,
+				Gid:         baseInodeRow.Gid,
+				SetAtimeNow: false,
+				Atime:       baseInodeRow.Atime,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{Valid: false},
+				Flags:       baseInodeRow.Flags,
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, targetSize, res.Attr.Size)
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("GetDiskByRootInoForUpdate 返回 pgx.ErrNoRows 时兼容跳过配额检查与更新", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
+			Return(db.Disk{}, pgx.ErrNoRows).
+			Once()
+
+		targetSize := uint64(2000)
+
+		updatedRow := baseInodeRow
+		updatedRow.Size = int64(targetSize)
+		updatedRow.Mtime = pgtype.Timestamptz{Time: now, Valid: true}
+		updatedRow.Ctime = pgtype.Timestamptz{Time: now, Valid: true}
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         int64(ino),
+				Mode:        baseInodeRow.Mode,
+				Size:        int64(targetSize),
+				Uid:         baseInodeRow.Uid,
+				Gid:         baseInodeRow.Gid,
+				SetAtimeNow: false,
+				Atime:       baseInodeRow.Atime,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{Valid: false},
+				Flags:       baseInodeRow.Flags,
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, targetSize, res.Attr.Size)
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("GetDiskByRootInoForUpdate 返回其他数据库错误时向上透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		dbErr := errors.New("db disk query error")
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
+			Return(db.Disk{}, dbErr).
+			Once()
+
+		targetSize := uint64(2000)
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, dbErr)
+		assert.Contains(t, err.Error(), fmt.Sprintf("get disk by root_ino %d for update", rootIno))
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("扩容时 AddDiskQuotaByRootIno 错误向上透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		diskRow := db.Disk{
+			RootIno:   rootIno,
+			MaxBytes:  10000,
+			UsedBytes: 5000,
+		}
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
+			Return(diskRow, nil).
+			Once()
+
+		dbErr := errors.New("quota update error")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  1000,
+				DeltaInodes: 0,
+			}).
+			Return(dbErr).
+			Once()
+
+		targetSize := uint64(2000)
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, dbErr)
+		assert.Contains(t, err.Error(), fmt.Sprintf("add disk quota by root_ino %d", rootIno))
+		mockQuerier.AssertExpectations(t)
+	})
+
+	t.Run("截断缩容时 AddDiskQuotaByRootIno 错误向上透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInodeRow, nil).
+			Once()
+
+		dbErr := errors.New("shrink quota update error")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -500,
+				DeltaInodes: 0,
+			}).
+			Return(dbErr).
+			Once()
+
+		targetSize := uint64(500)
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(targetSize),
+		})
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, dbErr)
+		assert.Contains(t, err.Error(), fmt.Sprintf("add disk quota by root_ino %d", rootIno))
+		mockQuerier.AssertExpectations(t)
 	})
 }
 

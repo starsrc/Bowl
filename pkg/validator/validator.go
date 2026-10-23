@@ -10,15 +10,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	diskv1 "github.com/starsrc/bowl/gen/go/disk/v1"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 // ErrorDomain 定义与 storage 领域层一致的 ErrorInfo 错误领域标识符。
 const ErrorDomain = "bowl.storage"
-
-// DiskErrorDomain 定义与 disk 领域层一致的 ErrorInfo 错误领域标识符。
-const DiskErrorDomain = "bowl.disk"
 
 // POSIX errno reason 常量，与 meta.ToStatus 映射契约保持严格一致。
 const (
@@ -115,28 +111,6 @@ var storageMessages = []proto.Message{
 	&storagev1.Disk{},
 }
 
-// diskMessages 汇总 DiskService 全部请求、响应与实体消息，用于启动期预编译校验规则。
-var diskMessages = []proto.Message{
-	// 请求消息 (Requests)
-	&diskv1.CreateDiskRequest{},
-	&diskv1.GetDiskRequest{},
-	&diskv1.UpdateDiskRequest{},
-	&diskv1.DeleteDiskRequest{},
-	&diskv1.StatFSRequest{},
-	&diskv1.UpdateDiskUsageRequest{},
-
-	// 响应消息 (Responses)
-	&diskv1.CreateDiskResponse{},
-	&diskv1.GetDiskResponse{},
-	&diskv1.UpdateDiskResponse{},
-	&diskv1.DeleteDiskResponse{},
-	&diskv1.StatFSResponse{},
-	&diskv1.UpdateDiskUsageResponse{},
-
-	// 实体消息 (Entities)
-	&diskv1.Disk{},
-}
-
 // ValidationError 包装 protovalidate.ValidationError，并将其边界违规映射为携带 google.rpc.ErrorInfo 的 gRPC Status。
 // 同时实现 Unwrap() error 与 GRPCStatus() *status.Status，确保 errors.As(..., **protovalidate.ValidationError)、
 // status.FromError 及 meta.ToStatus 均可无缝提取底层违规详情与对应的 POSIX errno reason。
@@ -161,7 +135,7 @@ func (e *ValidationError) Reason() string {
 	return e.reason
 }
 
-// Domain 返回错误所属的服务领域标识符（如 "bowl.storage" 或 "bowl.disk"）。
+// Domain 返回错误所属的服务领域标识符（如 "bowl.storage"）。
 func (e *ValidationError) Domain() string {
 	if e.domain != "" {
 		return e.domain
@@ -185,11 +159,7 @@ func (v *storageValidator) Validate(msg proto.Message, options ...protovalidate.
 	}
 	var valErr *protovalidate.ValidationError
 	if errors.As(err, &valErr) {
-		defaultDomain := ErrorDomain
-		if msg != nil && strings.HasPrefix(string(msg.ProtoReflect().Descriptor().FullName()), "disk.v1.") {
-			defaultDomain = DiskErrorDomain
-		}
-		reason, domain := translateValidation(valErr, defaultDomain)
+		reason, domain := translateValidation(valErr, ErrorDomain)
 		return &ValidationError{
 			err:    valErr,
 			reason: reason,
@@ -199,14 +169,11 @@ func (v *storageValidator) Validate(msg proto.Message, options ...protovalidate.
 	return err
 }
 
-// NewStorageValidator 创建并初始化一个预编译好 StorageService 与 DiskService 全部请求、响应与实体消息的 protovalidate.Validator。
+// NewStorageValidator 创建并初始化一个预编译好 StorageService 全部请求、响应与实体消息的 protovalidate.Validator。
 // 通过 protovalidate.WithMessages 选项在启动阶段编译 CEL 约束规则，避免在首次运行时产生编译延迟；
 // 同时将字段边界校验违规自动关联至对应的 POSIX errno reason（ERANGE、E2BIG、ENAMETOOLONG、EINVAL）。
 func NewStorageValidator() (protovalidate.Validator, error) {
-	allMessages := make([]proto.Message, 0, len(storageMessages)+len(diskMessages))
-	allMessages = append(allMessages, storageMessages...)
-	allMessages = append(allMessages, diskMessages...)
-	inner, err := protovalidate.New(protovalidate.WithMessages(allMessages...))
+	inner, err := protovalidate.New(protovalidate.WithMessages(storageMessages...))
 	if err != nil {
 		return nil, err
 	}
@@ -310,23 +277,13 @@ func classifyViolation(v *protovalidate.Violation) (int, string, string) {
 	if v != nil && v.FieldDescriptor != nil {
 		fullName = string(v.FieldDescriptor.FullName())
 	}
-	ruleID := ""
-	if v != nil && v.Proto != nil {
-		ruleID = v.Proto.GetRuleId()
-	}
 
 	domain := ""
 	if strings.HasPrefix(fullName, "storage.v1.") {
 		domain = ErrorDomain
-	} else if strings.HasPrefix(fullName, "disk.v1.") {
-		domain = DiskErrorDomain
 	} else if fullName == "" {
 		// 消息级约束（如 update_disk_has_update）无 field descriptor，返回空 domain，保留调用方的 defaultDomain
 		domain = ""
-	} else if strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
-		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
-		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_") {
-		domain = DiskErrorDomain
 	}
 	return priority, reason, domain
 }
@@ -351,25 +308,6 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		lastField := elems[len(elems)-1].GetFieldName()
 		if lastField == "names" {
 			fullName = "storage.v1.ListXattrResponse.names"
-		}
-	}
-
-	// 针对 disk.v1 消息的校验规则分类
-	isDisk := strings.HasPrefix(fullName, "disk.v1.") || (!strings.HasPrefix(fullName, "storage.v1.") && (
-		strings.HasPrefix(ruleID, "disk_") || strings.HasPrefix(ruleID, "create_disk_") ||
-		strings.HasPrefix(ruleID, "get_disk_") || strings.HasPrefix(ruleID, "update_disk_") ||
-		strings.HasPrefix(ruleID, "delete_disk_") || strings.HasPrefix(ruleID, "statfs_")))
-	if isDisk {
-		switch fullName {
-		case "disk.v1.Disk.name",
-			"disk.v1.CreateDiskRequest.name",
-			"disk.v1.UpdateDiskRequest.name":
-			if isMaxLen {
-				return 20, ReasonNameTooLong
-			}
-			return 30, ReasonInvalidArgument
-		default:
-			return 10, ReasonInvalidArgument
 		}
 	}
 

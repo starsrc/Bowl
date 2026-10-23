@@ -207,6 +207,7 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 
 // DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
 // 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
+// 事务提交成功后，主动关闭并清理内存中对应 Inode 的阻塞等待通道，唤醒正在等待锁的协程。
 func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	// 静态参数校验（无需触达数据库）：非法格式或全零 Nil UUID 直接返回 ErrInvalidArgument
 	pgID, err := parseDiskID(diskID)
@@ -214,7 +215,8 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return err
 	}
 
-	return m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+	var deletedInos []int64
+	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		// 1. 获取并排他锁定目标 Disk 行
 		diskRow, err := q.GetDiskForUpdate(ctx, pgID)
 		if err != nil {
@@ -234,12 +236,23 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		}
 
 		// 3. 按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联项）
-		if _, err := q.DeleteInodesByRootIno(ctx, diskRow.RootIno); err != nil {
+		deletedInos, err = q.DeleteInodesByRootIno(ctx, diskRow.RootIno)
+		if err != nil {
 			return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
 		}
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// 4. 事务成功提交后，主动清理内存中的锁等待通道，唤醒等待该磁盘下所有节点的阻塞协程
+	if len(deletedInos) > 0 {
+		m.cleanLockWaitersForInos(deletedInos)
+	}
+
+	return nil
 }
 
 // StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。

@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
@@ -1508,6 +1509,178 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		err := mgr.DeleteDisk(ctx, validDiskIDStr)
 		require.NoError(t, err)
 	})
+
+	t.Run("DeleteDisk 删除磁盘后唤醒并中断阻塞在目标 Inode 上的 SetLkw 等待者返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		targetIno := int64(2001)
+		targetFh := int64(11)
+		sessionID := int64(9999)
+		requestID := int64(8888)
+		owner := int64(7777)
+
+		// 事务执行模拟：所有 ExecTxWithOptions 均直接执行回调函数
+		mockStore.EXPECT().
+			ExecTxWithOptions(mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				return fn(mockQuerier)
+			})
+
+		baseInode := db.Inode{
+			Ino:   targetIno,
+			Mode:  int32(meta.S_IFREG | 0o644),
+			Nlink: 1,
+		}
+
+		// 1. SetLkw 第一次循环（因写锁冲突登记为等待者并阻塞）
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, targetIno).
+			Return(baseInode, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileLockWaiter(mock.Anything, db.GetFileLockWaiterParams{
+				SessionID: sessionID,
+				RequestID: requestID,
+			}).
+			Return(db.FileLockWaiter{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:        targetFh,
+				Ino:       targetIno,
+				SessionID: pgtype.Int8{Int64: sessionID, Valid: true},
+			}).
+			Return(db.FileHandle{
+				Fh:    targetFh,
+				Ino:   targetIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.Anything).
+			Return(db.ClientSession{SessionID: sessionID}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]int64(nil), nil).
+			Once()
+
+		// 模拟存在冲突锁
+		mockQuerier.EXPECT().
+			ListActiveFileLocksByInoAndFlags(mock.Anything, db.ListActiveFileLocksByInoAndFlagsParams{
+				Ino:     targetIno,
+				LkFlags: 0,
+			}).
+			Return([]db.FileLock{
+				{
+					ID:          1,
+					SessionID:   sessionID + 1,
+					Ino:         targetIno,
+					Fh:          targetFh + 1,
+					LockOwner:   owner + 1,
+					LkFlags:     0,
+					StartOffset: 0,
+					EndOffset:   100,
+					LockType:    int16(meta.F_WRLCK),
+					Pid:         1001,
+				},
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListPendingFileLockWaitersByInoAndFlags(mock.Anything, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+				Ino:     targetIno,
+				LkFlags: 0,
+			}).
+			Return([]db.FileLockWaiter(nil), nil).
+			Once()
+
+		waiterRegistered := make(chan struct{})
+		mockQuerier.EXPECT().
+			UpsertFileLockWaiter(mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, arg db.UpsertFileLockWaiterParams) (db.FileLockWaiter, error) {
+				close(waiterRegistered)
+				return db.FileLockWaiter{
+					SessionID: sessionID,
+					RequestID: requestID,
+					Ino:       targetIno,
+					Status:    meta.WaiterStatusPending,
+				}, nil
+			}).
+			Once()
+
+		// 2. DeleteDisk 预期执行
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteDisk(mock.Anything, validDiskID).
+			Return(int64(1), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInodesByRootIno(mock.Anything, rootIno).
+			Return([]int64{rootIno, targetIno}, nil).
+			Once()
+
+		// 3. SetLkw 被 DeleteDisk 唤醒后进入第二轮循环，因 Inode 已被删除返回 pgx.ErrNoRows -> ErrNotFound
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, targetIno).
+			Return(db.Inode{}, pgx.ErrNoRows).
+			Once()
+
+		// 启动后台协程发起阻塞加锁请求
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+				Ino:       uint64(targetIno),
+				Fh:        uint64(targetFh),
+				LockOwner: uint64(owner),
+				SessionID: uint64(sessionID),
+				RequestID: uint64(requestID),
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   2002,
+				},
+				LkFlags: 0,
+			})
+		}()
+
+		// 等待 SetLkw 完成第一轮事务并登记等待者
+		<-waiterRegistered
+		time.Sleep(10 * time.Millisecond)
+
+		// 主协程执行 DeleteDisk
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.NoError(t, err)
+
+		// 验证阻塞中的 SetLkw 立即被唤醒并返回 ErrNotFound
+		select {
+		case lkwErr := <-errCh:
+			require.Error(t, lkwErr)
+			assert.True(t, errors.Is(lkwErr, meta.ErrNotFound), "期望得到 ErrNotFound，实际得到: %v", lkwErr)
+		case <-time.After(2 * time.Second):
+			t.Fatal("SetLkw 超时未被唤醒")
+		}
+	})
 }
 
 func TestDeleteDisk_PostgresIntegration(t *testing.T) {
@@ -1710,6 +1883,110 @@ func TestDeleteDisk_PostgresIntegration(t *testing.T) {
 		_, err = mgr.GetAttr(ctx, fileIno)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
 		_, err = mgr.GetAttr(ctx, rootIno)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("DeleteDisk 强制删除时立即唤醒并中断阻塞中的 SetLkw 等待者返回 ErrNotFound", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_del_setlkw_wake_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		rootIno := disk.RootIno
+
+		s1 := uint64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+		s2 := s1 + 1
+		defer func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(s1), int64(s2))
+		}()
+
+		// 1. 创建常规文件
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: rootIno,
+			Name:      []byte("locked_waiter_file.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &s1,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh1 := createRes.Fh
+
+		// 2. 会话 2 打开该文件
+		openRes, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &s2,
+		})
+		require.NoError(t, err)
+		fh2 := openRes.Fh
+
+		// 3. 会话 1 持有排他写锁 SetLk(F_WRLCK)
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: 1001,
+			SessionID: s1,
+			Lk: meta.FileLock{
+				Type:  meta.F_WRLCK,
+				Start: 0,
+				End:   meta.OffsetMax,
+				PID:   1234,
+			},
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		// 4. 会话 2 在后台 goroutine 中发起阻塞写锁请求 SetLkw(F_WRLCK)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fh2,
+				LockOwner: 2002,
+				SessionID: s2,
+				RequestID: 7701,
+				Lk: meta.FileLock{
+					Type:  meta.F_WRLCK,
+					Start: 0,
+					End:   meta.OffsetMax,
+					PID:   5678,
+				},
+				LkFlags: 0,
+			})
+		}()
+
+		// 5. 确认会话 2 已在数据库中登记等待者并进入内存阻塞等待状态
+		require.Eventually(t, func() bool {
+			waiters, err := store.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+				Ino:     int64(fileIno),
+				LkFlags: 0,
+			})
+			return err == nil && len(waiters) == 1
+		}, 3*time.Second, 5*time.Millisecond)
+
+		// 6. 执行 DeleteDisk 强制删除磁盘实体及其所有元数据
+		startTime := time.Now()
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+
+		// 7. 验证阻塞中的 SetLkw 立即被唤醒并返回 ErrNotFound (ENOENT)
+		select {
+		case lkwErr := <-errCh:
+			require.Error(t, lkwErr)
+			assert.True(t, errors.Is(lkwErr, meta.ErrNotFound), "期望得到 ErrNotFound，实际得到: %v", lkwErr)
+		case <-time.After(3 * time.Second):
+			t.Fatal("SetLkw 超时未被唤醒")
+		}
+
+		elapsed := time.Since(startTime)
+		assert.Less(t, elapsed, 1*time.Second, "唤醒时间应远快于轮询超时")
+
+		// 8. 验证 Disk 与文件元数据已被删除
+		_, err = mgr.GetDisk(ctx, disk.DiskID)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		_, err = mgr.GetAttr(ctx, fileIno)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
 	})
 }

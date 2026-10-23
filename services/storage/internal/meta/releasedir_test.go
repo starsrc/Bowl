@@ -3,12 +3,14 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -270,6 +272,64 @@ func TestReleaseDir_PositivePath(t *testing.T) {
 		err := mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
 			Ino: ino,
 			Fh:  fh,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("携带 SessionID 关闭 Orphan 目录 (nlink == 0) 的最后一个句柄：先续期会话再删句柄且配额仅扣减一次", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		sessionID := uint64(888)
+		orphanDir := baseDir
+		orphanDir.Nlink = 0
+		orphanDir.RootIno = 10
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanDir, nil).
+			Once()
+
+		// 1. 先续期会话 (renewOptionalClientSession)
+		setupRenewClientSessionMocks(mockQuerier, sessionID)
+
+		// 2. 再删除句柄 (DeleteFileHandle)
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		// 3. 最终无句柄后回收孤儿节点 (reclaimOrphanIfNoHandles)
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  0,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino:       ino,
+			Fh:        fh,
+			SessionID: &sessionID,
 		})
 		require.NoError(t, err)
 	})
@@ -542,5 +602,94 @@ func TestReleaseDir_NegativeAndErrorPaths(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "releasedir tx")
 		assert.True(t, errors.Is(err, dbErr))
+	})
+}
+
+func TestReleaseDir_QuotaReclaim_PostgresIntegration(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	t.Run("携带 SessionID 关闭孤儿目录的最后一个句柄：验证 UsedInodes 仅被扣减一次（无双重扣减）", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_releasedir_session_quota_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessID := uint64(770002)
+
+		// 1. 创建常驻子目录 normal_dir，提供配额基底
+		_, err = mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("normal_dir"),
+			Mode:      0o755,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+
+		// 2. 创建即将被 rmdir 的目录 orphan_dir
+		orphanDir, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("orphan_dir"),
+			Mode:      0o755,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+
+		// 打开 orphan_dir 句柄（携带 SessionID）
+		openRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:       orphanDir.Ino,
+			Flags:     meta.O_RDONLY,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 当前配额状态：根目录 + normal_dir + orphan_dir = 3 inodes
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), d.UsedInodes)
+
+		// 3. Rmdir orphan_dir：因句柄打开，nlink 变 0 但暂不回收，配额不变
+		err = mgr.Rmdir(ctx, disk.RootIno, []byte("orphan_dir"))
+		require.NoError(t, err)
+
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), d.UsedInodes)
+
+		// 4. ReleaseDir 关闭句柄（携带 SessionID）
+		err = mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino:       orphanDir.Ino,
+			Fh:        openRes.Fh,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 5. 校验配额：必须且仅扣减 1 个 inode（剩余 2 个 inodes：根目录与 normal_dir）
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes, "孤儿目录释放后应恰好剩余 2 个 inode (根目录与 normal_dir)")
 	})
 }

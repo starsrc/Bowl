@@ -81,7 +81,7 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, nil, "flush")
 	}
 
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -167,8 +167,8 @@ func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
 // Release 关闭并销毁文件句柄，按标志位清理 BSD flock 句柄锁，且在孤儿节点无活跃句柄时执行最终物理回收。
 // 遵循 ADR-0012：
 // 1. 静态校验 ino、fh、release_flags（允许 0、FuseReleaseFlush、FuseReleaseFlockUnlock 及其组合）与可选 session_id 范围；
-// 2. 在 READ COMMITTED 写事务中锁定目标 Inode 并删除 file_handles(fh)；
-// 3. 若传入 session_id，续期客户端会话并执行无引用孤儿节点兜底回收；仅当 (release_flags & FuseReleaseFlockUnlock) != 0 时，原子删除该 (session_id, ino, fh)（未传 session_id 时按 (ino, fh)）绑定的 BSD flock 锁（lk_flags == FuseLkFlock），绝不越权清理 POSIX 记录锁；
+// 2. 在 READ COMMITTED 写事务中锁定目标 Inode 并优先续期会话（清理其他超期孤儿节点并确保租约有效）；
+// 3. 删除 file_handles(fh)；仅当 (release_flags & FuseReleaseFlockUnlock) != 0 时，原子删除该 (session_id, ino, fh)（未传 session_id 时按 (ino, fh)）绑定的 BSD flock 锁（lk_flags == FuseLkFlock），绝不越权清理 POSIX 记录锁；
 // 4. 若 nlink == 0 且无剩余活跃句柄，执行孤儿节点物理回收（数据库 ON DELETE CASCADE 自动清理残留锁）。
 func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 || params.Fh == 0 || params.Fh > math.MaxInt64 {
@@ -181,7 +181,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		return err
 	}
 
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -194,6 +194,10 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 			return ErrIsDir
 		}
 
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
+
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
 			Fh:        int64(params.Fh),
 			Ino:       int64(params.Ino),
@@ -204,10 +208,6 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 				return ErrBadFileHandle
 			}
 			return fmt.Errorf("delete file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
-		}
-
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
 		}
 
 		if (params.ReleaseFlags & FuseReleaseFlockUnlock) != 0 {
@@ -303,7 +303,7 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 		return err
 	}
 
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -316,6 +316,10 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 			return ErrNotDir
 		}
 
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
+
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
 			Fh:        int64(params.Fh),
 			Ino:       int64(params.Ino),
@@ -326,10 +330,6 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 				return ErrBadFileHandle
 			}
 			return fmt.Errorf("delete file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
-		}
-
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
 		}
 
 		if inode.Nlink == 0 {
@@ -371,7 +371,7 @@ func (m *manager) RenewSession(ctx context.Context, sessionID uint64) (time.Time
 	}
 
 	var expiresAt time.Time
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		exp, err := m.renewClientSession(ctx, q, sessionID)
 		if err != nil {
 			return err

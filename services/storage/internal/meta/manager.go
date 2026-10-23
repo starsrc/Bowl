@@ -396,7 +396,7 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		return RenewSessionResult{}, ErrInvalidArgument
 	}
 	var res RenewSessionResult
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		leaseTTL := m.sessionLeaseTTL
 		if leaseTTL <= 0 {
 			leaseTTL = DefaultSessionLeaseTTL

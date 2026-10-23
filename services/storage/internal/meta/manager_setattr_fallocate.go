@@ -65,7 +65,7 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 	}
 
 	var result *Inode
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		current, err := q.GetInodeForUpdate(ctx, int64(ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -270,7 +270,7 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 	}
 
 	// 3. 开启读写事务
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		current, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

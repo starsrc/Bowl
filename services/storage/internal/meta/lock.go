@@ -236,7 +236,9 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 
 	var flockConflictAfterDelete bool
 	var shouldNotify bool
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		flockConflictAfterDelete = false
+		shouldNotify = false
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -774,7 +776,11 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 		var deadlockDetected bool
 		var interrupted bool
 
-		err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+			granted = false
+			shouldNotify = false
+			deadlockDetected = false
+			interrupted = false
 			inode, err := q.GetInodeForUpdate(ctx, ino)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {

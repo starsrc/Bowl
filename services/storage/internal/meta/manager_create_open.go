@@ -39,7 +39,7 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 	}
 
 	var result *Inode
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -144,7 +144,7 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	}
 
 	var result *Inode
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -254,7 +254,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 	}
 
 	var result *Inode
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -368,7 +368,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 	targetMode := S_IFREG | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
 
 	var result *CreateResult
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -502,7 +502,7 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 	targetMode := S_IFREG | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
 
 	var result *CreateResult
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -602,7 +602,7 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 	}
 
 	var result *OpenResult
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -712,7 +712,7 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirRe
 	}
 
 	var result *OpenDirResult
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

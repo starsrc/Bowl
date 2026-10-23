@@ -1683,11 +1683,22 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 	})
 }
 
-func TestDeleteDisk_PostgresIntegration(t *testing.T) {
+func getStorageTestDSN() string {
 	dsn := os.Getenv("STORAGE_TEST_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("STORAGE_DB_DSN")
+	}
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
 	if dsn == "" {
 		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
 	}
+	return dsn
+}
+
+func TestDeleteDisk_PostgresIntegration(t *testing.T) {
+	dsn := getStorageTestDSN()
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -1989,5 +2000,434 @@ func TestDeleteDisk_PostgresIntegration(t *testing.T) {
 		_, err = mgr.GetAttr(ctx, fileIno)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
 	})
+}
+
+// TestWriteOps_DeadlockRetry_Unit 验证写操作与 DeleteDisk/配额等并发竞争触发 40P01 死锁时，
+// 通过 execWriteTxWithRetry 自动重试成功或在目标已被删除时优雅返回 ErrNotFound。
+func TestWriteOps_DeadlockRetry_Unit(t *testing.T) {
+	ctx := context.Background()
+	ino := uint64(100)
+	now := time.Now().Truncate(time.Microsecond)
+
+	baseInode := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFREG | 0o644),
+		Size:       1024,
+		Nlink:      1,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		RootIno:    1,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	deadlockErr := &pgconn.PgError{
+		Code:    "40P01",
+		Message: "deadlock detected",
+	}
+
+	mockDeadlockOnce := func(mockStore *dbmock.MockStore, mockQuerier db.Querier) *int {
+		attempts := 0
+		mockStore.EXPECT().
+			ExecTxWithOptions(mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				attempts++
+				if attempts == 1 {
+					return deadlockErr
+				}
+				return fn(mockQuerier)
+			}).
+			Twice()
+		return &attempts
+	}
+
+	t.Run("SetAttr 与并发事务死锁(40P01)时自动重试并最终成功", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		attempts := mockDeadlockOnce(mockStore, mockQuerier)
+
+		size2048 := uint64(2048)
+		updatedInode := baseInode
+		updatedInode.Size = int64(size2048)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInode, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, int64(1)).
+			Return(db.Disk{
+				DiskID:     pgtype.UUID{Valid: true},
+				RootIno:    1,
+				MaxBytes:   100 * 1024,
+				UsedBytes:  1024,
+				UsedInodes: 1,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     1,
+				DeltaBytes:  1024,
+				DeltaInodes: 0,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, mock.MatchedBy(func(p db.UpdateInodeAttrParams) bool {
+				return p.Ino == int64(ino) && p.Size == int64(size2048)
+			})).
+			Return(updatedInode, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: &size2048,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, size2048, res.Attr.Size)
+		assert.Equal(t, 2, *attempts, "应当触发 1 次死锁重试后成功")
+	})
+
+	t.Run("SetAttr 死锁重试期间目标节点被并发 DeleteDisk 级联删除，自动重试后返回 ErrNotFound 而非原始死锁错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		attempts := mockDeadlockOnce(mockStore, mockQuerier)
+
+		// 重试时，节点已被并发的 DeleteDisk 删除，返回 pgx.ErrNoRows
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(db.Inode{}, pgx.ErrNoRows).
+			Once()
+
+		size2048 := uint64(2048)
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: &size2048,
+		})
+		require.Error(t, err)
+		require.Nil(t, res)
+		assert.True(t, errors.Is(err, meta.ErrNotFound), "重试后应正确映射为 ErrNotFound，实际为: %v", err)
+		assert.Equal(t, 2, *attempts)
+	})
+
+	t.Run("Create 与并发事务死锁(40P01)时自动重试并成功创建", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		parentDir := baseInode
+		parentDir.Ino = 1
+		parentDir.Mode = int32(meta.S_IFDIR | 0o755)
+		parentDir.Nlink = 2
+
+		newFile := baseInode
+		newFile.Ino = 200
+		newFile.Size = 0
+
+		attempts := mockDeadlockOnce(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(1)).
+			Return(parentDir, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, mock.Anything).
+			Return(newFile, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     1,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, mock.Anything).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, mock.Anything).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, mock.Anything).
+			Return(db.FileHandle{Fh: 1, Ino: 200}, nil).
+			Once()
+
+		res, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: 1,
+			Name:      []byte("newfile.txt"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_CREAT | meta.O_RDWR,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(200), res.Inode.Ino)
+		assert.Equal(t, 2, *attempts)
+	})
+
+	t.Run("SetLk 与并发事务死锁(40P01)时自动重试并最终成功", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		fh := uint64(10)
+		sessionID := uint64(50)
+		owner := uint64(1001)
+
+		attempts := mockDeadlockOnce(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseInode, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
+			}).
+			Return(db.FileHandle{
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				Flags:     meta.O_RDWR,
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
+			}, nil).
+			Once()
+
+		// renewClientSession 调用
+		setupRenewClientSessionMocks(mockQuerier, sessionID)
+
+		// applyFlockSetLk 调用
+		mockQuerier.EXPECT().
+			DeleteFlockFileLocksBySessionAndFh(mock.Anything, db.DeleteFlockFileLocksBySessionAndFhParams{
+				SessionID: int64(sessionID),
+				Ino:       int64(ino),
+				Fh:        int64(fh),
+			}).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveFileLocksByInoAndFlags(mock.Anything, db.ListActiveFileLocksByInoAndFlagsParams{
+				Ino:     int64(ino),
+				LkFlags: int32(meta.FuseLkFlock),
+			}).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListPendingFileLockWaitersByInoAndFlags(mock.Anything, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+				Ino:     int64(ino),
+				LkFlags: int32(meta.FuseLkFlock),
+			}).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileLock(mock.Anything, db.CreateFileLockParams{
+				SessionID:   int64(sessionID),
+				Ino:         int64(ino),
+				Fh:          int64(fh),
+				LockOwner:   int64(owner),
+				LkFlags:     int32(meta.FuseLkFlock),
+				StartOffset: 0,
+				EndOffset:   int64(meta.OffsetMax),
+				LockType:    int16(meta.F_WRLCK),
+				Pid:         4321,
+			}).
+			Return(db.FileLock{ID: 1}, nil).
+			Once()
+
+		err := mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       ino,
+			Fh:        fh,
+			LockOwner: owner,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_WRLCK,
+				PID:   4321,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sessionID,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, *attempts)
+	})
+}
+
+func TestCrossDisk_TopologyIsolation_PostgresIntegration(t *testing.T) {
+	dsn := getStorageTestDSN()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("跳过集成测试 (ping 失败): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	// 1. 创建两块独立磁盘 Disk A 与 Disk B
+	diskAName := fmt.Sprintf("disk_a_%d", time.Now().UnixNano())
+	diskBName := fmt.Sprintf("disk_b_%d", time.Now().UnixNano())
+
+	diskA, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskAName,
+		MaxBytes: 10 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, diskA)
+
+	diskB, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskBName,
+		MaxBytes: 20 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, diskB)
+
+	defer func() {
+		_ = mgr.DeleteDisk(ctx, diskA.DiskID)
+		_ = mgr.DeleteDisk(ctx, diskB.DiskID)
+	}()
+
+	// 2. 在 Disk A 下创建文件 fileA 和子目录 dirA
+	createFileARes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: diskA.RootIno,
+		Name:      []byte("fileA.txt"),
+		Mode:      0o644,
+		Flags:     meta.O_CREAT | meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fileAIno := createFileARes.Inode.Ino
+
+	// 写入一些内容（通过 SetAttr 扩展 size 以便测试配额）
+	size1024 := uint64(1024)
+	_, err = mgr.SetAttr(ctx, fileAIno, meta.SetAttrInput{
+		Size: &size1024,
+	})
+	require.NoError(t, err)
+
+	dirARes, err := mgr.Mkdir(ctx, meta.MkdirParams{
+		ParentIno: diskA.RootIno,
+		Name:      []byte("dirA"),
+		Mode:      0o755,
+	})
+	require.NoError(t, err)
+	dirAIno := dirARes.Ino
+
+	// 在 Disk B 下创建文件 fileB
+	createFileBRes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: diskB.RootIno,
+		Name:      []byte("fileB.txt"),
+		Mode:      0o644,
+		Flags:     meta.O_CREAT | meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fileBIno := createFileBRes.Inode.Ino
+
+	size2048 := uint64(2048)
+	_, err = mgr.SetAttr(ctx, fileBIno, meta.SetAttrInput{
+		Size: &size2048,
+	})
+	require.NoError(t, err)
+
+	// 3. 验证将 fileA 硬链接（Link）到 Disk B 返回 ErrCrossDevice
+	linkedInode, linkErr := mgr.Link(ctx, meta.LinkParams{
+		Ino:          fileAIno,
+		NewParentIno: diskB.RootIno,
+		NewName:      []byte("hardlink_fileA_in_B.txt"),
+	})
+	require.Nil(t, linkedInode)
+	require.Error(t, linkErr)
+	assert.True(t, errors.Is(linkErr, meta.ErrCrossDevice), "跨盘 Link 必须返回 ErrCrossDevice")
+
+	// 4. 验证将 fileA 重命名/移动（Rename）到 Disk B 返回 ErrCrossDevice
+	renameFileErr := mgr.Rename(ctx, meta.RenameParams{
+		OldParentIno: diskA.RootIno,
+		OldName:      []byte("fileA.txt"),
+		NewParentIno: diskB.RootIno,
+		NewName:      []byte("fileA_moved.txt"),
+	})
+	require.Error(t, renameFileErr)
+	assert.True(t, errors.Is(renameFileErr, meta.ErrCrossDevice), "跨盘移动常规文件必须返回 ErrCrossDevice")
+
+	// 验证将 dirA 重命名/移动（Rename）到 Disk B 返回 ErrCrossDevice
+	renameDirErr := mgr.Rename(ctx, meta.RenameParams{
+		OldParentIno: diskA.RootIno,
+		OldName:      []byte("dirA"),
+		NewParentIno: diskB.RootIno,
+		NewName:      []byte("dirA_moved"),
+	})
+	require.Error(t, renameDirErr)
+	assert.True(t, errors.Is(renameDirErr, meta.ErrCrossDevice), "跨盘移动目录必须返回 ErrCrossDevice")
+
+	// 验证将 fileA 与 fileB 原子互换（RenameExchange）返回 ErrCrossDevice
+	renameExchangeErr := mgr.Rename(ctx, meta.RenameParams{
+		OldParentIno: diskA.RootIno,
+		OldName:      []byte("fileA.txt"),
+		NewParentIno: diskB.RootIno,
+		NewName:      []byte("fileB.txt"),
+		Flags:        meta.RenameExchange,
+	})
+	require.Error(t, renameExchangeErr)
+	assert.True(t, errors.Is(renameExchangeErr, meta.ErrCrossDevice), "跨盘 RenameExchange 必须返回 ErrCrossDevice")
+
+	// 5. 验证删除 Disk A（DeleteDisk）后，Disk B 下的所有目录项与文件完好无损，配额完全独立
+	err = mgr.DeleteDisk(ctx, diskA.DiskID)
+	require.NoError(t, err)
+
+	// 验证 Disk A 已被完全删除
+	_, err = mgr.GetDisk(ctx, diskA.DiskID)
+	assert.True(t, errors.Is(err, meta.ErrNotFound))
+	_, err = mgr.GetAttr(ctx, fileAIno)
+	assert.True(t, errors.Is(err, meta.ErrNotFound))
+	_, err = mgr.GetAttr(ctx, dirAIno)
+	assert.True(t, errors.Is(err, meta.ErrNotFound))
+
+	// 验证 Disk B 完好无损
+	fetchedDiskB, err := mgr.GetDisk(ctx, diskB.DiskID)
+	require.NoError(t, err)
+	assert.Equal(t, diskB.DiskID, fetchedDiskB.DiskID)
+	// Disk B 初始 1 个 root inode + 1 个 fileB = 2 个 used_inodes, used_bytes = 2048
+	assert.Equal(t, uint64(2), fetchedDiskB.UsedInodes)
+	assert.Equal(t, uint64(2048), fetchedDiskB.UsedBytes)
+
+	// 验证 Disk B 根目录与 fileB 元数据及 Lookup 正常
+	rootBAttr, err := mgr.GetAttr(ctx, diskB.RootIno)
+	require.NoError(t, err)
+	assert.Equal(t, diskB.RootIno, rootBAttr.Ino)
+
+	fileBAttr, err := mgr.GetAttr(ctx, fileBIno)
+	require.NoError(t, err)
+	assert.Equal(t, fileBIno, fileBAttr.Ino)
+	assert.Equal(t, uint64(2048), fileBAttr.Attr.Size)
+
+	lookedUpB, err := mgr.Lookup(ctx, diskB.RootIno, []byte("fileB.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, fileBIno, lookedUpB.Ino)
 }
 

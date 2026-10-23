@@ -21,6 +21,26 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
+// setupRenewClientSessionMocks 设置通用的会话续期 Mock 期望序列（包含 DeleteExpiredClientSessions、UpsertClientSession、DeleteUnreferencedOrphanInodes）。
+func setupRenewClientSessionMocks(mockQuerier *dbmock.MockQuerier, sessionID uint64) {
+	mockQuerier.EXPECT().
+		DeleteExpiredClientSessions(mock.Anything).
+		Return(int64(0), nil).
+		Once()
+
+	mockQuerier.EXPECT().
+		UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
+			return arg.SessionID == int64(sessionID)
+		})).
+		Return(db.ClientSession{SessionID: int64(sessionID)}, nil).
+		Once()
+
+	mockQuerier.EXPECT().
+		DeleteUnreferencedOrphanInodes(mock.Anything).
+		Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+		Once()
+}
+
 func TestRelease_InputValidation(t *testing.T) {
 	ctx := context.Background()
 
@@ -228,15 +248,6 @@ func TestRelease_PositivePath(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
-			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
-				Fh:        int64(fh),
-				Ino:       int64(ino),
-				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
-			}).
-			Return(int64(fh), nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
 			Return(int64(0), nil).
 			Once()
@@ -255,6 +266,15 @@ func TestRelease_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
 			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
+			}).
+			Return(int64(fh), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -435,6 +455,65 @@ func TestRelease_PositivePath(t *testing.T) {
 		err := mgr.Release(ctx, meta.ReleaseParams{
 			Ino: ino,
 			Fh:  fh,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("携带 SessionID 关闭 Orphan Inode (nlink == 0) 的最后一个句柄：先续期会话再删句柄且配额仅扣减一次", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		sessionID := uint64(888)
+		orphanInode := baseInode
+		orphanInode.Nlink = 0
+		orphanInode.RootIno = 10
+		orphanInode.Size = 4096
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanInode, nil).
+			Once()
+
+		// 1. 先续期会话 (renewOptionalClientSession)
+		setupRenewClientSessionMocks(mockQuerier, sessionID)
+
+		// 2. 再删除句柄 (DeleteFileHandle)
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		// 3. 最终无句柄后回收孤儿节点 (reclaimOrphanIfNoHandles)
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  -4096,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.Release(ctx, meta.ReleaseParams{
+			Ino:       ino,
+			Fh:        fh,
+			SessionID: &sessionID,
 		})
 		require.NoError(t, err)
 	})
@@ -1149,6 +1228,84 @@ func TestRelease_QuotaReclaim_PostgresIntegration(t *testing.T) {
 		// Inode 物理回收确认
 		_, err = mgr.GetAttr(ctx, dirIno)
 		assert.True(t, errors.Is(err, meta.ErrNotFound), "物理回收后目录 Inode 应不可见")
+	})
+
+	t.Run("携带 SessionID 关闭孤儿常规文件的最后一个句柄：验证 Size 和 UsedInodes 仅被扣减一次（无双重扣减）", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_release_session_quota_file_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessID := uint64(770001)
+
+		// 1. 创建常驻文件 normal.txt，大小 8192 字节，用于提供配额基底
+		normRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("normal.txt"),
+			Mode:      meta.S_IFREG | 0o644,
+			UID:       1000,
+			GID:       1000,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+		size8192 := uint64(8192)
+		_, err = mgr.SetAttr(ctx, normRes.Inode.Ino, meta.SetAttrInput{
+			Size:      &size8192,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 2. 创建即将被 unlink 的文件 orphan.txt，大小 4096 字节
+		orphanRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("orphan.txt"),
+			Mode:      meta.S_IFREG | 0o644,
+			UID:       1000,
+			GID:       1000,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+		size4096 := uint64(4096)
+		_, err = mgr.SetAttr(ctx, orphanRes.Inode.Ino, meta.SetAttrInput{
+			Size:      &size4096,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 当前配额状态：根目录 + normal.txt + orphan.txt = 3 inodes；8192 + 4096 = 12288 bytes
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), d.UsedInodes)
+		assert.Equal(t, uint64(12288), d.UsedBytes)
+
+		// 3. Unlink orphan.txt：此时 orphanRes.Fh 依然打开，nlink 变 0 但节点暂不回收，配额不变
+		err = mgr.Unlink(ctx, disk.RootIno, []byte("orphan.txt"))
+		require.NoError(t, err)
+
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), d.UsedInodes)
+		assert.Equal(t, uint64(12288), d.UsedBytes)
+
+		// 4. Release 关闭 orphan.txt 句柄（携带 SessionID）
+		err = mgr.Release(ctx, meta.ReleaseParams{
+			Ino:       orphanRes.Inode.Ino,
+			Fh:        orphanRes.Fh,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 5. 校验配额：必须且仅扣减 1 个 inode 和 4096 字节（剩余 2 个 inodes 和 8192 字节）
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes, "孤儿文件释放后应恰好剩余 2 个 inode (根目录与 normal.txt)")
+		assert.Equal(t, uint64(8192), d.UsedBytes, "孤儿文件释放后应恰好剩余 8192 字节 (normal.txt 占用)")
 	})
 }
 

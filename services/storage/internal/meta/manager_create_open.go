@@ -183,9 +183,20 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			Gid:       int32(gid),
 			Rdev:      0,
 			ParentIno: int64(params.ParentIno),
+			RootIno:   parent.RootIno,
 		})
 		if err != nil {
 			return fmt.Errorf("create inode: %w", err)
+		}
+
+		if parent.RootIno > 0 {
+			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+				RootIno:     parent.RootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}); err != nil {
+				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+			}
 		}
 
 		err = q.CreateEntry(ctx, db.CreateEntryParams{

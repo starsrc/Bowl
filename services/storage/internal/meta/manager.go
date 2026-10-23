@@ -439,16 +439,33 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 }
 
 // reclaimOrphanIfNoHandles 检查孤儿节点是否存在未释放句柄，若无任何句柄则执行物理删除并唤醒清理锁等待通道。
-func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, ino uint64) error {
-	hasRemaining, err := q.HasFileHandlesByIno(ctx, int64(ino))
+// 若节点所属 RootIno > 0，在物理删除后联动退还 used_bytes 与 used_inodes 配额。
+func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, inode db.Inode) error {
+	hasRemaining, err := q.HasFileHandlesByIno(ctx, inode.Ino)
 	if err != nil {
-		return fmt.Errorf("check remaining file handles for inode %d: %w", ino, err)
+		return fmt.Errorf("check remaining file handles for inode %d: %w", inode.Ino, err)
 	}
-	if !hasRemaining {
-		if err := q.DeleteInode(ctx, int64(ino)); err != nil {
-			return fmt.Errorf("delete orphan inode %d: %w", ino, err)
+	if hasRemaining {
+		return nil
+	}
+
+	if err := q.DeleteInode(ctx, inode.Ino); err != nil {
+		return fmt.Errorf("delete orphan inode %d: %w", inode.Ino, err)
+	}
+	m.notifyLockWaiters(uint64(inode.Ino))
+
+	if inode.RootIno > 0 {
+		var deltaBytes int64
+		if (uint32(inode.Mode)&S_IFMT) == S_IFREG && inode.Size > 0 {
+			deltaBytes = -inode.Size
 		}
-		m.notifyLockWaiters(ino)
+		if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+			RootIno:     inode.RootIno,
+			DeltaBytes:  deltaBytes,
+			DeltaInodes: -1,
+		}); err != nil {
+			return fmt.Errorf("reclaim orphan disk quota for root_ino %d: %w", inode.RootIno, err)
+		}
 	}
 	return nil
 }

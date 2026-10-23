@@ -187,6 +187,92 @@ func TestReleaseDir_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+
+	t.Run("最后一个句柄释放的 Orphan 目录 (nlink == 0, RootIno > 0): 无剩余活跃句柄时物理回收 Inode 并退还配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanDir := baseDir
+		orphanDir.Nlink = 0
+		orphanDir.RootIno = 10
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanDir, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  0,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("存在剩余活跃句柄的 Orphan 目录 (nlink == 0, RootIno > 0): 仅释放句柄，不调用 DeleteInode 与 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanDir := baseDir
+		orphanDir.Nlink = 0
+		orphanDir.RootIno = 10
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanDir, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(true, nil).
+			Once()
+
+		err := mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.NoError(t, err)
+	})
 }
 
 func TestReleaseDir_NegativeAndErrorPaths(t *testing.T) {
@@ -403,5 +489,58 @@ func TestReleaseDir_NegativeAndErrorPaths(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "delete orphan inode")
+	})
+
+	t.Run("AddDiskQuotaByRootIno 底层数据库错误导致事务中止并透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanDir := baseDir
+		orphanDir.Nlink = 0
+		orphanDir.RootIno = 10
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanDir, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		dbErr := errors.New("db add quota failed")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  0,
+				DeltaInodes: -1,
+			}).
+			Return(dbErr).
+			Once()
+
+		err := mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "releasedir tx")
+		assert.True(t, errors.Is(err, dbErr))
 	})
 }

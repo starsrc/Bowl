@@ -3,6 +3,7 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"testing"
@@ -349,6 +350,94 @@ func TestRelease_PositivePath(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+
+	t.Run("最后一个句柄释放的 Orphan 常规文件 (nlink == 0, RootIno > 0, Size = 8192): 无剩余活跃句柄时物理回收 Inode 并退还配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanInode := baseInode
+		orphanInode.Nlink = 0
+		orphanInode.RootIno = 10
+		orphanInode.Size = 8192
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanInode, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  -8192,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.Release(ctx, meta.ReleaseParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("存在剩余活跃句柄的 Orphan 常规文件 (nlink == 0, RootIno > 0): 仅释放句柄，不调用 DeleteInode 与 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanInode := baseInode
+		orphanInode.Nlink = 0
+		orphanInode.RootIno = 10
+		orphanInode.Size = 8192
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanInode, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(true, nil).
+			Once()
+
+		err := mgr.Release(ctx, meta.ReleaseParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.NoError(t, err)
+	})
 }
 
 func TestRelease_NegativeAndErrorPaths(t *testing.T) {
@@ -602,6 +691,60 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 		assert.Contains(t, err.Error(), "release tx")
 		assert.True(t, errors.Is(err, dbErr))
 	})
+
+	t.Run("AddDiskQuotaByRootIno 底层数据库错误导致事务中止并透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		orphanInode := baseInode
+		orphanInode.Nlink = 0
+		orphanInode.RootIno = 10
+		orphanInode.Size = 8192
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(orphanInode, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(int64(fh), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(ino)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		dbErr := errors.New("db add quota failed")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  -8192,
+				DeltaInodes: -1,
+			}).
+			Return(dbErr).
+			Once()
+
+		err := mgr.Release(ctx, meta.ReleaseParams{
+			Ino: ino,
+			Fh:  fh,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "release tx")
+		assert.True(t, errors.Is(err, dbErr))
+	})
 }
 
 func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
@@ -778,5 +921,234 @@ func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
 	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&remainingLocks)
 	require.NoError(t, err)
 	assert.Zero(t, remainingLocks, "孤儿节点物理回收后级联清理所有残留文件锁")
+}
+
+func TestRelease_QuotaReclaim_PostgresIntegration(t *testing.T) {
+	dsn := os.Getenv("STORAGE_TEST_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("STORAGE_DB_DSN")
+	}
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	t.Run("CreateDisk -> Create -> SetAttr(size=4096) -> Unlink(有活跃句柄暂不退还) -> Release(最后一个句柄关闭时退还 used_bytes 与 used_inodes)", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_release_quota_file_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		// 初始配额：仅包含根目录 Inode
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), d.UsedInodes)
+		assert.Equal(t, uint64(0), d.UsedBytes)
+
+		// Create 创建常规文件并获得初始句柄
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("file_unlink.txt"),
+			Mode:      meta.S_IFREG | 0o644,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, createRes)
+		fileIno := createRes.Inode.Ino
+		fileFh := createRes.Fh
+
+		// 验证创建后配额：used_inodes + 1
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes)
+		assert.Equal(t, uint64(0), d.UsedBytes)
+
+		// SetAttr 扩容常规文件至 4096 字节
+		size4096 := uint64(4096)
+		_, err = mgr.SetAttr(ctx, fileIno, meta.SetAttrInput{
+			Size: &size4096,
+		})
+		require.NoError(t, err)
+
+		// 验证扩容后配额：used_bytes + 4096
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes)
+		assert.Equal(t, uint64(4096), d.UsedBytes)
+
+		// Unlink 文件：存在活跃句柄 fileFh，进入 unlink-whilst-open，nlink 变 0 但暂不回收 Inode 也不退还配额
+		err = mgr.Unlink(ctx, disk.RootIno, []byte("file_unlink.txt"))
+		require.NoError(t, err)
+
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes, "有活跃句柄时 Unlink 不得退还 used_inodes")
+		assert.Equal(t, uint64(4096), d.UsedBytes, "有活跃句柄时 Unlink 不得退还 used_bytes")
+
+		// Release 关闭最后一个句柄：触发物理删除与配额归还
+		err = mgr.Release(ctx, meta.ReleaseParams{
+			Ino: fileIno,
+			Fh:  fileFh,
+		})
+		require.NoError(t, err)
+
+		// 验证配额已退还：used_inodes 恢复为 1，used_bytes 恢复为 0
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), d.UsedInodes, "关闭最后一个句柄时应扣减 1 个 inode 配额")
+		assert.Equal(t, uint64(0), d.UsedBytes, "关闭最后一个句柄时应退还 4096 字节配额")
+
+		// Inode 物理回收确认
+		_, err = mgr.GetAttr(ctx, fileIno)
+		assert.True(t, errors.Is(err, meta.ErrNotFound), "物理回收后 Inode 应不可见")
+	})
+
+	t.Run("CreateDisk -> TmpFile -> SetAttr(size=8192) -> Release(最后一个句柄关闭时退还 used_bytes 与 used_inodes)", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_release_quota_tmpfile_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		// TmpFile 创建匿名临时常规文件
+		tmpRes, err := mgr.TmpFile(ctx, meta.TmpFileParams{
+			ParentIno: disk.RootIno,
+			Mode:      meta.S_IFREG | 0o600,
+			Flags:     meta.O_RDWR,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, tmpRes)
+		tmpIno := tmpRes.Inode.Ino
+		tmpFh := tmpRes.Fh
+
+		// 验证配额：used_inodes + 1
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes)
+		assert.Equal(t, uint64(0), d.UsedBytes)
+
+		// SetAttr 扩容至 8192 字节
+		size8192 := uint64(8192)
+		_, err = mgr.SetAttr(ctx, tmpIno, meta.SetAttrInput{
+			Size: &size8192,
+		})
+		require.NoError(t, err)
+
+		// 验证配额：used_bytes + 8192
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes)
+		assert.Equal(t, uint64(8192), d.UsedBytes)
+
+		// Release 关闭临时文件唯一句柄：物理回收 Inode 并退还配额
+		err = mgr.Release(ctx, meta.ReleaseParams{
+			Ino: tmpIno,
+			Fh:  tmpFh,
+		})
+		require.NoError(t, err)
+
+		// 验证配额归还
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), d.UsedInodes, "释放 TmpFile 句柄应退还 1 个 inode 配额")
+		assert.Equal(t, uint64(0), d.UsedBytes, "释放 TmpFile 句柄应退还 8192 字节配额")
+
+		// Inode 物理回收确认
+		_, err = mgr.GetAttr(ctx, tmpIno)
+		assert.True(t, errors.Is(err, meta.ErrNotFound), "物理回收后 TmpFile Inode 应不可见")
+	})
+
+	t.Run("CreateDisk -> Mkdir -> OpenDir -> Rmdir(有活跃句柄暂不退还) -> ReleaseDir(最后一个句柄关闭时退还 used_inodes)", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_release_quota_dir_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		// Mkdir 创建子目录
+		dirInode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("subdir"),
+			Mode:      0o755,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, dirInode)
+		dirIno := dirInode.Ino
+
+		// 验证配额：used_inodes + 1
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes)
+		assert.Equal(t, uint64(0), d.UsedBytes)
+
+		// OpenDir 打开目录获取目录句柄
+		openDirRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino: dirIno,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, openDirRes)
+		dirFh := openDirRes.Fh
+
+		// Rmdir 删除目录：因存在活跃目录句柄 dirFh，进入 rmdir-whilst-open，nlink 变 0 但暂不回收 Inode 也不退还配额
+		err = mgr.Rmdir(ctx, disk.RootIno, []byte("subdir"))
+		require.NoError(t, err)
+
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes, "有活跃目录句柄时 Rmdir 不得退还 used_inodes")
+
+		// ReleaseDir 关闭最后一个句柄：触发物理删除与退还 used_inodes 配额
+		err = mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino: dirIno,
+			Fh:  dirFh,
+		})
+		require.NoError(t, err)
+
+		// 验证配额归还
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), d.UsedInodes, "关闭最后一个目录句柄时应扣减 1 个 inode 配额")
+		assert.Equal(t, uint64(0), d.UsedBytes)
+
+		// Inode 物理回收确认
+		_, err = mgr.GetAttr(ctx, dirIno)
+		assert.True(t, errors.Is(err, meta.ErrNotFound), "物理回收后目录 Inode 应不可见")
+	})
 }
 

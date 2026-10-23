@@ -232,7 +232,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		}
 
 		if inode.Nlink == 0 {
-			if err := m.reclaimOrphanIfNoHandles(ctx, q, params.Ino); err != nil {
+			if err := m.reclaimOrphanIfNoHandles(ctx, q, inode); err != nil {
 				return err
 			}
 		}
@@ -333,7 +333,7 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 		}
 
 		if inode.Nlink == 0 {
-			if err := m.reclaimOrphanIfNoHandles(ctx, q, params.Ino); err != nil {
+			if err := m.reclaimOrphanIfNoHandles(ctx, q, inode); err != nil {
 				return err
 			}
 		}

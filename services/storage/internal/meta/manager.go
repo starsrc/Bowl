@@ -75,6 +75,7 @@ type Manager interface {
 	CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error)
 	GetDisk(ctx context.Context, diskID string) (*Disk, error)
 	UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error)
+	DeleteDisk(ctx context.Context, diskID string) error
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 }
 

@@ -93,6 +93,8 @@ const (
 	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
 	// StorageServiceUpdateDiskProcedure is the procedure name of the StorageService's UpdateDisk RPC.
 	StorageServiceUpdateDiskProcedure = "/storage.v1.StorageService/UpdateDisk"
+	// StorageServiceDeleteDiskProcedure is the procedure name of the StorageService's DeleteDisk RPC.
+	StorageServiceDeleteDiskProcedure = "/storage.v1.StorageService/DeleteDisk"
 	// StorageServiceStatFSProcedure is the procedure name of the StorageService's StatFS RPC.
 	StorageServiceStatFSProcedure = "/storage.v1.StorageService/StatFS"
 )
@@ -336,6 +338,13 @@ var (
 			Procedure:  StorageServiceUpdateDiskProcedure,
 		}
 	})
+	storageServiceDeleteDiskSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("DeleteDisk"),
+			Procedure:  StorageServiceDeleteDiskProcedure,
+		}
+	})
 	storageServiceStatFSSpec = sync.OnceValue(func() connect.Spec {
 		return connect.Spec{
 			StreamType: connect.StreamTypeUnary,
@@ -529,6 +538,11 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
+	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+	// 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	DeleteDisk(context.Context, *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error)
 	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
 	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
 	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -726,6 +740,11 @@ type StorageServiceHandler interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
+	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+	// 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
+	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	DeleteDisk(context.Context, *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error)
 	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
 	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
 	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -772,6 +791,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceCreateDiskSpec(), Handler: adapter.createDisk},
 		connect.Method{Spec: storageServiceGetDiskSpec(), Handler: adapter.getDisk},
 		connect.Method{Spec: storageServiceUpdateDiskSpec(), Handler: adapter.updateDisk},
+		connect.Method{Spec: storageServiceDeleteDiskSpec(), Handler: adapter.deleteDisk},
 		connect.Method{Spec: storageServiceStatFSSpec(), Handler: adapter.statFS},
 	)
 }
@@ -913,6 +933,10 @@ func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *v1.GetDiskRe
 
 func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.UpdateDisk is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) DeleteDisk(context.Context, *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.DeleteDisk is not implemented")
 }
 
 func (UnimplementedStorageServiceHandler) StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error) {
@@ -1190,6 +1214,14 @@ func (c *storageServiceClient) GetDisk(ctx context.Context, req *v1.GetDiskReque
 func (c *storageServiceClient) UpdateDisk(ctx context.Context, req *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
 	var res v1.UpdateDiskResponse
 	if err := c.client.CallUnary(ctx, storageServiceUpdateDiskSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) DeleteDisk(ctx context.Context, req *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error) {
+	var res v1.DeleteDiskResponse
+	if err := c.client.CallUnary(ctx, storageServiceDeleteDiskSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1607,6 +1639,18 @@ func (h storageServiceHandler) updateDisk(ctx context.Context, _ connect.Spec, s
 		return err
 	}
 	res, err := h.svc.UpdateDisk(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) deleteDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.DeleteDiskRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.DeleteDisk(ctx, &req)
 	if err != nil {
 		return err
 	}

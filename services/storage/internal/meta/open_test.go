@@ -787,4 +787,254 @@ func TestOpen_OTrunc(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, dbErr))
 	})
+
+	t.Run("常规文件在携带 O_TRUNC 打开且 RootIno>0, Size>0 时同一事务内联动扣减 used_bytes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		rootIno := int64(1)
+		fileSize := int64(4096)
+		fileRow := baseFileRow
+		fileRow.RootIno = rootIno
+		fileRow.Size = fileSize
+
+		diskUUID := pgtype.UUID{Bytes: [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, Valid: true}
+		diskState := db.Disk{
+			DiskID:     diskUUID,
+			Name:       "test-disk",
+			RootIno:    rootIno,
+			MaxBytes:   10 * 1024 * 1024,
+			UsedBytes:  fileSize,
+			UsedInodes: 1,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(fileRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, mock.MatchedBy(func(p db.UpdateInodeAttrParams) bool {
+				return p.Ino == int64(ino) && p.Size == 0
+			})).
+			Return(fileRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -fileSize,
+				DeltaInodes: 0,
+			}).
+			RunAndReturn(func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
+				diskState.UsedBytes += arg.DeltaBytes
+				diskState.UsedInodes += arg.DeltaInodes
+				return nil
+			}).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDWR | meta.O_TRUNC),
+			}).
+			Return(db.FileHandle{
+				Fh:        201,
+				Ino:       int64(ino),
+				Flags:     int32(meta.O_RDWR | meta.O_TRUNC),
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil).
+			Once()
+
+		res, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_RDWR | meta.O_TRUNC,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(201), res.Fh)
+
+		// 验证通过 GetDisk 观察到 used_bytes 准确扣减归零
+		mockStore.EXPECT().
+			GetDisk(mock.Anything, diskUUID).
+			RunAndReturn(func(ctx context.Context, id pgtype.UUID) (db.Disk, error) {
+				return diskState, nil
+			}).
+			Once()
+
+		disk, err := mgr.GetDisk(ctx, "01020304-0506-0708-090a-0b0c0d0e0f10")
+		require.NoError(t, err)
+		assert.Equal(t, uint64(0), disk.UsedBytes)
+
+		// 验证通过 StatFS 观察到 used_bytes 准确扣减归零（Bfree/Bavail 增加）
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(fileRow, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, rootIno).
+			RunAndReturn(func(ctx context.Context, rIno int64) (db.Disk, error) {
+				return diskState, nil
+			}).
+			Once()
+
+		statRes, err := mgr.StatFS(ctx, ino)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(diskState.MaxBytes)/uint64(meta.DefaultStatFSBlockSize), statRes.Bfree)
+	})
+
+	t.Run("常规文件在携带 O_WRONLY|O_TRUNC 打开且 RootIno>0, Size>0 时联动扣减 used_bytes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		rootIno := int64(2)
+		fileSize := int64(8192)
+		fileRow := baseFileRow
+		fileRow.RootIno = rootIno
+		fileRow.Size = fileSize
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(fileRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, mock.MatchedBy(func(p db.UpdateInodeAttrParams) bool {
+				return p.Ino == int64(ino) && p.Size == 0
+			})).
+			Return(fileRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -fileSize,
+				DeltaInodes: 0,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_WRONLY | meta.O_TRUNC),
+			}).
+			Return(db.FileHandle{
+				Fh:        202,
+				Ino:       int64(ino),
+				Flags:     int32(meta.O_WRONLY | meta.O_TRUNC),
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil).
+			Once()
+
+		res, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_WRONLY | meta.O_TRUNC,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(202), res.Fh)
+	})
+
+	t.Run("常规文件 Size 为 0 且携带 O_TRUNC 打开时即使 RootIno>0 也不调用 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		rootIno := int64(1)
+		fileRow := baseFileRow
+		fileRow.RootIno = rootIno
+		fileRow.Size = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(fileRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, mock.MatchedBy(func(p db.UpdateInodeAttrParams) bool {
+				return p.Ino == int64(ino) && p.Size == 0
+			})).
+			Return(fileRow, nil).
+			Once()
+
+		// 不应调用 AddDiskQuotaByRootIno
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_WRONLY | meta.O_TRUNC),
+			}).
+			Return(db.FileHandle{
+				Fh:        203,
+				Ino:       int64(ino),
+				Flags:     int32(meta.O_WRONLY | meta.O_TRUNC),
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil).
+			Once()
+
+		res, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_WRONLY | meta.O_TRUNC,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(203), res.Fh)
+	})
+
+	t.Run("截断常规文件时 AddDiskQuotaByRootIno 返回数据库错误导致事务中止并向上透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		rootIno := int64(1)
+		fileSize := int64(4096)
+		fileRow := baseFileRow
+		fileRow.RootIno = rootIno
+		fileRow.Size = fileSize
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(fileRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, mock.MatchedBy(func(p db.UpdateInodeAttrParams) bool {
+				return p.Ino == int64(ino) && p.Size == 0
+			})).
+			Return(fileRow, nil).
+			Once()
+
+		dbErr := errors.New("failed to deduct disk quota")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  -fileSize,
+				DeltaInodes: 0,
+			}).
+			Return(dbErr).
+			Once()
+
+		res, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_RDWR | meta.O_TRUNC,
+		})
+
+		assert.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+	})
 }

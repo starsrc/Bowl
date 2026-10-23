@@ -175,6 +175,63 @@ func (_c *MockManager_CreateDisk_Call) RunAndReturn(run func(ctx context.Context
 	return _c
 }
 
+// DeleteDisk provides a mock function for the type MockManager
+func (_mock *MockManager) DeleteDisk(ctx context.Context, diskID string) error {
+	ret := _mock.Called(ctx, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteDisk")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(ctx, diskID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_DeleteDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteDisk'
+type MockManager_DeleteDisk_Call struct {
+	*mock.Call
+}
+
+// DeleteDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - diskID string
+func (_e *MockManager_Expecter) DeleteDisk(ctx any, diskID any) *MockManager_DeleteDisk_Call {
+	return &MockManager_DeleteDisk_Call{Call: _e.mock.On("DeleteDisk", ctx, diskID)}
+}
+
+func (_c *MockManager_DeleteDisk_Call) Run(run func(ctx context.Context, diskID string)) *MockManager_DeleteDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_DeleteDisk_Call) Return(err error) *MockManager_DeleteDisk_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_DeleteDisk_Call) RunAndReturn(run func(ctx context.Context, diskID string) error) *MockManager_DeleteDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Fallocate provides a mock function for the type MockManager
 func (_mock *MockManager) Fallocate(ctx context.Context, params meta.FallocateParams) error {
 	ret := _mock.Called(ctx, params)

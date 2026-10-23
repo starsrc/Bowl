@@ -163,6 +163,18 @@ func TestStorageDiskContract_ValidMessages(t *testing.T) {
 		assert.NoError(t, v.Validate(resp))
 	})
 
+	t.Run("有效 DeleteDiskRequest 校验通过", func(t *testing.T) {
+		req := &storagev1.DeleteDiskRequest{
+			DiskId: validStorageDiskUUID,
+		}
+		assert.NoError(t, v.Validate(req))
+	})
+
+	t.Run("有效 DeleteDiskResponse 校验通过", func(t *testing.T) {
+		resp := &storagev1.DeleteDiskResponse{}
+		assert.NoError(t, v.Validate(resp))
+	})
+
 	t.Run("有效 Disk 实体校验通过", func(t *testing.T) {
 		disk := validSampleStorageDisk()
 		assert.NoError(t, v.Validate(disk))
@@ -499,6 +511,32 @@ func TestStorageDiskContract_StatFSRequest_Invalid(t *testing.T) {
 		overflow := uint64(math.MaxInt64) + 1
 		req := &storagev1.StatFSRequest{
 			Ino: overflow,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+}
+
+func TestStorageDiskContract_DeleteDiskRequest_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("disk_id 为空串返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.DeleteDiskRequest{
+			DiskId: "",
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("disk_id 为非法 UUID 格式返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.DeleteDiskRequest{
+			DiskId: "invalid-uuid-format",
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("disk_id 为全零 nil UUID 返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.DeleteDiskRequest{
+			DiskId: nilStorageDiskUUID,
 		}
 		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
 	})

@@ -65,6 +65,7 @@ var storageMessages = []proto.Message{
 	&storagev1.CreateDiskRequest{},
 	&storagev1.GetDiskRequest{},
 	&storagev1.UpdateDiskRequest{},
+	&storagev1.DeleteDiskRequest{},
 	&storagev1.StatFSRequest{},
 
 	// 响应消息 (Responses)
@@ -102,6 +103,7 @@ var storageMessages = []proto.Message{
 	&storagev1.CreateDiskResponse{},
 	&storagev1.GetDiskResponse{},
 	&storagev1.UpdateDiskResponse{},
+	&storagev1.DeleteDiskResponse{},
 	&storagev1.StatFSResponse{},
 
 	// 嵌套与共享消息
@@ -509,6 +511,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.UpdateDiskRequest.disk_id",
 		"storage.v1.UpdateDiskRequest.max_bytes",
 		"storage.v1.UpdateDiskResponse.disk",
+		"storage.v1.DeleteDiskRequest.disk_id",
 		"storage.v1.StatFSRequest.ino":
 		return 10, ReasonInvalidArgument
 

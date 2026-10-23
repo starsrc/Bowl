@@ -205,6 +205,43 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	return result, nil
 }
 
+// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+// 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
+func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
+	// 静态参数校验（无需触达数据库）：非法格式或全零 Nil UUID 直接返回 ErrInvalidArgument
+	pgID, err := parseDiskID(diskID)
+	if err != nil {
+		return err
+	}
+
+	return m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		// 1. 获取并排他锁定目标 Disk 行
+		diskRow, err := q.GetDiskForUpdate(ctx, pgID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("get disk for update %s: %w", diskID, err)
+		}
+
+		// 2. 删除该 Disk 行
+		rows, err := q.DeleteDisk(ctx, pgID)
+		if err != nil {
+			return fmt.Errorf("delete disk %s: %w", diskID, err)
+		}
+		if rows == 0 {
+			return ErrNotFound
+		}
+
+		// 3. 按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联项）
+		if _, err := q.DeleteInodesByRootIno(ctx, diskRow.RootIno); err != nil {
+			return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
+		}
+
+		return nil
+	})
+}
+
 // StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
 // 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
 func (m *manager) StatFS(ctx context.Context, ino uint64) (*StatFSResult, error) {

@@ -3,7 +3,9 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1319,6 +1322,395 @@ func TestStatFS_Calculation(t *testing.T) {
 		require.NotNil(t, res)
 		assert.Equal(t, uint64(0), res.Files)
 		assert.Equal(t, uint64(0), res.Ffree)
+	})
+}
+
+func TestDeleteDisk_StaticValidation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("disk_id 为空串返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		err := mgr.DeleteDisk(ctx, "")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "invalid disk id")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("disk_id 为非法 UUID 格式返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		err := mgr.DeleteDisk(ctx, "not-a-valid-uuid")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "invalid disk id")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+
+	t.Run("disk_id 为全零 Nil UUID 返回 ErrInvalidArgument 且不触达数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		err := mgr.DeleteDisk(ctx, "00000000-0000-0000-0000-000000000000")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "disk id cannot be nil uuid")
+		mockStore.AssertNotCalled(t, "ExecTxWithOptions", mock.Anything, mock.Anything)
+	})
+}
+
+func TestDeleteDisk_MockStore(t *testing.T) {
+	ctx := context.Background()
+	const validDiskIDStr = "0192a3b4-c5d6-7e8f-9012-3456789abcde"
+	var validDiskID pgtype.UUID
+	require.NoError(t, validDiskID.Scan(validDiskIDStr))
+	const rootIno = int64(1001)
+
+	t.Run("目标磁盘不存在 (GetDiskForUpdate 返回 ErrNoRows) 返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{}, pgx.ErrNoRows).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("GetDiskForUpdate 数据库错误透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		dbErr := errors.New("db connection failure")
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{}, dbErr).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+	})
+
+	t.Run("DeleteDisk 返回 0 行受影响返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteDisk(mock.Anything, validDiskID).
+			Return(int64(0), nil).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("DeleteDisk 数据库错误透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		dbErr := errors.New("delete disk internal error")
+		mockQuerier.EXPECT().
+			DeleteDisk(mock.Anything, validDiskID).
+			Return(int64(0), dbErr).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+	})
+
+	t.Run("DeleteInodesByRootIno 数据库错误透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteDisk(mock.Anything, validDiskID).
+			Return(int64(1), nil).
+			Once()
+
+		dbErr := errors.New("delete inodes failure")
+		mockQuerier.EXPECT().
+			DeleteInodesByRootIno(mock.Anything, rootIno).
+			Return(nil, dbErr).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+	})
+
+	t.Run("正常删除依次调用 GetDiskForUpdate -> DeleteDisk -> DeleteInodesByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteDisk(mock.Anything, validDiskID).
+			Return(int64(1), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInodesByRootIno(mock.Anything, rootIno).
+			Return([]int64{rootIno, 1002, 1003}, nil).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.NoError(t, err)
+	})
+}
+
+func TestDeleteDisk_PostgresIntegration(t *testing.T) {
+	dsn := os.Getenv("STORAGE_TEST_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("跳过集成测试 (ping 失败): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	t.Run("空盘创建后直接删除，验证 GetDisk 与 GetAttr 均返回 ErrNotFound", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_del_empty_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+
+		// 确保删除前可查
+		fetchedDisk, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, disk.DiskID, fetchedDisk.DiskID)
+
+		rootAttr, err := mgr.GetAttr(ctx, disk.RootIno)
+		require.NoError(t, err)
+		assert.Equal(t, disk.RootIno, rootAttr.Ino)
+
+		// 执行 DeleteDisk
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+
+		// 删除后再次查询应返回 ErrNotFound
+		_, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+
+		_, err = mgr.GetAttr(ctx, disk.RootIno)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("非空目录树（多层子目录、常规文件、符号链接、扩展属性）强制级联删除", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_del_tree_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		rootIno := disk.RootIno
+
+		// 1. 创建子目录 dir1
+		dir1, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: rootIno,
+			Name:      []byte("dir1"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		// 2. 在 dir1 下创建子目录 dir2
+		dir2, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: dir1.Ino,
+			Name:      []byte("dir2"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		// 3. 在 dir2 下创建常规文件 file.txt
+		fileRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: dir2.Ino,
+			Name:      []byte("file.txt"),
+			Mode:      0o644,
+			Flags:     meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		fileIno := fileRes.Inode.Ino
+
+		// 4. 为常规文件设置扩展属性
+		err = mgr.SetXattr(ctx, meta.SetXattrParams{
+			Ino:   fileIno,
+			Name:  []byte("user.test_attr"),
+			Value: []byte("attr_value_123"),
+			Flags: meta.XattrCreate,
+		})
+		require.NoError(t, err)
+
+		// 5. 在 rootIno 下创建指向 file.txt 的符号链接 symlink1
+		symlink, err := mgr.Symlink(ctx, meta.SymlinkParams{
+			ParentIno: rootIno,
+			Name:      []byte("symlink1"),
+			Target:    []byte("dir1/dir2/file.txt"),
+		})
+		require.NoError(t, err)
+
+		// 验证节点存在
+		_, err = mgr.GetAttr(ctx, dir1.Ino)
+		require.NoError(t, err)
+		_, err = mgr.GetAttr(ctx, dir2.Ino)
+		require.NoError(t, err)
+		_, err = mgr.GetAttr(ctx, fileIno)
+		require.NoError(t, err)
+		_, err = mgr.GetAttr(ctx, symlink.Ino)
+		require.NoError(t, err)
+
+		// 验证扩展属性存在
+		xval, err := mgr.GetXattr(ctx, fileIno, []byte("user.test_attr"))
+		require.NoError(t, err)
+		assert.Equal(t, []byte("attr_value_123"), xval)
+
+		// 执行 DeleteDisk 强制级联删除
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+
+		// 验证所有节点均已被清理
+		_, err = mgr.GetDisk(ctx, disk.DiskID)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		for _, ino := range []uint64{rootIno, dir1.Ino, dir2.Ino, fileIno, symlink.Ino} {
+			_, err = mgr.GetAttr(ctx, ino)
+			assert.True(t, errors.Is(err, meta.ErrNotFound), "ino %d 应已被级联删除", ino)
+		}
+
+		// 扩展属性应无法查到
+		_, err = mgr.GetXattr(ctx, fileIno, []byte("user.test_attr"))
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("含活跃打开 FileHandle 和 FileLock 时的强制级联删除", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_del_locks_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		rootIno := disk.RootIno
+
+		sessionID := uint64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+
+		// 1. 创建常规文件
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: rootIno,
+			Name:      []byte("locked_file.bin"),
+			Mode:      0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessionID,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh := createRes.Fh
+
+		// 2. 对文件加锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: 12345,
+			SessionID: sessionID,
+			Lk: meta.FileLock{
+				Type:  meta.F_WRLCK,
+				Start: 0,
+				End:   100,
+				PID:   999,
+			},
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		// 验证锁存在
+		lk, err := mgr.GetLk(ctx, meta.GetLkParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: 54321, // 探测者 owner 不同
+			SessionID: sessionID,
+			Lk: meta.FileLock{
+				Type:  meta.F_WRLCK,
+				Start: 0,
+				End:   100,
+				PID:   888,
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, meta.F_WRLCK, lk.Type)
+
+		// 3. 执行 DeleteDisk 强制级联删除
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+
+		// 4. 验证 Disk、Inode 均被清理
+		_, err = mgr.GetDisk(ctx, disk.DiskID)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		_, err = mgr.GetAttr(ctx, fileIno)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		_, err = mgr.GetAttr(ctx, rootIno)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
 	})
 }
 

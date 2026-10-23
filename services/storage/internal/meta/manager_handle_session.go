@@ -166,7 +166,7 @@ func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
 
 // Release 关闭并销毁文件句柄，按标志位清理 BSD flock 句柄锁，且在孤儿节点无活跃句柄时执行最终物理回收。
 // 遵循 ADR-0012：
-// 1. 静态校验 ino、fh、release_flags（仅允许 0 或 FuseReleaseFlockUnlock）与可选 session_id 范围；
+// 1. 静态校验 ino、fh、release_flags（允许 0、FuseReleaseFlush、FuseReleaseFlockUnlock 及其组合）与可选 session_id 范围；
 // 2. 在 READ COMMITTED 写事务中锁定目标 Inode 并删除 file_handles(fh)；
 // 3. 若传入 session_id，续期客户端会话并执行无引用孤儿节点兜底回收；仅当 (release_flags & FuseReleaseFlockUnlock) != 0 时，原子删除该 (session_id, ino, fh)（未传 session_id 时按 (ino, fh)）绑定的 BSD flock 锁（lk_flags == FuseLkFlock），绝不越权清理 POSIX 记录锁；
 // 4. 若 nlink == 0 且无剩余活跃句柄，执行孤儿节点物理回收（数据库 ON DELETE CASCADE 自动清理残留锁）。
@@ -174,7 +174,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 || params.Fh == 0 || params.Fh > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if (params.ReleaseFlags &^ FuseReleaseFlockUnlock) != 0 {
+	if (params.ReleaseFlags &^ (FuseReleaseFlush | FuseReleaseFlockUnlock)) != 0 {
 		return ErrInvalidArgument
 	}
 	if err := validateOptionalSessionID(params.SessionID); err != nil {

@@ -69,11 +69,12 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:  expectedTargetMode,
-				Nlink: 2,
-				Uid:   1001,
-				Gid:   1002,
-				Rdev:  0,
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
 			}).
 			Return(createdInodeRow, nil).
 			Once()
@@ -140,11 +141,12 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:  expectedTargetMode,
-				Nlink: 2,
-				Uid:   1001,
-				Gid:   1002,
-				Rdev:  0,
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
 			}).
 			Return(createdInodeRow, nil).
 			Once()
@@ -210,11 +212,12 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:  expectedTargetMode,
-				Nlink: 2,
-				Uid:   1001,
-				Gid:   2000,
-				Rdev:  0,
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       2000,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
 			}).
 			Return(createdInodeRow, nil).
 			Once()
@@ -277,11 +280,12 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:  expectedTargetMode,
-				Nlink: 2,
-				Uid:   1001,
-				Gid:   1002,
-				Rdev:  0,
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
 			}).
 			Return(createdInodeRow, nil).
 			Once()
@@ -343,11 +347,12 @@ func TestMkdir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:  expectedTargetMode,
-				Nlink: 2,
-				Uid:   1001,
-				Gid:   1002,
-				Rdev:  0,
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
 			}).
 			Return(createdInodeRow, nil).
 			Once()
@@ -377,6 +382,72 @@ func TestMkdir_PositivePath(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, inode)
 		assert.Equal(t, newIno, inode.Ino)
+	})
+
+	t.Run("创建子目录: 应用 Umask 权限扣减并持久化 ParentIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		expectedTargetMode := int32(meta.S_IFDIR | 0o750)
+		createdInodeRow := db.Inode{
+			Ino:       int64(newIno),
+			Mode:      expectedTargetMode,
+			Nlink:     2,
+			Uid:       1001,
+			Gid:       1002,
+			ParentIno: int64(parentIno),
+			Atime:     pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:     pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:     pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("masked_dir"),
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      []byte("masked_dir"),
+			Mode:      0o777,
+			Umask:     0o027,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, uint32(expectedTargetMode), inode.Attr.Mode)
+		assert.Equal(t, parentIno, inode.Attr.ParentIno)
 	})
 }
 
@@ -693,5 +764,30 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 
 		assert.Nil(t, inode)
 		assert.ErrorIs(t, err, dbErr)
+	})
+
+	t.Run("父目录硬链接数达到 MaxNlink (65000) 时返回 ErrTooManyLinks (EMLINK)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		fullParent := baseParentRow
+		fullParent.Nlink = int32(meta.MaxNlink)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(fullParent, nil).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      []byte("sub"),
+			Mode:      0o755,
+		})
+
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrTooManyLinks)
 	})
 }

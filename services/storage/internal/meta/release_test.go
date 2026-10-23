@@ -59,16 +59,16 @@ func TestRelease_InputValidation(t *testing.T) {
 			fh:   0,
 		},
 		{
-			name:         "release_flags 包含未知位 (0x1)",
+			name:         "release_flags 包含未知位 (0x4)",
 			ino:          1,
 			fh:           1,
-			releaseFlags: 0x1,
+			releaseFlags: 0x4,
 		},
 		{
-			name:         "release_flags 包含未知高位 (0x3)",
+			name:         "release_flags 包含未知高位 (0x7)",
 			ino:          1,
 			fh:           1,
-			releaseFlags: meta.FuseReleaseFlockUnlock | 0x1,
+			releaseFlags: meta.FuseReleaseFlush | meta.FuseReleaseFlockUnlock | 0x4,
 		},
 		{
 			name:      "session_id 为 0",
@@ -97,6 +97,34 @@ func TestRelease_InputValidation(t *testing.T) {
 			assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
 		})
 	}
+
+	t.Run("允许携带 FuseReleaseFlush (0x1) 标志位正常销毁文件句柄", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(10)).
+			Return(db.Inode{Ino: 10, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
+				Fh:  1,
+				Ino: 10,
+			}).
+			Return(int64(1), nil).
+			Once()
+
+		err := mgr.Release(ctx, meta.ReleaseParams{
+			Ino:          10,
+			Fh:           1,
+			ReleaseFlags: meta.FuseReleaseFlush,
+		})
+		require.NoError(t, err)
+	})
 }
 
 func TestRelease_PositivePath(t *testing.T) {

@@ -344,4 +344,35 @@ func TestOpenDir_NegativeAndErrorPaths(t *testing.T) {
 		assert.Nil(t, res)
 		assert.Contains(t, err.Error(), "create file handle")
 	})
+
+	t.Run("启用 WithOpenDirCache(true) 时返回 FOPEN_CACHE_DIR", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore, meta.WithOpenDirCache(true))
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(baseDirRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDONLY),
+			}).
+			Return(db.FileHandle{Fh: 77, Ino: int64(ino), Flags: int32(meta.O_RDONLY)}, nil).
+			Once()
+
+		res, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   ino,
+			Flags: meta.O_RDONLY,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(77), res.Fh)
+		assert.Equal(t, meta.FOPEN_CACHE_DIR, res.OpenFlags)
+	})
 }

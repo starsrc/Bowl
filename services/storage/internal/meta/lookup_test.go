@@ -996,36 +996,6 @@ func TestLookup_EmptyNameSemantics(t *testing.T) {
 	})
 }
 
-func TestLookup_TrashNamespace(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("开启回收站 (trashDays > 0) 时根目录下查找 .trash 返回 TrashIno 节点", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore, meta.WithTrashDays(7))
-
-		rootRow := db.Inode{
-			Ino:   1,
-			Mode:  int32(meta.S_IFDIR | 0o755),
-			Nlink: 2,
-		}
-		trashRow := db.Inode{
-			Ino:   int64(meta.TrashIno),
-			Mode:  int32(meta.S_IFDIR | 0o700),
-			Nlink: 2,
-		}
-
-		setupMockTx(mockStore, mockQuerier)
-		mockQuerier.EXPECT().GetInode(mock.Anything, int64(1)).Return(rootRow, nil).Once()
-		mockQuerier.EXPECT().GetInode(mock.Anything, int64(meta.TrashIno)).Return(trashRow, nil).Once()
-
-		inode, err := mgr.Lookup(ctx, 1, []byte(".trash"))
-		require.NoError(t, err)
-		require.NotNil(t, inode)
-		assert.Equal(t, meta.TrashIno, inode.Ino)
-	})
-}
-
 func TestLookup_CacheTimeouts(t *testing.T) {
 	ctx := context.Background()
 

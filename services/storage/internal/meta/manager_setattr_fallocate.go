@@ -21,8 +21,17 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 
 	// 至少包含一项有效待更新属性
 	if input.Mode == nil && input.UID == nil && input.GID == nil && input.Size == nil &&
-		input.Atime == nil && input.Mtime == nil && !input.AtimeNow && !input.MtimeNow {
+		input.Atime == nil && input.Mtime == nil && !input.AtimeNow && !input.MtimeNow &&
+		!input.CtimeNow && input.Flags == nil {
 		return nil, ErrInvalidArgument
+	}
+
+	// 可选文件句柄与客户端会话标识静态边界防御
+	if input.Fh != nil && (*input.Fh == 0 || *input.Fh > math.MaxInt64) {
+		return nil, ErrInvalidArgument
+	}
+	if err := validateOptionalSessionID(input.SessionID); err != nil {
+		return nil, err
 	}
 
 	// 时间戳策略互斥防御
@@ -50,6 +59,11 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		return nil, ErrInvalidArgument
 	}
 
+	// Flags 范围边界防御（防止转换为 PostgreSQL INTEGER 符号位溢出）
+	if input.Flags != nil && *input.Flags > math.MaxInt32 {
+		return nil, ErrInvalidArgument
+	}
+
 	var result *Inode
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
 		current, err := q.GetInodeForUpdate(ctx, int64(ino))
@@ -71,6 +85,31 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			if fileType != S_IFREG {
 				return ErrInvalidArgument
 			}
+		}
+
+		// 可选文件句柄归属校验与 ftruncate 写权限强制检查
+		if input.Fh != nil {
+			handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
+				Fh:        int64(*input.Fh),
+				Ino:       int64(ino),
+				SessionID: toPgSessionID(input.SessionID),
+			})
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrBadFileHandle
+				}
+				return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", *input.Fh, ino, err)
+			}
+			if input.Size != nil {
+				accMode := uint32(handle.Flags) & O_ACCMODE
+				if accMode != O_WRONLY && accMode != O_RDWR {
+					return ErrBadFileHandle
+				}
+			}
+		}
+
+		if err := m.renewOptionalClientSession(ctx, q, input.SessionID); err != nil {
+			return err
 		}
 
 		// POSIX Mode 篡改防御、文件类型保留与特权位剥离
@@ -124,6 +163,11 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			mtime = current.Mtime
 		}
 
+		targetFlags := current.Flags
+		if input.Flags != nil {
+			targetFlags = int32(*input.Flags)
+		}
+
 		updated, err := q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
 			Ino:         int64(ino),
 			Mode:        int32(targetMode),
@@ -134,12 +178,13 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			Atime:       atime,
 			SetMtimeNow: setMtimeNow,
 			Mtime:       mtime,
+			Flags:       targetFlags,
 		})
 		if err != nil {
 			return fmt.Errorf("update inode attr %d: %w", ino, err)
 		}
 
-		result = newInodeFromDB(updated)
+		result = m.newInode(updated)
 		return nil
 	})
 
@@ -149,6 +194,8 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			return nil, ErrNotFound
 		case errors.Is(err, ErrIsDir):
 			return nil, ErrIsDir
+		case errors.Is(err, ErrBadFileHandle):
+			return nil, ErrBadFileHandle
 		case errors.Is(err, ErrInvalidArgument):
 			return nil, ErrInvalidArgument
 		default:
@@ -237,6 +284,7 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 					Atime:       current.Atime,
 					SetMtimeNow: true,
 					Mtime:       pgtype.Timestamptz{},
+					Flags:       current.Flags,
 				})
 				if err != nil {
 					return fmt.Errorf("update inode attr %d: %w", current.Ino, err)
@@ -262,6 +310,7 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 				Atime:       current.Atime,
 				SetMtimeNow: true,
 				Mtime:       pgtype.Timestamptz{},
+				Flags:       current.Flags,
 			})
 			if err != nil {
 				return fmt.Errorf("update inode attr %d: %w", current.Ino, err)

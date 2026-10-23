@@ -12,11 +12,11 @@ Storage 元数据服务在完成 `Lookup`、`GetAttr` 与 `SetAttr` 的设计后
 
 ## 决策
 1. **RPC 契约与权限掩码边界**：
-   - `umask` 由客户端 FUSE 适配层在发起 RPC 前完成权限掩码合成，`MknodRequest` 仅接收合成后的目标 `mode` 及 `parent_ino`、`name`、`uid`、`gid`、`rdev`；`MknodResponse` 与 `LookupResponse` 对齐，返回新建 `Inode` 及 `entry_timeout_seconds`、`attr_timeout_seconds`。
+   - `MknodRequest` 接收 `mode` 及 `parent_ino`、`name`、`uid`、`gid`、`rdev`；领域层 `MknodParams`（以及 `MkdirParams`、`CreateParams`、`TmpFileParams`）支持传入 `Umask`，在计算落库权限位时执行 `(mode & PermMask) &^ (umask & PermMask)` 掩码扣减；`MknodResponse` 与 `LookupResponse` 对齐，返回新建 `Inode` 及 `entry_timeout_seconds`、`attr_timeout_seconds`。
    - 对 `parent_ino` 施加 `> 0 && <= math.MaxInt64` 约束，对 `mode` 施加 `> 0 && <= 0o177777`（`65535`）约束，对 `name` 施加 `1..255` 字节且不含 `/` 与 `\x00` 约束。
-2. **严格显式文件类型白名单与 `rdev` 归一化**：
+2. **严格显式文件类型白名单、`rdev` 归一化与非目录 `parent_ino = 0`**：
    - `Mknod` 仅允许显式传入五种非目录、非软链文件类型：`S_IFREG (0o100000)`、`S_IFCHR (0o020000)`、`S_IFBLK (0o060000)`、`S_IFIFO (0o010000)`、`S_IFSOCK (0o140000)`；传入 `0`、`S_IFDIR`、`S_IFLNK` 或未知高位类型统一返回 `ErrInvalidArgument`（`EINVAL`）。
-   - 仅当类型为 `S_IFCHR` 或 `S_IFBLK` 时持久化请求传入的 `rdev`；其余类型强制将落库 `rdev` 归零为 `0`。新建节点初始 `size = 0`、`nlink = 1`、`generation = 0`，时间戳统一取事务 `NOW()`。
+   - 仅当类型为 `S_IFCHR` 或 `S_IFBLK` 时持久化请求传入的 `rdev`；其余类型强制将落库 `rdev` 归零为 `0`。所有非目录节点（`Mknod`、`Create`、`TmpFile`、`Symlink`）在 `inodes` 表中的 `parent_ino` 固定写 `0`（父子关系由 `entries` 表承载，仅 `S_IFDIR` 目录节点在 `inodes.parent_ino` 维护父目录编号）。新建节点初始 `size = 0`、`nlink = 1`、`generation = 0`，时间戳统一取 `clock_timestamp()`。
 3. **父目录 `FOR UPDATE` 悲观锁、孤儿目录拦截与属性联动**：
    - `meta.Manager.Mknod(ctx, MknodParams)` 开启读写事务，先调用 `GetInodeForUpdate(parent_ino)` 加行级排他锁：若父节点不存在或 `nlink == 0`（已解链孤儿目录）返回 `ErrNotFound`（`ENOENT`）；若父节点非目录返回 `ErrNotDir`（`ENOTDIR`）。
    - 父目录校验通过后，若 `name` 为 `"."` 或 `".."`，直接返回 `ErrAlreadyExists`（`EEXIST`）。

@@ -621,6 +621,35 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 			Return(baseParentRow, nil).
 			Once()
 
+		srcRowMax := baseSrcRow
+		srcRowMax.Nlink = int32(meta.MaxNlink)
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(srcIno)).
+			Return(srcRowMax, nil).
+			Once()
+
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          srcIno,
+			NewParentIno: parentIno,
+			NewName:      []byte("too_many_links"),
+		})
+
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, meta.ErrTooManyLinks)
+	})
+
+	t.Run("同名 Entry 已存在 (SQLSTATE 23505) 映射为 ErrAlreadyExists", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(srcIno)).
 			Return(baseSrcRow, nil).

@@ -1,8 +1,10 @@
 -- +goose Up
 -- +goose StatementBegin
--- 1. inodes 表新增 flags 与 parent_ino 列，并回填存量目录的 parent_ino
+-- 1. inodes 表新增 flags 与 parent_ino 列，并回填存量目录的 parent_ino（非目录节点保持为 0）
 ALTER TABLE inodes ADD COLUMN IF NOT EXISTS flags INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE inodes ADD COLUMN IF NOT EXISTS parent_ino BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE inodes ADD COLUMN IF NOT EXISTS parent_ino BIGINT NOT NULL DEFAULT 0;
+
+UPDATE inodes SET parent_ino = 1 WHERE ino = 1;
 
 UPDATE inodes i
 SET parent_ino = e.parent_ino

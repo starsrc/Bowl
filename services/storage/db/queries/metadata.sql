@@ -32,16 +32,8 @@ RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctim
 
 -- name: CreateInode :one
 INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
-SELECT $1, $2, $3, $4, $5, @size::bigint, CASE WHEN @parent_ino::bigint > 0 THEN @parent_ino::bigint ELSE 1 END, ts.now, ts.now, ts.now
+SELECT $1, $2, $3, $4, $5, @size::bigint, @parent_ino::bigint, ts.now, ts.now, ts.now
 FROM (SELECT clock_timestamp() AS now) AS ts
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
-
--- name: EnsureTrashInode :one
-INSERT INTO inodes (ino, mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
-SELECT @ino::bigint, $1, $2, 0, 0, 0, 4096, @parent_ino::bigint, ts.now, ts.now, ts.now
-FROM (SELECT clock_timestamp() AS now) AS ts
-ON CONFLICT (ino) DO UPDATE
-SET ino = EXCLUDED.ino
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 
 -- name: CreateEntry :exec
@@ -64,7 +56,7 @@ WHERE ino = $1;
 
 -- name: CreateSymlinkInode :one
 INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, atime, mtime, ctime)
-SELECT $1, $2, $3, $4, $5, $6, $7, CASE WHEN @parent_ino::bigint > 0 THEN @parent_ino::bigint ELSE 1 END, ts.now, ts.now, ts.now
+SELECT $1, $2, $3, $4, $5, $6, $7, @parent_ino::bigint, ts.now, ts.now, ts.now
 FROM (SELECT clock_timestamp() AS now) AS ts
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
 

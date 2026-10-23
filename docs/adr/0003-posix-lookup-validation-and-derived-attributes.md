@@ -24,8 +24,7 @@
      3. 孤儿父目录拦截：若 `parent.Nlink == 0`，返回 `ErrNotFound`（`ENOENT`），杜绝已解链父目录下的无效子项点查。
      4. 解析 `"."`：直接返回当前父节点自身属性。
      5. 解析空名称 `""`：父目录校验合法后，按 JuiceFS 规范返回 `ErrNotFound`（`ENOENT`）。
-     6. 处理根目录下回收站命名空间：若 `trashDays > 0` 且 `parentIno == RootIno` 且 `name == ".trash"`，直接查询并返回 `TrashIno` 节点属性。
-     7. 常规目录项点查：调用 `GetInodeByEntry(parent_ino, name)`，不存在返回 `ErrNotFound`（`ENOENT`）。
+     6. 常规目录项点查：调用 `GetInodeByEntry(parent_ino, name)`，不存在返回 `ErrNotFound`（`ENOENT`）。
 3. **块属性与文件类型隔离推导**：
    - 固定 `Blksize = 65536` (`0x10000`, 64 KiB)，对标 JuiceFS `attrToStat`。
    - 目录节点默认 `Size = 4096`，计算 `Blocks = 8`（512 字节块）。
@@ -37,7 +36,7 @@
 
 ## 结果
 - **积极影响**：
-  - `Lookup` 完整覆盖 POSIX 与 JuiceFS 的特殊目录项解析（`.`, `..`, `.trash`）及孤儿父目录拦截边界。
+  - `Lookup` 完整覆盖 POSIX 与 JuiceFS 的特殊目录项解析（`.`、`..`、空名称 `""`）及孤儿父目录拦截边界。
   - 完美解决 `rmdir-whilst-open` 状态下进程在被删目录中执行 `cd ..` 错误自指的死循环 Bug。
   - `Blksize = 65536` 避免用户态标准库退化为 4 KiB 小块 I/O，大幅提升读写吞吐性能。
   - 目录与非目录节点具备独立的内核缓存时效控制。

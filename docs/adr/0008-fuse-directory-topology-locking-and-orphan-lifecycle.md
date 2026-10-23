@@ -19,14 +19,14 @@ Storage 元数据引擎在推进 `Mkdir`、`Link`、`Unlink`、`Rmdir` 与 `Rena
      - `Rename`：先快照预读源 `Entry` 与目标 `Entry`（获取候选 `old_ino` 与 `new_ino`），将 `old_parent_ino`、`new_parent_ino`、候选 `old_ino`、候选 `new_ino` 全部汇总去重并按全局 `ino` 严格升序加锁；持锁后二次校验父目录不变量及源/目标 `Entry` 映射，若发生并发漂移则回滚并自动重试。
 2. **孤儿节点（`Orphan Inode`）保留与 `Link` 复活拦截**：
    - `Unlink`、`Rmdir` 与 `Rename` 覆盖目标时，仅从 `entries` 表删除对应记录，并更新目标 `Inode` 的 `nlink`（非目录递减 `nlink - 1`，目录直接置 `nlink = 0`）及刷新 `ctime = NOW()`，**不物理删除 `inodes` 表记录**，以完整支撑 `unlink-whilst-open` 句柄操作及 `parent.Nlink == 0` 孤儿目录写入拦截。
-   - `Link` 在锁定源 `Inode` 后，若发现其为目录则返回 `ErrPerm`（`EPERM`）；若发现 `nlink == 0`（已解链孤儿节点）则返回 `ErrNotFound`（`ENOENT`），严禁复活孤儿节点。
-3. **目录 `nlink` 联动、空目录 `EXISTS` 校验与 `S_ISGID` 继承**：
-   - `Mkdir` 接收 `mode`（支持 `mode = 0` 即 `0000` 零权限目录，`<= 0o177777`）并合成为 `S_IFDIR | (mode & 0o7777)`（若携带非零且非 `S_IFDIR` 的类型位则返回 `ErrInvalidArgument`）；若父目录含 `S_ISGID (0o2000)`，新目录同时继承父目录 `gid` 与 `S_ISGID` 模式位。新目录初始 `nlink = 2`，父目录 `nlink + 1`。
+   - `Link` 在锁定源 `Inode` 后，若发现其为目录则返回 `ErrPerm`（`EPERM`）；若发现 `nlink >= MaxNlink (65000)` 则返回 `ErrTooManyLinks`（`EMLINK`）；若发现 `nlink == 0`（已解链孤儿节点）则返回 `ErrNotFound`（`ENOENT`），严禁复活孤儿节点。
+3. **目录 `nlink` 联动、`inodes.parent_ino` 维护、空目录 `EXISTS` 校验与 `S_ISGID` 继承**：
+   - `Mkdir` 接收 `mode`（支持 `mode = 0` 即 `0000` 零权限目录，`<= 0o177777`）并结合 `Umask` 合成为 `S_IFDIR | ((mode & 0o7777) &^ (umask & 0o7777))`（若携带非零且非 `S_IFDIR` 的类型位则返回 `ErrInvalidArgument`）；若父目录 `nlink >= MaxNlink (65000)` 则返回 `ErrTooManyLinks`（`EMLINK`）；若父目录含 `S_ISGID (0o2000)`，新目录同时继承父目录 `gid` 与 `S_ISGID` 模式位。新目录初始 `nlink = 2`、持久化 `parent_ino = params.ParentIno`，父目录 `nlink + 1`。
    - `Rmdir` 与 `Rename`（覆盖目录）统一通过 `EXISTS (SELECT 1 FROM entries WHERE parent_ino = $1)` 权威判定目标目录是否为空，非空时返回 `ErrNotEmpty`（`ENOTEMPTY`）。`Rmdir` 成功后父目录 `nlink - 1`。
-   - 对 `"."` 与 `".."` 的操作：在确认父目录有效后，创建类操作（`Mkdir` / `Link` / `Symlink`）返回 `ErrAlreadyExists`（`EEXIST`）；`Rmdir("..")` 返回 `ErrNotEmpty`（`ENOTEMPTY`）；其余删除与重命名操作返回 `ErrInvalidArgument`（`EINVAL`）。
-4. **`Rename` 同节点硬链接无副作用返回、覆盖矩阵与 `WITH RECURSIVE` 全祖先链环检测**：
+   - 对空名称 `""`、`.` 与 `..` 的操作：在加锁并确认父目录有效（存在、为 `S_IFDIR` 且 `nlink > 0`）后，`Unlink("")`、`Rmdir("")` 与 `Rename(old_name = "")` 返回 `ErrNotFound`（`ENOENT`）；创建类操作（`Mkdir` / `Link` / `Symlink`）对 `.` 与 `..` 返回 `ErrAlreadyExists`（`EEXIST`）；`Rmdir("..")` 返回 `ErrNotEmpty`（`ENOTEMPTY`）；其余 `.` / `..` 删除与重命名操作返回 `ErrInvalidArgument`（`EINVAL`）。
+4. **`Rename` 同节点硬链接无副作用返回、覆盖矩阵、目录 `parent_ino` 同步与 `WITH RECURSIVE` 全祖先链环检测**：
    - **同路径或同节点短路**：在确认新旧父目录有效且源 `Entry` 存在后，若 `(old_parent_ino == new_parent_ino && old_name == new_name)` 或目标 `Entry` 已存在且 `old_ino == new_ino`（同一 `Inode` 的硬链接），直接无副作用返回成功。
-   - **异节点覆盖矩阵**：当 `new_ino` 存在且 `old_ino != new_ino` 时，源为目录而目标非目录返回 `ErrNotDir`；源非目录而目标为目录返回 `ErrIsDir`；两者皆为目录时校验目标目录为空（否则 `ErrNotEmpty`）后将目标目录置为孤儿（`nlink = 0`）。跨父目录移动目录时，源父目录 `nlink - 1`，若未覆盖目标目录则目标父目录 `nlink + 1`（若覆盖了目标空目录则目标父目录 `nlink` 不变）。
+   - **异节点覆盖矩阵与目录 `parent_ino` 更新**：当 `new_ino` 存在且 `old_ino != new_ino` 时，源为目录而目标非目录返回 `ErrNotDir`；源非目录而目标为目录返回 `ErrIsDir`；两者皆为目录时校验目标目录为空（否则 `ErrNotEmpty`）后将目标目录置为孤儿（`nlink = 0`）。跨父目录移动目录时，若未覆盖目标目录需先校验目标父目录 `nlink < MaxNlink`（否则返回 `ErrTooManyLinks`），随后源父目录 `nlink - 1`、目标父目录 `nlink + 1`（若覆盖了目标空目录则目标父目录 `nlink` 不变），并通过 `UpdateInodeParentInoAndTouchCtime` 原子更新被移动目录的 `inodes.parent_ino = new_parent_ino` 及 `ctime`（非目录节点仅刷新 `ctime`）。
    - **全祖先链环检测**：当源节点为目录且 `old_parent_ino != new_parent_ino` 时，通过 PostgreSQL `WITH RECURSIVE` 沿 `entries` 自 `new_parent_ino` 向上完整回溯祖先链，并维护 `visited` 路径集合检测异常环路；若命中 `old_ino` 或检测到环路则一律返回 `ErrInvalidArgument`（`EINVAL`），拒绝重命名。
 
 ## 结果

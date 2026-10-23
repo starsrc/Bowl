@@ -1306,6 +1306,186 @@ func TestSetAttr_NegativeCases(t *testing.T) {
 		assert.False(t, errors.Is(err, meta.ErrIsDir))
 		assert.False(t, errors.Is(err, meta.ErrInvalidArgument))
 	})
+
+	t.Run("仅设置 CtimeNow 或 Flags 的请求正常放行并保留已有 Flags", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		existingRow := db.Inode{
+			Ino:   int64(ino),
+			Mode:  int32(meta.S_IFREG | 0o644),
+			Flags: int32(meta.FlagAppend),
+		}
+		updatedRow := existingRow
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(existingRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:   int64(ino),
+				Mode:  existingRow.Mode,
+				Flags: int32(meta.FlagAppend),
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			CtimeNow: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, meta.FlagAppend, res.Attr.Flags)
+	})
+
+	t.Run("显式传入 Flags 时更新 Inode Flags", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		existingRow := db.Inode{
+			Ino:  int64(ino),
+			Mode: int32(meta.S_IFREG | 0o644),
+		}
+		updatedRow := existingRow
+		updatedRow.Flags = int32(meta.FlagImmutable)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(existingRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:   int64(ino),
+				Mode:  existingRow.Mode,
+				Flags: int32(meta.FlagImmutable),
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Flags: ptr(meta.FlagImmutable),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, meta.FlagImmutable, res.Attr.Flags)
+	})
+
+	t.Run("传入 Fh 与 Size (ftruncate) 时校验句柄写权限并续期客户端会话", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		existingRow := db.Inode{
+			Ino:  int64(ino),
+			Mode: int32(meta.S_IFREG | 0o644),
+			Size: 1024,
+		}
+		updatedRow := existingRow
+		updatedRow.Size = 512
+
+		fh := uint64(88)
+		sessionID := uint64(99)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(existingRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:        int64(fh),
+				Ino:       int64(ino),
+				SessionID: pgtype.Int8{Int64: int64(sessionID), Valid: true},
+			}).
+			Return(db.FileHandle{
+				Fh:    int64(fh),
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.Anything).
+			Return(db.ClientSession{SessionID: int64(sessionID)}, nil).
+			Once()
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         int64(ino),
+				Mode:        existingRow.Mode,
+				Size:        512,
+				SetMtimeNow: true,
+			}).
+			Return(updatedRow, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size:      ptr(uint64(512)),
+			Fh:        &fh,
+			SessionID: &sessionID,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(512), res.Attr.Size)
+	})
+
+	t.Run("传入只读 Fh 执行 ftruncate (Size != nil) 返回 ErrBadFileHandle (EBADF)", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		existingRow := db.Inode{
+			Ino:  int64(ino),
+			Mode: int32(meta.S_IFREG | 0o644),
+			Size: 1024,
+		}
+		fh := uint64(88)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(ino)).
+			Return(existingRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  int64(fh),
+				Ino: int64(ino),
+			}).
+			Return(db.FileHandle{
+				Fh:    int64(fh),
+				Ino:   int64(ino),
+				Flags: int32(meta.O_RDONLY),
+			}, nil).
+			Once()
+
+		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+			Size: ptr(uint64(0)),
+			Fh:   &fh,
+		})
+		assert.Nil(t, res)
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle)
+	})
 }
 
 

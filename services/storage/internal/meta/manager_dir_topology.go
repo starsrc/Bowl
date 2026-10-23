@@ -13,6 +13,17 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
+// validateEntryNameAllowEmpty 校验目录项名称长度与非法字符，允许空名称进入事务在校验父目录后返回 ErrNotFound (ENOENT)。
+func validateEntryNameAllowEmpty(name []byte) error {
+	if len(name) > MaxFileNameBytes {
+		return ErrNameTooLong
+	}
+	if bytes.IndexByte(name, '/') >= 0 || bytes.IndexByte(name, 0) >= 0 {
+		return ErrInvalidArgument
+	}
+	return nil
+}
+
 // Link 为已有非目录 Inode 在目标父目录下创建硬链接。
 func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 {
@@ -69,6 +80,10 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 				if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
 					return ErrPerm
 				}
+				// 硬链接数量上限检查
+				if uint32(row.Nlink) >= MaxNlink {
+					return ErrTooManyLinks
+				}
 				// 当 nlink == 0 时，仅允许持有有效且未携带 O_EXCL 的 O_TMPFILE 常规文件一次性具名化，严禁复活已 Unlink 孤儿节点
 				if row.Nlink == 0 {
 					if (uint32(row.Mode) & S_IFMT) != S_IFREG {
@@ -118,7 +133,7 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 			return fmt.Errorf("touch new parent inode %d timestamps: %w", parent.Ino, err)
 		}
 
-		result = newInodeFromDB(updatedSrc)
+		result = m.newInode(updatedSrc)
 		return nil
 	})
 
@@ -132,6 +147,8 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 			return nil, ErrPerm
 		case errors.Is(err, ErrAlreadyExists):
 			return nil, ErrAlreadyExists
+		case errors.Is(err, ErrTooManyLinks):
+			return nil, ErrTooManyLinks
 		default:
 			return nil, fmt.Errorf("link tx: %w", err)
 		}
@@ -145,12 +162,12 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 	if parentIno == 0 || parentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if err := validateEntryName(name); err != nil {
+	if err := validateEntryNameAllowEmpty(name); err != nil {
 		return err
 	}
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		if isDotOrDotDot(name) {
+		if len(name) == 0 || isDotOrDotDot(name) {
 			parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -162,6 +179,9 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 				return ErrNotDir
 			}
 			if parent.Nlink == 0 {
+				return ErrNotFound
+			}
+			if len(name) == 0 {
 				return ErrNotFound
 			}
 			return ErrInvalidArgument
@@ -276,12 +296,12 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 	if parentIno == 0 || parentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if err := validateEntryName(name); err != nil {
+	if err := validateEntryNameAllowEmpty(name); err != nil {
 		return err
 	}
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		if isDotOrDotDot(name) {
+		if len(name) == 0 || isDotOrDotDot(name) {
 			parent, err := q.GetInodeForUpdate(ctx, int64(parentIno))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -293,6 +313,9 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 				return ErrNotDir
 			}
 			if parent.Nlink == 0 {
+				return ErrNotFound
+			}
+			if len(name) == 0 {
 				return ErrNotFound
 			}
 			if bytes.Equal(name, []byte(".")) {
@@ -404,6 +427,10 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 			return ErrNotDir
 		case errors.Is(err, ErrNotEmpty):
 			return ErrNotEmpty
+		case errors.Is(err, ErrTooManyLinks):
+			return ErrTooManyLinks
+		case errors.Is(err, ErrNotSupported):
+			return ErrNotSupported
 		case errors.Is(err, ErrInvalidArgument):
 			return ErrInvalidArgument
 		default:
@@ -422,10 +449,16 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	if params.NewParentIno == 0 || params.NewParentIno > math.MaxInt64 {
 		return ErrInvalidArgument
 	}
-	if params.Flags != 0 && params.Flags != RenameNoReplace && params.Flags != RenameExchange {
+	if (params.Flags &^ (RenameNoReplace | RenameExchange | RenameWhiteout)) != 0 {
 		return ErrInvalidArgument
 	}
-	if err := validateEntryName(params.OldName); err != nil {
+	if (params.Flags & (RenameNoReplace | RenameExchange)) == (RenameNoReplace | RenameExchange) {
+		return ErrInvalidArgument
+	}
+	if (params.Flags & RenameWhiteout) != 0 {
+		return ErrNotSupported
+	}
+	if err := validateEntryNameAllowEmpty(params.OldName); err != nil {
 		return err
 	}
 	if err := validateEntryName(params.NewName); err != nil {
@@ -433,9 +466,12 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	}
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		if isDotOrDotDot(params.OldName) || isDotOrDotDot(params.NewName) {
+		if len(params.OldName) == 0 || isDotOrDotDot(params.OldName) || isDotOrDotDot(params.NewName) {
 			if _, _, err := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); err != nil {
 				return err
+			}
+			if len(params.OldName) == 0 {
+				return ErrNotFound
 			}
 			return ErrInvalidArgument
 		}
@@ -609,6 +645,15 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 				}
 			}
 
+			if params.OldParentIno != params.NewParentIno {
+				if oldIsDir && !newIsDir && uint32(newParent.Nlink) >= MaxNlink {
+					return ErrTooManyLinks
+				}
+				if !oldIsDir && newIsDir && uint32(oldParent.Nlink) >= MaxNlink {
+					return ErrTooManyLinks
+				}
+			}
+
 			// 原地互换两个目录项的目标 Ino
 			if err := q.UpdateEntryIno(ctx, db.UpdateEntryInoParams{
 				ParentIno: int64(params.OldParentIno),
@@ -625,12 +670,30 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 				return fmt.Errorf("update new entry %d/%s ino -> %d: %w", params.NewParentIno, params.NewName, oldIno, err)
 			}
 
-			// 刷新双节点 ctime
-			if err := q.TouchInodeCtime(ctx, oldIno); err != nil {
-				return fmt.Errorf("touch old inode %d ctime: %w", oldIno, err)
+			// 刷新双节点 ctime（跨父目录移动目录时同步更新目录的 parent_ino）
+			if oldIsDir && params.OldParentIno != params.NewParentIno {
+				if err := q.UpdateInodeParentInoAndTouchCtime(ctx, db.UpdateInodeParentInoAndTouchCtimeParams{
+					Ino:       oldIno,
+					ParentIno: int64(params.NewParentIno),
+				}); err != nil {
+					return fmt.Errorf("update old dir %d parent_ino and touch ctime: %w", oldIno, err)
+				}
+			} else {
+				if err := q.TouchInodeCtime(ctx, oldIno); err != nil {
+					return fmt.Errorf("touch old inode %d ctime: %w", oldIno, err)
+				}
 			}
-			if err := q.TouchInodeCtime(ctx, newIno); err != nil {
-				return fmt.Errorf("touch new inode %d ctime: %w", newIno, err)
+			if newIsDir && params.OldParentIno != params.NewParentIno {
+				if err := q.UpdateInodeParentInoAndTouchCtime(ctx, db.UpdateInodeParentInoAndTouchCtimeParams{
+					Ino:       newIno,
+					ParentIno: int64(params.OldParentIno),
+				}); err != nil {
+					return fmt.Errorf("update new dir %d parent_ino and touch ctime: %w", newIno, err)
+				}
+			} else {
+				if err := q.TouchInodeCtime(ctx, newIno); err != nil {
+					return fmt.Errorf("touch new inode %d ctime: %w", newIno, err)
+				}
 			}
 
 			// 维护父目录 nlink 与时间戳
@@ -707,6 +770,10 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			}
 		}
 
+		if oldIsDir && params.OldParentIno != params.NewParentIno && !hasNewEntry && uint32(newParent.Nlink) >= MaxNlink {
+			return ErrTooManyLinks
+		}
+
 		// 原子更新目录项至新位置
 		if err := q.UpdateEntry(ctx, db.UpdateEntryParams{
 			OldParentIno: int64(params.OldParentIno),
@@ -717,9 +784,18 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return fmt.Errorf("update entry %d/%s -> %d/%s: %w", params.OldParentIno, params.OldName, params.NewParentIno, params.NewName, err)
 		}
 
-		// 刷新源节点 ctime
-		if err := q.TouchInodeCtime(ctx, oldIno); err != nil {
-			return fmt.Errorf("touch old inode %d ctime: %w", oldIno, err)
+		// 刷新源节点 ctime（跨父目录移动目录时同步更新目录的 parent_ino）
+		if oldIsDir && params.OldParentIno != params.NewParentIno {
+			if err := q.UpdateInodeParentInoAndTouchCtime(ctx, db.UpdateInodeParentInoAndTouchCtimeParams{
+				Ino:       oldIno,
+				ParentIno: int64(params.NewParentIno),
+			}); err != nil {
+				return fmt.Errorf("update old dir %d parent_ino and touch ctime: %w", oldIno, err)
+			}
+		} else {
+			if err := q.TouchInodeCtime(ctx, oldIno); err != nil {
+				return fmt.Errorf("touch old inode %d ctime: %w", oldIno, err)
+			}
 		}
 
 		// 维护父目录 nlink 与时间戳
@@ -786,6 +862,10 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return ErrIsDir
 		case errors.Is(err, ErrNotEmpty):
 			return ErrNotEmpty
+		case errors.Is(err, ErrTooManyLinks):
+			return ErrTooManyLinks
+		case errors.Is(err, ErrNotSupported):
+			return ErrNotSupported
 		case errors.Is(err, ErrInvalidArgument):
 			return ErrInvalidArgument
 		default:

@@ -110,18 +110,6 @@ func (m *manager) Lookup(ctx context.Context, parentIno uint64, name []byte) (*I
 			return ErrNotFound
 		}
 
-		// 处理根目录下的 .trash（STARSRC-333）
-		if m.trashDays > 0 && parentIno == RootIno && bytes.Equal(name, []byte(TrashName)) {
-			trashInode, err := q.GetInode(ctx, int64(TrashIno))
-			if err == nil {
-				result = m.newInode(trashInode)
-				return nil
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("get trash inode: %w", err)
-			}
-		}
-
 		// 常规目录项查找
 		target, err := q.GetInodeByEntry(ctx, db.GetInodeByEntryParams{
 			ParentIno: int64(parentIno),

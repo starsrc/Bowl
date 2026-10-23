@@ -60,7 +60,7 @@ Storage 元数据引擎在完成目录流遍历与 `Fallocate`（ADR-0010）后�
 5. **基于 `google.rpc.ErrorInfo` 的全项目 `errno` 精确映射契约**：
    - 全项目统一在 gRPC 错误详情 `google.rpc.ErrorInfo` 中设置 `domain = "bowl.storage"`，并在 `reason` 字段中直接携带标准 POSIX `errno` 名称，FUSE 客户端适配层优先读取 `ErrorInfo.reason` 还原内核错误码，gRPC 状态码仅作为大类回退。
    - **严禁还原为 `ENOSYS`**：FUSE 客户端必须将 `(Unimplemented, "EOPNOTSUPP")` 还原为 `EOPNOTSUPP`，严禁将 gRPC `Unimplemented` 映射为 `ENOSYS`，防止 Linux 内核因收到 `ENOSYS` 而永久禁用对应 FUSE 操作码。
-   - 全量 14 个领域哨兵错误映射关系固定如下：
+   - 领域哨兵错误映射关系固定如下（后续随 ADR-0012 及元数据对齐演进扩展至 22 项）：
      - `ErrInvalidArgument` $\rightarrow$ `InvalidArgument` + `reason: "EINVAL"`
      - `ErrNameTooLong` $\rightarrow$ `InvalidArgument` + `reason: "ENAMETOOLONG"`
      - `ErrRange` $\rightarrow$ `InvalidArgument` + `reason: "ERANGE"`
@@ -69,11 +69,16 @@ Storage 元数据引擎在完成目录流遍历与 `Fallocate`（ADR-0010）后�
      - `ErrNoData` $\rightarrow$ `NotFound` + `reason: "ENODATA"`
      - `ErrAlreadyExists` $\rightarrow$ `AlreadyExists` + `reason: "EEXIST"`
      - `ErrPerm` $\rightarrow$ `PermissionDenied` + `reason: "EPERM"`
+     - `ErrAccess` $\rightarrow$ `PermissionDenied` + `reason: "EACCES"`
      - `ErrNotDir` $\rightarrow$ `FailedPrecondition` + `reason: "ENOTDIR"`
      - `ErrIsDir` $\rightarrow$ `FailedPrecondition` + `reason: "EISDIR"`
      - `ErrNotEmpty` $\rightarrow$ `FailedPrecondition` + `reason: "ENOTEMPTY"`
      - `ErrBadFileHandle` $\rightarrow$ `FailedPrecondition` + `reason: "EBADF"`
      - `ErrNoSpace` $\rightarrow$ `ResourceExhausted` + `reason: "ENOSPC"`
+     - `ErrTooManyLinks` $\rightarrow$ `ResourceExhausted` + `reason: "EMLINK"`
+     - `ErrFileTooLarge` $\rightarrow$ `InvalidArgument` + `reason: "EFBIG"`
+     - `ErrIllegalSeek` $\rightarrow$ `InvalidArgument` + `reason: "ESPIPE"`
+     - `ErrIO` $\rightarrow$ `Internal` + `reason: "EIO"`
      - `ErrNotSupported` $\rightarrow$ `Unimplemented` + `reason: "EOPNOTSUPP"`
 
 ## 结果

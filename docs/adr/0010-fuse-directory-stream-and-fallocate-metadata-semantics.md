@@ -24,7 +24,7 @@ Storage 元数据引擎在确立文件句柄生命周期（ADR-0009：`Create`�
      - `offset >= 3`：对应 `entries JOIN inodes` 按 `ORDER BY e.name ASC` 确定性排序的真实子项，第 $k$ 个真实子项（从 $0$ 起计）的返回游标为 `next_offset = k + 3`（SQL 分页偏移量为 `OFFSET max(0, req.offset - 2)`）。
    - 在 `ReadDirPlus` 中，合成的 `"."` 与 `".."` 条目填充完整 `Inode` 属性，但将其 `entry_timeout_seconds` 显式置为 `0`（符合 Linux FUSE 内核不对 `.` 和 `..` 缓存 dentry 的规范），真实子项则正常赋予标准 `entry_timeout_seconds` 与 `attr_timeout_seconds`。
 3. **孤儿目录（`nlink == 0`）的打开准入、空流返回与最终物理回收**：
-   - `OpenDir`：在读写事务内对目标目录 `GetInodeForUpdate(ino)` 加排他锁；若 `nlink == 0`，仅当 `HasFileHandlesByIno(ino)` 为 `true` 时允许分配新 `FileHandle`，否则返回 `ErrNotFound`（`ENOENT`）。
+   - `OpenDir`：在读写事务内对目标目录 `GetInodeForUpdate(ino)` 加排他锁；若 `nlink == 0`，仅当 `HasFileHandlesByIno(ino)` 为 `true` 时允许分配新 `FileHandle`，否则返回 `ErrNotFound`（`ENOENT`）；当配置 `WithOpenDirCache(true)` 时在响应 `OpenFlags` 中下发 `FOPEN_CACHE_DIR`。
    - `ReadDir` / `ReadDirPlus`：校验目录存在且 `(fh, ino)` 有效后，若发现目录 `nlink == 0`（处于 `rmdir-whilst-open` 状态），遵循 POSIX `readdir(3)` 规范直接返回空列表（不合成 `"."` 与 `".."`）。
    - `ReleaseDir`：在读写事务内 `GetInodeForUpdate(ino)` 并调用 `DeleteFileHandle(fh, ino)`；若目录 `nlink == 0` 且 `HasFileHandlesByIno(ino)` 为 `false`，在同一事务内调用 `DeleteInode(ino)` 物理删除该孤儿目录记录。
 4. **`Fallocate` 模式位矩阵、可写句柄校验与差异化元数据更新**：

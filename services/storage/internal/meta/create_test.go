@@ -844,5 +844,72 @@ func TestCreate_RejectOTmpfile(t *testing.T) {
 		assert.Equal(t, "EINVAL", info.Reason)
 		assert.Equal(t, meta.ErrorDomain, info.Domain)
 	})
+
+	t.Run("Create 应用 Umask 并下发 WithOpenKeepCache 及自定义缓存时效", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore,
+			meta.WithOpenKeepCache(true),
+			meta.WithEntryTimeout(3.5),
+			meta.WithAttrTimeout(4.5),
+		)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(1)).
+			Return(db.Inode{Ino: 1, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2}, nil).
+			Once()
+
+		expectedMode := int32(meta.S_IFREG | 0o640)
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:  expectedMode,
+				Nlink: 1,
+				Uid:   1000,
+				Gid:   1000,
+			}).
+			Return(db.Inode{Ino: 100, Mode: expectedMode, Nlink: 1, Uid: 1000, Gid: 1000}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: 1,
+				Name:      []byte("masked.txt"),
+				Ino:       100,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeTimestamps(mock.Anything, int64(1)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+				Ino:   100,
+				Flags: int32(meta.O_CREAT | meta.O_RDWR),
+			}).
+			Return(db.FileHandle{Fh: 55, Ino: 100, Flags: int32(meta.O_CREAT | meta.O_RDWR)}, nil).
+			Once()
+
+		res, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: 1,
+			Name:      []byte("masked.txt"),
+			Mode:      0o666,
+			Umask:     0o026,
+			UID:       1000,
+			GID:       1000,
+			Flags:     meta.O_CREAT | meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint32(expectedMode), res.Inode.Attr.Mode)
+		assert.Equal(t, uint64(0), res.Inode.Attr.ParentIno)
+		assert.Equal(t, meta.FOPEN_KEEP_CACHE, res.OpenFlags)
+		assert.Equal(t, 3.5, res.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, res.AttrTimeoutSeconds)
+	})
 }
 

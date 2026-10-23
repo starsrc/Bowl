@@ -65,8 +65,10 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 			gid = uint32(parent.Gid)
 		}
 
+		targetMode := modeType | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
+
 		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
-			Mode:  int32(params.Mode),
+			Mode:  int32(targetMode),
 			Nlink: 1,
 			Uid:   int32(params.UID),
 			Gid:   int32(gid),
@@ -93,7 +95,7 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
 		}
 
-		result = newInodeFromDB(newInode)
+		result = m.newInode(newInode)
 		return nil
 	})
 
@@ -152,19 +154,24 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			return ErrAlreadyExists
 		}
 
+		if uint32(parent.Nlink) >= MaxNlink {
+			return ErrTooManyLinks
+		}
+
 		gid := params.GID
-		targetMode := S_IFDIR | (params.Mode & PermMask)
+		targetMode := S_IFDIR | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
 		if (uint32(parent.Mode) & S_ISGID) != 0 {
 			gid = uint32(parent.Gid)
 			targetMode |= S_ISGID
 		}
 
 		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
-			Mode:  int32(targetMode),
-			Nlink: 2,
-			Uid:   int32(params.UID),
-			Gid:   int32(gid),
-			Rdev:  0,
+			Mode:      int32(targetMode),
+			Nlink:     2,
+			Uid:       int32(params.UID),
+			Gid:       int32(gid),
+			Rdev:      0,
+			ParentIno: int64(params.ParentIno),
 		})
 		if err != nil {
 			return fmt.Errorf("create inode: %w", err)
@@ -187,7 +194,7 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			return fmt.Errorf("increment parent inode %d nlink and touch: %w", parent.Ino, err)
 		}
 
-		result = newInodeFromDB(newInode)
+		result = m.newInode(newInode)
 		return nil
 	})
 
@@ -199,6 +206,8 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			return nil, ErrNotDir
 		case errors.Is(err, ErrAlreadyExists):
 			return nil, ErrAlreadyExists
+		case errors.Is(err, ErrTooManyLinks):
+			return nil, ErrTooManyLinks
 		default:
 			return nil, fmt.Errorf("mkdir tx: %w", err)
 		}
@@ -279,7 +288,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
 		}
 
-		result = newInodeFromDB(newInode)
+		result = m.newInode(newInode)
 		return nil
 	})
 
@@ -323,7 +332,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 		return nil, ErrInvalidArgument
 	}
 
-	targetMode := S_IFREG | (params.Mode & PermMask)
+	targetMode := S_IFREG | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
 
 	var result *CreateResult
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
@@ -393,10 +402,17 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return fmt.Errorf("create file handle for inode %d: %w", newInode.Ino, err)
 		}
 
+		inode := m.newInode(newInode)
+		var openFlags uint32
+		if m.openKeepCache {
+			openFlags = FOPEN_KEEP_CACHE
+		}
 		result = &CreateResult{
-			Inode:     newInodeFromDB(newInode),
-			Fh:        uint64(handle.Fh),
-			OpenFlags: 0,
+			Inode:               inode,
+			Fh:                  uint64(handle.Fh),
+			OpenFlags:           openFlags,
+			EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+			AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
 		}
 		return nil
 	})
@@ -439,7 +455,7 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 		return nil, ErrInvalidArgument
 	}
 
-	targetMode := S_IFREG | (params.Mode & PermMask)
+	targetMode := S_IFREG | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
 
 	var result *CreateResult
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
@@ -488,10 +504,17 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			return fmt.Errorf("create file handle for tmpfile inode %d: %w", newInode.Ino, err)
 		}
 
+		inode := m.newInode(newInode)
+		var openFlags uint32
+		if m.openKeepCache {
+			openFlags = FOPEN_KEEP_CACHE
+		}
 		result = &CreateResult{
-			Inode:     newInodeFromDB(newInode),
-			Fh:        uint64(handle.Fh),
-			OpenFlags: 0,
+			Inode:               inode,
+			Fh:                  uint64(handle.Fh),
+			OpenFlags:           openFlags,
+			EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+			AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
 		}
 		return nil
 	})
@@ -567,6 +590,7 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 					Atime:       inode.Atime,
 					SetMtimeNow: true,
 					Mtime:       pgtype.Timestamptz{},
+					Flags:       inode.Flags,
 				})
 				if err != nil {
 					return fmt.Errorf("truncate inode attr for inode %d: %w", inode.Ino, err)
@@ -587,9 +611,13 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
 		}
 
+		var openFlags uint32
+		if m.openKeepCache {
+			openFlags = FOPEN_KEEP_CACHE
+		}
 		result = &OpenResult{
 			Fh:        uint64(handle.Fh),
-			OpenFlags: 0,
+			OpenFlags: openFlags,
 		}
 		return nil
 	})
@@ -656,9 +684,13 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirRe
 			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
 		}
 
+		var openFlags uint32
+		if m.openDirCache {
+			openFlags = FOPEN_CACHE_DIR
+		}
 		result = &OpenDirResult{
 			Fh:        uint64(handle.Fh),
-			OpenFlags: 0,
+			OpenFlags: openFlags,
 		}
 		return nil
 	})

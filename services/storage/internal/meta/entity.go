@@ -24,11 +24,9 @@ const (
 	MaxSymlinkTargetBytes        = 4095
 )
 
-// 根节点与特殊节点编号。
+// 根节点编号。
 const (
-	RootIno   uint64 = 1
-	TrashIno  uint64 = 0x7FFFFFFF10000000
-	TrashName        = ".trash"
+	RootIno uint64 = 1
 )
 
 // 节点链接与大小上限。

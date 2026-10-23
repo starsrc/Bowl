@@ -11,12 +11,12 @@ Storage 元数据服务在支持 `Lookup` 与 `GetAttr` 后，需要实现对接
 
 ## 决策
 1. **Proto3 `optional` 契约与 CEL 复合校验**：
-   - 在 `SetAttrRequest` 中采用 `optional` 标量与消息字段（`mode`、`uid`、`gid`、`size`、`atime`、`mtime`）配合布尔标志（`atime_now`、`mtime_now`）表达部分更新，不暴露 `ctime`、`fh` 或 `lock_owner`。
-   - 对 `ino`（`> 0 && <= math.MaxInt64`）、`size`（`<= math.MaxInt64`）与 `mode`（`<= 0o177777` 即 `65535`）施加边界约束。
-   - 通过消息级 CEL 规则强制要求：至少指定一项变更属性；`atime` 与 `atime_now` 互斥；`mtime` 与 `mtime_now` 互斥。
-2. **读写事务 + `SELECT ... FOR UPDATE` 悲观锁两步执行**：
-   - 在 `sqlc` 查询层新增 `GetInodeForUpdate`（`SELECT ... FROM inodes WHERE ino = $1 FOR UPDATE`）与 `UpdateInodeAttr`（更新 `mode, size, uid, gid, atime, mtime` 并将 `ctime` 强制设为 `NOW()`，`RETURNING` 完整记录）。
-   - `meta.Manager.SetAttr` 通过 `Store.ExecTxWithOptions(ctx, ...)` 开启读写事务：先以 `GetInodeForUpdate` 锁定并读取目标 `Inode`（不存在则返回 `ErrNotFound`），在 Go 领域层完成 POSIX 状态校验与新旧字段合流后，再调用 `UpdateInodeAttr` 完成持久化并动态推导 `Blksize` 与 `Blocks`。
+   - 在 `SetAttrRequest` 中采用 `optional` 标量与消息字段（`mode`、`uid`、`gid`、`size`、`atime`、`mtime`、`flags`、`fh`、`session_id`）配合布尔标志（`atime_now`、`mtime_now`、`ctime_now`）表达部分更新。
+   - 对 `ino`（`> 0 && <= math.MaxInt64`）、`size`（`<= math.MaxInt64`）、`mode`（`<= 0o177777` 即 `65535`）及 `flags`（`<= math.MaxInt32`）施加边界约束。
+   - 通过消息级 CEL 规则强制要求：至少指定一项变更属性（含仅设置 `ctime_now` 或 `flags`）；`atime` 与 `atime_now` 互斥；`mtime` 与 `mtime_now` 互斥。
+2. **读写事务 + `SELECT ... FOR UPDATE` 悲观锁两步执行与可选句柄校验**：
+   - 在 `sqlc` 查询层新增 `GetInodeForUpdate`（`SELECT ... FROM inodes WHERE ino = $1 FOR UPDATE`）与 `UpdateInodeAttr`（更新 `mode, size, uid, gid, atime, mtime, flags` 并将 `ctime` 强制设为 `clock_timestamp()`，`RETURNING` 完整记录）。
+   - `meta.Manager.SetAttr` 通过 `Store.ExecTxWithOptions(ctx, ...)` 开启读写事务：先以 `GetInodeForUpdate` 锁定并读取目标 `Inode`（不存在则返回 `ErrNotFound`）；若请求携带 `fh`，通过 `GetFileHandle` 校验句柄存在且归属该 `(ino, session_id)`（不匹配返回 `ErrBadFileHandle` / `EBADF`），且当同时修改 `size`（`ftruncate`）时强制要求句柄具备写权限（`O_WRONLY` 或 `O_RDWR`）；若携带有效 `session_id` 则续期客户端会话；当未显式传入 `flags` 时默认保留 `current.Flags`（在 `SetAttr`、`Open(O_TRUNC)` 与 `Fallocate` 中一致生效），最后调用 `UpdateInodeAttr` 完成持久化并动态推导 `Blksize` 与 `Blocks`。
 3. **POSIX 属性不变量与特权位安全剥离**：
    - **文件类型不可变与符号链接权限固定**：若目标为符号链接（`S_IFLNK`）且请求修改 `mode`，直接返回 `ErrInvalidArgument`（POSIX 符号链接权限固定为 `0777` 且不可通过 `chmod` 修改）；若传入 `mode` 携带非零文件类型位（`mode & S_IFMT != 0`）且与原 `Inode` 的 `mode & S_IFMT` 不一致，返回 `ErrInvalidArgument`；最终写入的 `mode` 始终保留原文件类型位 `(old_mode & S_IFMT) | (new_mode & 0o7777)`。
    - **常规文件 `size` 变更限制**：当传入 `size` 时，若目标为目录（`S_IFDIR`）则返回领域错误 `ErrIsDir`（对应 `EISDIR`）；若为其他非常规文件（`!= S_IFREG`）则返回 `ErrInvalidArgument`（对应 `EINVAL`）。

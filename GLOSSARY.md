@@ -21,7 +21,7 @@ _Avoid_: Find, Search, GetFile, Query
 _Avoid_: Stat, GetFileInfo, FetchAttr, DescribeNode
 
 **SetAttr (属性设置)**:
-根据目标 Inode 编号，按需修改该 Inode 的可变 Attribute（如权限模式、文件大小、所属用户与组、访问与修改时间戳）并刷新状态变更时间的元数据变更操作。
+根据目标 Inode 编号（及可选关联 FileHandle），按需修改该 Inode 的可变 Attribute（如权限模式、文件大小、所属用户与组、访问与修改时间戳、文件系统标志位）并刷新状态变更时间的元数据变更操作。
 _Avoid_: Chmod, Chown, Truncate, UpdateAttr, ModifyNode, PatchInode
 
 **Mknod (节点创建)**:

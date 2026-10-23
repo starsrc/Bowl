@@ -11,15 +11,15 @@ Storage 元数据引擎在完成目录树拓扑（ADR-0008）、文件句柄生�
 4. **`FUSE_FSYNCDIR (30)` 目录句柄同步**：应用在修改目录树后常对父目录 `fd` 调用 `fsync(2)`，需在目录句柄体系（ADR-0010）中补齐与文件 `Fsync` 对称的 `FsyncDir` 契约。
 
 ## 决策
-1. **在 `Rename` 中内联扩展 `FUSE_RENAME2 (45)`（`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE`）**：
-   - **契约与标志位白名单**：不拆分独立 RPC，直接在 `RenameRequest` 与 `meta.RenameParams` 中新增 `uint32 flags = 5`。定义平台无关常量 `RenameNoReplace = 0x1`（`1 << 0`）、`RenameExchange = 0x2`（`1 << 1`）。仅允许 `flags` 为 `0`、`RenameNoReplace` 或 `RenameExchange`；传入 `RenameNoReplace | RenameExchange` 互斥组合、`RENAME_WHITEOUT (0x4)` 或任何未知标志位均静态返回 `ErrInvalidArgument`（`EINVAL`）。
+1. **在 `Rename` 中内联扩展 `FUSE_RENAME2 (45)`（`RENAME_NOREPLACE`、`RENAME_EXCHANGE` 与 `RENAME_WHITEOUT`）**：
+   - **契约与标志位白名单**：不拆分独立 RPC，直接在 `RenameRequest` 与 `meta.RenameParams` 中新增 `uint32 flags = 5`。定义平台无关常量 `RenameNoReplace = 0x1`（`1 << 0`）、`RenameExchange = 0x2`（`1 << 1`）、`RenameWhiteout = 0x4`（`1 << 2`）。传入 `RenameNoReplace | RenameExchange` 互斥组合或任何未知标志位静态返回 `ErrInvalidArgument`（`EINVAL`）；传入 `RenameWhiteout (0x4)` 返回 `ErrNotSupported`（`EOPNOTSUPP`）。
    - **同路径与同 `Inode` 硬链接边界（演进 ADR-0008）**：
      - 当 `flags == RenameNoReplace` 时：只要源与目标 `Entry` 均存在——**包括源与目标为同一路径（`old_parent_ino == new_parent_ino && old_name == new_name`）或指向同一 `Inode` 的不同硬链接（`old_ino == new_ino`）**——一律返回 `ErrAlreadyExists`（`EEXIST`），不执行无副作用成功短路。
      - 当 `flags == RenameExchange` 时：要求源与目标 `Entry` 均必须存在，任一不存在即返回 `ErrNotFound`（`ENOENT`）；当两者均存在且为同一路径或指向同一 `Inode` 时，无副作用直接返回成功。
    - **`RenameExchange` 异节点原子交换状态机**：
      - **全局升序加锁**：预读源与目标 `Entry`（任一不存在则在锁定校验新旧父目录后返回 `ErrNotFound`），将 `old_parent_ino`、`new_parent_ino`、`old_ino`、`new_ino` 去重后按全局 `ino` 严格升序加 `FOR UPDATE` 行锁，并二次校验 `Entry` 防并发漂移。
      - **双向 `WITH RECURSIVE` 祖先环检测**：当 `old_parent_ino != new_parent_ino` 时，若 `old_ino` 为目录，校验 `new_parent_ino` 不是 `old_ino` 及其子孙；**若 `new_ino` 为目录，同步反向校验 `old_parent_ino` 不是 `new_ino` 及其子孙**，命中环路即返回 `ErrInvalidArgument`（`EINVAL`）。
-     - **`entries` 原地互换与时间戳/`nlink` 矩阵**：不限定源与目标的文件类型组合，亦不要求目录为空；原地将 `(old_parent_ino, old_name)` 的 `ino` 更新为 `new_ino`、将 `(new_parent_ino, new_name)` 的 `ino` 更新为 `old_ino`；同时刷新 `old_ino` 与 `new_ino` 的 `ctime`（双方自身 `nlink` 不变）。若同父目录或跨父目录但双方同为目录/同为非目录，新旧父目录 `nlink` 均不变，仅刷新 `mtime` 与 `ctime`；若跨父目录且一方为目录、另一方为非目录，则移出目录的父目录 `nlink - 1`、移入目录的父目录 `nlink + 1`，并刷新各自 `mtime` 与 `ctime`。
+     - **`entries` 原地互换与时间戳/`nlink`/`parent_ino` 矩阵**：不限定源与目标的文件类型组合，亦不要求目录为空；原地将 `(old_parent_ino, old_name)` 的 `ino` 更新为 `new_ino`、将 `(new_parent_ino, new_name)` 的 `ino` 更新为 `old_ino`；同时刷新 `old_ino` 与 `new_ino` 的 `ctime`（跨父目录交换目录时同步更新被移动目录的 `inodes.parent_ino`，双方自身 `nlink` 不变）。若同父目录或跨父目录但双方同为目录/同为非目录，新旧父目录 `nlink` 均不变，仅刷新 `mtime` 与 `ctime`；若跨父目录且一方为目录、另一方为非目录，则移入目录的父目录需校验 `nlink < MaxNlink`（否则返回 `ErrTooManyLinks`），随后移出目录的父目录 `nlink - 1`、移入目录的父目录 `nlink + 1`，并刷新各自 `mtime` 与 `ctime`。
 
 2. **原生匿名 `TmpFile`（`FUSE_TMPFILE = 51`）直建与一次性 `Link` 具名化（演进 ADR-0008）**：
    - **独立 `TmpFile` RPC 与入参不变量**：新增 `TmpFile(TmpFileRequest) returns (TmpFileResponse)`（请求含 `parent_ino`、`mode`、`uid`、`gid`、`flags`、`optional session_id`；响应与 `CreateResponse` 对齐）。强制要求 `flags & O_ACCMODE` 为 `O_WRONLY` 或 `O_RDWR`（传入 `O_RDONLY` 返回 `ErrInvalidArgument` / `EINVAL`）；`mode & S_IFMT` 仅允许为 `0` 或 `S_IFREG`，归一化为 `S_IFREG | (mode & 0o7777)`。

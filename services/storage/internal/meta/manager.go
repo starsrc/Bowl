@@ -94,7 +94,6 @@ type manager struct {
 	openDirCache    bool
 	atimeMode       AtimeMode
 	skipDirMtime    time.Duration
-	trashDays       int
 	sessionLeaseTTL time.Duration
 	dirCursorMu     sync.Mutex
 	dirCursors      map[dirCursorKey][]byte
@@ -179,13 +178,6 @@ func WithAtimeMode(mode AtimeMode) Option {
 func WithSkipDirMtime(d time.Duration) Option {
 	return func(m *manager) {
 		m.skipDirMtime = d
-	}
-}
-
-// WithTrashDays 配置回收站保留天数。
-func WithTrashDays(days int) Option {
-	return func(m *manager) {
-		m.trashDays = days
 	}
 }
 
@@ -542,24 +534,5 @@ func (m *manager) shouldTouchDirMtime(parentMtime, now time.Time) bool {
 		return true
 	}
 	return now.Sub(parentMtime) >= m.skipDirMtime
-}
-
-// isTrashIno 判断给定 Inode 号是否属于回收站命名空间。
-func isTrashIno(ino uint64) bool {
-	return ino >= TrashIno
-}
-
-// toTrash 判断在给定父目录下删除或覆盖条目时是否应移入回收站。
-func (m *manager) toTrash(parentIno uint64) bool {
-	return m.trashDays > 0 && !isTrashIno(parentIno)
-}
-
-// trashEntryName 生成回收站归档条目名称 "{parent}-{ino}-{name}"（超过 255 字节自动截断）。
-func trashEntryName(parentIno, ino uint64, name []byte) []byte {
-	s := fmt.Sprintf("%d-%d-%s", parentIno, ino, string(name))
-	if len(s) > MaxFileNameBytes {
-		s = s[:MaxFileNameBytes]
-	}
-	return []byte(s)
 }
 

@@ -15,7 +15,7 @@ Storage 元数据引擎在完成扩展属性（Xattr）与结构化错误原因�
 ## 决策
 1. **三接口 1:1 拆分、`FileLock` 完整契约与 `lock_owner` 64 位无损编码**：
    - 在 `StorageService` 与 `meta.Manager` 中提供 `GetLk`（`FUSE_GETLK = 31`）、`SetLk`（`FUSE_SETLK = 32`）、`SetLkw`（`FUSE_SETLKW = 33`）三个独立方法，共用 `FileLock` 结构（包含 `uint64 start`、`uint64 end`、`uint32 type`、`uint32 pid`）。
-   - 在 `meta` 领域层定义平台无关的 Linux FUSE 常量：`F_RDLCK = 0`、`F_WRLCK = 1`、`F_UNLCK = 2`（严禁依赖宿主机 `syscall.F_*`）；锁标志位 `FuseLkFlock = 0x1`（`1 << 0`）；释放标志位 `FuseReleaseFlockUnlock = 0x2`（`1 << 1`）；最大字节偏移量 `OffsetMax = math.MaxInt64`（`0x7fffffffffffffff`）。
+   - 在 `meta` 领域层定义平台无关的 Linux FUSE 常量：`F_RDLCK = 0`、`F_WRLCK = 1`、`F_UNLCK = 2`（严禁依赖宿主机 `syscall.F_*`）；锁标志位 `FuseLkFlock = 0x1`（`1 << 0`）；释放标志位 `FuseReleaseFlush = 0x1`（`1 << 0`）与 `FuseReleaseFlockUnlock = 0x2`（`1 << 1`）；最大字节偏移量 `OffsetMax = math.MaxInt64`（`0x7fffffffffffffff`）。
    - **区间与 `lock_owner` 约束**：锁区间遵循闭区间 `0 <= start <= end <= OffsetMax`（`end == OffsetMax` 代表延伸至无穷远，区间裂解与相邻合并计算时必须先判 `< OffsetMax` 防止 `+ 1` 溢出）。由于 Linux 内核 `fuse_lock_owner_id()` 生成的 64 位无符号哈希最高位可能为 `1`，Protobuf 中的 `lock_owner` 允许全范围 `uint64`（不设 `lte = MaxInt64`），在存入 PostgreSQL `BIGINT` 时通过 `int64(lock_owner)` 二进制补码无损重解释。
 2. **POSIX 记录锁与 BSD `flock` 双命名空间隔离及独立状态机**：
    - **冲突域完全正交**：`lk_flags == 0`（POSIX 记录锁）与 `lk_flags == FuseLkFlock (0x1)`（BSD `flock`）在冲突检测、查询与清理时严格按 `lk_flags` 隔离，互不阻塞。暂不对标准连接承诺完整 OFD 锁跨句柄共享语义。

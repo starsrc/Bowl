@@ -14,7 +14,7 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-func TestToStatus_All23SentinelErrors(t *testing.T) {
+func TestToStatus_All24SentinelErrors(t *testing.T) {
 	testCases := []struct {
 		name           string
 		err            error
@@ -159,9 +159,15 @@ func TestToStatus_All23SentinelErrors(t *testing.T) {
 			expectedCode:   codes.PermissionDenied,
 			expectedReason: "EACCES",
 		},
+		{
+			name:           "ErrCrossDevice 映射为 FailedPrecondition 与 EXDEV",
+			err:            meta.ErrCrossDevice,
+			expectedCode:   codes.FailedPrecondition,
+			expectedReason: "EXDEV",
+		},
 	}
 
-	require.Equal(t, 23, len(testCases), "必须完整覆盖全部 23 个领域哨兵错误")
+	require.Equal(t, 24, len(testCases), "必须完整覆盖全部 24 个领域哨兵错误")
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -22,6 +22,7 @@
    - 每个 `Inode` 持久化其所属的磁盘根目录标识 `root_ino`（根目录自身的 `root_ino = ino`，子目录与文件在 `Mknod`/`Mkdir`/`Create`/`Symlink`/`TmpFile` 创建时直接从父目录继承 `root_ino`）。
    - **空间增减强一致**：在 `SetAttr`、`Open(O_TRUNC)`、`Fallocate` 变更文件 `size` 的同一数据库事务内，锁定所属 `Disk` 行校验 `used_bytes + delta_bytes <= max_bytes`（超限返回 `ResourceExhausted` / `ENOSPC`）并原子更新 `used_bytes`。
    - **物理销毁绑定配额退还**：当 `Unlink` 或 `Rename` 覆盖导致非目录 `Inode` 的 `nlink == 0` 时，若当前无活跃 `FileHandle`，当场在事务内物理删除该 `Inode` 并扣减 `used_bytes` 与 `used_inodes`；若仍存在活跃 `FileHandle`（转为 `Orphan Inode`），则暂不退还配额，直至最后一个 `FileHandle` 执行 `Release` 或会话过期由 `RenewSession` 批量物理删除该 `Orphan Inode` 时，在同一事务中精确归还其 `size` 与 `used_inodes`。
+   - **跨盘拓扑隔离（`EXDEV`）**：`Link` 与 `Rename`（含 `RENAME_NOREPLACE` 与 `RENAME_EXCHANGE`）在持有源/目标父目录与节点行锁后，强制校验参与操作的节点与父目录的 `root_ino` 必须完全一致；若检测到跨 `Disk`（`root_ino` 不一致）的硬链接或重命名/交换请求，立即拒绝并返回 `ErrCrossDevice`（映射为 gRPC `FailedPrecondition` 与 `ErrorInfo{Reason: "EXDEV", Domain: "bowl.storage"}`），确保单盘 `root_ino` 配额归属与 `DeleteDisk` 按 `root_ino` 级联清理的隔离性不变量绝不被跨盘引用破坏。
 4. **`StatFS(ino)` 寻址统一与块/节点指标换算**：
    - `StorageService.StatFS` 接收 `uint64 ino`，通过目标 `Inode` 的 `root_ino` 关联查询所属 `Disk` 的 `max_bytes`、`used_bytes` 与 `used_inodes`，以 `4096` 字节块大小换算返回 `blocks`、`bfree`、`bavail` 及真实已用节点数 `files = used_inodes`。
 

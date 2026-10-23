@@ -422,6 +422,7 @@ var (
 	ErrIO              = errors.New("meta: input/output error")
 	ErrAccess          = errors.New("meta: permission denied")
 	ErrInvalidShrink   = fmt.Errorf("%w: cannot shrink disk capacity below current usage", ErrInvalidArgument)
+	ErrCrossDevice     = errors.New("meta: invalid cross-device link")
 )
 
 // Inode 表示文件系统节点的领域实体。

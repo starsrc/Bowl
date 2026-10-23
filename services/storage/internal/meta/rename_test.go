@@ -107,9 +107,22 @@ func TestRename_ShortCircuit(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
+		parentWithDisk := parentRow
+		parentWithDisk.RootIno = 100
+
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(parentRow, nil).
+			Return(parentWithDisk, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(100)).
+			Return(db.Inode{
+				Ino:     100,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Nlink:   2,
+				RootIno: 100,
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -135,6 +148,56 @@ func TestRename_ShortCircuit(t *testing.T) {
 			NewName:      []byte("link2"),
 		})
 		require.NoError(t, err)
+	})
+
+	t.Run("同节点硬链接跨虚拟磁盘检测: oldInode.RootIno 与 parent.RootIno 不一致返回 ErrCrossDevice", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		parentWithDisk := parentRow
+		parentWithDisk.RootIno = 1
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentWithDisk, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(100)).
+			Return(db.Inode{
+				Ino:     100,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Nlink:   2,
+				RootIno: 2, // 异盘 root_ino
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("link1"),
+			}).
+			Return(db.Entry{ParentIno: int64(parentIno), Name: []byte("link1"), Ino: 100}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("link2"),
+			}).
+			Return(db.Entry{ParentIno: int64(parentIno), Name: []byte("link2"), Ino: 100}, nil).
+			Twice()
+
+		err := mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: parentIno,
+			OldName:      []byte("link1"),
+			NewParentIno: parentIno,
+			NewName:      []byte("link2"),
+		})
+		require.ErrorIs(t, err, meta.ErrCrossDevice)
 	})
 }
 
@@ -992,6 +1055,16 @@ func TestRename_NoReplace(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(100)).
+			Return(db.Inode{
+				Ino:     100,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Nlink:   2,
+				RootIno: parentRow.RootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      []byte("link1"),
@@ -1201,6 +1274,12 @@ func TestRename_Exchange(t *testing.T) {
 			Twice()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(100)).Return(db.Inode{
+			Ino:     100,
+			Mode:    int32(meta.S_IFREG | 0o644),
+			Nlink:   2,
+			RootIno: oldParentRow.RootIno,
+		}, nil).Once()
 
 		err := mgr.Rename(ctx, meta.RenameParams{
 			OldParentIno: oldParentIno,
@@ -1867,20 +1946,22 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 	rootIno := int64(1)
 
 	oldParentRow := db.Inode{
-		Ino:   int64(oldParentIno),
-		Mode:  int32(meta.S_IFDIR | 0o755),
-		Nlink: 2,
-		Atime: pgtype.Timestamptz{Time: now, Valid: true},
-		Mtime: pgtype.Timestamptz{Time: now, Valid: true},
-		Ctime: pgtype.Timestamptz{Time: now, Valid: true},
+		Ino:     int64(oldParentIno),
+		Mode:    int32(meta.S_IFDIR | 0o755),
+		Nlink:   2,
+		RootIno: rootIno,
+		Atime:   pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:   pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:   pgtype.Timestamptz{Time: now, Valid: true},
 	}
 	newParentRow := db.Inode{
-		Ino:   int64(newParentIno),
-		Mode:  int32(meta.S_IFDIR | 0o755),
-		Nlink: 2,
-		Atime: pgtype.Timestamptz{Time: now, Valid: true},
-		Mtime: pgtype.Timestamptz{Time: now, Valid: true},
-		Ctime: pgtype.Timestamptz{Time: now, Valid: true},
+		Ino:     int64(newParentIno),
+		Mode:    int32(meta.S_IFDIR | 0o755),
+		Nlink:   2,
+		RootIno: rootIno,
+		Atime:   pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:   pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:   pgtype.Timestamptz{Time: now, Valid: true},
 	}
 	srcFileRow := db.Inode{
 		Ino:     srcIno,
@@ -1896,9 +1977,17 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: []byte("dst.txt")}).
 			Return(db.Entry{ParentIno: int64(newParentIno), Name: []byte("dst.txt"), Ino: targetIno}, nil).Twice()
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcIno).Return(srcFileRow, nil).Once()
+		oldP := oldParentRow
+		newP := newParentRow
+		srcF := srcFileRow
+		rootIno := targetRow.RootIno
+		oldP.RootIno = rootIno
+		newP.RootIno = rootIno
+		srcF.RootIno = rootIno
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldP, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newP, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcIno).Return(srcF, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetIno).Return(targetRow, nil).Once()
 
 		mockQuerier.EXPECT().DeleteEntry(mock.Anything, db.DeleteEntryParams{
@@ -2141,8 +2230,14 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier.EXPECT().GetEntry(mock.Anything, db.GetEntryParams{ParentIno: int64(newParentIno), Name: []byte("dst_dir")}).
 			Return(db.Entry{ParentIno: int64(newParentIno), Name: []byte("dst_dir"), Ino: targetIno}, nil).Twice()
 
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldParentRow, nil).Once()
-		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newParentRow, nil).Once()
+		oldP := oldParentRow
+		newP := newParentRow
+		rootIno := srcDirRow.RootIno
+		oldP.RootIno = rootIno
+		newP.RootIno = rootIno
+
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(oldParentIno)).Return(oldP, nil).Once()
+		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(newParentIno)).Return(newP, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, srcIno).Return(srcDirRow, nil).Once()
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, targetIno).Return(targetDirRow, nil).Once()
 
@@ -2170,6 +2265,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 			Ino:       srcIno,
 			Mode:      int32(meta.S_IFDIR | 0o755),
 			Nlink:     2,
+			RootIno:   rootIno,
 			ParentIno: int64(oldParentIno),
 		}
 		targetDirRow := db.Inode{
@@ -2228,6 +2324,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 			Ino:       srcIno,
 			Mode:      int32(meta.S_IFDIR | 0o755),
 			Nlink:     2,
+			RootIno:   rootIno,
 			ParentIno: int64(oldParentIno),
 		}
 		targetDirRow := db.Inode{
@@ -2281,6 +2378,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 			Ino:       srcIno,
 			Mode:      int32(meta.S_IFDIR | 0o755),
 			Nlink:     2,
+			RootIno:   0,
 			ParentIno: int64(oldParentIno),
 		}
 		targetDirRow := db.Inode{
@@ -2414,7 +2512,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
 
-		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, ParentIno: int64(oldParentIno)}
+		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(oldParentIno)}
 		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
 		setupMockWriteTx(mockStore, mockQuerier)
 		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
@@ -2440,7 +2538,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
 
-		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, ParentIno: int64(oldParentIno)}
+		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(oldParentIno)}
 		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
 		setupMockWriteTx(mockStore, mockQuerier)
 		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
@@ -2467,7 +2565,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
 
-		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, ParentIno: int64(oldParentIno)}
+		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(oldParentIno)}
 		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
 		setupMockWriteTx(mockStore, mockQuerier)
 		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)

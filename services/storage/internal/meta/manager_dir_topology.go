@@ -37,7 +37,7 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 	}
 
 	var result *Inode
-	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		if isDotOrDotDot(params.NewName) {
 			parent, err := q.GetInodeForUpdate(ctx, int64(params.NewParentIno))
 			if err != nil {
@@ -57,6 +57,7 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 
 		// 按全局 ino 升序锁定目标父目录与源节点，避免跨层操作逆序死锁
 		var parent db.Inode
+		var srcInode db.Inode
 		var isTmpFileMaterializing bool
 		for _, ino := range uniqueSortedInos(int64(params.NewParentIno), int64(params.Ino)) {
 			row, err := q.GetInodeForUpdate(ctx, ino)
@@ -76,6 +77,7 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 				parent = row
 			}
 			if ino == int64(params.Ino) {
+				srcInode = row
 				// 禁止目录硬链接
 				if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
 					return ErrPerm
@@ -99,6 +101,10 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 					isTmpFileMaterializing = true
 				}
 			}
+		}
+
+		if parent.RootIno != srcInode.RootIno {
+			return ErrCrossDevice
 		}
 
 		// 插入新目录项
@@ -149,6 +155,8 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 			return nil, ErrAlreadyExists
 		case errors.Is(err, ErrTooManyLinks):
 			return nil, ErrTooManyLinks
+		case errors.Is(err, ErrCrossDevice):
+			return nil, ErrCrossDevice
 		default:
 			return nil, fmt.Errorf("link tx: %w", err)
 		}
@@ -545,12 +553,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return fmt.Errorf("get new entry %d/%s: %w", params.NewParentIno, params.NewName, err)
 		}
 
-		inosToLock := []int64{int64(params.OldParentIno), int64(params.NewParentIno)}
-		if !hasNewEntry || oldIno != newIno {
-			inosToLock = append(inosToLock, oldIno)
-			if hasNewEntry {
-				inosToLock = append(inosToLock, newIno)
-			}
+		inosToLock := []int64{int64(params.OldParentIno), int64(params.NewParentIno), oldIno}
+		if hasNewEntry && oldIno != newIno {
+			inosToLock = append(inosToLock, newIno)
 		}
 
 		locked := make(map[int64]db.Inode, len(inosToLock))
@@ -604,6 +609,21 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return errRetryTx
 		}
 
+		oldParent := locked[int64(params.OldParentIno)]
+		newParent := locked[int64(params.NewParentIno)]
+		oldInode := locked[oldIno]
+
+		// 跨虚拟磁盘拓扑隔离校验：oldParent、newParent 与 oldInode 必须属于同一虚拟磁盘
+		if oldParent.RootIno != newParent.RootIno || oldInode.RootIno != oldParent.RootIno {
+			return ErrCrossDevice
+		}
+		if hasNewEntry && oldIno != newIno {
+			newInode := locked[newIno]
+			if newInode.RootIno != oldParent.RootIno {
+				return ErrCrossDevice
+			}
+		}
+
 		// RenameNoReplace：只要目标 Entry 已存在（包含同一 Inode 的不同硬链接与异 Inode），一律返回 ErrAlreadyExists
 		if params.Flags == RenameNoReplace && hasNewEntry {
 			return ErrAlreadyExists
@@ -614,9 +634,6 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return nil
 		}
 
-		oldParent := locked[int64(params.OldParentIno)]
-		newParent := locked[int64(params.NewParentIno)]
-		oldInode := locked[oldIno]
 		newInode := locked[newIno]
 
 		oldIsDir := (uint32(oldInode.Mode) & S_IFMT) == S_IFDIR
@@ -894,6 +911,8 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			return ErrNotSupported
 		case errors.Is(err, ErrInvalidArgument):
 			return ErrInvalidArgument
+		case errors.Is(err, ErrCrossDevice):
+			return ErrCrossDevice
 		default:
 			return fmt.Errorf("rename tx: %w", err)
 		}

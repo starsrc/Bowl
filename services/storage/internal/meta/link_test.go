@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -747,6 +749,118 @@ func TestLink_LockOrderAndInvariants(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, inode)
 		assert.Equal(t, []int64{int64(olderSrcIno), int64(newerParentIno)}, lockOrder)
+	})
+}
+
+func TestLink_CrossDeviceTopologyIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("跨虚拟磁盘执行 Link 返回 ErrCrossDevice 且映射为 FailedPrecondition+EXDEV，不创建目录项与递增链接", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		parentIno := uint64(20)
+		srcIno := uint64(10)
+
+		// 目标父目录归属磁盘 200，源节点归属磁盘 100
+		parentRow := db.Inode{
+			Ino:     int64(parentIno),
+			Mode:    int32(meta.S_IFDIR | 0o755),
+			Nlink:   2,
+			RootIno: 200,
+		}
+		srcRow := db.Inode{
+			Ino:     int64(srcIno),
+			Mode:    int32(meta.S_IFREG | 0o644),
+			Nlink:   1,
+			RootIno: 100,
+		}
+
+		// 按升序加锁：srcIno (10) 先，parentIno (20) 后
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(srcIno)).
+			Return(srcRow, nil).
+			Once()
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentRow, nil).
+			Once()
+
+		// 绝不调用 CreateEntry、IncrementInodeNlinkAndTouchCtime、TouchInodeTimestamps
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          srcIno,
+			NewParentIno: parentIno,
+			NewName:      []byte("cross_link.txt"),
+		})
+
+		require.Nil(t, inode)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrCrossDevice), "跨盘 Link 必须返回 ErrCrossDevice")
+
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.FailedPrecondition, st.Code())
+		details := st.Details()
+		require.Len(t, details, 1)
+		info, ok := details[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "EXDEV", info.GetReason())
+		assert.Equal(t, meta.ErrorDomain, info.GetDomain())
+	})
+
+	t.Run("跨虚拟磁盘具名化匿名 TmpFile 同样返回 ErrCrossDevice", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		parentIno := uint64(50)
+		tmpIno := uint64(60)
+
+		parentRow := db.Inode{
+			Ino:     int64(parentIno),
+			Mode:    int32(meta.S_IFDIR | 0o755),
+			Nlink:   2,
+			RootIno: 200,
+		}
+		tmpRow := db.Inode{
+			Ino:     int64(tmpIno),
+			Mode:    int32(meta.S_IFREG | 0o600),
+			Nlink:   0,
+			RootIno: 100,
+		}
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentRow, nil).
+			Once()
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(tmpIno)).
+			Return(tmpRow, nil).
+			Once()
+		mockQuerier.EXPECT().
+			HasLinkableTmpFileHandleByIno(mock.Anything, int64(tmpIno)).
+			Return(true, nil).
+			Once()
+
+		// 绝不调用 CreateEntry、ClearTmpFileFlagByIno 等
+		inode, err := mgr.Link(ctx, meta.LinkParams{
+			Ino:          tmpIno,
+			NewParentIno: parentIno,
+			NewName:      []byte("materialize_cross.txt"),
+		})
+
+		require.Nil(t, inode)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrCrossDevice), "跨盘具名化 TmpFile 必须返回 ErrCrossDevice")
+
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.FailedPrecondition, st.Code())
 	})
 }
 

@@ -2109,6 +2109,74 @@ func (_c *MockManager_SetXattr_Call) RunAndReturn(run func(ctx context.Context, 
 	return _c
 }
 
+// StatFS provides a mock function for the type MockManager
+func (_mock *MockManager) StatFS(ctx context.Context, ino uint64) (*meta.StatFSResult, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for StatFS")
+	}
+
+	var r0 *meta.StatFSResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) (*meta.StatFSResult, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) *meta.StatFSResult); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.StatFSResult)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_StatFS_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'StatFS'
+type MockManager_StatFS_Call struct {
+	*mock.Call
+}
+
+// StatFS is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino uint64
+func (_e *MockManager_Expecter) StatFS(ctx any, ino any) *MockManager_StatFS_Call {
+	return &MockManager_StatFS_Call{Call: _e.mock.On("StatFS", ctx, ino)}
+}
+
+func (_c *MockManager_StatFS_Call) Run(run func(ctx context.Context, ino uint64)) *MockManager_StatFS_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_StatFS_Call) Return(statFSResult *meta.StatFSResult, err error) *MockManager_StatFS_Call {
+	_c.Call.Return(statFSResult, err)
+	return _c
+}
+
+func (_c *MockManager_StatFS_Call) RunAndReturn(run func(ctx context.Context, ino uint64) (*meta.StatFSResult, error)) *MockManager_StatFS_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Symlink provides a mock function for the type MockManager
 func (_mock *MockManager) Symlink(ctx context.Context, params meta.SymlinkParams) (*meta.Inode, error) {
 	ret := _mock.Called(ctx, params)

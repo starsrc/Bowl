@@ -224,6 +224,12 @@ service StorageService {
   // 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
   rpc UpdateDisk(UpdateDiskRequest) returns (UpdateDiskResponse);
+
+  // StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+  // 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
+  // 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  rpc StatFS(StatFSRequest) returns (StatFSResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -1565,6 +1571,51 @@ message UpdateDiskRequest {
 message UpdateDiskResponse {
   // 更新后的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
+}
+
+// StatFSRequest 定义 StatFS 接口输入参数。
+message StatFSRequest {
+  // 目标节点 Inode 编号（必须在 int64 正数区间内）。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+}
+
+// StatFSResponse 定义 StatFS 接口输出参数，对齐 Linux FUSE FUSE_STATFS = 17 协议与 4096 字节块统计语义。
+message StatFSResponse {
+  // 磁盘总容量字节数。
+  uint64 total_bytes = 1;
+
+  // 当前已使用容量字节数。
+  uint64 used_bytes = 2;
+
+  // 当前剩余可用容量字节数。
+  uint64 avail_bytes = 3;
+
+  // 文件系统基础块大小（字节，固定为 4096）。
+  uint32 bsize = 4;
+
+  // 文件系统基本分配单元大小（字节，固定为 4096）。
+  uint32 frsize = 5;
+
+  // 总数据块数量（基于 4096 字节块换算，至少为 1）。
+  uint64 blocks = 6;
+
+  // 空闲数据块数量。
+  uint64 bfree = 7;
+
+  // 非特权用户可用数据块数量。
+  uint64 bavail = 8;
+
+  // 当前已使用的 Inode 数量（反映 used_inodes）。
+  uint64 files = 9;
+
+  // 空闲 Inode 数量（不设限时填 0）。
+  uint64 ffree = 10;
+
+  // 文件名最大长度（字节，固定为 255）。
+  uint32 namelen = 11;
 }
 
 

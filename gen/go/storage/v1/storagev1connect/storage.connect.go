@@ -93,6 +93,8 @@ const (
 	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
 	// StorageServiceUpdateDiskProcedure is the procedure name of the StorageService's UpdateDisk RPC.
 	StorageServiceUpdateDiskProcedure = "/storage.v1.StorageService/UpdateDisk"
+	// StorageServiceStatFSProcedure is the procedure name of the StorageService's StatFS RPC.
+	StorageServiceStatFSProcedure = "/storage.v1.StorageService/StatFS"
 )
 
 var (
@@ -334,6 +336,13 @@ var (
 			Procedure:  StorageServiceUpdateDiskProcedure,
 		}
 	})
+	storageServiceStatFSSpec = sync.OnceValue(func() connect.Spec {
+		return connect.Spec{
+			StreamType: connect.StreamTypeUnary,
+			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("StatFS"),
+			Procedure:  StorageServiceStatFSProcedure,
+		}
+	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -520,6 +529,11 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
+	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
+	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
@@ -712,6 +726,11 @@ type StorageServiceHandler interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
+	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
+	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error)
 }
 
 // RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
@@ -753,6 +772,7 @@ func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHan
 		connect.Method{Spec: storageServiceCreateDiskSpec(), Handler: adapter.createDisk},
 		connect.Method{Spec: storageServiceGetDiskSpec(), Handler: adapter.getDisk},
 		connect.Method{Spec: storageServiceUpdateDiskSpec(), Handler: adapter.updateDisk},
+		connect.Method{Spec: storageServiceStatFSSpec(), Handler: adapter.statFS},
 	)
 }
 
@@ -893,6 +913,10 @@ func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *v1.GetDiskRe
 
 func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.UpdateDisk is not implemented")
+}
+
+func (UnimplementedStorageServiceHandler) StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.StatFS is not implemented")
 }
 
 type storageServiceClient struct {
@@ -1166,6 +1190,14 @@ func (c *storageServiceClient) GetDisk(ctx context.Context, req *v1.GetDiskReque
 func (c *storageServiceClient) UpdateDisk(ctx context.Context, req *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
 	var res v1.UpdateDiskResponse
 	if err := c.client.CallUnary(ctx, storageServiceUpdateDiskSpec(), req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *storageServiceClient) StatFS(ctx context.Context, req *v1.StatFSRequest) (*v1.StatFSResponse, error) {
+	var res v1.StatFSResponse
+	if err := c.client.CallUnary(ctx, storageServiceStatFSSpec(), req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -1575,6 +1607,18 @@ func (h storageServiceHandler) updateDisk(ctx context.Context, _ connect.Spec, s
 		return err
 	}
 	res, err := h.svc.UpdateDisk(ctx, &req)
+	if err != nil {
+		return err
+	}
+	return stream.Send(res)
+}
+
+func (h storageServiceHandler) statFS(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+	var req v1.StatFSRequest
+	if err := stream.Receive(&req); err != nil {
+		return err
+	}
+	res, err := h.svc.StatFS(ctx, &req)
 	if err != nil {
 		return err
 	}

@@ -205,3 +205,71 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	return result, nil
 }
 
+// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
+func (m *manager) StatFS(ctx context.Context, ino uint64) (*StatFSResult, error) {
+	// 静态参数校验（无需触达数据库）：ino 必须在 [1, math.MaxInt64] 区间内
+	if ino == 0 || ino > math.MaxInt64 {
+		return nil, fmt.Errorf("%w: ino must be between 1 and %d, got %d", ErrInvalidArgument, int64(math.MaxInt64), ino)
+	}
+
+	// 1. 查询目标 Inode（支持已解链但仍打开的孤儿节点 nlink == 0）
+	inode, err := m.store.GetInode(ctx, int64(ino))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get inode %d for statfs: %w", ino, err)
+	}
+	if inode.RootIno <= 0 {
+		return nil, ErrNotFound
+	}
+
+	// 2. 根据 root_ino 查询其绑定的 Disk 实体
+	row, err := m.store.GetDiskByRootIno(ctx, inode.RootIno)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get disk by root_ino %d: %w", inode.RootIno, err)
+	}
+
+	// 3. 计算容量与 4096 字节块统计信息
+	totalBytes := uint64(row.MaxBytes)
+	usedBytes := uint64(row.UsedBytes)
+
+	var availBytes uint64
+	if totalBytes > usedBytes {
+		availBytes = totalBytes - usedBytes
+	}
+
+	const blockSize uint64 = DefaultStatFSBlockSize
+	blocks := totalBytes / blockSize
+	if blocks == 0 && totalBytes > 0 {
+		blocks = 1
+	}
+
+	bavail := availBytes / blockSize
+	bfree := bavail
+
+	var files uint64
+	if row.UsedInodes > 0 {
+		files = uint64(row.UsedInodes)
+	}
+
+	return &StatFSResult{
+		TotalBytes: totalBytes,
+		UsedBytes:  usedBytes,
+		AvailBytes: availBytes,
+		Bsize:      DefaultStatFSBlockSize,
+		Frsize:     DefaultStatFSBlockSize,
+		Blocks:     blocks,
+		Bfree:      bfree,
+		Bavail:     bavail,
+		Files:      files,
+		Ffree:      0,
+		Namelen:    MaxDiskNameBytes,
+	}, nil
+}
+
+

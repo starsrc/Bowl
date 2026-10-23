@@ -53,6 +53,7 @@ const (
 	StorageService_CreateDisk_FullMethodName   = "/storage.v1.StorageService/CreateDisk"
 	StorageService_GetDisk_FullMethodName      = "/storage.v1.StorageService/GetDisk"
 	StorageService_UpdateDisk_FullMethodName   = "/storage.v1.StorageService/UpdateDisk"
+	StorageService_StatFS_FullMethodName       = "/storage.v1.StorageService/StatFS"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -243,6 +244,11 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(ctx context.Context, in *UpdateDiskRequest, opts ...grpc.CallOption) (*UpdateDiskResponse, error)
+	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
+	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	StatFS(ctx context.Context, in *StatFSRequest, opts ...grpc.CallOption) (*StatFSResponse, error)
 }
 
 type storageServiceClient struct {
@@ -593,6 +599,16 @@ func (c *storageServiceClient) UpdateDisk(ctx context.Context, in *UpdateDiskReq
 	return out, nil
 }
 
+func (c *storageServiceClient) StatFS(ctx context.Context, in *StatFSRequest, opts ...grpc.CallOption) (*StatFSResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StatFSResponse)
+	err := c.cc.Invoke(ctx, StorageService_StatFS_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -781,6 +797,11 @@ type StorageServiceServer interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *UpdateDiskRequest) (*UpdateDiskResponse, error)
+	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
+	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	StatFS(context.Context, *StatFSRequest) (*StatFSResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -892,6 +913,9 @@ func (UnimplementedStorageServiceServer) GetDisk(context.Context, *GetDiskReques
 }
 func (UnimplementedStorageServiceServer) UpdateDisk(context.Context, *UpdateDiskRequest) (*UpdateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) StatFS(context.Context, *StatFSRequest) (*StatFSResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StatFS not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1526,6 +1550,24 @@ func _StorageService_UpdateDisk_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_StatFS_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatFSRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).StatFS(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_StatFS_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).StatFS(ctx, req.(*StatFSRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1668,6 +1710,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateDisk",
 			Handler:    _StorageService_UpdateDisk_Handler,
+		},
+		{
+			MethodName: "StatFS",
+			Handler:    _StorageService_StatFS_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

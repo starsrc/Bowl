@@ -191,6 +191,40 @@ func TestStorageDiskContract_ValidMessages(t *testing.T) {
 		}
 		assert.NoError(t, v.Validate(diskZeroUsage))
 	})
+
+	t.Run("有效 StatFSRequest 校验通过", func(t *testing.T) {
+		req := &storagev1.StatFSRequest{
+			Ino: 1,
+		}
+		assert.NoError(t, v.Validate(req))
+
+		reqMaxBoundary := &storagev1.StatFSRequest{
+			Ino: math.MaxInt64,
+		}
+		assert.NoError(t, v.Validate(reqMaxBoundary))
+
+		reqArbitrary := &storagev1.StatFSRequest{
+			Ino: 100,
+		}
+		assert.NoError(t, v.Validate(reqArbitrary))
+	})
+
+	t.Run("有效 StatFSResponse 校验通过", func(t *testing.T) {
+		resp := &storagev1.StatFSResponse{
+			TotalBytes: 10 * 1024 * 1024 * 1024,
+			UsedBytes:  1024 * 1024,
+			AvailBytes: 10*1024*1024*1024 - 1024*1024,
+			Bsize:      4096,
+			Frsize:     4096,
+			Blocks:     (10 * 1024 * 1024 * 1024) / 4096,
+			Bfree:      (10*1024*1024*1024 - 1024*1024) / 4096,
+			Bavail:     (10*1024*1024*1024 - 1024*1024) / 4096,
+			Files:      10,
+			Ffree:      0,
+			Namelen:    255,
+		}
+		assert.NoError(t, v.Validate(resp))
+	})
 }
 
 func TestStorageDiskContract_CreateDiskRequest_Invalid(t *testing.T) {
@@ -449,4 +483,25 @@ func TestStorageDiskContract_UpdateDiskResponse_Invalid(t *testing.T) {
 		assertStorageErrorInfoReason(t, v.Validate(resp), validator.ReasonInvalidArgument)
 	})
 }
+
+func TestStorageDiskContract_StatFSRequest_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("ino 为 0 返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.StatFSRequest{
+			Ino: 0,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("ino 超过 math.MaxInt64 返回 EINVAL", func(t *testing.T) {
+		overflow := uint64(math.MaxInt64) + 1
+		req := &storagev1.StatFSRequest{
+			Ino: overflow,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+}
+
 

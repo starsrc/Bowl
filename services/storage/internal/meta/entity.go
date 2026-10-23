@@ -493,3 +493,19 @@ type UpdateDiskParams struct {
 	Name     *string
 	MaxBytes *uint64
 }
+
+// StatFSResult 描述磁盘文件系统统计状态（对接 Linux FUSE FUSE_STATFS = 17 协议）。
+type StatFSResult struct {
+	TotalBytes uint64
+	UsedBytes  uint64
+	AvailBytes uint64
+	Bsize      uint32
+	Frsize     uint32
+	Blocks     uint64
+	Bfree      uint64
+	Bavail     uint64
+	Files      uint64
+	Ffree      uint64
+	Namelen    uint32
+}
+

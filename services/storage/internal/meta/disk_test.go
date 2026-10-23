@@ -995,3 +995,330 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		assert.True(t, errors.Is(err, updateErr))
 	})
 }
+
+func TestStatFS_StaticValidation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ino 为 0 返回 ErrInvalidArgument 且不查询数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		res, err := mgr.StatFS(ctx, 0)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "ino must be between 1 and")
+		mockStore.AssertNotCalled(t, "GetInode", mock.Anything, mock.Anything)
+	})
+
+	t.Run("ino 超过 math.MaxInt64 返回 ErrInvalidArgument 且不查询数据库", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		res, err := mgr.StatFS(ctx, uint64(math.MaxInt64)+1)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrInvalidArgument))
+		assert.Contains(t, err.Error(), "ino must be between 1 and")
+		mockStore.AssertNotCalled(t, "GetInode", mock.Anything, mock.Anything)
+	})
+}
+
+func TestStatFS_DatabaseErrors(t *testing.T) {
+	ctx := context.Background()
+	const targetIno = uint64(100)
+
+	t.Run("GetInode 返回 pgx.ErrNoRows 时返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{}, pgx.ErrNoRows).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		mockStore.AssertNotCalled(t, "GetDiskByRootIno", mock.Anything, mock.Anything)
+	})
+
+	t.Run("GetInode 返回通用错误时透明透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		dbErr := errors.New("database connection broken")
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{}, dbErr).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+		assert.Contains(t, err.Error(), "get inode 100 for statfs")
+		mockStore.AssertNotCalled(t, "GetDiskByRootIno", mock.Anything, mock.Anything)
+	})
+
+	t.Run("GetInode 成功但 root_ino <= 0 时返回 ErrNotFound 且不查磁盘", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: 0,
+			}, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+		mockStore.AssertNotCalled(t, "GetDiskByRootIno", mock.Anything, mock.Anything)
+	})
+
+	t.Run("GetDiskByRootIno 返回 pgx.ErrNoRows 时返回 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: 1,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, int64(1)).
+			Return(db.Disk{}, pgx.ErrNoRows).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("GetDiskByRootIno 返回通用错误时透明透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		dbErr := errors.New("read replica down")
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: 1,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, int64(1)).
+			Return(db.Disk{}, dbErr).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.Nil(t, res)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, dbErr))
+		assert.Contains(t, err.Error(), "get disk by root_ino 1")
+	})
+}
+
+func TestStatFS_Calculation(t *testing.T) {
+	ctx := context.Background()
+	const targetIno = uint64(200)
+	const rootIno = int64(1)
+	const validDiskIDStr = "0192a3b4-c5d6-7e8f-9012-3456789abcde"
+	var validDiskID pgtype.UUID
+	require.NoError(t, validDiskID.Scan(validDiskIDStr))
+	now := time.Now().Truncate(time.Microsecond)
+
+	t.Run("常规容量与已用 Inode 统计正确计算", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		// 10 GiB 容量，已用 1 GiB
+		totalBytes := int64(10 * 1024 * 1024 * 1024)
+		usedBytes := int64(1024 * 1024 * 1024)
+		usedInodes := int64(42)
+
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: rootIno,
+				Nlink:   1,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, rootIno).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "statfs-disk",
+				RootIno:    rootIno,
+				MaxBytes:   totalBytes,
+				UsedBytes:  usedBytes,
+				UsedInodes: usedInodes,
+				CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+				UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			}, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+
+		assert.Equal(t, uint64(totalBytes), res.TotalBytes)
+		assert.Equal(t, uint64(usedBytes), res.UsedBytes)
+		assert.Equal(t, uint64(totalBytes-usedBytes), res.AvailBytes)
+		assert.Equal(t, uint32(meta.DefaultStatFSBlockSize), res.Bsize)
+		assert.Equal(t, uint32(meta.DefaultStatFSBlockSize), res.Frsize)
+		assert.Equal(t, uint64(totalBytes)/uint64(meta.DefaultStatFSBlockSize), res.Blocks)
+		assert.Equal(t, uint64(totalBytes-usedBytes)/uint64(meta.DefaultStatFSBlockSize), res.Bavail)
+		assert.Equal(t, uint64(totalBytes-usedBytes)/uint64(meta.DefaultStatFSBlockSize), res.Bfree)
+		assert.Equal(t, uint64(usedInodes), res.Files)
+		assert.Equal(t, uint64(0), res.Ffree)
+		assert.Equal(t, uint32(meta.MaxDiskNameBytes), res.Namelen)
+	})
+
+	t.Run("支持已解链孤儿节点 (nlink == 0) 按 root_ino 正常查询统计", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: rootIno,
+				Nlink:   0, // 孤儿节点
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, rootIno).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "orphan-disk",
+				RootIno:    rootIno,
+				MaxBytes:   40960,
+				UsedBytes:  8192,
+				UsedInodes: 1,
+			}, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(40960), res.TotalBytes)
+		assert.Equal(t, uint64(8192), res.UsedBytes)
+		assert.Equal(t, uint64(32768), res.AvailBytes)
+		assert.Equal(t, uint64(10), res.Blocks)
+		assert.Equal(t, uint64(8), res.Bavail)
+		assert.Equal(t, uint64(8), res.Bfree)
+		assert.Equal(t, uint64(1), res.Files)
+	})
+
+	t.Run("极小容量 (小于 4096 字节) 保底 blocks 为 1", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: rootIno,
+				Nlink:   1,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, rootIno).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "tiny-disk",
+				RootIno:    rootIno,
+				MaxBytes:   100, // 小于 4096
+				UsedBytes:  0,
+				UsedInodes: 1,
+			}, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(100), res.TotalBytes)
+		assert.Equal(t, uint64(0), res.UsedBytes)
+		assert.Equal(t, uint64(100), res.AvailBytes)
+		assert.Equal(t, uint64(1), res.Blocks, "极小容量 blocks 必须至少为 1")
+		assert.Equal(t, uint64(0), res.Bavail)
+		assert.Equal(t, uint64(0), res.Bfree)
+		assert.Equal(t, uint64(1), res.Files)
+	})
+
+	t.Run("已用容量等于或超过最大配额时可用空间与数据块钳位归零", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: rootIno,
+				Nlink:   1,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, rootIno).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "full-disk",
+				RootIno:    rootIno,
+				MaxBytes:   8192,
+				UsedBytes:  8192,
+				UsedInodes: 10,
+			}, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(8192), res.TotalBytes)
+		assert.Equal(t, uint64(8192), res.UsedBytes)
+		assert.Equal(t, uint64(0), res.AvailBytes)
+		assert.Equal(t, uint64(2), res.Blocks)
+		assert.Equal(t, uint64(0), res.Bavail)
+		assert.Equal(t, uint64(0), res.Bfree)
+		assert.Equal(t, uint64(10), res.Files)
+	})
+
+	t.Run("used_inodes 为 0 时 files 设为 0", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(targetIno)).
+			Return(db.Inode{
+				Ino:     int64(targetIno),
+				RootIno: rootIno,
+				Nlink:   1,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, rootIno).
+			Return(db.Disk{
+				DiskID:     validDiskID,
+				Name:       "zero-inodes-disk",
+				RootIno:    rootIno,
+				MaxBytes:   8192,
+				UsedBytes:  0,
+				UsedInodes: 0,
+			}, nil).
+			Once()
+
+		mgr := meta.New(mockStore)
+		res, err := mgr.StatFS(ctx, targetIno)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		assert.Equal(t, uint64(0), res.Files)
+		assert.Equal(t, uint64(0), res.Ffree)
+	})
+}
+

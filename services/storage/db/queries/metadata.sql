@@ -1,16 +1,16 @@
 -- name: GetInode :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 FROM inodes
 WHERE ino = $1;
 
 -- name: GetInodeByEntry :one
-SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target, i.flags, i.parent_ino
+SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target, i.flags, i.parent_ino, i.root_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name = $2;
 
 -- name: GetInodeForUpdate :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 FROM inodes
 WHERE ino = $1
 FOR UPDATE;
@@ -28,13 +28,22 @@ SET
   flags = @flags::integer
 FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
 
 -- name: CreateInode :one
-INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
-SELECT $1, $2, $3, $4, $5, @size::bigint, @parent_ino::bigint, ts.now, ts.now, ts.now
+INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, root_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, @size::bigint, @parent_ino::bigint, @root_ino::bigint, ts.now, ts.now, ts.now
 FROM (SELECT clock_timestamp() AS now) AS ts
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
+
+-- name: CreateRootInode :one
+WITH next_ino AS (
+    SELECT nextval('inode_id_seq') AS ino, clock_timestamp() AS now
+)
+INSERT INTO inodes (ino, mode, nlink, uid, gid, rdev, size, parent_ino, root_ino, atime, mtime, ctime)
+SELECT n.ino, $1, $2, $3, $4, $5, @size::bigint, n.ino, n.ino, n.now, n.now, n.now
+FROM next_ino n
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
 
 -- name: CreateEntry :exec
 INSERT INTO entries (parent_ino, name, ino)
@@ -55,10 +64,10 @@ FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1;
 
 -- name: CreateSymlinkInode :one
-INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, atime, mtime, ctime)
-SELECT $1, $2, $3, $4, $5, $6, $7, @parent_ino::bigint, ts.now, ts.now, ts.now
+INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, root_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, $6, $7, @parent_ino::bigint, @root_ino::bigint, ts.now, ts.now, ts.now
 FROM (SELECT clock_timestamp() AS now) AS ts
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
 
 -- name: GetSymlinkTarget :one
 SELECT mode, symlink_target
@@ -70,7 +79,7 @@ UPDATE inodes
 SET nlink = nlink + 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
 
 -- name: GetEntry :one
 SELECT parent_ino, name, ino
@@ -91,14 +100,14 @@ UPDATE inodes
 SET nlink = nlink - 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
 
 -- name: ClearInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = 0,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino;
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
 
 -- name: DecrementInodeNlinkAndTouch :exec
 UPDATE inodes
@@ -243,7 +252,8 @@ SELECT
     i.ctime,
     i.symlink_target,
     i.flags,
-    i.parent_ino
+    i.parent_ino,
+    i.root_ino
 FROM entries e
 JOIN inodes i ON e.parent_ino = i.ino
 WHERE e.ino = $1
@@ -266,7 +276,8 @@ SELECT
     i.ctime,
     i.symlink_target,
     i.flags,
-    i.parent_ino
+    i.parent_ino,
+    i.root_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
@@ -289,7 +300,8 @@ SELECT
     i.ctime,
     i.symlink_target,
     i.flags,
-    i.parent_ino
+    i.parent_ino,
+    i.root_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name > @after_name::bytea
@@ -486,3 +498,90 @@ WHERE session_id = @session_id
   AND lk_flags = 0
   AND start_offset <= @end_offset
   AND end_offset >= @start_offset;
+
+-- name: DeleteInodesByRootIno :many
+DELETE FROM inodes
+WHERE root_ino = $1
+RETURNING ino;
+
+-- name: CreateDisk :one
+INSERT INTO disks (
+    disk_id,
+    name,
+    root_ino,
+    max_bytes,
+    used_bytes,
+    used_inodes,
+    created_at,
+    updated_at
+) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    0,
+    1,
+    clock_timestamp(),
+    clock_timestamp()
+)
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
+
+-- name: GetDisk :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE disk_id = $1;
+
+-- name: GetDiskForUpdate :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE disk_id = $1
+FOR UPDATE;
+
+-- name: GetDiskByRootIno :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE root_ino = $1;
+
+-- name: GetDiskByRootInoForUpdate :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE root_ino = $1
+FOR UPDATE;
+
+-- name: UpdateDisk :one
+UPDATE disks
+SET
+    name = $2,
+    max_bytes = $3,
+    updated_at = clock_timestamp()
+WHERE disk_id = $1
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
+
+-- name: UpdateDiskUsedBytes :one
+UPDATE disks
+SET
+    used_bytes = $2,
+    updated_at = clock_timestamp()
+WHERE disk_id = $1
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
+
+-- name: UpdateDiskQuotaByRootIno :one
+UPDATE disks
+SET
+    used_bytes = GREATEST(used_bytes + @delta_bytes::bigint, 0),
+    used_inodes = GREATEST(used_inodes + @delta_inodes::bigint, 0),
+    updated_at = clock_timestamp()
+WHERE root_ino = @root_ino::bigint
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
+
+-- name: AddDiskQuotaByRootIno :exec
+UPDATE disks
+SET
+    used_bytes = GREATEST(used_bytes + @delta_bytes::bigint, 0),
+    used_inodes = GREATEST(used_inodes + @delta_inodes::bigint, 0),
+    updated_at = clock_timestamp()
+WHERE root_ino = @root_ino::bigint;
+
+-- name: DeleteDisk :execrows
+DELETE FROM disks
+WHERE disk_id = $1;

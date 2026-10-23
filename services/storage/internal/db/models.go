@@ -15,6 +15,17 @@ type ClientSession struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type Disk struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Entry struct {
 	ParentIno int64  `json:"parent_ino"`
 	Name      []byte `json:"name"`
@@ -73,6 +84,7 @@ type Inode struct {
 	SymlinkTarget []byte             `json:"symlink_target"`
 	Flags         int32              `json:"flags"`
 	ParentIno     int64              `json:"parent_ino"`
+	RootIno       int64              `json:"root_ino"`
 }
 
 type InodeXattr struct {

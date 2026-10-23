@@ -6,19 +6,25 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
+	AddDiskQuotaByRootIno(ctx context.Context, arg AddDiskQuotaByRootInoParams) error
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	// 4194304 = 0o20000000 (O_TMPFILE)
 	ClearTmpFileFlagByIno(ctx context.Context, ino int64) error
+	CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error)
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error)
 	CreateFileLock(ctx context.Context, arg CreateFileLockParams) (FileLock, error)
 	CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error)
+	CreateRootInode(ctx context.Context, arg CreateRootInodeParams) (Inode, error)
 	CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error)
 	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
+	DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	DeleteExpiredClientSessions(ctx context.Context) (int64, error)
 	DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error)
@@ -30,12 +36,17 @@ type Querier interface {
 	DeleteFlockFileLocksBySessionAndFh(ctx context.Context, arg DeleteFlockFileLocksBySessionAndFhParams) (int64, error)
 	DeleteInode(ctx context.Context, ino int64) error
 	DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) (int64, error)
+	DeleteInodesByRootIno(ctx context.Context, rootIno int64) ([]int64, error)
 	DeleteOverlappingPosixFileLockWaiters(ctx context.Context, arg DeleteOverlappingPosixFileLockWaitersParams) (int64, error)
 	DeletePosixFileLockWaitersByOwner(ctx context.Context, arg DeletePosixFileLockWaitersByOwnerParams) (int64, error)
 	DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error)
 	DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error)
 	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
 	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error)
+	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
+	GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, error)
+	GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (Disk, error)
+	GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
 	GetFileLockWaiter(ctx context.Context, arg GetFileLockWaiterParams) (FileLockWaiter, error)
@@ -63,6 +74,9 @@ type Querier interface {
 	TouchInodeAtime(ctx context.Context, ino int64) error
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
+	UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error)
+	UpdateDiskQuotaByRootIno(ctx context.Context, arg UpdateDiskQuotaByRootInoParams) (Disk, error)
+	UpdateDiskUsedBytes(ctx context.Context, arg UpdateDiskUsedBytesParams) (Disk, error)
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error
 	UpdateEntryIno(ctx context.Context, arg UpdateEntryInoParams) error
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)

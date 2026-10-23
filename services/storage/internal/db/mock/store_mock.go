@@ -7,6 +7,7 @@ package mock
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	mock "github.com/stretchr/testify/mock"
@@ -37,6 +38,63 @@ type MockStore_Expecter struct {
 
 func (_m *MockStore) EXPECT() *MockStore_Expecter {
 	return &MockStore_Expecter{mock: &_m.Mock}
+}
+
+// AddDiskQuotaByRootIno provides a mock function for the type MockStore
+func (_mock *MockStore) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AddDiskQuotaByRootIno")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AddDiskQuotaByRootInoParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_AddDiskQuotaByRootIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddDiskQuotaByRootIno'
+type MockStore_AddDiskQuotaByRootIno_Call struct {
+	*mock.Call
+}
+
+// AddDiskQuotaByRootIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AddDiskQuotaByRootInoParams
+func (_e *MockStore_Expecter) AddDiskQuotaByRootIno(ctx any, arg any) *MockStore_AddDiskQuotaByRootIno_Call {
+	return &MockStore_AddDiskQuotaByRootIno_Call{Call: _e.mock.On("AddDiskQuotaByRootIno", ctx, arg)}
+}
+
+func (_c *MockStore_AddDiskQuotaByRootIno_Call) Run(run func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams)) *MockStore_AddDiskQuotaByRootIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AddDiskQuotaByRootInoParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AddDiskQuotaByRootInoParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_AddDiskQuotaByRootIno_Call) Return(err error) *MockStore_AddDiskQuotaByRootIno_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_AddDiskQuotaByRootIno_Call) RunAndReturn(run func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error) *MockStore_AddDiskQuotaByRootIno_Call {
+	_c.Call.Return(run)
+	return _c
 }
 
 // ClearInodeNlinkAndTouchCtime provides a mock function for the type MockStore
@@ -158,6 +216,72 @@ func (_c *MockStore_ClearTmpFileFlagByIno_Call) Return(err error) *MockStore_Cle
 }
 
 func (_c *MockStore_ClearTmpFileFlagByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_ClearTmpFileFlagByIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CreateDisk provides a mock function for the type MockStore
+func (_mock *MockStore) CreateDisk(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateDisk")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateDiskParams) (db.Disk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateDiskParams) db.Disk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateDiskParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_CreateDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateDisk'
+type MockStore_CreateDisk_Call struct {
+	*mock.Call
+}
+
+// CreateDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateDiskParams
+func (_e *MockStore_Expecter) CreateDisk(ctx any, arg any) *MockStore_CreateDisk_Call {
+	return &MockStore_CreateDisk_Call{Call: _e.mock.On("CreateDisk", ctx, arg)}
+}
+
+func (_c *MockStore_CreateDisk_Call) Run(run func(ctx context.Context, arg db.CreateDiskParams)) *MockStore_CreateDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateDiskParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateDiskParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_CreateDisk_Call) Return(disk db.Disk, err error) *MockStore_CreateDisk_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_CreateDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error)) *MockStore_CreateDisk_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -417,6 +541,72 @@ func (_c *MockStore_CreateInode_Call) RunAndReturn(run func(ctx context.Context,
 	return _c
 }
 
+// CreateRootInode provides a mock function for the type MockStore
+func (_mock *MockStore) CreateRootInode(ctx context.Context, arg db.CreateRootInodeParams) (db.Inode, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateRootInode")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateRootInodeParams) (db.Inode, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateRootInodeParams) db.Inode); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateRootInodeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_CreateRootInode_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateRootInode'
+type MockStore_CreateRootInode_Call struct {
+	*mock.Call
+}
+
+// CreateRootInode is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.CreateRootInodeParams
+func (_e *MockStore_Expecter) CreateRootInode(ctx any, arg any) *MockStore_CreateRootInode_Call {
+	return &MockStore_CreateRootInode_Call{Call: _e.mock.On("CreateRootInode", ctx, arg)}
+}
+
+func (_c *MockStore_CreateRootInode_Call) Run(run func(ctx context.Context, arg db.CreateRootInodeParams)) *MockStore_CreateRootInode_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.CreateRootInodeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.CreateRootInodeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_CreateRootInode_Call) Return(inode db.Inode, err error) *MockStore_CreateRootInode_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_CreateRootInode_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateRootInodeParams) (db.Inode, error)) *MockStore_CreateRootInode_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateSymlinkInode provides a mock function for the type MockStore
 func (_mock *MockStore) CreateSymlinkInode(ctx context.Context, arg db.CreateSymlinkInodeParams) (db.Inode, error) {
 	ret := _mock.Called(ctx, arg)
@@ -602,6 +792,72 @@ func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) Return(inode db.Inode
 }
 
 func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_DecrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteDisk provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error) {
+	ret := _mock.Called(ctx, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteDisk")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (int64, error)); ok {
+		return returnFunc(ctx, diskID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) int64); ok {
+		r0 = returnFunc(ctx, diskID)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, pgtype.UUID) error); ok {
+		r1 = returnFunc(ctx, diskID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteDisk'
+type MockStore_DeleteDisk_Call struct {
+	*mock.Call
+}
+
+// DeleteDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - diskID pgtype.UUID
+func (_e *MockStore_Expecter) DeleteDisk(ctx any, diskID any) *MockStore_DeleteDisk_Call {
+	return &MockStore_DeleteDisk_Call{Call: _e.mock.On("DeleteDisk", ctx, diskID)}
+}
+
+func (_c *MockStore_DeleteDisk_Call) Run(run func(ctx context.Context, diskID pgtype.UUID)) *MockStore_DeleteDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 pgtype.UUID
+		if args[1] != nil {
+			arg1 = args[1].(pgtype.UUID)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteDisk_Call) Return(n int64, err error) *MockStore_DeleteDisk_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteDisk_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (int64, error)) *MockStore_DeleteDisk_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1299,6 +1555,74 @@ func (_c *MockStore_DeleteInodeXattr_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// DeleteInodesByRootIno provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteInodesByRootIno(ctx context.Context, rootIno int64) ([]int64, error) {
+	ret := _mock.Called(ctx, rootIno)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteInodesByRootIno")
+	}
+
+	var r0 []int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([]int64, error)); ok {
+		return returnFunc(ctx, rootIno)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) []int64); ok {
+		r0 = returnFunc(ctx, rootIno)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]int64)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, rootIno)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteInodesByRootIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteInodesByRootIno'
+type MockStore_DeleteInodesByRootIno_Call struct {
+	*mock.Call
+}
+
+// DeleteInodesByRootIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - rootIno int64
+func (_e *MockStore_Expecter) DeleteInodesByRootIno(ctx any, rootIno any) *MockStore_DeleteInodesByRootIno_Call {
+	return &MockStore_DeleteInodesByRootIno_Call{Call: _e.mock.On("DeleteInodesByRootIno", ctx, rootIno)}
+}
+
+func (_c *MockStore_DeleteInodesByRootIno_Call) Run(run func(ctx context.Context, rootIno int64)) *MockStore_DeleteInodesByRootIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteInodesByRootIno_Call) Return(int64s []int64, err error) *MockStore_DeleteInodesByRootIno_Call {
+	_c.Call.Return(int64s, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteInodesByRootIno_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) ([]int64, error)) *MockStore_DeleteInodesByRootIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteOverlappingPosixFileLockWaiters provides a mock function for the type MockStore
 func (_mock *MockStore) DeleteOverlappingPosixFileLockWaiters(ctx context.Context, arg db.DeleteOverlappingPosixFileLockWaitersParams) (int64, error) {
 	ret := _mock.Called(ctx, arg)
@@ -1820,6 +2144,270 @@ func (_c *MockStore_ExecTxWithOptions_Call) Return(err error) *MockStore_ExecTxW
 }
 
 func (_c *MockStore_ExecTxWithOptions_Call) RunAndReturn(run func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error) *MockStore_ExecTxWithOptions_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetDisk provides a mock function for the type MockStore
+func (_mock *MockStore) GetDisk(ctx context.Context, diskID pgtype.UUID) (db.Disk, error) {
+	ret := _mock.Called(ctx, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDisk")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (db.Disk, error)); ok {
+		return returnFunc(ctx, diskID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) db.Disk); ok {
+		r0 = returnFunc(ctx, diskID)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, pgtype.UUID) error); ok {
+		r1 = returnFunc(ctx, diskID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDisk'
+type MockStore_GetDisk_Call struct {
+	*mock.Call
+}
+
+// GetDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - diskID pgtype.UUID
+func (_e *MockStore_Expecter) GetDisk(ctx any, diskID any) *MockStore_GetDisk_Call {
+	return &MockStore_GetDisk_Call{Call: _e.mock.On("GetDisk", ctx, diskID)}
+}
+
+func (_c *MockStore_GetDisk_Call) Run(run func(ctx context.Context, diskID pgtype.UUID)) *MockStore_GetDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 pgtype.UUID
+		if args[1] != nil {
+			arg1 = args[1].(pgtype.UUID)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetDisk_Call) Return(disk db.Disk, err error) *MockStore_GetDisk_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_GetDisk_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (db.Disk, error)) *MockStore_GetDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetDiskByRootIno provides a mock function for the type MockStore
+func (_mock *MockStore) GetDiskByRootIno(ctx context.Context, rootIno int64) (db.Disk, error) {
+	ret := _mock.Called(ctx, rootIno)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDiskByRootIno")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Disk, error)); ok {
+		return returnFunc(ctx, rootIno)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Disk); ok {
+		r0 = returnFunc(ctx, rootIno)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, rootIno)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetDiskByRootIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDiskByRootIno'
+type MockStore_GetDiskByRootIno_Call struct {
+	*mock.Call
+}
+
+// GetDiskByRootIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - rootIno int64
+func (_e *MockStore_Expecter) GetDiskByRootIno(ctx any, rootIno any) *MockStore_GetDiskByRootIno_Call {
+	return &MockStore_GetDiskByRootIno_Call{Call: _e.mock.On("GetDiskByRootIno", ctx, rootIno)}
+}
+
+func (_c *MockStore_GetDiskByRootIno_Call) Run(run func(ctx context.Context, rootIno int64)) *MockStore_GetDiskByRootIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetDiskByRootIno_Call) Return(disk db.Disk, err error) *MockStore_GetDiskByRootIno_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_GetDiskByRootIno_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) (db.Disk, error)) *MockStore_GetDiskByRootIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetDiskByRootInoForUpdate provides a mock function for the type MockStore
+func (_mock *MockStore) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
+	ret := _mock.Called(ctx, rootIno)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDiskByRootInoForUpdate")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Disk, error)); ok {
+		return returnFunc(ctx, rootIno)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Disk); ok {
+		r0 = returnFunc(ctx, rootIno)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, rootIno)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetDiskByRootInoForUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDiskByRootInoForUpdate'
+type MockStore_GetDiskByRootInoForUpdate_Call struct {
+	*mock.Call
+}
+
+// GetDiskByRootInoForUpdate is a helper method to define mock.On call
+//   - ctx context.Context
+//   - rootIno int64
+func (_e *MockStore_Expecter) GetDiskByRootInoForUpdate(ctx any, rootIno any) *MockStore_GetDiskByRootInoForUpdate_Call {
+	return &MockStore_GetDiskByRootInoForUpdate_Call{Call: _e.mock.On("GetDiskByRootInoForUpdate", ctx, rootIno)}
+}
+
+func (_c *MockStore_GetDiskByRootInoForUpdate_Call) Run(run func(ctx context.Context, rootIno int64)) *MockStore_GetDiskByRootInoForUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetDiskByRootInoForUpdate_Call) Return(disk db.Disk, err error) *MockStore_GetDiskByRootInoForUpdate_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_GetDiskByRootInoForUpdate_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) (db.Disk, error)) *MockStore_GetDiskByRootInoForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetDiskForUpdate provides a mock function for the type MockStore
+func (_mock *MockStore) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (db.Disk, error) {
+	ret := _mock.Called(ctx, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDiskForUpdate")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (db.Disk, error)); ok {
+		return returnFunc(ctx, diskID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) db.Disk); ok {
+		r0 = returnFunc(ctx, diskID)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, pgtype.UUID) error); ok {
+		r1 = returnFunc(ctx, diskID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetDiskForUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDiskForUpdate'
+type MockStore_GetDiskForUpdate_Call struct {
+	*mock.Call
+}
+
+// GetDiskForUpdate is a helper method to define mock.On call
+//   - ctx context.Context
+//   - diskID pgtype.UUID
+func (_e *MockStore_Expecter) GetDiskForUpdate(ctx any, diskID any) *MockStore_GetDiskForUpdate_Call {
+	return &MockStore_GetDiskForUpdate_Call{Call: _e.mock.On("GetDiskForUpdate", ctx, diskID)}
+}
+
+func (_c *MockStore_GetDiskForUpdate_Call) Run(run func(ctx context.Context, diskID pgtype.UUID)) *MockStore_GetDiskForUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 pgtype.UUID
+		if args[1] != nil {
+			arg1 = args[1].(pgtype.UUID)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetDiskForUpdate_Call) Return(disk db.Disk, err error) *MockStore_GetDiskForUpdate_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_GetDiskForUpdate_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (db.Disk, error)) *MockStore_GetDiskForUpdate_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -3512,6 +4100,204 @@ func (_c *MockStore_TouchInodeTimestamps_Call) Return(err error) *MockStore_Touc
 }
 
 func (_c *MockStore_TouchInodeTimestamps_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_TouchInodeTimestamps_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateDisk provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateDisk(ctx context.Context, arg db.UpdateDiskParams) (db.Disk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateDisk")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskParams) (db.Disk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskParams) db.Disk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateDiskParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_UpdateDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateDisk'
+type MockStore_UpdateDisk_Call struct {
+	*mock.Call
+}
+
+// UpdateDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateDiskParams
+func (_e *MockStore_Expecter) UpdateDisk(ctx any, arg any) *MockStore_UpdateDisk_Call {
+	return &MockStore_UpdateDisk_Call{Call: _e.mock.On("UpdateDisk", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateDisk_Call) Run(run func(ctx context.Context, arg db.UpdateDiskParams)) *MockStore_UpdateDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateDiskParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateDiskParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateDisk_Call) Return(disk db.Disk, err error) *MockStore_UpdateDisk_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_UpdateDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskParams) (db.Disk, error)) *MockStore_UpdateDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateDiskQuotaByRootIno provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateDiskQuotaByRootIno(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams) (db.Disk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateDiskQuotaByRootIno")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskQuotaByRootInoParams) (db.Disk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskQuotaByRootInoParams) db.Disk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateDiskQuotaByRootInoParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_UpdateDiskQuotaByRootIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateDiskQuotaByRootIno'
+type MockStore_UpdateDiskQuotaByRootIno_Call struct {
+	*mock.Call
+}
+
+// UpdateDiskQuotaByRootIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateDiskQuotaByRootInoParams
+func (_e *MockStore_Expecter) UpdateDiskQuotaByRootIno(ctx any, arg any) *MockStore_UpdateDiskQuotaByRootIno_Call {
+	return &MockStore_UpdateDiskQuotaByRootIno_Call{Call: _e.mock.On("UpdateDiskQuotaByRootIno", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateDiskQuotaByRootIno_Call) Run(run func(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams)) *MockStore_UpdateDiskQuotaByRootIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateDiskQuotaByRootInoParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateDiskQuotaByRootInoParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateDiskQuotaByRootIno_Call) Return(disk db.Disk, err error) *MockStore_UpdateDiskQuotaByRootIno_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_UpdateDiskQuotaByRootIno_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams) (db.Disk, error)) *MockStore_UpdateDiskQuotaByRootIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateDiskUsedBytes provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateDiskUsedBytes(ctx context.Context, arg db.UpdateDiskUsedBytesParams) (db.Disk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateDiskUsedBytes")
+	}
+
+	var r0 db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskUsedBytesParams) (db.Disk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskUsedBytesParams) db.Disk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Disk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateDiskUsedBytesParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_UpdateDiskUsedBytes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateDiskUsedBytes'
+type MockStore_UpdateDiskUsedBytes_Call struct {
+	*mock.Call
+}
+
+// UpdateDiskUsedBytes is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateDiskUsedBytesParams
+func (_e *MockStore_Expecter) UpdateDiskUsedBytes(ctx any, arg any) *MockStore_UpdateDiskUsedBytes_Call {
+	return &MockStore_UpdateDiskUsedBytes_Call{Call: _e.mock.On("UpdateDiskUsedBytes", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateDiskUsedBytes_Call) Run(run func(ctx context.Context, arg db.UpdateDiskUsedBytesParams)) *MockStore_UpdateDiskUsedBytes_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateDiskUsedBytesParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateDiskUsedBytesParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateDiskUsedBytes_Call) Return(disk db.Disk, err error) *MockStore_UpdateDiskUsedBytes_Call {
+	_c.Call.Return(disk, err)
+	return _c
+}
+
+func (_c *MockStore_UpdateDiskUsedBytes_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskUsedBytesParams) (db.Disk, error)) *MockStore_UpdateDiskUsedBytes_Call {
 	_c.Call.Return(run)
 	return _c
 }

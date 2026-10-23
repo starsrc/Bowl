@@ -256,6 +256,7 @@ func (m *manager) newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
 		SymlinkTarget: row.SymlinkTarget,
 		Flags:         row.Flags,
 		ParentIno:     row.ParentIno,
+		RootIno:       row.RootIno,
 	}, entryTimeout, m.attrTimeout)
 }
 

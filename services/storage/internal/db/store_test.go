@@ -2,16 +2,22 @@ package db_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 )
@@ -101,6 +107,22 @@ type FileLockQuerier interface {
 	DeleteFileLockWaiter(ctx context.Context, arg db.DeleteFileLockWaiterParams) (int64, error)
 }
 
+// DiskQuerier 提取磁盘元数据增删改查、配额更新与按根节点级联清理接口契约。
+type DiskQuerier interface {
+	CreateDisk(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error)
+	GetDisk(ctx context.Context, diskID pgtype.UUID) (db.Disk, error)
+	GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (db.Disk, error)
+	GetDiskByRootIno(ctx context.Context, rootIno int64) (db.Disk, error)
+	GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error)
+	UpdateDisk(ctx context.Context, arg db.UpdateDiskParams) (db.Disk, error)
+	UpdateDiskUsedBytes(ctx context.Context, arg db.UpdateDiskUsedBytesParams) (db.Disk, error)
+	UpdateDiskQuotaByRootIno(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams) (db.Disk, error)
+	AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error
+	DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error)
+	DeleteInodesByRootIno(ctx context.Context, rootIno int64) ([]int64, error)
+	CreateRootInode(ctx context.Context, arg db.CreateRootInodeParams) (db.Inode, error)
+}
+
 // 静态验证 db.Querier、db.Store 与 *db.Queries 完备实现各接口契约。
 var (
 	_ InodeAttrQuerier = (db.Querier)(nil)
@@ -142,6 +164,12 @@ var (
 	_ FileLockQuerier = (db.Querier)(nil)
 	_ FileLockQuerier = (db.Store)(nil)
 	_ FileLockQuerier = (*db.Queries)(nil)
+
+	_ DiskQuerier = (db.Querier)(nil)
+	_ DiskQuerier = (db.Store)(nil)
+	_ DiskQuerier = (*db.Queries)(nil)
+
+	_ tx.Transactor[db.Querier] = (db.Store)(nil)
 )
 
 func TestNewStore(t *testing.T) {
@@ -1633,5 +1661,760 @@ func TestStore_FileLockBehavior(t *testing.T) {
 		rows, err := store.DeleteFileLockWaiter(ctx, delParams)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), rows)
+	})
+}
+
+func TestStore_DiskOperatorsBehavior(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Disk 磁盘元数据与配额算子契约调用与参数透传", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		var store db.Store = mockStore
+
+		diskID := newTestUUID()
+		now := time.Now().Truncate(time.Microsecond)
+		expectedDisk := db.Disk{
+			DiskID:     diskID,
+			Name:       "mock-disk",
+			RootIno:    1001,
+			MaxBytes:   1024 * 1024,
+			UsedBytes:  0,
+			UsedInodes: 1,
+			CreatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		// 1. CreateDisk
+		createParams := db.CreateDiskParams{
+			DiskID:   diskID,
+			Name:     "mock-disk",
+			RootIno:  1001,
+			MaxBytes: 1024 * 1024,
+		}
+		mockStore.EXPECT().
+			CreateDisk(mock.Anything, createParams).
+			Return(expectedDisk, nil).
+			Once()
+		createdDisk, err := store.CreateDisk(ctx, createParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedDisk, createdDisk)
+
+		// 2. GetDisk
+		mockStore.EXPECT().
+			GetDisk(mock.Anything, diskID).
+			Return(expectedDisk, nil).
+			Once()
+		gotDisk, err := store.GetDisk(ctx, diskID)
+		require.NoError(t, err)
+		assert.Equal(t, expectedDisk, gotDisk)
+
+		// 3. GetDiskForUpdate
+		mockStore.EXPECT().
+			GetDiskForUpdate(mock.Anything, diskID).
+			Return(expectedDisk, nil).
+			Once()
+		gotForUpdate, err := store.GetDiskForUpdate(ctx, diskID)
+		require.NoError(t, err)
+		assert.Equal(t, expectedDisk, gotForUpdate)
+
+		// 4. GetDiskByRootIno
+		mockStore.EXPECT().
+			GetDiskByRootIno(mock.Anything, int64(1001)).
+			Return(expectedDisk, nil).
+			Once()
+		gotByRoot, err := store.GetDiskByRootIno(ctx, 1001)
+		require.NoError(t, err)
+		assert.Equal(t, expectedDisk, gotByRoot)
+
+		// 5. GetDiskByRootInoForUpdate
+		mockStore.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, int64(1001)).
+			Return(expectedDisk, nil).
+			Once()
+		gotByRootForUpdate, err := store.GetDiskByRootInoForUpdate(ctx, 1001)
+		require.NoError(t, err)
+		assert.Equal(t, expectedDisk, gotByRootForUpdate)
+
+		// 6. UpdateDisk
+		updateParams := db.UpdateDiskParams{
+			DiskID:   diskID,
+			Name:     "renamed-mock-disk",
+			MaxBytes: 2048 * 1024,
+		}
+		updatedExpected := expectedDisk
+		updatedExpected.Name = "renamed-mock-disk"
+		updatedExpected.MaxBytes = 2048 * 1024
+		mockStore.EXPECT().
+			UpdateDisk(mock.Anything, updateParams).
+			Return(updatedExpected, nil).
+			Once()
+		updatedDisk, err := store.UpdateDisk(ctx, updateParams)
+		require.NoError(t, err)
+		assert.Equal(t, updatedExpected, updatedDisk)
+
+		// 7. UpdateDiskUsedBytes
+		updateUsedParams := db.UpdateDiskUsedBytesParams{
+			DiskID:    diskID,
+			UsedBytes: 512 * 1024,
+		}
+		usedBytesExpected := updatedExpected
+		usedBytesExpected.UsedBytes = 512 * 1024
+		mockStore.EXPECT().
+			UpdateDiskUsedBytes(mock.Anything, updateUsedParams).
+			Return(usedBytesExpected, nil).
+			Once()
+		usedDisk, err := store.UpdateDiskUsedBytes(ctx, updateUsedParams)
+		require.NoError(t, err)
+		assert.Equal(t, usedBytesExpected, usedDisk)
+
+		// 8. UpdateDiskQuotaByRootIno
+		updateQuotaParams := db.UpdateDiskQuotaByRootInoParams{
+			DeltaBytes:  4096,
+			DeltaInodes: 1,
+			RootIno:     1001,
+		}
+		quotaExpected := usedBytesExpected
+		quotaExpected.UsedBytes += 4096
+		quotaExpected.UsedInodes += 1
+		mockStore.EXPECT().
+			UpdateDiskQuotaByRootIno(mock.Anything, updateQuotaParams).
+			Return(quotaExpected, nil).
+			Once()
+		quotaDisk, err := store.UpdateDiskQuotaByRootIno(ctx, updateQuotaParams)
+		require.NoError(t, err)
+		assert.Equal(t, quotaExpected, quotaDisk)
+
+		// 9. AddDiskQuotaByRootIno
+		addQuotaParams := db.AddDiskQuotaByRootInoParams{
+			DeltaBytes:  -4096,
+			DeltaInodes: -1,
+			RootIno:     1001,
+		}
+		mockStore.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, addQuotaParams).
+			Return(nil).
+			Once()
+		err = store.AddDiskQuotaByRootIno(ctx, addQuotaParams)
+		require.NoError(t, err)
+
+		// 10. DeleteDisk
+		mockStore.EXPECT().
+			DeleteDisk(mock.Anything, diskID).
+			Return(int64(1), nil).
+			Once()
+		delRows, err := store.DeleteDisk(ctx, diskID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), delRows)
+
+		// 11. DeleteInodesByRootIno
+		mockStore.EXPECT().
+			DeleteInodesByRootIno(mock.Anything, int64(1001)).
+			Return([]int64{1001, 1002}, nil).
+			Once()
+		deletedInos, err := store.DeleteInodesByRootIno(ctx, 1001)
+		require.NoError(t, err)
+		assert.Equal(t, []int64{1001, 1002}, deletedInos)
+
+		// 12. CreateRootInode
+		rootParams := db.CreateRootInodeParams{
+			Mode:  0o040755,
+			Nlink: 2,
+			Uid:   0,
+			Gid:   0,
+			Rdev:  0,
+			Size:  4096,
+		}
+		expectedRootInode := db.Inode{
+			Ino:       1001,
+			Mode:      0o040755,
+			Nlink:     2,
+			Uid:       0,
+			Gid:       0,
+			Rdev:      0,
+			Size:      4096,
+			ParentIno: 1001,
+			RootIno:   1001,
+			Atime:     pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:     pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:     pgtype.Timestamptz{Time: now, Valid: true},
+		}
+		mockStore.EXPECT().
+			CreateRootInode(mock.Anything, rootParams).
+			Return(expectedRootInode, nil).
+			Once()
+		createdRoot, err := store.CreateRootInode(ctx, rootParams)
+		require.NoError(t, err)
+		assert.Equal(t, expectedRootInode, createdRoot)
+	})
+}
+
+// ==========================================
+// 数据库持久化集成测试 (Database Integration Tests)
+// ==========================================
+
+var testInoSeq int64 = 9_500_000_000
+
+func nextTestIno() int64 {
+	return atomic.AddInt64(&testInoSeq, 1)
+}
+
+func newTestUUID() pgtype.UUID {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // RFC 4122 version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return pgtype.UUID{Bytes: b, Valid: true}
+}
+
+func setupTestDB(t *testing.T) (db.Store, *pgxpool.Pool) {
+	t.Helper()
+	dsn := os.Getenv("STORAGE_DB_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过 PostgreSQL 测试 (连接初始化失败): %v", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("跳过 PostgreSQL 测试 (ping 失败): %v", err)
+	}
+
+	t.Cleanup(func() {
+		pool.Close()
+	})
+
+	return db.NewStore(pool), pool
+}
+
+func TestStore_Integration_CreateAndGetDisk(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	diskID := newTestUUID()
+	rootIno := nextTestIno()
+
+	t.Cleanup(func() {
+		_, _ = store.DeleteDisk(context.Background(), diskID)
+	})
+
+	params := db.CreateDiskParams{
+		DiskID:   diskID,
+		Name:     "integration-storage-disk-1",
+		RootIno:  rootIno,
+		MaxBytes: 100 * 1024 * 1024,
+	}
+
+	// 1. 创建磁盘实体
+	created, err := store.CreateDisk(ctx, params)
+	require.NoError(t, err)
+	assert.Equal(t, diskID, created.DiskID)
+	assert.Equal(t, "integration-storage-disk-1", created.Name)
+	assert.Equal(t, rootIno, created.RootIno)
+	assert.Equal(t, int64(100*1024*1024), created.MaxBytes)
+	assert.Equal(t, int64(0), created.UsedBytes)
+	assert.Equal(t, int64(1), created.UsedInodes)
+	assert.True(t, created.CreatedAt.Valid)
+	assert.True(t, created.UpdatedAt.Valid)
+
+	// 2. 主键查询磁盘实体
+	got, err := store.GetDisk(ctx, diskID)
+	require.NoError(t, err)
+	assert.Equal(t, created.DiskID, got.DiskID)
+	assert.Equal(t, created.Name, got.Name)
+	assert.Equal(t, created.RootIno, got.RootIno)
+	assert.Equal(t, created.MaxBytes, got.MaxBytes)
+	assert.Equal(t, created.UsedBytes, got.UsedBytes)
+	assert.Equal(t, created.UsedInodes, got.UsedInodes)
+
+	// 3. 按 root_ino 查询磁盘实体
+	gotByRoot, err := store.GetDiskByRootIno(ctx, rootIno)
+	require.NoError(t, err)
+	assert.Equal(t, created.DiskID, gotByRoot.DiskID)
+	assert.Equal(t, created.Name, gotByRoot.Name)
+	assert.Equal(t, created.RootIno, gotByRoot.RootIno)
+
+	// 4. 查询不存在的磁盘实体返回 pgx.ErrNoRows
+	nonExistentID := newTestUUID()
+	_, err = store.GetDisk(ctx, nonExistentID)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	_, err = store.GetDiskByRootIno(ctx, nextTestIno())
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+}
+
+func TestStore_Integration_GetDiskForUpdate(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	diskID := newTestUUID()
+	rootIno := nextTestIno()
+
+	t.Cleanup(func() {
+		_, _ = store.DeleteDisk(context.Background(), diskID)
+	})
+
+	params := db.CreateDiskParams{
+		DiskID:   diskID,
+		Name:     "for-update-storage-disk",
+		RootIno:  rootIno,
+		MaxBytes: 50 * 1024 * 1024,
+	}
+
+	_, err := store.CreateDisk(ctx, params)
+	require.NoError(t, err)
+
+	// 事务中悲观排他锁读取
+	err = store.ExecTx(ctx, func(q db.Querier) error {
+		locked, getErr := q.GetDiskForUpdate(ctx, diskID)
+		require.NoError(t, getErr)
+		assert.Equal(t, diskID, locked.DiskID)
+		assert.Equal(t, "for-update-storage-disk", locked.Name)
+
+		lockedByRoot, getByRootErr := q.GetDiskByRootInoForUpdate(ctx, rootIno)
+		require.NoError(t, getByRootErr)
+		assert.Equal(t, diskID, lockedByRoot.DiskID)
+		assert.Equal(t, rootIno, lockedByRoot.RootIno)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// 查询不存在的磁盘返回 pgx.ErrNoRows
+	_, err = store.GetDiskForUpdate(ctx, newTestUUID())
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	_, err = store.GetDiskByRootInoForUpdate(ctx, nextTestIno())
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+}
+
+func TestStore_Integration_UpdateDisk(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	diskID := newTestUUID()
+	rootIno := nextTestIno()
+
+	t.Cleanup(func() {
+		_, _ = store.DeleteDisk(context.Background(), diskID)
+	})
+
+	params := db.CreateDiskParams{
+		DiskID:   diskID,
+		Name:     "original-disk-name",
+		RootIno:  rootIno,
+		MaxBytes: 50 * 1024 * 1024,
+	}
+
+	_, err := store.CreateDisk(ctx, params)
+	require.NoError(t, err)
+
+	// 更新名称与容量上限
+	updateParams := db.UpdateDiskParams{
+		DiskID:   diskID,
+		Name:     "renamed-storage-disk",
+		MaxBytes: 200 * 1024 * 1024,
+	}
+	updated, err := store.UpdateDisk(ctx, updateParams)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed-storage-disk", updated.Name)
+	assert.Equal(t, int64(200*1024*1024), updated.MaxBytes)
+
+	// 更新已用字节数
+	usedParams := db.UpdateDiskUsedBytesParams{
+		DiskID:    diskID,
+		UsedBytes: 10 * 1024 * 1024,
+	}
+	updatedUsed, err := store.UpdateDiskUsedBytes(ctx, usedParams)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10*1024*1024), updatedUsed.UsedBytes)
+}
+
+func TestStore_Integration_DiskQuotaUpdates(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	diskID := newTestUUID()
+	rootIno := nextTestIno()
+
+	t.Cleanup(func() {
+		_, _ = store.DeleteDisk(context.Background(), diskID)
+	})
+
+	params := db.CreateDiskParams{
+		DiskID:   diskID,
+		Name:     "quota-disk",
+		RootIno:  rootIno,
+		MaxBytes: 100 * 1024 * 1024,
+	}
+
+	_, err := store.CreateDisk(ctx, params)
+	require.NoError(t, err)
+
+	// 1. UpdateDiskQuotaByRootIno 正向增加
+	q1, err := store.UpdateDiskQuotaByRootIno(ctx, db.UpdateDiskQuotaByRootInoParams{
+		DeltaBytes:  4096,
+		DeltaInodes: 1,
+		RootIno:     rootIno,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(4096), q1.UsedBytes)
+	assert.Equal(t, int64(2), q1.UsedInodes)
+
+	// 2. UpdateDiskQuotaByRootIno 负向扣减
+	q2, err := store.UpdateDiskQuotaByRootIno(ctx, db.UpdateDiskQuotaByRootInoParams{
+		DeltaBytes:  -2048,
+		DeltaInodes: -1,
+		RootIno:     rootIno,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2048), q2.UsedBytes)
+	assert.Equal(t, int64(1), q2.UsedInodes)
+
+	// 3. UpdateDiskQuotaByRootIno 超额扣减（GREATEST 钳位归零）
+	q3, err := store.UpdateDiskQuotaByRootIno(ctx, db.UpdateDiskQuotaByRootInoParams{
+		DeltaBytes:  -100000,
+		DeltaInodes: -10,
+		RootIno:     rootIno,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), q3.UsedBytes)
+	assert.Equal(t, int64(0), q3.UsedInodes)
+
+	// 4. AddDiskQuotaByRootIno 增量累加
+	err = store.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+		DeltaBytes:  8192,
+		DeltaInodes: 5,
+		RootIno:     rootIno,
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetDisk(ctx, diskID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(8192), got.UsedBytes)
+	assert.Equal(t, int64(5), got.UsedInodes)
+
+	// 5. 对不存在的 root_ino 调用 AddDiskQuotaByRootIno 影响 0 行且不返回错误
+	err = store.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+		DeltaBytes:  1024,
+		DeltaInodes: 1,
+		RootIno:     nextTestIno(),
+	})
+	require.NoError(t, err)
+}
+
+func TestStore_Integration_DeleteDisk(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	diskID := newTestUUID()
+	rootIno := nextTestIno()
+
+	params := db.CreateDiskParams{
+		DiskID:   diskID,
+		Name:     "delete-target-disk",
+		RootIno:  rootIno,
+		MaxBytes: 10 * 1024 * 1024,
+	}
+
+	_, err := store.CreateDisk(ctx, params)
+	require.NoError(t, err)
+
+	// 正常删除返回 1
+	rows, err := store.DeleteDisk(ctx, diskID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+
+	// 再次查询返回 pgx.ErrNoRows
+	_, err = store.GetDisk(ctx, diskID)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// 再次删除影响 0 行
+	rows, err = store.DeleteDisk(ctx, diskID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), rows)
+}
+
+func TestStore_Integration_DiskConstraints(t *testing.T) {
+	store, pool := setupTestDB(t)
+	ctx := context.Background()
+
+	t.Run("chk_disks_root_ino 约束: root_ino <= 0 被拒绝", func(t *testing.T) {
+		diskID := newTestUUID()
+		_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:   diskID,
+			Name:     "invalid-root-ino",
+			RootIno:  0,
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		assert.Equal(t, "chk_disks_root_ino", pgErr.ConstraintName)
+	})
+
+	t.Run("chk_disks_capacity 约束: max_bytes <= 0 被拒绝", func(t *testing.T) {
+		diskID := newTestUUID()
+		_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:   diskID,
+			Name:     "invalid-max-bytes",
+			RootIno:  nextTestIno(),
+			MaxBytes: 0,
+		})
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		assert.Equal(t, "chk_disks_capacity", pgErr.ConstraintName)
+	})
+
+	t.Run("chk_disks_capacity 约束: used_bytes > max_bytes 被拒绝", func(t *testing.T) {
+		diskID := newTestUUID()
+		rootIno := nextTestIno()
+		t.Cleanup(func() {
+			_, _ = store.DeleteDisk(context.Background(), diskID)
+		})
+
+		_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:   diskID,
+			Name:     "capacity-test-disk",
+			RootIno:  rootIno,
+			MaxBytes: 1000,
+		})
+		require.NoError(t, err)
+
+		_, err = store.UpdateDiskUsedBytes(ctx, db.UpdateDiskUsedBytesParams{
+			DiskID:    diskID,
+			UsedBytes: 1001,
+		})
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		assert.Equal(t, "chk_disks_capacity", pgErr.ConstraintName)
+	})
+
+	t.Run("chk_disks_capacity 约束: used_inodes < 0 被拒绝", func(t *testing.T) {
+		diskID := newTestUUID()
+		rootIno := nextTestIno()
+		t.Cleanup(func() {
+			_, _ = store.DeleteDisk(context.Background(), diskID)
+		})
+
+		_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:   diskID,
+			Name:     "inode-capacity-test",
+			RootIno:  rootIno,
+			MaxBytes: 1000,
+		})
+		require.NoError(t, err)
+
+		_, err = pool.Exec(ctx, "UPDATE disks SET used_inodes = -1 WHERE disk_id = $1", diskID)
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		assert.Equal(t, "chk_disks_capacity", pgErr.ConstraintName)
+	})
+
+	t.Run("root_ino UNIQUE 约束: 重复 root_ino 被拒绝", func(t *testing.T) {
+		diskID1 := newTestUUID()
+		diskID2 := newTestUUID()
+		rootIno := nextTestIno()
+
+		t.Cleanup(func() {
+			_, _ = store.DeleteDisk(context.Background(), diskID1)
+			_, _ = store.DeleteDisk(context.Background(), diskID2)
+		})
+
+		_, err := store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:   diskID1,
+			Name:     "disk-1",
+			RootIno:  rootIno,
+			MaxBytes: 1000,
+		})
+		require.NoError(t, err)
+
+		_, err = store.CreateDisk(ctx, db.CreateDiskParams{
+			DiskID:   diskID2,
+			Name:     "disk-2",
+			RootIno:  rootIno,
+			MaxBytes: 2000,
+		})
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		assert.Equal(t, "23505", pgErr.Code)
+	})
+}
+
+func TestStore_Integration_InodesRootInoAndCascade(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. CreateRootInode 自动设置 ino == root_ino == parent_ino
+	rootInode, err := store.CreateRootInode(ctx, db.CreateRootInodeParams{
+		Mode:  0o040755,
+		Nlink: 2,
+		Uid:   1000,
+		Gid:   1000,
+		Rdev:  0,
+		Size:  4096,
+	})
+	require.NoError(t, err)
+	assert.Greater(t, rootInode.Ino, int64(1))
+	assert.Equal(t, rootInode.Ino, rootInode.RootIno)
+	assert.Equal(t, rootInode.Ino, rootInode.ParentIno)
+
+	t.Cleanup(func() {
+		_, _ = store.DeleteInodesByRootIno(context.Background(), rootInode.Ino)
+	})
+
+	// 2. CreateInode 继承 root_ino
+	childInode, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:      0o100644,
+		Nlink:     1,
+		Uid:       1000,
+		Gid:       1000,
+		Rdev:      0,
+		Size:      1024,
+		ParentIno: rootInode.Ino,
+		RootIno:   rootInode.Ino,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, rootInode.Ino, childInode.RootIno)
+	assert.Equal(t, rootInode.Ino, childInode.ParentIno)
+
+	// 3. CreateSymlinkInode 继承 root_ino
+	symlinkInode, err := store.CreateSymlinkInode(ctx, db.CreateSymlinkInodeParams{
+		Mode:          0o120777,
+		Size:          10,
+		Nlink:         1,
+		Uid:           1000,
+		Gid:           1000,
+		Rdev:          0,
+		SymlinkTarget: []byte("/target/path"),
+		ParentIno:     rootInode.Ino,
+		RootIno:       rootInode.Ino,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, rootInode.Ino, symlinkInode.RootIno)
+	assert.Equal(t, rootInode.Ino, symlinkInode.ParentIno)
+
+	// 4. 创建 entries 目录项
+	err = store.CreateEntry(ctx, db.CreateEntryParams{
+		ParentIno: rootInode.Ino,
+		Name:      []byte("child-file.txt"),
+		Ino:       childInode.Ino,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateEntry(ctx, db.CreateEntryParams{
+		ParentIno: rootInode.Ino,
+		Name:      []byte("child-symlink"),
+		Ino:       symlinkInode.Ino,
+	})
+	require.NoError(t, err)
+
+	// 5. 验证 GetInode 与 GetInodeByEntry 能够查到带有正确 root_ino 的数据
+	gotChild, err := store.GetInode(ctx, childInode.Ino)
+	require.NoError(t, err)
+	assert.Equal(t, rootInode.Ino, gotChild.RootIno)
+
+	gotByEntry, err := store.GetInodeByEntry(ctx, db.GetInodeByEntryParams{
+		ParentIno: rootInode.Ino,
+		Name:      []byte("child-file.txt"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, childInode.Ino, gotByEntry.Ino)
+	assert.Equal(t, rootInode.Ino, gotByEntry.RootIno)
+
+	// 6. DeleteInodesByRootIno 级联清理所有 inodes 及 entries 表中的关联记录
+	deletedInos, err := store.DeleteInodesByRootIno(ctx, rootInode.Ino)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int64{rootInode.Ino, childInode.Ino, symlinkInode.Ino}, deletedInos)
+
+	// 7. 验证 inodes 已全部被物理清理
+	_, err = store.GetInode(ctx, rootInode.Ino)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	_, err = store.GetInode(ctx, childInode.Ino)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	_, err = store.GetInode(ctx, symlinkInode.Ino)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// 8. 验证 entries 记录因 fk_entries_ino ON DELETE CASCADE 也已被级联清理
+	_, err = store.GetEntry(ctx, db.GetEntryParams{
+		ParentIno: rootInode.Ino,
+		Name:      []byte("child-file.txt"),
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	_, err = store.GetEntry(ctx, db.GetEntryParams{
+		ParentIno: rootInode.Ino,
+		Name:      []byte("child-symlink"),
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+}
+
+func TestStore_Integration_TransactionRollbackAndCommit(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	t.Run("事务发生错误时原子回滚", func(t *testing.T) {
+		diskID := newTestUUID()
+		rootIno := nextTestIno()
+		simulatedErr := errors.New("simulated business error inside tx")
+
+		err := store.ExecTx(ctx, func(q db.Querier) error {
+			_, createErr := q.CreateDisk(ctx, db.CreateDiskParams{
+				DiskID:   diskID,
+				Name:     "rollback-disk",
+				RootIno:  rootIno,
+				MaxBytes: 10 * 1024 * 1024,
+			})
+			require.NoError(t, createErr)
+
+			return simulatedErr
+		})
+		require.ErrorIs(t, err, simulatedErr)
+
+		// 验证 disk 未持久化
+		_, err = store.GetDisk(ctx, diskID)
+		require.ErrorIs(t, err, pgx.ErrNoRows)
+	})
+
+	t.Run("事务成功提交后持久化生效", func(t *testing.T) {
+		diskID := newTestUUID()
+		rootIno := nextTestIno()
+
+		t.Cleanup(func() {
+			_, _ = store.DeleteDisk(context.Background(), diskID)
+		})
+
+		err := store.ExecTx(ctx, func(q db.Querier) error {
+			_, createErr := q.CreateDisk(ctx, db.CreateDiskParams{
+				DiskID:   diskID,
+				Name:     "commit-disk",
+				RootIno:  rootIno,
+				MaxBytes: 20 * 1024 * 1024,
+			})
+			require.NoError(t, createErr)
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		// 验证 disk 已持久化
+		disk, err := store.GetDisk(ctx, diskID)
+		require.NoError(t, err)
+		assert.Equal(t, diskID, disk.DiskID)
+		assert.Equal(t, "commit-disk", disk.Name)
 	})
 }

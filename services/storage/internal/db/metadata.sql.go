@@ -11,12 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addDiskQuotaByRootIno = `-- name: AddDiskQuotaByRootIno :exec
+UPDATE disks
+SET
+    used_bytes = GREATEST(used_bytes + $1::bigint, 0),
+    used_inodes = GREATEST(used_inodes + $2::bigint, 0),
+    updated_at = clock_timestamp()
+WHERE root_ino = $3::bigint
+`
+
+type AddDiskQuotaByRootInoParams struct {
+	DeltaBytes  int64 `json:"delta_bytes"`
+	DeltaInodes int64 `json:"delta_inodes"`
+	RootIno     int64 `json:"root_ino"`
+}
+
+func (q *Queries) AddDiskQuotaByRootIno(ctx context.Context, arg AddDiskQuotaByRootInoParams) error {
+	_, err := q.db.Exec(ctx, addDiskQuotaByRootIno, arg.DeltaBytes, arg.DeltaInodes, arg.RootIno)
+	return err
+}
+
 const clearInodeNlinkAndTouchCtime = `-- name: ClearInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = 0,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 `
 
 func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
@@ -37,6 +57,7 @@ func (q *Queries) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
@@ -51,6 +72,57 @@ WHERE ino = $1
 func (q *Queries) ClearTmpFileFlagByIno(ctx context.Context, ino int64) error {
 	_, err := q.db.Exec(ctx, clearTmpFileFlagByIno, ino)
 	return err
+}
+
+const createDisk = `-- name: CreateDisk :one
+INSERT INTO disks (
+    disk_id,
+    name,
+    root_ino,
+    max_bytes,
+    used_bytes,
+    used_inodes,
+    created_at,
+    updated_at
+) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    0,
+    1,
+    clock_timestamp(),
+    clock_timestamp()
+)
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+`
+
+type CreateDiskParams struct {
+	DiskID   pgtype.UUID `json:"disk_id"`
+	Name     string      `json:"name"`
+	RootIno  int64       `json:"root_ino"`
+	MaxBytes int64       `json:"max_bytes"`
+}
+
+func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, createDisk,
+		arg.DiskID,
+		arg.Name,
+		arg.RootIno,
+		arg.MaxBytes,
+	)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const createEntry = `-- name: CreateEntry :exec
@@ -146,10 +218,10 @@ func (q *Queries) CreateFileLock(ctx context.Context, arg CreateFileLockParams) 
 }
 
 const createInode = `-- name: CreateInode :one
-INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, atime, mtime, ctime)
-SELECT $1, $2, $3, $4, $5, $6::bigint, $7::bigint, ts.now, ts.now, ts.now
+INSERT INTO inodes (mode, nlink, uid, gid, rdev, size, parent_ino, root_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, $6::bigint, $7::bigint, $8::bigint, ts.now, ts.now, ts.now
 FROM (SELECT clock_timestamp() AS now) AS ts
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 `
 
 type CreateInodeParams struct {
@@ -160,6 +232,7 @@ type CreateInodeParams struct {
 	Rdev      int64 `json:"rdev"`
 	Size      int64 `json:"size"`
 	ParentIno int64 `json:"parent_ino"`
+	RootIno   int64 `json:"root_ino"`
 }
 
 func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode, error) {
@@ -171,6 +244,7 @@ func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode
 		arg.Rdev,
 		arg.Size,
 		arg.ParentIno,
+		arg.RootIno,
 	)
 	var i Inode
 	err := row.Scan(
@@ -188,15 +262,65 @@ func (q *Queries) CreateInode(ctx context.Context, arg CreateInodeParams) (Inode
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
+	)
+	return i, err
+}
+
+const createRootInode = `-- name: CreateRootInode :one
+WITH next_ino AS (
+    SELECT nextval('inode_id_seq') AS ino, clock_timestamp() AS now
+)
+INSERT INTO inodes (ino, mode, nlink, uid, gid, rdev, size, parent_ino, root_ino, atime, mtime, ctime)
+SELECT n.ino, $1, $2, $3, $4, $5, $6::bigint, n.ino, n.ino, n.now, n.now, n.now
+FROM next_ino n
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
+`
+
+type CreateRootInodeParams struct {
+	Mode  int32 `json:"mode"`
+	Nlink int32 `json:"nlink"`
+	Uid   int32 `json:"uid"`
+	Gid   int32 `json:"gid"`
+	Rdev  int64 `json:"rdev"`
+	Size  int64 `json:"size"`
+}
+
+func (q *Queries) CreateRootInode(ctx context.Context, arg CreateRootInodeParams) (Inode, error) {
+	row := q.db.QueryRow(ctx, createRootInode,
+		arg.Mode,
+		arg.Nlink,
+		arg.Uid,
+		arg.Gid,
+		arg.Rdev,
+		arg.Size,
+	)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
 
 const createSymlinkInode = `-- name: CreateSymlinkInode :one
-INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, atime, mtime, ctime)
-SELECT $1, $2, $3, $4, $5, $6, $7, $8::bigint, ts.now, ts.now, ts.now
+INSERT INTO inodes (mode, size, nlink, uid, gid, rdev, symlink_target, parent_ino, root_ino, atime, mtime, ctime)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8::bigint, $9::bigint, ts.now, ts.now, ts.now
 FROM (SELECT clock_timestamp() AS now) AS ts
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 `
 
 type CreateSymlinkInodeParams struct {
@@ -208,6 +332,7 @@ type CreateSymlinkInodeParams struct {
 	Rdev          int64  `json:"rdev"`
 	SymlinkTarget []byte `json:"symlink_target"`
 	ParentIno     int64  `json:"parent_ino"`
+	RootIno       int64  `json:"root_ino"`
 }
 
 func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error) {
@@ -220,6 +345,7 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 		arg.Rdev,
 		arg.SymlinkTarget,
 		arg.ParentIno,
+		arg.RootIno,
 	)
 	var i Inode
 	err := row.Scan(
@@ -237,6 +363,7 @@ func (q *Queries) CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInode
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
@@ -260,7 +387,7 @@ UPDATE inodes
 SET nlink = nlink - 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 `
 
 func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
@@ -281,8 +408,22 @@ func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
+}
+
+const deleteDisk = `-- name: DeleteDisk :execrows
+DELETE FROM disks
+WHERE disk_id = $1
+`
+
+func (q *Queries) DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDisk, diskID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteEntry = `-- name: DeleteEntry :exec
@@ -483,6 +624,32 @@ func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrPara
 	return result.RowsAffected(), nil
 }
 
+const deleteInodesByRootIno = `-- name: DeleteInodesByRootIno :many
+DELETE FROM inodes
+WHERE root_ino = $1
+RETURNING ino
+`
+
+func (q *Queries) DeleteInodesByRootIno(ctx context.Context, rootIno int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, deleteInodesByRootIno, rootIno)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var ino int64
+		if err := rows.Scan(&ino); err != nil {
+			return nil, err
+		}
+		items = append(items, ino)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const deleteOverlappingPosixFileLockWaiters = `-- name: DeleteOverlappingPosixFileLockWaiters :execrows
 DELETE FROM file_lock_waiters
 WHERE session_id = $1
@@ -637,6 +804,96 @@ func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, 
 	return items, nil
 }
 
+const getDisk = `-- name: GetDisk :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE disk_id = $1
+`
+
+func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error) {
+	row := q.db.QueryRow(ctx, getDisk, diskID)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getDiskByRootIno = `-- name: GetDiskByRootIno :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE root_ino = $1
+`
+
+func (q *Queries) GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, error) {
+	row := q.db.QueryRow(ctx, getDiskByRootIno, rootIno)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getDiskByRootInoForUpdate = `-- name: GetDiskByRootInoForUpdate :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE root_ino = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (Disk, error) {
+	row := q.db.QueryRow(ctx, getDiskByRootInoForUpdate, rootIno)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getDiskForUpdate = `-- name: GetDiskForUpdate :one
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE disk_id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Disk, error) {
+	row := q.db.QueryRow(ctx, getDiskForUpdate, diskID)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getEntry = `-- name: GetEntry :one
 SELECT parent_ino, name, ino
 FROM entries
@@ -774,7 +1031,7 @@ func (q *Queries) GetFirstConflictingFileLock(ctx context.Context, arg GetFirstC
 }
 
 const getInode = `-- name: GetInode :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 FROM inodes
 WHERE ino = $1
 `
@@ -797,12 +1054,13 @@ func (q *Queries) GetInode(ctx context.Context, ino int64) (Inode, error) {
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
 
 const getInodeByEntry = `-- name: GetInodeByEntry :one
-SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target, i.flags, i.parent_ino
+SELECT i.ino, i.generation, i.mode, i.size, i.nlink, i.uid, i.gid, i.rdev, i.atime, i.mtime, i.ctime, i.symlink_target, i.flags, i.parent_ino, i.root_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name = $2
@@ -831,12 +1089,13 @@ func (q *Queries) GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
 
 const getInodeForUpdate = `-- name: GetInodeForUpdate :one
-SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+SELECT ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 FROM inodes
 WHERE ino = $1
 FOR UPDATE
@@ -860,6 +1119,7 @@ func (q *Queries) GetInodeForUpdate(ctx context.Context, ino int64) (Inode, erro
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
@@ -910,7 +1170,8 @@ SELECT
     i.ctime,
     i.symlink_target,
     i.flags,
-    i.parent_ino
+    i.parent_ino,
+    i.root_ino
 FROM entries e
 JOIN inodes i ON e.parent_ino = i.ino
 WHERE e.ino = $1
@@ -936,6 +1197,7 @@ func (q *Queries) GetParentInode(ctx context.Context, ino int64) (Inode, error) 
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
@@ -1027,7 +1289,7 @@ UPDATE inodes
 SET nlink = nlink + 1,
     ctime = clock_timestamp()
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 `
 
 func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error) {
@@ -1048,6 +1310,7 @@ func (q *Queries) IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }
@@ -1149,7 +1412,8 @@ SELECT
     i.ctime,
     i.symlink_target,
     i.flags,
-    i.parent_ino
+    i.parent_ino,
+    i.root_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1
@@ -1179,6 +1443,7 @@ type ListDirEntriesRow struct {
 	SymlinkTarget []byte             `json:"symlink_target"`
 	Flags         int32              `json:"flags"`
 	ParentIno     int64              `json:"parent_ino"`
+	RootIno       int64              `json:"root_ino"`
 }
 
 func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error) {
@@ -1206,6 +1471,7 @@ func (q *Queries) ListDirEntries(ctx context.Context, arg ListDirEntriesParams) 
 			&i.SymlinkTarget,
 			&i.Flags,
 			&i.ParentIno,
+			&i.RootIno,
 		); err != nil {
 			return nil, err
 		}
@@ -1233,7 +1499,8 @@ SELECT
     i.ctime,
     i.symlink_target,
     i.flags,
-    i.parent_ino
+    i.parent_ino,
+    i.root_ino
 FROM entries e
 JOIN inodes i ON e.ino = i.ino
 WHERE e.parent_ino = $1 AND e.name > $3::bytea
@@ -1263,6 +1530,7 @@ type ListDirEntriesAfterNameRow struct {
 	SymlinkTarget []byte             `json:"symlink_target"`
 	Flags         int32              `json:"flags"`
 	ParentIno     int64              `json:"parent_ino"`
+	RootIno       int64              `json:"root_ino"`
 }
 
 func (q *Queries) ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error) {
@@ -1290,6 +1558,7 @@ func (q *Queries) ListDirEntriesAfterName(ctx context.Context, arg ListDirEntrie
 			&i.SymlinkTarget,
 			&i.Flags,
 			&i.ParentIno,
+			&i.RootIno,
 		); err != nil {
 			return nil, err
 		}
@@ -1443,6 +1712,100 @@ func (q *Queries) TouchInodeTimestamps(ctx context.Context, ino int64) error {
 	return err
 }
 
+const updateDisk = `-- name: UpdateDisk :one
+UPDATE disks
+SET
+    name = $2,
+    max_bytes = $3,
+    updated_at = clock_timestamp()
+WHERE disk_id = $1
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+`
+
+type UpdateDiskParams struct {
+	DiskID   pgtype.UUID `json:"disk_id"`
+	Name     string      `json:"name"`
+	MaxBytes int64       `json:"max_bytes"`
+}
+
+func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, updateDisk, arg.DiskID, arg.Name, arg.MaxBytes)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateDiskQuotaByRootIno = `-- name: UpdateDiskQuotaByRootIno :one
+UPDATE disks
+SET
+    used_bytes = GREATEST(used_bytes + $1::bigint, 0),
+    used_inodes = GREATEST(used_inodes + $2::bigint, 0),
+    updated_at = clock_timestamp()
+WHERE root_ino = $3::bigint
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+`
+
+type UpdateDiskQuotaByRootInoParams struct {
+	DeltaBytes  int64 `json:"delta_bytes"`
+	DeltaInodes int64 `json:"delta_inodes"`
+	RootIno     int64 `json:"root_ino"`
+}
+
+func (q *Queries) UpdateDiskQuotaByRootIno(ctx context.Context, arg UpdateDiskQuotaByRootInoParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, updateDiskQuotaByRootIno, arg.DeltaBytes, arg.DeltaInodes, arg.RootIno)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateDiskUsedBytes = `-- name: UpdateDiskUsedBytes :one
+UPDATE disks
+SET
+    used_bytes = $2,
+    updated_at = clock_timestamp()
+WHERE disk_id = $1
+RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+`
+
+type UpdateDiskUsedBytesParams struct {
+	DiskID    pgtype.UUID `json:"disk_id"`
+	UsedBytes int64       `json:"used_bytes"`
+}
+
+func (q *Queries) UpdateDiskUsedBytes(ctx context.Context, arg UpdateDiskUsedBytesParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, updateDiskUsedBytes, arg.DiskID, arg.UsedBytes)
+	var i Disk
+	err := row.Scan(
+		&i.DiskID,
+		&i.Name,
+		&i.RootIno,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateEntry = `-- name: UpdateEntry :exec
 UPDATE entries
 SET parent_ino = $1,
@@ -1497,7 +1860,7 @@ SET
   flags = $10::integer
 FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
-RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
 `
 
 type UpdateInodeAttrParams struct {
@@ -1542,6 +1905,7 @@ func (q *Queries) UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams
 		&i.SymlinkTarget,
 		&i.Flags,
 		&i.ParentIno,
+		&i.RootIno,
 	)
 	return i, err
 }

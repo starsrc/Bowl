@@ -9,8 +9,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
 
 	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
@@ -749,5 +752,605 @@ func TestFallocate_DatabaseErrors(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "tx commit failed")
+	})
+}
+
+// TestFallocate_DiskQuota 验证 Fallocate 预分配扩展文件大小时联动单事务容量配额校验与 used_bytes 更新。
+func TestFallocate_DiskQuota(t *testing.T) {
+	now := time.Now()
+	pgNow := pgtype.Timestamptz{Time: now, Valid: true}
+	const (
+		testIno     = int64(10)
+		testRootIno = int64(100)
+		testFh      = int64(1001)
+	)
+
+	t.Run("模式 0 扩展文件大小时按 deltaBytes 锁定 Disk 校验配额并调用 AddDiskQuotaByRootIno 递增 used_bytes", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		// offset=50, length=100 -> targetSize=150, deltaBytes=50
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
+			Return(db.Disk{
+				RootIno:   testRootIno,
+				MaxBytes:  1000,
+				UsedBytes: 200,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     testRootIno,
+				DeltaBytes:  50,
+				DeltaInodes: 0,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         testIno,
+				Mode:        int32(meta.S_IFREG | 0o644),
+				Size:        150,
+				Uid:         1001,
+				Gid:         1002,
+				SetAtimeNow: false,
+				Atime:       pgNow,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{},
+			}).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    150,
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.NoError(t, err)
+		mockQuerier.AssertNotCalled(t, "TouchInodeCtime")
+	})
+
+	t.Run("模式 0 扩展超出 max_bytes 时中止事务并返回 ErrNoSpace (ResourceExhausted / ENOSPC)，且不调用 UpdateInodeAttr", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		// offset=50, length=100 -> targetSize=150, deltaBytes=50.
+		// max_bytes=1000, used_bytes=980 -> 980 + 50 = 1030 > 1000 -> 超额
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
+			Return(db.Disk{
+				RootIno:   testRootIno,
+				MaxBytes:  1000,
+				UsedBytes: 980,
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.ErrorIs(t, err, meta.ErrNoSpace)
+
+		// 验证 meta.ToStatus 映射为 ResourceExhausted 与 ENOSPC
+		st := meta.ToStatus(err)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.ResourceExhausted, st.Code())
+		require.NotEmpty(t, st.Details())
+		info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "ENOSPC", info.Reason)
+		assert.Equal(t, meta.ErrorDomain, info.Domain)
+
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+
+	t.Run("模式 0 当前 used_bytes 已大于 max_bytes 时中止事务并返回 ErrNoSpace", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		// used_bytes 超过 max_bytes
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
+			Return(db.Disk{
+				RootIno:   testRootIno,
+				MaxBytes:  1000,
+				UsedBytes: 1050,
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.ErrorIs(t, err, meta.ErrNoSpace)
+
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+
+	t.Run("模式 0 目标大小小于或等于当前大小时不触发配额扣减", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    500,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_WRONLY),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeCtime(mock.Anything, testIno).
+			Return(nil).
+			Once()
+
+		// offset=50, length=100 -> targetSize=150 <= 500
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.NoError(t, err)
+
+		mockQuerier.AssertNotCalled(t, "GetDiskByRootInoForUpdate", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+
+	t.Run("模式 FallocFlKeepSize 即使 targetSize 超过原大小也不触发配额扣减", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_WRONLY),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			TouchInodeCtime(mock.Anything, testIno).
+			Return(nil).
+			Once()
+
+		// targetSize=300 > 100
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 100,
+			Length: 200,
+			Mode:   meta.FallocFlKeepSize,
+		})
+		require.NoError(t, err)
+
+		mockQuerier.AssertNotCalled(t, "GetDiskByRootInoForUpdate", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+
+	t.Run("模式 FallocFlPunchHole | FallocFlKeepSize 即使 offset+length 超过原大小也不触发配额扣减", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         testIno,
+				Mode:        int32(meta.S_IFREG | 0o644),
+				Size:        100,
+				Uid:         1001,
+				Gid:         1002,
+				SetAtimeNow: false,
+				Atime:       pgNow,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{},
+			}).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 200,
+			Mode:   meta.FallocFlPunchHole | meta.FallocFlKeepSize,
+		})
+		require.NoError(t, err)
+
+		mockQuerier.AssertNotCalled(t, "GetDiskByRootInoForUpdate", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+	})
+
+	t.Run("current.RootIno == 0 扩展大小不触发配额检查与递增", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: 0, // 未关联 Disk 根节点
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         testIno,
+				Mode:        int32(meta.S_IFREG | 0o644),
+				Size:        150,
+				Uid:         1001,
+				Gid:         1002,
+				SetAtimeNow: false,
+				Atime:       pgNow,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{},
+			}).
+			Return(db.Inode{
+				Ino:  testIno,
+				Mode: int32(meta.S_IFREG | 0o644),
+				Size: 150,
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.NoError(t, err)
+
+		mockQuerier.AssertNotCalled(t, "GetDiskByRootInoForUpdate", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+	})
+
+	t.Run("GetDiskByRootInoForUpdate 返回 pgx.ErrNoRows 时兼容跳过配额检查并成功更新 Inode", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
+			Return(db.Disk{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
+				Ino:         testIno,
+				Mode:        int32(meta.S_IFREG | 0o644),
+				Size:        150,
+				Uid:         1001,
+				Gid:         1002,
+				SetAtimeNow: false,
+				Atime:       pgNow,
+				SetMtimeNow: true,
+				Mtime:       pgtype.Timestamptz{},
+			}).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    150,
+			}, nil).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.NoError(t, err)
+
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+	})
+
+	t.Run("GetDiskByRootInoForUpdate 数据库错误向上传播并中止事务", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
+			Return(db.Disk{}, errors.New("db query error")).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "get disk by root_ino 100 for update")
+
+		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+
+	t.Run("AddDiskQuotaByRootIno 数据库错误向上传播并中止事务", func(t *testing.T) {
+		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
+		mockExecTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, testIno).
+			Return(db.Inode{
+				Ino:     testIno,
+				RootIno: testRootIno,
+				Mode:    int32(meta.S_IFREG | 0o644),
+				Size:    100,
+				Uid:     1001,
+				Gid:     1002,
+				Atime:   pgNow,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetFileHandle(mock.Anything, db.GetFileHandleParams{
+				Fh:  testFh,
+				Ino: testIno,
+			}).
+			Return(db.FileHandle{
+				Fh:    testFh,
+				Ino:   testIno,
+				Flags: int32(meta.O_RDWR),
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
+			Return(db.Disk{
+				RootIno:   testRootIno,
+				MaxBytes:  1000,
+				UsedBytes: 200,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     testRootIno,
+				DeltaBytes:  50,
+				DeltaInodes: 0,
+			}).
+			Return(errors.New("db update quota failure")).
+			Once()
+
+		err := mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:    uint64(testIno),
+			Fh:     uint64(testFh),
+			Offset: 50,
+			Length: 100,
+			Mode:   0,
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "add disk quota by root_ino 100")
+
+		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
 	})
 }

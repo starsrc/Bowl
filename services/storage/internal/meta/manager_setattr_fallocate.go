@@ -274,6 +274,28 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 		case 0:
 			targetSize := params.Offset + params.Length
 			if targetSize > uint64(current.Size) {
+				// 若关联了 Disk 根节点，进行容量配额校验与递增
+				if current.RootIno > 0 {
+					deltaBytes := targetSize - uint64(current.Size)
+					diskRow, err := q.GetDiskByRootInoForUpdate(ctx, current.RootIno)
+					if err != nil {
+						if !errors.Is(err, pgx.ErrNoRows) {
+							return fmt.Errorf("get disk by root_ino %d for update: %w", current.RootIno, err)
+						}
+					} else {
+						if uint64(diskRow.UsedBytes) > uint64(diskRow.MaxBytes) || deltaBytes > uint64(diskRow.MaxBytes)-uint64(diskRow.UsedBytes) {
+							return ErrNoSpace
+						}
+						if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+							RootIno:     current.RootIno,
+							DeltaBytes:  int64(deltaBytes),
+							DeltaInodes: 0,
+						}); err != nil {
+							return fmt.Errorf("add disk quota by root_ino %d: %w", current.RootIno, err)
+						}
+					}
+				}
+
 				_, err = q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
 					Ino:         current.Ino,
 					Mode:        current.Mode,
@@ -332,6 +354,8 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			return ErrNotSupported
 		case errors.Is(err, ErrBadFileHandle):
 			return ErrBadFileHandle
+		case errors.Is(err, ErrNoSpace):
+			return ErrNoSpace
 		default:
 			return fmt.Errorf("fallocate (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 		}

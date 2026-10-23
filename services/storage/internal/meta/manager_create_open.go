@@ -362,14 +362,25 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 		}
 
 		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
-			Mode:  int32(targetMode),
-			Nlink: 1,
-			Uid:   int32(params.UID),
-			Gid:   int32(gid),
-			Rdev:  0,
+			Mode:    int32(targetMode),
+			Nlink:   1,
+			Uid:     int32(params.UID),
+			Gid:     int32(gid),
+			Rdev:    0,
+			RootIno: parent.RootIno,
 		})
 		if err != nil {
 			return fmt.Errorf("create inode: %w", err)
+		}
+
+		if parent.RootIno > 0 {
+			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+				RootIno:     parent.RootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}); err != nil {
+				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+			}
 		}
 
 		err = q.CreateEntry(ctx, db.CreateEntryParams{
@@ -485,14 +496,25 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 		}
 
 		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
-			Mode:  int32(targetMode),
-			Nlink: 0,
-			Uid:   int32(params.UID),
-			Gid:   int32(gid),
-			Rdev:  0,
+			Mode:    int32(targetMode),
+			Nlink:   0,
+			Uid:     int32(params.UID),
+			Gid:     int32(gid),
+			Rdev:    0,
+			RootIno: parent.RootIno,
 		})
 		if err != nil {
 			return fmt.Errorf("create tmpfile inode: %w", err)
+		}
+
+		if parent.RootIno > 0 {
+			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+				RootIno:     parent.RootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}); err != nil {
+				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+			}
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{

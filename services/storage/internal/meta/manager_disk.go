@@ -318,7 +318,7 @@ func (m *manager) StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 		Bavail:     bavail,
 		Files:      files,
 		Ffree:      0,
-		Namelen:    MaxDiskNameBytes,
+		Namelen:    MaxFileNameBytes,
 	}, nil
 }
 

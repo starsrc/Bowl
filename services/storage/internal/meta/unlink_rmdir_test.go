@@ -3,13 +3,16 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -740,6 +743,18 @@ func TestRmdir_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
+		// 8. 检查是否存在活跃目录句柄
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		// 9. 物理删除 Inode 行
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
 		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
 		require.NoError(t, err)
 	})
@@ -809,6 +824,16 @@ func TestRmdir_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DecrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
 			Return(nil).
 			Once()
 
@@ -1179,5 +1204,319 @@ func TestRmdir_ParentInvariantsAndErrors(t *testing.T) {
 			Once()
 		assert.ErrorIs(t, mgr.Rmdir(ctx, parentIno, []byte{}), meta.ErrNotDir)
 	})
+}
+
+func TestRmdir_DiskQuotaAndHandleLifecycle(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	parentIno := uint64(10)
+	childIno := uint64(200)
+	rootIno := int64(1)
+
+	baseParentRow := db.Inode{
+		Ino:        int64(parentIno),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      3,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		RootIno:    rootIno,
+		Atime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+	}
+
+	baseChildRow := db.Inode{
+		Ino:        int64(childIno),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      2,
+		Uid:        1001,
+		Gid:        1001,
+		ParentIno:  int64(parentIno),
+		RootIno:    rootIno,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	setupCommonRmdirMocks := func(mockQuerier *dbmock.MockQuerier, child db.Inode) {
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("emptydir"),
+			}).
+			Return(db.Entry{
+				ParentIno: int64(parentIno),
+				Name:      []byte("emptydir"),
+				Ino:       int64(childIno),
+			}, nil).
+			Twice()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(baseParentRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(childIno)).
+			Return(child, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			HasChildEntries(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteEntry(mock.Anything, db.DeleteEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("emptydir"),
+			}).
+			Return(nil).
+			Once()
+
+		orphanChild := child
+		orphanChild.Nlink = 0
+		mockQuerier.EXPECT().
+			ClearInodeNlinkAndTouchCtime(mock.Anything, int64(childIno)).
+			Return(orphanChild, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DecrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+	}
+
+	t.Run("无活跃句柄且 child.RootIno > 0 时物理删除 Inode 并扣减 used_inodes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonRmdirMocks(mockQuerier, baseChildRow)
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: -1,
+			}).
+			Return(nil).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		require.NoError(t, err)
+	})
+
+	t.Run("存在活跃句柄 (rmdir-whilst-open) 时保留孤儿目录 Inode 且不扣减 used_inodes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonRmdirMocks(mockQuerier, baseChildRow)
+
+		// 存在活跃目录句柄：HasFileHandlesByIno 返回 true
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(true, nil).
+			Once()
+
+		// 不应调用 DeleteInode 与 AddDiskQuotaByRootIno
+
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		require.NoError(t, err)
+	})
+
+	t.Run("无活跃句柄但 child.RootIno == 0 时物理删除 Inode 但不调用 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		childNoRoot := baseChildRow
+		childNoRoot.RootIno = 0
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonRmdirMocks(mockQuerier, childNoRoot)
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		// 不应调用 AddDiskQuotaByRootIno
+
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		require.NoError(t, err)
+	})
+
+	t.Run("HasFileHandlesByIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonRmdirMocks(mockQuerier, baseChildRow)
+
+		handleErr := errors.New("check handle failed")
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, handleErr).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		assert.ErrorIs(t, err, handleErr)
+	})
+
+	t.Run("DeleteInode 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonRmdirMocks(mockQuerier, baseChildRow)
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		delErr := errors.New("delete inode failed")
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(delErr).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		assert.ErrorIs(t, err, delErr)
+	})
+
+	t.Run("AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		setupCommonRmdirMocks(mockQuerier, baseChildRow)
+
+		mockQuerier.EXPECT().
+			HasFileHandlesByIno(mock.Anything, int64(childIno)).
+			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInode(mock.Anything, int64(childIno)).
+			Return(nil).
+			Once()
+
+		quotaErr := errors.New("decrement disk quota failed")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: -1,
+			}).
+			Return(quotaErr).
+			Once()
+
+		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
+		assert.ErrorIs(t, err, quotaErr)
+	})
+}
+
+func TestMkdir_Rmdir_StatFS_Integration(t *testing.T) {
+	dsn := os.Getenv("STORAGE_TEST_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("跳过集成测试 (ping 失败): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	// 创建独立测试虚拟磁盘
+	diskName := fmt.Sprintf("test_statfs_%d", time.Now().UnixNano())
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskName,
+		MaxBytes: 10 * 1024 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	rootIno := disk.RootIno
+	defer func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM disks WHERE disk_id = $1", disk.DiskID)
+		_ = store.DeleteInode(context.Background(), int64(rootIno))
+	}()
+
+	// 1. 验证初始磁盘 StatFS：files 应当为 1（根目录节点占用）
+	statBefore, err := mgr.StatFS(ctx, rootIno)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), statBefore.Files)
+
+	// 2. Mkdir 创建子目录
+	subDirName := []byte("integ_sub_dir")
+	subDir, err := mgr.Mkdir(ctx, meta.MkdirParams{
+		ParentIno: rootIno,
+		Name:      subDirName,
+		Mode:      0o755,
+		UID:       1000,
+		GID:       1000,
+	})
+	require.NoError(t, err)
+
+	childRow, err := store.GetInode(ctx, int64(subDir.Ino))
+	require.NoError(t, err)
+	assert.Equal(t, int64(rootIno), childRow.RootIno, "子目录必须继承 parent 的 RootIno")
+
+	// 3. Mkdir 后 StatFS：files 递增 1，变为 2
+	statAfterMkdir, err := mgr.StatFS(ctx, rootIno)
+	require.NoError(t, err)
+	assert.Equal(t, statBefore.Files+1, statAfterMkdir.Files, "Mkdir 后 files 必须递增 1")
+
+	// 通过子目录自身 ino 查询 StatFS 同样有效且统计一致
+	statFromSubDir, err := mgr.StatFS(ctx, subDir.Ino)
+	require.NoError(t, err)
+	assert.Equal(t, statAfterMkdir.Files, statFromSubDir.Files)
+
+	// 4. Rmdir（无活跃句柄）删除空子目录
+	err = mgr.Rmdir(ctx, rootIno, subDirName)
+	require.NoError(t, err)
+
+	// 5. Rmdir 后 StatFS：files 递减 1，恢复为初始值
+	statAfterRmdir, err := mgr.StatFS(ctx, rootIno)
+	require.NoError(t, err)
+	assert.Equal(t, statBefore.Files, statAfterRmdir.Files, "Rmdir 后 files 必须递减 1 恢复初始值")
+
+	// 6. 验证子目录 Inode 已被物理删除
+	_, err = store.GetInode(ctx, int64(subDir.Ino))
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "无打开句柄的空目录在 Rmdir 后 Inode 必须被物理清理")
 }
 

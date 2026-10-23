@@ -416,6 +416,28 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 			return fmt.Errorf("decrement parent inode %d nlink and touch: %w", parent.Ino, err)
 		}
 
+		// 检查目标目录当前是否存在活跃目录句柄 (rmdir-whilst-open)
+		hasHandles, err := q.HasFileHandlesByIno(ctx, child.Ino)
+		if err != nil {
+			return fmt.Errorf("check has file handles for child dir %d: %w", child.Ino, err)
+		}
+
+		// 若无活跃句柄，物理删除 Inode 行并按需扣减所属 Disk 的 used_inodes 配额
+		if !hasHandles {
+			if err := q.DeleteInode(ctx, child.Ino); err != nil {
+				return fmt.Errorf("delete empty dir inode %d: %w", child.Ino, err)
+			}
+			if child.RootIno > 0 {
+				if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+					RootIno:     child.RootIno,
+					DeltaBytes:  0,
+					DeltaInodes: -1,
+				}); err != nil {
+					return fmt.Errorf("decrement disk used_inodes for root_ino %d: %w", child.RootIno, err)
+				}
+			}
+		}
+
 		return nil
 	})
 

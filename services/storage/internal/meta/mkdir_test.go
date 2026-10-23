@@ -791,3 +791,231 @@ func TestMkdir_ParentInvariantsAndErrors(t *testing.T) {
 		assert.ErrorIs(t, err, meta.ErrTooManyLinks)
 	})
 }
+
+func TestMkdir_DiskQuotaAndRootIno(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	parentIno := uint64(10)
+	rootIno := int64(1)
+	newIno := uint64(100)
+
+	parentWithRoot := db.Inode{
+		Ino:        int64(parentIno),
+		Generation: 1,
+		Mode:       int32(meta.S_IFDIR | 0o755),
+		Size:       4096,
+		Nlink:      2,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		RootIno:    rootIno,
+		Atime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+	}
+
+	t.Run("parent.RootIno > 0 时子目录继承 RootIno 并累加所属 Disk 的 used_inodes", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentWithRoot, nil).
+			Once()
+
+		expectedTargetMode := int32(meta.S_IFDIR | 0o755)
+		createdInodeRow := db.Inode{
+			Ino:        int64(newIno),
+			Generation: 0,
+			Mode:       expectedTargetMode,
+			Size:       0,
+			Nlink:      2,
+			Uid:        1001,
+			Gid:        1002,
+			Rdev:       0,
+			ParentIno:  int64(parentIno),
+			RootIno:    rootIno,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
+				RootIno:   rootIno,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("child_dir"),
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      []byte("child_dir"),
+			Mode:      0o755,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, newIno, inode.Ino)
+	})
+
+	t.Run("parent.RootIno > 0 时 AddDiskQuotaByRootIno 失败透传错误并中止事务", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentWithRoot, nil).
+			Once()
+
+		expectedTargetMode := int32(meta.S_IFDIR | 0o755)
+		createdInodeRow := db.Inode{
+			Ino:       int64(newIno),
+			Mode:      expectedTargetMode,
+			ParentIno: int64(parentIno),
+			RootIno:   rootIno,
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
+				RootIno:   rootIno,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		quotaErr := errors.New("disk quota update failed")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     rootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}).
+			Return(quotaErr).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      []byte("child_dir"),
+			Mode:      0o755,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		assert.Nil(t, inode)
+		assert.ErrorIs(t, err, quotaErr)
+	})
+
+	t.Run("parent.RootIno == 0 时不调用 AddDiskQuotaByRootIno", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		parentNoRoot := parentWithRoot
+		parentNoRoot.RootIno = 0
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(parentNoRoot, nil).
+			Once()
+
+		expectedTargetMode := int32(meta.S_IFDIR | 0o755)
+		createdInodeRow := db.Inode{
+			Ino:        int64(newIno),
+			Generation: 0,
+			Mode:       expectedTargetMode,
+			Size:       0,
+			Nlink:      2,
+			Uid:        1001,
+			Gid:        1002,
+			Rdev:       0,
+			ParentIno:  int64(parentIno),
+			RootIno:    0,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().
+			CreateInode(mock.Anything, db.CreateInodeParams{
+				Mode:      expectedTargetMode,
+				Nlink:     2,
+				Uid:       1001,
+				Gid:       1002,
+				Rdev:      0,
+				ParentIno: int64(parentIno),
+				RootIno:   0,
+			}).
+			Return(createdInodeRow, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			CreateEntry(mock.Anything, db.CreateEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("child_dir"),
+				Ino:       int64(newIno),
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			IncrementInodeNlinkAndTouch(mock.Anything, int64(parentIno)).
+			Return(nil).
+			Once()
+
+		inode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: parentIno,
+			Name:      []byte("child_dir"),
+			Mode:      0o755,
+			UID:       1001,
+			GID:       1002,
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, inode)
+		assert.Equal(t, newIno, inode.Ino)
+	})
+}

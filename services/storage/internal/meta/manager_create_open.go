@@ -650,6 +650,15 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 				if err != nil {
 					return fmt.Errorf("truncate inode attr for inode %d: %w", inode.Ino, err)
 				}
+				if inode.RootIno > 0 && inode.Size > 0 {
+					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+						RootIno:     inode.RootIno,
+						DeltaBytes:  -inode.Size,
+						DeltaInodes: 0,
+					}); err != nil {
+						return fmt.Errorf("deduct disk used_bytes on open truncate for inode %d: %w", inode.Ino, err)
+					}
+				}
 			}
 		}
 

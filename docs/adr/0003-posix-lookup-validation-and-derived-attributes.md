@@ -8,7 +8,7 @@
 1. **严格遵循 POSIX `lookup(parent_ino, name)` 语义**：准确区分“父节点或目标子项不存在”（`ENOENT`）与“父节点存在但不是目录”（`ENOTDIR`）。
 2. **精简数据库持久化存储与块属性隔离推导**：`inodes` 表仅持久化核心物理状态（`mode`, `size`, `nlink`, `uid`, `gid`, `rdev`, 时间戳），而未冗余存储 POSIX `struct stat` 中的 `blksize`（块大小）与 `blocks`（占用的 512 字节块数）。
 3. **支持特殊目录项与孤儿父目录拦截**：处理 `"."` 与 `".."` 解析（含根目录自指与孤儿目录 `rmdir-whilst-open` 下通过 `inodes.parent_ino` 寻找原父目录），拦截已解链孤儿父目录（`parent.Nlink == 0`）对常规子项的查找。
-4. **对齐 JuiceFS 空名称与内核缓存时效语义**：对 `len(name) == 0` 先进入事务校验父目录再返回 `ENOENT`；支持目录（`dirEntryTimeout`）与非目录（`entryTimeout`）独立配置 dentry 缓存超时，以及属性缓存超时（`attrTimeout`）与负缓存超时（`negEntryTimeout`）。
+4. **对齐 JuiceFS 空名称与内核缓存时效语义**：对 `len(name) == 0` 先进入事务校验父目录再返回 `ENOENT`；支持目录（`dirEntryTimeout`）与非目录（`entryTimeout`）独立配置 dentry 缓存超时，以及属性缓存超时（`attrTimeout`）。
 
 ## 决策
 1. **数据访问与事务架构**：
@@ -31,8 +31,8 @@
    - 常规文件与符号链接按 `(Size + 511) / 512` 计算 `Blocks`。
    - 特殊文件（`S_IFCHR`, `S_IFBLK`, `S_IFIFO`, `S_IFSOCK`）强制隔离 `Size = 0` 与 `Blocks = 0`；仅设备节点（`S_IFCHR`, `S_IFBLK`）暴露 `Rdev`，其余非设备节点强制 `Rdev = 0`。
 4. **内核缓存超时与独立配置**：
-   - `meta.Manager` 维护独立配置：`dirEntryTimeout`（目录）、`entryTimeout`（非目录）、`attrTimeout`（属性）与 `negEntryTimeout`（负缓存）。
-   - 在 `Lookup` 返回的 `Inode` 实体中暴露 `EntryTimeoutSeconds` 与 `AttrTimeoutSeconds`。
+   - `meta.Manager` 维护独立配置：`dirEntryTimeout`（目录）、`entryTimeout`（非目录）与 `attrTimeout`（属性）。
+   - 在 `Lookup` 返回的 `Inode` 实体与 `ReadDirPlus` 返回的扩展目录项中统一暴露 `EntryTimeoutSeconds` 与 `AttrTimeoutSeconds`。
 
 ## 结果
 - **积极影响**：

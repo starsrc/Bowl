@@ -22,7 +22,7 @@ Storage 元数据引擎在确立文件句柄生命周期（ADR-0009：`Create`�
      - `offset = 1`：固定合成 `"."`，指向当前目录 `Inode`。
      - `offset = 2`：固定合成 `".."`，通过 `GetParentInode(dir_ino)`（查询 `entries` 中 `ino = dir_ino` 绑定的父目录 `Inode`）获取；若未命中（如顶层根目录），则回退指向当前目录自身 `Inode`。
      - `offset >= 3`：对应 `entries JOIN inodes` 按 `ORDER BY e.name ASC` 确定性排序的真实子项，第 $k$ 个真实子项（从 $0$ 起计）的返回游标为 `next_offset = k + 3`（SQL 分页偏移量为 `OFFSET max(0, req.offset - 2)`）。
-   - 在 `ReadDirPlus` 中，合成的 `"."` 与 `".."` 条目填充完整 `Inode` 属性，但将其 `entry_timeout_seconds` 显式置为 `0`（符合 Linux FUSE 内核不对 `.` 和 `..` 缓存 dentry 的规范），真实子项则正常赋予标准 `entry_timeout_seconds` 与 `attr_timeout_seconds`。
+   - 在 `ReadDirPlus` 中，合成的 `"."` 与 `".."` 条目填充完整 `Inode` 属性，但将其 `entry_timeout_seconds` 显式置为 `0`（符合 Linux FUSE 内核不对 `.` 和 `..` 缓存 dentry 的规范），真实子项则根据子项类型分别赋予目录（`dirEntryTimeout`）或非目录（`entryTimeout`）的 `entry_timeout_seconds` 及 `attr_timeout_seconds`。
 3. **孤儿目录（`nlink == 0`）的打开准入、空流返回与最终物理回收**：
    - `OpenDir`：在读写事务内对目标目录 `GetInodeForUpdate(ino)` 加排他锁；若 `nlink == 0`，仅当 `HasFileHandlesByIno(ino)` 为 `true` 时允许分配新 `FileHandle`，否则返回 `ErrNotFound`（`ENOENT`）；当配置 `WithOpenDirCache(true)` 时在响应 `OpenFlags` 中下发 `FOPEN_CACHE_DIR`。
    - `ReadDir` / `ReadDirPlus`：校验目录存在且 `(fh, ino)` 有效后，若发现目录 `nlink == 0`（处于 `rmdir-whilst-open` 状态），遵循 POSIX `readdir(3)` 规范直接返回空列表（不合成 `"."` 与 `".."`）。

@@ -4195,7 +4195,9 @@ type InodeAttribute struct {
 	// 最后修改时间。
 	Mtime *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=mtime,proto3" json:"mtime,omitempty"`
 	// 状态变更时间。
-	Ctime         *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=ctime,proto3" json:"ctime,omitempty"`
+	Ctime *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=ctime,proto3" json:"ctime,omitempty"`
+	// 文件系统标志位（如 chattr 所设）。
+	Flags         uint32 `protobuf:"varint,12,opt,name=flags,proto3" json:"flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4307,6 +4309,13 @@ func (x *InodeAttribute) GetCtime() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *InodeAttribute) GetFlags() uint32 {
+	if x != nil {
+		return x.Flags
+	}
+	return 0
+}
+
 var File_storage_v1_storage_proto protoreflect.FileDescriptor
 
 const file_storage_v1_storage_proto_rawDesc = "" +
@@ -4326,7 +4335,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\"\x84\x01\n" +
 	"\x0fGetAttrResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x9f\b\n" +
+	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\xac\b\n" +
 	"\x0eSetAttrRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x17\n" +
 	"\x04mode\x18\x02 \x01(\rH\x00R\x04mode\x88\x01\x01\x12\"\n" +
@@ -4342,8 +4351,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	" \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x06R\x02fh\x88\x01\x01\x125\n" +
 	"\n" +
 	"session_id\x18\v \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\aR\tsessionId\x88\x01\x01\x12\x1b\n" +
-	"\tctime_now\x18\f \x01(\bR\bctimeNow\x12\x19\n" +
-	"\x05flags\x18\r \x01(\rH\bR\x05flags\x88\x01\x01:\xc7\x03\xbaH\xc3\x03\x1af\n" +
+	"\tctime_now\x18\f \x01(\bR\bctimeNow\x12&\n" +
+	"\x05flags\x18\r \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aH\bR\x05flags\x88\x01\x01:\xc7\x03\xbaH\xc3\x03\x1af\n" +
 	"\x16setattr_atime_conflict\x12&atime and atime_now cannot both be set\x1a$!(has(this.atime) && this.atime_now)\x1af\n" +
 	"\x16setattr_mtime_conflict\x12&mtime and mtime_now cannot both be set\x1a$!(has(this.mtime) && this.mtime_now)\x1a\xf0\x01\n" +
 	"\x12setattr_has_update\x12&at least one attribute must be updated\x1a\xb1\x01has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_now || this.ctime_now || has(this.flags)B\a\n" +
@@ -4663,7 +4672,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"generation\x18\x02 \x01(\x04R\n" +
 	"generation\x126\n" +
-	"\x04attr\x18\x03 \x01(\v2\x1a.storage.v1.InodeAttributeB\x06\xbaH\x03\xc8\x01\x01R\x04attr\"\x89\x03\n" +
+	"\x04attr\x18\x03 \x01(\v2\x1a.storage.v1.InodeAttributeB\x06\xbaH\x03\xc8\x01\x01R\x04attr\"\xac\x03\n" +
 	"\x0eInodeAttribute\x12\x1b\n" +
 	"\x04mode\x18\x01 \x01(\rB\a\xbaH\x04*\x02 \x00R\x04mode\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x14\n" +
@@ -4676,7 +4685,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\t \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05atime\x128\n" +
 	"\x05mtime\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05mtime\x128\n" +
-	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime2\xc9\x10\n" +
+	"\x05ctime\x18\v \x01(\v2\x1a.google.protobuf.TimestampB\x06\xbaH\x03\xc8\x01\x01R\x05ctime\x12!\n" +
+	"\x05flags\x18\f \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\xff\xff\aR\x05flags2\xc9\x10\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +

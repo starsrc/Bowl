@@ -74,31 +74,15 @@ type Manager interface {
 	GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error)
 }
 
-type dirCursorKey struct {
-	ino uint64
-	fh  uint64
-}
-
-type openFileTimeState struct {
-	mtime time.Time
-	atime time.Time
-}
-
 type manager struct {
 	store           db.Store
 	entryTimeout    float64
 	attrTimeout     float64
 	dirEntryTimeout float64
-	negEntryTimeout float64
 	openKeepCache   bool
 	openDirCache    bool
 	atimeMode       AtimeMode
-	skipDirMtime    time.Duration
 	sessionLeaseTTL time.Duration
-	dirCursorMu     sync.Mutex
-	dirCursors      map[dirCursorKey][]byte
-	openFileTimesMu sync.Mutex
-	openFileTimes   map[uint64]openFileTimeState
 	lockNotifyMu    sync.Mutex
 	lockNotifyChans map[uint64]chan struct{}
 }
@@ -144,15 +128,6 @@ func WithDirEntryTimeout(d float64) Option {
 	}
 }
 
-// WithNegEntryTimeout 配置负缓存内核条目缓存有效时间（秒）。
-func WithNegEntryTimeout(d float64) Option {
-	return func(m *manager) {
-		if d >= 0 {
-			m.negEntryTimeout = d
-		}
-	}
-}
-
 // WithOpenKeepCache 配置打开文件是否保留内核页缓存。
 func WithOpenKeepCache(enable bool) Option {
 	return func(m *manager) {
@@ -174,13 +149,6 @@ func WithAtimeMode(mode AtimeMode) Option {
 	}
 }
 
-// WithSkipDirMtime 配置目录修改时间跳过阈值。
-func WithSkipDirMtime(d time.Duration) Option {
-	return func(m *manager) {
-		m.skipDirMtime = d
-	}
-}
-
 // New 创建 Manager 实例。
 func New(store db.Store, opts ...Option) Manager {
 	m := &manager{
@@ -188,10 +156,7 @@ func New(store db.Store, opts ...Option) Manager {
 		entryTimeout:    DefaultEntryTimeoutSeconds,
 		attrTimeout:     DefaultAttrTimeoutSeconds,
 		dirEntryTimeout: DefaultEntryTimeoutSeconds,
-		negEntryTimeout: DefaultEntryTimeoutSeconds,
 		sessionLeaseTTL: DefaultSessionLeaseTTL,
-		dirCursors:      make(map[dirCursorKey][]byte),
-		openFileTimes:   make(map[uint64]openFileTimeState),
 		lockNotifyChans: make(map[uint64]chan struct{}),
 	}
 	for _, opt := range opts {
@@ -263,10 +228,6 @@ func convertDBInodeToEntity(target db.Inode, entryTimeout, attrTimeout float64) 
 	}
 }
 
-func newInodeFromDB(target db.Inode) *Inode {
-	return convertDBInodeToEntity(target, DefaultEntryTimeoutSeconds, DefaultAttrTimeoutSeconds)
-}
-
 func (m *manager) newInode(target db.Inode) *Inode {
 	entryTimeout := m.entryTimeout
 	if (uint32(target.Mode) & S_IFMT) == S_IFDIR {
@@ -275,57 +236,27 @@ func (m *manager) newInode(target db.Inode) *Inode {
 	return convertDBInodeToEntity(target, entryTimeout, m.attrTimeout)
 }
 
-func newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
-	mode := uint32(row.Mode)
-	fileType := mode & S_IFMT
-
-	var size uint64
-	var blocks uint64
-	var rdev uint32
-
-	switch fileType {
-	case S_IFDIR:
-		size = uint64(row.Size)
-		if size == 0 {
-			size = DefaultDirSize
-		}
-		blocks = (size + 511) / 512
-	case S_IFREG, S_IFLNK:
-		size = uint64(row.Size)
-		if size > 0 {
-			blocks = (size + 511) / 512
-		}
-	case S_IFCHR, S_IFBLK:
-		size = 0
-		blocks = 0
-		rdev = uint32(row.Rdev)
-	default:
-		size = 0
-		blocks = 0
-		rdev = 0
+func (m *manager) newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
+	entryTimeout := m.entryTimeout
+	if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
+		entryTimeout = m.dirEntryTimeout
 	}
-
-	return &Inode{
-		Ino:                 uint64(row.Ino),
-		Generation:          uint64(row.Generation),
-		EntryTimeoutSeconds: DefaultEntryTimeoutSeconds,
-		AttrTimeoutSeconds:  DefaultAttrTimeoutSeconds,
-		Attr: Attribute{
-			Mode:      mode,
-			Size:      size,
-			Nlink:     uint32(row.Nlink),
-			UID:       uint32(row.Uid),
-			GID:       uint32(row.Gid),
-			Rdev:      rdev,
-			Blksize:   DefaultBlockSize,
-			Blocks:    blocks,
-			Atime:     row.Atime.Time,
-			Mtime:     row.Mtime.Time,
-			Ctime:     row.Ctime.Time,
-			Flags:     uint32(row.Flags),
-			ParentIno: uint64(row.ParentIno),
-		},
-	}
+	return convertDBInodeToEntity(db.Inode{
+		Ino:           row.Ino,
+		Generation:    row.Generation,
+		Mode:          row.Mode,
+		Size:          row.Size,
+		Nlink:         row.Nlink,
+		Uid:           row.Uid,
+		Gid:           row.Gid,
+		Rdev:          row.Rdev,
+		Atime:         row.Atime,
+		Mtime:         row.Mtime,
+		Ctime:         row.Ctime,
+		SymlinkTarget: row.SymlinkTarget,
+		Flags:         row.Flags,
+		ParentIno:     row.ParentIno,
+	}, entryTimeout, m.attrTimeout)
 }
 
 // errRetryTx 表示事务预读的目录项映射在加锁前发生并发漂移，需回滚并重试当前事务。
@@ -526,13 +457,5 @@ func (m *manager) shouldTouchAtime(atime, mtime, ctime, now time.Time) bool {
 	default:
 		return false
 	}
-}
-
-// shouldTouchDirMtime 根据当前配置的 skipDirMtime 判断是否需要刷新父目录的 mtime 与 ctime。
-func (m *manager) shouldTouchDirMtime(parentMtime, now time.Time) bool {
-	if m.skipDirMtime <= 0 {
-		return true
-	}
-	return now.Sub(parentMtime) >= m.skipDirMtime
 }
 

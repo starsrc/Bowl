@@ -316,7 +316,7 @@ message SetAttrRequest {
   bool ctime_now = 12;
 
   // 可选的文件系统标志位（如 chattr 所设）。
-  optional uint32 flags = 13;
+  optional uint32 flags = 13 [(buf.validate.field).uint32.lte = 2147483647];
 }
 
 // SetAttrResponse 包含更新后的 Inode 实体元数据及内核属性缓存时长。
@@ -1413,4 +1413,7 @@ message InodeAttribute {
 
   // 状态变更时间。
   google.protobuf.Timestamp ctime = 11 [(buf.validate.field).required = true];
+
+  // 文件系统标志位（如 chattr 所设）。
+  uint32 flags = 12 [(buf.validate.field).uint32.lte = 2147483647];
 }

@@ -107,8 +107,21 @@ func TestInodeAttributeValidation(t *testing.T) {
 				Atime: now,
 				Mtime: now,
 				Ctime: now,
+				Flags: 1,
 			},
 			valid: true,
+		},
+		{
+			name: "flags 超过 MaxInt32 校验失败",
+			attr: &storagev1.InodeAttribute{
+				Mode:  0o644,
+				Nlink: 1,
+				Atime: now,
+				Mtime: now,
+				Ctime: now,
+				Flags: math.MaxInt32 + 1,
+			},
+			valid: false,
 		},
 		{
 			name: "目录合法属性",

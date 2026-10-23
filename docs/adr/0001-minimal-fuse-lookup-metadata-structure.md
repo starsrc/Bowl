@@ -11,7 +11,7 @@ Storage 元数据服务需要通过 RPC 对接 Linux FUSE 内核的 `lookup` 接
    - 文件统一置于 `proto/storage/v1/storage.proto`，声明 Package 为 `storage.v1`，严格对齐 Buf 目录命名空间规范。
 2. **元数据模型解耦**：
    - 抽象实体 `Inode` 承载节点唯一持久化标识 `ino`、代数 `generation` 及关联属性 `attr`。
-   - 抽象物理属性 `InodeAttribute` 封装 POSIX `struct stat` 属性（`mode`, `size`, `nlink`, `uid`, `gid`, `rdev`, `blksize`, `blocks`, `atime`, `mtime`, `ctime`），便于未来在 `GetAttr`、`SetAttr`、`ReadDir` 等操作中直接复用。
+   - 抽象物理属性 `InodeAttribute` 封装 POSIX `struct stat` 属性与文件系统标志位（`mode`, `size`, `nlink`, `uid`, `gid`, `rdev`, `blksize`, `blocks`, `atime`, `mtime`, `ctime`, `flags`），便于未来在 `GetAttr`、`SetAttr`、`ReadDirPlus` 等操作中直接复用。
 3. **Lookup 接口设计**：
    - 请求体 `LookupRequest` 仅包含 `parent_ino` 与 `name`，通过 `buf.validate` 严格校验输入合法性（禁止空值、超长及包含路径分隔符 `/` 或空字节 `\x00`）。
    - 响应体 `LookupResponse` 包含命中的 `Inode` 及内核缓存控制 `entry_timeout_seconds` 与 `attr_timeout_seconds`。

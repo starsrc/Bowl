@@ -224,6 +224,14 @@ func TestSetAttrRequestValidation(t *testing.T) {
 			},
 			isValid: false,
 		},
+		{
+			name: "非法: flags 超过 MaxInt32",
+			req: &storagev1.SetAttrRequest{
+				Ino:   1,
+				Flags: ptr[uint32](math.MaxInt32 + 1),
+			},
+			isValid: false,
+		},
 	}
 
 	for _, tc := range testCases {

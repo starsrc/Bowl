@@ -242,6 +242,77 @@ func TestReadDirPlus_PositivePath(t *testing.T) {
 		assert.Equal(t, uint64(4), entries[3].Inode.Attr.Blocks) // (2048+511)/512
 	})
 
+	t.Run("自定义缓存时效: 目录子项使用 dirEntryTimeout 而非目录子项使用 entryTimeout", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(
+			mockStore,
+			meta.WithEntryTimeout(2.5),
+			meta.WithDirEntryTimeout(7.5),
+			meta.WithAttrTimeout(4.5),
+		)
+
+		setupMockReadOnlyRepeatableReadTx(mockStore, mockQuerier, 1)
+
+		subDirRow := db.ListDirEntriesRow{
+			Name:       []byte("subdir"),
+			Ino:        205,
+			Generation: 1,
+			Mode:       int32(meta.S_IFDIR | 0o755),
+			Size:       4096,
+			Nlink:      2,
+			Uid:        1000,
+			Gid:        1000,
+			Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+			Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+		}
+
+		mockQuerier.EXPECT().GetInode(mock.Anything, dirIno).Return(dirDBInode, nil).Once()
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+			Fh:  fh,
+			Ino: dirIno,
+		}).Return(activeHandle, nil).Once()
+		mockQuerier.EXPECT().GetParentInode(mock.Anything, dirIno).Return(parentDBInode, nil).Once()
+		mockQuerier.EXPECT().ListDirEntries(mock.Anything, db.ListDirEntriesParams{
+			ParentIno: dirIno,
+			Limit:     8,
+			Offset:    0,
+		}).Return([]db.ListDirEntriesRow{childRow1, subDirRow}, nil).Once()
+
+		entries, err := mgr.ReadDirPlus(ctx, meta.ReadDirPlusParams{
+			Ino:    uint64(dirIno),
+			Fh:     uint64(fh),
+			Offset: 0,
+			Limit:  10,
+		})
+		require.NoError(t, err)
+		require.Len(t, entries, 4)
+
+		// . 与 .. 条目的 EntryTimeoutSeconds 固定为 0，AttrTimeoutSeconds 使用配置的 attrTimeout
+		assert.Equal(t, 0.0, entries[0].EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[0].AttrTimeoutSeconds)
+		assert.Equal(t, 0.0, entries[0].Inode.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[0].Inode.AttrTimeoutSeconds)
+
+		assert.Equal(t, 0.0, entries[1].EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[1].AttrTimeoutSeconds)
+		assert.Equal(t, 0.0, entries[1].Inode.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[1].Inode.AttrTimeoutSeconds)
+
+		// 常规文件子项使用 entryTimeout (2.5) 与 attrTimeout (4.5)
+		assert.Equal(t, 2.5, entries[2].EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[2].AttrTimeoutSeconds)
+		assert.Equal(t, 2.5, entries[2].Inode.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[2].Inode.AttrTimeoutSeconds)
+
+		// 目录子项使用 dirEntryTimeout (7.5) 与 attrTimeout (4.5)
+		assert.Equal(t, 7.5, entries[3].EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[3].AttrTimeoutSeconds)
+		assert.Equal(t, 7.5, entries[3].Inode.EntryTimeoutSeconds)
+		assert.Equal(t, 4.5, entries[3].Inode.AttrTimeoutSeconds)
+	})
+
 	t.Run("多批次游标接续: limit=1 逐项读取与越界 EOF", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)

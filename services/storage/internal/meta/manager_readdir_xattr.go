@@ -177,7 +177,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 				Ino:                 uint64(dirInode.Ino),
 				Name:                []byte("."),
 				NextOffset:          1,
-				Inode:               newInodeFromDB(*dirInode),
+				Inode:               convertDBInodeToEntity(*dirInode, 0, m.attrTimeout),
 				EntryTimeoutSeconds: 0,
 				AttrTimeoutSeconds:  m.attrTimeout,
 			})
@@ -197,7 +197,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 				Ino:                 uint64(parentInode.Ino),
 				Name:                []byte(".."),
 				NextOffset:          2,
-				Inode:               newInodeFromDB(parentInode),
+				Inode:               convertDBInodeToEntity(parentInode, 0, m.attrTimeout),
 				EntryTimeoutSeconds: 0,
 				AttrTimeoutSeconds:  m.attrTimeout,
 			})
@@ -219,13 +219,14 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 			}
 
 			for i, row := range rows {
+				inode := m.newInodeFromListDirRow(row)
 				entries = append(entries, DirEntryPlus{
 					Ino:                 uint64(row.Ino),
 					Name:                row.Name,
 					NextOffset:          uint64(sqlOffset) + uint64(i) + 3,
-					Inode:               newInodeFromListDirRow(row),
-					EntryTimeoutSeconds: m.entryTimeout,
-					AttrTimeoutSeconds:  m.attrTimeout,
+					Inode:               inode,
+					EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+					AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
 				})
 			}
 		}

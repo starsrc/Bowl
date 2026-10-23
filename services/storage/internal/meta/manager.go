@@ -418,12 +418,8 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		if err != nil {
 			return fmt.Errorf("upsert client session %d: %w", sessionID, err)
 		}
-		deletedInos, err := q.DeleteUnreferencedOrphanInodes(ctx)
-		if err != nil {
-			return fmt.Errorf("delete unreferenced orphan inodes: %w", err)
-		}
-		if len(deletedInos) > 0 {
-			m.cleanLockWaitersForInos(deletedInos)
+		if err := m.reclaimUnreferencedOrphans(ctx, q); err != nil {
+			return err
 		}
 		res.ExpiresAt = session.ExpiresAt.Time
 		res.SessionRecreated = session.CreatedAt.Time.Equal(session.UpdatedAt.Time)
@@ -436,6 +432,60 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		return RenewSessionResult{}, fmt.Errorf("renew session with status tx: %w", err)
 	}
 	return res, nil
+}
+
+// reclaimUnreferencedOrphans 批量清理无句柄引用的超期孤儿节点，并按 root_ino 汇总退还磁盘配额。
+func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) error {
+	deletedOrphans, err := q.DeleteUnreferencedOrphanInodes(ctx)
+	if err != nil {
+		return fmt.Errorf("delete unreferenced orphan inodes: %w", err)
+	}
+	if len(deletedOrphans) == 0 {
+		return nil
+	}
+
+	type quotaDelta struct {
+		deltaBytes  int64
+		deltaInodes int64
+	}
+	quotaDeltas := make(map[int64]*quotaDelta)
+	deletedInos := make([]int64, 0, len(deletedOrphans))
+
+	for _, row := range deletedOrphans {
+		deletedInos = append(deletedInos, row.Ino)
+		if row.RootIno <= 0 {
+			continue
+		}
+		agg, ok := quotaDeltas[row.RootIno]
+		if !ok {
+			agg = &quotaDelta{}
+			quotaDeltas[row.RootIno] = agg
+		}
+		agg.deltaInodes--
+		if (uint32(row.Mode)&S_IFMT) == S_IFREG && row.Size > 0 {
+			agg.deltaBytes -= row.Size
+		}
+	}
+
+	rootInos := make([]int64, 0, len(quotaDeltas))
+	for rootIno := range quotaDeltas {
+		rootInos = append(rootInos, rootIno)
+	}
+	slices.Sort(rootInos)
+
+	for _, rootIno := range rootInos {
+		agg := quotaDeltas[rootIno]
+		if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+			RootIno:     rootIno,
+			DeltaBytes:  agg.deltaBytes,
+			DeltaInodes: agg.deltaInodes,
+		}); err != nil {
+			return fmt.Errorf("reclaim disk quota for root_ino %d: %w", rootIno, err)
+		}
+	}
+
+	m.cleanLockWaitersForInos(deletedInos)
+	return nil
 }
 
 // reclaimOrphanIfNoHandles 检查孤儿节点是否存在未释放句柄，若无任何句柄则执行物理删除并唤醒清理锁等待通道。

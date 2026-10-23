@@ -58,7 +58,7 @@ func TestSetLk_PosixRangeSplitAndCoalesce(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 	}
 

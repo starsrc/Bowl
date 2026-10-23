@@ -284,7 +284,7 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -392,7 +392,7 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 
 		// A (session=1, owner=101) 与 B (session=2, owner=202) 均持有 [0, 100] 的 F_RDLCK
@@ -516,7 +516,7 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 
 		// A (1, 101) 持有 [0, 99] 写锁；B (2, 202) 持有 [100, 199] 写锁；C (3, 303) 持有 [200, 299] 写锁

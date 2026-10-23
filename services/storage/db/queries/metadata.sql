@@ -362,7 +362,7 @@ WHERE ino IN (
       )
     FOR UPDATE SKIP LOCKED
 )
-RETURNING ino;
+RETURNING ino, root_ino, mode, size;
 
 -- name: GetFirstConflictingFileLock :one
 SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.lk_flags, l.start_offset, l.end_offset, l.lock_type, l.pid, l.created_at

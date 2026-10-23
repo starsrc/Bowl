@@ -1954,23 +1954,23 @@ func (_c *MockStore_DeletePosixFileLocksBySessionAndOwner_Call) RunAndReturn(run
 }
 
 // DeleteUnreferencedOrphanInodes provides a mock function for the type MockStore
-func (_mock *MockStore) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error) {
+func (_mock *MockStore) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error) {
 	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteUnreferencedOrphanInodes")
 	}
 
-	var r0 []int64
+	var r0 []db.DeleteUnreferencedOrphanInodesRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]int64, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error)); ok {
 		return returnFunc(ctx)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context) []int64); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []db.DeleteUnreferencedOrphanInodesRow); ok {
 		r0 = returnFunc(ctx)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]int64)
+			r0 = ret.Get(0).([]db.DeleteUnreferencedOrphanInodesRow)
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
@@ -2005,12 +2005,12 @@ func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) Run(run func(ctx contex
 	return _c
 }
 
-func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) Return(int64s []int64, err error) *MockStore_DeleteUnreferencedOrphanInodes_Call {
-	_c.Call.Return(int64s, err)
+func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) Return(deleteUnreferencedOrphanInodesRows []db.DeleteUnreferencedOrphanInodesRow, err error) *MockStore_DeleteUnreferencedOrphanInodes_Call {
+	_c.Call.Return(deleteUnreferencedOrphanInodesRows, err)
 	return _c
 }
 
-func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) RunAndReturn(run func(ctx context.Context) ([]int64, error)) *MockStore_DeleteUnreferencedOrphanInodes_Call {
+func (_c *MockStore_DeleteUnreferencedOrphanInodes_Call) RunAndReturn(run func(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error)) *MockStore_DeleteUnreferencedOrphanInodes_Call {
 	_c.Call.Return(run)
 	return _c
 }

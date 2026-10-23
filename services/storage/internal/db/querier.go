@@ -42,7 +42,7 @@ type Querier interface {
 	DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error)
 	DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error)
 	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
-	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error)
+	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]DeleteUnreferencedOrphanInodesRow, error)
 	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 	GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, error)
 	GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (Disk, error)

@@ -83,7 +83,7 @@ func TestRenewSession_Unit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 
 		expiresAt, err := mgr.RenewSession(ctx, sessID)
@@ -157,7 +157,117 @@ func TestRenewSession_Unit(t *testing.T) {
 		expectedErr := errors.New("delete orphan inodes failed")
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), expectedErr).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), expectedErr).
+			Once()
+
+		expiresAt, err := mgr.RenewSession(ctx, sessID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.True(t, expiresAt.IsZero())
+	})
+
+	t.Run("批量清理分属不同 root_ino 的孤儿节点按 root_ino 升序汇总退还配额", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
+				return arg.SessionID == int64(sessID) && arg.ExpiresAt.Valid
+			})).
+			Return(db.ClientSession{
+				SessionID: int64(sessID),
+				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
+			}, nil).
+			Once()
+
+		orphanRows := []db.DeleteUnreferencedOrphanInodesRow{
+			{Ino: 101, RootIno: 20, Mode: int32(meta.S_IFREG | 0o644), Size: 4096}, // disk 20: reg, 4096B
+			{Ino: 102, RootIno: 10, Mode: int32(meta.S_IFREG | 0o644), Size: 1024}, // disk 10: reg, 1024B
+			{Ino: 103, RootIno: 20, Mode: int32(meta.S_IFDIR | 0o755), Size: 4096}, // disk 20: dir, 0B (目录不退还 size)
+			{Ino: 104, RootIno: 10, Mode: int32(meta.S_IFREG | 0o644), Size: 0},    // disk 10: reg, 0B (空文件)
+			{Ino: 105, RootIno: 0, Mode: int32(meta.S_IFREG | 0o644), Size: 2048},  // root_ino=0: 不退还配额
+			{Ino: 106, RootIno: 10, Mode: int32(meta.S_IFREG | 0o644), Size: 2048}, // disk 10: reg, 2048B
+		}
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return(orphanRows, nil).
+			Once()
+
+		var callOrder []int64
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  -3072,
+				DeltaInodes: -3,
+			}).
+			Run(func(_ context.Context, arg db.AddDiskQuotaByRootInoParams) {
+				callOrder = append(callOrder, arg.RootIno)
+			}).
+			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     20,
+				DeltaBytes:  -4096,
+				DeltaInodes: -2,
+			}).
+			Run(func(_ context.Context, arg db.AddDiskQuotaByRootInoParams) {
+				callOrder = append(callOrder, arg.RootIno)
+			}).
+			Return(nil).
+			Once()
+
+		expiresAt, err := mgr.RenewSession(ctx, sessID)
+		require.NoError(t, err)
+		assert.Equal(t, expectedExpires, expiresAt)
+		assert.Equal(t, []int64{10, 20}, callOrder, "必须按 root_ino 升序依次退还配额以保证锁顺序确定性")
+	})
+
+	t.Run("异常流: AddDiskQuotaByRootIno 失败中止事务并向上传播错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.Anything).
+			Return(db.ClientSession{
+				SessionID: int64(sessID),
+				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow{
+				{Ino: 201, RootIno: 10, Mode: int32(meta.S_IFREG | 0o644), Size: 4096},
+			}, nil).
+			Once()
+
+		expectedErr := errors.New("update disk quota failed")
+		mockQuerier.EXPECT().
+			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
+				RootIno:     10,
+				DeltaBytes:  -4096,
+				DeltaInodes: -1,
+			}).
+			Return(expectedErr).
 			Once()
 
 		expiresAt, err := mgr.RenewSession(ctx, sessID)

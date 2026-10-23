@@ -781,22 +781,34 @@ WHERE ino IN (
       )
     FOR UPDATE SKIP LOCKED
 )
-RETURNING ino
+RETURNING ino, root_ino, mode, size
 `
 
-func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error) {
+type DeleteUnreferencedOrphanInodesRow struct {
+	Ino     int64 `json:"ino"`
+	RootIno int64 `json:"root_ino"`
+	Mode    int32 `json:"mode"`
+	Size    int64 `json:"size"`
+}
+
+func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]DeleteUnreferencedOrphanInodesRow, error) {
 	rows, err := q.db.Query(ctx, deleteUnreferencedOrphanInodes)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []int64
+	var items []DeleteUnreferencedOrphanInodesRow
 	for rows.Next() {
-		var ino int64
-		if err := rows.Scan(&ino); err != nil {
+		var i DeleteUnreferencedOrphanInodesRow
+		if err := rows.Scan(
+			&i.Ino,
+			&i.RootIno,
+			&i.Mode,
+			&i.Size,
+		); err != nil {
 			return nil, err
 		}
-		items = append(items, ino)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

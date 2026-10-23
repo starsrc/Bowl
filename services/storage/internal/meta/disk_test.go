@@ -1573,7 +1573,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 
 		// 模拟存在冲突锁

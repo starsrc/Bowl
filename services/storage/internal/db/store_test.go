@@ -92,7 +92,7 @@ type XattrQuerier interface {
 type FileLockQuerier interface {
 	DeleteExpiredClientSessions(ctx context.Context) (int64, error)
 	UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error)
-	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]int64, error)
+	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error)
 	GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg db.ListActiveFileLocksByInoAndFlagsParams) ([]db.FileLock, error)
 	CreateFileLock(ctx context.Context, arg db.CreateFileLockParams) (db.FileLock, error)
@@ -1432,13 +1432,16 @@ func TestStore_FileLockBehavior(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, expectedSession, session)
 
+		expectedOrphans := []db.DeleteUnreferencedOrphanInodesRow{
+			{Ino: 101, RootIno: 1, Mode: 0o100644, Size: 4096},
+		}
 		mockStore.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return(expectedOrphans, nil).
 			Once()
 		deletedInos, err := store.DeleteUnreferencedOrphanInodes(ctx)
 		require.NoError(t, err)
-		assert.Nil(t, deletedInos)
+		assert.Equal(t, expectedOrphans, deletedInos)
 	})
 
 	t.Run("GetFirstConflictingFileLock 与 ListActiveFileLocksByInoAndFlags", func(t *testing.T) {

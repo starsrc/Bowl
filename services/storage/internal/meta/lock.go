@@ -70,12 +70,8 @@ func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionI
 	if err != nil {
 		return time.Time{}, fmt.Errorf("upsert client session %d: %w", sessionID, err)
 	}
-	deletedInos, err := q.DeleteUnreferencedOrphanInodes(ctx)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("delete unreferenced orphan inodes: %w", err)
-	}
-	if len(deletedInos) > 0 {
-		m.cleanLockWaitersForInos(deletedInos)
+	if err := m.reclaimUnreferencedOrphans(ctx, q); err != nil {
+		return time.Time{}, err
 	}
 	return session.ExpiresAt.Time, nil
 }

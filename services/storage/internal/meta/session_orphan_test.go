@@ -3,6 +3,7 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"testing"
@@ -139,7 +140,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			Once()
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), nil).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
 			Once()
 	}
 
@@ -415,7 +416,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 		orphanErr := errors.New("orphan gc failed")
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]int64(nil), orphanErr).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), orphanErr).
 			Once()
 
 		_, err := mgr.Open(ctx, meta.OpenParams{
@@ -824,5 +825,133 @@ func TestSessionHandleAndOrphanGC_PostgresIntegration(t *testing.T) {
 
 		_, err = store.GetInode(ctx, int64(lockedOrphanIno))
 		assert.ErrorIs(t, err, pgx.ErrNoRows, "txA 释放锁后下一轮会话续期应回收该孤儿节点")
+	})
+
+	// AC6: 客户端会话过期后，由另一会话续期触发批量清理超期孤儿节点并按 root_ino 汇总退还配额
+	t.Run("AC6_会话超时批量回收孤儿节点按root_ino汇总退还磁盘配额", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_orphan_quota_reclaim_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		// 初始配额校验：仅含根目录 Inode
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), d.UsedInodes)
+		assert.Equal(t, uint64(0), d.UsedBytes)
+
+		sess1 := uint64(981001)
+		sess2 := uint64(981002)
+		defer func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sess1), int64(sess2))
+		}()
+
+		// 1. 客户端会话 1 在磁盘下创建 TmpFile 并 SetAttr(size=8192)
+		tmpRes, err := mgr.TmpFile(ctx, meta.TmpFileParams{
+			ParentIno: disk.RootIno,
+			Mode:      0o644,
+			Flags:     meta.O_RDWR,
+			UID:       1000,
+			GID:       1000,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		tmpIno := tmpRes.Inode.Ino
+		tmpFh := tmpRes.Fh
+
+		size8192 := uint64(8192)
+		_, err = mgr.SetAttr(ctx, tmpIno, meta.SetAttrInput{
+			Size:      &size8192,
+			Fh:        &tmpFh,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+
+		// 2. 客户端会话 1 创建常规文件 Open -> SetAttr(size=4096) -> Unlink
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("orphan_file.txt"),
+			Mode:      meta.S_IFREG | 0o644,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		// 释放 Create 默认分配的无会话句柄
+		require.NoError(t, mgr.Release(ctx, meta.ReleaseParams{Ino: fileIno, Fh: createRes.Fh}))
+
+		openFileRes, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		fileFh := openFileRes.Fh
+
+		size4096 := uint64(4096)
+		_, err = mgr.SetAttr(ctx, fileIno, meta.SetAttrInput{
+			Size:      &size4096,
+			Fh:        &fileFh,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+
+		err = mgr.Unlink(ctx, disk.RootIno, []byte("orphan_file.txt"))
+		require.NoError(t, err)
+
+		// 3. 客户端会话 1 创建目录 OpenDir -> Rmdir
+		dirInode, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("orphan_dir"),
+			Mode:      0o755,
+			UID:       1000,
+			GID:       1000,
+		})
+		require.NoError(t, err)
+		dirIno := dirInode.Ino
+
+		openDirRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:       dirIno,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		_ = openDirRes.Fh
+
+		err = mgr.Rmdir(ctx, disk.RootIno, []byte("orphan_dir"))
+		require.NoError(t, err)
+
+		// 验证当前磁盘配额：used_bytes == 12288, used_inodes == 4 (含根目录)
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(12288), d.UsedBytes, "当前 used_bytes 应为 8192 + 4096 == 12288")
+		assert.Equal(t, uint64(4), d.UsedInodes, "当前 used_inodes 应为 4 (根目录 + TmpFile + 常规文件 + 目录)")
+
+		// 4. 模拟客户端会话 1 过期
+		_, err = pool.Exec(ctx, "UPDATE client_sessions SET expires_at = $1 WHERE session_id = $2", time.Now().Add(-10*time.Second), int64(sess1))
+		require.NoError(t, err)
+
+		// 5. 客户端会话 2 调用 RenewSession 触发超期会话清理与孤儿节点批量物理回收
+		_, err = mgr.RenewSession(ctx, sess2)
+		require.NoError(t, err)
+
+		// 6. 验证所属磁盘配额自动恢复为 used_bytes == 0, used_inodes == 1 (仅剩根目录)
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(0), d.UsedBytes, "孤儿节点批量物理回收后 used_bytes 必须自动恢复为 0")
+		assert.Equal(t, uint64(1), d.UsedInodes, "孤儿节点批量物理回收后 used_inodes 必须自动恢复为 1 (仅剩根目录)")
+
+		// 7. 验证 3 个孤儿节点均已被物理删除
+		_, err = mgr.GetAttr(ctx, tmpIno)
+		assert.ErrorIs(t, err, meta.ErrNotFound, "TmpFile 应被物理删除")
+		_, err = mgr.GetAttr(ctx, fileIno)
+		assert.ErrorIs(t, err, meta.ErrNotFound, "孤儿常规文件应被物理删除")
+		_, err = mgr.GetAttr(ctx, dirIno)
+		assert.ErrorIs(t, err, meta.ErrNotFound, "孤儿目录应被物理删除")
 	})
 }

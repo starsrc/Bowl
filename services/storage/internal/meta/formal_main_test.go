@@ -1545,10 +1545,19 @@ func formalAuditINV4DiskQuota(ctx context.Context, t *testing.T, env *formalMain
 			_, exists := dbDisksByRoot[rootIno]
 			require.Falsef(t, exists, "INV-4 违例: 已删除磁盘 root_ino=%d 在 disks 底表中仍有残留", rootIno)
 
-			var orphanInodeCount int64
-			err := env.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM inodes WHERE root_ino = $1`, int64(rootIno)).Scan(&orphanInodeCount)
-			require.NoError(t, err)
+			var orphanInodeCount, orphanEntryCount, orphanHandleCount, orphanLockCount int64
+			err := env.Pool.QueryRow(ctx, `
+				SELECT
+					(SELECT COUNT(*) FROM inodes WHERE root_ino = $1),
+					(SELECT COUNT(*) FROM entries e JOIN inodes i ON (e.parent_ino = i.ino OR e.ino = i.ino) WHERE i.root_ino = $1),
+					(SELECT COUNT(*) FROM file_handles fh JOIN inodes i ON fh.ino = i.ino WHERE i.root_ino = $1),
+					(SELECT COUNT(*) FROM file_locks fl JOIN inodes i ON fl.ino = i.ino WHERE i.root_ino = $1)
+			`, int64(rootIno)).Scan(&orphanInodeCount, &orphanEntryCount, &orphanHandleCount, &orphanLockCount)
+			require.NoError(t, err, "INV-4: 查询已删除磁盘级联残留失败")
 			require.Zerof(t, orphanInodeCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 inodes 底表中残留 %d 条记录", rootIno, orphanInodeCount)
+			require.Zerof(t, orphanEntryCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 entries 底表中残留 %d 条记录", rootIno, orphanEntryCount)
+			require.Zerof(t, orphanHandleCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_handles 底表中残留 %d 条记录", rootIno, orphanHandleCount)
+			require.Zerof(t, orphanLockCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_locks 底表中残留 %d 条记录", rootIno, orphanLockCount)
 			continue
 		}
 

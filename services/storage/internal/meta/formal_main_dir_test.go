@@ -66,6 +66,7 @@ func assertFormalInodeMatchesEntity(t *testing.T, expected *formalInode, got *me
 	t.Helper()
 	require.NotNilf(t, got, "%s: 返回的 Inode 不应为 nil", contextMsg)
 	assert.Equalf(t, expected.Ino, got.Ino, "%s: Ino 不一致", contextMsg)
+	assert.Equalf(t, expected.Generation, got.Generation, "%s: Generation 不一致", contextMsg)
 	assert.Equalf(t, expected.Mode, got.Attr.Mode, "%s: Mode 不一致 (expected=0o%o, got=0o%o)",
 		contextMsg, expected.Mode, got.Attr.Mode)
 	assert.Equalf(t, expected.UID, got.Attr.UID, "%s: UID 不一致", contextMsg)
@@ -787,10 +788,10 @@ func loadFormalAuditTopologySnapshot(ctx context.Context, t *testing.T, env *for
 }
 
 // formalAuditINV1DirTopology 强制审计底表数学不变量 INV-1（目录树无环与父子双向一致）：
-// 1. 根目录 (ino == root_ino) 满足 inodes.parent_ino == root_ino，且在 entries 表中不存在 entries.ino == root_ino 的记录；
-// 2. 任意非根存活目录 (ino != root_ino && nlink > 0) 在 entries 表中恰有唯一父目录记录，满足 entries.parent_ino == inodes.parent_ino，
-//    且沿 entries 向上回溯必在有限步内唯一到达其所属 Disk 的 root_ino，路径无环；
-// 3. 底表 entries 与目录 Inode 拓扑与内存参考模型 100% 一致。
+//  1. 根目录 (ino == root_ino) 满足 inodes.parent_ino == root_ino，且在 entries 表中不存在 entries.ino == root_ino 的记录；
+//  2. 任意非根存活目录 (ino != root_ino && nlink > 0) 在 entries 表中恰有唯一父目录记录，满足 entries.parent_ino == inodes.parent_ino，
+//     且沿 entries 向上回溯必在有限步内唯一到达其所属 Disk 的 root_ino，路径无环；
+//  3. 底表 entries 与目录 Inode 拓扑与内存参考模型 100% 一致。
 func formalAuditINV1DirTopology(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	t.Helper()
 	if len(env.Model.AllCreatedRootInos) == 0 {
@@ -995,7 +996,7 @@ func formalAuditINV2DirNlink(ctx context.Context, t *testing.T, env *formalMainE
 
 // TestFormalMain_T2_DirTopology 验证 T2 主状态机 Mkdir/Rmdir 目录树拓扑对拍、Lookup/GetAttr 探针及底表 INV-1、INV-2 审计。
 func TestFormalMain_T2_DirTopology(t *testing.T) {
-	t.Run("确定性边界_SGID继承_Umask_EMLINK_DotDot_ENOTEMPTY_ENOTDIR_孤儿目录全链路验证", func(t *testing.T) {
+	t.Run("确定性边界_SGID继承_Umask_DotDot_ENOTEMPTY_ENOTDIR_孤儿目录全链路验证", func(t *testing.T) {
 		pool := setupFormalPostgresPool(t)
 		store := db.NewStore(pool)
 		mgr := meta.New(store)
@@ -1255,8 +1256,10 @@ func TestFormalMain_T2_DirTopology(t *testing.T) {
 				{Name: "CreateDisk", Weight: 10, Fn: formalActionCreateDisk},
 				{Name: "UpdateDisk", Weight: 10, Fn: formalActionUpdateDisk},
 				{Name: "T1QuotaFileStep", Weight: 10, Fn: formalActionT1QuotaFileStep},
-				{Name: "Mkdir", Weight: 40, Fn: formalActionMkdir},
-				{Name: "Rmdir", Weight: 30, Fn: formalActionRmdir},
+				{Name: "Mkdir", Weight: 35, Fn: formalActionMkdir},
+				{Name: "OpenDir", Weight: 15, Fn: formalActionOpenDir},
+				{Name: "Rmdir", Weight: 20, Fn: formalActionRmdir},
+				{Name: "ReleaseDir", Weight: 10, Fn: formalActionReleaseDir},
 			},
 			Probes: []formalNamedProbe{
 				{Name: "GetDisk", Fn: formalProbeGetDisk},

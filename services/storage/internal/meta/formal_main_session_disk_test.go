@@ -66,9 +66,6 @@ func verifyExpiredHandleAntiResurrection(
 	ctx context.Context,
 	t *testing.T,
 	mgr meta.Manager,
-	pool interface {
-		QueryRow(ctx context.Context, sql string, args ...any) pgxRowScanner
-	},
 	expSID uint64,
 	fileHandles []*formalHandle,
 	dirHandles []*formalHandle,
@@ -304,16 +301,17 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		return formalCreateValidDiskStep(ctx, t, env)
 	}
 
-	const shortTTL = 20 * time.Millisecond
-	shortMgr := meta.New(env.Store, meta.WithSessionLeaseTTL(shortTTL))
-
 	expSID := nextIsolatedFormalSessionID(env)
 	keepSID := nextIsolatedFormalSessionID(env)
 
-	// 先在长租约 Manager 上注册 keepSID，确保 keepSID 在等待期间始终有效
+	// 先在长租约 Manager 上注册 keepSID 与 expSID，确保构造前置数据期间租约始终有效绝不提前过期
 	keepExpAt, err := env.Mgr.RenewSession(ctx, keepSID)
 	require.NoError(t, err, "注册存活会话 keepSID 不应失败")
 	env.Model.RecordSession(keepSID, keepExpAt)
+
+	expExpAt, err := env.Mgr.RenewSession(ctx, expSID)
+	require.NoError(t, err, "注册待过期会话 expSID 不应失败")
+	env.Model.RecordSession(expSID, expExpAt)
 
 	var expFileHandles []*formalHandle
 	var expDirHandles []*formalHandle
@@ -326,7 +324,7 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		// 子场景 A：unlink-whilst-open 常规文件孤儿 (仅 expSID 持有句柄 + POSIX 写锁) + 混合句柄孤儿 (expSID + nil 无会话句柄共同持有)
 		scenarioTag = "unlink-whilst-open常规文件孤儿回收+混合nil句柄孤儿保留+文件锁级联清理"
 		fName1 := env.UniqueEntryName("exp_orphan_reg")
-		cRes1, err := shortMgr.Create(ctx, meta.CreateParams{
+		cRes1, err := env.Mgr.Create(ctx, meta.CreateParams{
 			ParentIno: disk.RootIno,
 			Name:      []byte(fName1),
 			Mode:      meta.S_IFREG | 0o644,
@@ -341,7 +339,7 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		env.Model.RecordNewInode(f1Model)
 		env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: fName1}] = f1Model.Ino
 		disk.UsedInodes++
-		modelSyncSessionRenewal(env.Model, &expSID, shortTTL)
+		modelSyncSessionRenewal(env.Model, &expSID, env.LeaseTTL)
 		h1 := &formalHandle{
 			Fh: cRes1.Fh, Ino: f1Model.Ino, Flags: meta.O_CREAT | meta.O_RDWR,
 			SessionID: modelCloneSessionID(&expSID), IsDir: false,
@@ -352,28 +350,28 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		// 若磁盘有剩余字节配额，为 f1 赋予非零大小以检验孤儿回收退还 used_bytes
 		if disk.MaxBytes > disk.UsedBytes && (disk.MaxBytes-disk.UsedBytes) >= 1024 {
 			sz := uint64(1024)
-			_, err = shortMgr.SetAttr(ctx, f1Model.Ino, meta.SetAttrInput{Size: &sz, Fh: &cRes1.Fh, SessionID: &expSID})
+			_, err = env.Mgr.SetAttr(ctx, f1Model.Ino, meta.SetAttrInput{Size: &sz, Fh: &cRes1.Fh, SessionID: &expSID})
 			require.NoError(t, err)
 			f1Model.Size = sz
 			disk.UsedBytes += sz
 		}
 
 		// 在 f1 上以 expSID 加一把 POSIX 写锁，验证会话过期后 RenewSession 级联清除 file_locks
-		err = shortMgr.SetLk(ctx, meta.SetLkParams{
+		err = env.Mgr.SetLk(ctx, meta.SetLkParams{
 			Ino: f1Model.Ino, Fh: cRes1.Fh, LockOwner: 9001, SessionID: expSID, LkFlags: 0,
 			Lk: meta.FileLock{Start: 0, End: 128, Type: meta.F_WRLCK, PID: 88},
 		})
 		require.NoError(t, err)
 
 		// Unlink f1 使其成为仅由 expSID 持有的 nlink == 0 孤儿常规文件
-		err = shortMgr.Unlink(ctx, disk.RootIno, []byte(fName1))
+		err = env.Mgr.Unlink(ctx, disk.RootIno, []byte(fName1))
 		require.NoError(t, err)
 		delete(env.Model.Entries, formalEntryKey{ParentIno: disk.RootIno, Name: fName1})
 		f1Model.Nlink = 0
 
 		// 同时创建一个混合句柄孤儿 fMix：同时绑定 expSID 句柄与 session_id == nil 无会话句柄！
 		fNameMix := env.UniqueEntryName("mix_orphan_reg")
-		cResMix, err := shortMgr.Create(ctx, meta.CreateParams{
+		cResMix, err := env.Mgr.Create(ctx, meta.CreateParams{
 			ParentIno: disk.RootIno,
 			Name:      []byte(fNameMix),
 			Mode:      meta.S_IFREG | 0o644,
@@ -417,7 +415,7 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		// 子场景 B：rmdir-whilst-open 孤儿目录 (仅 expSID 持有目录句柄)
 		scenarioTag = "rmdir-whilst-open孤儿目录短租约超期物理回收与used_inodes退还"
 		dName := env.UniqueEntryName("exp_orphan_dir")
-		dirNode, err := shortMgr.Mkdir(ctx, meta.MkdirParams{
+		dirNode, err := env.Mgr.Mkdir(ctx, meta.MkdirParams{
 			ParentIno: disk.RootIno,
 			Name:      []byte(dName),
 			Mode:      0o755,
@@ -433,13 +431,13 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		env.Model.RecordNewInode(dirModel)
 		env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: dName}] = dirModel.Ino
 
-		openDirRes, err := shortMgr.OpenDir(ctx, meta.OpenDirParams{
+		openDirRes, err := env.Mgr.OpenDir(ctx, meta.OpenDirParams{
 			Ino:       dirModel.Ino,
 			Flags:     meta.O_RDONLY,
 			SessionID: &expSID,
 		})
 		require.NoError(t, err)
-		modelSyncSessionRenewal(env.Model, &expSID, shortTTL)
+		modelSyncSessionRenewal(env.Model, &expSID, env.LeaseTTL)
 		dh := &formalHandle{
 			Fh: openDirRes.Fh, Ino: dirModel.Ino, Flags: meta.O_RDONLY,
 			SessionID: modelCloneSessionID(&expSID), IsDir: true,
@@ -448,7 +446,7 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		expDirHandles = append(expDirHandles, dh)
 
 		// Rmdir 该打开的空子目录，使其变为 nlink == 0 的孤儿目录
-		err = shortMgr.Rmdir(ctx, disk.RootIno, []byte(dName))
+		err = env.Mgr.Rmdir(ctx, disk.RootIno, []byte(dName))
 		require.NoError(t, err)
 		delete(env.Model.Entries, formalEntryKey{ParentIno: disk.RootIno, Name: dName})
 		rootDir.Nlink--
@@ -457,14 +455,14 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 	case 2:
 		// 子场景 C：未具名化匿名 TmpFile (nlink == 0, S_IFREG, 非零大小, 仅 expSID 持有句柄)
 		scenarioTag = "未具名化TmpFile短租约超期物理回收与used_bytes配额退还"
-		tmpRes, err := shortMgr.TmpFile(ctx, meta.TmpFileParams{
+		tmpRes, err := env.Mgr.TmpFile(ctx, meta.TmpFileParams{
 			ParentIno: disk.RootIno,
 			Mode:      0o600,
 			Flags:     meta.O_RDWR | meta.O_TMPFILE,
 			SessionID: &expSID,
 		})
 		require.NoError(t, err)
-		modelSyncSessionRenewal(env.Model, &expSID, shortTTL)
+		modelSyncSessionRenewal(env.Model, &expSID, env.LeaseTTL)
 		tmpModel := &formalInode{
 			Ino: tmpRes.Inode.Ino, Generation: tmpRes.Inode.Generation, RootIno: disk.RootIno,
 			Mode: tmpRes.Inode.Attr.Mode, Size: 0, Nlink: 0, IsTmpFile: true,
@@ -480,7 +478,7 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 
 		if disk.MaxBytes > disk.UsedBytes && (disk.MaxBytes-disk.UsedBytes) >= 2048 {
 			sz := uint64(2048)
-			_, err = shortMgr.SetAttr(ctx, tmpModel.Ino, meta.SetAttrInput{Size: &sz, Fh: &tmpRes.Fh, SessionID: &expSID})
+			_, err = env.Mgr.SetAttr(ctx, tmpModel.Ino, meta.SetAttrInput{Size: &sz, Fh: &tmpRes.Fh, SessionID: &expSID})
 			require.NoError(t, err)
 			tmpModel.Size = sz
 			disk.UsedBytes += sz
@@ -490,7 +488,7 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		// 子场景 D：unlink-whilst-open 特殊设备节点 (S_IFIFO, size == 0) + 同时被 keepSID 存活会话引用的混合孤儿常规文件
 		scenarioTag = "特殊文件S_IFIFO孤儿回收+存活会话keepSID混合句柄孤儿保留"
 		fifoName := env.UniqueEntryName("exp_orphan_fifo")
-		fifoNode, err := shortMgr.Mknod(ctx, meta.MknodParams{
+		fifoNode, err := env.Mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: disk.RootIno,
 			Name:      []byte(fifoName),
 			Mode:      meta.S_IFIFO | 0o640,
@@ -504,13 +502,13 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: fifoName}] = fifoModel.Ino
 		disk.UsedInodes++
 
-		openFifoRes, err := shortMgr.Open(ctx, meta.OpenParams{
+		openFifoRes, err := env.Mgr.Open(ctx, meta.OpenParams{
 			Ino:       fifoModel.Ino,
 			Flags:     meta.O_RDWR,
 			SessionID: &expSID,
 		})
 		require.NoError(t, err)
-		modelSyncSessionRenewal(env.Model, &expSID, shortTTL)
+		modelSyncSessionRenewal(env.Model, &expSID, env.LeaseTTL)
 		fhFifo := &formalHandle{
 			Fh: openFifoRes.Fh, Ino: fifoModel.Ino, Flags: meta.O_RDWR,
 			SessionID: modelCloneSessionID(&expSID), IsDir: false,
@@ -518,14 +516,14 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		env.Model.RecordNewHandle(fhFifo)
 		expFileHandles = append(expFileHandles, fhFifo)
 
-		err = shortMgr.Unlink(ctx, disk.RootIno, []byte(fifoName))
+		err = env.Mgr.Unlink(ctx, disk.RootIno, []byte(fifoName))
 		require.NoError(t, err)
 		delete(env.Model.Entries, formalEntryKey{ParentIno: disk.RootIno, Name: fifoName})
 		fifoModel.Nlink = 0
 
 		// 同时创建由 expSID 与 keepSID 双会话共同持有的孤儿常规文件
 		sharedName := env.UniqueEntryName("shared_sess_orphan")
-		cShared, err := shortMgr.Create(ctx, meta.CreateParams{
+		cShared, err := env.Mgr.Create(ctx, meta.CreateParams{
 			ParentIno: disk.RootIno,
 			Name:      []byte(sharedName),
 			Mode:      meta.S_IFREG | 0o644,
@@ -565,16 +563,18 @@ func formalStepShortLeaseExpireAndSweep(ctx context.Context, t *testing.T, env *
 		sharedModel.Nlink = 0
 	}
 
-	// 刷新 expSID 的 20ms 短租约并等待 26ms 使其在 PostgreSQL 中确定性过期
+	// 前置全部孤儿与句柄就绪后，使用 shortMgr (60ms 短租约) 将 expSID 租约原子收缩，并等待 75ms 使其在 PostgreSQL 中确定性过期
+	const shortTTL = 60 * time.Millisecond
+	shortMgr := meta.New(env.Store, meta.WithSessionLeaseTTL(shortTTL))
 	_, err = shortMgr.RenewSession(ctx, expSID)
 	require.NoError(t, err)
-	time.Sleep(shortTTL + 6*time.Millisecond)
+	time.Sleep(shortTTL + 15*time.Millisecond)
 	if sess, ok := env.Model.Sessions[expSID]; ok {
 		sess.Expired = true
 	}
 
 	// 验证所有绑定在过期会话 expSID 上的句柄调用全套句柄接口必返回 ErrBadFileHandle 且绝不诈尸自救
-	verifyExpiredHandleAntiResurrection(ctx, t, shortMgr, nil, expSID, expFileHandles, expDirHandles)
+	verifyExpiredHandleAntiResurrection(ctx, t, shortMgr, expSID, expFileHandles, expDirHandles)
 	assertSessionStillExpiredInDB(ctx, t, env, expSID)
 
 	// 由存活会话 keepSID 显式调用 RenewSession 触发过期会话清理、孤儿节点物理回收与磁盘配额退还
@@ -675,78 +675,99 @@ func enrichDiskBeforeDelete(ctx context.Context, t *testing.T, env *formalMainEn
 		return
 	}
 
-	// 1. 若该盘节点较少，补充一个子目录及多硬链接常规文件与打开句柄
-	if disk.UsedInodes <= 3 {
-		subDirName := env.UniqueEntryName("del_subdir")
-		subDir, err := env.Mgr.Mkdir(ctx, meta.MkdirParams{
-			ParentIno: disk.RootIno,
-			Name:      []byte(subDirName),
-			Mode:      0o755,
-		})
-		if err == nil {
-			rootDir.Nlink++
-			disk.UsedInodes++
-			subDirModel := &formalInode{
-				Ino: subDir.Ino, Generation: subDir.Generation, RootIno: disk.RootIno, ParentIno: disk.RootIno,
-				Mode: subDir.Attr.Mode, Size: meta.DefaultDirSize, Nlink: 2,
-			}
-			env.Model.RecordNewInode(subDirModel)
-			env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: subDirName}] = subDirModel.Ino
-
-			// 打开子目录句柄（不关闭，测试 DeleteDisk 级联清除目录句柄）
-			if odRes, odErr := env.Mgr.OpenDir(ctx, meta.OpenDirParams{Ino: subDirModel.Ino, Flags: meta.O_RDONLY}); odErr == nil {
-				env.Model.RecordNewHandle(&formalHandle{
-					Fh: odRes.Fh, Ino: subDirModel.Ino, Flags: meta.O_RDONLY, IsDir: true,
-				})
-			}
-
-			// 在子目录下创建常规文件并建立硬链接与孤儿 TmpFile
-			fName := env.UniqueEntryName("del_file")
-			if cRes, cErr := env.Mgr.Create(ctx, meta.CreateParams{
-				ParentIno: subDirModel.Ino,
-				Name:      []byte(fName),
-				Mode:      meta.S_IFREG | 0o644,
-				Flags:     meta.O_CREAT | meta.O_RDWR,
-			}); cErr == nil {
-				fModel := &formalInode{
-					Ino: cRes.Inode.Ino, Generation: cRes.Inode.Generation, RootIno: disk.RootIno,
-					Mode: cRes.Inode.Attr.Mode, Size: 0, Nlink: 1,
-				}
-				env.Model.RecordNewInode(fModel)
-				env.Model.Entries[formalEntryKey{ParentIno: subDirModel.Ino, Name: fName}] = fModel.Ino
-				disk.UsedInodes++
-				env.Model.RecordNewHandle(&formalHandle{
-					Fh: cRes.Fh, Ino: fModel.Ino, Flags: meta.O_CREAT | meta.O_RDWR, IsDir: false,
-				})
-
-				// 建立跨目录硬链接
-				linkName := env.UniqueEntryName("del_file_link")
-				if _, lErr := env.Mgr.Link(ctx, meta.LinkParams{
-					Ino: fModel.Ino, NewParentIno: disk.RootIno, NewName: []byte(linkName),
-				}); lErr == nil {
-					fModel.Nlink++
-					env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: linkName}] = fModel.Ino
-				}
-			}
-
-			// 创建一个匿名 TmpFile (nlink == 0) 留在目标盘上
-			if tmpRes, tmpErr := env.Mgr.TmpFile(ctx, meta.TmpFileParams{
-				ParentIno: subDirModel.Ino,
-				Mode:      0o600,
-				Flags:     meta.O_RDWR | meta.O_TMPFILE,
-			}); tmpErr == nil {
-				tmpModel := &formalInode{
-					Ino: tmpRes.Inode.Ino, Generation: tmpRes.Inode.Generation, RootIno: disk.RootIno,
-					Mode: tmpRes.Inode.Attr.Mode, Size: 0, Nlink: 0, IsTmpFile: true,
-				}
-				env.Model.RecordNewInode(tmpModel)
-				disk.UsedInodes++
-				env.Model.RecordNewHandle(&formalHandle{
-					Fh: tmpRes.Fh, Ino: tmpModel.Ino, Flags: meta.O_RDWR | meta.O_TMPFILE, IsDir: false,
-				})
-			}
-		}
+	// 1. 创建子目录与打开目录句柄
+	subDirName := env.UniqueEntryName("del_subdir")
+	subDir, err := env.Mgr.Mkdir(ctx, meta.MkdirParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte(subDirName),
+		Mode:      0o755,
+	})
+	require.NoError(t, err, "enrichDiskBeforeDelete: 创建子目录必须成功")
+	rootDir.Nlink++
+	disk.UsedInodes++
+	subDirModel := &formalInode{
+		Ino: subDir.Ino, Generation: subDir.Generation, RootIno: disk.RootIno, ParentIno: disk.RootIno,
+		Mode: subDir.Attr.Mode, Size: meta.DefaultDirSize, Nlink: 2,
 	}
+	env.Model.RecordNewInode(subDirModel)
+	env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: subDirName}] = subDirModel.Ino
+
+	// 打开子目录句柄（不关闭，测试 DeleteDisk 级联清除目录句柄）
+	odRes, err := env.Mgr.OpenDir(ctx, meta.OpenDirParams{Ino: subDirModel.Ino, Flags: meta.O_RDONLY})
+	require.NoError(t, err, "enrichDiskBeforeDelete: 打开子目录句柄必须成功")
+	env.Model.RecordNewHandle(&formalHandle{
+		Fh: odRes.Fh, Ino: subDirModel.Ino, Flags: meta.O_RDONLY, IsDir: true,
+	})
+
+	// 2. 在子目录下创建常规文件并建立跨目录硬链接
+	fName := env.UniqueEntryName("del_file")
+	cRes, err := env.Mgr.Create(ctx, meta.CreateParams{
+		ParentIno: subDirModel.Ino,
+		Name:      []byte(fName),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_CREAT | meta.O_RDWR,
+	})
+	require.NoError(t, err, "enrichDiskBeforeDelete: 创建常规文件必须成功")
+	fModel := &formalInode{
+		Ino: cRes.Inode.Ino, Generation: cRes.Inode.Generation, RootIno: disk.RootIno,
+		Mode: cRes.Inode.Attr.Mode, Size: 0, Nlink: 1,
+	}
+	env.Model.RecordNewInode(fModel)
+	env.Model.Entries[formalEntryKey{ParentIno: subDirModel.Ino, Name: fName}] = fModel.Ino
+	disk.UsedInodes++
+	env.Model.RecordNewHandle(&formalHandle{
+		Fh: cRes.Fh, Ino: fModel.Ino, Flags: meta.O_CREAT | meta.O_RDWR, IsDir: false,
+	})
+
+	// 建立跨目录硬链接
+	linkName := env.UniqueEntryName("del_file_link")
+	_, err = env.Mgr.Link(ctx, meta.LinkParams{
+		Ino: fModel.Ino, NewParentIno: disk.RootIno, NewName: []byte(linkName),
+	})
+	require.NoError(t, err, "enrichDiskBeforeDelete: 建立跨目录硬链接必须成功")
+	fModel.Nlink++
+	env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: linkName}] = fModel.Ino
+
+	// 3. 构造活跃孤儿常规文件 (unlink-whilst-open)
+	orphanName := env.UniqueEntryName("del_orphan")
+	oRes, err := env.Mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte(orphanName),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_CREAT | meta.O_RDWR,
+	})
+	require.NoError(t, err, "enrichDiskBeforeDelete: 创建待解链常规文件必须成功")
+	oModel := &formalInode{
+		Ino: oRes.Inode.Ino, Generation: oRes.Inode.Generation, RootIno: disk.RootIno,
+		Mode: oRes.Inode.Attr.Mode, Size: 0, Nlink: 1,
+	}
+	env.Model.RecordNewInode(oModel)
+	env.Model.Entries[formalEntryKey{ParentIno: disk.RootIno, Name: orphanName}] = oModel.Ino
+	disk.UsedInodes++
+	env.Model.RecordNewHandle(&formalHandle{
+		Fh: oRes.Fh, Ino: oModel.Ino, Flags: meta.O_CREAT | meta.O_RDWR, IsDir: false,
+	})
+	err = env.Mgr.Unlink(ctx, disk.RootIno, []byte(orphanName))
+	require.NoError(t, err, "enrichDiskBeforeDelete: Unlink 孤儿文件必须成功")
+	delete(env.Model.Entries, formalEntryKey{ParentIno: disk.RootIno, Name: orphanName})
+	oModel.Nlink = 0
+
+	// 4. 创建一个匿名 TmpFile (nlink == 0) 留在目标盘上
+	tmpRes, err := env.Mgr.TmpFile(ctx, meta.TmpFileParams{
+		ParentIno: subDirModel.Ino,
+		Mode:      0o600,
+		Flags:     meta.O_RDWR | meta.O_TMPFILE,
+	})
+	require.NoError(t, err, "enrichDiskBeforeDelete: 创建 TmpFile 必须成功")
+	tmpModel := &formalInode{
+		Ino: tmpRes.Inode.Ino, Generation: tmpRes.Inode.Generation, RootIno: disk.RootIno,
+		Mode: tmpRes.Inode.Attr.Mode, Size: 0, Nlink: 0, IsTmpFile: true,
+	}
+	env.Model.RecordNewInode(tmpModel)
+	disk.UsedInodes++
+	env.Model.RecordNewHandle(&formalHandle{
+		Fh: tmpRes.Fh, Ino: tmpModel.Ino, Flags: meta.O_RDWR | meta.O_TMPFILE, IsDir: false,
+	})
 }
 
 // formalActionDeleteDisk 在状态机中随机生成：
@@ -842,11 +863,12 @@ func formalActionDeleteDisk(ctx context.Context, t *testing.T, env *formalMainEn
 
 // formalAuditT10SessionAndDeleteDisk 直接扫描 PostgreSQL 7 张核心底表，强制审计：
 // 1. INV-4 级联删盘底表零残留：
-//    - 对已执行 DeleteDisk 的所有 deletedDiskIDs 与 deletedRootInos，底表 disks、inodes、entries、file_handles、file_locks、file_lock_waiters 中归属该盘的记录数全部恒为 0；
-//    - 对内存中已标记物理删除的所有 DeletedInos（含删盘级联销毁的节点与回收的孤儿节点），底表 inodes、entries、file_handles、file_locks、file_lock_waiters、inode_xattrs 中记录数全部恒为 0；
+//   - 对已执行 DeleteDisk 的所有 deletedDiskIDs 与 deletedRootInos，底表 disks、inodes、entries、file_handles、file_locks、file_lock_waiters 中归属该盘的记录数全部恒为 0；
+//   - 对内存中已标记物理删除的所有 DeletedInos（含删盘级联销毁的节点与回收的孤儿节点），底表 inodes、entries、file_handles、file_locks、file_lock_waiters、inode_xattrs 中记录数全部恒为 0；
+//
 // 2. INV-3 会话租约与孤儿清扫收敛：
-//    - 对已通过 RenewSession 清扫的过期会话，底表 client_sessions、file_handles、file_locks、file_lock_waiters 中归属该 session_id 的记录数全部恒为 0；
-//    - 当不存在未清扫的过期会话时，底表中无有效句柄 (NOT EXISTS (fh.session_id IS NULL OR s.expires_at > clock_timestamp())) 的 nlink == 0 孤儿节点数恒为 0！
+//   - 对已通过 RenewSession 清扫的过期会话，底表 client_sessions、file_handles、file_locks、file_lock_waiters 中归属该 session_id 的记录数全部恒为 0；
+//   - 当不存在未清扫的过期会话时，底表中无有效句柄 (NOT EXISTS (fh.session_id IS NULL OR s.expires_at > clock_timestamp())) 的 nlink == 0 孤儿节点数恒为 0！
 func formalAuditT10SessionAndDeleteDisk(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	t.Helper()
 
@@ -873,23 +895,15 @@ func formalAuditT10SessionAndDeleteDisk(ctx context.Context, t *testing.T, env *
 				delRoots = append(delRoots, int64(r))
 			}
 		}
-		var diskCnt, inodeCnt, entryCnt, handleCnt, lockCnt, waiterCnt int64
+		var diskCnt, inodeCnt int64
 		err := env.Pool.QueryRow(ctx, `
 			SELECT
 				(SELECT COUNT(*) FROM disks WHERE root_ino = ANY($1)),
-				(SELECT COUNT(*) FROM inodes WHERE root_ino = ANY($1)),
-				(SELECT COUNT(*) FROM entries e JOIN inodes i ON (e.parent_ino = i.ino OR e.ino = i.ino) WHERE i.root_ino = ANY($1)),
-				(SELECT COUNT(*) FROM file_handles fh JOIN inodes i ON fh.ino = i.ino WHERE i.root_ino = ANY($1)),
-				(SELECT COUNT(*) FROM file_locks fl JOIN inodes i ON fl.ino = i.ino WHERE i.root_ino = ANY($1)),
-				(SELECT COUNT(*) FROM file_lock_waiters flw JOIN inodes i ON flw.ino = i.ino WHERE i.root_ino = ANY($1))
-		`, delRoots).Scan(&diskCnt, &inodeCnt, &entryCnt, &handleCnt, &lockCnt, &waiterCnt)
+				(SELECT COUNT(*) FROM inodes WHERE root_ino = ANY($1))
+		`, delRoots).Scan(&diskCnt, &inodeCnt)
 		require.NoError(t, err, "T10 INV-4 审计: 查询 deletedRootInos 底表残留失败")
 		require.Zerof(t, diskCnt, "INV-4 违例: deletedRootInos 在 disks 表残留 %d 条", diskCnt)
 		require.Zerof(t, inodeCnt, "INV-4 违例: deletedRootInos 在 inodes 表残留 %d 条", inodeCnt)
-		require.Zerof(t, entryCnt, "INV-4 违例: deletedRootInos 在 entries 表残留 %d 条", entryCnt)
-		require.Zerof(t, handleCnt, "INV-4 违例: deletedRootInos 在 file_handles 表残留 %d 条", handleCnt)
-		require.Zerof(t, lockCnt, "INV-4 违例: deletedRootInos 在 file_locks 表残留 %d 条", lockCnt)
-		require.Zerof(t, waiterCnt, "INV-4 违例: deletedRootInos 在 file_lock_waiters 表残留 %d 条", waiterCnt)
 	}
 
 	// 2. 审计所有已物理删除 Inode (DeletedInos，含删盘销毁的全部节点与已回收的全部孤儿节点) 在各关联子表中的零残留
@@ -1275,7 +1289,7 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 		env.Model.Sessions[sidExp].Expired = true
 
 		// 6. 验证过期会话 sidExp 的全部文件句柄与目录句柄调用 9 个句柄接口均返回 ErrBadFileHandle，且无法“诈尸”自救
-		verifyExpiredHandleAntiResurrection(ctx, t, shortMgr, nil, sidExp, expFileHandles, expDirHandles)
+		verifyExpiredHandleAntiResurrection(ctx, t, shortMgr, sidExp, expFileHandles, expDirHandles)
 		assertSessionStillExpiredInDB(ctx, t, env, sidExp)
 
 		// 7. 显式调用 RenewSession(sidKeep) 触发同步清扫：

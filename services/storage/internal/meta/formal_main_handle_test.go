@@ -231,17 +231,6 @@ func formalPredictRelease(
 	return inode, h, nil
 }
 
-// findOrphanNonDirsInModel 返回内存模型中所有 nlink == 0 且尚未物理删除的非目录孤儿节点。
-func findOrphanNonDirsInModel(m *formalMainModel) []*formalInode {
-	var res []*formalInode
-	for _, ino := range m.AllCreatedInos {
-		if inode, ok := m.Inodes[ino]; ok && !inode.Deleted && !inode.IsDir() && inode.Nlink == 0 {
-			res = append(res, inode)
-		}
-	}
-	return res
-}
-
 // pickOptionalFormalSessionID 在长租约模式下按概率选择 nil 或与当前 Seed 隔离的客户端会话 ID；在毫秒级短租约测试下保持 nil 以免干扰过期控制。
 func pickOptionalFormalSessionID(env *formalMainEnv) *uint64 {
 	if env.LeaseTTL < 5*time.Second {
@@ -1201,10 +1190,10 @@ type dbAuditHandleRow struct {
 }
 
 // formalAuditINV3OrphanAndHandles 直接扫描 PostgreSQL 底表 inodes、file_handles 与 client_sessions，强制校验 INV-3：
-// 1. 底表中任意 nlink == 0 的 Orphan Inode 必在 file_handles 表中存在关联句柄；
-//    且当无过期未清扫会话时（或在 RenewSession 同步清扫后），任意 nlink == 0 的 Orphan Inode 必关联至少一条有效句柄
-//    (fh.session_id IS NULL OR s.expires_at > clock_timestamp())；
-// 2. 底表 file_handles 记录集合（fh、ino、flags、session_id）与内存参考模型 Handles 完全一致，已关闭句柄零残留。
+//  1. 底表中任意 nlink == 0 的 Orphan Inode 必在 file_handles 表中存在关联句柄；
+//     且当无过期未清扫会话时（或在 RenewSession 同步清扫后），任意 nlink == 0 的 Orphan Inode 必关联至少一条有效句柄
+//     (fh.session_id IS NULL OR s.expires_at > clock_timestamp())；
+//  2. 底表 file_handles 记录集合（fh、ino、flags、session_id）与内存参考模型 Handles 完全一致，已关闭句柄零残留。
 func formalAuditINV3OrphanAndHandles(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	t.Helper()
 	if len(env.Model.AllCreatedRootInos) == 0 {

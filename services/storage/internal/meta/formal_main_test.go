@@ -109,17 +109,20 @@ func loadFormalSeedConfig(t *testing.T, defaultRuns, defaultSteps int) formalSee
 	}
 	if defaultSteps <= 0 {
 		defaultSteps = defaultFormalSteps
-		// 轻量档 (task test) 下，各工单内嵌的 RandomStateMachine 子测试跑精简冒烟步数，顶层 TestFormalMainStateMachine 跑完整轻量步数
+		// 轻量档 (task test) 下，各工单内嵌的 RandomStateMachine 子测试跑默认 8 步，顶层 TestFormalMainStateMachine 跑完整轻量步数
 		if !isFormalDeepMode() && strings.Contains(t.Name(), "/") {
-			defaultSteps = 3
+			defaultSteps = 8
 		}
 	}
 
 	ov := parseFormalEnvOverrides(t, defaultRuns, defaultSteps)
-	if !ov.HasFixedSeed && strings.Contains(t.Name(), "/") && isFormalDeepMode() && ov.Runs > 1 {
-		ov.Runs = 1
-		if ov.Steps > 20 {
-			ov.Steps = 20
+	if !ov.HasFixedSeed && strings.Contains(t.Name(), "/") && isFormalDeepMode() {
+		// 深度验证下，单接口专项子测试 Runs 收敛至至多 2 轮，Steps 至少保留 25 步
+		if ov.Runs > 2 {
+			ov.Runs = 2
+		}
+		if ov.Steps < 25 {
+			ov.Steps = 25
 		}
 	}
 
@@ -137,13 +140,14 @@ func newFormalRNG(seed uint64) *rand.Rand {
 
 // formalDisk 表示内存参考模型中的虚拟磁盘与配额账本状态。
 type formalDisk struct {
-	DiskID     string
-	Name       string
-	RootIno    uint64
-	MaxBytes   uint64
-	UsedBytes  uint64
-	UsedInodes uint64
-	Deleted    bool
+	DiskID      string
+	Name        string
+	RootIno     uint64
+	MaxBytes    uint64
+	UsedBytes   uint64
+	UsedInodes  uint64
+	Deleted     bool
+	DeletedInos []uint64
 }
 
 // formalInode 表示内存参考模型中的 Inode 节点状态（涵盖目录、常规文件、符号链接、特殊设备及孤儿节点）。
@@ -295,7 +299,7 @@ func (m *formalMainModel) RecordNewDisk(d *meta.Disk) *formalDisk {
 
 	rootInode := &formalInode{
 		Ino:        d.RootIno,
-		Generation: 1,
+		Generation: 0,
 		RootIno:    d.RootIno,
 		ParentIno:  d.RootIno,
 		Mode:       meta.S_IFDIR | 0o755,
@@ -336,6 +340,8 @@ func (m *formalMainModel) RecordDeletedDisk(diskID string) {
 		delete(m.Inodes, ino)
 		m.DeletedInos[ino] = true
 	}
+	fd.Deleted = true
+	fd.DeletedInos = toDeleteInos
 
 	for _, ek := range m.SortedEntries() {
 		childIno := m.Entries[ek]
@@ -555,17 +561,6 @@ func (m *formalMainModel) ClearTmpFileFlagForIno(ino uint64) {
 			h.Flags &^= meta.O_TMPFILE
 		}
 	}
-}
-
-// SortedInos 按创建顺序返回当前内存中仍存活的全部 Ino 编号。
-func (m *formalMainModel) SortedInos() []uint64 {
-	res := make([]uint64, 0, len(m.Inodes))
-	for _, ino := range m.AllCreatedInos {
-		if _, ok := m.Inodes[ino]; ok {
-			res = append(res, ino)
-		}
-	}
-	return res
 }
 
 // SortedDeletedInos 按创建顺序返回所有已物理删除的 Ino 编号。
@@ -964,6 +959,9 @@ func setupFormalPostgresPool(t *testing.T) *pgxpool.Pool {
 		sharedFormalPool = pool
 	})
 	if sharedFormalPoolErr != nil || sharedFormalPool == nil {
+		if os.Getenv("BOWL_FORMAL_REQUIRE_DB") == "1" || isFormalDeepMode() {
+			t.Fatalf("深度形式化验证模式下必须成功连接 PostgreSQL: %v", sharedFormalPoolErr)
+		}
 		t.Skipf("跳过形式化状态机测试: 连接 PostgreSQL 失败: %v", sharedFormalPoolErr)
 	}
 	return sharedFormalPool
@@ -1459,16 +1457,29 @@ func formalActionT1QuotaFileStep(ctx context.Context, t *testing.T, env *formalM
 	// 若尚无常规文件或按概率新建文件
 	if len(diskFiles) == 0 || (len(diskFiles) < 4 && env.Rng.IntN(2) == 0) {
 		fileName := env.UniqueEntryName("quota_file")
+		parentDir := env.Model.Inodes[disk.RootIno]
+		require.NotNil(t, parentDir)
+		expectedGID := uint32(1000)
+		if (parentDir.Mode & meta.S_ISGID) != 0 {
+			expectedGID = parentDir.GID
+		}
+		expectedUID := uint32(1000)
+		reqMode := uint32(meta.S_IFREG | 0o644)
+		expectedMode := meta.S_IFREG | ((reqMode & meta.PermMask) &^ 0) // umask 未传默认为 0
+
 		createRes, err := env.Mgr.Create(ctx, meta.CreateParams{
 			ParentIno: disk.RootIno,
 			Name:      []byte(fileName),
-			Mode:      meta.S_IFREG | 0o644,
+			Mode:      reqMode,
 			Flags:     meta.O_CREAT | meta.O_RDWR,
 			UID:       1000,
 			GID:       1000,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, createRes)
+		require.Equal(t, expectedMode, createRes.Inode.Attr.Mode, "Create 返回的 Mode 必须与独立预测一致")
+		require.Equal(t, expectedUID, createRes.Inode.Attr.UID, "Create 返回的 UID 必须与独立预测一致")
+		require.Equal(t, expectedGID, createRes.Inode.Attr.GID, "Create 返回的 GID 必须与独立预测一致")
 
 		// 立即释放打开句柄，保持无活跃句柄的干净状态
 		err = env.Mgr.Release(ctx, meta.ReleaseParams{
@@ -1482,9 +1493,9 @@ func formalActionT1QuotaFileStep(ctx context.Context, t *testing.T, env *formalM
 			Generation: createRes.Inode.Generation,
 			RootIno:    disk.RootIno,
 			ParentIno:  0,
-			Mode:       createRes.Inode.Attr.Mode,
-			UID:        createRes.Inode.Attr.UID,
-			GID:        createRes.Inode.Attr.GID,
+			Mode:       expectedMode,
+			UID:        expectedUID,
+			GID:        expectedGID,
 			Size:       0,
 			Nlink:      1,
 		}
@@ -1503,13 +1514,15 @@ func formalActionT1QuotaFileStep(ctx context.Context, t *testing.T, env *formalM
 				maxAlloc = 32768
 			}
 			targetSize := uint64(env.Rng.Uint64N(maxAlloc-512)) + 512
+			expectedMode := fi.Mode &^ (meta.S_ISUID | meta.S_ISGID)
 			updatedInode, err := env.Mgr.SetAttr(ctx, fi.Ino, meta.SetAttrInput{
 				Size: &targetSize,
 			})
 			require.NoError(t, err)
 			require.Equal(t, targetSize, updatedInode.Attr.Size)
+			require.Equal(t, expectedMode, updatedInode.Attr.Mode, "SetAttr(Size) 返回的 Mode 必须清除 S_ISUID/S_ISGID")
 			fi.Size = targetSize
-			fi.Mode = updatedInode.Attr.Mode
+			fi.Mode = expectedMode
 			disk.UsedBytes += targetSize
 		}
 
@@ -1558,13 +1571,15 @@ func formalActionT1QuotaFileStep(ctx context.Context, t *testing.T, env *formalM
 	require.NoError(t, err)
 	require.NotNil(t, gotInode)
 	require.Equal(t, newSize, gotInode.Attr.Size)
+	expectedMode := targetFile.Mode &^ (meta.S_ISUID | meta.S_ISGID)
+	require.Equal(t, expectedMode, gotInode.Attr.Mode, "SetAttr(Size) 返回的 Mode 必须清除 S_ISUID/S_ISGID")
 	if newSize > oldSize {
 		disk.UsedBytes += newSize - oldSize
 	} else {
 		disk.UsedBytes -= oldSize - newSize
 	}
 	targetFile.Size = newSize
-	targetFile.Mode = gotInode.Attr.Mode
+	targetFile.Mode = expectedMode
 
 	return fmt.Sprintf("QuotaFileResize(ino=%d, old=%d -> new=%d) -> 成功 (disk_used_bytes=%d)",
 		targetFile.Ino, oldSize, newSize, disk.UsedBytes)
@@ -1738,19 +1753,36 @@ func formalAuditINV4DiskQuota(ctx context.Context, t *testing.T, env *formalMain
 			_, exists := dbDisksByRoot[rootIno]
 			require.Falsef(t, exists, "INV-4 违例: 已删除磁盘 root_ino=%d 在 disks 底表中仍有残留", rootIno)
 
-			var orphanInodeCount, orphanEntryCount, orphanHandleCount, orphanLockCount int64
-			err := env.Pool.QueryRow(ctx, `
-				SELECT
-					(SELECT COUNT(*) FROM inodes WHERE root_ino = $1),
-					(SELECT COUNT(*) FROM entries e JOIN inodes i ON (e.parent_ino = i.ino OR e.ino = i.ino) WHERE i.root_ino = $1),
-					(SELECT COUNT(*) FROM file_handles fh JOIN inodes i ON fh.ino = i.ino WHERE i.root_ino = $1),
-					(SELECT COUNT(*) FROM file_locks fl JOIN inodes i ON fl.ino = i.ino WHERE i.root_ino = $1)
-			`, int64(rootIno)).Scan(&orphanInodeCount, &orphanEntryCount, &orphanHandleCount, &orphanLockCount)
-			require.NoError(t, err, "INV-4: 查询已删除磁盘级联残留失败")
+			var orphanInodeCount int64
+			err := env.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM inodes WHERE root_ino = $1`, int64(rootIno)).Scan(&orphanInodeCount)
+			require.NoError(t, err, "INV-4: 查询已删除磁盘 inodes 残留失败")
 			require.Zerof(t, orphanInodeCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 inodes 底表中残留 %d 条记录", rootIno, orphanInodeCount)
-			require.Zerof(t, orphanEntryCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 entries 底表中残留 %d 条记录", rootIno, orphanEntryCount)
-			require.Zerof(t, orphanHandleCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_handles 底表中残留 %d 条记录", rootIno, orphanHandleCount)
-			require.Zerof(t, orphanLockCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_locks 底表中残留 %d 条记录", rootIno, orphanLockCount)
+
+			var deletedInos []int64
+			for _, d := range env.Model.Disks {
+				if d.RootIno == rootIno && len(d.DeletedInos) > 0 {
+					for _, ino := range d.DeletedInos {
+						deletedInos = append(deletedInos, int64(ino))
+					}
+					break
+				}
+			}
+
+			if len(deletedInos) > 0 {
+				var orphanEntryCount, orphanHandleCount, orphanLockCount, orphanWaiterCount int64
+				err := env.Pool.QueryRow(ctx, `
+					SELECT
+						(SELECT COUNT(*) FROM entries WHERE parent_ino = ANY($1::bigint[]) OR ino = ANY($1::bigint[])),
+						(SELECT COUNT(*) FROM file_handles WHERE ino = ANY($1::bigint[])),
+						(SELECT COUNT(*) FROM file_locks WHERE ino = ANY($1::bigint[])),
+						(SELECT COUNT(*) FROM file_lock_waiters WHERE ino = ANY($1::bigint[]))
+				`, deletedInos).Scan(&orphanEntryCount, &orphanHandleCount, &orphanLockCount, &orphanWaiterCount)
+				require.NoError(t, err, "INV-4: 查询已删除磁盘级联残留失败")
+				require.Zerof(t, orphanEntryCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 entries 底表中残留 %d 条记录", rootIno, orphanEntryCount)
+				require.Zerof(t, orphanHandleCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_handles 底表中残留 %d 条记录", rootIno, orphanHandleCount)
+				require.Zerof(t, orphanLockCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_locks 底表中残留 %d 条记录", rootIno, orphanLockCount)
+				require.Zerof(t, orphanWaiterCount, "INV-4 违例: 已删除磁盘 root_ino=%d 在 file_lock_waiters 底表中残留 %d 条记录", rootIno, orphanWaiterCount)
+			}
 			continue
 		}
 

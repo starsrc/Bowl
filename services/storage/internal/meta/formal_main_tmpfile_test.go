@@ -77,10 +77,10 @@ func formalPredictTmpFile(
 // ============================================================================
 
 // formalActionTmpFile 在状态机中随机生成：
-// 1. 普通非 O_EXCL 与 O_EXCL 独占匿名临时文件创建（覆盖 O_WRONLY/O_RDWR、Umask/特权位、父目录 S_ISGID 属组继承、
-//    不写 entries 表、不刷新父目录 mtime/ctime/nlink、递增所属磁盘 used_inodes + 1，以及按概率注入非零 Size 水位）；
-// 2. 针对匿名 TmpFile 的一次性 Link 具名化、O_EXCL 永久拒绝 Link、已具名化后 Unlink 防二次复活、以及 Create/Open 拒绝 O_TMPFILE 组合对拍；
-// 3. 各类非法访问模式 (O_RDONLY / O_ACCMODE)、非法 Mode 类型位、非目录父节点 (ErrNotDir)、孤儿父目录 (ErrNotFound) 拦截对拍。
+//  1. 普通非 O_EXCL 与 O_EXCL 独占匿名临时文件创建（覆盖 O_WRONLY/O_RDWR、Umask/特权位、父目录 S_ISGID 属组继承、
+//     不写 entries 表、不刷新父目录 mtime/ctime/nlink、递增所属磁盘 used_inodes + 1，以及按概率注入非零 Size 水位）；
+//  2. 针对匿名 TmpFile 的一次性 Link 具名化、O_EXCL 永久拒绝 Link、已具名化后 Unlink 防二次复活、以及 Create/Open 拒绝 O_TMPFILE 组合对拍；
+//  3. 各类非法访问模式 (O_RDONLY / O_ACCMODE)、非法 Mode 类型位、非目录父节点 (ErrNotDir)、孤儿父目录 (ErrNotFound) 拦截对拍。
 func formalActionTmpFile(ctx context.Context, t *testing.T, env *formalMainEnv) string {
 	t.Helper()
 
@@ -533,11 +533,11 @@ func formalStepTmpFileMaterializeOrReject(
 // ============================================================================
 
 // formalAuditINV6TmpFileMaterialization 直接扫描 PostgreSQL 底表 file_handles JOIN inodes，强制审计数学不变量 INV-6：
-// 1. 任何 inodes.nlink > 0 的具名节点关联的所有 file_handles 中，(flags & O_TMPFILE) 恒为 0；
-// 2. 任何携带 O_TMPFILE 标志位的 file_handles，其关联 inodes 必为常规文件 ((mode & S_IFMT) == S_IFREG)、nlink == 0 且 parent_ino == 0；
-// 3. 任何携带 O_TMPFILE 标志位的 file_handles，在内存参考模型中必对应由 TmpFile 创建且尚未执行过 Link 具名化的节点 (IsTmpFile && !TmpFileLinked)；
-// 4. 任何非 TmpFile 创建的节点（Create/Mknod/Mkdir/Symlink）或已完成过一次性 Link 具名化的 TmpFile 节点 (TmpFileLinked == true)，
-//    其关联的所有底表与模型句柄中 (flags & O_TMPFILE) 恒为 0。
+//  1. 任何 inodes.nlink > 0 的具名节点关联的所有 file_handles 中，(flags & O_TMPFILE) 恒为 0；
+//  2. 任何携带 O_TMPFILE 标志位的 file_handles，其关联 inodes 必为常规文件 ((mode & S_IFMT) == S_IFREG)、nlink == 0 且 parent_ino == 0；
+//  3. 任何携带 O_TMPFILE 标志位的 file_handles，在内存参考模型中必对应由 TmpFile 创建且尚未执行过 Link 具名化的节点 (IsTmpFile && !TmpFileLinked)；
+//  4. 任何非 TmpFile 创建的节点（Create/Mknod/Mkdir/Symlink）或已完成过一次性 Link 具名化的 TmpFile 节点 (TmpFileLinked == true)，
+//     其关联的所有底表与模型句柄中 (flags & O_TMPFILE) 恒为 0。
 func formalAuditINV6TmpFileMaterialization(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	t.Helper()
 	if len(env.Model.AllCreatedRootInos) == 0 {

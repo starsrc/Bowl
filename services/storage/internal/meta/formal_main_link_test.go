@@ -608,10 +608,10 @@ func formalActionUnlink(ctx context.Context, t *testing.T, env *formalMainEnv) s
 // ============================================================================
 
 // formalAuditINV2NonDirNlink 强制审计底表数学不变量 非目录 INV-2（非目录硬链接计数守恒）：
-// 1. 扫描底表 inodes 与 entries，断言任意非目录 Inode ((mode & S_IFMT) != S_IFDIR) 恒满足：
-//    inodes.nlink == count(entries WHERE ino = i.ino)；
-// 2. 核对底表中每个非目录 Inode 的 nlink、parent_ino == 0、root_ino 与内存参考模型 100% 一致；
-// 3. 核对已物理回收的非目录节点在底表 inodes 与 entries 中零残留。
+//  1. 扫描底表 inodes 与 entries，断言任意非目录 Inode ((mode & S_IFMT) != S_IFDIR) 恒满足：
+//     inodes.nlink == count(entries WHERE ino = i.ino)；
+//  2. 核对底表中每个非目录 Inode 的 nlink、parent_ino == 0、root_ino 与内存参考模型 100% 一致；
+//  3. 核对已物理回收的非目录节点在底表 inodes 与 entries 中零残留。
 func formalAuditINV2NonDirNlink(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	t.Helper()
 	if len(env.Model.AllCreatedRootInos) == 0 {
@@ -752,7 +752,7 @@ func formalAuditINV5CrossDiskIsolation(ctx context.Context, t *testing.T, env *f
 
 // TestFormalMain_T4_LinkUnlink 验证 T4 主状态机 Link/Unlink 硬链接增减对拍与底表非目录 INV-2、INV-5 审计。
 func TestFormalMain_T4_LinkUnlink(t *testing.T) {
-	t.Run("确定性边界_同目录与跨目录硬链接_多链接渐进Unlink_Symlink与Reg配额退还隔离_unlink-whilst-open_TmpFile一次性具名化_EMLINK_EPERM_EXDEV_EISDIR全矩阵验证", func(t *testing.T) {
+	t.Run("确定性边界_同目录与跨目录硬链接_多链接渐进Unlink_Symlink与Reg配额退还隔离_unlink-whilst-open_TmpFile一次性具名化_EPERM_EXDEV_EISDIR全矩阵验证", func(t *testing.T) {
 		pool := setupFormalPostgresPool(t)
 		store := db.NewStore(pool)
 		mgr := meta.New(store)
@@ -1183,15 +1183,19 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 				env.AppendTrace(0, fmt.Sprintf("[初始双盘] %s; %s", d1, d2))
 			},
 			Actions: []formalWeightedAction{
-				{Name: "CreateDisk", Weight: 8, Fn: formalActionCreateDisk},
-				{Name: "UpdateDisk", Weight: 8, Fn: formalActionUpdateDisk},
-				{Name: "T1QuotaFileStep", Weight: 12, Fn: formalActionT1QuotaFileStep},
-				{Name: "Mkdir", Weight: 15, Fn: formalActionMkdir},
-				{Name: "Rmdir", Weight: 10, Fn: formalActionRmdir},
-				{Name: "Mknod", Weight: 18, Fn: formalActionMknod},
-				{Name: "Symlink", Weight: 15, Fn: formalActionSymlink},
-				{Name: "Link", Weight: 30, Fn: formalActionLink},
-				{Name: "Unlink", Weight: 25, Fn: formalActionUnlink},
+				{Name: "CreateDisk", Weight: 6, Fn: formalActionCreateDisk},
+				{Name: "UpdateDisk", Weight: 6, Fn: formalActionUpdateDisk},
+				{Name: "T1QuotaFileStep", Weight: 8, Fn: formalActionT1QuotaFileStep},
+				{Name: "Mkdir", Weight: 10, Fn: formalActionMkdir},
+				{Name: "Rmdir", Weight: 8, Fn: formalActionRmdir},
+				{Name: "Mknod", Weight: 10, Fn: formalActionMknod},
+				{Name: "Symlink", Weight: 10, Fn: formalActionSymlink},
+				{Name: "Create", Weight: 12, Fn: formalActionCreate},
+				{Name: "Open", Weight: 8, Fn: formalActionOpen},
+				{Name: "Release", Weight: 8, Fn: formalActionRelease},
+				{Name: "TmpFile", Weight: 10, Fn: formalActionTmpFile},
+				{Name: "Link", Weight: 24, Fn: formalActionLink},
+				{Name: "Unlink", Weight: 20, Fn: formalActionUnlink},
 			},
 			Probes: []formalNamedProbe{
 				{Name: "GetDisk", Fn: formalProbeGetDisk},

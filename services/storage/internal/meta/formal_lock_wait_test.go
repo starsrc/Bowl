@@ -21,10 +21,9 @@ type formalWaiterKey struct {
 
 // formalAsyncWaiter 跟踪后台正在阻塞等待的 SetLkw 协程及其取消函数与结果通道。
 type formalAsyncWaiter struct {
-	Params              meta.SetLkwParams
-	Cancel              context.CancelFunc
-	DoneCh              <-chan error
-	FlockOriginallyHeld bool
+	Params meta.SetLkwParams
+	Cancel context.CancelFunc
+	DoneCh <-chan error
 }
 
 // formalLockWaitHarness 封装 T13 阻塞锁、死锁检测、取消清理与短租约过期对拍所需的测试运行时。
@@ -426,7 +425,13 @@ func (h *formalLockWaitHarness) execAndVerifySetLkw(t *testing.T, params meta.Se
 
 	willBlock, flockOrigHeld, expErr := h.evalSetLkwInitial(params)
 	if !willBlock {
-		actErr := h.Env.Mgr.SetLkw(h.Env.Ctx, params)
+		syncCtx, syncCancel := context.WithTimeout(h.Env.Ctx, 2*time.Second)
+		defer syncCancel()
+		actErr := h.Env.Mgr.SetLkw(syncCtx, params)
+		if syncCtx.Err() != nil && errors.Is(syncCtx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("SetLkw 同步调用在 2s 内未返回，可能死锁检测失效导致非预期挂起 (%s)%s",
+				desc, h.Env.FormatFailureReport())
+		}
 		m.RecordStepf("%s | SetLkw[同步](ino=%d, fh=%d, sess=%d, req=%d, owner=%d, flags=%d, type=%s, range=[%d,%d], pid=%d) -> 期望=%v, 实际=%v",
 			desc, params.Ino, params.Fh, params.SessionID, params.RequestID, params.LockOwner, params.LkFlags,
 			formatLockTypeCN(params.Lk.Type), params.Lk.Start, params.Lk.End, params.Lk.PID, expErr, actErr)
@@ -449,10 +454,9 @@ func (h *formalLockWaitHarness) execAndVerifySetLkw(t *testing.T, params meta.Se
 
 	key := formalWaiterKey{SessionID: params.SessionID, RequestID: params.RequestID}
 	h.AsyncWaiters[key] = &formalAsyncWaiter{
-		Params:              params,
-		Cancel:              cancel,
-		DoneCh:              doneCh,
-		FlockOriginallyHeld: flockOrigHeld,
+		Params: params,
+		Cancel: cancel,
+		DoneCh: doneCh,
 	}
 
 	m.RecordStepf("%s | SetLkw[入队PENDING](ino=%d, fh=%d, sess=%d, req=%d, owner=%d, flags=%d, type=%s, range=[%d,%d], pid=%d) -> 状态=PENDING",
@@ -663,19 +667,15 @@ func auditFormalLockInv3And4(t *testing.T, h *formalLockWaitHarness) {
 	// 1. 先执行 LOCK-INV-1 与 LOCK-INV-2 全量底表审计
 	auditFormalLockInv2(t, env)
 
-	inoInt64s := make([]int64, len(m.FileInos))
-	for i, ino := range m.FileInos {
-		inoInt64s[i] = int64(ino)
-	}
-
-	// 2. 检查底表 file_lock_waiters 中是否存在非 PENDING 状态或非法 lk_flags / 非法区间的脏记录
+	// 2. 按所属 root_ino 检查底表 file_lock_waiters 中是否存在非 PENDING 状态或非法 lk_flags / 非法区间的脏记录
 	var abnormalWaiterCount int
 	err := env.Pool.QueryRow(ctx, `
 		SELECT COUNT(*)
-		FROM file_lock_waiters
-		WHERE ino = ANY($1::bigint[])
-		  AND (status <> 1 OR lk_flags NOT IN (0, 1) OR start_offset < 0 OR end_offset < start_offset OR (lk_flags = 1 AND (start_offset <> 0 OR end_offset <> $2)))
-	`, inoInt64s, int64(meta.OffsetMax)).Scan(&abnormalWaiterCount)
+		FROM file_lock_waiters fw
+		JOIN inodes i ON fw.ino = i.ino
+		WHERE i.root_ino = $1
+		  AND (fw.status <> 1 OR fw.lk_flags NOT IN (0, 1) OR fw.start_offset < 0 OR fw.end_offset < fw.start_offset OR (fw.lk_flags = 1 AND (fw.start_offset <> 0 OR fw.end_offset <> $2)))
+	`, int64(m.RootIno), int64(meta.OffsetMax)).Scan(&abnormalWaiterCount)
 	if err != nil {
 		t.Fatalf("SQL 检查异常 file_lock_waiters 记录失败: %v%s", err, env.FormatFailureReport())
 	}
@@ -684,7 +684,7 @@ func auditFormalLockInv3And4(t *testing.T, h *formalLockWaitHarness) {
 			abnormalWaiterCount, env.FormatFailureReport())
 	}
 
-	// 3. 批量扫描底表活跃的 file_lock_waiters 记录（按 created_at ASC, session_id ASC, request_id ASC 排序）
+	// 3. 按所属 root_ino 批量扫描底表活跃的 file_lock_waiters 记录（按 created_at ASC, session_id ASC, request_id ASC 排序）
 	type dbWaiterRow struct {
 		SessionID uint64
 		RequestID uint64
@@ -702,12 +702,13 @@ func auditFormalLockInv3And4(t *testing.T, h *formalLockWaitHarness) {
 	wRows, err := env.Pool.Query(ctx, `
 		SELECT w.session_id, w.request_id, w.ino, w.fh, w.lock_owner, w.lk_flags, w.start_offset, w.end_offset, w.lock_type, w.pid, w.status
 		FROM file_lock_waiters w
+		JOIN inodes i ON w.ino = i.ino
 		JOIN client_sessions s ON w.session_id = s.session_id
-		WHERE w.ino = ANY($1::bigint[])
+		WHERE i.root_ino = $1
 		  AND w.status = 1
 		  AND s.expires_at > clock_timestamp()
 		ORDER BY w.created_at ASC, w.session_id ASC, w.request_id ASC
-	`, inoInt64s)
+	`, int64(m.RootIno))
 	if err != nil {
 		t.Fatalf("SQL 扫描 file_lock_waiters 失败: %v%s", err, env.FormatFailureReport())
 	}
@@ -727,7 +728,13 @@ func auditFormalLockInv3And4(t *testing.T, h *formalLockWaitHarness) {
 			wRows.Close()
 			t.Fatalf("扫描 file_lock_waiters 行失败: %v%s", scanErr, env.FormatFailureReport())
 		}
-		k := nsKey{Ino: uint64(rowIno), LkFlags: uint32(lkFlags)}
+		uino := uint64(rowIno)
+		if m.Inodes[uino] == nil || m.Inodes[uino].IsDir {
+			wRows.Close()
+			t.Fatalf("违反 LOCK-INV-3/LOCK-INV-4: 底表存在非受测文件节点的幽灵等待者记录 (Ino=%d, root_ino=%d)%s",
+				uino, m.RootIno, env.FormatFailureReport())
+		}
+		k := nsKey{Ino: uino, LkFlags: uint32(lkFlags)}
 		waitersByNS[k] = append(waitersByNS[k], dbWaiterRow{
 			SessionID: uint64(sid),
 			RequestID: uint64(reqID),
@@ -1392,8 +1399,15 @@ func runFormalLockT13DeadlockScenarios(t *testing.T) {
 	auditFormalLockInv3And4(t, h)
 
 	// -------------------------------------------------------------------------
-	// 场景 4: BSD flock 命名空间下二次尝试 (attempt >= 1) 死锁环检测 (EDEADLK)
+	// 场景 4: BSD flock 模式转换首轮删旧锁破环与等待期重加读锁的重试清理验证
 	// -------------------------------------------------------------------------
+	// 依 ADR-0012 规范与 manager.SetLkw 实现，BSD flock 以 (session_id, fh) 为锁持有者顶点。
+	// 任何调用方首次调用 SetLkw 进入阻塞等待前，首轮事务必然先删除当前请求自身的旧 flock 锁 (DeleteFlockFileLocksBySessionAndFh)。
+	// 若等待者在排队期间另行通过 SetLk 重新获取了共享读锁，当对端持有者随后调用 SetLkw 升级写锁时，
+	// 对端持有者也会在首轮事务中先删除自身的旧读锁，从而打破双方的等待环路并唤醒原等待者（且原等待者在重试授锁前会再次清除等待期间取得的共享读锁，确保同 fh 唯一）。
+	//
+	// 本场景首先验证 HasDeadlockCycle 算法对 FuseLkFlock 环路图的准确识别能力；
+	// 随后验证真实公开接口 SetLkw 触发首轮删旧锁破环、唤醒等待者并清除等待期新加共享锁的完整闭环。
 	h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
 		Ino: ino, Fh: fh3RW, LockOwner: ownerC, SessionID: s3, LkFlags: meta.FuseLkFlock,
 		Lk: meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_RDLCK, PID: 850},
@@ -1449,10 +1463,10 @@ func runFormalLockT13DeadlockScenarios(t *testing.T) {
 }
 
 // runFormalLockT13CancelAndSessionExpiryScenarios 确定性验证：
-// 1. SetLkw 阻塞期间上下文取消（context.WithCancel / WithTimeout）返回 ErrInterrupted (EINTR)，
-//    底表 LOCK-INV-4 确认无残留 PENDING 记录、无悬挂锁，且取消中间阻塞的写锁等待者后自动级联唤醒后续兼容读锁等待者；
-// 2. 毫秒级短租约 WithSessionLeaseTTL(40ms) 会话超期 + 显式 RenewSession 清理：
-//    过期会话名下的 file_locks 与 file_lock_waiters 记录数全部清零，且因过期会话锁释放而满足条件的阻塞 SetLkw 等待者被正确唤醒授锁。
+//  1. SetLkw 阻塞期间上下文取消（context.WithCancel / WithTimeout）返回 ErrInterrupted (EINTR)，
+//     底表 LOCK-INV-4 确认无残留 PENDING 记录、无悬挂锁，且取消中间阻塞的写锁等待者后自动级联唤醒后续兼容读锁等待者；
+//  2. 毫秒级短租约 WithSessionLeaseTTL(40ms) 会话超期 + 显式 RenewSession 清理：
+//     过期会话名下的 file_locks 与 file_lock_waiters 记录数全部清零，且因过期会话锁释放而满足条件的阻塞 SetLkw 等待者被正确唤醒授锁。
 func runFormalLockT13CancelAndSessionExpiryScenarios(t *testing.T) {
 	const testName = "TestFormalLock_T13_SetLkwDeadlockCancel/DeterministicCancelAndSessionExpiry"
 
@@ -1530,15 +1544,24 @@ func runFormalLockT13CancelAndSessionExpiryScenarios(t *testing.T) {
 	auditFormalLockInv3And4(t, h)
 
 	// -------------------------------------------------------------------------
-	// 部分 B: 毫秒级短租约 WithSessionLeaseTTL(40ms) 会话超期 + RenewSession 锁与等待队列级联清零及唤醒
+	// 部分 B: 稳健短租约 WithSessionLeaseTTL(120ms) 会话超期 + RenewSession 锁与等待队列级联清零及唤醒
 	// -------------------------------------------------------------------------
-	shortEnv := setupFormalLockEnv(t, 0x202604204, 2, 2, meta.WithSessionLeaseTTL(40*time.Millisecond))
+	const leaseTTL = 120 * time.Millisecond
+	shortEnv := setupFormalLockEnv(t, 0x202604204, 2, 2, meta.WithSessionLeaseTTL(leaseTTL))
 	shortEnv.TestName = testName
 	shortH := newFormalLockWaitHarness(shortEnv)
 	shortM := shortEnv.Model
 
 	file0, file1 := shortM.FileInos[0], shortM.FileInos[1]
 	sExp, sKeep := shortM.SessionList[0], shortM.SessionList[1]
+
+	// 初始化完成后立即续租一次，杜绝慢测试机下 setup 耗时导致租约提前过期
+	expSess1, err := shortEnv.Mgr.RenewSession(shortEnv.Ctx, sExp)
+	require.NoError(t, err)
+	shortM.RegisterSession(sExp, expSess1)
+	expSess2, err := shortEnv.Mgr.RenewSession(shortEnv.Ctx, sKeep)
+	require.NoError(t, err)
+	shortM.RegisterSession(sKeep, expSess2)
 
 	fhExpF0, _ := shortM.findHandleForSessionAndMode(file0, sExp, meta.O_RDWR)
 	fhExpF1, _ := shortM.findHandleForSessionAndMode(file1, sExp, meta.O_RDWR)
@@ -1567,7 +1590,7 @@ func runFormalLockT13CancelAndSessionExpiryScenarios(t *testing.T) {
 	}
 	// 通过公开接口 SetLkw (搭配 1ms 租约的 tinyMgr) 让 sExp 在 file1 上真实入队 file_lock_waiters 并在首次轮询间隔内自然超期
 	tinyMgr := meta.New(shortEnv.Store, meta.WithSessionLeaseTTL(1*time.Millisecond))
-	err := tinyMgr.SetLkw(shortEnv.Ctx, waiterParams)
+	err = tinyMgr.SetLkw(shortEnv.Ctx, waiterParams)
 	require.ErrorIs(t, err, meta.ErrBadFileHandle, "sExp 在阻塞等待期间租约过期应返回 ErrBadFileHandle")
 	var pendingWaiterCnt int
 	require.NoError(t, shortEnv.Pool.QueryRow(shortEnv.Ctx, `SELECT COUNT(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2`, int64(sExp), int64(expWaiterReqID)).Scan(&pendingWaiterCnt))
@@ -1614,8 +1637,8 @@ func runFormalLockT13CancelAndSessionExpiryScenarios(t *testing.T) {
 	}, "短租约唤醒:sKeep在file0阻塞等待sExp2的[0,100]写锁")
 	require.Len(t, shortM.pendingWaitersByInoAndFlags(file0, 0), 1)
 
-	// 等待 45ms 使 sExp2 租约过期，标记 sExp2 过期并调用 RenewSession(sKeep)，验证 sKeep 被唤醒获锁且 sExp2 底表记录清零
-	time.Sleep(45 * time.Millisecond)
+	// 等待 leaseTTL + 30ms 使 sExp2 租约真实过期，标记 sExp2 过期并调用 RenewSession(sKeep)，验证 sKeep 被唤醒获锁且 sExp2 底表记录清零
+	time.Sleep(leaseTTL + 30*time.Millisecond)
 	shortM.MarkSessionExpired(sExp2)
 	shortH.execAndVerifyRenewSessionAndWake(t, sKeep, "短租约唤醒:sExp2超期后RenewSession清理并唤醒sKeep获锁")
 

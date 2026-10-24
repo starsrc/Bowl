@@ -63,7 +63,6 @@ type formalLockInodeState struct {
 // formalLockSessionState 记录副状态机中的客户端会话状态。
 type formalLockSessionState struct {
 	SessionID uint64
-	ExpiresAt time.Time
 	Expired   bool
 }
 
@@ -200,7 +199,6 @@ func (m *formalLockModel) RegisterSession(sessionID uint64, expiresAt time.Time)
 	}
 	m.Sessions[sessionID] = &formalLockSessionState{
 		SessionID: sessionID,
-		ExpiresAt: expiresAt,
 		Expired:   false,
 	}
 }
@@ -1017,11 +1015,11 @@ func (m *formalLockModel) findHandleForSessionAndMode(ino, sessionID uint64, acc
 }
 
 // auditFormalLockInv1 扫描数据库底表 file_locks 与 inodes，强制审计 LOCK-INV-1 与时间戳不变量：
-// 1. 同一 (ino, lk_flags = 0) 下不同 (session_id, lock_owner) 的相交活跃锁必同为 F_RDLCK；
-// 2. 同一 (session_id, ino, lock_owner, lk_flags = 0) 下的活跃锁区间必互不相交（prev.end < next.start），
-//    且不存在紧邻（prev.end < OffsetMax && prev.end + 1 == next.start）且同类型的未合并碎片区间；
-// 3. 底表活跃锁集合（区间 [start_offset, end_offset]、lock_type、pid、session_id、lock_owner）与内存参考模型 formalLockModel 100% 一致；
-// 4. 目标文件 Inode 的 atime、mtime、ctime 与初始快照严格一致（文件锁操作绝不修改 Inode 时间戳）。
+//  1. 同一 (ino, lk_flags = 0) 下不同 (session_id, lock_owner) 的相交活跃锁必同为 F_RDLCK；
+//  2. 同一 (session_id, ino, lock_owner, lk_flags = 0) 下的活跃锁区间必互不相交（prev.end < next.start），
+//     且不存在紧邻（prev.end < OffsetMax && prev.end + 1 == next.start）且同类型的未合并碎片区间；
+//  3. 底表活跃锁集合（区间 [start_offset, end_offset]、lock_type、pid、session_id、lock_owner）与内存参考模型 formalLockModel 100% 一致；
+//  4. 目标文件 Inode 的 atime、mtime、ctime 与初始快照严格一致（文件锁操作绝不修改 Inode 时间戳）。
 func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv) {
 	t.Helper()
 
@@ -1078,16 +1076,17 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv) {
 		t.Fatalf("遍历 inodes 时间戳出错: %v%s", err, env.FormatFailureReport())
 	}
 
-	// 2. 批量扫描 PostgreSQL 底表 file_locks 中所有受测 Ino 的活跃 POSIX 锁（lk_flags = 0）
+	// 2. 按所属 root_ino 批量扫描 PostgreSQL 底表 file_locks 中全部活跃 POSIX 锁（lk_flags = 0）
 	rows, err := env.Pool.Query(ctx, `
 		SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.start_offset, l.end_offset, l.lock_type, l.pid
 		FROM file_locks l
+		JOIN inodes i ON l.ino = i.ino
 		JOIN client_sessions s ON l.session_id = s.session_id
-		WHERE l.ino = ANY($1::bigint[])
+		WHERE i.root_ino = $1
 		  AND l.lk_flags = 0
 		  AND s.expires_at > clock_timestamp()
 		ORDER BY l.ino ASC, l.start_offset ASC, l.end_offset ASC, l.id ASC
-	`, inoInt64s)
+	`, int64(m.RootIno))
 	if err != nil {
 		t.Fatalf("SQL 批量扫描 file_locks 失败: %v%s", err, env.FormatFailureReport())
 	}
@@ -1108,6 +1107,11 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv) {
 			t.Fatalf("违反 LOCK-INV-1: 底表存在非法字节区间 [%d, %d]%s", startOff, endOff, env.FormatFailureReport())
 		}
 		uino := uint64(rowIno)
+		if m.Inodes[uino] == nil || m.Inodes[uino].IsDir {
+			rows.Close()
+			t.Fatalf("违反 LOCK-INV-1: 底表存在非受测文件节点的幽灵锁 (Ino=%d, root_ino=%d)%s",
+				uino, m.RootIno, env.FormatFailureReport())
+		}
 		locksByIno[uino] = append(locksByIno[uino], dbPosixLockRow{
 			ID:        id,
 			SessionID: uint64(sid),

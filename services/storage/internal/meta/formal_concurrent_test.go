@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,7 +42,7 @@ type formalConcurrentConfig struct {
 	StepsPerWorker int
 }
 
-// loadFormalConcurrentConfig 解析环境变量 BOWL_FORMAL_SEED、BOWL_FORMAL_RUNS、BOWL_FORMAL_STEPS。
+// loadFormalConcurrentConfig 解析环境变量 BOWL_FORMAL_SEED、BOWL_FORMAL_RUNS、BOWL_FORMAL_STEPS、BOWL_FORMAL_WORKERS。
 func loadFormalConcurrentConfig(t *testing.T) formalConcurrentConfig {
 	t.Helper()
 
@@ -52,6 +54,11 @@ func loadFormalConcurrentConfig(t *testing.T) formalConcurrentConfig {
 	workers := defaultConcurrentWorkers
 	if isFormalDeepMode() {
 		workers = deepConcurrentWorkers
+	}
+	if wStr := strings.TrimSpace(os.Getenv("BOWL_FORMAL_WORKERS")); wStr != "" {
+		if wVal, err := strconv.Atoi(wStr); err == nil && wVal > 0 {
+			workers = wVal
+		}
 	}
 
 	return formalConcurrentConfig{
@@ -77,6 +84,7 @@ type formalConcurrentSharedEnv struct {
 	T              *testing.T
 	Seed           uint64
 	RunIndex       int
+	Workers        int
 	StepsPerWorker int
 	Pool           *pgxpool.Pool
 	Store          db.Store
@@ -91,15 +99,16 @@ type formalConcurrentSharedEnv struct {
 	seqCounter    atomic.Uint64
 	nextRequestID atomic.Uint64
 
-	mu               sync.RWMutex
-	dirInos          []uint64          // 候选目录 Ino 池（含双盘根目录及各 Worker 创建的子目录）
-	fileInos         []uint64          // 候选非目录 Ino 池（含常规文件、符号链接、特殊节点、TmpFile）
-	symlinkInos      []uint64          // 候选符号链接 Ino 池
-	entryPool        []formalEntryKey  // 近期创建的候选目录项 (ParentIno, Name)
-	workerSessionIDs []uint64          // 各 Worker 专属会话 ID
-	crashSessionIDs  []uint64          // 并发阶段创建的短命断连会话 ID（将在收尾阶段全部超期并被清扫）
-	cancelledWaiters []formalWaiterKey // 所有因超时/取消退出的 SetLkw 请求键
-	workerTraces     [][]string        // 各 Worker 的中文操作轨迹账单
+	mu                  sync.RWMutex
+	dirInos             []uint64          // 候选目录 Ino 池（含双盘根目录及各 Worker 创建的子目录）
+	fileInos            []uint64          // 候选非目录 Ino 池（含常规文件、符号链接、特殊节点、TmpFile）
+	symlinkInos         []uint64          // 候选符号链接 Ino 池
+	entryPool           []formalEntryKey  // 近期创建的候选目录项 (ParentIno, Name)
+	workerSessionIDs    []uint64          // 各 Worker 专属会话 ID
+	crashSessionIDs     []uint64          // 并发阶段创建的短命断连会话 ID（将在收尾阶段全部超期并被清扫）
+	cancelledWaiters    []formalWaiterKey // 所有因超时/取消退出的 SetLkw 请求键
+	materializedTmpInos []uint64          // 所有曾通过 Link 成功具名化的 TmpFile 节点 Ino（一旦具名化，即便后续 Unlink 至 nlink=0，其关联句柄也绝不能再带 O_TMPFILE）
+	workerTraces        [][]string        // 各 Worker 的中文操作轨迹账单
 }
 
 func (e *formalConcurrentSharedEnv) NextSeq() uint64 {
@@ -151,6 +160,12 @@ func (e *formalConcurrentSharedEnv) RecordCancelledWaiter(sid, reqID uint64) {
 		SessionID: sid,
 		RequestID: reqID,
 	})
+}
+
+func (e *formalConcurrentSharedEnv) RecordMaterializedTmpIno(ino uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.materializedTmpInos = append(e.materializedTmpInos, ino)
 }
 
 func (e *formalConcurrentSharedEnv) PickDirIno(rng *rand.Rand) uint64 {
@@ -207,7 +222,7 @@ func (e *formalConcurrentSharedEnv) FormatDiagnosticReport() string {
 	b.WriteString("\n================================================================================\n")
 	b.WriteString("[多协程高并发混沌压测诊断报告]\n")
 	b.WriteString(fmt.Sprintf("复现种子 (Seed): 0x%016x (十进制: %d), 轮次: %d\n", e.Seed, e.Seed, e.RunIndex))
-	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_STEPS=%d go -C services/storage test -v ./internal/meta -run '^TestFormalConcurrentChaos$'\n", e.Seed, e.StepsPerWorker))
+	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_WORKERS=%d BOWL_FORMAL_STEPS=%d go -C services/storage test -v ./internal/meta -run '^TestFormalConcurrentChaos$'\n", e.Seed, e.Workers, e.StepsPerWorker))
 	for wID, lines := range e.workerTraces {
 		b.WriteString(fmt.Sprintf("--- Worker %d 轨迹 (共 %d 步) ---\n", wID, len(lines)))
 		for _, line := range lines {
@@ -220,8 +235,8 @@ func (e *formalConcurrentSharedEnv) FormatDiagnosticReport() string {
 	return b.String()
 }
 
-// isLegalConcurrentDomainError 校验高并发冲突下返回的非 nil 错误是否属于合法的领域哨兵错误或上下文超时/取消。
-// 严禁出现任何未恢复的 PostgreSQL 死锁错误 (SQLSTATE 40P01)、串行化失败 (40001)、约束崩溃或未知底层 SQL 错误。
+// isLegalConcurrentDomainError 校验高并发冲突下返回的非 nil 错误是否属于合法的领域哨兵错误。
+// 严禁出现未恢复的 PostgreSQL 死锁错误 (SQLSTATE 40P01)、串行化失败 (40001)、底层 ErrIO、超时或未知 SQL 错误。
 func isLegalConcurrentDomainError(err error) bool {
 	if err == nil {
 		return true
@@ -241,7 +256,7 @@ func isLegalConcurrentDomainError(err error) bool {
 		return false
 	}
 
-	// 2. 必须匹配已知的 meta.Err* 领域哨兵错误或 context 超时/取消
+	// 2. 必须匹配已知的 meta.Err* 领域哨兵错误（绝不包含 ErrIO，绝不包含通用超时或取消）
 	legalSentinels := []error{
 		meta.ErrInvalidArgument,
 		meta.ErrNotFound,
@@ -259,16 +274,12 @@ func isLegalConcurrentDomainError(err error) bool {
 		meta.ErrNoSpace,
 		meta.ErrAgain,
 		meta.ErrDeadlock,
-		meta.ErrInterrupted,
 		meta.ErrTooManyLinks,
 		meta.ErrFileTooLarge,
 		meta.ErrIllegalSeek,
-		meta.ErrIO,
 		meta.ErrAccess,
 		meta.ErrInvalidShrink,
 		meta.ErrCrossDevice,
-		context.DeadlineExceeded,
-		context.Canceled,
 	}
 	for _, sentinel := range legalSentinels {
 		if errors.Is(err, sentinel) {
@@ -278,12 +289,27 @@ func isLegalConcurrentDomainError(err error) bool {
 	return false
 }
 
-// assertConcurrentStepErr 断言单步并发操作返回的 err 绝不出现未恢复数据库死锁或非法底层错误。
+// assertConcurrentStepErr 断言单步并发操作返回的 err 绝不出现未恢复数据库死锁、底层 ErrIO 或非预期的超时取消。
 func assertConcurrentStepErr(t *testing.T, env *formalConcurrentSharedEnv, workerID, step int, opDesc string, err error) {
 	t.Helper()
 	if !isLegalConcurrentDomainError(err) {
 		t.Fatalf("Worker %d 第 %d 步 [%s] 出现非法或未恢复的数据库错误: %v%s",
 			workerID, step, opDesc, err, env.FormatDiagnosticReport())
+	}
+}
+
+// assertConcurrentSetLkwStepErr 断言 SetLkw 操作返回的 err 合法，仅在显式设置超时取消的阻塞锁操作中允许 ErrInterrupted/超时/取消。
+func assertConcurrentSetLkwStepErr(t *testing.T, env *formalConcurrentSharedEnv, workerID, step int, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	if errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return
+	}
+	if !isLegalConcurrentDomainError(err) {
+		t.Fatalf("Worker %d 第 %d 步 [SetLkw] 出现非法或未恢复的数据库错误: %v%s",
+			workerID, step, err, env.FormatDiagnosticReport())
 	}
 }
 
@@ -343,16 +369,15 @@ func runConcurrentWorker(
 		Flags:     meta.O_RDWR,
 		SessionID: &workerSID,
 	})
-	env.assertAllowedErr(t, workerID, 0, "InitOpen", initErr)
-	if initErr == nil && initOpen != nil {
-		sidCopy := workerSID
-		myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
-			Fh:        initOpen.Fh,
-			Ino:       env.PinnedIno1,
-			SessionID: &sidCopy,
-			Flags:     meta.O_RDWR,
-		})
-	}
+	require.NoError(t, initErr, "Worker 专属初始锚点文件打开句柄必须成功")
+	require.NotNil(t, initOpen)
+	sidCopy := workerSID
+	myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
+		Fh:        initOpen.Fh,
+		Ino:       env.PinnedIno1,
+		SessionID: &sidCopy,
+		Flags:     meta.O_RDWR,
+	})
 
 	for step := 1; step <= steps; step++ {
 		roll := rng.IntN(100)
@@ -560,6 +585,7 @@ func runConcurrentWorker(
 						})
 						assertConcurrentStepErr(t, env, workerID, step, "Link(TmpFile)", lErr)
 						if lErr == nil {
+							env.RecordMaterializedTmpIno(res.Inode.Ino)
 							env.AddEntryHint(parentIno, linkName)
 						}
 					}
@@ -580,6 +606,7 @@ func runConcurrentWorker(
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Link", err)
 				if err == nil {
+					env.RecordMaterializedTmpIno(srcIno)
 					env.AddEntryHint(newParent, newName)
 				}
 				recordTrace(step, fmt.Sprintf("Link(ino=%d, newParent=%d, name=%s) -> err=%v", srcIno, newParent, newName, err))
@@ -741,13 +768,14 @@ func runConcurrentWorker(
 					targetDisk = env.Disk2
 				}
 				if rng.IntN(3) == 0 {
-					// 缩容低于锚点文件 4096 字节 -> 必触发 ErrInvalidShrink
+					// 缩容低于锚点文件 4096 字节 -> 必触发 ErrInvalidShrink (包装 ErrInvalidArgument)
 					shrinkMax := uint64(512)
 					_, err := env.Mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
 						DiskID:   targetDisk.DiskID,
 						MaxBytes: &shrinkMax,
 					})
-					assertConcurrentStepErr(t, env, workerID, step, "UpdateDisk(Shrink)", err)
+					require.ErrorIs(t, err, meta.ErrInvalidShrink, "确定性缩容拦截必须返回 ErrInvalidShrink")
+					require.ErrorIs(t, err, meta.ErrInvalidArgument, "ErrInvalidShrink 必须包装 ErrInvalidArgument")
 					recordTrace(step, fmt.Sprintf("UpdateDisk(shrink disk=%s) -> err=%v", targetDisk.DiskID, err))
 				} else {
 					newMax := uint64(8*1024*1024 + rng.IntN(4*1024*1024))
@@ -829,7 +857,7 @@ func runConcurrentWorker(
 					RequestID: reqID,
 				})
 				cancel()
-				assertConcurrentStepErr(t, env, workerID, step, "SetLkw", err)
+				assertConcurrentSetLkwStepErr(t, env, workerID, step, err)
 				if errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					env.RecordCancelledWaiter(workerSID, reqID)
 				}
@@ -959,7 +987,19 @@ func runConcurrentWorker(
 // 停机收敛后 PostgreSQL 底表 10 大数学不变量全量 SQL 独立审计器
 // ============================================================================
 
-// auditConcurrentAll10Invariants 在并发 Worker 停止且完成 RenewSession 清扫后，
+// auditConcurrentPhase1ActiveInvariants 在并发 Worker 刚停止、会话依然存活且未清扫时，
+// 审计活跃态下的 INV-1、INV-2、INV-4、INV-5、INV-6 以及 LOCK-INV-1、LOCK-INV-2、LOCK-INV-3、LOCK-INV-4(a)（已取消等待者零残留）。
+func auditConcurrentPhase1ActiveInvariants(
+	ctx context.Context,
+	t *testing.T,
+	env *formalConcurrentSharedEnv,
+	activeRootInos []uint64,
+) {
+	t.Helper()
+	auditConcurrentInvariantsInternal(ctx, t, env, activeRootInos, nil, true)
+}
+
+// auditConcurrentAll10Invariants 在并发 Worker 停止且完成短租约过期与 RenewSession 同步清扫后，
 // 直接基于 PostgreSQL 底表自身满足的数学恒等式对全部 10 条不变量执行全量 SQL 独立审计：
 // - INV-1: 目录树无环与父子双向一致
 // - INV-2: 硬链接计数守恒（非目录 nlink == count(entries)，存活目录 nlink == 2 + 子目录数，孤儿目录无子项）
@@ -977,6 +1017,18 @@ func auditConcurrentAll10Invariants(
 	env *formalConcurrentSharedEnv,
 	activeRootInos []uint64,
 	purgedSessionIDs []uint64,
+) {
+	t.Helper()
+	auditConcurrentInvariantsInternal(ctx, t, env, activeRootInos, purgedSessionIDs, false)
+}
+
+func auditConcurrentInvariantsInternal(
+	ctx context.Context,
+	t *testing.T,
+	env *formalConcurrentSharedEnv,
+	activeRootInos []uint64,
+	purgedSessionIDs []uint64,
+	isPhase1Active bool,
 ) {
 	t.Helper()
 	defer func() {
@@ -1140,43 +1192,61 @@ func auditConcurrentAll10Invariants(
 	// -------------------------------------------------------------------------
 	// 3. 审计 INV-3（孤儿节点生命周期与清扫收敛）与 INV-6（TmpFile 一次性具名化）
 	// -------------------------------------------------------------------------
-	var unreferencedOrphanCount int64
-	err = env.Pool.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM inodes i
-		WHERE i.root_ino = ANY($1::bigint[])
-		  AND i.nlink = 0
-		  AND NOT EXISTS (
-		      SELECT 1
-		      FROM file_handles fh
-		      LEFT JOIN client_sessions s ON fh.session_id = s.session_id
-		      WHERE fh.ino = i.ino
-		        AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
-		  )
-	`, rootInoInt64s).Scan(&unreferencedOrphanCount)
-	require.NoError(t, err, "INV-3 审计: 查询无有效句柄的孤儿节点失败")
-	require.Zerof(t, unreferencedOrphanCount,
-		"INV-3 违例: RenewSession 同步清扫后，底表中仍残留 %d 个无有效句柄引用的 nlink=0 孤儿节点", unreferencedOrphanCount)
+	if isPhase1Active {
+		// 阶段 1（活跃未清扫态）：任意 nlink == 0 的孤儿节点在 file_handles 中必存在至少 1 条关联句柄（允许包含短命 crashSID 已到期但尚未经阶段 2 同步清扫的惰性句柄）
+		for ino, row := range inodesByIno {
+			if row.Nlink == 0 {
+				var totalFhCount int64
+				err := env.Pool.QueryRow(ctx, `
+					SELECT COUNT(*)
+					FROM file_handles fh
+					WHERE fh.ino = $1
+				`, int64(ino)).Scan(&totalFhCount)
+				require.NoError(t, err)
+				require.GreaterOrEqualf(t, totalFhCount, int64(1),
+					"INV-3 违例(阶段1活跃态): 孤儿节点 ino=%d (nlink=0) 在底表 file_handles 中无任何关联句柄", ino)
+			}
+		}
+	} else {
+		var unreferencedOrphanCount int64
+		err = env.Pool.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM inodes i
+			WHERE i.root_ino = ANY($1::bigint[])
+			  AND i.nlink = 0
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM file_handles fh
+			      LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+			      WHERE fh.ino = i.ino
+			        AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
+			  )
+		`, rootInoInt64s).Scan(&unreferencedOrphanCount)
+		require.NoError(t, err, "INV-3 审计: 查询无有效句柄的孤儿节点失败")
+		require.Zerof(t, unreferencedOrphanCount,
+			"INV-3 违例: RenewSession 同步清扫后，底表中仍残留 %d 个无有效句柄引用的 nlink=0 孤儿节点", unreferencedOrphanCount)
 
-	// 验证任意仍存活的 nlink == 0 孤儿节点必关联至少 1 条有效 FileHandle
-	for ino, row := range inodesByIno {
-		if row.Nlink == 0 {
-			var validFhCount int64
-			err := env.Pool.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM file_handles fh
-				LEFT JOIN client_sessions s ON fh.session_id = s.session_id
-				WHERE fh.ino = $1
-				  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
-			`, int64(ino)).Scan(&validFhCount)
-			require.NoError(t, err)
-			require.GreaterOrEqualf(t, validFhCount, int64(1),
-				"INV-3 违例: 存活孤儿节点 ino=%d (nlink=0) 未关联任何有效 FileHandle", ino)
+		// 验证同步清扫后任意仍存活的 nlink == 0 孤儿节点必关联至少 1 条未过期有效 FileHandle
+		for ino, row := range inodesByIno {
+			if row.Nlink == 0 {
+				var validFhCount int64
+				err := env.Pool.QueryRow(ctx, `
+					SELECT COUNT(*)
+					FROM file_handles fh
+					LEFT JOIN client_sessions s ON fh.session_id = s.session_id
+					WHERE fh.ino = $1
+					  AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
+				`, int64(ino)).Scan(&validFhCount)
+				require.NoError(t, err)
+				require.GreaterOrEqualf(t, validFhCount, int64(1),
+					"INV-3 违例: 存活孤儿节点 ino=%d (nlink=0) 未关联任何有效 FileHandle", ino)
+			}
 		}
 	}
 
 	// INV-6: 任意 nlink > 0 的节点关联的所有 file_handles 中 (flags & O_TMPFILE) == 0；
-	// 任意携带 O_TMPFILE 的句柄必关联 S_IFREG 且 nlink == 0 且 parent_ino == 0
+	// 任意携带 O_TMPFILE 的句柄必关联 S_IFREG 且 nlink == 0 且 parent_ino == 0；
+	// 且任何曾通过 Link 成功具名化过的节点（哪怕后续被 Unlink 解链回 nlink == 0），其关联句柄中的 O_TMPFILE 位也必须已被永久清零！
 	var badNamedTmpHandleCount int64
 	err = env.Pool.QueryRow(ctx, `
 		SELECT COUNT(*)
@@ -1189,6 +1259,23 @@ func auditConcurrentAll10Invariants(
 	require.NoError(t, err, "INV-6 审计: 查询 O_TMPFILE 违例句柄失败")
 	require.Zerof(t, badNamedTmpHandleCount,
 		"INV-6 违例: 存在 %d 条 nlink>0 或非 S_IFREG 节点的句柄仍残留 O_TMPFILE 标志位", badNamedTmpHandleCount)
+
+	if len(env.materializedTmpInos) > 0 {
+		matInoInt64s := make([]int64, len(env.materializedTmpInos))
+		for i, ino := range env.materializedTmpInos {
+			matInoInt64s[i] = int64(ino)
+		}
+		var badHistoricalTmpHandleCount int64
+		err = env.Pool.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM file_handles fh
+			WHERE fh.ino = ANY($1::bigint[])
+			  AND (fh.flags & $2) != 0
+		`, matInoInt64s, int32(meta.O_TMPFILE)).Scan(&badHistoricalTmpHandleCount)
+		require.NoError(t, err, "INV-6 审计: 查询曾具名化节点的 O_TMPFILE 残留失败")
+		require.Zerof(t, badHistoricalTmpHandleCount,
+			"INV-6 违例: 存在 %d 条曾具名化后解链节点的句柄仍残留 O_TMPFILE 标志位", badHistoricalTmpHandleCount)
+	}
 
 	// -------------------------------------------------------------------------
 	// 4. 审计 INV-4（磁盘容量与节点配额账本守恒）
@@ -1371,6 +1458,22 @@ func auditConcurrentAll10Invariants(
 		}
 	}
 
+	// LOCK-INV-2 & LOCK-INV-4(a) 悬挂锁核验:
+	// 若 PinnedIno2 仍在 activeRootInos 集合中，验证 keeperSID 在 PinnedIno2 上的 POSIX 裂解三段锁 ([0,29]W, [30,60]R, [61,100]W) 与 BSD flock 读锁完整存续，
+	// 且已被 Flush(LockOwner=9999) 清除的 POSIX 锁和已被超时取消的 LockOwner=7701 阻塞锁请求绝未在 file_locks 中留下任何悬挂锁记录！
+	if activeRootSet[env.Disk2.RootIno] {
+		require.Lenf(t, posixByIno[env.PinnedIno2], 3,
+			"LOCK-INV-1/2/4 违例: PinnedIno2 上的 POSIX 锁段数应恰为 3 段（无 LockOwner=9999 残留或 LockOwner=7701 取消悬挂锁），实际=%+v",
+			posixByIno[env.PinnedIno2])
+		for _, pl := range posixByIno[env.PinnedIno2] {
+			require.Equalf(t, uint64(8801), pl.LockOwner,
+				"LOCK-INV-2/4 违例: PinnedIno2 上存在非预期 LockOwner=%d 的悬挂 POSIX 锁", pl.LockOwner)
+		}
+		require.Lenf(t, flockByIno[env.PinnedIno2], 1,
+			"LOCK-INV-2 违例: Flush(LockOwner) 后 PinnedIno2 上的 BSD flock 读锁必须正交保留 1 条，实际=%+v",
+			flockByIno[env.PinnedIno2])
+	}
+
 	// -------------------------------------------------------------------------
 	// 6. 审计 LOCK-INV-3（底表局部等待有向图恒无环）与 LOCK-INV-4（取消请求与过期会话零残留）
 	// -------------------------------------------------------------------------
@@ -1504,25 +1607,34 @@ func auditConcurrentAll10Invariants(
 }
 
 // assertDeletedDiskZeroResidue 审计执行 DeleteDisk 后归属该 root_ino 的全部底表记录数归零 (INV-4)。
-func assertDeletedDiskZeroResidue(ctx context.Context, t *testing.T, pool *pgxpool.Pool, deletedRootIno uint64) {
+// 直接基于删盘前记录的 deletedInos 执行无 INNER JOIN 假阳性的直接扫描校验。
+func assertDeletedDiskZeroResidue(ctx context.Context, t *testing.T, pool *pgxpool.Pool, deletedRootIno uint64, deletedInos []int64) {
 	t.Helper()
-	var diskCnt, inodeCnt, entryCnt, handleCnt, lockCnt, waiterCnt int64
+	var diskCnt, inodeCnt int64
 	err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM disks WHERE root_ino = $1),
-			(SELECT COUNT(*) FROM inodes WHERE root_ino = $1),
-			(SELECT COUNT(*) FROM entries e JOIN inodes i ON (e.parent_ino = i.ino OR e.ino = i.ino) WHERE i.root_ino = $1),
-			(SELECT COUNT(*) FROM file_handles fh JOIN inodes i ON fh.ino = i.ino WHERE i.root_ino = $1),
-			(SELECT COUNT(*) FROM file_locks fl JOIN inodes i ON fl.ino = i.ino WHERE i.root_ino = $1),
-			(SELECT COUNT(*) FROM file_lock_waiters fw JOIN inodes i ON fw.ino = i.ino WHERE i.root_ino = $1)
-	`, int64(deletedRootIno)).Scan(&diskCnt, &inodeCnt, &entryCnt, &handleCnt, &lockCnt, &waiterCnt)
+			(SELECT COUNT(*) FROM inodes WHERE root_ino = $1)
+	`, int64(deletedRootIno)).Scan(&diskCnt, &inodeCnt)
 	require.NoError(t, err, "DeleteDisk 零残留审计查询失败")
 	require.Zerof(t, diskCnt, "INV-4 违例: DeleteDisk 后 root_ino=%d 在 disks 中残留 %d 条", deletedRootIno, diskCnt)
 	require.Zerof(t, inodeCnt, "INV-4 违例: DeleteDisk 后 root_ino=%d 在 inodes 中残留 %d 条", deletedRootIno, inodeCnt)
-	require.Zerof(t, entryCnt, "INV-4 违例: DeleteDisk 后 root_ino=%d 在 entries 中残留 %d 条", deletedRootIno, entryCnt)
-	require.Zerof(t, handleCnt, "INV-4 违例: DeleteDisk 后 root_ino=%d 在 file_handles 中残留 %d 条", deletedRootIno, handleCnt)
-	require.Zerof(t, lockCnt, "INV-4 违例: DeleteDisk 后 root_ino=%d 在 file_locks 中残留 %d 条", deletedRootIno, lockCnt)
-	require.Zerof(t, waiterCnt, "INV-4 违例: DeleteDisk 后 root_ino=%d 在 file_lock_waiters 中残留 %d 条", deletedRootIno, waiterCnt)
+
+	if len(deletedInos) > 0 {
+		var entryCnt, handleCnt, lockCnt, waiterCnt int64
+		err := pool.QueryRow(ctx, `
+			SELECT
+				(SELECT COUNT(*) FROM entries WHERE parent_ino = ANY($1::bigint[]) OR ino = ANY($1::bigint[])),
+				(SELECT COUNT(*) FROM file_handles WHERE ino = ANY($1::bigint[])),
+				(SELECT COUNT(*) FROM file_locks WHERE ino = ANY($1::bigint[])),
+				(SELECT COUNT(*) FROM file_lock_waiters WHERE ino = ANY($1::bigint[]))
+		`, deletedInos).Scan(&entryCnt, &handleCnt, &lockCnt, &waiterCnt)
+		require.NoError(t, err, "DeleteDisk 级联子表零残留审计查询失败")
+		require.Zerof(t, entryCnt, "INV-4 违例: DeleteDisk 后 entries 中残留 %d 条", entryCnt)
+		require.Zerof(t, handleCnt, "INV-4 违例: DeleteDisk 后 file_handles 中残留 %d 条", handleCnt)
+		require.Zerof(t, lockCnt, "INV-4 违例: DeleteDisk 后 file_locks 中残留 %d 条", lockCnt)
+		require.Zerof(t, waiterCnt, "INV-4 违例: DeleteDisk 后 file_lock_waiters 中残留 %d 条", waiterCnt)
+	}
 }
 
 // closeSessionlessHandlesForRoots 通过公开接口 Release / ReleaseDir 关闭指定测试盘下所有 session_id IS NULL 的无会话句柄。
@@ -1606,6 +1718,7 @@ func TestFormalConcurrentChaos(t *testing.T) {
 				T:              t,
 				Seed:           runSeed,
 				RunIndex:       runIdx,
+				Workers:        cfg.Workers,
 				StepsPerWorker: cfg.StepsPerWorker,
 				Pool:           pool,
 				Store:          store,
@@ -1716,7 +1829,8 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, mgr.Rmdir(ctx, disk1.RootIno, []byte("__keeper_orphan_dir__")))
 
-			// 为 keeperSID 在 Disk2 的锚点文件上设置 POSIX 区间锁（含裂解/合并）与 BSD flock 读锁
+			// 为 keeperSID 在 Disk2 的锚点文件上设置 POSIX 区间锁（含裂解/合并）与 BSD flock 读锁，
+			// 并立即执行带 LockOwner=9999 的 Flush（验证 Flush 仅清理对应 POSIX 锁，绝不误删同句柄 BSD flock 读锁或 LockOwner=8801 的 POSIX 锁）！
 			keepPin2Open, err := mgr.Open(ctx, meta.OpenParams{
 				Ino:       env.PinnedIno2,
 				Flags:     meta.O_RDWR,
@@ -1742,11 +1856,47 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
 				Ino:       env.PinnedIno2,
 				Fh:        keepPin2Open.Fh,
+				LockOwner: 9999,
+				SessionID: keeperSID,
+				LkFlags:   0,
+				Lk:        meta.FileLock{Start: 200, End: 300, Type: meta.F_WRLCK, PID: 90},
+			}))
+			require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       env.PinnedIno2,
+				Fh:        keepPin2Open.Fh,
 				LockOwner: 8801,
 				SessionID: keeperSID,
 				LkFlags:   meta.FuseLkFlock,
 				Lk:        meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_RDLCK, PID: 88},
 			}))
+			flushOwner9999 := uint64(9999)
+			require.NoError(t, mgr.Flush(ctx, meta.FlushParams{
+				Ino:       env.PinnedIno2,
+				Fh:        keepPin2Open.Fh,
+				LockOwner: &flushOwner9999,
+				SessionID: &keeperSID,
+			}))
+			// 构造 keeperSID 在 PinnedIno2 [0, 50] 上的一次真实阻塞 SetLkw 超时取消（验证取消后既无 PENDING 残留，亦未在 file_locks 中对阻塞区间产生悬挂写锁）
+			keepPin2CancelOpen, err := mgr.Open(ctx, meta.OpenParams{
+				Ino:       env.PinnedIno2,
+				Flags:     meta.O_RDWR,
+				SessionID: &keeperSID,
+			})
+			require.NoError(t, err)
+			cancelReqID := env.NextRequestID()
+			cancelCtx, cancelFn := context.WithTimeout(ctx, 8*time.Millisecond)
+			cancelErr := mgr.SetLkw(cancelCtx, meta.SetLkwParams{
+				Ino:       env.PinnedIno2,
+				Fh:        keepPin2CancelOpen.Fh,
+				LockOwner: 7701,
+				SessionID: keeperSID,
+				RequestID: cancelReqID,
+				LkFlags:   0,
+				Lk:        meta.FileLock{Start: 0, End: 50, Type: meta.F_WRLCK, PID: 91},
+			})
+			cancelFn()
+			require.ErrorIs(t, cancelErr, meta.ErrInterrupted, "keeper 阻塞 SetLkw 超时取消必须返回 ErrInterrupted")
+			env.RecordCancelledWaiter(keeperSID, cancelReqID)
 
 			// -----------------------------------------------------------------
 			// 启动多协程 Worker 并发混沌冲突压测
@@ -1767,8 +1917,22 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			wg.Wait()
 
 			// -----------------------------------------------------------------
-			// 停机清扫阶段 1：
-			// 1. 将所有 Worker 会话通过 shortMgr (30ms TTL) 缩短租约并等待 40ms 使其全部超期；
+			// 阶段 1：并发活跃态底表审计
+			// Worker 会话与打开句柄依然有效，活跃锁与等待图均真实存在。
+			// 先对 keeperSID 与全部 workerSessionIDs 执行 RenewSession 续租保活，
+			// 立即全量扫描底表校验 INV-1、INV-2、INV-4、INV-5、INV-6 及 LOCK-INV-1、LOCK-INV-2、LOCK-INV-3、LOCK-INV-4(a)！
+			// -----------------------------------------------------------------
+			_, err = mgr.RenewSession(ctx, keeperSID)
+			require.NoError(t, err)
+			for _, wSID := range env.workerSessionIDs {
+				_, err := mgr.RenewSession(ctx, wSID)
+				require.NoError(t, err)
+			}
+			auditConcurrentPhase1ActiveInvariants(ctx, t, env, []uint64{disk1.RootIno, disk2.RootIno})
+
+			// -----------------------------------------------------------------
+			// 阶段 2：短租约过期与级联收敛清扫
+			// 1. 将所有 Worker 会话通过 shortMgr (30ms TTL) 缩短租约并等待 42ms 使其全部超期；
 			// 2. 关闭所有测试盘上的无会话句柄 (session_id IS NULL)；
 			// 3. 显式调用 mgr.RenewSession(keeperSID) 触发同步清扫（级联清理所有过期会话的句柄/锁/等待者，并物理回收所有无引用孤儿节点）。
 			// -----------------------------------------------------------------
@@ -1787,13 +1951,11 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			allPurgedSIDs = append(allPurgedSIDs, env.workerSessionIDs...)
 			allPurgedSIDs = append(allPurgedSIDs, env.crashSessionIDs...)
 
-			// -----------------------------------------------------------------
-			// 停机清扫后全量 SQL 独立审计 10 大数学不变量（含 keeperSID 存活孤儿与活跃锁）
-			// -----------------------------------------------------------------
+			// 停机清扫后全量 SQL 独立审计 10 大数学不变量（含 keeperSID 存活孤儿与活跃锁，以及 INV-3 孤儿清扫与 LOCK-INV-4(b) 会话清理）
 			auditConcurrentAll10Invariants(ctx, t, env, []uint64{disk1.RootIno, disk2.RootIno}, allPurgedSIDs)
 
 			// -----------------------------------------------------------------
-			// 停机清扫阶段 2：释放 keeperSID 持有的孤儿文件句柄与孤儿目录句柄，
+			// 释放 keeperSID 持有的孤儿文件句柄与孤儿目录句柄，
 			// 验证所有测试盘上的 nlink == 0 孤儿节点数彻底归零！
 			// -----------------------------------------------------------------
 			require.NoError(t, mgr.Release(ctx, meta.ReleaseParams{
@@ -1823,11 +1985,22 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			// -----------------------------------------------------------------
 			// 阶段 3 (INV-4 删盘级联归零证明)：
 			// 对经受高并发混沌压测后的 Disk1 执行 DeleteDisk，
-			// 断言归属 Disk1.RootIno 的 disks、inodes、entries、file_handles、file_locks、file_lock_waiters 记录数全部归零，
+			// 先记录 Disk1 名下所有 ino，断言归属 Disk1.RootIno 的 disks、inodes、entries、file_handles、file_locks、file_lock_waiters 记录数全部归零，
 			// 且存活邻盘 Disk2 的 10 大数学不变量依然 100% 成立！
 			// -----------------------------------------------------------------
+			var disk1Inos []int64
+			dRows, err := pool.Query(ctx, `SELECT ino FROM inodes WHERE root_ino = $1`, int64(disk1.RootIno))
+			require.NoError(t, err)
+			for dRows.Next() {
+				var dino int64
+				require.NoError(t, dRows.Scan(&dino))
+				disk1Inos = append(disk1Inos, dino)
+			}
+			require.NoError(t, dRows.Err())
+			dRows.Close()
+
 			require.NoError(t, mgr.DeleteDisk(ctx, disk1.DiskID))
-			assertDeletedDiskZeroResidue(ctx, t, pool, disk1.RootIno)
+			assertDeletedDiskZeroResidue(ctx, t, pool, disk1.RootIno, disk1Inos)
 			auditConcurrentAll10Invariants(ctx, t, env, []uint64{disk2.RootIno}, allPurgedSIDs)
 		})
 	}

@@ -1308,10 +1308,35 @@ func TestFormalMain_T9_SetAttrFallocate(t *testing.T) {
 		require.Equal(t, customFlags, updated.Attr.Flags)
 		regModel.Flags = customFlags
 
-		// 仅设置 CtimeNow: true 幂等返回当前属性
+		// 仅设置 CtimeNow: true 幂等返回当前属性并刷新 ctime 为当前事务时间
+		beforeCallTime := time.Now().UTC().Add(-100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
+		beforeCtime := updated.Attr.Ctime
 		updatedIdem, err := mgr.SetAttr(ctx, regModel.Ino, meta.SetAttrInput{CtimeNow: true})
 		require.NoError(t, err)
 		assertFormalInodeMatchesEntity(t, regModel, updatedIdem, "仅CtimeNow幂等更新")
+		require.True(t, updatedIdem.Attr.Ctime.After(beforeCtime), "CtimeNow 必须严格推进 ctime (before=%v, after=%v)", beforeCtime, updatedIdem.Attr.Ctime)
+		require.True(t, updatedIdem.Attr.Ctime.After(beforeCallTime), "CtimeNow 必须刷新为当前时间")
+		var dbCtime time.Time
+		err = pool.QueryRow(ctx, `SELECT ctime FROM inodes WHERE ino = $1`, int64(regModel.Ino)).Scan(&dbCtime)
+		require.NoError(t, err)
+		require.True(t, updatedIdem.Attr.Ctime.Equal(dbCtime), "返回的 Ctime 必须与 DB 中的 ctime 一致")
+
+		// 补充 AtimeNow: true 与 MtimeNow: true 有效刷新时间戳断言（从过去时间 1700000100/1700000200 刷新到当前时间）
+		beforeAtime := updatedIdem.Attr.Atime
+		beforeMtime := updatedIdem.Attr.Mtime
+		updatedNow, err := mgr.SetAttr(ctx, regModel.Ino, meta.SetAttrInput{AtimeNow: true, MtimeNow: true})
+		require.NoError(t, err)
+		require.True(t, updatedNow.Attr.Atime.After(beforeAtime), "AtimeNow 必须从历史时间严格推进至当前时间 (before=%v, after=%v)", beforeAtime, updatedNow.Attr.Atime)
+		require.True(t, updatedNow.Attr.Mtime.After(beforeMtime), "MtimeNow 必须从历史时间严格推进至当前时间 (before=%v, after=%v)", beforeMtime, updatedNow.Attr.Mtime)
+		require.True(t, updatedNow.Attr.Atime.After(beforeCallTime), "AtimeNow 必须刷新为当前时间")
+		require.True(t, updatedNow.Attr.Mtime.After(beforeCallTime), "MtimeNow 必须刷新为当前时间")
+		var dbAtime, dbMtime time.Time
+		err = pool.QueryRow(ctx, `SELECT atime, mtime FROM inodes WHERE ino = $1`, int64(regModel.Ino)).Scan(&dbAtime, &dbMtime)
+		require.NoError(t, err)
+		require.True(t, updatedNow.Attr.Atime.Equal(dbAtime), "返回的 Atime 必须与 DB 一致")
+		require.True(t, updatedNow.Attr.Mtime.Equal(dbMtime), "返回的 Mtime 必须与 DB 一致")
+
 		runProbesAndAuditors()
 
 		// 4. 验证 SetAttr 非法掩码、类型限制与 Fh 校验拦截

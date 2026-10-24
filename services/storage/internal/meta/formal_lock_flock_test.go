@@ -111,14 +111,15 @@ func auditFormalLockInv2(t *testing.T, env *formalLockTestEnv) {
 		inoInt64s[i] = int64(ino)
 	}
 
-	// 2. 检查是否存在非法 lk_flags 记录
+	// 2. 按所属 root_ino 检查是否存在非法 lk_flags 记录
 	var invalidFlagCount int
 	err := env.Pool.QueryRow(ctx, `
 		SELECT COUNT(*)
-		FROM file_locks
-		WHERE ino = ANY($1::bigint[])
-		  AND lk_flags NOT IN (0, 1)
-	`, inoInt64s).Scan(&invalidFlagCount)
+		FROM file_locks fl
+		JOIN inodes i ON fl.ino = i.ino
+		WHERE i.root_ino = $1
+		  AND fl.lk_flags NOT IN (0, 1)
+	`, int64(m.RootIno)).Scan(&invalidFlagCount)
 	if err != nil {
 		t.Fatalf("SQL 检查非法 lk_flags 失败: %v%s", err, env.FormatFailureReport())
 	}
@@ -126,7 +127,7 @@ func auditFormalLockInv2(t *testing.T, env *formalLockTestEnv) {
 		t.Fatalf("违反 LOCK-INV-2: 底表存在 %d 条非法 lk_flags 记录%s", invalidFlagCount, env.FormatFailureReport())
 	}
 
-	// 3. 批量扫描底表 file_locks 中所有受测 Ino 的活跃 BSD flock 锁（lk_flags = FuseLkFlock）
+	// 3. 按所属 root_ino 批量扫描底表 file_locks 中全部活跃 BSD flock 锁（lk_flags = FuseLkFlock）
 	type dbFlockRow struct {
 		ID        int64
 		SessionID uint64
@@ -142,12 +143,13 @@ func auditFormalLockInv2(t *testing.T, env *formalLockTestEnv) {
 	rows, err := env.Pool.Query(ctx, `
 		SELECT l.id, l.session_id, l.ino, l.fh, l.lock_owner, l.start_offset, l.end_offset, l.lock_type, l.pid
 		FROM file_locks l
+		JOIN inodes i ON l.ino = i.ino
 		JOIN client_sessions s ON l.session_id = s.session_id
-		WHERE l.ino = ANY($1::bigint[])
+		WHERE i.root_ino = $1
 		  AND l.lk_flags = 1
 		  AND s.expires_at > clock_timestamp()
 		ORDER BY l.ino ASC, l.id ASC
-	`, inoInt64s)
+	`, int64(m.RootIno))
 	if err != nil {
 		t.Fatalf("SQL 批量扫描 BSD flock file_locks 失败: %v%s", err, env.FormatFailureReport())
 	}
@@ -169,6 +171,11 @@ func auditFormalLockInv2(t *testing.T, env *formalLockTestEnv) {
 				rowIno, sid, fh, startOff, endOff, meta.OffsetMax, env.FormatFailureReport())
 		}
 		uino := uint64(rowIno)
+		if m.Inodes[uino] == nil || m.Inodes[uino].IsDir {
+			rows.Close()
+			t.Fatalf("违反 LOCK-INV-2: 底表存在非受测文件节点的幽灵 BSD flock 锁 (Ino=%d, root_ino=%d)%s",
+				uino, m.RootIno, env.FormatFailureReport())
+		}
 		flocksByIno[uino] = append(flocksByIno[uino], dbFlockRow{
 			ID:        id,
 			SessionID: uint64(sid),

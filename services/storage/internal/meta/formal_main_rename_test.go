@@ -975,7 +975,7 @@ func formalActionRename(ctx context.Context, t *testing.T, env *formalMainEnv) s
 
 // TestFormalMain_T5_Rename 验证 T5 主状态机 Rename 全模式（覆盖、NOREPLACE、EXCHANGE）对拍、正反向双向防环检测、跨盘 EXDEV 与配额退还审计。
 func TestFormalMain_T5_Rename(t *testing.T) {
-	t.Run("确定性边界_传统覆盖全矩阵_同路径与同Inode硬链接短路_NOREPLACE_EXCHANGE双向交换_正反向祖先防环_跨盘EXDEV_EMLINK_孤儿保留与配额退还全验证", func(t *testing.T) {
+	t.Run("确定性边界_传统覆盖全矩阵_同路径与同Inode硬链接短路_NOREPLACE_EXCHANGE双向交换_正反向祖先防环_跨盘EXDEV_孤儿保留与配额退还全验证", func(t *testing.T) {
 		pool := setupFormalPostgresPool(t)
 		store := db.NewStore(pool)
 		mgr := meta.New(store)
@@ -1330,12 +1330,15 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 		}, nil, "RenameExchange_交换两个非空目录")
 		require.Equal(t, dirC.Ino, env.Model.Entries[formalEntryKey{ParentIno: root1, Name: "dirA"}])
 		require.Equal(t, dirA.Ino, env.Model.Entries[formalEntryKey{ParentIno: root1, Name: "dirC"}])
+		runAllProbesAndAuditors()
+
 		// 再次交换还原名称绑定
 		execCheckedRename(meta.RenameParams{
 			OldParentIno: root1, OldName: []byte("dirA"), NewParentIno: root1, NewName: []byte("dirC"), Flags: meta.RenameExchange,
 		}, nil, "RenameExchange_二次交换还原两个非空目录")
 		require.Equal(t, dirA.Ino, env.Model.Entries[formalEntryKey{ParentIno: root1, Name: "dirA"}])
 		require.Equal(t, dirC.Ino, env.Model.Entries[formalEntryKey{ParentIno: root1, Name: "dirC"}])
+		runAllProbesAndAuditors()
 
 		// 8.3 跨父目录交换“一目录 (dirC/empty_open_target -> movingDir) 一非目录 (dirB/mover_noreplace_done -> moverFile)”：
 		// dirC (移出目录) nlink: 3 -> 2，dirB (移入目录) nlink: 2 -> 3，movingDir.ParentIno = dirB.Ino
@@ -1349,6 +1352,7 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 		require.Equal(t, dirB.Ino, movingDir.ParentIno)
 		require.Equal(t, moverFile.Ino, env.Model.Entries[formalEntryKey{ParentIno: dirC.Ino, Name: "empty_open_target"}])
 		require.Equal(t, movingDir.Ino, env.Model.Entries[formalEntryKey{ParentIno: dirB.Ino, Name: "mover_noreplace_done"}])
+		runAllProbesAndAuditors()
 
 		// 反向再交换一次：dirC (移入目录) nlink: 2 -> 3，dirB (移出目录) nlink: 3 -> 2，movingDir.ParentIno = dirC.Ino
 		execCheckedRename(meta.RenameParams{
@@ -1359,6 +1363,7 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 		require.Equal(t, uint32(3), dirC.Nlink)
 		require.Equal(t, uint32(2), dirB.Nlink)
 		require.Equal(t, dirC.Ino, movingDir.ParentIno)
+		runAllProbesAndAuditors()
 
 		// 9. 验证单向与双向祖先防环检测 (ErrInvalidArgument)
 		// 9.1 正向防环：将 dirA 移动到 dirA 自身下 (NewParentIno == dirA.Ino) 或子孙目录 subA1 / subA2 下

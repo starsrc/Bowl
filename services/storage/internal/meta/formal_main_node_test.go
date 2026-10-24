@@ -627,10 +627,10 @@ func formalProbeReadlink(ctx context.Context, t *testing.T, env *formalMainEnv) 
 // ============================================================================
 
 // formalAuditNodeAndSymlinkQuota 直接扫描 PostgreSQL 底表 inodes 与 disks，强制校验：
-// 1. 所有非目录 Inode (S_IFREG, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK, S_IFLNK) 的底表字段
-//    (mode, size, nlink, uid, gid, rdev, parent_ino=0, root_ino, symlink_target) 与内存参考模型 100% 一致；
-// 2. 对所有 S_IFLNK 符号链接节点，底表 inodes.size == len(inodes.symlink_target) > 0；
-// 3. 对所有存活 Disk，底表 disks.used_bytes 严格等于 S_IFREG 节点的 size 之和，绝不混入 S_IFLNK 节点的 size。
+//  1. 所有非目录 Inode (S_IFREG, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK, S_IFLNK) 的底表字段
+//     (mode, size, nlink, uid, gid, rdev, parent_ino=0, root_ino, symlink_target) 与内存参考模型 100% 一致；
+//  2. 对所有 S_IFLNK 符号链接节点，底表 inodes.size == len(inodes.symlink_target) > 0；
+//  3. 对所有存活 Disk，底表 disks.used_bytes 严格等于 S_IFREG 节点的 size 之和，绝不混入 S_IFLNK 节点的 size。
 func formalAuditNodeAndSymlinkQuota(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	t.Helper()
 	if len(env.Model.AllCreatedRootInos) == 0 {
@@ -976,11 +976,11 @@ func TestFormalMain_T3_MknodSymlink(t *testing.T) {
 		// 4. 验证 Mknod 与 Symlink 的全部错误码边界
 		// 4.1 Mknod 非法 Mode 类型位
 		for _, badMode := range []uint32{
-			0o644,                      // 缺失类型位 (0)
-			meta.S_IFDIR | 0o755,       // 目录类型
-			meta.S_IFLNK | 0o777,       // 符号链接类型
-			meta.S_IFMT | 0o644,        // 非法类型掩码 0o170000
-			0o200000 | meta.S_IFREG,    // 超出 0o177777
+			0o644,                   // 缺失类型位 (0)
+			meta.S_IFDIR | 0o755,    // 目录类型
+			meta.S_IFLNK | 0o777,    // 符号链接类型
+			meta.S_IFMT | 0o644,     // 非法类型掩码 0o170000
+			0o200000 | meta.S_IFREG, // 超出 0o177777
 		} {
 			_, err := mgr.Mknod(ctx, meta.MknodParams{
 				ParentIno: rootIno,

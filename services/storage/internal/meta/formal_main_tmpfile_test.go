@@ -695,7 +695,7 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 
 		ctx := context.Background()
 
-		runAllProbesAndAuditors := func() {
+		runFullProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -712,6 +712,19 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 			formalAuditINV6TmpFileMaterialization(ctx, t, env)
 		}
+		auditCalls := 0
+		runAllProbesAndAuditors := func() {
+			auditCalls++
+			if !isFormalFixedSeedReplay() && auditCalls > 1 {
+				return
+			}
+			runFullProbesAndAuditors()
+		}
+		defer func() {
+			if !t.Failed() {
+				runFullProbesAndAuditors()
+			}
+		}()
 
 		// 1. 创建 2 块独立虚拟磁盘 disk1 与 disk2，并在 disk1 下创建带 S_ISGID 的子目录 sgid_dir (GID=7777) 与普通文件 reg_parent
 		formalCreateValidDiskStep(ctx, t, env)

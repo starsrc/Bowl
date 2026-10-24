@@ -927,6 +927,15 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 
 			if !hasActiveConflict && !hasEarlierWaiterConflict {
 				if params.LkFlags == FuseLkFlock {
+					if attempt > 0 {
+						if _, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
+							SessionID: sessionID,
+							Ino:       ino,
+							Fh:        fh,
+						}); err != nil {
+							return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+						}
+					}
 					_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
 						SessionID:   sessionID,
 						Ino:         ino,

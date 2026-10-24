@@ -1755,11 +1755,17 @@ func stepFormalLockT13Action(t *testing.T, h *formalLockWaitHarness, rng *rand.R
 					return
 				}
 			}
-			// 否则挑一个未持锁的会话发起 SetLk 验证防写锁饥饿或冲突拦截
+			// 否则挑一个非等待者自身的会话发起 SetLk 验证防写锁饥饿或冲突拦截
 			sid := m.SessionList[rng.IntN(len(m.SessionList))]
 			owner := m.OwnerList[rng.IntN(len(m.OwnerList))]
 			fh, ok := m.findHandleForSessionAndMode(w.Ino, sid, meta.O_RDWR)
 			require.True(t, ok)
+			for _, pw := range m.pendingWaitersByInoAndFlags(w.Ino, w.LkFlags) {
+				if (w.LkFlags == meta.FuseLkFlock && pw.SessionID == sid && pw.Fh == fh) ||
+					(w.LkFlags == 0 && pw.SessionID == sid && pw.LockOwner == owner) {
+					return
+				}
+			}
 			h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
 				Ino:       w.Ino,
 				Fh:        fh,
@@ -1894,17 +1900,24 @@ func stepFormalLockT13Action(t *testing.T, h *formalLockWaitHarness, rng *rand.R
 		fh, ok := m.findHandleForSessionAndMode(ino, sid, accMode)
 		require.True(t, ok)
 
-		// 若当前 (ino, 0) 已有 PENDING 等待者，改用非阻塞 SetLk 执行，避免多个互相冲突的异步等待者并发竞争同一锁导致非确定性获锁顺序
-		if len(m.pendingWaitersByInoAndFlags(ino, 0)) > 0 && lkType != meta.F_UNLCK {
-			h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
-				Ino:       ino,
-				Fh:        fh,
-				LockOwner: owner,
-				SessionID: sid,
-				LkFlags:   0,
-				Lk:        meta.FileLock{Start: start, End: end, Type: lkType, PID: pid},
-			}, "随机状态机:POSIX_SetLk加锁", testName, totalSteps)
-			return
+		// 若当前 (ino, 0) 已有 PENDING 等待者，改用非阻塞 SetLk 执行（且跳过等待者自身 holder），避免多个互相冲突的异步等待者并发竞争同一锁导致非确定性获锁顺序
+		if len(m.pendingWaitersByInoAndFlags(ino, 0)) > 0 {
+			for _, pw := range m.pendingWaitersByInoAndFlags(ino, 0) {
+				if pw.SessionID == sid && pw.LockOwner == owner {
+					return
+				}
+			}
+			if lkType != meta.F_UNLCK {
+				h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
+					Ino:       ino,
+					Fh:        fh,
+					LockOwner: owner,
+					SessionID: sid,
+					LkFlags:   0,
+					Lk:        meta.FileLock{Start: start, End: end, Type: lkType, PID: pid},
+				}, "随机状态机:POSIX_SetLk加锁", testName, totalSteps)
+				return
+			}
 		}
 
 		h.execAndVerifySetLkw(t, meta.SetLkwParams{
@@ -1934,17 +1947,24 @@ func stepFormalLockT13Action(t *testing.T, h *formalLockWaitHarness, rng *rand.R
 			lkType = meta.F_UNLCK
 		}
 
-		if len(m.pendingWaitersByInoAndFlags(ino, meta.FuseLkFlock)) > 0 && lkType != meta.F_UNLCK {
-			// 若已有 flock 等待者，避免使用已持有活跃 flock 的句柄去删锁唤醒或新增第二个冲突等待者，改由未持锁句柄调用 SetLk 检验防饥饿 EAGAIN
-			if !m.hasActiveFlockOnHandle(ino, sid, fh) {
-				h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
-					Ino:       ino,
-					Fh:        fh,
-					LockOwner: owner,
-					SessionID: sid,
-					LkFlags:   meta.FuseLkFlock,
-					Lk:        meta.FileLock{Start: 0, End: meta.OffsetMax, Type: lkType, PID: pid},
-				}, "随机状态机:BSD_flock_SetLk防饥饿与冲突探测", testName, totalSteps)
+		if len(m.pendingWaitersByInoAndFlags(ino, meta.FuseLkFlock)) > 0 {
+			for _, pw := range m.pendingWaitersByInoAndFlags(ino, meta.FuseLkFlock) {
+				if pw.SessionID == sid && pw.Fh == fh {
+					return
+				}
+			}
+			if lkType != meta.F_UNLCK {
+				// 若已有 flock 等待者，避免使用已持有活跃 flock 的句柄去删锁唤醒或新增第二个冲突等待者，改由未持锁句柄调用 SetLk 检验防饥饿 EAGAIN
+				if !m.hasActiveFlockOnHandle(ino, sid, fh) {
+					h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
+						Ino:       ino,
+						Fh:        fh,
+						LockOwner: owner,
+						SessionID: sid,
+						LkFlags:   meta.FuseLkFlock,
+						Lk:        meta.FileLock{Start: 0, End: meta.OffsetMax, Type: lkType, PID: pid},
+					}, "随机状态机:BSD_flock_SetLk防饥饿与冲突探测", testName, totalSteps)
+				}
 				return
 			}
 		}

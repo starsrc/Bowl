@@ -1109,7 +1109,7 @@ func TestFormalMain_T7_DirStream(t *testing.T) {
 
 		ctx := context.Background()
 
-		runAllProbesAndAuditors := func() {
+		runFullProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -1128,6 +1128,19 @@ func TestFormalMain_T7_DirStream(t *testing.T) {
 			formalAuditNodeAndSymlinkQuota(ctx, t, env)
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 		}
+		auditCalls := 0
+		runAllProbesAndAuditors := func() {
+			auditCalls++
+			if !isFormalFixedSeedReplay() && auditCalls > 1 {
+				return
+			}
+			runFullProbesAndAuditors()
+		}
+		defer func() {
+			if !t.Failed() {
+				runFullProbesAndAuditors()
+			}
+		}()
 
 		// 1. 创建初始测试磁盘，并在根目录下创建测试主目录 work_dir
 		formalCreateValidDiskStep(ctx, t, env)

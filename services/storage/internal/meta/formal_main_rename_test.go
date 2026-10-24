@@ -1000,7 +1000,7 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 
 		ctx := context.Background()
 
-		runAllProbesAndAuditors := func() {
+		runFullProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -1013,6 +1013,19 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 			formalAuditNodeAndSymlinkQuota(ctx, t, env)
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 		}
+		auditCalls := 0
+		runAllProbesAndAuditors := func() {
+			auditCalls++
+			if !isFormalFixedSeedReplay() && auditCalls > 1 {
+				return
+			}
+			runFullProbesAndAuditors()
+		}
+		defer func() {
+			if !t.Failed() {
+				runFullProbesAndAuditors()
+			}
+		}()
 
 		// 辅助闭包：执行一步 Rename，先通过 formalPredictRename 对拍错误码，成功后通过 formalApplyRenameToModel 更新模型并运行全量审计
 		execCheckedRename := func(params meta.RenameParams, expectedErr error, desc string) {

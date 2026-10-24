@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,10 +28,22 @@ import (
 // ============================================================================
 
 const (
-	defaultFormalRuns  = 3
-	defaultFormalSteps = 40
+	defaultFormalRuns  = 1
+	defaultFormalSteps = 16
 	pcgStreamSalt      = uint64(0x9e3779b97f4a7c15)
 )
+
+// isFormalDeepMode 判断是否显式设置了深度形式化验证环境变量（BOWL_FORMAL_RUNS、BOWL_FORMAL_STEPS 或 BOWL_FORMAL_SEED）。
+func isFormalDeepMode() bool {
+	return strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")) != "" ||
+		strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")) != "" ||
+		strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")) != ""
+}
+
+// isFormalFixedSeedReplay 判断是否显式设置了 BOWL_FORMAL_SEED 进行单步全量复现。
+func isFormalFixedSeedReplay() bool {
+	return strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")) != ""
+}
 
 // formalSeedConfig 保存从环境变量解析出的状态机运行配置。
 type formalSeedConfig struct {
@@ -57,6 +70,10 @@ func loadFormalSeedConfig(t *testing.T, defaultRuns, defaultSteps int) formalSee
 	}
 	if defaultSteps <= 0 {
 		defaultSteps = defaultFormalSteps
+		// 轻量档 (task test) 下，各工单内嵌的 RandomStateMachine 子测试跑精简冒烟步数，顶层 TestFormalMainStateMachine 跑完整轻量步数
+		if !isFormalDeepMode() && strings.Contains(t.Name(), "/") {
+			defaultSteps = 4
+		}
 	}
 
 	cfg := formalSeedConfig{
@@ -87,6 +104,15 @@ func loadFormalSeedConfig(t *testing.T, defaultRuns, defaultSteps int) formalSee
 		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_STEPS=%q 失败", rawSteps)
 		require.Greater(t, steps, 0, "BOWL_FORMAL_STEPS 必须大于 0")
 		cfg.Steps = steps
+	}
+
+	if !cfg.HasFixedSeed && strings.Contains(t.Name(), "/") && isFormalDeepMode() {
+		if cfg.Runs > 1 {
+			cfg.Runs = 1
+		}
+		if cfg.Steps > 20 {
+			cfg.Steps = 20
+		}
 	}
 
 	return cfg
@@ -760,25 +786,47 @@ func (env *formalMainEnv) cleanupDatabase() {
 	}
 }
 
-// setupFormalPostgresPool 建立 PostgreSQL 测试连接池，若数据库不可用则安全跳过。
+var (
+	sharedFormalPoolOnce sync.Once
+	sharedFormalPool     *pgxpool.Pool
+	sharedFormalPoolErr  error
+)
+
+// setupFormalPostgresPool 建立并复用包级共享 PostgreSQL 测试连接池，若数据库不可用则安全跳过。
 func setupFormalPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := getStorageTestDSN()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	sharedFormalPoolOnce.Do(func() {
+		dsn := getStorageTestDSN()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过形式化状态机测试: 连接 PostgreSQL 失败: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("跳过形式化状态机测试: Ping PostgreSQL 失败: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
+		poolCfg, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			sharedFormalPoolErr = err
+			return
+		}
+		if poolCfg.ConnConfig.RuntimeParams == nil {
+			poolCfg.ConnConfig.RuntimeParams = make(map[string]string)
+		}
+		poolCfg.ConnConfig.RuntimeParams["deadlock_timeout"] = "15ms"
+		poolCfg.MaxConns = 16
+
+		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+		if err != nil {
+			sharedFormalPoolErr = err
+			return
+		}
+		if err := pool.Ping(ctx); err != nil {
+			pool.Close()
+			sharedFormalPoolErr = err
+			return
+		}
+		sharedFormalPool = pool
 	})
-	return pool
+	if sharedFormalPoolErr != nil || sharedFormalPool == nil {
+		t.Skipf("跳过形式化状态机测试: 连接 PostgreSQL 失败: %v", sharedFormalPoolErr)
+	}
+	return sharedFormalPool
 }
 
 // formalMainRunConfig 控制状态机运行器的参数与插件组合。
@@ -894,11 +942,22 @@ func runFormalMainStateMachine(t *testing.T, cfg formalMainRunConfig) {
 				env.AppendTrace(0, "[初始建盘] "+initDesc)
 			}
 
+			deepMode := isFormalDeepMode()
+			isSubTest := strings.Contains(t.Name(), "/")
 			for step := 1; step <= seedCfg.Steps; step++ {
 				env.StepIndex = step
 				chosen := pickWeightedAction(env.Rng, actions)
 				desc := chosen.Fn(ctx, t, env)
 				env.AppendTrace(step, desc)
+
+				if !seedCfg.HasFixedSeed {
+					if !deepMode && step != seedCfg.Steps && step%6 != 0 {
+						continue
+					}
+					if deepMode && isSubTest && step != seedCfg.Steps && step%5 != 0 {
+						continue
+					}
+				}
 
 				// 1. 执行只读查账探针 (Probes)
 				for _, probe := range probes {

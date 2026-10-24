@@ -54,6 +54,15 @@ tasks:
       - task: test:storage
         vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
 
+  test:formal:
+    desc: "Run deep formal state-machine and concurrent verification for storage metadata"
+    dir: services/storage
+    env:
+      BOWL_FORMAL_RUNS: '{{.BOWL_FORMAL_RUNS | default "5"}}'
+      BOWL_FORMAL_STEPS: '{{.BOWL_FORMAL_STEPS | default "80"}}'
+    cmds:
+      - go test -v ./internal/meta -run "TestFormal" {{.CLI_ARGS}}
+
   lint:
     desc: "Run buf lint and go vet across all modules"
     cmds:

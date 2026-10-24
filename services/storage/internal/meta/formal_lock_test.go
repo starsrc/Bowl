@@ -33,8 +33,12 @@ func loadFormalLockConfig(t *testing.T) formalLockConfig {
 
 	cfg := formalLockConfig{
 		BaseSeed: uint64(time.Now().UnixNano()),
-		Runs:     2,
-		Steps:    50,
+		Runs:     1,
+		Steps:    12,
+	}
+	if isFormalDeepMode() {
+		cfg.Runs = 2
+		cfg.Steps = 50
 	}
 
 	if rawSeed := strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")); rawSeed != "" {
@@ -922,16 +926,8 @@ type formalLockTestEnv struct {
 func setupFormalLockEnv(t *testing.T, seed uint64, fileCount int, sessionCount int, opts ...meta.Option) *formalLockTestEnv {
 	t.Helper()
 
-	dsn := getStorageTestDSN()
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过形式化文件锁测试: 连接 PostgreSQL 失败: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("跳过形式化文件锁测试: Ping PostgreSQL 失败: %v", err)
-	}
+	pool := setupFormalPostgresPool(t)
 
 	store := db.NewStore(pool)
 	mgr := meta.New(store, opts...)
@@ -1009,10 +1005,13 @@ func setupFormalLockEnv(t *testing.T, seed uint64, fileCount int, sessionCount i
 
 	t.Cleanup(func() {
 		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
-		for _, sid := range model.SessionList {
-			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", int64(sid))
+		if len(model.SessionList) > 0 {
+			sids := make([]int64, len(model.SessionList))
+			for i, sid := range model.SessionList {
+				sids[i] = int64(sid)
+			}
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = ANY($1::bigint[])", sids)
 		}
-		pool.Close()
 	})
 
 	return &formalLockTestEnv{

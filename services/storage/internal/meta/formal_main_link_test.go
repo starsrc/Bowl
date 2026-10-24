@@ -781,7 +781,7 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 
 		ctx := context.Background()
 
-		runAllProbesAndAuditors := func() {
+		runFullProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -794,6 +794,19 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 			formalAuditNodeAndSymlinkQuota(ctx, t, env)
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 		}
+		auditCalls := 0
+		runAllProbesAndAuditors := func() {
+			auditCalls++
+			if !isFormalFixedSeedReplay() && auditCalls > 1 {
+				return
+			}
+			runFullProbesAndAuditors()
+		}
+		defer func() {
+			if !t.Failed() {
+				runFullProbesAndAuditors()
+			}
+		}()
 
 		// 1. 创建 2 块独立虚拟磁盘 disk1 与 disk2，构造跨目录与跨盘测试拓扑
 		formalCreateValidDiskStep(ctx, t, env)

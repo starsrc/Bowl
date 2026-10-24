@@ -249,6 +249,10 @@ func (m *formalLockModel) isHandleValid(fh, ino uint64, sessionID *uint64) (*for
 		if h.SessionID == nil || *h.SessionID != *sessionID {
 			return nil, false
 		}
+	} else {
+		if h.SessionID != nil {
+			return nil, false
+		}
 	}
 	return h, true
 }
@@ -738,11 +742,7 @@ func (m *formalLockModel) ApplyFlush(params meta.FlushParams) error {
 		return meta.ErrIsDir
 	}
 
-	var checkSess *uint64
-	if params.LockOwner != nil || params.SessionID != nil {
-		checkSess = params.SessionID
-	}
-	if _, valid := m.isHandleValid(params.Fh, params.Ino, checkSess); !valid {
+	if _, valid := m.isHandleValid(params.Fh, params.Ino, params.SessionID); !valid {
 		return meta.ErrBadFileHandle
 	}
 
@@ -790,14 +790,15 @@ func (m *formalLockModel) ApplyRelease(params meta.ReleaseParams) error {
 		return meta.ErrIsDir
 	}
 
-	if params.SessionID != nil {
-		m.purgeExpiredSessionsAndUpsert(*params.SessionID)
-	}
-
 	h, valid := m.isHandleValid(params.Fh, params.Ino, params.SessionID)
 	if !valid {
 		return meta.ErrBadFileHandle
 	}
+
+	if params.SessionID != nil {
+		m.purgeExpiredSessionsAndUpsert(*params.SessionID)
+	}
+
 	h.Closed = true
 
 	if (params.ReleaseFlags & meta.FuseReleaseFlockUnlock) != 0 {

@@ -672,6 +672,10 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 			SessionID: toPgSessionID(params.SessionID),
 		})
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return ErrNotFound
+			}
 			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
 		}
 
@@ -745,6 +749,10 @@ func (m *manager) OpenDir(ctx context.Context, params OpenDirParams) (*OpenDirRe
 			SessionID: toPgSessionID(params.SessionID),
 		})
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return ErrNotFound
+			}
 			return fmt.Errorf("create file handle for inode %d: %w", inode.Ino, err)
 		}
 

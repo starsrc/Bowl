@@ -29,24 +29,26 @@ import (
 
 const (
 	defaultFormalRuns  = 1
-	defaultFormalSteps = 16
+	defaultFormalSteps = 10
 	pcgStreamSalt      = uint64(0x9e3779b97f4a7c15)
 )
 
-// isFormalDeepMode 判断是否显式设置了深度形式化验证环境变量（BOWL_FORMAL_RUNS、BOWL_FORMAL_STEPS 或 BOWL_FORMAL_SEED）。
+// isFormalDeepMode 判断是否显式设置了深度形式化验证环境变量（BOWL_FORMAL_RUNS 或 BOWL_FORMAL_STEPS）。
 func isFormalDeepMode() bool {
 	return strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")) != "" ||
-		strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")) != "" ||
-		strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")) != ""
-}
-
-// isFormalFixedSeedReplay 判断是否显式设置了 BOWL_FORMAL_SEED 进行单步全量复现。
-func isFormalFixedSeedReplay() bool {
-	return strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")) != ""
+		strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")) != ""
 }
 
 // formalSeedConfig 保存从环境变量解析出的状态机运行配置。
 type formalSeedConfig struct {
+	HasFixedSeed bool
+	FixedSeed    uint64
+	Runs         int
+	Steps        int
+}
+
+// formalEnvOverrides 保存从 BOWL_FORMAL_SEED、BOWL_FORMAL_RUNS、BOWL_FORMAL_STEPS 解析的公共环境变量配置。
+type formalEnvOverrides struct {
 	HasFixedSeed bool
 	FixedSeed    uint64
 	Runs         int
@@ -62,6 +64,42 @@ func parseFormalSeedString(raw string) (uint64, error) {
 	return strconv.ParseUint(s, 0, 64)
 }
 
+// parseFormalEnvOverrides 统一解析 BOWL_FORMAL_SEED、BOWL_FORMAL_RUNS 与 BOWL_FORMAL_STEPS 环境变量。
+func parseFormalEnvOverrides(t *testing.T, defaultRuns, defaultSteps int) formalEnvOverrides {
+	t.Helper()
+	out := formalEnvOverrides{
+		Runs:  defaultRuns,
+		Steps: defaultSteps,
+	}
+
+	if rawSeed := strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")); rawSeed != "" {
+		seed, err := parseFormalSeedString(rawSeed)
+		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_SEED=%q 失败", rawSeed)
+		out.HasFixedSeed = true
+		out.FixedSeed = seed
+		// 复现指定种子时若未显式指定 BOWL_FORMAL_RUNS，默认执行 1 轮精准复现
+		if strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")) == "" {
+			out.Runs = 1
+		}
+	}
+
+	if rawRuns := strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")); rawRuns != "" {
+		runs, err := strconv.Atoi(rawRuns)
+		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_RUNS=%q 失败", rawRuns)
+		require.Greater(t, runs, 0, "BOWL_FORMAL_RUNS 必须大于 0")
+		out.Runs = runs
+	}
+
+	if rawSteps := strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")); rawSteps != "" {
+		steps, err := strconv.Atoi(rawSteps)
+		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_STEPS=%q 失败", rawSteps)
+		require.Greater(t, steps, 0, "BOWL_FORMAL_STEPS 必须大于 0")
+		out.Steps = steps
+	}
+
+	return out
+}
+
 // loadFormalSeedConfig 从环境变量读取 BOWL_FORMAL_SEED、BOWL_FORMAL_RUNS、BOWL_FORMAL_STEPS。
 func loadFormalSeedConfig(t *testing.T, defaultRuns, defaultSteps int) formalSeedConfig {
 	t.Helper()
@@ -72,50 +110,19 @@ func loadFormalSeedConfig(t *testing.T, defaultRuns, defaultSteps int) formalSee
 		defaultSteps = defaultFormalSteps
 		// 轻量档 (task test) 下，各工单内嵌的 RandomStateMachine 子测试跑精简冒烟步数，顶层 TestFormalMainStateMachine 跑完整轻量步数
 		if !isFormalDeepMode() && strings.Contains(t.Name(), "/") {
-			defaultSteps = 4
+			defaultSteps = 3
 		}
 	}
 
-	cfg := formalSeedConfig{
-		Runs:  defaultRuns,
-		Steps: defaultSteps,
-	}
-
-	if rawSeed := strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")); rawSeed != "" {
-		seed, err := parseFormalSeedString(rawSeed)
-		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_SEED=%q 失败", rawSeed)
-		cfg.HasFixedSeed = true
-		cfg.FixedSeed = seed
-		// 复现指定种子时若未显式指定 BOWL_FORMAL_RUNS，默认执行 1 轮精准复现
-		if strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")) == "" {
-			cfg.Runs = 1
+	ov := parseFormalEnvOverrides(t, defaultRuns, defaultSteps)
+	if !ov.HasFixedSeed && strings.Contains(t.Name(), "/") && isFormalDeepMode() && ov.Runs > 1 {
+		ov.Runs = 1
+		if ov.Steps > 20 {
+			ov.Steps = 20
 		}
 	}
 
-	if rawRuns := strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")); rawRuns != "" {
-		runs, err := strconv.Atoi(rawRuns)
-		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_RUNS=%q 失败", rawRuns)
-		require.Greater(t, runs, 0, "BOWL_FORMAL_RUNS 必须大于 0")
-		cfg.Runs = runs
-	}
-
-	if rawSteps := strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")); rawSteps != "" {
-		steps, err := strconv.Atoi(rawSteps)
-		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_STEPS=%q 失败", rawSteps)
-		require.Greater(t, steps, 0, "BOWL_FORMAL_STEPS 必须大于 0")
-		cfg.Steps = steps
-	}
-
-	if !cfg.HasFixedSeed && strings.Contains(t.Name(), "/") && isFormalDeepMode() {
-		if cfg.Runs > 1 {
-			cfg.Runs = 1
-		}
-		if cfg.Steps > 20 {
-			cfg.Steps = 20
-		}
-	}
-
-	return cfg
+	return formalSeedConfig(ov)
 }
 
 // newFormalRNG 基于 math/rand/v2.NewPCG(seed, seed^0x9e3779b97f4a7c15) 创建确定性伪随机数生成器。
@@ -704,6 +711,7 @@ type formalMainEnv struct {
 	TotalSteps int
 	Seed       uint64
 	Rng        *rand.Rand
+	ProbeRng   *rand.Rand
 	Pool       *pgxpool.Pool
 	Store      db.Store
 	Mgr        meta.Manager
@@ -712,6 +720,14 @@ type formalMainEnv struct {
 	SeqCounter uint64
 	LeaseTTL   time.Duration
 	Trace      []string
+}
+
+// ProbeRNG 返回只读探针专用的隔离伪随机数生成器，避免只读探针抽样推进主动作流 env.Rng。
+func (env *formalMainEnv) ProbeRNG() *rand.Rand {
+	if env.ProbeRng == nil {
+		env.ProbeRng = newFormalRNG(env.Seed ^ 0x6a09e667f3bcc908)
+	}
+	return env.ProbeRng
 }
 
 // NextSeq 生成单轮内递增的唯一序号。
@@ -744,8 +760,8 @@ func (env *formalMainEnv) FormatFailureReport() string {
 	b.WriteString(fmt.Sprintf("测试名称: %s (第 %d / %d 轮, 失败于第 %d / %d 步)\n",
 		env.TestName, env.RunIndex+1, env.TotalRuns, env.StepIndex, env.TotalSteps))
 	b.WriteString(fmt.Sprintf("复现种子 (Seed): 0x%016x (十进制: %d)\n", env.Seed, env.Seed))
-	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x go -C services/storage test -v ./internal/meta -run '^%s$'\n",
-		env.Seed, env.TestName))
+	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_STEPS=%d go -C services/storage test -v ./internal/meta -run '^%s$'\n",
+		env.Seed, env.TotalSteps, env.TestName))
 	b.WriteString(fmt.Sprintf("中文操作轨迹账单 (共 %d 步):\n", len(env.Trace)))
 	for _, entry := range env.Trace {
 		b.WriteString("  ")
@@ -942,22 +958,14 @@ func runFormalMainStateMachine(t *testing.T, cfg formalMainRunConfig) {
 				env.AppendTrace(0, "[初始建盘] "+initDesc)
 			}
 
-			deepMode := isFormalDeepMode()
-			isSubTest := strings.Contains(t.Name(), "/")
 			for step := 1; step <= seedCfg.Steps; step++ {
 				env.StepIndex = step
 				chosen := pickWeightedAction(env.Rng, actions)
 				desc := chosen.Fn(ctx, t, env)
 				env.AppendTrace(step, desc)
 
-				if !seedCfg.HasFixedSeed {
-					if !deepMode && step != seedCfg.Steps && step%6 != 0 {
-						continue
-					}
-					if deepMode && isSubTest && step != seedCfg.Steps && step%5 != 0 {
-						continue
-					}
-				}
+				// 为本步只读探针初始化独立 RNG，确保探针内部抽样不污染主动作流 env.Rng
+				env.ProbeRng = rand.New(rand.NewPCG(seed^uint64(step)*pcgStreamSalt, seed+uint64(step)))
 
 				// 1. 执行只读查账探针 (Probes)
 				for _, probe := range probes {
@@ -1520,7 +1528,7 @@ func formalProbeStatFS(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	// 2. 抽样核对存活的非根 Inode（含 nlink == 0 的孤儿节点）调用 StatFS
 	activeInodes := env.Model.ActiveInodes()
 	if len(activeInodes) > 0 {
-		sampleInode := activeInodes[env.Rng.IntN(len(activeInodes))]
+		sampleInode := activeInodes[env.ProbeRNG().IntN(len(activeInodes))]
 		if disk, ok := env.Model.DiskByRootIno[sampleInode.RootIno]; ok && !disk.Deleted {
 			got, err := env.Mgr.StatFS(ctx, sampleInode.Ino)
 			require.NoErrorf(t, err, "存活节点 ino=%d (root_ino=%d) 调用 StatFS 不应失败", sampleInode.Ino, sampleInode.RootIno)

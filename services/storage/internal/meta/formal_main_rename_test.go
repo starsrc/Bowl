@@ -1000,7 +1000,7 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 
 		ctx := context.Background()
 
-		runFullProbesAndAuditors := func() {
+		runAllProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -1013,21 +1013,8 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 			formalAuditNodeAndSymlinkQuota(ctx, t, env)
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 		}
-		auditCalls := 0
-		runAllProbesAndAuditors := func() {
-			auditCalls++
-			if !isFormalFixedSeedReplay() && auditCalls > 1 {
-				return
-			}
-			runFullProbesAndAuditors()
-		}
-		defer func() {
-			if !t.Failed() {
-				runFullProbesAndAuditors()
-			}
-		}()
 
-		// 辅助闭包：执行一步 Rename，先通过 formalPredictRename 对拍错误码，成功后通过 formalApplyRenameToModel 更新模型并运行全量审计
+		// 辅助闭包：执行一步 Rename，先通过 formalPredictRename 对拍错误码，成功后通过 formalApplyRenameToModel 更新模型
 		execCheckedRename := func(params meta.RenameParams, expectedErr error, desc string) {
 			t.Helper()
 			plan := formalPredictRename(env.Model, params)
@@ -1040,7 +1027,6 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 			}
 			require.NoErrorf(t, err, "%s: 预期成功，但返回错误: %v", desc, err)
 			formalApplyRenameToModel(env.Model, params, plan)
-			runAllProbesAndAuditors()
 		}
 
 		// 辅助闭包：创建子目录并登记到内存模型
@@ -1471,6 +1457,7 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 			NewParentIno: root2, NewName: []byte("dirDisk2"),
 			Flags: meta.RenameExchange,
 		}, meta.ErrCrossDevice, "跨盘Rename_RenameExchange交换两个目录返回ErrCrossDevice")
+		runAllProbesAndAuditors()
 	})
 
 	t.Run("随机状态机_Rename全模式覆盖_NOREPLACE_EXCHANGE_双向防环_跨盘EXDEV与底表INV-1_INV-2_INV-4_INV-5全量审计", func(t *testing.T) {

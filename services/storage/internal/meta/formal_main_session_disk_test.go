@@ -1015,7 +1015,7 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 
 		ctx := context.Background()
 
-		runFullProbesAndAuditors := func() {
+		runAllProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -1036,19 +1036,6 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 			formalAuditINV6TmpFileMaterialization(ctx, t, env)
 			formalAuditT10SessionAndDeleteDisk(ctx, t, env)
 		}
-		auditCalls := 0
-		runAllProbesAndAuditors := func() {
-			auditCalls++
-			if !isFormalFixedSeedReplay() && auditCalls > 1 {
-				return
-			}
-			runFullProbesAndAuditors()
-		}
-		defer func() {
-			if !t.Failed() {
-				runFullProbesAndAuditors()
-			}
-		}()
 
 		// 1. 验证 RenewSession 与 RenewSessionWithStatus 的非法入参边界 (0 与 > math.MaxInt64)
 		for _, badSID := range []uint64{0, uint64(math.MaxInt64) + 1, ^uint64(0)} {
@@ -1344,7 +1331,7 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 
 		ctx := context.Background()
 
-		runFullProbesAndAuditors := func() {
+		runAllProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -1365,19 +1352,6 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 			formalAuditINV6TmpFileMaterialization(ctx, t, env)
 			formalAuditT10SessionAndDeleteDisk(ctx, t, env)
 		}
-		auditCalls := 0
-		runAllProbesAndAuditors := func() {
-			auditCalls++
-			if !isFormalFixedSeedReplay() && auditCalls > 1 {
-				return
-			}
-			runFullProbesAndAuditors()
-		}
-		defer func() {
-			if !t.Failed() {
-				runFullProbesAndAuditors()
-			}
-		}()
 
 		// 1. 验证 DeleteDisk 静态与动态错误码边界
 		for _, invalidID := range []string{

@@ -253,14 +253,14 @@ func findOrphanNonDirsInModel(m *formalMainModel) []*formalInode {
 	return res
 }
 
-// pickOptionalFormalSessionID 在长租约模式下按概率选择 nil 或有效客户端会话 ID；在毫秒级短租约测试下保持 nil 以免干扰过期控制。
+// pickOptionalFormalSessionID 在长租约模式下按概率选择 nil 或与当前 Seed 隔离的客户端会话 ID；在毫秒级短租约测试下保持 nil 以免干扰过期控制。
 func pickOptionalFormalSessionID(env *formalMainEnv) *uint64 {
 	if env.LeaseTTL < 5*time.Second {
 		return nil
 	}
 	if env.Rng.IntN(4) == 0 {
-		candidates := []uint64{1001, 1002}
-		sid := candidates[env.Rng.IntN(len(candidates))]
+		base := (env.Seed & 0x3fffffff) + 7000000 + uint64(env.RunIndex)*10
+		sid := base + uint64(env.Rng.IntN(2)) + 1
 		if s, exists := env.Model.Sessions[sid]; exists && s.Expired {
 			return nil
 		}

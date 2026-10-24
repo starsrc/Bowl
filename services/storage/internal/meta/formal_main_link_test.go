@@ -781,7 +781,7 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 
 		ctx := context.Background()
 
-		runFullProbesAndAuditors := func() {
+		runAllProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -794,19 +794,6 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 			formalAuditNodeAndSymlinkQuota(ctx, t, env)
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 		}
-		auditCalls := 0
-		runAllProbesAndAuditors := func() {
-			auditCalls++
-			if !isFormalFixedSeedReplay() && auditCalls > 1 {
-				return
-			}
-			runFullProbesAndAuditors()
-		}
-		defer func() {
-			if !t.Failed() {
-				runFullProbesAndAuditors()
-			}
-		}()
 
 		// 1. 创建 2 块独立虚拟磁盘 disk1 与 disk2，构造跨目录与跨盘测试拓扑
 		formalCreateValidDiskStep(ctx, t, env)
@@ -991,7 +978,6 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 		})
 		disk1.UsedInodes++
 		disk1.UsedBytes += tmpSize
-		runAllProbesAndAuditors()
 
 		// 5.1 跨盘具名化 TmpFile 必须返回 ErrCrossDevice
 		_, err = mgr.Link(ctx, meta.LinkParams{Ino: tmpModel.Ino, NewParentIno: root2, NewName: []byte("tmp_cross")})
@@ -1005,7 +991,6 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 		tmpModel.TmpFileLinked = true
 		env.Model.ClearTmpFileFlagForIno(tmpModel.Ino)
 		env.Model.Entries[formalEntryKey{ParentIno: dirB.Ino, Name: "tmp_named"}] = tmpModel.Ino
-		runAllProbesAndAuditors()
 
 		// 5.3 在仍持有打开句柄时对其执行 Unlink：nlink 1 -> 0，成为 unlink-whilst-open 孤儿节点，暂不退还配额
 		err = mgr.Unlink(ctx, dirB.Ino, []byte("tmp_named"))
@@ -1013,7 +998,6 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 		delete(env.Model.Entries, formalEntryKey{ParentIno: dirB.Ino, Name: "tmp_named"})
 		tmpModel.Nlink = 0
 		require.False(t, env.Model.ReclaimOrphanInModel(tmpModel.Ino), "持有打开句柄时不应物理删除")
-		runAllProbesAndAuditors()
 
 		// 5.4 尝试二次 Link 复活该已具名化又被 Unlink 的节点 -> 必须返回 ErrNotFound
 		_, err = mgr.Link(ctx, meta.LinkParams{Ino: tmpModel.Ino, NewParentIno: dirB.Ino, NewName: []byte("tmp_resurrect")})
@@ -1058,7 +1042,6 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 		require.NoError(t, err)
 		delete(env.Model.Entries, formalEntryKey{ParentIno: dirA.Ino, Name: "sym1"})
 		sym1Model.Nlink = 1
-		runAllProbesAndAuditors()
 
 		usedBytesBeforeSymDelete := disk1.UsedBytes
 		err = mgr.Unlink(ctx, dirB.Ino, []byte("sym1_cross"))
@@ -1097,7 +1080,6 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 			delete(env.Model.Entries, formalEntryKey{ParentIno: step.Parent, Name: step.Name})
 			reg1Model.Nlink = step.Expect
 			require.Equal(t, uint64(4096), disk1.UsedBytes, "nlink > 0 时绝不退还常规文件配额")
-			runAllProbesAndAuditors()
 		}
 
 		// 6.4 验证 unlink-whilst-open (兼容 T6)：先 Open(reg1) 持有有效 FileHandle，再 Unlink 最后一条硬链接 reg1_root

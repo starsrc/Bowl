@@ -98,8 +98,8 @@ func formalPredictReleaseDir(
 	return inode, h, nil
 }
 
-// formalExpectedDirStreamItem 表示内存参考模型推导出的单条目录流期望项。
-type formalExpectedDirStreamItem struct {
+// formalExpectedDirEntryItem 表示内存参考模型推导出的单条目录项 (DirEntry) 期望值。
+type formalExpectedDirEntryItem struct {
 	Ino        uint64
 	Name       []byte
 	Mode       uint32
@@ -107,15 +107,15 @@ type formalExpectedDirStreamItem struct {
 	Node       *formalInode
 }
 
-// formalBuildExpectedDirStream 根据内存参考模型构建指定目录在 Offset=0 全量读取时的期望条目序列。
+// formalBuildExpectedDirEntries 根据内存参考模型构建指定目录在 Offset=0 全量读取时的期望条目序列。
 // - 若为孤儿目录 (dir.Nlink == 0)，返回空切片；
 // - 若为存活目录 (dir.Nlink > 0)：
 //   - 第 0 项 (NextOffset = 1): "." -> dir 自身；
 //   - 第 1 项 (NextOffset = 2): ".." -> dir.ParentIno 对应的父目录（根目录为自身）；
 //   - 第 2+i 项 (NextOffset = i+3): 按原始字节字典序升序 (bytes.Compare) 排列的子目录项。
-func formalBuildExpectedDirStream(m *formalMainModel, dir *formalInode) []formalExpectedDirStreamItem {
+func formalBuildExpectedDirEntries(m *formalMainModel, dir *formalInode) []formalExpectedDirEntryItem {
 	if dir == nil || dir.Deleted || dir.Nlink == 0 {
-		return []formalExpectedDirStreamItem{}
+		return []formalExpectedDirEntryItem{}
 	}
 
 	parentNode, ok := m.Inodes[dir.ParentIno]
@@ -124,16 +124,16 @@ func formalBuildExpectedDirStream(m *formalMainModel, dir *formalInode) []formal
 	}
 
 	childKeys := m.ChildEntriesOf(dir.Ino)
-	items := make([]formalExpectedDirStreamItem, 0, 2+len(childKeys))
+	items := make([]formalExpectedDirEntryItem, 0, 2+len(childKeys))
 
-	items = append(items, formalExpectedDirStreamItem{
+	items = append(items, formalExpectedDirEntryItem{
 		Ino:        dir.Ino,
 		Name:       []byte("."),
 		Mode:       dir.Mode,
 		NextOffset: 1,
 		Node:       dir,
 	})
-	items = append(items, formalExpectedDirStreamItem{
+	items = append(items, formalExpectedDirEntryItem{
 		Ino:        parentNode.Ino,
 		Name:       []byte(".."),
 		Mode:       parentNode.Mode,
@@ -144,7 +144,7 @@ func formalBuildExpectedDirStream(m *formalMainModel, dir *formalInode) []formal
 	for i, ek := range childKeys {
 		childIno := m.Entries[ek]
 		childNode := m.Inodes[childIno]
-		items = append(items, formalExpectedDirStreamItem{
+		items = append(items, formalExpectedDirEntryItem{
 			Ino:        childNode.Ino,
 			Name:       []byte(ek.Name),
 			Mode:       childNode.Mode,
@@ -159,22 +159,6 @@ func formalBuildExpectedDirStream(m *formalMainModel, dir *formalInode) []formal
 // ============================================================================
 // 2. T7 动作实现：OpenDir 与 ReleaseDir 随机操作生成与逐操作对拍
 // ============================================================================
-
-// pickOptionalFormalDirSessionID 在长租约模式下按概率选择 nil 或与当前 Seed 隔离的客户端会话 ID。
-func pickOptionalFormalDirSessionID(env *formalMainEnv) *uint64 {
-	if env.LeaseTTL < 5*time.Second {
-		return nil
-	}
-	if env.Rng.IntN(4) == 0 {
-		base := (env.Seed & 0x3fffffff) + 7000000 + uint64(env.RunIndex)*10
-		sid := base + uint64(env.Rng.IntN(2)) + 1
-		if s, exists := env.Model.Sessions[sid]; exists && s.Expired {
-			return nil
-		}
-		return &sid
-	}
-	return nil
-}
 
 // formalActionOpenDir 在状态机中随机生成存活目录打开、rmdir-whilst-open 活跃孤儿目录重打开、
 // 以及非目录节点拦截 (ErrNotDir)、非法标志位拦截 (ErrInvalidArgument)、无句柄孤儿/不存在节点拦截 (ErrNotFound) 的 OpenDir 请求并与参考模型对拍。
@@ -201,7 +185,7 @@ func formalActionOpenDir(ctx context.Context, t *testing.T, env *formalMainEnv) 
 
 	var params meta.OpenDirParams
 	params.Flags = meta.O_RDONLY
-	params.SessionID = pickOptionalFormalDirSessionID(env)
+	params.SessionID = pickOptionalFormalSessionID(env)
 
 	branch := env.Rng.IntN(100)
 	var caseTag string
@@ -538,8 +522,8 @@ func formalActionReleaseDir(ctx context.Context, t *testing.T, env *formalMainEn
 // 3. T7 只读查账探针：ReadDir、ReadDirPlus 与 FsyncDir
 // ============================================================================
 
-// assertFormalReadDirStreamMatches 核对给定有效目录句柄下的 ReadDir 全量读取与分页迭代读取结果。
-func assertFormalReadDirStreamMatches(
+// assertFormalReadDirEntriesMatches 核对给定有效目录句柄下的 ReadDir 全量读取与分页迭代读取结果。
+func assertFormalReadDirEntriesMatches(
 	ctx context.Context,
 	t *testing.T,
 	mgr meta.Manager,
@@ -551,7 +535,7 @@ func assertFormalReadDirStreamMatches(
 ) {
 	t.Helper()
 
-	expected := formalBuildExpectedDirStream(m, dir)
+	expected := formalBuildExpectedDirEntries(m, dir)
 
 	// 1. 全量读取 (Offset = 0, Limit = MaxReadDirLimit)
 	gotAll, err := mgr.ReadDir(ctx, meta.ReadDirParams{
@@ -648,8 +632,8 @@ func assertFormalReadDirStreamMatches(
 	require.Empty(t, beyond, "越界 Offset 调用 ReadDir 应返回空列表")
 }
 
-// assertFormalReadDirPlusStreamMatches 核对给定有效目录句柄下的 ReadDirPlus 全量读取、每个子项完整 Inode 属性与分页迭代读取结果。
-func assertFormalReadDirPlusStreamMatches(
+// assertFormalReadDirPlusEntriesMatches 核对给定有效目录句柄下的 ReadDirPlus 全量读取、每个子项完整 Inode 属性与分页迭代读取结果。
+func assertFormalReadDirPlusEntriesMatches(
 	ctx context.Context,
 	t *testing.T,
 	mgr meta.Manager,
@@ -661,7 +645,7 @@ func assertFormalReadDirPlusStreamMatches(
 ) {
 	t.Helper()
 
-	expected := formalBuildExpectedDirStream(m, dir)
+	expected := formalBuildExpectedDirEntries(m, dir)
 
 	// 1. 全量读取 (Offset = 0, Limit = MaxReadDirLimit)
 	gotAll, err := mgr.ReadDirPlus(ctx, meta.ReadDirPlusParams{
@@ -771,7 +755,7 @@ func formalProbeReadDir(ctx context.Context, t *testing.T, env *formalMainEnv) {
 			"ReadDir 探针: 活跃目录句柄 fh=%d 关联的目录 ino=%d 在参考模型中不存在或非目录", h.Fh, h.Ino)
 
 		verifyPagination := (idx == 0 && env.StepIndex%4 == 0) || dir.Nlink == 0
-		assertFormalReadDirStreamMatches(ctx, t, env.Mgr, env.Model, dir, h.Fh, h.SessionID, verifyPagination)
+		assertFormalReadDirEntriesMatches(ctx, t, env.Mgr, env.Model, dir, h.Fh, h.SessionID, verifyPagination)
 
 		// 抽样核对 SessionID 不匹配时返回 ErrBadFileHandle
 		if idx == 0 {
@@ -882,7 +866,7 @@ func formalProbeReadDirPlus(ctx context.Context, t *testing.T, env *formalMainEn
 			"ReadDirPlus 探针: 活跃目录句柄 fh=%d 关联的目录 ino=%d 在参考模型中不存在或非目录", h.Fh, h.Ino)
 
 		verifyPagination := (idx == 0 && env.StepIndex%4 == 0) || dir.Nlink == 0
-		assertFormalReadDirPlusStreamMatches(ctx, t, env.Mgr, env.Model, dir, h.Fh, h.SessionID, verifyPagination)
+		assertFormalReadDirPlusEntriesMatches(ctx, t, env.Mgr, env.Model, dir, h.Fh, h.SessionID, verifyPagination)
 
 		if idx == 0 {
 			var mismatchedSID *uint64
@@ -1080,9 +1064,9 @@ func formalProbeFsyncDir(ctx context.Context, t *testing.T, env *formalMainEnv) 
 // 4. T7 专属测试入口：确定性全边界矩阵子测试 + 多轮随机状态机对拍子测试
 // ============================================================================
 
-// TestFormalMain_T7_DirStream 验证 T7 主状态机 OpenDir/ReadDir/ReadDirPlus/FsyncDir/ReleaseDir 目录流合成、
+// TestFormalMain_T7_OpenDirReadDir 验证 T7 主状态机 OpenDir/ReadDir/ReadDirPlus/FsyncDir/ReleaseDir 目录遍历合成、
 // 字典序分页游标、rmdir-whilst-open 与 Rename 覆盖打开目录的孤儿延迟回收及底表 INV-1 ~ INV-5 闭环。
-func TestFormalMain_T7_DirStream(t *testing.T) {
+func TestFormalMain_T7_OpenDirReadDir(t *testing.T) {
 	t.Run("确定性边界_OpenDir与ReleaseDir全参数矩阵_ReadDir与ReadDirPlus字典序分页对拍_rmdir-whilst-open与Rename覆盖打开目录孤儿回收_INV-2至INV-4闭环验证", func(t *testing.T) {
 		pool := setupFormalPostgresPool(t)
 		store := db.NewStore(pool)
@@ -1109,7 +1093,7 @@ func TestFormalMain_T7_DirStream(t *testing.T) {
 
 		ctx := context.Background()
 
-		runFullProbesAndAuditors := func() {
+		runAllProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -1128,19 +1112,6 @@ func TestFormalMain_T7_DirStream(t *testing.T) {
 			formalAuditNodeAndSymlinkQuota(ctx, t, env)
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 		}
-		auditCalls := 0
-		runAllProbesAndAuditors := func() {
-			auditCalls++
-			if !isFormalFixedSeedReplay() && auditCalls > 1 {
-				return
-			}
-			runFullProbesAndAuditors()
-		}
-		defer func() {
-			if !t.Failed() {
-				runFullProbesAndAuditors()
-			}
-		}()
 
 		// 1. 创建初始测试磁盘，并在根目录下创建测试主目录 work_dir
 		formalCreateValidDiskStep(ctx, t, env)
@@ -1347,7 +1318,6 @@ func TestFormalMain_T7_DirStream(t *testing.T) {
 		delete(env.Model.Handles, subFh2.Fh)
 		require.False(t, env.Model.ReclaimOrphanInModel(subDirModel.Ino))
 		require.Equal(t, usedInodesBeforeRmdir, disk.UsedInodes)
-		runAllProbesAndAuditors()
 
 		// 4.4 关闭孤儿目录最后一个句柄 subFh3 -> 在同一事务内物理删除孤儿目录且 used_inodes - 1！
 		require.NoError(t, mgr.ReleaseDir(ctx, meta.ReleaseDirParams{Ino: subDirModel.Ino, Fh: subFh3.Fh}))
@@ -1417,7 +1387,6 @@ func TestFormalMain_T7_DirStream(t *testing.T) {
 		delete(env.Model.Handles, victimFh.Fh)
 		require.True(t, env.Model.ReclaimOrphanInModel(victimDirModel.Ino))
 		require.Equal(t, usedInodesBeforeRenameOverwrite-1, disk.UsedInodes)
-		runAllProbesAndAuditors()
 
 		// 清理剩余打开句柄
 		require.NoError(t, mgr.Release(ctx, meta.ReleaseParams{Ino: regModel.Ino, Fh: regRes.Fh}))

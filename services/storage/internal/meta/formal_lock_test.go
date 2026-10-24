@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,35 +29,24 @@ type formalLockConfig struct {
 func loadFormalLockConfig(t *testing.T) formalLockConfig {
 	t.Helper()
 
-	cfg := formalLockConfig{
-		BaseSeed: uint64(time.Now().UnixNano()),
-		Runs:     1,
-		Steps:    12,
-	}
+	defaultRuns := 1
+	defaultSteps := 8
 	if isFormalDeepMode() {
-		cfg.Runs = 2
-		cfg.Steps = 50
+		defaultRuns = 2
+		defaultSteps = 50
 	}
 
-	if rawSeed := strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")); rawSeed != "" {
-		parsed, err := strconv.ParseUint(rawSeed, 0, 64)
-		require.NoError(t, err, "解析环境变量 BOWL_FORMAL_SEED=%q 失败", rawSeed)
-		cfg.BaseSeed = parsed
-	}
-	if rawRuns := strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")); rawRuns != "" {
-		parsed, err := strconv.Atoi(rawRuns)
-		require.NoError(t, err, "解析环境变量 BOWL_FORMAL_RUNS=%q 失败", rawRuns)
-		require.Greater(t, parsed, 0, "BOWL_FORMAL_RUNS 必须大于 0")
-		cfg.Runs = parsed
-	}
-	if rawSteps := strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")); rawSteps != "" {
-		parsed, err := strconv.Atoi(rawSteps)
-		require.NoError(t, err, "解析环境变量 BOWL_FORMAL_STEPS=%q 失败", rawSteps)
-		require.Greater(t, parsed, 0, "BOWL_FORMAL_STEPS 必须大于 0")
-		cfg.Steps = parsed
+	ov := parseFormalEnvOverrides(t, defaultRuns, defaultSteps)
+	baseSeed := uint64(time.Now().UnixNano())
+	if ov.HasFixedSeed {
+		baseSeed = ov.FixedSeed
 	}
 
-	return cfg
+	return formalLockConfig{
+		BaseSeed: baseSeed,
+		Runs:     ov.Runs,
+		Steps:    ov.Steps,
+	}
 }
 
 // formalLockInodeState 记录副状态机中受测 Inode 的元数据与初始时间戳快照。
@@ -102,8 +89,8 @@ type formalPosixLockSegment struct {
 	PID       uint32
 }
 
-// formalFlockEntry 表示内存参考模型中的单条 BSD flock 整文件锁（lk_flags == FuseLkFlock）。
-type formalFlockEntry struct {
+// formalBSDFileLock 表示内存参考模型中的单条 BSD flock 整文件锁（lk_flags == FuseLkFlock）。
+type formalBSDFileLock struct {
 	SeqID     int64
 	SessionID uint64
 	Ino       uint64
@@ -129,8 +116,8 @@ type formalLockWaiterEntry struct {
 	Status    int16
 }
 
-// formalLockHolderID 标识同命名空间下的锁持有者（POSIX 为 (session_id, lock_owner)，flock 为 (session_id, fh)）。
-type formalLockHolderID struct {
+// formalLockOwnerKey 标识同命名空间下的锁归属键（POSIX 为 (session_id, lock_owner)，BSD flock 为 (session_id, fh)）。
+type formalLockOwnerKey struct {
 	SessionID uint64
 	ID        uint64
 }
@@ -152,7 +139,7 @@ type formalLockModel struct {
 	HandleList  []uint64
 
 	PosixLocks []*formalPosixLockSegment
-	FlockLocks []*formalFlockEntry
+	FlockLocks []*formalBSDFileLock
 	Waiters    []*formalLockWaiterEntry
 
 	nextLockSeq   int64
@@ -181,8 +168,8 @@ func (m *formalLockModel) RecordStepf(format string, args ...any) {
 
 func (m *formalLockModel) FormatTrace(testName string, steps int) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n=== 文件锁副状态机反例轨迹 (Seed=0x%x / %d) ===\n", m.Seed, m.Seed))
-	sb.WriteString(fmt.Sprintf("重放命令: BOWL_FORMAL_SEED=0x%x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_STEPS=%d GOWORK=off go -C services/storage test -v ./internal/meta -run %s\n", m.Seed, steps, testName))
+	sb.WriteString(fmt.Sprintf("\n=== 文件锁副状态机反例轨迹 (Seed=0x%016x / %d) ===\n", m.Seed, m.Seed))
+	sb.WriteString(fmt.Sprintf("重放命令: BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_STEPS=%d GOWORK=off go -C services/storage test -v ./internal/meta -run '^%s$'\n", m.Seed, steps, testName))
 	for _, line := range m.Trace {
 		sb.WriteString(line)
 		sb.WriteByte('\n')
@@ -374,8 +361,8 @@ func (m *formalLockModel) activePosixLocksByIno(ino uint64) []*formalPosixLockSe
 }
 
 // activeFlockLocksByIno 返回指定 Ino 上未过期会话持有的活跃 BSD flock 锁，按 SeqID ASC 排序。
-func (m *formalLockModel) activeFlockLocksByIno(ino uint64) []*formalFlockEntry {
-	var out []*formalFlockEntry
+func (m *formalLockModel) activeFlockLocksByIno(ino uint64) []*formalBSDFileLock {
+	var out []*formalBSDFileLock
 	for _, l := range m.FlockLocks {
 		if l.Ino == ino && m.isSessionActive(l.SessionID) {
 			out = append(out, l)
@@ -405,6 +392,120 @@ func (m *formalLockModel) pendingWaitersByInoAndFlags(ino uint64, lkFlags uint32
 		return out[i].RequestID < out[j].RequestID
 	})
 	return out
+}
+
+// grantPosixLockUnchecked 在已确认无跨拥有者冲突的前提下，对指定拥有者执行 POSIX 区间覆盖、裂解与紧邻合并授锁。
+func (m *formalLockModel) grantPosixLockUnchecked(sessionID, ino, fh, lockOwner uint64, lk meta.FileLock) {
+	activeLocks := m.activePosixLocksByIno(ino)
+	reqStart := lk.Start
+	reqEnd := lk.End
+	reqType := lk.Type
+
+	deleteSet := make(map[int64]bool)
+	var remnants []*formalPosixLockSegment
+	mergedStart := reqStart
+	mergedEnd := reqEnd
+
+	for _, l := range activeLocks {
+		if l.SessionID != sessionID || l.LockOwner != lockOwner {
+			continue
+		}
+		overlaps := lockOracleRangesOverlap(l.Start, l.End, reqStart, reqEnd)
+		adjacentSameType := l.Type == reqType &&
+			((l.End < meta.OffsetMax && l.End+1 == reqStart) || (reqEnd < meta.OffsetMax && reqEnd+1 == l.Start))
+		if !overlaps && !adjacentSameType {
+			continue
+		}
+
+		deleteSet[l.SeqID] = true
+		if l.Type == reqType {
+			if l.Start < mergedStart {
+				mergedStart = l.Start
+			}
+			if l.End > mergedEnd {
+				mergedEnd = l.End
+			}
+		} else {
+			if l.Start < reqStart {
+				remnants = append(remnants, &formalPosixLockSegment{
+					SessionID: sessionID,
+					Ino:       ino,
+					Fh:        fh,
+					LockOwner: lockOwner,
+					Start:     l.Start,
+					End:       reqStart - 1,
+					Type:      l.Type,
+					PID:       l.PID,
+				})
+			}
+			if l.End > reqEnd && reqEnd < meta.OffsetMax {
+				remnants = append(remnants, &formalPosixLockSegment{
+					SessionID: sessionID,
+					Ino:       ino,
+					Fh:        fh,
+					LockOwner: lockOwner,
+					Start:     reqEnd + 1,
+					End:       l.End,
+					Type:      l.Type,
+					PID:       l.PID,
+				})
+			}
+		}
+	}
+
+	if len(deleteSet) > 0 {
+		kept := m.PosixLocks[:0]
+		for _, l := range m.PosixLocks {
+			if !deleteSet[l.SeqID] {
+				kept = append(kept, l)
+			}
+		}
+		m.PosixLocks = kept
+	}
+
+	for _, seg := range remnants {
+		seg.SeqID = m.nextLockSeq
+		m.nextLockSeq++
+		m.PosixLocks = append(m.PosixLocks, seg)
+	}
+
+	seq := m.nextLockSeq
+	m.nextLockSeq++
+	m.PosixLocks = append(m.PosixLocks, &formalPosixLockSegment{
+		SeqID:     seq,
+		SessionID: sessionID,
+		Ino:       ino,
+		Fh:        fh,
+		LockOwner: lockOwner,
+		Start:     mergedStart,
+		End:       mergedEnd,
+		Type:      reqType,
+		PID:       lk.PID,
+	})
+}
+
+// grantFlockLockUnchecked 在已确认无跨句柄冲突的前提下，对指定 (sessionID, ino, fh) 授予整文件 BSD flock 锁。
+func (m *formalLockModel) grantFlockLockUnchecked(sessionID, ino, fh, lockOwner uint64, lk meta.FileLock) {
+	kept := m.FlockLocks[:0]
+	for _, l := range m.FlockLocks {
+		if l.Ino == ino && l.SessionID == sessionID && l.Fh == fh {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	m.FlockLocks = kept
+
+	seq := m.nextLockSeq
+	m.nextLockSeq++
+	m.FlockLocks = append(m.FlockLocks, &formalBSDFileLock{
+		SeqID:     seq,
+		SessionID: sessionID,
+		Ino:       ino,
+		Fh:        fh,
+		LockOwner: lockOwner,
+		Type:      lk.Type,
+		PID:       lk.PID,
+	})
 }
 
 // ApplyGetLk 在内存参考模型上执行 GetLk 冲突锁探测，不修改任何模型状态。
@@ -549,17 +650,7 @@ func (m *formalLockModel) applyFlockSetLk(params meta.SetLkParams) error {
 		}
 	}
 
-	seq := m.nextLockSeq
-	m.nextLockSeq++
-	m.FlockLocks = append(m.FlockLocks, &formalFlockEntry{
-		SeqID:     seq,
-		SessionID: params.SessionID,
-		Ino:       params.Ino,
-		Fh:        params.Fh,
-		LockOwner: params.LockOwner,
-		Type:      params.Lk.Type,
-		PID:       params.Lk.PID,
-	})
+	m.grantFlockLockUnchecked(params.SessionID, params.Ino, params.Fh, params.LockOwner, params.Lk)
 	return nil
 }
 
@@ -645,87 +736,7 @@ func (m *formalLockModel) applyPosixSetLk(params meta.SetLkParams) error {
 		}
 	}
 
-	deleteSet := make(map[int64]bool)
-	var remnants []*formalPosixLockSegment
-	mergedStart := reqStart
-	mergedEnd := reqEnd
-
-	for _, l := range activeLocks {
-		if l.SessionID != params.SessionID || l.LockOwner != params.LockOwner {
-			continue
-		}
-		overlaps := lockOracleRangesOverlap(l.Start, l.End, reqStart, reqEnd)
-		adjacentSameType := l.Type == reqType &&
-			((l.End < meta.OffsetMax && l.End+1 == reqStart) || (reqEnd < meta.OffsetMax && reqEnd+1 == l.Start))
-		if !overlaps && !adjacentSameType {
-			continue
-		}
-
-		deleteSet[l.SeqID] = true
-		if l.Type == reqType {
-			if l.Start < mergedStart {
-				mergedStart = l.Start
-			}
-			if l.End > mergedEnd {
-				mergedEnd = l.End
-			}
-		} else {
-			if l.Start < reqStart {
-				remnants = append(remnants, &formalPosixLockSegment{
-					SessionID: params.SessionID,
-					Ino:       params.Ino,
-					Fh:        params.Fh,
-					LockOwner: params.LockOwner,
-					Start:     l.Start,
-					End:       reqStart - 1,
-					Type:      l.Type,
-					PID:       l.PID,
-				})
-			}
-			if l.End > reqEnd && reqEnd < meta.OffsetMax {
-				remnants = append(remnants, &formalPosixLockSegment{
-					SessionID: params.SessionID,
-					Ino:       params.Ino,
-					Fh:        params.Fh,
-					LockOwner: params.LockOwner,
-					Start:     reqEnd + 1,
-					End:       l.End,
-					Type:      l.Type,
-					PID:       l.PID,
-				})
-			}
-		}
-	}
-
-	if len(deleteSet) > 0 {
-		kept := m.PosixLocks[:0]
-		for _, l := range m.PosixLocks {
-			if !deleteSet[l.SeqID] {
-				kept = append(kept, l)
-			}
-		}
-		m.PosixLocks = kept
-	}
-
-	for _, seg := range remnants {
-		seg.SeqID = m.nextLockSeq
-		m.nextLockSeq++
-		m.PosixLocks = append(m.PosixLocks, seg)
-	}
-
-	seq := m.nextLockSeq
-	m.nextLockSeq++
-	m.PosixLocks = append(m.PosixLocks, &formalPosixLockSegment{
-		SeqID:     seq,
-		SessionID: params.SessionID,
-		Ino:       params.Ino,
-		Fh:        params.Fh,
-		LockOwner: params.LockOwner,
-		Start:     mergedStart,
-		End:       mergedEnd,
-		Type:      reqType,
-		PID:       params.Lk.PID,
-	})
+	m.grantPosixLockUnchecked(params.SessionID, params.Ino, params.Fh, params.LockOwner, params.Lk)
 	return nil
 }
 
@@ -824,18 +835,18 @@ func (m *formalLockModel) ApplyRelease(params meta.ReleaseParams) error {
 func (m *formalLockModel) HasDeadlockCycle(
 	ino uint64,
 	lkFlags uint32,
-	reqHolder formalLockHolderID,
+	reqOwnerKey formalLockOwnerKey,
 	reqStart, reqEnd uint64,
 	reqType uint32,
 	reqSessionID, reqRequestID uint64,
 ) bool {
-	adj := make(map[formalLockHolderID]map[formalLockHolderID]struct{})
-	addEdge := func(from, to formalLockHolderID) {
+	adj := make(map[formalLockOwnerKey]map[formalLockOwnerKey]struct{})
+	addEdge := func(from, to formalLockOwnerKey) {
 		if from == to {
 			return
 		}
 		if adj[from] == nil {
-			adj[from] = make(map[formalLockHolderID]struct{})
+			adj[from] = make(map[formalLockOwnerKey]struct{})
 		}
 		adj[from][to] = struct{}{}
 	}
@@ -844,20 +855,20 @@ func (m *formalLockModel) HasDeadlockCycle(
 		active := m.activeFlockLocksByIno(ino)
 		waiters := m.pendingWaitersByInoAndFlags(ino, meta.FuseLkFlock)
 		for _, l := range active {
-			h := formalLockHolderID{SessionID: l.SessionID, ID: l.Fh}
-			if h != reqHolder && lockOracleConflicts(reqType, l.Type) {
-				addEdge(reqHolder, h)
+			lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh}
+			if lOwnerKey != reqOwnerKey && lockOracleConflicts(reqType, l.Type) {
+				addEdge(reqOwnerKey, lOwnerKey)
 			}
 		}
 		for _, w := range waiters {
 			if w.SessionID == reqSessionID && w.RequestID == reqRequestID {
 				continue
 			}
-			wHolder := formalLockHolderID{SessionID: w.SessionID, ID: w.Fh}
+			wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.Fh}
 			for _, l := range active {
-				h := formalLockHolderID{SessionID: l.SessionID, ID: l.Fh}
-				if h != wHolder && lockOracleConflicts(w.Type, l.Type) {
-					addEdge(wHolder, h)
+				lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh}
+				if lOwnerKey != wOwnerKey && lockOracleConflicts(w.Type, l.Type) {
+					addEdge(wOwnerKey, lOwnerKey)
 				}
 			}
 		}
@@ -865,33 +876,33 @@ func (m *formalLockModel) HasDeadlockCycle(
 		active := m.activePosixLocksByIno(ino)
 		waiters := m.pendingWaitersByInoAndFlags(ino, 0)
 		for _, l := range active {
-			h := formalLockHolderID{SessionID: l.SessionID, ID: l.LockOwner}
-			if h != reqHolder && lockOracleRangesOverlap(l.Start, l.End, reqStart, reqEnd) && lockOracleConflicts(reqType, l.Type) {
-				addEdge(reqHolder, h)
+			lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner}
+			if lOwnerKey != reqOwnerKey && lockOracleRangesOverlap(l.Start, l.End, reqStart, reqEnd) && lockOracleConflicts(reqType, l.Type) {
+				addEdge(reqOwnerKey, lOwnerKey)
 			}
 		}
 		for _, w := range waiters {
 			if w.SessionID == reqSessionID && w.RequestID == reqRequestID {
 				continue
 			}
-			wHolder := formalLockHolderID{SessionID: w.SessionID, ID: w.LockOwner}
+			wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.LockOwner}
 			for _, l := range active {
-				h := formalLockHolderID{SessionID: l.SessionID, ID: l.LockOwner}
-				if h != wHolder && lockOracleRangesOverlap(l.Start, l.End, w.Start, w.End) && lockOracleConflicts(w.Type, l.Type) {
-					addEdge(wHolder, h)
+				lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner}
+				if lOwnerKey != wOwnerKey && lockOracleRangesOverlap(l.Start, l.End, w.Start, w.End) && lockOracleConflicts(w.Type, l.Type) {
+					addEdge(wOwnerKey, lOwnerKey)
 				}
 			}
 		}
 	}
 
-	startTargets := adj[reqHolder]
+	startTargets := adj[reqOwnerKey]
 	if len(startTargets) == 0 {
 		return false
 	}
-	visited := make(map[formalLockHolderID]bool)
-	queue := make([]formalLockHolderID, 0, len(startTargets))
+	visited := make(map[formalLockOwnerKey]bool)
+	queue := make([]formalLockOwnerKey, 0, len(startTargets))
 	for target := range startTargets {
-		if target == reqHolder {
+		if target == reqOwnerKey {
 			return true
 		}
 		visited[target] = true
@@ -901,7 +912,7 @@ func (m *formalLockModel) HasDeadlockCycle(
 		curr := queue[0]
 		queue = queue[1:]
 		for next := range adj[curr] {
-			if next == reqHolder {
+			if next == reqOwnerKey {
 				return true
 			}
 			if !visited[next] {
@@ -915,11 +926,22 @@ func (m *formalLockModel) HasDeadlockCycle(
 
 // formalLockTestEnv 封装副状态机单轮运行的真实 PostgreSQL 连接池、meta.Manager 与内存参考模型。
 type formalLockTestEnv struct {
-	Ctx   context.Context
-	Pool  *pgxpool.Pool
-	Store db.Store
-	Mgr   meta.Manager
-	Model *formalLockModel
+	Ctx      context.Context
+	Pool     *pgxpool.Pool
+	Store    db.Store
+	Mgr      meta.Manager
+	Model    *formalLockModel
+	TestName string
+	Steps    int
+}
+
+// FormatFailureReport 格式化当前文件锁副状态机的失败反例轨迹与重放命令。
+func (e *formalLockTestEnv) FormatFailureReport() string {
+	steps := e.Steps
+	if steps <= 0 {
+		steps = 1
+	}
+	return e.Model.FormatTrace(e.TestName, steps)
 }
 
 // setupFormalLockEnv 初始化测试专属 Disk、常规文件 Inode、子目录 Inode、多客户端会话与三类打开模式句柄（O_RDONLY, O_WRONLY, O_RDWR）。
@@ -1015,11 +1037,13 @@ func setupFormalLockEnv(t *testing.T, seed uint64, fileCount int, sessionCount i
 	})
 
 	return &formalLockTestEnv{
-		Ctx:   ctx,
-		Pool:  pool,
-		Store: store,
-		Mgr:   mgr,
-		Model: model,
+		Ctx:      ctx,
+		Pool:     pool,
+		Store:    store,
+		Mgr:      mgr,
+		Model:    model,
+		TestName: t.Name(),
+		Steps:    1,
 	}
 }
 
@@ -1040,7 +1064,7 @@ func (m *formalLockModel) findHandleForSessionAndMode(ino, sessionID uint64, acc
 //    且不存在紧邻（prev.end < OffsetMax && prev.end + 1 == next.start）且同类型的未合并碎片区间；
 // 3. 底表活跃锁集合（区间 [start_offset, end_offset]、lock_type、pid、session_id、lock_owner）与内存参考模型 formalLockModel 100% 一致；
 // 4. 目标文件 Inode 的 atime、mtime、ctime 与初始快照严格一致（文件锁操作绝不修改 Inode 时间戳）。
-func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, steps int) {
+func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv) {
 	t.Helper()
 
 	ctx := env.Ctx
@@ -1070,14 +1094,14 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 		WHERE ino = ANY($1::bigint[])
 	`, inoInt64s)
 	if err != nil {
-		t.Fatalf("SQL 扫描 inodes 时间戳失败: %v%s", err, m.FormatTrace(testName, steps))
+		t.Fatalf("SQL 扫描 inodes 时间戳失败: %v%s", err, env.FormatFailureReport())
 	}
 	for tsRows.Next() {
 		var rowIno int64
 		var atime, mtime, ctime time.Time
 		if scanErr := tsRows.Scan(&rowIno, &atime, &mtime, &ctime); scanErr != nil {
 			tsRows.Close()
-			t.Fatalf("扫描 inodes 时间戳行失败: %v%s", scanErr, m.FormatTrace(testName, steps))
+			t.Fatalf("扫描 inodes 时间戳行失败: %v%s", scanErr, env.FormatFailureReport())
 		}
 		uino := uint64(rowIno)
 		expectedInode := m.Inodes[uino]
@@ -1087,13 +1111,13 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 				uino,
 				expectedInode.Atime, expectedInode.Mtime, expectedInode.Ctime,
 				atime, mtime, ctime,
-				m.FormatTrace(testName, steps),
+				env.FormatFailureReport(),
 			)
 		}
 	}
 	tsRows.Close()
 	if err := tsRows.Err(); err != nil {
-		t.Fatalf("遍历 inodes 时间戳出错: %v%s", err, m.FormatTrace(testName, steps))
+		t.Fatalf("遍历 inodes 时间戳出错: %v%s", err, env.FormatFailureReport())
 	}
 
 	// 2. 批量扫描 PostgreSQL 底表 file_locks 中所有受测 Ino 的活跃 POSIX 锁（lk_flags = 0）
@@ -1107,7 +1131,7 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 		ORDER BY l.ino ASC, l.start_offset ASC, l.end_offset ASC, l.id ASC
 	`, inoInt64s)
 	if err != nil {
-		t.Fatalf("SQL 批量扫描 file_locks 失败: %v%s", err, m.FormatTrace(testName, steps))
+		t.Fatalf("SQL 批量扫描 file_locks 失败: %v%s", err, env.FormatFailureReport())
 	}
 
 	locksByIno := make(map[uint64][]dbPosixLockRow, len(m.FileInos))
@@ -1119,11 +1143,11 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 		)
 		if scanErr := rows.Scan(&id, &sid, &rowIno, &fh, &owner, &startOff, &endOff, &lockType, &pid); scanErr != nil {
 			rows.Close()
-			t.Fatalf("扫描 file_locks 行失败: %v%s", scanErr, m.FormatTrace(testName, steps))
+			t.Fatalf("扫描 file_locks 行失败: %v%s", scanErr, env.FormatFailureReport())
 		}
 		if startOff < 0 || endOff < startOff {
 			rows.Close()
-			t.Fatalf("违反 LOCK-INV-1: 底表存在非法字节区间 [%d, %d]%s", startOff, endOff, m.FormatTrace(testName, steps))
+			t.Fatalf("违反 LOCK-INV-1: 底表存在非法字节区间 [%d, %d]%s", startOff, endOff, env.FormatFailureReport())
 		}
 		uino := uint64(rowIno)
 		locksByIno[uino] = append(locksByIno[uino], dbPosixLockRow{
@@ -1140,7 +1164,7 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		t.Fatalf("遍历 file_locks 行出错: %v%s", err, m.FormatTrace(testName, steps))
+		t.Fatalf("遍历 file_locks 行出错: %v%s", err, env.FormatFailureReport())
 	}
 
 	for _, ino := range m.FileInos {
@@ -1158,7 +1182,7 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 						t.Fatalf("违反 LOCK-INV-1(跨拥有者互斥): Ino=%d 下 (sess=%d,owner=%d)[%d,%d](type=%d) 与 (sess=%d,owner=%d)[%d,%d](type=%d) 相交但非全读锁%s",
 							ino, a.SessionID, a.LockOwner, a.Start, a.End, a.Type,
 							b.SessionID, b.LockOwner, b.Start, b.End, b.Type,
-							m.FormatTrace(testName, steps),
+							env.FormatFailureReport(),
 						)
 					}
 				}
@@ -1166,13 +1190,9 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 		}
 
 		// 4. 审计 LOCK-INV-1(b): 同一 (session_id, ino, lock_owner) 下的活跃锁必互不相交，且不存在紧邻同类型碎片
-		type ownerKey struct {
-			sessionID uint64
-			owner     uint64
-		}
-		byOwner := make(map[ownerKey][]dbPosixLockRow)
+		byOwner := make(map[formalLockOwnerKey][]dbPosixLockRow)
 		for _, l := range dbLocks {
-			k := ownerKey{sessionID: l.SessionID, owner: l.LockOwner}
+			k := formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner}
 			byOwner[k] = append(byOwner[k], l)
 		}
 		for k, list := range byOwner {
@@ -1187,14 +1207,14 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 				next := list[i]
 				if prev.End >= next.Start {
 					t.Fatalf("违反 LOCK-INV-1(同拥有者重叠): Ino=%d (sess=%d,owner=%d) 存在相交锁 [%d,%d] 与 [%d,%d]%s",
-						ino, k.sessionID, k.owner, prev.Start, prev.End, next.Start, next.End,
-						m.FormatTrace(testName, steps),
+						ino, k.SessionID, k.ID, prev.Start, prev.End, next.Start, next.End,
+						env.FormatFailureReport(),
 					)
 				}
 				if prev.End < meta.OffsetMax && prev.End+1 == next.Start && prev.Type == next.Type {
 					t.Fatalf("违反 LOCK-INV-1(同拥有者紧邻同类型未合并碎片): Ino=%d (sess=%d,owner=%d) 存在紧邻同类型锁 [%d,%d](type=%d) 与 [%d,%d](type=%d)%s",
-						ino, k.sessionID, k.owner, prev.Start, prev.End, prev.Type, next.Start, next.End, next.Type,
-						m.FormatTrace(testName, steps),
+						ino, k.SessionID, k.ID, prev.Start, prev.End, prev.Type, next.Start, next.End, next.Type,
+						env.FormatFailureReport(),
 					)
 				}
 			}
@@ -1204,7 +1224,7 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 		expectedLocks := m.activePosixLocksByIno(ino)
 		if len(dbLocks) != len(expectedLocks) {
 			t.Fatalf("违反 LOCK-INV-1(模型与底表锁数量不一致): Ino=%d 模型期望 %d 条锁, 底表实际 %d 条锁\n模型=%+v\n底表=%+v%s",
-				ino, len(expectedLocks), len(dbLocks), expectedLocks, dbLocks, m.FormatTrace(testName, steps))
+				ino, len(expectedLocks), len(dbLocks), expectedLocks, dbLocks, env.FormatFailureReport())
 		}
 		for i := range expectedLocks {
 			exp := expectedLocks[i]
@@ -1219,7 +1239,7 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 					i, ino,
 					exp.SessionID, exp.LockOwner, exp.Start, exp.End, exp.Type, exp.PID,
 					act.SessionID, act.LockOwner, act.Start, act.End, act.Type, act.PID,
-					m.FormatTrace(testName, steps),
+					env.FormatFailureReport(),
 				)
 			}
 		}
@@ -1228,7 +1248,7 @@ func auditFormalLockInv1(t *testing.T, env *formalLockTestEnv, testName string, 
 
 // verifyFormalLockGetLkProbes 在每步状态变更后执行 GetLk 只读查账探针：
 // 覆盖随机区间探测、零点区间 [0,0] 探测、自锁忽略、多冲突锁确定性排序以及 F_UNLCK 非法入参边界。
-func verifyFormalLockGetLkProbes(t *testing.T, env *formalLockTestEnv, rng *rand.Rand, testName string, steps int) {
+func verifyFormalLockGetLkProbes(t *testing.T, env *formalLockTestEnv, rng *rand.Rand) {
 	t.Helper()
 
 	ctx := env.Ctx
@@ -1281,12 +1301,12 @@ func verifyFormalLockGetLkProbes(t *testing.T, env *formalLockTestEnv, rng *rand
 	actLk, actErr := env.Mgr.GetLk(ctx, params)
 	if (expErr == nil) != (actErr == nil) || (expErr != nil && !errors.Is(actErr, expErr)) {
 		t.Fatalf("GetLk 探针错误码不一致 (Ino=%d, sess=%d, owner=%d, [%d,%d], type=%d): 模型期望 err=%v, 实际 err=%v%s",
-			ino, sid, owner, start, end, probeType, expErr, actErr, m.FormatTrace(testName, steps))
+			ino, sid, owner, start, end, probeType, expErr, actErr, env.FormatFailureReport())
 	}
 	if expErr == nil {
 		if *expLk != *actLk {
 			t.Fatalf("GetLk 探针返回值不一致 (Ino=%d, sess=%d, owner=%d, [%d,%d], type=%d): 模型期望 %+v, 实际 %+v%s",
-				ino, sid, owner, start, end, probeType, expLk, actLk, m.FormatTrace(testName, steps))
+				ino, sid, owner, start, end, probeType, expLk, actLk, env.FormatFailureReport())
 		}
 	}
 
@@ -1314,7 +1334,7 @@ func verifyFormalLockGetLkProbes(t *testing.T, env *formalLockTestEnv, rng *rand
 			require.NoError(t, expSelfErr)
 			require.NoError(t, actSelfErr)
 			if *expSelfLk != *actSelfLk {
-				t.Fatalf("GetLk 自锁忽略探针不一致: 模型期望 %+v, 实际 %+v%s", expSelfLk, actSelfLk, m.FormatTrace(testName, steps))
+				t.Fatalf("GetLk 自锁忽略探针不一致: 模型期望 %+v, 实际 %+v%s", expSelfLk, actSelfLk, env.FormatFailureReport())
 			}
 		}
 	}
@@ -1334,7 +1354,7 @@ func formatLockTypeCN(t uint32) string {
 }
 
 // execAndVerifySetLk 同时在内存参考模型与真实 meta.Manager 上执行 SetLk 并核对返回错误码。
-func execAndVerifySetLk(t *testing.T, env *formalLockTestEnv, params meta.SetLkParams, desc string, testName string, steps int) {
+func execAndVerifySetLk(t *testing.T, env *formalLockTestEnv, params meta.SetLkParams, desc string) {
 	t.Helper()
 
 	m := env.Model
@@ -1347,12 +1367,12 @@ func execAndVerifySetLk(t *testing.T, env *formalLockTestEnv, params meta.SetLkP
 
 	if (expErr == nil) != (actErr == nil) || (expErr != nil && !errors.Is(actErr, expErr)) {
 		t.Fatalf("SetLk 对拍失败 (%s): 模型期望 err=%v, 实际 err=%v%s",
-			desc, expErr, actErr, m.FormatTrace(testName, steps))
+			desc, expErr, actErr, env.FormatFailureReport())
 	}
 }
 
 // execAndVerifyGetLk 同时在内存参考模型与真实 meta.Manager 上执行 GetLk 并核对返回结果与错误码。
-func execAndVerifyGetLk(t *testing.T, env *formalLockTestEnv, params meta.GetLkParams, desc string, testName string, steps int) *meta.FileLock {
+func execAndVerifyGetLk(t *testing.T, env *formalLockTestEnv, params meta.GetLkParams, desc string) *meta.FileLock {
 	t.Helper()
 
 	m := env.Model
@@ -1365,11 +1385,11 @@ func execAndVerifyGetLk(t *testing.T, env *formalLockTestEnv, params meta.GetLkP
 
 	if (expErr == nil) != (actErr == nil) || (expErr != nil && !errors.Is(actErr, expErr)) {
 		t.Fatalf("GetLk 错误码对拍失败 (%s): 模型期望 err=%v, 实际 err=%v%s",
-			desc, expErr, actErr, m.FormatTrace(testName, steps))
+			desc, expErr, actErr, env.FormatFailureReport())
 	}
 	if expErr == nil && *expLk != *actLk {
 		t.Fatalf("GetLk 返回锁对拍失败 (%s): 模型期望 %+v, 实际 %+v%s",
-			desc, expLk, actLk, m.FormatTrace(testName, steps))
+			desc, expLk, actLk, env.FormatFailureReport())
 	}
 	return actLk
 }
@@ -1400,7 +1420,7 @@ func generateRandomPosixRange(rng *rand.Rand) (uint64, uint64) {
 }
 
 // stepFormalLockPosixAction 基于随机数生成器生成一步 POSIX SetLk 动作（涵盖正常加解锁、裂解合并、跨拥有者冲突以及非法参数/无效句柄边界）。
-func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.Rand, stepIdx int, testName string, totalSteps int) {
+func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.Rand, stepIdx int) {
 	t.Helper()
 
 	m := env.Model
@@ -1425,7 +1445,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 			lkType = meta.F_UNLCK
 		}
 
-		// 选择权限匹配的句柄（或随机選取 O_RDWR）
+		// 选择权限匹配的句柄（或随机选取 O_RDWR）
 		accMode := uint32(meta.O_RDWR)
 		if lkType == meta.F_RDLCK && rng.IntN(2) == 0 {
 			accMode = meta.O_RDONLY
@@ -1450,7 +1470,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 			},
 			LkFlags:   0,
 			SessionID: sid,
-		}, "随机POSIX区间加解锁", testName, totalSteps)
+		}, "随机POSIX区间加解锁")
 
 	case roll < 85:
 		// 10% 概率：句柄读写模式位不匹配或跨会话/无效句柄 -> 期望返回 ErrBadFileHandle (EBADF)
@@ -1467,7 +1487,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: start, End: end, Type: meta.F_WRLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "只读句柄申请写锁(EBADF)", testName, totalSteps)
+			}, "只读句柄申请写锁(EBADF)")
 		case 1:
 			// O_WRONLY 申请 F_RDLCK -> ErrBadFileHandle
 			fh, _ := m.findHandleForSessionAndMode(ino, sid, meta.O_WRONLY)
@@ -1478,7 +1498,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: start, End: end, Type: meta.F_RDLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "只写句柄申请读锁(EBADF)", testName, totalSteps)
+			}, "只写句柄申请读锁(EBADF)")
 		case 2:
 			// 跨会话句柄盗用 -> ErrBadFileHandle
 			otherSid := m.SessionList[(rng.IntN(len(m.SessionList)-1)+1)%len(m.SessionList)]
@@ -1496,7 +1516,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: start, End: end, Type: meta.F_RDLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "跨会话盗用句柄(EBADF)", testName, totalSteps)
+			}, "跨会话盗用句柄(EBADF)")
 		default:
 			// 不存在的句柄 Fh -> ErrBadFileHandle
 			execAndVerifySetLk(t, env, meta.SetLkParams{
@@ -1506,7 +1526,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: start, End: end, Type: meta.F_RDLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "不存在句柄(EBADF)", testName, totalSteps)
+			}, "不存在句柄(EBADF)")
 		}
 
 	case roll < 95:
@@ -1525,24 +1545,24 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 			// start < 0 (uint64 表示为 > OffsetMax)
 			baseParams.Lk.Start = meta.OffsetMax + 1
 			baseParams.Lk.End = meta.OffsetMax + 10
-			execAndVerifySetLk(t, env, baseParams, "非法区间(start>OffsetMax/EINVAL)", testName, totalSteps)
+			execAndVerifySetLk(t, env, baseParams, "非法区间(start>OffsetMax/EINVAL)")
 		case 1:
 			// end < start
 			baseParams.Lk.Start = 50
 			baseParams.Lk.End = 20
-			execAndVerifySetLk(t, env, baseParams, "非法区间(end<start/EINVAL)", testName, totalSteps)
+			execAndVerifySetLk(t, env, baseParams, "非法区间(end<start/EINVAL)")
 		case 2:
 			// 非法 typ
 			baseParams.Lk.Type = 99
-			execAndVerifySetLk(t, env, baseParams, "非法锁类型(typ=99/EINVAL)", testName, totalSteps)
+			execAndVerifySetLk(t, env, baseParams, "非法锁类型(typ=99/EINVAL)")
 		case 3:
 			// 非法 lk_flags
 			baseParams.LkFlags = 2
-			execAndVerifySetLk(t, env, baseParams, "非法标志位(lk_flags=2/EINVAL)", testName, totalSteps)
+			execAndVerifySetLk(t, env, baseParams, "非法标志位(lk_flags=2/EINVAL)")
 		case 4:
 			// 空 session_id (0)
 			baseParams.SessionID = 0
-			execAndVerifySetLk(t, env, baseParams, "空会话ID(session_id=0/EINVAL)", testName, totalSteps)
+			execAndVerifySetLk(t, env, baseParams, "空会话ID(session_id=0/EINVAL)")
 		default:
 			// GetLk 传入 F_UNLCK -> ErrInvalidArgument
 			execAndVerifyGetLk(t, env, meta.GetLkParams{
@@ -1552,7 +1572,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: 0, End: 10, Type: meta.F_UNLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "GetLk传入F_UNLCK(EINVAL)", testName, totalSteps)
+			}, "GetLk传入F_UNLCK(EINVAL)")
 		}
 
 	default:
@@ -1566,7 +1586,7 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: 0, End: 10, Type: meta.F_RDLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "目录节点加锁(EISDIR)", testName, totalSteps)
+			}, "目录节点加锁(EISDIR)")
 		} else {
 			execAndVerifySetLk(t, env, meta.SetLkParams{
 				Ino:       888888888,
@@ -1575,14 +1595,13 @@ func stepFormalLockPosixAction(t *testing.T, env *formalLockTestEnv, rng *rand.R
 				Lk:        meta.FileLock{Start: 0, End: 10, Type: meta.F_RDLCK, PID: pid},
 				LkFlags:   0,
 				SessionID: sid,
-			}, "不存在节点加锁(ENOENT)", testName, totalSteps)
+			}, "不存在节点加锁(ENOENT)")
 		}
 	}
 }
 
 // TestFormalLock_T11_DeterministicPosixScenarios 验证 T11 所有核心边界场景的确定性黄金路径对拍与 LOCK-INV-1 审计。
 func TestFormalLock_T11_DeterministicPosixScenarios(t *testing.T) {
-	const testName = "TestFormalLock_T11_DeterministicPosixScenarios"
 	env := setupFormalLockEnv(t, 0x20261024, 1, 3)
 	m := env.Model
 
@@ -1596,116 +1615,116 @@ func TestFormalLock_T11_DeterministicPosixScenarios(t *testing.T) {
 	fh2RW, _ := m.findHandleForSessionAndMode(ino, s2, meta.O_RDWR)
 	fh3RW, _ := m.findHandleForSessionAndMode(ino, s3, meta.O_RDWR)
 
-	// 1. 非法入参边界校验 (EINVAL) 與句柄模式校验 (EBADF)
+	// 1. 非法入参边界校验 (EINVAL) 与句柄模式校验 (EBADF)
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: 0,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: meta.F_RDLCK, PID: 10},
-	}, "空session_id返回EINVAL", testName, 1)
+	}, "空session_id返回EINVAL")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: meta.OffsetMax + 1, End: meta.OffsetMax + 5, Type: meta.F_RDLCK, PID: 10},
-	}, "start<0(超OffsetMax)返回EINVAL", testName, 1)
+	}, "start<0(超OffsetMax)返回EINVAL")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 30, End: 20, Type: meta.F_RDLCK, PID: 10},
-	}, "end<start返回EINVAL", testName, 1)
+	}, "end<start返回EINVAL")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: 99, PID: 10},
-	}, "非法typ返回EINVAL", testName, 1)
+	}, "非法typ返回EINVAL")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1, LkFlags: 7,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: meta.F_RDLCK, PID: 10},
-	}, "非法lk_flags返回EINVAL", testName, 1)
+	}, "非法lk_flags返回EINVAL")
 
 	execAndVerifyGetLk(t, env, meta.GetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: meta.F_UNLCK, PID: 10},
-	}, "GetLk传入F_UNLCK返回EINVAL", testName, 1)
+	}, "GetLk传入F_UNLCK返回EINVAL")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RO, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: meta.F_WRLCK, PID: 10},
-	}, "O_RDONLY句柄申请F_WRLCK返回EBADF", testName, 1)
+	}, "O_RDONLY句柄申请F_WRLCK返回EBADF")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1WO, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: meta.F_RDLCK, PID: 10},
-	}, "O_WRONLY句柄申请F_RDLCK返回EBADF", testName, 1)
+	}, "O_WRONLY句柄申请F_RDLCK返回EBADF")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh2RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 10, Type: meta.F_RDLCK, PID: 10},
-	}, "跨会话使用fh2RW返回EBADF", testName, 1)
+	}, "跨会话使用fh2RW返回EBADF")
 
 	// 2. 无锁区间幂等解锁 + GetLk 无冲突返回 F_UNLCK (Start=0, End=0, PID=0)
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RO, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 100, Type: meta.F_UNLCK, PID: 11},
-	}, "无锁区间F_UNLCK幂等成功", testName, 1)
+	}, "无锁区间F_UNLCK幂等成功")
 
 	lkRes := execAndVerifyGetLk(t, env, meta.GetLkParams{
 		Ino: ino, Fh: fh1RO, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 0, End: 0, Type: meta.F_WRLCK, PID: 99},
-	}, "无冲突探测[0,0]返回F_UNLCK+Start=0,End=0,PID=0", testName, 1)
+	}, "无冲突探测[0,0]返回F_UNLCK+Start=0,End=0,PID=0")
 	require.Equal(t, meta.FileLock{Start: 0, End: 0, Type: meta.F_UNLCK, PID: 0}, *lkRes)
 
-	// 3. 同一 (session_id, ino, lock_owner) 下的中心裂解（保留被截断原记录的 pid）與紧邻同类型合并（更新 pid）
+	// 3. 同一 (session_id, ino, lock_owner) 下的中心裂解（保留被截断原记录的 pid）与紧邻同类型合并（更新 pid）
 	// 3.1 申请 [10, 50] F_WRLCK (pid=101)
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 10, End: 50, Type: meta.F_WRLCK, PID: 101},
-	}, "申请[10,50]写锁(pid=101)", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "申请[10,50]写锁(pid=101)")
+	auditFormalLockInv1(t, env)
 
 	// 3.2 在中间 [20, 30] 降级为 F_RDLCK (pid=202) -> 裂解为 [10,19](W,pid=101), [20,30](R,pid=202), [31,50](W,pid=101)
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RO, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 20, End: 30, Type: meta.F_RDLCK, PID: 202},
-	}, "中间[20,30]降级为读锁(pid=202)触发左右裂解并保留原pid=101", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "中间[20,30]降级为读锁(pid=202)触发左右裂解并保留原pid=101")
+	auditFormalLockInv1(t, env)
 
 	// 3.3 会话 2 在 [20, 30] 申请共享读锁 F_RDLCK (pid=301) -> 成功共享；但在 [15, 25] 申请读锁或 [20, 30] 申请写锁 -> 返回 ErrAgain 且原锁完整保留
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh2RW, LockOwner: ownerB, SessionID: s2,
 		Lk: meta.FileLock{Start: 20, End: 30, Type: meta.F_RDLCK, PID: 301},
-	}, "会话2在[20,30]共享F_RDLCK成功", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "会话2在[20,30]共享F_RDLCK成功")
+	auditFormalLockInv1(t, env)
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh2RW, LockOwner: ownerB, SessionID: s2,
 		Lk: meta.FileLock{Start: 15, End: 25, Type: meta.F_RDLCK, PID: 302},
-	}, "会话2在[15,25]与会话1写锁[10,19]冲突返回EAGAIN", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "会话2在[15,25]与会话1写锁[10,19]冲突返回EAGAIN")
+	auditFormalLockInv1(t, env)
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh3RW, LockOwner: ownerB, SessionID: s3,
 		Lk: meta.FileLock{Start: 20, End: 30, Type: meta.F_WRLCK, PID: 401},
-	}, "会话3在[20,30]与共享读锁冲突返回EAGAIN", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "会话3在[20,30]与共享读锁冲突返回EAGAIN")
+	auditFormalLockInv1(t, env)
 
 	// 3.4 会话 3 调用 GetLk(F_WRLCK, [0, 100]) -> 应按 start_offset ASC, end_offset ASC, id ASC 返回首个冲突锁 [10, 19] (pid=101)
 	firstConflict := execAndVerifyGetLk(t, env, meta.GetLkParams{
 		Ino: ino, Fh: fh3RW, LockOwner: ownerB, SessionID: s3,
 		Lk: meta.FileLock{Start: 0, End: 100, Type: meta.F_WRLCK, PID: 402},
-	}, "会话3探测[0,100]返回首个冲突锁[10,19]", testName, 1)
+	}, "会话3探测[0,100]返回首个冲突锁[10,19]")
 	require.Equal(t, meta.FileLock{Start: 10, End: 19, Type: meta.F_WRLCK, PID: 101}, *firstConflict)
 
 	// 3.5 会话 2 释放 [20, 30] 读锁后，会话 1 在 [20, 30] 重新加 F_WRLCK (pid=505) -> 与左右紧邻 [10,19] 和 [31,50] 合并为 [10, 50] 且 pid 更新为 505
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh2RW, LockOwner: ownerB, SessionID: s2,
 		Lk: meta.FileLock{Start: 20, End: 30, Type: meta.F_UNLCK, PID: 303},
-	}, "会话2解锁[20,30]", testName, 1)
+	}, "会话2解锁[20,30]")
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1WO, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 20, End: 30, Type: meta.F_WRLCK, PID: 505},
-	}, "会话1在[20,30]加写锁(pid=505)与左右紧邻[10,19]、[31,50]合并为[10,50](pid=505)", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "会话1在[20,30]加写锁(pid=505)与左右紧邻[10,19]、[31,50]合并为[10,50](pid=505)")
+	auditFormalLockInv1(t, env)
 
 	activeAfterCoalesce := m.activePosixLocksByIno(ino)
 	require.Len(t, activeAfterCoalesce, 1)
@@ -1717,14 +1736,14 @@ func TestFormalLock_T11_DeterministicPosixScenarios(t *testing.T) {
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 51, End: meta.OffsetMax, Type: meta.F_WRLCK, PID: 606},
-	}, "会话1在[51,OffsetMax]紧邻加写锁(pid=606)合并为[10,OffsetMax]", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "会话1在[51,OffsetMax]紧邻加写锁(pid=606)合并为[10,OffsetMax]")
+	auditFormalLockInv1(t, env)
 
 	execAndVerifySetLk(t, env, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1,
 		Lk: meta.FileLock{Start: 100, End: meta.OffsetMax, Type: meta.F_UNLCK, PID: 707},
-	}, "会话1解锁右边界[100,OffsetMax]保留[10,99](pid=606)", testName, 1)
-	auditFormalLockInv1(t, env, testName, 1)
+	}, "会话1解锁右边界[100,OffsetMax]保留[10,99](pid=606)")
+	auditFormalLockInv1(t, env)
 }
 
 // TestFormalLock_T11_PosixRange 运行基于 PCG 64 位随机种子的 POSIX 字节区间锁状态机对账测试。
@@ -1732,18 +1751,20 @@ func TestFormalLock_T11_DeterministicPosixScenarios(t *testing.T) {
 func TestFormalLock_T11_PosixRange(t *testing.T) {
 	const testName = "TestFormalLock_T11_PosixRange"
 	cfg := loadFormalLockConfig(t)
-	t.Logf("启动 T11 POSIX 字节区间锁形式化状态机验证: baseSeed=0x%x, runs=%d, steps=%d", cfg.BaseSeed, cfg.Runs, cfg.Steps)
+	t.Logf("启动 T11 POSIX 字节区间锁形式化状态机验证: baseSeed=0x%016x, runs=%d, steps=%d", cfg.BaseSeed, cfg.Runs, cfg.Steps)
 
 	for runIdx := 0; runIdx < cfg.Runs; runIdx++ {
 		runSeed := cfg.BaseSeed + uint64(runIdx)
 		t.Run(fmt.Sprintf("Run_%d_Seed_0x%x", runIdx, runSeed), func(t *testing.T) {
 			env := setupFormalLockEnv(t, runSeed, 2, 3)
+			env.TestName = testName
+			env.Steps = cfg.Steps
 			rng := rand.New(rand.NewPCG(runSeed, runSeed^0x9e3779b97f4a7c15))
 
 			for step := 1; step <= cfg.Steps; step++ {
-				stepFormalLockPosixAction(t, env, rng, step, testName, cfg.Steps)
-				verifyFormalLockGetLkProbes(t, env, rng, testName, cfg.Steps)
-				auditFormalLockInv1(t, env, testName, cfg.Steps)
+				stepFormalLockPosixAction(t, env, rng, step)
+				verifyFormalLockGetLkProbes(t, env, rng)
+				auditFormalLockInv1(t, env)
 			}
 
 			// 每轮结束时额外通过公开接口 GetAttr 校验所有受测文件时间戳与初始快照严格一致

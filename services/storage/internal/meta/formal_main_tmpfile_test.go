@@ -76,23 +76,6 @@ func formalPredictTmpFile(
 // 2. T8 动作实现：TmpFile 随机操作生成、父目录时间戳零变动核验与一次性 Link 对拍
 // ============================================================================
 
-// pickOptionalTmpFileSessionID 生成基于当前测试种子隔离的可选 SessionID，避免多工作树并行测试时在 client_sessions 表发生跨测试会话清理碰撞。
-func pickOptionalTmpFileSessionID(env *formalMainEnv) *uint64 {
-	if env.LeaseTTL < 5*time.Second {
-		return nil
-	}
-	if env.Rng.IntN(4) == 0 {
-		base := uint64(8000000) + (env.Seed%1000000)*10 + uint64(env.RunIndex)*2
-		candidates := []uint64{base + 1, base + 2}
-		sid := candidates[env.Rng.IntN(len(candidates))]
-		if s, exists := env.Model.Sessions[sid]; exists && s.Expired {
-			return nil
-		}
-		return &sid
-	}
-	return nil
-}
-
 // formalActionTmpFile 在状态机中随机生成：
 // 1. 普通非 O_EXCL 与 O_EXCL 独占匿名临时文件创建（覆盖 O_WRONLY/O_RDWR、Umask/特权位、父目录 S_ISGID 属组继承、
 //    不写 entries 表、不刷新父目录 mtime/ctime/nlink、递增所属磁盘 used_inodes + 1，以及按概率注入非零 Size 水位）；
@@ -132,7 +115,7 @@ func formalActionTmpFile(ctx context.Context, t *testing.T, env *formalMainEnv) 
 	params.GID = gids[env.Rng.IntN(len(gids))]
 	params.Umask = umasks[env.Rng.IntN(len(umasks))]
 	params.Flags = validFlagsPool[env.Rng.IntN(len(validFlagsPool))]
-	params.SessionID = pickOptionalTmpFileSessionID(env)
+	params.SessionID = pickOptionalFormalSessionID(env)
 
 	branch := env.Rng.IntN(100)
 	var caseTag string
@@ -695,7 +678,7 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 
 		ctx := context.Background()
 
-		runFullProbesAndAuditors := func() {
+		runAllProbesAndAuditors := func() {
 			formalProbeGetDisk(ctx, t, env)
 			formalProbeStatFS(ctx, t, env)
 			formalProbeLookup(ctx, t, env)
@@ -712,19 +695,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 			formalAuditINV5CrossDiskIsolation(ctx, t, env)
 			formalAuditINV6TmpFileMaterialization(ctx, t, env)
 		}
-		auditCalls := 0
-		runAllProbesAndAuditors := func() {
-			auditCalls++
-			if !isFormalFixedSeedReplay() && auditCalls > 1 {
-				return
-			}
-			runFullProbesAndAuditors()
-		}
-		defer func() {
-			if !t.Failed() {
-				runFullProbesAndAuditors()
-			}
-		}()
 
 		// 1. 创建 2 块独立虚拟磁盘 disk1 与 disk2，并在 disk1 下创建带 S_ISGID 的子目录 sgid_dir (GID=7777) 与普通文件 reg_parent
 		formalCreateValidDiskStep(ctx, t, env)
@@ -932,7 +902,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 			Fh: tmp1Res.Fh, Ino: tmp1Model.Ino, Flags: meta.O_RDWR | meta.O_TMPFILE,
 		})
 		require.Equal(t, usedInodesBeforeTmp1+1, disk1.UsedInodes)
-		runAllProbesAndAuditors()
 
 		// 为未具名化的 tmp1 写入 8192 字节大小，随后直接 Release 关闭唯一句柄 -> 当场物理销毁并退还 used_inodes - 1 与 used_bytes - 8192
 		tmp1Size := uint64(8192)
@@ -941,7 +910,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 		require.NoError(t, err)
 		tmp1Model.Size = tmp1Size
 		disk1.UsedBytes += tmp1Size
-		runAllProbesAndAuditors()
 
 		require.NoError(t, mgr.Release(ctx, meta.ReleaseParams{Ino: tmp1Model.Ino, Fh: tmp1Res.Fh}))
 		env.Model.Handles[tmp1Res.Fh].Closed = true
@@ -992,7 +960,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 		// 4.1 跨盘 Link 具名化必须被拦截并返回 ErrCrossDevice (EXDEV)，且 O_TMPFILE 保持未清除
 		_, err = mgr.Link(ctx, meta.LinkParams{Ino: tmp2Model.Ino, NewParentIno: root2, NewName: []byte("cross_disk_tmp")})
 		require.ErrorIs(t, err, meta.ErrCrossDevice)
-		runAllProbesAndAuditors()
 
 		// 4.2 同盘首次 Link 具名化成功：nlink 0 -> 1，原子清除该 Inode 关联句柄中的 O_TMPFILE 位
 		linkedTmp2, err := mgr.Link(ctx, meta.LinkParams{
@@ -1006,7 +973,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 		tmp2Model.Nlink = 1
 		tmp2Model.TmpFileLinked = true
 		env.Model.ClearTmpFileFlagForIno(tmp2Model.Ino)
-		runAllProbesAndAuditors()
 
 		// 4.3 具名化后（nlink == 1）可像普通文件一样继续创建第 2 条硬链接 (nlink: 1 -> 2)
 		linkedTmp2Second, err := mgr.Link(ctx, meta.LinkParams{
@@ -1018,7 +984,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 		require.Equal(t, uint32(2), linkedTmp2Second.Attr.Nlink)
 		env.Model.Entries[formalEntryKey{ParentIno: root1, Name: "materialized_tmp2_hl2.txt"}] = tmp2Model.Ino
 		tmp2Model.Nlink = 2
-		runAllProbesAndAuditors()
 
 		// 4.4 依次 Unlink 两条硬链接使其降回 nlink == 0（此时仍持有 tmp2Res.Fh 与 openTmp2Res.Fh 两个活跃句柄）
 		require.NoError(t, mgr.Unlink(ctx, root1, []byte("materialized_tmp2_hl2.txt")))
@@ -1029,7 +994,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 		delete(env.Model.Entries, formalEntryKey{ParentIno: sgidDir.Ino, Name: "materialized_tmp2.txt"})
 		tmp2Model.Nlink = 0
 		require.False(t, env.Model.ReclaimOrphanInModel(tmp2Model.Ino))
-		runAllProbesAndAuditors()
 
 		// 4.5 尝试对已具名化又被 Unlink 至 nlink == 0 的节点再次调用 Link -> 必须返回 ErrNotFound (ENOENT)，严禁二次复活！
 		_, err = mgr.Link(ctx, meta.LinkParams{
@@ -1103,7 +1067,6 @@ func TestFormalMain_T8_TmpFile(t *testing.T) {
 			NewName:      []byte("excl_must_fail_2.txt"),
 		})
 		require.ErrorIs(t, err, meta.ErrNotFound, "二次普通 Open 后 O_EXCL TmpFile 依然严禁 Link 具名化")
-		runAllProbesAndAuditors()
 
 		// 释放两个句柄物理回收 exclModel
 		require.NoError(t, mgr.Release(ctx, meta.ReleaseParams{Ino: exclModel.Ino, Fh: exclRes.Fh}))

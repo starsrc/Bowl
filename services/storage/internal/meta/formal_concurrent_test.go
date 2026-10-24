@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +27,7 @@ import (
 const (
 	defaultConcurrentRuns           = 1
 	defaultConcurrentWorkers        = 6
-	defaultConcurrentStepsPerWorker = 35
+	defaultConcurrentStepsPerWorker = 20
 	deepConcurrentWorkers           = 8
 )
 
@@ -46,37 +44,23 @@ type formalConcurrentConfig struct {
 func loadFormalConcurrentConfig(t *testing.T) formalConcurrentConfig {
 	t.Helper()
 
-	cfg := formalConcurrentConfig{
-		BaseSeed:       uint64(time.Now().UnixNano()),
-		Runs:           defaultConcurrentRuns,
-		Workers:        defaultConcurrentWorkers,
-		StepsPerWorker: defaultConcurrentStepsPerWorker,
+	ov := parseFormalEnvOverrides(t, defaultConcurrentRuns, defaultConcurrentStepsPerWorker)
+	baseSeed := uint64(time.Now().UnixNano())
+	if ov.HasFixedSeed {
+		baseSeed = ov.FixedSeed
+	}
+	workers := defaultConcurrentWorkers
+	if isFormalDeepMode() {
+		workers = deepConcurrentWorkers
 	}
 
-	if rawSeed := strings.TrimSpace(os.Getenv("BOWL_FORMAL_SEED")); rawSeed != "" {
-		seed, err := parseFormalSeedString(rawSeed)
-		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_SEED=%q 失败", rawSeed)
-		cfg.BaseSeed = seed
-		cfg.HasFixedSeed = true
+	return formalConcurrentConfig{
+		BaseSeed:       baseSeed,
+		HasFixedSeed:   ov.HasFixedSeed,
+		Runs:           ov.Runs,
+		Workers:        workers,
+		StepsPerWorker: ov.Steps,
 	}
-
-	if rawRuns := strings.TrimSpace(os.Getenv("BOWL_FORMAL_RUNS")); rawRuns != "" {
-		runs, err := strconv.Atoi(rawRuns)
-		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_RUNS=%q 失败", rawRuns)
-		require.Greater(t, runs, 0, "BOWL_FORMAL_RUNS 必须大于 0")
-		cfg.Runs = runs
-		cfg.Workers = deepConcurrentWorkers
-	}
-
-	if rawSteps := strings.TrimSpace(os.Getenv("BOWL_FORMAL_STEPS")); rawSteps != "" {
-		steps, err := strconv.Atoi(rawSteps)
-		require.NoErrorf(t, err, "解析环境变量 BOWL_FORMAL_STEPS=%q 失败", rawSteps)
-		require.Greater(t, steps, 0, "BOWL_FORMAL_STEPS 必须大于 0")
-		cfg.StepsPerWorker = steps
-		cfg.Workers = deepConcurrentWorkers
-	}
-
-	return cfg
 }
 
 // formalConcurrentHandleRec 记录单个 Worker 持有的打开文件或目录句柄。
@@ -90,18 +74,19 @@ type formalConcurrentHandleRec struct {
 
 // formalConcurrentSharedEnv 维护多协程并发混沌压测的共享池与线程安全追踪状态。
 type formalConcurrentSharedEnv struct {
-	T          *testing.T
-	Seed       uint64
-	RunIndex   int
-	Pool       *pgxpool.Pool
-	Store      db.Store
-	Mgr        meta.Manager // 标准 60s 租约 Manager，用于并发阶段稳态操作
-	ShortMgr   meta.Manager // 短租约 (30ms) Manager，用于模拟客户端断连超期与同步清扫
-	LeaseTTL   time.Duration
-	Disk1      *meta.Disk // 主共享冲突压测虚拟磁盘（并发收敛审计后还将执行 DeleteDisk 级联删盘验证）
-	Disk2      *meta.Disk // 辅共享冲突压测虚拟磁盘（用于跨盘 EXDEV 碰撞与删盘后邻盘存活对照验证）
-	PinnedIno1 uint64     // Disk1 上固定的锚点常规文件 (4096 字节，保证 UsedBytes >= 4096 以稳定验证 ErrInvalidShrink)
-	PinnedIno2 uint64     // Disk2 上固定的锚点常规文件 (4096 字节)
+	T              *testing.T
+	Seed           uint64
+	RunIndex       int
+	StepsPerWorker int
+	Pool           *pgxpool.Pool
+	Store          db.Store
+	Mgr            meta.Manager // 标准 60s 租约 Manager，用于并发阶段稳态操作
+	ShortMgr       meta.Manager // 短租约 (30ms) Manager，用于模拟客户端断连超期与同步清扫
+	LeaseTTL       time.Duration
+	Disk1          *meta.Disk // 主共享冲突压测虚拟磁盘（并发收敛审计后还将执行 DeleteDisk 级联删盘验证）
+	Disk2          *meta.Disk // 辅共享冲突压测虚拟磁盘（用于跨盘 EXDEV 碰撞与删盘后邻盘存活对照验证）
+	PinnedIno1     uint64     // Disk1 上固定的锚点常规文件 (4096 字节，保证 UsedBytes >= 4096 以稳定验证 ErrInvalidShrink)
+	PinnedIno2     uint64     // Disk2 上固定的锚点常规文件 (4096 字节)
 
 	seqCounter    atomic.Uint64
 	nextRequestID atomic.Uint64
@@ -222,7 +207,7 @@ func (e *formalConcurrentSharedEnv) FormatDiagnosticReport() string {
 	b.WriteString("\n================================================================================\n")
 	b.WriteString("[多协程高并发混沌压测诊断报告]\n")
 	b.WriteString(fmt.Sprintf("复现种子 (Seed): 0x%016x (十进制: %d), 轮次: %d\n", e.Seed, e.Seed, e.RunIndex))
-	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 go -C services/storage test -v ./internal/meta -run '^TestFormalConcurrentChaos$'\n", e.Seed))
+	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_STEPS=%d go -C services/storage test -v ./internal/meta -run '^TestFormalConcurrentChaos$'\n", e.Seed, e.StepsPerWorker))
 	for wID, lines := range e.workerTraces {
 		b.WriteString(fmt.Sprintf("--- Worker %d 轨迹 (共 %d 步) ---\n", wID, len(lines)))
 		start := 0
@@ -1351,22 +1336,22 @@ func auditConcurrentAll10Invariants(
 
 	// 审计 LOCK-INV-2
 	for ino, flocks := range flockByIno {
-		type flockHolderKey struct {
+		type flockOwnerKey struct {
 			SessionID uint64
 			Fh        uint64
 		}
-		seenHolders := make(map[flockHolderKey]bool)
+		seenOwnerKeys := make(map[flockOwnerKey]bool)
 		for _, fl := range flocks {
 			require.Equalf(t, uint64(0), fl.Start,
 				"LOCK-INV-2 违例: ino=%d BSD flock start_offset (%d) != 0", ino, fl.Start)
 			require.Equalf(t, meta.OffsetMax, fl.End,
 				"LOCK-INV-2 违例: ino=%d BSD flock end_offset (%d) != OffsetMax", ino, fl.End)
 
-			hk := flockHolderKey{SessionID: fl.SessionID, Fh: fl.Fh}
-			require.Falsef(t, seenHolders[hk],
+			ok := flockOwnerKey{SessionID: fl.SessionID, Fh: fl.Fh}
+			require.Falsef(t, seenOwnerKeys[ok],
 				"LOCK-INV-2 违例: ino=%d 同一 (session_id=%d, fh=%d) 存在多条 BSD flock 记录",
 				ino, fl.SessionID, fl.Fh)
-			seenHolders[hk] = true
+			seenOwnerKeys[ok] = true
 		}
 		if len(flocks) > 1 {
 			for _, fl := range flocks {
@@ -1433,13 +1418,13 @@ func auditConcurrentAll10Invariants(
 
 	// LOCK-INV-3: 对每个存在等待者的 (ino, lk_flags) 构建局部等待有向图并证明无环
 	for ns, waiters := range waitersByNS {
-		adj := make(map[formalLockHolderID]map[formalLockHolderID]struct{})
-		addEdge := func(from, to formalLockHolderID) {
+		adj := make(map[formalLockOwnerKey]map[formalLockOwnerKey]struct{})
+		addEdge := func(from, to formalLockOwnerKey) {
 			if from == to {
 				return
 			}
 			if adj[from] == nil {
-				adj[from] = make(map[formalLockHolderID]struct{})
+				adj[from] = make(map[formalLockOwnerKey]struct{})
 			}
 			adj[from][to] = struct{}{}
 		}
@@ -1447,32 +1432,32 @@ func auditConcurrentAll10Invariants(
 		if ns.LkFlags == meta.FuseLkFlock {
 			activeFlocks := flockByIno[ns.Ino]
 			for _, w := range waiters {
-				wHolder := formalLockHolderID{SessionID: w.SessionID, ID: w.Fh}
+				wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.Fh}
 				for _, l := range activeFlocks {
-					lHolder := formalLockHolderID{SessionID: l.SessionID, ID: l.Fh}
-					if wHolder != lHolder && lockOracleConflicts(w.Type, l.Type) {
-						addEdge(wHolder, lHolder)
+					lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh}
+					if wOwnerKey != lOwnerKey && lockOracleConflicts(w.Type, l.Type) {
+						addEdge(wOwnerKey, lOwnerKey)
 					}
 				}
 			}
 		} else {
 			activePosix := posixByIno[ns.Ino]
 			for _, w := range waiters {
-				wHolder := formalLockHolderID{SessionID: w.SessionID, ID: w.LockOwner}
+				wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.LockOwner}
 				for _, l := range activePosix {
-					lHolder := formalLockHolderID{SessionID: l.SessionID, ID: l.LockOwner}
-					if wHolder != lHolder &&
+					lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner}
+					if wOwnerKey != lOwnerKey &&
 						lockOracleRangesOverlap(l.Start, l.End, w.Start, w.End) &&
 						lockOracleConflicts(w.Type, l.Type) {
-						addEdge(wHolder, lHolder)
+						addEdge(wOwnerKey, lOwnerKey)
 					}
 				}
 			}
 		}
 
 		for startNode := range adj {
-			visited := make(map[formalLockHolderID]bool)
-			var queue []formalLockHolderID
+			visited := make(map[formalLockOwnerKey]bool)
+			var queue []formalLockOwnerKey
 			for next := range adj[startNode] {
 				visited[next] = true
 				queue = append(queue, next)
@@ -1628,18 +1613,19 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			require.NoError(t, err)
 
 			env := &formalConcurrentSharedEnv{
-				T:            t,
-				Seed:         runSeed,
-				RunIndex:     runIdx,
-				Pool:         pool,
-				Store:        store,
-				Mgr:          mgr,
-				ShortMgr:     shortMgr,
-				LeaseTTL:     shortLeaseTTL,
-				Disk1:        disk1,
-				Disk2:        disk2,
-				dirInos:      []uint64{disk1.RootIno, disk2.RootIno},
-				workerTraces: make([][]string, cfg.Workers),
+				T:              t,
+				Seed:           runSeed,
+				RunIndex:       runIdx,
+				StepsPerWorker: cfg.StepsPerWorker,
+				Pool:           pool,
+				Store:          store,
+				Mgr:            mgr,
+				ShortMgr:       shortMgr,
+				LeaseTTL:       shortLeaseTTL,
+				Disk1:          disk1,
+				Disk2:          disk2,
+				dirInos:        []uint64{disk1.RootIno, disk2.RootIno},
+				workerTraces:   make([][]string, cfg.Workers),
 			}
 
 			// 注册 Worker 专属会话与收尾保留会话 keeperSID

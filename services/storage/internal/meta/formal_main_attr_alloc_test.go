@@ -939,7 +939,7 @@ func formalActionFallocate(ctx context.Context, t *testing.T, env *formalMainEnv
 		params.Mode = meta.FallocFlPunchHole | meta.FallocFlKeepSize
 		params.Offset = uint64(env.Rng.IntN(1024))
 		params.Length = uint64(env.Rng.IntN(4096) + 128)
-		caseTag = "Fallocate(PunchHole|KeepSize)打洞剥离特权位且保持Size不变"
+		caseTag = "Fallocate(FallocFlPunchHole|FallocFlKeepSize)打洞剥离特权位且保持Size不变"
 
 	case branch < 70 && len(writableRegHandles) > 0:
 		// 重点场景 5：Mode == 0 超出磁盘配额上限触发 ErrNoSpace (ENOSPC)

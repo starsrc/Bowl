@@ -648,7 +648,7 @@ func formalProbeLookup(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	// 4. 核对非目录父节点调用 Lookup 返回 ErrNotDir
 	nonDirs := env.Model.ActiveNonDirs()
 	if len(nonDirs) > 0 {
-		sampleNonDir := nonDirs[env.Rng.IntN(len(nonDirs))]
+		sampleNonDir := nonDirs[env.ProbeRNG().IntN(len(nonDirs))]
 		// 注意：仅当该非目录节点仍存在于底表（nlink > 0 或持有有效句柄）时探测
 		if sampleNonDir.Nlink > 0 || env.Model.HasValidHandlesForIno(sampleNonDir.Ino) {
 			_, err := env.Mgr.Lookup(ctx, sampleNonDir.Ino, []byte("probe"))

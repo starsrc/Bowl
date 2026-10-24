@@ -107,8 +107,8 @@ func (m *formalLockModel) upsertPendingWaiter(params meta.SetLkwParams) {
 
 // recordExpiredSessionsBeforePurge 在模型触发 renewClientSession 之前记录即将被物理清除的已过期会话 ID。
 func (h *formalLockWaitHarness) recordExpiredSessionsBeforePurge() {
-	for sid, sess := range h.Env.Model.Sessions {
-		if sess.Expired {
+	for _, sid := range h.Env.Model.SessionList {
+		if sess, ok := h.Env.Model.Sessions[sid]; ok && sess.Expired {
 			h.PurgedSessions = append(h.PurgedSessions, sid)
 		}
 	}
@@ -579,6 +579,71 @@ func (h *formalLockWaitHarness) execAndVerifyRenewSessionAndWake(t *testing.T, s
 	h.settleWokenWaiters(t)
 }
 
+// formalWaitGraphLockEdgeInput 表示构建 LOCK-INV-3 等待有向图所需的单条活跃锁或等待者摘要。
+type formalWaitGraphLockEdgeInput struct {
+	OwnerKey formalLockOwnerKey
+	Start    uint64
+	End      uint64
+	Type     uint32
+}
+
+// assertLockWaitGraphNoCycle 基于活跃锁列表与等待者列表构建 LOCK-INV-3 等待有向图并断言恒无环路。
+func assertLockWaitGraphNoCycle(
+	t *testing.T,
+	ino uint64,
+	lkFlags uint32,
+	activeLocks []formalWaitGraphLockEdgeInput,
+	waiters []formalWaitGraphLockEdgeInput,
+	diagReport string,
+) {
+	t.Helper()
+	adj := make(map[formalLockOwnerKey]map[formalLockOwnerKey]struct{})
+	addEdge := func(from, to formalLockOwnerKey) {
+		if from == to {
+			return
+		}
+		if adj[from] == nil {
+			adj[from] = make(map[formalLockOwnerKey]struct{})
+		}
+		adj[from][to] = struct{}{}
+	}
+
+	for _, w := range waiters {
+		for _, l := range activeLocks {
+			if w.OwnerKey == l.OwnerKey {
+				continue
+			}
+			overlap := lkFlags == meta.FuseLkFlock || lockOracleRangesOverlap(l.Start, l.End, w.Start, w.End)
+			if overlap && lockOracleConflicts(w.Type, l.Type) {
+				addEdge(w.OwnerKey, l.OwnerKey)
+			}
+		}
+	}
+
+	for startNode := range adj {
+		visited := make(map[formalLockOwnerKey]bool)
+		var queue []formalLockOwnerKey
+		for next := range adj[startNode] {
+			visited[next] = true
+			queue = append(queue, next)
+		}
+		for len(queue) > 0 {
+			curr := queue[0]
+			queue = queue[1:]
+			for next := range adj[curr] {
+				if next == startNode {
+					t.Fatalf("违反 LOCK-INV-3(底表等待图存在死锁环): Ino=%d lk_flags=%d 存在从 %+v 回到自身的环路%s",
+						ino, lkFlags, startNode, diagReport)
+				}
+				if !visited[next] {
+					visited[next] = true
+					queue = append(queue, next)
+				}
+			}
+		}
+	}
+}
+
 // auditFormalLockInv3And4 扫描 PostgreSQL 底表 file_locks、file_lock_waiters、file_handles、client_sessions 与 inodes，
 // 强制审计 LOCK-INV-1、LOCK-INV-2、LOCK-INV-3 与 LOCK-INV-4：
 // 1. 调用 auditFormalLockInv2 完成 LOCK-INV-1 与 LOCK-INV-2 全量校验；
@@ -715,65 +780,44 @@ func auditFormalLockInv3And4(t *testing.T, h *formalLockWaitHarness) {
 
 			// LOCK-INV-3 底表等待有向图无环校验：
 			// 基于当前命名空间下的活跃锁与底表 PENDING 等待者构建等待有向图，检验任意节点出发是否存在回到自身的环
-			adj := make(map[formalLockOwnerKey]map[formalLockOwnerKey]struct{})
-			addEdge := func(from, to formalLockOwnerKey) {
-				if from == to {
-					return
-				}
-				if adj[from] == nil {
-					adj[from] = make(map[formalLockOwnerKey]struct{})
-				}
-				adj[from][to] = struct{}{}
-			}
-
+			var activeEdgeInputs []formalWaitGraphLockEdgeInput
+			var waiterEdgeInputs []formalWaitGraphLockEdgeInput
 			if lkFlags == meta.FuseLkFlock {
-				activeFlocks := m.activeFlockLocksByIno(ino)
+				for _, l := range m.activeFlockLocksByIno(ino) {
+					activeEdgeInputs = append(activeEdgeInputs, formalWaitGraphLockEdgeInput{
+						OwnerKey: formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh},
+						Start:    0,
+						End:      meta.OffsetMax,
+						Type:     l.Type,
+					})
+				}
 				for _, w := range actualWaiters {
-					wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.Fh}
-					for _, l := range activeFlocks {
-						lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh}
-						if wOwnerKey != lOwnerKey && lockOracleConflicts(w.Type, l.Type) {
-							addEdge(wOwnerKey, lOwnerKey)
-						}
-					}
+					waiterEdgeInputs = append(waiterEdgeInputs, formalWaitGraphLockEdgeInput{
+						OwnerKey: formalLockOwnerKey{SessionID: w.SessionID, ID: w.Fh},
+						Start:    w.Start,
+						End:      w.End,
+						Type:     w.Type,
+					})
 				}
 			} else {
-				activePosix := m.activePosixLocksByIno(ino)
+				for _, l := range m.activePosixLocksByIno(ino) {
+					activeEdgeInputs = append(activeEdgeInputs, formalWaitGraphLockEdgeInput{
+						OwnerKey: formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner},
+						Start:    l.Start,
+						End:      l.End,
+						Type:     l.Type,
+					})
+				}
 				for _, w := range actualWaiters {
-					wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.LockOwner}
-					for _, l := range activePosix {
-						lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner}
-						if wOwnerKey != lOwnerKey &&
-							lockOracleRangesOverlap(l.Start, l.End, w.Start, w.End) &&
-							lockOracleConflicts(w.Type, l.Type) {
-							addEdge(wOwnerKey, lOwnerKey)
-						}
-					}
+					waiterEdgeInputs = append(waiterEdgeInputs, formalWaitGraphLockEdgeInput{
+						OwnerKey: formalLockOwnerKey{SessionID: w.SessionID, ID: w.LockOwner},
+						Start:    w.Start,
+						End:      w.End,
+						Type:     w.Type,
+					})
 				}
 			}
-
-			for startNode := range adj {
-				visited := make(map[formalLockOwnerKey]bool)
-				var queue []formalLockOwnerKey
-				for next := range adj[startNode] {
-					visited[next] = true
-					queue = append(queue, next)
-				}
-				for len(queue) > 0 {
-					curr := queue[0]
-					queue = queue[1:]
-					for next := range adj[curr] {
-						if next == startNode {
-							t.Fatalf("违反 LOCK-INV-3(底表等待图存在死锁环): Ino=%d lk_flags=%d 存在从 %+v 回到自身的环路%s",
-								ino, lkFlags, startNode, env.FormatFailureReport())
-						}
-						if !visited[next] {
-							visited[next] = true
-							queue = append(queue, next)
-						}
-					}
-				}
-			}
+			assertLockWaitGraphNoCycle(t, ino, lkFlags, activeEdgeInputs, waiterEdgeInputs, env.FormatFailureReport())
 		}
 	}
 
@@ -1378,22 +1422,29 @@ func runFormalLockT13DeadlockScenarios(t *testing.T) {
 		s3, 99999,
 	), "HasDeadlockCycle 必须精确识别 FuseLkFlock 下的 (s3,fh3RW) -> (s1,fh1RW) -> (s3,fh3RW) 死锁环")
 
-	// 先释放 (s1, fh1RW) 的 F_RDLCK 再释放 (s3, fh3RW) 的 F_RDLCK，使 req851 干净唤醒获锁
+	// 通过公开接口 SetLkw 让 (s3, fh3RW) 发起 F_WRLCK 升级：
+	// SetLkw 首轮事务持久化删除 (s3, fh3RW) 的 F_RDLCK 从而打破互锁环，使 (s3, fh3RW) 入队 PENDING 并自动唤醒 (s1, fh1RW) 的 req851 获得 F_WRLCK！
+	req852 := h.allocRequestID()
+	h.execAndVerifySetLkw(t, meta.SetLkwParams{
+		Ino: ino, Fh: fh3RW, LockOwner: ownerC, SessionID: s3, RequestID: req852,
+		LkFlags: meta.FuseLkFlock,
+		Lk:      meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_WRLCK, PID: 853},
+	}, "BSD_flock:(s3,fh3RW)调用公开接口SetLkw升级F_WRLCK(首轮删旧锁打破死锁环并唤醒req851)")
+	require.Len(t, m.pendingWaitersByInoAndFlags(ino, meta.FuseLkFlock), 1, "(s3,fh3RW) 应处于 PENDING 等待 (s1,fh1RW) 释放写锁")
+	auditFormalLockInv3And4(t, h)
+
+	// 释放 (s1, fh1RW) 的 F_WRLCK，唤醒 (s3, fh3RW) 的 req852 获得写锁，随后清理 (s3, fh3RW) 写锁
 	h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
 		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1, LkFlags: meta.FuseLkFlock,
-		Lk: meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_UNLCK, PID: 853},
-	}, "BSD_flock:(s1,fh1RW)释放临时F_RDLCK")
-	h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
-		Ino: ino, Fh: fh3RW, LockOwner: ownerC, SessionID: s3, LkFlags: meta.FuseLkFlock,
 		Lk: meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_UNLCK, PID: 854},
-	}, "BSD_flock:(s3,fh3RW)释放F_RDLCK唤醒(s1,fh1RW)获写锁")
+	}, "BSD_flock:(s1,fh1RW)释放F_WRLCK唤醒(s3,fh3RW)获写锁")
 	require.Empty(t, m.pendingWaitersByInoAndFlags(ino, meta.FuseLkFlock))
 	auditFormalLockInv3And4(t, h)
 
 	h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
-		Ino: ino, Fh: fh1RW, LockOwner: ownerA, SessionID: s1, LkFlags: meta.FuseLkFlock,
+		Ino: ino, Fh: fh3RW, LockOwner: ownerC, SessionID: s3, LkFlags: meta.FuseLkFlock,
 		Lk: meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_UNLCK, PID: 855},
-	}, "BSD_flock:清理(s1,fh1RW)写锁")
+	}, "BSD_flock:清理(s3,fh3RW)写锁")
 	auditFormalLockInv3And4(t, h)
 }
 
@@ -1510,26 +1561,22 @@ func runFormalLockT13CancelAndSessionExpiryScenarios(t *testing.T) {
 	}, "短租约:sKeep在file1获取POSIX[0,100]写锁")
 
 	expWaiterReqID := shortH.allocRequestID()
-	_, err := shortEnv.Pool.Exec(shortEnv.Ctx, `
-		INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status)
-		VALUES ($1, $2, $3, $4, $5, 0, 0, 100, 1, 1004, 1)
-	`, int64(sExp), int64(expWaiterReqID), int64(file1), int64(fhExpF1), int64(ownerA))
-	require.NoError(t, err)
-	shortM.upsertPendingWaiter(meta.SetLkwParams{
+	waiterParams := meta.SetLkwParams{
 		Ino: file1, Fh: fhExpF1, LockOwner: ownerA, SessionID: sExp, RequestID: expWaiterReqID,
 		LkFlags: 0, Lk: meta.FileLock{Start: 0, End: 100, Type: meta.F_WRLCK, PID: 1004},
-	})
+	}
+	// 通过公开接口 SetLkw (搭配 1ms 租约的 tinyMgr) 让 sExp 在 file1 上真实入队 file_lock_waiters 并在首次轮询间隔内自然超期
+	tinyMgr := meta.New(shortEnv.Store, meta.WithSessionLeaseTTL(1*time.Millisecond))
+	err := tinyMgr.SetLkw(shortEnv.Ctx, waiterParams)
+	require.ErrorIs(t, err, meta.ErrBadFileHandle, "sExp 在阻塞等待期间租约过期应返回 ErrBadFileHandle")
+	var pendingWaiterCnt int
+	require.NoError(t, shortEnv.Pool.QueryRow(shortEnv.Ctx, `SELECT COUNT(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2`, int64(sExp), int64(expWaiterReqID)).Scan(&pendingWaiterCnt))
+	require.Equal(t, 1, pendingWaiterCnt, "公开接口 SetLkw 必须在底表 file_lock_waiters 中留下待级联清扫的等待记录")
+	shortM.upsertPendingWaiter(waiterParams)
+	shortM.MarkSessionExpired(sExp)
 	auditFormalLockInv3And4(t, shortH)
 
-	// 2. 等待 20ms 后先为 sKeep 续期（此时 sExp 距 40ms TTL 尚未到期），再等待 25ms 使 sExp 超期而 sKeep 仍有效！
-	time.Sleep(20 * time.Millisecond)
-	_, err = shortEnv.Mgr.RenewSession(shortEnv.Ctx, sKeep)
-	require.NoError(t, err)
-
-	time.Sleep(25 * time.Millisecond)
-	shortM.MarkSessionExpired(sExp)
-
-	// 此时 sExp 在底表中已超期但尚未物理删除（惰性清理）；
+	// 2. 此时 sExp 在底表中已超期但尚未物理删除（惰性清理）；
 	// 令 sKeep 调用 RenewSession 触发同步清理，验证 sExp 的 file_locks、file_lock_waiters、file_handles、client_sessions 全部清零！
 	shortH.execAndVerifyRenewSessionAndWake(t, sKeep, "短租约:sKeep调用RenewSession同步清理过期sExp的锁与等待队列")
 	auditFormalLockInv3And4(t, shortH)
@@ -1831,18 +1878,41 @@ func stepFormalLockT13Action(t *testing.T, h *formalLockWaitHarness, rng *rand.R
 				}
 			}
 			if lkType != meta.F_UNLCK {
-				// 若已有 flock 等待者，避免使用已持有活跃 flock 的句柄去删锁唤醒或新增第二个冲突等待者，改由未持锁句柄调用 SetLk 检验防饥饿 EAGAIN
 				if !m.hasActiveFlockOnHandle(ino, sid, fh) {
-					h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
-						Ino:       ino,
-						Fh:        fh,
-						LockOwner: owner,
-						SessionID: sid,
-						LkFlags:   meta.FuseLkFlock,
-						Lk:        meta.FileLock{Start: 0, End: meta.OffsetMax, Type: lkType, PID: pid},
-					}, "随机状态机:BSD_flock_SetLk防饥饿与冲突探测")
+					if lkType == meta.F_RDLCK && rng.IntN(2) == 0 {
+						// 使用 SetLkw 发起读锁等待排在已有 PENDING 写锁之后，验证 BSD flock SetLkw 多级阻塞排队
+						h.execAndVerifySetLkw(t, meta.SetLkwParams{
+							Ino:       ino,
+							Fh:        fh,
+							LockOwner: owner,
+							SessionID: sid,
+							RequestID: h.allocRequestID(),
+							LkFlags:   meta.FuseLkFlock,
+							Lk:        meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_RDLCK, PID: pid},
+						}, "随机状态机:BSD_flock_SetLkw防饥饿排队阻塞")
+					} else {
+						h.execAndVerifySetLkAndWake(t, meta.SetLkParams{
+							Ino:       ino,
+							Fh:        fh,
+							LockOwner: owner,
+							SessionID: sid,
+							LkFlags:   meta.FuseLkFlock,
+							Lk:        meta.FileLock{Start: 0, End: meta.OffsetMax, Type: lkType, PID: pid},
+						}, "随机状态机:BSD_flock_SetLk防饥饿与冲突探测")
+					}
 				}
 				return
+			}
+		} else if activeFlocks := m.activeFlockLocksByIno(ino); len(activeFlocks) > 0 && rng.IntN(2) == 0 {
+			// 当尚无 flock 等待者但存在活跃 flock 锁时，高频挑选异构会话发起冲突 F_WRLCK SetLkw 以真实进入 PENDING 阻塞队列
+			for _, candSid := range m.SessionList {
+				if candSid != activeFlocks[0].SessionID {
+					sid = candSid
+					fh, ok = m.findHandleForSessionAndMode(ino, sid, meta.O_RDWR)
+					require.True(t, ok)
+					lkType = meta.F_WRLCK
+					break
+				}
 			}
 		}
 

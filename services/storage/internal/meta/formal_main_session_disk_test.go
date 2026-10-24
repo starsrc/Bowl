@@ -853,8 +853,10 @@ func formalAuditT10SessionAndDeleteDisk(ctx context.Context, t *testing.T, env *
 	// 1. 审计已删除 Disk (deletedDiskIDs & deletedRootInos) 在底表中的零残留
 	if len(env.Model.DeletedDiskIDs) > 0 {
 		delDiskIDs := make([]string, 0, len(env.Model.DeletedDiskIDs))
-		for id := range env.Model.DeletedDiskIDs {
-			delDiskIDs = append(delDiskIDs, id)
+		for _, id := range env.Model.SortedDiskIDs() {
+			if env.Model.DeletedDiskIDs[id] {
+				delDiskIDs = append(delDiskIDs, id)
+			}
 		}
 		var diskCount int64
 		err := env.Pool.QueryRow(ctx, `
@@ -866,8 +868,10 @@ func formalAuditT10SessionAndDeleteDisk(ctx context.Context, t *testing.T, env *
 
 	if len(env.Model.DeletedRootInos) > 0 {
 		delRoots := make([]int64, 0, len(env.Model.DeletedRootInos))
-		for r := range env.Model.DeletedRootInos {
-			delRoots = append(delRoots, int64(r))
+		for _, r := range env.Model.AllCreatedRootInos {
+			if env.Model.DeletedRootInos[r] {
+				delRoots = append(delRoots, int64(r))
+			}
 		}
 		var diskCnt, inodeCnt, entryCnt, handleCnt, lockCnt, waiterCnt int64
 		err := env.Pool.QueryRow(ctx, `
@@ -890,8 +894,9 @@ func formalAuditT10SessionAndDeleteDisk(ctx context.Context, t *testing.T, env *
 
 	// 2. 审计所有已物理删除 Inode (DeletedInos，含删盘销毁的全部节点与已回收的全部孤儿节点) 在各关联子表中的零残留
 	if len(env.Model.DeletedInos) > 0 {
-		delInos := make([]int64, 0, len(env.Model.DeletedInos))
-		for ino := range env.Model.DeletedInos {
+		sortedDel := env.Model.SortedDeletedInos()
+		delInos := make([]int64, 0, len(sortedDel))
+		for _, ino := range sortedDel {
 			delInos = append(delInos, int64(ino))
 		}
 		var inodeCnt, entryCnt, handleCnt, lockCnt, waiterCnt, xattrCnt int64
@@ -947,8 +952,8 @@ func formalAuditT10SessionAndDeleteDisk(ctx context.Context, t *testing.T, env *
 
 	// 4. 审计 INV-3 核心收敛条件：当无未清扫的过期会话时，当前测试所有存活 Disk 下无有效句柄引用的 nlink == 0 孤儿节点数恒为 0！
 	hasUnsweptExpired := false
-	for _, s := range env.Model.Sessions {
-		if s.Expired {
+	for _, sid := range env.Model.AllSessionIDs {
+		if s, ok := env.Model.Sessions[sid]; ok && s.Expired {
 			hasUnsweptExpired = true
 			break
 		}
@@ -1100,7 +1105,7 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 		env.Model.RecordNewHandle(h1)
 		expFileHandles = append(expFileHandles, h1)
 
-		// 在 Orphan 1 上为 sidExp 加上 POSIX 写锁、BSD flock 写锁，并插入一条 file_lock_waiters 记录
+		// 在 Orphan 1 上为 sidExp 加上 POSIX 写锁与 BSD flock 写锁
 		require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
 			Ino: orphan1Model.Ino, Fh: c1.Fh, LockOwner: 101, SessionID: sidExp, LkFlags: 0,
 			Lk: meta.FileLock{Start: 0, End: 100, Type: meta.F_WRLCK, PID: 11},
@@ -1109,11 +1114,6 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 			Ino: orphan1Model.Ino, Fh: c1.Fh, LockOwner: 101, SessionID: sidExp, LkFlags: meta.FuseLkFlock,
 			Lk: meta.FileLock{Start: 0, End: meta.OffsetMax, Type: meta.F_WRLCK, PID: 11},
 		}))
-		_, err = pool.Exec(ctx, `
-			INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status)
-			VALUES ($1, $2, $3, $4, 102, 0, 200, 300, 1, 12, 1)
-		`, int64(sidExp), int64(88001), int64(orphan1Model.Ino), int64(c1.Fh))
-		require.NoError(t, err)
 
 		require.NoError(t, mgr.Unlink(ctx, root1, []byte("orphan_reg_only_exp")))
 		delete(env.Model.Entries, formalEntryKey{ParentIno: root1, Name: "orphan_reg_only_exp"})
@@ -1238,6 +1238,12 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 		h6Keep := &formalHandle{Fh: open6Keep.Fh, Ino: orphan6Model.Ino, Flags: meta.O_RDWR, SessionID: modelCloneSessionID(&sidKeep)}
 		env.Model.RecordNewHandle(h6Keep)
 
+		// 在 Orphan 6 上由 sidKeep 持有 [200, 300] 写锁，供后续 sidExp 通过公开接口 SetLkw 产生真实冲突入队等待记录
+		require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
+			Ino: orphan6Model.Ino, Fh: open6Keep.Fh, LockOwner: 601, SessionID: sidKeep, LkFlags: 0,
+			Lk: meta.FileLock{Start: 200, End: 300, Type: meta.F_WRLCK, PID: 61},
+		}))
+
 		require.NoError(t, mgr.Unlink(ctx, root1, []byte("orphan_mix_keep")))
 		delete(env.Model.Entries, formalEntryKey{ParentIno: root1, Name: "orphan_mix_keep"})
 		orphan6Model.Nlink = 0
@@ -1256,10 +1262,16 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 		require.ErrorIs(t, mgr.Fsync(ctx, meta.FsyncParams{Ino: h6Keep.Ino, Fh: h6Keep.Fh, SessionID: nil}), meta.ErrBadFileHandle)
 		require.ErrorIs(t, mgr.FsyncDir(ctx, meta.FsyncDirParams{Ino: dh3.Ino, Fh: dh3.Fh, SessionID: &sidKeep}), meta.ErrBadFileHandle)
 
-		// 5. 使用 shortMgr (WithSessionLeaseTTL(20ms)) 续期 sidExp 将其租约缩短为 20ms，随后等待 26ms 使其超期，而 sidKeep 仍保持有效
-		_, err = shortMgr.RenewSession(ctx, sidExp)
-		require.NoError(t, err)
-		time.Sleep(26 * time.Millisecond)
+		// 5. 通过公开接口 SetLkw (搭配 1ms 租约的 tinyMgr) 让 sidExp 在冲突写锁上真实入队 file_lock_waiters 并在首次轮询间隔内自然超期
+		tinyMgr := meta.New(store, meta.WithSessionLeaseTTL(1*time.Millisecond))
+		err = tinyMgr.SetLkw(ctx, meta.SetLkwParams{
+			Ino: orphan6Model.Ino, Fh: c6.Fh, LockOwner: 102, SessionID: sidExp, RequestID: 88001, LkFlags: 0,
+			Lk: meta.FileLock{Start: 200, End: 300, Type: meta.F_WRLCK, PID: 12},
+		})
+		require.ErrorIs(t, err, meta.ErrBadFileHandle, "sidExp 在阻塞等待期间租约过期应返回 ErrBadFileHandle")
+		var pendingWaiterCnt int64
+		require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = 88001`, int64(sidExp)).Scan(&pendingWaiterCnt))
+		require.Equal(t, int64(1), pendingWaiterCnt, "公开接口 SetLkw 必须在 file_lock_waiters 中留下待级联清扫的等待记录")
 		env.Model.Sessions[sidExp].Expired = true
 
 		// 6. 验证过期会话 sidExp 的全部文件句柄与目录句柄调用 9 个句柄接口均返回 ErrBadFileHandle，且无法“诈尸”自救

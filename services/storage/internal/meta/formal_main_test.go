@@ -1,6 +1,7 @@
 package meta_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -319,10 +320,10 @@ func (m *formalMainModel) RecordDeletedDisk(diskID string) {
 	m.DeletedRootInos[fd.RootIno] = true
 	delete(m.DiskByRootIno, fd.RootIno)
 
-	// 收集归属该 root_ino 的全部 Inode 并级联清理 entries、handles
+	// 收集归属该 root_ino 的全部 Inode 并级联清理 entries、handles（按创建顺序确定性遍历）
 	var toDeleteInos []uint64
-	for ino, inode := range m.Inodes {
-		if inode.RootIno == fd.RootIno {
+	for _, ino := range m.AllCreatedInos {
+		if inode, exists := m.Inodes[ino]; exists && inode.RootIno == fd.RootIno {
 			toDeleteInos = append(toDeleteInos, ino)
 		}
 	}
@@ -336,14 +337,15 @@ func (m *formalMainModel) RecordDeletedDisk(diskID string) {
 		m.DeletedInos[ino] = true
 	}
 
-	for ek, childIno := range m.Entries {
+	for _, ek := range m.SortedEntries() {
+		childIno := m.Entries[ek]
 		if deletedSet[ek.ParentIno] || deletedSet[childIno] {
 			delete(m.Entries, ek)
 		}
 	}
 
-	for fh, h := range m.Handles {
-		if deletedSet[h.Ino] {
+	for _, fh := range m.AllCreatedFhs {
+		if h, exists := m.Handles[fh]; exists && deletedSet[h.Ino] {
 			h.Closed = true
 			m.ClosedHandles[fh] = h
 			delete(m.Handles, fh)
@@ -548,11 +550,122 @@ func (m *formalMainModel) HasLinkableTmpFileHandleForIno(ino uint64) bool {
 
 // ClearTmpFileFlagForIno 清除指定 Inode 所有关联句柄上的 O_TMPFILE 标志位（对应 ClearTmpFileFlagByIno）。
 func (m *formalMainModel) ClearTmpFileFlagForIno(ino uint64) {
-	for _, h := range m.Handles {
-		if h.Ino == ino {
+	for _, fh := range m.AllCreatedFhs {
+		if h, ok := m.Handles[fh]; ok && h.Ino == ino {
 			h.Flags &^= meta.O_TMPFILE
 		}
 	}
+}
+
+// SortedInos 按创建顺序返回当前内存中仍存活的全部 Ino 编号。
+func (m *formalMainModel) SortedInos() []uint64 {
+	res := make([]uint64, 0, len(m.Inodes))
+	for _, ino := range m.AllCreatedInos {
+		if _, ok := m.Inodes[ino]; ok {
+			res = append(res, ino)
+		}
+	}
+	return res
+}
+
+// SortedDeletedInos 按创建顺序返回所有已物理删除的 Ino 编号。
+func (m *formalMainModel) SortedDeletedInos() []uint64 {
+	res := make([]uint64, 0, len(m.DeletedInos))
+	for _, ino := range m.AllCreatedInos {
+		if m.DeletedInos[ino] {
+			res = append(res, ino)
+		}
+	}
+	return res
+}
+
+// FirstDeletedIno 按创建顺序返回第一个已物理删除的 Ino 编号。
+func (m *formalMainModel) FirstDeletedIno() (uint64, bool) {
+	for _, ino := range m.AllCreatedInos {
+		if m.DeletedInos[ino] {
+			return ino, true
+		}
+	}
+	return 0, false
+}
+
+// SortedFhs 按创建顺序返回所有历史创建的句柄编号。
+func (m *formalMainModel) SortedFhs() []uint64 {
+	return m.AllCreatedFhs
+}
+
+// SortedDiskIDs 按创建顺序返回所有历史创建的 DiskID。
+func (m *formalMainModel) SortedDiskIDs() []string {
+	return m.AllCreatedDiskIDs
+}
+
+// ClosedFileHandles 按创建顺序返回所有已关闭的非目录句柄。
+func (m *formalMainModel) ClosedFileHandles() []*formalHandle {
+	var res []*formalHandle
+	for _, fh := range m.AllCreatedFhs {
+		if ch, ok := m.ClosedHandles[fh]; ok && !ch.IsDir {
+			res = append(res, ch)
+		}
+	}
+	return res
+}
+
+// ClosedDirHandles 按创建顺序返回所有已关闭的目录句柄。
+func (m *formalMainModel) ClosedDirHandles() []*formalHandle {
+	var res []*formalHandle
+	for _, fh := range m.AllCreatedFhs {
+		if ch, ok := m.ClosedHandles[fh]; ok && ch.IsDir {
+			res = append(res, ch)
+		}
+	}
+	return res
+}
+
+// ProbeClosedHandles 按创建顺序遍历所有已释放句柄并核对调用结果：
+// 若关联 Inode 已物理删除则断言返回 ErrNotFound，若关联 Inode 仍存续则断言返回 ErrBadFileHandle。
+func (m *formalMainModel) ProbeClosedHandles(t *testing.T, isDir bool, opName string, callFn func(ch *formalHandle) error) {
+	t.Helper()
+	var list []*formalHandle
+	if isDir {
+		list = m.ClosedDirHandles()
+	} else {
+		list = m.ClosedFileHandles()
+	}
+	for _, ch := range list {
+		err := callFn(ch)
+		if m.DeletedInos[ch.Ino] {
+			require.Truef(t, errors.Is(err, meta.ErrNotFound),
+				"已物理删除节点 ino=%d 的已关闭句柄 fh=%d 调用 %s 应返回 ErrNotFound, 实际: %v",
+				ch.Ino, ch.Fh, opName, err)
+		} else if inode, ok := m.Inodes[ch.Ino]; ok && !inode.Deleted && inode.IsDir() == isDir {
+			if inode.Nlink > 0 || m.HasValidHandlesForIno(inode.Ino) {
+				require.Truef(t, errors.Is(err, meta.ErrBadFileHandle),
+					"存活节点 ino=%d 的已释放句柄 fh=%d 调用 %s 应返回 ErrBadFileHandle, 实际: %v",
+					ch.Ino, ch.Fh, opName, err)
+			}
+		}
+	}
+}
+
+// validateParentDirForCreate 校验在指定父目录下创建新目录项时的父目录存活、类型、孤儿拦截、"."/".." 与重名冲突。
+func (m *formalMainModel) validateParentDirForCreate(parentIno uint64, name []byte) (*formalInode, error) {
+	parent, exists := m.Inodes[parentIno]
+	if !exists || parent.Deleted {
+		return nil, meta.ErrNotFound
+	}
+	if !parent.IsDir() {
+		return nil, meta.ErrNotDir
+	}
+	if parent.Nlink == 0 {
+		return nil, meta.ErrNotFound
+	}
+	if bytes.Equal(name, []byte(".")) || bytes.Equal(name, []byte("..")) {
+		return nil, meta.ErrAlreadyExists
+	}
+	if _, dup := m.Entries[formalEntryKey{ParentIno: parentIno, Name: string(name)}]; dup {
+		return nil, meta.ErrAlreadyExists
+	}
+	return parent, nil
 }
 
 // ReclaimOrphanInModel 当 nlink == 0 且无有效句柄时，从内存模型中物理删除孤儿节点并退还所属磁盘配额。
@@ -746,9 +859,20 @@ func (env *formalMainEnv) UniqueEntryName(prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, env.NextSeq())
 }
 
-// AppendTrace 追加一步中文操作轨迹账单。
+// BeginStep 在执行第 step 步动作前预登记轨迹占位行，确保动作内部断言失败时 FormatFailureReport 不会丢失当前失败步骤。
+func (env *formalMainEnv) BeginStep(step int, actionName string) {
+	line := fmt.Sprintf("[第 %03d 步] %s (动作执行中断于内部断言)", step, actionName)
+	env.Trace = append(env.Trace, line)
+}
+
+// AppendTrace 追加或更新一步中文操作轨迹账单。
 func (env *formalMainEnv) AppendTrace(step int, desc string) {
-	line := fmt.Sprintf("[第 %03d 步] %s", step, desc)
+	prefix := fmt.Sprintf("[第 %03d 步] ", step)
+	line := prefix + desc
+	if n := len(env.Trace); n > 0 && strings.HasPrefix(env.Trace[n-1], prefix) {
+		env.Trace[n-1] = line
+		return
+	}
 	env.Trace = append(env.Trace, line)
 }
 
@@ -954,6 +1078,7 @@ func runFormalMainStateMachine(t *testing.T, cfg formalMainRunConfig) {
 				cfg.InitHook(ctx, t, env)
 			} else {
 				env.StepIndex = 0
+				env.BeginStep(0, "InitDisk")
 				initDesc := formalCreateValidDiskStep(ctx, t, env)
 				env.AppendTrace(0, "[初始建盘] "+initDesc)
 			}
@@ -961,6 +1086,7 @@ func runFormalMainStateMachine(t *testing.T, cfg formalMainRunConfig) {
 			for step := 1; step <= seedCfg.Steps; step++ {
 				env.StepIndex = step
 				chosen := pickWeightedAction(env.Rng, actions)
+				env.BeginStep(step, chosen.Name)
 				desc := chosen.Fn(ctx, t, env)
 				env.AppendTrace(step, desc)
 

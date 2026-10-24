@@ -662,8 +662,8 @@ func formalActionSetAttr(ctx context.Context, t *testing.T, env *formalMainEnv) 
 		input.UID = &newUID
 
 		if len(env.Model.ClosedHandles) > 0 && env.Rng.IntN(3) == 0 {
-			for fh, ch := range env.Model.ClosedHandles {
-				if ch.Ino == targetIno {
+			for _, fh := range env.Model.SortedFhs() {
+				if ch, ok := env.Model.ClosedHandles[fh]; ok && ch.Ino == targetIno {
 					fhCopy := fh
 					input.Fh = &fhCopy
 					input.SessionID = modelCloneSessionID(ch.SessionID)

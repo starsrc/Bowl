@@ -80,10 +80,11 @@ func modelSyncSessionRenewal(m *formalMainModel, sessionID *uint64, leaseTTL tim
 	}
 
 	// 1. 清理已标记过期的客户端会话及其级联句柄 (对应 DeleteExpiredClientSessions + ON DELETE CASCADE)
-	for sid, sess := range m.Sessions {
-		if sess.Expired {
-			for fh, h := range m.Handles {
-				if h.SessionID != nil && *h.SessionID == sid {
+	for _, sid := range m.AllSessionIDs {
+		sess, exists := m.Sessions[sid]
+		if exists && sess.Expired {
+			for _, fh := range m.AllCreatedFhs {
+				if h, ok := m.Handles[fh]; ok && h.SessionID != nil && *h.SessionID == sid {
 					h.Closed = true
 					m.ClosedHandles[fh] = h
 					delete(m.Handles, fh)
@@ -133,21 +134,9 @@ func formalPredictCreate(
 		return 0, 0, meta.ErrInvalidArgument
 	}
 
-	parent, exists := m.Inodes[params.ParentIno]
-	if !exists || parent.Deleted {
-		return 0, 0, meta.ErrNotFound
-	}
-	if !parent.IsDir() {
-		return 0, 0, meta.ErrNotDir
-	}
-	if parent.Nlink == 0 {
-		return 0, 0, meta.ErrNotFound
-	}
-	if modelIsDotOrDotDot(params.Name) {
-		return 0, 0, meta.ErrAlreadyExists
-	}
-	if _, dup := m.Entries[formalEntryKey{ParentIno: params.ParentIno, Name: string(params.Name)}]; dup {
-		return 0, 0, meta.ErrAlreadyExists
+	parent, err := m.validateParentDirForCreate(params.ParentIno, params.Name)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	targetGID = params.GID
@@ -689,12 +678,9 @@ func formalActionOpen(ctx context.Context, t *testing.T, env *formalMainEnv) str
 		if len(deadOrphans) > 0 && env.Rng.IntN(2) == 0 {
 			caseTag = "无有效句柄nlink=0孤儿节点(ErrNotFound)"
 			params.Ino = deadOrphans[env.Rng.IntN(len(deadOrphans))].Ino
-		} else if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
+		} else if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
 			caseTag = "已物理回收节点(ErrNotFound)"
-			for ino := range env.Model.DeletedInos {
-				params.Ino = ino
-				break
-			}
+			params.Ino = delIno
 		} else {
 			caseTag = "不存在的Ino(ErrNotFound)"
 			params.Ino = uint64(math.MaxInt64 - 543210)
@@ -902,11 +888,8 @@ func formalActionRelease(ctx context.Context, t *testing.T, env *formalMainEnv) 
 		// 对不存在或已物理删除的 Ino 调用 Release -> ErrNotFound
 		caseTag = "不存在或已删除Ino(ErrNotFound)"
 		params.Fh = 1
-		if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
-			for ino := range env.Model.DeletedInos {
-				params.Ino = ino
-				break
-			}
+		if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
+			params.Ino = delIno
 		} else {
 			params.Ino = uint64(math.MaxInt64 - 333444)
 		}
@@ -1009,29 +992,14 @@ func formalProbeFlush(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	}
 
 	// 2. 核对已释放的非目录句柄 (ClosedHandles)
-	for _, fh := range env.Model.AllCreatedFhs {
-		ch, isClosed := env.Model.ClosedHandles[fh]
-		if !isClosed || ch.IsDir {
-			continue
-		}
-		err := env.Mgr.Flush(ctx, meta.FlushParams{
+	env.Model.ProbeClosedHandles(t, false, "Flush", func(ch *formalHandle) error {
+		return env.Mgr.Flush(ctx, meta.FlushParams{
 			Ino:       ch.Ino,
 			Fh:        ch.Fh,
 			LockOwner: nil,
 			SessionID: nil,
 		})
-		if env.Model.DeletedInos[ch.Ino] {
-			require.Truef(t, errors.Is(err, meta.ErrNotFound),
-				"已物理删除节点 ino=%d 的已关闭句柄 fh=%d 调用 Flush 应返回 ErrNotFound, 实际: %v",
-				ch.Ino, ch.Fh, err)
-		} else if inode, ok := env.Model.Inodes[ch.Ino]; ok && !inode.Deleted && !inode.IsDir() {
-			if inode.Nlink > 0 || env.Model.HasValidHandlesForIno(inode.Ino) {
-				require.Truef(t, errors.Is(err, meta.ErrBadFileHandle),
-					"存活节点 ino=%d 的已释放句柄 fh=%d 调用 Flush 应返回 ErrBadFileHandle, 实际: %v",
-					ch.Ino, ch.Fh, err)
-			}
-		}
-	}
+	})
 
 	// 3. 抽样存活非目录节点，核对不存在句柄、跨节点 ino 不匹配句柄、以及目录句柄 (OpenDir) 返回 ErrBadFileHandle
 	for _, node := range env.Model.ActiveNonDirs() {
@@ -1143,29 +1111,14 @@ func formalProbeFsync(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	}
 
 	// 2. 核对已释放的非目录句柄 (ClosedHandles)
-	for _, fh := range env.Model.AllCreatedFhs {
-		ch, isClosed := env.Model.ClosedHandles[fh]
-		if !isClosed || ch.IsDir {
-			continue
-		}
-		err := env.Mgr.Fsync(ctx, meta.FsyncParams{
+	env.Model.ProbeClosedHandles(t, false, "Fsync", func(ch *formalHandle) error {
+		return env.Mgr.Fsync(ctx, meta.FsyncParams{
 			Ino:       ch.Ino,
 			Fh:        ch.Fh,
 			Datasync:  false,
 			SessionID: ch.SessionID,
 		})
-		if env.Model.DeletedInos[ch.Ino] {
-			require.Truef(t, errors.Is(err, meta.ErrNotFound),
-				"已物理删除节点 ino=%d 的已关闭句柄 fh=%d 调用 Fsync 应返回 ErrNotFound, 实际: %v",
-				ch.Ino, ch.Fh, err)
-		} else if inode, ok := env.Model.Inodes[ch.Ino]; ok && !inode.Deleted && !inode.IsDir() {
-			if inode.Nlink > 0 || env.Model.HasValidHandlesForIno(inode.Ino) {
-				require.Truef(t, errors.Is(err, meta.ErrBadFileHandle),
-					"存活节点 ino=%d 的已释放句柄 fh=%d 调用 Fsync 应返回 ErrBadFileHandle, 实际: %v",
-					ch.Ino, ch.Fh, err)
-			}
-		}
-	}
+	})
 
 	// 3. 抽样存活非目录节点，核对不存在句柄、跨节点 ino 不匹配句柄、以及目录句柄 (OpenDir) 返回 ErrBadFileHandle
 	for _, node := range env.Model.ActiveNonDirs() {

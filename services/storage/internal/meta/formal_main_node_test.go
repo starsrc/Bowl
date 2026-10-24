@@ -61,21 +61,9 @@ func formalPredictMknod(
 		return 0, 0, 0, meta.ErrInvalidArgument
 	}
 
-	parent, exists := m.Inodes[params.ParentIno]
-	if !exists || parent.Deleted {
-		return 0, 0, 0, meta.ErrNotFound
-	}
-	if !parent.IsDir() {
-		return 0, 0, 0, meta.ErrNotDir
-	}
-	if parent.Nlink == 0 {
-		return 0, 0, 0, meta.ErrNotFound
-	}
-	if modelIsDotOrDotDot(params.Name) {
-		return 0, 0, 0, meta.ErrAlreadyExists
-	}
-	if _, dup := m.Entries[formalEntryKey{ParentIno: params.ParentIno, Name: string(params.Name)}]; dup {
-		return 0, 0, 0, meta.ErrAlreadyExists
+	parent, err := m.validateParentDirForCreate(params.ParentIno, params.Name)
+	if err != nil {
+		return 0, 0, 0, err
 	}
 
 	if modeType == meta.S_IFCHR || modeType == meta.S_IFBLK {
@@ -110,21 +98,9 @@ func formalPredictSymlink(
 		return 0, 0, meta.ErrNameTooLong
 	}
 
-	parent, exists := m.Inodes[params.ParentIno]
-	if !exists || parent.Deleted {
-		return 0, 0, meta.ErrNotFound
-	}
-	if !parent.IsDir() {
-		return 0, 0, meta.ErrNotDir
-	}
-	if parent.Nlink == 0 {
-		return 0, 0, meta.ErrNotFound
-	}
-	if modelIsDotOrDotDot(params.Name) {
-		return 0, 0, meta.ErrAlreadyExists
-	}
-	if _, dup := m.Entries[formalEntryKey{ParentIno: params.ParentIno, Name: string(params.Name)}]; dup {
-		return 0, 0, meta.ErrAlreadyExists
+	parent, err := m.validateParentDirForCreate(params.ParentIno, params.Name)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	targetGID = params.GID
@@ -311,12 +287,9 @@ func formalActionMknod(ctx context.Context, t *testing.T, env *formalMainEnv) st
 		} else if env.Rng.IntN(3) == 0 {
 			caseTag = "非法ParentIno=0(ErrInvalidArgument)"
 			params.ParentIno = 0
-		} else if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
+		} else if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
 			caseTag = "已删除父节点(ErrNotFound)"
-			for ino := range env.Model.DeletedInos {
-				params.ParentIno = ino
-				break
-			}
+			params.ParentIno = delIno
 		} else {
 			caseTag = "不存在父节点(ErrNotFound)"
 			params.ParentIno = uint64(math.MaxInt64 - 445566)

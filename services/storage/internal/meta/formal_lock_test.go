@@ -257,12 +257,13 @@ func (m *formalLockModel) MarkSessionExpired(sessionID uint64) {
 
 // purgeExpiredSessionsAndUpsert 模拟 renewClientSession：物理移除已过期会话名下的句柄、锁与等待者，并激活当前 sessionID。
 func (m *formalLockModel) purgeExpiredSessionsAndUpsert(sessionID uint64) {
-	for sid, sess := range m.Sessions {
-		if !sess.Expired {
+	for _, sid := range m.SessionList {
+		sess, exists := m.Sessions[sid]
+		if !exists || !sess.Expired {
 			continue
 		}
-		for _, h := range m.Handles {
-			if h.SessionID != nil && *h.SessionID == sid {
+		for _, fh := range m.HandleList {
+			if h, ok := m.Handles[fh]; ok && h.SessionID != nil && *h.SessionID == sid {
 				h.Closed = true
 			}
 		}
@@ -292,11 +293,7 @@ func (m *formalLockModel) purgeExpiredSessionsAndUpsert(sessionID uint64) {
 		delete(m.Sessions, sid)
 	}
 
-	m.Sessions[sessionID] = &formalLockSessionState{
-		SessionID: sessionID,
-		ExpiresAt: time.Now().Add(meta.DefaultSessionLeaseTTL),
-		Expired:   false,
-	}
+	m.RegisterSession(sessionID, time.Now().Add(meta.DefaultSessionLeaseTTL))
 }
 
 func lockOracleRangesOverlap(start1, end1, start2, end2 uint64) bool {
@@ -394,13 +391,15 @@ func (m *formalLockModel) pendingWaitersByInoAndFlags(ino uint64, lkFlags uint32
 	return out
 }
 
-// grantPosixLockUnchecked 在已确认无跨拥有者冲突的前提下，对指定拥有者执行 POSIX 区间覆盖、裂解与紧邻合并授锁。
-func (m *formalLockModel) grantPosixLockUnchecked(sessionID, ino, fh, lockOwner uint64, lk meta.FileLock) {
+// splitAndRemovePosixLockRange 在内存模型中移除指定拥有者与 [reqStart, reqEnd] 相交（及授锁时紧邻同类型）的旧 POSIX 锁段，
+// 并将被截断的左右残余锁段追加回模型，返回同类型合并后的 [mergedStart, mergedEnd]。
+func (m *formalLockModel) splitAndRemovePosixLockRange(
+	sessionID, ino, fh, lockOwner uint64,
+	reqStart, reqEnd uint64,
+	reqType uint32,
+	isUnlock bool,
+) (uint64, uint64) {
 	activeLocks := m.activePosixLocksByIno(ino)
-	reqStart := lk.Start
-	reqEnd := lk.End
-	reqType := lk.Type
-
 	deleteSet := make(map[int64]bool)
 	var remnants []*formalPosixLockSegment
 	mergedStart := reqStart
@@ -411,14 +410,14 @@ func (m *formalLockModel) grantPosixLockUnchecked(sessionID, ino, fh, lockOwner 
 			continue
 		}
 		overlaps := lockOracleRangesOverlap(l.Start, l.End, reqStart, reqEnd)
-		adjacentSameType := l.Type == reqType &&
+		adjacentSameType := !isUnlock && l.Type == reqType &&
 			((l.End < meta.OffsetMax && l.End+1 == reqStart) || (reqEnd < meta.OffsetMax && reqEnd+1 == l.Start))
 		if !overlaps && !adjacentSameType {
 			continue
 		}
 
 		deleteSet[l.SeqID] = true
-		if l.Type == reqType {
+		if !isUnlock && l.Type == reqType {
 			if l.Start < mergedStart {
 				mergedStart = l.Start
 			}
@@ -469,6 +468,13 @@ func (m *formalLockModel) grantPosixLockUnchecked(sessionID, ino, fh, lockOwner 
 		m.PosixLocks = append(m.PosixLocks, seg)
 	}
 
+	return mergedStart, mergedEnd
+}
+
+// grantPosixLockUnchecked 在已确认无跨拥有者冲突的前提下，对指定拥有者执行 POSIX 区间覆盖、裂解与紧邻合并授锁。
+func (m *formalLockModel) grantPosixLockUnchecked(sessionID, ino, fh, lockOwner uint64, lk meta.FileLock) {
+	mergedStart, mergedEnd := m.splitAndRemovePosixLockRange(sessionID, ino, fh, lockOwner, lk.Start, lk.End, lk.Type, false)
+
 	seq := m.nextLockSeq
 	m.nextLockSeq++
 	m.PosixLocks = append(m.PosixLocks, &formalPosixLockSegment{
@@ -479,7 +485,7 @@ func (m *formalLockModel) grantPosixLockUnchecked(sessionID, ino, fh, lockOwner 
 		LockOwner: lockOwner,
 		Start:     mergedStart,
 		End:       mergedEnd,
-		Type:      reqType,
+		Type:      lk.Type,
 		PID:       lk.PID,
 	})
 }
@@ -655,64 +661,16 @@ func (m *formalLockModel) applyFlockSetLk(params meta.SetLkParams) error {
 }
 
 func (m *formalLockModel) applyPosixSetLk(params meta.SetLkParams) error {
-	activeLocks := m.activePosixLocksByIno(params.Ino)
 	reqStart := params.Lk.Start
 	reqEnd := params.Lk.End
 	reqType := params.Lk.Type
 
 	if reqType == meta.F_UNLCK {
-		deleteSet := make(map[int64]bool)
-		var remnants []*formalPosixLockSegment
-		for _, l := range activeLocks {
-			if l.SessionID != params.SessionID || l.LockOwner != params.LockOwner {
-				continue
-			}
-			if !lockOracleRangesOverlap(l.Start, l.End, reqStart, reqEnd) {
-				continue
-			}
-			deleteSet[l.SeqID] = true
-			if l.Start < reqStart {
-				remnants = append(remnants, &formalPosixLockSegment{
-					SessionID: params.SessionID,
-					Ino:       params.Ino,
-					Fh:        params.Fh,
-					LockOwner: params.LockOwner,
-					Start:     l.Start,
-					End:       reqStart - 1,
-					Type:      l.Type,
-					PID:       l.PID,
-				})
-			}
-			if l.End > reqEnd && reqEnd < meta.OffsetMax {
-				remnants = append(remnants, &formalPosixLockSegment{
-					SessionID: params.SessionID,
-					Ino:       params.Ino,
-					Fh:        params.Fh,
-					LockOwner: params.LockOwner,
-					Start:     reqEnd + 1,
-					End:       l.End,
-					Type:      l.Type,
-					PID:       l.PID,
-				})
-			}
-		}
-		if len(deleteSet) > 0 {
-			kept := m.PosixLocks[:0]
-			for _, l := range m.PosixLocks {
-				if !deleteSet[l.SeqID] {
-					kept = append(kept, l)
-				}
-			}
-			m.PosixLocks = kept
-		}
-		for _, seg := range remnants {
-			seg.SeqID = m.nextLockSeq
-			m.nextLockSeq++
-			m.PosixLocks = append(m.PosixLocks, seg)
-		}
+		m.splitAndRemovePosixLockRange(params.SessionID, params.Ino, params.Fh, params.LockOwner, reqStart, reqEnd, reqType, true)
 		return nil
 	}
 
+	activeLocks := m.activePosixLocksByIno(params.Ino)
 	var callerHasActiveLocks bool
 	for _, l := range activeLocks {
 		if l.SessionID == params.SessionID && l.LockOwner == params.LockOwner {

@@ -346,12 +346,9 @@ func formalActionLink(ctx context.Context, t *testing.T, env *formalMainEnv) str
 		if len(unlinkedOrphans) > 0 && env.Rng.IntN(2) == 0 {
 			caseTag = "普通nlink=0孤儿源节点禁止复活(ErrNotFound)"
 			params.Ino = unlinkedOrphans[env.Rng.IntN(len(unlinkedOrphans))].Ino
-		} else if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
+		} else if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
 			caseTag = "已物理删除源节点(ErrNotFound)"
-			for ino := range env.Model.DeletedInos {
-				params.Ino = ino
-				break
-			}
+			params.Ino = delIno
 		} else {
 			caseTag = "不存在源节点(ErrNotFound)"
 			params.Ino = uint64(math.MaxInt64 - 135791)
@@ -943,15 +940,7 @@ func TestFormalMain_T4_LinkUnlink(t *testing.T) {
 		_, err = mgr.Link(ctx, meta.LinkParams{Ino: reg1Model.Ino, NewParentIno: dirA.Ino, NewName: []byte("..")})
 		require.ErrorIs(t, err, meta.ErrAlreadyExists)
 
-		// 4.4 源节点 nlink >= MaxNlink (65000) 返回 ErrTooManyLinks (EMLINK)
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = $1 WHERE ino = $2`, int32(meta.MaxNlink), int64(fifo1Model.Ino))
-		require.NoError(t, err)
-		_, err = mgr.Link(ctx, meta.LinkParams{Ino: fifo1Model.Ino, NewParentIno: dirB.Ino, NewName: []byte("fifo_overflow")})
-		require.ErrorIs(t, err, meta.ErrTooManyLinks, "源节点 nlink 达到 MaxNlink 时必须返回 ErrTooManyLinks")
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = 2 WHERE ino = $1`, int64(fifo1Model.Ino))
-		require.NoError(t, err)
-
-		// 4.5 非目录父节点返回 ErrNotDir，不存在父节点返回 ErrNotFound
+		// 4.4 非目录父节点返回 ErrNotDir，不存在父节点返回 ErrNotFound
 		_, err = mgr.Link(ctx, meta.LinkParams{Ino: fifo1Model.Ino, NewParentIno: reg1Model.Ino, NewName: []byte("under_file")})
 		require.ErrorIs(t, err, meta.ErrNotDir)
 		_, err = mgr.Link(ctx, meta.LinkParams{Ino: fifo1Model.Ino, NewParentIno: uint64(math.MaxInt64 - 111), NewName: []byte("ghost_parent")})

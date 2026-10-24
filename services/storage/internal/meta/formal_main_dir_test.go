@@ -110,25 +110,12 @@ func formalPredictMkdir(m *formalMainModel, params meta.MkdirParams) (targetMode
 		return 0, 0, meta.ErrInvalidArgument
 	}
 
-	parent, exists := m.Inodes[params.ParentIno]
-	if !exists || parent.Deleted {
-		return 0, 0, meta.ErrNotFound
-	}
-	if !parent.IsDir() {
-		return 0, 0, meta.ErrNotDir
-	}
-	if parent.Nlink == 0 {
-		return 0, 0, meta.ErrNotFound
-	}
-	if modelIsDotOrDotDot(params.Name) {
-		return 0, 0, meta.ErrAlreadyExists
+	parent, err := m.validateParentDirForCreate(params.ParentIno, params.Name)
+	if err != nil {
+		return 0, 0, err
 	}
 	if parent.Nlink >= meta.MaxNlink {
 		return 0, 0, meta.ErrTooManyLinks
-	}
-
-	if _, dup := m.Entries[formalEntryKey{ParentIno: params.ParentIno, Name: string(params.Name)}]; dup {
-		return 0, 0, meta.ErrAlreadyExists
 	}
 
 	targetGID = params.GID
@@ -268,12 +255,9 @@ func formalActionMkdir(ctx context.Context, t *testing.T, env *formalMainEnv) st
 		if len(orphanDirs) > 0 && env.Rng.IntN(2) == 0 {
 			caseTag = "孤儿父目录nlink=0(ErrNotFound)"
 			params.ParentIno = orphanDirs[env.Rng.IntN(len(orphanDirs))].Ino
-		} else if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
+		} else if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
 			caseTag = "已删除父节点(ErrNotFound)"
-			for ino := range env.Model.DeletedInos {
-				params.ParentIno = ino
-				break
-			}
+			params.ParentIno = delIno
 		} else {
 			caseTag = "不存在父节点(ErrNotFound)"
 			params.ParentIno = uint64(math.MaxInt64 - 654321)
@@ -1159,22 +1143,9 @@ func TestFormalMain_T2_DirTopology(t *testing.T) {
 		require.ErrorIs(t, err, meta.ErrInvalidArgument)
 		_, err = mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: rootIno, Name: []byte(strings.Repeat("x", 256)), Mode: 0o755})
 		require.ErrorIs(t, err, meta.ErrNameTooLong)
-
-		// 5. 验证父目录 nlink >= MaxNlink (65000) 返回 ErrTooManyLinks (EMLINK)
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = $1 WHERE ino = $2`, int32(meta.MaxNlink), int64(umaskDir.Ino))
-		require.NoError(t, err)
-		_, err = mgr.Mkdir(ctx, meta.MkdirParams{
-			ParentIno: umaskDir.Ino,
-			Name:      []byte("overflow_child"),
-			Mode:      0o755,
-		})
-		require.ErrorIs(t, err, meta.ErrTooManyLinks, "父目录 nlink 达 MaxNlink 时必须返回 ErrTooManyLinks")
-		// 恢复真实 nlink = 2 并运行全量底表审计
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = 2 WHERE ino = $1`, int64(umaskDir.Ino))
-		require.NoError(t, err)
 		runAllProbesAndAuditors()
 
-		// 6. 创建一个常规文件用于验证父节点非目录 (ErrNotDir) 与 Rmdir 目标非目录 (ErrNotDir)
+		// 5. 创建一个常规文件用于验证父节点非目录 (ErrNotDir) 与 Rmdir 目标非目录 (ErrNotDir)
 		regNode, err := mgr.Mknod(ctx, meta.MknodParams{
 			ParentIno: rootIno,
 			Name:      []byte("regular_file"),

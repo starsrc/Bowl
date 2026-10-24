@@ -262,12 +262,9 @@ func formalActionOpenDir(ctx context.Context, t *testing.T, env *formalMainEnv) 
 		if len(deadOrphanDirs) > 0 && env.Rng.IntN(2) == 0 {
 			caseTag = "无有效句柄nlink=0孤儿目录(ErrNotFound)"
 			params.Ino = deadOrphanDirs[env.Rng.IntN(len(deadOrphanDirs))].Ino
-		} else if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
+		} else if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
 			caseTag = "已物理删除节点(ErrNotFound)"
-			for ino := range env.Model.DeletedInos {
-				params.Ino = ino
-				break
-			}
+			params.Ino = delIno
 		} else {
 			caseTag = "不存在的Ino(ErrNotFound)"
 			params.Ino = uint64(math.MaxInt64 - 424001)
@@ -365,12 +362,7 @@ func formalActionReleaseDir(ctx context.Context, t *testing.T, env *formalMainEn
 
 	case branch < 60 && len(env.Model.ClosedHandles) > 0:
 		// 对已关闭的目录句柄再次调用 ReleaseDir
-		var closedDirHandles []*formalHandle
-		for _, fh := range env.Model.AllCreatedFhs {
-			if ch, ok := env.Model.ClosedHandles[fh]; ok && ch.IsDir {
-				closedDirHandles = append(closedDirHandles, ch)
-			}
-		}
+		closedDirHandles := env.Model.ClosedDirHandles()
 		if len(closedDirHandles) > 0 {
 			chosen := closedDirHandles[env.Rng.IntN(len(closedDirHandles))]
 			caseTag = "重复释放已关闭目录句柄"
@@ -453,11 +445,8 @@ func formalActionReleaseDir(ctx context.Context, t *testing.T, env *formalMainEn
 		// 对不存在或已物理回收的 Ino 调用 ReleaseDir -> ErrNotFound
 		caseTag = "不存在或已删除Ino调用ReleaseDir(ErrNotFound)"
 		params.Fh = 1
-		if len(env.Model.DeletedInos) > 0 && env.Rng.IntN(2) == 0 {
-			for ino := range env.Model.DeletedInos {
-				params.Ino = ino
-				break
-			}
+		if delIno, ok := env.Model.FirstDeletedIno(); ok && env.Rng.IntN(2) == 0 {
+			params.Ino = delIno
 		} else {
 			params.Ino = uint64(math.MaxInt64 - 424333)
 		}
@@ -776,11 +765,7 @@ func formalProbeReadDir(ctx context.Context, t *testing.T, env *formalMainEnv) {
 	}
 
 	// 2. 核对已释放的目录句柄 (ClosedHandles)
-	for _, fh := range env.Model.AllCreatedFhs {
-		ch, isClosed := env.Model.ClosedHandles[fh]
-		if !isClosed || !ch.IsDir {
-			continue
-		}
+	env.Model.ProbeClosedHandles(t, true, "ReadDir", func(ch *formalHandle) error {
 		_, err := env.Mgr.ReadDir(ctx, meta.ReadDirParams{
 			Ino:       ch.Ino,
 			Fh:        ch.Fh,
@@ -788,16 +773,8 @@ func formalProbeReadDir(ctx context.Context, t *testing.T, env *formalMainEnv) {
 			Limit:     10,
 			SessionID: ch.SessionID,
 		})
-		if env.Model.DeletedInos[ch.Ino] {
-			require.ErrorIs(t, err, meta.ErrNotFound,
-				"已物理删除孤儿目录的已关闭句柄调用 ReadDir 应返回 ErrNotFound")
-		} else if inode, ok := env.Model.Inodes[ch.Ino]; ok && !inode.Deleted && inode.IsDir() {
-			if inode.Nlink > 0 || env.Model.HasValidHandlesForIno(inode.Ino) {
-				require.ErrorIs(t, err, meta.ErrBadFileHandle,
-					"存活目录的已关闭句柄调用 ReadDir 应返回 ErrBadFileHandle")
-			}
-		}
-	}
+		return err
+	})
 
 	// 3. 核对文件句柄调用 ReadDir：
 	// - Ino 为非目录节点 + 文件句柄 Fh -> 先查 Inode 非目录返回 ErrNotDir；
@@ -886,11 +863,7 @@ func formalProbeReadDirPlus(ctx context.Context, t *testing.T, env *formalMainEn
 	}
 
 	// 2. 核对已释放的目录句柄 (ClosedHandles)
-	for _, fh := range env.Model.AllCreatedFhs {
-		ch, isClosed := env.Model.ClosedHandles[fh]
-		if !isClosed || !ch.IsDir {
-			continue
-		}
+	env.Model.ProbeClosedHandles(t, true, "ReadDirPlus", func(ch *formalHandle) error {
 		_, err := env.Mgr.ReadDirPlus(ctx, meta.ReadDirPlusParams{
 			Ino:       ch.Ino,
 			Fh:        ch.Fh,
@@ -898,16 +871,8 @@ func formalProbeReadDirPlus(ctx context.Context, t *testing.T, env *formalMainEn
 			Limit:     10,
 			SessionID: ch.SessionID,
 		})
-		if env.Model.DeletedInos[ch.Ino] {
-			require.ErrorIs(t, err, meta.ErrNotFound,
-				"已物理删除孤儿目录的已关闭句柄调用 ReadDirPlus 应返回 ErrNotFound")
-		} else if inode, ok := env.Model.Inodes[ch.Ino]; ok && !inode.Deleted && inode.IsDir() {
-			if inode.Nlink > 0 || env.Model.HasValidHandlesForIno(inode.Ino) {
-				require.ErrorIs(t, err, meta.ErrBadFileHandle,
-					"存活目录的已关闭句柄调用 ReadDirPlus 应返回 ErrBadFileHandle")
-			}
-		}
-	}
+		return err
+	})
 
 	// 3. 核对文件句柄调用 ReadDirPlus
 	if len(activeFileHandles) > 0 {
@@ -995,27 +960,14 @@ func formalProbeFsyncDir(ctx context.Context, t *testing.T, env *formalMainEnv) 
 	}
 
 	// 2. 核对已释放的目录句柄 (ClosedHandles)
-	for _, fh := range env.Model.AllCreatedFhs {
-		ch, isClosed := env.Model.ClosedHandles[fh]
-		if !isClosed || !ch.IsDir {
-			continue
-		}
-		err := env.Mgr.FsyncDir(ctx, meta.FsyncDirParams{
+	env.Model.ProbeClosedHandles(t, true, "FsyncDir", func(ch *formalHandle) error {
+		return env.Mgr.FsyncDir(ctx, meta.FsyncDirParams{
 			Ino:       ch.Ino,
 			Fh:        ch.Fh,
 			Datasync:  false,
 			SessionID: ch.SessionID,
 		})
-		if env.Model.DeletedInos[ch.Ino] {
-			require.ErrorIs(t, err, meta.ErrNotFound,
-				"已物理删除孤儿目录的已关闭句柄调用 FsyncDir 应返回 ErrNotFound")
-		} else if inode, ok := env.Model.Inodes[ch.Ino]; ok && !inode.Deleted && inode.IsDir() {
-			if inode.Nlink > 0 || env.Model.HasValidHandlesForIno(inode.Ino) {
-				require.ErrorIs(t, err, meta.ErrBadFileHandle,
-					"存活目录的已关闭句柄调用 FsyncDir 应返回 ErrBadFileHandle")
-			}
-		}
-	}
+	})
 
 	// 3. 核对文件句柄调用 FsyncDir
 	if len(activeFileHandles) > 0 {

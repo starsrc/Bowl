@@ -162,10 +162,10 @@ func (e *formalConcurrentSharedEnv) PickDirIno(rng *rand.Rand) uint64 {
 	return e.dirInos[rng.IntN(len(e.dirInos))]
 }
 
-func (e *formalConcurrentSharedEnv) PickDisk1DirIno(rng *rand.Rand) uint64 {
+func (e *formalConcurrentSharedEnv) PickActiveDirIno(rng *rand.Rand) uint64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	// 优先选择前几个在 Disk1 上的基础目录以提升同目录/跨目录冲突密度
+	// 优先选择前几个基础目录以提升同目录/跨目录冲突密度
 	if len(e.dirInos) == 0 || rng.IntN(3) == 0 {
 		return e.Disk1.RootIno
 	}
@@ -210,11 +210,7 @@ func (e *formalConcurrentSharedEnv) FormatDiagnosticReport() string {
 	b.WriteString(fmt.Sprintf("单轮精准重放命令:\n  GOWORK=off BOWL_FORMAL_SEED=0x%016x BOWL_FORMAL_RUNS=1 BOWL_FORMAL_STEPS=%d go -C services/storage test -v ./internal/meta -run '^TestFormalConcurrentChaos$'\n", e.Seed, e.StepsPerWorker))
 	for wID, lines := range e.workerTraces {
 		b.WriteString(fmt.Sprintf("--- Worker %d 轨迹 (共 %d 步) ---\n", wID, len(lines)))
-		start := 0
-		if len(lines) > 25 {
-			start = len(lines) - 25
-		}
-		for _, line := range lines[start:] {
+		for _, line := range lines {
 			b.WriteString("  ")
 			b.WriteString(line)
 			b.WriteString("\n")
@@ -291,6 +287,11 @@ func assertConcurrentStepErr(t *testing.T, env *formalConcurrentSharedEnv, worke
 	}
 }
 
+func (e *formalConcurrentSharedEnv) assertAllowedErr(t *testing.T, workerID, step int, opDesc string, err error) {
+	t.Helper()
+	assertConcurrentStepErr(t, e, workerID, step, opDesc, err)
+}
+
 // sharedSlotNames 提供高冲突密度的短文件名集合，促使多个 Worker 在相同父目录下频繁碰撞同名目录项。
 var sharedSlotNames = []string{
 	"slot_a", "slot_b", "slot_c", "slot_d",
@@ -337,11 +338,13 @@ func runConcurrentWorker(
 	}
 
 	// 每个 Worker 初始在共享锚点文件上打开一个专属 O_RDWR 句柄，确保随时可执行文件锁与 Fallocate
-	if initOpen, err := env.Mgr.Open(ctx, meta.OpenParams{
+	initOpen, initErr := env.Mgr.Open(ctx, meta.OpenParams{
 		Ino:       env.PinnedIno1,
 		Flags:     meta.O_RDWR,
 		SessionID: &workerSID,
-	}); err == nil {
+	})
+	env.assertAllowedErr(t, workerID, 0, "InitOpen", initErr)
+	if initErr == nil && initOpen != nil {
 		sidCopy := workerSID
 		myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
 			Fh:        initOpen.Fh,
@@ -357,8 +360,8 @@ func runConcurrentWorker(
 		switch {
 		case roll < 12:
 			// 1. 跨目录 / 同目录 Rename（含 flags = 0, RenameNoReplace, RenameExchange 及跨盘 EXDEV）
-			oldParent := env.PickDisk1DirIno(rng)
-			newParent := env.PickDisk1DirIno(rng)
+			oldParent := env.PickActiveDirIno(rng)
+			newParent := env.PickActiveDirIno(rng)
 			if rng.IntN(8) == 0 {
 				// 触发跨盘 Rename -> ErrCrossDevice (EXDEV)
 				newParent = env.Disk2.RootIno
@@ -479,8 +482,8 @@ func runConcurrentWorker(
 				// 无会话句柄 (session_id IS NULL)
 				sidPtr = nil
 			case 1:
-				// 短命断连会话（通过 ShortMgr 创建，使其在压测中和收尾时超期被清扫）
-				crashSID := uint64(7000000) + env.NextSeq()
+				// 短命断连会话（通过 ShortMgr 创建，使其在压测中和收尾时超期被清扫；按种子隔离会话空间避免碰撞）
+				crashSID := (env.Seed&0xfffff)*1_000_000 + 9_000_000_000 + env.NextSeq()
 				env.RecordCrashSession(crashSID)
 				sidPtr = &crashSID
 				useShortCrash = true
@@ -518,7 +521,8 @@ func runConcurrentWorker(
 						})
 					} else if rng.IntN(2) == 0 {
 						// 50% 概率立即 Unlink，构造仅绑定在短命断连会话上的孤儿文件
-						_ = env.Mgr.Unlink(ctx, parentIno, []byte(name))
+						uErr := env.Mgr.Unlink(ctx, parentIno, []byte(name))
+						env.assertAllowedErr(t, workerID, step, "Unlink(ShortCrash)", uErr)
 					}
 				}
 				recordTrace(step, fmt.Sprintf("Create(parent=%d, name=%s) -> err=%v", parentIno, name, err))
@@ -975,6 +979,11 @@ func auditConcurrentAll10Invariants(
 	purgedSessionIDs []uint64,
 ) {
 	t.Helper()
+	defer func() {
+		if t.Failed() {
+			t.Log(env.FormatDiagnosticReport())
+		}
+	}()
 	require.NotEmpty(t, activeRootInos)
 
 	rootInoInt64s := make([]int64, len(activeRootInos))
@@ -1418,63 +1427,44 @@ func auditConcurrentAll10Invariants(
 
 	// LOCK-INV-3: 对每个存在等待者的 (ino, lk_flags) 构建局部等待有向图并证明无环
 	for ns, waiters := range waitersByNS {
-		adj := make(map[formalLockOwnerKey]map[formalLockOwnerKey]struct{})
-		addEdge := func(from, to formalLockOwnerKey) {
-			if from == to {
-				return
-			}
-			if adj[from] == nil {
-				adj[from] = make(map[formalLockOwnerKey]struct{})
-			}
-			adj[from][to] = struct{}{}
-		}
-
+		var activeEdgeInputs []formalWaitGraphLockEdgeInput
+		var waiterEdgeInputs []formalWaitGraphLockEdgeInput
 		if ns.LkFlags == meta.FuseLkFlock {
-			activeFlocks := flockByIno[ns.Ino]
+			for _, l := range flockByIno[ns.Ino] {
+				activeEdgeInputs = append(activeEdgeInputs, formalWaitGraphLockEdgeInput{
+					OwnerKey: formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh},
+					Start:    0,
+					End:      meta.OffsetMax,
+					Type:     l.Type,
+				})
+			}
 			for _, w := range waiters {
-				wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.Fh}
-				for _, l := range activeFlocks {
-					lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.Fh}
-					if wOwnerKey != lOwnerKey && lockOracleConflicts(w.Type, l.Type) {
-						addEdge(wOwnerKey, lOwnerKey)
-					}
-				}
+				waiterEdgeInputs = append(waiterEdgeInputs, formalWaitGraphLockEdgeInput{
+					OwnerKey: formalLockOwnerKey{SessionID: w.SessionID, ID: w.Fh},
+					Start:    w.Start,
+					End:      w.End,
+					Type:     w.Type,
+				})
 			}
 		} else {
-			activePosix := posixByIno[ns.Ino]
+			for _, l := range posixByIno[ns.Ino] {
+				activeEdgeInputs = append(activeEdgeInputs, formalWaitGraphLockEdgeInput{
+					OwnerKey: formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner},
+					Start:    l.Start,
+					End:      l.End,
+					Type:     l.Type,
+				})
+			}
 			for _, w := range waiters {
-				wOwnerKey := formalLockOwnerKey{SessionID: w.SessionID, ID: w.LockOwner}
-				for _, l := range activePosix {
-					lOwnerKey := formalLockOwnerKey{SessionID: l.SessionID, ID: l.LockOwner}
-					if wOwnerKey != lOwnerKey &&
-						lockOracleRangesOverlap(l.Start, l.End, w.Start, w.End) &&
-						lockOracleConflicts(w.Type, l.Type) {
-						addEdge(wOwnerKey, lOwnerKey)
-					}
-				}
+				waiterEdgeInputs = append(waiterEdgeInputs, formalWaitGraphLockEdgeInput{
+					OwnerKey: formalLockOwnerKey{SessionID: w.SessionID, ID: w.LockOwner},
+					Start:    w.Start,
+					End:      w.End,
+					Type:     w.Type,
+				})
 			}
 		}
-
-		for startNode := range adj {
-			visited := make(map[formalLockOwnerKey]bool)
-			var queue []formalLockOwnerKey
-			for next := range adj[startNode] {
-				visited[next] = true
-				queue = append(queue, next)
-			}
-			for len(queue) > 0 {
-				curr := queue[0]
-				queue = queue[1:]
-				for next := range adj[curr] {
-					require.NotEqualf(t, startNode, next,
-						"LOCK-INV-3 违例: ino=%d lk_flags=%d 底表等待图存在死锁环 (起点=%+v)", ns.Ino, ns.LkFlags, startNode)
-					if !visited[next] {
-						visited[next] = true
-						queue = append(queue, next)
-					}
-				}
-			}
-		}
+		assertLockWaitGraphNoCycle(t, ns.Ino, ns.LkFlags, activeEdgeInputs, waiterEdgeInputs, env.FormatDiagnosticReport())
 	}
 
 	// LOCK-INV-4(a): 所有已取消/超时的 SetLkw 请求在 file_lock_waiters 中零残留
@@ -1628,8 +1618,8 @@ func TestFormalConcurrentChaos(t *testing.T) {
 				workerTraces:   make([][]string, cfg.Workers),
 			}
 
-			// 注册 Worker 专属会话与收尾保留会话 keeperSID
-			baseSID := uint64(time.Now().UnixNano()&0x1fffffffffffffff) + uint64(runIdx)*100000
+			// 注册 Worker 专属会话与收尾保留会话 keeperSID（由 runSeed 确定性派生，避免与 crashSID 空间碰撞）
+			baseSID := (runSeed&0xfffff)*1_000_000 + 1_000_000_000 + uint64(runIdx)*100000
 			keeperSID := baseSID + 9999
 			_, err = mgr.RenewSession(ctx, keeperSID)
 			require.NoError(t, err)

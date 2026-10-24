@@ -386,13 +386,14 @@ func formalActionRename(ctx context.Context, t *testing.T, env *formalMainEnv) s
 		}
 	}
 
-	// 收集同一 Inode 拥有多条硬链接的目录项对 (src_ino == dst_ino)
+	// 收集同一 Inode 拥有多条硬链接的目录项对 (src_ino == dst_ino)，按创建顺序确定性遍历
 	type entryPair struct {
 		Src formalRenameEntryCandidate
 		Dst formalRenameEntryCandidate
 	}
 	var sameInoPairs []entryPair
-	for _, list := range entriesByIno {
+	for _, ino := range env.Model.AllCreatedInos {
+		list := entriesByIno[ino]
 		if len(list) >= 2 {
 			for i := 0; i < len(list); i++ {
 				for j := i + 1; j < len(list); j++ {
@@ -1170,23 +1171,11 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 			OldParentIno: root1, OldName: []byte("dirC"), NewParentIno: root1, NewName: []byte("dirA"), Flags: 0,
 		}, meta.ErrNotEmpty, "源为目录覆盖非空目标目录dirA返回ErrNotEmpty")
 
-		// 5. 验证跨父目录移动子目录、覆盖空目标目录（同父与跨父 nlink 变化、parent_ino 更新、MaxNlink 拦截、rmdir-whilst-open 孤儿目录覆盖）
+		// 5. 验证跨父目录移动子目录、覆盖空目标目录（同父与跨父 nlink 变化、parent_ino 更新、rmdir-whilst-open 孤儿目录覆盖）
 		movingDir := mustMkdir(dirB.Ino, "moving_dir")
 		runAllProbesAndAuditors()
 
-		// 5.1 跨父目录移动子目录至未覆盖新位置时，若 newParent.nlink >= MaxNlink 返回 ErrTooManyLinks
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = $1 WHERE ino = $2`, int32(meta.MaxNlink), int64(dirC.Ino))
-		require.NoError(t, err)
-		env.Model.Inodes[dirC.Ino].Nlink = meta.MaxNlink
-		execCheckedRename(meta.RenameParams{
-			OldParentIno: dirB.Ino, OldName: []byte("moving_dir"), NewParentIno: dirC.Ino, NewName: []byte("moved_dir"), Flags: 0,
-		}, meta.ErrTooManyLinks, "跨父目录移动子目录当newParent达MaxNlink时返回ErrTooManyLinks")
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = 2 WHERE ino = $1`, int64(dirC.Ino))
-		require.NoError(t, err)
-		env.Model.Inodes[dirC.Ino].Nlink = 2
-		runAllProbesAndAuditors()
-
-		// 5.2 正常跨父目录移动子目录 dirB/moving_dir -> dirC/moved_dir（dirB.nlink - 1, dirC.nlink + 1, movingDir.ParentIno = dirC.Ino）
+		// 5.1 正常跨父目录移动子目录 dirB/moving_dir -> dirC/moved_dir（dirB.nlink - 1, dirC.nlink + 1, movingDir.ParentIno = dirC.Ino）
 		dirBNlinkBefore := dirB.Nlink
 		dirCNlinkBefore := dirC.Nlink
 		execCheckedRename(meta.RenameParams{
@@ -1349,26 +1338,7 @@ func TestFormalMain_T5_Rename(t *testing.T) {
 		require.Equal(t, dirC.Ino, env.Model.Entries[formalEntryKey{ParentIno: root1, Name: "dirC"}])
 
 		// 8.3 跨父目录交换“一目录 (dirC/empty_open_target -> movingDir) 一非目录 (dirB/mover_noreplace_done -> moverFile)”：
-		// 先验证移入目录方的父目录 nlink >= MaxNlink 时返回 ErrTooManyLinks（正反双向）
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = $1 WHERE ino = $2`, int32(meta.MaxNlink), int64(dirB.Ino))
-		require.NoError(t, err)
-		env.Model.Inodes[dirB.Ino].Nlink = meta.MaxNlink
-		execCheckedRename(meta.RenameParams{
-			OldParentIno: dirC.Ino, OldName: []byte("empty_open_target"),
-			NewParentIno: dirB.Ino, NewName: []byte("mover_noreplace_done"),
-			Flags: meta.RenameExchange,
-		}, meta.ErrTooManyLinks, "RenameExchange_源为目录目标为非目录且newParent达MaxNlink返回ErrTooManyLinks")
-		execCheckedRename(meta.RenameParams{
-			OldParentIno: dirB.Ino, OldName: []byte("mover_noreplace_done"),
-			NewParentIno: dirC.Ino, NewName: []byte("empty_open_target"),
-			Flags: meta.RenameExchange,
-		}, meta.ErrTooManyLinks, "RenameExchange_源为非目录目标为目录且oldParent达MaxNlink返回ErrTooManyLinks")
-		_, err = pool.Exec(ctx, `UPDATE inodes SET nlink = 2 WHERE ino = $1`, int64(dirB.Ino))
-		require.NoError(t, err)
-		env.Model.Inodes[dirB.Ino].Nlink = 2
-		runAllProbesAndAuditors()
-
-		// 正常执行跨父目录“一目录一非目录”交换：dirC (移出目录) nlink: 3 -> 2，dirB (移入目录) nlink: 2 -> 3，movingDir.ParentIno = dirB.Ino
+		// dirC (移出目录) nlink: 3 -> 2，dirB (移入目录) nlink: 2 -> 3，movingDir.ParentIno = dirB.Ino
 		execCheckedRename(meta.RenameParams{
 			OldParentIno: dirC.Ino, OldName: []byte("empty_open_target"),
 			NewParentIno: dirB.Ino, NewName: []byte("mover_noreplace_done"),

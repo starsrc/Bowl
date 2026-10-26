@@ -15,6 +15,7 @@ type Config struct {
 	DB        DBPoolConfig
 	Telemetry TelemetryConfig
 	Log       LogConfig
+	Meta      MetaConfig
 }
 
 // Load 读取环境变量及配置文件。
@@ -38,6 +39,10 @@ func Load(filenames ...string) (*Config, error) {
 
 	if err := cfg.Server.Validate(); err != nil {
 		return nil, fmt.Errorf("validate server config: %w", err)
+	}
+
+	if err := cfg.Meta.Validate(); err != nil {
+		return nil, fmt.Errorf("validate meta config: %w", err)
 	}
 
 	return &cfg, nil

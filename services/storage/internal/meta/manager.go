@@ -16,6 +16,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/starsrc/Aether/pkg/tx"
+	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
@@ -172,11 +173,52 @@ func New(store db.Store, opts ...Option) Manager {
 	return m
 }
 
+// ManagerParams 定义 Manager 的 Fx 依赖注入参数。
+type ManagerParams struct {
+	fx.In
+
+	Store   db.Store
+	MetaCfg *config.MetaConfig `optional:"true"`
+	MetaVal config.MetaConfig  `optional:"true"`
+}
+
+func newManagerFromParams(params ManagerParams) Manager {
+	var metaCfg *config.MetaConfig
+	if params.MetaCfg != nil {
+		metaCfg = params.MetaCfg
+	} else if params.MetaVal != (config.MetaConfig{}) {
+		metaCfg = &params.MetaVal
+	}
+
+	if metaCfg == nil {
+		return New(params.Store)
+	}
+
+	var atimeMode AtimeMode
+	switch metaCfg.AtimeMode() {
+	case "relatime":
+		atimeMode = AtimeModeRelAtime
+	case "strictatime":
+		atimeMode = AtimeModeStrictAtime
+	default:
+		atimeMode = AtimeModeNoAtime
+	}
+
+	return New(
+		params.Store,
+		WithSessionLeaseTTL(metaCfg.SessionLeaseTTL()),
+		WithAtimeMode(atimeMode),
+		WithEntryTimeout(metaCfg.EntryTimeoutSeconds()),
+		WithAttrTimeout(metaCfg.AttrTimeoutSeconds()),
+		WithDirEntryTimeout(metaCfg.DirEntryTimeoutSeconds()),
+		WithOpenKeepCache(metaCfg.OpenKeepCache()),
+		WithOpenDirCache(metaCfg.OpenDirCache()),
+	)
+}
+
 // Module 提供 meta 依赖注入模块。
 var Module = fx.Module("meta",
-	fx.Provide(func(store db.Store) Manager {
-		return New(store)
-	}),
+	fx.Provide(newManagerFromParams),
 )
 
 func convertDBInodeToEntity(target db.Inode, entryTimeout, attrTimeout float64) *Inode {

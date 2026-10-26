@@ -27,6 +27,9 @@ func cleanConfigEnv(t *testing.T) {
 		"LOG_LEVEL", "LOG_FORMAT", "LOG_CONNECT_MESSAGE", "LOG_OTEL_RECORD_TRACE_FLAGS", "LOG_OTEL_SAMPLED_ONLY",
 		"OTEL_ENABLED", "OTEL_SERVICE_NAME", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_TRACES_INSECURE", "OTEL_SAMPLE_RATIO", "OTEL_SHUTDOWN_TIMEOUT", "OTEL_TRUST_REMOTE",
+		"STORAGE_SESSION_LEASE_TTL", "STORAGE_ATIME_MODE",
+		"STORAGE_ENTRY_TIMEOUT_SECONDS", "STORAGE_ATTR_TIMEOUT_SECONDS", "STORAGE_DIR_ENTRY_TIMEOUT_SECONDS",
+		"STORAGE_OPEN_KEEP_CACHE", "STORAGE_OPEN_DIR_CACHE",
 	}
 	for _, key := range keys {
 		oldVal, exists := os.LookupEnv(key)
@@ -527,6 +530,15 @@ func TestConfigModule_ProvidesComponents(t *testing.T) {
 			LevelVal:  "debug",
 			FormatVal: "json",
 		},
+		Meta: config.MetaConfig{
+			SessionLeaseTTLVal:        45 * time.Second,
+			AtimeModeVal:              "strictatime",
+			EntryTimeoutSecondsVal:    2.5,
+			AttrTimeoutSecondsVal:     3.5,
+			DirEntryTimeoutSecondsVal: 4.5,
+			OpenKeepCacheVal:          true,
+			OpenDirCacheVal:           true,
+		},
 	}
 
 	var (
@@ -535,6 +547,8 @@ func TestConfigModule_ProvidesComponents(t *testing.T) {
 		extractedDB        config.DBPoolConfig
 		extractedTelemetry telemetry.Config
 		extractedOtelPtr   *config.TelemetryConfig
+		extractedMeta      config.MetaConfig
+		extractedMetaPtr   *config.MetaConfig
 	)
 
 	app := fxtest.New(
@@ -547,6 +561,8 @@ func TestConfigModule_ProvidesComponents(t *testing.T) {
 			&extractedDB,
 			&extractedTelemetry,
 			&extractedOtelPtr,
+			&extractedMeta,
+			&extractedMetaPtr,
 		),
 	)
 	require.NoError(t, app.Err())
@@ -556,4 +572,157 @@ func TestConfigModule_ProvidesComponents(t *testing.T) {
 	assert.Equal(t, "postgres://localhost/bowl", extractedDB.DSN())
 	assert.Equal(t, "bowl-storage", extractedTelemetry.ServiceName())
 	assert.Equal(t, "bowl-storage", extractedOtelPtr.ServiceName())
+	assert.Equal(t, 45*time.Second, extractedMeta.SessionLeaseTTL())
+	assert.Equal(t, "strictatime", extractedMeta.AtimeMode())
+	assert.Equal(t, 2.5, extractedMeta.EntryTimeoutSeconds())
+	assert.Equal(t, 3.5, extractedMeta.AttrTimeoutSeconds())
+	assert.Equal(t, 4.5, extractedMeta.DirEntryTimeoutSeconds())
+	assert.True(t, extractedMeta.OpenKeepCache())
+	assert.True(t, extractedMeta.OpenDirCache())
+	require.NotNil(t, extractedMetaPtr)
+	assert.Equal(t, 45*time.Second, extractedMetaPtr.SessionLeaseTTL())
+}
+
+func TestMetaConfig_Defaults(t *testing.T) {
+	cleanConfigEnv(t)
+
+	var cfg config.MetaConfig
+	err := env.Parse(&cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, 60*time.Second, cfg.SessionLeaseTTL())
+	assert.Equal(t, "noatime", cfg.AtimeMode())
+	assert.Equal(t, 1.0, cfg.EntryTimeoutSeconds())
+	assert.Equal(t, 1.0, cfg.AttrTimeoutSeconds())
+	assert.Equal(t, 1.0, cfg.DirEntryTimeoutSeconds())
+	assert.False(t, cfg.OpenKeepCache())
+	assert.False(t, cfg.OpenDirCache())
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestMetaConfig_EnvOverrides(t *testing.T) {
+	cleanConfigEnv(t)
+
+	t.Setenv("STORAGE_SESSION_LEASE_TTL", "120s")
+	t.Setenv("STORAGE_ATIME_MODE", "RelAtime")
+	t.Setenv("STORAGE_ENTRY_TIMEOUT_SECONDS", "2.5")
+	t.Setenv("STORAGE_ATTR_TIMEOUT_SECONDS", "3.5")
+	t.Setenv("STORAGE_DIR_ENTRY_TIMEOUT_SECONDS", "4.5")
+	t.Setenv("STORAGE_OPEN_KEEP_CACHE", "true")
+	t.Setenv("STORAGE_OPEN_DIR_CACHE", "true")
+
+	var cfg config.MetaConfig
+	err := env.Parse(&cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, 120*time.Second, cfg.SessionLeaseTTL())
+	assert.Equal(t, "relatime", cfg.AtimeMode())
+	assert.Equal(t, 2.5, cfg.EntryTimeoutSeconds())
+	assert.Equal(t, 3.5, cfg.AttrTimeoutSeconds())
+	assert.Equal(t, 4.5, cfg.DirEntryTimeoutSeconds())
+	assert.True(t, cfg.OpenKeepCache())
+	assert.True(t, cfg.OpenDirCache())
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestMetaConfig_CaseInsensitiveAtimeMode(t *testing.T) {
+	modes := []struct {
+		input    string
+		expected string
+	}{
+		{input: "noatime", expected: "noatime"},
+		{input: "NOATIME", expected: "noatime"},
+		{input: "NoAtime", expected: "noatime"},
+		{input: "relatime", expected: "relatime"},
+		{input: "RELATIME", expected: "relatime"},
+		{input: "RelAtime", expected: "relatime"},
+		{input: "strictatime", expected: "strictatime"},
+		{input: "STRICTATIME", expected: "strictatime"},
+		{input: "StrictAtime", expected: "strictatime"},
+	}
+
+	for _, tc := range modes {
+		t.Run(tc.input, func(t *testing.T) {
+			cfg := config.MetaConfig{
+				SessionLeaseTTLVal:        time.Minute,
+				AtimeModeVal:              tc.input,
+				EntryTimeoutSecondsVal:    1.0,
+				AttrTimeoutSecondsVal:     1.0,
+				DirEntryTimeoutSecondsVal: 1.0,
+			}
+			assert.NoError(t, cfg.Validate())
+			assert.Equal(t, tc.expected, cfg.AtimeMode())
+		})
+	}
+}
+
+func TestMetaConfig_ValidateErrors(t *testing.T) {
+	validCfg := func() config.MetaConfig {
+		return config.MetaConfig{
+			SessionLeaseTTLVal:        60 * time.Second,
+			AtimeModeVal:              "noatime",
+			EntryTimeoutSecondsVal:    1.0,
+			AttrTimeoutSecondsVal:     1.0,
+			DirEntryTimeoutSecondsVal: 1.0,
+		}
+	}
+
+	t.Run("非法atime策略报错", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.AtimeModeVal = "fastatime"
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid atime mode")
+	})
+
+	t.Run("负数entry超时报错", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.EntryTimeoutSecondsVal = -0.1
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid entry timeout")
+	})
+
+	t.Run("负数attr超时报错", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.AttrTimeoutSecondsVal = -1.0
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid attr timeout")
+	})
+
+	t.Run("负数dir entry超时报错", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.DirEntryTimeoutSecondsVal = -0.5
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid dir entry timeout")
+	})
+
+	t.Run("零或负数session租约TTL报错", func(t *testing.T) {
+		cfgZero := validCfg()
+		cfgZero.SessionLeaseTTLVal = 0
+		err := cfgZero.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid session lease TTL")
+
+		cfgNegative := validCfg()
+		cfgNegative.SessionLeaseTTLVal = -5 * time.Second
+		err = cfgNegative.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid session lease TTL")
+	})
+}
+
+func TestLoad_MetaConfigValidation(t *testing.T) {
+	cleanConfigEnv(t)
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	t.Setenv("DB_DSN", "postgres://localhost/bowl")
+	t.Setenv("STORAGE_ATIME_MODE", "invalid_mode")
+
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validate meta config:")
 }

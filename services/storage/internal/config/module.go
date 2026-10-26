@@ -15,5 +15,7 @@ var Module = fx.Module("config",
 		func(cfg *Config) DBPoolConfig { return cfg.DB },
 		func(cfg *Config) telemetry.Config { return &cfg.Telemetry },
 		func(cfg *Config) *TelemetryConfig { return &cfg.Telemetry },
+		func(cfg *Config) MetaConfig { return cfg.Meta },
+		func(cfg *Config) *MetaConfig { return &cfg.Meta },
 	),
 )

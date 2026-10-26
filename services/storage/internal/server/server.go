@@ -22,11 +22,10 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-// Server 封装并管理底层 HTTP 服务与 ConnectRPC 路由处理器。
-// 嵌入 storagev1connect.UnimplementedStorageServiceHandler 供 Wave 4 的 STARSRC-462..465 分片实现全部 36 个 RPC 方法。
-type Server struct {
-	storagev1connect.UnimplementedStorageServiceHandler
+var _ storagev1connect.StorageServiceHandler = (*Server)(nil)
 
+// Server 封装并管理底层 HTTP 服务与 ConnectRPC 路由处理器。
+type Server struct {
 	metaManager     meta.Manager
 	config          config.ServerConfig
 	logger          *slog.Logger

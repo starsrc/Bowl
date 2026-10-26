@@ -1,0 +1,17 @@
+# ==============================================================================
+# Goose Migration Builder Stage
+# ==============================================================================
+FROM golang:1.26-alpine3.24 AS builder
+
+RUN CGO_ENABLED=0 go install github.com/pressly/goose/v3/cmd/goose@v3.28.0
+
+# ==============================================================================
+# Goose Migration Runtime Stage
+# ==============================================================================
+FROM alpine:3.24
+
+RUN apk --no-cache add ca-certificates tzdata
+
+COPY --from=builder /go/bin/goose /bin/goose
+
+ENTRYPOINT ["/bin/goose"]

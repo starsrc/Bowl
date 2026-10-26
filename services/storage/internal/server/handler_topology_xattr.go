@@ -4,49 +4,10 @@ import (
 	"context"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
-
-// inodeToProtoForTopology 将元数据领域层 *meta.Inode 转换为 Protobuf *storagev1.Inode。
-// 函数命名保持专属前缀，避免与并行分支的 toProtoInode / toProtoAttribute 产生符号冲突。
-func inodeToProtoForTopology(in *meta.Inode) *storagev1.Inode {
-	if in == nil {
-		return nil
-	}
-
-	var atime, mtime, ctime *timestamppb.Timestamp
-	if !in.Attr.Atime.IsZero() {
-		atime = timestamppb.New(in.Attr.Atime)
-	}
-	if !in.Attr.Mtime.IsZero() {
-		mtime = timestamppb.New(in.Attr.Mtime)
-	}
-	if !in.Attr.Ctime.IsZero() {
-		ctime = timestamppb.New(in.Attr.Ctime)
-	}
-
-	return &storagev1.Inode{
-		Ino:        in.Ino,
-		Generation: in.Generation,
-		Attr: &storagev1.InodeAttribute{
-			Mode:    in.Attr.Mode,
-			Size:    in.Attr.Size,
-			Nlink:   in.Attr.Nlink,
-			Uid:     in.Attr.UID,
-			Gid:     in.Attr.GID,
-			Rdev:    in.Attr.Rdev,
-			Blksize: in.Attr.Blksize,
-			Blocks:  in.Attr.Blocks,
-			Atime:   atime,
-			Mtime:   mtime,
-			Ctime:   ctime,
-			Flags:   in.Attr.Flags,
-		},
-	}
-}
 
 // Link 创建硬链接，返回更新后的 Inode 实体元数据与内核缓存超时时长。
 func (s *Server) Link(ctx context.Context, req *connect.Request[storagev1.LinkRequest]) (*connect.Response[storagev1.LinkResponse], error) {
@@ -60,7 +21,7 @@ func (s *Server) Link(ctx context.Context, req *connect.Request[storagev1.LinkRe
 	}
 
 	return connect.NewResponse(&storagev1.LinkResponse{
-		Inode:               inodeToProtoForTopology(inode),
+		Inode:               toProtoInode(inode),
 		EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
 		AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
 	}), nil

@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
@@ -27,7 +26,7 @@ func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.Crea
 	}
 
 	return connect.NewResponse(&storagev1.CreateResponse{
-		Inode:               inodeToProtoForHandle(res.Inode),
+		Inode:               toProtoInode(res.Inode),
 		Fh:                  res.Fh,
 		OpenFlags:           res.OpenFlags,
 		EntryTimeoutSeconds: res.EntryTimeoutSeconds,
@@ -51,7 +50,7 @@ func (s *Server) TmpFile(ctx context.Context, req *connect.Request[storagev1.Tmp
 	}
 
 	return connect.NewResponse(&storagev1.TmpFileResponse{
-		Inode:               inodeToProtoForHandle(res.Inode),
+		Inode:               toProtoInode(res.Inode),
 		Fh:                  res.Fh,
 		OpenFlags:           res.OpenFlags,
 		EntryTimeoutSeconds: res.EntryTimeoutSeconds,
@@ -241,33 +240,6 @@ func (s *Server) Fallocate(ctx context.Context, req *connect.Request[storagev1.F
 	return connect.NewResponse(&storagev1.FallocateResponse{}), nil
 }
 
-// inodeToProtoForHandle 将 meta.Inode 转换为 proto storagev1.Inode。
-// 命名隔离：确保不与并行工单定义的 toProtoInode 冲突。
-func inodeToProtoForHandle(in *meta.Inode) *storagev1.Inode {
-	if in == nil {
-		return nil
-	}
-
-	return &storagev1.Inode{
-		Ino:        in.Ino,
-		Generation: in.Generation,
-		Attr: &storagev1.InodeAttribute{
-			Mode:    in.Attr.Mode,
-			Size:    in.Attr.Size,
-			Nlink:   in.Attr.Nlink,
-			Uid:     in.Attr.UID,
-			Gid:     in.Attr.GID,
-			Rdev:    in.Attr.Rdev,
-			Blksize: in.Attr.Blksize,
-			Blocks:  in.Attr.Blocks,
-			Atime:   timestamppb.New(in.Attr.Atime),
-			Mtime:   timestamppb.New(in.Attr.Mtime),
-			Ctime:   timestamppb.New(in.Attr.Ctime),
-			Flags:   in.Attr.Flags,
-		},
-	}
-}
-
 // toProtoDirEntry 将 meta.DirEntry 转换为 proto storagev1.DirEntry。
 func toProtoDirEntry(e meta.DirEntry) *storagev1.DirEntry {
 	return &storagev1.DirEntry{
@@ -284,7 +256,7 @@ func toProtoDirEntryPlus(e meta.DirEntryPlus) *storagev1.DirEntryPlus {
 		Ino:                 e.Ino,
 		Name:                e.Name,
 		NextOffset:          e.NextOffset,
-		Inode:               inodeToProtoForHandle(e.Inode),
+		Inode:               toProtoInode(e.Inode),
 		EntryTimeoutSeconds: e.EntryTimeoutSeconds,
 		AttrTimeoutSeconds:  e.AttrTimeoutSeconds,
 	}

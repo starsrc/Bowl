@@ -90,9 +90,9 @@ services:
     container_name: bowl-jaeger
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9686:16686" # Web UI
-      - "127.0.0.1:9317:4317"   # OTLP gRPC receiver
-      - "127.0.0.1:9318:4318"   # OTLP HTTP receiver
+      - "127.0.0.1:${JAEGER_UI_PORT:-9686}:16686" # Web UI
+      - "127.0.0.1:${JAEGER_OTLP_GRPC_PORT:-9317}:4317"   # OTLP gRPC receiver
+      - "127.0.0.1:${JAEGER_OTLP_HTTP_PORT:-9318}:4318"   # OTLP HTTP receiver
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     networks:

@@ -13,8 +13,6 @@ import (
 
 	"connectrpc.com/connect"
 	"go.uber.org/fx"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"github.com/starsrc/Aether/pkg/observability/telemetry"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
@@ -112,8 +110,7 @@ func New(p Params) (*Server, error) {
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 
-	h2cHandler := h2c.NewHandler(mux, &http2.Server{})
-	rootHandler := http.MaxBytesHandler(h2cHandler, p.Config.ReadMaxBytes())
+	rootHandler := http.MaxBytesHandler(mux, p.Config.ReadMaxBytes())
 
 	httpServer := &http.Server{
 		Addr:              p.Config.Addr(),

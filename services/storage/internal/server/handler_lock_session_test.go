@@ -301,9 +301,10 @@ func TestServer_SetLk(t *testing.T) {
 
 // TestServer_SetLkw 验证 SetLkw RPC 的成功路径与典型领域错误（EDEADLK, EINTR 等）。
 func TestServer_SetLkw(t *testing.T) {
-	ctx := context.Background()
-
 	t.Run("成功路径: 阻塞获取锁成功", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
 		mockMgr := metamock.NewMockManager(t)
 		client, teardown := setupTestServer(t, mockMgr)
 		defer teardown()
@@ -362,6 +363,9 @@ func TestServer_SetLkw(t *testing.T) {
 
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
 				mockMgr := metamock.NewMockManager(t)
 				client, teardown := setupTestServer(t, mockMgr)
 				defer teardown()

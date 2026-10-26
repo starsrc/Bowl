@@ -42,10 +42,8 @@ func BuildInterceptors(
 
 	interceptors := make([]connect.Interceptor, 0, 4)
 
-	// 1. 最外层脱敏：当 logger != nil 时挂载
-	if logger != nil {
-		interceptors = append(interceptors, slogx.NewMaskInterceptor(logger))
-	}
+	// 1. 最外层脱敏：无条件挂载（slogx.NewMaskInterceptor 原生支持 nil logger）
+	interceptors = append(interceptors, slogx.NewMaskInterceptor(logger))
 
 	// 2. 链路追踪
 	interceptors = append(interceptors, otelInterceptor)

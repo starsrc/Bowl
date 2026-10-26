@@ -16,6 +16,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
@@ -27,7 +28,7 @@ import (
 	"github.com/starsrc/bowl/pkg/validator"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
-	"github.com/starsrc/bowl/services/storage/internal/meta/mock"
+	metamock "github.com/starsrc/bowl/services/storage/internal/meta/mock"
 	"github.com/starsrc/bowl/services/storage/internal/server"
 )
 
@@ -177,7 +178,7 @@ func TestToConnectError_AllDomainSentinelsAndContext(t *testing.T) {
 
 // 2. 验证校验拦截器对非法请求直接拦截并返回 connect.CodeInvalidArgument 及 ErrorInfo{Reason, Domain}，不调用底层 meta.Manager。
 func TestValidationInterceptor_RejectsInvalidRequests(t *testing.T) {
-	mockMgr := mock.NewMockManager(t) // 零 Expectation，任何被测调用将导致直接失败
+	mockMgr := metamock.NewMockManager(t) // 零 Expectation，任何被测调用将导致直接失败
 
 	logCap := &logCapture{}
 	logger := testLogger(logCap)
@@ -264,7 +265,7 @@ func (h *overrideLookupHandler) Lookup(ctx context.Context, req *connect.Request
 
 // 3. 验证未知内部错误与包装错误经 MaskInterceptor 脱敏为 "internal server error"，同时完整保留 ErrorInfo Detail。
 func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
-	mockMgr := mock.NewMockManager(t)
+	mockMgr := metamock.NewMockManager(t)
 	logCap := &logCapture{}
 	logger := testLogger(logCap)
 
@@ -361,7 +362,7 @@ func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 
 // 4. 验证 server.Module 的 fx.Lifecycle 启动监听、网络通信与优雅停机
 func TestServer_FxLifecycle_StartAndStop(t *testing.T) {
-	mockMgr := mock.NewMockManager(t)
+	mockMgr := metamock.NewMockManager(t)
 	logCap := &logCapture{}
 	logger := testLogger(logCap)
 
@@ -401,8 +402,153 @@ func TestServer_FxLifecycle_StartAndStop(t *testing.T) {
 	assert.Error(t, dialErr, "停机后监听端口应已释放关闭")
 }
 
+// 5. 验证存在在途 RPC 请求时触发 OnStop 优雅停机排空：OnStop 会等待在途 RPC 处理完毕并成功返回响应后才完成停机。
+func TestServer_FxLifecycle_GracefulShutdownDrainsInflightRequests(t *testing.T) {
+	mockMgr := metamock.NewMockManager(t)
+	var srv *server.Server
+
+	cfg := defaultTestConfig()
+	cfg.Port = 0
+	cfg.StopTimeoutVal = 5 * time.Second
+
+	app := fxtest.New(t,
+		fx.Provide(
+			func() config.ServerConfig { return cfg },
+			func() meta.Manager { return mockMgr },
+		),
+		server.Module,
+		fx.Populate(&srv),
+	)
+
+	app.RequireStart()
+	require.NotNil(t, srv)
+
+	addr := srv.Addr()
+	client := storagev1connect.NewStorageServiceClient(http.DefaultClient, "http://"+addr)
+
+	reqStarted := make(chan struct{})
+	allowFinish := make(chan struct{})
+
+	mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("slow.txt")).Run(func(ctx context.Context, parentIno uint64, name []byte) {
+		close(reqStarted)
+		<-allowFinish
+	}).Return(sampleInode(42, meta.S_IFREG|0o644), nil).Once()
+
+	var (
+		callResp *connect.Response[storagev1.LookupResponse]
+		callErr  error
+		rpcDone  = make(chan struct{})
+	)
+
+	go func() {
+		defer close(rpcDone)
+		callResp, callErr = client.Lookup(context.Background(), connect.NewRequest(&storagev1.LookupRequest{
+			ParentIno: 1,
+			Name:      []byte("slow.txt"),
+		}))
+	}()
+
+	select {
+	case <-reqStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for RPC to start")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		app.RequireStop()
+	}()
+
+	// 此时停机流程应因在途 RPC 正在执行而等待
+	select {
+	case <-stopDone:
+		t.Fatal("server stopped prematurely while RPC was still inflight")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// 允许在途 RPC 恢复并完成响应
+	close(allowFinish)
+
+	select {
+	case <-rpcDone:
+		require.NoError(t, callErr)
+		require.NotNil(t, callResp)
+		assert.Equal(t, uint64(42), callResp.Msg.GetInode().GetIno())
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for inflight RPC to complete")
+	}
+
+	// 验证停机流程在在途 RPC 响应完成后顺利退出
+	select {
+	case <-stopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for OnStop to complete after inflight RPC finished")
+	}
+}
+
+// 6. 验证当 Logger 为 nil 时，通过真实 srv.Handler() 发起的未知内部错误依然被脱敏为 "internal server error"，且 meta.ErrIO 的 ErrorInfo 依然完整保留。
+func TestMaskInterceptor_NilLogger_MasksInternalAndRetainsErrorInfo(t *testing.T) {
+	mockMgr := metamock.NewMockManager(t)
+
+	srv, err := server.New(server.Params{
+		Config:      defaultTestConfig(),
+		MetaManager: mockMgr,
+		Logger:      nil,
+	})
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := storagev1connect.NewStorageServiceClient(http.DefaultClient, ts.URL)
+	ctx := context.Background()
+
+	t.Run("Logger 为 nil 时未知内部错误依然被脱敏为 internal server error", func(t *testing.T) {
+		mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("secret.txt")).
+			Return(nil, errors.New("db connection reset: pq fatal socket read")).Once()
+
+		resp, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+			ParentIno: 1,
+			Name:      []byte("secret.txt"),
+		}))
+		require.Error(t, callErr)
+		assert.Nil(t, resp)
+
+		assert.Equal(t, connect.CodeInternal, connect.CodeOf(callErr))
+		var connErr *connect.Error
+		require.True(t, errors.As(callErr, &connErr))
+		assert.Equal(t, "internal server error", connErr.Message())
+		assert.NotContains(t, connErr.Message(), "pq fatal socket read")
+	})
+
+	t.Run("Logger 为 nil 时 meta.ErrIO 脱敏为 internal server error 且保留 EIO ErrorInfo", func(t *testing.T) {
+		mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("io_err.txt")).
+			Return(nil, fmt.Errorf("%w: underlying disk crash", meta.ErrIO)).Once()
+
+		resp, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+			ParentIno: 1,
+			Name:      []byte("io_err.txt"),
+		}))
+		require.Error(t, callErr)
+		assert.Nil(t, resp)
+
+		assert.Equal(t, connect.CodeInternal, connect.CodeOf(callErr))
+		var connErr *connect.Error
+		require.True(t, errors.As(callErr, &connErr))
+		assert.Equal(t, "internal server error", connErr.Message())
+
+		info := server.ExtractErrorInfo(callErr)
+		require.NotNil(t, info, "脱敏后必须完整保留 Details 中的 ErrorInfo")
+		assert.Equal(t, "EIO", info.GetReason())
+		assert.Equal(t, "bowl.storage", info.GetDomain())
+	})
+
+	mockMgr.AssertExpectations(t)
+}
+
 func TestServer_ValidateConfigError(t *testing.T) {
-	mockMgr := mock.NewMockManager(t)
+	mockMgr := metamock.NewMockManager(t)
 	cfg := defaultTestConfig()
 	cfg.Port = 99999 // 非法端口
 
@@ -435,7 +581,7 @@ func TestServer_PortConflict_StartFails(t *testing.T) {
 	app := fxtest.New(t,
 		fx.Provide(
 			func() config.ServerConfig { return cfg },
-			func() meta.Manager { return mock.NewMockManager(t) },
+			func() meta.Manager { return metamock.NewMockManager(t) },
 		),
 		server.Module,
 	)
@@ -454,7 +600,7 @@ func TestToConnectError_UnknownAndUnmappedErrors(t *testing.T) {
 }
 
 func TestServer_Getters(t *testing.T) {
-	mockMgr := mock.NewMockManager(t)
+	mockMgr := metamock.NewMockManager(t)
 	cfg := defaultTestConfig()
 	srv, err := server.New(server.Params{
 		Config:      cfg,

@@ -119,7 +119,7 @@ tasks:
       STORAGE_IMAGE_NAME: '{{.STORAGE_IMAGE_NAME}}'
       TAG: '{{.TAG}}'
     cmds:
-      - defer: docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
+      - defer: docker compose -f {{.COMPOSE_FILE}} down --remove-orphans
       - docker compose -f {{.COMPOSE_FILE}} up -d --build --wait storage-service
       - go test -tags=e2e -v -count=1 ./e2e/... {{.CLI_ARGS}}
 

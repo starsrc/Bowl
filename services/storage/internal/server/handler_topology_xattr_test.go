@@ -42,7 +42,9 @@ func TestHandler_Link(t *testing.T) {
 		mockMgr, client, cleanup := setupTopologyXattrTestServer(t)
 		defer cleanup()
 
-		now := time.Now().Truncate(time.Microsecond)
+		atime := time.Date(2026, 10, 26, 10, 1, 2, 123456789, time.UTC)
+		mtime := time.Date(2026, 10, 26, 11, 2, 3, 234567890, time.UTC)
+		ctime := time.Date(2026, 10, 26, 12, 3, 4, 345678901, time.UTC)
 		expectedInode := &meta.Inode{
 			Ino:        1001,
 			Generation: 1,
@@ -50,15 +52,15 @@ func TestHandler_Link(t *testing.T) {
 				Mode:      0o100644,
 				Size:      2048,
 				Nlink:     2,
-				UID:       1000,
-				GID:       1000,
-				Rdev:      0,
+				UID:       1001,
+				GID:       2002,
+				Rdev:      259,
 				Blksize:   4096,
 				Blocks:    4,
-				Atime:     now,
-				Mtime:     now,
-				Ctime:     now,
-				Flags:     0,
+				Atime:     atime,
+				Mtime:     mtime,
+				Ctime:     ctime,
+				Flags:     meta.FlagImmutable,
 				ParentIno: 1,
 			},
 			EntryTimeoutSeconds: 2.5,
@@ -95,13 +97,15 @@ func TestHandler_Link(t *testing.T) {
 		assert.Equal(t, uint32(0o100644), attr.GetMode())
 		assert.Equal(t, uint64(2048), attr.GetSize())
 		assert.Equal(t, uint32(2), attr.GetNlink())
-		assert.Equal(t, uint32(1000), attr.GetUid())
-		assert.Equal(t, uint32(1000), attr.GetGid())
+		assert.Equal(t, uint32(1001), attr.GetUid())
+		assert.Equal(t, uint32(2002), attr.GetGid())
+		assert.Equal(t, uint32(259), attr.GetRdev())
+		assert.Equal(t, uint32(meta.FlagImmutable), attr.GetFlags())
 		assert.Equal(t, uint32(4096), attr.GetBlksize())
 		assert.Equal(t, uint64(4), attr.GetBlocks())
-		assert.Equal(t, now.Unix(), attr.GetAtime().GetSeconds())
-		assert.Equal(t, now.Unix(), attr.GetMtime().GetSeconds())
-		assert.Equal(t, now.Unix(), attr.GetCtime().GetSeconds())
+		assert.True(t, attr.GetAtime().AsTime().Equal(atime), "Atime 必须满足纳秒级时间戳相等")
+		assert.True(t, attr.GetMtime().AsTime().Equal(mtime), "Mtime 必须满足纳秒级时间戳相等")
+		assert.True(t, attr.GetCtime().AsTime().Equal(ctime), "Ctime 必须满足纳秒级时间戳相等")
 	})
 
 	t.Run("跨设备链接失败映射为 EXDEV", func(t *testing.T) {

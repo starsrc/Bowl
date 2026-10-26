@@ -10,6 +10,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/starsrc/bowl/e2e/testutil"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -362,19 +363,37 @@ func TestDomainSentinels_ContractMapping(t *testing.T) {
 		}))
 		testutil.RequireConnectError(t, err, connect.CodeFailedPrecondition, "EBADF")
 
-		// 以只读模式打开文件并尝试申请写锁
+		// 以只读模式打开文件并显式绑定会话 70001
 		readOnlyOpen, err := client.Open(ctx, connect.NewRequest(&storagev1.OpenRequest{
-			Ino:   fileIno,
-			Flags: oRdOnly,
+			Ino:       fileIno,
+			Flags:     oRdOnly,
+			SessionId: proto.Uint64(70001),
 		}))
 		require.NoError(t, err)
 		readFh := readOnlyOpen.Msg.GetFh()
 		defer func() {
 			_, _ = client.Release(ctx, connect.NewRequest(&storagev1.ReleaseRequest{
-				Ino: fileIno,
-				Fh:  readFh,
+				Ino:       fileIno,
+				Fh:        readFh,
+				SessionId: proto.Uint64(70001),
 			}))
 		}()
+
+		// 先使用该只读句柄调用 SetLk 申请共享读锁（证明句柄与会话合法有效）
+		_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
+			Ino:       fileIno,
+			Fh:        readFh,
+			LockOwner: 303,
+			SessionId: 70001,
+			Lk: &storagev1.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  fRdLck,
+				Pid:   3003,
+			},
+			LkFlags: 0,
+		}))
+		require.NoError(t, err, "只读句柄申请共享读锁应成功")
 
 		// 在只读句柄上申请排他写锁 -> EBADF
 		_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{

@@ -45,7 +45,9 @@ func setupDiskNodeTestClient(t *testing.T) (storagev1connect.StorageServiceClien
 
 // 示例通用 Inode 构造辅助。
 func sampleInode(ino uint64, mode uint32) *meta.Inode {
-	now := time.Now().Truncate(time.Microsecond)
+	atime := time.Date(2026, 10, 26, 10, 1, 2, 123456789, time.UTC)
+	mtime := time.Date(2026, 10, 26, 11, 2, 3, 234567890, time.UTC)
+	ctime := time.Date(2026, 10, 26, 12, 3, 4, 345678901, time.UTC)
 	return &meta.Inode{
 		Ino:        ino,
 		Generation: 1,
@@ -53,15 +55,15 @@ func sampleInode(ino uint64, mode uint32) *meta.Inode {
 			Mode:      mode,
 			Size:      1024,
 			Nlink:     1,
-			UID:       1000,
-			GID:       1000,
-			Rdev:      0,
+			UID:       1001,
+			GID:       2002,
+			Rdev:      259,
 			Blksize:   meta.DefaultBlockSize,
 			Blocks:    2,
-			Atime:     now,
-			Mtime:     now,
-			Ctime:     now,
-			Flags:     0,
+			Atime:     atime,
+			Mtime:     mtime,
+			Ctime:     ctime,
+			Flags:     meta.FlagImmutable,
 			ParentIno: 1,
 		},
 		EntryTimeoutSeconds: 1.5,
@@ -453,6 +455,22 @@ func TestServer_NodeRPCs(t *testing.T) {
 		require.NotNil(t, res.Msg.Inode)
 		assert.Equal(t, uint64(2), res.Msg.Inode.Ino)
 		assert.Equal(t, 2.0, res.Msg.AttrTimeoutSeconds)
+
+		// 逐项校验 UID、GID、Rdev、Flags 与纳秒级时间戳精度
+		attr := res.Msg.Inode.Attr
+		require.NotNil(t, attr)
+		assert.Equal(t, uint32(meta.S_IFREG|0o644), attr.Mode)
+		assert.Equal(t, uint64(1024), attr.Size)
+		assert.Equal(t, uint32(1), attr.Nlink)
+		assert.Equal(t, uint32(1001), attr.Uid)
+		assert.Equal(t, uint32(2002), attr.Gid)
+		assert.Equal(t, uint32(259), attr.Rdev)
+		assert.Equal(t, uint32(meta.FlagImmutable), attr.Flags)
+		assert.Equal(t, uint32(meta.DefaultBlockSize), attr.Blksize)
+		assert.Equal(t, uint64(2), attr.Blocks)
+		assert.True(t, attr.Atime.AsTime().Equal(inode.Attr.Atime), "Atime 必须满足纳秒级时间戳相等")
+		assert.True(t, attr.Mtime.AsTime().Equal(inode.Attr.Mtime), "Mtime 必须满足纳秒级时间戳相等")
+		assert.True(t, attr.Ctime.AsTime().Equal(inode.Attr.Ctime), "Ctime 必须满足纳秒级时间戳相等")
 	})
 
 	t.Run("GetAttr_NotFound", func(t *testing.T) {
@@ -477,14 +495,16 @@ func TestServer_NodeRPCs(t *testing.T) {
 
 		mode := uint32(0o755)
 		uid := uint32(1001)
-		gid := uint32(1002)
+		gid := uint32(2002)
 		size := uint64(2048)
-		now := time.Now().Truncate(time.Microsecond)
-		atimeProto := timestamppb.New(now)
-		mtimeProto := timestamppb.New(now.Add(time.Minute))
+		rdev := uint32(259)
+		atime := time.Date(2026, 10, 26, 10, 1, 2, 123456789, time.UTC)
+		mtime := time.Date(2026, 10, 26, 11, 2, 3, 234567890, time.UTC)
+		atimeProto := timestamppb.New(atime)
+		mtimeProto := timestamppb.New(mtime)
 		fh := uint64(42)
 		sessionID := uint64(100)
-		flags := uint32(meta.FlagAppend)
+		flags := uint32(meta.FlagImmutable)
 
 		mockMgr.EXPECT().
 			SetAttr(mock.Anything, uint64(2), mock.MatchedBy(func(in meta.SetAttrInput) bool {
@@ -500,10 +520,10 @@ func TestServer_NodeRPCs(t *testing.T) {
 				if in.Size == nil || *in.Size != size {
 					return false
 				}
-				if in.Atime == nil || in.Atime.Unix() != now.Unix() {
+				if in.Atime == nil || !in.Atime.Equal(atime) {
 					return false
 				}
-				if in.Mtime == nil || in.Mtime.Unix() != now.Add(time.Minute).Unix() {
+				if in.Mtime == nil || !in.Mtime.Equal(mtime) {
 					return false
 				}
 				if in.Fh == nil || *in.Fh != fh {
@@ -538,6 +558,17 @@ func TestServer_NodeRPCs(t *testing.T) {
 		require.NotNil(t, res.Msg.Inode)
 		assert.Equal(t, uint64(2), res.Msg.Inode.Ino)
 		assert.Equal(t, 2.0, res.Msg.AttrTimeoutSeconds)
+
+		// 响应断言逐项校验 UID、GID、Rdev、Flags 与纳秒级时间戳相等
+		attr := res.Msg.Inode.Attr
+		require.NotNil(t, attr)
+		assert.Equal(t, uid, attr.Uid)
+		assert.Equal(t, gid, attr.Gid)
+		assert.Equal(t, rdev, attr.Rdev)
+		assert.Equal(t, flags, attr.Flags)
+		assert.True(t, attr.Atime.AsTime().Equal(inode.Attr.Atime), "Atime 必须满足纳秒级时间戳相等")
+		assert.True(t, attr.Mtime.AsTime().Equal(inode.Attr.Mtime), "Mtime 必须满足纳秒级时间戳相等")
+		assert.True(t, attr.Ctime.AsTime().Equal(inode.Attr.Ctime), "Ctime 必须满足纳秒级时间戳相等")
 	})
 
 	t.Run("SetAttr_Success_AtimeNowMtimeNow", func(t *testing.T) {

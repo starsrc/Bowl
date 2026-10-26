@@ -12,6 +12,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/starsrc/bowl/e2e/testutil"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -338,6 +339,24 @@ func TestFileLock_POSIXAndFlock(t *testing.T) {
 	wg.Wait()
 	require.NoError(t, waitErr, "session2 阻塞等待后被正常唤醒获锁，不应报错")
 
+	// 用第三个锁拥有者探测该区间，断言返回被唤醒等待者（session2 / pid 2002）的写锁冲突信息
+	probeWakeupResp, err := client.GetLk(ctx, connect.NewRequest(&storagev1.GetLkRequest{
+		Ino:       fileIno,
+		Fh:        fh1,
+		LockOwner: 303,
+		SessionId: session1,
+		Lk: &storagev1.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  fRdLck,
+			Pid:   3003,
+		},
+		LkFlags: 0,
+	}))
+	require.NoError(t, err, "GetLk 探测等待者获锁状态应成功")
+	assert.Equal(t, fWrLck, probeWakeupResp.Msg.GetLk().GetType(), "被唤醒等待者获锁后应冲突")
+	assert.Equal(t, uint32(2002), probeWakeupResp.Msg.GetLk().GetPid(), "冲突锁 PID 应为 session2 的 2002")
+
 	// session2 释放写锁
 	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
 		Ino:       fileIno,
@@ -376,13 +395,14 @@ func TestFileLock_POSIXAndFlock(t *testing.T) {
 
 	// session1 发起 SetLkw 升级为排他写锁，因 session2 持有读锁而进入等待
 	var deadlockWg sync.WaitGroup
+	waiter1ErrCh := make(chan error, 1)
 	deadlockWg.Add(1)
 	go func() {
 		defer deadlockWg.Done()
 		upgCtx, upgCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer upgCancel()
 
-		_, _ = client.SetLkw(upgCtx, connect.NewRequest(&storagev1.SetLkwRequest{
+		_, upgErr := client.SetLkw(upgCtx, connect.NewRequest(&storagev1.SetLkwRequest{
 			Ino:       fileIno,
 			Fh:        fh1,
 			LockOwner: 101,
@@ -390,6 +410,7 @@ func TestFileLock_POSIXAndFlock(t *testing.T) {
 			RequestId: 90002,
 			Lk:        &storagev1.FileLock{Start: 0, End: 100, Type: fWrLck, Pid: 1001},
 		}))
+		waiter1ErrCh <- upgErr
 	}()
 
 	time.Sleep(200 * time.Millisecond)
@@ -416,15 +437,35 @@ func TestFileLock_POSIXAndFlock(t *testing.T) {
 	require.NoError(t, err)
 
 	deadlockWg.Wait()
+	require.NoError(t, <-waiter1ErrCh, "首个等待者在对端释放读锁后应成功升级并获锁")
+
+	// 用另一 LockOwner 调用 GetLk 断言首个等待者确已成功升级并持有排他写锁
+	probeDeadlockResp, err := client.GetLk(ctx, connect.NewRequest(&storagev1.GetLkRequest{
+		Ino:       fileIno,
+		Fh:        fh2,
+		LockOwner: 202,
+		SessionId: session2,
+		Lk: &storagev1.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  fRdLck,
+			Pid:   2002,
+		},
+		LkFlags: 0,
+	}))
+	require.NoError(t, err, "探测首个等待者升级后的写锁应成功")
+	assert.Equal(t, fWrLck, probeDeadlockResp.Msg.GetLk().GetType(), "首个等待者应成功升级为写锁")
+	assert.Equal(t, uint32(1001), probeDeadlockResp.Msg.GetLk().GetPid(), "写锁 PID 应为 1001")
 
 	// 清理 session1 获锁后的写锁
-	_, _ = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
+	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
 		Ino:       fileIno,
 		Fh:        fh1,
 		LockOwner: 101,
 		SessionId: session1,
 		Lk:        &storagev1.FileLock{Start: 0, End: 100, Type: fUnLck, Pid: 1001},
 	}))
+	require.NoError(t, err, "释放 session1 升级后的写锁应成功")
 
 	// 7. SetLkw 阻塞等待取消 EINTR
 	// session1 重新持锁
@@ -461,15 +502,52 @@ func TestFileLock_POSIXAndFlock(t *testing.T) {
 	require.Error(t, cancelErr, "主动取消必须产生错误")
 	assert.Equal(t, connect.CodeCanceled, connect.CodeOf(cancelErr), "客户端主动取消状态码必须为 Canceled")
 
-	// 8. BSD flock 整文件锁兼容性验证 (lk_flags = FuseLkFlock, start=0, end=math.MaxInt64)
-	// session1 释放 POSIX 锁
-	_, _ = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
+	// 释放原持锁者（owner1）持有的 POSIX 写锁
+	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
 		Ino:       fileIno,
 		Fh:        fh1,
 		LockOwner: 101,
 		SessionId: session1,
 		Lk:        &storagev1.FileLock{Start: 0, End: 100, Type: fUnLck, Pid: 1001},
 	}))
+	require.NoError(t, err, "释放 owner1 POSIX 写锁应成功")
+
+	// 在会话仍有效期内，使用另一 LockOwner、新 RequestID 调用带短超时的 SetLkw 申请同一区间排他写锁并断言立即成功
+	quickCtx, quickCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer quickCancel()
+	_, err = client.SetLkw(quickCtx, connect.NewRequest(&storagev1.SetLkwRequest{
+		Ino:       fileIno,
+		Fh:        fh2,
+		LockOwner: 202,
+		SessionId: session2,
+		RequestId: 90005,
+		Lk: &storagev1.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  fWrLck,
+			Pid:   2002,
+		},
+		LkFlags: 0,
+	}))
+	require.NoError(t, err, "取消等待后原锁释放，重新申请写锁应立即成功，证明无幽灵等待者残留")
+
+	// 随后释放该测试写锁
+	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
+		Ino:       fileIno,
+		Fh:        fh2,
+		LockOwner: 202,
+		SessionId: session2,
+		Lk: &storagev1.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  fUnLck,
+			Pid:   2002,
+		},
+		LkFlags: 0,
+	}))
+	require.NoError(t, err, "释放测试写锁应成功")
+
+	// 8. BSD flock 整文件锁兼容性验证 (lk_flags = FuseLkFlock, start=0, end=math.MaxInt64)
 
 	flockWholeFile := &storagev1.FileLock{
 		Start: 0,
@@ -559,6 +637,7 @@ func TestSession_LeaseExpirationAndOrphanReclamation(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	orphanIno := createResp.Msg.GetInode().GetIno()
+	orphanFh := createResp.Msg.GetFh()
 
 	// 4. 对该文件发起 Unlink。此时 nlink = 0，但由于 shortSessionID 下的句柄仍未关闭，属于打开孤儿
 	_, err = client.Unlink(ctx, connect.NewRequest(&storagev1.UnlinkRequest{
@@ -567,12 +646,28 @@ func TestSession_LeaseExpirationAndOrphanReclamation(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
+	// 使用携带相同 SessionId 与 Fh 的 SetAttr（设置 Size: proto.Uint64(4096)）建立非零配额
+	_, err = client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
+		Ino:       orphanIno,
+		Fh:        &orphanFh,
+		SessionId: &shortSessionID,
+		Size:      proto.Uint64(4096),
+	}))
+	require.NoError(t, err, "设置孤儿文件大小为 4096 应成功")
+
+	// 在等待会话过期前先调用 StatFS 断言 UsedBytes == 4096 且 Files == 2
+	statBefore, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{Ino: rootIno}))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4096), statBefore.Msg.GetUsedBytes(), "会话未过期前孤儿节点占用 4096 字节配额")
+	assert.Equal(t, uint64(2), statBefore.Msg.GetFiles(), "根节点与孤儿节点共 2 个 Inode")
+
 	// 验证此时该孤儿节点依然可以通过 Inode 获取到
 	getOrphanResp, err := client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
 		Ino: orphanIno,
 	}))
 	require.NoError(t, err, "会话存活期间打开孤儿文件必须依然可查询")
 	assert.Equal(t, uint32(0), getOrphanResp.Msg.GetInode().GetAttr().GetNlink())
+	assert.Equal(t, uint64(4096), getOrphanResp.Msg.GetInode().GetAttr().GetSize())
 
 	// 5. 等待会话租约过期：docker-compose.yaml.example 中 STORAGE_SESSION_LEASE_TTL 为 2s
 	// 我们等待 2.6 秒，确保 session 达到过期时间

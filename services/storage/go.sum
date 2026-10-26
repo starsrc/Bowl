@@ -12,6 +12,8 @@ connectrpc.com/otelconnect v0.12.0 h1:SOQ2LvyPUON2WekzWUWhXEy2NHusTevV64xa6kAHsr
 connectrpc.com/otelconnect v0.12.0/go.mod h1:BB9a3Z9DDsx8AAJREAdKVIENfa70XB1KQXWKRbfpLxw=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
 github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
+github.com/brianvoe/gofakeit/v6 v6.28.0 h1:Xib46XXuQfmlLS2EXRuJpqcw8St6qSZz75OUo0tgAW4=
+github.com/brianvoe/gofakeit/v6 v6.28.0/go.mod h1:Xj58BMSnFqcn/fAQeSK+/PLtC5kSb7FJIq4JyGa8vEs=
 github.com/caarlos0/env/v11 v11.4.1 h1:fYwH0sWEsBSMPG7t4e/PEfTFzrWrpjyygXyUnWiSwEw=
 github.com/caarlos0/env/v11 v11.4.1/go.mod h1:qupehSf/Y0TUTsxKywqRt/vJjN5nz6vauiYEUUr8P4U=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
@@ -48,6 +50,8 @@ github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFr
 github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
 github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/rodaine/protogofakeit v0.1.1 h1:ZKouljuRM3A+TArppfBqnH8tGZHOwM/pjvtXe9DaXH8=
+github.com/rodaine/protogofakeit v0.1.1/go.mod h1:pXn/AstBYMaSfc1/RqH3N82pBuxtWgejz1AlYpY1mI0=
 github.com/starsrc/Aether/pkg/observability v0.0.0-20261026051551-11f1527158f0 h1:nHS1xC1Ud4SJkrTh8gLh1KQAmG6hz3z8/ZLwVSNAfOA=
 github.com/starsrc/Aether/pkg/observability v0.0.0-20261026051551-11f1527158f0/go.mod h1:wAIjLW/QLLr9GZWKkDMH/qnr+BTQnF8Oq7OU2q6V6fc=
 github.com/starsrc/Aether/pkg/tx v0.0.0-20261015162448-6c422ba5431b h1:vE2wuU5Hu5s6SzZtCfG4i6Uz2lqu24l0DdrFvir5sp8=

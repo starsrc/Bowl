@@ -29,6 +29,7 @@ go.work.sum
 .DS_Store
 .tdd_list.md
 docker-compose.yaml
+services/storage/vendor/
 .worktrees/
 .r3-export/
 .r3-ui/

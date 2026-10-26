@@ -3,21 +3,15 @@
 # ==============================================================================
 FROM golang:1.26-alpine3.24 AS builder
 
+RUN apk --no-cache add ca-certificates tzdata
+
 ARG GOPROXY=https://goproxy.cn,direct
 ENV GOPROXY=${GOPROXY}
 
 WORKDIR /src
 
-# 利用 Docker 构建缓存：先复制 Go 依赖描述文件
+# 复制根模块描述与共享协议代码
 COPY go.mod go.sum ./
-COPY services/storage/go.mod services/storage/go.sum ./services/storage/
-
-# 下载 Go 模块依赖
-WORKDIR /src/services/storage
-RUN go mod download
-
-# 复制协议生成文件、通用共享包与服务源码
-WORKDIR /src
 COPY gen ./gen
 COPY pkg ./pkg
 COPY services/storage ./services/storage
@@ -28,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-w -s" \
     -o /bin/storage-service \
-    ./cmd/main.go
+    ./cmd
 
 # ==============================================================================
 # Production Runtime Stage

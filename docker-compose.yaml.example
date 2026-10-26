@@ -1,0 +1,106 @@
+services:
+  # ==============================================================================
+  # Database Service (PostgreSQL 最新版本)
+  # ==============================================================================
+  postgres:
+    image: postgres:18-alpine
+    container_name: bowl-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bowl
+    ports:
+      - "${POSTGRES_PORT:-9432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bowl"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks:
+      - bowl-net
+
+  # ==============================================================================
+  # Database Migration Service (Goose)
+  # 在 Postgres 数据库就绪后自动执行迁移，执行完毕后退出
+  # ==============================================================================
+  migration:
+    image: bowl-storage-migration:latest
+    build:
+      context: .
+      dockerfile: services/storage/Dockerfile.migration
+    container_name: bowl-storage-migration
+    command: ["-dir", "/migrations", "postgres", "postgres://postgres:postgres@postgres:5432/bowl?sslmode=disable", "up"]
+    volumes:
+      - ./services/storage/db/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - bowl-net
+
+  # ==============================================================================
+  # Storage Service (ConnectRPC)
+  # 依赖数据库与迁移完成，开箱即用拉起
+  # ==============================================================================
+  storage-service:
+    image: ${STORAGE_IMAGE_NAME:-bowl-storage}:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: services/storage/Dockerfile
+    container_name: bowl-storage-service
+    restart: unless-stopped
+    ports:
+      - "${STORAGE_PORT:-9000}:9000"
+    environment:
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: 9000
+      DB_DSN: "postgres://postgres:postgres@postgres:5432/bowl?sslmode=disable"
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: "bowl-storage"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "jaeger:4317"
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      STORAGE_SESSION_LEASE_TTL: "${STORAGE_SESSION_LEASE_TTL:-2s}"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9000 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+    networks:
+      - bowl-net
+
+  # ==============================================================================
+  # Tracing Backend (Jaeger All-In-One)
+  # 接收 OTLP 遥测数据并提供可视化 Web UI (http://localhost:9686)
+  # ==============================================================================
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: bowl-jaeger
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9686:16686" # Web UI
+      - "127.0.0.1:9317:4317"   # OTLP gRPC receiver
+      - "127.0.0.1:9318:4318"   # OTLP HTTP receiver
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - bowl-net
+
+volumes:
+  postgres_data:
+
+networks:
+  bowl-net:
+    driver: bridge

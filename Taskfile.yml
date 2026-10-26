@@ -1,6 +1,11 @@
 version: '3'
 
 vars:
+  COMPOSE_FILE: docker-compose.yaml
+  COMPOSE_EXAMPLE: docker-compose.yaml.example
+  STORAGE_DOCKERFILE: services/storage/Dockerfile
+  STORAGE_IMAGE_NAME: '{{.STORAGE_IMAGE_NAME | default "bowl-storage"}}'
+  TAG: '{{.TAG | default "latest"}}'
   PROTO_DIR: proto
   GEN_DIR: gen
   STORAGE_DB_DSN: '{{.STORAGE_DB_DSN | default "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"}}'
@@ -14,6 +19,59 @@ tasks:
     desc: "List all available tasks"
     cmds:
       - task --list
+
+  init:
+    desc: "Ensure docker-compose.yaml exists (copies from example if missing)"
+    status:
+      - test -f {{.COMPOSE_FILE}}
+    cmds:
+      - cp {{.COMPOSE_EXAMPLE}} {{.COMPOSE_FILE}}
+      - echo "Created {{.COMPOSE_FILE}} from {{.COMPOSE_EXAMPLE}}."
+
+  vendor:storage:
+    desc: "Vendor dependencies for storage service (ensures offline docker build)"
+    internal: true
+    cmds:
+      - go -C services/storage mod vendor
+
+  run:
+    desc: "Start all services in background via docker compose (supports TAG=xxx, e.g. task run TAG=test)"
+    deps: [init]
+    env:
+      STORAGE_IMAGE_NAME: '{{.STORAGE_IMAGE_NAME}}'
+      TAG: '{{.TAG}}'
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} up -d {{.CLI_ARGS}}
+
+  build:
+    desc: "Build new docker image(s) via docker compose (supports TAG=xxx, e.g. task build TAG=test)"
+    deps: [init, vendor:storage]
+    env:
+      STORAGE_IMAGE_NAME: '{{.STORAGE_IMAGE_NAME}}'
+      TAG: '{{.TAG}}'
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} build {{.CLI_ARGS}}
+
+  build:storage:
+    desc: "Build storage service docker image directly with docker build (supports TAG=xxx, e.g. task build:storage TAG=test)"
+    deps: [vendor:storage]
+    cmds:
+      - docker build -t {{.STORAGE_IMAGE_NAME}}:{{.TAG}} -f {{.STORAGE_DOCKERFILE}} . {{.CLI_ARGS}}
+
+  down:
+    desc: "Stop and remove docker compose containers and networks"
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} down {{.CLI_ARGS}}
+
+  logs:
+    desc: "Follow docker compose service logs"
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} logs -f {{.CLI_ARGS}}
+
+  ps:
+    desc: "Show status of docker compose services"
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} ps
 
   buf:generate:
     desc: "Generate code from Protocol Buffers using Buf"
@@ -54,6 +112,17 @@ tasks:
       - task: test:storage
         vars: { CLI_ARGS: '{{.CLI_ARGS}}' }
 
+  test:e2e:
+    desc: "Run cross-service E2E tests against live docker compose services"
+    deps: [init, vendor:storage]
+    env:
+      STORAGE_IMAGE_NAME: '{{.STORAGE_IMAGE_NAME}}'
+      TAG: '{{.TAG}}'
+    cmds:
+      - defer: docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
+      - docker compose -f {{.COMPOSE_FILE}} up -d --build --wait storage-service
+      - go test -tags=e2e -v -count=1 ./e2e/... {{.CLI_ARGS}}
+
   test:formal:
     desc: "Run deep formal state-machine and concurrent verification for storage metadata"
     dir: services/storage
@@ -71,6 +140,7 @@ tasks:
       - test -z "$(gofmt -s -l .)"
       - go vet ./...
       - go -C services/storage vet ./...
+      - go vet -tags=e2e ./e2e/...
 
   goose:storage:up:
     desc: "执行 storage 服务的 goose 向上迁移 (Up)"

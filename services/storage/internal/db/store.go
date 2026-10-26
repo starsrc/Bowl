@@ -1,11 +1,17 @@
 package db
 
 import (
+	"context"
+	"fmt"
+
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/starsrc/Aether/pkg/observability/telemetry"
 	"github.com/starsrc/Aether/pkg/tx"
+	"github.com/starsrc/bowl/services/storage/internal/config"
 )
 
 // Store 组合 Querier 与通用事务执行器接口。
@@ -18,6 +24,7 @@ type Store interface {
 type SQLStore struct {
 	*Queries
 	tx.Transactor[Querier]
+	pool *pgxpool.Pool
 }
 
 var _ Store = (*SQLStore)(nil)
@@ -29,10 +36,101 @@ func NewStore(pool *pgxpool.Pool) Store {
 		Transactor: tx.NewPGXTransactor(pool, func(rawTx pgx.Tx) Querier {
 			return New(rawTx)
 		}),
+		pool: pool,
 	}
+}
+
+// Close 关闭底层数据库连接池。
+func (s *SQLStore) Close() {
+	if s.pool != nil {
+		s.pool.Close()
+	}
+}
+
+// Pool 返回底层 pgxpool.Pool 实例。
+func (s *SQLStore) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
+// OpenPool 根据 DBPoolConfig 初始化底层 pgxpool.Pool。
+func OpenPool(cfg config.DBPoolConfig) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(cfg.DSN())
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse dbpool config: %w", err)
+	}
+
+	if cfg.TracingEnabled() {
+		poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
+	}
+
+	if cfg.MaxConns() > 0 {
+		poolCfg.MaxConns = cfg.MaxConns()
+	}
+	if cfg.MinConns() > 0 {
+		poolCfg.MinConns = cfg.MinConns()
+	}
+	// 尺寸保护：当 poolConfig.MaxConns > 0 && poolConfig.MinConns > poolConfig.MaxConns 时，自动将 poolConfig.MinConns 钳制为 poolConfig.MaxConns
+	if poolCfg.MaxConns > 0 && poolCfg.MinConns > poolCfg.MaxConns {
+		poolCfg.MinConns = poolCfg.MaxConns
+	}
+
+	if cfg.MaxConnLifetime() > 0 {
+		poolCfg.MaxConnLifetime = cfg.MaxConnLifetime()
+	}
+	if cfg.MaxConnIdleTime() > 0 {
+		poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime()
+	}
+	if cfg.HealthCheckPeriod() > 0 {
+		poolCfg.HealthCheckPeriod = cfg.HealthCheckPeriod()
+	}
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dbpool: %w", err)
+	}
+
+	return pool, nil
+}
+
+// PoolParams 封装 ProvidePool 依赖注入参数。
+type PoolParams struct {
+	fx.In
+
+	Lifecycle fx.Lifecycle
+	Config    config.DBPoolConfig
+	Ready     telemetry.Ready `optional:"true"`
+}
+
+// ProvidePool 根据 PoolParams 初始化底层连接池并托管其生命周期至 Fx。
+func ProvidePool(params PoolParams) (*pgxpool.Pool, error) {
+	pool, err := OpenPool(params.Config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize dbpool: %w", err)
+	}
+
+	if params.Lifecycle != nil {
+		params.Lifecycle.Append(fx.Hook{
+			OnStart: func(ctx context.Context) error {
+				if err := pool.Ping(ctx); err != nil {
+					pool.Close()
+					return fmt.Errorf("failed to ping database: %w", err)
+				}
+				return nil
+			},
+			OnStop: func(context.Context) error {
+				pool.Close()
+				return nil
+			},
+		})
+	}
+
+	return pool, nil
 }
 
 // Module 提供 db 依赖注入模块。
 var Module = fx.Module("db",
-	fx.Provide(NewStore),
+	fx.Provide(
+		ProvidePool,
+		NewStore,
+	),
 )

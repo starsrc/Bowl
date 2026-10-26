@@ -5,353 +5,115 @@
 package storagev1connect
 
 import (
-	connect "connectrpc.com/connect/v2"
+	connect "connectrpc.com/connect"
 	context "context"
+	errors "errors"
 	v1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	sync "sync"
+	http "net/http"
+	strings "strings"
 )
+
+// This is a compile-time assertion to ensure that this generated file and the connect package are
+// compatible. If you get a compiler error that this constant is not defined, this code was
+// generated with a version of connect newer than the one compiled into your binary. You can fix the
+// problem by either regenerating this code with an older version of connect or updating the connect
+// version compiled into your binary.
+const _ = connect.IsAtLeastVersion1_13_0
 
 const (
 	// StorageServiceName is the fully-qualified name of the StorageService service.
 	StorageServiceName = "storage.v1.StorageService"
 )
 
-// These constants are the procedure names of the RPCs defined in this package. They're exposed at
-// runtime as Spec.Procedure and as the final two segments of the HTTP route.
+// These constants are the fully-qualified names of the RPCs defined in this package. They're
+// exposed at runtime as Spec.Procedure and as the final two segments of the HTTP route.
 //
 // Note that these are different from the fully-qualified method names used by
 // google.golang.org/protobuf/reflect/protoreflect. To convert from these constants to
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// StorageServiceLookupProcedure is the procedure name of the StorageService's Lookup RPC.
+	// StorageServiceLookupProcedure is the fully-qualified name of the StorageService's Lookup RPC.
 	StorageServiceLookupProcedure = "/storage.v1.StorageService/Lookup"
-	// StorageServiceGetAttrProcedure is the procedure name of the StorageService's GetAttr RPC.
+	// StorageServiceGetAttrProcedure is the fully-qualified name of the StorageService's GetAttr RPC.
 	StorageServiceGetAttrProcedure = "/storage.v1.StorageService/GetAttr"
-	// StorageServiceSetAttrProcedure is the procedure name of the StorageService's SetAttr RPC.
+	// StorageServiceSetAttrProcedure is the fully-qualified name of the StorageService's SetAttr RPC.
 	StorageServiceSetAttrProcedure = "/storage.v1.StorageService/SetAttr"
-	// StorageServiceMknodProcedure is the procedure name of the StorageService's Mknod RPC.
+	// StorageServiceMknodProcedure is the fully-qualified name of the StorageService's Mknod RPC.
 	StorageServiceMknodProcedure = "/storage.v1.StorageService/Mknod"
-	// StorageServiceMkdirProcedure is the procedure name of the StorageService's Mkdir RPC.
+	// StorageServiceMkdirProcedure is the fully-qualified name of the StorageService's Mkdir RPC.
 	StorageServiceMkdirProcedure = "/storage.v1.StorageService/Mkdir"
-	// StorageServiceSymlinkProcedure is the procedure name of the StorageService's Symlink RPC.
+	// StorageServiceSymlinkProcedure is the fully-qualified name of the StorageService's Symlink RPC.
 	StorageServiceSymlinkProcedure = "/storage.v1.StorageService/Symlink"
-	// StorageServiceReadlinkProcedure is the procedure name of the StorageService's Readlink RPC.
+	// StorageServiceReadlinkProcedure is the fully-qualified name of the StorageService's Readlink RPC.
 	StorageServiceReadlinkProcedure = "/storage.v1.StorageService/Readlink"
-	// StorageServiceLinkProcedure is the procedure name of the StorageService's Link RPC.
+	// StorageServiceLinkProcedure is the fully-qualified name of the StorageService's Link RPC.
 	StorageServiceLinkProcedure = "/storage.v1.StorageService/Link"
-	// StorageServiceUnlinkProcedure is the procedure name of the StorageService's Unlink RPC.
+	// StorageServiceUnlinkProcedure is the fully-qualified name of the StorageService's Unlink RPC.
 	StorageServiceUnlinkProcedure = "/storage.v1.StorageService/Unlink"
-	// StorageServiceRmdirProcedure is the procedure name of the StorageService's Rmdir RPC.
+	// StorageServiceRmdirProcedure is the fully-qualified name of the StorageService's Rmdir RPC.
 	StorageServiceRmdirProcedure = "/storage.v1.StorageService/Rmdir"
-	// StorageServiceRenameProcedure is the procedure name of the StorageService's Rename RPC.
+	// StorageServiceRenameProcedure is the fully-qualified name of the StorageService's Rename RPC.
 	StorageServiceRenameProcedure = "/storage.v1.StorageService/Rename"
-	// StorageServiceCreateProcedure is the procedure name of the StorageService's Create RPC.
+	// StorageServiceCreateProcedure is the fully-qualified name of the StorageService's Create RPC.
 	StorageServiceCreateProcedure = "/storage.v1.StorageService/Create"
-	// StorageServiceTmpFileProcedure is the procedure name of the StorageService's TmpFile RPC.
+	// StorageServiceTmpFileProcedure is the fully-qualified name of the StorageService's TmpFile RPC.
 	StorageServiceTmpFileProcedure = "/storage.v1.StorageService/TmpFile"
-	// StorageServiceOpenProcedure is the procedure name of the StorageService's Open RPC.
+	// StorageServiceOpenProcedure is the fully-qualified name of the StorageService's Open RPC.
 	StorageServiceOpenProcedure = "/storage.v1.StorageService/Open"
-	// StorageServiceFlushProcedure is the procedure name of the StorageService's Flush RPC.
+	// StorageServiceFlushProcedure is the fully-qualified name of the StorageService's Flush RPC.
 	StorageServiceFlushProcedure = "/storage.v1.StorageService/Flush"
-	// StorageServiceFsyncProcedure is the procedure name of the StorageService's Fsync RPC.
+	// StorageServiceFsyncProcedure is the fully-qualified name of the StorageService's Fsync RPC.
 	StorageServiceFsyncProcedure = "/storage.v1.StorageService/Fsync"
-	// StorageServiceReleaseProcedure is the procedure name of the StorageService's Release RPC.
+	// StorageServiceReleaseProcedure is the fully-qualified name of the StorageService's Release RPC.
 	StorageServiceReleaseProcedure = "/storage.v1.StorageService/Release"
-	// StorageServiceOpenDirProcedure is the procedure name of the StorageService's OpenDir RPC.
+	// StorageServiceOpenDirProcedure is the fully-qualified name of the StorageService's OpenDir RPC.
 	StorageServiceOpenDirProcedure = "/storage.v1.StorageService/OpenDir"
-	// StorageServiceFsyncDirProcedure is the procedure name of the StorageService's FsyncDir RPC.
+	// StorageServiceFsyncDirProcedure is the fully-qualified name of the StorageService's FsyncDir RPC.
 	StorageServiceFsyncDirProcedure = "/storage.v1.StorageService/FsyncDir"
-	// StorageServiceReleaseDirProcedure is the procedure name of the StorageService's ReleaseDir RPC.
-	StorageServiceReleaseDirProcedure = "/storage.v1.StorageService/ReleaseDir"
-	// StorageServiceReadDirProcedure is the procedure name of the StorageService's ReadDir RPC.
-	StorageServiceReadDirProcedure = "/storage.v1.StorageService/ReadDir"
-	// StorageServiceReadDirPlusProcedure is the procedure name of the StorageService's ReadDirPlus RPC.
-	StorageServiceReadDirPlusProcedure = "/storage.v1.StorageService/ReadDirPlus"
-	// StorageServiceFallocateProcedure is the procedure name of the StorageService's Fallocate RPC.
-	StorageServiceFallocateProcedure = "/storage.v1.StorageService/Fallocate"
-	// StorageServiceSetXattrProcedure is the procedure name of the StorageService's SetXattr RPC.
-	StorageServiceSetXattrProcedure = "/storage.v1.StorageService/SetXattr"
-	// StorageServiceGetXattrProcedure is the procedure name of the StorageService's GetXattr RPC.
-	StorageServiceGetXattrProcedure = "/storage.v1.StorageService/GetXattr"
-	// StorageServiceListXattrProcedure is the procedure name of the StorageService's ListXattr RPC.
-	StorageServiceListXattrProcedure = "/storage.v1.StorageService/ListXattr"
-	// StorageServiceRemoveXattrProcedure is the procedure name of the StorageService's RemoveXattr RPC.
-	StorageServiceRemoveXattrProcedure = "/storage.v1.StorageService/RemoveXattr"
-	// StorageServiceGetLkProcedure is the procedure name of the StorageService's GetLk RPC.
-	StorageServiceGetLkProcedure = "/storage.v1.StorageService/GetLk"
-	// StorageServiceSetLkProcedure is the procedure name of the StorageService's SetLk RPC.
-	StorageServiceSetLkProcedure = "/storage.v1.StorageService/SetLk"
-	// StorageServiceSetLkwProcedure is the procedure name of the StorageService's SetLkw RPC.
-	StorageServiceSetLkwProcedure = "/storage.v1.StorageService/SetLkw"
-	// StorageServiceRenewSessionProcedure is the procedure name of the StorageService's RenewSession
+	// StorageServiceReleaseDirProcedure is the fully-qualified name of the StorageService's ReleaseDir
 	// RPC.
+	StorageServiceReleaseDirProcedure = "/storage.v1.StorageService/ReleaseDir"
+	// StorageServiceReadDirProcedure is the fully-qualified name of the StorageService's ReadDir RPC.
+	StorageServiceReadDirProcedure = "/storage.v1.StorageService/ReadDir"
+	// StorageServiceReadDirPlusProcedure is the fully-qualified name of the StorageService's
+	// ReadDirPlus RPC.
+	StorageServiceReadDirPlusProcedure = "/storage.v1.StorageService/ReadDirPlus"
+	// StorageServiceFallocateProcedure is the fully-qualified name of the StorageService's Fallocate
+	// RPC.
+	StorageServiceFallocateProcedure = "/storage.v1.StorageService/Fallocate"
+	// StorageServiceSetXattrProcedure is the fully-qualified name of the StorageService's SetXattr RPC.
+	StorageServiceSetXattrProcedure = "/storage.v1.StorageService/SetXattr"
+	// StorageServiceGetXattrProcedure is the fully-qualified name of the StorageService's GetXattr RPC.
+	StorageServiceGetXattrProcedure = "/storage.v1.StorageService/GetXattr"
+	// StorageServiceListXattrProcedure is the fully-qualified name of the StorageService's ListXattr
+	// RPC.
+	StorageServiceListXattrProcedure = "/storage.v1.StorageService/ListXattr"
+	// StorageServiceRemoveXattrProcedure is the fully-qualified name of the StorageService's
+	// RemoveXattr RPC.
+	StorageServiceRemoveXattrProcedure = "/storage.v1.StorageService/RemoveXattr"
+	// StorageServiceGetLkProcedure is the fully-qualified name of the StorageService's GetLk RPC.
+	StorageServiceGetLkProcedure = "/storage.v1.StorageService/GetLk"
+	// StorageServiceSetLkProcedure is the fully-qualified name of the StorageService's SetLk RPC.
+	StorageServiceSetLkProcedure = "/storage.v1.StorageService/SetLk"
+	// StorageServiceSetLkwProcedure is the fully-qualified name of the StorageService's SetLkw RPC.
+	StorageServiceSetLkwProcedure = "/storage.v1.StorageService/SetLkw"
+	// StorageServiceRenewSessionProcedure is the fully-qualified name of the StorageService's
+	// RenewSession RPC.
 	StorageServiceRenewSessionProcedure = "/storage.v1.StorageService/RenewSession"
-	// StorageServiceCreateDiskProcedure is the procedure name of the StorageService's CreateDisk RPC.
+	// StorageServiceCreateDiskProcedure is the fully-qualified name of the StorageService's CreateDisk
+	// RPC.
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
-	// StorageServiceGetDiskProcedure is the procedure name of the StorageService's GetDisk RPC.
+	// StorageServiceGetDiskProcedure is the fully-qualified name of the StorageService's GetDisk RPC.
 	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
-	// StorageServiceUpdateDiskProcedure is the procedure name of the StorageService's UpdateDisk RPC.
+	// StorageServiceUpdateDiskProcedure is the fully-qualified name of the StorageService's UpdateDisk
+	// RPC.
 	StorageServiceUpdateDiskProcedure = "/storage.v1.StorageService/UpdateDisk"
-	// StorageServiceDeleteDiskProcedure is the procedure name of the StorageService's DeleteDisk RPC.
+	// StorageServiceDeleteDiskProcedure is the fully-qualified name of the StorageService's DeleteDisk
+	// RPC.
 	StorageServiceDeleteDiskProcedure = "/storage.v1.StorageService/DeleteDisk"
-	// StorageServiceStatFSProcedure is the procedure name of the StorageService's StatFS RPC.
+	// StorageServiceStatFSProcedure is the fully-qualified name of the StorageService's StatFS RPC.
 	StorageServiceStatFSProcedure = "/storage.v1.StorageService/StatFS"
-)
-
-var (
-	storageServiceLookupSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Lookup"),
-			Procedure:  StorageServiceLookupProcedure,
-		}
-	})
-	storageServiceGetAttrSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetAttr"),
-			Procedure:  StorageServiceGetAttrProcedure,
-		}
-	})
-	storageServiceSetAttrSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetAttr"),
-			Procedure:  StorageServiceSetAttrProcedure,
-		}
-	})
-	storageServiceMknodSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Mknod"),
-			Procedure:  StorageServiceMknodProcedure,
-		}
-	})
-	storageServiceMkdirSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Mkdir"),
-			Procedure:  StorageServiceMkdirProcedure,
-		}
-	})
-	storageServiceSymlinkSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Symlink"),
-			Procedure:  StorageServiceSymlinkProcedure,
-		}
-	})
-	storageServiceReadlinkSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Readlink"),
-			Procedure:  StorageServiceReadlinkProcedure,
-		}
-	})
-	storageServiceLinkSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Link"),
-			Procedure:  StorageServiceLinkProcedure,
-		}
-	})
-	storageServiceUnlinkSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Unlink"),
-			Procedure:  StorageServiceUnlinkProcedure,
-		}
-	})
-	storageServiceRmdirSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Rmdir"),
-			Procedure:  StorageServiceRmdirProcedure,
-		}
-	})
-	storageServiceRenameSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Rename"),
-			Procedure:  StorageServiceRenameProcedure,
-		}
-	})
-	storageServiceCreateSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Create"),
-			Procedure:  StorageServiceCreateProcedure,
-		}
-	})
-	storageServiceTmpFileSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("TmpFile"),
-			Procedure:  StorageServiceTmpFileProcedure,
-		}
-	})
-	storageServiceOpenSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Open"),
-			Procedure:  StorageServiceOpenProcedure,
-		}
-	})
-	storageServiceFlushSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Flush"),
-			Procedure:  StorageServiceFlushProcedure,
-		}
-	})
-	storageServiceFsyncSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Fsync"),
-			Procedure:  StorageServiceFsyncProcedure,
-		}
-	})
-	storageServiceReleaseSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Release"),
-			Procedure:  StorageServiceReleaseProcedure,
-		}
-	})
-	storageServiceOpenDirSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("OpenDir"),
-			Procedure:  StorageServiceOpenDirProcedure,
-		}
-	})
-	storageServiceFsyncDirSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("FsyncDir"),
-			Procedure:  StorageServiceFsyncDirProcedure,
-		}
-	})
-	storageServiceReleaseDirSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("ReleaseDir"),
-			Procedure:  StorageServiceReleaseDirProcedure,
-		}
-	})
-	storageServiceReadDirSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("ReadDir"),
-			Procedure:  StorageServiceReadDirProcedure,
-		}
-	})
-	storageServiceReadDirPlusSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("ReadDirPlus"),
-			Procedure:  StorageServiceReadDirPlusProcedure,
-		}
-	})
-	storageServiceFallocateSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("Fallocate"),
-			Procedure:  StorageServiceFallocateProcedure,
-		}
-	})
-	storageServiceSetXattrSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetXattr"),
-			Procedure:  StorageServiceSetXattrProcedure,
-		}
-	})
-	storageServiceGetXattrSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetXattr"),
-			Procedure:  StorageServiceGetXattrProcedure,
-		}
-	})
-	storageServiceListXattrSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("ListXattr"),
-			Procedure:  StorageServiceListXattrProcedure,
-		}
-	})
-	storageServiceRemoveXattrSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("RemoveXattr"),
-			Procedure:  StorageServiceRemoveXattrProcedure,
-		}
-	})
-	storageServiceGetLkSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetLk"),
-			Procedure:  StorageServiceGetLkProcedure,
-		}
-	})
-	storageServiceSetLkSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetLk"),
-			Procedure:  StorageServiceSetLkProcedure,
-		}
-	})
-	storageServiceSetLkwSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("SetLkw"),
-			Procedure:  StorageServiceSetLkwProcedure,
-		}
-	})
-	storageServiceRenewSessionSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("RenewSession"),
-			Procedure:  StorageServiceRenewSessionProcedure,
-		}
-	})
-	storageServiceCreateDiskSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("CreateDisk"),
-			Procedure:  StorageServiceCreateDiskProcedure,
-		}
-	})
-	storageServiceGetDiskSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("GetDisk"),
-			Procedure:  StorageServiceGetDiskProcedure,
-		}
-	})
-	storageServiceUpdateDiskSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("UpdateDisk"),
-			Procedure:  StorageServiceUpdateDiskProcedure,
-		}
-	})
-	storageServiceDeleteDiskSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("DeleteDisk"),
-			Procedure:  StorageServiceDeleteDiskProcedure,
-		}
-	})
-	storageServiceStatFSSpec = sync.OnceValue(func() connect.Spec {
-		return connect.Spec{
-			StreamType: connect.StreamTypeUnary,
-			Schema:     v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods().ByName("StatFS"),
-			Procedure:  StorageServiceStatFSProcedure,
-		}
-	})
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -360,53 +122,53 @@ type StorageServiceClient interface {
 	// 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error)
+	Lookup(context.Context, *connect.Request[v1.LookupRequest]) (*connect.Response[v1.LookupResponse], error)
 	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
 	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
 	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	GetAttr(context.Context, *v1.GetAttrRequest) (*v1.GetAttrResponse, error)
+	GetAttr(context.Context, *connect.Request[v1.GetAttrRequest]) (*connect.Response[v1.GetAttrResponse], error)
 	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
 	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
 	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
-	SetAttr(context.Context, *v1.SetAttrRequest) (*v1.SetAttrResponse, error)
+	SetAttr(context.Context, *connect.Request[v1.SetAttrRequest]) (*connect.Response[v1.SetAttrResponse], error)
 	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
+	Mknod(context.Context, *connect.Request[v1.MknodRequest]) (*connect.Response[v1.MknodResponse], error)
 	// Mkdir 在指定父目录下创建子目录。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Mkdir(context.Context, *v1.MkdirRequest) (*v1.MkdirResponse, error)
+	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
 	// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Symlink(context.Context, *v1.SymlinkRequest) (*v1.SymlinkResponse, error)
+	Symlink(context.Context, *connect.Request[v1.SymlinkRequest]) (*connect.Response[v1.SymlinkResponse], error)
 	// Readlink 获取符号链接节点指向的目标路径。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Readlink(context.Context, *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error)
+	Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error)
 	// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-	Link(context.Context, *v1.LinkRequest) (*v1.LinkResponse, error)
+	Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error)
 	// Unlink 删除指定父目录下的非目录项（解链）。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 或 ".."，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Unlink(context.Context, *v1.UnlinkRequest) (*v1.UnlinkResponse, error)
+	Unlink(context.Context, *connect.Request[v1.UnlinkRequest]) (*connect.Response[v1.UnlinkResponse], error)
 	// Rmdir 移除指定父目录下的空目录项。
 	// 若目标节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若目标目录非空，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
 	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
-	Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error)
+	Rmdir(context.Context, *connect.Request[v1.RmdirRequest]) (*connect.Response[v1.RmdirResponse], error)
 	// Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
 	// 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
 	// 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
@@ -417,143 +179,587 @@ type StorageServiceClient interface {
 	// 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
 	// 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
+	Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error)
 	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
-	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
+	Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error)
 	// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
 	// 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
-	TmpFile(context.Context, *v1.TmpFileRequest) (*v1.TmpFileResponse, error)
+	TmpFile(context.Context, *connect.Request[v1.TmpFileRequest]) (*connect.Response[v1.TmpFileResponse], error)
 	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
 	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error)
+	Open(context.Context, *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error)
 	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
-	Flush(context.Context, *v1.FlushRequest) (*v1.FlushResponse, error)
+	Flush(context.Context, *connect.Request[v1.FlushRequest]) (*connect.Response[v1.FlushResponse], error)
 	// Fsync 同步并持久化文件节点与句柄关联的状态。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
-	Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error)
+	Fsync(context.Context, *connect.Request[v1.FsyncRequest]) (*connect.Response[v1.FsyncResponse], error)
 	// Release 关闭并销毁文件句柄 (FileHandle)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
-	Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error)
+	Release(context.Context, *connect.Request[v1.ReleaseRequest]) (*connect.Response[v1.ReleaseResponse], error)
 	// OpenDir 打开指定目录 Inode 节点并分配目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	OpenDir(context.Context, *v1.OpenDirRequest) (*v1.OpenDirResponse, error)
+	OpenDir(context.Context, *connect.Request[v1.OpenDirRequest]) (*connect.Response[v1.OpenDirResponse], error)
 	// FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在、与 Inode 不匹配或所属会话已过期，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
-	FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error)
+	FsyncDir(context.Context, *connect.Request[v1.FsyncDirRequest]) (*connect.Response[v1.FsyncDirResponse], error)
 	// ReleaseDir 关闭并销毁目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 当目标目录的硬链接数已为 0 (孤儿目录) 且所有活跃句柄均已销毁时，将触发底层物理回收。
-	ReleaseDir(context.Context, *v1.ReleaseDirRequest) (*v1.ReleaseDirResponse, error)
+	ReleaseDir(context.Context, *connect.Request[v1.ReleaseDirRequest]) (*connect.Response[v1.ReleaseDirResponse], error)
 	// ReadDir 读取指定目录的子项流（基本条目）。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
-	ReadDir(context.Context, *v1.ReadDirRequest) (*v1.ReadDirResponse, error)
+	ReadDir(context.Context, *connect.Request[v1.ReadDirRequest]) (*connect.Response[v1.ReadDirResponse], error)
 	// ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
-	ReadDirPlus(context.Context, *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error)
+	ReadDirPlus(context.Context, *connect.Request[v1.ReadDirPlusRequest]) (*connect.Response[v1.ReadDirPlusResponse], error)
 	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
 	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
-	Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error)
+	Fallocate(context.Context, *connect.Request[v1.FallocateRequest]) (*connect.Response[v1.FallocateResponse], error)
 	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
 	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
 	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
-	SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error)
+	SetXattr(context.Context, *connect.Request[v1.SetXattrRequest]) (*connect.Response[v1.SetXattrResponse], error)
 	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
 	// 遵循 POSIX getxattr(2) 语义。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-	GetXattr(context.Context, *v1.GetXattrRequest) (*v1.GetXattrResponse, error)
+	GetXattr(context.Context, *connect.Request[v1.GetXattrRequest]) (*connect.Response[v1.GetXattrResponse], error)
 	// ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
 	// 遵循 POSIX listxattr(2) 语义。
 	// 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若无属性，返回空列表。
-	ListXattr(context.Context, *v1.ListXattrRequest) (*v1.ListXattrResponse, error)
+	ListXattr(context.Context, *connect.Request[v1.ListXattrRequest]) (*connect.Response[v1.ListXattrResponse], error)
 	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
 	// 遵循 POSIX removexattr(2) 语义。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-	RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error)
+	RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error)
 	// GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
 	// 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
 	// 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
-	GetLk(context.Context, *v1.GetLkRequest) (*v1.GetLkResponse, error)
+	GetLk(context.Context, *connect.Request[v1.GetLkRequest]) (*connect.Response[v1.GetLkResponse], error)
 	// SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
 	// 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
 	// 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-	SetLk(context.Context, *v1.SetLkRequest) (*v1.SetLkResponse, error)
+	SetLk(context.Context, *connect.Request[v1.SetLkRequest]) (*connect.Response[v1.SetLkResponse], error)
 	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
 	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
-	SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error)
+	SetLkw(context.Context, *connect.Request[v1.SetLkwRequest]) (*connect.Response[v1.SetLkwResponse], error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
-	RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error)
+	RenewSession(context.Context, *connect.Request[v1.RenewSessionRequest]) (*connect.Response[v1.RenewSessionResponse], error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
-	CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error)
+	CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error)
 	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error)
+	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
-	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
+	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
 	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
 	// 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	DeleteDisk(context.Context, *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error)
+	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
 	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
 	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
 	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error)
+	StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error)
 }
 
-// NewStorageServiceClient constructs a client for the storage.v1.StorageService service. Multiple
-// service clients may share a single connect.Client.
-func NewStorageServiceClient(client *connect.Client) StorageServiceClient {
-	return &storageServiceClient{client: client}
+// NewStorageServiceClient constructs a client for the storage.v1.StorageService service. By
+// default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped responses,
+// and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) StorageServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	storageServiceMethods := v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods()
+	return &storageServiceClient{
+		lookup: connect.NewClient[v1.LookupRequest, v1.LookupResponse](
+			httpClient,
+			baseURL+StorageServiceLookupProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Lookup")),
+			connect.WithClientOptions(opts...),
+		),
+		getAttr: connect.NewClient[v1.GetAttrRequest, v1.GetAttrResponse](
+			httpClient,
+			baseURL+StorageServiceGetAttrProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("GetAttr")),
+			connect.WithClientOptions(opts...),
+		),
+		setAttr: connect.NewClient[v1.SetAttrRequest, v1.SetAttrResponse](
+			httpClient,
+			baseURL+StorageServiceSetAttrProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("SetAttr")),
+			connect.WithClientOptions(opts...),
+		),
+		mknod: connect.NewClient[v1.MknodRequest, v1.MknodResponse](
+			httpClient,
+			baseURL+StorageServiceMknodProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Mknod")),
+			connect.WithClientOptions(opts...),
+		),
+		mkdir: connect.NewClient[v1.MkdirRequest, v1.MkdirResponse](
+			httpClient,
+			baseURL+StorageServiceMkdirProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Mkdir")),
+			connect.WithClientOptions(opts...),
+		),
+		symlink: connect.NewClient[v1.SymlinkRequest, v1.SymlinkResponse](
+			httpClient,
+			baseURL+StorageServiceSymlinkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Symlink")),
+			connect.WithClientOptions(opts...),
+		),
+		readlink: connect.NewClient[v1.ReadlinkRequest, v1.ReadlinkResponse](
+			httpClient,
+			baseURL+StorageServiceReadlinkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Readlink")),
+			connect.WithClientOptions(opts...),
+		),
+		link: connect.NewClient[v1.LinkRequest, v1.LinkResponse](
+			httpClient,
+			baseURL+StorageServiceLinkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Link")),
+			connect.WithClientOptions(opts...),
+		),
+		unlink: connect.NewClient[v1.UnlinkRequest, v1.UnlinkResponse](
+			httpClient,
+			baseURL+StorageServiceUnlinkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Unlink")),
+			connect.WithClientOptions(opts...),
+		),
+		rmdir: connect.NewClient[v1.RmdirRequest, v1.RmdirResponse](
+			httpClient,
+			baseURL+StorageServiceRmdirProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Rmdir")),
+			connect.WithClientOptions(opts...),
+		),
+		rename: connect.NewClient[v1.RenameRequest, v1.RenameResponse](
+			httpClient,
+			baseURL+StorageServiceRenameProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Rename")),
+			connect.WithClientOptions(opts...),
+		),
+		create: connect.NewClient[v1.CreateRequest, v1.CreateResponse](
+			httpClient,
+			baseURL+StorageServiceCreateProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Create")),
+			connect.WithClientOptions(opts...),
+		),
+		tmpFile: connect.NewClient[v1.TmpFileRequest, v1.TmpFileResponse](
+			httpClient,
+			baseURL+StorageServiceTmpFileProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("TmpFile")),
+			connect.WithClientOptions(opts...),
+		),
+		open: connect.NewClient[v1.OpenRequest, v1.OpenResponse](
+			httpClient,
+			baseURL+StorageServiceOpenProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Open")),
+			connect.WithClientOptions(opts...),
+		),
+		flush: connect.NewClient[v1.FlushRequest, v1.FlushResponse](
+			httpClient,
+			baseURL+StorageServiceFlushProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Flush")),
+			connect.WithClientOptions(opts...),
+		),
+		fsync: connect.NewClient[v1.FsyncRequest, v1.FsyncResponse](
+			httpClient,
+			baseURL+StorageServiceFsyncProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Fsync")),
+			connect.WithClientOptions(opts...),
+		),
+		release: connect.NewClient[v1.ReleaseRequest, v1.ReleaseResponse](
+			httpClient,
+			baseURL+StorageServiceReleaseProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Release")),
+			connect.WithClientOptions(opts...),
+		),
+		openDir: connect.NewClient[v1.OpenDirRequest, v1.OpenDirResponse](
+			httpClient,
+			baseURL+StorageServiceOpenDirProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("OpenDir")),
+			connect.WithClientOptions(opts...),
+		),
+		fsyncDir: connect.NewClient[v1.FsyncDirRequest, v1.FsyncDirResponse](
+			httpClient,
+			baseURL+StorageServiceFsyncDirProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("FsyncDir")),
+			connect.WithClientOptions(opts...),
+		),
+		releaseDir: connect.NewClient[v1.ReleaseDirRequest, v1.ReleaseDirResponse](
+			httpClient,
+			baseURL+StorageServiceReleaseDirProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ReleaseDir")),
+			connect.WithClientOptions(opts...),
+		),
+		readDir: connect.NewClient[v1.ReadDirRequest, v1.ReadDirResponse](
+			httpClient,
+			baseURL+StorageServiceReadDirProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ReadDir")),
+			connect.WithClientOptions(opts...),
+		),
+		readDirPlus: connect.NewClient[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse](
+			httpClient,
+			baseURL+StorageServiceReadDirPlusProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ReadDirPlus")),
+			connect.WithClientOptions(opts...),
+		),
+		fallocate: connect.NewClient[v1.FallocateRequest, v1.FallocateResponse](
+			httpClient,
+			baseURL+StorageServiceFallocateProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Fallocate")),
+			connect.WithClientOptions(opts...),
+		),
+		setXattr: connect.NewClient[v1.SetXattrRequest, v1.SetXattrResponse](
+			httpClient,
+			baseURL+StorageServiceSetXattrProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("SetXattr")),
+			connect.WithClientOptions(opts...),
+		),
+		getXattr: connect.NewClient[v1.GetXattrRequest, v1.GetXattrResponse](
+			httpClient,
+			baseURL+StorageServiceGetXattrProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("GetXattr")),
+			connect.WithClientOptions(opts...),
+		),
+		listXattr: connect.NewClient[v1.ListXattrRequest, v1.ListXattrResponse](
+			httpClient,
+			baseURL+StorageServiceListXattrProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListXattr")),
+			connect.WithClientOptions(opts...),
+		),
+		removeXattr: connect.NewClient[v1.RemoveXattrRequest, v1.RemoveXattrResponse](
+			httpClient,
+			baseURL+StorageServiceRemoveXattrProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("RemoveXattr")),
+			connect.WithClientOptions(opts...),
+		),
+		getLk: connect.NewClient[v1.GetLkRequest, v1.GetLkResponse](
+			httpClient,
+			baseURL+StorageServiceGetLkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("GetLk")),
+			connect.WithClientOptions(opts...),
+		),
+		setLk: connect.NewClient[v1.SetLkRequest, v1.SetLkResponse](
+			httpClient,
+			baseURL+StorageServiceSetLkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("SetLk")),
+			connect.WithClientOptions(opts...),
+		),
+		setLkw: connect.NewClient[v1.SetLkwRequest, v1.SetLkwResponse](
+			httpClient,
+			baseURL+StorageServiceSetLkwProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("SetLkw")),
+			connect.WithClientOptions(opts...),
+		),
+		renewSession: connect.NewClient[v1.RenewSessionRequest, v1.RenewSessionResponse](
+			httpClient,
+			baseURL+StorageServiceRenewSessionProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("RenewSession")),
+			connect.WithClientOptions(opts...),
+		),
+		createDisk: connect.NewClient[v1.CreateDiskRequest, v1.CreateDiskResponse](
+			httpClient,
+			baseURL+StorageServiceCreateDiskProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("CreateDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		getDisk: connect.NewClient[v1.GetDiskRequest, v1.GetDiskResponse](
+			httpClient,
+			baseURL+StorageServiceGetDiskProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("GetDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		updateDisk: connect.NewClient[v1.UpdateDiskRequest, v1.UpdateDiskResponse](
+			httpClient,
+			baseURL+StorageServiceUpdateDiskProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("UpdateDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteDisk: connect.NewClient[v1.DeleteDiskRequest, v1.DeleteDiskResponse](
+			httpClient,
+			baseURL+StorageServiceDeleteDiskProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DeleteDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		statFS: connect.NewClient[v1.StatFSRequest, v1.StatFSResponse](
+			httpClient,
+			baseURL+StorageServiceStatFSProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("StatFS")),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// storageServiceClient implements StorageServiceClient.
+type storageServiceClient struct {
+	lookup       *connect.Client[v1.LookupRequest, v1.LookupResponse]
+	getAttr      *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
+	setAttr      *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
+	mknod        *connect.Client[v1.MknodRequest, v1.MknodResponse]
+	mkdir        *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
+	symlink      *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
+	readlink     *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
+	link         *connect.Client[v1.LinkRequest, v1.LinkResponse]
+	unlink       *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
+	rmdir        *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
+	rename       *connect.Client[v1.RenameRequest, v1.RenameResponse]
+	create       *connect.Client[v1.CreateRequest, v1.CreateResponse]
+	tmpFile      *connect.Client[v1.TmpFileRequest, v1.TmpFileResponse]
+	open         *connect.Client[v1.OpenRequest, v1.OpenResponse]
+	flush        *connect.Client[v1.FlushRequest, v1.FlushResponse]
+	fsync        *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
+	release      *connect.Client[v1.ReleaseRequest, v1.ReleaseResponse]
+	openDir      *connect.Client[v1.OpenDirRequest, v1.OpenDirResponse]
+	fsyncDir     *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
+	releaseDir   *connect.Client[v1.ReleaseDirRequest, v1.ReleaseDirResponse]
+	readDir      *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
+	readDirPlus  *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
+	fallocate    *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
+	setXattr     *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
+	getXattr     *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
+	listXattr    *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
+	removeXattr  *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
+	getLk        *connect.Client[v1.GetLkRequest, v1.GetLkResponse]
+	setLk        *connect.Client[v1.SetLkRequest, v1.SetLkResponse]
+	setLkw       *connect.Client[v1.SetLkwRequest, v1.SetLkwResponse]
+	renewSession *connect.Client[v1.RenewSessionRequest, v1.RenewSessionResponse]
+	createDisk   *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
+	getDisk      *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
+	updateDisk   *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
+	deleteDisk   *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
+	statFS       *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
+}
+
+// Lookup calls storage.v1.StorageService.Lookup.
+func (c *storageServiceClient) Lookup(ctx context.Context, req *connect.Request[v1.LookupRequest]) (*connect.Response[v1.LookupResponse], error) {
+	return c.lookup.CallUnary(ctx, req)
+}
+
+// GetAttr calls storage.v1.StorageService.GetAttr.
+func (c *storageServiceClient) GetAttr(ctx context.Context, req *connect.Request[v1.GetAttrRequest]) (*connect.Response[v1.GetAttrResponse], error) {
+	return c.getAttr.CallUnary(ctx, req)
+}
+
+// SetAttr calls storage.v1.StorageService.SetAttr.
+func (c *storageServiceClient) SetAttr(ctx context.Context, req *connect.Request[v1.SetAttrRequest]) (*connect.Response[v1.SetAttrResponse], error) {
+	return c.setAttr.CallUnary(ctx, req)
+}
+
+// Mknod calls storage.v1.StorageService.Mknod.
+func (c *storageServiceClient) Mknod(ctx context.Context, req *connect.Request[v1.MknodRequest]) (*connect.Response[v1.MknodResponse], error) {
+	return c.mknod.CallUnary(ctx, req)
+}
+
+// Mkdir calls storage.v1.StorageService.Mkdir.
+func (c *storageServiceClient) Mkdir(ctx context.Context, req *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error) {
+	return c.mkdir.CallUnary(ctx, req)
+}
+
+// Symlink calls storage.v1.StorageService.Symlink.
+func (c *storageServiceClient) Symlink(ctx context.Context, req *connect.Request[v1.SymlinkRequest]) (*connect.Response[v1.SymlinkResponse], error) {
+	return c.symlink.CallUnary(ctx, req)
+}
+
+// Readlink calls storage.v1.StorageService.Readlink.
+func (c *storageServiceClient) Readlink(ctx context.Context, req *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error) {
+	return c.readlink.CallUnary(ctx, req)
+}
+
+// Link calls storage.v1.StorageService.Link.
+func (c *storageServiceClient) Link(ctx context.Context, req *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error) {
+	return c.link.CallUnary(ctx, req)
+}
+
+// Unlink calls storage.v1.StorageService.Unlink.
+func (c *storageServiceClient) Unlink(ctx context.Context, req *connect.Request[v1.UnlinkRequest]) (*connect.Response[v1.UnlinkResponse], error) {
+	return c.unlink.CallUnary(ctx, req)
+}
+
+// Rmdir calls storage.v1.StorageService.Rmdir.
+func (c *storageServiceClient) Rmdir(ctx context.Context, req *connect.Request[v1.RmdirRequest]) (*connect.Response[v1.RmdirResponse], error) {
+	return c.rmdir.CallUnary(ctx, req)
+}
+
+// Rename calls storage.v1.StorageService.Rename.
+func (c *storageServiceClient) Rename(ctx context.Context, req *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error) {
+	return c.rename.CallUnary(ctx, req)
+}
+
+// Create calls storage.v1.StorageService.Create.
+func (c *storageServiceClient) Create(ctx context.Context, req *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error) {
+	return c.create.CallUnary(ctx, req)
+}
+
+// TmpFile calls storage.v1.StorageService.TmpFile.
+func (c *storageServiceClient) TmpFile(ctx context.Context, req *connect.Request[v1.TmpFileRequest]) (*connect.Response[v1.TmpFileResponse], error) {
+	return c.tmpFile.CallUnary(ctx, req)
+}
+
+// Open calls storage.v1.StorageService.Open.
+func (c *storageServiceClient) Open(ctx context.Context, req *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error) {
+	return c.open.CallUnary(ctx, req)
+}
+
+// Flush calls storage.v1.StorageService.Flush.
+func (c *storageServiceClient) Flush(ctx context.Context, req *connect.Request[v1.FlushRequest]) (*connect.Response[v1.FlushResponse], error) {
+	return c.flush.CallUnary(ctx, req)
+}
+
+// Fsync calls storage.v1.StorageService.Fsync.
+func (c *storageServiceClient) Fsync(ctx context.Context, req *connect.Request[v1.FsyncRequest]) (*connect.Response[v1.FsyncResponse], error) {
+	return c.fsync.CallUnary(ctx, req)
+}
+
+// Release calls storage.v1.StorageService.Release.
+func (c *storageServiceClient) Release(ctx context.Context, req *connect.Request[v1.ReleaseRequest]) (*connect.Response[v1.ReleaseResponse], error) {
+	return c.release.CallUnary(ctx, req)
+}
+
+// OpenDir calls storage.v1.StorageService.OpenDir.
+func (c *storageServiceClient) OpenDir(ctx context.Context, req *connect.Request[v1.OpenDirRequest]) (*connect.Response[v1.OpenDirResponse], error) {
+	return c.openDir.CallUnary(ctx, req)
+}
+
+// FsyncDir calls storage.v1.StorageService.FsyncDir.
+func (c *storageServiceClient) FsyncDir(ctx context.Context, req *connect.Request[v1.FsyncDirRequest]) (*connect.Response[v1.FsyncDirResponse], error) {
+	return c.fsyncDir.CallUnary(ctx, req)
+}
+
+// ReleaseDir calls storage.v1.StorageService.ReleaseDir.
+func (c *storageServiceClient) ReleaseDir(ctx context.Context, req *connect.Request[v1.ReleaseDirRequest]) (*connect.Response[v1.ReleaseDirResponse], error) {
+	return c.releaseDir.CallUnary(ctx, req)
+}
+
+// ReadDir calls storage.v1.StorageService.ReadDir.
+func (c *storageServiceClient) ReadDir(ctx context.Context, req *connect.Request[v1.ReadDirRequest]) (*connect.Response[v1.ReadDirResponse], error) {
+	return c.readDir.CallUnary(ctx, req)
+}
+
+// ReadDirPlus calls storage.v1.StorageService.ReadDirPlus.
+func (c *storageServiceClient) ReadDirPlus(ctx context.Context, req *connect.Request[v1.ReadDirPlusRequest]) (*connect.Response[v1.ReadDirPlusResponse], error) {
+	return c.readDirPlus.CallUnary(ctx, req)
+}
+
+// Fallocate calls storage.v1.StorageService.Fallocate.
+func (c *storageServiceClient) Fallocate(ctx context.Context, req *connect.Request[v1.FallocateRequest]) (*connect.Response[v1.FallocateResponse], error) {
+	return c.fallocate.CallUnary(ctx, req)
+}
+
+// SetXattr calls storage.v1.StorageService.SetXattr.
+func (c *storageServiceClient) SetXattr(ctx context.Context, req *connect.Request[v1.SetXattrRequest]) (*connect.Response[v1.SetXattrResponse], error) {
+	return c.setXattr.CallUnary(ctx, req)
+}
+
+// GetXattr calls storage.v1.StorageService.GetXattr.
+func (c *storageServiceClient) GetXattr(ctx context.Context, req *connect.Request[v1.GetXattrRequest]) (*connect.Response[v1.GetXattrResponse], error) {
+	return c.getXattr.CallUnary(ctx, req)
+}
+
+// ListXattr calls storage.v1.StorageService.ListXattr.
+func (c *storageServiceClient) ListXattr(ctx context.Context, req *connect.Request[v1.ListXattrRequest]) (*connect.Response[v1.ListXattrResponse], error) {
+	return c.listXattr.CallUnary(ctx, req)
+}
+
+// RemoveXattr calls storage.v1.StorageService.RemoveXattr.
+func (c *storageServiceClient) RemoveXattr(ctx context.Context, req *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error) {
+	return c.removeXattr.CallUnary(ctx, req)
+}
+
+// GetLk calls storage.v1.StorageService.GetLk.
+func (c *storageServiceClient) GetLk(ctx context.Context, req *connect.Request[v1.GetLkRequest]) (*connect.Response[v1.GetLkResponse], error) {
+	return c.getLk.CallUnary(ctx, req)
+}
+
+// SetLk calls storage.v1.StorageService.SetLk.
+func (c *storageServiceClient) SetLk(ctx context.Context, req *connect.Request[v1.SetLkRequest]) (*connect.Response[v1.SetLkResponse], error) {
+	return c.setLk.CallUnary(ctx, req)
+}
+
+// SetLkw calls storage.v1.StorageService.SetLkw.
+func (c *storageServiceClient) SetLkw(ctx context.Context, req *connect.Request[v1.SetLkwRequest]) (*connect.Response[v1.SetLkwResponse], error) {
+	return c.setLkw.CallUnary(ctx, req)
+}
+
+// RenewSession calls storage.v1.StorageService.RenewSession.
+func (c *storageServiceClient) RenewSession(ctx context.Context, req *connect.Request[v1.RenewSessionRequest]) (*connect.Response[v1.RenewSessionResponse], error) {
+	return c.renewSession.CallUnary(ctx, req)
+}
+
+// CreateDisk calls storage.v1.StorageService.CreateDisk.
+func (c *storageServiceClient) CreateDisk(ctx context.Context, req *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error) {
+	return c.createDisk.CallUnary(ctx, req)
+}
+
+// GetDisk calls storage.v1.StorageService.GetDisk.
+func (c *storageServiceClient) GetDisk(ctx context.Context, req *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error) {
+	return c.getDisk.CallUnary(ctx, req)
+}
+
+// UpdateDisk calls storage.v1.StorageService.UpdateDisk.
+func (c *storageServiceClient) UpdateDisk(ctx context.Context, req *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error) {
+	return c.updateDisk.CallUnary(ctx, req)
+}
+
+// DeleteDisk calls storage.v1.StorageService.DeleteDisk.
+func (c *storageServiceClient) DeleteDisk(ctx context.Context, req *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error) {
+	return c.deleteDisk.CallUnary(ctx, req)
+}
+
+// StatFS calls storage.v1.StorageService.StatFS.
+func (c *storageServiceClient) StatFS(ctx context.Context, req *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error) {
+	return c.statFS.CallUnary(ctx, req)
 }
 
 // StorageServiceHandler is an implementation of the storage.v1.StorageService service.
@@ -562,53 +768,53 @@ type StorageServiceHandler interface {
 	// 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
 	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error)
+	Lookup(context.Context, *connect.Request[v1.LookupRequest]) (*connect.Response[v1.LookupResponse], error)
 	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
 	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
 	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	GetAttr(context.Context, *v1.GetAttrRequest) (*v1.GetAttrResponse, error)
+	GetAttr(context.Context, *connect.Request[v1.GetAttrRequest]) (*connect.Response[v1.GetAttrResponse], error)
 	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
 	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
 	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
-	SetAttr(context.Context, *v1.SetAttrRequest) (*v1.SetAttrResponse, error)
+	SetAttr(context.Context, *connect.Request[v1.SetAttrRequest]) (*connect.Response[v1.SetAttrResponse], error)
 	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error)
+	Mknod(context.Context, *connect.Request[v1.MknodRequest]) (*connect.Response[v1.MknodResponse], error)
 	// Mkdir 在指定父目录下创建子目录。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Mkdir(context.Context, *v1.MkdirRequest) (*v1.MkdirResponse, error)
+	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
 	// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	Symlink(context.Context, *v1.SymlinkRequest) (*v1.SymlinkResponse, error)
+	Symlink(context.Context, *connect.Request[v1.SymlinkRequest]) (*connect.Response[v1.SymlinkResponse], error)
 	// Readlink 获取符号链接节点指向的目标路径。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Readlink(context.Context, *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error)
+	Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error)
 	// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-	Link(context.Context, *v1.LinkRequest) (*v1.LinkResponse, error)
+	Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error)
 	// Unlink 删除指定父目录下的非目录项（解链）。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 或 ".."，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Unlink(context.Context, *v1.UnlinkRequest) (*v1.UnlinkResponse, error)
+	Unlink(context.Context, *connect.Request[v1.UnlinkRequest]) (*connect.Response[v1.UnlinkResponse], error)
 	// Rmdir 移除指定父目录下的空目录项。
 	// 若目标节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若目标目录非空，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
 	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
-	Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error)
+	Rmdir(context.Context, *connect.Request[v1.RmdirRequest]) (*connect.Response[v1.RmdirResponse], error)
 	// Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
 	// 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
 	// 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
@@ -619,1052 +825,585 @@ type StorageServiceHandler interface {
 	// 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
 	// 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error)
+	Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error)
 	// Create 在指定父目录下原子创建常规文件并分配初始文件句柄 (FileHandle)。
 	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
 	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
-	Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error)
+	Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error)
 	// TmpFile 在指定父目录下原子创建未绑定 Entry (nlink = 0) 的匿名临时常规文件并分配初始文件句柄 (FileHandle)（对接 Linux FUSE FUSE_TMPFILE = 51 协议）。
 	// 若父节点不存在或已解链 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)，且打开标志位必须为 O_WRONLY 或 O_RDWR，否则返回 InvalidArgument (映射至 POSIX EINVAL)。
-	TmpFile(context.Context, *v1.TmpFileRequest) (*v1.TmpFileResponse, error)
+	TmpFile(context.Context, *connect.Request[v1.TmpFileRequest]) (*connect.Response[v1.TmpFileResponse], error)
 	// Open 打开指定 Inode 节点并分配文件句柄 (FileHandle)。
 	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若目标为符号链接，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error)
+	Open(context.Context, *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error)
 	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
-	Flush(context.Context, *v1.FlushRequest) (*v1.FlushResponse, error)
+	Flush(context.Context, *connect.Request[v1.FlushRequest]) (*connect.Response[v1.FlushResponse], error)
 	// Fsync 同步并持久化文件节点与句柄关联的状态。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
-	Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error)
+	Fsync(context.Context, *connect.Request[v1.FsyncRequest]) (*connect.Response[v1.FsyncResponse], error)
 	// Release 关闭并销毁文件句柄 (FileHandle)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 当目标 Inode 的硬链接数已为 0 (孤儿节点) 且所有活跃句柄均已销毁时，将触发底层物理回收。
-	Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error)
+	Release(context.Context, *connect.Request[v1.ReleaseRequest]) (*connect.Response[v1.ReleaseResponse], error)
 	// OpenDir 打开指定目录 Inode 节点并分配目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在或为已无活跃句柄的孤儿目录 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若打开标志位非只读 (flags & O_ACCMODE != O_RDONLY) 或携带 O_TRUNC，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	OpenDir(context.Context, *v1.OpenDirRequest) (*v1.OpenDirResponse, error)
+	OpenDir(context.Context, *connect.Request[v1.OpenDirRequest]) (*connect.Response[v1.OpenDirResponse], error)
 	// FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在、与 Inode 不匹配或所属会话已过期，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
-	FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error)
+	FsyncDir(context.Context, *connect.Request[v1.FsyncDirRequest]) (*connect.Response[v1.FsyncDirResponse], error)
 	// ReleaseDir 关闭并销毁目录 FileHandle。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 当目标目录的硬链接数已为 0 (孤儿目录) 且所有活跃句柄均已销毁时，将触发底层物理回收。
-	ReleaseDir(context.Context, *v1.ReleaseDirRequest) (*v1.ReleaseDirResponse, error)
+	ReleaseDir(context.Context, *connect.Request[v1.ReleaseDirRequest]) (*connect.Response[v1.ReleaseDirResponse], error)
 	// ReadDir 读取指定目录的子项流（基本条目）。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
-	ReadDir(context.Context, *v1.ReadDirRequest) (*v1.ReadDirResponse, error)
+	ReadDir(context.Context, *connect.Request[v1.ReadDirRequest]) (*connect.Response[v1.ReadDirResponse], error)
 	// ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
 	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若目录句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
-	ReadDirPlus(context.Context, *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error)
+	ReadDirPlus(context.Context, *connect.Request[v1.ReadDirPlusRequest]) (*connect.Response[v1.ReadDirPlusResponse], error)
 	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
 	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
-	Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error)
+	Fallocate(context.Context, *connect.Request[v1.FallocateRequest]) (*connect.Response[v1.FallocateResponse], error)
 	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
 	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
 	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
-	SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error)
+	SetXattr(context.Context, *connect.Request[v1.SetXattrRequest]) (*connect.Response[v1.SetXattrResponse], error)
 	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
 	// 遵循 POSIX getxattr(2) 语义。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-	GetXattr(context.Context, *v1.GetXattrRequest) (*v1.GetXattrResponse, error)
+	GetXattr(context.Context, *connect.Request[v1.GetXattrRequest]) (*connect.Response[v1.GetXattrResponse], error)
 	// ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
 	// 遵循 POSIX listxattr(2) 语义。
 	// 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若无属性，返回空列表。
-	ListXattr(context.Context, *v1.ListXattrRequest) (*v1.ListXattrResponse, error)
+	ListXattr(context.Context, *connect.Request[v1.ListXattrRequest]) (*connect.Response[v1.ListXattrResponse], error)
 	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
 	// 遵循 POSIX removexattr(2) 语义。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-	RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error)
+	RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error)
 	// GetLk 探测目标 Inode 在指定锁命名空间（POSIX 记录锁或 BSD flock）下是否存在冲突锁（对接 Linux FUSE FUSE_GETLK = 31 协议）。
 	// 若存在冲突锁，返回首个冲突锁详情（含 start、end、type 与 pid）；若无冲突，返回 type = F_UNLCK (2) 的 FileLock。
 	// 若传入 lk.type == F_UNLCK，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
-	GetLk(context.Context, *v1.GetLkRequest) (*v1.GetLkResponse, error)
+	GetLk(context.Context, *connect.Request[v1.GetLkRequest]) (*connect.Response[v1.GetLkResponse], error)
 	// SetLk 非阻塞地申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLK = 32 协议）。
 	// 若遇到外部冲突锁或排队等待冲突，立即返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX EAGAIN)。
 	// 若 POSIX 记录锁请求模式与文件句柄读写权限不匹配，返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-	SetLk(context.Context, *v1.SetLkRequest) (*v1.SetLkResponse, error)
+	SetLk(context.Context, *connect.Request[v1.SetLkRequest]) (*connect.Response[v1.SetLkResponse], error)
 	// SetLkw 阻塞式申请、转换、裂解合并或释放文件锁（对接 Linux FUSE FUSE_SETLKW = 33 协议）。
 	// 若存在冲突锁则阻塞等待，直至锁释放唤醒、检测到同节点死锁返回 Aborted (映射至 POSIX EDEADLK)、或收到取消信号返回 Canceled (映射至 POSIX EINTR)。
-	SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error)
+	SetLkw(context.Context, *connect.Request[v1.SetLkwRequest]) (*connect.Response[v1.SetLkwResponse], error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
-	RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error)
+	RenewSession(context.Context, *connect.Request[v1.RenewSessionRequest]) (*connect.Response[v1.RenewSessionResponse], error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
-	CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error)
+	CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error)
 	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error)
+	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
-	UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error)
+	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
 	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
 	// 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	DeleteDisk(context.Context, *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error)
+	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
 	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
 	// 接收目标节点的 uint64 ino，按 root_ino O(1) 查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
 	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error)
+	StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error)
 }
 
-// RegisterStorageServiceHandler registers svc as the storage.v1.StorageService implementation on
-// server.
-func RegisterStorageServiceHandler(server *connect.Server, svc StorageServiceHandler) {
-	adapter := storageServiceHandler{svc: svc}
-	server.Register(
-		connect.Method{Spec: storageServiceLookupSpec(), Handler: adapter.lookup},
-		connect.Method{Spec: storageServiceGetAttrSpec(), Handler: adapter.getAttr},
-		connect.Method{Spec: storageServiceSetAttrSpec(), Handler: adapter.setAttr},
-		connect.Method{Spec: storageServiceMknodSpec(), Handler: adapter.mknod},
-		connect.Method{Spec: storageServiceMkdirSpec(), Handler: adapter.mkdir},
-		connect.Method{Spec: storageServiceSymlinkSpec(), Handler: adapter.symlink},
-		connect.Method{Spec: storageServiceReadlinkSpec(), Handler: adapter.readlink},
-		connect.Method{Spec: storageServiceLinkSpec(), Handler: adapter.link},
-		connect.Method{Spec: storageServiceUnlinkSpec(), Handler: adapter.unlink},
-		connect.Method{Spec: storageServiceRmdirSpec(), Handler: adapter.rmdir},
-		connect.Method{Spec: storageServiceRenameSpec(), Handler: adapter.rename},
-		connect.Method{Spec: storageServiceCreateSpec(), Handler: adapter.create},
-		connect.Method{Spec: storageServiceTmpFileSpec(), Handler: adapter.tmpFile},
-		connect.Method{Spec: storageServiceOpenSpec(), Handler: adapter.open},
-		connect.Method{Spec: storageServiceFlushSpec(), Handler: adapter.flush},
-		connect.Method{Spec: storageServiceFsyncSpec(), Handler: adapter.fsync},
-		connect.Method{Spec: storageServiceReleaseSpec(), Handler: adapter.release},
-		connect.Method{Spec: storageServiceOpenDirSpec(), Handler: adapter.openDir},
-		connect.Method{Spec: storageServiceFsyncDirSpec(), Handler: adapter.fsyncDir},
-		connect.Method{Spec: storageServiceReleaseDirSpec(), Handler: adapter.releaseDir},
-		connect.Method{Spec: storageServiceReadDirSpec(), Handler: adapter.readDir},
-		connect.Method{Spec: storageServiceReadDirPlusSpec(), Handler: adapter.readDirPlus},
-		connect.Method{Spec: storageServiceFallocateSpec(), Handler: adapter.fallocate},
-		connect.Method{Spec: storageServiceSetXattrSpec(), Handler: adapter.setXattr},
-		connect.Method{Spec: storageServiceGetXattrSpec(), Handler: adapter.getXattr},
-		connect.Method{Spec: storageServiceListXattrSpec(), Handler: adapter.listXattr},
-		connect.Method{Spec: storageServiceRemoveXattrSpec(), Handler: adapter.removeXattr},
-		connect.Method{Spec: storageServiceGetLkSpec(), Handler: adapter.getLk},
-		connect.Method{Spec: storageServiceSetLkSpec(), Handler: adapter.setLk},
-		connect.Method{Spec: storageServiceSetLkwSpec(), Handler: adapter.setLkw},
-		connect.Method{Spec: storageServiceRenewSessionSpec(), Handler: adapter.renewSession},
-		connect.Method{Spec: storageServiceCreateDiskSpec(), Handler: adapter.createDisk},
-		connect.Method{Spec: storageServiceGetDiskSpec(), Handler: adapter.getDisk},
-		connect.Method{Spec: storageServiceUpdateDiskSpec(), Handler: adapter.updateDisk},
-		connect.Method{Spec: storageServiceDeleteDiskSpec(), Handler: adapter.deleteDisk},
-		connect.Method{Spec: storageServiceStatFSSpec(), Handler: adapter.statFS},
+// NewStorageServiceHandler builds an HTTP handler from the service implementation. It returns the
+// path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	storageServiceMethods := v1.File_storage_v1_storage_proto.Services().ByName("StorageService").Methods()
+	storageServiceLookupHandler := connect.NewUnaryHandler(
+		StorageServiceLookupProcedure,
+		svc.Lookup,
+		connect.WithSchema(storageServiceMethods.ByName("Lookup")),
+		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceGetAttrHandler := connect.NewUnaryHandler(
+		StorageServiceGetAttrProcedure,
+		svc.GetAttr,
+		connect.WithSchema(storageServiceMethods.ByName("GetAttr")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceSetAttrHandler := connect.NewUnaryHandler(
+		StorageServiceSetAttrProcedure,
+		svc.SetAttr,
+		connect.WithSchema(storageServiceMethods.ByName("SetAttr")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceMknodHandler := connect.NewUnaryHandler(
+		StorageServiceMknodProcedure,
+		svc.Mknod,
+		connect.WithSchema(storageServiceMethods.ByName("Mknod")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceMkdirHandler := connect.NewUnaryHandler(
+		StorageServiceMkdirProcedure,
+		svc.Mkdir,
+		connect.WithSchema(storageServiceMethods.ByName("Mkdir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceSymlinkHandler := connect.NewUnaryHandler(
+		StorageServiceSymlinkProcedure,
+		svc.Symlink,
+		connect.WithSchema(storageServiceMethods.ByName("Symlink")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceReadlinkHandler := connect.NewUnaryHandler(
+		StorageServiceReadlinkProcedure,
+		svc.Readlink,
+		connect.WithSchema(storageServiceMethods.ByName("Readlink")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceLinkHandler := connect.NewUnaryHandler(
+		StorageServiceLinkProcedure,
+		svc.Link,
+		connect.WithSchema(storageServiceMethods.ByName("Link")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceUnlinkHandler := connect.NewUnaryHandler(
+		StorageServiceUnlinkProcedure,
+		svc.Unlink,
+		connect.WithSchema(storageServiceMethods.ByName("Unlink")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceRmdirHandler := connect.NewUnaryHandler(
+		StorageServiceRmdirProcedure,
+		svc.Rmdir,
+		connect.WithSchema(storageServiceMethods.ByName("Rmdir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceRenameHandler := connect.NewUnaryHandler(
+		StorageServiceRenameProcedure,
+		svc.Rename,
+		connect.WithSchema(storageServiceMethods.ByName("Rename")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceCreateHandler := connect.NewUnaryHandler(
+		StorageServiceCreateProcedure,
+		svc.Create,
+		connect.WithSchema(storageServiceMethods.ByName("Create")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceTmpFileHandler := connect.NewUnaryHandler(
+		StorageServiceTmpFileProcedure,
+		svc.TmpFile,
+		connect.WithSchema(storageServiceMethods.ByName("TmpFile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceOpenHandler := connect.NewUnaryHandler(
+		StorageServiceOpenProcedure,
+		svc.Open,
+		connect.WithSchema(storageServiceMethods.ByName("Open")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceFlushHandler := connect.NewUnaryHandler(
+		StorageServiceFlushProcedure,
+		svc.Flush,
+		connect.WithSchema(storageServiceMethods.ByName("Flush")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceFsyncHandler := connect.NewUnaryHandler(
+		StorageServiceFsyncProcedure,
+		svc.Fsync,
+		connect.WithSchema(storageServiceMethods.ByName("Fsync")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceReleaseHandler := connect.NewUnaryHandler(
+		StorageServiceReleaseProcedure,
+		svc.Release,
+		connect.WithSchema(storageServiceMethods.ByName("Release")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceOpenDirHandler := connect.NewUnaryHandler(
+		StorageServiceOpenDirProcedure,
+		svc.OpenDir,
+		connect.WithSchema(storageServiceMethods.ByName("OpenDir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceFsyncDirHandler := connect.NewUnaryHandler(
+		StorageServiceFsyncDirProcedure,
+		svc.FsyncDir,
+		connect.WithSchema(storageServiceMethods.ByName("FsyncDir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceReleaseDirHandler := connect.NewUnaryHandler(
+		StorageServiceReleaseDirProcedure,
+		svc.ReleaseDir,
+		connect.WithSchema(storageServiceMethods.ByName("ReleaseDir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceReadDirHandler := connect.NewUnaryHandler(
+		StorageServiceReadDirProcedure,
+		svc.ReadDir,
+		connect.WithSchema(storageServiceMethods.ByName("ReadDir")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceReadDirPlusHandler := connect.NewUnaryHandler(
+		StorageServiceReadDirPlusProcedure,
+		svc.ReadDirPlus,
+		connect.WithSchema(storageServiceMethods.ByName("ReadDirPlus")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceFallocateHandler := connect.NewUnaryHandler(
+		StorageServiceFallocateProcedure,
+		svc.Fallocate,
+		connect.WithSchema(storageServiceMethods.ByName("Fallocate")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceSetXattrHandler := connect.NewUnaryHandler(
+		StorageServiceSetXattrProcedure,
+		svc.SetXattr,
+		connect.WithSchema(storageServiceMethods.ByName("SetXattr")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceGetXattrHandler := connect.NewUnaryHandler(
+		StorageServiceGetXattrProcedure,
+		svc.GetXattr,
+		connect.WithSchema(storageServiceMethods.ByName("GetXattr")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceListXattrHandler := connect.NewUnaryHandler(
+		StorageServiceListXattrProcedure,
+		svc.ListXattr,
+		connect.WithSchema(storageServiceMethods.ByName("ListXattr")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceRemoveXattrHandler := connect.NewUnaryHandler(
+		StorageServiceRemoveXattrProcedure,
+		svc.RemoveXattr,
+		connect.WithSchema(storageServiceMethods.ByName("RemoveXattr")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceGetLkHandler := connect.NewUnaryHandler(
+		StorageServiceGetLkProcedure,
+		svc.GetLk,
+		connect.WithSchema(storageServiceMethods.ByName("GetLk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceSetLkHandler := connect.NewUnaryHandler(
+		StorageServiceSetLkProcedure,
+		svc.SetLk,
+		connect.WithSchema(storageServiceMethods.ByName("SetLk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceSetLkwHandler := connect.NewUnaryHandler(
+		StorageServiceSetLkwProcedure,
+		svc.SetLkw,
+		connect.WithSchema(storageServiceMethods.ByName("SetLkw")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceRenewSessionHandler := connect.NewUnaryHandler(
+		StorageServiceRenewSessionProcedure,
+		svc.RenewSession,
+		connect.WithSchema(storageServiceMethods.ByName("RenewSession")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceCreateDiskHandler := connect.NewUnaryHandler(
+		StorageServiceCreateDiskProcedure,
+		svc.CreateDisk,
+		connect.WithSchema(storageServiceMethods.ByName("CreateDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceGetDiskHandler := connect.NewUnaryHandler(
+		StorageServiceGetDiskProcedure,
+		svc.GetDisk,
+		connect.WithSchema(storageServiceMethods.ByName("GetDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceUpdateDiskHandler := connect.NewUnaryHandler(
+		StorageServiceUpdateDiskProcedure,
+		svc.UpdateDisk,
+		connect.WithSchema(storageServiceMethods.ByName("UpdateDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceDeleteDiskHandler := connect.NewUnaryHandler(
+		StorageServiceDeleteDiskProcedure,
+		svc.DeleteDisk,
+		connect.WithSchema(storageServiceMethods.ByName("DeleteDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceStatFSHandler := connect.NewUnaryHandler(
+		StorageServiceStatFSProcedure,
+		svc.StatFS,
+		connect.WithSchema(storageServiceMethods.ByName("StatFS")),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/storage.v1.StorageService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case StorageServiceLookupProcedure:
+			storageServiceLookupHandler.ServeHTTP(w, r)
+		case StorageServiceGetAttrProcedure:
+			storageServiceGetAttrHandler.ServeHTTP(w, r)
+		case StorageServiceSetAttrProcedure:
+			storageServiceSetAttrHandler.ServeHTTP(w, r)
+		case StorageServiceMknodProcedure:
+			storageServiceMknodHandler.ServeHTTP(w, r)
+		case StorageServiceMkdirProcedure:
+			storageServiceMkdirHandler.ServeHTTP(w, r)
+		case StorageServiceSymlinkProcedure:
+			storageServiceSymlinkHandler.ServeHTTP(w, r)
+		case StorageServiceReadlinkProcedure:
+			storageServiceReadlinkHandler.ServeHTTP(w, r)
+		case StorageServiceLinkProcedure:
+			storageServiceLinkHandler.ServeHTTP(w, r)
+		case StorageServiceUnlinkProcedure:
+			storageServiceUnlinkHandler.ServeHTTP(w, r)
+		case StorageServiceRmdirProcedure:
+			storageServiceRmdirHandler.ServeHTTP(w, r)
+		case StorageServiceRenameProcedure:
+			storageServiceRenameHandler.ServeHTTP(w, r)
+		case StorageServiceCreateProcedure:
+			storageServiceCreateHandler.ServeHTTP(w, r)
+		case StorageServiceTmpFileProcedure:
+			storageServiceTmpFileHandler.ServeHTTP(w, r)
+		case StorageServiceOpenProcedure:
+			storageServiceOpenHandler.ServeHTTP(w, r)
+		case StorageServiceFlushProcedure:
+			storageServiceFlushHandler.ServeHTTP(w, r)
+		case StorageServiceFsyncProcedure:
+			storageServiceFsyncHandler.ServeHTTP(w, r)
+		case StorageServiceReleaseProcedure:
+			storageServiceReleaseHandler.ServeHTTP(w, r)
+		case StorageServiceOpenDirProcedure:
+			storageServiceOpenDirHandler.ServeHTTP(w, r)
+		case StorageServiceFsyncDirProcedure:
+			storageServiceFsyncDirHandler.ServeHTTP(w, r)
+		case StorageServiceReleaseDirProcedure:
+			storageServiceReleaseDirHandler.ServeHTTP(w, r)
+		case StorageServiceReadDirProcedure:
+			storageServiceReadDirHandler.ServeHTTP(w, r)
+		case StorageServiceReadDirPlusProcedure:
+			storageServiceReadDirPlusHandler.ServeHTTP(w, r)
+		case StorageServiceFallocateProcedure:
+			storageServiceFallocateHandler.ServeHTTP(w, r)
+		case StorageServiceSetXattrProcedure:
+			storageServiceSetXattrHandler.ServeHTTP(w, r)
+		case StorageServiceGetXattrProcedure:
+			storageServiceGetXattrHandler.ServeHTTP(w, r)
+		case StorageServiceListXattrProcedure:
+			storageServiceListXattrHandler.ServeHTTP(w, r)
+		case StorageServiceRemoveXattrProcedure:
+			storageServiceRemoveXattrHandler.ServeHTTP(w, r)
+		case StorageServiceGetLkProcedure:
+			storageServiceGetLkHandler.ServeHTTP(w, r)
+		case StorageServiceSetLkProcedure:
+			storageServiceSetLkHandler.ServeHTTP(w, r)
+		case StorageServiceSetLkwProcedure:
+			storageServiceSetLkwHandler.ServeHTTP(w, r)
+		case StorageServiceRenewSessionProcedure:
+			storageServiceRenewSessionHandler.ServeHTTP(w, r)
+		case StorageServiceCreateDiskProcedure:
+			storageServiceCreateDiskHandler.ServeHTTP(w, r)
+		case StorageServiceGetDiskProcedure:
+			storageServiceGetDiskHandler.ServeHTTP(w, r)
+		case StorageServiceUpdateDiskProcedure:
+			storageServiceUpdateDiskHandler.ServeHTTP(w, r)
+		case StorageServiceDeleteDiskProcedure:
+			storageServiceDeleteDiskHandler.ServeHTTP(w, r)
+		case StorageServiceStatFSProcedure:
+			storageServiceStatFSHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
 }
 
 // UnimplementedStorageServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedStorageServiceHandler struct{}
 
-func (UnimplementedStorageServiceHandler) Lookup(context.Context, *v1.LookupRequest) (*v1.LookupResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Lookup is not implemented")
+func (UnimplementedStorageServiceHandler) Lookup(context.Context, *connect.Request[v1.LookupRequest]) (*connect.Response[v1.LookupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Lookup is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) GetAttr(context.Context, *v1.GetAttrRequest) (*v1.GetAttrResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetAttr is not implemented")
+func (UnimplementedStorageServiceHandler) GetAttr(context.Context, *connect.Request[v1.GetAttrRequest]) (*connect.Response[v1.GetAttrResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetAttr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) SetAttr(context.Context, *v1.SetAttrRequest) (*v1.SetAttrResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetAttr is not implemented")
+func (UnimplementedStorageServiceHandler) SetAttr(context.Context, *connect.Request[v1.SetAttrRequest]) (*connect.Response[v1.SetAttrResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.SetAttr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Mknod(context.Context, *v1.MknodRequest) (*v1.MknodResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Mknod is not implemented")
+func (UnimplementedStorageServiceHandler) Mknod(context.Context, *connect.Request[v1.MknodRequest]) (*connect.Response[v1.MknodResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Mknod is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Mkdir(context.Context, *v1.MkdirRequest) (*v1.MkdirResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Mkdir is not implemented")
+func (UnimplementedStorageServiceHandler) Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Mkdir is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Symlink(context.Context, *v1.SymlinkRequest) (*v1.SymlinkResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Symlink is not implemented")
+func (UnimplementedStorageServiceHandler) Symlink(context.Context, *connect.Request[v1.SymlinkRequest]) (*connect.Response[v1.SymlinkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Symlink is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Readlink(context.Context, *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Readlink is not implemented")
+func (UnimplementedStorageServiceHandler) Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Readlink is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Link(context.Context, *v1.LinkRequest) (*v1.LinkResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Link is not implemented")
+func (UnimplementedStorageServiceHandler) Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Link is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Unlink(context.Context, *v1.UnlinkRequest) (*v1.UnlinkResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Unlink is not implemented")
+func (UnimplementedStorageServiceHandler) Unlink(context.Context, *connect.Request[v1.UnlinkRequest]) (*connect.Response[v1.UnlinkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Unlink is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Rmdir(context.Context, *v1.RmdirRequest) (*v1.RmdirResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Rmdir is not implemented")
+func (UnimplementedStorageServiceHandler) Rmdir(context.Context, *connect.Request[v1.RmdirRequest]) (*connect.Response[v1.RmdirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Rmdir is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Rename(context.Context, *v1.RenameRequest) (*v1.RenameResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Rename is not implemented")
+func (UnimplementedStorageServiceHandler) Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Rename is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Create(context.Context, *v1.CreateRequest) (*v1.CreateResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Create is not implemented")
+func (UnimplementedStorageServiceHandler) Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Create is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) TmpFile(context.Context, *v1.TmpFileRequest) (*v1.TmpFileResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.TmpFile is not implemented")
+func (UnimplementedStorageServiceHandler) TmpFile(context.Context, *connect.Request[v1.TmpFileRequest]) (*connect.Response[v1.TmpFileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.TmpFile is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Open(context.Context, *v1.OpenRequest) (*v1.OpenResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Open is not implemented")
+func (UnimplementedStorageServiceHandler) Open(context.Context, *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Open is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Flush(context.Context, *v1.FlushRequest) (*v1.FlushResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Flush is not implemented")
+func (UnimplementedStorageServiceHandler) Flush(context.Context, *connect.Request[v1.FlushRequest]) (*connect.Response[v1.FlushResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Flush is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Fsync(context.Context, *v1.FsyncRequest) (*v1.FsyncResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Fsync is not implemented")
+func (UnimplementedStorageServiceHandler) Fsync(context.Context, *connect.Request[v1.FsyncRequest]) (*connect.Response[v1.FsyncResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Fsync is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Release(context.Context, *v1.ReleaseRequest) (*v1.ReleaseResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Release is not implemented")
+func (UnimplementedStorageServiceHandler) Release(context.Context, *connect.Request[v1.ReleaseRequest]) (*connect.Response[v1.ReleaseResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Release is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) OpenDir(context.Context, *v1.OpenDirRequest) (*v1.OpenDirResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.OpenDir is not implemented")
+func (UnimplementedStorageServiceHandler) OpenDir(context.Context, *connect.Request[v1.OpenDirRequest]) (*connect.Response[v1.OpenDirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.OpenDir is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) FsyncDir(context.Context, *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.FsyncDir is not implemented")
+func (UnimplementedStorageServiceHandler) FsyncDir(context.Context, *connect.Request[v1.FsyncDirRequest]) (*connect.Response[v1.FsyncDirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.FsyncDir is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ReleaseDir(context.Context, *v1.ReleaseDirRequest) (*v1.ReleaseDirResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.ReleaseDir is not implemented")
+func (UnimplementedStorageServiceHandler) ReleaseDir(context.Context, *connect.Request[v1.ReleaseDirRequest]) (*connect.Response[v1.ReleaseDirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReleaseDir is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ReadDir(context.Context, *v1.ReadDirRequest) (*v1.ReadDirResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.ReadDir is not implemented")
+func (UnimplementedStorageServiceHandler) ReadDir(context.Context, *connect.Request[v1.ReadDirRequest]) (*connect.Response[v1.ReadDirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReadDir is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ReadDirPlus(context.Context, *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.ReadDirPlus is not implemented")
+func (UnimplementedStorageServiceHandler) ReadDirPlus(context.Context, *connect.Request[v1.ReadDirPlusRequest]) (*connect.Response[v1.ReadDirPlusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReadDirPlus is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) Fallocate(context.Context, *v1.FallocateRequest) (*v1.FallocateResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.Fallocate is not implemented")
+func (UnimplementedStorageServiceHandler) Fallocate(context.Context, *connect.Request[v1.FallocateRequest]) (*connect.Response[v1.FallocateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Fallocate is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) SetXattr(context.Context, *v1.SetXattrRequest) (*v1.SetXattrResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetXattr is not implemented")
+func (UnimplementedStorageServiceHandler) SetXattr(context.Context, *connect.Request[v1.SetXattrRequest]) (*connect.Response[v1.SetXattrResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.SetXattr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) GetXattr(context.Context, *v1.GetXattrRequest) (*v1.GetXattrResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetXattr is not implemented")
+func (UnimplementedStorageServiceHandler) GetXattr(context.Context, *connect.Request[v1.GetXattrRequest]) (*connect.Response[v1.GetXattrResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetXattr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ListXattr(context.Context, *v1.ListXattrRequest) (*v1.ListXattrResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.ListXattr is not implemented")
+func (UnimplementedStorageServiceHandler) ListXattr(context.Context, *connect.Request[v1.ListXattrRequest]) (*connect.Response[v1.ListXattrResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListXattr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) RemoveXattr(context.Context, *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.RemoveXattr is not implemented")
+func (UnimplementedStorageServiceHandler) RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.RemoveXattr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) GetLk(context.Context, *v1.GetLkRequest) (*v1.GetLkResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetLk is not implemented")
+func (UnimplementedStorageServiceHandler) GetLk(context.Context, *connect.Request[v1.GetLkRequest]) (*connect.Response[v1.GetLkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetLk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) SetLk(context.Context, *v1.SetLkRequest) (*v1.SetLkResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetLk is not implemented")
+func (UnimplementedStorageServiceHandler) SetLk(context.Context, *connect.Request[v1.SetLkRequest]) (*connect.Response[v1.SetLkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.SetLk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) SetLkw(context.Context, *v1.SetLkwRequest) (*v1.SetLkwResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.SetLkw is not implemented")
+func (UnimplementedStorageServiceHandler) SetLkw(context.Context, *connect.Request[v1.SetLkwRequest]) (*connect.Response[v1.SetLkwResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.SetLkw is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.RenewSession is not implemented")
+func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *connect.Request[v1.RenewSessionRequest]) (*connect.Response[v1.RenewSessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.RenewSession is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.CreateDisk is not implemented")
+func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CreateDisk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *v1.GetDiskRequest) (*v1.GetDiskResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.GetDisk is not implemented")
+func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetDisk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.UpdateDisk is not implemented")
+func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.UpdateDisk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) DeleteDisk(context.Context, *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.DeleteDisk is not implemented")
+func (UnimplementedStorageServiceHandler) DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DeleteDisk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) StatFS(context.Context, *v1.StatFSRequest) (*v1.StatFSResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "storage.v1.StorageService.StatFS is not implemented")
-}
-
-type storageServiceClient struct {
-	client *connect.Client
-}
-
-func (c *storageServiceClient) Lookup(ctx context.Context, req *v1.LookupRequest) (*v1.LookupResponse, error) {
-	var res v1.LookupResponse
-	if err := c.client.CallUnary(ctx, storageServiceLookupSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) GetAttr(ctx context.Context, req *v1.GetAttrRequest) (*v1.GetAttrResponse, error) {
-	var res v1.GetAttrResponse
-	if err := c.client.CallUnary(ctx, storageServiceGetAttrSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) SetAttr(ctx context.Context, req *v1.SetAttrRequest) (*v1.SetAttrResponse, error) {
-	var res v1.SetAttrResponse
-	if err := c.client.CallUnary(ctx, storageServiceSetAttrSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Mknod(ctx context.Context, req *v1.MknodRequest) (*v1.MknodResponse, error) {
-	var res v1.MknodResponse
-	if err := c.client.CallUnary(ctx, storageServiceMknodSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Mkdir(ctx context.Context, req *v1.MkdirRequest) (*v1.MkdirResponse, error) {
-	var res v1.MkdirResponse
-	if err := c.client.CallUnary(ctx, storageServiceMkdirSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Symlink(ctx context.Context, req *v1.SymlinkRequest) (*v1.SymlinkResponse, error) {
-	var res v1.SymlinkResponse
-	if err := c.client.CallUnary(ctx, storageServiceSymlinkSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Readlink(ctx context.Context, req *v1.ReadlinkRequest) (*v1.ReadlinkResponse, error) {
-	var res v1.ReadlinkResponse
-	if err := c.client.CallUnary(ctx, storageServiceReadlinkSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Link(ctx context.Context, req *v1.LinkRequest) (*v1.LinkResponse, error) {
-	var res v1.LinkResponse
-	if err := c.client.CallUnary(ctx, storageServiceLinkSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Unlink(ctx context.Context, req *v1.UnlinkRequest) (*v1.UnlinkResponse, error) {
-	var res v1.UnlinkResponse
-	if err := c.client.CallUnary(ctx, storageServiceUnlinkSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Rmdir(ctx context.Context, req *v1.RmdirRequest) (*v1.RmdirResponse, error) {
-	var res v1.RmdirResponse
-	if err := c.client.CallUnary(ctx, storageServiceRmdirSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Rename(ctx context.Context, req *v1.RenameRequest) (*v1.RenameResponse, error) {
-	var res v1.RenameResponse
-	if err := c.client.CallUnary(ctx, storageServiceRenameSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Create(ctx context.Context, req *v1.CreateRequest) (*v1.CreateResponse, error) {
-	var res v1.CreateResponse
-	if err := c.client.CallUnary(ctx, storageServiceCreateSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) TmpFile(ctx context.Context, req *v1.TmpFileRequest) (*v1.TmpFileResponse, error) {
-	var res v1.TmpFileResponse
-	if err := c.client.CallUnary(ctx, storageServiceTmpFileSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Open(ctx context.Context, req *v1.OpenRequest) (*v1.OpenResponse, error) {
-	var res v1.OpenResponse
-	if err := c.client.CallUnary(ctx, storageServiceOpenSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Flush(ctx context.Context, req *v1.FlushRequest) (*v1.FlushResponse, error) {
-	var res v1.FlushResponse
-	if err := c.client.CallUnary(ctx, storageServiceFlushSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Fsync(ctx context.Context, req *v1.FsyncRequest) (*v1.FsyncResponse, error) {
-	var res v1.FsyncResponse
-	if err := c.client.CallUnary(ctx, storageServiceFsyncSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Release(ctx context.Context, req *v1.ReleaseRequest) (*v1.ReleaseResponse, error) {
-	var res v1.ReleaseResponse
-	if err := c.client.CallUnary(ctx, storageServiceReleaseSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) OpenDir(ctx context.Context, req *v1.OpenDirRequest) (*v1.OpenDirResponse, error) {
-	var res v1.OpenDirResponse
-	if err := c.client.CallUnary(ctx, storageServiceOpenDirSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) FsyncDir(ctx context.Context, req *v1.FsyncDirRequest) (*v1.FsyncDirResponse, error) {
-	var res v1.FsyncDirResponse
-	if err := c.client.CallUnary(ctx, storageServiceFsyncDirSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) ReleaseDir(ctx context.Context, req *v1.ReleaseDirRequest) (*v1.ReleaseDirResponse, error) {
-	var res v1.ReleaseDirResponse
-	if err := c.client.CallUnary(ctx, storageServiceReleaseDirSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) ReadDir(ctx context.Context, req *v1.ReadDirRequest) (*v1.ReadDirResponse, error) {
-	var res v1.ReadDirResponse
-	if err := c.client.CallUnary(ctx, storageServiceReadDirSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) ReadDirPlus(ctx context.Context, req *v1.ReadDirPlusRequest) (*v1.ReadDirPlusResponse, error) {
-	var res v1.ReadDirPlusResponse
-	if err := c.client.CallUnary(ctx, storageServiceReadDirPlusSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) Fallocate(ctx context.Context, req *v1.FallocateRequest) (*v1.FallocateResponse, error) {
-	var res v1.FallocateResponse
-	if err := c.client.CallUnary(ctx, storageServiceFallocateSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) SetXattr(ctx context.Context, req *v1.SetXattrRequest) (*v1.SetXattrResponse, error) {
-	var res v1.SetXattrResponse
-	if err := c.client.CallUnary(ctx, storageServiceSetXattrSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) GetXattr(ctx context.Context, req *v1.GetXattrRequest) (*v1.GetXattrResponse, error) {
-	var res v1.GetXattrResponse
-	if err := c.client.CallUnary(ctx, storageServiceGetXattrSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) ListXattr(ctx context.Context, req *v1.ListXattrRequest) (*v1.ListXattrResponse, error) {
-	var res v1.ListXattrResponse
-	if err := c.client.CallUnary(ctx, storageServiceListXattrSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) RemoveXattr(ctx context.Context, req *v1.RemoveXattrRequest) (*v1.RemoveXattrResponse, error) {
-	var res v1.RemoveXattrResponse
-	if err := c.client.CallUnary(ctx, storageServiceRemoveXattrSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) GetLk(ctx context.Context, req *v1.GetLkRequest) (*v1.GetLkResponse, error) {
-	var res v1.GetLkResponse
-	if err := c.client.CallUnary(ctx, storageServiceGetLkSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) SetLk(ctx context.Context, req *v1.SetLkRequest) (*v1.SetLkResponse, error) {
-	var res v1.SetLkResponse
-	if err := c.client.CallUnary(ctx, storageServiceSetLkSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) SetLkw(ctx context.Context, req *v1.SetLkwRequest) (*v1.SetLkwResponse, error) {
-	var res v1.SetLkwResponse
-	if err := c.client.CallUnary(ctx, storageServiceSetLkwSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) RenewSession(ctx context.Context, req *v1.RenewSessionRequest) (*v1.RenewSessionResponse, error) {
-	var res v1.RenewSessionResponse
-	if err := c.client.CallUnary(ctx, storageServiceRenewSessionSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) CreateDisk(ctx context.Context, req *v1.CreateDiskRequest) (*v1.CreateDiskResponse, error) {
-	var res v1.CreateDiskResponse
-	if err := c.client.CallUnary(ctx, storageServiceCreateDiskSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) GetDisk(ctx context.Context, req *v1.GetDiskRequest) (*v1.GetDiskResponse, error) {
-	var res v1.GetDiskResponse
-	if err := c.client.CallUnary(ctx, storageServiceGetDiskSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) UpdateDisk(ctx context.Context, req *v1.UpdateDiskRequest) (*v1.UpdateDiskResponse, error) {
-	var res v1.UpdateDiskResponse
-	if err := c.client.CallUnary(ctx, storageServiceUpdateDiskSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) DeleteDisk(ctx context.Context, req *v1.DeleteDiskRequest) (*v1.DeleteDiskResponse, error) {
-	var res v1.DeleteDiskResponse
-	if err := c.client.CallUnary(ctx, storageServiceDeleteDiskSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (c *storageServiceClient) StatFS(ctx context.Context, req *v1.StatFSRequest) (*v1.StatFSResponse, error) {
-	var res v1.StatFSResponse
-	if err := c.client.CallUnary(ctx, storageServiceStatFSSpec(), req, &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-type storageServiceHandler struct{ svc StorageServiceHandler }
-
-func (h storageServiceHandler) lookup(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.LookupRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Lookup(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) getAttr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.GetAttrRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.GetAttr(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) setAttr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.SetAttrRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.SetAttr(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) mknod(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.MknodRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Mknod(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) mkdir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.MkdirRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Mkdir(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) symlink(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.SymlinkRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Symlink(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) readlink(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ReadlinkRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Readlink(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) link(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.LinkRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Link(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) unlink(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.UnlinkRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Unlink(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) rmdir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.RmdirRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Rmdir(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) rename(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.RenameRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Rename(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) create(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.CreateRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Create(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) tmpFile(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.TmpFileRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.TmpFile(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) open(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.OpenRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Open(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) flush(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.FlushRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Flush(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) fsync(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.FsyncRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Fsync(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) release(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ReleaseRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Release(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) openDir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.OpenDirRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.OpenDir(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) fsyncDir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.FsyncDirRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.FsyncDir(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) releaseDir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ReleaseDirRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.ReleaseDir(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) readDir(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ReadDirRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.ReadDir(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) readDirPlus(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ReadDirPlusRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.ReadDirPlus(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) fallocate(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.FallocateRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.Fallocate(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) setXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.SetXattrRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.SetXattr(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) getXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.GetXattrRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.GetXattr(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) listXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.ListXattrRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.ListXattr(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) removeXattr(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.RemoveXattrRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.RemoveXattr(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) getLk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.GetLkRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.GetLk(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) setLk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.SetLkRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.SetLk(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) setLkw(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.SetLkwRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.SetLkw(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) renewSession(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.RenewSessionRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.RenewSession(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) createDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.CreateDiskRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.CreateDisk(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) getDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.GetDiskRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.GetDisk(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) updateDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.UpdateDiskRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.UpdateDisk(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) deleteDisk(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.DeleteDiskRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.DeleteDisk(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
-}
-
-func (h storageServiceHandler) statFS(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
-	var req v1.StatFSRequest
-	if err := stream.Receive(&req); err != nil {
-		return err
-	}
-	res, err := h.svc.StatFS(ctx, &req)
-	if err != nil {
-		return err
-	}
-	return stream.Send(res)
+func (UnimplementedStorageServiceHandler) StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.StatFS is not implemented"))
 }

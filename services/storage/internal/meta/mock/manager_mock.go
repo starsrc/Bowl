@@ -39,6 +39,72 @@ func (_m *MockManager) EXPECT() *MockManager_Expecter {
 	return &MockManager_Expecter{mock: &_m.Mock}
 }
 
+// CollectGarbage provides a mock function for the type MockManager
+func (_mock *MockManager) CollectGarbage(ctx context.Context, limit int32) (int, error) {
+	ret := _mock.Called(ctx, limit)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CollectGarbage")
+	}
+
+	var r0 int
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int32) (int, error)); ok {
+		return returnFunc(ctx, limit)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int32) int); ok {
+		r0 = returnFunc(ctx, limit)
+	} else {
+		r0 = ret.Get(0).(int)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int32) error); ok {
+		r1 = returnFunc(ctx, limit)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_CollectGarbage_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CollectGarbage'
+type MockManager_CollectGarbage_Call struct {
+	*mock.Call
+}
+
+// CollectGarbage is a helper method to define mock.On call
+//   - ctx context.Context
+//   - limit int32
+func (_e *MockManager_Expecter) CollectGarbage(ctx any, limit any) *MockManager_CollectGarbage_Call {
+	return &MockManager_CollectGarbage_Call{Call: _e.mock.On("CollectGarbage", ctx, limit)}
+}
+
+func (_c *MockManager_CollectGarbage_Call) Run(run func(ctx context.Context, limit int32)) *MockManager_CollectGarbage_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int32
+		if args[1] != nil {
+			arg1 = args[1].(int32)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_CollectGarbage_Call) Return(n int, err error) *MockManager_CollectGarbage_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockManager_CollectGarbage_Call) RunAndReturn(run func(ctx context.Context, limit int32) (int, error)) *MockManager_CollectGarbage_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Create provides a mock function for the type MockManager
 func (_mock *MockManager) Create(ctx context.Context, params meta.CreateParams) (*meta.CreateResult, error) {
 	ret := _mock.Called(ctx, params)
@@ -2231,6 +2297,58 @@ func (_c *MockManager_SetXattr_Call) Return(err error) *MockManager_SetXattr_Cal
 
 func (_c *MockManager_SetXattr_Call) RunAndReturn(run func(ctx context.Context, params meta.SetXattrParams) error) *MockManager_SetXattr_Call {
 	_c.Call.Return(run)
+	return _c
+}
+
+// StartGCWorker provides a mock function for the type MockManager
+func (_mock *MockManager) StartGCWorker(ctx context.Context, interval time.Duration, batchLimit int32) {
+	_mock.Called(ctx, interval, batchLimit)
+	return
+}
+
+// MockManager_StartGCWorker_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'StartGCWorker'
+type MockManager_StartGCWorker_Call struct {
+	*mock.Call
+}
+
+// StartGCWorker is a helper method to define mock.On call
+//   - ctx context.Context
+//   - interval time.Duration
+//   - batchLimit int32
+func (_e *MockManager_Expecter) StartGCWorker(ctx any, interval any, batchLimit any) *MockManager_StartGCWorker_Call {
+	return &MockManager_StartGCWorker_Call{Call: _e.mock.On("StartGCWorker", ctx, interval, batchLimit)}
+}
+
+func (_c *MockManager_StartGCWorker_Call) Run(run func(ctx context.Context, interval time.Duration, batchLimit int32)) *MockManager_StartGCWorker_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 time.Duration
+		if args[1] != nil {
+			arg1 = args[1].(time.Duration)
+		}
+		var arg2 int32
+		if args[2] != nil {
+			arg2 = args[2].(int32)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_StartGCWorker_Call) Return() *MockManager_StartGCWorker_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockManager_StartGCWorker_Call) RunAndReturn(run func(ctx context.Context, interval time.Duration, batchLimit int32)) *MockManager_StartGCWorker_Call {
+	_c.Run(run)
 	return _c
 }
 

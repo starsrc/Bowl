@@ -81,6 +81,8 @@ type Manager interface {
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 	Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error)
 	Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error)
+	CollectGarbage(ctx context.Context, limit int32) (int, error)
+	StartGCWorker(ctx context.Context, interval time.Duration, batchLimit int32)
 }
 
 type manager struct {

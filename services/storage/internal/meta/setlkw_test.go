@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -4985,3 +4986,945 @@ func TestSetLkw_Round2_P2_UnlockTxFailure_SkipsUndo_HangingLockLeak(t *testing.T
 		require.NoError(t, otherErr, "Round 2 P-2 缺陷验证 (Flock)：外部冲突 Owner 尝试加排他锁必须成功，不能因残留悬挂锁冲突失败")
 	})
 }
+
+type transientHookQuerier struct {
+	db.Querier
+	onDeleteFileLockWaiter func(ctx context.Context, q db.Querier, params db.DeleteFileLockWaiterParams) (int64, error)
+	onCreateFileLock       func(ctx context.Context, q db.Querier, params db.CreateFileLockParams) (db.FileLock, error)
+	onDeleteFileLocksByIDs func(ctx context.Context, q db.Querier, ids []int64) error
+}
+
+func (q *transientHookQuerier) DeleteFileLockWaiter(ctx context.Context, params db.DeleteFileLockWaiterParams) (int64, error) {
+	if q.onDeleteFileLockWaiter != nil {
+		return q.onDeleteFileLockWaiter(ctx, q.Querier, params)
+	}
+	return q.Querier.DeleteFileLockWaiter(ctx, params)
+}
+
+func (q *transientHookQuerier) CreateFileLock(ctx context.Context, params db.CreateFileLockParams) (db.FileLock, error) {
+	if q.onCreateFileLock != nil {
+		return q.onCreateFileLock(ctx, q.Querier, params)
+	}
+	return q.Querier.CreateFileLock(ctx, params)
+}
+
+func (q *transientHookQuerier) DeleteFileLocksByIDs(ctx context.Context, ids []int64) error {
+	if q.onDeleteFileLocksByIDs != nil {
+		return q.onDeleteFileLocksByIDs(ctx, q.Querier, ids)
+	}
+	return q.Querier.DeleteFileLocksByIDs(ctx, ids)
+}
+
+type transientRetryHookStore struct {
+	db.Store
+	onDeleteFileLockWaiter func(ctx context.Context, q db.Querier, params db.DeleteFileLockWaiterParams) (int64, error)
+	onCreateFileLock       func(ctx context.Context, q db.Querier, params db.CreateFileLockParams) (db.FileLock, error)
+	onDeleteFileLocksByIDs func(ctx context.Context, q db.Querier, ids []int64) error
+	onExecTx               func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error
+}
+
+func (s *transientRetryHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	wrappedFn := func(q db.Querier) error {
+		hookQ := &transientHookQuerier{
+			Querier:                q,
+			onDeleteFileLockWaiter: s.onDeleteFileLockWaiter,
+			onCreateFileLock:       s.onCreateFileLock,
+			onDeleteFileLocksByIDs: s.onDeleteFileLocksByIDs,
+		}
+		return fn(hookQ)
+	}
+	if s.onExecTx != nil {
+		return s.onExecTx(ctx, wrappedFn, opts...)
+	}
+	return s.Store.ExecTxWithOptions(ctx, wrappedFn, opts...)
+}
+
+// TestSetLkw_CancelCleanupAndRollback_TransientConflictRetry 复现缺陷 P-1：
+// 1. cleanupCancelledWaiter 在遇到瞬态 40P01 等冲突错误时，未重试且吞没 SQL 错误，导致残留 PENDING 等待者。
+// 2. rollbackGrantedLock 在恢复原锁阶段遇到瞬态 40P01 时，未重试且吞没 CreateFileLock 错误，导致调用方原有锁被永久误删。
+// 3. rollbackGrantedLock 在删除刚授予的 Flock 锁阶段遇到瞬态 40P01 时，未重试且吞没 DeleteFileLocksByIDs 错误。
+func TestSetLkw_CancelCleanupAndRollback_TransientConflictRetry(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	t.Run("Subtest1_CleanupCancelledWaiter_Transient40P01Retry", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		baseStore := db.NewStore(pool)
+		hookStore := &transientRetryHookStore{
+			Store: baseStore,
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-waiter-retry-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sess1 := uint64(700101)
+		sess2 := uint64(700102)
+		sess3 := uint64(700103)
+		_, err = mgr.RenewSession(ctx, sess1)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sess2)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sess3)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("waiter_retry.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh1 := createRes.Fh
+
+		openRes2, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		fh2 := openRes2.Fh
+
+		openRes3, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess3,
+		})
+		require.NoError(t, err)
+		fh3 := openRes3.Fh
+
+		owner1 := uint64(101)
+		owner2 := uint64(202)
+		owner3 := uint64(303)
+
+		// 1. 客户端 1 持有 [0, 100] 排他写锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: owner1,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   1001,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		// 2. 客户端 2 发起阻塞 SetLkw 请求获取 [0, 100] 写锁
+		waiterCtx, cancelWaiter := context.WithCancel(ctx)
+		defer cancelWaiter()
+
+		var deleteAttempts atomic.Int32
+		var inject40P01 atomic.Bool
+
+		hookStore.onDeleteFileLockWaiter = func(callCtx context.Context, q db.Querier, p db.DeleteFileLockWaiterParams) (int64, error) {
+			if inject40P01.Load() && deleteAttempts.Add(1) == 1 {
+				// 模拟首次清理事务遇到瞬态 40P01 deadlock_detected
+				return 0, &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+			}
+			return q.DeleteFileLockWaiter(callCtx, p)
+		}
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- mgr.SetLkw(waiterCtx, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fh2,
+				LockOwner: owner2,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   2002,
+				},
+				LkFlags:   0,
+				SessionID: sess2,
+				RequestID: 5001,
+			})
+		}()
+
+		// 确保客户端 2 已成功在底表登记为 PENDING 等待者
+		require.Eventually(t, func() bool {
+			waiters, listErr := baseStore.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+				Ino:     int64(fileIno),
+				LkFlags: 0,
+			})
+			return listErr == nil && len(waiters) == 1
+		}, 3*time.Second, 5*time.Millisecond, "客户端 2 必须在底表成功登记等待者")
+
+		// 激活 40P01 注入并取消 waiterCtx
+		inject40P01.Store(true)
+		cancelWaiter()
+
+		select {
+		case waitErr := <-errCh:
+			require.ErrorIs(t, waitErr, meta.ErrInterrupted, "取消后的 SetLkw 必须返回 ErrInterrupted")
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 SetLkw 取消返回超时")
+		}
+
+		// 显式断言：确保首次 40P01 故障确实被注入且触发了至少第 2 次重试
+		require.GreaterOrEqual(t, deleteAttempts.Load(), int32(2), "cleanupCancelledWaiter 必须经历首次 40P01 故障并至少重试 1 次")
+
+		// 3. 断言：底表 file_lock_waiters 中该等待者已被彻底清除（数量为 0）
+		waiters, err := baseStore.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, waiters, "P-1 缺陷验证：cleanupCancelledWaiter 遇到瞬态 40P01 必须自动重试并彻底清除底表 waiter 记录，绝不能吞错残留")
+
+		// 4. 断言：客户端 1 释放锁后，其他竞争方（客户端 3）随后可以正常获取锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: owner1,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_UNLCK,
+				PID:   1001,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh3,
+			LockOwner: owner3,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   3003,
+			},
+			LkFlags:   0,
+			SessionID: sess3,
+		})
+		require.NoError(t, err, "客户端 1 释放后，竞争方客户端 3 必须能正常获取排他锁")
+	})
+
+	t.Run("Subtest2_RollbackGrantedLock_RestoreOldLocks_Transient40P01Retry", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		baseStore := db.NewStore(pool)
+		hookStore := &transientRetryHookStore{
+			Store: baseStore,
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-rollback-retry-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(800101)
+		sessB := uint64(800102)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sessB)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("rollback_retry.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		openResB, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessB,
+		})
+		require.NoError(t, err)
+		fhB := openResB.Fh
+
+		ownerA := uint64(1001)
+		ownerB := uint64(1002)
+
+		// 1. 客户端 A 原本持有 [0, 100] 读锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_RDLCK,
+				PID:   1001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 客户端 B 也持有 [0, 100] 读锁，阻止客户端 A 升级为写锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: ownerB,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_RDLCK,
+				PID:   1002,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+		})
+		require.NoError(t, err)
+
+		// 2. 客户端 A 发起阻塞 SetLkw 升级为 [0, 100] 写锁
+		type ctxTag string
+		upgradeCtxKey := ctxTag("is_upgrade_a")
+		callCtx, callCancel := context.WithCancel(context.WithValue(ctx, upgradeCtxKey, true))
+		defer callCancel()
+
+		var writeLockCreatedInTx atomic.Bool
+		var injectCreateLock40P01 atomic.Bool
+		var createLockAttempts atomic.Int32
+
+		hookStore.onCreateFileLock = func(callCtx context.Context, q db.Querier, p db.CreateFileLockParams) (db.FileLock, error) {
+			if p.SessionID == int64(sessA) && p.LockType == int16(meta.F_WRLCK) {
+				writeLockCreatedInTx.Store(true)
+			}
+			if injectCreateLock40P01.Load() && createLockAttempts.Add(1) == 1 {
+				// 模拟 rollbackGrantedLock 内恢复原读锁时首次 CreateFileLock 返回瞬态 40P01
+				return db.FileLock{}, &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+			}
+			return q.CreateFileLock(callCtx, p)
+		}
+
+		hookStore.onExecTx = func(txCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			err := hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+			if err == nil && writeLockCreatedInTx.Load() && txCtx.Value(upgradeCtxKey) != nil {
+				// 在客户端 A 授锁写锁事务成功提交后触发取消，并激活 rollback 期间 CreateFileLock 40P01 注入
+				writeLockCreatedInTx.Store(false)
+				injectCreateLock40P01.Store(true)
+				callCancel()
+			}
+			return err
+		}
+
+		upgradeErrCh := make(chan error, 1)
+		go func() {
+			upgradeErrCh <- mgr.SetLkw(callCtx, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   1001,
+				},
+				LkFlags:   0,
+				SessionID: sessA,
+				RequestID: 6001,
+			})
+		}()
+
+		// 等待客户端 A 在底表登记为 PENDING 等待者
+		require.Eventually(t, func() bool {
+			waiters, listErr := baseStore.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+				Ino:     int64(fileIno),
+				LkFlags: 0,
+			})
+			return listErr == nil && len(waiters) == 1
+		}, 3*time.Second, 5*time.Millisecond, "客户端 A 必须在底表成功登记等待者")
+
+		// 客户端 B 释放读锁，唤醒客户端 A
+		bUnlockErr := mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: ownerB,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_UNLCK,
+				PID:   1002,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+		})
+		require.NoError(t, bUnlockErr)
+
+		// 等待客户端 A 的 SetLkw 返回
+		select {
+		case retErr := <-upgradeErrCh:
+			require.ErrorIs(t, retErr, meta.ErrInterrupted, "回滚后的 SetLkw 必须返回 ErrInterrupted")
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待客户端 A 的 SetLkw 回滚返回超时")
+		}
+
+		// 断言：回滚恢复旧读锁的 CreateFileLock 确实经历了首次 40P01 失败并重试成功
+		require.GreaterOrEqual(t, createLockAttempts.Load(), int32(2), "rollbackGrantedLock 恢复原读锁时必须经历首次 40P01 故障并至少重试 1 次")
+
+		// 断言：底表 file_lock_waiters 为空
+		waiters, err := baseStore.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, waiters, "回滚完成后底表 file_lock_waiters 必须为空")
+
+		// 3. 断言：新授予的写锁被撤销，且原有的 [0, 100] 读锁完整恢复保留！
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		require.Len(t, activeLocks, 1, "P-1 缺陷验证：客户端 A 原有的 [0, 100] 读锁必须完整恢复保留，绝不能因 40P01 吞错而永久误删")
+		assert.Equal(t, int64(ownerA), activeLocks[0].LockOwner)
+		assert.Equal(t, int64(sessA), activeLocks[0].SessionID)
+		assert.Equal(t, int16(meta.F_RDLCK), activeLocks[0].LockType, "原锁类型必须为读锁 F_RDLCK")
+		assert.Equal(t, int64(0), activeLocks[0].StartOffset)
+		assert.Equal(t, int64(100), activeLocks[0].EndOffset)
+	})
+
+	t.Run("Subtest3_RollbackGrantedFlock_DeleteLock_Transient40P01Retry", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		baseStore := db.NewStore(pool)
+		hookStore := &transientRetryHookStore{
+			Store: baseStore,
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-flock-rollback-retry-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sess1 := uint64(900101)
+		sess2 := uint64(900102)
+		sess3 := uint64(900103)
+		_, err = mgr.RenewSession(ctx, sess1)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sess2)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sess3)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("flock_rollback_retry.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh1 := createRes.Fh
+
+		openRes2, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		fh2 := openRes2.Fh
+
+		openRes3, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess3,
+		})
+		require.NoError(t, err)
+		fh3 := openRes3.Fh
+
+		owner1 := uint64(2001)
+		owner2 := uint64(2002)
+		owner3 := uint64(2003)
+
+		// 1. 客户端 1 持有排他 flock 锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: owner1,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_WRLCK,
+				PID:   2001,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		// 2. 客户端 2 发起阻塞 SetLkw 请求获取排他 flock 锁
+		type ctxTag string
+		flockCtxKey := ctxTag("is_flock_2")
+		callCtx, callCancel := context.WithCancel(context.WithValue(ctx, flockCtxKey, true))
+		defer callCancel()
+
+		var flockCreatedInTx atomic.Bool
+		var injectDeleteLocks40P01 atomic.Bool
+		var deleteLocksAttempts atomic.Int32
+
+		hookStore.onCreateFileLock = func(callCtx context.Context, q db.Querier, p db.CreateFileLockParams) (db.FileLock, error) {
+			if p.SessionID == int64(sess2) && p.LkFlags == int32(meta.FuseLkFlock) && p.LockType == int16(meta.F_WRLCK) {
+				flockCreatedInTx.Store(true)
+			}
+			return q.CreateFileLock(callCtx, p)
+		}
+
+		hookStore.onExecTx = func(txCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			err := hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+			if err == nil && flockCreatedInTx.Load() && txCtx.Value(flockCtxKey) != nil {
+				// 在客户端 2 授锁事务成功提交后触发取消，并激活 rollback 期间 DeleteFileLocksByIDs 40P01 注入
+				flockCreatedInTx.Store(false)
+				injectDeleteLocks40P01.Store(true)
+				callCancel()
+			}
+			return err
+		}
+
+		hookStore.onDeleteFileLocksByIDs = func(callCtx context.Context, q db.Querier, ids []int64) error {
+			if injectDeleteLocks40P01.Load() && deleteLocksAttempts.Add(1) == 1 {
+				// 模拟 rollbackGrantedLock 内删除刚授予的 flock 时首次 DeleteFileLocksByIDs 返回瞬态 40P01
+				return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+			}
+			return q.DeleteFileLocksByIDs(callCtx, ids)
+		}
+
+		flockErrCh := make(chan error, 1)
+		go func() {
+			flockErrCh <- mgr.SetLkw(callCtx, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fh2,
+				LockOwner: owner2,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   meta.OffsetMax,
+					Type:  meta.F_WRLCK,
+					PID:   2002,
+				},
+				LkFlags:   meta.FuseLkFlock,
+				SessionID: sess2,
+				RequestID: 7001,
+			})
+		}()
+
+		// 等待客户端 2 在底表登记为 PENDING 等待者
+		require.Eventually(t, func() bool {
+			waiters, listErr := baseStore.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+				Ino:     int64(fileIno),
+				LkFlags: int32(meta.FuseLkFlock),
+			})
+			return listErr == nil && len(waiters) == 1
+		}, 3*time.Second, 5*time.Millisecond, "客户端 2 必须在底表成功登记等待者")
+
+		// 客户端 1 释放 flock 锁，唤醒客户端 2 授锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: owner1,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_UNLCK,
+				PID:   2001,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		// 等待客户端 2 的 SetLkw 返回
+		select {
+		case retErr := <-flockErrCh:
+			require.ErrorIs(t, retErr, meta.ErrInterrupted, "回滚后的 SetLkw 必须返回 ErrInterrupted")
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待客户端 2 的 SetLkw 回滚返回超时")
+		}
+
+		// 断言 DeleteFileLocksByIDs 尝试次数 >= 2
+		require.GreaterOrEqual(t, deleteLocksAttempts.Load(), int32(2), "rollbackGrantedLock 删除刚授予的 flock 时必须经历首次 40P01 故障并至少重试 1 次")
+
+		// 断言底表无残留 flock 锁与 waiter
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: int32(meta.FuseLkFlock),
+		})
+		require.NoError(t, err)
+		assert.Empty(t, activeLocks, "底表不能有残留的 flock 锁")
+
+		waiters, err := baseStore.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: int32(meta.FuseLkFlock),
+		})
+		require.NoError(t, err)
+		assert.Empty(t, waiters, "底表不能有残留的 flock 等待者")
+
+		// 断言另一句柄随后能成功非阻塞获取排他 flock 锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh3,
+			LockOwner: owner3,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_WRLCK,
+				PID:   3003,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sess3,
+		})
+		require.NoError(t, err, "残留清理干净后，第三方客户端 3 必须能成功非阻塞获取排他 flock 锁")
+	})
+}
+
+type p1UndoRollbackHookStore struct {
+	db.Store
+	onExecTx         func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error
+	onCreateFileLock func(ctx context.Context, q db.Querier, params db.CreateFileLockParams) (db.FileLock, error)
+}
+
+func (s *p1UndoRollbackHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	wrappedFn := func(q db.Querier) error {
+		hookQ := &p1UndoRollbackHookQuerier{
+			Querier:          q,
+			onCreateFileLock: s.onCreateFileLock,
+		}
+		return fn(hookQ)
+	}
+	if s.onExecTx != nil {
+		return s.onExecTx(ctx, wrappedFn, opts...)
+	}
+	return s.Store.ExecTxWithOptions(ctx, wrappedFn, opts...)
+}
+
+type p1UndoRollbackHookQuerier struct {
+	db.Querier
+	onCreateFileLock func(ctx context.Context, q db.Querier, params db.CreateFileLockParams) (db.FileLock, error)
+}
+
+func (q *p1UndoRollbackHookQuerier) CreateFileLock(ctx context.Context, params db.CreateFileLockParams) (db.FileLock, error) {
+	if q.onCreateFileLock != nil {
+		return q.onCreateFileLock(ctx, q.Querier, params)
+	}
+	return q.Querier.CreateFileLock(ctx, params)
+}
+
+// TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk 复现缺陷 P-1：
+// 当请求 A 在 inFlightGrants 中登记后准备取消，请求 B 尝试授锁将其区间剪除并记入 undo，
+// B 事务失败回滚并转入 rollbackGrantedLock。在此期间并发请求 C 成功获取并提交被剪除区间，
+// 随后 B 的 lastUndo.Rollback() 不应错误恢复已被 C 接管的区间，否则会导致 A 后续取消时误删 C 已提交的锁。
+func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &p1UndoRollbackHookStore{Store: baseStore}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-p1-undo-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sess := uint64(8001)
+	owner := uint64(9001)
+
+	_, err = mgr.RenewSession(ctx, sess)
+	require.NoError(t, err)
+
+	createRes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("p1_test_file.txt"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess,
+	})
+	require.NoError(t, err)
+	fileIno := createRes.Inode.Ino
+	fh := createRes.Fh
+
+	type ctxKey string
+	const (
+		tagKey ctxKey = "p1_req_tag"
+		tagA          = "req_a"
+		tagB          = "req_b"
+		tagC          = "req_c"
+	)
+
+	aCleanupReadyCh := make(chan struct{}, 1)
+	allowACleanupCh := make(chan struct{})
+
+	bGrantAbortedCh := make(chan struct{}, 1)
+	bCleanupCommittedCh := make(chan struct{}, 1)
+	allowBLastUndoRollbackCh := make(chan struct{})
+
+	var hookActive atomic.Bool
+	var aCleanupSeen atomic.Bool
+	var bCleanupSeen atomic.Bool
+	errAbortB := errors.New("simulated B transaction abort")
+
+	callCtxA, callCancelA := context.WithCancel(context.WithValue(ctx, tagKey, tagA))
+	defer callCancelA()
+
+	callCtxB, callCancelB := context.WithCancel(context.WithValue(ctx, tagKey, tagB))
+	defer callCancelB()
+
+	callCtxC := context.WithValue(ctx, tagKey, tagC)
+
+	hookStore.onCreateFileLock = func(callCtx context.Context, q db.Querier, p db.CreateFileLockParams) (db.FileLock, error) {
+		if !hookActive.Load() {
+			return q.CreateFileLock(callCtx, p)
+		}
+		// A 的主事务请求写锁 [0, 100] 时，返回 dummy lock，使其在内存 inFlightGrants 成功登记但在 DB 不留物理锁
+		if callCtx.Value(tagKey) == tagA {
+			return db.FileLock{
+				ID:          888888,
+				SessionID:   p.SessionID,
+				Ino:         p.Ino,
+				Fh:          p.Fh,
+				LockOwner:   p.LockOwner,
+				LkFlags:     p.LkFlags,
+				StartOffset: p.StartOffset,
+				EndOffset:   p.EndOffset,
+				LockType:    p.LockType,
+				Pid:         p.Pid,
+			}, nil
+		}
+		return q.CreateFileLock(callCtx, p)
+	}
+
+	hookStore.onExecTx = func(txCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+		if !hookActive.Load() {
+			return hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+		}
+
+		tag := txCtx.Value(tagKey)
+		switch tag {
+		case tagA:
+			// A 的主授锁事务：执行提交并在退出时取消 callCtxA，促使 A 走向 rollbackGrantedLock
+			err := hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+			if err == nil {
+				callCancelA()
+			}
+			return err
+
+		case tagB:
+			// B 的主授锁事务：在闭包内执行 registerInFlightGrant 将 A 的 pendingRanges 剪除为 [50, 100]，
+			// 并将被剪除的 [0, 49] 暂存至 B.lastUndo.removedRanges，随后令外层事务回滚
+			_ = hookStore.Store.ExecTxWithOptions(txCtx, func(q db.Querier) error {
+				if err := fn(q); err != nil {
+					return err
+				}
+				return errAbortB
+			}, opts...)
+			bGrantAbortedCh <- struct{}{}
+			return errAbortB
+
+		case tagC:
+			// C 的 SetLk 事务：正常提交写锁 [0, 49]
+			return hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+
+		default:
+			// 无 tag 的事务来自于 rollbackGrantedLock 内部的 cleanupCtx
+			if !aCleanupSeen.Load() {
+				aCleanupSeen.Store(true)
+				aCleanupReadyCh <- struct{}{}
+				<-allowACleanupCh
+				return hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+			}
+			if !bCleanupSeen.Load() {
+				bCleanupSeen.Store(true)
+				// B 的 cleanup 事务在数据库成功提交（此时 pendingUndoAction 已置为 1），
+				// 但在第 2234 行执行 lastUndo.Rollback() 前暂停，给并发请求 C 插入并提交的时间窗口
+				err := hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+				if err == nil {
+					bCleanupCommittedCh <- struct{}{}
+					<-allowBLastUndoRollbackCh
+				}
+				return err
+			}
+			return hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
+		}
+	}
+
+	hookActive.Store(true)
+	defer hookActive.Store(false)
+
+	// 1. 请求 A 发起 SetLkw([0, 100], F_WRLCK)，授锁并在 inFlightGrants 登记 pendingRanges = [0, 100]，
+	// 随后因 callCtxA 被取消进入 rollbackGrantedLock，并在清理事务入口挂起等待
+	aErrCh := make(chan error, 1)
+	go func() {
+		aErrCh <- mgr.SetLkw(callCtxA, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: owner,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   1001,
+			},
+			LkFlags:   0,
+			SessionID: sess,
+			RequestID: 1001,
+		})
+	}()
+
+	select {
+	case <-aCleanupReadyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待请求 A 挂起在 cleanup 事务入口超时")
+	}
+
+	// 2. 请求 B（同一 SessionID, LockOwner）发起 SetLkw([0, 49], F_WRLCK)，
+	// 在闭包内将 A 的 pendingRanges 剪除为 [50, 100]，将被剪除的 [0, 49] 暂存至 B.lastUndo.removedRanges[A.regID]。
+	// 随后外层事务失败回滚，进入 rollbackGrantedLock，清理事务成功提交后在 lastUndo.Rollback() 前挂起
+	bErrCh := make(chan error, 1)
+	go func() {
+		bErrCh <- mgr.SetLkw(callCtxB, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: owner,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   49,
+				Type:  meta.F_WRLCK,
+				PID:   1002,
+			},
+			LkFlags:   0,
+			SessionID: sess,
+			RequestID: 1002,
+		})
+	}()
+
+	select {
+	case <-bCleanupCommittedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待请求 B 的 cleanup 事务提交超时")
+	}
+
+	// 3. 在 B 的 lastUndo.Rollback() 执行前，请求 C（同一 SessionID, LockOwner）成功执行 SetLk([0, 49], F_WRLCK) 并提交返回。
+	// 由于此时 [0, 49] 暂存在 B.lastUndo.removedRanges 中而不在 A.pendingRanges 中，C 未能从中扣除 [0, 49]
+	cErr := mgr.SetLk(callCtxC, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fh,
+		LockOwner: owner,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   49,
+			Type:  meta.F_WRLCK,
+			PID:   1003,
+		},
+		LkFlags:   0,
+		SessionID: sess,
+	})
+	require.NoError(t, cErr, "请求 C 的 SetLk([0, 49]) 必须成功提交返回")
+
+	// 验证 C 提交后，数据库中确实已存在该 [0, 49] 写锁
+	midLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     int64(fileIno),
+		LkFlags: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, midLocks, 1, "请求 C 提交后数据库必须且仅存在 C 的 [0, 49] 写锁")
+	assert.Equal(t, int64(0), midLocks[0].StartOffset)
+	assert.Equal(t, int64(49), midLocks[0].EndOffset)
+
+	// 4. 恢复并放行 B 执行 lastUndo.Rollback()：
+	// B 执行 lastUndo.Rollback()，将已经被 C 接管的 [0, 49] 错误补回 A.pendingRanges（变回 [0, 100]）
+	close(allowBLastUndoRollbackCh)
+	select {
+	case bErr := <-bErrCh:
+		require.ErrorIs(t, bErr, meta.ErrInterrupted, "回滚后的请求 B 必须返回 ErrInterrupted")
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待请求 B 回滚完成超时")
+	}
+
+	// 5. 恢复并放行 A 完成 rollbackGrantedLock：
+	// A 因 pendingRanges 被错误恢复为 [0, 100]，在清理阶段会误将 C 已提交的 [0, 49] 锁一并删除
+	close(allowACleanupCh)
+	select {
+	case aErr := <-aErrCh:
+		require.ErrorIs(t, aErr, meta.ErrInterrupted, "回滚后的请求 A 必须返回 ErrInterrupted")
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待请求 A 回滚完成超时")
+	}
+
+	// 6. 断言：最终数据库 file_locks 中必须完整保留 C 已成功提交的 [0, 49] 写锁！
+	activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     int64(fileIno),
+		LkFlags: 0,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, activeLocks, 1, "P-1 缺陷验证：C 已成功提交的 [0, 49] 写锁必须完整保留在数据库中，绝不能因 B 的 Rollback 错误恢复 A 的范围而被 A 取消误删")
+	assert.Equal(t, int64(owner), activeLocks[0].LockOwner)
+	assert.Equal(t, int64(sess), activeLocks[0].SessionID)
+	assert.Equal(t, int16(meta.F_WRLCK), activeLocks[0].LockType, "锁类型必须为写锁 F_WRLCK")
+	assert.Equal(t, int64(0), activeLocks[0].StartOffset)
+	assert.Equal(t, int64(49), activeLocks[0].EndOffset)
+}
+

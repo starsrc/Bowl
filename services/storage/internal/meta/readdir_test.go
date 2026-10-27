@@ -1913,3 +1913,278 @@ func TestReadDir_MidPageCursorUnlinkAndReleaseDirRace(t *testing.T) {
 		require.Equal(t, 0, meta.DirCursorTrackingEntriesCount(mgr), "关闭目录句柄后内部游标清理追踪结构不应累积历史键")
 	})
 }
+
+type readDirCommitWindowHookStore struct {
+	db.Store
+	pool         *pgxpool.Pool
+	onCommitHook func()
+}
+
+func (s *readDirCommitWindowHookStore) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
+func (s *readDirCommitWindowHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && s.onCommitHook != nil {
+		hook := s.onCommitHook
+		s.onCommitHook = nil // 消费钩子，防止后续事务（如 ReadDir）重复触发
+		hook()
+	}
+	return err
+}
+
+func TestReadDir_UnlinkCommitBeforeCursorNotifyWindow(t *testing.T) {
+	ctx := context.Background()
+	dsn := getStorageTestDSN()
+	testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(testCtx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(testCtx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &readDirCommitWindowHookStore{
+		Store: baseStore,
+		pool:  pool,
+	}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(testCtx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-readdir-commit-win-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+	}()
+
+	dir, err := mgr.Mkdir(testCtx, meta.MkdirParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("dirCommitWin"),
+		Mode:      0o755,
+	})
+	require.NoError(t, err)
+
+	for _, name := range []string{"a", "b", "c"} {
+		_, err = mgr.Mknod(testCtx, meta.MknodParams{
+			ParentIno: dir.Ino,
+			Name:      []byte(name),
+			Mode:      meta.S_IFREG | 0o644,
+		})
+		require.NoError(t, err)
+	}
+
+	openRes, err := mgr.OpenDir(testCtx, meta.OpenDirParams{
+		Ino:   dir.Ino,
+		Flags: meta.O_RDONLY,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.ReleaseDir(context.Background(), meta.ReleaseDirParams{
+			Ino: dir.Ino,
+			Fh:  openRes.Fh,
+		})
+	}()
+
+	// 第 1 页读取：获取 ., .., a (offset=3)
+	p1, err := mgr.ReadDir(testCtx, meta.ReadDirParams{
+		Ino:    dir.Ino,
+		Fh:     openRes.Fh,
+		Offset: 0,
+		Limit:  3,
+	})
+	require.NoError(t, err)
+	require.Len(t, p1, 3)
+	require.Equal(t, ".", string(p1[0].Name))
+	require.Equal(t, "..", string(p1[1].Name))
+	require.Equal(t, "a", string(p1[2].Name))
+	aNextOffset := p1[2].NextOffset
+	require.Equal(t, uint64(3), aNextOffset)
+
+	var secondPageEntries []meta.DirEntry
+	var secondPageErr error
+
+	// 设置拦截器：在底层 PG 事务提交成功后、Unlink 返回并执行 onDirEntryRemoved 之前触发续读
+	hookStore.onCommitHook = func() {
+		secondPageEntries, secondPageErr = mgr.ReadDir(testCtx, meta.ReadDirParams{
+			Ino:    dir.Ino,
+			Fh:     openRes.Fh,
+			Offset: aNextOffset,
+			Limit:  10,
+		})
+	}
+
+	err = mgr.Unlink(testCtx, dir.Ino, []byte("a"))
+	require.NoError(t, err)
+
+	require.NoError(t, secondPageErr)
+	var names []string
+	for _, e := range secondPageEntries {
+		names = append(names, string(e.Name))
+	}
+
+	// 断言续读结果必须包含 "b"（完整读出 b, c，绝不能漏掉 "b"）
+	require.Contains(t, names, "b", "Unlink 事务提交后至内存游标通知窗口期间续读不得漏掉条目 'b' (got: %v)", names)
+	require.Equal(t, []string{"b", "c"}, names, "续读应该完整读出剩余全部条目 [b, c]")
+}
+
+type readDirInFlightHookStore struct {
+	db.Store
+	pool             *pgxpool.Pool
+	beforeCommitHook func()
+	afterCommitHook  func()
+}
+
+func (s *readDirInFlightHookStore) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
+func (s *readDirInFlightHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	if s.beforeCommitHook == nil && s.afterCommitHook == nil {
+		return s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	}
+
+	beforeHook := s.beforeCommitHook
+	afterHook := s.afterCommitHook
+	s.beforeCommitHook = nil // 消费钩子，防止 ReadDir 内部嵌套调用 ExecTxWithOptions 时重复触发
+	s.afterCommitHook = nil
+
+	wrappedFn := func(q db.Querier) error {
+		if err := fn(q); err != nil {
+			return err
+		}
+		if beforeHook != nil {
+			beforeHook()
+		}
+		return nil
+	}
+
+	err := s.Store.ExecTxWithOptions(ctx, wrappedFn, opts...)
+	if err == nil && afterHook != nil {
+		afterHook()
+	}
+	return err
+}
+
+func TestReadDir_FirstPageDuringInFlightUnlinkBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	dsn := getStorageTestDSN()
+	testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(testCtx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(testCtx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &readDirInFlightHookStore{
+		Store: baseStore,
+		pool:  pool,
+	}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(testCtx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-readdir-inflight-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+	}()
+
+	dir, err := mgr.Mkdir(testCtx, meta.MkdirParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("dirInFlight"),
+		Mode:      0o755,
+	})
+	require.NoError(t, err)
+
+	for _, name := range []string{"a", "b", "c"} {
+		_, err = mgr.Mknod(testCtx, meta.MknodParams{
+			ParentIno: dir.Ino,
+			Name:      []byte(name),
+			Mode:      meta.S_IFREG | 0o644,
+		})
+		require.NoError(t, err)
+	}
+
+	openRes, err := mgr.OpenDir(testCtx, meta.OpenDirParams{
+		Ino:   dir.Ino,
+		Flags: meta.O_RDONLY,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.ReleaseDir(context.Background(), meta.ReleaseDirParams{
+			Ino: dir.Ino,
+			Fh:  openRes.Fh,
+		})
+	}()
+
+	var firstPageEntries []meta.DirEntry
+	var firstPageErr error
+	var secondPageEntries []meta.DirEntry
+	var secondPageErr error
+
+	// a) 当 Unlink("a") 的写事务闭包 fn(q) 内部刚返回 nil（即事务内 onDirEntryMutated 已执行）、
+	// 但底层真实 PG 事务尚未 COMMIT 时，在拦截器中同步执行第 1 页 ReadDir (Offset: 0, Limit: 3)
+	hookStore.beforeCommitHook = func() {
+		firstPageEntries, firstPageErr = mgr.ReadDir(testCtx, meta.ReadDirParams{
+			Ino:    dir.Ino,
+			Fh:     openRes.Fh,
+			Offset: 0,
+			Limit:  3,
+		})
+	}
+
+	// b) 随后让底层真实 PG 事务完成 COMMIT，并在 ExecTxWithOptions 返回给 Unlink 调用事务外 onDirEntryRemoved 之前，
+	// 同步执行第 2 页 ReadDir (Offset: 3, Limit: 10)
+	hookStore.afterCommitHook = func() {
+		offset := uint64(3)
+		if len(firstPageEntries) > 0 {
+			offset = firstPageEntries[len(firstPageEntries)-1].NextOffset
+		}
+		secondPageEntries, secondPageErr = mgr.ReadDir(testCtx, meta.ReadDirParams{
+			Ino:    dir.Ino,
+			Fh:     openRes.Fh,
+			Offset: offset,
+			Limit:  10,
+		})
+	}
+
+	err = mgr.Unlink(testCtx, dir.Ino, []byte("a"))
+	require.NoError(t, err)
+
+	// 确认第 1 页读出 ., .., a
+	require.NoError(t, firstPageErr)
+	require.Len(t, firstPageEntries, 3)
+	require.Equal(t, ".", string(firstPageEntries[0].Name))
+	require.Equal(t, "..", string(firstPageEntries[1].Name))
+	require.Equal(t, "a", string(firstPageEntries[2].Name))
+
+	// 确认第 2 页续读结果必须包含 "b"（完整返回 ["b", "c"]，绝不能漏掉 "b"）
+	require.NoError(t, secondPageErr)
+	var names []string
+	for _, e := range secondPageEntries {
+		names = append(names, string(e.Name))
+	}
+	require.Contains(t, names, "b", "Unlink 事务内首屏读出未感知在途变更，提交后续读不得漏掉条目 'b' (got: %v)", names)
+	require.Equal(t, []string{"b", "c"}, names, "续读应该完整读出剩余全部条目 [b, c]")
+}

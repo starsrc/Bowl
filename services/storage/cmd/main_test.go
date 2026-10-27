@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"testing"
@@ -60,6 +61,7 @@ func TestRun_Success_GracefulShutdown(t *testing.T) {
 	defer cancel()
 
 	started := make(chan struct{})
+	stopped := make(chan struct{})
 	errCh := make(chan error, 1)
 
 	opts := []fx.Option{
@@ -68,6 +70,10 @@ func TestRun_Success_GracefulShutdown(t *testing.T) {
 			lc.Append(fx.Hook{
 				OnStart: func(context.Context) error {
 					close(started)
+					return nil
+				},
+				OnStop: func(context.Context) error {
+					close(stopped)
 					return nil
 				},
 			})
@@ -90,8 +96,67 @@ func TestRun_Success_GracefulShutdown(t *testing.T) {
 	select {
 	case err := <-errCh:
 		assert.NoError(t, err)
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("expected OnStop hook to have been executed")
+		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("timed out waiting for application to stop gracefully")
+	}
+}
+
+func TestRun_GracefulShutdown_StopError(t *testing.T) {
+	port := getFreePort(t)
+	t.Setenv("DB_DSN", "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable")
+	t.Setenv("SERVER_PORT", strconv.Itoa(port))
+	t.Setenv("SERVER_STOP_TIMEOUT", "3s")
+	t.Setenv("LOG_LEVEL", "error")
+
+	mockStore := mockdb.NewMockStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+
+	stopErr := errors.New("hook stop failed")
+	opts := []fx.Option{
+		fx.Replace(fx.Annotate(mockStore, fx.As(new(db.Store)))),
+		fx.Invoke(func(lc fx.Lifecycle) {
+			lc.Append(fx.Hook{
+				OnStart: func(context.Context) error {
+					close(started)
+					return nil
+				},
+				OnStop: func(context.Context) error {
+					return stopErr
+				},
+			})
+		}),
+	}
+
+	go func() {
+		errCh <- run(ctx, opts...)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for application to start")
+	}
+
+	// 触发上下文取消以触发优雅停机
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "server graceful shutdown error")
+		assert.Contains(t, err.Error(), "hook stop failed")
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for application to stop")
 	}
 }
 

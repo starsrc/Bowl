@@ -725,7 +725,7 @@ func runConcurrentWorker(
 						Mode:     &mode,
 						MtimeNow: true,
 					})
-					assertConcurrentStepErr(t, env, workerID, step, "SetAttr(Pinned)", err)
+					require.NoError(t, err)
 					if err == nil {
 						env.RecordWriteSuccess()
 					}
@@ -799,7 +799,7 @@ func runConcurrentWorker(
 						Name:     &newName,
 						MaxBytes: &newMax,
 					})
-					assertConcurrentStepErr(t, env, workerID, step, "UpdateDisk", err)
+					require.NoError(t, err)
 					if err == nil {
 						env.RecordWriteSuccess()
 					}

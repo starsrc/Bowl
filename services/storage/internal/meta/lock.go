@@ -1300,7 +1300,9 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 	defer cancel()
 
 	var shouldNotify bool
-	_ = m.store.ExecTxWithOptions(cleanupCtx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(cleanupCtx, func(q db.Querier) error {
+		shouldNotify = false
+
 		_, err := q.GetInodeForUpdate(cleanupCtx, int64(ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1333,31 +1335,36 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 
 		if waiter.Status == WaiterStatusGranted {
 			if waiter.LkFlags == int32(FuseLkFlock) {
-				_, _ = q.DeleteFlockFileLocksBySessionAndFh(cleanupCtx, db.DeleteFlockFileLocksBySessionAndFhParams{
+				if _, err := q.DeleteFlockFileLocksBySessionAndFh(cleanupCtx, db.DeleteFlockFileLocksBySessionAndFhParams{
 					SessionID: sessionID,
 					Ino:       int64(ino),
 					Fh:        waiter.Fh,
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				activeLocks, err := q.ListActiveFileLocksByInoAndFlags(cleanupCtx, db.ListActiveFileLocksByInoAndFlagsParams{
 					Ino:     int64(ino),
 					LkFlags: 0,
 				})
-				if err == nil {
-					unlockParams := SetLkParams{
-						Ino:       ino,
-						Fh:        uint64(waiter.Fh),
-						LockOwner: uint64(waiter.LockOwner),
-						Lk: FileLock{
-							Start: uint64(waiter.StartOffset),
-							End:   uint64(waiter.EndOffset),
-							Type:  F_UNLCK,
-							PID:   uint32(waiter.Pid),
-						},
-						LkFlags:   0,
-						SessionID: uint64(sessionID),
-					}
-					_ = applyPosixUnlock(cleanupCtx, q, unlockParams, activeLocks, &shouldNotify)
+				if err != nil {
+					return err
+				}
+				unlockParams := SetLkParams{
+					Ino:       ino,
+					Fh:        uint64(waiter.Fh),
+					LockOwner: uint64(waiter.LockOwner),
+					Lk: FileLock{
+						Start: uint64(waiter.StartOffset),
+						End:   uint64(waiter.EndOffset),
+						Type:  F_UNLCK,
+						PID:   uint32(waiter.Pid),
+					},
+					LkFlags:   0,
+					SessionID: uint64(sessionID),
+				}
+				if err := applyPosixUnlock(cleanupCtx, q, unlockParams, activeLocks, &shouldNotify); err != nil {
+					return err
 				}
 			}
 			shouldNotify = true
@@ -1367,12 +1374,15 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 			SessionID: sessionID,
 			RequestID: requestID,
 		})
-		if err == nil && n > 0 {
+		if err != nil {
+			return err
+		}
+		if n > 0 {
 			shouldNotify = true
 		}
 		return nil
 	})
-	if shouldNotify {
+	if err == nil && shouldNotify {
 		m.notifyLockWaiters(ino)
 	}
 }
@@ -1443,6 +1453,7 @@ type inFlightGrant struct {
 	preGrantOwnerLocks     []db.FileLock
 	flushedOrReleased      bool
 	flushedOrReleasedCount int
+	activeUndos            map[*inFlightTxUndo]struct{}
 }
 
 func subtractRangesList(ranges []byteRange, subStart, subEnd uint64) []byteRange {
@@ -1551,16 +1562,20 @@ func (u *inFlightTxUndo) recordFlushedLocked(g *inFlightGrant) {
 		g.flushedOrReleased = true
 	}
 	if len(g.pendingRanges) > 0 {
-		u.recordRemovedRangesLocked(g.regID, g.pendingRanges)
+		u.recordRemovedRangesLocked(g, g.pendingRanges)
 		g.pendingRanges = nil
 	}
 }
 
-func (u *inFlightTxUndo) recordRemovedRangesLocked(regID uint64, removed []byteRange) {
-	if u == nil || len(removed) == 0 {
+func (u *inFlightTxUndo) recordRemovedRangesLocked(g *inFlightGrant, removed []byteRange) {
+	if u == nil || g == nil || len(removed) == 0 {
 		return
 	}
-	u.removedRanges[regID] = mergeByteRanges(append(u.removedRanges[regID], removed...))
+	u.removedRanges[g.regID] = mergeByteRanges(append(u.removedRanges[g.regID], removed...))
+	if g.activeUndos == nil {
+		g.activeUndos = make(map[*inFlightTxUndo]struct{})
+	}
+	g.activeUndos[u] = struct{}{}
 }
 
 func (u *inFlightTxUndo) recordRegistered(regID uint64) {
@@ -1603,11 +1618,17 @@ func (u *inFlightTxUndo) Rollback() {
 	for regID, rem := range u.removedRanges {
 		for _, g := range u.m.inFlightGrants {
 			if g.ino == u.ino && g.regID == regID {
-				if !g.flushedOrReleased {
+				delete(g.activeUndos, u)
+				if !g.flushedOrReleased && len(rem) > 0 {
 					g.pendingRanges = mergeByteRanges(append(g.pendingRanges, rem...))
 				}
 				break
 			}
+		}
+	}
+	for _, g := range u.m.inFlightGrants {
+		if g.ino == u.ino {
+			delete(g.activeUndos, u)
 		}
 	}
 	clear(u.removedRanges)
@@ -1617,9 +1638,17 @@ func (u *inFlightTxUndo) Discard() {
 	if u == nil {
 		return
 	}
+	u.m.inFlightGrantMu.Lock()
+	defer u.m.inFlightGrantMu.Unlock()
+
+	for _, g := range u.m.inFlightGrants {
+		if g.ino == u.ino {
+			delete(g.activeUndos, u)
+		}
+	}
 	u.attemptRegID = 0
-	u.flushedEntries = nil
-	u.removedRanges = nil
+	clear(u.flushedEntries)
+	clear(u.removedRanges)
 }
 
 func (m *manager) registerInFlightGrant(
@@ -1656,8 +1685,32 @@ func (m *manager) registerInFlightGrant(
 			return 1
 		})
 
+		target := []byteRange{{start: reqStart, end: reqEnd}}
 		for _, pred := range predecessors {
-			taken := intersectByteRanges(pred.pendingRanges, []byteRange{{start: reqStart, end: reqEnd}})
+			takenFromPending := intersectByteRanges(pred.pendingRanges, target)
+
+			var stolenFromUndos []byteRange
+			var emptyUndos []*inFlightTxUndo
+			for otherUndo := range pred.activeUndos {
+				if otherUndo == undo {
+					continue
+				}
+				stolen := intersectByteRanges(otherUndo.removedRanges[pred.regID], target)
+				if len(stolen) > 0 {
+					otherUndo.removedRanges[pred.regID] = subtractMultipleRanges(otherUndo.removedRanges[pred.regID], stolen)
+					if len(otherUndo.removedRanges[pred.regID]) == 0 {
+						delete(otherUndo.removedRanges, pred.regID)
+						emptyUndos = append(emptyUndos, otherUndo)
+					}
+					stolenFromUndos = append(stolenFromUndos, stolen...)
+				}
+			}
+			for _, eu := range emptyUndos {
+				delete(pred.activeUndos, eu)
+			}
+			stolenFromUndos = mergeByteRanges(stolenFromUndos)
+
+			taken := mergeByteRanges(append(takenFromPending, stolenFromUndos...))
 			if len(taken) == 0 {
 				continue
 			}
@@ -1692,7 +1745,7 @@ func (m *manager) registerInFlightGrant(
 
 			// 3) 从 pred.pendingRanges 中剪除 taken
 			if undo != nil {
-				undo.recordRemovedRangesLocked(pred.regID, taken)
+				undo.recordRemovedRangesLocked(pred, taken)
 			}
 			pred.pendingRanges = subtractMultipleRanges(pred.pendingRanges, taken)
 		}
@@ -1717,6 +1770,7 @@ func (m *manager) registerInFlightGrant(
 		preGrantOwnerLocks:     effectivePreGrantLocks,
 		flushedOrReleased:      false,
 		flushedOrReleasedCount: 0,
+		activeUndos:            make(map[*inFlightTxUndo]struct{}),
 	}
 
 	undo.recordRegistered(regID)
@@ -1762,6 +1816,7 @@ func (m *manager) getInFlightGrant(ino, sessionID, requestID uint64) *inFlightGr
 	cp := *grant
 	cp.pendingRanges = append([]byteRange(nil), grant.pendingRanges...)
 	cp.preGrantOwnerLocks = append([]db.FileLock(nil), grant.preGrantOwnerLocks...)
+	cp.activeUndos = nil
 	return &cp
 }
 
@@ -1853,10 +1908,33 @@ func (m *manager) recordExternalLockOpInFlightGrants(
 				target := []byteRange{{start: opStart, end: opEnd}}
 				removed := intersectByteRanges(g.pendingRanges, target)
 				if len(removed) > 0 {
-					if undo != nil {
-						undo.recordRemovedRangesLocked(g.regID, removed)
-					}
 					g.pendingRanges = subtractMultipleRanges(g.pendingRanges, removed)
+				}
+
+				var stolenFromUndos []byteRange
+				var emptyUndos []*inFlightTxUndo
+				for otherUndo := range g.activeUndos {
+					if otherUndo == undo {
+						continue
+					}
+					stolen := intersectByteRanges(otherUndo.removedRanges[g.regID], target)
+					if len(stolen) > 0 {
+						otherUndo.removedRanges[g.regID] = subtractMultipleRanges(otherUndo.removedRanges[g.regID], stolen)
+						if len(otherUndo.removedRanges[g.regID]) == 0 {
+							delete(otherUndo.removedRanges, g.regID)
+							emptyUndos = append(emptyUndos, otherUndo)
+						}
+						stolenFromUndos = append(stolenFromUndos, stolen...)
+					}
+				}
+				for _, eu := range emptyUndos {
+					delete(g.activeUndos, eu)
+				}
+				stolenFromUndos = mergeByteRanges(stolenFromUndos)
+
+				taken := mergeByteRanges(append(removed, stolenFromUndos...))
+				if len(taken) > 0 && undo != nil {
+					undo.recordRemovedRangesLocked(g, taken)
 				}
 			}
 		}
@@ -1879,7 +1957,11 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 	defer cancel()
 
 	var shouldNotify bool
-	_ = m.store.ExecTxWithOptions(cleanupCtx, func(q db.Querier) error {
+	var pendingUndoAction int // 0: none, 1: rollback, 2: discard
+	err := m.execWriteTxWithRetry(cleanupCtx, func(q db.Querier) error {
+		shouldNotify = false
+		pendingUndoAction = 0
+
 		_, err := q.GetInodeForUpdate(cleanupCtx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1901,19 +1983,23 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 
 		curGrant := m.getInFlightGrant(params.Ino, params.SessionID, params.RequestID)
 		if curGrant == nil {
-			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+			if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 				SessionID: int64(params.SessionID),
 				RequestID: int64(params.RequestID),
-			})
+			}); err != nil {
+				return err
+			}
 			shouldNotify = true
 			return nil
 		}
 
 		if curGrant.flushedOrReleased {
-			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+			if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 				SessionID: int64(params.SessionID),
 				RequestID: int64(params.RequestID),
-			})
+			}); err != nil {
+				return err
+			}
 			shouldNotify = true
 			return nil
 		}
@@ -1924,14 +2010,15 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 				Ino:     int64(params.Ino),
 				LkFlags: int32(FuseLkFlock),
 			})
-			if err == nil {
-				for _, fl := range activeLocks {
-					if fl.SessionID == int64(params.SessionID) && fl.Fh == int64(params.Fh) {
-						if curGrant.grantedLockID > 0 && fl.ID == curGrant.grantedLockID {
-							toDelete = append(toDelete, fl.ID)
-						}
-						break
+			if err != nil {
+				return err
+			}
+			for _, fl := range activeLocks {
+				if fl.SessionID == int64(params.SessionID) && fl.Fh == int64(params.Fh) {
+					if curGrant.grantedLockID > 0 && fl.ID == curGrant.grantedLockID {
+						toDelete = append(toDelete, fl.ID)
 					}
+					break
 				}
 			}
 			if lastUndo != nil && curGrant.grantedLockID > 0 {
@@ -1943,35 +2030,45 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 					}
 				}
 				if !lockCommitted {
-					lastUndo.Rollback()
-					_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+					pendingUndoAction = 1 // rollback
+					if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 						SessionID: int64(params.SessionID),
 						RequestID: int64(params.RequestID),
-					})
+					}); err != nil {
+						return err
+					}
+					lastUndo.Rollback()
+					pendingUndoAction = 0
 					shouldNotify = true
 					return nil
 				}
 			}
 			if lastUndo != nil {
-				lastUndo.Discard()
+				pendingUndoAction = 2 // discard
 			}
 			if len(toDelete) > 0 {
-				_ = q.DeleteFileLocksByIDs(cleanupCtx, toDelete)
+				if err := q.DeleteFileLocksByIDs(cleanupCtx, toDelete); err != nil {
+					return err
+				}
 				shouldNotify = true
 			}
-			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+			if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 				SessionID: int64(params.SessionID),
 				RequestID: int64(params.RequestID),
-			})
+			}); err != nil {
+				return err
+			}
 			shouldNotify = true
 			return nil
 		}
 
 		if len(curGrant.pendingRanges) == 0 {
-			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+			if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 				SessionID: int64(params.SessionID),
 				RequestID: int64(params.RequestID),
-			})
+			}); err != nil {
+				return err
+			}
 			shouldNotify = true
 			return nil
 		}
@@ -1993,17 +2090,21 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 				}
 			}
 			if !lockCommitted {
-				lastUndo.Rollback()
-				_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+				pendingUndoAction = 1 // rollback
+				if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 					SessionID: int64(params.SessionID),
 					RequestID: int64(params.RequestID),
-				})
+				}); err != nil {
+					return err
+				}
+				lastUndo.Rollback()
+				pendingUndoAction = 0
 				shouldNotify = true
 				return nil
 			}
 		}
 		if lastUndo != nil {
-			lastUndo.Discard()
+			pendingUndoAction = 2 // discard
 		}
 
 		sessionID := int64(params.SessionID)
@@ -2167,14 +2268,16 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 		}
 
 		if len(idsToDelete) > 0 {
-			_ = q.DeleteFileLocksByIDs(cleanupCtx, idsToDelete)
+			if err := q.DeleteFileLocksByIDs(cleanupCtx, idsToDelete); err != nil {
+				return err
+			}
 		}
 
 		allSegments := append(retainedSegments, restoredSegments...)
 		mergedSegments := mergeSegments(allSegments)
 
 		for _, seg := range mergedSegments {
-			_, _ = q.CreateFileLock(cleanupCtx, db.CreateFileLockParams{
+			if _, err := q.CreateFileLock(cleanupCtx, db.CreateFileLockParams{
 				SessionID:   sessionID,
 				Ino:         int64(params.Ino),
 				Fh:          int64(params.Fh),
@@ -2184,17 +2287,30 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 				EndOffset:   int64(seg.end),
 				LockType:    int16(seg.ltype),
 				Pid:         int32(seg.pid),
-			})
+			}); err != nil {
+				return err
+			}
 		}
 
-		_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+		if _, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 			SessionID: int64(params.SessionID),
 			RequestID: int64(params.RequestID),
-		})
+		}); err != nil {
+			return err
+		}
 		shouldNotify = true
 		return nil
 	})
-	if shouldNotify {
-		m.notifyLockWaiters(params.Ino)
+	if err == nil {
+		if pendingUndoAction == 1 && lastUndo != nil {
+			lastUndo.Rollback()
+		} else if pendingUndoAction == 2 && lastUndo != nil {
+			lastUndo.Discard()
+		}
+		if shouldNotify {
+			m.notifyLockWaiters(params.Ino)
+		}
+	} else if lastUndo != nil {
+		lastUndo.Rollback()
 	}
 }

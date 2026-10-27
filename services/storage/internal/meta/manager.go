@@ -107,25 +107,26 @@ type dirCursorAnchor struct {
 }
 
 type manager struct {
-	store               db.Store
-	entryTimeout        float64
-	attrTimeout         float64
-	dirEntryTimeout     float64
-	openKeepCache       bool
-	openDirCache        bool
-	atimeMode           AtimeMode
-	sessionLeaseTTL     time.Duration
-	lockNotifyMu        sync.Mutex
-	lockNotifyChans     map[uint64]*lockNotifyEntry
-	crossDirRenameMu    sync.Mutex
-	dirCursorMu         sync.Mutex
-	dirCursors          map[dirCursorKey]dirCursorAnchor
-	dirMutationSeq      map[uint64]uint64
-	activeDirReads      map[uint64]*inFlightDirRead
-	nextDirReadID       uint64
-	inFlightGrantMu     sync.Mutex
-	inFlightGrants      map[inFlightGrantKey]*inFlightGrant
-	nextInFlightGrantID uint64
+	store                db.Store
+	entryTimeout         float64
+	attrTimeout          float64
+	dirEntryTimeout      float64
+	openKeepCache        bool
+	openDirCache         bool
+	atimeMode            AtimeMode
+	sessionLeaseTTL      time.Duration
+	lockNotifyMu         sync.Mutex
+	lockNotifyChans      map[uint64]*lockNotifyEntry
+	crossDirRenameMu     sync.Mutex
+	dirCursorMu          sync.Mutex
+	dirCursors           map[dirCursorKey]dirCursorAnchor
+	dirMutationSeq       map[uint64]uint64
+	inFlightDirMutations map[uint64]int
+	activeDirReads       map[uint64]*inFlightDirRead
+	nextDirReadID        uint64
+	inFlightGrantMu      sync.Mutex
+	inFlightGrants       map[inFlightGrantKey]*inFlightGrant
+	nextInFlightGrantID  uint64
 }
 
 var _ Manager = (*manager)(nil)
@@ -193,16 +194,17 @@ func WithAtimeMode(mode AtimeMode) Option {
 // New 创建 Manager 实例。
 func New(store db.Store, opts ...Option) Manager {
 	m := &manager{
-		store:           store,
-		entryTimeout:    DefaultEntryTimeoutSeconds,
-		attrTimeout:     DefaultAttrTimeoutSeconds,
-		dirEntryTimeout: DefaultEntryTimeoutSeconds,
-		sessionLeaseTTL: DefaultSessionLeaseTTL,
-		lockNotifyChans: make(map[uint64]*lockNotifyEntry),
-		dirCursors:      make(map[dirCursorKey]dirCursorAnchor),
-		dirMutationSeq:  make(map[uint64]uint64),
-		activeDirReads:  make(map[uint64]*inFlightDirRead),
-		inFlightGrants:  make(map[inFlightGrantKey]*inFlightGrant),
+		store:                store,
+		entryTimeout:         DefaultEntryTimeoutSeconds,
+		attrTimeout:          DefaultAttrTimeoutSeconds,
+		dirEntryTimeout:      DefaultEntryTimeoutSeconds,
+		sessionLeaseTTL:      DefaultSessionLeaseTTL,
+		lockNotifyChans:      make(map[uint64]*lockNotifyEntry),
+		dirCursors:           make(map[dirCursorKey]dirCursorAnchor),
+		dirMutationSeq:       make(map[uint64]uint64),
+		inFlightDirMutations: make(map[uint64]int),
+		activeDirReads:       make(map[uint64]*inFlightDirRead),
+		inFlightGrants:       make(map[inFlightGrantKey]*inFlightGrant),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -284,7 +286,8 @@ func (m *manager) recordDirCursors(readID uint64, cursors []pendingDirCursor) {
 			m.dirCursors = make(map[dirCursorKey]dirCursorAnchor)
 		}
 		dirMutated := pc.dirMutated
-		if m.dirMutationSeq != nil && m.dirMutationSeq[pc.ino] != pc.startMutationSeq {
+		if (m.dirMutationSeq != nil && m.dirMutationSeq[pc.ino] != pc.startMutationSeq) ||
+			(m.inFlightDirMutations != nil && m.inFlightDirMutations[pc.ino] > 0) {
 			dirMutated = true
 		}
 		m.dirCursors[dirCursorKey{ino: pc.ino, fh: pc.fh, offset: pc.nextOffset}] = dirCursorAnchor{
@@ -303,7 +306,8 @@ func (m *manager) recordDirCursor(ino, fh, nextOffset uint64, lastName []byte, s
 	if m.dirCursors == nil {
 		m.dirCursors = make(map[dirCursorKey]dirCursorAnchor)
 	}
-	if m.dirMutationSeq != nil && m.dirMutationSeq[ino] != startMutationSeq {
+	if (m.dirMutationSeq != nil && m.dirMutationSeq[ino] != startMutationSeq) ||
+		(m.inFlightDirMutations != nil && m.inFlightDirMutations[ino] > 0) {
 		dirMutated = true
 	}
 	m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: nextOffset}] = dirCursorAnchor{
@@ -412,6 +416,78 @@ func (m *manager) clearDirCursorsForInos(inos ...uint64) {
 			delete(m.dirMutationSeq, ino)
 		}
 	}
+	if m.inFlightDirMutations != nil {
+		for _, ino := range inos {
+			delete(m.inFlightDirMutations, ino)
+		}
+	}
+}
+
+// beginDirMutation 递增指定目录节点的在途变更计数。
+func (m *manager) beginDirMutation(ino uint64) {
+	if ino == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.inFlightDirMutations == nil {
+		m.inFlightDirMutations = make(map[uint64]int)
+	}
+	m.inFlightDirMutations[ino]++
+}
+
+// endDirMutation 递减指定目录节点的在途变更计数，归零后删除条目。
+func (m *manager) endDirMutation(ino uint64) {
+	if ino == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.inFlightDirMutations == nil {
+		return
+	}
+	m.inFlightDirMutations[ino]--
+	if m.inFlightDirMutations[ino] <= 0 {
+		delete(m.inFlightDirMutations, ino)
+	}
+}
+
+// dirMutationTracker 追踪单次写操作中已登记的在途目录变更，防止重试重复递增并在操作退出时可靠归零。
+type dirMutationTracker struct {
+	m    *manager
+	inos map[uint64]struct{}
+}
+
+func (m *manager) newDirMutationTracker() *dirMutationTracker {
+	return &dirMutationTracker{m: m}
+}
+
+func (t *dirMutationTracker) track(inos ...uint64) {
+	if t == nil || t.m == nil {
+		return
+	}
+	for _, ino := range inos {
+		if ino == 0 {
+			continue
+		}
+		if t.inos == nil {
+			t.inos = make(map[uint64]struct{})
+		}
+		if _, ok := t.inos[ino]; !ok {
+			t.inos[ino] = struct{}{}
+			t.m.beginDirMutation(ino)
+		}
+	}
+}
+
+func (t *dirMutationTracker) done() {
+	if t == nil || t.m == nil {
+		return
+	}
+	for ino := range t.inos {
+		t.m.endDirMutation(ino)
+	}
+	t.inos = nil
 }
 
 // ManagerParams 定义 Manager 的 Fx 依赖注入参数。

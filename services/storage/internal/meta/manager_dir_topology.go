@@ -47,6 +47,9 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 		return nil, err
 	}
 
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
+
 	var result *Inode
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		if isDotOrDotDot(params.NewName) {
@@ -151,6 +154,8 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 		}
 
 		result = m.newInode(updatedSrc)
+		mutationTracker.track(params.NewParentIno)
+		m.onDirEntryMutated(params.NewParentIno)
 		return nil
 	})
 
@@ -173,6 +178,7 @@ func (m *manager) Link(ctx context.Context, params LinkParams) (*Inode, error) {
 		}
 	}
 
+	m.onDirEntryMutated(params.NewParentIno)
 	return result, nil
 }
 
@@ -184,6 +190,9 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 	if err := validateEntryNameAllowEmpty(name); err != nil {
 		return err
 	}
+
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		if len(name) == 0 || isDotOrDotDot(name) {
@@ -300,6 +309,8 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 			}
 		}
 
+		mutationTracker.track(parentIno)
+		m.onDirEntryMutated(parentIno)
 		return nil
 	})
 
@@ -330,6 +341,9 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 	if err := validateEntryNameAllowEmpty(name); err != nil {
 		return err
 	}
+
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		if len(name) == 0 || isDotOrDotDot(name) {
@@ -452,6 +466,8 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 			return err
 		}
 
+		mutationTracker.track(parentIno)
+		m.onDirEntryMutated(parentIno)
 		return nil
 	})
 
@@ -501,6 +517,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 	if err := validateEntryName(params.NewName); err != nil {
 		return err
 	}
+
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
 
 	if params.OldParentIno != params.NewParentIno {
 		m.crossDirRenameMu.Lock()
@@ -810,6 +829,11 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 				}
 			}
 
+			mutationTracker.track(params.OldParentIno, params.NewParentIno)
+			m.onDirEntryMutated(params.OldParentIno)
+			if params.NewParentIno != params.OldParentIno {
+				m.onDirEntryMutated(params.NewParentIno)
+			}
 			return nil
 		}
 
@@ -950,6 +974,11 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			}
 		}
 
+		mutationTracker.track(params.OldParentIno, params.NewParentIno)
+		m.onDirEntryMutated(params.OldParentIno)
+		if params.NewParentIno != params.OldParentIno {
+			m.onDirEntryMutated(params.NewParentIno)
+		}
 		return nil
 	})
 

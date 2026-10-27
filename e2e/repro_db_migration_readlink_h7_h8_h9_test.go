@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -348,6 +349,7 @@ func TestE2E_H7_CrossTableLockOrderDeadlock(t *testing.T) {
 
 		var allDeleteErrs []error
 		var allSetAttrErrs []error
+		var setAttrSuccessCount int64
 
 		for d := 0; d < numDisks; d++ {
 			diskResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
@@ -386,18 +388,24 @@ func TestE2E_H7_CrossTableLockOrderDeadlock(t *testing.T) {
 
 			// 启动并发协程：多个协程连续调用 SetAttr 修改不同 Size（触发 Inode -> Disk 加锁），
 			// 同时另一个协程并发调用 DeleteDisk 删除该磁盘（触发 Disk -> Inode 加锁）。
+			// 通过 channel 同步信号确保首个 SetAttr 成功后立即放行 DeleteDisk 与剩余并发 SetAttr 交错竞争，
+			// 避免 DeleteDisk 过早完成导致 SetAttr 零成功假绿。
 			const numSetAttrWorkers = 4
 			const setattrLoops = 6
 			setAttrCh := make(chan error, numSetAttrWorkers*setattrLoops)
 			deleteCh := make(chan error, 1)
 
-			var diskWg sync.WaitGroup
+			var roundSuccessCount int64
+			var setAttrWg sync.WaitGroup
+			var deleteWg sync.WaitGroup
 			startCh := make(chan struct{})
+			startDeleteCh := make(chan struct{})
+			var signalDeleteOnce sync.Once
 
 			for w := 0; w < numSetAttrWorkers; w++ {
-				diskWg.Add(1)
+				setAttrWg.Add(1)
 				go func(workerID int) {
-					defer diskWg.Done()
+					defer setAttrWg.Done()
 					<-startCh
 					for l := 0; l < setattrLoops; l++ {
 						ino := fileInos[(workerID+l)%filesPerDisk]
@@ -406,15 +414,37 @@ func TestE2E_H7_CrossTableLockOrderDeadlock(t *testing.T) {
 							Ino:  ino,
 							Size: protoUint64(newSize),
 						}))
+						if err == nil {
+							atomic.AddInt64(&setAttrSuccessCount, 1)
+							atomic.AddInt64(&roundSuccessCount, 1)
+							signalDeleteOnce.Do(func() {
+								close(startDeleteCh)
+							})
+						}
 						setAttrCh <- err
 					}
 				}(w)
 			}
 
-			diskWg.Add(1)
+			// 若所有 SetAttr 执行完毕仍未成功（如生产端异常），兜底放行 DeleteDisk 避免测试挂起，
+			// 由末尾断言显式捕获并判负
 			go func() {
-				defer diskWg.Done()
+				setAttrWg.Wait()
+				signalDeleteOnce.Do(func() {
+					close(startDeleteCh)
+				})
+			}()
+
+			deleteWg.Add(1)
+			go func() {
+				defer deleteWg.Done()
 				<-startCh
+				select {
+				case <-startDeleteCh:
+				case <-ctx.Done():
+					deleteCh <- ctx.Err()
+					return
+				}
 				_, err := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
 					DiskId: diskID,
 				}))
@@ -422,7 +452,8 @@ func TestE2E_H7_CrossTableLockOrderDeadlock(t *testing.T) {
 			}()
 
 			close(startCh)
-			diskWg.Wait()
+			setAttrWg.Wait()
+			deleteWg.Wait()
 			close(setAttrCh)
 			close(deleteCh)
 
@@ -432,6 +463,9 @@ func TestE2E_H7_CrossTableLockOrderDeadlock(t *testing.T) {
 			for sErr := range setAttrCh {
 				allSetAttrErrs = append(allSetAttrErrs, sErr)
 			}
+
+			// 显式断言当前磁盘轮次必须至少有 1 次有效扩容成功，严禁单轮零样本空跑假绿
+			require.Greater(t, atomic.LoadInt64(&roundSuccessCount), int64(0), "磁盘轮次 %d 必须至少有 1 次有效扩容成功，严禁单轮零样本空跑假绿", d)
 		}
 
 		obs := stopMonitor()
@@ -466,6 +500,12 @@ func TestE2E_H7_CrossTableLockOrderDeadlock(t *testing.T) {
 				testutil.RequireConnectError(t, sErr, connect.CodeNotFound, "ENOENT")
 			}
 		}
+
+		// 显式断言 SetAttr 成功扩容次数：每轮至少成功 1 次，严禁零成功空跑假绿
+		finalSuccessCount := atomic.LoadInt64(&setAttrSuccessCount)
+		t.Logf("SetAttr 有效成功扩容总次数: %d (轮次: %d)", finalSuccessCount, numDisks)
+		require.Greater(t, finalSuccessCount, int64(0), "SetAttr 必须至少成功完成有效扩容，严禁零成功空跑假绿")
+		require.GreaterOrEqual(t, finalSuccessCount, int64(numDisks), "每个磁盘轮次必须至少成功完成 1 次有效扩容 (总成功数: %d, 轮次: %d)", finalSuccessCount, numDisks)
 	})
 }
 

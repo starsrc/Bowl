@@ -1429,6 +1429,21 @@ func TestSetAttr_NegativeCases(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteChunksAfterIndx(mock.Anything, db.DeleteChunksAfterIndxParams{
+				Ino:       int64(ino),
+				AfterIndx: 0,
+			}).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AppendExistingChunkSlice(mock.Anything, mock.MatchedBy(func(p db.AppendExistingChunkSliceParams) bool {
+				return p.Ino == int64(ino) && p.Indx == 0
+			})).
+			Return(int64(1), nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			UpdateInodeAttr(mock.Anything, db.UpdateInodeAttrParams{
 				Ino:         int64(ino),
 				Mode:        existingRow.Mode,
@@ -1670,6 +1685,21 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 				DeltaInodes: 0,
 			}).
 			Return(nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksAfterIndx(mock.Anything, db.DeleteChunksAfterIndxParams{
+				Ino:       int64(ino),
+				AfterIndx: 0,
+			}).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			AppendExistingChunkSlice(mock.Anything, mock.MatchedBy(func(p db.AppendExistingChunkSliceParams) bool {
+				return p.Ino == int64(ino) && p.Indx == 0
+			})).
+			Return(int64(1), nil).
 			Once()
 
 		updatedRow := baseInodeRow

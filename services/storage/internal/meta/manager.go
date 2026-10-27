@@ -547,6 +547,13 @@ func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, in
 		return nil
 	}
 
+	// 若为常规文件，在同一数据库事务内物理删除其全部 chunks 行并批量扣减关联物理切片的引用计数
+	if (uint32(inode.Mode) & S_IFMT) == S_IFREG {
+		if err := deleteAllChunksByIno(ctx, q, inode.Ino); err != nil {
+			return err
+		}
+	}
+
 	if err := q.DeleteInode(ctx, inode.Ino); err != nil {
 		return fmt.Errorf("delete orphan inode %d: %w", inode.Ino, err)
 	}

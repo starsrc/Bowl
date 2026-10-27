@@ -975,6 +975,7 @@ func TestRename_GlobalLockOrderAndDriftRetry(t *testing.T) {
 		mockQuerier2.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, driftedTargetIno).
 			Return(db.Inode{Ino: driftedTargetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 0}, nil).Once()
 		mockQuerier2.EXPECT().HasFileHandlesByIno(mock.Anything, driftedTargetIno).Return(false, nil).Once()
+		mockQuerier2.EXPECT().DeleteChunksByIno(mock.Anything, driftedTargetIno).Return(nil, nil).Once()
 		mockQuerier2.EXPECT().DeleteInode(mock.Anything, driftedTargetIno).Return(nil).Once()
 		mockQuerier2.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
 			OldParentIno: int64(oldParentIno),
@@ -2018,6 +2019,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 			Return(targetDecremented, nil).Once()
 
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteChunksByIno(mock.Anything, targetIno).Return(nil, nil).Once()
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
 		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
 			RootIno:     rootIno,
@@ -2201,6 +2203,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 			Return(targetDecremented, nil).Once()
 
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteChunksByIno(mock.Anything, targetIno).Return(nil, nil).Once()
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
 
 		// 不应调用 AddDiskQuotaByRootIno
@@ -2463,6 +2466,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		targetDecremented.Nlink = 0
 		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(targetDecremented, nil).Once()
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteChunksByIno(mock.Anything, targetIno).Return(nil, nil).Once()
 
 		delErr := errors.New("delete inode failed")
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(delErr).Once()
@@ -2489,6 +2493,7 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		targetDecremented.Nlink = 0
 		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(targetDecremented, nil).Once()
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
+		mockQuerier.EXPECT().DeleteChunksByIno(mock.Anything, targetIno).Return(nil, nil).Once()
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
 
 		quotaErr := errors.New("add disk quota failed")

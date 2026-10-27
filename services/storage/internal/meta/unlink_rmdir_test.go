@@ -325,6 +325,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(childIno)).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(childIno)).
 			Return(nil).
 			Once()
@@ -401,6 +406,11 @@ func TestUnlink_PositivePath(t *testing.T) {
 		mockQuerier2.EXPECT().
 			HasFileHandlesByIno(mock.Anything, driftedChildIno).
 			Return(false, nil).
+			Once()
+
+		mockQuerier2.EXPECT().
+			DeleteChunksByIno(mock.Anything, driftedChildIno).
+			Return(nil, nil).
 			Once()
 
 		mockQuerier2.EXPECT().
@@ -796,6 +806,11 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(childIno)).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(childIno)).
 			Return(nil).
 			Once()
@@ -892,6 +907,11 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(childIno)).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(childIno)).
 			Return(nil).
 			Once()
@@ -941,6 +961,11 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 			Return(false, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(childIno)).
+			Return(nil, nil).
+			Once()
+
 		delErr := errors.New("delete inode failed")
 		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(childIno)).
@@ -966,6 +991,11 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 		mockQuerier.EXPECT().
 			HasFileHandlesByIno(mock.Anything, int64(childIno)).
 			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(childIno)).
+			Return(nil, nil).
 			Once()
 
 		mockQuerier.EXPECT().

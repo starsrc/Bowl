@@ -545,6 +545,11 @@ func TestRemoveXattr_OrphanReclamationCascade(t *testing.T) {
 			Return(false, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(orphanIno)).
+			Return(nil, nil).
+			Once()
+
 		// 4. 无剩余句柄，触发 DeleteInode 物理回收
 		// 数据库级联约束：fk_inode_xattrs_ino FOREIGN KEY (ino) REFERENCES inodes(ino) ON DELETE CASCADE
 		// 确保 DeleteInode 自动级联清理 inode_xattrs，无需领域层逐个调用 DeleteInodeXattr

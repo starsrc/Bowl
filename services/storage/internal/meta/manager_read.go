@@ -20,8 +20,11 @@ import (
 //  3. 会话续期与访问时间：在传入有效 session_id 时续期会话租约；遵循配置的 AtimeMode（noatime/relatime/strictatime）决定是否更新 inodes.atime；
 //  4. EOF 与截断读取：当 size == 0 或 offset >= inode.Size 时，直接返回空字节流（len(data) == 0）；
 //     当 offset + size > inode.Size 时，自动截断实际读取长度 readLen = uint32(inode.Size - offset)；
-//  5. 稀疏空洞与切片合并：读取目标 Chunk 的 chunks.slices；若该块不存在（pgx.ErrNoRows），直接返回全 0x00 缓冲区且不触发物理盘 IO；
-//  6. 若该 Chunk 存在，通过 BuildSlice 构建有效切片视图，空洞区间保持 0x00，有效物理切片通过 LocateBlocks 精确从 BlockStore 读取并拼接。
+//  5. 跨 4 MiB Block 与跨 64 MiB Chunk 边界无缝拼接：
+//     - 当读取区间 [req.Offset, req.Offset + readLen) 跨越 64 MiB Chunk 边界时，按 startIndx 到 endIndx 分别加载各自的 chunks.slices；
+//     - 若某侧 Chunk 不存在（pgx.ErrNoRows）或为空，视为稀疏空洞保持 0x00 填充；
+//     - 若存在，通过 BuildSlice 裁剪合并有效切片视图；
+//     - 对有效 Slice 区间若跨越 BlockSize，按 block_idx = slice_off / BlockSize 与 block_off = slice_off % BlockSize 准确定位并从 BlockStore 拼接连续字节流。
 func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error) {
 	if req == nil {
 		return nil, ErrInvalidArgument
@@ -99,65 +102,79 @@ func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, er
 		}
 
 		buf := make([]byte, readLen)
-		indx := uint32(req.Offset / ChunkSize)
-		chunkStart := uint32(req.Offset % ChunkSize)
+		actualStart := req.Offset
+		actualEnd := req.Offset + uint64(readLen)
+		startIndx := uint32(actualStart / ChunkSize)
+		endIndx := uint32((actualEnd - 1) / ChunkSize)
 
-		chunk, err := q.GetChunk(ctx, db.GetChunkParams{
-			Ino:  int64(req.Ino),
-			Indx: int32(indx),
-		})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				// 整块为未写入稀疏区域，直接返回全 0x00 缓冲区，不触发物理盘 IO
-				resp = &ReadResponse{Data: buf}
-				return nil
-			}
-			return fmt.Errorf("get chunk (ino=%d, indx=%d): %w", req.Ino, indx, err)
-		}
-
-		if len(chunk.Slices) == 0 {
-			resp = &ReadResponse{Data: buf}
-			return nil
-		}
-
-		slices, err := DecodeSlices(chunk.Slices)
-		if err != nil {
-			return fmt.Errorf("decode slices (ino=%d, indx=%d): %w", req.Ino, indx, err)
-		}
-
-		view := BuildSlice(slices)
 		bs := m.getBlockStore()
-		chunkReadStart := chunkStart
-		chunkReadEnd := chunkStart + readLen
 
-		for _, s := range view {
-			overlapStart := max(s.Pos, chunkReadStart)
-			overlapEnd := min(s.Pos+s.Len, chunkReadEnd)
-			if overlapStart >= overlapEnd {
+		for indx := startIndx; indx <= endIndx; indx++ {
+			chunkGlobalStart := uint64(indx) * ChunkSize
+			chunkGlobalEnd := chunkGlobalStart + ChunkSize
+
+			partGlobalStart := max(actualStart, chunkGlobalStart)
+			partGlobalEnd := min(actualEnd, chunkGlobalEnd)
+			if partGlobalStart >= partGlobalEnd {
 				continue
 			}
 
-			if s.ID == 0 {
-				continue
-			}
+			chunkReadStart := uint32(partGlobalStart - chunkGlobalStart)
+			chunkReadEnd := uint32(partGlobalEnd - chunkGlobalStart)
+			bufOffset := uint32(partGlobalStart - actualStart)
 
-			overlapLen := overlapEnd - overlapStart
-			bufStart := overlapStart - chunkReadStart
-			sliceOff := s.Off + (overlapStart - s.Pos)
-
-			locs, err := LocateBlocks(s.Size, sliceOff, overlapLen)
+			chunk, err := q.GetChunk(ctx, db.GetChunkParams{
+				Ino:  int64(req.Ino),
+				Indx: int32(indx),
+			})
 			if err != nil {
-				return fmt.Errorf("locate blocks (slice_id=%d, size=%d, off=%d, len=%d): %w", s.ID, s.Size, sliceOff, overlapLen, err)
+				if errors.Is(err, pgx.ErrNoRows) {
+					// 该 Chunk 为稀疏未写入空洞，对应缓冲区区间保持 0x00，不触发物理盘 IO
+					continue
+				}
+				return fmt.Errorf("get chunk (ino=%d, indx=%d): %w", req.Ino, indx, err)
 			}
 
-			curOverlapOff := uint32(0)
-			for _, loc := range locs {
-				dstStart := bufStart + curOverlapOff
-				dstEnd := dstStart + loc.Length
-				if err := bs.GetBlock(ctx, s.ID, loc.BlockIdx, loc.BlockSize, loc.BlockOff, buf[dstStart:dstEnd]); err != nil {
-					return fmt.Errorf("%w: get block (slice_id=%d, block_idx=%d): %v", ErrIO, s.ID, loc.BlockIdx, err)
+			if len(chunk.Slices) == 0 {
+				continue
+			}
+
+			slices, err := DecodeSlices(chunk.Slices)
+			if err != nil {
+				return fmt.Errorf("decode slices (ino=%d, indx=%d): %w", req.Ino, indx, err)
+			}
+
+			view := BuildSlice(slices)
+
+			for _, s := range view {
+				overlapStart := max(s.Pos, chunkReadStart)
+				overlapEnd := min(s.Pos+s.Len, chunkReadEnd)
+				if overlapStart >= overlapEnd {
+					continue
 				}
-				curOverlapOff += loc.Length
+
+				if s.ID == 0 {
+					continue
+				}
+
+				overlapLen := overlapEnd - overlapStart
+				bufStart := bufOffset + (overlapStart - chunkReadStart)
+				sliceOff := s.Off + (overlapStart - s.Pos)
+
+				locs, err := LocateBlocks(s.Size, sliceOff, overlapLen)
+				if err != nil {
+					return fmt.Errorf("locate blocks (slice_id=%d, size=%d, off=%d, len=%d): %w", s.ID, s.Size, sliceOff, overlapLen, err)
+				}
+
+				curOverlapOff := uint32(0)
+				for _, loc := range locs {
+					dstStart := bufStart + curOverlapOff
+					dstEnd := dstStart + loc.Length
+					if err := bs.GetBlock(ctx, s.ID, loc.BlockIdx, loc.BlockSize, loc.BlockOff, buf[dstStart:dstEnd]); err != nil {
+						return fmt.Errorf("%w: get block (slice_id=%d, block_idx=%d): %v", ErrIO, s.ID, loc.BlockIdx, err)
+					}
+					curOverlapOff += loc.Length
+				}
 			}
 		}
 

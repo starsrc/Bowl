@@ -1,6 +1,7 @@
 package meta_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -251,6 +252,54 @@ func TestToStatus_WrappedError(t *testing.T) {
 func TestToStatus_NilError(t *testing.T) {
 	assert.Nil(t, meta.ToStatus(nil))
 	assert.NoError(t, meta.ToGRPCError(nil))
+}
+
+func TestToStatus_ContextErrors(t *testing.T) {
+	t.Run("纯 context.Canceled 映射为 codes.Canceled 且不携带 ErrorInfo", func(t *testing.T) {
+		st := meta.ToStatus(context.Canceled)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.Canceled, st.Code())
+		assert.Equal(t, context.Canceled.Error(), st.Message())
+		assert.Empty(t, st.Details(), "纯 context.Canceled 不得携带 ErrorInfo 详情")
+	})
+
+	t.Run("包装的 context.Canceled 映射为 codes.Canceled 且不携带 ErrorInfo", func(t *testing.T) {
+		wrapped := fmt.Errorf("operation aborted by client: %w", context.Canceled)
+		st := meta.ToStatus(wrapped)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.Canceled, st.Code())
+		assert.Equal(t, wrapped.Error(), st.Message())
+		assert.Empty(t, st.Details())
+	})
+
+	t.Run("纯 context.DeadlineExceeded 映射为 codes.DeadlineExceeded 且不携带 ErrorInfo", func(t *testing.T) {
+		st := meta.ToStatus(context.DeadlineExceeded)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.DeadlineExceeded, st.Code())
+		assert.Equal(t, context.DeadlineExceeded.Error(), st.Message())
+		assert.Empty(t, st.Details(), "纯 context.DeadlineExceeded 不得携带 ErrorInfo 详情")
+	})
+
+	t.Run("包装的 context.DeadlineExceeded 映射为 codes.DeadlineExceeded 且不携带 ErrorInfo", func(t *testing.T) {
+		wrapped := fmt.Errorf("timeout waiting for lock: %w", context.DeadlineExceeded)
+		st := meta.ToStatus(wrapped)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.DeadlineExceeded, st.Code())
+		assert.Equal(t, wrapped.Error(), st.Message())
+		assert.Empty(t, st.Details())
+	})
+
+	t.Run("对比 ErrInterrupted 必须映射为 codes.Canceled 且携带 EINTR ErrorInfo", func(t *testing.T) {
+		st := meta.ToStatus(meta.ErrInterrupted)
+		require.NotNil(t, st)
+		assert.Equal(t, codes.Canceled, st.Code())
+		details := st.Details()
+		require.Len(t, details, 1)
+		info, ok := details[0].(*errdetails.ErrorInfo)
+		require.True(t, ok)
+		assert.Equal(t, "EINTR", info.GetReason())
+		assert.Equal(t, meta.ErrorDomain, info.GetDomain())
+	})
 }
 
 func TestToStatus_UnknownError(t *testing.T) {

@@ -1,7 +1,6 @@
 package testutil
 
 import (
-	"errors"
 	"net/http"
 	"os"
 	"testing"
@@ -11,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
-	"google.golang.org/grpc/status"
 
+	"github.com/starsrc/Aether/pkg/serverx"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
@@ -41,35 +40,10 @@ func NewStorageClient(opts ...connect.ClientOption) storagev1connect.StorageServ
 	)
 }
 
-// ExtractErrorInfo 从 error 中提取 *errdetails.ErrorInfo 详情。
-// 支持 *connect.Error 与 gRPC *status.Status。若未包含 ErrorInfo 则返回 nil。
+// ExtractErrorInfo 从 error 中提取 *errdetails.ErrorInfo 详情，
+// 委托给 serverx.ExtractErrorInfo。
 func ExtractErrorInfo(err error) *errdetails.ErrorInfo {
-	if err == nil {
-		return nil
-	}
-
-	var connErr *connect.Error
-	if errors.As(err, &connErr) {
-		for _, detail := range connErr.Details() {
-			val, err := detail.Value()
-			if err != nil {
-				continue
-			}
-			if info, ok := val.(*errdetails.ErrorInfo); ok {
-				return info
-			}
-		}
-	}
-
-	if st, ok := status.FromError(err); ok {
-		for _, detail := range st.Details() {
-			if info, ok := detail.(*errdetails.ErrorInfo); ok {
-				return info
-			}
-		}
-	}
-
-	return nil
+	return serverx.ExtractErrorInfo(err)
 }
 
 // RequireConnectError 断言返回的错误符合 ConnectRPC 错误码及 POSIX 细粒度 ErrorInfo 契约。

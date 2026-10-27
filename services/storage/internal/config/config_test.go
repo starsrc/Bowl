@@ -31,6 +31,7 @@ func cleanConfigEnv(t *testing.T) {
 		"STORAGE_SESSION_LEASE_TTL", "STORAGE_ATIME_MODE",
 		"STORAGE_ENTRY_TIMEOUT_SECONDS", "STORAGE_ATTR_TIMEOUT_SECONDS", "STORAGE_DIR_ENTRY_TIMEOUT_SECONDS",
 		"STORAGE_OPEN_KEEP_CACHE", "STORAGE_OPEN_DIR_CACHE",
+		"DATA_DIR", "STORAGE_DATA_DIR",
 	}
 	for _, key := range keys {
 		oldVal, exists := os.LookupEnv(key)
@@ -104,6 +105,7 @@ func TestConfig_Load_Defaults(t *testing.T) {
 	assert.Equal(t, 1.0, cfg.Meta.DirEntryTimeoutSeconds())
 	assert.False(t, cfg.Meta.OpenKeepCache())
 	assert.False(t, cfg.Meta.OpenDirCache())
+	assert.Equal(t, "/tmp/bowl-storage-data", cfg.Meta.DataDir())
 }
 
 func TestConfig_Load_EnvOverrides(t *testing.T) {
@@ -133,6 +135,7 @@ func TestConfig_Load_EnvOverrides(t *testing.T) {
 
 	t.Setenv("STORAGE_SESSION_LEASE_TTL", "90s")
 	t.Setenv("STORAGE_ATIME_MODE", "strictatime")
+	t.Setenv("DATA_DIR", "/mnt/nvme0n1/data")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -162,6 +165,14 @@ func TestConfig_Load_EnvOverrides(t *testing.T) {
 
 	assert.Equal(t, 90*time.Second, cfg.Meta.SessionLeaseTTL())
 	assert.Equal(t, "strictatime", cfg.Meta.AtimeMode())
+	assert.Equal(t, "/mnt/nvme0n1/data", cfg.Meta.DataDir())
+
+	// 测试 STORAGE_DATA_DIR 备用环境变量
+	t.Setenv("DATA_DIR", "")
+	t.Setenv("STORAGE_DATA_DIR", "/mnt/nvme0n2/storage_data")
+	cfg2, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "/mnt/nvme0n2/storage_data", cfg2.Meta.DataDir())
 }
 
 func TestConfig_Load_DotenvFile(t *testing.T) {
@@ -290,6 +301,7 @@ func TestConfig_Validate(t *testing.T) {
 				EntryTimeoutSecondsVal:    1.0,
 				AttrTimeoutSecondsVal:     1.0,
 				DirEntryTimeoutSecondsVal: 1.0,
+				DataDirVal:                "/tmp/bowl-storage-data",
 			},
 		}
 	}
@@ -338,6 +350,15 @@ func TestConfig_Validate(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "validate meta config:")
 	})
+
+	t.Run("MetaConfig DataDir为空校验失败", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Meta.DataDirVal = "   "
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "validate meta config:")
+		assert.Contains(t, err.Error(), "invalid data dir")
+	})
 }
 
 func TestConfigModule_ProvidesComponents(t *testing.T) {
@@ -364,6 +385,7 @@ func TestConfigModule_ProvidesComponents(t *testing.T) {
 			DirEntryTimeoutSecondsVal: 4.5,
 			OpenKeepCacheVal:          true,
 			OpenDirCacheVal:           true,
+			DataDirVal:                "/custom/storage/data",
 		},
 	}
 
@@ -413,4 +435,5 @@ func TestConfigModule_ProvidesComponents(t *testing.T) {
 	assert.Equal(t, 4.5, extractedMeta.DirEntryTimeoutSeconds())
 	assert.True(t, extractedMeta.OpenKeepCache())
 	assert.True(t, extractedMeta.OpenDirCache())
+	assert.Equal(t, "/custom/storage/data", extractedMeta.DataDir())
 }

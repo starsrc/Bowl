@@ -81,6 +81,7 @@ type Manager interface {
 
 type manager struct {
 	store           db.Store
+	blockStore      BlockStore
 	entryTimeout    float64
 	attrTimeout     float64
 	dirEntryTimeout float64
@@ -96,6 +97,18 @@ var _ Manager = (*manager)(nil)
 
 // Option 定义 Manager 的配置选项。
 type Option func(*manager)
+
+// WithBlockStore 配置底层物理块存储引擎。
+func WithBlockStore(bs BlockStore) Option {
+	return func(m *manager) {
+		m.blockStore = bs
+	}
+}
+
+// BlockStore 返回底层物理块存储引擎（未配置时可能为 nil）。
+func (m *manager) BlockStore() BlockStore {
+	return m.blockStore
+}
 
 // WithSessionLeaseTTL 配置客户端会话租约的续期时长（TTL <= 0 时忽略并保持默认值）。
 func WithSessionLeaseTTL(ttl time.Duration) Option {
@@ -176,9 +189,10 @@ func New(store db.Store, opts ...Option) Manager {
 type ManagerParams struct {
 	fx.In
 
-	Store   db.Store
-	MetaCfg *config.MetaConfig `optional:"true"`
-	MetaVal config.MetaConfig  `optional:"true"`
+	Store      db.Store
+	BlockStore BlockStore         `optional:"true"`
+	MetaCfg    *config.MetaConfig `optional:"true"`
+	MetaVal    config.MetaConfig  `optional:"true"`
 }
 
 func newManagerFromParams(params ManagerParams) Manager {
@@ -189,8 +203,19 @@ func newManagerFromParams(params ManagerParams) Manager {
 		metaCfg = &params.MetaVal
 	}
 
+	opts := make([]Option, 0, 10)
+
+	// BlockStore 依赖解析：优先使用注入的 BlockStore，否则根据 MetaConfig.DataDir 构造默认 LocalFSBlockStore
+	if params.BlockStore != nil {
+		opts = append(opts, WithBlockStore(params.BlockStore))
+	} else if metaCfg != nil && metaCfg.DataDir() != "" {
+		opts = append(opts, WithBlockStore(NewLocalFSBlockStore(metaCfg.DataDir())))
+	} else {
+		opts = append(opts, WithBlockStore(NewLocalFSBlockStore(config.DefaultDataDir)))
+	}
+
 	if metaCfg == nil {
-		return New(params.Store)
+		return New(params.Store, opts...)
 	}
 
 	var atimeMode AtimeMode
@@ -203,8 +228,7 @@ func newManagerFromParams(params ManagerParams) Manager {
 		atimeMode = AtimeModeNoAtime
 	}
 
-	return New(
-		params.Store,
+	opts = append(opts,
 		WithSessionLeaseTTL(metaCfg.SessionLeaseTTL()),
 		WithAtimeMode(atimeMode),
 		WithEntryTimeout(metaCfg.EntryTimeoutSeconds()),
@@ -213,6 +237,8 @@ func newManagerFromParams(params ManagerParams) Manager {
 		WithOpenKeepCache(metaCfg.OpenKeepCache()),
 		WithOpenDirCache(metaCfg.OpenDirCache()),
 	)
+
+	return New(params.Store, opts...)
 }
 
 // Module 提供 meta 依赖注入模块。

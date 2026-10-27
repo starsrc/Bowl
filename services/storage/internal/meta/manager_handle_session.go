@@ -379,7 +379,6 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 	return nil
 }
 
-
 // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 // 遵循 ADR-0013：
 // 1. 静态校验入参合法性（sessionID == 0 或 > math.MaxInt64 返回 ErrInvalidArgument / EINVAL）；

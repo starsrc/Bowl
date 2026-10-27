@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
@@ -2640,12 +2643,17 @@ func TestRename_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 		startBarrier := make(chan struct{})
 		var err1, err2 error
 
+		// 为两个并发 goroutine 创建独立的 Manager 实例，绕开进程内单实例内存锁 crossDirRenameMu，
+		// 覆盖多 Manager 实例在数据库事务层的真实并发交错。
+		mgr1 := meta.New(store)
+		mgr2 := meta.New(store)
+
 		wg.Add(2)
 		// T1: 把 dirA 移动到 dirD 下
 		go func() {
 			defer wg.Done()
 			<-startBarrier
-			err1 = mgr.Rename(ctx, meta.RenameParams{
+			err1 = mgr1.Rename(ctx, meta.RenameParams{
 				OldParentIno: dirX.Ino,
 				OldName:      []byte("dirA"),
 				NewParentIno: dirD.Ino,
@@ -2657,7 +2665,7 @@ func TestRename_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-startBarrier
-			err2 = mgr.Rename(ctx, meta.RenameParams{
+			err2 = mgr2.Rename(ctx, meta.RenameParams{
 				OldParentIno: dirY.Ino,
 				OldName:      []byte("dirC"),
 				NewParentIno: dirB.Ino,
@@ -2667,6 +2675,18 @@ func TestRename_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 
 		close(startBarrier)
 		wg.Wait()
+
+		// 断言并发两个 Rename 操作不应返回包含 deadlock detected / 40P01 的数据库底层死锁错误，
+		// 且失败错误不应映射为 CodeInternal
+		for _, err := range []error{err1, err2} {
+			if err != nil {
+				require.False(t, strings.Contains(strings.ToLower(err.Error()), "deadlock") || strings.Contains(err.Error(), "40P01"),
+					"并发跨目录 Rename 不应触发 PostgreSQL 40P01 deadlock detected 死锁，实际返回: %v", err)
+				st := meta.ToStatus(err)
+				require.NotEqual(t, codes.Internal, st.Code(),
+					"并发跨目录 Rename 不应因未处理死锁而返回 CodeInternal 内部错误，实际状态码: %s, 错误: %v", st.Code(), err)
+			}
+		}
 
 		// 严格断言恰好 1 个成功、另 1 个失败且错误必须为 ErrInvalidArgument
 		successCount := 0
@@ -2771,12 +2791,17 @@ func TestRenameExchange_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 		startBarrier := make(chan struct{})
 		var err1, err2 error
 
+		// 为两个并发 goroutine 创建独立的 Manager 实例，绕开进程内单实例内存锁 crossDirRenameMu，
+		// 覆盖多 Manager 实例在数据库事务层的真实并发交错。
+		mgr1 := meta.New(store)
+		mgr2 := meta.New(store)
+
 		wg.Add(2)
 		// T1: 交换 dirX/dirA 与 dirD/phD
 		go func() {
 			defer wg.Done()
 			<-startBarrier
-			err1 = mgr.Rename(ctx, meta.RenameParams{
+			err1 = mgr1.Rename(ctx, meta.RenameParams{
 				OldParentIno: dirX.Ino,
 				OldName:      []byte("dirA"),
 				NewParentIno: dirD.Ino,
@@ -2789,7 +2814,7 @@ func TestRenameExchange_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-startBarrier
-			err2 = mgr.Rename(ctx, meta.RenameParams{
+			err2 = mgr2.Rename(ctx, meta.RenameParams{
 				OldParentIno: dirY.Ino,
 				OldName:      []byte("dirC"),
 				NewParentIno: dirB.Ino,
@@ -2800,6 +2825,18 @@ func TestRenameExchange_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 
 		close(startBarrier)
 		wg.Wait()
+
+		// 断言并发两个 RenameExchange 操作不应返回包含 deadlock detected / 40P01 的数据库底层死锁错误，
+		// 且失败错误不应映射为 CodeInternal
+		for _, err := range []error{err1, err2} {
+			if err != nil {
+				require.False(t, strings.Contains(strings.ToLower(err.Error()), "deadlock") || strings.Contains(err.Error(), "40P01"),
+					"并发跨目录 RenameExchange 不应触发 PostgreSQL 40P01 deadlock detected 死锁，实际返回: %v", err)
+				st := meta.ToStatus(err)
+				require.NotEqual(t, codes.Internal, st.Code(),
+					"并发跨目录 RenameExchange 不应因未处理死锁而返回 CodeInternal 内部错误，实际状态码: %s, 错误: %v", st.Code(), err)
+			}
+		}
 
 		// 严格断言恰好 1 个成功、另 1 个失败且错误必须为 ErrInvalidArgument
 		successCount := 0
@@ -2844,5 +2881,199 @@ func TestRenameExchange_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
 
 		delErr := mgr.DeleteDisk(context.Background(), disk.DiskID)
 		require.NoError(t, delErr, "清理磁盘失败")
+	}
+}
+
+type renameAncestorHookStore struct {
+	db.Store
+	onBeforeIsSubdirectory func(ctx context.Context, params db.IsSubdirectoryParams)
+}
+
+func (s *renameAncestorHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	err := s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		return fn(&renameAncestorHookQuerier{Querier: q, onBeforeIsSubdirectory: s.onBeforeIsSubdirectory})
+	}, opts...)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+			// 将底层捕获的 40P01 死锁暴露为非 retryable 错误，直接向上透传死锁失败，
+			// 真实反映生产代码在 IsSubdirectory 逆序加锁引发的 deadlock detected
+			return fmt.Errorf("transaction failed with deadlock: %s", err.Error())
+		}
+	}
+	return err
+}
+
+type renameAncestorHookQuerier struct {
+	db.Querier
+	onBeforeIsSubdirectory func(ctx context.Context, params db.IsSubdirectoryParams)
+}
+
+func (q *renameAncestorHookQuerier) IsSubdirectory(ctx context.Context, params db.IsSubdirectoryParams) (bool, error) {
+	if q.onBeforeIsSubdirectory != nil {
+		q.onBeforeIsSubdirectory(ctx, params)
+	}
+	return q.Querier.IsSubdirectory(ctx, params)
+}
+
+// TestRename_AncestorLockOrder_DeadlockDetected_RealDB 验证 P-3：
+// 跨目录 Rename 在 IsSubdirectory 逆序阻塞等待祖先 FOR SHARE 导致 40P01 死锁。
+func TestRename_AncestorLockOrder_DeadlockDetected_RealDB(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	mgrBase := meta.New(baseStore)
+
+	disk, err := mgrBase.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-rename-ancestor-deadlock-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgrBase.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	// 构建目录拓扑：
+	// /dirX/dirA/dirB
+	// /dirY/dirC/dirD
+	dirX, err := mgrBase.Mkdir(ctx, meta.MkdirParams{ParentIno: disk.RootIno, Name: []byte("dirX"), Mode: 0o755})
+	require.NoError(t, err)
+	dirA, err := mgrBase.Mkdir(ctx, meta.MkdirParams{ParentIno: dirX.Ino, Name: []byte("dirA"), Mode: 0o755})
+	require.NoError(t, err)
+	dirB, err := mgrBase.Mkdir(ctx, meta.MkdirParams{ParentIno: dirA.Ino, Name: []byte("dirB"), Mode: 0o755})
+	require.NoError(t, err)
+
+	dirY, err := mgrBase.Mkdir(ctx, meta.MkdirParams{ParentIno: disk.RootIno, Name: []byte("dirY"), Mode: 0o755})
+	require.NoError(t, err)
+	dirC, err := mgrBase.Mkdir(ctx, meta.MkdirParams{ParentIno: dirY.Ino, Name: []byte("dirC"), Mode: 0o755})
+	require.NoError(t, err)
+	dirD, err := mgrBase.Mkdir(ctx, meta.MkdirParams{ParentIno: dirC.Ino, Name: []byte("dirD"), Mode: 0o755})
+	require.NoError(t, err)
+
+	t1Arrived := make(chan struct{})
+	t2Arrived := make(chan struct{})
+	var syncOnce1, syncOnce2 sync.Once
+
+	store1 := &renameAncestorHookStore{
+		Store: baseStore,
+		onBeforeIsSubdirectory: func(ctx context.Context, params db.IsSubdirectoryParams) {
+			syncOnce1.Do(func() {
+				close(t1Arrived)
+				select {
+				case <-t2Arrived:
+				case <-ctx.Done():
+				}
+			})
+		},
+	}
+
+	store2 := &renameAncestorHookStore{
+		Store: baseStore,
+		onBeforeIsSubdirectory: func(ctx context.Context, params db.IsSubdirectoryParams) {
+			syncOnce2.Do(func() {
+				close(t2Arrived)
+				select {
+				case <-t1Arrived:
+				case <-ctx.Done():
+				}
+			})
+		},
+	}
+
+	mgr1 := meta.New(store1)
+	mgr2 := meta.New(store2)
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+
+	wg.Add(2)
+	// T1: 移动 /dirX/dirA 到 /dirY/dirC/dirD/subA
+	go func() {
+		defer wg.Done()
+		err1 = mgr1.Rename(ctx, meta.RenameParams{
+			OldParentIno: dirX.Ino,
+			OldName:      []byte("dirA"),
+			NewParentIno: dirD.Ino,
+			NewName:      []byte("subA"),
+		})
+	}()
+
+	// T2: 移动 /dirY/dirC 到 /dirX/dirA/dirB/subC
+	go func() {
+		defer wg.Done()
+		err2 = mgr2.Rename(ctx, meta.RenameParams{
+			OldParentIno: dirY.Ino,
+			OldName:      []byte("dirC"),
+			NewParentIno: dirB.Ino,
+			NewName:      []byte("subC"),
+		})
+	}()
+
+	wg.Wait()
+
+	// 1. 断言并发两个 Rename 操作不应返回包含 deadlock detected / 40P01 的数据库底层死锁错误，
+	//    且失败错误不应映射为 CodeInternal
+	for _, err := range []error{err1, err2} {
+		if err != nil {
+			require.False(t, strings.Contains(strings.ToLower(err.Error()), "deadlock") || strings.Contains(err.Error(), "40P01"),
+				"并发跨目录 Rename 不应触发 PostgreSQL 40P01 deadlock detected 死锁，实际返回: %v", err)
+			st := meta.ToStatus(err)
+			require.NotEqual(t, codes.Internal, st.Code(),
+				"并发跨目录 Rename 不应因未处理死锁而返回 CodeInternal 内部错误，实际状态码: %s, 错误: %v", st.Code(), err)
+		}
+	}
+
+	// 2. 严格断言在理想无死锁并发机制下：恰好 1 个操作成功（nil），另 1 个因祖先环检测返回 ErrInvalidArgument
+	successCount := 0
+	var failedErr error
+	if err1 == nil {
+		successCount++
+	} else {
+		failedErr = err1
+	}
+	if err2 == nil {
+		successCount++
+	} else {
+		failedErr = err2
+	}
+	require.Equal(t, 1, successCount, "并发 Rename 必须恰好 1 个成功，err1: %v, err2: %v", err1, err2)
+	require.ErrorIs(t, failedErr, meta.ErrInvalidArgument, "并发 Rename 失败分支必须返回 ErrInvalidArgument，实际: %v", failedErr)
+
+	// 3. 断言最终目录树绝不产生环路
+	dirsToCheck := []uint64{dirA.Ino, dirB.Ino, dirC.Ino, dirD.Ino}
+	for _, targetIno := range dirsToCheck {
+		curr := targetIno
+		visited := make(map[uint64]bool)
+		steps := 0
+		const maxSteps = 100
+		for {
+			require.NotZero(t, curr, "目录 inode %d 在追溯过程中遇到了无效的 parent_ino 0", targetIno)
+			if curr == disk.RootIno {
+				break
+			}
+			require.False(t, visited[curr], "检测到环路: 节点 %d 已被访问过 (起点 %d)", curr, targetIno)
+			visited[curr] = true
+
+			steps++
+			require.LessOrEqual(t, steps, maxSteps, "追溯超过最大深度 %d，可能存在死循环 (起点 %d)", maxSteps, targetIno)
+
+			var pIno int64
+			qErr := pool.QueryRow(ctx, "SELECT parent_ino FROM inodes WHERE ino = $1", curr).Scan(&pIno)
+			require.NoError(t, qErr, "查询节点 %d 的 parent_ino 失败 (起点 %d)", curr, targetIno)
+			curr = uint64(pIno)
+		}
 	}
 }

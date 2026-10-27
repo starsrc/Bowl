@@ -406,6 +406,10 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return fmt.Errorf("create inode: %w", err)
 		}
 
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
+
 		if parent.RootIno > 0 {
 			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
 				RootIno:     parent.RootIno,
@@ -431,10 +435,6 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 
 		if err := q.TouchInodeTimestamps(ctx, parent.Ino); err != nil {
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
-		}
-
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
@@ -524,56 +524,29 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			gid = uint32(parent.Gid)
 		}
 
-		var newInode db.Inode
-		if params.SessionID != nil {
-			if parent.RootIno > 0 {
-				if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-					RootIno:     parent.RootIno,
-					DeltaBytes:  0,
-					DeltaInodes: 1,
-				}); err != nil {
-					return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
-				}
-			}
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
 
-			if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-				return err
-			}
+		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
+			Mode:    int32(targetMode),
+			Nlink:   0,
+			Uid:     int32(params.UID),
+			Gid:     int32(gid),
+			Rdev:    0,
+			RootIno: parent.RootIno,
+		})
+		if err != nil {
+			return fmt.Errorf("create tmpfile inode: %w", err)
+		}
 
-			var err error
-			newInode, err = q.CreateInode(ctx, db.CreateInodeParams{
-				Mode:    int32(targetMode),
-				Nlink:   0,
-				Uid:     int32(params.UID),
-				Gid:     int32(gid),
-				Rdev:    0,
-				RootIno: parent.RootIno,
-			})
-			if err != nil {
-				return fmt.Errorf("create tmpfile inode: %w", err)
-			}
-		} else {
-			var err error
-			newInode, err = q.CreateInode(ctx, db.CreateInodeParams{
-				Mode:    int32(targetMode),
-				Nlink:   0,
-				Uid:     int32(params.UID),
-				Gid:     int32(gid),
-				Rdev:    0,
-				RootIno: parent.RootIno,
-			})
-			if err != nil {
-				return fmt.Errorf("create tmpfile inode: %w", err)
-			}
-
-			if parent.RootIno > 0 {
-				if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-					RootIno:     parent.RootIno,
-					DeltaBytes:  0,
-					DeltaInodes: 1,
-				}); err != nil {
-					return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
-				}
+		if parent.RootIno > 0 {
+			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+				RootIno:     parent.RootIno,
+				DeltaBytes:  0,
+				DeltaInodes: 1,
+			}); err != nil {
+				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
 			}
 		}
 
@@ -656,6 +629,10 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 			}
 		}
 
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
+
 		if (params.Flags & O_TRUNC) != 0 {
 			if (params.Flags & O_ACCMODE) == O_RDONLY {
 				return ErrInvalidArgument
@@ -687,10 +664,6 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 					}
 				}
 			}
-		}
-
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{

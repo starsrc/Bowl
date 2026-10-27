@@ -618,3 +618,96 @@ func TestMigration_EntriesNameToBytea_NonUTF8Preserved(t *testing.T) {
 		assert.True(t, gotMap[key], "往返后必须保真存在目录项: parent_ino=%d, ino=%d, name(hex)=%x", exp.parentIno, exp.ino, exp.name)
 	}
 }
+
+// TestMigration_EntriesBackupIno_ReplacedEntryNotOverwrittenOnUp 验证 P-6：
+// 20261017020000_convert_entries_name_to_bytea.sql 迁移回滚后若同名目录项被删除并替换为指向新 Inode，
+// 再次 Up 迁移时不得错误匹配并用已被删除旧 Inode 的 raw_name 覆写新 Inode 的目录项。
+func TestMigration_EntriesBackupIno_ReplacedEntryNotOverwrittenOnUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_p6")
+
+	// 1. 依次执行前置迁移并执行 20261017020000 Up 迁移
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 插入测试用 Inodes
+	// 父目录 ino=1
+	// 旧文件 old_ino=100
+	// 保留文件 keep_ino=101 (用于验证未被替换的正常目录项仍能恢复原始非 UTF-8 字节)
+	// 新文件 new_ino=200
+	setupInodesSQL := `
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev)
+		VALUES (1, 16877, 4096, 2, 0, 0, 0),
+		       (100, 33188, 1024, 1, 0, 0, 0),
+		       (101, 33188, 1024, 1, 0, 0, 0),
+		       (200, 33188, 1024, 1, 0, 0, 0);
+	`
+	_, err := testPool.Exec(ctx, setupInodesSQL)
+	require.NoError(t, err)
+
+	// 3. 在 Up 状态 (BYTEA 模式) 下插入两个非 UTF-8 原始字节名的目录项
+	oldRawName := []byte{0xfe, 0x01}
+	keepRawName := []byte{0xfe, 0x02}
+
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", 1, oldRawName, 100)
+	require.NoError(t, err)
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", 1, keepRawName, 101)
+	require.NoError(t, err)
+
+	// 4. 执行 Down 迁移回滚到 VARCHAR 模式
+	downSQL := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", false)
+	err = runMigrationTxInPool(ctx, testPool, downSQL)
+	require.NoError(t, err, "执行 20261017020000 Down 迁移失败")
+
+	// 5. 获取回滚后的转义名称 rollback_name
+	var rollbackName string
+	err = testPool.QueryRow(ctx, "SELECT name FROM entries WHERE parent_ino = 1 AND ino = 100;").Scan(&rollbackName)
+	require.NoError(t, err)
+	require.NotEmpty(t, rollbackName)
+
+	var keepRollbackName string
+	err = testPool.QueryRow(ctx, "SELECT name FROM entries WHERE parent_ino = 1 AND ino = 101;").Scan(&keepRollbackName)
+	require.NoError(t, err)
+	require.NotEmpty(t, keepRollbackName)
+
+	// 6. 模拟回滚期间（VARCHAR 模式下）：
+	// 删除旧文件 old_ino=100 的目录项，并插入同名 rollback_name 但指向新文件 new_ino=200 的新目录项
+	_, err = testPool.Exec(ctx, "DELETE FROM entries WHERE parent_ino = 1 AND ino = 100;")
+	require.NoError(t, err)
+
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, ino, name) VALUES ($1, $3, $2);", 1, rollbackName, 200)
+	require.NoError(t, err)
+
+	// 7. 再次执行 Up 迁移重新升级为 BYTEA 模式
+	upSQL := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upSQL)
+	require.NoError(t, err, "再次执行 20261017020000 Up 迁移失败")
+
+	// 8. 校验结果
+	// (a) 对于未替换的 keep_ino=101，应正常恢复非 UTF-8 原始字节 keepRawName
+	var gotKeepName []byte
+	err = testPool.QueryRow(ctx, "SELECT name::bytea FROM entries WHERE parent_ino = 1 AND ino = 101;").Scan(&gotKeepName)
+	require.NoError(t, err)
+	assert.Equal(t, keepRawName, gotKeepName, "未替换的目录项 ino=101 应正常恢复原始非 UTF-8 字节")
+
+	// (b) 对于新文件 new_ino=200，其名称必须保持为新插入的字符串 UTF-8 编码字节 convert_to(rollback_name, 'UTF8')，
+	// 严禁被已被删除的 old_ino=100 旧文件原始非 UTF-8 字节篡改！
+	var gotNewInoName []byte
+	err = testPool.QueryRow(ctx, "SELECT name::bytea FROM entries WHERE parent_ino = 1 AND ino = 200;").Scan(&gotNewInoName)
+	require.NoError(t, err)
+
+	expectedNewInoName := []byte(rollbackName)
+	assert.Equal(t, expectedNewInoName, gotNewInoName, "指向 new_ino=200 的新目录项名称必须保持为新插入名称，不得被旧文件 old_ino=100 的 raw_name 覆写")
+}

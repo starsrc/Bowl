@@ -3,12 +3,18 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1352,5 +1358,341 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		require.Contains(t, err.Error(), "add disk quota by root_ino 100")
 
 		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
+	})
+}
+
+// -----------------------------------------------------------------------------
+// P-2 缺陷复现：Disks 配额与 ClientSession 锁序倒置导致死锁 / 锁序违规
+// -----------------------------------------------------------------------------
+
+type lockOrderTrackingQuerier struct {
+	db.Querier
+	recordedOps *[]string
+	mu          *sync.Mutex
+}
+
+func (q *lockOrderTrackingQuerier) record(op string) {
+	if q.mu != nil && q.recordedOps != nil {
+		q.mu.Lock()
+		*q.recordedOps = append(*q.recordedOps, op)
+		q.mu.Unlock()
+	}
+}
+
+func (q *lockOrderTrackingQuerier) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
+	q.record("disks")
+	return q.Querier.AddDiskQuotaByRootIno(ctx, arg)
+}
+
+func (q *lockOrderTrackingQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
+	q.record("disks")
+	return q.Querier.GetDiskByRootInoForUpdate(ctx, rootIno)
+}
+
+func (q *lockOrderTrackingQuerier) UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error) {
+	q.record("client_sessions")
+	return q.Querier.UpsertClientSession(ctx, arg)
+}
+
+func (q *lockOrderTrackingQuerier) DeleteExpiredClientSessions(ctx context.Context) (int64, error) {
+	q.record("client_sessions")
+	return q.Querier.DeleteExpiredClientSessions(ctx)
+}
+
+type lockOrderTrackingStore struct {
+	db.Store
+	recordedOps []string
+	mu          sync.Mutex
+}
+
+func (s *lockOrderTrackingStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		wrapped := &lockOrderTrackingQuerier{
+			Querier:     q,
+			recordedOps: &s.recordedOps,
+			mu:          &s.mu,
+		}
+		return fn(wrapped)
+	}, opts...)
+}
+
+func (s *lockOrderTrackingStore) getResourceSequence() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var seq []string
+	for _, op := range s.recordedOps {
+		if op == "client_sessions" || op == "disks" {
+			if len(seq) == 0 || seq[len(seq)-1] != op {
+				seq = append(seq, op)
+			}
+		}
+	}
+	return seq
+}
+
+func (s *lockOrderTrackingStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordedOps = nil
+}
+
+type deadlockBarrierQuerier struct {
+	db.Querier
+	onAddDiskQuotaDone  func()
+	onUpsertSessionDone func()
+	onErr               func(error)
+}
+
+func (q *deadlockBarrierQuerier) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
+	err := q.Querier.AddDiskQuotaByRootIno(ctx, arg)
+	if err != nil {
+		if q.onErr != nil {
+			q.onErr(err)
+		}
+		return err
+	}
+	if q.onAddDiskQuotaDone != nil {
+		q.onAddDiskQuotaDone()
+	}
+	return nil
+}
+
+func (q *deadlockBarrierQuerier) UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error) {
+	sess, err := q.Querier.UpsertClientSession(ctx, arg)
+	if err != nil {
+		if q.onErr != nil {
+			q.onErr(err)
+		}
+		return sess, err
+	}
+	if q.onUpsertSessionDone != nil {
+		q.onUpsertSessionDone()
+	}
+	return sess, err
+}
+
+func (q *deadlockBarrierQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
+	disk, err := q.Querier.GetDiskByRootInoForUpdate(ctx, rootIno)
+	if err != nil && q.onErr != nil {
+		q.onErr(err)
+	}
+	return disk, err
+}
+
+type deadlockBarrierStore struct {
+	db.Store
+	onAddDiskQuotaDone  func()
+	onUpsertSessionDone func()
+	onErr               func(error)
+}
+
+func (s *deadlockBarrierStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	err := s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		wrapped := &deadlockBarrierQuerier{
+			Querier:             q,
+			onAddDiskQuotaDone:  s.onAddDiskQuotaDone,
+			onUpsertSessionDone: s.onUpsertSessionDone,
+			onErr:               s.onErr,
+		}
+		err := fn(wrapped)
+		if err != nil && s.onErr != nil {
+			s.onErr(err)
+		}
+		return err
+	}, opts...)
+	if err != nil && s.onErr != nil {
+		s.onErr(err)
+	}
+	return err
+}
+
+// TestFallocate_QuotaSessionLockOrder 验证 P-2：
+// 在同属一个 Disk (同一 root_ino) 且携带相同 SessionID 的场景下，
+// Create/TmpFile 与 Fallocate 之间存在相反的加锁顺序 (disks -> client_sessions vs client_sessions -> disks)，
+// 导致在并发执行时触发确定性 PostgreSQL 40P01 死锁，并在单事务层面严重违背全局一致的加锁全序契约。
+func TestFallocate_QuotaSessionLockOrder(t *testing.T) {
+	dsn := getStorageTestDSN()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test (parse config failed): %v", err)
+	}
+	if poolCfg.ConnConfig.RuntimeParams == nil {
+		poolCfg.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	poolCfg.ConnConfig.RuntimeParams["deadlock_timeout"] = "20ms"
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		t.Skipf("skipping postgres test (pool init failed): %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	initMgr := meta.New(baseStore)
+
+	disk, err := initMgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-lock-order-%d", time.Now().UnixNano()),
+		MaxBytes: 10 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = initMgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessID := uint64(time.Now().UnixNano() & 0x7FFFFFFF)
+	_, err = initMgr.RenewSession(ctx, sessID)
+	require.NoError(t, err)
+
+	// 创建初始文件用于 Fallocate
+	createRes, err := initMgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte(fmt.Sprintf("base_file_%d.bin", time.Now().UnixNano())),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessID,
+	})
+	require.NoError(t, err)
+	fileIno := createRes.Inode.Ino
+	fh := createRes.Fh
+
+	t.Run("StrictLockOrder_CreateAndTmpFile_ViolatesGlobalSessionFirstOrder", func(t *testing.T) {
+		trackingStore := &lockOrderTrackingStore{Store: baseStore}
+		mgrTrack := meta.New(trackingStore)
+
+		// 1. 验证 Fallocate 的加锁全序：必须先 client_sessions，后 disks
+		trackingStore.reset()
+		err = mgrTrack.Fallocate(ctx, meta.FallocateParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			Offset:    100,
+			Length:    100,
+			Mode:      0,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+		seqFalloc := trackingStore.getResourceSequence()
+		require.Equal(t, []string{"client_sessions", "disks"}, seqFalloc, "Fallocate 必须遵循先 client_sessions 后 disks 锁序")
+
+		// 2. 验证 Create 的加锁全序：全局规范要求所有元数据写事务必须严格遵循 client_sessions -> disks 顺序以杜绝 AB-BA 死锁
+		trackingStore.reset()
+		_, err = mgrTrack.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("strict_create_%d.bin", time.Now().UnixNano())),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+		seqCreate := trackingStore.getResourceSequence()
+		require.Equal(t, []string{"client_sessions", "disks"}, seqCreate, "Create 必须遵循全局统一全序 (先 client_sessions 后 disks)，当前先 disks 后 client_sessions 违反锁序规范")
+
+		// 3. 验证 TmpFile 的加锁全序
+		trackingStore.reset()
+		_, err = mgrTrack.TmpFile(ctx, meta.TmpFileParams{
+			ParentIno: disk.RootIno,
+			Mode:      0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+		seqTmpFile := trackingStore.getResourceSequence()
+		require.Equal(t, []string{"client_sessions", "disks"}, seqTmpFile, "TmpFile 必须遵循全局统一全序 (先 client_sessions 后 disks)，当前先 disks 后 client_sessions 违反锁序规范")
+	})
+
+	t.Run("Concurrent_Create_vs_Fallocate_ABBA_Deadlock", func(t *testing.T) {
+		createFirstLocked := make(chan struct{})
+		fallocFirstLocked := make(chan struct{})
+		var deadlockDetected atomic.Bool
+
+		checkDeadlock := func(err error) {
+			if err == nil {
+				return
+			}
+			var pgErr *pgconn.PgError
+			if (errors.As(err, &pgErr) && pgErr.Code == "40P01") || strings.Contains(strings.ToLower(err.Error()), "deadlock") {
+				deadlockDetected.Store(true)
+			}
+		}
+
+		var createBarrierOnce sync.Once
+		onFirstLockCreate := func() {
+			createBarrierOnce.Do(func() {
+				close(createFirstLocked)
+				select {
+				case <-fallocFirstLocked:
+				case <-time.After(50 * time.Millisecond):
+				case <-ctx.Done():
+				}
+			})
+		}
+		storeCreate := &deadlockBarrierStore{
+			Store:               baseStore,
+			onAddDiskQuotaDone:  onFirstLockCreate,
+			onUpsertSessionDone: onFirstLockCreate,
+			onErr:               checkDeadlock,
+		}
+		mgrCreate := meta.New(storeCreate)
+
+		var fallocBarrierOnce sync.Once
+		onFirstLockFalloc := func() {
+			fallocBarrierOnce.Do(func() {
+				close(fallocFirstLocked)
+				select {
+				case <-createFirstLocked:
+				case <-time.After(50 * time.Millisecond):
+				case <-ctx.Done():
+				}
+			})
+		}
+		storeFalloc := &deadlockBarrierStore{
+			Store:               baseStore,
+			onAddDiskQuotaDone:  onFirstLockFalloc,
+			onUpsertSessionDone: onFirstLockFalloc,
+			onErr:               checkDeadlock,
+		}
+		mgrFalloc := meta.New(storeFalloc)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		var errCreate, errFalloc error
+
+		go func() {
+			defer wg.Done()
+			_, errCreate = mgrCreate.Create(ctx, meta.CreateParams{
+				ParentIno: disk.RootIno,
+				Name:      []byte(fmt.Sprintf("create_deadlock_%d.bin", time.Now().UnixNano())),
+				Mode:      meta.S_IFREG | 0o644,
+				Flags:     meta.O_RDWR,
+				SessionID: &sessID,
+			})
+			checkDeadlock(errCreate)
+		}()
+
+		go func() {
+			defer wg.Done()
+			errFalloc = mgrFalloc.Fallocate(ctx, meta.FallocateParams{
+				Ino:       fileIno,
+				Fh:        fh,
+				Offset:    300,
+				Length:    100,
+				Mode:      0,
+				SessionID: &sessID,
+			})
+			checkDeadlock(errFalloc)
+		}()
+
+		wg.Wait()
+
+		require.False(t, deadlockDetected.Load(), "检测到 PostgreSQL 40P01 死锁: Create 先锁 disks 后锁 client_sessions，而 Fallocate 先锁 client_sessions 后锁 disks，加锁顺序相反导致死锁")
+		require.NoError(t, errCreate)
+		require.NoError(t, errFalloc)
 	})
 }

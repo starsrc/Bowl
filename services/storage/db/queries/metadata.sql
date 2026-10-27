@@ -177,7 +177,7 @@ locked_ancestors AS MATERIALIZED (
     FROM inodes i
     WHERE i.ino IN (SELECT parent_ino FROM ancestors)
     ORDER BY i.ino ASC
-    FOR SHARE
+    FOR SHARE NOWAIT
 )
 SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
     SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint OR has_cycle

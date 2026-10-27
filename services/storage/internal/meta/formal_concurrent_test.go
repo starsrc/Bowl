@@ -923,13 +923,15 @@ func runConcurrentWorker(
 		case roll < 90:
 			// 9. RenewSession / RenewSessionWithStatus 会话续期与并发超期孤儿清扫
 			if rng.IntN(2) == 0 {
-				_, err := env.Mgr.RenewSession(ctx, workerSID)
-				assertConcurrentStepErr(t, env, workerID, step, "RenewSession", err)
-				recordTrace(step, fmt.Sprintf("RenewSession(sid=%d) -> err=%v", workerSID, err))
+				exp, err := env.Mgr.RenewSession(ctx, workerSID)
+				require.NoError(t, err)
+				require.False(t, exp.IsZero())
+				recordTrace(step, fmt.Sprintf("RenewSession(sid=%d) -> exp=%v", workerSID, exp))
 			} else {
-				_, err := env.Mgr.RenewSessionWithStatus(ctx, workerSID)
-				assertConcurrentStepErr(t, env, workerID, step, "RenewSessionWithStatus", err)
-				recordTrace(step, fmt.Sprintf("RenewSessionWithStatus(sid=%d) -> err=%v", workerSID, err))
+				res, err := env.Mgr.RenewSessionWithStatus(ctx, workerSID)
+				require.NoError(t, err)
+				require.False(t, res.ExpiresAt.IsZero())
+				recordTrace(step, fmt.Sprintf("RenewSessionWithStatus(sid=%d) -> exp=%v", workerSID, res.ExpiresAt))
 			}
 
 		default:
@@ -974,11 +976,14 @@ func runConcurrentWorker(
 					assertConcurrentStepErr(t, env, workerID, step, "ReadDirPlus", err)
 				}
 			case 5:
-				_, err := env.Mgr.GetDisk(ctx, env.Disk1.DiskID)
-				assertConcurrentStepErr(t, env, workerID, step, "GetDisk", err)
+				disk, err := env.Mgr.GetDisk(ctx, env.Disk1.DiskID)
+				require.NoError(t, err)
+				require.Equal(t, env.Disk1.DiskID, disk.DiskID)
+				require.Equal(t, env.Disk1.RootIno, disk.RootIno)
 			case 6:
-				_, err := env.Mgr.StatFS(ctx, env.Disk1.RootIno)
-				assertConcurrentStepErr(t, env, workerID, step, "StatFS", err)
+				stat, err := env.Mgr.StatFS(ctx, env.Disk1.RootIno)
+				require.NoError(t, err)
+				require.True(t, stat.Bsize > 0)
 			case 7:
 				if len(myFileHandles) > 0 {
 					h := myFileHandles[rng.IntN(len(myFileHandles))]

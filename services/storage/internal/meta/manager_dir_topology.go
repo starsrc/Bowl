@@ -6,12 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
+
+// isLockConflictError 判断是否为 PostgreSQL 55P03 (lock_not_available) 或 40P01 (deadlock_detected)
+func isLockConflictError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "55P03" || pgErr.Code == "40P01"
+	}
+	return false
+}
 
 // validateEntryNameAllowEmpty 校验目录项名称长度与非法字符，允许空名称进入事务在校验父目录后返回 ErrNotFound (ENOENT)。
 func validateEntryNameAllowEmpty(name []byte) error {
@@ -498,8 +509,26 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 
 	var removedOld bool
 	var removedNew bool
+	var attempts int
 
-	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) (txErr error) {
+		attempts++
+		if attempts > 1 {
+			// 在重试之间加入短暂随机退避（1ms ~ 5ms 抖动）以打破多 Manager 实例在并发屏障下的对称活锁
+			jitter := time.Duration(1+rand.IntN(5)) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(jitter):
+			}
+		}
+
+		defer func() {
+			if txErr != nil && isLockConflictError(txErr) {
+				txErr = errRetryTx
+			}
+		}()
+
 		removedOld = false
 		removedNew = false
 		if len(params.OldName) == 0 || isDotOrDotDot(params.OldName) || isDotOrDotDot(params.NewName) {
@@ -667,6 +696,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 				AncestorIno: oldIno,
 			})
 			if err != nil {
+				if isLockConflictError(err) {
+					return errRetryTx
+				}
 				return fmt.Errorf("check is subdirectory %d in %d: %w", params.NewParentIno, oldIno, err)
 			}
 			if isSub {
@@ -686,6 +718,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 					AncestorIno: newIno,
 				})
 				if err != nil {
+					if isLockConflictError(err) {
+						return errRetryTx
+					}
 					return fmt.Errorf("check reverse is subdirectory %d in %d: %w", params.OldParentIno, newIno, err)
 				}
 				if isSub {

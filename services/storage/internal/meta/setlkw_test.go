@@ -2026,7 +2026,454 @@ func TestSetLkw_ReleaseClosingHandleCleansWaiter(t *testing.T) {
 	require.NoError(t, err, "G-03: 前序持锁者已解锁且等待句柄已关闭，后续客户端 SetLk 必须立即获锁成功")
 }
 
-func TestUnitTestSuiteAudit_BlockingSetLkwMissingContextTimeout(t *testing.T) {
+func testRangesOverlap(s1, e1, s2, e2 uint64) bool {
+	return s1 <= e2 && s2 <= e1
+}
+
+// TestSetLkw_Rollback_P1_Defects 针对缺陷 P-1 的两个确定性违规路径进行复现：
+// 路径 A: Owner A 降级写锁为读锁，事务提交后外部 Owner B 获取并发读锁；此时 SetLkw 因取消触发 rollbackGrantedLock，
+// 盲目将 Owner A 的旧写锁快照插回底表，导致排他写锁与共享读锁冲突并存，破坏 LOCK-INV-1。
+// 路径 B: 同一 (sessionID, lockOwner) 在 SetLkw 授锁提交后、回滚前，并发新增不相交区间的合法锁并提交；
+// rollbackGrantedLock 全量删除该 Owner 的锁并仅恢复旧快照，导致不相交区间的合法已提交锁被静默抹除。
+func TestSetLkw_Rollback_P1_Defects(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	t.Run("PathA_DowngradeRollback_ViolatesLockInv1_ConflictWithConcurrentReadLock", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-p1-patha-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(888101)
+		sessB := uint64(888102)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sessB)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("patha_lock_inv1.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		openResB, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessB,
+		})
+		require.NoError(t, err)
+		fhB := openResB.Fh
+
+		ownerA := uint64(1001)
+		ownerB := uint64(1002)
+
+		// 1. Owner A 预先持有 [0, 100] 的排他写锁 (F_WRLCK)
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   1001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. Owner A 调用 SetLkw 将 [0, 100] 降级为读锁 (F_RDLCK)
+		// 在降级事务成功提交后、SetLkw 返回前：
+		// Owner B 并发成功获取 [0, 100] 读锁，随后取消 Owner A 的上下文触发 rollbackGrantedLock
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 此时降级已提交，Owner A 在 DB 中为 F_RDLCK，Owner B 获取 F_RDLCK 读锁成功
+			bErr := mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       fileIno,
+				Fh:        fhB,
+				LockOwner: ownerB,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_RDLCK,
+					PID:   1002,
+				},
+				LkFlags:   0,
+				SessionID: sessB,
+			})
+			require.NoError(t, bErr, "降级事务提交后，Owner B 获取同区间读锁应成功")
+
+			// 取消 Owner A 的上下文触发回滚
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_RDLCK,
+				PID:   1001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 3001,
+		})
+		require.ErrorIs(t, err, meta.ErrInterrupted)
+
+		// 3. 断言 LOCK-INV-1 不变量：底表中排他写锁与任何重叠区间的外部锁绝对不可并存
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		// 显式断言 Owner B 成功获取的读锁与 Owner A 回滚后保留的读锁仍完整存在于底表中，避免删空假绿
+		var hasOwnerBLock, hasOwnerALock bool
+		for _, l := range activeLocks {
+			if l.SessionID == int64(sessB) && l.LockOwner == int64(ownerB) &&
+				l.LockType == int16(meta.F_RDLCK) && l.StartOffset == 0 && l.EndOffset == 100 {
+				hasOwnerBLock = true
+			}
+			if l.SessionID == int64(sessA) && l.LockOwner == int64(ownerA) &&
+				l.LockType == int16(meta.F_RDLCK) && l.StartOffset == 0 && l.EndOffset == 100 {
+				hasOwnerALock = true
+			}
+		}
+		require.True(t, hasOwnerBLock, "Owner B 的 [0, 100] 读锁必须保留在底表中")
+		require.True(t, hasOwnerALock, "Owner A 回滚后保留的 [0, 100] 读锁必须保留在底表中")
+
+		var lockInv1Violations []string
+		for i := 0; i < len(activeLocks); i++ {
+			for j := i + 1; j < len(activeLocks); j++ {
+				l1, l2 := activeLocks[i], activeLocks[j]
+				if (l1.SessionID != l2.SessionID || l1.LockOwner != l2.LockOwner) &&
+					testRangesOverlap(uint64(l1.StartOffset), uint64(l1.EndOffset), uint64(l2.StartOffset), uint64(l2.EndOffset)) {
+					if l1.LockType == int16(meta.F_WRLCK) || l2.LockType == int16(meta.F_WRLCK) {
+						lockInv1Violations = append(lockInv1Violations,
+							fmt.Sprintf("lock1(session=%d,owner=%d,type=%d,[%d,%d]) conflicts with lock2(session=%d,owner=%d,type=%d,[%d,%d])",
+								l1.SessionID, l1.LockOwner, l1.LockType, l1.StartOffset, l1.EndOffset,
+								l2.SessionID, l2.LockOwner, l2.LockType, l2.StartOffset, l2.EndOffset))
+					}
+				}
+			}
+		}
+		require.Empty(t, lockInv1Violations, "LOCK-INV-1 违规: rollbackGrantedLock 导致底表中排他写锁与共享读锁冲突并存:\n%s", strings.Join(lockInv1Violations, "\n"))
+	})
+
+	t.Run("PathB_RollbackErasesConcurrentDisjointLockOfSameOwner", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-p1-pathb-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(888201)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("pathb_disjoint_erase.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		ownerA := uint64(2001)
+
+		// 1. Owner A 预先持有 [0, 100] 的读锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_RDLCK,
+				PID:   2001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. Owner A 调用 SetLkw 尝试对 [0, 100] 扩展为 [0, 150]
+		// 在授锁事务提交后、SetLkw 返回前：
+		// 同一 Owner A 并发申请不相交区间 [200, 300] 的锁并提交成功，随后取消 SetLkw 的上下文
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 同一 (sessA, ownerA) 在不相交区间 [200, 300] 获取写锁
+			disjointErr := mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 200,
+					End:   300,
+					Type:  meta.F_WRLCK,
+					PID:   2001,
+				},
+				LkFlags:   0,
+				SessionID: sessA,
+			})
+			require.NoError(t, disjointErr, "在不相交区间 [200, 300] 申请锁应成功")
+
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   150,
+				Type:  meta.F_RDLCK,
+				PID:   2001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 4001,
+		})
+		require.ErrorIs(t, err, meta.ErrInterrupted)
+
+		// 3. 断言底层 file_locks 表：同一 Owner 并发新增的不相交区间 [200, 300] 锁必须保留，绝不能被抹除
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		var hasDisjointLock bool
+		for _, l := range activeLocks {
+			if l.SessionID == int64(sessA) && l.LockOwner == int64(ownerA) && l.StartOffset == 200 && l.EndOffset == 300 {
+				hasDisjointLock = true
+				break
+			}
+		}
+		require.True(t, hasDisjointLock, "回滚绝不能抹除同一 Owner 在不相交区间 [200, 300] 并发新增的合法锁 (当前活跃锁: %+v)", activeLocks)
+	})
+}
+
+// TestSetLkw_Rollback_P2_2_PartialUpgradePreservesDisjointConcurrentLock 复现缺陷 P2-2：
+// Owner A 原持有 [0, 100] F_RDLCK，调用 SetLkw 将子区间 [40, 60] 升级为 F_WRLCK。
+// 授锁事务提交后、SetLkw 返回前，Owner A 并发调用 SetLk 将未受影响的不相交子区间 [0, 10] 升级为 F_WRLCK。
+// 随后 SetLkw 因上下文取消触发 rollbackGrantedLock 时，错误地以扩展后的 [0, 100] 范围全量删除并写回旧快照，
+// 导致后提交的 [0, 10] F_WRLCK 排他写锁被静默抹除降级为读锁。
+func TestSetLkw_Rollback_P2_2_PartialUpgradePreservesDisjointConcurrentLock(t *testing.T) {
+	dsn := getStorageTestDSN()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &cancelAfterTxStore{Store: baseStore}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-p2-2-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(888301)
+	sessB := uint64(888302)
+	_, err = mgr.RenewSession(ctx, sessA)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(ctx, sessB)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("p2_2_partial_upgrade.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+
+	openResB, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessB,
+	})
+	require.NoError(t, err)
+	fhB := openResB.Fh
+
+	ownerA := uint64(3001)
+	ownerB := uint64(3002)
+
+	// 1. Owner A 预先持有 [0, 100] 的读锁 (F_RDLCK)
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_RDLCK,
+			PID:   3001,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+	})
+	require.NoError(t, err)
+
+	// 2. Owner A 调用 SetLkw 请求将子区间 [40, 60] 升级为写锁 (F_WRLCK)。
+	// 在授锁事务提交后、回滚前，Owner A 调用 SetLk 将不相交区间 [0, 10] 升级为 F_WRLCK 并取消 callCtx。
+	callCtx, callCancel := context.WithCancel(ctx)
+	defer callCancel()
+
+	hookStore.returnNilOnCancel = true
+	hookStore.cancelOnGrant = func() {
+		hookStore.hookActive = false
+		// 同一 Owner A 在与请求区间 [40, 60] 不相交的子区间 [0, 10] 升级为排他写锁并提交成功
+		upgradeErr := mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   10,
+				Type:  meta.F_WRLCK,
+				PID:   3001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, upgradeErr, "在不相交区间 [0, 10] 升级为排他写锁应成功")
+
+		callCancel()
+	}
+	hookStore.hookActive = true
+
+	err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 40,
+			End:   60,
+			Type:  meta.F_WRLCK,
+			PID:   3001,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+		RequestID: 6001,
+	})
+	require.ErrorIs(t, err, meta.ErrInterrupted)
+
+	// 3. 断言底表中 Owner A 的锁状态：
+	// 底表中 Owner A 依然持有 [0, 10] F_WRLCK 以及合并还原后的 [11, 100] F_RDLCK
+	activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     int64(fileIno),
+		LkFlags: 0,
+	})
+	require.NoError(t, err)
+
+	var hasDisjointWriteLock bool
+	var hasMergedReadLock bool
+	for _, l := range activeLocks {
+		if l.SessionID == int64(sessA) && l.LockOwner == int64(ownerA) {
+			if l.StartOffset == 0 && l.EndOffset == 10 && l.LockType == int16(meta.F_WRLCK) {
+				hasDisjointWriteLock = true
+			}
+			if l.StartOffset == 11 && l.EndOffset == 100 && l.LockType == int16(meta.F_RDLCK) {
+				hasMergedReadLock = true
+			}
+		}
+	}
+	require.True(t, hasDisjointWriteLock, "回滚绝不能抹除同一 Owner 在请求区间外并发获取的排他写锁 [0, 10] F_WRLCK (当前活跃锁: %+v)", activeLocks)
+	require.True(t, hasMergedReadLock, "回滚后应保持剩余区间的读锁 [11, 100] F_RDLCK (当前活跃锁: %+v)", activeLocks)
+
+	// 并且外部 Owner B 尝试对 [0, 10] 获取 F_RDLCK 必须冲突失败 (ErrAgain)
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhB,
+		LockOwner: ownerB,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   10,
+			Type:  meta.F_RDLCK,
+			PID:   3002,
+		},
+		LkFlags:   0,
+		SessionID: sessB,
+	})
+	require.ErrorIs(t, err, meta.ErrAgain, "Owner B 对 [0, 10] 加读锁必须被 Owner A 的 [0, 10] 排他写锁阻止返回 ErrAgain")
+}
+
+func TestSetLkw_BlockingTestsEnforceContextTimeout(t *testing.T) {
 	fset := token.NewFileSet()
 
 	// 自检反例 1: 合规函数（WithTimeout + select { case <-waiterRegistered: case <-ctx.Done(): }）
@@ -2192,9 +2639,6 @@ func auditASTFileForH11(fset *token.FileSet, filePath string, fileNode *ast.File
 
 		case *ast.CallExpr:
 			if sel, ok := stmt.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetLkw" {
-				if xIdent, ok := sel.X.(*ast.Ident); ok && xIdent.Name == "tinyMgr" {
-					return true
-				}
 				if len(stmt.Args) > 0 {
 					arg0 := stmt.Args[0]
 					pos := fset.Position(stmt.Pos())

@@ -513,7 +513,6 @@ func TestQuerierInterface(t *testing.T) {
 	var _ db.Querier = (db.Store)(nil)
 }
 
-
 func TestQuerierInterface_MknodOperators(t *testing.T) {
 	type mknodQuerier interface {
 		CreateInode(ctx context.Context, arg db.CreateInodeParams) (db.Inode, error)
@@ -524,7 +523,6 @@ func TestQuerierInterface_MknodOperators(t *testing.T) {
 	var _ mknodQuerier = (db.Querier)(nil)
 	var _ mknodQuerier = (db.Store)(nil)
 }
-
 
 // ==========================================
 // 数据库持久化集成测试 (Database Integration Tests)

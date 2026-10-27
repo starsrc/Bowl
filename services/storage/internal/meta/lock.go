@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -860,6 +861,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 	var waiterEverPersisted bool
 	var flockOriginallyHeld bool
 	var preGrantOwnerLocks []db.FileLock
+	var affectedStart, affectedEnd uint64
 	for attempt := 0; ; attempt++ {
 		done, err := func() (bool, error) {
 			notifyCh, releaseNotify := m.acquireLockNotifyChan(params.Ino)
@@ -875,6 +877,9 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 				shouldNotify = false
 				deadlockDetected = false
 				interrupted = false
+				preGrantOwnerLocks = nil
+				affectedStart = 0
+				affectedEnd = 0
 				inode, err := q.GetInodeForUpdate(ctx, ino)
 				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
@@ -966,6 +971,8 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 							RequestID: requestID,
 						})
 					}
+					affectedStart = reqStart
+					affectedEnd = reqEnd
 					granted = true
 					return nil
 				}
@@ -1024,12 +1031,26 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 
 				if !hasActiveConflict && !hasEarlierWaiterConflict {
 					var txPreGrantLocks []db.FileLock
+					affStart := reqStart
+					affEnd := reqEnd
 					if params.LkFlags == 0 {
 						for _, l := range activeLocks {
 							if l.SessionID == sessionID && l.LockOwner == owner {
-								txPreGrantLocks = append(txPreGrantLocks, l)
+								lStart := uint64(l.StartOffset)
+								lEnd := uint64(l.EndOffset)
+								if rangesOverlap(lStart, lEnd, reqStart, reqEnd) {
+									cStart := max(lStart, reqStart)
+									cEnd := min(lEnd, reqEnd)
+									clipped := l
+									clipped.StartOffset = int64(cStart)
+									clipped.EndOffset = int64(cEnd)
+									txPreGrantLocks = append(txPreGrantLocks, clipped)
+								}
 							}
 						}
+					} else {
+						affStart = 0
+						affEnd = OffsetMax
 					}
 
 					if params.LkFlags == FuseLkFlock {
@@ -1071,6 +1092,8 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 						}
 					}
 					preGrantOwnerLocks = txPreGrantLocks
+					affectedStart = affStart
+					affectedEnd = affEnd
 					granted = true
 					return nil
 				}
@@ -1115,7 +1138,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 
 			if txErr != nil {
 				if granted {
-					m.rollbackGrantedLock(params, preGrantOwnerLocks)
+					m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
 					return true, ErrInterrupted
 				}
 				if (waiterEverPersisted && !errors.Is(txErr, ErrBadFileHandle)) || errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
@@ -1155,7 +1178,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			}
 			if granted {
 				if ctx.Err() != nil {
-					m.rollbackGrantedLock(params, preGrantOwnerLocks)
+					m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
 					return true, ErrInterrupted
 				}
 				return true, nil
@@ -1255,7 +1278,49 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 	}
 }
 
-func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []db.FileLock) {
+func mergeSegments(segments []lockSegment) []lockSegment {
+	if len(segments) == 0 {
+		return nil
+	}
+	slices.SortFunc(segments, func(a, b lockSegment) int {
+		if a.start != b.start {
+			if a.start < b.start {
+				return -1
+			}
+			return 1
+		}
+		if a.end < b.end {
+			return -1
+		}
+		if a.end > b.end {
+			return 1
+		}
+		return 0
+	})
+
+	var merged []lockSegment
+	for _, seg := range segments {
+		if seg.start > seg.end {
+			continue
+		}
+		if len(merged) == 0 {
+			merged = append(merged, seg)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		if last.ltype == seg.ltype &&
+			(last.end >= seg.start || (last.end < OffsetMax && last.end+1 == seg.start)) {
+			if seg.end > last.end {
+				last.end = seg.end
+			}
+		} else {
+			merged = append(merged, seg)
+		}
+	}
+	return merged
+}
+
+func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []db.FileLock, affectedStart, affectedEnd uint64) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1277,26 +1342,180 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 				LkFlags: 0,
 			})
 			if err == nil {
-				var idsToDelete []int64
+				sessionID := int64(params.SessionID)
+				owner := int64(params.LockOwner)
+
+				var curOwnerLocks []db.FileLock
+				var externalLocks []db.FileLock
 				for _, l := range activeLocks {
-					if l.SessionID == int64(params.SessionID) && l.LockOwner == int64(params.LockOwner) {
-						idsToDelete = append(idsToDelete, l.ID)
+					if l.SessionID == sessionID && l.LockOwner == owner {
+						curOwnerLocks = append(curOwnerLocks, l)
+					} else {
+						externalLocks = append(externalLocks, l)
 					}
 				}
+
+				var idsToDelete []int64
+				var retainedSegments []lockSegment
+
+				for _, l := range curOwnerLocks {
+					lStart := uint64(l.StartOffset)
+					lEnd := uint64(l.EndOffset)
+					overlaps := rangesOverlap(lStart, lEnd, affectedStart, affectedEnd)
+					isAdjacent := (affectedStart > 0 && lEnd+1 == affectedStart) ||
+						(affectedEnd < OffsetMax && affectedEnd+1 == lStart)
+
+					if !overlaps && !isAdjacent {
+						continue
+					}
+
+					idsToDelete = append(idsToDelete, l.ID)
+					if overlaps {
+						if lStart < affectedStart {
+							retainedSegments = append(retainedSegments, lockSegment{
+								start: lStart,
+								end:   affectedStart - 1,
+								ltype: uint32(l.LockType),
+								pid:   uint32(l.Pid),
+							})
+						}
+						if lEnd > affectedEnd && affectedEnd < OffsetMax {
+							retainedSegments = append(retainedSegments, lockSegment{
+								start: affectedEnd + 1,
+								end:   lEnd,
+								ltype: uint32(l.LockType),
+								pid:   uint32(l.Pid),
+							})
+						}
+					} else if isAdjacent {
+						retainedSegments = append(retainedSegments, lockSegment{
+							start: lStart,
+							end:   lEnd,
+							ltype: uint32(l.LockType),
+							pid:   uint32(l.Pid),
+						})
+					}
+				}
+
 				if len(idsToDelete) > 0 {
 					_ = q.DeleteFileLocksByIDs(cleanupCtx, idsToDelete)
 				}
+
+				var restoredSegments []lockSegment
 				for _, oldLock := range preGrantOwnerLocks {
+					oldStart := uint64(oldLock.StartOffset)
+					oldEnd := uint64(oldLock.EndOffset)
+					oldType := uint32(oldLock.LockType)
+					oldPID := uint32(oldLock.Pid)
+
+					var overlappingExt []db.FileLock
+					for _, ext := range externalLocks {
+						if rangesOverlap(uint64(ext.StartOffset), uint64(ext.EndOffset), oldStart, oldEnd) {
+							overlappingExt = append(overlappingExt, ext)
+						}
+					}
+
+					if len(overlappingExt) == 0 {
+						restoredSegments = append(restoredSegments, lockSegment{
+							start: oldStart,
+							end:   oldEnd,
+							ltype: oldType,
+							pid:   oldPID,
+						})
+						continue
+					}
+
+					pointMap := make(map[uint64]struct{})
+					pointMap[oldStart] = struct{}{}
+					for _, ext := range overlappingExt {
+						extS := uint64(ext.StartOffset)
+						extE := uint64(ext.EndOffset)
+						if extS > oldStart && extS <= oldEnd {
+							pointMap[extS] = struct{}{}
+						}
+						if extE < oldEnd && extE < OffsetMax {
+							pointMap[extE+1] = struct{}{}
+						}
+					}
+
+					points := make([]uint64, 0, len(pointMap))
+					for p := range pointMap {
+						points = append(points, p)
+					}
+					slices.Sort(points)
+
+					for i, subStart := range points {
+						var subEnd uint64
+						if i+1 < len(points) {
+							subEnd = points[i+1] - 1
+						} else {
+							subEnd = oldEnd
+						}
+						if subStart > subEnd {
+							continue
+						}
+
+						var subExtLocks []db.FileLock
+						var hasExtWrLock bool
+						for _, ext := range overlappingExt {
+							if rangesOverlap(uint64(ext.StartOffset), uint64(ext.EndOffset), subStart, subEnd) {
+								subExtLocks = append(subExtLocks, ext)
+								if ext.LockType == int16(F_WRLCK) {
+									hasExtWrLock = true
+								}
+							}
+						}
+
+						if len(subExtLocks) == 0 {
+							restoredSegments = append(restoredSegments, lockSegment{
+								start: subStart,
+								end:   subEnd,
+								ltype: oldType,
+								pid:   oldPID,
+							})
+							continue
+						}
+
+						if hasExtWrLock {
+							continue
+						}
+
+						if oldType == F_RDLCK {
+							restoredSegments = append(restoredSegments, lockSegment{
+								start: subStart,
+								end:   subEnd,
+								ltype: F_RDLCK,
+								pid:   oldPID,
+							})
+						} else if oldType == F_WRLCK {
+							isDowngradedToRead := params.Lk.Type == F_RDLCK &&
+								rangesOverlap(params.Lk.Start, params.Lk.End, subStart, subEnd)
+							if isDowngradedToRead {
+								restoredSegments = append(restoredSegments, lockSegment{
+									start: subStart,
+									end:   subEnd,
+									ltype: F_RDLCK,
+									pid:   oldPID,
+								})
+							}
+						}
+					}
+				}
+
+				allSegments := append(retainedSegments, restoredSegments...)
+				mergedSegments := mergeSegments(allSegments)
+
+				for _, seg := range mergedSegments {
 					_, _ = q.CreateFileLock(cleanupCtx, db.CreateFileLockParams{
-						SessionID:   oldLock.SessionID,
-						Ino:         oldLock.Ino,
-						Fh:          oldLock.Fh,
-						LockOwner:   oldLock.LockOwner,
-						LkFlags:     oldLock.LkFlags,
-						StartOffset: oldLock.StartOffset,
-						EndOffset:   oldLock.EndOffset,
-						LockType:    oldLock.LockType,
-						Pid:         oldLock.Pid,
+						SessionID:   sessionID,
+						Ino:         int64(params.Ino),
+						Fh:          int64(params.Fh),
+						LockOwner:   owner,
+						LkFlags:     0,
+						StartOffset: int64(seg.start),
+						EndOffset:   int64(seg.end),
+						LockType:    int16(seg.ltype),
+						Pid:         int32(seg.pid),
 					})
 				}
 			}

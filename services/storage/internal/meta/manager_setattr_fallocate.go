@@ -183,6 +183,10 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			if err := deleteAllChunksByIno(ctx, q, current.Ino); err != nil {
 				return fmt.Errorf("delete all chunks on truncate zero for inode %d: %w", current.Ino, err)
 			}
+		} else if input.Size != nil && fileType == S_IFREG && targetSize > 0 && targetSize < uint64(current.Size) {
+			if err := truncateChunksToSize(ctx, q, current.Ino, targetSize); err != nil {
+				return fmt.Errorf("truncate chunks to size %d for inode %d: %w", targetSize, current.Ino, err)
+			}
 		}
 
 		var setAtimeNow bool

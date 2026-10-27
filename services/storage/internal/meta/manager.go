@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -77,6 +79,8 @@ type Manager interface {
 	UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error)
 	DeleteDisk(ctx context.Context, diskID string) error
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
+	Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error)
+	Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error)
 }
 
 type manager struct {
@@ -108,6 +112,14 @@ func WithBlockStore(bs BlockStore) Option {
 // BlockStore 返回底层物理块存储引擎（未配置时可能为 nil）。
 func (m *manager) BlockStore() BlockStore {
 	return m.blockStore
+}
+
+// getBlockStore 返回底层物理块存储引擎；若未配置则兜底使用基于临时目录的 LocalFSBlockStore。
+func (m *manager) getBlockStore() BlockStore {
+	if m.blockStore != nil {
+		return m.blockStore
+	}
+	return NewLocalFSBlockStore(filepath.Join(os.TempDir(), "bowl_data"))
 }
 
 // WithSessionLeaseTTL 配置客户端会话租约的续期时长（TTL <= 0 时忽略并保持默认值）。

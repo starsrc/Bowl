@@ -5681,6 +5681,72 @@ func (_c *MockStore_UpdateInodeParentInoAndTouchCtime_Call) RunAndReturn(run fun
 	return _c
 }
 
+// UpdateInodeSizeAndTouchForWrite provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateInodeSizeAndTouchForWrite(ctx context.Context, arg db.UpdateInodeSizeAndTouchForWriteParams) (db.Inode, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateInodeSizeAndTouchForWrite")
+	}
+
+	var r0 db.Inode
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateInodeSizeAndTouchForWriteParams) (db.Inode, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateInodeSizeAndTouchForWriteParams) db.Inode); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Inode)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateInodeSizeAndTouchForWriteParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_UpdateInodeSizeAndTouchForWrite_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateInodeSizeAndTouchForWrite'
+type MockStore_UpdateInodeSizeAndTouchForWrite_Call struct {
+	*mock.Call
+}
+
+// UpdateInodeSizeAndTouchForWrite is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateInodeSizeAndTouchForWriteParams
+func (_e *MockStore_Expecter) UpdateInodeSizeAndTouchForWrite(ctx any, arg any) *MockStore_UpdateInodeSizeAndTouchForWrite_Call {
+	return &MockStore_UpdateInodeSizeAndTouchForWrite_Call{Call: _e.mock.On("UpdateInodeSizeAndTouchForWrite", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateInodeSizeAndTouchForWrite_Call) Run(run func(ctx context.Context, arg db.UpdateInodeSizeAndTouchForWriteParams)) *MockStore_UpdateInodeSizeAndTouchForWrite_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateInodeSizeAndTouchForWriteParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateInodeSizeAndTouchForWriteParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeSizeAndTouchForWrite_Call) Return(inode db.Inode, err error) *MockStore_UpdateInodeSizeAndTouchForWrite_Call {
+	_c.Call.Return(inode, err)
+	return _c
+}
+
+func (_c *MockStore_UpdateInodeSizeAndTouchForWrite_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateInodeSizeAndTouchForWriteParams) (db.Inode, error)) *MockStore_UpdateInodeSizeAndTouchForWrite_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // UpsertClientSession provides a mock function for the type MockStore
 func (_mock *MockStore) UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error) {
 	ret := _mock.Called(ctx, arg)

@@ -383,3 +383,44 @@ func (q *Queries) UpdateChunkSlices(ctx context.Context, arg UpdateChunkSlicesPa
 	_, err := q.db.Exec(ctx, updateChunkSlices, arg.Slices, arg.Ino, arg.Indx)
 	return err
 }
+
+const updateInodeSizeAndTouchForWrite = `-- name: UpdateInodeSizeAndTouchForWrite :one
+UPDATE inodes
+SET
+    size = $2,
+    mode = $3,
+    mtime = ts.now,
+    ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino
+`
+
+type UpdateInodeSizeAndTouchForWriteParams struct {
+	Ino  int64 `json:"ino"`
+	Size int64 `json:"size"`
+	Mode int32 `json:"mode"`
+}
+
+func (q *Queries) UpdateInodeSizeAndTouchForWrite(ctx context.Context, arg UpdateInodeSizeAndTouchForWriteParams) (Inode, error) {
+	row := q.db.QueryRow(ctx, updateInodeSizeAndTouchForWrite, arg.Ino, arg.Size, arg.Mode)
+	var i Inode
+	err := row.Scan(
+		&i.Ino,
+		&i.Generation,
+		&i.Mode,
+		&i.Size,
+		&i.Nlink,
+		&i.Uid,
+		&i.Gid,
+		&i.Rdev,
+		&i.Atime,
+		&i.Mtime,
+		&i.Ctime,
+		&i.SymlinkTarget,
+		&i.Flags,
+		&i.ParentIno,
+		&i.RootIno,
+	)
+	return i, err
+}

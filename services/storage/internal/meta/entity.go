@@ -517,3 +517,32 @@ type StatFSResult struct {
 	Ffree      uint64
 	Namelen    uint32
 }
+
+// ReadRequest 定义文件数据流读取请求参数。
+type ReadRequest struct {
+	Ino       uint64
+	Fh        uint64
+	Offset    uint64
+	Size      uint32
+	SessionID *uint64
+}
+
+// ReadResponse 包含文件数据流读取返回的数据载荷。
+type ReadResponse struct {
+	Data []byte
+}
+
+// WriteRequest 定义文件数据流写入请求参数。
+type WriteRequest struct {
+	Ino       uint64
+	Fh        uint64
+	Offset    uint64
+	Data      []byte
+	SessionID *uint64
+}
+
+// WriteResponse 包含文件数据流写入返回的实际写入大小与更新后的 Inode 元数据。
+type WriteResponse struct {
+	Size  uint32
+	Inode *Inode
+}

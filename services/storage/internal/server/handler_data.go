@@ -2,21 +2,48 @@ package server
 
 import (
 	"context"
-	"errors"
 
 	"connectrpc.com/connect"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
 // Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
-// 当前阶段（STARSRC-486）作为桩方法返回 Unimplemented，后续工单（STARSRC-493）接入 meta.Manager 读实现。
 func (s *Server) Read(ctx context.Context, req *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Read is not implemented"))
+	msg := req.Msg
+	res, err := s.metaManager.Read(ctx, &meta.ReadRequest{
+		Ino:       msg.Ino,
+		Fh:        msg.Fh,
+		Offset:    msg.Offset,
+		Size:      msg.Size,
+		SessionID: msg.SessionId,
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+
+	return connect.NewResponse(&storagev1.ReadResponse{
+		Data: res.Data,
+	}), nil
 }
 
 // Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
-// 当前阶段（STARSRC-486）作为桩方法返回 Unimplemented，后续工单（STARSRC-490）接入 meta.Manager 写实现。
 func (s *Server) Write(ctx context.Context, req *connect.Request[storagev1.WriteRequest]) (*connect.Response[storagev1.WriteResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Write is not implemented"))
+	msg := req.Msg
+	res, err := s.metaManager.Write(ctx, &meta.WriteRequest{
+		Ino:       msg.Ino,
+		Fh:        msg.Fh,
+		Offset:    msg.Offset,
+		Data:      msg.Data,
+		SessionID: msg.SessionId,
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+
+	return connect.NewResponse(&storagev1.WriteResponse{
+		Size:  res.Size,
+		Inode: toProtoInode(res.Inode),
+	}), nil
 }

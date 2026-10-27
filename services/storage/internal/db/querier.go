@@ -99,6 +99,7 @@ type Querier interface {
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)
 	UpdateInodeParentIno(ctx context.Context, arg UpdateInodeParentInoParams) error
 	UpdateInodeParentInoAndTouchCtime(ctx context.Context, arg UpdateInodeParentInoAndTouchCtimeParams) error
+	UpdateInodeSizeAndTouchForWrite(ctx context.Context, arg UpdateInodeSizeAndTouchForWriteParams) (Inode, error)
 	UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error)
 	UpsertFileLockWaiter(ctx context.Context, arg UpsertFileLockWaiterParams) (FileLockWaiter, error)
 	UpsertInodeXattr(ctx context.Context, arg UpsertInodeXattrParams) error

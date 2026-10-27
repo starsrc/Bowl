@@ -1288,6 +1288,74 @@ func (_c *MockManager_OpenDir_Call) RunAndReturn(run func(ctx context.Context, p
 	return _c
 }
 
+// Read provides a mock function for the type MockManager
+func (_mock *MockManager) Read(ctx context.Context, req *meta.ReadRequest) (*meta.ReadResponse, error) {
+	ret := _mock.Called(ctx, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Read")
+	}
+
+	var r0 *meta.ReadResponse
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *meta.ReadRequest) (*meta.ReadResponse, error)); ok {
+		return returnFunc(ctx, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *meta.ReadRequest) *meta.ReadResponse); ok {
+		r0 = returnFunc(ctx, req)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.ReadResponse)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, *meta.ReadRequest) error); ok {
+		r1 = returnFunc(ctx, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_Read_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Read'
+type MockManager_Read_Call struct {
+	*mock.Call
+}
+
+// Read is a helper method to define mock.On call
+//   - ctx context.Context
+//   - req *meta.ReadRequest
+func (_e *MockManager_Expecter) Read(ctx any, req any) *MockManager_Read_Call {
+	return &MockManager_Read_Call{Call: _e.mock.On("Read", ctx, req)}
+}
+
+func (_c *MockManager_Read_Call) Run(run func(ctx context.Context, req *meta.ReadRequest)) *MockManager_Read_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 *meta.ReadRequest
+		if args[1] != nil {
+			arg1 = args[1].(*meta.ReadRequest)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Read_Call) Return(readResponse *meta.ReadResponse, err error) *MockManager_Read_Call {
+	_c.Call.Return(readResponse, err)
+	return _c
+}
+
+func (_c *MockManager_Read_Call) RunAndReturn(run func(ctx context.Context, req *meta.ReadRequest) (*meta.ReadResponse, error)) *MockManager_Read_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ReadDir provides a mock function for the type MockManager
 func (_mock *MockManager) ReadDir(ctx context.Context, params meta.ReadDirParams) ([]meta.DirEntry, error) {
 	ret := _mock.Called(ctx, params)
@@ -2497,6 +2565,74 @@ func (_c *MockManager_UpdateDisk_Call) Return(disk *meta.Disk, err error) *MockM
 }
 
 func (_c *MockManager_UpdateDisk_Call) RunAndReturn(run func(ctx context.Context, params meta.UpdateDiskParams) (*meta.Disk, error)) *MockManager_UpdateDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Write provides a mock function for the type MockManager
+func (_mock *MockManager) Write(ctx context.Context, req *meta.WriteRequest) (*meta.WriteResponse, error) {
+	ret := _mock.Called(ctx, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Write")
+	}
+
+	var r0 *meta.WriteResponse
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *meta.WriteRequest) (*meta.WriteResponse, error)); ok {
+		return returnFunc(ctx, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *meta.WriteRequest) *meta.WriteResponse); ok {
+		r0 = returnFunc(ctx, req)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.WriteResponse)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, *meta.WriteRequest) error); ok {
+		r1 = returnFunc(ctx, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_Write_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Write'
+type MockManager_Write_Call struct {
+	*mock.Call
+}
+
+// Write is a helper method to define mock.On call
+//   - ctx context.Context
+//   - req *meta.WriteRequest
+func (_e *MockManager_Expecter) Write(ctx any, req any) *MockManager_Write_Call {
+	return &MockManager_Write_Call{Call: _e.mock.On("Write", ctx, req)}
+}
+
+func (_c *MockManager_Write_Call) Run(run func(ctx context.Context, req *meta.WriteRequest)) *MockManager_Write_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 *meta.WriteRequest
+		if args[1] != nil {
+			arg1 = args[1].(*meta.WriteRequest)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_Write_Call) Return(writeResponse *meta.WriteResponse, err error) *MockManager_Write_Call {
+	_c.Call.Return(writeResponse, err)
+	return _c
+}
+
+func (_c *MockManager_Write_Call) RunAndReturn(run func(ctx context.Context, req *meta.WriteRequest) (*meta.WriteResponse, error)) *MockManager_Write_Call {
 	_c.Call.Return(run)
 	return _c
 }

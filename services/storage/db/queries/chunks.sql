@@ -84,3 +84,15 @@ FOR UPDATE SKIP LOCKED;
 -- name: DeleteSliceRef :exec
 DELETE FROM slice_refs
 WHERE slice_id = @slice_id::bigint;
+
+-- name: UpdateInodeSizeAndTouchForWrite :one
+UPDATE inodes
+SET
+    size = $2,
+    mode = $3,
+    mtime = ts.now,
+    ctime = ts.now
+FROM (SELECT clock_timestamp() AS now) AS ts
+WHERE ino = $1
+RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
+

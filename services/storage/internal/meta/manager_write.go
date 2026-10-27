@@ -115,6 +115,32 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return err
 		}
 
+		newEnd := int64(req.Offset) + int64(dataLen)
+		newSize := inode.Size
+		if newEnd > newSize {
+			newSize = newEnd
+			if inode.RootIno > 0 {
+				deltaBytes := uint64(newEnd - inode.Size)
+				diskRow, err := q.GetDiskByRootInoForUpdate(ctx, inode.RootIno)
+				if err != nil {
+					if !errors.Is(err, pgx.ErrNoRows) {
+						return fmt.Errorf("get disk by root_ino %d for update: %w", inode.RootIno, err)
+					}
+				} else {
+					if uint64(diskRow.UsedBytes) > uint64(diskRow.MaxBytes) || deltaBytes > uint64(diskRow.MaxBytes)-uint64(diskRow.UsedBytes) {
+						return ErrNoSpace
+					}
+					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+						RootIno:     inode.RootIno,
+						DeltaBytes:  int64(deltaBytes),
+						DeltaInodes: 0,
+					}); err != nil {
+						return fmt.Errorf("add disk quota by root_ino %d: %w", inode.RootIno, err)
+					}
+				}
+			}
+		}
+
 		indx := uint32(req.Offset / ChunkSize)
 		pos := uint32(req.Offset % ChunkSize)
 
@@ -143,11 +169,6 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return fmt.Errorf("insert slice ref (slice_id=%d): %w", sliceID, err)
 		}
 
-		newEnd := int64(req.Offset) + int64(dataLen)
-		newSize := inode.Size
-		if newEnd > newSize {
-			newSize = newEnd
-		}
 		newMode := int32(uint32(inode.Mode) &^ (S_ISUID | S_ISGID))
 
 		updatedInode, err := q.UpdateInodeSizeAndTouchForWrite(ctx, db.UpdateInodeSizeAndTouchForWriteParams{
@@ -179,6 +200,8 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return nil, ErrIsDir
 		case errors.Is(txErr, ErrBadFileHandle):
 			return nil, ErrBadFileHandle
+		case errors.Is(txErr, ErrNoSpace):
+			return nil, ErrNoSpace
 		default:
 			return nil, fmt.Errorf("write commit tx: %w", txErr)
 		}

@@ -41,6 +41,8 @@ var storageMessages = []proto.Message{
 	&storagev1.CreateRequest{},
 	&storagev1.TmpFileRequest{},
 	&storagev1.OpenRequest{},
+	&storagev1.ReadRequest{},
+	&storagev1.WriteRequest{},
 	&storagev1.FlushRequest{},
 	&storagev1.FsyncRequest{},
 	&storagev1.ReleaseRequest{},
@@ -79,6 +81,8 @@ var storageMessages = []proto.Message{
 	&storagev1.CreateResponse{},
 	&storagev1.TmpFileResponse{},
 	&storagev1.OpenResponse{},
+	&storagev1.ReadResponse{},
+	&storagev1.WriteResponse{},
 	&storagev1.FlushResponse{},
 	&storagev1.FsyncResponse{},
 	&storagev1.ReleaseResponse{},
@@ -297,7 +301,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 	isMaxLen := ruleID == "bytes.max_len" || strings.HasSuffix(ruleID, ".bytes.max_len") ||
 		ruleID == "string.max_bytes" || strings.HasSuffix(ruleID, ".string.max_bytes")
 
-	if ruleID == "update_disk_has_update" {
+	if ruleID == "update_disk_has_update" || ruleID == "write_request_offset_len_overflow" {
 		return 10, ReasonInvalidArgument
 	}
 
@@ -358,6 +362,18 @@ func classifyViolationInternal(v *protovalidate.Violation) (int, string) {
 		"storage.v1.OpenRequest.ino",
 		"storage.v1.OpenRequest.flags",
 		"storage.v1.OpenRequest.session_id",
+		"storage.v1.ReadRequest.ino",
+		"storage.v1.ReadRequest.fh",
+		"storage.v1.ReadRequest.offset",
+		"storage.v1.ReadRequest.size",
+		"storage.v1.ReadRequest.session_id",
+		"storage.v1.WriteRequest.ino",
+		"storage.v1.WriteRequest.fh",
+		"storage.v1.WriteRequest.offset",
+		"storage.v1.WriteRequest.data",
+		"storage.v1.WriteRequest.session_id",
+		"storage.v1.WriteResponse.size",
+		"storage.v1.WriteResponse.inode",
 		"storage.v1.FlushRequest.ino",
 		"storage.v1.FlushRequest.fh",
 		"storage.v1.FlushRequest.lock_owner",

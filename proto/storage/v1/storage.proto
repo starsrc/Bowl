@@ -102,6 +102,20 @@ service StorageService {
   // 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
   rpc Open(OpenRequest) returns (OpenResponse);
 
+  // Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
+  // 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若文件句柄不存在、与 Inode 不匹配或无读权限，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  // 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  rpc Read(ReadRequest) returns (ReadResponse);
+
+  // Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
+  // 遵循 POSIX pwrite(2) 语义，支持最大 4 MiB 单次写入。
+  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // 若文件句柄不存在、与 Inode 不匹配或无写权限，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+  // 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  rpc Write(WriteRequest) returns (WriteResponse);
+
   // Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
   // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
@@ -787,6 +801,81 @@ message OpenResponse {
 
   // 打开响应标志位 (open flags)。
   uint32 open_flags = 2;
+}
+
+// ReadRequest 定义 Read 接口输入参数。
+message ReadRequest {
+  // 目标常规文件的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 活跃文件句柄标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 读取起始偏移量（字节）。必须在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 读取字节数（最大 4194304，即 4 MiB）。
+  uint32 size = 4 [(buf.validate.field).uint32.lte = 4194304];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 5 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// ReadResponse 定义 Read 接口响应结果。
+message ReadResponse {
+  // 读取到的数据载荷。
+  bytes data = 1;
+}
+
+// WriteRequest 定义 Write 接口输入参数。
+message WriteRequest {
+  option (buf.validate.message).cel = {
+    id: "write_request_offset_len_overflow"
+    message: "offset + len(data) must not exceed MaxInt64 (9223372036854775807)"
+    expression: "uint(this.offset) <= 9223372036854775807u - uint(size(this.data))"
+  };
+
+  // 目标常规文件的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 活跃文件句柄标识。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 fh = 2 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  // 写入起始偏移量（字节）。必须在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+
+  // 写入的数据载荷（最大 4194304 字节，即 4 MiB）。
+  bytes data = 4 [(buf.validate.field).bytes.max_len = 4194304];
+
+  // 可选的客户端会话租约标识 (session_id)。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  optional uint64 session_id = 5 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// WriteResponse 定义 Write 接口响应结果。
+message WriteResponse {
+  // 实际写入的字节数。
+  uint32 size = 1;
+
+  // 写入后更新的 Inode 实体元数据。
+  Inode inode = 2;
 }
 
 // FlushRequest 定义 Flush 接口输入参数。

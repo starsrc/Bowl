@@ -61,6 +61,10 @@ const (
 	StorageServiceTmpFileProcedure = "/storage.v1.StorageService/TmpFile"
 	// StorageServiceOpenProcedure is the fully-qualified name of the StorageService's Open RPC.
 	StorageServiceOpenProcedure = "/storage.v1.StorageService/Open"
+	// StorageServiceReadProcedure is the fully-qualified name of the StorageService's Read RPC.
+	StorageServiceReadProcedure = "/storage.v1.StorageService/Read"
+	// StorageServiceWriteProcedure is the fully-qualified name of the StorageService's Write RPC.
+	StorageServiceWriteProcedure = "/storage.v1.StorageService/Write"
 	// StorageServiceFlushProcedure is the fully-qualified name of the StorageService's Flush RPC.
 	StorageServiceFlushProcedure = "/storage.v1.StorageService/Flush"
 	// StorageServiceFsyncProcedure is the fully-qualified name of the StorageService's Fsync RPC.
@@ -197,6 +201,18 @@ type StorageServiceClient interface {
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Open(context.Context, *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error)
+	// Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
+	// 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在、与 Inode 不匹配或无读权限，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
+	// Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
+	// 遵循 POSIX pwrite(2) 语义，支持最大 4 MiB 单次写入。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在、与 Inode 不匹配或无写权限，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
 	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
@@ -407,6 +423,18 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("Open")),
 			connect.WithClientOptions(opts...),
 		),
+		read: connect.NewClient[v1.ReadRequest, v1.ReadResponse](
+			httpClient,
+			baseURL+StorageServiceReadProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Read")),
+			connect.WithClientOptions(opts...),
+		),
+		write: connect.NewClient[v1.WriteRequest, v1.WriteResponse](
+			httpClient,
+			baseURL+StorageServiceWriteProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("Write")),
+			connect.WithClientOptions(opts...),
+		),
 		flush: connect.NewClient[v1.FlushRequest, v1.FlushResponse](
 			httpClient,
 			baseURL+StorageServiceFlushProcedure,
@@ -558,6 +586,8 @@ type storageServiceClient struct {
 	create       *connect.Client[v1.CreateRequest, v1.CreateResponse]
 	tmpFile      *connect.Client[v1.TmpFileRequest, v1.TmpFileResponse]
 	open         *connect.Client[v1.OpenRequest, v1.OpenResponse]
+	read         *connect.Client[v1.ReadRequest, v1.ReadResponse]
+	write        *connect.Client[v1.WriteRequest, v1.WriteResponse]
 	flush        *connect.Client[v1.FlushRequest, v1.FlushResponse]
 	fsync        *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
 	release      *connect.Client[v1.ReleaseRequest, v1.ReleaseResponse]
@@ -650,6 +680,16 @@ func (c *storageServiceClient) TmpFile(ctx context.Context, req *connect.Request
 // Open calls storage.v1.StorageService.Open.
 func (c *storageServiceClient) Open(ctx context.Context, req *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error) {
 	return c.open.CallUnary(ctx, req)
+}
+
+// Read calls storage.v1.StorageService.Read.
+func (c *storageServiceClient) Read(ctx context.Context, req *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
+	return c.read.CallUnary(ctx, req)
+}
+
+// Write calls storage.v1.StorageService.Write.
+func (c *storageServiceClient) Write(ctx context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
+	return c.write.CallUnary(ctx, req)
 }
 
 // Flush calls storage.v1.StorageService.Flush.
@@ -843,6 +883,18 @@ type StorageServiceHandler interface {
 	// 若节点不存在或为已无活跃句柄的孤儿节点 (nlink == 0)，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若携带 O_TRUNC 但以只读模式打开，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Open(context.Context, *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error)
+	// Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
+	// 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在、与 Inode 不匹配或无读权限，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
+	// Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
+	// 遵循 POSIX pwrite(2) 语义，支持最大 4 MiB 单次写入。
+	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// 若文件句柄不存在、与 Inode 不匹配或无写权限，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
+	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
 	// Flush 在单次文件关闭时触发，冲刷并校验文件句柄的合法性（不销毁文件句柄）。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若文件句柄不存在或与 Inode 不匹配，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EBADF)。
@@ -1049,6 +1101,18 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("Open")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceReadHandler := connect.NewUnaryHandler(
+		StorageServiceReadProcedure,
+		svc.Read,
+		connect.WithSchema(storageServiceMethods.ByName("Read")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceWriteHandler := connect.NewUnaryHandler(
+		StorageServiceWriteProcedure,
+		svc.Write,
+		connect.WithSchema(storageServiceMethods.ByName("Write")),
+		connect.WithHandlerOptions(opts...),
+	)
 	storageServiceFlushHandler := connect.NewUnaryHandler(
 		StorageServiceFlushProcedure,
 		svc.Flush,
@@ -1211,6 +1275,10 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceTmpFileHandler.ServeHTTP(w, r)
 		case StorageServiceOpenProcedure:
 			storageServiceOpenHandler.ServeHTTP(w, r)
+		case StorageServiceReadProcedure:
+			storageServiceReadHandler.ServeHTTP(w, r)
+		case StorageServiceWriteProcedure:
+			storageServiceWriteHandler.ServeHTTP(w, r)
 		case StorageServiceFlushProcedure:
 			storageServiceFlushHandler.ServeHTTP(w, r)
 		case StorageServiceFsyncProcedure:
@@ -1318,6 +1386,14 @@ func (UnimplementedStorageServiceHandler) TmpFile(context.Context, *connect.Requ
 
 func (UnimplementedStorageServiceHandler) Open(context.Context, *connect.Request[v1.OpenRequest]) (*connect.Response[v1.OpenResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Open is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Read is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Write is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) Flush(context.Context, *connect.Request[v1.FlushRequest]) (*connect.Response[v1.FlushResponse], error) {

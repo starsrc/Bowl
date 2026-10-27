@@ -179,6 +179,12 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			}
 		}
 
+		if input.Size != nil && fileType == S_IFREG && *input.Size == 0 && current.Size > 0 {
+			if err := deleteAllChunksByIno(ctx, q, current.Ino); err != nil {
+				return fmt.Errorf("delete all chunks on truncate zero for inode %d: %w", current.Ino, err)
+			}
+		}
+
 		var setAtimeNow bool
 		var atime pgtype.Timestamptz
 		if input.AtimeNow {

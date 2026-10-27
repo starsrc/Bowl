@@ -16,6 +16,11 @@ func DeleteAllChunksByIno(ctx context.Context, q db.Querier, ino int64) error {
 	return deleteAllChunksByIno(ctx, q, ino)
 }
 
+// DeleteAllChunksByInos 导出未导出的 deleteAllChunksByInos 供 meta_test 黑盒测试使用。
+func DeleteAllChunksByInos(ctx context.Context, q db.Querier, inos []int64) error {
+	return deleteAllChunksByInos(ctx, q, inos)
+}
+
 // TruncateChunksToSize 导出未导出的 truncateChunksToSize 供 meta_test 黑盒测试使用。
 func TruncateChunksToSize(ctx context.Context, q db.Querier, ino int64, newSize uint64) error {
 	return truncateChunksToSize(ctx, q, ino, newSize)

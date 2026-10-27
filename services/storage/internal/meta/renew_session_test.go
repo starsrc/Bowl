@@ -202,6 +202,11 @@ func TestRenewSession_Unit(t *testing.T) {
 			Return(orphanRows, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteChunksByInos(mock.Anything, []int64{101, 102, 103, 104, 105, 106}).
+			Return([][]byte(nil), nil).
+			Once()
+
 		var callOrder []int64
 		mockQuerier.EXPECT().
 			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
@@ -258,6 +263,11 @@ func TestRenewSession_Unit(t *testing.T) {
 			Return([]db.DeleteUnreferencedOrphanInodesRow{
 				{Ino: 201, RootIno: 10, Mode: int32(meta.S_IFREG | 0o644), Size: 4096},
 			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByInos(mock.Anything, []int64{201}).
+			Return([][]byte(nil), nil).
 			Once()
 
 		expectedErr := errors.New("update disk quota failed")

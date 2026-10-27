@@ -1506,6 +1506,11 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 			Return([]int64{rootIno, 1002, 1003}, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteChunksByInos(mock.Anything, []int64{rootIno, 1002, 1003}).
+			Return([][]byte(nil), nil).
+			Once()
+
 		err := mgr.DeleteDisk(ctx, validDiskIDStr)
 		require.NoError(t, err)
 	})
@@ -1637,6 +1642,11 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteInodesByRootIno(mock.Anything, rootIno).
 			Return([]int64{rootIno, targetIno}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByInos(mock.Anything, []int64{rootIno, targetIno}).
+			Return([][]byte(nil), nil).
 			Once()
 
 		// 3. SetLkw 被 DeleteDisk 唤醒后进入第二轮循环，因 Inode 已被删除返回 pgx.ErrNoRows -> ErrNotFound

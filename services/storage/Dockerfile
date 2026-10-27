@@ -3,7 +3,7 @@
 # ==============================================================================
 FROM golang:1.26-alpine3.24 AS builder
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata git
 
 ARG GOPROXY=https://goproxy.cn,direct
 ENV GOPROXY=${GOPROXY}

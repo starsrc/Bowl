@@ -872,10 +872,10 @@ message WriteRequest {
 // WriteResponse 定义 Write 接口响应结果。
 message WriteResponse {
   // 实际写入的字节数。
-  uint32 size = 1;
+  uint32 size = 1 [(buf.validate.field).uint32.lte = 4194304];
 
   // 写入后更新的 Inode 实体元数据。
-  Inode inode = 2;
+  Inode inode = 2 [(buf.validate.field).required = true];
 }
 
 // FlushRequest 定义 Flush 接口输入参数。

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +32,62 @@ import (
 	metamock "github.com/starsrc/bowl/services/storage/internal/meta/mock"
 	"github.com/starsrc/bowl/services/storage/internal/server"
 )
+
+type fakeShutdowner struct {
+	mu             sync.Mutex
+	shutdownCalled atomic.Bool
+	shutdownOpts   []fx.ShutdownOption
+	shutdownErr    error
+}
+
+func (f *fakeShutdowner) Shutdown(opts ...fx.ShutdownOption) error {
+	f.shutdownCalled.Store(true)
+	f.mu.Lock()
+	f.shutdownOpts = append(f.shutdownOpts, opts...)
+	f.mu.Unlock()
+	return f.shutdownErr
+}
+
+func (f *fakeShutdowner) Options() []fx.ShutdownOption {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fx.ShutdownOption(nil), f.shutdownOpts...)
+}
+
+var _ fx.Shutdowner = (*fakeShutdowner)(nil)
+
+func allocateFreePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+	return port
+}
+
+func assertPortListening(t *testing.T, addr string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "端口未就绪: %s", addr)
+}
+
+func assertPortClosed(t *testing.T, addr string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err != nil {
+			return true
+		}
+		_ = conn.Close()
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "端口未关闭: %s", addr)
+}
 
 type logCapture struct {
 	mu  sync.Mutex
@@ -362,44 +419,76 @@ func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 
 // 4. 验证 server.Module 的 fx.Lifecycle 启动监听、网络通信与优雅停机
 func TestServer_FxLifecycle_StartAndStop(t *testing.T) {
-	mockMgr := metamock.NewMockManager(t)
-	logCap := &logCapture{}
-	logger := testLogger(logCap)
+	t.Run("配置正常停机超时时OnStart与OnStop平滑完成", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		logCap := &logCapture{}
+		logger := testLogger(logCap)
 
-	var srv *server.Server
+		var srv *server.Server
 
-	cfg := defaultTestConfig()
-	cfg.ServerPort = 0 // 动态随机端口
+		port := allocateFreePort(t)
+		cfg := defaultTestConfig()
+		cfg.ServerPort = port
 
-	app := fxtest.New(t,
-		fx.Provide(
-			func() config.ServerConfig { return cfg },
-			func() meta.Manager { return mockMgr },
-			func() *slog.Logger { return logger },
-		),
-		server.Module,
-		fx.Populate(&srv),
-	)
+		app := fxtest.New(t,
+			fx.Provide(
+				func() config.ServerConfig { return cfg },
+				func() meta.Manager { return mockMgr },
+				func() *slog.Logger { return logger },
+			),
+			server.Module,
+			fx.Populate(&srv),
+		)
 
-	app.RequireStart()
-	require.NotNil(t, srv)
+		app.RequireStart()
+		require.NotNil(t, srv)
 
-	addr := srv.Addr()
-	require.NotEmpty(t, addr)
-	assert.NotEqual(t, "127.0.0.1:0", addr, "必须绑定到真实的系统随机端口")
+		addr := srv.Addr()
+		require.NotEmpty(t, addr)
+		assert.Equal(t, cfg.Addr(), addr)
 
-	// 验证 HTTP Server 真实就绪可通信
-	resp, err := http.Get("http://" + addr + "/")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+		// 等待后台 goroutine ListenAndServe 就绪
+		assertPortListening(t, addr)
 
-	// 优雅停机
-	app.RequireStop()
+		// 验证 HTTP Server 真实就绪可通信
+		resp, err := http.Get("http://" + addr + "/")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
 
-	// 停机后再次连接应拒绝
-	_, dialErr := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-	assert.Error(t, dialErr, "停机后监听端口应已释放关闭")
+		// 优雅停机
+		app.RequireStop()
+
+		// 停机后验证端口已释放关闭
+		assertPortClosed(t, addr)
+	})
+
+	t.Run("停机超时配置为0时亦可平滑关停", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		shutdowner := &fakeShutdowner{}
+		lc := fxtest.NewLifecycle(t)
+
+		port := allocateFreePort(t)
+		cfg := defaultTestConfig()
+		cfg.ServerPort = port
+		cfg.ServerStopTimeout = 0
+
+		srv, err := server.New(server.Params{
+			Config:      cfg,
+			MetaManager: mockMgr,
+			Lifecycle:   lc,
+			Shutdowner:  shutdowner,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, srv)
+
+		lc.RequireStart()
+		assertPortListening(t, cfg.Addr())
+
+		require.NoError(t, lc.Stop(context.Background()))
+		assert.False(t, shutdowner.shutdownCalled.Load())
+		assertPortClosed(t, cfg.Addr())
+	})
 }
 
 // 5. 验证存在在途 RPC 请求时触发 OnStop 优雅停机排空：OnStop 会等待在途 RPC 处理完毕并成功返回响应后才完成停机。
@@ -407,8 +496,9 @@ func TestServer_FxLifecycle_GracefulShutdownDrainsInflightRequests(t *testing.T)
 	mockMgr := metamock.NewMockManager(t)
 	var srv *server.Server
 
+	port := allocateFreePort(t)
 	cfg := defaultTestConfig()
-	cfg.ServerPort = 0
+	cfg.ServerPort = port
 	cfg.ServerStopTimeout = 5 * time.Second
 
 	app := fxtest.New(t,
@@ -424,6 +514,8 @@ func TestServer_FxLifecycle_GracefulShutdownDrainsInflightRequests(t *testing.T)
 	require.NotNil(t, srv)
 
 	addr := srv.Addr()
+	assertPortListening(t, addr)
+
 	client := storagev1connect.NewStorageServiceClient(http.DefaultClient, "http://"+addr)
 
 	reqStarted := make(chan struct{})
@@ -485,6 +577,8 @@ func TestServer_FxLifecycle_GracefulShutdownDrainsInflightRequests(t *testing.T)
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for OnStop to complete after inflight RPC finished")
 	}
+
+	assertPortClosed(t, addr)
 }
 
 // 6. 验证当 Logger 为 nil 时，通过真实 srv.Handler() 发起的未知内部错误依然被脱敏为 "internal server error"，且 meta.ErrIO 的 ErrorInfo 依然完整保留。
@@ -568,27 +662,82 @@ func TestServer_ValidateConfigError(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid server port")
 }
 
-func TestServer_PortConflict_StartFails(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
+func TestServer_PortConflict_TriggersShutdown(t *testing.T) {
+	t.Run("端口冲突监听失败自动触发应用退出且传递 ExitCode 选项", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer ln.Close()
 
-	tcpAddr := ln.Addr().(*net.TCPAddr)
+		tcpAddr := ln.Addr().(*net.TCPAddr)
 
-	cfg := defaultTestConfig()
-	cfg.ServerPort = tcpAddr.Port
+		shutdowner := &fakeShutdowner{}
+		lc := fxtest.NewLifecycle(t)
 
-	app := fxtest.New(t,
-		fx.Provide(
-			func() config.ServerConfig { return cfg },
-			func() meta.Manager { return metamock.NewMockManager(t) },
-		),
-		server.Module,
-	)
+		cfg := defaultTestConfig()
+		cfg.ServerPort = tcpAddr.Port
 
-	startErr := app.Start(context.Background())
-	require.Error(t, startErr)
-	assert.Contains(t, startErr.Error(), "address already in use")
+		mockMgr := metamock.NewMockManager(t)
+		srv, err := server.New(server.Params{
+			Config:      cfg,
+			MetaManager: mockMgr,
+			Lifecycle:   lc,
+			Shutdowner:  shutdowner,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, srv)
+
+		lc.RequireStart()
+
+		// 等待后台 goroutine 触发 ListenAndServe 端口冲突并级联调用 shutdowner.Shutdown
+		require.Eventually(t, func() bool {
+			return shutdowner.shutdownCalled.Load()
+		}, 2*time.Second, 10*time.Millisecond)
+
+		assert.NotEmpty(t, shutdowner.Options(), "端口冲突异常退出时应传递 ExitCode 选项")
+
+		// 调用 OnStop 收集错误
+		stopErr := lc.Stop(context.Background())
+		require.Error(t, stopErr)
+		assert.Contains(t, stopErr.Error(), "server error")
+		assert.Contains(t, stopErr.Error(), "address already in use")
+	})
+
+	t.Run("应用停机通知返回错误时完整合并错误信息", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer ln.Close()
+
+		tcpAddr := ln.Addr().(*net.TCPAddr)
+
+		shutdowner := &fakeShutdowner{
+			shutdownErr: errors.New("app shutdown failed"),
+		}
+		lc := fxtest.NewLifecycle(t)
+
+		cfg := defaultTestConfig()
+		cfg.ServerPort = tcpAddr.Port
+
+		mockMgr := metamock.NewMockManager(t)
+		srv, err := server.New(server.Params{
+			Config:      cfg,
+			MetaManager: mockMgr,
+			Lifecycle:   lc,
+			Shutdowner:  shutdowner,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, srv)
+
+		lc.RequireStart()
+
+		require.Eventually(t, func() bool {
+			return shutdowner.shutdownCalled.Load()
+		}, 2*time.Second, 10*time.Millisecond)
+
+		stopErr := lc.Stop(context.Background())
+		require.Error(t, stopErr)
+		assert.Contains(t, stopErr.Error(), "server error")
+		assert.Contains(t, stopErr.Error(), "request application shutdown: app shutdown failed")
+	})
 }
 
 func TestToConnectError_UnknownAndUnmappedErrors(t *testing.T) {

@@ -140,5 +140,5 @@ func TestRun_StartFailure_PortConflict(t *testing.T) {
 
 	err = run(ctx, fx.Replace(fx.Annotate(mockStore, fx.As(new(db.Store)))))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to start application")
+	assert.Contains(t, err.Error(), "address already in use")
 }

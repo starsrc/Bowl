@@ -12,13 +12,18 @@ import (
 )
 
 // Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
-// 遵循 ADR-0019 两阶段落盘架构：
+// 遵循 ADR-0019 两阶段落盘架构与 STARSRC-491 跨 Chunk 边界切分及 O_APPEND 语义：
 // 1. 静态边界校验：参数非空、(ino, fh, offset) 在正数范围内、len(data) <= 4 MiB、offset + len(data) <= MaxInt64；
 // 2. 零字节写入：在事务内锁定 Inode 校验常规文件类型与写句柄有效性，续期会话，不分配 slice_id 且不修改任何元数据；
 // 3. 两阶段落盘写入：
 //   - 阶段 1（锁外落盘）：申请 slice_id，将 data 按 BlockSize 切分原子写入底层物理块存储；失败立即清理物理块返回 ErrIO；
-//   - 阶段 2（事务提交）：事务内锁定 Inode 校验类型与写句柄有效性，续期会话，追加 24 字节 Slice 描述符至 chunks 表，
-//     插入 slice_refs 引用，更新 Inode 大小（扩容则更新，覆写保持）、剥离 S_ISUID/S_ISGID 特权位并刷新 mtime/ctime；
+//   - 阶段 2（事务提交）：事务内锁定 Inode 校验类型与写句柄有效性，续期会话；
+//     * 若句柄设置 O_APPEND，强制将 actualOffset 设为当前 inode.Size（若溢出 MaxInt64 返回 ErrInvalidArgument）；
+//     * 根据 actualOffset 与 dataLen 计算所跨 Chunk 范围：
+//       - 单 Chunk 内写入：向 indx 追加 1 条 Slice，登记 slice_refs.refs = 1；
+//       - 跨 64 MiB 边界写入：拆分为 indx（off=0, len=firstLen）与 indx+1（pos=0, off=firstLen, len=secondLen），
+//         在同一事务内分别追加 2 条 Slice 描述符，并将同一 slice_id 的 slice_refs.refs 记为 2；
+//     * 更新 Inode 大小（扩容则更新，覆写保持）、剥离 S_ISUID/S_ISGID 特权位并刷新 mtime/ctime；
 //   - 事务回滚补偿：若阶段 2 事务失败，在事务外立即调用 DeleteBlock 清理阶段 1 已落盘物理块，保证零孤儿块残留。
 func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error) {
 	if req == nil {
@@ -115,35 +120,87 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return err
 		}
 
-		indx := uint32(req.Offset / ChunkSize)
-		pos := uint32(req.Offset % ChunkSize)
-
-		sliceDesc := Slice{
-			Pos:  pos,
-			ID:   uint64(sliceID),
-			Size: uint32(dataLen),
-			Off:  0,
-			Len:  uint32(dataLen),
+		actualOffset := req.Offset
+		if (uint32(handle.Flags) & O_APPEND) != 0 {
+			actualOffset = uint64(inode.Size)
 		}
-		sliceBytes := EncodeSlice(sliceDesc)
-
-		if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
-			Ino:    int64(req.Ino),
-			Indx:   int32(indx),
-			Slices: sliceBytes,
-		}); err != nil {
-			return fmt.Errorf("append chunk slice (ino=%d, indx=%d): %w", req.Ino, indx, err)
+		if actualOffset > uint64(math.MaxInt64)-uint64(dataLen) {
+			return ErrInvalidArgument
 		}
 
-		if err := q.InsertSliceRef(ctx, db.InsertSliceRefParams{
-			SliceID: sliceID,
-			Size:    int32(dataLen),
-			Refs:    1,
-		}); err != nil {
-			return fmt.Errorf("insert slice ref (slice_id=%d): %w", sliceID, err)
+		startIndx := uint32(actualOffset / ChunkSize)
+		endIndx := uint32((actualOffset + uint64(dataLen) - 1) / ChunkSize)
+
+		if startIndx == endIndx {
+			sliceDesc := Slice{
+				Pos:  uint32(actualOffset % ChunkSize),
+				ID:   uint64(sliceID),
+				Size: uint32(dataLen),
+				Off:  0,
+				Len:  uint32(dataLen),
+			}
+			sliceBytes := EncodeSlice(sliceDesc)
+
+			if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+				Ino:    int64(req.Ino),
+				Indx:   int32(startIndx),
+				Slices: sliceBytes,
+			}); err != nil {
+				return fmt.Errorf("append chunk slice (ino=%d, indx=%d): %w", req.Ino, startIndx, err)
+			}
+
+			if err := q.InsertSliceRef(ctx, db.InsertSliceRefParams{
+				SliceID: sliceID,
+				Size:    int32(dataLen),
+				Refs:    1,
+			}); err != nil {
+				return fmt.Errorf("insert slice ref (slice_id=%d): %w", sliceID, err)
+			}
+		} else {
+			firstPos := uint32(actualOffset % ChunkSize)
+			firstLen := uint32(ChunkSize) - firstPos
+			secondLen := uint32(dataLen) - firstLen
+
+			firstSliceBytes := EncodeSlice(Slice{
+				Pos:  firstPos,
+				ID:   uint64(sliceID),
+				Size: uint32(dataLen),
+				Off:  0,
+				Len:  firstLen,
+			})
+			if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+				Ino:    int64(req.Ino),
+				Indx:   int32(startIndx),
+				Slices: firstSliceBytes,
+			}); err != nil {
+				return fmt.Errorf("append chunk slice first chunk (ino=%d, indx=%d): %w", req.Ino, startIndx, err)
+			}
+
+			secondSliceBytes := EncodeSlice(Slice{
+				Pos:  0,
+				ID:   uint64(sliceID),
+				Size: uint32(dataLen),
+				Off:  firstLen,
+				Len:  secondLen,
+			})
+			if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+				Ino:    int64(req.Ino),
+				Indx:   int32(startIndx + 1),
+				Slices: secondSliceBytes,
+			}); err != nil {
+				return fmt.Errorf("append chunk slice second chunk (ino=%d, indx=%d): %w", req.Ino, startIndx+1, err)
+			}
+
+			if err := q.InsertSliceRef(ctx, db.InsertSliceRefParams{
+				SliceID: sliceID,
+				Size:    int32(dataLen),
+				Refs:    2,
+			}); err != nil {
+				return fmt.Errorf("insert slice ref (slice_id=%d): %w", sliceID, err)
+			}
 		}
 
-		newEnd := int64(req.Offset) + int64(dataLen)
+		newEnd := int64(actualOffset) + int64(dataLen)
 		newSize := inode.Size
 		if newEnd > newSize {
 			newSize = newEnd

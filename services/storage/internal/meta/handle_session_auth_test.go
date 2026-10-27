@@ -3,7 +3,6 @@ package meta_test
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -24,10 +23,7 @@ import (
 // 4. 会话过期防“诈尸自救”：过期会话句柄写操作直接被拒，且会话不会被重新激活续期；
 // 5. Release / ReleaseDir 严格会话匹配，绝不误删其他会话合法句柄。
 func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
-	dsn := os.Getenv("BOWL_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

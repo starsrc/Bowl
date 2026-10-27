@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -660,10 +659,7 @@ func TestSetLk_PosixLockAndUnlock(t *testing.T) {
 }
 
 func TestSetLk_PostgresSemantics(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

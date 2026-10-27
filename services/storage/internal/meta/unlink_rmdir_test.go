@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1803,10 +1802,7 @@ func TestRmdir_DiskQuotaAndHandleLifecycle(t *testing.T) {
 }
 
 func TestMkdir_Rmdir_StatFS_Integration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

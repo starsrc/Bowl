@@ -460,13 +460,44 @@ func TestModule_Lifecycle_OnStop(t *testing.T) {
 	})
 }
 
-func TestModule_Lifecycle_PingSuccess(t *testing.T) {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+func resolveTestDSN(t *testing.T) string {
+	t.Helper()
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN"} {
+		if val := os.Getenv(env); val != "" {
+			return val
+		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	candidates := []string{
+		"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
+	}
+
+	for _, candidate := range candidates {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		pool, err := pgxpool.New(probeCtx, candidate)
+		if err == nil {
+			pingErr := pool.Ping(probeCtx)
+			pool.Close()
+			cancel()
+			if pingErr == nil {
+				return candidate
+			}
+		} else {
+			cancel()
+		}
+	}
+
+	return ""
+}
+
+func TestModule_Lifecycle_PingSuccess(t *testing.T) {
+	dsn := resolveTestDSN(t)
+	if dsn == "" {
+		t.Skip("跳过成功探活测试: 未探测到可用的 PostgreSQL 实例 (5432 与 9432 均连接失败)")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	probePool, err := pgxpool.New(ctx, dsn)
@@ -544,51 +575,21 @@ func newTestUUID() pgtype.UUID {
 
 func setupTestDB(t *testing.T) (db.Store, *pgxpool.Pool) {
 	t.Helper()
-	dsn := os.Getenv("STORAGE_DB_DSN")
+	dsn := resolveTestDSN(t)
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		t.Skip("跳过 PostgreSQL 测试 (未探测到可用的 PostgreSQL 实例: 5432 与 9432 均连接失败)")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var pool *pgxpool.Pool
-	var err error
-
-	if dsn != "" {
-		pool, err = pgxpool.New(ctx, dsn)
-		if err == nil {
-			err = pool.Ping(ctx)
-		}
-		if err != nil {
-			if pool != nil {
-				pool.Close()
-			}
-			t.Skipf("跳过 PostgreSQL 测试 (配置的 DSN 连接/ping 失败): %v", err)
-		}
-	} else {
-		// 未指定环境变量时，优先尝试 5432，失败自动尝试 9432
-		dsn5432 := "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-		pool, err = pgxpool.New(ctx, dsn5432)
-		if err == nil {
-			err = pool.Ping(ctx)
-		}
-		if err != nil {
-			if pool != nil {
-				pool.Close()
-			}
-			dsn9432 := "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
-			pool, err = pgxpool.New(ctx, dsn9432)
-			if err == nil {
-				err = pool.Ping(ctx)
-			}
-			if err != nil {
-				if pool != nil {
-					pool.Close()
-				}
-				t.Skipf("跳过 PostgreSQL 测试 (5432 与 9432 均连接失败): %v", err)
-			}
-		}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过 PostgreSQL 测试 (连接失败): %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("跳过 PostgreSQL 测试 (ping 失败): %v", err)
 	}
 
 	t.Cleanup(func() {

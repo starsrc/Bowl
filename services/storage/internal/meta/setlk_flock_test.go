@@ -3,7 +3,6 @@ package meta_test
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -407,10 +406,7 @@ func TestSetLk_FlockUnitSemantics(t *testing.T) {
 }
 
 func TestSetLk_FlockPostgresSemantics(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -432,6 +432,7 @@ func TestServer_RenewSession(t *testing.T) {
 		expectedTimestamp := timestamppb.New(renewedTime)
 		assert.Equal(t, expectedTimestamp.GetSeconds(), resp.Msg.GetExpiresAt().GetSeconds())
 		assert.Equal(t, expectedTimestamp.GetNanos(), resp.Msg.GetExpiresAt().GetNanos())
+		assert.False(t, resp.Msg.GetSessionRecreated())
 
 		mockMgr.AssertExpectations(t)
 	})
@@ -457,6 +458,11 @@ func TestServer_RenewSession(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		assert.True(t, resp.Msg.GetSessionRecreated(), "当会话过期重建时，session_recreated 必须返回 true")
+		require.NotNil(t, resp.Msg.GetExpiresAt())
+
+		expectedTimestamp := timestamppb.New(renewedTime)
+		assert.Equal(t, expectedTimestamp.GetSeconds(), resp.Msg.GetExpiresAt().GetSeconds())
+		assert.Equal(t, expectedTimestamp.GetNanos(), resp.Msg.GetExpiresAt().GetNanos())
 
 		mockMgr.AssertExpectations(t)
 	})

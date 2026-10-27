@@ -324,16 +324,21 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 
 	var flockConflictAfterDelete bool
 	var shouldNotify bool
-	snap := m.snapshotInFlightGrants(params.Ino)
+	var lastUndo *inFlightTxUndo
 	var committed bool
 	defer func() {
-		if !committed {
-			m.restoreInFlightGrants(params.Ino, snap)
+		if !committed && lastUndo != nil {
+			lastUndo.Rollback()
 		}
 	}()
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		m.restoreInFlightGrants(params.Ino, snap)
+		if lastUndo != nil {
+			lastUndo.Rollback()
+		}
+		currentUndo := newInFlightTxUndo(m, params.Ino)
+		lastUndo = currentUndo
+
 		flockConflictAfterDelete = false
 		shouldNotify = false
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
@@ -374,17 +379,24 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 			if err := applyFlockSetLk(ctx, q, params, &flockConflictAfterDelete, &shouldNotify); err != nil {
 				return err
 			}
-			m.updateInFlightGrantsOnLockOp(params.Ino, params.SessionID, params.Fh, params.LockOwner, true, 0, OffsetMax, 0)
+			m.recordExternalLockOpInFlightGrants(params.Ino, params.SessionID, params.Fh, params.LockOwner, true, 0, OffsetMax, 0, currentUndo)
 			return nil
 		}
 		if err := applyPosixSetLk(ctx, q, params, &shouldNotify); err != nil {
 			return err
 		}
-		m.updateInFlightGrantsOnLockOp(params.Ino, params.SessionID, params.Fh, params.LockOwner, false, params.Lk.Start, params.Lk.End, 0)
+		m.recordExternalLockOpInFlightGrants(params.Ino, params.SessionID, params.Fh, params.LockOwner, false, params.Lk.Start, params.Lk.End, 0, currentUndo)
 		return nil
 	})
 	if err == nil {
 		committed = true
+		if lastUndo != nil {
+			lastUndo.Discard()
+		}
+	} else {
+		if lastUndo != nil {
+			lastUndo.Rollback()
+		}
 	}
 
 	if err != nil {
@@ -486,7 +498,8 @@ func applyPosixSetLk(ctx context.Context, q db.Querier, params SetLkParams, shou
 		}
 	}
 
-	return applyPosixGrant(ctx, q, params, activeLocks, shouldNotify)
+	_, err = applyPosixGrant(ctx, q, params, activeLocks, shouldNotify)
+	return err
 }
 
 func applyPosixUnlock(ctx context.Context, q db.Querier, params SetLkParams, activeLocks []db.FileLock, shouldNotify *bool) error {
@@ -553,7 +566,7 @@ func applyPosixUnlock(ctx context.Context, q db.Querier, params SetLkParams, act
 	return nil
 }
 
-func applyPosixGrant(ctx context.Context, q db.Querier, params SetLkParams, activeLocks []db.FileLock, shouldNotify *bool) error {
+func applyPosixGrant(ctx context.Context, q db.Querier, params SetLkParams, activeLocks []db.FileLock, shouldNotify *bool) (int64, error) {
 	ino := int64(params.Ino)
 	sessionID := int64(params.SessionID)
 	owner := int64(params.LockOwner)
@@ -616,7 +629,7 @@ func applyPosixGrant(ctx context.Context, q db.Querier, params SetLkParams, acti
 
 	if len(deleteIDs) > 0 {
 		if err := q.DeleteFileLocksByIDs(ctx, deleteIDs); err != nil {
-			return fmt.Errorf("delete overlapping posix file locks (ino=%d): %w", params.Ino, err)
+			return 0, fmt.Errorf("delete overlapping posix file locks (ino=%d): %w", params.Ino, err)
 		}
 	}
 
@@ -633,11 +646,11 @@ func applyPosixGrant(ctx context.Context, q db.Querier, params SetLkParams, acti
 			Pid:         int32(seg.pid),
 		})
 		if err != nil {
-			return fmt.Errorf("create split posix file lock (ino=%d): %w", params.Ino, err)
+			return 0, fmt.Errorf("create split posix file lock (ino=%d): %w", params.Ino, err)
 		}
 	}
 
-	_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
+	created, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
 		SessionID:   sessionID,
 		Ino:         ino,
 		Fh:          int64(params.Fh),
@@ -649,10 +662,10 @@ func applyPosixGrant(ctx context.Context, q db.Querier, params SetLkParams, acti
 		Pid:         int32(reqPID),
 	})
 	if err != nil {
-		return fmt.Errorf("create posix file lock (ino=%d): %w", params.Ino, err)
+		return 0, fmt.Errorf("create posix file lock (ino=%d): %w", params.Ino, err)
 	}
 
-	return nil
+	return created.ID, nil
 }
 
 func applyFlockSetLk(ctx context.Context, q db.Querier, params SetLkParams, conflictAfterDelete *bool, shouldNotify *bool) error {
@@ -888,14 +901,27 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			defer releaseNotify()
 
 			var granted bool
+			var unlocked bool
 			var shouldNotify bool
 			var deadlockDetected bool
 			var interrupted bool
-			snap := m.snapshotInFlightGrants(params.Ino)
+			var lastUndo *inFlightTxUndo
+			var committed bool
+			defer func() {
+				if !committed && !granted && lastUndo != nil {
+					lastUndo.Rollback()
+				}
+			}()
 
 			txErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-				m.restoreInFlightGrants(params.Ino, snap)
+				if lastUndo != nil {
+					lastUndo.Rollback()
+				}
+				currentUndo := newInFlightTxUndo(m, params.Ino)
+				lastUndo = currentUndo
+
 				granted = false
+				unlocked = false
 				shouldNotify = false
 				deadlockDetected = false
 				interrupted = false
@@ -993,10 +1019,10 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 							RequestID: requestID,
 						})
 					}
-					m.updateInFlightGrantsOnLockOp(params.Ino, params.SessionID, params.Fh, params.LockOwner, params.LkFlags == FuseLkFlock, reqStart, reqEnd, 0)
+					m.recordExternalLockOpInFlightGrants(params.Ino, params.SessionID, params.Fh, params.LockOwner, params.LkFlags == FuseLkFlock, reqStart, reqEnd, 0, currentUndo)
 					affectedStart = reqStart
 					affectedEnd = reqEnd
-					granted = true
+					unlocked = true
 					return nil
 				}
 
@@ -1103,9 +1129,11 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 						}
 						grantedLockID = createdLock.ID
 					} else {
-						if err := applyPosixGrant(ctx, q, setLkParams, activeLocks, &shouldNotify); err != nil {
+						createdID, err := applyPosixGrant(ctx, q, setLkParams, activeLocks, &shouldNotify)
+						if err != nil {
 							return err
 						}
+						grantedLockID = createdID
 					}
 
 					if hasExistingWaiter {
@@ -1119,11 +1147,11 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 					regID, effectivePreGrantLocks := m.registerInFlightGrant(
 						params.Ino, params.SessionID, params.RequestID, params.Fh, params.LockOwner,
 						params.LkFlags == FuseLkFlock, grantedLockID,
-						reqStart, reqEnd, txPreGrantLocks,
+						reqStart, reqEnd, txPreGrantLocks, currentUndo,
 					)
-					m.updateInFlightGrantsOnLockOp(
+					m.recordExternalLockOpInFlightGrants(
 						params.Ino, params.SessionID, params.Fh, params.LockOwner,
-						params.LkFlags == FuseLkFlock, reqStart, reqEnd, regID,
+						params.LkFlags == FuseLkFlock, reqStart, reqEnd, regID, currentUndo,
 					)
 					preGrantOwnerLocks = effectivePreGrantLocks
 					affectedStart = affStart
@@ -1170,13 +1198,21 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 				m.notifyLockWaiters(params.Ino)
 			}
 
-			if txErr != nil {
-				if !granted {
-					m.restoreInFlightGrants(params.Ino, snap)
+			if txErr == nil {
+				committed = true
+				if lastUndo != nil {
+					lastUndo.Discard()
 				}
+			} else {
+				if !granted && lastUndo != nil {
+					lastUndo.Rollback()
+				}
+			}
+
+			if txErr != nil {
 				if granted {
 					if reqType != F_UNLCK {
-						m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
+						m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd, lastUndo)
 					}
 					return true, ErrInterrupted
 				}
@@ -1215,10 +1251,16 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 				m.notifyLockWaiters(params.Ino)
 				return true, ErrDeadlock
 			}
+			if unlocked {
+				if ctx.Err() != nil {
+					return true, ErrInterrupted
+				}
+				return true, nil
+			}
 			if granted {
 				if ctx.Err() != nil {
 					if reqType != F_UNLCK {
-						m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
+						m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd, nil)
 					}
 					return true, ErrInterrupted
 				}
@@ -1260,9 +1302,24 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 	var shouldNotify bool
 	_ = m.store.ExecTxWithOptions(cleanupCtx, func(q db.Querier) error {
 		_, err := q.GetInodeForUpdate(cleanupCtx, int64(ino))
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
 			return err
 		}
+
+		deletedCount, err := q.DeleteExpiredClientSessions(cleanupCtx)
+		if err != nil {
+			return err
+		}
+		if deletedCount > 0 {
+			if err := m.reclaimUnreferencedOrphans(cleanupCtx, q); err != nil {
+				return err
+			}
+			shouldNotify = true
+		}
+
 		waiter, err := q.GetFileLockWaiter(cleanupCtx, db.GetFileLockWaiterParams{
 			SessionID: sessionID,
 			RequestID: requestID,
@@ -1374,17 +1431,18 @@ type inFlightGrantKey struct {
 }
 
 type inFlightGrant struct {
-	regID              uint64
-	ino                uint64
-	sessionID          uint64
-	requestID          uint64
-	fh                 uint64
-	lockOwner          uint64
-	isFlock            bool
-	grantedLockID      int64
-	pendingRanges      []byteRange
-	preGrantOwnerLocks []db.FileLock
-	flushedOrReleased  bool
+	regID                  uint64
+	ino                    uint64
+	sessionID              uint64
+	requestID              uint64
+	fh                     uint64
+	lockOwner              uint64
+	isFlock                bool
+	grantedLockID          int64
+	pendingRanges          []byteRange
+	preGrantOwnerLocks     []db.FileLock
+	flushedOrReleased      bool
+	flushedOrReleasedCount int
 }
 
 func subtractRangesList(ranges []byteRange, subStart, subEnd uint64) []byteRange {
@@ -1441,7 +1499,7 @@ func mergeByteRanges(ranges []byteRange) []byteRange {
 			continue
 		}
 		last := &merged[len(merged)-1]
-		if last.end >= r.start || (last.end < OffsetMax && last.end+1 == r.start) {
+		if last.end >= r.start || (last.end < math.MaxUint64 && last.end+1 >= r.start) {
 			if r.end > last.end {
 				last.end = r.end
 			}
@@ -1466,37 +1524,102 @@ func intersectByteRanges(r1 []byteRange, r2 []byteRange) []byteRange {
 	return mergeByteRanges(result)
 }
 
-func (m *manager) snapshotInFlightGrants(ino uint64) map[inFlightGrantKey]*inFlightGrant {
-	m.inFlightGrantMu.Lock()
-	defer m.inFlightGrantMu.Unlock()
-
-	snap := make(map[inFlightGrantKey]*inFlightGrant)
-	for k, g := range m.inFlightGrants {
-		if g.ino == ino {
-			cp := *g
-			cp.pendingRanges = append([]byteRange(nil), g.pendingRanges...)
-			cp.preGrantOwnerLocks = append([]db.FileLock(nil), g.preGrantOwnerLocks...)
-			snap[k] = &cp
-		}
-	}
-	return snap
+type inFlightTxUndo struct {
+	m              *manager
+	ino            uint64
+	attemptRegID   uint64
+	flushedEntries map[uint64]struct{}
+	removedRanges  map[uint64][]byteRange
 }
 
-func (m *manager) restoreInFlightGrants(ino uint64, snap map[inFlightGrantKey]*inFlightGrant) {
-	m.inFlightGrantMu.Lock()
-	defer m.inFlightGrantMu.Unlock()
+func newInFlightTxUndo(m *manager, ino uint64) *inFlightTxUndo {
+	return &inFlightTxUndo{
+		m:              m,
+		ino:            ino,
+		flushedEntries: make(map[uint64]struct{}),
+		removedRanges:  make(map[uint64][]byteRange),
+	}
+}
 
-	for k, g := range m.inFlightGrants {
-		if g.ino == ino {
-			delete(m.inFlightGrants, k)
+func (u *inFlightTxUndo) recordFlushedLocked(g *inFlightGrant) {
+	if u == nil || g == nil {
+		return
+	}
+	if _, ok := u.flushedEntries[g.regID]; !ok {
+		u.flushedEntries[g.regID] = struct{}{}
+		g.flushedOrReleasedCount++
+		g.flushedOrReleased = true
+	}
+	if len(g.pendingRanges) > 0 {
+		u.recordRemovedRangesLocked(g.regID, g.pendingRanges)
+		g.pendingRanges = nil
+	}
+}
+
+func (u *inFlightTxUndo) recordRemovedRangesLocked(regID uint64, removed []byteRange) {
+	if u == nil || len(removed) == 0 {
+		return
+	}
+	u.removedRanges[regID] = mergeByteRanges(append(u.removedRanges[regID], removed...))
+}
+
+func (u *inFlightTxUndo) recordRegistered(regID uint64) {
+	if u == nil {
+		return
+	}
+	u.attemptRegID = regID
+}
+
+func (u *inFlightTxUndo) Rollback() {
+	if u == nil {
+		return
+	}
+	u.m.inFlightGrantMu.Lock()
+	defer u.m.inFlightGrantMu.Unlock()
+
+	if u.attemptRegID > 0 {
+		for k, g := range u.m.inFlightGrants {
+			if g.ino == u.ino && g.regID == u.attemptRegID {
+				delete(u.m.inFlightGrants, k)
+				break
+			}
+		}
+		u.attemptRegID = 0
+	}
+
+	for regID := range u.flushedEntries {
+		for _, g := range u.m.inFlightGrants {
+			if g.ino == u.ino && g.regID == regID {
+				if g.flushedOrReleasedCount > 0 {
+					g.flushedOrReleasedCount--
+				}
+				g.flushedOrReleased = g.flushedOrReleasedCount > 0
+				break
+			}
 		}
 	}
-	for k, g := range snap {
-		cp := *g
-		cp.pendingRanges = append([]byteRange(nil), g.pendingRanges...)
-		cp.preGrantOwnerLocks = append([]db.FileLock(nil), g.preGrantOwnerLocks...)
-		m.inFlightGrants[k] = &cp
+	clear(u.flushedEntries)
+
+	for regID, rem := range u.removedRanges {
+		for _, g := range u.m.inFlightGrants {
+			if g.ino == u.ino && g.regID == regID {
+				if !g.flushedOrReleased {
+					g.pendingRanges = mergeByteRanges(append(g.pendingRanges, rem...))
+				}
+				break
+			}
+		}
 	}
+	clear(u.removedRanges)
+}
+
+func (u *inFlightTxUndo) Discard() {
+	if u == nil {
+		return
+	}
+	u.attemptRegID = 0
+	u.flushedEntries = nil
+	u.removedRanges = nil
 }
 
 func (m *manager) registerInFlightGrant(
@@ -1505,6 +1628,7 @@ func (m *manager) registerInFlightGrant(
 	grantedLockID int64,
 	reqStart, reqEnd uint64,
 	preGrantOwnerLocks []db.FileLock,
+	undo *inFlightTxUndo,
 ) (uint64, []db.FileLock) {
 	m.inFlightGrantMu.Lock()
 	defer m.inFlightGrantMu.Unlock()
@@ -1567,6 +1691,9 @@ func (m *manager) registerInFlightGrant(
 			effectivePreGrantLocks = remaining
 
 			// 3) 从 pred.pendingRanges 中剪除 taken
+			if undo != nil {
+				undo.recordRemovedRangesLocked(pred.regID, taken)
+			}
 			pred.pendingRanges = subtractMultipleRanges(pred.pendingRanges, taken)
 		}
 	}
@@ -1578,18 +1705,21 @@ func (m *manager) registerInFlightGrant(
 	}
 
 	m.inFlightGrants[key] = &inFlightGrant{
-		regID:              regID,
-		ino:                ino,
-		sessionID:          sessionID,
-		requestID:          requestID,
-		fh:                 fh,
-		lockOwner:          lockOwner,
-		isFlock:            isFlock,
-		grantedLockID:      grantedLockID,
-		pendingRanges:      ranges,
-		preGrantOwnerLocks: effectivePreGrantLocks,
-		flushedOrReleased:  false,
+		regID:                  regID,
+		ino:                    ino,
+		sessionID:              sessionID,
+		requestID:              requestID,
+		fh:                     fh,
+		lockOwner:              lockOwner,
+		isFlock:                isFlock,
+		grantedLockID:          grantedLockID,
+		pendingRanges:          ranges,
+		preGrantOwnerLocks:     effectivePreGrantLocks,
+		flushedOrReleased:      false,
+		flushedOrReleasedCount: 0,
 	}
+
+	undo.recordRegistered(regID)
 
 	return regID, effectivePreGrantLocks
 }
@@ -1602,6 +1732,20 @@ func (m *manager) unregisterInFlightGrant(ino, sessionID, requestID uint64) {
 		sessionID: sessionID,
 		requestID: requestID,
 	})
+}
+
+func (m *manager) unregisterInFlightGrantByRegID(ino, regID uint64) {
+	if regID == 0 {
+		return
+	}
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+	for k, g := range m.inFlightGrants {
+		if g.ino == ino && g.regID == regID {
+			delete(m.inFlightGrants, k)
+			break
+		}
+	}
 }
 
 func (m *manager) getInFlightGrant(ino, sessionID, requestID uint64) *inFlightGrant {
@@ -1621,7 +1765,7 @@ func (m *manager) getInFlightGrant(ino, sessionID, requestID uint64) *inFlightGr
 	return &cp
 }
 
-func (m *manager) invalidateInFlightGrantsOnFlush(ino uint64, sessionID *uint64, lockOwner uint64) {
+func (m *manager) markInFlightGrantsFlushedPOSIX(ino uint64, sessionID *uint64, lockOwner uint64, undo *inFlightTxUndo) {
 	if sessionID == nil {
 		return
 	}
@@ -1635,12 +1779,21 @@ func (m *manager) invalidateInFlightGrantsOnFlush(ino uint64, sessionID *uint64,
 		if g.sessionID != *sessionID {
 			continue
 		}
-		g.flushedOrReleased = true
-		g.pendingRanges = nil
+		if undo != nil {
+			undo.recordFlushedLocked(g)
+		} else {
+			g.flushedOrReleasedCount++
+			g.flushedOrReleased = true
+			g.pendingRanges = nil
+		}
 	}
 }
 
-func (m *manager) invalidateInFlightGrantsOnFlockRelease(ino uint64, sessionID *uint64, fh uint64) {
+func (m *manager) invalidateInFlightGrantsOnFlush(ino uint64, sessionID *uint64, lockOwner uint64) {
+	m.markInFlightGrantsFlushedPOSIX(ino, sessionID, lockOwner, nil)
+}
+
+func (m *manager) markInFlightGrantsFlushedOrReleased(ino uint64, sessionID *uint64, fh uint64, undo *inFlightTxUndo) {
 	if sessionID == nil {
 		return
 	}
@@ -1654,16 +1807,26 @@ func (m *manager) invalidateInFlightGrantsOnFlockRelease(ino uint64, sessionID *
 		if g.sessionID != *sessionID {
 			continue
 		}
-		g.flushedOrReleased = true
-		g.pendingRanges = nil
+		if undo != nil {
+			undo.recordFlushedLocked(g)
+		} else {
+			g.flushedOrReleasedCount++
+			g.flushedOrReleased = true
+			g.pendingRanges = nil
+		}
 	}
 }
 
-func (m *manager) updateInFlightGrantsOnLockOp(
+func (m *manager) invalidateInFlightGrantsOnFlockRelease(ino uint64, sessionID *uint64, fh uint64) {
+	m.markInFlightGrantsFlushedOrReleased(ino, sessionID, fh, nil)
+}
+
+func (m *manager) recordExternalLockOpInFlightGrants(
 	ino, sessionID, fh, lockOwner uint64,
 	isFlock bool,
 	opStart, opEnd uint64,
 	currentRegID uint64,
+	undo *inFlightTxUndo,
 ) {
 	m.inFlightGrantMu.Lock()
 	defer m.inFlightGrantMu.Unlock()
@@ -1677,18 +1840,39 @@ func (m *manager) updateInFlightGrantsOnLockOp(
 		}
 		if isFlock {
 			if g.isFlock && g.sessionID == sessionID && g.fh == fh {
-				g.flushedOrReleased = true
-				g.pendingRanges = nil
+				if undo != nil {
+					undo.recordFlushedLocked(g)
+				} else {
+					g.flushedOrReleasedCount++
+					g.flushedOrReleased = true
+					g.pendingRanges = nil
+				}
 			}
 		} else {
 			if !g.isFlock && g.sessionID == sessionID && g.lockOwner == lockOwner {
-				g.pendingRanges = subtractRangesList(g.pendingRanges, opStart, opEnd)
+				target := []byteRange{{start: opStart, end: opEnd}}
+				removed := intersectByteRanges(g.pendingRanges, target)
+				if len(removed) > 0 {
+					if undo != nil {
+						undo.recordRemovedRangesLocked(g.regID, removed)
+					}
+					g.pendingRanges = subtractMultipleRanges(g.pendingRanges, removed)
+				}
 			}
 		}
 	}
 }
 
-func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []db.FileLock, affectedStart, affectedEnd uint64) {
+func (m *manager) updateInFlightGrantsOnLockOp(
+	ino, sessionID, fh, lockOwner uint64,
+	isFlock bool,
+	opStart, opEnd uint64,
+	currentRegID uint64,
+) {
+	m.recordExternalLockOpInFlightGrants(ino, sessionID, fh, lockOwner, isFlock, opStart, opEnd, currentRegID, nil)
+}
+
+func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []db.FileLock, affectedStart, affectedEnd uint64, lastUndo *inFlightTxUndo) {
 	defer m.unregisterInFlightGrant(params.Ino, params.SessionID, params.RequestID)
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1697,8 +1881,22 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 	var shouldNotify bool
 	_ = m.store.ExecTxWithOptions(cleanupCtx, func(q db.Querier) error {
 		_, err := q.GetInodeForUpdate(cleanupCtx, int64(params.Ino))
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
 			return err
+		}
+
+		deletedCount, err := q.DeleteExpiredClientSessions(cleanupCtx)
+		if err != nil {
+			return err
+		}
+		if deletedCount > 0 {
+			if err := m.reclaimUnreferencedOrphans(cleanupCtx, q); err != nil {
+				return err
+			}
+			shouldNotify = true
 		}
 
 		curGrant := m.getInFlightGrant(params.Ino, params.SessionID, params.RequestID)
@@ -1721,6 +1919,7 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 		}
 
 		if params.LkFlags == FuseLkFlock {
+			var toDelete []int64
 			activeLocks, err := q.ListActiveFileLocksByInoAndFlags(cleanupCtx, db.ListActiveFileLocksByInoAndFlagsParams{
 				Ino:     int64(params.Ino),
 				LkFlags: int32(FuseLkFlock),
@@ -1729,12 +1928,36 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 				for _, fl := range activeLocks {
 					if fl.SessionID == int64(params.SessionID) && fl.Fh == int64(params.Fh) {
 						if curGrant.grantedLockID > 0 && fl.ID == curGrant.grantedLockID {
-							_ = q.DeleteFileLocksByIDs(cleanupCtx, []int64{fl.ID})
-							shouldNotify = true
+							toDelete = append(toDelete, fl.ID)
 						}
 						break
 					}
 				}
+			}
+			if lastUndo != nil && curGrant.grantedLockID > 0 {
+				var lockCommitted bool
+				for _, id := range toDelete {
+					if id == curGrant.grantedLockID {
+						lockCommitted = true
+						break
+					}
+				}
+				if !lockCommitted {
+					lastUndo.Rollback()
+					_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+						SessionID: int64(params.SessionID),
+						RequestID: int64(params.RequestID),
+					})
+					shouldNotify = true
+					return nil
+				}
+			}
+			if lastUndo != nil {
+				lastUndo.Discard()
+			}
+			if len(toDelete) > 0 {
+				_ = q.DeleteFileLocksByIDs(cleanupCtx, toDelete)
+				shouldNotify = true
 			}
 			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 				SessionID: int64(params.SessionID),
@@ -1759,6 +1982,28 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 		})
 		if err != nil {
 			return err
+		}
+
+		if lastUndo != nil && curGrant.grantedLockID > 0 {
+			var lockCommitted bool
+			for _, l := range activeLocks {
+				if l.ID == curGrant.grantedLockID {
+					lockCommitted = true
+					break
+				}
+			}
+			if !lockCommitted {
+				lastUndo.Rollback()
+				_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+					SessionID: int64(params.SessionID),
+					RequestID: int64(params.RequestID),
+				})
+				shouldNotify = true
+				return nil
+			}
+		}
+		if lastUndo != nil {
+			lastUndo.Discard()
 		}
 
 		sessionID := int64(params.SessionID)

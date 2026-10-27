@@ -1700,7 +1700,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 }
 
 func getStorageTestDSN() string {
-	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL"} {
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN"} {
 		if val := os.Getenv(env); val != "" {
 			return val
 		}

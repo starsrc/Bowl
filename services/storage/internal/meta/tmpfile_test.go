@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"os"
 	"testing"
 	"time"
 
@@ -437,10 +436,7 @@ func TestTmpFile_PositiveAndParentInvariants(t *testing.T) {
 }
 
 func TestTmpFileAndLinkMaterialization_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

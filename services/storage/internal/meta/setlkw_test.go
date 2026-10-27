@@ -2753,6 +2753,8 @@ func TestSetLkw_CancelRollbackDoesNotReviveFlushedOrOverwriteNewerOwnerLock(t *t
 	})
 }
 
+var errSimulatedFlushTxRollback = errors.New("simulated error to trigger rollback")
+
 type rollbackFlushHookStore struct {
 	db.Store
 	cancelOnGrant func()
@@ -2762,11 +2764,12 @@ type rollbackFlushHookStore struct {
 
 func (s *rollbackFlushHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
 	if s.failNextTx {
-		_ = s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-			_ = fn(q)
-			return errors.New("simulated error to trigger rollback")
+		return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+			if err := fn(q); err != nil {
+				return err
+			}
+			return errSimulatedFlushTxRollback
 		}, opts...)
-		return errors.New("simulated error to trigger rollback")
 	}
 
 	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
@@ -3258,7 +3261,7 @@ func TestSetLkw_CancelRollbackEdgeCases(t *testing.T) {
 				SessionID: &sessA,
 				LockOwner: &ownerA,
 			})
-			require.Error(t, flushErr, "Flush 事务应因模拟错误回滚")
+			require.ErrorIs(t, flushErr, errSimulatedFlushTxRollback, "Flush 事务应因模拟错误回滚")
 			hookStore.failNextTx = false
 
 			callCancel()
@@ -3474,6 +3477,682 @@ func TestSetLkw_CancelRollbackEdgeCases(t *testing.T) {
 		assert.Equal(t, int64(0), ownerALocks[0].StartOffset, "起始偏移量应为 0")
 		assert.Equal(t, int64(50), ownerALocks[0].EndOffset, "结束偏移量应为 50")
 		assert.Equal(t, int16(meta.F_RDLCK), ownerALocks[0].LockType, "锁类型应为 F_RDLCK")
+	})
+}
+
+var errSimulatedBTxRollback = errors.New("simulated B tx failure to trigger restoreInFlightGrants")
+
+type p1SnapshotWipeHookStore struct {
+	db.Store
+	bWaitBeforeTx chan struct{}
+	bResumeTx     chan struct{}
+	bFailTx       atomic.Bool
+	onACommitted  func()
+}
+
+func (s *p1SnapshotWipeHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	role, _ := ctx.Value("p1Role").(string)
+	if role == "B" {
+		select {
+		case s.bWaitBeforeTx <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.bResumeTx:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if s.bFailTx.Load() {
+			return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+				if err := fn(q); err != nil {
+					return err
+				}
+				return errSimulatedBTxRollback
+			}, opts...)
+		}
+		return s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	}
+
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && role == "A" && s.onACommitted != nil {
+		s.onACommitted()
+	}
+	return err
+}
+
+// TestSetLkw_ConcurrentSnapshotRestore_WipesInFlightGrant_DanglingLockLeak
+// 复现缺陷 P-1：SetLk/SetLkw/Flush/Release 在行锁外按整个 Inode 恢复旧 inFlightGrants 快照，
+// 抹除并发 SetLkw 的授锁撤销记录导致悬挂锁泄漏。
+func TestSetLkw_ConcurrentSnapshotRestore_WipesInFlightGrant_DanglingLockLeak(t *testing.T) {
+	dsn := getStorageTestDSN()
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer parentCancel()
+
+	pool, err := pgxpool.New(parentCtx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(parentCtx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &p1SnapshotWipeHookStore{
+		Store:         baseStore,
+		bWaitBeforeTx: make(chan struct{}, 1),
+		bResumeTx:     make(chan struct{}),
+	}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-p1-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(889701)
+	sessB := uint64(889702)
+	_, err = mgr.RenewSession(parentCtx, sessA)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(parentCtx, sessB)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(parentCtx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("p1_leak.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+
+	openResB, err := mgr.Open(parentCtx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessB,
+	})
+	require.NoError(t, err)
+	fhB := openResB.Fh
+
+	ownerA := uint64(9101)
+	ownerB := uint64(9102)
+
+	// 1. 并发请求 B：在请求 A 授锁前拍摄空快照并进入 ExecTxWithOptions 等待
+	ctxB := context.WithValue(parentCtx, "p1Role", "B")
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- mgr.Flush(ctxB, meta.FlushParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			SessionID: &sessB,
+			LockOwner: &ownerB,
+		})
+	}()
+
+	// 等待 B 拍完快照 snap 并停留在 ExecTxWithOptions 入口
+	select {
+	case <-hookStore.bWaitBeforeTx:
+	case <-parentCtx.Done():
+		t.Fatal("等待请求 B 拍摄快照并进入事务超时")
+	}
+
+	// 2. 请求 A 发起 SetLkw([0, 100], F_WRLCK)
+	callCtx, callCancel := context.WithCancel(parentCtx)
+	defer callCancel()
+	ctxA := context.WithValue(callCtx, "p1Role", "A")
+
+	hookStore.onACommitted = func() {
+		hookStore.onACommitted = nil
+		// 请求 A 已经完成授锁并在 m.inFlightGrants 登记了 grantA，事务已提交。
+		// 此时让请求 B 恢复运行并失败，触发其 defer 中的 restoreInFlightGrants(ino, snap)。
+		hookStore.bFailTx.Store(true)
+		close(hookStore.bResumeTx)
+
+		select {
+		case bErr := <-bDone:
+			require.ErrorIs(t, bErr, errSimulatedBTxRollback, "请求 B 应因模拟错误回滚")
+		case <-parentCtx.Done():
+			t.Fatal("等待请求 B 事务失败并恢复旧快照超时")
+		}
+
+		// 请求 B 的旧快照已将 m.inFlightGrants 中 A 的登记项抹除。
+		// 此时取消请求 A 的上下文，触发 rollbackGrantedLock。
+		callCancel()
+	}
+
+	err = mgr.SetLkw(ctxA, meta.SetLkwParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   9101,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+		RequestID: 91011,
+	})
+	require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+		"SetLkw 取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+	// 3. 断言底层数据库：请求 A 的 SetLkw 取消回滚后，已授予的锁必须被彻底清理，不能在底表残留悬挂锁
+	var lockCount int
+	countErr := pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&lockCount)
+	require.NoError(t, countErr)
+	assert.Equal(t, 0, lockCount,
+		"P-1 缺陷验证：SetLkw 取消回滚后，file_locks 底表绝不能残留悬挂写锁（当前因旧快照抹除 inFlightGrant 导致跳过回滚）")
+
+	// 4. 断言业务语义：外部冲突 Owner B 加排他写锁应当成功，不能因残留悬挂锁冲突失败
+	bErr := mgr.SetLk(parentCtx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhB,
+		LockOwner: ownerB,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   9102,
+		},
+		LkFlags:   0,
+		SessionID: sessB,
+	})
+	require.NoError(t, bErr, "P-1 缺陷验证：SetLkw 取消回滚后，外部冲突 Owner B 加排他写锁应当成功，不能遭遇残留悬挂锁冲突")
+}
+
+var errSimulatedSetLkwTxRollback = errors.New("simulated SetLkw tx rollback")
+
+type setLkwRollbackHookStore struct {
+	db.Store
+	aCommittedCh chan struct{}
+	aResumeCh    chan struct{}
+	bFailTx      atomic.Bool
+}
+
+func (s *setLkwRollbackHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	role, _ := ctx.Value("setLkwRollbackRole").(string)
+	if role == "B" && s.bFailTx.Load() {
+		return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+			if err := fn(q); err != nil {
+				return err
+			}
+			return errSimulatedSetLkwTxRollback
+		}, opts...)
+	}
+
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && role == "A" {
+		select {
+		case s.aCommittedCh <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.aResumeCh:
+		case <-ctx.Done():
+		}
+	}
+	return err
+}
+
+func TestSetLkw_SameOwnerRegisterInFlightGrant_TxRollbackRestoresPredecessorRanges(t *testing.T) {
+	dsn := getStorageTestDSN()
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer parentCancel()
+
+	pool, err := pgxpool.New(parentCtx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(parentCtx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &setLkwRollbackHookStore{
+		Store:        baseStore,
+		aCommittedCh: make(chan struct{}, 1),
+		aResumeCh:    make(chan struct{}),
+	}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-undo-test-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(889751)
+	sessOther := uint64(889752)
+	_, err = mgr.RenewSession(parentCtx, sessA)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(parentCtx, sessOther)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(parentCtx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("undo_predecessor.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+	ownerA := uint64(9151)
+
+	openResOther, err := mgr.Open(parentCtx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessOther,
+	})
+	require.NoError(t, err)
+	fhOther := openResOther.Fh
+	ownerOther := uint64(9152)
+
+	// 1. 请求 A 发起 SetLkw([0, 100], F_WRLCK)，授锁事务提交成功后停在返回前
+	aCtx, aCancel := context.WithCancel(parentCtx)
+	defer aCancel()
+	ctxA := context.WithValue(aCtx, "setLkwRollbackRole", "A")
+
+	aDoneCh := make(chan error, 1)
+	go func() {
+		aDoneCh <- mgr.SetLkw(ctxA, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9151,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 91511,
+		})
+	}()
+
+	select {
+	case <-hookStore.aCommittedCh:
+	case <-parentCtx.Done():
+		t.Fatal("等待请求 A 授锁事务提交超时")
+	}
+
+	// 2. 同 Owner 发起重叠请求 B ([0, 200], F_WRLCK)：
+	// 进入事务后执行 registerInFlightGrant (登记 attemptRegID 并剪裁前驱 A 的 pendingRanges 为空)，
+	// 随后 hook 注入错误使得事务回滚 (txErr != nil)。
+	hookStore.bFailTx.Store(true)
+
+	bCtx, bCancel := context.WithCancel(parentCtx)
+	defer bCancel()
+	ctxB := context.WithValue(bCtx, "setLkwRollbackRole", "B")
+
+	bErr := mgr.SetLkw(ctxB, meta.SetLkwParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   200,
+			Type:  meta.F_WRLCK,
+			PID:   9151,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+		RequestID: 91512,
+	})
+	require.True(t, errors.Is(bErr, meta.ErrInterrupted) || errors.Is(bErr, context.Canceled),
+		"SetLkw 自身事务回滚后应返回 ErrInterrupted 或 context.Canceled, actual: %v", bErr)
+
+	// 验证底表此时仅存前驱 A 的初始写锁，新请求 B 的锁未被持久化
+	var midLockCount int
+	err = pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&midLockCount)
+	require.NoError(t, err)
+	require.Equal(t, 1, midLockCount, "请求 B 回滚后底表应仅保留请求 A 的 [0, 100] 锁")
+
+	// 3. 此时新 attemptRegID 已注销，且前驱 A 的 pendingRanges 已恢复为 [0, 100]。
+	// 取消前驱请求 A 的上下文并唤醒放行，A 触发 rollbackGrantedLock：
+	// 若 pendingRanges 恢复成功，则 A 能完整清理底表中的 [0, 100] 锁；若未恢复（为空），A 将跳过清理导致残留悬挂锁。
+	aCancel()
+	close(hookStore.aResumeCh)
+
+	select {
+	case aErr := <-aDoneCh:
+		require.True(t, errors.Is(aErr, meta.ErrInterrupted) || errors.Is(aErr, context.Canceled),
+			"前驱请求 A 取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", aErr)
+	case <-parentCtx.Done():
+		t.Fatal("等待前驱请求 A 取消返回超时")
+	}
+
+	// 4. 断言底层数据库：请求 A 取消后，底表中前驱持有的锁被完整清理，残留锁数量必须为 0
+	var finalLockCount int
+	err = pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&finalLockCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, finalLockCount, "前驱 SetLkw 取消后，底表 file_locks 必须被完整清理，残留锁数应为 0")
+
+	// 5. 断言业务语义：外部冲突 Owner 加排他锁应当成功，不能遭遇残留悬挂锁冲突
+	otherErr := mgr.SetLk(parentCtx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhOther,
+		LockOwner: ownerOther,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   200,
+			Type:  meta.F_WRLCK,
+			PID:   9152,
+		},
+		LkFlags:   0,
+		SessionID: sessOther,
+	})
+	require.NoError(t, otherErr, "外部 Owner 尝试对同一区间加排他锁必须成功，证明前驱锁已彻底释放且未被幽灵锁定")
+}
+
+type p2ExpiryHookStore struct {
+	db.Store
+	setLkwBeforeReturnHook func()
+}
+
+func (s *p2ExpiryHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && s.setLkwBeforeReturnHook != nil {
+		s.setLkwBeforeReturnHook()
+	}
+	return err
+}
+
+// TestSetLkw_ExpiredSessionCancel_LeavesDirtyFileLock
+// 复现缺陷 P-2 及孤儿回收与配额退还覆盖：
+// 场景 ① (rollbackGrantedLock)：获锁后返回前租约过期并取消上下文，物理删除非空孤儿并精确退还磁盘配额
+// 场景 ② (cleanupCancelledWaiter)：PENDING 等待期间租约过期并取消等待，清理等待队列、物理回收孤儿并退还配额
+func TestSetLkw_ExpiredSessionCancel_LeavesDirtyFileLock(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	t.Run("Scenario1_RollbackGrantedLock_ExpiredOrphanReclaimAndQuotaRefund", func(t *testing.T) {
+		parentCtx, parentCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer parentCancel()
+
+		pool, err := pgxpool.New(parentCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(parentCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &p2ExpiryHookStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-p2-s1-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889811)
+		_, err = mgr.RenewSession(parentCtx, sessA)
+		require.NoError(t, err)
+
+		// 1. 创建文件并打开句柄
+		createResA, err := mgr.Create(parentCtx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("p2_orphan_s1.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		orphanIno := createResA.Inode.Ino
+		orphanFh := createResA.Fh
+		ownerA := uint64(9211)
+
+		// 2. 通过 SetAttr 设置非零大小 (Size = 4096)
+		newSize := uint64(4096)
+		_, err = mgr.SetAttr(parentCtx, orphanIno, meta.SetAttrInput{
+			Size: &newSize,
+		})
+		require.NoError(t, err)
+
+		// 3. 调用 Unlink 使其成为 nlink == 0 的孤儿文件
+		err = mgr.Unlink(parentCtx, disk.RootIno, []byte("p2_orphan_s1.bin"))
+		require.NoError(t, err)
+
+		// 验证当前处于孤儿状态：因句柄仍打开，used_inodes == 2, used_bytes == 4096
+		var preUsedInodes, preUsedBytes int64
+		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&preUsedInodes, &preUsedBytes)
+		require.NoError(t, err)
+		require.Equal(t, int64(2), preUsedInodes)
+		require.Equal(t, int64(4096), preUsedBytes)
+
+		callCtx, callCancel := context.WithCancel(parentCtx)
+		defer callCancel()
+
+		hookStore.setLkwBeforeReturnHook = func() {
+			hookStore.setLkwBeforeReturnHook = nil
+			// 在 setLkwBeforeReturnHook 中使会话租约过期并取消 ctx
+			_, updateErr := pool.Exec(parentCtx, "UPDATE client_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE session_id = $1", int64(sessA))
+			require.NoError(t, updateErr)
+
+			callCancel()
+		}
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       orphanIno,
+			Fh:        orphanFh,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9211,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 92111,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 4. 断言底表 file_locks 记录数为 0
+		var lockCount int
+		err = pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(orphanIno)).Scan(&lockCount)
+		require.NoError(t, err)
+		assert.Equal(t, 0, lockCount, "回滚后 file_locks 底表绝不能残留脏记录")
+
+		// 5. 断言该孤儿 inodes 记录已被物理删除 (记录数为 0)
+		var inodeCount int
+		err = pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM inodes WHERE ino = $1", int64(orphanIno)).Scan(&inodeCount)
+		require.NoError(t, err)
+		assert.Equal(t, 0, inodeCount, "孤儿文件在关联过期会话清理后必须被物理删除")
+
+		// 6. 断言所属磁盘 disks.used_inodes 与 disks.used_bytes 已准确退还
+		var postUsedInodes, postUsedBytes int64
+		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&postUsedInodes, &postUsedBytes)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), postUsedInodes, "所属磁盘配额 used_inodes 必须恢复为 1 (仅剩根目录)")
+		assert.Equal(t, int64(0), postUsedBytes, "所属磁盘配额 used_bytes 必须精确退还为 0")
+	})
+
+	t.Run("Scenario2_CleanupCancelledWaiter_PendingExpiryCancellationAndOrphanReclaim", func(t *testing.T) {
+		parentCtx, parentCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer parentCancel()
+
+		pool, err := pgxpool.New(parentCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(parentCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		mgr := meta.New(baseStore)
+
+		disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-p2-s2-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sess1 := uint64(889821)
+		sess2 := uint64(889822)
+		_, err = mgr.RenewSession(parentCtx, sess1)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(parentCtx, sess2)
+		require.NoError(t, err)
+
+		// 1. 创建目标文件 target.bin，会话 1 持有写锁阻塞该文件
+		createTarget, err := mgr.Create(parentCtx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("target.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		targetIno := createTarget.Inode.Ino
+		targetFh1 := createTarget.Fh
+		owner1 := uint64(9221)
+
+		err = mgr.SetLk(parentCtx, meta.SetLkParams{
+			Ino:       targetIno,
+			Fh:        targetFh1,
+			LockOwner: owner1,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9221,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		// 2. 会话 2 创建并打开另一个孤儿文件 orphan2.bin (Size = 4096, Unlink)
+		createOrphan2, err := mgr.Create(parentCtx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("orphan2.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		orphan2Ino := createOrphan2.Inode.Ino
+		_ = createOrphan2.Fh
+
+		newSize := uint64(4096)
+		_, err = mgr.SetAttr(parentCtx, orphan2Ino, meta.SetAttrInput{
+			Size: &newSize,
+		})
+		require.NoError(t, err)
+
+		err = mgr.Unlink(parentCtx, disk.RootIno, []byte("orphan2.bin"))
+		require.NoError(t, err)
+
+		// 验证此时配额：used_inodes == 3 (根目录 + target.bin + orphan2.bin), used_bytes == 4096
+		var preInodes, preBytes int64
+		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&preInodes, &preBytes)
+		require.NoError(t, err)
+		require.Equal(t, int64(3), preInodes)
+		require.Equal(t, int64(4096), preBytes)
+
+		// 3. 会话 2 打开目标文件并调用阻塞 SetLkw 进入 PENDING 等待队列
+		openTarget2, err := mgr.Open(parentCtx, meta.OpenParams{
+			Ino:       targetIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		targetFh2 := openTarget2.Fh
+		owner2 := uint64(9222)
+		reqID2 := uint64(92221)
+
+		s2Ctx, s2Cancel := context.WithCancel(parentCtx)
+		defer s2Cancel()
+
+		s2Done := make(chan error, 1)
+		go func() {
+			s2Done <- mgr.SetLkw(s2Ctx, meta.SetLkwParams{
+				Ino:       targetIno,
+				Fh:        targetFh2,
+				LockOwner: owner2,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   9222,
+				},
+				LkFlags:   0,
+				SessionID: sess2,
+				RequestID: reqID2,
+			})
+		}()
+
+		// 确认会话 2 已在 file_lock_waiters 中登记为 PENDING 状态
+		require.Eventually(t, func() bool {
+			var cnt int
+			_ = pool.QueryRow(parentCtx,
+				"SELECT COUNT(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2 AND status = $3",
+				int64(sess2), int64(reqID2), int16(meta.WaiterStatusPending)).Scan(&cnt)
+			return cnt == 1
+		}, 5*time.Second, 10*time.Millisecond, "会话 2 的等待记录应在底表中处于 PENDING 状态")
+
+		// 4. 将会话 2 的 client_sessions.expires_at 设为过去时间并取消会话 2 的 SetLkw 上下文 (触发 cleanupCancelledWaiter)
+		_, err = pool.Exec(parentCtx, "UPDATE client_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE session_id = $1", int64(sess2))
+		require.NoError(t, err)
+
+		s2Cancel()
+
+		select {
+		case err2 := <-s2Done:
+			require.True(t, errors.Is(err2, meta.ErrInterrupted) || errors.Is(err2, context.Canceled),
+				"SetLkw 取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err2)
+		case <-parentCtx.Done():
+			t.Fatal("等待会话 2 SetLkw 取消超时")
+		}
+
+		// 5. 断言 file_lock_waiters 中会话 2 的等待记录数为 0
+		var waiterCount int
+		err = pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_lock_waiters WHERE session_id = $1", int64(sess2)).Scan(&waiterCount)
+		require.NoError(t, err)
+		assert.Equal(t, 0, waiterCount, "cleanupCancelledWaiter 后 file_lock_waiters 底表绝不能残留等待记录")
+
+		// 6. 断言会话 2 持有的孤儿 inodes 记录已被物理回收 (记录数为 0)
+		var orphanCount int
+		err = pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM inodes WHERE ino = $1", int64(orphan2Ino)).Scan(&orphanCount)
+		require.NoError(t, err)
+		assert.Equal(t, 0, orphanCount, "会话 2 过期并取消等待后，其持有的孤儿文件必须被物理回收")
+
+		// 7. 断言所属磁盘配额已准确退还
+		var postInodes, postBytes int64
+		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&postInodes, &postBytes)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), postInodes, "所属磁盘配额 used_inodes 必须恢复为 2 (仅剩根目录与 target.bin)")
+		assert.Equal(t, int64(0), postBytes, "所属磁盘配额 used_bytes 必须退还为 0")
 	})
 }
 
@@ -3812,4 +4491,497 @@ func isCallToExpr(call *ast.CallExpr, pkg, fn string) bool {
 		return false
 	}
 	return pkgIdent.Name == pkg && sel.Sel.Name == fn
+}
+
+type p1UndoSnapshotWipeHookStore struct {
+	db.Store
+	aCommittedCh    chan struct{}
+	aResumeCh       chan struct{}
+	bBeforeRollback func()
+}
+
+func (s *p1UndoSnapshotWipeHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	role, _ := ctx.Value("p1UndoRole").(string)
+	if role == "B" {
+		err := s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+			if err := fn(q); err != nil {
+				return err
+			}
+			return errors.New("simulated B tx rollback")
+		}, opts...)
+		if s.bBeforeRollback != nil {
+			s.bBeforeRollback()
+		}
+		return err
+	}
+
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && role == "A" {
+		select {
+		case s.aCommittedCh <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.aResumeCh:
+		case <-ctx.Done():
+		}
+	}
+	return err
+}
+
+func TestSetLkw_Round2_P1_UndoRollbackSnapshotOverwrite_WipesCommittedRange(t *testing.T) {
+	dsn := getStorageTestDSN()
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer parentCancel()
+
+	pool, err := pgxpool.New(parentCtx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(parentCtx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &p1UndoSnapshotWipeHookStore{
+		Store:        baseStore,
+		aCommittedCh: make(chan struct{}, 1),
+		aResumeCh:    make(chan struct{}),
+	}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-r2p1-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(889801)
+	_, err = mgr.RenewSession(parentCtx, sessA)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(parentCtx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("r2p1_leak.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+	ownerA := uint64(9201)
+
+	// 1. 请求 A 通过 SetLkw 获得 [0, 100] 排他写锁，并在数据库事务提交后停在返回前
+	aCtx, aCancel := context.WithCancel(parentCtx)
+	defer aCancel()
+	ctxA := context.WithValue(aCtx, "p1UndoRole", "A")
+
+	aDoneCh := make(chan error, 1)
+	go func() {
+		aDoneCh <- mgr.SetLkw(ctxA, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9201,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 92011,
+		})
+	}()
+
+	select {
+	case <-hookStore.aCommittedCh:
+	case <-parentCtx.Done():
+		t.Fatal("等待请求 A 授锁事务提交超时")
+	}
+
+	// 2. 请求 B 解锁 [0, 49]：事务执行并修改内存快照后回滚；
+	// 在 B 的 ExecTxWithOptions 返回错误给 SetLk 调用 lastUndo.Rollback() 之前，
+	// 同步执行请求 C 对 [50, 100] 加排他写锁并提交。
+	hookStore.bBeforeRollback = func() {
+		// 此时 B 的事务已经 ROLLBACK，PostgreSQL 行锁已被释放；
+		// 此时 A 的在途 grant 已被 B 裁剪为 pendingRanges = [50, 100]；
+		// 执行请求 C，加写锁 [50, 100] 并提交
+		cErr := mgr.SetLk(parentCtx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 50,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9201,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, cErr, "请求 C 应该成功提交")
+	}
+
+	ctxB := context.WithValue(parentCtx, "p1UndoRole", "B")
+	bErr := mgr.SetLk(ctxB, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   49,
+			Type:  meta.F_UNLCK,
+			PID:   9201,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+	})
+	require.Error(t, bErr, "请求 B 的事务被模拟回滚应返回错误")
+
+	// 3. 取消请求 A 的上下文并放行，A 退出并执行 rollbackGrantedLock
+	aCancel()
+	close(hookStore.aResumeCh)
+
+	select {
+	case aErr := <-aDoneCh:
+		require.True(t, errors.Is(aErr, meta.ErrInterrupted) || errors.Is(aErr, context.Canceled),
+			"SetLkw 取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", aErr)
+	case <-parentCtx.Done():
+		t.Fatal("等待请求 A 取消返回超时")
+	}
+
+	// 4. 验证断言：C 成功提交的 [50, 100] 写锁必须存活且绝不能被误删
+	var lockCount int
+	countErr := pool.QueryRow(parentCtx,
+		"SELECT COUNT(*) FROM file_locks WHERE ino = $1 AND lock_owner = $2 AND start_offset = 50 AND end_offset = 100 AND lock_type = $3",
+		int64(fileIno), int64(ownerA), int16(meta.F_WRLCK)).Scan(&lockCount)
+	require.NoError(t, countErr)
+	assert.Equal(t, 1, lockCount,
+		"Round 2 P-1 缺陷验证：请求 C 成功提交的 [50, 100] 写锁必须在数据库中存活且未被误删（当前因 B 的 lastUndo.Rollback 用全量旧快照覆盖抹除了 C 的区间扣减，导致 A 取消时误删了 C 的已提交锁）")
+}
+
+type p2UnlockFailHookStore struct {
+	db.Store
+	aCommittedCh chan struct{}
+	aResumeCh    chan struct{}
+}
+
+func (s *p2UnlockFailHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	role, _ := ctx.Value("p2Role").(string)
+	if role == "B" {
+		return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+			if err := fn(q); err != nil {
+				return err
+			}
+			return errors.New("simulated B unlock tx failure")
+		}, opts...)
+	}
+
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && role == "A" {
+		select {
+		case s.aCommittedCh <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.aResumeCh:
+		case <-ctx.Done():
+		}
+	}
+	return err
+}
+
+func TestSetLkw_Round2_P2_UnlockTxFailure_SkipsUndo_HangingLockLeak(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	t.Run("POSIX", func(t *testing.T) {
+		parentCtx, parentCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer parentCancel()
+
+		pool, err := pgxpool.New(parentCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(parentCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &p2UnlockFailHookStore{
+			Store:        baseStore,
+			aCommittedCh: make(chan struct{}, 1),
+			aResumeCh:    make(chan struct{}),
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-r2p2-posix-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889901)
+		sessOther := uint64(889902)
+		_, err = mgr.RenewSession(parentCtx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(parentCtx, sessOther)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(parentCtx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("r2p2_posix.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+		ownerA := uint64(9301)
+
+		openResOther, err := mgr.Open(parentCtx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessOther,
+		})
+		require.NoError(t, err)
+		fhOther := openResOther.Fh
+		ownerOther := uint64(9302)
+
+		// 1. 请求 A 授锁事务已提交但停在返回前
+		aCtx, aCancel := context.WithCancel(parentCtx)
+		defer aCancel()
+		ctxA := context.WithValue(aCtx, "p2Role", "A")
+
+		aDoneCh := make(chan error, 1)
+		go func() {
+			aDoneCh <- mgr.SetLkw(ctxA, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   9301,
+				},
+				LkFlags:   0,
+				SessionID: sessA,
+				RequestID: 93011,
+			})
+		}()
+
+		select {
+		case <-hookStore.aCommittedCh:
+		case <-parentCtx.Done():
+			t.Fatal("等待请求 A 授锁事务提交超时")
+		}
+
+		// 2. 请求 B 调用 SetLkw(F_UNLCK) 解锁，在 fn(q) 完成后事务失败回滚
+		ctxB := context.WithValue(parentCtx, "p2Role", "B")
+		bErr := mgr.SetLkw(ctxB, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_UNLCK,
+				PID:   9301,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 93012,
+		})
+		require.Error(t, bErr, "SetLkw(F_UNLCK) 事务失败应返回错误")
+
+		// 3. 取消请求 A 的上下文并唤醒放行
+		aCancel()
+		close(hookStore.aResumeCh)
+
+		select {
+		case aErr := <-aDoneCh:
+			require.True(t, errors.Is(aErr, meta.ErrInterrupted) || errors.Is(aErr, context.Canceled),
+				"SetLkw 取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", aErr)
+		case <-parentCtx.Done():
+			t.Fatal("等待请求 A 取消返回超时")
+		}
+
+		// 4. 断言底表残留锁数量必须为 0
+		var lockCount int
+		countErr := pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&lockCount)
+		require.NoError(t, countErr)
+		assert.Equal(t, 0, lockCount,
+			"Round 2 P-2 缺陷验证 (POSIX)：SetLkw 取消回滚后，file_locks 底表绝不能残留悬挂锁（当前因 SetLkw 解锁失败因 granted=true 跳过 undo 导致前驱锁失效标记未撤销，使得 rollbackGrantedLock 提前退出产生悬挂锁）")
+
+		// 5. 断言外部冲突 Owner 加排他锁应当成功
+		otherErr := mgr.SetLk(parentCtx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhOther,
+			LockOwner: ownerOther,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9302,
+			},
+			LkFlags:   0,
+			SessionID: sessOther,
+		})
+		require.NoError(t, otherErr, "Round 2 P-2 缺陷验证 (POSIX)：外部冲突 Owner 尝试加排他锁必须成功，不能因残留悬挂锁冲突失败")
+	})
+
+	t.Run("Flock", func(t *testing.T) {
+		parentCtx, parentCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer parentCancel()
+
+		pool, err := pgxpool.New(parentCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(parentCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &p2UnlockFailHookStore{
+			Store:        baseStore,
+			aCommittedCh: make(chan struct{}, 1),
+			aResumeCh:    make(chan struct{}),
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(parentCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-r2p2-flock-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889911)
+		sessOther := uint64(889912)
+		_, err = mgr.RenewSession(parentCtx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(parentCtx, sessOther)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(parentCtx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("r2p2_flock.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+		ownerA := uint64(9311)
+
+		openResOther, err := mgr.Open(parentCtx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessOther,
+		})
+		require.NoError(t, err)
+		fhOther := openResOther.Fh
+		ownerOther := uint64(9312)
+
+		// 1. 请求 A 授锁事务已提交但停在返回前
+		aCtx, aCancel := context.WithCancel(parentCtx)
+		defer aCancel()
+		ctxA := context.WithValue(aCtx, "p2Role", "A")
+
+		aDoneCh := make(chan error, 1)
+		go func() {
+			aDoneCh <- mgr.SetLkw(ctxA, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   meta.OffsetMax,
+					Type:  meta.F_WRLCK,
+					PID:   9311,
+				},
+				LkFlags:   meta.FuseLkFlock,
+				SessionID: sessA,
+				RequestID: 93111,
+			})
+		}()
+
+		select {
+		case <-hookStore.aCommittedCh:
+		case <-parentCtx.Done():
+			t.Fatal("等待请求 A 授锁事务提交超时")
+		}
+
+		// 2. 请求 B 调用 SetLkw(F_UNLCK) 解锁，在 fn(q) 完成后事务失败回滚
+		ctxB := context.WithValue(parentCtx, "p2Role", "B")
+		bErr := mgr.SetLkw(ctxB, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_UNLCK,
+				PID:   9311,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sessA,
+			RequestID: 93112,
+		})
+		require.Error(t, bErr, "SetLkw(F_UNLCK) 事务失败应返回错误")
+
+		// 3. 取消请求 A 的上下文并唤醒放行
+		aCancel()
+		close(hookStore.aResumeCh)
+
+		select {
+		case aErr := <-aDoneCh:
+			require.True(t, errors.Is(aErr, meta.ErrInterrupted) || errors.Is(aErr, context.Canceled),
+				"SetLkw 取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", aErr)
+		case <-parentCtx.Done():
+			t.Fatal("等待请求 A 取消返回超时")
+		}
+
+		// 4. 断言底表残留锁数量必须为 0
+		var lockCount int
+		countErr := pool.QueryRow(parentCtx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&lockCount)
+		require.NoError(t, countErr)
+		assert.Equal(t, 0, lockCount,
+			"Round 2 P-2 缺陷验证 (Flock)：SetLkw 取消回滚后，file_locks 底表绝不能残留悬挂锁（当前因 SetLkw 解锁失败因 granted=true 跳过 undo 导致前驱锁失效标记未撤销，使得 rollbackGrantedLock 提前退出产生悬挂锁）")
+
+		// 5. 断言外部冲突 Owner 加排他锁应当成功
+		otherErr := mgr.SetLk(parentCtx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhOther,
+			LockOwner: ownerOther,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_WRLCK,
+				PID:   9312,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sessOther,
+		})
+		require.NoError(t, otherErr, "Round 2 P-2 缺陷验证 (Flock)：外部冲突 Owner 尝试加排他锁必须成功，不能因残留悬挂锁冲突失败")
+	})
 }

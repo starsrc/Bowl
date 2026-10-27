@@ -81,16 +81,21 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, nil, "flush")
 	}
 
-	snap := m.snapshotInFlightGrants(params.Ino)
+	var lastUndo *inFlightTxUndo
 	var committed bool
 	defer func() {
-		if !committed {
-			m.restoreInFlightGrants(params.Ino, snap)
+		if !committed && lastUndo != nil {
+			lastUndo.Rollback()
 		}
 	}()
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		m.restoreInFlightGrants(params.Ino, snap)
+		if lastUndo != nil {
+			lastUndo.Rollback()
+		}
+		currentUndo := newInFlightTxUndo(m, params.Ino)
+		lastUndo = currentUndo
+
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -140,13 +145,20 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 					return fmt.Errorf("delete posix file locks by owner (ino=%d, lock_owner=%d): %w", params.Ino, *params.LockOwner, err)
 				}
 			}
-			m.invalidateInFlightGrantsOnFlush(params.Ino, params.SessionID, *params.LockOwner)
+			m.markInFlightGrantsFlushedPOSIX(params.Ino, params.SessionID, *params.LockOwner, currentUndo)
 		}
 
 		return nil
 	})
 	if err == nil {
 		committed = true
+		if lastUndo != nil {
+			lastUndo.Discard()
+		}
+	} else {
+		if lastUndo != nil {
+			lastUndo.Rollback()
+		}
 	}
 
 	if err != nil {
@@ -199,16 +211,21 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		return err
 	}
 
-	snap := m.snapshotInFlightGrants(params.Ino)
+	var lastUndo *inFlightTxUndo
 	var committed bool
 	defer func() {
-		if !committed {
-			m.restoreInFlightGrants(params.Ino, snap)
+		if !committed && lastUndo != nil {
+			lastUndo.Rollback()
 		}
 	}()
 
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		m.restoreInFlightGrants(params.Ino, snap)
+		if lastUndo != nil {
+			lastUndo.Rollback()
+		}
+		currentUndo := newInFlightTxUndo(m, params.Ino)
+		lastUndo = currentUndo
+
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -260,7 +277,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 					return fmt.Errorf("delete flock file locks by fh (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 				}
 			}
-			m.invalidateInFlightGrantsOnFlockRelease(params.Ino, params.SessionID, params.Fh)
+			m.markInFlightGrantsFlushedOrReleased(params.Ino, params.SessionID, params.Fh, currentUndo)
 		}
 
 		if inode.Nlink == 0 {
@@ -273,6 +290,13 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 	})
 	if err == nil {
 		committed = true
+		if lastUndo != nil {
+			lastUndo.Discard()
+		}
+	} else {
+		if lastUndo != nil {
+			lastUndo.Rollback()
+		}
 	}
 
 	if err != nil {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"testing"
 	"time"
 
@@ -833,10 +832,7 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 }
 
 func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1009,13 +1005,7 @@ func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
 }
 
 func TestRelease_QuotaReclaim_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = os.Getenv("STORAGE_DB_DSN")
-	}
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"os"
 	"testing"
 	"time"
 
@@ -277,12 +276,223 @@ func TestRenewSession_Unit(t *testing.T) {
 	})
 }
 
+// TestRenewSessionWithStatus_Unit 验证 RenewSessionWithStatus 的单元测试与异常错误传播。
+func TestRenewSessionWithStatus_Unit(t *testing.T) {
+	ctx := context.Background()
+	sessID := uint64(10086)
+	expectedExpires := time.Now().Add(10 * time.Minute).Truncate(time.Microsecond)
+
+	t.Run("首次创建或过期重建会话返回 SessionRecreated: true 且 ExpiresAt 与 DB 返回值一致", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		ts := time.Now().Truncate(time.Microsecond)
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
+				return arg.SessionID == int64(sessID) && arg.ExpiresAt.Valid
+			})).
+			Return(db.ClientSession{
+				SessionID: int64(sessID),
+				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
+				CreatedAt: pgtype.Timestamptz{Time: ts, Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: ts, Valid: true},
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+			Once()
+
+		res, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		require.NoError(t, err)
+		assert.True(t, res.SessionRecreated, "CreatedAt == UpdatedAt 时 SessionRecreated 必须为 true")
+		assert.Equal(t, expectedExpires, res.ExpiresAt)
+	})
+
+	t.Run("续期已有活跃会话返回 SessionRecreated: false 且 ExpiresAt 与 DB 返回值一致", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		createdTS := time.Now().Add(-5 * time.Minute).Truncate(time.Microsecond)
+		updatedTS := time.Now().Truncate(time.Microsecond)
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
+				return arg.SessionID == int64(sessID) && arg.ExpiresAt.Valid
+			})).
+			Return(db.ClientSession{
+				SessionID: int64(sessID),
+				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
+				CreatedAt: pgtype.Timestamptz{Time: createdTS, Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: updatedTS, Valid: true},
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+			Once()
+
+		res, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		require.NoError(t, err)
+		assert.False(t, res.SessionRecreated, "CreatedAt < UpdatedAt 时 SessionRecreated 必须为 false")
+		assert.Equal(t, expectedExpires, res.ExpiresAt)
+	})
+
+	t.Run("配置自定义 WithSessionLeaseTTL 时传入 UpsertClientSession 的 expiresAt 处于合理窗口", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		customTTL := 45 * time.Minute
+		mgr := meta.New(mockStore, meta.WithSessionLeaseTTL(customTTL))
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(1), nil). // 模拟清理了1个过期会话触发 notifyAllLockWaiters
+			Once()
+
+		before := time.Now()
+		var capturedExpiresAt time.Time
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
+				if arg.SessionID != int64(sessID) || !arg.ExpiresAt.Valid {
+					return false
+				}
+				capturedExpiresAt = arg.ExpiresAt.Time
+				return true
+			})).
+			Return(db.ClientSession{
+				SessionID: int64(sessID),
+				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
+				CreatedAt: pgtype.Timestamptz{Time: before, Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: before, Valid: true},
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+			Once()
+
+		res, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		after := time.Now()
+		require.NoError(t, err)
+		assert.True(t, res.SessionRecreated)
+		assert.Equal(t, expectedExpires, res.ExpiresAt)
+
+		// 验证传入 DB 的 expiresAt 处于 [before+customTTL, after+customTTL] 窗口内
+		assert.False(t, capturedExpiresAt.Before(before.Add(customTTL)), "传入 expiresAt 不得早于 before + customTTL")
+		assert.False(t, capturedExpiresAt.After(after.Add(customTTL)), "传入 expiresAt 不得晚于 after + customTTL")
+	})
+
+	t.Run("参数校验防御: sessionID 为 0 或超出 math.MaxInt64 返回 ErrInvalidArgument", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		for _, invalidID := range []uint64{0, uint64(math.MaxInt64) + 1, math.MaxUint64} {
+			res, err := mgr.RenewSessionWithStatus(ctx, invalidID)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+			assert.Empty(t, res)
+		}
+	})
+
+	t.Run("异常流: DeleteExpiredClientSessions 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		expectedErr := errors.New("delete expired failed")
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), expectedErr).
+			Once()
+
+		res, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Empty(t, res)
+	})
+
+	t.Run("异常流: UpsertClientSession 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		expectedErr := errors.New("upsert failed")
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.Anything).
+			Return(db.ClientSession{}, expectedErr).
+			Once()
+
+		res, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Empty(t, res)
+	})
+
+	t.Run("异常流: DeleteUnreferencedOrphanInodes 失败透传错误", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.Anything).
+			Return(db.ClientSession{
+				SessionID: int64(sessID),
+				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
+			}, nil).
+			Once()
+
+		expectedErr := errors.New("delete orphans failed")
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), expectedErr).
+			Once()
+
+		res, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Empty(t, res)
+	})
+}
+
 // TestRenewSession_PostgresIntegration 验证 RenewSession 在真实 PostgreSQL 环境下的功能与只读客户端保活特性。
 func TestRenewSession_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -325,6 +535,28 @@ func TestRenewSession_PostgresIntegration(t *testing.T) {
 		secondExpiresAt, err := mgr.RenewSession(ctx, sessID)
 		require.NoError(t, err)
 		assert.True(t, secondExpiresAt.After(expiresAt), "二次续期租约截止时间必须单调推进")
+
+		// 验证 RenewSessionWithStatus 返回的 ExpiresAt 处于合理 TTL 窗口内
+		statusBefore := time.Now()
+		statusRes, err := mgr.RenewSessionWithStatus(ctx, sessID)
+		require.NoError(t, err)
+		assert.False(t, statusRes.SessionRecreated, "续期已有活跃会话时 session_recreated 必须为 false")
+		assert.True(t, statusRes.ExpiresAt.After(statusBefore))
+		assert.True(t, statusRes.ExpiresAt.After(statusBefore.Add(leaseTTL-500*time.Millisecond)))
+		assert.True(t, statusRes.ExpiresAt.Before(time.Now().Add(leaseTTL+500*time.Millisecond)))
+
+		// 验证 RenewSessionWithStatus 首次创建会话返回 session_recreated = true 且 ExpiresAt 处于合理 TTL 窗口内
+		newSessID := uint64(88009)
+		defer func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", int64(newSessID))
+		}()
+		newBefore := time.Now()
+		newRes, err := mgr.RenewSessionWithStatus(ctx, newSessID)
+		require.NoError(t, err)
+		assert.True(t, newRes.SessionRecreated, "首次创建会话 session_recreated 必须为 true")
+		assert.True(t, newRes.ExpiresAt.After(newBefore))
+		assert.True(t, newRes.ExpiresAt.After(newBefore.Add(leaseTTL-500*time.Millisecond)))
+		assert.True(t, newRes.ExpiresAt.Before(time.Now().Add(leaseTTL+500*time.Millisecond)))
 	})
 
 	t.Run("AC2: 顺带清理超期会话与孤儿 Inode", func(t *testing.T) {

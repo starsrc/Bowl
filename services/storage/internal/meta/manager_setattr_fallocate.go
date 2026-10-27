@@ -369,6 +369,12 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 				return fmt.Errorf("touch inode ctime %d: %w", params.Ino, err)
 			}
 		case FallocFlPunchHole | FallocFlKeepSize:
+			if current.Size > 0 && params.Offset < uint64(current.Size) {
+				if err := punchHoleChunks(ctx, q, current.Ino, current.Size, params.Offset, params.Length); err != nil {
+					return fmt.Errorf("punch hole chunks (ino=%d): %w", current.Ino, err)
+				}
+			}
+
 			newMode := uint32(current.Mode) &^ (S_ISUID | S_ISGID)
 			_, err = q.UpdateInodeAttr(ctx, db.UpdateInodeAttrParams{
 				Ino:         current.Ino,
@@ -406,6 +412,76 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			return ErrNoSpace
 		default:
 			return fmt.Errorf("fallocate (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+		}
+	}
+
+	return nil
+}
+
+// punchHoleChunks 对有效打洞区间遍历受影响的 chunks，整块覆盖时直接删除并扣减引用计数，局部子区间追加空洞切片。
+func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize int64, offset uint64, length uint64) error {
+	if currentSize <= 0 || offset >= uint64(currentSize) {
+		return nil
+	}
+
+	punchStart := offset
+	punchEnd := min(offset+length, uint64(currentSize))
+	if punchStart >= punchEnd {
+		return nil
+	}
+
+	startIndx := uint32(punchStart / ChunkSize)
+	endIndx := uint32((punchEnd - 1) / ChunkSize)
+
+	for indx := startIndx; indx <= endIndx; indx++ {
+		chunkStartOffset := uint64(indx) * ChunkSize
+		chunkEndOffset := chunkStartOffset + ChunkSize
+
+		var cStart uint32
+		if punchStart > chunkStartOffset {
+			cStart = uint32(punchStart - chunkStartOffset)
+		} else {
+			cStart = 0
+		}
+
+		var cEnd uint32
+		if punchEnd < chunkEndOffset {
+			cEnd = uint32(punchEnd - chunkStartOffset)
+		} else {
+			cEnd = ChunkSize
+		}
+
+		if cStart == 0 && cEnd == ChunkSize {
+			deletedSlices, err := q.DeleteChunk(ctx, db.DeleteChunkParams{
+				Ino:  ino,
+				Indx: int32(indx),
+			})
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					continue
+				}
+				return fmt.Errorf("delete chunk (ino=%d, indx=%d): %w", ino, indx, err)
+			}
+			if len(deletedSlices) > 0 {
+				if err := decrementDeletedSlicesRefs(ctx, q, deletedSlices...); err != nil {
+					return fmt.Errorf("decrement deleted slices refs (ino=%d, indx=%d): %w", ino, indx, err)
+				}
+			}
+		} else if cEnd > cStart {
+			holeSlice := Slice{
+				Pos:  cStart,
+				ID:   0,
+				Size: 0,
+				Off:  0,
+				Len:  cEnd - cStart,
+			}
+			if _, err := q.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
+				Ino:    ino,
+				Indx:   int32(indx),
+				Slices: EncodeSlice(holeSlice),
+			}); err != nil {
+				return fmt.Errorf("append existing chunk slice (ino=%d, indx=%d): %w", ino, indx, err)
+			}
 		}
 	}
 

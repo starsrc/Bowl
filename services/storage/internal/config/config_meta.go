@@ -21,6 +21,8 @@ const (
 	DefaultOpenKeepCache = false
 	// DefaultOpenDirCache 默认打开目录是否保留内核目录缓存。
 	DefaultOpenDirCache = false
+	// DefaultDataDir 默认本地数据根目录。
+	DefaultDataDir = "/tmp/bowl-storage-data"
 )
 
 // MetaConfig 承载元数据与 FUSE 缓存相关配置。
@@ -32,6 +34,8 @@ type MetaConfig struct {
 	DirEntryTimeoutSecondsVal float64       `env:"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS" envDefault:"1.0"`
 	OpenKeepCacheVal          bool          `env:"STORAGE_OPEN_KEEP_CACHE" envDefault:"false"`
 	OpenDirCacheVal           bool          `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
+	DataDirVal                string        `env:"DATA_DIR"`
+	StorageDataDirVal         string        `env:"STORAGE_DATA_DIR"`
 }
 
 // SessionLeaseTTL 返回客户端会话租约时长。
@@ -72,8 +76,29 @@ func (c MetaConfig) OpenDirCache() bool {
 	return c.OpenDirCacheVal
 }
 
+// DataDir 返回本地数据根目录路径（优先读取 DATA_DIR，其次 STORAGE_DATA_DIR，默认 DefaultDataDir）。
+func (c MetaConfig) DataDir() string {
+	if strings.TrimSpace(c.DataDirVal) != "" {
+		return c.DataDirVal
+	}
+	if strings.TrimSpace(c.StorageDataDirVal) != "" {
+		return c.StorageDataDirVal
+	}
+	if c.DataDirVal != "" || c.StorageDataDirVal != "" {
+		if c.DataDirVal != "" {
+			return c.DataDirVal
+		}
+		return c.StorageDataDirVal
+	}
+	return DefaultDataDir
+}
+
 // Validate 校验元数据配置合法性。
 func (c MetaConfig) Validate() error {
+	if strings.TrimSpace(c.DataDir()) == "" {
+		return fmt.Errorf("invalid data dir %q: must not be empty", c.DataDir())
+	}
+
 	if c.SessionLeaseTTLVal <= 0 {
 		return fmt.Errorf("invalid session lease TTL %v: must be greater than 0", c.SessionLeaseTTLVal)
 	}

@@ -1,10 +1,8 @@
 package db
 
 import (
-	"context"
 	"fmt"
 
-	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -54,41 +52,10 @@ func (s *SQLStore) Pool() *pgxpool.Pool {
 
 // OpenPool 根据 DBPoolConfig 初始化底层 pgxpool.Pool。
 func OpenPool(cfg config.DBPoolConfig) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
+	pool, err := tx.OpenPool(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse dbpool config: %w", err)
 	}
-
-	if cfg.TracingEnabled {
-		poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
-	}
-
-	if cfg.MaxConns > 0 {
-		poolCfg.MaxConns = cfg.MaxConns
-	}
-	if cfg.MinConns > 0 {
-		poolCfg.MinConns = cfg.MinConns
-	}
-	// 尺寸保护：当 poolConfig.MaxConns > 0 && poolConfig.MinConns > poolConfig.MaxConns 时，自动将 poolConfig.MinConns 钳制为 poolConfig.MaxConns
-	if poolCfg.MaxConns > 0 && poolCfg.MinConns > poolCfg.MaxConns {
-		poolCfg.MinConns = poolCfg.MaxConns
-	}
-
-	if cfg.MaxConnLifetime > 0 {
-		poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
-	}
-	if cfg.MaxConnIdleTime > 0 {
-		poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime
-	}
-	if cfg.HealthCheckPeriod > 0 {
-		poolCfg.HealthCheckPeriod = cfg.HealthCheckPeriod
-	}
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dbpool: %w", err)
-	}
-
 	return pool, nil
 }
 
@@ -108,22 +75,7 @@ func ProvidePool(params PoolParams) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("failed to initialize dbpool: %w", err)
 	}
 
-	if params.Lifecycle != nil {
-		params.Lifecycle.Append(fx.Hook{
-			OnStart: func(ctx context.Context) error {
-				if err := pool.Ping(ctx); err != nil {
-					pool.Close()
-					return fmt.Errorf("failed to ping database: %w", err)
-				}
-				return nil
-			},
-			OnStop: func(context.Context) error {
-				pool.Close()
-				return nil
-			},
-		})
-	}
-
+	tx.RegisterPoolLifecycle(params.Lifecycle, pool)
 	return pool, nil
 }
 

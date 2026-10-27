@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/fx"
 
@@ -310,45 +309,14 @@ func (m *manager) newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
 // errRetryTx 表示事务预读的目录项映射在加锁前发生并发漂移，需回滚并重试当前事务。
 var errRetryTx = errors.New("retry transaction due to concurrent entry drift")
 
-const maxTxRetries = 16
-
 func isRetryableTxError(err error) bool {
-	if errors.Is(err, errRetryTx) {
-		return true
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		// 40001: serialization_failure, 40P01: deadlock_detected
-		return pgErr.Code == "40001" || pgErr.Code == "40P01"
-	}
-	return false
+	return tx.IsRetryable(err, errRetryTx)
 }
 
 func (m *manager) execWriteTxWithRetry(ctx context.Context, fn func(q db.Querier) error) error {
-	var lastErr error
-	backoff := 5 * time.Millisecond
-	for attempt := 0; attempt < maxTxRetries; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		err := m.store.ExecTxWithOptions(ctx, fn)
-		if err == nil {
-			return nil
-		}
-		if !isRetryableTxError(err) {
-			return err
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-			if backoff < 50*time.Millisecond {
-				backoff *= 2
-			}
-		}
-	}
-	return fmt.Errorf("exceeded max transaction retries (%d): %w", maxTxRetries, lastErr)
+	return tx.Retry(ctx, func(attemptCtx context.Context) error {
+		return m.store.ExecTxWithOptions(attemptCtx, fn)
+	}, tx.WithDefaultRetry(errRetryTx))
 }
 
 // uniqueSortedInos 将一组 Inode 号按全局升序排列并去重，确保所有多 Inode 事务遵循单一全局加锁顺序。

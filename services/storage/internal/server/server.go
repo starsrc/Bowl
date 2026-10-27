@@ -81,8 +81,8 @@ type Params struct {
 
 // New 构造 Server 实例，组装洋葱拦截器链与 ConnectRPC 处理器，并按需在 Fx 生命周期中注册启停钩子。
 func New(p Params) (*Server, error) {
-	if p.Config.Port < 0 || p.Config.Port > 65535 {
-		return nil, fmt.Errorf("invalid server port %d: must be between 0 and 65535", p.Config.Port)
+	if p.Config.Port() < 0 || p.Config.Port() > 65535 {
+		return nil, fmt.Errorf("invalid server port %d: must be between 0 and 65535", p.Config.Port())
 	}
 
 	interceptors, err := buildInterceptors(p.Telemetry, p.LogInterceptor, p.Logger)

@@ -58,11 +58,11 @@ func testLogger(capture *logCapture) *slog.Logger {
 
 func defaultTestConfig() config.ServerConfig {
 	return config.ServerConfig{
-		Host:                 "127.0.0.1",
-		Port:                 0,
-		ReadHeaderTimeoutVal: 5 * time.Second,
-		StopTimeoutVal:       5 * time.Second,
-		ReadMaxBytesVal:      131072,
+		ServerHost:              "127.0.0.1",
+		ServerPort:              0,
+		ServerReadHeaderTimeout: 5 * time.Second,
+		ServerStopTimeout:       5 * time.Second,
+		ServerReadMaxBytes:      131072,
 	}
 }
 
@@ -369,7 +369,7 @@ func TestServer_FxLifecycle_StartAndStop(t *testing.T) {
 	var srv *server.Server
 
 	cfg := defaultTestConfig()
-	cfg.Port = 0 // 动态随机端口
+	cfg.ServerPort = 0 // 动态随机端口
 
 	app := fxtest.New(t,
 		fx.Provide(
@@ -408,8 +408,8 @@ func TestServer_FxLifecycle_GracefulShutdownDrainsInflightRequests(t *testing.T)
 	var srv *server.Server
 
 	cfg := defaultTestConfig()
-	cfg.Port = 0
-	cfg.StopTimeoutVal = 5 * time.Second
+	cfg.ServerPort = 0
+	cfg.ServerStopTimeout = 5 * time.Second
 
 	app := fxtest.New(t,
 		fx.Provide(
@@ -550,7 +550,7 @@ func TestMaskInterceptor_NilLogger_MasksInternalAndRetainsErrorInfo(t *testing.T
 func TestServer_ValidateConfigError(t *testing.T) {
 	mockMgr := metamock.NewMockManager(t)
 	cfg := defaultTestConfig()
-	cfg.Port = 99999 // 非法端口
+	cfg.ServerPort = 99999 // 非法端口
 
 	_, err := server.New(server.Params{
 		Config:      cfg,
@@ -559,7 +559,7 @@ func TestServer_ValidateConfigError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid server port")
 
-	cfg.Port = -1
+	cfg.ServerPort = -1
 	_, err = server.New(server.Params{
 		Config:      cfg,
 		MetaManager: mockMgr,
@@ -576,7 +576,7 @@ func TestServer_PortConflict_StartFails(t *testing.T) {
 	tcpAddr := ln.Addr().(*net.TCPAddr)
 
 	cfg := defaultTestConfig()
-	cfg.Port = tcpAddr.Port
+	cfg.ServerPort = tcpAddr.Port
 
 	app := fxtest.New(t,
 		fx.Provide(

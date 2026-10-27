@@ -284,19 +284,19 @@ func TestMetaModule_CustomMetaConfigRuntimeBehavior(t *testing.T) {
 	t.Run("config.Module 与 meta.Module 联动装配集成验证", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		rootCfg := &config.Config{
-			Server: config.ServerConfig{
-				Host: "127.0.0.1",
-				Port: 9000,
+			ServerConfig: config.ServerConfig{
+				ServerHost: "127.0.0.1",
+				ServerPort: 9000,
 			},
-			DB: config.DBPoolConfig{
-				DSNVal: "postgres://localhost/bowl",
+			PoolConfig: config.DBPoolConfig{
+				DSN: "postgres://localhost/bowl",
 			},
-			Telemetry: config.TelemetryConfig{
-				ServiceNameVal: "bowl-storage",
+			TelemetryConfig: config.TelemetryConfig{
+				OtelServiceName: "bowl-storage",
 			},
-			Log: config.LogConfig{
-				LevelVal:  "info",
-				FormatVal: "json",
+			LogConfig: config.LogConfig{
+				LogLevel:  "info",
+				LogFormat: "json",
 			},
 			Meta: config.MetaConfig{
 				SessionLeaseTTLVal:        80 * time.Second,

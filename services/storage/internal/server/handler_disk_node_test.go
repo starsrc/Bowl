@@ -26,11 +26,11 @@ func setupDiskNodeTestClient(t *testing.T) (storagev1connect.StorageServiceClien
 	mockMgr := metamock.NewMockManager(t)
 	srv, err := server.New(server.Params{
 		Config: config.ServerConfig{
-			Host:                 "127.0.0.1",
-			Port:                 0,
-			ReadHeaderTimeoutVal: 5 * time.Second,
-			StopTimeoutVal:       5 * time.Second,
-			ReadMaxBytesVal:      131072,
+			ServerHost:              "127.0.0.1",
+			ServerPort:              0,
+			ServerReadHeaderTimeout: 5 * time.Second,
+			ServerStopTimeout:       5 * time.Second,
+			ServerReadMaxBytes:      131072,
 		},
 		MetaManager: mockMgr,
 	})

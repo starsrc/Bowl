@@ -44,7 +44,7 @@ func run(ctx context.Context, opts ...fx.Option) error {
 		server.Module,
 		fx.NopLogger,
 		fx.Provide(func() context.Context { return ctx }),
-		fx.StopTimeout(cfg.Server.StopTimeout()),
+		fx.StopTimeout(cfg.StopTimeout()),
 	}
 
 	application := fx.New(append(options, opts...)...)

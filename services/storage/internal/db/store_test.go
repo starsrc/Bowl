@@ -189,7 +189,7 @@ func (r *recordingLifecycle) Append(hook fx.Hook) {
 
 func TestOpenPool_InvalidDSN(t *testing.T) {
 	cfg := config.DBPoolConfig{
-		DSNVal: "postgres://%invalid-url",
+		DSN: "postgres://%invalid-url",
 	}
 
 	pool, err := db.OpenPool(cfg)
@@ -201,8 +201,8 @@ func TestOpenPool_InvalidDSN(t *testing.T) {
 func TestOpenPool_TracingEnabled(t *testing.T) {
 	t.Run("TracingEnabled 为 true 时挂载 OTel Tracer", func(t *testing.T) {
 		cfg := config.DBPoolConfig{
-			DSNVal:            "postgres://user:pass@127.0.0.1:5432/testdb",
-			TracingEnabledVal: true,
+			DSN:            "postgres://user:pass@127.0.0.1:5432/testdb",
+			TracingEnabled: true,
 		}
 
 		pool, err := db.OpenPool(cfg)
@@ -215,8 +215,8 @@ func TestOpenPool_TracingEnabled(t *testing.T) {
 
 	t.Run("TracingEnabled 为 false 时不挂载 OTel Tracer", func(t *testing.T) {
 		cfg := config.DBPoolConfig{
-			DSNVal:            "postgres://user:pass@127.0.0.1:5432/testdb",
-			TracingEnabledVal: false,
+			DSN:            "postgres://user:pass@127.0.0.1:5432/testdb",
+			TracingEnabled: false,
 		}
 
 		pool, err := db.OpenPool(cfg)
@@ -231,9 +231,9 @@ func TestOpenPool_TracingEnabled(t *testing.T) {
 func TestOpenPool_MinConnsClamped(t *testing.T) {
 	t.Run("MinConns 大于 MaxConns 时触发尺寸保护钳制为 MaxConns", func(t *testing.T) {
 		cfg := config.DBPoolConfig{
-			DSNVal:      "postgres://user:pass@127.0.0.1:5432/testdb",
-			MaxConnsVal: 10,
-			MinConnsVal: 20,
+			DSN:      "postgres://user:pass@127.0.0.1:5432/testdb",
+			MaxConns: 10,
+			MinConns: 20,
 		}
 
 		pool, err := db.OpenPool(cfg)
@@ -247,9 +247,9 @@ func TestOpenPool_MinConnsClamped(t *testing.T) {
 
 	t.Run("MinConns 小于等于 MaxConns 时保持原样", func(t *testing.T) {
 		cfg := config.DBPoolConfig{
-			DSNVal:      "postgres://user:pass@127.0.0.1:5432/testdb",
-			MaxConnsVal: 20,
-			MinConnsVal: 5,
+			DSN:      "postgres://user:pass@127.0.0.1:5432/testdb",
+			MaxConns: 20,
+			MinConns: 5,
 		}
 
 		pool, err := db.OpenPool(cfg)
@@ -264,13 +264,13 @@ func TestOpenPool_MinConnsClamped(t *testing.T) {
 
 func TestOpenPool_PoolConfigOptions(t *testing.T) {
 	cfg := config.DBPoolConfig{
-		DSNVal:               "postgres://user:pass@127.0.0.1:5432/testdb?connect_timeout=5",
-		MaxConnsVal:          15,
-		MinConnsVal:          3,
-		MaxConnLifetimeVal:   45 * time.Minute,
-		MaxConnIdleTimeVal:   15 * time.Minute,
-		HealthCheckPeriodVal: 30 * time.Second,
-		TracingEnabledVal:    false,
+		DSN:               "postgres://user:pass@127.0.0.1:5432/testdb?connect_timeout=5",
+		MaxConns:          15,
+		MinConns:          3,
+		MaxConnLifetime:   45 * time.Minute,
+		MaxConnIdleTime:   15 * time.Minute,
+		HealthCheckPeriod: 30 * time.Second,
+		TracingEnabled:    false,
 	}
 
 	pool, err := db.OpenPool(cfg)
@@ -296,7 +296,7 @@ func TestNewStore(t *testing.T) {
 
 func TestNewStore_PoolAndClose(t *testing.T) {
 	cfg := config.DBPoolConfig{
-		DSNVal: "postgres://user:pass@127.0.0.1:5432/testdb",
+		DSN: "postgres://user:pass@127.0.0.1:5432/testdb",
 	}
 	pool, err := db.OpenPool(cfg)
 	require.NoError(t, err)
@@ -332,7 +332,7 @@ func TestNewStore_PoolAndClose(t *testing.T) {
 
 func TestModule_FxProvidesStoreAndPool(t *testing.T) {
 	cfg := config.DBPoolConfig{
-		DSNVal: "postgres://user:pass@127.0.0.1:5432/testdb",
+		DSN: "postgres://user:pass@127.0.0.1:5432/testdb",
 	}
 
 	t.Run("同时提供 *pgxpool.Pool 与 db.Store (携带 telemetry.Ready)", func(t *testing.T) {
@@ -370,7 +370,7 @@ func TestModule_FxProvidesStoreAndPool(t *testing.T) {
 
 	t.Run("非法 DSN 时 Fx 初始化报错", func(t *testing.T) {
 		invalidCfg := config.DBPoolConfig{
-			DSNVal: "postgres://%invalid-url",
+			DSN: "postgres://%invalid-url",
 		}
 		var store db.Store
 		app := fx.New(
@@ -386,7 +386,7 @@ func TestModule_FxProvidesStoreAndPool(t *testing.T) {
 
 func TestModule_Lifecycle_PingFailure(t *testing.T) {
 	cfg := config.DBPoolConfig{
-		DSNVal: "postgres://user:pass@127.0.0.1:59999/testdb?connect_timeout=1",
+		DSN: "postgres://user:pass@127.0.0.1:59999/testdb?connect_timeout=1",
 	}
 
 	var (
@@ -417,7 +417,7 @@ func TestModule_Lifecycle_PingFailure(t *testing.T) {
 
 func TestModule_Lifecycle_OnStop(t *testing.T) {
 	cfg := config.DBPoolConfig{
-		DSNVal: "postgres://user:pass@127.0.0.1:5432/testdb",
+		DSN: "postgres://user:pass@127.0.0.1:5432/testdb",
 	}
 
 	t.Run("OnStop 钩子成功执行并关闭底层连接池", func(t *testing.T) {
@@ -482,7 +482,7 @@ func TestModule_Lifecycle_PingSuccess(t *testing.T) {
 	}
 
 	cfg := config.DBPoolConfig{
-		DSNVal: dsn,
+		DSN: dsn,
 	}
 
 	var (

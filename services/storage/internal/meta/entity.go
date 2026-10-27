@@ -42,6 +42,14 @@ const (
 	DefaultDirSize   uint64 = 4096
 )
 
+// 数据层核心常量（ADR-0019）。
+const (
+	ChunkSize             = 1 << 26 // 64 MiB (67,108,864 字节)
+	BlockSize             = 1 << 22 // 4 MiB (4,194,304 字节)
+	SliceBytes            = 24      // 单个 Slice 二进制元数据描述符字节大小
+	CompactSliceThreshold = 64      // 单个 Chunk 累积 Slice 数量触发 Compaction 的阈值
+)
+
 // 磁盘与 StatFS 常量。
 const (
 	// MaxDiskNameBytes 定义磁盘名称最大字节长度（255 字节）。

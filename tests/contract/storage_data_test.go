@@ -19,14 +19,46 @@ func TestReadRequestContract(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("有效请求", func(t *testing.T) {
-		req := &storagev1.ReadRequest{
-			Ino:       1,
-			Fh:        1,
-			Offset:    0,
-			Size:      4194304,
-			SessionId: proto.Uint64(1),
+		cases := []struct {
+			name string
+			req  *storagev1.ReadRequest
+		}{
+			{
+				name: "典型 4 MiB 满载读取",
+				req: &storagev1.ReadRequest{
+					Ino:       1,
+					Fh:        1,
+					Offset:    0,
+					Size:      4194304,
+					SessionId: proto.Uint64(1),
+				},
+			},
+			{
+				name: "0 字节 EOF 探测读取",
+				req: &storagev1.ReadRequest{
+					Ino:       100,
+					Fh:        200,
+					Offset:    1024,
+					Size:      0,
+					SessionId: proto.Uint64(10),
+				},
+			},
+			{
+				name: "最大合法 offset 边界",
+				req: &storagev1.ReadRequest{
+					Ino:    math.MaxInt64,
+					Fh:     math.MaxInt64,
+					Offset: math.MaxInt64,
+					Size:   1024,
+				},
+			},
 		}
-		assert.NoError(t, v.Validate(req))
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.NoError(t, v.Validate(tc.req))
+			})
+		}
 	})
 
 	t.Run("非法参数拦截", func(t *testing.T) {
@@ -49,6 +81,41 @@ func TestReadRequestContract(t *testing.T) {
 				assertErrorInfoReason(t, v.Validate(tc.req), validator.ReasonInvalidArgument)
 			})
 		}
+	})
+}
+
+// TestReadResponseContract 验证 ReadResponse 的契约规范与 Protobuf 编解码正确性。
+func TestReadResponseContract(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("有效空载荷响应", func(t *testing.T) {
+		resp := &storagev1.ReadResponse{
+			Data: []byte{},
+		}
+		assert.NoError(t, v.Validate(resp))
+
+		wire, err := proto.Marshal(resp)
+		require.NoError(t, err)
+
+		var unmarshaled storagev1.ReadResponse
+		require.NoError(t, proto.Unmarshal(wire, &unmarshaled))
+		assert.Empty(t, unmarshaled.Data)
+	})
+
+	t.Run("有效 4 MiB 满载数据响应序列化往返", func(t *testing.T) {
+		data := bytes.Repeat([]byte{0xAB}, 4194304)
+		resp := &storagev1.ReadResponse{
+			Data: data,
+		}
+		assert.NoError(t, v.Validate(resp))
+
+		wire, err := proto.Marshal(resp)
+		require.NoError(t, err)
+
+		var unmarshaled storagev1.ReadResponse
+		require.NoError(t, proto.Unmarshal(wire, &unmarshaled))
+		assert.Equal(t, data, unmarshaled.Data)
 	})
 }
 

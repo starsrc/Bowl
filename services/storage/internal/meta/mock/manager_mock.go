@@ -105,6 +105,69 @@ func (_c *MockManager_CollectGarbage_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// CompactChunk provides a mock function for the type MockManager
+func (_mock *MockManager) CompactChunk(ctx context.Context, ino uint64, indx uint32) error {
+	ret := _mock.Called(ctx, ino, indx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CompactChunk")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, uint32) error); ok {
+		r0 = returnFunc(ctx, ino, indx)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_CompactChunk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CompactChunk'
+type MockManager_CompactChunk_Call struct {
+	*mock.Call
+}
+
+// CompactChunk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino uint64
+//   - indx uint32
+func (_e *MockManager_Expecter) CompactChunk(ctx any, ino any, indx any) *MockManager_CompactChunk_Call {
+	return &MockManager_CompactChunk_Call{Call: _e.mock.On("CompactChunk", ctx, ino, indx)}
+}
+
+func (_c *MockManager_CompactChunk_Call) Run(run func(ctx context.Context, ino uint64, indx uint32)) *MockManager_CompactChunk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		var arg2 uint32
+		if args[2] != nil {
+			arg2 = args[2].(uint32)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_CompactChunk_Call) Return(err error) *MockManager_CompactChunk_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_CompactChunk_Call) RunAndReturn(run func(ctx context.Context, ino uint64, indx uint32) error) *MockManager_CompactChunk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Create provides a mock function for the type MockManager
 func (_mock *MockManager) Create(ctx context.Context, params meta.CreateParams) (*meta.CreateResult, error) {
 	ret := _mock.Called(ctx, params)

@@ -1,34 +1,21 @@
 -- +goose Up
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION pg_temp.decode_entry_name_to_bytea(t text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE AS $$
-DECLARE
-    res bytea := ''::bytea;
-    i int;
-    ch text;
-    ch_code int;
-BEGIN
-    IF t IS NULL THEN
-        RETURN NULL;
-    END IF;
-    IF t !~ '[\uE000-\uE0FF]' THEN
-        RETURN convert_to(t, 'UTF8');
-    END IF;
-
-    FOR i IN 1 .. char_length(t) LOOP
-        ch := substr(t, i, 1);
-        ch_code := ascii(ch);
-        IF ch_code BETWEEN 57344 AND 57599 THEN
-            res := res || set_byte('\x00'::bytea, 0, ch_code - 57344);
-        ELSE
-            res := res || convert_to(ch, 'UTF8');
-        END IF;
-    END LOOP;
-    RETURN res;
-END;
-$$;
-
 ALTER TABLE entries
-    ALTER COLUMN name TYPE BYTEA USING pg_temp.decode_entry_name_to_bytea(name);
+    ALTER COLUMN name TYPE BYTEA USING convert_to(name, 'UTF8');
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name = '_rollback_entries_name_backup'
+    ) THEN
+        UPDATE entries e
+        SET name = b.raw_name
+        FROM _rollback_entries_name_backup b
+        WHERE e.parent_ino = b.parent_ino AND e.name = convert_to(b.rollback_name, 'UTF8');
+        DROP TABLE _rollback_entries_name_backup;
+    END IF;
+END $$;
 
 ALTER TABLE entries
     ADD CONSTRAINT chk_entries_name CHECK (
@@ -40,36 +27,39 @@ ALTER TABLE entries
 
 -- +goose Down
 -- +goose StatementBegin
+CREATE TABLE IF NOT EXISTS _rollback_entries_name_backup (
+    parent_ino BIGINT NOT NULL,
+    rollback_name VARCHAR(255) NOT NULL,
+    raw_name BYTEA NOT NULL,
+    PRIMARY KEY (parent_ino, rollback_name)
+);
+
 CREATE OR REPLACE FUNCTION pg_temp.encode_entry_name_to_varchar(b bytea) RETURNS varchar(255) LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE
-    res text;
-    i int;
-    byte_val int;
+    s text;
 BEGIN
     IF b IS NULL THEN
         RETURN NULL;
     END IF;
+
     BEGIN
-        res := convert_from(b, 'UTF8');
-        IF res !~ '[\uE000-\uE0FF]' THEN
-            RETURN res::varchar(255);
+        s := convert_from(b, 'UTF8');
+        IF length(s) <= 255 AND octet_length(b) <= 255 AND left(s, 10) <> '__bowl_rb_' THEN
+            RETURN s::varchar(255);
         END IF;
-    EXCEPTION WHEN character_not_in_repertoire THEN
+    EXCEPTION WHEN others THEN
         NULL;
     END;
 
-    res := '';
-    FOR i IN 0 .. octet_length(b) - 1 LOOP
-        byte_val := get_byte(b, i);
-        IF byte_val BETWEEN 1 AND 127 THEN
-            res := res || chr(byte_val);
-        ELSE
-            res := res || chr(57344 + byte_val);
-        END IF;
-    END LOOP;
-    RETURN res::varchar(255);
+    RETURN ('__bowl_rb_' || encode(sha256(b), 'hex'))::varchar(255);
 END;
 $$;
+
+INSERT INTO _rollback_entries_name_backup (parent_ino, rollback_name, raw_name)
+SELECT parent_ino, pg_temp.encode_entry_name_to_varchar(name), name
+FROM entries
+WHERE convert_to(pg_temp.encode_entry_name_to_varchar(name), 'UTF8') <> name
+ON CONFLICT (parent_ino, rollback_name) DO UPDATE SET raw_name = EXCLUDED.raw_name;
 
 ALTER TABLE entries DROP CONSTRAINT IF EXISTS chk_entries_name;
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -771,4 +772,81 @@ func TestSetXattr_DatabaseErrors(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "touch inode ctime")
 	})
+}
+
+// TestSetXattr_Integration_MaxXattrListBytesBoundary 基于真实 PostgreSQL 验证：
+// SetXattr 触及 MaxXattrListBytes (65536) 含 + 1 NUL 计费临界值（恰好 65536 成功、超出返回 ErrNoSpace）。
+func TestSetXattr_Integration_MaxXattrListBytesBoundary(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	ctx := context.Background()
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     "test-xattr-boundary-disk",
+		MaxBytes: 10 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	})
+
+	mknodRes, err := mgr.Mknod(ctx, meta.MknodParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("xattr_boundary_file.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+	})
+	require.NoError(t, err)
+	ino := mknodRes.Ino
+
+	// 1. 连续插入 255 个长度为 255 字节的属性（每个属性计费 255 + 1 = 256 字节）
+	// 255 * 256 = 65280 字节，剩余配额为 65536 - 65280 = 256 字节
+	for i := 0; i < 255; i++ {
+		// 构造 255 字节的合法 user.* 属性名
+		name := []byte(fmt.Sprintf("user.key_%03d_%s", i, bytes.Repeat([]byte("a"), 242)))
+		require.Len(t, name, 255)
+		err := mgr.SetXattr(ctx, meta.SetXattrParams{
+			Ino:   ino,
+			Name:  name,
+			Value: []byte("v"),
+			Flags: meta.XattrCreate,
+		})
+		require.NoError(t, err, "插入第 %d 个 xattr 必须成功", i)
+	}
+
+	// 2. 插入第 256 个属性，长度恰好为 255 字节（计费 255 + 1 = 256 字节）
+	// 总字节数累计达到 65280 + 256 = 65536 字节，恰好等于 MaxXattrListBytes
+	nameExact := []byte(fmt.Sprintf("user.exact_%s", bytes.Repeat([]byte("b"), 244)))
+	require.Len(t, nameExact, 255)
+	err = mgr.SetXattr(ctx, meta.SetXattrParams{
+		Ino:   ino,
+		Name:  nameExact,
+		Value: []byte("exact-val"),
+		Flags: meta.XattrCreate,
+	})
+	require.NoError(t, err, "恰好达到 65536 字节上限必须成功")
+
+	// 验证底表统计正好为 65536 字节
+	totalBytes, err := store.GetInodeXattrNamesTotalBytes(ctx, int64(ino))
+	require.NoError(t, err)
+	assert.Equal(t, int64(meta.MaxXattrListBytes), totalBytes, "底表扩展属性名称总计费必须精确为 65536 字节")
+
+	// 3. 此时配额已满，再次尝试新增任意属性（超出 1 字节及以上）必返回 ErrNoSpace
+	err = mgr.SetXattr(ctx, meta.SetXattrParams{
+		Ino:   ino,
+		Name:  []byte("user.overflow"),
+		Value: []byte("val"),
+		Flags: meta.XattrCreate,
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, meta.ErrNoSpace), "超出 65536 上限时必须返回 ErrNoSpace")
+
+	// 4. 对已有属性执行覆盖更新（不增加名称长度），必须依然成功
+	err = mgr.SetXattr(ctx, meta.SetXattrParams{
+		Ino:   ino,
+		Name:  nameExact,
+		Value: []byte("updated-exact-val"),
+		Flags: meta.XattrReplace,
+	})
+	require.NoError(t, err, "满额状态下对已有属性执行 Replace 覆盖写必须成功")
 }

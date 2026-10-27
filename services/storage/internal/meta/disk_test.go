@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1643,12 +1644,22 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, targetIno).
 			Return(db.Inode{}, pgx.ErrNoRows).
-			Once()
+			Maybe()
+
+		mockQuerier.EXPECT().
+			GetFileLockWaiter(mock.Anything, db.GetFileLockWaiterParams{
+				SessionID: sessionID,
+				RequestID: requestID,
+			}).
+			Return(db.FileLockWaiter{}, pgx.ErrNoRows).
+			Maybe()
 
 		// 启动后台协程发起阻塞加锁请求
 		errCh := make(chan error, 1)
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
 		go func() {
-			errCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+			errCh <- mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 				Ino:       uint64(targetIno),
 				Fh:        uint64(targetFh),
 				LockOwner: uint64(owner),
@@ -1665,7 +1676,11 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		}()
 
 		// 等待 SetLkw 完成第一轮事务并登记等待者
-		<-waiterRegistered
+		select {
+		case <-waiterRegistered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("等待 waiterRegistered 超时")
+		}
 		time.Sleep(10 * time.Millisecond)
 
 		// 主协程执行 DeleteDisk
@@ -1684,17 +1699,33 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 }
 
 func getStorageTestDSN() string {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = os.Getenv("STORAGE_DB_DSN")
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL"} {
+		if val := os.Getenv(env); val != "" {
+			return val
+		}
 	}
-	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+
+	candidates := []string{
+		"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
 	}
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+
+	for _, candidate := range candidates {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		pool, err := pgxpool.New(probeCtx, candidate)
+		if err == nil {
+			pingErr := pool.Ping(probeCtx)
+			pool.Close()
+			cancel()
+			if pingErr == nil {
+				return candidate
+			}
+		} else {
+			cancel()
+		}
 	}
-	return dsn
+
+	return "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
 }
 
 func TestDeleteDisk_PostgresIntegration(t *testing.T) {
@@ -1951,8 +1982,10 @@ func TestDeleteDisk_PostgresIntegration(t *testing.T) {
 
 		// 4. 会话 2 在后台 goroutine 中发起阻塞写锁请求 SetLkw(F_WRLCK)
 		errCh := make(chan error, 1)
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
 		go func() {
-			errCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+			errCh <- mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 				Ino:       fileIno,
 				Fh:        fh2,
 				LockOwner: 2002,
@@ -2429,4 +2462,114 @@ func TestCrossDisk_TopologyIsolation_PostgresIntegration(t *testing.T) {
 	lookedUpB, err := mgr.Lookup(ctx, diskB.RootIno, []byte("fileB.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, fileBIno, lookedUpB.Ino)
+}
+
+// TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock 验证 DeleteDisk 与并发 SetAttr 不得发生 PostgreSQL 40P01 死锁。
+func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
+	dsn := getStorageTestDSN()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
+		return
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("跳过集成测试: ping postgres 失败: %v", err)
+		return
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	const numDisks = 2
+	const filesPerDisk = 6
+	totalSetAttrSamples := 0
+
+	for d := 0; d < numDisks; d++ {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-del-vs-setattr-%d-%d", d, time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		fileInos := make([]uint64, filesPerDisk)
+		for f := 0; f < filesPerDisk; f++ {
+			res, err := mgr.Create(ctx, meta.CreateParams{
+				ParentIno: disk.RootIno,
+				Name:      []byte(fmt.Sprintf("file_%d", f)),
+				Mode:      meta.S_IFREG | 0o644,
+				Flags:     meta.O_CREAT | meta.O_RDWR,
+				UID:       1000,
+				GID:       1000,
+			})
+			require.NoError(t, err)
+			fileInos[f] = res.Inode.Ino
+		}
+
+		const numSetAttrWorkers = 4
+		const setattrLoops = 5
+		setattrErrCh := make(chan error, numSetAttrWorkers*setattrLoops)
+
+		var wg sync.WaitGroup
+		startCh := make(chan struct{})
+
+		for w := 0; w < numSetAttrWorkers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				<-startCh
+				for l := 0; l < setattrLoops; l++ {
+					ino := fileInos[(workerID+l)%filesPerDisk]
+					newSize := uint64(1024 * (l + 1))
+					_, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+						Size: &newSize,
+					})
+					setattrErrCh <- err
+				}
+			}(w)
+		}
+
+		var delErr error
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-startCh
+			delErr = mgr.DeleteDisk(ctx, disk.DiskID)
+		}()
+
+		close(startCh)
+		wg.Wait()
+		close(setattrErrCh)
+
+		require.NoError(t, delErr, "每轮 DeleteDisk 调用必须成功")
+
+		for e := range setattrErrCh {
+			if e == nil || errors.Is(e, meta.ErrNotFound) {
+				totalSetAttrSamples++
+				continue
+			}
+
+			var pgErr *pgconn.PgError
+			if (errors.As(e, &pgErr) && pgErr.Code == "40P01") || strings.Contains(strings.ToLower(e.Error()), "deadlock") {
+				t.Fatalf("检测到 PostgreSQL 40P01 死锁: %v", e)
+			}
+			t.Fatalf("SetAttr 返回非法错误 (仅允许 nil 或 ErrNotFound): %v", e)
+		}
+
+		var diskCount, inodeCount int64
+		qErr := pool.QueryRow(ctx, "SELECT count(*) FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&diskCount)
+		require.NoError(t, qErr)
+		require.Zero(t, diskCount, "被删除磁盘在 disks 表中的记录数必须为 0")
+
+		qErr = pool.QueryRow(ctx, "SELECT count(*) FROM inodes WHERE root_ino = $1", disk.RootIno).Scan(&inodeCount)
+		require.NoError(t, qErr)
+		require.Zero(t, inodeCount, "被删除磁盘在 inodes 表中的记录数必须为 0")
+	}
+
+	require.Greater(t, totalSetAttrSamples, 0, "SetAttr 实际执行完成的样本数必须大于 0")
+	require.NoError(t, ctx.Err())
 }

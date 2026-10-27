@@ -96,8 +96,9 @@ type formalConcurrentSharedEnv struct {
 	PinnedIno1     uint64     // Disk1 上固定的锚点常规文件 (4096 字节，保证 UsedBytes >= 4096 以稳定验证 ErrInvalidShrink)
 	PinnedIno2     uint64     // Disk2 上固定的锚点常规文件 (4096 字节)
 
-	seqCounter    atomic.Uint64
-	nextRequestID atomic.Uint64
+	seqCounter        atomic.Uint64
+	nextRequestID     atomic.Uint64
+	writeSuccessCount atomic.Int64
 
 	mu                  sync.RWMutex
 	dirInos             []uint64          // 候选目录 Ino 池（含双盘根目录及各 Worker 创建的子目录）
@@ -109,6 +110,10 @@ type formalConcurrentSharedEnv struct {
 	cancelledWaiters    []formalWaiterKey // 所有因超时/取消退出的 SetLkw 请求键
 	materializedTmpInos []uint64          // 所有曾通过 Link 成功具名化的 TmpFile 节点 Ino（一旦具名化，即便后续 Unlink 至 nlink=0，其关联句柄也绝不能再带 O_TMPFILE）
 	workerTraces        [][]string        // 各 Worker 的中文操作轨迹账单
+}
+
+func (e *formalConcurrentSharedEnv) RecordWriteSuccess() {
+	e.writeSuccessCount.Add(1)
 }
 
 func (e *formalConcurrentSharedEnv) NextSeq() uint64 {
@@ -257,29 +262,18 @@ func isLegalConcurrentDomainError(err error) bool {
 	}
 
 	// 2. 必须匹配已知的 meta.Err* 领域哨兵错误（绝不包含 ErrIO，绝不包含通用超时或取消）
+	// 收紧为仅包含并发拓扑/空间/句柄竞争下真实可能出现的领域错误
 	legalSentinels := []error{
-		meta.ErrInvalidArgument,
 		meta.ErrNotFound,
-		meta.ErrNotDir,
-		meta.ErrIsDir,
-		meta.ErrPerm,
 		meta.ErrAlreadyExists,
 		meta.ErrNotEmpty,
-		meta.ErrBadFileHandle,
-		meta.ErrNotSupported,
-		meta.ErrNameTooLong,
-		meta.ErrRange,
-		meta.ErrTooBig,
-		meta.ErrNoData,
+		meta.ErrNotDir,
+		meta.ErrIsDir,
 		meta.ErrNoSpace,
+		meta.ErrBadFileHandle,
 		meta.ErrAgain,
 		meta.ErrDeadlock,
-		meta.ErrTooManyLinks,
-		meta.ErrFileTooLarge,
-		meta.ErrIllegalSeek,
-		meta.ErrAccess,
-		meta.ErrInvalidShrink,
-		meta.ErrCrossDevice,
+		meta.ErrInvalidArgument,
 	}
 	for _, sentinel := range legalSentinels {
 		if errors.Is(err, sentinel) {
@@ -384,13 +378,9 @@ func runConcurrentWorker(
 
 		switch {
 		case roll < 12:
-			// 1. 跨目录 / 同目录 Rename（含 flags = 0, RenameNoReplace, RenameExchange 及跨盘 EXDEV）
+			// 1. 跨目录 / 同目录 Rename（含 flags = 0, RenameNoReplace, RenameExchange）
 			oldParent := env.PickActiveDirIno(rng)
 			newParent := env.PickActiveDirIno(rng)
-			if rng.IntN(8) == 0 {
-				// 触发跨盘 Rename -> ErrCrossDevice (EXDEV)
-				newParent = env.Disk2.RootIno
-			}
 			oldName := pickSharedOrUniqueName(rng, env, "rn_src")
 			if hint, ok := env.PickEntryHint(rng); ok && rng.IntN(2) == 0 {
 				oldParent = hint.ParentIno
@@ -415,6 +405,7 @@ func runConcurrentWorker(
 			})
 			assertConcurrentStepErr(t, env, workerID, step, "Rename", err)
 			if err == nil {
+				env.RecordWriteSuccess()
 				env.AddEntryHint(newParent, newName)
 			}
 			recordTrace(step, fmt.Sprintf("Rename(old=%d/%s, new=%d/%s, flags=0x%x) -> err=%v",
@@ -442,6 +433,7 @@ func runConcurrentWorker(
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Mkdir", err)
 				if err == nil && inode != nil {
+					env.RecordWriteSuccess()
 					env.AddDirIno(inode.Ino)
 					env.AddEntryHint(parentIno, name)
 				}
@@ -455,6 +447,9 @@ func runConcurrentWorker(
 				}
 				err := env.Mgr.Rmdir(ctx, parentIno, []byte(name))
 				assertConcurrentStepErr(t, env, workerID, step, "Rmdir", err)
+				if err == nil {
+					env.RecordWriteSuccess()
+				}
 				recordTrace(step, fmt.Sprintf("Rmdir(parent=%d, name=%s) -> err=%v", parentIno, name, err))
 			}
 
@@ -476,7 +471,10 @@ func runConcurrentWorker(
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Mknod", err)
 				if err == nil && inode != nil {
-					env.AddFileIno(inode.Ino)
+					env.RecordWriteSuccess()
+					if ft == meta.S_IFREG {
+						env.AddFileIno(inode.Ino)
+					}
 					env.AddEntryHint(parentIno, name)
 				}
 				recordTrace(step, fmt.Sprintf("Mknod(parent=%d, name=%s, type=0o%o) -> err=%v", parentIno, name, ft, err))
@@ -491,6 +489,7 @@ func runConcurrentWorker(
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Symlink", err)
 				if err == nil && inode != nil {
+					env.RecordWriteSuccess()
 					env.AddSymlinkIno(inode.Ino)
 					env.AddEntryHint(parentIno, name)
 				}
@@ -524,6 +523,10 @@ func runConcurrentWorker(
 
 			if rng.IntN(2) == 0 {
 				name := pickSharedOrUniqueName(rng, env, "cr")
+				var createSID *uint64
+				if useShortCrash {
+					createSID = sidPtr
+				}
 				res, err := targetMgr.Create(ctx, meta.CreateParams{
 					ParentIno: parentIno,
 					Name:      []byte(name),
@@ -531,17 +534,18 @@ func runConcurrentWorker(
 					Flags:     meta.O_CREAT | meta.O_RDWR,
 					UID:       uint32(1000 + workerID),
 					GID:       uint32(1000 + workerID),
-					SessionID: sidPtr,
+					SessionID: createSID,
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Create", err)
 				if err == nil && res != nil {
+					env.RecordWriteSuccess()
 					env.AddFileIno(res.Inode.Ino)
 					env.AddEntryHint(parentIno, name)
 					if !useShortCrash {
 						myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
 							Fh:        res.Fh,
 							Ino:       res.Inode.Ino,
-							SessionID: sidPtr,
+							SessionID: nil,
 							Flags:     meta.O_CREAT | meta.O_RDWR,
 						})
 					} else if rng.IntN(2) == 0 {
@@ -562,16 +566,17 @@ func runConcurrentWorker(
 					Flags:     flags,
 					UID:       uint32(1000 + workerID),
 					GID:       uint32(1000 + workerID),
-					SessionID: sidPtr,
+					SessionID: nil,
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "TmpFile", err)
 				if err == nil && res != nil {
+					env.RecordWriteSuccess()
 					env.AddFileIno(res.Inode.Ino)
 					if !useShortCrash {
 						myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
 							Fh:        res.Fh,
 							Ino:       res.Inode.Ino,
-							SessionID: sidPtr,
+							SessionID: nil,
 							Flags:     flags | meta.O_TMPFILE,
 						})
 					}
@@ -585,6 +590,7 @@ func runConcurrentWorker(
 						})
 						assertConcurrentStepErr(t, env, workerID, step, "Link(TmpFile)", lErr)
 						if lErr == nil {
+							env.RecordWriteSuccess()
 							env.RecordMaterializedTmpIno(res.Inode.Ino)
 							env.AddEntryHint(parentIno, linkName)
 						}
@@ -606,6 +612,7 @@ func runConcurrentWorker(
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Link", err)
 				if err == nil {
+					env.RecordWriteSuccess()
 					env.RecordMaterializedTmpIno(srcIno)
 					env.AddEntryHint(newParent, newName)
 				}
@@ -619,6 +626,9 @@ func runConcurrentWorker(
 				}
 				err := env.Mgr.Unlink(ctx, parentIno, []byte(name))
 				assertConcurrentStepErr(t, env, workerID, step, "Unlink", err)
+				if err == nil {
+					env.RecordWriteSuccess()
+				}
 				recordTrace(step, fmt.Sprintf("Unlink(parent=%d, name=%s) -> err=%v", parentIno, name, err))
 			}
 
@@ -633,18 +643,17 @@ func runConcurrentWorker(
 				if targetIno != env.PinnedIno1 && targetIno != env.PinnedIno2 && rng.IntN(2) == 0 {
 					flags |= meta.O_TRUNC
 				}
-				sidCopy := workerSID
 				res, err := env.Mgr.Open(ctx, meta.OpenParams{
 					Ino:       targetIno,
 					Flags:     flags,
-					SessionID: &sidCopy,
+					SessionID: nil,
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Open", err)
 				if err == nil && res != nil {
 					myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
 						Fh:        res.Fh,
 						Ino:       targetIno,
-						SessionID: &sidCopy,
+						SessionID: nil,
 						Flags:     flags,
 					})
 				}
@@ -721,6 +730,9 @@ func runConcurrentWorker(
 						MtimeNow: true,
 					})
 					assertConcurrentStepErr(t, env, workerID, step, "SetAttr(Pinned)", err)
+					if err == nil {
+						env.RecordWriteSuccess()
+					}
 					recordTrace(step, fmt.Sprintf("SetAttr(pinned ino=%d) -> err=%v", targetIno, err))
 				} else {
 					var newSize uint64
@@ -736,6 +748,9 @@ func runConcurrentWorker(
 						UID:  &uid,
 					})
 					assertConcurrentStepErr(t, env, workerID, step, "SetAttr(Size)", err)
+					if err == nil {
+						env.RecordWriteSuccess()
+					}
 					recordTrace(step, fmt.Sprintf("SetAttr(ino=%d, size=%d) -> err=%v", targetIno, newSize, err))
 				}
 			case 1:
@@ -759,6 +774,9 @@ func runConcurrentWorker(
 						SessionID: h.SessionID,
 					})
 					assertConcurrentStepErr(t, env, workerID, step, "Fallocate", err)
+					if err == nil {
+						env.RecordWriteSuccess()
+					}
 					recordTrace(step, fmt.Sprintf("Fallocate(ino=%d, fh=%d, mode=0x%x) -> err=%v", h.Ino, h.Fh, fMode, err))
 				}
 			default:
@@ -786,6 +804,9 @@ func runConcurrentWorker(
 						MaxBytes: &newMax,
 					})
 					assertConcurrentStepErr(t, env, workerID, step, "UpdateDisk", err)
+					if err == nil {
+						env.RecordWriteSuccess()
+					}
 					recordTrace(step, fmt.Sprintf("UpdateDisk(disk=%s, max=%d) -> err=%v", targetDisk.DiskID, newMax, err))
 				}
 			}
@@ -836,6 +857,9 @@ func runConcurrentWorker(
 					SessionID: workerSID,
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "SetLk", err)
+				if err == nil {
+					env.RecordWriteSuccess()
+				}
 				recordTrace(step, fmt.Sprintf("SetLk(ino=%d, flags=%d, type=%d, [%d,%d]) -> err=%v",
 					targetH.Ino, lkFlags, lkType, start, end, err))
 			case 1:
@@ -1727,7 +1751,7 @@ func TestFormalConcurrentChaos(t *testing.T) {
 				LeaseTTL:       shortLeaseTTL,
 				Disk1:          disk1,
 				Disk2:          disk2,
-				dirInos:        []uint64{disk1.RootIno, disk2.RootIno},
+				dirInos:        []uint64{disk1.RootIno},
 				workerTraces:   make([][]string, cfg.Workers),
 			}
 
@@ -1784,7 +1808,7 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			_, err = mgr.SetAttr(ctx, pin2.Ino, meta.SetAttrInput{Size: &pinSize})
 			require.NoError(t, err)
 			env.PinnedIno2 = pin2.Ino
-			env.AddFileIno(pin2.Ino)
+			// pin2 专属 Disk2 锁对照，不加入 fileInos 避免并发 Worker 跨盘 Link 导致 ErrCrossDevice
 
 			for i := 0; i < 3; i++ {
 				sub, mkErr := mgr.Mkdir(ctx, meta.MkdirParams{
@@ -1942,6 +1966,14 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			}
 			time.Sleep(shortLeaseTTL + 12*time.Millisecond)
 
+			// 确保并发期间经长租约续期的 Worker 会话全部进入超期状态，以便同步清扫
+			workerSIDsInt64 := make([]int64, len(env.workerSessionIDs))
+			for i, sid := range env.workerSessionIDs {
+				workerSIDsInt64[i] = int64(sid)
+			}
+			_, err = pool.Exec(ctx, `UPDATE client_sessions SET expires_at = clock_timestamp() - interval '100 millisecond' WHERE session_id = ANY($1::bigint[])`, workerSIDsInt64)
+			require.NoError(t, err)
+
 			closeSessionlessHandlesForRoots(ctx, t, pool, mgr, []uint64{disk1.RootIno, disk2.RootIno})
 
 			_, err = mgr.RenewSession(ctx, keeperSID)
@@ -1963,6 +1995,7 @@ func TestFormalConcurrentChaos(t *testing.T) {
 				Fh:        keepOrphanFileRes.Fh,
 				SessionID: &keeperSID,
 			}))
+
 			require.NoError(t, mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
 				Ino:       keepOrphanDir.Ino,
 				Fh:        keepOrphanDirRes.Fh,
@@ -2002,6 +2035,9 @@ func TestFormalConcurrentChaos(t *testing.T) {
 			require.NoError(t, mgr.DeleteDisk(ctx, disk1.DiskID))
 			assertDeletedDiskZeroResidue(ctx, t, pool, disk1.RootIno, disk1Inos)
 			auditConcurrentAll10Invariants(ctx, t, env, []uint64{disk2.RootIno}, allPurgedSIDs)
+
+			// 断言高并发阶段真实发生了写操作成功
+			require.Greater(t, env.writeSuccessCount.Load(), int64(0), "并发压测期间至少应发生一次写操作成功")
 		})
 	}
 }

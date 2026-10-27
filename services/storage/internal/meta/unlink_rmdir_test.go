@@ -563,7 +563,9 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		setupMockWriteTx(mockStore, mockQuerier)
+		setupMockWriteTx(mockStore, mockQuerier)
 
+		// 第一次事务：预读目录项成功，但目标 childIno 不存在，返回 errRetryTx 触发重试
 		mockQuerier.EXPECT().
 			GetEntry(mock.Anything, db.GetEntryParams{
 				ParentIno: int64(parentIno),
@@ -588,6 +590,24 @@ func TestUnlink_ParentInvariantsAndErrors(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(childIno)).
 			Return(db.Inode{}, pgx.ErrNoRows).
+			Once()
+
+		// 第二次重试事务：GetEntry 返回 pgx.ErrNoRows 并锁定 parentIno 后返回 ErrNotFound
+		mockQuerier.EXPECT().
+			GetEntry(mock.Anything, db.GetEntryParams{
+				ParentIno: int64(parentIno),
+				Name:      []byte("ghost.txt"),
+			}).
+			Return(db.Entry{}, pgx.ErrNoRows).
+			Once()
+
+		mockQuerier.EXPECT().
+			GetInodeForUpdate(mock.Anything, int64(parentIno)).
+			Return(db.Inode{
+				Ino:   int64(parentIno),
+				Mode:  int32(meta.S_IFDIR | 0o755),
+				Nlink: 2,
+			}, nil).
 			Once()
 
 		err := mgr.Unlink(ctx, parentIno, []byte("ghost.txt"))

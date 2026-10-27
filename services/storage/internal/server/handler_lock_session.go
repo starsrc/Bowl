@@ -95,12 +95,13 @@ func (s *Server) SetLkw(ctx context.Context, req *connect.Request[storagev1.SetL
 
 // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 func (s *Server) RenewSession(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
-	expiresAt, err := s.metaManager.RenewSession(ctx, req.Msg.GetSessionId())
+	res, err := s.metaManager.RenewSessionWithStatus(ctx, req.Msg.GetSessionId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
 	return connect.NewResponse(&storagev1.RenewSessionResponse{
-		ExpiresAt: timestamppb.New(expiresAt),
+		ExpiresAt:        timestamppb.New(res.ExpiresAt),
+		SessionRecreated: res.SessionRecreated,
 	}), nil
 }

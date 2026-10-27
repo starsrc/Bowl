@@ -519,34 +519,61 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			return ErrNotFound
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
-		}
-
 		gid := params.GID
 		if (uint32(parent.Mode) & S_ISGID) != 0 {
 			gid = uint32(parent.Gid)
 		}
 
-		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
-			Mode:    int32(targetMode),
-			Nlink:   0,
-			Uid:     int32(params.UID),
-			Gid:     int32(gid),
-			Rdev:    0,
-			RootIno: parent.RootIno,
-		})
-		if err != nil {
-			return fmt.Errorf("create tmpfile inode: %w", err)
-		}
+		var newInode db.Inode
+		if params.SessionID != nil {
+			if parent.RootIno > 0 {
+				if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+					RootIno:     parent.RootIno,
+					DeltaBytes:  0,
+					DeltaInodes: 1,
+				}); err != nil {
+					return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+				}
+			}
 
-		if parent.RootIno > 0 {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
-				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+			if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+				return err
+			}
+
+			var err error
+			newInode, err = q.CreateInode(ctx, db.CreateInodeParams{
+				Mode:    int32(targetMode),
+				Nlink:   0,
+				Uid:     int32(params.UID),
+				Gid:     int32(gid),
+				Rdev:    0,
+				RootIno: parent.RootIno,
+			})
+			if err != nil {
+				return fmt.Errorf("create tmpfile inode: %w", err)
+			}
+		} else {
+			var err error
+			newInode, err = q.CreateInode(ctx, db.CreateInodeParams{
+				Mode:    int32(targetMode),
+				Nlink:   0,
+				Uid:     int32(params.UID),
+				Gid:     int32(gid),
+				Rdev:    0,
+				RootIno: parent.RootIno,
+			})
+			if err != nil {
+				return fmt.Errorf("create tmpfile inode: %w", err)
+			}
+
+			if parent.RootIno > 0 {
+				if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+					RootIno:     parent.RootIno,
+					DeltaBytes:  0,
+					DeltaInodes: 1,
+				}); err != nil {
+					return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
+				}
 			}
 		}
 

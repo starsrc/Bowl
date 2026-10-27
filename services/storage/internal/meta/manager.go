@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
 	"github.com/starsrc/Aether/pkg/tx"
@@ -79,17 +80,32 @@ type Manager interface {
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 }
 
+type dirCursorKey struct {
+	ino    uint64
+	fh     uint64
+	offset uint64
+}
+
+type dirCursorAnchor struct {
+	lastName   []byte
+	sqlOffset  int64
+	dirMutated bool
+}
+
 type manager struct {
-	store           db.Store
-	entryTimeout    float64
-	attrTimeout     float64
-	dirEntryTimeout float64
-	openKeepCache   bool
-	openDirCache    bool
-	atimeMode       AtimeMode
-	sessionLeaseTTL time.Duration
-	lockNotifyMu    sync.Mutex
-	lockNotifyChans map[uint64]chan struct{}
+	store            db.Store
+	entryTimeout     float64
+	attrTimeout      float64
+	dirEntryTimeout  float64
+	openKeepCache    bool
+	openDirCache     bool
+	atimeMode        AtimeMode
+	sessionLeaseTTL  time.Duration
+	lockNotifyMu     sync.Mutex
+	lockNotifyChans  map[uint64]*lockNotifyEntry
+	crossDirRenameMu sync.Mutex
+	dirCursorMu      sync.Mutex
+	dirCursors       map[dirCursorKey]dirCursorAnchor
 }
 
 var _ Manager = (*manager)(nil)
@@ -162,7 +178,8 @@ func New(store db.Store, opts ...Option) Manager {
 		attrTimeout:     DefaultAttrTimeoutSeconds,
 		dirEntryTimeout: DefaultEntryTimeoutSeconds,
 		sessionLeaseTTL: DefaultSessionLeaseTTL,
-		lockNotifyChans: make(map[uint64]chan struct{}),
+		lockNotifyChans: make(map[uint64]*lockNotifyEntry),
+		dirCursors:      make(map[dirCursorKey]dirCursorAnchor),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -170,6 +187,115 @@ func New(store db.Store, opts ...Option) Manager {
 		}
 	}
 	return m
+}
+
+func (m *manager) getDirCursorOffset(ino, fh, offset uint64) int64 {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirCursors == nil {
+		return int64(offset - 2)
+	}
+	if anchor, ok := m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: offset}]; ok {
+		return anchor.sqlOffset
+	}
+	return int64(offset - 2)
+}
+
+func (m *manager) lookupDirCursorAnchor(ino, fh, offset uint64) (dirCursorAnchor, bool) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirCursors == nil {
+		return dirCursorAnchor{}, false
+	}
+	anchor, ok := m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: offset}]
+	return anchor, ok
+}
+
+func (m *manager) recordDirCursor(ino, fh, nextOffset uint64, lastName []byte, sqlOffset int64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirCursors == nil {
+		m.dirCursors = make(map[dirCursorKey]dirCursorAnchor)
+	}
+	// 为防止单句柄连续分页读取大量页面时在 m.dirCursors 中无限累积历史页游标，
+	// 在写入新游标前，清理同一 (ino, fh) 下 offset < nextOffset - 1 的旧锚点
+	// （保留最近 2 个锚点以支持重读当前页和请求下一页）
+	for k := range m.dirCursors {
+		if k.ino == ino && k.fh == fh && nextOffset > 1 && k.offset < nextOffset-1 {
+			delete(m.dirCursors, k)
+		}
+	}
+	m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: nextOffset}] = dirCursorAnchor{
+		lastName:   bytes.Clone(lastName),
+		sqlOffset:  sqlOffset,
+		dirMutated: false,
+	}
+}
+
+func (m *manager) onDirEntryRemoved(parentIno uint64, name []byte) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for k, anchor := range m.dirCursors {
+		if k.ino == parentIno {
+			anchor.dirMutated = true
+			if len(name) > 0 && bytes.Compare(name, anchor.lastName) <= 0 && anchor.sqlOffset > 0 {
+				anchor.sqlOffset--
+			}
+			m.dirCursors[k] = anchor
+		}
+	}
+}
+
+func (m *manager) onDirEntryMutated(parentIno uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for k, anchor := range m.dirCursors {
+		if k.ino == parentIno {
+			anchor.dirMutated = true
+			m.dirCursors[k] = anchor
+		}
+	}
+}
+
+func (m *manager) clearDirCursors(ino, fh uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for k := range m.dirCursors {
+		if k.ino == ino && k.fh == fh {
+			delete(m.dirCursors, k)
+		}
+	}
+}
+
+func (m *manager) clearDirCursorsForInos(inos ...uint64) {
+	if len(inos) == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if len(m.dirCursors) == 0 {
+		return
+	}
+
+	if len(inos) == 1 {
+		target := inos[0]
+		for k := range m.dirCursors {
+			if k.ino == target {
+				delete(m.dirCursors, k)
+			}
+		}
+		return
+	}
+
+	inoSet := make(map[uint64]struct{}, len(inos))
+	for _, ino := range inos {
+		inoSet[ino] = struct{}{}
+	}
+	for k := range m.dirCursors {
+		if _, ok := inoSet[k.ino]; ok {
+			delete(m.dirCursors, k)
+		}
+	}
 }
 
 // ManagerParams 定义 Manager 的 Fx 依赖注入参数。
@@ -306,6 +432,30 @@ func (m *manager) newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
 	}, entryTimeout, m.attrTimeout)
 }
 
+func (m *manager) newInodeFromListDirAfterNameRow(row db.ListDirEntriesAfterNameRow) *Inode {
+	entryTimeout := m.entryTimeout
+	if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
+		entryTimeout = m.dirEntryTimeout
+	}
+	return convertDBInodeToEntity(db.Inode{
+		Ino:           row.Ino,
+		Generation:    row.Generation,
+		Mode:          row.Mode,
+		Size:          row.Size,
+		Nlink:         row.Nlink,
+		Uid:           row.Uid,
+		Gid:           row.Gid,
+		Rdev:          row.Rdev,
+		Atime:         row.Atime,
+		Mtime:         row.Mtime,
+		Ctime:         row.Ctime,
+		SymlinkTarget: row.SymlinkTarget,
+		Flags:         row.Flags,
+		ParentIno:     row.ParentIno,
+		RootIno:       row.RootIno,
+	}, entryTimeout, m.attrTimeout)
+}
+
 // errRetryTx 表示事务预读的目录项映射在加锁前发生并发漂移，需回滚并重试当前事务。
 var errRetryTx = errors.New("retry transaction due to concurrent entry drift")
 
@@ -411,6 +561,8 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		if leaseTTL <= 0 {
 			leaseTTL = DefaultSessionLeaseTTL
 		}
+
+		sid := int64(sessionID)
 		deletedCount, err := q.DeleteExpiredClientSessions(ctx)
 		if err != nil {
 			return fmt.Errorf("delete expired client sessions: %w", err)
@@ -418,8 +570,9 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		if deletedCount > 0 {
 			m.notifyAllLockWaiters()
 		}
+
 		session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
-			SessionID: int64(sessionID),
+			SessionID: sid,
 			ExpiresAt: pgtype.Timestamptz{
 				Time:  time.Now().Add(leaseTTL),
 				Valid: true,
@@ -495,6 +648,13 @@ func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) 
 	}
 
 	m.cleanLockWaitersForInos(deletedInos)
+	if len(deletedInos) > 0 {
+		inos := make([]uint64, len(deletedInos))
+		for i, ino := range deletedInos {
+			inos[i] = uint64(ino)
+		}
+		m.clearDirCursorsForInos(inos...)
+	}
 	return nil
 }
 
@@ -513,6 +673,7 @@ func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, in
 		return fmt.Errorf("delete orphan inode %d: %w", inode.Ino, err)
 	}
 	m.notifyLockWaiters(uint64(inode.Ino))
+	m.clearDirCursorsForInos(uint64(inode.Ino))
 
 	if inode.RootIno > 0 {
 		var deltaBytes int64
@@ -540,4 +701,21 @@ func (m *manager) shouldTouchAtime(atime, mtime, ctime, now time.Time) bool {
 	default:
 		return false
 	}
+}
+
+// isClientSessionAlive 检查指定会话在真实数据库中是否存在且未过期。
+func (m *manager) isClientSessionAlive(ctx context.Context, sessionID uint64) bool {
+	type poolProvider interface {
+		Pool() *pgxpool.Pool
+	}
+	pp, ok := m.store.(poolProvider)
+	if !ok || pp == nil || pp.Pool() == nil {
+		return true // Mock 环境默认兜底视为存活
+	}
+	var alive bool
+	err := pp.Pool().QueryRow(ctx, `SELECT expires_at > clock_timestamp() FROM client_sessions WHERE session_id = $1`, int64(sessionID)).Scan(&alive)
+	if err != nil {
+		return false
+	}
+	return alive
 }

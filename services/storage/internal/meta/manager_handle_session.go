@@ -94,7 +94,7 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 			return ErrIsDir
 		}
 
-		_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
+		handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
 			Fh:        int64(params.Fh),
 			Ino:       int64(params.Ino),
 			SessionID: toPgSessionID(params.SessionID),
@@ -106,8 +106,10 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 			return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
+		if params.SessionID != nil {
+			if err := m.touchActiveClientSessionForHandle(ctx, q, *params.SessionID, handle.CreatedAt); err != nil {
+				return err
+			}
 		}
 
 		if params.LockOwner != nil {
@@ -143,6 +145,9 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 		case errors.Is(err, ErrIsDir):
 			return ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && params.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *params.SessionID)
+			}
 			return ErrBadFileHandle
 		default:
 			return fmt.Errorf("flush tx: %w", err)
@@ -194,10 +199,14 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 			return ErrIsDir
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
+		// 1. 校验会话有效性并原子续期（若会话已过期则拒绝并回滚，严禁复活过期会话；此时句柄尚未删除，防止被 reclaimUnreferencedOrphans 抢先回收导致二次扣减配额）
+		if params.SessionID != nil {
+			if err := m.touchActiveClientSession(ctx, q, *params.SessionID); err != nil {
+				return err
+			}
 		}
 
+		// 2. 删除文件句柄（若句柄不存在直接返回 ErrBadFileHandle）
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
 			Fh:        int64(params.Fh),
 			Ino:       int64(params.Ino),
@@ -249,13 +258,16 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 		case errors.Is(err, ErrIsDir):
 			return ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && params.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *params.SessionID)
+			}
 			return ErrBadFileHandle
 		default:
 			return fmt.Errorf("release tx: %w", err)
 		}
 	}
 
-	if (params.ReleaseFlags & FuseReleaseFlockUnlock) != 0 {
+	if params.SessionID != nil || (params.ReleaseFlags&FuseReleaseFlockUnlock) != 0 {
 		m.notifyLockWaiters(params.Ino)
 	}
 	return nil
@@ -316,10 +328,14 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 			return ErrNotDir
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
+		// 1. 校验会话有效性并原子续期（若会话已过期则拒绝并回滚，严禁复活过期会话；此时句柄尚未删除，防止被 reclaimUnreferencedOrphans 抢先回收导致二次扣减配额）
+		if params.SessionID != nil {
+			if err := m.touchActiveClientSession(ctx, q, *params.SessionID); err != nil {
+				return err
+			}
 		}
 
+		// 2. 删除目录句柄（若句柄不存在直接返回 ErrBadFileHandle）
 		_, err = q.DeleteFileHandle(ctx, db.DeleteFileHandleParams{
 			Fh:        int64(params.Fh),
 			Ino:       int64(params.Ino),
@@ -350,14 +366,19 @@ func (m *manager) ReleaseDir(ctx context.Context, params ReleaseDirParams) error
 		case errors.Is(err, ErrNotDir):
 			return ErrNotDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && params.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *params.SessionID)
+			}
 			return ErrBadFileHandle
 		default:
 			return fmt.Errorf("releasedir tx: %w", err)
 		}
 	}
 
+	m.clearDirCursors(params.Ino, params.Fh)
 	return nil
 }
+
 
 // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 // 遵循 ADR-0013：

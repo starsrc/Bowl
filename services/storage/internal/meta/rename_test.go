@@ -3,9 +3,10 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
-	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1634,10 +1635,7 @@ func TestRename_Exchange(t *testing.T) {
 }
 
 func TestRename_PostgresSemantics(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2591,4 +2589,260 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		})
 		assert.ErrorIs(t, err, quotaErr)
 	})
+}
+
+// TestRename_ConcurrentCrossDirCycle_RealDB 验证 G-01：
+// 跨父目录并发 Rename 会在无根节点拓扑排他锁时形成持久化孤立目录环，脱离根节点。
+func TestRename_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	const rounds = 10
+
+	for r := 0; r < rounds; r++ {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-rename-cycle-%d-%d", r, time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		// 构建 /dirX/dirA/dirB 与 /dirY/dirC/dirD 拓扑
+		dirX, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: disk.RootIno, Name: []byte("dirX"), Mode: 0o755})
+		require.NoError(t, err)
+		dirA, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirX.Ino, Name: []byte("dirA"), Mode: 0o755})
+		require.NoError(t, err)
+		dirB, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirA.Ino, Name: []byte("dirB"), Mode: 0o755})
+		require.NoError(t, err)
+
+		dirY, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: disk.RootIno, Name: []byte("dirY"), Mode: 0o755})
+		require.NoError(t, err)
+		dirC, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirY.Ino, Name: []byte("dirC"), Mode: 0o755})
+		require.NoError(t, err)
+		dirD, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirC.Ino, Name: []byte("dirD"), Mode: 0o755})
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		startBarrier := make(chan struct{})
+		var err1, err2 error
+
+		wg.Add(2)
+		// T1: 把 dirA 移动到 dirD 下
+		go func() {
+			defer wg.Done()
+			<-startBarrier
+			err1 = mgr.Rename(ctx, meta.RenameParams{
+				OldParentIno: dirX.Ino,
+				OldName:      []byte("dirA"),
+				NewParentIno: dirD.Ino,
+				NewName:      []byte("dirA"),
+			})
+		}()
+
+		// T2: 把 dirC 移动到 dirB 下
+		go func() {
+			defer wg.Done()
+			<-startBarrier
+			err2 = mgr.Rename(ctx, meta.RenameParams{
+				OldParentIno: dirY.Ino,
+				OldName:      []byte("dirC"),
+				NewParentIno: dirB.Ino,
+				NewName:      []byte("dirC"),
+			})
+		}()
+
+		close(startBarrier)
+		wg.Wait()
+
+		// 严格断言恰好 1 个成功、另 1 个失败且错误必须为 ErrInvalidArgument
+		successCount := 0
+		var failedErr error
+		if err1 == nil {
+			successCount++
+		} else {
+			failedErr = err1
+		}
+		if err2 == nil {
+			successCount++
+		} else {
+			failedErr = err2
+		}
+		require.Equal(t, 1, successCount, "并发 Rename 必须恰好 1 个成功，err1: %v, err2: %v", err1, err2)
+		require.ErrorIs(t, failedErr, meta.ErrInvalidArgument, "并发 Rename 失败分支必须返回 ErrInvalidArgument，实际: %v", failedErr)
+
+		// 对 dirA.Ino、dirB.Ino、dirC.Ino、dirD.Ino 全部四个目录逐一沿 parent_ino 向上回溯验证
+		dirsToCheck := []uint64{dirA.Ino, dirB.Ino, dirC.Ino, dirD.Ino}
+		for _, targetIno := range dirsToCheck {
+			curr := targetIno
+			visited := make(map[uint64]bool)
+			steps := 0
+			const maxSteps = 100
+			for {
+				require.NotZero(t, curr, "目录 inode %d 在追溯过程中遇到了无效的 parent_ino 0", targetIno)
+				if curr == disk.RootIno {
+					break
+				}
+				require.False(t, visited[curr], "检测到环路: 节点 %d 已被访问过 (起点 %d)", curr, targetIno)
+				visited[curr] = true
+
+				steps++
+				require.LessOrEqual(t, steps, maxSteps, "追溯超过最大深度 %d，可能存在死循环 (起点 %d)", maxSteps, targetIno)
+
+				var pIno int64
+				qErr := pool.QueryRow(ctx, "SELECT parent_ino FROM inodes WHERE ino = $1", curr).Scan(&pIno)
+				require.NoError(t, qErr, "查询节点 %d 的 parent_ino 失败 (起点 %d)", curr, targetIno)
+				curr = uint64(pIno)
+			}
+		}
+
+		delErr := mgr.DeleteDisk(context.Background(), disk.DiskID)
+		require.NoError(t, delErr, "清理磁盘失败")
+	}
+}
+
+// TestRenameExchange_ConcurrentCrossDirCycle_RealDB 验证 G-01：
+// 跨父目录并发 RenameExchange 在无根节点拓扑排他锁时形成持久化孤立目录环。
+func TestRenameExchange_ConcurrentCrossDirCycle_RealDB(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	const rounds = 10
+
+	for r := 0; r < rounds; r++ {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-rename-ex-cycle-%d-%d", r, time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		// 构建 /dirX/dirA/dirB 与 /dirY/dirC/dirD 拓扑
+		dirX, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: disk.RootIno, Name: []byte("dirX"), Mode: 0o755})
+		require.NoError(t, err)
+		dirA, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirX.Ino, Name: []byte("dirA"), Mode: 0o755})
+		require.NoError(t, err)
+		dirB, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirA.Ino, Name: []byte("dirB"), Mode: 0o755})
+		require.NoError(t, err)
+
+		dirY, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: disk.RootIno, Name: []byte("dirY"), Mode: 0o755})
+		require.NoError(t, err)
+		dirC, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirY.Ino, Name: []byte("dirC"), Mode: 0o755})
+		require.NoError(t, err)
+		dirD, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirC.Ino, Name: []byte("dirD"), Mode: 0o755})
+		require.NoError(t, err)
+
+		// 在 dirD 和 dirB 下分别创建占位目录
+		phD, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirD.Ino, Name: []byte("phD"), Mode: 0o755})
+		require.NoError(t, err)
+		phB, err := mgr.Mkdir(ctx, meta.MkdirParams{ParentIno: dirB.Ino, Name: []byte("phB"), Mode: 0o755})
+		require.NoError(t, err)
+		_ = phD
+		_ = phB
+
+		var wg sync.WaitGroup
+		startBarrier := make(chan struct{})
+		var err1, err2 error
+
+		wg.Add(2)
+		// T1: 交换 dirX/dirA 与 dirD/phD
+		go func() {
+			defer wg.Done()
+			<-startBarrier
+			err1 = mgr.Rename(ctx, meta.RenameParams{
+				OldParentIno: dirX.Ino,
+				OldName:      []byte("dirA"),
+				NewParentIno: dirD.Ino,
+				NewName:      []byte("phD"),
+				Flags:        meta.RenameExchange,
+			})
+		}()
+
+		// T2: 交换 dirY/dirC 与 dirB/phB
+		go func() {
+			defer wg.Done()
+			<-startBarrier
+			err2 = mgr.Rename(ctx, meta.RenameParams{
+				OldParentIno: dirY.Ino,
+				OldName:      []byte("dirC"),
+				NewParentIno: dirB.Ino,
+				NewName:      []byte("phB"),
+				Flags:        meta.RenameExchange,
+			})
+		}()
+
+		close(startBarrier)
+		wg.Wait()
+
+		// 严格断言恰好 1 个成功、另 1 个失败且错误必须为 ErrInvalidArgument
+		successCount := 0
+		var failedErr error
+		if err1 == nil {
+			successCount++
+		} else {
+			failedErr = err1
+		}
+		if err2 == nil {
+			successCount++
+		} else {
+			failedErr = err2
+		}
+		require.Equal(t, 1, successCount, "并发 RenameExchange 必须恰好 1 个成功，err1: %v, err2: %v", err1, err2)
+		require.ErrorIs(t, failedErr, meta.ErrInvalidArgument, "并发 RenameExchange 失败分支必须返回 ErrInvalidArgument，实际: %v", failedErr)
+
+		// 对 dirA.Ino、dirB.Ino、dirC.Ino、dirD.Ino 全部四个目录逐一沿 parent_ino 向上回溯验证
+		dirsToCheck := []uint64{dirA.Ino, dirB.Ino, dirC.Ino, dirD.Ino}
+		for _, targetIno := range dirsToCheck {
+			curr := targetIno
+			visited := make(map[uint64]bool)
+			steps := 0
+			const maxSteps = 100
+			for {
+				require.NotZero(t, curr, "目录 inode %d 在追溯过程中遇到了无效的 parent_ino 0", targetIno)
+				if curr == disk.RootIno {
+					break
+				}
+				require.False(t, visited[curr], "检测到环路: 节点 %d 已被访问过 (起点 %d)", curr, targetIno)
+				visited[curr] = true
+
+				steps++
+				require.LessOrEqual(t, steps, maxSteps, "追溯超过最大深度 %d，可能存在死循环 (起点 %d)", maxSteps, targetIno)
+
+				var pIno int64
+				qErr := pool.QueryRow(ctx, "SELECT parent_ino FROM inodes WHERE ino = $1", curr).Scan(&pIno)
+				require.NoError(t, qErr, "查询节点 %d 的 parent_ino 失败 (起点 %d)", curr, targetIno)
+				curr = uint64(pIno)
+			}
+		}
+
+		delErr := mgr.DeleteDisk(context.Background(), disk.DiskID)
+		require.NoError(t, delErr, "清理磁盘失败")
+	}
 }

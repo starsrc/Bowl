@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,11 +49,70 @@ func validatePosixOpenMode(lockType uint32, handleFlags int32) error {
 	return nil
 }
 
+var errExpiredSessionBadHandle = fmt.Errorf("%w: session expired", ErrBadFileHandle)
+
+// touchActiveClientSession 仅原子延长未过期的活跃会话租约；若会话已过期或不存在则返回 ErrBadFileHandle。
+func (m *manager) touchActiveClientSession(ctx context.Context, q db.Querier, sessionID uint64) error {
+	return m.touchActiveClientSessionForHandle(ctx, q, sessionID, pgtype.Timestamptz{})
+}
+
+func (m *manager) touchActiveClientSessionForHandle(ctx context.Context, q db.Querier, sessionID uint64, handleCreatedAt pgtype.Timestamptz) error {
+	leaseTTL := m.sessionLeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultSessionLeaseTTL
+	}
+
+	deletedCount, err := q.DeleteExpiredClientSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("delete expired client sessions: %w", err)
+	}
+	if deletedCount > 0 {
+		m.notifyAllLockWaiters()
+	}
+
+	session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+		SessionID: int64(sessionID),
+		ExpiresAt: pgtype.Timestamptz{
+			Time:  time.Now().Add(leaseTTL),
+			Valid: true,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("upsert client session %d: %w", sessionID, err)
+	}
+	if session.CreatedAt.Valid && session.UpdatedAt.Valid && session.CreatedAt.Time.Equal(session.UpdatedAt.Time) {
+		return errExpiredSessionBadHandle
+	}
+	if handleCreatedAt.Valid && session.CreatedAt.Valid && handleCreatedAt.Time.Before(session.CreatedAt.Time) {
+		return ErrBadFileHandle
+	}
+	if err := m.reclaimUnreferencedOrphans(ctx, q); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *manager) cleanExpiredSessionByID(ctx context.Context, sessionID uint64) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = m.execWriteTxWithRetry(cleanupCtx, func(q db.Querier) error {
+		deletedCount, err := q.DeleteExpiredClientSessions(cleanupCtx)
+		if err != nil {
+			return err
+		}
+		if deletedCount > 0 {
+			m.notifyAllLockWaiters()
+		}
+		return nil
+	})
+}
+
 func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionID uint64) (time.Time, error) {
 	leaseTTL := m.sessionLeaseTTL
 	if leaseTTL <= 0 {
 		leaseTTL = DefaultSessionLeaseTTL
 	}
+
 	deletedCount, err := q.DeleteExpiredClientSessions(ctx)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("delete expired client sessions: %w", err)
@@ -166,17 +226,44 @@ func (m *manager) GetLk(ctx context.Context, params GetLkParams) (*FileLock, err
 	return result, nil
 }
 
-func (m *manager) waitLockChan(ino uint64) <-chan struct{} {
+type lockNotifyEntry struct {
+	ch       chan struct{}
+	refCount int
+}
+
+func (m *manager) acquireLockNotifyChan(ino uint64) (<-chan struct{}, func()) {
 	m.lockNotifyMu.Lock()
 	defer m.lockNotifyMu.Unlock()
 	if m.lockNotifyChans == nil {
-		m.lockNotifyChans = make(map[uint64]chan struct{})
+		m.lockNotifyChans = make(map[uint64]*lockNotifyEntry)
 	}
-	ch, ok := m.lockNotifyChans[ino]
+	entry, ok := m.lockNotifyChans[ino]
 	if !ok {
-		ch = make(chan struct{})
-		m.lockNotifyChans[ino] = ch
+		entry = &lockNotifyEntry{
+			ch: make(chan struct{}),
+		}
+		m.lockNotifyChans[ino] = entry
 	}
+	entry.refCount++
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			m.lockNotifyMu.Lock()
+			defer m.lockNotifyMu.Unlock()
+			entry.refCount--
+			if entry.refCount <= 0 {
+				if cur, exists := m.lockNotifyChans[ino]; exists && cur == entry {
+					delete(m.lockNotifyChans, ino)
+				}
+			}
+		})
+	}
+	return entry.ch, release
+}
+
+func (m *manager) waitLockChan(ino uint64) <-chan struct{} {
+	ch, _ := m.acquireLockNotifyChan(ino)
 	return ch
 }
 
@@ -186,8 +273,8 @@ func (m *manager) notifyLockWaiters(ino uint64) {
 	if m.lockNotifyChans == nil {
 		return
 	}
-	if ch, ok := m.lockNotifyChans[ino]; ok {
-		close(ch)
+	if entry, ok := m.lockNotifyChans[ino]; ok {
+		close(entry.ch)
 		delete(m.lockNotifyChans, ino)
 	}
 }
@@ -198,8 +285,8 @@ func (m *manager) notifyAllLockWaiters() {
 	if m.lockNotifyChans == nil {
 		return
 	}
-	for ino, ch := range m.lockNotifyChans {
-		close(ch)
+	for ino, entry := range m.lockNotifyChans {
+		close(entry.ch)
 		delete(m.lockNotifyChans, ino)
 	}
 }
@@ -212,8 +299,8 @@ func (m *manager) cleanLockWaitersForInos(inos []int64) {
 	}
 	for _, ino := range inos {
 		uino := uint64(ino)
-		if ch, ok := m.lockNotifyChans[uino]; ok {
-			close(ch)
+		if entry, ok := m.lockNotifyChans[uino]; ok {
+			close(entry.ch)
 			delete(m.lockNotifyChans, uino)
 		}
 	}
@@ -269,7 +356,7 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 			}
 		}
 
-		if _, err := m.renewClientSession(ctx, q, params.SessionID); err != nil {
+		if err := m.touchActiveClientSessionForHandle(ctx, q, params.SessionID, handle.CreatedAt); err != nil {
 			return err
 		}
 
@@ -288,6 +375,9 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 		case errors.Is(err, ErrIsDir):
 			return ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) {
+				m.cleanExpiredSessionByID(ctx, params.SessionID)
+			}
 			return ErrBadFileHandle
 		case errors.Is(err, ErrAgain):
 			return ErrAgain
@@ -767,296 +857,333 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 	backoff := 5 * time.Millisecond
 	const maxBackoff = 50 * time.Millisecond
 
+	var waiterEverPersisted bool
 	var flockOriginallyHeld bool
+	var preGrantOwnerLocks []db.FileLock
 	for attempt := 0; ; attempt++ {
-		notifyCh := m.waitLockChan(params.Ino)
+		done, err := func() (bool, error) {
+			notifyCh, releaseNotify := m.acquireLockNotifyChan(params.Ino)
+			defer releaseNotify()
 
-		var granted bool
-		var shouldNotify bool
-		var deadlockDetected bool
-		var interrupted bool
+			var granted bool
+			var shouldNotify bool
+			var deadlockDetected bool
+			var interrupted bool
 
-		err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-			granted = false
-			shouldNotify = false
-			deadlockDetected = false
-			interrupted = false
-			inode, err := q.GetInodeForUpdate(ctx, ino)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrNotFound
+			txErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+				granted = false
+				shouldNotify = false
+				deadlockDetected = false
+				interrupted = false
+				inode, err := q.GetInodeForUpdate(ctx, ino)
+				if err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return ErrNotFound
+					}
+					return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
 				}
-				return fmt.Errorf("get inode for update %d: %w", params.Ino, err)
-			}
 
-			if (uint32(inode.Mode) & S_IFMT) == S_IFDIR {
-				return ErrIsDir
-			}
-
-			existingWaiter, waiterErr := q.GetFileLockWaiter(ctx, db.GetFileLockWaiterParams{
-				SessionID: sessionID,
-				RequestID: requestID,
-			})
-			hasExistingWaiter := waiterErr == nil
-			if waiterErr != nil && !errors.Is(waiterErr, pgx.ErrNoRows) {
-				return fmt.Errorf("get file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, waiterErr)
-			}
-
-			if ctx.Err() != nil || (hasExistingWaiter && existingWaiter.Status == WaiterStatusCancelled) {
-				if hasExistingWaiter {
-					_, _ = q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
-						SessionID: sessionID,
-						RequestID: requestID,
-					})
+				if (uint32(inode.Mode) & S_IFMT) == S_IFDIR {
+					return ErrIsDir
 				}
-				interrupted = true
-				return nil
-			}
 
-			handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
-				Fh:        fh,
-				Ino:       ino,
-				SessionID: pgtype.Int8{Int64: sessionID, Valid: true},
-			})
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ErrBadFileHandle
-				}
-				return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
-			}
-
-			if params.LkFlags == 0 {
-				if err := validatePosixOpenMode(reqType, handle.Flags); err != nil {
-					return err
-				}
-			}
-
-			if _, err := m.renewClientSession(ctx, q, params.SessionID); err != nil {
-				return err
-			}
-
-			if params.LkFlags == FuseLkFlock && (attempt == 0 || reqType == F_UNLCK) {
-				deletedCount, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
+				existingWaiter, waiterErr := q.GetFileLockWaiter(ctx, db.GetFileLockWaiterParams{
 					SessionID: sessionID,
-					Ino:       ino,
+					RequestID: requestID,
+				})
+				hasExistingWaiter := waiterErr == nil
+				if waiterErr != nil && !errors.Is(waiterErr, pgx.ErrNoRows) {
+					return fmt.Errorf("get file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, waiterErr)
+				}
+				if hasExistingWaiter {
+					waiterEverPersisted = true
+				}
+
+				if ctx.Err() != nil || (hasExistingWaiter && existingWaiter.Status == WaiterStatusCancelled) {
+					if hasExistingWaiter {
+						_, _ = q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
+							SessionID: sessionID,
+							RequestID: requestID,
+						})
+					}
+					interrupted = true
+					return nil
+				}
+
+				handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
 					Fh:        fh,
+					Ino:       ino,
+					SessionID: pgtype.Int8{Int64: sessionID, Valid: true},
 				})
 				if err != nil {
-					return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
-				}
-				if deletedCount > 0 {
-					flockOriginallyHeld = true
-					shouldNotify = true
-				}
-			}
-
-			if reqType == F_UNLCK {
-				if params.LkFlags == 0 {
-					activeLocks, err := q.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
-						Ino:     ino,
-						LkFlags: 0,
-					})
-					if err != nil {
-						return fmt.Errorf("list active posix file locks (ino=%d): %w", params.Ino, err)
+					if errors.Is(err, pgx.ErrNoRows) {
+						return ErrBadFileHandle
 					}
-					if err := applyPosixUnlock(ctx, q, setLkParams, activeLocks, &shouldNotify); err != nil {
+					return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
+				}
+
+				if params.LkFlags == 0 {
+					if err := validatePosixOpenMode(reqType, handle.Flags); err != nil {
 						return err
 					}
 				}
-				if hasExistingWaiter {
-					_, _ = q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
+
+				if err := m.touchActiveClientSessionForHandle(ctx, q, params.SessionID, handle.CreatedAt); err != nil {
+					return err
+				}
+
+				if params.LkFlags == FuseLkFlock && (attempt == 0 || reqType == F_UNLCK) {
+					deletedCount, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
 						SessionID: sessionID,
-						RequestID: requestID,
+						Ino:       ino,
+						Fh:        fh,
 					})
-				}
-				granted = true
-				return nil
-			}
-
-			activeLocks, err := q.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
-				Ino:     ino,
-				LkFlags: int32(params.LkFlags),
-			})
-			if err != nil {
-				return fmt.Errorf("list active file locks (ino=%d, lk_flags=%d): %w", params.Ino, params.LkFlags, err)
-			}
-
-			waiters, err := q.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
-				Ino:     ino,
-				LkFlags: int32(params.LkFlags),
-			})
-			if err != nil {
-				return fmt.Errorf("list pending file lock waiters (ino=%d, lk_flags=%d): %w", params.Ino, params.LkFlags, err)
-			}
-
-			callerHasActiveLocks := flockOriginallyHeld
-			var hasActiveConflict bool
-			for _, l := range activeLocks {
-				h := holderOfLock(l, params.LkFlags)
-				if h == reqHolder {
-					callerHasActiveLocks = true
-					continue
-				}
-				lStart := uint64(l.StartOffset)
-				lEnd := uint64(l.EndOffset)
-				if rangesOverlap(lStart, lEnd, reqStart, reqEnd) && locksConflict(reqType, uint32(l.LockType)) {
-					hasActiveConflict = true
-				}
-			}
-
-			var hasEarlierWaiterConflict bool
-			if !callerHasActiveLocks {
-				for _, w := range waiters {
-					if w.SessionID == sessionID && w.RequestID == requestID {
-						// waiters 已按 created_at ASC, session_id ASC, request_id ASC 排序，
-						// 扫描到自身说明排在自身之前的更早等待者均不冲突
-						break
+					if err != nil {
+						return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 					}
-					wHolder := holderOfWaiter(w, params.LkFlags)
-					if wHolder == reqHolder {
-						continue
-					}
-					wStart := uint64(w.StartOffset)
-					wEnd := uint64(w.EndOffset)
-					if rangesOverlap(wStart, wEnd, reqStart, reqEnd) && locksConflict(reqType, uint32(w.LockType)) {
-						hasEarlierWaiterConflict = true
-						break
+					if deletedCount > 0 {
+						flockOriginallyHeld = true
+						shouldNotify = true
 					}
 				}
-			}
 
-			if !hasActiveConflict && !hasEarlierWaiterConflict {
-				if params.LkFlags == FuseLkFlock {
-					if attempt > 0 {
-						if _, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
-							SessionID: sessionID,
-							Ino:       ino,
-							Fh:        fh,
-						}); err != nil {
-							return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+				if reqType == F_UNLCK {
+					if params.LkFlags == 0 {
+						activeLocks, err := q.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+							Ino:     ino,
+							LkFlags: 0,
+						})
+						if err != nil {
+							return fmt.Errorf("list active posix file locks (ino=%d): %w", params.Ino, err)
+						}
+						if err := applyPosixUnlock(ctx, q, setLkParams, activeLocks, &shouldNotify); err != nil {
+							return err
 						}
 					}
-					_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
-						SessionID:   sessionID,
-						Ino:         ino,
-						Fh:          fh,
-						LockOwner:   owner,
-						LkFlags:     int32(FuseLkFlock),
-						StartOffset: 0,
-						EndOffset:   int64(OffsetMax),
-						LockType:    int16(reqType),
-						Pid:         int32(params.Lk.PID),
-					})
-					if err != nil {
-						return fmt.Errorf("create flock file lock (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+					if hasExistingWaiter {
+						_, _ = q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
+							SessionID: sessionID,
+							RequestID: requestID,
+						})
 					}
-				} else {
-					if err := applyPosixGrant(ctx, q, setLkParams, activeLocks, &shouldNotify); err != nil {
-						return err
+					granted = true
+					return nil
+				}
+
+				activeLocks, err := q.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+					Ino:     ino,
+					LkFlags: int32(params.LkFlags),
+				})
+				if err != nil {
+					return fmt.Errorf("list active file locks (ino=%d, lk_flags=%d): %w", params.Ino, params.LkFlags, err)
+				}
+
+				waiters, err := q.ListPendingFileLockWaitersByInoAndFlags(ctx, db.ListPendingFileLockWaitersByInoAndFlagsParams{
+					Ino:     ino,
+					LkFlags: int32(params.LkFlags),
+				})
+				if err != nil {
+					return fmt.Errorf("list pending file lock waiters (ino=%d, lk_flags=%d): %w", params.Ino, params.LkFlags, err)
+				}
+
+				callerHasActiveLocks := flockOriginallyHeld
+				var hasActiveConflict bool
+				for _, l := range activeLocks {
+					h := holderOfLock(l, params.LkFlags)
+					if h == reqHolder {
+						callerHasActiveLocks = true
+						continue
+					}
+					lStart := uint64(l.StartOffset)
+					lEnd := uint64(l.EndOffset)
+					if rangesOverlap(lStart, lEnd, reqStart, reqEnd) && locksConflict(reqType, uint32(l.LockType)) {
+						hasActiveConflict = true
 					}
 				}
 
-				if hasExistingWaiter {
-					if _, err := q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
-						SessionID: sessionID,
-						RequestID: requestID,
-					}); err != nil {
-						return fmt.Errorf("delete granted file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
+				var hasEarlierWaiterConflict bool
+				if !callerHasActiveLocks {
+					for _, w := range waiters {
+						if w.SessionID == sessionID && w.RequestID == requestID {
+							// waiters 已按 created_at ASC, session_id ASC, request_id ASC 排序，
+							// 扫描到自身说明排在自身之前的更早等待者均不冲突
+							break
+						}
+						wHolder := holderOfWaiter(w, params.LkFlags)
+						if wHolder == reqHolder {
+							continue
+						}
+						wStart := uint64(w.StartOffset)
+						wEnd := uint64(w.EndOffset)
+						if rangesOverlap(wStart, wEnd, reqStart, reqEnd) && locksConflict(reqType, uint32(w.LockType)) {
+							hasEarlierWaiterConflict = true
+							break
+						}
 					}
 				}
-				granted = true
+
+				if !hasActiveConflict && !hasEarlierWaiterConflict {
+					var txPreGrantLocks []db.FileLock
+					if params.LkFlags == 0 {
+						for _, l := range activeLocks {
+							if l.SessionID == sessionID && l.LockOwner == owner {
+								txPreGrantLocks = append(txPreGrantLocks, l)
+							}
+						}
+					}
+
+					if params.LkFlags == FuseLkFlock {
+						if attempt > 0 {
+							if _, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
+								SessionID: sessionID,
+								Ino:       ino,
+								Fh:        fh,
+							}); err != nil {
+								return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+							}
+						}
+						_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
+							SessionID:   sessionID,
+							Ino:         ino,
+							Fh:          fh,
+							LockOwner:   owner,
+							LkFlags:     int32(FuseLkFlock),
+							StartOffset: 0,
+							EndOffset:   int64(OffsetMax),
+							LockType:    int16(reqType),
+							Pid:         int32(params.Lk.PID),
+						})
+						if err != nil {
+							return fmt.Errorf("create flock file lock (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
+						}
+					} else {
+						if err := applyPosixGrant(ctx, q, setLkParams, activeLocks, &shouldNotify); err != nil {
+							return err
+						}
+					}
+
+					if hasExistingWaiter {
+						if _, err := q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
+							SessionID: sessionID,
+							RequestID: requestID,
+						}); err != nil {
+							return fmt.Errorf("delete granted file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
+						}
+					}
+					preGrantOwnerLocks = txPreGrantLocks
+					granted = true
+					return nil
+				}
+
+				if hasDeadlockCycle(reqHolder, reqStart, reqEnd, reqType, sessionID, requestID, params.LkFlags, activeLocks, waiters) {
+					if hasExistingWaiter {
+						if _, err := q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
+							SessionID: sessionID,
+							RequestID: requestID,
+						}); err != nil {
+							return fmt.Errorf("delete deadlocked file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
+						}
+					}
+					deadlockDetected = true
+					return nil
+				}
+
+				_, err = q.UpsertFileLockWaiter(ctx, db.UpsertFileLockWaiterParams{
+					SessionID:   sessionID,
+					RequestID:   requestID,
+					Ino:         ino,
+					Fh:          fh,
+					LockOwner:   owner,
+					LkFlags:     int32(params.LkFlags),
+					StartOffset: int64(reqStart),
+					EndOffset:   int64(reqEnd),
+					LockType:    int16(reqType),
+					Pid:         int32(params.Lk.PID),
+					Status:      WaiterStatusPending,
+				})
+				if err != nil {
+					return fmt.Errorf("upsert file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
+				}
+				waiterEverPersisted = true
+
 				return nil
-			}
-
-			if hasDeadlockCycle(reqHolder, reqStart, reqEnd, reqType, sessionID, requestID, params.LkFlags, activeLocks, waiters) {
-				if hasExistingWaiter {
-					if _, err := q.DeleteFileLockWaiter(ctx, db.DeleteFileLockWaiterParams{
-						SessionID: sessionID,
-						RequestID: requestID,
-					}); err != nil {
-						return fmt.Errorf("delete deadlocked file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
-					}
-				}
-				deadlockDetected = true
-				return nil
-			}
-
-			_, err = q.UpsertFileLockWaiter(ctx, db.UpsertFileLockWaiterParams{
-				SessionID:   sessionID,
-				RequestID:   requestID,
-				Ino:         ino,
-				Fh:          fh,
-				LockOwner:   owner,
-				LkFlags:     int32(params.LkFlags),
-				StartOffset: int64(reqStart),
-				EndOffset:   int64(reqEnd),
-				LockType:    int16(reqType),
-				Pid:         int32(params.Lk.PID),
-				Status:      WaiterStatusPending,
 			})
-			if err != nil {
-				return fmt.Errorf("upsert file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
+
+			if shouldNotify {
+				m.notifyLockWaiters(params.Ino)
 			}
 
-			return nil
-		})
-
-		if shouldNotify {
-			m.notifyLockWaiters(params.Ino)
-		}
-
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-				m.cleanupCancelledWaiter(params.Ino, sessionID, requestID)
-				return ErrInterrupted
-			}
-			switch {
-			case errors.Is(err, ErrInvalidArgument):
-				return ErrInvalidArgument
-			case errors.Is(err, ErrNotFound):
-				return ErrNotFound
-			case errors.Is(err, ErrIsDir):
-				return ErrIsDir
-			case errors.Is(err, ErrBadFileHandle):
-				return ErrBadFileHandle
-			case errors.Is(err, ErrDeadlock):
-				return ErrDeadlock
-			case errors.Is(err, ErrInterrupted):
-				return ErrInterrupted
-			default:
-				return fmt.Errorf("setlkw tx: %w", err)
-			}
-		}
-
-		if interrupted {
-			m.notifyLockWaiters(params.Ino)
-			return ErrInterrupted
-		}
-		if deadlockDetected {
-			m.notifyLockWaiters(params.Ino)
-			return ErrDeadlock
-		}
-		if granted {
-			return nil
-		}
-
-		half := backoff / 2
-		waitDuration := half + rand.N(half+1)
-		timer := time.NewTimer(waitDuration)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			m.cleanupCancelledWaiter(params.Ino, sessionID, requestID)
-			return ErrInterrupted
-		case <-notifyCh:
-			timer.Stop()
-		case <-timer.C:
-			if backoff < maxBackoff {
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
+			if txErr != nil {
+				if granted {
+					m.rollbackGrantedLock(params, preGrantOwnerLocks)
+					return true, ErrInterrupted
+				}
+				if (waiterEverPersisted && !errors.Is(txErr, ErrBadFileHandle)) || errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
+					m.cleanupCancelledWaiter(params.Ino, sessionID, requestID)
+				}
+				if errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
+					return true, ErrInterrupted
+				}
+				switch {
+				case errors.Is(txErr, ErrInvalidArgument):
+					return true, ErrInvalidArgument
+				case errors.Is(txErr, ErrNotFound):
+					return true, ErrNotFound
+				case errors.Is(txErr, ErrIsDir):
+					return true, ErrIsDir
+				case errors.Is(txErr, ErrBadFileHandle):
+					if errors.Is(txErr, errExpiredSessionBadHandle) && !waiterEverPersisted {
+						m.cleanExpiredSessionByID(ctx, params.SessionID)
+					}
+					return true, ErrBadFileHandle
+				case errors.Is(txErr, ErrDeadlock):
+					return true, ErrDeadlock
+				case errors.Is(txErr, ErrInterrupted):
+					return true, ErrInterrupted
+				default:
+					return true, fmt.Errorf("setlkw tx: %w", txErr)
 				}
 			}
+
+			if interrupted {
+				m.notifyLockWaiters(params.Ino)
+				return true, ErrInterrupted
+			}
+			if deadlockDetected {
+				m.notifyLockWaiters(params.Ino)
+				return true, ErrDeadlock
+			}
+			if granted {
+				if ctx.Err() != nil {
+					m.rollbackGrantedLock(params, preGrantOwnerLocks)
+					return true, ErrInterrupted
+				}
+				return true, nil
+			}
+
+			half := backoff / 2
+			waitDuration := half + rand.N(half+1)
+			timer := time.NewTimer(waitDuration)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				m.cleanupCancelledWaiter(params.Ino, sessionID, requestID)
+				return true, ErrInterrupted
+			case <-notifyCh:
+				timer.Stop()
+			case <-timer.C:
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+			}
+			return false, nil
+		}()
+
+		if done {
+			return err
 		}
 	}
 }
@@ -1065,23 +1192,123 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var removed int64
+	var shouldNotify bool
 	_ = m.store.ExecTxWithOptions(cleanupCtx, func(q db.Querier) error {
 		_, err := q.GetInodeForUpdate(cleanupCtx, int64(ino))
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		n, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+		waiter, err := q.GetFileLockWaiter(cleanupCtx, db.GetFileLockWaiterParams{
 			SessionID: sessionID,
 			RequestID: requestID,
 		})
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
 			return err
 		}
-		removed = n
+
+		if waiter.Status == WaiterStatusGranted {
+			if waiter.LkFlags == int32(FuseLkFlock) {
+				_, _ = q.DeleteFlockFileLocksBySessionAndFh(cleanupCtx, db.DeleteFlockFileLocksBySessionAndFhParams{
+					SessionID: sessionID,
+					Ino:       int64(ino),
+					Fh:        waiter.Fh,
+				})
+			} else {
+				activeLocks, err := q.ListActiveFileLocksByInoAndFlags(cleanupCtx, db.ListActiveFileLocksByInoAndFlagsParams{
+					Ino:     int64(ino),
+					LkFlags: 0,
+				})
+				if err == nil {
+					unlockParams := SetLkParams{
+						Ino:       ino,
+						Fh:        uint64(waiter.Fh),
+						LockOwner: uint64(waiter.LockOwner),
+						Lk: FileLock{
+							Start: uint64(waiter.StartOffset),
+							End:   uint64(waiter.EndOffset),
+							Type:  F_UNLCK,
+							PID:   uint32(waiter.Pid),
+						},
+						LkFlags:   0,
+						SessionID: uint64(sessionID),
+					}
+					_ = applyPosixUnlock(cleanupCtx, q, unlockParams, activeLocks, &shouldNotify)
+				}
+			}
+			shouldNotify = true
+		}
+
+		n, err := q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+			SessionID: sessionID,
+			RequestID: requestID,
+		})
+		if err == nil && n > 0 {
+			shouldNotify = true
+		}
 		return nil
 	})
-	if removed > 0 {
+	if shouldNotify {
 		m.notifyLockWaiters(ino)
+	}
+}
+
+func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []db.FileLock) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var shouldNotify bool
+	_ = m.store.ExecTxWithOptions(cleanupCtx, func(q db.Querier) error {
+		_, err := q.GetInodeForUpdate(cleanupCtx, int64(params.Ino))
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if params.LkFlags == FuseLkFlock {
+			_, _ = q.DeleteFlockFileLocksBySessionAndFh(cleanupCtx, db.DeleteFlockFileLocksBySessionAndFhParams{
+				SessionID: int64(params.SessionID),
+				Ino:       int64(params.Ino),
+				Fh:        int64(params.Fh),
+			})
+		} else {
+			activeLocks, err := q.ListActiveFileLocksByInoAndFlags(cleanupCtx, db.ListActiveFileLocksByInoAndFlagsParams{
+				Ino:     int64(params.Ino),
+				LkFlags: 0,
+			})
+			if err == nil {
+				var idsToDelete []int64
+				for _, l := range activeLocks {
+					if l.SessionID == int64(params.SessionID) && l.LockOwner == int64(params.LockOwner) {
+						idsToDelete = append(idsToDelete, l.ID)
+					}
+				}
+				if len(idsToDelete) > 0 {
+					_ = q.DeleteFileLocksByIDs(cleanupCtx, idsToDelete)
+				}
+				for _, oldLock := range preGrantOwnerLocks {
+					_, _ = q.CreateFileLock(cleanupCtx, db.CreateFileLockParams{
+						SessionID:   oldLock.SessionID,
+						Ino:         oldLock.Ino,
+						Fh:          oldLock.Fh,
+						LockOwner:   oldLock.LockOwner,
+						LkFlags:     oldLock.LkFlags,
+						StartOffset: oldLock.StartOffset,
+						EndOffset:   oldLock.EndOffset,
+						LockType:    oldLock.LockType,
+						Pid:         oldLock.Pid,
+					})
+				}
+			}
+		}
+		_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+			SessionID: int64(params.SessionID),
+			RequestID: int64(params.RequestID),
+		})
+		shouldNotify = true
+		return nil
+	})
+	if shouldNotify {
+		m.notifyLockWaiters(params.Ino)
 	}
 }

@@ -88,6 +88,7 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		}
 
 		// 可选文件句柄归属校验与 ftruncate 写权限强制检查
+		var handleCreatedAt pgtype.Timestamptz
 		if input.Fh != nil {
 			handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
 				Fh:        int64(*input.Fh),
@@ -100,6 +101,7 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 				}
 				return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", *input.Fh, ino, err)
 			}
+			handleCreatedAt = handle.CreatedAt
 			if input.Size != nil {
 				accMode := uint32(handle.Flags) & O_ACCMODE
 				if accMode != O_WRONLY && accMode != O_RDWR {
@@ -108,8 +110,10 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 			}
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, input.SessionID); err != nil {
-			return err
+		if input.SessionID != nil {
+			if err := m.touchActiveClientSessionForHandle(ctx, q, *input.SessionID, handleCreatedAt); err != nil {
+				return err
+			}
 		}
 
 		// POSIX Mode 篡改防御、文件类型保留与特权位剥离
@@ -231,6 +235,9 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		case errors.Is(err, ErrIsDir):
 			return nil, ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && input.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *input.SessionID)
+			}
 			return nil, ErrBadFileHandle
 		case errors.Is(err, ErrInvalidArgument):
 			return nil, ErrInvalidArgument
@@ -304,8 +311,10 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			return ErrBadFileHandle
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
+		if params.SessionID != nil {
+			if err := m.touchActiveClientSessionForHandle(ctx, q, *params.SessionID, handle.CreatedAt); err != nil {
+				return err
+			}
 		}
 
 		switch params.Mode {
@@ -391,6 +400,9 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 		case errors.Is(err, ErrNotSupported):
 			return ErrNotSupported
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && params.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *params.SessionID)
+			}
 			return ErrBadFileHandle
 		case errors.Is(err, ErrNoSpace):
 			return ErrNoSpace

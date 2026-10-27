@@ -3,8 +3,13 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
-	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,13 +22,15 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
 func TestSetLkw_InputValidation(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	validBase := meta.SetLkwParams{
 		Ino:       100,
@@ -136,7 +143,8 @@ func TestSetLkw_InputValidation(t *testing.T) {
 }
 
 func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	ino := uint64(310)
 	fh := uint64(15)
 
@@ -198,6 +206,24 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 		mgr := meta.New(mockStore)
 
 		setupMockWriteTx(mockStore, mockQuerier)
+
+		// 支持 ErrBadFileHandle 触发的 cleanExpiredSessionByID 异步事务清理
+		mockStore.EXPECT().
+			ExecTxWithOptions(mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				return fn(mockQuerier)
+			}).
+			Maybe()
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Maybe()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+			Maybe()
 
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, int64(ino)).
@@ -275,17 +301,26 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
 			Return(int64(0), nil).
-			Once()
+			Maybe()
 
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
-			Return(db.ClientSession{SessionID: 1}, nil).
-			Once()
+			Return(db.ClientSession{
+				SessionID: 1,
+				CreatedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: time.Now().Add(time.Second), Valid: true},
+			}, nil).
+			Maybe()
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
 			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
-			Once()
+			Maybe()
+
+		mockQuerier.EXPECT().
+			UpsertFileLockWaiter(mock.Anything, mock.Anything).
+			Return(db.FileLockWaiter{}, nil).
+			Maybe()
 
 		mockQuerier.EXPECT().
 			ListActiveFileLocksByInoAndFlags(mock.Anything, db.ListActiveFileLocksByInoAndFlagsParams{
@@ -336,7 +371,8 @@ func TestSetLkw_InodeAndOpenModeValidation(t *testing.T) {
 }
 
 func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	ino := uint64(700)
 	fh1 := uint64(31)
 	fh2 := uint64(32)
@@ -383,17 +419,21 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
 			Return(int64(0), nil).
-			Once()
+			Maybe()
 
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
-			Return(db.ClientSession{SessionID: 2}, nil).
-			Once()
+			Return(db.ClientSession{
+				SessionID: 2,
+				CreatedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: time.Now().Add(time.Second), Valid: true},
+			}, nil).
+			Maybe()
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
 			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
-			Once()
+			Maybe()
 
 		// A (session=1, owner=101) 与 B (session=2, owner=202) 均持有 [0, 100] 的 F_RDLCK
 		mockQuerier.EXPECT().
@@ -507,17 +547,21 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
 			Return(int64(0), nil).
-			Once()
+			Maybe()
 
 		mockQuerier.EXPECT().
 			UpsertClientSession(mock.Anything, mock.Anything).
-			Return(db.ClientSession{SessionID: 3}, nil).
-			Once()
+			Return(db.ClientSession{
+				SessionID: 3,
+				CreatedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: time.Now().Add(time.Second), Valid: true},
+			}, nil).
+			Maybe()
 
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
 			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
-			Once()
+			Maybe()
 
 		// A (1, 101) 持有 [0, 99] 写锁；B (2, 202) 持有 [100, 199] 写锁；C (3, 303) 持有 [200, 299] 写锁
 		mockQuerier.EXPECT().
@@ -668,10 +712,7 @@ func TestSetLkw_UnitDeadlockAndStateMachine(t *testing.T) {
 }
 
 func TestSetLkw_PostgresAcceptanceCriteria(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -1419,4 +1460,908 @@ func TestSetLkw_PostgresAcceptanceCriteria(t *testing.T) {
 		assert.True(t, beforeInode.Attr.Mtime.Equal(afterInode.Attr.Mtime))
 		assert.True(t, beforeInode.Attr.Ctime.Equal(afterInode.Attr.Ctime))
 	})
+}
+
+// TestSetLkw_NotifyChanLeak_OnImmediateReturnOrError 验证 G-08：
+// SetLkw 在无需阻塞直接返回或校验失败时未回收 lockNotifyChans[ino] 导致内存泄漏。
+func TestSetLkw_NotifyChanLeak_OnImmediateReturnOrError(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	t.Run("校验失败返回 ErrNotFound 时未清理 lockNotifyChans 内存泄漏", func(t *testing.T) {
+		nonExistentIno := uint64(987654321)
+		err := mgr.SetLkw(ctx, meta.SetLkwParams{
+			Ino:       nonExistentIno,
+			Fh:        1,
+			LockOwner: 100,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   101,
+			},
+			SessionID: 1,
+			RequestID: 1,
+		})
+		require.ErrorIs(t, err, meta.ErrNotFound)
+
+		assert.False(t, meta.HasLockNotifyChan(mgr, nonExistentIno),
+			"G-08: 对不存在的 Inode 执行 SetLkw 校验失败退出时，lockNotifyChans 绝不应残留通知通道条目")
+	})
+
+	t.Run("无冲突直接获锁成功退出时未清理 lockNotifyChans 内存泄漏", func(t *testing.T) {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-leak-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sess := uint64(555001)
+		_, err = mgr.RenewSession(ctx, sess)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("direct_grant_leak.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh := createRes.Fh
+
+		// 无冲突直接申请排他锁并成功
+		err = mgr.SetLkw(ctx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: 200,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   50,
+				Type:  meta.F_WRLCK,
+				PID:   201,
+			},
+			SessionID: sess,
+			RequestID: 2,
+		})
+		require.NoError(t, err)
+
+		assert.False(t, meta.HasLockNotifyChan(mgr, fileIno),
+			"G-08: 无冲突直接获锁退出时，lockNotifyChans 绝不应残留通知通道条目")
+	})
+}
+
+type cancelAfterTxStore struct {
+	db.Store
+	cancelOnGrant     func()
+	hookActive        bool
+	returnNilOnCancel bool
+}
+
+func (s *cancelAfterTxStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && s.hookActive && s.cancelOnGrant != nil {
+		s.cancelOnGrant()
+		if s.returnNilOnCancel {
+			return nil
+		}
+		return context.Canceled
+	}
+	return err
+}
+
+// TestSetLkw_ContextCanceledAfterGrantCommit_NoHangingLock 验证 G-04 与 G-06：
+// SetLkw 授锁事务已在 DB 提交但返回前 ctx 取消，必须回滚/撤销已授予的锁，绝不残留悬挂锁。
+// 涵盖两种模式：
+// 1. returnNilOnCancel=false: 覆盖 txErr != nil 分支
+// 2. returnNilOnCancel=true: 覆盖 txErr == nil && ctx.Err() != nil 分支
+// 每种模式均测试 POSIX 记录锁和 BSD flock，并在每次调用后直接查询底层数据库 file_locks 与 file_lock_waiters 表断言记录数均为 0。
+func TestSetLkw_ContextCanceledAfterGrantCommit_NoHangingLock(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &cancelAfterTxStore{Store: baseStore}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-hanging-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	testCases := []struct {
+		name              string
+		returnNilOnCancel bool
+		isFlock           bool
+	}{
+		{name: "txErr!=nil/POSIX", returnNilOnCancel: false, isFlock: false},
+		{name: "txErr!=nil/BSD_flock", returnNilOnCancel: false, isFlock: true},
+		{name: "txErr==nil_ctxErr!=nil/POSIX", returnNilOnCancel: true, isFlock: false},
+		{name: "txErr==nil_ctxErr!=nil/BSD_flock", returnNilOnCancel: true, isFlock: true},
+	}
+
+	for idx, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sessA := uint64(666100 + idx*2)
+			sessB := uint64(666100 + idx*2 + 1)
+			_, err = mgr.RenewSession(ctx, sessA)
+			require.NoError(t, err)
+			_, err = mgr.RenewSession(ctx, sessB)
+			require.NoError(t, err)
+
+			createResA, err := mgr.Create(ctx, meta.CreateParams{
+				ParentIno: disk.RootIno,
+				Name:      []byte(fmt.Sprintf("hanging_%d_%v.bin", idx, tc.isFlock)),
+				Mode:      meta.S_IFREG | 0o644,
+				Flags:     meta.O_RDWR,
+				SessionID: &sessA,
+			})
+			require.NoError(t, err)
+			fileIno := createResA.Inode.Ino
+			fhA := createResA.Fh
+
+			openResB, err := mgr.Open(ctx, meta.OpenParams{
+				Ino:       fileIno,
+				Flags:     meta.O_RDWR,
+				SessionID: &sessB,
+			})
+			require.NoError(t, err)
+			fhB := openResB.Fh
+
+			// 激活接缝：当 SetLkw 提交授锁事务后，立即取消 ctx
+			callCtx, callCancel := context.WithCancel(ctx)
+			hookStore.cancelOnGrant = callCancel
+			hookStore.hookActive = true
+			hookStore.returnNilOnCancel = tc.returnNilOnCancel
+
+			var lkFlags uint32
+			var lkA meta.FileLock
+			if tc.isFlock {
+				lkFlags = meta.FuseLkFlock
+				lkA = meta.FileLock{
+					Start: 0,
+					End:   meta.OffsetMax,
+					Type:  meta.F_WRLCK,
+					PID:   301,
+				}
+			} else {
+				lkFlags = 0
+				lkA = meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   301,
+				}
+			}
+
+			err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: 300,
+				Lk:        lkA,
+				LkFlags:   lkFlags,
+				SessionID: sessA,
+				RequestID: 1,
+			})
+			require.ErrorIs(t, err, meta.ErrInterrupted, "在授锁提交与返回间取消必须向客户端返回 ErrInterrupted")
+
+			// 禁用 hook，恢复正常执行
+			hookStore.hookActive = false
+
+			// 在每次调用后直接查询底层数据库 file_locks 与 file_lock_waiters 表断言锁记录数与等待记录数均为 0
+			var lockCount, waiterCount int64
+			err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM file_locks WHERE ino = $1", int64(fileIno)).Scan(&lockCount)
+			require.NoError(t, err)
+			assert.Equal(t, int64(0), lockCount, "file_locks 记录数必须为 0")
+
+			err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM file_lock_waiters WHERE ino = $1", int64(fileIno)).Scan(&waiterCount)
+			require.NoError(t, err)
+			assert.Equal(t, int64(0), waiterCount, "file_lock_waiters 记录数必须为 0")
+
+			// 此时客户端 B 尝试获取同一区间的排他锁：验证无悬挂锁阻碍后续客户端
+			var lkB meta.FileLock
+			if tc.isFlock {
+				lkB = meta.FileLock{
+					Start: 0,
+					End:   meta.OffsetMax,
+					Type:  meta.F_WRLCK,
+					PID:   401,
+				}
+			} else {
+				lkB = meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   401,
+				}
+			}
+
+			err = mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       fileIno,
+				Fh:        fhB,
+				LockOwner: 400,
+				Lk:        lkB,
+				LkFlags:   lkFlags,
+				SessionID: sessB,
+			})
+			require.NoError(t, err, "G-04/G-06: SetLkw 因取消返回 ErrInterrupted 时，绝不能在 file_locks 残留悬挂锁阻碍后续客户端获锁")
+		})
+	}
+}
+
+// TestSetLkw_CancelAfterGrant_PreservesPreExistingOwnerLocks 验证 G-01：
+// SetLkw 授锁提交后取消回滚时，必须精确保留或恢复调用方原有的 POSIX 记录锁，
+// 绝不得直接对请求区间执行解锁而误删调用方在授锁前合法持有的重叠记录锁。
+func TestSetLkw_CancelAfterGrant_PreservesPreExistingOwnerLocks(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &cancelAfterTxStore{Store: baseStore}
+	mgr := meta.New(hookStore)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-g01-lock-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(777001)
+	sessB := uint64(777002)
+	_, err = mgr.RenewSession(ctx, sessA)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(ctx, sessB)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("cancel_preserve_lock.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+
+	openResB, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessB,
+	})
+	require.NoError(t, err)
+	fhB := openResB.Fh
+
+	// 1. 同一 (session_id, ino, lock_owner) 先通过 SetLk 成功持有 [0, 99] 的 POSIX 读锁
+	ownerA := uint64(501)
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   99,
+			Type:  meta.F_RDLCK,
+			PID:   501,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+	})
+	require.NoError(t, err)
+
+	// 验证持有锁状态：[0, 99] 读锁已在底表建立
+	preLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     int64(fileIno),
+		LkFlags: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, preLocks, 1)
+	require.Equal(t, int64(0), preLocks[0].StartOffset)
+	require.Equal(t, int64(99), preLocks[0].EndOffset)
+	require.Equal(t, int16(meta.F_RDLCK), preLocks[0].LockType)
+
+	// 2. 模拟 SetLkw 请求将子区间 [50, 99] 升级为写锁；授锁事务提交成功后、返回前上下文取消
+	callCtx, callCancel := context.WithCancel(ctx)
+	hookStore.cancelOnGrant = callCancel
+	hookStore.hookActive = true
+
+	err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: ownerA,
+		Lk: meta.FileLock{
+			Start: 50,
+			End:   99,
+			Type:  meta.F_WRLCK,
+			PID:   501,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+		RequestID: 999,
+	})
+	require.ErrorIs(t, err, meta.ErrInterrupted, "在授锁提交与返回间取消必须向客户端返回 ErrInterrupted")
+
+	// 禁用 hook
+	hookStore.hookActive = false
+
+	// 3. 断言底层 file_locks 表：该 owner 在 [0, 99] 上的原有读锁必须完整保留
+	// 若存在 G-01 缺陷，回滚逻辑直接对请求区间 [50, 99] 执行 unlock，导致 [50, 99] 被误删，仅残留 [0, 49]！
+	postLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     int64(fileIno),
+		LkFlags: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, postLocks, 1, "G-01: 回滚后原有读锁必须完整保留为 1 条记录，不能被抹除或截断")
+	assert.Equal(t, int64(0), postLocks[0].StartOffset, "G-01: 原有读锁起始偏移应为 0")
+	assert.Equal(t, int64(99), postLocks[0].EndOffset, "G-01: 原有读锁结束偏移应为 99，不能误删 [50, 99] 导致只剩 [0, 49]")
+	assert.Equal(t, int16(meta.F_RDLCK), postLocks[0].LockType, "G-01: 恢复的锁类型应为 F_RDLCK")
+
+	// 4. 冲突锁检测：客户端 B 尝试在 [50, 99] 上获取排他写锁，必须因冲突返回 ErrAgain
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhB,
+		LockOwner: 602,
+		Lk: meta.FileLock{
+			Start: 50,
+			End:   99,
+			Type:  meta.F_WRLCK,
+			PID:   602,
+		},
+		LkFlags:   0,
+		SessionID: sessB,
+	})
+	assert.ErrorIs(t, err, meta.ErrAgain, "G-01: 客户端 A 的原有读锁 [50, 99] 应当有效存在，客户端 B 获取写锁必须冲突失败返回 ErrAgain")
+}
+
+// TestSetLkw_ReleaseClosingHandleCleansWaiter 验证 G-03：
+// Release 关闭正在 SetLkw 排队的句柄后，file_lock_waiters 必须零残留，且后续客户端加锁不被阻塞。
+func TestSetLkw_ReleaseClosingHandleCleansWaiter(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-g03-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(777001)
+	sessB := uint64(777002)
+	sessC := uint64(777003)
+	_, err = mgr.RenewSession(ctx, sessA)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(ctx, sessB)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(ctx, sessC)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("zombie_waiter.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+
+	openResB, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessB,
+	})
+	require.NoError(t, err)
+	fhB := openResB.Fh
+
+	openResC, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessC,
+	})
+	require.NoError(t, err)
+	fhC := openResC.Fh
+
+	// 1. 客户端 A 获取排他锁
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: 501,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   501,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+	})
+	require.NoError(t, err)
+
+	// 2. 客户端 B 在后台发起阻塞式 SetLkw
+	setlkwErrCh := make(chan error, 1)
+	setlkwCtx, cancelSetLkw := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelSetLkw()
+
+	go func() {
+		setlkwErrCh <- mgr.SetLkw(setlkwCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: 502,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   502,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+			RequestID: 88,
+		})
+	}()
+
+	// 等待客户端 B 的 waiter 写入数据库
+	require.Eventually(t, func() bool {
+		var cnt int64
+		err := pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE ino = $1 AND session_id = $2", fileIno, sessB).Scan(&cnt)
+		return err == nil && cnt > 0
+	}, 2*time.Second, 10*time.Millisecond, "客户端 B 的 waiter 必须已写入数据库")
+
+	// 3. 客户端 B 并发调用 Release 关闭正在等待加锁的句柄 fhB
+	err = mgr.Release(ctx, meta.ReleaseParams{
+		Ino:       fileIno,
+		Fh:        fhB,
+		SessionID: &sessB,
+	})
+	require.NoError(t, err)
+
+	// 等待 SetLkw 协程退出（因句柄关闭返回 ErrBadFileHandle）
+	setlkwErr := <-setlkwErrCh
+	require.ErrorIs(t, setlkwErr, meta.ErrBadFileHandle, "句柄被 Release 后 SetLkw 必须返回 ErrBadFileHandle")
+
+	// 4. 断言：file_lock_waiters 中绝不能残留客户端 B 的僵尸记录
+	var waiterCount int64
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE ino = $1 AND session_id = $2", fileIno, sessB).Scan(&waiterCount)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), waiterCount, "G-03: Release 关闭等待句柄后，file_lock_waiters 表中绝不应残留僵尸记录")
+
+	// 5. 客户端 A 释放锁
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: 501,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_UNLCK,
+			PID:   501,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+	})
+	require.NoError(t, err)
+
+	// 6. 客户端 C 尝试获锁：如果残留了僵尸等待者，客户端 C 的加锁会被防饥饿机制永久拦截
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhC,
+		LockOwner: 503,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   503,
+		},
+		LkFlags:   0,
+		SessionID: sessC,
+	})
+	require.NoError(t, err, "G-03: 前序持锁者已解锁且等待句柄已关闭，后续客户端 SetLk 必须立即获锁成功")
+}
+
+func TestUnitTestSuiteAudit_BlockingSetLkwMissingContextTimeout(t *testing.T) {
+	fset := token.NewFileSet()
+
+	// 自检反例 1: 合规函数（WithTimeout + select { case <-waiterRegistered: case <-ctx.Done(): }）
+	const testCodeCompliant = `package sample
+import (
+	"context"
+	"time"
+)
+func testCompliant() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waiterRegistered := make(chan struct{})
+	select {
+	case <-waiterRegistered:
+	case <-ctx.Done():
+	}
+	_ = mgr.SetLkw(ctx, nil)
+}
+`
+	node1, err := parser.ParseFile(fset, "sample_compliant.go", testCodeCompliant, 0)
+	require.NoError(t, err)
+	violations1 := auditASTFileForH11(fset, "sample_compliant.go", node1)
+	require.Empty(t, violations1, "合规函数不应报出任何 AST 违规，但报出: %v", violations1)
+
+	// 自检反例 2: 作用域遮蔽违规（外层有 WithTimeout，后一个子测试遮蔽为 context.Background()）
+	const testCodeShadowed = `package sample
+import (
+	"context"
+	"testing"
+	"time"
+)
+func testShadowed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Run("sub1", func(t *testing.T) {
+		_ = mgr.SetLkw(ctx, nil)
+	})
+	t.Run("sub2", func(t *testing.T) {
+		ctx := context.Background()
+		_ = mgr.SetLkw(ctx, nil)
+	})
+}
+`
+	node2, err := parser.ParseFile(fset, "sample_shadowed.go", testCodeShadowed, 0)
+	require.NoError(t, err)
+	violations2 := auditASTFileForH11(fset, "sample_shadowed.go", node2)
+	require.Len(t, violations2, 1, "遮蔽违规测试必须准确检出 1 条违规，实际: %v", violations2)
+
+	// 自检反例 3: 继承有界上下文（WithCancel 继承自 WithTimeout）
+	const testCodeInherited = `package sample
+import (
+	"context"
+	"time"
+)
+func testInherited() {
+	parentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	childCtx, childCancel := context.WithCancel(parentCtx)
+	defer childCancel()
+	_ = mgr.SetLkw(childCtx, nil)
+}
+`
+	node3, err := parser.ParseFile(fset, "sample_inherited.go", testCodeInherited, 0)
+	require.NoError(t, err)
+	violations3 := auditASTFileForH11(fset, "sample_inherited.go", node3)
+	require.Empty(t, violations3, "继承有界上下文的调用不应报出任何违规，但报出: %v", violations3)
+
+	// 自检反例 4: WithCancel 直接派生自 context.Background() 必须报错
+	const testCodeUnboundedCancel = `package sample
+import (
+	"context"
+)
+func testUnboundedCancel() {
+	wCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = mgr.SetLkw(wCtx, nil)
+}
+`
+	node4, err := parser.ParseFile(fset, "sample_unbounded_cancel.go", testCodeUnboundedCancel, 0)
+	require.NoError(t, err)
+	violations4 := auditFileForUnboundedSetLkw(fset, "sample_unbounded_cancel.go", node4)
+	require.Len(t, violations4, 1, "直接派生自 context.Background() 的 WithCancel 必须检出 1 条违规，实际: %v", violations4)
+
+	// 自检反例 5: 两层嵌套 WithCancel 派生自 context.Background() 必须报错
+	const testCodeNestedCancel = `package sample
+import (
+	"context"
+)
+func testNestedCancel() {
+	c1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	c2, cancel2 := context.WithCancel(c1)
+	defer cancel2()
+	_ = mgr.SetLkw(c2, nil)
+}
+`
+	node5, err := parser.ParseFile(fset, "sample_nested_cancel.go", testCodeNestedCancel, 0)
+	require.NoError(t, err)
+	violations5 := auditFileForUnboundedSetLkw(fset, "sample_nested_cancel.go", node5)
+	require.Len(t, violations5, 1, "两层嵌套 WithCancel 派生自 context.Background() 必须检出 1 条违规，实际: %v", violations5)
+
+	// 审计当前目录 '.' 下所有 *_test.go 文件
+	violations := auditTestSuiteSetLkwTimeouts(t)
+	assert.Empty(t, violations, "单元测试套件必须符合 CODING_STANDARDS.md §2 规范，阻塞操作与通道等待必须绑定 context.WithTimeout 超时保护：\n%s", strings.Join(violations, "\n"))
+}
+
+func auditTestSuiteSetLkwTimeouts(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	var violations []string
+
+	files, err := filepath.Glob("*_test.go")
+	require.NoError(t, err)
+
+	for _, file := range files {
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		require.NoError(t, err, "解析 %s 失败", file)
+		violations = append(violations, auditASTFileForH11(fset, file, node)...)
+	}
+
+	return violations
+}
+
+func auditFileForUnboundedSetLkw(fset *token.FileSet, filePath string, fileNode *ast.File) []string {
+	return auditASTFileForH11(fset, filePath, fileNode)
+}
+
+func auditASTFileForH11(fset *token.FileSet, filePath string, fileNode *ast.File) []string {
+	var violations []string
+	var stack []ast.Node
+
+	ast.Inspect(fileNode, func(n ast.Node) bool {
+		if n == nil {
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			return true
+		}
+		stack = append(stack, n)
+
+		switch stmt := n.(type) {
+		case *ast.UnaryExpr:
+			if stmt.Op == token.ARROW {
+				if ident, ok := stmt.X.(*ast.Ident); ok && ident.Name == "waiterRegistered" {
+					var ancestorSelect *ast.SelectStmt
+					for i := len(stack) - 2; i >= 0; i-- {
+						if sel, ok := stack[i].(*ast.SelectStmt); ok {
+							ancestorSelect = sel
+							break
+						}
+					}
+
+					pos := fset.Position(stmt.Pos())
+					if ancestorSelect == nil {
+						violations = append(violations, fmt.Sprintf("%s:%d: 存在未包裹在带超时或 ctx.Done() 分支 select 中的裸通道接收 <-waiterRegistered",
+							filepath.ToSlash(filepath.Clean(filePath)), pos.Line))
+					} else if !hasTimeoutOrCancellationBranch(ancestorSelect) {
+						violations = append(violations, fmt.Sprintf("%s:%d: select 中接收 <-waiterRegistered 但未包含任何超时 (time.After/timer.C) 或 ctx.Done() 取消分支",
+							filepath.ToSlash(filepath.Clean(filePath)), pos.Line))
+					}
+				}
+			}
+
+		case *ast.CallExpr:
+			if sel, ok := stmt.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetLkw" {
+				if xIdent, ok := sel.X.(*ast.Ident); ok && xIdent.Name == "tinyMgr" {
+					return true
+				}
+				if len(stmt.Args) > 0 {
+					arg0 := stmt.Args[0]
+					pos := fset.Position(stmt.Pos())
+					if isCallTo(arg0, "context", "Background") || isCallTo(arg0, "context", "TODO") {
+						violations = append(violations, fmt.Sprintf("%s:%d: 调用 SetLkw 直接传入无超时的 context",
+							filepath.ToSlash(filepath.Clean(filePath)), pos.Line))
+					} else if ident, ok := arg0.(*ast.Ident); ok {
+						if !isVarBoundedAtPos(stack, ident.Name, stmt.Pos()) {
+							violations = append(violations, fmt.Sprintf("%s:%d: 调用 SetLkw 使用的 context 变量 %q 未绑定 WithTimeout/WithDeadline",
+								filepath.ToSlash(filepath.Clean(filePath)), pos.Line, ident.Name))
+						}
+					}
+				}
+			}
+		}
+
+		return true
+	})
+
+	return violations
+}
+
+func hasTimeoutOrCancellationBranch(selectStmt *ast.SelectStmt) bool {
+	if selectStmt.Body == nil {
+		return false
+	}
+	for _, clause := range selectStmt.Body.List {
+		comm, ok := clause.(*ast.CommClause)
+		if !ok || comm.Comm == nil {
+			continue
+		}
+		var recvExpr ast.Expr
+		switch s := comm.Comm.(type) {
+		case *ast.ExprStmt:
+			recvExpr = s.X
+		case *ast.AssignStmt:
+			if len(s.Rhs) > 0 {
+				recvExpr = s.Rhs[0]
+			}
+		}
+		if recvExpr == nil {
+			continue
+		}
+		unary, ok := recvExpr.(*ast.UnaryExpr)
+		if !ok || unary.Op != token.ARROW {
+			continue
+		}
+		ch := unary.X
+		if call, ok := ch.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" {
+				return true
+			}
+			if isCallToExpr(call, "time", "After") {
+				return true
+			}
+		}
+		if sel, ok := ch.(*ast.SelectorExpr); ok && sel.Sel.Name == "C" {
+			return true
+		}
+	}
+	return false
+}
+
+func isVarBoundedAtPos(stack []ast.Node, varName string, usePos token.Pos) bool {
+	for i := len(stack) - 1; i >= 0; i-- {
+		var stmts []ast.Stmt
+		switch b := stack[i].(type) {
+		case *ast.BlockStmt:
+			stmts = b.List
+		case *ast.CaseClause:
+			stmts = b.Body
+		default:
+			continue
+		}
+
+		var lastAssign *ast.AssignStmt
+		for _, stmt := range stmts {
+			if stmt.Pos() >= usePos {
+				continue
+			}
+			assign, ok := stmt.(*ast.AssignStmt)
+			if !ok {
+				continue
+			}
+			for _, lhs := range assign.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == varName {
+					lastAssign = assign
+					break
+				}
+			}
+		}
+
+		if lastAssign != nil {
+			return isAssignmentBounded(stack[:i+1], lastAssign, varName)
+		}
+	}
+	return false
+}
+
+func isAssignmentBounded(stack []ast.Node, assign *ast.AssignStmt, varName string) bool {
+	varIndex := -1
+	for idx, lhs := range assign.Lhs {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name == varName {
+			varIndex = idx
+			break
+		}
+	}
+	if varIndex == -1 {
+		return false
+	}
+
+	var rhsExpr ast.Expr
+	if len(assign.Rhs) == 1 {
+		rhsExpr = assign.Rhs[0]
+	} else if varIndex < len(assign.Rhs) {
+		rhsExpr = assign.Rhs[varIndex]
+	} else {
+		return false
+	}
+
+	return isContextExprBounded(stack, rhsExpr, assign.Pos())
+}
+
+func isContextExprBounded(stack []ast.Node, expr ast.Expr, usePos token.Pos) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return isVarBoundedAtPos(stack, e.Name, usePos)
+	case *ast.CallExpr:
+		if isCallToExpr(e, "context", "WithTimeout") || isCallToExpr(e, "context", "WithDeadline") {
+			return true
+		}
+		if isCallToExpr(e, "context", "Background") || isCallToExpr(e, "context", "TODO") {
+			return false
+		}
+		if isCallToExpr(e, "context", "WithCancel") || isCallToExpr(e, "context", "WithValue") {
+			if len(e.Args) > 0 {
+				return isContextExprBounded(stack, e.Args[0], usePos)
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func isCallTo(expr ast.Expr, pkg, fn string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	return isCallToExpr(call, pkg, fn)
+}
+
+func isCallToExpr(call *ast.CallExpr, pkg, fn string) bool {
+	if call == nil {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkgIdent, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return pkgIdent.Name == pkg && sel.Sel.Name == fn
 }

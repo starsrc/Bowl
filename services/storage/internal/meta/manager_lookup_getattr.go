@@ -14,17 +14,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
-// readlinkEmptyTargetError 同时支持 ErrIO（STARSRC-313）与向后兼容 ErrInvalidArgument。
-type readlinkEmptyTargetError struct{}
-
-func (e readlinkEmptyTargetError) Error() string {
-	return ErrIO.Error()
-}
-
-func (e readlinkEmptyTargetError) Is(target error) bool {
-	return target == ErrIO || target == ErrInvalidArgument
-}
-
 // Lookup 执行单级目录项查找与块属性动态推导。
 func (m *manager) Lookup(ctx context.Context, parentIno uint64, name []byte) (*Inode, error) {
 	if parentIno == 0 || parentIno > math.MaxInt64 {
@@ -186,7 +175,7 @@ func (m *manager) Readlink(ctx context.Context, ino uint64) ([]byte, error) {
 	}
 
 	if len(row.SymlinkTarget) == 0 {
-		return nil, readlinkEmptyTargetError{}
+		return nil, fmt.Errorf("%w: empty symlink target for ino %d", ErrIO, ino)
 	}
 
 	if m.atimeMode != AtimeModeNoAtime {

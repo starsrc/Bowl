@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"testing"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
@@ -128,6 +128,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 	}
 
 	expectRenewSession := func(mockQuerier *dbmock.MockQuerier, sid uint64) {
+		now := time.Now()
 		mockQuerier.EXPECT().
 			DeleteExpiredClientSessions(mock.Anything).
 			Return(int64(0), nil).
@@ -136,7 +137,12 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
 				return arg.SessionID == int64(sid) && arg.ExpiresAt.Valid
 			})).
-			Return(db.ClientSession{SessionID: int64(sid)}, nil).
+			Return(db.ClientSession{
+				SessionID: int64(sid),
+				ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
+				CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+				UpdatedAt: pgtype.Timestamptz{Time: now.Add(time.Second), Valid: true},
+			}, nil).
 			Once()
 		mockQuerier.EXPECT().
 			DeleteUnreferencedOrphanInodes(mock.Anything).
@@ -430,10 +436,7 @@ func TestSessionBindingAndRenewal_Unit(t *testing.T) {
 }
 
 func TestSessionHandleAndOrphanGC_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -954,4 +957,539 @@ func TestSessionHandleAndOrphanGC_PostgresIntegration(t *testing.T) {
 		_, err = mgr.GetAttr(ctx, dirIno)
 		assert.ErrorIs(t, err, meta.ErrNotFound, "孤儿目录应被物理删除")
 	})
+}
+
+// TestSession_ExpiredLockRevivedByRenewSession 验证 G-02：
+// 会话过期后锁被忽略并授予新客户端，原会话续期/重建绝不得复活旧锁导致双写锁并存。
+func TestSession_ExpiredLockRevivedByRenewSession(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-g02-lock-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessA := uint64(888001)
+	sessB := uint64(888002)
+	_, err = mgr.RenewSession(ctx, sessA)
+	require.NoError(t, err)
+	_, err = mgr.RenewSession(ctx, sessB)
+	require.NoError(t, err)
+
+	createResA, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("revived_lock.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessA,
+	})
+	require.NoError(t, err)
+	fileIno := createResA.Inode.Ino
+	fhA := createResA.Fh
+
+	openResB, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessB,
+	})
+	require.NoError(t, err)
+	fhB := openResB.Fh
+
+	// 1. 会话 A 加上排他写锁 [0, 100]
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhA,
+		LockOwner: 601,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   601,
+		},
+		LkFlags:   0,
+		SessionID: sessA,
+	})
+	require.NoError(t, err)
+
+	// 2. 模拟会话 A 过期 (将 expires_at 改为过去 10 秒)
+	_, err = pool.Exec(ctx, "UPDATE client_sessions SET expires_at = $1 WHERE session_id = $2", time.Now().Add(-10*time.Second), int64(sessA))
+	require.NoError(t, err)
+
+	// 3. 会话 B 申请同一区间排他写锁：由于会话 A 已过期，会话 B 成功获锁
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fhB,
+		LockOwner: 602,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   602,
+		},
+		LkFlags:   0,
+		SessionID: sessB,
+	})
+	require.NoError(t, err, "会话 A 过期后会话 B 应能成功获锁")
+
+	// 4. 会话 A 尝试续期/重建
+	_, err = mgr.RenewSession(ctx, sessA)
+	require.NoError(t, err)
+
+	// 5. 核心断言：会话 A 续期后，绝不能使之前未被级联删除的旧锁复活，导致同一区间同时存在两把有效排他锁！
+	var totalLocks int64
+	err = pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM file_locks l
+		JOIN client_sessions s ON l.session_id = s.session_id
+		WHERE l.ino = $1 AND s.expires_at > clock_timestamp() AND l.lock_type = $2
+	`, fileIno, meta.F_WRLCK).Scan(&totalLocks)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), totalLocks, "G-02: 会话 A 续期后绝不能复活已失效旧锁，有效排他写锁必须唯一")
+}
+
+// TestSession_ExpiredHandleOperationsReturnBadFileHandle 验证 G-02 与 G-11：
+// 为每个被测操作（Release、ReleaseDir、Flush、Fallocate、SetLk、SetLkw）分别创建独立会话与对应句柄，
+// 消除前序操作清理会话与级联句柄的状态污染；
+// 等待租约过期后，断言调用前过期会话与句柄在表中存在，调用时返回 ErrBadFileHandle，
+// 调用后确认该过期会话与句柄已被清理，且绝未被重新插入复活为活跃会话。
+func TestSession_ExpiredHandleOperationsReturnBadFileHandle(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-g02-handles-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	// 辅助函数：断言调用前过期会话与句柄在数据库表中仍然存在（尚未被清理）
+	assertSessionAndHandleExistBefore := func(t *testing.T, sessID uint64, ino, fh uint64) {
+		t.Helper()
+		var sessExists, fhExists bool
+		err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM client_sessions WHERE session_id = $1)", int64(sessID)).Scan(&sessExists)
+		require.NoError(t, err)
+		require.True(t, sessExists, "调用前该过期会话在表中应仍然存在（尚未被清理）")
+
+		err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM file_handles WHERE fh = $1 AND ino = $2)", int64(fh), int64(ino)).Scan(&fhExists)
+		require.NoError(t, err)
+		require.True(t, fhExists, "调用前该句柄在表中应仍然存在（尚未被清理）")
+	}
+
+	// 辅助函数：断言调用后过期会话与句柄已被清除（或绝未被重新插入复活为活跃会话）
+	assertSessionAndHandleCleanedAfter := func(t *testing.T, sessID uint64, ino, fh uint64, opName string) {
+		t.Helper()
+		if opName == "Release" || opName == "ReleaseDir" {
+			var sessExists, fhExists bool
+			err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM client_sessions WHERE session_id = $1)", int64(sessID)).Scan(&sessExists)
+			require.NoError(t, err)
+			assert.False(t, sessExists, "持已过期句柄调用 %s 绝不能复活会话，过期会话应已被彻底清理", opName)
+
+			err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM file_handles WHERE fh = $1 AND ino = $2)", int64(fh), int64(ino)).Scan(&fhExists)
+			require.NoError(t, err)
+			assert.False(t, fhExists, "持已过期句柄调用 %s 后，该句柄应已被彻底清除（级联删除）", opName)
+		} else {
+			var exp pgtype.Timestamptz
+			err := pool.QueryRow(ctx, "SELECT expires_at FROM client_sessions WHERE session_id = $1", int64(sessID)).Scan(&exp)
+			if err == nil {
+				assert.True(t, exp.Valid && exp.Time.Before(time.Now()), "持已过期句柄调用 %s 绝不能被重新插入复活为活跃会话", opName)
+			} else {
+				assert.ErrorIs(t, err, pgx.ErrNoRows)
+			}
+
+			var fhActive bool
+			err = pool.QueryRow(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM file_handles fh
+					JOIN client_sessions s ON fh.session_id = s.session_id
+					WHERE fh.fh = $1 AND fh.ino = $2 AND s.expires_at > clock_timestamp()
+				)`, int64(fh), int64(ino)).Scan(&fhActive)
+			require.NoError(t, err)
+			assert.False(t, fhActive, "持已过期句柄调用 %s 后，该句柄绝不得被复活为活跃句柄", opName)
+		}
+	}
+
+	// 辅助函数：令指定会话过期
+	expireSession := func(t *testing.T, sessID uint64) {
+		t.Helper()
+		_, err := pool.Exec(ctx, "UPDATE client_sessions SET expires_at = $1 WHERE session_id = $2", time.Now().Add(-10*time.Second), int64(sessID))
+		require.NoError(t, err)
+	}
+
+	// 1. Release
+	t.Run("Release", func(t *testing.T) {
+		sess1 := uint64(888101)
+		_, err := mgr.RenewSession(ctx, sess1)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("expired_rel_%d.bin", time.Now().UnixNano())),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		fileIno, fh := createRes.Inode.Ino, createRes.Fh
+
+		expireSession(t, sess1)
+		assertSessionAndHandleExistBefore(t, sess1, fileIno, fh)
+
+		err = mgr.Release(ctx, meta.ReleaseParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			SessionID: &sess1,
+		})
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 持已过期会话句柄调用 Release 必须返回 ErrBadFileHandle")
+
+		assertSessionAndHandleCleanedAfter(t, sess1, fileIno, fh, "Release")
+	})
+
+	// 2. ReleaseDir
+	t.Run("ReleaseDir", func(t *testing.T) {
+		sess2 := uint64(888102)
+		_, err := mgr.RenewSession(ctx, sess2)
+		require.NoError(t, err)
+
+		mkdirRes, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("expired_dir_%d", time.Now().UnixNano())),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+		dirIno := mkdirRes.Ino
+
+		openDirRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:       dirIno,
+			Flags:     meta.O_RDONLY,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		dfh := openDirRes.Fh
+
+		expireSession(t, sess2)
+		assertSessionAndHandleExistBefore(t, sess2, dirIno, dfh)
+
+		err = mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino:       dirIno,
+			Fh:        dfh,
+			SessionID: &sess2,
+		})
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 持已过期会话句柄调用 ReleaseDir 必须返回 ErrBadFileHandle")
+
+		assertSessionAndHandleCleanedAfter(t, sess2, dirIno, dfh, "ReleaseDir")
+	})
+
+	// 3. Flush
+	t.Run("Flush", func(t *testing.T) {
+		sess3 := uint64(888103)
+		_, err := mgr.RenewSession(ctx, sess3)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("expired_flush_%d.bin", time.Now().UnixNano())),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess3,
+		})
+		require.NoError(t, err)
+		fileIno, fh := createRes.Inode.Ino, createRes.Fh
+
+		expireSession(t, sess3)
+		assertSessionAndHandleExistBefore(t, sess3, fileIno, fh)
+
+		err = mgr.Flush(ctx, meta.FlushParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			SessionID: &sess3,
+		})
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 持已过期会话句柄调用 Flush 必须返回 ErrBadFileHandle")
+
+		assertSessionAndHandleCleanedAfter(t, sess3, fileIno, fh, "Flush")
+	})
+
+	// 4. Fallocate
+	t.Run("Fallocate", func(t *testing.T) {
+		sess4 := uint64(888104)
+		_, err := mgr.RenewSession(ctx, sess4)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("expired_falloc_%d.bin", time.Now().UnixNano())),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess4,
+		})
+		require.NoError(t, err)
+		fileIno, fh := createRes.Inode.Ino, createRes.Fh
+
+		expireSession(t, sess4)
+		assertSessionAndHandleExistBefore(t, sess4, fileIno, fh)
+
+		err = mgr.Fallocate(ctx, meta.FallocateParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			Offset:    0,
+			Length:    1024,
+			Mode:      meta.FallocFlKeepSize,
+			SessionID: &sess4,
+		})
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 持已过期会话句柄调用 Fallocate 必须返回 ErrBadFileHandle")
+
+		assertSessionAndHandleCleanedAfter(t, sess4, fileIno, fh, "Fallocate")
+	})
+
+	// 5. SetLk
+	t.Run("SetLk", func(t *testing.T) {
+		sess5 := uint64(888105)
+		_, err := mgr.RenewSession(ctx, sess5)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("expired_setlk_%d.bin", time.Now().UnixNano())),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess5,
+		})
+		require.NoError(t, err)
+		fileIno, fh := createRes.Inode.Ino, createRes.Fh
+
+		expireSession(t, sess5)
+		assertSessionAndHandleExistBefore(t, sess5, fileIno, fh)
+
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: 5001,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+			},
+			SessionID: sess5,
+		})
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 持已过期会话句柄调用 SetLk 必须返回 ErrBadFileHandle")
+
+		assertSessionAndHandleCleanedAfter(t, sess5, fileIno, fh, "SetLk")
+	})
+
+	// 6. SetLkw
+	t.Run("SetLkw", func(t *testing.T) {
+		sess6 := uint64(888106)
+		_, err := mgr.RenewSession(ctx, sess6)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte(fmt.Sprintf("expired_setlkw_%d.bin", time.Now().UnixNano())),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess6,
+		})
+		require.NoError(t, err)
+		fileIno, fh := createRes.Inode.Ino, createRes.Fh
+
+		expireSession(t, sess6)
+		assertSessionAndHandleExistBefore(t, sess6, fileIno, fh)
+
+		err = mgr.SetLkw(ctx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fh,
+			LockOwner: 6001,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+			},
+			SessionID: sess6,
+			RequestID: 1,
+		})
+		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 持已过期会话句柄调用 SetLkw 必须返回 ErrBadFileHandle")
+
+		assertSessionAndHandleCleanedAfter(t, sess6, fileIno, fh, "SetLkw")
+	})
+}
+
+type staleHandleHookQuerier struct {
+	db.Querier
+	afterGetFileHandle func()
+}
+
+func (q *staleHandleHookQuerier) GetFileHandle(ctx context.Context, arg db.GetFileHandleParams) (db.FileHandle, error) {
+	h, err := q.Querier.GetFileHandle(ctx, arg)
+	if err == nil && q.afterGetFileHandle != nil {
+		q.afterGetFileHandle()
+	}
+	return h, err
+}
+
+type staleHandleHookStore struct {
+	db.Store
+	afterGetFileHandle func()
+	hookActive         bool
+}
+
+func (s *staleHandleHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		if s.hookActive && s.afterGetFileHandle != nil {
+			wrapped := &staleHandleHookQuerier{
+				Querier:            q,
+				afterGetFileHandle: s.afterGetFileHandle,
+			}
+			return fn(wrapped)
+		}
+		return fn(q)
+	}, opts...)
+}
+
+// TestSession_ExpiredAndRecreatedSameSessionID_RejectsStaleFileHandle 验证 G-02：
+// 会话过期并被相同 session_id 重建后，写操作预检通过的旧代际句柄绝不得逃逸 CreatedAt == UpdatedAt 检查，
+// 必须严格返回 ErrBadFileHandle，底表 file_locks 绝不能写入已失效句柄的锁记录，且新重建的活跃会话不能被误删。
+func TestSession_ExpiredAndRecreatedSameSessionID_RejectsStaleFileHandle(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	baseStore := db.NewStore(pool)
+	hookStore := &staleHandleHookStore{Store: baseStore}
+	mgr := meta.New(hookStore)
+	otherMgr := meta.New(baseStore)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-g02-stale-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	}()
+
+	sessID := uint64(888009)
+	_, err = mgr.RenewSession(ctx, sessID)
+	require.NoError(t, err)
+
+	createRes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("stale_handle_test.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessID,
+	})
+	require.NoError(t, err)
+	fileIno := createRes.Inode.Ino
+	fh := createRes.Fh
+
+	// 确认句柄已在底表持久化
+	var fhExists bool
+	err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM file_handles WHERE fh = $1 AND ino = $2)", int64(fh), int64(fileIno)).Scan(&fhExists)
+	require.NoError(t, err)
+	require.True(t, fhExists)
+
+	// 配置钩子：在 T1 事务内通过 GetFileHandle 预检之后、即将执行 touchActiveClientSession 之前触发
+	var hookTriggered bool
+	hookStore.afterGetFileHandle = func() {
+		if hookTriggered {
+			return
+		}
+		hookTriggered = true
+
+		// 1. 令会话 S1 过期 (将 expires_at 改为过去 10 秒)
+		_, errExec := pool.Exec(ctx, "UPDATE client_sessions SET expires_at = $1 WHERE session_id = $2", time.Now().Add(-10*time.Second), int64(sessID))
+		require.NoError(t, errExec)
+
+		// 2. 由另一独立连接调用 otherMgr.RenewSession(S1)
+		// 这会触发清除旧会话 S1（级联删除 file_handles 中的 fh），并以相同 session_id 重建新会话
+		_, errRenew := otherMgr.RenewSession(ctx, sessID)
+		require.NoError(t, errRenew)
+
+		// 3. 再次更新或者续期，令新会话 updated_at > created_at，从而避开旧有的 CreatedAt == UpdatedAt 检查
+		time.Sleep(10 * time.Millisecond)
+		_, errRenew2 := otherMgr.RenewSession(ctx, sessID)
+		require.NoError(t, errRenew2)
+	}
+	hookStore.hookActive = true
+
+	// 此时 T1 执行 SetLk 写操作：在事务内先完成 GetFileHandle，随后触发 hook 使会话过期并以相同 session_id 重建
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fh,
+		LockOwner: 901,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   901,
+		},
+		LkFlags:   0,
+		SessionID: sessID,
+	})
+
+	hookStore.hookActive = false
+	require.True(t, hookTriggered, "hook 必须被正常触发")
+
+	// 核心断言 1：T1 的写操作必须返回 ErrBadFileHandle，绝不能因为同名 session_id 重建而放行旧句柄
+	assert.ErrorIs(t, err, meta.ErrBadFileHandle, "G-02: 会话过期重建后，旧代际句柄执行写操作必须返回 ErrBadFileHandle")
+
+	// 核心断言 2：底表 file_locks 中绝不能写入绑定已级联删除句柄 fh 的锁记录
+	var lockCount int64
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE fh = $1", int64(fh)).Scan(&lockCount)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), lockCount, "G-02: 底表 file_locks 绝不能写入绑定已删除句柄的锁记录")
+
+	// 核心断言 3：新重建的活跃会话 S1 绝不能被误删
+	var sessExists bool
+	err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM client_sessions WHERE session_id = $1)", int64(sessID)).Scan(&sessExists)
+	require.NoError(t, err)
+	assert.True(t, sessExists, "G-02: 新重建的活跃会话 S1 绝不能被写操作事务误删")
 }

@@ -3,12 +3,15 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -650,3 +653,172 @@ func TestReadDir_InvariantsAndErrors(t *testing.T) {
 		assert.Nil(t, entries)
 	})
 }
+
+// TestReadDir_G05_SameDirRenameAndCursorLifecycle 验证 G-05：
+// 1. 子场景 A：同目录重命名导致基于 offset 的游标补偿失步，在后续分页中重复读取已返回条目或遗漏条目。
+// 2. 子场景 B：多页遍历目录后未调用 ReleaseDir 直接 DeleteDisk 销毁磁盘时，dirCursors 内存游标发生泄漏。
+func TestReadDir_G05_SameDirRenameAndCursorLifecycle(t *testing.T) {
+	dsn := os.Getenv("STORAGE_DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	t.Run("SubA_SameDirRenameCursorOffsetMismatch", func(t *testing.T) {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-readdir-rename-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		dirD, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dirD"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		// 在目录 D 下创建 4 个文件："a", "b", "c", "d"
+		for _, name := range []string{"a", "b", "c", "d"} {
+			_, err := mgr.Mknod(ctx, meta.MknodParams{
+				ParentIno: dirD.Ino,
+				Name:      []byte(name),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+		}
+
+		// 打开目录获取句柄
+		openRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   dirD.Ino,
+			Flags: meta.O_RDONLY,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+				Ino: dirD.Ino,
+				Fh:  openRes.Fh,
+			})
+		}()
+
+		// 第一页 ReadDir(offset=0, limit=4)：返回 ".", "..", "a", "b"
+		p1, err := mgr.ReadDir(ctx, meta.ReadDirParams{
+			Ino:    dirD.Ino,
+			Fh:     openRes.Fh,
+			Offset: 0,
+			Limit:  4,
+		})
+		require.NoError(t, err)
+		require.Len(t, p1, 4)
+		require.Equal(t, ".", string(p1[0].Name))
+		require.Equal(t, "..", string(p1[1].Name))
+		require.Equal(t, "a", string(p1[2].Name))
+		require.Equal(t, "b", string(p1[3].Name))
+		require.Equal(t, uint64(4), p1[3].NextOffset)
+
+		// 在读取下一页（offset=4）前，执行同目录重命名：将 "a" 重命名为 "aa"
+		// 此时目录中的文件项按字典序为："aa", "b", "c", "d"
+		err = mgr.Rename(ctx, meta.RenameParams{
+			OldParentIno: dirD.Ino,
+			OldName:      []byte("a"),
+			NewParentIno: dirD.Ino,
+			NewName:      []byte("aa"),
+		})
+		require.NoError(t, err)
+
+		// 继续调用 ReadDir(offset=4, limit=10) 读取剩余目录项
+		p2, err := mgr.ReadDir(ctx, meta.ReadDirParams{
+			Ino:    dirD.Ino,
+			Fh:     openRes.Fh,
+			Offset: 4,
+			Limit:  10,
+		})
+		require.NoError(t, err)
+
+		var names2 []string
+		for _, e := range p2 {
+			names2 = append(names2, string(e.Name))
+		}
+		// 正确的目录流语义：第二页必须严格且只返回剩余未读取的 ["c", "d"]
+		// 当前生产代码在同目录 Rename 时将 offset 从 2 减到 1，导致 ListDirEntries 从 OFFSET 1 读取，
+		// 从而重复返回了已经在第一页读取过的 "b"（返回 ["b", "c", "d"]）
+		require.Equal(t, []string{"c", "d"}, names2, "第二页读取必须严格返回剩余未读取的 [c, d]，既不能重复返回已读过的 b，也不能漏读")
+	})
+
+	t.Run("SubB_DeleteDiskCursorCleanupLeak", func(t *testing.T) {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-readdir-leak-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		dirLeak, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dirLeak"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		for _, name := range []string{"f1", "f2", "f3", "f4"} {
+			_, err := mgr.Mknod(ctx, meta.MknodParams{
+				ParentIno: dirLeak.Ino,
+				Name:      []byte(name),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+		}
+
+		openRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:   dirLeak.Ino,
+			Flags: meta.O_RDONLY,
+		})
+		require.NoError(t, err)
+
+		// 翻页读取产生游标
+		p1, err := mgr.ReadDir(ctx, meta.ReadDirParams{
+			Ino:    dirLeak.Ino,
+			Fh:     openRes.Fh,
+			Offset: 0,
+			Limit:  3,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, p1)
+
+		p2, err := mgr.ReadDir(ctx, meta.ReadDirParams{
+			Ino:    dirLeak.Ino,
+			Fh:     openRes.Fh,
+			Offset: p1[len(p1)-1].NextOffset,
+			Limit:  3,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, p2)
+
+		// 验证当前内存中记录了该目录的游标
+		cursorsBefore := meta.InoDirCursorsCount(mgr, dirLeak.Ino)
+		require.Greater(t, cursorsBefore, 0, "ReadDir 翻页后必须记录目录游标")
+
+		// 不调用 ReleaseDir，直接通过 DeleteDisk 销毁该磁盘
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+
+		// DeleteDisk 销毁磁盘后，所属目录的游标必须被同步清理以防内存泄漏
+		cursorsAfter := meta.InoDirCursorsCount(mgr, dirLeak.Ino)
+		require.Equal(t, 0, cursorsAfter, "DeleteDisk 销毁磁盘后必须清理所属目录的 dirCursors，避免内存泄漏")
+	})
+}
+

@@ -1,0 +1,620 @@
+package db_test
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// getBasePostgresDSN 获取连接 postgres 默认管理库的 DSN。
+func getBasePostgresDSN() (string, string) {
+	var rawDSN string
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL"} {
+		if val := strings.TrimSpace(os.Getenv(env)); val != "" {
+			rawDSN = val
+			break
+		}
+	}
+
+	if rawDSN == "" {
+		candidates := []string{
+			"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
+			"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
+		}
+		for _, candidate := range candidates {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			pool, err := pgxpool.New(probeCtx, candidate)
+			if err == nil {
+				pingErr := pool.Ping(probeCtx)
+				pool.Close()
+				cancel()
+				if pingErr == nil {
+					rawDSN = candidate
+					break
+				}
+			} else {
+				cancel()
+			}
+		}
+		if rawDSN == "" {
+			rawDSN = "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
+		}
+	}
+
+	u, err := url.Parse(rawDSN)
+	if err != nil {
+		return "postgres://postgres:postgres@localhost:9432/postgres?sslmode=disable", "localhost:9432"
+	}
+	host := u.Host
+	u.Path = "/postgres"
+	return u.String(), host
+}
+
+// createUniqueTempDB 为迁移保真度测试创建独立的临时数据库并在测试结束时强制销毁。
+func createUniqueTempDB(t *testing.T, prefix string) (*pgxpool.Pool, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	adminDSN, host := getBasePostgresDSN()
+	adminPool, err := pgxpool.New(ctx, adminDSN)
+	if err != nil {
+		t.Skipf("无法连接管理数据库 %s: %v", adminDSN, err)
+	}
+
+	if err := adminPool.Ping(ctx); err != nil {
+		adminPool.Close()
+		t.Skipf("管理数据库 ping 失败: %v", err)
+	}
+
+	dbName := fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s;", dbName))
+	if err != nil {
+		adminPool.Close()
+		require.NoError(t, err, "创建独立临时数据库 %s 失败", dbName)
+	}
+
+	testDSN := fmt.Sprintf("postgres://postgres:postgres@%s/%s?sslmode=disable", host, dbName)
+	if u, parseErr := url.Parse(adminDSN); parseErr == nil {
+		u.Path = "/" + dbName
+		testDSN = u.String()
+	}
+
+	testPool, err := pgxpool.New(ctx, testDSN)
+	if err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", dbName))
+		cleanupCancel()
+		adminPool.Close()
+		require.NoError(t, err, "连接临时测试数据库 %s 失败", dbName)
+	}
+
+	// 注册第一个 t.Cleanup（后进先出，在测试结束且测试连接池关闭后最后执行）
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		defer adminPool.Close()
+		_, dropErr := adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", dbName))
+		require.NoError(t, dropErr, "删除独立临时数据库 %s 失败", dbName)
+	})
+
+	// 注册第二个 t.Cleanup（后进先出，最先执行，释放所有测试连接）
+	t.Cleanup(func() {
+		testPool.Close()
+	})
+
+	return testPool, dbName
+}
+
+// extractGooseSection 提取 migration 文件中的 Up 或 Down 部分。
+func extractGooseSection(t *testing.T, filename string, isUp bool) string {
+	t.Helper()
+	migrationsDir := "../../db/migrations"
+	content, err := os.ReadFile(filepath.Join(migrationsDir, filename))
+	require.NoError(t, err, "读取迁移文件 %s 失败", filename)
+
+	parts := strings.Split(string(content), "-- +goose Down")
+	require.Len(t, parts, 2, "迁移文件 %s 缺少 -- +goose Down 分隔符", filename)
+
+	var target string
+	if isUp {
+		target = parts[0]
+	} else {
+		target = parts[1]
+	}
+
+	target = strings.ReplaceAll(target, "-- +goose Up", "")
+	target = strings.ReplaceAll(target, "-- +goose StatementBegin", "")
+	target = strings.ReplaceAll(target, "-- +goose StatementEnd", "")
+	return strings.TrimSpace(target)
+}
+
+// runMigrationTxInPool 在事务中执行迁移 SQL。
+func runMigrationTxInPool(ctx context.Context, pool *pgxpool.Pool, sqlText string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if _, err := tx.Exec(ctx, sqlText); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// TestMigration_PUACharacterPreservedOnUp 验证 G-05：
+// BYTEA 迁移脚本 Up 函数严禁误解码 Unicode 私用区字符 (U+E000..U+E0FF)，必须保持原始 UTF-8 字节。
+func TestMigration_PUACharacterPreservedOnUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_pua")
+
+	// 1. 依次执行前 3 个迁移的 Up SQL
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 插入包含合法 Unicode 私用区字符 U+E041 (UTF-8 编码为 \xee\x81\x81，对应 chr(57409))
+	setupSQL := `
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev) VALUES (1, 16877, 4096, 2, 0, 0, 0);
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, symlink_target) VALUES (2, 41453, 3, 1, 0, 0, 0, chr(57409));
+		INSERT INTO entries (parent_ino, name, ino) VALUES (1, chr(57409), 2);
+	`
+	_, err := testPool.Exec(ctx, setupSQL)
+	require.NoError(t, err)
+
+	// 确认升级前 UTF-8 编码十六进制为 ee8181 (3 字节)
+	var beforeHex string
+	err = testPool.QueryRow(ctx, "SELECT encode(convert_to(name, 'UTF8'), 'hex') FROM entries WHERE ino = 2;").Scan(&beforeHex)
+	require.NoError(t, err)
+	require.Equal(t, "ee8181", beforeHex, "升级前 entries.name 必须为 3 字节 UTF-8 码值 ee8181")
+
+	// 3. 执行 20261017010000 与 20261017020000 的 Up SQL
+	upSymlink := extractGooseSection(t, "20261017010000_convert_symlink_target_to_bytea.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upSymlink)
+	require.NoError(t, err, "执行 20261017010000 Up 迁移失败")
+
+	upEntries := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upEntries)
+	require.NoError(t, err, "执行 20261017020000 Up 迁移失败")
+
+	// 4. 正确性断言（触发真红）：
+	// 升级为 BYTEA 后，原始 UTF-8 字节必须无损保持 "ee8181"！
+	// 当前迁移脚本误将 U+E041 判定为回滚转义字符并扣减 57344，被静默篡改为 ASCII 'A' ("41")，断言直接报红！
+	var gotNameHex, gotSymHex string
+	err = testPool.QueryRow(ctx, "SELECT encode(name, 'hex') FROM entries WHERE ino = 2;").Scan(&gotNameHex)
+	require.NoError(t, err)
+	err = testPool.QueryRow(ctx, "SELECT encode(symlink_target, 'hex') FROM inodes WHERE ino = 2;").Scan(&gotSymHex)
+	require.NoError(t, err)
+
+	assert.Equal(t, "ee8181", gotNameHex, "G-05: 迁移升级后 entries.name 应保持原始 UTF-8 字节 ee8181")
+	assert.Equal(t, "ee8181", gotSymHex, "G-05: 迁移升级后 inodes.symlink_target 应保持原始 UTF-8 字节 ee8181")
+}
+
+// TestMigration_SymlinkTargetDownUpRoundtripNoLoss 验证 G-06：
+// symlink_target Down 回滚函数严禁截断超 4096 UTF-8 字节的编码字符串造成不可逆数据丢失。
+func TestMigration_SymlinkTargetDownUpRoundtripNoLoss(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_trunc")
+
+	// 1. 依次执行前 3 个迁移的 Up SQL
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 执行 20261017010000 的 Up SQL
+	upSymlink := extractGooseSection(t, "20261017010000_convert_symlink_target_to_bytea.sql", true)
+	downSymlink := extractGooseSection(t, "20261017010000_convert_symlink_target_to_bytea.sql", false)
+	err := runMigrationTxInPool(ctx, testPool, upSymlink)
+	require.NoError(t, err, "执行 20261017010000 Up 迁移失败")
+
+	// 3. 插入长度为 2000 字节的合法非 UTF-8 符号链接目标 (2000 个 \x80，完全符合 PATH_MAX 契约)
+	insertSQL := `
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, symlink_target)
+		VALUES (3, 41453, 2000, 1, 0, 0, 0, decode(repeat('80', 2000), 'hex'));
+	`
+	_, err = testPool.Exec(ctx, insertSQL)
+	require.NoError(t, err)
+
+	var initialLen int64
+	err = testPool.QueryRow(ctx, "SELECT octet_length(symlink_target) FROM inodes WHERE ino = 3;").Scan(&initialLen)
+	require.NoError(t, err)
+	require.Equal(t, int64(2000), initialLen, "初始符号链接目标长度必须为 2000 字节")
+
+	// 4. 执行 Down SQL
+	err = runMigrationTxInPool(ctx, testPool, downSymlink)
+	require.NoError(t, err, "执行 20261017010000 Down 迁移失败")
+
+	// 5. 重新执行 Up SQL 完成往返
+	err = runMigrationTxInPool(ctx, testPool, upSymlink)
+	require.NoError(t, err, "重新执行 Up SQL 失败")
+
+	// 6. 断言（触发真红）：
+	// 往返后符号链接目标字节长度必须保持 2000 字节无损！
+	// 当前生产脚本截断至 1365 字节，断言直接报红！
+	var gotLen int64
+	err = testPool.QueryRow(ctx, "SELECT octet_length(symlink_target) FROM inodes WHERE ino = 3;").Scan(&gotLen)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2000), gotLen, "G-06: Down -> Up 往返后符号链接目标字节长度必须保持 2000 字节无损")
+
+	var gotHex string
+	err = testPool.QueryRow(ctx, "SELECT encode(symlink_target, 'hex') FROM inodes WHERE ino = 3;").Scan(&gotHex)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("80", 2000), gotHex, "G-06: Down -> Up 往返后符号链接目标的完整字节内容必须 100% 保真")
+}
+
+// TestMigration_NestedDiskDetachesCrossDiskEntryOnUp 验证原 E2E H9 存量嵌套磁盘迁移场景：
+// 20261023000000_add_disks_and_inode_root_ino.sql 在 Up 时自动解除父盘指向子盘根的跨盘 entries 记录、
+// 递减父目录 nlink，并将子盘根 inodes.parent_ino 修正为自指 ino，防止存量嵌套子盘在父盘 Rmdir 时被误摧毁。
+func TestMigration_NestedDiskDetachesCrossDiskEntryOnUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_nested")
+
+	// 1. 依次执行前置迁移
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+		"20261017030000_create_inode_xattrs_table.sql",
+		"20261018000000_create_file_locks_tables.sql",
+		"20261018010000_add_session_id_to_file_handles.sql",
+		"20261019000000_align_juicefs_meta_foundation.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 模拟升级前存量环境：disks 表已存在，父盘挂载子盘根目录项
+	setupSQL := `
+		CREATE TABLE IF NOT EXISTS disks (
+			disk_id UUID PRIMARY KEY,
+			name VARCHAR(255) NOT NULL DEFAULT '',
+			root_ino BIGINT NOT NULL UNIQUE,
+			max_bytes BIGINT NOT NULL,
+			used_bytes BIGINT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+			CONSTRAINT chk_disks_root_ino CHECK (root_ino > 0),
+			CONSTRAINT chk_disks_capacity CHECK (max_bytes > 0 AND used_bytes >= 0 AND used_bytes <= max_bytes)
+		);
+
+		-- 父盘根节点 (ino=1, parent_ino=1, nlink=3，包含子目录项 subdisk)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (1, 16877, 4096, 3, 0, 0, 0, 1);
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes)
+		VALUES ('11111111-1111-1111-1111-111111111111', 'parent-disk', 1, 104857600);
+
+		-- 存量嵌套子盘根节点 (ino=10, 错误关联到父盘 parent_ino=1, nlink=2)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (10, 16877, 4096, 2, 0, 0, 0, 1);
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes)
+		VALUES ('22222222-2222-2222-2222-222222222222', 'nested-child-disk', 10, 52428800);
+
+		-- 父盘中指向子盘根的跨盘目录项
+		INSERT INTO entries (parent_ino, name, ino)
+		VALUES (1, convert_to('subdisk', 'UTF8'), 10);
+
+		-- 子盘内部文件 (ino=11)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (11, 33188, 1024, 1, 0, 0, 0, 10);
+		INSERT INTO entries (parent_ino, name, ino)
+		VALUES (10, convert_to('child_file.txt', 'UTF8'), 11);
+	`
+	_, err := testPool.Exec(ctx, setupSQL)
+	require.NoError(t, err)
+
+	// 3. 执行 20261023000000 Up 迁移
+	upSQL := extractGooseSection(t, "20261023000000_add_disks_and_inode_root_ino.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upSQL)
+	require.NoError(t, err, "执行 20261023000000 Up 迁移失败")
+
+	// 4. 断言跨盘 entries 已被清理
+	var crossEntryCount int64
+	err = testPool.QueryRow(ctx, "SELECT COUNT(*) FROM entries WHERE parent_ino = 1 AND ino = 10;").Scan(&crossEntryCount)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), crossEntryCount, "父盘指向嵌套子盘根的 entries 必须在 Up 迁移中被自动解除")
+
+	// 5. 断言父盘根 nlink 扣减 1 (3 -> 2)
+	var parentNlink int32
+	err = testPool.QueryRow(ctx, "SELECT nlink FROM inodes WHERE ino = 1;").Scan(&parentNlink)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), parentNlink, "解开子盘目录项后父盘根目录 nlink 必须从 3 减为 2")
+
+	// 6. 断言子盘根 parent_ino 已被修正为自指 (10 -> 10)
+	var childParentIno int64
+	err = testPool.QueryRow(ctx, "SELECT parent_ino FROM inodes WHERE ino = 10;").Scan(&childParentIno)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), childParentIno, "子盘根 parent_ino 必须被自动修正为自指 ino=10")
+
+	// 7. 断言 root_ino 回填正确且互不污染
+	var rootIno1, rootIno10, rootIno11 int64
+	err = testPool.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = 1;").Scan(&rootIno1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rootIno1)
+
+	err = testPool.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = 10;").Scan(&rootIno10)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), rootIno10)
+
+	err = testPool.QueryRow(ctx, "SELECT root_ino FROM inodes WHERE ino = 11;").Scan(&rootIno11)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), rootIno11)
+
+	// 8. 断言 used_inodes 统计
+	var usedInodes1, usedInodes2 int64
+	err = testPool.QueryRow(ctx, "SELECT used_inodes FROM disks WHERE root_ino = 1;").Scan(&usedInodes1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), usedInodes1)
+
+	err = testPool.QueryRow(ctx, "SELECT used_inodes FROM disks WHERE root_ino = 10;").Scan(&usedInodes2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), usedInodes2)
+}
+
+// TestMigration_DisksAndInodeRootIno_UpDownUpFidelity 验证 G-03：
+// 嵌套磁盘迁移在同一语句中对中间层磁盘根 Inode 更新两次导致修复丢失。
+// 构造两层嵌套磁盘结构：根盘 1 (ino=1) -> 中间层子盘 A (ino=10, parent_ino=1, nlink=3) -> 孙盘 B (ino=20, parent_ino=10, nlink=2)。
+// 执行 20261023000000_add_disks_and_inode_root_ino.sql 的 Up 迁移后，
+// 中间层子盘 A (ino=10) 必须同时满足：
+// 1) parent_ino == 10（自指根，因为自身也是独立磁盘根）
+// 2) nlink == 2（因为原本挂载在其下的孙盘 B 跨盘目录项被删除，nlink 必须从 3 减为 2）。
+// 当前 SQL 在同一 WITH ... UPDATE 语句中同时通过 updated_parents 和顶层 UPDATE 更新 ino=10，必然丢失其中一项修改而触发 FAIL。
+func TestMigration_DisksAndInodeRootIno_UpDownUpFidelity(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_nest_g03")
+
+	// 1. 依次执行前置迁移
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+		"20261017030000_create_inode_xattrs_table.sql",
+		"20261018000000_create_file_locks_tables.sql",
+		"20261018010000_add_session_id_to_file_handles.sql",
+		"20261019000000_align_juicefs_meta_foundation.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 模拟升级前存量环境：创建 disks 表，并构造两层嵌套磁盘结构：
+	// 根盘 1 (ino=1) -> 中间层子盘 A (ino=10, parent_ino=1, nlink=3) -> 孙盘 B (ino=20, parent_ino=10, nlink=2)
+	setupSQL := `
+		CREATE TABLE IF NOT EXISTS disks (
+			disk_id UUID PRIMARY KEY,
+			name VARCHAR(255) NOT NULL DEFAULT '',
+			root_ino BIGINT NOT NULL UNIQUE,
+			max_bytes BIGINT NOT NULL,
+			used_bytes BIGINT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+			CONSTRAINT chk_disks_root_ino CHECK (root_ino > 0),
+			CONSTRAINT chk_disks_capacity CHECK (max_bytes > 0 AND used_bytes >= 0 AND used_bytes <= max_bytes)
+		);
+
+		-- 根盘 1 (ino=1, parent_ino=1, nlink=3，挂载了 subdisk A)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (1, 16877, 4096, 3, 0, 0, 0, 1);
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes)
+		VALUES ('11111111-1111-1111-1111-111111111111', 'root-disk', 1, 104857600);
+
+		-- 中间层子盘 A (ino=10, 挂在根盘 parent_ino=1 下，自身挂载了孙盘 B 故 nlink=3)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (10, 16877, 4096, 3, 0, 0, 0, 1);
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes)
+		VALUES ('22222222-2222-2222-2222-222222222222', 'child-disk-a', 10, 52428800);
+
+		-- 孙盘 B (ino=20, 挂在中间层子盘 parent_ino=10 下，nlink=2)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (20, 16877, 4096, 2, 0, 0, 0, 10);
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes)
+		VALUES ('33333333-3333-3333-3333-333333333333', 'grandchild-disk-b', 20, 26214400);
+
+		-- entries 跨盘挂载记录
+		INSERT INTO entries (parent_ino, name, ino) VALUES (1, convert_to('subdisk_a', 'UTF8'), 10);
+		INSERT INTO entries (parent_ino, name, ino) VALUES (10, convert_to('granddisk_b', 'UTF8'), 20);
+
+		-- 孙盘内部正常文件 (ino=21)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev, parent_ino)
+		VALUES (21, 33188, 1024, 1, 0, 0, 0, 20);
+		INSERT INTO entries (parent_ino, name, ino) VALUES (20, convert_to('file_in_b.txt', 'UTF8'), 21);
+	`
+	_, err := testPool.Exec(ctx, setupSQL)
+	require.NoError(t, err)
+
+	// 3. 执行 20261023000000 Up 迁移
+	upSQL := extractGooseSection(t, "20261023000000_add_disks_and_inode_root_ino.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upSQL)
+	require.NoError(t, err, "执行 20261023000000 Up 迁移失败")
+
+	// 4. 断言中间层子盘 A (ino=10)：必须同时满足 parent_ino == 10 且 nlink == 2！
+	var childParentIno int64
+	var childNlink int32
+	err = testPool.QueryRow(ctx, "SELECT parent_ino, nlink FROM inodes WHERE ino = 10;").Scan(&childParentIno, &childNlink)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(10), childParentIno, "G-03: 中间层磁盘根 A (ino=10) parent_ino 必须被自动修正为自指 10")
+	assert.Equal(t, int32(2), childNlink, "G-03: 解除孙盘 B 跨盘目录项后中间层磁盘根 A (ino=10) nlink 必须从 3 减为 2")
+
+	// 5. 校验跨盘 entries 已被完全解除
+	var crossEntriesCount int64
+	err = testPool.QueryRow(ctx, "SELECT COUNT(*) FROM entries WHERE (parent_ino = 1 AND ino = 10) OR (parent_ino = 10 AND ino = 20);").Scan(&crossEntriesCount)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), crossEntriesCount, "所有跨盘 entries 必须被自动清除")
+
+	// 6. 校验根盘 1 与孙盘 B
+	var rootNlink int32
+	err = testPool.QueryRow(ctx, "SELECT nlink FROM inodes WHERE ino = 1;").Scan(&rootNlink)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), rootNlink, "根盘 ino=1 nlink 必须从 3 减为 2")
+
+	var grandParentIno int64
+	err = testPool.QueryRow(ctx, "SELECT parent_ino FROM inodes WHERE ino = 20;").Scan(&grandParentIno)
+	require.NoError(t, err)
+	assert.Equal(t, int64(20), grandParentIno, "孙盘 ino=20 parent_ino 必须自指 20")
+}
+
+// TestMigration_EntriesNameToBytea_NonUTF8Preserved 验证 G-04：
+// entries 名称 BYTEA 迁移的 Down -> Up 往返保真、同目录多硬链接及编码碰撞。
+// 补充执行 20261017020000_convert_entries_name_to_bytea.sql 的 Down 迁移再执行 Up 迁移的往返（Round-trip）测试，
+// 并在回滚前插入以下合法目录项数据：
+// 1) 同一父目录下指向同一个文件 Inode 的两个不同名称硬链接（例如非 UTF-8 名称 []byte{0xfe, 0x01} 与 []byte{0xfe, 0x02} 指向同一 ino）；
+// 2) 同一父目录下指向不同 Inode 的单字节 []byte{0xff} 与 ASCII 字面量 []byte("\\377")；
+// 3) 同一父目录下前 255 个转义字符相同但尾部不同的两个长非 UTF-8 名称。
+// 断言 Down 与随后的 Up 迁移均不报错（require.NoError），且 Up 完成后所有目录项的 (parent_ino, name, ino) 与回滚前 100% 字节级一致。
+func TestMigration_EntriesNameToBytea_NonUTF8Preserved(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_g04")
+
+	// 1. 依次执行前置迁移并执行 20261017020000 Up 迁移
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 插入测试用的父目录 inode 与各个目标文件 inodes
+	setupInodesSQL := `
+		-- 父目录 ino=1
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev)
+		VALUES (1, 16877, 4096, 2, 0, 0, 0);
+
+		-- 目标文件 inodes:
+		-- ino=100: 用于同父目录多硬链接测试 (nlink=2)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev)
+		VALUES (100, 33188, 1024, 2, 0, 0, 0);
+
+		-- ino=101, 102: 用于编码碰撞测试 (\xff 与 \377)
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev)
+		VALUES (101, 33188, 1024, 1, 0, 0, 0),
+		       (102, 33188, 1024, 1, 0, 0, 0);
+
+		-- ino=103, 104: 用于长名称截断碰撞测试
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev)
+		VALUES (103, 33188, 1024, 1, 0, 0, 0),
+		       (104, 33188, 1024, 1, 0, 0, 0);
+	`
+	_, err := testPool.Exec(ctx, setupInodesSQL)
+	require.NoError(t, err)
+
+	// 3. 构造 3 类特定测试目录项数据：
+	// a. 同父目录下指向同一个文件 Inode (100) 的两个不同名称硬链接：非 UTF-8 名称 []byte{0xfe, 0x01} 与 []byte{0xfe, 0x02}
+	linkNameA := []byte{0xfe, 0x01}
+	linkNameB := []byte{0xfe, 0x02}
+
+	// b. 同父目录下指向不同 Inode 的单字节 []byte{0xff} 与 ASCII 字面量 []byte("\\377")
+	colNameByte := []byte{0xff}
+	colNameLit := []byte("\\377")
+
+	// c. 同父目录下前 255 个转义字符相同但尾部不同的两个长非 UTF-8 名称
+	// 70 个 0x80 会转义为 70*4=280 字符，取 left(..., 255) 时前 255 字符完全相同
+	longNameA := append(bytes.Repeat([]byte{0x80}, 70), 0x01)
+	longNameB := append(bytes.Repeat([]byte{0x80}, 70), 0x02)
+
+	type expectedEntry struct {
+		parentIno int64
+		name      []byte
+		ino       int64
+	}
+
+	expectedList := []expectedEntry{
+		{parentIno: 1, name: linkNameA, ino: 100},
+		{parentIno: 1, name: linkNameB, ino: 100},
+		{parentIno: 1, name: colNameByte, ino: 101},
+		{parentIno: 1, name: colNameLit, ino: 102},
+		{parentIno: 1, name: longNameA, ino: 103},
+		{parentIno: 1, name: longNameB, ino: 104},
+	}
+
+	for _, entry := range expectedList {
+		_, err := testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", entry.parentIno, entry.name, entry.ino)
+		require.NoError(t, err, "插入测试目录项失败: ino=%d, name=%x", entry.ino, entry.name)
+	}
+
+	// 4. 执行 20261017020000 Down 迁移
+	downSQL := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", false)
+	err = runMigrationTxInPool(ctx, testPool, downSQL)
+	require.NoError(t, err, "执行 20261017020000 Down 迁移失败")
+
+	// 5. 重新执行 20261017020000 Up 迁移完成往返
+	upSQL := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upSQL)
+	require.NoError(t, err, "重新执行 20261017020000 Up 迁移失败")
+
+	// 6. 验证往返后所有 entries 的 (parent_ino, name, ino) 100% 字节级一致
+	rows, err := testPool.Query(ctx, "SELECT parent_ino, name, ino FROM entries ORDER BY ino, name;")
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var gotList []expectedEntry
+	for rows.Next() {
+		var e expectedEntry
+		err := rows.Scan(&e.parentIno, &e.name, &e.ino)
+		require.NoError(t, err)
+		gotList = append(gotList, e)
+	}
+	require.NoError(t, rows.Err())
+
+	require.Len(t, gotList, len(expectedList), "往返后目录项总数必须完全一致")
+
+	gotMap := make(map[string]bool)
+	for _, g := range gotList {
+		key := fmt.Sprintf("%d:%d:%x", g.parentIno, g.ino, g.name)
+		gotMap[key] = true
+	}
+	for _, exp := range expectedList {
+		key := fmt.Sprintf("%d:%d:%x", exp.parentIno, exp.ino, exp.name)
+		assert.True(t, gotMap[key], "往返后必须保真存在目录项: parent_ino=%d, ino=%d, name(hex)=%x", exp.parentIno, exp.ino, exp.name)
+	}
+}

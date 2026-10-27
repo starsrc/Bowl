@@ -444,7 +444,7 @@ func (h *formalLockWaitHarness) execAndVerifySetLkw(t *testing.T, params meta.Se
 		return
 	}
 
-	wCtx, cancel := context.WithCancel(h.Env.Ctx)
+	wCtx, cancel := context.WithTimeout(h.Env.Ctx, 10*time.Second)
 	doneCh := make(chan error, 1)
 	go func() {
 		doneCh <- h.Env.Mgr.SetLkw(wCtx, params)

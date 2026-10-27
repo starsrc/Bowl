@@ -222,6 +222,9 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 			row, err := q.GetInodeForUpdate(ctx, ino)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
+					if ino == preEntry.Ino && ino != int64(parentIno) {
+						return errRetryTx
+					}
 					return ErrNotFound
 				}
 				return fmt.Errorf("get inode for update %d: %w", ino, err)
@@ -304,6 +307,7 @@ func (m *manager) Unlink(ctx context.Context, parentIno uint64, name []byte) err
 		}
 	}
 
+	m.onDirEntryRemoved(parentIno, name)
 	return nil
 }
 
@@ -459,6 +463,7 @@ func (m *manager) Rmdir(ctx context.Context, parentIno uint64, name []byte) erro
 		}
 	}
 
+	m.onDirEntryRemoved(parentIno, name)
 	return nil
 }
 
@@ -486,7 +491,17 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		return err
 	}
 
+	if params.OldParentIno != params.NewParentIno {
+		m.crossDirRenameMu.Lock()
+		defer m.crossDirRenameMu.Unlock()
+	}
+
+	var removedOld bool
+	var removedNew bool
+
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		removedOld = false
+		removedNew = false
 		if len(params.OldName) == 0 || isDotOrDotDot(params.OldName) || isDotOrDotDot(params.NewName) {
 			if _, _, err := lockAndValidateParents(ctx, q, params.OldParentIno, params.NewParentIno); err != nil {
 				return err
@@ -563,6 +578,9 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			row, err := q.GetInodeForUpdate(ctx, ino)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
+					if hasNewEntry && ino == newIno && ino != int64(params.OldParentIno) && ino != int64(params.NewParentIno) && ino != oldIno && params.Flags != RenameExchange {
+						return errRetryTx
+					}
 					return ErrNotFound
 				}
 				return fmt.Errorf("get inode %d for update: %w", ino, err)
@@ -890,6 +908,13 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 			}
 		}
 
+		if params.Flags != RenameExchange {
+			removedOld = true
+			if hasNewEntry {
+				removedNew = true
+			}
+		}
+
 		return nil
 	})
 
@@ -916,6 +941,17 @@ func (m *manager) Rename(ctx context.Context, params RenameParams) error {
 		default:
 			return fmt.Errorf("rename tx: %w", err)
 		}
+	}
+
+	if removedOld {
+		m.onDirEntryRemoved(params.OldParentIno, params.OldName)
+	}
+	if removedNew {
+		m.onDirEntryRemoved(params.NewParentIno, params.NewName)
+	}
+	m.onDirEntryMutated(params.OldParentIno)
+	if params.NewParentIno != params.OldParentIno {
+		m.onDirEntryMutated(params.NewParentIno)
 	}
 
 	return nil

@@ -98,26 +98,59 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		}
 
 		if rem > 0 {
-			var sqlOffset int64
-			if params.Offset >= 2 {
-				sqlOffset = int64(params.Offset - 2)
-			}
-			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
-				ParentIno: int64(params.Ino),
-				Limit:     int32(rem),
-				Offset:    sqlOffset,
-			})
-			if err != nil {
-				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+			var anchor dirCursorAnchor
+			var anchorOk bool
+			if params.Offset >= 3 {
+				anchor, anchorOk = m.lookupDirCursorAnchor(params.Ino, params.Fh, params.Offset)
 			}
 
-			for i, row := range rows {
-				entries = append(entries, DirEntry{
-					Ino:        uint64(row.Ino),
-					Name:       row.Name,
-					Mode:       uint32(row.Mode),
-					NextOffset: uint64(sqlOffset) + uint64(i) + 3,
+			if anchorOk && anchor.dirMutated && len(anchor.lastName) > 0 {
+				rows, err := q.ListDirEntriesAfterName(ctx, db.ListDirEntriesAfterNameParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					AfterName: anchor.lastName,
 				})
+				if err != nil {
+					return fmt.Errorf("list dir entries after name for parent %d (limit=%d, after=%s): %w", params.Ino, rem, string(anchor.lastName), err)
+				}
+
+				for i, row := range rows {
+					nextOffset := params.Offset + uint64(i) + 1
+					entries = append(entries, DirEntry{
+						Ino:        uint64(row.Ino),
+						Name:       row.Name,
+						Mode:       uint32(row.Mode),
+						NextOffset: nextOffset,
+					})
+					m.recordDirCursor(params.Ino, params.Fh, nextOffset, row.Name, int64(nextOffset-2))
+				}
+			} else {
+				var sqlOffset int64
+				if params.Offset >= 2 {
+					sqlOffset = m.getDirCursorOffset(params.Ino, params.Fh, params.Offset)
+				}
+				rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					Offset:    sqlOffset,
+				})
+				if err != nil {
+					return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+				}
+
+				for i, row := range rows {
+					nextOffset := uint64(sqlOffset) + uint64(i) + 3
+					if params.Offset >= 2 && uint64(sqlOffset)+2 != params.Offset {
+						nextOffset = max(nextOffset, params.Offset+uint64(i)+1)
+					}
+					entries = append(entries, DirEntry{
+						Ino:        uint64(row.Ino),
+						Name:       row.Name,
+						Mode:       uint32(row.Mode),
+						NextOffset: nextOffset,
+					})
+					m.recordDirCursor(params.Ino, params.Fh, nextOffset, row.Name, sqlOffset+int64(i)+1)
+				}
 			}
 		}
 
@@ -205,29 +238,65 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		}
 
 		if rem > 0 {
-			var sqlOffset int64
-			if params.Offset >= 2 {
-				sqlOffset = int64(params.Offset - 2)
-			}
-			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
-				ParentIno: int64(params.Ino),
-				Limit:     int32(rem),
-				Offset:    sqlOffset,
-			})
-			if err != nil {
-				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+			var anchor dirCursorAnchor
+			var anchorOk bool
+			if params.Offset >= 3 {
+				anchor, anchorOk = m.lookupDirCursorAnchor(params.Ino, params.Fh, params.Offset)
 			}
 
-			for i, row := range rows {
-				inode := m.newInodeFromListDirRow(row)
-				entries = append(entries, DirEntryPlus{
-					Ino:                 uint64(row.Ino),
-					Name:                row.Name,
-					NextOffset:          uint64(sqlOffset) + uint64(i) + 3,
-					Inode:               inode,
-					EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
-					AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
+			if anchorOk && anchor.dirMutated && len(anchor.lastName) > 0 {
+				rows, err := q.ListDirEntriesAfterName(ctx, db.ListDirEntriesAfterNameParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					AfterName: anchor.lastName,
 				})
+				if err != nil {
+					return fmt.Errorf("list dir entries after name for parent %d (limit=%d, after=%s): %w", params.Ino, rem, string(anchor.lastName), err)
+				}
+
+				for i, row := range rows {
+					nextOffset := params.Offset + uint64(i) + 1
+					inode := m.newInodeFromListDirAfterNameRow(row)
+					entries = append(entries, DirEntryPlus{
+						Ino:                 uint64(row.Ino),
+						Name:                row.Name,
+						NextOffset:          nextOffset,
+						Inode:               inode,
+						EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+						AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
+					})
+					m.recordDirCursor(params.Ino, params.Fh, nextOffset, row.Name, int64(nextOffset-2))
+				}
+			} else {
+				var sqlOffset int64
+				if params.Offset >= 2 {
+					sqlOffset = m.getDirCursorOffset(params.Ino, params.Fh, params.Offset)
+				}
+				rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					Offset:    sqlOffset,
+				})
+				if err != nil {
+					return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+				}
+
+				for i, row := range rows {
+					nextOffset := uint64(sqlOffset) + uint64(i) + 3
+					if params.Offset >= 2 && uint64(sqlOffset)+2 != params.Offset {
+						nextOffset = max(nextOffset, params.Offset+uint64(i)+1)
+					}
+					inode := m.newInodeFromListDirRow(row)
+					entries = append(entries, DirEntryPlus{
+						Ino:                 uint64(row.Ino),
+						Name:                row.Name,
+						NextOffset:          nextOffset,
+						Inode:               inode,
+						EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+						AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
+					})
+					m.recordDirCursor(params.Ino, params.Fh, nextOffset, row.Name, sqlOffset+int64(i)+1)
+				}
 			}
 		}
 

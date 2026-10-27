@@ -30,16 +30,11 @@ type Querier interface {
 	DeleteFileHandle(ctx context.Context, arg DeleteFileHandleParams) (int64, error)
 	DeleteFileLockWaiter(ctx context.Context, arg DeleteFileLockWaiterParams) (int64, error)
 	DeleteFileLocksByIDs(ctx context.Context, ids []int64) error
-	DeleteFlockFileLockWaitersByFh(ctx context.Context, arg DeleteFlockFileLockWaitersByFhParams) (int64, error)
-	DeleteFlockFileLockWaitersBySessionAndFh(ctx context.Context, arg DeleteFlockFileLockWaitersBySessionAndFhParams) (int64, error)
 	DeleteFlockFileLocksByFh(ctx context.Context, arg DeleteFlockFileLocksByFhParams) (int64, error)
 	DeleteFlockFileLocksBySessionAndFh(ctx context.Context, arg DeleteFlockFileLocksBySessionAndFhParams) (int64, error)
 	DeleteInode(ctx context.Context, ino int64) error
 	DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrParams) (int64, error)
 	DeleteInodesByRootIno(ctx context.Context, rootIno int64) ([]int64, error)
-	DeleteOverlappingPosixFileLockWaiters(ctx context.Context, arg DeleteOverlappingPosixFileLockWaitersParams) (int64, error)
-	DeletePosixFileLockWaitersByOwner(ctx context.Context, arg DeletePosixFileLockWaitersByOwnerParams) (int64, error)
-	DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error)
 	DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error)
 	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
 	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]DeleteUnreferencedOrphanInodesRow, error)

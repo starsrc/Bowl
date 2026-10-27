@@ -360,6 +360,11 @@ func TestRelease_PositivePath(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(ino)).
+			Return(nil, nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(ino)).
 			Return(nil).
 			Once()
@@ -399,6 +404,11 @@ func TestRelease_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			HasFileHandlesByIno(mock.Anything, int64(ino)).
 			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(ino)).
+			Return(nil, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -494,6 +504,11 @@ func TestRelease_PositivePath(t *testing.T) {
 		mockQuerier.EXPECT().
 			HasFileHandlesByIno(mock.Anything, int64(ino)).
 			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(ino)).
+			Return(nil, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -756,6 +771,11 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 			Return(false, nil).
 			Once()
 
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(ino)).
+			Return(nil, nil).
+			Once()
+
 		dbErr := errors.New("db delete inode failed")
 		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(ino)).
@@ -799,6 +819,11 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 		mockQuerier.EXPECT().
 			HasFileHandlesByIno(mock.Anything, int64(ino)).
 			Return(false, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByIno(mock.Anything, int64(ino)).
+			Return(nil, nil).
 			Once()
 
 		mockQuerier.EXPECT().

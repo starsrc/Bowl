@@ -18,12 +18,12 @@ import (
 // 3. 两阶段落盘写入：
 //   - 阶段 1（锁外落盘）：申请 slice_id，将 data 按 BlockSize 切分原子写入底层物理块存储；失败立即清理物理块返回 ErrIO；
 //   - 阶段 2（事务提交）：事务内锁定 Inode 校验类型与写句柄有效性，续期会话；
-//     * 若句柄设置 O_APPEND，强制将 actualOffset 设为当前 inode.Size（若溢出 MaxInt64 返回 ErrInvalidArgument）；
-//     * 根据 actualOffset 与 dataLen 计算所跨 Chunk 范围：
-//       - 单 Chunk 内写入：向 indx 追加 1 条 Slice，登记 slice_refs.refs = 1；
-//       - 跨 64 MiB 边界写入：拆分为 indx（off=0, len=firstLen）与 indx+1（pos=0, off=firstLen, len=secondLen），
-//         在同一事务内分别追加 2 条 Slice 描述符，并将同一 slice_id 的 slice_refs.refs 记为 2；
-//     * 更新 Inode 大小（扩容则更新，覆写保持）、剥离 S_ISUID/S_ISGID 特权位并刷新 mtime/ctime；
+//   - 若句柄设置 O_APPEND，强制将 actualOffset 设为当前 inode.Size（若溢出 MaxInt64 返回 ErrInvalidArgument）；
+//   - 根据 actualOffset 与 dataLen 计算所跨 Chunk 范围：
+//   - 单 Chunk 内写入：向 indx 追加 1 条 Slice，登记 slice_refs.refs = 1；
+//   - 跨 64 MiB 边界写入：拆分为 indx（off=0, len=firstLen）与 indx+1（pos=0, off=firstLen, len=secondLen），
+//     在同一事务内分别追加 2 条 Slice 描述符，并将同一 slice_id 的 slice_refs.refs 记为 2；
+//   - 更新 Inode 大小（扩容则更新，覆写保持）、剥离 S_ISUID/S_ISGID 特权位并刷新 mtime/ctime；
 //   - 事务回滚补偿：若阶段 2 事务失败，在事务外立即调用 DeleteBlock 清理阶段 1 已落盘物理块，保证零孤儿块残留。
 func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error) {
 	if req == nil {
@@ -128,6 +128,32 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return ErrInvalidArgument
 		}
 
+		newEnd := int64(actualOffset) + int64(dataLen)
+		newSize := inode.Size
+		if newEnd > newSize {
+			newSize = newEnd
+			if inode.RootIno > 0 {
+				deltaBytes := uint64(newEnd - inode.Size)
+				diskRow, err := q.GetDiskByRootInoForUpdate(ctx, inode.RootIno)
+				if err != nil {
+					if !errors.Is(err, pgx.ErrNoRows) {
+						return fmt.Errorf("get disk by root_ino %d for update: %w", inode.RootIno, err)
+					}
+				} else {
+					if uint64(diskRow.UsedBytes) > uint64(diskRow.MaxBytes) || deltaBytes > uint64(diskRow.MaxBytes)-uint64(diskRow.UsedBytes) {
+						return ErrNoSpace
+					}
+					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
+						RootIno:     inode.RootIno,
+						DeltaBytes:  int64(deltaBytes),
+						DeltaInodes: 0,
+					}); err != nil {
+						return fmt.Errorf("add disk quota by root_ino %d: %w", inode.RootIno, err)
+					}
+				}
+			}
+		}
+
 		startIndx := uint32(actualOffset / ChunkSize)
 		endIndx := uint32((actualOffset + uint64(dataLen) - 1) / ChunkSize)
 
@@ -199,12 +225,6 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 				return fmt.Errorf("insert slice ref (slice_id=%d): %w", sliceID, err)
 			}
 		}
-
-		newEnd := int64(actualOffset) + int64(dataLen)
-		newSize := inode.Size
-		if newEnd > newSize {
-			newSize = newEnd
-		}
 		newMode := int32(uint32(inode.Mode) &^ (S_ISUID | S_ISGID))
 
 		updatedInode, err := q.UpdateInodeSizeAndTouchForWrite(ctx, db.UpdateInodeSizeAndTouchForWriteParams{
@@ -236,6 +256,8 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return nil, ErrIsDir
 		case errors.Is(txErr, ErrBadFileHandle):
 			return nil, ErrBadFileHandle
+		case errors.Is(txErr, ErrNoSpace):
+			return nil, ErrNoSpace
 		default:
 			return nil, fmt.Errorf("write commit tx: %w", txErr)
 		}

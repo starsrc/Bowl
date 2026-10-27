@@ -659,6 +659,11 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 						return fmt.Errorf("deduct disk used_bytes on open truncate for inode %d: %w", inode.Ino, err)
 					}
 				}
+				if inode.Size > 0 {
+					if err := deleteAllChunksByIno(ctx, q, inode.Ino); err != nil {
+						return fmt.Errorf("delete all chunks on open truncate for inode %d: %w", inode.Ino, err)
+					}
+				}
 			}
 		}
 

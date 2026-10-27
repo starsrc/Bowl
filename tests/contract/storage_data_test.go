@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/pkg/validator"
@@ -125,14 +126,45 @@ func TestWriteRequestContract(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("有效请求", func(t *testing.T) {
-		req := &storagev1.WriteRequest{
-			Ino:       1,
-			Fh:        1,
-			Offset:    0,
-			Data:      make([]byte, 4194304),
-			SessionId: proto.Uint64(math.MaxInt64),
+		cases := []struct {
+			name string
+			req  *storagev1.WriteRequest
+		}{
+			{
+				name: "典型 4 MiB 写入",
+				req: &storagev1.WriteRequest{
+					Ino:       1,
+					Fh:        1,
+					Offset:    0,
+					Data:      make([]byte, 4194304),
+					SessionId: proto.Uint64(math.MaxInt64),
+				},
+			},
+			{
+				name: "空数据写入 (0 字节)",
+				req: &storagev1.WriteRequest{
+					Ino:    10,
+					Fh:     20,
+					Offset: 100,
+					Data:   []byte{},
+				},
+			},
+			{
+				name: "边界 offset 与小数据载荷",
+				req: &storagev1.WriteRequest{
+					Ino:    1,
+					Fh:     1,
+					Offset: math.MaxInt64 - 10,
+					Data:   []byte("1234567890"),
+				},
+			},
 		}
-		assert.NoError(t, v.Validate(req))
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.NoError(t, v.Validate(tc.req))
+			})
+		}
 	})
 
 	t.Run("非法参数拦截", func(t *testing.T) {
@@ -155,6 +187,160 @@ func TestWriteRequestContract(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				assertErrorInfoReason(t, v.Validate(tc.req), validator.ReasonInvalidArgument)
+			})
+		}
+	})
+}
+
+// TestWriteResponseContract 验证 WriteResponse 的契约规范与 Protobuf 编解码正确性。
+func TestWriteResponseContract(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	now := timestamppb.Now()
+	validInode := &storagev1.Inode{
+		Ino:        100,
+		Generation: 1,
+		Attr: &storagev1.InodeAttribute{
+			Mode:    0o100644,
+			Uid:     1000,
+			Gid:     1000,
+			Rdev:    0,
+			Size:    4096,
+			Atime:   now,
+			Mtime:   now,
+			Ctime:   now,
+			Nlink:   1,
+			Blksize: 4096,
+			Blocks:  1,
+			Flags:   0,
+		},
+	}
+
+	t.Run("有效响应与序列化往返", func(t *testing.T) {
+		cases := []struct {
+			name string
+			resp *storagev1.WriteResponse
+		}{
+			{
+				name: "典型写入响应",
+				resp: &storagev1.WriteResponse{
+					Size:  4096,
+					Inode: validInode,
+				},
+			},
+			{
+				name: "零字节写入响应",
+				resp: &storagev1.WriteResponse{
+					Size:  0,
+					Inode: validInode,
+				},
+			},
+			{
+				name: "4 MiB 满载写入响应",
+				resp: &storagev1.WriteResponse{
+					Size:  4194304,
+					Inode: validInode,
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.NoError(t, v.Validate(tc.resp))
+
+				wire, err := proto.Marshal(tc.resp)
+				require.NoError(t, err)
+
+				var unmarshaled storagev1.WriteResponse
+				require.NoError(t, proto.Unmarshal(wire, &unmarshaled))
+				assert.Equal(t, tc.resp.Size, unmarshaled.Size)
+				assert.Equal(t, tc.resp.Inode.Ino, unmarshaled.Inode.Ino)
+				assert.Equal(t, tc.resp.Inode.Attr.Size, unmarshaled.Inode.Attr.Size)
+			})
+		}
+	})
+
+	t.Run("非法参数与必填字段拦截", func(t *testing.T) {
+		cases := []struct {
+			name string
+			resp *storagev1.WriteResponse
+		}{
+			{
+				name: "缺失必填 inode 字段",
+				resp: &storagev1.WriteResponse{
+					Size:  1024,
+					Inode: nil,
+				},
+			},
+			{
+				name: "size 超出 4 MiB 边界",
+				resp: &storagev1.WriteResponse{
+					Size:  4194305,
+					Inode: validInode,
+				},
+			},
+			{
+				name: "嵌套 Inode.Ino 为 0",
+				resp: &storagev1.WriteResponse{
+					Size: 1024,
+					Inode: &storagev1.Inode{
+						Ino:        0,
+						Generation: 1,
+						Attr:       validInode.Attr,
+					},
+				},
+			},
+			{
+				name: "嵌套 Inode.Attr.Mode 为 0",
+				resp: &storagev1.WriteResponse{
+					Size: 1024,
+					Inode: &storagev1.Inode{
+						Ino:        100,
+						Generation: 1,
+						Attr: &storagev1.InodeAttribute{
+							Mode:    0,
+							Size:    1024,
+							Atime:   now,
+							Mtime:   now,
+							Ctime:   now,
+							Nlink:   1,
+							Blksize: 4096,
+						},
+					},
+				},
+			},
+			{
+				name: "嵌套 Inode 缺失 Attr 字段",
+				resp: &storagev1.WriteResponse{
+					Size: 1024,
+					Inode: &storagev1.Inode{
+						Ino:        100,
+						Generation: 1,
+						Attr:       nil,
+					},
+				},
+			},
+			{
+				name: "嵌套 Inode.Attr.Size 超出 MaxInt64",
+				resp: &storagev1.WriteResponse{
+					Size: 1024,
+					Inode: &storagev1.Inode{
+						Ino:        100,
+						Generation: 1,
+						Attr: &storagev1.InodeAttribute{
+							Mode:  0o100644,
+							Size:  math.MaxInt64 + 1,
+							Nlink: 1,
+						},
+					},
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				assertErrorInfoReason(t, v.Validate(tc.resp), validator.ReasonInvalidArgument)
 			})
 		}
 	})

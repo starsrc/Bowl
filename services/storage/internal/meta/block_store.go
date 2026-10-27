@@ -9,11 +9,6 @@ import (
 	"path/filepath"
 )
 
-const (
-	// DefaultBlockSize4MiB 定义默认物理块大小（4 MiB = 4194304 字节）。
-	DefaultBlockSize4MiB uint32 = 1 << 22
-)
-
 // BlockStore 定义不可变数据块物理持久化接口。
 type BlockStore interface {
 	// PutBlock 将切片子块数据原子写入存储介质。
@@ -33,7 +28,7 @@ type SliceBlockInfo struct {
 // SliceBlocks 根据 sliceSize 计算其切分出的所有物理 Block 列表。
 // 若 sliceSize 为 0 则返回空切片。
 func SliceBlocks(sliceSize uint32) []SliceBlockInfo {
-	return SliceBlocksWithBlockSize(sliceSize, DefaultBlockSize4MiB)
+	return SliceBlocksWithBlockSize(sliceSize, BlockSize)
 }
 
 // SliceBlocksWithBlockSize 根据给定的单块大小 defaultBlockSize 计算 sliceSize 切分出的所有物理 Block 列表。
@@ -79,7 +74,7 @@ type BlockLocation struct {
 // 若 reqLen == 0 则返回空切片。
 // 若 sliceOff + reqLen > sliceSize 或参数越界，返回 ErrInvalidArgument。
 func LocateBlocks(sliceSize uint32, sliceOff uint32, reqLen uint32) ([]BlockLocation, error) {
-	return LocateBlocksWithBlockSize(sliceSize, sliceOff, reqLen, DefaultBlockSize4MiB)
+	return LocateBlocksWithBlockSize(sliceSize, sliceOff, reqLen, BlockSize)
 }
 
 // LocateBlocksWithBlockSize 根据指定物理块大小 defaultBlockSize 计算所涉 Block 范围。

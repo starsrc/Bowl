@@ -241,6 +241,12 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 			return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
 		}
 
+		if len(deletedInos) > 0 {
+			if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
+				return fmt.Errorf("delete chunks for disk %s (root_ino=%d): %w", diskID, diskRow.RootIno, err)
+			}
+		}
+
 		return nil
 	})
 	if err != nil {

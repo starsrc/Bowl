@@ -55,6 +55,24 @@ func deleteAllChunksByIno(ctx context.Context, q db.Querier, ino int64) error {
 	return nil
 }
 
+// deleteAllChunksByInos 在事务内批量删除指定 Inode 列表的全部 chunks 行，并递减其关联物理切片的引用计数。
+func deleteAllChunksByInos(ctx context.Context, q db.Querier, inos []int64) error {
+	if len(inos) == 0 {
+		return nil
+	}
+	deletedSlices, err := q.DeleteChunksByInos(ctx, inos)
+	if err != nil {
+		return fmt.Errorf("delete chunks by inos: %w", err)
+	}
+	if len(deletedSlices) == 0 {
+		return nil
+	}
+	if err := decrementDeletedSlicesRefs(ctx, q, deletedSlices...); err != nil {
+		return fmt.Errorf("decrement deleted slices refs for inos: %w", err)
+	}
+	return nil
+}
+
 // truncateChunksToSize 在事务内处理常规文件非零缩容截断 (0 < newSize < oldSize)：
 //  1. 计算截断边界 borderIndx := uint32(newSize / ChunkSize) 与 borderPos := uint32(newSize % ChunkSize)；
 //  2. 当 borderPos == 0 时，删除 indx >= borderIndx 的所有 chunks 行并递减对应 slice_refs.refs；

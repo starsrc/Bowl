@@ -515,6 +515,12 @@ func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) 
 		}
 	}
 
+	if len(deletedInos) > 0 {
+		if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
+			return fmt.Errorf("delete chunks for unreferenced orphan inodes: %w", err)
+		}
+	}
+
 	rootInos := make([]int64, 0, len(quotaDeltas))
 	for rootIno := range quotaDeltas {
 		rootInos = append(rootInos, rootIno)

@@ -81,22 +81,31 @@ type Manager interface {
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 	Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error)
 	Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error)
+	CompactChunk(ctx context.Context, ino uint64, indx uint32) error
 	CollectGarbage(ctx context.Context, limit int32) (int, error)
 	StartGCWorker(ctx context.Context, interval time.Duration, batchLimit int32)
 }
 
+type chunkKey struct {
+	ino  uint64
+	indx uint32
+}
+
 type manager struct {
-	store           db.Store
-	blockStore      BlockStore
-	entryTimeout    float64
-	attrTimeout     float64
-	dirEntryTimeout float64
-	openKeepCache   bool
-	openDirCache    bool
-	atimeMode       AtimeMode
-	sessionLeaseTTL time.Duration
-	lockNotifyMu    sync.Mutex
-	lockNotifyChans map[uint64]chan struct{}
+	store                 db.Store
+	blockStore            BlockStore
+	entryTimeout          float64
+	attrTimeout           float64
+	dirEntryTimeout       float64
+	openKeepCache         bool
+	openDirCache          bool
+	atimeMode             AtimeMode
+	sessionLeaseTTL       time.Duration
+	compactSliceThreshold int
+	chunkWriteCountsMu    sync.Mutex
+	chunkWriteCounts      map[chunkKey]int
+	lockNotifyMu          sync.Mutex
+	lockNotifyChans       map[uint64]chan struct{}
 }
 
 var _ Manager = (*manager)(nil)
@@ -181,15 +190,26 @@ func WithAtimeMode(mode AtimeMode) Option {
 	}
 }
 
+// WithCompactSliceThreshold 配置单 Chunk 累积写入 Slice 达到触发 Compaction 的阈值。
+func WithCompactSliceThreshold(threshold int) Option {
+	return func(m *manager) {
+		if threshold > 0 {
+			m.compactSliceThreshold = threshold
+		}
+	}
+}
+
 // New 创建 Manager 实例。
 func New(store db.Store, opts ...Option) Manager {
 	m := &manager{
-		store:           store,
-		entryTimeout:    DefaultEntryTimeoutSeconds,
-		attrTimeout:     DefaultAttrTimeoutSeconds,
-		dirEntryTimeout: DefaultEntryTimeoutSeconds,
-		sessionLeaseTTL: DefaultSessionLeaseTTL,
-		lockNotifyChans: make(map[uint64]chan struct{}),
+		store:                 store,
+		entryTimeout:          DefaultEntryTimeoutSeconds,
+		attrTimeout:           DefaultAttrTimeoutSeconds,
+		dirEntryTimeout:       DefaultEntryTimeoutSeconds,
+		sessionLeaseTTL:       DefaultSessionLeaseTTL,
+		compactSliceThreshold: CompactSliceThreshold,
+		chunkWriteCounts:      make(map[chunkKey]int),
+		lockNotifyChans:       make(map[uint64]chan struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {

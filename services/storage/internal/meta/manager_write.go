@@ -81,6 +81,7 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 	}
 
 	// 阶段 2：事务提交追加 Slice 元数据与更新 Inode
+	var committedStartIndx, committedEndIndx uint32
 	var resp *WriteResponse
 	txErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		inode, err := q.GetInodeForUpdate(ctx, int64(req.Ino))
@@ -156,6 +157,8 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 
 		startIndx := uint32(actualOffset / ChunkSize)
 		endIndx := uint32((actualOffset + uint64(dataLen) - 1) / ChunkSize)
+		committedStartIndx = startIndx
+		committedEndIndx = endIndx
 
 		if startIndx == endIndx {
 			sliceDesc := Slice{
@@ -261,6 +264,11 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 		default:
 			return nil, fmt.Errorf("write commit tx: %w", txErr)
 		}
+	}
+
+	m.recordChunkWriteAndTriggerCompact(req.Ino, committedStartIndx)
+	if committedStartIndx != committedEndIndx {
+		m.recordChunkWriteAndTriggerCompact(req.Ino, committedEndIndx)
 	}
 
 	return resp, nil

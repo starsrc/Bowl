@@ -97,6 +97,186 @@ func (_c *MockStore_AddDiskQuotaByRootIno_Call) RunAndReturn(run func(ctx contex
 	return _c
 }
 
+// AddSliceRefCount provides a mock function for the type MockStore
+func (_mock *MockStore) AddSliceRefCount(ctx context.Context, arg db.AddSliceRefCountParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AddSliceRefCount")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AddSliceRefCountParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_AddSliceRefCount_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddSliceRefCount'
+type MockStore_AddSliceRefCount_Call struct {
+	*mock.Call
+}
+
+// AddSliceRefCount is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AddSliceRefCountParams
+func (_e *MockStore_Expecter) AddSliceRefCount(ctx any, arg any) *MockStore_AddSliceRefCount_Call {
+	return &MockStore_AddSliceRefCount_Call{Call: _e.mock.On("AddSliceRefCount", ctx, arg)}
+}
+
+func (_c *MockStore_AddSliceRefCount_Call) Run(run func(ctx context.Context, arg db.AddSliceRefCountParams)) *MockStore_AddSliceRefCount_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AddSliceRefCountParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AddSliceRefCountParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_AddSliceRefCount_Call) Return(err error) *MockStore_AddSliceRefCount_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_AddSliceRefCount_Call) RunAndReturn(run func(ctx context.Context, arg db.AddSliceRefCountParams) error) *MockStore_AddSliceRefCount_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// AppendChunkSlice provides a mock function for the type MockStore
+func (_mock *MockStore) AppendChunkSlice(ctx context.Context, arg db.AppendChunkSliceParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AppendChunkSlice")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendChunkSliceParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_AppendChunkSlice_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AppendChunkSlice'
+type MockStore_AppendChunkSlice_Call struct {
+	*mock.Call
+}
+
+// AppendChunkSlice is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AppendChunkSliceParams
+func (_e *MockStore_Expecter) AppendChunkSlice(ctx any, arg any) *MockStore_AppendChunkSlice_Call {
+	return &MockStore_AppendChunkSlice_Call{Call: _e.mock.On("AppendChunkSlice", ctx, arg)}
+}
+
+func (_c *MockStore_AppendChunkSlice_Call) Run(run func(ctx context.Context, arg db.AppendChunkSliceParams)) *MockStore_AppendChunkSlice_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AppendChunkSliceParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AppendChunkSliceParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_AppendChunkSlice_Call) Return(err error) *MockStore_AppendChunkSlice_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_AppendChunkSlice_Call) RunAndReturn(run func(ctx context.Context, arg db.AppendChunkSliceParams) error) *MockStore_AppendChunkSlice_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// AppendExistingChunkSlice provides a mock function for the type MockStore
+func (_mock *MockStore) AppendExistingChunkSlice(ctx context.Context, arg db.AppendExistingChunkSliceParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AppendExistingChunkSlice")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendExistingChunkSliceParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendExistingChunkSliceParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.AppendExistingChunkSliceParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_AppendExistingChunkSlice_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AppendExistingChunkSlice'
+type MockStore_AppendExistingChunkSlice_Call struct {
+	*mock.Call
+}
+
+// AppendExistingChunkSlice is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AppendExistingChunkSliceParams
+func (_e *MockStore_Expecter) AppendExistingChunkSlice(ctx any, arg any) *MockStore_AppendExistingChunkSlice_Call {
+	return &MockStore_AppendExistingChunkSlice_Call{Call: _e.mock.On("AppendExistingChunkSlice", ctx, arg)}
+}
+
+func (_c *MockStore_AppendExistingChunkSlice_Call) Run(run func(ctx context.Context, arg db.AppendExistingChunkSliceParams)) *MockStore_AppendExistingChunkSlice_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AppendExistingChunkSliceParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AppendExistingChunkSliceParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_AppendExistingChunkSlice_Call) Return(n int64, err error) *MockStore_AppendExistingChunkSlice_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_AppendExistingChunkSlice_Call) RunAndReturn(run func(ctx context.Context, arg db.AppendExistingChunkSliceParams) (int64, error)) *MockStore_AppendExistingChunkSlice_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ClearInodeNlinkAndTouchCtime provides a mock function for the type MockStore
 func (_mock *MockStore) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error) {
 	ret := _mock.Called(ctx, ino)
@@ -792,6 +972,346 @@ func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) Return(inode db.Inode
 }
 
 func (_c *MockStore_DecrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockStore_DecrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunk provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteChunk(ctx context.Context, arg db.DeleteChunkParams) ([][]byte, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunk")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunkParams) ([][]byte, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunkParams) [][]byte); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteChunkParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteChunk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunk'
+type MockStore_DeleteChunk_Call struct {
+	*mock.Call
+}
+
+// DeleteChunk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteChunkParams
+func (_e *MockStore_Expecter) DeleteChunk(ctx any, arg any) *MockStore_DeleteChunk_Call {
+	return &MockStore_DeleteChunk_Call{Call: _e.mock.On("DeleteChunk", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteChunk_Call) Run(run func(ctx context.Context, arg db.DeleteChunkParams)) *MockStore_DeleteChunk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteChunkParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteChunkParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteChunk_Call) Return(bytess [][]byte, err error) *MockStore_DeleteChunk_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteChunk_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteChunkParams) ([][]byte, error)) *MockStore_DeleteChunk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksAfterIndx provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteChunksAfterIndx(ctx context.Context, arg db.DeleteChunksAfterIndxParams) ([][]byte, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksAfterIndx")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksAfterIndxParams) ([][]byte, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksAfterIndxParams) [][]byte); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteChunksAfterIndxParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteChunksAfterIndx_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksAfterIndx'
+type MockStore_DeleteChunksAfterIndx_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksAfterIndx is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteChunksAfterIndxParams
+func (_e *MockStore_Expecter) DeleteChunksAfterIndx(ctx any, arg any) *MockStore_DeleteChunksAfterIndx_Call {
+	return &MockStore_DeleteChunksAfterIndx_Call{Call: _e.mock.On("DeleteChunksAfterIndx", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteChunksAfterIndx_Call) Run(run func(ctx context.Context, arg db.DeleteChunksAfterIndxParams)) *MockStore_DeleteChunksAfterIndx_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteChunksAfterIndxParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteChunksAfterIndxParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksAfterIndx_Call) Return(bytess [][]byte, err error) *MockStore_DeleteChunksAfterIndx_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksAfterIndx_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteChunksAfterIndxParams) ([][]byte, error)) *MockStore_DeleteChunksAfterIndx_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksByIno provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteChunksByIno(ctx context.Context, ino int64) ([][]byte, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksByIno")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([][]byte, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) [][]byte); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteChunksByIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksByIno'
+type MockStore_DeleteChunksByIno_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksByIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockStore_Expecter) DeleteChunksByIno(ctx any, ino any) *MockStore_DeleteChunksByIno_Call {
+	return &MockStore_DeleteChunksByIno_Call{Call: _e.mock.On("DeleteChunksByIno", ctx, ino)}
+}
+
+func (_c *MockStore_DeleteChunksByIno_Call) Run(run func(ctx context.Context, ino int64)) *MockStore_DeleteChunksByIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksByIno_Call) Return(bytess [][]byte, err error) *MockStore_DeleteChunksByIno_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) ([][]byte, error)) *MockStore_DeleteChunksByIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksByInos provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteChunksByInos(ctx context.Context, inos []int64) ([][]byte, error) {
+	ret := _mock.Called(ctx, inos)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksByInos")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) ([][]byte, error)); ok {
+		return returnFunc(ctx, inos)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) [][]byte); ok {
+		r0 = returnFunc(ctx, inos)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, []int64) error); ok {
+		r1 = returnFunc(ctx, inos)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteChunksByInos_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksByInos'
+type MockStore_DeleteChunksByInos_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksByInos is a helper method to define mock.On call
+//   - ctx context.Context
+//   - inos []int64
+func (_e *MockStore_Expecter) DeleteChunksByInos(ctx any, inos any) *MockStore_DeleteChunksByInos_Call {
+	return &MockStore_DeleteChunksByInos_Call{Call: _e.mock.On("DeleteChunksByInos", ctx, inos)}
+}
+
+func (_c *MockStore_DeleteChunksByInos_Call) Run(run func(ctx context.Context, inos []int64)) *MockStore_DeleteChunksByInos_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 []int64
+		if args[1] != nil {
+			arg1 = args[1].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksByInos_Call) Return(bytess [][]byte, err error) *MockStore_DeleteChunksByInos_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksByInos_Call) RunAndReturn(run func(ctx context.Context, inos []int64) ([][]byte, error)) *MockStore_DeleteChunksByInos_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksFromIndx provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteChunksFromIndx(ctx context.Context, arg db.DeleteChunksFromIndxParams) ([][]byte, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksFromIndx")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksFromIndxParams) ([][]byte, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksFromIndxParams) [][]byte); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteChunksFromIndxParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_DeleteChunksFromIndx_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksFromIndx'
+type MockStore_DeleteChunksFromIndx_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksFromIndx is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteChunksFromIndxParams
+func (_e *MockStore_Expecter) DeleteChunksFromIndx(ctx any, arg any) *MockStore_DeleteChunksFromIndx_Call {
+	return &MockStore_DeleteChunksFromIndx_Call{Call: _e.mock.On("DeleteChunksFromIndx", ctx, arg)}
+}
+
+func (_c *MockStore_DeleteChunksFromIndx_Call) Run(run func(ctx context.Context, arg db.DeleteChunksFromIndxParams)) *MockStore_DeleteChunksFromIndx_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteChunksFromIndxParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteChunksFromIndxParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksFromIndx_Call) Return(bytess [][]byte, err error) *MockStore_DeleteChunksFromIndx_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockStore_DeleteChunksFromIndx_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteChunksFromIndxParams) ([][]byte, error)) *MockStore_DeleteChunksFromIndx_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1953,6 +2473,63 @@ func (_c *MockStore_DeletePosixFileLocksBySessionAndOwner_Call) RunAndReturn(run
 	return _c
 }
 
+// DeleteSliceRef provides a mock function for the type MockStore
+func (_mock *MockStore) DeleteSliceRef(ctx context.Context, sliceID int64) error {
+	ret := _mock.Called(ctx, sliceID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteSliceRef")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, sliceID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_DeleteSliceRef_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteSliceRef'
+type MockStore_DeleteSliceRef_Call struct {
+	*mock.Call
+}
+
+// DeleteSliceRef is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sliceID int64
+func (_e *MockStore_Expecter) DeleteSliceRef(ctx any, sliceID any) *MockStore_DeleteSliceRef_Call {
+	return &MockStore_DeleteSliceRef_Call{Call: _e.mock.On("DeleteSliceRef", ctx, sliceID)}
+}
+
+func (_c *MockStore_DeleteSliceRef_Call) Run(run func(ctx context.Context, sliceID int64)) *MockStore_DeleteSliceRef_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_DeleteSliceRef_Call) Return(err error) *MockStore_DeleteSliceRef_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_DeleteSliceRef_Call) RunAndReturn(run func(ctx context.Context, sliceID int64) error) *MockStore_DeleteSliceRef_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteUnreferencedOrphanInodes provides a mock function for the type MockStore
 func (_mock *MockStore) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error) {
 	ret := _mock.Called(ctx)
@@ -2144,6 +2721,206 @@ func (_c *MockStore_ExecTxWithOptions_Call) Return(err error) *MockStore_ExecTxW
 }
 
 func (_c *MockStore_ExecTxWithOptions_Call) RunAndReturn(run func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error) *MockStore_ExecTxWithOptions_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetChunk provides a mock function for the type MockStore
+func (_mock *MockStore) GetChunk(ctx context.Context, arg db.GetChunkParams) (db.Chunk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetChunk")
+	}
+
+	var r0 db.Chunk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkParams) (db.Chunk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkParams) db.Chunk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Chunk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetChunkParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetChunk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetChunk'
+type MockStore_GetChunk_Call struct {
+	*mock.Call
+}
+
+// GetChunk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetChunkParams
+func (_e *MockStore_Expecter) GetChunk(ctx any, arg any) *MockStore_GetChunk_Call {
+	return &MockStore_GetChunk_Call{Call: _e.mock.On("GetChunk", ctx, arg)}
+}
+
+func (_c *MockStore_GetChunk_Call) Run(run func(ctx context.Context, arg db.GetChunkParams)) *MockStore_GetChunk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetChunkParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetChunkParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetChunk_Call) Return(chunk db.Chunk, err error) *MockStore_GetChunk_Call {
+	_c.Call.Return(chunk, err)
+	return _c
+}
+
+func (_c *MockStore_GetChunk_Call) RunAndReturn(run func(ctx context.Context, arg db.GetChunkParams) (db.Chunk, error)) *MockStore_GetChunk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetChunkForUpdate provides a mock function for the type MockStore
+func (_mock *MockStore) GetChunkForUpdate(ctx context.Context, arg db.GetChunkForUpdateParams) (db.Chunk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetChunkForUpdate")
+	}
+
+	var r0 db.Chunk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkForUpdateParams) (db.Chunk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkForUpdateParams) db.Chunk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Chunk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetChunkForUpdateParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetChunkForUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetChunkForUpdate'
+type MockStore_GetChunkForUpdate_Call struct {
+	*mock.Call
+}
+
+// GetChunkForUpdate is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetChunkForUpdateParams
+func (_e *MockStore_Expecter) GetChunkForUpdate(ctx any, arg any) *MockStore_GetChunkForUpdate_Call {
+	return &MockStore_GetChunkForUpdate_Call{Call: _e.mock.On("GetChunkForUpdate", ctx, arg)}
+}
+
+func (_c *MockStore_GetChunkForUpdate_Call) Run(run func(ctx context.Context, arg db.GetChunkForUpdateParams)) *MockStore_GetChunkForUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetChunkForUpdateParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetChunkForUpdateParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetChunkForUpdate_Call) Return(chunk db.Chunk, err error) *MockStore_GetChunkForUpdate_Call {
+	_c.Call.Return(chunk, err)
+	return _c
+}
+
+func (_c *MockStore_GetChunkForUpdate_Call) RunAndReturn(run func(ctx context.Context, arg db.GetChunkForUpdateParams) (db.Chunk, error)) *MockStore_GetChunkForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetChunksInRange provides a mock function for the type MockStore
+func (_mock *MockStore) GetChunksInRange(ctx context.Context, arg db.GetChunksInRangeParams) ([]db.Chunk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetChunksInRange")
+	}
+
+	var r0 []db.Chunk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunksInRangeParams) ([]db.Chunk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunksInRangeParams) []db.Chunk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.Chunk)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetChunksInRangeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetChunksInRange_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetChunksInRange'
+type MockStore_GetChunksInRange_Call struct {
+	*mock.Call
+}
+
+// GetChunksInRange is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetChunksInRangeParams
+func (_e *MockStore_Expecter) GetChunksInRange(ctx any, arg any) *MockStore_GetChunksInRange_Call {
+	return &MockStore_GetChunksInRange_Call{Call: _e.mock.On("GetChunksInRange", ctx, arg)}
+}
+
+func (_c *MockStore_GetChunksInRange_Call) Run(run func(ctx context.Context, arg db.GetChunksInRangeParams)) *MockStore_GetChunksInRange_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetChunksInRangeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetChunksInRangeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetChunksInRange_Call) Return(chunks []db.Chunk, err error) *MockStore_GetChunksInRange_Call {
+	_c.Call.Return(chunks, err)
+	return _c
+}
+
+func (_c *MockStore_GetChunksInRange_Call) RunAndReturn(run func(ctx context.Context, arg db.GetChunksInRangeParams) ([]db.Chunk, error)) *MockStore_GetChunksInRange_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -3072,6 +3849,72 @@ func (_c *MockStore_GetParentInode_Call) RunAndReturn(run func(ctx context.Conte
 	return _c
 }
 
+// GetSliceRef provides a mock function for the type MockStore
+func (_mock *MockStore) GetSliceRef(ctx context.Context, sliceID int64) (db.SliceRef, error) {
+	ret := _mock.Called(ctx, sliceID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetSliceRef")
+	}
+
+	var r0 db.SliceRef
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.SliceRef, error)); ok {
+		return returnFunc(ctx, sliceID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.SliceRef); ok {
+		r0 = returnFunc(ctx, sliceID)
+	} else {
+		r0 = ret.Get(0).(db.SliceRef)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, sliceID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetSliceRef_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetSliceRef'
+type MockStore_GetSliceRef_Call struct {
+	*mock.Call
+}
+
+// GetSliceRef is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sliceID int64
+func (_e *MockStore_Expecter) GetSliceRef(ctx any, sliceID any) *MockStore_GetSliceRef_Call {
+	return &MockStore_GetSliceRef_Call{Call: _e.mock.On("GetSliceRef", ctx, sliceID)}
+}
+
+func (_c *MockStore_GetSliceRef_Call) Run(run func(ctx context.Context, sliceID int64)) *MockStore_GetSliceRef_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetSliceRef_Call) Return(sliceRef db.SliceRef, err error) *MockStore_GetSliceRef_Call {
+	_c.Call.Return(sliceRef, err)
+	return _c
+}
+
+func (_c *MockStore_GetSliceRef_Call) RunAndReturn(run func(ctx context.Context, sliceID int64) (db.SliceRef, error)) *MockStore_GetSliceRef_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetSymlinkTarget provides a mock function for the type MockStore
 func (_mock *MockStore) GetSymlinkTarget(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error) {
 	ret := _mock.Called(ctx, ino)
@@ -3459,6 +4302,63 @@ func (_c *MockStore_IncrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run func
 	return _c
 }
 
+// InsertSliceRef provides a mock function for the type MockStore
+func (_mock *MockStore) InsertSliceRef(ctx context.Context, arg db.InsertSliceRefParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for InsertSliceRef")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.InsertSliceRefParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_InsertSliceRef_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'InsertSliceRef'
+type MockStore_InsertSliceRef_Call struct {
+	*mock.Call
+}
+
+// InsertSliceRef is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.InsertSliceRefParams
+func (_e *MockStore_Expecter) InsertSliceRef(ctx any, arg any) *MockStore_InsertSliceRef_Call {
+	return &MockStore_InsertSliceRef_Call{Call: _e.mock.On("InsertSliceRef", ctx, arg)}
+}
+
+func (_c *MockStore_InsertSliceRef_Call) Run(run func(ctx context.Context, arg db.InsertSliceRefParams)) *MockStore_InsertSliceRef_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.InsertSliceRefParams
+		if args[1] != nil {
+			arg1 = args[1].(db.InsertSliceRefParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_InsertSliceRef_Call) Return(err error) *MockStore_InsertSliceRef_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_InsertSliceRef_Call) RunAndReturn(run func(ctx context.Context, arg db.InsertSliceRefParams) error) *MockStore_InsertSliceRef_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // IsSubdirectory provides a mock function for the type MockStore
 func (_mock *MockStore) IsSubdirectory(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error) {
 	ret := _mock.Called(ctx, arg)
@@ -3729,6 +4629,74 @@ func (_c *MockStore_ListDirEntriesAfterName_Call) RunAndReturn(run func(ctx cont
 	return _c
 }
 
+// ListGarbageSliceRefs provides a mock function for the type MockStore
+func (_mock *MockStore) ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]db.SliceRef, error) {
+	ret := _mock.Called(ctx, limitCount)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListGarbageSliceRefs")
+	}
+
+	var r0 []db.SliceRef
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int32) ([]db.SliceRef, error)); ok {
+		return returnFunc(ctx, limitCount)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int32) []db.SliceRef); ok {
+		r0 = returnFunc(ctx, limitCount)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.SliceRef)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int32) error); ok {
+		r1 = returnFunc(ctx, limitCount)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_ListGarbageSliceRefs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListGarbageSliceRefs'
+type MockStore_ListGarbageSliceRefs_Call struct {
+	*mock.Call
+}
+
+// ListGarbageSliceRefs is a helper method to define mock.On call
+//   - ctx context.Context
+//   - limitCount int32
+func (_e *MockStore_Expecter) ListGarbageSliceRefs(ctx any, limitCount any) *MockStore_ListGarbageSliceRefs_Call {
+	return &MockStore_ListGarbageSliceRefs_Call{Call: _e.mock.On("ListGarbageSliceRefs", ctx, limitCount)}
+}
+
+func (_c *MockStore_ListGarbageSliceRefs_Call) Run(run func(ctx context.Context, limitCount int32)) *MockStore_ListGarbageSliceRefs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int32
+		if args[1] != nil {
+			arg1 = args[1].(int32)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ListGarbageSliceRefs_Call) Return(sliceRefs []db.SliceRef, err error) *MockStore_ListGarbageSliceRefs_Call {
+	_c.Call.Return(sliceRefs, err)
+	return _c
+}
+
+func (_c *MockStore_ListGarbageSliceRefs_Call) RunAndReturn(run func(ctx context.Context, limitCount int32) ([]db.SliceRef, error)) *MockStore_ListGarbageSliceRefs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListInodeXattrNames provides a mock function for the type MockStore
 func (_mock *MockStore) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error) {
 	ret := _mock.Called(ctx, ino)
@@ -3933,6 +4901,66 @@ func (_c *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call) RunAndReturn(r
 	return _c
 }
 
+// NextSliceID provides a mock function for the type MockStore
+func (_mock *MockStore) NextSliceID(ctx context.Context) (int64, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for NextSliceID")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_NextSliceID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'NextSliceID'
+type MockStore_NextSliceID_Call struct {
+	*mock.Call
+}
+
+// NextSliceID is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockStore_Expecter) NextSliceID(ctx any) *MockStore_NextSliceID_Call {
+	return &MockStore_NextSliceID_Call{Call: _e.mock.On("NextSliceID", ctx)}
+}
+
+func (_c *MockStore_NextSliceID_Call) Run(run func(ctx context.Context)) *MockStore_NextSliceID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_NextSliceID_Call) Return(n int64, err error) *MockStore_NextSliceID_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockStore_NextSliceID_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockStore_NextSliceID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // TouchInodeAtime provides a mock function for the type MockStore
 func (_mock *MockStore) TouchInodeAtime(ctx context.Context, ino int64) error {
 	ret := _mock.Called(ctx, ino)
@@ -4100,6 +5128,63 @@ func (_c *MockStore_TouchInodeTimestamps_Call) Return(err error) *MockStore_Touc
 }
 
 func (_c *MockStore_TouchInodeTimestamps_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockStore_TouchInodeTimestamps_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateChunkSlices provides a mock function for the type MockStore
+func (_mock *MockStore) UpdateChunkSlices(ctx context.Context, arg db.UpdateChunkSlicesParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateChunkSlices")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateChunkSlicesParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockStore_UpdateChunkSlices_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateChunkSlices'
+type MockStore_UpdateChunkSlices_Call struct {
+	*mock.Call
+}
+
+// UpdateChunkSlices is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateChunkSlicesParams
+func (_e *MockStore_Expecter) UpdateChunkSlices(ctx any, arg any) *MockStore_UpdateChunkSlices_Call {
+	return &MockStore_UpdateChunkSlices_Call{Call: _e.mock.On("UpdateChunkSlices", ctx, arg)}
+}
+
+func (_c *MockStore_UpdateChunkSlices_Call) Run(run func(ctx context.Context, arg db.UpdateChunkSlicesParams)) *MockStore_UpdateChunkSlices_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateChunkSlicesParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateChunkSlicesParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_UpdateChunkSlices_Call) Return(err error) *MockStore_UpdateChunkSlices_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockStore_UpdateChunkSlices_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateChunkSlicesParams) error) *MockStore_UpdateChunkSlices_Call {
 	_c.Call.Return(run)
 	return _c
 }

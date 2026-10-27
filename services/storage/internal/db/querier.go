@@ -12,6 +12,9 @@ import (
 
 type Querier interface {
 	AddDiskQuotaByRootIno(ctx context.Context, arg AddDiskQuotaByRootInoParams) error
+	AddSliceRefCount(ctx context.Context, arg AddSliceRefCountParams) error
+	AppendChunkSlice(ctx context.Context, arg AppendChunkSliceParams) error
+	AppendExistingChunkSlice(ctx context.Context, arg AppendExistingChunkSliceParams) (int64, error)
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	// 4194304 = 0o20000000 (O_TMPFILE)
 	ClearTmpFileFlagByIno(ctx context.Context, ino int64) error
@@ -24,6 +27,11 @@ type Querier interface {
 	CreateSymlinkInode(ctx context.Context, arg CreateSymlinkInodeParams) (Inode, error)
 	DecrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
+	DeleteChunk(ctx context.Context, arg DeleteChunkParams) ([][]byte, error)
+	DeleteChunksAfterIndx(ctx context.Context, arg DeleteChunksAfterIndxParams) ([][]byte, error)
+	DeleteChunksByIno(ctx context.Context, ino int64) ([][]byte, error)
+	DeleteChunksByInos(ctx context.Context, inos []int64) ([][]byte, error)
+	DeleteChunksFromIndx(ctx context.Context, arg DeleteChunksFromIndxParams) ([][]byte, error)
 	DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	DeleteExpiredClientSessions(ctx context.Context) (int64, error)
@@ -42,7 +50,11 @@ type Querier interface {
 	DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error)
 	DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePosixFileLocksByOwnerParams) (int64, error)
 	DeletePosixFileLocksBySessionAndOwner(ctx context.Context, arg DeletePosixFileLocksBySessionAndOwnerParams) (int64, error)
+	DeleteSliceRef(ctx context.Context, sliceID int64) error
 	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]DeleteUnreferencedOrphanInodesRow, error)
+	GetChunk(ctx context.Context, arg GetChunkParams) (Chunk, error)
+	GetChunkForUpdate(ctx context.Context, arg GetChunkForUpdateParams) (Chunk, error)
+	GetChunksInRange(ctx context.Context, arg GetChunksInRangeParams) ([]Chunk, error)
 	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 	GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, error)
 	GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (Disk, error)
@@ -57,6 +69,7 @@ type Querier interface {
 	GetInodeXattr(ctx context.Context, arg GetInodeXattrParams) (InodeXattr, error)
 	GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error)
 	GetParentInode(ctx context.Context, ino int64) (Inode, error)
+	GetSliceRef(ctx context.Context, sliceID int64) (SliceRef, error)
 	GetSymlinkTarget(ctx context.Context, ino int64) (GetSymlinkTargetRow, error)
 	HasChildEntries(ctx context.Context, parentIno int64) (bool, error)
 	HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error)
@@ -64,16 +77,20 @@ type Querier interface {
 	HasLinkableTmpFileHandleByIno(ctx context.Context, ino int64) (bool, error)
 	IncrementInodeNlinkAndTouch(ctx context.Context, ino int64) error
 	IncrementInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
+	InsertSliceRef(ctx context.Context, arg InsertSliceRefParams) error
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg ListActiveFileLocksByInoAndFlagsParams) ([]FileLock, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error)
+	ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]SliceRef, error)
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
 	ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]ListParentEntryCountsByInoRow, error)
 	ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg ListPendingFileLockWaitersByInoAndFlagsParams) ([]FileLockWaiter, error)
+	NextSliceID(ctx context.Context) (int64, error)
 	TouchInodeAtime(ctx context.Context, ino int64) error
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
+	UpdateChunkSlices(ctx context.Context, arg UpdateChunkSlicesParams) error
 	UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error)
 	UpdateDiskQuotaByRootIno(ctx context.Context, arg UpdateDiskQuotaByRootInoParams) (Disk, error)
 	UpdateDiskUsedBytes(ctx context.Context, arg UpdateDiskUsedBytesParams) (Disk, error)

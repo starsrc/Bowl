@@ -96,6 +96,186 @@ func (_c *MockQuerier_AddDiskQuotaByRootIno_Call) RunAndReturn(run func(ctx cont
 	return _c
 }
 
+// AddSliceRefCount provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) AddSliceRefCount(ctx context.Context, arg db.AddSliceRefCountParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AddSliceRefCount")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AddSliceRefCountParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_AddSliceRefCount_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddSliceRefCount'
+type MockQuerier_AddSliceRefCount_Call struct {
+	*mock.Call
+}
+
+// AddSliceRefCount is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AddSliceRefCountParams
+func (_e *MockQuerier_Expecter) AddSliceRefCount(ctx any, arg any) *MockQuerier_AddSliceRefCount_Call {
+	return &MockQuerier_AddSliceRefCount_Call{Call: _e.mock.On("AddSliceRefCount", ctx, arg)}
+}
+
+func (_c *MockQuerier_AddSliceRefCount_Call) Run(run func(ctx context.Context, arg db.AddSliceRefCountParams)) *MockQuerier_AddSliceRefCount_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AddSliceRefCountParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AddSliceRefCountParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_AddSliceRefCount_Call) Return(err error) *MockQuerier_AddSliceRefCount_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_AddSliceRefCount_Call) RunAndReturn(run func(ctx context.Context, arg db.AddSliceRefCountParams) error) *MockQuerier_AddSliceRefCount_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// AppendChunkSlice provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) AppendChunkSlice(ctx context.Context, arg db.AppendChunkSliceParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AppendChunkSlice")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendChunkSliceParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_AppendChunkSlice_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AppendChunkSlice'
+type MockQuerier_AppendChunkSlice_Call struct {
+	*mock.Call
+}
+
+// AppendChunkSlice is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AppendChunkSliceParams
+func (_e *MockQuerier_Expecter) AppendChunkSlice(ctx any, arg any) *MockQuerier_AppendChunkSlice_Call {
+	return &MockQuerier_AppendChunkSlice_Call{Call: _e.mock.On("AppendChunkSlice", ctx, arg)}
+}
+
+func (_c *MockQuerier_AppendChunkSlice_Call) Run(run func(ctx context.Context, arg db.AppendChunkSliceParams)) *MockQuerier_AppendChunkSlice_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AppendChunkSliceParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AppendChunkSliceParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_AppendChunkSlice_Call) Return(err error) *MockQuerier_AppendChunkSlice_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_AppendChunkSlice_Call) RunAndReturn(run func(ctx context.Context, arg db.AppendChunkSliceParams) error) *MockQuerier_AppendChunkSlice_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// AppendExistingChunkSlice provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) AppendExistingChunkSlice(ctx context.Context, arg db.AppendExistingChunkSliceParams) (int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AppendExistingChunkSlice")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendExistingChunkSliceParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendExistingChunkSliceParams) int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.AppendExistingChunkSliceParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_AppendExistingChunkSlice_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AppendExistingChunkSlice'
+type MockQuerier_AppendExistingChunkSlice_Call struct {
+	*mock.Call
+}
+
+// AppendExistingChunkSlice is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.AppendExistingChunkSliceParams
+func (_e *MockQuerier_Expecter) AppendExistingChunkSlice(ctx any, arg any) *MockQuerier_AppendExistingChunkSlice_Call {
+	return &MockQuerier_AppendExistingChunkSlice_Call{Call: _e.mock.On("AppendExistingChunkSlice", ctx, arg)}
+}
+
+func (_c *MockQuerier_AppendExistingChunkSlice_Call) Run(run func(ctx context.Context, arg db.AppendExistingChunkSliceParams)) *MockQuerier_AppendExistingChunkSlice_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.AppendExistingChunkSliceParams
+		if args[1] != nil {
+			arg1 = args[1].(db.AppendExistingChunkSliceParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_AppendExistingChunkSlice_Call) Return(n int64, err error) *MockQuerier_AppendExistingChunkSlice_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_AppendExistingChunkSlice_Call) RunAndReturn(run func(ctx context.Context, arg db.AppendExistingChunkSliceParams) (int64, error)) *MockQuerier_AppendExistingChunkSlice_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ClearInodeNlinkAndTouchCtime provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (db.Inode, error) {
 	ret := _mock.Called(ctx, ino)
@@ -791,6 +971,346 @@ func (_c *MockQuerier_DecrementInodeNlinkAndTouchCtime_Call) Return(inode db.Ino
 }
 
 func (_c *MockQuerier_DecrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run func(ctx context.Context, ino int64) (db.Inode, error)) *MockQuerier_DecrementInodeNlinkAndTouchCtime_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunk provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteChunk(ctx context.Context, arg db.DeleteChunkParams) ([][]byte, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunk")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunkParams) ([][]byte, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunkParams) [][]byte); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteChunkParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteChunk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunk'
+type MockQuerier_DeleteChunk_Call struct {
+	*mock.Call
+}
+
+// DeleteChunk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteChunkParams
+func (_e *MockQuerier_Expecter) DeleteChunk(ctx any, arg any) *MockQuerier_DeleteChunk_Call {
+	return &MockQuerier_DeleteChunk_Call{Call: _e.mock.On("DeleteChunk", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteChunk_Call) Run(run func(ctx context.Context, arg db.DeleteChunkParams)) *MockQuerier_DeleteChunk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteChunkParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteChunkParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunk_Call) Return(bytess [][]byte, err error) *MockQuerier_DeleteChunk_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunk_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteChunkParams) ([][]byte, error)) *MockQuerier_DeleteChunk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksAfterIndx provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteChunksAfterIndx(ctx context.Context, arg db.DeleteChunksAfterIndxParams) ([][]byte, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksAfterIndx")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksAfterIndxParams) ([][]byte, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksAfterIndxParams) [][]byte); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteChunksAfterIndxParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteChunksAfterIndx_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksAfterIndx'
+type MockQuerier_DeleteChunksAfterIndx_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksAfterIndx is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteChunksAfterIndxParams
+func (_e *MockQuerier_Expecter) DeleteChunksAfterIndx(ctx any, arg any) *MockQuerier_DeleteChunksAfterIndx_Call {
+	return &MockQuerier_DeleteChunksAfterIndx_Call{Call: _e.mock.On("DeleteChunksAfterIndx", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteChunksAfterIndx_Call) Run(run func(ctx context.Context, arg db.DeleteChunksAfterIndxParams)) *MockQuerier_DeleteChunksAfterIndx_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteChunksAfterIndxParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteChunksAfterIndxParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksAfterIndx_Call) Return(bytess [][]byte, err error) *MockQuerier_DeleteChunksAfterIndx_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksAfterIndx_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteChunksAfterIndxParams) ([][]byte, error)) *MockQuerier_DeleteChunksAfterIndx_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksByIno provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteChunksByIno(ctx context.Context, ino int64) ([][]byte, error) {
+	ret := _mock.Called(ctx, ino)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksByIno")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) ([][]byte, error)); ok {
+		return returnFunc(ctx, ino)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) [][]byte); ok {
+		r0 = returnFunc(ctx, ino)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, ino)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteChunksByIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksByIno'
+type MockQuerier_DeleteChunksByIno_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksByIno is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ino int64
+func (_e *MockQuerier_Expecter) DeleteChunksByIno(ctx any, ino any) *MockQuerier_DeleteChunksByIno_Call {
+	return &MockQuerier_DeleteChunksByIno_Call{Call: _e.mock.On("DeleteChunksByIno", ctx, ino)}
+}
+
+func (_c *MockQuerier_DeleteChunksByIno_Call) Run(run func(ctx context.Context, ino int64)) *MockQuerier_DeleteChunksByIno_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksByIno_Call) Return(bytess [][]byte, err error) *MockQuerier_DeleteChunksByIno_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksByIno_Call) RunAndReturn(run func(ctx context.Context, ino int64) ([][]byte, error)) *MockQuerier_DeleteChunksByIno_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksByInos provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteChunksByInos(ctx context.Context, inos []int64) ([][]byte, error) {
+	ret := _mock.Called(ctx, inos)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksByInos")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) ([][]byte, error)); ok {
+		return returnFunc(ctx, inos)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) [][]byte); ok {
+		r0 = returnFunc(ctx, inos)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, []int64) error); ok {
+		r1 = returnFunc(ctx, inos)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteChunksByInos_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksByInos'
+type MockQuerier_DeleteChunksByInos_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksByInos is a helper method to define mock.On call
+//   - ctx context.Context
+//   - inos []int64
+func (_e *MockQuerier_Expecter) DeleteChunksByInos(ctx any, inos any) *MockQuerier_DeleteChunksByInos_Call {
+	return &MockQuerier_DeleteChunksByInos_Call{Call: _e.mock.On("DeleteChunksByInos", ctx, inos)}
+}
+
+func (_c *MockQuerier_DeleteChunksByInos_Call) Run(run func(ctx context.Context, inos []int64)) *MockQuerier_DeleteChunksByInos_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 []int64
+		if args[1] != nil {
+			arg1 = args[1].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksByInos_Call) Return(bytess [][]byte, err error) *MockQuerier_DeleteChunksByInos_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksByInos_Call) RunAndReturn(run func(ctx context.Context, inos []int64) ([][]byte, error)) *MockQuerier_DeleteChunksByInos_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteChunksFromIndx provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteChunksFromIndx(ctx context.Context, arg db.DeleteChunksFromIndxParams) ([][]byte, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteChunksFromIndx")
+	}
+
+	var r0 [][]byte
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksFromIndxParams) ([][]byte, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.DeleteChunksFromIndxParams) [][]byte); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([][]byte)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.DeleteChunksFromIndxParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteChunksFromIndx_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteChunksFromIndx'
+type MockQuerier_DeleteChunksFromIndx_Call struct {
+	*mock.Call
+}
+
+// DeleteChunksFromIndx is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.DeleteChunksFromIndxParams
+func (_e *MockQuerier_Expecter) DeleteChunksFromIndx(ctx any, arg any) *MockQuerier_DeleteChunksFromIndx_Call {
+	return &MockQuerier_DeleteChunksFromIndx_Call{Call: _e.mock.On("DeleteChunksFromIndx", ctx, arg)}
+}
+
+func (_c *MockQuerier_DeleteChunksFromIndx_Call) Run(run func(ctx context.Context, arg db.DeleteChunksFromIndxParams)) *MockQuerier_DeleteChunksFromIndx_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.DeleteChunksFromIndxParams
+		if args[1] != nil {
+			arg1 = args[1].(db.DeleteChunksFromIndxParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksFromIndx_Call) Return(bytess [][]byte, err error) *MockQuerier_DeleteChunksFromIndx_Call {
+	_c.Call.Return(bytess, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteChunksFromIndx_Call) RunAndReturn(run func(ctx context.Context, arg db.DeleteChunksFromIndxParams) ([][]byte, error)) *MockQuerier_DeleteChunksFromIndx_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1952,6 +2472,63 @@ func (_c *MockQuerier_DeletePosixFileLocksBySessionAndOwner_Call) RunAndReturn(r
 	return _c
 }
 
+// DeleteSliceRef provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteSliceRef(ctx context.Context, sliceID int64) error {
+	ret := _mock.Called(ctx, sliceID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteSliceRef")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = returnFunc(ctx, sliceID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_DeleteSliceRef_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteSliceRef'
+type MockQuerier_DeleteSliceRef_Call struct {
+	*mock.Call
+}
+
+// DeleteSliceRef is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sliceID int64
+func (_e *MockQuerier_Expecter) DeleteSliceRef(ctx any, sliceID any) *MockQuerier_DeleteSliceRef_Call {
+	return &MockQuerier_DeleteSliceRef_Call{Call: _e.mock.On("DeleteSliceRef", ctx, sliceID)}
+}
+
+func (_c *MockQuerier_DeleteSliceRef_Call) Run(run func(ctx context.Context, sliceID int64)) *MockQuerier_DeleteSliceRef_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteSliceRef_Call) Return(err error) *MockQuerier_DeleteSliceRef_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteSliceRef_Call) RunAndReturn(run func(ctx context.Context, sliceID int64) error) *MockQuerier_DeleteSliceRef_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteUnreferencedOrphanInodes provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error) {
 	ret := _mock.Called(ctx)
@@ -2010,6 +2587,206 @@ func (_c *MockQuerier_DeleteUnreferencedOrphanInodes_Call) Return(deleteUnrefere
 }
 
 func (_c *MockQuerier_DeleteUnreferencedOrphanInodes_Call) RunAndReturn(run func(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error)) *MockQuerier_DeleteUnreferencedOrphanInodes_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetChunk provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetChunk(ctx context.Context, arg db.GetChunkParams) (db.Chunk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetChunk")
+	}
+
+	var r0 db.Chunk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkParams) (db.Chunk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkParams) db.Chunk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Chunk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetChunkParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetChunk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetChunk'
+type MockQuerier_GetChunk_Call struct {
+	*mock.Call
+}
+
+// GetChunk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetChunkParams
+func (_e *MockQuerier_Expecter) GetChunk(ctx any, arg any) *MockQuerier_GetChunk_Call {
+	return &MockQuerier_GetChunk_Call{Call: _e.mock.On("GetChunk", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetChunk_Call) Run(run func(ctx context.Context, arg db.GetChunkParams)) *MockQuerier_GetChunk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetChunkParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetChunkParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetChunk_Call) Return(chunk db.Chunk, err error) *MockQuerier_GetChunk_Call {
+	_c.Call.Return(chunk, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetChunk_Call) RunAndReturn(run func(ctx context.Context, arg db.GetChunkParams) (db.Chunk, error)) *MockQuerier_GetChunk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetChunkForUpdate provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetChunkForUpdate(ctx context.Context, arg db.GetChunkForUpdateParams) (db.Chunk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetChunkForUpdate")
+	}
+
+	var r0 db.Chunk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkForUpdateParams) (db.Chunk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunkForUpdateParams) db.Chunk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Get(0).(db.Chunk)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetChunkForUpdateParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetChunkForUpdate_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetChunkForUpdate'
+type MockQuerier_GetChunkForUpdate_Call struct {
+	*mock.Call
+}
+
+// GetChunkForUpdate is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetChunkForUpdateParams
+func (_e *MockQuerier_Expecter) GetChunkForUpdate(ctx any, arg any) *MockQuerier_GetChunkForUpdate_Call {
+	return &MockQuerier_GetChunkForUpdate_Call{Call: _e.mock.On("GetChunkForUpdate", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetChunkForUpdate_Call) Run(run func(ctx context.Context, arg db.GetChunkForUpdateParams)) *MockQuerier_GetChunkForUpdate_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetChunkForUpdateParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetChunkForUpdateParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetChunkForUpdate_Call) Return(chunk db.Chunk, err error) *MockQuerier_GetChunkForUpdate_Call {
+	_c.Call.Return(chunk, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetChunkForUpdate_Call) RunAndReturn(run func(ctx context.Context, arg db.GetChunkForUpdateParams) (db.Chunk, error)) *MockQuerier_GetChunkForUpdate_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetChunksInRange provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetChunksInRange(ctx context.Context, arg db.GetChunksInRangeParams) ([]db.Chunk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetChunksInRange")
+	}
+
+	var r0 []db.Chunk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunksInRangeParams) ([]db.Chunk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetChunksInRangeParams) []db.Chunk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.Chunk)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetChunksInRangeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetChunksInRange_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetChunksInRange'
+type MockQuerier_GetChunksInRange_Call struct {
+	*mock.Call
+}
+
+// GetChunksInRange is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetChunksInRangeParams
+func (_e *MockQuerier_Expecter) GetChunksInRange(ctx any, arg any) *MockQuerier_GetChunksInRange_Call {
+	return &MockQuerier_GetChunksInRange_Call{Call: _e.mock.On("GetChunksInRange", ctx, arg)}
+}
+
+func (_c *MockQuerier_GetChunksInRange_Call) Run(run func(ctx context.Context, arg db.GetChunksInRangeParams)) *MockQuerier_GetChunksInRange_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetChunksInRangeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetChunksInRangeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetChunksInRange_Call) Return(chunks []db.Chunk, err error) *MockQuerier_GetChunksInRange_Call {
+	_c.Call.Return(chunks, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetChunksInRange_Call) RunAndReturn(run func(ctx context.Context, arg db.GetChunksInRangeParams) ([]db.Chunk, error)) *MockQuerier_GetChunksInRange_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -2938,6 +3715,72 @@ func (_c *MockQuerier_GetParentInode_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// GetSliceRef provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) GetSliceRef(ctx context.Context, sliceID int64) (db.SliceRef, error) {
+	ret := _mock.Called(ctx, sliceID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetSliceRef")
+	}
+
+	var r0 db.SliceRef
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.SliceRef, error)); ok {
+		return returnFunc(ctx, sliceID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.SliceRef); ok {
+		r0 = returnFunc(ctx, sliceID)
+	} else {
+		r0 = ret.Get(0).(db.SliceRef)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, sliceID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_GetSliceRef_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetSliceRef'
+type MockQuerier_GetSliceRef_Call struct {
+	*mock.Call
+}
+
+// GetSliceRef is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sliceID int64
+func (_e *MockQuerier_Expecter) GetSliceRef(ctx any, sliceID any) *MockQuerier_GetSliceRef_Call {
+	return &MockQuerier_GetSliceRef_Call{Call: _e.mock.On("GetSliceRef", ctx, sliceID)}
+}
+
+func (_c *MockQuerier_GetSliceRef_Call) Run(run func(ctx context.Context, sliceID int64)) *MockQuerier_GetSliceRef_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_GetSliceRef_Call) Return(sliceRef db.SliceRef, err error) *MockQuerier_GetSliceRef_Call {
+	_c.Call.Return(sliceRef, err)
+	return _c
+}
+
+func (_c *MockQuerier_GetSliceRef_Call) RunAndReturn(run func(ctx context.Context, sliceID int64) (db.SliceRef, error)) *MockQuerier_GetSliceRef_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetSymlinkTarget provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) GetSymlinkTarget(ctx context.Context, ino int64) (db.GetSymlinkTargetRow, error) {
 	ret := _mock.Called(ctx, ino)
@@ -3325,6 +4168,63 @@ func (_c *MockQuerier_IncrementInodeNlinkAndTouchCtime_Call) RunAndReturn(run fu
 	return _c
 }
 
+// InsertSliceRef provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) InsertSliceRef(ctx context.Context, arg db.InsertSliceRefParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for InsertSliceRef")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.InsertSliceRefParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_InsertSliceRef_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'InsertSliceRef'
+type MockQuerier_InsertSliceRef_Call struct {
+	*mock.Call
+}
+
+// InsertSliceRef is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.InsertSliceRefParams
+func (_e *MockQuerier_Expecter) InsertSliceRef(ctx any, arg any) *MockQuerier_InsertSliceRef_Call {
+	return &MockQuerier_InsertSliceRef_Call{Call: _e.mock.On("InsertSliceRef", ctx, arg)}
+}
+
+func (_c *MockQuerier_InsertSliceRef_Call) Run(run func(ctx context.Context, arg db.InsertSliceRefParams)) *MockQuerier_InsertSliceRef_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.InsertSliceRefParams
+		if args[1] != nil {
+			arg1 = args[1].(db.InsertSliceRefParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_InsertSliceRef_Call) Return(err error) *MockQuerier_InsertSliceRef_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_InsertSliceRef_Call) RunAndReturn(run func(ctx context.Context, arg db.InsertSliceRefParams) error) *MockQuerier_InsertSliceRef_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // IsSubdirectory provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) IsSubdirectory(ctx context.Context, arg db.IsSubdirectoryParams) (bool, error) {
 	ret := _mock.Called(ctx, arg)
@@ -3595,6 +4495,74 @@ func (_c *MockQuerier_ListDirEntriesAfterName_Call) RunAndReturn(run func(ctx co
 	return _c
 }
 
+// ListGarbageSliceRefs provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]db.SliceRef, error) {
+	ret := _mock.Called(ctx, limitCount)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListGarbageSliceRefs")
+	}
+
+	var r0 []db.SliceRef
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int32) ([]db.SliceRef, error)); ok {
+		return returnFunc(ctx, limitCount)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int32) []db.SliceRef); ok {
+		r0 = returnFunc(ctx, limitCount)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.SliceRef)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int32) error); ok {
+		r1 = returnFunc(ctx, limitCount)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListGarbageSliceRefs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListGarbageSliceRefs'
+type MockQuerier_ListGarbageSliceRefs_Call struct {
+	*mock.Call
+}
+
+// ListGarbageSliceRefs is a helper method to define mock.On call
+//   - ctx context.Context
+//   - limitCount int32
+func (_e *MockQuerier_Expecter) ListGarbageSliceRefs(ctx any, limitCount any) *MockQuerier_ListGarbageSliceRefs_Call {
+	return &MockQuerier_ListGarbageSliceRefs_Call{Call: _e.mock.On("ListGarbageSliceRefs", ctx, limitCount)}
+}
+
+func (_c *MockQuerier_ListGarbageSliceRefs_Call) Run(run func(ctx context.Context, limitCount int32)) *MockQuerier_ListGarbageSliceRefs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int32
+		if args[1] != nil {
+			arg1 = args[1].(int32)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListGarbageSliceRefs_Call) Return(sliceRefs []db.SliceRef, err error) *MockQuerier_ListGarbageSliceRefs_Call {
+	_c.Call.Return(sliceRefs, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListGarbageSliceRefs_Call) RunAndReturn(run func(ctx context.Context, limitCount int32) ([]db.SliceRef, error)) *MockQuerier_ListGarbageSliceRefs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListInodeXattrNames provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error) {
 	ret := _mock.Called(ctx, ino)
@@ -3799,6 +4767,66 @@ func (_c *MockQuerier_ListPendingFileLockWaitersByInoAndFlags_Call) RunAndReturn
 	return _c
 }
 
+// NextSliceID provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) NextSliceID(ctx context.Context) (int64, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for NextSliceID")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (int64, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) int64); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_NextSliceID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'NextSliceID'
+type MockQuerier_NextSliceID_Call struct {
+	*mock.Call
+}
+
+// NextSliceID is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockQuerier_Expecter) NextSliceID(ctx any) *MockQuerier_NextSliceID_Call {
+	return &MockQuerier_NextSliceID_Call{Call: _e.mock.On("NextSliceID", ctx)}
+}
+
+func (_c *MockQuerier_NextSliceID_Call) Run(run func(ctx context.Context)) *MockQuerier_NextSliceID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_NextSliceID_Call) Return(n int64, err error) *MockQuerier_NextSliceID_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_NextSliceID_Call) RunAndReturn(run func(ctx context.Context) (int64, error)) *MockQuerier_NextSliceID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // TouchInodeAtime provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) TouchInodeAtime(ctx context.Context, ino int64) error {
 	ret := _mock.Called(ctx, ino)
@@ -3966,6 +4994,63 @@ func (_c *MockQuerier_TouchInodeTimestamps_Call) Return(err error) *MockQuerier_
 }
 
 func (_c *MockQuerier_TouchInodeTimestamps_Call) RunAndReturn(run func(ctx context.Context, ino int64) error) *MockQuerier_TouchInodeTimestamps_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateChunkSlices provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) UpdateChunkSlices(ctx context.Context, arg db.UpdateChunkSlicesParams) error {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateChunkSlices")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateChunkSlicesParams) error); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockQuerier_UpdateChunkSlices_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateChunkSlices'
+type MockQuerier_UpdateChunkSlices_Call struct {
+	*mock.Call
+}
+
+// UpdateChunkSlices is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.UpdateChunkSlicesParams
+func (_e *MockQuerier_Expecter) UpdateChunkSlices(ctx any, arg any) *MockQuerier_UpdateChunkSlices_Call {
+	return &MockQuerier_UpdateChunkSlices_Call{Call: _e.mock.On("UpdateChunkSlices", ctx, arg)}
+}
+
+func (_c *MockQuerier_UpdateChunkSlices_Call) Run(run func(ctx context.Context, arg db.UpdateChunkSlicesParams)) *MockQuerier_UpdateChunkSlices_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.UpdateChunkSlicesParams
+		if args[1] != nil {
+			arg1 = args[1].(db.UpdateChunkSlicesParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_UpdateChunkSlices_Call) Return(err error) *MockQuerier_UpdateChunkSlices_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockQuerier_UpdateChunkSlices_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateChunkSlicesParams) error) *MockQuerier_UpdateChunkSlices_Call {
 	_c.Call.Return(run)
 	return _c
 }

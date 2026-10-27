@@ -8,6 +8,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Chunk struct {
+	Ino    int64  `json:"ino"`
+	Indx   int32  `json:"indx"`
+	Slices []byte `json:"slices"`
+}
+
 type ClientSession struct {
 	SessionID int64              `json:"session_id"`
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
@@ -91,4 +97,11 @@ type InodeXattr struct {
 	Ino   int64  `json:"ino"`
 	Name  []byte `json:"name"`
 	Value []byte `json:"value"`
+}
+
+type SliceRef struct {
+	SliceID   int64              `json:"slice_id"`
+	Size      int32              `json:"size"`
+	Refs      int32              `json:"refs"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }

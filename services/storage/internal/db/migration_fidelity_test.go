@@ -3,6 +3,7 @@ package db_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/url"
 	"os"
@@ -710,4 +711,97 @@ func TestMigration_EntriesBackupIno_ReplacedEntryNotOverwrittenOnUp(t *testing.T
 
 	expectedNewInoName := []byte(rollbackName)
 	assert.Equal(t, expectedNewInoName, gotNewInoName, "指向 new_ino=200 的新目录项名称必须保持为新插入名称，不得被旧文件 old_ino=100 的 raw_name 覆写")
+}
+
+// TestMigration002_ArbitraryByteaRoundTripAndCollisionIsolation 验证 G1-3：
+// entries 名称 BYTEA 迁移在 Down -> Up 往返过程中处理链式回滚名称置换场景时，
+// 严禁因单条 UPDATE 执行时的物理更新顺序触发 pk_entries (parent_ino, name) 的 23505 (unique_violation) 错误。
+//
+// 场景设定：
+// 同一 parent_ino 下存在两个条目：
+// 1) 非 UTF-8 名称 A（如 []byte{0xff, 0xfe}，ino=102），Down 时被编码为 B = "__bowl_rb_" + sha256(A)；
+// 2) 合法 ASCII 名称恰好为 B（ino=101），Down 时因匹配 __bowl_rb_ 前缀被编码为 C = "__bowl_rb_" + sha256(B)。
+// Down 完成后，两行在 entries 中的 name 分别为 B (ino=102) 和 C (ino=101)。
+// 再次执行 Up 时，若 PostgreSQL 先更新 C -> B，而 B -> A 尚未完成，就会触发 (parent_ino, name) 唯一约束冲突。
+// 本测试覆盖不同物理插入与存储顺序（先 B 后 A，以及先 A 后 B），验证 Up -> Down -> Up 完整往返必须成功且数据无损还原。
+func TestMigration002_ArbitraryByteaRoundTripAndCollisionIsolation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_002")
+
+	// 1. 执行前置迁移至 20261017020000 Up
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	// 2. 插入测试用 parent_ino 和文件 inodes
+	setupSQL := `
+		INSERT INTO inodes (ino, mode, size, nlink, uid, gid, rdev)
+		VALUES (10, 16877, 4096, 2, 0, 0, 0),
+		       (20, 16877, 4096, 2, 0, 0, 0),
+		       (101, 33188, 1024, 1, 0, 0, 0),
+		       (102, 33188, 1024, 1, 0, 0, 0),
+		       (201, 33188, 1024, 1, 0, 0, 0),
+		       (202, 33188, 1024, 1, 0, 0, 0);
+	`
+	_, err := testPool.Exec(ctx, setupSQL)
+	require.NoError(t, err)
+
+	// 构造名称对：
+	// A: 非 UTF-8 原始字节
+	rawNameA := []byte{0xff, 0xfe}
+	shaA := sha256.Sum256(rawNameA)
+	nameBStr := fmt.Sprintf("__bowl_rb_%x", shaA)
+	rawNameB := []byte(nameBStr)
+
+	// 场景 1 (parent_ino=10): 先插入 B (ino=101)，后插入 A (ino=102)
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", 10, rawNameB, 101)
+	require.NoError(t, err)
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", 10, rawNameA, 102)
+	require.NoError(t, err)
+
+	// 场景 2 (parent_ino=20): 先插入 A (ino=201)，后插入 B (ino=202)
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", 20, rawNameA, 201)
+	require.NoError(t, err)
+	_, err = testPool.Exec(ctx, "INSERT INTO entries (parent_ino, name, ino) VALUES ($1, $2, $3);", 20, rawNameB, 202)
+	require.NoError(t, err)
+
+	// 3. 执行 Down 迁移回滚为 VARCHAR(255)
+	downSQL := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", false)
+	err = runMigrationTxInPool(ctx, testPool, downSQL)
+	require.NoError(t, err, "执行 20261017020000 Down 迁移失败")
+
+	// 4. 执行 Up 迁移重新升级为 BYTEA 并恢复原始名称
+	upSQL := extractGooseSection(t, "20261017020000_convert_entries_name_to_bytea.sql", true)
+	err = runMigrationTxInPool(ctx, testPool, upSQL)
+	require.NoError(t, err, "重新执行 20261017020000 Up 迁移失败")
+
+	// 5. 校验两组 entries 均已 100% 保真还原
+	var gotName101, gotName102 []byte
+	err = testPool.QueryRow(ctx, "SELECT name FROM entries WHERE parent_ino = 10 AND ino = 101;").Scan(&gotName101)
+	require.NoError(t, err)
+	assert.Equal(t, rawNameB, gotName101, "parent 10 ino 101 名称必须保真还原为 rawNameB")
+
+	err = testPool.QueryRow(ctx, "SELECT name FROM entries WHERE parent_ino = 10 AND ino = 102;").Scan(&gotName102)
+	require.NoError(t, err)
+	assert.Equal(t, rawNameA, gotName102, "parent 10 ino 102 名称必须保真还原为 rawNameA")
+
+	var gotName201, gotName202 []byte
+	err = testPool.QueryRow(ctx, "SELECT name FROM entries WHERE parent_ino = 20 AND ino = 201;").Scan(&gotName201)
+	require.NoError(t, err)
+	assert.Equal(t, rawNameA, gotName201, "parent 20 ino 201 名称必须保真还原为 rawNameA")
+
+	err = testPool.QueryRow(ctx, "SELECT name FROM entries WHERE parent_ino = 20 AND ino = 202;").Scan(&gotName202)
+	require.NoError(t, err)
+	assert.Equal(t, rawNameB, gotName202, "parent 20 ino 202 名称必须保真还原为 rawNameB")
 }

@@ -324,7 +324,16 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 
 	var flockConflictAfterDelete bool
 	var shouldNotify bool
+	snap := m.snapshotInFlightGrants(params.Ino)
+	var committed bool
+	defer func() {
+		if !committed {
+			m.restoreInFlightGrants(params.Ino, snap)
+		}
+	}()
+
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		m.restoreInFlightGrants(params.Ino, snap)
 		flockConflictAfterDelete = false
 		shouldNotify = false
 		inode, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
@@ -362,10 +371,21 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 		}
 
 		if params.LkFlags == FuseLkFlock {
-			return applyFlockSetLk(ctx, q, params, &flockConflictAfterDelete, &shouldNotify)
+			if err := applyFlockSetLk(ctx, q, params, &flockConflictAfterDelete, &shouldNotify); err != nil {
+				return err
+			}
+			m.updateInFlightGrantsOnLockOp(params.Ino, params.SessionID, params.Fh, params.LockOwner, true, 0, OffsetMax, 0)
+			return nil
 		}
-		return applyPosixSetLk(ctx, q, params, &shouldNotify)
+		if err := applyPosixSetLk(ctx, q, params, &shouldNotify); err != nil {
+			return err
+		}
+		m.updateInFlightGrantsOnLockOp(params.Ino, params.SessionID, params.Fh, params.LockOwner, false, params.Lk.Start, params.Lk.End, 0)
+		return nil
 	})
+	if err == nil {
+		committed = true
+	}
 
 	if err != nil {
 		switch {
@@ -871,8 +891,10 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			var shouldNotify bool
 			var deadlockDetected bool
 			var interrupted bool
+			snap := m.snapshotInFlightGrants(params.Ino)
 
 			txErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+				m.restoreInFlightGrants(params.Ino, snap)
 				granted = false
 				shouldNotify = false
 				deadlockDetected = false
@@ -971,6 +993,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 							RequestID: requestID,
 						})
 					}
+					m.updateInFlightGrantsOnLockOp(params.Ino, params.SessionID, params.Fh, params.LockOwner, params.LkFlags == FuseLkFlock, reqStart, reqEnd, 0)
 					affectedStart = reqStart
 					affectedEnd = reqEnd
 					granted = true
@@ -1053,6 +1076,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 						affEnd = OffsetMax
 					}
 
+					var grantedLockID int64
 					if params.LkFlags == FuseLkFlock {
 						if attempt > 0 {
 							if _, err := q.DeleteFlockFileLocksBySessionAndFh(ctx, db.DeleteFlockFileLocksBySessionAndFhParams{
@@ -1063,7 +1087,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 								return fmt.Errorf("delete existing flock file locks (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 							}
 						}
-						_, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
+						createdLock, err := q.CreateFileLock(ctx, db.CreateFileLockParams{
 							SessionID:   sessionID,
 							Ino:         ino,
 							Fh:          fh,
@@ -1077,6 +1101,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 						if err != nil {
 							return fmt.Errorf("create flock file lock (ino=%d, fh=%d): %w", params.Ino, params.Fh, err)
 						}
+						grantedLockID = createdLock.ID
 					} else {
 						if err := applyPosixGrant(ctx, q, setLkParams, activeLocks, &shouldNotify); err != nil {
 							return err
@@ -1091,7 +1116,16 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 							return fmt.Errorf("delete granted file lock waiter (session_id=%d, request_id=%d): %w", params.SessionID, params.RequestID, err)
 						}
 					}
-					preGrantOwnerLocks = txPreGrantLocks
+					regID, effectivePreGrantLocks := m.registerInFlightGrant(
+						params.Ino, params.SessionID, params.RequestID, params.Fh, params.LockOwner,
+						params.LkFlags == FuseLkFlock, grantedLockID,
+						reqStart, reqEnd, txPreGrantLocks,
+					)
+					m.updateInFlightGrantsOnLockOp(
+						params.Ino, params.SessionID, params.Fh, params.LockOwner,
+						params.LkFlags == FuseLkFlock, reqStart, reqEnd, regID,
+					)
+					preGrantOwnerLocks = effectivePreGrantLocks
 					affectedStart = affStart
 					affectedEnd = affEnd
 					granted = true
@@ -1137,8 +1171,13 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			}
 
 			if txErr != nil {
+				if !granted {
+					m.restoreInFlightGrants(params.Ino, snap)
+				}
 				if granted {
-					m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
+					if reqType != F_UNLCK {
+						m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
+					}
 					return true, ErrInterrupted
 				}
 				if (waiterEverPersisted && !errors.Is(txErr, ErrBadFileHandle)) || errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
@@ -1178,9 +1217,12 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			}
 			if granted {
 				if ctx.Err() != nil {
-					m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
+					if reqType != F_UNLCK {
+						m.rollbackGrantedLock(params, preGrantOwnerLocks, affectedStart, affectedEnd)
+					}
 					return true, ErrInterrupted
 				}
+				m.unregisterInFlightGrant(params.Ino, params.SessionID, params.RequestID)
 				return true, nil
 			}
 
@@ -1320,7 +1362,335 @@ func mergeSegments(segments []lockSegment) []lockSegment {
 	return merged
 }
 
+type byteRange struct {
+	start uint64
+	end   uint64
+}
+
+type inFlightGrantKey struct {
+	ino       uint64
+	sessionID uint64
+	requestID uint64
+}
+
+type inFlightGrant struct {
+	regID              uint64
+	ino                uint64
+	sessionID          uint64
+	requestID          uint64
+	fh                 uint64
+	lockOwner          uint64
+	isFlock            bool
+	grantedLockID      int64
+	pendingRanges      []byteRange
+	preGrantOwnerLocks []db.FileLock
+	flushedOrReleased  bool
+}
+
+func subtractRangesList(ranges []byteRange, subStart, subEnd uint64) []byteRange {
+	var result []byteRange
+	for _, r := range ranges {
+		if !rangesOverlap(r.start, r.end, subStart, subEnd) {
+			result = append(result, r)
+			continue
+		}
+		if r.start < subStart {
+			result = append(result, byteRange{start: r.start, end: subStart - 1})
+		}
+		if r.end > subEnd && subEnd < OffsetMax {
+			result = append(result, byteRange{start: subEnd + 1, end: r.end})
+		}
+	}
+	return result
+}
+
+func subtractMultipleRanges(base []byteRange, toRemove []byteRange) []byteRange {
+	res := base
+	for _, rem := range toRemove {
+		res = subtractRangesList(res, rem.start, rem.end)
+	}
+	return res
+}
+
+func mergeByteRanges(ranges []byteRange) []byteRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	slices.SortFunc(ranges, func(a, b byteRange) int {
+		if a.start != b.start {
+			if a.start < b.start {
+				return -1
+			}
+			return 1
+		}
+		if a.end < b.end {
+			return -1
+		}
+		if a.end > b.end {
+			return 1
+		}
+		return 0
+	})
+	var merged []byteRange
+	for _, r := range ranges {
+		if r.start > r.end {
+			continue
+		}
+		if len(merged) == 0 {
+			merged = append(merged, r)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		if last.end >= r.start || (last.end < OffsetMax && last.end+1 == r.start) {
+			if r.end > last.end {
+				last.end = r.end
+			}
+		} else {
+			merged = append(merged, r)
+		}
+	}
+	return merged
+}
+
+func intersectByteRanges(r1 []byteRange, r2 []byteRange) []byteRange {
+	var result []byteRange
+	for _, a := range r1 {
+		for _, b := range r2 {
+			if rangesOverlap(a.start, a.end, b.start, b.end) {
+				iStart := max(a.start, b.start)
+				iEnd := min(a.end, b.end)
+				result = append(result, byteRange{start: iStart, end: iEnd})
+			}
+		}
+	}
+	return mergeByteRanges(result)
+}
+
+func (m *manager) snapshotInFlightGrants(ino uint64) map[inFlightGrantKey]*inFlightGrant {
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+
+	snap := make(map[inFlightGrantKey]*inFlightGrant)
+	for k, g := range m.inFlightGrants {
+		if g.ino == ino {
+			cp := *g
+			cp.pendingRanges = append([]byteRange(nil), g.pendingRanges...)
+			cp.preGrantOwnerLocks = append([]db.FileLock(nil), g.preGrantOwnerLocks...)
+			snap[k] = &cp
+		}
+	}
+	return snap
+}
+
+func (m *manager) restoreInFlightGrants(ino uint64, snap map[inFlightGrantKey]*inFlightGrant) {
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+
+	for k, g := range m.inFlightGrants {
+		if g.ino == ino {
+			delete(m.inFlightGrants, k)
+		}
+	}
+	for k, g := range snap {
+		cp := *g
+		cp.pendingRanges = append([]byteRange(nil), g.pendingRanges...)
+		cp.preGrantOwnerLocks = append([]db.FileLock(nil), g.preGrantOwnerLocks...)
+		m.inFlightGrants[k] = &cp
+	}
+}
+
+func (m *manager) registerInFlightGrant(
+	ino, sessionID, requestID, fh, lockOwner uint64,
+	isFlock bool,
+	grantedLockID int64,
+	reqStart, reqEnd uint64,
+	preGrantOwnerLocks []db.FileLock,
+) (uint64, []db.FileLock) {
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+
+	m.nextInFlightGrantID++
+	regID := m.nextInFlightGrantID
+
+	var ranges []byteRange
+	if !isFlock {
+		ranges = []byteRange{{start: reqStart, end: reqEnd}}
+	}
+
+	effectivePreGrantLocks := preGrantOwnerLocks
+	if !isFlock {
+		var predecessors []*inFlightGrant
+		for _, g := range m.inFlightGrants {
+			if g.ino == ino && !g.isFlock && g.sessionID == sessionID && g.lockOwner == lockOwner && !g.flushedOrReleased {
+				predecessors = append(predecessors, g)
+			}
+		}
+		slices.SortFunc(predecessors, func(a, b *inFlightGrant) int {
+			if a.regID < b.regID {
+				return -1
+			}
+			return 1
+		})
+
+		for _, pred := range predecessors {
+			taken := intersectByteRanges(pred.pendingRanges, []byteRange{{start: reqStart, end: reqEnd}})
+			if len(taken) == 0 {
+				continue
+			}
+
+			// 1) 从 effectivePreGrantLocks 中扣除 taken 区间
+			var remaining []db.FileLock
+			for _, l := range effectivePreGrantLocks {
+				lStart := uint64(l.StartOffset)
+				lEnd := uint64(l.EndOffset)
+				lRemnants := subtractMultipleRanges([]byteRange{{start: lStart, end: lEnd}}, taken)
+				for _, rem := range lRemnants {
+					cp := l
+					cp.StartOffset = int64(rem.start)
+					cp.EndOffset = int64(rem.end)
+					remaining = append(remaining, cp)
+				}
+			}
+
+			// 2) 从 pred.preGrantOwnerLocks 中提取与 taken 重叠的片段并继承
+			for _, pl := range pred.preGrantOwnerLocks {
+				plStart := uint64(pl.StartOffset)
+				plEnd := uint64(pl.EndOffset)
+				inheritedRanges := intersectByteRanges([]byteRange{{start: plStart, end: plEnd}}, taken)
+				for _, ir := range inheritedRanges {
+					cp := pl
+					cp.StartOffset = int64(ir.start)
+					cp.EndOffset = int64(ir.end)
+					remaining = append(remaining, cp)
+				}
+			}
+			effectivePreGrantLocks = remaining
+
+			// 3) 从 pred.pendingRanges 中剪除 taken
+			pred.pendingRanges = subtractMultipleRanges(pred.pendingRanges, taken)
+		}
+	}
+
+	key := inFlightGrantKey{
+		ino:       ino,
+		sessionID: sessionID,
+		requestID: requestID,
+	}
+
+	m.inFlightGrants[key] = &inFlightGrant{
+		regID:              regID,
+		ino:                ino,
+		sessionID:          sessionID,
+		requestID:          requestID,
+		fh:                 fh,
+		lockOwner:          lockOwner,
+		isFlock:            isFlock,
+		grantedLockID:      grantedLockID,
+		pendingRanges:      ranges,
+		preGrantOwnerLocks: effectivePreGrantLocks,
+		flushedOrReleased:  false,
+	}
+
+	return regID, effectivePreGrantLocks
+}
+
+func (m *manager) unregisterInFlightGrant(ino, sessionID, requestID uint64) {
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+	delete(m.inFlightGrants, inFlightGrantKey{
+		ino:       ino,
+		sessionID: sessionID,
+		requestID: requestID,
+	})
+}
+
+func (m *manager) getInFlightGrant(ino, sessionID, requestID uint64) *inFlightGrant {
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+	grant, ok := m.inFlightGrants[inFlightGrantKey{
+		ino:       ino,
+		sessionID: sessionID,
+		requestID: requestID,
+	}]
+	if !ok {
+		return nil
+	}
+	cp := *grant
+	cp.pendingRanges = append([]byteRange(nil), grant.pendingRanges...)
+	cp.preGrantOwnerLocks = append([]db.FileLock(nil), grant.preGrantOwnerLocks...)
+	return &cp
+}
+
+func (m *manager) invalidateInFlightGrantsOnFlush(ino uint64, sessionID *uint64, lockOwner uint64) {
+	if sessionID == nil {
+		return
+	}
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+
+	for _, g := range m.inFlightGrants {
+		if g.ino != ino || g.isFlock || g.lockOwner != lockOwner {
+			continue
+		}
+		if g.sessionID != *sessionID {
+			continue
+		}
+		g.flushedOrReleased = true
+		g.pendingRanges = nil
+	}
+}
+
+func (m *manager) invalidateInFlightGrantsOnFlockRelease(ino uint64, sessionID *uint64, fh uint64) {
+	if sessionID == nil {
+		return
+	}
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+
+	for _, g := range m.inFlightGrants {
+		if g.ino != ino || !g.isFlock || g.fh != fh {
+			continue
+		}
+		if g.sessionID != *sessionID {
+			continue
+		}
+		g.flushedOrReleased = true
+		g.pendingRanges = nil
+	}
+}
+
+func (m *manager) updateInFlightGrantsOnLockOp(
+	ino, sessionID, fh, lockOwner uint64,
+	isFlock bool,
+	opStart, opEnd uint64,
+	currentRegID uint64,
+) {
+	m.inFlightGrantMu.Lock()
+	defer m.inFlightGrantMu.Unlock()
+
+	for _, g := range m.inFlightGrants {
+		if g.ino != ino {
+			continue
+		}
+		if currentRegID > 0 && g.regID >= currentRegID {
+			continue
+		}
+		if isFlock {
+			if g.isFlock && g.sessionID == sessionID && g.fh == fh {
+				g.flushedOrReleased = true
+				g.pendingRanges = nil
+			}
+		} else {
+			if !g.isFlock && g.sessionID == sessionID && g.lockOwner == lockOwner {
+				g.pendingRanges = subtractRangesList(g.pendingRanges, opStart, opEnd)
+			}
+		}
+	}
+}
+
 func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []db.FileLock, affectedStart, affectedEnd uint64) {
+	defer m.unregisterInFlightGrant(params.Ino, params.SessionID, params.RequestID)
+
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1330,196 +1700,248 @@ func (m *manager) rollbackGrantedLock(params SetLkwParams, preGrantOwnerLocks []
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if params.LkFlags == FuseLkFlock {
-			_, _ = q.DeleteFlockFileLocksBySessionAndFh(cleanupCtx, db.DeleteFlockFileLocksBySessionAndFhParams{
+
+		curGrant := m.getInFlightGrant(params.Ino, params.SessionID, params.RequestID)
+		if curGrant == nil {
+			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 				SessionID: int64(params.SessionID),
-				Ino:       int64(params.Ino),
-				Fh:        int64(params.Fh),
+				RequestID: int64(params.RequestID),
 			})
-		} else {
+			shouldNotify = true
+			return nil
+		}
+
+		if curGrant.flushedOrReleased {
+			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+				SessionID: int64(params.SessionID),
+				RequestID: int64(params.RequestID),
+			})
+			shouldNotify = true
+			return nil
+		}
+
+		if params.LkFlags == FuseLkFlock {
 			activeLocks, err := q.ListActiveFileLocksByInoAndFlags(cleanupCtx, db.ListActiveFileLocksByInoAndFlagsParams{
 				Ino:     int64(params.Ino),
-				LkFlags: 0,
+				LkFlags: int32(FuseLkFlock),
 			})
 			if err == nil {
-				sessionID := int64(params.SessionID)
-				owner := int64(params.LockOwner)
+				for _, fl := range activeLocks {
+					if fl.SessionID == int64(params.SessionID) && fl.Fh == int64(params.Fh) {
+						if curGrant.grantedLockID > 0 && fl.ID == curGrant.grantedLockID {
+							_ = q.DeleteFileLocksByIDs(cleanupCtx, []int64{fl.ID})
+							shouldNotify = true
+						}
+						break
+					}
+				}
+			}
+			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+				SessionID: int64(params.SessionID),
+				RequestID: int64(params.RequestID),
+			})
+			shouldNotify = true
+			return nil
+		}
 
-				var curOwnerLocks []db.FileLock
-				var externalLocks []db.FileLock
-				for _, l := range activeLocks {
-					if l.SessionID == sessionID && l.LockOwner == owner {
-						curOwnerLocks = append(curOwnerLocks, l)
-					} else {
-						externalLocks = append(externalLocks, l)
+		if len(curGrant.pendingRanges) == 0 {
+			_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
+				SessionID: int64(params.SessionID),
+				RequestID: int64(params.RequestID),
+			})
+			shouldNotify = true
+			return nil
+		}
+
+		activeLocks, err := q.ListActiveFileLocksByInoAndFlags(cleanupCtx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(params.Ino),
+			LkFlags: 0,
+		})
+		if err != nil {
+			return err
+		}
+
+		sessionID := int64(params.SessionID)
+		owner := int64(params.LockOwner)
+
+		var curOwnerLocks []db.FileLock
+		var externalLocks []db.FileLock
+		for _, l := range activeLocks {
+			if l.SessionID == sessionID && l.LockOwner == owner {
+				curOwnerLocks = append(curOwnerLocks, l)
+			} else {
+				externalLocks = append(externalLocks, l)
+			}
+		}
+
+		var idsToDelete []int64
+		var retainedSegments []lockSegment
+		var curOwnerRanges []byteRange
+
+		for _, l := range curOwnerLocks {
+			lStart := uint64(l.StartOffset)
+			lEnd := uint64(l.EndOffset)
+			curOwnerRanges = append(curOwnerRanges, byteRange{start: lStart, end: lEnd})
+
+			var overlapsWithPending bool
+			for _, pr := range curGrant.pendingRanges {
+				if rangesOverlap(lStart, lEnd, pr.start, pr.end) {
+					overlapsWithPending = true
+					break
+				}
+			}
+
+			var adjacentToPending bool
+			if !overlapsWithPending {
+				for _, pr := range curGrant.pendingRanges {
+					if (pr.start > 0 && lEnd+1 == pr.start) || (pr.end < OffsetMax && pr.end+1 == lStart) {
+						adjacentToPending = true
+						break
+					}
+				}
+			}
+
+			if !overlapsWithPending && !adjacentToPending {
+				continue
+			}
+
+			idsToDelete = append(idsToDelete, l.ID)
+			if overlapsWithPending {
+				remnants := subtractMultipleRanges([]byteRange{{start: lStart, end: lEnd}}, curGrant.pendingRanges)
+				for _, rem := range remnants {
+					retainedSegments = append(retainedSegments, lockSegment{
+						start: rem.start,
+						end:   rem.end,
+						ltype: uint32(l.LockType),
+						pid:   uint32(l.Pid),
+					})
+				}
+			} else if adjacentToPending {
+				retainedSegments = append(retainedSegments, lockSegment{
+					start: lStart,
+					end:   lEnd,
+					ltype: uint32(l.LockType),
+					pid:   uint32(l.Pid),
+				})
+			}
+		}
+
+		validRestoreRanges := intersectByteRanges(curOwnerRanges, curGrant.pendingRanges)
+
+		var restoredSegments []lockSegment
+		for _, oldLock := range curGrant.preGrantOwnerLocks {
+			oldStart := uint64(oldLock.StartOffset)
+			oldEnd := uint64(oldLock.EndOffset)
+			oldType := uint32(oldLock.LockType)
+			oldPID := uint32(oldLock.Pid)
+
+			oldFragments := intersectByteRanges([]byteRange{{start: oldStart, end: oldEnd}}, validRestoreRanges)
+			for _, frag := range oldFragments {
+				cutPoints := []uint64{frag.start}
+				if frag.end < OffsetMax {
+					cutPoints = append(cutPoints, frag.end+1)
+				}
+
+				for _, ext := range externalLocks {
+					extStart := uint64(ext.StartOffset)
+					extEnd := uint64(ext.EndOffset)
+					if rangesOverlap(extStart, extEnd, frag.start, frag.end) {
+						extS := max(extStart, frag.start)
+						extE := min(extEnd, frag.end)
+						cutPoints = append(cutPoints, extS)
+						if extE < OffsetMax {
+							cutPoints = append(cutPoints, extE+1)
+						}
 					}
 				}
 
-				var idsToDelete []int64
-				var retainedSegments []lockSegment
+				slices.Sort(cutPoints)
+				cutPoints = slices.Compact(cutPoints)
 
-				for _, l := range curOwnerLocks {
-					lStart := uint64(l.StartOffset)
-					lEnd := uint64(l.EndOffset)
-					overlaps := rangesOverlap(lStart, lEnd, affectedStart, affectedEnd)
-					isAdjacent := (affectedStart > 0 && lEnd+1 == affectedStart) ||
-						(affectedEnd < OffsetMax && affectedEnd+1 == lStart)
-
-					if !overlaps && !isAdjacent {
+				for i := 0; i < len(cutPoints); i++ {
+					subStart := cutPoints[i]
+					if subStart > frag.end {
+						continue
+					}
+					var subEnd uint64
+					if i+1 < len(cutPoints) {
+						subEnd = cutPoints[i+1] - 1
+					} else {
+						subEnd = frag.end
+					}
+					if subStart > subEnd || subEnd > frag.end {
 						continue
 					}
 
-					idsToDelete = append(idsToDelete, l.ID)
-					if overlaps {
-						if lStart < affectedStart {
-							retainedSegments = append(retainedSegments, lockSegment{
-								start: lStart,
-								end:   affectedStart - 1,
-								ltype: uint32(l.LockType),
-								pid:   uint32(l.Pid),
-							})
-						}
-						if lEnd > affectedEnd && affectedEnd < OffsetMax {
-							retainedSegments = append(retainedSegments, lockSegment{
-								start: affectedEnd + 1,
-								end:   lEnd,
-								ltype: uint32(l.LockType),
-								pid:   uint32(l.Pid),
-							})
-						}
-					} else if isAdjacent {
-						retainedSegments = append(retainedSegments, lockSegment{
-							start: lStart,
-							end:   lEnd,
-							ltype: uint32(l.LockType),
-							pid:   uint32(l.Pid),
-						})
-					}
-				}
-
-				if len(idsToDelete) > 0 {
-					_ = q.DeleteFileLocksByIDs(cleanupCtx, idsToDelete)
-				}
-
-				var restoredSegments []lockSegment
-				for _, oldLock := range preGrantOwnerLocks {
-					oldStart := uint64(oldLock.StartOffset)
-					oldEnd := uint64(oldLock.EndOffset)
-					oldType := uint32(oldLock.LockType)
-					oldPID := uint32(oldLock.Pid)
-
-					var overlappingExt []db.FileLock
+					var subExtLocks []db.FileLock
+					var hasExtWrLock bool
 					for _, ext := range externalLocks {
-						if rangesOverlap(uint64(ext.StartOffset), uint64(ext.EndOffset), oldStart, oldEnd) {
-							overlappingExt = append(overlappingExt, ext)
+						if rangesOverlap(uint64(ext.StartOffset), uint64(ext.EndOffset), subStart, subEnd) {
+							subExtLocks = append(subExtLocks, ext)
+							if ext.LockType == int16(F_WRLCK) {
+								hasExtWrLock = true
+							}
 						}
 					}
 
-					if len(overlappingExt) == 0 {
+					if hasExtWrLock {
+						continue
+					}
+
+					if len(subExtLocks) == 0 {
 						restoredSegments = append(restoredSegments, lockSegment{
-							start: oldStart,
-							end:   oldEnd,
+							start: subStart,
+							end:   subEnd,
 							ltype: oldType,
 							pid:   oldPID,
 						})
 						continue
 					}
 
-					pointMap := make(map[uint64]struct{})
-					pointMap[oldStart] = struct{}{}
-					for _, ext := range overlappingExt {
-						extS := uint64(ext.StartOffset)
-						extE := uint64(ext.EndOffset)
-						if extS > oldStart && extS <= oldEnd {
-							pointMap[extS] = struct{}{}
-						}
-						if extE < oldEnd && extE < OffsetMax {
-							pointMap[extE+1] = struct{}{}
-						}
-					}
-
-					points := make([]uint64, 0, len(pointMap))
-					for p := range pointMap {
-						points = append(points, p)
-					}
-					slices.Sort(points)
-
-					for i, subStart := range points {
-						var subEnd uint64
-						if i+1 < len(points) {
-							subEnd = points[i+1] - 1
-						} else {
-							subEnd = oldEnd
-						}
-						if subStart > subEnd {
-							continue
-						}
-
-						var subExtLocks []db.FileLock
-						var hasExtWrLock bool
-						for _, ext := range overlappingExt {
-							if rangesOverlap(uint64(ext.StartOffset), uint64(ext.EndOffset), subStart, subEnd) {
-								subExtLocks = append(subExtLocks, ext)
-								if ext.LockType == int16(F_WRLCK) {
-									hasExtWrLock = true
-								}
-							}
-						}
-
-						if len(subExtLocks) == 0 {
-							restoredSegments = append(restoredSegments, lockSegment{
-								start: subStart,
-								end:   subEnd,
-								ltype: oldType,
-								pid:   oldPID,
-							})
-							continue
-						}
-
-						if hasExtWrLock {
-							continue
-						}
-
-						if oldType == F_RDLCK {
+					if oldType == F_RDLCK {
+						restoredSegments = append(restoredSegments, lockSegment{
+							start: subStart,
+							end:   subEnd,
+							ltype: F_RDLCK,
+							pid:   oldPID,
+						})
+					} else if oldType == F_WRLCK {
+						isDowngradedToRead := params.Lk.Type == F_RDLCK &&
+							rangesOverlap(params.Lk.Start, params.Lk.End, subStart, subEnd)
+						if isDowngradedToRead {
 							restoredSegments = append(restoredSegments, lockSegment{
 								start: subStart,
 								end:   subEnd,
 								ltype: F_RDLCK,
 								pid:   oldPID,
 							})
-						} else if oldType == F_WRLCK {
-							isDowngradedToRead := params.Lk.Type == F_RDLCK &&
-								rangesOverlap(params.Lk.Start, params.Lk.End, subStart, subEnd)
-							if isDowngradedToRead {
-								restoredSegments = append(restoredSegments, lockSegment{
-									start: subStart,
-									end:   subEnd,
-									ltype: F_RDLCK,
-									pid:   oldPID,
-								})
-							}
 						}
 					}
 				}
-
-				allSegments := append(retainedSegments, restoredSegments...)
-				mergedSegments := mergeSegments(allSegments)
-
-				for _, seg := range mergedSegments {
-					_, _ = q.CreateFileLock(cleanupCtx, db.CreateFileLockParams{
-						SessionID:   sessionID,
-						Ino:         int64(params.Ino),
-						Fh:          int64(params.Fh),
-						LockOwner:   owner,
-						LkFlags:     0,
-						StartOffset: int64(seg.start),
-						EndOffset:   int64(seg.end),
-						LockType:    int16(seg.ltype),
-						Pid:         int32(seg.pid),
-					})
-				}
 			}
 		}
+
+		if len(idsToDelete) > 0 {
+			_ = q.DeleteFileLocksByIDs(cleanupCtx, idsToDelete)
+		}
+
+		allSegments := append(retainedSegments, restoredSegments...)
+		mergedSegments := mergeSegments(allSegments)
+
+		for _, seg := range mergedSegments {
+			_, _ = q.CreateFileLock(cleanupCtx, db.CreateFileLockParams{
+				SessionID:   sessionID,
+				Ino:         int64(params.Ino),
+				Fh:          int64(params.Fh),
+				LockOwner:   owner,
+				LkFlags:     0,
+				StartOffset: int64(seg.start),
+				EndOffset:   int64(seg.end),
+				LockType:    int16(seg.ltype),
+				Pid:         int32(seg.pid),
+			})
+		}
+
 		_, _ = q.DeleteFileLockWaiter(cleanupCtx, db.DeleteFileLockWaiterParams{
 			SessionID: int64(params.SessionID),
 			RequestID: int64(params.RequestID),

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2487,7 +2488,7 @@ func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
 
 	const numDisks = 2
 	const filesPerDisk = 6
-	totalSetAttrSamples := 0
+	var totalSetAttrSamples atomic.Int64
 
 	for d := 0; d < numDisks; d++ {
 		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
@@ -2514,13 +2515,20 @@ func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
 		const setattrLoops = 5
 		setattrErrCh := make(chan error, numSetAttrWorkers*setattrLoops)
 
-		var wg sync.WaitGroup
+		var setattrWg sync.WaitGroup
 		startCh := make(chan struct{})
+		startDeleteCh := make(chan struct{})
+		var triggerOnce sync.Once
+		triggerDelete := func() {
+			triggerOnce.Do(func() {
+				close(startDeleteCh)
+			})
+		}
 
 		for w := 0; w < numSetAttrWorkers; w++ {
-			wg.Add(1)
+			setattrWg.Add(1)
 			go func(workerID int) {
-				defer wg.Done()
+				defer setattrWg.Done()
 				<-startCh
 				for l := 0; l < setattrLoops; l++ {
 					ino := fileInos[(workerID+l)%filesPerDisk]
@@ -2528,28 +2536,47 @@ func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
 					_, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
 						Size: &newSize,
 					})
+					if err == nil {
+						triggerDelete()
+					}
 					setattrErrCh <- err
 				}
 			}(w)
 		}
 
-		var delErr error
-		wg.Add(1)
+		// 保底：若所有 worker 均异常未成功，也释放 startDeleteCh 避免死锁
 		go func() {
-			defer wg.Done()
-			<-startCh
+			setattrWg.Wait()
+			triggerDelete()
+		}()
+
+		var delErr error
+		var delWg sync.WaitGroup
+		delWg.Add(1)
+		go func() {
+			defer delWg.Done()
+			select {
+			case <-startDeleteCh:
+			case <-ctx.Done():
+				return
+			}
 			delErr = mgr.DeleteDisk(ctx, disk.DiskID)
 		}()
 
 		close(startCh)
-		wg.Wait()
+		setattrWg.Wait()
+		delWg.Wait()
 		close(setattrErrCh)
 
 		require.NoError(t, delErr, "每轮 DeleteDisk 调用必须成功")
 
 		for e := range setattrErrCh {
-			if e == nil || errors.Is(e, meta.ErrNotFound) {
-				totalSetAttrSamples++
+			if e == nil {
+				totalSetAttrSamples.Add(1)
+				continue
+			}
+			if errors.Is(e, meta.ErrNotFound) {
+				// 删盘后的合法竞争终止态，不计入成功样本
 				continue
 			}
 
@@ -2570,6 +2597,6 @@ func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
 		require.Zero(t, inodeCount, "被删除磁盘在 inodes 表中的记录数必须为 0")
 	}
 
-	require.Greater(t, totalSetAttrSamples, 0, "SetAttr 实际执行完成的样本数必须大于 0")
+	require.Greater(t, totalSetAttrSamples.Load(), int64(0), "SetAttr 实际执行完成的有效成功样本数必须大于 0")
 	require.NoError(t, ctx.Err())
 }

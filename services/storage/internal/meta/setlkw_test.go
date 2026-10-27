@@ -2473,6 +2473,1010 @@ func TestSetLkw_Rollback_P2_2_PartialUpgradePreservesDisjointConcurrentLock(t *t
 	require.ErrorIs(t, err, meta.ErrAgain, "Owner B 对 [0, 10] 加读锁必须被 Owner A 的 [0, 10] 排他写锁阻止返回 ErrAgain")
 }
 
+// TestSetLkw_CancelRollbackDoesNotReviveFlushedOrOverwriteNewerOwnerLock 验证 G1-1 缺陷场景：
+// rollbackGrantedLock 回滚时：
+// 1. 绝不能复活已被 Flush 清除的旧 POSIX 锁
+// 2. 绝不能剪裁或抹除同一 Owner 在授锁后最新提交的新锁
+func TestSetLkw_CancelRollbackDoesNotReviveFlushedOrOverwriteNewerOwnerLock(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	t.Run("Subtest1_FlushedLockNotRevived", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-flush-revive-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889101)
+		sessB := uint64(889102)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sessB)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("flush_revive.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		openResB, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessB,
+		})
+		require.NoError(t, err)
+		fhB := openResB.Fh
+
+		ownerA := uint64(7001)
+		ownerB := uint64(7002)
+
+		// 1. Owner A 预先持有 [0, 100] 的共享读锁 (F_RDLCK)
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_RDLCK,
+				PID:   7001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. Owner A 调用 SetLkw 将 [0, 100] 升级为排他写锁 (F_WRLCK)
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 在 tryAcquireLock 升级事务提交后、rollbackGrantedLock 之前：
+			// Owner A 并发调用 Flush 清除该 (session_id, ino, lock_owner) 的全部 POSIX 锁
+			flushErr := mgr.Flush(ctx, meta.FlushParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				SessionID: &sessA,
+				LockOwner: &ownerA,
+			})
+			require.NoError(t, flushErr, "Flush 清除 POSIX 锁应当成功")
+
+			// 取消 SetLkw 的上下文触发 rollbackGrantedLock
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   7001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 7101,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 3. 断言：随后冲突 Owner B 执行 GetLk 或 SetLk 时无锁冲突（证明旧读锁未被复活）
+		// 首先使用 GetLk 检查：此时应该没有锁冲突（返回 F_UNLCK）
+		getLkRes, err := mgr.GetLk(ctx, meta.GetLkParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: ownerB,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   7002,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, uint32(meta.F_UNLCK), getLkRes.Type,
+			"Owner A 的锁已被 Flush 清除且 SetLkw 已取消退出，GetLk 绝不应检测到已复活的旧读锁")
+
+		// 其次使用 SetLk 申请排他写锁：应成功获锁，不应返回 ErrAgain 或 ErrLocked
+		bErr := mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: ownerB,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   7002,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+		})
+		require.NoError(t, bErr, "Flush 清除锁后，Owner B 对 [0, 100] 加排他写锁应当成功，旧读锁绝不能被 rollbackGrantedLock 复活")
+	})
+
+	t.Run("Subtest2_NewerOwnerLockNotOverwritten", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-newer-lock-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889201)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("newer_lock.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		ownerA := uint64(8001)
+
+		// 1. Owner A 预先持有 [0, 50] 的读锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   50,
+				Type:  meta.F_RDLCK,
+				PID:   8001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. Owner A 调用 SetLkw 尝试申请 [0, 100] 的写锁
+		// 在 tryAcquireLock 事务提交后、rollbackGrantedLock 之前：
+		// 同一 Owner A 发起新的 SetLk，在重叠且扩展的区间 [0, 200] 设置新排他写锁，然后 cancel()
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 同一 Owner A 发起新的 SetLk 设置 [0, 200] 写锁
+			newLkErr := mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   200,
+					Type:  meta.F_WRLCK,
+					PID:   8001,
+				},
+				LkFlags:   0,
+				SessionID: sessA,
+			})
+			require.NoError(t, newLkErr, "同一 Owner 设置新的 [0, 200] 写锁应成功")
+
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   8001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 8101,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 3. 断言底层数据库：新 SetLk 设置的锁 [0, 200] F_WRLCK 依然完整保留在数据库中，未被 rollbackGrantedLock 抹除或篡改
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		var ownerLocks []db.FileLock
+		for _, l := range activeLocks {
+			if l.SessionID == int64(sessA) && l.LockOwner == int64(ownerA) {
+				ownerLocks = append(ownerLocks, l)
+			}
+		}
+		require.Len(t, ownerLocks, 1, "同一 Owner 最新设置的锁必须保留为单一完整锁段，不能被回滚切碎或覆盖 (当前活跃锁: %+v)", ownerLocks)
+		assert.Equal(t, int64(0), ownerLocks[0].StartOffset, "起始偏移量应为 0")
+		assert.Equal(t, int64(200), ownerLocks[0].EndOffset, "结束偏移量应为 200")
+		assert.Equal(t, int16(meta.F_WRLCK), ownerLocks[0].LockType, "锁类型应为 F_WRLCK")
+	})
+}
+
+type rollbackFlushHookStore struct {
+	db.Store
+	cancelOnGrant func()
+	hookActive    bool
+	failNextTx    bool
+}
+
+func (s *rollbackFlushHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	if s.failNextTx {
+		_ = s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+			_ = fn(q)
+			return errors.New("simulated error to trigger rollback")
+		}, opts...)
+		return errors.New("simulated error to trigger rollback")
+	}
+
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && s.hookActive && s.cancelOnGrant != nil {
+		s.cancelOnGrant()
+		return nil
+	}
+	return err
+}
+
+type consecutiveCancelStore struct {
+	db.Store
+	onTxCommitted func(ctx context.Context)
+	hookActive    bool
+}
+
+func (s *consecutiveCancelStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
+	if err == nil && s.hookActive && s.onTxCommitted != nil {
+		s.onTxCommitted(ctx)
+	}
+	return err
+}
+
+// TestSetLkw_CancelRollbackEdgeCases 验证取消回滚边缘场景下的缺陷（真红）：
+// SubtestA: 局部外部读锁冲突时的区间拆分恢复
+// SubtestB: Flock SetLkw(F_UNLCK) 解锁取消不误删后续新 Flock
+// SubtestC: 无 SessionID 的 legacy 句柄 Flush 不误失效带 SessionID 的在途 SetLkw
+// SubtestD: 后续 Flush 或 SetLk 事务回滚时不污染 inFlightGrants 内存标记
+// SubtestE: 连续两个同 Owner 重叠 SetLkw 均取消时不复活前驱未确认锁
+func TestSetLkw_CancelRollbackEdgeCases(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	t.Run("SubtestA_PartialExternalReadLockConflict_SegmentSplittingRestoration", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-edge-a-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889301)
+		sessB := uint64(889302)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sessB)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("edge_a.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		openResB, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessB,
+		})
+		require.NoError(t, err)
+		fhB := openResB.Fh
+
+		ownerA := uint64(9001)
+		ownerB := uint64(9002)
+
+		// 1. Owner A 预先持有 [0, 100] 的排他写锁 (F_WRLCK)
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. Owner A 调用 SetLkw 将 [0, 100] 降级为读锁 (F_RDLCK)
+		// 在降级事务提交后、rollbackGrantedLock 之前：
+		// 外部 Owner B 并发对 [0, 10] 加共享读锁 (F_RDLCK)，随后取消 Owner A 的 SetLkw
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 外部 Owner B 获取 [0, 10] 读锁
+			bErr := mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       fileIno,
+				Fh:        fhB,
+				LockOwner: ownerB,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   10,
+					Type:  meta.F_RDLCK,
+					PID:   9002,
+				},
+				LkFlags:   0,
+				SessionID: sessB,
+			})
+			require.NoError(t, bErr, "Owner B 获取 [0, 10] 读锁应成功")
+
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_RDLCK,
+				PID:   9001,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 9101,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 3. 断言底层数据库：
+		// 重叠冲突的 [0, 10] 保留读锁，而无外部冲突的 [11, 100] 必须恢复为排他写锁 F_WRLCK
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		var ownerALocks []db.FileLock
+		for _, l := range activeLocks {
+			if l.SessionID == int64(sessA) && l.LockOwner == int64(ownerA) {
+				ownerALocks = append(ownerALocks, l)
+			}
+		}
+
+		var hasConflictReadLock bool
+		var hasRestoredWriteLock bool
+		for _, l := range ownerALocks {
+			if l.StartOffset == 0 && l.EndOffset == 10 && l.LockType == int16(meta.F_RDLCK) {
+				hasConflictReadLock = true
+			}
+			if l.StartOffset == 11 && l.EndOffset == 100 && l.LockType == int16(meta.F_WRLCK) {
+				hasRestoredWriteLock = true
+			}
+		}
+		assert.True(t, hasConflictReadLock, "与外部读锁重叠的 [0, 10] 应保留为 F_RDLCK, 当前 Owner A 锁: %+v", ownerALocks)
+		assert.True(t, hasRestoredWriteLock, "无外部冲突的 [11, 100] 必须恢复为排他写锁 F_WRLCK, 当前 Owner A 锁: %+v", ownerALocks)
+	})
+
+	t.Run("SubtestB_FlockUnlockCancelDoesNotDeleteNewFlock", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-edge-b-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889401)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("edge_b.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+		ownerA := uint64(9011)
+
+		// 1. 句柄 fhA 预先持有 Flock 写锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_WRLCK,
+				PID:   9011,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. 调用 SetLkw(Flock, F_UNLCK) 解锁
+		// 在解锁事务提交后、rollbackGrantedLock 之前：
+		// 同一 (session_id, fh) 调用 SetLk(Flock, F_WRLCK) 重新获得新 Flock 写锁，随后 cancel()
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 重新加 Flock 写锁
+			newLockErr := mgr.SetLk(ctx, meta.SetLkParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   meta.OffsetMax,
+					Type:  meta.F_WRLCK,
+					PID:   9011,
+				},
+				LkFlags:   meta.FuseLkFlock,
+				SessionID: sessA,
+			})
+			require.NoError(t, newLockErr, "同一句柄重新获取 Flock 写锁应成功")
+
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   meta.OffsetMax,
+				Type:  meta.F_UNLCK,
+				PID:   9011,
+			},
+			LkFlags:   meta.FuseLkFlock,
+			SessionID: sessA,
+			RequestID: 9111,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 3. 断言底层数据库：新获得的 Flock 写锁依然存在，绝不能被 rollbackGrantedLock 误删
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: int32(meta.FuseLkFlock),
+		})
+		require.NoError(t, err)
+
+		var flockLocks []db.FileLock
+		for _, l := range activeLocks {
+			if l.SessionID == int64(sessA) && l.Fh == int64(fhA) {
+				flockLocks = append(flockLocks, l)
+			}
+		}
+		require.Len(t, flockLocks, 1, "同一 (session_id, fh) 新获取的 Flock 写锁必须保留在数据库中 (当前活跃锁: %+v)", flockLocks)
+		assert.Equal(t, int16(meta.F_WRLCK), flockLocks[0].LockType, "锁类型应为 F_WRLCK")
+	})
+
+	t.Run("SubtestC_LegacyFlushWithoutSessionDoesNotInvalidateSessionInFlightGrant", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &cancelAfterTxStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-edge-c-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889501)
+		sessB := uint64(889502)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sessB)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("edge_c.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		openResB, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessB,
+		})
+		require.NoError(t, err)
+		fhB := openResB.Fh
+
+		// 打开一个 SessionID 为 nil 的 legacy 句柄
+		openResLegacy, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: nil,
+		})
+		require.NoError(t, err)
+		fhLegacy := openResLegacy.Fh
+
+		ownerA := uint64(9021)
+		ownerB := uint64(9022)
+
+		// 1. 发起 SetLkw([0, 100], F_WRLCK, LockOwner: ownerA, SessionID: sessA)
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.returnNilOnCancel = true
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 在 tryAcquireLock 提交后的钩子窗口内，调用 legacy Flush (SessionID: nil)
+			flushErr := mgr.Flush(ctx, meta.FlushParams{
+				Ino:       fileIno,
+				Fh:        fhLegacy,
+				SessionID: nil,
+				LockOwner: &ownerA,
+			})
+			require.NoError(t, flushErr, "Legacy Flush 应成功执行")
+
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9021,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 9121,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 2. 断言：带 SessionID 的 SetLkw 取消时必须正常回滚清除 [0, 100] 写锁，外部 Owner B 可成功对 [0, 100] 加排他写锁
+		bErr := mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: ownerB,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9022,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+		})
+		require.NoError(t, bErr, "SetLkw 回滚后，外部 Owner B 对 [0, 100] 加排他写锁应当成功，不能因 legacy Flush 误失效内存标记导致残留悬挂写锁")
+	})
+
+	t.Run("SubtestD_RolledBackFlushOrSetLkDoesNotPolluteInFlightGrant", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &rollbackFlushHookStore{Store: baseStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-edge-d-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889601)
+		sessB := uint64(889602)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sessB)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("edge_d.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+
+		openResB, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessB,
+		})
+		require.NoError(t, err)
+		fhB := openResB.Fh
+
+		ownerA := uint64(9031)
+		ownerB := uint64(9032)
+
+		// 1. 发起 SetLkw([0, 100], F_WRLCK, LockOwner: ownerA)
+		callCtx, callCancel := context.WithCancel(ctx)
+		defer callCancel()
+
+		hookStore.cancelOnGrant = func() {
+			hookStore.hookActive = false
+			// 在 tryAcquireLock 提交后，同一 Owner 发起一次 Flush，但通过 Store 注入错误令其回滚
+			hookStore.failNextTx = true
+			flushErr := mgr.Flush(ctx, meta.FlushParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				SessionID: &sessA,
+				LockOwner: &ownerA,
+			})
+			require.Error(t, flushErr, "Flush 事务应因模拟错误回滚")
+			hookStore.failNextTx = false
+
+			callCancel()
+		}
+		hookStore.hookActive = true
+
+		err = mgr.SetLkw(callCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9031,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+			RequestID: 9131,
+		})
+		require.True(t, errors.Is(err, meta.ErrInterrupted) || errors.Is(err, context.Canceled),
+			"SetLkw 在上下文取消后应返回 ErrInterrupted 或 context.Canceled, actual: %v", err)
+
+		// 2. 断言：由于 Flush 事务已回滚，原 SetLkw 取消时必须正常回滚清除 [0, 100] 写锁，绝不能因内存标记被污染而跳过回滚留悬挂写锁
+		bErr := mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhB,
+			LockOwner: ownerB,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   9032,
+			},
+			LkFlags:   0,
+			SessionID: sessB,
+		})
+		require.NoError(t, bErr, "SetLkw 取消后，外部 Owner B 对 [0, 100] 加排他写锁应当成功，不能遗留悬挂写锁")
+	})
+
+	t.Run("SubtestE_ConsecutiveCancelsDoNotRevivePriorUnconfirmedLock", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+
+		aCommitted := make(chan struct{})
+		bCommitted := make(chan struct{})
+		unblockA := make(chan struct{})
+		unblockB := make(chan struct{})
+
+		var grantCount atomic.Int32
+		hookStore := &consecutiveCancelStore{
+			Store: baseStore,
+			onTxCommitted: func(opCtx context.Context) {
+				idx := grantCount.Add(1)
+				if idx == 1 {
+					close(aCommitted)
+					<-unblockA
+				} else if idx == 2 {
+					close(bCommitted)
+					<-unblockB
+				}
+			},
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-edge-e-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessA := uint64(889701)
+		_, err = mgr.RenewSession(ctx, sessA)
+		require.NoError(t, err)
+
+		createResA, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("edge_e.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		fileIno := createResA.Inode.Ino
+		fhA := createResA.Fh
+		ownerA := uint64(9041)
+
+		// 1. 同一 (SessionID, LockOwner) 初始仅持有 [0, 50] 读锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fhA,
+			LockOwner: ownerA,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   50,
+				Type:  meta.F_RDLCK,
+				PID:   9041,
+			},
+			LkFlags:   0,
+			SessionID: sessA,
+		})
+		require.NoError(t, err)
+
+		// 2. 先后发起请求 A ([0, 100] 写锁) 与请求 B ([0, 200] 写锁)
+		hookStore.hookActive = true
+
+		ctxA, cancelA := context.WithCancel(ctx)
+		defer cancelA()
+		ctxB, cancelB := context.WithCancel(ctx)
+		defer cancelB()
+
+		var errA, errB error
+		var wg sync.WaitGroup
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errA = mgr.SetLkw(ctxA, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   9041,
+				},
+				LkFlags:   0,
+				SessionID: sessA,
+				RequestID: 9141,
+			})
+		}()
+
+		// 等待请求 A 的 tryAcquireLock 提交并挂在未确认窗口
+		select {
+		case <-aCommitted:
+		case <-ctx.Done():
+			t.Fatal("等待请求 A 事务提交超时")
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errB = mgr.SetLkw(ctxB, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhA,
+				LockOwner: ownerA,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   200,
+					Type:  meta.F_WRLCK,
+					PID:   9041,
+				},
+				LkFlags:   0,
+				SessionID: sessA,
+				RequestID: 9142,
+			})
+		}()
+
+		// 等待请求 B 的 tryAcquireLock 提交并挂在未确认窗口
+		select {
+		case <-bCommitted:
+		case <-ctx.Done():
+			t.Fatal("等待请求 B 事务提交超时")
+		}
+
+		// 3. 此时请求 A 与请求 B 均已完成写事务提交，但都未确认退出；
+		// 依次取消请求 B 和请求 A
+		hookStore.hookActive = false
+
+		cancelB()
+		close(unblockB)
+
+		cancelA()
+		close(unblockA)
+
+		wg.Wait()
+
+		require.True(t, errors.Is(errA, meta.ErrInterrupted) || errors.Is(errA, context.Canceled),
+			"请求 A 应返回取消中断错误，实际: %v", errA)
+		require.True(t, errors.Is(errB, meta.ErrInterrupted) || errors.Is(errB, context.Canceled),
+			"请求 B 应返回取消中断错误，实际: %v", errB)
+
+		// 4. 断言底层数据库：两个未确认请求均取消后，最终状态必须仅保留初始的 [0, 50] 读锁，绝不能残留写锁
+		activeLocks, err := baseStore.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+			Ino:     int64(fileIno),
+			LkFlags: 0,
+		})
+		require.NoError(t, err)
+
+		var ownerALocks []db.FileLock
+		for _, l := range activeLocks {
+			if l.SessionID == int64(sessA) && l.LockOwner == int64(ownerA) {
+				ownerALocks = append(ownerALocks, l)
+			}
+		}
+		require.Len(t, ownerALocks, 1, "回滚后必须仅保留初始读锁，当前活跃锁: %+v", ownerALocks)
+		assert.Equal(t, int64(0), ownerALocks[0].StartOffset, "起始偏移量应为 0")
+		assert.Equal(t, int64(50), ownerALocks[0].EndOffset, "结束偏移量应为 50")
+		assert.Equal(t, int16(meta.F_RDLCK), ownerALocks[0].LockType, "锁类型应为 F_RDLCK")
+	})
+}
+
 func TestSetLkw_BlockingTestsEnforceContextTimeout(t *testing.T) {
 	fset := token.NewFileSet()
 

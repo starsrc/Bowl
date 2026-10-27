@@ -49,3 +49,13 @@ func InoDirCursorsCount(mgr Manager, ino uint64) int {
 	}
 	return 0
 }
+
+// DirCursorTrackingEntriesCount 供测试检查 Manager 实现中内部清理/在途追踪 map 条目总数。
+func DirCursorTrackingEntriesCount(mgr Manager) int {
+	if m, ok := mgr.(*manager); ok {
+		m.dirCursorMu.Lock()
+		defer m.dirCursorMu.Unlock()
+		return len(m.activeDirReads)
+	}
+	return 0
+}

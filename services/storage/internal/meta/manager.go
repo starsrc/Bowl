@@ -86,6 +86,18 @@ type dirCursorKey struct {
 	offset uint64
 }
 
+type dirHandleKey struct {
+	ino uint64
+	fh  uint64
+}
+
+type inFlightDirRead struct {
+	ino                 uint64
+	fh                  uint64
+	invalidatedAll      bool
+	invalidatedSessions map[uint64]struct{}
+}
+
 type dirCursorAnchor struct {
 	lastName        []byte
 	sqlOffset       int64
@@ -95,20 +107,25 @@ type dirCursorAnchor struct {
 }
 
 type manager struct {
-	store            db.Store
-	entryTimeout     float64
-	attrTimeout      float64
-	dirEntryTimeout  float64
-	openKeepCache    bool
-	openDirCache     bool
-	atimeMode        AtimeMode
-	sessionLeaseTTL  time.Duration
-	lockNotifyMu     sync.Mutex
-	lockNotifyChans  map[uint64]*lockNotifyEntry
-	crossDirRenameMu sync.Mutex
-	dirCursorMu      sync.Mutex
-	dirCursors       map[dirCursorKey]dirCursorAnchor
-	dirMutationSeq   map[uint64]uint64
+	store               db.Store
+	entryTimeout        float64
+	attrTimeout         float64
+	dirEntryTimeout     float64
+	openKeepCache       bool
+	openDirCache        bool
+	atimeMode           AtimeMode
+	sessionLeaseTTL     time.Duration
+	lockNotifyMu        sync.Mutex
+	lockNotifyChans     map[uint64]*lockNotifyEntry
+	crossDirRenameMu    sync.Mutex
+	dirCursorMu         sync.Mutex
+	dirCursors          map[dirCursorKey]dirCursorAnchor
+	dirMutationSeq      map[uint64]uint64
+	activeDirReads      map[uint64]*inFlightDirRead
+	nextDirReadID       uint64
+	inFlightGrantMu     sync.Mutex
+	inFlightGrants      map[inFlightGrantKey]*inFlightGrant
+	nextInFlightGrantID uint64
 }
 
 var _ Manager = (*manager)(nil)
@@ -184,6 +201,8 @@ func New(store db.Store, opts ...Option) Manager {
 		lockNotifyChans: make(map[uint64]*lockNotifyEntry),
 		dirCursors:      make(map[dirCursorKey]dirCursorAnchor),
 		dirMutationSeq:  make(map[uint64]uint64),
+		activeDirReads:  make(map[uint64]*inFlightDirRead),
+		inFlightGrants:  make(map[inFlightGrantKey]*inFlightGrant),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -224,6 +243,60 @@ func (m *manager) lookupDirCursorAnchor(ino, fh, offset uint64) (dirCursorAnchor
 	return anchor, ok
 }
 
+func (m *manager) beginDirCursorRead(ino, fh uint64) uint64 {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.activeDirReads == nil {
+		m.activeDirReads = make(map[uint64]*inFlightDirRead)
+	}
+	m.nextDirReadID++
+	readID := m.nextDirReadID
+	m.activeDirReads[readID] = &inFlightDirRead{
+		ino: ino,
+		fh:  fh,
+	}
+	return readID
+}
+
+func (m *manager) endDirCursorRead(readID uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	delete(m.activeDirReads, readID)
+}
+
+func (m *manager) recordDirCursors(readID uint64, cursors []pendingDirCursor) {
+	if len(cursors) == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	r, ok := m.activeDirReads[readID]
+	if !ok || r.invalidatedAll {
+		return
+	}
+	for _, pc := range cursors {
+		if r.invalidatedSessions != nil {
+			if _, bad := r.invalidatedSessions[pc.sessionID]; bad {
+				continue
+			}
+		}
+		if m.dirCursors == nil {
+			m.dirCursors = make(map[dirCursorKey]dirCursorAnchor)
+		}
+		dirMutated := pc.dirMutated
+		if m.dirMutationSeq != nil && m.dirMutationSeq[pc.ino] != pc.startMutationSeq {
+			dirMutated = true
+		}
+		m.dirCursors[dirCursorKey{ino: pc.ino, fh: pc.fh, offset: pc.nextOffset}] = dirCursorAnchor{
+			lastName:        bytes.Clone(pc.lastName),
+			sqlOffset:       pc.sqlOffset,
+			dirMutated:      dirMutated,
+			sessionID:       pc.sessionID,
+			handleCreatedAt: pc.handleCreatedAt,
+		}
+	}
+}
+
 func (m *manager) recordDirCursor(ino, fh, nextOffset uint64, lastName []byte, sqlOffset int64, dirMutated bool, sessionID uint64, handleCreatedAt time.Time, startMutationSeq uint64) {
 	m.dirCursorMu.Lock()
 	defer m.dirCursorMu.Unlock()
@@ -232,14 +305,6 @@ func (m *manager) recordDirCursor(ino, fh, nextOffset uint64, lastName []byte, s
 	}
 	if m.dirMutationSeq != nil && m.dirMutationSeq[ino] != startMutationSeq {
 		dirMutated = true
-	}
-	// 为防止单句柄连续分页读取大量页面时在 m.dirCursors 中无限累积历史页游标，
-	// 在写入新游标前，清理同一 (ino, fh) 下 offset < nextOffset - 1 的旧锚点
-	// （保留最近 2 个锚点以支持重读当前页和请求下一页）
-	for k := range m.dirCursors {
-		if k.ino == ino && k.fh == fh && nextOffset > 1 && k.offset < nextOffset-1 {
-			delete(m.dirCursors, k)
-		}
 	}
 	m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: nextOffset}] = dirCursorAnchor{
 		lastName:        bytes.Clone(lastName),
@@ -286,6 +351,11 @@ func (m *manager) onDirEntryMutated(parentIno uint64) {
 func (m *manager) clearDirCursors(ino, fh uint64) {
 	m.dirCursorMu.Lock()
 	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		if r.ino == ino && r.fh == fh {
+			r.invalidatedAll = true
+		}
+	}
 	for k := range m.dirCursors {
 		if k.ino == ino && k.fh == fh {
 			delete(m.dirCursors, k)
@@ -296,6 +366,14 @@ func (m *manager) clearDirCursors(ino, fh uint64) {
 func (m *manager) clearDirCursorsForSession(ino, fh, sessionID uint64) {
 	m.dirCursorMu.Lock()
 	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		if r.ino == ino && r.fh == fh {
+			if r.invalidatedSessions == nil {
+				r.invalidatedSessions = make(map[uint64]struct{})
+			}
+			r.invalidatedSessions[sessionID] = struct{}{}
+		}
+	}
 	for k, anchor := range m.dirCursors {
 		if k.ino == ino && k.fh == fh && anchor.sessionID == sessionID {
 			delete(m.dirCursors, k)
@@ -309,27 +387,21 @@ func (m *manager) clearDirCursorsForInos(inos ...uint64) {
 	}
 	m.dirCursorMu.Lock()
 	defer m.dirCursorMu.Unlock()
-	if len(m.dirCursors) == 0 && len(m.dirMutationSeq) == 0 {
-		return
-	}
-
-	if len(inos) == 1 {
-		target := inos[0]
-		for k := range m.dirCursors {
-			if k.ino == target {
-				delete(m.dirCursors, k)
-			}
-		}
-		if m.dirMutationSeq != nil {
-			delete(m.dirMutationSeq, target)
-		}
-		return
-	}
 
 	inoSet := make(map[uint64]struct{}, len(inos))
 	for _, ino := range inos {
 		inoSet[ino] = struct{}{}
 	}
+	for _, r := range m.activeDirReads {
+		if _, ok := inoSet[r.ino]; ok {
+			r.invalidatedAll = true
+		}
+	}
+
+	if len(m.dirCursors) == 0 && len(m.dirMutationSeq) == 0 {
+		return
+	}
+
 	for k := range m.dirCursors {
 		if _, ok := inoSet[k.ino]; ok {
 			delete(m.dirCursors, k)
@@ -768,7 +840,7 @@ func (m *manager) isClientSessionAlive(ctx context.Context, sessionID uint64) bo
 	return alive
 }
 
-// cleanExpiredDirCursors 检查并清理关联会话已过期、不存在或已被重建的目录游标缓存。
+// cleanExpiredDirCursors 检查并清理关联会话已过期、不存在或已被重建，以及句柄已不存在的目录游标缓存。
 func (m *manager) cleanExpiredDirCursors(ctx context.Context) {
 	type poolProvider interface {
 		Pool() *pgxpool.Pool
@@ -784,67 +856,116 @@ func (m *manager) cleanExpiredDirCursors(ctx context.Context) {
 		return
 	}
 
+	type handleInfo struct {
+		sessionID uint64
+	}
+
+	handleMap := make(map[dirHandleKey]handleInfo)
 	sessionIDsMap := make(map[uint64]struct{})
-	for _, anchor := range m.dirCursors {
+	for k, anchor := range m.dirCursors {
+		handleMap[dirHandleKey{ino: k.ino, fh: k.fh}] = handleInfo{sessionID: anchor.sessionID}
 		if anchor.sessionID > 0 {
 			sessionIDsMap[anchor.sessionID] = struct{}{}
 		}
 	}
-	if len(sessionIDsMap) == 0 {
-		m.dirCursorMu.Unlock()
-		return
-	}
-
-	sessionIDs := make([]int64, 0, len(sessionIDsMap))
-	for sid := range sessionIDsMap {
-		sessionIDs = append(sessionIDs, int64(sid))
-	}
 	m.dirCursorMu.Unlock()
-
-	rows, err := pp.Pool().Query(ctx, `
-		SELECT session_id, created_at, (expires_at > clock_timestamp()) AS alive
-		FROM client_sessions
-		WHERE session_id = ANY($1)
-	`, sessionIDs)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
 
 	type sessionStatus struct {
 		createdAt time.Time
 		alive     bool
 	}
-	statuses := make(map[uint64]sessionStatus, len(sessionIDs))
-	for rows.Next() {
-		var sid int64
-		var createdAt time.Time
-		var alive bool
-		if err := rows.Scan(&sid, &createdAt, &alive); err != nil {
+	statuses := make(map[uint64]sessionStatus, len(sessionIDsMap))
+	if len(sessionIDsMap) > 0 {
+		sessionIDs := make([]int64, 0, len(sessionIDsMap))
+		for sid := range sessionIDsMap {
+			sessionIDs = append(sessionIDs, int64(sid))
+		}
+
+		rows, err := pp.Pool().Query(ctx, `
+			SELECT session_id, created_at, (expires_at > clock_timestamp()) AS alive
+			FROM client_sessions
+			WHERE session_id = ANY($1)
+		`, sessionIDs)
+		if err != nil {
 			return
 		}
-		statuses[uint64(sid)] = sessionStatus{
-			createdAt: createdAt,
-			alive:     alive,
+
+		for rows.Next() {
+			var sid int64
+			var createdAt time.Time
+			var alive bool
+			if err := rows.Scan(&sid, &createdAt, &alive); err != nil {
+				rows.Close()
+				return
+			}
+			statuses[uint64(sid)] = sessionStatus{
+				createdAt: createdAt,
+				alive:     alive,
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return
+
+	deadHandles := make(map[dirHandleKey]struct{})
+	for h, info := range handleMap {
+		var sidPtr *uint64
+		if info.sessionID > 0 {
+			sidPtr = &info.sessionID
+		}
+		_, err := m.store.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:        int64(h.fh),
+			Ino:       int64(h.ino),
+			SessionID: toPgSessionID(sidPtr),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrBadFileHandle) {
+				deadHandles[h] = struct{}{}
+			}
+		}
+	}
+
+	expiredSessions := make(map[uint64]struct{})
+	for sid := range sessionIDsMap {
+		st, ok := statuses[sid]
+		if !ok || !st.alive {
+			expiredSessions[sid] = struct{}{}
+		}
 	}
 
 	m.dirCursorMu.Lock()
 	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		hk := dirHandleKey{ino: r.ino, fh: r.fh}
+		if _, isDead := deadHandles[hk]; isDead {
+			r.invalidatedAll = true
+			continue
+		}
+		for sid := range expiredSessions {
+			if r.invalidatedSessions == nil {
+				r.invalidatedSessions = make(map[uint64]struct{})
+			}
+			r.invalidatedSessions[sid] = struct{}{}
+		}
+	}
 	for k, anchor := range m.dirCursors {
-		if anchor.sessionID == 0 {
-			continue
-		}
-		if _, queried := sessionIDsMap[anchor.sessionID]; !queried {
-			continue
-		}
-		st, ok := statuses[anchor.sessionID]
-		// 若 session 在表中不存在，或已过期 (alive == false)，或已被重建 (st.createdAt > anchor.handleCreatedAt)
-		if !ok || !st.alive || (!anchor.handleCreatedAt.IsZero() && st.createdAt.After(anchor.handleCreatedAt)) {
+		hk := dirHandleKey{ino: k.ino, fh: k.fh}
+		if _, isDead := deadHandles[hk]; isDead {
 			delete(m.dirCursors, k)
+			continue
+		}
+		if anchor.sessionID > 0 {
+			if _, queried := sessionIDsMap[anchor.sessionID]; !queried {
+				continue
+			}
+			st, ok := statuses[anchor.sessionID]
+			// 若 session 在表中不存在，或已过期 (alive == false)，或已被重建 (st.createdAt > anchor.handleCreatedAt)
+			if !ok || !st.alive || (!anchor.handleCreatedAt.IsZero() && st.createdAt.After(anchor.handleCreatedAt)) {
+				delete(m.dirCursors, k)
+			}
 		}
 	}
 }

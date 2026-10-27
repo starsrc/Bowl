@@ -15,18 +15,38 @@ BEGIN
               AND table_name = '_rollback_entries_name_backup'
               AND column_name = 'ino'
         ) THEN
-            EXECUTE 'UPDATE entries e
-                     SET name = b.raw_name
-                     FROM _rollback_entries_name_backup b
-                     WHERE e.parent_ino = b.parent_ino
-                       AND e.name = convert_to(b.rollback_name, ''UTF8'')
-                       AND e.ino = b.ino';
+            EXECUTE 'CREATE TEMP TABLE _restored_entries ON COMMIT DROP AS
+                     WITH del AS (
+                         DELETE FROM entries e
+                         USING _rollback_entries_name_backup b
+                         WHERE e.parent_ino = b.parent_ino
+                           AND e.ino = b.ino
+                           AND e.name = convert_to(b.rollback_name, ''UTF8'')
+                         RETURNING e.parent_ino, b.raw_name, e.ino
+                     )
+                     SELECT parent_ino, raw_name, ino FROM del;
+
+                     INSERT INTO entries (parent_ino, name, ino)
+                     SELECT parent_ino, raw_name, ino
+                     FROM _restored_entries;
+
+                     DROP TABLE IF EXISTS _restored_entries;';
         ELSE
-            EXECUTE 'UPDATE entries e
-                     SET name = b.raw_name
-                     FROM _rollback_entries_name_backup b
-                     WHERE e.parent_ino = b.parent_ino
-                       AND e.name = convert_to(b.rollback_name, ''UTF8'')';
+            EXECUTE 'CREATE TEMP TABLE _restored_entries ON COMMIT DROP AS
+                     WITH del AS (
+                         DELETE FROM entries e
+                         USING _rollback_entries_name_backup b
+                         WHERE e.parent_ino = b.parent_ino
+                           AND e.name = convert_to(b.rollback_name, ''UTF8'')
+                         RETURNING e.parent_ino, b.raw_name, e.ino
+                     )
+                     SELECT parent_ino, raw_name, ino FROM del;
+
+                     INSERT INTO entries (parent_ino, name, ino)
+                     SELECT parent_ino, raw_name, ino
+                     FROM _restored_entries;
+
+                     DROP TABLE IF EXISTS _restored_entries;';
         END IF;
         DROP TABLE _rollback_entries_name_backup;
     END IF;

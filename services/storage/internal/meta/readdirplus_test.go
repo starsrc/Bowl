@@ -1498,3 +1498,344 @@ func TestReadDirPlus_P2_1_3_4_ReproduceDefects(t *testing.T) {
 		require.Equal(t, "b", string(p2[0].Name))
 	})
 }
+
+func TestReadDirPlus_MidPageCursorUnlinkAndReleaseDirRace(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Subtest1_MidPageCursor_UnlinkPrevEntryNoMissingEntries", func(t *testing.T) {
+		dsn := getStorageTestDSN()
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(testCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(testCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		store := db.NewStore(pool)
+		mgr := meta.New(store)
+
+		disk, err := mgr.CreateDisk(testCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-readdirplus-midpage-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		}()
+
+		dir, err := mgr.Mkdir(testCtx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dirMidPagePlus"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		for _, name := range []string{"a", "b", "c"} {
+			_, err = mgr.Mknod(testCtx, meta.MknodParams{
+				ParentIno: dir.Ino,
+				Name:      []byte(name),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+		}
+
+		openRes, err := mgr.OpenDir(testCtx, meta.OpenDirParams{
+			Ino:   dir.Ino,
+			Flags: meta.O_RDONLY,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.ReleaseDir(context.Background(), meta.ReleaseDirParams{
+				Ino: dir.Ino,
+				Fh:  openRes.Fh,
+			})
+		}()
+
+		// 首次调用 ReadDirPlus(offset=0, limit=10) 一次性获取全量条目
+		entries, err := mgr.ReadDirPlus(testCtx, meta.ReadDirPlusParams{
+			Ino:    dir.Ino,
+			Fh:     openRes.Fh,
+			Offset: 0,
+			Limit:  10,
+		})
+		require.NoError(t, err)
+		// 应该包含 . (1), .. (2), a (3), b (4), c (5)
+		require.Len(t, entries, 5)
+		require.Equal(t, ".", string(entries[0].Name))
+		require.Equal(t, "..", string(entries[1].Name))
+		require.Equal(t, "a", string(entries[2].Name))
+		aOffset := entries[2].NextOffset
+		require.Equal(t, uint64(3), aOffset)
+
+		// 删除条目 "a"
+		err = mgr.Unlink(testCtx, dir.Ino, []byte("a"))
+		require.NoError(t, err)
+
+		// 使用 "a" 返回的 NextOffset(3) 继续向下读取
+		nextEntries, err := mgr.ReadDirPlus(testCtx, meta.ReadDirPlusParams{
+			Ino:    dir.Ino,
+			Fh:     openRes.Fh,
+			Offset: aOffset,
+			Limit:  10,
+		})
+		require.NoError(t, err)
+
+		names := make([]string, len(nextEntries))
+		for i, e := range nextEntries {
+			names[i] = string(e.Name)
+		}
+		// C1-2: 同页中间条目在 recordDirCursor 中不应被过早淘汰；Unlink "a" 后，
+		// 以 aOffset=3 续读应正确返回剩余存活条目 ["b", "c"]，而不是漏掉 "b" 仅返回 ["c"]。
+		require.Equal(t, []string{"b", "c"}, names, "C1-2: 同页中间游标在 Unlink 前序条目后续读不应漏读后续条目 'b'")
+	})
+
+	t.Run("Subtest2_ReleaseDirRaceDuringTxCommit_NoOrphanCursor", func(t *testing.T) {
+		dsn := getStorageTestDSN()
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(testCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(testCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &readDirPlusP24HookStore{
+			Store: baseStore,
+			pool:  pool,
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(testCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-readdirplus-race-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		}()
+
+		dir, err := mgr.Mkdir(testCtx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dirRacePlus"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		for _, name := range []string{"x", "y"} {
+			_, err = mgr.Mknod(testCtx, meta.MknodParams{
+				ParentIno: dir.Ino,
+				Name:      []byte(name),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+		}
+
+		openRes, err := mgr.OpenDir(testCtx, meta.OpenDirParams{
+			Ino:   dir.Ino,
+			Flags: meta.O_RDONLY,
+		})
+		require.NoError(t, err)
+
+		// 拦截 ReadDirPlus 事务提交后、发布游标前的窗口，并发执行 ReleaseDir 关闭该句柄
+		hookStore.onReadDirTxCommit = func() {
+			relErr := mgr.ReleaseDir(testCtx, meta.ReleaseDirParams{
+				Ino: dir.Ino,
+				Fh:  openRes.Fh,
+			})
+			require.NoError(t, relErr)
+		}
+
+		_, err = mgr.ReadDirPlus(testCtx, meta.ReadDirPlusParams{
+			Ino:    dir.Ino,
+			Fh:     openRes.Fh,
+			Offset: 0,
+			Limit:  10,
+		})
+		require.NoError(t, err)
+
+		// C1-3: 已关闭句柄在 ReadDirPlus 事务后被 ReleaseDir 清理，落后的 recordDirCursor
+		// 不应将已失效句柄的游标再次写入内存造成孤儿游标残留。
+		require.Equal(t, 0, meta.InoDirCursorsCount(mgr, dir.Ino), "C1-3: 已关闭句柄的游标在 ReadDirPlus 返回后不应残留在内存中")
+	})
+
+	t.Run("Subtest3_ForeignSessionBadHandleDoesNotDropInFlightCursor", func(t *testing.T) {
+		dsn := getStorageTestDSN()
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(testCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(testCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		baseStore := db.NewStore(pool)
+		hookStore := &readDirPlusP24HookStore{
+			Store: baseStore,
+			pool:  pool,
+		}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(testCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-readdirplus-badhandle-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		}()
+
+		dir, err := mgr.Mkdir(testCtx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dirForeignBadHandlePlus"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		for _, name := range []string{"a", "b", "c"} {
+			_, err = mgr.Mknod(testCtx, meta.MknodParams{
+				ParentIno: dir.Ino,
+				Name:      []byte(name),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+		}
+
+		sessA := uint64(time.Now().UnixNano() & 0x7FFFFFFF)
+		openRes, err := mgr.OpenDir(testCtx, meta.OpenDirParams{
+			Ino:       dir.Ino,
+			Flags:     meta.O_RDONLY,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.ReleaseDir(context.Background(), meta.ReleaseDirParams{
+				Ino:       dir.Ino,
+				Fh:        openRes.Fh,
+				SessionID: &sessA,
+			})
+		}()
+
+		// 拦截会话 A 的 ReadDirPlus 事务提交后、发布游标前的窗口，另一会话 B 使用错误的 SessionID 请求同一句柄
+		sessB := sessA + 9999
+		hookStore.onReadDirTxCommit = func() {
+			_, badErr := mgr.ReadDirPlus(testCtx, meta.ReadDirPlusParams{
+				Ino:       dir.Ino,
+				Fh:        openRes.Fh,
+				Offset:    0,
+				Limit:     10,
+				SessionID: &sessB,
+			})
+			require.ErrorIs(t, badErr, meta.ErrBadFileHandle, "非所属会话请求同一句柄必须返回 ErrBadFileHandle")
+		}
+
+		// 会话 A 执行初次 ReadDirPlus(offset=0, limit=10)
+		p1, err := mgr.ReadDirPlus(testCtx, meta.ReadDirPlusParams{
+			Ino:       dir.Ino,
+			Fh:        openRes.Fh,
+			Offset:    0,
+			Limit:     10,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+		require.Len(t, p1, 5) // ., .., a, b, c
+		require.Equal(t, "a", string(p1[2].Name))
+		aOffset := p1[2].NextOffset
+		require.Equal(t, uint64(3), aOffset)
+
+		// 删除条目 "a"
+		err = mgr.Unlink(testCtx, dir.Ino, []byte("a"))
+		require.NoError(t, err)
+
+		// 会话 A 使用首次响应中 "a" 的 NextOffset(offset=3) 续读
+		p2, err := mgr.ReadDirPlus(testCtx, meta.ReadDirPlusParams{
+			Ino:       dir.Ino,
+			Fh:        openRes.Fh,
+			Offset:    aOffset,
+			Limit:     10,
+			SessionID: &sessA,
+		})
+		require.NoError(t, err)
+
+		names := make([]string, len(p2))
+		for i, e := range p2 {
+			names[i] = string(e.Name)
+		}
+		// 若合法会话 A 的在途游标被会话 B 触发的 clearDirCursorsForSession 误丢弃，
+		// 续读将漏掉 "b" 仅返回 ["c"]。
+		require.Equal(t, []string{"b", "c"}, names, "非所属会话 B 触发 ErrBadFileHandle 不得丢弃合法会话 A 的在途游标")
+	})
+
+	t.Run("Subtest4_ReleaseDirDoesNotRetainCursorTrackingEntries", func(t *testing.T) {
+		dsn := getStorageTestDSN()
+		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+
+		pool, err := pgxpool.New(testCtx, dsn)
+		if err != nil {
+			t.Skipf("skipping postgres test: %v", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(testCtx); err != nil {
+			t.Skipf("skipping postgres test (ping failed): %v", err)
+		}
+
+		store := db.NewStore(pool)
+		mgr := meta.New(store)
+
+		disk, err := mgr.CreateDisk(testCtx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-readdirplus-trackseq-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		}()
+
+		dir, err := mgr.Mkdir(testCtx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dirTrackSeqPlus"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+
+		openRes, err := mgr.OpenDir(testCtx, meta.OpenDirParams{
+			Ino:   dir.Ino,
+			Flags: meta.O_RDONLY,
+		})
+		require.NoError(t, err)
+
+		err = mgr.ReleaseDir(testCtx, meta.ReleaseDirParams{
+			Ino: dir.Ino,
+			Fh:  openRes.Fh,
+		})
+		require.NoError(t, err)
+
+		require.Equal(t, 0, meta.DirCursorTrackingEntriesCount(mgr), "关闭目录句柄后内部游标清理追踪结构不应累积历史键")
+	})
+}

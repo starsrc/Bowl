@@ -523,10 +523,6 @@ func runConcurrentWorker(
 
 			if rng.IntN(2) == 0 {
 				name := pickSharedOrUniqueName(rng, env, "cr")
-				var createSID *uint64
-				if useShortCrash {
-					createSID = sidPtr
-				}
 				res, err := targetMgr.Create(ctx, meta.CreateParams{
 					ParentIno: parentIno,
 					Name:      []byte(name),
@@ -534,7 +530,7 @@ func runConcurrentWorker(
 					Flags:     meta.O_CREAT | meta.O_RDWR,
 					UID:       uint32(1000 + workerID),
 					GID:       uint32(1000 + workerID),
-					SessionID: createSID,
+					SessionID: sidPtr,
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "Create", err)
 				if err == nil && res != nil {
@@ -545,7 +541,7 @@ func runConcurrentWorker(
 						myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
 							Fh:        res.Fh,
 							Ino:       res.Inode.Ino,
-							SessionID: nil,
+							SessionID: sidPtr,
 							Flags:     meta.O_CREAT | meta.O_RDWR,
 						})
 					} else if rng.IntN(2) == 0 {
@@ -566,7 +562,7 @@ func runConcurrentWorker(
 					Flags:     flags,
 					UID:       uint32(1000 + workerID),
 					GID:       uint32(1000 + workerID),
-					SessionID: nil,
+					SessionID: sidPtr,
 				})
 				assertConcurrentStepErr(t, env, workerID, step, "TmpFile", err)
 				if err == nil && res != nil {
@@ -576,7 +572,7 @@ func runConcurrentWorker(
 						myFileHandles = append(myFileHandles, formalConcurrentHandleRec{
 							Fh:        res.Fh,
 							Ino:       res.Inode.Ino,
-							SessionID: nil,
+							SessionID: sidPtr,
 							Flags:     flags | meta.O_TMPFILE,
 						})
 					}

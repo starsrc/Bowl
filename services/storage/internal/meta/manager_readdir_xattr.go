@@ -73,6 +73,8 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		return nil, err
 	}
 
+	readID := m.beginDirCursorRead(params.Ino, params.Fh)
+	defer m.endDirCursorRead(readID)
 	startMutationSeq := m.getDirMutationSeq(params.Ino)
 
 	var entries []DirEntry
@@ -232,9 +234,7 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		}
 	}
 
-	for _, pc := range pendingCursors {
-		m.recordDirCursor(pc.ino, pc.fh, pc.nextOffset, pc.lastName, pc.sqlOffset, pc.dirMutated, pc.sessionID, pc.handleCreatedAt, pc.startMutationSeq)
-	}
+	m.recordDirCursors(readID, pendingCursors)
 
 	if entries == nil {
 		entries = []DirEntry{}
@@ -254,6 +254,8 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		return nil, err
 	}
 
+	readID := m.beginDirCursorRead(params.Ino, params.Fh)
+	defer m.endDirCursorRead(readID)
 	startMutationSeq := m.getDirMutationSeq(params.Ino)
 
 	var entries []DirEntryPlus
@@ -423,9 +425,7 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		}
 	}
 
-	for _, pc := range pendingCursors {
-		m.recordDirCursor(pc.ino, pc.fh, pc.nextOffset, pc.lastName, pc.sqlOffset, pc.dirMutated, pc.sessionID, pc.handleCreatedAt, pc.startMutationSeq)
-	}
+	m.recordDirCursors(readID, pendingCursors)
 
 	if entries == nil {
 		entries = []DirEntryPlus{}

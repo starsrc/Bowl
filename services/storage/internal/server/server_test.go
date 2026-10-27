@@ -109,6 +109,12 @@ func (c *logCapture) String() string {
 	return c.buf.String()
 }
 
+func (c *logCapture) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.buf.Reset()
+}
+
 func testLogger(capture *logCapture) *slog.Logger {
 	handler := slog.NewJSONHandler(capture, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -343,19 +349,6 @@ func TestValidationInterceptor_RejectsInvalidRequests(t *testing.T) {
 	mockMgr.AssertExpectations(t)
 }
 
-// overrideLookupHandler 用于测试注入特定 Handler 返回错误
-type overrideLookupHandler struct {
-	*server.Server
-	lookupFn func(context.Context, *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error)
-}
-
-func (h *overrideLookupHandler) Lookup(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
-	if h.lookupFn != nil {
-		return h.lookupFn(ctx, req)
-	}
-	return h.Server.Lookup(ctx, req)
-}
-
 // 3. 验证未知内部错误与包装错误经 MaskInterceptor 脱敏为 "internal server error"，同时完整保留 ErrorInfo Detail。
 func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 	mockMgr := metamock.NewMockManager(t)
@@ -369,33 +362,21 @@ func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	handler := &overrideLookupHandler{Server: srv}
-
-	// 组装真实的生产洋葱拦截器链（包含真实的 MaskInterceptor、otelconnect、slogx 日志与 validator）
-	interceptors, err := server.BuildInterceptors(nil, nil, logger)
-	require.NoError(t, err)
-
-	mux := http.NewServeMux()
-	path, h2 := storagev1connect.NewStorageServiceHandler(
-		handler,
-		connect.WithInterceptors(interceptors...),
-	)
-	mux.Handle(path, h2)
-
-	ts := httptest.NewServer(mux)
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	client := storagev1connect.NewStorageServiceClient(http.DefaultClient, ts.URL)
 	ctx := context.Background()
 
 	t.Run("原生数据库异常脱敏为 internal server error", func(t *testing.T) {
-		handler.lookupFn = func(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
-			return nil, server.ToConnectError(errors.New("db connection reset: pq fatal socket read"))
-		}
+		logCap.Reset()
+		rawDBErr := errors.New("pq: syntax error at or near \"SELECT\" (SQLSTATE 42601)")
+		mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("db_err.txt")).
+			Return(nil, rawDBErr).Once()
 
 		resp, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
 			ParentIno: 1,
-			Name:      []byte("normal.txt"),
+			Name:      []byte("db_err.txt"),
 		}))
 		require.Error(t, callErr)
 		assert.Nil(t, resp)
@@ -404,16 +385,19 @@ func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 		var connErr *connect.Error
 		require.True(t, errors.As(callErr, &connErr))
 		assert.Equal(t, "internal server error", connErr.Message())
-		assert.NotContains(t, connErr.Message(), "pq fatal socket read", "原始敏感数据库错误严禁泄露")
+		assert.NotContains(t, connErr.Message(), "pq:")
+		assert.NotContains(t, connErr.Message(), "SQLSTATE")
 
-		// 日志中需记录脱敏警告
+		// 日志中精确记录了包含原始错误的日志与脱敏警告
 		assert.Contains(t, logCap.String(), "internal server error masked")
+		assert.Contains(t, logCap.String(), "pq: syntax error at or near")
+		assert.Contains(t, logCap.String(), "SQLSTATE 42601")
 	})
 
 	t.Run("meta.ErrIO 内部错误脱敏但保留 EIO Detail", func(t *testing.T) {
-		handler.lookupFn = func(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
-			return nil, server.ToConnectError(fmt.Errorf("%w: underlying disk sector failed", meta.ErrIO))
-		}
+		logCap.Reset()
+		mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("sector_test.txt")).
+			Return(nil, fmt.Errorf("%w: underlying disk sector failed", meta.ErrIO)).Once()
 
 		resp, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
 			ParentIno: 1,
@@ -432,12 +416,14 @@ func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 		require.NotNil(t, info, "脱敏后必须完整保留 Details 中的 ErrorInfo")
 		assert.Equal(t, "EIO", info.GetReason())
 		assert.Equal(t, "bowl.storage", info.GetDomain())
+
+		assert.Contains(t, logCap.String(), "internal server error masked")
 	})
 
 	t.Run("业务正常错误（如 ENOENT）不被脱敏且保留详情", func(t *testing.T) {
-		handler.lookupFn = func(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
-			return nil, server.ToConnectError(meta.ErrNotFound)
-		}
+		logCap.Reset()
+		mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("missing.txt")).
+			Return(nil, fmt.Errorf("wrapped: %w", meta.ErrNotFound)).Once()
 
 		resp, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
 			ParentIno: 1,
@@ -447,10 +433,42 @@ func TestMaskInterceptor_MasksInternalAndRetainsErrorInfo(t *testing.T) {
 		assert.Nil(t, resp)
 
 		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(callErr))
+		var connErr *connect.Error
+		require.True(t, errors.As(callErr, &connErr))
+		assert.NotEqual(t, "internal server error", connErr.Message())
+		assert.Contains(t, connErr.Message(), "wrapped:")
+
 		info := server.ExtractErrorInfo(callErr)
 		require.NotNil(t, info)
 		assert.Equal(t, "ENOENT", info.GetReason())
+		assert.Equal(t, "bowl.storage", info.GetDomain())
 	})
+
+	t.Run("业务参数错误（如 EINVAL）不被脱敏且保留详情", func(t *testing.T) {
+		logCap.Reset()
+		mockMgr.EXPECT().Lookup(mock.Anything, uint64(1), []byte("invalid_arg.txt")).
+			Return(nil, fmt.Errorf("domain check: %w", meta.ErrInvalidArgument)).Once()
+
+		resp, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+			ParentIno: 1,
+			Name:      []byte("invalid_arg.txt"),
+		}))
+		require.Error(t, callErr)
+		assert.Nil(t, resp)
+
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(callErr))
+		var connErr *connect.Error
+		require.True(t, errors.As(callErr, &connErr))
+		assert.NotEqual(t, "internal server error", connErr.Message())
+		assert.Contains(t, connErr.Message(), "domain check:")
+
+		info := server.ExtractErrorInfo(callErr)
+		require.NotNil(t, info)
+		assert.Equal(t, "EINVAL", info.GetReason())
+		assert.Equal(t, "bowl.storage", info.GetDomain())
+	})
+
+	mockMgr.AssertExpectations(t)
 }
 
 // 4. 验证 server.Module 的 fx.Lifecycle 启动监听、网络通信与优雅停机

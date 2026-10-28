@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -1492,4 +1494,371 @@ func TestSession_ExpiredAndRecreatedSameSessionID_RejectsStaleFileHandle(t *test
 	err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM client_sessions WHERE session_id = $1)", int64(sessID)).Scan(&sessExists)
 	require.NoError(t, err)
 	assert.True(t, sessExists, "G-02: 新重建的活跃会话 S1 绝不能被写操作事务误删")
+}
+
+type orphanRaceHookQuerier struct {
+	db.Querier
+	onCreateFileHandle               func(ctx context.Context, ino int64)
+	onDeleteUnreferencedOrphanInodes func()
+	afterSweepBeforeCommit           func(ctx context.Context)
+}
+
+func (q *orphanRaceHookQuerier) CreateFileHandle(ctx context.Context, arg db.CreateFileHandleParams) (db.FileHandle, error) {
+	fh, err := q.Querier.CreateFileHandle(ctx, arg)
+	if err == nil && q.onCreateFileHandle != nil {
+		q.onCreateFileHandle(ctx, arg.Ino)
+	}
+	return fh, err
+}
+
+func (q *orphanRaceHookQuerier) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error) {
+	if q.onDeleteUnreferencedOrphanInodes != nil {
+		q.onDeleteUnreferencedOrphanInodes()
+	}
+	rows, err := q.Querier.DeleteUnreferencedOrphanInodes(ctx)
+	if q.afterSweepBeforeCommit != nil {
+		q.afterSweepBeforeCommit(ctx)
+	}
+	return rows, err
+}
+
+type orphanRaceHookStore struct {
+	db.Store
+	onCreateFileHandle               func(ctx context.Context, ino int64)
+	onDeleteUnreferencedOrphanInodes func()
+	afterSweepBeforeCommit           func(ctx context.Context)
+}
+
+func (s *orphanRaceHookStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
+	return s.ExecTxWithOptions(ctx, fn)
+}
+
+func (s *orphanRaceHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		wrapped := &orphanRaceHookQuerier{
+			Querier:                          q,
+			onCreateFileHandle:               s.onCreateFileHandle,
+			onDeleteUnreferencedOrphanInodes: s.onDeleteUnreferencedOrphanInodes,
+			afterSweepBeforeCommit:           s.afterSweepBeforeCommit,
+		}
+		return fn(wrapped)
+	}, opts...)
+}
+
+// TestSessionOrphan_ConcurrentOpenDuringOrphanSweepSnapshotRace 验证 P1 / Ch1-R1 漏洞：
+// 在 PostgreSQL READ COMMITTED 隔离级别下，DeleteUnreferencedOrphanInodes 使用单一 MVCC 语句快照。
+// 当孤儿文件 I_target (nlink=0) 的旧会话 S_exp 即将过期且仅剩最后一个句柄 H1 时，
+// 协程 A 发起无会话 Open 分配新句柄 H2（已写入底表但事务尚未提交，持有 I_target 行锁）；
+// 此时 S_exp 到期，协程 B 调用 RenewSession 触发 DeleteExpiredClientSessions 级联销毁 H1，
+// 随后进入 DeleteUnreferencedOrphanInodes 建立语句快照（此时看不到未提交的 H2，且 H1 已被删）；
+// 在 B 扫描并跳过大量占位行期间，A 提交事务并释放 I_target 行锁；
+// B 扫描至 I_target 时获取行锁并因快照旧视图错误将 I_target 物理删除，导致活跃句柄 H2 级联失效并误扣配额。
+// 两阶段清理修复后，B 在第一阶段加锁，并在第二阶段新语句快照复核时不予删除。
+// 本测试通过行级排他锁实证（55P03）证明第一阶段确实锁定了目标行，且通过全量断言证明目标文件与活跃句柄完好无损。
+func TestSessionOrphan_ConcurrentOpenDuringOrphanSweepSnapshotRace(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	baseStore := db.NewStore(pool)
+
+	var (
+		mu                               sync.Mutex
+		targetIno                        uint64
+		onCreateFileHandleHook           func(ctx context.Context, ino int64)
+		onDeleteUnreferencedOrphanInodes func()
+		afterSweepBeforeCommitHook       func(ctx context.Context)
+	)
+
+	hookStore := &orphanRaceHookStore{
+		Store: baseStore,
+		onCreateFileHandle: func(ctx context.Context, ino int64) {
+			mu.Lock()
+			hook := onCreateFileHandleHook
+			tIno := targetIno
+			mu.Unlock()
+			if hook != nil && uint64(ino) == tIno {
+				hook(ctx, ino)
+			}
+		},
+		onDeleteUnreferencedOrphanInodes: func() {
+			mu.Lock()
+			hook := onDeleteUnreferencedOrphanInodes
+			mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+		},
+		afterSweepBeforeCommit: func(ctx context.Context) {
+			mu.Lock()
+			hook := afterSweepBeforeCommitHook
+			mu.Unlock()
+			if hook != nil {
+				hook(ctx)
+			}
+		},
+	}
+	mgr := meta.New(hookStore)
+
+	ctx := context.Background()
+
+	// 1. 创建占位专用临时磁盘，批量插入 12000 个 nlink=0 的前缀孤儿 Inode
+	placeholderDisk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-race-placeholder-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM inodes WHERE root_ino = $1", placeholderDisk.RootIno)
+		_ = mgr.DeleteDisk(cleanupCtx, placeholderDisk.DiskID)
+	})
+
+	const placeholderCount = 12000
+	_, err = pool.Exec(ctx, `
+		INSERT INTO inodes (mode, size, nlink, root_ino)
+		SELECT 33188, 0, 0, $1 FROM generate_series(1, $2)
+	`, placeholderDisk.RootIno, placeholderCount)
+	require.NoError(t, err)
+
+	// 2. 独立连接开启 txHold 对这批前缀占位孤儿行加持 FOR UPDATE 排他锁，
+	// 使 DeleteUnreferencedOrphanInodes 的 FOR UPDATE SKIP LOCKED 逐行检测并跳过，拉宽语句快照窗口
+	connHold, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		connHold.Release()
+	})
+
+	txHold, err := connHold.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = txHold.Rollback(context.Background())
+	})
+
+	rowsHold, err := txHold.Query(ctx, "SELECT ino FROM inodes WHERE root_ino = $1 AND nlink = 0 FOR UPDATE", placeholderDisk.RootIno)
+	require.NoError(t, err)
+	holdCount := 0
+	for rowsHold.Next() {
+		holdCount++
+	}
+	rowsHold.Close()
+	require.Equal(t, placeholderCount, holdCount, "txHold 必须锁定全部占位孤儿行")
+
+	// 3. 创建目标文件专用磁盘（其 Inode 号在序列中必然大于所有占位行）
+	targetDisk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-race-target-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM inodes WHERE root_ino = $1", targetDisk.RootIno)
+		_ = mgr.DeleteDisk(cleanupCtx, targetDisk.DiskID)
+	})
+
+	raceWindowHitCount := 0
+	const maxRounds = 15
+	for round := 1; round <= maxRounds; round++ {
+		hit := func() bool {
+			var wg sync.WaitGroup
+			openCreatedHandleCh := make(chan struct{})
+			signalOpenCreated := sync.OnceFunc(func() { close(openCreatedHandleCh) })
+
+			openAllowCommitCh := make(chan struct{})
+			releaseOpenCommit := sync.OnceFunc(func() { close(openAllowCommitCh) })
+
+			deleteSweepStartedCh := make(chan struct{})
+			signalSweepStarted := sync.OnceFunc(func() { close(deleteSweepStartedCh) })
+
+			defer releaseOpenCommit()
+			defer wg.Wait()
+
+			sExp := uint64(777000 + round*10 + 1)
+			sOther := uint64(777000 + round*10 + 2)
+
+			_, err = mgr.RenewSession(ctx, sExp)
+			require.NoError(t, err)
+			_, err = mgr.RenewSession(ctx, sOther)
+			require.NoError(t, err)
+
+			fileName := fmt.Sprintf("target_orphan_%d.bin", round)
+			createRes, err := mgr.Create(ctx, meta.CreateParams{
+				ParentIno: targetDisk.RootIno,
+				Name:      []byte(fileName),
+				Mode:      meta.S_IFREG | 0o644,
+				Flags:     meta.O_RDWR,
+				SessionID: &sExp,
+			})
+			require.NoError(t, err)
+			curTargetIno := createRes.Inode.Ino
+
+			// 确保目标 Inode 号大于所有占位行
+			require.Greater(t, int64(curTargetIno), int64(placeholderCount), "目标 Inode 号必须位于所有前缀占位孤儿行之后")
+
+			// Unlink 成为孤儿文件（nlink=0），仍由 sExp 持有句柄
+			require.NoError(t, mgr.Unlink(ctx, targetDisk.RootIno, []byte(fileName)))
+
+			diskBefore, err := mgr.GetDisk(ctx, targetDisk.DiskID)
+			require.NoError(t, err)
+
+			var roundHitRaceWindow bool
+
+			mu.Lock()
+			targetIno = curTargetIno
+			onCreateFileHandleHook = func(hookCtx context.Context, ino int64) {
+				signalOpenCreated()
+				select {
+				case <-openAllowCommitCh:
+				case <-hookCtx.Done():
+				case <-ctx.Done():
+				}
+			}
+			onDeleteUnreferencedOrphanInodes = func() {
+				signalSweepStarted()
+			}
+			afterSweepBeforeCommitHook = func(hookCtx context.Context) {
+				// 此时协程 A 的 Open 事务已提交释放了行锁，
+				// 而协程 B 的 RenewSession 事务尚未提交，仍持有第一阶段 SelectOrphanInodesForUpdate 锁定的所有候选孤儿行锁！
+				// 通过 pool 独立连接执行 SELECT ... FOR KEY SHARE NOWAIT 探测行锁
+				var checkIno int64
+				checkErr := pool.QueryRow(hookCtx, "SELECT ino FROM inodes WHERE ino = $1 FOR KEY SHARE NOWAIT", int64(curTargetIno)).Scan(&checkIno)
+				var pgErr *pgconn.PgError
+				if errors.As(checkErr, &pgErr) && pgErr.Code == "55P03" {
+					mu.Lock()
+					roundHitRaceWindow = true
+					mu.Unlock()
+				}
+			}
+			mu.Unlock()
+
+			// 启动协程 A：对孤儿 Inode 发起无会话 Open
+			type openOutcome struct {
+				res *meta.OpenResult
+				err error
+			}
+			openCh := make(chan openOutcome, 1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				res, oErr := mgr.Open(ctx, meta.OpenParams{
+					Ino:   curTargetIno,
+					Flags: meta.O_RDONLY,
+				})
+				openCh <- openOutcome{res: res, err: oErr}
+			}()
+
+			// 等待协程 A 完成句柄创建并持有 I_target 行锁暂停
+			select {
+			case <-openCreatedHandleCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("round %d: 协程 A 创建句柄超时", round)
+			}
+
+			// 令 sExp 到期
+			_, err = pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() - interval '10 seconds' WHERE session_id = $1", int64(sExp))
+			require.NoError(t, err)
+
+			// 启动协程 B：调用 RenewSession 触发过期会话清除与孤儿扫描
+			type renewOutcome struct {
+				expiresAt time.Time
+				err       error
+			}
+			renewCh := make(chan renewOutcome, 1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				exp, rErr := mgr.RenewSession(ctx, sOther)
+				renewCh <- renewOutcome{expiresAt: exp, err: rErr}
+			}()
+
+			// 等待协程 B 进入 DeleteUnreferencedOrphanInodes
+			select {
+			case <-deleteSweepStartedCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("round %d: 协程 B 进入孤儿扫描超时", round)
+			}
+
+			// 通过 pool 短轮询 pg_stat_activity 确认协程 B 的第一阶段 SQL 已在 PG 服务端建立快照并正在扫描占位行
+			pollStart := time.Now()
+			for time.Since(pollStart) < 30*time.Millisecond {
+				var count int
+				pErr := pool.QueryRow(ctx, `
+					SELECT count(*)
+					FROM pg_stat_activity
+					WHERE state = 'active'
+					  AND query ILIKE '%FOR UPDATE SKIP LOCKED%'
+					  AND pid <> pg_backend_pid()
+				`).Scan(&count)
+				if pErr == nil && count > 0 {
+					break
+				}
+				time.Sleep(200 * time.Microsecond)
+			}
+
+			// 释放协程 A 提交事务并释放 I_target 行锁
+			releaseOpenCommit()
+
+			// 等待协程 A 完成
+			var openRes openOutcome
+			select {
+			case openRes = <-openCh:
+				require.NoError(t, openRes.err, "round %d: Open 必须成功返回有效句柄", round)
+				require.NotNil(t, openRes.res)
+				require.NotZero(t, openRes.res.Fh, "round %d: Open 句柄必须非 0", round)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("round %d: 协程 A 提交超时", round)
+			}
+
+			// 等待协程 B 完成
+			var renewRes renewOutcome
+			select {
+			case renewRes = <-renewCh:
+				require.NoError(t, renewRes.err, "round %d: RenewSession 必须返回 NoError", round)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("round %d: 协程 B 续期超时", round)
+			}
+
+			// 清理当前轮次钩子
+			mu.Lock()
+			onCreateFileHandleHook = nil
+			onDeleteUnreferencedOrphanInodes = nil
+			afterSweepBeforeCommitHook = nil
+			isHit := roundHitRaceWindow
+			mu.Unlock()
+
+			// 显式断言：
+			// 1. GetAttr(curTargetIno) 必须成功返回 NoError（若被误删则返回 ErrNotFound）
+			_, err = mgr.GetAttr(ctx, curTargetIno)
+			require.NoError(t, err, "round %d: 目标孤儿 Inode %d 绝不能被并发孤儿扫描误删", round, curTargetIno)
+
+			// 2. Fsync(curTargetIno, H2) 必须成功返回 NoError
+			err = mgr.Fsync(ctx, meta.FsyncParams{
+				Ino: curTargetIno,
+				Fh:  openRes.res.Fh,
+			})
+			require.NoError(t, err, "round %d: 目标孤儿 Inode %d 的活跃新句柄 %d 执行 Fsync 必须成功返回 NoError", round, curTargetIno, openRes.res.Fh)
+
+			// 3. 目标磁盘配额未被误扣减
+			diskAfter, err := mgr.GetDisk(ctx, targetDisk.DiskID)
+			require.NoError(t, err)
+			require.Equal(t, diskBefore.UsedInodes, diskAfter.UsedInodes, "round %d: 磁盘 used_inodes 不得被误扣减", round)
+			require.Equal(t, diskBefore.UsedBytes, diskAfter.UsedBytes, "round %d: 磁盘 used_bytes 不得被误扣减", round)
+
+			return isHit
+		}()
+
+		if hit {
+			raceWindowHitCount++
+			t.Logf("round %d: 成功物理实证命中两阶段快照竞态窗口 (55P03 行锁冲突确认，当前累计命中: %d)", round, raceWindowHitCount)
+		} else {
+			t.Logf("round %d: 本轮未探测到行锁冲突 (当前累计命中: %d)", round, raceWindowHitCount)
+		}
+		if round >= 3 && raceWindowHitCount >= 2 {
+			t.Logf("已完成 %d 轮且累计物理命中 %d 次两阶段快照竞态窗口，提前达成验证目标", round, raceWindowHitCount)
+			break
+		}
+	}
+
+	require.Greater(t, raceWindowHitCount, 0, "必须物理实证至少命中 1 次孤儿清理两阶段快照竞态窗口（55P03 行锁竞争实证）")
 }

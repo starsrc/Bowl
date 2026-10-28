@@ -3,7 +3,10 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
@@ -763,4 +767,950 @@ func TestRenewSession_PostgresIntegration(t *testing.T) {
 		})
 		assert.ErrorIs(t, err, meta.ErrBadFileHandle, "未续期的超期会话 GetLk 应返回 ErrBadFileHandle")
 	})
+}
+
+// rowLockExpirySkipDeleteStore 允许在特定并发测试阶段跳过 DeleteExpiredClientSessions，
+// 模拟客户端在未执行全局清扫或清扫刚过时的交错场景，防止其被测试持有的特定会话行锁阻塞。
+type rowLockExpirySkipDeleteStore struct {
+	db.Store
+	skipDeleteExpired bool
+}
+
+type rowLockExpirySkipDeleteQuerier struct {
+	db.Querier
+}
+
+func (q *rowLockExpirySkipDeleteQuerier) DeleteExpiredClientSessions(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (s *rowLockExpirySkipDeleteStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
+	return s.ExecTxWithOptions(ctx, fn)
+}
+
+func (s *rowLockExpirySkipDeleteStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		if s.skipDeleteExpired {
+			return fn(&rowLockExpirySkipDeleteQuerier{Querier: q})
+		}
+		return fn(q)
+	}, opts...)
+}
+
+// TestRenewSession_RowLockWaitAcrossExpiry_MustNotResurrectExpiredLocksAndMustUsePostLockClock 验证 P2 / Ch1-R2：
+// 当 UpsertClientSession 阻塞在 client_sessions 行锁上直至跨越租约过期线时：
+// 1. 锁等待跨期恢复执行时不得死灰复燃过期锁，句柄操作必须返回 ErrBadFileHandle，底表同区间排他锁计数必须严格为 1；
+// 2. 租约续期截止时间必须基于获锁后的数据库最新时钟（而非等锁前宿主机陈旧时间戳）计算。
+func TestRenewSession_RowLockWaitAcrossExpiry_MustNotResurrectExpiredLocksAndMustUsePostLockClock(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	baseStore := db.NewStore(pool)
+	storeShort := &rowLockExpirySkipDeleteStore{Store: baseStore}
+	storeLong := &rowLockExpirySkipDeleteStore{Store: baseStore}
+
+	leaseTTL := 400 * time.Millisecond
+	mgrShort := meta.New(storeShort, meta.WithSessionLeaseTTL(leaseTTL))
+	mgrLong := meta.New(storeLong, meta.WithSessionLeaseTTL(5*time.Second))
+
+	// 1. 创建独立测试虚拟磁盘
+	diskName := fmt.Sprintf("disk-wait-expiry-%d", time.Now().UnixNano())
+	disk, err := mgrShort.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskName,
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = mgrShort.DeleteDisk(context.Background(), disk.DiskID)
+	})
+
+	sessS := uint64(77001)
+	sessC := uint64(77002)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sessS), int64(sessC))
+	})
+
+	// 2. 会话 sessS 打开两个文件 fileI 和 fileJ
+	fileIRes, err := mgrShort.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("file_i.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessS,
+	})
+	require.NoError(t, err)
+	fileI := fileIRes.Inode.Ino
+	fhI := fileIRes.Fh
+
+	fileJRes, err := mgrShort.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("file_j.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessS,
+	})
+	require.NoError(t, err)
+	fileJ := fileJRes.Inode.Ino
+	fhJ := fileJRes.Fh
+
+	// sessS 在 fileI 区间 [0, 100] 获取排他写锁 F_WRLCK
+	err = mgrShort.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileI,
+		Fh:        fhI,
+		LockOwner: 101,
+		SessionID: sessS,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   1,
+		},
+	})
+	require.NoError(t, err)
+
+	// 活跃会话 sessC 打开 fileI
+	openResC, err := mgrLong.Open(ctx, meta.OpenParams{
+		Ino:       fileI,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessC,
+	})
+	require.NoError(t, err)
+	fhC := openResC.Fh
+
+	// 调整 sessS 的过期时间为即将到期（80ms 后），模拟语句启动瞬间尚未过期但即将在等锁期间过期的临界状态
+	_, err = pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() + interval '80 milliseconds' WHERE session_id = $1", int64(sessS))
+	require.NoError(t, err)
+
+	// 3. 开启独立数据库连接事务 txHold 显式锁定 sessS 会话行
+	holdConn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer holdConn.Release()
+
+	txHold, err := holdConn.Begin(ctx)
+	require.NoError(t, err)
+	defer func() {
+		_ = txHold.Rollback(context.Background())
+	}()
+
+	var heldID int64
+	err = txHold.QueryRow(ctx, "SELECT session_id FROM client_sessions WHERE session_id = $1 FOR UPDATE", int64(sessS)).Scan(&heldID)
+	require.NoError(t, err)
+
+	// 4. 在 sessS 尚未过期前，启动协程 F 调用 Flush 尝试续期
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- mgrShort.Flush(ctx, meta.FlushParams{
+			Ino:       fileJ,
+			Fh:        fhJ,
+			SessionID: &sessS,
+		})
+	}()
+
+	// 轮询确认协程 F 已真实进入 client_sessions 行锁等待
+	require.Eventually(t, func() bool {
+		var count int64
+		err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_locks l
+			JOIN pg_stat_activity a ON l.pid = a.pid
+			WHERE a.pid != pg_backend_pid()
+			  AND NOT l.granted
+			  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+		`).Scan(&count)
+		return err == nil && count > 0
+	}, 3*time.Second, 10*time.Millisecond, "协程 F 的 UpsertClientSession 必须真实进入 client_sessions 行锁等待")
+
+	// 5. 轮询确认 sessS 在物理时钟上已真实过期
+	require.Eventually(t, func() bool {
+		var expired bool
+		err := pool.QueryRow(ctx, "SELECT clock_timestamp() > expires_at FROM client_sessions WHERE session_id = $1", int64(sessS)).Scan(&expired)
+		return err == nil && expired
+	}, 3*time.Second, 10*time.Millisecond, "sessS 必须在物理时钟上真实过期")
+
+	// sessC 在 fileI 上调用 SetLk 申请区间 [0, 100] 排他写锁
+	// 跳过 DeleteExpiredClientSessions 防止其等待 txHold 锁
+	storeLong.skipDeleteExpired = true
+	setLkDone := make(chan error, 1)
+	go func() {
+		setLkDone <- mgrLong.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileI,
+			Fh:        fhC,
+			LockOwner: 303,
+			SessionID: sessC,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   3,
+			},
+		})
+	}()
+
+	// 轮询确认 sessC 的 SetLk 已真实进入 client_sessions 行锁等待（等待 txHold 释放 sessS 的行锁）
+	require.Eventually(t, func() bool {
+		var count int64
+		err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_locks l
+			JOIN pg_stat_activity a ON l.pid = a.pid
+			WHERE a.pid != pg_backend_pid()
+			  AND NOT l.granted
+			  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+		`).Scan(&count)
+		return err == nil && count >= 2
+	}, 3*time.Second, 10*time.Millisecond, "sessC 的 SetLk 与协程 F 必须真实进入 client_sessions 行锁等待")
+
+	// 释放 txHold 行锁，让协程 F 与 sessC 的 SetLk 恢复执行
+	err = txHold.Rollback(ctx)
+	require.NoError(t, err)
+
+	var setLkErr error
+	select {
+	case setLkErr = <-setLkDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sessC SetLk 超时未返回")
+	}
+	storeLong.skipDeleteExpired = false
+	require.NoError(t, setLkErr, "活跃会话 sessC 发现 sessS 已过期，必须成功获取排他写锁")
+
+	var flushErr error
+	select {
+	case flushErr = <-flushDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("协程 F Flush 超时未返回")
+	}
+
+	// 6. 核心断言 ①：协程 F 的 Flush 在等锁跨期后恢复执行，必须返回 ErrBadFileHandle（拒绝续命已过期句柄）
+	assert.ErrorIs(t, flushErr, meta.ErrBadFileHandle, "Flush 在等锁跨期后恢复执行时必须返回 ErrBadFileHandle")
+
+	// 核心断言 ②：底表有效排他锁计数必须严格等于 1（仅 sessC 持有锁，绝不允许 sessS 死灰复燃造成冲突排他锁共存）
+	var activeExclusiveLocks int64
+	err = pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM file_locks l
+		JOIN client_sessions s ON l.session_id = s.session_id
+		WHERE l.ino = $1 AND l.lock_type = $2 AND s.expires_at > clock_timestamp()
+	`, int64(fileI), int16(meta.F_WRLCK)).Scan(&activeExclusiveLocks)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), activeExclusiveLocks, "底表有效排他锁计数必须严格等于 1，绝不允许过期锁死灰复燃造成冲突排他锁共存")
+
+	// 核心断言 ③（子测试）：新会话行锁等待耗时后，续期截止时间必须基于获锁后的数据库实时时钟计算
+	t.Run("SubTest_RenewSessionMustUsePostLockClock", func(t *testing.T) {
+		sessR := uint64(77003)
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", int64(sessR))
+		})
+
+		mgrTight := meta.New(storeShort, meta.WithSessionLeaseTTL(250*time.Millisecond))
+
+		// 先激活新会话 sessR
+		_, err := mgrTight.RenewSession(ctx, sessR)
+		require.NoError(t, err)
+
+		holdConn2, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		defer holdConn2.Release()
+
+		txHold2, err := holdConn2.Begin(ctx)
+		require.NoError(t, err)
+		defer func() {
+			_ = txHold2.Rollback(context.Background())
+		}()
+
+		var heldID2 int64
+		err = txHold2.QueryRow(ctx, "SELECT session_id FROM client_sessions WHERE session_id = $1 FOR UPDATE", int64(sessR)).Scan(&heldID2)
+		require.NoError(t, err)
+
+		renewDone := make(chan error, 1)
+		go func() {
+			_, rErr := mgrTight.RenewSession(ctx, sessR)
+			renewDone <- rErr
+		}()
+
+		require.Eventually(t, func() bool {
+			var count int64
+			err := pool.QueryRow(ctx, `
+				SELECT count(*)
+				FROM pg_locks l
+				JOIN pg_stat_activity a ON l.pid = a.pid
+				WHERE a.pid != pg_backend_pid()
+				  AND NOT l.granted
+				  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+			`).Scan(&count)
+			return err == nil && count > 0
+		}, 3*time.Second, 10*time.Millisecond, "RenewSession 必须真实进入 client_sessions 行锁等待")
+
+		// 阻塞等待 180ms（总 leaseTTL 为 250ms，若在获锁前计算宿主机时间，恢复落库时剩余租约被吞噬至不足 70ms）
+		time.Sleep(180 * time.Millisecond)
+
+		err = txHold2.Rollback(ctx)
+		require.NoError(t, err)
+
+		select {
+		case rErr := <-renewDone:
+			require.NoError(t, rErr)
+		case <-time.After(5 * time.Second):
+			t.Fatal("RenewSession 超时未返回")
+		}
+
+		var hasAdequateLease bool
+		err = pool.QueryRow(ctx, "SELECT expires_at > clock_timestamp() + interval '150 milliseconds' FROM client_sessions WHERE session_id = $1", int64(sessR)).Scan(&hasAdequateLease)
+		require.NoError(t, err)
+		assert.True(t, hasAdequateLease, "续期截止时间必须基于获锁后的数据库实时时钟计算，剩余有效租约必须大于 150ms")
+	})
+}
+
+type lockLeaseSyncBarrierStore struct {
+	db.Store
+	onDeleteExpiredClientSessions    func(ctx context.Context, q db.Querier) error
+	onDeleteUnreferencedOrphanInodes func(ctx context.Context, q db.Querier) ([]db.DeleteUnreferencedOrphanInodesRow, error)
+}
+
+func (s *lockLeaseSyncBarrierStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
+	return s.ExecTxWithOptions(ctx, fn)
+}
+
+func (s *lockLeaseSyncBarrierStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	return s.Store.ExecTxWithOptions(ctx, func(q db.Querier) error {
+		wrapped := &lockLeaseSyncBarrierQuerier{
+			Querier: q,
+			store:   s,
+		}
+		return fn(wrapped)
+	}, opts...)
+}
+
+type lockLeaseSyncBarrierQuerier struct {
+	db.Querier
+	store *lockLeaseSyncBarrierStore
+}
+
+func (q *lockLeaseSyncBarrierQuerier) DeleteExpiredClientSessions(ctx context.Context) (int64, error) {
+	if q.store.onDeleteExpiredClientSessions != nil {
+		if err := q.store.onDeleteExpiredClientSessions(ctx, q.Querier); err != nil {
+			return 0, err
+		}
+	}
+	return q.Querier.DeleteExpiredClientSessions(ctx)
+}
+
+func (q *lockLeaseSyncBarrierQuerier) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error) {
+	if q.store.onDeleteUnreferencedOrphanInodes != nil {
+		return q.store.onDeleteUnreferencedOrphanInodes(ctx, q.Querier)
+	}
+	return q.Querier.DeleteUnreferencedOrphanInodes(ctx)
+}
+
+// TestSetLk_UncommittedRenewalAcrossOldExpiry_MustNotGrantConflictingExclusiveLock 验证 Wave 0 / Issue #1 / Ch1-1：
+// 在 PostgreSQL READ COMMITTED 隔离级别下：
+//  1. 会话 S1 持有常规文件 fileIno 的 [0, 100] 排他写锁 F_WRLCK，当前底表已提交的 client_sessions(S1).expires_at = E；
+//  2. 事务 T1（RenewSession(S1)）在物理时钟 t1 < E 时执行 UpsertClientSession(S1)，更新为新租约 E' = t1 + TTL 并持有 S1 行锁，但 T1 尚未提交；
+//  3. 并发事务 T2（活跃会话 S2 申请同区间 [0, 100] 排他写锁）在 t2 < E 时执行完 DeleteExpiredClientSessions（跳过 S1）；
+//     随后物理时钟跨过旧截止时间 E（t3 >= E），T2 执行 ListActiveFileLocksByInoAndFlags 时因普通 SELECT 快照只能看到 T1 未提交前的旧 expires_at = E，
+//     误判 S1 已过期而将其写锁静默过滤，向 S2 授予同区间排他写锁并提交；紧接着 T1 提交新租约 E'，导致底表中 S1 与 S2 同时持有同一文件同区间的冲突排他写锁。
+//
+// 本测试编排确定性时序屏障，断言在未修复前稳定捕获此并发写偏序（真红：SetLk(S2) 返回 nil 且底表有效排他锁数为 2）。
+func TestSetLk_UncommittedRenewalAcrossOldExpiry_MustNotGrantConflictingExclusiveLock(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	type lockLeaseSyncTagKey struct{}
+	const (
+		tagT1Renew = "T1_Renew"
+		tagT2SetLk = "T2_SetLk"
+	)
+
+	t1UpsertedCh := make(chan struct{})
+	t1UpsertedOnce := sync.OnceFunc(func() {
+		close(t1UpsertedCh)
+	})
+	defer t1UpsertedOnce()
+
+	t1AllowCommitCh := make(chan struct{})
+	t1AllowCommitOnce := sync.OnceFunc(func() {
+		close(t1AllowCommitCh)
+	})
+	defer t1AllowCommitOnce()
+
+	t2PastOldExpiryCh := make(chan struct{})
+	t2PastOldExpiryOnce := sync.OnceFunc(func() {
+		close(t2PastOldExpiryCh)
+	})
+	defer t2PastOldExpiryOnce()
+
+	var t2DeleteExpiredDone atomic.Bool
+	var oldExpiresAt time.Time
+
+	baseStore := db.NewStore(pool)
+	barrierStore := &lockLeaseSyncBarrierStore{
+		Store: baseStore,
+		onDeleteExpiredClientSessions: func(ctx context.Context, q db.Querier) error {
+			tag, _ := ctx.Value(lockLeaseSyncTagKey{}).(string)
+			if tag == tagT2SetLk {
+				t2DeleteExpiredDone.Store(true)
+			}
+			return nil
+		},
+		onDeleteUnreferencedOrphanInodes: func(ctx context.Context, q db.Querier) ([]db.DeleteUnreferencedOrphanInodesRow, error) {
+			tag, _ := ctx.Value(lockLeaseSyncTagKey{}).(string)
+			switch tag {
+			case tagT1Renew:
+				// T1: 在 UpsertClientSession(S1) 返回后、执行 DeleteUnreferencedOrphanInodes 时
+				// 关闭 t1UpsertedCh 发出信号，并阻塞等待 <-t1AllowCommitCh
+				t1UpsertedOnce()
+				select {
+				case <-t1AllowCommitCh:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			case tagT2SetLk:
+				// T2: 在 DeleteExpiredClientSessions 执行完毕后，轮询 pool 等待数据库物理时钟跨过 oldExpiresAt
+				for {
+					var isPast bool
+					err := pool.QueryRow(ctx, "SELECT clock_timestamp() >= $1", oldExpiresAt).Scan(&isPast)
+					if err == nil && isPast {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(2 * time.Millisecond):
+					}
+				}
+				t2PastOldExpiryOnce()
+			}
+			return q.DeleteUnreferencedOrphanInodes(ctx)
+		},
+	}
+
+	leaseTTL := 5 * time.Second
+	mgr := meta.New(barrierStore, meta.WithSessionLeaseTTL(leaseTTL))
+
+	// 1. 创建独立测试虚拟磁盘
+	diskName := fmt.Sprintf("disk-uncommitted-renewal-%d", time.Now().UnixNano())
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskName,
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	sess1 := uint64(77101)
+	sess2 := uint64(77102)
+
+	t.Cleanup(func() {
+		t1UpsertedOnce()
+		t1AllowCommitOnce()
+		t2PastOldExpiryOnce()
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelCleanup()
+		_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sess1), int64(sess2))
+	})
+
+	// 会话 S1 创建常规文件 fileIno 并获取 [0, 100] 排他写锁 F_WRLCK
+	createRes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("conflict_test.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	fileIno := createRes.Inode.Ino
+	fh1 := createRes.Fh
+
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fh1,
+		LockOwner: 801,
+		SessionID: sess1,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   1,
+		},
+	})
+	require.NoError(t, err)
+
+	// 会话 S2 打开同一 fileIno 获得 fh2
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess2,
+	})
+	require.NoError(t, err)
+	fh2 := openRes.Fh
+
+	// 2. 将 S1 在底表 client_sessions 的 expires_at 更新为 clock_timestamp() + interval '150 milliseconds'
+	err = pool.QueryRow(ctx, `
+		UPDATE client_sessions
+		SET expires_at = clock_timestamp() + interval '150 milliseconds'
+		WHERE session_id = $1
+		RETURNING expires_at
+	`, int64(sess1)).Scan(&oldExpiresAt)
+	require.NoError(t, err)
+	require.False(t, oldExpiresAt.IsZero())
+
+	// 3. 编排确定性屏障
+	type renewResult struct {
+		expiresAt time.Time
+		err       error
+	}
+	renewDoneCh := make(chan renewResult, 1)
+
+	// 启动协程 1 执行 mgr.RenewSession(ctx, S1)
+	ctxT1 := context.WithValue(ctx, lockLeaseSyncTagKey{}, tagT1Renew)
+	go func() {
+		exp, rErr := mgr.RenewSession(ctxT1, sess1)
+		renewDoneCh <- renewResult{expiresAt: exp, err: rErr}
+	}()
+
+	// 等待协程 1 完成 UpsertClientSession 并在 DeleteUnreferencedOrphanInodes 处阻塞
+	select {
+	case <-t1UpsertedCh:
+	case <-ctx.Done():
+		t.Fatal("等待 T1 完成 UpsertClientSession 超时")
+	}
+
+	// 确认当前数据库物理时钟仍在 oldExpiresAt 之前
+	var stillBefore bool
+	err = pool.QueryRow(ctx, "SELECT clock_timestamp() < $1", oldExpiresAt).Scan(&stillBefore)
+	require.NoError(t, err)
+	require.True(t, stillBefore, "T1 upsert 必须在 oldExpiresAt 到期前完成")
+
+	// 启动后台监控协程：兼容 Step B 修复后 SetLk 在进入 DeleteUnreferencedOrphanInodes 前即阻塞在 S1 行锁上的场景
+	go func() {
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t2PastOldExpiryCh:
+				return
+			case <-ticker.C:
+				if !t2DeleteExpiredDone.Load() {
+					continue
+				}
+				var isPast bool
+				if err := pool.QueryRow(ctx, "SELECT clock_timestamp() >= $1", oldExpiresAt).Scan(&isPast); err != nil || !isPast {
+					continue
+				}
+				var blockedCount int64
+				err := pool.QueryRow(ctx, `
+					SELECT count(*)
+					FROM pg_locks l
+					JOIN pg_stat_activity a ON l.pid = a.pid
+					WHERE a.pid != pg_backend_pid()
+					  AND NOT l.granted
+					  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+				`).Scan(&blockedCount)
+				if err == nil && blockedCount > 0 {
+					t2PastOldExpiryOnce()
+					return
+				}
+			}
+		}
+	}()
+
+	// 启动协程 2 执行 SetLk(S2)
+	type setLkResult struct {
+		err error
+	}
+	setLkDoneCh := make(chan setLkResult, 1)
+	ctxT2 := context.WithValue(ctx, lockLeaseSyncTagKey{}, tagT2SetLk)
+	go func() {
+		sErr := mgr.SetLk(ctxT2, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh2,
+			LockOwner: 802,
+			SessionID: sess2,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   2,
+			},
+		})
+		setLkDoneCh <- setLkResult{err: sErr}
+	}()
+
+	// 等待协程 2 跨过旧过期时间
+	select {
+	case <-t2PastOldExpiryCh:
+	case <-ctx.Done():
+		t.Fatal("等待 T2 跨过旧过期时间超时")
+	}
+
+	// 主协程等待协程 2 返回，或确认其已阻塞在 client_sessions 行锁上
+	var setLkRes setLkResult
+	var setLkReceived bool
+	select {
+	case setLkRes = <-setLkDoneCh:
+		setLkReceived = true
+	case <-time.After(50 * time.Millisecond):
+		require.Eventually(t, func() bool {
+			var count int64
+			err := pool.QueryRow(ctx, `
+				SELECT count(*)
+				FROM pg_locks l
+				JOIN pg_stat_activity a ON l.pid = a.pid
+				WHERE a.pid != pg_backend_pid()
+				  AND NOT l.granted
+				  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+			`).Scan(&count)
+			return err == nil && count > 0
+		}, 2*time.Second, 10*time.Millisecond, "协程 2 必须已返回或阻塞在 client_sessions 行锁")
+	}
+
+	// 放行协程 1 提交
+	t1AllowCommitOnce()
+
+	// 收集协程 1 续期结果
+	var renewRes renewResult
+	select {
+	case renewRes = <-renewDoneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RenewSession(S1) 超时未返回")
+	}
+
+	// 若协程 2 之前在等锁，等待其在协程 1 提交后恢复并返回
+	if !setLkReceived {
+		select {
+		case setLkRes = <-setLkDoneCh:
+			setLkReceived = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("SetLk(S2) 等锁唤醒后超时未返回")
+		}
+	}
+
+	// 4. 核心断言
+	// 断言 ①：RenewSession(S1) 必须成功
+	require.NoError(t, renewRes.err, "RenewSession(S1) 必须成功")
+	require.False(t, renewRes.expiresAt.IsZero(), "RenewSession(S1) 返回的新过期时间不得为零")
+
+	// 查询底表有效排他锁数量
+	var activeExclusiveLocks int64
+	err = pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM file_locks l
+		JOIN client_sessions s ON l.session_id = s.session_id
+		WHERE l.ino = $1 AND s.expires_at > clock_timestamp()
+	`, int64(fileIno)).Scan(&activeExclusiveLocks)
+	require.NoError(t, err)
+
+	t.Logf("【实证观测】RenewSession(S1) err: %v, SetLk(S2) err: %v, 底表有效排他锁数: %d", renewRes.err, setLkRes.err, activeExclusiveLocks)
+
+	// 断言 ②：SetLk(S2) 必须返回 meta.ErrAgain
+	assert.ErrorIs(t, setLkRes.err, meta.ErrAgain, "SetLk(S2) 必须因与未提交已续期的 S1 排他写锁冲突而返回 ErrAgain")
+
+	// 断言 ③：底表有效排他写锁数量必须严格等于 1
+	assert.Equal(t, int64(1), activeExclusiveLocks, "底表有效排他锁数量必须严格等于 1，绝不允许 S1 与 S2 同时持有冲突排他锁")
+
+	// 刚性断言：满足 prompt 要求的 require.ErrorIs(t, setLkErr, meta.ErrAgain)
+	require.ErrorIs(t, setLkRes.err, meta.ErrAgain, "SetLk(S2) 必须返回 ErrAgain")
+}
+
+// TestRenewSession_RowLockWaitAcrossExpiry_PurgesStaleLocksWaitersAndHandlesOnCommit 验证 Wave 1 / Issue #3 / Ch2-2：
+// 当客户端在会话 sessTarget 过期前调用 RenewSessionWithStatus(ctx, sessTarget) 时：
+//  1. 首步 DeleteExpiredClientSessions 因 sessTarget 尚未过期不会将其删除；
+//  2. 随后的 UpsertClientSession 因并发事务持有 client_sessions(sessTarget) 行锁而阻塞；
+//  3. 在阻塞期间物理时钟跨过了 sessTarget 的旧 expires_at；
+//  4. 行锁释放获锁恢复执行后，UpsertClientSession 判定 is_expired = true，原地重建会话并成功提交事务（不回滚）；
+//  5. 核心验证：此时全靠 UpsertClientSession 内部的 purged_locks、purged_waiters、purged_handles 三个 CTE
+//     原子清除该会话残留的旧锁、旧等待者与旧句柄，同时对照会话 sessOther 的全部状态完好保留！
+func TestRenewSession_RowLockWaitAcrossExpiry_PurgesStaleLocksWaitersAndHandlesOnCommit(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	baseStore := db.NewStore(pool)
+	leaseTTL := 10 * time.Second
+	mgr := meta.New(baseStore, meta.WithSessionLeaseTTL(leaseTTL))
+
+	// 1. 创建独立测试虚拟磁盘
+	diskName := fmt.Sprintf("disk-wait-expiry-purge-%d", time.Now().UnixNano())
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskName,
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	sessTarget := uint64(77201)
+	sessOther := uint64(77202)
+
+	t.Cleanup(func() {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelCleanup()
+		_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_lock_waiters WHERE session_id IN ($1, $2)", int64(sessTarget), int64(sessOther))
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_locks WHERE session_id IN ($1, $2)", int64(sessTarget), int64(sessOther))
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_handles WHERE session_id IN ($1, $2)", int64(sessTarget), int64(sessOther))
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sessTarget), int64(sessOther))
+	})
+
+	// 激活目标会话与对照活跃会话（长租约 10s）
+	_, err = mgr.RenewSessionWithStatus(ctx, sessTarget)
+	require.NoError(t, err)
+	_, err = mgr.RenewSessionWithStatus(ctx, sessOther)
+	require.NoError(t, err)
+
+	// 2. 为 sessTarget 真实建立并持久化全部三类状态，同时为 sessOther 建立对照状态：
+	// (a) 句柄 (file_handles)：sessTarget 打开 fileA 与 fileB；sessOther 打开 fileA 与 fileB
+	createResA, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("file_a.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessTarget,
+	})
+	require.NoError(t, err)
+	fileA := createResA.Inode.Ino
+	fhTargetA := createResA.Fh
+
+	createResB, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("file_b.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessOther,
+	})
+	require.NoError(t, err)
+	fileB := createResB.Inode.Ino
+	fhOtherB := createResB.Fh
+
+	openResTargetB, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileB,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessTarget,
+	})
+	require.NoError(t, err)
+	fhTargetB := openResTargetB.Fh
+
+	openResOtherA, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       fileA,
+		Flags:     meta.O_RDWR,
+		SessionID: &sessOther,
+	})
+	require.NoError(t, err)
+	fhOtherA := openResOtherA.Fh
+
+	// (b) 已持有锁 (file_locks)：sessTarget 在 fileA [0, 100] 获取排他写锁；sessOther 在 fileB [0, 100] 获取排他写锁
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileA,
+		Fh:        fhTargetA,
+		LockOwner: 801,
+		SessionID: sessTarget,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   1,
+		},
+	})
+	require.NoError(t, err)
+
+	err = mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileB,
+		Fh:        fhOtherB,
+		LockOwner: 802,
+		SessionID: sessOther,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   2,
+		},
+	})
+	require.NoError(t, err)
+
+	// (c) 等待记录 (file_lock_waiters)：让 sessTarget 在 fileB [0, 100] 上拥有一条真实 PENDING 等待记录；
+	// 同时为 sessOther 在 fileA 上插入一条对照 PENDING 等待记录
+	reqTarget := int64(9001)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status)
+		VALUES ($1, $2, $3, $4, 801, 0, 0, 100, $5, 1, $6)
+	`, int64(sessTarget), reqTarget, int64(fileB), int64(fhTargetB), int16(meta.F_WRLCK), int16(meta.WaiterStatusPending))
+	require.NoError(t, err)
+
+	reqOther := int64(9002)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status)
+		VALUES ($1, $2, $3, $4, 802, 0, 0, 100, $5, 2, $6)
+	`, int64(sessOther), reqOther, int64(fileA), int64(fhOtherA), int16(meta.F_WRLCK), int16(meta.WaiterStatusPending))
+	require.NoError(t, err)
+
+	// 前置断言：确认 sessTarget 在 file_handles、file_locks、file_lock_waiters 三张表中的记录数均 >= 1
+	var (
+		preTargetHandlesCnt int64
+		preTargetLocksCnt   int64
+		preTargetWaitersCnt int64
+	)
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", int64(sessTarget)).Scan(&preTargetHandlesCnt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, preTargetHandlesCnt, int64(1), "前置断言: sessTarget 的 file_handles 记录数必须 >= 1")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", int64(sessTarget)).Scan(&preTargetLocksCnt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, preTargetLocksCnt, int64(1), "前置断言: sessTarget 的 file_locks 记录数必须 >= 1")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", int64(sessTarget)).Scan(&preTargetWaitersCnt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, preTargetWaitersCnt, int64(1), "前置断言: sessTarget 的 file_lock_waiters 记录数必须 >= 1")
+
+	// 对照组前置断言：确认 sessOther 在三张表中的记录数均 >= 1
+	var (
+		preOtherHandlesCnt int64
+		preOtherLocksCnt   int64
+		preOtherWaitersCnt int64
+	)
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", int64(sessOther)).Scan(&preOtherHandlesCnt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, preOtherHandlesCnt, int64(1), "前置断言: sessOther 的 file_handles 记录数必须 >= 1")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", int64(sessOther)).Scan(&preOtherLocksCnt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, preOtherLocksCnt, int64(1), "前置断言: sessOther 的 file_locks 记录数必须 >= 1")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", int64(sessOther)).Scan(&preOtherWaitersCnt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, preOtherWaitersCnt, int64(1), "前置断言: sessOther 的 file_lock_waiters 记录数必须 >= 1")
+
+	// 3. 将 sessTarget 的 expires_at 更新为 clock_timestamp() + interval '150 milliseconds'（此时尚未过期）
+	var oldExpiresAt time.Time
+	err = pool.QueryRow(ctx, `
+		UPDATE client_sessions
+		SET expires_at = clock_timestamp() + interval '150 milliseconds'
+		WHERE session_id = $1
+		RETURNING expires_at
+	`, int64(sessTarget)).Scan(&oldExpiresAt)
+	require.NoError(t, err)
+	require.False(t, oldExpiresAt.IsZero())
+
+	// 立即开启独立连接事务 txHold 显式锁定 sessTarget 会话行
+	holdConn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer holdConn.Release()
+
+	txHold, err := holdConn.Begin(ctx)
+	require.NoError(t, err)
+	defer func() {
+		_ = txHold.Rollback(context.Background())
+	}()
+
+	var heldID int64
+	err = txHold.QueryRow(ctx, "SELECT session_id FROM client_sessions WHERE session_id = $1 FOR UPDATE", int64(sessTarget)).Scan(&heldID)
+	require.NoError(t, err)
+	require.Equal(t, int64(sessTarget), heldID)
+
+	// 4. 在 sessTarget 过期前，启动后台协程调用 mgr.RenewSessionWithStatus(ctx, sessTarget)
+	var stillBefore bool
+	err = pool.QueryRow(ctx, "SELECT clock_timestamp() < $1", oldExpiresAt).Scan(&stillBefore)
+	require.NoError(t, err)
+	require.True(t, stillBefore, "RenewSessionWithStatus 必须在 oldExpiresAt 到期前启动")
+
+	type renewStatusResult struct {
+		res meta.RenewSessionResult
+		err error
+	}
+	renewDone := make(chan renewStatusResult, 1)
+	go func() {
+		rRes, rErr := mgr.RenewSessionWithStatus(ctx, sessTarget)
+		renewDone <- renewStatusResult{res: rRes, err: rErr}
+	}()
+
+	// 轮询 pg_locks 确认该协程已走过 DeleteExpiredClientSessions 并真实阻塞在 client_sessions 行锁等待上
+	require.Eventually(t, func() bool {
+		var count int64
+		err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM pg_locks l
+			JOIN pg_stat_activity a ON l.pid = a.pid
+			WHERE a.pid != pg_backend_pid()
+			  AND NOT l.granted
+			  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+		`).Scan(&count)
+		return err == nil && count > 0
+	}, 3*time.Second, 10*time.Millisecond, "RenewSessionWithStatus 必须真实进入 client_sessions 行锁等待")
+
+	// 5. 轮询数据库确认 clock_timestamp() 已跨过 sessTarget 原 expires_at（真实过期）
+	require.Eventually(t, func() bool {
+		var expired bool
+		err := pool.QueryRow(ctx, "SELECT clock_timestamp() >= $1", oldExpiresAt).Scan(&expired)
+		return err == nil && expired
+	}, 3*time.Second, 10*time.Millisecond, "物理时钟必须已跨过 sessTarget 的旧 expires_at")
+
+	// 随即执行 txHold.Rollback(ctx) 释放行锁，等待 RenewSessionWithStatus 成功提交返回
+	err = txHold.Rollback(ctx)
+	require.NoError(t, err)
+
+	var renewRes renewStatusResult
+	select {
+	case renewRes = <-renewDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RenewSessionWithStatus 超时未返回")
+	}
+
+	// 6. 核心断言：
+	// 断言 ①：RenewSessionWithStatus 返回 NoError，res.SessionRecreated == true，且底表新 expires_at > clock_timestamp()
+	require.NoError(t, renewRes.err, "RenewSessionWithStatus 必须成功提交")
+	assert.True(t, renewRes.res.SessionRecreated, "等锁跨期后原地重建会话，SessionRecreated 必须为 true")
+	assert.True(t, renewRes.res.ExpiresAt.After(oldExpiresAt), "新 expires_at 必须更新推进")
+
+	var (
+		newExpiresAt time.Time
+		isFuture     bool
+	)
+	err = pool.QueryRow(ctx, "SELECT expires_at, expires_at > clock_timestamp() FROM client_sessions WHERE session_id = $1", int64(sessTarget)).Scan(&newExpiresAt, &isFuture)
+	require.NoError(t, err)
+	assert.True(t, isFuture, "底表新 expires_at 必须大于当前物理时钟")
+	assert.WithinDuration(t, renewRes.res.ExpiresAt, newExpiresAt, 50*time.Millisecond)
+
+	// 断言 ②：直接查询底表 file_locks、file_lock_waiters、file_handles 中 WHERE session_id = sessTarget 的记录数，
+	// 三张表计数均必须严格等于 0（证明 purged_locks、purged_waiters、purged_handles 三个 CTE 生效）
+	var (
+		targetLocksCnt   int64
+		targetWaitersCnt int64
+		targetHandlesCnt int64
+	)
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", int64(sessTarget)).Scan(&targetLocksCnt)
+	require.NoError(t, err)
+	assert.Zero(t, targetLocksCnt, "sessTarget 的残留旧锁必须被 purged_locks 原子清除")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", int64(sessTarget)).Scan(&targetWaitersCnt)
+	require.NoError(t, err)
+	assert.Zero(t, targetWaitersCnt, "sessTarget 的残留旧等待者必须被 purged_waiters 原子清除")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", int64(sessTarget)).Scan(&targetHandlesCnt)
+	require.NoError(t, err)
+	assert.Zero(t, targetHandlesCnt, "sessTarget 的残留旧句柄必须被 purged_handles 原子清除")
+
+	// 断言 ③：直接查询底表验证对照组 sessOther 在 client_sessions、file_handles、file_locks、file_lock_waiters 中的活跃记录均完整保留未被误删
+	var (
+		otherSessionsCnt int64
+		otherHandlesCnt  int64
+		otherLocksCnt    int64
+		otherWaitersCnt  int64
+	)
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id = $1 AND expires_at > clock_timestamp()", int64(sessOther)).Scan(&otherSessionsCnt)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), otherSessionsCnt, "对照会话 sessOther 必须在 client_sessions 中完好活跃")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", int64(sessOther)).Scan(&otherHandlesCnt)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), otherHandlesCnt, "对照会话 sessOther 的 2 个句柄必须完整保留")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", int64(sessOther)).Scan(&otherLocksCnt)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), otherLocksCnt, "对照会话 sessOther 的已持有锁必须完整保留")
+
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", int64(sessOther)).Scan(&otherWaitersCnt)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), otherWaitersCnt, "对照会话 sessOther 的等待者记录必须完整保留")
 }

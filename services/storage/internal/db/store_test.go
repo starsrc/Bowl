@@ -1625,3 +1625,262 @@ func TestMigration_AddDisksAndInodeRootIno_BackfillAndDown(t *testing.T) {
 		assert.False(t, columnExists, "Down 回滚后 used_inodes 列应不存在")
 	})
 }
+
+func TestSQLStore_TopLevelOverrides_LeaseClockPurgeAndOrphanTwoPhaseReclaim(t *testing.T) {
+	store, pool := setupTestDB(t)
+	ctx := context.Background()
+
+	t.Run("子测试 1：顶层 store.UpsertClientSession 的 WithLeaseTTL、获锁后时钟裁决与跨期原子清理", func(t *testing.T) {
+		const sessTop = int64(77401)
+		inoTop := nextTestIno()
+
+		t.Cleanup(func() {
+			ctxClean := context.Background()
+			_, _ = pool.Exec(ctxClean, "DELETE FROM file_lock_waiters WHERE session_id = $1", sessTop)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM file_locks WHERE session_id = $1", sessTop)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM file_handles WHERE session_id = $1", sessTop)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM client_sessions WHERE session_id = $1", sessTop)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM inodes WHERE ino = $1", inoTop)
+		})
+
+		// 先清理可能存在的历史脏数据
+		_, _ = pool.Exec(ctx, "DELETE FROM file_lock_waiters WHERE session_id = $1", sessTop)
+		_, _ = pool.Exec(ctx, "DELETE FROM file_locks WHERE session_id = $1", sessTop)
+		_, _ = pool.Exec(ctx, "DELETE FROM file_handles WHERE session_id = $1", sessTop)
+		_, _ = pool.Exec(ctx, "DELETE FROM client_sessions WHERE session_id = $1", sessTop)
+		_, _ = pool.Exec(ctx, "DELETE FROM inodes WHERE ino = $1", inoTop)
+
+		// 1. 预置基础 Inode 与会话 sessTop（距离过期剩 120ms），并关联 handles、locks、waiters
+		_, err := pool.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $1, $2, 1, 1000, 1000, $1)
+		`, inoTop, int32(0o100644))
+		require.NoError(t, err)
+
+		_, err = pool.Exec(ctx, `
+			INSERT INTO client_sessions (session_id, expires_at, created_at, updated_at)
+			VALUES ($1, clock_timestamp() + interval '120 milliseconds', clock_timestamp() - interval '1 second', clock_timestamp() - interval '1 second')
+		`, sessTop)
+		require.NoError(t, err)
+
+		var fh int64
+		err = pool.QueryRow(ctx, `
+			INSERT INTO file_handles (ino, session_id, flags)
+			VALUES ($1, $2, 0)
+			RETURNING fh
+		`, inoTop, sessTop).Scan(&fh)
+		require.NoError(t, err)
+
+		_, err = pool.Exec(ctx, `
+			INSERT INTO file_locks (session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid)
+			VALUES ($1, $2, $3, 1001, 0, 0, 100, 0, 1234)
+		`, sessTop, inoTop, fh)
+		require.NoError(t, err)
+
+		_, err = pool.Exec(ctx, `
+			INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status)
+			VALUES ($1, 1, $2, $3, 1001, 0, 0, 100, 0, 1234, 1)
+		`, sessTop, inoTop, fh)
+		require.NoError(t, err)
+
+		// 2. 开启独立连接事务 txHold 执行 SELECT ... FOR UPDATE 持有行锁
+		txHold, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() {
+			_ = txHold.Rollback(context.Background())
+		}()
+
+		var lockedSess int64
+		err = txHold.QueryRow(ctx, "SELECT session_id FROM client_sessions WHERE session_id = $1 FOR UPDATE", sessTop).Scan(&lockedSess)
+		require.NoError(t, err)
+		assert.Equal(t, sessTop, lockedSess)
+
+		// 3. 在 sessTop 过期前启动后台协程直接调用顶层 store.UpsertClientSession
+		// 故意在 arg.ExpiresAt 传入过去时间（1 小时前），以 100% 反事实证明顶层覆写确实启用了 WithLeaseTTL 而非退回 *Queries 旧 SQL
+		type upsertResult struct {
+			sess db.ClientSession
+			err  error
+		}
+		resCh := make(chan upsertResult, 1)
+		go func() {
+			sessRes, upsertErr := store.UpsertClientSession(
+				db.WithLeaseTTL(context.Background(), 400*time.Millisecond),
+				db.UpsertClientSessionParams{
+					SessionID: sessTop,
+					ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(-1 * time.Hour), Valid: true},
+				},
+			)
+			resCh <- upsertResult{sess: sessRes, err: upsertErr}
+		}()
+
+		// 4. 轮询 pg_locks 确认协程已真实阻塞在 client_sessions 行锁等待
+		require.Eventually(t, func() bool {
+			var count int64
+			pollErr := pool.QueryRow(ctx, `
+				SELECT count(*)
+				FROM pg_locks l
+				JOIN pg_stat_activity a ON l.pid = a.pid
+				WHERE a.pid != pg_backend_pid()
+				  AND NOT l.granted
+				  AND (a.query ILIKE '%client_sessions%' OR a.wait_event_type = 'Lock')
+			`).Scan(&count)
+			return pollErr == nil && count > 0
+		}, 3*time.Second, 10*time.Millisecond, "顶层 UpsertClientSession 必须真实进入 client_sessions 行锁等待")
+
+		// 5. 待数据库物理时钟跨过原 120ms 截止时间后再 txHold.Rollback 释放行锁
+		require.Eventually(t, func() bool {
+			var expired bool
+			pollErr := pool.QueryRow(ctx, "SELECT clock_timestamp() > expires_at FROM client_sessions WHERE session_id = $1", sessTop).Scan(&expired)
+			return pollErr == nil && expired
+		}, 3*time.Second, 10*time.Millisecond, "sessTop 必须在物理时钟上真实跨过原截止时间")
+
+		err = txHold.Rollback(ctx)
+		require.NoError(t, err)
+
+		var res upsertResult
+		select {
+		case res = <-resCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("UpsertClientSession 等待释放行锁超时")
+		}
+		require.NoError(t, res.err)
+
+		// 严格断言：
+		// ① 返回的 sess.CreatedAt.Equal(sess.UpdatedAt) 为 true（跨期原地重建）
+		assert.True(t, res.sess.CreatedAt.Time.Equal(res.sess.UpdatedAt.Time), "跨期原地重建会话的 CreatedAt 必须等于 UpdatedAt")
+
+		// ② 底表剩余有效租约 expires_at > clock_timestamp() + interval '250 milliseconds'（证明同时生效了 WithLeaseTTL 与获锁后实时时钟）
+		var remainingValid bool
+		err = pool.QueryRow(ctx, "SELECT expires_at > (clock_timestamp() + interval '250 milliseconds') FROM client_sessions WHERE session_id = $1", sessTop).Scan(&remainingValid)
+		require.NoError(t, err)
+		assert.True(t, remainingValid, "底表剩余有效租约必须满足 expires_at > clock_timestamp() + interval '250 milliseconds'")
+
+		// ③ 该会话原有的 file_handles、file_locks、file_lock_waiters 三表记录均已被原子清除为 0
+		var handlesCount, locksCount, waitersCount int64
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", sessTop).Scan(&handlesCount)
+		require.NoError(t, err)
+		assert.Zero(t, handlesCount, "该会话原有的 file_handles 必须被原子清空")
+
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", sessTop).Scan(&locksCount)
+		require.NoError(t, err)
+		assert.Zero(t, locksCount, "该会话原有的 file_locks 必须被原子清空")
+
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", sessTop).Scan(&waitersCount)
+		require.NoError(t, err)
+		assert.Zero(t, waitersCount, "该会话原有的 file_lock_waiters 必须被原子清空")
+
+		// 对照调用：无 WithLeaseTTL 的顶层 store.UpsertClientSession
+		// 验证未注入 WithLeaseTTL 时严格采用显式 arg.ExpiresAt 且活跃续租时 UpdatedAt.After(CreatedAt) 为 true
+		const sessCtrl = int64(77402)
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", sessCtrl)
+		})
+		_, _ = pool.Exec(ctx, "DELETE FROM client_sessions WHERE session_id = $1", sessCtrl)
+
+		initExpires := time.Now().Add(10 * time.Minute)
+		initSess, err := store.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+			SessionID: sessCtrl,
+			ExpiresAt: pgtype.Timestamptz{Time: initExpires, Valid: true},
+		})
+		require.NoError(t, err)
+		assert.True(t, initSess.CreatedAt.Time.Equal(initSess.UpdatedAt.Time))
+
+		// 确保时间跨过 microsecond 粒度
+		time.Sleep(5 * time.Millisecond)
+
+		explicitExpires := time.Now().Add(30 * time.Minute)
+		renewedSess, err := store.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+			SessionID: sessCtrl,
+			ExpiresAt: pgtype.Timestamptz{Time: explicitExpires, Valid: true},
+		})
+		require.NoError(t, err)
+
+		assert.True(t, renewedSess.UpdatedAt.Time.After(renewedSess.CreatedAt.Time), "活跃续租时 UpdatedAt 必须严格晚于 CreatedAt")
+		assert.Equal(t, explicitExpires.Truncate(time.Microsecond).UTC(), renewedSess.ExpiresAt.Time.Truncate(time.Microsecond).UTC(), "未注入 WithLeaseTTL 时必须严格采用显式 arg.ExpiresAt")
+
+		var dbExpiresAt time.Time
+		err = pool.QueryRow(ctx, "SELECT expires_at FROM client_sessions WHERE session_id = $1", sessCtrl).Scan(&dbExpiresAt)
+		require.NoError(t, err)
+		assert.Equal(t, explicitExpires.Truncate(time.Microsecond).UTC(), dbExpiresAt.Truncate(time.Microsecond).UTC(), "底表 expires_at 必须与显式传入值一致")
+	})
+
+	t.Run("子测试 2：顶层 store.DeleteUnreferencedOrphanInodes 的独立事务两阶段锁定与复核", func(t *testing.T) {
+		rootIno := nextTestIno()
+		inoReclaim := nextTestIno()
+		inoReferenced := nextTestIno()
+		inoLocked := nextTestIno()
+
+		t.Cleanup(func() {
+			ctxClean := context.Background()
+			_, _ = pool.Exec(ctxClean, "DELETE FROM file_handles WHERE ino = $1", inoReferenced)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM inodes WHERE ino IN ($1, $2, $3)", inoReclaim, inoReferenced, inoLocked)
+		})
+
+		// 在专属测试 root_ino 下创建 3 个 nlink = 0 孤儿 Inode：
+		// ① 无句柄且无行锁的 inoReclaim
+		// ② 有 file_handles 引用的 inoReferenced
+		// ③ 无句柄但被另一独立事务 txLock 持有 FOR UPDATE 行锁的 inoLocked
+		_, err := pool.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino, size)
+			VALUES ($1, 0, $4, 0, 1000, 1000, $5, 4096),
+			       ($2, 0, $4, 0, 1000, 1000, $5, 2048),
+			       ($3, 0, $4, 0, 1000, 1000, $5, 1024)
+		`, inoReclaim, inoReferenced, inoLocked, int32(0o100644), rootIno)
+		require.NoError(t, err)
+
+		// 为 inoReferenced 插入 file_handles 记录
+		_, err = pool.Exec(ctx, "INSERT INTO file_handles (ino, flags) VALUES ($1, 0)", inoReferenced)
+		require.NoError(t, err)
+
+		// 开启独立事务 txLock 对 inoLocked 施加 FOR UPDATE 行锁
+		txLock, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() {
+			_ = txLock.Rollback(context.Background())
+		}()
+
+		var lockedIno int64
+		err = txLock.QueryRow(ctx, "SELECT ino FROM inodes WHERE ino = $1 FOR UPDATE", inoLocked).Scan(&lockedIno)
+		require.NoError(t, err)
+		assert.Equal(t, inoLocked, lockedIno)
+
+		// 直接调用顶层 store.DeleteUnreferencedOrphanInodes
+		deletedRows, err := store.DeleteUnreferencedOrphanInodes(ctx)
+		require.NoError(t, err)
+
+		// 严格断言：
+		// 返回结果精确包含 inoReclaim（校验其 Ino、RootIno、Mode、Size）且不包含 inoReferenced 与 inoLocked
+		var foundReclaim bool
+		for _, row := range deletedRows {
+			if row.Ino == inoReclaim {
+				foundReclaim = true
+				assert.Equal(t, rootIno, row.RootIno)
+				assert.Equal(t, int32(0o100644), row.Mode)
+				assert.Equal(t, int64(4096), row.Size)
+			}
+			assert.NotEqual(t, inoReferenced, row.Ino, "有句柄引用的 inoReferenced 绝不能被删除")
+			assert.NotEqual(t, inoLocked, row.Ino, "被独立事务持有行锁的 inoLocked 必须被 SKIP LOCKED 跳过")
+		}
+		assert.True(t, foundReclaim, "deletedRows 必须精确包含 inoReclaim")
+
+		// 查询底表验证 inoReclaim 已物理删除而 inoReferenced 与 inoLocked 完整保留
+		var reclaimExists bool
+		err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM inodes WHERE ino = $1)", inoReclaim).Scan(&reclaimExists)
+		require.NoError(t, err)
+		assert.False(t, reclaimExists, "inoReclaim 必须已被物理删除")
+
+		var refExists bool
+		err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM inodes WHERE ino = $1)", inoReferenced).Scan(&refExists)
+		require.NoError(t, err)
+		assert.True(t, refExists, "inoReferenced 必须完整保留在底表")
+
+		var lockedExists bool
+		err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM inodes WHERE ino = $1)", inoLocked).Scan(&lockedExists)
+		require.NoError(t, err)
+		assert.True(t, lockedExists, "inoLocked 必须完整保留在底表")
+
+		// 释放锁
+		err = txLock.Rollback(ctx)
+		require.NoError(t, err)
+	})
+}

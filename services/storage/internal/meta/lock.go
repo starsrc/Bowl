@@ -71,7 +71,7 @@ func (m *manager) touchActiveClientSessionForHandle(ctx context.Context, q db.Qu
 		m.notifyAllLockWaiters()
 	}
 
-	session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+	session, err := q.UpsertClientSession(db.WithLeaseTTL(ctx, leaseTTL), db.UpsertClientSessionParams{
 		SessionID: int64(sessionID),
 		ExpiresAt: pgtype.Timestamptz{
 			Time:  time.Now().Add(leaseTTL),
@@ -121,7 +121,7 @@ func (m *manager) renewClientSession(ctx context.Context, q db.Querier, sessionI
 	if deletedCount > 0 {
 		m.notifyAllLockWaiters()
 	}
-	session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+	session, err := q.UpsertClientSession(db.WithLeaseTTL(ctx, leaseTTL), db.UpsertClientSessionParams{
 		SessionID: int64(sessionID),
 		ExpiresAt: pgtype.Timestamptz{
 			Time:  time.Now().Add(leaseTTL),
@@ -371,7 +371,8 @@ func (m *manager) SetLk(ctx context.Context, params SetLkParams) error {
 			}
 		}
 
-		if err := m.touchActiveClientSessionForHandle(ctx, q, params.SessionID, handle.CreatedAt); err != nil {
+		syncCtx := db.WithLockSyncIno(ctx, int64(params.Ino))
+		if err := m.touchActiveClientSessionForHandle(syncCtx, q, params.SessionID, handle.CreatedAt); err != nil {
 			return err
 		}
 
@@ -970,6 +971,11 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 				})
 				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) {
+						if sessionID != 0 {
+							if touchErr := m.touchActiveClientSession(ctx, q, params.SessionID); touchErr != nil {
+								return touchErr
+							}
+						}
 						return ErrBadFileHandle
 					}
 					return fmt.Errorf("get file handle (fh=%d, ino=%d): %w", params.Fh, params.Ino, err)
@@ -981,7 +987,8 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 					}
 				}
 
-				if err := m.touchActiveClientSessionForHandle(ctx, q, params.SessionID, handle.CreatedAt); err != nil {
+				syncCtx := db.WithLockSyncIno(ctx, int64(params.Ino))
+				if err := m.touchActiveClientSessionForHandle(syncCtx, q, params.SessionID, handle.CreatedAt); err != nil {
 					return err
 				}
 
@@ -1216,8 +1223,8 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 					}
 					return true, ErrInterrupted
 				}
-				if (waiterEverPersisted && !errors.Is(txErr, ErrBadFileHandle)) || errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
-					m.cleanupCancelledWaiter(params.Ino, sessionID, requestID)
+				if (waiterEverPersisted && !errors.Is(txErr, errExpiredSessionBadHandle)) || errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
+					m.cleanupCancelledWaiter(params.Ino, sessionID, requestID, fh)
 				}
 				if errors.Is(txErr, context.Canceled) || errors.Is(txErr, context.DeadlineExceeded) || ctx.Err() != nil {
 					return true, ErrInterrupted
@@ -1274,7 +1281,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				m.cleanupCancelledWaiter(params.Ino, sessionID, requestID)
+				m.cleanupCancelledWaiter(params.Ino, sessionID, requestID, fh)
 				return true, ErrInterrupted
 			case <-notifyCh:
 				timer.Stop()
@@ -1295,7 +1302,7 @@ func (m *manager) SetLkw(ctx context.Context, params SetLkwParams) error {
 	}
 }
 
-func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64) {
+func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID, expectedFh int64) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1331,6 +1338,10 @@ func (m *manager) cleanupCancelledWaiter(ino uint64, sessionID, requestID int64)
 				return nil
 			}
 			return err
+		}
+
+		if waiter.Fh != expectedFh {
+			return nil
 		}
 
 		if waiter.Status == WaiterStatusGranted {

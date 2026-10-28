@@ -5928,3 +5928,668 @@ func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t
 	assert.Equal(t, int64(49), activeLocks[0].EndOffset)
 }
 
+func TestSetLkw_Integration_PersistedWaiterCleanedUpOnHandleInvalidBadFileHandle(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	store := db.NewStore(pool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. 创建独立测试磁盘与常规文件
+	mgrHolder := meta.New(store, meta.WithSessionLeaseTTL(10*time.Second))
+	diskName := fmt.Sprintf("setlkw_waiter_handle_disk_%d", time.Now().UnixNano())
+	disk, err := mgrHolder.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     diskName,
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	sess1 := uint64(time.Now().UnixNano()&0x3fffffffffffffff) + 101
+	sess2 := sess1 + 1
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = mgrHolder.DeleteDisk(cleanupCtx, disk.DiskID)
+		sids := []int64{int64(sess1), int64(sess2)}
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_lock_waiters WHERE session_id = ANY($1::bigint[])", sids)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_locks WHERE session_id = ANY($1::bigint[])", sids)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_handles WHERE session_id = ANY($1::bigint[])", sids)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM client_sessions WHERE session_id = ANY($1::bigint[])", sids)
+	})
+
+	// 会话 sess1 续期注册
+	_, err = mgrHolder.RenewSession(ctx, sess1)
+	require.NoError(t, err)
+
+	// 在独立磁盘下创建测试文件并为 sess1 打开句柄 fh1
+	createRes, err := mgrHolder.Create(ctx, meta.CreateParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("test_waiter_handle.dat"),
+		Mode:      0o644,
+		Flags:     meta.O_CREAT | meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	fileIno := createRes.Inode.Ino
+	fh1 := createRes.Fh
+
+	// 2. sess1 成功获取 [0, 100] 排他写锁 F_WRLCK
+	err = mgrHolder.SetLk(ctx, meta.SetLkParams{
+		Ino:       fileIno,
+		Fh:        fh1,
+		LockOwner: 101,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   1,
+		},
+		LkFlags:   0,
+		SessionID: sess1,
+	})
+	require.NoError(t, err)
+
+	activeLocks, err := store.ListActiveFileLocksByInoAndFlags(ctx, db.ListActiveFileLocksByInoAndFlagsParams{
+		Ino:     int64(fileIno),
+		LkFlags: 0,
+	})
+	require.NoError(t, err)
+	require.Len(t, activeLocks, 1, "会话 sess1 必须成功持有 [0, 100] 写锁")
+	require.Equal(t, int64(101), activeLocks[0].LockOwner)
+	require.Equal(t, int64(0), activeLocks[0].StartOffset)
+	require.Equal(t, int64(100), activeLocks[0].EndOffset)
+
+	// 3. 会话 sess2 打开同一文件获得 fh2
+	mgrWaiter := meta.New(store, meta.WithSessionLeaseTTL(10*time.Second))
+	_, err = mgrWaiter.RenewSession(ctx, sess2)
+	require.NoError(t, err)
+
+	openRes, err := mgrWaiter.Open(ctx, meta.OpenParams{
+		Ino:       fileIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess2,
+	})
+	require.NoError(t, err)
+	fh2 := openRes.Fh
+
+	// 在带 3 秒超时保护的 waitCtx 下调用 SetLkw，发生阻塞等待
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer waitCancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mgrWaiter.SetLkw(waitCtx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fh2,
+			LockOwner: 202,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   2,
+			},
+			LkFlags:   0,
+			SessionID: sess2,
+			RequestID: 9901,
+		})
+	}()
+
+	// 证实 sess2 确实首轮阻塞并在底表持久化了 status = PENDING 等待记录
+	require.Eventually(t, func() bool {
+		var count int64
+		qErr := pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2 AND status = $3", int64(sess2), int64(9901), meta.WaiterStatusPending).Scan(&count)
+		return qErr == nil && count == 1
+	}, 2*time.Second, 10*time.Millisecond, "sess2 的 SetLkw 必须已在 file_lock_waiters 底表持久化 PENDING 记录")
+
+	// 主动释放/销毁句柄 fh2（模拟句柄失效/关闭，例如客户端并发 Release）
+	err = mgrWaiter.Release(ctx, meta.ReleaseParams{
+		Ino:       fileIno,
+		Fh:        fh2,
+		SessionID: &sess2,
+	})
+	require.NoError(t, err)
+
+	// 依赖 SetLkw 自身轮询定时器（最大 50ms）或释放句柄通知自然唤醒重检
+	var setLkwErr error
+	select {
+	case setLkwErr = <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("等待 mgrWaiter.SetLkw 退出超时")
+	}
+
+	// 4. 显式断言：
+	// mgrWaiter.SetLkw 必须返回错误且为 ErrBadFileHandle
+	require.Error(t, setLkwErr)
+	require.ErrorIs(t, setLkwErr, meta.ErrBadFileHandle, "SetLkw 在句柄失效重试时必须返回 ErrBadFileHandle")
+
+	// SetLkw 返回后，立即直接查询 PostgreSQL 底表，断言计数必须严格等于 0（零脏数据残留）！
+	var remainingWaiters int64
+	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2", int64(sess2), int64(9901)).Scan(&remainingWaiters)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), remainingWaiters, "SetLkw 因句柄失效返回 ErrBadFileHandle 终止退出后，file_lock_waiters 底表中不得残留 PENDING 脏数据")
+}
+
+type waiterExpectedFhHookQuerier struct {
+	db.Querier
+	onGetFileHandle func(ctx context.Context, q db.Querier, params db.GetFileHandleParams) (db.FileHandle, error)
+}
+
+func (q *waiterExpectedFhHookQuerier) GetFileHandle(ctx context.Context, params db.GetFileHandleParams) (db.FileHandle, error) {
+	if q.onGetFileHandle != nil {
+		return q.onGetFileHandle(ctx, q.Querier, params)
+	}
+	return q.Querier.GetFileHandle(ctx, params)
+}
+
+type waiterExpectedFhHookStore struct {
+	db.Store
+	onGetFileHandle func(ctx context.Context, q db.Querier, params db.GetFileHandleParams) (db.FileHandle, error)
+	onExecTx        func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error
+}
+
+func (s *waiterExpectedFhHookStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
+	return s.ExecTxWithOptions(ctx, fn)
+}
+
+func (s *waiterExpectedFhHookStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	wrappedFn := func(q db.Querier) error {
+		hookQ := &waiterExpectedFhHookQuerier{
+			Querier:         q,
+			onGetFileHandle: s.onGetFileHandle,
+		}
+		return fn(hookQ)
+	}
+	if s.onExecTx != nil {
+		return s.onExecTx(ctx, wrappedFn, opts...)
+	}
+	return s.Store.ExecTxWithOptions(ctx, wrappedFn, opts...)
+}
+
+// TestSetLkw_Integration_CleanupCancelledWaiter_PreservesReplacedHandleOnSameRequestID 验证 Issue #4 / Ch2-5：
+// 覆盖同一活跃会话下，旧句柄 fhOld 的 SetLkw 退出执行 cleanupCancelledWaiter(expectedFh = fhOld) 时，
+// 同一 (session_id, request_id) 已被该活跃会话的新句柄 fhNew 复用的场景。
+// 必须严格触发并保护 cleanupCancelledWaiter 中 if waiter.Fh != expectedFh { return nil } 防误删/防误回滚分支：
+// 子场景 A：fhNew 处于 PENDING 等待状态，旧句柄延迟清理绝不误删 fhNew 的等待者记录；sess1 解锁后 fhNew 成功获锁。
+// 子场景 B：fhNew 已推进至 GRANTED 并持有排他锁，旧句柄延迟清理绝不误回滚 fhNew 的已授排他锁。
+func TestSetLkw_Integration_CleanupCancelledWaiter_PreservesReplacedHandleOnSameRequestID(t *testing.T) {
+	dsn := getStorageTestDSN()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("skipping postgres test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping postgres test (ping failed): %v", err)
+	}
+
+	t.Run("SubscenarioA_PendingWaiterPreservedAgainstDelayedOldWaiterCleanup", func(t *testing.T) {
+		sess1 := uint64(77301)
+		sess2 := uint64(77302)
+		reqID := int64(88001)
+
+		cleanTables := func() {
+			cleanupCtx := context.Background()
+			sids := []int64{int64(sess1), int64(sess2)}
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_lock_waiters WHERE session_id = ANY($1::bigint[])", sids)
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_locks WHERE session_id = ANY($1::bigint[])", sids)
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_handles WHERE session_id = ANY($1::bigint[])", sids)
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM client_sessions WHERE session_id = ANY($1::bigint[])", sids)
+		}
+		cleanTables()
+
+		rawStore := db.NewStore(pool)
+		hookStore := &waiterExpectedFhHookStore{Store: rawStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-waiter-expected-fh-a-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+			cleanTables()
+		})
+
+		_, err = mgr.RenewSession(ctx, sess1)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sess2)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("test_waiter_replace_a.dat"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_CREAT | meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh1 := createRes.Fh
+
+		// 1. sess1 获取 [0, 100] 排他写锁 F_WRLCK
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: 101,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   1,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		// 2. 活跃长租约会话 sess2 打开同一文件两次获得两个不同句柄 fhOld 与 fhNew
+		openResOld, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		fhOld := openResOld.Fh
+
+		openResNew, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		fhNew := openResNew.Fh
+		require.NotEqual(t, fhOld, fhNew, "fhOld 与 fhNew 必须是同一会话下的不同句柄")
+
+		// 设置挂起拦截机制：当 fhOld 被 Release 删除后，SetLkw 检测到 ErrBadFileHandle，
+		// 在即将进入 cleanupCancelledWaiter 事务前精确暂停
+		var (
+			pauseBeforeCleanup atomic.Bool
+			cleanupPaused      = make(chan struct{})
+			cleanupPausedOnce  sync.Once
+			resumeCleanup      = make(chan struct{})
+		)
+		closeResume := sync.OnceFunc(func() { close(resumeCleanup) })
+		defer closeResume()
+
+		hookStore.onGetFileHandle = func(ctx context.Context, q db.Querier, params db.GetFileHandleParams) (db.FileHandle, error) {
+			handle, hErr := q.GetFileHandle(ctx, params)
+			if params.Fh == int64(fhOld) && errors.Is(hErr, pgx.ErrNoRows) {
+				pauseBeforeCleanup.Store(true)
+			}
+			return handle, hErr
+		}
+
+		hookStore.onExecTx = func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			if pauseBeforeCleanup.CompareAndSwap(true, false) {
+				cleanupPausedOnce.Do(func() {
+					close(cleanupPaused)
+				})
+				<-resumeCleanup
+			}
+			return rawStore.ExecTxWithOptions(ctx, fn, opts...)
+		}
+
+		// 3. sess2 使用 (Fh: fhOld, RequestID: reqID) 发起阻塞 SetLkw
+		ctxOld, cancelOld := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelOld()
+
+		errChOld := make(chan error, 1)
+		go func() {
+			errChOld <- mgr.SetLkw(ctxOld, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhOld,
+				LockOwner: 202,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   2,
+				},
+				LkFlags:   0,
+				SessionID: sess2,
+				RequestID: uint64(reqID),
+			})
+		}()
+
+		// 轮询底表确认 file_lock_waiters 中 (sess2, reqID) 的 fh == fhOld && status == 'PENDING' 已落库
+		require.Eventually(t, func() bool {
+			var count int64
+			qErr := pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2 AND fh = $3 AND status = $4", int64(sess2), reqID, int64(fhOld), meta.WaiterStatusPending).Scan(&count)
+			return qErr == nil && count == 1
+		}, 2*time.Second, 10*time.Millisecond, "fhOld 必须已在 file_lock_waiters 持久化 PENDING 记录")
+
+		// 4. 调用 mgr.Release 关闭 fhOld
+		err = mgr.Release(ctx, meta.ReleaseParams{
+			Ino:       fileIno,
+			Fh:        fhOld,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+
+		// 等待 fhOld 的 SetLkw 循环检测到句柄关闭并暂停在即将执行 cleanupCancelledWaiter 事务前
+		select {
+		case <-cleanupPaused:
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 fhOld 进入 cleanupCancelledWaiter 挂起超时")
+		}
+
+		// 5. 在挂起窗口内，sess2 使用新句柄 (Fh: fhNew, RequestID: reqID) 发起新的 SetLkw
+		ctxNew, cancelNew := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelNew()
+
+		errChNew := make(chan error, 1)
+		go func() {
+			errChNew <- mgr.SetLkw(ctxNew, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhNew,
+				LockOwner: 202,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   2,
+				},
+				LkFlags:   0,
+				SessionID: sess2,
+				RequestID: uint64(reqID),
+			})
+		}()
+
+		// 轮询底表确认 (sess2, reqID) 现已被更新/写入为 fh == fhNew && status == 'PENDING'
+		require.Eventually(t, func() bool {
+			var waiterFh int64
+			var waiterStatus int16
+			qErr := pool.QueryRow(ctx, "SELECT fh, status FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2", int64(sess2), reqID).Scan(&waiterFh, &waiterStatus)
+			return qErr == nil && waiterFh == int64(fhNew) && waiterStatus == meta.WaiterStatusPending
+		}, 2*time.Second, 10*time.Millisecond, "fhNew 必须已将 (sess2, reqID) 更新/覆盖为 fh == fhNew && status == PENDING")
+
+		// 6. 放行旧请求完成 cleanupCancelledWaiter(..., fhOld)
+		closeResume()
+
+		// 等待旧 SetLkw 返回 ErrBadFileHandle
+		select {
+		case oldErr := <-errChOld:
+			require.ErrorIs(t, oldErr, meta.ErrBadFileHandle, "旧句柄 fhOld 的 SetLkw 必须返回 ErrBadFileHandle")
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待旧句柄 fhOld 的 SetLkw 退出超时")
+		}
+
+		// 严格断言：直接查询底表，新句柄 fhNew 的 waiter 记录必须依然存在且 fh == fhNew && status == PENDING
+		// （若缺少 lock.go 中的 waiter.Fh != expectedFh 保护，该记录会被旧请求误删，导致断言失败变红！）
+		var currentFh int64
+		var currentStatus int16
+		err = pool.QueryRow(ctx, "SELECT fh, status FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2", int64(sess2), reqID).Scan(&currentFh, &currentStatus)
+		require.NoError(t, err, "新句柄 fhNew 的 waiter 记录必须依然存在，绝不能被旧句柄 fhOld 误删")
+		require.Equal(t, int64(fhNew), currentFh, "waiter 记录的 fh 必须依然是 fhNew")
+		require.Equal(t, meta.WaiterStatusPending, currentStatus, "waiter 记录的状态必须依然是 PENDING")
+
+		// 7. 释放 sess1 的写锁，断言 fhNew 的 SetLkw 正常被唤醒并成功获锁返回 NoError（有效成功样本 > 0）
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: 101,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_UNLCK,
+				PID:   1,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		select {
+		case newErr := <-errChNew:
+			require.NoError(t, newErr, "fhNew 的 SetLkw 在 sess1 解锁后必须被正常唤醒并成功获锁返回 NoError")
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 fhNew 的 SetLkw 获锁超时")
+		}
+
+		// 验证底表 file_locks 确实持久化了 sess2 在 fhNew 上的排他锁
+		var lockCount int64
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1 AND ino = $2 AND fh = $3 AND lock_owner = $4", int64(sess2), int64(fileIno), int64(fhNew), int64(202)).Scan(&lockCount)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), lockCount, "sess2 在 fhNew 上必须持有排他锁")
+	})
+
+	t.Run("SubscenarioB_GrantedLockPreservedAgainstDelayedOldWaiterCleanup", func(t *testing.T) {
+		sess1 := uint64(77303)
+		sess2 := uint64(77304)
+		reqID := int64(88002)
+
+		cleanTables := func() {
+			cleanupCtx := context.Background()
+			sids := []int64{int64(sess1), int64(sess2)}
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_lock_waiters WHERE session_id = ANY($1::bigint[])", sids)
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_locks WHERE session_id = ANY($1::bigint[])", sids)
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM file_handles WHERE session_id = ANY($1::bigint[])", sids)
+			_, _ = pool.Exec(cleanupCtx, "DELETE FROM client_sessions WHERE session_id = ANY($1::bigint[])", sids)
+		}
+		cleanTables()
+
+		rawStore := db.NewStore(pool)
+		hookStore := &waiterExpectedFhHookStore{Store: rawStore}
+		mgr := meta.New(hookStore)
+
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-waiter-expected-fh-b-%d", time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+			cleanTables()
+		})
+
+		_, err = mgr.RenewSession(ctx, sess1)
+		require.NoError(t, err)
+		_, err = mgr.RenewSession(ctx, sess2)
+		require.NoError(t, err)
+
+		createRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("test_waiter_replace_b.dat"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_CREAT | meta.O_RDWR,
+			SessionID: &sess1,
+		})
+		require.NoError(t, err)
+		fileIno := createRes.Inode.Ino
+		fh1 := createRes.Fh
+
+		// 1. sess1 获取 [0, 100] 排他写锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: 101,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   1,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		// 2. sess2 打开同一文件两次获得 fhOld 与 fhNew
+		openResOld, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		fhOld := openResOld.Fh
+
+		openResNew, err := mgr.Open(ctx, meta.OpenParams{
+			Ino:       fileIno,
+			Flags:     meta.O_RDWR,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+		fhNew := openResNew.Fh
+		require.NotEqual(t, fhOld, fhNew)
+
+		var (
+			pauseBeforeCleanup atomic.Bool
+			cleanupPaused      = make(chan struct{})
+			cleanupPausedOnce  sync.Once
+			resumeCleanup      = make(chan struct{})
+		)
+		closeResume := sync.OnceFunc(func() { close(resumeCleanup) })
+		defer closeResume()
+
+		hookStore.onGetFileHandle = func(ctx context.Context, q db.Querier, params db.GetFileHandleParams) (db.FileHandle, error) {
+			handle, hErr := q.GetFileHandle(ctx, params)
+			if params.Fh == int64(fhOld) && errors.Is(hErr, pgx.ErrNoRows) {
+				pauseBeforeCleanup.Store(true)
+			}
+			return handle, hErr
+		}
+
+		hookStore.onExecTx = func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			if pauseBeforeCleanup.CompareAndSwap(true, false) {
+				cleanupPausedOnce.Do(func() {
+					close(cleanupPaused)
+				})
+				<-resumeCleanup
+			}
+			return rawStore.ExecTxWithOptions(ctx, fn, opts...)
+		}
+
+		// 3. sess2 使用 (fhOld, reqID) 发起阻塞 SetLkw
+		ctxOld, cancelOld := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelOld()
+
+		errChOld := make(chan error, 1)
+		go func() {
+			errChOld <- mgr.SetLkw(ctxOld, meta.SetLkwParams{
+				Ino:       fileIno,
+				Fh:        fhOld,
+				LockOwner: 202,
+				Lk: meta.FileLock{
+					Start: 0,
+					End:   100,
+					Type:  meta.F_WRLCK,
+					PID:   2,
+				},
+				LkFlags:   0,
+				SessionID: sess2,
+				RequestID: uint64(reqID),
+			})
+		}()
+
+		require.Eventually(t, func() bool {
+			var count int64
+			qErr := pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2 AND fh = $3 AND status = $4", int64(sess2), reqID, int64(fhOld), meta.WaiterStatusPending).Scan(&count)
+			return qErr == nil && count == 1
+		}, 2*time.Second, 10*time.Millisecond, "fhOld 必须已持久化 PENDING 记录")
+
+		// 4. 调用 mgr.Release 关闭 fhOld 并等待进入 cleanupCancelledWaiter 挂起
+		err = mgr.Release(ctx, meta.ReleaseParams{
+			Ino:       fileIno,
+			Fh:        fhOld,
+			SessionID: &sess2,
+		})
+		require.NoError(t, err)
+
+		select {
+		case <-cleanupPaused:
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 fhOld 进入 cleanupCancelledWaiter 挂起超时")
+		}
+
+		// 5. 在挂起窗口内，sess1 释放锁，sess2 使用新句柄 (Fh: fhNew, RequestID: reqID) 成功获锁
+		err = mgr.SetLk(ctx, meta.SetLkParams{
+			Ino:       fileIno,
+			Fh:        fh1,
+			LockOwner: 101,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_UNLCK,
+				PID:   1,
+			},
+			LkFlags:   0,
+			SessionID: sess1,
+		})
+		require.NoError(t, err)
+
+		setLkwErr := mgr.SetLkw(ctx, meta.SetLkwParams{
+			Ino:       fileIno,
+			Fh:        fhNew,
+			LockOwner: 202,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   2,
+			},
+			LkFlags:   0,
+			SessionID: sess2,
+			RequestID: uint64(reqID),
+		})
+		require.NoError(t, setLkwErr, "新句柄 fhNew 的 SetLkw 必须成功获锁")
+
+		// 将 (sess2, reqID) 在 file_lock_waiters 中设置为 status = GRANTED (2) 且 fh = fhNew
+		_, err = pool.Exec(ctx, `
+			INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status)
+			VALUES ($1, $2, $3, $4, 202, 0, 0, 100, 1, 2, $5)
+			ON CONFLICT (session_id, request_id) DO UPDATE SET
+				fh = EXCLUDED.fh,
+				status = EXCLUDED.status,
+				lock_owner = EXCLUDED.lock_owner,
+				start_offset = EXCLUDED.start_offset,
+				end_offset = EXCLUDED.end_offset,
+				lock_type = EXCLUDED.lock_type
+		`, int64(sess2), reqID, int64(fileIno), int64(fhNew), meta.WaiterStatusGranted)
+		require.NoError(t, err)
+
+		// 确认底表状态：fhNew 持有排他锁且 waiter status 为 GRANTED
+		var preLockCount int64
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1 AND ino = $2 AND fh = $3 AND lock_owner = $4", int64(sess2), int64(fileIno), int64(fhNew), int64(202)).Scan(&preLockCount)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), preLockCount, "sess2 在 fhNew 上必须持有排他锁")
+
+		var preWaiterCount int64
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2 AND fh = $3 AND status = $4", int64(sess2), reqID, int64(fhNew), meta.WaiterStatusGranted).Scan(&preWaiterCount)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), preWaiterCount, "file_lock_waiters 必须为 fhNew 且 status 为 GRANTED")
+
+		// 6. 放行旧请求执行 cleanupCancelledWaiter(..., fhOld)
+		closeResume()
+
+		select {
+		case oldErr := <-errChOld:
+			require.ErrorIs(t, oldErr, meta.ErrBadFileHandle, "旧句柄 fhOld 的 SetLkw 必须返回 ErrBadFileHandle")
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待旧句柄 fhOld 的 SetLkw 退出超时")
+		}
+
+		// 严格断言：底表 file_locks 中 sess2 的排他写锁依然完好存在（计数为 1），绝未被旧句柄误回滚！
+		// （若缺少 waiter.Fh != expectedFh 分支保护，cleanupCancelledWaiter 会将 waiter.Status == GRANTED 误识别为自身已授锁，
+		// 调用 applyPosixUnlock 误删除 fhNew 的排他锁，导致测试变红！）
+		var finalLockCount int64
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1 AND ino = $2 AND fh = $3 AND lock_owner = $4", int64(sess2), int64(fileIno), int64(fhNew), int64(202)).Scan(&finalLockCount)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), finalLockCount, "Subscenario B: 底表 file_locks 中 sess2 的排他写锁必须依然完好存在，未被误回滚")
+
+		// waiter 记录未被旧句柄误删
+		var finalWaiterCount int64
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2 AND fh = $3 AND status = $4", int64(sess2), reqID, int64(fhNew), meta.WaiterStatusGranted).Scan(&finalWaiterCount)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), finalWaiterCount, "Subscenario B: waiter 记录必须依然存在且 fh == fhNew")
+	})
+}

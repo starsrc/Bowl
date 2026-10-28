@@ -35,11 +35,15 @@ func cleanConfigEnv(t *testing.T) {
 	for _, key := range keys {
 		oldVal, exists := os.LookupEnv(key)
 		os.Unsetenv(key)
+		k := key
 		if exists {
-			k := key
 			v := oldVal
 			t.Cleanup(func() {
 				_ = os.Setenv(k, v)
+			})
+		} else {
+			t.Cleanup(func() {
+				_ = os.Unsetenv(k)
 			})
 		}
 	}
@@ -199,6 +203,56 @@ func TestConfig_Load_CustomFile(t *testing.T) {
 
 	assert.Equal(t, "postgres://custom:pass@localhost:5432/custom_db", cfg.DSN)
 	assert.Equal(t, "0.0.0.0:9010", cfg.Addr())
+}
+
+func TestCleanConfigEnv_RestoresUnsetAfterDotenvLoad(t *testing.T) {
+	targetKeys := []string{"DB_DSN", "SERVER_PORT", "OTEL_SERVICE_NAME"}
+
+	// 1. 父测试中保存并在父测试 t.Cleanup 兜底恢复原始环境，同时临时 Unsetenv
+	for _, key := range targetKeys {
+		k := key
+		origVal, exists := os.LookupEnv(k)
+		if exists {
+			t.Cleanup(func() {
+				_ = os.Setenv(k, origVal)
+			})
+		} else {
+			t.Cleanup(func() {
+				_ = os.Unsetenv(k)
+			})
+		}
+		require.NoError(t, os.Unsetenv(k))
+		_, stillExists := os.LookupEnv(k)
+		require.False(t, stillExists, "key %s should be unset initially in parent test", k)
+	}
+
+	// 2. 在 t.Run("dotenv_load_subtest", ...) 子测试内调用 cleanConfigEnv(t) 并通过临时 .env 文件调用 config.Load(...)
+	t.Run("dotenv_load_subtest", func(t *testing.T) {
+		cleanConfigEnv(t)
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+
+		envContent := "DB_DSN=postgres://clean_test:pass@localhost:5432/clean_db\n" +
+			"SERVER_PORT=9007\n" +
+			"OTEL_SERVICE_NAME=clean-test-storage\n"
+		require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".env"), []byte(envContent), 0o600))
+
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+
+		// 在子测试内断言 os.LookupEnv 已变为 exists == true（证明 godotenv 确实写入了进程环境）
+		for _, key := range targetKeys {
+			_, exists := os.LookupEnv(key)
+			assert.True(t, exists, "key %s should exist in process env during subtest", key)
+		}
+	})
+
+	// 3. 待 t.Run 子测试退出（触发子测试的 t.Cleanup）后，在父测试中断言上述各键经 os.LookupEnv 检查严格恢复为 exists == false！
+	for _, key := range targetKeys {
+		val, exists := os.LookupEnv(key)
+		assert.False(t, exists, "key %s should be restored to unset after subtest, but got %q", key, val)
+	}
 }
 
 func TestConfig_Load_Errors(t *testing.T) {

@@ -767,7 +767,7 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 			m.notifyAllLockWaiters()
 		}
 
-		session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
+		session, err := q.UpsertClientSession(db.WithLeaseTTL(ctx, leaseTTL), db.UpsertClientSessionParams{
 			SessionID: sid,
 			ExpiresAt: pgtype.Timestamptz{
 				Time:  time.Now().Add(leaseTTL),

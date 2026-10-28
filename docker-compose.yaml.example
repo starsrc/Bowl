@@ -59,6 +59,7 @@ services:
     environment:
       SERVER_HOST: "0.0.0.0"
       SERVER_PORT: 9000
+      SERVER_READ_MAX_BYTES: 16777216
       DB_DSN: "postgres://postgres:postgres@postgres:5432/bowl?sslmode=disable"
       OTEL_ENABLED: "true"
       OTEL_SERVICE_NAME: "bowl-storage"

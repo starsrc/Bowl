@@ -10,6 +10,8 @@ vars:
   GEN_DIR: gen
   STORAGE_DB_DSN: '{{.STORAGE_DB_DSN | default "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"}}'
   STORAGE_MIGRATIONS_DIR: services/storage/db/migrations
+  CLIENT_DOCKERFILE: client/Dockerfile.test
+  CLIENT_TEST_IMAGE: '{{.CLIENT_TEST_IMAGE | default "bowl-client-test"}}'
 
 env:
   GOWORK: "off"
@@ -58,6 +60,11 @@ tasks:
     cmds:
       - docker build -t {{.STORAGE_IMAGE_NAME}}:{{.TAG}} -f {{.STORAGE_DOCKERFILE}} . {{.CLI_ARGS}}
 
+  build:client:test:
+    desc: "Build client test container image (bowl-client-test:latest)"
+    cmds:
+      - docker build -t {{.CLIENT_TEST_IMAGE}}:{{.TAG}} -f {{.CLIENT_DOCKERFILE}} client {{.CLI_ARGS}}
+
   down:
     desc: "Stop and remove docker compose containers and networks"
     cmds:
@@ -98,6 +105,20 @@ tasks:
     cmds:
       - go mod tidy {{.CLI_ARGS}}
       - go -C services/storage mod tidy {{.CLI_ARGS}}
+      - go -C client mod tidy {{.CLI_ARGS}}
+
+  test:client:
+    desc: "Run client static checks, build, and unit tests inside Linux Docker container"
+    deps: [build:client:test]
+    cmds:
+      - docker run --rm
+        -v bowl-go-mod-cache:/go/pkg/mod
+        -v bowl-go-build-cache:/root/.cache/go-build
+        -v "{{.ROOT_DIR | default .TASKFILE_DIR}}":/workspace
+        -w /workspace/client
+        -e GOWORK=off
+        {{.CLIENT_TEST_IMAGE}}:{{.TAG}}
+        sh -c 'test -z "$(gofmt -s -l .)" && go vet ./... && CGO_ENABLED=0 GOOS=linux go build -o /tmp/bowl ./cmd/bowl && /tmp/bowl version && go test -v -count=1 ./... {{.CLI_ARGS}}'
 
   test:storage:
     desc: "Run tests for storage service"
@@ -140,6 +161,7 @@ tasks:
       - test -z "$(gofmt -s -l .)"
       - go vet ./...
       - go -C services/storage vet ./...
+      - GOOS=linux CGO_ENABLED=0 go -C client vet ./...
       - go vet -tags=e2e ./e2e/...
 
   goose:storage:up:

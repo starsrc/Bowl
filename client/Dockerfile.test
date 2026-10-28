@@ -1,0 +1,18 @@
+# ==============================================================================
+# Bowl Client Linux Test & Build Environment
+# ==============================================================================
+FROM golang:1.26-alpine3.24
+
+# 安装 FUSE 3 用户态工具、卸载工具、常用证书与基础调试工具
+RUN apk --no-cache add \
+    fuse3 \
+    util-linux \
+    ca-certificates \
+    tzdata \
+    git
+
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
+ENV GOWORK=off
+
+WORKDIR /workspace

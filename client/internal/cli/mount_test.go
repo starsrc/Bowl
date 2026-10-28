@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -124,7 +124,7 @@ func TestMount_FlagPositioning(t *testing.T) {
 	}
 }
 
-func TestMount_DefaultDaemonNotice(t *testing.T) {
+func TestMount_DefaultDaemonDelegation(t *testing.T) {
 	tmpDir := t.TempDir()
 	validUUID := uuid.New().String()
 
@@ -141,11 +141,20 @@ func TestMount_DefaultDaemonNotice(t *testing.T) {
 	}
 	endpoint := setupTestStorageServer(t, mockSrv)
 
-	// 未传 -f / --foreground 时应提示前台模式并返回退出码 1
+	var launcherCalled bool
+	cli.SetProcessLauncherForTest(t, func(cmd *exec.Cmd) error {
+		launcherCalled = true
+		require.Contains(t, cmd.Args, "mount")
+		require.Contains(t, cmd.Args, validUUID)
+		w := cmd.ExtraFiles[0]
+		_, _ = w.WriteString("OK\n")
+		return nil
+	})
+
 	var stdout, stderr bytes.Buffer
 	code := cli.Execute([]string{"mount", "--endpoint", endpoint, validUUID, tmpDir}, &stdout, &stderr)
-	require.Equal(t, 1, code)
-	require.True(t, strings.Contains(stderr.String(), "-f") || strings.Contains(stderr.String(), "前台"))
+	require.Equal(t, 0, code)
+	require.True(t, launcherCalled)
 }
 
 func TestMount_ForegroundRunnerSuccess(t *testing.T) {

@@ -1,14 +1,16 @@
 package meta_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -20,38 +22,40 @@ import (
 // 1. 跨会话隔离：S2 访问 S1 句柄，全 11 个接口均返回 ErrBadFileHandle；
 // 2. 有会话访问无会话句柄隔离：会话请求访问无会话句柄返回 ErrBadFileHandle；
 // 3. 无会话访问有会话句柄隔离：无会话请求访问有会话句柄返回 ErrBadFileHandle；
-// 4. 会话过期防“诈尸自救”：过期会话句柄写操作直接被拒，且会话不会被重新激活续期；
+// 4. 会话过期防“诈尸自救”：过期会话句柄读写操作直接被拒，且会话不会被重新激活续期，被拒写不改配额与尺寸且不残留物理块；
 // 5. Release / ReleaseDir 严格会话匹配，绝不误删其他会话合法句柄。
 func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
-	dsn := getStorageTestDSN()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("skipping postgres test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping postgres test (ping failed): %v", err)
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
 	}
 
 	store := db.NewStore(pool)
-	mgr := meta.New(store)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+	mgr := meta.New(store, meta.WithBlockStore(bs))
 
-	// 创建测试根目录与测试文件/子目录
-	rootDir, err := store.CreateInode(ctx, db.CreateInodeParams{
-		Mode:  int32(meta.S_IFDIR | 0o755),
-		Nlink: 2,
-		Uid:   1000,
-		Gid:   1000,
+	countRegularFiles := func(dir string) int {
+		var count int
+		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				count++
+			}
+			return nil
+		})
+		return count
+	}
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     "auth-test-disk",
+		MaxBytes: 10 * 1024 * 1024,
 	})
 	require.NoError(t, err)
 	defer func() {
-		_ = store.DeleteInode(context.Background(), rootDir.Ino)
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
 	}()
+
+	rootDirIno := uint64(disk.RootIno)
 
 	s1 := uint64(960001)
 	s2 := uint64(960002)
@@ -62,7 +66,7 @@ func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
 
 	// 1. 创建属于 s1 的文件句柄与目录句柄
 	createRes1, err := mgr.Create(ctx, meta.CreateParams{
-		ParentIno: uint64(rootDir.Ino),
+		ParentIno: rootDirIno,
 		Name:      []byte("auth_test_file.txt"),
 		Mode:      meta.S_IFREG | 0o644,
 		UID:       1000,
@@ -74,11 +78,30 @@ func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
 	fileIno := createRes1.Inode.Ino
 	fhS1 := createRes1.Fh
 	defer func() {
+		chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(fileIno), Indx: 0})
+		if len(chunkRow.Slices) > 0 {
+			if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
+				for _, s := range slices {
+					_ = store.DeleteSliceRef(context.Background(), int64(s.ID))
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(context.Background(), store, []int64{int64(fileIno)})
 		_ = store.DeleteInode(context.Background(), int64(fileIno))
 	}()
 
+	initData := bytes.Repeat([]byte("initial-file-content"), 16)
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:       fileIno,
+		Fh:        fhS1,
+		Offset:    0,
+		Data:      initData,
+		SessionID: &s1,
+	})
+	require.NoError(t, err)
+
 	mkdirRes, err := mgr.Mkdir(ctx, meta.MkdirParams{
-		ParentIno: uint64(rootDir.Ino),
+		ParentIno: rootDirIno,
 		Name:      []byte("auth_test_dir"),
 		Mode:      0o755,
 		UID:       1000,
@@ -212,7 +235,9 @@ func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrBadFileHandle), "SetLk with cross-session handle must return ErrBadFileHandle")
 
 		// 11. SetLkw
-		err = mgr.SetLkw(ctx, meta.SetLkwParams{
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
+		err = mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 			Ino:       fileIno,
 			Fh:        fhS1,
 			LockOwner: 1001,
@@ -288,7 +313,9 @@ func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrBadFileHandle))
 
 		// 11. SetLkw
-		err = mgr.SetLkw(ctx, meta.SetLkwParams{
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
+		err = mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 			Ino:       fileIno,
 			Fh:        fhNoSess,
 			LockOwner: 1001,
@@ -367,6 +394,47 @@ func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
 		require.NoError(t, err)
 		dirFhExpired := uint64(dirFhExpiredRow.Fh)
 
+		// 0. Read 读操作拦截
+		_, err = mgr.Read(ctx, &meta.ReadRequest{
+			Ino:       fileIno,
+			Fh:        fhExpired,
+			Offset:    0,
+			Size:      uint32(len(initData)),
+			SessionID: &sExpired,
+		})
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrBadFileHandle), "Read with expired session must return ErrBadFileHandle")
+
+		// 记录写前 Inode 大小、Disk 使用量以及磁盘上物理块文件计数
+		fileBeforeWrite, err := store.GetInode(ctx, int64(fileIno))
+		require.NoError(t, err)
+		diskBeforeWrite, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		filesBeforeWrite := countRegularFiles(dataDir)
+
+		// 0.1 Write 写操作拦截
+		_, err = mgr.Write(ctx, &meta.WriteRequest{
+			Ino:       fileIno,
+			Fh:        fhExpired,
+			Offset:    uint64(fileBeforeWrite.Size),
+			Data:      bytes.Repeat([]byte("bad-write-payload"), 100),
+			SessionID: &sExpired,
+		})
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, meta.ErrBadFileHandle), "Write with expired session must return ErrBadFileHandle")
+
+		// 核心断言：被拒的 Write 绝不修改 inodes.size 与 disks.used_bytes，且磁盘上零物理块残留
+		fileAfterWrite, err := store.GetInode(ctx, int64(fileIno))
+		require.NoError(t, err)
+		assert.Equal(t, fileBeforeWrite.Size, fileAfterWrite.Size, "被拒的 Write 严禁修改 inodes.size")
+
+		diskAfterWrite, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, diskBeforeWrite.UsedBytes, diskAfterWrite.UsedBytes, "被拒的 Write 严禁修改 disks.used_bytes")
+
+		filesAfterWrite := countRegularFiles(dataDir)
+		assert.Equal(t, filesBeforeWrite, filesAfterWrite, "被拒的 Write 绝不在磁盘上残留任何物理块文件")
+
 		// 1. Flush 写操作拦截
 		err = mgr.Flush(ctx, meta.FlushParams{
 			Ino:       fileIno,
@@ -398,7 +466,9 @@ func TestHandleSessionAuth_PostgresRegression(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrBadFileHandle))
 
 		// 4. SetLkw 写操作拦截
-		err = mgr.SetLkw(ctx, meta.SetLkwParams{
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
+		err = mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 			Ino:       fileIno,
 			Fh:        fhExpired,
 			LockOwner: 1001,

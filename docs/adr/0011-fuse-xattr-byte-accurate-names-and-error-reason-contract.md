@@ -46,10 +46,10 @@ Storage 元数据引擎在完成目录流遍历与 `Fallocate`（ADR-0010）后�
    - **求值顺序与并发锁协议**：
      1. **入参静态校验（不查库）**：
         - `ino == 0 || ino > math.MaxInt64` 返回 `ErrInvalidArgument`（`EINVAL`）；
-        - `SetXattr` 中 `flags &^ 0x3 != 0` 返回 `ErrInvalidArgument`（`EINVAL`）；
-        - Xattr 名称 `len(name) == 0 || len(name) > 255` 返回 `ErrRange`（`ERANGE`，对齐 Linux `import_xattr_name`），而目录项名称 `len(name) > 255` 或符号链接目标 `len(target) > 4095` 则返回 `ErrNameTooLong`（`ENAMETOOLONG`）；
-        - 名称包含 `\x00`（`bytes.IndexByte(name, 0) >= 0`）返回 `ErrInvalidArgument`（`EINVAL`）；
-        - `SetXattr` 中 `len(value) > 65536` 返回 `ErrTooBig`（`E2BIG`）。
+        - `SetXattr` 中 `flags &^ 0x3 != 0` 返回 `ErrInvalidArgument`（`EINVAL`）（`flags = 3` 允许放行进入领域层）；
+        - 扩展属性名 `len(name) == 0`（空名称）或包含 `\x00`（`bytes.IndexByte(name, 0) >= 0`）返回 `ErrInvalidArgument`（`EINVAL`）；
+        - 扩展属性名 `len(name) > 255` 返回 `ErrRange`（`ERANGE`，且当同时 `len(name) > 255` 且含 `\x00` 时优先返回 `ERANGE`），而目录项名称 `len(name) > 255` 或符号链接目标 `len(target) > 4095` 则返回 `ErrNameTooLong`（`ENAMETOOLONG`）；
+        - `SetXattr` 中属性值 `len(value) > 65536`（超 64KB）返回 `ErrRange`（`ERANGE`，对齐现行已上线的对外 RPC 契约与 JuiceFS 行为）。
      2. **Inode 锁与存在性校验**：`SetXattr` 与 `RemoveXattr` 在读写事务内调用 `GetInodeForUpdate(ino)` 加行级排他锁；`GetXattr` 与 `ListXattr` 在 `RepeatableRead` 只读事务内调用 `GetInode(ino)`；节点不存在统一返回 `ErrNotFound`（`ENOENT`）。
      3. **`user.*` 文件类型准入校验**：先于属性存在性查询执行，不满足文件类型要求时按操作类型返回 `ErrPerm` 或 `ErrNoData`。
      4. **`XATTR_CREATE (0x1)` / `XATTR_REPLACE (0x2)` 独立判定与 Bowl `XATTR_LIST_MAX (65536)` 配额**：`SetXattr` 查询 `(ino, name)` 是否已存在——若已存在且含 `XATTR_CREATE` 返回 `ErrAlreadyExists`（`EEXIST`）；若不存在且含 `XATTR_REPLACE` 返回 `ErrNoData`（`ENODATA`）（因此 `flags == 0x3` 在属性存在时返回 `EEXIST`、不存在时返回 `ENODATA`，而非 `EINVAL`）。仅当 `(ino, name)` 尚不存在（新增属性名）时，在持有 Inode `FOR UPDATE` 行锁下计算该节点现有 `Σ(octet_length(name) + 1)`；若新增后总长超过 `65536` 字节（Bowl 内部配额策略，对齐 ext4 / tmpfs），返回 `ErrNoSpace`（`ENOSPC`）；覆盖已有同名属性时不触发配额拦截。

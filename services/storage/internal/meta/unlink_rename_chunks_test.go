@@ -5,13 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -464,43 +462,13 @@ func TestRename_ChunksCleanup_Mock(t *testing.T) {
 	})
 }
 
-// helper: 获取可用 PostgreSQL 连接池
-func getTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
-	t.Helper()
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	ctx := context.Background()
-	if dsn != "" {
-		pool, err := pgxpool.New(ctx, dsn)
-		if err == nil && pool.Ping(ctx) == nil {
-			return pool, ctx
-		}
-		if pool != nil {
-			pool.Close()
-		}
-	}
-
-	candidates := []string{
-		"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
-		"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
-	}
-	for _, cand := range candidates {
-		pool, err := pgxpool.New(ctx, cand)
-		if err == nil && pool.Ping(ctx) == nil {
-			return pool, ctx
-		}
-		if pool != nil {
-			pool.Close()
-		}
-	}
-
-	t.Skip("跳过集成测试: 无法连接本地或容器 PostgreSQL 实例")
-	return nil, nil
-}
-
 // TestUnlink_Rename_Chunks_Integration 真实 PostgreSQL 与本地 BlockStore 集成测试
 func TestUnlink_Rename_Chunks_Integration(t *testing.T) {
-	pool, ctx := getTestPool(t)
-	defer pool.Close()
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
 
 	store := db.NewStore(pool)
 	dataDir := t.TempDir()
@@ -514,11 +482,48 @@ func TestUnlink_Rename_Chunks_Integration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	rootIno := disk.RootIno
-	defer func() {
-		_, _ = pool.Exec(context.Background(), "DELETE FROM entries WHERE parent_ino = $1", rootIno)
-		_, _ = pool.Exec(context.Background(), "DELETE FROM disks WHERE disk_id = $1", disk.DiskID)
-		_ = store.DeleteInode(context.Background(), int64(rootIno))
-	}()
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		rows, qErr := pool.Query(cleanupCtx, "SELECT ino FROM entries WHERE parent_ino = $1", rootIno)
+		if qErr == nil {
+			var childInos []int64
+			for rows.Next() {
+				var cIno int64
+				if scanErr := rows.Scan(&cIno); scanErr == nil {
+					childInos = append(childInos, cIno)
+				}
+			}
+			rows.Close()
+
+			for _, cIno := range childInos {
+				for indx := int32(0); indx < 16; indx++ {
+					cRow, _ := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: cIno, Indx: indx})
+					if len(cRow.Slices) > 0 {
+						if sls, dErr := meta.DecodeSlices(cRow.Slices); dErr == nil {
+							for _, s := range sls {
+								if s.ID > 0 {
+									_ = store.DeleteSliceRef(cleanupCtx, int64(s.ID))
+								}
+							}
+						}
+					}
+				}
+				_ = meta.DeleteAllChunksByInos(cleanupCtx, store, []int64{cIno})
+				_ = store.DeleteInode(cleanupCtx, cIno)
+			}
+		}
+
+		_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+
+		var diskCount int
+		_ = pool.QueryRow(cleanupCtx, "SELECT count(*) FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&diskCount)
+		assert.Equal(t, 0, diskCount, "测试磁盘必须已清除")
+
+		_, rootErr := store.GetInode(cleanupCtx, int64(rootIno))
+		assert.ErrorIs(t, rootErr, pgx.ErrNoRows, "rootIno 必须已清除")
+	})
 
 	t.Run("无句柄 Unlink 常规文件: 物理删除 Inode 并清空 chunks 行及扣减 slice_refs", func(t *testing.T) {
 		name := []byte("unlink_clean.txt")

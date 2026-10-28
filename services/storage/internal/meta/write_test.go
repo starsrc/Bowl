@@ -5,16 +5,20 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
 	"github.com/starsrc/bowl/services/storage/internal/meta"
@@ -418,7 +422,7 @@ func TestWrite_TwoPhaseCommit(t *testing.T) {
 				Indx:   0,
 				Slices: expectedSliceBytes,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -503,7 +507,7 @@ func TestWrite_TwoPhaseCommit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			AppendChunkSlice(mock.Anything, mock.Anything).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -748,24 +752,59 @@ func ptrOf[T any](v T) *T {
 	return &v
 }
 
-func TestWrite_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+// cleanupWriteTestInoAndSlices 清理目标 Inode 关联的所有 chunks 及产生的测试专有 slice_refs，并断言零残留
+func cleanupWriteTestInoAndSlices(t *testing.T, store db.Store, mgr meta.Manager, ino int64, fhs ...uint64) {
+	t.Helper()
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过 PostgreSQL 测试 (连接初始化失败): %v", err)
+	if mgr != nil {
+		for _, fh := range fhs {
+			_ = mgr.Release(cleanupCtx, meta.ReleaseParams{Ino: uint64(ino), Fh: fh})
+		}
 	}
-	defer pool.Close()
 
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("跳过 PostgreSQL 测试 (ping 失败): %v", err)
+	var sliceIDs []int64
+	for indx := int32(0); indx < 16; indx++ {
+		chunkRow, err := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: ino, Indx: indx})
+		if err == nil && len(chunkRow.Slices) > 0 {
+			if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
+				for _, s := range slices {
+					if s.ID > 0 {
+						sliceIDs = append(sliceIDs, int64(s.ID))
+					}
+				}
+			}
+		}
 	}
+
+	_ = meta.DeleteAllChunksByInos(cleanupCtx, store, []int64{ino})
+	for _, sid := range sliceIDs {
+		_ = store.DeleteSliceRef(cleanupCtx, sid)
+	}
+	_ = store.DeleteInode(cleanupCtx, ino)
+
+	// 严格断言目标 ino 的 inodes、chunks 与本测试产生的 slice_refs 均已清除无残留！
+	_, inoErr := store.GetInode(cleanupCtx, ino)
+	assert.ErrorIs(t, inoErr, pgx.ErrNoRows, "目标 ino 必须已被清除")
+
+	for indx := int32(0); indx < 16; indx++ {
+		_, cErr := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: ino, Indx: indx})
+		assert.ErrorIs(t, cErr, pgx.ErrNoRows, "目标 ino 的 chunk 行必须已被清除")
+	}
+
+	for _, sid := range sliceIDs {
+		_, sErr := store.GetSliceRef(cleanupCtx, sid)
+		assert.ErrorIs(t, sErr, pgx.ErrNoRows, "测试专有 slice_ref %d 必须已被清除", sid)
+	}
+}
+
+func TestWrite_PostgresIntegration(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
 
 	store := db.NewStore(pool)
 	dataDir := t.TempDir()
@@ -781,10 +820,6 @@ func TestWrite_PostgresIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	ino := uint64(fileRow.Ino)
-	defer func() {
-		_ = store.DeleteInode(context.Background(), fileRow.Ino)
-		_, _ = store.DeleteChunksByIno(context.Background(), fileRow.Ino)
-	}()
 
 	// 打开句柄
 	openRes, err := mgr.Open(ctx, meta.OpenParams{
@@ -793,12 +828,9 @@ func TestWrite_PostgresIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	fh := openRes.Fh
-	defer func() {
-		_ = mgr.Release(context.Background(), meta.ReleaseParams{
-			Ino: ino,
-			Fh:  fh,
-		})
-	}()
+	t.Cleanup(func() {
+		cleanupWriteTestInoAndSlices(t, store, mgr, fileRow.Ino, fh)
+	})
 
 	// 1. 首次写入 10 字节
 	data1 := []byte("0123456789")
@@ -870,4 +902,421 @@ func TestWrite_PostgresIntegration(t *testing.T) {
 		Fh:  fh,
 	})
 	require.NoError(t, err)
+}
+
+// cancelOnPutBlockStore 包装真实 BlockStore，在 PutBlock 落盘成功后立即取消 ctx。
+type cancelOnPutBlockStore struct {
+	meta.BlockStore
+	cancelFn context.CancelFunc
+}
+
+func (s *cancelOnPutBlockStore) PutBlock(ctx context.Context, sliceID uint64, blockIdx uint32, data []byte) error {
+	if err := s.BlockStore.PutBlock(ctx, sliceID, blockIdx, data); err != nil {
+		return err
+	}
+	if s.cancelFn != nil {
+		s.cancelFn()
+	}
+	return nil
+}
+
+func TestWrite_ContextCanceledAfterPutBlock_CleansUpOrphanBlock(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+
+	fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:  int32(meta.S_IFREG | 0o755),
+		Nlink: 1,
+		Uid:   1000,
+		Gid:   1000,
+	})
+	require.NoError(t, err)
+	ino := uint64(fileRow.Ino)
+
+	initMgr := meta.New(store, meta.WithBlockStore(bs))
+	openRes, err := initMgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+	t.Cleanup(func() {
+		cleanupWriteTestInoAndSlices(t, store, initMgr, fileRow.Ino, fh)
+	})
+
+	reqCtx, reqCancel := context.WithCancel(ctx)
+	wrappedBS := &cancelOnPutBlockStore{
+		BlockStore: bs,
+		cancelFn:   reqCancel,
+	}
+	mgr := meta.New(store, meta.WithBlockStore(wrappedBS))
+
+	writeData := []byte("hello context canceled orphan cleanup test")
+	_, writeErr := mgr.Write(reqCtx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Data:   writeData,
+	})
+	require.Error(t, writeErr, "请求取消后阶段 2 事务应失败")
+
+	var regularFiles int
+	walkErr := filepath.WalkDir(dataDir, func(path string, d os.DirEntry, walkErr error) error {
+		require.NoError(t, walkErr)
+		if !d.IsDir() {
+			regularFiles++
+		}
+		return nil
+	})
+	require.NoError(t, walkErr)
+	assert.Equal(t, 0, regularFiles, "阶段 2 事务因 context 取消失败回滚时，阶段 1 已落盘物理块必须被立即回滚清理，不能残留孤儿块")
+}
+
+// commitAckErrorStore 代理真实 Store，允许在底层真实事务 COMMIT 成功后向调用方注入模拟网络确认断连错误。
+type commitAckErrorStore struct {
+	db.Store
+	onExecTxWithOptions func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error
+}
+
+func (s *commitAckErrorStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+	if s.onExecTxWithOptions != nil {
+		return s.onExecTxWithOptions(ctx, fn, opts...)
+	}
+	return s.Store.ExecTxWithOptions(ctx, fn, opts...)
+}
+
+func (s *commitAckErrorStore) ExecTx(ctx context.Context, fn func(db.Querier) error) error {
+	return s.ExecTxWithOptions(ctx, fn)
+}
+
+func TestWrite_CommitAckErrorAfterServerCommit_DoesNotDeletePublishedBlock(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+
+	t.Run("PublishedBlockPreservedOnCommitAckError", func(t *testing.T) {
+		fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(meta.S_IFREG | 0o755),
+			Nlink: 1,
+			Uid:   1000,
+			Gid:   1000,
+		})
+		require.NoError(t, err)
+		ino := uint64(fileRow.Ino)
+
+		initMgr := meta.New(store, meta.WithBlockStore(bs))
+		openRes, err := initMgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		fh := openRes.Fh
+		t.Cleanup(func() {
+			cleanupWriteTestInoAndSlices(t, store, initMgr, fileRow.Ino, fh)
+		})
+
+		mockAckErr := errors.New("commit ack network lost")
+		wrappedStore := &commitAckErrorStore{
+			Store: store,
+			onExecTxWithOptions: func(attemptCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				if err := store.ExecTxWithOptions(attemptCtx, fn, opts...); err != nil {
+					return err
+				}
+				return mockAckErr
+			},
+		}
+		mgr := meta.New(wrappedStore, meta.WithBlockStore(bs))
+
+		writeData := []byte("important committed data block")
+		_, writeErr := mgr.Write(ctx, &meta.WriteRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Data:   writeData,
+		})
+		require.Error(t, writeErr)
+		assert.Contains(t, writeErr.Error(), "commit ack network lost")
+
+		// 服务端已成功 COMMIT，物理块不得被误删，随后读操作必须能够成功读取
+		readRes, readErr := initMgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   uint32(len(writeData)),
+		})
+		require.NoError(t, readErr, "已成功 COMMIT 的数据块绝不能因确认阶段断连被误删，Read 不得返回 ErrIO")
+		require.NotNil(t, readRes)
+		assert.Equal(t, writeData, readRes.Data)
+	})
+
+	t.Run("ConcurrentSetAttrZeroAfterCommit_DelegatesToGC", func(t *testing.T) {
+		subDataDir := t.TempDir()
+		subBS := meta.NewLocalFSBlockStore(subDataDir)
+
+		fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(meta.S_IFREG | 0o755),
+			Nlink: 1,
+			Uid:   1000,
+			Gid:   1000,
+		})
+		require.NoError(t, err)
+		ino := uint64(fileRow.Ino)
+
+		initMgr := meta.New(store, meta.WithBlockStore(subBS))
+		// 排空历史可能残留的待回收垃圾，保证切片计数的纯净与隔离
+		_, _ = initMgr.CollectGarbage(ctx, 1000)
+
+		openRes, err := initMgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		fh := openRes.Fh
+		t.Cleanup(func() {
+			cleanupWriteTestInoAndSlices(t, store, initMgr, fileRow.Ino, fh)
+		})
+
+		mockAckErr := errors.New("commit ack network lost")
+		wrappedStore := &commitAckErrorStore{
+			Store: store,
+			onExecTxWithOptions: func(attemptCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				if err := store.ExecTxWithOptions(attemptCtx, fn, opts...); err != nil {
+					return err
+				}
+				// 真实事务 COMMIT 成功后、向 Write 返回 commit ack lost 之前，
+				// 模拟并发请求将文件 truncate 为 0（使该 slice 的 refs 降为 0）
+				zeroSize := uint64(0)
+				_, setAttrErr := initMgr.SetAttr(context.Background(), ino, meta.SetAttrInput{
+					Size: &zeroSize,
+				})
+				if setAttrErr != nil {
+					return setAttrErr
+				}
+				return mockAckErr
+			},
+		}
+		mgr := meta.New(wrappedStore, meta.WithBlockStore(subBS))
+
+		writeData := []byte("data for concurrent truncate to zero test")
+		_, writeErr := mgr.Write(ctx, &meta.WriteRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Data:   writeData,
+		})
+		require.Error(t, writeErr)
+		assert.Contains(t, writeErr.Error(), "commit ack network lost")
+
+		// 检查物理块：因为 slice_refs 表中已存在该 slice（refs=0），Write 回滚逻辑不得越权提前删块，
+		// 物理块应依然存在，交由 CollectGarbage 回收
+		var regularFilesBeforeGC int
+		walkErr := filepath.WalkDir(subDataDir, func(path string, d os.DirEntry, walkErr error) error {
+			require.NoError(t, walkErr)
+			if !d.IsDir() {
+				regularFilesBeforeGC++
+			}
+			return nil
+		})
+		require.NoError(t, walkErr)
+		assert.Equal(t, 1, regularFilesBeforeGC, "slice_refs 已存在（即便 refs=0）时 Write 不得越权删块，块文件在 GC 前必须依然存在")
+
+		reclaimed, gcErr := initMgr.CollectGarbage(ctx, 10)
+		require.NoError(t, gcErr)
+		assert.Equal(t, 1, reclaimed, "CollectGarbage 应当安全回收此孤儿切片")
+	})
+
+	t.Run("InFlightServerCommitNotYetVisible_DoesNotDeleteBlock", func(t *testing.T) {
+		subDataDir := t.TempDir()
+		subBS := meta.NewLocalFSBlockStore(subDataDir)
+
+		fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+			Mode:  int32(meta.S_IFREG | 0o755),
+			Nlink: 1,
+			Uid:   1000,
+			Gid:   1000,
+		})
+		require.NoError(t, err)
+		ino := uint64(fileRow.Ino)
+
+		initMgr := meta.New(store, meta.WithBlockStore(subBS))
+		openRes, err := initMgr.Open(ctx, meta.OpenParams{
+			Ino:   ino,
+			Flags: meta.O_RDWR,
+		})
+		require.NoError(t, err)
+		fh := openRes.Fh
+		t.Cleanup(func() {
+			cleanupWriteTestInoAndSlices(t, store, initMgr, fileRow.Ino, fh)
+		})
+
+		allowServerCommitCh := make(chan struct{})
+		var closeOnce sync.Once
+		closeAllowCommit := func() {
+			closeOnce.Do(func() {
+				close(allowServerCommitCh)
+			})
+		}
+		t.Cleanup(closeAllowCommit)
+
+		reachedCommitCh := make(chan struct{})
+		var onceReached sync.Once
+		var bgErr error
+		var bgWg sync.WaitGroup
+
+		wrappedStore := &commitAckErrorStore{
+			Store: store,
+			onExecTxWithOptions: func(attemptCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				bgWg.Add(1)
+				go func() {
+					defer bgWg.Done()
+					bgCtx, bgCancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer bgCancel()
+					bgErr = store.ExecTxWithOptions(bgCtx, func(q db.Querier) error {
+						if err := fn(q); err != nil {
+							return err
+						}
+						onceReached.Do(func() {
+							close(reachedCommitCh)
+						})
+						select {
+						case <-allowServerCommitCh:
+							return nil
+						case <-bgCtx.Done():
+							return bgCtx.Err()
+						}
+					}, opts...)
+				}()
+
+				select {
+				case <-reachedCommitCh:
+					return context.DeadlineExceeded
+				case <-attemptCtx.Done():
+					return attemptCtx.Err()
+				}
+			},
+		}
+		mgr := meta.New(wrappedStore, meta.WithBlockStore(subBS))
+
+		writeData := []byte("important in-flight committed data block")
+		_, writeErr := mgr.Write(ctx, &meta.WriteRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Data:   writeData,
+		})
+		require.Error(t, writeErr)
+		assert.True(t, errors.Is(writeErr, context.DeadlineExceeded) || strings.Contains(writeErr.Error(), context.DeadlineExceeded.Error()))
+
+		// Write 的 txErr != nil 补偿分支已运行完毕。
+		// 放行后台独立 goroutine 执行真正的 PostgreSQL COMMIT 并等待其完成。
+		closeAllowCommit()
+		bgWg.Wait()
+		require.NoError(t, bgErr, "后台服务端事务 COMMIT 必须成功")
+
+		// 服务端已成功 COMMIT，物理块绝不能被误删，随后读操作必须能够成功读取！
+		readRes, readErr := initMgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   uint32(len(writeData)),
+		})
+		require.NoError(t, readErr, "在途 COMMIT 的数据块绝不能因外部超时检查被误删，Read 不得返回 ErrIO")
+		require.NotNil(t, readRes)
+		assert.Equal(t, writeData, readRes.Data)
+	})
+}
+
+// TestWrite_TxRetryResetsEverReachedCommit_CleansUpBlockOnSecondAttemptFailure 验证写事务重试首行重置 everReachedCommit 并精确清理物理块
+func TestWrite_TxRetryResetsEverReachedCommit_CleansUpBlockOnSecondAttemptFailure(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	ino := uint64(100)
+	fh := uint64(10)
+
+	baseFileRow := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFREG | 0o644),
+		Size:       1024,
+		Nlink:      1,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	mockStore := dbmock.NewMockStore(t)
+	mockBS := metamock.NewMockBlockStore(t)
+
+	mockBS.EXPECT().PutBlock(mock.Anything, uint64(101), uint32(0), []byte("test-data")).Return(nil).Once()
+	mockStore.EXPECT().NextSliceID(mock.Anything).Return(int64(101), nil).Once()
+
+	mockQuerier1 := dbmock.NewMockQuerier(t)
+	mockQuerier1.EXPECT().GetInodeForUpdate(mock.Anything, int64(ino)).Return(baseFileRow, nil).Once()
+	mockQuerier1.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+		Fh:  int64(fh),
+		Ino: int64(ino),
+	}).Return(db.FileHandle{
+		Fh:    int64(fh),
+		Ino:   int64(ino),
+		Flags: int32(meta.O_RDWR),
+	}, nil).Once()
+
+	mockQuerier1.EXPECT().InsertSliceRef(mock.Anything, db.InsertSliceRefParams{
+		SliceID: 101,
+		Size:    int32(len("test-data")),
+		Refs:    1,
+	}).Return(nil).Once()
+
+	mockQuerier1.EXPECT().AppendChunkSlice(mock.Anything, mock.Anything).Return(int64(1), nil).Once()
+
+	updatedInode := baseFileRow
+	mockQuerier1.EXPECT().UpdateInodeSizeAndTouchForWrite(mock.Anything, mock.Anything).Return(updatedInode, nil).Once()
+
+	// 阶段 2 事务第 2 次尝试（在 GetInodeForUpdate 返回 pgx.ErrNoRows，未到达 Commit）
+	mockQuerier2 := dbmock.NewMockQuerier(t)
+	mockQuerier2.EXPECT().GetInodeForUpdate(mock.Anything, int64(ino)).Return(db.Inode{}, pgx.ErrNoRows).Once()
+
+	var txCallCount int
+	mockStore.EXPECT().ExecTxWithOptions(mock.Anything, mock.Anything).RunAndReturn(func(attemptCtx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+		txCallCount++
+		if txCallCount == 1 {
+			// 完整跑完闭包 fn(q1)，使 everReachedCommit 置为 true，但事务返回 40001
+			if err := fn(mockQuerier1); err != nil {
+				return err
+			}
+			return &pgconn.PgError{Code: "40001"}
+		}
+		// 重试轮次执行 fn(q2)
+		return fn(mockQuerier2)
+	}).Twice()
+
+	// 精确调用 1 次 mockBS.DeleteBlock 清理阶段 1 物理块
+	mockBS.EXPECT().DeleteBlock(mock.Anything, uint64(101), uint32(0), uint32(len("test-data"))).Return(nil).Once()
+
+	mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
+	resp, err := mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Data:   []byte("test-data"),
+	})
+	require.Nil(t, resp)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, meta.ErrNotFound, "第 2 次重试首条 GetInodeForUpdate 返回 ErrNoRows 应映射为 ErrNotFound")
 }

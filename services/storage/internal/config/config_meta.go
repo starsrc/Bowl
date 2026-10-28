@@ -23,6 +23,8 @@ const (
 	DefaultOpenDirCache = false
 	// DefaultDataDir 默认本地数据根目录。
 	DefaultDataDir = "/tmp/bowl-storage-data"
+	// DefaultGCInterval 默认后台 GC Worker 扫描轮询周期（1分钟）。
+	DefaultGCInterval = time.Minute
 )
 
 // MetaConfig 承载元数据与 FUSE 缓存相关配置。
@@ -36,6 +38,7 @@ type MetaConfig struct {
 	OpenDirCacheVal           bool          `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
 	DataDirVal                string        `env:"DATA_DIR"`
 	StorageDataDirVal         string        `env:"STORAGE_DATA_DIR"`
+	GCIntervalVal             time.Duration `env:"STORAGE_GC_INTERVAL" envDefault:"1m"`
 }
 
 // SessionLeaseTTL 返回客户端会话租约时长。
@@ -93,6 +96,14 @@ func (c MetaConfig) DataDir() string {
 	return DefaultDataDir
 }
 
+// GCInterval 返回后台 GC Worker 扫描轮询周期。若未设置或 <= 0 则采用 DefaultGCInterval。
+func (c MetaConfig) GCInterval() time.Duration {
+	if c.GCIntervalVal <= 0 {
+		return DefaultGCInterval
+	}
+	return c.GCIntervalVal
+}
+
 // Validate 校验元数据配置合法性。
 func (c MetaConfig) Validate() error {
 	if strings.TrimSpace(c.DataDir()) == "" {
@@ -118,6 +129,10 @@ func (c MetaConfig) Validate() error {
 	}
 	if c.DirEntryTimeoutSecondsVal < 0 {
 		return fmt.Errorf("invalid dir entry timeout %v: must be non-negative", c.DirEntryTimeoutSecondsVal)
+	}
+
+	if c.GCIntervalVal < 0 {
+		return fmt.Errorf("invalid gc interval %v: must be non-negative", c.GCIntervalVal)
 	}
 
 	return nil

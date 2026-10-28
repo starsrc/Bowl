@@ -399,7 +399,203 @@ func TestManager_BlockStoreInjection(t *testing.T) {
 		acc, ok := extractedMgr.(managerAccessor)
 		require.True(t, ok)
 		require.NotNil(t, acc.BlockStore())
-		_, isLocalFS := acc.BlockStore().(*meta.LocalFSBlockStore)
+		bs, isLocalFS := acc.BlockStore().(*meta.LocalFSBlockStore)
 		assert.True(t, isLocalFS)
+
+		ctx := context.Background()
+		probeData := []byte("datadir-probe")
+		err := bs.PutBlock(ctx, 42, 0, probeData)
+		require.NoError(t, err)
+
+		// 验证数据确实落盘在 tempDir 对应的分片路径下，而非默认目录或其它路径
+		expectedPath := filepath.Join(tempDir, "chunks", "2A", "0", "42_0_13")
+		content, err := os.ReadFile(expectedPath)
+		require.NoError(t, err)
+		assert.Equal(t, probeData, content)
+
+		// 构造第二个独立 tempDir2 的 Manager 实例，验证不同 DataDir 配置下物理落盘目录完全隔离互不干扰
+		tempDir2 := t.TempDir()
+		mockStore2 := dbmock.NewMockStore(t)
+		var extractedMgr2 meta.Manager
+
+		app2 := fxtest.New(
+			t,
+			fx.Provide(
+				func() db.Store { return mockStore2 },
+				func() config.MetaConfig {
+					return config.MetaConfig{
+						DataDirVal: tempDir2,
+					}
+				},
+			),
+			meta.Module,
+			fx.Populate(&extractedMgr2),
+		)
+		require.NoError(t, app2.Err())
+		require.NotNil(t, extractedMgr2)
+
+		acc2, ok := extractedMgr2.(managerAccessor)
+		require.True(t, ok)
+		require.NotNil(t, acc2.BlockStore())
+		bs2, ok := acc2.BlockStore().(*meta.LocalFSBlockStore)
+		require.True(t, ok)
+
+		probeData2 := []byte("datadir-probe-isolated-2")
+		err = bs2.PutBlock(ctx, 42, 0, probeData2)
+		require.NoError(t, err)
+
+		expectedPath2 := filepath.Join(tempDir2, "chunks", "2A", "0", fmt.Sprintf("42_0_%d", len(probeData2)))
+		content2, err := os.ReadFile(expectedPath2)
+		require.NoError(t, err)
+		assert.Equal(t, probeData2, content2)
+
+		// 确保 tempDir 与 tempDir2 互不干扰：tempDir 内的文件保持不变，tempDir2 的文件不在 tempDir 中
+		origContent, err := os.ReadFile(expectedPath)
+		require.NoError(t, err)
+		assert.Equal(t, probeData, origContent)
+
+		_, statErr := os.Stat(filepath.Join(tempDir, "chunks", "2A", "0", fmt.Sprintf("42_0_%d", len(probeData2))))
+		assert.True(t, errors.Is(statErr, os.ErrNotExist))
+
+		_, statErr2 := os.Stat(filepath.Join(tempDir2, "chunks", "2A", "0", "42_0_13"))
+		assert.True(t, errors.Is(statErr2, os.ErrNotExist))
+	})
+}
+
+func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires non-root user to enforce directory 0o300 read permission")
+	}
+
+	ctx := context.Background()
+
+	t.Run("PutBlock 原子 Rename 后必须对分片目录执行 dir.Sync", func(t *testing.T) {
+		dataDir := t.TempDir()
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		const sliceID = uint64(1)
+		const blockIdx = uint32(0)
+		payload := []byte("durable-payload")
+		blockSize := uint32(len(payload))
+
+		// 真实分片路径：%02X = 1%256 ("01"), %d = 1/1000/1000 ("0")
+		shardDir := filepath.Join(dataDir, "chunks", fmt.Sprintf("%02X", sliceID%256), fmt.Sprintf("%d", sliceID/1000/1000))
+		require.NoError(t, os.MkdirAll(shardDir, 0o755))
+
+		t.Cleanup(func() {
+			_ = os.Chmod(shardDir, 0o755)
+		})
+
+		// 设为 0o300（d-wx------）：允许在该目录内创建临时文件、写入并 os.Rename，
+		// 但禁止 os.Open(shardDir) 获取目录 fd 执行 Sync()，必然触发内核 EACCES: permission denied
+		require.NoError(t, os.Chmod(shardDir, 0o300))
+
+		err := store.PutBlock(ctx, sliceID, blockIdx, payload)
+		require.Error(t, err, "PutBlock 必须在 Rename 后同步分片目录，无目录读权限时应报错 permission denied")
+
+		// 恢复 0o755 权限后检查 shardDir，断言当目录 Sync 失败返回错误时，PutBlock 已清理回滚未完成持久化确认的目标块文件
+		require.NoError(t, os.Chmod(shardDir, 0o755))
+		finalPath := filepath.Join(shardDir, fmt.Sprintf("%d_%d_%d", sliceID, blockIdx, blockSize))
+		_, statErr := os.Stat(finalPath)
+		assert.True(t, errors.Is(statErr, os.ErrNotExist), "目录 Sync 失败后目标块文件应被清理回滚，不应残留半发布文件: %s", finalPath)
+	})
+
+	t.Run("DeleteBlock 删除实际存在的文件后必须对分片目录执行 dir.Sync", func(t *testing.T) {
+		dataDir := t.TempDir()
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		const sliceID = uint64(2)
+		const blockIdx = uint32(0)
+		payload := []byte("to-delete")
+		blockSize := uint32(len(payload))
+
+		// 在正常 0o755 权限下先成功落盘
+		require.NoError(t, store.PutBlock(ctx, sliceID, blockIdx, payload))
+
+		shardDir := filepath.Join(dataDir, "chunks", fmt.Sprintf("%02X", sliceID%256), fmt.Sprintf("%d", sliceID/1000/1000))
+		t.Cleanup(func() {
+			_ = os.Chmod(shardDir, 0o755)
+		})
+
+		// 设为 0o300（允许 os.Remove 删除目录项，但禁止 os.Open 同步目录）
+		require.NoError(t, os.Chmod(shardDir, 0o300))
+
+		err := store.DeleteBlock(ctx, sliceID, blockIdx, blockSize)
+		require.Error(t, err, "DeleteBlock 必须在删除实际存在的文件后同步分片目录，无目录读权限时应报错 permission denied")
+	})
+}
+
+func TestLocalFSBlockStore_AncestorDirSyncBarrierAndRetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("跳过权限测试: root 用户忽略 POSIX 0o300 目录只写不可读限制")
+	}
+
+	ctx := context.Background()
+
+	t.Run("前次祖先目录 syncDir 失败遗留已创建子目录后同散列桶后续写入不得跳过祖先目录同步", func(t *testing.T) {
+		dataDir := t.TempDir()
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		chunksDir := filepath.Join(dataDir, "chunks")
+		require.NoError(t, os.MkdirAll(chunksDir, 0o755))
+		t.Cleanup(func() {
+			_ = os.Chmod(chunksDir, 0o755)
+		})
+
+		// 设为 0o300 (-wx------)：允许在其下创建子目录与路径穿梭，但禁止 os.Open 执行 syncDir
+		require.NoError(t, os.Chmod(chunksDir, 0o300))
+
+		// 第 1 次调用：创建 chunks/01/0 子目录，但 syncDir(chunksDir) 失败未完成持久化
+		err1 := store.PutBlock(ctx, 1, 0, []byte("first"))
+		require.ErrorIs(t, err1, meta.ErrIO)
+
+		// 保持 chunksDir 为 0o300 不变，第 2 次调用同散列分片目录
+		// 绝不能因为 chunks/01/0 目录已存在就直接无锁返回 nil 跳过尚未同步成功的祖先目录 chunksDir
+		err2 := store.PutBlock(ctx, 257, 0, []byte("second"))
+		require.ErrorIs(t, err2, meta.ErrIO, "祖先目录 sync 失败后同散列分片后续写入不得跳过祖先目录同步")
+
+		// 恢复 0o755，第 3 次调用必须成功且能完整读出
+		require.NoError(t, os.Chmod(chunksDir, 0o755))
+		err3 := store.PutBlock(ctx, 257, 0, []byte("second"))
+		require.NoError(t, err3)
+
+		got := make([]byte, len("second"))
+		readErr := store.GetBlock(ctx, 257, 0, uint32(len("second")), 0, got)
+		require.NoError(t, readErr)
+		assert.Equal(t, []byte("second"), got)
+	})
+
+	t.Run("16 协程并发首写同一全新散列分片目录竞态检验", func(t *testing.T) {
+		dataDir := t.TempDir()
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		const concurrency = 16
+		startCh := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make([]error, concurrency)
+
+		for i := 0; i < concurrency; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-startCh
+				payload := []byte(fmt.Sprintf("concurrency-payload-%d", idx))
+				sliceID := uint64(idx*256 + 3)
+				errs[idx] = store.PutBlock(ctx, sliceID, 0, payload)
+			}(i)
+		}
+
+		close(startCh)
+		wg.Wait()
+
+		for i := 0; i < concurrency; i++ {
+			require.NoError(t, errs[i], "并发首写全新散列分片目录不得报错 (协程 %d)", i)
+			expected := []byte(fmt.Sprintf("concurrency-payload-%d", i))
+			sliceID := uint64(i*256 + 3)
+			data := make([]byte, len(expected))
+			err := store.GetBlock(ctx, sliceID, 0, uint32(len(expected)), 0, data)
+			require.NoError(t, err)
+			assert.Equal(t, expected, data)
+		}
 	})
 }

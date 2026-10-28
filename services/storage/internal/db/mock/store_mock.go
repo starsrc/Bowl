@@ -155,20 +155,29 @@ func (_c *MockStore_AddSliceRefCount_Call) RunAndReturn(run func(ctx context.Con
 }
 
 // AppendChunkSlice provides a mock function for the type MockStore
-func (_mock *MockStore) AppendChunkSlice(ctx context.Context, arg db.AppendChunkSliceParams) error {
+func (_mock *MockStore) AppendChunkSlice(ctx context.Context, arg db.AppendChunkSliceParams) (int64, error) {
 	ret := _mock.Called(ctx, arg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for AppendChunkSlice")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendChunkSliceParams) error); ok {
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendChunkSliceParams) (int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AppendChunkSliceParams) int64); ok {
 		r0 = returnFunc(ctx, arg)
 	} else {
-		r0 = ret.Error(0)
+		r0 = ret.Get(0).(int64)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.AppendChunkSliceParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockStore_AppendChunkSlice_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AppendChunkSlice'
@@ -201,12 +210,12 @@ func (_c *MockStore_AppendChunkSlice_Call) Run(run func(ctx context.Context, arg
 	return _c
 }
 
-func (_c *MockStore_AppendChunkSlice_Call) Return(err error) *MockStore_AppendChunkSlice_Call {
-	_c.Call.Return(err)
+func (_c *MockStore_AppendChunkSlice_Call) Return(n int64, err error) *MockStore_AppendChunkSlice_Call {
+	_c.Call.Return(n, err)
 	return _c
 }
 
-func (_c *MockStore_AppendChunkSlice_Call) RunAndReturn(run func(ctx context.Context, arg db.AppendChunkSliceParams) error) *MockStore_AppendChunkSlice_Call {
+func (_c *MockStore_AppendChunkSlice_Call) RunAndReturn(run func(ctx context.Context, arg db.AppendChunkSliceParams) (int64, error)) *MockStore_AppendChunkSlice_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -3321,6 +3330,74 @@ func (_c *MockStore_GetInodeForUpdate_Call) RunAndReturn(run func(ctx context.Co
 	return _c
 }
 
+// GetInodeSizeAndChunksInRange provides a mock function for the type MockStore
+func (_mock *MockStore) GetInodeSizeAndChunksInRange(ctx context.Context, arg db.GetInodeSizeAndChunksInRangeParams) ([]db.GetInodeSizeAndChunksInRangeRow, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetInodeSizeAndChunksInRange")
+	}
+
+	var r0 []db.GetInodeSizeAndChunksInRangeRow
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetInodeSizeAndChunksInRangeParams) ([]db.GetInodeSizeAndChunksInRangeRow, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.GetInodeSizeAndChunksInRangeParams) []db.GetInodeSizeAndChunksInRangeRow); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.GetInodeSizeAndChunksInRangeRow)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.GetInodeSizeAndChunksInRangeParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_GetInodeSizeAndChunksInRange_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetInodeSizeAndChunksInRange'
+type MockStore_GetInodeSizeAndChunksInRange_Call struct {
+	*mock.Call
+}
+
+// GetInodeSizeAndChunksInRange is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.GetInodeSizeAndChunksInRangeParams
+func (_e *MockStore_Expecter) GetInodeSizeAndChunksInRange(ctx any, arg any) *MockStore_GetInodeSizeAndChunksInRange_Call {
+	return &MockStore_GetInodeSizeAndChunksInRange_Call{Call: _e.mock.On("GetInodeSizeAndChunksInRange", ctx, arg)}
+}
+
+func (_c *MockStore_GetInodeSizeAndChunksInRange_Call) Run(run func(ctx context.Context, arg db.GetInodeSizeAndChunksInRangeParams)) *MockStore_GetInodeSizeAndChunksInRange_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.GetInodeSizeAndChunksInRangeParams
+		if args[1] != nil {
+			arg1 = args[1].(db.GetInodeSizeAndChunksInRangeParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_GetInodeSizeAndChunksInRange_Call) Return(getInodeSizeAndChunksInRangeRows []db.GetInodeSizeAndChunksInRangeRow, err error) *MockStore_GetInodeSizeAndChunksInRange_Call {
+	_c.Call.Return(getInodeSizeAndChunksInRangeRows, err)
+	return _c
+}
+
+func (_c *MockStore_GetInodeSizeAndChunksInRange_Call) RunAndReturn(run func(ctx context.Context, arg db.GetInodeSizeAndChunksInRangeParams) ([]db.GetInodeSizeAndChunksInRangeRow, error)) *MockStore_GetInodeSizeAndChunksInRange_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetInodeXattr provides a mock function for the type MockStore
 func (_mock *MockStore) GetInodeXattr(ctx context.Context, arg db.GetInodeXattrParams) (db.InodeXattr, error) {
 	ret := _mock.Called(ctx, arg)
@@ -4567,6 +4644,74 @@ func (_c *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call) Return(fileLoc
 }
 
 func (_c *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call) RunAndReturn(run func(ctx context.Context, arg db.ListPendingFileLockWaitersByInoAndFlagsParams) ([]db.FileLockWaiter, error)) *MockStore_ListPendingFileLockWaitersByInoAndFlags_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// LockValidSliceRefsKeyShare provides a mock function for the type MockStore
+func (_mock *MockStore) LockValidSliceRefsKeyShare(ctx context.Context, sliceIds []int64) ([]int64, error) {
+	ret := _mock.Called(ctx, sliceIds)
+
+	if len(ret) == 0 {
+		panic("no return value specified for LockValidSliceRefsKeyShare")
+	}
+
+	var r0 []int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) ([]int64, error)); ok {
+		return returnFunc(ctx, sliceIds)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []int64) []int64); ok {
+		r0 = returnFunc(ctx, sliceIds)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]int64)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, []int64) error); ok {
+		r1 = returnFunc(ctx, sliceIds)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_LockValidSliceRefsKeyShare_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'LockValidSliceRefsKeyShare'
+type MockStore_LockValidSliceRefsKeyShare_Call struct {
+	*mock.Call
+}
+
+// LockValidSliceRefsKeyShare is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sliceIds []int64
+func (_e *MockStore_Expecter) LockValidSliceRefsKeyShare(ctx any, sliceIds any) *MockStore_LockValidSliceRefsKeyShare_Call {
+	return &MockStore_LockValidSliceRefsKeyShare_Call{Call: _e.mock.On("LockValidSliceRefsKeyShare", ctx, sliceIds)}
+}
+
+func (_c *MockStore_LockValidSliceRefsKeyShare_Call) Run(run func(ctx context.Context, sliceIds []int64)) *MockStore_LockValidSliceRefsKeyShare_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 []int64
+		if args[1] != nil {
+			arg1 = args[1].([]int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_LockValidSliceRefsKeyShare_Call) Return(int64s []int64, err error) *MockStore_LockValidSliceRefsKeyShare_Call {
+	_c.Call.Return(int64s, err)
+	return _c
+}
+
+func (_c *MockStore_LockValidSliceRefsKeyShare_Call) RunAndReturn(run func(ctx context.Context, sliceIds []int64) ([]int64, error)) *MockStore_LockValidSliceRefsKeyShare_Call {
 	_c.Call.Return(run)
 	return _c
 }

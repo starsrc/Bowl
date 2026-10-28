@@ -3,15 +3,94 @@ package db_test
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
+
+// testSliceGCAdvisoryLockKey 是跨测试包隔离 slice_refs 全表 GC 与并发切片测试的固定 64 位 PostgreSQL 咨询锁键。
+const testSliceGCAdvisoryLockKey int64 = 0x424f574c5f474301
+
+func acquireChunksTestSliceGCLock(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err, "获取专用连接以加 GC 咨询锁失败")
+
+	_, err = conn.Exec(context.Background(), "SELECT pg_advisory_lock($1)", testSliceGCAdvisoryLockKey)
+	require.NoError(t, err, "加会话级 GC 咨询锁失败")
+
+	t.Cleanup(func() {
+		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testSliceGCAdvisoryLockKey)
+		conn.Release()
+	})
+}
+
+func setupChunksTestDB(t *testing.T) (db.Store, *pgxpool.Pool) {
+	t.Helper()
+	for _, envName := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "TEST_DB_DSN"} {
+		rawVal := strings.TrimSpace(os.Getenv(envName))
+		if rawVal != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			poolCfg, err := pgxpool.ParseConfig(rawVal)
+			if err != nil {
+				t.Fatalf("显式指定的数据库 DSN (%s) 配置解析失败: %v", envName, err)
+			}
+			pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+			if err != nil {
+				t.Fatalf("显式指定的数据库 DSN (%s) 连接失败: %v", envName, err)
+			}
+			if err := pool.Ping(ctx); err != nil {
+				pool.Close()
+				t.Fatalf("显式指定的数据库 DSN (%s) 连接失败: %v", envName, err)
+			}
+			t.Cleanup(func() {
+				pool.Close()
+			})
+			return db.NewStore(pool), pool
+		}
+	}
+
+	candidates := []string{
+		"postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@127.0.0.1:5432/bowl?sslmode=disable",
+	}
+
+	for _, cand := range candidates {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		poolCfg, err := pgxpool.ParseConfig(cand)
+		if err == nil {
+			pool, err := pgxpool.NewWithConfig(probeCtx, poolCfg)
+			if err == nil {
+				if pingErr := pool.Ping(probeCtx); pingErr == nil {
+					cancel()
+					t.Cleanup(func() {
+						pool.Close()
+					})
+					return db.NewStore(pool), pool
+				}
+				pool.Close()
+			}
+		}
+		cancel()
+	}
+
+	if strings.TrimSpace(os.Getenv("BOWL_FORMAL_REQUIRE_DB")) == "1" {
+		t.Fatalf("未探测到可用 PostgreSQL 实例 (9432/5432 均不可达) 且设置了 BOWL_FORMAL_REQUIRE_DB=1")
+	}
+
+	t.Skip("跳过 PostgreSQL 测试 (未显式配置 DSN 且 127.0.0.1:9432 和 127.0.0.1:5432 均不可达)")
+	return nil, nil
+}
 
 // makeTestSliceDescriptor 生成模拟的 24 字节 Slice 描述符
 func makeTestSliceDescriptor(pos uint32, id uint64, size uint32, off uint32, length uint32) []byte {
@@ -58,7 +137,7 @@ func isPgCheckViolation(err error) bool {
 }
 
 func TestStore_Integration_SliceIDSeq(t *testing.T) {
-	store, _ := setupTestDB(t)
+	store, _ := setupChunksTestDB(t)
 	ctx := context.Background()
 
 	id1, err := store.NextSliceID(ctx)
@@ -71,7 +150,7 @@ func TestStore_Integration_SliceIDSeq(t *testing.T) {
 }
 
 func TestStore_Integration_ChunksConstraints(t *testing.T) {
-	store, _ := setupTestDB(t)
+	store, _ := setupChunksTestDB(t)
 	ctx := context.Background()
 
 	validSlice := makeTestSliceDescriptor(0, 100, 4096, 0, 4096)
@@ -83,7 +162,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	})
 
 	// 1. 正常插入合法 24 字节与 48 字节数据
-	err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   0,
 		Slices: validSlice,
@@ -91,7 +170,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	require.NoError(t, err, "合法 24 字节 slice 插入必须成功")
 
 	// 2. 违反 chk_chunks_ino (ino <= 0)
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    0,
 		Indx:   0,
 		Slices: validSlice,
@@ -99,7 +178,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, isPgCheckViolation(err), "ino = 0 必须触发 chk_chunks_ino CHECK 违规: %v", err)
 
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    -1,
 		Indx:   0,
 		Slices: validSlice,
@@ -108,7 +187,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	assert.True(t, isPgCheckViolation(err), "ino < 0 必须触发 chk_chunks_ino CHECK 违规: %v", err)
 
 	// 3. 违反 chk_chunks_indx (indx < 0)
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   -1,
 		Slices: validSlice,
@@ -117,7 +196,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	assert.True(t, isPgCheckViolation(err), "indx < 0 必须触发 chk_chunks_indx CHECK 违规: %v", err)
 
 	// 4. 违反 chk_chunks_slices_len: 长度为空 (0 字节)
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   1,
 		Slices: []byte{},
@@ -126,7 +205,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	assert.True(t, isPgCheckViolation(err), "空 slices 必须触发 chk_chunks_slices_len 违规: %v", err)
 
 	// 5. 违反 chk_chunks_slices_len: 长度非 24 字节整数倍 (例如 10 字节、25 字节)
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   2,
 		Slices: make([]byte, 10),
@@ -134,7 +213,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, isPgCheckViolation(err), "10 字节 slices 必须触发 chk_chunks_slices_len 违规: %v", err)
 
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   3,
 		Slices: make([]byte, 25),
@@ -144,7 +223,7 @@ func TestStore_Integration_ChunksConstraints(t *testing.T) {
 }
 
 func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
-	store, _ := setupTestDB(t)
+	store, _ := setupChunksTestDB(t)
 	ctx := context.Background()
 
 	ino := nextTestIno()
@@ -157,19 +236,21 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	slice3 := makeTestSliceDescriptor(8192, 103, 4096, 0, 4096)
 
 	// 1. AppendChunkSlice: 首次插入与追加合并
-	err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	octetLen1, err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   0,
 		Slices: slice1,
 	})
 	require.NoError(t, err)
+	assert.Equal(t, int64(24), octetLen1)
 
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+	octetLen2, err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 		Ino:    ino,
 		Indx:   0,
 		Slices: slice2,
 	})
 	require.NoError(t, err)
+	assert.Equal(t, int64(48), octetLen2)
 
 	// 2. GetChunk 读取
 	chunk0, err := store.GetChunk(ctx, db.GetChunkParams{
@@ -183,13 +264,13 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	assert.Equal(t, expectedSlices, chunk0.Slices, "slices 应该为追加拼接后的 48 字节")
 
 	// 3. AppendExistingChunkSlice: 仅在已有 chunk 上追加
-	rows, err := store.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
+	octetLen3, err := store.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
 		Slices: slice3,
 		Ino:    ino,
 		Indx:   0,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), rows, "对已存在的 chunk 行追加应影响 1 行")
+	assert.Equal(t, int64(72), octetLen3, "对已存在的 chunk 行追加应返回追加后的 72 字节")
 
 	chunk0AfterAppend, err := store.GetChunk(ctx, db.GetChunkParams{
 		Ino:  ino,
@@ -198,14 +279,14 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 72, len(chunk0AfterAppend.Slices))
 
-	// 对不存在的 chunk 追加，应返回 0 行且不创建新记录
-	rowsNonExistent, err := store.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
+	// 对不存在的 chunk 追加，应返回 0 字节且不创建新记录
+	octetLenNonExistent, err := store.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
 		Slices: slice1,
 		Ino:    ino,
 		Indx:   999,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), rowsNonExistent, "对不存在的 chunk 追加应影响 0 行")
+	assert.Equal(t, int64(0), octetLenNonExistent, "对不存在的 chunk 追加应返回 0 字节")
 
 	_, err = store.GetChunk(ctx, db.GetChunkParams{
 		Ino:  ino,
@@ -230,11 +311,11 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	assert.Equal(t, compactedSlice, chunk0Compacted.Slices, "UpdateChunkSlices 必须替换为紧致的 slices")
 
 	// 5. GetChunksInRange: 插入多个 indx 并按范围查询升序返回
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino, Indx: 1, Slices: slice1})
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino, Indx: 1, Slices: slice1})
 	require.NoError(t, err)
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino, Indx: 2, Slices: slice2})
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino, Indx: 2, Slices: slice2})
 	require.NoError(t, err)
-	err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino, Indx: 4, Slices: slice3})
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino, Indx: 4, Slices: slice3})
 	require.NoError(t, err)
 
 	rangeChunks, err := store.GetChunksInRange(ctx, db.GetChunksInRangeParams{
@@ -262,7 +343,7 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 }
 
 func TestStore_Integration_ChunksTruncateAndBatchDeletes(t *testing.T) {
-	store, _ := setupTestDB(t)
+	store, _ := setupChunksTestDB(t)
 	ctx := context.Background()
 
 	ino1 := nextTestIno()
@@ -278,7 +359,7 @@ func TestStore_Integration_ChunksTruncateAndBatchDeletes(t *testing.T) {
 	s3 := makeTestSliceDescriptor(0, 203, 4096, 0, 4096)
 
 	for idx, s := range [][]byte{s0, s1, s2, s3} {
-		err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+		_, err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 			Ino:    ino1,
 			Indx:   int32(idx),
 			Slices: s,
@@ -310,8 +391,10 @@ func TestStore_Integration_ChunksTruncateAndBatchDeletes(t *testing.T) {
 	assert.Equal(t, s0, inoSlices[0])
 
 	// 4. DeleteChunksByInos: 批量删除多个 Inode
-	require.NoError(t, store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino1, Indx: 0, Slices: s0}))
-	require.NoError(t, store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino2, Indx: 0, Slices: s1}))
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino1, Indx: 0, Slices: s0})
+	require.NoError(t, err)
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{Ino: ino2, Indx: 0, Slices: s1})
+	require.NoError(t, err)
 
 	batchSlices, err := store.DeleteChunksByInos(ctx, []int64{ino1, ino2})
 	require.NoError(t, err)
@@ -319,7 +402,8 @@ func TestStore_Integration_ChunksTruncateAndBatchDeletes(t *testing.T) {
 }
 
 func TestStore_Integration_SliceRefsConstraintsAndCRUD(t *testing.T) {
-	store, _ := setupTestDB(t)
+	store, pool := setupChunksTestDB(t)
+	acquireChunksTestSliceGCLock(t, pool)
 	ctx := context.Background()
 
 	sliceID, err := store.NextSliceID(ctx)
@@ -393,8 +477,13 @@ func TestStore_Integration_SliceRefsConstraintsAndCRUD(t *testing.T) {
 }
 
 func TestStore_Integration_ListGarbageSliceRefs_SkipLocked(t *testing.T) {
-	store, pool := setupTestDB(t)
+	store, pool := setupChunksTestDB(t)
+	acquireChunksTestSliceGCLock(t, pool)
 	ctx := context.Background()
+
+	// 清理共享库残留的非活跃垃圾切片，确保本用例隔离不受历史脏数据干扰
+	_, err := pool.Exec(ctx, "DELETE FROM slice_refs WHERE refs <= 0")
+	require.NoError(t, err)
 
 	id1, err := store.NextSliceID(ctx)
 	require.NoError(t, err)

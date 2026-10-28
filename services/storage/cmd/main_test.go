@@ -5,13 +5,17 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx"
 
+	"github.com/starsrc/Aether/pkg/tx"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	mockdb "github.com/starsrc/bowl/services/storage/internal/db/mock"
 )
@@ -206,4 +210,138 @@ func TestRun_StartFailure_PortConflict(t *testing.T) {
 	err = run(ctx, fx.Replace(fx.Annotate(mockStore, fx.As(new(db.Store)))))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "address already in use")
+}
+
+func TestRun_AutoGCWorker_TriggersOnIntervalAndDrainsGracefully(t *testing.T) {
+	port := getFreePort(t)
+	t.Setenv("DB_DSN", "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable")
+	t.Setenv("SERVER_PORT", strconv.Itoa(port))
+	t.Setenv("SERVER_STOP_TIMEOUT", "3s")
+	t.Setenv("LOG_LEVEL", "error")
+	t.Setenv("STORAGE_GC_INTERVAL", "20ms")
+
+	mockStore := mockdb.NewMockStore(t)
+	mockQuerier := mockdb.NewMockQuerier(t)
+
+	gcCalled := make(chan struct{}, 10)
+	var gcCount atomic.Int32
+
+	mockStore.EXPECT().
+		ExecTxWithOptions(mock.Anything, mock.Anything).
+		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			return fn(mockQuerier)
+		}).
+		Maybe()
+
+	mockQuerier.EXPECT().
+		ListGarbageSliceRefs(mock.Anything, int32(100)).
+		RunAndReturn(func(ctx context.Context, limit int32) ([]db.SliceRef, error) {
+			gcCount.Add(1)
+			select {
+			case gcCalled <- struct{}{}:
+			default:
+			}
+			return []db.SliceRef{}, nil
+		}).
+		Maybe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opts := []fx.Option{
+		fx.Replace(fx.Annotate(mockStore, fx.As(new(db.Store)))),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, opts...)
+	}()
+
+	// 1. 等待短周期触发后台 CollectGarbage
+	select {
+	case <-gcCalled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for auto GC worker to trigger")
+	}
+
+	// 2. 取消上下文触发优雅停机
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for application to stop gracefully")
+	}
+
+	assert.GreaterOrEqual(t, gcCount.Load(), int32(1))
+}
+
+func TestRun_AutoGCWorker_WaitsForInFlightGCToCompleteOnStop(t *testing.T) {
+	port := getFreePort(t)
+	t.Setenv("DB_DSN", "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable")
+	t.Setenv("SERVER_PORT", strconv.Itoa(port))
+	t.Setenv("SERVER_STOP_TIMEOUT", "3s")
+	t.Setenv("LOG_LEVEL", "error")
+	t.Setenv("STORAGE_GC_INTERVAL", "20ms")
+
+	mockStore := mockdb.NewMockStore(t)
+	mockQuerier := mockdb.NewMockQuerier(t)
+
+	inFlightStarted := make(chan struct{})
+	inFlightDone := make(chan struct{})
+
+	mockStore.EXPECT().
+		ExecTxWithOptions(mock.Anything, mock.Anything).
+		RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+			return fn(mockQuerier)
+		}).
+		Maybe()
+
+	var once sync.Once
+	mockQuerier.EXPECT().
+		ListGarbageSliceRefs(mock.Anything, int32(100)).
+		RunAndReturn(func(ctx context.Context, limit int32) ([]db.SliceRef, error) {
+			once.Do(func() {
+				close(inFlightStarted)
+				time.Sleep(80 * time.Millisecond)
+				close(inFlightDone)
+			})
+			return []db.SliceRef{}, nil
+		}).
+		Maybe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opts := []fx.Option{
+		fx.Replace(fx.Annotate(mockStore, fx.As(new(db.Store)))),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, opts...)
+	}()
+
+	select {
+	case <-inFlightStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for in-flight GC to start")
+	}
+
+	// 触发停机
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+		// 验证停机完成时，在途的 GC 轮次必须已经完成排空
+		select {
+		case <-inFlightDone:
+		default:
+			t.Fatal("expected in-flight GC to be fully drained before application stop completes")
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for application shutdown")
+	}
 }

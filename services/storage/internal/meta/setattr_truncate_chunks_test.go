@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -514,8 +517,23 @@ func TestSetAttr_TruncateNonZero_ResurrectPrevention_Read(t *testing.T) {
 	setupMockWriteTx(mockStore, mockQuerier)
 
 	mockQuerier.EXPECT().
-		GetInode(mock.Anything, int64(ino)).
-		Return(expandedRow, nil).
+		GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).
+		Return([]db.GetInodeSizeAndChunksInRangeRow{
+			{
+				Ino:         expandedRow.Ino,
+				Mode:        expandedRow.Mode,
+				Size:        expandedRow.Size,
+				Atime:       expandedRow.Atime,
+				Mtime:       expandedRow.Mtime,
+				Ctime:       expandedRow.Ctime,
+				ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+				ChunkSlices: combinedSlicesBytes,
+			},
+		}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -531,15 +549,8 @@ func TestSetAttr_TruncateNonZero_ResurrectPrevention_Read(t *testing.T) {
 		Once()
 
 	mockQuerier.EXPECT().
-		GetChunk(mock.Anything, db.GetChunkParams{
-			Ino:  int64(ino),
-			Indx: 0,
-		}).
-		Return(db.Chunk{
-			Ino:    int64(ino),
-			Indx:   0,
-			Slices: combinedSlicesBytes,
-		}, nil).
+		LockValidSliceRefsKeyShare(mock.Anything, []int64{100}).
+		Return([]int64{100}, nil).
 		Once()
 
 	// 截断点之前的 2048 字节数据 (来自 ID=100) 会调用 BlockStore.GetBlock 读取
@@ -568,4 +579,158 @@ func TestSetAttr_TruncateNonZero_ResurrectPrevention_Read(t *testing.T) {
 
 	// 严防对 [2048, 4096) 触发 BlockStore 读取（空洞由 buildSlice 补齐为 id=0 直接内存填零）
 	mockBS.AssertNumberOfCalls(t, "GetBlock", 1)
+}
+
+// TestTruncate_CrossChunkSharedSliceRefCountAndGCProtection_PostgresIntegration 验证跨 64 MiB Chunk 边界写入拆分为多 Chunk 共享同一 SliceID 时，
+// 单侧截断仅扣减 refs 并保留物理块供剩余 Chunk 读取，全量归零截断后 refs 归零且 GC 彻底清理物理块与元数据记录。
+func TestTruncate_CrossChunkSharedSliceRefCountAndGCProtection_PostgresIntegration(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+	mgr := meta.New(store, meta.WithBlockStore(bs))
+
+	blockFilePath := func(sliceID uint64, blockIdx uint32, blockSize uint32) string {
+		return filepath.Join(
+			dataDir,
+			"chunks",
+			fmt.Sprintf("%02X", sliceID%256),
+			fmt.Sprintf("%d", sliceID/1000/1000),
+			fmt.Sprintf("%d_%d_%d", sliceID, blockIdx, blockSize),
+		)
+	}
+
+	fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:  int32(meta.S_IFREG | 0o644),
+		Nlink: 1,
+		Uid:   1000,
+		Gid:   1000,
+	})
+	require.NoError(t, err)
+	ino := uint64(fileRow.Ino)
+
+	t.Cleanup(func() {
+		for indx := int32(0); indx < 4; indx++ {
+			chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(ino), Indx: indx})
+			if len(chunkRow.Slices) > 0 {
+				if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
+					for _, s := range slices {
+						_ = store.DeleteSliceRef(context.Background(), int64(s.ID))
+					}
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(context.Background(), store, []int64{int64(ino)})
+		_ = store.DeleteInode(context.Background(), int64(ino))
+	})
+
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+	t.Cleanup(func() {
+		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: fh})
+	})
+
+	// 在跨 64 MiB 边界 offset = meta.ChunkSize - 2048 处单次写入 4096 字节可识别数据（跨 Chunk 0 末尾 2048B 与 Chunk 1 开头 2048B）
+	crossOffset := uint64(meta.ChunkSize - 2048)
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i%251 + 1)
+	}
+
+	writeRes, err := mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: crossOffset,
+		Data:   payload,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, writeRes)
+	assert.Equal(t, uint32(4096), writeRes.Size)
+	assert.Equal(t, crossOffset+4096, writeRes.Inode.Attr.Size)
+
+	// 查询底表 GetChunk(ino, 0) 与 GetChunk(ino, 1)，验证两者解码出的物理 SliceID 相同且 GetSliceRef 中 refs == 2
+	c0, err := store.GetChunk(ctx, db.GetChunkParams{Ino: int64(ino), Indx: 0})
+	require.NoError(t, err)
+	slices0, err := meta.DecodeSlices(c0.Slices)
+	require.NoError(t, err)
+	require.NotEmpty(t, slices0)
+
+	c1, err := store.GetChunk(ctx, db.GetChunkParams{Ino: int64(ino), Indx: 1})
+	require.NoError(t, err)
+	slices1, err := meta.DecodeSlices(c1.Slices)
+	require.NoError(t, err)
+	require.NotEmpty(t, slices1)
+
+	sharedSliceID := slices0[0].ID
+	assert.Equal(t, sharedSliceID, slices1[0].ID, "跨 Chunk 拆分切片必须共享同一物理 SliceID")
+
+	refBefore, err := store.GetSliceRef(ctx, int64(sharedSliceID))
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), refBefore.Refs, "共享切片初始 refs 必须为 2")
+
+	pPath := blockFilePath(sharedSliceID, 0, 4096)
+	assert.FileExists(t, pPath, "物理块文件必须落盘存在")
+
+	// 第 1 次单侧截断：调用 mgr.SetAttr 将文件大小截断为 newSize = meta.ChunkSize（整块删除 Chunk 1，保留 Chunk 0）
+	targetSize1 := uint64(meta.ChunkSize)
+	setAttrRes1, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+		Size: &targetSize1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, setAttrRes1)
+	assert.Equal(t, targetSize1, setAttrRes1.Attr.Size)
+
+	// 查询 GetSliceRef 断言 refs == 1
+	ref1, err := store.GetSliceRef(ctx, int64(sharedSliceID))
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), ref1.Refs, "单侧截断后 refs 必须安全扣减为 1")
+
+	// 调用 mgr.CollectGarbage(ctx, 100)，断言该共享物理块文件在磁盘上依然完好存在未被误删
+	reclaimed1, err := mgr.CollectGarbage(ctx, 100)
+	require.NoError(t, err)
+	_ = reclaimed1
+	assert.FileExists(t, pPath, "单侧截断后 refs=1，GC 绝不能误删共享物理块文件")
+
+	// 且 mgr.Read(offset = meta.ChunkSize - 2048, size = 2048) 精确读出前半段 2048 字节数据！
+	readRes1, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: crossOffset,
+		Size:   2048,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, readRes1)
+	assert.Equal(t, payload[:2048], readRes1.Data, "Chunk 0 内前半段数据必须完好且可正常读取")
+
+	// 第 2 次归零截断：调用 mgr.SetAttr 将文件大小截断为 newSize = 0
+	targetSize0 := uint64(0)
+	setAttrRes0, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+		Size: &targetSize0,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, setAttrRes0)
+	assert.Equal(t, targetSize0, setAttrRes0.Attr.Size)
+
+	// 查询 GetSliceRef 断言 refs == 0
+	ref0, err := store.GetSliceRef(ctx, int64(sharedSliceID))
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), ref0.Refs, "归零截断后 refs 必须降为 0")
+
+	// 再次调用 mgr.CollectGarbage(ctx, 100)，断言该物理块文件已从磁盘物理删除，且 GetSliceRef 返回 pgx.ErrNoRows
+	reclaimed0, err := mgr.CollectGarbage(ctx, 100)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, reclaimed0, 1, "GC 必须成功回收 refs=0 的切片")
+	assert.NoFileExists(t, pPath, "GC 回收后磁盘上的物理块文件必须被彻底删除")
+
+	_, err = store.GetSliceRef(ctx, int64(sharedSliceID))
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "GC 回收后底表 slice_refs 记录必须彻底删除")
 }

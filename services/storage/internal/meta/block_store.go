@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // BlockStore 定义不可变数据块物理持久化接口。
@@ -132,7 +133,9 @@ func LocateBlocksWithBlockSize(sliceSize uint32, sliceOff uint32, reqLen uint32,
 
 // LocalFSBlockStore 实现基于本地 NVMe SSD 文件系统的两级散列目录存储引擎。
 type LocalFSBlockStore struct {
-	dataDir string
+	dataDir    string
+	dirMu      sync.Mutex
+	syncedDirs map[string]struct{}
 }
 
 var _ BlockStore = (*LocalFSBlockStore)(nil)
@@ -140,7 +143,8 @@ var _ BlockStore = (*LocalFSBlockStore)(nil)
 // NewLocalFSBlockStore 创建基于本地文件系统的 BlockStore 实例。
 func NewLocalFSBlockStore(dataDir string) *LocalFSBlockStore {
 	return &LocalFSBlockStore{
-		dataDir: dataDir,
+		dataDir:    dataDir,
+		syncedDirs: make(map[string]struct{}),
 	}
 }
 
@@ -165,6 +169,106 @@ func (s *LocalFSBlockStore) blockPath(sliceID uint64, blockIdx uint32, blockSize
 	)
 }
 
+// syncDir 打开指定目录并调用 Sync 将其目录项变更持久化至介质。
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("%w: failed to open directory %s for sync: %v", ErrIO, dir, err)
+	}
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		return fmt.Errorf("%w: failed to sync directory %s: %v", ErrIO, dir, err)
+	}
+	return nil
+}
+
+// ensureDirSynced 保证 targetDir 及其所有祖先目录项均已持久化刷盘。
+func (s *LocalFSBlockStore) ensureDirSynced(targetDir string) error {
+	s.dirMu.Lock()
+	defer s.dirMu.Unlock()
+
+	if s.syncedDirs == nil {
+		s.syncedDirs = make(map[string]struct{})
+	}
+
+	cleanBase := filepath.Clean(s.dataDir)
+	cleanTarget := filepath.Clean(targetDir)
+
+	if _, ok := s.syncedDirs[cleanTarget]; ok {
+		fi, err := os.Stat(cleanTarget)
+		if err == nil {
+			if fi.IsDir() {
+				return nil
+			}
+			return fmt.Errorf("%w: path %s exists but is not a directory", ErrIO, cleanTarget)
+		}
+		delete(s.syncedDirs, cleanTarget)
+	}
+
+	var toCreate []string
+	curr := cleanTarget
+	for {
+		fi, err := os.Stat(curr)
+		if err == nil {
+			if !fi.IsDir() {
+				return fmt.Errorf("%w: path %s exists but is not a directory", ErrIO, curr)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: failed to stat %s: %v", ErrIO, curr, err)
+		}
+		toCreate = append(toCreate, curr)
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			return fmt.Errorf("%w: reached filesystem root without existing directory: %s", ErrIO, cleanTarget)
+		}
+		curr = parent
+	}
+
+	for i, j := 0, len(toCreate)-1; i < j; i, j = i+1, j-1 {
+		toCreate[i], toCreate[j] = toCreate[j], toCreate[i]
+	}
+
+	for _, d := range toCreate {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("%w: failed to create directory %s: %v", ErrIO, d, err)
+			}
+			fi, statErr := os.Stat(d)
+			if statErr != nil || !fi.IsDir() {
+				return fmt.Errorf("%w: path %s already exists and is not a directory: %v", ErrIO, d, statErr)
+			}
+		}
+	}
+
+	leafParent := filepath.Dir(cleanTarget)
+	var ancestorsToSync []string
+	for a := leafParent; ; a = filepath.Dir(a) {
+		ancestorsToSync = append(ancestorsToSync, a)
+		if a == cleanBase || a == filepath.Dir(a) {
+			break
+		}
+	}
+
+	for i, j := 0, len(ancestorsToSync)-1; i < j; i, j = i+1, j-1 {
+		ancestorsToSync[i], ancestorsToSync[j] = ancestorsToSync[j], ancestorsToSync[i]
+	}
+
+	for _, a := range ancestorsToSync {
+		if _, synced := s.syncedDirs[a]; !synced {
+			if err := syncDir(a); err != nil {
+				return err
+			}
+			s.syncedDirs[a] = struct{}{}
+		}
+	}
+
+	s.syncedDirs[cleanTarget] = struct{}{}
+	return nil
+}
+
 // PutBlock 采用两级目录散列，通过写入同目录唯一临时文件、Sync 刷盘并原子重命名发布到目标路径。
 func (s *LocalFSBlockStore) PutBlock(ctx context.Context, sliceID uint64, blockIdx uint32, data []byte) error {
 	if err := ctx.Err(); err != nil {
@@ -175,7 +279,7 @@ func (s *LocalFSBlockStore) PutBlock(ctx context.Context, sliceID uint64, blockI
 	finalPath := s.blockPath(sliceID, blockIdx, blockSize)
 	dir := s.blockDir(sliceID)
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := s.ensureDirSynced(dir); err != nil {
 		return fmt.Errorf("%w: failed to create chunk directory %s: %v", ErrIO, dir, err)
 	}
 
@@ -216,6 +320,12 @@ func (s *LocalFSBlockStore) PutBlock(ctx context.Context, sliceID uint64, blockI
 	}
 
 	success = true
+
+	if err := syncDir(dir); err != nil {
+		_ = os.Remove(finalPath)
+		return fmt.Errorf("%w: failed to sync chunk directory %s after rename: %v", ErrIO, dir, err)
+	}
+
 	return nil
 }
 
@@ -268,6 +378,10 @@ func (s *LocalFSBlockStore) DeleteBlock(ctx context.Context, sliceID uint64, blo
 			return nil
 		}
 		return fmt.Errorf("%w: failed to remove block file %s: %v", ErrIO, finalPath, err)
+	}
+
+	if err := syncDir(filepath.Dir(finalPath)); err != nil {
+		return fmt.Errorf("%w: failed to sync directory after removing block file %s: %v", ErrIO, finalPath, err)
 	}
 
 	return nil

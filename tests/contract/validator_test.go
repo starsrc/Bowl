@@ -101,6 +101,16 @@ func TestNewStorageValidator(t *testing.T) {
 		if err := v.Validate(validGetLkUnlock); err != nil {
 			t.Errorf("expected valid GetLkRequest with F_UNLCK, got error: %v", err)
 		}
+
+		validSetXattrFlags3 := &storagev1.SetXattrRequest{
+			Ino:   1,
+			Name:  []byte("user.k"),
+			Value: []byte("v"),
+			Flags: 3,
+		}
+		if err := v.Validate(validSetXattrFlags3); err != nil {
+			t.Errorf("expected valid SetXattrRequest with Flags: 3, got error: %v", err)
+		}
 	})
 
 	t.Run("非法请求校验失败并精确映射 ErrorInfo.reason", func(t *testing.T) {
@@ -141,6 +151,16 @@ func TestNewStorageValidator(t *testing.T) {
 					Ino:   1,
 					Name:  []byte{},
 					Value: []byte("val"),
+				},
+				expectedReason: validator.ReasonInvalidArgument,
+			},
+			{
+				name: "SetXattr Flags 超过 3 (Flags: 4) 映射为 EINVAL",
+				msg: &storagev1.SetXattrRequest{
+					Ino:   1,
+					Name:  []byte("user.k"),
+					Value: []byte("v"),
+					Flags: 4,
 				},
 				expectedReason: validator.ReasonInvalidArgument,
 			},

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -432,11 +431,25 @@ func TestTruncateZero_ExpandAndReadZero(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		// 3. 模拟 Read[0, 8192) 阶段：因 chunks 表记录已被彻底清空，GetChunk 返回 pgx.ErrNoRows，直接全零返回且无 BlockStore IO
+		// 3. 模拟 Read[0, 8192) 阶段：因 chunks 表记录已被彻底清空，GetInodeSizeAndChunksInRange 返回 ChunkIndx 为 NULL，直接全零返回且无 BlockStore IO
 		setupMockWriteTx(mockStore, mockQuerier)
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRowExpanded, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				{
+					Ino:       fileRowExpanded.Ino,
+					Mode:      fileRowExpanded.Mode,
+					Size:      fileRowExpanded.Size,
+					Atime:     fileRowExpanded.Atime,
+					Mtime:     fileRowExpanded.Mtime,
+					Ctime:     fileRowExpanded.Ctime,
+					ChunkIndx: pgtype.Int4{Valid: false},
+				},
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -449,14 +462,6 @@ func TestTruncateZero_ExpandAndReadZero(t *testing.T) {
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDONLY),
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
 			Once()
 
 		readResp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -572,8 +577,22 @@ func TestTruncateZero_ExpandAndReadZero(t *testing.T) {
 		// 3. 模拟 Read[0, 4096) 阶段
 		setupMockWriteTx(mockStore, mockQuerier)
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRowAllocated, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				{
+					Ino:       fileRowAllocated.Ino,
+					Mode:      fileRowAllocated.Mode,
+					Size:      fileRowAllocated.Size,
+					Atime:     fileRowAllocated.Atime,
+					Mtime:     fileRowAllocated.Mtime,
+					Ctime:     fileRowAllocated.Ctime,
+					ChunkIndx: pgtype.Int4{Valid: false},
+				},
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -586,14 +605,6 @@ func TestTruncateZero_ExpandAndReadZero(t *testing.T) {
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDWR),
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
 			Once()
 
 		readResp, err := mgr.Read(ctx, &meta.ReadRequest{

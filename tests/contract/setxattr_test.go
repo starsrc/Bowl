@@ -81,6 +81,14 @@ func TestSetXattrRequestValidation(t *testing.T) {
 			flags: 2,
 			valid: true,
 		},
+		{
+			name:  "合法: flags 为 3 (XATTR_CREATE | XATTR_REPLACE，允许放行至领域层)",
+			ino:   1,
+			xName: []byte("user.test"),
+			value: []byte("val"),
+			flags: 3,
+			valid: true,
+		},
 
 		// 边界与防御负向用例：ino
 		{
@@ -169,14 +177,6 @@ func TestSetXattrRequestValidation(t *testing.T) {
 		},
 
 		// 边界与防御负向用例：flags
-		{
-			name:  "非法: flags 为 3 (XATTR_CREATE | XATTR_REPLACE 互斥)",
-			ino:   1,
-			xName: []byte("user.test"),
-			value: []byte("val"),
-			flags: 3,
-			valid: false,
-		},
 		{
 			name:  "非法: flags 超过 3 (flags=4)",
 			ino:   1,

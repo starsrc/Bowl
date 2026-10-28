@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -64,8 +65,10 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 	blocks := SliceBlocks(uint32(dataLen))
 	writtenBlocks := make([]SliceBlockInfo, 0, len(blocks))
 	cleanupBlocks := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		for _, b := range writtenBlocks {
-			_ = bs.DeleteBlock(ctx, uint64(sliceID), b.BlockIdx, b.BlockSize)
+			_ = bs.DeleteBlock(cleanupCtx, uint64(sliceID), b.BlockIdx, b.BlockSize)
 		}
 	}
 
@@ -81,9 +84,12 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 	}
 
 	// 阶段 2：事务提交追加 Slice 元数据与更新 Inode
-	var committedStartIndx, committedEndIndx uint32
+	var committedStats []chunkAppendStat
+	var everReachedCommit bool
 	var resp *WriteResponse
 	txErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		everReachedCommit = false
+		committedStats = nil
 		inode, err := q.GetInodeForUpdate(ctx, int64(req.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -159,8 +165,6 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 
 		startIndx := uint32(actualOffset / ChunkSize)
 		endIndx := uint32((actualOffset + uint64(dataLen) - 1) / ChunkSize)
-		committedStartIndx = startIndx
-		committedEndIndx = endIndx
 
 		if startIndx == endIndx {
 			sliceDesc := Slice{
@@ -172,13 +176,15 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			}
 			sliceBytes := EncodeSlice(sliceDesc)
 
-			if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+			octetLen, err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 				Ino:    int64(req.Ino),
 				Indx:   int32(startIndx),
 				Slices: sliceBytes,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("append chunk slice (ino=%d, indx=%d): %w", req.Ino, startIndx, err)
 			}
+			committedStats = append(committedStats, chunkAppendStat{indx: startIndx, octetLen: octetLen})
 
 			if err := q.InsertSliceRef(ctx, db.InsertSliceRefParams{
 				SliceID: sliceID,
@@ -199,13 +205,15 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 				Off:  0,
 				Len:  firstLen,
 			})
-			if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+			octetLen1, err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 				Ino:    int64(req.Ino),
 				Indx:   int32(startIndx),
 				Slices: firstSliceBytes,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("append chunk slice first chunk (ino=%d, indx=%d): %w", req.Ino, startIndx, err)
 			}
+			committedStats = append(committedStats, chunkAppendStat{indx: startIndx, octetLen: octetLen1})
 
 			secondSliceBytes := EncodeSlice(Slice{
 				Pos:  0,
@@ -214,13 +222,15 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 				Off:  firstLen,
 				Len:  secondLen,
 			})
-			if err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+			octetLen2, err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 				Ino:    int64(req.Ino),
 				Indx:   int32(startIndx + 1),
 				Slices: secondSliceBytes,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("append chunk slice second chunk (ino=%d, indx=%d): %w", req.Ino, startIndx+1, err)
 			}
+			committedStats = append(committedStats, chunkAppendStat{indx: startIndx + 1, octetLen: octetLen2})
 
 			if err := q.InsertSliceRef(ctx, db.InsertSliceRefParams{
 				SliceID: sliceID,
@@ -245,12 +255,17 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			Size:  uint32(dataLen),
 			Inode: m.newInode(updatedInode),
 		}
+		everReachedCommit = true
 		return nil
 	})
 
 	if txErr != nil {
-		// 阶段 2 失败时清理物理块，确保零残留
-		cleanupBlocks()
+		// 当 everReachedCommit 为 false 时，事务未进入提交阶段，安全清理在途写入物理块；
+		// 若已进入 COMMIT 阶段（everReachedCommit 为 true），提交结果未知或在途，
+		// 必须保守保留物理块，杜绝误删即将提交完成的数据，未引用的残留块由后台 GC 回收。
+		if !everReachedCommit {
+			cleanupBlocks()
+		}
 
 		switch {
 		case errors.Is(txErr, ErrInvalidArgument):
@@ -271,9 +286,8 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 		}
 	}
 
-	m.recordChunkWriteAndTriggerCompact(req.Ino, committedStartIndx)
-	if committedStartIndx != committedEndIndx {
-		m.recordChunkWriteAndTriggerCompact(req.Ino, committedEndIndx)
+	for _, stat := range committedStats {
+		m.maybeTriggerAsyncCompact(req.Ino, stat.indx, stat.octetLen)
 	}
 
 	return resp, nil

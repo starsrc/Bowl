@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
@@ -13,6 +14,10 @@ import (
 	"github.com/starsrc/Aether/pkg/serverx"
 	"github.com/starsrc/Aether/pkg/tx"
 )
+
+// DefaultServerReadMaxBytes 定义 Storage 服务默认的最大请求体读取字节数（8 MiB）。
+// 确保可承载协议承诺的 4 MiB 二进制写入载荷以及 Connect JSON Base64 编码后的完整请求包，同时保留明确防 OOM 上界。
+const DefaultServerReadMaxBytes = 8 * 1024 * 1024
 
 // ServerConfig 作为 serverx.ServerConfig 的类型别名。
 type ServerConfig = serverx.ServerConfig
@@ -77,6 +82,10 @@ func Load(filenames ...string) (*Config, error) {
 
 	cfg.ApplyDefaultPort(9000)
 	cfg.ApplyDefaultServiceName("bowl-storage")
+
+	if strings.TrimSpace(os.Getenv("SERVER_READ_MAX_BYTES")) == "" {
+		cfg.ServerReadMaxBytes = DefaultServerReadMaxBytes
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err

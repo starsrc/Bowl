@@ -579,6 +579,72 @@ func TestHandler_SetXattr(t *testing.T) {
 		require.NotNil(t, info)
 		assert.Equal(t, "ENODATA", info.GetReason())
 	})
+
+	t.Run("Flags 3 且属性已存在映射为 EEXIST", func(t *testing.T) {
+		mockMgr, client, cleanup := setupTopologyXattrTestServer(t)
+		defer cleanup()
+
+		mockMgr.EXPECT().
+			SetXattr(mock.Anything, meta.SetXattrParams{
+				Ino:   10,
+				Name:  []byte("user.both_flags"),
+				Value: []byte("val"),
+				Flags: 3, // XATTR_CREATE | XATTR_REPLACE
+			}).
+			Return(meta.ErrAlreadyExists).
+			Once()
+
+		req := connect.NewRequest(&storagev1.SetXattrRequest{
+			Ino:   10,
+			Name:  []byte("user.both_flags"),
+			Value: []byte("val"),
+			Flags: 3,
+		})
+		resp, err := client.SetXattr(ctx, req)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+
+		var connErr *connect.Error
+		require.ErrorAs(t, err, &connErr)
+		assert.Equal(t, connect.CodeAlreadyExists, connErr.Code())
+
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "EEXIST", info.GetReason())
+	})
+
+	t.Run("Flags 3 且属性不存在映射为 ENODATA", func(t *testing.T) {
+		mockMgr, client, cleanup := setupTopologyXattrTestServer(t)
+		defer cleanup()
+
+		mockMgr.EXPECT().
+			SetXattr(mock.Anything, meta.SetXattrParams{
+				Ino:   10,
+				Name:  []byte("user.both_flags"),
+				Value: []byte("val"),
+				Flags: 3, // XATTR_CREATE | XATTR_REPLACE
+			}).
+			Return(meta.ErrNoData).
+			Once()
+
+		req := connect.NewRequest(&storagev1.SetXattrRequest{
+			Ino:   10,
+			Name:  []byte("user.both_flags"),
+			Value: []byte("val"),
+			Flags: 3,
+		})
+		resp, err := client.SetXattr(ctx, req)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+
+		var connErr *connect.Error
+		require.ErrorAs(t, err, &connErr)
+		assert.Equal(t, connect.CodeNotFound, connErr.Code())
+
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "ENODATA", info.GetReason())
+	})
 }
 
 func TestHandler_GetXattr(t *testing.T) {

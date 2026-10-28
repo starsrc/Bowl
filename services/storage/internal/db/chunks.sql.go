@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const addSliceRefCount = `-- name: AddSliceRefCount :exec
@@ -25,11 +27,12 @@ func (q *Queries) AddSliceRefCount(ctx context.Context, arg AddSliceRefCountPara
 	return err
 }
 
-const appendChunkSlice = `-- name: AppendChunkSlice :exec
+const appendChunkSlice = `-- name: AppendChunkSlice :one
 INSERT INTO chunks (ino, indx, slices)
 VALUES ($1::bigint, $2::integer, $3::bytea)
 ON CONFLICT (ino, indx)
 DO UPDATE SET slices = chunks.slices || EXCLUDED.slices
+RETURNING octet_length(slices)::bigint
 `
 
 type AppendChunkSliceParams struct {
@@ -38,15 +41,21 @@ type AppendChunkSliceParams struct {
 	Slices []byte `json:"slices"`
 }
 
-func (q *Queries) AppendChunkSlice(ctx context.Context, arg AppendChunkSliceParams) error {
-	_, err := q.db.Exec(ctx, appendChunkSlice, arg.Ino, arg.Indx, arg.Slices)
-	return err
+func (q *Queries) AppendChunkSlice(ctx context.Context, arg AppendChunkSliceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, appendChunkSlice, arg.Ino, arg.Indx, arg.Slices)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
-const appendExistingChunkSlice = `-- name: AppendExistingChunkSlice :execrows
-UPDATE chunks
-SET slices = slices || $1::bytea
-WHERE ino = $2::bigint AND indx = $3::integer
+const appendExistingChunkSlice = `-- name: AppendExistingChunkSlice :one
+WITH updated AS (
+    UPDATE chunks
+    SET slices = slices || $1::bytea
+    WHERE ino = $2::bigint AND indx = $3::integer
+    RETURNING octet_length(slices)::bigint AS octet_len
+)
+SELECT COALESCE((SELECT octet_len FROM updated), 0)::bigint AS octet_len
 `
 
 type AppendExistingChunkSliceParams struct {
@@ -56,11 +65,10 @@ type AppendExistingChunkSliceParams struct {
 }
 
 func (q *Queries) AppendExistingChunkSlice(ctx context.Context, arg AppendExistingChunkSliceParams) (int64, error) {
-	result, err := q.db.Exec(ctx, appendExistingChunkSlice, arg.Slices, arg.Ino, arg.Indx)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, appendExistingChunkSlice, arg.Slices, arg.Ino, arg.Indx)
+	var octet_len int64
+	err := row.Scan(&octet_len)
+	return octet_len, err
 }
 
 const deleteChunk = `-- name: DeleteChunk :many
@@ -288,6 +296,95 @@ func (q *Queries) GetChunksInRange(ctx context.Context, arg GetChunksInRangePara
 	return items, nil
 }
 
+const getInodeSizeAndChunksInRange = `-- name: GetInodeSizeAndChunksInRange :many
+SELECT
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target,
+    i.flags,
+    i.parent_ino,
+    i.root_ino,
+    c.indx AS chunk_indx,
+    c.slices AS chunk_slices
+FROM inodes i
+LEFT JOIN chunks c ON c.ino = i.ino AND c.indx >= $1::integer AND c.indx <= $2::integer
+WHERE i.ino = $3::bigint
+ORDER BY c.indx ASC
+`
+
+type GetInodeSizeAndChunksInRangeParams struct {
+	StartIndx int32 `json:"start_indx"`
+	EndIndx   int32 `json:"end_indx"`
+	Ino       int64 `json:"ino"`
+}
+
+type GetInodeSizeAndChunksInRangeRow struct {
+	Ino           int64              `json:"ino"`
+	Generation    int64              `json:"generation"`
+	Mode          int32              `json:"mode"`
+	Size          int64              `json:"size"`
+	Nlink         int32              `json:"nlink"`
+	Uid           int32              `json:"uid"`
+	Gid           int32              `json:"gid"`
+	Rdev          int64              `json:"rdev"`
+	Atime         pgtype.Timestamptz `json:"atime"`
+	Mtime         pgtype.Timestamptz `json:"mtime"`
+	Ctime         pgtype.Timestamptz `json:"ctime"`
+	SymlinkTarget []byte             `json:"symlink_target"`
+	Flags         int32              `json:"flags"`
+	ParentIno     int64              `json:"parent_ino"`
+	RootIno       int64              `json:"root_ino"`
+	ChunkIndx     pgtype.Int4        `json:"chunk_indx"`
+	ChunkSlices   []byte             `json:"chunk_slices"`
+}
+
+func (q *Queries) GetInodeSizeAndChunksInRange(ctx context.Context, arg GetInodeSizeAndChunksInRangeParams) ([]GetInodeSizeAndChunksInRangeRow, error) {
+	rows, err := q.db.Query(ctx, getInodeSizeAndChunksInRange, arg.StartIndx, arg.EndIndx, arg.Ino)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetInodeSizeAndChunksInRangeRow
+	for rows.Next() {
+		var i GetInodeSizeAndChunksInRangeRow
+		if err := rows.Scan(
+			&i.Ino,
+			&i.Generation,
+			&i.Mode,
+			&i.Size,
+			&i.Nlink,
+			&i.Uid,
+			&i.Gid,
+			&i.Rdev,
+			&i.Atime,
+			&i.Mtime,
+			&i.Ctime,
+			&i.SymlinkTarget,
+			&i.Flags,
+			&i.ParentIno,
+			&i.RootIno,
+			&i.ChunkIndx,
+			&i.ChunkSlices,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getSliceRef = `-- name: GetSliceRef :one
 SELECT slice_id, size, refs, created_at
 FROM slice_refs
@@ -349,6 +446,35 @@ func (q *Queries) ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockValidSliceRefsKeyShare = `-- name: LockValidSliceRefsKeyShare :many
+SELECT slice_id
+FROM slice_refs
+WHERE slice_id = ANY($1::bigint[])
+  AND refs > 0
+ORDER BY slice_id ASC
+FOR KEY SHARE
+`
+
+func (q *Queries) LockValidSliceRefsKeyShare(ctx context.Context, sliceIds []int64) ([]int64, error) {
+	rows, err := q.db.Query(ctx, lockValidSliceRefsKeyShare, sliceIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var slice_id int64
+		if err := rows.Scan(&slice_id); err != nil {
+			return nil, err
+		}
+		items = append(items, slice_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

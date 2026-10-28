@@ -2783,14 +2783,14 @@ func (s *rollbackFlushHookStore) ExecTxWithOptions(ctx context.Context, fn func(
 
 type consecutiveCancelStore struct {
 	db.Store
-	onTxCommitted func(ctx context.Context)
+	onTxCommitted func(ctx context.Context) error
 	hookActive    bool
 }
 
 func (s *consecutiveCancelStore) ExecTxWithOptions(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
 	err := s.Store.ExecTxWithOptions(ctx, fn, opts...)
 	if err == nil && s.hookActive && s.onTxCommitted != nil {
-		s.onTxCommitted(ctx)
+		return s.onTxCommitted(ctx)
 	}
 	return err
 }
@@ -3323,19 +3323,32 @@ func TestSetLkw_CancelRollbackEdgeCases(t *testing.T) {
 		bCommitted := make(chan struct{})
 		unblockA := make(chan struct{})
 		unblockB := make(chan struct{})
+		releaseA := sync.OnceFunc(func() { close(unblockA) })
+		releaseB := sync.OnceFunc(func() { close(unblockB) })
+		t.Cleanup(releaseA)
+		t.Cleanup(releaseB)
 
 		var grantCount atomic.Int32
 		hookStore := &consecutiveCancelStore{
 			Store: baseStore,
-			onTxCommitted: func(opCtx context.Context) {
+			onTxCommitted: func(opCtx context.Context) error {
 				idx := grantCount.Add(1)
 				if idx == 1 {
 					close(aCommitted)
-					<-unblockA
+					select {
+					case <-unblockA:
+					case <-opCtx.Done():
+						return opCtx.Err()
+					}
 				} else if idx == 2 {
 					close(bCommitted)
-					<-unblockB
+					select {
+					case <-unblockB:
+					case <-opCtx.Done():
+						return opCtx.Err()
+					}
 				}
+				return nil
 			},
 		}
 		mgr := meta.New(hookStore)
@@ -3449,10 +3462,10 @@ func TestSetLkw_CancelRollbackEdgeCases(t *testing.T) {
 		hookStore.hookActive = false
 
 		cancelB()
-		close(unblockB)
+		releaseB()
 
 		cancelA()
-		close(unblockA)
+		releaseA()
 
 		wg.Wait()
 
@@ -5716,10 +5729,14 @@ func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t
 
 	aCleanupReadyCh := make(chan struct{}, 1)
 	allowACleanupCh := make(chan struct{})
+	releaseACleanup := sync.OnceFunc(func() { close(allowACleanupCh) })
+	t.Cleanup(releaseACleanup)
 
 	bGrantAbortedCh := make(chan struct{}, 1)
 	bCleanupCommittedCh := make(chan struct{}, 1)
 	allowBLastUndoRollbackCh := make(chan struct{})
+	releaseBLastUndoRollback := sync.OnceFunc(func() { close(allowBLastUndoRollbackCh) })
+	t.Cleanup(releaseBLastUndoRollback)
 
 	var hookActive atomic.Bool
 	var aCleanupSeen atomic.Bool
@@ -5792,7 +5809,11 @@ func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t
 			if !aCleanupSeen.Load() {
 				aCleanupSeen.Store(true)
 				aCleanupReadyCh <- struct{}{}
-				<-allowACleanupCh
+				select {
+				case <-allowACleanupCh:
+				case <-txCtx.Done():
+					return txCtx.Err()
+				}
 				return hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
 			}
 			if !bCleanupSeen.Load() {
@@ -5802,7 +5823,11 @@ func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t
 				err := hookStore.Store.ExecTxWithOptions(txCtx, fn, opts...)
 				if err == nil {
 					bCleanupCommittedCh <- struct{}{}
-					<-allowBLastUndoRollbackCh
+					select {
+					case <-allowBLastUndoRollbackCh:
+					case <-txCtx.Done():
+						return txCtx.Err()
+					}
 				}
 				return err
 			}
@@ -5895,7 +5920,7 @@ func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t
 
 	// 4. 恢复并放行 B 执行 lastUndo.Rollback()：
 	// B 执行 lastUndo.Rollback()，将已经被 C 接管的 [0, 49] 错误补回 A.pendingRanges（变回 [0, 100]）
-	close(allowBLastUndoRollbackCh)
+	releaseBLastUndoRollback()
 	select {
 	case bErr := <-bErrCh:
 		require.ErrorIs(t, bErr, meta.ErrInterrupted, "回滚后的请求 B 必须返回 ErrInterrupted")
@@ -5905,7 +5930,7 @@ func TestSetLkw_Round2_UndoRollbackDoesNotRestoreRangeClaimedByConcurrentSetLk(t
 
 	// 5. 恢复并放行 A 完成 rollbackGrantedLock：
 	// A 因 pendingRanges 被错误恢复为 [0, 100]，在清理阶段会误将 C 已提交的 [0, 49] 锁一并删除
-	close(allowACleanupCh)
+	releaseACleanup()
 	select {
 	case aErr := <-aErrCh:
 		require.ErrorIs(t, aErr, meta.ErrInterrupted, "回滚后的请求 A 必须返回 ErrInterrupted")
@@ -6217,7 +6242,7 @@ func TestSetLkw_Integration_CleanupCancelledWaiter_PreservesReplacedHandleOnSame
 			resumeCleanup      = make(chan struct{})
 		)
 		closeResume := sync.OnceFunc(func() { close(resumeCleanup) })
-		defer closeResume()
+		t.Cleanup(closeResume)
 
 		hookStore.onGetFileHandle = func(ctx context.Context, q db.Querier, params db.GetFileHandleParams) (db.FileHandle, error) {
 			handle, hErr := q.GetFileHandle(ctx, params)
@@ -6232,7 +6257,11 @@ func TestSetLkw_Integration_CleanupCancelledWaiter_PreservesReplacedHandleOnSame
 				cleanupPausedOnce.Do(func() {
 					close(cleanupPaused)
 				})
-				<-resumeCleanup
+				select {
+				case <-resumeCleanup:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 			return rawStore.ExecTxWithOptions(ctx, fn, opts...)
 		}
@@ -6449,7 +6478,7 @@ func TestSetLkw_Integration_CleanupCancelledWaiter_PreservesReplacedHandleOnSame
 			resumeCleanup      = make(chan struct{})
 		)
 		closeResume := sync.OnceFunc(func() { close(resumeCleanup) })
-		defer closeResume()
+		t.Cleanup(closeResume)
 
 		hookStore.onGetFileHandle = func(ctx context.Context, q db.Querier, params db.GetFileHandleParams) (db.FileHandle, error) {
 			handle, hErr := q.GetFileHandle(ctx, params)
@@ -6464,7 +6493,11 @@ func TestSetLkw_Integration_CleanupCancelledWaiter_PreservesReplacedHandleOnSame
 				cleanupPausedOnce.Do(func() {
 					close(cleanupPaused)
 				})
-				<-resumeCleanup
+				select {
+				case <-resumeCleanup:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 			return rawStore.ExecTxWithOptions(ctx, fn, opts...)
 		}

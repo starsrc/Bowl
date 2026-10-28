@@ -118,7 +118,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 				Indx:   0,
 				Slices: expectedSliceBytes,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -235,7 +235,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 				Indx:   0,
 				Slices: expectedSliceBytes,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -335,7 +335,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 				Indx:   0,
 				Slices: expectedSliceBytes,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -489,7 +489,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 		// 不应调用 AddDiskQuotaByRootIno
 		mockQuerier.EXPECT().
 			AppendChunkSlice(mock.Anything, mock.Anything).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		mockQuerier.EXPECT().

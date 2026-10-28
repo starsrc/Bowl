@@ -927,13 +927,37 @@ var (
 	sharedFormalPoolErr  error
 )
 
-// setupFormalPostgresPool 建立并复用包级共享 PostgreSQL 测试连接池，若数据库不可用则安全跳过。
+// setupFormalPostgresPool 建立并复用包级共享 PostgreSQL 测试连接池，严格遵循统一 DSN 配置契约。
 func setupFormalPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	sharedFormalPoolOnce.Do(func() {
-		dsn := getStorageTestDSN()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		var fatalMsg, skipMsg string
+		fatalf := func(format string, args ...any) {
+			fatalMsg = fmt.Sprintf(format, args...)
+		}
+		skipf := func(format string, args ...any) {
+			skipMsg = fmt.Sprintf(format, args...)
+		}
+
+		pool, dsn := resolveAndConnectTestDB(ctx, fatalf, skipf)
+		if fatalMsg != "" {
+			sharedFormalPoolErr = errors.New(fatalMsg)
+			return
+		}
+		if skipMsg != "" {
+			sharedFormalPoolErr = errors.New(skipMsg)
+			return
+		}
+		if pool == nil {
+			sharedFormalPoolErr = errors.New("无法解析或连接 PostgreSQL")
+			return
+		}
+
+		// 关闭临时探测连接池，按形式化验证特化参数重构目标池
+		pool.Close()
 
 		poolCfg, err := pgxpool.ParseConfig(dsn)
 		if err != nil {
@@ -946,21 +970,21 @@ func setupFormalPostgresPool(t *testing.T) *pgxpool.Pool {
 		poolCfg.ConnConfig.RuntimeParams["deadlock_timeout"] = "15ms"
 		poolCfg.MaxConns = 16
 
-		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+		targetPool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			sharedFormalPoolErr = err
 			return
 		}
-		if err := pool.Ping(ctx); err != nil {
-			pool.Close()
+		if err := targetPool.Ping(ctx); err != nil {
+			targetPool.Close()
 			sharedFormalPoolErr = err
 			return
 		}
-		sharedFormalPool = pool
+		sharedFormalPool = targetPool
 	})
 	if sharedFormalPoolErr != nil || sharedFormalPool == nil {
-		if os.Getenv("BOWL_FORMAL_REQUIRE_DB") == "1" || isFormalDeepMode() {
-			t.Fatalf("深度形式化验证模式下必须成功连接 PostgreSQL: %v", sharedFormalPoolErr)
+		if os.Getenv("BOWL_FORMAL_REQUIRE_DB") == "1" || isFormalDeepMode() || (sharedFormalPoolErr != nil && strings.Contains(sharedFormalPoolErr.Error(), "显式指定的数据库 DSN")) {
+			t.Fatalf("连接 PostgreSQL 失败: %v", sharedFormalPoolErr)
 		}
 		t.Skipf("跳过形式化状态机测试: 连接 PostgreSQL 失败: %v", sharedFormalPoolErr)
 	}

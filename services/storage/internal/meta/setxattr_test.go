@@ -73,12 +73,12 @@ func TestSetXattr_StaticValidation(t *testing.T) {
 		{
 			name:        "name 为空切片 (0 字节)",
 			params:      meta.SetXattrParams{Ino: 1, Name: []byte{}, Value: []byte("val"), Flags: 0},
-			expectedErr: meta.ErrRange,
+			expectedErr: meta.ErrInvalidArgument,
 		},
 		{
 			name:        "name 为 nil (0 字节)",
 			params:      meta.SetXattrParams{Ino: 1, Name: nil, Value: []byte("val"), Flags: 0},
-			expectedErr: meta.ErrRange,
+			expectedErr: meta.ErrInvalidArgument,
 		},
 		{
 			name:        "name 超过 255 字节",
@@ -103,7 +103,7 @@ func TestSetXattr_StaticValidation(t *testing.T) {
 		{
 			name:        "value 超过 65536 字节",
 			params:      meta.SetXattrParams{Ino: 1, Name: []byte("user.test"), Value: bytes.Repeat([]byte("v"), 65537), Flags: 0},
-			expectedErr: meta.ErrTooBig,
+			expectedErr: meta.ErrRange,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

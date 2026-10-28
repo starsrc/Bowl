@@ -6,16 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
+type chunkAppendStat struct {
+	indx     uint32
+	octetLen int64
+}
+
 type compactDataSegment struct {
 	pos    uint32
 	length uint32
 	slices []Slice
+	data   []byte
 }
 
 type compactWrittenBlock struct {
@@ -56,75 +64,151 @@ type compactNewSliceDesc struct {
 //   - 调用 decrementDeletedSlicesRefs 递减 originSlices 中旧 slice_id 的引用计数；
 //   - 若写事务执行失败，事务外立即清理新物理块并返回错误。
 func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx uint32) error {
+	_, _, err := m.compactChunkWithCount(ctx, ino, indx)
+	return err
+}
+
+func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx uint32) (int, bool, error) {
 	if ino == 0 || ino > math.MaxInt64 || indx > math.MaxInt32 {
-		return ErrInvalidArgument
+		return 0, false, ErrInvalidArgument
 	}
 
-	// 阶段 1：行锁外读取与新物理块落盘
-	chunk, err := m.store.GetChunk(ctx, db.GetChunkParams{
-		Ino:  int64(ino),
-		Indx: int32(indx),
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		return fmt.Errorf("get chunk for compact (ino=%d, indx=%d): %w", ino, indx, err)
-	}
-	if len(chunk.Slices) == 0 {
-		return nil
-	}
-
-	originSlices := chunk.Slices
-	rawSlices, err := DecodeSlices(originSlices)
-	if err != nil {
-		return fmt.Errorf("decode origin slices (ino=%d, indx=%d): %w", ino, indx, err)
-	}
-
-	view := BuildSlice(rawSlices)
-
+	// 阶段 1：在短读保护事务内读取旧 Chunk，锁定 slice_refs，从 BlockStore 读出各段数据拼装到内存
+	var originSlices []byte
 	var segments []compactDataSegment
-	var curSeg *compactDataSegment
-
-	for _, s := range view {
-		if s.ID == 0 {
-			if curSeg != nil {
-				segments = append(segments, *curSeg)
-				curSeg = nil
-			}
-			continue
-		}
-
-		if curSeg == nil {
-			curSeg = &compactDataSegment{
-				pos:    s.Pos,
-				length: s.Len,
-				slices: []Slice{s},
-			}
-		} else {
-			if curSeg.pos+curSeg.length == s.Pos {
-				curSeg.length += s.Len
-				curSeg.slices = append(curSeg.slices, s)
-			} else {
-				segments = append(segments, *curSeg)
-				curSeg = &compactDataSegment{
-					pos:    s.Pos,
-					length: s.Len,
-					slices: []Slice{s},
-				}
-			}
-		}
-	}
-	if curSeg != nil {
-		segments = append(segments, *curSeg)
-	}
 
 	bs := m.getBlockStore()
+
+	readTxErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		const maxLockRetries = 8
+		for attempt := 0; attempt < maxLockRetries; attempt++ {
+			chunk, err := q.GetChunk(ctx, db.GetChunkParams{
+				Ino:  int64(ino),
+				Indx: int32(indx),
+			})
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					originSlices = nil
+					segments = nil
+					return nil
+				}
+				return fmt.Errorf("get chunk for compact (ino=%d, indx=%d): %w", ino, indx, err)
+			}
+			if len(chunk.Slices) == 0 {
+				originSlices = nil
+				segments = nil
+				return nil
+			}
+
+			rawSlices, err := DecodeSlices(chunk.Slices)
+			if err != nil {
+				return fmt.Errorf("decode origin slices (ino=%d, indx=%d): %w", ino, indx, err)
+			}
+
+			view := BuildSlice(rawSlices)
+
+			var segs []compactDataSegment
+			var curSeg *compactDataSegment
+
+			for _, s := range view {
+				if s.ID == 0 {
+					if curSeg != nil {
+						segs = append(segs, *curSeg)
+						curSeg = nil
+					}
+					continue
+				}
+
+				if curSeg == nil {
+					curSeg = &compactDataSegment{
+						pos:    s.Pos,
+						length: s.Len,
+						slices: []Slice{s},
+					}
+				} else {
+					if curSeg.pos+curSeg.length == s.Pos {
+						curSeg.length += s.Len
+						curSeg.slices = append(curSeg.slices, s)
+					} else {
+						segs = append(segs, *curSeg)
+						curSeg = &compactDataSegment{
+							pos:    s.Pos,
+							length: s.Len,
+							slices: []Slice{s},
+						}
+					}
+				}
+			}
+			if curSeg != nil {
+				segs = append(segs, *curSeg)
+			}
+
+			// 提取所有需读取物理文件的去重升序非零 sliceIDs
+			var sliceIDs []int64
+			for _, seg := range segs {
+				for _, s := range seg.slices {
+					if s.ID > 0 {
+						sliceIDs = append(sliceIDs, int64(s.ID))
+					}
+				}
+			}
+			slices.Sort(sliceIDs)
+			sliceIDs = slices.Compact(sliceIDs)
+
+			if len(sliceIDs) > 0 {
+				lockedIDs, err := q.LockValidSliceRefsKeyShare(ctx, sliceIDs)
+				if err != nil {
+					return fmt.Errorf("lock valid slice refs for compact: %w", err)
+				}
+				if len(lockedIDs) < len(sliceIDs) {
+					if attempt == maxLockRetries-1 {
+						return fmt.Errorf("%w: failed to lock slice refs for compact after %d retries", ErrIO, maxLockRetries)
+					}
+					continue
+				}
+			}
+
+			// 在持有 FOR KEY SHARE 读保护事务期间调用 m.blockStore.GetBlock 拼装好内存合并数据
+			for i := range segs {
+				segs[i].data = make([]byte, segs[i].length)
+				var segOff uint32
+				for _, s := range segs[i].slices {
+					locs, err := LocateBlocks(s.Size, s.Off, s.Len)
+					if err != nil {
+						return fmt.Errorf("locate blocks for compact slice %d: %w", s.ID, err)
+					}
+					var sOff uint32
+					for _, loc := range locs {
+						dst := segs[i].data[segOff+sOff : segOff+sOff+loc.Length]
+						if err := bs.GetBlock(ctx, s.ID, loc.BlockIdx, loc.BlockSize, loc.BlockOff, dst); err != nil {
+							return fmt.Errorf("%w: get block for compact (slice_id=%d, block_idx=%d): %v", ErrIO, s.ID, loc.BlockIdx, err)
+						}
+						sOff += loc.Length
+					}
+					segOff += s.Len
+				}
+			}
+
+			originSlices = chunk.Slices
+			segments = segs
+			return nil
+		}
+		return nil
+	})
+	if readTxErr != nil {
+		return 0, false, readTxErr
+	}
+	if len(originSlices) == 0 {
+		return 0, false, nil
+	}
+
 	var writtenBlocks []compactWrittenBlock
 
 	cleanupBlocks := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		for _, b := range writtenBlocks {
-			_ = bs.DeleteBlock(context.Background(), b.sliceID, b.blockIdx, b.blockSize)
+			_ = bs.DeleteBlock(cleanupCtx, b.sliceID, b.blockIdx, b.blockSize)
 		}
 	}
 
@@ -132,31 +216,12 @@ func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx uint32) err
 	var compactedSlices []byte
 
 	for _, seg := range segments {
-		segData := make([]byte, seg.length)
-		var segOff uint32
-
-		for _, s := range seg.slices {
-			locs, err := LocateBlocks(s.Size, s.Off, s.Len)
-			if err != nil {
-				cleanupBlocks()
-				return fmt.Errorf("locate blocks for compact slice %d: %w", s.ID, err)
-			}
-			var sOff uint32
-			for _, loc := range locs {
-				dst := segData[segOff+sOff : segOff+sOff+loc.Length]
-				if err := bs.GetBlock(ctx, s.ID, loc.BlockIdx, loc.BlockSize, loc.BlockOff, dst); err != nil {
-					cleanupBlocks()
-					return fmt.Errorf("%w: get block for compact (slice_id=%d, block_idx=%d): %v", ErrIO, s.ID, loc.BlockIdx, err)
-				}
-				sOff += loc.Length
-			}
-			segOff += s.Len
-		}
+		segData := seg.data
 
 		newID, err := m.store.NextSliceID(ctx)
 		if err != nil {
 			cleanupBlocks()
-			return fmt.Errorf("next slice id for compact: %w", err)
+			return 0, false, fmt.Errorf("next slice id for compact: %w", err)
 		}
 
 		blocks := SliceBlocks(seg.length)
@@ -166,7 +231,7 @@ func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx uint32) err
 			bData := segData[start:end]
 			if err := bs.PutBlock(ctx, uint64(newID), b.BlockIdx, bData); err != nil {
 				cleanupBlocks()
-				return fmt.Errorf("%w: put block for compact (slice_id=%d, block_idx=%d): %v", ErrIO, newID, b.BlockIdx, err)
+				return 0, false, fmt.Errorf("%w: put block for compact (slice_id=%d, block_idx=%d): %v", ErrIO, newID, b.BlockIdx, err)
 			}
 			writtenBlocks = append(writtenBlocks, compactWrittenBlock{
 				sliceID:   uint64(newID),
@@ -203,8 +268,11 @@ func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx uint32) err
 
 	// 阶段 2：数据库写事务内乐观前缀 CAS 替换
 	var casAborted bool
+	var everReachedCommit bool
+	var finalSliceCount int
 
 	txErr := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		everReachedCommit = false
 		casAborted = false
 		currentChunk, err := q.GetChunkForUpdate(ctx, db.GetChunkForUpdateParams{
 			Ino:  int64(ino),
@@ -255,40 +323,91 @@ func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx uint32) err
 			return fmt.Errorf("decrement deleted slices refs in compact: %w", err)
 		}
 
+		finalSliceCount = len(updatedSlices) / SliceBytes
+		everReachedCommit = true
 		return nil
 	})
 
 	if txErr != nil {
-		cleanupBlocks()
-		return txErr
+		if !everReachedCommit {
+			cleanupBlocks()
+		}
+		return 0, false, txErr
 	}
 
 	if casAborted {
 		cleanupBlocks()
-		return nil
+		return 0, true, nil
 	}
 
-	return nil
+	return finalSliceCount, false, nil
 }
 
-// recordChunkWriteAndTriggerCompact 在单次写操作成功追加 Slice 后递增分块计数，达到阈值时异步触发 Compaction。
-func (m *manager) recordChunkWriteAndTriggerCompact(ino uint64, indx uint32) {
-	if m.compactSliceThreshold <= 0 {
+// maybeTriggerAsyncCompact 当追加后的切片字节长度达到压缩阈值时，异步触发 Chunk 碎片整理。
+func (m *manager) maybeTriggerAsyncCompact(ino uint64, indx uint32, octetLen int64) {
+	if m.compactSliceThreshold <= 0 || int(octetLen)/SliceBytes < m.compactSliceThreshold {
 		return
 	}
 	key := chunkKey{ino: ino, indx: indx}
-	m.chunkWriteCountsMu.Lock()
-	m.chunkWriteCounts[key]++
-	count := m.chunkWriteCounts[key]
-	trigger := count >= m.compactSliceThreshold
-	if trigger {
-		delete(m.chunkWriteCounts, key)
+	m.inFlightCompactsMu.Lock()
+	if _, inFlight := m.inFlightCompacts[key]; inFlight {
+		m.inFlightCompacts[key] = true
+		m.inFlightCompactsMu.Unlock()
+		return
 	}
-	m.chunkWriteCountsMu.Unlock()
+	m.inFlightCompacts[key] = false
+	m.inFlightCompactsMu.Unlock()
 
-	if trigger {
-		go func() {
-			_ = m.CompactChunk(context.Background(), ino, indx)
+	go func() {
+		defer func() {
+			m.inFlightCompactsMu.Lock()
+			delete(m.inFlightCompacts, key)
+			m.inFlightCompactsMu.Unlock()
 		}()
-	}
+
+		const maxRounds = 16
+		for round := 0; round < maxRounds; round++ {
+			compactCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			finalCount, casAborted, err := m.compactChunkWithCount(compactCtx, ino, indx)
+			cancel()
+			if err != nil {
+				return
+			}
+
+			m.inFlightCompactsMu.Lock()
+			pending := m.inFlightCompacts[key]
+			if !casAborted && finalCount < m.compactSliceThreshold && !pending {
+				delete(m.inFlightCompacts, key)
+				m.inFlightCompactsMu.Unlock()
+				return
+			}
+			m.inFlightCompacts[key] = false
+			m.inFlightCompactsMu.Unlock()
+
+			if !casAborted && finalCount >= m.compactSliceThreshold {
+				continue
+			}
+
+			queryCtx, qCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			chunk, qErr := m.store.GetChunk(queryCtx, db.GetChunkParams{
+				Ino:  int64(ino),
+				Indx: int32(indx),
+			})
+			qCancel()
+			if qErr != nil {
+				return
+			}
+			latestCount := len(chunk.Slices) / SliceBytes
+			if latestCount < m.compactSliceThreshold {
+				m.inFlightCompactsMu.Lock()
+				if !m.inFlightCompacts[key] {
+					delete(m.inFlightCompacts, key)
+					m.inFlightCompactsMu.Unlock()
+					return
+				}
+				m.inFlightCompacts[key] = false
+				m.inFlightCompactsMu.Unlock()
+			}
+		}
+	}()
 }

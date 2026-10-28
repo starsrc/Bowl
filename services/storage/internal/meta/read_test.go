@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -20,6 +21,28 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 	metamock "github.com/starsrc/bowl/services/storage/internal/meta/mock"
 )
+
+func inodeToRow(inode db.Inode, indx pgtype.Int4, sliceData []byte) db.GetInodeSizeAndChunksInRangeRow {
+	return db.GetInodeSizeAndChunksInRangeRow{
+		Ino:           inode.Ino,
+		Generation:    inode.Generation,
+		Mode:          inode.Mode,
+		Size:          inode.Size,
+		Nlink:         inode.Nlink,
+		Uid:           inode.Uid,
+		Gid:           inode.Gid,
+		Rdev:          inode.Rdev,
+		Atime:         inode.Atime,
+		Mtime:         inode.Mtime,
+		Ctime:         inode.Ctime,
+		SymlinkTarget: inode.SymlinkTarget,
+		Flags:         inode.Flags,
+		ParentIno:     inode.ParentIno,
+		RootIno:       inode.RootIno,
+		ChunkIndx:     indx,
+		ChunkSlices:   sliceData,
+	}
+}
 
 // TestRead_Validation 验证 Read 的入参边界防护与合法性静态校验。
 func TestRead_Validation(t *testing.T) {
@@ -137,8 +160,12 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(db.Inode{}, pgx.ErrNoRows).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return(nil, nil).
 			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -161,8 +188,14 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		dirRow.Mode = int32(meta.S_IFDIR | 0o755)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(dirRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(dirRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -185,8 +218,14 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		sockRow.Mode = int32(meta.S_IFSOCK | 0o666)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(sockRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(sockRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -206,8 +245,14 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(baseFileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -235,8 +280,14 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(baseFileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -268,8 +319,14 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(baseFileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -282,14 +339,6 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDONLY),
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
 			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -311,8 +360,14 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(baseFileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -325,14 +380,6 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDWR),
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
 			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -371,8 +418,14 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -406,8 +459,14 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -441,8 +500,14 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -476,9 +541,26 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
+		// 构造一个包含完整 100 字节的 chunk
+		sliceID := uint64(555)
+		sliceDesc := meta.Slice{
+			Pos:  0,
+			ID:   sliceID,
+			Size: 100,
+			Off:  0,
+			Len:  100,
+		}
+		rawSlices := meta.EncodeSlice(sliceDesc)
+
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, rawSlices),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -493,27 +575,9 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 			}, nil).
 			Once()
 
-		// 构造一个包含完整 100 字节的 chunk
-		sliceID := uint64(555)
-		sliceDesc := meta.Slice{
-			Pos:  0,
-			ID:   sliceID,
-			Size: 100,
-			Off:  0,
-			Len:  100,
-		}
-		rawSlices := meta.EncodeSlice(sliceDesc)
-
 		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{
-				Ino:    int64(ino),
-				Indx:   0,
-				Slices: rawSlices,
-			}, nil).
+			LockValidSliceRefsKeyShare(mock.Anything, []int64{int64(sliceID)}).
+			Return([]int64{int64(sliceID)}, nil).
 			Once()
 
 		// 请求 offset=80, size=50 -> 超出 100 边界，截断为 readLen = 100 - 80 = 20
@@ -566,8 +630,14 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -580,14 +650,6 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDONLY),
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
 			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -611,8 +673,14 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 		setupMockWriteTx(mockStore, mockQuerier)
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, []byte{}),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -624,18 +692,6 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 				Fh:    int64(fh),
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDONLY),
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{
-				Ino:    int64(ino),
-				Indx:   0,
-				Slices: []byte{},
 			}, nil).
 			Once()
 
@@ -658,9 +714,26 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 
 		setupMockWriteTx(mockStore, mockQuerier)
 
+		// 仅在 pos=100 处写入了 50 字节数据，区间 [100, 150)
+		sliceID := uint64(777)
+		sliceDesc := meta.Slice{
+			Pos:  100,
+			ID:   sliceID,
+			Size: 50,
+			Off:  0,
+			Len:  50,
+		}
+		rawSlices := meta.EncodeSlice(sliceDesc)
+
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, rawSlices),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -675,27 +748,9 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 			}, nil).
 			Once()
 
-		// 仅在 pos=100 处写入了 50 字节数据，区间 [100, 150)
-		sliceID := uint64(777)
-		sliceDesc := meta.Slice{
-			Pos:  100,
-			ID:   sliceID,
-			Size: 50,
-			Off:  0,
-			Len:  50,
-		}
-		rawSlices := meta.EncodeSlice(sliceDesc)
-
 		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{
-				Ino:  int64(ino),
-				Indx: 0,
-			}).
-			Return(db.Chunk{
-				Ino:    int64(ino),
-				Indx:   0,
-				Slices: rawSlices,
-			}, nil).
+			LockValidSliceRefsKeyShare(mock.Anything, []int64{int64(sliceID)}).
+			Return([]int64{int64(sliceID)}, nil).
 			Once()
 
 		// 请求读取 [50, 200) 共 150 字节：
@@ -745,11 +800,17 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		Ctime: pgtype.Timestamptz{Time: now, Valid: true},
 	}
 
-	setupBaseMocks := func(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier) {
+	setupMocksWithChunk := func(mockStore *dbmock.MockStore, mockQuerier *dbmock.MockQuerier, chunkSlices []byte, sliceIDs ...int64) {
 		setupMockWriteTx(mockStore, mockQuerier)
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, chunkSlices),
+			}, nil).
 			Once()
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, db.GetFileHandleParams{
@@ -762,6 +823,15 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 				Flags: int32(meta.O_RDONLY),
 			}, nil).
 			Once()
+		if len(sliceIDs) > 0 {
+			sortedIDs := append([]int64(nil), sliceIDs...)
+			slices.Sort(sortedIDs)
+			sortedIDs = slices.Compact(sortedIDs)
+			mockQuerier.EXPECT().
+				LockValidSliceRefsKeyShare(mock.Anything, sortedIDs).
+				Return(sortedIDs, nil).
+				Once()
+		}
 	}
 
 	t.Run("顺序单切片完整读取", func(t *testing.T) {
@@ -770,17 +840,12 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		mockBS := metamock.NewMockBlockStore(t)
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
 
-		setupBaseMocks(mockStore, mockQuerier)
-
 		sliceID := uint64(101)
 		slices := []meta.Slice{
 			{Pos: 0, ID: sliceID, Size: 100, Off: 0, Len: 100},
 		}
 
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlices(slices)}, nil).
-			Once()
+		setupMocksWithChunk(mockStore, mockQuerier, meta.EncodeSlices(slices), int64(sliceID))
 
 		data := bytes.Repeat([]byte("A"), 100)
 		mockBS.EXPECT().
@@ -807,8 +872,6 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		mockBS := metamock.NewMockBlockStore(t)
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
 
-		setupBaseMocks(mockStore, mockQuerier)
-
 		sliceID1 := uint64(101)
 		sliceID2 := uint64(102)
 		slices := []meta.Slice{
@@ -816,10 +879,7 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 			{Pos: 0, ID: sliceID2, Size: 100, Off: 0, Len: 100}, // 后写全 B 完全覆盖
 		}
 
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlices(slices)}, nil).
-			Once()
+		setupMocksWithChunk(mockStore, mockQuerier, meta.EncodeSlices(slices), int64(sliceID2))
 
 		dataB := bytes.Repeat([]byte("B"), 100)
 		// 仅从 sliceID2 读取，绝不读取 sliceID1
@@ -847,8 +907,6 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		mockBS := metamock.NewMockBlockStore(t)
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
 
-		setupBaseMocks(mockStore, mockQuerier)
-
 		sliceID1 := uint64(101)
 		sliceID2 := uint64(102)
 		slices := []meta.Slice{
@@ -856,10 +914,7 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 			{Pos: 0, ID: sliceID2, Size: 30, Off: 0, Len: 30},   // [0, 30) B 头部覆盖
 		}
 
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlices(slices)}, nil).
-			Once()
+		setupMocksWithChunk(mockStore, mockQuerier, meta.EncodeSlices(slices), int64(sliceID1), int64(sliceID2))
 
 		dataB := bytes.Repeat([]byte("B"), 30)
 		dataA := bytes.Repeat([]byte("A"), 70)
@@ -899,8 +954,6 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		mockBS := metamock.NewMockBlockStore(t)
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
 
-		setupBaseMocks(mockStore, mockQuerier)
-
 		sliceID1 := uint64(101)
 		sliceID2 := uint64(102)
 		slices := []meta.Slice{
@@ -908,10 +961,7 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 			{Pos: 70, ID: sliceID2, Size: 30, Off: 0, Len: 30},  // [70, 100) B 尾部覆盖
 		}
 
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlices(slices)}, nil).
-			Once()
+		setupMocksWithChunk(mockStore, mockQuerier, meta.EncodeSlices(slices), int64(sliceID1), int64(sliceID2))
 
 		dataA := bytes.Repeat([]byte("A"), 70)
 		dataB := bytes.Repeat([]byte("B"), 30)
@@ -951,8 +1001,6 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		mockBS := metamock.NewMockBlockStore(t)
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
 
-		setupBaseMocks(mockStore, mockQuerier)
-
 		sliceID1 := uint64(101)
 		sliceID2 := uint64(102)
 		slices := []meta.Slice{
@@ -960,10 +1008,7 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 			{Pos: 30, ID: sliceID2, Size: 40, Off: 0, Len: 40},  // [30, 70) B 中间覆写
 		}
 
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlices(slices)}, nil).
-			Once()
+		setupMocksWithChunk(mockStore, mockQuerier, meta.EncodeSlices(slices), int64(sliceID1), int64(sliceID2))
 
 		dataALeft := bytes.Repeat([]byte("A"), 30)
 		dataB := bytes.Repeat([]byte("B"), 40)
@@ -1013,18 +1058,13 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 		mockBS := metamock.NewMockBlockStore(t)
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
 
-		setupBaseMocks(mockStore, mockQuerier)
-
 		sliceID1 := uint64(101)
 		slices := []meta.Slice{
 			{Pos: 0, ID: sliceID1, Size: 100, Off: 0, Len: 100}, // [0, 100) A
 			{Pos: 30, ID: 0, Size: 0, Off: 0, Len: 40},          // [30, 70) 打洞空洞
 		}
 
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlices(slices)}, nil).
-			Once()
+		setupMocksWithChunk(mockStore, mockQuerier, meta.EncodeSlices(slices), int64(sliceID1))
 
 		dataALeft := bytes.Repeat([]byte("A"), 30)
 		dataARight := bytes.Repeat([]byte("A"), 30)
@@ -1070,8 +1110,14 @@ func TestRead_AtimeModeAndSessionRenew(t *testing.T) {
 
 	setupFileAndChunkMocks := func(mockQuerier *dbmock.MockQuerier, fileRow db.Inode) {
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 		mockQuerier.EXPECT().
 			GetFileHandle(mock.Anything, mock.Anything).
@@ -1080,10 +1126,6 @@ func TestRead_AtimeModeAndSessionRenew(t *testing.T) {
 				Ino:   int64(ino),
 				Flags: int32(meta.O_RDONLY),
 			}, nil).
-			Once()
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
 			Once()
 	}
 
@@ -1224,8 +1266,14 @@ func TestRead_AtimeModeAndSessionRenew(t *testing.T) {
 		}
 
 		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
+			GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+				Ino:       int64(ino),
+				StartIndx: 0,
+				EndIndx:   0,
+			}).
+			Return([]db.GetInodeSizeAndChunksInRangeRow{
+				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+			}, nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -1243,11 +1291,6 @@ func TestRead_AtimeModeAndSessionRenew(t *testing.T) {
 			Once()
 
 		setupRenewClientSessionMocks(mockQuerier, sessionID)
-
-		mockQuerier.EXPECT().
-			GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-			Return(db.Chunk{}, pgx.ErrNoRows).
-			Once()
 
 		resp, err := mgr.Read(ctx, &meta.ReadRequest{
 			Ino:       ino,
@@ -1284,9 +1327,24 @@ func TestRead_BlockStoreIOError(t *testing.T) {
 
 	setupMockWriteTx(mockStore, mockQuerier)
 
+	sliceID := uint64(999)
+	sliceDesc := meta.Slice{
+		Pos:  0,
+		ID:   sliceID,
+		Size: 100,
+		Off:  0,
+		Len:  100,
+	}
+
 	mockQuerier.EXPECT().
-		GetInode(mock.Anything, int64(ino)).
-		Return(fileRow, nil).
+		GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).
+		Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, meta.EncodeSlice(sliceDesc)),
+		}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -1301,18 +1359,9 @@ func TestRead_BlockStoreIOError(t *testing.T) {
 		}, nil).
 		Once()
 
-	sliceID := uint64(999)
-	sliceDesc := meta.Slice{
-		Pos:  0,
-		ID:   sliceID,
-		Size: 100,
-		Off:  0,
-		Len:  100,
-	}
-
 	mockQuerier.EXPECT().
-		GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-		Return(db.Chunk{Ino: int64(ino), Indx: 0, Slices: meta.EncodeSlice(sliceDesc)}, nil).
+		LockValidSliceRefsKeyShare(mock.Anything, []int64{int64(sliceID)}).
+		Return([]int64{int64(sliceID)}, nil).
 		Once()
 
 	mockBS.EXPECT().
@@ -1363,9 +1412,23 @@ func TestRead_LocalFSBlockStoreIntegration(t *testing.T) {
 		Ctime: pgtype.Timestamptz{Time: now, Valid: true},
 	}
 
+	sliceDesc := meta.Slice{
+		Pos:  0,
+		ID:   sliceID,
+		Size: uint32(len(payload)),
+		Off:  0,
+		Len:  uint32(len(payload)),
+	}
+
 	mockQuerier.EXPECT().
-		GetInode(mock.Anything, int64(ino)).
-		Return(fileRow, nil).
+		GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).
+		Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, meta.EncodeSlice(sliceDesc)),
+		}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -1380,21 +1443,9 @@ func TestRead_LocalFSBlockStoreIntegration(t *testing.T) {
 		}, nil).
 		Once()
 
-	sliceDesc := meta.Slice{
-		Pos:  0,
-		ID:   sliceID,
-		Size: uint32(len(payload)),
-		Off:  0,
-		Len:  uint32(len(payload)),
-	}
-
 	mockQuerier.EXPECT().
-		GetChunk(mock.Anything, db.GetChunkParams{Ino: int64(ino), Indx: 0}).
-		Return(db.Chunk{
-			Ino:    int64(ino),
-			Indx:   0,
-			Slices: meta.EncodeSlice(sliceDesc),
-		}, nil).
+		LockValidSliceRefsKeyShare(mock.Anything, []int64{int64(sliceID)}).
+		Return([]int64{int64(sliceID)}, nil).
 		Once()
 
 	resp, err := mgr.Read(ctx, &meta.ReadRequest{
@@ -1406,4 +1457,282 @@ func TestRead_LocalFSBlockStoreIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, payload, resp.Data)
+}
+
+// TestRead_SliceRefLockRetryAndExhaustion 单元测试 LockValidSliceRefsKeyShare 的重试与耗尽行为
+func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	ino := uint64(500)
+	fh := uint64(50)
+
+	baseFileRow := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFREG | 0o644),
+		Size:       1024,
+		Nlink:      1,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	t.Run("首次锁返回不足触发重读快照拿到合并后新 sliceID 成功读取且不读旧块", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mockBS := metamock.NewMockBlockStore(t)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		slice101 := meta.EncodeSlice(meta.Slice{Pos: 0, ID: 101, Size: 1024, Off: 0, Len: 1024})
+		slice202 := meta.EncodeSlice(meta.Slice{Pos: 0, ID: 202, Size: 1024, Off: 0, Len: 1024})
+
+		// 第一次调用 GetInodeSizeAndChunksInRange 返回 sliceID=101
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+		}, nil).Once()
+
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+			Fh:  int64(fh),
+			Ino: int64(ino),
+		}).Return(db.FileHandle{
+			Fh:    int64(fh),
+			Ino:   int64(ino),
+			Flags: int32(meta.O_RDONLY),
+		}, nil).Once()
+
+		// 第一次 LockValidSliceRefsKeyShare 返回空切片（锁定不足）
+		mockQuerier.EXPECT().LockValidSliceRefsKeyShare(mock.Anything, []int64{101}).
+			Return([]int64{}, nil).Once()
+
+		// attempt 1 触发重新获取快照，返回新合并的 sliceID=202
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice202),
+		}, nil).Once()
+
+		// 成功锁定 [202]
+		mockQuerier.EXPECT().LockValidSliceRefsKeyShare(mock.Anything, []int64{202}).
+			Return([]int64{202}, nil).Once()
+
+		expectedData := bytes.Repeat([]byte("X"), 1024)
+		mockBS.EXPECT().GetBlock(mock.Anything, uint64(202), uint32(0), uint32(1024), uint32(0), mock.Anything).
+			RunAndReturn(func(ctx context.Context, sliceID uint64, blockIdx, blockSize, offset uint32, dst []byte) error {
+				copy(dst, expectedData)
+				return nil
+			}).Once()
+
+		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
+		resp, err := mgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, expectedData, resp.Data)
+
+		// 严格断言未调用 101 的 GetBlock
+		mockBS.AssertNotCalled(t, "GetBlock", mock.Anything, uint64(101), mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("重读快照发现并发截断至 EOF 返回空字节流", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mockBS := metamock.NewMockBlockStore(t)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		slice101 := meta.EncodeSlice(meta.Slice{Pos: 0, ID: 101, Size: 1024, Off: 0, Len: 1024})
+
+		// 第一次调用返回 size=1024
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+		}, nil).Once()
+
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+			Fh:  int64(fh),
+			Ino: int64(ino),
+		}).Return(db.FileHandle{
+			Fh:    int64(fh),
+			Ino:   int64(ino),
+			Flags: int32(meta.O_RDONLY),
+		}, nil).Once()
+
+		mockQuerier.EXPECT().LockValidSliceRefsKeyShare(mock.Anything, []int64{101}).
+			Return([]int64{}, nil).Once()
+
+		// 重读快照：文件大小被截断为 0
+		truncatedRow := baseFileRow
+		truncatedRow.Size = 0
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(truncatedRow, pgtype.Int4{Valid: false}, nil),
+		}, nil).Once()
+
+		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
+		resp, err := mgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Empty(t, resp.Data, "并发截断至 EOF 时安全返回空字节流")
+		mockBS.AssertNotCalled(t, "GetBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("重读快照发现节点已被删除返回 meta.ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mockBS := metamock.NewMockBlockStore(t)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		slice101 := meta.EncodeSlice(meta.Slice{Pos: 0, ID: 101, Size: 1024, Off: 0, Len: 1024})
+
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+		}, nil).Once()
+
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+			Fh:  int64(fh),
+			Ino: int64(ino),
+		}).Return(db.FileHandle{
+			Fh:    int64(fh),
+			Ino:   int64(ino),
+			Flags: int32(meta.O_RDONLY),
+		}, nil).Once()
+
+		mockQuerier.EXPECT().LockValidSliceRefsKeyShare(mock.Anything, []int64{101}).
+			Return([]int64{}, nil).Once()
+
+		// 重读快照：节点已被删除，返回空列表
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{}, nil).Once()
+
+		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
+		resp, err := mgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   1024,
+		})
+		require.Nil(t, resp)
+		assert.ErrorIs(t, err, meta.ErrNotFound)
+		mockBS.AssertNotCalled(t, "GetBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("LockValidSliceRefsKeyShare 报错原样上抛且不调 GetBlock", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mockBS := metamock.NewMockBlockStore(t)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		slice101 := meta.EncodeSlice(meta.Slice{Pos: 0, ID: 101, Size: 1024, Off: 0, Len: 1024})
+
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+		}, nil).Once()
+
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+			Fh:  int64(fh),
+			Ino: int64(ino),
+		}).Return(db.FileHandle{
+			Fh:    int64(fh),
+			Ino:   int64(ino),
+			Flags: int32(meta.O_RDONLY),
+		}, nil).Once()
+
+		lockErr := errors.New("lock query database failure")
+		mockQuerier.EXPECT().LockValidSliceRefsKeyShare(mock.Anything, []int64{101}).
+			Return(nil, lockErr).Once()
+
+		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
+		resp, err := mgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   1024,
+		})
+		require.Nil(t, resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "lock slice refs key share")
+		mockBS.AssertNotCalled(t, "GetBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("连续达最大重试上限 8 次锁定不足后返回 meta.ErrIO", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mockBS := metamock.NewMockBlockStore(t)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		slice101 := meta.EncodeSlice(meta.Slice{Pos: 0, ID: 101, Size: 1024, Off: 0, Len: 1024})
+
+		// 第 1 次由外层调，随后重试调 7 次，共 8 次
+		mockQuerier.EXPECT().GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
+			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+		}, nil).Times(8)
+
+		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
+			Fh:  int64(fh),
+			Ino: int64(ino),
+		}).Return(db.FileHandle{
+			Fh:    int64(fh),
+			Ino:   int64(ino),
+			Flags: int32(meta.O_RDONLY),
+		}, nil).Once()
+
+		// 精确调用 8 次 LockValidSliceRefsKeyShare，每次返回空切片
+		mockQuerier.EXPECT().LockValidSliceRefsKeyShare(mock.Anything, []int64{101}).
+			Return([]int64{}, nil).Times(8)
+
+		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
+		resp, err := mgr.Read(ctx, &meta.ReadRequest{
+			Ino:    ino,
+			Fh:     fh,
+			Offset: 0,
+			Size:   1024,
+		})
+		require.Nil(t, resp)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrIO)
+		mockBS.AssertNotCalled(t, "GetBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
 }

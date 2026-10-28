@@ -73,13 +73,13 @@ func TestRemoveXattr_StaticValidation(t *testing.T) {
 			name:        "name 为空切片 (0 字节)",
 			ino:         1,
 			xName:       []byte{},
-			expectedErr: meta.ErrRange,
+			expectedErr: meta.ErrInvalidArgument,
 		},
 		{
 			name:        "name 为 nil (0 字节)",
 			ino:         1,
 			xName:       nil,
-			expectedErr: meta.ErrRange,
+			expectedErr: meta.ErrInvalidArgument,
 		},
 		{
 			name:        "name 超过 255 字节 (256 字节)",

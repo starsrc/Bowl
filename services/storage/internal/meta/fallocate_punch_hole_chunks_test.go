@@ -106,8 +106,23 @@ func TestFallocatePunchHole_LocalChunk_ReadHoleZero(t *testing.T) {
 	setupMockWriteTx(mockStore, mockQuerier)
 
 	mockQuerier.EXPECT().
-		GetInode(mock.Anything, int64(ino)).
-		Return(fileRow, nil).
+		GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   0,
+		}).
+		Return([]db.GetInodeSizeAndChunksInRangeRow{
+			{
+				Ino:         fileRow.Ino,
+				Mode:        fileRow.Mode,
+				Size:        fileRow.Size,
+				Atime:       fileRow.Atime,
+				Mtime:       fileRow.Mtime,
+				Ctime:       fileRow.Ctime,
+				ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+				ChunkSlices: combinedSlices,
+			},
+		}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -123,15 +138,8 @@ func TestFallocatePunchHole_LocalChunk_ReadHoleZero(t *testing.T) {
 		Once()
 
 	mockQuerier.EXPECT().
-		GetChunk(mock.Anything, db.GetChunkParams{
-			Ino:  int64(ino),
-			Indx: 0,
-		}).
-		Return(db.Chunk{
-			Ino:    int64(ino),
-			Indx:   0,
-			Slices: combinedSlices,
-		}, nil).
+		LockValidSliceRefsKeyShare(mock.Anything, []int64{100}).
+		Return([]int64{100}, nil).
 		Once()
 
 	// 准备 BlockStore 物理数据：4096 字节，内容为 'A'
@@ -283,8 +291,33 @@ func TestFallocatePunchHole_CrossChunkBoundary_ReadHoleZero(t *testing.T) {
 	setupMockWriteTx(mockStore, mockQuerier)
 
 	mockQuerier.EXPECT().
-		GetInode(mock.Anything, int64(ino)).
-		Return(fileRow, nil).
+		GetInodeSizeAndChunksInRange(mock.Anything, db.GetInodeSizeAndChunksInRangeParams{
+			Ino:       int64(ino),
+			StartIndx: 0,
+			EndIndx:   1,
+		}).
+		Return([]db.GetInodeSizeAndChunksInRangeRow{
+			{
+				Ino:         fileRow.Ino,
+				Mode:        fileRow.Mode,
+				Size:        fileRow.Size,
+				Atime:       fileRow.Atime,
+				Mtime:       fileRow.Mtime,
+				Ctime:       fileRow.Ctime,
+				ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+				ChunkSlices: chunk0Slices,
+			},
+			{
+				Ino:         fileRow.Ino,
+				Mode:        fileRow.Mode,
+				Size:        fileRow.Size,
+				Atime:       fileRow.Atime,
+				Mtime:       fileRow.Mtime,
+				Ctime:       fileRow.Ctime,
+				ChunkIndx:   pgtype.Int4{Int32: 1, Valid: true},
+				ChunkSlices: chunk1Slices,
+			},
+		}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -300,27 +333,8 @@ func TestFallocatePunchHole_CrossChunkBoundary_ReadHoleZero(t *testing.T) {
 		Once()
 
 	mockQuerier.EXPECT().
-		GetChunk(mock.Anything, db.GetChunkParams{
-			Ino:  int64(ino),
-			Indx: 0,
-		}).
-		Return(db.Chunk{
-			Ino:    int64(ino),
-			Indx:   0,
-			Slices: chunk0Slices,
-		}, nil).
-		Once()
-
-	mockQuerier.EXPECT().
-		GetChunk(mock.Anything, db.GetChunkParams{
-			Ino:  int64(ino),
-			Indx: 1,
-		}).
-		Return(db.Chunk{
-			Ino:    int64(ino),
-			Indx:   1,
-			Slices: chunk1Slices,
-		}, nil).
+		LockValidSliceRefsKeyShare(mock.Anything, []int64{10, 20}).
+		Return([]int64{10, 20}, nil).
 		Once()
 
 	// Chunk 0 未打洞区域读取 [ChunkSize - 2048, ChunkSize - 1024)，长度 1024

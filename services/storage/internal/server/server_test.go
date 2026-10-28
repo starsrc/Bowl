@@ -128,7 +128,7 @@ func defaultTestConfig() config.ServerConfig {
 		ServerPort:              0,
 		ServerReadHeaderTimeout: 5 * time.Second,
 		ServerStopTimeout:       5 * time.Second,
-		ServerReadMaxBytes:      131072,
+		ServerReadMaxBytes:      config.DefaultServerReadMaxBytes,
 	}
 }
 
@@ -1000,4 +1000,72 @@ func TestServer_H2C_GRPC_ProtocolContract(t *testing.T) {
 		assert.Equal(t, "ENOENT", info.GetReason())
 		assert.Equal(t, "bowl.storage", info.GetDomain())
 	})
+}
+
+// 验证使用 config.Load() 默认配置时，Server 能够正常处理 4 MiB Write RPC（支持 Protobuf 与 JSON）
+func TestServer_DefaultReadMaxBytesAllows4MiBWrite(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	t.Setenv("DB_DSN", "postgres://user:pass@localhost:5432/bowl")
+	t.Setenv("SERVER_READ_MAX_BYTES", "")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	const fourMiB = 4 * 1024 * 1024
+
+	mockMgr := metamock.NewMockManager(t)
+	mockMgr.EXPECT().Write(mock.Anything, mock.MatchedBy(func(req *meta.WriteRequest) bool {
+		return req != nil && len(req.Data) == fourMiB && req.Ino == 1
+	})).Return(&meta.WriteResponse{
+		Size: fourMiB,
+		Inode: &meta.Inode{
+			Ino:        1,
+			Generation: 1,
+			Attr: meta.Attribute{
+				Size: fourMiB,
+			},
+		},
+	}, nil).Maybe()
+
+	srv, err := server.New(server.Params{
+		Config:      cfg.ServerConfig,
+		MetaManager: mockMgr,
+	})
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	payload := make([]byte, fourMiB)
+
+	// 1. Protobuf 编码客户端
+	protoClient := storagev1connect.NewStorageServiceClient(http.DefaultClient, ts.URL)
+	reqProto := connect.NewRequest(&storagev1.WriteRequest{
+		Ino:    1,
+		Fh:     1,
+		Offset: 0,
+		Data:   payload,
+	})
+	respProto, errProto := protoClient.Write(ctx, reqProto)
+	assert.NoError(t, errProto, "Protobuf 客户端 4 MiB 写入应成功")
+	if assert.NotNil(t, respProto) {
+		assert.Equal(t, uint32(fourMiB), respProto.Msg.Size)
+	}
+
+	// 2. JSON 编码客户端
+	jsonClient := storagev1connect.NewStorageServiceClient(http.DefaultClient, ts.URL, connect.WithProtoJSON())
+	reqJSON := connect.NewRequest(&storagev1.WriteRequest{
+		Ino:    1,
+		Fh:     1,
+		Offset: 0,
+		Data:   payload,
+	})
+	respJSON, errJSON := jsonClient.Write(ctx, reqJSON)
+	assert.NoError(t, errJSON, "JSON 客户端 4 MiB 写入应成功")
+	if assert.NotNil(t, respJSON) {
+		assert.Equal(t, uint32(fourMiB), respJSON.Msg.Size)
+	}
 }

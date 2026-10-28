@@ -434,10 +434,13 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 }
 
 // validateXattrName 校验扩展属性名称合法性。
-// len(name) == 0 或 len(name) > MaxXattrNameBytes 时返回 ErrRange；
-// name 包含 NUL 字节 (\x00) 时返回 ErrInvalidArgument。
+// len(name) == 0 或 name 包含 NUL 字节 (\x00) 时返回 ErrInvalidArgument；
+// len(name) > MaxXattrNameBytes 时返回 ErrRange（且当同时 len(name) > 255 且包含 \x00 时优先返回 ErrRange）。
 func validateXattrName(name []byte) error {
-	if len(name) == 0 || len(name) > MaxXattrNameBytes {
+	if len(name) == 0 {
+		return ErrInvalidArgument
+	}
+	if len(name) > MaxXattrNameBytes {
 		return ErrRange
 	}
 	if bytes.IndexByte(name, 0) >= 0 {
@@ -472,7 +475,7 @@ func (m *manager) SetXattr(ctx context.Context, params SetXattrParams) error {
 		return err
 	}
 	if len(params.Value) > MaxXattrValueBytes {
-		return ErrTooBig
+		return ErrRange
 	}
 
 	// 开启读写事务
@@ -698,7 +701,7 @@ func (m *manager) ListXattr(ctx context.Context, ino uint64) ([][]byte, error) {
 // 遵循 Linux FUSE FUSE_REMOVEXATTR 协议与 POSIX removexattr(2) 语义，执行 4 步求值状态机：
 // 1. 入参静态校验（不查库）：
 //   - ino == 0 || ino > math.MaxInt64 返回 ErrInvalidArgument；
-//   - len(name) == 0 || len(name) > MaxXattrNameBytes 返回 ErrRange；
+//   - len(name) == 0 返回 ErrInvalidArgument；len(name) > MaxXattrNameBytes 返回 ErrRange；
 //   - bytes.IndexByte(name, 0) >= 0 返回 ErrInvalidArgument；
 //
 // 2. Inode 行级排他锁与存在性校验：在读写事务内调用 GetInodeForUpdate(ino)；未命中返回 ErrNotFound；支持孤儿节点 (nlink == 0)；

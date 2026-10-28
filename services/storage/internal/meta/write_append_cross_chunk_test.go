@@ -1,17 +1,17 @@
 package meta_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -107,7 +107,7 @@ func TestWrite_CrossChunkBoundary(t *testing.T) {
 				Indx:   0,
 				Slices: firstSliceExpected,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		// 第二个 Chunk (indx = 1)：[0, 3072)，长度 3072
@@ -124,7 +124,7 @@ func TestWrite_CrossChunkBoundary(t *testing.T) {
 				Indx:   1,
 				Slices: secondSliceExpected,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		// 跨界拆分时 slice_refs 记录 refs = 2
@@ -259,7 +259,7 @@ func TestWrite_OAppend_IgnoreClientOffset(t *testing.T) {
 					Indx:   0,
 					Slices: expectedSlice,
 				}).
-				Return(nil).
+				Return(int64(24), nil).
 				Once()
 
 			mockQuerier.EXPECT().
@@ -378,7 +378,7 @@ func TestWrite_OAppend_CrossChunkBoundary(t *testing.T) {
 				Indx:   0,
 				Slices: firstSliceExpected,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		// 第二个 Chunk (indx = 1)：[0, 2048)，长度 2048
@@ -395,7 +395,7 @@ func TestWrite_OAppend_CrossChunkBoundary(t *testing.T) {
 				Indx:   1,
 				Slices: secondSliceExpected,
 			}).
-			Return(nil).
+			Return(int64(24), nil).
 			Once()
 
 		// 跨界引用计数记为 2
@@ -565,13 +565,13 @@ func TestWrite_OAppend_Concurrent_NoDataLoss(t *testing.T) {
 
 			mockQuerier.EXPECT().
 				AppendChunkSlice(mock.Anything, mock.Anything).
-				RunAndReturn(func(ctx context.Context, params db.AppendChunkSliceParams) error {
+				RunAndReturn(func(ctx context.Context, params db.AppendChunkSliceParams) (int64, error) {
 					slices, err := meta.DecodeSlices(params.Slices)
 					if err != nil {
-						return err
+						return 0, err
 					}
 					appendedSlices = append(appendedSlices, slices...)
-					return nil
+					return int64(len(appendedSlices) * meta.SliceBytes), nil
 				}).
 				Maybe()
 
@@ -655,23 +655,11 @@ func TestWrite_OAppend_Concurrent_NoDataLoss(t *testing.T) {
 
 // TestWrite_CrossChunkBoundary_PostgresIntegration 真实 PostgreSQL 容器跨 64 MiB 边界与 O_APPEND 集成测试。
 func TestWrite_CrossChunkBoundary_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过 PostgreSQL 测试 (连接初始化失败): %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("跳过 PostgreSQL 测试 (ping 失败): %v", err)
-	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
 
 	store := db.NewStore(pool)
 	dataDir := t.TempDir()
@@ -687,10 +675,6 @@ func TestWrite_CrossChunkBoundary_PostgresIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	ino := uint64(fileRow.Ino)
-	defer func() {
-		_ = store.DeleteInode(context.Background(), fileRow.Ino)
-		_, _ = store.DeleteChunksByIno(context.Background(), fileRow.Ino)
-	}()
 
 	// 1. 测试普通跨 64 MiB 边界写入
 	openRes, err := mgr.Open(ctx, meta.OpenParams{
@@ -699,9 +683,18 @@ func TestWrite_CrossChunkBoundary_PostgresIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	fh := openRes.Fh
-	defer func() {
-		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: fh})
-	}()
+
+	// 2. 测试 O_APPEND 句柄追加
+	appendOpenRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_WRONLY | meta.O_APPEND,
+	})
+	require.NoError(t, err)
+	appendFh := appendOpenRes.Fh
+
+	t.Cleanup(func() {
+		cleanupWriteTestInoAndSlices(t, store, mgr, fileRow.Ino, fh, appendFh)
+	})
 
 	// 在 64 MiB - 1024 处写入 4096 字节
 	crossOffset := uint64(meta.ChunkSize - 1024)
@@ -749,17 +742,6 @@ func TestWrite_CrossChunkBoundary_PostgresIntegration(t *testing.T) {
 	assert.Equal(t, int32(2), ref.Refs)
 	assert.Equal(t, int32(4096), ref.Size)
 
-	// 2. 测试 O_APPEND 句柄追加
-	appendOpenRes, err := mgr.Open(ctx, meta.OpenParams{
-		Ino:   ino,
-		Flags: meta.O_WRONLY | meta.O_APPEND,
-	})
-	require.NoError(t, err)
-	appendFh := appendOpenRes.Fh
-	defer func() {
-		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: appendFh})
-	}()
-
 	appendData := []byte("append-to-tail")
 	appendRes, err := mgr.Write(ctx, &meta.WriteRequest{
 		Ino:    ino,
@@ -770,4 +752,162 @@ func TestWrite_CrossChunkBoundary_PostgresIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, appendRes)
 	assert.Equal(t, uint64(crossOffset+4096+uint64(len(appendData))), appendRes.Inode.Attr.Size)
+}
+
+// TestWrite_ConcurrentOAppend_PostgresIntegration 验证 16 个并发客户端使用 O_APPEND 向同一文件并发写入 4096 字节。
+// 验证数据库行锁排他保证零丢失更新、零重叠覆盖、零空洞，最终文件大小与磁盘已用容量严格匹配且全量块内容逐一完整。
+func TestWrite_ConcurrentOAppend_PostgresIntegration(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+	mgr := meta.New(store, meta.WithBlockStore(bs))
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     "concurrent-append-disk",
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	})
+
+	createRes, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: uint64(disk.RootIno),
+		Name:      []byte("append_target.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		UID:       1000,
+		GID:       1000,
+	})
+	require.NoError(t, err)
+	ino := createRes.Inode.Ino
+
+	t.Cleanup(func() {
+		var sliceIDs []int64
+		for indx := int32(0); indx < 16; indx++ {
+			chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(ino), Indx: indx})
+			if len(chunkRow.Slices) > 0 {
+				if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
+					for _, s := range slices {
+						if s.ID > 0 {
+							sliceIDs = append(sliceIDs, int64(s.ID))
+							_ = store.DeleteSliceRef(context.Background(), int64(s.ID))
+						}
+					}
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(context.Background(), store, []int64{int64(ino)})
+		_ = store.DeleteInode(context.Background(), int64(ino))
+
+		_, inoErr := store.GetInode(context.Background(), int64(ino))
+		assert.ErrorIs(t, inoErr, pgx.ErrNoRows, "目标 ino 必须已被清除")
+		for _, sid := range sliceIDs {
+			_, sErr := store.GetSliceRef(context.Background(), sid)
+			assert.ErrorIs(t, sErr, pgx.ErrNoRows, "测试专有 slice_ref %d 必须已被清除", sid)
+		}
+	})
+
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR | meta.O_APPEND,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+	t.Cleanup(func() {
+		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: fh})
+	})
+
+	const numWorkers = 16
+	const blockSize = 4096
+
+	type writeResult struct {
+		workerID int
+		err      error
+		res      *meta.WriteResponse
+	}
+	results := make(chan writeResult, numWorkers)
+	startCh := make(chan struct{})
+	var startOnce sync.Once
+	closeStart := func() {
+		startOnce.Do(func() {
+			close(startCh)
+		})
+	}
+	t.Cleanup(closeStart)
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		workerID := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case <-startCh:
+			case <-ctx.Done():
+				results <- writeResult{workerID: workerID, err: ctx.Err()}
+				return
+			}
+
+			payload := bytes.Repeat([]byte{byte('A' + workerID)}, blockSize)
+			res, writeErr := mgr.Write(ctx, &meta.WriteRequest{
+				Ino:    ino,
+				Fh:     fh,
+				Offset: 0, // 故意传入 0 验证 O_APPEND 依托数据库 GetInodeForUpdate 行锁强制按最新末尾顺序追加而不互相覆盖
+				Data:   payload,
+			})
+			results <- writeResult{workerID: workerID, err: writeErr, res: res}
+		}()
+	}
+
+	closeStart()
+	wg.Wait()
+	close(results)
+
+	var successCount int
+	for r := range results {
+		assert.NoError(t, r.err, "worker %d 写入必须成功", r.workerID)
+		if r.err == nil {
+			successCount++
+		}
+	}
+	assert.Equal(t, numWorkers, successCount, "成功写入次数严格等于 16（零错误、零吞错）")
+
+	// 最终 GetAttr 文件 Size == 16 * 4096
+	attr, err := mgr.GetAttr(ctx, ino)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(numWorkers*blockSize), attr.Attr.Size)
+
+	// Disk 用量 UsedBytes == 16 * 4096
+	diskInfo, err := mgr.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(numWorkers*blockSize), diskInfo.UsedBytes)
+
+	// mgr.Read(offset=0, size=16*4096) 读回全文件切分为 16 个 4096B 块后，每个块内部 4096 字节均一无混杂、且 16 个 worker 的特征字节集合 100% 完整出现
+	readRes, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Size:   uint32(numWorkers * blockSize),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, readRes)
+	require.Len(t, readRes.Data, numWorkers*blockSize)
+
+	seenWorkers := make(map[byte]bool)
+	for b := 0; b < numWorkers; b++ {
+		block := readRes.Data[b*blockSize : (b+1)*blockSize]
+		char := block[0]
+		seenWorkers[char] = true
+		assert.Equal(t, bytes.Repeat([]byte{char}, blockSize), block, "每个块内部 4096 字节均一无混杂 (块索引 %d)", b)
+	}
+	assert.Len(t, seenWorkers, numWorkers, "16 个 worker 的特征字节集合 100% 完整出现（零丢失更新、零重叠覆盖、零空洞）")
+	for i := 0; i < numWorkers; i++ {
+		assert.True(t, seenWorkers[byte('A'+i)], "特征字节 %c 必须存在", byte('A'+i))
+	}
 }

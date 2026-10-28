@@ -243,6 +243,30 @@ func TestWriteResponseContract(t *testing.T) {
 					Inode: validInode,
 				},
 			},
+			{
+				name: "4 MiB 满载写入且 Inode.Attr.Size 为 MaxInt64",
+				resp: &storagev1.WriteResponse{
+					Size: 4194304,
+					Inode: &storagev1.Inode{
+						Ino:        validInode.Ino,
+						Generation: validInode.Generation,
+						Attr: &storagev1.InodeAttribute{
+							Mode:    validInode.Attr.Mode,
+							Uid:     validInode.Attr.Uid,
+							Gid:     validInode.Attr.Gid,
+							Rdev:    validInode.Attr.Rdev,
+							Size:    math.MaxInt64,
+							Atime:   validInode.Attr.Atime,
+							Mtime:   validInode.Attr.Mtime,
+							Ctime:   validInode.Attr.Ctime,
+							Nlink:   validInode.Attr.Nlink,
+							Blksize: validInode.Attr.Blksize,
+							Blocks:  validInode.Attr.Blocks,
+							Flags:   validInode.Attr.Flags,
+						},
+					},
+				},
+			},
 		}
 
 		for _, tc := range cases {
@@ -322,16 +346,60 @@ func TestWriteResponseContract(t *testing.T) {
 				},
 			},
 			{
-				name: "嵌套 Inode.Attr.Size 超出 MaxInt64",
+				name: "嵌套 Inode.Attr 缺失必填 Mtime 时间戳",
 				resp: &storagev1.WriteResponse{
 					Size: 1024,
 					Inode: &storagev1.Inode{
 						Ino:        100,
 						Generation: 1,
 						Attr: &storagev1.InodeAttribute{
-							Mode:  0o100644,
-							Size:  math.MaxInt64 + 1,
-							Nlink: 1,
+							Mode:    0o100644,
+							Size:    1024,
+							Atime:   now,
+							Mtime:   nil,
+							Ctime:   now,
+							Nlink:   1,
+							Blksize: 4096,
+						},
+					},
+				},
+			},
+			{
+				name: "嵌套 Inode.Attr.Flags 超出 MaxInt32",
+				resp: &storagev1.WriteResponse{
+					Size: 1024,
+					Inode: &storagev1.Inode{
+						Ino:        100,
+						Generation: 1,
+						Attr: &storagev1.InodeAttribute{
+							Mode:    0o100644,
+							Size:    1024,
+							Atime:   now,
+							Mtime:   now,
+							Ctime:   now,
+							Nlink:   1,
+							Blksize: 4096,
+							Flags:   math.MaxInt32 + 1,
+						},
+					},
+				},
+			},
+			{
+				name: "嵌套 Inode.Attr.Uid 超出 MaxInt32",
+				resp: &storagev1.WriteResponse{
+					Size: 1024,
+					Inode: &storagev1.Inode{
+						Ino:        100,
+						Generation: 1,
+						Attr: &storagev1.InodeAttribute{
+							Mode:    0o100644,
+							Uid:     math.MaxInt32 + 1,
+							Size:    1024,
+							Atime:   now,
+							Mtime:   now,
+							Ctime:   now,
+							Nlink:   1,
+							Blksize: 4096,
 						},
 					},
 				},

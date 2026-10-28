@@ -60,12 +60,15 @@ services:
       SERVER_HOST: "0.0.0.0"
       SERVER_PORT: 9000
       SERVER_READ_MAX_BYTES: 16777216
+      STORAGE_DATA_DIR: "/var/lib/bowl/data"
       DB_DSN: "postgres://postgres:postgres@postgres:5432/bowl?sslmode=disable"
       OTEL_ENABLED: "true"
       OTEL_SERVICE_NAME: "bowl-storage"
       OTEL_EXPORTER_OTLP_ENDPOINT: "jaeger:4317"
       OTEL_EXPORTER_OTLP_INSECURE: "true"
       STORAGE_SESSION_LEASE_TTL: "${STORAGE_SESSION_LEASE_TTL:-2s}"
+    volumes:
+      - storage_data:/var/lib/bowl/data
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 9000 || exit 1"]
       interval: 2s
@@ -101,6 +104,7 @@ services:
 
 volumes:
   postgres_data:
+  storage_data:
 
 networks:
   bowl-net:

@@ -282,46 +282,10 @@ func TestStartGCWorker_Unit(t *testing.T) {
 	assert.InDelta(t, currentCalls, callCount.Load(), 1)
 }
 
-// setupPostgresIntegration 初始化真实 PostgreSQL 连接。
+// setupPostgresIntegration 初始化真实 PostgreSQL 连接并遵循统一 DSN 配置契约。
 func setupPostgresIntegration(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
-
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	t.Cleanup(cancel)
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil || pool.Ping(ctx) != nil {
-		if os.Getenv("STORAGE_DB_DSN") == "" {
-			if pool != nil {
-				pool.Close()
-			}
-			dsn = "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
-			pool, err = pgxpool.New(ctx, dsn)
-			if err != nil || pool.Ping(ctx) != nil {
-				if pool != nil {
-					pool.Close()
-				}
-				t.Skipf("跳过 PostgreSQL 测试 (连接初始化/Ping 均失败)")
-				return nil, nil
-			}
-		} else {
-			if pool != nil {
-				pool.Close()
-			}
-			t.Skipf("跳过 PostgreSQL 测试 (连接初始化失败): %v", err)
-			return nil, nil
-		}
-	}
-	t.Cleanup(func() {
-		pool.Close()
-	})
-
-	return pool, ctx
+	return setupMetaTestDB(t)
 }
 
 // faultInjectBlockStore 包装 BlockStore，支持针对指定 sliceID 注入删除错误。
@@ -343,6 +307,7 @@ func TestGC_PostgresIntegration(t *testing.T) {
 	if pool == nil {
 		return
 	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
 
 	store := db.NewStore(pool)
 	dataDir := t.TempDir()
@@ -703,6 +668,9 @@ func TestGC_PostgresIntegration(t *testing.T) {
 		refRow, err := store.GetSliceRef(ctx, int64(sliceID))
 		require.NoError(t, err)
 		assert.Equal(t, int32(1), refRow.Refs)
+
+		// 测试收尾显式清理该切片，防止在共享数据库中残留
+		_ = store.DeleteSliceRef(context.Background(), int64(sliceID))
 	})
 
 	t.Run("磁盘删除错误时保留 slice_refs 且故障恢复后重试彻底清除", func(t *testing.T) {

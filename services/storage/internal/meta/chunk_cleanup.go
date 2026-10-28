@@ -79,6 +79,11 @@ func deleteAllChunksByInos(ctx context.Context, q db.Querier, inos []int64) erro
 //  3. 当 borderPos > 0 时，删除 indx > borderIndx 的所有 chunks 行并递减对应 slice_refs.refs，
 //     随后向 indx == borderIndx 的边界 Chunk 追加覆盖 [borderPos, ChunkSize) 的 24 字节空洞切片（若该行存在）。
 func truncateChunksToSize(ctx context.Context, q db.Querier, ino int64, newSize uint64) error {
+	_, _, err := truncateChunksToSizeWithStats(ctx, q, ino, newSize)
+	return err
+}
+
+func truncateChunksToSizeWithStats(ctx context.Context, q db.Querier, ino int64, newSize uint64) (uint32, int64, error) {
 	borderIndx := uint32(newSize / ChunkSize)
 	borderPos := uint32(newSize % ChunkSize)
 
@@ -88,14 +93,14 @@ func truncateChunksToSize(ctx context.Context, q db.Querier, ino int64, newSize 
 			FromIndx: int32(borderIndx),
 		})
 		if err != nil {
-			return fmt.Errorf("delete chunks from indx %d for ino %d: %w", borderIndx, ino, err)
+			return 0, 0, fmt.Errorf("delete chunks from indx %d for ino %d: %w", borderIndx, ino, err)
 		}
 		if len(deletedSlices) > 0 {
 			if err := decrementDeletedSlicesRefs(ctx, q, deletedSlices...); err != nil {
-				return fmt.Errorf("decrement deleted slices refs from indx %d for ino %d: %w", borderIndx, ino, err)
+				return 0, 0, fmt.Errorf("decrement deleted slices refs from indx %d for ino %d: %w", borderIndx, ino, err)
 			}
 		}
-		return nil
+		return borderIndx, 0, nil
 	}
 
 	// borderPos > 0
@@ -104,11 +109,11 @@ func truncateChunksToSize(ctx context.Context, q db.Querier, ino int64, newSize 
 		AfterIndx: int32(borderIndx),
 	})
 	if err != nil {
-		return fmt.Errorf("delete chunks after indx %d for ino %d: %w", borderIndx, ino, err)
+		return 0, 0, fmt.Errorf("delete chunks after indx %d for ino %d: %w", borderIndx, ino, err)
 	}
 	if len(deletedSlices) > 0 {
 		if err := decrementDeletedSlicesRefs(ctx, q, deletedSlices...); err != nil {
-			return fmt.Errorf("decrement deleted slices refs after indx %d for ino %d: %w", borderIndx, ino, err)
+			return 0, 0, fmt.Errorf("decrement deleted slices refs after indx %d for ino %d: %w", borderIndx, ino, err)
 		}
 	}
 
@@ -121,13 +126,14 @@ func truncateChunksToSize(ctx context.Context, q db.Querier, ino int64, newSize 
 	}
 	holeBytes := EncodeSlice(holeSlice)
 
-	if _, err := q.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
+	octetLen, err := q.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
 		Ino:    ino,
 		Indx:   int32(borderIndx),
 		Slices: holeBytes,
-	}); err != nil {
-		return fmt.Errorf("append hole slice to chunk (ino=%d, indx=%d): %w", ino, borderIndx, err)
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("append hole slice to chunk (ino=%d, indx=%d): %w", ino, borderIndx, err)
 	}
 
-	return nil
+	return borderIndx, octetLen, nil
 }

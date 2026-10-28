@@ -90,10 +90,10 @@ func (m *manager) CollectGarbage(ctx context.Context, limit int32) (int, error) 
 	return totalReclaimed, nil
 }
 
-// StartGCWorker 在后台启动周期性物理垃圾回收协程。
-// 当 ctx 取消时自动平滑退出。
+// startGCWorkerWithDone 在后台启动周期性物理垃圾回收协程并返回 doneCh 通道。
+// 协程完全退出排空后关闭 doneCh。
 // 若 interval <= 0 则采用 DefaultGCInterval；若 batchLimit <= 0 则采用 DefaultGCBatchLimit。
-func (m *manager) StartGCWorker(ctx context.Context, interval time.Duration, batchLimit int32) {
+func (m *manager) startGCWorkerWithDone(ctx context.Context, interval time.Duration, batchLimit int32) <-chan struct{} {
 	if interval <= 0 {
 		interval = DefaultGCInterval
 	}
@@ -101,7 +101,10 @@ func (m *manager) StartGCWorker(ctx context.Context, interval time.Duration, bat
 		batchLimit = DefaultGCBatchLimit
 	}
 
+	doneCh := make(chan struct{})
 	go func() {
+		defer close(doneCh)
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -122,4 +125,13 @@ func (m *manager) StartGCWorker(ctx context.Context, interval time.Duration, bat
 			}
 		}
 	}()
+
+	return doneCh
+}
+
+// StartGCWorker 在后台启动周期性物理垃圾回收协程。
+// 当 ctx 取消时自动平滑退出。
+// 若 interval <= 0 则采用 DefaultGCInterval；若 batchLimit <= 0 则采用 DefaultGCBatchLimit。
+func (m *manager) StartGCWorker(ctx context.Context, interval time.Duration, batchLimit int32) {
+	_ = m.startGCWorkerWithDone(ctx, interval, batchLimit)
 }

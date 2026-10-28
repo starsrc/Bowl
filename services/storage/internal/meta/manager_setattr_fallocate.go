@@ -65,7 +65,10 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 	}
 
 	var result *Inode
+	var truncatedBorderIndx uint32
+	var truncatedOctetLen int64
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		truncatedOctetLen = 0
 		current, err := q.GetInodeForUpdate(ctx, int64(ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -188,9 +191,12 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 				return fmt.Errorf("delete all chunks on truncate zero for inode %d: %w", current.Ino, err)
 			}
 		} else if input.Size != nil && fileType == S_IFREG && targetSize > 0 && targetSize < uint64(current.Size) {
-			if err := truncateChunksToSize(ctx, q, current.Ino, targetSize); err != nil {
+			bIndx, oLen, err := truncateChunksToSizeWithStats(ctx, q, current.Ino, targetSize)
+			if err != nil {
 				return fmt.Errorf("truncate chunks to size %d for inode %d: %w", targetSize, current.Ino, err)
 			}
+			truncatedBorderIndx = bIndx
+			truncatedOctetLen = oLen
 		}
 
 		var setAtimeNow bool
@@ -258,6 +264,10 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		}
 	}
 
+	if truncatedOctetLen > 0 {
+		m.maybeTriggerAsyncCompact(ino, truncatedBorderIndx, truncatedOctetLen)
+	}
+
 	return result, nil
 }
 
@@ -287,7 +297,9 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 	}
 
 	// 3. 开启读写事务
+	var punchStats []chunkAppendStat
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		punchStats = nil
 		current, err := q.GetInodeForUpdate(ctx, int64(params.Ino))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -379,7 +391,9 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			}
 		case FallocFlPunchHole | FallocFlKeepSize:
 			if current.Size > 0 && params.Offset < uint64(current.Size) {
-				if err := punchHoleChunks(ctx, q, current.Ino, current.Size, params.Offset, params.Length); err != nil {
+				var err error
+				punchStats, err = punchHoleChunks(ctx, q, current.Ino, current.Size, params.Offset, params.Length)
+				if err != nil {
 					return fmt.Errorf("punch hole chunks (ino=%d): %w", current.Ino, err)
 				}
 			}
@@ -427,24 +441,29 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 		}
 	}
 
+	for _, stat := range punchStats {
+		m.maybeTriggerAsyncCompact(params.Ino, stat.indx, stat.octetLen)
+	}
+
 	return nil
 }
 
 // punchHoleChunks 对有效打洞区间遍历受影响的 chunks，整块覆盖时直接删除并扣减引用计数，局部子区间追加空洞切片。
-func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize int64, offset uint64, length uint64) error {
+func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize int64, offset uint64, length uint64) ([]chunkAppendStat, error) {
 	if currentSize <= 0 || offset >= uint64(currentSize) {
-		return nil
+		return nil, nil
 	}
 
 	punchStart := offset
 	punchEnd := min(offset+length, uint64(currentSize))
 	if punchStart >= punchEnd {
-		return nil
+		return nil, nil
 	}
 
 	startIndx := uint32(punchStart / ChunkSize)
 	endIndx := uint32((punchEnd - 1) / ChunkSize)
 
+	var stats []chunkAppendStat
 	for indx := startIndx; indx <= endIndx; indx++ {
 		chunkStartOffset := uint64(indx) * ChunkSize
 		chunkEndOffset := chunkStartOffset + ChunkSize
@@ -472,11 +491,11 @@ func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize i
 				if errors.Is(err, pgx.ErrNoRows) {
 					continue
 				}
-				return fmt.Errorf("delete chunk (ino=%d, indx=%d): %w", ino, indx, err)
+				return nil, fmt.Errorf("delete chunk (ino=%d, indx=%d): %w", ino, indx, err)
 			}
 			if len(deletedSlices) > 0 {
 				if err := decrementDeletedSlicesRefs(ctx, q, deletedSlices...); err != nil {
-					return fmt.Errorf("decrement deleted slices refs (ino=%d, indx=%d): %w", ino, indx, err)
+					return nil, fmt.Errorf("decrement deleted slices refs (ino=%d, indx=%d): %w", ino, indx, err)
 				}
 			}
 		} else if cEnd > cStart {
@@ -487,15 +506,19 @@ func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize i
 				Off:  0,
 				Len:  cEnd - cStart,
 			}
-			if _, err := q.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
+			octetLen, err := q.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
 				Ino:    ino,
 				Indx:   int32(indx),
 				Slices: EncodeSlice(holeSlice),
-			}); err != nil {
-				return fmt.Errorf("append existing chunk slice (ino=%d, indx=%d): %w", ino, indx, err)
+			})
+			if err != nil {
+				return nil, fmt.Errorf("append existing chunk slice (ino=%d, indx=%d): %w", ino, indx, err)
+			}
+			if octetLen > 0 {
+				stats = append(stats, chunkAppendStat{indx: indx, octetLen: octetLen})
 			}
 		}
 	}
 
-	return nil
+	return stats, nil
 }

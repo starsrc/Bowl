@@ -128,9 +128,11 @@ type manager struct {
 	openDirCache          bool
 	atimeMode             AtimeMode
 	sessionLeaseTTL       time.Duration
+	gcInterval            time.Duration
+	gcBatchLimit          int32
 	compactSliceThreshold int
-	chunkWriteCountsMu    sync.Mutex
-	chunkWriteCounts      map[chunkKey]int
+	inFlightCompactsMu    sync.Mutex
+	inFlightCompacts      map[chunkKey]bool
 	lockNotifyMu          sync.Mutex
 	lockNotifyChans       map[uint64]*lockNotifyEntry
 	crossDirRenameMu      sync.Mutex
@@ -236,6 +238,24 @@ func WithCompactSliceThreshold(threshold int) Option {
 	}
 }
 
+// WithGCInterval 配置后台 GC Worker 扫描轮询周期（d > 0 时生效，默认 DefaultGCInterval）。
+func WithGCInterval(d time.Duration) Option {
+	return func(m *manager) {
+		if d > 0 {
+			m.gcInterval = d
+		}
+	}
+}
+
+// WithGCBatchLimit 配置后台 GC Worker 单批次扫描回收上限（limit > 0 时生效，默认 DefaultGCBatchLimit）。
+func WithGCBatchLimit(limit int32) Option {
+	return func(m *manager) {
+		if limit > 0 {
+			m.gcBatchLimit = limit
+		}
+	}
+}
+
 // New 创建 Manager 实例。
 func New(store db.Store, opts ...Option) Manager {
 	m := &manager{
@@ -244,8 +264,10 @@ func New(store db.Store, opts ...Option) Manager {
 		attrTimeout:           DefaultAttrTimeoutSeconds,
 		dirEntryTimeout:       DefaultEntryTimeoutSeconds,
 		sessionLeaseTTL:       DefaultSessionLeaseTTL,
+		gcInterval:            DefaultGCInterval,
+		gcBatchLimit:          DefaultGCBatchLimit,
 		compactSliceThreshold: CompactSliceThreshold,
-		chunkWriteCounts:      make(map[chunkKey]int),
+		inFlightCompacts:      make(map[chunkKey]bool),
 		lockNotifyChans:       make(map[uint64]*lockNotifyEntry),
 		dirCursors:            make(map[dirCursorKey]dirCursorAnchor),
 		dirMutationSeq:        make(map[uint64]uint64),
@@ -541,6 +563,7 @@ func (t *dirMutationTracker) done() {
 type ManagerParams struct {
 	fx.In
 
+	Lifecycle  fx.Lifecycle `optional:"true"`
 	Store      db.Store
 	BlockStore BlockStore         `optional:"true"`
 	MetaCfg    *config.MetaConfig `optional:"true"`
@@ -566,31 +589,61 @@ func newManagerFromParams(params ManagerParams) Manager {
 		opts = append(opts, WithBlockStore(NewLocalFSBlockStore(config.DefaultDataDir)))
 	}
 
-	if metaCfg == nil {
-		return New(params.Store, opts...)
+	if metaCfg != nil {
+		var atimeMode AtimeMode
+		switch metaCfg.AtimeMode() {
+		case "relatime":
+			atimeMode = AtimeModeRelAtime
+		case "strictatime":
+			atimeMode = AtimeModeStrictAtime
+		default:
+			atimeMode = AtimeModeNoAtime
+		}
+
+		opts = append(opts,
+			WithSessionLeaseTTL(metaCfg.SessionLeaseTTL()),
+			WithAtimeMode(atimeMode),
+			WithEntryTimeout(metaCfg.EntryTimeoutSeconds()),
+			WithAttrTimeout(metaCfg.AttrTimeoutSeconds()),
+			WithDirEntryTimeout(metaCfg.DirEntryTimeoutSeconds()),
+			WithOpenKeepCache(metaCfg.OpenKeepCache()),
+			WithOpenDirCache(metaCfg.OpenDirCache()),
+			WithGCInterval(metaCfg.GCInterval()),
+		)
 	}
 
-	var atimeMode AtimeMode
-	switch metaCfg.AtimeMode() {
-	case "relatime":
-		atimeMode = AtimeModeRelAtime
-	case "strictatime":
-		atimeMode = AtimeModeStrictAtime
-	default:
-		atimeMode = AtimeModeNoAtime
+	mgr := New(params.Store, opts...).(*manager)
+
+	if params.Lifecycle != nil {
+		var (
+			gcCancel context.CancelFunc
+			doneCh   <-chan struct{}
+		)
+		params.Lifecycle.Append(fx.Hook{
+			OnStart: func(context.Context) error {
+				var gcCtx context.Context
+				gcCtx, gcCancel = context.WithCancel(context.Background())
+				doneCh = mgr.startGCWorkerWithDone(gcCtx, mgr.gcInterval, mgr.gcBatchLimit)
+				return nil
+			},
+			OnStop: func(stopCtx context.Context) error {
+				if gcCancel != nil {
+					gcCancel()
+				}
+				if doneCh != nil {
+					select {
+					case <-doneCh:
+						return nil
+					case <-stopCtx.Done():
+						return stopCtx.Err()
+					}
+				}
+				return nil
+			},
+		})
 	}
 
-	opts = append(opts,
-		WithSessionLeaseTTL(metaCfg.SessionLeaseTTL()),
-		WithAtimeMode(atimeMode),
-		WithEntryTimeout(metaCfg.EntryTimeoutSeconds()),
-		WithAttrTimeout(metaCfg.AttrTimeoutSeconds()),
-		WithDirEntryTimeout(metaCfg.DirEntryTimeoutSeconds()),
-		WithOpenKeepCache(metaCfg.OpenKeepCache()),
-		WithOpenDirCache(metaCfg.OpenDirCache()),
-	)
-
-	return New(params.Store, opts...)
+	return mgr
 }
 
 // Module 提供 meta 依赖注入模块。

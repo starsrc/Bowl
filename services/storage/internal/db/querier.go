@@ -13,7 +13,7 @@ import (
 type Querier interface {
 	AddDiskQuotaByRootIno(ctx context.Context, arg AddDiskQuotaByRootInoParams) error
 	AddSliceRefCount(ctx context.Context, arg AddSliceRefCountParams) error
-	AppendChunkSlice(ctx context.Context, arg AppendChunkSliceParams) error
+	AppendChunkSlice(ctx context.Context, arg AppendChunkSliceParams) (int64, error)
 	AppendExistingChunkSlice(ctx context.Context, arg AppendExistingChunkSliceParams) (int64, error)
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	// 4194304 = 0o20000000 (O_TMPFILE)
@@ -61,6 +61,7 @@ type Querier interface {
 	GetInode(ctx context.Context, ino int64) (Inode, error)
 	GetInodeByEntry(ctx context.Context, arg GetInodeByEntryParams) (Inode, error)
 	GetInodeForUpdate(ctx context.Context, ino int64) (Inode, error)
+	GetInodeSizeAndChunksInRange(ctx context.Context, arg GetInodeSizeAndChunksInRangeParams) ([]GetInodeSizeAndChunksInRangeRow, error)
 	GetInodeXattr(ctx context.Context, arg GetInodeXattrParams) (InodeXattr, error)
 	GetInodeXattrNamesTotalBytes(ctx context.Context, ino int64) (int64, error)
 	GetParentInode(ctx context.Context, ino int64) (Inode, error)
@@ -81,6 +82,7 @@ type Querier interface {
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
 	ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]ListParentEntryCountsByInoRow, error)
 	ListPendingFileLockWaitersByInoAndFlags(ctx context.Context, arg ListPendingFileLockWaitersByInoAndFlagsParams) ([]FileLockWaiter, error)
+	LockValidSliceRefsKeyShare(ctx context.Context, sliceIds []int64) ([]int64, error)
 	NextSliceID(ctx context.Context) (int64, error)
 	TouchInodeAtime(ctx context.Context, ino int64) error
 	TouchInodeCtime(ctx context.Context, ino int64) error

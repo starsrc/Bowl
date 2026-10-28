@@ -18,16 +18,21 @@ FROM chunks
 WHERE ino = @ino::bigint AND indx >= @start_indx::integer AND indx <= @end_indx::integer
 ORDER BY indx ASC;
 
--- name: AppendChunkSlice :exec
+-- name: AppendChunkSlice :one
 INSERT INTO chunks (ino, indx, slices)
 VALUES (@ino::bigint, @indx::integer, @slices::bytea)
 ON CONFLICT (ino, indx)
-DO UPDATE SET slices = chunks.slices || EXCLUDED.slices;
+DO UPDATE SET slices = chunks.slices || EXCLUDED.slices
+RETURNING octet_length(slices)::bigint;
 
--- name: AppendExistingChunkSlice :execrows
-UPDATE chunks
-SET slices = slices || @slices::bytea
-WHERE ino = @ino::bigint AND indx = @indx::integer;
+-- name: AppendExistingChunkSlice :one
+WITH updated AS (
+    UPDATE chunks
+    SET slices = slices || @slices::bytea
+    WHERE ino = @ino::bigint AND indx = @indx::integer
+    RETURNING octet_length(slices)::bigint AS octet_len
+)
+SELECT COALESCE((SELECT octet_len FROM updated), 0)::bigint AS octet_len;
 
 -- name: UpdateChunkSlices :exec
 UPDATE chunks
@@ -95,4 +100,37 @@ SET
 FROM (SELECT clock_timestamp() AS now) AS ts
 WHERE ino = $1
 RETURNING ino, generation, mode, size, nlink, uid, gid, rdev, atime, mtime, ctime, symlink_target, flags, parent_ino, root_ino;
+
+-- name: GetInodeSizeAndChunksInRange :many
+SELECT
+    i.ino,
+    i.generation,
+    i.mode,
+    i.size,
+    i.nlink,
+    i.uid,
+    i.gid,
+    i.rdev,
+    i.atime,
+    i.mtime,
+    i.ctime,
+    i.symlink_target,
+    i.flags,
+    i.parent_ino,
+    i.root_ino,
+    c.indx AS chunk_indx,
+    c.slices AS chunk_slices
+FROM inodes i
+LEFT JOIN chunks c ON c.ino = i.ino AND c.indx >= @start_indx::integer AND c.indx <= @end_indx::integer
+WHERE i.ino = @ino::bigint
+ORDER BY c.indx ASC;
+
+-- name: LockValidSliceRefsKeyShare :many
+SELECT slice_id
+FROM slice_refs
+WHERE slice_id = ANY(@slice_ids::bigint[])
+  AND refs > 0
+ORDER BY slice_id ASC
+FOR KEY SHARE;
+
 

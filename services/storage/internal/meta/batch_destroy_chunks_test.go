@@ -5,13 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -243,38 +241,11 @@ func TestDeleteDisk_DeleteChunksError(t *testing.T) {
 
 // TestBatchDestroyChunks_PostgresIntegration 在真实 PostgreSQL 环境下端到端验证批量销毁 chunks 与 slice_refs
 func TestBatchDestroyChunks_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil || pool.Ping(ctx) != nil {
-		if os.Getenv("STORAGE_DB_DSN") == "" {
-			if pool != nil {
-				pool.Close()
-			}
-			dsn = "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
-			pool, err = pgxpool.New(ctx, dsn)
-			if err != nil || pool.Ping(ctx) != nil {
-				if pool != nil {
-					pool.Close()
-				}
-				t.Skipf("跳过 PostgreSQL 测试 (连接初始化/Ping 均失败)")
-				return
-			}
-		} else {
-			if pool != nil {
-				pool.Close()
-			}
-			t.Skipf("跳过 PostgreSQL 测试 (连接初始化失败): %v", err)
-			return
-		}
-	}
-	defer pool.Close()
+	acquireTestSliceGCAdvisoryLock(t, pool)
 
 	store := db.NewStore(pool)
 	dataDir := t.TempDir()
@@ -331,6 +302,9 @@ func TestBatchDestroyChunks_PostgresIntegration(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, slicesList)
 		sliceID := slicesList[0].ID
+		defer func() {
+			_ = store.DeleteSliceRef(context.Background(), int64(sliceID))
+		}()
 
 		refRow, err := store.GetSliceRef(ctx, int64(sliceID))
 		require.NoError(t, err)
@@ -459,6 +433,10 @@ func TestBatchDestroyChunks_PostgresIntegration(t *testing.T) {
 		slices2, err := meta.DecodeSlices(chunk2.Slices)
 		require.NoError(t, err)
 		sliceID2 := slices2[0].ID
+		defer func() {
+			_ = store.DeleteSliceRef(context.Background(), int64(sliceID1))
+			_ = store.DeleteSliceRef(context.Background(), int64(sliceID2))
+		}()
 
 		// 分别 Unlink 两文件（此时因为持有 sessExpired 句柄，成为 Orphan Inode）
 		err = mgr.Unlink(ctx, disk.RootIno, []byte("orphan1.txt"))
@@ -618,6 +596,12 @@ func TestBatchDestroyChunks_PostgresIntegration(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, slicesB, 1)
 		diskBSliceID := slicesB[0].ID
+		defer func() {
+			for _, id := range diskASliceIDs {
+				_ = store.DeleteSliceRef(context.Background(), int64(id))
+			}
+			_ = store.DeleteSliceRef(context.Background(), int64(diskBSliceID))
+		}()
 
 		// 执行 DeleteDisk 销毁 diskA
 		err = mgr.DeleteDisk(ctx, diskA.DiskID)

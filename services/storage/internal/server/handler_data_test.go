@@ -213,6 +213,42 @@ func TestServer_Read(t *testing.T) {
 		assert.Equal(t, testData, resp.Msg.Data)
 	})
 
+	t.Run("读取成功透传显式 SessionID", func(t *testing.T) {
+		mockMgr, client, cleanup := setupDataTestServer(t)
+		defer cleanup()
+
+		testIno := uint64(104)
+		testFh := uint64(204)
+		testOffset := uint64(128)
+		testSize := uint32(64)
+		testData := []byte("session read payload")
+		expectedSessionID := uint64(9988)
+
+		mockMgr.EXPECT().Read(mock.Anything, mock.MatchedBy(func(req *meta.ReadRequest) bool {
+			return req != nil &&
+				req.Ino == testIno &&
+				req.Fh == testFh &&
+				req.Offset == testOffset &&
+				req.Size == testSize &&
+				req.SessionID != nil &&
+				*req.SessionID == expectedSessionID
+		})).Return(&meta.ReadResponse{
+			Data: testData,
+		}, nil).Once()
+
+		resp, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+			Ino:       testIno,
+			Fh:        testFh,
+			Offset:    testOffset,
+			Size:      testSize,
+			SessionId: proto.Uint64(expectedSessionID),
+		}))
+
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, testData, resp.Msg.Data)
+	})
+
 	t.Run("读取失败返回对应 Connect 状态码与 POSIX ErrorInfo 契约", func(t *testing.T) {
 		mockMgr, client, cleanup := setupDataTestServer(t)
 		defer cleanup()
@@ -230,5 +266,17 @@ func TestServer_Read(t *testing.T) {
 		var connErr *connect.Error
 		require.ErrorAs(t, err, &connErr)
 		assert.Equal(t, connect.CodeFailedPrecondition, connErr.Code())
+
+		var hasErrorInfo bool
+		for _, detail := range connErr.Details() {
+			val, err := detail.Value()
+			require.NoError(t, err)
+			if errInfo, ok := val.(*errdetails.ErrorInfo); ok {
+				hasErrorInfo = true
+				assert.Equal(t, "bowl.storage", errInfo.Domain)
+				assert.Equal(t, "EBADF", errInfo.Reason)
+			}
+		}
+		assert.True(t, hasErrorInfo, "应携带 reason=EBADF 的 google.rpc.ErrorInfo 详情")
 	})
 }

@@ -41,9 +41,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usageHelp)
 		return 0
 	case "mount":
-		// mount 子命令由后续工单 (STARSRC-509/510) 接入
-		fmt.Fprintln(stderr, "错误: mount 子命令尚未就绪")
-		return 1
+		return executeMount(args[1:], stdout, stderr)
 	case "umount", "unmount":
 		// umount 子命令由后续工单 (STARSRC-510) 接入
 		fmt.Fprintln(stderr, "错误: umount 子命令尚未就绪")

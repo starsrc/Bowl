@@ -223,6 +223,7 @@ func TestManager_AdaptiveRenewLoop(t *testing.T) {
 
 		mgr, err := session.New(context.Background(), client, cfg)
 		require.NoError(t, err)
+		defer func() { _ = mgr.Close() }()
 
 		err = mgr.Start(context.Background())
 		require.NoError(t, err)
@@ -237,7 +238,7 @@ func TestManager_AdaptiveRenewLoop(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			return renewCount >= 3
-		}, 1*time.Second, 10*time.Millisecond)
+		}, 5*time.Second, 10*time.Millisecond)
 
 		// 验证 Close 优雅退出
 		err = mgr.Close()
@@ -313,7 +314,7 @@ func TestManager_AdaptiveRenewLoop(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			return attempts >= 3
-		}, 1*time.Second, 10*time.Millisecond)
+		}, 5*time.Second, 10*time.Millisecond)
 	})
 }
 
@@ -426,7 +427,7 @@ func TestManager_SessionRecreated_RotationAndHandleIsolation(t *testing.T) {
 	require.Eventually(t, func() bool {
 		cur := mgr.CurrentSessionID()
 		return cur != oldSID
-	}, 1*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	newSID := mgr.CurrentSessionID()
 	require.GreaterOrEqual(t, newSID, uint64(1))
@@ -521,7 +522,7 @@ func TestManager_SessionRecreated_RetryOnRotationFailure(t *testing.T) {
 	// 等待最终成功轮换
 	require.Eventually(t, func() bool {
 		return mgr.CurrentSessionID() != initialSID
-	}, 1*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()

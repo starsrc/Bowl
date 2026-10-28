@@ -120,6 +120,14 @@ tasks:
         {{.CLIENT_TEST_IMAGE}}:{{.TAG}}
         sh -c 'test -z "$(gofmt -s -l .)" && go vet ./... && CGO_ENABLED=0 GOOS=linux go build -o /tmp/bowl ./cmd/bowl && /tmp/bowl version && go test -v -count=1 ./... {{.CLI_ARGS}}'
 
+  test:client:e2e:
+    desc: "Run Linux FUSE client black-box E2E tests inside privileged test container"
+    deps: [init, vendor:storage, build:client:test]
+    cmds:
+      - defer: sh -c 'if [ "${KEEP_E2E_ENV:-0}" != "1" ]; then docker compose -p bowl -f {{.COMPOSE_FILE}} down --remove-orphans; fi'
+      - docker compose -p bowl -f {{.COMPOSE_FILE}} up -d --build --wait storage-service
+      - docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined --network bowl_bowl-net -v bowl-go-mod-cache:/go/pkg/mod -v bowl-go-build-cache:/root/.cache/go-build -v "{{.ROOT_DIR | default .TASKFILE_DIR}}":/workspace -w /workspace/client -e GOWORK=off -e BOWL_STORAGE_ENDPOINT=http://storage-service:9000 {{.CLIENT_TEST_IMAGE}}:{{.TAG}} sh -c 'CGO_ENABLED=0 GOOS=linux go build -o /tmp/bowl ./cmd/bowl && BOWL_BIN=/tmp/bowl go test -tags=e2e -v -count=1 ./e2e/... {{.CLI_ARGS}}'
+
   test:storage:
     desc: "Run tests for storage service"
     dir: services/storage
@@ -162,6 +170,7 @@ tasks:
       - go vet ./...
       - go -C services/storage vet ./...
       - GOOS=linux CGO_ENABLED=0 go -C client vet ./...
+      - GOOS=linux CGO_ENABLED=0 go -C client vet -tags=e2e ./e2e/...
       - go vet -tags=e2e ./e2e/...
 
   goose:storage:up:

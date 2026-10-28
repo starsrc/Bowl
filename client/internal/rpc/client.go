@@ -41,6 +41,9 @@ type ClientConfig struct {
 
 	// TLSConfig 为可选的自定义 TLS 配置（例如自签名证书信任）。
 	TLSConfig *tls.Config
+
+	// RetryConfig 为可选的重试策略配置。若为 nil 则默认使用 5s 有界指数退避策略。
+	RetryConfig *RetryConfig
 }
 
 // ResolveEndpoint 按照显式参数 -> BOWL_STORAGE_ENDPOINT -> 默认 http://127.0.0.1:9000 的回退链解析 endpoint，
@@ -123,7 +126,18 @@ func NewClientFromConfig(cfg ClientConfig, opts ...connect.ClientOption) (storag
 		}
 	}
 
-	var clientOpts []connect.ClientOption
+	var interceptors []connect.Interceptor
+
+	// 1. 默认装配重试拦截器（位于最外层，包裹鉴权与底层网络传输）
+	retryCfg := RetryConfig{}
+	if cfg.RetryConfig != nil {
+		retryCfg = *cfg.RetryConfig
+	}
+	if !retryCfg.Disable {
+		interceptors = append(interceptors, NewRetryInterceptor(retryCfg))
+	}
+
+	// 2. 装配 Bearer 令牌鉴权拦截器
 	if token != "" {
 		authInterceptor := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 			return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -131,7 +145,12 @@ func NewClientFromConfig(cfg ClientConfig, opts ...connect.ClientOption) (storag
 				return next(ctx, req)
 			}
 		})
-		clientOpts = append(clientOpts, connect.WithInterceptors(authInterceptor))
+		interceptors = append(interceptors, authInterceptor)
+	}
+
+	var clientOpts []connect.ClientOption
+	if len(interceptors) > 0 {
+		clientOpts = append(clientOpts, connect.WithInterceptors(interceptors...))
 	}
 
 	if len(opts) > 0 {

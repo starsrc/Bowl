@@ -213,6 +213,17 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// 挂载前重复挂载校验：解析 /proc/self/mountinfo，若目标 <mountpoint> 已是活跃挂载点，在前台立即报错
+	mounted, err := IsMountPoint(absMountpoint)
+	if err != nil {
+		fmt.Fprintf(stderr, "错误: 检查挂载点状态失败: %v\n", err)
+		return 1
+	}
+	if mounted {
+		fmt.Fprintf(stderr, "错误: 目标挂载点 \"%s\" 当前已挂载\n", absMountpoint)
+		return 1
+	}
+
 	// 3. 解析 endpoint 与 token
 	resolvedEndpoint, err := rpc.ResolveEndpoint(endpoint)
 	if err != nil {
@@ -253,13 +264,6 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 5. 模式选择：当前聚焦 -f / --foreground 前台挂载
-	if !foreground {
-		_ = logFile
-		fmt.Fprintln(stderr, "错误: 后台守护模式将在后续工单补齐，请使用 -f 或 --foreground 前台模式运行")
-		return 1
-	}
-
 	cfg := fusefs.Config{
 		DiskID:     diskIDStr,
 		RootIno:    disk.GetRootIno(),
@@ -267,6 +271,16 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		DirectIO:   directIO,
 		AllowOther: allowOther,
 		Debug:      debug,
+	}
+
+	// 5. 模式选择：检测是否为内部后台工作子进程
+	if os.Getenv("BOWL_DAEMON_WORKER") == "1" {
+		return runDaemonWorker(context.Background(), client, cfg, absMountpoint, logFile)
+	}
+
+	// 若未指定 -f / --foreground，执行默认后台守护派生与就绪握手
+	if !foreground {
+		return spawnDaemonProcess(args, stderr)
 	}
 
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())

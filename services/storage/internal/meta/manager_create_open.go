@@ -38,6 +38,9 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 		rdev = params.Rdev
 	}
 
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
+
 	var result *Inode
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		parent, err := q.GetInodeForUpdate(ctx, int64(params.ParentIno))
@@ -107,6 +110,8 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 		}
 
 		result = m.newInode(newInode)
+		mutationTracker.track(params.ParentIno)
+		m.onDirEntryMutated(params.ParentIno)
 		return nil
 	})
 
@@ -123,6 +128,7 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 		}
 	}
 
+	m.onDirEntryMutated(params.ParentIno)
 	return result, nil
 }
 
@@ -142,6 +148,9 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 	if modeType != 0 && modeType != S_IFDIR {
 		return nil, ErrInvalidArgument
 	}
+
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
 
 	var result *Inode
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
@@ -217,6 +226,8 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 		}
 
 		result = m.newInode(newInode)
+		mutationTracker.track(params.ParentIno)
+		m.onDirEntryMutated(params.ParentIno)
 		return nil
 	})
 
@@ -235,6 +246,7 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 		}
 	}
 
+	m.onDirEntryMutated(params.ParentIno)
 	return result, nil
 }
 
@@ -252,6 +264,9 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 	if len(params.Target) > MaxSymlinkTargetBytes {
 		return nil, ErrNameTooLong
 	}
+
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
 
 	var result *Inode
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
@@ -322,6 +337,8 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 		}
 
 		result = m.newInode(newInode)
+		mutationTracker.track(params.ParentIno)
+		m.onDirEntryMutated(params.ParentIno)
 		return nil
 	})
 
@@ -338,6 +355,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 		}
 	}
 
+	m.onDirEntryMutated(params.ParentIno)
 	return result, nil
 }
 
@@ -366,6 +384,9 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 	}
 
 	targetMode := S_IFREG | ((params.Mode & PermMask) &^ (params.Umask & PermMask))
+
+	mutationTracker := m.newDirMutationTracker()
+	defer mutationTracker.done()
 
 	var result *CreateResult
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
@@ -406,6 +427,10 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return fmt.Errorf("create inode: %w", err)
 		}
 
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
+
 		if parent.RootIno > 0 {
 			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
 				RootIno:     parent.RootIno,
@@ -433,10 +458,6 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return fmt.Errorf("touch parent inode %d timestamps: %w", parent.Ino, err)
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
-		}
-
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
 			Ino:       newInode.Ino,
 			Flags:     int32(params.Flags),
@@ -458,6 +479,8 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
 			AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
 		}
+		mutationTracker.track(params.ParentIno)
+		m.onDirEntryMutated(params.ParentIno)
 		return nil
 	})
 
@@ -474,6 +497,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 		}
 	}
 
+	m.onDirEntryMutated(params.ParentIno)
 	return result, nil
 }
 
@@ -519,13 +543,13 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			return ErrNotFound
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
-		}
-
 		gid := params.GID
 		if (uint32(parent.Mode) & S_ISGID) != 0 {
 			gid = uint32(parent.Gid)
+		}
+
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
 		}
 
 		newInode, err := q.CreateInode(ctx, db.CreateInodeParams{
@@ -629,6 +653,10 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 			}
 		}
 
+		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
+			return err
+		}
+
 		if (params.Flags & O_TRUNC) != 0 {
 			if (params.Flags & O_ACCMODE) == O_RDONLY {
 				return ErrInvalidArgument
@@ -665,10 +693,6 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 					}
 				}
 			}
-		}
-
-		if err := m.renewOptionalClientSession(ctx, q, params.SessionID); err != nil {
-			return err
 		}
 
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{

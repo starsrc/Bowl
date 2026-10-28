@@ -142,8 +142,8 @@ func (q *Queries) CreateEntry(ctx context.Context, arg CreateEntryParams) error 
 }
 
 const createFileHandle = `-- name: CreateFileHandle :one
-INSERT INTO file_handles (ino, flags, session_id)
-VALUES ($1, $2, $3)
+INSERT INTO file_handles (ino, flags, session_id, created_at)
+VALUES ($1, $2, $3, clock_timestamp())
 RETURNING fh, ino, flags, created_at, session_id
 `
 
@@ -455,20 +455,30 @@ func (q *Queries) DeleteExpiredClientSessions(ctx context.Context) (int64, error
 }
 
 const deleteFileHandle = `-- name: DeleteFileHandle :one
-DELETE FROM file_handles fh
-WHERE fh.fh = $1
-  AND fh.ino = $2
-  AND fh.session_id IS NOT DISTINCT FROM $3
-  AND (
-      fh.session_id IS NULL
-      OR EXISTS (
-          SELECT 1
-          FROM client_sessions s
-          WHERE s.session_id = fh.session_id
-            AND s.expires_at > clock_timestamp()
+WITH deleted_handle AS (
+    DELETE FROM file_handles fh
+    WHERE fh.fh = $1
+      AND fh.ino = $2
+      AND fh.session_id IS NOT DISTINCT FROM $3
+      AND (
+          fh.session_id IS NULL
+          OR EXISTS (
+              SELECT 1
+              FROM client_sessions s
+              WHERE s.session_id = fh.session_id
+                AND s.expires_at > clock_timestamp()
+          )
       )
-  )
-RETURNING fh.fh
+    RETURNING fh.fh, fh.ino, fh.session_id
+),
+deleted_waiters AS (
+    DELETE FROM file_lock_waiters w
+    USING deleted_handle dh
+    WHERE w.ino = dh.ino
+      AND w.fh = dh.fh
+      AND (dh.session_id IS NULL OR w.session_id = dh.session_id)
+)
+SELECT fh FROM deleted_handle
 `
 
 type DeleteFileHandleParams struct {
@@ -510,48 +520,6 @@ WHERE id = ANY($1::bigint[])
 func (q *Queries) DeleteFileLocksByIDs(ctx context.Context, ids []int64) error {
 	_, err := q.db.Exec(ctx, deleteFileLocksByIDs, ids)
 	return err
-}
-
-const deleteFlockFileLockWaitersByFh = `-- name: DeleteFlockFileLockWaitersByFh :execrows
-DELETE FROM file_lock_waiters
-WHERE ino = $1
-  AND fh = $2
-  AND lk_flags = 1
-`
-
-type DeleteFlockFileLockWaitersByFhParams struct {
-	Ino int64 `json:"ino"`
-	Fh  int64 `json:"fh"`
-}
-
-func (q *Queries) DeleteFlockFileLockWaitersByFh(ctx context.Context, arg DeleteFlockFileLockWaitersByFhParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteFlockFileLockWaitersByFh, arg.Ino, arg.Fh)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const deleteFlockFileLockWaitersBySessionAndFh = `-- name: DeleteFlockFileLockWaitersBySessionAndFh :execrows
-DELETE FROM file_lock_waiters
-WHERE session_id = $1
-  AND ino = $2
-  AND fh = $3
-  AND lk_flags = 1
-`
-
-type DeleteFlockFileLockWaitersBySessionAndFhParams struct {
-	SessionID int64 `json:"session_id"`
-	Ino       int64 `json:"ino"`
-	Fh        int64 `json:"fh"`
-}
-
-func (q *Queries) DeleteFlockFileLockWaitersBySessionAndFh(ctx context.Context, arg DeleteFlockFileLockWaitersBySessionAndFhParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteFlockFileLockWaitersBySessionAndFh, arg.SessionID, arg.Ino, arg.Fh)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }
 
 const deleteFlockFileLocksByFh = `-- name: DeleteFlockFileLocksByFh :execrows
@@ -626,7 +594,13 @@ func (q *Queries) DeleteInodeXattr(ctx context.Context, arg DeleteInodeXattrPara
 
 const deleteInodesByRootIno = `-- name: DeleteInodesByRootIno :many
 DELETE FROM inodes
-WHERE root_ino = $1
+WHERE ino IN (
+    SELECT i.ino
+    FROM inodes i
+    WHERE i.root_ino = $1
+    ORDER BY i.ino ASC
+    FOR UPDATE
+)
 RETURNING ino
 `
 
@@ -650,85 +624,31 @@ func (q *Queries) DeleteInodesByRootIno(ctx context.Context, rootIno int64) ([]i
 	return items, nil
 }
 
-const deleteOverlappingPosixFileLockWaiters = `-- name: DeleteOverlappingPosixFileLockWaiters :execrows
-DELETE FROM file_lock_waiters
-WHERE session_id = $1
-  AND ino = $2
-  AND lock_owner = $3
-  AND lk_flags = 0
-  AND start_offset <= $4
-  AND end_offset >= $5
-`
-
-type DeleteOverlappingPosixFileLockWaitersParams struct {
-	SessionID   int64 `json:"session_id"`
-	Ino         int64 `json:"ino"`
-	LockOwner   int64 `json:"lock_owner"`
-	EndOffset   int64 `json:"end_offset"`
-	StartOffset int64 `json:"start_offset"`
-}
-
-func (q *Queries) DeleteOverlappingPosixFileLockWaiters(ctx context.Context, arg DeleteOverlappingPosixFileLockWaitersParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteOverlappingPosixFileLockWaiters,
-		arg.SessionID,
-		arg.Ino,
-		arg.LockOwner,
-		arg.EndOffset,
-		arg.StartOffset,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const deletePosixFileLockWaitersByOwner = `-- name: DeletePosixFileLockWaitersByOwner :execrows
-DELETE FROM file_lock_waiters
-WHERE ino = $1
-  AND lock_owner = $2
-  AND lk_flags = 0
-`
-
-type DeletePosixFileLockWaitersByOwnerParams struct {
-	Ino       int64 `json:"ino"`
-	LockOwner int64 `json:"lock_owner"`
-}
-
-func (q *Queries) DeletePosixFileLockWaitersByOwner(ctx context.Context, arg DeletePosixFileLockWaitersByOwnerParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePosixFileLockWaitersByOwner, arg.Ino, arg.LockOwner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const deletePosixFileLockWaitersBySessionAndOwner = `-- name: DeletePosixFileLockWaitersBySessionAndOwner :execrows
-DELETE FROM file_lock_waiters
-WHERE session_id = $1
-  AND ino = $2
-  AND lock_owner = $3
-  AND lk_flags = 0
-`
-
-type DeletePosixFileLockWaitersBySessionAndOwnerParams struct {
-	SessionID int64 `json:"session_id"`
-	Ino       int64 `json:"ino"`
-	LockOwner int64 `json:"lock_owner"`
-}
-
-func (q *Queries) DeletePosixFileLockWaitersBySessionAndOwner(ctx context.Context, arg DeletePosixFileLockWaitersBySessionAndOwnerParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePosixFileLockWaitersBySessionAndOwner, arg.SessionID, arg.Ino, arg.LockOwner)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const deletePosixFileLocksByOwner = `-- name: DeletePosixFileLocksByOwner :execrows
-DELETE FROM file_locks
-WHERE ino = $1
-  AND lock_owner = $2
-  AND lk_flags = 0
+WITH deleted_waiters AS (
+    DELETE FROM file_lock_waiters w
+    WHERE w.ino = $1
+      AND w.lock_owner = $2
+      AND w.lk_flags = 0
+      AND EXISTS (
+          SELECT 1
+          FROM file_handles fh
+          WHERE fh.fh = w.fh
+            AND fh.ino = w.ino
+            AND fh.session_id IS NULL
+      )
+)
+DELETE FROM file_locks fl
+WHERE fl.ino = $1
+  AND fl.lock_owner = $2
+  AND fl.lk_flags = 0
+  AND EXISTS (
+      SELECT 1
+      FROM file_handles fh
+      WHERE fh.fh = fl.fh
+        AND fh.ino = fl.ino
+        AND fh.session_id IS NULL
+  )
 `
 
 type DeletePosixFileLocksByOwnerParams struct {
@@ -745,11 +665,18 @@ func (q *Queries) DeletePosixFileLocksByOwner(ctx context.Context, arg DeletePos
 }
 
 const deletePosixFileLocksBySessionAndOwner = `-- name: DeletePosixFileLocksBySessionAndOwner :execrows
-DELETE FROM file_locks
-WHERE session_id = $1
-  AND ino = $2
-  AND lock_owner = $3
-  AND lk_flags = 0
+WITH deleted_waiters AS (
+    DELETE FROM file_lock_waiters w
+    WHERE w.session_id = $1
+      AND w.ino = $2
+      AND w.lock_owner = $3
+      AND w.lk_flags = 0
+)
+DELETE FROM file_locks fl
+WHERE fl.session_id = $1
+  AND fl.ino = $2
+  AND fl.lock_owner = $3
+  AND fl.lk_flags = 0
 `
 
 type DeletePosixFileLocksBySessionAndOwnerParams struct {
@@ -775,9 +702,7 @@ WHERE ino IN (
       AND NOT EXISTS (
           SELECT 1
           FROM file_handles fh
-          LEFT JOIN client_sessions s ON fh.session_id = s.session_id
           WHERE fh.ino = i.ino
-            AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
       )
     FOR UPDATE SKIP LOCKED
 )
@@ -884,10 +809,23 @@ func (q *Queries) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) 
 }
 
 const getDiskForUpdate = `-- name: GetDiskForUpdate :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE disk_id = $1
-FOR UPDATE
+WITH target_disk AS MATERIALIZED (
+    SELECT root_ino
+    FROM disks
+    WHERE disk_id = $1
+),
+locked_inodes AS MATERIALIZED (
+    SELECT ino
+    FROM inodes
+    WHERE root_ino = (SELECT root_ino FROM target_disk)
+    ORDER BY ino ASC
+    FOR UPDATE
+)
+SELECT d.disk_id, d.name, d.root_ino, d.max_bytes, d.used_bytes, d.used_inodes, d.created_at, d.updated_at
+FROM (SELECT COUNT(*) FROM locked_inodes) li
+CROSS JOIN disks d
+WHERE d.disk_id = $1
+FOR UPDATE OF d
 `
 
 func (q *Queries) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Disk, error) {
@@ -1246,20 +1184,25 @@ func (q *Queries) HasChildEntries(ctx context.Context, parentIno int64) (bool, e
 }
 
 const hasFileHandlesByIno = `-- name: HasFileHandlesByIno :one
-SELECT EXISTS (
+SELECT ((EXISTS (
     SELECT 1
     FROM file_handles fh
     LEFT JOIN client_sessions s ON fh.session_id = s.session_id
     WHERE fh.ino = $1
       AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
-)
+)) OR (EXISTS (
+    SELECT 1
+    FROM inodes i
+    WHERE i.ino = $1
+      AND i.nlink > 0
+)))::boolean
 `
 
 func (q *Queries) HasFileHandlesByIno(ctx context.Context, ino int64) (bool, error) {
 	row := q.db.QueryRow(ctx, hasFileHandlesByIno, ino)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const hasLinkableTmpFileHandleByIno = `-- name: HasLinkableTmpFileHandleByIno :one
@@ -1343,9 +1286,18 @@ WITH RECURSIVE ancestors AS (
     FROM entries e
     JOIN ancestors a ON e.ino = a.parent_ino
     WHERE NOT a.has_cycle
+),
+locked_ancestors AS MATERIALIZED (
+    SELECT i.ino, i.parent_ino
+    FROM inodes i
+    WHERE i.ino IN (SELECT parent_ino FROM ancestors)
+    ORDER BY i.ino ASC
+    FOR SHARE NOWAIT
 )
 SELECT COALESCE(($1::bigint = $2::bigint) OR EXISTS (
     SELECT 1 FROM ancestors WHERE parent_ino = $2::bigint OR has_cycle
+) OR EXISTS (
+    SELECT 1 FROM locked_ancestors WHERE ino = $2::bigint OR parent_ino = $2::bigint
 ), false)::boolean AS is_sub
 `
 
@@ -1956,12 +1908,40 @@ func (q *Queries) UpdateInodeParentInoAndTouchCtime(ctx context.Context, arg Upd
 }
 
 const upsertClientSession = `-- name: UpsertClientSession :one
-WITH ts AS (SELECT clock_timestamp() AS now)
+WITH ts AS (
+    SELECT clock_timestamp() AS now
+),
+expired_target AS MATERIALIZED (
+    SELECT s.session_id
+    FROM client_sessions s, ts
+    WHERE s.session_id = $1
+      AND s.expires_at <= ts.now
+    FOR UPDATE OF s
+),
+purged_locks AS (
+    DELETE FROM file_locks
+    WHERE session_id IN (SELECT session_id FROM expired_target)
+),
+purged_waiters AS (
+    DELETE FROM file_lock_waiters
+    WHERE session_id IN (SELECT session_id FROM expired_target)
+),
+purged_handles AS (
+    DELETE FROM file_handles
+    WHERE session_id IN (SELECT session_id FROM expired_target)
+)
 INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
 SELECT $1, $2, ts.now, ts.now FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
-    updated_at = (SELECT now FROM ts)
+    created_at = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
+        ELSE client_sessions.created_at
+    END,
+    updated_at = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
+        ELSE GREATEST((SELECT now FROM ts), client_sessions.created_at + interval '1 microsecond')
+    END
 RETURNING session_id, expires_at, updated_at, created_at
 `
 

@@ -3,16 +3,19 @@ package meta_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -1061,4 +1064,114 @@ func TestOpen_OTrunc(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, dbErr))
 	})
+}
+
+func TestOpen_CreateFileHandlePgErrors(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	ino := uint64(100)
+
+	baseFileRow := db.Inode{
+		Ino:        int64(ino),
+		Generation: 1,
+		Mode:       int32(meta.S_IFREG | 0o644),
+		Size:       1024,
+		Nlink:      1,
+		Uid:        1000,
+		Gid:        1000,
+		Rdev:       0,
+		Atime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Mtime:      pgtype.Timestamptz{Time: now, Valid: true},
+		Ctime:      pgtype.Timestamptz{Time: now, Valid: true},
+	}
+
+	for _, tc := range []struct {
+		name           string
+		createErr      error
+		expectNotFound bool
+	}{
+		{
+			name: "直接返回 23503 外键约束冲突映射为 ErrNotFound",
+			createErr: &pgconn.PgError{
+				Code:    "23503",
+				Message: "insert or update on table \"file_handles\" violates foreign key constraint",
+			},
+			expectNotFound: true,
+		},
+		{
+			name: "包装后的 wrapped 23503 外键冲突同样映射为 ErrNotFound",
+			createErr: fmt.Errorf("wrapped fk error: %w", &pgconn.PgError{
+				Code:    "23503",
+				Message: "foreign key violation",
+			}),
+			expectNotFound: true,
+		},
+		{
+			name: "非 23503 错误 (23505 唯一键冲突) 负面边界对照不得映射为 ErrNotFound",
+			createErr: &pgconn.PgError{
+				Code:    "23505",
+				Message: "duplicate key value violates unique constraint",
+			},
+			expectNotFound: false,
+		},
+		{
+			name: "非 23503 错误 (08006 连接断开) 负面边界对照不得映射为 ErrNotFound",
+			createErr: &pgconn.PgError{
+				Code:    "08006",
+				Message: "connection failure",
+			},
+			expectNotFound: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockStore := dbmock.NewMockStore(t)
+			mockQuerier := dbmock.NewMockQuerier(t)
+			mgr := meta.New(mockStore)
+
+			setupMockWriteTx(mockStore, mockQuerier)
+
+			mockQuerier.EXPECT().
+				GetInodeForUpdate(mock.Anything, int64(ino)).
+				Return(baseFileRow, nil).
+				Once()
+
+			mockQuerier.EXPECT().
+				CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
+					Ino:   int64(ino),
+					Flags: int32(meta.O_RDONLY),
+				}).
+				Return(db.FileHandle{}, tc.createErr).
+				Once()
+
+			res, err := mgr.Open(ctx, meta.OpenParams{
+				Ino:   ino,
+				Flags: meta.O_RDONLY,
+			})
+
+			assert.Nil(t, res)
+			require.Error(t, err)
+
+			if tc.expectNotFound {
+				require.ErrorIs(t, err, meta.ErrNotFound)
+
+				st := meta.ToStatus(err)
+				require.NotNil(t, st)
+				assert.Equal(t, codes.NotFound, st.Code())
+				require.NotEmpty(t, st.Details())
+				info, ok := st.Details()[0].(*errdetails.ErrorInfo)
+				require.True(t, ok)
+				assert.Equal(t, meta.ErrorDomain, info.Domain)
+				assert.Equal(t, "ENOENT", info.Reason)
+			} else {
+				assert.False(t, errors.Is(err, meta.ErrNotFound), "非 23503 错误严禁误映射为 ErrNotFound")
+
+				st := meta.ToStatus(err)
+				require.NotNil(t, st)
+				assert.NotEqual(t, codes.NotFound, st.Code(), "非 23503 错误状态码严禁映射为 NotFound")
+				// 契约锚定：未匹配 24 种领域哨兵的底层未知错误按 status.go 既有契约映射为 Unknown
+				assert.Equal(t, codes.Unknown, st.Code())
+				assert.Empty(t, st.Details(), "底层未映射数据库错误不应携带 ErrorInfo 详情")
+			}
+		})
+	}
 }

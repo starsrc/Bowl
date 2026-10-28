@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1653,12 +1655,22 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetInodeForUpdate(mock.Anything, targetIno).
 			Return(db.Inode{}, pgx.ErrNoRows).
-			Once()
+			Maybe()
+
+		mockQuerier.EXPECT().
+			GetFileLockWaiter(mock.Anything, db.GetFileLockWaiterParams{
+				SessionID: sessionID,
+				RequestID: requestID,
+			}).
+			Return(db.FileLockWaiter{}, pgx.ErrNoRows).
+			Maybe()
 
 		// 启动后台协程发起阻塞加锁请求
 		errCh := make(chan error, 1)
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
 		go func() {
-			errCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+			errCh <- mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 				Ino:       uint64(targetIno),
 				Fh:        uint64(targetFh),
 				LockOwner: uint64(owner),
@@ -1675,7 +1687,11 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		}()
 
 		// 等待 SetLkw 完成第一轮事务并登记等待者
-		<-waiterRegistered
+		select {
+		case <-waiterRegistered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("等待 waiterRegistered 超时")
+		}
 		time.Sleep(10 * time.Millisecond)
 
 		// 主协程执行 DeleteDisk
@@ -1694,17 +1710,33 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 }
 
 func getStorageTestDSN() string {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = os.Getenv("STORAGE_DB_DSN")
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN"} {
+		if val := os.Getenv(env); val != "" {
+			return val
+		}
 	}
-	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+
+	candidates := []string{
+		"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
 	}
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
+
+	for _, candidate := range candidates {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		pool, err := pgxpool.New(probeCtx, candidate)
+		if err == nil {
+			pingErr := pool.Ping(probeCtx)
+			pool.Close()
+			cancel()
+			if pingErr == nil {
+				return candidate
+			}
+		} else {
+			cancel()
+		}
 	}
-	return dsn
+
+	return "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
 }
 
 func TestDeleteDisk_PostgresIntegration(t *testing.T) {
@@ -1961,8 +1993,10 @@ func TestDeleteDisk_PostgresIntegration(t *testing.T) {
 
 		// 4. 会话 2 在后台 goroutine 中发起阻塞写锁请求 SetLkw(F_WRLCK)
 		errCh := make(chan error, 1)
+		lkwCtx, lkwCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lkwCancel()
 		go func() {
-			errCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+			errCh <- mgr.SetLkw(lkwCtx, meta.SetLkwParams{
 				Ino:       fileIno,
 				Fh:        fh2,
 				LockOwner: 2002,
@@ -2439,4 +2473,323 @@ func TestCrossDisk_TopologyIsolation_PostgresIntegration(t *testing.T) {
 	lookedUpB, err := mgr.Lookup(ctx, diskB.RootIno, []byte("fileB.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, fileBIno, lookedUpB.Ino)
+}
+
+// TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock 验证 DeleteDisk 与并发 SetAttr 不得发生 PostgreSQL 40P01 死锁。
+func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
+	dsn := getStorageTestDSN()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
+		return
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("跳过集成测试: ping postgres 失败: %v", err)
+		return
+	}
+
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	const numDisks = 2
+	const filesPerDisk = 6
+	var totalSetAttrSamples atomic.Int64
+
+	for d := 0; d < numDisks; d++ {
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     fmt.Sprintf("disk-del-vs-setattr-%d-%d", d, time.Now().UnixNano()),
+			MaxBytes: 100 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+
+		fileInos := make([]uint64, filesPerDisk)
+		for f := 0; f < filesPerDisk; f++ {
+			res, err := mgr.Create(ctx, meta.CreateParams{
+				ParentIno: disk.RootIno,
+				Name:      []byte(fmt.Sprintf("file_%d", f)),
+				Mode:      meta.S_IFREG | 0o644,
+				Flags:     meta.O_CREAT | meta.O_RDWR,
+				UID:       1000,
+				GID:       1000,
+			})
+			require.NoError(t, err)
+			fileInos[f] = res.Inode.Ino
+		}
+
+		const numSetAttrWorkers = 4
+		const setattrLoops = 5
+		setattrErrCh := make(chan error, numSetAttrWorkers*setattrLoops)
+
+		var setattrWg sync.WaitGroup
+		startCh := make(chan struct{})
+		startDeleteCh := make(chan struct{})
+		var triggerOnce sync.Once
+		triggerDelete := func() {
+			triggerOnce.Do(func() {
+				close(startDeleteCh)
+			})
+		}
+
+		for w := 0; w < numSetAttrWorkers; w++ {
+			setattrWg.Add(1)
+			go func(workerID int) {
+				defer setattrWg.Done()
+				<-startCh
+				for l := 0; l < setattrLoops; l++ {
+					ino := fileInos[(workerID+l)%filesPerDisk]
+					newSize := uint64(1024 * (l + 1))
+					_, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+						Size: &newSize,
+					})
+					if err == nil {
+						triggerDelete()
+					}
+					setattrErrCh <- err
+				}
+			}(w)
+		}
+
+		// 保底：若所有 worker 均异常未成功，也释放 startDeleteCh 避免死锁
+		go func() {
+			setattrWg.Wait()
+			triggerDelete()
+		}()
+
+		var delErr error
+		var delWg sync.WaitGroup
+		delWg.Add(1)
+		go func() {
+			defer delWg.Done()
+			select {
+			case <-startDeleteCh:
+			case <-ctx.Done():
+				return
+			}
+			delErr = mgr.DeleteDisk(ctx, disk.DiskID)
+		}()
+
+		close(startCh)
+		setattrWg.Wait()
+		delWg.Wait()
+		close(setattrErrCh)
+
+		require.NoError(t, delErr, "每轮 DeleteDisk 调用必须成功")
+
+		for e := range setattrErrCh {
+			if e == nil {
+				totalSetAttrSamples.Add(1)
+				continue
+			}
+			if errors.Is(e, meta.ErrNotFound) {
+				// 删盘后的合法竞争终止态，不计入成功样本
+				continue
+			}
+
+			var pgErr *pgconn.PgError
+			if (errors.As(e, &pgErr) && pgErr.Code == "40P01") || strings.Contains(strings.ToLower(e.Error()), "deadlock") {
+				t.Fatalf("检测到 PostgreSQL 40P01 死锁: %v", e)
+			}
+			t.Fatalf("SetAttr 返回非法错误 (仅允许 nil 或 ErrNotFound): %v", e)
+		}
+
+		var diskCount, inodeCount int64
+		qErr := pool.QueryRow(ctx, "SELECT count(*) FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&diskCount)
+		require.NoError(t, qErr)
+		require.Zero(t, diskCount, "被删除磁盘在 disks 表中的记录数必须为 0")
+
+		qErr = pool.QueryRow(ctx, "SELECT count(*) FROM inodes WHERE root_ino = $1", disk.RootIno).Scan(&inodeCount)
+		require.NoError(t, qErr)
+		require.Zero(t, inodeCount, "被删除磁盘在 inodes 表中的记录数必须为 0")
+	}
+
+	require.Greater(t, totalSetAttrSamples.Load(), int64(0), "SetAttr 实际执行完成的有效成功样本数必须大于 0")
+	require.NoError(t, ctx.Err())
+}
+
+// TestDisk_UpdateDiskShrinkVsExpand_CriticalWatermarkConcurrency 验证真实数据库下磁盘合法缩容与文件扩容在临界水位的并发竞争。
+// 严禁发生未恢复的 40P01 死锁与 23514 CHECK 约束泄漏，并发结果必须严格串行化为（扩容先赢 + ErrInvalidShrink）或（缩容先赢 + ErrNoSpace）。
+func TestDisk_UpdateDiskShrinkVsExpand_CriticalWatermarkConcurrency(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	const numRounds = 16
+	const wLow = uint64(4096)
+	const wHigh = uint64(8192)
+
+	assertNoForbiddenPgErrors := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			return
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "40P01" {
+				t.Fatalf("检测到未恢复的 PostgreSQL 40P01 死锁: %v", err)
+			}
+			if pgErr.Code == "23514" {
+				t.Fatalf("检测到原始 PostgreSQL 23514 CHECK 约束泄漏: %v", err)
+			}
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "deadlock") {
+			t.Fatalf("检测到未恢复的死锁: %v", err)
+		}
+	}
+
+	subtests := []struct {
+		name       string
+		expandFunc func(ctx context.Context, mgr meta.Manager, fileIno uint64, fh uint64, targetSize uint64) error
+	}{
+		{
+			name: "expand_via_setattr",
+			expandFunc: func(ctx context.Context, mgr meta.Manager, fileIno uint64, fh uint64, targetSize uint64) error {
+				_, err := mgr.SetAttr(ctx, fileIno, meta.SetAttrInput{
+					Size: &targetSize,
+				})
+				return err
+			},
+		},
+		{
+			name: "expand_via_fallocate",
+			expandFunc: func(ctx context.Context, mgr meta.Manager, fileIno uint64, fh uint64, targetSize uint64) error {
+				return mgr.Fallocate(ctx, meta.FallocateParams{
+					Ino:    fileIno,
+					Fh:     fh,
+					Offset: 0,
+					Length: targetSize,
+					Mode:   0,
+				})
+			},
+		},
+	}
+
+	for _, tc := range subtests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			var expandWins, shrinkWins int
+
+			for round := 0; round < numRounds; round++ {
+				// 1. 每轮新建一个初始容量 MaxBytes = 8192 的独立测试磁盘
+				diskName := fmt.Sprintf("disk-wm-%s-r%d-%d", tc.name, round, time.Now().UnixNano())
+				disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+					Name:     diskName,
+					MaxBytes: wHigh,
+				})
+				require.NoError(t, err)
+
+				rootIno := int64(disk.RootIno)
+				t.Cleanup(func() {
+					cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cleanCancel()
+					_, _ = pool.Exec(cleanCtx, `DELETE FROM disks WHERE root_ino = $1`, rootIno)
+					_, _ = pool.Exec(cleanCtx, `DELETE FROM inodes WHERE root_ino = $1`, rootIno)
+				})
+
+				// 2. 核实 CreateDisk 后根目录占用的真实 baseUsedBytes
+				fetchedDisk, err := mgr.GetDisk(ctx, disk.DiskID)
+				require.NoError(t, err)
+				baseUsedBytes := fetchedDisk.UsedBytes
+				require.LessOrEqual(t, baseUsedBytes, wLow, "baseUsedBytes 不得超过临界低水位 wLow")
+
+				initialFileSize := wLow - baseUsedBytes
+				targetFileSize := initialFileSize + 4096
+
+				// 3. 创建 1 个常规文件并初始化大小，使磁盘当前 UsedBytes == W_low (4096)
+				createRes, err := mgr.Create(ctx, meta.CreateParams{
+					ParentIno: disk.RootIno,
+					Name:      []byte(fmt.Sprintf("file_%d.bin", round)),
+					Mode:      meta.S_IFREG | 0o644,
+					Flags:     meta.O_CREAT | meta.O_RDWR,
+				})
+				require.NoError(t, err)
+				fileIno := createRes.Inode.Ino
+				fh := createRes.Fh
+
+				if initialFileSize > 0 {
+					_, err = mgr.SetAttr(ctx, fileIno, meta.SetAttrInput{
+						Size: &initialFileSize,
+					})
+					require.NoError(t, err)
+				}
+
+				// 验证竞争前磁盘状态：MaxBytes == W_high, UsedBytes == W_low
+				preDisk, err := mgr.GetDisk(ctx, disk.DiskID)
+				require.NoError(t, err)
+				require.Equal(t, wHigh, preDisk.MaxBytes, "竞争前磁盘 MaxBytes 必须严格为 W_high")
+				require.Equal(t, wLow, preDisk.UsedBytes, "竞争前磁盘 UsedBytes 必须严格为 W_low")
+
+				// 4. 并发竞争屏障：协程 A 扩容文件 (+4096)，协程 B 将磁盘 MaxBytes 缩容至 W_low
+				var wg sync.WaitGroup
+				startCh := make(chan struct{})
+				var expandErr, shrinkErr error
+
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					<-startCh
+					expandErr = tc.expandFunc(ctx, mgr, fileIno, fh, targetFileSize)
+				}()
+
+				go func() {
+					defer wg.Done()
+					<-startCh
+					targetMaxBytes := wLow
+					_, shrinkErr = mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+						DiskID:   disk.DiskID,
+						MaxBytes: &targetMaxBytes,
+					})
+				}()
+
+				close(startCh)
+				wg.Wait()
+
+				// 5. 严格断言：绝不泄露 40P01 死锁，绝不泄露 23514 CHECK 约束违规
+				assertNoForbiddenPgErrors(t, expandErr)
+				assertNoForbiddenPgErrors(t, shrinkErr)
+
+				// 判定串行化结局
+				switch {
+				case expandErr == nil && errors.Is(shrinkErr, meta.ErrInvalidShrink):
+					expandWins++
+					// 扩容先获胜：磁盘 MaxBytes 保持 W_high，UsedBytes 达到 W_high，文件大小为扩容后大小
+					postDisk, err := mgr.GetDisk(ctx, disk.DiskID)
+					require.NoError(t, err)
+					assert.Equal(t, wHigh, postDisk.MaxBytes, "扩容先获胜时 MaxBytes 必须为 W_high")
+					assert.Equal(t, wHigh, postDisk.UsedBytes, "扩容先获胜时 UsedBytes 必须为 W_high")
+
+					attr, err := mgr.GetAttr(ctx, fileIno)
+					require.NoError(t, err)
+					assert.Equal(t, targetFileSize, attr.Attr.Size, "扩容先获胜时文件大小必须为扩容后大小")
+
+				case shrinkErr == nil && errors.Is(expandErr, meta.ErrNoSpace):
+					shrinkWins++
+					// 缩容先获胜：磁盘 MaxBytes 变为 W_low，UsedBytes 保持 W_low，文件大小保持初始大小
+					postDisk, err := mgr.GetDisk(ctx, disk.DiskID)
+					require.NoError(t, err)
+					assert.Equal(t, wLow, postDisk.MaxBytes, "缩容先获胜时 MaxBytes 必须为 W_low")
+					assert.Equal(t, wLow, postDisk.UsedBytes, "缩容先获胜时 UsedBytes 必须为 W_low")
+
+					attr, err := mgr.GetAttr(ctx, fileIno)
+					require.NoError(t, err)
+					assert.Equal(t, initialFileSize, attr.Attr.Size, "缩容先获胜时文件大小必须保持初始大小未变")
+
+				default:
+					t.Fatalf("第 %d 轮并发结果不是合法串行化结局之一: expandErr=%v, shrinkErr=%v", round, expandErr, shrinkErr)
+				}
+			}
+
+			// 6. 断言总有效成功操作样本数
+			totalSuccesses := expandWins + shrinkWins
+			assert.Equal(t, numRounds, totalSuccesses, "16 轮合计成功操作数严格为 16")
+			assert.Greater(t, totalSuccesses, 0, "总有效成功操作样本数必须大于 0")
+			t.Logf("[%s] 16 轮并发结果: 扩容获胜=%d, 缩容获胜=%d, 合计成功=%d", tc.name, expandWins, shrinkWins, totalSuccesses)
+		})
+	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"testing"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 
 // setupRenewClientSessionMocks 设置通用的会话续期 Mock 期望序列（包含 DeleteExpiredClientSessions、UpsertClientSession、DeleteUnreferencedOrphanInodes）。
 func setupRenewClientSessionMocks(mockQuerier *dbmock.MockQuerier, sessionID uint64) {
+	now := time.Now()
 	mockQuerier.EXPECT().
 		DeleteExpiredClientSessions(mock.Anything).
 		Return(int64(0), nil).
@@ -32,7 +32,12 @@ func setupRenewClientSessionMocks(mockQuerier *dbmock.MockQuerier, sessionID uin
 		UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
 			return arg.SessionID == int64(sessionID)
 		})).
-		Return(db.ClientSession{SessionID: int64(sessionID)}, nil).
+		Return(db.ClientSession{
+			SessionID: int64(sessionID),
+			ExpiresAt: pgtype.Timestamptz{Time: now.Add(time.Minute), Valid: true},
+			CreatedAt: pgtype.Timestamptz{Time: now, Valid: true},
+			UpdatedAt: pgtype.Timestamptz{Time: now.Add(time.Second), Valid: true},
+		}, nil).
 		Once()
 
 	mockQuerier.EXPECT().
@@ -487,10 +492,10 @@ func TestRelease_PositivePath(t *testing.T) {
 			Return(orphanInode, nil).
 			Once()
 
-		// 1. 先续期会话 (renewOptionalClientSession)
+		// 1. 先续期会话并清理其他孤儿节点
 		setupRenewClientSessionMocks(mockQuerier, sessionID)
 
-		// 2. 再删除句柄 (DeleteFileHandle)
+		// 2. 删除句柄 (DeleteFileHandle)
 		mockQuerier.EXPECT().
 			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
 				Fh:        int64(fh),
@@ -500,7 +505,7 @@ func TestRelease_PositivePath(t *testing.T) {
 			Return(int64(fh), nil).
 			Once()
 
-		// 3. 最终无句柄后回收孤儿节点 (reclaimOrphanIfNoHandles)
+		// 4. 最终无句柄后回收孤儿节点 (reclaimOrphanIfNoHandles)
 		mockQuerier.EXPECT().
 			HasFileHandlesByIno(mock.Anything, int64(ino)).
 			Return(false, nil).
@@ -852,10 +857,7 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 }
 
 func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
-	dsn := os.Getenv("STORAGE_DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1028,13 +1030,7 @@ func TestRelease_PostgresFlockAndOrphanCleanupSemantics(t *testing.T) {
 }
 
 func TestRelease_QuotaReclaim_PostgresIntegration(t *testing.T) {
-	dsn := os.Getenv("STORAGE_TEST_DSN")
-	if dsn == "" {
-		dsn = os.Getenv("STORAGE_DB_DSN")
-	}
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable"
-	}
+	dsn := getStorageTestDSN()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1331,5 +1327,76 @@ func TestRelease_QuotaReclaim_PostgresIntegration(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint64(2), d.UsedInodes, "孤儿文件释放后应恰好剩余 2 个 inode (根目录与 normal.txt)")
 		assert.Equal(t, uint64(8192), d.UsedBytes, "孤儿文件释放后应恰好剩余 8192 字节 (normal.txt 占用)")
+	})
+
+	t.Run("携带 SessionID 关闭孤儿目录的最后一个句柄：验证 UsedInodes 仅被扣减一次（无双重扣减）", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_releasedir_session_quota_dir_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, disk)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sessID := uint64(770002)
+
+		// 1. 创建常驻子目录 dir1，用于提供配额基底
+		dir1, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dir1"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, dir1)
+
+		// 2. 创建即将被 rmdir 的孤儿目录 dir2
+		dir2, err := mgr.Mkdir(ctx, meta.MkdirParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("dir2"),
+			Mode:      0o755,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, dir2)
+
+		// 3. 打开 dir2 句柄（携带 SessionID）
+		openRes, err := mgr.OpenDir(ctx, meta.OpenDirParams{
+			Ino:       dir2.Ino,
+			Flags:     meta.O_RDONLY,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 当前配额状态：根目录 + dir1 + dir2 = 3 inodes
+		d, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), d.UsedInodes)
+
+		// 4. Rmdir 删除 dir2：因句柄打开，nlink 变 0 成为孤儿，配额保持 3
+		err = mgr.Rmdir(ctx, disk.RootIno, []byte("dir2"))
+		require.NoError(t, err)
+
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3), d.UsedInodes, "有活跃目录句柄时 Rmdir 不得退还 used_inodes")
+
+		// 5. ReleaseDir 关闭 dir2 句柄（携带 SessionID）
+		err = mgr.ReleaseDir(ctx, meta.ReleaseDirParams{
+			Ino:       dir2.Ino,
+			Fh:        openRes.Fh,
+			SessionID: &sessID,
+		})
+		require.NoError(t, err)
+
+		// 6. 校验配额：必须且仅扣减 1 个 inode（剩余 2 个 inodes：根目录与 dir1）
+		d, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), d.UsedInodes, "孤儿目录释放后应恰好剩余 2 个 inode (根目录与 dir1)")
+
+		// 确认物理删除
+		_, err = mgr.GetAttr(ctx, dir2.Ino)
+		assert.True(t, errors.Is(err, meta.ErrNotFound), "物理回收后目录 Inode 应不可见")
 	})
 }

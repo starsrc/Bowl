@@ -444,7 +444,7 @@ func (h *formalLockWaitHarness) execAndVerifySetLkw(t *testing.T, params meta.Se
 		return
 	}
 
-	wCtx, cancel := context.WithCancel(h.Env.Ctx)
+	wCtx, cancel := context.WithTimeout(h.Env.Ctx, 10*time.Second)
 	doneCh := make(chan error, 1)
 	go func() {
 		doneCh <- h.Env.Mgr.SetLkw(wCtx, params)
@@ -1590,7 +1590,9 @@ func runFormalLockT13CancelAndSessionExpiryScenarios(t *testing.T) {
 	}
 	// 通过公开接口 SetLkw (搭配 1ms 租约的 tinyMgr) 让 sExp 在 file1 上真实入队 file_lock_waiters 并在首次轮询间隔内自然超期
 	tinyMgr := meta.New(shortEnv.Store, meta.WithSessionLeaseTTL(1*time.Millisecond))
-	err = tinyMgr.SetLkw(shortEnv.Ctx, waiterParams)
+	tinyCtx, tinyCancel := context.WithTimeout(shortEnv.Ctx, 2*time.Second)
+	defer tinyCancel()
+	err = tinyMgr.SetLkw(tinyCtx, waiterParams)
 	require.ErrorIs(t, err, meta.ErrBadFileHandle, "sExp 在阻塞等待期间租约过期应返回 ErrBadFileHandle")
 	var pendingWaiterCnt int
 	require.NoError(t, shortEnv.Pool.QueryRow(shortEnv.Ctx, `SELECT COUNT(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = $2`, int64(sExp), int64(expWaiterReqID)).Scan(&pendingWaiterCnt))
@@ -2027,7 +2029,7 @@ func TestFormalLock_T13_SetLkwDeadlockCancel(t *testing.T) {
 
 			for step := 1; step <= cfg.Steps; step++ {
 				stepFormalLockT13Action(t, h, rng, step)
-				verifyFormalLockT12GetLkProbes(t, env, rng)
+				verifyFormalLockT12GetLkProbes(t, env, env.ProbeRNG)
 				auditFormalLockInv3And4(t, h)
 			}
 

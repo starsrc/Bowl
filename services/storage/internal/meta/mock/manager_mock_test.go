@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 )
 
 // testStorageService 验证 ConnectRPC v1 一元签名与 meta.Manager 协同工作。
@@ -101,12 +100,37 @@ func TestStorageModuleDependencies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "VALUE", parsedEnv["KEY"])
 
-	// 验证 golang.org/x/net/http2
-	server := &http2.Server{}
-	assert.NotNil(t, server)
-
 	// 验证 connectrpc.com/connect 构造与错误封装
 	connErr := connect.NewError(connect.CodeNotFound, assert.AnError)
 	assert.Equal(t, connect.CodeNotFound, connErr.Code())
 	assert.True(t, strings.Contains(connErr.Error(), assert.AnError.Error()))
+}
+
+// TestMockManager_GetParentsContract 验证 MockManager 对 GetParents 的实质打桩与返回值契约。
+func TestMockManager_GetParentsContract(t *testing.T) {
+	mockMgr := metamock.NewMockManager(t)
+	require.NotNil(t, mockMgr)
+
+	ctx := context.Background()
+	targetIno := uint64(2001)
+	expectedParents := map[uint64]uint32{
+		1:    1,
+		1001: 2,
+	}
+
+	// 1. 正向打桩与契约断言
+	mockMgr.EXPECT().GetParents(mock.Anything, targetIno).
+		Return(expectedParents, nil).Once()
+
+	parents, err := mockMgr.GetParents(ctx, targetIno)
+	require.NoError(t, err)
+	assert.Equal(t, expectedParents, parents)
+
+	// 2. 负向打桩与契约断言 (ErrNotFound)
+	mockMgr.EXPECT().GetParents(mock.Anything, uint64(9999)).
+		Return(nil, meta.ErrNotFound).Once()
+
+	errParents, err := mockMgr.GetParents(ctx, uint64(9999))
+	require.ErrorIs(t, err, meta.ErrNotFound)
+	assert.Nil(t, errParents)
 }

@@ -129,6 +129,44 @@ func requireShortLeaseTTL(ctx context.Context, t testing.TB, client storagev1con
 	require.LessOrEqual(t, ttl, 5, "当前环境租约 TTL=%d 秒 > 5 秒；请确保测试环境配置短租约（如 2s/3s），杜绝 60s 默认租约耗尽测试预算", ttl)
 }
 
+// waitForBlockedExpiredSessionDelete 轮询检测是否有后端活跃连接针对 client_sessions 表/元组级锁处于未授予等待 (granted = false) 或活跃锁阻塞状态，
+// 消除对内部具体 SQL 文本（如 %DELETE FROM client_sessions%）的脆弱耦合。
+func waitForBlockedExpiredSessionDelete(ctx context.Context, t testing.TB) {
+	t.Helper()
+	waitBlockCtx, waitBlockCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer waitBlockCancel()
+
+	checkLockSQL := `
+SELECT COUNT(*)
+FROM pg_stat_activity a
+JOIN pg_locks l ON a.pid = l.pid
+WHERE a.datname = current_database()
+  AND a.state = 'active'
+  AND (
+    (l.relation = 'client_sessions'::regclass AND l.granted = false)
+    OR (l.granted = false AND EXISTS (
+      SELECT 1 FROM pg_locks b
+      WHERE b.pid = a.pid AND b.relation = 'client_sessions'::regclass
+    ))
+  );`
+
+	blocked := false
+	for {
+		select {
+		case <-waitBlockCtx.Done():
+			t.Fatalf("等待操作在 client_sessions 上发生锁阻塞超时: %v", waitBlockCtx.Err())
+		default:
+		}
+		cntStr := execSessionPsql(ctx, t, checkLockSQL)
+		if cnt, convErr := strconv.Atoi(cntStr); convErr == nil && cnt >= 1 {
+			blocked = true
+			break
+		}
+		_ = sleepWithContext(ctx, 20*time.Millisecond)
+	}
+	require.True(t, blocked, "必须检测到针对 client_sessions 的未授予等待或锁阻塞状态")
+}
+
 // acquireExpiredBlockerSessionLock 插入一条已过期的 blocker 行并在后台持有其行级 FOR UPDATE 锁，
 // 返回释放行锁的 release 回调。在 release 之前，任何全表清理 client_sessions 的 DELETE
 // 扫描到该 blockerSessionID 时都会阻塞在行锁等待上。
@@ -235,7 +273,6 @@ func TestE2E_H2_OrphanReclaimVsRenewSessionRace(t *testing.T) {
 	defer cancel()
 
 	client := testutil.NewStorageClient()
-	execSessionPsql(ctx, t, "DELETE FROM inodes WHERE nlink = 0;")
 
 	// 1. 创建目标磁盘 targetDisk（承载孤儿节点与清理竞争）与控制磁盘 controlDisk（对照金丝雀）
 	targetDiskResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
@@ -249,7 +286,7 @@ func TestE2E_H2_OrphanReclaimVsRenewSessionRace(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		cleanSQL := fmt.Sprintf("DELETE FROM inodes WHERE root_ino = %d AND ino <> %d;", targetDisk.GetRootIno(), targetDisk.GetRootIno())
+		cleanSQL := fmt.Sprintf("DELETE FROM inodes WHERE root_ino = %d AND ino <> %d; DELETE FROM client_sessions WHERE session_id = 210001;", targetDisk.GetRootIno(), targetDisk.GetRootIno())
 		execSessionPsql(cleanupCtx, t, cleanSQL)
 		if _, err := client.DeleteDisk(cleanupCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: targetDisk.GetDiskId()})); err != nil {
 			if connect.CodeOf(err) != connect.CodeNotFound {
@@ -305,7 +342,7 @@ func TestE2E_H2_OrphanReclaimVsRenewSessionRace(t *testing.T) {
 
 	// 保持 helperSessionID 租约在测试期间不过期，避免背景孤儿被提前清理，
 	// 使用直接的 SQL 更新租约并更新统计信息（不调用全表扫描的 RenewSession RPC，避免占用 DB 连接池与触发锁竞争）
-	execSessionPsql(ctx, t, fmt.Sprintf("UPDATE client_sessions SET expires_at = clock_timestamp() + interval '1 hour' WHERE session_id = %d; ANALYZE inodes; ANALYZE file_handles;", helperSessionID))
+	execSessionPsql(ctx, t, fmt.Sprintf("UPDATE client_sessions SET expires_at = clock_timestamp() + interval '1 hour' WHERE session_id = %d; UPDATE disks SET used_inodes = used_inodes + 25000 WHERE root_ino = %d; ANALYZE inodes; ANALYZE file_handles;", helperSessionID, targetDisk.GetRootIno()))
 
 	// 3. 循环轮次，最多 8 轮复现 H2 竞态
 	targetSessionBase := uint64(220000)
@@ -392,13 +429,13 @@ func TestE2E_H2_OrphanReclaimVsRenewSessionRace(t *testing.T) {
 			oldExpiresAtStr = parts[1]
 		}
 
-		// 使用 sleepWithContext 等待至距离旧过期时刻 E 剩余约 140ms
-		waitToWindow := time.Duration(remMs-140) * time.Millisecond
+		// 使用 sleepWithContext 等待至距离旧过期时刻 E 剩余约 115ms
+		waitToWindow := time.Duration(remMs-115) * time.Millisecond
 		if waitToWindow > 0 {
 			require.NoError(t, sleepWithContext(ctx, waitToWindow))
 		}
 
-		// 启动 6 个 sweeper 协程以 22ms 错峰跨越过期点 (0ms~110ms) 调用独立会话的 RenewSession
+		// 启动 6 个 sweeper 协程以 28ms 错峰跨越过期点 (0ms~140ms) 调用独立会话的 RenewSession
 		sweepGroupCtx, sweepGroupCancel := context.WithCancel(ctx)
 		sweeperErrCh := make(chan error, 16)
 		var sweeperWg sync.WaitGroup
@@ -416,7 +453,7 @@ func TestE2E_H2_OrphanReclaimVsRenewSessionRace(t *testing.T) {
 			go func(idx int) {
 				defer sweeperWg.Done()
 				sSessionID := sweeperSessionID + uint64(idx)
-				_ = sleepWithContext(sweepGroupCtx, time.Duration(idx)*22*time.Millisecond)
+				_ = sleepWithContext(sweepGroupCtx, time.Duration(idx)*28*time.Millisecond)
 				sCtx, sCancel := context.WithTimeout(sweepGroupCtx, 5*time.Second)
 				defer sCancel()
 				_, sErr := client.RenewSession(sCtx, connect.NewRequest(&storagev1.RenewSessionRequest{
@@ -604,27 +641,9 @@ func TestE2E_H5_ExpiredHandleRevivedBySessionUpsert(t *testing.T) {
 			setLkResCh <- setLkResult{resp: r, err: sErr}
 		}()
 
-		// 4. 轮询数据库确认 SetLk 已通过 GetFileHandle 并正阻塞在 DeleteExpiredClientSessions
-		waitBlockCtx, waitBlockCancel := context.WithTimeout(subCtx, 5*time.Second)
-		defer waitBlockCancel()
-		blocked := false
-		for {
-			select {
-			case <-waitBlockCtx.Done():
-				t.Fatalf("等待 SetLk 阻塞在 DELETE FROM client_sessions 超时: %v", waitBlockCtx.Err())
-			default:
-			}
-			cntStr := execSessionPsql(subCtx, t, "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND state = 'active' AND query LIKE '%DELETE FROM client_sessions%'")
-			cnt, convErr := strconv.Atoi(cntStr)
-			require.NoError(t, convErr)
-			if cnt >= 1 {
-				blocked = true
-				break
-			}
-			_ = sleepWithContext(subCtx, 20*time.Millisecond)
-		}
-		require.True(t, blocked, "SetLk 必须已通过 GetFileHandle 校验并阻塞在 DeleteExpiredClientSessions")
-		t.Logf("【确证 1】SetLk 已成功阻塞在 DeleteExpiredClientSessions")
+		// 4. 轮询数据库确认 SetLk 已通过 GetFileHandle 并针对 client_sessions 发生锁阻塞
+		waitForBlockedExpiredSessionDelete(subCtx, t)
+		t.Logf("【确证 1】SetLk 已成功阻塞在 client_sessions 锁等待")
 
 		// 5. 轮询数据库等待 sessionA 跨期失效
 		waitExpireCtx, waitExpireCancel := context.WithTimeout(subCtx, 5*time.Second)
@@ -754,26 +773,8 @@ func TestE2E_H5_ExpiredHandleRevivedBySessionUpsert(t *testing.T) {
 			setLkResCh <- setLkResult{resp: r, err: sErr}
 		}()
 
-		// 4. 轮询 pg_stat_activity 确认 SetLk 已通过 GetFileHandle 并阻塞在 DeleteExpiredClientSessions
-		waitBlockCtx, waitBlockCancel := context.WithTimeout(subCtx, 5*time.Second)
-		defer waitBlockCancel()
-		blocked := false
-		for {
-			select {
-			case <-waitBlockCtx.Done():
-				t.Fatalf("等待 SetLk 阻塞在 DELETE FROM client_sessions 超时: %v", waitBlockCtx.Err())
-			default:
-			}
-			cntStr := execSessionPsql(subCtx, t, "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND state = 'active' AND query LIKE '%DELETE FROM client_sessions%'")
-			cnt, convErr := strconv.Atoi(cntStr)
-			require.NoError(t, convErr)
-			if cnt >= 1 {
-				blocked = true
-				break
-			}
-			_ = sleepWithContext(subCtx, 20*time.Millisecond)
-		}
-		require.True(t, blocked, "SetLk 必须已通过 GetFileHandle 校验并阻塞在 DeleteExpiredClientSessions")
+		// 4. 轮询 pg_stat_activity 确认 SetLk 已通过 GetFileHandle 并针对 client_sessions 发生锁阻塞
+		waitForBlockedExpiredSessionDelete(subCtx, t)
 
 		// 5. 轮询确认 sessionOrphan 跨期失效
 		waitExpireCtx, waitExpireCancel := context.WithTimeout(subCtx, 5*time.Second)

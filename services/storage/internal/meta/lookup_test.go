@@ -1047,7 +1047,3 @@ func TestLookup_CacheTimeouts(t *testing.T) {
 		assert.Equal(t, 4.5, fileInode.AttrTimeoutSeconds)
 	})
 }
-
-func TestModule(t *testing.T) {
-	assert.NotNil(t, meta.Module)
-}

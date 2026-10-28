@@ -512,40 +512,103 @@ func TestFileLock_POSIXAndFlock(t *testing.T) {
 	}))
 	require.NoError(t, err, "释放 owner1 POSIX 写锁应成功")
 
-	// 在会话仍有效期内，使用另一 LockOwner、新 RequestID 调用带短超时的 SetLkw 申请同一区间排他写锁并断言立即成功
+	// 注册独立的第三活跃会话 session3，打开同一文件获取句柄 fh3
+	session3 := uint64(50003)
+	renew3, err := client.RenewSession(ctx, connect.NewRequest(&storagev1.RenewSessionRequest{SessionId: session3}))
+	require.NoError(t, err, "RenewSession session3 应成功")
+	require.NotNil(t, renew3.Msg.GetExpiresAt())
+
+	open3Resp, err := client.Open(ctx, connect.NewRequest(&storagev1.OpenRequest{
+		Ino:       fileIno,
+		Flags:     oRdWr,
+		SessionId: &session3,
+	}))
+	require.NoError(t, err, "Open fh3 for session3 应成功")
+	fh3 := open3Resp.Msg.GetFh()
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = client.Release(cleanupCtx, connect.NewRequest(&storagev1.ReleaseRequest{
+			Ino:       fileIno,
+			Fh:        fh3,
+			SessionId: &session3,
+		}))
+	})
+
+	// 使用异会话异拥有者 (SessionId: session3, Fh: fh3, LockOwner: 303) 验证申请同一区间排他写锁立即成功。
+	// 若 session2 被取消的等待者未被清理（幽灵等待者残留），冲突队列检测到异会话异拥有者的请求将判定冲突（非阻塞 SetLk 报 EAGAIN），实现 100% 反事实突变检出能力。
+	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
+		Ino:       fileIno,
+		Fh:        fh3,
+		LockOwner: 303,
+		SessionId: session3,
+		Lk: &storagev1.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  fWrLck,
+			Pid:   3003,
+		},
+		LkFlags: 0,
+	}))
+	require.NoError(t, err, "取消等待后原锁释放，异会话异拥有者非阻塞 SetLk 申请写锁应立即成功，证明无幽灵等待者残留")
+
+	// 释放 session3 的 SetLk 测试写锁
+	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
+		Ino:       fileIno,
+		Fh:        fh3,
+		LockOwner: 303,
+		SessionId: session3,
+		Lk: &storagev1.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  fUnLck,
+			Pid:   3003,
+		},
+		LkFlags: 0,
+	}))
+	require.NoError(t, err, "释放 session3 SetLk 测试写锁应成功")
+
+	// 再配合短超时 2s 的 SetLkw 与新 RequestID 验证阻塞接口亦立即成功且不发生超时等待
 	quickCtx, quickCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer quickCancel()
 	_, err = client.SetLkw(quickCtx, connect.NewRequest(&storagev1.SetLkwRequest{
 		Ino:       fileIno,
-		Fh:        fh2,
-		LockOwner: 202,
-		SessionId: session2,
+		Fh:        fh3,
+		LockOwner: 303,
+		SessionId: session3,
 		RequestId: 90005,
 		Lk: &storagev1.FileLock{
 			Start: 0,
 			End:   100,
 			Type:  fWrLck,
-			Pid:   2002,
+			Pid:   3003,
 		},
 		LkFlags: 0,
 	}))
-	require.NoError(t, err, "取消等待后原锁释放，重新申请写锁应立即成功，证明无幽灵等待者残留")
+	require.NoError(t, err, "异会话异拥有者带短超时的 SetLkw 申请写锁应立即成功")
 
-	// 随后释放该测试写锁
+	// 随后释放 session3 的 SetLkw 写锁并主动关闭句柄 fh3
 	_, err = client.SetLk(ctx, connect.NewRequest(&storagev1.SetLkRequest{
 		Ino:       fileIno,
-		Fh:        fh2,
-		LockOwner: 202,
-		SessionId: session2,
+		Fh:        fh3,
+		LockOwner: 303,
+		SessionId: session3,
 		Lk: &storagev1.FileLock{
 			Start: 0,
 			End:   100,
 			Type:  fUnLck,
-			Pid:   2002,
+			Pid:   3003,
 		},
 		LkFlags: 0,
 	}))
-	require.NoError(t, err, "释放测试写锁应成功")
+	require.NoError(t, err, "释放 session3 SetLkw 测试写锁应成功")
+
+	_, err = client.Release(ctx, connect.NewRequest(&storagev1.ReleaseRequest{
+		Ino:       fileIno,
+		Fh:        fh3,
+		SessionId: &session3,
+	}))
+	require.NoError(t, err, "关闭 session3 句柄 fh3 应成功")
 
 	// 8. BSD flock 整文件锁兼容性验证 (lk_flags = FuseLkFlock, start=0, end=math.MaxInt64)
 

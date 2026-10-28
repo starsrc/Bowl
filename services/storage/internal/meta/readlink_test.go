@@ -117,6 +117,170 @@ func TestReadlink_AtimeUpdate(t *testing.T) {
 		mockStore.AssertNotCalled(t, "GetInode", mock.Anything, mock.Anything)
 		mockStore.AssertNotCalled(t, "TouchInodeAtime", mock.Anything, mock.Anything)
 	})
+
+	t.Run("RelAtime 模式下 atime < mtime 触发 TouchInodeAtime", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore, meta.WithAtimeMode(meta.AtimeModeRelAtime))
+
+		ino := uint64(104)
+		targetBytes := []byte("/data/link_mtime")
+		mockStore.EXPECT().
+			GetSymlinkTarget(mock.Anything, int64(ino)).
+			Return(db.GetSymlinkTargetRow{
+				Mode:          int32(meta.S_IFLNK | 0o777),
+				SymlinkTarget: targetBytes,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Atime: pgtype.Timestamptz{Time: now.Add(-2 * time.Hour), Valid: true},
+				Mtime: pgtype.Timestamptz{Time: now.Add(-1 * time.Hour), Valid: true},
+				Ctime: pgtype.Timestamptz{Time: now.Add(-3 * time.Hour), Valid: true},
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			TouchInodeAtime(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		result, err := mgr.Readlink(ctx, ino)
+		require.NoError(t, err)
+		assert.Equal(t, targetBytes, result)
+	})
+
+	t.Run("RelAtime 模式下 atime < ctime 触发 TouchInodeAtime", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore, meta.WithAtimeMode(meta.AtimeModeRelAtime))
+
+		ino := uint64(105)
+		targetBytes := []byte("/data/link_ctime")
+		mockStore.EXPECT().
+			GetSymlinkTarget(mock.Anything, int64(ino)).
+			Return(db.GetSymlinkTargetRow{
+				Mode:          int32(meta.S_IFLNK | 0o777),
+				SymlinkTarget: targetBytes,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Atime: pgtype.Timestamptz{Time: now.Add(-2 * time.Hour), Valid: true},
+				Mtime: pgtype.Timestamptz{Time: now.Add(-3 * time.Hour), Valid: true},
+				Ctime: pgtype.Timestamptz{Time: now.Add(-1 * time.Hour), Valid: true},
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			TouchInodeAtime(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		result, err := mgr.Readlink(ctx, ino)
+		require.NoError(t, err)
+		assert.Equal(t, targetBytes, result)
+	})
+
+	t.Run("RelAtime 模式下 now - atime >= 24h 触发 TouchInodeAtime", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore, meta.WithAtimeMode(meta.AtimeModeRelAtime))
+
+		ino := uint64(106)
+		targetBytes := []byte("/data/link_24h")
+		mockStore.EXPECT().
+			GetSymlinkTarget(mock.Anything, int64(ino)).
+			Return(db.GetSymlinkTargetRow{
+				Mode:          int32(meta.S_IFLNK | 0o777),
+				SymlinkTarget: targetBytes,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Atime: pgtype.Timestamptz{Time: now.Add(-25 * time.Hour), Valid: true},
+				Mtime: pgtype.Timestamptz{Time: now.Add(-25 * time.Hour), Valid: true},
+				Ctime: pgtype.Timestamptz{Time: now.Add(-25 * time.Hour), Valid: true},
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			TouchInodeAtime(mock.Anything, int64(ino)).
+			Return(nil).
+			Once()
+
+		result, err := mgr.Readlink(ctx, ino)
+		require.NoError(t, err)
+		assert.Equal(t, targetBytes, result)
+	})
+
+	t.Run("RelAtime 模式下新鲜 atime（未早于 mtime/ctime 且未满 24 小时）不触发 TouchInodeAtime", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore, meta.WithAtimeMode(meta.AtimeModeRelAtime))
+
+		ino := uint64(107)
+		targetBytes := []byte("/data/link_fresh")
+		mockStore.EXPECT().
+			GetSymlinkTarget(mock.Anything, int64(ino)).
+			Return(db.GetSymlinkTargetRow{
+				Mode:          int32(meta.S_IFLNK | 0o777),
+				SymlinkTarget: targetBytes,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Atime: pgtype.Timestamptz{Time: now.Add(-1 * time.Hour), Valid: true},
+				Mtime: pgtype.Timestamptz{Time: now.Add(-1 * time.Hour), Valid: true},
+				Ctime: pgtype.Timestamptz{Time: now.Add(-1 * time.Hour), Valid: true},
+			}, nil).
+			Once()
+
+		result, err := mgr.Readlink(ctx, ino)
+		require.NoError(t, err)
+		assert.Equal(t, targetBytes, result)
+
+		mockStore.AssertNotCalled(t, "TouchInodeAtime", mock.Anything, mock.Anything)
+	})
+
+	t.Run("StrictAtime 模式下 now - atime < 1s 受节流保护不触发 TouchInodeAtime", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore, meta.WithAtimeMode(meta.AtimeModeStrictAtime))
+
+		ino := uint64(108)
+		targetBytes := []byte("/data/link_throttle")
+		mockStore.EXPECT().
+			GetSymlinkTarget(mock.Anything, int64(ino)).
+			Return(db.GetSymlinkTargetRow{
+				Mode:          int32(meta.S_IFLNK | 0o777),
+				SymlinkTarget: targetBytes,
+			}, nil).
+			Once()
+
+		mockStore.EXPECT().
+			GetInode(mock.Anything, int64(ino)).
+			Return(db.Inode{
+				Ino:   int64(ino),
+				Atime: pgtype.Timestamptz{Time: now.Add(-100 * time.Millisecond), Valid: true},
+				Mtime: pgtype.Timestamptz{Time: now.Add(-10 * time.Second), Valid: true},
+				Ctime: pgtype.Timestamptz{Time: now.Add(-10 * time.Second), Valid: true},
+			}, nil).
+			Once()
+
+		result, err := mgr.Readlink(ctx, ino)
+		require.NoError(t, err)
+		assert.Equal(t, targetBytes, result)
+
+		mockStore.AssertNotCalled(t, "TouchInodeAtime", mock.Anything, mock.Anything)
+	})
 }
 
 func TestReadlink_AdditionalValidationAndErrors(t *testing.T) {

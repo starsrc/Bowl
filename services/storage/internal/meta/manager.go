@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
 	"github.com/starsrc/Aether/pkg/tx"
@@ -91,6 +92,32 @@ type chunkKey struct {
 	indx uint32
 }
 
+type dirCursorKey struct {
+	ino    uint64
+	fh     uint64
+	offset uint64
+}
+
+type dirHandleKey struct {
+	ino uint64
+	fh  uint64
+}
+
+type inFlightDirRead struct {
+	ino                 uint64
+	fh                  uint64
+	invalidatedAll      bool
+	invalidatedSessions map[uint64]struct{}
+}
+
+type dirCursorAnchor struct {
+	lastName        []byte
+	sqlOffset       int64
+	dirMutated      bool
+	sessionID       uint64
+	handleCreatedAt time.Time
+}
+
 type manager struct {
 	store                 db.Store
 	blockStore            BlockStore
@@ -105,7 +132,17 @@ type manager struct {
 	chunkWriteCountsMu    sync.Mutex
 	chunkWriteCounts      map[chunkKey]int
 	lockNotifyMu          sync.Mutex
-	lockNotifyChans       map[uint64]chan struct{}
+	lockNotifyChans       map[uint64]*lockNotifyEntry
+	crossDirRenameMu      sync.Mutex
+	dirCursorMu           sync.Mutex
+	dirCursors            map[dirCursorKey]dirCursorAnchor
+	dirMutationSeq        map[uint64]uint64
+	inFlightDirMutations  map[uint64]int
+	activeDirReads        map[uint64]*inFlightDirRead
+	nextDirReadID         uint64
+	inFlightGrantMu       sync.Mutex
+	inFlightGrants        map[inFlightGrantKey]*inFlightGrant
+	nextInFlightGrantID   uint64
 }
 
 var _ Manager = (*manager)(nil)
@@ -209,7 +246,12 @@ func New(store db.Store, opts ...Option) Manager {
 		sessionLeaseTTL:       DefaultSessionLeaseTTL,
 		compactSliceThreshold: CompactSliceThreshold,
 		chunkWriteCounts:      make(map[chunkKey]int),
-		lockNotifyChans:       make(map[uint64]chan struct{}),
+		lockNotifyChans:       make(map[uint64]*lockNotifyEntry),
+		dirCursors:            make(map[dirCursorKey]dirCursorAnchor),
+		dirMutationSeq:        make(map[uint64]uint64),
+		inFlightDirMutations:  make(map[uint64]int),
+		activeDirReads:        make(map[uint64]*inFlightDirRead),
+		inFlightGrants:        make(map[inFlightGrantKey]*inFlightGrant),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -217,6 +259,282 @@ func New(store db.Store, opts ...Option) Manager {
 		}
 	}
 	return m
+}
+
+func (m *manager) getDirMutationSeq(ino uint64) uint64 {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirMutationSeq == nil {
+		return 0
+	}
+	return m.dirMutationSeq[ino]
+}
+
+func (m *manager) getDirCursorOffset(ino, fh, offset uint64) int64 {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirCursors == nil {
+		return int64(offset - 2)
+	}
+	if anchor, ok := m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: offset}]; ok {
+		return anchor.sqlOffset
+	}
+	return int64(offset - 2)
+}
+
+func (m *manager) lookupDirCursorAnchor(ino, fh, offset uint64) (dirCursorAnchor, bool) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirCursors == nil {
+		return dirCursorAnchor{}, false
+	}
+	anchor, ok := m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: offset}]
+	return anchor, ok
+}
+
+func (m *manager) beginDirCursorRead(ino, fh uint64) uint64 {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.activeDirReads == nil {
+		m.activeDirReads = make(map[uint64]*inFlightDirRead)
+	}
+	m.nextDirReadID++
+	readID := m.nextDirReadID
+	m.activeDirReads[readID] = &inFlightDirRead{
+		ino: ino,
+		fh:  fh,
+	}
+	return readID
+}
+
+func (m *manager) endDirCursorRead(readID uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	delete(m.activeDirReads, readID)
+}
+
+func (m *manager) recordDirCursors(readID uint64, cursors []pendingDirCursor) {
+	if len(cursors) == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	r, ok := m.activeDirReads[readID]
+	if !ok || r.invalidatedAll {
+		return
+	}
+	for _, pc := range cursors {
+		if r.invalidatedSessions != nil {
+			if _, bad := r.invalidatedSessions[pc.sessionID]; bad {
+				continue
+			}
+		}
+		if m.dirCursors == nil {
+			m.dirCursors = make(map[dirCursorKey]dirCursorAnchor)
+		}
+		dirMutated := pc.dirMutated
+		if (m.dirMutationSeq != nil && m.dirMutationSeq[pc.ino] != pc.startMutationSeq) ||
+			(m.inFlightDirMutations != nil && m.inFlightDirMutations[pc.ino] > 0) {
+			dirMutated = true
+		}
+		m.dirCursors[dirCursorKey{ino: pc.ino, fh: pc.fh, offset: pc.nextOffset}] = dirCursorAnchor{
+			lastName:        bytes.Clone(pc.lastName),
+			sqlOffset:       pc.sqlOffset,
+			dirMutated:      dirMutated,
+			sessionID:       pc.sessionID,
+			handleCreatedAt: pc.handleCreatedAt,
+		}
+	}
+}
+
+func (m *manager) recordDirCursor(ino, fh, nextOffset uint64, lastName []byte, sqlOffset int64, dirMutated bool, sessionID uint64, handleCreatedAt time.Time, startMutationSeq uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirCursors == nil {
+		m.dirCursors = make(map[dirCursorKey]dirCursorAnchor)
+	}
+	if (m.dirMutationSeq != nil && m.dirMutationSeq[ino] != startMutationSeq) ||
+		(m.inFlightDirMutations != nil && m.inFlightDirMutations[ino] > 0) {
+		dirMutated = true
+	}
+	m.dirCursors[dirCursorKey{ino: ino, fh: fh, offset: nextOffset}] = dirCursorAnchor{
+		lastName:        bytes.Clone(lastName),
+		sqlOffset:       sqlOffset,
+		dirMutated:      dirMutated,
+		sessionID:       sessionID,
+		handleCreatedAt: handleCreatedAt,
+	}
+}
+
+func (m *manager) onDirEntryRemoved(parentIno uint64, name []byte) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirMutationSeq == nil {
+		m.dirMutationSeq = make(map[uint64]uint64)
+	}
+	m.dirMutationSeq[parentIno]++
+	for k, anchor := range m.dirCursors {
+		if k.ino == parentIno {
+			anchor.dirMutated = true
+			if len(name) > 0 && bytes.Compare(name, anchor.lastName) <= 0 && anchor.sqlOffset > 0 {
+				anchor.sqlOffset--
+			}
+			m.dirCursors[k] = anchor
+		}
+	}
+}
+
+func (m *manager) onDirEntryMutated(parentIno uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.dirMutationSeq == nil {
+		m.dirMutationSeq = make(map[uint64]uint64)
+	}
+	m.dirMutationSeq[parentIno]++
+	for k, anchor := range m.dirCursors {
+		if k.ino == parentIno {
+			anchor.dirMutated = true
+			m.dirCursors[k] = anchor
+		}
+	}
+}
+
+func (m *manager) clearDirCursors(ino, fh uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		if r.ino == ino && r.fh == fh {
+			r.invalidatedAll = true
+		}
+	}
+	for k := range m.dirCursors {
+		if k.ino == ino && k.fh == fh {
+			delete(m.dirCursors, k)
+		}
+	}
+}
+
+func (m *manager) clearDirCursorsForSession(ino, fh, sessionID uint64) {
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		if r.ino == ino && r.fh == fh {
+			if r.invalidatedSessions == nil {
+				r.invalidatedSessions = make(map[uint64]struct{})
+			}
+			r.invalidatedSessions[sessionID] = struct{}{}
+		}
+	}
+	for k, anchor := range m.dirCursors {
+		if k.ino == ino && k.fh == fh && anchor.sessionID == sessionID {
+			delete(m.dirCursors, k)
+		}
+	}
+}
+
+func (m *manager) clearDirCursorsForInos(inos ...uint64) {
+	if len(inos) == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+
+	inoSet := make(map[uint64]struct{}, len(inos))
+	for _, ino := range inos {
+		inoSet[ino] = struct{}{}
+	}
+	for _, r := range m.activeDirReads {
+		if _, ok := inoSet[r.ino]; ok {
+			r.invalidatedAll = true
+		}
+	}
+
+	if len(m.dirCursors) == 0 && len(m.dirMutationSeq) == 0 {
+		return
+	}
+
+	for k := range m.dirCursors {
+		if _, ok := inoSet[k.ino]; ok {
+			delete(m.dirCursors, k)
+		}
+	}
+	if m.dirMutationSeq != nil {
+		for _, ino := range inos {
+			delete(m.dirMutationSeq, ino)
+		}
+	}
+	if m.inFlightDirMutations != nil {
+		for _, ino := range inos {
+			delete(m.inFlightDirMutations, ino)
+		}
+	}
+}
+
+// beginDirMutation 递增指定目录节点的在途变更计数。
+func (m *manager) beginDirMutation(ino uint64) {
+	if ino == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.inFlightDirMutations == nil {
+		m.inFlightDirMutations = make(map[uint64]int)
+	}
+	m.inFlightDirMutations[ino]++
+}
+
+// endDirMutation 递减指定目录节点的在途变更计数，归零后删除条目。
+func (m *manager) endDirMutation(ino uint64) {
+	if ino == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	if m.inFlightDirMutations == nil {
+		return
+	}
+	m.inFlightDirMutations[ino]--
+	if m.inFlightDirMutations[ino] <= 0 {
+		delete(m.inFlightDirMutations, ino)
+	}
+}
+
+// dirMutationTracker 追踪单次写操作中已登记的在途目录变更，防止重试重复递增并在操作退出时可靠归零。
+type dirMutationTracker struct {
+	m    *manager
+	inos map[uint64]struct{}
+}
+
+func (m *manager) newDirMutationTracker() *dirMutationTracker {
+	return &dirMutationTracker{m: m}
+}
+
+func (t *dirMutationTracker) track(inos ...uint64) {
+	if t == nil || t.m == nil {
+		return
+	}
+	for _, ino := range inos {
+		if ino == 0 {
+			continue
+		}
+		if t.inos == nil {
+			t.inos = make(map[uint64]struct{})
+		}
+		if _, ok := t.inos[ino]; !ok {
+			t.inos[ino] = struct{}{}
+			t.m.beginDirMutation(ino)
+		}
+	}
+}
+
+func (t *dirMutationTracker) done() {
+	if t == nil || t.m == nil {
+		return
+	}
+	for ino := range t.inos {
+		t.m.endDirMutation(ino)
+	}
+	t.inos = nil
 }
 
 // ManagerParams 定义 Manager 的 Fx 依赖注入参数。
@@ -366,6 +684,30 @@ func (m *manager) newInodeFromListDirRow(row db.ListDirEntriesRow) *Inode {
 	}, entryTimeout, m.attrTimeout)
 }
 
+func (m *manager) newInodeFromListDirAfterNameRow(row db.ListDirEntriesAfterNameRow) *Inode {
+	entryTimeout := m.entryTimeout
+	if (uint32(row.Mode) & S_IFMT) == S_IFDIR {
+		entryTimeout = m.dirEntryTimeout
+	}
+	return convertDBInodeToEntity(db.Inode{
+		Ino:           row.Ino,
+		Generation:    row.Generation,
+		Mode:          row.Mode,
+		Size:          row.Size,
+		Nlink:         row.Nlink,
+		Uid:           row.Uid,
+		Gid:           row.Gid,
+		Rdev:          row.Rdev,
+		Atime:         row.Atime,
+		Mtime:         row.Mtime,
+		Ctime:         row.Ctime,
+		SymlinkTarget: row.SymlinkTarget,
+		Flags:         row.Flags,
+		ParentIno:     row.ParentIno,
+		RootIno:       row.RootIno,
+	}, entryTimeout, m.attrTimeout)
+}
+
 // errRetryTx 表示事务预读的目录项映射在加锁前发生并发漂移，需回滚并重试当前事务。
 var errRetryTx = errors.New("retry transaction due to concurrent entry drift")
 
@@ -374,9 +716,13 @@ func isRetryableTxError(err error) bool {
 }
 
 func (m *manager) execWriteTxWithRetry(ctx context.Context, fn func(q db.Querier) error) error {
-	return tx.Retry(ctx, func(attemptCtx context.Context) error {
+	err := tx.Retry(ctx, func(attemptCtx context.Context) error {
 		return m.store.ExecTxWithOptions(attemptCtx, fn)
 	}, tx.WithDefaultRetry(errRetryTx))
+	if err == nil {
+		m.cleanExpiredDirCursors(ctx)
+	}
+	return err
 }
 
 // uniqueSortedInos 将一组 Inode 号按全局升序排列并去重，确保所有多 Inode 事务遵循单一全局加锁顺序。
@@ -471,6 +817,8 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		if leaseTTL <= 0 {
 			leaseTTL = DefaultSessionLeaseTTL
 		}
+
+		sid := int64(sessionID)
 		deletedCount, err := q.DeleteExpiredClientSessions(ctx)
 		if err != nil {
 			return fmt.Errorf("delete expired client sessions: %w", err)
@@ -478,8 +826,9 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		if deletedCount > 0 {
 			m.notifyAllLockWaiters()
 		}
-		session, err := q.UpsertClientSession(ctx, db.UpsertClientSessionParams{
-			SessionID: int64(sessionID),
+
+		session, err := q.UpsertClientSession(db.WithLeaseTTL(ctx, leaseTTL), db.UpsertClientSessionParams{
+			SessionID: sid,
 			ExpiresAt: pgtype.Timestamptz{
 				Time:  time.Now().Add(leaseTTL),
 				Valid: true,
@@ -561,6 +910,13 @@ func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) 
 	}
 
 	m.cleanLockWaitersForInos(deletedInos)
+	if len(deletedInos) > 0 {
+		inos := make([]uint64, len(deletedInos))
+		for i, ino := range deletedInos {
+			inos[i] = uint64(ino)
+		}
+		m.clearDirCursorsForInos(inos...)
+	}
 	return nil
 }
 
@@ -586,6 +942,7 @@ func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, in
 		return fmt.Errorf("delete orphan inode %d: %w", inode.Ino, err)
 	}
 	m.notifyLockWaiters(uint64(inode.Ino))
+	m.clearDirCursorsForInos(uint64(inode.Ino))
 
 	if inode.RootIno > 0 {
 		var deltaBytes int64
@@ -612,5 +969,152 @@ func (m *manager) shouldTouchAtime(atime, mtime, ctime, now time.Time) bool {
 		return atime.Before(mtime) || atime.Before(ctime) || now.Sub(atime) >= 24*time.Hour
 	default:
 		return false
+	}
+}
+
+// isClientSessionAlive 检查指定会话在真实数据库中是否存在且未过期。
+func (m *manager) isClientSessionAlive(ctx context.Context, sessionID uint64) bool {
+	type poolProvider interface {
+		Pool() *pgxpool.Pool
+	}
+	pp, ok := m.store.(poolProvider)
+	if !ok || pp == nil || pp.Pool() == nil {
+		return true // Mock 环境默认兜底视为存活
+	}
+	var alive bool
+	err := pp.Pool().QueryRow(ctx, `SELECT expires_at > clock_timestamp() FROM client_sessions WHERE session_id = $1`, int64(sessionID)).Scan(&alive)
+	if err != nil {
+		return false
+	}
+	return alive
+}
+
+// cleanExpiredDirCursors 检查并清理关联会话已过期、不存在或已被重建，以及句柄已不存在的目录游标缓存。
+func (m *manager) cleanExpiredDirCursors(ctx context.Context) {
+	type poolProvider interface {
+		Pool() *pgxpool.Pool
+	}
+	pp, ok := m.store.(poolProvider)
+	if !ok || pp == nil || pp.Pool() == nil {
+		return
+	}
+
+	m.dirCursorMu.Lock()
+	if len(m.dirCursors) == 0 {
+		m.dirCursorMu.Unlock()
+		return
+	}
+
+	type handleInfo struct {
+		sessionID uint64
+	}
+
+	handleMap := make(map[dirHandleKey]handleInfo)
+	sessionIDsMap := make(map[uint64]struct{})
+	for k, anchor := range m.dirCursors {
+		handleMap[dirHandleKey{ino: k.ino, fh: k.fh}] = handleInfo{sessionID: anchor.sessionID}
+		if anchor.sessionID > 0 {
+			sessionIDsMap[anchor.sessionID] = struct{}{}
+		}
+	}
+	m.dirCursorMu.Unlock()
+
+	type sessionStatus struct {
+		createdAt time.Time
+		alive     bool
+	}
+	statuses := make(map[uint64]sessionStatus, len(sessionIDsMap))
+	if len(sessionIDsMap) > 0 {
+		sessionIDs := make([]int64, 0, len(sessionIDsMap))
+		for sid := range sessionIDsMap {
+			sessionIDs = append(sessionIDs, int64(sid))
+		}
+
+		rows, err := pp.Pool().Query(ctx, `
+			SELECT session_id, created_at, (expires_at > clock_timestamp()) AS alive
+			FROM client_sessions
+			WHERE session_id = ANY($1)
+		`, sessionIDs)
+		if err != nil {
+			return
+		}
+
+		for rows.Next() {
+			var sid int64
+			var createdAt time.Time
+			var alive bool
+			if err := rows.Scan(&sid, &createdAt, &alive); err != nil {
+				rows.Close()
+				return
+			}
+			statuses[uint64(sid)] = sessionStatus{
+				createdAt: createdAt,
+				alive:     alive,
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return
+		}
+	}
+
+	deadHandles := make(map[dirHandleKey]struct{})
+	for h, info := range handleMap {
+		var sidPtr *uint64
+		if info.sessionID > 0 {
+			sidPtr = &info.sessionID
+		}
+		_, err := m.store.GetFileHandle(ctx, db.GetFileHandleParams{
+			Fh:        int64(h.fh),
+			Ino:       int64(h.ino),
+			SessionID: toPgSessionID(sidPtr),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrBadFileHandle) {
+				deadHandles[h] = struct{}{}
+			}
+		}
+	}
+
+	expiredSessions := make(map[uint64]struct{})
+	for sid := range sessionIDsMap {
+		st, ok := statuses[sid]
+		if !ok || !st.alive {
+			expiredSessions[sid] = struct{}{}
+		}
+	}
+
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		hk := dirHandleKey{ino: r.ino, fh: r.fh}
+		if _, isDead := deadHandles[hk]; isDead {
+			r.invalidatedAll = true
+			continue
+		}
+		for sid := range expiredSessions {
+			if r.invalidatedSessions == nil {
+				r.invalidatedSessions = make(map[uint64]struct{})
+			}
+			r.invalidatedSessions[sid] = struct{}{}
+		}
+	}
+	for k, anchor := range m.dirCursors {
+		hk := dirHandleKey{ino: k.ino, fh: k.fh}
+		if _, isDead := deadHandles[hk]; isDead {
+			delete(m.dirCursors, k)
+			continue
+		}
+		if anchor.sessionID > 0 {
+			if _, queried := sessionIDsMap[anchor.sessionID]; !queried {
+				continue
+			}
+			st, ok := statuses[anchor.sessionID]
+			// 若 session 在表中不存在，或已过期 (alive == false)，或已被重建 (st.createdAt > anchor.handleCreatedAt)
+			if !ok || !st.alive || (!anchor.handleCreatedAt.IsZero() && st.createdAt.After(anchor.handleCreatedAt)) {
+				delete(m.dirCursors, k)
+			}
+		}
 	}
 }

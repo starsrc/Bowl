@@ -6,15 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	dbmock "github.com/starsrc/bowl/services/storage/internal/db/mock"
@@ -705,7 +712,7 @@ func TestReadlink_NegativeCases(t *testing.T) {
 		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
 	})
 
-	t.Run("目标节点为符号链接但 symlink_target 字段无效返回 ErrInvalidArgument", func(t *testing.T) {
+	t.Run("目标节点为符号链接但 symlink_target 字段无效返回 ErrIO 且 ToStatus 为 CodeInternal", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mgr := meta.New(mockStore)
 
@@ -719,7 +726,11 @@ func TestReadlink_NegativeCases(t *testing.T) {
 			Once()
 
 		_, err := mgr.Readlink(ctx, ino)
-		assert.ErrorIs(t, err, meta.ErrInvalidArgument)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrIO, "ADR-0007 规定损坏的空目标符号链接必须返回 ErrIO")
+		assert.NotErrorIs(t, err, meta.ErrInvalidArgument, "空符号链接属于数据损坏(EIO)，不得匹配 ErrInvalidArgument (EINVAL)")
+		st := meta.ToStatus(err)
+		assert.Equal(t, codes.Internal, st.Code(), "ADR-0007 要求损坏的空 symlink_target 必须映射为 CodeInternal (EIO)")
 	})
 
 	t.Run("底层数据库查询错误返回包装错误", func(t *testing.T) {
@@ -922,4 +933,122 @@ func TestSymlink_DiskQuotaAndRootInoInheritance(t *testing.T) {
 		assert.Contains(t, err.Error(), fmt.Sprintf("increment disk used_inodes for root_ino %d", rootIno))
 		mockQuerier.AssertExpectations(t)
 	})
+}
+
+// TestSymlink_PostgresIntegration_ReadlinkCorruptedEmptyTargetReturnsEIO 使用独立临时数据库验证损坏的符号链接（空目标或 NULL）调用 Readlink 返回 ErrIO (EIO)。
+func TestSymlink_PostgresIntegration_ReadlinkCorruptedEmptyTargetReturnsEIO(t *testing.T) {
+	dsn := getStorageTestDSN()
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Skipf("跳过集成测试: 解析 dsn 失败: %v", err)
+		return
+	}
+	host := u.Host
+	u.Path = "/postgres"
+	adminDSN := u.String()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	adminPool, err := pgxpool.New(ctx, adminDSN)
+	if err != nil {
+		t.Skipf("跳过集成测试: 连接管理库 postgres 失败: %v", err)
+		return
+	}
+	defer adminPool.Close()
+
+	if err := adminPool.Ping(ctx); err != nil {
+		t.Skipf("跳过集成测试: ping 管理库 postgres 失败: %v", err)
+		return
+	}
+
+	tempDBName := fmt.Sprintf("bowl_symlink_corrupt_%d", time.Now().UnixNano())
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s;", tempDBName))
+	require.NoError(t, err)
+
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", tempDBName))
+	}()
+
+	tempDSN := fmt.Sprintf("postgres://postgres:postgres@%s/%s?sslmode=disable", host, tempDBName)
+	tempPool, err := pgxpool.New(ctx, tempDSN)
+	require.NoError(t, err)
+	defer tempPool.Close()
+
+	// 在独立临时库中执行完整 schema 迁移
+	migrationFiles, err := filepath.Glob("../../db/migrations/*.sql")
+	require.NoError(t, err)
+	sort.Strings(migrationFiles)
+	for _, f := range migrationFiles {
+		content, err := os.ReadFile(f)
+		require.NoError(t, err)
+		parts := strings.Split(string(content), "-- +goose Down")
+		upSQL := parts[0]
+		upSQL = strings.ReplaceAll(upSQL, "-- +goose Up", "")
+		upSQL = strings.ReplaceAll(upSQL, "-- +goose StatementBegin", "")
+		upSQL = strings.ReplaceAll(upSQL, "-- +goose StatementEnd", "")
+		_, err = tempPool.Exec(ctx, strings.TrimSpace(upSQL))
+		require.NoError(t, err, "执行迁移 %s 失败", filepath.Base(f))
+	}
+
+	// 临时 DROP CHECK 约束（仅在独立临时库上操作，严禁污染共享测试主库），以便构造损坏脏数据
+	_, err = tempPool.Exec(ctx, "ALTER TABLE inodes DROP CONSTRAINT IF EXISTS chk_inodes_symlink_target;")
+	require.NoError(t, err)
+
+	store := db.NewStore(tempPool)
+	mgr := meta.New(store)
+
+	// 1. 创建测试虚拟磁盘
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-readlink-eio-%d", time.Now().UnixNano()),
+		MaxBytes: 10 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	// 2. 构造损坏节点 1：symlink_target 为空字节串
+	symEmpty, err := mgr.Symlink(ctx, meta.SymlinkParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("empty_target_link"),
+		Target:    []byte("/valid/target/empty"),
+		UID:       1000,
+		GID:       1000,
+	})
+	require.NoError(t, err)
+	tag, err := tempPool.Exec(ctx, "UPDATE inodes SET symlink_target = ''::bytea WHERE ino = $1;", int64(symEmpty.Ino))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), tag.RowsAffected())
+
+	// 3. 构造损坏节点 2：symlink_target 为 NULL
+	symNull, err := mgr.Symlink(ctx, meta.SymlinkParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("null_target_link"),
+		Target:    []byte("/valid/target/null"),
+		UID:       1000,
+		GID:       1000,
+	})
+	require.NoError(t, err)
+	tag, err = tempPool.Exec(ctx, "UPDATE inodes SET symlink_target = NULL WHERE ino = $1;", int64(symNull.Ino))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), tag.RowsAffected())
+
+	// 4. 调用 mgr.Readlink，验证两者均返回 ErrIO，不匹配 ErrInvalidArgument，且 ToStatus 为 CodeInternal
+	testCases := []struct {
+		desc string
+		ino  uint64
+	}{
+		{desc: "symlink_target 为空字节串", ino: symEmpty.Ino},
+		{desc: "symlink_target 为 NULL", ino: symNull.Ino},
+	}
+
+	for _, tc := range testCases {
+		target, err := mgr.Readlink(ctx, tc.ino)
+		require.Nil(t, target, tc.desc)
+		require.Error(t, err, tc.desc)
+		assert.True(t, errors.Is(err, meta.ErrIO), "%s 损坏符号链接必须返回 ErrIO，实际为: %v", tc.desc, err)
+		assert.False(t, errors.Is(err, meta.ErrInvalidArgument), "%s 损坏符号链接不得匹配 ErrInvalidArgument", tc.desc)
+		st := meta.ToStatus(err)
+		assert.Equal(t, codes.Internal, st.Code(), "%s 损坏符号链接必须映射为 CodeInternal (EIO)", tc.desc)
+	}
 }

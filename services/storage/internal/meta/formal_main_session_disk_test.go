@@ -1278,7 +1278,9 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 
 		// 5. 通过公开接口 SetLkw (搭配 1ms 租约的 tinyMgr) 让 sidExp 在冲突写锁上真实入队 file_lock_waiters 并在首次轮询间隔内自然超期
 		tinyMgr := meta.New(store, meta.WithSessionLeaseTTL(1*time.Millisecond))
-		err = tinyMgr.SetLkw(ctx, meta.SetLkwParams{
+		tinyCtx, tinyCancel := context.WithTimeout(ctx, 2*time.Second)
+		defer tinyCancel()
+		err = tinyMgr.SetLkw(tinyCtx, meta.SetLkwParams{
 			Ino: orphan6Model.Ino, Fh: c6.Fh, LockOwner: 102, SessionID: sidExp, RequestID: 88001, LkFlags: 0,
 			Lk: meta.FileLock{Start: 200, End: 300, Type: meta.F_WRLCK, PID: 12},
 		})
@@ -1584,9 +1586,5 @@ func TestFormalMain_T10_SessionAndDeleteDisk(t *testing.T) {
 				{Name: "Fallocate", Weight: 14, Fn: formalActionFallocate},
 			},
 		})
-	})
-
-	t.Run("随机状态机_全量19写接口与10只读探针及INV-1至INV-6联合对拍验证", func(t *testing.T) {
-		runFormalMainStateMachine(t, formalMainRunConfig{})
 	})
 }

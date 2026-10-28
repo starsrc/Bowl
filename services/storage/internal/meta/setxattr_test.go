@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
@@ -770,5 +773,271 @@ func TestSetXattr_DatabaseErrors(t *testing.T) {
 		err := mgr.SetXattr(ctx, meta.SetXattrParams{Ino: 1, Name: []byte("user.t"), Value: []byte("v"), Flags: 0})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "touch inode ctime")
+	})
+}
+
+// TestSetXattr_Integration_MaxXattrListBytesBoundary 基于真实 PostgreSQL 验证：
+// SetXattr 触及 MaxXattrListBytes (65536) 含 + 1 NUL 计费临界值（恰好 65536 成功、超出返回 ErrNoSpace）。
+func TestSetXattr_Integration_MaxXattrListBytesBoundary(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	ctx := context.Background()
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     "test-xattr-boundary-disk",
+		MaxBytes: 10 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+	})
+
+	mknodRes, err := mgr.Mknod(ctx, meta.MknodParams{
+		ParentIno: disk.RootIno,
+		Name:      []byte("xattr_boundary_file.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+	})
+	require.NoError(t, err)
+	ino := mknodRes.Ino
+
+	// 1. 连续插入 255 个长度为 255 字节的属性（每个属性计费 255 + 1 = 256 字节）
+	// 255 * 256 = 65280 字节，剩余配额为 65536 - 65280 = 256 字节
+	for i := 0; i < 255; i++ {
+		// 构造 255 字节的合法 user.* 属性名
+		name := []byte(fmt.Sprintf("user.key_%03d_%s", i, bytes.Repeat([]byte("a"), 242)))
+		require.Len(t, name, 255)
+		err := mgr.SetXattr(ctx, meta.SetXattrParams{
+			Ino:   ino,
+			Name:  name,
+			Value: []byte("v"),
+			Flags: meta.XattrCreate,
+		})
+		require.NoError(t, err, "插入第 %d 个 xattr 必须成功", i)
+	}
+
+	// 2. 插入第 256 个属性，长度恰好为 255 字节（计费 255 + 1 = 256 字节）
+	// 总字节数累计达到 65280 + 256 = 65536 字节，恰好等于 MaxXattrListBytes
+	nameExact := []byte(fmt.Sprintf("user.exact_%s", bytes.Repeat([]byte("b"), 244)))
+	require.Len(t, nameExact, 255)
+	err = mgr.SetXattr(ctx, meta.SetXattrParams{
+		Ino:   ino,
+		Name:  nameExact,
+		Value: []byte("exact-val"),
+		Flags: meta.XattrCreate,
+	})
+	require.NoError(t, err, "恰好达到 65536 字节上限必须成功")
+
+	// 验证底表统计正好为 65536 字节
+	totalBytes, err := store.GetInodeXattrNamesTotalBytes(ctx, int64(ino))
+	require.NoError(t, err)
+	assert.Equal(t, int64(meta.MaxXattrListBytes), totalBytes, "底表扩展属性名称总计费必须精确为 65536 字节")
+
+	// 3. 此时配额已满，再次尝试新增任意属性（超出 1 字节及以上）必返回 ErrNoSpace
+	err = mgr.SetXattr(ctx, meta.SetXattrParams{
+		Ino:   ino,
+		Name:  []byte("user.overflow"),
+		Value: []byte("val"),
+		Flags: meta.XattrCreate,
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, meta.ErrNoSpace), "超出 65536 上限时必须返回 ErrNoSpace")
+
+	// 4. 对已有属性执行覆盖更新（不增加名称长度），必须依然成功
+	err = mgr.SetXattr(ctx, meta.SetXattrParams{
+		Ino:   ino,
+		Name:  nameExact,
+		Value: []byte("updated-exact-val"),
+		Flags: meta.XattrReplace,
+	})
+	require.NoError(t, err, "满额状态下对已有属性执行 Replace 覆盖写必须成功")
+}
+
+// TestSetXattr_Integration_ConcurrentQuotaAndCreateExclusivity 基于真实 PostgreSQL 验证：
+// 1. 子场景 A：MaxXattrListBytes (65536 字节) 最后一份配额 (256 字节) 的双并发争抢原子性（恰好 1 成功 1 ErrNoSpace，总容量严格锁定 65536 字节）；
+// 2. 子场景 B：同名属性多协程并发 XATTR_CREATE 的排他性（恰好 1 成功 N-1 ErrAlreadyExists，且最终内容无并发写偏序覆盖）。
+func TestSetXattr_Integration_ConcurrentQuotaAndCreateExclusivity(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	ctx := context.Background()
+	store := db.NewStore(pool)
+	mgr := meta.New(store)
+
+	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("test-xattr-concurrent-quota-excl-%d", time.Now().UnixNano()),
+		MaxBytes: 20 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	// 在 t.Cleanup 中仅按专属 root_ino 清理 disks 与 inodes，严禁全表 TRUNCATE
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = mgr.DeleteDisk(cleanupCtx, disk.DiskID)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM inodes WHERE root_ino = $1", disk.RootIno)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM disks WHERE disk_id = $1", disk.DiskID)
+	})
+
+	// 辅助函数：构造严格为 255 字节的 user.* 属性名（计费恰好为 255 + 1 = 256 字节）
+	make255ByteName := func(prefix string) []byte {
+		padLen := 255 - len(prefix)
+		require.GreaterOrEqual(t, padLen, 0, "前缀不能超过 255 字节")
+		return append([]byte(prefix), bytes.Repeat([]byte("z"), padLen)...)
+	}
+
+	t.Run("子场景 A: MaxXattrListBytes 最后一份配额双并发争抢", func(t *testing.T) {
+		const rounds = 2
+		for round := 0; round < rounds; round++ {
+			mknodRes, err := mgr.Mknod(ctx, meta.MknodParams{
+				ParentIno: disk.RootIno,
+				Name:      []byte(fmt.Sprintf("quota_race_%d.bin", round)),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+			fileIno := mknodRes.Ino
+
+			// 1. 预先写入 255 个不同名称的 255 字节扩展属性
+			// 计费为 255 * (255 + 1) = 65280 字节，距离 MaxXattrListBytes (65536) 恰好剩余 256 字节
+			for i := 0; i < 255; i++ {
+				name := make255ByteName(fmt.Sprintf("user.pre_%03d_%d_", i, round))
+				require.Len(t, name, 255)
+				err := mgr.SetXattr(ctx, meta.SetXattrParams{
+					Ino:   fileIno,
+					Name:  name,
+					Value: []byte("v"),
+					Flags: meta.XattrCreate,
+				})
+				require.NoError(t, err, "round %d: 预填第 %d 个 xattr 必须成功", round, i)
+			}
+
+			// 确认当前底表名称计费严格为 65280 字节
+			preTotal, err := store.GetInodeXattrNamesTotalBytes(ctx, int64(fileIno))
+			require.NoError(t, err)
+			require.Equal(t, int64(65280), preTotal, "round %d: 预填后底表计费必须为 65280 字节", round)
+
+			// 2. 构造两个不同名称的 255 字节候选属性（各自需计费 256 字节）
+			nameA := make255ByteName(fmt.Sprintf("user.race_a_%d_", round))
+			nameB := make255ByteName(fmt.Sprintf("user.race_b_%d_", round))
+			require.Len(t, nameA, 255)
+			require.Len(t, nameB, 255)
+
+			startCh := make(chan struct{})
+			var wg sync.WaitGroup
+			var errA, errB error
+
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-startCh
+				errA = mgr.SetXattr(ctx, meta.SetXattrParams{
+					Ino:   fileIno,
+					Name:  nameA,
+					Value: []byte("val-a"),
+					Flags: meta.XattrCreate,
+				})
+			}()
+			go func() {
+				defer wg.Done()
+				<-startCh
+				errB = mgr.SetXattr(ctx, meta.SetXattrParams{
+					Ino:   fileIno,
+					Name:  nameB,
+					Value: []byte("val-b"),
+					Flags: meta.XattrCreate,
+				})
+			}()
+
+			close(startCh)
+			wg.Wait()
+
+			// 3. 严格断言：必须恰好 1 个成功（返回 nil），另 1 个必须返回 ErrNoSpace
+			var successCount, noSpaceCount int
+			for _, opErr := range []error{errA, errB} {
+				if opErr == nil {
+					successCount++
+				} else if errors.Is(opErr, meta.ErrNoSpace) {
+					noSpaceCount++
+				} else {
+					t.Fatalf("round %d: 并发 SetXattr 收到非预期错误: %v", round, opErr)
+				}
+			}
+			require.Equal(t, 1, successCount, "round %d: 两个并发请求中必须恰好 1 个成功返回 nil", round)
+			require.Equal(t, 1, noSpaceCount, "round %d: 两个并发请求中另 1 个必须返回 ErrNoSpace", round)
+
+			// 4. 底表直接查询：总字节数严格等于 65536 字节
+			totalBytes, err := store.GetInodeXattrNamesTotalBytes(ctx, int64(fileIno))
+			require.NoError(t, err)
+			assert.Equal(t, int64(meta.MaxXattrListBytes), totalBytes, "round %d: 底表计费必须精确为 65536 字节", round)
+
+			// 5. ListXattr 统计校验：属性数量严格为 256，总计费字节数严格等于 65536
+			listNames, err := mgr.ListXattr(ctx, fileIno)
+			require.NoError(t, err)
+			assert.Len(t, listNames, 256, "round %d: 属性列表数量必须严格等于 256", round)
+			var listTotalBytes int
+			for _, n := range listNames {
+				listTotalBytes += len(n) + 1
+			}
+			assert.Equal(t, meta.MaxXattrListBytes, listTotalBytes, "round %d: ListXattr 返回的总计费字节数必须严格等于 65536 字节", round)
+		}
+	})
+
+	t.Run("子场景 B: 同名属性多协程并发 XATTR_CREATE 原子互斥", func(t *testing.T) {
+		const rounds = 3
+		const N = 8
+
+		for round := 0; round < rounds; round++ {
+			mknodRes, err := mgr.Mknod(ctx, meta.MknodParams{
+				ParentIno: disk.RootIno,
+				Name:      []byte(fmt.Sprintf("concurrent_create_%d.bin", round)),
+				Mode:      meta.S_IFREG | 0o644,
+			})
+			require.NoError(t, err)
+			fileIno := mknodRes.Ino
+
+			targetAttr := []byte("user.concurrent.create")
+
+			startCh := make(chan struct{})
+			var wg sync.WaitGroup
+			results := make([]error, N)
+
+			for i := 0; i < N; i++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					<-startCh
+					results[idx] = mgr.SetXattr(ctx, meta.SetXattrParams{
+						Ino:   fileIno,
+						Name:  targetAttr,
+						Value: []byte(fmt.Sprintf("payload-%d-%d", round, idx)),
+						Flags: meta.XattrCreate,
+					})
+				}(i)
+			}
+
+			close(startCh)
+			wg.Wait()
+
+			// 严格断言：N 个协程中必须恰好 1 个返回 nil，其余 N-1 个协程全部返回 ErrAlreadyExists
+			var successCount, alreadyExistsCount int
+			var winnerIdx = -1
+			for idx, opErr := range results {
+				if opErr == nil {
+					successCount++
+					winnerIdx = idx
+				} else if errors.Is(opErr, meta.ErrAlreadyExists) {
+					alreadyExistsCount++
+				} else {
+					t.Fatalf("round %d: 协程 %d 返回非预期错误: %v", round, idx, opErr)
+				}
+			}
+
+			require.Equal(t, 1, successCount, "round %d: N 个协程中必须恰好仅有 1 个返回 nil", round)
+			require.Equal(t, N-1, alreadyExistsCount, "round %d: 其余 N-1 个协程必须全部返回 ErrAlreadyExists", round)
+			require.True(t, winnerIdx >= 0, "round %d: 必须有获胜协程索引", round)
+
+			// 读回属性值严格校验：必须与唯一获胜协程写入的 Value 完全一致
+			gotVal, err := mgr.GetXattr(ctx, fileIno, targetAttr)
+			require.NoError(t, err)
+			expectedVal := []byte(fmt.Sprintf("payload-%d-%d", round, winnerIdx))
+			require.Equal(t, expectedVal, gotVal, "round %d: 读回的属性值必须严格等于获胜协程写入的 Value", round)
+		}
 	})
 }

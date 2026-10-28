@@ -1,36 +1,22 @@
 -- +goose Up
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION pg_temp.decode_symlink_target_to_bytea(t text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE AS $$
-DECLARE
-    res bytea := ''::bytea;
-    i int;
-    ch text;
-    ch_code int;
-BEGIN
-    IF t IS NULL THEN
-        RETURN NULL;
-    END IF;
-    IF t !~ '[\uE000-\uE0FF]' THEN
-        RETURN convert_to(t, 'UTF8');
-    END IF;
-
-    FOR i IN 1 .. char_length(t) LOOP
-        ch := substr(t, i, 1);
-        ch_code := ascii(ch);
-        IF ch_code BETWEEN 57344 AND 57599 THEN
-            res := res || set_byte('\x00'::bytea, 0, ch_code - 57344);
-        ELSE
-            res := res || convert_to(ch, 'UTF8');
-        END IF;
-    END LOOP;
-    RETURN res;
-END;
-$$;
-
 ALTER TABLE inodes DROP CONSTRAINT IF EXISTS chk_inodes_symlink_target;
 
 ALTER TABLE inodes
-    ALTER COLUMN symlink_target TYPE BYTEA USING pg_temp.decode_symlink_target_to_bytea(symlink_target);
+    ALTER COLUMN symlink_target TYPE BYTEA USING convert_to(symlink_target, 'UTF8');
+
+-- 若存在 Down 阶段备份的原始 bytea 辅助表，从辅助表中 100% 字节级无损还原
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_rollback_symlink_target_backup') THEN
+        UPDATE inodes i
+        SET symlink_target = b.raw_target,
+            size = octet_length(b.raw_target)
+        FROM _rollback_symlink_target_backup b
+        WHERE i.ino = b.ino;
+        DROP TABLE _rollback_symlink_target_backup;
+    END IF;
+END $$;
 
 -- 将旧版允许的 4096 字节符号链接目标截断收敛至 4095 字节（PATH_MAX - 1），避免存量合法数据导致迁移失败
 UPDATE inodes
@@ -54,37 +40,32 @@ ALTER TABLE inodes ADD CONSTRAINT chk_inodes_symlink_target CHECK (
 
 -- +goose Down
 -- +goose StatementBegin
+CREATE TABLE IF NOT EXISTS _rollback_symlink_target_backup (
+    ino BIGINT PRIMARY KEY,
+    raw_target BYTEA NOT NULL
+);
+
+INSERT INTO _rollback_symlink_target_backup (ino, raw_target)
+SELECT ino, symlink_target FROM inodes WHERE symlink_target IS NOT NULL
+ON CONFLICT (ino) DO UPDATE SET raw_target = EXCLUDED.raw_target;
+
 CREATE OR REPLACE FUNCTION pg_temp.encode_symlink_target_to_text(b bytea) RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE
     res text;
-    i int;
-    byte_val int;
 BEGIN
     IF b IS NULL THEN
         RETURN NULL;
     END IF;
     BEGIN
         res := convert_from(b, 'UTF8');
-        IF res !~ '[\uE000-\uE0FF]' THEN
+        IF octet_length(res) <= 4096 AND length(res) <= 4096 THEN
             RETURN res;
         END IF;
     EXCEPTION WHEN character_not_in_repertoire THEN
         NULL;
     END;
 
-    res := '';
-    FOR i IN 0 .. octet_length(b) - 1 LOOP
-        byte_val := get_byte(b, i);
-        IF byte_val BETWEEN 1 AND 127 THEN
-            res := res || chr(byte_val);
-        ELSE
-            res := res || chr(57344 + byte_val);
-        END IF;
-    END LOOP;
-    WHILE octet_length(res) > 4096 LOOP
-        res := left(res, char_length(res) - GREATEST(1, (octet_length(res) - 4096) / 3));
-    END LOOP;
-    RETURN res;
+    RETURN left(encode(b, 'escape'), 4096);
 END;
 $$;
 

@@ -940,7 +940,7 @@ func TestFormalLock_T12_FlockOrthogonality(t *testing.T) {
 
 			for step := 1; step <= cfg.Steps; step++ {
 				stepFormalLockT12Action(t, env, rng, step)
-				verifyFormalLockT12GetLkProbes(t, env, rng)
+				verifyFormalLockT12GetLkProbes(t, env, env.ProbeRNG)
 				auditFormalLockInv2(t, env)
 			}
 

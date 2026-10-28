@@ -171,24 +171,38 @@ WITH RECURSIVE ancestors AS (
     FROM entries e
     JOIN ancestors a ON e.ino = a.parent_ino
     WHERE NOT a.has_cycle
+),
+locked_ancestors AS MATERIALIZED (
+    SELECT i.ino, i.parent_ino
+    FROM inodes i
+    WHERE i.ino IN (SELECT parent_ino FROM ancestors)
+    ORDER BY i.ino ASC
+    FOR SHARE NOWAIT
 )
 SELECT COALESCE((@child_ino::bigint = @ancestor_ino::bigint) OR EXISTS (
     SELECT 1 FROM ancestors WHERE parent_ino = @ancestor_ino::bigint OR has_cycle
+) OR EXISTS (
+    SELECT 1 FROM locked_ancestors WHERE ino = @ancestor_ino::bigint OR parent_ino = @ancestor_ino::bigint
 ), false)::boolean AS is_sub;
 
 -- name: CreateFileHandle :one
-INSERT INTO file_handles (ino, flags, session_id)
-VALUES ($1, $2, $3)
+INSERT INTO file_handles (ino, flags, session_id, created_at)
+VALUES ($1, $2, $3, clock_timestamp())
 RETURNING *;
 
 -- name: HasFileHandlesByIno :one
-SELECT EXISTS (
+SELECT ((EXISTS (
     SELECT 1
     FROM file_handles fh
     LEFT JOIN client_sessions s ON fh.session_id = s.session_id
     WHERE fh.ino = $1
       AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
-);
+)) OR (EXISTS (
+    SELECT 1
+    FROM inodes i
+    WHERE i.ino = $1
+      AND i.nlink > 0
+)))::boolean;
 
 -- name: GetFileHandle :one
 SELECT fh.*
@@ -218,20 +232,30 @@ SET flags = flags & ~4194304 -- 4194304 = 0o20000000 (O_TMPFILE)
 WHERE ino = $1;
 
 -- name: DeleteFileHandle :one
-DELETE FROM file_handles fh
-WHERE fh.fh = $1
-  AND fh.ino = $2
-  AND fh.session_id IS NOT DISTINCT FROM sqlc.narg('session_id')
-  AND (
-      fh.session_id IS NULL
-      OR EXISTS (
-          SELECT 1
-          FROM client_sessions s
-          WHERE s.session_id = fh.session_id
-            AND s.expires_at > clock_timestamp()
+WITH deleted_handle AS (
+    DELETE FROM file_handles fh
+    WHERE fh.fh = $1
+      AND fh.ino = $2
+      AND fh.session_id IS NOT DISTINCT FROM sqlc.narg('session_id')
+      AND (
+          fh.session_id IS NULL
+          OR EXISTS (
+              SELECT 1
+              FROM client_sessions s
+              WHERE s.session_id = fh.session_id
+                AND s.expires_at > clock_timestamp()
+          )
       )
-  )
-RETURNING fh.fh;
+    RETURNING fh.fh, fh.ino, fh.session_id
+),
+deleted_waiters AS (
+    DELETE FROM file_lock_waiters w
+    USING deleted_handle dh
+    WHERE w.ino = dh.ino
+      AND w.fh = dh.fh
+      AND (dh.session_id IS NULL OR w.session_id = dh.session_id)
+)
+SELECT fh FROM deleted_handle;
 
 -- name: DeleteInode :exec
 DELETE FROM inodes
@@ -339,12 +363,40 @@ DELETE FROM client_sessions
 WHERE expires_at <= clock_timestamp();
 
 -- name: UpsertClientSession :one
-WITH ts AS (SELECT clock_timestamp() AS now)
+WITH ts AS (
+    SELECT clock_timestamp() AS now
+),
+expired_target AS MATERIALIZED (
+    SELECT s.session_id
+    FROM client_sessions s, ts
+    WHERE s.session_id = $1
+      AND s.expires_at <= ts.now
+    FOR UPDATE OF s
+),
+purged_locks AS (
+    DELETE FROM file_locks
+    WHERE session_id IN (SELECT session_id FROM expired_target)
+),
+purged_waiters AS (
+    DELETE FROM file_lock_waiters
+    WHERE session_id IN (SELECT session_id FROM expired_target)
+),
+purged_handles AS (
+    DELETE FROM file_handles
+    WHERE session_id IN (SELECT session_id FROM expired_target)
+)
 INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
 SELECT $1, $2, ts.now, ts.now FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
-    updated_at = (SELECT now FROM ts)
+    created_at = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
+        ELSE client_sessions.created_at
+    END,
+    updated_at = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
+        ELSE GREATEST((SELECT now FROM ts), client_sessions.created_at + interval '1 microsecond')
+    END
 RETURNING session_id, expires_at, updated_at, created_at;
 
 -- name: DeleteUnreferencedOrphanInodes :many
@@ -356,9 +408,7 @@ WHERE ino IN (
       AND NOT EXISTS (
           SELECT 1
           FROM file_handles fh
-          LEFT JOIN client_sessions s ON fh.session_id = s.session_id
           WHERE fh.ino = i.ino
-            AND (fh.session_id IS NULL OR s.expires_at > clock_timestamp())
       )
     FOR UPDATE SKIP LOCKED
 )
@@ -405,17 +455,44 @@ DELETE FROM file_locks
 WHERE id = ANY(@ids::bigint[]);
 
 -- name: DeletePosixFileLocksBySessionAndOwner :execrows
-DELETE FROM file_locks
-WHERE session_id = @session_id
-  AND ino = @ino
-  AND lock_owner = @lock_owner
-  AND lk_flags = 0;
+WITH deleted_waiters AS (
+    DELETE FROM file_lock_waiters w
+    WHERE w.session_id = @session_id
+      AND w.ino = @ino
+      AND w.lock_owner = @lock_owner
+      AND w.lk_flags = 0
+)
+DELETE FROM file_locks fl
+WHERE fl.session_id = @session_id
+  AND fl.ino = @ino
+  AND fl.lock_owner = @lock_owner
+  AND fl.lk_flags = 0;
 
 -- name: DeletePosixFileLocksByOwner :execrows
-DELETE FROM file_locks
-WHERE ino = @ino
-  AND lock_owner = @lock_owner
-  AND lk_flags = 0;
+WITH deleted_waiters AS (
+    DELETE FROM file_lock_waiters w
+    WHERE w.ino = @ino
+      AND w.lock_owner = @lock_owner
+      AND w.lk_flags = 0
+      AND EXISTS (
+          SELECT 1
+          FROM file_handles fh
+          WHERE fh.fh = w.fh
+            AND fh.ino = w.ino
+            AND fh.session_id IS NULL
+      )
+)
+DELETE FROM file_locks fl
+WHERE fl.ino = @ino
+  AND fl.lock_owner = @lock_owner
+  AND fl.lk_flags = 0
+  AND EXISTS (
+      SELECT 1
+      FROM file_handles fh
+      WHERE fh.fh = fl.fh
+        AND fh.ino = fl.ino
+        AND fh.session_id IS NULL
+  );
 
 -- name: DeleteFlockFileLocksBySessionAndFh :execrows
 DELETE FROM file_locks
@@ -464,44 +541,15 @@ RETURNING session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, e
 DELETE FROM file_lock_waiters
 WHERE session_id = @session_id AND request_id = @request_id;
 
--- name: DeleteFlockFileLockWaitersBySessionAndFh :execrows
-DELETE FROM file_lock_waiters
-WHERE session_id = @session_id
-  AND ino = @ino
-  AND fh = @fh
-  AND lk_flags = 1;
-
--- name: DeleteFlockFileLockWaitersByFh :execrows
-DELETE FROM file_lock_waiters
-WHERE ino = @ino
-  AND fh = @fh
-  AND lk_flags = 1;
-
--- name: DeletePosixFileLockWaitersBySessionAndOwner :execrows
-DELETE FROM file_lock_waiters
-WHERE session_id = @session_id
-  AND ino = @ino
-  AND lock_owner = @lock_owner
-  AND lk_flags = 0;
-
--- name: DeletePosixFileLockWaitersByOwner :execrows
-DELETE FROM file_lock_waiters
-WHERE ino = @ino
-  AND lock_owner = @lock_owner
-  AND lk_flags = 0;
-
--- name: DeleteOverlappingPosixFileLockWaiters :execrows
-DELETE FROM file_lock_waiters
-WHERE session_id = @session_id
-  AND ino = @ino
-  AND lock_owner = @lock_owner
-  AND lk_flags = 0
-  AND start_offset <= @end_offset
-  AND end_offset >= @start_offset;
-
 -- name: DeleteInodesByRootIno :many
 DELETE FROM inodes
-WHERE root_ino = $1
+WHERE ino IN (
+    SELECT i.ino
+    FROM inodes i
+    WHERE i.root_ino = $1
+    ORDER BY i.ino ASC
+    FOR UPDATE
+)
 RETURNING ino;
 
 -- name: CreateDisk :one
@@ -532,10 +580,23 @@ FROM disks
 WHERE disk_id = $1;
 
 -- name: GetDiskForUpdate :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE disk_id = $1
-FOR UPDATE;
+WITH target_disk AS MATERIALIZED (
+    SELECT root_ino
+    FROM disks
+    WHERE disk_id = $1
+),
+locked_inodes AS MATERIALIZED (
+    SELECT ino
+    FROM inodes
+    WHERE root_ino = (SELECT root_ino FROM target_disk)
+    ORDER BY ino ASC
+    FOR UPDATE
+)
+SELECT d.disk_id, d.name, d.root_ino, d.max_bytes, d.used_bytes, d.used_inodes, d.created_at, d.updated_at
+FROM (SELECT COUNT(*) FROM locked_inodes) li
+CROSS JOIN disks d
+WHERE d.disk_id = $1
+FOR UPDATE OF d;
 
 -- name: GetDiskByRootIno :one
 SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at

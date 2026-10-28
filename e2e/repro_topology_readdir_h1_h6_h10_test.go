@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -592,6 +593,14 @@ func TestE2E_H10_ConcurrentLinearizabilityAndStrictContract(t *testing.T) {
 			} else {
 				testutil.RequireConnectError(t, lookupErr, connect.CodeNotFound, "ENOENT")
 			}
+
+			// 补充对原目录项 "y" 的 Lookup 断言：无论哪种合法串行顺序（被覆盖或删除的节点 nlink == 0 时），
+			// 目录项 "y" 均绝不能残留悬挂目录项，必须返回 connect.CodeNotFound
+			_, lookupYErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+				ParentIno: subDirIno,
+				Name:      []byte("y"),
+			}))
+			testutil.RequireConnectError(t, lookupYErr, connect.CodeNotFound, "ENOENT")
 		}
 	})
 
@@ -621,15 +630,18 @@ func TestE2E_H10_ConcurrentLinearizabilityAndStrictContract(t *testing.T) {
 			var wg sync.WaitGroup
 			startCh := make(chan struct{})
 			stopCh := make(chan struct{})
+			readerReady := make(chan struct{})
+			var readyOnce sync.Once
+			var getAttrCount atomic.Uint64
 
-			// Goroutine 1：先微等 200 微秒确保 12 个 GetAttr 协程已全部处于高频飞行状态，
+			// Goroutine 1：通过 readerReady 通道握手等待 GetAttr 观察协程完成首次 RPC 探测，
 			// 随后立即连续调用 Link (使 nlink 变为 1) 与 Release 关闭句柄，并在 Release 返回后 close(stopCh)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				defer close(stopCh)
 				<-startCh
-				time.Sleep(200 * time.Microsecond)
+				<-readerReady
 				linkName := fmt.Sprintf("linked_tmp_r%d", round)
 				_, linkErr = client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
 					Ino:          tmpIno,
@@ -662,6 +674,10 @@ func TestE2E_H10_ConcurrentLinearizabilityAndStrictContract(t *testing.T) {
 						gResp, gErr := client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
 							Ino: tmpIno,
 						}))
+						getAttrCount.Add(1)
+						readyOnce.Do(func() {
+							close(readerReady)
+						})
 						if gErr != nil {
 							select {
 							case errCh <- gErr:
@@ -686,6 +702,7 @@ func TestE2E_H10_ConcurrentLinearizabilityAndStrictContract(t *testing.T) {
 
 			require.NoError(t, linkErr, "轮次 %d: Link 必须成功", round)
 			require.NoError(t, relErr, "轮次 %d: Release 必须成功", round)
+			require.Greater(t, getAttrCount.Load(), uint64(0), "轮次 %d: GetAttr 探测次数必须 > 0", round)
 
 			// 线性一致性严格核验：
 			// 文件先 Link 成功（nlink=1）后 Release 句柄，全程合法存活，GetAttr 绝不能返回 ENOENT
@@ -837,6 +854,19 @@ func TestE2E_H10_ConcurrentLinearizabilityAndStrictContract(t *testing.T) {
 			finalIno := lookupResp.Msg.GetInode().GetIno()
 			require.True(t, finalIno == aIno || finalIno == bIno,
 				"轮次 %d: 目录项 'x' 必须指向 aIno (%d) 或 bIno (%d)，实际指向 %d", round, aIno, bIno, finalIno)
+
+			// 补充对源目录项 "a" 和 "b" 的 Lookup 断言：两者必须均返回 connect.CodeNotFound，严禁仅断言目标存在而漏检源目录项残留
+			_, errLookupA := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+				ParentIno: subDirIno,
+				Name:      []byte("a"),
+			}))
+			testutil.RequireConnectError(t, errLookupA, connect.CodeNotFound, "ENOENT")
+
+			_, errLookupB := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+				ParentIno: subDirIno,
+				Name:      []byte("b"),
+			}))
+			testutil.RequireConnectError(t, errLookupB, connect.CodeNotFound, "ENOENT")
 		}
 	})
 }

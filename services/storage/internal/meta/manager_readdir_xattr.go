@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -13,33 +14,51 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
-// validateDirHandle 校验目录会话有效性，确认 Inode 存在、为目录且 FileHandle 属于该 Inode。
-func (m *manager) validateDirHandle(ctx context.Context, q db.Querier, ino, fh uint64, sessionID *uint64) (*db.Inode, error) {
+type pendingDirCursor struct {
+	ino              uint64
+	fh               uint64
+	nextOffset       uint64
+	lastName         []byte
+	sqlOffset        int64
+	dirMutated       bool
+	sessionID        uint64
+	handleCreatedAt  time.Time
+	startMutationSeq uint64
+}
+
+// validateDirHandleWithHandle 校验目录会话有效性，确认 Inode 存在、为目录且 FileHandle 属于该 Inode，并返回 FileHandle 元数据。
+func (m *manager) validateDirHandleWithHandle(ctx context.Context, q db.Querier, ino, fh uint64, sessionID *uint64) (*db.Inode, *db.FileHandle, error) {
 	dirInode, err := q.GetInode(ctx, int64(ino))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("get dir inode %d: %w", ino, err)
+		return nil, nil, fmt.Errorf("get dir inode %d: %w", ino, err)
 	}
 
 	if (uint32(dirInode.Mode) & S_IFMT) != S_IFDIR {
-		return nil, ErrNotDir
+		return nil, nil, ErrNotDir
 	}
 
-	_, err = q.GetFileHandle(ctx, db.GetFileHandleParams{
+	handle, err := q.GetFileHandle(ctx, db.GetFileHandleParams{
 		Fh:        int64(fh),
 		Ino:       int64(ino),
 		SessionID: toPgSessionID(sessionID),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrBadFileHandle
+			return nil, nil, ErrBadFileHandle
 		}
-		return nil, fmt.Errorf("get file handle (fh=%d, ino=%d): %w", fh, ino, err)
+		return nil, nil, fmt.Errorf("get file handle (fh=%d, ino=%d): %w", fh, ino, err)
 	}
 
-	return &dirInode, nil
+	return &dirInode, &handle, nil
+}
+
+// validateDirHandle 校验目录会话有效性，保持既有接口签名供外部模块复用。
+func (m *manager) validateDirHandle(ctx context.Context, q db.Querier, ino, fh uint64, sessionID *uint64) (*db.Inode, error) {
+	inode, _, err := m.validateDirHandleWithHandle(ctx, q, ino, fh, sessionID)
+	return inode, err
 }
 
 // ReadDir 读取指定目录的子项流（基本条目），支持确定性分页游标与 . / .. 合成。
@@ -54,9 +73,14 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		return nil, err
 	}
 
+	readID := m.beginDirCursorRead(params.Ino, params.Fh)
+	defer m.endDirCursorRead(readID)
+	startMutationSeq := m.getDirMutationSeq(params.Ino)
+
 	var entries []DirEntry
+	var pendingCursors []pendingDirCursor
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
+		dirInode, handle, err := m.validateDirHandleWithHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
 		if err != nil {
 			return err
 		}
@@ -64,6 +88,15 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		if dirInode.Nlink == 0 {
 			entries = []DirEntry{}
 			return nil
+		}
+
+		var sid uint64
+		if handle.SessionID.Valid && handle.SessionID.Int64 > 0 {
+			sid = uint64(handle.SessionID.Int64)
+		}
+		var handleCreatedAt time.Time
+		if handle.CreatedAt.Valid {
+			handleCreatedAt = handle.CreatedAt.Time
 		}
 
 		rem := int(params.Limit)
@@ -98,26 +131,79 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 		}
 
 		if rem > 0 {
-			var sqlOffset int64
-			if params.Offset >= 2 {
-				sqlOffset = int64(params.Offset - 2)
-			}
-			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
-				ParentIno: int64(params.Ino),
-				Limit:     int32(rem),
-				Offset:    sqlOffset,
-			})
-			if err != nil {
-				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+			var anchor dirCursorAnchor
+			var anchorOk bool
+			if params.Offset >= 3 {
+				anchor, anchorOk = m.lookupDirCursorAnchor(params.Ino, params.Fh, params.Offset)
 			}
 
-			for i, row := range rows {
-				entries = append(entries, DirEntry{
-					Ino:        uint64(row.Ino),
-					Name:       row.Name,
-					Mode:       uint32(row.Mode),
-					NextOffset: uint64(sqlOffset) + uint64(i) + 3,
+			if anchorOk && anchor.dirMutated && len(anchor.lastName) > 0 {
+				rows, err := q.ListDirEntriesAfterName(ctx, db.ListDirEntriesAfterNameParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					AfterName: anchor.lastName,
 				})
+				if err != nil {
+					return fmt.Errorf("list dir entries after name for parent %d (limit=%d, after=%s): %w", params.Ino, rem, string(anchor.lastName), err)
+				}
+
+				for i, row := range rows {
+					nextOffset := params.Offset + uint64(i) + 1
+					entries = append(entries, DirEntry{
+						Ino:        uint64(row.Ino),
+						Name:       row.Name,
+						Mode:       uint32(row.Mode),
+						NextOffset: nextOffset,
+					})
+					pendingCursors = append(pendingCursors, pendingDirCursor{
+						ino:              params.Ino,
+						fh:               params.Fh,
+						nextOffset:       nextOffset,
+						lastName:         row.Name,
+						sqlOffset:        int64(nextOffset - 2),
+						dirMutated:       true,
+						sessionID:        sid,
+						handleCreatedAt:  handleCreatedAt,
+						startMutationSeq: startMutationSeq,
+					})
+				}
+			} else {
+				var sqlOffset int64
+				if params.Offset >= 2 {
+					sqlOffset = m.getDirCursorOffset(params.Ino, params.Fh, params.Offset)
+				}
+				rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					Offset:    sqlOffset,
+				})
+				if err != nil {
+					return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+				}
+
+				for i, row := range rows {
+					nextOffset := uint64(sqlOffset) + uint64(i) + 3
+					if params.Offset >= 2 && uint64(sqlOffset)+2 != params.Offset {
+						nextOffset = max(nextOffset, params.Offset+uint64(i)+1)
+					}
+					entries = append(entries, DirEntry{
+						Ino:        uint64(row.Ino),
+						Name:       row.Name,
+						Mode:       uint32(row.Mode),
+						NextOffset: nextOffset,
+					})
+					pendingCursors = append(pendingCursors, pendingDirCursor{
+						ino:              params.Ino,
+						fh:               params.Fh,
+						nextOffset:       nextOffset,
+						lastName:         row.Name,
+						sqlOffset:        sqlOffset + int64(i) + 1,
+						dirMutated:       false,
+						sessionID:        sid,
+						handleCreatedAt:  handleCreatedAt,
+						startMutationSeq: startMutationSeq,
+					})
+				}
 			}
 		}
 
@@ -125,6 +211,15 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
 
 	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotDir) {
+			m.clearDirCursors(params.Ino, params.Fh)
+		} else if errors.Is(err, ErrBadFileHandle) {
+			var reqSid uint64
+			if params.SessionID != nil {
+				reqSid = *params.SessionID
+			}
+			m.clearDirCursorsForSession(params.Ino, params.Fh, reqSid)
+		}
 		switch {
 		case errors.Is(err, ErrInvalidArgument):
 			return nil, ErrInvalidArgument
@@ -138,6 +233,8 @@ func (m *manager) ReadDir(ctx context.Context, params ReadDirParams) ([]DirEntry
 			return nil, fmt.Errorf("readdir tx: %w", err)
 		}
 	}
+
+	m.recordDirCursors(readID, pendingCursors)
 
 	if entries == nil {
 		entries = []DirEntry{}
@@ -157,9 +254,14 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		return nil, err
 	}
 
+	readID := m.beginDirCursorRead(params.Ino, params.Fh)
+	defer m.endDirCursorRead(readID)
+	startMutationSeq := m.getDirMutationSeq(params.Ino)
+
 	var entries []DirEntryPlus
+	var pendingCursors []pendingDirCursor
 	err := m.store.ExecTxWithOptions(ctx, func(q db.Querier) error {
-		dirInode, err := m.validateDirHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
+		dirInode, handle, err := m.validateDirHandleWithHandle(ctx, q, params.Ino, params.Fh, params.SessionID)
 		if err != nil {
 			return err
 		}
@@ -167,6 +269,15 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		if dirInode.Nlink == 0 {
 			entries = []DirEntryPlus{}
 			return nil
+		}
+
+		var sid uint64
+		if handle.SessionID.Valid && handle.SessionID.Int64 > 0 {
+			sid = uint64(handle.SessionID.Int64)
+		}
+		var handleCreatedAt time.Time
+		if handle.CreatedAt.Valid {
+			handleCreatedAt = handle.CreatedAt.Time
 		}
 
 		rem := int(params.Limit)
@@ -205,29 +316,85 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 		}
 
 		if rem > 0 {
-			var sqlOffset int64
-			if params.Offset >= 2 {
-				sqlOffset = int64(params.Offset - 2)
-			}
-			rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
-				ParentIno: int64(params.Ino),
-				Limit:     int32(rem),
-				Offset:    sqlOffset,
-			})
-			if err != nil {
-				return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+			var anchor dirCursorAnchor
+			var anchorOk bool
+			if params.Offset >= 3 {
+				anchor, anchorOk = m.lookupDirCursorAnchor(params.Ino, params.Fh, params.Offset)
 			}
 
-			for i, row := range rows {
-				inode := m.newInodeFromListDirRow(row)
-				entries = append(entries, DirEntryPlus{
-					Ino:                 uint64(row.Ino),
-					Name:                row.Name,
-					NextOffset:          uint64(sqlOffset) + uint64(i) + 3,
-					Inode:               inode,
-					EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
-					AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
+			if anchorOk && anchor.dirMutated && len(anchor.lastName) > 0 {
+				rows, err := q.ListDirEntriesAfterName(ctx, db.ListDirEntriesAfterNameParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					AfterName: anchor.lastName,
 				})
+				if err != nil {
+					return fmt.Errorf("list dir entries after name for parent %d (limit=%d, after=%s): %w", params.Ino, rem, string(anchor.lastName), err)
+				}
+
+				for i, row := range rows {
+					nextOffset := params.Offset + uint64(i) + 1
+					inode := m.newInodeFromListDirAfterNameRow(row)
+					entries = append(entries, DirEntryPlus{
+						Ino:                 uint64(row.Ino),
+						Name:                row.Name,
+						NextOffset:          nextOffset,
+						Inode:               inode,
+						EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+						AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
+					})
+					pendingCursors = append(pendingCursors, pendingDirCursor{
+						ino:              params.Ino,
+						fh:               params.Fh,
+						nextOffset:       nextOffset,
+						lastName:         row.Name,
+						sqlOffset:        int64(nextOffset - 2),
+						dirMutated:       true,
+						sessionID:        sid,
+						handleCreatedAt:  handleCreatedAt,
+						startMutationSeq: startMutationSeq,
+					})
+				}
+			} else {
+				var sqlOffset int64
+				if params.Offset >= 2 {
+					sqlOffset = m.getDirCursorOffset(params.Ino, params.Fh, params.Offset)
+				}
+				rows, err := q.ListDirEntries(ctx, db.ListDirEntriesParams{
+					ParentIno: int64(params.Ino),
+					Limit:     int32(rem),
+					Offset:    sqlOffset,
+				})
+				if err != nil {
+					return fmt.Errorf("list dir entries for parent %d (limit=%d, offset=%d): %w", params.Ino, rem, sqlOffset, err)
+				}
+
+				for i, row := range rows {
+					nextOffset := uint64(sqlOffset) + uint64(i) + 3
+					if params.Offset >= 2 && uint64(sqlOffset)+2 != params.Offset {
+						nextOffset = max(nextOffset, params.Offset+uint64(i)+1)
+					}
+					inode := m.newInodeFromListDirRow(row)
+					entries = append(entries, DirEntryPlus{
+						Ino:                 uint64(row.Ino),
+						Name:                row.Name,
+						NextOffset:          nextOffset,
+						Inode:               inode,
+						EntryTimeoutSeconds: inode.EntryTimeoutSeconds,
+						AttrTimeoutSeconds:  inode.AttrTimeoutSeconds,
+					})
+					pendingCursors = append(pendingCursors, pendingDirCursor{
+						ino:              params.Ino,
+						fh:               params.Fh,
+						nextOffset:       nextOffset,
+						lastName:         row.Name,
+						sqlOffset:        sqlOffset + int64(i) + 1,
+						dirMutated:       false,
+						sessionID:        sid,
+						handleCreatedAt:  handleCreatedAt,
+						startMutationSeq: startMutationSeq,
+					})
+				}
 			}
 		}
 
@@ -235,6 +402,15 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 	}, tx.WithReadOnly(), tx.WithIsoLevel(tx.RepeatableRead))
 
 	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotDir) {
+			m.clearDirCursors(params.Ino, params.Fh)
+		} else if errors.Is(err, ErrBadFileHandle) {
+			var reqSid uint64
+			if params.SessionID != nil {
+				reqSid = *params.SessionID
+			}
+			m.clearDirCursorsForSession(params.Ino, params.Fh, reqSid)
+		}
 		switch {
 		case errors.Is(err, ErrInvalidArgument):
 			return nil, ErrInvalidArgument
@@ -248,6 +424,8 @@ func (m *manager) ReadDirPlus(ctx context.Context, params ReadDirPlusParams) ([]
 			return nil, fmt.Errorf("readdirplus tx: %w", err)
 		}
 	}
+
+	m.recordDirCursors(readID, pendingCursors)
 
 	if entries == nil {
 		entries = []DirEntryPlus{}

@@ -215,6 +215,7 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return err
 	}
 
+	var rootIno int64
 	var deletedInos []int64
 	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		// 1. 获取并排他锁定目标 Disk 行
@@ -225,6 +226,7 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 			}
 			return fmt.Errorf("get disk for update %s: %w", diskID, err)
 		}
+		rootIno = diskRow.RootIno
 
 		// 2. 删除该 Disk 行
 		rows, err := q.DeleteDisk(ctx, pgID)
@@ -257,6 +259,15 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	if len(deletedInos) > 0 {
 		m.cleanLockWaitersForInos(deletedInos)
 	}
+
+	inosToClean := make([]uint64, 0, len(deletedInos)+1)
+	if rootIno > 0 {
+		inosToClean = append(inosToClean, uint64(rootIno))
+	}
+	for _, ino := range deletedInos {
+		inosToClean = append(inosToClean, uint64(ino))
+	}
+	m.clearDirCursorsForInos(inosToClean...)
 
 	return nil
 }

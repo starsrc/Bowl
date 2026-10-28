@@ -415,7 +415,10 @@ func TestServer_RenewSession(t *testing.T) {
 		sessionID := uint64(888)
 		renewedTime := time.Date(2026, 10, 26, 18, 0, 0, 0, time.UTC)
 
-		mockMgr.EXPECT().RenewSession(testifymock.Anything, sessionID).Return(renewedTime, nil).Once()
+		mockMgr.EXPECT().RenewSessionWithStatus(testifymock.Anything, sessionID).Return(meta.RenewSessionResult{
+			ExpiresAt:        renewedTime,
+			SessionRecreated: false,
+		}, nil).Once()
 
 		reqMsg := &storagev1.RenewSessionRequest{
 			SessionId: sessionID,
@@ -424,6 +427,37 @@ func TestServer_RenewSession(t *testing.T) {
 		resp, err := client.RenewSession(ctx, connect.NewRequest(reqMsg))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
+		require.NotNil(t, resp.Msg.GetExpiresAt())
+
+		expectedTimestamp := timestamppb.New(renewedTime)
+		assert.Equal(t, expectedTimestamp.GetSeconds(), resp.Msg.GetExpiresAt().GetSeconds())
+		assert.Equal(t, expectedTimestamp.GetNanos(), resp.Msg.GetExpiresAt().GetNanos())
+		assert.False(t, resp.Msg.GetSessionRecreated())
+
+		mockMgr.AssertExpectations(t)
+	})
+
+	t.Run("成功路径: 会话已过期重建返回 session_recreated = true", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		sessionID := uint64(888)
+		renewedTime := time.Date(2026, 10, 26, 18, 0, 0, 0, time.UTC)
+
+		mockMgr.EXPECT().RenewSessionWithStatus(testifymock.Anything, sessionID).Return(meta.RenewSessionResult{
+			ExpiresAt:        renewedTime,
+			SessionRecreated: true,
+		}, nil).Once()
+
+		reqMsg := &storagev1.RenewSessionRequest{
+			SessionId: sessionID,
+		}
+
+		resp, err := client.RenewSession(ctx, connect.NewRequest(reqMsg))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, resp.Msg.GetSessionRecreated(), "当会话过期重建时，session_recreated 必须返回 true")
 		require.NotNil(t, resp.Msg.GetExpiresAt())
 
 		expectedTimestamp := timestamppb.New(renewedTime)
@@ -451,7 +485,7 @@ func TestServer_RenewSession(t *testing.T) {
 				defer teardown()
 
 				sessionID := uint64(888)
-				mockMgr.EXPECT().RenewSession(testifymock.Anything, sessionID).Return(time.Time{}, tc.domainErr).Once()
+				mockMgr.EXPECT().RenewSessionWithStatus(testifymock.Anything, sessionID).Return(meta.RenewSessionResult{}, tc.domainErr).Once()
 
 				reqMsg := &storagev1.RenewSessionRequest{
 					SessionId: sessionID,

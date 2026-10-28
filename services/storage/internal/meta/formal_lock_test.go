@@ -889,6 +889,7 @@ type formalLockTestEnv struct {
 	Model    *formalLockModel
 	TestName string
 	Steps    int
+	ProbeRNG *rand.Rand
 }
 
 // FormatFailureReport 格式化当前文件锁副状态机的失败反例轨迹与重放命令。
@@ -1000,6 +1001,7 @@ func setupFormalLockEnv(t *testing.T, seed uint64, fileCount int, sessionCount i
 		Model:    model,
 		TestName: t.Name(),
 		Steps:    1,
+		ProbeRNG: rand.New(rand.NewPCG(seed^0x9e3779b97f4a7c15, seed^0xbf58476d1ce4e5b9)),
 	}
 }
 
@@ -1725,7 +1727,7 @@ func TestFormalLock_T11_PosixRange(t *testing.T) {
 
 			for step := 1; step <= cfg.Steps; step++ {
 				stepFormalLockPosixAction(t, env, rng, step)
-				verifyFormalLockGetLkProbes(t, env, rng)
+				verifyFormalLockGetLkProbes(t, env, env.ProbeRNG)
 				auditFormalLockInv1(t, env)
 			}
 

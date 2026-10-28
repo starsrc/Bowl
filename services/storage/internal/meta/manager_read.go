@@ -80,8 +80,10 @@ func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, er
 			return ErrBadFileHandle
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, req.SessionID); err != nil {
-			return err
+		if req.SessionID != nil {
+			if err := m.touchActiveClientSessionForHandle(ctx, q, *req.SessionID, handle.CreatedAt); err != nil {
+				return err
+			}
 		}
 
 		// 到达 EOF 或请求大小为 0 时直接返回空字节流
@@ -191,6 +193,9 @@ func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, er
 		case errors.Is(err, ErrIsDir):
 			return nil, ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && req.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *req.SessionID)
+			}
 			return nil, ErrBadFileHandle
 		case errors.Is(err, ErrIO):
 			return nil, err

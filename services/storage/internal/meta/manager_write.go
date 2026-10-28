@@ -117,8 +117,10 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			return ErrBadFileHandle
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, req.SessionID); err != nil {
-			return err
+		if req.SessionID != nil {
+			if err := m.touchActiveClientSessionForHandle(ctx, q, *req.SessionID, handle.CreatedAt); err != nil {
+				return err
+			}
 		}
 
 		actualOffset := req.Offset
@@ -258,6 +260,9 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 		case errors.Is(txErr, ErrIsDir):
 			return nil, ErrIsDir
 		case errors.Is(txErr, ErrBadFileHandle):
+			if errors.Is(txErr, errExpiredSessionBadHandle) && req.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *req.SessionID)
+			}
 			return nil, ErrBadFileHandle
 		case errors.Is(txErr, ErrNoSpace):
 			return nil, ErrNoSpace
@@ -311,8 +316,10 @@ func (m *manager) writeZeroBytes(ctx context.Context, req *WriteRequest) (*Write
 			return ErrBadFileHandle
 		}
 
-		if err := m.renewOptionalClientSession(ctx, q, req.SessionID); err != nil {
-			return err
+		if req.SessionID != nil {
+			if err := m.touchActiveClientSessionForHandle(ctx, q, *req.SessionID, handle.CreatedAt); err != nil {
+				return err
+			}
 		}
 
 		resp = &WriteResponse{
@@ -331,6 +338,9 @@ func (m *manager) writeZeroBytes(ctx context.Context, req *WriteRequest) (*Write
 		case errors.Is(err, ErrIsDir):
 			return nil, ErrIsDir
 		case errors.Is(err, ErrBadFileHandle):
+			if errors.Is(err, errExpiredSessionBadHandle) && req.SessionID != nil {
+				m.cleanExpiredSessionByID(ctx, *req.SessionID)
+			}
 			return nil, ErrBadFileHandle
 		default:
 			return nil, fmt.Errorf("write zero bytes tx: %w", err)

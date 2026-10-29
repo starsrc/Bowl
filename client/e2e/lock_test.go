@@ -197,12 +197,23 @@ func TestE2E_Lock(t *testing.T) {
 		errStillConflict := unix.Flock(int(fB.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		require.ErrorIs(t, errStillConflict, syscall.EAGAIN, "dupFd 关闭后原始句柄未关，flock 必须依然互斥")
 
-		// 关闭最后一个活跃句柄 fA，触发 Release 并释放 flock 锁
+		// 关闭最后一个活跃句柄 fA，触发内核异步下发 FUSE_RELEASE 并释放 flock 锁
 		require.NoError(t, fA.Close())
 		fA = nil
 
-		// B 端现在能够成功获取 flock 锁
-		require.NoError(t, unix.Flock(int(fB.Fd()), unix.LOCK_EX|unix.LOCK_NB), "最后一个句柄关闭后 B 端必须能获取 flock")
+		// B 端在有界超时内轮询等待 FUSE_RELEASE 完成并成功获取 flock 锁
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := unix.Flock(int(fB.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+			if err == nil {
+				break
+			}
+			require.ErrorIs(t, err, syscall.EAGAIN, "等待释放期间仅允许返回 EAGAIN")
+			if time.Now().After(deadline) {
+				t.Fatalf("最后一个句柄关闭后 5s 内 B 端仍未成功获取 flock: %v", err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		_ = unix.Flock(int(fB.Fd()), unix.LOCK_UN)
 	})
 

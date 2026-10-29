@@ -199,9 +199,23 @@ func TestE2E_ReadWrite(t *testing.T) {
 		}))
 		require.NoError(t, err)
 		disk := resp.Msg.GetDisk()
+		diskID := disk.GetDiskId()
+		t.Cleanup(func() {
+			cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanCancel()
+			_, delErr := client.DeleteDisk(cleanCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+				DiskId: diskID,
+			}))
+			require.NoError(t, delErr, "清理测试磁盘失败: %s", diskID)
+			_, getErr := client.GetDisk(cleanCtx, connect.NewRequest(&storagev1.GetDiskRequest{
+				DiskId: diskID,
+			}))
+			require.Error(t, getErr, "删除磁盘后 GetDisk 必须返回错误: %s", diskID)
+			require.Equal(t, connect.CodeNotFound, connect.CodeOf(getErr), "删除磁盘后 GetDisk 应返回 CodeNotFound")
+		})
 
 		mountpoint := t.TempDir()
-		cmd, stdout, stderr := startBowlMount(t, endpoint, disk.GetDiskId(), mountpoint, "--debug")
+		cmd, stdout, stderr := startBowlMount(t, endpoint, diskID, mountpoint, "--debug")
 		require.NoError(t, waitForMount(mountpoint, 10*time.Second), "挂载点就绪")
 		defer func() {
 			if t.Failed() {

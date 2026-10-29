@@ -27,15 +27,17 @@ import (
 type mockStorageHandler struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 
-	mu               sync.Mutex
-	lookupCallCount  int32
-	getDiskCallCount int32
-	createCallCount  int32
-	setLkwCallCount  int32
-	onLookup         func(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error)
-	onGetDisk        func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error)
-	onCreate         func(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error)
-	onSetLkw         func(ctx context.Context, req *connect.Request[storagev1.SetLkwRequest]) (*connect.Response[storagev1.SetLkwResponse], error)
+	mu                  sync.Mutex
+	lookupCallCount     int32
+	getDiskCallCount    int32
+	createCallCount     int32
+	createDiskCallCount int32
+	setLkwCallCount     int32
+	onLookup            func(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error)
+	onGetDisk           func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error)
+	onCreate            func(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error)
+	onCreateDisk        func(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error)
+	onSetLkw            func(ctx context.Context, req *connect.Request[storagev1.SetLkwRequest]) (*connect.Response[storagev1.SetLkwResponse], error)
 }
 
 func (m *mockStorageHandler) Lookup(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
@@ -84,6 +86,22 @@ func (m *mockStorageHandler) Create(ctx context.Context, req *connect.Request[st
 	}), nil
 }
 
+func (m *mockStorageHandler) CreateDisk(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
+	atomic.AddInt32(&m.createDiskCallCount, 1)
+	m.mu.Lock()
+	fn := m.onCreateDisk
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	return connect.NewResponse(&storagev1.CreateDiskResponse{
+		Disk: &storagev1.Disk{
+			DiskId: "disk-created-1",
+			Name:   req.Msg.GetName(),
+		},
+	}), nil
+}
+
 func (m *mockStorageHandler) SetLkw(ctx context.Context, req *connect.Request[storagev1.SetLkwRequest]) (*connect.Response[storagev1.SetLkwResponse], error) {
 	atomic.AddInt32(&m.setLkwCallCount, 1)
 	m.mu.Lock()
@@ -125,21 +143,39 @@ func TestIdempotentProceduresWhitelist(t *testing.T) {
 		storagev1connect.StorageServiceCloseSessionProcedure,
 	}
 
+	require.Len(t, idempotentProcedures, 16, "生产白名单映射必须恰好包含 16 个只读与幂等 RPC")
 	require.Len(t, expectedProcedures, 16, "白名单必须恰好包含 16 个只读与幂等 RPC")
 	for _, proc := range expectedProcedures {
 		require.True(t, IsIdempotentProcedure(proc), "Procedure %s 必须被判定为幂等", proc)
 	}
 
-	// 非幂等方法必须返回 false
+	// 非幂等方法必须返回 false（覆盖全部非幂等 RPC）
 	nonIdempotent := []string{
-		storagev1connect.StorageServiceCreateProcedure,
-		storagev1connect.StorageServiceMkdirProcedure,
-		storagev1connect.StorageServiceUnlinkProcedure,
-		storagev1connect.StorageServiceRenameProcedure,
-		storagev1connect.StorageServiceWriteProcedure,
 		storagev1connect.StorageServiceSetAttrProcedure,
+		storagev1connect.StorageServiceMknodProcedure,
+		storagev1connect.StorageServiceMkdirProcedure,
+		storagev1connect.StorageServiceSymlinkProcedure,
+		storagev1connect.StorageServiceLinkProcedure,
+		storagev1connect.StorageServiceUnlinkProcedure,
+		storagev1connect.StorageServiceRmdirProcedure,
+		storagev1connect.StorageServiceRenameProcedure,
+		storagev1connect.StorageServiceCreateProcedure,
+		storagev1connect.StorageServiceTmpFileProcedure,
+		storagev1connect.StorageServiceOpenProcedure,
+		storagev1connect.StorageServiceWriteProcedure,
+		storagev1connect.StorageServiceFlushProcedure,
+		storagev1connect.StorageServiceReleaseProcedure,
+		storagev1connect.StorageServiceOpenDirProcedure,
+		storagev1connect.StorageServiceReleaseDirProcedure,
+		storagev1connect.StorageServiceFallocateProcedure,
+		storagev1connect.StorageServiceSetXattrProcedure,
+		storagev1connect.StorageServiceRemoveXattrProcedure,
 		storagev1connect.StorageServiceSetLkProcedure,
 		storagev1connect.StorageServiceSetLkwProcedure,
+		storagev1connect.StorageServiceWatchSessionProcedure,
+		storagev1connect.StorageServiceCreateDiskProcedure,
+		storagev1connect.StorageServiceUpdateDiskProcedure,
+		storagev1connect.StorageServiceDeleteDiskProcedure,
 	}
 	for _, proc := range nonIdempotent {
 		require.False(t, IsIdempotentProcedure(proc), "Procedure %s 不应被判定为幂等", proc)
@@ -403,6 +439,34 @@ func TestRetry_NonIdempotentRPC_SentFailure_NeverRetry(t *testing.T) {
 		}))
 		require.Error(t, err)
 		require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "非幂等 RPC 在请求送达服务端后发生失败严禁重放")
+		require.Equal(t, syscall.EIO, MapError(err), "必须准确映射为 syscall.EIO")
+	})
+
+	t.Run("server returns CodeUnavailable after receiving CreateDisk", func(t *testing.T) {
+		handler := &mockStorageHandler{}
+		var attempts int32
+		handler.onCreateDisk = func(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
+			atomic.AddInt32(&attempts, 1)
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("server crashed after committing disk"))
+		}
+
+		_, serverURL := startMockServer(t, handler)
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint: serverURL,
+			RetryConfig: &RetryConfig{
+				MaxElapsedTime:  2 * time.Second,
+				InitialInterval: 5 * time.Millisecond,
+			},
+		})
+		require.NoError(t, err)
+
+		_, err = client.CreateDisk(context.Background(), connect.NewRequest(&storagev1.CreateDiskRequest{
+			Name:     "non-idempotent-disk",
+			MaxBytes: 1024 * 1024,
+		}))
+		require.Error(t, err)
+		require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "CreateDisk 在请求送达服务端后发生失败严禁重放")
+		require.Equal(t, int32(1), atomic.LoadInt32(&handler.createDiskCallCount), "服务端建盘计数必须严格为 1")
 		require.Equal(t, syscall.EIO, MapError(err), "必须准确映射为 syscall.EIO")
 	})
 

@@ -527,19 +527,27 @@ func TestManager_SessionRecreated_RotationAndHandleIsolation(t *testing.T) {
 }
 
 func TestManager_SessionRecreated_RetryOnRotationFailure(t *testing.T) {
+	TestManager_SessionExpired_RotationRetryOnError(t)
+}
+
+func TestManager_SessionExpired_RotationRetryOnError(t *testing.T) {
 	var mu sync.Mutex
 	calls := make([]uint64, 0)
 	rotationAttempts := 0
+	firstRotationEntered := make(chan struct{})
+	releaseFirstRotation := make(chan struct{})
+	var firstRotationOnce sync.Once
 
 	handler := &mockStorageHandler{
 		renewSessionFunc: func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
 			mu.Lock()
-			defer mu.Unlock()
 			sid := req.Msg.GetSessionId()
 			calls = append(calls, sid)
+			callNum := len(calls)
 
 			// 初始激活
-			if len(calls) == 1 {
+			if callNum == 1 {
+				mu.Unlock()
 				return connect.NewResponse(&storagev1.RenewSessionResponse{
 					ExpiresAt:        timestamppb.New(time.Now().Add(100 * time.Millisecond)),
 					SessionRecreated: false,
@@ -547,16 +555,26 @@ func TestManager_SessionRecreated_RetryOnRotationFailure(t *testing.T) {
 			}
 
 			// 第 2 次续期返回 session_recreated = true 触发轮换
-			if len(calls) == 2 {
+			if callNum == 2 {
+				mu.Unlock()
 				return connect.NewResponse(&storagev1.RenewSessionResponse{
 					ExpiresAt:        timestamppb.New(time.Now().Add(100 * time.Millisecond)),
 					SessionRecreated: true,
 				}), nil
 			}
 
-			// 轮换激活新 ID 阶段：第一次失败（模拟瞬态网络故障），第二次成功
+			// 轮换激活新 ID 阶段：第一次阻塞在屏障以便观测旧句柄退役窗口，放行后失败（模拟瞬态网络故障），第二次成功
 			rotationAttempts++
-			if rotationAttempts == 1 {
+			curAttempt := rotationAttempts
+			mu.Unlock()
+
+			if curAttempt == 1 {
+				firstRotationOnce.Do(func() { close(firstRotationEntered) })
+				select {
+				case <-releaseFirstRotation:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
 				return nil, connect.NewError(connect.CodeUnavailable, errors.New("network glitch during rotation"))
 			}
 
@@ -580,10 +598,32 @@ func TestManager_SessionRecreated_RetryOnRotationFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	initialSID := mgr.CurrentSessionID()
+	const oldFH = uint64(777)
+	mgr.BindHandle(oldFH, initialSID)
+
+	resolvedSID, err := mgr.ResolveHandleSession(oldFH)
+	require.NoError(t, err)
+	require.Equal(t, initialSID, resolvedSID)
 
 	err = mgr.Start(context.Background())
 	require.NoError(t, err)
 	defer func() { _ = mgr.Close() }()
+
+	// 等待进入首次轮换 RenewSession(newSID) 尝试并阻塞在屏障上
+	select {
+	case <-firstRotationEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first rotation RenewSession attempt")
+	}
+
+	// 此时新会话尚未激活成功，CurrentSessionID() 仍为 initialSID，但旧句柄必须已因 retiredSessions 登记立即返回 EBADF
+	require.Equal(t, initialSID, mgr.CurrentSessionID(), "新会话激活完成前 CurrentSessionID 仍应保持为 initialSID")
+	midSID, err := mgr.ResolveHandleSession(oldFH)
+	require.ErrorIs(t, err, session.ErrBadFileHandle, "轮换激活受阻窗口内旧句柄必须立即返回 EBADF")
+	require.Equal(t, initialSID, midSID)
+
+	// 放行首次轮换尝试（使其返回 Unavailable 触发重试）
+	close(releaseFirstRotation)
 
 	// 等待最终成功轮换
 	require.Eventually(t, func() bool {

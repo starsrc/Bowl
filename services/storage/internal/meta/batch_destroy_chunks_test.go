@@ -219,6 +219,14 @@ func TestDeleteDisk_DeleteChunksError(t *testing.T) {
 		Once()
 
 	mockQuerier.EXPECT().
+		ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+			DiskID:  diskID,
+			RootIno: rootIno,
+		}).
+		Return([]int64(nil), nil).
+		Once()
+
+	mockQuerier.EXPECT().
 		DeleteDisk(mock.Anything, diskID).
 		Return(int64(1), nil).
 		Once()

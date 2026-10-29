@@ -77,6 +77,7 @@ type Querier interface {
 	InsertSliceRef(ctx context.Context, arg InsertSliceRefParams) error
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg ListActiveFileLocksByInoAndFlagsParams) ([]FileLock, error)
+	ListActiveSessionIDsByDisk(ctx context.Context, arg ListActiveSessionIDsByDiskParams) ([]int64, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error)
 	ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error)

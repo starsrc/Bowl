@@ -363,6 +363,26 @@ func TestServer_DiskRPCs(t *testing.T) {
 		assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 	})
 
+	t.Run("DeleteDisk_Busy", func(t *testing.T) {
+		client, mockMgr := setupDiskNodeTestClient(t)
+
+		mockMgr.EXPECT().
+			DeleteDisk(mock.Anything, validUUID).
+			Return(meta.ErrBusy).
+			Once()
+
+		req := connect.NewRequest(&storagev1.DeleteDiskRequest{
+			DiskId: validUUID,
+		})
+		_, err := client.DeleteDisk(ctx, req)
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "EBUSY", info.Reason)
+		assert.Equal(t, "bowl.storage", info.Domain)
+	})
+
 	t.Run("StatFS_Success", func(t *testing.T) {
 		client, mockMgr := setupDiskNodeTestClient(t)
 

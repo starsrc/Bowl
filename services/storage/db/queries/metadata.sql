@@ -680,3 +680,19 @@ WHERE root_ino = @root_ino::bigint;
 -- name: DeleteDisk :execrows
 DELETE FROM disks
 WHERE disk_id = $1;
+
+-- name: ListActiveSessionIDsByDisk :many
+SELECT cs.session_id
+FROM client_sessions cs
+WHERE cs.expires_at > clock_timestamp()
+  AND (
+    cs.disk_id = @disk_id::uuid
+    OR EXISTS (
+      SELECT 1
+      FROM file_handles fh
+      JOIN inodes i ON i.ino = fh.ino
+      WHERE fh.session_id = cs.session_id
+        AND i.root_ino = @root_ino::bigint
+    )
+  )
+ORDER BY cs.session_id ASC;

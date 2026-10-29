@@ -1391,6 +1391,48 @@ func (q *Queries) ListActiveFileLocksByInoAndFlags(ctx context.Context, arg List
 	return items, nil
 }
 
+const listActiveSessionIDsByDisk = `-- name: ListActiveSessionIDsByDisk :many
+SELECT cs.session_id
+FROM client_sessions cs
+WHERE cs.expires_at > clock_timestamp()
+  AND (
+    cs.disk_id = $1::uuid
+    OR EXISTS (
+      SELECT 1
+      FROM file_handles fh
+      JOIN inodes i ON i.ino = fh.ino
+      WHERE fh.session_id = cs.session_id
+        AND i.root_ino = $2::bigint
+    )
+  )
+ORDER BY cs.session_id ASC
+`
+
+type ListActiveSessionIDsByDiskParams struct {
+	DiskID  pgtype.UUID `json:"disk_id"`
+	RootIno int64       `json:"root_ino"`
+}
+
+func (q *Queries) ListActiveSessionIDsByDisk(ctx context.Context, arg ListActiveSessionIDsByDiskParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, listActiveSessionIDsByDisk, arg.DiskID, arg.RootIno)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var session_id int64
+		if err := rows.Scan(&session_id); err != nil {
+			return nil, err
+		}
+		items = append(items, session_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDirEntries = `-- name: ListDirEntries :many
 SELECT
     e.name,

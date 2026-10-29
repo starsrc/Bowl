@@ -136,7 +136,8 @@ const (
 
 	OffsetMax uint64 = math.MaxInt64
 
-	DefaultSessionLeaseTTL = 60 * time.Second
+	DefaultSessionLeaseTTL     = 60 * time.Second
+	DefaultSessionProbeTimeout = 1500 * time.Millisecond
 
 	WaiterStatusPending   int16 = 1
 	WaiterStatusGranted   int16 = 2
@@ -435,6 +436,7 @@ var (
 	ErrAccess          = errors.New("meta: permission denied")
 	ErrInvalidShrink   = fmt.Errorf("%w: cannot shrink disk capacity below current usage", ErrInvalidArgument)
 	ErrCrossDevice     = errors.New("meta: invalid cross-device link")
+	ErrBusy            = errors.New("meta: device or resource busy")
 )
 
 // Inode 表示文件系统节点的领域实体。

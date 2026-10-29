@@ -104,6 +104,16 @@ func (h *SessionWatchHub) HasActiveStream(sessionID uint64) bool {
 	return ok
 }
 
+// Evict 强制移除指定 sessionID 的活跃流注册并关闭其完成通道。
+func (h *SessionWatchHub) Evict(sessionID uint64) {
+	h.mu.Lock()
+	if entry, ok := h.streams[sessionID]; ok {
+		delete(h.streams, sessionID)
+		close(entry.doneCh)
+	}
+	h.mu.Unlock()
+}
+
 // Probe 向指定 sessionID 的活跃流发送 Ping 探活帧并等待客户端在 timeout 内回复 Pong。
 // 若不存在活跃流，立即返回 false（0ms 等待）。
 func (h *SessionWatchHub) Probe(ctx context.Context, sessionID uint64, timeout time.Duration) bool {

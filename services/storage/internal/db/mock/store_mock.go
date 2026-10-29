@@ -4306,6 +4306,74 @@ func (_c *MockStore_ListActiveFileLocksByInoAndFlags_Call) RunAndReturn(run func
 	return _c
 }
 
+// ListActiveSessionIDsByDisk provides a mock function for the type MockStore
+func (_mock *MockStore) ListActiveSessionIDsByDisk(ctx context.Context, arg db.ListActiveSessionIDsByDiskParams) ([]int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListActiveSessionIDsByDisk")
+	}
+
+	var r0 []int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListActiveSessionIDsByDiskParams) ([]int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListActiveSessionIDsByDiskParams) []int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]int64)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListActiveSessionIDsByDiskParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockStore_ListActiveSessionIDsByDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListActiveSessionIDsByDisk'
+type MockStore_ListActiveSessionIDsByDisk_Call struct {
+	*mock.Call
+}
+
+// ListActiveSessionIDsByDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListActiveSessionIDsByDiskParams
+func (_e *MockStore_Expecter) ListActiveSessionIDsByDisk(ctx any, arg any) *MockStore_ListActiveSessionIDsByDisk_Call {
+	return &MockStore_ListActiveSessionIDsByDisk_Call{Call: _e.mock.On("ListActiveSessionIDsByDisk", ctx, arg)}
+}
+
+func (_c *MockStore_ListActiveSessionIDsByDisk_Call) Run(run func(ctx context.Context, arg db.ListActiveSessionIDsByDiskParams)) *MockStore_ListActiveSessionIDsByDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListActiveSessionIDsByDiskParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListActiveSessionIDsByDiskParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockStore_ListActiveSessionIDsByDisk_Call) Return(int64s []int64, err error) *MockStore_ListActiveSessionIDsByDisk_Call {
+	_c.Call.Return(int64s, err)
+	return _c
+}
+
+func (_c *MockStore_ListActiveSessionIDsByDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.ListActiveSessionIDsByDiskParams) ([]int64, error)) *MockStore_ListActiveSessionIDsByDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListDirEntries provides a mock function for the type MockStore
 func (_mock *MockStore) ListDirEntries(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error) {
 	ret := _mock.Called(ctx, arg)

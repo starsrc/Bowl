@@ -134,6 +134,7 @@ type manager struct {
 	openDirCache          bool
 	atimeMode             AtimeMode
 	sessionLeaseTTL       time.Duration
+	sessionProbeTimeout   time.Duration
 	gcInterval            time.Duration
 	gcBatchLimit          int32
 	compactSliceThreshold int
@@ -185,6 +186,15 @@ func WithSessionLeaseTTL(ttl time.Duration) Option {
 	return func(m *manager) {
 		if ttl > 0 {
 			m.sessionLeaseTTL = ttl
+		}
+	}
+}
+
+// WithSessionProbeTimeout 配置删盘时对活跃客户端会话流发送 Ping-Pong 探活的超时窗口（d > 0 时生效，默认 DefaultSessionProbeTimeout）。
+func WithSessionProbeTimeout(d time.Duration) Option {
+	return func(m *manager) {
+		if d > 0 {
+			m.sessionProbeTimeout = d
 		}
 	}
 }
@@ -272,6 +282,7 @@ func New(store db.Store, opts ...Option) Manager {
 		attrTimeout:           DefaultAttrTimeoutSeconds,
 		dirEntryTimeout:       DefaultEntryTimeoutSeconds,
 		sessionLeaseTTL:       DefaultSessionLeaseTTL,
+		sessionProbeTimeout:   DefaultSessionProbeTimeout,
 		gcInterval:            DefaultGCInterval,
 		gcBatchLimit:          DefaultGCBatchLimit,
 		compactSliceThreshold: CompactSliceThreshold,

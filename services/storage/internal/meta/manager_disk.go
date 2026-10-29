@@ -306,6 +306,8 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	return result, nil
 }
 
+var errNeedSessionProbe = errors.New("meta: need active session liveness probe")
+
 // DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
 // 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
 // 事务提交成功后，主动关闭并清理内存中对应 Inode 的阻塞等待通道，唤醒正在等待锁的协程。
@@ -316,47 +318,96 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return err
 	}
 
-	var rootIno int64
-	var deletedInos []int64
-	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		// 1. 获取并排他锁定目标 Disk 行
-		diskRow, err := q.GetDiskForUpdate(ctx, pgID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get disk for update %s: %w", diskID, err)
-		}
-		rootIno = diskRow.RootIno
-
-		// 2. 删除该 Disk 行
-		rows, err := q.DeleteDisk(ctx, pgID)
-		if err != nil {
-			return fmt.Errorf("delete disk %s: %w", diskID, err)
-		}
-		if rows == 0 {
-			return ErrNotFound
-		}
-
-		// 3. 按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联项）
-		deletedInos, err = q.DeleteInodesByRootIno(ctx, diskRow.RootIno)
-		if err != nil {
-			return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
-		}
-
-		if len(deletedInos) > 0 {
-			if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
-				return fmt.Errorf("delete chunks for disk %s (root_ino=%d): %w", diskID, diskRow.RootIno, err)
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
+	probeTimeout := m.sessionProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = DefaultSessionProbeTimeout
 	}
 
-	// 4. 事务成功提交后，主动清理内存中的锁等待通道，唤醒等待该磁盘下所有节点的阻塞协程
+	var rootIno int64
+	var deletedInos []int64
+
+	for attempt := 0; attempt < 3; attempt++ {
+		var needProbeSIDs []uint64
+		err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+			needProbeSIDs = nil
+			deletedInos = nil
+
+			// 1. 获取并排他锁定目标 Disk 行与关联 Inodes
+			diskRow, err := q.GetDiskForUpdate(ctx, pgID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get disk for update %s: %w", diskID, err)
+			}
+			rootIno = diskRow.RootIno
+
+			// 2. 查询绑定该磁盘或持有该磁盘下句柄的未过期会话
+			activeSIDs, err := q.ListActiveSessionIDsByDisk(ctx, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  pgID,
+				RootIno: diskRow.RootIno,
+			})
+			if err != nil {
+				return fmt.Errorf("list active sessions for disk %s: %w", diskID, err)
+			}
+
+			for _, sid := range activeSIDs {
+				if sid > 0 && m.WatchHub().HasActiveStream(uint64(sid)) {
+					needProbeSIDs = append(needProbeSIDs, uint64(sid))
+				}
+			}
+			if len(needProbeSIDs) > 0 {
+				// 存在活跃流，先回滚释放数据库行锁，在事务外执行 Ping-Pong 探活
+				return errNeedSessionProbe
+			}
+
+			// 3. 删除该 Disk 行（外键 ON DELETE CASCADE 自动级联清理 disk_id 绑定的残留无流 client_sessions）
+			rows, err := q.DeleteDisk(ctx, pgID)
+			if err != nil {
+				return fmt.Errorf("delete disk %s: %w", diskID, err)
+			}
+			if rows == 0 {
+				return ErrNotFound
+			}
+
+			// 4. 按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联项）
+			deletedInos, err = q.DeleteInodesByRootIno(ctx, diskRow.RootIno)
+			if err != nil {
+				return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
+			}
+
+			if len(deletedInos) > 0 {
+				if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
+					return fmt.Errorf("delete chunks for disk %s (root_ino=%d): %w", diskID, diskRow.RootIno, err)
+				}
+			}
+
+			return nil
+		})
+
+		if errors.Is(err, errNeedSessionProbe) {
+			for _, sid := range needProbeSIDs {
+				if m.WatchHub().Probe(ctx, sid, probeTimeout) {
+					return fmt.Errorf("%w: disk %s has active mounted session %d", ErrBusy, diskID, sid)
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				m.WatchHub().Evict(sid)
+				_ = m.CloseSession(ctx, sid)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		break
+	}
+	if errors.Is(err, errNeedSessionProbe) {
+		return fmt.Errorf("%w: disk %s still has active mounted sessions", ErrBusy, diskID)
+	}
+
+	// 5. 事务成功提交后，主动清理内存中的锁等待通道，唤醒等待该磁盘下所有节点的阻塞协程
 	if len(deletedInos) > 0 {
 		m.cleanLockWaitersForInos(deletedInos)
 	}

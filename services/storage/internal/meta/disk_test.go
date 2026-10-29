@@ -1538,6 +1538,14 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64(nil), nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteDisk(mock.Anything, validDiskID).
 			Return(int64(0), nil).
 			Once()
@@ -1559,6 +1567,14 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64(nil), nil).
 			Once()
 
 		dbErr := errors.New("delete disk internal error")
@@ -1587,6 +1603,14 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64(nil), nil).
+			Once()
+
+		mockQuerier.EXPECT().
 			DeleteDisk(mock.Anything, validDiskID).
 			Return(int64(1), nil).
 			Once()
@@ -1602,7 +1626,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		assert.True(t, errors.Is(err, dbErr))
 	})
 
-	t.Run("正常删除依次调用 GetDiskForUpdate -> DeleteDisk -> DeleteInodesByRootIno", func(t *testing.T) {
+	t.Run("正常删除依次调用 GetDiskForUpdate -> ListActiveSessionIDsByDisk -> DeleteDisk -> DeleteInodesByRootIno", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -1614,6 +1638,14 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64(nil), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -1633,6 +1665,130 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		err := mgr.DeleteDisk(ctx, validDiskIDStr)
 		require.NoError(t, err)
+	})
+
+	t.Run("存在活跃会话且 WatchHub 探活回复 Pong 时返回 ErrBusy 且不执行 DeleteDisk", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		activeSID := uint64(80801)
+		var streamID uint64
+		streamID, unregister := mgr.WatchHub().Register(activeSID, func(pingSeq uint64) error {
+			go mgr.WatchHub().HandlePong(activeSID, streamID, pingSeq)
+			return nil
+		})
+		defer unregister()
+
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64{int64(activeSID)}, nil).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, meta.ErrBusy)
+		mockQuerier.AssertNotCalled(t, "DeleteDisk", mock.Anything, mock.Anything)
+	})
+
+	t.Run("存在活跃会话但 WatchHub 探活超时未响应 Pong 时自动清理死会话并在下一轮成功删除磁盘", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore, meta.WithSessionProbeTimeout(30*time.Millisecond))
+
+		mockStore.EXPECT().
+			ExecTxWithOptions(mock.Anything, mock.Anything).
+			RunAndReturn(func(ctx context.Context, fn func(db.Querier) error, opts ...tx.Option) error {
+				return fn(mockQuerier)
+			})
+
+		deadSID := uint64(80802)
+		_, unregister := mgr.WatchHub().Register(deadSID, func(pingSeq uint64) error {
+			// 模拟客户端死锁不回复 Pong
+			return nil
+		})
+		defer unregister()
+
+		// 第一轮：发现活跃流，回滚事务触发探活
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64{int64(deadSID)}, nil).
+			Once()
+
+		// 探活超时后触发 CloseSession(deadSID)
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteClientSessionByID(mock.Anything, int64(deadSID)).
+			Return(int64(1), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteUnreferencedOrphanInodes(mock.Anything).
+			Return([]db.DeleteUnreferencedOrphanInodesRow(nil), nil).
+			Once()
+
+		// 第二轮：死会话已被 Evict 和 CloseSession，成功删除磁盘
+		mockQuerier.EXPECT().
+			GetDiskForUpdate(mock.Anything, validDiskID).
+			Return(db.Disk{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64(nil), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteDisk(mock.Anything, validDiskID).
+			Return(int64(1), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteInodesByRootIno(mock.Anything, rootIno).
+			Return([]int64{rootIno}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			DeleteChunksByInos(mock.Anything, []int64{rootIno}).
+			Return([][]byte(nil), nil).
+			Once()
+
+		err := mgr.DeleteDisk(ctx, validDiskIDStr)
+		require.NoError(t, err)
+		assert.False(t, mgr.WatchHub().HasActiveStream(deadSID), "超时死会话的流应已被 Evict")
 	})
 
 	t.Run("DeleteDisk 删除磁盘后唤醒并中断阻塞在目标 Inode 上的 SetLkw 等待者返回 ErrNotFound", func(t *testing.T) {
@@ -1752,6 +1908,14 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			ListActiveSessionIDsByDisk(mock.Anything, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  validDiskID,
+				RootIno: rootIno,
+			}).
+			Return([]int64(nil), nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -2161,6 +2325,139 @@ func TestDeleteDisk_PostgresIntegration(t *testing.T) {
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
 		_, err = mgr.GetAttr(ctx, fileIno)
 		assert.True(t, errors.Is(err, meta.ErrNotFound))
+	})
+
+	t.Run("活跃会话注册了 WatchHub 流并自动回复 Pong 时 DeleteDisk 返回 ErrBusy 且磁盘与会话均完好保留", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_del_busy_pong_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sid := uint64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+		defer func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", int64(sid))
+		}()
+
+		diskID := disk.DiskID
+		_, err = mgr.RenewSessionWithDisk(ctx, sid, &diskID)
+		require.NoError(t, err)
+
+		var streamID uint64
+		streamID, unregister := mgr.WatchHub().Register(sid, func(pingSeq uint64) error {
+			go mgr.WatchHub().HandlePong(sid, streamID, pingSeq)
+			return nil
+		})
+		defer unregister()
+
+		// 执行 DeleteDisk，应被探活拦截返回 ErrBusy
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		require.Error(t, err)
+		require.ErrorIs(t, err, meta.ErrBusy)
+
+		// 磁盘与根目录依然完好
+		gotDisk, err := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+		assert.Equal(t, disk.DiskID, gotDisk.DiskID)
+
+		_, err = mgr.GetAttr(ctx, disk.RootIno)
+		require.NoError(t, err)
+
+		// 会话依然存活
+		var count int
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id = $1", int64(sid)).Scan(&count)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count)
+	})
+
+	t.Run("活跃会话注册了 WatchHub 流但死锁不回复 Pong 时在探活超时后强制注销会话并成功删除磁盘", func(t *testing.T) {
+		fastMgr := meta.New(store, meta.WithSessionProbeTimeout(100*time.Millisecond))
+
+		diskName := fmt.Sprintf("test_del_dead_session_%d", time.Now().UnixNano())
+		disk, err := fastMgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = fastMgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sid := uint64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+		defer func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id = $1", int64(sid))
+		}()
+
+		diskID := disk.DiskID
+		_, err = fastMgr.RenewSessionWithDisk(ctx, sid, &diskID)
+		require.NoError(t, err)
+
+		// 注册一个不回复 Pong 的流（模拟死锁/半开连接）
+		_, unregister := fastMgr.WatchHub().Register(sid, func(pingSeq uint64) error {
+			return nil
+		})
+		defer unregister()
+
+		err = fastMgr.DeleteDisk(ctx, disk.DiskID)
+		require.NoError(t, err)
+
+		// 磁盘与根目录已被删除
+		_, err = fastMgr.GetDisk(ctx, disk.DiskID)
+		require.ErrorIs(t, err, meta.ErrNotFound)
+		_, err = fastMgr.GetAttr(ctx, disk.RootIno)
+		require.ErrorIs(t, err, meta.ErrNotFound)
+
+		// 死会话已被强制清理
+		var count int
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id = $1", int64(sid)).Scan(&count)
+		require.NoError(t, err)
+		assert.Equal(t, 0, count)
+		assert.False(t, fastMgr.WatchHub().HasActiveStream(sid))
+	})
+
+	t.Run("活跃会话已执行 CloseSession 或无活跃 WatchHub 流时零等待立即删除磁盘", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_del_closed_or_nostream_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+			Name:     diskName,
+			MaxBytes: 10 * 1024 * 1024 * 1024,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = mgr.DeleteDisk(context.Background(), disk.DiskID)
+		}()
+
+		sid1 := uint64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+		sid2 := sid1 + 1
+		defer func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sid1), int64(sid2))
+		}()
+
+		diskID := disk.DiskID
+		_, err = mgr.RenewSessionWithDisk(ctx, sid1, &diskID)
+		require.NoError(t, err)
+		_, err = mgr.RenewSessionWithDisk(ctx, sid2, &diskID)
+		require.NoError(t, err)
+
+		// sid1 正常卸载调用 CloseSession，sid2 断开流（无 WatchHub 注册）
+		require.NoError(t, mgr.CloseSession(ctx, sid1))
+
+		start := time.Now()
+		err = mgr.DeleteDisk(ctx, disk.DiskID)
+		elapsed := time.Since(start)
+		require.NoError(t, err)
+		assert.Less(t, elapsed, 500*time.Millisecond, "无活跃流时无需等待 1.5s 探活超时，应立即删除")
+
+		_, err = mgr.GetDisk(ctx, disk.DiskID)
+		require.ErrorIs(t, err, meta.ErrNotFound)
+
+		var count int
+		err = pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id IN ($1, $2)", int64(sid1), int64(sid2)).Scan(&count)
+		require.NoError(t, err)
+		assert.Equal(t, 0, count, "disks ON DELETE CASCADE 应自动级联清理绑定该 disk_id 的残留会话")
 	})
 }
 

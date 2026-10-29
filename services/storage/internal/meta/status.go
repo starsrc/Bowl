@@ -44,11 +44,12 @@ var mappings = []errorMapping{
 	{sentinel: ErrIO, code: codes.Internal, reason: "EIO"},
 	{sentinel: ErrAccess, code: codes.PermissionDenied, reason: "EACCES"},
 	{sentinel: ErrCrossDevice, code: codes.FailedPrecondition, reason: "EXDEV"},
+	{sentinel: ErrBusy, code: codes.FailedPrecondition, reason: "EBUSY"},
 }
 
 // ToStatus 将领域层返回的 error 映射为携带 google.rpc.ErrorInfo 详情的 gRPC status.Status。
 // 若 err == nil，直接返回 nil。
-// 若 err 命中 24 个领域哨兵错误之一，映射为对应的 gRPC 状态码并在 ErrorInfo 中注入 POSIX errno reason 与 bowl.storage domain。
+// 若 err 命中 25 个领域哨兵错误之一，映射为对应的 gRPC 状态码并在 ErrorInfo 中注入 POSIX errno reason 与 bowl.storage domain。
 // 若 err 是已有 gRPC status，直接透传。
 // 若 err 是 context.Canceled 或 context.DeadlineExceeded，映射为对应状态码且不携带 ErrorInfo。
 // 若 err 为未知错误，映射为 codes.Unknown。

@@ -1,9 +1,19 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"testing"
 )
+
+// SetStdinForTest 在单元测试中临时替换标准输入读取器并在测试结束后自动还原。
+func SetStdinForTest(t testing.TB, r io.Reader) {
+	old := defaultStdin
+	defaultStdin = r
+	t.Cleanup(func() {
+		defaultStdin = old
+	})
+}
 
 // SetMountRunnerForTest 在单元测试中临时替换挂载运行器并在测试结束后自动还原。
 func SetMountRunnerForTest(t testing.TB, runner MountServerRunner) {

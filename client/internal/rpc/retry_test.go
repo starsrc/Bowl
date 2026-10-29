@@ -16,6 +16,7 @@ import (
 	"connectrpc.com/connect"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -30,9 +31,11 @@ type mockStorageHandler struct {
 	lookupCallCount  int32
 	getDiskCallCount int32
 	createCallCount  int32
+	setLkwCallCount  int32
 	onLookup         func(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error)
 	onGetDisk        func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error)
 	onCreate         func(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error)
+	onSetLkw         func(ctx context.Context, req *connect.Request[storagev1.SetLkwRequest]) (*connect.Response[storagev1.SetLkwResponse], error)
 }
 
 func (m *mockStorageHandler) Lookup(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
@@ -79,6 +82,17 @@ func (m *mockStorageHandler) Create(ctx context.Context, req *connect.Request[st
 		},
 		Fh: 12345,
 	}), nil
+}
+
+func (m *mockStorageHandler) SetLkw(ctx context.Context, req *connect.Request[storagev1.SetLkwRequest]) (*connect.Response[storagev1.SetLkwResponse], error) {
+	atomic.AddInt32(&m.setLkwCallCount, 1)
+	m.mu.Lock()
+	fn := m.onSetLkw
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	return connect.NewResponse(&storagev1.SetLkwResponse{}), nil
 }
 
 func startMockServer(t *testing.T, handler storagev1connect.StorageServiceHandler) (*httptest.Server, string) {
@@ -173,22 +187,30 @@ func TestRetry_IdempotentRPC_TransientUnavailable_Success(t *testing.T) {
 	require.Equal(t, int32(3), atomic.LoadInt32(&attempts), "应当在重试 2 次后在第 3 次调用成功")
 }
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // Slice 1: 幂等 RPC 在遇到底层传输错误（连接重置/意外 EOF）时重试成功
 func TestRetry_IdempotentRPC_TransportError_Success(t *testing.T) {
 	handler := &mockStorageHandler{}
-	var attempts int32
-	handler.onGetDisk = func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
-		att := atomic.AddInt32(&attempts, 1)
-		if att < 2 {
-			// 模拟底层网络传输中断
-			return nil, connect.NewError(connect.CodeUnavailable, syscall.ECONNRESET)
-		}
-		return connect.NewResponse(&storagev1.GetDiskResponse{
-			Disk: &storagev1.Disk{DiskId: req.Msg.GetDiskId()},
-		}), nil
-	}
+	mockServer, serverURL := startMockServer(t, handler)
 
-	_, serverURL := startMockServer(t, handler)
+	var attempts atomic.Int32
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch attempts.Add(1) {
+			case 1:
+				return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+			case 2:
+				return nil, io.ErrUnexpectedEOF
+			default:
+				return mockServer.Client().Transport.RoundTrip(req)
+			}
+		}),
+	}
 
 	retryCfg := &RetryConfig{
 		MaxElapsedTime:  1 * time.Second,
@@ -199,6 +221,7 @@ func TestRetry_IdempotentRPC_TransportError_Success(t *testing.T) {
 
 	client, err := NewClientFromConfig(ClientConfig{
 		Endpoint:    serverURL,
+		HTTPClient:  httpClient,
 		RetryConfig: retryCfg,
 	})
 	require.NoError(t, err)
@@ -208,7 +231,8 @@ func TestRetry_IdempotentRPC_TransportError_Success(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.Equal(t, "disk-id-123", resp.Msg.GetDisk().GetDiskId())
-	require.Equal(t, int32(2), atomic.LoadInt32(&attempts))
+	require.Equal(t, int32(3), attempts.Load())
+	require.Equal(t, int32(1), atomic.LoadInt32(&handler.getDiskCallCount))
 }
 
 // Slice 2: 绝不重试（零重试）——携带业务 ErrorInfo 的错误立即返回对应 errno
@@ -381,17 +405,18 @@ func TestRetry_NonIdempotentRPC_SentFailure_NeverRetry(t *testing.T) {
 	})
 
 	t.Run("connection drops with EOF mid-way for Create", func(t *testing.T) {
-		handler := &mockStorageHandler{}
-		var attempts int32
-		handler.onCreate = func(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
-			atomic.AddInt32(&attempts, 1)
-			// 模拟连接已建立但传输中断返回 EOF
-			return nil, connect.NewError(connect.CodeUnavailable, io.EOF)
+		var attempts atomic.Int32
+		httpClient := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				// 请求已进入传输层发送给服务端后，在读取响应阶段发生底层传输中断（非 CodeUnavailable）
+				return nil, io.ErrUnexpectedEOF
+			}),
 		}
 
-		_, serverURL := startMockServer(t, handler)
 		client, err := NewClientFromConfig(ClientConfig{
-			Endpoint: serverURL,
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: httpClient,
 			RetryConfig: &RetryConfig{
 				MaxElapsedTime:  2 * time.Second,
 				InitialInterval: 5 * time.Millisecond,
@@ -405,8 +430,37 @@ func TestRetry_NonIdempotentRPC_SentFailure_NeverRetry(t *testing.T) {
 			Mode:      0644,
 		}))
 		require.Error(t, err)
-		require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "非幂等 RPC 在非建连阶段中途断连严禁重放")
+		require.Equal(t, int32(1), attempts.Load(), "非幂等 RPC 在非建连阶段中途断连严禁重放")
 		require.Equal(t, syscall.EIO, MapError(err))
+	})
+
+	t.Run("connection resets with ECONNRESET mid-way for Create", func(t *testing.T) {
+		var attempts atomic.Int32
+		httpClient := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+			}),
+		}
+
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: httpClient,
+			RetryConfig: &RetryConfig{
+				MaxElapsedTime:  2 * time.Second,
+				InitialInterval: 5 * time.Millisecond,
+			},
+		})
+		require.NoError(t, err)
+
+		_, err = client.Create(context.Background(), connect.NewRequest(&storagev1.CreateRequest{
+			ParentIno: 1,
+			Name:      []byte("new-file"),
+			Mode:      0644,
+		}))
+		require.Error(t, err)
+		require.Equal(t, int32(1), attempts.Load(), "非幂等 RPC 在非建连阶段中途连接重置严禁重放")
+		require.Equal(t, syscall.EIO, MapError(err), "传输层 ECONNRESET 必须准确映射为 syscall.EIO 而非 syscall.EINTR")
 	})
 }
 
@@ -485,11 +539,296 @@ func TestRetry_BudgetExceeded_ReturnsEIO(t *testing.T) {
 
 	require.Error(t, err)
 	require.GreaterOrEqual(t, elapsed, 60*time.Millisecond)
+	assert.Less(t, elapsed, 500*time.Millisecond)
 	require.Greater(t, atomic.LoadInt32(&attempts), int32(1), "在预算耗尽前应至少重试过")
 
 	// 关键契约校验：内部超时必须准确映射为 EIO，严禁伪装成 EINTR
 	errno := MapError(err)
 	require.Equal(t, syscall.EIO, errno, "预算耗尽必须映射为 EIO 而非 EINTR")
+}
+
+// Slice 4: 预算耗尽（持续底层 ECONNRESET）——超出总预算仍未恢复时停止重试，准确返回 EIO 且绝不因 Connect CodeCanceled 包装误报 EINTR
+func TestRetry_BudgetExceeded_TransportConnReset_ReturnsEIO(t *testing.T) {
+	var attempts atomic.Int32
+	httpClient := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+		}),
+	}
+
+	client, err := NewClientFromConfig(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: httpClient,
+		RetryConfig: &RetryConfig{
+			MaxElapsedTime:  60 * time.Millisecond,
+			InitialInterval: 10 * time.Millisecond,
+			Multiplier:      2.0,
+			MaxInterval:     20 * time.Millisecond,
+			RandFloat64:     func() float64 { return 0.0 },
+		},
+	})
+	require.NoError(t, err)
+
+	cancelChan := make(chan struct{})
+	ctx, cancel := ContextWithCancelChan(context.Background(), cancelChan)
+	defer cancel()
+
+	_, err = client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+		ParentIno: 1,
+		Name:      []byte("connreset-timeout.txt"),
+	}))
+
+	require.Error(t, err)
+	require.Greater(t, attempts.Load(), int32(1), "在预算耗尽前应至少重试过")
+	require.Equal(t, syscall.EIO, MapErrorWithCancel(err, cancelChan), "持续传输错误导致预算耗尽必须映射为 EIO 而非 EINTR")
+	require.Equal(t, syscall.EIO, MapError(err), "持续传输错误导致预算耗尽必须映射为 EIO 而非 EINTR")
+}
+
+// Slice 4: 对端挂起不响应时，在途单次请求必须受 MaxElapsedTime 预算约束并在预算耗尽后返回 EIO（SetLkw 除外）
+func TestRetry_HangingServer_BoundedByMaxElapsedTime(t *testing.T) {
+	retryCfg := &RetryConfig{
+		InitialInterval: 20 * time.Millisecond,
+		MaxInterval:     40 * time.Millisecond,
+		MaxElapsedTime:  80 * time.Millisecond,
+		Multiplier:      2.0,
+		RandFloat64:     func() float64 { return 0.0 },
+	}
+
+	t.Run("idempotent GetDisk hanging server bounded by MaxElapsedTime", func(t *testing.T) {
+		handler := &mockStorageHandler{}
+		var attempts int32
+		handler.onGetDisk = func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
+			atomic.AddInt32(&attempts, 1)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+
+		mockServer, serverURL := startMockServer(t, handler)
+		var (
+			dlMu       sync.Mutex
+			hasDL      bool
+			firstRem   time.Duration
+			recordedDL bool
+		)
+		httpClient := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				dl, ok := req.Context().Deadline()
+				dlMu.Lock()
+				if !recordedDL {
+					recordedDL = true
+					hasDL = ok
+					if ok {
+						firstRem = time.Until(dl)
+					}
+				}
+				dlMu.Unlock()
+				return mockServer.Client().Transport.RoundTrip(req)
+			}),
+		}
+
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:    serverURL,
+			HTTPClient:  httpClient,
+			RetryConfig: retryCfg,
+		})
+		require.NoError(t, err)
+
+		cancelChan := make(chan struct{})
+		ctx, cancel := ContextWithCancelChan(context.Background(), cancelChan)
+		defer cancel()
+		guardTimer := time.AfterFunc(2*time.Second, cancel)
+		defer guardTimer.Stop()
+
+		start := time.Now()
+		_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{
+			DiskId: "hanging-disk",
+		}))
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		dlMu.Lock()
+		gotHasDL, gotRem := hasDL, firstRem
+		dlMu.Unlock()
+		require.True(t, gotHasDL, "请求上下文必须设置截止时间")
+		require.Greater(t, gotRem, time.Duration(0), "首次请求剩余预算必须大于 0")
+		require.LessOrEqual(t, gotRem, retryCfg.MaxElapsedTime, "首次请求剩余预算不能超过 MaxElapsedTime")
+		require.GreaterOrEqual(t, elapsed, 70*time.Millisecond)
+		require.Less(t, elapsed, 250*time.Millisecond, "幂等 RPC 对端挂起时必须受 MaxElapsedTime 约束，不能阻塞至 2s 护栏")
+		require.Equal(t, syscall.EIO, MapErrorWithCancel(err, cancelChan), "预算耗尽必须映射为 EIO 而非 EINTR")
+	})
+
+	t.Run("non-idempotent Create hanging server bounded by MaxElapsedTime", func(t *testing.T) {
+		handler := &mockStorageHandler{}
+		var attempts int32
+		handler.onCreate = func(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
+			atomic.AddInt32(&attempts, 1)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+
+		mockServer, serverURL := startMockServer(t, handler)
+		var (
+			dlMu       sync.Mutex
+			hasDL      bool
+			firstRem   time.Duration
+			recordedDL bool
+		)
+		httpClient := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				dl, ok := req.Context().Deadline()
+				dlMu.Lock()
+				if !recordedDL {
+					recordedDL = true
+					hasDL = ok
+					if ok {
+						firstRem = time.Until(dl)
+					}
+				}
+				dlMu.Unlock()
+				return mockServer.Client().Transport.RoundTrip(req)
+			}),
+		}
+
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:    serverURL,
+			HTTPClient:  httpClient,
+			RetryConfig: retryCfg,
+		})
+		require.NoError(t, err)
+
+		cancelChan := make(chan struct{})
+		ctx, cancel := ContextWithCancelChan(context.Background(), cancelChan)
+		defer cancel()
+		guardTimer := time.AfterFunc(2*time.Second, cancel)
+		defer guardTimer.Stop()
+
+		start := time.Now()
+		_, err = client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+			ParentIno: 1,
+			Name:      []byte("hanging-create"),
+			Mode:      0o644,
+		}))
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "非幂等 RPC 只允许发起 1 次尝试")
+		dlMu.Lock()
+		gotHasDL, gotRem := hasDL, firstRem
+		dlMu.Unlock()
+		require.True(t, gotHasDL, "请求上下文必须设置截止时间")
+		require.Greater(t, gotRem, time.Duration(0), "首次请求剩余预算必须大于 0")
+		require.LessOrEqual(t, gotRem, retryCfg.MaxElapsedTime, "首次请求剩余预算不能超过 MaxElapsedTime")
+		require.GreaterOrEqual(t, elapsed, 70*time.Millisecond)
+		require.Less(t, elapsed, 250*time.Millisecond, "非幂等 RPC 对端挂起时必须受 MaxElapsedTime 约束，不能阻塞至 2s 护栏")
+		require.Equal(t, syscall.EIO, MapErrorWithCancel(err, cancelChan), "预算耗尽必须映射为 EIO 而非 EINTR")
+	})
+
+	t.Run("retry shares single overall deadline when first attempt consumes budget then second hangs", func(t *testing.T) {
+		handler := &mockStorageHandler{}
+		var attempts atomic.Int32
+		handler.onGetDisk = func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
+			if attempts.Add(1) == 1 {
+				select {
+				case <-time.After(30 * time.Millisecond):
+					return nil, connect.NewError(connect.CodeUnavailable, errors.New("temp fail"))
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+
+		mockServer, serverURL := startMockServer(t, handler)
+		var (
+			dlMu      sync.Mutex
+			deadlines []time.Time
+			rems      []time.Duration
+		)
+		httpClient := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				dl, ok := req.Context().Deadline()
+				dlMu.Lock()
+				if ok {
+					deadlines = append(deadlines, dl)
+					rems = append(rems, time.Until(dl))
+				}
+				dlMu.Unlock()
+				return mockServer.Client().Transport.RoundTrip(req)
+			}),
+		}
+
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:    serverURL,
+			HTTPClient:  httpClient,
+			RetryConfig: retryCfg,
+		})
+		require.NoError(t, err)
+
+		cancelChan := make(chan struct{})
+		ctx, cancel := ContextWithCancelChan(context.Background(), cancelChan)
+		defer cancel()
+		guardTimer := time.AfterFunc(2*time.Second, cancel)
+		defer guardTimer.Stop()
+
+		start := time.Now()
+		_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{
+			DiskId: "shared-deadline-disk",
+		}))
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		dlMu.Lock()
+		gotDeadlines := append([]time.Time(nil), deadlines...)
+		gotRems := append([]time.Duration(nil), rems...)
+		dlMu.Unlock()
+		require.Len(t, gotDeadlines, 2, "应发起 2 次尝试（首轮消耗预算失败，次轮挂起至共享预算截止）")
+		require.True(t, gotDeadlines[0].Equal(gotDeadlines[1]), "多次重试必须共享同一个总预算绝对截止时间")
+		require.Greater(t, gotRems[0], time.Duration(0))
+		require.LessOrEqual(t, gotRems[0], retryCfg.MaxElapsedTime)
+		require.GreaterOrEqual(t, elapsed, 70*time.Millisecond)
+		require.Less(t, elapsed, 250*time.Millisecond)
+		require.Equal(t, syscall.EIO, MapErrorWithCancel(err, cancelChan), "预算耗尽必须映射为 EIO 而非 EINTR")
+	})
+
+	t.Run("blocking SetLkw exempt from MaxElapsedTime truncation", func(t *testing.T) {
+		handler := &mockStorageHandler{}
+		var attempts int32
+		handler.onSetLkw = func(ctx context.Context, req *connect.Request[storagev1.SetLkwRequest]) (*connect.Response[storagev1.SetLkwResponse], error) {
+			atomic.AddInt32(&attempts, 1)
+			select {
+			case <-time.After(150 * time.Millisecond):
+				return connect.NewResponse(&storagev1.SetLkwResponse{}), nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		_, serverURL := startMockServer(t, handler)
+		client, err := NewClientFromConfig(ClientConfig{
+			Endpoint:    serverURL,
+			RetryConfig: retryCfg,
+		})
+		require.NoError(t, err)
+
+		cancelChan := make(chan struct{})
+		ctx, cancel := ContextWithCancelChan(context.Background(), cancelChan)
+		defer cancel()
+		guardTimer := time.AfterFunc(2*time.Second, cancel)
+		defer guardTimer.Stop()
+
+		start := time.Now()
+		_, err = client.SetLkw(ctx, connect.NewRequest(&storagev1.SetLkwRequest{
+			Ino: 1001,
+			Fh:  1,
+		}))
+		elapsed := time.Since(start)
+
+		require.NoError(t, err, "阻塞文件锁 SetLkw 豁免 MaxElapsedTime 截断，等待 150ms 后应成功返回")
+		require.GreaterOrEqual(t, elapsed, 150*time.Millisecond)
+		require.Equal(t, int32(1), atomic.LoadInt32(&attempts))
+	})
 }
 
 // Slice 5: 默认配置与禁用配置

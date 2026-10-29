@@ -140,6 +140,16 @@ func TestMapError_TransportAndNil(t *testing.T) {
 	t.Run("arbitrary network error maps to EIO", func(t *testing.T) {
 		require.Equal(t, syscall.EIO, MapError(errors.New("connection reset by peer")))
 	})
+
+	t.Run("CodeCanceled wrapping ECONNRESET maps to EIO", func(t *testing.T) {
+		connErr := connect.NewError(connect.CodeCanceled, syscall.ECONNRESET)
+		require.Equal(t, syscall.EIO, MapError(connErr))
+	})
+
+	t.Run("CodeCanceled wrapping EPIPE maps to EIO", func(t *testing.T) {
+		connErr := connect.NewError(connect.CodeCanceled, syscall.EPIPE)
+		require.Equal(t, syscall.EIO, MapError(connErr))
+	})
 }
 
 func TestContextWithCancelChan_CancelTriggered(t *testing.T) {

@@ -158,6 +158,9 @@ func MapError(err error) syscall.Errno {
 		case connect.CodeResourceExhausted:
 			return syscall.ENOSPC
 		case connect.CodeCanceled:
+			if isTransportError(connectErr.Unwrap()) {
+				return syscall.EIO
+			}
 			return syscall.EINTR
 		default:
 			return syscall.EIO

@@ -231,6 +231,22 @@ func computeJitteredInterval(interval time.Duration, randFn func() float64) time
 	return jittered
 }
 
+// wrapBudgetExceededError 将重试总预算耗尽的底层错误统一包装为 CodeDeadlineExceeded（若未携带业务 ErrorInfo），
+// 确保预算耗尽出口恒映射为 syscall.EIO。
+func wrapBudgetExceededError(err error) error {
+	if err == nil {
+		return connect.NewError(connect.CodeDeadlineExceeded, context.DeadlineExceeded)
+	}
+	if hasErrorInfo(err) {
+		return err
+	}
+	var connectErr *connect.Error
+	if errors.As(err, &connectErr) && connectErr.Code() == connect.CodeDeadlineExceeded {
+		return err
+	}
+	return connect.NewError(connect.CodeDeadlineExceeded, err)
+}
+
 // NewRetryInterceptor 创建遵循有界指数退避策略的 ConnectRPC 客户端一元拦截器。
 func NewRetryInterceptor(cfg RetryConfig) connect.UnaryInterceptorFunc {
 	config := cfg.withDefaults()
@@ -245,17 +261,40 @@ func NewRetryInterceptor(cfg RetryConfig) connect.UnaryInterceptorFunc {
 			interval := config.InitialInterval
 			var lastErr error
 
+			attemptCtx := ctx
+			if config.MaxElapsedTime > 0 && req.Spec().Procedure != storagev1connect.StorageServiceSetLkwProcedure {
+				var cancel context.CancelFunc
+				attemptCtx, cancel = context.WithDeadline(ctx, startTime.Add(config.MaxElapsedTime))
+				defer cancel()
+			}
+
 			for {
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}
+				if err := attemptCtx.Err(); err != nil {
+					if lastErr != nil {
+						return nil, wrapBudgetExceededError(lastErr)
+					}
+					return nil, wrapBudgetExceededError(err)
+				}
 
-				resp, err := next(ctx, req)
+				resp, err := next(attemptCtx, req)
 				if err == nil {
 					return resp, nil
 				}
 
 				lastErr = err
+
+				// 若父上下文已取消或超时，直接返回原始错误
+				if ctx.Err() != nil {
+					return nil, err
+				}
+
+				// 若父上下文未取消但重试总预算上下文已耗尽，停止重试并返回错误（映射为 EIO）
+				if attemptCtx.Err() != nil {
+					return nil, wrapBudgetExceededError(err)
+				}
 
 				// 若不满足重试条件，立即终止并返回原始错误
 				if !shouldRetry(req.Spec().Procedure, err) {
@@ -265,7 +304,7 @@ func NewRetryInterceptor(cfg RetryConfig) connect.UnaryInterceptorFunc {
 				// 计算已过去的总耗时，若超出总预算则终止重试
 				elapsed := time.Since(startTime)
 				if elapsed >= config.MaxElapsedTime {
-					return nil, lastErr
+					return nil, wrapBudgetExceededError(lastErr)
 				}
 
 				sleepDuration := computeJitteredInterval(interval, config.RandFloat64)

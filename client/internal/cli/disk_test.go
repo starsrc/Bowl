@@ -18,15 +18,35 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
+func TestCLI_DiskUpdateRouting(t *testing.T) {
+	for _, subcmd := range []string{"update", "resize"} {
+		for _, arg := range []string{"--help", "-h"} {
+			var stdout, stderr bytes.Buffer
+			code := cli.Execute([]string{"disk", subcmd, arg}, &stdout, &stderr)
+			require.Equal(t, 0, code, "subcmd=%s arg=%s", subcmd, arg)
+			require.Empty(t, stderr.String())
+			require.Contains(t, stdout.String(), "bowl disk update <disk-id>")
+		}
+	}
+}
+
 type diskMockStorageHandler struct {
 	cliMockStorageHandler
 
 	createDiskFn func(context.Context, *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error)
+	updateDiskFn func(context.Context, *connect.Request[storagev1.UpdateDiskRequest]) (*connect.Response[storagev1.UpdateDiskResponse], error)
 }
 
 func (h *diskMockStorageHandler) CreateDisk(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
 	if h.createDiskFn != nil {
 		return h.createDiskFn(ctx, req)
+	}
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("unimplemented"))
+}
+
+func (h *diskMockStorageHandler) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.UpdateDiskRequest]) (*connect.Response[storagev1.UpdateDiskResponse], error) {
+	if h.updateDiskFn != nil {
+		return h.updateDiskFn(ctx, req)
 	}
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("unimplemented"))
 }

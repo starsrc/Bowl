@@ -164,9 +164,37 @@ _Avoid_: WaitLock, LockBlock, AcquireLockWait
 客户端显式延长其会话租约有效期的保活操作，同步触发已超期会话清理与无剩余活跃 FileHandle 的 Orphan Inode 物理回收。
 _Avoid_: Heartbeat, PingSession, KeepAlive, TouchSession
 
+**CloseSession (会话关闭)**:
+客户端在正常卸载退出时显式注销其 ClientSession 租约，并同步释放关联活跃 FileHandle、FileLock 与 Orphan Inode 的生命周期终止操作。
+_Avoid_: EndSession, DestroySession, LogoutSession, DisconnectSession
+
+**WatchSession (会话探活流)**:
+客户端在挂载存续期间与服务端维持的双向长连接流，用于即时感知客户端进程终止并承载服务端按需发起的存活探测问答。
+_Avoid_: PingStream, SessionChannel, MonitorSession, KeepAliveStream
+
 **Disk (磁盘)**:
 对外交付的商业化独立文件系统实例，由全局唯一 UUID 标识，一对一绑定一个独立的根目录 Inode，并承载容量配额上限与已用空间及节点数核算。
 _Avoid_: Volume, Drive, MountPoint, Partition, Bucket
+
+**CreateDisk (磁盘创建)**:
+创建商业化独立 Disk 实例、分配全局唯一标识符与初始容量配额上限，并原子创建一对一绑定的根目录 Inode 的生命周期建立操作。
+_Avoid_: NewDisk, InitVolume, ProvisionDisk, MakeDisk
+
+**GetDisk (磁盘查询)**:
+根据目标 Disk 唯一标识符，检索并获取其名称、根目录 Inode、容量配额上限、已用空间与节点数及时间戳详情的状态检索操作。
+_Avoid_: DescribeDisk, FetchDisk, StatDisk, InspectDisk
+
+**ListDisks (磁盘列表查询)**:
+按创建时间倒序与游标分页规则，批量检索 Disk 实例及其配额状态列表的状态检索操作。
+_Avoid_: ScanDisks, GetAllDisks, EnumDisks, QueryDisks
+
+**UpdateDisk (磁盘更新)**:
+根据目标 Disk 唯一标识符，按需修改其名称或调整容量配额上限（支持在线扩容与不低于当前已用空间的缩容）的生命周期变更操作。
+_Avoid_: ResizeDisk, ExpandDisk, ShrinkDisk, ModifyDisk, PatchDisk
+
+**DeleteDisk (磁盘删除)**:
+在确认目标 Disk 无存活客户端挂载会话（对未超期会话经双向流探活无响应后回收）的前提下，级联销毁该 Disk 实例及其下属全部 Inode、FileHandle、FileLock 与 Slice 引用的生命周期释放操作。
+_Avoid_: RemoveDisk, DestroyDisk, DropVolume, PurgeDisk
 
 **StatFS (文件系统状态查询)**:
 检索目标文件系统实例的总容量、已用空间、可用空间、Inode 节点统计及派生 POSIX 文件系统块指标的状态检索操作。

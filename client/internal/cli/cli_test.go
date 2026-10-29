@@ -53,11 +53,52 @@ func TestCLI_Help(t *testing.T) {
 			require.Empty(t, stderr.String(), "stderr 应为空")
 			out := stdout.String()
 			require.Contains(t, out, "用法:", "帮助信息应包含用法")
+			require.Contains(t, out, "disk", "帮助信息应包含 disk 命令")
 			require.Contains(t, out, "mount", "帮助信息应包含 mount 命令")
 			require.Contains(t, out, "umount", "帮助信息应包含 umount 命令")
 			require.Contains(t, out, "version", "帮助信息应包含 version 命令")
 		})
 	}
+}
+
+func TestCLI_DiskSubcommandRouting(t *testing.T) {
+	t.Run("disk help", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"disk", "--help"},
+			{"disk", "-h"},
+			{"disk", "help"},
+		} {
+			var stdout, stderr bytes.Buffer
+			code := cli.Execute(args, &stdout, &stderr)
+			require.Equal(t, 0, code, "args: %v", args)
+			require.Empty(t, stderr.String())
+			out := stdout.String()
+			require.Contains(t, out, "bowl disk <subcommand>")
+			require.Contains(t, out, "create")
+			require.Contains(t, out, "list")
+			require.Contains(t, out, "get")
+			require.Contains(t, out, "update")
+			require.Contains(t, out, "resize")
+			require.Contains(t, out, "delete")
+		}
+	})
+
+	t.Run("disk without subcommand returns exit code 2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := cli.Execute([]string{"disk"}, &stdout, &stderr)
+		require.Equal(t, 2, code)
+		require.Empty(t, stdout.String())
+		require.Contains(t, stderr.String(), "bowl disk <subcommand>")
+	})
+
+	t.Run("disk unknown subcommand returns exit code 2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := cli.Execute([]string{"disk", "unknown-sub"}, &stdout, &stderr)
+		require.Equal(t, 2, code)
+		require.Empty(t, stdout.String())
+		require.Contains(t, stderr.String(), "未知")
+		require.Contains(t, stderr.String(), "unknown-sub")
+	})
 }
 
 func TestCLI_NoArgs(t *testing.T) {

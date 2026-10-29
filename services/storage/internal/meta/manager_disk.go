@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -326,10 +327,30 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	var rootIno int64
 	var deletedInos []int64
 
+	type sessionProbeTarget struct {
+		sid            uint64
+		streamID       uint64
+		reconnectedNew bool
+	}
+
+	var (
+		commitGateUnlock func()
+		releaseGateNow   = func() {
+			if commitGateUnlock != nil {
+				commitGateUnlock()
+				commitGateUnlock = nil
+			}
+		}
+	)
+	defer func() {
+		releaseGateNow()
+	}()
+
 	for attempt := 0; attempt < 3; attempt++ {
-		var needProbeSIDs []uint64
+		var needProbes []sessionProbeTarget
 		err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-			needProbeSIDs = nil
+			releaseGateNow()
+			needProbes = nil
 			deletedInos = nil
 
 			// 1. 获取并排他锁定目标 Disk 行与关联 Inodes
@@ -351,12 +372,21 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 				return fmt.Errorf("list active sessions for disk %s: %w", diskID, err)
 			}
 
+			expectedLatestStreams := make(map[uint64]uint64, len(activeSIDs))
 			for _, sid := range activeSIDs {
-				if sid > 0 && m.WatchHub().HasActiveStream(uint64(sid)) {
-					needProbeSIDs = append(needProbeSIDs, uint64(sid))
+				if sid > 0 {
+					usid := uint64(sid)
+					if streamID, ok := m.WatchHub().ActiveStreamID(usid); ok {
+						needProbes = append(needProbes, sessionProbeTarget{
+							sid:      usid,
+							streamID: streamID,
+						})
+					} else {
+						expectedLatestStreams[usid] = m.WatchHub().LatestStreamID(usid)
+					}
 				}
 			}
-			if len(needProbeSIDs) > 0 {
+			if len(needProbes) > 0 {
 				// 存在活跃流，先回滚释放数据库行锁，在事务外执行 Ping-Pong 探活
 				return errNeedSessionProbe
 			}
@@ -382,19 +412,66 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 				}
 			}
 
+			if len(expectedLatestStreams) > 0 {
+				allowed, activeStreams, unlock := m.WatchHub().AcquireSessionsCommitGate(expectedLatestStreams)
+				if !allowed {
+					reconnectedSIDs := make([]uint64, 0, len(activeStreams))
+					for sid := range activeStreams {
+						reconnectedSIDs = append(reconnectedSIDs, sid)
+					}
+					slices.Sort(reconnectedSIDs)
+					for _, sid := range reconnectedSIDs {
+						needProbes = append(needProbes, sessionProbeTarget{
+							sid:            sid,
+							streamID:       activeStreams[sid],
+							reconnectedNew: true,
+						})
+					}
+					return errNeedSessionProbe
+				}
+				commitGateUnlock = unlock
+			}
+
 			return nil
 		})
+		releaseGateNow()
 
 		if errors.Is(err, errNeedSessionProbe) {
-			for _, sid := range needProbeSIDs {
-				if m.WatchHub().Probe(ctx, sid, probeTimeout) {
-					return fmt.Errorf("%w: disk %s has active mounted session %d", ErrBusy, diskID, sid)
+			for _, target := range needProbes {
+				if target.reconnectedNew && m.WatchHub().HasVerifiedPong(target.sid, target.streamID) {
+					return fmt.Errorf("%w: disk %s has active mounted session %d", ErrBusy, diskID, target.sid)
 				}
-				if err := ctx.Err(); err != nil {
-					return err
+				curStreamID := target.streamID
+				for probeAttempt := 0; probeAttempt < 3; probeAttempt++ {
+					alive, probedID := m.WatchHub().ProbeStream(ctx, target.sid, curStreamID, probeTimeout)
+					if alive {
+						return fmt.Errorf("%w: disk %s has active mounted session %d", ErrBusy, diskID, target.sid)
+					}
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if probedID == 0 {
+						// 原先记录的 curStreamID 在开始探测前已被注销或被新流替换
+						nextID, ok := m.WatchHub().ActiveStreamID(target.sid)
+						if !ok {
+							break
+						}
+						curStreamID = nextID
+						continue
+					}
+					if m.WatchHub().EvictIfStreamID(target.sid, probedID) {
+						aborted, _ := m.closeSessionIfNoActiveStream(ctx, target.sid, probedID)
+						if !aborted {
+							break
+						}
+					}
+					// 探测期间同 sessionID 被新流替换，严禁凭旧流失败驱逐新流或关闭会话，改为对新流重新探测
+					nextID, ok := m.WatchHub().ActiveStreamID(target.sid)
+					if !ok {
+						break
+					}
+					curStreamID = nextID
 				}
-				m.WatchHub().Evict(sid)
-				_ = m.CloseSession(ctx, sid)
 			}
 			continue
 		}

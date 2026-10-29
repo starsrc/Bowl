@@ -147,20 +147,110 @@ func (s *Server) WatchSession(ctx context.Context, stream *connect.BidiStream[st
 		hub = meta.NewSessionWatchHub()
 	}
 
-	var sendMu sync.Mutex
-	sendFrame := func(pingSeq uint64) error {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		return stream.Send(&storagev1.WatchSessionResponse{
-			PingSeq: pingSeq,
-		})
+	type sendReq struct {
+		pingSeq uint64
+		resCh   chan error
+	}
+	sendCh := make(chan sendReq)
+	handlerDone := make(chan struct{})
+	senderDone := make(chan struct{})
+
+	var (
+		streamDoneMu sync.Mutex
+		streamDone   <-chan struct{}
+	)
+	getStreamDone := func() <-chan struct{} {
+		streamDoneMu.Lock()
+		defer streamDoneMu.Unlock()
+		return streamDone
 	}
 
-	streamID, unregister := hub.Register(sessionID, sendFrame)
+	go func() {
+		defer close(senderDone)
+		for {
+			select {
+			case <-handlerDone:
+				return
+			case <-getStreamDone():
+				return
+			case req := <-sendCh:
+				err := stream.Send(&storagev1.WatchSessionResponse{
+					PingSeq: req.pingSeq,
+				})
+				req.resCh <- err
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	sendFrame := func(pingSeq uint64) error {
+		req := sendReq{
+			pingSeq: pingSeq,
+			resCh:   make(chan error, 1),
+		}
+		doneCh := getStreamDone()
+		select {
+		case sendCh <- req:
+		case <-doneCh:
+			return io.ErrClosedPipe
+		case <-handlerDone:
+			return io.ErrClosedPipe
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		select {
+		case err := <-req.resCh:
+			return err
+		case <-doneCh:
+			return io.ErrClosedPipe
+		case <-handlerDone:
+			return io.ErrClosedPipe
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	streamID, unregister, err := hub.RegisterContext(ctx, sessionID, sendFrame)
+	if err != nil {
+		close(handlerDone)
+		<-senderDone
+		return err
+	}
+	streamDoneCh := hub.StreamDone(sessionID, streamID)
+	streamDoneMu.Lock()
+	streamDone = streamDoneCh
+	streamDoneMu.Unlock()
+
+	rc := responseControllerFromContext(ctx)
+	var abortOnce sync.Once
+	abortStreamIO := func() {
+		abortOnce.Do(func() {
+			if rc != nil {
+				past := time.Unix(1, 0)
+				_ = rc.SetWriteDeadline(past)
+				_ = rc.SetReadDeadline(past)
+			}
+		})
+	}
+	go func() {
+		select {
+		case <-streamDoneCh:
+			abortStreamIO()
+		case <-handlerDone:
+			abortStreamIO()
+		}
+	}()
+
 	defer func() {
+		close(handlerDone)
+		abortStreamIO()
 		replaced := unregister()
+		<-senderDone
 		if !replaced {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cleanupCtx, cancel := context.WithTimeout(meta.WithDisconnectedStreamID(context.Background(), streamID), 5*time.Second)
 			defer cancel()
 			_ = s.metaManager.CloseSession(cleanupCtx, sessionID)
 		}

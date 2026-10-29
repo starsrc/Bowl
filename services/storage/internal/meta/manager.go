@@ -968,43 +968,98 @@ func (m *manager) RenewSessionWithDisk(ctx context.Context, sessionID uint64, di
 	return res, nil
 }
 
+var errSessionHasActiveStream = errors.New("meta: session regained active watch stream before close")
+
 // CloseSession 立即注销指定客户端会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
 func (m *manager) CloseSession(ctx context.Context, sessionID uint64) error {
+	if streamID, ok := disconnectedStreamIDFromContext(ctx); ok {
+		_, err := m.closeSessionAfterStream(ctx, sessionID, true, streamID)
+		return err
+	}
+	return m.closeSession(ctx, sessionID, false)
+}
+
+func (m *manager) closeSessionIfNoActiveStream(ctx context.Context, sessionID uint64, evictedStreamID uint64) (abortedByActiveStream bool, err error) {
+	return m.closeSessionAfterStream(ctx, sessionID, true, evictedStreamID)
+}
+
+func (m *manager) closeSession(ctx context.Context, sessionID uint64, abortIfActiveStream bool) error {
+	_, err := m.closeSessionAfterStream(ctx, sessionID, abortIfActiveStream, 0)
+	return err
+}
+
+func (m *manager) closeSessionAfterStream(ctx context.Context, sessionID uint64, abortIfActiveStream bool, expectedMaxStreamID uint64) (abortedByActiveStream bool, err error) {
 	if sessionID == 0 || sessionID > math.MaxInt64 {
-		return ErrInvalidArgument
+		return false, ErrInvalidArgument
 	}
 
-	var shouldNotify bool
-	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		shouldNotify = false
-		expiredCount, err := q.DeleteExpiredClientSessions(ctx)
-		if err != nil {
-			return fmt.Errorf("delete expired client sessions: %w", err)
+	var (
+		shouldNotify   bool
+		reclaimedInos  []int64
+		autoCloseGate  func()
+		releaseGateNow = func() {
+			if autoCloseGate != nil {
+				autoCloseGate()
+				autoCloseGate = nil
+			}
 		}
-		deletedCount, err := q.DeleteClientSessionByID(ctx, int64(sessionID))
-		if err != nil {
-			return fmt.Errorf("delete client session %d: %w", sessionID, err)
-		}
-		if expiredCount > 0 || deletedCount > 0 {
-			shouldNotify = true
-		}
-		if err := m.reclaimUnreferencedOrphans(ctx, q); err != nil {
-			return err
-		}
-		return nil
-	})
+	)
+	defer func() {
+		releaseGateNow()
+	}()
+
+	err = tx.Retry(ctx, func(attemptCtx context.Context) error {
+		defer releaseGateNow()
+		return m.store.ExecTxWithOptions(attemptCtx, func(q db.Querier) error {
+			shouldNotify = false
+			reclaimedInos = nil
+			expiredCount, err := q.DeleteExpiredClientSessions(ctx)
+			if err != nil {
+				return fmt.Errorf("delete expired client sessions: %w", err)
+			}
+			deletedCount, err := q.DeleteClientSessionByID(ctx, int64(sessionID))
+			if err != nil {
+				return fmt.Errorf("delete client session %d: %w", sessionID, err)
+			}
+			if abortIfActiveStream && m.WatchHub().HasActiveStream(sessionID) {
+				return errSessionHasActiveStream
+			}
+			if expiredCount > 0 || deletedCount > 0 {
+				shouldNotify = true
+			}
+			reclaimedInos, err = m.reclaimUnreferencedOrphansInTx(ctx, q)
+			if err != nil {
+				return err
+			}
+			if abortIfActiveStream {
+				allowed, unlock := m.WatchHub().AcquireAutoCloseGate(sessionID, expectedMaxStreamID)
+				if !allowed {
+					return errSessionHasActiveStream
+				}
+				autoCloseGate = unlock
+			}
+			return nil
+		})
+	}, tx.WithDefaultRetry(errRetryTx))
+	releaseGateNow()
+
 	if err != nil {
-		if errors.Is(err, ErrInvalidArgument) {
-			return ErrInvalidArgument
+		if errors.Is(err, errSessionHasActiveStream) {
+			return true, nil
 		}
-		return fmt.Errorf("close session tx: %w", err)
+		if errors.Is(err, ErrInvalidArgument) {
+			return false, ErrInvalidArgument
+		}
+		return false, fmt.Errorf("close session tx: %w", err)
 	}
 
+	m.finalizeReclaimedOrphans(reclaimedInos)
+	m.cleanExpiredDirCursors(ctx)
 	if shouldNotify {
 		m.notifyAllLockWaiters()
 	}
 	m.invalidateDirCursorsBySession(sessionID)
-	return nil
+	return false, nil
 }
 
 func (m *manager) invalidateDirCursorsBySession(sessionID uint64) {
@@ -1028,12 +1083,21 @@ func (m *manager) invalidateDirCursorsBySession(sessionID uint64) {
 
 // reclaimUnreferencedOrphans 批量清理无句柄引用的超期孤儿节点，并按 root_ino 汇总退还磁盘配额。
 func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) error {
+	deletedInos, err := m.reclaimUnreferencedOrphansInTx(ctx, q)
+	if err != nil {
+		return err
+	}
+	m.finalizeReclaimedOrphans(deletedInos)
+	return nil
+}
+
+func (m *manager) reclaimUnreferencedOrphansInTx(ctx context.Context, q db.Querier) ([]int64, error) {
 	deletedOrphans, err := q.DeleteUnreferencedOrphanInodes(ctx)
 	if err != nil {
-		return fmt.Errorf("delete unreferenced orphan inodes: %w", err)
+		return nil, fmt.Errorf("delete unreferenced orphan inodes: %w", err)
 	}
 	if len(deletedOrphans) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	type quotaDelta struct {
@@ -1061,7 +1125,7 @@ func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) 
 
 	if len(deletedInos) > 0 {
 		if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
-			return fmt.Errorf("delete chunks for unreferenced orphan inodes: %w", err)
+			return nil, fmt.Errorf("delete chunks for unreferenced orphan inodes: %w", err)
 		}
 	}
 
@@ -1078,19 +1142,23 @@ func (m *manager) reclaimUnreferencedOrphans(ctx context.Context, q db.Querier) 
 			DeltaBytes:  agg.deltaBytes,
 			DeltaInodes: agg.deltaInodes,
 		}); err != nil {
-			return fmt.Errorf("reclaim disk quota for root_ino %d: %w", rootIno, err)
+			return nil, fmt.Errorf("reclaim disk quota for root_ino %d: %w", rootIno, err)
 		}
 	}
 
-	m.cleanLockWaitersForInos(deletedInos)
-	if len(deletedInos) > 0 {
-		inos := make([]uint64, len(deletedInos))
-		for i, ino := range deletedInos {
-			inos[i] = uint64(ino)
-		}
-		m.clearDirCursorsForInos(inos...)
+	return deletedInos, nil
+}
+
+func (m *manager) finalizeReclaimedOrphans(deletedInos []int64) {
+	if len(deletedInos) == 0 {
+		return
 	}
-	return nil
+	m.cleanLockWaitersForInos(deletedInos)
+	inos := make([]uint64, len(deletedInos))
+	for i, ino := range deletedInos {
+		inos[i] = uint64(ino)
+	}
+	m.clearDirCursorsForInos(inos...)
 }
 
 // reclaimOrphanIfNoHandles 检查孤儿节点是否存在未释放句柄，若无任何句柄则执行物理删除并唤醒清理锁等待通道。

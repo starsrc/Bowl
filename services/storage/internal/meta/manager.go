@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -74,9 +75,14 @@ type Manager interface {
 	SetLkw(ctx context.Context, params SetLkwParams) error
 	RenewSession(ctx context.Context, sessionID uint64) (time.Time, error)
 	RenewSessionWithStatus(ctx context.Context, sessionID uint64) (RenewSessionResult, error)
+	RenewSessionWithDisk(ctx context.Context, sessionID uint64, diskID *string) (RenewSessionResult, error)
+	CloseSession(ctx context.Context, sessionID uint64) error
+	WatchHub() *SessionWatchHub
+	ValidateWatchSession(sessionID uint64, diskID *string) error
 	GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error)
 	CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error)
 	GetDisk(ctx context.Context, diskID string) (*Disk, error)
+	ListDisks(ctx context.Context, params ListDisksParams) (*ListDisksResult, error)
 	UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error)
 	DeleteDisk(ctx context.Context, diskID string) error
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
@@ -128,6 +134,7 @@ type manager struct {
 	openDirCache          bool
 	atimeMode             AtimeMode
 	sessionLeaseTTL       time.Duration
+	sessionProbeTimeout   time.Duration
 	gcInterval            time.Duration
 	gcBatchLimit          int32
 	gcOrphanGracePeriod   time.Duration
@@ -146,6 +153,8 @@ type manager struct {
 	inFlightGrantMu       sync.Mutex
 	inFlightGrants        map[inFlightGrantKey]*inFlightGrant
 	nextInFlightGrantID   uint64
+	watchHubMu            sync.Mutex
+	watchHub              *SessionWatchHub
 }
 
 var _ Manager = (*manager)(nil)
@@ -178,6 +187,15 @@ func WithSessionLeaseTTL(ttl time.Duration) Option {
 	return func(m *manager) {
 		if ttl > 0 {
 			m.sessionLeaseTTL = ttl
+		}
+	}
+}
+
+// WithSessionProbeTimeout 配置删盘时对活跃客户端会话流发送 Ping-Pong 探活的超时窗口（d > 0 时生效，默认 DefaultSessionProbeTimeout）。
+func WithSessionProbeTimeout(d time.Duration) Option {
+	return func(m *manager) {
+		if d > 0 {
+			m.sessionProbeTimeout = d
 		}
 	}
 }
@@ -274,6 +292,7 @@ func New(store db.Store, opts ...Option) Manager {
 		attrTimeout:           DefaultAttrTimeoutSeconds,
 		dirEntryTimeout:       DefaultEntryTimeoutSeconds,
 		sessionLeaseTTL:       DefaultSessionLeaseTTL,
+		sessionProbeTimeout:   DefaultSessionProbeTimeout,
 		gcInterval:            DefaultGCInterval,
 		gcBatchLimit:          DefaultGCBatchLimit,
 		gcOrphanGracePeriod:   DefaultGCOrphanGracePeriod,
@@ -285,6 +304,7 @@ func New(store db.Store, opts ...Option) Manager {
 		inFlightDirMutations:  make(map[uint64]int),
 		activeDirReads:        make(map[uint64]*inFlightDirRead),
 		inFlightGrants:        make(map[inFlightGrantKey]*inFlightGrant),
+		watchHub:              NewSessionWatchHub(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -657,6 +677,16 @@ func newManagerFromParams(params ManagerParams) Manager {
 	return mgr
 }
 
+// WatchHub 返回会话流探活中心实例（懒初始化兜底，防止测试直接构造 &manager{} 时返回 nil）。
+func (m *manager) WatchHub() *SessionWatchHub {
+	m.watchHubMu.Lock()
+	defer m.watchHubMu.Unlock()
+	if m.watchHub == nil {
+		m.watchHub = NewSessionWatchHub()
+	}
+	return m.watchHub
+}
+
 // Module 提供 meta 依赖注入模块。
 var Module = fx.Module("meta",
 	fx.Provide(newManagerFromParams),
@@ -872,8 +902,21 @@ func (m *manager) GetParents(ctx context.Context, ino uint64) (map[uint64]uint32
 
 // RenewSessionWithStatus 续期客户端会话并返回详细状态（包括是否为新创建或过期重建）。
 func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) (RenewSessionResult, error) {
+	return m.RenewSessionWithDisk(ctx, sessionID, nil)
+}
+
+// RenewSessionWithDisk 续期客户端会话并可选绑定指定虚拟磁盘，返回详细状态（包括是否为新创建或过期重建）。
+func (m *manager) RenewSessionWithDisk(ctx context.Context, sessionID uint64, diskID *string) (RenewSessionResult, error) {
 	if sessionID == 0 || sessionID > math.MaxInt64 {
 		return RenewSessionResult{}, ErrInvalidArgument
+	}
+	var pgDiskID pgtype.UUID
+	if diskID != nil {
+		parsed, err := parseDiskID(*diskID)
+		if err != nil {
+			return RenewSessionResult{}, err
+		}
+		pgDiskID = parsed
 	}
 	var res RenewSessionResult
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
@@ -897,8 +940,13 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 				Time:  time.Now().Add(leaseTTL),
 				Valid: true,
 			},
+			DiskID: pgDiskID,
 		})
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return ErrNotFound
+			}
 			return fmt.Errorf("upsert client session %d: %w", sessionID, err)
 		}
 		if err := m.reclaimUnreferencedOrphans(ctx, q); err != nil {
@@ -912,9 +960,70 @@ func (m *manager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) 
 		if errors.Is(err, ErrInvalidArgument) {
 			return RenewSessionResult{}, ErrInvalidArgument
 		}
+		if errors.Is(err, ErrNotFound) {
+			return RenewSessionResult{}, ErrNotFound
+		}
 		return RenewSessionResult{}, fmt.Errorf("renew session with status tx: %w", err)
 	}
 	return res, nil
+}
+
+// CloseSession 立即注销指定客户端会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+func (m *manager) CloseSession(ctx context.Context, sessionID uint64) error {
+	if sessionID == 0 || sessionID > math.MaxInt64 {
+		return ErrInvalidArgument
+	}
+
+	var shouldNotify bool
+	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		shouldNotify = false
+		expiredCount, err := q.DeleteExpiredClientSessions(ctx)
+		if err != nil {
+			return fmt.Errorf("delete expired client sessions: %w", err)
+		}
+		deletedCount, err := q.DeleteClientSessionByID(ctx, int64(sessionID))
+		if err != nil {
+			return fmt.Errorf("delete client session %d: %w", sessionID, err)
+		}
+		if expiredCount > 0 || deletedCount > 0 {
+			shouldNotify = true
+		}
+		if err := m.reclaimUnreferencedOrphans(ctx, q); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrInvalidArgument) {
+			return ErrInvalidArgument
+		}
+		return fmt.Errorf("close session tx: %w", err)
+	}
+
+	if shouldNotify {
+		m.notifyAllLockWaiters()
+	}
+	m.invalidateDirCursorsBySession(sessionID)
+	return nil
+}
+
+func (m *manager) invalidateDirCursorsBySession(sessionID uint64) {
+	if sessionID == 0 {
+		return
+	}
+	m.dirCursorMu.Lock()
+	defer m.dirCursorMu.Unlock()
+	for _, r := range m.activeDirReads {
+		if r.invalidatedSessions == nil {
+			r.invalidatedSessions = make(map[uint64]struct{})
+		}
+		r.invalidatedSessions[sessionID] = struct{}{}
+	}
+	for k, anchor := range m.dirCursors {
+		if anchor.sessionID == sessionID {
+			delete(m.dirCursors, k)
+		}
+	}
 }
 
 // reclaimUnreferencedOrphans 批量清理无句柄引用的超期孤儿节点，并按 root_ino 汇总退还磁盘配额。

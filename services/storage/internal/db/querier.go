@@ -32,6 +32,7 @@ type Querier interface {
 	DeleteChunksByIno(ctx context.Context, ino int64) ([][]byte, error)
 	DeleteChunksByInos(ctx context.Context, inos []int64) ([][]byte, error)
 	DeleteChunksFromIndx(ctx context.Context, arg DeleteChunksFromIndxParams) ([][]byte, error)
+	DeleteClientSessionByID(ctx context.Context, sessionID int64) (int64, error)
 	DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	DeleteExpiredClientSessions(ctx context.Context) (int64, error)
@@ -76,8 +77,10 @@ type Querier interface {
 	InsertSliceRef(ctx context.Context, arg InsertSliceRefParams) error
 	IsSubdirectory(ctx context.Context, arg IsSubdirectoryParams) (bool, error)
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg ListActiveFileLocksByInoAndFlagsParams) ([]FileLock, error)
+	ListActiveSessionIDsByDisk(ctx context.Context, arg ListActiveSessionIDsByDiskParams) ([]int64, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error)
+	ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error)
 	ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]SliceRef, error)
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
 	ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]ListParentEntryCountsByInoRow, error)

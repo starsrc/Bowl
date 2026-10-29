@@ -114,7 +114,7 @@ func runDaemonWorker(ctx context.Context, client storagev1connect.StorageService
 	_ = unix.Dup2(logFd, int(os.Stderr.Fd()))
 
 	// 2. 初始化 ClientSession
-	sessionMgr, err := session.New(ctx, client, session.Config{})
+	sessionMgr, err := session.New(ctx, client, session.Config{DiskID: cfg.DiskID})
 	if err != nil {
 		notifyErr(fmt.Errorf("初始化客户端会话失败: %w", err))
 		return 1

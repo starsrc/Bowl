@@ -39,6 +39,63 @@ func (_m *MockManager) EXPECT() *MockManager_Expecter {
 	return &MockManager_Expecter{mock: &_m.Mock}
 }
 
+// CloseSession provides a mock function for the type MockManager
+func (_mock *MockManager) CloseSession(ctx context.Context, sessionID uint64) error {
+	ret := _mock.Called(ctx, sessionID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CloseSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) error); ok {
+		r0 = returnFunc(ctx, sessionID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_CloseSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CloseSession'
+type MockManager_CloseSession_Call struct {
+	*mock.Call
+}
+
+// CloseSession is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sessionID uint64
+func (_e *MockManager_Expecter) CloseSession(ctx any, sessionID any) *MockManager_CloseSession_Call {
+	return &MockManager_CloseSession_Call{Call: _e.mock.On("CloseSession", ctx, sessionID)}
+}
+
+func (_c *MockManager_CloseSession_Call) Run(run func(ctx context.Context, sessionID uint64)) *MockManager_CloseSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_CloseSession_Call) Return(err error) *MockManager_CloseSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_CloseSession_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64) error) *MockManager_CloseSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CollectGarbage provides a mock function for the type MockManager
 func (_mock *MockManager) CollectGarbage(ctx context.Context, limit int32) (int, error) {
 	ret := _mock.Called(ctx, limit)
@@ -999,6 +1056,74 @@ func (_c *MockManager_Link_Call) Return(inode *meta.Inode, err error) *MockManag
 }
 
 func (_c *MockManager_Link_Call) RunAndReturn(run func(ctx context.Context, params meta.LinkParams) (*meta.Inode, error)) *MockManager_Link_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListDisks provides a mock function for the type MockManager
+func (_mock *MockManager) ListDisks(ctx context.Context, params meta.ListDisksParams) (*meta.ListDisksResult, error) {
+	ret := _mock.Called(ctx, params)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListDisks")
+	}
+
+	var r0 *meta.ListDisksResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ListDisksParams) (*meta.ListDisksResult, error)); ok {
+		return returnFunc(ctx, params)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, meta.ListDisksParams) *meta.ListDisksResult); ok {
+		r0 = returnFunc(ctx, params)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.ListDisksResult)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, meta.ListDisksParams) error); ok {
+		r1 = returnFunc(ctx, params)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_ListDisks_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDisks'
+type MockManager_ListDisks_Call struct {
+	*mock.Call
+}
+
+// ListDisks is a helper method to define mock.On call
+//   - ctx context.Context
+//   - params meta.ListDisksParams
+func (_e *MockManager_Expecter) ListDisks(ctx any, params any) *MockManager_ListDisks_Call {
+	return &MockManager_ListDisks_Call{Call: _e.mock.On("ListDisks", ctx, params)}
+}
+
+func (_c *MockManager_ListDisks_Call) Run(run func(ctx context.Context, params meta.ListDisksParams)) *MockManager_ListDisks_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 meta.ListDisksParams
+		if args[1] != nil {
+			arg1 = args[1].(meta.ListDisksParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ListDisks_Call) Return(listDisksResult *meta.ListDisksResult, err error) *MockManager_ListDisks_Call {
+	_c.Call.Return(listDisksResult, err)
+	return _c
+}
+
+func (_c *MockManager_ListDisks_Call) RunAndReturn(run func(ctx context.Context, params meta.ListDisksParams) (*meta.ListDisksResult, error)) *MockManager_ListDisks_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1989,6 +2114,78 @@ func (_c *MockManager_RenewSession_Call) RunAndReturn(run func(ctx context.Conte
 	return _c
 }
 
+// RenewSessionWithDisk provides a mock function for the type MockManager
+func (_mock *MockManager) RenewSessionWithDisk(ctx context.Context, sessionID uint64, diskID *string) (meta.RenewSessionResult, error) {
+	ret := _mock.Called(ctx, sessionID, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RenewSessionWithDisk")
+	}
+
+	var r0 meta.RenewSessionResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, *string) (meta.RenewSessionResult, error)); ok {
+		return returnFunc(ctx, sessionID, diskID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, *string) meta.RenewSessionResult); ok {
+		r0 = returnFunc(ctx, sessionID, diskID)
+	} else {
+		r0 = ret.Get(0).(meta.RenewSessionResult)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64, *string) error); ok {
+		r1 = returnFunc(ctx, sessionID, diskID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_RenewSessionWithDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RenewSessionWithDisk'
+type MockManager_RenewSessionWithDisk_Call struct {
+	*mock.Call
+}
+
+// RenewSessionWithDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sessionID uint64
+//   - diskID *string
+func (_e *MockManager_Expecter) RenewSessionWithDisk(ctx any, sessionID any, diskID any) *MockManager_RenewSessionWithDisk_Call {
+	return &MockManager_RenewSessionWithDisk_Call{Call: _e.mock.On("RenewSessionWithDisk", ctx, sessionID, diskID)}
+}
+
+func (_c *MockManager_RenewSessionWithDisk_Call) Run(run func(ctx context.Context, sessionID uint64, diskID *string)) *MockManager_RenewSessionWithDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		var arg2 *string
+		if args[2] != nil {
+			arg2 = args[2].(*string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_RenewSessionWithDisk_Call) Return(renewSessionResult meta.RenewSessionResult, err error) *MockManager_RenewSessionWithDisk_Call {
+	_c.Call.Return(renewSessionResult, err)
+	return _c
+}
+
+func (_c *MockManager_RenewSessionWithDisk_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64, diskID *string) (meta.RenewSessionResult, error)) *MockManager_RenewSessionWithDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // RenewSessionWithStatus provides a mock function for the type MockManager
 func (_mock *MockManager) RenewSessionWithStatus(ctx context.Context, sessionID uint64) (meta.RenewSessionResult, error) {
 	ret := _mock.Called(ctx, sessionID)
@@ -2746,6 +2943,109 @@ func (_c *MockManager_UpdateDisk_Call) Return(disk *meta.Disk, err error) *MockM
 }
 
 func (_c *MockManager_UpdateDisk_Call) RunAndReturn(run func(ctx context.Context, params meta.UpdateDiskParams) (*meta.Disk, error)) *MockManager_UpdateDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ValidateWatchSession provides a mock function for the type MockManager
+func (_mock *MockManager) ValidateWatchSession(sessionID uint64, diskID *string) error {
+	ret := _mock.Called(sessionID, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ValidateWatchSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(uint64, *string) error); ok {
+		r0 = returnFunc(sessionID, diskID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_ValidateWatchSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ValidateWatchSession'
+type MockManager_ValidateWatchSession_Call struct {
+	*mock.Call
+}
+
+// ValidateWatchSession is a helper method to define mock.On call
+//   - sessionID uint64
+//   - diskID *string
+func (_e *MockManager_Expecter) ValidateWatchSession(sessionID any, diskID any) *MockManager_ValidateWatchSession_Call {
+	return &MockManager_ValidateWatchSession_Call{Call: _e.mock.On("ValidateWatchSession", sessionID, diskID)}
+}
+
+func (_c *MockManager_ValidateWatchSession_Call) Run(run func(sessionID uint64, diskID *string)) *MockManager_ValidateWatchSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 uint64
+		if args[0] != nil {
+			arg0 = args[0].(uint64)
+		}
+		var arg1 *string
+		if args[1] != nil {
+			arg1 = args[1].(*string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ValidateWatchSession_Call) Return(err error) *MockManager_ValidateWatchSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_ValidateWatchSession_Call) RunAndReturn(run func(sessionID uint64, diskID *string) error) *MockManager_ValidateWatchSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// WatchHub provides a mock function for the type MockManager
+func (_mock *MockManager) WatchHub() *meta.SessionWatchHub {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for WatchHub")
+	}
+
+	var r0 *meta.SessionWatchHub
+	if returnFunc, ok := ret.Get(0).(func() *meta.SessionWatchHub); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.SessionWatchHub)
+		}
+	}
+	return r0
+}
+
+// MockManager_WatchHub_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'WatchHub'
+type MockManager_WatchHub_Call struct {
+	*mock.Call
+}
+
+// WatchHub is a helper method to define mock.On call
+func (_e *MockManager_Expecter) WatchHub() *MockManager_WatchHub_Call {
+	return &MockManager_WatchHub_Call{Call: _e.mock.On("WatchHub")}
+}
+
+func (_c *MockManager_WatchHub_Call) Run(run func()) *MockManager_WatchHub_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockManager_WatchHub_Call) Return(sessionWatchHub *meta.SessionWatchHub) *MockManager_WatchHub_Call {
+	_c.Call.Return(sessionWatchHub)
+	return _c
+}
+
+func (_c *MockManager_WatchHub_Call) RunAndReturn(run func() *meta.SessionWatchHub) *MockManager_WatchHub_Call {
 	_c.Call.Return(run)
 	return _c
 }

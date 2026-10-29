@@ -166,9 +166,15 @@ func TestToStatus_All24SentinelErrors(t *testing.T) {
 			expectedCode:   codes.FailedPrecondition,
 			expectedReason: "EXDEV",
 		},
+		{
+			name:           "ErrBusy 映射为 FailedPrecondition 与 EBUSY",
+			err:            meta.ErrBusy,
+			expectedCode:   codes.FailedPrecondition,
+			expectedReason: "EBUSY",
+		},
 	}
 
-	require.Equal(t, 24, len(testCases), "必须完整覆盖全部 24 个领域哨兵错误")
+	require.Equal(t, 25, len(testCases), "必须完整覆盖全部 25 个领域哨兵错误")
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

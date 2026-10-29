@@ -56,6 +56,10 @@ const (
 	MaxDiskNameBytes = 255
 	// DefaultStatFSBlockSize 定义 StatFS 默认换算块大小（4096 字节）。
 	DefaultStatFSBlockSize = 4096
+	// DefaultListDisksPageSize 定义 ListDisks 默认单页最大返回条数（50）。
+	DefaultListDisksPageSize uint32 = 50
+	// MaxListDisksPageSize 定义 ListDisks 单页最大返回条数上限（1000）。
+	MaxListDisksPageSize uint32 = 1000
 )
 
 // Inode 文件系统标志位常量（对齐 Linux chattr / FS_*_FL）。
@@ -132,7 +136,8 @@ const (
 
 	OffsetMax uint64 = math.MaxInt64
 
-	DefaultSessionLeaseTTL = 60 * time.Second
+	DefaultSessionLeaseTTL     = 60 * time.Second
+	DefaultSessionProbeTimeout = 1500 * time.Millisecond
 
 	WaiterStatusPending   int16 = 1
 	WaiterStatusGranted   int16 = 2
@@ -431,6 +436,7 @@ var (
 	ErrAccess          = errors.New("meta: permission denied")
 	ErrInvalidShrink   = fmt.Errorf("%w: cannot shrink disk capacity below current usage", ErrInvalidArgument)
 	ErrCrossDevice     = errors.New("meta: invalid cross-device link")
+	ErrBusy            = errors.New("meta: device or resource busy")
 )
 
 // Inode 表示文件系统节点的领域实体。
@@ -494,6 +500,18 @@ type Disk struct {
 type CreateDiskParams struct {
 	Name     string
 	MaxBytes uint64
+}
+
+// ListDisksParams 描述分页查询虚拟磁盘列表入参。
+type ListDisksParams struct {
+	PageSize  uint32
+	PageToken string
+}
+
+// ListDisksResult 描述分页查询虚拟磁盘列表返回结果。
+type ListDisksResult struct {
+	Disks         []*Disk
+	NextPageToken string
 }
 
 // UpdateDiskParams 描述更新虚拟磁盘入参。

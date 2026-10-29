@@ -81,3 +81,49 @@ func IsMountPoint(path string) (bool, error) {
 
 	return false, nil
 }
+
+// FindDiskMountpoint 扫描 /proc/self/mountinfo 检查指定 diskID 是否在当前机器处于活跃挂载状态。
+// 挂载时 FUSE fsname 固定为 "bowl:<disk-id>"（位于 mountinfo "-" 分隔符后的第 2 个字段，即 fields[sepIdx+2]）。
+// 若处于挂载状态，返回其挂载点路径（unescaped & cleaned）、true, nil。
+// 若 /proc/self/mountinfo 不存在（如非 Linux 环境），返回 "", false, nil。
+func FindDiskMountpoint(diskID string) (string, bool, error) {
+	expectedSource := "bowl:" + strings.TrimSpace(diskID)
+
+	file, err := os.Open(defaultMountInfoPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("读取挂载信息文件失败: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		sepIdx := -1
+		for i, f := range fields {
+			if f == "-" {
+				sepIdx = i
+				break
+			}
+		}
+		if sepIdx < 4 || sepIdx+2 >= len(fields) {
+			continue
+		}
+		mountSource := unescapeMountInfo(fields[sepIdx+2])
+		if strings.EqualFold(mountSource, expectedSource) {
+			return filepath.Clean(unescapeMountInfo(fields[4])), true, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+		return "", false, fmt.Errorf("扫描挂载信息失败: %w", err)
+	}
+
+	return "", false, nil
+}

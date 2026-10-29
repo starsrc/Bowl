@@ -1,11 +1,15 @@
 package meta
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -138,6 +142,103 @@ func (m *manager) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
 	return toDomainDisk(row), nil
 }
 
+// diskPageCursor 定义 ListDisks 游标令牌的序列化载荷。
+// PostgreSQL TIMESTAMPTZ 精度为微秒，使用 UnixMicro() 编码与还原以彻底消除纳秒截断带来的翻页漂移。
+type diskPageCursor struct {
+	CreatedAtMicro *int64 `json:"t"`
+	DiskID         string `json:"id"`
+}
+
+func encodeDiskPageCursor(createdAt time.Time, diskID string) string {
+	us := createdAt.UTC().UnixMicro()
+	raw, err := json.Marshal(diskPageCursor{
+		CreatedAtMicro: &us,
+		DiskID:         diskID,
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeDiskPageCursor(token string) (pgtype.Timestamptz, pgtype.UUID, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return pgtype.Timestamptz{}, pgtype.UUID{}, fmt.Errorf("%w: invalid page_token base64 encoding", ErrInvalidArgument)
+	}
+	var cursor diskPageCursor
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cursor); err != nil || dec.More() || cursor.CreatedAtMicro == nil || cursor.DiskID == "" {
+		return pgtype.Timestamptz{}, pgtype.UUID{}, fmt.Errorf("%w: malformed page_token payload", ErrInvalidArgument)
+	}
+	pgID, err := parseDiskID(cursor.DiskID)
+	if err != nil {
+		return pgtype.Timestamptz{}, pgtype.UUID{}, fmt.Errorf("%w: invalid page_token disk_id", ErrInvalidArgument)
+	}
+	ts := pgtype.Timestamptz{
+		Time:  time.UnixMicro(*cursor.CreatedAtMicro).UTC(),
+		Valid: true,
+	}
+	return ts, pgID, nil
+}
+
+// ListDisks 分页列出虚拟磁盘实体（按 created_at DESC, disk_id DESC 排序）。
+func (m *manager) ListDisks(ctx context.Context, params ListDisksParams) (*ListDisksResult, error) {
+	if params.PageSize > MaxListDisksPageSize {
+		return nil, fmt.Errorf("%w: page_size %d exceeds max %d", ErrInvalidArgument, params.PageSize, MaxListDisksPageSize)
+	}
+	pageSize := params.PageSize
+	if pageSize == 0 {
+		pageSize = DefaultListDisksPageSize
+	}
+
+	var (
+		hasCursor       bool
+		cursorCreatedAt pgtype.Timestamptz
+		cursorDiskID    pgtype.UUID
+	)
+	if params.PageToken != "" {
+		var err error
+		cursorCreatedAt, cursorDiskID, err = decodeDiskPageCursor(params.PageToken)
+		if err != nil {
+			return nil, err
+		}
+		hasCursor = true
+	}
+
+	rows, err := m.store.ListDisks(ctx, db.ListDisksParams{
+		HasCursor:       hasCursor,
+		CursorCreatedAt: cursorCreatedAt,
+		CursorDiskID:    cursorDiskID,
+		PageLimit:       int32(pageSize + 1),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list disks: %w", err)
+	}
+
+	var nextPageToken string
+	if len(rows) > int(pageSize) {
+		rows = rows[:pageSize]
+		lastRow := rows[pageSize-1]
+		var lastID string
+		if lastRow.DiskID.Valid {
+			lastID = lastRow.DiskID.String()
+		}
+		nextPageToken = encodeDiskPageCursor(lastRow.CreatedAt.Time, lastID)
+	}
+
+	disks := make([]*Disk, 0, len(rows))
+	for _, row := range rows {
+		disks = append(disks, toDomainDisk(row))
+	}
+
+	return &ListDisksResult{
+		Disks:         disks,
+		NextPageToken: nextPageToken,
+	}, nil
+}
+
 // UpdateDisk 更新虚拟磁盘属性（名称、最大容量）。
 // 在事务内通过 FOR UPDATE 行锁排他锁定磁盘，校验缩容水位线（new_max_bytes >= used_bytes）并原子持久化新配额与名称。
 func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error) {
@@ -205,6 +306,8 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	return result, nil
 }
 
+var errNeedSessionProbe = errors.New("meta: need active session liveness probe")
+
 // DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
 // 在单次读写事务内排他锁定目标磁盘并删除 Disk 记录，同时按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联的 entries、inode_xattrs、file_handles、file_locks）。
 // 事务提交成功后，主动关闭并清理内存中对应 Inode 的阻塞等待通道，唤醒正在等待锁的协程。
@@ -215,47 +318,96 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return err
 	}
 
-	var rootIno int64
-	var deletedInos []int64
-	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		// 1. 获取并排他锁定目标 Disk 行
-		diskRow, err := q.GetDiskForUpdate(ctx, pgID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("get disk for update %s: %w", diskID, err)
-		}
-		rootIno = diskRow.RootIno
-
-		// 2. 删除该 Disk 行
-		rows, err := q.DeleteDisk(ctx, pgID)
-		if err != nil {
-			return fmt.Errorf("delete disk %s: %w", diskID, err)
-		}
-		if rows == 0 {
-			return ErrNotFound
-		}
-
-		// 3. 按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联项）
-		deletedInos, err = q.DeleteInodesByRootIno(ctx, diskRow.RootIno)
-		if err != nil {
-			return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
-		}
-
-		if len(deletedInos) > 0 {
-			if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
-				return fmt.Errorf("delete chunks for disk %s (root_ino=%d): %w", diskID, diskRow.RootIno, err)
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
+	probeTimeout := m.sessionProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = DefaultSessionProbeTimeout
 	}
 
-	// 4. 事务成功提交后，主动清理内存中的锁等待通道，唤醒等待该磁盘下所有节点的阻塞协程
+	var rootIno int64
+	var deletedInos []int64
+
+	for attempt := 0; attempt < 3; attempt++ {
+		var needProbeSIDs []uint64
+		err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+			needProbeSIDs = nil
+			deletedInos = nil
+
+			// 1. 获取并排他锁定目标 Disk 行与关联 Inodes
+			diskRow, err := q.GetDiskForUpdate(ctx, pgID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return fmt.Errorf("get disk for update %s: %w", diskID, err)
+			}
+			rootIno = diskRow.RootIno
+
+			// 2. 查询绑定该磁盘或持有该磁盘下句柄的未过期会话
+			activeSIDs, err := q.ListActiveSessionIDsByDisk(ctx, db.ListActiveSessionIDsByDiskParams{
+				DiskID:  pgID,
+				RootIno: diskRow.RootIno,
+			})
+			if err != nil {
+				return fmt.Errorf("list active sessions for disk %s: %w", diskID, err)
+			}
+
+			for _, sid := range activeSIDs {
+				if sid > 0 && m.WatchHub().HasActiveStream(uint64(sid)) {
+					needProbeSIDs = append(needProbeSIDs, uint64(sid))
+				}
+			}
+			if len(needProbeSIDs) > 0 {
+				// 存在活跃流，先回滚释放数据库行锁，在事务外执行 Ping-Pong 探活
+				return errNeedSessionProbe
+			}
+
+			// 3. 删除该 Disk 行（外键 ON DELETE CASCADE 自动级联清理 disk_id 绑定的残留无流 client_sessions）
+			rows, err := q.DeleteDisk(ctx, pgID)
+			if err != nil {
+				return fmt.Errorf("delete disk %s: %w", diskID, err)
+			}
+			if rows == 0 {
+				return ErrNotFound
+			}
+
+			// 4. 按 root_ino 批量强制删除该磁盘下的全部 Inode（依赖外键 ON DELETE CASCADE 自动级联清除关联项）
+			deletedInos, err = q.DeleteInodesByRootIno(ctx, diskRow.RootIno)
+			if err != nil {
+				return fmt.Errorf("delete inodes by root_ino %d for disk %s: %w", diskRow.RootIno, diskID, err)
+			}
+
+			if len(deletedInos) > 0 {
+				if err := deleteAllChunksByInos(ctx, q, deletedInos); err != nil {
+					return fmt.Errorf("delete chunks for disk %s (root_ino=%d): %w", diskID, diskRow.RootIno, err)
+				}
+			}
+
+			return nil
+		})
+
+		if errors.Is(err, errNeedSessionProbe) {
+			for _, sid := range needProbeSIDs {
+				if m.WatchHub().Probe(ctx, sid, probeTimeout) {
+					return fmt.Errorf("%w: disk %s has active mounted session %d", ErrBusy, diskID, sid)
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				m.WatchHub().Evict(sid)
+				_ = m.CloseSession(ctx, sid)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		break
+	}
+	if errors.Is(err, errNeedSessionProbe) {
+		return fmt.Errorf("%w: disk %s still has active mounted sessions", ErrBusy, diskID)
+	}
+
+	// 5. 事务成功提交后，主动清理内存中的锁等待通道，唤醒等待该磁盘下所有节点的阻塞协程
 	if len(deletedInos) > 0 {
 		m.cleanLockWaitersForInos(deletedInos)
 	}

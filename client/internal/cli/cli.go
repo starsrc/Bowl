@@ -13,6 +13,7 @@ const usageHelp = `bowl - 分布式虚拟磁盘 Linux FUSE 客户端
   bowl <command> [flags] [arguments]
 
 可用命令:
+  disk        管理虚拟磁盘生命周期 (创建、列表、详情、更新/扩缩容、删除)
   mount       挂载远端虚拟磁盘至本地目录
   umount      卸载本地已挂载的虚拟磁盘 (别名: unmount)
   version     打印客户端版本信息
@@ -40,6 +41,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, usageHelp)
 		return 0
+	case "disk":
+		return executeDisk(args[1:], stdout, stderr)
 	case "mount":
 		return executeMount(args[1:], stdout, stderr)
 	case "umount", "unmount":

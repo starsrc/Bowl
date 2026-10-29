@@ -108,6 +108,7 @@ func startMockServer(t *testing.T, handler storagev1connect.StorageServiceHandle
 func TestIdempotentProceduresWhitelist(t *testing.T) {
 	expectedProcedures := []string{
 		storagev1connect.StorageServiceGetDiskProcedure,
+		storagev1connect.StorageServiceListDisksProcedure,
 		storagev1connect.StorageServiceLookupProcedure,
 		storagev1connect.StorageServiceGetAttrProcedure,
 		storagev1connect.StorageServiceReadlinkProcedure,
@@ -121,9 +122,10 @@ func TestIdempotentProceduresWhitelist(t *testing.T) {
 		storagev1connect.StorageServiceGetLkProcedure,
 		storagev1connect.StorageServiceStatFSProcedure,
 		storagev1connect.StorageServiceRenewSessionProcedure,
+		storagev1connect.StorageServiceCloseSessionProcedure,
 	}
 
-	require.Len(t, expectedProcedures, 14, "白名单必须恰好包含 14 个只读与幂等 RPC")
+	require.Len(t, expectedProcedures, 16, "白名单必须恰好包含 16 个只读与幂等 RPC")
 	for _, proc := range expectedProcedures {
 		require.True(t, IsIdempotentProcedure(proc), "Procedure %s 必须被判定为幂等", proc)
 	}

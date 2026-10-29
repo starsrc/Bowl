@@ -413,6 +413,37 @@ func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 	return i, err
 }
 
+const deleteClientSessionByID = `-- name: DeleteClientSessionByID :execrows
+WITH locked_target AS MATERIALIZED (
+    SELECT s.session_id
+    FROM client_sessions s
+    WHERE s.session_id = $1
+    FOR UPDATE OF s
+),
+purged_locks AS (
+    DELETE FROM file_locks
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+),
+purged_waiters AS (
+    DELETE FROM file_lock_waiters
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+),
+purged_handles AS (
+    DELETE FROM file_handles
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+)
+DELETE FROM client_sessions
+WHERE session_id IN (SELECT session_id FROM locked_target)
+`
+
+func (q *Queries) DeleteClientSessionByID(ctx context.Context, sessionID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteClientSessionByID, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteDisk = `-- name: DeleteDisk :execrows
 DELETE FROM disks
 WHERE disk_id = $1
@@ -1360,6 +1391,48 @@ func (q *Queries) ListActiveFileLocksByInoAndFlags(ctx context.Context, arg List
 	return items, nil
 }
 
+const listActiveSessionIDsByDisk = `-- name: ListActiveSessionIDsByDisk :many
+SELECT cs.session_id
+FROM client_sessions cs
+WHERE cs.expires_at > clock_timestamp()
+  AND (
+    cs.disk_id = $1::uuid
+    OR EXISTS (
+      SELECT 1
+      FROM file_handles fh
+      JOIN inodes i ON i.ino = fh.ino
+      WHERE fh.session_id = cs.session_id
+        AND i.root_ino = $2::bigint
+    )
+  )
+ORDER BY cs.session_id ASC
+`
+
+type ListActiveSessionIDsByDiskParams struct {
+	DiskID  pgtype.UUID `json:"disk_id"`
+	RootIno int64       `json:"root_ino"`
+}
+
+func (q *Queries) ListActiveSessionIDsByDisk(ctx context.Context, arg ListActiveSessionIDsByDiskParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, listActiveSessionIDsByDisk, arg.DiskID, arg.RootIno)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var session_id int64
+		if err := rows.Scan(&session_id); err != nil {
+			return nil, err
+		}
+		items = append(items, session_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDirEntries = `-- name: ListDirEntries :many
 SELECT
     e.name,
@@ -1523,6 +1596,56 @@ func (q *Queries) ListDirEntriesAfterName(ctx context.Context, arg ListDirEntrie
 			&i.Flags,
 			&i.ParentIno,
 			&i.RootIno,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDisks = `-- name: ListDisks :many
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE (NOT $1::boolean)
+   OR (created_at, disk_id) < ($2::timestamptz, $3::uuid)
+ORDER BY created_at DESC, disk_id DESC
+LIMIT $4::int
+`
+
+type ListDisksParams struct {
+	HasCursor       bool               `json:"has_cursor"`
+	CursorCreatedAt pgtype.Timestamptz `json:"cursor_created_at"`
+	CursorDiskID    pgtype.UUID        `json:"cursor_disk_id"`
+	PageLimit       int32              `json:"page_limit"`
+}
+
+func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error) {
+	rows, err := q.db.Query(ctx, listDisks,
+		arg.HasCursor,
+		arg.CursorCreatedAt,
+		arg.CursorDiskID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Disk
+	for rows.Next() {
+		var i Disk
+		if err := rows.Scan(
+			&i.DiskID,
+			&i.Name,
+			&i.RootIno,
+			&i.MaxBytes,
+			&i.UsedBytes,
+			&i.UsedInodes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1930,8 +2053,8 @@ purged_handles AS (
     DELETE FROM file_handles
     WHERE session_id IN (SELECT session_id FROM expired_target)
 )
-INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
-SELECT $1, $2, ts.now, ts.now FROM ts
+INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at, disk_id)
+SELECT $1, $2, ts.now, ts.now, $3 FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
     created_at = CASE
@@ -1941,23 +2064,29 @@ SET expires_at = EXCLUDED.expires_at,
     updated_at = CASE
         WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
         ELSE GREATEST((SELECT now FROM ts), client_sessions.created_at + interval '1 microsecond')
+    END,
+    disk_id = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN EXCLUDED.disk_id
+        ELSE COALESCE(EXCLUDED.disk_id, client_sessions.disk_id)
     END
-RETURNING session_id, expires_at, updated_at, created_at
+RETURNING session_id, expires_at, updated_at, created_at, disk_id
 `
 
 type UpsertClientSessionParams struct {
 	SessionID int64              `json:"session_id"`
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	DiskID    pgtype.UUID        `json:"disk_id"`
 }
 
 func (q *Queries) UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error) {
-	row := q.db.QueryRow(ctx, upsertClientSession, arg.SessionID, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, upsertClientSession, arg.SessionID, arg.ExpiresAt, arg.DiskID)
 	var i ClientSession
 	err := row.Scan(
 		&i.SessionID,
 		&i.ExpiresAt,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.DiskID,
 	)
 	return i, err
 }

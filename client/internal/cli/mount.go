@@ -49,7 +49,7 @@ var defaultMountRunner MountServerRunner = runForegroundMount
 
 // runForegroundMount 是默认的前台挂载执行器。
 func runForegroundMount(ctx context.Context, client storagev1connect.StorageServiceClient, cfg fusefs.Config, mountpoint string, stdout, stderr io.Writer) error {
-	sessionMgr, err := session.New(ctx, client, session.Config{})
+	sessionMgr, err := session.New(ctx, client, session.Config{DiskID: cfg.DiskID})
 	if err != nil {
 		return fmt.Errorf("初始化客户端会话失败: %w", err)
 	}

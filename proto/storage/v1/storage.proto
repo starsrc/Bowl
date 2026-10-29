@@ -219,8 +219,21 @@ service StorageService {
 
   // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
   // 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
   // 续期成功返回刷新后的租约截止时间 expires_at。
   rpc RenewSession(RenewSessionRequest) returns (RenewSessionResponse);
+
+  // CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+  // 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // 若目标会话已不存在或已过期，按幂等成功返回。
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+
+  // WatchSession 建立客户端会话保活与探活双向流：
+  // 1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+  // 2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+  // 3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+  //    客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+  rpc WatchSession(stream WatchSessionRequest) returns (stream WatchSessionResponse);
 
   // CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
   // 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
@@ -231,6 +244,9 @@ service StorageService {
   // 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
   // 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
   rpc GetDisk(GetDiskRequest) returns (GetDiskResponse);
+
+  // ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+  rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
 
   // UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
   // 支持按需单独或同时更新 name 与 max_bytes。
@@ -1475,6 +1491,16 @@ message RenewSessionRequest {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  // 可选的关联虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+  optional string disk_id = 2 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "renew_session_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
 }
 
 // RenewSessionResponse 包含续期后刷新得到的会话租约绝对截止时间。
@@ -1484,6 +1510,40 @@ message RenewSessionResponse {
 
   // 会话是否为新创建或过期重建。
   bool session_recreated = 2;
+}
+
+// CloseSessionRequest 定义 CloseSession 接口输入参数。
+message CloseSessionRequest {
+  // 待注销的客户端会话租约标识 (session_id)。
+  // 必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
+  uint64 session_id = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// CloseSessionResponse 定义 CloseSession 接口输出参数。
+message CloseSessionResponse {}
+
+// WatchSessionRequest 客户端会话监听与 Pong 心跳回复请求帧。
+message WatchSessionRequest {
+  // 客户端会话 63 位正整数标识（取值范围 1..9223372036854775807）。
+  uint64 session_id = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 首帧可选上报该会话挂载绑定的虚拟磁盘 UUID。
+  optional string disk_id = 2;
+
+  // 当回复服务端 Ping 探活时，回填服务端下发的 ping_seq（首帧注册时为 0）。
+  uint64 pong_seq = 3;
+}
+
+// WatchSessionResponse 服务端下发的会话探活 Ping 帧。
+message WatchSessionResponse {
+  // 服务端生成的单调递增探活序列号（> 0 时要求客户端立即回复相同 pong_seq；0 表示首帧注册就绪确认）。
+  uint64 ping_seq = 1;
 }
 
 // Inode 代表文件系统中的实体节点。
@@ -1627,6 +1687,24 @@ message GetDiskRequest {
 message GetDiskResponse {
   // 查询到的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
+}
+
+// ListDisksRequest 分页查询虚拟磁盘列表请求。
+message ListDisksRequest {
+  // 单页最大返回条数（为 0 时默认取 50，最大不超过 1000）。
+  uint32 page_size = 1 [(buf.validate.field).uint32.lte = 1000];
+
+  // 游标分页令牌（为空表示从第一页开始查询）。
+  string page_token = 2;
+}
+
+// ListDisksResponse 分页查询虚拟磁盘列表响应。
+message ListDisksResponse {
+  // 当前页虚拟磁盘列表（按 created_at DESC, disk_id DESC 排序）。
+  repeated Disk disks = 1;
+
+  // 下一页游标令牌（为空字符串表示已到达最后一页）。
+  string next_page_token = 2;
 }
 
 // UpdateDiskRequest 定义 UpdateDisk 接口输入参数。

@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
+	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -95,7 +99,15 @@ func (s *Server) SetLkw(ctx context.Context, req *connect.Request[storagev1.SetL
 
 // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 func (s *Server) RenewSession(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
-	res, err := s.metaManager.RenewSessionWithStatus(ctx, req.Msg.GetSessionId())
+	var (
+		res meta.RenewSessionResult
+		err error
+	)
+	if req.Msg.DiskId == nil {
+		res, err = s.metaManager.RenewSessionWithStatus(ctx, req.Msg.GetSessionId())
+	} else {
+		res, err = s.metaManager.RenewSessionWithDisk(ctx, req.Msg.GetSessionId(), req.Msg.DiskId)
+	}
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -104,4 +116,74 @@ func (s *Server) RenewSession(ctx context.Context, req *connect.Request[storagev
 		ExpiresAt:        timestamppb.New(res.ExpiresAt),
 		SessionRecreated: res.SessionRecreated,
 	}), nil
+}
+
+// CloseSession 在客户端优雅卸载时即时注销指定会话租约。
+func (s *Server) CloseSession(ctx context.Context, req *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error) {
+	if err := s.metaManager.CloseSession(ctx, req.Msg.GetSessionId()); err != nil {
+		return nil, toConnectError(err)
+	}
+
+	return connect.NewResponse(&storagev1.CloseSessionResponse{}), nil
+}
+
+// WatchSession 建立客户端会话保活与探活双向流。
+func (s *Server) WatchSession(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error {
+	firstMsg, err := stream.Receive()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+
+	sessionID := firstMsg.GetSessionId()
+	if err := s.metaManager.ValidateWatchSession(sessionID, firstMsg.DiskId); err != nil {
+		return toConnectError(err)
+	}
+
+	hub := s.metaManager.WatchHub()
+	if hub == nil {
+		hub = meta.NewSessionWatchHub()
+	}
+
+	var sendMu sync.Mutex
+	sendFrame := func(pingSeq uint64) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.Send(&storagev1.WatchSessionResponse{
+			PingSeq: pingSeq,
+		})
+	}
+
+	streamID, unregister := hub.Register(sessionID, sendFrame)
+	defer func() {
+		replaced := unregister()
+		if !replaced {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.metaManager.CloseSession(cleanupCtx, sessionID)
+		}
+	}()
+
+	if err := sendFrame(0); err != nil {
+		return err
+	}
+
+	if firstMsg.GetPongSeq() > 0 {
+		hub.HandlePong(sessionID, streamID, firstMsg.GetPongSeq())
+	}
+
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if msg.GetPongSeq() > 0 {
+			hub.HandlePong(sessionID, streamID, msg.GetPongSeq())
+		}
+	}
 }

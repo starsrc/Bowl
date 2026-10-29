@@ -385,8 +385,8 @@ purged_handles AS (
     DELETE FROM file_handles
     WHERE session_id IN (SELECT session_id FROM expired_target)
 )
-INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
-SELECT $1, $2, ts.now, ts.now FROM ts
+INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at, disk_id)
+SELECT $1, $2, ts.now, ts.now, $3 FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
     created_at = CASE
@@ -396,8 +396,34 @@ SET expires_at = EXCLUDED.expires_at,
     updated_at = CASE
         WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
         ELSE GREATEST((SELECT now FROM ts), client_sessions.created_at + interval '1 microsecond')
+    END,
+    disk_id = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN EXCLUDED.disk_id
+        ELSE COALESCE(EXCLUDED.disk_id, client_sessions.disk_id)
     END
-RETURNING session_id, expires_at, updated_at, created_at;
+RETURNING session_id, expires_at, updated_at, created_at, disk_id;
+
+-- name: DeleteClientSessionByID :execrows
+WITH locked_target AS MATERIALIZED (
+    SELECT s.session_id
+    FROM client_sessions s
+    WHERE s.session_id = $1
+    FOR UPDATE OF s
+),
+purged_locks AS (
+    DELETE FROM file_locks
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+),
+purged_waiters AS (
+    DELETE FROM file_lock_waiters
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+),
+purged_handles AS (
+    DELETE FROM file_handles
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+)
+DELETE FROM client_sessions
+WHERE session_id IN (SELECT session_id FROM locked_target);
 
 -- name: DeleteUnreferencedOrphanInodes :many
 DELETE FROM inodes
@@ -579,6 +605,14 @@ SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, 
 FROM disks
 WHERE disk_id = $1;
 
+-- name: ListDisks :many
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE (NOT @has_cursor::boolean)
+   OR (created_at, disk_id) < (@cursor_created_at::timestamptz, @cursor_disk_id::uuid)
+ORDER BY created_at DESC, disk_id DESC
+LIMIT @page_limit::int;
+
 -- name: GetDiskForUpdate :one
 WITH target_disk AS MATERIALIZED (
     SELECT root_ino
@@ -646,3 +680,19 @@ WHERE root_ino = @root_ino::bigint;
 -- name: DeleteDisk :execrows
 DELETE FROM disks
 WHERE disk_id = $1;
+
+-- name: ListActiveSessionIDsByDisk :many
+SELECT cs.session_id
+FROM client_sessions cs
+WHERE cs.expires_at > clock_timestamp()
+  AND (
+    cs.disk_id = @disk_id::uuid
+    OR EXISTS (
+      SELECT 1
+      FROM file_handles fh
+      JOIN inodes i ON i.ino = fh.ino
+      WHERE fh.session_id = cs.session_id
+        AND i.root_ino = @root_ino::bigint
+    )
+  )
+ORDER BY cs.session_id ASC;

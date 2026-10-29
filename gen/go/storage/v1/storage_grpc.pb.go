@@ -52,8 +52,11 @@ const (
 	StorageService_SetLk_FullMethodName        = "/storage.v1.StorageService/SetLk"
 	StorageService_SetLkw_FullMethodName       = "/storage.v1.StorageService/SetLkw"
 	StorageService_RenewSession_FullMethodName = "/storage.v1.StorageService/RenewSession"
+	StorageService_CloseSession_FullMethodName = "/storage.v1.StorageService/CloseSession"
+	StorageService_WatchSession_FullMethodName = "/storage.v1.StorageService/WatchSession"
 	StorageService_CreateDisk_FullMethodName   = "/storage.v1.StorageService/CreateDisk"
 	StorageService_GetDisk_FullMethodName      = "/storage.v1.StorageService/GetDisk"
+	StorageService_ListDisks_FullMethodName    = "/storage.v1.StorageService/ListDisks"
 	StorageService_UpdateDisk_FullMethodName   = "/storage.v1.StorageService/UpdateDisk"
 	StorageService_DeleteDisk_FullMethodName   = "/storage.v1.StorageService/DeleteDisk"
 	StorageService_StatFS_FullMethodName       = "/storage.v1.StorageService/StatFS"
@@ -243,8 +246,19 @@ type StorageServiceClient interface {
 	SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(ctx context.Context, in *RenewSessionRequest, opts ...grpc.CallOption) (*RenewSessionResponse, error)
+	// CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标会话已不存在或已过期，按幂等成功返回。
+	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
+	// WatchSession 建立客户端会话保活与探活双向流：
+	//  1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+	//  2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+	//  3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+	//     客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+	WatchSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WatchSessionRequest, WatchSessionResponse], error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -253,6 +267,8 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(ctx context.Context, in *GetDiskRequest, opts ...grpc.CallOption) (*GetDiskResponse, error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -609,6 +625,29 @@ func (c *storageServiceClient) RenewSession(ctx context.Context, in *RenewSessio
 	return out, nil
 }
 
+func (c *storageServiceClient) CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseSessionResponse)
+	err := c.cc.Invoke(ctx, StorageService_CloseSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) WatchSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WatchSessionRequest, WatchSessionResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StorageService_ServiceDesc.Streams[0], StorageService_WatchSession_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchSessionRequest, WatchSessionResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StorageService_WatchSessionClient = grpc.BidiStreamingClient[WatchSessionRequest, WatchSessionResponse]
+
 func (c *storageServiceClient) CreateDisk(ctx context.Context, in *CreateDiskRequest, opts ...grpc.CallOption) (*CreateDiskResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateDiskResponse)
@@ -623,6 +662,16 @@ func (c *storageServiceClient) GetDisk(ctx context.Context, in *GetDiskRequest, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetDiskResponse)
 	err := c.cc.Invoke(ctx, StorageService_GetDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListDisksResponse)
+	err := c.cc.Invoke(ctx, StorageService_ListDisks_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -843,8 +892,19 @@ type StorageServiceServer interface {
 	SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error)
+	// CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标会话已不存在或已过期，按幂等成功返回。
+	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
+	// WatchSession 建立客户端会话保活与探活双向流：
+	//  1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+	//  2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+	//  3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+	//     客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+	WatchSession(grpc.BidiStreamingServer[WatchSessionRequest, WatchSessionResponse]) error
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -853,6 +913,8 @@ type StorageServiceServer interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *GetDiskRequest) (*GetDiskResponse, error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -978,11 +1040,20 @@ func (UnimplementedStorageServiceServer) SetLkw(context.Context, *SetLkwRequest)
 func (UnimplementedStorageServiceServer) RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RenewSession not implemented")
 }
+func (UnimplementedStorageServiceServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CloseSession not implemented")
+}
+func (UnimplementedStorageServiceServer) WatchSession(grpc.BidiStreamingServer[WatchSessionRequest, WatchSessionResponse]) error {
+	return status.Error(codes.Unimplemented, "method WatchSession not implemented")
+}
 func (UnimplementedStorageServiceServer) CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDisk not implemented")
 }
 func (UnimplementedStorageServiceServer) GetDisk(context.Context, *GetDiskRequest) (*GetDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListDisks not implemented")
 }
 func (UnimplementedStorageServiceServer) UpdateDisk(context.Context, *UpdateDiskRequest) (*UpdateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateDisk not implemented")
@@ -1608,6 +1679,31 @@ func _StorageService_RenewSession_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_CloseSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).CloseSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_CloseSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).CloseSession(ctx, req.(*CloseSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_WatchSession_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(StorageServiceServer).WatchSession(&grpc.GenericServerStream[WatchSessionRequest, WatchSessionResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StorageService_WatchSessionServer = grpc.BidiStreamingServer[WatchSessionRequest, WatchSessionResponse]
+
 func _StorageService_CreateDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateDiskRequest)
 	if err := dec(in); err != nil {
@@ -1640,6 +1736,24 @@ func _StorageService_GetDisk_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(StorageServiceServer).GetDisk(ctx, req.(*GetDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ListDisks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListDisksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ListDisks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ListDisks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ListDisks(ctx, req.(*ListDisksRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1838,12 +1952,20 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _StorageService_RenewSession_Handler,
 		},
 		{
+			MethodName: "CloseSession",
+			Handler:    _StorageService_CloseSession_Handler,
+		},
+		{
 			MethodName: "CreateDisk",
 			Handler:    _StorageService_CreateDisk_Handler,
 		},
 		{
 			MethodName: "GetDisk",
 			Handler:    _StorageService_GetDisk_Handler,
+		},
+		{
+			MethodName: "ListDisks",
+			Handler:    _StorageService_ListDisks_Handler,
 		},
 		{
 			MethodName: "UpdateDisk",
@@ -1858,6 +1980,13 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _StorageService_StatFS_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchSession",
+			Handler:       _StorageService_WatchSession_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "storage/v1/storage.proto",
 }

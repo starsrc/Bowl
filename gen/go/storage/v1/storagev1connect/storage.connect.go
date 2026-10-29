@@ -105,11 +105,20 @@ const (
 	// StorageServiceRenewSessionProcedure is the fully-qualified name of the StorageService's
 	// RenewSession RPC.
 	StorageServiceRenewSessionProcedure = "/storage.v1.StorageService/RenewSession"
+	// StorageServiceCloseSessionProcedure is the fully-qualified name of the StorageService's
+	// CloseSession RPC.
+	StorageServiceCloseSessionProcedure = "/storage.v1.StorageService/CloseSession"
+	// StorageServiceWatchSessionProcedure is the fully-qualified name of the StorageService's
+	// WatchSession RPC.
+	StorageServiceWatchSessionProcedure = "/storage.v1.StorageService/WatchSession"
 	// StorageServiceCreateDiskProcedure is the fully-qualified name of the StorageService's CreateDisk
 	// RPC.
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
 	// StorageServiceGetDiskProcedure is the fully-qualified name of the StorageService's GetDisk RPC.
 	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
+	// StorageServiceListDisksProcedure is the fully-qualified name of the StorageService's ListDisks
+	// RPC.
+	StorageServiceListDisksProcedure = "/storage.v1.StorageService/ListDisks"
 	// StorageServiceUpdateDiskProcedure is the fully-qualified name of the StorageService's UpdateDisk
 	// RPC.
 	StorageServiceUpdateDiskProcedure = "/storage.v1.StorageService/UpdateDisk"
@@ -300,8 +309,19 @@ type StorageServiceClient interface {
 	SetLkw(context.Context, *connect.Request[v1.SetLkwRequest]) (*connect.Response[v1.SetLkwResponse], error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *connect.Request[v1.RenewSessionRequest]) (*connect.Response[v1.RenewSessionResponse], error)
+	// CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标会话已不存在或已过期，按幂等成功返回。
+	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
+	// WatchSession 建立客户端会话保活与探活双向流：
+	//  1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+	//  2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+	//  3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+	//     客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+	WatchSession(context.Context) *connect.BidiStreamForClient[v1.WatchSessionRequest, v1.WatchSessionResponse]
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -310,6 +330,8 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -537,6 +559,18 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("RenewSession")),
 			connect.WithClientOptions(opts...),
 		),
+		closeSession: connect.NewClient[v1.CloseSessionRequest, v1.CloseSessionResponse](
+			httpClient,
+			baseURL+StorageServiceCloseSessionProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("CloseSession")),
+			connect.WithClientOptions(opts...),
+		),
+		watchSession: connect.NewClient[v1.WatchSessionRequest, v1.WatchSessionResponse](
+			httpClient,
+			baseURL+StorageServiceWatchSessionProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("WatchSession")),
+			connect.WithClientOptions(opts...),
+		),
 		createDisk: connect.NewClient[v1.CreateDiskRequest, v1.CreateDiskResponse](
 			httpClient,
 			baseURL+StorageServiceCreateDiskProcedure,
@@ -547,6 +581,12 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			httpClient,
 			baseURL+StorageServiceGetDiskProcedure,
 			connect.WithSchema(storageServiceMethods.ByName("GetDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		listDisks: connect.NewClient[v1.ListDisksRequest, v1.ListDisksResponse](
+			httpClient,
+			baseURL+StorageServiceListDisksProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListDisks")),
 			connect.WithClientOptions(opts...),
 		),
 		updateDisk: connect.NewClient[v1.UpdateDiskRequest, v1.UpdateDiskResponse](
@@ -605,8 +645,11 @@ type storageServiceClient struct {
 	setLk        *connect.Client[v1.SetLkRequest, v1.SetLkResponse]
 	setLkw       *connect.Client[v1.SetLkwRequest, v1.SetLkwResponse]
 	renewSession *connect.Client[v1.RenewSessionRequest, v1.RenewSessionResponse]
+	closeSession *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
+	watchSession *connect.Client[v1.WatchSessionRequest, v1.WatchSessionResponse]
 	createDisk   *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
 	getDisk      *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
+	listDisks    *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
 	updateDisk   *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
 	deleteDisk   *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
 	statFS       *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
@@ -777,6 +820,16 @@ func (c *storageServiceClient) RenewSession(ctx context.Context, req *connect.Re
 	return c.renewSession.CallUnary(ctx, req)
 }
 
+// CloseSession calls storage.v1.StorageService.CloseSession.
+func (c *storageServiceClient) CloseSession(ctx context.Context, req *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
+	return c.closeSession.CallUnary(ctx, req)
+}
+
+// WatchSession calls storage.v1.StorageService.WatchSession.
+func (c *storageServiceClient) WatchSession(ctx context.Context) *connect.BidiStreamForClient[v1.WatchSessionRequest, v1.WatchSessionResponse] {
+	return c.watchSession.CallBidiStream(ctx)
+}
+
 // CreateDisk calls storage.v1.StorageService.CreateDisk.
 func (c *storageServiceClient) CreateDisk(ctx context.Context, req *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error) {
 	return c.createDisk.CallUnary(ctx, req)
@@ -785,6 +838,11 @@ func (c *storageServiceClient) CreateDisk(ctx context.Context, req *connect.Requ
 // GetDisk calls storage.v1.StorageService.GetDisk.
 func (c *storageServiceClient) GetDisk(ctx context.Context, req *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error) {
 	return c.getDisk.CallUnary(ctx, req)
+}
+
+// ListDisks calls storage.v1.StorageService.ListDisks.
+func (c *storageServiceClient) ListDisks(ctx context.Context, req *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error) {
+	return c.listDisks.CallUnary(ctx, req)
 }
 
 // UpdateDisk calls storage.v1.StorageService.UpdateDisk.
@@ -982,8 +1040,19 @@ type StorageServiceHandler interface {
 	SetLkw(context.Context, *connect.Request[v1.SetLkwRequest]) (*connect.Response[v1.SetLkwResponse], error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *connect.Request[v1.RenewSessionRequest]) (*connect.Response[v1.RenewSessionResponse], error)
+	// CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标会话已不存在或已过期，按幂等成功返回。
+	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
+	// WatchSession 建立客户端会话保活与探活双向流：
+	//  1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+	//  2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+	//  3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+	//     客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+	WatchSession(context.Context, *connect.BidiStream[v1.WatchSessionRequest, v1.WatchSessionResponse]) error
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -992,6 +1061,8 @@ type StorageServiceHandler interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -1215,6 +1286,18 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("RenewSession")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceCloseSessionHandler := connect.NewUnaryHandler(
+		StorageServiceCloseSessionProcedure,
+		svc.CloseSession,
+		connect.WithSchema(storageServiceMethods.ByName("CloseSession")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceWatchSessionHandler := connect.NewBidiStreamHandler(
+		StorageServiceWatchSessionProcedure,
+		svc.WatchSession,
+		connect.WithSchema(storageServiceMethods.ByName("WatchSession")),
+		connect.WithHandlerOptions(opts...),
+	)
 	storageServiceCreateDiskHandler := connect.NewUnaryHandler(
 		StorageServiceCreateDiskProcedure,
 		svc.CreateDisk,
@@ -1225,6 +1308,12 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		StorageServiceGetDiskProcedure,
 		svc.GetDisk,
 		connect.WithSchema(storageServiceMethods.ByName("GetDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceListDisksHandler := connect.NewUnaryHandler(
+		StorageServiceListDisksProcedure,
+		svc.ListDisks,
+		connect.WithSchema(storageServiceMethods.ByName("ListDisks")),
 		connect.WithHandlerOptions(opts...),
 	)
 	storageServiceUpdateDiskHandler := connect.NewUnaryHandler(
@@ -1313,10 +1402,16 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceSetLkwHandler.ServeHTTP(w, r)
 		case StorageServiceRenewSessionProcedure:
 			storageServiceRenewSessionHandler.ServeHTTP(w, r)
+		case StorageServiceCloseSessionProcedure:
+			storageServiceCloseSessionHandler.ServeHTTP(w, r)
+		case StorageServiceWatchSessionProcedure:
+			storageServiceWatchSessionHandler.ServeHTTP(w, r)
 		case StorageServiceCreateDiskProcedure:
 			storageServiceCreateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceGetDiskProcedure:
 			storageServiceGetDiskHandler.ServeHTTP(w, r)
+		case StorageServiceListDisksProcedure:
+			storageServiceListDisksHandler.ServeHTTP(w, r)
 		case StorageServiceUpdateDiskProcedure:
 			storageServiceUpdateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceDeleteDiskProcedure:
@@ -1464,12 +1559,24 @@ func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *connect
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.RenewSession is not implemented"))
 }
 
+func (UnimplementedStorageServiceHandler) CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CloseSession is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) WatchSession(context.Context, *connect.BidiStream[v1.WatchSessionRequest, v1.WatchSessionResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.WatchSession is not implemented"))
+}
+
 func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CreateDisk is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListDisks is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error) {

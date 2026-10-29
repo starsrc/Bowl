@@ -1324,6 +1324,72 @@ func (_c *MockQuerier_DeleteChunksFromIndx_Call) RunAndReturn(run func(ctx conte
 	return _c
 }
 
+// DeleteClientSessionByID provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) DeleteClientSessionByID(ctx context.Context, sessionID int64) (int64, error) {
+	ret := _mock.Called(ctx, sessionID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteClientSessionByID")
+	}
+
+	var r0 int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (int64, error)); ok {
+		return returnFunc(ctx, sessionID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) int64); ok {
+		r0 = returnFunc(ctx, sessionID)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = returnFunc(ctx, sessionID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_DeleteClientSessionByID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteClientSessionByID'
+type MockQuerier_DeleteClientSessionByID_Call struct {
+	*mock.Call
+}
+
+// DeleteClientSessionByID is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sessionID int64
+func (_e *MockQuerier_Expecter) DeleteClientSessionByID(ctx any, sessionID any) *MockQuerier_DeleteClientSessionByID_Call {
+	return &MockQuerier_DeleteClientSessionByID_Call{Call: _e.mock.On("DeleteClientSessionByID", ctx, sessionID)}
+}
+
+func (_c *MockQuerier_DeleteClientSessionByID_Call) Run(run func(ctx context.Context, sessionID int64)) *MockQuerier_DeleteClientSessionByID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 int64
+		if args[1] != nil {
+			arg1 = args[1].(int64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_DeleteClientSessionByID_Call) Return(n int64, err error) *MockQuerier_DeleteClientSessionByID_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockQuerier_DeleteClientSessionByID_Call) RunAndReturn(run func(ctx context.Context, sessionID int64) (int64, error)) *MockQuerier_DeleteClientSessionByID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteDisk provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error) {
 	ret := _mock.Called(ctx, diskID)
@@ -4106,6 +4172,74 @@ func (_c *MockQuerier_ListActiveFileLocksByInoAndFlags_Call) RunAndReturn(run fu
 	return _c
 }
 
+// ListActiveSessionIDsByDisk provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListActiveSessionIDsByDisk(ctx context.Context, arg db.ListActiveSessionIDsByDiskParams) ([]int64, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListActiveSessionIDsByDisk")
+	}
+
+	var r0 []int64
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListActiveSessionIDsByDiskParams) ([]int64, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListActiveSessionIDsByDiskParams) []int64); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]int64)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListActiveSessionIDsByDiskParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListActiveSessionIDsByDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListActiveSessionIDsByDisk'
+type MockQuerier_ListActiveSessionIDsByDisk_Call struct {
+	*mock.Call
+}
+
+// ListActiveSessionIDsByDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListActiveSessionIDsByDiskParams
+func (_e *MockQuerier_Expecter) ListActiveSessionIDsByDisk(ctx any, arg any) *MockQuerier_ListActiveSessionIDsByDisk_Call {
+	return &MockQuerier_ListActiveSessionIDsByDisk_Call{Call: _e.mock.On("ListActiveSessionIDsByDisk", ctx, arg)}
+}
+
+func (_c *MockQuerier_ListActiveSessionIDsByDisk_Call) Run(run func(ctx context.Context, arg db.ListActiveSessionIDsByDiskParams)) *MockQuerier_ListActiveSessionIDsByDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListActiveSessionIDsByDiskParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListActiveSessionIDsByDiskParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListActiveSessionIDsByDisk_Call) Return(int64s []int64, err error) *MockQuerier_ListActiveSessionIDsByDisk_Call {
+	_c.Call.Return(int64s, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListActiveSessionIDsByDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.ListActiveSessionIDsByDiskParams) ([]int64, error)) *MockQuerier_ListActiveSessionIDsByDisk_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListDirEntries provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) ListDirEntries(ctx context.Context, arg db.ListDirEntriesParams) ([]db.ListDirEntriesRow, error) {
 	ret := _mock.Called(ctx, arg)
@@ -4238,6 +4372,74 @@ func (_c *MockQuerier_ListDirEntriesAfterName_Call) Return(listDirEntriesAfterNa
 }
 
 func (_c *MockQuerier_ListDirEntriesAfterName_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDirEntriesAfterNameParams) ([]db.ListDirEntriesAfterNameRow, error)) *MockQuerier_ListDirEntriesAfterName_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListDisks provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListDisks(ctx context.Context, arg db.ListDisksParams) ([]db.Disk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListDisks")
+	}
+
+	var r0 []db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) ([]db.Disk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) []db.Disk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.Disk)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListDisksParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListDisks_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDisks'
+type MockQuerier_ListDisks_Call struct {
+	*mock.Call
+}
+
+// ListDisks is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListDisksParams
+func (_e *MockQuerier_Expecter) ListDisks(ctx any, arg any) *MockQuerier_ListDisks_Call {
+	return &MockQuerier_ListDisks_Call{Call: _e.mock.On("ListDisks", ctx, arg)}
+}
+
+func (_c *MockQuerier_ListDisks_Call) Run(run func(ctx context.Context, arg db.ListDisksParams)) *MockQuerier_ListDisks_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListDisksParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListDisksParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListDisks_Call) Return(disks []db.Disk, err error) *MockQuerier_ListDisks_Call {
+	_c.Call.Return(disks, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListDisks_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDisksParams) ([]db.Disk, error)) *MockQuerier_ListDisks_Call {
 	_c.Call.Return(run)
 	return _c
 }

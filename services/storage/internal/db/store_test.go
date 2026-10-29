@@ -95,6 +95,7 @@ type XattrQuerier interface {
 // FileLockQuerier 提取文件锁、阻塞等待者与客户端会话租约存取接口契约。
 type FileLockQuerier interface {
 	DeleteExpiredClientSessions(ctx context.Context) (int64, error)
+	DeleteClientSessionByID(ctx context.Context, sessionID int64) (int64, error)
 	UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error)
 	DeleteUnreferencedOrphanInodes(ctx context.Context) ([]db.DeleteUnreferencedOrphanInodesRow, error)
 	GetFirstConflictingFileLock(ctx context.Context, arg db.GetFirstConflictingFileLockParams) (db.FileLock, error)
@@ -1882,5 +1883,111 @@ func TestSQLStore_TopLevelOverrides_LeaseClockPurgeAndOrphanTwoPhaseReclaim(t *t
 		// 释放锁
 		err = txLock.Rollback(ctx)
 		require.NoError(t, err)
+	})
+
+	t.Run("子测试 3：UpsertClientSession 事务内覆写 (txQueries) 与顶层覆写对 disk_id 绑定/保留/重建覆盖及 DeleteClientSessionByID 原子级联清理", func(t *testing.T) {
+		diskA := newTestUUID()
+		diskB := newTestUUID()
+		rootA := nextTestIno()
+		rootB := nextTestIno()
+		const sessDisk = int64(77403)
+
+		t.Cleanup(func() {
+			ctxClean := context.Background()
+			_, _ = pool.Exec(ctxClean, "DELETE FROM client_sessions WHERE session_id = $1", sessDisk)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM disks WHERE disk_id IN ($1, $2)", diskA, diskB)
+			_, _ = pool.Exec(ctxClean, "DELETE FROM inodes WHERE ino IN ($1, $2)", rootA, rootB)
+		})
+
+		_, err := pool.Exec(ctx, `
+			INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+			VALUES ($1, $1, $3, 2, 1000, 1000, $1),
+			       ($2, $2, $3, 2, 1000, 1000, $2);
+		`, rootA, rootB, int32(0o040755))
+		require.NoError(t, err)
+
+		_, err = pool.Exec(ctx, `
+			INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+			VALUES ($1, 'disk-a', $2, 104857600, 0, 1),
+			       ($3, 'disk-b', $4, 104857600, 0, 1);
+		`, diskA, rootA, diskB, rootB)
+		require.NoError(t, err)
+
+		// 1. 在 ExecTx 内首次创建并绑定 diskA（检验 store.go upsertClientSessionTx 的 WithLeaseTTL 分支）
+		var createdSess db.ClientSession
+		err = store.ExecTx(ctx, func(q db.Querier) error {
+			var txErr error
+			createdSess, txErr = q.UpsertClientSession(
+				db.WithLeaseTTL(ctx, 10*time.Second),
+				db.UpsertClientSessionParams{
+					SessionID: sessDisk,
+					ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(10 * time.Second), Valid: true},
+					DiskID:    diskA,
+				},
+			)
+			return txErr
+		})
+		require.NoError(t, err)
+		assert.Equal(t, diskA, createdSess.DiskID, "首次创建必须写入并返回 diskA")
+
+		// 2. 活跃续租时不传 DiskID (Valid=false)，必须保留原 diskA（COALESCE($3, s.disk_id)）
+		var renewedWithoutDisk db.ClientSession
+		err = store.ExecTx(ctx, func(q db.Querier) error {
+			var txErr error
+			renewedWithoutDisk, txErr = q.UpsertClientSession(
+				ctx,
+				db.UpsertClientSessionParams{
+					SessionID: sessDisk,
+					ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(20 * time.Second), Valid: true},
+					DiskID:    pgtype.UUID{},
+				},
+			)
+			return txErr
+		})
+		require.NoError(t, err)
+		assert.Equal(t, diskA, renewedWithoutDisk.DiskID, "活跃续租未传 disk_id 时必须保留已绑定的 diskA")
+
+		// 3. 将会话设为已过期，跨期重建时传入 diskB，必须更新为 diskB
+		_, err = pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE session_id = $1", sessDisk)
+		require.NoError(t, err)
+
+		var recreatedSess db.ClientSession
+		err = store.ExecTx(ctx, func(q db.Querier) error {
+			var txErr error
+			recreatedSess, txErr = q.UpsertClientSession(
+				db.WithLeaseTTL(ctx, 10*time.Second),
+				db.UpsertClientSessionParams{
+					SessionID: sessDisk,
+					ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(10 * time.Second), Valid: true},
+					DiskID:    diskB,
+				},
+			)
+			return txErr
+		})
+		require.NoError(t, err)
+		assert.Equal(t, diskB, recreatedSess.DiskID, "过期重建时必须更新为新传入的 diskB")
+
+		// 4. 验证 DeleteClientSessionByID 原子清除会话及其关联句柄、锁、等待者
+		var fh int64
+		err = pool.QueryRow(ctx, "INSERT INTO file_handles (ino, session_id, flags) VALUES ($1, $2, 0) RETURNING fh", rootB, sessDisk).Scan(&fh)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "INSERT INTO file_locks (session_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid) VALUES ($1, $2, $3, 1, 0, 0, 10, 0, 1)", sessDisk, rootB, fh)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "INSERT INTO file_lock_waiters (session_id, request_id, ino, fh, lock_owner, lk_flags, start_offset, end_offset, lock_type, pid, status) VALUES ($1, 1, $2, $3, 1, 0, 0, 10, 0, 1, 1)", sessDisk, rootB, fh)
+		require.NoError(t, err)
+
+		deletedRows, err := store.DeleteClientSessionByID(ctx, sessDisk)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), deletedRows)
+
+		var remSess, remFh, remLocks, remWaiters int64
+		require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id = $1", sessDisk).Scan(&remSess))
+		require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", sessDisk).Scan(&remFh))
+		require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", sessDisk).Scan(&remLocks))
+		require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", sessDisk).Scan(&remWaiters))
+		assert.Zero(t, remSess)
+		assert.Zero(t, remFh)
+		assert.Zero(t, remLocks)
+		assert.Zero(t, remWaiters)
 	})
 }

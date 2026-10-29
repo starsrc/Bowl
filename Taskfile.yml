@@ -15,6 +15,8 @@ vars:
 
 env:
   GOWORK: "off"
+  # 本机只有一套 bowl 容器栈（固定 container_name 与端口）；固定 Compose 项目名，避免在 .worktrees/<name> 内按目录名另起项目而与主栈冲突
+  COMPOSE_PROJECT_NAME: bowl
 
 tasks:
   default:
@@ -124,8 +126,8 @@ tasks:
     desc: "Run Linux FUSE client black-box E2E tests inside privileged test container"
     deps: [init, vendor:storage, build:client:test]
     cmds:
-      - defer: sh -c 'if [ "${KEEP_E2E_ENV:-0}" != "1" ]; then docker compose -p bowl -f {{.COMPOSE_FILE}} down --remove-orphans; fi'
-      - docker compose -p bowl -f {{.COMPOSE_FILE}} up -d --build --wait storage-service
+      - defer: sh -c 'if [ "${KEEP_E2E_ENV:-0}" != "1" ]; then docker compose -f {{.COMPOSE_FILE}} down --remove-orphans; fi'
+      - docker compose -f {{.COMPOSE_FILE}} up -d --build --wait storage-service
       - docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined --network bowl_bowl-net -v bowl-go-mod-cache:/go/pkg/mod -v bowl-go-build-cache:/root/.cache/go-build -v "{{.ROOT_DIR | default .TASKFILE_DIR}}":/workspace -w /workspace/client -e GOWORK=off -e BOWL_STORAGE_ENDPOINT=http://storage-service:9000 {{.CLIENT_TEST_IMAGE}}:{{.TAG}} sh -c 'CGO_ENABLED=0 GOOS=linux go build -o /tmp/bowl ./cmd/bowl && BOWL_BIN=/tmp/bowl go test -tags=e2e -v -count=1 ./e2e/... {{.CLI_ARGS}}'
 
   test:storage:
@@ -148,7 +150,7 @@ tasks:
       STORAGE_IMAGE_NAME: '{{.STORAGE_IMAGE_NAME}}'
       TAG: '{{.TAG}}'
     cmds:
-      - defer: docker compose -f {{.COMPOSE_FILE}} down --remove-orphans
+      - defer: sh -c 'if [ "${KEEP_E2E_ENV:-0}" != "1" ]; then docker compose -f {{.COMPOSE_FILE}} down --remove-orphans; fi'
       - docker compose -f {{.COMPOSE_FILE}} up -d --build --wait storage-service
       - go test -tags=e2e -v -count=1 ./e2e/... {{.CLI_ARGS}}
 

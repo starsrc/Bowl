@@ -127,10 +127,14 @@ SET expires_at = (SELECT now FROM ts) + ($2::bigint * interval '1 microsecond'),
     updated_at = CASE
         WHEN t.is_expired THEN (SELECT now FROM ts)
         ELSE GREATEST((SELECT now FROM ts), s.created_at + interval '1 microsecond')
+    END,
+    disk_id = CASE
+        WHEN t.is_expired THEN $3
+        ELSE COALESCE($3, s.disk_id)
     END
 FROM ts, target t
 WHERE s.session_id = $1
-RETURNING s.session_id, s.expires_at, s.updated_at, s.created_at
+RETURNING s.session_id, s.expires_at, s.updated_at, s.created_at, s.disk_id
 `
 
 const upsertClientSessionExplicitExpiresAt = `-- name: upsertClientSessionExplicitExpiresAt :one
@@ -163,10 +167,14 @@ SET expires_at = $2,
     updated_at = CASE
         WHEN t.is_expired THEN (SELECT now FROM ts)
         ELSE GREATEST((SELECT now FROM ts), s.created_at + interval '1 microsecond')
+    END,
+    disk_id = CASE
+        WHEN t.is_expired THEN $3
+        ELSE COALESCE($3, s.disk_id)
     END
 FROM ts, target t
 WHERE s.session_id = $1
-RETURNING s.session_id, s.expires_at, s.updated_at, s.created_at
+RETURNING s.session_id, s.expires_at, s.updated_at, s.created_at, s.disk_id
 `
 
 func upsertClientSessionTx(ctx context.Context, dbtx DBTX, arg UpsertClientSessionParams) (ClientSession, error) {
@@ -244,9 +252,9 @@ func upsertClientSessionTx(ctx context.Context, dbtx DBTX, arg UpsertClientSessi
 
 	var row pgx.Row
 	if ttl, ok := leaseTTLFromContext(ctx); ok && ttl > 0 {
-		row = dbtx.QueryRow(ctx, upsertClientSessionWithTTL, arg.SessionID, ttl.Microseconds())
+		row = dbtx.QueryRow(ctx, upsertClientSessionWithTTL, arg.SessionID, ttl.Microseconds(), arg.DiskID)
 	} else {
-		row = dbtx.QueryRow(ctx, upsertClientSessionExplicitExpiresAt, arg.SessionID, arg.ExpiresAt)
+		row = dbtx.QueryRow(ctx, upsertClientSessionExplicitExpiresAt, arg.SessionID, arg.ExpiresAt, arg.DiskID)
 	}
 
 	var i ClientSession
@@ -255,6 +263,7 @@ func upsertClientSessionTx(ctx context.Context, dbtx DBTX, arg UpsertClientSessi
 		&i.ExpiresAt,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.DiskID,
 	); err != nil {
 		return ClientSession{}, err
 	}

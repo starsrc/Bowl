@@ -2,9 +2,12 @@ package session_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,8 +33,10 @@ type mockStorageHandler struct {
 	renewSessionCalls []uint64
 	renewSessionReqs  []*storagev1.RenewSessionRequest
 	closeSessionCalls []uint64
+	watchFirstReqs    []*storagev1.WatchSessionRequest
 	renewSessionFunc  func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error)
 	closeSessionFunc  func(ctx context.Context, req *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error)
+	watchSessionFunc  func(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error
 }
 
 func (m *mockStorageHandler) RenewSession(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
@@ -64,6 +69,41 @@ func (m *mockStorageHandler) CloseSession(ctx context.Context, req *connect.Requ
 	return connect.NewResponse(&storagev1.CloseSessionResponse{}), nil
 }
 
+func (m *mockStorageHandler) WatchSession(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error {
+	m.mu.Lock()
+	fn := m.watchSessionFunc
+	m.mu.Unlock()
+
+	if fn != nil {
+		return fn(ctx, stream)
+	}
+
+	firstReq, err := stream.Receive()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+
+	m.mu.Lock()
+	m.watchFirstReqs = append(m.watchFirstReqs, firstReq)
+	m.mu.Unlock()
+
+	if err := stream.Send(&storagev1.WatchSessionResponse{PingSeq: 0}); err != nil {
+		return err
+	}
+
+	for {
+		if _, err := stream.Receive(); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
 func (m *mockStorageHandler) getCalls() []uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -79,7 +119,16 @@ func setupTestServer(t *testing.T, handler storagev1connect.StorageServiceHandle
 	mux.Handle(path, srvHandler)
 
 	server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
-	client := storagev1connect.NewStorageServiceClient(server.Client(), server.URL)
+	h2cClient := &http.Client{
+		Transport: &http2.Transport{
+			AllowHTTP: true,
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			},
+		},
+	}
+	client := storagev1connect.NewStorageServiceClient(h2cClient, server.URL)
 
 	return client, func() {
 		server.Close()
@@ -629,5 +678,201 @@ func TestManager_DiskIDPropagation_And_CloseSession(t *testing.T) {
 
 		require.NoError(t, mgr.Close())
 		require.True(t, logCapture.hasWarnLog("close session failed on shutdown"), "CloseSession 失败时应记录 Warn 日志而不阻塞卸载")
+	})
+}
+
+func TestManager_WatchSession_PingPong_Rotation_And_Reconnect(t *testing.T) {
+	const testDiskID = "22222222-2222-7222-8222-222222222222"
+
+	t.Run("Start establishes WatchSession with initial frame and replies to Ping with matching Pong", func(t *testing.T) {
+		firstReqCh := make(chan *storagev1.WatchSessionRequest, 1)
+		pongReqCh := make(chan *storagev1.WatchSessionRequest, 1)
+
+		handler := &mockStorageHandler{
+			watchSessionFunc: func(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error {
+				firstReq, err := stream.Receive()
+				if err != nil {
+					return err
+				}
+				select {
+				case firstReqCh <- firstReq:
+				default:
+				}
+
+				if err := stream.Send(&storagev1.WatchSessionResponse{PingSeq: 0}); err != nil {
+					return err
+				}
+				if err := stream.Send(&storagev1.WatchSessionResponse{PingSeq: 77}); err != nil {
+					return err
+				}
+
+				for {
+					msg, err := stream.Receive()
+					if err != nil {
+						return nil
+					}
+					if msg.GetPongSeq() > 0 {
+						select {
+						case pongReqCh <- msg:
+						default:
+						}
+					}
+				}
+			},
+		}
+		client, cleanup := setupTestServer(t, handler)
+		defer cleanup()
+
+		mgr, err := session.New(context.Background(), client, session.Config{
+			DiskID: testDiskID,
+		})
+		require.NoError(t, err)
+		defer func() { _ = mgr.Close() }()
+
+		sid := mgr.CurrentSessionID()
+		require.NoError(t, mgr.Start(context.Background()))
+
+		select {
+		case firstReq := <-firstReqCh:
+			require.Equal(t, sid, firstReq.GetSessionId())
+			require.NotNil(t, firstReq.DiskId)
+			require.Equal(t, testDiskID, firstReq.GetDiskId())
+			require.Equal(t, uint64(0), firstReq.GetPongSeq())
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for WatchSession initial request")
+		}
+
+		select {
+		case pongReq := <-pongReqCh:
+			require.Equal(t, sid, pongReq.GetSessionId())
+			require.Equal(t, uint64(77), pongReq.GetPongSeq())
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for WatchSession pong reply")
+		}
+	})
+
+	t.Run("rotates WatchSession stream immediately when session_recreated triggers rotation", func(t *testing.T) {
+		var mu sync.Mutex
+		renewIdx := 0
+		watchedSIDs := make([]uint64, 0, 2)
+		oldStreamExited := make(chan struct{})
+		var oldStreamExitOnce sync.Once
+
+		handler := &mockStorageHandler{
+			renewSessionFunc: func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
+				mu.Lock()
+				defer mu.Unlock()
+				renewIdx++
+				if renewIdx == 2 {
+					return connect.NewResponse(&storagev1.RenewSessionResponse{
+						ExpiresAt:        timestamppb.New(time.Now().Add(60 * time.Millisecond)),
+						SessionRecreated: true,
+					}), nil
+				}
+				return connect.NewResponse(&storagev1.RenewSessionResponse{
+					ExpiresAt:        timestamppb.New(time.Now().Add(60 * time.Millisecond)),
+					SessionRecreated: false,
+				}), nil
+			},
+			watchSessionFunc: func(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error {
+				firstReq, err := stream.Receive()
+				if err != nil {
+					return err
+				}
+				mu.Lock()
+				watchedSIDs = append(watchedSIDs, firstReq.GetSessionId())
+				streamIdx := len(watchedSIDs)
+				mu.Unlock()
+
+				if err := stream.Send(&storagev1.WatchSessionResponse{PingSeq: 0}); err != nil {
+					return err
+				}
+
+				for {
+					if _, err := stream.Receive(); err != nil {
+						if streamIdx == 1 {
+							oldStreamExitOnce.Do(func() { close(oldStreamExited) })
+						}
+						return nil
+					}
+				}
+			},
+		}
+		client, cleanup := setupTestServer(t, handler)
+		defer cleanup()
+
+		mgr, err := session.New(context.Background(), client, session.Config{
+			DiskID:              testDiskID,
+			MinInterval:         20 * time.Millisecond,
+			MaxInterval:         50 * time.Millisecond,
+			InitialRetryBackoff: 20 * time.Millisecond,
+			MaxRetryBackoff:     50 * time.Millisecond,
+		})
+		require.NoError(t, err)
+		defer func() { _ = mgr.Close() }()
+
+		oldSID := mgr.CurrentSessionID()
+		require.NoError(t, mgr.Start(context.Background()))
+
+		select {
+		case <-oldStreamExited:
+		case <-time.After(3 * time.Second):
+			t.Fatal("old WatchSession stream was not canceled after session rotation")
+		}
+
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			newSID := mgr.CurrentSessionID()
+			return len(watchedSIDs) >= 2 && watchedSIDs[0] == oldSID && watchedSIDs[len(watchedSIDs)-1] == newSID && newSID != oldSID
+		}, 3*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("reconnects WatchSession stream with backoff after transient stream disconnect", func(t *testing.T) {
+		var mu sync.Mutex
+		streamCount := 0
+
+		handler := &mockStorageHandler{
+			watchSessionFunc: func(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error {
+				if _, err := stream.Receive(); err != nil {
+					return err
+				}
+				mu.Lock()
+				streamCount++
+				cur := streamCount
+				mu.Unlock()
+
+				// 第一次连接模拟异常断开
+				if cur == 1 {
+					return connect.NewError(connect.CodeUnavailable, errors.New("stream reset"))
+				}
+
+				if err := stream.Send(&storagev1.WatchSessionResponse{PingSeq: 0}); err != nil {
+					return err
+				}
+				for {
+					if _, err := stream.Receive(); err != nil {
+						return nil
+					}
+				}
+			},
+		}
+		client, cleanup := setupTestServer(t, handler)
+		defer cleanup()
+
+		mgr, err := session.New(context.Background(), client, session.Config{
+			InitialRetryBackoff: 15 * time.Millisecond,
+			MaxRetryBackoff:     40 * time.Millisecond,
+		})
+		require.NoError(t, err)
+		defer func() { _ = mgr.Close() }()
+
+		require.NoError(t, mgr.Start(context.Background()))
+
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return streamCount >= 2
+		}, 3*time.Second, 10*time.Millisecond)
 	})
 }

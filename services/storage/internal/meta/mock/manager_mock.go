@@ -2879,6 +2879,109 @@ func (_c *MockManager_UpdateDisk_Call) RunAndReturn(run func(ctx context.Context
 	return _c
 }
 
+// ValidateWatchSession provides a mock function for the type MockManager
+func (_mock *MockManager) ValidateWatchSession(sessionID uint64, diskID *string) error {
+	ret := _mock.Called(sessionID, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ValidateWatchSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(uint64, *string) error); ok {
+		r0 = returnFunc(sessionID, diskID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_ValidateWatchSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ValidateWatchSession'
+type MockManager_ValidateWatchSession_Call struct {
+	*mock.Call
+}
+
+// ValidateWatchSession is a helper method to define mock.On call
+//   - sessionID uint64
+//   - diskID *string
+func (_e *MockManager_Expecter) ValidateWatchSession(sessionID any, diskID any) *MockManager_ValidateWatchSession_Call {
+	return &MockManager_ValidateWatchSession_Call{Call: _e.mock.On("ValidateWatchSession", sessionID, diskID)}
+}
+
+func (_c *MockManager_ValidateWatchSession_Call) Run(run func(sessionID uint64, diskID *string)) *MockManager_ValidateWatchSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 uint64
+		if args[0] != nil {
+			arg0 = args[0].(uint64)
+		}
+		var arg1 *string
+		if args[1] != nil {
+			arg1 = args[1].(*string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_ValidateWatchSession_Call) Return(err error) *MockManager_ValidateWatchSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_ValidateWatchSession_Call) RunAndReturn(run func(sessionID uint64, diskID *string) error) *MockManager_ValidateWatchSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// WatchHub provides a mock function for the type MockManager
+func (_mock *MockManager) WatchHub() *meta.SessionWatchHub {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for WatchHub")
+	}
+
+	var r0 *meta.SessionWatchHub
+	if returnFunc, ok := ret.Get(0).(func() *meta.SessionWatchHub); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*meta.SessionWatchHub)
+		}
+	}
+	return r0
+}
+
+// MockManager_WatchHub_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'WatchHub'
+type MockManager_WatchHub_Call struct {
+	*mock.Call
+}
+
+// WatchHub is a helper method to define mock.On call
+func (_e *MockManager_Expecter) WatchHub() *MockManager_WatchHub_Call {
+	return &MockManager_WatchHub_Call{Call: _e.mock.On("WatchHub")}
+}
+
+func (_c *MockManager_WatchHub_Call) Run(run func()) *MockManager_WatchHub_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockManager_WatchHub_Call) Return(sessionWatchHub *meta.SessionWatchHub) *MockManager_WatchHub_Call {
+	_c.Call.Return(sessionWatchHub)
+	return _c
+}
+
+func (_c *MockManager_WatchHub_Call) RunAndReturn(run func() *meta.SessionWatchHub) *MockManager_WatchHub_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Write provides a mock function for the type MockManager
 func (_mock *MockManager) Write(ctx context.Context, req *meta.WriteRequest) (*meta.WriteResponse, error) {
 	ret := _mock.Called(ctx, req)

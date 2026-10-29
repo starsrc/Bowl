@@ -108,6 +108,9 @@ const (
 	// StorageServiceCloseSessionProcedure is the fully-qualified name of the StorageService's
 	// CloseSession RPC.
 	StorageServiceCloseSessionProcedure = "/storage.v1.StorageService/CloseSession"
+	// StorageServiceWatchSessionProcedure is the fully-qualified name of the StorageService's
+	// WatchSession RPC.
+	StorageServiceWatchSessionProcedure = "/storage.v1.StorageService/WatchSession"
 	// StorageServiceCreateDiskProcedure is the fully-qualified name of the StorageService's CreateDisk
 	// RPC.
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
@@ -310,6 +313,12 @@ type StorageServiceClient interface {
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 若目标会话已不存在或已过期，按幂等成功返回。
 	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
+	// WatchSession 建立客户端会话保活与探活双向流：
+	//  1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+	//  2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+	//  3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+	//     客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+	WatchSession(context.Context) *connect.BidiStreamForClient[v1.WatchSessionRequest, v1.WatchSessionResponse]
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -551,6 +560,12 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("CloseSession")),
 			connect.WithClientOptions(opts...),
 		),
+		watchSession: connect.NewClient[v1.WatchSessionRequest, v1.WatchSessionResponse](
+			httpClient,
+			baseURL+StorageServiceWatchSessionProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("WatchSession")),
+			connect.WithClientOptions(opts...),
+		),
 		createDisk: connect.NewClient[v1.CreateDiskRequest, v1.CreateDiskResponse](
 			httpClient,
 			baseURL+StorageServiceCreateDiskProcedure,
@@ -620,6 +635,7 @@ type storageServiceClient struct {
 	setLkw       *connect.Client[v1.SetLkwRequest, v1.SetLkwResponse]
 	renewSession *connect.Client[v1.RenewSessionRequest, v1.RenewSessionResponse]
 	closeSession *connect.Client[v1.CloseSessionRequest, v1.CloseSessionResponse]
+	watchSession *connect.Client[v1.WatchSessionRequest, v1.WatchSessionResponse]
 	createDisk   *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
 	getDisk      *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
 	updateDisk   *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
@@ -795,6 +811,11 @@ func (c *storageServiceClient) RenewSession(ctx context.Context, req *connect.Re
 // CloseSession calls storage.v1.StorageService.CloseSession.
 func (c *storageServiceClient) CloseSession(ctx context.Context, req *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
 	return c.closeSession.CallUnary(ctx, req)
+}
+
+// WatchSession calls storage.v1.StorageService.WatchSession.
+func (c *storageServiceClient) WatchSession(ctx context.Context) *connect.BidiStreamForClient[v1.WatchSessionRequest, v1.WatchSessionResponse] {
+	return c.watchSession.CallBidiStream(ctx)
 }
 
 // CreateDisk calls storage.v1.StorageService.CreateDisk.
@@ -1009,6 +1030,12 @@ type StorageServiceHandler interface {
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	// 若目标会话已不存在或已过期，按幂等成功返回。
 	CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error)
+	// WatchSession 建立客户端会话保活与探活双向流：
+	//  1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+	//  2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+	//  3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+	//     客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+	WatchSession(context.Context, *connect.BidiStream[v1.WatchSessionRequest, v1.WatchSessionResponse]) error
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -1246,6 +1273,12 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("CloseSession")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceWatchSessionHandler := connect.NewBidiStreamHandler(
+		StorageServiceWatchSessionProcedure,
+		svc.WatchSession,
+		connect.WithSchema(storageServiceMethods.ByName("WatchSession")),
+		connect.WithHandlerOptions(opts...),
+	)
 	storageServiceCreateDiskHandler := connect.NewUnaryHandler(
 		StorageServiceCreateDiskProcedure,
 		svc.CreateDisk,
@@ -1346,6 +1379,8 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceRenewSessionHandler.ServeHTTP(w, r)
 		case StorageServiceCloseSessionProcedure:
 			storageServiceCloseSessionHandler.ServeHTTP(w, r)
+		case StorageServiceWatchSessionProcedure:
+			storageServiceWatchSessionHandler.ServeHTTP(w, r)
 		case StorageServiceCreateDiskProcedure:
 			storageServiceCreateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceGetDiskProcedure:
@@ -1499,6 +1534,10 @@ func (UnimplementedStorageServiceHandler) RenewSession(context.Context, *connect
 
 func (UnimplementedStorageServiceHandler) CloseSession(context.Context, *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CloseSession is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) WatchSession(context.Context, *connect.BidiStream[v1.WatchSessionRequest, v1.WatchSessionResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.WatchSession is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error) {

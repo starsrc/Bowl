@@ -3,7 +3,6 @@ package server_test
 import (
 	"context"
 	"math"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -12,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	testifymock "github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -31,8 +32,9 @@ func setupTestServer(t *testing.T, mockMgr *metamock.MockManager) (storagev1conn
 	})
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(srv.Handler())
-	client := storagev1connect.NewStorageServiceClient(http.DefaultClient, ts.URL)
+	ts := httptest.NewServer(h2c.NewHandler(srv.Handler(), &http2.Server{}))
+	h2cClient, _ := newH2CTestClient()
+	client := storagev1connect.NewStorageServiceClient(h2cClient, ts.URL)
 
 	return client, ts.Close
 }
@@ -573,5 +575,158 @@ func TestServer_CloseSession(t *testing.T) {
 		require.NotNil(t, info)
 		assert.Equal(t, "EINVAL", info.GetReason())
 		mockMgr.AssertExpectations(t)
+	})
+}
+
+// TestServer_WatchSession 验证 WatchSession 双向流注册、Ping-Pong 探活、流断连感知清理与替换接管行为。
+func TestServer_WatchSession(t *testing.T) {
+	t.Run("首帧校验失败返回 InvalidArgument (EINVAL) 且不触发 CloseSession", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		invalidDiskID := "00000000-0000-0000-0000-000000000000"
+		mockMgr.EXPECT().ValidateWatchSession(uint64(101), testifymock.MatchedBy(func(d *string) bool {
+			return d != nil && *d == invalidDiskID
+		})).Return(meta.ErrInvalidArgument).Once()
+
+		stream := client.WatchSession(context.Background())
+		require.NoError(t, stream.Send(&storagev1.WatchSessionRequest{
+			SessionId: 101,
+			DiskId:    &invalidDiskID,
+		}))
+
+		_, err := stream.Receive()
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "EINVAL", info.GetReason())
+		mockMgr.AssertExpectations(t)
+	})
+
+	t.Run("正常注册收到首帧确认 PingSeq=0、支持按需 Probe Ping-Pong 且流断开时立即调用 CloseSession", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		hub := meta.NewSessionWatchHub()
+		const sid = uint64(202)
+		diskID := "11111111-1111-7111-8111-111111111111"
+
+		mockMgr.EXPECT().ValidateWatchSession(sid, testifymock.MatchedBy(func(d *string) bool {
+			return d != nil && *d == diskID
+		})).Return(nil).Once()
+		mockMgr.EXPECT().WatchHub().Return(hub).Once()
+
+		closedCh := make(chan uint64, 1)
+		mockMgr.EXPECT().CloseSession(testifymock.Anything, sid).Run(func(ctx context.Context, sessionID uint64) {
+			closedCh <- sessionID
+		}).Return(nil).Once()
+
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		defer streamCancel()
+
+		stream := client.WatchSession(streamCtx)
+		require.NoError(t, stream.Send(&storagev1.WatchSessionRequest{
+			SessionId: sid,
+			DiskId:    &diskID,
+		}))
+
+		// 1. 收到服务端首帧确认 PingSeq = 0
+		ack, err := stream.Receive()
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), ack.GetPingSeq())
+		require.True(t, hub.HasActiveStream(sid))
+
+		// 2. 启动客户端 Pong 响应协程并执行服务端 Probe
+		clientDone := make(chan struct{})
+		go func() {
+			defer close(clientDone)
+			for {
+				msg, recvErr := stream.Receive()
+				if recvErr != nil {
+					return
+				}
+				if msg.GetPingSeq() > 0 {
+					_ = stream.Send(&storagev1.WatchSessionRequest{
+						SessionId: sid,
+						PongSeq:   msg.GetPingSeq(),
+					})
+				}
+			}
+		}()
+
+		alive := hub.Probe(context.Background(), sid, time.Second)
+		require.True(t, alive, "服务端 Probe 应收到客户端 Pong 并返回 true")
+
+		// 3. 模拟客户端进程终止/断连（取消 streamCtx 并关闭请求流）
+		streamCancel()
+		_ = stream.CloseRequest()
+		<-clientDone
+
+		select {
+		case closedSID := <-closedCh:
+			require.Equal(t, sid, closedSID)
+		case <-time.After(2 * time.Second):
+			t.Fatal("流断开后服务端未及时调用 CloseSession")
+		}
+		require.False(t, hub.HasActiveStream(sid))
+		mockMgr.AssertExpectations(t)
+	})
+
+	t.Run("同一 sessionID 新流覆盖旧流时，旧流退出不误调 CloseSession", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		hub := meta.NewSessionWatchHub()
+		const sid = uint64(303)
+
+		mockMgr.EXPECT().ValidateWatchSession(sid, (*string)(nil)).Return(nil).Twice()
+		mockMgr.EXPECT().WatchHub().Return(hub).Twice()
+
+		closedCh := make(chan uint64, 2)
+		mockMgr.EXPECT().CloseSession(testifymock.Anything, sid).Run(func(ctx context.Context, sessionID uint64) {
+			closedCh <- sessionID
+		}).Return(nil).Once()
+
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		defer cancel1()
+		stream1 := client.WatchSession(ctx1)
+		require.NoError(t, stream1.Send(&storagev1.WatchSessionRequest{SessionId: sid}))
+		ack1, err := stream1.Receive()
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), ack1.GetPingSeq())
+
+		// 建立同一 sessionID 的新流 stream2 覆盖 stream1
+		ctx2, cancel2 := context.WithCancel(context.Background())
+		defer cancel2()
+		stream2 := client.WatchSession(ctx2)
+		require.NoError(t, stream2.Send(&storagev1.WatchSessionRequest{SessionId: sid}))
+		ack2, err := stream2.Receive()
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), ack2.GetPingSeq())
+
+		// 关闭旧流 stream1，由于已被 stream2 替换，不应触发 CloseSession
+		_ = stream1.CloseRequest()
+		cancel1()
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-closedCh:
+			t.Fatal("被替换的旧流退出时严禁调用 CloseSession")
+		default:
+		}
+		require.True(t, hub.HasActiveStream(sid))
+
+		// 关闭新流 stream2，此时应触发 CloseSession
+		_ = stream2.CloseRequest()
+		cancel2()
+		select {
+		case closedSID := <-closedCh:
+			require.Equal(t, sid, closedSID)
+		case <-time.After(2 * time.Second):
+			t.Fatal("新流退出后应触发 CloseSession")
+		}
 	})
 }

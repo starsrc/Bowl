@@ -228,6 +228,13 @@ service StorageService {
   // 若目标会话已不存在或已过期，按幂等成功返回。
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
 
+  // WatchSession 建立客户端会话保活与探活双向流：
+  // 1. 客户端连接后立即发送首帧声明其持有的 session_id 与绑定的 disk_id；
+  // 2. 当客户端进程异常终止（如 kill -9）导致 TCP/HTTP2 流断开时，服务端立即感知并清理该会话；
+  // 3. 当服务端需要探测会话真实存活性（如 DeleteDisk 前置校验）时，通过流下发携带 ping_seq 的探测帧，
+  //    客户端收到后必须立即回复携带相同 pong_seq = ping_seq 的响应帧。
+  rpc WatchSession(stream WatchSessionRequest) returns (stream WatchSessionResponse);
+
   // CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
   // 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
   // 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -1514,6 +1521,27 @@ message CloseSessionRequest {
 
 // CloseSessionResponse 定义 CloseSession 接口输出参数。
 message CloseSessionResponse {}
+
+// WatchSessionRequest 客户端会话监听与 Pong 心跳回复请求帧。
+message WatchSessionRequest {
+  // 客户端会话 63 位正整数标识（取值范围 1..9223372036854775807）。
+  uint64 session_id = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // 首帧可选上报该会话挂载绑定的虚拟磁盘 UUID。
+  optional string disk_id = 2;
+
+  // 当回复服务端 Ping 探活时，回填服务端下发的 ping_seq（首帧注册时为 0）。
+  uint64 pong_seq = 3;
+}
+
+// WatchSessionResponse 服务端下发的会话探活 Ping 帧。
+message WatchSessionResponse {
+  // 服务端生成的单调递增探活序列号（> 0 时要求客户端立即回复相同 pong_seq；0 表示首帧注册就绪确认）。
+  uint64 ping_seq = 1;
+}
 
 // Inode 代表文件系统中的实体节点。
 

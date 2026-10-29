@@ -26,10 +26,11 @@ const (
 	DefaultMaxRetryBackoff     = 2 * time.Second
 )
 
-// StorageClient 抽象 StorageService 的 RenewSession 与 CloseSession RPC 契约。
+// StorageClient 抽象 StorageService 的 RenewSession、CloseSession 与 WatchSession RPC 契约。
 type StorageClient interface {
 	RenewSession(context.Context, *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error)
 	CloseSession(context.Context, *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error)
+	WatchSession(context.Context) *connect.BidiStreamForClient[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]
 }
 
 // Config 定义 ClientSession 生命周期的参数配置。
@@ -56,12 +57,14 @@ type Manager struct {
 	handleSessions  map[uint64]uint64
 	retiredSessions map[uint64]struct{}
 
-	// 后台续期协程生命周期控制
-	loopCtx    context.Context
-	cancelLoop context.CancelFunc
-	loopDone   chan struct{}
-	startOnce  sync.Once
-	closeOnce  sync.Once
+	// 后台续期与监听协程生命周期控制
+	loopCtx     context.Context
+	cancelLoop  context.CancelFunc
+	loopDone    chan struct{}
+	startOnce   sync.Once
+	closeOnce   sync.Once
+	watchMu     sync.Mutex
+	watchCancel context.CancelFunc
 
 	// 最新租约截止时间
 	expiresAtMu sync.RWMutex
@@ -112,13 +115,26 @@ func New(ctx context.Context, client StorageClient, cfg Config) (*Manager, error
 	return m, nil
 }
 
-// Start 启动后台自适应租约续期保活协程。
+// Start 启动后台自适应租约续期保活与 WatchSession 双向流监听协程。
 // 协程会按 (expiresAt - now) / 3 动态心跳保活；收到 Close 信号时干净终止。
 func (m *Manager) Start(ctx context.Context) error {
 	var alreadyStarted bool
 	m.startOnce.Do(func() {
 		alreadyStarted = true
-		go m.renewLoop(m.loopCtx)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			m.renewLoop(m.loopCtx)
+		}()
+		go func() {
+			defer wg.Done()
+			m.watchLoop(m.loopCtx)
+		}()
+		go func() {
+			wg.Wait()
+			close(m.loopDone)
+		}()
 	})
 	if !alreadyStarted {
 		return errors.New("session manager renew loop already started")
@@ -127,7 +143,6 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 func (m *Manager) renewLoop(ctx context.Context) {
-	defer close(m.loopDone)
 
 	currentBackoff := m.cfg.InitialRetryBackoff
 
@@ -217,6 +232,7 @@ func (m *Manager) handleSessionExpired(ctx context.Context, oldSID uint64) {
 		if err == nil {
 			// 新会话激活成功，原子切换当前活跃会话 ID
 			m.currentSessionID.Store(newSID)
+			m.cancelCurrentWatch()
 
 			var newExp time.Time
 			if expTs := resp.Msg.GetExpiresAt(); expTs != nil {
@@ -305,6 +321,7 @@ func (m *Manager) UnbindHandle(fh uint64) {
 func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
 		m.cancelLoop()
+		m.cancelCurrentWatch()
 		// 若后台协程未启动过，直接关闭 loopDone 避免死锁
 		m.startOnce.Do(func() {
 			close(m.loopDone)
@@ -325,6 +342,99 @@ func (m *Manager) Close() error {
 		}
 	})
 	return nil
+}
+
+func (m *Manager) setWatchCancel(cancel context.CancelFunc) {
+	m.watchMu.Lock()
+	m.watchCancel = cancel
+	m.watchMu.Unlock()
+}
+
+func (m *Manager) cancelCurrentWatch() {
+	m.watchMu.Lock()
+	cancel := m.watchCancel
+	m.watchCancel = nil
+	m.watchMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (m *Manager) watchLoop(ctx context.Context) {
+	currentBackoff := m.cfg.InitialRetryBackoff
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		sid := m.currentSessionID.Load()
+		streamCtx, streamCancel := context.WithCancel(ctx)
+		m.setWatchCancel(streamCancel)
+
+		stream := m.client.WatchSession(streamCtx)
+		doneClose := make(chan struct{})
+		go func() {
+			select {
+			case <-streamCtx.Done():
+				_ = stream.CloseRequest()
+				_ = stream.CloseResponse()
+			case <-doneClose:
+			}
+		}()
+
+		sendErr := stream.Send(&storagev1.WatchSessionRequest{
+			SessionId: sid,
+			DiskId:    optionalDiskID(m.cfg.DiskID),
+			PongSeq:   0,
+		})
+		if sendErr == nil {
+			for {
+				resp, recvErr := stream.Receive()
+				if recvErr != nil {
+					break
+				}
+				currentBackoff = m.cfg.InitialRetryBackoff
+				if pingSeq := resp.GetPingSeq(); pingSeq > 0 {
+					if err := stream.Send(&storagev1.WatchSessionRequest{
+						SessionId: sid,
+						PongSeq:   pingSeq,
+					}); err != nil {
+						break
+					}
+				}
+			}
+		}
+
+		close(doneClose)
+		_ = stream.CloseRequest()
+		_ = stream.CloseResponse()
+		streamCancel()
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		// 若会话已发生轮换，无需退避等待，立即使用新 session_id 建立新流
+		if m.currentSessionID.Load() != sid {
+			currentBackoff = m.cfg.InitialRetryBackoff
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(currentBackoff):
+		}
+		currentBackoff = min(currentBackoff*2, m.cfg.MaxRetryBackoff)
+	}
+}
+
+func optionalDiskID(diskID string) *string {
+	if diskID == "" {
+		return nil
+	}
+	return &diskID
 }
 
 func newRenewSessionRequest(sessionID uint64, diskID string) *connect.Request[storagev1.RenewSessionRequest] {

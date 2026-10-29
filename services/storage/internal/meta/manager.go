@@ -77,6 +77,8 @@ type Manager interface {
 	RenewSessionWithStatus(ctx context.Context, sessionID uint64) (RenewSessionResult, error)
 	RenewSessionWithDisk(ctx context.Context, sessionID uint64, diskID *string) (RenewSessionResult, error)
 	CloseSession(ctx context.Context, sessionID uint64) error
+	WatchHub() *SessionWatchHub
+	ValidateWatchSession(sessionID uint64, diskID *string) error
 	GetParents(ctx context.Context, ino uint64) (map[uint64]uint32, error)
 	CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error)
 	GetDisk(ctx context.Context, diskID string) (*Disk, error)
@@ -148,6 +150,8 @@ type manager struct {
 	inFlightGrantMu       sync.Mutex
 	inFlightGrants        map[inFlightGrantKey]*inFlightGrant
 	nextInFlightGrantID   uint64
+	watchHubMu            sync.Mutex
+	watchHub              *SessionWatchHub
 }
 
 var _ Manager = (*manager)(nil)
@@ -277,6 +281,7 @@ func New(store db.Store, opts ...Option) Manager {
 		inFlightDirMutations:  make(map[uint64]int),
 		activeDirReads:        make(map[uint64]*inFlightDirRead),
 		inFlightGrants:        make(map[inFlightGrantKey]*inFlightGrant),
+		watchHub:              NewSessionWatchHub(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -647,6 +652,16 @@ func newManagerFromParams(params ManagerParams) Manager {
 	}
 
 	return mgr
+}
+
+// WatchHub 返回会话流探活中心实例（懒初始化兜底，防止测试直接构造 &manager{} 时返回 nil）。
+func (m *manager) WatchHub() *SessionWatchHub {
+	m.watchHubMu.Lock()
+	defer m.watchHubMu.Unlock()
+	if m.watchHub == nil {
+		m.watchHub = NewSessionWatchHub()
+	}
+	return m.watchHub
 }
 
 // Module 提供 meta 依赖注入模块。

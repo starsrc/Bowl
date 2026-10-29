@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
+	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -121,4 +125,65 @@ func (s *Server) CloseSession(ctx context.Context, req *connect.Request[storagev
 	}
 
 	return connect.NewResponse(&storagev1.CloseSessionResponse{}), nil
+}
+
+// WatchSession 建立客户端会话保活与探活双向流。
+func (s *Server) WatchSession(ctx context.Context, stream *connect.BidiStream[storagev1.WatchSessionRequest, storagev1.WatchSessionResponse]) error {
+	firstMsg, err := stream.Receive()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+
+	sessionID := firstMsg.GetSessionId()
+	if err := s.metaManager.ValidateWatchSession(sessionID, firstMsg.DiskId); err != nil {
+		return toConnectError(err)
+	}
+
+	hub := s.metaManager.WatchHub()
+	if hub == nil {
+		hub = meta.NewSessionWatchHub()
+	}
+
+	var sendMu sync.Mutex
+	sendFrame := func(pingSeq uint64) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.Send(&storagev1.WatchSessionResponse{
+			PingSeq: pingSeq,
+		})
+	}
+
+	streamID, unregister := hub.Register(sessionID, sendFrame)
+	defer func() {
+		replaced := unregister()
+		if !replaced {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.metaManager.CloseSession(cleanupCtx, sessionID)
+		}
+	}()
+
+	if err := sendFrame(0); err != nil {
+		return err
+	}
+
+	if firstMsg.GetPongSeq() > 0 {
+		hub.HandlePong(sessionID, streamID, firstMsg.GetPongSeq())
+	}
+
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if msg.GetPongSeq() > 0 {
+			hub.HandlePong(sessionID, streamID, msg.GetPongSeq())
+		}
+	}
 }

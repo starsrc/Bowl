@@ -60,11 +60,16 @@ func toDiskJSON(d *storagev1.Disk) diskJSON {
 // printDiskDetail 向指定 Writer 打印人类可读的虚拟磁盘详情视图。
 func printDiskDetail(w io.Writer, d *storagev1.Disk) {
 	dj := toDiskJSON(d)
+	var usagePct float64
+	if dj.MaxBytes > 0 {
+		usagePct = float64(dj.UsedBytes) * 100.0 / float64(dj.MaxBytes)
+	}
 	fmt.Fprintf(w, "Disk ID:      %s\n", dj.DiskID)
 	fmt.Fprintf(w, "Name:         %s\n", dj.Name)
 	fmt.Fprintf(w, "Root Ino:     %d\n", dj.RootIno)
 	fmt.Fprintf(w, "Max Bytes:    %d (%s)\n", dj.MaxBytes, FormatSize(dj.MaxBytes))
 	fmt.Fprintf(w, "Used Bytes:   %d (%s)\n", dj.UsedBytes, FormatSize(dj.UsedBytes))
+	fmt.Fprintf(w, "Usage:        %.2f%%\n", usagePct)
 	fmt.Fprintf(w, "Used Inodes:  %d\n", dj.UsedInodes)
 	fmt.Fprintf(w, "Created At:   %s\n", dj.CreatedAt)
 	fmt.Fprintf(w, "Updated At:   %s\n", dj.UpdatedAt)
@@ -103,6 +108,8 @@ func executeDisk(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "create":
 		return executeDiskCreate(args[1:], stdout, stderr)
+	case "get":
+		return executeDiskGet(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "错误: 未知 disk 子命令 \"%s\"\n\n%s", subcmd, diskUsageHelp)
 		return 2

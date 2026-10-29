@@ -505,4 +505,73 @@ func TestServer_RenewSession(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("成功路径: 携带 disk_id 路由至 RenewSessionWithDisk", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		sessionID := uint64(888)
+		diskID := "11111111-1111-7111-8111-111111111111"
+		renewedTime := time.Date(2026, 10, 26, 18, 0, 0, 0, time.UTC)
+
+		mockMgr.EXPECT().RenewSessionWithDisk(testifymock.Anything, sessionID, testifymock.MatchedBy(func(d *string) bool {
+			return d != nil && *d == diskID
+		})).Return(meta.RenewSessionResult{
+			ExpiresAt:        renewedTime,
+			SessionRecreated: true,
+		}, nil).Once()
+
+		reqMsg := &storagev1.RenewSessionRequest{
+			SessionId: sessionID,
+			DiskId:    &diskID,
+		}
+
+		resp, err := client.RenewSession(ctx, connect.NewRequest(reqMsg))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, resp.Msg.GetSessionRecreated())
+		mockMgr.AssertExpectations(t)
+	})
+}
+
+// TestServer_CloseSession 验证 CloseSession RPC 的成功路径与领域错误映射。
+func TestServer_CloseSession(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("成功路径: 正常注销客户端会话", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		sessionID := uint64(999)
+		mockMgr.EXPECT().CloseSession(testifymock.Anything, sessionID).Return(nil).Once()
+
+		resp, err := client.CloseSession(ctx, connect.NewRequest(&storagev1.CloseSessionRequest{
+			SessionId: sessionID,
+		}))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		mockMgr.AssertExpectations(t)
+	})
+
+	t.Run("典型领域错误映射", func(t *testing.T) {
+		mockMgr := metamock.NewMockManager(t)
+		client, teardown := setupTestServer(t, mockMgr)
+		defer teardown()
+
+		sessionID := uint64(999)
+		mockMgr.EXPECT().CloseSession(testifymock.Anything, sessionID).Return(meta.ErrInvalidArgument).Once()
+
+		resp, err := client.CloseSession(ctx, connect.NewRequest(&storagev1.CloseSessionRequest{
+			SessionId: sessionID,
+		}))
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "EINVAL", info.GetReason())
+		mockMgr.AssertExpectations(t)
+	})
 }

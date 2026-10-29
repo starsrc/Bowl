@@ -32,6 +32,7 @@ type Querier interface {
 	DeleteChunksByIno(ctx context.Context, ino int64) ([][]byte, error)
 	DeleteChunksByInos(ctx context.Context, inos []int64) ([][]byte, error)
 	DeleteChunksFromIndx(ctx context.Context, arg DeleteChunksFromIndxParams) ([][]byte, error)
+	DeleteClientSessionByID(ctx context.Context, sessionID int64) (int64, error)
 	DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error)
 	DeleteEntry(ctx context.Context, arg DeleteEntryParams) error
 	DeleteExpiredClientSessions(ctx context.Context) (int64, error)

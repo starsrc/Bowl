@@ -68,7 +68,7 @@ func (c RetryConfig) withDefaults() RetryConfig {
 	return c
 }
 
-// idempotentProcedures 记录 14 个只读与幂等 RPC 白名单集合。
+// idempotentProcedures 记录 15 个只读与幂等 RPC 白名单集合。
 var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceGetDiskProcedure:      {},
 	storagev1connect.StorageServiceLookupProcedure:       {},
@@ -84,9 +84,10 @@ var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceGetLkProcedure:        {},
 	storagev1connect.StorageServiceStatFSProcedure:       {},
 	storagev1connect.StorageServiceRenewSessionProcedure: {},
+	storagev1connect.StorageServiceCloseSessionProcedure: {},
 }
 
-// IsIdempotentProcedure 判定指定 procedure 是否属于 14 个只读与幂等 RPC 白名单。
+// IsIdempotentProcedure 判定指定 procedure 是否属于 15 个只读与幂等 RPC 白名单。
 func IsIdempotentProcedure(procedure string) bool {
 	_, ok := idempotentProcedures[procedure]
 	return ok

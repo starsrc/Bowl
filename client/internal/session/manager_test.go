@@ -28,12 +28,16 @@ type mockStorageHandler struct {
 
 	mu                sync.Mutex
 	renewSessionCalls []uint64
+	renewSessionReqs  []*storagev1.RenewSessionRequest
+	closeSessionCalls []uint64
 	renewSessionFunc  func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error)
+	closeSessionFunc  func(ctx context.Context, req *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error)
 }
 
 func (m *mockStorageHandler) RenewSession(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
 	m.mu.Lock()
 	m.renewSessionCalls = append(m.renewSessionCalls, req.Msg.GetSessionId())
+	m.renewSessionReqs = append(m.renewSessionReqs, req.Msg)
 	fn := m.renewSessionFunc
 	m.mu.Unlock()
 
@@ -45,6 +49,19 @@ func (m *mockStorageHandler) RenewSession(ctx context.Context, req *connect.Requ
 		ExpiresAt:        timestamppb.New(time.Now().Add(60 * time.Second)),
 		SessionRecreated: false,
 	}), nil
+}
+
+func (m *mockStorageHandler) CloseSession(ctx context.Context, req *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error) {
+	m.mu.Lock()
+	m.closeSessionCalls = append(m.closeSessionCalls, req.Msg.GetSessionId())
+	fn := m.closeSessionFunc
+	m.mu.Unlock()
+
+	if fn != nil {
+		return fn(ctx, req)
+	}
+
+	return connect.NewResponse(&storagev1.CloseSessionResponse{}), nil
 }
 
 func (m *mockStorageHandler) getCalls() []uint64 {
@@ -527,4 +544,90 @@ func TestManager_SessionRecreated_RetryOnRotationFailure(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.GreaterOrEqual(t, rotationAttempts, 2, "轮换激活应发生至少一次重试后成功")
+}
+
+func TestManager_DiskIDPropagation_And_CloseSession(t *testing.T) {
+	const testDiskID = "11111111-1111-7111-8111-111111111111"
+
+	t.Run("New, renewLoop, and handleSessionExpired all propagate DiskId and Close calls CloseSession", func(t *testing.T) {
+		var mu sync.Mutex
+		callIdx := 0
+
+		handler := &mockStorageHandler{
+			renewSessionFunc: func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
+				mu.Lock()
+				defer mu.Unlock()
+				callIdx++
+				// 第 2 次调用返回 SessionRecreated = true 触发轮换
+				if callIdx == 2 {
+					return connect.NewResponse(&storagev1.RenewSessionResponse{
+						ExpiresAt:        timestamppb.New(time.Now().Add(60 * time.Millisecond)),
+						SessionRecreated: true,
+					}), nil
+				}
+				return connect.NewResponse(&storagev1.RenewSessionResponse{
+					ExpiresAt:        timestamppb.New(time.Now().Add(60 * time.Millisecond)),
+					SessionRecreated: false,
+				}), nil
+			},
+		}
+		client, cleanup := setupTestServer(t, handler)
+		defer cleanup()
+
+		mgr, err := session.New(context.Background(), client, session.Config{
+			DiskID:              testDiskID,
+			MinInterval:         15 * time.Millisecond,
+			MaxInterval:         50 * time.Millisecond,
+			InitialRetryBackoff: 15 * time.Millisecond,
+			MaxRetryBackoff:     50 * time.Millisecond,
+		})
+		require.NoError(t, err)
+
+		initialSID := mgr.CurrentSessionID()
+		require.NoError(t, mgr.Start(context.Background()))
+
+		// 等待发生轮换并至少完成 3 次 RenewSession（New -> renewLoop 触发 recreated -> handleSessionExpired 激活新会话）
+		require.Eventually(t, func() bool {
+			return mgr.CurrentSessionID() != initialSID
+		}, 3*time.Second, 10*time.Millisecond)
+
+		rotatedSID := mgr.CurrentSessionID()
+
+		// 调用 Close() 必须停止 renewLoop 并对最新活跃会话发送 CloseSession
+		require.NoError(t, mgr.Close())
+		// 重复调用 Close() 幂等，不会重复发送 CloseSession
+		require.NoError(t, mgr.Close())
+
+		handler.mu.Lock()
+		reqs := append([]*storagev1.RenewSessionRequest(nil), handler.renewSessionReqs...)
+		closeCalls := append([]uint64(nil), handler.closeSessionCalls...)
+		handler.mu.Unlock()
+
+		require.GreaterOrEqual(t, len(reqs), 3)
+		for i, r := range reqs {
+			require.NotNil(t, r.DiskId, "第 %d 次 RenewSession 请求必须携带 DiskId", i+1)
+			require.Equal(t, testDiskID, r.GetDiskId(), "第 %d 次 RenewSession 请求的 DiskId 必须等于配置的 DiskID", i+1)
+		}
+
+		require.Equal(t, []uint64{rotatedSID}, closeCalls, "Close() 必须恰好调用一次 CloseSession 且携带当前最新活跃的 SessionId")
+	})
+
+	t.Run("Close logs warn and returns nil when CloseSession RPC fails", func(t *testing.T) {
+		handler := &mockStorageHandler{
+			closeSessionFunc: func(ctx context.Context, req *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error) {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("server down on unmount"))
+			},
+		}
+		client, cleanup := setupTestServer(t, handler)
+		defer cleanup()
+
+		logCapture := &logCaptureHandler{}
+		mgr, err := session.New(context.Background(), client, session.Config{
+			Logger: slog.New(logCapture),
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, mgr.Close())
+		require.True(t, logCapture.hasWarnLog("close session failed on shutdown"), "CloseSession 失败时应记录 Warn 日志而不阻塞卸载")
+	})
 }

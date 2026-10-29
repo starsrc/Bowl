@@ -26,7 +26,8 @@ import (
 type cliMockStorageHandler struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 
-	getDiskFn func(context.Context, *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error)
+	getDiskFn      func(context.Context, *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error)
+	renewSessionFn func(context.Context, *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error)
 }
 
 func (h *cliMockStorageHandler) GetDisk(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
@@ -34,6 +35,13 @@ func (h *cliMockStorageHandler) GetDisk(ctx context.Context, req *connect.Reques
 		return h.getDiskFn(ctx, req)
 	}
 	return nil, connect.NewError(connect.CodeNotFound, os.ErrNotExist)
+}
+
+func (h *cliMockStorageHandler) RenewSession(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
+	if h.renewSessionFn != nil {
+		return h.renewSessionFn(ctx, req)
+	}
+	return nil, connect.NewError(connect.CodeUnavailable, os.ErrNotExist)
 }
 
 func setupTestStorageServer(t *testing.T, handler storagev1connect.StorageServiceHandler) string {
@@ -187,4 +195,32 @@ func TestMount_ForegroundRunnerSuccess(t *testing.T) {
 	code := cli.Execute([]string{"mount", "-f", "--endpoint", endpoint, validUUID, tmpDir}, &stdout, &stderr)
 	require.Equal(t, 0, code)
 	require.True(t, runnerCalled)
+}
+
+func TestMount_ForegroundRunner_PropagatesDiskIDToRenewSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	validUUID := uuid.New().String()
+
+	var capturedDiskID string
+	mockSrv := &cliMockStorageHandler{
+		getDiskFn: func(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
+			return connect.NewResponse(&storagev1.GetDiskResponse{
+				Disk: &storagev1.Disk{
+					DiskId:   validUUID,
+					RootIno:  1001,
+					MaxBytes: 1024 * 1024,
+				},
+			}), nil
+		},
+		renewSessionFn: func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
+			capturedDiskID = req.Msg.GetDiskId()
+			return nil, connect.NewError(connect.CodeUnavailable, os.ErrPermission)
+		},
+	}
+	endpoint := setupTestStorageServer(t, mockSrv)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Execute([]string{"mount", "-f", "--endpoint", endpoint, validUUID, tmpDir}, &stdout, &stderr)
+	require.Equal(t, 1, code)
+	require.Equal(t, validUUID, capturedDiskID, "runForegroundMount 调用 session.New 时必须透传 cfg.DiskID")
 }

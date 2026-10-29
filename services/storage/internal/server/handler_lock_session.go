@@ -95,7 +95,15 @@ func (s *Server) SetLkw(ctx context.Context, req *connect.Request[storagev1.SetL
 
 // RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 func (s *Server) RenewSession(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
-	res, err := s.metaManager.RenewSessionWithStatus(ctx, req.Msg.GetSessionId())
+	var (
+		res meta.RenewSessionResult
+		err error
+	)
+	if req.Msg.DiskId == nil {
+		res, err = s.metaManager.RenewSessionWithStatus(ctx, req.Msg.GetSessionId())
+	} else {
+		res, err = s.metaManager.RenewSessionWithDisk(ctx, req.Msg.GetSessionId(), req.Msg.DiskId)
+	}
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -104,4 +112,13 @@ func (s *Server) RenewSession(ctx context.Context, req *connect.Request[storagev
 		ExpiresAt:        timestamppb.New(res.ExpiresAt),
 		SessionRecreated: res.SessionRecreated,
 	}), nil
+}
+
+// CloseSession 在客户端优雅卸载时即时注销指定会话租约。
+func (s *Server) CloseSession(ctx context.Context, req *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error) {
+	if err := s.metaManager.CloseSession(ctx, req.Msg.GetSessionId()); err != nil {
+		return nil, toConnectError(err)
+	}
+
+	return connect.NewResponse(&storagev1.CloseSessionResponse{}), nil
 }

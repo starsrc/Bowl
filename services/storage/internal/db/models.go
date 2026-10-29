@@ -19,6 +19,7 @@ type ClientSession struct {
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	DiskID    pgtype.UUID        `json:"disk_id"`
 }
 
 type Disk struct {

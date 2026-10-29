@@ -290,14 +290,36 @@ func assertNoBowlDaemonResiduals(t *testing.T, diskID string, mountpoints ...str
 	}
 }
 
+// grantAncestorTraverseForTest 确保位于 os.TempDir() 之下的测试专属临时目录层级的权限可被普通用户穿透，
+// 绝不触碰 os.TempDir()（如 /tmp）及其上层系统目录；若修改权限则保留特殊位并通过 t.Cleanup 精确还原原始 mode。
+func grantAncestorTraverseForTest(t *testing.T, targetPath string) {
+	t.Helper()
+
+	tempRoot := filepath.Clean(os.TempDir())
+	for p := filepath.Clean(targetPath); p != tempRoot && p != "/" && p != "."; p = filepath.Dir(p) {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		origMode := info.Mode()
+		if origMode.Perm()&0o111 != 0o111 {
+			dirPath := p
+			require.NoError(t, os.Chmod(dirPath, origMode|0o111), "赋予测试临时目录穿透权限失败: %s", dirPath)
+			t.Cleanup(func() {
+				if _, statErr := os.Stat(dirPath); statErr == nil {
+					_ = os.Chmod(dirPath, origMode)
+				}
+			})
+		}
+	}
+}
+
 // runMultiUserHelperCmd 执行带有真实非 root 普通用户凭据的子进程操作。
 func runMultiUserHelperCmd(t *testing.T, uid, gid uint32, op string, args ...string) (int, string, string) {
 	t.Helper()
 
-	// 确保测试二进制及其父目录可被普通用户读取与执行
-	for p := os.Args[0]; p != "/" && p != "."; p = filepath.Dir(p) {
-		_ = os.Chmod(p, 0755)
-	}
+	// 确保测试二进制及其位于 os.TempDir() 之下的父目录可被普通用户读取与执行
+	grantAncestorTraverseForTest(t, os.Args[0])
 
 	cmdArgs := []string{"-test.run=^TestMultiUserHelperProcess$", "--", op}
 	cmdArgs = append(cmdArgs, args...)
@@ -334,6 +356,16 @@ func TestE2E_MultiClient_ComprehensiveAcceptance(t *testing.T) {
 	endpoint := getStorageEndpoint()
 	ensureFuseAllowOther()
 
+	tempRoot := filepath.Clean(os.TempDir())
+	tempRootInfoBefore, err := os.Stat(tempRoot)
+	require.NoError(t, err, "读取 os.TempDir() 初始状态失败")
+	tempRootModeBefore := tempRootInfoBefore.Mode()
+	t.Cleanup(func() {
+		infoAfter, statErr := os.Stat(tempRoot)
+		require.NoError(t, statErr, "测试结束后读取 os.TempDir() 状态失败")
+		require.Equal(t, tempRootModeBefore, infoAfter.Mode(), "测试执行前后 os.TempDir() 权限（含 Sticky Bit）必须保持不变")
+	})
+
 	// 准备具有 root_ino > 1 的目标磁盘
 	disk := createDiskWithRootInoGT1(t, client)
 	diskID := disk.GetDiskId()
@@ -342,12 +374,14 @@ func TestE2E_MultiClient_ComprehensiveAcceptance(t *testing.T) {
 	mpA := t.TempDir()
 	mpB := t.TempDir()
 
-	// 确保挂载点及其所有父级目录具备 0755 权限，使非 root 普通用户可穿透访问
+	// 确保挂载点及其位于 os.TempDir() 之下的父级目录可被非 root 普通用户穿透访问，且绝不污染 /tmp
 	for _, mp := range []string{mpA, mpB} {
-		for p := mp; p != "/" && p != "."; p = filepath.Dir(p) {
-			_ = os.Chmod(p, 0755)
-		}
+		grantAncestorTraverseForTest(t, mp)
 	}
+
+	tempRootInfoAfterGrant, err := os.Stat(tempRoot)
+	require.NoError(t, err)
+	require.Equal(t, tempRootModeBefore, tempRootInfoAfterGrant.Mode(), "grantAncestorTraverseForTest 不得篡改 os.TempDir() 权限")
 
 	// 确保退出时若未被场景 4 卸载，则兜底强制卸载以防泄露
 	defer func() {

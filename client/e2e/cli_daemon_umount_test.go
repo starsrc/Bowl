@@ -102,9 +102,29 @@ func createE2EDisk(t *testing.T, client storagev1connect.StorageServiceClient) *
 			Name:     fmt.Sprintf("e2e-disk-%d-%d", time.Now().UnixNano(), attempt),
 			MaxBytes: 10 * 1024 * 1024 * 1024,
 		}))
+		if err == nil && resp.Msg.GetDisk().GetRootIno() == 1 {
+			_, delErr := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+				DiskId: resp.Msg.GetDisk().GetDiskId(),
+			}))
+			cancel()
+			require.NoError(t, delErr, "清理过渡磁盘 (root_ino == 1) 失败")
+			continue
+		}
 		cancel()
 		if err == nil && resp.Msg.GetDisk().GetRootIno() > 1 {
-			return resp.Msg.GetDisk()
+			disk := resp.Msg.GetDisk()
+			diskID := disk.GetDiskId()
+			t.Cleanup(func() {
+				cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cleanCancel()
+				_, delErr := client.DeleteDisk(cleanCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+					DiskId: diskID,
+				}))
+				if delErr != nil && connect.CodeOf(delErr) != connect.CodeNotFound {
+					require.NoError(t, delErr, "清理测试磁盘失败: %s", diskID)
+				}
+			})
+			return disk
 		}
 		if err != nil {
 			lastErr = err

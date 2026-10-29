@@ -62,7 +62,28 @@ func createDiskWithRootInoGT1(t *testing.T, client storagev1connect.StorageServi
 		require.NoError(t, err, "创建磁盘失败")
 
 		disk := resp.Msg.GetDisk()
+		if disk.GetRootIno() == 1 {
+			_, delErr := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+				DiskId: disk.GetDiskId(),
+			}))
+			require.NoError(t, delErr, "清理过渡磁盘 (root_ino == 1) 失败")
+			continue
+		}
 		if disk.GetRootIno() > 1 {
+			diskID := disk.GetDiskId()
+			t.Cleanup(func() {
+				cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cleanCancel()
+				_, delErr := client.DeleteDisk(cleanCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+					DiskId: diskID,
+				}))
+				require.NoError(t, delErr, "清理测试磁盘失败: %s", diskID)
+				_, getErr := client.GetDisk(cleanCtx, connect.NewRequest(&storagev1.GetDiskRequest{
+					DiskId: diskID,
+				}))
+				require.Error(t, getErr, "删除磁盘后 GetDisk 必须返回错误: %s", diskID)
+				require.Equal(t, connect.CodeNotFound, connect.CodeOf(getErr), "删除磁盘后 GetDisk 应返回 CodeNotFound")
+			})
 			return disk
 		}
 	}

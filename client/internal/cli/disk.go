@@ -108,6 +108,8 @@ func executeDisk(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "create":
 		return executeDiskCreate(args[1:], stdout, stderr)
+	case "list":
+		return executeDiskList(args[1:], stdout, stderr)
 	case "get":
 		return executeDiskGet(args[1:], stdout, stderr)
 	case "update", "resize":

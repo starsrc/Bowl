@@ -19,6 +19,8 @@ func TestStorageMessagesRegistered(t *testing.T) {
 		reflect.TypeOf(&storagev1.ReadResponse{}),
 		reflect.TypeOf(&storagev1.WriteRequest{}),
 		reflect.TypeOf(&storagev1.WriteResponse{}),
+		reflect.TypeOf(&storagev1.ListDisksRequest{}),
+		reflect.TypeOf(&storagev1.ListDisksResponse{}),
 	}
 
 	registeredMap := make(map[reflect.Type]bool)
@@ -45,6 +47,7 @@ func TestClassifyViolationPriority(t *testing.T) {
 		"storage.v1.WriteRequest.session_id",
 		"storage.v1.WriteResponse.size",
 		"storage.v1.WriteResponse.inode",
+		"storage.v1.ListDisksRequest.page_size",
 	}
 
 	for _, f := range testFields {
@@ -71,6 +74,19 @@ func TestClassifyViolationPriority(t *testing.T) {
 		priority, reason := classifyViolationInternal(v)
 		assert.Equal(t, 10, priority, "CEL write_request_offset_len_overflow 应具备第 1 优先级 (10)")
 		assert.Equal(t, ReasonInvalidArgument, reason, "CEL write_request_offset_len_overflow 应映射为 EINVAL")
+	})
+
+	t.Run("ListDisksRequest page_size > 1000 validation", func(t *testing.T) {
+		val, err := NewStorageValidator()
+		assert.NoError(t, err)
+		assert.NoError(t, val.Validate(&storagev1.ListDisksRequest{PageSize: 0}))
+		assert.NoError(t, val.Validate(&storagev1.ListDisksRequest{PageSize: 1000}))
+
+		err = val.Validate(&storagev1.ListDisksRequest{PageSize: 1001})
+		assert.Error(t, err)
+		reason, ok := ErrnoReason(err)
+		assert.True(t, ok)
+		assert.Equal(t, ReasonInvalidArgument, reason)
 	})
 }
 

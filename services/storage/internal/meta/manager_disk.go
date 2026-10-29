@@ -1,11 +1,15 @@
 package meta
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -136,6 +140,103 @@ func (m *manager) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
 	}
 
 	return toDomainDisk(row), nil
+}
+
+// diskPageCursor 定义 ListDisks 游标令牌的序列化载荷。
+// PostgreSQL TIMESTAMPTZ 精度为微秒，使用 UnixMicro() 编码与还原以彻底消除纳秒截断带来的翻页漂移。
+type diskPageCursor struct {
+	CreatedAtMicro *int64 `json:"t"`
+	DiskID         string `json:"id"`
+}
+
+func encodeDiskPageCursor(createdAt time.Time, diskID string) string {
+	us := createdAt.UTC().UnixMicro()
+	raw, err := json.Marshal(diskPageCursor{
+		CreatedAtMicro: &us,
+		DiskID:         diskID,
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeDiskPageCursor(token string) (pgtype.Timestamptz, pgtype.UUID, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return pgtype.Timestamptz{}, pgtype.UUID{}, fmt.Errorf("%w: invalid page_token base64 encoding", ErrInvalidArgument)
+	}
+	var cursor diskPageCursor
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cursor); err != nil || dec.More() || cursor.CreatedAtMicro == nil || cursor.DiskID == "" {
+		return pgtype.Timestamptz{}, pgtype.UUID{}, fmt.Errorf("%w: malformed page_token payload", ErrInvalidArgument)
+	}
+	pgID, err := parseDiskID(cursor.DiskID)
+	if err != nil {
+		return pgtype.Timestamptz{}, pgtype.UUID{}, fmt.Errorf("%w: invalid page_token disk_id", ErrInvalidArgument)
+	}
+	ts := pgtype.Timestamptz{
+		Time:  time.UnixMicro(*cursor.CreatedAtMicro).UTC(),
+		Valid: true,
+	}
+	return ts, pgID, nil
+}
+
+// ListDisks 分页列出虚拟磁盘实体（按 created_at DESC, disk_id DESC 排序）。
+func (m *manager) ListDisks(ctx context.Context, params ListDisksParams) (*ListDisksResult, error) {
+	if params.PageSize > MaxListDisksPageSize {
+		return nil, fmt.Errorf("%w: page_size %d exceeds max %d", ErrInvalidArgument, params.PageSize, MaxListDisksPageSize)
+	}
+	pageSize := params.PageSize
+	if pageSize == 0 {
+		pageSize = DefaultListDisksPageSize
+	}
+
+	var (
+		hasCursor       bool
+		cursorCreatedAt pgtype.Timestamptz
+		cursorDiskID    pgtype.UUID
+	)
+	if params.PageToken != "" {
+		var err error
+		cursorCreatedAt, cursorDiskID, err = decodeDiskPageCursor(params.PageToken)
+		if err != nil {
+			return nil, err
+		}
+		hasCursor = true
+	}
+
+	rows, err := m.store.ListDisks(ctx, db.ListDisksParams{
+		HasCursor:       hasCursor,
+		CursorCreatedAt: cursorCreatedAt,
+		CursorDiskID:    cursorDiskID,
+		PageLimit:       int32(pageSize + 1),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list disks: %w", err)
+	}
+
+	var nextPageToken string
+	if len(rows) > int(pageSize) {
+		rows = rows[:pageSize]
+		lastRow := rows[pageSize-1]
+		var lastID string
+		if lastRow.DiskID.Valid {
+			lastID = lastRow.DiskID.String()
+		}
+		nextPageToken = encodeDiskPageCursor(lastRow.CreatedAt.Time, lastID)
+	}
+
+	disks := make([]*Disk, 0, len(rows))
+	for _, row := range rows {
+		disks = append(disks, toDomainDisk(row))
+	}
+
+	return &ListDisksResult{
+		Disks:         disks,
+		NextPageToken: nextPageToken,
+	}, nil
 }
 
 // UpdateDisk 更新虚拟磁盘属性（名称、最大容量）。

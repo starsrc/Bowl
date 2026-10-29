@@ -116,6 +116,9 @@ const (
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
 	// StorageServiceGetDiskProcedure is the fully-qualified name of the StorageService's GetDisk RPC.
 	StorageServiceGetDiskProcedure = "/storage.v1.StorageService/GetDisk"
+	// StorageServiceListDisksProcedure is the fully-qualified name of the StorageService's ListDisks
+	// RPC.
+	StorageServiceListDisksProcedure = "/storage.v1.StorageService/ListDisks"
 	// StorageServiceUpdateDiskProcedure is the fully-qualified name of the StorageService's UpdateDisk
 	// RPC.
 	StorageServiceUpdateDiskProcedure = "/storage.v1.StorageService/UpdateDisk"
@@ -327,6 +330,8 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -578,6 +583,12 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("GetDisk")),
 			connect.WithClientOptions(opts...),
 		),
+		listDisks: connect.NewClient[v1.ListDisksRequest, v1.ListDisksResponse](
+			httpClient,
+			baseURL+StorageServiceListDisksProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListDisks")),
+			connect.WithClientOptions(opts...),
+		),
 		updateDisk: connect.NewClient[v1.UpdateDiskRequest, v1.UpdateDiskResponse](
 			httpClient,
 			baseURL+StorageServiceUpdateDiskProcedure,
@@ -638,6 +649,7 @@ type storageServiceClient struct {
 	watchSession *connect.Client[v1.WatchSessionRequest, v1.WatchSessionResponse]
 	createDisk   *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
 	getDisk      *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
+	listDisks    *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
 	updateDisk   *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
 	deleteDisk   *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
 	statFS       *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
@@ -826,6 +838,11 @@ func (c *storageServiceClient) CreateDisk(ctx context.Context, req *connect.Requ
 // GetDisk calls storage.v1.StorageService.GetDisk.
 func (c *storageServiceClient) GetDisk(ctx context.Context, req *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error) {
 	return c.getDisk.CallUnary(ctx, req)
+}
+
+// ListDisks calls storage.v1.StorageService.ListDisks.
+func (c *storageServiceClient) ListDisks(ctx context.Context, req *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error) {
+	return c.listDisks.CallUnary(ctx, req)
 }
 
 // UpdateDisk calls storage.v1.StorageService.UpdateDisk.
@@ -1044,6 +1061,8 @@ type StorageServiceHandler interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -1291,6 +1310,12 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("GetDisk")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceListDisksHandler := connect.NewUnaryHandler(
+		StorageServiceListDisksProcedure,
+		svc.ListDisks,
+		connect.WithSchema(storageServiceMethods.ByName("ListDisks")),
+		connect.WithHandlerOptions(opts...),
+	)
 	storageServiceUpdateDiskHandler := connect.NewUnaryHandler(
 		StorageServiceUpdateDiskProcedure,
 		svc.UpdateDisk,
@@ -1385,6 +1410,8 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceCreateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceGetDiskProcedure:
 			storageServiceGetDiskHandler.ServeHTTP(w, r)
+		case StorageServiceListDisksProcedure:
+			storageServiceListDisksHandler.ServeHTTP(w, r)
 		case StorageServiceUpdateDiskProcedure:
 			storageServiceUpdateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceDeleteDiskProcedure:
@@ -1546,6 +1573,10 @@ func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *connect.R
 
 func (UnimplementedStorageServiceHandler) GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListDisks is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error) {

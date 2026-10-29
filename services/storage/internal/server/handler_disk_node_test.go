@@ -199,6 +199,75 @@ func TestServer_DiskRPCs(t *testing.T) {
 		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
 	})
 
+	t.Run("ListDisks_Success", func(t *testing.T) {
+		client, mockMgr := setupDiskNodeTestClient(t)
+		d1 := sampleDisk(validUUID, "disk-1", 101, 1073741824)
+		d2 := sampleDisk("018f6738-4e89-7381-8000-123456789abd", "disk-2", 102, 2147483648)
+
+		mockMgr.EXPECT().
+			ListDisks(mock.Anything, meta.ListDisksParams{
+				PageSize:  2,
+				PageToken: "cursor-in",
+			}).
+			Return(&meta.ListDisksResult{
+				Disks:         []*meta.Disk{d1, d2},
+				NextPageToken: "cursor-out",
+			}, nil).
+			Once()
+
+		req := connect.NewRequest(&storagev1.ListDisksRequest{
+			PageSize:  2,
+			PageToken: "cursor-in",
+		})
+		res, err := client.ListDisks(ctx, req)
+		require.NoError(t, err)
+		require.Len(t, res.Msg.Disks, 2)
+		assert.Equal(t, validUUID, res.Msg.Disks[0].DiskId)
+		assert.Equal(t, "disk-1", res.Msg.Disks[0].Name)
+		assert.Equal(t, "018f6738-4e89-7381-8000-123456789abd", res.Msg.Disks[1].DiskId)
+		assert.Equal(t, "disk-2", res.Msg.Disks[1].Name)
+		assert.Equal(t, "cursor-out", res.Msg.NextPageToken)
+	})
+
+	t.Run("ListDisks_InvalidPageToken_DomainError", func(t *testing.T) {
+		client, mockMgr := setupDiskNodeTestClient(t)
+
+		mockMgr.EXPECT().
+			ListDisks(mock.Anything, meta.ListDisksParams{
+				PageSize:  10,
+				PageToken: "bad-token",
+			}).
+			Return(nil, meta.ErrInvalidArgument).
+			Once()
+
+		req := connect.NewRequest(&storagev1.ListDisksRequest{
+			PageSize:  10,
+			PageToken: "bad-token",
+		})
+		_, err := client.ListDisks(ctx, req)
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "EINVAL", info.Reason)
+		assert.Equal(t, "bowl.storage", info.Domain)
+	})
+
+	t.Run("ListDisks_ValidationError_PageSizeExceeds1000", func(t *testing.T) {
+		client, _ := setupDiskNodeTestClient(t)
+
+		req := connect.NewRequest(&storagev1.ListDisksRequest{
+			PageSize: 1001,
+		})
+		_, err := client.ListDisks(ctx, req)
+		require.Error(t, err)
+		assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+		info := server.ExtractErrorInfo(err)
+		require.NotNil(t, info)
+		assert.Equal(t, "EINVAL", info.Reason)
+		assert.Equal(t, "bowl.storage", info.Domain)
+	})
+
 	t.Run("UpdateDisk_Success", func(t *testing.T) {
 		client, mockMgr := setupDiskNodeTestClient(t)
 		disk := sampleDisk(validUUID, "disk-renamed", 1, 2147483648)

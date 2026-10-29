@@ -245,6 +245,9 @@ service StorageService {
   // 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
   rpc GetDisk(GetDiskRequest) returns (GetDiskResponse);
 
+  // ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+  rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
+
   // UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
   // 支持按需单独或同时更新 name 与 max_bytes。
   // 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -1684,6 +1687,24 @@ message GetDiskRequest {
 message GetDiskResponse {
   // 查询到的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
+}
+
+// ListDisksRequest 分页查询虚拟磁盘列表请求。
+message ListDisksRequest {
+  // 单页最大返回条数（为 0 时默认取 50，最大不超过 1000）。
+  uint32 page_size = 1 [(buf.validate.field).uint32.lte = 1000];
+
+  // 游标分页令牌（为空表示从第一页开始查询）。
+  string page_token = 2;
+}
+
+// ListDisksResponse 分页查询虚拟磁盘列表响应。
+message ListDisksResponse {
+  // 当前页虚拟磁盘列表（按 created_at DESC, disk_id DESC 排序）。
+  repeated Disk disks = 1;
+
+  // 下一页游标令牌（为空字符串表示已到达最后一页）。
+  string next_page_token = 2;
 }
 
 // UpdateDiskRequest 定义 UpdateDisk 接口输入参数。

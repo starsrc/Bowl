@@ -605,6 +605,14 @@ SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, 
 FROM disks
 WHERE disk_id = $1;
 
+-- name: ListDisks :many
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE (NOT @has_cursor::boolean)
+   OR (created_at, disk_id) < (@cursor_created_at::timestamptz, @cursor_disk_id::uuid)
+ORDER BY created_at DESC, disk_id DESC
+LIMIT @page_limit::int;
+
 -- name: GetDiskForUpdate :one
 WITH target_disk AS MATERIALIZED (
     SELECT root_ino

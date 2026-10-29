@@ -82,6 +82,25 @@ func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.Get
 	}), nil
 }
 
+// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+func (s *Server) ListDisks(ctx context.Context, req *connect.Request[storagev1.ListDisksRequest]) (*connect.Response[storagev1.ListDisksResponse], error) {
+	res, err := s.metaManager.ListDisks(ctx, meta.ListDisksParams{
+		PageSize:  req.Msg.PageSize,
+		PageToken: req.Msg.PageToken,
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	protoDisks := make([]*storagev1.Disk, 0, len(res.Disks))
+	for _, d := range res.Disks {
+		protoDisks = append(protoDisks, toProtoDisk(d))
+	}
+	return connect.NewResponse(&storagev1.ListDisksResponse{
+		Disks:         protoDisks,
+		NextPageToken: res.NextPageToken,
+	}), nil
+}
+
 // UpdateDisk 动态调整虚拟磁盘名称或容量配额上限。
 func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.UpdateDiskRequest]) (*connect.Response[storagev1.UpdateDiskResponse], error) {
 	disk, err := s.metaManager.UpdateDisk(ctx, meta.UpdateDiskParams{

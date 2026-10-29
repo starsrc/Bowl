@@ -114,6 +114,18 @@ func TestStorageDiskContract_ValidMessages(t *testing.T) {
 		assert.NoError(t, v.Validate(resp))
 	})
 
+	t.Run("有效 ListDisksRequest 与 ListDisksResponse 校验通过", func(t *testing.T) {
+		assert.NoError(t, v.Validate(&storagev1.ListDisksRequest{}))
+		assert.NoError(t, v.Validate(&storagev1.ListDisksRequest{PageSize: 50, PageToken: "token"}))
+		assert.NoError(t, v.Validate(&storagev1.ListDisksRequest{PageSize: 1000}))
+
+		assert.NoError(t, v.Validate(&storagev1.ListDisksResponse{}))
+		assert.NoError(t, v.Validate(&storagev1.ListDisksResponse{
+			Disks:         []*storagev1.Disk{validSampleStorageDisk()},
+			NextPageToken: "next-token",
+		}))
+	})
+
 	t.Run("有效 UpdateDiskRequest 校验通过", func(t *testing.T) {
 		name := "updated-disk"
 		maxBytes := uint64(20 * 1024 * 1024 * 1024)
@@ -539,5 +551,26 @@ func TestStorageDiskContract_DeleteDiskRequest_Invalid(t *testing.T) {
 			DiskId: nilStorageDiskUUID,
 		}
 		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+}
+
+func TestStorageDiskContract_ListDisksRequest_Invalid(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	t.Run("page_size 超过 1000 返回 EINVAL", func(t *testing.T) {
+		req := &storagev1.ListDisksRequest{
+			PageSize: 1001,
+		}
+		assertStorageErrorInfoReason(t, v.Validate(req), validator.ReasonInvalidArgument)
+	})
+
+	t.Run("ListDisksResponse 包含非法 Disk 实体时返回相应错误码", func(t *testing.T) {
+		badDisk := validSampleStorageDisk()
+		badDisk.DiskId = nilStorageDiskUUID
+		resp := &storagev1.ListDisksResponse{
+			Disks: []*storagev1.Disk{badDisk},
+		}
+		assertStorageErrorInfoReason(t, v.Validate(resp), validator.ReasonInvalidArgument)
 	})
 }

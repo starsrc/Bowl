@@ -56,6 +56,7 @@ const (
 	StorageService_WatchSession_FullMethodName = "/storage.v1.StorageService/WatchSession"
 	StorageService_CreateDisk_FullMethodName   = "/storage.v1.StorageService/CreateDisk"
 	StorageService_GetDisk_FullMethodName      = "/storage.v1.StorageService/GetDisk"
+	StorageService_ListDisks_FullMethodName    = "/storage.v1.StorageService/ListDisks"
 	StorageService_UpdateDisk_FullMethodName   = "/storage.v1.StorageService/UpdateDisk"
 	StorageService_DeleteDisk_FullMethodName   = "/storage.v1.StorageService/DeleteDisk"
 	StorageService_StatFS_FullMethodName       = "/storage.v1.StorageService/StatFS"
@@ -266,6 +267,8 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(ctx context.Context, in *GetDiskRequest, opts ...grpc.CallOption) (*GetDiskResponse, error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -665,6 +668,16 @@ func (c *storageServiceClient) GetDisk(ctx context.Context, in *GetDiskRequest, 
 	return out, nil
 }
 
+func (c *storageServiceClient) ListDisks(ctx context.Context, in *ListDisksRequest, opts ...grpc.CallOption) (*ListDisksResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListDisksResponse)
+	err := c.cc.Invoke(ctx, StorageService_ListDisks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *storageServiceClient) UpdateDisk(ctx context.Context, in *UpdateDiskRequest, opts ...grpc.CallOption) (*UpdateDiskResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UpdateDiskResponse)
@@ -900,6 +913,8 @@ type StorageServiceServer interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	GetDisk(context.Context, *GetDiskRequest) (*GetDiskResponse, error)
+	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
+	ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error)
 	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
 	// 支持按需单独或同时更新 name 与 max_bytes。
 	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
@@ -1036,6 +1051,9 @@ func (UnimplementedStorageServiceServer) CreateDisk(context.Context, *CreateDisk
 }
 func (UnimplementedStorageServiceServer) GetDisk(context.Context, *GetDiskRequest) (*GetDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) ListDisks(context.Context, *ListDisksRequest) (*ListDisksResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListDisks not implemented")
 }
 func (UnimplementedStorageServiceServer) UpdateDisk(context.Context, *UpdateDiskRequest) (*UpdateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateDisk not implemented")
@@ -1722,6 +1740,24 @@ func _StorageService_GetDisk_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_ListDisks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListDisksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ListDisks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ListDisks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ListDisks(ctx, req.(*ListDisksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StorageService_UpdateDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateDiskRequest)
 	if err := dec(in); err != nil {
@@ -1926,6 +1962,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDisk",
 			Handler:    _StorageService_GetDisk_Handler,
+		},
+		{
+			MethodName: "ListDisks",
+			Handler:    _StorageService_ListDisks_Handler,
 		},
 		{
 			MethodName: "UpdateDisk",

@@ -30,16 +30,34 @@ func TestCLI_DiskUpdateRouting(t *testing.T) {
 	}
 }
 
+func TestCLI_DiskListRouting(t *testing.T) {
+	for _, arg := range []string{"--help", "-h"} {
+		var stdout, stderr bytes.Buffer
+		code := cli.Execute([]string{"disk", "list", arg}, &stdout, &stderr)
+		require.Equal(t, 0, code, "arg=%s", arg)
+		require.Empty(t, stderr.String())
+		require.Contains(t, stdout.String(), "bowl disk list")
+	}
+}
+
 type diskMockStorageHandler struct {
 	cliMockStorageHandler
 
 	createDiskFn func(context.Context, *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error)
+	listDisksFn  func(context.Context, *connect.Request[storagev1.ListDisksRequest]) (*connect.Response[storagev1.ListDisksResponse], error)
 	updateDiskFn func(context.Context, *connect.Request[storagev1.UpdateDiskRequest]) (*connect.Response[storagev1.UpdateDiskResponse], error)
 }
 
 func (h *diskMockStorageHandler) CreateDisk(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
 	if h.createDiskFn != nil {
 		return h.createDiskFn(ctx, req)
+	}
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("unimplemented"))
+}
+
+func (h *diskMockStorageHandler) ListDisks(ctx context.Context, req *connect.Request[storagev1.ListDisksRequest]) (*connect.Response[storagev1.ListDisksResponse], error) {
+	if h.listDisksFn != nil {
+		return h.listDisksFn(ctx, req)
 	}
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("unimplemented"))
 }

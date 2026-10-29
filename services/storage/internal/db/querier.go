@@ -79,6 +79,7 @@ type Querier interface {
 	ListActiveFileLocksByInoAndFlags(ctx context.Context, arg ListActiveFileLocksByInoAndFlagsParams) ([]FileLock, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error)
+	ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error)
 	ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]SliceRef, error)
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
 	ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]ListParentEntryCountsByInoRow, error)

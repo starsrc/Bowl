@@ -4308,6 +4308,74 @@ func (_c *MockQuerier_ListDirEntriesAfterName_Call) RunAndReturn(run func(ctx co
 	return _c
 }
 
+// ListDisks provides a mock function for the type MockQuerier
+func (_mock *MockQuerier) ListDisks(ctx context.Context, arg db.ListDisksParams) ([]db.Disk, error) {
+	ret := _mock.Called(ctx, arg)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListDisks")
+	}
+
+	var r0 []db.Disk
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) ([]db.Disk, error)); ok {
+		return returnFunc(ctx, arg)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) []db.Disk); ok {
+		r0 = returnFunc(ctx, arg)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]db.Disk)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListDisksParams) error); ok {
+		r1 = returnFunc(ctx, arg)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockQuerier_ListDisks_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListDisks'
+type MockQuerier_ListDisks_Call struct {
+	*mock.Call
+}
+
+// ListDisks is a helper method to define mock.On call
+//   - ctx context.Context
+//   - arg db.ListDisksParams
+func (_e *MockQuerier_Expecter) ListDisks(ctx any, arg any) *MockQuerier_ListDisks_Call {
+	return &MockQuerier_ListDisks_Call{Call: _e.mock.On("ListDisks", ctx, arg)}
+}
+
+func (_c *MockQuerier_ListDisks_Call) Run(run func(ctx context.Context, arg db.ListDisksParams)) *MockQuerier_ListDisks_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 db.ListDisksParams
+		if args[1] != nil {
+			arg1 = args[1].(db.ListDisksParams)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockQuerier_ListDisks_Call) Return(disks []db.Disk, err error) *MockQuerier_ListDisks_Call {
+	_c.Call.Return(disks, err)
+	return _c
+}
+
+func (_c *MockQuerier_ListDisks_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDisksParams) ([]db.Disk, error)) *MockQuerier_ListDisks_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListGarbageSliceRefs provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]db.SliceRef, error) {
 	ret := _mock.Called(ctx, limitCount)

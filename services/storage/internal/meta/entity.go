@@ -56,6 +56,10 @@ const (
 	MaxDiskNameBytes = 255
 	// DefaultStatFSBlockSize 定义 StatFS 默认换算块大小（4096 字节）。
 	DefaultStatFSBlockSize = 4096
+	// DefaultListDisksPageSize 定义 ListDisks 默认单页最大返回条数（50）。
+	DefaultListDisksPageSize uint32 = 50
+	// MaxListDisksPageSize 定义 ListDisks 单页最大返回条数上限（1000）。
+	MaxListDisksPageSize uint32 = 1000
 )
 
 // Inode 文件系统标志位常量（对齐 Linux chattr / FS_*_FL）。
@@ -494,6 +498,18 @@ type Disk struct {
 type CreateDiskParams struct {
 	Name     string
 	MaxBytes uint64
+}
+
+// ListDisksParams 描述分页查询虚拟磁盘列表入参。
+type ListDisksParams struct {
+	PageSize  uint32
+	PageToken string
+}
+
+// ListDisksResult 描述分页查询虚拟磁盘列表返回结果。
+type ListDisksResult struct {
+	Disks         []*Disk
+	NextPageToken string
 }
 
 // UpdateDiskParams 描述更新虚拟磁盘入参。

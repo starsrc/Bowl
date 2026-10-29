@@ -1565,6 +1565,56 @@ func (q *Queries) ListDirEntriesAfterName(ctx context.Context, arg ListDirEntrie
 	return items, nil
 }
 
+const listDisks = `-- name: ListDisks :many
+SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+FROM disks
+WHERE (NOT $1::boolean)
+   OR (created_at, disk_id) < ($2::timestamptz, $3::uuid)
+ORDER BY created_at DESC, disk_id DESC
+LIMIT $4::int
+`
+
+type ListDisksParams struct {
+	HasCursor       bool               `json:"has_cursor"`
+	CursorCreatedAt pgtype.Timestamptz `json:"cursor_created_at"`
+	CursorDiskID    pgtype.UUID        `json:"cursor_disk_id"`
+	PageLimit       int32              `json:"page_limit"`
+}
+
+func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error) {
+	rows, err := q.db.Query(ctx, listDisks,
+		arg.HasCursor,
+		arg.CursorCreatedAt,
+		arg.CursorDiskID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Disk
+	for rows.Next() {
+		var i Disk
+		if err := rows.Scan(
+			&i.DiskID,
+			&i.Name,
+			&i.RootIno,
+			&i.MaxBytes,
+			&i.UsedBytes,
+			&i.UsedInodes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInodeXattrNames = `-- name: ListInodeXattrNames :many
 SELECT name
 FROM inode_xattrs

@@ -461,55 +461,98 @@ func TestModule_Lifecycle_OnStop(t *testing.T) {
 	})
 }
 
-func resolveTestDSN(t *testing.T) string {
-	t.Helper()
-	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN"} {
-		if val := os.Getenv(env); val != "" {
-			return val
+// resolveAndConnectTestDB 统一解析并连接 PostgreSQL 测试库，严格遵循显式环境变量配置故障硬失败契约。
+func resolveAndConnectTestDB(ctx context.Context, fatalf func(string, ...any), skipf func(string, ...any)) (*pgxpool.Pool, string) {
+	for _, envName := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN", "TEST_DB_DSN"} {
+		rawVal := strings.TrimSpace(os.Getenv(envName))
+		if rawVal != "" {
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			poolCfg, err := pgxpool.ParseConfig(rawVal)
+			if err != nil {
+				fatalf("显式指定的数据库 DSN (%s) 配置解析失败: %v", envName, err)
+				return nil, ""
+			}
+			pool, err := pgxpool.NewWithConfig(probeCtx, poolCfg)
+			if err != nil {
+				fatalf("显式指定的数据库 DSN (%s) 连接失败: %v", envName, err)
+				return nil, ""
+			}
+			if err := pool.Ping(probeCtx); err != nil {
+				pool.Close()
+				fatalf("显式指定的数据库 DSN (%s) 连接失败: %v", envName, err)
+				return nil, ""
+			}
+			return pool, rawVal
 		}
 	}
 
 	candidates := []string{
-		"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
-		"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@127.0.0.1:5432/bowl?sslmode=disable",
 	}
 
-	for _, candidate := range candidates {
-		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		pool, err := pgxpool.New(probeCtx, candidate)
+	for _, cand := range candidates {
+		probeCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+		poolCfg, err := pgxpool.ParseConfig(cand)
 		if err == nil {
-			pingErr := pool.Ping(probeCtx)
-			pool.Close()
-			cancel()
-			if pingErr == nil {
-				return candidate
+			pool, err := pgxpool.NewWithConfig(probeCtx, poolCfg)
+			if err == nil {
+				if pingErr := pool.Ping(probeCtx); pingErr == nil {
+					cancel()
+					return pool, cand
+				}
+				pool.Close()
 			}
-		} else {
-			cancel()
 		}
+		cancel()
 	}
 
-	return ""
+	if strings.TrimSpace(os.Getenv("BOWL_FORMAL_REQUIRE_DB")) == "1" {
+		fatalf("未探测到可用 PostgreSQL 实例 (9432/5432 均不可达) 且设置了 BOWL_FORMAL_REQUIRE_DB=1")
+		return nil, ""
+	}
+
+	skipf("跳过 PostgreSQL 测试 (未显式配置 DSN 且 127.0.0.1:9432 和 127.0.0.1:5432 均不可达)")
+	return nil, ""
+}
+
+func TestExplicitInvalidDSNFailsFast(t *testing.T) {
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN", "TEST_DB_DSN"} {
+		t.Setenv(env, "")
+	}
+	t.Setenv("STORAGE_TEST_DSN", "postgres://postgres:postgres@127.0.0.1:1/bowl?sslmode=disable&connect_timeout=1")
+
+	var fatalCalls, skipCalls int
+	fatalf := func(format string, args ...any) {
+		fatalCalls++
+	}
+	skipf := func(format string, args ...any) {
+		skipCalls++
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pool, _ := resolveAndConnectTestDB(ctx, fatalf, skipf)
+	if pool != nil {
+		pool.Close()
+	}
+
+	assert.Equal(t, 1, fatalCalls, "显式指定的非法 DSN 必须触发且仅触发 1 次 fatalf")
+	assert.Equal(t, 0, skipCalls, "显式指定的非法 DSN 严禁触发 skipf")
 }
 
 func TestModule_Lifecycle_PingSuccess(t *testing.T) {
-	dsn := resolveTestDSN(t)
-	if dsn == "" {
-		t.Skip("跳过成功探活测试: 未探测到可用的 PostgreSQL 实例 (5432 与 9432 均连接失败)")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	probePool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过成功探活测试: 连接 postgres 失败: %v", err)
+	probePool, dsn := resolveAndConnectTestDB(ctx, t.Fatalf, t.Skipf)
+	if probePool == nil {
+		return
 	}
-	defer probePool.Close()
-
-	if err := probePool.Ping(ctx); err != nil {
-		t.Skipf("跳过成功探活测试 (ping 失败): %v", err)
-	}
+	probePool.Close()
 
 	cfg := config.DBPoolConfig{
 		DSN: dsn,
@@ -530,7 +573,7 @@ func TestModule_Lifecycle_PingSuccess(t *testing.T) {
 	startCtx, startCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer startCancel()
 
-	err = app.Start(startCtx)
+	err := app.Start(startCtx)
 	require.NoError(t, err)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -576,21 +619,12 @@ func newTestUUID() pgtype.UUID {
 
 func setupTestDB(t *testing.T) (db.Store, *pgxpool.Pool) {
 	t.Helper()
-	dsn := resolveTestDSN(t)
-	if dsn == "" {
-		t.Skip("跳过 PostgreSQL 测试 (未探测到可用的 PostgreSQL 实例: 5432 与 9432 均连接失败)")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过 PostgreSQL 测试 (连接失败): %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("跳过 PostgreSQL 测试 (ping 失败): %v", err)
+	pool, _ := resolveAndConnectTestDB(ctx, t.Fatalf, t.Skipf)
+	if pool == nil {
+		return nil, nil
 	}
 
 	t.Cleanup(func() {

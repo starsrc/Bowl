@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1991,48 +1989,8 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 	})
 }
 
-func getStorageTestDSN() string {
-	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN"} {
-		if val := os.Getenv(env); val != "" {
-			return val
-		}
-	}
-
-	candidates := []string{
-		"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
-		"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
-	}
-
-	for _, candidate := range candidates {
-		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		pool, err := pgxpool.New(probeCtx, candidate)
-		if err == nil {
-			pingErr := pool.Ping(probeCtx)
-			pool.Close()
-			cancel()
-			if pingErr == nil {
-				return candidate
-			}
-		} else {
-			cancel()
-		}
-	}
-
-	return "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
-}
-
 func TestDeleteDisk_PostgresIntegration(t *testing.T) {
-	dsn := getStorageTestDSN()
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("跳过集成测试 (ping 失败): %v", err)
-	}
+	pool, ctx := setupMetaTestDB(t)
 
 	store := db.NewStore(pool)
 	mgr := meta.New(store)
@@ -2735,17 +2693,7 @@ func TestWriteOps_DeadlockRetry_Unit(t *testing.T) {
 }
 
 func TestCrossDisk_TopologyIsolation_PostgresIntegration(t *testing.T) {
-	dsn := getStorageTestDSN()
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("跳过集成测试 (ping 失败): %v", err)
-	}
+	pool, ctx := setupMetaTestDB(t)
 
 	store := db.NewStore(pool)
 	mgr := meta.New(store)
@@ -2892,21 +2840,7 @@ func TestCrossDisk_TopologyIsolation_PostgresIntegration(t *testing.T) {
 
 // TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock 验证 DeleteDisk 与并发 SetAttr 不得发生 PostgreSQL 40P01 死锁。
 func TestDisk_DeleteDiskVsSetAttr_ConcurrentNoDeadlock(t *testing.T) {
-	dsn := getStorageTestDSN()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
-		return
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("跳过集成测试: ping postgres 失败: %v", err)
-		return
-	}
+	pool, ctx := setupMetaTestDB(t)
 
 	store := db.NewStore(pool)
 	mgr := meta.New(store)
@@ -3210,29 +3144,11 @@ func TestDisk_UpdateDiskShrinkVsExpand_CriticalWatermarkConcurrency(t *testing.T
 }
 
 func TestListDisks_PostgresIntegration(t *testing.T) {
-	dsn := getStorageTestDSN()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Skipf("跳过集成测试: 连接 postgres 失败: %v", err)
-		return
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("跳过集成测试: ping postgres 失败: %v", err)
-		return
-	}
+	// 使用独立临时数据库验证全表分页，严禁在共享测试库无条件执行 DELETE FROM disks 污染其他并行测试
+	pool, ctx := setupIsolatedMetaTestDB(t, "bowl_list_disks_test")
 
 	store := db.NewStore(pool)
 	mgr := meta.New(store)
-
-	// 清理测试前可能残留的磁盘，隔离测试环境（使用事务或记录并在测试后清理，或先备份/清空）
-	// 为确保不影响或被已有数据干扰，先清空 disks 表并在测试结束时清理新建的数据
-	_, err = pool.Exec(ctx, "DELETE FROM disks")
-	require.NoError(t, err)
 
 	// 1. 空表查询
 	emptyRes, err := mgr.ListDisks(ctx, meta.ListDisksParams{PageSize: 10})
@@ -3258,13 +3174,18 @@ func TestListDisks_PostgresIntegration(t *testing.T) {
 		{id: "0192a3b4-c5d6-7e8f-9012-000000000005", name: "disk-newest", createdAt: newestTime},
 	}
 
+	var createdDiskIDs []string
 	var createdRootInos []int64
 	t.Cleanup(func() {
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanCancel()
-		_, _ = pool.Exec(cleanCtx, "DELETE FROM disks")
+		if len(createdDiskIDs) > 0 {
+			_, cleanErr := pool.Exec(cleanCtx, "DELETE FROM disks WHERE disk_id = ANY($1)", createdDiskIDs)
+			require.NoError(t, cleanErr)
+		}
 		if len(createdRootInos) > 0 {
-			_, _ = pool.Exec(cleanCtx, "DELETE FROM inodes WHERE ino = ANY($1)", createdRootInos)
+			_, cleanErr := pool.Exec(cleanCtx, "DELETE FROM inodes WHERE ino = ANY($1)", createdRootInos)
+			require.NoError(t, cleanErr)
 		}
 	})
 
@@ -3274,6 +3195,7 @@ func TestListDisks_PostgresIntegration(t *testing.T) {
 			MaxBytes: 1024 * 1024,
 		})
 		require.NoError(t, err)
+		createdDiskIDs = append(createdDiskIDs, item.id)
 		createdRootInos = append(createdRootInos, int64(d.RootIno))
 
 		_, err = pool.Exec(ctx, "UPDATE disks SET disk_id = $1, created_at = $2, updated_at = $2 WHERE disk_id = $3",

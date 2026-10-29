@@ -2,7 +2,10 @@ package meta_test
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +21,40 @@ import (
 // testSliceGCAdvisoryLockKey 是跨测试包隔离 slice_refs 全表 GC 与并发切片测试的固定 64 位 PostgreSQL 咨询锁键。
 const testSliceGCAdvisoryLockKey int64 = 0x424f574c5f474301
 
+// getStorageTestDSN 解析并返回测试 PostgreSQL DSN，供尚未迁移至 setupMetaTestDB 的包内历史测试文件调用。
+func getStorageTestDSN() string {
+	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN", "TEST_DB_DSN"} {
+		if val := strings.TrimSpace(os.Getenv(env)); val != "" {
+			return val
+		}
+	}
+
+	candidates := []string{
+		"postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable",
+		"postgres://postgres:postgres@127.0.0.1:5432/bowl?sslmode=disable",
+	}
+
+	for _, candidate := range candidates {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		pool, err := pgxpool.New(probeCtx, candidate)
+		if err == nil {
+			pingErr := pool.Ping(probeCtx)
+			pool.Close()
+			cancel()
+			if pingErr == nil {
+				return candidate
+			}
+		} else {
+			cancel()
+		}
+	}
+
+	return "postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable"
+}
+
 // resolveAndConnectTestDB 统一解析并连接 PostgreSQL 测试库，严格遵循显式环境变量配置故障硬失败契约。
 func resolveAndConnectTestDB(ctx context.Context, fatalf func(string, ...any), skipf func(string, ...any)) (*pgxpool.Pool, string) {
-	for _, envName := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "TEST_DB_DSN"} {
+	for _, envName := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN", "TEST_DB_DSN"} {
 		rawVal := strings.TrimSpace(os.Getenv(envName))
 		if rawVal != "" {
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -89,6 +123,72 @@ func setupMetaTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
 		pool.Close()
 	})
 	return pool, ctx
+}
+
+// setupIsolatedMetaTestDB 为需要验证全表扫描或空表分页的用例创建独立的临时数据库，
+// 自动应用全部迁移，并在测试结束时按 LIFO 顺序先关闭测试连接池、再强制销毁临时数据库。
+func setupIsolatedMetaTestDB(t *testing.T, prefix string) (*pgxpool.Pool, context.Context) {
+	t.Helper()
+	adminPool, ctx := setupMetaTestDB(t)
+
+	dbName := fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	_, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s;", dbName))
+	require.NoError(t, err, "创建独立临时数据库 %s 失败", dbName)
+
+	cfg := adminPool.Config().Copy()
+	cfg.ConnConfig.Database = dbName
+
+	isoPool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", dbName))
+		cancel()
+		require.NoError(t, err, "连接独立临时数据库 %s 失败", dbName)
+	}
+
+	// LIFO 顺序：先注册 DROP DATABASE（在 isoPool.Close 之后、adminPool.Close 之前执行）
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, dropErr := adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", dbName))
+		require.NoError(t, dropErr, "销毁独立临时数据库 %s 失败", dbName)
+	})
+
+	// 后注册 isoPool.Close()，使其在 DROP DATABASE 及所有更早注册的 t.Cleanup 之前或按序执行
+	t.Cleanup(func() {
+		isoPool.Close()
+	})
+
+	applyAllStorageMigrations(t, ctx, isoPool)
+	return isoPool, ctx
+}
+
+// applyAllStorageMigrations 读取并按文件名升序在目标连接池上执行 services/storage/db/migrations 下的全部 Up 迁移。
+func applyAllStorageMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	migrationsDir := "../../db/migrations"
+	entries, err := os.ReadDir(migrationsDir)
+	require.NoError(t, err, "读取迁移目录 %s 失败", migrationsDir)
+
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			files = append(files, e.Name())
+		}
+	}
+	slices.Sort(files)
+
+	for _, name := range files {
+		raw, err := os.ReadFile(filepath.Join(migrationsDir, name))
+		require.NoError(t, err, "读取迁移文件 %s 失败", name)
+		parts := strings.Split(string(raw), "-- +goose Down")
+		upPart := parts[0]
+		if idx := strings.Index(upPart, "-- +goose Up"); idx >= 0 {
+			upPart = upPart[idx+len("-- +goose Up"):]
+		}
+		_, err = pool.Exec(ctx, upPart)
+		require.NoError(t, err, "执行迁移 %s 失败", name)
+	}
 }
 
 // acquireTestSliceGCAdvisoryLock 在专用连接上获取全表 GC 咨询锁，测试退出时自动释放连接与锁。

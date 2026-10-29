@@ -12,53 +12,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// getBasePostgresDSN 获取连接 postgres 默认管理库的 DSN。
-func getBasePostgresDSN() (string, string) {
-	var rawDSN string
-	for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL"} {
-		if val := strings.TrimSpace(os.Getenv(env)); val != "" {
-			rawDSN = val
-			break
-		}
+// connectAdminPostgres 连接 postgres 默认管理库，遵循 resolveAndConnectTestDB 的显式 DSN 硬失败契约。
+func connectAdminPostgres(ctx context.Context, fatalf func(string, ...any), skipf func(string, ...any)) (*pgxpool.Pool, string, string) {
+	basePool, rawDSN := resolveAndConnectTestDB(ctx, fatalf, skipf)
+	if basePool == nil {
+		return nil, "", ""
 	}
+	basePool.Close()
 
-	if rawDSN == "" {
-		candidates := []string{
-			"postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable",
-			"postgres://postgres:postgres@localhost:5432/bowl?sslmode=disable",
-		}
-		for _, candidate := range candidates {
-			probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-			pool, err := pgxpool.New(probeCtx, candidate)
-			if err == nil {
-				pingErr := pool.Ping(probeCtx)
-				pool.Close()
-				cancel()
-				if pingErr == nil {
-					rawDSN = candidate
-					break
-				}
-			} else {
-				cancel()
-			}
-		}
-		if rawDSN == "" {
-			rawDSN = "postgres://postgres:postgres@localhost:9432/bowl?sslmode=disable"
-		}
-	}
-
-	u, err := url.Parse(rawDSN)
+	adminCfg, err := pgxpool.ParseConfig(rawDSN)
 	if err != nil {
-		return "postgres://postgres:postgres@localhost:9432/postgres?sslmode=disable", "localhost:9432"
+		fatalf("解析数据库 DSN %q 失败: %v", rawDSN, err)
+		return nil, "", ""
 	}
-	host := u.Host
-	u.Path = "/postgres"
-	return u.String(), host
+	host := fmt.Sprintf("%s:%d", adminCfg.ConnConfig.Host, adminCfg.ConnConfig.Port)
+	adminCfg.ConnConfig.Database = "postgres"
+
+	adminPool, err := pgxpool.NewWithConfig(ctx, adminCfg)
+	if err != nil {
+		fatalf("无法连接管理数据库 %s: %v", rawDSN, err)
+		return nil, "", ""
+	}
+	if err := adminPool.Ping(ctx); err != nil {
+		adminPool.Close()
+		fatalf("管理数据库 %s ping 失败: %v", rawDSN, err)
+		return nil, "", ""
+	}
+	return adminPool, rawDSN, host
 }
 
 // createUniqueTempDB 为迁移保真度测试创建独立的临时数据库并在测试结束时强制销毁。
@@ -67,31 +53,29 @@ func createUniqueTempDB(t *testing.T, prefix string) (*pgxpool.Pool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	adminDSN, host := getBasePostgresDSN()
-	adminPool, err := pgxpool.New(ctx, adminDSN)
-	if err != nil {
-		t.Skipf("无法连接管理数据库 %s: %v", adminDSN, err)
-	}
-
-	if err := adminPool.Ping(ctx); err != nil {
-		adminPool.Close()
-		t.Skipf("管理数据库 ping 失败: %v", err)
+	adminPool, rawDSN, _ := connectAdminPostgres(ctx, t.Fatalf, t.Skipf)
+	if adminPool == nil {
+		return nil, ""
 	}
 
 	dbName := fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
-	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s;", dbName))
+	_, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s;", dbName))
 	if err != nil {
 		adminPool.Close()
 		require.NoError(t, err, "创建独立临时数据库 %s 失败", dbName)
 	}
 
-	testDSN := fmt.Sprintf("postgres://postgres:postgres@%s/%s?sslmode=disable", host, dbName)
-	if u, parseErr := url.Parse(adminDSN); parseErr == nil {
-		u.Path = "/" + dbName
-		testDSN = u.String()
+	testCfg, err := pgxpool.ParseConfig(rawDSN)
+	if err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", dbName))
+		cleanupCancel()
+		adminPool.Close()
+		require.NoError(t, err, "解析测试数据库配置 %s 失败", dbName)
 	}
+	testCfg.ConnConfig.Database = dbName
 
-	testPool, err := pgxpool.New(ctx, testDSN)
+	testPool, err := pgxpool.NewWithConfig(ctx, testCfg)
 	if err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, _ = adminPool.Exec(cleanupCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE);", dbName))
@@ -904,4 +888,205 @@ func TestMigration_AddDiskIDToClientSessions_UpAndDown(t *testing.T) {
 	`).Scan(&idxExists)
 	require.NoError(t, err)
 	assert.False(t, idxExists, "Down 迁移后 idx_client_sessions_disk_expires 索引必须已被删除")
+}
+
+func quoteLibpqValue(v string) string {
+	escaped := strings.ReplaceAll(v, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
+}
+
+func buildTestURLDSN(host string, port uint16, user, password, dbName string) string {
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     fmt.Sprintf("%s:%d", host, port),
+		Path:     "/" + dbName,
+		RawQuery: "sslmode=disable",
+	}
+	return u.String()
+}
+
+func buildTestKeywordDSN(host string, port uint16, user, password, dbName string) string {
+	return fmt.Sprintf(
+		"host=%s port=%d dbname=%s user=%s password=%s sslmode=disable",
+		quoteLibpqValue(host),
+		port,
+		quoteLibpqValue(dbName),
+		quoteLibpqValue(user),
+		quoteLibpqValue(password),
+	)
+}
+
+// TestMigration_ConnectAdminAndCreateTempDB_URLAndKeywordDSN 验证 connectAdminPostgres 与 createUniqueTempDB
+// 对等价 URL DSN 与 libpq keyword/value DSN（host=... port=... dbname=...）均能正确解析、连接管理库并创建临时库，
+// 同时非法端口 DSN 仍保持硬失败。
+func TestMigration_ConnectAdminAndCreateTempDB_URLAndKeywordDSN(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	probePool, _ := resolveAndConnectTestDB(ctx, t.Fatalf, t.Skipf)
+	if probePool == nil {
+		return
+	}
+	baseCfg := probePool.Config().ConnConfig
+	host := baseCfg.Host
+	port := baseCfg.Port
+	user := baseCfg.User
+	password := baseCfg.Password
+	dbName := baseCfg.Database
+	probePool.Close()
+
+	urlDSN := buildTestURLDSN(host, port, user, password, dbName)
+	keywordDSN := buildTestKeywordDSN(host, port, user, password, dbName)
+
+	clearDSNEnvs := func(t *testing.T) {
+		for _, env := range []string{"STORAGE_TEST_DSN", "STORAGE_DB_DSN", "DATABASE_URL", "BOWL_TEST_POSTGRES_DSN", "TEST_DB_DSN"} {
+			t.Setenv(env, "")
+		}
+	}
+
+	t.Run("URL DSN 建库与查询保真", func(t *testing.T) {
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", urlDSN)
+
+		tempPool, tempDBName := createUniqueTempDB(t, "bowl_mig_url_dsn")
+		require.NotNil(t, tempPool)
+		var currentDB string
+		require.NoError(t, tempPool.QueryRow(ctx, "SELECT current_database()").Scan(&currentDB))
+		assert.Equal(t, tempDBName, currentDB)
+	})
+
+	t.Run("Keyword/Value DSN 建库与查询保真", func(t *testing.T) {
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", keywordDSN)
+
+		tempPool, tempDBName := createUniqueTempDB(t, "bowl_mig_kw_dsn")
+		require.NotNil(t, tempPool)
+		var currentDB string
+		require.NoError(t, tempPool.QueryRow(ctx, "SELECT current_database()").Scan(&currentDB))
+		assert.Equal(t, tempDBName, currentDB)
+	})
+
+	verifySpecialCredentialRoleAndDSNs := func(t *testing.T, creatorDSN string, dropPool *pgxpool.Pool, rolePrefix string) {
+		t.Helper()
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", creatorDSN)
+
+		creatorPool, _, _ := connectAdminPostgres(ctx, t.Fatalf, t.Skipf)
+		require.NotNil(t, creatorPool)
+		t.Cleanup(func() {
+			creatorPool.Close()
+		})
+
+		roleName := fmt.Sprintf("%s_%d", rolePrefix, time.Now().UnixNano())
+		specialPass := `r3 pass'word\test:@#?`
+		_, err := creatorPool.Exec(ctx, fmt.Sprintf(
+			"CREATE ROLE %s WITH LOGIN CREATEDB PASSWORD E%s",
+			pgx.Identifier{roleName}.Sanitize(),
+			quoteLibpqValue(specialPass),
+		))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanCancel()
+			_, dropErr := dropPool.Exec(cleanCtx, fmt.Sprintf("DROP ROLE IF EXISTS %s", pgx.Identifier{roleName}.Sanitize()))
+			require.NoError(t, dropErr)
+		})
+
+		specialURLDSN := buildTestURLDSN(host, port, roleName, specialPass, dbName)
+		specialKeywordDSN := buildTestKeywordDSN(host, port, roleName, specialPass, dbName)
+
+		t.Run("Special_URL_DSN", func(t *testing.T) {
+			clearDSNEnvs(t)
+			t.Setenv("STORAGE_TEST_DSN", specialURLDSN)
+			tempPool, tempDBName := createUniqueTempDB(t, "bowl_mig_sp_url")
+			require.NotNil(t, tempPool)
+			var currentDB, currentUser string
+			require.NoError(t, tempPool.QueryRow(ctx, "SELECT current_database(), current_user").Scan(&currentDB, &currentUser))
+			assert.Equal(t, tempDBName, currentDB)
+			assert.Equal(t, roleName, currentUser)
+		})
+
+		t.Run("Special_Keyword_DSN", func(t *testing.T) {
+			clearDSNEnvs(t)
+			t.Setenv("STORAGE_TEST_DSN", specialKeywordDSN)
+			tempPool, tempDBName := createUniqueTempDB(t, "bowl_mig_sp_kw")
+			require.NotNil(t, tempPool)
+			var currentDB, currentUser string
+			require.NoError(t, tempPool.QueryRow(ctx, "SELECT current_database(), current_user").Scan(&currentDB, &currentUser))
+			assert.Equal(t, tempDBName, currentDB)
+			assert.Equal(t, roleName, currentUser)
+		})
+	}
+
+	t.Run("含空格与特殊字符凭据的 URL 与 Keyword DSN 建库保真", func(t *testing.T) {
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", urlDSN)
+		adminPool, _, _ := connectAdminPostgres(ctx, t.Fatalf, t.Skipf)
+		require.NotNil(t, adminPool)
+		t.Cleanup(func() {
+			adminPool.Close()
+		})
+		verifySpecialCredentialRoleAndDSNs(t, urlDSN, adminPool, "bowl_r3_role")
+	})
+
+	t.Run("非超级用户角色（NOSUPERUSER）执行建库与特殊凭据保真", func(t *testing.T) {
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", urlDSN)
+
+		adminPool, _, _ := connectAdminPostgres(ctx, t.Fatalf, t.Skipf)
+		require.NotNil(t, adminPool)
+		t.Cleanup(func() {
+			adminPool.Close()
+		})
+
+		nonSuperAdminRole := fmt.Sprintf("bowl_r4_nonsuper_admin_%d", time.Now().UnixNano())
+		nonSuperAdminPass := "r4_nonsuper_pass"
+		_, err := adminPool.Exec(ctx, fmt.Sprintf(
+			"CREATE ROLE %s WITH LOGIN CREATEDB CREATEROLE NOSUPERUSER PASSWORD E%s",
+			pgx.Identifier{nonSuperAdminRole}.Sanitize(),
+			quoteLibpqValue(nonSuperAdminPass),
+		))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanCancel()
+			_, dropErr := adminPool.Exec(cleanCtx, fmt.Sprintf("DROP ROLE IF EXISTS %s", pgx.Identifier{nonSuperAdminRole}.Sanitize()))
+			require.NoError(t, dropErr)
+		})
+
+		nonSuperURLDSN := buildTestURLDSN(host, port, nonSuperAdminRole, nonSuperAdminPass, dbName)
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", nonSuperURLDSN)
+
+		nonSuperPool, _, _ := connectAdminPostgres(ctx, t.Fatalf, t.Skipf)
+		require.NotNil(t, nonSuperPool)
+		t.Cleanup(func() {
+			nonSuperPool.Close()
+		})
+
+		var isSuper bool
+		require.NoError(t, nonSuperPool.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&isSuper))
+		require.False(t, isSuper, "测试连接角色必须为非超级用户 NOSUPERUSER")
+
+		verifySpecialCredentialRoleAndDSNs(t, nonSuperURLDSN, adminPool, "bowl_r4_sub_role")
+	})
+
+	t.Run("非法端口 Keyword DSN 仍硬失败不跳过", func(t *testing.T) {
+		clearDSNEnvs(t)
+		t.Setenv("STORAGE_TEST_DSN", "host=127.0.0.1 port=1 dbname=bowl user=postgres password=postgres sslmode=disable connect_timeout=1")
+
+		var fatalCalls, skipCalls int
+		adminPool, _, _ := connectAdminPostgres(
+			ctx,
+			func(string, ...any) { fatalCalls++ },
+			func(string, ...any) { skipCalls++ },
+		)
+		if adminPool != nil {
+			adminPool.Close()
+		}
+		assert.Equal(t, 1, fatalCalls, "非法端口 Keyword DSN 必须触发 fatalf")
+		assert.Zero(t, skipCalls, "非法端口 Keyword DSN 严禁触发 skipf")
+	})
 }

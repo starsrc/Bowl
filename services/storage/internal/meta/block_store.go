@@ -148,12 +148,39 @@ func LocateBlocksWithBlockSize(sliceSize uint32, sliceOff uint32, reqLen uint32,
 	return locs, nil
 }
 
+// LocalFSBlockStoreOption 定义 LocalFSBlockStore 的可选配置项。
+type LocalFSBlockStoreOption func(*LocalFSBlockStore)
+
+// DirHandle 定义目录句柄持久化与关闭契约。
+type DirHandle interface {
+	Sync() error
+	Close() error
+}
+
+// WithOpenDirHook 注入打开目录句柄的钩子（默认调用 os.Open）。
+func WithOpenDirHook(fn func(dir string) (DirHandle, error)) LocalFSBlockStoreOption {
+	return func(s *LocalFSBlockStore) {
+		if fn != nil {
+			s.openDirFn = fn
+		}
+	}
+}
+
+type blockScanCursor struct {
+	lvl1 string
+	lvl2 string
+	file string
+}
+
 // LocalFSBlockStore 实现基于本地 NVMe SSD 文件系统的两级散列目录存储引擎。
 type LocalFSBlockStore struct {
 	dataDir         string
 	dirMu           sync.Mutex
 	syncedDirs      map[string]struct{}
 	pendingSyncDirs map[string]struct{}
+	openDirFn       func(dir string) (DirHandle, error)
+	scanMu          sync.Mutex
+	scanCursor      blockScanCursor
 }
 
 var (
@@ -162,12 +189,21 @@ var (
 )
 
 // NewLocalFSBlockStore 创建基于本地文件系统的 BlockStore 实例。
-func NewLocalFSBlockStore(dataDir string) *LocalFSBlockStore {
-	return &LocalFSBlockStore{
+func NewLocalFSBlockStore(dataDir string, opts ...LocalFSBlockStoreOption) *LocalFSBlockStore {
+	s := &LocalFSBlockStore{
 		dataDir:         dataDir,
 		syncedDirs:      make(map[string]struct{}),
 		pendingSyncDirs: make(map[string]struct{}),
+		openDirFn: func(dir string) (DirHandle, error) {
+			return os.Open(dir)
+		},
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // blockDir 计算指定 sliceID 对应的两级十六进制散列父目录路径。
@@ -192,8 +228,14 @@ func (s *LocalFSBlockStore) blockPath(sliceID uint64, blockIdx uint32, blockSize
 }
 
 // syncDir 打开指定目录并调用 Sync 将其目录项变更持久化至介质。
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
+func (s *LocalFSBlockStore) syncDir(dir string) error {
+	openFn := s.openDirFn
+	if openFn == nil {
+		openFn = func(d string) (DirHandle, error) {
+			return os.Open(d)
+		}
+	}
+	f, err := openFn(dir)
 	if err != nil {
 		return fmt.Errorf("%w: failed to open directory %s for sync: %v", ErrIO, dir, err)
 	}
@@ -302,7 +344,7 @@ func (s *LocalFSBlockStore) ensureDirSynced(targetDir string) error {
 		_, synced := s.syncedDirs[a]
 		_, pending := s.pendingSyncDirs[a]
 		if !synced || pending {
-			if err := syncDir(a); err != nil {
+			if err := s.syncDir(a); err != nil {
 				return err
 			}
 			delete(s.pendingSyncDirs, a)
@@ -367,7 +409,7 @@ func (s *LocalFSBlockStore) PutBlock(ctx context.Context, sliceID uint64, blockI
 
 	success = true
 
-	if err := syncDir(dir); err != nil {
+	if err := s.syncDir(dir); err != nil {
 		_ = os.Remove(finalPath)
 		return fmt.Errorf("%w: failed to sync chunk directory %s after rename: %v", ErrIO, dir, err)
 	}
@@ -426,14 +468,37 @@ func (s *LocalFSBlockStore) DeleteBlock(ctx context.Context, sliceID uint64, blo
 		return fmt.Errorf("%w: failed to remove block file %s: %v", ErrIO, finalPath, err)
 	}
 
-	if err := syncDir(filepath.Dir(finalPath)); err != nil {
+	if err := s.syncDir(filepath.Dir(finalPath)); err != nil {
 		return fmt.Errorf("%w: failed to sync directory after removing block file %s: %v", ErrIO, finalPath, err)
 	}
 
 	return nil
 }
 
+func compareBlockScanPos(l1, l2, f string, cur blockScanCursor) int {
+	if l1 != cur.lvl1 {
+		if l1 < cur.lvl1 {
+			return -1
+		}
+		return 1
+	}
+	if l2 != cur.lvl2 {
+		if l2 < cur.lvl2 {
+			return -1
+		}
+		return 1
+	}
+	if f != cur.file {
+		if f < cur.file {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
 // ListBlocksBefore 遍历 chunks 下的两级散列目录，收集修改时间早于 cutoff 的物理块文件。
+// 维护并发安全的跨批次扫描游标，有界扫描从上次位置之后继续推进并在到达目录树末尾时回绕，确保已引用前缀块不会饿死后续孤儿块。
 // 遇到早于 cutoff 的陈旧 .tmp_* 临时文件时一并清理；若 chunks 根目录不存在则直接返回 nil, nil。
 func (s *LocalFSBlockStore) ListBlocksBefore(ctx context.Context, cutoff time.Time, limit int) ([]PhysicalBlockFile, error) {
 	if err := ctx.Err(); err != nil {
@@ -449,84 +514,136 @@ func (s *LocalFSBlockStore) ListBlocksBefore(ctx context.Context, cutoff time.Ti
 		return nil, fmt.Errorf("%w: failed to read chunks root directory %s: %v", ErrIO, chunksRoot, err)
 	}
 
-	var result []PhysicalBlockFile
-	for _, e1 := range lvl1Entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if !e1.IsDir() {
-			continue
-		}
-		dir1 := filepath.Join(chunksRoot, e1.Name())
-		lvl2Entries, err := os.ReadDir(dir1)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return nil, fmt.Errorf("%w: failed to read hash bucket directory %s: %v", ErrIO, dir1, err)
-		}
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
 
-		for _, e2 := range lvl2Entries {
+	startCursor := s.scanCursor
+	hasCursor := limit > 0 && startCursor != (blockScanCursor{})
+
+	var result []PhysicalBlockFile
+	var lastVisited blockScanCursor
+
+	scanRange := func(afterStart bool, upToStart bool) error {
+		for _, e1 := range lvl1Entries {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return err
 			}
-			if !e2.IsDir() {
+			if !e1.IsDir() {
 				continue
 			}
-			dir2 := filepath.Join(dir1, e2.Name())
-			files, err := os.ReadDir(dir2)
+			l1Name := e1.Name()
+			if afterStart && l1Name < startCursor.lvl1 {
+				continue
+			}
+			if upToStart && l1Name > startCursor.lvl1 {
+				return nil
+			}
+
+			dir1 := filepath.Join(chunksRoot, l1Name)
+			lvl2Entries, err := os.ReadDir(dir1)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
-				return nil, fmt.Errorf("%w: failed to read block group directory %s: %v", ErrIO, dir2, err)
+				return fmt.Errorf("%w: failed to read hash bucket directory %s: %v", ErrIO, dir1, err)
 			}
 
-			for _, f := range files {
+			for _, e2 := range lvl2Entries {
 				if err := ctx.Err(); err != nil {
-					return nil, err
+					return err
 				}
-				if f.IsDir() {
+				if !e2.IsDir() {
 					continue
 				}
-				name := f.Name()
-				info, err := f.Info()
+				l2Name := e2.Name()
+				if afterStart && l1Name == startCursor.lvl1 && l2Name < startCursor.lvl2 {
+					continue
+				}
+				if upToStart && l1Name == startCursor.lvl1 && l2Name > startCursor.lvl2 {
+					return nil
+				}
+
+				dir2 := filepath.Join(dir1, l2Name)
+				files, err := os.ReadDir(dir2)
 				if err != nil {
 					if errors.Is(err, os.ErrNotExist) {
 						continue
 					}
-					return nil, fmt.Errorf("%w: failed to stat block file %s: %v", ErrIO, filepath.Join(dir2, name), err)
-				}
-				if !info.ModTime().Before(cutoff) {
-					continue
+					return fmt.Errorf("%w: failed to read block group directory %s: %v", ErrIO, dir2, err)
 				}
 
-				if strings.HasPrefix(name, ".tmp") {
-					_ = os.Remove(filepath.Join(dir2, name))
-					continue
-				}
+				for _, f := range files {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if f.IsDir() {
+						continue
+					}
+					name := f.Name()
+					cmp := compareBlockScanPos(l1Name, l2Name, name, startCursor)
+					if afterStart && cmp <= 0 {
+						continue
+					}
+					if upToStart && cmp > 0 {
+						return nil
+					}
 
-				parts := strings.Split(name, "_")
-				if len(parts) != 3 {
-					continue
-				}
-				sliceID, err1 := strconv.ParseUint(parts[0], 10, 64)
-				blockIdx64, err2 := strconv.ParseUint(parts[1], 10, 32)
-				blockSize64, err3 := strconv.ParseUint(parts[2], 10, 32)
-				if err1 != nil || err2 != nil || err3 != nil || sliceID == 0 {
-					continue
-				}
+					info, err := f.Info()
+					if err != nil {
+						if errors.Is(err, os.ErrNotExist) {
+							continue
+						}
+						return fmt.Errorf("%w: failed to stat block file %s: %v", ErrIO, filepath.Join(dir2, name), err)
+					}
+					if !info.ModTime().Before(cutoff) {
+						continue
+					}
 
-				result = append(result, PhysicalBlockFile{
-					SliceID:   sliceID,
-					BlockIdx:  uint32(blockIdx64),
-					BlockSize: uint32(blockSize64),
-					ModTime:   info.ModTime(),
-				})
-				if limit > 0 && len(result) >= limit {
-					return result, nil
+					if strings.HasPrefix(name, ".tmp") {
+						_ = os.Remove(filepath.Join(dir2, name))
+						continue
+					}
+
+					parts := strings.Split(name, "_")
+					if len(parts) != 3 {
+						continue
+					}
+					sliceID, err1 := strconv.ParseUint(parts[0], 10, 64)
+					blockIdx64, err2 := strconv.ParseUint(parts[1], 10, 32)
+					blockSize64, err3 := strconv.ParseUint(parts[2], 10, 32)
+					if err1 != nil || err2 != nil || err3 != nil || sliceID == 0 {
+						continue
+					}
+
+					result = append(result, PhysicalBlockFile{
+						SliceID:   sliceID,
+						BlockIdx:  uint32(blockIdx64),
+						BlockSize: uint32(blockSize64),
+						ModTime:   info.ModTime(),
+					})
+					lastVisited = blockScanCursor{lvl1: l1Name, lvl2: l2Name, file: name}
+					if limit > 0 && len(result) >= limit {
+						s.scanCursor = lastVisited
+						return nil
+					}
 				}
 			}
+		}
+		return nil
+	}
+
+	if err := scanRange(hasCursor, false); err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(result) >= limit {
+		return result, nil
+	}
+
+	// 已到达目录树末尾但尚未凑满 limit：游标回绕至起点，若本轮曾从中间游标启动则补齐前缀区间以保证单轮完整扫描
+	s.scanCursor = blockScanCursor{}
+	if hasCursor {
+		if err := scanRange(false, true); err != nil {
+			return nil, err
 		}
 	}
 

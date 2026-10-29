@@ -462,14 +462,30 @@ func TestManager_BlockStoreInjection(t *testing.T) {
 	})
 }
 
-func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("requires non-root user to enforce directory 0o300 read permission")
-	}
+type spyDirHandle struct {
+	file   *os.File
+	dir    string
+	onSync func(dir string, f *os.File) error
+}
 
+func (h *spyDirHandle) Sync() error {
+	if h.onSync != nil {
+		return h.onSync(h.dir, h.file)
+	}
+	return h.file.Sync()
+}
+
+func (h *spyDirHandle) Close() error {
+	return h.file.Close()
+}
+
+func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("PutBlock 原子 Rename 后必须对分片目录执行 dir.Sync", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("requires non-root user to enforce directory 0o300 read permission")
+		}
 		dataDir := t.TempDir()
 		store := meta.NewLocalFSBlockStore(dataDir)
 
@@ -501,6 +517,9 @@ func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
 	})
 
 	t.Run("DeleteBlock 删除实际存在的文件后必须对分片目录执行 dir.Sync", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("requires non-root user to enforce directory 0o300 read permission")
+		}
 		dataDir := t.TempDir()
 		store := meta.NewLocalFSBlockStore(dataDir)
 
@@ -523,16 +542,73 @@ func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
 		err := store.DeleteBlock(ctx, sliceID, blockIdx, blockSize)
 		require.Error(t, err, "DeleteBlock 必须在删除实际存在的文件后同步分片目录，无目录读权限时应报错 permission denied")
 	})
+
+	t.Run("PutBlock 与 DeleteBlock 实际调用目录 Sync 计数及 Sync 失败回滚清理断言", func(t *testing.T) {
+		dataDir := t.TempDir()
+		var syncedDirs []string
+		var failNextShardSync bool
+
+		shardDir := filepath.Join(dataDir, "chunks", "03", "0")
+		store := meta.NewLocalFSBlockStore(dataDir, meta.WithOpenDirHook(func(dir string) (meta.DirHandle, error) {
+			f, err := os.Open(dir)
+			if err != nil {
+				return nil, err
+			}
+			return &spyDirHandle{
+				file: f,
+				dir:  filepath.Clean(dir),
+				onSync: func(cleaned string, file *os.File) error {
+					syncedDirs = append(syncedDirs, cleaned)
+					if failNextShardSync && cleaned == filepath.Clean(shardDir) {
+						return errors.New("injected dir sync failure")
+					}
+					return file.Sync()
+				},
+			}, nil
+		}))
+
+		// 1. 首次写入 sliceID=3：应同步祖先目录（dataDir, chunks, chunks/03）以及 Rename 后的叶子目录 chunks/03/0
+		payload := []byte("hook-verified-payload")
+		require.NoError(t, store.PutBlock(ctx, 3, 0, payload))
+		require.Contains(t, syncedDirs, filepath.Clean(shardDir), "PutBlock 必须对叶子分片目录执行实际 Sync")
+
+		// 2. 同分片目录再次写入 sliceID=259：祖先目录已缓存，但 Rename 后仍必须对 shardDir 执行 1 次 Sync
+		syncedDirs = nil
+		require.NoError(t, store.PutBlock(ctx, 259, 0, payload))
+		assert.Equal(t, []string{filepath.Clean(shardDir)}, syncedDirs, "同分片目录后续 PutBlock 必须在 Rename 后精确执行 1 次分片目录 Sync")
+
+		// 3. 注入分片目录 Sync 失败：PutBlock 必须返回 ErrIO 并回滚删除已 Rename 的目标文件
+		syncedDirs = nil
+		failNextShardSync = true
+		err := store.PutBlock(ctx, 515, 0, payload)
+		require.ErrorIs(t, err, meta.ErrIO)
+		assert.Equal(t, []string{filepath.Clean(shardDir)}, syncedDirs)
+		rolledBackPath := filepath.Join(shardDir, fmt.Sprintf("515_0_%d", len(payload)))
+		_, statErr := os.Stat(rolledBackPath)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "目录 Sync 失败时必须回滚清理目标块文件")
+
+		// 4. 恢复正常后 DeleteBlock 删除已存在块：必须对 shardDir 执行 1 次 Sync
+		failNextShardSync = false
+		syncedDirs = nil
+		require.NoError(t, store.DeleteBlock(ctx, 3, 0, uint32(len(payload))))
+		assert.Equal(t, []string{filepath.Clean(shardDir)}, syncedDirs, "DeleteBlock 删除已存在块文件后必须精确执行 1 次分片目录 Sync")
+
+		// 5. DeleteBlock 删除已存在块但目录 Sync 失败：必须返回 ErrIO
+		syncedDirs = nil
+		failNextShardSync = true
+		delErr := store.DeleteBlock(ctx, 259, 0, uint32(len(payload)))
+		require.ErrorIs(t, delErr, meta.ErrIO)
+		assert.Equal(t, []string{filepath.Clean(shardDir)}, syncedDirs)
+	})
 }
 
 func TestLocalFSBlockStore_AncestorDirSyncBarrierAndRetry(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("跳过权限测试: root 用户忽略 POSIX 0o300 目录只写不可读限制")
-	}
-
 	ctx := context.Background()
 
 	t.Run("前次祖先目录 syncDir 失败遗留已创建子目录后同散列桶后续写入不得跳过祖先目录同步", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("跳过权限测试: root 用户忽略 POSIX 0o300 目录只写不可读限制")
+		}
 		dataDir := t.TempDir()
 		store := meta.NewLocalFSBlockStore(dataDir)
 

@@ -110,6 +110,8 @@ func executeDisk(args []string, stdout, stderr io.Writer) int {
 		return executeDiskCreate(args[1:], stdout, stderr)
 	case "get":
 		return executeDiskGet(args[1:], stdout, stderr)
+	case "update", "resize":
+		return executeDiskUpdate(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "错误: 未知 disk 子命令 \"%s\"\n\n%s", subcmd, diskUsageHelp)
 		return 2

@@ -39,6 +39,63 @@ func (_m *MockManager) EXPECT() *MockManager_Expecter {
 	return &MockManager_Expecter{mock: &_m.Mock}
 }
 
+// CloseSession provides a mock function for the type MockManager
+func (_mock *MockManager) CloseSession(ctx context.Context, sessionID uint64) error {
+	ret := _mock.Called(ctx, sessionID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CloseSession")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64) error); ok {
+		r0 = returnFunc(ctx, sessionID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockManager_CloseSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CloseSession'
+type MockManager_CloseSession_Call struct {
+	*mock.Call
+}
+
+// CloseSession is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sessionID uint64
+func (_e *MockManager_Expecter) CloseSession(ctx any, sessionID any) *MockManager_CloseSession_Call {
+	return &MockManager_CloseSession_Call{Call: _e.mock.On("CloseSession", ctx, sessionID)}
+}
+
+func (_c *MockManager_CloseSession_Call) Run(run func(ctx context.Context, sessionID uint64)) *MockManager_CloseSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_CloseSession_Call) Return(err error) *MockManager_CloseSession_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockManager_CloseSession_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64) error) *MockManager_CloseSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CollectGarbage provides a mock function for the type MockManager
 func (_mock *MockManager) CollectGarbage(ctx context.Context, limit int32) (int, error) {
 	ret := _mock.Called(ctx, limit)
@@ -1985,6 +2042,78 @@ func (_c *MockManager_RenewSession_Call) Return(time1 time.Time, err error) *Moc
 }
 
 func (_c *MockManager_RenewSession_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64) (time.Time, error)) *MockManager_RenewSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RenewSessionWithDisk provides a mock function for the type MockManager
+func (_mock *MockManager) RenewSessionWithDisk(ctx context.Context, sessionID uint64, diskID *string) (meta.RenewSessionResult, error) {
+	ret := _mock.Called(ctx, sessionID, diskID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RenewSessionWithDisk")
+	}
+
+	var r0 meta.RenewSessionResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, *string) (meta.RenewSessionResult, error)); ok {
+		return returnFunc(ctx, sessionID, diskID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, *string) meta.RenewSessionResult); ok {
+		r0 = returnFunc(ctx, sessionID, diskID)
+	} else {
+		r0 = ret.Get(0).(meta.RenewSessionResult)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uint64, *string) error); ok {
+		r1 = returnFunc(ctx, sessionID, diskID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManager_RenewSessionWithDisk_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RenewSessionWithDisk'
+type MockManager_RenewSessionWithDisk_Call struct {
+	*mock.Call
+}
+
+// RenewSessionWithDisk is a helper method to define mock.On call
+//   - ctx context.Context
+//   - sessionID uint64
+//   - diskID *string
+func (_e *MockManager_Expecter) RenewSessionWithDisk(ctx any, sessionID any, diskID any) *MockManager_RenewSessionWithDisk_Call {
+	return &MockManager_RenewSessionWithDisk_Call{Call: _e.mock.On("RenewSessionWithDisk", ctx, sessionID, diskID)}
+}
+
+func (_c *MockManager_RenewSessionWithDisk_Call) Run(run func(ctx context.Context, sessionID uint64, diskID *string)) *MockManager_RenewSessionWithDisk_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uint64
+		if args[1] != nil {
+			arg1 = args[1].(uint64)
+		}
+		var arg2 *string
+		if args[2] != nil {
+			arg2 = args[2].(*string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManager_RenewSessionWithDisk_Call) Return(renewSessionResult meta.RenewSessionResult, err error) *MockManager_RenewSessionWithDisk_Call {
+	_c.Call.Return(renewSessionResult, err)
+	return _c
+}
+
+func (_c *MockManager_RenewSessionWithDisk_Call) RunAndReturn(run func(ctx context.Context, sessionID uint64, diskID *string) (meta.RenewSessionResult, error)) *MockManager_RenewSessionWithDisk_Call {
 	_c.Call.Return(run)
 	return _c
 }

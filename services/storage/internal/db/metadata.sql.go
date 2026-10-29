@@ -413,6 +413,37 @@ func (q *Queries) DecrementInodeNlinkAndTouchCtime(ctx context.Context, ino int6
 	return i, err
 }
 
+const deleteClientSessionByID = `-- name: DeleteClientSessionByID :execrows
+WITH locked_target AS MATERIALIZED (
+    SELECT s.session_id
+    FROM client_sessions s
+    WHERE s.session_id = $1
+    FOR UPDATE OF s
+),
+purged_locks AS (
+    DELETE FROM file_locks
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+),
+purged_waiters AS (
+    DELETE FROM file_lock_waiters
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+),
+purged_handles AS (
+    DELETE FROM file_handles
+    WHERE session_id IN (SELECT session_id FROM locked_target)
+)
+DELETE FROM client_sessions
+WHERE session_id IN (SELECT session_id FROM locked_target)
+`
+
+func (q *Queries) DeleteClientSessionByID(ctx context.Context, sessionID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteClientSessionByID, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteDisk = `-- name: DeleteDisk :execrows
 DELETE FROM disks
 WHERE disk_id = $1
@@ -1930,8 +1961,8 @@ purged_handles AS (
     DELETE FROM file_handles
     WHERE session_id IN (SELECT session_id FROM expired_target)
 )
-INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at)
-SELECT $1, $2, ts.now, ts.now FROM ts
+INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at, disk_id)
+SELECT $1, $2, ts.now, ts.now, $3 FROM ts
 ON CONFLICT (session_id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
     created_at = CASE
@@ -1941,23 +1972,29 @@ SET expires_at = EXCLUDED.expires_at,
     updated_at = CASE
         WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN (SELECT now FROM ts)
         ELSE GREATEST((SELECT now FROM ts), client_sessions.created_at + interval '1 microsecond')
+    END,
+    disk_id = CASE
+        WHEN client_sessions.expires_at <= (SELECT now FROM ts) THEN EXCLUDED.disk_id
+        ELSE COALESCE(EXCLUDED.disk_id, client_sessions.disk_id)
     END
-RETURNING session_id, expires_at, updated_at, created_at
+RETURNING session_id, expires_at, updated_at, created_at, disk_id
 `
 
 type UpsertClientSessionParams struct {
 	SessionID int64              `json:"session_id"`
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	DiskID    pgtype.UUID        `json:"disk_id"`
 }
 
 func (q *Queries) UpsertClientSession(ctx context.Context, arg UpsertClientSessionParams) (ClientSession, error) {
-	row := q.db.QueryRow(ctx, upsertClientSession, arg.SessionID, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, upsertClientSession, arg.SessionID, arg.ExpiresAt, arg.DiskID)
 	var i ClientSession
 	err := row.Scan(
 		&i.SessionID,
 		&i.ExpiresAt,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.DiskID,
 	)
 	return i, err
 }

@@ -26,13 +26,15 @@ const (
 	DefaultMaxRetryBackoff     = 2 * time.Second
 )
 
-// StorageClient 抽象 StorageService 的 RenewSession RPC 契约。
+// StorageClient 抽象 StorageService 的 RenewSession 与 CloseSession RPC 契约。
 type StorageClient interface {
 	RenewSession(context.Context, *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error)
+	CloseSession(context.Context, *connect.Request[storagev1.CloseSessionRequest]) (*connect.Response[storagev1.CloseSessionResponse], error)
 }
 
 // Config 定义 ClientSession 生命周期的参数配置。
 type Config struct {
+	DiskID              string
 	MinInterval         time.Duration
 	MaxInterval         time.Duration
 	InitialRetryBackoff time.Duration
@@ -80,9 +82,7 @@ func New(ctx context.Context, client StorageClient, cfg Config) (*Manager, error
 		return nil, fmt.Errorf("generate initial session id: %w", err)
 	}
 
-	resp, err := client.RenewSession(ctx, connect.NewRequest(&storagev1.RenewSessionRequest{
-		SessionId: initialSID,
-	}))
+	resp, err := client.RenewSession(ctx, newRenewSessionRequest(initialSID, cfg.DiskID))
 	if err != nil {
 		return nil, fmt.Errorf("activate initial session: %w", err)
 	}
@@ -157,9 +157,7 @@ func (m *Manager) renewLoop(ctx context.Context) {
 		}
 
 		sid := m.currentSessionID.Load()
-		resp, err := m.client.RenewSession(ctx, connect.NewRequest(&storagev1.RenewSessionRequest{
-			SessionId: sid,
-		}))
+		resp, err := m.client.RenewSession(ctx, newRenewSessionRequest(sid, m.cfg.DiskID))
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -215,9 +213,7 @@ func (m *Manager) handleSessionExpired(ctx context.Context, oldSID uint64) {
 	// 激活新会话，遇到临时网络错误时以指数退避重试保活
 	backoff := m.cfg.InitialRetryBackoff
 	for {
-		resp, err := m.client.RenewSession(ctx, connect.NewRequest(&storagev1.RenewSessionRequest{
-			SessionId: newSID,
-		}))
+		resp, err := m.client.RenewSession(ctx, newRenewSessionRequest(newSID, m.cfg.DiskID))
 		if err == nil {
 			// 新会话激活成功，原子切换当前活跃会话 ID
 			m.currentSessionID.Store(newSID)
@@ -305,7 +301,7 @@ func (m *Manager) UnbindHandle(fh uint64) {
 	m.handleMu.Unlock()
 }
 
-// Close 优雅停止后台续期协程并释放资源。
+// Close 优雅停止后台续期协程并尽力注销当前活跃会话。
 func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
 		m.cancelLoop()
@@ -314,8 +310,31 @@ func (m *Manager) Close() error {
 			close(m.loopDone)
 		})
 		<-m.loopDone
+
+		if sid := m.currentSessionID.Load(); sid > 0 {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := m.client.CloseSession(closeCtx, connect.NewRequest(&storagev1.CloseSessionRequest{
+				SessionId: sid,
+			})); err != nil {
+				m.logger.Warn("close session failed on shutdown",
+					"session_id", sid,
+					"error", err,
+				)
+			}
+		}
 	})
 	return nil
+}
+
+func newRenewSessionRequest(sessionID uint64, diskID string) *connect.Request[storagev1.RenewSessionRequest] {
+	req := &storagev1.RenewSessionRequest{
+		SessionId: sessionID,
+	}
+	if diskID != "" {
+		req.DiskId = &diskID
+	}
+	return connect.NewRequest(req)
 }
 
 func normalizeConfig(cfg *Config) {

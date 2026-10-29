@@ -805,3 +805,103 @@ func TestMigration002_ArbitraryByteaRoundTripAndCollisionIsolation(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, rawNameB, gotName202, "parent 20 ino 202 名称必须保真还原为 rawNameB")
 }
+
+// TestMigration_AddDiskIDToClientSessions_UpAndDown 验证 20261029010000_add_disk_id_to_client_sessions.sql 的 Up 与 Down 往返正确性及 ON DELETE CASCADE 约束。
+func TestMigration_AddDiskIDToClientSessions_UpAndDown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_sess_disk")
+
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+		"20261017030000_create_inode_xattrs_table.sql",
+		"20261018000000_create_file_locks_tables.sql",
+		"20261018010000_add_session_id_to_file_handles.sql",
+		"20261019000000_align_juicefs_meta_foundation.sql",
+		"20261023000000_add_disks_and_inode_root_ino.sql",
+		"20261028000000_add_chunks_and_slice_refs.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	upSQL := extractGooseSection(t, "20261029010000_add_disk_id_to_client_sessions.sql", true)
+	downSQL := extractGooseSection(t, "20261029010000_add_disk_id_to_client_sessions.sql", false)
+
+	// 1. 执行 Up 迁移
+	require.NoError(t, runMigrationTxInPool(ctx, testPool, upSQL))
+
+	// 验证列与索引存在
+	var colExists, idxExists bool
+	err := testPool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'client_sessions' AND column_name = 'disk_id'
+		)
+	`).Scan(&colExists)
+	require.NoError(t, err)
+	assert.True(t, colExists, "Up 迁移后 client_sessions.disk_id 列必须存在")
+
+	err = testPool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE tablename = 'client_sessions' AND indexname = 'idx_client_sessions_disk_expires'
+		)
+	`).Scan(&idxExists)
+	require.NoError(t, err)
+	assert.True(t, idxExists, "Up 迁移后 idx_client_sessions_disk_expires 索引必须存在")
+
+	// 验证外键 ON DELETE CASCADE：删除磁盘时自动级联清理关联会话
+	diskID := "33333333-3333-7333-8333-333333333333"
+	_, err = testPool.Exec(ctx, `
+		INSERT INTO inodes (ino, parent_ino, mode, nlink, uid, gid, root_ino)
+		VALUES (100, 100, 16877, 2, 0, 0, 100);
+	`)
+	require.NoError(t, err)
+	_, err = testPool.Exec(ctx, `
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+		VALUES ($1, 'cascade-disk', 100, 104857600, 0, 1);
+	`, diskID)
+	require.NoError(t, err)
+	_, err = testPool.Exec(ctx, `
+		INSERT INTO client_sessions (session_id, expires_at, updated_at, created_at, disk_id)
+		VALUES (9001, clock_timestamp() + interval '10 minutes', clock_timestamp(), clock_timestamp(), $1);
+	`, diskID)
+	require.NoError(t, err)
+
+	_, err = testPool.Exec(ctx, `DELETE FROM disks WHERE disk_id = $1`, diskID)
+	require.NoError(t, err)
+
+	var sessCount int64
+	err = testPool.QueryRow(ctx, `SELECT count(*) FROM client_sessions WHERE session_id = 9001`).Scan(&sessCount)
+	require.NoError(t, err)
+	assert.Zero(t, sessCount, "删除磁盘时 ON DELETE CASCADE 必须自动删除关联的 client_sessions 记录")
+
+	// 2. 执行 Down 迁移
+	require.NoError(t, runMigrationTxInPool(ctx, testPool, downSQL))
+
+	err = testPool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'client_sessions' AND column_name = 'disk_id'
+		)
+	`).Scan(&colExists)
+	require.NoError(t, err)
+	assert.False(t, colExists, "Down 迁移后 client_sessions.disk_id 列必须已被删除")
+
+	err = testPool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE tablename = 'client_sessions' AND indexname = 'idx_client_sessions_disk_expires'
+		)
+	`).Scan(&idxExists)
+	require.NoError(t, err)
+	assert.False(t, idxExists, "Down 迁移后 idx_client_sessions_disk_expires 索引必须已被删除")
+}

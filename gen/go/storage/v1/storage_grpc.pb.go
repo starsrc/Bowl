@@ -52,6 +52,7 @@ const (
 	StorageService_SetLk_FullMethodName        = "/storage.v1.StorageService/SetLk"
 	StorageService_SetLkw_FullMethodName       = "/storage.v1.StorageService/SetLkw"
 	StorageService_RenewSession_FullMethodName = "/storage.v1.StorageService/RenewSession"
+	StorageService_CloseSession_FullMethodName = "/storage.v1.StorageService/CloseSession"
 	StorageService_CreateDisk_FullMethodName   = "/storage.v1.StorageService/CreateDisk"
 	StorageService_GetDisk_FullMethodName      = "/storage.v1.StorageService/GetDisk"
 	StorageService_UpdateDisk_FullMethodName   = "/storage.v1.StorageService/UpdateDisk"
@@ -243,8 +244,13 @@ type StorageServiceClient interface {
 	SetLkw(ctx context.Context, in *SetLkwRequest, opts ...grpc.CallOption) (*SetLkwResponse, error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(ctx context.Context, in *RenewSessionRequest, opts ...grpc.CallOption) (*RenewSessionResponse, error)
+	// CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标会话已不存在或已过期，按幂等成功返回。
+	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -609,6 +615,16 @@ func (c *storageServiceClient) RenewSession(ctx context.Context, in *RenewSessio
 	return out, nil
 }
 
+func (c *storageServiceClient) CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseSessionResponse)
+	err := c.cc.Invoke(ctx, StorageService_CloseSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *storageServiceClient) CreateDisk(ctx context.Context, in *CreateDiskRequest, opts ...grpc.CallOption) (*CreateDiskResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateDiskResponse)
@@ -843,8 +859,13 @@ type StorageServiceServer interface {
 	SetLkw(context.Context, *SetLkwRequest) (*SetLkwResponse, error)
 	// RenewSession 显式延长客户端会话租约有效期并顺带回收孤儿节点。
 	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若提供可选的 disk_id，将其绑定到该客户端会话；若关联磁盘不存在返回 NotFound (ENOENT)。
 	// 续期成功返回刷新后的租约截止时间 expires_at。
 	RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error)
+	// CloseSession 在客户端优雅卸载时即时注销指定会话租约，级联释放关联的文件句柄、文件锁并回收孤儿节点。
+	// 若 session_id 超出范围 (<= 0 或 > 9223372036854775807)，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// 若目标会话已不存在或已过期，按幂等成功返回。
+	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -977,6 +998,9 @@ func (UnimplementedStorageServiceServer) SetLkw(context.Context, *SetLkwRequest)
 }
 func (UnimplementedStorageServiceServer) RenewSession(context.Context, *RenewSessionRequest) (*RenewSessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RenewSession not implemented")
+}
+func (UnimplementedStorageServiceServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CloseSession not implemented")
 }
 func (UnimplementedStorageServiceServer) CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDisk not implemented")
@@ -1608,6 +1632,24 @@ func _StorageService_RenewSession_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_CloseSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).CloseSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_CloseSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).CloseSession(ctx, req.(*CloseSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StorageService_CreateDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateDiskRequest)
 	if err := dec(in); err != nil {
@@ -1836,6 +1878,10 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RenewSession",
 			Handler:    _StorageService_RenewSession_Handler,
+		},
+		{
+			MethodName: "CloseSession",
+			Handler:    _StorageService_CloseSession_Handler,
 		},
 		{
 			MethodName: "CreateDisk",

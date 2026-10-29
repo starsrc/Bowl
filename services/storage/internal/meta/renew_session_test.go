@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -1723,4 +1724,234 @@ func TestRenewSession_RowLockWaitAcrossExpiry_PurgesStaleLocksWaitersAndHandlesO
 	err = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1", int64(sessOther)).Scan(&otherWaitersCnt)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), otherWaitersCnt, "对照会话 sessOther 的等待者记录必须完整保留")
+}
+
+// TestRenewSessionWithDisk_And_CloseSession_Unit 验证 RenewSessionWithDisk 与 CloseSession 的静态校验、外键错误映射与事务异常传播。
+func TestRenewSessionWithDisk_And_CloseSession_Unit(t *testing.T) {
+	ctx := context.Background()
+	sessID := uint64(20086)
+	validDiskID := "11111111-1111-7111-8111-111111111111"
+
+	t.Run("RenewSessionWithDisk 入参静态校验拒绝非法 session_id 或非法/Nil disk_id", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		_, err := mgr.RenewSessionWithDisk(ctx, 0, &validDiskID)
+		require.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+		_, err = mgr.RenewSessionWithDisk(ctx, uint64(math.MaxInt64)+1, &validDiskID)
+		require.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+		emptyStr := ""
+		_, err = mgr.RenewSessionWithDisk(ctx, sessID, &emptyStr)
+		require.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+		badUUID := "not-a-uuid"
+		_, err = mgr.RenewSessionWithDisk(ctx, sessID, &badUUID)
+		require.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+		nilUUID := "00000000-0000-0000-0000-000000000000"
+		_, err = mgr.RenewSessionWithDisk(ctx, sessID, &nilUUID)
+		require.ErrorIs(t, err, meta.ErrInvalidArgument)
+	})
+
+	t.Run("RenewSessionWithDisk 遇到 PG 23503 外键冲突映射为 ErrNotFound", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		mgr := meta.New(mockStore)
+
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().
+			DeleteExpiredClientSessions(mock.Anything).
+			Return(int64(0), nil).
+			Once()
+
+		mockQuerier.EXPECT().
+			UpsertClientSession(mock.Anything, mock.MatchedBy(func(arg db.UpsertClientSessionParams) bool {
+				return arg.SessionID == int64(sessID) && arg.DiskID.Valid
+			})).
+			Return(db.ClientSession{}, &pgconn.PgError{Code: "23503"}).
+			Once()
+
+		_, err := mgr.RenewSessionWithDisk(ctx, sessID, &validDiskID)
+		require.ErrorIs(t, err, meta.ErrNotFound)
+	})
+
+	t.Run("CloseSession 入参静态校验与幂等/异常传播", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mgr := meta.New(mockStore)
+
+		require.ErrorIs(t, mgr.CloseSession(ctx, 0), meta.ErrInvalidArgument)
+		require.ErrorIs(t, mgr.CloseSession(ctx, uint64(math.MaxInt64)+1), meta.ErrInvalidArgument)
+
+		mockQuerier := dbmock.NewMockQuerier(t)
+		setupMockWriteTx(mockStore, mockQuerier)
+
+		mockQuerier.EXPECT().DeleteExpiredClientSessions(mock.Anything).Return(int64(0), nil).Once()
+		mockQuerier.EXPECT().DeleteClientSessionByID(mock.Anything, int64(sessID)).Return(int64(1), nil).Once()
+		mockQuerier.EXPECT().DeleteUnreferencedOrphanInodes(mock.Anything).Return(nil, nil).Once()
+
+		require.NoError(t, mgr.CloseSession(ctx, sessID))
+	})
+}
+
+// TestRenewSessionWithDisk_And_CloseSession_PostgresIntegration 在真实 PostgreSQL 上验证：
+// 1. RenewSessionWithDisk 首次绑定、活跃续租保留、跨期重建覆盖及不存在磁盘返回 ErrNotFound；
+// 2. CloseSession 即时删除目标会话、级联清理关联 file_handles / file_locks / file_lock_waiters、回收孤儿 Inode 并退还配额、唤醒阻塞 SetLkw 锁等待者，且不影响其他活跃会话。
+func TestRenewSessionWithDisk_And_CloseSession_PostgresIntegration(t *testing.T) {
+	pool := setupFormalPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	baseStore := db.NewStore(pool)
+	mgr := meta.New(baseStore, meta.WithSessionLeaseTTL(10*time.Second))
+
+	diskA, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-a-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	diskB, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
+		Name:     fmt.Sprintf("disk-b-%d", time.Now().UnixNano()),
+		MaxBytes: 100 * 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	sess1 := uint64(88501)
+	sess2 := uint64(88502)
+
+	t.Cleanup(func() {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanCancel()
+		_ = mgr.DeleteDisk(cleanCtx, diskA.DiskID)
+		_ = mgr.DeleteDisk(cleanCtx, diskB.DiskID)
+		_, _ = pool.Exec(cleanCtx, "DELETE FROM client_sessions WHERE session_id IN ($1, $2)", int64(sess1), int64(sess2))
+	})
+
+	// 1. 不存在的磁盘 UUID 触发外键冲突并映射为 meta.ErrNotFound
+	nonExistentDisk := "99999999-9999-7999-8999-999999999999"
+	_, err = mgr.RenewSessionWithDisk(ctx, sess1, &nonExistentDisk)
+	require.ErrorIs(t, err, meta.ErrNotFound)
+
+	// 2. 绑定 diskA 激活 sess1，绑定 diskB 激活 sess2
+	res1, err := mgr.RenewSessionWithDisk(ctx, sess1, &diskA.DiskID)
+	require.NoError(t, err)
+	assert.True(t, res1.SessionRecreated)
+
+	var gotDiskID string
+	err = pool.QueryRow(ctx, "SELECT disk_id::text FROM client_sessions WHERE session_id = $1", int64(sess1)).Scan(&gotDiskID)
+	require.NoError(t, err)
+	assert.Equal(t, diskA.DiskID, gotDiskID)
+
+	// 活跃状态下不传 disk_id 调用 RenewSessionWithStatus，保留原 diskA
+	res1Keep, err := mgr.RenewSessionWithStatus(ctx, sess1)
+	require.NoError(t, err)
+	assert.False(t, res1Keep.SessionRecreated)
+	err = pool.QueryRow(ctx, "SELECT disk_id::text FROM client_sessions WHERE session_id = $1", int64(sess1)).Scan(&gotDiskID)
+	require.NoError(t, err)
+	assert.Equal(t, diskA.DiskID, gotDiskID)
+
+	// 激活对照会话 sess2
+	_, err = mgr.RenewSessionWithDisk(ctx, sess2, &diskB.DiskID)
+	require.NoError(t, err)
+
+	// 3. 在 diskA 下由 sess1 创建常规文件并 Unlink 形成孤儿节点（但仍被 sess1 的句柄引用）
+	orphanCreate, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: diskA.RootIno,
+		Name:      []byte("orphan_on_close.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	orphanIno := orphanCreate.Inode.Ino
+	require.NoError(t, mgr.Unlink(ctx, diskA.RootIno, []byte("orphan_on_close.bin")))
+
+	// 4. 在 diskA 下创建共享文件 lock_target.bin，由 sess1 持有排他写锁，sess2 发起阻塞 SetLkw 等待
+	lockFile, err := mgr.Create(ctx, meta.CreateParams{
+		ParentIno: diskA.RootIno,
+		Name:      []byte("lock_target.bin"),
+		Mode:      meta.S_IFREG | 0o644,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess1,
+	})
+	require.NoError(t, err)
+	lockIno := lockFile.Inode.Ino
+	fh1 := lockFile.Fh
+
+	open2, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:       lockIno,
+		Flags:     meta.O_RDWR,
+		SessionID: &sess2,
+	})
+	require.NoError(t, err)
+	fh2 := open2.Fh
+
+	require.NoError(t, mgr.SetLk(ctx, meta.SetLkParams{
+		Ino:       lockIno,
+		Fh:        fh1,
+		LockOwner: 101,
+		SessionID: sess1,
+		Lk: meta.FileLock{
+			Start: 0,
+			End:   100,
+			Type:  meta.F_WRLCK,
+			PID:   1,
+		},
+	}))
+
+	setLkwErrCh := make(chan error, 1)
+	go func() {
+		setLkwErrCh <- mgr.SetLkw(ctx, meta.SetLkwParams{
+			Ino:       lockIno,
+			Fh:        fh2,
+			LockOwner: 202,
+			SessionID: sess2,
+			RequestID: 5001,
+			Lk: meta.FileLock{
+				Start: 0,
+				End:   100,
+				Type:  meta.F_WRLCK,
+				PID:   2,
+			},
+		})
+	}()
+
+	// 等待 sess2 进入 file_lock_waiters 排队
+	require.Eventually(t, func() bool {
+		var cnt int64
+		_ = pool.QueryRow(ctx, "SELECT count(*) FROM file_lock_waiters WHERE session_id = $1 AND request_id = 5001", int64(sess2)).Scan(&cnt)
+		return cnt == 1
+	}, 3*time.Second, 10*time.Millisecond)
+
+	// 5. 调用 CloseSession(sess1)：必须即时删除 sess1、释放其句柄与排他锁、回收孤儿节点 orphanIno，并唤醒 sess2 获得锁
+	require.NoError(t, mgr.CloseSession(ctx, sess1))
+
+	select {
+	case lkwErr := <-setLkwErrCh:
+		require.NoError(t, lkwErr, "CloseSession(sess1) 释放锁后必须立即唤醒阻塞的 SetLkw(sess2) 并成功获锁")
+	case <-time.After(3 * time.Second):
+		t.Fatal("CloseSession 后阻塞的 SetLkw 未在预期时间内被唤醒")
+	}
+
+	// 验证底表状态：sess1 及其句柄、锁已全部清空；orphanIno 已物理回收；sess2 仍然存活且持有新锁
+	var s1Cnt, s1FhCnt, s1LockCnt, orphanCnt, s2Cnt, s2LockCnt int64
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id = $1", int64(sess1)).Scan(&s1Cnt))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM file_handles WHERE session_id = $1", int64(sess1)).Scan(&s1FhCnt))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1", int64(sess1)).Scan(&s1LockCnt))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM inodes WHERE ino = $1", int64(orphanIno)).Scan(&orphanCnt))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM client_sessions WHERE session_id = $1", int64(sess2)).Scan(&s2Cnt))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM file_locks WHERE session_id = $1 AND ino = $2", int64(sess2), int64(lockIno)).Scan(&s2LockCnt))
+
+	assert.Zero(t, s1Cnt, "sess1 必须已从 client_sessions 中物理删除")
+	assert.Zero(t, s1FhCnt, "sess1 的 file_handles 必须已全部级联删除")
+	assert.Zero(t, s1LockCnt, "sess1 的 file_locks 必须已全部级联删除")
+	assert.Zero(t, orphanCnt, "孤儿节点 orphanIno 必须在 CloseSession 中被物理回收")
+	assert.Equal(t, int64(1), s2Cnt, "对照会话 sess2 必须完好保留")
+	assert.Equal(t, int64(1), s2LockCnt, "sess2 必须已成功获得 lockIno 的排他锁")
+
+	// 6. 重复调用 CloseSession(sess1) 必须幂等成功
+	require.NoError(t, mgr.CloseSession(ctx, sess1))
 }

@@ -106,7 +106,7 @@ func (_c *MockManager_CollectGarbage_Call) RunAndReturn(run func(ctx context.Con
 }
 
 // CompactChunk provides a mock function for the type MockManager
-func (_mock *MockManager) CompactChunk(ctx context.Context, ino uint64, indx uint32) error {
+func (_mock *MockManager) CompactChunk(ctx context.Context, ino uint64, indx int64) error {
 	ret := _mock.Called(ctx, ino, indx)
 
 	if len(ret) == 0 {
@@ -114,7 +114,7 @@ func (_mock *MockManager) CompactChunk(ctx context.Context, ino uint64, indx uin
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, uint32) error); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uint64, int64) error); ok {
 		r0 = returnFunc(ctx, ino, indx)
 	} else {
 		r0 = ret.Error(0)
@@ -130,12 +130,12 @@ type MockManager_CompactChunk_Call struct {
 // CompactChunk is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ino uint64
-//   - indx uint32
+//   - indx int64
 func (_e *MockManager_Expecter) CompactChunk(ctx any, ino any, indx any) *MockManager_CompactChunk_Call {
 	return &MockManager_CompactChunk_Call{Call: _e.mock.On("CompactChunk", ctx, ino, indx)}
 }
 
-func (_c *MockManager_CompactChunk_Call) Run(run func(ctx context.Context, ino uint64, indx uint32)) *MockManager_CompactChunk_Call {
+func (_c *MockManager_CompactChunk_Call) Run(run func(ctx context.Context, ino uint64, indx int64)) *MockManager_CompactChunk_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -145,9 +145,9 @@ func (_c *MockManager_CompactChunk_Call) Run(run func(ctx context.Context, ino u
 		if args[1] != nil {
 			arg1 = args[1].(uint64)
 		}
-		var arg2 uint32
+		var arg2 int64
 		if args[2] != nil {
-			arg2 = args[2].(uint32)
+			arg2 = args[2].(int64)
 		}
 		run(
 			arg0,
@@ -163,7 +163,7 @@ func (_c *MockManager_CompactChunk_Call) Return(err error) *MockManager_CompactC
 	return _c
 }
 
-func (_c *MockManager_CompactChunk_Call) RunAndReturn(run func(ctx context.Context, ino uint64, indx uint32) error) *MockManager_CompactChunk_Call {
+func (_c *MockManager_CompactChunk_Call) RunAndReturn(run func(ctx context.Context, ino uint64, indx int64) error) *MockManager_CompactChunk_Call {
 	_c.Call.Return(run)
 	return _c
 }

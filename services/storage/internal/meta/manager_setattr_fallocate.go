@@ -65,7 +65,7 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 	}
 
 	var result *Inode
-	var truncatedBorderIndx uint32
+	var truncatedBorderIndx int64
 	var truncatedOctetLen int64
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		truncatedOctetLen = 0
@@ -460,8 +460,8 @@ func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize i
 		return nil, nil
 	}
 
-	startIndx := uint32(punchStart / ChunkSize)
-	endIndx := uint32((punchEnd - 1) / ChunkSize)
+	startIndx := int64(punchStart / ChunkSize)
+	endIndx := int64((punchEnd - 1) / ChunkSize)
 
 	var stats []chunkAppendStat
 	for indx := startIndx; indx <= endIndx; indx++ {
@@ -485,7 +485,7 @@ func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize i
 		if cStart == 0 && cEnd == ChunkSize {
 			deletedSlices, err := q.DeleteChunk(ctx, db.DeleteChunkParams{
 				Ino:  ino,
-				Indx: int32(indx),
+				Indx: indx,
 			})
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -508,7 +508,7 @@ func punchHoleChunks(ctx context.Context, q db.Querier, ino int64, currentSize i
 			}
 			octetLen, err := q.AppendExistingChunkSlice(ctx, db.AppendExistingChunkSliceParams{
 				Ino:    ino,
-				Indx:   int32(indx),
+				Indx:   indx,
 				Slices: EncodeSlice(holeSlice),
 			})
 			if err != nil {

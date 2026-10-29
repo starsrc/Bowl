@@ -530,7 +530,7 @@ func TestSetAttr_TruncateNonZero_ResurrectPrevention_Read(t *testing.T) {
 				Atime:       expandedRow.Atime,
 				Mtime:       expandedRow.Mtime,
 				Ctime:       expandedRow.Ctime,
-				ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+				ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 				ChunkSlices: combinedSlicesBytes,
 			},
 		}, nil).
@@ -615,7 +615,7 @@ func TestTruncate_CrossChunkSharedSliceRefCountAndGCProtection_PostgresIntegrati
 	ino := uint64(fileRow.Ino)
 
 	t.Cleanup(func() {
-		for indx := int32(0); indx < 4; indx++ {
+		for indx := int64(0); indx < 4; indx++ {
 			chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(ino), Indx: indx})
 			if len(chunkRow.Slices) > 0 {
 				if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
@@ -733,4 +733,123 @@ func TestTruncate_CrossChunkSharedSliceRefCountAndGCProtection_PostgresIntegrati
 
 	_, err = store.GetSliceRef(ctx, int64(sharedSliceID))
 	assert.ErrorIs(t, err, pgx.ErrNoRows, "GC 回收后底表 slice_refs 记录必须彻底删除")
+}
+
+// TestTruncate_HighSparseChunkIndxBeyondInt32_PostgresIntegration 验证超过 128 PiB (indx >= 1<<31)
+// 的高稀疏偏移在 SetAttr 非零缩容截断时，borderIndx 保持 64 位精度，不因 int32 截断或回绕误删/污染低偏移 Chunk。
+func TestTruncate_HighSparseChunkIndxBeyondInt32_PostgresIntegration(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+	mgr := meta.New(store, meta.WithBlockStore(bs))
+
+	fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:  int32(meta.S_IFREG | 0o644),
+		Nlink: 1,
+		Uid:   1000,
+		Gid:   1000,
+	})
+	require.NoError(t, err)
+	ino := uint64(fileRow.Ino)
+
+	highIndx := int64(1) << 31 // 2147483648 (offset = 128 PiB = 1<<57)
+	highOffset := uint64(highIndx) * uint64(meta.ChunkSize)
+
+	t.Cleanup(func() {
+		for _, indx := range []int64{0, highIndx, highIndx + 1} {
+			chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(ino), Indx: indx})
+			if len(chunkRow.Slices) > 0 {
+				if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
+					for _, s := range slices {
+						if s.ID > 0 {
+							_ = store.DeleteSliceRef(context.Background(), int64(s.ID))
+						}
+					}
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(context.Background(), store, []int64{int64(ino)})
+		_ = store.DeleteInode(context.Background(), int64(ino))
+	})
+
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+	t.Cleanup(func() {
+		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: fh})
+	})
+
+	// 1. 在 Chunk 0 写入 4096 字节数据，在 highIndx 写入 4096 字节数据，在 highIndx+1 写入 4096 字节数据
+	lowData := bytes.Repeat([]byte("L"), 4096)
+	highData := bytes.Repeat([]byte("H"), 4096)
+	tailData := bytes.Repeat([]byte("T"), 4096)
+
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Data:   lowData,
+	})
+	require.NoError(t, err)
+
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Data:   highData,
+	})
+	require.NoError(t, err)
+
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset + uint64(meta.ChunkSize),
+		Data:   tailData,
+	})
+	require.NoError(t, err)
+
+	// 2. 截断到 highOffset + 2048（落在 highIndx 块内半块边界）：
+	// 应删除 indx > highIndx 的 highIndx+1，向 highIndx 追加 [2048, ChunkSize) 空洞切片，且绝不触碰 indx=0
+	truncSize := highOffset + 2048
+	_, err = mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+		Size: &truncSize,
+	})
+	require.NoError(t, err)
+
+	// 再次扩容到 highOffset + 4096 验证 highIndx 后半段已清零，而 indx=0 完全未受损
+	reExpandSize := highOffset + 4096
+	_, err = mgr.SetAttr(ctx, ino, meta.SetAttrInput{
+		Size: &reExpandSize,
+	})
+	require.NoError(t, err)
+
+	readLow, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Size:   4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, lowData, readLow.Data, "高偏移截断绝不能因 32 位回绕污染 indx=0 的数据")
+
+	readHigh, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Size:   4096,
+	})
+	require.NoError(t, err)
+	expectedHigh := append(append([]byte(nil), highData[:2048]...), make([]byte, 2048)...)
+	assert.Equal(t, expectedHigh, readHigh.Data, "highIndx 截断点前 2048B 保留、后 2048B 必须为 0x00")
+
+	_, err = store.GetChunk(ctx, db.GetChunkParams{Ino: int64(ino), Indx: highIndx + 1})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "highIndx+1 的块必须已被删除")
 }

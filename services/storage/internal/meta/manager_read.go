@@ -75,10 +75,10 @@ func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, er
 
 	var resp *ReadResponse
 	err := m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
-		startIndx := int32(req.Offset / ChunkSize)
+		startIndx := int64(req.Offset / ChunkSize)
 		endIndx := startIndx
 		if req.Size > 0 {
-			endIndx = int32((req.Offset + uint64(req.Size) - 1) / ChunkSize)
+			endIndx = int64((req.Offset + uint64(req.Size) - 1) / ChunkSize)
 		}
 
 		rows, err := q.GetInodeSizeAndChunksInRange(ctx, db.GetInodeSizeAndChunksInRangeParams{
@@ -132,7 +132,7 @@ func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, er
 		}
 
 		type chunkPlan struct {
-			indx      uint32
+			indx      int64
 			slices    []Slice
 			bufOffset uint32
 			readStart uint32
@@ -175,13 +175,13 @@ func (m *manager) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, er
 
 			actualStart := req.Offset
 			actualEnd := req.Offset + uint64(readLen)
-			actualStartIndx := uint32(actualStart / ChunkSize)
-			actualEndIndx := uint32((actualEnd - 1) / ChunkSize)
+			actualStartIndx := int64(actualStart / ChunkSize)
+			actualEndIndx := int64((actualEnd - 1) / ChunkSize)
 
-			chunksMap := make(map[uint32][]byte)
+			chunksMap := make(map[int64][]byte)
 			for _, r := range currentRows {
 				if r.ChunkIndx.Valid {
-					chunksMap[uint32(r.ChunkIndx.Int32)] = r.ChunkSlices
+					chunksMap[r.ChunkIndx.Int64] = r.ChunkSlices
 				}
 			}
 

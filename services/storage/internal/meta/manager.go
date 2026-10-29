@@ -82,14 +82,14 @@ type Manager interface {
 	StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 	Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error)
 	Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error)
-	CompactChunk(ctx context.Context, ino uint64, indx uint32) error
+	CompactChunk(ctx context.Context, ino uint64, indx int64) error
 	CollectGarbage(ctx context.Context, limit int32) (int, error)
 	StartGCWorker(ctx context.Context, interval time.Duration, batchLimit int32)
 }
 
 type chunkKey struct {
 	ino  uint64
-	indx uint32
+	indx int64
 }
 
 type dirCursorKey struct {
@@ -130,6 +130,7 @@ type manager struct {
 	sessionLeaseTTL       time.Duration
 	gcInterval            time.Duration
 	gcBatchLimit          int32
+	gcOrphanGracePeriod   time.Duration
 	compactSliceThreshold int
 	inFlightCompactsMu    sync.Mutex
 	inFlightCompacts      map[chunkKey]bool
@@ -256,6 +257,15 @@ func WithGCBatchLimit(limit int32) Option {
 	}
 }
 
+// WithGCOrphanGracePeriod 配置后台 GC 扫描未在 slice_refs 登记的孤儿物理块文件的安全宽限期（d > 0 时生效，默认 DefaultGCOrphanGracePeriod）。
+func WithGCOrphanGracePeriod(d time.Duration) Option {
+	return func(m *manager) {
+		if d > 0 {
+			m.gcOrphanGracePeriod = d
+		}
+	}
+}
+
 // New 创建 Manager 实例。
 func New(store db.Store, opts ...Option) Manager {
 	m := &manager{
@@ -266,6 +276,7 @@ func New(store db.Store, opts ...Option) Manager {
 		sessionLeaseTTL:       DefaultSessionLeaseTTL,
 		gcInterval:            DefaultGCInterval,
 		gcBatchLimit:          DefaultGCBatchLimit,
+		gcOrphanGracePeriod:   DefaultGCOrphanGracePeriod,
 		compactSliceThreshold: CompactSliceThreshold,
 		inFlightCompacts:      make(map[chunkKey]bool),
 		lockNotifyChans:       make(map[uint64]*lockNotifyEntry),

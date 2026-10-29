@@ -119,7 +119,7 @@ func TestFallocatePunchHole_LocalChunk_ReadHoleZero(t *testing.T) {
 				Atime:       fileRow.Atime,
 				Mtime:       fileRow.Mtime,
 				Ctime:       fileRow.Ctime,
-				ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+				ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 				ChunkSlices: combinedSlices,
 			},
 		}, nil).
@@ -304,7 +304,7 @@ func TestFallocatePunchHole_CrossChunkBoundary_ReadHoleZero(t *testing.T) {
 				Atime:       fileRow.Atime,
 				Mtime:       fileRow.Mtime,
 				Ctime:       fileRow.Ctime,
-				ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+				ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 				ChunkSlices: chunk0Slices,
 			},
 			{
@@ -314,7 +314,7 @@ func TestFallocatePunchHole_CrossChunkBoundary_ReadHoleZero(t *testing.T) {
 				Atime:       fileRow.Atime,
 				Mtime:       fileRow.Mtime,
 				Ctime:       fileRow.Ctime,
-				ChunkIndx:   pgtype.Int4{Int32: 1, Valid: true},
+				ChunkIndx:   pgtype.Int8{Int64: 1, Valid: true},
 				ChunkSlices: chunk1Slices,
 			},
 		}, nil).
@@ -729,4 +729,110 @@ func TestFallocatePunchHole_SparseAndOutOfBound_NoExtraChunks(t *testing.T) {
 		require.NoError(t, err)
 		mockQuerier.AssertNotCalled(t, "AddSliceRefCount", mock.Anything, mock.Anything)
 	})
+}
+
+// TestFallocatePunchHole_HighSparseChunkIndxBeyondInt32_PostgresIntegration 验证在超过 128 PiB
+// (indx >= 1<<31) 的高稀疏偏移处执行 Fallocate 打洞时，startIndx/endIndx 保持 64 位精度，
+// 精确清理或打洞目标高偏移 Chunk，不因 32 位截断回绕误删 indx=0 数据。
+func TestFallocatePunchHole_HighSparseChunkIndxBeyondInt32_PostgresIntegration(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+	mgr := meta.New(store, meta.WithBlockStore(bs))
+
+	fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:  int32(meta.S_IFREG | 0o644),
+		Nlink: 1,
+		Uid:   1000,
+		Gid:   1000,
+	})
+	require.NoError(t, err)
+	ino := uint64(fileRow.Ino)
+
+	highIndx := int64(1) << 31 // 2147483648 (offset = 128 PiB = 1<<57)
+	highOffset := uint64(highIndx) * uint64(meta.ChunkSize)
+
+	t.Cleanup(func() {
+		for _, indx := range []int64{0, highIndx} {
+			chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(ino), Indx: indx})
+			if len(chunkRow.Slices) > 0 {
+				if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
+					for _, s := range slices {
+						if s.ID > 0 {
+							_ = store.DeleteSliceRef(context.Background(), int64(s.ID))
+						}
+					}
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(context.Background(), store, []int64{int64(ino)})
+		_ = store.DeleteInode(context.Background(), int64(ino))
+	})
+
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+	t.Cleanup(func() {
+		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: fh})
+	})
+
+	lowData := bytes.Repeat([]byte("L"), 4096)
+	highData := bytes.Repeat([]byte("H"), 4096)
+
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Data:   lowData,
+	})
+	require.NoError(t, err)
+
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Data:   highData,
+	})
+	require.NoError(t, err)
+
+	// 在 highOffset + 1024 处打洞 2048 字节
+	err = mgr.Fallocate(ctx, meta.FallocateParams{
+		Ino:    ino,
+		Fh:     fh,
+		Mode:   meta.FallocFlPunchHole | meta.FallocFlKeepSize,
+		Offset: highOffset + 1024,
+		Length: 2048,
+	})
+	require.NoError(t, err)
+
+	// 验证 indx=0 完好无损
+	readLow, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Size:   4096,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, lowData, readLow.Data, "高偏移打洞绝不能因 32 位回绕污染 indx=0 的数据")
+
+	// 验证 highIndx 中间 [1024, 3072) 已变为 0x00，首尾各 1024B 仍为 'H'
+	readHigh, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Size:   4096,
+	})
+	require.NoError(t, err)
+	expectedHigh := make([]byte, 4096)
+	copy(expectedHigh[0:1024], highData[0:1024])
+	copy(expectedHigh[3072:4096], highData[3072:4096])
+	assert.Equal(t, expectedHigh, readHigh.Data, "highIndx 打洞区间 [1024, 3072) 必须读零")
 }

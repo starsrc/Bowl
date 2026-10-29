@@ -498,7 +498,7 @@ func TestUnlink_Rename_Chunks_Integration(t *testing.T) {
 			rows.Close()
 
 			for _, cIno := range childInos {
-				for indx := int32(0); indx < 16; indx++ {
+				for indx := int64(0); indx < 16; indx++ {
 					cRow, _ := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: cIno, Indx: indx})
 					if len(cRow.Slices) > 0 {
 						if sls, dErr := meta.DecodeSlices(cRow.Slices); dErr == nil {

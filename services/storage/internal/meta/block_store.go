@@ -7,8 +7,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
+
+// PhysicalBlockFile 描述本地物理块存储介质上的单个物理块文件元数据。
+type PhysicalBlockFile struct {
+	SliceID   uint64
+	BlockIdx  uint32
+	BlockSize uint32
+	ModTime   time.Time
+}
+
+// BlockLister 定义物理块存储引擎可选实现的存量块扫描接口，用于后台 GC 孤儿块对账回收。
+type BlockLister interface {
+	// ListBlocksBefore 扫描并返回修改时间严格早于 cutoff 的物理块文件列表（当 limit > 0 时最多返回 limit 条）。
+	ListBlocksBefore(ctx context.Context, cutoff time.Time, limit int) ([]PhysicalBlockFile, error)
+}
 
 // BlockStore 定义不可变数据块物理持久化接口。
 type BlockStore interface {
@@ -133,18 +150,23 @@ func LocateBlocksWithBlockSize(sliceSize uint32, sliceOff uint32, reqLen uint32,
 
 // LocalFSBlockStore 实现基于本地 NVMe SSD 文件系统的两级散列目录存储引擎。
 type LocalFSBlockStore struct {
-	dataDir    string
-	dirMu      sync.Mutex
-	syncedDirs map[string]struct{}
+	dataDir         string
+	dirMu           sync.Mutex
+	syncedDirs      map[string]struct{}
+	pendingSyncDirs map[string]struct{}
 }
 
-var _ BlockStore = (*LocalFSBlockStore)(nil)
+var (
+	_ BlockStore  = (*LocalFSBlockStore)(nil)
+	_ BlockLister = (*LocalFSBlockStore)(nil)
+)
 
 // NewLocalFSBlockStore 创建基于本地文件系统的 BlockStore 实例。
 func NewLocalFSBlockStore(dataDir string) *LocalFSBlockStore {
 	return &LocalFSBlockStore{
-		dataDir:    dataDir,
-		syncedDirs: make(map[string]struct{}),
+		dataDir:         dataDir,
+		syncedDirs:      make(map[string]struct{}),
+		pendingSyncDirs: make(map[string]struct{}),
 	}
 }
 
@@ -191,11 +213,14 @@ func (s *LocalFSBlockStore) ensureDirSynced(targetDir string) error {
 	if s.syncedDirs == nil {
 		s.syncedDirs = make(map[string]struct{})
 	}
+	if s.pendingSyncDirs == nil {
+		s.pendingSyncDirs = make(map[string]struct{})
+	}
 
 	cleanBase := filepath.Clean(s.dataDir)
 	cleanTarget := filepath.Clean(targetDir)
 
-	if _, ok := s.syncedDirs[cleanTarget]; ok {
+	if _, ok := s.syncedDirs[cleanTarget]; ok && len(s.pendingSyncDirs) == 0 {
 		fi, err := os.Stat(cleanTarget)
 		if err == nil {
 			if fi.IsDir() {
@@ -240,14 +265,31 @@ func (s *LocalFSBlockStore) ensureDirSynced(targetDir string) error {
 			if statErr != nil || !fi.IsDir() {
 				return fmt.Errorf("%w: path %s already exists and is not a directory: %v", ErrIO, d, statErr)
 			}
+		} else {
+			parentDir := filepath.Dir(d)
+			if parentDir != d {
+				delete(s.syncedDirs, parentDir)
+				s.pendingSyncDirs[parentDir] = struct{}{}
+			}
+			if d != cleanTarget {
+				delete(s.syncedDirs, d)
+				s.pendingSyncDirs[d] = struct{}{}
+			}
 		}
 	}
 
 	leafParent := filepath.Dir(cleanTarget)
 	var ancestorsToSync []string
+	reachedBase := false
 	for a := leafParent; ; a = filepath.Dir(a) {
-		ancestorsToSync = append(ancestorsToSync, a)
-		if a == cleanBase || a == filepath.Dir(a) {
+		if a == cleanBase {
+			reachedBase = true
+		}
+		_, pending := s.pendingSyncDirs[a]
+		if !reachedBase || a == cleanBase || pending {
+			ancestorsToSync = append(ancestorsToSync, a)
+		}
+		if a == filepath.Dir(a) {
 			break
 		}
 	}
@@ -257,14 +299,18 @@ func (s *LocalFSBlockStore) ensureDirSynced(targetDir string) error {
 	}
 
 	for _, a := range ancestorsToSync {
-		if _, synced := s.syncedDirs[a]; !synced {
+		_, synced := s.syncedDirs[a]
+		_, pending := s.pendingSyncDirs[a]
+		if !synced || pending {
 			if err := syncDir(a); err != nil {
 				return err
 			}
+			delete(s.pendingSyncDirs, a)
 			s.syncedDirs[a] = struct{}{}
 		}
 	}
 
+	delete(s.pendingSyncDirs, cleanTarget)
 	s.syncedDirs[cleanTarget] = struct{}{}
 	return nil
 }
@@ -385,4 +431,104 @@ func (s *LocalFSBlockStore) DeleteBlock(ctx context.Context, sliceID uint64, blo
 	}
 
 	return nil
+}
+
+// ListBlocksBefore 遍历 chunks 下的两级散列目录，收集修改时间早于 cutoff 的物理块文件。
+// 遇到早于 cutoff 的陈旧 .tmp_* 临时文件时一并清理；若 chunks 根目录不存在则直接返回 nil, nil。
+func (s *LocalFSBlockStore) ListBlocksBefore(ctx context.Context, cutoff time.Time, limit int) ([]PhysicalBlockFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	chunksRoot := filepath.Join(s.dataDir, "chunks")
+	lvl1Entries, err := os.ReadDir(chunksRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: failed to read chunks root directory %s: %v", ErrIO, chunksRoot, err)
+	}
+
+	var result []PhysicalBlockFile
+	for _, e1 := range lvl1Entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !e1.IsDir() {
+			continue
+		}
+		dir1 := filepath.Join(chunksRoot, e1.Name())
+		lvl2Entries, err := os.ReadDir(dir1)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("%w: failed to read hash bucket directory %s: %v", ErrIO, dir1, err)
+		}
+
+		for _, e2 := range lvl2Entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !e2.IsDir() {
+				continue
+			}
+			dir2 := filepath.Join(dir1, e2.Name())
+			files, err := os.ReadDir(dir2)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, fmt.Errorf("%w: failed to read block group directory %s: %v", ErrIO, dir2, err)
+			}
+
+			for _, f := range files {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if f.IsDir() {
+					continue
+				}
+				name := f.Name()
+				info, err := f.Info()
+				if err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						continue
+					}
+					return nil, fmt.Errorf("%w: failed to stat block file %s: %v", ErrIO, filepath.Join(dir2, name), err)
+				}
+				if !info.ModTime().Before(cutoff) {
+					continue
+				}
+
+				if strings.HasPrefix(name, ".tmp") {
+					_ = os.Remove(filepath.Join(dir2, name))
+					continue
+				}
+
+				parts := strings.Split(name, "_")
+				if len(parts) != 3 {
+					continue
+				}
+				sliceID, err1 := strconv.ParseUint(parts[0], 10, 64)
+				blockIdx64, err2 := strconv.ParseUint(parts[1], 10, 32)
+				blockSize64, err3 := strconv.ParseUint(parts[2], 10, 32)
+				if err1 != nil || err2 != nil || err3 != nil || sliceID == 0 {
+					continue
+				}
+
+				result = append(result, PhysicalBlockFile{
+					SliceID:   sliceID,
+					BlockIdx:  uint32(blockIdx64),
+					BlockSize: uint32(blockSize64),
+					ModTime:   info.ModTime(),
+				})
+				if limit > 0 && len(result) >= limit {
+					return result, nil
+				}
+			}
+		}
+	}
+
+	return result, nil
 }

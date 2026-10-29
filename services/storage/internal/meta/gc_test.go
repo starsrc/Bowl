@@ -242,6 +242,56 @@ func TestCollectGarbage_Unit(t *testing.T) {
 		assert.ErrorIs(t, err, dbErr)
 		assert.Equal(t, 0, reclaimed)
 	})
+
+	t.Run("WithGCOrphanGracePeriod 自定义安全宽限期对账回收单元测试", func(t *testing.T) {
+		mockStore := dbmock.NewMockStore(t)
+		mockQuerier := dbmock.NewMockQuerier(t)
+		dataDir := t.TempDir()
+		localBS := meta.NewLocalFSBlockStore(dataDir)
+		customGrace := 10 * time.Minute
+		mgr := meta.New(mockStore, meta.WithBlockStore(localBS), meta.WithGCOrphanGracePeriod(customGrace))
+
+		setupMockWriteTx(mockStore, mockQuerier)
+		mockQuerier.EXPECT().
+			ListGarbageSliceRefs(mock.Anything, int32(20)).
+			Return(nil, nil).
+			Once()
+
+		// 写入 3 个物理块：
+		// 1) slice 501: mtime 15 分钟前（超过 10 分钟宽限期），在 slice_refs 中无记录 -> 应被删除
+		// 2) slice 502: mtime 5 分钟前（未超过 10 分钟宽限期），在 slice_refs 中无记录 -> 保留
+		// 3) slice 503: mtime 15 分钟前（超过 10 分钟宽限期），但在 slice_refs 中已登记 refs=1 -> 保留
+		require.NoError(t, localBS.PutBlock(ctx, 501, 0, []byte("orphan-old")))
+		require.NoError(t, localBS.PutBlock(ctx, 502, 0, []byte("in-flight-fresh")))
+		require.NoError(t, localBS.PutBlock(ctx, 503, 0, []byte("registered-old")))
+
+		path501 := filepath.Join(dataDir, "chunks", fmt.Sprintf("%02X", 501%256), "0", fmt.Sprintf("501_0_%d", len("orphan-old")))
+		path502 := filepath.Join(dataDir, "chunks", fmt.Sprintf("%02X", 502%256), "0", fmt.Sprintf("502_0_%d", len("in-flight-fresh")))
+		path503 := filepath.Join(dataDir, "chunks", fmt.Sprintf("%02X", 503%256), "0", fmt.Sprintf("503_0_%d", len("registered-old")))
+
+		fifteenMinAgo := time.Now().Add(-15 * time.Minute)
+		fiveMinAgo := time.Now().Add(-5 * time.Minute)
+		require.NoError(t, os.Chtimes(path501, fifteenMinAgo, fifteenMinAgo))
+		require.NoError(t, os.Chtimes(path502, fiveMinAgo, fiveMinAgo))
+		require.NoError(t, os.Chtimes(path503, fifteenMinAgo, fifteenMinAgo))
+
+		mockStore.EXPECT().
+			GetSliceRef(mock.Anything, int64(501)).
+			Return(db.SliceRef{}, pgx.ErrNoRows).
+			Once()
+		mockStore.EXPECT().
+			GetSliceRef(mock.Anything, int64(503)).
+			Return(db.SliceRef{SliceID: 503, Size: int32(len("registered-old")), Refs: 1}, nil).
+			Once()
+
+		reclaimed, err := mgr.CollectGarbage(ctx, 20)
+		require.NoError(t, err)
+		assert.Equal(t, 1, reclaimed)
+
+		assert.NoFileExists(t, path501, "超过 10 分钟自定义宽限期且未登记的孤儿块应被删除")
+		assert.FileExists(t, path502, "未满 10 分钟自定义宽限期的在途块必须保留")
+		assert.FileExists(t, path503, "已在 slice_refs 登记的物理块必须保留")
+	})
 }
 
 // TestStartGCWorker_Unit 验证 StartGCWorker 后台周期协程的运行与退出机制。
@@ -288,7 +338,7 @@ func setupPostgresIntegration(t *testing.T) (*pgxpool.Pool, context.Context) {
 	return setupMetaTestDB(t)
 }
 
-// faultInjectBlockStore 包装 BlockStore，支持针对指定 sliceID 注入删除错误。
+// faultInjectBlockStore 包装 BlockStore，支持针对指定 sliceID 注入删除错误，并透传 BlockLister 扫描能力。
 type faultInjectBlockStore struct {
 	meta.BlockStore
 	failSliceID atomic.Uint64
@@ -299,6 +349,13 @@ func (f *faultInjectBlockStore) DeleteBlock(ctx context.Context, sliceID uint64,
 		return fmt.Errorf("%w: simulated disk hardware failure on slice %d", meta.ErrIO, sliceID)
 	}
 	return f.BlockStore.DeleteBlock(ctx, sliceID, blockIdx, blockSize)
+}
+
+func (f *faultInjectBlockStore) ListBlocksBefore(ctx context.Context, cutoff time.Time, limit int) ([]meta.PhysicalBlockFile, error) {
+	if lister, ok := f.BlockStore.(meta.BlockLister); ok {
+		return lister.ListBlocksBefore(ctx, cutoff, limit)
+	}
+	return nil, nil
 }
 
 // TestGC_PostgresIntegration 在真实 PostgreSQL 环境下结合 LocalFSBlockStore 进行完整生命周期端到端集成测试。
@@ -785,5 +842,84 @@ func TestGC_PostgresIntegration(t *testing.T) {
 			_, err := store.GetSliceRef(ctx, int64(sliceID))
 			return errors.Is(err, pgx.ErrNoRows)
 		}, 3*time.Second, 50*time.Millisecond, "后台 Worker 必须在周期运行中自动清除垃圾切片与物理文件")
+	})
+
+	t.Run("生命周期场景 6: 后台 GC 带宽限期未登记孤儿物理块扫描与对账回收", func(t *testing.T) {
+		diskName := fmt.Sprintf("test_gc_orphan_blocks_%d", time.Now().UnixNano())
+		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{Name: diskName, MaxBytes: 100 * 1024 * 1024})
+		require.NoError(t, err)
+		defer func() { _ = mgr.DeleteDisk(context.Background(), disk.DiskID) }()
+
+		// 1) 创建并正常写入一个有效文件（在 slice_refs 中登记 refs = 1），随后将其物理文件 mtime 改为 2 小时前
+		fRes, err := mgr.Create(ctx, meta.CreateParams{
+			ParentIno: disk.RootIno,
+			Name:      []byte("file_registered_old.bin"),
+			Mode:      meta.S_IFREG | 0o644,
+			Flags:     meta.O_RDWR,
+		})
+		require.NoError(t, err)
+
+		registeredPayload := bytes.Repeat([]byte("R"), 4096)
+		_, err = mgr.Write(ctx, &meta.WriteRequest{
+			Ino:    fRes.Inode.Ino,
+			Fh:     fRes.Fh,
+			Offset: 0,
+			Data:   registeredPayload,
+		})
+		require.NoError(t, err)
+
+		chunkRow, err := store.GetChunk(ctx, db.GetChunkParams{Ino: int64(fRes.Inode.Ino), Indx: 0})
+		require.NoError(t, err)
+		slices, err := meta.DecodeSlices(chunkRow.Slices)
+		require.NoError(t, err)
+		require.NotEmpty(t, slices)
+		registeredSliceID := slices[0].ID
+		registeredPath := blockFilePath(registeredSliceID, 0, uint32(len(registeredPayload)))
+		require.FileExists(t, registeredPath)
+
+		twoHoursAgo := time.Now().Add(-2 * time.Hour)
+		require.NoError(t, os.Chtimes(registeredPath, twoHoursAgo, twoHoursAgo))
+
+		// 2) 直接通过 BlockStore.PutBlock 写入一个未在 slice_refs 中登记的陈旧孤儿物理块，并将其 mtime 设为 2 小时前
+		staleOrphanSliceID := uint64(900000001)
+		_, err = store.GetSliceRef(ctx, int64(staleOrphanSliceID))
+		require.ErrorIs(t, err, pgx.ErrNoRows)
+
+		staleOrphanPayload := bytes.Repeat([]byte("O"), 4096)
+		require.NoError(t, rawBlockStore.PutBlock(ctx, staleOrphanSliceID, 0, staleOrphanPayload))
+		staleOrphanPath := blockFilePath(staleOrphanSliceID, 0, uint32(len(staleOrphanPayload)))
+		require.FileExists(t, staleOrphanPath)
+		require.NoError(t, os.Chtimes(staleOrphanPath, twoHoursAgo, twoHoursAgo))
+
+		// 3) 直接通过 BlockStore.PutBlock 写入一个未超宽限期（刚创建）的未登记在途物理块文件
+		freshInFlightSliceID := uint64(900000002)
+		_, err = store.GetSliceRef(ctx, int64(freshInFlightSliceID))
+		require.ErrorIs(t, err, pgx.ErrNoRows)
+
+		freshPayload := bytes.Repeat([]byte("F"), 4096)
+		require.NoError(t, rawBlockStore.PutBlock(ctx, freshInFlightSliceID, 0, freshPayload))
+		freshPath := blockFilePath(freshInFlightSliceID, 0, uint32(len(freshPayload)))
+		require.FileExists(t, freshPath)
+		defer func() {
+			_ = rawBlockStore.DeleteBlock(context.Background(), freshInFlightSliceID, 0, uint32(len(freshPayload)))
+		}()
+
+		// 4) 调用 CollectGarbage 执行对账回收（默认宽限期 1 小时）
+		reclaimed, err := mgr.CollectGarbage(ctx, 100)
+		require.NoError(t, err)
+		assert.Equal(t, 1, reclaimed, "应恰好回收 1 个超宽限期的未登记孤儿物理块")
+
+		// 断言：仅超宽限期且未登记的孤儿物理块被物理删除，未超宽限期的在途物理块与已登记 refs=1 的有效物理块均完好保留
+		assert.NoFileExists(t, staleOrphanPath, "超宽限期且未在 slice_refs 登记的孤儿物理块必须被物理删除")
+		assert.FileExists(t, freshPath, "未超宽限期的在途未登记物理块绝不能被误删")
+		assert.FileExists(t, registeredPath, "已在 slice_refs 登记 refs=1 的有效物理块（即使 mtime 超过 2 小时）绝不能被误删")
+
+		refRow, err := store.GetSliceRef(ctx, int64(registeredSliceID))
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), refRow.Refs)
+
+		// 收尾清理已登记切片
+		_ = rawBlockStore.DeleteBlock(context.Background(), registeredSliceID, 0, uint32(len(registeredPayload)))
+		_ = store.DeleteSliceRef(context.Background(), int64(registeredSliceID))
 	})
 }

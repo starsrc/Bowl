@@ -163,8 +163,8 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			}
 		}
 
-		startIndx := uint32(actualOffset / ChunkSize)
-		endIndx := uint32((actualOffset + uint64(dataLen) - 1) / ChunkSize)
+		startIndx := int64(actualOffset / ChunkSize)
+		endIndx := int64((actualOffset + uint64(dataLen) - 1) / ChunkSize)
 
 		if startIndx == endIndx {
 			sliceDesc := Slice{
@@ -178,7 +178,7 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 
 			octetLen, err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 				Ino:    int64(req.Ino),
-				Indx:   int32(startIndx),
+				Indx:   startIndx,
 				Slices: sliceBytes,
 			})
 			if err != nil {
@@ -207,7 +207,7 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			})
 			octetLen1, err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 				Ino:    int64(req.Ino),
-				Indx:   int32(startIndx),
+				Indx:   startIndx,
 				Slices: firstSliceBytes,
 			})
 			if err != nil {
@@ -224,7 +224,7 @@ func (m *manager) Write(ctx context.Context, req *WriteRequest) (*WriteResponse,
 			})
 			octetLen2, err := q.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 				Ino:    int64(req.Ino),
-				Indx:   int32(startIndx + 1),
+				Indx:   startIndx + 1,
 				Slices: secondSliceBytes,
 			})
 			if err != nil {

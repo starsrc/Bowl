@@ -44,7 +44,7 @@ func setupPostgresForCompact(t *testing.T) (db.Store, meta.BlockStore, meta.Mana
 }
 
 func cleanupCompactTestIno(ctx context.Context, store db.Store, ino int64) {
-	for indx := int32(0); indx < 16; indx++ {
+	for indx := int64(0); indx < 16; indx++ {
 		chunkRow, err := store.GetChunk(ctx, db.GetChunkParams{Ino: ino, Indx: indx})
 		if err == nil && len(chunkRow.Slices) > 0 {
 			if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
@@ -108,7 +108,7 @@ func TestCompactChunk_StaticValidation(t *testing.T) {
 	tests := []struct {
 		name string
 		ino  uint64
-		indx uint32
+		indx int64
 	}{
 		{
 			name: "ino 为 0",
@@ -121,9 +121,14 @@ func TestCompactChunk_StaticValidation(t *testing.T) {
 			indx: 0,
 		},
 		{
-			name: "indx 超出 MaxInt32",
+			name: "indx 为负数",
 			ino:  1,
-			indx: uint32(math.MaxInt32) + 1,
+			indx: -1,
+		},
+		{
+			name: "indx 超出 MaxInt64/ChunkSize",
+			ino:  1,
+			indx: math.MaxInt64/int64(meta.ChunkSize) + 1,
 		},
 	}
 
@@ -1711,4 +1716,119 @@ func TestCompactChunk_TxRetryResetsEverReachedCommit_CleansUpBlockOnSecondAttemp
 	err := mgr.CompactChunk(ctx, 1, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fatal db connection failure on retry")
+}
+
+// TestCompactChunk_HighSparseChunkIndxBeyondInt32_PostgresIntegration 验证超过 128 PiB
+// (indx >= 1<<31) 的高稀疏偏移 Chunk 碎片整理：CompactChunk 正常接受 64 位 indx 并完成合并，
+// 且绝不污染 indx=0 的数据。
+func TestCompactChunk_HighSparseChunkIndxBeyondInt32_PostgresIntegration(t *testing.T) {
+	ctx := context.Background()
+	store, _, mgr, _, _ := setupPostgresForCompact(t)
+	if store == nil {
+		return
+	}
+
+	fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:  int32(meta.S_IFREG | 0o644),
+		Nlink: 1,
+		Uid:   1000,
+		Gid:   1000,
+	})
+	require.NoError(t, err)
+	ino := uint64(fileRow.Ino)
+
+	highIndx := int64(1) << 31 // 2147483648 (offset = 128 PiB = 1<<57)
+	highOffset := uint64(highIndx) * uint64(meta.ChunkSize)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		for _, indx := range []int64{0, highIndx} {
+			chunkRow, cErr := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: fileRow.Ino, Indx: indx})
+			if cErr == nil && len(chunkRow.Slices) > 0 {
+				if slices, dErr := meta.DecodeSlices(chunkRow.Slices); dErr == nil {
+					for _, s := range slices {
+						if s.ID > 0 {
+							_ = store.DeleteSliceRef(cleanupCtx, int64(s.ID))
+						}
+					}
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(cleanupCtx, store, []int64{fileRow.Ino})
+		_ = store.DeleteInode(cleanupCtx, fileRow.Ino)
+	})
+
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+	defer func() {
+		_ = mgr.Release(context.Background(), meta.ReleaseParams{Ino: ino, Fh: fh})
+	}()
+
+	// 在 indx=0 写入对照数据
+	lowData := []byte("origin-low-chunk-data")
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Data:   lowData,
+	})
+	require.NoError(t, err)
+
+	// 在 highIndx 连续写入并局部覆写产生 2 条碎片 Slice
+	partA := bytes.Repeat([]byte("A"), 2048)
+	partB := bytes.Repeat([]byte("B"), 1024)
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Data:   partA,
+	})
+	require.NoError(t, err)
+
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset + 512,
+		Data:   partB,
+	})
+	require.NoError(t, err)
+
+	chunkBefore, err := store.GetChunk(ctx, db.GetChunkParams{Ino: int64(ino), Indx: highIndx})
+	require.NoError(t, err)
+	assert.Equal(t, 2*meta.SliceBytes, len(chunkBefore.Slices), "合并前 highIndx 应包含 2 条 Slice")
+
+	// 调用 CompactChunk(ctx, ino, highIndx)
+	err = mgr.CompactChunk(ctx, ino, highIndx)
+	require.NoError(t, err, "CompactChunk 必须支持 indx >= 1<<31 的 64 位块索引")
+
+	chunkAfter, err := store.GetChunk(ctx, db.GetChunkParams{Ino: int64(ino), Indx: highIndx})
+	require.NoError(t, err)
+	assert.Equal(t, meta.SliceBytes, len(chunkAfter.Slices), "合并后 highIndx 应缩减为 1 条紧致 Slice")
+
+	// 验证合并后 highIndx 读取数据精确一致，且 indx=0 未受影响
+	expectedHigh := make([]byte, 2048)
+	copy(expectedHigh, partA)
+	copy(expectedHigh[512:1536], partB)
+
+	readHigh, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Size:   2048,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, expectedHigh, readHigh.Data)
+
+	readLow, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Size:   uint32(len(lowData)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, lowData, readLow.Data)
 }

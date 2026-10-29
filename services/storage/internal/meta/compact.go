@@ -15,7 +15,7 @@ import (
 )
 
 type chunkAppendStat struct {
-	indx     uint32
+	indx     int64
 	octetLen int64
 }
 
@@ -41,7 +41,7 @@ type compactNewSliceDesc struct {
 
 // CompactChunk 对指定 Inode 与 ChunkIndx 执行切片碎片合并与乐观前缀 CAS 替换。
 // 遵循 ADR-0019 数据层碎片整理与 CAS 替换架构：
-// 1. 静态边界校验：ino 非零且在 int64 范围内，indx 在 int32 范围内；
+// 1. 静态边界校验：ino 非零且在 int64 范围内，indx 在合法非负范围且不超过 math.MaxInt64/int64(ChunkSize)；
 // 2. 阶段 1（锁外读取与新物理块落盘）：
 //   - 调用 m.store.GetChunk 获取 originSlices（若 pgx.ErrNoRows 或 len(originSlices) == 0 直接返回 nil）；
 //   - DecodeSlices 并调用 BuildSlice 计算有效切片视图 view []Slice；
@@ -63,13 +63,13 @@ type compactNewSliceDesc struct {
 //   - 插入新 slice_refs（refs = 1）；
 //   - 调用 decrementDeletedSlicesRefs 递减 originSlices 中旧 slice_id 的引用计数；
 //   - 若写事务执行失败，事务外立即清理新物理块并返回错误。
-func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx uint32) error {
+func (m *manager) CompactChunk(ctx context.Context, ino uint64, indx int64) error {
 	_, _, err := m.compactChunkWithCount(ctx, ino, indx)
 	return err
 }
 
-func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx uint32) (int, bool, error) {
-	if ino == 0 || ino > math.MaxInt64 || indx > math.MaxInt32 {
+func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx int64) (int, bool, error) {
+	if ino == 0 || ino > math.MaxInt64 || indx < 0 || indx > math.MaxInt64/int64(ChunkSize) {
 		return 0, false, ErrInvalidArgument
 	}
 
@@ -84,7 +84,7 @@ func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx ui
 		for attempt := 0; attempt < maxLockRetries; attempt++ {
 			chunk, err := q.GetChunk(ctx, db.GetChunkParams{
 				Ino:  int64(ino),
-				Indx: int32(indx),
+				Indx: indx,
 			})
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -276,7 +276,7 @@ func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx ui
 		casAborted = false
 		currentChunk, err := q.GetChunkForUpdate(ctx, db.GetChunkForUpdateParams{
 			Ino:  int64(ino),
-			Indx: int32(indx),
+			Indx: indx,
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -303,7 +303,7 @@ func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx ui
 
 		if err := q.UpdateChunkSlices(ctx, db.UpdateChunkSlicesParams{
 			Ino:    int64(ino),
-			Indx:   int32(indx),
+			Indx:   indx,
 			Slices: updatedSlices,
 		}); err != nil {
 			return fmt.Errorf("update chunk slices in compact (ino=%d, indx=%d): %w", ino, indx, err)
@@ -344,7 +344,7 @@ func (m *manager) compactChunkWithCount(ctx context.Context, ino uint64, indx ui
 }
 
 // maybeTriggerAsyncCompact 当追加后的切片字节长度达到压缩阈值时，异步触发 Chunk 碎片整理。
-func (m *manager) maybeTriggerAsyncCompact(ino uint64, indx uint32, octetLen int64) {
+func (m *manager) maybeTriggerAsyncCompact(ino uint64, indx int64, octetLen int64) {
 	if m.compactSliceThreshold <= 0 || int(octetLen)/SliceBytes < m.compactSliceThreshold {
 		return
 	}
@@ -391,7 +391,7 @@ func (m *manager) maybeTriggerAsyncCompact(ino uint64, indx uint32, octetLen int
 			queryCtx, qCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			chunk, qErr := m.store.GetChunk(queryCtx, db.GetChunkParams{
 				Ino:  int64(ino),
-				Indx: int32(indx),
+				Indx: indx,
 			})
 			qCancel()
 			if qErr != nil {

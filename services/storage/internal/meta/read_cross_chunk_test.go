@@ -73,7 +73,7 @@ func TestRead_CrossBlockBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 					ChunkSlices: meta.EncodeSlice(sliceDesc),
 				},
 			}, nil).
@@ -194,7 +194,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 					ChunkSlices: meta.EncodeSlice(slice0),
 				},
 				{
@@ -204,7 +204,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 1, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 1, Valid: true},
 					ChunkSlices: meta.EncodeSlice(slice1),
 				},
 			}, nil).
@@ -292,7 +292,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 1, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 1, Valid: true},
 					ChunkSlices: meta.EncodeSlice(slice1),
 				},
 			}, nil).
@@ -369,7 +369,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 					ChunkSlices: meta.EncodeSlice(slice0),
 				},
 			}, nil).
@@ -436,7 +436,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:     fileRow.Atime,
 					Mtime:     fileRow.Mtime,
 					Ctime:     fileRow.Ctime,
-					ChunkIndx: pgtype.Int4{Valid: false},
+					ChunkIndx: pgtype.Int8{Valid: false},
 				},
 			}, nil).
 			Once()
@@ -502,7 +502,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 0, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 0, Valid: true},
 					ChunkSlices: meta.EncodeSlices(chunk0Slices),
 				},
 				{
@@ -512,7 +512,7 @@ func TestRead_CrossChunkBoundary(t *testing.T) {
 					Atime:       fileRow.Atime,
 					Mtime:       fileRow.Mtime,
 					Ctime:       fileRow.Ctime,
-					ChunkIndx:   pgtype.Int4{Int32: 1, Valid: true},
+					ChunkIndx:   pgtype.Int8{Int64: 1, Valid: true},
 					ChunkSlices: meta.EncodeSlices(chunk1Slices),
 				},
 			}, nil).
@@ -865,7 +865,7 @@ func TestRead_CrossChunk_ConcurrentWriteAtomicSnapshot_NoTornRead(t *testing.T) 
 	require.NoError(t, err)
 	ino := uint64(fileRow.Ino)
 	t.Cleanup(func() {
-		for indx := int32(0); indx < 2; indx++ {
+		for indx := int64(0); indx < 2; indx++ {
 			chunkRow, _ := baseStore.GetChunk(context.Background(), db.GetChunkParams{Ino: fileRow.Ino, Indx: indx})
 			if len(chunkRow.Slices) > 0 {
 				slices, _ := meta.DecodeSlices(chunkRow.Slices)
@@ -1097,7 +1097,7 @@ func TestRead_InFlightProtectedAgainstConcurrentCompactAndGC(t *testing.T) {
 		defer cancel()
 
 		var sliceIDs []int64
-		for indx := int32(0); indx < 16; indx++ {
+		for indx := int64(0); indx < 16; indx++ {
 			chunkRow, cErr := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: fileRow.Ino, Indx: indx})
 			if cErr == nil && len(chunkRow.Slices) > 0 {
 				if sls, dErr := meta.DecodeSlices(chunkRow.Slices); dErr == nil {

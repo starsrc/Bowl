@@ -259,7 +259,7 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ino, chunk0.Ino)
-	assert.Equal(t, int32(0), chunk0.Indx)
+	assert.Equal(t, int64(0), chunk0.Indx)
 	expectedSlices := append(append([]byte(nil), slice1...), slice2...)
 	assert.Equal(t, expectedSlices, chunk0.Slices, "slices 应该为追加拼接后的 48 字节")
 
@@ -325,8 +325,8 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, rangeChunks, 2, "范围 [1, 3] 应匹配 indx=1 和 indx=2")
-	assert.Equal(t, int32(1), rangeChunks[0].Indx)
-	assert.Equal(t, int32(2), rangeChunks[1].Indx)
+	assert.Equal(t, int64(1), rangeChunks[0].Indx)
+	assert.Equal(t, int64(2), rangeChunks[1].Indx)
 
 	// 6. DeleteChunk: 单块删除返回 RETURNING slices
 	delSlices, err := store.DeleteChunk(ctx, db.DeleteChunkParams{
@@ -340,6 +340,41 @@ func TestStore_Integration_ChunksCRUDAndRanges(t *testing.T) {
 	// 再次查询已不存在
 	_, err = store.GetChunk(ctx, db.GetChunkParams{Ino: ino, Indx: 4})
 	require.Error(t, err)
+
+	// 7. 64 位 BIGINT 超大索引 (indx >= 1<<31，对应超 128 PiB 稀疏偏移) 读写与删除验证
+	highIndx := int64(1) << 31 // 2147483648 (> math.MaxInt32)
+	maxIndx := int64(1)<<57 - 1
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+		Ino:    ino,
+		Indx:   highIndx,
+		Slices: slice2,
+	})
+	require.NoError(t, err, "BIGINT indx >= 1<<31 插入必须成功")
+
+	_, err = store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
+		Ino:    ino,
+		Indx:   maxIndx,
+		Slices: slice3,
+	})
+	require.NoError(t, err, "超大 BIGINT indx 插入必须成功")
+
+	highChunk, err := store.GetChunk(ctx, db.GetChunkParams{
+		Ino:  ino,
+		Indx: highIndx,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, highIndx, highChunk.Indx)
+	assert.Equal(t, slice2, highChunk.Slices)
+
+	highRange, err := store.GetChunksInRange(ctx, db.GetChunksInRangeParams{
+		Ino:       ino,
+		StartIndx: highIndx,
+		EndIndx:   maxIndx,
+	})
+	require.NoError(t, err)
+	require.Len(t, highRange, 2)
+	assert.Equal(t, highIndx, highRange[0].Indx)
+	assert.Equal(t, maxIndx, highRange[1].Indx)
 }
 
 func TestStore_Integration_ChunksTruncateAndBatchDeletes(t *testing.T) {
@@ -361,7 +396,7 @@ func TestStore_Integration_ChunksTruncateAndBatchDeletes(t *testing.T) {
 	for idx, s := range [][]byte{s0, s1, s2, s3} {
 		_, err := store.AppendChunkSlice(ctx, db.AppendChunkSliceParams{
 			Ino:    ino1,
-			Indx:   int32(idx),
+			Indx:   int64(idx),
 			Slices: s,
 		})
 		require.NoError(t, err)

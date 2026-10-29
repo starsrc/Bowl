@@ -789,7 +789,7 @@ func TestWrite_ConcurrentOAppend_PostgresIntegration(t *testing.T) {
 
 	t.Cleanup(func() {
 		var sliceIDs []int64
-		for indx := int32(0); indx < 16; indx++ {
+		for indx := int64(0); indx < 16; indx++ {
 			chunkRow, _ := store.GetChunk(context.Background(), db.GetChunkParams{Ino: int64(ino), Indx: indx})
 			if len(chunkRow.Slices) > 0 {
 				if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {

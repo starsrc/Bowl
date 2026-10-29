@@ -765,7 +765,7 @@ func cleanupWriteTestInoAndSlices(t *testing.T, store db.Store, mgr meta.Manager
 	}
 
 	var sliceIDs []int64
-	for indx := int32(0); indx < 16; indx++ {
+	for indx := int64(0); indx < 16; indx++ {
 		chunkRow, err := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: ino, Indx: indx})
 		if err == nil && len(chunkRow.Slices) > 0 {
 			if slices, err := meta.DecodeSlices(chunkRow.Slices); err == nil {
@@ -788,7 +788,7 @@ func cleanupWriteTestInoAndSlices(t *testing.T, store db.Store, mgr meta.Manager
 	_, inoErr := store.GetInode(cleanupCtx, ino)
 	assert.ErrorIs(t, inoErr, pgx.ErrNoRows, "目标 ino 必须已被清除")
 
-	for indx := int32(0); indx < 16; indx++ {
+	for indx := int64(0); indx < 16; indx++ {
 		_, cErr := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: ino, Indx: indx})
 		assert.ErrorIs(t, cErr, pgx.ErrNoRows, "目标 ino 的 chunk 行必须已被清除")
 	}
@@ -1319,4 +1319,119 @@ func TestWrite_TxRetryResetsEverReachedCommit_CleansUpBlockOnSecondAttemptFailur
 	require.Nil(t, resp)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, meta.ErrNotFound, "第 2 次重试首条 GetInodeForUpdate 返回 ErrNoRows 应映射为 ErrNotFound")
+}
+
+// TestWrite_HighSparseChunkIndxBeyondInt32_PostgresIntegration 验证在超过 128 PiB
+// (indx >= 1<<31) 的高稀疏偏移处写入与跨块写入时，chunks.indx 保持 64 位精度，
+// 绝不因 uint32/int32 截断回绕覆盖 indx=0 或产生负数索引违规。
+func TestWrite_HighSparseChunkIndxBeyondInt32_PostgresIntegration(t *testing.T) {
+	pool, ctx := setupMetaTestDB(t)
+	if pool == nil {
+		return
+	}
+	acquireTestSliceGCAdvisoryLock(t, pool)
+
+	store := db.NewStore(pool)
+	dataDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(dataDir)
+	mgr := meta.New(store, meta.WithBlockStore(bs))
+
+	fileRow, err := store.CreateInode(ctx, db.CreateInodeParams{
+		Mode:  int32(meta.S_IFREG | 0o644),
+		Nlink: 1,
+		Uid:   1000,
+		Gid:   1000,
+	})
+	require.NoError(t, err)
+	ino := uint64(fileRow.Ino)
+
+	highIndx := int64(1) << 31 // 2147483648 (offset = 128 PiB = 1<<57)
+	highOffset := uint64(highIndx) * uint64(meta.ChunkSize)
+	wrapIndx := int64(1) << 32 // 4294967296 (uint32 强转会回绕为 0！)
+	wrapOffset := uint64(wrapIndx) * uint64(meta.ChunkSize)
+
+	openRes, err := mgr.Open(ctx, meta.OpenParams{
+		Ino:   ino,
+		Flags: meta.O_RDWR,
+	})
+	require.NoError(t, err)
+	fh := openRes.Fh
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mgr.Release(cleanupCtx, meta.ReleaseParams{Ino: ino, Fh: fh})
+		for _, indx := range []int64{0, highIndx, wrapIndx} {
+			chunkRow, cErr := store.GetChunk(cleanupCtx, db.GetChunkParams{Ino: int64(ino), Indx: indx})
+			if cErr == nil && len(chunkRow.Slices) > 0 {
+				if slices, dErr := meta.DecodeSlices(chunkRow.Slices); dErr == nil {
+					for _, s := range slices {
+						if s.ID > 0 {
+							_ = store.DeleteSliceRef(cleanupCtx, int64(s.ID))
+						}
+					}
+				}
+			}
+		}
+		_ = meta.DeleteAllChunksByInos(cleanupCtx, store, []int64{int64(ino)})
+		_ = store.DeleteInode(cleanupCtx, int64(ino))
+	})
+
+	// 1. 在 offset = 0 (indx = 0) 写入基准载荷
+	lowPayload := []byte("chunk-zero-origin-payload")
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Data:   lowPayload,
+	})
+	require.NoError(t, err)
+
+	// 2. 在 offset = 1<<57 (indx = 1<<31 = 2147483648，int32 强转会变成 -2147483648 触发 chk_chunks_indx 报错) 写入载荷
+	highPayload := []byte("high-sparse-128pib-payload")
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Data:   highPayload,
+	})
+	require.NoError(t, err, "offset=128PiB (indx=1<<31) 写入必须成功，不得因 int32 符号位溢出报错")
+
+	// 3. 在 offset = 1<<58 (indx = 1<<32 = 4294967296，uint32 强转会回绕为 indx = 0 覆盖首块) 写入载荷
+	wrapPayload := []byte("wrap-boundary-256pib-payload")
+	_, err = mgr.Write(ctx, &meta.WriteRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: wrapOffset,
+		Data:   wrapPayload,
+	})
+	require.NoError(t, err, "offset=256PiB (indx=1<<32) 写入必须成功")
+
+	// 4. 验证数据库底表与 Read 返回：三个偏移的数据相互独立，indx=0 绝未被覆盖
+	readLow, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: 0,
+		Size:   uint32(len(lowPayload)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, lowPayload, readLow.Data, "indx=0 的数据绝不能被 indx=1<<32 的写入回绕覆盖")
+
+	readHigh, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: highOffset,
+		Size:   uint32(len(highPayload)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, highPayload, readHigh.Data, "indx=1<<31 的数据必须精确可读")
+
+	readWrap, err := mgr.Read(ctx, &meta.ReadRequest{
+		Ino:    ino,
+		Fh:     fh,
+		Offset: wrapOffset,
+		Size:   uint32(len(wrapPayload)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, wrapPayload, readWrap.Data, "indx=1<<32 的数据必须精确可读")
 }

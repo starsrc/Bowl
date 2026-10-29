@@ -29,7 +29,7 @@ func (q *Queries) AddSliceRefCount(ctx context.Context, arg AddSliceRefCountPara
 
 const appendChunkSlice = `-- name: AppendChunkSlice :one
 INSERT INTO chunks (ino, indx, slices)
-VALUES ($1::bigint, $2::integer, $3::bytea)
+VALUES ($1::bigint, $2::bigint, $3::bytea)
 ON CONFLICT (ino, indx)
 DO UPDATE SET slices = chunks.slices || EXCLUDED.slices
 RETURNING octet_length(slices)::bigint
@@ -37,7 +37,7 @@ RETURNING octet_length(slices)::bigint
 
 type AppendChunkSliceParams struct {
 	Ino    int64  `json:"ino"`
-	Indx   int32  `json:"indx"`
+	Indx   int64  `json:"indx"`
 	Slices []byte `json:"slices"`
 }
 
@@ -52,7 +52,7 @@ const appendExistingChunkSlice = `-- name: AppendExistingChunkSlice :one
 WITH updated AS (
     UPDATE chunks
     SET slices = slices || $1::bytea
-    WHERE ino = $2::bigint AND indx = $3::integer
+    WHERE ino = $2::bigint AND indx = $3::bigint
     RETURNING octet_length(slices)::bigint AS octet_len
 )
 SELECT COALESCE((SELECT octet_len FROM updated), 0)::bigint AS octet_len
@@ -61,7 +61,7 @@ SELECT COALESCE((SELECT octet_len FROM updated), 0)::bigint AS octet_len
 type AppendExistingChunkSliceParams struct {
 	Slices []byte `json:"slices"`
 	Ino    int64  `json:"ino"`
-	Indx   int32  `json:"indx"`
+	Indx   int64  `json:"indx"`
 }
 
 func (q *Queries) AppendExistingChunkSlice(ctx context.Context, arg AppendExistingChunkSliceParams) (int64, error) {
@@ -73,13 +73,13 @@ func (q *Queries) AppendExistingChunkSlice(ctx context.Context, arg AppendExisti
 
 const deleteChunk = `-- name: DeleteChunk :many
 DELETE FROM chunks
-WHERE ino = $1::bigint AND indx = $2::integer
+WHERE ino = $1::bigint AND indx = $2::bigint
 RETURNING slices
 `
 
 type DeleteChunkParams struct {
 	Ino  int64 `json:"ino"`
-	Indx int32 `json:"indx"`
+	Indx int64 `json:"indx"`
 }
 
 func (q *Queries) DeleteChunk(ctx context.Context, arg DeleteChunkParams) ([][]byte, error) {
@@ -104,13 +104,13 @@ func (q *Queries) DeleteChunk(ctx context.Context, arg DeleteChunkParams) ([][]b
 
 const deleteChunksAfterIndx = `-- name: DeleteChunksAfterIndx :many
 DELETE FROM chunks
-WHERE ino = $1::bigint AND indx > $2::integer
+WHERE ino = $1::bigint AND indx > $2::bigint
 RETURNING slices
 `
 
 type DeleteChunksAfterIndxParams struct {
 	Ino       int64 `json:"ino"`
-	AfterIndx int32 `json:"after_indx"`
+	AfterIndx int64 `json:"after_indx"`
 }
 
 func (q *Queries) DeleteChunksAfterIndx(ctx context.Context, arg DeleteChunksAfterIndxParams) ([][]byte, error) {
@@ -187,13 +187,13 @@ func (q *Queries) DeleteChunksByInos(ctx context.Context, inos []int64) ([][]byt
 
 const deleteChunksFromIndx = `-- name: DeleteChunksFromIndx :many
 DELETE FROM chunks
-WHERE ino = $1::bigint AND indx >= $2::integer
+WHERE ino = $1::bigint AND indx >= $2::bigint
 RETURNING slices
 `
 
 type DeleteChunksFromIndxParams struct {
 	Ino      int64 `json:"ino"`
-	FromIndx int32 `json:"from_indx"`
+	FromIndx int64 `json:"from_indx"`
 }
 
 func (q *Queries) DeleteChunksFromIndx(ctx context.Context, arg DeleteChunksFromIndxParams) ([][]byte, error) {
@@ -229,12 +229,12 @@ func (q *Queries) DeleteSliceRef(ctx context.Context, sliceID int64) error {
 const getChunk = `-- name: GetChunk :one
 SELECT ino, indx, slices
 FROM chunks
-WHERE ino = $1::bigint AND indx = $2::integer
+WHERE ino = $1::bigint AND indx = $2::bigint
 `
 
 type GetChunkParams struct {
 	Ino  int64 `json:"ino"`
-	Indx int32 `json:"indx"`
+	Indx int64 `json:"indx"`
 }
 
 func (q *Queries) GetChunk(ctx context.Context, arg GetChunkParams) (Chunk, error) {
@@ -247,13 +247,13 @@ func (q *Queries) GetChunk(ctx context.Context, arg GetChunkParams) (Chunk, erro
 const getChunkForUpdate = `-- name: GetChunkForUpdate :one
 SELECT ino, indx, slices
 FROM chunks
-WHERE ino = $1::bigint AND indx = $2::integer
+WHERE ino = $1::bigint AND indx = $2::bigint
 FOR UPDATE
 `
 
 type GetChunkForUpdateParams struct {
 	Ino  int64 `json:"ino"`
-	Indx int32 `json:"indx"`
+	Indx int64 `json:"indx"`
 }
 
 func (q *Queries) GetChunkForUpdate(ctx context.Context, arg GetChunkForUpdateParams) (Chunk, error) {
@@ -266,14 +266,14 @@ func (q *Queries) GetChunkForUpdate(ctx context.Context, arg GetChunkForUpdatePa
 const getChunksInRange = `-- name: GetChunksInRange :many
 SELECT ino, indx, slices
 FROM chunks
-WHERE ino = $1::bigint AND indx >= $2::integer AND indx <= $3::integer
+WHERE ino = $1::bigint AND indx >= $2::bigint AND indx <= $3::bigint
 ORDER BY indx ASC
 `
 
 type GetChunksInRangeParams struct {
 	Ino       int64 `json:"ino"`
-	StartIndx int32 `json:"start_indx"`
-	EndIndx   int32 `json:"end_indx"`
+	StartIndx int64 `json:"start_indx"`
+	EndIndx   int64 `json:"end_indx"`
 }
 
 func (q *Queries) GetChunksInRange(ctx context.Context, arg GetChunksInRangeParams) ([]Chunk, error) {
@@ -316,14 +316,14 @@ SELECT
     c.indx AS chunk_indx,
     c.slices AS chunk_slices
 FROM inodes i
-LEFT JOIN chunks c ON c.ino = i.ino AND c.indx >= $1::integer AND c.indx <= $2::integer
+LEFT JOIN chunks c ON c.ino = i.ino AND c.indx >= $1::bigint AND c.indx <= $2::bigint
 WHERE i.ino = $3::bigint
 ORDER BY c.indx ASC
 `
 
 type GetInodeSizeAndChunksInRangeParams struct {
-	StartIndx int32 `json:"start_indx"`
-	EndIndx   int32 `json:"end_indx"`
+	StartIndx int64 `json:"start_indx"`
+	EndIndx   int64 `json:"end_indx"`
 	Ino       int64 `json:"ino"`
 }
 
@@ -343,7 +343,7 @@ type GetInodeSizeAndChunksInRangeRow struct {
 	Flags         int32              `json:"flags"`
 	ParentIno     int64              `json:"parent_ino"`
 	RootIno       int64              `json:"root_ino"`
-	ChunkIndx     pgtype.Int4        `json:"chunk_indx"`
+	ChunkIndx     pgtype.Int8        `json:"chunk_indx"`
 	ChunkSlices   []byte             `json:"chunk_slices"`
 }
 
@@ -496,13 +496,13 @@ func (q *Queries) NextSliceID(ctx context.Context) (int64, error) {
 const updateChunkSlices = `-- name: UpdateChunkSlices :exec
 UPDATE chunks
 SET slices = $1::bytea
-WHERE ino = $2::bigint AND indx = $3::integer
+WHERE ino = $2::bigint AND indx = $3::bigint
 `
 
 type UpdateChunkSlicesParams struct {
 	Slices []byte `json:"slices"`
 	Ino    int64  `json:"ino"`
-	Indx   int32  `json:"indx"`
+	Indx   int64  `json:"indx"`
 }
 
 func (q *Queries) UpdateChunkSlices(ctx context.Context, arg UpdateChunkSlicesParams) error {

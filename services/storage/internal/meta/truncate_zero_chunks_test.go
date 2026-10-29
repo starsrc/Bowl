@@ -447,7 +447,7 @@ func TestTruncateZero_ExpandAndReadZero(t *testing.T) {
 					Atime:     fileRowExpanded.Atime,
 					Mtime:     fileRowExpanded.Mtime,
 					Ctime:     fileRowExpanded.Ctime,
-					ChunkIndx: pgtype.Int4{Valid: false},
+					ChunkIndx: pgtype.Int8{Valid: false},
 				},
 			}, nil).
 			Once()
@@ -590,7 +590,7 @@ func TestTruncateZero_ExpandAndReadZero(t *testing.T) {
 					Atime:     fileRowAllocated.Atime,
 					Mtime:     fileRowAllocated.Mtime,
 					Ctime:     fileRowAllocated.Ctime,
-					ChunkIndx: pgtype.Int4{Valid: false},
+					ChunkIndx: pgtype.Int8{Valid: false},
 				},
 			}, nil).
 			Once()

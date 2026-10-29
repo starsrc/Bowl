@@ -4,23 +4,23 @@ SELECT nextval('slice_id_seq')::bigint;
 -- name: GetChunk :one
 SELECT ino, indx, slices
 FROM chunks
-WHERE ino = @ino::bigint AND indx = @indx::integer;
+WHERE ino = @ino::bigint AND indx = @indx::bigint;
 
 -- name: GetChunkForUpdate :one
 SELECT ino, indx, slices
 FROM chunks
-WHERE ino = @ino::bigint AND indx = @indx::integer
+WHERE ino = @ino::bigint AND indx = @indx::bigint
 FOR UPDATE;
 
 -- name: GetChunksInRange :many
 SELECT ino, indx, slices
 FROM chunks
-WHERE ino = @ino::bigint AND indx >= @start_indx::integer AND indx <= @end_indx::integer
+WHERE ino = @ino::bigint AND indx >= @start_indx::bigint AND indx <= @end_indx::bigint
 ORDER BY indx ASC;
 
 -- name: AppendChunkSlice :one
 INSERT INTO chunks (ino, indx, slices)
-VALUES (@ino::bigint, @indx::integer, @slices::bytea)
+VALUES (@ino::bigint, @indx::bigint, @slices::bytea)
 ON CONFLICT (ino, indx)
 DO UPDATE SET slices = chunks.slices || EXCLUDED.slices
 RETURNING octet_length(slices)::bigint;
@@ -29,7 +29,7 @@ RETURNING octet_length(slices)::bigint;
 WITH updated AS (
     UPDATE chunks
     SET slices = slices || @slices::bytea
-    WHERE ino = @ino::bigint AND indx = @indx::integer
+    WHERE ino = @ino::bigint AND indx = @indx::bigint
     RETURNING octet_length(slices)::bigint AS octet_len
 )
 SELECT COALESCE((SELECT octet_len FROM updated), 0)::bigint AS octet_len;
@@ -37,11 +37,11 @@ SELECT COALESCE((SELECT octet_len FROM updated), 0)::bigint AS octet_len;
 -- name: UpdateChunkSlices :exec
 UPDATE chunks
 SET slices = @slices::bytea
-WHERE ino = @ino::bigint AND indx = @indx::integer;
+WHERE ino = @ino::bigint AND indx = @indx::bigint;
 
 -- name: DeleteChunk :many
 DELETE FROM chunks
-WHERE ino = @ino::bigint AND indx = @indx::integer
+WHERE ino = @ino::bigint AND indx = @indx::bigint
 RETURNING slices;
 
 -- name: DeleteChunksByIno :many
@@ -56,12 +56,12 @@ RETURNING slices;
 
 -- name: DeleteChunksFromIndx :many
 DELETE FROM chunks
-WHERE ino = @ino::bigint AND indx >= @from_indx::integer
+WHERE ino = @ino::bigint AND indx >= @from_indx::bigint
 RETURNING slices;
 
 -- name: DeleteChunksAfterIndx :many
 DELETE FROM chunks
-WHERE ino = @ino::bigint AND indx > @after_indx::integer
+WHERE ino = @ino::bigint AND indx > @after_indx::bigint
 RETURNING slices;
 
 -- name: InsertSliceRef :exec
@@ -121,7 +121,7 @@ SELECT
     c.indx AS chunk_indx,
     c.slices AS chunk_slices
 FROM inodes i
-LEFT JOIN chunks c ON c.ino = i.ino AND c.indx >= @start_indx::integer AND c.indx <= @end_indx::integer
+LEFT JOIN chunks c ON c.ino = i.ino AND c.indx >= @start_indx::bigint AND c.indx <= @end_indx::bigint
 WHERE i.ino = @ino::bigint
 ORDER BY c.indx ASC;
 

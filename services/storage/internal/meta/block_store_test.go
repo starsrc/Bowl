@@ -599,3 +599,97 @@ func TestLocalFSBlockStore_AncestorDirSyncBarrierAndRetry(t *testing.T) {
 		}
 	})
 }
+
+func TestLocalFSBlockStore_EnsureDirSynced_NewSubdirUnderCachedParent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("跳过权限测试: root 用户忽略 POSIX 0o300 目录只写不可读限制")
+	}
+
+	ctx := context.Background()
+
+	t.Run("已缓存的 chunks 目录下新建第二个一级散列桶 02 时必须重新 syncDir 父目录", func(t *testing.T) {
+		dataDir := t.TempDir()
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		require.NoError(t, store.PutBlock(ctx, 1, 0, []byte("first")))
+
+		chunksDir := filepath.Join(dataDir, "chunks")
+		t.Cleanup(func() {
+			_ = os.Chmod(chunksDir, 0o755)
+		})
+		require.NoError(t, os.Chmod(chunksDir, 0o300))
+
+		err := store.PutBlock(ctx, 2, 0, []byte("second-bucket"))
+		require.Error(t, err)
+		require.ErrorIs(t, err, meta.ErrIO)
+	})
+
+	t.Run("已缓存的 chunks/01 目录下新建第二个二级分组目录 1 时必须重新 syncDir 父目录", func(t *testing.T) {
+		dataDir := t.TempDir()
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		require.NoError(t, store.PutBlock(ctx, 1, 0, []byte("group0")))
+
+		bucket01Dir := filepath.Join(dataDir, "chunks", "01")
+		t.Cleanup(func() {
+			_ = os.Chmod(bucket01Dir, 0o755)
+		})
+		require.NoError(t, os.Chmod(bucket01Dir, 0o300))
+
+		// 1000193 = 0x0f4301: 1000193 % 256 == 1 ("01"), 1000193 / 1_000_000 == 1 ("1")
+		err := store.PutBlock(ctx, 1000193, 0, []byte("group1"))
+		require.Error(t, err)
+		require.ErrorIs(t, err, meta.ErrIO)
+	})
+}
+
+func TestLocalFSBlockStore_EnsureDirSynced_RootAndAboveParentRetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("跳过权限测试: root 用户忽略 POSIX 0o300 目录只写不可读限制")
+	}
+
+	ctx := context.Background()
+
+	t.Run("不存在的 dataDir 创建后其父目录 syncDir 失败，再次调用仍须报错直至父目录同步成功", func(t *testing.T) {
+		parent := t.TempDir()
+		dataDir := filepath.Join(parent, "data")
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		t.Cleanup(func() {
+			_ = os.Chmod(parent, 0o755)
+		})
+		require.NoError(t, os.Chmod(parent, 0o300))
+
+		// 第 1 次调用：创建 parent/data 子目录，但 syncDir(parent) 失败
+		err1 := store.PutBlock(ctx, 1, 0, []byte("first"))
+		require.ErrorIs(t, err1, meta.ErrIO)
+
+		// 保持 parent 为 0o300 不变，第 2 次调用不得因为 dataDir 已创建就跳过 syncDir(parent)
+		err2 := store.PutBlock(ctx, 1, 0, []byte("first"))
+		require.ErrorIs(t, err2, meta.ErrIO)
+
+		// 恢复 parent 为 0o755，第 3 次调用必须成功且能完整读出
+		require.NoError(t, os.Chmod(parent, 0o755))
+		err3 := store.PutBlock(ctx, 1, 0, []byte("first"))
+		require.NoError(t, err3)
+
+		got := make([]byte, len("first"))
+		readErr := store.GetBlock(ctx, 1, 0, uint32(len("first")), 0, got)
+		require.NoError(t, readErr)
+		assert.Equal(t, []byte("first"), got)
+	})
+
+	t.Run("dataDir 之上存在多级未创建目录如 parent/bowl/data 时必须同步最外层 parent", func(t *testing.T) {
+		parent := t.TempDir()
+		dataDir := filepath.Join(parent, "bowl", "data")
+		store := meta.NewLocalFSBlockStore(dataDir)
+
+		t.Cleanup(func() {
+			_ = os.Chmod(parent, 0o755)
+		})
+		require.NoError(t, os.Chmod(parent, 0o300))
+
+		err := store.PutBlock(ctx, 1, 0, []byte("nested-base"))
+		require.ErrorIs(t, err, meta.ErrIO)
+	})
+}

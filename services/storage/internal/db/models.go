@@ -10,7 +10,7 @@ import (
 
 type Chunk struct {
 	Ino    int64  `json:"ino"`
-	Indx   int32  `json:"indx"`
+	Indx   int64  `json:"indx"`
 	Slices []byte `json:"slices"`
 }
 

@@ -22,7 +22,7 @@ import (
 	metamock "github.com/starsrc/bowl/services/storage/internal/meta/mock"
 )
 
-func inodeToRow(inode db.Inode, indx pgtype.Int4, sliceData []byte) db.GetInodeSizeAndChunksInRangeRow {
+func inodeToRow(inode db.Inode, indx pgtype.Int8, sliceData []byte) db.GetInodeSizeAndChunksInRangeRow {
 	return db.GetInodeSizeAndChunksInRangeRow{
 		Ino:           inode.Ino,
 		Generation:    inode.Generation,
@@ -194,7 +194,7 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(dirRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(dirRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -224,7 +224,7 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(sockRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(sockRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -251,7 +251,7 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(baseFileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -286,7 +286,7 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(baseFileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -325,7 +325,7 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(baseFileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -366,7 +366,7 @@ func TestRead_HandleAndFileTypeValidation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(baseFileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(baseFileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -424,7 +424,7 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(fileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -465,7 +465,7 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(fileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -506,7 +506,7 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(fileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -559,7 +559,7 @@ func TestRead_EOFAndTruncation(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, rawSlices),
+				inodeToRow(fileRow, pgtype.Int8{Int64: 0, Valid: true}, rawSlices),
 			}, nil).
 			Once()
 
@@ -636,7 +636,7 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(fileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -679,7 +679,7 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, []byte{}),
+				inodeToRow(fileRow, pgtype.Int8{Int64: 0, Valid: true}, []byte{}),
 			}, nil).
 			Once()
 
@@ -732,7 +732,7 @@ func TestRead_SparseHolesAndUnwrittenChunks(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, rawSlices),
+				inodeToRow(fileRow, pgtype.Int8{Int64: 0, Valid: true}, rawSlices),
 			}, nil).
 			Once()
 
@@ -809,7 +809,7 @@ func TestRead_SequentialAndOverwrites(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, chunkSlices),
+				inodeToRow(fileRow, pgtype.Int8{Int64: 0, Valid: true}, chunkSlices),
 			}, nil).
 			Once()
 		mockQuerier.EXPECT().
@@ -1116,7 +1116,7 @@ func TestRead_AtimeModeAndSessionRenew(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(fileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 		mockQuerier.EXPECT().
@@ -1272,7 +1272,7 @@ func TestRead_AtimeModeAndSessionRenew(t *testing.T) {
 				EndIndx:   0,
 			}).
 			Return([]db.GetInodeSizeAndChunksInRangeRow{
-				inodeToRow(fileRow, pgtype.Int4{Valid: false}, nil),
+				inodeToRow(fileRow, pgtype.Int8{Valid: false}, nil),
 			}, nil).
 			Once()
 
@@ -1343,7 +1343,7 @@ func TestRead_BlockStoreIOError(t *testing.T) {
 			EndIndx:   0,
 		}).
 		Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, meta.EncodeSlice(sliceDesc)),
+			inodeToRow(fileRow, pgtype.Int8{Int64: 0, Valid: true}, meta.EncodeSlice(sliceDesc)),
 		}, nil).
 		Once()
 
@@ -1427,7 +1427,7 @@ func TestRead_LocalFSBlockStoreIntegration(t *testing.T) {
 			EndIndx:   0,
 		}).
 		Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(fileRow, pgtype.Int4{Int32: 0, Valid: true}, meta.EncodeSlice(sliceDesc)),
+			inodeToRow(fileRow, pgtype.Int8{Int64: 0, Valid: true}, meta.EncodeSlice(sliceDesc)),
 		}, nil).
 		Once()
 
@@ -1496,7 +1496,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+			inodeToRow(baseFileRow, pgtype.Int8{Int64: 0, Valid: true}, slice101),
 		}, nil).Once()
 
 		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
@@ -1518,7 +1518,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice202),
+			inodeToRow(baseFileRow, pgtype.Int8{Int64: 0, Valid: true}, slice202),
 		}, nil).Once()
 
 		// 成功锁定 [202]
@@ -1562,7 +1562,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+			inodeToRow(baseFileRow, pgtype.Int8{Int64: 0, Valid: true}, slice101),
 		}, nil).Once()
 
 		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
@@ -1585,7 +1585,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(truncatedRow, pgtype.Int4{Valid: false}, nil),
+			inodeToRow(truncatedRow, pgtype.Int8{Valid: false}, nil),
 		}, nil).Once()
 
 		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
@@ -1615,7 +1615,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+			inodeToRow(baseFileRow, pgtype.Int8{Int64: 0, Valid: true}, slice101),
 		}, nil).Once()
 
 		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
@@ -1663,7 +1663,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+			inodeToRow(baseFileRow, pgtype.Int8{Int64: 0, Valid: true}, slice101),
 		}, nil).Once()
 
 		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{
@@ -1707,7 +1707,7 @@ func TestRead_SliceRefLockRetryAndExhaustion(t *testing.T) {
 			StartIndx: 0,
 			EndIndx:   0,
 		}).Return([]db.GetInodeSizeAndChunksInRangeRow{
-			inodeToRow(baseFileRow, pgtype.Int4{Int32: 0, Valid: true}, slice101),
+			inodeToRow(baseFileRow, pgtype.Int8{Int64: 0, Valid: true}, slice101),
 		}, nil).Times(8)
 
 		mockQuerier.EXPECT().GetFileHandle(mock.Anything, db.GetFileHandleParams{

@@ -21,9 +21,10 @@
    - **用户态零缓存直通**：第一阶段客户端进程不引入任何用户态内存或本地磁盘缓存，所有 FUSE 操作直通 `StorageService`；挂载时禁用内核异步 `writeback_cache` 以确保每次写入同步直达服务端，协商 `MaxWrite = 1 MiB` 并在读写超 `4 MiB` 时按 `4 MiB` 边界分片调用 RPC。
    - **透传服务端内核缓存指令以保留 `mmap`**：客户端原样透传服务端响应中的 `entry_timeout_seconds`、`attr_timeout_seconds` 与 `open_flags`（服务端默认 `OpenKeepCache = false` 实现跨客户端打开时刷新），默认不强制置位 `FOPEN_DIRECT_IO` 以确保 `mmap` 与挂载点可执行二进制文件正常运行（另提供 `--direct-io` 可选开关）。
    - **根 `Inode` 双向重写与本地内核权限强制校验**：在 FUSE 适配边界对所有请求入参与目录遍历（含 `.` / `..`）结果执行内核根节点 `1` 与服务端 `Disk.root_ino` 的双向转换；默认强制开启 FUSE 内核 `default_permissions` 由 Linux VFS 本地执行标准 POSIX `rwx` 及 Sticky Bit 校验，创建类操作透传请求头真实 `uid / gid`，暴露 `--allow-other` 与 `--ro` 选项，并通过 `Ioctl` 将 `FS_IOC_GETFLAGS` / `FS_IOC_SETFLAGS` 桥接至 `GetAttr` / `SetAttr(flags)`。
-3. **`ClientSession` 自适应续期、超期会话轮换与有界网络重试**：
+3. **`ClientSession` 自适应续期、超期会话轮换、有界网络重试与待释放句柄异步重试队列**：
    - **自适应心跳与会话轮换自愈**：客户端启动时生成随机 63 位正整数 `session_id` 调用 `RenewSession`，并按服务端返回的 `expires_at` 剩余时长 `1/3` 动态调度续期心跳。若网络中断恢复后检测到原租约已超期回收（`session_recreated == true`），立即记录告警并原子切换为全新 `session_id`：保障后续新打开的文件立即恢复正常服务，同时令断网前已丢失服务端 `FileLock` 与句柄的老文件描述符诚实返回 `EBADF`（严禁静默伪造重开句柄掩盖锁丢失）。
    - **错误无损提取与有界重试**：解析 ConnectRPC 错误详情中的 `google.rpc.ErrorInfo.Reason` 映射为 Linux `syscall.Errno`；仅对传输层未送达的连接瞬断及只读/幂等 RPC 执行总长不超过 `5s` 的指数退避重试（收到内核 `cancel` 中断时立即返回 `EINTR`），重试耗尽返回 `EIO`，防止服务端停机时宿主机进程永久挂死。
+   - **待释放句柄异步重试队列**：由于 FUSE `Release` 与 `ReleaseDir` 回调不向内核返回错误码，客户端在同步解绑本地句柄会话映射的同时，维护轻量待释放句柄重试队列：当 `Release` / `ReleaseDir` 因网络闪断、超时或中断错误失败时入队由后台协程周期重试（在 `OnUnmount` 卸载时停止后台循环并尽力冲刷队列），将服务端返回的 `EBADF` / `ENOENT` / `EINVAL` 视为已完成销毁直接出队，并在 `ClientSession` 发生超期轮换时自动丢弃旧会话的待释放项，避免长稳活跃会话下瞬断导致服务端句柄与关联 BSD `flock` 或孤儿节点延迟回收。
 4. **直接使用上游官方 `github.com/hanwen/go-fuse/v2`**：
    - 直接依赖上游官方稳定版 `github.com/hanwen/go-fuse/v2`，不为低频匿名 `open(O_TMPFILE)` 维护私有底层库 Fork（内核下发 `FUSE_TMPFILE` 时按标准未实现操作码降级返回 `EOPNOTSUPP`，常规具名临时文件如 `mkstemp` 不受影响）。
 5. **独立特权测试容器与 `Taskfile.yml` 闭环验证**：

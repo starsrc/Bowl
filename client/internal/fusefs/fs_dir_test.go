@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
@@ -172,6 +174,140 @@ func TestRawFS_OpenDir_And_ReleaseDir(t *testing.T) {
 	// 校验句柄已解绑，再次 ResolveHandle 应返回 EBADF
 	_, resolveSt = rawFS.ResolveHandle(8888)
 	require.Equal(t, fuse.EBADF, resolveSt)
+}
+
+func TestRawFS_ReleaseDir(t *testing.T) {
+	mockServer := &mockDirStorageServer{}
+	client := setupDirTestRPCServer(t, mockServer)
+	mgr := createTestSessionManager(t, client)
+
+	t.Run("transient network error enqueues async retry until server succeeds or returns ENOENT", func(t *testing.T) {
+		retryFS := fusefs.NewRawFS(client, mgr, fusefs.Config{
+			DiskID:               "00000000-0000-0000-0000-000000000001",
+			RootIno:              1001,
+			ReleaseRetryInterval: 15 * time.Millisecond,
+		})
+		t.Cleanup(retryFS.OnUnmount)
+
+		// 1. 初次网络失败，后续重试成功
+		fh1 := uint64(8889)
+		mgr.BindHandle(fh1, mgr.CurrentSessionID())
+
+		var attempts1 atomic.Int32
+		mockServer.releaseDirFn = func(ctx context.Context, req *connect.Request[storagev1.ReleaseDirRequest]) (*connect.Response[storagev1.ReleaseDirResponse], error) {
+			if req.Msg.GetFh() != fh1 {
+				return connect.NewResponse(&storagev1.ReleaseDirResponse{}), nil
+			}
+			n := attempts1.Add(1)
+			if n < 3 {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("temporary network failure"))
+			}
+			return connect.NewResponse(&storagev1.ReleaseDirResponse{}), nil
+		}
+
+		retryFS.ReleaseDir(&fuse.ReleaseIn{
+			InHeader: fuse.InHeader{NodeId: 1},
+			Fh:       fh1,
+		})
+
+		// 本地句柄立即解绑
+		_, st := retryFS.ResolveHandle(fh1)
+		require.Equal(t, fuse.EBADF, st, "初次 ReleaseDir 失败后本地句柄仍须立即解绑")
+
+		require.Eventually(t, func() bool {
+			return attempts1.Load() == 3
+		}, 150*time.Millisecond, 5*time.Millisecond, "后台重试队列应自动重发 ReleaseDir 直至服务端成功")
+
+		time.Sleep(45 * time.Millisecond)
+		require.Equal(t, int32(3), attempts1.Load())
+
+		// 2. 初次失败入队，重试期间服务端返回 ENOENT（视为已完成销毁并出队）
+		fh2 := uint64(8890)
+		mgr.BindHandle(fh2, mgr.CurrentSessionID())
+
+		var attempts2 atomic.Int32
+		mockServer.releaseDirFn = func(ctx context.Context, req *connect.Request[storagev1.ReleaseDirRequest]) (*connect.Response[storagev1.ReleaseDirResponse], error) {
+			if req.Msg.GetFh() != fh2 {
+				return connect.NewResponse(&storagev1.ReleaseDirResponse{}), nil
+			}
+			n := attempts2.Add(1)
+			if n == 1 {
+				return nil, connect.NewError(connect.CodeDeadlineExceeded, errors.New("timeout"))
+			}
+			cerr := connect.NewError(connect.CodeNotFound, errors.New("dir handle not found"))
+			detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+				Reason: "ENOENT",
+				Domain: "bowl.storage",
+			})
+			require.NoError(t, err)
+			cerr.AddDetail(detail)
+			return nil, cerr
+		}
+
+		retryFS.ReleaseDir(&fuse.ReleaseIn{
+			InHeader: fuse.InHeader{NodeId: 1},
+			Fh:       fh2,
+		})
+
+		require.Eventually(t, func() bool {
+			return attempts2.Load() == 2
+		}, 150*time.Millisecond, 5*time.Millisecond, "重试收到 ENOENT 后应停止重试")
+
+		time.Sleep(45 * time.Millisecond)
+		require.Equal(t, int32(2), attempts2.Load(), "ENOENT 视为已完成销毁，出队后不再重发")
+	})
+
+	t.Run("session rotation drops stale session pending releasedir items", func(t *testing.T) {
+		var rotateFlag atomic.Bool
+		localSrv := &mockDirStorageServer{
+			renewSessionFn: func(ctx context.Context, req *connect.Request[storagev1.RenewSessionRequest]) (*connect.Response[storagev1.RenewSessionResponse], error) {
+				recreated := rotateFlag.Swap(false)
+				return connect.NewResponse(&storagev1.RenewSessionResponse{
+					ExpiresAt:        timestamppb.New(time.Now().Add(60 * time.Millisecond)),
+					SessionRecreated: recreated,
+				}), nil
+			},
+		}
+		localClient := setupDirTestRPCServer(t, localSrv)
+		localMgr, err := session.New(context.Background(), localClient, session.Config{
+			MinInterval: 15 * time.Millisecond,
+			MaxInterval: 30 * time.Millisecond,
+		})
+		require.NoError(t, err)
+		require.NoError(t, localMgr.Start(context.Background()))
+		t.Cleanup(func() { _ = localMgr.Close() })
+
+		oldSID := localMgr.CurrentSessionID()
+		retryFS := fusefs.NewRawFS(localClient, localMgr, fusefs.Config{
+			DiskID:               "00000000-0000-0000-0000-000000000001",
+			RootIno:              1001,
+			ReleaseRetryInterval: 80 * time.Millisecond,
+		})
+		t.Cleanup(retryFS.OnUnmount)
+
+		fh := uint64(8891)
+		localMgr.BindHandle(fh, oldSID)
+
+		var releaseDirCalls atomic.Int32
+		localSrv.releaseDirFn = func(ctx context.Context, req *connect.Request[storagev1.ReleaseDirRequest]) (*connect.Response[storagev1.ReleaseDirResponse], error) {
+			releaseDirCalls.Add(1)
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("network down"))
+		}
+
+		retryFS.ReleaseDir(&fuse.ReleaseIn{
+			InHeader: fuse.InHeader{NodeId: 1},
+			Fh:       fh,
+		})
+		require.Equal(t, int32(1), releaseDirCalls.Load())
+
+		rotateFlag.Store(true)
+		require.Eventually(t, func() bool {
+			return localMgr.CurrentSessionID() != oldSID
+		}, 500*time.Millisecond, 10*time.Millisecond, "会话应完成轮换")
+
+		time.Sleep(120 * time.Millisecond)
+		require.Equal(t, int32(1), releaseDirCalls.Load(), "会话轮换后队列应自动丢弃旧会话待释放目录句柄，不再发送 RPC")
+	})
 }
 
 func TestRawFS_ReadDir(t *testing.T) {

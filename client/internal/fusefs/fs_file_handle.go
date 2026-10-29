@@ -224,11 +224,15 @@ func (fs *RawFS) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 	lockOwner := input.LockOwner
 	releaseFlags := input.ReleaseFlags & 0x3
 
-	_, _ = fs.client.Release(ctx, connect.NewRequest(&storagev1.ReleaseRequest{
+	req := &storagev1.ReleaseRequest{
 		Ino:          ino,
 		Fh:           input.Fh,
 		LockOwner:    &lockOwner,
 		ReleaseFlags: releaseFlags,
 		SessionId:    &sid,
-	}))
+	}
+	_, err := fs.client.Release(ctx, connect.NewRequest(req))
+	if shouldEnqueueReleaseRetry(err) {
+		fs.enqueueReleaseFileRetry(req, sid)
+	}
 }

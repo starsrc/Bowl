@@ -184,8 +184,10 @@ func (fs *RawFS) ReleaseDir(input *fuse.ReleaseIn) {
 	}
 
 	var sessionIDPtr *uint64
+	var sid uint64
 	if fs.sessions != nil {
-		sid, ok := fs.sessions.LookupHandleSession(input.Fh)
+		var ok bool
+		sid, ok = fs.sessions.LookupHandleSession(input.Fh)
 		if !ok {
 			return
 		}
@@ -197,9 +199,13 @@ func (fs *RawFS) ReleaseDir(input *fuse.ReleaseIn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = fs.client.ReleaseDir(ctx, connect.NewRequest(&storagev1.ReleaseDirRequest{
+	req := &storagev1.ReleaseDirRequest{
 		Ino:       ino,
 		Fh:        input.Fh,
 		SessionId: sessionIDPtr,
-	}))
+	}
+	_, err := fs.client.ReleaseDir(ctx, connect.NewRequest(req))
+	if shouldEnqueueReleaseRetry(err) {
+		fs.enqueueReleaseDirRetry(req, sid)
+	}
 }

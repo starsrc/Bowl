@@ -1,9 +1,16 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"math"
+	"net"
+	"net/http"
 	"net/http/httptest"
+	"runtime/pprof"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"golang.org/x/net/http2/hpack"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -729,4 +738,171 @@ func TestServer_WatchSession(t *testing.T) {
 			t.Fatal("新流退出后应触发 CloseSession")
 		}
 	})
+}
+
+// TestServer_WatchSession_EvictionTerminatesBlockedHandler 验证 HTTP/2 零接收窗口使 stream.Send 阻塞时，驱逐流能通过 ResponseController 终止其发送与处理器生命周期。
+func TestServer_WatchSession_EvictionTerminatesBlockedHandler(t *testing.T) {
+	hub := meta.NewSessionWatchHub()
+	const sid = uint64(30303)
+	mgr := metamock.NewMockManager(t)
+	mgr.EXPECT().ValidateWatchSession(sid, (*string)(nil)).Return(nil).Once()
+	mgr.EXPECT().WatchHub().Return(hub).Once()
+	srv, err := server.New(server.Params{Config: defaultTestConfig(), MetaManager: mgr})
+	require.NoError(t, err)
+	handlerDone := make(chan struct{})
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		srv.Handler().ServeHTTP(w, r)
+	}))
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	ts.Config.Protocols = &protocols
+	ts.Start()
+	defer ts.Close()
+	conn, err := net.DialTimeout("tcp", ts.Listener.Addr().String(), time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	framer := http2.NewFramer(conn, conn)
+	_, err = conn.Write([]byte(http2.ClientPreface))
+	require.NoError(t, err)
+	require.NoError(t, framer.WriteSettings(http2.Setting{ID: http2.SettingInitialWindowSize, Val: 0}))
+	var headers bytes.Buffer
+	encoder := hpack.NewEncoder(&headers)
+	for _, field := range []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "http"},
+		{Name: ":authority", Value: ts.Listener.Addr().String()},
+		{Name: ":path", Value: storagev1connect.StorageServiceWatchSessionProcedure},
+		{Name: "content-type", Value: "application/grpc"},
+		{Name: "te", Value: "trailers"},
+	} {
+		require.NoError(t, encoder.WriteField(field))
+	}
+	require.NoError(t, framer.WriteHeaders(http2.HeadersFrameParam{StreamID: 1, BlockFragment: headers.Bytes(), EndHeaders: true}))
+	payload, err := proto.Marshal(&storagev1.WatchSessionRequest{SessionId: sid})
+	require.NoError(t, err)
+	envelope := make([]byte, 5+len(payload))
+	binary.BigEndian.PutUint32(envelope[1:5], uint32(len(payload)))
+	copy(envelope[5:], payload)
+	require.NoError(t, framer.WriteData(1, false, envelope))
+	readerDone := make(chan struct{})
+	var writeMu sync.Mutex
+	go func() {
+		defer close(readerDone)
+		for {
+			frame, readErr := framer.ReadFrame()
+			if readErr != nil {
+				return
+			}
+			if settings, ok := frame.(*http2.SettingsFrame); ok && !settings.IsAck() {
+				writeMu.Lock()
+				ackErr := framer.WriteSettingsAck()
+				writeMu.Unlock()
+				if ackErr != nil {
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		require.NoError(t, conn.Close())
+		select {
+		case <-readerDone:
+		case <-time.After(time.Second):
+			t.Error("HTTP/2 读协程未退出")
+		}
+		select {
+		case <-handlerDone:
+		case <-time.After(time.Second):
+			t.Error("连接关闭后处理器未退出")
+		}
+	}()
+	countBlockedSenders := func() int {
+		var stacks bytes.Buffer
+		require.NoError(t, pprof.Lookup("goroutine").WriteTo(&stacks, 2))
+		count := 0
+		for _, stack := range strings.Split(stacks.String(), "\n\n") {
+			if strings.Contains(stack, "server.(*Server).WatchSession") && strings.Contains(stack, "connect.(*BidiStream[") {
+				count++
+			}
+		}
+		return count
+	}
+	require.Eventually(t, func() bool { return countBlockedSenders() == 1 }, time.Second, time.Millisecond,
+		"首帧确认必须已进入真实 HTTP/2 阻塞发送")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.False(t, hub.Probe(ctx, sid, 10*time.Millisecond))
+	hub.Evict(sid)
+	require.False(t, hub.HasActiveStream(sid))
+	select {
+	case <-handlerDone:
+	case <-time.After(200 * time.Millisecond):
+		assert.Fail(t, "流驱逐后 WatchSession 处理器仍未退出", "真实 HTTP/2 阻塞发送协程数量=%d", countBlockedSenders())
+	}
+	assert.Zero(t, countBlockedSenders(), "流驱逐后必须释放真实 stream.Send 协程")
+}
+
+// TestServer_WatchSession_CanceledWatchLeavesCommitGateWait 验证等待同会话提交门控的 HTTP/2 请求取消后立即释放处理器与内部发送协程，且不调用 CloseSession。
+func TestServer_WatchSession_CanceledWatchLeavesCommitGateWait(t *testing.T) {
+	hub := meta.NewSessionWatchHub()
+	const sid = uint64(50505)
+	allowed, unlock := hub.AcquireAutoCloseGate(sid, 0)
+	require.True(t, allowed)
+	defer unlock()
+	mgr := metamock.NewMockManager(t)
+	mgr.EXPECT().ValidateWatchSession(sid, (*string)(nil)).Return(nil).Once()
+	mgr.EXPECT().WatchHub().Return(hub).Once()
+	srv, err := server.New(server.Params{Config: defaultTestConfig(), MetaManager: mgr})
+	require.NoError(t, err)
+	handlerDone := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		go func() { <-r.Context().Done(); close(requestCanceled) }()
+		srv.Handler().ServeHTTP(w, r)
+	}))
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer func() {
+		unlock()
+		ts.CloseClientConnections()
+		ts.Close()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	client := storagev1connect.NewStorageServiceClient(ts.Client(), ts.URL, connect.WithGRPC())
+	stream := client.WatchSession(ctx)
+	require.NoError(t, stream.Send(&storagev1.WatchSessionRequest{SessionId: sid}))
+	require.Eventually(t, func() bool {
+		var stacks bytes.Buffer
+		require.NoError(t, pprof.Lookup("goroutine").WriteTo(&stacks, 2))
+		return strings.Contains(stacks.String(), "meta.(*SessionWatchHub).Register")
+	}, time.Second, time.Millisecond, "请求应已进入会话提交门控等待")
+	cancel()
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("服务端未收到 HTTP/2 请求取消")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Error("HTTP/2 上下文已取消，但 WatchSession 处理器仍等待提交门控，无法释放请求及发送协程")
+	}
+	unlock()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Error("释放门控后处理器仍未退出")
+	}
+	mgr.AssertNotCalled(t, "CloseSession", testifymock.Anything, sid)
+	assert.Zero(t, hub.LatestStreamID(sid), "已在门控等待中取消的请求不得在门控释放后登记新流")
+
+	var postStacks bytes.Buffer
+	require.NoError(t, pprof.Lookup("goroutine").WriteTo(&postStacks, 2))
+	leakedSenders := strings.Count(postStacks.String(), "created by github.com/starsrc/bowl/services/storage/internal/server.(*Server).WatchSession")
+	assert.Zero(t, leakedSenders, "WatchSession 内部发送协程必须已完全退出无残留")
 }

@@ -122,12 +122,6 @@ func TestUnlink_ChunksCleanup_Mock(t *testing.T) {
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, int64(childIno)).
 			Return(nil).Once()
 
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  -8192,
-			DeltaInodes: -1,
-		}).Return(nil).Once()
-
 		err := mgr.Unlink(ctx, parentIno, name)
 		require.NoError(t, err)
 	})
@@ -371,12 +365,6 @@ func TestRename_ChunksCleanup_Mock(t *testing.T) {
 
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, int64(targetIno)).
 			Return(nil).Once()
-
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  -8192,
-			DeltaInodes: -1,
-		}).Return(nil).Once()
 
 		// 更新源目录项至目标位置
 		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{

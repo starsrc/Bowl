@@ -942,15 +942,6 @@ func TestTmpFile_InheritRootInoAndQuotaIncrement(t *testing.T) {
 			Return(createdInodeRow, nil).
 			Once()
 
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}).
-			Return(nil).
-			Once()
-
 		createdHandleRow := db.FileHandle{
 			Fh:    expectedFh,
 			Ino:   int64(newIno),
@@ -978,62 +969,5 @@ func TestTmpFile_InheritRootInoAndQuotaIncrement(t *testing.T) {
 		assert.Equal(t, uint64(expectedFh), res.Fh)
 		require.NotNil(t, res.Inode)
 		assert.Equal(t, newIno, res.Inode.Ino)
-	})
-
-	t.Run("AddDiskQuotaByRootIno 失败时回滚事务并向上传播错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(baseParentRowWithRoot, nil).
-			Once()
-
-		createdInodeRow := db.Inode{
-			Ino:     int64(newIno),
-			Mode:    int32(meta.S_IFREG | 0o600),
-			Nlink:   0,
-			Uid:     1001,
-			Gid:     1002,
-			RootIno: rootIno,
-		}
-
-		mockQuerier.EXPECT().
-			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:    int32(meta.S_IFREG | 0o600),
-				Nlink:   0,
-				Uid:     1001,
-				Gid:     1002,
-				Rdev:    0,
-				RootIno: rootIno,
-			}).
-			Return(createdInodeRow, nil).
-			Once()
-
-		quotaErr := errors.New("failed to increment disk quota inodes for tmpfile")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}).
-			Return(quotaErr).
-			Once()
-
-		res, err := mgr.TmpFile(ctx, meta.TmpFileParams{
-			ParentIno: parentIno,
-			Mode:      0o600,
-			UID:       1001,
-			GID:       1002,
-			Flags:     meta.O_RDWR,
-		})
-
-		assert.Nil(t, res)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, quotaErr)
-		assert.Contains(t, err.Error(), "increment disk used_inodes")
 	})
 }

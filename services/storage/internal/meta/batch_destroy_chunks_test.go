@@ -212,7 +212,7 @@ func TestDeleteDisk_DeleteChunksError(t *testing.T) {
 
 	mockQuerier.EXPECT().
 		GetDiskForUpdate(mock.Anything, diskID).
-		Return(db.Disk{
+		Return(db.GetDiskForUpdateRow{
 			DiskID:  diskID,
 			RootIno: rootIno,
 		}, nil).

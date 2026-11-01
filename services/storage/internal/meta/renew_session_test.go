@@ -211,83 +211,9 @@ func TestRenewSession_Unit(t *testing.T) {
 			Return([][]byte(nil), nil).
 			Once()
 
-		var callOrder []int64
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     10,
-				DeltaBytes:  -3072,
-				DeltaInodes: -3,
-			}).
-			Run(func(_ context.Context, arg db.AddDiskQuotaByRootInoParams) {
-				callOrder = append(callOrder, arg.RootIno)
-			}).
-			Return(nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     20,
-				DeltaBytes:  -4096,
-				DeltaInodes: -2,
-			}).
-			Run(func(_ context.Context, arg db.AddDiskQuotaByRootInoParams) {
-				callOrder = append(callOrder, arg.RootIno)
-			}).
-			Return(nil).
-			Once()
-
 		expiresAt, err := mgr.RenewSession(ctx, sessID)
 		require.NoError(t, err)
 		assert.Equal(t, expectedExpires, expiresAt)
-		assert.Equal(t, []int64{10, 20}, callOrder, "必须按 root_ino 升序依次退还配额以保证锁顺序确定性")
-	})
-
-	t.Run("异常流: AddDiskQuotaByRootIno 失败中止事务并向上传播错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			DeleteExpiredClientSessions(mock.Anything).
-			Return(int64(0), nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			UpsertClientSession(mock.Anything, mock.Anything).
-			Return(db.ClientSession{
-				SessionID: int64(sessID),
-				ExpiresAt: pgtype.Timestamptz{Time: expectedExpires, Valid: true},
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteUnreferencedOrphanInodes(mock.Anything).
-			Return([]db.DeleteUnreferencedOrphanInodesRow{
-				{Ino: 201, RootIno: 10, Mode: int32(meta.S_IFREG | 0o644), Size: 4096},
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteChunksByInos(mock.Anything, []int64{201}).
-			Return([][]byte(nil), nil).
-			Once()
-
-		expectedErr := errors.New("update disk quota failed")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     10,
-				DeltaBytes:  -4096,
-				DeltaInodes: -1,
-			}).
-			Return(expectedErr).
-			Once()
-
-		expiresAt, err := mgr.RenewSession(ctx, sessID)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, expectedErr)
-		assert.True(t, expiresAt.IsZero())
 	})
 }
 
@@ -2011,7 +1937,6 @@ func TestSessionTouchThrottling_AllPaths_Unit(t *testing.T) {
 		// 1. Create
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(1)).Return(parentDir, nil).Once()
 		mockQuerier.EXPECT().CreateInode(mock.Anything, mock.Anything).Return(regInode, nil).Once()
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, mock.Anything).Return(nil).Once()
 		mockQuerier.EXPECT().CreateEntry(mock.Anything, mock.Anything).Return(nil).Once()
 		mockQuerier.EXPECT().TouchInodeTimestamps(mock.Anything, int64(1)).Return(nil).Once()
 		mockQuerier.EXPECT().CreateFileHandle(mock.Anything, mock.Anything).Return(db.FileHandle{Fh: 10, Ino: 100}, nil).Once()
@@ -2028,7 +1953,6 @@ func TestSessionTouchThrottling_AllPaths_Unit(t *testing.T) {
 		// 2. TmpFile（窗口内跳过续期）
 		mockQuerier.EXPECT().GetInodeForUpdate(mock.Anything, int64(1)).Return(parentDir, nil).Once()
 		mockQuerier.EXPECT().CreateInode(mock.Anything, mock.Anything).Return(db.Inode{Ino: 101, Mode: int32(meta.S_IFREG | 0o644), Nlink: 0, RootIno: 1}, nil).Once()
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, mock.Anything).Return(nil).Once()
 		mockQuerier.EXPECT().CreateFileHandle(mock.Anything, mock.Anything).Return(db.FileHandle{Fh: 11, Ino: 101}, nil).Once()
 
 		_, err = mgr.TmpFile(ctx, meta.TmpFileParams{

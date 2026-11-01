@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -13,56 +11,24 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
 
-const (
-	// DefaultDiskQuotaFlushBatchThreshold 定义触发立即异步合并刷盘的脏配额操作数阈值。
-	DefaultDiskQuotaFlushBatchThreshold = 64
-)
-
 type diskQuotaState struct {
-	rootIno        int64
-	diskID         pgtype.UUID
-	maxBytes       int64
-	baseUsedBytes  int64
-	baseInodes     int64
-	flushingBytes  int64
-	flushingInodes int64
-	dirtyBytes     int64
-	dirtyInodes    int64
-	reservedBytes  int64
-	loaded         bool
-}
-
-func (s *diskQuotaState) effectiveCommittedBytes() int64 {
-	v := s.baseUsedBytes + s.flushingBytes + s.dirtyBytes
-	if v < 0 {
-		return 0
-	}
-	return v
+	rootIno       int64
+	diskID        pgtype.UUID
+	maxBytes      int64
+	usedBytes     int64
+	usedInodes    int64
+	reservedBytes int64
+	pendingBytes  int64
+	pendingInodes int64
+	loaded        bool
 }
 
 func (s *diskQuotaState) effectiveUsedBytesWithReserved() int64 {
-	return s.effectiveCommittedBytes() + s.reservedBytes
-}
-
-func (s *diskQuotaState) effectiveCommittedInodes() int64 {
-	v := s.baseInodes + s.flushingInodes + s.dirtyInodes
+	v := s.usedBytes + s.reservedBytes
 	if v < 0 {
 		return 0
 	}
 	return v
-}
-
-// WithDiskQuotaFlushInterval 配置磁盘配额（used_bytes / used_inodes）在内存中预留与异步批量合并刷盘的时间窗口。
-// 当 d > 0 且底层 Store 为真实 PostgreSQL 连接池时，元数据与数据写事务免除事务内对 disks 表的行级排他锁，改为内存原子预留与后台按 root_ino 批量合并刷盘；
-// 当 d == 0 时保持事务内同步更新 disks 表。
-func WithDiskQuotaFlushInterval(d time.Duration) Option {
-	return func(m *manager) {
-		if d <= 0 {
-			m.diskQuotaFlushInterval = 0
-		} else {
-			m.diskQuotaFlushInterval = d
-		}
-	}
 }
 
 func isNativeTxQuerier(q db.Querier) bool {
@@ -70,16 +36,12 @@ func isNativeTxQuerier(q db.Querier) bool {
 	return ok && r != nil && r.RawDBTX() != nil
 }
 
-func (m *manager) isAsyncDiskQuotaEnabled() bool {
-	if m == nil || m.diskQuotaFlushInterval <= 0 {
+func (m *manager) hasPool() bool {
+	if m == nil {
 		return false
 	}
 	pp, ok := m.store.(poolProvider)
 	return ok && pp != nil && pp.Pool() != nil
-}
-
-func (m *manager) shouldUseAsyncDiskQuota(q db.Querier) bool {
-	return m.isAsyncDiskQuotaEnabled() && isNativeTxQuerier(q)
 }
 
 func (m *manager) getOrCreateDiskQuotaStateLocked(rootIno int64) *diskQuotaState {
@@ -94,7 +56,7 @@ func (m *manager) getOrCreateDiskQuotaStateLocked(rootIno int64) *diskQuotaState
 	return st
 }
 
-func (m *manager) initDiskQuotaOnCreate(row db.Disk) {
+func (m *manager) initDiskQuotaOnCreate(row db.GetDiskRow) {
 	if row.RootIno <= 0 {
 		return
 	}
@@ -102,18 +64,16 @@ func (m *manager) initDiskQuotaOnCreate(row db.Disk) {
 	st := m.getOrCreateDiskQuotaStateLocked(row.RootIno)
 	st.diskID = row.DiskID
 	st.maxBytes = row.MaxBytes
-	st.baseUsedBytes = row.UsedBytes
-	st.baseInodes = row.UsedInodes
-	st.flushingBytes = 0
-	st.flushingInodes = 0
-	st.dirtyBytes = 0
-	st.dirtyInodes = 0
+	st.usedBytes = max(int64(0), row.UsedBytes)
+	st.usedInodes = max(int64(0), row.UsedInodes)
 	st.reservedBytes = 0
+	st.pendingBytes = 0
+	st.pendingInodes = 0
 	st.loaded = true
 	m.quotaMu.Unlock()
 }
 
-func (m *manager) updateDiskQuotaOnUpdate(row db.Disk) {
+func (m *manager) updateDiskQuotaOnUpdate(row db.GetDiskRow) {
 	if row.RootIno <= 0 {
 		return
 	}
@@ -122,14 +82,16 @@ func (m *manager) updateDiskQuotaOnUpdate(row db.Disk) {
 	st.diskID = row.DiskID
 	st.maxBytes = row.MaxBytes
 	if !st.loaded {
-		st.baseUsedBytes = row.UsedBytes
-		st.baseInodes = row.UsedInodes
+		st.usedBytes = max(int64(0), row.UsedBytes+st.pendingBytes)
+		st.usedInodes = max(int64(0), row.UsedInodes+st.pendingInodes)
+		st.pendingBytes = 0
+		st.pendingInodes = 0
 		st.loaded = true
 	}
 	m.quotaMu.Unlock()
 }
 
-func (m *manager) evictDiskQuota(rootIno int64) {
+func (m *manager) deleteDiskQuotaState(rootIno int64) {
 	if rootIno <= 0 {
 		return
 	}
@@ -138,17 +100,11 @@ func (m *manager) evictDiskQuota(rootIno int64) {
 	m.quotaMu.Unlock()
 }
 
+func (m *manager) evictDiskQuota(rootIno int64) {
+	m.deleteDiskQuotaState(rootIno)
+}
+
 func (m *manager) ensureDiskQuotaLoaded(ctx context.Context, rootIno int64) (*diskQuotaState, bool, error) {
-	m.quotaMu.Lock()
-	if st, ok := m.diskQuotas[rootIno]; ok && st.loaded {
-		m.quotaMu.Unlock()
-		return st, true, nil
-	}
-	m.quotaMu.Unlock()
-
-	m.quotaFlushExecMu.Lock()
-	defer m.quotaFlushExecMu.Unlock()
-
 	m.quotaMu.Lock()
 	if st, ok := m.diskQuotas[rootIno]; ok && st.loaded {
 		m.quotaMu.Unlock()
@@ -169,198 +125,93 @@ func (m *manager) ensureDiskQuotaLoaded(ctx context.Context, rootIno int64) (*di
 	if !st.loaded {
 		st.diskID = row.DiskID
 		st.maxBytes = row.MaxBytes
-		st.baseUsedBytes = row.UsedBytes
-		st.baseInodes = row.UsedInodes
+		st.usedBytes = max(int64(0), row.UsedBytes+st.pendingBytes)
+		st.usedInodes = max(int64(0), row.UsedInodes+st.pendingInodes)
+		st.pendingBytes = 0
+		st.pendingInodes = 0
 		st.loaded = true
 	}
 	m.quotaMu.Unlock()
 	return st, true, nil
 }
 
-func (m *manager) syncDiskRowWithQuotaState(ctx context.Context, row *db.Disk) error {
-	if row == nil || row.RootIno <= 0 || !m.isAsyncDiskQuotaEnabled() {
-		return nil
+func (m *manager) ensureDiskQuotaLoadedInTx(ctx context.Context, q db.Querier, rootIno int64) (*diskQuotaState, bool, error) {
+	if m.hasPool() {
+		return m.ensureDiskQuotaLoaded(ctx, rootIno)
 	}
 
 	m.quotaMu.Lock()
-	st, ok := m.diskQuotas[row.RootIno]
-	if !ok {
-		st = m.getOrCreateDiskQuotaStateLocked(row.RootIno)
+	if st, ok := m.diskQuotas[rootIno]; ok && st.loaded {
+		m.quotaMu.Unlock()
+		return st, true, nil
+	}
+	m.quotaMu.Unlock()
+
+	row, err := q.GetDiskByRootInoForUpdate(ctx, rootIno)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("get disk by root_ino %d for update: %w", rootIno, err)
+	}
+
+	m.quotaMu.Lock()
+	st := m.getOrCreateDiskQuotaStateLocked(rootIno)
+	if !st.loaded {
 		st.diskID = row.DiskID
 		st.maxBytes = row.MaxBytes
-		st.baseUsedBytes = row.UsedBytes
-		st.baseInodes = row.UsedInodes
+		st.usedBytes = max(int64(0), row.UsedBytes+st.pendingBytes)
+		st.usedInodes = max(int64(0), row.UsedInodes+st.pendingInodes)
+		st.pendingBytes = 0
+		st.pendingInodes = 0
 		st.loaded = true
-		m.quotaMu.Unlock()
-		return nil
 	}
-	if st.loaded {
+	m.quotaMu.Unlock()
+	return st, true, nil
+}
+
+func (m *manager) syncDiskRowWithQuotaState(row *db.GetDiskRow) {
+	if row == nil || row.RootIno <= 0 {
+		return
+	}
+
+	m.quotaMu.Lock()
+	st := m.getOrCreateDiskQuotaStateLocked(row.RootIno)
+	if !st.loaded {
 		st.diskID = row.DiskID
 		st.maxBytes = row.MaxBytes
-		row.UsedBytes = st.effectiveCommittedBytes()
-		row.UsedInodes = st.effectiveCommittedInodes()
-		m.quotaMu.Unlock()
-		return nil
-	}
-	if st.dirtyBytes == 0 && st.dirtyInodes == 0 && st.flushingBytes == 0 && st.flushingInodes == 0 {
-		st.diskID = row.DiskID
-		st.maxBytes = row.MaxBytes
-		st.baseUsedBytes = row.UsedBytes
-		st.baseInodes = row.UsedInodes
+		st.usedBytes = max(int64(0), row.UsedBytes+st.pendingBytes)
+		st.usedInodes = max(int64(0), row.UsedInodes+st.pendingInodes)
+		st.pendingBytes = 0
+		st.pendingInodes = 0
 		st.loaded = true
+		row.UsedBytes = st.usedBytes
+		row.UsedInodes = st.usedInodes
 		m.quotaMu.Unlock()
-		return nil
+		return
 	}
+
+	st.diskID = row.DiskID
+	row.MaxBytes = st.maxBytes
+	row.UsedBytes = max(int64(0), st.usedBytes)
+	row.UsedInodes = max(int64(0), st.usedInodes)
 	m.quotaMu.Unlock()
+}
 
-	if err := m.FlushDiskQuotas(ctx); err != nil {
-		return err
+func (m *manager) currentDiskUsedBytes(rootIno int64, dbUsedBytes int64) uint64 {
+	used := max(int64(0), dbUsedBytes)
+	if rootIno <= 0 {
+		return uint64(used)
 	}
-	if _, found, err := m.ensureDiskQuotaLoaded(ctx, row.RootIno); err != nil {
-		return err
-	} else if !found {
-		return ErrNotFound
-	}
-
 	m.quotaMu.Lock()
-	if st, ok := m.diskQuotas[row.RootIno]; ok && st.loaded {
-		row.UsedBytes = st.effectiveCommittedBytes()
-		row.UsedInodes = st.effectiveCommittedInodes()
+	if st, ok := m.diskQuotas[rootIno]; ok && st.loaded {
+		memUsed := st.effectiveUsedBytesWithReserved()
+		if memUsed > used {
+			used = memUsed
+		}
 	}
 	m.quotaMu.Unlock()
-	return nil
-}
-
-func (m *manager) scheduleQuotaFlushLocked() {
-	if m.quotaFlushImmediateCh == nil {
-		m.quotaFlushImmediateCh = make(chan struct{}, 1)
-	}
-	if !m.quotaFlusherActive {
-		m.quotaFlusherActive = true
-		go m.runQuotaFlushLoop()
-	}
-	if m.dirtyQuotaOps >= DefaultDiskQuotaFlushBatchThreshold {
-		select {
-		case m.quotaFlushImmediateCh <- struct{}{}:
-		default:
-		}
-	}
-}
-
-func (m *manager) runQuotaFlushLoop() {
-	for {
-		interval := m.diskQuotaFlushInterval
-		if interval <= 0 {
-			interval = DefaultDiskQuotaFlushInterval
-		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-timer.C:
-		case <-m.quotaFlushImmediateCh:
-			timer.Stop()
-		}
-
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = m.FlushDiskQuotas(flushCtx)
-		cancel()
-
-		m.quotaMu.Lock()
-		hasDirty := false
-		for _, st := range m.diskQuotas {
-			if st.dirtyBytes != 0 || st.dirtyInodes != 0 {
-				hasDirty = true
-				break
-			}
-		}
-		if !hasDirty {
-			m.quotaFlusherActive = false
-			m.quotaMu.Unlock()
-			return
-		}
-		m.quotaMu.Unlock()
-	}
-}
-
-// FlushDiskQuotas 将内存中累积的所有未刷盘磁盘配额增量按 root_ino 升序批量合并刷入 PostgreSQL disks 表。
-func (m *manager) FlushDiskQuotas(ctx context.Context) error {
-	if m == nil || !m.isAsyncDiskQuotaEnabled() {
-		return nil
-	}
-
-	m.quotaFlushExecMu.Lock()
-	defer m.quotaFlushExecMu.Unlock()
-
-	type pendingFlush struct {
-		rootIno     int64
-		deltaBytes  int64
-		deltaInodes int64
-	}
-
-	m.quotaMu.Lock()
-	if len(m.diskQuotas) == 0 {
-		m.dirtyQuotaOps = 0
-		m.quotaMu.Unlock()
-		return nil
-	}
-	var batch []pendingFlush
-	for rootIno, st := range m.diskQuotas {
-		if st.dirtyBytes == 0 && st.dirtyInodes == 0 {
-			continue
-		}
-		batch = append(batch, pendingFlush{
-			rootIno:     rootIno,
-			deltaBytes:  st.dirtyBytes,
-			deltaInodes: st.dirtyInodes,
-		})
-		st.flushingBytes += st.dirtyBytes
-		st.flushingInodes += st.dirtyInodes
-		st.dirtyBytes = 0
-		st.dirtyInodes = 0
-	}
-	m.dirtyQuotaOps = 0
-	m.quotaMu.Unlock()
-
-	if len(batch) == 0 {
-		return nil
-	}
-
-	slices.SortFunc(batch, func(a, b pendingFlush) int {
-		if a.rootIno < b.rootIno {
-			return -1
-		}
-		if a.rootIno > b.rootIno {
-			return 1
-		}
-		return 0
-	})
-
-	var firstErr error
-	for _, item := range batch {
-		err := m.store.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-			RootIno:     item.rootIno,
-			DeltaBytes:  item.deltaBytes,
-			DeltaInodes: item.deltaInodes,
-		})
-		m.quotaMu.Lock()
-		st, exists := m.diskQuotas[item.rootIno]
-		if exists {
-			st.flushingBytes -= item.deltaBytes
-			st.flushingInodes -= item.deltaInodes
-			if err != nil {
-				st.dirtyBytes += item.deltaBytes
-				st.dirtyInodes += item.deltaInodes
-			} else if st.loaded {
-				st.baseUsedBytes = max(int64(0), st.baseUsedBytes+item.deltaBytes)
-				st.baseInodes = max(int64(0), st.baseInodes+item.deltaInodes)
-			}
-		}
-		m.quotaMu.Unlock()
-		if err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("flush disk quota for root_ino %d: %w", item.rootIno, err)
-		}
-	}
-
-	return firstErr
+	return uint64(used)
 }
 
 type quotaBufferedQuerier struct {
@@ -369,7 +220,6 @@ type quotaBufferedQuerier struct {
 	txReservedBytes   map[int64]int64
 	txUnreservedBytes map[int64]int64
 	txInodes          map[int64]int64
-	seenSnapshot      map[int64]bool
 }
 
 func (q *quotaBufferedQuerier) RawDBTX() db.DBTX {
@@ -379,89 +229,80 @@ func (q *quotaBufferedQuerier) RawDBTX() db.DBTX {
 	return nil
 }
 
-func (q *quotaBufferedQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
-	if rootIno <= 0 {
-		return db.Disk{}, pgx.ErrNoRows
+func quotaTxFromQuerier(q db.Querier) *quotaBufferedQuerier {
+	if bq, ok := q.(*quotaBufferedQuerier); ok {
+		return bq
 	}
-	_, found, err := q.m.ensureDiskQuotaLoaded(ctx, rootIno)
-	if err != nil {
-		return db.Disk{}, err
-	}
-	if !found {
-		return db.Disk{}, pgx.ErrNoRows
-	}
-
-	q.m.quotaMu.Lock()
-	st := q.m.diskQuotas[rootIno]
-	usedBytes := st.effectiveUsedBytesWithReserved() + q.txUnreservedBytes[rootIno]
-	if usedBytes < 0 {
-		usedBytes = 0
-	}
-	usedInodes := st.effectiveCommittedInodes() + q.txInodes[rootIno]
-	if usedInodes < 0 {
-		usedInodes = 0
-	}
-	if q.seenSnapshot == nil {
-		q.seenSnapshot = make(map[int64]bool)
-	}
-	q.seenSnapshot[rootIno] = true
-	row := db.Disk{
-		DiskID:     st.diskID,
-		RootIno:    rootIno,
-		MaxBytes:   st.maxBytes,
-		UsedBytes:  usedBytes,
-		UsedInodes: usedInodes,
-	}
-	q.m.quotaMu.Unlock()
-	return row, nil
+	return nil
 }
 
-func (q *quotaBufferedQuerier) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
-	if arg.RootIno <= 0 || (arg.DeltaBytes == 0 && arg.DeltaInodes == 0) {
+func (m *manager) reserveQuotaBytes(ctx context.Context, q db.Querier, rootIno int64, deltaBytes int64) error {
+	if rootIno <= 0 || deltaBytes <= 0 {
+		return nil
+	}
+	_, found, err := m.ensureDiskQuotaLoadedInTx(ctx, q, rootIno)
+	if err != nil {
+		return err
+	}
+	if !found {
 		return nil
 	}
 
-	if arg.DeltaBytes > 0 {
-		_, found, err := q.m.ensureDiskQuotaLoaded(ctx, arg.RootIno)
-		if err != nil {
+	bq := quotaTxFromQuerier(q)
+	m.quotaMu.Lock()
+	st := m.diskQuotas[rootIno]
+	var unreserved int64
+	if bq != nil {
+		unreserved = bq.txUnreservedBytes[rootIno]
+	}
+	usedBytes := st.effectiveUsedBytesWithReserved() + unreserved
+	if usedBytes < 0 {
+		usedBytes = 0
+	}
+	if uint64(usedBytes) > uint64(st.maxBytes) || uint64(deltaBytes) > uint64(st.maxBytes)-uint64(usedBytes) {
+		m.quotaMu.Unlock()
+		return ErrNoSpace
+	}
+	st.reservedBytes += deltaBytes
+	if bq != nil {
+		if bq.txReservedBytes == nil {
+			bq.txReservedBytes = make(map[int64]int64)
+		}
+		bq.txReservedBytes[rootIno] += deltaBytes
+	}
+	m.quotaMu.Unlock()
+	return nil
+}
+
+func (m *manager) recordQuotaDelta(ctx context.Context, q db.Querier, rootIno int64, deltaBytes int64, deltaInodes int64) error {
+	if rootIno <= 0 || (deltaBytes == 0 && deltaInodes == 0) {
+		return nil
+	}
+	if m.hasPool() {
+		if _, _, err := m.ensureDiskQuotaLoaded(ctx, rootIno); err != nil {
 			return err
 		}
-		if found {
-			q.m.quotaMu.Lock()
-			st := q.m.diskQuotas[arg.RootIno]
-			usedBytes := st.effectiveUsedBytesWithReserved() + q.txUnreservedBytes[arg.RootIno]
-			if usedBytes < 0 {
-				usedBytes = 0
-			}
-			if uint64(usedBytes) > uint64(st.maxBytes) || uint64(arg.DeltaBytes) > uint64(st.maxBytes)-uint64(usedBytes) {
-				hadSnapshot := q.seenSnapshot[arg.RootIno]
-				q.m.quotaMu.Unlock()
-				if hadSnapshot {
-					return errRetryTx
-				}
-				return ErrNoSpace
-			}
-			st.reservedBytes += arg.DeltaBytes
-			if q.txReservedBytes == nil {
-				q.txReservedBytes = make(map[int64]int64)
-			}
-			q.txReservedBytes[arg.RootIno] += arg.DeltaBytes
-			q.m.quotaMu.Unlock()
-		}
-	} else if arg.DeltaBytes < 0 {
-		if q.txUnreservedBytes == nil {
-			q.txUnreservedBytes = make(map[int64]int64)
-		}
-		q.txUnreservedBytes[arg.RootIno] += arg.DeltaBytes
 	}
-
-	if arg.DeltaInodes != 0 {
-		if q.txInodes == nil {
-			q.txInodes = make(map[int64]int64)
+	if deltaBytes > 0 {
+		if err := m.reserveQuotaBytes(ctx, q, rootIno, deltaBytes); err != nil {
+			return err
 		}
-		q.txInodes[arg.RootIno] += arg.DeltaInodes
+	} else if deltaBytes < 0 {
+		if bq := quotaTxFromQuerier(q); bq != nil {
+			if bq.txUnreservedBytes == nil {
+				bq.txUnreservedBytes = make(map[int64]int64)
+			}
+			bq.txUnreservedBytes[rootIno] += deltaBytes
+		}
 	}
-
+	if deltaInodes != 0 {
+		if bq := quotaTxFromQuerier(q); bq != nil {
+			if bq.txInodes == nil {
+				bq.txInodes = make(map[int64]int64)
+			}
+			bq.txInodes[rootIno] += deltaInodes
+		}
+	}
 	return nil
 }
 
@@ -478,7 +319,6 @@ func (q *quotaBufferedQuerier) rollback() {
 	clear(q.txReservedBytes)
 	clear(q.txUnreservedBytes)
 	clear(q.txInodes)
-	clear(q.seenSnapshot)
 }
 
 func (q *quotaBufferedQuerier) commit() {
@@ -498,27 +338,23 @@ func (q *quotaBufferedQuerier) commit() {
 		seen[r] = struct{}{}
 	}
 
-	hasDirty := false
 	for rootIno := range seen {
 		st := q.m.getOrCreateDiskQuotaStateLocked(rootIno)
 		res := q.txReservedBytes[rootIno]
 		unres := q.txUnreservedBytes[rootIno]
 		inos := q.txInodes[rootIno]
 		st.reservedBytes -= res
-		st.dirtyBytes += res + unres
-		st.dirtyInodes += inos
-		if st.dirtyBytes != 0 || st.dirtyInodes != 0 {
-			hasDirty = true
+		if st.loaded {
+			st.usedBytes = max(int64(0), st.usedBytes+res+unres)
+			st.usedInodes = max(int64(0), st.usedInodes+inos)
+		} else {
+			st.pendingBytes += res + unres
+			st.pendingInodes += inos
 		}
-	}
-	if hasDirty {
-		q.m.dirtyQuotaOps++
-		q.m.scheduleQuotaFlushLocked()
 	}
 	q.m.quotaMu.Unlock()
 
 	clear(q.txReservedBytes)
 	clear(q.txUnreservedBytes)
 	clear(q.txInodes)
-	clear(q.seenSnapshot)
 }

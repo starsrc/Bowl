@@ -52,7 +52,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 			payload[i] = 0xAA
 		}
 
-		diskRow := db.Disk{
+		diskRow := db.GetDiskByRootInoForUpdateRow{
 			RootIno:   rootIno,
 			MaxBytes:  10000,
 			UsedBytes: 0,
@@ -93,15 +93,6 @@ func TestWrite_DiskQuota(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
 			Return(diskRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  1024,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
 			Once()
 
 		expectedSliceBytes := meta.EncodeSlice(meta.Slice{
@@ -174,7 +165,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 		fileRow := baseFileRow
 		fileRow.Size = 1024 // 初始大小 1024
 
-		diskRow := db.Disk{
+		diskRow := db.GetDiskByRootInoForUpdateRow{
 			RootIno:   rootIno,
 			MaxBytes:  10000,
 			UsedBytes: 1024,
@@ -210,15 +201,6 @@ func TestWrite_DiskQuota(t *testing.T) {
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
 			Return(diskRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  2048,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
 			Once()
 
 		expectedSliceBytes := meta.EncodeSlice(meta.Slice{
@@ -387,7 +369,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 		}
 
 		// 盘剩余配额仅 500 字节，而写入需 1024 字节
-		diskRow := db.Disk{
+		diskRow := db.GetDiskByRootInoForUpdateRow{
 			RootIno:   rootIno,
 			MaxBytes:  1000,
 			UsedBytes: 500,
@@ -483,10 +465,9 @@ func TestWrite_DiskQuota(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskByRootInoForUpdateRow{}, pgx.ErrNoRows).
 			Once()
 
-		// 不应调用 AddDiskQuotaByRootIno
 		mockQuerier.EXPECT().
 			AppendChunkSlice(mock.Anything, mock.Anything).
 			Return(int64(24), nil).
@@ -555,77 +536,7 @@ func TestWrite_DiskQuota(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-			Return(db.Disk{}, errors.New("connection failed")).
-			Once()
-
-		// 事务回滚，物理块被清理
-		mockBS.EXPECT().
-			DeleteBlock(mock.Anything, uint64(sliceID), uint32(0), uint32(512)).
-			Return(nil).
-			Once()
-
-		resp, err := mgr.Write(ctx, &meta.WriteRequest{
-			Ino:    ino,
-			Fh:     fh,
-			Offset: 0,
-			Data:   payload,
-		})
-
-		require.Nil(t, resp)
-		require.Error(t, err)
-		mockQuerier.AssertExpectations(t)
-		mockBS.AssertExpectations(t)
-	})
-
-	t.Run("AddDiskQuotaByRootIno 数据库错误：事务回滚并清理物理块", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mockBS := metamock.NewMockBlockStore(t)
-		mgr := meta.New(mockStore, meta.WithBlockStore(mockBS))
-
-		sliceID := int64(7)
-		payload := make([]byte, 512)
-
-		diskRow := db.Disk{
-			RootIno:   rootIno,
-			MaxBytes:  10000,
-			UsedBytes: 0,
-		}
-
-		mockStore.EXPECT().
-			NextSliceID(mock.Anything).
-			Return(sliceID, nil).
-			Once()
-
-		mockBS.EXPECT().
-			PutBlock(mock.Anything, uint64(sliceID), uint32(0), payload).
-			Return(nil).
-			Once()
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(ino)).
-			Return(baseFileRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetFileHandle(mock.Anything, mock.Anything).
-			Return(db.FileHandle{
-				Fh:    int64(fh),
-				Ino:   int64(ino),
-				Flags: int32(meta.O_WRONLY),
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-			Return(diskRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, mock.Anything).
-			Return(errors.New("deadlock or timeout")).
+			Return(db.GetDiskByRootInoForUpdateRow{}, errors.New("connection failed")).
 			Once()
 
 		// 事务回滚，物理块被清理

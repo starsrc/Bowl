@@ -821,20 +821,11 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		// offset=50, length=100 -> targetSize=150, deltaBytes=50
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoForUpdateRow{
 				RootIno:   testRootIno,
 				MaxBytes:  1000,
 				UsedBytes: 200,
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     testRootIno,
-				DeltaBytes:  50,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -901,7 +892,7 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		// max_bytes=1000, used_bytes=980 -> 980 + 50 = 1030 > 1000 -> 超额
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoForUpdateRow{
 				RootIno:   testRootIno,
 				MaxBytes:  1000,
 				UsedBytes: 980,
@@ -927,7 +918,6 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		assert.Equal(t, "ENOSPC", info.Reason)
 		assert.Equal(t, meta.ErrorDomain, info.Domain)
 
-		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
 		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
 	})
 
@@ -963,7 +953,7 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		// used_bytes 超过 max_bytes
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoForUpdateRow{
 				RootIno:   testRootIno,
 				MaxBytes:  1000,
 				UsedBytes: 1050,
@@ -979,7 +969,6 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		})
 		require.ErrorIs(t, err, meta.ErrNoSpace)
 
-		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
 		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
 	})
 
@@ -1244,7 +1233,7 @@ func TestFallocate_DiskQuota(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskByRootInoForUpdateRow{}, pgx.ErrNoRows).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -1275,8 +1264,6 @@ func TestFallocate_DiskQuota(t *testing.T) {
 			Mode:   0,
 		})
 		require.NoError(t, err)
-
-		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
 	})
 
 	t.Run("GetDiskByRootInoForUpdate 数据库错误向上传播并中止事务", func(t *testing.T) {
@@ -1310,7 +1297,7 @@ func TestFallocate_DiskQuota(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
-			Return(db.Disk{}, errors.New("db query error")).
+			Return(db.GetDiskByRootInoForUpdateRow{}, errors.New("db query error")).
 			Once()
 
 		err := mgr.Fallocate(ctx, meta.FallocateParams{
@@ -1322,67 +1309,6 @@ func TestFallocate_DiskQuota(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "get disk by root_ino 100 for update")
-
-		mockQuerier.AssertNotCalled(t, "AddDiskQuotaByRootIno", mock.Anything, mock.Anything)
-		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
-	})
-
-	t.Run("AddDiskQuotaByRootIno 数据库错误向上传播并中止事务", func(t *testing.T) {
-		ctx, mockStore, mockQuerier, mgr := setupFallocateTest(t)
-		mockExecTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, testIno).
-			Return(db.Inode{
-				Ino:     testIno,
-				RootIno: testRootIno,
-				Mode:    int32(meta.S_IFREG | 0o644),
-				Size:    100,
-				Uid:     1001,
-				Gid:     1002,
-				Atime:   pgNow,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetFileHandle(mock.Anything, db.GetFileHandleParams{
-				Fh:  testFh,
-				Ino: testIno,
-			}).
-			Return(db.FileHandle{
-				Fh:    testFh,
-				Ino:   testIno,
-				Flags: int32(meta.O_RDWR),
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetDiskByRootInoForUpdate(mock.Anything, testRootIno).
-			Return(db.Disk{
-				RootIno:   testRootIno,
-				MaxBytes:  1000,
-				UsedBytes: 200,
-			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     testRootIno,
-				DeltaBytes:  50,
-				DeltaInodes: 0,
-			}).
-			Return(errors.New("db update quota failure")).
-			Once()
-
-		err := mgr.Fallocate(ctx, meta.FallocateParams{
-			Ino:    uint64(testIno),
-			Fh:     uint64(testFh),
-			Offset: 50,
-			Length: 100,
-			Mode:   0,
-		})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "add disk quota by root_ino 100")
 
 		mockQuerier.AssertNotCalled(t, "UpdateInodeAttr", mock.Anything, mock.Anything)
 	})
@@ -1406,12 +1332,7 @@ func (q *lockOrderTrackingQuerier) record(op string) {
 	}
 }
 
-func (q *lockOrderTrackingQuerier) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
-	q.record("disks")
-	return q.Querier.AddDiskQuotaByRootIno(ctx, arg)
-}
-
-func (q *lockOrderTrackingQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
+func (q *lockOrderTrackingQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.GetDiskByRootInoForUpdateRow, error) {
 	q.record("disks")
 	return q.Querier.GetDiskByRootInoForUpdate(ctx, rootIno)
 }
@@ -1470,20 +1391,6 @@ type deadlockBarrierQuerier struct {
 	onErr               func(error)
 }
 
-func (q *deadlockBarrierQuerier) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
-	err := q.Querier.AddDiskQuotaByRootIno(ctx, arg)
-	if err != nil {
-		if q.onErr != nil {
-			q.onErr(err)
-		}
-		return err
-	}
-	if q.onAddDiskQuotaDone != nil {
-		q.onAddDiskQuotaDone()
-	}
-	return nil
-}
-
 func (q *deadlockBarrierQuerier) UpsertClientSession(ctx context.Context, arg db.UpsertClientSessionParams) (db.ClientSession, error) {
 	sess, err := q.Querier.UpsertClientSession(ctx, arg)
 	if err != nil {
@@ -1498,7 +1405,7 @@ func (q *deadlockBarrierQuerier) UpsertClientSession(ctx context.Context, arg db
 	return sess, err
 }
 
-func (q *deadlockBarrierQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
+func (q *deadlockBarrierQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.GetDiskByRootInoForUpdateRow, error) {
 	disk, err := q.Querier.GetDiskByRootInoForUpdate(ctx, rootIno)
 	if err != nil && q.onErr != nil {
 		q.onErr(err)
@@ -1607,7 +1514,7 @@ func TestFallocate_QuotaSessionLockOrder(t *testing.T) {
 		seqFalloc := trackingStore.getResourceSequence()
 		require.Equal(t, []string{"client_sessions", "disks"}, seqFalloc, "Fallocate 必须遵循先 client_sessions 后 disks 锁序")
 
-		// 2. 验证 Create 的加锁全序：全局规范要求所有元数据写事务必须严格遵循 client_sessions -> disks 顺序以杜绝 AB-BA 死锁
+		// 2. 验证 Create 的加锁全序：ADR-0024 纯内存配额下 Create (deltaBytes == 0) 仅访问 client_sessions，无需加 disks 锁
 		trackingStore.reset()
 		_, err = mgrTrack.Create(ctx, meta.CreateParams{
 			ParentIno: disk.RootIno,
@@ -1618,7 +1525,7 @@ func TestFallocate_QuotaSessionLockOrder(t *testing.T) {
 		})
 		require.NoError(t, err)
 		seqCreate := trackingStore.getResourceSequence()
-		require.Equal(t, []string{"client_sessions", "disks"}, seqCreate, "Create 必须遵循全局统一全序 (先 client_sessions 后 disks)，当前先 disks 后 client_sessions 违反锁序规范")
+		require.Equal(t, []string{"client_sessions"}, seqCreate, "Create 在纯内存配额下仅访问 client_sessions")
 
 		// 3. 验证 TmpFile 的加锁全序
 		trackingStore.reset()
@@ -1630,7 +1537,7 @@ func TestFallocate_QuotaSessionLockOrder(t *testing.T) {
 		})
 		require.NoError(t, err)
 		seqTmpFile := trackingStore.getResourceSequence()
-		require.Equal(t, []string{"client_sessions", "disks"}, seqTmpFile, "TmpFile 必须遵循全局统一全序 (先 client_sessions 后 disks)，当前先 disks 后 client_sessions 违反锁序规范")
+		require.Equal(t, []string{"client_sessions"}, seqTmpFile, "TmpFile 在纯内存配额下仅访问 client_sessions")
 	})
 
 	t.Run("Concurrent_Create_vs_Fallocate_ABBA_Deadlock", func(t *testing.T) {

@@ -829,7 +829,7 @@ func TestOpen_OTrunc(t *testing.T) {
 		fileRow.Size = fileSize
 
 		diskUUID := pgtype.UUID{Bytes: [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, Valid: true}
-		diskState := db.Disk{
+		diskState := db.GetDiskRow{
 			DiskID:     diskUUID,
 			Name:       "test-disk",
 			RootIno:    rootIno,
@@ -852,19 +852,6 @@ func TestOpen_OTrunc(t *testing.T) {
 				return p.Ino == int64(ino) && p.Size == 0
 			})).
 			Return(fileRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -fileSize,
-				DeltaInodes: 0,
-			}).
-			RunAndReturn(func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
-				diskState.UsedBytes += arg.DeltaBytes
-				diskState.UsedInodes += arg.DeltaInodes
-				return nil
-			}).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -896,7 +883,7 @@ func TestOpen_OTrunc(t *testing.T) {
 		// 验证通过 GetDisk 观察到 used_bytes 准确扣减归零
 		mockStore.EXPECT().
 			GetDisk(mock.Anything, diskUUID).
-			RunAndReturn(func(ctx context.Context, id pgtype.UUID) (db.Disk, error) {
+			RunAndReturn(func(ctx context.Context, id pgtype.UUID) (db.GetDiskRow, error) {
 				return diskState, nil
 			}).
 			Once()
@@ -913,8 +900,8 @@ func TestOpen_OTrunc(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, rootIno).
-			RunAndReturn(func(ctx context.Context, rIno int64) (db.Disk, error) {
-				return diskState, nil
+			RunAndReturn(func(ctx context.Context, rIno int64) (db.GetDiskByRootInoRow, error) {
+				return db.GetDiskByRootInoRow(diskState), nil
 			}).
 			Once()
 
@@ -949,15 +936,6 @@ func TestOpen_OTrunc(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -fileSize,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			DeleteChunksByIno(mock.Anything, int64(ino)).
 			Return(nil, nil).
 			Once()
@@ -984,7 +962,7 @@ func TestOpen_OTrunc(t *testing.T) {
 		assert.Equal(t, uint64(202), res.Fh)
 	})
 
-	t.Run("常规文件 Size 为 0 且携带 O_TRUNC 打开时即使 RootIno>0 也不调用 AddDiskQuotaByRootIno", func(t *testing.T) {
+	t.Run("常规文件 Size 为 0 且携带 O_TRUNC 打开时正常截断", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -1008,8 +986,6 @@ func TestOpen_OTrunc(t *testing.T) {
 			Return(fileRow, nil).
 			Once()
 
-		// 不应调用 AddDiskQuotaByRootIno
-
 		mockQuerier.EXPECT().
 			CreateFileHandle(mock.Anything, db.CreateFileHandleParams{
 				Ino:   int64(ino),
@@ -1030,51 +1006,6 @@ func TestOpen_OTrunc(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, res)
 		assert.Equal(t, uint64(203), res.Fh)
-	})
-
-	t.Run("截断常规文件时 AddDiskQuotaByRootIno 返回数据库错误导致事务中止并向上透传错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		rootIno := int64(1)
-		fileSize := int64(4096)
-		fileRow := baseFileRow
-		fileRow.RootIno = rootIno
-		fileRow.Size = fileSize
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(ino)).
-			Return(fileRow, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			UpdateInodeAttr(mock.Anything, mock.MatchedBy(func(p db.UpdateInodeAttrParams) bool {
-				return p.Ino == int64(ino) && p.Size == 0
-			})).
-			Return(fileRow, nil).
-			Once()
-
-		dbErr := errors.New("failed to deduct disk quota")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -fileSize,
-				DeltaInodes: 0,
-			}).
-			Return(dbErr).
-			Once()
-
-		res, err := mgr.Open(ctx, meta.OpenParams{
-			Ino:   ino,
-			Flags: meta.O_RDWR | meta.O_TRUNC,
-		})
-
-		assert.Nil(t, res)
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, dbErr))
 	})
 }
 

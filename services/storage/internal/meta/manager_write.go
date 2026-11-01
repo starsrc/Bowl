@@ -425,23 +425,9 @@ func (m *manager) executeSingleWriteTask(t *writeBatchTask) (*WriteResponse, err
 		if newEnd > newSize {
 			newSize = newEnd
 			if inode.RootIno > 0 {
-				deltaBytes := uint64(newEnd - inode.Size)
-				diskRow, err := q.GetDiskByRootInoForUpdate(ctx, inode.RootIno)
-				if err != nil {
-					if !errors.Is(err, pgx.ErrNoRows) {
-						return fmt.Errorf("get disk by root_ino %d for update: %w", inode.RootIno, err)
-					}
-				} else {
-					if uint64(diskRow.UsedBytes) > uint64(diskRow.MaxBytes) || deltaBytes > uint64(diskRow.MaxBytes)-uint64(diskRow.UsedBytes) {
-						return ErrNoSpace
-					}
-					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-						RootIno:     inode.RootIno,
-						DeltaBytes:  int64(deltaBytes),
-						DeltaInodes: 0,
-					}); err != nil {
-						return fmt.Errorf("add disk quota by root_ino %d: %w", inode.RootIno, err)
-					}
+				deltaBytes := newEnd - inode.Size
+				if err := m.reserveQuotaBytes(ctx, q, inode.RootIno, deltaBytes); err != nil {
+					return err
 				}
 			}
 		}
@@ -725,27 +711,20 @@ func (m *manager) executeBatchWriteTasks(batchCtx context.Context, validTasks []
 			}
 		}
 
-		// 3. 按 RootIno 升序锁定涉及扩容校验的 Disk 行，初始化内存配额账本
+		// 3. 按 RootIno 升序校验并预留涉及扩容任务的内存配额账本
 		slices.Sort(uniqueRootInos)
-		disks := make(map[int64]db.Disk, len(uniqueRootInos))
 		hasDisk := make(map[int64]bool, len(uniqueRootInos))
-		runningDiskUsed := make(map[int64]uint64, len(uniqueRootInos))
-		totalDiskDelta := make(map[int64]uint64, len(uniqueRootInos))
-
 		for _, rootIno := range uniqueRootInos {
-			diskRow, err := q.GetDiskByRootInoForUpdate(batchCtx, rootIno)
+			_, found, err := m.ensureDiskQuotaLoadedInTx(batchCtx, q, rootIno)
 			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					continue
-				}
-				return fmt.Errorf("get disk by root_ino %d for update: %w", rootIno, err)
+				return err
 			}
-			disks[rootIno] = diskRow
-			hasDisk[rootIno] = true
-			runningDiskUsed[rootIno] = uint64(diskRow.UsedBytes)
+			if found {
+				hasDisk[rootIno] = true
+			}
 		}
 
-		// 4. 按批次内任务到达顺序依次推演偏移、文件大小演进与配额扣减
+		// 4. 按批次内任务到达顺序依次推演偏移、文件大小演进与内存配额预留
 		acceptedTasks := make([]*writeBatchTask, 0, len(validTasks))
 		hasAcceptedForIno := make(map[uint64]bool, len(uniqueInos))
 
@@ -778,15 +757,13 @@ func (m *manager) executeBatchWriteTasks(batchCtx context.Context, validTasks []
 			}
 
 			if taskDelta > 0 && inode.RootIno > 0 && hasDisk[inode.RootIno] {
-				diskRow := disks[inode.RootIno]
-				used := runningDiskUsed[inode.RootIno]
-				maxBytes := uint64(diskRow.MaxBytes)
-				if used > maxBytes || uint64(taskDelta) > maxBytes-used {
-					t.bizErr = ErrNoSpace
-					continue
+				if err := m.reserveQuotaBytes(batchCtx, q, inode.RootIno, taskDelta); err != nil {
+					if errors.Is(err, ErrNoSpace) {
+						t.bizErr = ErrNoSpace
+						continue
+					}
+					return err
 				}
-				runningDiskUsed[inode.RootIno] = used + uint64(taskDelta)
-				totalDiskDelta[inode.RootIno] += uint64(taskDelta)
 			}
 
 			if newEnd > curSize {
@@ -803,20 +780,7 @@ func (m *manager) executeBatchWriteTasks(batchCtx context.Context, validTasks []
 			return nil
 		}
 
-		// 5. 批量落库修改：按 RootIno 汇总扣减配额 -> 按 (ino, indx) 合并追加 Slice -> 登记 slice_refs -> 按 ino 更新 Inode
-		for _, rootIno := range uniqueRootInos {
-			delta := totalDiskDelta[rootIno]
-			if delta == 0 {
-				continue
-			}
-			if err := q.AddDiskQuotaByRootIno(batchCtx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  int64(delta),
-				DeltaInodes: 0,
-			}); err != nil {
-				return fmt.Errorf("add disk quota by root_ino %d: %w", rootIno, err)
-			}
-		}
+		// 5. 批量落库修改：按 (ino, indx) 合并追加 Slice -> 登记 slice_refs -> 按 ino 更新 Inode
 
 		chunkSlicesMap := make(map[chunkKey][]byte, len(acceptedTasks))
 		chunkKeyOrder := make([]chunkKey, 0, len(acceptedTasks))

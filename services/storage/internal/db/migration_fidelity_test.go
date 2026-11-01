@@ -1090,3 +1090,87 @@ func TestMigration_ConnectAdminAndCreateTempDB_URLAndKeywordDSN(t *testing.T) {
 		assert.Zero(t, skipCalls, "非法端口 Keyword DSN 严禁触发 skipf")
 	})
 }
+
+// TestMigration_DropDisksQuotaColumnsAndAddInodeQuotaIndex_UpAndDown 验证 20261101000000_drop_disks_quota_columns_and_add_inode_quota_index.sql
+// 的 Up 与 Down 往返可逆性、索引切换与存量配额回填保真度。
+func TestMigration_DropDisksQuotaColumnsAndAddInodeQuotaIndex_UpAndDown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testPool, _ := createUniqueTempDB(t, "bowl_mig_drop_quota")
+
+	earlyMigrations := []string{
+		"20261015165500_create_metadata_tables.sql",
+		"20261016180000_add_symlink_target_to_inodes.sql",
+		"20261017000000_create_file_handles_table.sql",
+		"20261017010000_convert_symlink_target_to_bytea.sql",
+		"20261017020000_convert_entries_name_to_bytea.sql",
+		"20261017030000_create_inode_xattrs_table.sql",
+		"20261018000000_create_file_locks_tables.sql",
+		"20261018010000_add_session_id_to_file_handles.sql",
+		"20261019000000_align_juicefs_meta_foundation.sql",
+		"20261023000000_add_disks_and_inode_root_ino.sql",
+		"20261028000000_add_chunks_and_slice_refs.sql",
+		"20261029000000_alter_chunks_indx_to_bigint.sql",
+		"20261029010000_add_disk_id_to_client_sessions.sql",
+	}
+	for _, f := range earlyMigrations {
+		upSQL := extractGooseSection(t, f, true)
+		err := runMigrationTxInPool(ctx, testPool, upSQL)
+		require.NoError(t, err, "执行前置迁移 %s 失败", f)
+	}
+
+	diskID := "44444444-4444-7444-8444-444444444444"
+	_, err := testPool.Exec(ctx, `
+		INSERT INTO inodes (ino, parent_ino, mode, size, nlink, uid, gid, root_ino)
+		VALUES
+			(200, 200, 16877, 4096, 2, 0, 0, 200),
+			(201, 200, 33188, 8192, 1, 0, 0, 200),
+			(202, 200, 33188, 1024, 0, 0, 0, 200);
+	`)
+	require.NoError(t, err)
+	_, err = testPool.Exec(ctx, `
+		INSERT INTO disks (disk_id, name, root_ino, max_bytes, used_bytes, used_inodes)
+		VALUES ($1, 'quota-mig-disk', 200, 104857600, 9216, 3);
+	`, diskID)
+	require.NoError(t, err)
+
+	migFile := "20261101000000_drop_disks_quota_columns_and_add_inode_quota_index.sql"
+	upSQL := extractGooseSection(t, migFile, true)
+	downSQL := extractGooseSection(t, migFile, false)
+
+	// 1. 执行 Up 迁移
+	require.NoError(t, runMigrationTxInPool(ctx, testPool, upSQL))
+
+	var colCount int64
+	err = testPool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_name = 'disks' AND column_name IN ('used_bytes', 'used_inodes')
+	`).Scan(&colCount)
+	require.NoError(t, err)
+	assert.Zero(t, colCount, "Up 迁移后 disks.used_bytes 与 used_inodes 列必须被移除")
+
+	var hasCoveringIdx, hasOldIdx bool
+	err = testPool.QueryRow(ctx, `
+		SELECT
+			EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'inodes' AND indexname = 'idx_inodes_root_ino_quota'),
+			EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'inodes' AND indexname = 'idx_inodes_root_ino')
+	`).Scan(&hasCoveringIdx, &hasOldIdx)
+	require.NoError(t, err)
+	assert.True(t, hasCoveringIdx, "Up 迁移后 idx_inodes_root_ino_quota 必须存在")
+	assert.False(t, hasOldIdx, "Up 迁移后旧单列索引 idx_inodes_root_ino 必须已删除")
+
+	// 2. 执行 Down 迁移回滚并验证 used_bytes / used_inodes 从 inodes 表精确回填
+	require.NoError(t, runMigrationTxInPool(ctx, testPool, downSQL))
+
+	var usedBytes, usedInodes int64
+	err = testPool.QueryRow(ctx, `
+		SELECT used_bytes, used_inodes FROM disks WHERE disk_id = $1
+	`, diskID).Scan(&usedBytes, &usedInodes)
+	require.NoError(t, err)
+	assert.Equal(t, int64(9216), usedBytes, "Down 迁移必须按常规文件 size 之和回填 used_bytes (8192 + 1024 = 9216)")
+	assert.Equal(t, int64(3), usedInodes, "Down 迁移必须按同 root_ino 下全部节点数回填 used_inodes (3)")
+
+	// 3. 再次执行 Up 迁移
+	require.NoError(t, runMigrationTxInPool(ctx, testPool, upSQL))
+}

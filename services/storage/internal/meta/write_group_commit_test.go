@@ -357,7 +357,6 @@ func TestWrite_GroupCommit_OAppendOffsetEvolution_UnitAndPostgres(t *testing.T) 
 
 	var txCount atomic.Int64
 	var recordedSlices []meta.Slice
-	var quotaDeltaRecorded int64
 	var finalInodeSizeRecorded int64
 
 	mockStore.EXPECT().
@@ -388,18 +387,10 @@ func TestWrite_GroupCommit_OAppendOffsetEvolution_UnitAndPostgres(t *testing.T) 
 				Return(db.FileHandle{Fh: int64(fh2), Ino: int64(ino), Flags: int32(meta.O_RDWR | meta.O_APPEND)}, nil).
 				Once()
 
-			// 同一批次内对唯一 RootIno 仅调用 1 次 GetDiskByRootInoForUpdate 与 1 次 AddDiskQuotaByRootIno
+			// 同一批次内对唯一 RootIno 仅调用 1 次 GetDiskByRootInoForUpdate
 			q.EXPECT().
 				GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-				Return(db.Disk{RootIno: rootIno, MaxBytes: 100000, UsedBytes: initialSize}, nil).
-				Once()
-
-			q.EXPECT().
-				AddDiskQuotaByRootIno(mock.Anything, mock.Anything).
-				RunAndReturn(func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
-					quotaDeltaRecorded = arg.DeltaBytes
-					return nil
-				}).
+				Return(db.GetDiskByRootInoForUpdateRow{RootIno: rootIno, MaxBytes: 100000, UsedBytes: initialSize}, nil).
 				Once()
 
 			// 同一 (ino, indx=0) 仅调用 1 次 AppendChunkSlice（拼接 8 条 24B Slice）
@@ -472,8 +463,20 @@ func TestWrite_GroupCommit_OAppendOffsetEvolution_UnitAndPostgres(t *testing.T) 
 
 	// 1. 断言 8 个并发 O_APPEND 请求在单次事务中完成
 	assert.Equal(t, int64(1), txCount.Load(), "8 个并发 O_APPEND 请求应合并为 1 次事务")
-	assert.Equal(t, int64(numAppendTasks*writeLen), quotaDeltaRecorded, "Disk 配额净增量必须精确等于 8 * 512")
 	assert.Equal(t, int64(initialSize+numAppendTasks*writeLen), finalInodeSizeRecorded, "最终 Inode.Size 必须精确等于 1024 + 8 * 512")
+
+	// 验证内存配额状态已精确更新为 initialSize + 8 * 512
+	mockStore.EXPECT().
+		GetInode(mock.Anything, int64(ino)).
+		Return(db.Inode{Ino: int64(ino), RootIno: rootIno, Mode: int32(meta.S_IFREG | 0o644), Size: finalInodeSizeRecorded, Nlink: 1}, nil).
+		Once()
+	mockStore.EXPECT().
+		GetDiskByRootIno(mock.Anything, int64(rootIno)).
+		Return(db.GetDiskByRootInoRow{RootIno: rootIno, MaxBytes: 100000}, nil).
+		Once()
+	statRes, statErr := mgr.StatFS(ctx, ino)
+	require.NoError(t, statErr)
+	assert.Equal(t, uint64(initialSize+numAppendTasks*writeLen), statRes.UsedBytes, "Disk 内存配额必须精确反映 1024 + 8 * 512")
 
 	// 2. 断言 8 条 Slice 的 Pos 严格按 [1024, 1536, 2048, ..., 4608] 顺序演进，零重叠、零跳空
 	require.Len(t, recordedSlices, numAppendTasks)

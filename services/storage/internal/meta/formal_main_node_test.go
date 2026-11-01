@@ -706,21 +706,20 @@ func formalAuditNodeAndSymlinkQuota(ctx context.Context, t *testing.T, env *form
 
 	// 核对每个存活 Disk 的配额账本严格隔离 S_IFLNK 的 size
 	for _, disk := range env.Model.ActiveDisks() {
-		var dbUsedBytes, dbUsedInodes int64
-		err := env.Pool.QueryRow(ctx, `
-			SELECT used_bytes, used_inodes FROM disks WHERE root_ino = $1
-		`, int64(disk.RootIno)).Scan(&dbUsedBytes, &dbUsedInodes)
-		require.NoError(t, err, "T3底表审计: 查询 disks 配额失败")
+		gotDisk, err := env.Mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, err, "T3底表审计: 查询磁盘配额失败")
+		dbUsedBytes := int64(gotDisk.UsedBytes)
+		dbUsedInodes := int64(gotDisk.UsedInodes)
 
 		expectedRegBytes := regBytesByRoot[disk.RootIno]
 		expectedInodes := inodeCountByRoot[disk.RootIno]
 		symBytes := symlinkBytesByRoot[disk.RootIno]
 
 		require.Equalf(t, expectedRegBytes, dbUsedBytes,
-			"INV-4 符号链接配额违例: root_ino=%d 底表 used_bytes (%d) != S_IFREG 总字节 (%d) (当前盘上 S_IFLNK 总字节=%d)",
+			"INV-4 符号链接配额违例: root_ino=%d used_bytes (%d) != S_IFREG 总字节 (%d) (当前盘上 S_IFLNK 总字节=%d)",
 			disk.RootIno, dbUsedBytes, expectedRegBytes, symBytes)
 		require.Equalf(t, expectedInodes, dbUsedInodes,
-			"INV-4 节点配额违例: root_ino=%d 底表 used_inodes (%d) != inodes 总行数 (%d)",
+			"INV-4 节点配额违例: root_ino=%d used_inodes (%d) != inodes 总行数 (%d)",
 			disk.RootIno, dbUsedInodes, expectedInodes)
 	}
 }

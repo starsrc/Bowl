@@ -834,15 +834,6 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 			Return(nil).
 			Once()
 
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -4096,
-				DeltaInodes: -1,
-			}).
-			Return(nil).
-			Once()
-
 		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		require.NoError(t, err)
 	})
@@ -868,15 +859,6 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(childIno)).
-			Return(nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: -1,
-			}).
 			Return(nil).
 			Once()
 
@@ -993,47 +975,6 @@ func TestUnlink_DiskQuotaAndHandleLifecycle(t *testing.T) {
 
 		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
 		assert.ErrorIs(t, err, delErr)
-	})
-
-	t.Run("AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		child := baseChildRow
-		decrementedChild := child
-		decrementedChild.Nlink = 0
-
-		setupMockWriteTx(mockStore, mockQuerier)
-		setupCommonUnlinkMocks(mockQuerier, child, decrementedChild, []byte("file.txt"))
-
-		mockQuerier.EXPECT().
-			HasFileHandlesByIno(mock.Anything, int64(childIno)).
-			Return(false, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteChunksByIno(mock.Anything, int64(childIno)).
-			Return(nil, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteInode(mock.Anything, int64(childIno)).
-			Return(nil).
-			Once()
-
-		quotaErr := errors.New("decrement disk quota failed")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -4096,
-				DeltaInodes: -1,
-			}).
-			Return(quotaErr).
-			Once()
-
-		err := mgr.Unlink(ctx, parentIno, []byte("file.txt"))
-		assert.ErrorIs(t, err, quotaErr)
 	})
 }
 
@@ -1697,15 +1638,6 @@ func TestRmdir_DiskQuotaAndHandleLifecycle(t *testing.T) {
 			Return(nil).
 			Once()
 
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: -1,
-			}).
-			Return(nil).
-			Once()
-
 		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
 		require.NoError(t, err)
 	})
@@ -1796,38 +1728,6 @@ func TestRmdir_DiskQuotaAndHandleLifecycle(t *testing.T) {
 
 		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
 		assert.ErrorIs(t, err, delErr)
-	})
-
-	t.Run("AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-		setupCommonRmdirMocks(mockQuerier, baseChildRow)
-
-		mockQuerier.EXPECT().
-			HasFileHandlesByIno(mock.Anything, int64(childIno)).
-			Return(false, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteInode(mock.Anything, int64(childIno)).
-			Return(nil).
-			Once()
-
-		quotaErr := errors.New("decrement disk quota failed")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: -1,
-			}).
-			Return(quotaErr).
-			Once()
-
-		err := mgr.Rmdir(ctx, parentIno, []byte("emptydir"))
-		assert.ErrorIs(t, err, quotaErr)
 	})
 }
 

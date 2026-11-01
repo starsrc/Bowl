@@ -141,7 +141,6 @@ const (
 	DefaultSessionLeaseTTL           = 60 * time.Second
 	DefaultSessionProbeTimeout       = 1500 * time.Millisecond
 	DefaultWriteSessionTouchInterval = 5 * time.Second
-	DefaultDiskQuotaFlushInterval    = 25 * time.Millisecond
 
 	WaiterStatusPending   int16 = 1
 	WaiterStatusGranted   int16 = 2

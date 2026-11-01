@@ -585,8 +585,6 @@ INSERT INTO disks (
     name,
     root_ino,
     max_bytes,
-    used_bytes,
-    used_inodes,
     created_at,
     updated_at
 ) VALUES (
@@ -594,24 +592,70 @@ INSERT INTO disks (
     $2,
     $3,
     $4,
-    0,
-    1,
     clock_timestamp(),
     clock_timestamp()
 )
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
+RETURNING
+    disk_id,
+    name,
+    root_ino,
+    max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    )::bigint AS used_inodes,
+    created_at,
+    updated_at;
 
 -- name: GetDisk :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE disk_id = $1;
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
+WHERE d.disk_id = $1;
 
 -- name: ListDisks :many
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
 WHERE (NOT @has_cursor::boolean)
-   OR (created_at, disk_id) < (@cursor_created_at::timestamptz, @cursor_disk_id::uuid)
-ORDER BY created_at DESC, disk_id DESC
+   OR (d.created_at, d.disk_id) < (@cursor_created_at::timestamptz, @cursor_disk_id::uuid)
+ORDER BY d.created_at DESC, d.disk_id DESC
 LIMIT @page_limit::int;
 
 -- name: GetDiskForUpdate :one
@@ -621,28 +665,73 @@ WITH target_disk AS MATERIALIZED (
     WHERE disk_id = $1
 ),
 locked_inodes AS MATERIALIZED (
-    SELECT ino
+    SELECT ino, mode, size
     FROM inodes
     WHERE root_ino = (SELECT root_ino FROM target_disk)
     ORDER BY ino ASC
     FOR UPDATE
 )
-SELECT d.disk_id, d.name, d.root_ino, d.max_bytes, d.used_bytes, d.used_inodes, d.created_at, d.updated_at
-FROM (SELECT COUNT(*) FROM locked_inodes) li
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    li.used_bytes,
+    li.used_inodes,
+    d.created_at,
+    d.updated_at
+FROM (
+    SELECT
+        COALESCE(SUM(CASE WHEN (mode & 61440) = 32768 THEN size ELSE 0 END), 0)::bigint AS used_bytes,
+        COUNT(*)::bigint AS used_inodes
+    FROM locked_inodes
+) li
 CROSS JOIN disks d
 WHERE d.disk_id = $1
 FOR UPDATE OF d;
 
 -- name: GetDiskByRootIno :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE root_ino = $1;
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
+WHERE d.root_ino = $1;
 
 -- name: GetDiskByRootInoForUpdate :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE root_ino = $1
-FOR UPDATE;
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
+WHERE d.root_ino = $1
+FOR UPDATE OF d;
 
 -- name: UpdateDisk :one
 UPDATE disks
@@ -651,32 +740,23 @@ SET
     max_bytes = $3,
     updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
-
--- name: UpdateDiskUsedBytes :one
-UPDATE disks
-SET
-    used_bytes = $2,
-    updated_at = clock_timestamp()
-WHERE disk_id = $1
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
-
--- name: UpdateDiskQuotaByRootIno :one
-UPDATE disks
-SET
-    used_bytes = GREATEST(used_bytes + @delta_bytes::bigint, 0),
-    used_inodes = GREATEST(used_inodes + @delta_inodes::bigint, 0),
-    updated_at = clock_timestamp()
-WHERE root_ino = @root_ino::bigint
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at;
-
--- name: AddDiskQuotaByRootIno :exec
-UPDATE disks
-SET
-    used_bytes = GREATEST(used_bytes + @delta_bytes::bigint, 0),
-    used_inodes = GREATEST(used_inodes + @delta_inodes::bigint, 0),
-    updated_at = clock_timestamp()
-WHERE root_ino = @root_ino::bigint;
+RETURNING
+    disk_id,
+    name,
+    root_ino,
+    max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    )::bigint AS used_inodes,
+    created_at,
+    updated_at;
 
 -- name: DeleteDisk :execrows
 DELETE FROM disks

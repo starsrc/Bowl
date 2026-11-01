@@ -14,26 +14,26 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/meta"
 )
 
-// TestDiskQuotaAsyncBatchFlush_PostgresIntegration 验证启用 WithDiskQuotaFlushInterval 后：
-// 1. Create、Mkdir、Write、SetAttr、Fallocate、Unlink、Rmdir 在事务内免除对 disks 表的同步排他锁更新，改为内存预留与脏增量累加；
-// 2. 在后台刷盘尚未执行前，GetDisk、ListDisks、StatFS 立即叠加内存未刷盘增量，返回 100% 实时精确的 UsedBytes 与 UsedInodes；
-// 3. 超出磁盘 MaxBytes 时在内存中立即精确拦截并返回 ErrNoSpace (ENOSPC)，失败回滚不残留任何预留字节；
-// 4. 后台定时刷盘或显式调用 UpdateDisk 时，自动将内存脏增量按 root_ino 批量合并刷入 PostgreSQL disks 底表。
-func TestDiskQuotaAsyncBatchFlush_PostgresIntegration(t *testing.T) {
+// TestDiskQuotaInMemoryAndColdLoad_PostgresIntegration 验证 ADR-0024 决策 4：
+// 1. Create、Mkdir、Write、SetAttr、Fallocate、Unlink、Rmdir 在事务内完全不写 disks 表，而在内存中实时预占与更新 UsedBytes / UsedInodes；
+// 2. GetDisk、ListDisks、StatFS 实时读取内存中的精确配额；
+// 3. 超出磁盘 MaxBytes 时在内存中立即精确拦截并返回 ErrNoSpace (ENOSPC)，失败回滚释放预占字节；
+// 4. 冷启动/新建 Manager 实例后，首次访问（StatFS / GetDisk / ListDisks / 写操作）自动从 inodes 表覆盖索引 idx_inodes_root_ino_quota 动态聚合恢复 UsedBytes 与 UsedInodes（含未物理回收的 Orphan Inode）；
+// 5. UpdateDisk 在排他锁下基于实时已用空间拦截非法缩容请求（返回 ErrInvalidShrink / ErrInvalidArgument），合法扩容/缩容后同步刷新内存 max_bytes。
+func TestDiskQuotaInMemoryAndColdLoad_PostgresIntegration(t *testing.T) {
 	pool := setupFormalPostgresPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	store := db.NewStore(pool)
-	bs := meta.NewLocalFSBlockStore(t.TempDir())
-	// 设置较长的后台刷盘间隔（500ms），以便先验证刷盘前 GetDisk / StatFS 的实时内存叠加可见性，再验证刷盘落表
+	bsDir := t.TempDir()
+	bs := meta.NewLocalFSBlockStore(bsDir)
 	mgr := meta.New(
 		store,
 		meta.WithBlockStore(bs),
-		meta.WithDiskQuotaFlushInterval(200*time.Millisecond),
 	)
 
-	diskName := fmt.Sprintf("disk-async-quota-%d", time.Now().UnixNano())
+	diskName := fmt.Sprintf("disk-inmem-quota-%d", time.Now().UnixNano())
 	disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
 		Name:     diskName,
 		MaxBytes: 16384, // 16 KiB
@@ -45,7 +45,7 @@ func TestDiskQuotaAsyncBatchFlush_PostgresIntegration(t *testing.T) {
 		_ = mgr.DeleteDisk(cleanCtx, disk.DiskID)
 	})
 
-	// 1. 4 并发协程各自在独立子目录下并发创建文件并写入数据（验证零 disks 行锁争用与配额累加）
+	// 1. 4 并发协程各自在独立子目录下并发创建文件并写入数据（验证零 disks 行锁争用与纯内存配额累加）
 	const workers = 4
 	dirInos := make([]uint64, workers)
 	for i := 0; i < workers; i++ {
@@ -86,7 +86,7 @@ func TestDiskQuotaAsyncBatchFlush_PostgresIntegration(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 2. 立即通过 GetDisk 与 StatFS 验证实时可见性（1 个根目录 + 4 个子目录 + 4 个常规文件 = 9 个 Inode，已用 8192 字节）
+	// 2. 通过 GetDisk 与 StatFS 验证实时内存可见性（1 个根目录 + 4 个子目录 + 4 个常规文件 = 9 个 Inode，已用 8192 字节）
 	gotDisk, err := mgr.GetDisk(ctx, disk.DiskID)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(8192), gotDisk.UsedBytes)
@@ -113,19 +113,52 @@ func TestDiskQuotaAsyncBatchFlush_PostgresIntegration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(8192), gotDiskAfterFail.UsedBytes)
 
-	// 4. 等待后台异步合并刷盘完成，验证 PostgreSQL disks 底表已精确同步
-	require.Eventually(t, func() bool {
-		var dbUsedBytes, dbUsedInodes int64
-		qErr := pool.QueryRow(ctx, "SELECT used_bytes, used_inodes FROM disks WHERE root_ino = $1", int64(disk.RootIno)).Scan(&dbUsedBytes, &dbUsedInodes)
-		return qErr == nil && dbUsedBytes == 8192 && dbUsedInodes == 9
-	}, 2*time.Second, 20*time.Millisecond, "后台配额合并刷盘应将 used_bytes=8192, used_inodes=9 同步至 disks 底表")
-
-	// 5. 释放句柄并删除 1 个文件，验证扣减与最终一致性
-	require.NoError(t, mgr.Release(ctx, meta.ReleaseParams{Ino: fileInos[0], Fh: fileFhs[0]}))
-	require.NoError(t, mgr.Unlink(ctx, dirInos[0], []byte("file.bin")))
-
-	gotDiskAfterUnlink, err := mgr.GetDisk(ctx, disk.DiskID)
+	// 4. 构造冷启动的新 Manager 实例，验证首次调用 StatFS / GetDisk / 写操作时从 inodes 表覆盖索引动态聚合恢复精确配额
+	coldMgr := meta.New(
+		store,
+		meta.WithBlockStore(bs),
+	)
+	coldStat, err := coldMgr.StatFS(ctx, disk.RootIno)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(6144), gotDiskAfterUnlink.UsedBytes)
-	assert.Equal(t, uint64(8), gotDiskAfterUnlink.UsedInodes)
+	assert.Equal(t, uint64(8192), coldStat.UsedBytes)
+	assert.Equal(t, uint64(9), coldStat.Files)
+
+	// 5. 验证 UpdateDisk 缩容水位拦截与合法调整
+	tooSmallMax := uint64(8191)
+	_, err = coldMgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+		DiskID:   disk.DiskID,
+		MaxBytes: &tooSmallMax,
+	})
+	require.ErrorIs(t, err, meta.ErrInvalidArgument)
+
+	exactMax := uint64(10240)
+	updatedDisk, err := coldMgr.UpdateDisk(ctx, meta.UpdateDiskParams{
+		DiskID:   disk.DiskID,
+		MaxBytes: &exactMax,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10240), updatedDisk.MaxBytes)
+	assert.Equal(t, uint64(8192), updatedDisk.UsedBytes)
+	assert.Equal(t, uint64(9), updatedDisk.UsedInodes)
+
+	// 6. 解链仍有打开句柄的 fileInos[0]（成为 Orphan Inode），验证 Orphan 期间配额仍计入，Release 后才物理回收退还
+	require.NoError(t, coldMgr.Unlink(ctx, dirInos[0], []byte("file.bin")))
+	orphanDisk, err := coldMgr.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8192), orphanDisk.UsedBytes, "未关闭句柄的 Orphan Inode 仍计入已用空间")
+	assert.Equal(t, uint64(9), orphanDisk.UsedInodes, "未关闭句柄的 Orphan Inode 仍计入已用节点数")
+
+	// 重建第三个冷实例，验证数据库覆盖索引聚合同样包含 Orphan Inode
+	coldMgr2 := meta.New(store, meta.WithBlockStore(bs))
+	coldDiskWithOrphan, err := coldMgr2.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8192), coldDiskWithOrphan.UsedBytes)
+	assert.Equal(t, uint64(9), coldDiskWithOrphan.UsedInodes)
+
+	// Release 最后一个句柄触发 Orphan 物理回收，内存配额实时扣减
+	require.NoError(t, coldMgr2.Release(ctx, meta.ReleaseParams{Ino: fileInos[0], Fh: fileFhs[0]}))
+	gotDiskAfterRelease, err := coldMgr2.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6144), gotDiskAfterRelease.UsedBytes)
+	assert.Equal(t, uint64(8), gotDiskAfterRelease.UsedInodes)
 }

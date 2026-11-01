@@ -39,63 +39,6 @@ func (_m *MockQuerier) EXPECT() *MockQuerier_Expecter {
 	return &MockQuerier_Expecter{mock: &_m.Mock}
 }
 
-// AddDiskQuotaByRootIno provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) AddDiskQuotaByRootIno(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error {
-	ret := _mock.Called(ctx, arg)
-
-	if len(ret) == 0 {
-		panic("no return value specified for AddDiskQuotaByRootIno")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.AddDiskQuotaByRootInoParams) error); ok {
-		r0 = returnFunc(ctx, arg)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockQuerier_AddDiskQuotaByRootIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddDiskQuotaByRootIno'
-type MockQuerier_AddDiskQuotaByRootIno_Call struct {
-	*mock.Call
-}
-
-// AddDiskQuotaByRootIno is a helper method to define mock.On call
-//   - ctx context.Context
-//   - arg db.AddDiskQuotaByRootInoParams
-func (_e *MockQuerier_Expecter) AddDiskQuotaByRootIno(ctx any, arg any) *MockQuerier_AddDiskQuotaByRootIno_Call {
-	return &MockQuerier_AddDiskQuotaByRootIno_Call{Call: _e.mock.On("AddDiskQuotaByRootIno", ctx, arg)}
-}
-
-func (_c *MockQuerier_AddDiskQuotaByRootIno_Call) Run(run func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams)) *MockQuerier_AddDiskQuotaByRootIno_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 db.AddDiskQuotaByRootInoParams
-		if args[1] != nil {
-			arg1 = args[1].(db.AddDiskQuotaByRootInoParams)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockQuerier_AddDiskQuotaByRootIno_Call) Return(err error) *MockQuerier_AddDiskQuotaByRootIno_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockQuerier_AddDiskQuotaByRootIno_Call) RunAndReturn(run func(ctx context.Context, arg db.AddDiskQuotaByRootInoParams) error) *MockQuerier_AddDiskQuotaByRootIno_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // AddSliceRefCount provides a mock function for the type MockQuerier
 func (_mock *MockQuerier) AddSliceRefCount(ctx context.Context, arg db.AddSliceRefCountParams) error {
 	ret := _mock.Called(ctx, arg)
@@ -409,22 +352,22 @@ func (_c *MockQuerier_ClearTmpFileFlagByIno_Call) RunAndReturn(run func(ctx cont
 }
 
 // CreateDisk provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) CreateDisk(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error) {
+func (_mock *MockQuerier) CreateDisk(ctx context.Context, arg db.CreateDiskParams) (db.CreateDiskRow, error) {
 	ret := _mock.Called(ctx, arg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreateDisk")
 	}
 
-	var r0 db.Disk
+	var r0 db.CreateDiskRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateDiskParams) (db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateDiskParams) (db.CreateDiskRow, error)); ok {
 		return returnFunc(ctx, arg)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateDiskParams) db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.CreateDiskParams) db.CreateDiskRow); ok {
 		r0 = returnFunc(ctx, arg)
 	} else {
-		r0 = ret.Get(0).(db.Disk)
+		r0 = ret.Get(0).(db.CreateDiskRow)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, db.CreateDiskParams) error); ok {
 		r1 = returnFunc(ctx, arg)
@@ -464,12 +407,12 @@ func (_c *MockQuerier_CreateDisk_Call) Run(run func(ctx context.Context, arg db.
 	return _c
 }
 
-func (_c *MockQuerier_CreateDisk_Call) Return(disk db.Disk, err error) *MockQuerier_CreateDisk_Call {
-	_c.Call.Return(disk, err)
+func (_c *MockQuerier_CreateDisk_Call) Return(createDiskRow db.CreateDiskRow, err error) *MockQuerier_CreateDisk_Call {
+	_c.Call.Return(createDiskRow, err)
 	return _c
 }
 
-func (_c *MockQuerier_CreateDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error)) *MockQuerier_CreateDisk_Call {
+func (_c *MockQuerier_CreateDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.CreateDiskParams) (db.CreateDiskRow, error)) *MockQuerier_CreateDisk_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -2537,22 +2480,22 @@ func (_c *MockQuerier_GetChunksInRange_Call) RunAndReturn(run func(ctx context.C
 }
 
 // GetDisk provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) GetDisk(ctx context.Context, diskID pgtype.UUID) (db.Disk, error) {
+func (_mock *MockQuerier) GetDisk(ctx context.Context, diskID pgtype.UUID) (db.GetDiskRow, error) {
 	ret := _mock.Called(ctx, diskID)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetDisk")
 	}
 
-	var r0 db.Disk
+	var r0 db.GetDiskRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (db.GetDiskRow, error)); ok {
 		return returnFunc(ctx, diskID)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) db.GetDiskRow); ok {
 		r0 = returnFunc(ctx, diskID)
 	} else {
-		r0 = ret.Get(0).(db.Disk)
+		r0 = ret.Get(0).(db.GetDiskRow)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, pgtype.UUID) error); ok {
 		r1 = returnFunc(ctx, diskID)
@@ -2592,33 +2535,33 @@ func (_c *MockQuerier_GetDisk_Call) Run(run func(ctx context.Context, diskID pgt
 	return _c
 }
 
-func (_c *MockQuerier_GetDisk_Call) Return(disk db.Disk, err error) *MockQuerier_GetDisk_Call {
-	_c.Call.Return(disk, err)
+func (_c *MockQuerier_GetDisk_Call) Return(getDiskRow db.GetDiskRow, err error) *MockQuerier_GetDisk_Call {
+	_c.Call.Return(getDiskRow, err)
 	return _c
 }
 
-func (_c *MockQuerier_GetDisk_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (db.Disk, error)) *MockQuerier_GetDisk_Call {
+func (_c *MockQuerier_GetDisk_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (db.GetDiskRow, error)) *MockQuerier_GetDisk_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // GetDiskByRootIno provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) GetDiskByRootIno(ctx context.Context, rootIno int64) (db.Disk, error) {
+func (_mock *MockQuerier) GetDiskByRootIno(ctx context.Context, rootIno int64) (db.GetDiskByRootInoRow, error) {
 	ret := _mock.Called(ctx, rootIno)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetDiskByRootIno")
 	}
 
-	var r0 db.Disk
+	var r0 db.GetDiskByRootInoRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.GetDiskByRootInoRow, error)); ok {
 		return returnFunc(ctx, rootIno)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.GetDiskByRootInoRow); ok {
 		r0 = returnFunc(ctx, rootIno)
 	} else {
-		r0 = ret.Get(0).(db.Disk)
+		r0 = ret.Get(0).(db.GetDiskByRootInoRow)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
 		r1 = returnFunc(ctx, rootIno)
@@ -2658,33 +2601,33 @@ func (_c *MockQuerier_GetDiskByRootIno_Call) Run(run func(ctx context.Context, r
 	return _c
 }
 
-func (_c *MockQuerier_GetDiskByRootIno_Call) Return(disk db.Disk, err error) *MockQuerier_GetDiskByRootIno_Call {
-	_c.Call.Return(disk, err)
+func (_c *MockQuerier_GetDiskByRootIno_Call) Return(getDiskByRootInoRow db.GetDiskByRootInoRow, err error) *MockQuerier_GetDiskByRootIno_Call {
+	_c.Call.Return(getDiskByRootInoRow, err)
 	return _c
 }
 
-func (_c *MockQuerier_GetDiskByRootIno_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) (db.Disk, error)) *MockQuerier_GetDiskByRootIno_Call {
+func (_c *MockQuerier_GetDiskByRootIno_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) (db.GetDiskByRootInoRow, error)) *MockQuerier_GetDiskByRootIno_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // GetDiskByRootInoForUpdate provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.Disk, error) {
+func (_mock *MockQuerier) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (db.GetDiskByRootInoForUpdateRow, error) {
 	ret := _mock.Called(ctx, rootIno)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetDiskByRootInoForUpdate")
 	}
 
-	var r0 db.Disk
+	var r0 db.GetDiskByRootInoForUpdateRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) (db.GetDiskByRootInoForUpdateRow, error)); ok {
 		return returnFunc(ctx, rootIno)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int64) db.GetDiskByRootInoForUpdateRow); ok {
 		r0 = returnFunc(ctx, rootIno)
 	} else {
-		r0 = ret.Get(0).(db.Disk)
+		r0 = ret.Get(0).(db.GetDiskByRootInoForUpdateRow)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, int64) error); ok {
 		r1 = returnFunc(ctx, rootIno)
@@ -2724,33 +2667,33 @@ func (_c *MockQuerier_GetDiskByRootInoForUpdate_Call) Run(run func(ctx context.C
 	return _c
 }
 
-func (_c *MockQuerier_GetDiskByRootInoForUpdate_Call) Return(disk db.Disk, err error) *MockQuerier_GetDiskByRootInoForUpdate_Call {
-	_c.Call.Return(disk, err)
+func (_c *MockQuerier_GetDiskByRootInoForUpdate_Call) Return(getDiskByRootInoForUpdateRow db.GetDiskByRootInoForUpdateRow, err error) *MockQuerier_GetDiskByRootInoForUpdate_Call {
+	_c.Call.Return(getDiskByRootInoForUpdateRow, err)
 	return _c
 }
 
-func (_c *MockQuerier_GetDiskByRootInoForUpdate_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) (db.Disk, error)) *MockQuerier_GetDiskByRootInoForUpdate_Call {
+func (_c *MockQuerier_GetDiskByRootInoForUpdate_Call) RunAndReturn(run func(ctx context.Context, rootIno int64) (db.GetDiskByRootInoForUpdateRow, error)) *MockQuerier_GetDiskByRootInoForUpdate_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // GetDiskForUpdate provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (db.Disk, error) {
+func (_mock *MockQuerier) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (db.GetDiskForUpdateRow, error) {
 	ret := _mock.Called(ctx, diskID)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetDiskForUpdate")
 	}
 
-	var r0 db.Disk
+	var r0 db.GetDiskForUpdateRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) (db.GetDiskForUpdateRow, error)); ok {
 		return returnFunc(ctx, diskID)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, pgtype.UUID) db.GetDiskForUpdateRow); ok {
 		r0 = returnFunc(ctx, diskID)
 	} else {
-		r0 = ret.Get(0).(db.Disk)
+		r0 = ret.Get(0).(db.GetDiskForUpdateRow)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, pgtype.UUID) error); ok {
 		r1 = returnFunc(ctx, diskID)
@@ -2790,12 +2733,12 @@ func (_c *MockQuerier_GetDiskForUpdate_Call) Run(run func(ctx context.Context, d
 	return _c
 }
 
-func (_c *MockQuerier_GetDiskForUpdate_Call) Return(disk db.Disk, err error) *MockQuerier_GetDiskForUpdate_Call {
-	_c.Call.Return(disk, err)
+func (_c *MockQuerier_GetDiskForUpdate_Call) Return(getDiskForUpdateRow db.GetDiskForUpdateRow, err error) *MockQuerier_GetDiskForUpdate_Call {
+	_c.Call.Return(getDiskForUpdateRow, err)
 	return _c
 }
 
-func (_c *MockQuerier_GetDiskForUpdate_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (db.Disk, error)) *MockQuerier_GetDiskForUpdate_Call {
+func (_c *MockQuerier_GetDiskForUpdate_Call) RunAndReturn(run func(ctx context.Context, diskID pgtype.UUID) (db.GetDiskForUpdateRow, error)) *MockQuerier_GetDiskForUpdate_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -4377,23 +4320,23 @@ func (_c *MockQuerier_ListDirEntriesAfterName_Call) RunAndReturn(run func(ctx co
 }
 
 // ListDisks provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) ListDisks(ctx context.Context, arg db.ListDisksParams) ([]db.Disk, error) {
+func (_mock *MockQuerier) ListDisks(ctx context.Context, arg db.ListDisksParams) ([]db.ListDisksRow, error) {
 	ret := _mock.Called(ctx, arg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ListDisks")
 	}
 
-	var r0 []db.Disk
+	var r0 []db.ListDisksRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) ([]db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) ([]db.ListDisksRow, error)); ok {
 		return returnFunc(ctx, arg)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) []db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.ListDisksParams) []db.ListDisksRow); ok {
 		r0 = returnFunc(ctx, arg)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]db.Disk)
+			r0 = ret.Get(0).([]db.ListDisksRow)
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, db.ListDisksParams) error); ok {
@@ -4434,12 +4377,12 @@ func (_c *MockQuerier_ListDisks_Call) Run(run func(ctx context.Context, arg db.L
 	return _c
 }
 
-func (_c *MockQuerier_ListDisks_Call) Return(disks []db.Disk, err error) *MockQuerier_ListDisks_Call {
-	_c.Call.Return(disks, err)
+func (_c *MockQuerier_ListDisks_Call) Return(listDisksRows []db.ListDisksRow, err error) *MockQuerier_ListDisks_Call {
+	_c.Call.Return(listDisksRows, err)
 	return _c
 }
 
-func (_c *MockQuerier_ListDisks_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDisksParams) ([]db.Disk, error)) *MockQuerier_ListDisks_Call {
+func (_c *MockQuerier_ListDisks_Call) RunAndReturn(run func(ctx context.Context, arg db.ListDisksParams) ([]db.ListDisksRow, error)) *MockQuerier_ListDisks_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -5139,22 +5082,22 @@ func (_c *MockQuerier_UpdateChunkSlices_Call) RunAndReturn(run func(ctx context.
 }
 
 // UpdateDisk provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) UpdateDisk(ctx context.Context, arg db.UpdateDiskParams) (db.Disk, error) {
+func (_mock *MockQuerier) UpdateDisk(ctx context.Context, arg db.UpdateDiskParams) (db.UpdateDiskRow, error) {
 	ret := _mock.Called(ctx, arg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for UpdateDisk")
 	}
 
-	var r0 db.Disk
+	var r0 db.UpdateDiskRow
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskParams) (db.Disk, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskParams) (db.UpdateDiskRow, error)); ok {
 		return returnFunc(ctx, arg)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskParams) db.Disk); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskParams) db.UpdateDiskRow); ok {
 		r0 = returnFunc(ctx, arg)
 	} else {
-		r0 = ret.Get(0).(db.Disk)
+		r0 = ret.Get(0).(db.UpdateDiskRow)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateDiskParams) error); ok {
 		r1 = returnFunc(ctx, arg)
@@ -5194,144 +5137,12 @@ func (_c *MockQuerier_UpdateDisk_Call) Run(run func(ctx context.Context, arg db.
 	return _c
 }
 
-func (_c *MockQuerier_UpdateDisk_Call) Return(disk db.Disk, err error) *MockQuerier_UpdateDisk_Call {
-	_c.Call.Return(disk, err)
+func (_c *MockQuerier_UpdateDisk_Call) Return(updateDiskRow db.UpdateDiskRow, err error) *MockQuerier_UpdateDisk_Call {
+	_c.Call.Return(updateDiskRow, err)
 	return _c
 }
 
-func (_c *MockQuerier_UpdateDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskParams) (db.Disk, error)) *MockQuerier_UpdateDisk_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// UpdateDiskQuotaByRootIno provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) UpdateDiskQuotaByRootIno(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams) (db.Disk, error) {
-	ret := _mock.Called(ctx, arg)
-
-	if len(ret) == 0 {
-		panic("no return value specified for UpdateDiskQuotaByRootIno")
-	}
-
-	var r0 db.Disk
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskQuotaByRootInoParams) (db.Disk, error)); ok {
-		return returnFunc(ctx, arg)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskQuotaByRootInoParams) db.Disk); ok {
-		r0 = returnFunc(ctx, arg)
-	} else {
-		r0 = ret.Get(0).(db.Disk)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateDiskQuotaByRootInoParams) error); ok {
-		r1 = returnFunc(ctx, arg)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockQuerier_UpdateDiskQuotaByRootIno_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateDiskQuotaByRootIno'
-type MockQuerier_UpdateDiskQuotaByRootIno_Call struct {
-	*mock.Call
-}
-
-// UpdateDiskQuotaByRootIno is a helper method to define mock.On call
-//   - ctx context.Context
-//   - arg db.UpdateDiskQuotaByRootInoParams
-func (_e *MockQuerier_Expecter) UpdateDiskQuotaByRootIno(ctx any, arg any) *MockQuerier_UpdateDiskQuotaByRootIno_Call {
-	return &MockQuerier_UpdateDiskQuotaByRootIno_Call{Call: _e.mock.On("UpdateDiskQuotaByRootIno", ctx, arg)}
-}
-
-func (_c *MockQuerier_UpdateDiskQuotaByRootIno_Call) Run(run func(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams)) *MockQuerier_UpdateDiskQuotaByRootIno_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 db.UpdateDiskQuotaByRootInoParams
-		if args[1] != nil {
-			arg1 = args[1].(db.UpdateDiskQuotaByRootInoParams)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockQuerier_UpdateDiskQuotaByRootIno_Call) Return(disk db.Disk, err error) *MockQuerier_UpdateDiskQuotaByRootIno_Call {
-	_c.Call.Return(disk, err)
-	return _c
-}
-
-func (_c *MockQuerier_UpdateDiskQuotaByRootIno_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskQuotaByRootInoParams) (db.Disk, error)) *MockQuerier_UpdateDiskQuotaByRootIno_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// UpdateDiskUsedBytes provides a mock function for the type MockQuerier
-func (_mock *MockQuerier) UpdateDiskUsedBytes(ctx context.Context, arg db.UpdateDiskUsedBytesParams) (db.Disk, error) {
-	ret := _mock.Called(ctx, arg)
-
-	if len(ret) == 0 {
-		panic("no return value specified for UpdateDiskUsedBytes")
-	}
-
-	var r0 db.Disk
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskUsedBytesParams) (db.Disk, error)); ok {
-		return returnFunc(ctx, arg)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, db.UpdateDiskUsedBytesParams) db.Disk); ok {
-		r0 = returnFunc(ctx, arg)
-	} else {
-		r0 = ret.Get(0).(db.Disk)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, db.UpdateDiskUsedBytesParams) error); ok {
-		r1 = returnFunc(ctx, arg)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockQuerier_UpdateDiskUsedBytes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateDiskUsedBytes'
-type MockQuerier_UpdateDiskUsedBytes_Call struct {
-	*mock.Call
-}
-
-// UpdateDiskUsedBytes is a helper method to define mock.On call
-//   - ctx context.Context
-//   - arg db.UpdateDiskUsedBytesParams
-func (_e *MockQuerier_Expecter) UpdateDiskUsedBytes(ctx any, arg any) *MockQuerier_UpdateDiskUsedBytes_Call {
-	return &MockQuerier_UpdateDiskUsedBytes_Call{Call: _e.mock.On("UpdateDiskUsedBytes", ctx, arg)}
-}
-
-func (_c *MockQuerier_UpdateDiskUsedBytes_Call) Run(run func(ctx context.Context, arg db.UpdateDiskUsedBytesParams)) *MockQuerier_UpdateDiskUsedBytes_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 db.UpdateDiskUsedBytesParams
-		if args[1] != nil {
-			arg1 = args[1].(db.UpdateDiskUsedBytesParams)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockQuerier_UpdateDiskUsedBytes_Call) Return(disk db.Disk, err error) *MockQuerier_UpdateDiskUsedBytes_Call {
-	_c.Call.Return(disk, err)
-	return _c
-}
-
-func (_c *MockQuerier_UpdateDiskUsedBytes_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskUsedBytesParams) (db.Disk, error)) *MockQuerier_UpdateDiskUsedBytes_Call {
+func (_c *MockQuerier_UpdateDisk_Call) RunAndReturn(run func(ctx context.Context, arg db.UpdateDiskParams) (db.UpdateDiskRow, error)) *MockQuerier_UpdateDisk_Call {
 	_c.Call.Return(run)
 	return _c
 }

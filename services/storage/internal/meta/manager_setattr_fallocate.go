@@ -154,34 +154,14 @@ func (m *manager) SetAttr(ctx context.Context, ino uint64, input SetAttrInput) (
 		if input.Size != nil && fileType == S_IFREG && current.RootIno > 0 {
 			oldSize := uint64(current.Size)
 			if targetSize > oldSize {
-				deltaBytes := targetSize - oldSize
-				diskRow, err := q.GetDiskByRootInoForUpdate(ctx, current.RootIno)
-				if err != nil {
-					if errors.Is(err, pgx.ErrNoRows) {
-						// 说明该 root_ino 未绑定 Disk（如裸 Inode 测试场景），直接跳过配额检查与更新
-					} else {
-						return fmt.Errorf("get disk by root_ino %d for update: %w", current.RootIno, err)
-					}
-				} else {
-					if uint64(diskRow.UsedBytes) > uint64(diskRow.MaxBytes) || deltaBytes > uint64(diskRow.MaxBytes)-uint64(diskRow.UsedBytes) {
-						return ErrNoSpace
-					}
-					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-						RootIno:     current.RootIno,
-						DeltaBytes:  int64(deltaBytes),
-						DeltaInodes: 0,
-					}); err != nil {
-						return fmt.Errorf("add disk quota by root_ino %d: %w", current.RootIno, err)
-					}
+				deltaBytes := int64(targetSize - oldSize)
+				if err := m.reserveQuotaBytes(ctx, q, current.RootIno, deltaBytes); err != nil {
+					return err
 				}
 			} else if targetSize < oldSize {
 				deltaBytes := int64(targetSize) - int64(oldSize)
-				if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-					RootIno:     current.RootIno,
-					DeltaBytes:  deltaBytes,
-					DeltaInodes: 0,
-				}); err != nil {
-					return fmt.Errorf("add disk quota by root_ino %d: %w", current.RootIno, err)
+				if err := m.recordQuotaDelta(ctx, q, current.RootIno, deltaBytes, 0); err != nil {
+					return fmt.Errorf("record disk quota delta by root_ino %d: %w", current.RootIno, err)
 				}
 			}
 		}
@@ -343,23 +323,9 @@ func (m *manager) Fallocate(ctx context.Context, params FallocateParams) error {
 			if targetSize > uint64(current.Size) {
 				// 若关联了 Disk 根节点，进行容量配额校验与递增
 				if current.RootIno > 0 {
-					deltaBytes := targetSize - uint64(current.Size)
-					diskRow, err := q.GetDiskByRootInoForUpdate(ctx, current.RootIno)
-					if err != nil {
-						if !errors.Is(err, pgx.ErrNoRows) {
-							return fmt.Errorf("get disk by root_ino %d for update: %w", current.RootIno, err)
-						}
-					} else {
-						if uint64(diskRow.UsedBytes) > uint64(diskRow.MaxBytes) || deltaBytes > uint64(diskRow.MaxBytes)-uint64(diskRow.UsedBytes) {
-							return ErrNoSpace
-						}
-						if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-							RootIno:     current.RootIno,
-							DeltaBytes:  int64(deltaBytes),
-							DeltaInodes: 0,
-						}); err != nil {
-							return fmt.Errorf("add disk quota by root_ino %d: %w", current.RootIno, err)
-						}
+					deltaBytes := int64(targetSize - uint64(current.Size))
+					if err := m.reserveQuotaBytes(ctx, q, current.RootIno, deltaBytes); err != nil {
+						return err
 					}
 				}
 

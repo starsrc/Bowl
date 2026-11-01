@@ -11,26 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const addDiskQuotaByRootIno = `-- name: AddDiskQuotaByRootIno :exec
-UPDATE disks
-SET
-    used_bytes = GREATEST(used_bytes + $1::bigint, 0),
-    used_inodes = GREATEST(used_inodes + $2::bigint, 0),
-    updated_at = clock_timestamp()
-WHERE root_ino = $3::bigint
-`
-
-type AddDiskQuotaByRootInoParams struct {
-	DeltaBytes  int64 `json:"delta_bytes"`
-	DeltaInodes int64 `json:"delta_inodes"`
-	RootIno     int64 `json:"root_ino"`
-}
-
-func (q *Queries) AddDiskQuotaByRootIno(ctx context.Context, arg AddDiskQuotaByRootInoParams) error {
-	_, err := q.db.Exec(ctx, addDiskQuotaByRootIno, arg.DeltaBytes, arg.DeltaInodes, arg.RootIno)
-	return err
-}
-
 const clearInodeNlinkAndTouchCtime = `-- name: ClearInodeNlinkAndTouchCtime :one
 UPDATE inodes
 SET nlink = 0,
@@ -80,8 +60,6 @@ INSERT INTO disks (
     name,
     root_ino,
     max_bytes,
-    used_bytes,
-    used_inodes,
     created_at,
     updated_at
 ) VALUES (
@@ -89,12 +67,26 @@ INSERT INTO disks (
     $2,
     $3,
     $4,
-    0,
-    1,
     clock_timestamp(),
     clock_timestamp()
 )
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+RETURNING
+    disk_id,
+    name,
+    root_ino,
+    max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    )::bigint AS used_inodes,
+    created_at,
+    updated_at
 `
 
 type CreateDiskParams struct {
@@ -104,14 +96,25 @@ type CreateDiskParams struct {
 	MaxBytes int64       `json:"max_bytes"`
 }
 
-func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error) {
+type CreateDiskRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (CreateDiskRow, error) {
 	row := q.db.QueryRow(ctx, createDisk,
 		arg.DiskID,
 		arg.Name,
 		arg.RootIno,
 		arg.MaxBytes,
 	)
-	var i Disk
+	var i CreateDiskRow
 	err := row.Scan(
 		&i.DiskID,
 		&i.Name,
@@ -774,14 +777,41 @@ func (q *Queries) DeleteUnreferencedOrphanInodes(ctx context.Context) ([]DeleteU
 }
 
 const getDisk = `-- name: GetDisk :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE disk_id = $1
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
+WHERE d.disk_id = $1
 `
 
-func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error) {
+type GetDiskRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (GetDiskRow, error) {
 	row := q.db.QueryRow(ctx, getDisk, diskID)
-	var i Disk
+	var i GetDiskRow
 	err := row.Scan(
 		&i.DiskID,
 		&i.Name,
@@ -796,14 +826,41 @@ func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 }
 
 const getDiskByRootIno = `-- name: GetDiskByRootIno :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE root_ino = $1
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
+WHERE d.root_ino = $1
 `
 
-func (q *Queries) GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, error) {
+type GetDiskByRootInoRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetDiskByRootIno(ctx context.Context, rootIno int64) (GetDiskByRootInoRow, error) {
 	row := q.db.QueryRow(ctx, getDiskByRootIno, rootIno)
-	var i Disk
+	var i GetDiskByRootInoRow
 	err := row.Scan(
 		&i.DiskID,
 		&i.Name,
@@ -818,15 +875,42 @@ func (q *Queries) GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, er
 }
 
 const getDiskByRootInoForUpdate = `-- name: GetDiskByRootInoForUpdate :one
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
-WHERE root_ino = $1
-FOR UPDATE
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
+WHERE d.root_ino = $1
+FOR UPDATE OF d
 `
 
-func (q *Queries) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (Disk, error) {
+type GetDiskByRootInoForUpdateRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (GetDiskByRootInoForUpdateRow, error) {
 	row := q.db.QueryRow(ctx, getDiskByRootInoForUpdate, rootIno)
-	var i Disk
+	var i GetDiskByRootInoForUpdateRow
 	err := row.Scan(
 		&i.DiskID,
 		&i.Name,
@@ -847,22 +931,46 @@ WITH target_disk AS MATERIALIZED (
     WHERE disk_id = $1
 ),
 locked_inodes AS MATERIALIZED (
-    SELECT ino
+    SELECT ino, mode, size
     FROM inodes
     WHERE root_ino = (SELECT root_ino FROM target_disk)
     ORDER BY ino ASC
     FOR UPDATE
 )
-SELECT d.disk_id, d.name, d.root_ino, d.max_bytes, d.used_bytes, d.used_inodes, d.created_at, d.updated_at
-FROM (SELECT COUNT(*) FROM locked_inodes) li
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    li.used_bytes,
+    li.used_inodes,
+    d.created_at,
+    d.updated_at
+FROM (
+    SELECT
+        COALESCE(SUM(CASE WHEN (mode & 61440) = 32768 THEN size ELSE 0 END), 0)::bigint AS used_bytes,
+        COUNT(*)::bigint AS used_inodes
+    FROM locked_inodes
+) li
 CROSS JOIN disks d
 WHERE d.disk_id = $1
 FOR UPDATE OF d
 `
 
-func (q *Queries) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Disk, error) {
+type GetDiskForUpdateRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (GetDiskForUpdateRow, error) {
 	row := q.db.QueryRow(ctx, getDiskForUpdate, diskID)
-	var i Disk
+	var i GetDiskForUpdateRow
 	err := row.Scan(
 		&i.DiskID,
 		&i.Name,
@@ -1609,11 +1717,27 @@ func (q *Queries) ListDirEntriesAfterName(ctx context.Context, arg ListDirEntrie
 }
 
 const listDisks = `-- name: ListDisks :many
-SELECT disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-FROM disks
+SELECT
+    d.disk_id,
+    d.name,
+    d.root_ino,
+    d.max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = d.root_ino
+    )::bigint AS used_inodes,
+    d.created_at,
+    d.updated_at
+FROM disks d
 WHERE (NOT $1::boolean)
-   OR (created_at, disk_id) < ($2::timestamptz, $3::uuid)
-ORDER BY created_at DESC, disk_id DESC
+   OR (d.created_at, d.disk_id) < ($2::timestamptz, $3::uuid)
+ORDER BY d.created_at DESC, d.disk_id DESC
 LIMIT $4::int
 `
 
@@ -1624,7 +1748,18 @@ type ListDisksParams struct {
 	PageLimit       int32              `json:"page_limit"`
 }
 
-func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error) {
+type ListDisksRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]ListDisksRow, error) {
 	rows, err := q.db.Query(ctx, listDisks,
 		arg.HasCursor,
 		arg.CursorCreatedAt,
@@ -1635,9 +1770,9 @@ func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, e
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Disk
+	var items []ListDisksRow
 	for rows.Next() {
-		var i Disk
+		var i ListDisksRow
 		if err := rows.Scan(
 			&i.DiskID,
 			&i.Name,
@@ -1885,7 +2020,23 @@ SET
     max_bytes = $3,
     updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
+RETURNING
+    disk_id,
+    name,
+    root_ino,
+    max_bytes,
+    COALESCE((
+        SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    ), 0)::bigint AS used_bytes,
+    (
+        SELECT COUNT(*)::bigint
+        FROM inodes i
+        WHERE i.root_ino = disks.root_ino
+    )::bigint AS used_inodes,
+    created_at,
+    updated_at
 `
 
 type UpdateDiskParams struct {
@@ -1894,71 +2045,20 @@ type UpdateDiskParams struct {
 	MaxBytes int64       `json:"max_bytes"`
 }
 
-func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error) {
+type UpdateDiskRow struct {
+	DiskID     pgtype.UUID        `json:"disk_id"`
+	Name       string             `json:"name"`
+	RootIno    int64              `json:"root_ino"`
+	MaxBytes   int64              `json:"max_bytes"`
+	UsedBytes  int64              `json:"used_bytes"`
+	UsedInodes int64              `json:"used_inodes"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (UpdateDiskRow, error) {
 	row := q.db.QueryRow(ctx, updateDisk, arg.DiskID, arg.Name, arg.MaxBytes)
-	var i Disk
-	err := row.Scan(
-		&i.DiskID,
-		&i.Name,
-		&i.RootIno,
-		&i.MaxBytes,
-		&i.UsedBytes,
-		&i.UsedInodes,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const updateDiskQuotaByRootIno = `-- name: UpdateDiskQuotaByRootIno :one
-UPDATE disks
-SET
-    used_bytes = GREATEST(used_bytes + $1::bigint, 0),
-    used_inodes = GREATEST(used_inodes + $2::bigint, 0),
-    updated_at = clock_timestamp()
-WHERE root_ino = $3::bigint
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-`
-
-type UpdateDiskQuotaByRootInoParams struct {
-	DeltaBytes  int64 `json:"delta_bytes"`
-	DeltaInodes int64 `json:"delta_inodes"`
-	RootIno     int64 `json:"root_ino"`
-}
-
-func (q *Queries) UpdateDiskQuotaByRootIno(ctx context.Context, arg UpdateDiskQuotaByRootInoParams) (Disk, error) {
-	row := q.db.QueryRow(ctx, updateDiskQuotaByRootIno, arg.DeltaBytes, arg.DeltaInodes, arg.RootIno)
-	var i Disk
-	err := row.Scan(
-		&i.DiskID,
-		&i.Name,
-		&i.RootIno,
-		&i.MaxBytes,
-		&i.UsedBytes,
-		&i.UsedInodes,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const updateDiskUsedBytes = `-- name: UpdateDiskUsedBytes :one
-UPDATE disks
-SET
-    used_bytes = $2,
-    updated_at = clock_timestamp()
-WHERE disk_id = $1
-RETURNING disk_id, name, root_ino, max_bytes, used_bytes, used_inodes, created_at, updated_at
-`
-
-type UpdateDiskUsedBytesParams struct {
-	DiskID    pgtype.UUID `json:"disk_id"`
-	UsedBytes int64       `json:"used_bytes"`
-}
-
-func (q *Queries) UpdateDiskUsedBytes(ctx context.Context, arg UpdateDiskUsedBytesParams) (Disk, error) {
-	row := q.db.QueryRow(ctx, updateDiskUsedBytes, arg.DiskID, arg.UsedBytes)
-	var i Disk
+	var i UpdateDiskRow
 	err := row.Scan(
 		&i.DiskID,
 		&i.Name,

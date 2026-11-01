@@ -176,13 +176,8 @@ type manager struct {
 	nextInFlightGrantID         uint64
 	deferredOrphansMu           sync.Mutex
 	deferredOrphanInos          map[int64]struct{}
-	diskQuotaFlushInterval      time.Duration
 	quotaMu                     sync.Mutex
-	quotaFlushExecMu            sync.Mutex
 	diskQuotas                  map[int64]*diskQuotaState
-	dirtyQuotaOps               int
-	quotaFlusherActive          bool
-	quotaFlushImmediateCh       chan struct{}
 	watchHubMu                  sync.Mutex
 	watchHub                    *SessionWatchHub
 }
@@ -850,7 +845,6 @@ func newManagerFromParams(params ManagerParams) Manager {
 			WithOpenKeepCache(metaCfg.OpenKeepCache()),
 			WithOpenDirCache(metaCfg.OpenDirCache()),
 			WithGCInterval(metaCfg.GCInterval()),
-			WithDiskQuotaFlushInterval(DefaultDiskQuotaFlushInterval),
 		)
 	}
 
@@ -869,7 +863,6 @@ func newManagerFromParams(params ManagerParams) Manager {
 				return nil
 			},
 			OnStop: func(stopCtx context.Context) error {
-				_ = mgr.FlushDiskQuotas(stopCtx)
 				if gcCancel != nil {
 					gcCancel()
 				}
@@ -1029,14 +1022,11 @@ func (m *manager) execWriteTxWithRetry(ctx context.Context, fn func(q db.Querier
 			buffered = nil
 		}
 		return m.store.ExecTxWithOptions(attemptCtx, func(q db.Querier) error {
-			if m.shouldUseAsyncDiskQuota(q) {
-				buffered = &quotaBufferedQuerier{
-					Querier: q,
-					m:       m,
-				}
-				return fn(buffered)
+			buffered = &quotaBufferedQuerier{
+				Querier: q,
+				m:       m,
 			}
-			return fn(q)
+			return fn(buffered)
 		})
 	}, tx.WithDefaultRetry(errRetryTx))
 	if err != nil {
@@ -1299,14 +1289,11 @@ func (m *manager) closeSessionAfterStream(ctx context.Context, sessionID uint64,
 			buffered = nil
 		}
 		return m.store.ExecTxWithOptions(attemptCtx, func(rawQ db.Querier) error {
-			q := rawQ
-			if m.shouldUseAsyncDiskQuota(rawQ) {
-				buffered = &quotaBufferedQuerier{
-					Querier: rawQ,
-					m:       m,
-				}
-				q = buffered
+			buffered = &quotaBufferedQuerier{
+				Querier: rawQ,
+				m:       m,
 			}
+			q := buffered
 			shouldNotify = false
 			reclaimedInos = nil
 			expiredCount, err := q.DeleteExpiredClientSessions(ctx)
@@ -1440,11 +1427,7 @@ func (m *manager) reclaimUnreferencedOrphansInTx(ctx context.Context, q db.Queri
 
 	for _, rootIno := range rootInos {
 		agg := quotaDeltas[rootIno]
-		if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  agg.deltaBytes,
-			DeltaInodes: agg.deltaInodes,
-		}); err != nil {
+		if err := m.recordQuotaDelta(ctx, q, rootIno, agg.deltaBytes, agg.deltaInodes); err != nil {
 			return nil, fmt.Errorf("reclaim disk quota for root_ino %d: %w", rootIno, err)
 		}
 	}
@@ -1496,11 +1479,7 @@ func (m *manager) reclaimOrphanIfNoHandles(ctx context.Context, q db.Querier, in
 		if (uint32(inode.Mode)&S_IFMT) == S_IFREG && inode.Size > 0 {
 			deltaBytes = -inode.Size
 		}
-		if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-			RootIno:     inode.RootIno,
-			DeltaBytes:  deltaBytes,
-			DeltaInodes: -1,
-		}); err != nil {
+		if err := m.recordQuotaDelta(ctx, q, inode.RootIno, deltaBytes, -1); err != nil {
 			return fmt.Errorf("reclaim orphan disk quota for root_ino %d: %w", inode.RootIno, err)
 		}
 	}

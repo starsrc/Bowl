@@ -2022,11 +2022,6 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
 		mockQuerier.EXPECT().DeleteChunksByIno(mock.Anything, targetIno).Return(nil, nil).Once()
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  -4096,
-			DeltaInodes: -1,
-		}).Return(nil).Once()
 
 		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
 			OldParentIno: int64(oldParentIno),
@@ -2070,11 +2065,6 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  0,
-			DeltaInodes: -1,
-		}).Return(nil).Once()
 
 		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
 			OldParentIno: int64(oldParentIno),
@@ -2288,11 +2278,6 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
 		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
 		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  0,
-			DeltaInodes: -1,
-		}).Return(nil).Once()
 
 		mockQuerier.EXPECT().UpdateEntry(mock.Anything, db.UpdateEntryParams{
 			OldParentIno: int64(oldParentIno),
@@ -2481,38 +2466,6 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 		assert.ErrorIs(t, err, delErr)
 	})
 
-	t.Run("覆盖文件时 AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		targetRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFREG | 0o644), Nlink: 1, RootIno: rootIno, Size: 4096}
-		setupMockWriteTx(mockStore, mockQuerier)
-		setupFileOverwriteBaseMocks(mockQuerier, targetRow)
-
-		targetDecremented := targetRow
-		targetDecremented.Nlink = 0
-		mockQuerier.EXPECT().DecrementInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(targetDecremented, nil).Once()
-		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
-		mockQuerier.EXPECT().DeleteChunksByIno(mock.Anything, targetIno).Return(nil, nil).Once()
-		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
-
-		quotaErr := errors.New("add disk quota failed")
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  -4096,
-			DeltaInodes: -1,
-		}).Return(quotaErr).Once()
-
-		err := mgr.Rename(ctx, meta.RenameParams{
-			OldParentIno: oldParentIno,
-			OldName:      []byte("src.txt"),
-			NewParentIno: newParentIno,
-			NewName:      []byte("dst.txt"),
-		})
-		assert.ErrorIs(t, err, quotaErr)
-	})
-
 	t.Run("覆盖空目录时 HasFileHandlesByIno 失败透传错误", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
@@ -2564,38 +2517,6 @@ func TestRename_Overwrite_QuotaAndLifecycle(t *testing.T) {
 			NewName:      []byte("dst_dir"),
 		})
 		assert.ErrorIs(t, err, delErr)
-	})
-
-	t.Run("覆盖空目录时 AddDiskQuotaByRootIno 失败透传错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		srcDirRow := db.Inode{Ino: srcIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(oldParentIno)}
-		targetDirRow := db.Inode{Ino: targetIno, Mode: int32(meta.S_IFDIR | 0o755), Nlink: 2, RootIno: rootIno, ParentIno: int64(newParentIno)}
-		setupMockWriteTx(mockStore, mockQuerier)
-		setupDirOverwriteBaseMocks(mockQuerier, srcDirRow, targetDirRow)
-
-		orphanTarget := targetDirRow
-		orphanTarget.Nlink = 0
-		mockQuerier.EXPECT().ClearInodeNlinkAndTouchCtime(mock.Anything, targetIno).Return(orphanTarget, nil).Once()
-		mockQuerier.EXPECT().HasFileHandlesByIno(mock.Anything, targetIno).Return(false, nil).Once()
-		mockQuerier.EXPECT().DeleteInode(mock.Anything, targetIno).Return(nil).Once()
-
-		quotaErr := errors.New("quota refund failed")
-		mockQuerier.EXPECT().AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-			RootIno:     rootIno,
-			DeltaBytes:  0,
-			DeltaInodes: -1,
-		}).Return(quotaErr).Once()
-
-		err := mgr.Rename(ctx, meta.RenameParams{
-			OldParentIno: oldParentIno,
-			OldName:      []byte("src_dir"),
-			NewParentIno: newParentIno,
-			NewName:      []byte("dst_dir"),
-		})
-		assert.ErrorIs(t, err, quotaErr)
 	})
 }
 

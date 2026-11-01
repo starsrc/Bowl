@@ -3950,11 +3950,10 @@ func TestSetLkw_ExpiredSessionCancel_LeavesDirtyFileLock(t *testing.T) {
 		require.NoError(t, err)
 
 		// 验证当前处于孤儿状态：因句柄仍打开，used_inodes == 2, used_bytes == 4096
-		var preUsedInodes, preUsedBytes int64
-		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&preUsedInodes, &preUsedBytes)
+		preDisk, err := mgr.GetDisk(parentCtx, disk.DiskID)
 		require.NoError(t, err)
-		require.Equal(t, int64(2), preUsedInodes)
-		require.Equal(t, int64(4096), preUsedBytes)
+		require.Equal(t, uint64(2), preDisk.UsedInodes)
+		require.Equal(t, uint64(4096), preDisk.UsedBytes)
 
 		callCtx, callCancel := context.WithCancel(parentCtx)
 		defer callCancel()
@@ -3997,12 +3996,11 @@ func TestSetLkw_ExpiredSessionCancel_LeavesDirtyFileLock(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 0, inodeCount, "孤儿文件在关联过期会话清理后必须被物理删除")
 
-		// 6. 断言所属磁盘 disks.used_inodes 与 disks.used_bytes 已准确退还
-		var postUsedInodes, postUsedBytes int64
-		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&postUsedInodes, &postUsedBytes)
+		// 6. 断言所属磁盘配额 used_inodes 与 used_bytes 已准确退还
+		postDisk, err := mgr.GetDisk(parentCtx, disk.DiskID)
 		require.NoError(t, err)
-		assert.Equal(t, int64(1), postUsedInodes, "所属磁盘配额 used_inodes 必须恢复为 1 (仅剩根目录)")
-		assert.Equal(t, int64(0), postUsedBytes, "所属磁盘配额 used_bytes 必须精确退还为 0")
+		assert.Equal(t, uint64(1), postDisk.UsedInodes, "所属磁盘配额 used_inodes 必须恢复为 1 (仅剩根目录)")
+		assert.Equal(t, uint64(0), postDisk.UsedBytes, "所属磁盘配额 used_bytes 必须精确退还为 0")
 	})
 
 	t.Run("Scenario2_CleanupCancelledWaiter_PendingExpiryCancellationAndOrphanReclaim", func(t *testing.T) {
@@ -4088,11 +4086,10 @@ func TestSetLkw_ExpiredSessionCancel_LeavesDirtyFileLock(t *testing.T) {
 		require.NoError(t, err)
 
 		// 验证此时配额：used_inodes == 3 (根目录 + target.bin + orphan2.bin), used_bytes == 4096
-		var preInodes, preBytes int64
-		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&preInodes, &preBytes)
+		preDisk2, err := mgr.GetDisk(parentCtx, disk.DiskID)
 		require.NoError(t, err)
-		require.Equal(t, int64(3), preInodes)
-		require.Equal(t, int64(4096), preBytes)
+		require.Equal(t, uint64(3), preDisk2.UsedInodes)
+		require.Equal(t, uint64(4096), preDisk2.UsedBytes)
 
 		// 3. 会话 2 打开目标文件并调用阻塞 SetLkw 进入 PENDING 等待队列
 		openTarget2, err := mgr.Open(parentCtx, meta.OpenParams{
@@ -4162,11 +4159,10 @@ func TestSetLkw_ExpiredSessionCancel_LeavesDirtyFileLock(t *testing.T) {
 		assert.Equal(t, 0, orphanCount, "会话 2 过期并取消等待后，其持有的孤儿文件必须被物理回收")
 
 		// 7. 断言所属磁盘配额已准确退还
-		var postInodes, postBytes int64
-		err = pool.QueryRow(parentCtx, "SELECT used_inodes, used_bytes FROM disks WHERE disk_id = $1", disk.DiskID).Scan(&postInodes, &postBytes)
+		postDisk2, err := mgr.GetDisk(parentCtx, disk.DiskID)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), postInodes, "所属磁盘配额 used_inodes 必须恢复为 2 (仅剩根目录与 target.bin)")
-		assert.Equal(t, int64(0), postBytes, "所属磁盘配额 used_bytes 必须退还为 0")
+		assert.Equal(t, uint64(2), postDisk2.UsedInodes, "所属磁盘配额 used_inodes 必须恢复为 2 (仅剩根目录与 target.bin)")
+		assert.Equal(t, uint64(0), postDisk2.UsedBytes, "所属磁盘配额 used_bytes 必须退还为 0")
 	})
 }
 

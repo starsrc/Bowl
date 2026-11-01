@@ -177,8 +177,8 @@ func TestCreateDisk_PositivePath(t *testing.T) {
 					arg.RootIno == expectedRootIno &&
 					arg.MaxBytes == 10*1024*1024*1024
 			})).
-			RunAndReturn(func(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error) {
-				return db.Disk{
+			RunAndReturn(func(ctx context.Context, arg db.CreateDiskParams) (db.CreateDiskRow, error) {
+				return db.CreateDiskRow{
 					DiskID:     arg.DiskID,
 					Name:       arg.Name,
 					RootIno:    arg.RootIno,
@@ -242,8 +242,8 @@ func TestCreateDisk_PositivePath(t *testing.T) {
 					arg.RootIno == expectedRootIno &&
 					arg.MaxBytes == math.MaxInt64
 			})).
-			RunAndReturn(func(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error) {
-				return db.Disk{
+			RunAndReturn(func(ctx context.Context, arg db.CreateDiskParams) (db.CreateDiskRow, error) {
+				return db.CreateDiskRow{
 					DiskID:     arg.DiskID,
 					Name:       arg.Name,
 					RootIno:    arg.RootIno,
@@ -302,8 +302,8 @@ func TestCreateDisk_PositivePath(t *testing.T) {
 					arg.RootIno == expectedRootIno &&
 					arg.MaxBytes == 1
 			})).
-			RunAndReturn(func(ctx context.Context, arg db.CreateDiskParams) (db.Disk, error) {
-				return db.Disk{
+			RunAndReturn(func(ctx context.Context, arg db.CreateDiskParams) (db.CreateDiskRow, error) {
+				return db.CreateDiskRow{
 					DiskID:     arg.DiskID,
 					Name:       arg.Name,
 					RootIno:    arg.RootIno,
@@ -367,7 +367,7 @@ func TestCreateDisk_DatabaseErrors(t *testing.T) {
 		dbErr := errors.New("disk insertion failure")
 		mockQuerier.EXPECT().
 			CreateDisk(mock.Anything, mock.Anything).
-			Return(db.Disk{}, dbErr).
+			Return(db.CreateDiskRow{}, dbErr).
 			Once()
 
 		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
@@ -397,7 +397,7 @@ func TestCreateDisk_DatabaseErrors(t *testing.T) {
 		}
 		mockQuerier.EXPECT().
 			CreateDisk(mock.Anything, mock.Anything).
-			Return(db.Disk{}, pgConflictErr).
+			Return(db.CreateDiskRow{}, pgConflictErr).
 			Once()
 
 		disk, err := mgr.CreateDisk(ctx, meta.CreateDiskParams{
@@ -442,7 +442,7 @@ func TestGetDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	now := time.Now().Truncate(time.Microsecond)
-	sampleDBDisk := db.Disk{
+	sampleDBDisk := db.GetDiskRow{
 		DiskID:     validDiskID,
 		Name:       "primary-disk",
 		RootIno:    2001,
@@ -518,7 +518,7 @@ func TestGetDisk(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockStore.EXPECT().
 			GetDisk(mock.Anything, validDiskID).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskRow{}, pgx.ErrNoRows).
 			Once()
 
 		mgr := meta.New(mockStore)
@@ -534,7 +534,7 @@ func TestGetDisk(t *testing.T) {
 		dbErr := errors.New("database connection refused")
 		mockStore.EXPECT().
 			GetDisk(mock.Anything, validDiskID).
-			Return(db.Disk{}, dbErr).
+			Return(db.GetDiskRow{}, dbErr).
 			Once()
 
 		mgr := meta.New(mockStore)
@@ -624,7 +624,7 @@ func TestListDisks_Unit(t *testing.T) {
 				HasCursor: false,
 				PageLimit: 3,
 			}).
-			Return([]db.Disk{
+			Return([]db.ListDisksRow{
 				{DiskID: id1, Name: "d1", RootIno: 101, MaxBytes: 1024, CreatedAt: pgtype.Timestamptz{Time: t1, Valid: true}, UpdatedAt: pgtype.Timestamptz{Time: t1, Valid: true}},
 				{DiskID: id2, Name: "d2", RootIno: 102, MaxBytes: 2048, CreatedAt: pgtype.Timestamptz{Time: t2, Valid: true}, UpdatedAt: pgtype.Timestamptz{Time: t2, Valid: true}},
 				{DiskID: id3, Name: "d3", RootIno: 103, MaxBytes: 4096, CreatedAt: pgtype.Timestamptz{Time: t3, Valid: true}, UpdatedAt: pgtype.Timestamptz{Time: t3, Valid: true}},
@@ -648,7 +648,7 @@ func TestListDisks_Unit(t *testing.T) {
 					arg.CursorDiskID == id2 &&
 					arg.PageLimit == 3
 			})).
-			Return([]db.Disk{
+			Return([]db.ListDisksRow{
 				{DiskID: id3, Name: "d3", RootIno: 103, MaxBytes: 4096, CreatedAt: pgtype.Timestamptz{Time: t3, Valid: true}, UpdatedAt: pgtype.Timestamptz{Time: t3, Valid: true}},
 			}, nil).
 			Once()
@@ -813,7 +813,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskForUpdateRow{}, pgx.ErrNoRows).
 			Once()
 
 		newName := "new-disk-name"
@@ -832,7 +832,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		mgr := meta.New(mockStore)
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		currentDiskRow := db.Disk{
+		currentDiskRow := db.GetDiskForUpdateRow{
 			DiskID:     validDiskID,
 			Name:       "old-name",
 			RootIno:    101,
@@ -871,7 +871,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		mgr := meta.New(mockStore)
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		currentDiskRow := db.Disk{
+		currentDiskRow := db.GetDiskForUpdateRow{
 			DiskID:     validDiskID,
 			Name:       "disk-1",
 			RootIno:    101,
@@ -894,7 +894,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 				Name:     "disk-1",
 				MaxBytes: 5000,
 			}).
-			Return(db.Disk{
+			Return(db.UpdateDiskRow{
 				DiskID:     validDiskID,
 				Name:       "disk-1",
 				RootIno:    101,
@@ -922,7 +922,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		mgr := meta.New(mockStore)
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		currentDiskRow := db.Disk{
+		currentDiskRow := db.GetDiskForUpdateRow{
 			DiskID:     validDiskID,
 			Name:       "old-name",
 			RootIno:    101,
@@ -945,7 +945,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 				Name:     newName,
 				MaxBytes: 20000,
 			}).
-			Return(db.Disk{
+			Return(db.UpdateDiskRow{
 				DiskID:     validDiskID,
 				Name:       newName,
 				RootIno:    101,
@@ -973,7 +973,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		mgr := meta.New(mockStore)
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		currentDiskRow := db.Disk{
+		currentDiskRow := db.GetDiskForUpdateRow{
 			DiskID:     validDiskID,
 			Name:       "stable-name",
 			RootIno:    101,
@@ -996,7 +996,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 				Name:     "stable-name",
 				MaxBytes: 50000,
 			}).
-			Return(db.Disk{
+			Return(db.UpdateDiskRow{
 				DiskID:     validDiskID,
 				Name:       "stable-name",
 				RootIno:    101,
@@ -1024,7 +1024,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		mgr := meta.New(mockStore)
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		currentDiskRow := db.Disk{
+		currentDiskRow := db.GetDiskForUpdateRow{
 			DiskID:     validDiskID,
 			Name:       "initial-name",
 			RootIno:    101,
@@ -1048,7 +1048,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 				Name:     newName,
 				MaxBytes: 60000,
 			}).
-			Return(db.Disk{
+			Return(db.UpdateDiskRow{
 				DiskID:     validDiskID,
 				Name:       newName,
 				RootIno:    101,
@@ -1080,7 +1080,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		dbErr := errors.New("query timeout")
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{}, dbErr).
+			Return(db.GetDiskForUpdateRow{}, dbErr).
 			Once()
 
 		newName := "new-name"
@@ -1099,7 +1099,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		mgr := meta.New(mockStore)
 		setupMockWriteTx(mockStore, mockQuerier)
 
-		currentDiskRow := db.Disk{
+		currentDiskRow := db.GetDiskForUpdateRow{
 			DiskID:     validDiskID,
 			Name:       "initial-name",
 			RootIno:    101,
@@ -1119,7 +1119,7 @@ func TestUpdateDisk_BusinessLogic(t *testing.T) {
 		newName := "fail-name"
 		mockQuerier.EXPECT().
 			UpdateDisk(mock.Anything, mock.Anything).
-			Return(db.Disk{}, updateErr).
+			Return(db.UpdateDiskRow{}, updateErr).
 			Once()
 
 		disk, err := mgr.UpdateDisk(ctx, meta.UpdateDiskParams{
@@ -1226,7 +1226,7 @@ func TestStatFS_DatabaseErrors(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, int64(1)).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskByRootInoRow{}, pgx.ErrNoRows).
 			Once()
 
 		mgr := meta.New(mockStore)
@@ -1249,7 +1249,7 @@ func TestStatFS_DatabaseErrors(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, int64(1)).
-			Return(db.Disk{}, dbErr).
+			Return(db.GetDiskByRootInoRow{}, dbErr).
 			Once()
 
 		mgr := meta.New(mockStore)
@@ -1288,7 +1288,7 @@ func TestStatFS_Calculation(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, rootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoRow{
 				DiskID:     validDiskID,
 				Name:       "statfs-disk",
 				RootIno:    rootIno,
@@ -1331,7 +1331,7 @@ func TestStatFS_Calculation(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, rootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoRow{
 				DiskID:     validDiskID,
 				Name:       "orphan-disk",
 				RootIno:    rootIno,
@@ -1367,7 +1367,7 @@ func TestStatFS_Calculation(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, rootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoRow{
 				DiskID:     validDiskID,
 				Name:       "tiny-disk",
 				RootIno:    rootIno,
@@ -1403,7 +1403,7 @@ func TestStatFS_Calculation(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, rootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoRow{
 				DiskID:     validDiskID,
 				Name:       "full-disk",
 				RootIno:    rootIno,
@@ -1439,7 +1439,7 @@ func TestStatFS_Calculation(t *testing.T) {
 
 		mockStore.EXPECT().
 			GetDiskByRootIno(mock.Anything, rootIno).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoRow{
 				DiskID:     validDiskID,
 				Name:       "zero-inodes-disk",
 				RootIno:    rootIno,
@@ -1510,7 +1510,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskForUpdateRow{}, pgx.ErrNoRows).
 			Once()
 
 		err := mgr.DeleteDisk(ctx, validDiskIDStr)
@@ -1527,7 +1527,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		dbErr := errors.New("db connection failure")
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{}, dbErr).
+			Return(db.GetDiskForUpdateRow{}, dbErr).
 			Once()
 
 		err := mgr.DeleteDisk(ctx, validDiskIDStr)
@@ -1543,7 +1543,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1575,7 +1575,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1608,7 +1608,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1646,7 +1646,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1695,7 +1695,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1736,7 +1736,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		// 第一轮：发现活跃流，回滚事务触发探活
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1769,7 +1769,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		// 第二轮：死会话已被 Evict 和 CloseSession，成功删除磁盘
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -1916,7 +1916,7 @@ func TestDeleteDisk_MockStore(t *testing.T) {
 		// 2. DeleteDisk 预期执行
 		mockQuerier.EXPECT().
 			GetDiskForUpdate(mock.Anything, validDiskID).
-			Return(db.Disk{
+			Return(db.GetDiskForUpdateRow{
 				DiskID:  validDiskID,
 				RootIno: rootIno,
 			}, nil).
@@ -2493,22 +2493,13 @@ func TestWriteOps_DeadlockRetry_Unit(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, int64(1)).
-			Return(db.Disk{
+			Return(db.GetDiskByRootInoForUpdateRow{
 				DiskID:     pgtype.UUID{Valid: true},
 				RootIno:    1,
 				MaxBytes:   100 * 1024,
 				UsedBytes:  1024,
 				UsedInodes: 1,
 			}, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     1,
-				DeltaBytes:  1024,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -2574,15 +2565,6 @@ func TestWriteOps_DeadlockRetry_Unit(t *testing.T) {
 		mockQuerier.EXPECT().
 			CreateInode(mock.Anything, mock.Anything).
 			Return(newFile, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     1,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}).
-			Return(nil).
 			Once()
 
 		mockQuerier.EXPECT().
@@ -3604,6 +3586,8 @@ func TestDeleteDisk_ReconnectDuringOrphanQuotaReclaim(t *testing.T) {
 		ParentIno: disk.RootIno, Mode: 0o600, Flags: meta.O_RDWR, SessionID: &sid,
 	})
 	require.NoError(t, err)
+	_, err = pool.Exec(ctx, "INSERT INTO chunks (ino, indx, slices) VALUES ($1, 0, $2)", int64(tmp.Inode.Ino), make([]byte, 24))
+	require.NoError(t, err)
 
 	oldPing := make(chan struct{}, 1)
 	_, unregisterOld := mgr.WatchHub().Register(sid, func(uint64) error {
@@ -3634,7 +3618,7 @@ func TestDeleteDisk_ReconnectDuringOrphanQuotaReclaim(t *testing.T) {
 	blocker, err := pool.Begin(ctx)
 	require.NoError(t, err)
 	defer func() { _ = blocker.Rollback(context.Background()) }()
-	_, err = blocker.Exec(ctx, "SELECT disk_id FROM disks WHERE disk_id = $1 FOR UPDATE", disk.DiskID)
+	_, err = blocker.Exec(ctx, "SELECT ino FROM chunks WHERE ino = $1 FOR UPDATE", int64(tmp.Inode.Ino))
 	require.NoError(t, err)
 	var blockerPID int32
 	require.NoError(t, blocker.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&blockerPID))
@@ -3643,11 +3627,11 @@ func TestDeleteDisk_ReconnectDuringOrphanQuotaReclaim(t *testing.T) {
 		err := pool.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
 			WHERE $1 = ANY(pg_blocking_pids(pid))
-			AND query LIKE '%AddDiskQuotaByRootIno%'
+			AND query LIKE '%DeleteChunksByInos%'
 		)`, blockerPID).Scan(&waiting)
 		require.NoError(t, err)
 		return waiting
-	}, 2*time.Second, time.Millisecond, "会话回收应在流复核之后等待配额行锁")
+	}, 2*time.Second, time.Millisecond, "会话回收应在流复核之后等待孤儿 Chunk 行锁")
 	require.False(t, mgr.WatchHub().HasActiveStream(sid))
 
 	var streamID uint64

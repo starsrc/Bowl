@@ -100,11 +100,7 @@ func (m *manager) Mknod(ctx context.Context, params MknodParams) (*Inode, error)
 		}
 
 		if parent.RootIno > 0 {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
+			if err := m.recordQuotaDelta(ctx, q, parent.RootIno, 0, 1); err != nil {
 				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
 			}
 		}
@@ -198,17 +194,6 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			return fmt.Errorf("create inode: %w", err)
 		}
 
-		deferQuotaToEnd := isNativeTxQuerier(q)
-		if parent.RootIno > 0 && !deferQuotaToEnd {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
-				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
-			}
-		}
-
 		err = q.CreateEntry(ctx, db.CreateEntryParams{
 			ParentIno: int64(params.ParentIno),
 			Name:      params.Name,
@@ -226,12 +211,8 @@ func (m *manager) Mkdir(ctx context.Context, params MkdirParams) (*Inode, error)
 			return fmt.Errorf("increment parent inode %d nlink and touch: %w", parent.Ino, err)
 		}
 
-		if parent.RootIno > 0 && deferQuotaToEnd {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
+		if parent.RootIno > 0 {
+			if err := m.recordQuotaDelta(ctx, q, parent.RootIno, 0, 1); err != nil {
 				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
 			}
 		}
@@ -338,11 +319,7 @@ func (m *manager) Symlink(ctx context.Context, params SymlinkParams) (*Inode, er
 		}
 
 		if parent.RootIno > 0 {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
+			if err := m.recordQuotaDelta(ctx, q, parent.RootIno, 0, 1); err != nil {
 				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
 			}
 		}
@@ -442,17 +419,6 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return err
 		}
 
-		deferQuotaToEnd := isNativeTxQuerier(q)
-		if parent.RootIno > 0 && !deferQuotaToEnd {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
-				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
-			}
-		}
-
 		err = q.CreateEntry(ctx, db.CreateEntryParams{
 			ParentIno: int64(params.ParentIno),
 			Name:      params.Name,
@@ -479,12 +445,8 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*CreateResul
 			return fmt.Errorf("create file handle for inode %d: %w", newInode.Ino, err)
 		}
 
-		if parent.RootIno > 0 && deferQuotaToEnd {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
+		if parent.RootIno > 0 {
+			if err := m.recordQuotaDelta(ctx, q, parent.RootIno, 0, 1); err != nil {
 				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
 			}
 		}
@@ -586,17 +548,6 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			return fmt.Errorf("create tmpfile inode: %w", err)
 		}
 
-		deferQuotaToEnd := isNativeTxQuerier(q)
-		if parent.RootIno > 0 && !deferQuotaToEnd {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
-				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
-			}
-		}
-
 		handle, err := q.CreateFileHandle(ctx, db.CreateFileHandleParams{
 			Ino:       newInode.Ino,
 			Flags:     int32(params.Flags | O_TMPFILE),
@@ -606,12 +557,8 @@ func (m *manager) TmpFile(ctx context.Context, params TmpFileParams) (*CreateRes
 			return fmt.Errorf("create file handle for tmpfile inode %d: %w", newInode.Ino, err)
 		}
 
-		if parent.RootIno > 0 && deferQuotaToEnd {
-			if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-				RootIno:     parent.RootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}); err != nil {
+		if parent.RootIno > 0 {
+			if err := m.recordQuotaDelta(ctx, q, parent.RootIno, 0, 1); err != nil {
 				return fmt.Errorf("increment disk used_inodes for root_ino %d: %w", parent.RootIno, err)
 			}
 		}
@@ -739,11 +686,7 @@ func (m *manager) Open(ctx context.Context, params OpenParams) (*OpenResult, err
 					return fmt.Errorf("truncate inode attr for inode %d: %w", inode.Ino, err)
 				}
 				if inode.RootIno > 0 && inode.Size > 0 {
-					if err := q.AddDiskQuotaByRootIno(ctx, db.AddDiskQuotaByRootInoParams{
-						RootIno:     inode.RootIno,
-						DeltaBytes:  -inode.Size,
-						DeltaInodes: 0,
-					}); err != nil {
+					if err := m.recordQuotaDelta(ctx, q, inode.RootIno, -inode.Size, 0); err != nil {
 						return fmt.Errorf("deduct disk used_bytes on open truncate for inode %d: %w", inode.Ino, err)
 					}
 				}

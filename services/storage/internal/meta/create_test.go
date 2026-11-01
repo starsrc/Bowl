@@ -962,15 +962,6 @@ func TestCreate_InheritRootInoAndQuotaIncrement(t *testing.T) {
 			Once()
 
 		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}).
-			Return(nil).
-			Once()
-
-		mockQuerier.EXPECT().
 			CreateEntry(mock.Anything, db.CreateEntryParams{
 				ParentIno: int64(parentIno),
 				Name:      []byte("quota_file.txt"),
@@ -1012,63 +1003,5 @@ func TestCreate_InheritRootInoAndQuotaIncrement(t *testing.T) {
 		assert.Equal(t, uint64(expectedFh), res.Fh)
 		require.NotNil(t, res.Inode)
 		assert.Equal(t, newIno, res.Inode.Ino)
-	})
-
-	t.Run("AddDiskQuotaByRootIno 失败时回滚事务并向上传播错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(parentIno)).
-			Return(baseParentRowWithRoot, nil).
-			Once()
-
-		createdInodeRow := db.Inode{
-			Ino:     int64(newIno),
-			Mode:    int32(meta.S_IFREG | 0o644),
-			Nlink:   1,
-			Uid:     1000,
-			Gid:     1000,
-			RootIno: rootIno,
-		}
-
-		mockQuerier.EXPECT().
-			CreateInode(mock.Anything, db.CreateInodeParams{
-				Mode:    int32(meta.S_IFREG | 0o644),
-				Nlink:   1,
-				Uid:     1000,
-				Gid:     1000,
-				Rdev:    0,
-				RootIno: rootIno,
-			}).
-			Return(createdInodeRow, nil).
-			Once()
-
-		quotaErr := errors.New("failed to increment disk quota inodes")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  0,
-				DeltaInodes: 1,
-			}).
-			Return(quotaErr).
-			Once()
-
-		res, err := mgr.Create(ctx, meta.CreateParams{
-			ParentIno: parentIno,
-			Name:      []byte("quota_file_fail.txt"),
-			Mode:      0o644,
-			UID:       1000,
-			GID:       1000,
-			Flags:     meta.O_CREAT | meta.O_RDWR,
-		})
-
-		assert.Nil(t, res)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, quotaErr)
-		assert.Contains(t, err.Error(), "increment disk used_inodes")
 	})
 }

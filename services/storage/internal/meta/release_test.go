@@ -436,15 +436,6 @@ func TestRelease_PositivePath(t *testing.T) {
 			Return(nil).
 			Once()
 
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     10,
-				DeltaBytes:  -8192,
-				DeltaInodes: -1,
-			}).
-			Return(nil).
-			Once()
-
 		err := mgr.Release(ctx, meta.ReleaseParams{
 			Ino: ino,
 			Fh:  fh,
@@ -452,7 +443,7 @@ func TestRelease_PositivePath(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("存在剩余活跃句柄的 Orphan 常规文件 (nlink == 0, RootIno > 0): 仅释放句柄，不调用 DeleteInode 与 AddDiskQuotaByRootIno", func(t *testing.T) {
+	t.Run("存在剩余活跃句柄的 Orphan 常规文件 (nlink == 0, RootIno > 0): 仅释放句柄，不调用 DeleteInode", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -543,15 +534,6 @@ func TestRelease_PositivePath(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(ino)).
-			Return(nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     10,
-				DeltaBytes:  -4096,
-				DeltaInodes: -1,
-			}).
 			Return(nil).
 			Once()
 
@@ -819,70 +801,6 @@ func TestRelease_NegativeAndErrorPaths(t *testing.T) {
 		dbErr := errors.New("db delete inode failed")
 		mockQuerier.EXPECT().
 			DeleteInode(mock.Anything, int64(ino)).
-			Return(dbErr).
-			Once()
-
-		err := mgr.Release(ctx, meta.ReleaseParams{
-			Ino: ino,
-			Fh:  fh,
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "release tx")
-		assert.True(t, errors.Is(err, dbErr))
-	})
-
-	t.Run("AddDiskQuotaByRootIno 底层数据库错误导致事务中止并透传错误", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		orphanInode := baseInode
-		orphanInode.Nlink = 0
-		orphanInode.RootIno = 10
-		orphanInode.Size = 8192
-
-		mockQuerier.EXPECT().
-			GetInode(mock.Anything, int64(ino)).
-			Return(orphanInode, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(ino)).
-			Return(orphanInode, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteFileHandle(mock.Anything, db.DeleteFileHandleParams{
-				Fh:  int64(fh),
-				Ino: int64(ino),
-			}).
-			Return(int64(fh), nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			HasFileHandlesByIno(mock.Anything, int64(ino)).
-			Return(false, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteChunksByIno(mock.Anything, int64(ino)).
-			Return(nil, nil).
-			Once()
-
-		mockQuerier.EXPECT().
-			DeleteInode(mock.Anything, int64(ino)).
-			Return(nil).
-			Once()
-
-		dbErr := errors.New("db add quota failed")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     10,
-				DeltaBytes:  -8192,
-				DeltaInodes: -1,
-			}).
 			Return(dbErr).
 			Once()
 

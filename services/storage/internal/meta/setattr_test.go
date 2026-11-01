@@ -1535,7 +1535,7 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 			Return(baseInodeRow, nil).
 			Once()
 
-		diskRow := db.Disk{
+		diskRow := db.GetDiskByRootInoForUpdateRow{
 			RootIno:   rootIno,
 			MaxBytes:  10000,
 			UsedBytes: 5000,
@@ -1546,16 +1546,6 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 			Once()
 
 		targetSize := uint64(2500)
-		deltaBytes := int64(1500)
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  deltaBytes,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
-			Once()
 
 		updatedRow := baseInodeRow
 		updatedRow.Size = int64(targetSize)
@@ -1599,7 +1589,7 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 			Return(baseInodeRow, nil).
 			Once()
 
-		diskRow := db.Disk{
+		diskRow := db.GetDiskByRootInoForUpdateRow{
 			RootIno:   rootIno,
 			MaxBytes:  10000,
 			UsedBytes: 5000,
@@ -1642,7 +1632,7 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 			Return(baseInodeRow, nil).
 			Once()
 
-		diskRow := db.Disk{
+		diskRow := db.GetDiskByRootInoForUpdateRow{
 			RootIno:   rootIno,
 			MaxBytes:  5000,
 			UsedBytes: 6000,
@@ -1664,7 +1654,7 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 		mockQuerier.AssertExpectations(t)
 	})
 
-	t.Run("截断缩小常规文件调用 AddDiskQuotaByRootIno 释放配额", func(t *testing.T) {
+	t.Run("截断缩小常规文件在内存中释放配额", func(t *testing.T) {
 		mockStore := dbmock.NewMockStore(t)
 		mockQuerier := dbmock.NewMockQuerier(t)
 		mgr := meta.New(mockStore)
@@ -1677,15 +1667,6 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 			Once()
 
 		targetSize := uint64(400)
-
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -600,
-				DeltaInodes: 0,
-			}).
-			Return(nil).
-			Once()
 
 		mockQuerier.EXPECT().
 			DeleteChunksAfterIndx(mock.Anything, db.DeleteChunksAfterIndxParams{
@@ -1789,7 +1770,7 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-			Return(db.Disk{}, pgx.ErrNoRows).
+			Return(db.GetDiskByRootInoForUpdateRow{}, pgx.ErrNoRows).
 			Once()
 
 		targetSize := uint64(2000)
@@ -1839,7 +1820,7 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 		dbErr := errors.New("db disk query error")
 		mockQuerier.EXPECT().
 			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-			Return(db.Disk{}, dbErr).
+			Return(db.GetDiskByRootInoForUpdateRow{}, dbErr).
 			Once()
 
 		targetSize := uint64(2000)
@@ -1851,84 +1832,6 @@ func TestSetAttr_DiskQuota(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, dbErr)
 		assert.Contains(t, err.Error(), fmt.Sprintf("get disk by root_ino %d for update", rootIno))
-		mockQuerier.AssertExpectations(t)
-	})
-
-	t.Run("扩容时 AddDiskQuotaByRootIno 错误向上透传", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(ino)).
-			Return(baseInodeRow, nil).
-			Once()
-
-		diskRow := db.Disk{
-			RootIno:   rootIno,
-			MaxBytes:  10000,
-			UsedBytes: 5000,
-		}
-		mockQuerier.EXPECT().
-			GetDiskByRootInoForUpdate(mock.Anything, rootIno).
-			Return(diskRow, nil).
-			Once()
-
-		dbErr := errors.New("quota update error")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  1000,
-				DeltaInodes: 0,
-			}).
-			Return(dbErr).
-			Once()
-
-		targetSize := uint64(2000)
-
-		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
-			Size: ptr(targetSize),
-		})
-		assert.Nil(t, res)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, dbErr)
-		assert.Contains(t, err.Error(), fmt.Sprintf("add disk quota by root_ino %d", rootIno))
-		mockQuerier.AssertExpectations(t)
-	})
-
-	t.Run("截断缩容时 AddDiskQuotaByRootIno 错误向上透传", func(t *testing.T) {
-		mockStore := dbmock.NewMockStore(t)
-		mockQuerier := dbmock.NewMockQuerier(t)
-		mgr := meta.New(mockStore)
-
-		setupMockWriteTx(mockStore, mockQuerier)
-
-		mockQuerier.EXPECT().
-			GetInodeForUpdate(mock.Anything, int64(ino)).
-			Return(baseInodeRow, nil).
-			Once()
-
-		dbErr := errors.New("shrink quota update error")
-		mockQuerier.EXPECT().
-			AddDiskQuotaByRootIno(mock.Anything, db.AddDiskQuotaByRootInoParams{
-				RootIno:     rootIno,
-				DeltaBytes:  -500,
-				DeltaInodes: 0,
-			}).
-			Return(dbErr).
-			Once()
-
-		targetSize := uint64(500)
-
-		res, err := mgr.SetAttr(ctx, ino, meta.SetAttrInput{
-			Size: ptr(targetSize),
-		})
-		assert.Nil(t, res)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, dbErr)
-		assert.Contains(t, err.Error(), fmt.Sprintf("add disk quota by root_ino %d", rootIno))
 		mockQuerier.AssertExpectations(t)
 	})
 }

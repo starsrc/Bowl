@@ -11,14 +11,13 @@ import (
 )
 
 type Querier interface {
-	AddDiskQuotaByRootIno(ctx context.Context, arg AddDiskQuotaByRootInoParams) error
 	AddSliceRefCount(ctx context.Context, arg AddSliceRefCountParams) error
 	AppendChunkSlice(ctx context.Context, arg AppendChunkSliceParams) (int64, error)
 	AppendExistingChunkSlice(ctx context.Context, arg AppendExistingChunkSliceParams) (int64, error)
 	ClearInodeNlinkAndTouchCtime(ctx context.Context, ino int64) (Inode, error)
 	// 4194304 = 0o20000000 (O_TMPFILE)
 	ClearTmpFileFlagByIno(ctx context.Context, ino int64) error
-	CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error)
+	CreateDisk(ctx context.Context, arg CreateDiskParams) (CreateDiskRow, error)
 	CreateEntry(ctx context.Context, arg CreateEntryParams) error
 	CreateFileHandle(ctx context.Context, arg CreateFileHandleParams) (FileHandle, error)
 	CreateFileLock(ctx context.Context, arg CreateFileLockParams) (FileLock, error)
@@ -51,10 +50,10 @@ type Querier interface {
 	GetChunk(ctx context.Context, arg GetChunkParams) (Chunk, error)
 	GetChunkForUpdate(ctx context.Context, arg GetChunkForUpdateParams) (Chunk, error)
 	GetChunksInRange(ctx context.Context, arg GetChunksInRangeParams) ([]Chunk, error)
-	GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
-	GetDiskByRootIno(ctx context.Context, rootIno int64) (Disk, error)
-	GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (Disk, error)
-	GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Disk, error)
+	GetDisk(ctx context.Context, diskID pgtype.UUID) (GetDiskRow, error)
+	GetDiskByRootIno(ctx context.Context, rootIno int64) (GetDiskByRootInoRow, error)
+	GetDiskByRootInoForUpdate(ctx context.Context, rootIno int64) (GetDiskByRootInoForUpdateRow, error)
+	GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (GetDiskForUpdateRow, error)
 	GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error)
 	GetFileHandle(ctx context.Context, arg GetFileHandleParams) (FileHandle, error)
 	GetFileLockWaiter(ctx context.Context, arg GetFileLockWaiterParams) (FileLockWaiter, error)
@@ -80,7 +79,7 @@ type Querier interface {
 	ListActiveSessionIDsByDisk(ctx context.Context, arg ListActiveSessionIDsByDiskParams) ([]int64, error)
 	ListDirEntries(ctx context.Context, arg ListDirEntriesParams) ([]ListDirEntriesRow, error)
 	ListDirEntriesAfterName(ctx context.Context, arg ListDirEntriesAfterNameParams) ([]ListDirEntriesAfterNameRow, error)
-	ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, error)
+	ListDisks(ctx context.Context, arg ListDisksParams) ([]ListDisksRow, error)
 	ListGarbageSliceRefs(ctx context.Context, limitCount int32) ([]SliceRef, error)
 	ListInodeXattrNames(ctx context.Context, ino int64) ([][]byte, error)
 	ListParentEntryCountsByIno(ctx context.Context, ino int64) ([]ListParentEntryCountsByInoRow, error)
@@ -92,9 +91,7 @@ type Querier interface {
 	TouchInodeCtime(ctx context.Context, ino int64) error
 	TouchInodeTimestamps(ctx context.Context, ino int64) error
 	UpdateChunkSlices(ctx context.Context, arg UpdateChunkSlicesParams) error
-	UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error)
-	UpdateDiskQuotaByRootIno(ctx context.Context, arg UpdateDiskQuotaByRootInoParams) (Disk, error)
-	UpdateDiskUsedBytes(ctx context.Context, arg UpdateDiskUsedBytesParams) (Disk, error)
+	UpdateDisk(ctx context.Context, arg UpdateDiskParams) (UpdateDiskRow, error)
 	UpdateEntry(ctx context.Context, arg UpdateEntryParams) error
 	UpdateEntryIno(ctx context.Context, arg UpdateEntryInoParams) error
 	UpdateInodeAttr(ctx context.Context, arg UpdateInodeAttrParams) (Inode, error)

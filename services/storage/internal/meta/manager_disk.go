@@ -32,8 +32,8 @@ func validateDiskName(name string) error {
 	return nil
 }
 
-// toDomainDisk 将数据库持久层 db.Disk 行模型转换为领域层 Disk 实体。
-func toDomainDisk(row db.Disk) *Disk {
+// toDomainDisk 将数据库持久层 db.GetDiskRow 行模型转换为领域层 Disk 实体。
+func toDomainDisk(row db.GetDiskRow) *Disk {
 	var diskID string
 	if row.DiskID.Valid {
 		diskID = row.DiskID.String()
@@ -75,7 +75,7 @@ func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 	}
 
 	// 4. 单次读写事务内原子创建根目录 Inode 与 Disk 记录
-	var createdDisk db.Disk
+	var createdDisk db.GetDiskRow
 	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
 		rootInode, err := q.CreateRootInode(ctx, db.CreateRootInodeParams{
 			Mode:  int32(S_IFDIR | 0o755),
@@ -103,7 +103,7 @@ func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 			return fmt.Errorf("create disk: %w", err)
 		}
 
-		createdDisk = row
+		createdDisk = db.GetDiskRow(row)
 		return nil
 	})
 	if err != nil {
@@ -140,9 +140,7 @@ func (m *manager) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
 		}
 		return nil, err
 	}
-	if err := m.syncDiskRowWithQuotaState(ctx, &row); err != nil {
-		return nil, err
-	}
+	m.syncDiskRowWithQuotaState(&row)
 
 	return toDomainDisk(row), nil
 }
@@ -235,10 +233,9 @@ func (m *manager) ListDisks(ctx context.Context, params ListDisksParams) (*ListD
 
 	disks := make([]*Disk, 0, len(rows))
 	for i := range rows {
-		if err := m.syncDiskRowWithQuotaState(ctx, &rows[i]); err != nil {
-			return nil, err
-		}
-		disks = append(disks, toDomainDisk(rows[i]))
+		r := db.GetDiskRow(rows[i])
+		m.syncDiskRowWithQuotaState(&r)
+		disks = append(disks, toDomainDisk(r))
 	}
 
 	return &ListDisksResult{
@@ -270,13 +267,16 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 		}
 	}
 
-	if err := m.FlushDiskQuotas(ctx); err != nil {
-		return nil, err
-	}
-
-	var updatedRow db.Disk
-	var result *Disk
+	var (
+		prevRow    db.GetDiskRow
+		hasPrevRow bool
+		updatedRow db.GetDiskRow
+	)
 	err = m.execWriteTxWithRetry(ctx, func(q db.Querier) error {
+		if hasPrevRow {
+			m.updateDiskQuotaOnUpdate(prevRow)
+			hasPrevRow = false
+		}
 		current, err := q.GetDiskForUpdate(ctx, pgID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -296,7 +296,8 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 		}
 
 		// 缩容水位保护：严禁缩容至当前已用空间以下
-		if params.MaxBytes != nil && *params.MaxBytes < uint64(current.UsedBytes) {
+		currentUsedBytes := m.currentDiskUsedBytes(current.RootIno, current.UsedBytes)
+		if params.MaxBytes != nil && *params.MaxBytes < currentUsedBytes {
 			return ErrInvalidShrink
 		}
 
@@ -309,16 +310,21 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 			return fmt.Errorf("update disk %s: %w", params.DiskID, err)
 		}
 
-		updatedRow = updated
-		result = toDomainDisk(updated)
+		prevRow = db.GetDiskRow(current)
+		hasPrevRow = true
+		updatedRow = db.GetDiskRow(updated)
+		m.updateDiskQuotaOnUpdate(updatedRow)
 		return nil
 	})
 	if err != nil {
+		if hasPrevRow {
+			m.updateDiskQuotaOnUpdate(prevRow)
+		}
 		return nil, err
 	}
 
-	m.updateDiskQuotaOnUpdate(updatedRow)
-	return result, nil
+	m.syncDiskRowWithQuotaState(&updatedRow)
+	return toDomainDisk(updatedRow), nil
 }
 
 var errNeedSessionProbe = errors.New("meta: need active session liveness probe")
@@ -505,7 +511,7 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 
 	inosToClean := make([]uint64, 0, len(deletedInos)+1)
 	if rootIno > 0 {
-		m.evictDiskQuota(rootIno)
+		m.deleteDiskQuotaState(rootIno)
 		inosToClean = append(inosToClean, uint64(rootIno))
 	}
 	for _, ino := range deletedInos {
@@ -544,13 +550,12 @@ func (m *manager) StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 		}
 		return nil, fmt.Errorf("get disk by root_ino %d: %w", inode.RootIno, err)
 	}
-	if err := m.syncDiskRowWithQuotaState(ctx, &row); err != nil {
-		return nil, err
-	}
+	diskRow := db.GetDiskRow(row)
+	m.syncDiskRowWithQuotaState(&diskRow)
 
 	// 3. 计算容量与 4096 字节块统计信息
-	totalBytes := uint64(row.MaxBytes)
-	usedBytes := uint64(row.UsedBytes)
+	totalBytes := uint64(diskRow.MaxBytes)
+	usedBytes := uint64(diskRow.UsedBytes)
 
 	var availBytes uint64
 	if totalBytes > usedBytes {
@@ -567,8 +572,8 @@ func (m *manager) StatFS(ctx context.Context, ino uint64) (*StatFSResult, error)
 	bfree := bavail
 
 	var files uint64
-	if row.UsedInodes > 0 {
-		files = uint64(row.UsedInodes)
+	if diskRow.UsedInodes > 0 {
+		files = uint64(diskRow.UsedInodes)
 	}
 
 	return &StatFSResult{

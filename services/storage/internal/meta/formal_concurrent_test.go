@@ -516,14 +516,9 @@ func runConcurrentWorker(
 				sidPtr = &sidCopy
 			}
 
-			targetMgr := env.Mgr
-			if useShortCrash {
-				targetMgr = env.ShortMgr
-			}
-
 			if rng.IntN(2) == 0 {
 				name := pickSharedOrUniqueName(rng, env, "cr")
-				res, err := targetMgr.Create(ctx, meta.CreateParams{
+				res, err := env.Mgr.Create(ctx, meta.CreateParams{
 					ParentIno: parentIno,
 					Name:      []byte(name),
 					Mode:      meta.S_IFREG | meta.S_ISUID | 0o755,
@@ -544,10 +539,13 @@ func runConcurrentWorker(
 							SessionID: sidPtr,
 							Flags:     meta.O_CREAT | meta.O_RDWR,
 						})
-					} else if rng.IntN(2) == 0 {
-						// 50% 概率立即 Unlink，构造仅绑定在短命断连会话上的孤儿文件
-						uErr := env.Mgr.Unlink(ctx, parentIno, []byte(name))
-						env.assertAllowedErr(t, workerID, step, "Unlink(ShortCrash)", uErr)
+					} else {
+						_, _ = env.Pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() + interval '30 milliseconds' WHERE session_id = $1", int64(*sidPtr))
+						if rng.IntN(2) == 0 {
+							// 50% 概率立即 Unlink，构造仅绑定在短命断连会话上的孤儿文件
+							uErr := env.Mgr.Unlink(ctx, parentIno, []byte(name))
+							env.assertAllowedErr(t, workerID, step, "Unlink(ShortCrash)", uErr)
+						}
 					}
 				}
 				recordTrace(step, fmt.Sprintf("Create(parent=%d, name=%s) -> err=%v", parentIno, name, err))
@@ -556,7 +554,7 @@ func runConcurrentWorker(
 				if rng.IntN(4) == 0 {
 					flags |= meta.O_EXCL
 				}
-				res, err := targetMgr.TmpFile(ctx, meta.TmpFileParams{
+				res, err := env.Mgr.TmpFile(ctx, meta.TmpFileParams{
 					ParentIno: parentIno,
 					Mode:      0o640,
 					Flags:     flags,
@@ -575,6 +573,8 @@ func runConcurrentWorker(
 							SessionID: sidPtr,
 							Flags:     flags | meta.O_TMPFILE,
 						})
+					} else {
+						_, _ = env.Pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() + interval '30 milliseconds' WHERE session_id = $1", int64(*sidPtr))
 					}
 					// 立即尝试一次 Link 具名化（覆盖 TmpFile 一次性具名化与 O_TMPFILE 清除）
 					if rng.IntN(2) == 0 {
@@ -1307,17 +1307,13 @@ func auditConcurrentInvariantsInternal(
 	// -------------------------------------------------------------------------
 	for _, rootIno := range activeRootInos {
 		var diskID, diskName string
-		var maxBytes, usedBytes, usedInodes int64
+		var maxBytes int64
 		err := env.Pool.QueryRow(ctx, `
-			SELECT disk_id::text, name, max_bytes, used_bytes, used_inodes
+			SELECT disk_id::text, name, max_bytes
 			FROM disks
 			WHERE root_ino = $1
-		`, int64(rootIno)).Scan(&diskID, &diskName, &maxBytes, &usedBytes, &usedInodes)
+		`, int64(rootIno)).Scan(&diskID, &diskName, &maxBytes)
 		require.NoErrorf(t, err, "INV-4 审计: 查询存活磁盘 root_ino=%d 失败", rootIno)
-
-		require.GreaterOrEqualf(t, usedBytes, int64(0), "INV-4 违例: root_ino=%d used_bytes < 0", rootIno)
-		require.LessOrEqualf(t, usedBytes, maxBytes, "INV-4 违例: root_ino=%d used_bytes (%d) > max_bytes (%d)", rootIno, usedBytes, maxBytes)
-		require.GreaterOrEqualf(t, usedInodes, int64(1), "INV-4 违例: root_ino=%d used_inodes (%d) < 1", rootIno, usedInodes)
 
 		var actualInodeCount, actualRegBytes int64
 		err = env.Pool.QueryRow(ctx, `
@@ -1329,23 +1325,20 @@ func auditConcurrentInvariantsInternal(
 		`, int64(rootIno), int32(meta.S_IFMT), int32(meta.S_IFREG)).Scan(&actualInodeCount, &actualRegBytes)
 		require.NoError(t, err, "INV-4 审计: 聚合 inodes 配额失败")
 
-		require.Equalf(t, actualRegBytes, usedBytes,
-			"INV-4 违例: root_ino=%d disks.used_bytes (%d) != sum(inodes.size WHERE S_IFREG) (%d)",
-			rootIno, usedBytes, actualRegBytes)
-		require.Equalf(t, actualInodeCount, usedInodes,
-			"INV-4 违例: root_ino=%d disks.used_inodes (%d) != count(inodes) (%d)",
-			rootIno, usedInodes, actualInodeCount)
+		require.GreaterOrEqualf(t, actualRegBytes, int64(0), "INV-4 违例: root_ino=%d used_bytes < 0", rootIno)
+		require.LessOrEqualf(t, actualRegBytes, maxBytes, "INV-4 违例: root_ino=%d used_bytes (%d) > max_bytes (%d)", rootIno, actualRegBytes, maxBytes)
+		require.GreaterOrEqualf(t, actualInodeCount, int64(1), "INV-4 违例: root_ino=%d used_inodes (%d) < 1", rootIno, actualInodeCount)
 
 		// 同时核对公开接口 GetDisk 与 StatFS 与底表账本完全一致
 		gotDisk, err := env.Mgr.GetDisk(ctx, diskID)
 		require.NoError(t, err)
-		require.Equal(t, uint64(usedBytes), gotDisk.UsedBytes)
-		require.Equal(t, uint64(usedInodes), gotDisk.UsedInodes)
+		require.Equal(t, uint64(actualRegBytes), gotDisk.UsedBytes)
+		require.Equal(t, uint64(actualInodeCount), gotDisk.UsedInodes)
 
 		gotStatFS, err := env.Mgr.StatFS(ctx, rootIno)
 		require.NoError(t, err)
-		require.Equal(t, uint64(usedBytes), gotStatFS.UsedBytes)
-		require.Equal(t, uint64(usedInodes), gotStatFS.Files)
+		require.Equal(t, uint64(actualRegBytes), gotStatFS.UsedBytes)
+		require.Equal(t, uint64(actualInodeCount), gotStatFS.Files)
 	}
 
 	// -------------------------------------------------------------------------
@@ -1957,12 +1950,12 @@ func TestFormalConcurrentChaos(t *testing.T) {
 
 			// -----------------------------------------------------------------
 			// 阶段 2：短租约过期与级联收敛清扫
-			// 1. 将所有 Worker 会话通过 shortMgr (30ms TTL) 缩短租约并等待 42ms 使其全部超期；
+			// 1. 将所有 Worker 会话缩短租约 (30ms TTL) 并等待 42ms 使其全部超期；
 			// 2. 关闭所有测试盘上的无会话句柄 (session_id IS NULL)；
 			// 3. 显式调用 mgr.RenewSession(keeperSID) 触发同步清扫（级联清理所有过期会话的句柄/锁/等待者，并物理回收所有无引用孤儿节点）。
 			// -----------------------------------------------------------------
 			for _, wSID := range env.workerSessionIDs {
-				_, err := shortMgr.RenewSession(ctx, wSID)
+				_, err := pool.Exec(ctx, "UPDATE client_sessions SET expires_at = clock_timestamp() + interval '30 milliseconds' WHERE session_id = $1", int64(wSID))
 				require.NoError(t, err)
 			}
 			time.Sleep(shortLeaseTTL + 12*time.Millisecond)

@@ -23,14 +23,12 @@ type ClientSession struct {
 }
 
 type Disk struct {
-	DiskID     pgtype.UUID        `json:"disk_id"`
-	Name       string             `json:"name"`
-	RootIno    int64              `json:"root_ino"`
-	MaxBytes   int64              `json:"max_bytes"`
-	UsedBytes  int64              `json:"used_bytes"`
-	UsedInodes int64              `json:"used_inodes"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	Name      string             `json:"name"`
+	RootIno   int64              `json:"root_ino"`
+	MaxBytes  int64              `json:"max_bytes"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Entry struct {

@@ -1746,9 +1746,23 @@ func formalAuditINV4DiskQuota(ctx context.Context, t *testing.T, env *formalMain
 	}
 
 	rows, err := env.Pool.Query(ctx, `
-		SELECT disk_id::text, name, root_ino, max_bytes, used_bytes, used_inodes
-		FROM disks
-		WHERE root_ino = ANY($1)
+		SELECT
+			d.disk_id::text,
+			d.name,
+			d.root_ino,
+			d.max_bytes,
+			COALESCE((
+				SELECT SUM(CASE WHEN (i.mode & 61440) = 32768 THEN i.size ELSE 0 END)
+				FROM inodes i
+				WHERE i.root_ino = d.root_ino
+			), 0)::bigint AS used_bytes,
+			(
+				SELECT COUNT(*)
+				FROM inodes i
+				WHERE i.root_ino = d.root_ino
+			)::bigint AS used_inodes
+		FROM disks d
+		WHERE d.root_ino = ANY($1)
 	`, rootInos)
 	require.NoError(t, err, "INV-4: 查询底表 disks 失败")
 	defer rows.Close()

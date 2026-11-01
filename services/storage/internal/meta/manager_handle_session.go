@@ -428,13 +428,34 @@ func (m *manager) Flush(ctx context.Context, params FlushParams) error {
 	return nil
 }
 
-// Fsync 同步文件节点与句柄关联的状态。
-// 注：params.Datasync 保留用于 Linux FUSE / POSIX 协议契约对齐，当前元数据在 PostgreSQL 事务提交时已完成持久化。
+// flushDurabilityBarrier 按「先刷物理数据块，后刷 PostgreSQL WAL」的顺序触发物理落盘屏障。
+func (m *manager) flushDurabilityBarrier(ctx context.Context) error {
+	if stagedBS, ok := m.getBlockStore().(StagedBlockStore); ok && stagedBS != nil {
+		if err := stagedBS.SyncPending(ctx); err != nil {
+			if errors.Is(err, ErrIO) {
+				return err
+			}
+			return fmt.Errorf("%w: sync pending blocks: %v", ErrIO, err)
+		}
+	}
+	if pp, ok := m.store.(poolProvider); ok && pp != nil && pp.Pool() != nil {
+		var lsn string
+		if err := pp.Pool().QueryRow(ctx, "SELECT pg_current_wal_flush_lsn()::text").Scan(&lsn); err != nil {
+			return fmt.Errorf("%w: flush wal: %v", ErrIO, err)
+		}
+	}
+	return nil
+}
+
+// Fsync 同步文件节点与句柄关联的状态，并触发块存储与数据库 WAL 物理落盘屏障。
 func (m *manager) Fsync(ctx context.Context, params FsyncParams) error {
 	if err := validateOptionalSessionID(params.SessionID); err != nil {
 		return err
 	}
-	return m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, params.SessionID, "fsync")
+	if err := m.checkFileHandleReadOnly(ctx, params.Ino, params.Fh, params.SessionID, "fsync"); err != nil {
+		return err
+	}
+	return m.flushDurabilityBarrier(ctx)
 }
 
 // Release 关闭并销毁文件句柄，按标志位清理 BSD flock 句柄锁，且在孤儿节点无活跃句柄时执行最终物理回收。
@@ -610,8 +631,7 @@ func (m *manager) Release(ctx context.Context, params ReleaseParams) error {
 	return nil
 }
 
-// FsyncDir 同步目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
-// 注：params.Datasync 保留用于 Linux FUSE / POSIX 协议契约对齐，当前元数据在 PostgreSQL 事务提交时已完成持久化。
+// FsyncDir 同步目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议），并触发块存储与数据库 WAL 物理落盘屏障。
 func (m *manager) FsyncDir(ctx context.Context, params FsyncDirParams) error {
 	if params.Ino == 0 || params.Ino > math.MaxInt64 || params.Fh == 0 || params.Fh > math.MaxInt64 {
 		return ErrInvalidArgument
@@ -640,7 +660,7 @@ func (m *manager) FsyncDir(ctx context.Context, params FsyncDirParams) error {
 		}
 	}
 
-	return nil
+	return m.flushDurabilityBarrier(ctx)
 }
 
 // ReleaseDir 关闭并销毁目录句柄，且在孤儿目录无活跃句柄时执行最终物理回收。

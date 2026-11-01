@@ -518,7 +518,7 @@ func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
 		assert.True(t, errors.Is(statErr, os.ErrNotExist), "目录 Sync 失败后目标块文件应被清理回滚，不应残留半发布文件: %s", finalPath)
 	})
 
-	t.Run("DeleteBlock 删除实际存在的文件后必须对分片目录执行 dir.Sync", func(t *testing.T) {
+	t.Run("DeleteBlock 删除实际存在的文件时直接删除而不阻塞等待 dir.Sync", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("requires non-root user to enforce directory 0o300 read permission")
 		}
@@ -542,10 +542,15 @@ func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
 		require.NoError(t, os.Chmod(shardDir, 0o300))
 
 		err := store.DeleteBlock(ctx, sliceID, blockIdx, blockSize)
-		require.Error(t, err, "DeleteBlock 必须在删除实际存在的文件后同步分片目录，无目录读权限时应报错 permission denied")
+		require.NoError(t, err, "DeleteBlock 直接 os.Remove 块文件，不再同步触发目录 Sync")
+
+		require.NoError(t, os.Chmod(shardDir, 0o755))
+		finalPath := filepath.Join(shardDir, fmt.Sprintf("%d_%d_%d", sliceID, blockIdx, blockSize))
+		_, statErr := os.Stat(finalPath)
+		assert.ErrorIs(t, statErr, os.ErrNotExist)
 	})
 
-	t.Run("PutBlock 与 DeleteBlock 实际调用目录 Sync 计数及 Sync 失败回滚清理断言", func(t *testing.T) {
+	t.Run("PutBlock 与 DeleteBlock 目录 Sync 计数及 Sync 失败回滚清理断言", func(t *testing.T) {
 		dataDir := t.TempDir()
 		var syncedDirs []string
 		var failNextShardSync bool
@@ -589,18 +594,14 @@ func TestLocalFSBlockStore_DirectorySyncEnforcedOnPutAndDelete(t *testing.T) {
 		_, statErr := os.Stat(rolledBackPath)
 		assert.ErrorIs(t, statErr, os.ErrNotExist, "目录 Sync 失败时必须回滚清理目标块文件")
 
-		// 4. 恢复正常后 DeleteBlock 删除已存在块：必须对 shardDir 执行 1 次 Sync
+		// 4. 恢复正常后 DeleteBlock 删除已存在块：不触发目录 Sync，且文件被移除
 		failNextShardSync = false
 		syncedDirs = nil
 		require.NoError(t, store.DeleteBlock(ctx, 3, 0, uint32(len(payload))))
-		assert.Equal(t, []string{filepath.Clean(shardDir)}, syncedDirs, "DeleteBlock 删除已存在块文件后必须精确执行 1 次分片目录 Sync")
-
-		// 5. DeleteBlock 删除已存在块但目录 Sync 失败：必须返回 ErrIO
-		syncedDirs = nil
-		failNextShardSync = true
-		delErr := store.DeleteBlock(ctx, 259, 0, uint32(len(payload)))
-		require.ErrorIs(t, delErr, meta.ErrIO)
-		assert.Equal(t, []string{filepath.Clean(shardDir)}, syncedDirs)
+		assert.Empty(t, syncedDirs, "DeleteBlock 删除块文件时不触发同步目录 Sync")
+		deletedPath := filepath.Join(shardDir, fmt.Sprintf("3_0_%d", len(payload)))
+		_, delStatErr := os.Stat(deletedPath)
+		assert.ErrorIs(t, delStatErr, os.ErrNotExist)
 	})
 }
 
@@ -957,12 +958,187 @@ func TestLocalFSBlockStore_StageBlockAndSyncDirs(t *testing.T) {
 		err := store.SyncDirs(ctx, []string{dirA, dirB})
 		require.ErrorIs(t, err, meta.ErrIO)
 
-		// 验证 Context 取消时 StageBlock 与 SyncDirs 立即返回 context.Canceled
+		// 验证 Context 取消时 StageBlock、SyncDirs 与 SyncPending 立即返回 context.Canceled
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 		_, err = store.StageBlock(canceledCtx, 1034, 0, []byte("canceled"))
 		require.ErrorIs(t, err, context.Canceled)
 		err = store.SyncDirs(canceledCtx, []string{dirA})
 		require.ErrorIs(t, err, context.Canceled)
+		err = store.SyncPending(canceledCtx)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+func TestLocalFSBlockStore_SyncPending_NoopCoalesceAndRetry(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("无新写入时重复 SyncPending 零磁盘操作，StageBlock 后 SyncPending 精确同步且回滚删除文件忽略 ErrNotExist，失败后保留状态支持重试", func(t *testing.T) {
+		dataDir := t.TempDir()
+		var syncMu sync.Mutex
+		var syncedDirs []string
+		var failSyncForDir string
+
+		store := meta.NewLocalFSBlockStore(
+			dataDir,
+			meta.WithOpenDirHook(func(dir string) (meta.DirHandle, error) {
+				f, err := os.Open(dir)
+				if err != nil {
+					return nil, err
+				}
+				return &spyDirHandle{
+					file: f,
+					dir:  filepath.Clean(dir),
+					onSync: func(cleaned string, file *os.File) error {
+						syncMu.Lock()
+						syncedDirs = append(syncedDirs, cleaned)
+						failDir := failSyncForDir
+						syncMu.Unlock()
+						if failDir != "" && cleaned == filepath.Clean(failDir) {
+							return errors.New("injected syncPending dir failure")
+						}
+						return file.Sync()
+					},
+				}, nil
+			}),
+		)
+
+		// 1. 初始无写入时 SyncPending 直接返回 nil 且零目录 Sync
+		require.NoError(t, store.SyncPending(ctx))
+		syncMu.Lock()
+		assert.Empty(t, syncedDirs)
+		syncMu.Unlock()
+
+		// 2. 预热散列目录 chunks/0C/0 (sliceID%256==12) 与 chunks/0D/0 (sliceID%256==13)
+		_, err := store.StageBlock(ctx, 12, 0, []byte("warmup-12"))
+		require.NoError(t, err)
+		_, err = store.StageBlock(ctx, 13, 0, []byte("warmup-13"))
+		require.NoError(t, err)
+		require.NoError(t, store.SyncPending(ctx))
+
+		dir12 := filepath.Clean(filepath.Join(dataDir, "chunks", "0C", "0"))
+		dir13 := filepath.Clean(filepath.Join(dataDir, "chunks", "0D", "0"))
+		syncMu.Lock()
+		assert.Contains(t, syncedDirs, dir12)
+		assert.Contains(t, syncedDirs, dir13)
+		syncedDirs = nil
+		syncMu.Unlock()
+
+		// 3. 无新写入时连续重复调用 SyncPending，不触发任何冗余刷盘
+		require.NoError(t, store.SyncPending(ctx))
+		require.NoError(t, store.SyncPending(ctx))
+		syncMu.Lock()
+		assert.Empty(t, syncedDirs, "无新写入时重复调用 SyncPending 不得触发冗余磁盘同步")
+		syncMu.Unlock()
+
+		// 4. 在已预热目录下 StageBlock 写入 3 个块，其中 1 个通过 DeleteBlock 删除、1 个被外部 os.Remove 删除（模拟回滚清理）
+		_, err = store.StageBlock(ctx, 12+256, 0, []byte("block-12-keep"))
+		require.NoError(t, err)
+		_, err = store.StageBlock(ctx, 12+512, 0, []byte("block-12-deleted-via-api"))
+		require.NoError(t, err)
+		_, err = store.StageBlock(ctx, 13+256, 0, []byte("block-13-unlinked"))
+		require.NoError(t, err)
+
+		// StageBlock 热路径不触发叶子目录 Sync
+		syncMu.Lock()
+		assert.Empty(t, syncedDirs, "StageBlock 仅发布至 OS Page Cache，不触发叶子目录 Sync")
+		syncMu.Unlock()
+
+		require.NoError(t, store.DeleteBlock(ctx, 12+512, 0, uint32(len("block-12-deleted-via-api"))))
+		unlinkedPath := filepath.Join(dir13, fmt.Sprintf("%d_0_%d", 13+256, len("block-13-unlinked")))
+		require.NoError(t, os.Remove(unlinkedPath))
+
+		// 5. 注入 dir13 同步故障：首次 SyncPending 应返回 ErrIO，且保留待刷批次供后续重试
+		syncMu.Lock()
+		failSyncForDir = dir13
+		syncMu.Unlock()
+
+		err = store.SyncPending(ctx)
+		require.ErrorIs(t, err, meta.ErrIO, "SyncPending 失败时必须返回包装 ErrIO 的错误")
+
+		// 6. 解除故障后再次调用 SyncPending：上次未完成的批次必须重试并成功刷盘
+		syncMu.Lock()
+		failSyncForDir = ""
+		syncedDirs = nil
+		syncMu.Unlock()
+
+		require.NoError(t, store.SyncPending(ctx))
+		syncMu.Lock()
+		assert.Equal(t, []string{dir12, dir13}, syncedDirs, "失败重试后必须完整刷入待刷目录")
+		syncedDirs = nil
+		syncMu.Unlock()
+
+		// 7. 刷盘成功后再次调用 SyncPending 應为幂等空操作
+		require.NoError(t, store.SyncPending(ctx))
+		syncMu.Lock()
+		assert.Empty(t, syncedDirs)
+		syncMu.Unlock()
+	})
+
+	t.Run("多协程并发调用 SyncPending 自动合并等待同一次刷盘", func(t *testing.T) {
+		dataDir := t.TempDir()
+		var dirSyncCalls atomic.Int64
+		enteredSyncCh := make(chan struct{})
+		releaseSyncCh := make(chan struct{})
+		var enterOnce sync.Once
+
+		shardDir := filepath.Clean(filepath.Join(dataDir, "chunks", "0E", "0"))
+		store := meta.NewLocalFSBlockStore(
+			dataDir,
+			meta.WithOpenDirHook(func(dir string) (meta.DirHandle, error) {
+				f, err := os.Open(dir)
+				if err != nil {
+					return nil, err
+				}
+				return &spyDirHandle{
+					file: f,
+					dir:  filepath.Clean(dir),
+					onSync: func(cleaned string, file *os.File) error {
+						if cleaned == shardDir {
+							dirSyncCalls.Add(1)
+							enterOnce.Do(func() {
+								close(enteredSyncCh)
+							})
+							<-releaseSyncCh
+						}
+						return file.Sync()
+					},
+				}, nil
+			}),
+		)
+
+		// 先写入 1 个块使 writeGen = 1
+		_, err := store.StageBlock(ctx, 14, 0, []byte("coalesce-payload"))
+		require.NoError(t, err)
+
+		const callers = 8
+		var wg sync.WaitGroup
+		errs := make([]error, callers)
+		wg.Add(callers)
+
+		// 启动第 1 个调用方进入刷盘并阻塞在 releaseSyncCh
+		go func() {
+			defer wg.Done()
+			errs[0] = store.SyncPending(ctx)
+		}()
+
+		<-enteredSyncCh
+
+		// 其余 7 个并发调用方在同一批次刷盘期间到达，应合并等待该轮完成
+		for i := 1; i < callers; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				errs[idx] = store.SyncPending(ctx)
+			}(i)
+		}
+
+		// 给并发调用方进入等待队列的时间窗口后放行
+		close(releaseSyncCh)
+		wg.Wait()
+
+		for i, cErr := range errs {
+			require.NoError(t, cErr, "并发调用方 %d 应成功返回", i)
+		}
+		assert.Equal(t, int64(1), dirSyncCalls.Load(), "8 个并发 SyncPending 针对同一写入批次必须合并为 1 次底层刷盘")
 	})
 }

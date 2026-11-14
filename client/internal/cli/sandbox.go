@@ -169,18 +169,10 @@ func sandboxCreate(args []string, stdout, stderr io.Writer) int {
 		return cliErr.exitCode
 	}
 
-	bin, err := sandbox.EnsureClientBinary(*binary, *rebuild, stderr)
-	if err != nil {
-		sboxDropDisk(client, diskID)
-		fmt.Fprintf(stderr, "错误: %v\n", err)
-		return 1
-	}
-	startCtx, startCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	err = sboxRuntime.Create(startCtx, &sandbox.CreateSpec{
+	err := sboxStart(&sandbox.CreateSpec{
 		ID: diskID, Image: *image, Name: *name, MountPath: *mountAt,
-		Network: *network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(*token), ClientBinary: bin,
-	})
-	startCancel()
+		Network: *network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(*token),
+	}, *binary, *rebuild, stderr)
 	if err != nil {
 		sboxDropDisk(client, diskID)
 		fmt.Fprintf(stderr, "错误: %v\n", err)
@@ -206,13 +198,22 @@ func sandboxList(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	rows, err := sboxRuntime.List(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "错误: %v\n", err)
-		return 1
+	var rows []sandbox.Row
+	for i, rt := range sboxAllRuntimes() {
+		part, err := rt.List(ctx)
+		if err != nil {
+			if i == 0 {
+				fmt.Fprintf(stderr, "错误: %v\n", err)
+				return 1
+			}
+			// 远端算力连不上不应挡住本机沙箱的列表。
+			fmt.Fprintf(stderr, "警告: 算力 %s 不可达，其上的沙箱未列出: %v\n", rt.Host, err)
+			continue
+		}
+		rows = append(rows, part...)
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(stdout, "本机没有沙箱")
+		fmt.Fprintln(stdout, "没有沙箱")
 		return 0
 	}
 	// NODE 是沙箱的盘所在的存储节点：move 之后靠这一列分辨哪个沙箱在本地、哪个在云端。
@@ -240,7 +241,7 @@ func sandboxExec(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	mountAt, err := sboxRuntime.DefaultMount(ctx, id)
+	mountAt, err := sboxFor(id).DefaultMount(ctx, id)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
@@ -250,7 +251,7 @@ func sandboxExec(args []string, stdout, stderr io.Writer) int {
 		workdir = cwd
 	}
 	if background {
-		runID, bgErr := sboxRuntime.ExecBackground(ctx, id, workdir, cmdArgs)
+		runID, bgErr := sboxFor(id).ExecBackground(ctx, id, workdir, cmdArgs)
 		if bgErr != nil {
 			fmt.Fprintf(stderr, "错误: %v\n", bgErr)
 			return 1
@@ -258,7 +259,7 @@ func sandboxExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, runID)
 		return 0
 	}
-	code, err = sboxRuntime.Exec(ctx, id, workdir, cmdArgs,
+	code, err = sboxFor(id).Exec(ctx, id, workdir, cmdArgs,
 		sandbox.ExecOptions{TTY: fileIsTerminal(os.Stdin)}, os.Stdin, stdout, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
@@ -278,18 +279,18 @@ func sandboxShellCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	mountAt, err := sboxRuntime.DefaultMount(ctx, id)
+	mountAt, err := sboxFor(id).DefaultMount(ctx, id)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
 	}
 	shell := "sh"
 	var probe bytes.Buffer
-	if probeCode, probeErr := sboxRuntime.Exec(ctx, id, mountAt, []string{"sh", "-c", "command -v bash"},
+	if probeCode, probeErr := sboxFor(id).Exec(ctx, id, mountAt, []string{"sh", "-c", "command -v bash"},
 		sandbox.ExecOptions{}, nil, &probe, io.Discard); probeErr == nil && probeCode == 0 {
 		shell = "bash"
 	}
-	code, err = sboxRuntime.Exec(ctx, id, mountAt, []string{shell},
+	code, err = sboxFor(id).Exec(ctx, id, mountAt, []string{shell},
 		sandbox.ExecOptions{TTY: true}, os.Stdin, stdout, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
@@ -322,9 +323,9 @@ func sandboxCp(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	var err error
 	if srcInSandbox {
-		err = sboxRuntime.CopyFrom(ctx, srcID, srcPath, dstPath, stderr)
+		err = sboxFor(srcID).CopyFrom(ctx, srcID, srcPath, dstPath, stderr)
 	} else {
-		err = sboxRuntime.CopyInto(ctx, dstID, srcPath, dstPath, stderr)
+		err = sboxFor(dstID).CopyInto(ctx, dstID, srcPath, dstPath, stderr)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
@@ -363,7 +364,7 @@ func sandboxLogsCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "用法: bowl sandbox logs <sandbox-id> [-f] [--exec <run-id>]\n")
 		return 2
 	}
-	if err := sboxRuntime.Logs(context.Background(), sandbox.StripID(posArgs[0]), runID, follow, stdout, stderr); err != nil {
+	if err := sboxFor(sandbox.StripID(posArgs[0])).Logs(context.Background(), sandbox.StripID(posArgs[0]), runID, follow, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
 	}
@@ -376,7 +377,7 @@ func sandboxWaitCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "用法: bowl sandbox wait <sandbox-id> <run-id>\n")
 		return 2
 	}
-	code, err := sboxRuntime.Wait(context.Background(), sandbox.StripID(args[0]), args[1])
+	code, err := sboxFor(sandbox.StripID(args[0])).Wait(context.Background(), sandbox.StripID(args[0]), args[1])
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
@@ -436,7 +437,7 @@ func sandboxMountCmd(args []string, stdout, stderr io.Writer) int {
 	// 一块盘同时只能有一个写者。已有写者时服务端不报错、直接静默接管，
 	// 被抢占的一方要到下一次写入才会撞上 EBUSY，所以这里先挡住。
 	if !readOnly && !force {
-		writers, err := sboxRuntime.Writers(ctx, diskID)
+		writers, err := sboxFor(id).Writers(ctx, diskID)
 		if err != nil {
 			fmt.Fprintf(stderr, "警告: 无法检查写者冲突(%v)，继续挂载\n", err)
 		}
@@ -446,7 +447,7 @@ func sandboxMountCmd(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	if err := sboxRuntime.Mount(ctx, id, diskID, mountAt,
+	if err := sboxFor(id).Mount(ctx, id, diskID, mountAt,
 		sandbox.MountOptions{ReadOnly: readOnly, Subdir: subdir}); err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
@@ -480,7 +481,7 @@ func sandboxUnmountCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "用法: bowl sandbox unmount <sandbox-id> --path /mnt/data\n")
 		return 2
 	}
-	if err := sboxRuntime.Unmount(context.Background(), sandbox.StripID(posArgs[0]), mountAt); err != nil {
+	if err := sboxFor(sandbox.StripID(posArgs[0])).Unmount(context.Background(), sandbox.StripID(posArgs[0]), mountAt); err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
 	}
@@ -494,7 +495,7 @@ func sandboxMountsCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "用法: bowl sandbox mounts <sandbox-id>\n")
 		return 2
 	}
-	mounts, err := sboxRuntime.Mounts(context.Background(), sandbox.StripID(args[0]))
+	mounts, err := sboxFor(sandbox.StripID(args[0])).Mounts(context.Background(), sandbox.StripID(args[0]))
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
@@ -520,7 +521,7 @@ func sandboxInfo(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "用法: bowl sandbox info <sandbox-id>\n")
 		return 2
 	}
-	info, err := sboxRuntime.Info(context.Background(), sandbox.StripID(args[0]))
+	info, err := sboxFor(sandbox.StripID(args[0])).Info(context.Background(), sandbox.StripID(args[0]))
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
@@ -530,6 +531,7 @@ func sandboxInfo(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "镜像   %s\n", info.Image)
 	fmt.Fprintf(stdout, "创建   %s\n", info.Created)
 	fmt.Fprintf(stdout, "容器   %s\n", info.Container)
+	fmt.Fprintf(stdout, "算力   %s\n", cmp.Or(sboxFor(info.ID).Host, "本机 Docker"))
 	if info.Endpoint != "" {
 		fmt.Fprintf(stdout, "节点   %s\n", info.Endpoint)
 	}
@@ -578,11 +580,6 @@ func sandboxFork(args []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	bin, err := sandbox.EnsureClientBinary(*binary, false, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "错误: %v\n", err)
-		return 1
-	}
 	for i := 0; i < *count; i++ {
 		forkName := *name
 		if forkName != "" && *count > 1 {
@@ -595,12 +592,10 @@ func sandboxFork(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "错误: %s\n", cliErr.msg)
 			return cliErr.exitCode
 		}
-		startCtx, startCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		err := sboxRuntime.Create(startCtx, &sandbox.CreateSpec{
+		err := sboxStart(&sandbox.CreateSpec{
 			ID: diskID, Image: *image, Name: forkName, MountPath: *mountAt,
-			Network: *network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(*token), ClientBinary: bin,
-		})
-		startCancel()
+			Network: *network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(*token),
+		}, *binary, false, stderr)
 		if err != nil {
 			sboxDropDisk(client, diskID)
 			fmt.Fprintf(stderr, "错误: %v\n", err)
@@ -632,11 +627,11 @@ func sandboxKill(args []string, stdout, stderr io.Writer) int {
 	id := sandbox.StripID(positionals[0])
 	if opts.endpoint == "" {
 		// 盘可能已经被 move 到别的节点：删盘要去它现在所在的节点删。
-		if info, infoErr := sboxRuntime.Info(ctx, id); infoErr == nil {
+		if info, infoErr := sboxFor(id).Info(ctx, id); infoErr == nil {
 			opts.endpoint = info.Endpoint
 		}
 	}
-	if err := sboxRuntime.Remove(ctx, id); err != nil {
+	if err := sboxFor(id).Remove(ctx, id); err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", err)
 		return 1
 	}
@@ -653,10 +648,21 @@ func sandboxKill(args []string, stdout, stderr io.Writer) int {
 
 // sboxKillAll 批量销毁本机所有沙箱。
 func sboxKillAll(ctx context.Context, opts sboxKillOptions, stdout, stderr io.Writer) int {
-	ids, err := sboxRuntime.IDs(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "错误: %v\n", err)
-		return 1
+	var ids []string
+	for i, rt := range sboxAllRuntimes() {
+		part, err := rt.IDs(ctx)
+		if err != nil {
+			if i == 0 {
+				fmt.Fprintf(stderr, "错误: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stderr, "警告: 算力 %s 不可达，其上的沙箱未处理: %v\n", rt.Host, err)
+			continue
+		}
+		for _, id := range part {
+			sboxLocated[id] = rt
+		}
+		ids = append(ids, part...)
 	}
 	if len(ids) == 0 {
 		fmt.Fprintln(stdout, "本机没有沙箱")
@@ -664,7 +670,7 @@ func sboxKillAll(ctx context.Context, opts sboxKillOptions, stdout, stderr io.Wr
 	}
 	code := 0
 	for _, id := range ids {
-		if err := sboxRuntime.Remove(ctx, id); err != nil {
+		if err := sboxFor(id).Remove(ctx, id); err != nil {
 			fmt.Fprintf(stderr, "错误: %v\n", err)
 			code = 1
 			continue
@@ -726,7 +732,7 @@ func sboxKillArgs(args []string, stdout, stderr io.Writer) (opts sboxKillOptions
 
 // sboxDiskClient 解析 endpoint 并创建 StorageService 客户端。
 func sboxDiskClient(endpoint, token string, stderr io.Writer) (resolved string, client storagev1connect.StorageServiceClient, code int) {
-	resolvedEndpoint, err := rpc.ResolveEndpoint(endpoint)
+	resolvedEndpoint, err := resolveEndpoint(endpoint)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: 无效的 endpoint: %v\n", err)
 		return "", nil, 2

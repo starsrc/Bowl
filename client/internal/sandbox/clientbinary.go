@@ -12,28 +12,44 @@ import (
 
 const linuxClientModule = "module github.com/starsrc/bowl/client"
 
-// EnsureClientBinary 准备好注入沙箱容器的 Linux 版 bowl 客户端。
+// EnsureClientBinary 准备好注入沙箱容器的 Linux 版 bowl 客户端，arch 是沙箱所在机器的架构
+// （为空取本机架构）。按顺序查找，找到即用：
 //
-// 优先 override；否则在本机能找到 client 源码时交叉编译并缓存，找不到源码就退回已有缓存。
-// ponytail: v1 从源码编译，发布形态应改为随包分发的预编译二进制。
-func EnsureClientBinary(override string, rebuild bool, log io.Writer) (string, error) {
+//  1. override（--binary）或 $BOWL_LINUX_BINARY；
+//  2. 当前可执行文件旁边的 bowl-linux-<arch>：发布包里随 CLI 一起分发，不需要 Go；
+//  3. 当前可执行文件自身（本机就是同架构的 Linux 时）；
+//  4. 能找到 client 源码时交叉编译并缓存；找不到源码就用已有的缓存。
+func EnsureClientBinary(override, arch string, rebuild bool, log io.Writer) (string, error) {
+	if arch == "" {
+		arch = runtime.GOARCH
+	}
 	if p := strings.TrimSpace(override); p != "" {
 		return requireFile(p)
 	}
 	if p := strings.TrimSpace(os.Getenv("BOWL_LINUX_BINARY")); p != "" {
 		return requireFile(p)
 	}
+	name := "bowl-linux-" + arch
+	exe, exeErr := os.Executable()
+	if exeErr == nil && !rebuild {
+		if sibling := filepath.Join(filepath.Dir(exe), name); isRegularFile(sibling) {
+			return sibling, nil
+		}
+		if runtime.GOOS == "linux" && runtime.GOARCH == arch {
+			return exe, nil
+		}
+	}
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("无法定位缓存目录: %w", err)
 	}
-	out := filepath.Join(cacheDir, "bowl", "bowl-linux-"+runtime.GOARCH)
+	out := filepath.Join(cacheDir, "bowl", name)
 	srcDir := findClientSourceDir()
 	if srcDir == "" {
-		if _, statErr := os.Stat(out); statErr == nil {
+		if isRegularFile(out) {
 			return out, nil
 		}
-		return "", fmt.Errorf("找不到 Linux 客户端 %s，也没有可编译的源码；请用 --binary 指定，或设置 BOWL_SOURCE_DIR", out)
+		return "", fmt.Errorf("找不到 Linux 客户端 %s：把它放在 bowl 可执行文件旁边，或用 --binary / $BOWL_LINUX_BINARY 指定", name)
 	}
 	if !rebuild && !sourceNewerThan(srcDir, out) {
 		return out, nil
@@ -44,12 +60,17 @@ func EnsureClientBinary(override string, rebuild bool, log io.Writer) (string, e
 	fmt.Fprintf(log, "正在编译 Linux 客户端 -> %s\n", out)
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/bowl")
 	cmd.Dir = srcDir
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH, "GOWORK=off")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+arch, "GOWORK=off")
 	cmd.Stderr = log
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("编译 Linux 客户端失败: %w", err)
 	}
 	return out, nil
+}
+
+func isRegularFile(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func requireFile(p string) (string, error) {

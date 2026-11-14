@@ -48,6 +48,10 @@ const (
 type Runtime struct {
 	// Docker 是 docker 可执行文件路径。
 	Docker string
+	// Host 指定容器跑在哪个 Docker 上：留空是本机默认的 Docker；带协议的地址
+	// （ssh://user@host、tcp://host:2376）按 docker -H 使用；其余当作 docker context 名。
+	// 沙箱跑在另一台机器上时，本包的所有动作都经由这个 Docker 的 API 完成，不依赖共享文件系统。
+	Host string
 }
 
 // Row 是 docker ps 里一个沙箱的展示信息。
@@ -88,8 +92,13 @@ type CreateSpec struct {
 	HostEndpoint string
 	// Token 是访问令牌。
 	Token string
-	// ClientBinary 是注入容器的 Linux 客户端路径。
+	// ClientBinary 是注入容器的 Linux 客户端路径（调用方本机上的文件）。
 	ClientBinary string
+	// Arch 是容器的 CPU 架构（arm64 / amd64），必须与 ClientBinary 一致；为空取本机架构。
+	Arch string
+	// SandboxEndpoint 是沙箱内访问 StorageService 用的地址。为空时由 HostEndpoint 推出
+	// （回环地址改写成 host.docker.internal）。算力和存储在同一内网时填内网地址。
+	SandboxEndpoint string
 }
 
 // ExecOptions 描述一次命令执行。
@@ -129,14 +138,20 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 	if spec.ClientBinary == "" {
 		return errors.New("缺少注入沙箱的 Linux 客户端路径")
 	}
+	if spec.Arch == "" {
+		spec.Arch = runtime.GOARCH
+	}
+	if spec.SandboxEndpoint == "" {
+		spec.SandboxEndpoint = containerEndpoint(spec.HostEndpoint)
+	}
 	container := ContainerName(spec.ID)
-	env := []string{"BOWL_STORAGE_ENDPOINT=" + containerEndpoint(spec.HostEndpoint)}
+	env := []string{"BOWL_STORAGE_ENDPOINT=" + spec.SandboxEndpoint}
 	if spec.Token != "" {
 		env = append(env, "BOWL_TOKEN="+spec.Token)
 	}
-	args := []string{"run", "-d", "--name", container,
+	args := []string{"create", "--name", container,
 		// 容器架构必须与注入的 Linux 客户端一致，否则会在模拟层里跑。
-		"--platform", "linux/" + runtime.GOARCH,
+		"--platform", "linux/" + spec.Arch,
 		"--label", labelOwner + "=1",
 		"--label", labelDisk + "=" + spec.ID,
 		"--label", labelMount + "=" + spec.MountPath,
@@ -146,7 +161,6 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 		"--cap-drop", "ALL", "--cap-add", "SYS_ADMIN",
 		"--device", "/dev/fuse",
 		"--security-opt", "no-new-privileges",
-		"--mount", "type=bind,source=" + spec.ClientBinary + ",destination=" + ClientPath + ",readonly",
 	}
 	for _, kv := range env {
 		args = append(args, "-e", kv)
@@ -161,6 +175,17 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 
 	// 标准输出是容器 ID，用不上；错误直接抛给调用方。
 	if err := rt.run(ctx, io.Discard, io.Discard, args...); err != nil {
+		return fmt.Errorf("创建沙箱容器失败: %w", err)
+	}
+	// 客户端用 docker cp 拷进容器，而不是从本机 bind 挂载：容器可能跑在另一台机器的 Docker 上，
+	// 那边没有这个文件。
+	// ponytail: 每次建沙箱都拷一次客户端（约 40 MB），远程 Docker 上会慢几秒；量大了应把客户端做进镜像。
+	if err := rt.run(ctx, io.Discard, io.Discard, "cp", spec.ClientBinary, container+":"+ClientPath); err != nil {
+		_ = rt.Remove(context.WithoutCancel(ctx), spec.ID)
+		return fmt.Errorf("向沙箱注入客户端失败: %w", err)
+	}
+	if err := rt.run(ctx, io.Discard, io.Discard, "start", container); err != nil {
+		_ = rt.Remove(context.WithoutCancel(ctx), spec.ID)
 		return fmt.Errorf("启动沙箱容器失败: %w", err)
 	}
 	if err := rt.mountInside(ctx, container, spec.ID, spec.MountPath); err != nil {
@@ -532,7 +557,51 @@ func (rt *Runtime) docker() string {
 }
 
 func (rt *Runtime) command(ctx context.Context, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, rt.docker(), args...) //nolint:gosec // 参数由调用方按 argv 构造
+	return exec.CommandContext(ctx, rt.docker(), append(hostArgs(rt.Host), args...)...) //nolint:gosec // 参数由调用方按 argv 构造
+}
+
+// hostArgs 把 Host 翻译成 docker 的全局参数。
+func hostArgs(host string) []string {
+	switch {
+	case host == "":
+		return nil
+	case strings.Contains(host, "://"):
+		return []string{"-H", host}
+	default:
+		return []string{"--context", host}
+	}
+}
+
+// Arch 返回这个 Docker 所在机器的 CPU 架构（arm64 / amd64）。
+func (rt *Runtime) Arch(ctx context.Context) (string, error) {
+	out, err := rt.output(ctx, "version", "--format", "{{.Server.Arch}}")
+	if err != nil {
+		return "", fmt.Errorf("连不上 Docker%s: %w", describeHost(rt.Host), err)
+	}
+	return normalizeArch(out), nil
+}
+
+// Exists 判断这个 Docker 上有没有该沙箱的容器。
+func (rt *Runtime) Exists(ctx context.Context, id string) bool {
+	return rt.run(ctx, io.Discard, io.Discard, "inspect", "-f", "{{.Id}}", ContainerName(id)) == nil
+}
+
+func describeHost(host string) string {
+	if host == "" {
+		return ""
+	}
+	return " " + host
+}
+
+func normalizeArch(raw string) string {
+	switch arch := strings.TrimSpace(raw); arch {
+	case "aarch64":
+		return "arm64"
+	case "x86_64":
+		return "amd64"
+	default:
+		return arch
+	}
 }
 
 // run 执行 docker 子命令，标准输出丢弃。

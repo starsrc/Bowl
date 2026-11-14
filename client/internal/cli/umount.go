@@ -28,7 +28,8 @@ var (
 	runCommand = func(name string, args ...string) ([]byte, error) {
 		return exec.Command(name, args...).CombinedOutput()
 	}
-	umountDrainTimeout      = 5 * time.Second
+	// 写过上万个小文件的盘，卸载时刷盘实测要 7 秒左右；等不到就报错会让调用方误以为没卸掉。
+	umountDrainTimeout      = 60 * time.Second
 	umountDrainPollInterval = 20 * time.Millisecond
 )
 

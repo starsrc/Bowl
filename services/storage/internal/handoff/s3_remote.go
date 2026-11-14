@@ -135,7 +135,19 @@ func (s *S3Remote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		_ = obj.Close()
 		return nil, mapS3Err(statErr)
 	}
-	return obj, nil
+	return &s3Reader{ReadCloser: obj}, nil
+}
+
+// s3Reader 把读取过程中的对象存储错误也映射成本包的错误。
+// 客户端分多次请求读一个对象时会带 If-Match，对象中途被改写就得到 412，这属于 ErrConflict。
+type s3Reader struct{ io.ReadCloser }
+
+func (r *s3Reader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		return n, mapS3Err(err)
+	}
+	return n, err
 }
 
 // ReadAt 用范围请求读取对象的一段。
@@ -208,7 +220,8 @@ func (s *S3Remote) CompareAndSwap(ctx context.Context, key string, old, next []b
 	}
 	current, readErr := io.ReadAll(obj)
 	if err := errors.Join(readErr, obj.Close()); err != nil {
-		return err
+		// 读的过程中对象被别的节点改写（412）同样是冲突。
+		return mapS3Err(err)
 	}
 	if !bytes.Equal(current, old) {
 		return ErrConflict

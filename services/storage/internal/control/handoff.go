@@ -330,6 +330,19 @@ func (m *manager) PushDisk(ctx context.Context, params PushDiskParams) (*Handoff
 
 // PullDisk 用远端最新快照替换本地副本，并认领写权限。
 func (m *manager) PullDisk(ctx context.Context, params PullDiskParams) (*HandoffResult, error) {
+	res, err := m.pullDisk(ctx, params)
+	// 强行接管时原写者可能还在后台同步，正好在我们读写 HEAD 之间改写了它。
+	// 这不是调用方能处理的冲突，重新读 HEAD 再来即可。
+	for attempt := 0; params.Force && errors.Is(err, ErrHandoffConflict) && attempt < forcePullRetries; attempt++ {
+		res, err = m.pullDisk(ctx, params)
+	}
+	return res, err
+}
+
+// forcePullRetries 是强行接管遇到 HEAD 被并发改写时的重试次数。
+const forcePullRetries = 3
+
+func (m *manager) pullDisk(ctx context.Context, params PullDiskParams) (*HandoffResult, error) {
 	if m.handoffRemote == nil {
 		return nil, ErrHandoffDisabled
 	}

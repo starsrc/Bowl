@@ -547,3 +547,37 @@ func TestHandoff_RemoteGC_回收旧快照且写者删盘后远端清空(t *testi
 	require.NoError(t, err)
 	require.Empty(t, left, "盘删掉并回收之后远端不应残留任何对象")
 }
+
+// conflictOnceRemote 让接下来的 n 次 CompareAndSwap 以冲突失败，模拟 HEAD 在读写之间被别的节点改写。
+type conflictOnceRemote struct {
+	handoff.Remote
+	remaining int
+}
+
+func (r *conflictOnceRemote) CompareAndSwap(ctx context.Context, key string, old, next []byte) error {
+	if r.remaining > 0 {
+		r.remaining--
+		return handoff.ErrConflict
+	}
+	return r.Remote.CompareAndSwap(ctx, key, old, next)
+}
+
+func TestHandoff_ForcePull_HEAD被并发改写时自动重试(t *testing.T) {
+	ctx := context.Background()
+	shared := newSharedRemote(t)
+	flaky := &conflictOnceRemote{Remote: shared}
+	local := newHandoffNode(t, shared, "local")
+	cloud := newHandoffNode(t, flaky, "cloud")
+
+	disk, err := local.CreateDisk(ctx, CreateDiskParams{Name: "workspace", MaxBytes: 64 << 20})
+	require.NoError(t, err)
+	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+
+	// 强行接管：冲突次数在重试上限内则成功
+	flaky.remaining = forcePullRetries
+	pulled, err := cloud.PullDisk(ctx, PullDiskParams{DiskID: disk.DiskID, Force: true})
+	require.NoError(t, err)
+	require.Equal(t, "cloud", pulled.Head.Owner)
+	require.Zero(t, flaky.remaining)
+}

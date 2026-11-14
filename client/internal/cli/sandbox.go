@@ -44,6 +44,7 @@ const sandboxUsageHelp = `bowl sandbox - 在本机容器里跑一个以 Bowl 磁
   mounts      列出沙箱当前挂载的磁盘
   info        查看沙箱状态与挂载
   fork        从一个沙箱分叉出多个新沙箱（ID 一行一个）
+  move        把沙箱连同它的盘切换到另一个存储节点（本地 ⇄ 云端），详见 move --help
   kill        销毁沙箱（--all 批量，--keep-disk 保留磁盘）
   help        查看帮助
 
@@ -118,6 +119,8 @@ func executeSandbox(args []string, stdout, stderr io.Writer) int {
 		return sandboxInfo(args[1:], stdout, stderr)
 	case "fork":
 		return sandboxFork(args[1:], stdout, stderr)
+	case "move":
+		return sandboxMove(args[1:], stdout, stderr)
 	case "kill", "rm", "delete":
 		return sandboxKill(args[1:], stdout, stderr)
 	default:

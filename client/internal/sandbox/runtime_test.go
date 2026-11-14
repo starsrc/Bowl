@@ -94,3 +94,16 @@ func TestCommandScript_逐参数引用避免二次解释(t *testing.T) {
 		`cd '/mnt/data' && exec 'npm' 'run' 'dev'`,
 		commandScript("/mnt/data", []string{"npm", "run", "dev"}))
 }
+
+func TestHostArgs_按地址形式选择docker参数(t *testing.T) {
+	assert.Nil(t, hostArgs(""))
+	assert.Equal(t, []string{"-H", "ssh://me@cloud"}, hostArgs("ssh://me@cloud"))
+	assert.Equal(t, []string{"-H", "tcp://127.0.0.1:2385"}, hostArgs("tcp://127.0.0.1:2385"))
+	assert.Equal(t, []string{"--context", "prod"}, hostArgs("prod"))
+}
+
+func TestNormalizeArch(t *testing.T) {
+	assert.Equal(t, "arm64", normalizeArch("aarch64\n"))
+	assert.Equal(t, "amd64", normalizeArch("x86_64"))
+	assert.Equal(t, "arm64", normalizeArch("arm64"))
+}

@@ -69,13 +69,13 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 	id := sandbox.StripID(fs.Arg(0))
 	ctx := context.Background()
 
-	target, err := rpc.ResolveEndpoint(*to)
+	target, err := resolveEndpoint(*to)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: 无效的 --to: %v\n", err)
 		return 2
 	}
 
-	info, infoErr := sboxRuntime.Info(ctx, id)
+	info, infoErr := sboxFor(id).Info(ctx, id)
 	hasContainer := infoErr == nil
 	source := *from
 	if source == "" {
@@ -86,7 +86,7 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if source != "" {
-		if source, err = rpc.ResolveEndpoint(source); err != nil {
+		if source, err = resolveEndpoint(source); err != nil {
 			fmt.Fprintf(stderr, "错误: 无效的 --from: %v\n", err)
 			return 2
 		}
@@ -115,12 +115,12 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 	if !*force {
 		began := time.Now()
 		for _, m := range info.Mounts {
-			if err = sboxRuntime.Unmount(ctx, id, m.Path); err != nil {
+			if err = sboxFor(id).Unmount(ctx, id, m.Path); err != nil {
 				fmt.Fprintf(stderr, "错误: %v\n", err)
 				return 1
 			}
 		}
-		if err = sboxRuntime.Remove(ctx, id); err != nil {
+		if err = sboxFor(id).Remove(ctx, id); err != nil {
 			fmt.Fprintf(stderr, "错误: %v\n", err)
 			return 1
 		}
@@ -136,7 +136,7 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "    %s\n", pushed)
 	} else if hasContainer {
 		// 原型里新旧沙箱在同一个 Docker 上同名，必须先让位；真实场景下旧沙箱在另一台机器上。
-		_ = sboxRuntime.Remove(ctx, id)
+		_ = sboxFor(id).Remove(ctx, id)
 	}
 
 	began := time.Now()
@@ -151,15 +151,7 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "    %s\n", pulled)
 
 	began = time.Now()
-	bin, err := sandbox.EnsureClientBinary(*binary, false, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "错误: %v\n", err)
-		return 1
-	}
-	spec.ClientBinary = bin
-	startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	err = sboxRuntime.Create(startCtx, &spec)
-	cancel()
+	err = sboxStart(&spec, *binary, false, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: %v\n盘已在目标节点就绪，只是沙箱没起来。\n", err)
 		return 1

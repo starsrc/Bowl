@@ -122,7 +122,7 @@ func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "错误: 缺少 <disk-id>\n\n%s", diskHandoffUsageHelp)
 		return 2
 	}
-	base, err := rpc.ResolveEndpoint(endpoint)
+	base, err := resolveEndpoint(endpoint)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: 无效的 endpoint: %v\n", err)
 		return 2

@@ -256,7 +256,7 @@ func mapDiskRPCError(err error, policy diskRPCErrorPolicy) *diskCLIError {
 // newDiskStorageClient 解析 endpoint 与 token 并创建 StorageServiceClient。
 // 若 endpoint 配置非法，返回退出码 2；若创建客户端异常，返回退出码 1。
 func newDiskStorageClient(endpoint, token string) (storagev1connect.StorageServiceClient, int, error) {
-	resolvedEndpoint, err := rpc.ResolveEndpoint(endpoint)
+	resolvedEndpoint, err := resolveEndpoint(endpoint)
 	if err != nil {
 		return nil, 2, fmt.Errorf("无效的 endpoint: %w", err)
 	}

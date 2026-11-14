@@ -156,15 +156,13 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 		_ = os.RemoveAll(op.destDir)
 		return sealErr
 	}
-	packNames := make([]string, 0, len(livePackIDs))
-	for _, id := range livePackIDs {
-		if id != 0 {
-			packNames = append(packNames, packFileName(id))
-		}
-	}
+	// 还没下载回来的包链接它的占位文件；持有 hydrMu 让判断与链接之间不会有包就位。
+	s.blobs.hydrMu.Lock()
+	packNames := s.blobs.checkpointPackNamesLocked(livePackIDs)
 	s.blobs.filesMu.RLock()
 	linkErr := linkPackFilesToDir(s.blobs.dir, filepath.Join(op.destDir, "packs"), packNames, s.metrics)
 	s.blobs.filesMu.RUnlock()
+	s.blobs.hydrMu.Unlock()
 	if linkErr != nil {
 		_ = os.RemoveAll(op.destDir)
 		return linkErr
@@ -381,7 +379,8 @@ func clonePacksSubdir(srcPacksDir, dstPacksDir string) error {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".pack") {
+		if _, isStub := PackNameOfStub(name); isStub || strings.HasSuffix(name, ".pack") {
+			// 占位文件写完后同样不可变，和数据包一样硬链接。
 			packNames = append(packNames, name)
 			continue
 		}

@@ -190,14 +190,17 @@ type Metrics struct {
 	writeBlocks [writeModeCount]atomic.Uint64
 	writeBytes  [writeModeCount]atomic.Uint64
 
-	readHotCache      atomic.Uint64
-	readDiskPack      atomic.Uint64
-	hotCacheEvictions atomic.Uint64
-	epochFenced       atomic.Uint64
-	pebbleStallEvents atomic.Uint64
-	pebbleDiskSlow    atomic.Uint64
-	bgSyncErrors      atomic.Uint64
-	packRemoveErrors  atomic.Uint64
+	readHotCache atomic.Uint64
+	// 按需取块：向远端按范围读的次数、后台补齐完成的包数（暂未导出为 Prometheus 指标）。
+	remoteBlockReads    atomic.Uint64
+	remotePacksHydrated atomic.Uint64
+	readDiskPack        atomic.Uint64
+	hotCacheEvictions   atomic.Uint64
+	epochFenced         atomic.Uint64
+	pebbleStallEvents   atomic.Uint64
+	pebbleDiskSlow      atomic.Uint64
+	bgSyncErrors        atomic.Uint64
+	packRemoveErrors    atomic.Uint64
 }
 
 // NewMetrics 创建隔离的存储引擎指标收集器实例。
@@ -609,6 +612,21 @@ func (m *Metrics) incReadHotCache() {
 	}
 	m.readHotCache.Add(1)
 }
+
+func (m *Metrics) incRemoteBlockReads() {
+	if m != nil {
+		m.remoteBlockReads.Add(1)
+	}
+}
+
+func (m *Metrics) incRemotePacksHydrated() {
+	if m != nil {
+		m.remotePacksHydrated.Add(1)
+	}
+}
+
+// RemoteBlockReads 返回累计向远端按范围读取数据块的次数。
+func (m *Metrics) RemoteBlockReads() uint64 { return m.remoteBlockReads.Load() }
 
 func (m *Metrics) addReadDiskPack(n uint64) {
 	if m == nil || n == 0 {

@@ -1438,6 +1438,9 @@ func existingPackIDsFromDir(baseDir string) []uint64 {
 	var ids []uint64
 	for _, e := range entries {
 		name := e.Name()
+		if packName, isStub := PackNameOfStub(name); isStub {
+			name = packName
+		}
 		if !strings.HasSuffix(name, ".pack") {
 			continue
 		}

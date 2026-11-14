@@ -134,6 +134,15 @@ type blobStore struct {
 	packFiles map[uint64]*os.File
 
 	writebackHintCount atomic.Uint64
+
+	// 5. 按需取块（见 pack_remote.go）：source 为 nil 时占位包不可读。
+	//    hydrMu 保护 hydrFlights，并让"包下载就位"与"包被回收 / 切面硬链接"互斥。
+	source      PackSource
+	hydrMu      sync.Mutex
+	hydrFlights map[uint64]chan struct{}
+	hydrCtx     context.Context
+	hydrCancel  context.CancelFunc
+	hydrWG      sync.WaitGroup
 }
 
 func newBlobStore(
@@ -164,7 +173,9 @@ func newBlobStore(
 		packFiles:      make(map[uint64]*os.File),
 		syncFileHook:   syncFileHook,
 		removePackHook: removePackHook,
+		hydrFlights:    make(map[uint64]chan struct{}),
 	}
+	bs.hydrCtx, bs.hydrCancel = context.WithCancel(context.Background())
 	maxID := bs.scanExistingPacks()
 	bs.minPackID = maxID
 	bs.lastReserved = maxID
@@ -253,13 +264,22 @@ func (s *blobStore) existingPackIDs() []uint64 {
 		return nil
 	}
 	s.dirReady.Store(true)
+	// 占位文件也算"已存在的包"：新包编号必须避开还没下载回来的包，否则会撞号。
+	seen := make(map[uint64]struct{}, len(entries))
 	var ids []uint64
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pack") {
+		name := entry.Name()
+		if packName, isStub := PackNameOfStub(name); isStub {
+			name = packName
+		}
+		if entry.IsDir() || !strings.HasSuffix(name, ".pack") {
 			continue
 		}
-		if id, err := parsePackID(entry.Name()); err == nil && id > 0 {
-			ids = append(ids, id)
+		if id, err := parsePackID(name); err == nil && id > 0 {
+			if _, dup := seen[id]; !dup {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
 		}
 	}
 	return ids
@@ -777,6 +797,11 @@ func (s *blobStore) readRangeAtContext(ctx context.Context, packID uint64, packO
 	}
 
 	file, err := s.getOrOpenPackFile(packID)
+	if errors.Is(err, os.ErrNotExist) {
+		if handled, remoteErr := s.readRemoteRange(ctx, packID, packOffset, dst); handled {
+			return remoteErr
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -1499,8 +1524,17 @@ func (s *blobStore) removePack(packID uint64) error {
 	}
 	s.filesMu.Unlock()
 
+	// 与后台补齐互斥：先删占位文件，在途的下载就位前会发现它不在了并丢弃结果。
+	s.hydrMu.Lock()
+	stubErr := os.Remove(s.stubPath(packID))
 	err := os.Remove(packFilePath(s.dir, packID))
+	s.hydrMu.Unlock()
 	if errors.Is(err, os.ErrNotExist) {
+		if stubErr == nil {
+			s.mu.Lock()
+			s.markDirDirtyLocked()
+			s.mu.Unlock()
+		}
 		return nil
 	}
 	if err == nil {
@@ -1513,6 +1547,7 @@ func (s *blobStore) removePack(packID uint64) error {
 
 // close 安全停止后台回写与刷盘协程、排空待回收死包队列并关闭所有常驻 .pack 文件句柄。
 func (s *blobStore) close() error {
+	s.stopHydration()
 	s.mu.Lock()
 	wasClosed := s.closed
 	s.closed = true

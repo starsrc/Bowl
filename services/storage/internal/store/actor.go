@@ -146,19 +146,22 @@ type writeCmd struct {
 
 // Options 配置 StoreActor 实例打开参数。
 type Options struct {
-	Dir               string
-	DiskID            string
-	ReadOnly          bool
-	MaxBytes          uint64
-	MaxInodes         uint64
-	AtimeMode         AtimeMode
-	Cache             *pebble.Cache
-	Now               func() time.Time
-	Logger            *slog.Logger
-	Metrics           *Metrics
-	InoAllocator      InodeSegmentAllocator
-	PackAllocator     PackSegmentAllocator
-	ResetEpoch        bool
+	Dir           string
+	DiskID        string
+	ReadOnly      bool
+	MaxBytes      uint64
+	MaxInodes     uint64
+	AtimeMode     AtimeMode
+	Cache         *pebble.Cache
+	Now           func() time.Time
+	Logger        *slog.Logger
+	Metrics       *Metrics
+	InoAllocator  InodeSegmentAllocator
+	PackAllocator PackSegmentAllocator
+	ResetEpoch    bool
+	// PackSource 让这块盘可以读尚未下载到本地的数据包；PackPrefetch 为 true 时打开后即在后台把它们补齐。
+	PackSource        PackSource
+	PackPrefetch      bool
 	MaxPackSize       uint32
 	SlowTickThreshold time.Duration
 
@@ -397,6 +400,8 @@ func Open(opts Options) (*StoreActor, error) {
 		opts.removePackHook,
 	)
 
+	s.blobs.source = opts.PackSource
+
 	if err := s.syncPackStatsWithBlobs(); err != nil {
 		_ = s.blobs.close()
 		_ = db.Close()
@@ -410,6 +415,15 @@ func Open(opts Options) (*StoreActor, error) {
 	}
 
 	s.publishAtomicStats()
+
+	if !s.readOnly && opts.PackPrefetch && opts.PackSource != nil {
+		bs := s.blobs
+		bs.hydrWG.Go(func() {
+			if err := bs.hydrateAll(bs.hydrCtx); err != nil && bs.hydrCtx.Err() == nil {
+				bs.logger.Warn("remote pack prefetch stopped", "err", err)
+			}
+		})
+	}
 
 	if s.readOnly {
 		close(s.loopDone)

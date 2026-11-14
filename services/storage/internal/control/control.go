@@ -237,6 +237,8 @@ type manager struct {
 	handoffStop         chan struct{}
 	handoffDone         chan struct{}
 	handoffStopOnce     sync.Once
+	handoffGCInterval   time.Duration
+	handoffGC           handoff.GCOptions
 	commitHydrateMu     sync.Mutex
 }
 
@@ -1301,7 +1303,8 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return errors.Join(cleanupErrs...)
 	}
 	m.clearDiskMounts(diskID)
-	_ = os.Remove(m.syncMarkPath(diskID)) // 交接同步记录随盘一起清掉；远端快照不动
+	_ = os.Remove(m.syncMarkPath(diskID))
+	m.dropRemoteDisk(ctx, diskID)
 
 	m.logger.InfoContext(ctx, "disk deleted",
 		"disk_id", diskID,

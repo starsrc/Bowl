@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -493,4 +494,56 @@ func TestHandoff_Status_各节点看到自己的角色与待下载数据(t *test
 	st, err = local.StatusDisk(ctx, disk.DiskID)
 	require.NoError(t, err)
 	require.Equal(t, "replica", st.Role)
+}
+
+func TestHandoff_RemoteGC_回收旧快照且写者删盘后远端清空(t *testing.T) {
+	ctx := context.Background()
+	remote := newSharedRemote(t)
+	now := time.Now()
+	local := newManager(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithHandoff(remote, "local"),
+		WithClock(func() time.Time { return now }))
+	t.Cleanup(func() { _ = local.Close() })
+	local.handoffGC = handoff.GCOptions{KeepSnapshots: 1, MinAge: time.Hour}
+
+	disk, err := local.CreateDisk(ctx, CreateDiskParams{Name: "workspace", MaxBytes: 64 << 20})
+	require.NoError(t, err)
+	mount, err := local.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	actor, err := local.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	for i := range 4 {
+		writeRegularFile(t, ctx, actor, mount.Epoch, fmt.Sprintf("f%d.txt", i), bytes.Repeat([]byte{byte('a' + i)}, 2048))
+		_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+		require.NoError(t, err)
+	}
+
+	// 保留期内不删；过了保留期只留最新的两代
+	require.Zero(t, local.collectRemoteGarbage(ctx).SnapshotsDeleted)
+	now = now.Add(2 * time.Hour)
+	stats := local.collectRemoteGarbage(ctx)
+	require.Equal(t, 2, stats.SnapshotsDeleted)
+	require.Equal(t, 2, stats.SnapshotsKept)
+
+	// 回收之后，另一个节点仍能完整拿到最新状态
+	cloud := newHandoffNode(t, remote, "cloud")
+	_, err = cloud.PullDisk(ctx, PullDiskParams{DiskID: disk.DiskID, Force: true})
+	require.NoError(t, err)
+	cloudActor, err := cloud.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.NoError(t, cloudActor.HydrateRemotePacks(ctx))
+	require.Equal(t, bytes.Repeat([]byte{'d'}, 2048), readRegularFile(t, ctx, cloudActor, "f3.txt", 4096))
+
+	// 只读副本（local 现在不是写者）删盘不动远端；写者（cloud）删盘才清掉远端记录
+	require.NoError(t, local.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: mount.MountID}))
+	require.NoError(t, local.DeleteDisk(ctx, disk.DiskID))
+	_, err = cloud.HeadDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.NoError(t, cloud.DeleteDisk(ctx, disk.DiskID))
+	_, err = cloud.HeadDisk(ctx, disk.DiskID)
+	require.ErrorIs(t, err, ErrNotFound)
+	now = now.Add(2 * time.Hour)
+	local.collectRemoteGarbage(ctx)
+	left, err := remote.List(ctx, "")
+	require.NoError(t, err)
+	require.Empty(t, left, "盘删掉并回收之后远端不应残留任何对象")
 }

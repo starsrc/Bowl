@@ -60,6 +60,7 @@ func newManagerFromParams(params ManagerParams) Manager {
 		opts = append(opts,
 			handoffOption(cfg.HandoffRemoteDirVal, cfg.HandoffNodeIDVal, params.Logger),
 			WithHandoffSync(cfg.HandoffSyncIntervalVal),
+			WithHandoffGC(cfg.HandoffGCIntervalVal, cfg.HandoffGCKeepSnapshotsVal, cfg.HandoffGCMinAgeVal),
 		)
 	}
 	if params.StoreMetrics != nil {

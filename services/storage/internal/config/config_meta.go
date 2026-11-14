@@ -40,6 +40,10 @@ type MetaConfig struct {
 	HandoffNodeIDVal string `env:"HANDOFF_NODE_ID"`
 	// 后台同步周期；0 关闭后台同步。
 	HandoffSyncIntervalVal time.Duration `env:"HANDOFF_SYNC_INTERVAL" envDefault:"30s"`
+	// 远端回收：周期（0 关闭）、每块盘在最新快照之外额外保留的快照数、以及一律不删的最小年龄。
+	HandoffGCIntervalVal      time.Duration `env:"HANDOFF_GC_INTERVAL" envDefault:"1h"`
+	HandoffGCKeepSnapshotsVal int           `env:"HANDOFF_GC_KEEP_SNAPSHOTS" envDefault:"5"`
+	HandoffGCMinAgeVal        time.Duration `env:"HANDOFF_GC_MIN_AGE" envDefault:"24h"`
 }
 
 // AtimeMode 返回最后访问时间更新策略的小写标准化字符串（"noatime" / "relatime" / "strictatime"）。

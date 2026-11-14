@@ -648,25 +648,105 @@ func WithHandoffSync(interval time.Duration) Option {
 	}
 }
 
+// WithHandoffGC 设置远端回收：每隔 interval 清理一次，每块盘在 HEAD 之外额外保留 keep 个
+// 最近的快照，minAge 以内的快照与对象一律不删。interval 为 0 表示本节点不做回收。
+func WithHandoffGC(interval time.Duration, keep int, minAge time.Duration) Option {
+	return func(m *manager) {
+		if interval > 0 {
+			m.handoffGCInterval = interval
+			m.handoffGC = handoff.GCOptions{KeepSnapshots: keep, MinAge: minAge}
+		}
+	}
+}
+
 func (m *manager) startHandoffSync() {
-	if m.handoffRemote == nil || m.handoffSyncInterval <= 0 {
+	if m.handoffRemote == nil || (m.handoffSyncInterval <= 0 && m.handoffGCInterval <= 0) {
 		return
 	}
 	m.handoffStop = make(chan struct{})
 	m.handoffDone = make(chan struct{})
+	// 周期为 0 的那一项用一个永不触发的通道顶替。
+	tick := func(d time.Duration) (<-chan time.Time, func()) {
+		if d <= 0 {
+			return nil, func() {}
+		}
+		t := time.NewTicker(d)
+		return t.C, t.Stop
+	}
 	go func() {
 		defer close(m.handoffDone)
-		ticker := time.NewTicker(m.handoffSyncInterval)
-		defer ticker.Stop()
+		syncC, stopSync := tick(m.handoffSyncInterval)
+		defer stopSync()
+		gcC, stopGC := tick(m.handoffGCInterval)
+		defer stopGC()
 		for {
 			select {
 			case <-m.handoffStop:
 				return
-			case <-ticker.C:
+			case <-syncC:
 				m.syncDirtyDisks(context.Background())
+			case <-gcC:
+				// 先把本节点提交切面里的占位包补齐，再回收：切面引用的旧包可能已不在任何
+				// 保留快照里，回收之后就取不回来了。
+				m.hydrateAllCommitDirs(context.Background())
+				m.collectRemoteGarbage(context.Background())
 			}
 		}
 	}()
+}
+
+// hydrateAllCommitDirs 把本节点所有提交切面里尚未下载的数据包补齐。
+// 可写盘打开后会自己在后台补齐；提交切面没有常驻实例，靠这里周期性兜底。
+func (m *manager) hydrateAllCommitDirs(ctx context.Context) {
+	entries, err := os.ReadDir(filepath.Join(m.storageRoot, "commits"))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		m.lineageCommitMu.RLock()
+		hydErr := m.hydrateCommitDir(ctx, filepath.Join(m.storageRoot, "commits", entry.Name()))
+		m.lineageCommitMu.RUnlock()
+		if hydErr != nil && !errors.Is(hydErr, os.ErrNotExist) {
+			m.logger.WarnContext(ctx, "commit dir hydrate failed", "commit_id", entry.Name(), "err", hydErr)
+		}
+	}
+}
+
+// collectRemoteGarbage 清理远端的旧快照与无人引用的数据包。多个节点各自执行是安全的：
+// 删除是幂等的，保留策略只取决于远端内容。
+func (m *manager) collectRemoteGarbage(ctx context.Context) handoff.GCStats {
+	opts := m.handoffGC
+	opts.Now = m.currentTime
+	stats, err := handoff.GC(ctx, m.handoffRemote, opts)
+	if err != nil {
+		m.logger.WarnContext(ctx, "handoff remote gc failed", "err", err)
+		return stats
+	}
+	if stats.SnapshotsDeleted > 0 || stats.ObjectsDeleted > 0 {
+		m.logger.InfoContext(ctx, "handoff remote gc",
+			"snapshots_deleted", stats.SnapshotsDeleted,
+			"objects_deleted", stats.ObjectsDeleted,
+			"bytes_freed", stats.BytesFreed,
+		)
+	}
+	return stats
+}
+
+// dropRemoteDisk 在写者删盘时把它在远端的记录一并删掉；只读副本或已释放的盘被删时不动远端。
+func (m *manager) dropRemoteDisk(ctx context.Context, diskID string) {
+	if m.handoffRemote == nil {
+		return
+	}
+	head, _, err := handoff.ReadHead(ctx, m.handoffRemote, diskID)
+	if err != nil || head.Owner != m.nodeID {
+		return
+	}
+	if delErr := handoff.DeleteDisk(ctx, m.handoffRemote, diskID); delErr != nil {
+		m.logger.WarnContext(ctx, "handoff remote disk cleanup failed", "disk_id", diskID, "err", delErr)
+	}
 }
 
 func (m *manager) stopHandoffSync() {

@@ -1,15 +1,27 @@
 <div align="center">
-
-# Bowl
-
-**面向云原生沙箱与开发环境的远程 POSIX 虚拟磁盘系统**
-
-提供 Linux FUSE 挂载、WriterEpoch 单写者栅栏与盘级零拷贝 Fork / Diff / 三路 Merge
-
-<a href="LICENSE"><kbd>MIT License</kbd></a> &nbsp;·&nbsp; <a href="go.mod"><kbd>Go 1.26.5</kbd></a> &nbsp;·&nbsp; <a href="https://github.com/starsrc/Bowl/releases"><kbd>Status: Pre-release（尚未发布可用版本）</kbd></a>
-
-[快速开始](#快速开始) · [系统架构](#系统架构) · [开发手册](docs/index.md) · [提交 Issue](https://github.com/starsrc/Bowl/issues)
-
+  <br/>
+  <a href="https://github.com/starsrc/Bowl">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./.github/media/logo-dark.png">
+      <img src="./.github/media/logo-light.png" alt="Bowl" height="68">
+    </picture>
+  </a>
+  <br/>
+  <br/>
+  <h3>面向云原生沙箱与开发环境的远程 POSIX 虚拟磁盘系统</h3>
+  <p>Linux FUSE 挂载 · WriterEpoch 单写者栅栏 · 盘级零拷贝 Fork / Diff / 三路 Merge</p>
+  <p>
+    <a href="LICENSE"><kbd>MIT License</kbd></a> &nbsp;·&nbsp;
+    <a href="go.mod"><kbd>Go 1.26.5</kbd></a> &nbsp;·&nbsp;
+    <a href="https://github.com/starsrc/Bowl/releases"><kbd>Pre-release（尚未发布可用版本）</kbd></a>
+  </p>
+  <p>
+    <a href="#快速开始">快速开始</a> •
+    <a href="#适用场景">适用场景</a> •
+    <a href="#系统架构">系统架构</a> •
+    <a href="docs/index.md">开发手册</a> •
+    <a href="https://github.com/starsrc/Bowl/issues">提交 Issue</a>
+  </p>
 </div>
 
 ---
@@ -28,6 +40,12 @@
 - **单写者 Epoch 栅栏与软租约**：通过 PostgreSQL 18 持久化单调递增的 `writer_epoch` 与 `MountDisk` / `RenewMount` 软租约隔离陈旧写者（防止脑裂），同时支持多节点并发只读（`--ro`）挂载。
 - **双层存储架构**：全局元数据与血缘树存于 PostgreSQL 18；单盘文件系统与块数据由服务端 `StoreActor` 独占串行微批处理，底层基于 Pebble KV 与 64 MiB Append-Only `.pack` 数据容器（256 KiB 逻辑分块网格 + 64 MiB 热块缓存）实现高吞吐写入与在线压缩回收。
 - **多路分片传输与全链路可观测**：客户端采用 1 条元信息连接 + 8 条数据分片连接的 ConnectRPC HTTP/2（`h2c` / HTTPS）连接池；服务端内建 Prometheus `/metrics`、OpenTelemetry Tracing（Jaeger）与客户端 `.stats` 实时虚拟文件。
+
+## 适用场景
+
+- **AI Agent 沙箱工作区**：基于基线磁盘秒级 `fork` 独立工作区挂载进容器或沙箱，Agent 改坏直接丢弃分支盘，验证通过后 `diff --patch` 审查并 `merge` 回主盘。
+- **多分支隔离开发与测试**：在不重复拷贝数 GB 文件的前提下，为多个并行任务或测试流水线派生各自可写的 POSIX 磁盘分支。
+- **单写多读数据分发**：通过单个写入挂载生成基线或合并结果，多节点以 `--ro`（`epoch = 0`）只读挂载共享同一数据集。
 
 ## 系统架构
 

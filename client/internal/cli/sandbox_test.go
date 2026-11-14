@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,4 +73,14 @@ func TestSboxConflictingWriter_识别写者冲突(t *testing.T) {
 	// 没有写者
 	_, ok = sboxConflictingWriter(nil, "sbx-b", "/mnt/y")
 	assert.False(t, ok)
+}
+
+func TestDiskMove_参数校验(t *testing.T) {
+	t.Setenv("BOWL_CONFIG_DIR", t.TempDir())
+	var out, errOut bytes.Buffer
+	assert.Equal(t, 2, Execute([]string{"disk", "move", "d1"}, &out, &errOut), "缺少 --to")
+	errOut.Reset()
+	assert.Equal(t, 2, Execute([]string{"disk", "move", "d1", "--to", "http://127.0.0.1:9100", "--from", "http://127.0.0.1:9100"}, &out, &errOut))
+	assert.Contains(t, errOut.String(), "同一个节点")
+	assert.Equal(t, 0, Execute([]string{"disk", "move", "--help"}, &out, &errOut))
 }

@@ -1,9 +1,11 @@
 package control
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
@@ -56,9 +58,9 @@ func newManagerFromParams(params ManagerParams) Manager {
 	if params.Logger != nil {
 		opts = append(opts, WithLogger(params.Logger))
 	}
-	if cfg != nil && cfg.HandoffRemoteDirVal != "" {
+	if cfg != nil && (cfg.HandoffRemoteDirVal != "" || cfg.HandoffRemoteURLVal != "") {
 		opts = append(opts,
-			handoffOption(cfg.HandoffRemoteDirVal, cfg.HandoffNodeIDVal, params.Logger),
+			handoffOption(cfg, params.Logger),
 			WithHandoffSync(cfg.HandoffSyncIntervalVal),
 			WithHandoffGC(cfg.HandoffGCIntervalVal, cfg.HandoffGCKeepSnapshotsVal, cfg.HandoffGCMinAgeVal),
 		)
@@ -102,18 +104,37 @@ var Module = fx.Module("control",
 )
 
 // handoffOption 按配置启用交接；远端初始化失败只告警并保持交接关闭，不阻止服务启动。
-func handoffOption(remoteDir, nodeID string, logger *slog.Logger) Option {
+func handoffOption(cfg *config.MetaConfig, logger *slog.Logger) Option {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	nodeID := cfg.HandoffNodeIDVal
 	if nodeID == "" {
 		nodeID, _ = os.Hostname()
 	}
-	remote, err := handoff.NewDirRemote(remoteDir)
+	remote, where, err := newHandoffRemote(cfg)
 	if err != nil {
-		logger.Warn("handoff disabled: remote init failed", "dir", remoteDir, "err", err)
+		logger.Warn("handoff disabled: remote init failed", "remote", where, "err", err)
 		return nil
 	}
-	logger.Info("handoff enabled", "remote_dir", remoteDir, "node_id", nodeID)
+	logger.Info("handoff enabled", "remote", where, "node_id", nodeID)
 	return WithHandoff(remote, nodeID)
+}
+
+// newHandoffRemote 按配置构造交接远端，where 是用于日志的远端描述（不含凭证）。
+func newHandoffRemote(cfg *config.MetaConfig) (remote handoff.Remote, where string, err error) {
+	if cfg.HandoffRemoteURLVal == "" {
+		remote, err = handoff.NewDirRemote(cfg.HandoffRemoteDirVal)
+		return remote, cfg.HandoffRemoteDirVal, err
+	}
+	s3cfg, err := handoff.ParseS3URL(cfg.HandoffRemoteURLVal)
+	if err != nil {
+		return nil, cfg.HandoffRemoteURLVal, err
+	}
+	s3cfg.AccessKey = cmp.Or(cfg.HandoffS3AccessKeyVal, os.Getenv("AWS_ACCESS_KEY_ID"))
+	s3cfg.SecretKey = cmp.Or(cfg.HandoffS3SecretKeyVal, os.Getenv("AWS_SECRET_ACCESS_KEY"))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	remote, err = handoff.NewS3Remote(ctx, &s3cfg)
+	return remote, cfg.HandoffRemoteURLVal, err
 }

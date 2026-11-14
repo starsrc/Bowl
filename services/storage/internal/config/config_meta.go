@@ -36,6 +36,11 @@ type MetaConfig struct {
 	StorageDataDirVal         string  `env:"STORAGE_DATA_DIR"`
 	// 交接（handoff）原型：两个存储节点指向同一个目录即视为共用一个远端；留空则关闭交接。
 	HandoffRemoteDirVal string `env:"HANDOFF_REMOTE_DIR"`
+	// 以 S3 兼容对象存储作为交接远端：s3://bucket/prefix?endpoint=host:port&region=...&insecure=true。
+	// 与 HANDOFF_REMOTE_DIR 同时设置时以本项为准。凭证未单独设置时回退到 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY。
+	HandoffRemoteURLVal   string `env:"HANDOFF_REMOTE_URL"`
+	HandoffS3AccessKeyVal string `env:"HANDOFF_S3_ACCESS_KEY"`
+	HandoffS3SecretKeyVal string `env:"HANDOFF_S3_SECRET_KEY"`
 	// 本节点在交接 HEAD 里的身份；留空取主机名。
 	HandoffNodeIDVal string `env:"HANDOFF_NODE_ID"`
 	// 后台同步周期；0 关闭后台同步。

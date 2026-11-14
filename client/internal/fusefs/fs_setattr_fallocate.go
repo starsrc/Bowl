@@ -5,15 +5,9 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-)
-
-const (
-	fallocFlKeepSize  = unix.FALLOC_FL_KEEP_SIZE
-	fallocFlPunchHole = unix.FALLOC_FL_PUNCH_HOLE
 )
 
 // SetAttr 实现按需部分更新 Inode 属性或截断文件空间，对应 Linux FUSE FUSE_SETATTR 协议。

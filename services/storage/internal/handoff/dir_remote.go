@@ -89,6 +89,50 @@ func (d *DirRemote) Size(_ context.Context, key string) (int64, error) {
 	return info.Size(), nil
 }
 
+// List 列出 prefix 下的全部对象（不含上传中的临时文件与 HEAD 的锁文件）。
+func (d *DirRemote) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
+	var out []ObjectInfo
+	walkErr := filepath.WalkDir(d.root, func(p string, entry os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil // 遍历期间被并发删除
+			}
+			return err
+		}
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".put-") || strings.HasSuffix(name, ".lock") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(d.root, p)
+		if relErr != nil {
+			return relErr
+		}
+		key := filepath.ToSlash(rel)
+		if !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return nil //nolint:nilerr // 条目在遍历期间被并发删除，跳过即可
+		}
+		out = append(out, ObjectInfo{Key: key, Size: info.Size(), ModTime: info.ModTime()})
+		return nil
+	})
+	return out, walkErr
+}
+
+// Delete 删除对象。
+func (d *DirRemote) Delete(_ context.Context, key string) error {
+	p, err := d.path(key)
+	if err != nil {
+		return err
+	}
+	if rmErr := os.Remove(p); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		return rmErr
+	}
+	return nil
+}
+
 // CompareAndSwap 用同目录下的锁文件串行化"读-比较-写"，对应对象存储的条件写（If-Match）。
 // 锁是 flock，跨进程有效：两个存储服务进程抢同一个 HEAD 时只有一个能成功。
 func (d *DirRemote) CompareAndSwap(_ context.Context, key string, old, next []byte) (retErr error) {

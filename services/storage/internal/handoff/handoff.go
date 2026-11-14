@@ -51,9 +51,20 @@ type Remote interface {
 	ReadAt(ctx context.Context, key string, off int64, dst []byte) error
 	// Size 返回对象字节数；不存在返回 ErrNotFound。
 	Size(ctx context.Context, key string) (int64, error)
+	// List 列出键以 prefix 开头的全部对象。
+	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+	// Delete 删除一个对象；对象不存在不算错误。
+	Delete(ctx context.Context, key string) error
 	// CompareAndSwap 仅当对象当前内容等于 old 时写入 next（old 为 nil 表示对象必须不存在），
 	// 否则返回 ErrConflict。这是整个协议里唯一需要原子性的操作。
 	CompareAndSwap(ctx context.Context, key string, old, next []byte) error
+}
+
+// ObjectInfo 是 List 返回的对象概要。
+type ObjectInfo struct {
+	Key     string
+	Size    int64
+	ModTime time.Time
 }
 
 // Head 记录一块盘在远端的权威状态：谁是当前写者、最新快照是哪个。

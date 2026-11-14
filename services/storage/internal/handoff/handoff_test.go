@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -99,4 +101,64 @@ func TestPullSnapshot_远端对象被篡改时拒绝安装(t *testing.T) {
 	require.ErrorIs(t, err, ErrIncomplete)
 	_, statErr := os.Stat(dst)
 	require.True(t, os.IsNotExist(statErr), "校验失败后不能留下半成品目录")
+}
+
+func TestGC_只删没人引用的旧快照与对象(t *testing.T) {
+	ctx := context.Background()
+	remote, err := NewDirRemote(t.TempDir())
+	require.NoError(t, err)
+
+	// 五代快照：每一代新增一个包，并保留上一代的包（模拟只追加的磁盘）；第 3 代起丢掉包 1（被回收）
+	dir := t.TempDir()
+	writePack(t, dir, "0000000000000001.pack", "pack-one")
+	for gen := 1; gen <= 5; gen++ {
+		writePack(t, dir, SnapshotName(uint64(gen))[12:]+".pack", "data-of-gen-"+SnapshotName(uint64(gen)))
+		if gen == 3 {
+			require.NoError(t, os.Remove(filepath.Join(dir, "packs", "0000000000000001.pack")))
+		}
+		_, err = PushSnapshot(ctx, remote, "disk", SnapshotName(uint64(gen)), dir, nil)
+		require.NoError(t, err)
+	}
+	require.NoError(t, WriteHead(ctx, remote, nil, &Head{DiskID: "disk", Generation: 5, Owner: "n", Snapshot: SnapshotName(5)}))
+	// 一个没被任何清单引用的孤儿对象（推送中途失败留下的）
+	require.NoError(t, remote.Put(ctx, objectKey("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), strings.NewReader("orphan")))
+
+	later := func() time.Time { return time.Now().Add(48 * time.Hour) }
+
+	// MinAge 之内什么都不删
+	stats, err := GC(ctx, remote, GCOptions{KeepSnapshots: 1, MinAge: 24 * time.Hour})
+	require.NoError(t, err)
+	require.Zero(t, stats.SnapshotsDeleted)
+	require.Zero(t, stats.ObjectsDeleted)
+
+	// 过了保留期：留 HEAD（第 5 代）+ 额外 1 个（第 4 代），删第 1~3 代；
+	// 包 1 只被第 1、2 代引用，随之被清除；孤儿对象也被清除
+	stats, err = GC(ctx, remote, GCOptions{KeepSnapshots: 1, MinAge: 24 * time.Hour, Now: later})
+	require.NoError(t, err)
+	require.Equal(t, 2, stats.SnapshotsKept)
+	require.Equal(t, 3, stats.SnapshotsDeleted)
+	require.Equal(t, 2, stats.ObjectsDeleted, "包 1 与孤儿对象")
+
+	// 保留下来的两代快照仍然完整可拉取，被删的那几代拉不到
+	for _, gen := range []uint64{4, 5} {
+		_, err = PullSnapshot(ctx, remote, "disk", SnapshotName(gen), filepath.Join(t.TempDir(), "p"), "", nil)
+		require.NoError(t, err, "第 %d 代应当完好", gen)
+	}
+	_, err = PullSnapshot(ctx, remote, "disk", SnapshotName(2), filepath.Join(t.TempDir(), "p"), "", nil)
+	require.ErrorIs(t, err, ErrIncomplete)
+
+	// 再跑一轮是空操作
+	stats, err = GC(ctx, remote, GCOptions{KeepSnapshots: 1, MinAge: 24 * time.Hour, Now: later})
+	require.NoError(t, err)
+	require.Zero(t, stats.SnapshotsDeleted+stats.ObjectsDeleted)
+
+	// 删盘后它的对象在下一轮被清除干净
+	require.NoError(t, DeleteDisk(ctx, remote, "disk"))
+	_, _, err = ReadHead(ctx, remote, "disk")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = GC(ctx, remote, GCOptions{KeepSnapshots: 1, MinAge: 24 * time.Hour, Now: later})
+	require.NoError(t, err)
+	left, err := remote.List(ctx, "")
+	require.NoError(t, err)
+	require.Empty(t, left)
 }

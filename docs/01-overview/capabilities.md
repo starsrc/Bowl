@@ -6,7 +6,7 @@
 
 1. **完整远程 POSIX 语义**：在客户端通过 Linux `/dev/fuse` 暴露标准挂载点，支持常规文件随机读写、硬链接/符号链接、扩展属性（`xattr`）、`fallocate` 空间预分配/打洞（`punch hole`）、`O_TMPFILE` 匿名临时文件及建议锁（`flock` / `fcntl`）。
 2. **血缘感知与写时复制（CoW）**：每块虚拟磁盘具备持久化状态与独立局部提交树。`ForkDisk` 瞬间从源盘派生写时复制分支并记录全局血缘 DAG；`DiffDisk` 与 `MergeDisk` 基于最近公共祖先（LCA）完成目录树级比对与三路合并。
-3. **单写者 Epoch 栅栏**：同一磁盘支持多节点并发只读挂载（`epoch = 0`），而读写挂载通过控制面单调递增的 `writer_epoch` 与软租约续期实现严格脑裂隔离。
+3. **单写者 Epoch 栅栏**：同一磁盘支持多节点无状态只读挂载（`epoch = 0`），读写挂载通过 Pebble 持久化的单调递增 `WriterEpoch` 与 `WriterExpiresAt` 写租约实现写者互斥、显式 `--force` 抢占及旧写者失租约自动下线。
 4. **控制面与数据面解耦**：PostgreSQL 18 仅持久化全局盘元数据、血缘关系与 Commit DAG；单盘内部所有 Inode、目录项、扩展属性与数据块全部自治于本地 `StoreActor`（Pebble KV + `.pack` 追加封包）。
 
 ## 已支持能力全景矩阵
@@ -15,7 +15,7 @@
 | :--- | :--- | :--- | :--- |
 | **磁盘生命周期** | 创建、查询、分页列表、在线扩容/改名、删除 | 在线扩容仅支持增大容量（不允许低于 `used_bytes`）；删除挂载中的磁盘返回 `EBUSY` | `services/storage/internal/control/control.go` |
 | **分支、对比与合并** | `ForkDisk`、`DiffDisk`（含 `--patch`、`--conflicts-only`）、`MergeDisk`（`fail`/`ours`/`theirs` 及路径级覆盖 `--resolve`、`--dry-run`） | `diff --patch` 对单文件超过 `32 MiB` 自动跳过文本补丁；`merge` 遇到冲突默认中止并返回退出码 `1` | `services/storage/internal/control/{control,merge_diff}.go` |
-| **挂载与并发控制** | 读写挂载（`WriterEpoch` 栅栏 + `RenewMount` 心跳）、多节点只读挂载（`--ro`）、后台守护进程与优雅卸载 | 默认租约 `30s`，客户端每 `TTL/3`（最低 `1s`）续约一次；读写挂载仅允许单活跃写者 | `services/storage/internal/control/{control,mount_lease}.go`、`client/internal/cli/mount.go` |
+| **挂载与并发控制** | 读写挂载（`WriterEpoch` 栅栏、持久化写租约、`--force` 抢占与失租约自动卸载）、无状态多节点只读挂载（`--ro`）、后台守护进程与优雅卸载 | 读写默认租约 `30s`，客户端每 `TTL/3`（最低 `1s`）续约；只读挂载不占租约且不调用续约与卸载 RPC | `services/storage/internal/control/{control,mount_lease}.go`、`services/storage/internal/store/actor.go`、`client/internal/cli/mount.go` |
 | **POSIX 文件与目录** | `Lookup`、`GetAttr`、`SetAttr`、`Read`/`Write`、`Create`/`Mkdir`/`Mknod`/`Symlink`/`Link`/`Unlink`/`Rmdir`/`Rename`、`ReadDir`/`ReadDirPlus`、`StatFS` | `Rename` 支持 `0`、`RENAME_NOREPLACE`（`0x1`）、`RENAME_EXCHANGE`（`0x2`）；`Mknod` 支持常规文件（`S_IFREG`）、字符/块设备（`S_IFCHR`/`S_IFBLK`，含 `rdev`）、FIFO（`S_IFIFO`）与 Socket（`S_IFSOCK`） | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/` |
 | **高级存储特性** | `Fallocate`（默认分配与 `FALLOC_FL_PUNCH_HOLE` / `FALLOC_FL_KEEP_SIZE`）、`xattr`（增删改查列表）、`O_TMPFILE` + `linkat` 物化、预读与异步回写 | `user.*` 扩展属性仅允许设置在常规文件、目录与 Socket 上 | `services/storage/internal/store/{xattr_setattr,data_rw}.go`、`client/internal/fusefs/` |
 | **传输与可观测性** | ConnectRPC HTTP/2（`h2c` / HTTPS）、客户端 1 条元信息连接 + 8 条数据分片连接池、双端口 Prometheus + OTel 链路追踪 + 客户端 `.stats` 虚拟文件 | `--token` / `$BOWL_TOKEN` 在客户端注入 `Authorization: Bearer` 头 | `client/internal/rpc/client.go`、`services/storage/internal/server/` |

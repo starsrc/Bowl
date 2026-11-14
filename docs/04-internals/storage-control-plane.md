@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `config.Module` | `services/storage/internal/config/` | `ServerConfig`、`ObservabilityConfig`、`DBPoolConfig`、`MetaConfig` 等配置视图 |
 | `obsfx.Module` | 外部包 `github.com/starsrc/pkg/observability/obsfx` | 隔离 Prometheus Registry、`observability.Ready`、Gatherer |
-| `db.Module` | `services/storage/internal/db/store.go:628` | `ProvidePool`（`*pgxpool.Pool`）、`NewStore`（`db.Store`） |
+| `db.Module` | `services/storage/internal/db/store.go:618` | `ProvidePool`（`*pgxpool.Pool`）、`NewStore`（`db.Store`） |
 | `control.Module` | `services/storage/internal/control/module.go:85` | `store.NewMetrics`、`newStorageEngineCollector`、`newManagerFromParams`（`control.Manager`） |
 | `server.Module` | `services/storage/internal/server/module.go:15` | `NewHTTPMetrics`、`ConfigureFineBucketMeterProvider`、`ConfigureStorageTracerProvider`、`New`（`*Server`） |
 
@@ -151,41 +151,44 @@ flowchart LR
 
 ## 3. `control.Manager`：单盘 Actor 池与协调
 
-`Manager` 接口定义在 `control/control.go:165`。它对上承接 `server` 的业务调用，对下持有一张 `磁盘 ID → *store.StoreActor` 的池。
+`Manager` 接口定义在 `control/control.go:163`。它对上承接 `server` 的业务调用，对下持有一张 `磁盘 ID → *store.StoreActor` 的池。
 
-### 3.1 数据结构（`control.go:197-228`）
+### 3.1 数据结构（`control.go:195-224`）
 
 | 字段 | 类型 | 作用 |
 | --- | --- | --- |
 | `actors` | `map[string]*store.StoreActor` | Actor 池，键为规范化小写 UUID |
 | `poolMu` | `sync.RWMutex` | 保护 `actors` 与 `closed` |
-| `diskLocks` / `diskLocksMu` | 引用计数互斥锁表 | 单盘级串行化（`lockDisk`，`control.go:489`），引用归零即删除条目 |
+| `diskLocks` / `diskLocksMu` | 引用计数互斥锁表 | 单盘级串行化（`lockDisk`），引用归零即删除条目 |
 | `lineageCommitMu` | `sync.RWMutex` | 保护 `commits/` 目录：合并读取时持读锁，`DeleteDisk` 回收时持写锁 |
 | `cache` | `*pebble.Cache` | 所有 Actor 共享的 Pebble Block Cache，默认 `64 MiB`（`DefaultSharedCacheSize`） |
-| `activeMounts` / `mountsMu` | `map[disk]map[mountID]mountLease` | 内存挂载租约表，默认 TTL `30s`（`DefaultMountLeaseTTL`） |
+| `mountLeaseTTL` / `now` | `time.Duration` / `func() time.Time` | 单写者租约 TTL（默认 `30s`，`DefaultMountLeaseTTL`）与时钟注入点，供 `AcquireWriterLease` / `RenewWriterLease` 统一使用 |
 
 ### 3.2 Actor 获取：三段式快路径
 
-`Manager.Actor`（`control.go:1355`）是每个数据面 RPC 的入口：
+`Manager.Actor`（`control.go:1369`）是每个数据面 RPC 的入口：
 
 1. 持 `poolMu.RLock` 直接查 `actors[diskID]`，命中即返回（热路径，零分配）。
 2. 未命中则 `parseDiskID` 规范化，再次查池。
-3. 仍未命中：`lockDisk(diskID)` → 复查池 → `store.GetDisk` 取 `LineageID` → `getOrOpenActorWithLineageLocked`（`control.go:606`）打开 Actor。打开期间不持 `poolMu`；写回池时二次检查，竞争失败者调用 `CloseDiscard()` 丢弃，返回已有实例。
+3. 仍未命中：`lockDisk(diskID)` → 复查池 → `store.GetDisk` 取 `LineageID` → `getOrOpenActorWithLineageLocked` 打开 Actor。打开期间不持 `poolMu`；写回池时二次检查，竞争失败者调用 `CloseDiscard()` 丢弃，返回已有实例。
 
-打开 Actor 时会注入两个号段分配器（`newSegmentAllocators`，`control.go:402`）：Inode 号段步长 `store.InodeSegment = 4096`、Pack 号段步长 `store.PackSegment = 64`，二者通过 `db.Store.ReserveSegment` 在 PostgreSQL 中按血缘预留，保证同一血缘下各盘的 `ino` 与 `packID` 不冲突。预留使用 `context.WithoutCancel` 加 `5s` 超时（`segmentReserveTimeout`），避免客户端取消导致号段半分配。
+打开 Actor 时会注入两个号段分配器（`newSegmentAllocators`）：Inode 号段步长 `store.InodeSegment = 4096`、Pack 号段步长 `store.PackSegment = 64`，二者通过 `db.Store.ReserveSegment` 在 PostgreSQL 中按血缘预留，保证同一血缘下各盘的 `ino` 与 `packID` 不冲突。预留使用 `context.WithoutCancel` 加 `5s` 超时（`segmentReserveTimeout`），避免客户端取消导致号段半分配。
 
-### 3.3 租约与世代栅栏
+### 3.3 Pebble 持久化租约与世代栅栏
 
-- `MountDisk`（`control.go:1293`）：读写挂载调用 `actor.AdvanceEpoch` 原子递增 `WriterEpoch`，再 `issueMountLease` 签发 `mountID`；只读挂载不递增世代，`Epoch = 0`。
-- `RenewMount` / `UnmountDisk`（`mount_lease.go`）：租约保存在内存 `activeMounts`，过期条目由 `pruneExpiredDiskLeasesLocked` 惰性清理。
-- 旧写者被世代栅栏隔离：`StoreActor.validateCmd` 对所有外部写操作比较 `cmd.epoch` 与当前 `WriterEpoch`，不一致返回 `ErrStaleEpoch`（映射为 `EBUSY`）。机制细节见 [挂载与世代栅栏](/02-features/mount-and-fencing)。
-- `checkMergeMountGate` 在非 `DryRun` 且非 `Force` 的合并前，检查源盘与目标盘是否仍有活跃挂载租约，否则返回 `ErrDiskMounted`。
+控制面将单写者租约与 `WriterEpoch` 统一持久化在单盘 Pebble `BranchStat` 中：
+
+- `MountDisk`（`control.go:1290`）：
+  - 只读挂载（`read_only = true`）：校验 `force == false` 后通过 `withLiveActor` 只读探测根目录，返回 `Epoch = 0`、`LeaseTTLSeconds = 0`，不写 Pebble 也不占租约；
+  - 读写挂载（`read_only = false`）：调用 `actor.AcquireWriterLease(ctx, m.leaseTTL(), params.Force)`。若已有未过期写租约且未传 `--force`，`ErrWriterLeaseActive` 映射为 `ErrDiskMounted`（`Aborted/EBUSY`）；抢占或过期接管则递增 `WriterEpoch`、更新 `WriterExpiresAt = now.UTC().Add(ttl)`、清理遗留孤儿并 `pebble.Sync` 落盘。
+- `RenewMount` / `UnmountDisk`（`mount_lease.go:59-96`）：基于 `(disk_id, epoch)` 通过 `withLiveActor` 调用 `actor.RenewWriterLease` 或 `actor.ReleaseWriterLease`（只读挂载从不触发这两个 RPC）。遇到并发 `MergeDisk` Phase 2 或 `DeleteDisk` 逐出旧 Actor 导致的 `store.ErrClosed` 且 Manager 未关闭时，`withLiveActor` 自动重试一次等待收敛。
+- 旧写者隔离与合并门禁：`StoreActor.validateCmd`（`actor.go:1652`）对外部写操作核对 `cmd.epoch == s.stat.WriterEpoch` 且 `nowNano < s.stat.WriterExpiresAt`，不一致或已过期均返回 `ErrStaleEpoch`（`FailedPrecondition/EBUSY`）；`checkMergeMountGate`（`mount_lease.go:98`）在 `lockDiskPair` 内复用 `actor.HasActiveWriterLease` 检查源盘与目标盘是否存在未过期写租约，只读挂载不阻塞合并。细节见 [挂载租约与写栅栏](/02-features/mount-and-fencing)。
 
 ### 3.4 PostgreSQL 血缘提交协调
 
 控制面把"文件系统目录状态"与"PostgreSQL 血缘 DAG"两份状态做原子对账。顺序统一为：**先物化目录，再提交数据库事务，失败则回滚目录**。
 
-**`ForkDisk`（`control.go:767`）**
+**`ForkDisk`（`control.go:765`）**
 
 ```mermaid
 sequenceDiagram
@@ -219,9 +222,9 @@ sequenceDiagram
 
 数据库事务内再做一次 CAS：`SQLStore.MergeDisk`（`db/store.go:386`）校验两盘 `BaseCommitID` 与期望值一致，否则返回 `db.ErrStaleBaseCommit`（映射 `Aborted/EBUSY`）。
 
-**崩溃恢复**：`openDiskActor`（`control.go:578`）在打开读写 Actor 前调用 `reconcilePendingMergeLocked`，扫描 `disks/` 中残留的 `.merge.*`、`.old.*`、`.srccommit.*` 产物，以 PostgreSQL 记录的 `BaseCommitID` 为准前滚或回滚。`DeleteDisk` 在清理血缘前也会先协助他盘完成挂起合并（`reconcileOtherPendingMergesBeforeDelete`）。
+**崩溃恢复**：`openDiskActor`（`control.go:573`）在打开读写 Actor 前调用 `reconcilePendingMergeLocked`，扫描 `disks/` 中残留的 `.merge.*`、`.old.*`、`.srccommit.*` 产物，以 PostgreSQL 记录的 `BaseCommitID` 为准前滚或回滚。`DeleteDisk` 在清理血缘前也会先协助他盘完成挂起合并（`reconcileOtherPendingMergesBeforeDelete`）。
 
-**`DeleteDisk`（`control.go:1167`）**：先 `store.DeleteDisk` 事务返回需回收的 `commitsToClean`；再摘除并 `CloseDiscard` Actor、删盘目录；最后持 `lineageCommitMu.Lock` 逐个删除 `commits/` 目录。任一清理失败会汇总为 `errors.Join` 返回，并计入 `incCleanupError` 指标。
+**`DeleteDisk`（`control.go:1165`）**：先 `store.DeleteDisk` 事务返回需回收的 `commitsToClean`；再摘除并 `CloseDiscard` Actor、删盘目录；最后持 `lineageCommitMu.Lock` 逐个删除 `commits/` 目录。任一清理失败会汇总为 `errors.Join` 返回，并计入 `incCleanupError` 指标。
 
 ## 4. `db` 抽象层
 

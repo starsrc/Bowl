@@ -4,18 +4,18 @@
 
 ::: warning 与常见印象不同的两点
 - 管理端**不是 Unix Socket**，而是挂载进程内的本地 TCP HTTP 服务（默认 `127.0.0.1:0`，随机端口），地址通过元数据 JSON 文件发现。见 §1.3。
-- `fs_capability.go` **不做 FUSE 能力协商**，它是 `security.capability` 扩展属性的负缓存。FUSE 能力协商在 `BuildMountOptions`（`fs.go:802`）。见 §2.1。
+- `fs_capability.go` **不做 FUSE 能力协商**，它是 `security.capability` 扩展属性的负缓存。FUSE 能力协商在 `BuildMountOptions`（`fs.go:858`）。见 §2.1。
 :::
 
 ## 1. 守护进程
 
 ### 1.1 fork 与就绪握手
 
-`bowl mount` 默认以后台守护模式运行。`executeMount`（`cli/mount.go:455`）完成参数与前置校验后，按 `BOWL_DAEMON_WORKER` 环境变量与 `-f` 标志选择三种模式之一：
+`bowl mount` 默认以后台守护模式运行。`executeMount`（`cli/mount.go:578`）先解析参数并在 `spawnDaemon` 之前校验 `--ro` 与 `--force` 互斥（冲突时以退出码 `2` 立即失败），随后按 `BOWL_DAEMON_WORKER` 环境变量与 `-f` 标志选择三种模式之一：
 
 | 条件 | 模式 | 入口 |
 | --- | --- | --- |
-| 环境变量 `BOWL_DAEMON_WORKER=1` | 守护子进程 | `runDaemonWorker`（`cli/daemon.go:78`） |
+| 环境变量 `BOWL_DAEMON_WORKER=1` | 守护子进程 | `runDaemonWorker`（`cli/daemon.go:88`） |
 | 未指定 `-f` / `--foreground` | 父进程：派生子进程并等待握手 | `spawnDaemon`（变量，指向 `spawnDaemonProcess`，`cli/daemon.go:38`） |
 | 指定 `-f` | 前台阻塞，日志写标准错误 | `runMount(..., stderr, nil)` |
 
@@ -29,53 +29,53 @@ sequenceDiagram
     P->>W: exec 自身, 参数为 mount + 原 argv, ExtraFiles=w 即 fd 3, Setsid
     P->>P: 立即关闭自身持有的 w
     W->>W: ResolveLogFile 并 Dup2 重定向 stdout/stderr
-    W->>S: MountDisk 握手 (得到 Epoch, RootIno, 超时配置, MountID)
-    W->>K: fuse.NewServer + WaitMount
+    W->>S: MountDisk 握手 (得到 Epoch, RootIno, 超时配置, LeaseTTLSeconds)
+    W->>K: fuse.NewServer + signal.Notify + WaitMount
     W->>W: 写 mountMeta JSON 并启动管理面
     W-->>P: 向 fd 3 写入 OK 换行
     P->>P: readDaemonHandshake 读到 OK, 退出码 0
-    Note over W,P: 失败时写 ERR 加原因, 或子进程退出致管道 EOF, 父进程返回退出码 1
+    Note over W,P: 失败时通过 singleLineError 写单行 ERR 加原因, 或子进程退出致管道 EOF, 父进程返回退出码 1
 ```
 
 要点：
 
 - 父进程**必须立即关闭自己的管道写端**（`daemon.go:71`），否则子进程退出时读端收不到 EOF，父进程会永久阻塞。
 - 子进程用 `Setsid: true` 脱离控制终端，`Stdin` 指向 `/dev/null`，并通过 `unix.Dup2` 把标准输出与标准错误重定向到日志文件。
-- 日志文件由 `ResolveLogFile`（`cli/log.go:49`）解析：`--log-file` 优先；否则 `/var/log/bowl/mount-` 加 `disk-id` 加 `.log`；无权限回退到 `$XDG_STATE_HOME/bowl/logs/` 或 `~/.local/state/bowl/logs/`。
-- 握手协议只有两种行：`OK` 与 `ERR:` 加错误文本（`readDaemonHandshake`，`daemon.go:19`）。
+- 日志文件由 `ResolveLogFile`（`cli/log.go`）解析：`--log-file` 优先；否则 `/var/log/bowl/mount-` 加 `disk-id` 加 `.log`；无权限回退到 `$XDG_STATE_HOME/bowl/logs/` 或 `~/.local/state/bowl/logs/`。
+- 握手协议只有两种行：`OK` 与单行 `ERR:` 加错误文本（`singleLineError` + `readDaemonHandshake`，`daemon.go:19,76`），避免 `MountDisk` 多行报错在管道首行读取时被截断。
 
 ### 1.2 `runMount` 装配顺序
 
-`runMount`（`cli/mount.go:279`）是前台与守护子进程共用的主流程：
+`runMount`（`cli/mount.go:390`）是前台与守护子进程共用的主流程：
 
 1. `setupObservability`：日志、追踪与指标运行时。
 2. `rpc.NewClientFromConfig`：构造 ConnectRPC 客户端（见 §4）。
-3. `mountHandshake`：单次 `MountDisk` RPC，10 秒超时。返回权威 `Epoch`、`RootIno`、`entry` 与 `attr` 超时；读写挂载必须拿到非 0 的 `Epoch`。
+3. `mountHandshake`：单次 `MountDisk` RPC（带 `Force` 参数，10 秒超时）。只读挂载返回 `Epoch = 0` 与 `LeaseTTLSeconds = 0`；读写挂载校验 `Epoch > 0` 与 `LeaseTTLSeconds > 0`（遇未过期活跃写者则返回单行 `EBUSY` 提示）。
 4. `fusefs.NewRawFS(client, *cfg)` 并注册指标收集器。
 5. `startAdminServer`：启动管理面。
-6. `startMountLeaseRenewer`：后台协程按 `TTL/3`（最小 1 秒）调用 `RenewMount`；收到 `FailedPrecondition` 或 `NotFound` 即停止续期。
-7. `serveFUSE`（默认 `defaultServeFUSE`，`mount.go:235`）：`fuse.NewServer` → `Serve` → `WaitMount` → `BindMountpoint` → `ready()`，之后阻塞到卸载。
+6. `startMountLeaseRenewer`：只读挂载直接跳过；读写挂载按 `max(1s, TTL/3)` 调用 `RenewMount(disk_id, epoch)`，可恢复错误按 `min(2s, normalInterval)` 短间隔重试，收到 `FailedPrecondition` 或 `NotFound` 则设置 `leaseLost`、`rawFS.MarkLeaseLost()` 并取消 `serveCtx` 触发自动下线。
+7. `serveFUSE`（默认 `defaultServeFUSE` 与 `serveFUSEWithServer`，`mount.go:296-386`）：创建 `fuse.NewServer` 后在 `WaitMount()` 前即注册 `signal.Notify`，通过持续监听循环（`ctxDone` 触发置 `nil` 后继续监听后续信号）等待退出，`BindMountpoint` 并调用 `ready()`。
 
 ### 1.3 管理端与发现元数据
 
-- 管理面 `startAdminServer`（`cli/admin.go:318`）在 `--admin-addr` 上监听 **TCP**，默认 `127.0.0.1:0`，传 `off` 关闭。提供 `/metrics`、`/debug/pprof/*`、`/healthz`、`/readyz`、`/debug/stats`。
+- 管理面 `startAdminServer` 在 `--admin-addr` 上监听 **TCP**，默认 `127.0.0.1:0`，传 `off` 关闭。提供 `/metrics`、`/debug/pprof/*`、`/healthz`、`/readyz`、`/debug/stats`。
 - 挂载就绪后，`ready` 回调把 `mountMeta`（`mountpoint`、`pid`、`disk_id`、`admin_addr`、`started_at`）原子写入（临时文件加 `rename`）元数据目录 `/run/bowl/mounts`，无权限回退 `$TMPDIR/bowl-mounts`；文件名为规范化挂载点 SHA-256 前 16 字节的十六进制加 `.json`（`cli/mountmeta.go`）。
-- `bowl stats` 通过这些 JSON 找到 `admin_addr`，请求 `/debug/stats`；`bowl disk delete`、`bowl disk merge` 通过 `/proc/self/mountinfo`（`cli/mountinfo.go` 的 `FindDiskMountpoint`）识别本机挂载。
+- `bowl stats` 通过这些 JSON 找到 `admin_addr`，请求 `/debug/stats`；`bowl disk delete`、`bowl disk merge` 通过 `/proc/self/mountinfo`（`cli/mountinfo.go` 的 `FindDiskMountpoint`）识别本机挂载（`bowl disk merge` 仅拦截本机读写挂载，放行只读挂载）。
 
 ### 1.4 退出与清理
 
-卸载由 `bowl umount`（调用 `fusermount3` / `fusermount` / `umount`）或 `SIGINT` / `SIGTERM` 触发，守护进程内的顺序如下：
+卸载由 `bowl umount`（调用 `fusermount3` / `fusermount` / `umount`）、`SIGINT` / `SIGTERM` 或失租约取消 `serveCtx` 触发，守护进程内的顺序如下：
 
-1. 内核通知卸载，`server.Serve()` 返回；`RawFS.OnUnmount`（`fs.go:475`）执行：关闭锁表 → 取 `lifecycleMu` 写锁（等待在途请求排空）→ `writeBehind.Clear` 排空异步写 → 对所有脏 inode 逐个 `Fsync` RPC → 清空句柄、缓存、临时文件 → `readAhead.Clear`。
-2. `runMount` 停止续期协程，调用 `UnmountDisk` RPC 释放服务端租约（独立超时，不受信号上下文取消影响）。
-3. 删除元数据 JSON 文件，关闭管理面与可观测性运行时。
-4. `executeUmount`（`cli/umount.go:75`）在非 `--force` 时用 `waitMountMetaDrained` 轮询元数据文件消失或进程退出，保证"命令返回即数据已刷盘、租约已释放"。
+1. `unmountServerWithLazyFallback` 优先执行 `server.Unmount()`，若因目录或句柄忙失败则自动回退 `findUmountCommand(mountpoint, true)`（`fusermount3 -uz` / `fusermount -uz` / `umount -l`）懒卸载。`server.Serve()` 返回后，`RawFS.OnUnmount`（`fs.go:494`）关闭锁表、持 `lifecycleMu` 等待在途请求结束、在总预算 `unmountFlushTimeout = 5s` 内排空 `writeBehind` 并逐个 `Fsync` 脏 inode、清理缓存与临时文件，最后排空 `ReclaimOrphan` 队列。若已标记 `leaseLost`、遇到 `FailedPrecondition`/`NotFound` 或超时预算耗尽，立即跳过/早停远端刷盘与孤儿回收，保证自动下线瞬时完成。
+2. `runMount` 停止续期协程；若非失租约退出且为读写挂载，调用 `UnmountDisk(disk_id, epoch)` RPC 释放服务端写租约（独立 `3s` 超时）；若已失租约或为只读挂载，跳过 `UnmountDisk`。
+3. 移除元数据 JSON 文件前校验 `readMountMetaPID(metaPath) == os.Getpid()`（防止懒卸载后原挂载点被重用时误删新进程元数据），随后关闭管理面与可观测性运行时。
+4. `executeUmount` 在非 `--force` 时用 `waitMountMetaDrained` 轮询元数据文件消失或进程退出，保证"命令返回即数据已刷盘、租约已释放"。
 
 ## 2. FUSE 层基础：挂载选项、能力缓存与 Inode 锁
 
 ### 2.1 FUSE 能力协商：`BuildMountOptions`
 
-`BuildMountOptions`（`fusefs/fs.go:802`）决定与内核协商的能力与参数：
+`BuildMountOptions`（`fusefs/fs.go:858`）决定与内核协商的能力与参数：
 
 | 项 | 取值 | 含义 |
 | --- | --- | --- |
@@ -84,6 +84,7 @@ sequenceDiagram
 | `ExtraCapabilities` | `CAP_HANDLE_KILLPRIV` | 由文件系统自己在写批次里清除 `security.capability`，内核不再写前探测 |
 | `DisabledCapabilities` | `CAP_WRITEBACK_CACHE`、`CAP_AUTO_INVAL_DATA` | 关闭内核写回缓存，保持 1 MiB 直通写；关闭自动失效，避免服务端与内核 mtime 不等造成整文件页缓存被清空 |
 | `Options` | `default_permissions`，只读时加 `ro` | 权限检查交内核 |
+| `DirectMount` / `DirectMountFlags` | `true` / `MS_NOSUID \| MS_NODEV`（只读追加 `MS_RDONLY`） | 直连内核 `mount(2)` 时将 VFS 挂点标记为只读 |
 | `EnableLocks` | `true` | 启用 POSIX 与 flock 锁协议（`fs_lock.go`、`lock_table.go`） |
 
 `security.capability` 负缓存（`fusefs/fs_capability.go`）：`capabilityCache` 记录每个内核 inode"是否已知不带该属性"。普通文件几乎不会设置它，命中 `knownAbsent` 就免去写前 `GetXattr` RPC；`Create`、写成功、`SetAttr` 后调用 `markAbsent`，显式 `SetXattr` 后 `markPresent`，inode 被回收时 `forget`，会话失效时 `reset`。写路径用它决定是否允许走异步聚合（`fs_rw.go:188` 的 `!fs.caps.knownAbsent(...)` 分支）。
@@ -179,7 +180,7 @@ flowchart TD
 | `Flush`（`close(fd)`） | `fs_file_handle.go:211` | 释放 POSIX 记录锁；匿名文件先上云；只读句柄 `BarrierInode`；可写句柄 `FlushInodeForHandle`（刷尾部分片，等全部在途 Write 完成，消费该句柄错误） | 写入已进服务端队列，**不发 Fsync RPC** |
 | `Fsync` | `fs_file_handle.go:261` | 匿名文件同步 → `FlushInodeForHandle` → `Fsync` RPC（`Datasync` 取自 `FsyncFlags`）→ `clearDirty` | 服务端完成 WAL 同步与脏 `.pack` `fdatasync`（见 [Store 引擎 §1.5](/04-internals/storage-store-engine)） |
 | `Release` | `fs_file_handle.go:313` | `BarrierInode` → 持 `inodeLocks` → 释放 flock、`readAhead.RemoveHandle`、`writeBehind.ForgetHandle`；孤儿最后句柄触发回收；最后一个句柄时 `writeBehind.RemoveInode` | 无 |
-| `OnUnmount` | `fs.go:475` | `writeBehind.Clear` 后对全部 `dirtyInodes` 逐个 `Fsync` | 卸载时确认物理落盘 |
+| `OnUnmount` | `fs.go:494` | `leaseLost`/失租约/超时预算（`5s`）耗尽时跳过或早停远端刷盘，否则排空 `writeBehind` 并对存活 `dirtyInodes` 逐个 `Fsync` | 卸载时尽量确认落盘，失租约不阻塞退出 |
 
 `markDirty` 在每次成功写入后登记 inode，`Fsync` 成功后 `clearDirty`；因此 `Flush` 不付 Fsync 代价，但卸载一定补刷。需要"关闭即持久"的应用必须显式 `fsync`。
 

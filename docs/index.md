@@ -18,8 +18,8 @@ features:
     details: 基于 hanwen/go-fuse/v2 实现目录树、硬链接/符号链接、rename2、fallocate、xattr、孤儿文件及守护进程化挂载。
   - title: 零拷贝派生与三路合并
     details: 支持基于不可变提交切面的 ForkDisk 零拷贝派生、DiffDisk 差异对比，以及带 dry_run 预览与冲突策略的 MergeDisk 三路合并。
-  - title: 单写者世代栅栏与租约控制
-    details: 通过 PostgreSQL 持久化的 WriterEpoch 栅栏、MountDisk/RenewMount/UnmountDisk 软租约与配额校验保障多端挂载一致性。
+  - title: 单写者世代栅栏与持久化租约
+    details: 通过 Pebble 持久化的 WriterEpoch 栅栏与 WriterExpiresAt 写租约、MountDisk/RenewMount/UnmountDisk 续期抢占及配额校验保障多端挂载一致性。
   - title: 分离式控制面与引擎架构
     details: 控制面基于 Uber Fx、ConnectRPC、protovalidate 与 PostgreSQL；数据面采用单盘 StoreActor、Pebble 键值索引与 64 MiB Append-Only Pack 容器。
 ---

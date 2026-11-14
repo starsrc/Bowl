@@ -101,7 +101,7 @@ flowchart LR
 1. **防竞态串行化**：在 `Unlink`、`Rename`（非 `EXCHANGE` 覆盖且目标 `Nlink == 1`）与 `Release` 之间，客户端通过按 `Inode` 粒度的 `inodeLocks` 互斥锁严格串行执行，彻底避免“客户端刚关闭句柄但 `Unlink` 误判仍打开”或“已标记孤儿却漏掉关闭回调”的双边漏失。
 2. **孤儿期可见性与计费**：在 `orphan:&lt;ino&gt;` 存活期间，节点 `Nlink == 0`、`ParentIno == 0`：任何新 `Lookup` 与 `Link` 均返回 `ENOENT`，但既有的文件描述符仍可通过 `Ino` 正常读写、`Fstat` 与 `Fsync`，其 `Inode.Size` 也依然计入 `used_bytes` 配额。
 3. **异步重试与积压告警**：若 `ReclaimOrphan` 因网络抖动返回 `Unavailable`/`DeadlineExceeded`/`Aborted`/`ResourceExhausted`/`Internal`，节点进入客户端 `releaseQueue`，后台协程按 `DefaultReleaseRetryInterval = 200ms` 周期重试；队列深度达到 `DefaultOrphanBacklogThreshold = 16` 时限流打印 `orphan_reclaim_backlogged` 告警。
-4. **崩溃兜底清扫**：若客户端未及发送 `ReclaimOrphan` 即断电崩溃，服务端会在**下一次读写 `MountDisk`**（`AdvanceEpoch` 触发 `planCleanOrphans`）、**`ForkDisk`**（`SanitizeCheckpoint` 净化）或 **`MergeDisk`**（阶段一整理目标树）时统一清除全部残留 `orphan:&lt;ino&gt;` 记录并归还逻辑容量配额。
+4. **崩溃兜底清扫**：若客户端未及发送 `ReclaimOrphan` 即断电崩溃，服务端会在**下一次读写 `MountDisk`**（`AcquireWriterLease` 触发 `planCleanOrphans`）、**`ForkDisk`**（`SanitizeCheckpoint` 净化）或 **`MergeDisk`**（阶段一整理目标树）时统一清除全部残留 `orphan:&lt;ino&gt;` 记录并归还逻辑容量配额。
 
 ---
 

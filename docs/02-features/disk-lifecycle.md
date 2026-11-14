@@ -23,14 +23,14 @@ Bowl 采用**控制面元数据与单盘引擎状态分离**的双层模型：Po
 | `used_inodes` | Pebble `sys:stat`（`BranchStat.Inodes`） | `uint64` 实时存活节点计数 | 含根目录（初始为 `1`）及所有存活节点（含未回收的 `orphan` 节点） |
 
 > [!NOTE]
-> `StoreActor` 在 Pebble 中将 `sys:stat` 编码为 41 字节定长结构 `BranchStat`（`[ver(1B) | LogicalBytes(8B) | Inodes(8B) | NextWriteSeq(8B) | WriterEpoch(8B) | MaxBytes(8B)]`）。详见 [存储引擎内部实现](/04-internals/storage-store-engine)。
+> `StoreActor` 在 Pebble 中将 `sys:stat` 编码为 49 字节定长结构 `BranchStat`（`[ver(1B) | LogicalBytes(8B) | Inodes(8B) | NextWriteSeq(8B) | WriterEpoch(8B) | MaxBytes(8B) | WriterExpiresAt(8B)]`）。详见 [存储引擎内部实现](/04-internals/storage-store-engine)。
 
 ### 创建初始化与原子回滚（`CreateDisk`）
 
 `services/storage/internal/control/control.go` 中的 `CreateDisk` 按以下顺序确保引擎目录与控制面元数据的强一致：
 
 1. **参数与 UUIDv7 生成**：校验名称长度（`0..255` 字节、允许空字符串且无 NUL）与 `max_bytes &gt; 0`（受 `proto/storage/v1/storage.proto` `buf.validate` 约束），生成 UUIDv7 作为 `disk_id`、`lineage_id` 与初始 `commit_id`。
-2. **预建存储引擎实例**：在 `&lt;storage_root&gt;/disks/&lt;disk_id&gt;` 打开 `StoreActor`，写入 `RootIno = 1` 根目录节点与初始 `BranchStat`（`Inodes = 1`、`LogicalBytes = 0`、`WriterEpoch = 0`、`MaxBytes = max_bytes`）。
+2. **预建存储引擎实例**：在 `&lt;storage_root&gt;/disks/&lt;disk_id&gt;` 打开 `StoreActor`，写入 `RootIno = 1` 根目录节点与初始 `BranchStat`（`Inodes = 1`、`LogicalBytes = 0`、`WriterEpoch = 0`、`WriterExpiresAt = 0`、`MaxBytes = max_bytes`）。
 3. **PostgreSQL 事务提交**：在 `SQLStore.CreateDisk` 事务内依次插入 `disk_lineages`（初始 `next_ino = 2`、`next_pack_id = 1`）与 `disks` 表。
 4. **失败补偿清理**：若数据库事务提交失败，控制面立即关闭并丢弃刚创建的 `StoreActor`，递归删除物理目录 `&lt;storage_root&gt;/disks/&lt;disk_id&gt;`，杜绝无主数据目录残留。
 
@@ -108,11 +108,11 @@ Bowl 支持在不卸载、不中断在线读写会话的前提下，通过 `Upda
 | :--- | :--- | :--- |
 | CLI 本地挂载检测 | `bowl disk delete` 在发起 RPC 前通过 `ports.findMountpoint` 扫描本地已挂载记录；若目标磁盘仍挂载于本机路径，立即报错拦截并要求先执行卸载 | `client/internal/cli/disk_delete.go` |
 | CLI 交互确认与 `EBUSY` 翻译 | 非 `-y/--yes` 调用要求输入 `yes` 确认；若服务端返回 `ErrorInfo{Reason: "EBUSY"}`（如未来或代理层拦截），CLI 提示磁盘忙并终止 | `client/internal/cli/disk_delete.go` |
-| 服务端 `DeleteDisk` 租约处理 | Storage 控制面 `DeleteDisk` **不会**在服务端因存在 `activeMounts` 而返回 `EBUSY`；其在销毁盘目录后调用 `clearDiskMounts(diskID)` 强制清除该盘全部内存挂载租约（见 `TestMountLease_DeleteDiskClearsLeasesAndCustomTTLApplies` 测试验证） | `services/storage/internal/control/control.go` |
-| 与 `MergeDisk` 的区别 | `MergeDisk` 在服务端强制校验活跃挂载门禁（`checkMergeMountGate`），存在有效租约时明确返回 `Aborted`（`Reason: "EBUSY"`） | `services/storage/internal/control/mount_lease.go` |
+| 服务端 `DeleteDisk` 租约处理 | Storage 控制面 `DeleteDisk` 不会在服务端因存在活跃写租约而返回 `EBUSY`；它直接销毁盘的 `StoreActor` 与磁盘目录（含 Pebble 中的 `WriterEpoch` 与 `WriterExpiresAt`） | `services/storage/internal/control/control.go` |
+| 与 `MergeDisk` 的区别 | `MergeDisk` 在服务端强制校验活跃写租约门禁（`checkMergeMountGate`），仅当源盘或目标盘存在未过期读写租约时返回 `Aborted`（`Reason: "EBUSY"`）；只读挂载不阻塞合并 | `services/storage/internal/control/mount_lease.go` |
 
 > [!WARNING]
-> 若外部系统绕过 `bowl` CLI 直接调用 `DeleteDisk` gRPC 接口，服务端将直接销毁该盘存储引擎并撤销其挂载租约；此时仍在远端节点运行的残留挂载客户端会在后续读写或 `RenewMount` 心跳中收到 `NotFound` 并失效。因此，生产集成编排层应在调用 `DeleteDisk` RPC 前主动确认全集群无在途挂载或业务流量。
+> 若外部系统绕过 `bowl` CLI 直接调用 `DeleteDisk` gRPC 接口，服务端将直接销毁该盘存储引擎；仍在远端节点运行的读写或只读挂载客户端会在后续 I/O 或 `RenewMount` 心跳中收到 `NotFound`，读写守护进程会自动标记租约失效并触发自动卸载退出。因此，生产集成编排层应在调用 `DeleteDisk` RPC 前主动确认全集群无在途挂载或业务流量。
 
 ### 盘内清理与三态血缘提交 GC
 
@@ -124,9 +124,8 @@ Bowl 支持在不卸载、不中断在线读写会话的前提下，通过 `Upda
    - **`remaining == 1`**：同血缘仅剩最后一块存活盘，跨分支三路比较已不再发生；事务内清空幸存盘的 `base_commit_id`，并删除该血缘下的全部 `disk_commits` 行。
    - **`remaining == 0`**：血缘内已无存活盘；删除该血缘下的全部 `disk_commits` 行并级联删除 `disk_lineages` 记录。
 3. **存储引擎与物理文件回收**：
-   - 控制面持盘锁关闭目标 `StoreActor`（`CloseWithDiscard`，跳过正常关停刷盘以加速销毁），删除 `&lt;storage_root&gt;/disks/&lt;disk_id&gt;` 目录及 `*.merge.*`、`*.old.*`、`*.srccommit.*` 暂存遗留。
+   - 控制面持盘锁关闭目标 `StoreActor`（`CloseDiscard`，跳过正常关停刷盘以加速销毁），删除 `&lt;storage_root&gt;/disks/&lt;disk_id&gt;` 目录及 `*.merge.*`、`*.old.*`、`*.srccommit.*` 暂存遗留。
    - 依据数据库返回的 `commitsToClean` 列表，在 `lineageCommitMu` 保护下物理删除已被 GC 的 `&lt;storage_root&gt;/commits/&lt;commit_id&gt;` 快照目录。由于 `.pack` 文件通过硬链接跨盘与跨提交共享，删除单个盘或提交目录时仅减少操作系统硬链接计数，其余存活分支共享的数据块仍然安全可读。
-   - 最后调用 `clearDiskMounts(diskID)` 清理该盘在内存中的所有租约条目。
 
 ---
 

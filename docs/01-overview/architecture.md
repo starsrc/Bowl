@@ -56,8 +56,8 @@ Bowl 刻意避免将海量 POSIX 元数据（Inode、目录项、Xattr、Block �
 
 | 存储层 | 载体与位置 | 持久化实体 | 核心职责 | 严禁越界行为 |
 | :--- | :--- | :--- | :--- | :--- |
-| **全局控制面** | PostgreSQL 18（`services/storage/db/migrations/`） | `disks`、`disk_lineages`、`disk_commits` 三张表 | 记录盘 ID/名称/容量配额、当前活跃 `writer_epoch` 与挂载租约、逻辑分支血缘（`lineage_id`）及全局 Commit DAG（`parent_commit_id`、`root_disk_id`、`deleted_at`） | **不存储**任何文件字节、POSIX 目录项、Inode 属性或扩展属性 |
-| **单盘引擎元数据** | 本地磁盘 `$DATA_DIR/<disk-or-commit>/` 下的 Pebble KV | `StoreActor` 私有键值空间（参见 `store/keys.go`） | 存储单盘全部 Inode（`i:`）、目录项（`d:`）、扩展属性（`x:`）、`256 KiB` 块映射（`b:`）、超级块与 Epoch 状态及局部 Diff/Merge 变更索引 | 不直接跨盘维护全局血缘树，只维护本盘/本分支数据一致性 |
+| **全局控制面** | PostgreSQL 18（`services/storage/db/migrations/`） | `disks`、`disk_lineages`、`disk_commits` 三张表 | 记录盘 ID/名称、逻辑分支血缘（`lineage_id`）及全局 Commit DAG（`parent_commit_id`、`root_disk_id`、`deleted_at`） | **不存储**任何文件字节、POSIX 目录项、Inode 属性、`WriterEpoch` 或写租约状态 |
+| **单盘引擎元数据** | 本地磁盘 `$DATA_DIR/<disk-or-commit>/` 下的 Pebble KV | `StoreActor` 私有键值空间（参见 `store/keys.go`） | 存储单盘全部 Inode（`i:`）、目录项（`d:`）、扩展属性（`x:`）、`256 KiB` 块映射（`b:`）、`BranchStat`（`MaxBytes`、`WriterEpoch`、`WriterExpiresAt`）及局部 Diff/Merge 变更索引 | 不直接跨盘维护全局血缘树，只维护本盘/本分支数据一致性 |
 | **单盘引擎数据块** | 本地磁盘 `$DATA_DIR` 下的 `.pack` 封包文件 + 内存热块缓存 | `64 MiB` 追加写 `.pack` 段 + `64 MiB` 16 分片环形缓存 | 以只追加写承载 `256 KiB` 块数据（支持读改写对齐、稀疏空洞与 `CompactPacks` 碎片回收）；`Fork` 共享只读基线 `.pack` 引用，实现零拷贝秒级派生 | 客户端无权直接访问底层 `.pack` 文件，必须经 RPC 读写 |
 
 > [!NOTE]

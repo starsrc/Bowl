@@ -134,17 +134,17 @@ bowl <command> [flags] [arguments]
 
 ### `bowl disk merge`
 
-将源分支盘的变更三路合并入目标盘（RPC 超时 `60s`）。非 `--dry-run` 且未传 `--force` 时，客户端会先检查 `/proc/self/mountinfo` 确认目标盘未挂载且源盘未处于读写挂载状态。
+将源分支盘的变更三路合并入目标盘（RPC 超时 `60s`）。非 `--dry-run` 且未传 `--force` 时，客户端先检查 `/proc/self/mountinfo`，仅当源盘或目标盘在本机处于读写挂载状态时拦截并提示先卸载（本机只读挂载不拦截合并）。
 
 | 标志 / 参数 | 必填 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `<source-disk-id>` | 是（位置参数） | — | 源分支盘 UUID |
-| `--into <target-disk-id>` | 是 | — | 合入目标盘 UUID |
+| `<source-disk-id>` | 是（位置参数） | - | 源分支盘 UUID |
+| `--into <target-disk-id>` | 是 | - | 合入目标盘 UUID |
 | `--strategy <fail\|ours\|theirs>` | 否 | `fail` | 默认冲突裁决策略 |
-| `--resolve <path>=<ours\|theirs>` | 否 | — | 针对单个路径的冲突覆盖策略（可重复传参，最多 `4096` 项，路径 `1 .. 4096 B`） |
+| `--resolve <path>=<ours\|theirs>` | 否 | - | 针对单个路径的冲突覆盖策略（可重复传参，最多 `4096` 项，路径 `1 .. 4096 B`） |
 | `--dry-run` | 否 | `false` | 仅做冲突检测与容量估算，不修改目标盘状态 |
-| `-f`, `--force` | 否 | `false` | 跳过本地 `/proc/self/mountinfo` 挂载冲突预检 |
-| `--size <size>` | 否 | — | 合并同时显式扩容目标盘 |
+| `-f`, `--force` | 否 | `false` | 跳过本地 `/proc/self/mountinfo` 读写挂载预检并向服务端请求强制合入 |
+| `--size <size>` | 否 | - | 合并同时显式扩容目标盘 |
 | `-q`, `--quiet` | 否 | `false` | 合并成功后仅输出目标盘 ID（冲突时仍退出 `1`） |
 | `--json` | 否 | `false` | 输出 `merge` 结构化 JSON |
 
@@ -244,7 +244,8 @@ bowl <command> [flags] [arguments]
 | `-f`, `--foreground` | `false` | 前台运行，直接响应 `SIGINT` / `SIGTERM` 退出 |
 | `--log-file <path>` | `/var/log/bowl/mount-<disk-id>.log`（无权限回退 `$XDG_STATE_HOME/bowl/logs/` 或 `~/.local/state/bowl/logs/`） | 仅后台守护模式生效；与 `-f` 同时传入会报参数错误（退出 `2`） |
 | `--allow-other` | `false` | 允许非挂载用户访问挂载点（需 `/etc/fuse.conf` 开启 `user_allow_other`） |
-| `--ro` | `false` | 只读挂载（`epoch = 0`，允许多节点并发挂载） |
+| `--ro` | `false` | 无状态只读挂载（`epoch = 0`，不占用写租约，允许多节点并发挂载，不可与 `--force` 同时传入） |
+| `--force` | `false` | 强制抢占当前持有未过期写租约的在线读写挂载，递增 `WriterEpoch` 并使旧写者失租约自动下线（不可与 `--ro` 同时传入，无 `-f` 短标志） |
 | `--direct-io` | `false` | 强制 FUSE 绕过内核页缓存直通存储服务 |
 | `--debug` | `false` | 开启 `go-fuse` 底层协议调试日志 |
 | `--admin-addr <host:port\|off>` | `$BOWL_ADMIN_ADDR` / `$OBS_ADMIN_ADDR` / `127.0.0.1:0` | 本地回环 HTTP 管理端口；设 `"off"` 完全关闭管理端口 |
@@ -274,7 +275,7 @@ bowl <command> [flags] [arguments]
 | :--- | :--- | :--- |
 | **`0`** | 成功 | 命令正常执行完毕；`--help` / `version`；`merge --dry-run` 且冲突数为 `0` |
 | **`1`** | 运行时 / 业务错误 | RPC 超时或网络不可达；服务端返回配额超限 / `EBUSY` / `ECONFLICT`（含 `merge` 冲突）；本地挂载预检失败；`delete` 用户交互取消；`mount` / `umount` / `stats` 执行失败 |
-| **`2`** | 参数或语法校验失败 | 未知命令或未知标志；缺少必填位置参数或多余参数；UUID / `--size` / `--endpoint` / `--limit` / `--admin-addr` 格式错误；互斥标志同时出现（`-q` + `--json`、`--json` + `--raw`、`-f` + `--log-file`）；在 `delete`/`diff`/`merge` 上触发服务端 `InvalidArgument` |
+| **`2`** | 参数或语法校验失败 | 未知命令或未知标志；缺少必填位置参数或多余参数；UUID / `--size` / `--endpoint` / `--limit` / `--admin-addr` 格式错误；互斥标志同时出现（`-q` + `--json`、`--json` + `--raw`、`-f` + `--log-file`、`--ro` + `--force`）；在 `delete`/`diff`/`merge` 上触发服务端 `InvalidArgument` |
 
 ## 延伸阅读
 

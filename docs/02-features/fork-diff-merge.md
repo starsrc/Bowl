@@ -69,7 +69,7 @@ flowchart LR
   - 对不可变的 `.sst`、`*.blob` 与 `packs/*.pack` 文件创建操作系统硬链接（零字节数据拷贝）；
   - 对 `CURRENT`、`MANIFEST-*`、`OPTIONS-*` 等可变元数据清单执行物理拷贝；
   - 跳过 `LOCK` 与 Pebble 事件日志文件，防止进程文件锁与日志冲突。
-- **写时隔离与独立 Epoch**：子盘打开前重置 `WriterEpoch = 0`，并独立拥有自己的 Pebble 可写层与新 `.pack` 追加流；源盘与子盘后续各自追加的数据写入新的 `.pack` 文件并修改各自的 Pebble 键值，共享的旧 `.pack` 硬链接永远只读不可变，实现彻底的写时隔离。
+- **写时隔离与独立 Epoch**：子盘打开前重置 `WriterEpoch = 0` 与 `WriterExpiresAt = 0`（不继承源盘写租约），并独立拥有自己的 Pebble 可写层与新 `.pack` 追加流；源盘与子盘后续各自追加的数据写入新的 `.pack` 文件并修改各自的 Pebble 键值，共享的旧 `.pack` 硬链接永远只读不可变，实现彻底的写时隔离。
 - **PostgreSQL 事务推进**：`SQLStore.ForkDisk` 在 `disk_lineages` 锁保护下，将源盘新固化快照 `newCommitID` 插入 `disk_commits`（继承源盘原 `base_commit_id` 作为父提交），同步将源盘与新建子盘的 `base_commit_id` 共同指向该共享切面 `newCommitID`。
 
 ---
@@ -114,9 +114,9 @@ flowchart LR
 
 | 执行模式 | 挂载门禁行为 | 状态变更 |
 | :--- | :--- | :--- |
-| `dry_run = true` | **不检查挂载门禁**，完全基于快照在只读视图中演练合并 | 不修改目标盘、不提交新 Commit、不递增 `WriterEpoch`；若存在未决冲突，返回 `MergeResponse{merged: false, conflicts, summary}`（注：gRPC 状态码为正常返回而非错误） |
-| `dry_run = false`（`force = false`） | 控制面通过 `checkMergeMountGate` 校验：目标盘不得有任何未过期挂载租约（无论是读写还是只读）；源盘不得有未过期读写挂载租约（允许源盘只读挂载）。违反任一条件立即拒绝并返回 `Aborted`（`ErrorInfo{Reason: "EBUSY"}`） | 通过门禁且无未决冲突后原子替换目标盘存储实例并推进 DAG |
-| `dry_run = false`（`force = true`） | 跳过 `checkMergeMountGate` 检查，直接进入两阶段提交流程 | 提交切换后强制调用 `clearDiskMounts(targetDiskID)` 撤销目标盘所有残留租约，并递增 `WriterEpoch` 隔离旧写者 |
+| `dry_run = true` | 不检查挂载门禁，完全基于快照在只读视图中演练合并 | 不修改目标盘、不提交新 Commit、不递增 `WriterEpoch`；若存在未决冲突，返回 `MergeConflictReport`（gRPC 状态码正常返回） |
+| `dry_run = false`（`force = false`） | 控制面通过 `checkMergeMountGate` 校验：目标盘与源盘均不得持有未过期活跃写租约（`HasActiveWriterLease`），只读挂载不阻塞合并。任一盘存在活跃读写挂载则拒绝并返回 `Aborted`（`ErrorInfo{Reason: "EBUSY"}`） | 通过门禁且无未决冲突后原子替换目标盘存储实例并推进 DAG |
+| `dry_run = false`（`force = true`） | 跳过 `checkMergeMountGate` 检查，直接进入两阶段提交流程 | Phase 2 预设 `WriterEpoch = ExpectedWriterEpoch + 1` 并把 `WriterExpiresAt` 归零，重新打开目标盘后立即隔离原读写挂载体，旧写者续期与写入触发自动下线 |
 
 > [!IMPORTANT]
 > 在正式合并（`dry_run = false`）时，一旦存在任何无法自动解决的冲突（裁决策略为 `MERGE_STRATEGY_FAIL`），服务端在 `services/storage/internal/server/handler_merge_diff.go` 返回 Connect/gRPC `codes.Aborted`，并在错误详情中同时附带 `ErrorInfo{Reason: "ECONFLICT"}` 与完整 `MergeConflictReport`（冲突样本上限 `MaxMergeConflictSamples = 200`）。
@@ -159,13 +159,13 @@ flowchart LR
    - 调用 `store.MergeTrees` 在临时暂存目录 `&lt;storage_root&gt;/disks/&lt;target_disk_id&gt;.merge.&lt;merge_commit_id&gt;` 生成完整合并树：
      - 处理 `PackID` 跨盘冲突（通过 `os.SameFile` 判定同血缘共享包还是物理分歧包，若发生号段碰撞或与非同源包撞号则通过血缘号段分配器重映射新 `PackID`）；
      - 清理目标盘残余孤儿节点与死节点，重算目录 `Nlink = 2 + liveSubdirs` 与逻辑用量账本 `BranchStat`；
-     - 在暂存树中将 `WriterEpoch` 预设为 `ExpectedWriterEpoch + 1`，执行 `Flush` 与 `syncDirPath` 落盘。
+     - 在暂存树中将 `WriterEpoch` 预设为 `ExpectedWriterEpoch + 1` 且将 `WriterExpiresAt` 置 `0`，执行 `Flush` 与 `syncDirPath` 落盘。
    - 固化合并前源盘基准快照至 `&lt;storage_root&gt;/commits/&lt;src_commit_id&gt;`，同步写入标记文件 `.srccommit.&lt;merge_commit_id&gt;.&lt;src_commit_id&gt;` 与正式合并提交快照 `&lt;storage_root&gt;/commits/&lt;merge_commit_id&gt;`。
 2. **Phase 2（短停顿 CAS 验证与原子切换）**：
    - 按 `disk_id` 字典序锁定源/目标盘对（`lockDiskPair` 防死锁），检查挂载门禁，随后关闭目标盘 `StoreActor`；
    - **CAS 校验**：核对目标盘停顿前实时 `(WriterEpoch, NextWriteSeq)` 与 Phase 1 读取基线严格一致（否则返回 `ErrConcurrentMerge` -&gt; `Aborted`/`EBUSY`）；
    - **PostgreSQL 事务提交**：`SQLStore.MergeDisk` 校验目标盘 `base_commit_id` 与合并计划起始值一致（否则返回 `ErrStaleBaseCommit` -&gt; `Aborted`/`EBUSY`），写入 `disk_commits` 新节点（`parent_commit_id = old_target_base`、`merge_parent_commit_id = src_commit_id`）并更新目标盘 `base_commit_id = merge_commit_id`；
-   - **物理目录原子替换**：`os.Rename(tgtDir, oldDir)` -&gt; `os.Rename(stagingDir, tgtDir)` -&gt; `syncDirPath`，随后重新打开目标盘 `StoreActor`（`WriterEpoch` 已递增，自动隔离任何旧会话写者），清理 `oldDir` 与 `.srccommit` 标记，若指定 `force = true` 则清空目标盘挂载租约。
+   - **物理目录原子替换**：`os.Rename(tgtDir, oldDir)` -&gt; `os.Rename(stagingDir, tgtDir)` -&gt; `syncDirPath`，随后重新打开目标盘 `StoreActor`（`WriterEpoch` 已递增且 `WriterExpiresAt = 0`，自动隔离任何旧会话写者），清理 `oldDir` 与 `.srccommit` 标记。
 3. **崩溃自动对账（`reconcilePendingMergeLocked`）**：
    - 若服务端在目录切换阶段发生宕机，下次控制面启动、打开盘或执行删除前会扫描 `*.merge.*`、`*.old.*` 与 `*.srccommit.*` 残留；
    - 判定逻辑为 `shouldRollForward = (row.BaseCommitID == cid) || (tgtMissing &amp;&amp; stagingExists &amp;&amp; oldExists)`：由于 `oldDir` 仅在 PostgreSQL 事务成功提交后创建，满足前滚条件则继续完成目录重命名激活新树；否则将 `oldDir` 恢复为 `tgtDir` 并安全清理未提交的暂存与提交目录。

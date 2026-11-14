@@ -352,21 +352,21 @@ RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXA
 
 MountDisk 执行单盘挂载握手。
 
-可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
+可写挂载 (read_only = false) 获取或抢占单写者租约、推进 WriterEpoch 并清理残留孤儿节点，返回新世代号、租约 TTL 与根 Inode。
 
-只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
+只读挂载 (read_only = true) 无状态校验目标磁盘存在，返回 epoch = 0、lease_ttl_seconds = 0 与根 Inode。
 
 #### RenewMount
 
 - **请求**: [RenewMountRequest](#renewmountrequest)　|　**响应**: [RenewMountResponse](#renewmountresponse)　|　**模式**: 一元调用 (Unary)
 
-RenewMount 为已建立的在线挂载软租约执行周期续期。
+RenewMount 为已持有的读写挂载写租约执行周期续期。
 
 #### UnmountDisk
 
 - **请求**: [UnmountDiskRequest](#unmountdiskrequest)　|　**响应**: [UnmountDiskResponse](#unmountdiskresponse)　|　**模式**: 一元调用 (Unary)
 
-UnmountDisk 幂等释放指定的在线挂载软租约。
+UnmountDisk 幂等释放匹配写世代的读写挂载写租约。
 
 #### CreateDisk
 
@@ -1026,10 +1026,15 @@ RemoveXattrResponse 定义 RemoveXattr 接口响应结果。
 
 MountDiskRequest 定义 MountDisk 接口输入参数。
 
+**消息级校验规则（protovalidate）：**
+
+- CEL `mount_disk_force_requires_rw`: `!this.read_only || !this.force`（force cannot be true when read_only is true）
+
 | 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `disk_id` | `string` | singular | CEL `mount_disk.disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | — |
-| 2 | `read_only` | `bool` | singular | — | — |
+| 1 | `disk_id` | `string` | singular | CEL `mount_disk.disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | 目标磁盘唯一标识符（UUID 格式）。 |
+| 2 | `read_only` | `bool` | singular | — | 是否以只读模式挂载（true 时无状态且不递增写世代，返回 epoch = 0）。 |
+| 3 | `force` | `bool` | singular | — | 是否强制抢占当前持有未过期写租约的在线读写挂载（仅允许在 read_only = false 时设为 true）。 |
 
 ### MountDiskResponse
 
@@ -1041,23 +1046,16 @@ MountDiskResponse 定义 MountDisk 接口输出参数。
 | 2 | `root_inode` | [Inode](#inode) | singular | — | — |
 | 3 | `entry_timeout_seconds` | `double` | singular | — | — |
 | 4 | `attr_timeout_seconds` | `double` | singular | — | — |
-| 5 | `mount_id` | `string` | singular | — | 本次在线挂载实例的唯一标识符（UUID 格式）。 |
-| 6 | `lease_ttl_seconds` | `uint32` | singular | — | 在线挂载软租约的有效时长（秒）。 |
+| 5 | `lease_ttl_seconds` | `uint32` | singular | — | 读写租约的有效时长（秒；只读挂载返回 0）。 |
 
 ### RenewMountRequest
 
 RenewMountRequest 定义 RenewMount 接口输入参数。
 
-**消息级校验规则（protovalidate）：**
-
-- CEL `renew_mount_epoch_matches_mode`: `this.read_only ? this.epoch == 0u : this.epoch > 0u`（epoch must be 0 when read_only is true, and &gt; 0 when read_only is false）
-
 | 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `disk_id` | `string` | singular | CEL `renew_mount_disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。 |
-| 2 | `mount_id` | `string` | singular | CEL `renew_mount_mount_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（mount_id must not be nil UUID）<br>`string`: `uuid=true` | 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。 |
-| 3 | `read_only` | `bool` | singular | — | 是否为只读挂载。 |
-| 4 | `epoch` | `uint64` | singular | `uint64`: `lte=9223372036854775807` | 写挂载世代号（只读挂载必须为 0；可写挂载必须大于 0 且在 int64 正数范围内）。 |
+| 2 | `epoch` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | 当前读写挂载持有的写世代号（必须大于 0 且在 int64 正数范围内）。 |
 
 ### RenewMountResponse
 
@@ -1065,7 +1063,7 @@ RenewMountResponse 定义 RenewMount 接口输出参数。
 
 | 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `lease_ttl_seconds` | `uint32` | singular | — | 续期后的在线挂载软租约有效时长（秒）。 |
+| 1 | `lease_ttl_seconds` | `uint32` | singular | — | 续期后的在线写租约有效时长（秒）。 |
 
 ### UnmountDiskRequest
 
@@ -1074,7 +1072,7 @@ UnmountDiskRequest 定义 UnmountDisk 接口输入参数。
 | 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `disk_id` | `string` | singular | CEL `unmount_disk_disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。 |
-| 2 | `mount_id` | `string` | singular | CEL `unmount_disk_mount_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（mount_id must not be nil UUID）<br>`string`: `uuid=true` | 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。 |
+| 2 | `epoch` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | 待释放读写挂载持有的写世代号（必须大于 0 且在 int64 正数范围内）。 |
 
 ### UnmountDiskResponse
 
@@ -1398,7 +1396,7 @@ MergeDiskRequest 定义 MergeDisk 接口输入参数。
 | 4 | `path_strategies` | map&lt;`string`, [MergeStrategy](#mergestrategy)&gt; | map | `map`: `max_pairs=4096`, Key: CEL `merge_disk_path_strategies_key_no_nul`: `!this.contains('\x00')`（path_strategies key cannot contain NUL byte）; `string`: `minLen=1`, `maxLen=4096`, Value: `enum`: `definedOnly=true`, `notIn=[0]` | 按路径前缀或精确路径覆盖的冲突解决策略映射。 |
 | 5 | `dry_run` | `bool` | singular | — | 是否仅执行预演检查而不实际提交合并结果。 |
 | 6 | `max_bytes` | `uint64` | optional | `uint64`: `lte=9223372036854775807`, `gt=0` | 可选的合并后目标盘容量配额上限字节数（指定时必须在 int64 正数区间内）。 |
-| 7 | `force` | `bool` | singular | — | 是否忽略在线挂载软租约门禁强制执行合并。 |
+| 7 | `force` | `bool` | singular | — | 是否忽略在线挂载写租约门禁强制执行合并。 |
 
 ### MergeDiskResponse
 

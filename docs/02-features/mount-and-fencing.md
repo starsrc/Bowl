@@ -1,23 +1,22 @@
 # 挂载租约与写栅栏
 
-Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块虚拟磁盘可以并发承载任意数量的只读挂载（`--ro`）以及**至多一个有效读写写者**。通过单调递增的 `WriterEpoch` 硬栅栏与 `MountLease` 软租约协同，系统在不引入分布式锁服务的前提下，既能瞬间隔离脑裂僵尸写者，又能为三路合并等控制面变更提供安全门禁。
+Bowl 采用单盘单写多读（SWMR）挂载模型。同一时刻同一块虚拟磁盘可以并发承载任意数量的只读挂载（`--ro`），并至多允许一个持有有效写租约的读写写者。服务端通过 Pebble 持久化的 `WriterEpoch`（单调递增写世代）与 `WriterExpiresAt`（UTC 纳秒级租约到期时间）协同防护，在不引入外部分布式锁的前提下完成写者互斥、显式抢占与断网/脑裂自动下线。
 
 ---
 
 ## 读写挂载与只读挂载握手（`MountDisk`）
 
-客户端在挂载 FUSE 前，先通过 `client/internal/cli/mount.go` 中的 `mountHandshake` 向服务端发起单次 `MountDiskRequest{disk_id, read_only}` 调用；服务端处理逻辑位于 `services/storage/internal/control/control.go` 与 `mount_lease.go`。
+客户端在挂载 FUSE 前，先通过 `client/internal/cli/mount.go` 中的 `mountHandshake` 向服务端发起单次 `MountDiskRequest{disk_id, read_only, force}` 调用。若 CLI 同时传入 `--ro` 与 `--force`，`executeMount` 会在派生后台守护进程前直接以退出码 `2` 拒绝；协议层同样通过 CEL 规则 `!this.read_only || !this.force` 强制拦截。
 
 ### 握手分支行为对比
 
 | 维度 | 只读挂载（`read_only = true`） | 读写挂载（`read_only = false`） |
 | :--- | :--- | :--- |
-| 引擎状态推进 | **只读探测**根目录 `RootIno = 1`，**不推进** `WriterEpoch` | 调用 `StoreActor.AdvanceEpoch`，原子递增 `WriterEpoch` 并 `pebble.Sync` 落盘 |
-| 返回 `epoch` 值 | 固定返回 `0` | 返回递增后的新 `WriterEpoch`（必为 `&gt;= 1`） |
-| 孤儿节点清理 | **不触发**孤儿清理 | **同步触发** `planCleanOrphans`，彻底清除上任写者崩溃残留的 `orphan:&lt;ino&gt;` 节点并扣减逻辑用量 |
-| 租约淘汰策略 | 登记只读租约，与已有 RW / RO 租约共存 | 登记新 RW 租约，并立即淘汰内存中所有 `lease.epoch &lt; epoch` 的旧 RW 租约（**保留 RO 租约**） |
-| 服务端/客户端写保护 | 客户端在 `BuildMountOptions` 传入 `ro`，并在 FUSE 层 `CheckWritable()` 直接拦截返回 `EROFS` | 所有写类 RPC（`Create`、`Write`、`Unlink`、`Rename`、`SetAttr`、`Fallocate`、`SetXattr`、`RemoveXattr`、`Fsync`、`FsyncDir`、`ReclaimOrphan` 等）必须携带当前 `epoch` |
-| 共用响应参数 | 均颁发 UUIDv7 `mount_id`、`lease_ttl_seconds`（默认 `30s`）、`root_inode`、`entry_timeout_seconds` 及 `attr_timeout_seconds` | 同左 |
+| 控制面与 Pebble 状态 | 无状态只读探测根目录 `RootIno = 1`，不写入 Pebble，不递增 `WriterEpoch` | 持盘锁调用 `StoreActor.AcquireWriterLease(ctx, ttl, force)`，原子递增 `WriterEpoch`、写入 `WriterExpiresAt = now.UTC().Add(ttl).UnixNano()` 并执行 `pebble.Sync` 落盘 |
+| 活跃写者互斥与抢占 | 不受写租约阻塞，与已有 RW 或 RO 挂载并发共存 | 若盘内存在未过期写租约（`WriterEpoch > 0 && nowNano < WriterExpiresAt`）且 `force = false`，返回 `ErrDiskMounted`（`CodeAborted`，`Reason: "EBUSY"`）；传入 `--force` 或原租约已过期时零等待接管 |
+| 返回 `epoch` 与租约 | 固定返回 `epoch = 0`、`lease_ttl_seconds = 0` | 返回递增后的 `epoch`（`>= 1`）与 `lease_ttl_seconds`（默认 `30s`）；客户端校验二者均大于 `0` |
+| 孤儿节点清理 | 不触发孤儿清理 | 同步触发 `planCleanOrphans`，清除上任写者崩溃残留的 `orphan:<ino>` 节点并归还逻辑用量 |
+| 客户端写保护与生命周期 | 内核挂载带 `ro` 标志且 `CheckWritable()` 直接返回 `EROFS`；完全跳过 `RenewMount` 与 `UnmountDisk` | 写入类 RPC 携带当前 `epoch`；后台按 `TTL/3` 续期，失租约时自动触发卸载并跳过 `UnmountDisk` |
 
 ### 客户端 FUSE 内核能力协商
 
@@ -27,94 +26,93 @@ Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块�
 - **禁用 `CAP_WRITEBACK_CACHE | CAP_AUTO_INVAL_DATA`**：
   - 禁用 `CAP_WRITEBACK_CACHE` 以维持 1 MiB 写直通（或客户端 `WriteBehind` 顺序缓冲）语义，避免内核 4 KiB 脏页碎块回写与写前尺寸核对。
   - 禁用 `CAP_AUTO_INVAL_DATA`：因 SWMR 保证了同一挂载视图内无第三方并发写入，而服务端 Go 时钟与宿主机内核 `i_mtime` 存在毫秒级时钟偏差，禁止内核因 `mtime` 不等而误清整文件页缓存（文件长度变化仍由内核 `fuse_change_attributes` 自动淘汰越界页）。
+- **只读直挂显式传递 `MS_RDONLY`**：`BuildMountOptions` 在 `DirectMount` 模式下除追加挂载选项 `ro` 外，同时在 `DirectMountFlags` 设置 `MS_NOSUID | MS_NODEV | MS_RDONLY`，确保内核 VFS 挂点拒绝写操作且 `/proc/self/mountinfo` VFS 选项准确呈现 `ro`。
 
 ---
 
-## 单写者 `WriterEpoch` 栅栏状态机
+## Pebble 持久化租约与 `WriterEpoch` 状态机
 
-`WriterEpoch` 是持久在单盘 Pebble `sys:stat` 中的 `uint64` 单调递增写世代计数器，由任何一次新的读写 `MountDisk` 或正式 `MergeDisk` 提交原子推高。只要新写者完成握手，任何持有旧 `Epoch` 的客户端即刻失去写权限，成为必须被隔离的“僵尸写者（Zombie Writer）”。
+`WriterEpoch`（`uint64`）与 `WriterExpiresAt`（`int64`，UTC UnixNano，`0` 表示无活跃写租约）共同编码在单盘 Pebble `sys:stat` 的 49 字节定长结构 `BranchStat` 中。Storage 服务重启后无需依赖内存表重建：控制面打开 `StoreActor` 时即从 Pebble 恢复权威租约水位，直接对后续非强制 `MountDisk`、写入 RPC 与 `MergeDisk` 生效。
 
-### 栅栏拦截链路
+### 写路径世代与租约双重栅栏
 
-服务端通过三道防线对僵尸写者实施零宽容栅栏：
+服务端对所有 16 个外部写与刷盘类 RPC 实施严格检查：
 
-1. **RPC 入口守卫（`validateWriteEpoch`）**：位于 `services/storage/internal/server/`，拒绝 `epoch == 0` 或 `&gt; MaxInt64` 的非法写请求（返回 `InvalidArgument`）。
-2. **Actor 无锁快筛（`isDefinitelyStaleEpoch`）**：位于 `services/storage/internal/store/actor.go`，通过原子变量 `atomicWriterEpoch`（且无在途 `pendingEpochAdvances`）快速判定 `epoch != currentEpoch` 并立即拦截返回 `store.ErrStaleEpoch`。
-3. **写循环 Phase A 严格校验**：即使请求在世代切换并发窗口进入排队队列，单协程写循环 `validateCmd` 在 Phase A 阶段再次核对 `cmd.epoch == s.stat.WriterEpoch`，不相等绝不触碰 Pebble `Batch`。
+1. **RPC 入口守卫（`validateWriteEpoch`）**：位于 `services/storage/internal/server/`，拒绝 `epoch <= 0` 或 `epoch > MaxInt64` 的非法写请求（返回 `InvalidArgument`）。
+2. **写循环 Phase A 严格校验（`StoreActor.validateCmd`）**：位于 `services/storage/internal/store/actor.go`。当 `s.stat.WriterEpoch > 0` 时，必须同时满足 `cmd.epoch == s.stat.WriterEpoch` 且 `nowNano < s.stat.WriterExpiresAt`；任一条件不满足立即拦截并返回 `store.ErrStaleEpoch`。
+3. **无锁只读快照与原子协调**：`StoreActor` 维护原子快照 `atomic.Pointer[writerLeaseSnapshot]` 与在途更新计数 `pendingLeaseUpdates`，保障并发读写或跨租约切换边界的一致性判定。
 4. **错误语义还原**：`store.ErrStaleEpoch` 经 `services/storage/internal/control/status.go` 映射为 gRPC `codes.FailedPrecondition` + `ErrorInfo{Reason: "EBUSY", Domain: "bowl.storage"}`；客户端 `rpc.MapError` 精确还原为 Linux `syscall.EBUSY`。
 
-### 新写挂载抢占与僵尸隔离时序
+### `--force` 抢占与旧写者自动下线时序
 
 ```mermaid
 sequenceDiagram
     participant A as "客户端 A (旧写者, epoch=1)"
-    participant B as "客户端 B (新写者)"
+    participant B as "客户端 B (新写者, --force)"
     participant S as "Storage 控制面与 StoreActor"
 
-    Note over A,S: "客户端 A 之前发生异常断连，盘内存在孤儿节点 orphan:42"
-    B->>S: "MountDisk(disk_id, read_only=false)"
-    S->>S: "AdvanceEpoch(): WriterEpoch 1 -> 2 (pebble.Sync)"
-    S->>S: "planCleanOrphans(): 清理 orphan:42 并扣减用量"
-    S->>S: "淘汰所有 epoch < 2 的旧 RW 租约，签发新 mount_id"
-    S-->>B: "返回 epoch=2, mount_id, root_inode"
+    Note over A,S: "客户端 A 原持有效写租约 (epoch=1, now < WriterExpiresAt)"
+    B->>S: "MountDisk(disk_id, read_only=false, force=true)"
+    S->>S: "AcquireWriterLease(): WriterEpoch 1 -> 2, 更新 WriterExpiresAt (pebble.Sync)"
+    S->>S: "planCleanOrphans(): 清理残留孤儿并扣减用量"
+    S-->>B: "返回 epoch=2, lease_ttl_seconds=30, root_inode"
 
     par "并发行为"
         B->>S: "Write(ino=10, epoch=2, data=...)"
         S-->>B: "OK (写入落盘)"
-    and "僵尸写者复苏尝试"
+    and "旧写者被隔离并自动下线"
         A->>S: "Write(ino=10, epoch=1, data=...)"
-        S->>S: "isDefinitelyStaleEpoch / Phase A: 1 != 2"
+        S->>S: "validateCmd: 1 != 2"
         S-->>A: "FailedPrecondition (Reason: EBUSY)"
-        A->>A: "映射为 syscall.EBUSY 返回应用"
-        A->>S: "RenewMount(mount_id_A, epoch=1)"
+        A-->>A: "返回 syscall.EBUSY 给应用"
+        A->>S: "RenewMount(disk_id, epoch=1)"
         S-->>A: "FailedPrecondition (Reason: EBUSY)"
-        A->>A: "收到 FailedPrecondition，停止续期协程"
+        A->>A: "标记 leaseLost, 取消 serveCtx 并回退懒卸载"
+        A->>A: "OnUnmount 跳过远端 Fsync 与多余 UnmountDisk"
     end
 ```
 
 ---
 
-## `MountLease` 软租约、续期与幂等卸载
+## 写租约续期、短重试与失租约自动卸载
 
-`MountLease` 是存储控制面内存中的挂载会话登记表（`activeMounts`），不落盘持久化，专门用于在运行时感知活跃客户挂载状态并作为控制面危险变更（如 `MergeDisk`）的门禁依据。
+### 续期心跳与可恢复短重试（`RenewMount`）
 
-### 租约数据结构与心跳续期（`RenewMount`）
+`RenewMountRequest{disk_id, epoch}` 仅作用于读写挂载（只读挂载从不启动续期协程）：
 
-- **数据结构**：每条租约记录包含 `{readOnly bool, epoch uint64, expiresAt time.Time}`，键为 `mount_id`（UUIDv7）。默认租约存活期 `DefaultMountLeaseTTL = 30s`。
-- **客户端心跳策略**：`startMountLeaseRenewer` 在挂载成功后启动后台协程，按 `max(1s, lease_ttl_seconds / 3)` 间隔（默认 `10s`）周期调用 `RenewMount`（单次 RPC 超时 `mountRenewRPCTimeout = 5s`）。若服务端响应调整了 `lease_ttl_seconds`，客户端动态重设心跳定时器。
-- **服务端校验规则（`control.RenewMount`）**：
-  - 磁盘不存在或已销毁 -&gt; 返回 `NotFound`；
-  - `read_only = true` -&gt; 要求 `epoch == 0`（否则 `InvalidArgument`）；
-  - `read_only = false` -&gt; 要求 `epoch &gt; 0` 且严格等于当前 `actor.WriterEpoch()`，否则返回 `ErrStaleEpoch`（`FailedPrecondition` / `EBUSY`）。
-  - 客户端一旦收到 `FailedPrecondition` 或 `NotFound`，立即打印 `mount_lease_renew_stopped` 告警并终止续期协程。
-- **服务端重启后的透明重建（Rebuild）**：Storage 进程重启会清空内存 `activeMounts`；只要重连上来的客户端所持 `mount_id` 对应合法磁盘，且 RW 挂载的 `epoch` 依然等于当前盘 `actor.WriterEpoch()`（或为 RO 挂载），`RenewMount` 会自动重新写入一条有效期为 `now + TTL` 的 `mountLease`，无需客户端重新挂载。
+- **正常续期间隔**：`startMountLeaseRenewer` 启动后台协程，按 `max(1s, lease_ttl_seconds / 3)` 间隔（默认 TTL 为 `30s`，间隔为 `10s`）调用 `RenewMount`，单次 RPC 超时 `mountRenewRPCTimeout = 5s`。
+- **可恢复抖动短重试**：遇到 `Unavailable`、超时等非终态错误时，不等待完整 `10s` 周期，而是按 `min(2s, normalInterval)`（即 `2s`）调度下一次续期，避免在 `30s` 租约窗口内错失重试机会。
+- **服务端原子续期（`RenewWriterLease`）**：校验 `epoch > 0`、`epoch == s.stat.WriterEpoch` 且 `nowNano < s.stat.WriterExpiresAt`，成功后刷新 `WriterExpiresAt = now.UTC().Add(ttl).UnixNano()` 并执行 `pebble.Sync`，不递增 `WriterEpoch` 或 `NextWriteSeq`。
+- **终态失败触发自动下线**：若 `RenewMount` 收到 `FailedPrecondition`（世代已被抢占、合并推进或租约已过期）或 `NotFound`（盘已删除），客户端打印 `mount_lease_renew_stopped` 日志，设置 `leaseLost = true`、调用 `rawFS.MarkLeaseLost()` 并取消 `serveCtx`，主动启动自愈卸载流程。
 
-### 租约过期行为与软状态边界
+### 租约边界行为矩阵
 
-`MountLease` 的核心职责是服务控制面挂载门禁，其过期与隔离语义具有明确边界：
-
-| 场景 | 行为与结果 | 说明 |
+| 场景 | 服务端行为 | 客户端行为 |
 | :--- | :--- | :--- |
-| 心跳超时租约过期（`now &gt; expiresAt`） | 控制面忽略或惰性剔除过期条目，`checkMergeMountGate` 不再视其为活跃挂载 | **不会自动递增 `WriterEpoch`** |
-| 过期后旧客户端恢复网络继续发送 `Write` | 若期间无新 RW 挂载或 `MergeDisk` 发生（`WriterEpoch` 未变），写请求依然可以通过 Epoch 校验，且下次 `RenewMount` 可重建租约 | 一旦期间发生了 `MergeDisk` 或新 RW 挂载，旧客户端的 `WriterEpoch` 失效并即刻被 `EBUSY` 拦截 |
-| `MergeDisk` 门禁检查（`force = false`） | 存在任何未过期目标盘租约（RW 或 RO），或存在未过期源盘 RW 租约时，拒绝合并并返回 `Aborted`（`Reason: "EBUSY"`） | 源盘只读挂载不阻塞合并 |
+| 存在未过期写租约时非强制 RW 挂载 | `AcquireWriterLease` 返回 `ErrWriterLeaseActive`，映射为 `Aborted`（`Reason: "EBUSY"`） | 通过 `singleLineError` 输出单行报错并提示先卸载或使用 `--force` |
+| 租约自然过期（`nowNano >= WriterExpiresAt`） | `HasActiveWriterLease` 返回 `false`；旧客户端后续写与 `RenewMount` 均被 `ErrStaleEpoch` 拦截；任意新非强制 RW 挂载与 `MergeDisk` 可直接接管 | 旧客户端续期收到 `FailedPrecondition` 后自动卸载退出 |
+| 客户端断网重连但租约尚未过期 | `WriterEpoch` 与 `WriterExpiresAt` 持久在 Pebble；Storage 重启也不丢失租约态，客户端 `RenewMount` 直接成功续期 | `2s` 短重试自动恢复租约，挂载点业务零感知 |
+| `MergeDisk` 门禁检查（`force = false`） | `checkMergeMountGate` 检查源盘与目标盘的 `HasActiveWriterLease`，仅活跃读写租约会触发 `EBUSY` 拦截；并发 `--ro` 挂载不阻塞合并 | `bowl disk merge` 本机 `preRPC` 同步放行 `--ro` 挂载，仅拦截本机读写挂载 |
 
-### `UnmountDisk` 幂等释放与客户端优雅退出
+### 信号竞争防护、懒卸载回退与优雅退出
 
-当本地 FUSE 接收到 `SIGINT` / `SIGTERM` 或外部执行 `umount` 触发退出时，客户端按严格逆序关闭各子系统：
+当 `SIGINT`/`SIGTERM`、外部 `umount` 或 `serveCtx` 租约失活触发下线时，客户端按以下机制避免僵尸挂载与元数据误删：
 
-1. **排空在途 FUSE 请求与本地脏数据（`RawFS.OnUnmount`）**：
-   - 关闭本地文件锁表 `LockTable.Close()`，中断阻塞等待中的 `SetLkw`；
-   - 获取 `lifecycleMu` 排他锁等待所有在途 FUSE 调用完成；
-   - 排空 `WriteBehind` 异步写队列，并对所有 `dirtyInodes` 逐一发起同步 `Fsync` 落盘；
-   - 清理本地句柄、缓存、临时匿名文件与预读表，排空 `ReclaimOrphan` 异步重试队列（上限 `2s` 等待）。
-2. **发送 `UnmountDisk` 释放租约**：`defaultServeFUSE` 退出阻塞后，调用 `unmountMountLease`（采用独立的 `context.Background()` 与 `3s` 超时预算，防止因进程退出主上下文取消而漏发 RPC），随后清除本地挂载元信息文件。
-3. **服务端幂等删除**：`control.UnmountDisk` 从 `activeMounts` 中删除 `(disk_id, mount_id)` 对应的租约；若磁盘已删除、租约早已过期或重复调用 `UnmountDisk`，均视为幂等成功直接返回 `UnmountDiskResponse{}`。
+1. **前置信号注册与防卡死循环（`serveFUSEWithServer`）**：在 `fuse.NewServer` 之后、`server.WaitMount()` 之前注册 `signal.Notify`，并在挂载整个生命周期内持续监听信号（`ctxDone` 触发后将其置为 `nil` 并保持对后续信号的响应），防止在挂载瞬间被抢占或连续收到信号时卡死。
+2. **忙挂载懒卸载回退（`unmountServerWithLazyFallback`）**：优先调用 `server.Unmount()`；若因工作目录或打开句柄占用导致常规卸载失败，自动回退执行 `findUmountCommand(mountpoint, true)`（`fusermount3 -uz` / `fusermount -uz` / `umount -l`），立即将挂载点从 `/proc/self/mountinfo` 剥离。
+3. **失租约快速排空（`RawFS.OnUnmount`）**：
+   - 正常卸载：关闭 `LockTable`、持 `lifecycleMu` 等待在途请求结束、在总预算 `unmountFlushTimeout = 5s` 内排空 `WriteBehind` 并对存活 `dirtyInodes` 执行 `Fsync`，随后排空 `ReclaimOrphan` 重试队列。
+   - 断网或失租约卸载：当 `fs.IsLeaseLost()` 为真、脏节点 `Fsync` 收到 `FailedPrecondition`/`NotFound`、或耗尽 `5s` 总超时预算时，立即跳过或中止远端 `WriteBehind` / `Fsync` / `ReclaimOrphan` 循环，避免逐节点串行干等 30 秒超时。
+4. **条件释放租约与安全清理元信息（`UnmountDisk`）**：
+   - 若因租约失活主动下线（`leaseLost == true`）或为只读挂载（`Epoch == 0`），客户端跳过多余的 `UnmountDisk` RPC。
+   - 正常读写卸载调用 `unmountMountLease`（`UnmountDiskRequest{disk_id, epoch}`，独立 `3s` 超时），服务端 `ReleaseWriterLease` 幂等将匹配世代的 `WriterExpiresAt` 清零（保持 `WriterEpoch` 单调不回退）。
+   - 删除本地 `mountMeta` 文件前严格核对 `readMountMetaPID(metaPath) == os.Getpid()`，确保旧守护进程因忙挂载延迟退出时，不会误删同路径新挂载进程刚写入的元信息文件。
 
 ---
 
 ## 相关接口与实现参考
 
 - 挂载、续期、卸载 RPC 定义：`proto/storage/v1/storage.proto` 与 [RPC 接口契约](/03-interfaces/rpc-api)。
-- 客户端 FUSE 挂载选项与命令行参数：`client/internal/cli/mount.go` 与 [CLI 命令参考](/03-interfaces/cli-reference)。
+- 客户端守护进程与流水线细节：`client/internal/cli/mount.go`、`client/internal/fusefs/fs.go` 与 [Client 与 FUSE 流水线](/04-internals/client-fuse-pipeline)。
+- 服务端租约存储与门禁实现：`services/storage/internal/store/actor.go`、`services/storage/internal/control/mount_lease.go` 与 [Storage 控制面实现](/04-internals/storage-control-plane)。
 - `MergeDisk` 门禁与 `WriterEpoch` 切换联动：[派生、差异与三路合并](/02-features/fork-diff-merge)。

@@ -9,9 +9,9 @@
 | 路径 | 入口 | 并发模型 |
 | --- | --- | --- |
 | 读（`GetAttr`、`Read`、`ReadDir` 等） | 直接调用 `s.db.Get` / `s.db.NewIter` | **队列外无锁直读**：不入队，只持 `lifecycleMu` 读锁（`enter()`）防止 Actor 被关闭 |
-| 写（`Write`、`Create`、`Rename` 等） | `submit` → `enqueueAndWait`（`actor.go:979`、`actor.go:995`） | **双缓冲 MPSC 队列**，由单个 Actor 协程串行处理 |
+| 写（`Write`、`Create`、`Rename` 等） | `submit` → `enqueueAndWait`（`actor.go:1199`、`actor.go:1215`） | **双缓冲 MPSC 队列**，由单个 Actor 协程串行处理 |
 
-写队列在 `StoreActor.mb`（`actor.go:225-231`）：`active` 供任意 RPC 协程追加，`draining` 供 Actor 协程处理。`runLoop`（`actor.go:1102`）收到 `notify` 信号后，在持锁状态下交换两个切片（指针交换，不拷贝命令），随后无锁处理 `draining`。命令载体 `writeCmd` 由 `sync.Pool` 复用，每个命令带一个容量为 1 的 `done` 通道，调用方阻塞在 `<-cmd.done`。
+写队列在 `StoreActor.mb`（`actor.go:247-253`）：`active` 供任意 RPC 协程追加，`draining` 供 Actor 协程处理。`runLoop`（`actor.go:1322`）收到 `notify` 信号后，在持锁状态下交换两个切片（指针交换，不拷贝命令），随后无锁处理 `draining`。命令载体 `writeCmd` 由 `sync.Pool` 复用，每个命令带一个容量为 1 的 `done` 通道，调用方阻塞在 `<-cmd.done`。
 
 ```mermaid
 flowchart TD
@@ -28,7 +28,7 @@ flowchart TD
         PB --> IB["同一个 IndexedBatch"]
         IB --> SEAL["Seal: 合入 dirtyAtime / dirtyPackStats / sys:stat"]
         SEAL -->|"无 Fsync 屏障"| NOSYNC["db.Apply (pebble.NoSync)"]
-        SEAL -->|"含 Fsync 或 FsyncDir"| SYNC["commitWithSyncBarrier: WAL Sync 与 pack fdatasync"]
+        SEAL -->|"含 Fsync 或 FsyncDir"| SYNC["commitWithSyncBarrier: 先 pack fdatasync 后 WAL Sync"]
         NOSYNC --> WAKE["唤醒全部 cmd.done"]
         SYNC --> WAKE
         ERR --> WAKE
@@ -36,7 +36,7 @@ flowchart TD
     PB -.->|"BatchSet*Deferred"| PDB
 ```
 
-### 1.2 一次 Tick 的四步（`processTick`，`actor.go:1129`）
+### 1.2 一次 Tick 的四步（`processTick`，`actor.go:1349`）
 
 | 步骤 | 动作 |
 | --- | --- |
@@ -47,16 +47,16 @@ flowchart TD
 
 ### 1.3 Phase A：只读预校验
 
-`validateCmd`（`actor.go:1425`）的约束：
+`validateCmd`（`actor.go:1652`）的约束：
 
 - 只读取，不写入 `s.batch`。校验读取的是 `s.batch`（`IndexedBatch`），因此**同一 Tick 内前序命令的未提交写入对后序命令可见**，不会出现读到旧状态的竞态。
-- 所有外部写操作先比较 `cmd.epoch` 与 `s.stat.WriterEpoch`，不一致返回 `ErrStaleEpoch` 并计入世代栅栏指标。
+- 所有外部写操作先通过 `validateCmd` 比较 `cmd.epoch` 与 `s.stat.WriterEpoch`；当 `WriterEpoch > 0` 时同时校验写租约未过期（`s.stat.WriterExpiresAt > 0 && nowNano < s.stat.WriterExpiresAt`），不一致或已过期均返回 `ErrStaleEpoch` 并计入世代栅栏指标。
 - 每类操作有独立校验函数，例如 `validateWriteCmd`（`data_rw.go:346`）检查 `NextWriteSeq` 未溢出、目标是可写常规文件、配额（`checkQuota`）、并调用 `resolveWriteBlockSpecs` 从 `s.batch` 重读每个目标块的现有 `BlobRef`。
 - 失败命令只写入 `cmd.err`，其预写入 `.pack` 的块通过 `recordDeadBlobWrite` 记为死空间，不影响同批次其他命令。
 
 ### 1.4 Phase B：`SetDeferred` / `DeleteDeferred` 编码
 
-`mutateCmd`（`actor.go:1475`）在 Phase A 通过后"必定成功"：
+`mutateCmd`（`actor.go:1725`）在 Phase A 通过后"必定成功"：
 
 - 修改内存中的 `s.stat`（`LogicalBytes`、`Inodes`、`NextWriteSeq`）与 `s.packStats`。
 - 通过 `values.go` 中的 `Batch*Deferred` 函数把键值编码写入 `s.batch`：`BatchSetInodeDeferred`、`BatchSetEntryDeferred`、`BatchSetDataDeferred`、`BatchDeleteEntryDeferred` 等。"Deferred"指 `pebble.Batch.SetDeferred` / `DeleteDeferred`：先预留键值空间，再原地填充字节，免去中间缓冲拷贝。
@@ -67,20 +67,20 @@ flowchart TD
 | 场景 | 提交方式 | 含义 |
 | --- | --- | --- |
 | 普通写批次 | `db.Apply(batch, NoSync)`，并置 `walDirty=true` | 写进 WAL 缓冲，不等落盘；崩溃可能丢失最近写入 |
-| 批次含 `Fsync` / `FsyncDir`（`syncBarrier`） | `commitWithSyncBarrier`（`actor.go:1518`） | `ApplyNoSyncWait(batch, Sync)` 后，并行执行脏 `.pack` 的 `fdatasync`，再 `batch.SyncWait()`；两者都成功才算持久 |
-| 仅有屏障、无批次 | `syncBarrierWithoutBatch`（`actor.go:1559`） | `db.LogData(nil, Sync)` 加 `.pack` 同步并行 |
+| 批次含 `Fsync` / `FsyncDir`（`syncBarrier`） | `commitWithSyncBarrier`（`actor.go:1772`） | 先执行脏 `.pack` 的 `fdatasync` 落盘，再调用 `ApplyNoSyncWait(batch, pebble.Sync)` 并等待 `batch.SyncWait()` 完成 WAL 持久化；两者都成功才算持久 |
+| 仅有屏障、无批次 | `syncBarrierWithoutBatch`（`actor.go:1826`） | 先同步脏 `.pack`（若存在），再调用 `db.LogData(nil, pebble.Sync)` 同步 WAL |
 
 屏障保证"索引不先于数据落盘"：`BlobRef` 指向的 `.pack` 字节在 WAL 同步返回前已 `fdatasync`。
 
 ## 2. Pebble 键空间与值编码
 
-`NewPebbleOptions`（`actor.go:178`）自定义 `Comparer.Split = SplitKey`，使 `entry:`、`xattr:`、`data:` 的 8 字节父标识成为 Prefix Bloom 前缀，全部 7 层启用 `bloom.FilterPolicy(10)`。所有整数一律**大端序**，使字节序等于数值序，支持按前缀范围扫描。
+`NewPebbleOptions`（`actor.go:200`）自定义 `Comparer.Split = SplitKey`，使 `entry:`、`xattr:`、`data:` 的 8 字节父标识成为 Prefix Bloom 前缀，全部 7 层启用 `bloom.FilterPolicy(10)`。所有整数一律**大端序**，使字节序等于数值序，支持按前缀范围扫描。
 
 ### 2.1 七类键
 
 | 类别 | 键格式 | 键长 | 值 | 值长 | 源码 |
 | --- | --- | --- | --- | --- | --- |
-| `sys:stat` | `sys:stat` | 8 B | `BranchStat` | 41 B | `keys.go:10`、`values.go:12` |
+| `sys:stat` | `sys:stat` | 8 B | `BranchStat` | 49 B | `keys.go:10`、`values.go:12` |
 | `sys:pack` | `sys:pack:` + 8B `packID` | 17 B | `PackMeta` | 17 B | `keys.go:12`、`values.go:13` |
 | `inode` | `inode:` + 8B `ino` | 14 B | `Inode` | 93 B 头 + 变长 `SymlinkTarget` | `keys.go:13`、`values.go:15` |
 | `entry` | `entry:` + 8B `parent` + `:` + `name` | 15 B + 名称 | `Entry` | 13 B | `keys.go:14`、`values.go:14` |
@@ -96,13 +96,13 @@ flowchart TD
 
 | 值 | 布局（字节偏移） |
 | --- | --- |
-| `BranchStat`（41 B） | `ver(0)`、`LogicalBytes(1-8)`、`Inodes(9-16)`、`NextWriteSeq(17-24)`、`WriterEpoch(25-32)`、`MaxBytes(33-40)` |
+| `BranchStat`（49 B） | `ver(0)`、`LogicalBytes(1-8)`、`Inodes(9-16)`、`NextWriteSeq(17-24)`、`WriterEpoch(25-32)`、`MaxBytes(33-40)`、`WriterExpiresAt(41-48)`（UTC UnixNano，`0` 表示无活跃写租约） |
 | `PackMeta`（17 B） | `ver(0)`、`LiveBytes(1-8)`、`TotalBytes(9-16)`；解码要求 `LiveBytes` 不大于 `TotalBytes` 且 `TotalBytes` 不大于 64 MiB |
 | `Entry`（13 B） | `ver(0)`、`Ino(1-8)`、`Mode(9-12)` |
 | `Inode`（93 B + n） | `ver`、`Ino`、`ParentIno`、`Mode`、`Nlink`、`UID`、`GID`、`Rdev`、`Size`、`Atime`、`Mtime`、`Ctime`（纳秒）、`Flags`、`Generation`、`WriteSeq`，末 4 字节 `len(SymlinkTarget)`（偏移 89-92），其后接目标路径 |
 | `BlobRef`（16 B） | `PackID(0-7)`、`Offset(8-11)`、`Length(12-15)`；解码要求 `PackID` 非 0、`Length` 在 1 到 256 KiB、`Offset+Length` 不超过 64 MiB |
 
-`BranchStat.WriterEpoch` 是持久化的写世代，`NextWriteSeq` 是单盘写序列号；合并时控制面用二者做水位 CAS（见 [控制面 §3.4](/04-internals/storage-control-plane)）。
+`BranchStat.WriterEpoch` 是持久化的写世代，`BranchStat.WriterExpiresAt` 是持久化的单写者租约截止时间，`NextWriteSeq` 是单盘写序列号；合并时控制面用 `(WriterEpoch, NextWriteSeq)` 做水位 CAS（见 [控制面 §3.4](/04-internals/storage-control-plane)）。
 
 ## 3. 数据层：块网格与 `.pack` 容器
 
@@ -190,11 +190,11 @@ sequenceDiagram
 关键点：
 
 - **CAS 搬迁**：`validateCompactRelocateCmd`（`compact.go`）在 Phase A 用 `s.batch.Get(DataKey)` 检查该块仍属于存活的常规文件，且 `curRef == oldRef`。扫描到搬迁之间若被前台覆写、截断或删除，CAS 不通过，该块不更新指针，预写的新块记为死空间（`recordDeadBlobWrite`），避免"旧值回写覆盖新数据"。
-- **双重持久化屏障**：先 `blobs.sync()`（新包 `fdatasync`），再 `FlushWAL()`（`db.LogData(nil, pebble.Sync)`，`actor.go:902`）。只有两者都完成，旧 `.pack` 才会被物理删除；若顺序颠倒，崩溃后索引可能指向未落盘的新包或已删的旧包。
+- **双重持久化屏障**：先 `blobs.sync()`（新包 `fdatasync`），再 `FlushWAL()`（`db.LogData(nil, pebble.Sync)`，`actor.go:1107`）。只有两者都完成，旧 `.pack` 才会被物理删除；若顺序颠倒，崩溃后索引可能指向未落盘的新包或已删的旧包。
 - 搬迁期间源包被 `pinPackIDs` 钉住，屏障完成后 `unpinPackIDs`。
 
 ::: tip 排错入口
-Actor 内部的 `atomicLowWatermarkPacks` 与 `atomicPendingDeadPacks` 计数反映回收积压（由控制面的 `storageEngineCollector` 导出为指标）；`slow actor tick` 日志包含 `pack_sync_ms`、`wal_apply_ms`、`dead_pack_remove_ms` 各阶段耗时（`actor.go:1368-1386`）。指标全集见 [可观测性](/03-interfaces/observability)。
+Actor 内部的 `atomicLowWatermarkPacks` 与 `atomicPendingDeadPacks` 计数反映回收积压（由控制面的 `storageEngineCollector` 导出为指标）；`slow actor tick` 日志包含 `pack_sync_ms`、`wal_apply_ms`、`dead_pack_remove_ms` 各阶段耗时（`actor.go:1595-1614`）。指标全集见 [可观测性](/03-interfaces/observability)。
 :::
 
 ## 5. 相关测试入口

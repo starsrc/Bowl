@@ -12,6 +12,7 @@
 # 用法:
 #   scripts/handoff-smoke.sh
 #   BOWL_BIN=./bowl LOCAL=http://127.0.0.1:9100 CLOUD=http://127.0.0.1:9200 scripts/handoff-smoke.sh
+#   COMPUTE=1 scripts/handoff-smoke.sh     # 云端的沙箱起在独立的 Docker 上（需先 COMPUTE=1 scripts/handoff-up.sh）
 #
 # 只清理本次创建的沙箱和磁盘。
 set -euo pipefail
@@ -56,6 +57,16 @@ in_sandbox() { local id="$1"; shift; "$BOWL" sandbox exec "$id" -- sh -c "$*"; }
 # expect_fail <说明> <命令...>
 expect_fail() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then fail "$what"; fi; }
 
+# 节点登记用临时目录，不读也不改使用者自己的登记。
+export BOWL_CONFIG_DIR="$WORK/config"
+CLOUD_DOCKER="tcp://127.0.0.1:${CLOUD_DOCKER_PORT:-2385}"
+if [[ "${COMPUTE:-}" == 1 ]]; then
+  docker -H "$CLOUD_DOCKER" version >/dev/null 2>&1 || fail "连不上云端算力 $CLOUD_DOCKER（先跑 COMPUTE=1 scripts/handoff-up.sh）"
+  "$BOWL" node set local --endpoint "$L" >/dev/null
+  "$BOWL" node set cloud --endpoint "$C" --docker "$CLOUD_DOCKER" --sandbox-endpoint http://172.31.250.10:9000 >/dev/null
+  echo "[handoff-smoke] 云端沙箱将起在独立的 Docker 上: $CLOUD_DOCKER"
+fi
+
 for ep in "$L" "$C"; do
   "$BOWL" disk list --endpoint "$ep" >/dev/null 2>&1 || fail "连不上存储节点 $ep（先跑 scripts/handoff-up.sh）"
 done
@@ -84,6 +95,11 @@ out="$("$BOWL" sandbox move "$S" --to "$C")"
 echo "$out" | sed 's/^/    /'
 [[ "$out" == *"本地复用 0 个"* && "$out" == *"留待读到时再取"* ]] || fail "第一次去云端应当一个数据包都不先下载"
 [[ "$(owner "$S" "$C")" == "cloud" ]] || fail "切换后写者应为 cloud"
+if [[ "${COMPUTE:-}" == 1 ]]; then
+  docker -H "$CLOUD_DOCKER" ps --format '{{.Names}}' | grep -q "bowl-sbx-$S" || fail "沙箱应当跑在云端的 Docker 上"
+  if docker ps -a --format '{{.Names}}' | grep -q "bowl-sbx-$S"; then fail "本机 Docker 上不应再有这个沙箱"; fi
+  [[ "$(in_sandbox "$S" 'echo ok')" == "ok" ]] || fail "无法在云端算力上的沙箱里执行命令"
+fi
 in_sandbox "$S" '[ "$(tail -1 notes.txt)" = v2 ] && [ "$(sha256sum data.bin | cut -c1-16)" = "$(cat data.sha)" ]' \
   || fail "云端看到的内容和本地写的不一致"
 in_sandbox "$S" 'echo computed-on-cloud > result.txt; sync'

@@ -52,6 +52,9 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 
 	subArgs := append([]string{"mount"}, args...)
 	cmd := exec.Command(binPath, subArgs...)
+	// 守护进程不能继承调用者的工作目录：它会一直持有该目录，导致同一挂载点所属
+	// 文件系统上的 umount 因 Resource busy 失败。
+	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{w}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = append(os.Environ(), "BOWL_DAEMON_WORKER=1")

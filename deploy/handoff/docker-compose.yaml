@@ -1,0 +1,127 @@
+# 本地 ⇄ 云端交接的开发栈：两个互相独立的存储节点（各自的控制面库与数据卷），
+# 只通过一个共享的远端交换数据。用来在一台机器上复现“本地开发、切到云端、再切回来”。
+#
+#   local  http://127.0.0.1:9100
+#   cloud  http://127.0.0.1:9200
+#
+# 远端默认是一个共享卷（顶替对象存储）。要换成真实的 S3 兼容存储，设置
+# HANDOFF_REMOTE_URL / HANDOFF_S3_ACCESS_KEY / HANDOFF_S3_SECRET_KEY 后再启动。
+# 项目名与 deploy/dev 不同，两套栈互不影响。
+name: bowl-handoff
+
+x-storage: &storage
+  image: ${STORAGE_IMAGE_NAME:-bowl-storage}:${TAG:-latest}
+  build:
+    context: ../..
+    dockerfile: services/storage/Dockerfile
+  restart: unless-stopped
+  env_file:
+    - ../dev/storage.env
+  healthcheck:
+    test: ["CMD-SHELL", "nc -z localhost 9000 || exit 1"]
+    interval: 2s
+    timeout: 2s
+    retries: 15
+    start_period: 2s
+  networks:
+    - handoff-net
+
+x-storage-env: &storage-env
+  OTEL_ENABLED: "false"
+  LOG_LEVEL: info
+  HANDOFF_REMOTE_DIR: /var/lib/bowl/remote
+  HANDOFF_REMOTE_URL: ${HANDOFF_REMOTE_URL:-}
+  HANDOFF_S3_ACCESS_KEY: ${HANDOFF_S3_ACCESS_KEY:-}
+  HANDOFF_S3_SECRET_KEY: ${HANDOFF_S3_SECRET_KEY:-}
+  # 开发栈用较短的同步周期，方便观察；服务默认值是 30s。
+  HANDOFF_SYNC_INTERVAL: ${HANDOFF_SYNC_INTERVAL:-10s}
+  STORAGE_AUTH_TOKEN: ${BOWL_TOKEN:-}
+
+x-migration: &migration
+  image: bowl-storage-migration:latest
+  build:
+    context: ../..
+    dockerfile: services/storage/Dockerfile.migration
+  volumes:
+    - ../../services/storage/db/migrations:/migrations:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: "no"
+  networks:
+    - handoff-net
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bowl_local
+    configs:
+      - source: create-cloud-db
+        target: /docker-entrypoint-initdb.d/10-cloud.sql
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bowl_cloud"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+    networks:
+      - handoff-net
+
+  migration-local:
+    <<: *migration
+    command: ["-dir", "/migrations", "postgres", "postgres://postgres:postgres@postgres:5432/bowl_local?sslmode=disable", "up"]
+
+  migration-cloud:
+    <<: *migration
+    command: ["-dir", "/migrations", "postgres", "postgres://postgres:postgres@postgres:5432/bowl_cloud?sslmode=disable", "up"]
+
+  storage-local:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      HANDOFF_NODE_ID: local
+      DB_DSN: postgres://postgres:postgres@postgres:5432/bowl_local?sslmode=disable
+    ports:
+      - "${LOCAL_PORT:-9100}:9000"
+    volumes:
+      - local_data:/var/lib/bowl/data
+      - remote:/var/lib/bowl/remote
+    depends_on:
+      migration-local:
+        condition: service_completed_successfully
+
+  storage-cloud:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      HANDOFF_NODE_ID: cloud
+      DB_DSN: postgres://postgres:postgres@postgres:5432/bowl_cloud?sslmode=disable
+    ports:
+      - "${CLOUD_PORT:-9200}:9000"
+    volumes:
+      - cloud_data:/var/lib/bowl/data
+      - remote:/var/lib/bowl/remote
+    depends_on:
+      migration-cloud:
+        condition: service_completed_successfully
+
+configs:
+  create-cloud-db:
+    content: |
+      CREATE DATABASE bowl_cloud;
+
+volumes:
+  postgres_data:
+  local_data:
+  cloud_data:
+  remote:
+
+networks:
+  handoff-net:
+    driver: bridge

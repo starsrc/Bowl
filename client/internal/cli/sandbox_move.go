@@ -35,6 +35,7 @@ const sandboxMoveUsageHelp = `用法:
                     原节点上次同步之后的写入不会带过来
   --image string    切换后使用的容器镜像（默认沿用原沙箱的镜像）
   --binary string   注入沙箱的 Linux bowl 客户端路径
+  --token string    访问令牌 (默认读取 $BOWL_TOKEN)，两个节点使用同一个令牌
   -h, --help        查看帮助信息
 `
 
@@ -50,8 +51,9 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 		force  = fs.Bool("force", false, "")
 		image  = fs.String("image", "", "")
 		binary = fs.String("binary", "", "")
+		token  = fs.String("token", "", "")
 	)
-	args = sboxHoistFlags(args, []string{"to", "from", "image", "binary"})
+	args = sboxHoistFlags(args, []string{"to", "from", "image", "binary", "token"})
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, sandboxMoveUsageHelp)
@@ -99,6 +101,7 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 	}
 	spec := sandbox.CreateSpec{
 		ID: id, Image: info.Image, MountPath: info.MountPath, Network: info.Network, HostEndpoint: target,
+		Token: rpc.ResolveToken(*token),
 	}
 	if *image != "" {
 		spec.Image = *image
@@ -124,7 +127,7 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 		step("停掉原沙箱并卸载", began)
 
 		began = time.Now()
-		pushed, code := sboxHandoffStep(source, "push", id, true, false, stderr)
+		pushed, code := sboxHandoffStep(source, "push", id, handoffFlags{release: true, token: *token}, stderr)
 		if code != 0 {
 			fmt.Fprintf(stderr, "沙箱容器已停，盘仍归原节点。修复后可重新执行，或用 bowl sandbox create --from 另起。\n")
 			return code
@@ -137,7 +140,7 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 	}
 
 	began := time.Now()
-	pulled, code := sboxHandoffStep(target, "pull", id, false, *force, stderr)
+	pulled, code := sboxHandoffStep(target, "pull", id, handoffFlags{force: *force, token: *token}, stderr)
 	if code != 0 {
 		if !*force {
 			fmt.Fprintf(stderr, "盘已交出但目标节点没接住，现在没有写者。在任一节点执行 bowl disk pull %s 即可认领。\n", id)
@@ -168,8 +171,8 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 }
 
 // sboxHandoffStep 对一个存储节点执行一次 push 或 pull，返回传输量摘要；失败时打印可操作的原因。
-func sboxHandoffStep(endpoint, verb, diskID string, release, force bool, stderr io.Writer) (summary string, code int) {
-	raw, status, err := callDiskHandoff(endpoint, verb, diskID, handoffFlags{release: release, force: force})
+func sboxHandoffStep(endpoint, verb, diskID string, flags handoffFlags, stderr io.Writer) (summary string, code int) {
+	raw, status, err := callDiskHandoff(endpoint, verb, diskID, flags)
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: 请求存储节点 %s 失败: %v\n", endpoint, err)
 		return "", 1

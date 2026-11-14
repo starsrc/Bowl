@@ -30,6 +30,7 @@ const diskHandoffUsageHelp = `用法:
 
 标志:
   --endpoint string    StorageService 基础地址 (默认读取 $BOWL_STORAGE_ENDPOINT 或 http://127.0.0.1:9000)
+  --token string       访问令牌 (默认读取 $BOWL_TOKEN)
   --json               输出服务端返回的原始 JSON
   -h, --help           查看帮助信息
 `
@@ -81,7 +82,7 @@ func (r *diskHandoffResult) transferSummary(verb string) string {
 // 这三个命令走存储服务的 JSON 管理路由而不是 RPC，见服务端 handler_handoff.go 的说明。
 func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) int {
 	var (
-		diskID, endpoint                   string
+		diskID, endpoint, token            string
 		release, force, keepLocal, jsonOut bool
 	)
 	for i := 0; i < len(args); i++ {
@@ -102,6 +103,11 @@ func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) in
 			endpoint = args[i]
 		case strings.HasPrefix(arg, "--endpoint="):
 			endpoint = strings.TrimPrefix(arg, "--endpoint=")
+		case arg == "--token" && i+1 < len(args):
+			i++
+			token = args[i]
+		case strings.HasPrefix(arg, "--token="):
+			token = strings.TrimPrefix(arg, "--token=")
 		case strings.HasPrefix(arg, "-"):
 			fmt.Fprintf(stderr, "错误: disk %s 不支持标志 %s\n\n%s", verb, arg, diskHandoffUsageHelp)
 			return 2
@@ -122,7 +128,7 @@ func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	raw, status, err := callDiskHandoff(base, verb, diskID, handoffFlags{release: release, force: force, keepLocal: keepLocal})
+	raw, status, err := callDiskHandoff(base, verb, diskID, handoffFlags{release: release, force: force, keepLocal: keepLocal, token: token})
 	if err != nil {
 		fmt.Fprintf(stderr, "错误: 请求存储节点失败: %v\n", err)
 		return 1
@@ -141,17 +147,27 @@ func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) in
 // handoffFlags 是一次 push / pull 请求的开关。
 type handoffFlags struct {
 	release, force, keepLocal bool
+	// token 为空时回退到 $BOWL_TOKEN。
+	token string
 }
 
 func callDiskHandoff(base, verb, diskID string, flags handoffFlags) (raw []byte, status int, err error) {
 	base = strings.TrimRight(base, "/")
-	var resp *http.Response
+	var req *http.Request
 	if verb == "head" || verb == "status" {
-		resp, err = diskHandoffHTTPClient.Get(base + "/handoff/v1/" + verb + "?disk_id=" + url.QueryEscape(diskID))
+		req, err = http.NewRequest(http.MethodGet, base+"/handoff/v1/"+verb+"?disk_id="+url.QueryEscape(diskID), http.NoBody)
 	} else {
 		body, _ := json.Marshal(map[string]any{"disk_id": diskID, "release": flags.release, "force": flags.force, "keep_local": flags.keepLocal})
-		resp, err = diskHandoffHTTPClient.Post(base+"/handoff/v1/"+verb, "application/json", bytes.NewReader(body))
+		req, err = http.NewRequest(http.MethodPost, base+"/handoff/v1/"+verb, bytes.NewReader(body))
 	}
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := rpc.ResolveToken(flags.token); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := diskHandoffHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -165,6 +181,9 @@ func describeHandoffFailure(raw []byte, status int) string {
 	var body struct {
 		Error  string `json:"error"`
 		Reason string `json:"reason"`
+	}
+	if status == http.StatusUnauthorized {
+		return "存储节点拒绝了访问令牌。用 --token 或 $BOWL_TOKEN 提供正确的令牌"
 	}
 	if json.Unmarshal(raw, &body) != nil || body.Error == "" {
 		return fmt.Sprintf("存储节点返回 HTTP %d: %s", status, strings.TrimSpace(string(raw)))

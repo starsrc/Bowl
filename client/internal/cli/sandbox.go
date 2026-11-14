@@ -177,7 +177,7 @@ func sandboxCreate(args []string, stdout, stderr io.Writer) int {
 	startCtx, startCancel := context.WithTimeout(context.Background(), 90*time.Second)
 	err = sboxRuntime.Create(startCtx, &sandbox.CreateSpec{
 		ID: diskID, Image: *image, Name: *name, MountPath: *mountAt,
-		Network: *network, HostEndpoint: resolvedEndpoint, Token: *token, ClientBinary: bin,
+		Network: *network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(*token), ClientBinary: bin,
 	})
 	startCancel()
 	if err != nil {
@@ -596,7 +596,7 @@ func sandboxFork(args []string, stdout, stderr io.Writer) int {
 		startCtx, startCancel := context.WithTimeout(context.Background(), 90*time.Second)
 		err := sboxRuntime.Create(startCtx, &sandbox.CreateSpec{
 			ID: diskID, Image: *image, Name: forkName, MountPath: *mountAt,
-			Network: *network, HostEndpoint: resolvedEndpoint, Token: *token, ClientBinary: bin,
+			Network: *network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(*token), ClientBinary: bin,
 		})
 		startCancel()
 		if err != nil {

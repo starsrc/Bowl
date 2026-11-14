@@ -167,8 +167,14 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 	return nil
 }
 
-// Remove 强制删除沙箱容器（容器内的挂载也随之消失）。
+// Remove 删除沙箱容器。删除前先尽力卸载容器内的磁盘：正常卸载会把缓冲的写入刷到存储节点
+// 并立即释放挂载租约；直接杀容器的话，租约要等超时才过期，期间这块盘既删不掉也交接不了。
 func (rt *Runtime) Remove(ctx context.Context, id string) error {
+	if mounts, err := rt.Mounts(ctx, id); err == nil {
+		for _, m := range mounts {
+			_ = rt.Unmount(ctx, id, m.Path)
+		}
+	}
 	if err := rt.run(ctx, io.Discard, io.Discard, "rm", "-f", ContainerName(id)); err != nil {
 		return fmt.Errorf("删除沙箱容器失败: %w", err)
 	}

@@ -35,7 +35,11 @@ func (d *DirRemote) path(key string) (string, error) {
 }
 
 // Put 先写临时文件再改名，读者永远看不到写了一半的对象。
-func (d *DirRemote) Put(_ context.Context, key string, r io.Reader) error {
+func (d *DirRemote) Put(ctx context.Context, key string, r io.Reader) error {
+	// 和对象存储一样拒绝已取消的请求，否则误用已取消 ctx 的调用方只在真实远端上才出错。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	p, err := d.path(key)
 	if err != nil {
 		return err

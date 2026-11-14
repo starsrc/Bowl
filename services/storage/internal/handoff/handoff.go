@@ -29,6 +29,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -157,6 +159,10 @@ type PullStats struct {
 	MetaBytes     int64 `json:"meta_bytes"`
 }
 
+// transferConcurrency 是一次快照上传或下载里同时进行的对象请求数。
+// 快照由十几个小文件组成，逐个往返对象存储时耗时全在等待上。
+const transferConcurrency = 8
+
 // objectKey 是数据包在远端的内容寻址位置。
 //
 // 不能按包名存：包名（PackID）只在一个节点的控制面内保证不重复，一块盘换到另一个节点后，
@@ -235,7 +241,12 @@ func PushSnapshot(ctx context.Context, r Remote, diskID, snapshot, dir string, s
 	var (
 		stats PushStats
 		mf    manifest
+		// mu 保护 stats 里由并发传输更新的两个上传计数。
+		mu sync.Mutex
 	)
+	// 目录遍历和哈希在本协程里顺序做，清单的顺序因此是确定的；和远端的往返交给 g 并发执行。
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(transferConcurrency)
 	root := filepath.Clean(dir)
 	walkErr := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -244,7 +255,7 @@ func PushSnapshot(ctx context.Context, r Remote, diskID, snapshot, dir string, s
 		if d.IsDir() {
 			return nil
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := gctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		rel, relErr := filepath.Rel(root, p)
@@ -269,23 +280,31 @@ func PushSnapshot(ctx context.Context, r Remote, diskID, snapshot, dir string, s
 			entry.Path, entry.SHA256 = name, sum
 			mf.Packs = append(mf.Packs, entry)
 			stats.Packs++
-			if size, sizeErr := r.Size(ctx, objectKey(sum)); sizeErr == nil && size == info.Size() {
-				return nil
-			} else if sizeErr != nil && !errors.Is(sizeErr, ErrNotFound) {
-				return sizeErr
-			}
-			stats.PacksUploaded++
-			stats.PackBytes += info.Size()
-			return putFile(ctx, r, objectKey(sum), p)
+			g.Go(func() error {
+				if size, sizeErr := r.Size(gctx, objectKey(sum)); sizeErr == nil && size == info.Size() {
+					return nil
+				} else if sizeErr != nil && !errors.Is(sizeErr, ErrNotFound) {
+					return sizeErr
+				}
+				mu.Lock()
+				stats.PacksUploaded++
+				stats.PackBytes += info.Size()
+				mu.Unlock()
+				return putFile(gctx, r, objectKey(sum), p)
+			})
+			return nil
 		}
 
 		if strings.HasPrefix(rel, "packs/") && stubOf != nil {
 			if packName, sum, size, ok := stubOf(p); ok {
-				if remoteSize, sizeErr := r.Size(ctx, objectKey(sum)); sizeErr != nil || remoteSize != size {
-					return fmt.Errorf("%w: pack %s is neither local nor in the remote", ErrIncomplete, packName)
-				}
 				mf.Packs = append(mf.Packs, manifestFile{Path: packName, Size: size, SHA256: sum})
 				stats.Packs++
+				g.Go(func() error {
+					if remoteSize, sizeErr := r.Size(gctx, objectKey(sum)); sizeErr != nil || remoteSize != size {
+						return fmt.Errorf("%w: pack %s is neither local nor in the remote", ErrIncomplete, packName)
+					}
+					return nil
+				})
 				return nil
 			}
 		}
@@ -293,10 +312,13 @@ func PushSnapshot(ctx context.Context, r Remote, diskID, snapshot, dir string, s
 		mf.Meta = append(mf.Meta, entry)
 		stats.MetaFiles++
 		stats.MetaBytes += info.Size()
-		return putFile(ctx, r, path.Join(snapshotPrefix(diskID, snapshot), "meta", rel), p)
+		g.Go(func() error {
+			return putFile(gctx, r, path.Join(snapshotPrefix(diskID, snapshot), "meta", rel), p)
+		})
+		return nil
 	})
-	if walkErr != nil {
-		return PushStats{}, walkErr
+	if err := errors.Join(walkErr, g.Wait()); err != nil {
+		return PushStats{}, err
 	}
 	raw, err := json.MarshalIndent(mf, "", "  ")
 	if err != nil {
@@ -347,16 +369,16 @@ func PullSnapshot(ctx context.Context, r Remote, diskID, snapshot, dstDir, reuse
 		}
 	}()
 
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(transferConcurrency)
 	for _, f := range mf.Meta {
 		key := path.Join(snapshotPrefix(diskID, snapshot), "meta", f.Path)
-		if err := getFile(ctx, r, key, localPath(dst, f.Path), f.Size, ""); err != nil {
-			return stats, err
-		}
+		g.Go(func() error { return getFile(gctx, r, key, localPath(dst, f.Path), f.Size, "") })
 		stats.MetaBytes += f.Size
 	}
 	for _, f := range mf.Packs {
 		if len(f.SHA256) != sha256.Size*2 {
-			return stats, fmt.Errorf("%w: pack %s has no content hash", ErrIncomplete, f.Path)
+			return stats, errors.Join(fmt.Errorf("%w: pack %s has no content hash", ErrIncomplete, f.Path), g.Wait())
 		}
 		stats.Packs++
 		target := localPath(filepath.Join(dst, "packs"), f.Path)
@@ -366,17 +388,18 @@ func PullSnapshot(ctx context.Context, r Remote, diskID, snapshot, dstDir, reuse
 		}
 		if deferPack != nil {
 			if err := deferPack(filepath.Join(dst, "packs"), f.Path, f.SHA256, f.Size); err != nil {
-				return stats, err
+				return stats, errors.Join(err, g.Wait())
 			}
 			stats.PacksDeferred++
 			stats.DeferredBytes += f.Size
 			continue
 		}
-		if err := getFile(ctx, r, objectKey(f.SHA256), target, f.Size, f.SHA256); err != nil {
-			return stats, err
-		}
+		g.Go(func() error { return getFile(gctx, r, objectKey(f.SHA256), target, f.Size, f.SHA256) })
 		stats.PacksDownloaded++
 		stats.PackBytes += f.Size
+	}
+	if err := g.Wait(); err != nil {
+		return stats, err
 	}
 	return stats, syncDir(dst)
 }

@@ -299,7 +299,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 	isMaxLen := ruleID == "bytes.max_len" || strings.HasSuffix(ruleID, ".bytes.max_len") ||
 		ruleID == "string.max_bytes" || strings.HasSuffix(ruleID, ".string.max_bytes")
 
-	if ruleID == "update_disk_has_update" || ruleID == "write_request_offset_len_overflow" || ruleID == "renew_mount_epoch_matches_mode" {
+	if ruleID == "update_disk_has_update" || ruleID == "write_request_offset_len_overflow" || ruleID == "mount_disk_force_requires_rw" {
 		return 10, ReasonInvalidArgument
 	}
 
@@ -317,10 +317,9 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 	// 第 1 优先级：基础整型/标识符与模式/标志字段校验 -> EINVAL
 	case "storage.v1.MountDiskRequest.disk_id",
 		"storage.v1.RenewMountRequest.disk_id",
-		"storage.v1.RenewMountRequest.mount_id",
 		"storage.v1.RenewMountRequest.epoch",
 		"storage.v1.UnmountDiskRequest.disk_id",
-		"storage.v1.UnmountDiskRequest.mount_id",
+		"storage.v1.UnmountDiskRequest.epoch",
 		"storage.v1.LookupRequest.disk_id",
 		"storage.v1.GetAttrRequest.disk_id",
 		"storage.v1.SetAttrRequest.disk_id",

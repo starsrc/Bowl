@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -187,6 +189,8 @@ func TestMount_GivenReadOnlyWithZeroEpochAndEnvFallbacks_Succeeds(t *testing.T) 
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.True(t, gotReadOnly)
 	require.Zero(t, gotEpoch)
+	require.Empty(t, storage.getRenewReqs(), "RO 挂载不得调用 RenewMount")
+	require.Empty(t, storage.getUnmountReqs(), "RO 挂载不得调用 UnmountDisk")
 }
 
 func TestMount_GivenHandshakeFailuresOrServeError_ReturnsExit1(t *testing.T) {
@@ -349,15 +353,13 @@ func TestRunMount_GivenServeLifecycleAndCanceledCtx_RenewsPeriodicallyAndUnmount
 	require.GreaterOrEqual(t, len(renews), 2)
 	for _, req := range renews {
 		require.Equal(t, testDiskID1, req.GetDiskId())
-		require.Equal(t, "01950000-0000-7000-9000-000000000001", req.GetMountId())
-		require.False(t, req.GetReadOnly())
 		require.Equal(t, uint64(1), req.GetEpoch())
 	}
 
 	unmounts := storage.getUnmountReqs()
 	require.Len(t, unmounts, 1, "serveFUSE 返回后必须调用一次 UnmountDisk（即使外层 ctx 已取消）")
 	require.Equal(t, testDiskID1, unmounts[0].GetDiskId())
-	require.Equal(t, "01950000-0000-7000-9000-000000000001", unmounts[0].GetMountId())
+	require.Equal(t, uint64(1), unmounts[0].GetEpoch())
 	require.True(t, metaExistsAtUnmount, "UnmountDisk 必须在清理 mountMeta 文件之前调用")
 	_, metaAfter := findMountMeta(mp)
 	require.False(t, metaAfter, "UnmountDisk 完成后必须移除 mountMeta 文件")
@@ -390,12 +392,19 @@ func TestRunMount_GivenRenewTerminalError_StopsSubsequentRenewRequests(t *testin
 			storage.renewErr = tc.renewErr
 			withMountStorageFake(t, storage)
 
-			withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			var gotFS *fusefs.RawFS
+			var canceledOnLeaseLoss bool
+			withServeFUSEStub(t, func(serveCtx context.Context, fs *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+				gotFS = fs
 				ready()
 				require.Eventually(t, func() bool {
 					return len(storage.getRenewReqs()) == 1
 				}, time.Second, 5*time.Millisecond)
-				time.Sleep(60 * time.Millisecond)
+				select {
+				case <-serveCtx.Done():
+					canceledOnLeaseLoss = true
+				case <-time.After(time.Second):
+				}
 				return nil
 			})
 
@@ -411,10 +420,59 @@ func TestRunMount_GivenRenewTerminalError_StopsSubsequentRenewRequests(t *testin
 			var logBuf bytes.Buffer
 			runErr := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 			require.NoError(t, runErr)
+			require.True(t, canceledOnLeaseLoss, "收到 %s 后必须触发 serveCtx 自动下线", tc.name)
+			require.NotNil(t, gotFS)
+			require.True(t, gotFS.IsLeaseLost(), "收到 %s 后必须标记 RawFS.leaseLost", tc.name)
 			require.Len(t, storage.getRenewReqs(), 1, "收到 %s 后必须立即停止后续续期", tc.name)
-			require.Len(t, storage.getUnmountReqs(), 1)
+			require.Empty(t, storage.getUnmountReqs(), "因租约失效自动下线时必须跳过多余的 UnmountDisk RPC")
 		})
 	}
+}
+
+func withMountRenewRetryIntervalStub(t *testing.T, interval time.Duration) {
+	t.Helper()
+	prev := mountRenewRetryIntervalFn
+	mountRenewRetryIntervalFn = func(time.Duration) time.Duration { return interval }
+	t.Cleanup(func() { mountRenewRetryIntervalFn = prev })
+}
+
+type fakeMountServer struct {
+	waitMountFn func() error
+	serveFn     func()
+	unmountFn   func() error
+
+	mu           sync.Mutex
+	unmountCalls int
+}
+
+func (s *fakeMountServer) Serve() {
+	if s.serveFn != nil {
+		s.serveFn()
+	}
+}
+
+func (s *fakeMountServer) WaitMount() error {
+	if s.waitMountFn != nil {
+		return s.waitMountFn()
+	}
+	return nil
+}
+
+func (s *fakeMountServer) Unmount() error {
+	s.mu.Lock()
+	s.unmountCalls++
+	fn := s.unmountFn
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (s *fakeMountServer) getUnmountCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unmountCalls
 }
 
 func TestDefaultMountRenewInterval_ClampsMinimumOneSecond(t *testing.T) {
@@ -422,4 +480,269 @@ func TestDefaultMountRenewInterval_ClampsMinimumOneSecond(t *testing.T) {
 	require.Equal(t, time.Second, defaultMountRenewInterval(1))
 	require.Equal(t, time.Second, defaultMountRenewInterval(3))
 	require.Equal(t, 10*time.Second, defaultMountRenewInterval(30))
+	require.Equal(t, 2*time.Second, defaultMountRenewRetryInterval(10*time.Second))
+	require.Equal(t, 500*time.Millisecond, defaultMountRenewRetryInterval(500*time.Millisecond))
+}
+
+func TestMount_GivenReadOnlyAndForce_RejectsWithExit2BeforeSpawnDaemon(t *testing.T) {
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	var spawnCalls int
+	withSpawnDaemonStub(t, func([]string, io.Writer) int {
+		spawnCalls++
+		return 0
+	})
+
+	// 后台模式：必须在 spawnDaemon 之前直接以退出码 2 拦截
+	code, _, errOut := runCLI("mount", testDiskID1, mp, "--ro", "--force")
+	require.Equal(t, 2, code)
+	require.Zero(t, spawnCalls, "--ro 与 --force 冲突时不得拉起后台守护进程")
+	require.Contains(t, errOut, "--ro 与 --force 不能同时使用")
+
+	// 前台模式：同样以退出码 2 拦截
+	code, _, errOut = runCLI("mount", testDiskID1, mp, "-f", "--ro", "--force")
+	require.Equal(t, 2, code)
+	require.Zero(t, spawnCalls)
+	require.Contains(t, errOut, "--ro 与 --force 不能同时使用")
+}
+
+func TestMount_GivenForceAndActiveLeaseConflict_SendsForceAndSingleLineError(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "fenced-disk", 1<<30, 0)
+	storage.enforceRWLease = true
+	storage.epochSeq = 1
+	storage.activeRWLease[testDiskID1] = 1
+	withMountStorageFake(t, storage)
+
+	var gotEpoch uint64
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, _ string, ready func()) error {
+		gotEpoch = cfg.Epoch
+		ready()
+		return nil
+	})
+
+	// 1. 存在活跃写租约且未传 --force：返回退出码 1 与单行明确错误
+	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "存在未过期的活跃读写挂载，请先卸载或使用 --force 抢占")
+	reqs := storage.getMountReqs()
+	require.Len(t, reqs, 1)
+	require.False(t, reqs[0].GetForce())
+
+	// singleLineError 必须剥离换行，避免 readDaemonHandshake 截断报错
+	multilineMsg := "line1\r\nline2\n"
+	require.Equal(t, "line1 line2", singleLineError(errors.New(multilineMsg)))
+
+	// 2. 传入 --force：抢占成功并递增 Epoch
+	code, _, errOut = runCLI("mount", testDiskID1, mp, "-f", "--force", "--admin-addr", "off")
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Equal(t, uint64(2), gotEpoch)
+	reqs = storage.getMountReqs()
+	require.Len(t, reqs, 2)
+	require.True(t, reqs[1].GetForce())
+}
+
+func TestMount_GivenRWZeroLeaseTTL_FailsHandshakeWithExit1(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "no-ttl-disk", 1<<30, 0)
+	storage.mountZeroTTL = true
+	withMountStorageFake(t, storage)
+
+	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "有效的写挂载租约时长")
+}
+
+func TestRunMount_GivenRenewTransientError_SchedulesShortRetryAndKeepsServing(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withMountRenewIntervalStub(t, 300*time.Millisecond)
+	withMountRenewRetryIntervalStub(t, 15*time.Millisecond)
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "retry-disk", 1<<30, 0)
+	var renewCalls atomic.Int32
+	var secondCallAt atomic.Int64
+	var firstCallAt time.Time
+	var mu sync.Mutex
+	storage.onRenewMount = func(_ *storagev1.RenewMountRequest) (*connect.Response[storagev1.RenewMountResponse], error) {
+		n := renewCalls.Add(1)
+		if n == 1 {
+			mu.Lock()
+			firstCallAt = time.Now()
+			mu.Unlock()
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("transient network blip"))
+		}
+		if n == 2 {
+			secondCallAt.Store(time.Now().UnixNano())
+		}
+		return connect.NewResponse(&storagev1.RenewMountResponse{LeaseTtlSeconds: 30}), nil
+	}
+	withMountStorageFake(t, storage)
+
+	var gotFS *fusefs.RawFS
+	withServeFUSEStub(t, func(serveCtx context.Context, fs *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+		gotFS = fs
+		ready()
+		require.Eventually(t, func() bool {
+			return renewCalls.Load() >= 2
+		}, time.Second, 5*time.Millisecond)
+		require.NoError(t, serveCtx.Err(), "临时续期失败不得触发 serveCtx 取消")
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:         "http://127.0.0.1:9000",
+		adminAddr:        "off",
+		logLevel:         "info",
+		logFormat:        "json",
+		traceSampleRatio: 0,
+	}
+	baseCfg := &fusefs.Config{DiskID: testDiskID1, ReadOnly: false}
+
+	var logBuf bytes.Buffer
+	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotFS)
+	require.False(t, gotFS.IsLeaseLost())
+	require.Len(t, storage.getUnmountReqs(), 1)
+
+	mu.Lock()
+	elapsed := time.Unix(0, secondCallAt.Load()).Sub(firstCallAt)
+	mu.Unlock()
+	require.Less(t, elapsed, 150*time.Millisecond, "临时错误后必须按短重试间隔调度续期，而非等满正常周期")
+}
+
+func TestRunMount_GivenForeignMountMetaPID_PreservesNewMetaOnExit(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "remount-meta-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	var metaPath string
+	foreignPID := os.Getpid() + 10000
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, mountpoint string, ready func()) error {
+		ready()
+		p, ok := mountMetaFilePath(mountpoint)
+		require.True(t, ok)
+		metaPath = p
+		// 模拟懒卸载后新守护进程覆盖了同路径 mountMeta 文件
+		writtenPath, werr := writeMountMeta(&mountMeta{
+			PID:        foreignPID,
+			DiskID:     testDiskID1,
+			Mountpoint: mountpoint,
+		})
+		require.NoError(t, werr)
+		require.Equal(t, p, writtenPath)
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:         "http://127.0.0.1:9000",
+		adminAddr:        "off",
+		logLevel:         "info",
+		logFormat:        "json",
+		traceSampleRatio: 0,
+	}
+	baseCfg := &fusefs.Config{DiskID: testDiskID1, ReadOnly: false}
+
+	var logBuf bytes.Buffer
+	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, metaPath)
+	require.Equal(t, foreignPID, readMountMetaPID(metaPath), "归属其他 PID 的 mountMeta 不得被旧进程误删")
+}
+
+func TestServeFUSEWithServer_GivenWaitMountSignalAndBusyUnmount_FallsBackToLazyAndUnblocks(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("SignalBeforeWaitMountDone_TriggersUnmountImmediately", func(t *testing.T) {
+		mp := t.TempDir()
+		sigCh := make(chan os.Signal, 2)
+		serveRelease := make(chan struct{})
+		srv := &fakeMountServer{
+			serveFn: func() { <-serveRelease },
+			waitMountFn: func() error {
+				sigCh <- syscall.SIGINT
+				require.Eventually(t, func() bool {
+					select {
+					case <-serveRelease:
+						return true
+					default:
+						return false
+					}
+				}, time.Second, 5*time.Millisecond)
+				return nil
+			},
+			unmountFn: func() error {
+				select {
+				case <-serveRelease:
+				default:
+					close(serveRelease)
+				}
+				return nil
+			},
+		}
+
+		err := serveFUSEWithServer(context.Background(), srv, nil, mp, logger, sigCh, nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, srv.getUnmountCalls(), 1)
+	})
+
+	t.Run("CtxCancelWithBusyUnmount_FallsBackToLazyUmountAndHandlesSecondSignal", func(t *testing.T) {
+		mp := t.TempDir()
+		withMissingMountInfo(t)
+		calledName, calledArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+
+		sigCh := make(chan os.Signal, 2)
+		serveRelease := make(chan struct{})
+		t.Cleanup(func() { close(serveRelease) })
+
+		srv := &fakeMountServer{
+			serveFn:     func() { <-serveRelease },
+			waitMountFn: func() error { return nil },
+			unmountFn:   func() error { return errors.New("device or resource busy") },
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		ready := make(chan struct{})
+		go func() {
+			done <- serveFUSEWithServer(ctx, srv, nil, mp, logger, sigCh, func() { close(ready) })
+		}()
+		<-ready
+
+		// 触发租约失活取消 ctx，因 server.Unmount() 失败必须回退到懒卸载工具
+		cancel()
+		require.Eventually(t, func() bool {
+			return *calledName != ""
+		}, time.Second, 5*time.Millisecond)
+		require.Equal(t, "/usr/bin/fusermount3", *calledName)
+		require.Equal(t, []string{"-uz", mp}, *calledArgs)
+
+		// 模拟外层退出前再次发送 SIGTERM（此时挂载点已不可见），必须通过 forceExitCh 正常解除阻塞
+		sigCh <- syscall.SIGTERM
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("ctx 取消后继续监听后续信号不得卡死")
+		}
+	})
 }

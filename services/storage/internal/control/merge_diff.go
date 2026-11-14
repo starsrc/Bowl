@@ -519,7 +519,7 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	}
 
 	if !params.DryRun && !params.Force {
-		if gateErr := m.checkMergeMountGate(sourceKey, targetKey); gateErr != nil {
+		if gateErr := m.checkMergeMountGate(ctx, &sourceRow, &targetRow); gateErr != nil {
 			return nil, gateErr
 		}
 	}
@@ -772,7 +772,6 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	}
 	m.actors[targetKey] = newTargetActor
 	m.poolMu.Unlock()
-	m.clearDiskMounts(targetKey)
 
 	stat, statErr := newTargetActor.StatFS(ctx)
 	if statErr != nil {

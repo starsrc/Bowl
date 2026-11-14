@@ -249,6 +249,9 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 		return nil, ErrNoSpace
 	}
 
+	if opts.ExpectedWriterEpoch == math.MaxUint64 {
+		return nil, ErrNoSpace
+	}
 	result := &MergeResult{
 		UsedBytes:      planner.logicalBytes,
 		Inodes:         planner.inodesCount,
@@ -1355,11 +1358,12 @@ func (mp *mergePlanner) commitToStaging(
 
 	// 持久化 sys:stat（WriterEpoch = ExpectedWriterEpoch + 1）
 	BatchSetStatDeferred(batch, BranchStat{
-		LogicalBytes: result.UsedBytes,
-		Inodes:       result.Inodes,
-		NextWriteSeq: result.NextWriteSeq,
-		MaxBytes:     result.TargetMaxBytes,
-		WriterEpoch:  result.WriterEpoch,
+		LogicalBytes:    result.UsedBytes,
+		Inodes:          result.Inodes,
+		NextWriteSeq:    result.NextWriteSeq,
+		MaxBytes:        result.TargetMaxBytes,
+		WriterEpoch:     result.WriterEpoch,
+		WriterExpiresAt: 0,
 	})
 
 	if err := batch.Commit(pebble.Sync); err != nil {

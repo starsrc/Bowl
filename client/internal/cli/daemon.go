@@ -73,13 +73,23 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 	return readDaemonHandshake(r, stderr)
 }
 
+func singleLineError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.ReplaceAll(err.Error(), "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.TrimSpace(s)
+}
+
 // runDaemonWorker 是子进程内部的后台挂载执行器（挂载期间维护后台租约续期并在卸载刷盘后显式释放租约）。
 // 日志文件重定向标准输出/错误后，复用前台同一条挂载链路；挂载就绪时经 fd 3 管道回传 OK。
 func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string) int {
 	pipeWriter := os.NewFile(3, "readiness-pipe")
 	notifyErr := func(err error) {
 		if pipeWriter != nil {
-			fmt.Fprintf(pipeWriter, "ERR:%v\n", err)
+			fmt.Fprintf(pipeWriter, "ERR:%s\n", singleLineError(err))
 			_ = pipeWriter.Close()
 			pipeWriter = nil
 		}

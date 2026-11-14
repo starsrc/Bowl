@@ -111,3 +111,27 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 	require.Empty(t, info3.Mountpoint)
 	require.False(t, info3.ReadOnly)
 }
+
+func TestFindDiskMountpoint_GivenSuperblockReadOnlyOption_ReturnsReadOnly(t *testing.T) {
+	// Given: DirectMount 未传 MS_RDONLY 时，VFS 选项为 rw 而超级块选项为 ro
+	withMountInfoContent(t, "201 30 0:60 / /mnt/sb-ro rw,nosuid,nodev shared:60 - fuse.bowl bowl:0192a3b4-c5d6-7e8f-9012-3456789abcd5 ro\n"+
+		"202 30 0:61 / /mnt/sb-rw rw,nosuid,nodev shared:61 - fuse.bowl bowl:0192a3b4-c5d6-7e8f-9012-3456789abcd6 rw\n")
+
+	// When / Then: 超级块带 ro 时必须识别为 ReadOnly=true
+	roInfo, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd5")
+	require.NoError(t, err)
+	require.Equal(t, DiskMountInfo{
+		Mountpoint: "/mnt/sb-ro",
+		Mounted:    true,
+		ReadOnly:   true,
+	}, roInfo)
+
+	// When / Then: 双侧均无 ro 时保持 ReadOnly=false
+	rwInfo, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd6")
+	require.NoError(t, err)
+	require.Equal(t, DiskMountInfo{
+		Mountpoint: "/mnt/sb-rw",
+		Mounted:    true,
+		ReadOnly:   false,
+	}, rwInfo)
+}

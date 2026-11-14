@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/starsrc/pkg/serverx"
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -98,7 +97,7 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 
-	t.Run("ParentReadOnlyFUSEMounted_BlocksDirectRPCWithEBUSY_AllowsDryRun", func(t *testing.T) {
+	t.Run("MultiReadOnlyFUSEMounted_DoesNotBlockDryRunOrMerge", func(t *testing.T) {
 		mainID := createTestDisk(t, client).GetDiskId()
 		mpMain, stopMain := mountWithCleanup(t, endpoint, mainID)
 		require.NoError(t, os.WriteFile(filepath.Join(mpMain, "base.txt"), []byte("v1\n"), 0o644))
@@ -112,27 +111,42 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(mpFeat, "feat-ro.txt"), []byte("from-feat\n"), 0o644))
 		stopFeat()
 
-		// 父盘以只读方式在线 FUSE 挂载
-		_, stopMainRO := mountWithCleanup(t, endpoint, mainID, "--ro")
-		defer stopMainRO()
+		// 父盘多路只读 + 子盘只读并发在线 FUSE 挂载（RO 无状态且免租约）
+		_, stopMainRO1 := mountWithCleanup(t, endpoint, mainID, "--ro")
+		defer stopMainRO1()
+		_, stopMainRO2 := mountWithCleanup(t, endpoint, mainID, "--ro")
+		defer stopMainRO2()
+		_, stopFeatRO := mountWithCleanup(t, endpoint, featID, "--ro")
+		defer stopFeatRO()
 
-		// 绕过本机 CLI 直调 StorageServiceClient.MergeDisk，服务端必须拦截为 CodeAborted + EBUSY
+		// 1. 直调 MergeDisk DryRun 与 CLI --dry-run 均不被 --ro 阻塞
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, rpcErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
+		dryResp, rpcErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 			SourceDiskId: featID,
 			TargetDiskId: mainID,
 			Strategy:     storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS,
+			DryRun:       true,
 		}))
-		require.Error(t, rpcErr)
-		require.Equal(t, connect.CodeAborted, connect.CodeOf(rpcErr))
-		info := serverx.ExtractErrorInfo(rpcErr)
-		require.NotNil(t, info)
-		require.Equal(t, "EBUSY", info.GetReason())
+		require.NoError(t, rpcErr)
+		require.NotEmpty(t, dryResp.Msg.GetLcaCommitId())
 
-		// 本机 `bowl disk merge --dry-run` 在父盘 --ro 挂载态下必须正常成功
 		dryOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--dry-run")
 		require.Contains(t, dryOut, "Dry Run")
+
+		// 2. 非 --force 正式 MergeDisk 同样不被 --ro 阻塞且直接成功
+		mergeOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID)
+		require.Contains(t, mergeOut, mainID)
+
+		stopMainRO1()
+		stopMainRO2()
+		stopFeatRO()
+
+		mpVerify, stopVerify := mountWithCleanup(t, endpoint, mainID)
+		defer stopVerify()
+		got, err := os.ReadFile(filepath.Join(mpVerify, "feat-ro.txt"))
+		require.NoError(t, err)
+		require.Equal(t, "from-feat\n", string(got))
 	})
 
 	t.Run("ChildRWMountedBlocksMerge_UmountThenImmediateMergeSucceeds", func(t *testing.T) {

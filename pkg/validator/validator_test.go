@@ -154,8 +154,20 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 			msg:  &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("sym"), Target: bytes.Repeat([]byte("t"), testMaxTargetLen)},
 		},
 		{
-			name: "mount_disk_rw_and_ro",
+			name: "mount_disk_ro",
 			msg:  &storagev1.MountDiskRequest{DiskId: testValidDiskID, ReadOnly: true},
+		},
+		{
+			name: "mount_disk_rw_force",
+			msg:  &storagev1.MountDiskRequest{DiskId: testValidDiskID, ReadOnly: false, Force: true},
+		},
+		{
+			name: "renew_mount_valid",
+			msg:  &storagev1.RenewMountRequest{DiskId: testValidDiskID, Epoch: 1},
+		},
+		{
+			name: "unmount_disk_valid",
+			msg:  &storagev1.UnmountDiskRequest{DiskId: testValidDiskID, Epoch: 1},
 		},
 		{
 			name: "create_disk_valid",
@@ -401,6 +413,15 @@ func TestStorageValidator_GivenOutOfRangeNumericOrControlFields_WhenValidated_Th
 		{name: "mount_disk_empty_id", msg: &storagev1.MountDiskRequest{}},
 		{name: "mount_disk_bad_id", msg: &storagev1.MountDiskRequest{DiskId: "bad"}},
 		{name: "mount_disk_nil_uuid", msg: &storagev1.MountDiskRequest{DiskId: testNilUUID}},
+		{name: "mount_disk_ro_force_conflict", msg: &storagev1.MountDiskRequest{DiskId: testValidDiskID, ReadOnly: true, Force: true}},
+		{name: "renew_mount_bad_id", msg: &storagev1.RenewMountRequest{DiskId: "bad", Epoch: 1}},
+		{name: "renew_mount_nil_uuid", msg: &storagev1.RenewMountRequest{DiskId: testNilUUID, Epoch: 1}},
+		{name: "renew_mount_zero_epoch", msg: &storagev1.RenewMountRequest{DiskId: testValidDiskID, Epoch: 0}},
+		{name: "renew_mount_over_max_int64_epoch", msg: &storagev1.RenewMountRequest{DiskId: testValidDiskID, Epoch: testOverMaxInt64}},
+		{name: "unmount_disk_bad_id", msg: &storagev1.UnmountDiskRequest{DiskId: "bad", Epoch: 1}},
+		{name: "unmount_disk_nil_uuid", msg: &storagev1.UnmountDiskRequest{DiskId: testNilUUID, Epoch: 1}},
+		{name: "unmount_disk_zero_epoch", msg: &storagev1.UnmountDiskRequest{DiskId: testValidDiskID, Epoch: 0}},
+		{name: "unmount_disk_over_max_int64_epoch", msg: &storagev1.UnmountDiskRequest{DiskId: testValidDiskID, Epoch: testOverMaxInt64}},
 		{name: "create_disk_zero_max_bytes", msg: &storagev1.CreateDiskRequest{Name: "disk", MaxBytes: 0}},
 		{name: "create_disk_over_max_int64_bytes", msg: &storagev1.CreateDiskRequest{Name: "disk", MaxBytes: testOverMaxInt64}},
 		{name: "get_disk_bad_id", msg: &storagev1.GetDiskRequest{DiskId: "bad"}},

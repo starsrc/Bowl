@@ -189,12 +189,12 @@ type StorageServiceClient interface {
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(ctx context.Context, in *RemoveXattrRequest, opts ...grpc.CallOption) (*RemoveXattrResponse, error)
 	// MountDisk 执行单盘挂载握手。
-	// 可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
-	// 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
+	// 可写挂载 (read_only = false) 获取或抢占单写者租约、推进 WriterEpoch 并清理残留孤儿节点，返回新世代号、租约 TTL 与根 Inode。
+	// 只读挂载 (read_only = true) 无状态校验目标磁盘存在，返回 epoch = 0、lease_ttl_seconds = 0 与根 Inode。
 	MountDisk(ctx context.Context, in *MountDiskRequest, opts ...grpc.CallOption) (*MountDiskResponse, error)
-	// RenewMount 为已建立的在线挂载软租约执行周期续期。
+	// RenewMount 为已持有的读写挂载写租约执行周期续期。
 	RenewMount(ctx context.Context, in *RenewMountRequest, opts ...grpc.CallOption) (*RenewMountResponse, error)
-	// UnmountDisk 幂等释放指定的在线挂载软租约。
+	// UnmountDisk 幂等释放匹配写世代的读写挂载写租约。
 	UnmountDisk(ctx context.Context, in *UnmountDiskRequest, opts ...grpc.CallOption) (*UnmountDiskResponse, error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
@@ -746,12 +746,12 @@ type StorageServiceServer interface {
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(context.Context, *RemoveXattrRequest) (*RemoveXattrResponse, error)
 	// MountDisk 执行单盘挂载握手。
-	// 可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
-	// 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
+	// 可写挂载 (read_only = false) 获取或抢占单写者租约、推进 WriterEpoch 并清理残留孤儿节点，返回新世代号、租约 TTL 与根 Inode。
+	// 只读挂载 (read_only = true) 无状态校验目标磁盘存在，返回 epoch = 0、lease_ttl_seconds = 0 与根 Inode。
 	MountDisk(context.Context, *MountDiskRequest) (*MountDiskResponse, error)
-	// RenewMount 为已建立的在线挂载软租约执行周期续期。
+	// RenewMount 为已持有的读写挂载写租约执行周期续期。
 	RenewMount(context.Context, *RenewMountRequest) (*RenewMountResponse, error)
-	// UnmountDisk 幂等释放指定的在线挂载软租约。
+	// UnmountDisk 幂等释放匹配写世代的读写挂载写租约。
 	UnmountDisk(context.Context, *UnmountDiskRequest) (*UnmountDiskResponse, error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。

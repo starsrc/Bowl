@@ -578,8 +578,8 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 	}))
 	require.NoError(t, err)
 
-	// 先将 epoch 推进至 2，使旧 epoch=1 变为陈旧
-	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	// 先通过 Force 抢占将 epoch 推进至 2，使旧 epoch=1 变为陈旧
+	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err, "推进 epoch 失败")
 
 	zeroFh := uint64(0)

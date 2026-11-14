@@ -180,8 +180,8 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 
 	// 卸载源盘租约（保留目标盘 mainID 在线租约），后续用 Force=true 验证强行合并与旧 epoch 栅栏
 	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
-		DiskId:  featID,
-		MountId: featMnt.Msg.GetMountId(),
+		DiskId: featID,
+		Epoch:  featEpoch,
 	}))
 	require.NoError(t, err)
 
@@ -267,10 +267,8 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 
 	// 被 Force 抢占后，旧写者以原 mainEpoch 调用 RenewMount 应返回 CodeFailedPrecondition + EBUSY
 	_, renewStaleErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
-		DiskId:   mainID,
-		MountId:  mainMnt.Msg.GetMountId(),
-		ReadOnly: false,
-		Epoch:    mainEpoch,
+		DiskId: mainID,
+		Epoch:  mainEpoch,
 	}))
 	requireConnectErrorCodeAndReason(t, renewStaleErr, connect.CodeFailedPrecondition, "EBUSY")
 
@@ -278,10 +276,8 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	mainMnt2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID}))
 	require.NoError(t, err)
 	renewResp, err := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
-		DiskId:   mainID,
-		MountId:  mainMnt2.Msg.GetMountId(),
-		ReadOnly: false,
-		Epoch:    mainMnt2.Msg.GetEpoch(),
+		DiskId: mainID,
+		Epoch:  mainMnt2.Msg.GetEpoch(),
 	}))
 	require.NoError(t, err)
 	require.Equal(t, uint32(30), renewResp.Msg.GetLeaseTtlSeconds())

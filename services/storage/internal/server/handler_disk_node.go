@@ -158,6 +158,7 @@ func (s *Server) MountDisk(ctx context.Context, req *connect.Request[storagev1.M
 	res, err := s.control.MountDisk(ctx, control.MountDiskParams{
 		DiskID:   req.Msg.DiskId,
 		ReadOnly: req.Msg.ReadOnly,
+		Force:    req.Msg.Force,
 	})
 	if err != nil {
 		return nil, toConnectError(err)
@@ -167,18 +168,15 @@ func (s *Server) MountDisk(ctx context.Context, req *connect.Request[storagev1.M
 		RootInode:           toProtoInode(&res.RootAttr),
 		EntryTimeoutSeconds: res.EntryTimeoutSeconds,
 		AttrTimeoutSeconds:  res.AttrTimeoutSeconds,
-		MountId:             res.MountID,
 		LeaseTtlSeconds:     res.LeaseTTLSeconds,
 	}), nil
 }
 
-// RenewMount 为已建立的在线挂载软租约执行周期续期。
+// RenewMount 为已建立的在线可写租约执行周期续期。
 func (s *Server) RenewMount(ctx context.Context, req *connect.Request[storagev1.RenewMountRequest]) (*connect.Response[storagev1.RenewMountResponse], error) {
 	res, err := s.control.RenewMount(ctx, control.RenewMountParams{
-		DiskID:   req.Msg.DiskId,
-		MountID:  req.Msg.MountId,
-		ReadOnly: req.Msg.ReadOnly,
-		Epoch:    req.Msg.Epoch,
+		DiskID: req.Msg.DiskId,
+		Epoch:  req.Msg.Epoch,
 	})
 	if err != nil {
 		return nil, toConnectError(err)
@@ -188,11 +186,11 @@ func (s *Server) RenewMount(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-// UnmountDisk 幂等释放指定的在线挂载软租约。
+// UnmountDisk 幂等释放指定的在线可写租约。
 func (s *Server) UnmountDisk(ctx context.Context, req *connect.Request[storagev1.UnmountDiskRequest]) (*connect.Response[storagev1.UnmountDiskResponse], error) {
 	if err := s.control.UnmountDisk(ctx, control.UnmountDiskParams{
-		DiskID:  req.Msg.DiskId,
-		MountID: req.Msg.MountId,
+		DiskID: req.Msg.DiskId,
+		Epoch:  req.Msg.Epoch,
 	}); err != nil {
 		return nil, toConnectError(err)
 	}

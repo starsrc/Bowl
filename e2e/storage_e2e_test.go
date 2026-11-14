@@ -75,18 +75,20 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 		return d.GetDiskId() == diskID
 	}), "磁盘列表必须包含新创建的磁盘 %s", diskID)
 
-	// When: 只读挂载返回 Epoch=0，可写挂载返回 Epoch=1，写入后在线扩容至 16 MiB
+	// When: 只读挂载返回 Epoch=0（TTL=0），可写挂载返回 Epoch=1（TTL=30），写入后在线扩容至 16 MiB
 	mountRO, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId:   diskID,
 		ReadOnly: true,
 	}))
 	require.NoError(t, err)
 	require.Zero(t, mountRO.Msg.GetEpoch())
+	require.Zero(t, mountRO.Msg.GetLeaseTtlSeconds())
 
 	mount1, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)
 	epoch1 := mount1.Msg.GetEpoch()
 	require.Equal(t, uint64(1), epoch1)
+	require.Equal(t, uint32(30), mount1.Msg.GetLeaseTtlSeconds())
 
 	expanded, err := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{
 		DiskId:   diskID,
@@ -146,8 +148,11 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	require.Equal(t, chunk0, r0.Msg.GetData())
 	require.Equal(t, chunk1, r1.Msg.GetData())
 
-	// Then: 新可写挂载抢占 Epoch=2 后，旧 Epoch=1 写入被拦截返回 EBUSY；删盘后返回 ENOENT
-	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	// Then: 未到期非强制可写挂载被 EBUSY 拦截；Force=true 抢占 Epoch=2 后，旧 Epoch=1 写入被拦截返回 EBUSY；删盘后返回 ENOENT
+	_, busyErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	testutil.RequireConnectError(t, busyErr, connect.CodeAborted, "EBUSY")
+
+	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
 

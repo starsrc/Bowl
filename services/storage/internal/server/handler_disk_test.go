@@ -123,13 +123,18 @@ func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
 	rwMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
 	require.NoError(t, err, "可写 MountDisk RPC 失败")
 	require.Equal(t, uint64(1), rwMount.Msg.GetEpoch())
+	require.Equal(t, uint32(30), rwMount.Msg.GetLeaseTtlSeconds())
 	require.Equal(t, uint64(1), rwMount.Msg.GetRootInode().GetIno())
 	require.InDelta(t, 2.5, rwMount.Msg.GetEntryTimeoutSeconds(), 1e-9)
 	require.InDelta(t, 3.5, rwMount.Msg.GetAttrTimeoutSeconds(), 1e-9)
 
+	_, busyErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	requireConnectErrorCodeAndReason(t, busyErr, connect.CodeAborted, "EBUSY")
+
 	roMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, ReadOnly: true}))
 	require.NoError(t, err, "只读 MountDisk RPC 失败")
 	require.Equal(t, uint64(0), roMount.Msg.GetEpoch())
+	require.Equal(t, uint32(0), roMount.Msg.GetLeaseTtlSeconds())
 
 	// When 4: 删除磁盘
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))

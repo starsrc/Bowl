@@ -130,6 +130,7 @@ type UpdateDiskParams struct {
 type MountDiskParams struct {
 	DiskID   string
 	ReadOnly bool
+	Force    bool
 }
 
 // MountDiskResult 描述挂载虚拟磁盘握手返回结果。
@@ -138,27 +139,24 @@ type MountDiskResult struct {
 	RootAttr            store.Attribute
 	EntryTimeoutSeconds float64
 	AttrTimeoutSeconds  float64
-	MountID             string
 	LeaseTTLSeconds     uint32
 }
 
-// RenewMountParams 描述在线挂载软租约续期入参。
+// RenewMountParams 描述在线写租约续期入参。
 type RenewMountParams struct {
-	DiskID   string
-	MountID  string
-	ReadOnly bool
-	Epoch    uint64
+	DiskID string
+	Epoch  uint64
 }
 
-// RenewMountResult 描述在线挂载软租约续期返回结果。
+// RenewMountResult 描述在线写租约续期返回结果。
 type RenewMountResult struct {
 	LeaseTTLSeconds uint32
 }
 
-// UnmountDiskParams 描述释放挂载软租约入参。
+// UnmountDiskParams 描述释放写租约入参。
 type UnmountDiskParams struct {
-	DiskID  string
-	MountID string
+	DiskID string
+	Epoch  uint64
 }
 
 // Manager 定义单盘控制面与 StoreActor 实例池管理接口。
@@ -223,8 +221,6 @@ type manager struct {
 
 	now           func() time.Time
 	mountLeaseTTL time.Duration
-	mountsMu      sync.Mutex
-	activeMounts  map[string]map[string]mountLease
 }
 
 // Option 配置单盘控制面管理器。
@@ -351,7 +347,6 @@ func newManager(dbStore db.Store, opts ...Option) *manager {
 		actors:          make(map[string]*store.StoreActor),
 		now:             time.Now,
 		mountLeaseTTL:   DefaultMountLeaseTTL,
-		activeMounts:    make(map[string]map[string]mountLease),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -589,6 +584,9 @@ func (m *manager) openDiskActor(ctx context.Context, opts store.Options) (*store
 				attribute.Bool("disk.read_only", opts.ReadOnly),
 			),
 		)
+	}
+	if opts.Now == nil {
+		opts.Now = m.now
 	}
 	openStart := time.Now()
 	actor, err := store.Open(opts)
@@ -1279,7 +1277,6 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	if len(cleanupErrs) > 0 {
 		return errors.Join(cleanupErrs...)
 	}
-	m.clearDiskMounts(diskID)
 
 	m.logger.InfoContext(ctx, "disk deleted",
 		"disk_id", diskID,
@@ -1295,24 +1292,25 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	if err != nil {
 		return nil, err
 	}
+	if params.ReadOnly && params.Force {
+		return nil, fmt.Errorf("%w: force requires read-write mount", ErrInvalidArgument)
+	}
 	diskID := id.String()
 
-	actor, err := m.Actor(ctx, diskID)
-	if err != nil {
-		return nil, err
-	}
 	if params.ReadOnly {
-		rootAttr, attrErr := actor.GetAttr(ctx, store.RootIno)
-		if attrErr != nil {
-			return nil, attrErr
-		}
-		mountID, ttlSeconds, leaseErr := m.issueMountLease(diskID, true, 0)
-		if leaseErr != nil {
-			return nil, leaseErr
+		var rootAttr store.Attribute
+		if roErr := m.withLiveActor(ctx, diskID, func(actor *store.StoreActor) error {
+			attr, attrErr := actor.GetAttr(ctx, store.RootIno)
+			if attrErr != nil {
+				return attrErr
+			}
+			rootAttr = attr
+			return nil
+		}); roErr != nil {
+			return nil, roErr
 		}
 		m.logger.InfoContext(ctx, "disk mounted",
 			"disk_id", diskID,
-			"mount_id", mountID,
 			"epoch", uint64(0),
 			"mode", actorModeRO,
 		)
@@ -1321,25 +1319,42 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 			RootAttr:            rootAttr,
 			EntryTimeoutSeconds: m.entryTimeout,
 			AttrTimeoutSeconds:  m.attrTimeout,
-			MountID:             mountID,
-			LeaseTTLSeconds:     ttlSeconds,
+			LeaseTTLSeconds:     0,
 		}, nil
 	}
 
-	prevEpoch := actor.WriterEpoch()
-	epoch, rootAttr, err := actor.AdvanceEpoch(ctx)
+	if openErr := m.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+	unlock := m.lockDisk(ctx, diskID)
+	defer unlock()
+	if openErr := m.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+
+	row, err := m.store.GetDisk(ctx, id)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	actor, err := m.getOrOpenActorWithLineageLocked(ctx, diskID, row.LineageID)
 	if err != nil {
 		return nil, err
 	}
-	mountID, ttlSeconds, leaseErr := m.issueMountLease(diskID, false, epoch)
-	if leaseErr != nil {
-		return nil, leaseErr
+	prevEpoch := actor.WriterEpoch()
+	epoch, rootAttr, err := actor.AcquireWriterLease(ctx, m.leaseTTL(), params.Force)
+	if err != nil {
+		if errors.Is(err, store.ErrWriterLeaseActive) {
+			return nil, fmt.Errorf("%w: disk %s already has active writer lease: %w", ErrDiskMounted, diskID, err)
+		}
+		return nil, err
 	}
+	ttlSeconds := m.leaseTTLSeconds()
 	m.logger.InfoContext(ctx, "disk epoch fenced",
 		"disk_id", diskID,
-		"mount_id", mountID,
 		"prev_epoch", prevEpoch,
 		"epoch", epoch,
+		"force", params.Force,
+		"lease_ttl_seconds", ttlSeconds,
 		"mode", actorModeRW,
 	)
 	return &MountDiskResult{
@@ -1347,7 +1362,6 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 		RootAttr:            rootAttr,
 		EntryTimeoutSeconds: m.entryTimeout,
 		AttrTimeoutSeconds:  m.attrTimeout,
-		MountID:             mountID,
 		LeaseTTLSeconds:     ttlSeconds,
 	}, nil
 }

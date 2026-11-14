@@ -12,6 +12,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// directMountFlags 返回 DirectMount 传给 mount(2) 的内核挂载标志；只读挂载显式携带 MS_RDONLY。
+func directMountFlags(readOnly bool) uintptr {
+	flags := uintptr(unix.MS_NOSUID | unix.MS_NODEV)
+	if readOnly {
+		flags |= unix.MS_RDONLY
+	}
+	return flags
+}
+
 func resolveFuseSysfsConnectionDir(mountpoint string) string {
 	if strings.TrimSpace(mountpoint) == "" {
 		return ""

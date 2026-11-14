@@ -861,10 +861,15 @@ func TestMergeTrees_Slice3_Strategies_Hardlinks_Packs_DryRun_Quota_Reopen(t *tes
 		require.NoError(t, err)
 		require.Equal(t, []byte("src-nested-pack-payload"), dataSN)
 
-		// WriterEpoch 校验：旧 epoch=1 写入被拒绝，新 epoch=2 写入成功
+		// WriterEpoch 与写租约校验：MergeTrees 后 WriterExpiresAt=0，旧 epoch=1 与未获租约的 epoch=2 写入均被拒绝，获取租约后新 epoch=3 写入成功
 		_, _, err = merged.Write(ctx, entTCol.Ino, 0, []byte("x"), 1)
 		require.ErrorIs(t, err, store.ErrStaleEpoch)
-		_, _, err = merged.Write(ctx, entTCol.Ino, 0, []byte("TARGET"), 2)
+		_, _, err = merged.Write(ctx, entTCol.Ino, 0, []byte("x"), 2)
+		require.ErrorIs(t, err, store.ErrStaleEpoch)
+		leaseEpoch, _, err := merged.AcquireWriterLease(ctx, store.DefaultWriterLeaseTTL, false)
+		require.NoError(t, err)
+		require.Equal(t, uint64(3), leaseEpoch)
+		_, _, err = merged.Write(ctx, entTCol.Ino, 0, []byte("TARGET"), leaseEpoch)
 		require.NoError(t, err)
 
 		// CompactPacks 账本自洽验证

@@ -115,7 +115,15 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	mainMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID}))
 	require.NoError(t, err)
 	mainEpoch := mainMnt.Msg.GetEpoch()
-	mainMountID := mainMnt.Msg.GetMountId()
+	require.Equal(t, uint32(30), mainMnt.Msg.GetLeaseTtlSeconds())
+
+	// 只读挂载支持无限并发且不颁发写租约 TTL，也不得阻塞 RW 写者。
+	for range 3 {
+		roMnt, roErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID, ReadOnly: true}))
+		require.NoError(t, roErr)
+		require.Zero(t, roMnt.Msg.GetEpoch())
+		require.Zero(t, roMnt.Msg.GetLeaseTtlSeconds())
+	}
 
 	sharedIno := e2eWriteNewFile(t, ctx, client, mainID, mainEpoch, "shared.txt", []byte("base-shared\n"))
 	e2eWriteNewFile(t, ctx, client, mainID, mainEpoch, "base.txt", []byte("base-only\n"))
@@ -131,7 +139,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	featMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: featID}))
 	require.NoError(t, err)
 	featEpoch := featMnt.Msg.GetEpoch()
-	featMountID := featMnt.Msg.GetMountId()
 
 	// 在双边同时修改 shared.txt 并各自新增独占文件
 	e2eOverwriteFile(t, ctx, client, mainID, mainEpoch, "shared.txt", []byte("main-edited\n"))
@@ -189,11 +196,13 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	}))
 	testutil.RequireConnectError(t, busyBothErr, connect.CodeAborted, "EBUSY")
 
-	// 2.3 仅 UnmountDisk 释放源盘 featID、保留目标盘 mainID 挂载时，MergeDisk(Force:false) 仍被 EBUSY 拦截
+	// 2.3 仅 UnmountDisk 释放源盘 featID 并挂源盘 RO、保留目标盘 mainID RW 时，MergeDisk(Force:false) 仍被 EBUSY 拦截
 	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
-		DiskId:  featID,
-		MountId: featMountID,
+		DiskId: featID,
+		Epoch:  featEpoch,
 	}))
+	require.NoError(t, err)
+	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: featID, ReadOnly: true}))
 	require.NoError(t, err)
 
 	_, busyTargetErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
@@ -203,10 +212,10 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	}))
 	testutil.RequireConnectError(t, busyTargetErr, connect.CodeAborted, "EBUSY")
 
-	// When 3 (方式一): UnmountDisk 释放目标盘 mainID 后，校验冲突检测与无 Force 正式合并成功
+	// When 3 (方式一): UnmountDisk 释放目标盘 mainID 后（源盘 RO 无阻塞），校验冲突检测与无 Force 正式合并成功
 	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
-		DiskId:  mainID,
-		MountId: mainMountID,
+		DiskId: mainID,
+		Epoch:  mainEpoch,
 	}))
 	require.NoError(t, err)
 
@@ -313,7 +322,7 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.NoError(t, err)
 	require.NotEmpty(t, forceMergeResp.Msg.GetMergeCommitId())
 
-	// Then: 原客户端持旧 reMntEpoch 写入被 CodeFailedPrecondition (EBUSY) 栅栏拦截
+	// Then: 原客户端持旧 reMntEpoch 写入与 RenewMount 均被 CodeFailedPrecondition (EBUSY) 栅栏拦截
 	_, fencedErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    mainID,
 		ParentIno: 1,
@@ -323,9 +332,22 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	}))
 	testutil.RequireConnectError(t, fencedErr, connect.CodeFailedPrecondition, "EBUSY")
 
+	_, staleRenewErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
+		DiskId: mainID,
+		Epoch:  reMntEpoch,
+	}))
+	testutil.RequireConnectError(t, staleRenewErr, connect.CodeFailedPrecondition, "EBUSY")
+
 	reMntAfterForce, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID}))
 	require.NoError(t, err)
 	require.Greater(t, reMntAfterForce.Msg.GetEpoch(), reMntEpoch)
+
+	renewOKResp, err := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
+		DiskId: mainID,
+		Epoch:  reMntAfterForce.Msg.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint32(30), renewOKResp.Msg.GetLeaseTtlSeconds())
 
 	lookupFeat2, err := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
 		DiskId:    mainID,

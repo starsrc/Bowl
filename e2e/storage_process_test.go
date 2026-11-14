@@ -301,7 +301,10 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	mount2, err := client1.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	_, busyErr1 := client1.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	testutil.RequireConnectError(t, busyErr1, connect.CodeAborted, "EBUSY")
+
+	mount2, err := client1.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
 
@@ -342,7 +345,11 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, persistedPayload, readAfterRestart.Msg.GetData())
 
-	mount3, err := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	// 跨进程重启后未过期 Pebble 租约仍有效，非强制 MountDisk 返回 EBUSY，Force=true 抢占后递增至 3
+	_, busyAfterRestartErr := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	testutil.RequireConnectError(t, busyAfterRestartErr, connect.CodeAborted, "EBUSY")
+
+	mount3, err := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), mount3.Msg.GetEpoch(), "重启后写入世代号必须在持久化世代 2 基础上递增至 3")
 

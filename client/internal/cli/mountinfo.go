@@ -69,15 +69,19 @@ func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 			continue
 		}
 		source := ""
+		superOpts := ""
 		for i, field := range fields {
 			if field == "-" && i+2 < len(fields) {
 				source = unescapeMountInfo(fields[i+2])
+				if i+3 < len(fields) {
+					superOpts = fields[i+3]
+				}
 				break
 			}
 		}
-		var readOnly bool
+		readOnly := hasReadOnlyMountOption(superOpts)
 		if len(fields) > 5 {
-			readOnly = hasReadOnlyMountOption(fields[5])
+			readOnly = readOnly || hasReadOnlyMountOption(fields[5])
 		}
 		points = append(points, mountPoint{
 			path:     filepath.Clean(unescapeMountInfo(fields[4])),

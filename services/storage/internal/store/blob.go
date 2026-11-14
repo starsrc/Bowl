@@ -1015,6 +1015,14 @@ func (s *blobStore) evictHotPack(packID uint64) {
 	}
 }
 
+// hasDirty 检查 blobStore 是否存在未刷盘的脏 .pack 或待刷目录状态。
+func (s *blobStore) hasDirty() bool {
+	s.mu.Lock()
+	dirty := len(s.dirtyPacks) > 0 || s.dirDirty
+	s.mu.Unlock()
+	return dirty
+}
+
 // sync 将所有未刷盘的脏 .pack 常驻句柄与待刷 packs/ 目录持久化落盘。
 func (s *blobStore) sync() error {
 	s.mu.Lock()

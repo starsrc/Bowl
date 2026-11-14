@@ -90,12 +90,16 @@ func TestMountDisk_ReadWrite_AdvancesEpochAndFencesStaleWriter(t *testing.T) {
 	})
 	require.NoError(t, err, "初始 epoch 创建文件失败")
 
-	// When: 再次执行可写挂载推进 epoch 至 2
-	mnt2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
-	require.NoError(t, err, "第二次可写挂载失败")
+	// When: 租约未过期且未传 force 时，第二次非强制可写挂载应被租约门禁拦截；传 Force=true 后抢占并推进 epoch 至 2
+	_, busyErr := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.ErrorIs(t, busyErr, ErrDiskMounted, "未过期可写租约应拦截非强制 MountDisk: got=%v", busyErr)
+
+	mnt2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, Force: true})
+	require.NoError(t, err, "第二次强制可写挂载失败")
 
 	// Then: 新 epoch=2 生效，旧 epoch=1 写入被拦截为 ErrStaleEpoch
 	require.Equal(t, uint64(2), mnt2.Epoch, "第二次可写挂载 epoch 不匹配: want=2 got=%d", mnt2.Epoch)
+	require.Equal(t, uint32(30), mnt2.LeaseTTLSeconds, "RW 挂载默认 TTL 应为 30 秒: got=%d", mnt2.LeaseTTLSeconds)
 
 	_, _, staleErr := actor.Write(ctx, fAttr.Ino, 0, []byte("stale"), mnt1.Epoch)
 	require.ErrorIs(t, staleErr, ErrStaleEpoch, "陈旧 epoch=1 写入应被栅栏拦截: want=%v got=%v", ErrStaleEpoch, staleErr)
@@ -126,9 +130,10 @@ func TestMountDisk_ReadOnly_ReturnsZeroEpochWithoutFencingActiveWriter(t *testin
 	// When: 执行只读挂载
 	roMount, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
 
-	// Then: 返回 epoch=0 与配置一致的缓存超时，且不影响活跃 epoch=1 的继续写入
+	// Then: 返回 epoch=0、lease_ttl_seconds=0 与配置一致的缓存超时，且不影响活跃 epoch=1 的继续写入
 	require.NoError(t, err, "只读挂载失败")
 	require.Equal(t, uint64(0), roMount.Epoch, "只读挂载 epoch 应固定为 0: want=0 got=%d", roMount.Epoch)
+	require.Equal(t, uint32(0), roMount.LeaseTTLSeconds, "只读挂载不得下发租约 TTL: want=0 got=%d", roMount.LeaseTTLSeconds)
 	require.Equal(t, RootIno, roMount.RootAttr.Ino, "根 Inode 不匹配: want=%d got=%d", RootIno, roMount.RootAttr.Ino)
 	require.InDelta(t, 2.5, roMount.EntryTimeoutSeconds, 1e-9, "EntryTimeoutSeconds 不匹配: want=2.5 got=%v", roMount.EntryTimeoutSeconds)
 	require.InDelta(t, 3.5, roMount.AttrTimeoutSeconds, 1e-9, "AttrTimeoutSeconds 不匹配: want=3.5 got=%v", roMount.AttrTimeoutSeconds)
@@ -170,10 +175,13 @@ func TestMountDisk_AfterRestart_PersistsEpochAndReclaimsOrphans(t *testing.T) {
 	require.NoError(t, actor1.Unlink(ctx, RootIno, []byte("orphan.bin"), true, mnt1.Epoch), "解链保留孤儿失败")
 	require.NoError(t, mgr1.Close(), "关闭旧管理器失败")
 
-	// When: 重启新管理器并执行可写挂载
+	// When: 重启新管理器并执行强制抢占可写挂载（验证未过期 Pebble 租约跨重启依然阻止非强制接管）
 	mgr2 := New(memDB, WithStorageRoot(rootDir))
 	t.Cleanup(func() { _ = mgr2.Close() })
-	mnt2, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	_, busyErr := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.ErrorIs(t, busyErr, ErrDiskMounted, "重启后未过期 Pebble 租约应拦截非强制挂载: got=%v", busyErr)
+
+	mnt2, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, Force: true})
 
 	// Then: epoch 延续递增至 2 且孤儿节点已被清理回收
 	require.NoError(t, err, "重启后可写挂载失败")

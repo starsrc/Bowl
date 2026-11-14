@@ -333,6 +333,15 @@ func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce
 	require.Equal(t, 4, storage.mergeCalls)
 	require.False(t, storage.lastMergeReq.GetForce())
 	require.Contains(t, out, testDiskID2)
+
+	// Given: 目标盘与源盘均在本机处于 ro 只读挂载 -> preRPC 放行
+	withMountInfoContent(t, "100 30 0:50 / /mnt/target-ro ro,nosuid - fuse.bowl bowl:"+testDiskID2+" ro\n101 30 0:51 / /mnt/source-ro ro,nosuid - fuse.bowl bowl:"+testDiskID1+" ro\n")
+	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	require.Equal(t, 5, storage.mergeCalls)
+	require.False(t, storage.lastMergeReq.GetForce())
+	require.Contains(t, out, testDiskID2)
 }
 
 func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *testing.T) {

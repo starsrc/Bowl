@@ -157,14 +157,14 @@ service StorageService {
   rpc RemoveXattr(RemoveXattrRequest) returns (RemoveXattrResponse);
 
   // MountDisk 执行单盘挂载握手。
-  // 可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
-  // 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
+  // 可写挂载 (read_only = false) 获取或抢占单写者租约、推进 WriterEpoch 并清理残留孤儿节点，返回新世代号、租约 TTL 与根 Inode。
+  // 只读挂载 (read_only = true) 无状态校验目标磁盘存在，返回 epoch = 0、lease_ttl_seconds = 0 与根 Inode。
   rpc MountDisk(MountDiskRequest) returns (MountDiskResponse);
 
-  // RenewMount 为已建立的在线挂载软租约执行周期续期。
+  // RenewMount 为已持有的读写挂载写租约执行周期续期。
   rpc RenewMount(RenewMountRequest) returns (RenewMountResponse);
 
-  // UnmountDisk 幂等释放指定的在线挂载软租约。
+  // UnmountDisk 幂等释放匹配写世代的读写挂载写租约。
   rpc UnmountDisk(UnmountDiskRequest) returns (UnmountDiskResponse);
 
   // CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
@@ -1349,6 +1349,13 @@ message RemoveXattrResponse {}
 
 // MountDiskRequest 定义 MountDisk 接口输入参数。
 message MountDiskRequest {
+  option (buf.validate.message).cel = {
+    id: "mount_disk_force_requires_rw"
+    message: "force cannot be true when read_only is true"
+    expression: "!this.read_only || !this.force"
+  };
+
+  // 目标磁盘唯一标识符（UUID 格式）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1357,7 +1364,12 @@ message MountDiskRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  // 是否以只读模式挂载（true 时无状态且不递增写世代，返回 epoch = 0）。
   bool read_only = 2;
+
+  // 是否强制抢占当前持有未过期写租约的在线读写挂载（仅允许在 read_only = false 时设为 true）。
+  bool force = 3;
 }
 
 // MountDiskResponse 定义 MountDisk 接口输出参数。
@@ -1366,20 +1378,12 @@ message MountDiskResponse {
   Inode root_inode = 2;
   double entry_timeout_seconds = 3;
   double attr_timeout_seconds = 4;
-  // 本次在线挂载实例的唯一标识符（UUID 格式）。
-  string mount_id = 5;
-  // 在线挂载软租约的有效时长（秒）。
-  uint32 lease_ttl_seconds = 6;
+  // 读写租约的有效时长（秒；只读挂载返回 0）。
+  uint32 lease_ttl_seconds = 5;
 }
 
 // RenewMountRequest 定义 RenewMount 接口输入参数。
 message RenewMountRequest {
-  option (buf.validate.message).cel = {
-    id: "renew_mount_epoch_matches_mode"
-    message: "epoch must be 0 when read_only is true, and > 0 when read_only is false"
-    expression: "this.read_only ? this.epoch == 0u : this.epoch > 0u"
-  };
-
   // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
@@ -1390,26 +1394,16 @@ message RenewMountRequest {
     }
   ];
 
-  // 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。
-  string mount_id = 2 [
-    (buf.validate.field).string.uuid = true,
-    (buf.validate.field).cel = {
-      id: "renew_mount_mount_id_not_nil"
-      message: "mount_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
-
-  // 是否为只读挂载。
-  bool read_only = 3;
-
-  // 写挂载世代号（只读挂载必须为 0；可写挂载必须大于 0 且在 int64 正数范围内）。
-  uint64 epoch = 4 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  // 当前读写挂载持有的写世代号（必须大于 0 且在 int64 正数范围内）。
+  uint64 epoch = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // RenewMountResponse 定义 RenewMount 接口输出参数。
 message RenewMountResponse {
-  // 续期后的在线挂载软租约有效时长（秒）。
+  // 续期后的在线写租约有效时长（秒）。
   uint32 lease_ttl_seconds = 1;
 }
 
@@ -1425,15 +1419,11 @@ message UnmountDiskRequest {
     }
   ];
 
-  // 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。
-  string mount_id = 2 [
-    (buf.validate.field).string.uuid = true,
-    (buf.validate.field).cel = {
-      id: "unmount_disk_mount_id_not_nil"
-      message: "mount_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
+  // 待释放读写挂载持有的写世代号（必须大于 0 且在 int64 正数范围内）。
+  uint64 epoch = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 }
 
 // UnmountDiskResponse 定义 UnmountDisk 接口输出参数。
@@ -2100,7 +2090,7 @@ message MergeDiskRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 是否忽略在线挂载软租约门禁强制执行合并。
+  // 是否忽略在线挂载写租约门禁强制执行合并。
   bool force = 7;
 }
 

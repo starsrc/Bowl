@@ -41,6 +41,9 @@ const DefaultOrphanBacklogThreshold = 16
 
 const orphanWarnMinInterval = time.Second
 
+// unmountFlushTimeout 是 OnUnmount 期间执行远端异步写排空与脏节点 Fsync 的总超时上限。
+var unmountFlushTimeout = 5 * time.Second
+
 var (
 	noopSpanInstance = noop.Span{}
 	noopEndFuseOp    = func(fuse.Status) {}
@@ -116,9 +119,22 @@ type RawFS struct {
 
 	lastOrphanWarnUnixNano atomic.Int64
 	fuseSysfsDir           atomic.Pointer[string]
+	leaseLost              atomic.Bool
 
 	readAhead   *ReadAheadCoordinator
 	writeBehind *WriteBehindCoordinator
+}
+
+// MarkLeaseLost 标记当前写租约已失效，卸载清理时将跳过远端刷盘、同步与孤儿回收 RPC。
+func (fs *RawFS) MarkLeaseLost() {
+	if fs != nil {
+		fs.leaseLost.Store(true)
+	}
+}
+
+// IsLeaseLost 返回当前挂载是否已被标记为失租约状态。
+func (fs *RawFS) IsLeaseLost() bool {
+	return fs != nil && fs.leaseLost.Load()
 }
 
 // NewRawFS 创建并初始化 RawFS 实例。
@@ -167,6 +183,9 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 	}
 	fs.writeBehind = NewWriteBehindCoordinator(
 		func(ctx context.Context, ino, offset uint64, data []byte) (uint32, *storagev1.Inode, error) {
+			if fs.IsLeaseLost() {
+				return 0, nil, syscall.EBUSY
+			}
 			if fs.client == nil {
 				return 0, nil, syscall.EIO
 			}
@@ -483,22 +502,47 @@ func (fs *RawFS) OnUnmount() {
 	fs.locks.Close()
 	// 排他锁等待所有在途请求释放读锁，先排空异步写缓冲确保 dirtyInodes 完整，再逐一同步落盘。
 	fs.lifecycleMu.Lock()
-	fs.writeBehind.Clear(opCtx)
-	for _, ino := range fs.takeDirtyInodes() {
-		ctx, done := fs.RPCContextFrom(opCtx, nil)
-		_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
-			Ino:    ino,
-			DiskId: fs.cfg.DiskID,
-			Epoch:  fs.cfg.Epoch,
-		}))
-		done()
-		if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
-			fs.metrics.incDirtyFlushError()
-			fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
-		} else {
-			fs.metrics.incDirtyFlushOK()
+	var (
+		flushCtx    context.Context
+		flushCancel context.CancelFunc
+	)
+	if fs.IsLeaseLost() {
+		flushCtx, flushCancel = context.WithCancel(opCtx)
+		flushCancel()
+	} else {
+		flushCtx, flushCancel = context.WithTimeout(opCtx, unmountFlushTimeout)
+	}
+	fs.writeBehind.Clear(flushCtx)
+	dirtyInodes := fs.takeDirtyInodes()
+	if !fs.IsLeaseLost() {
+		for idx, ino := range dirtyInodes {
+			if flushCtx.Err() != nil {
+				fs.logger().WarnContext(opCtx, "unmount_fsync_timeout_skipped",
+					"skipped", len(dirtyInodes)-idx,
+					"error", flushCtx.Err(),
+				)
+				break
+			}
+			ctx, done := fs.RPCContextFrom(flushCtx, nil)
+			_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
+				Ino:    ino,
+				DiskId: fs.cfg.DiskID,
+				Epoch:  fs.cfg.Epoch,
+			}))
+			done()
+			if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
+				fs.metrics.incDirtyFlushError()
+				fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
+				if code := connect.CodeOf(err); code == connect.CodeFailedPrecondition || code == connect.CodeNotFound {
+					fs.MarkLeaseLost()
+					break
+				}
+			} else {
+				fs.metrics.incDirtyFlushOK()
+			}
 		}
 	}
+	flushCancel()
 	fs.handles.clear()
 	fs.cache.clear()
 	fs.caps.reset()
@@ -680,6 +724,9 @@ func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, from
 		fs.metrics.incAsyncReleaseError()
 	}
 	fs.warnOrphanBacklog(ctx, item.ino, item.attempts+1, fs.releaseQueueDepth(), err)
+	if code := connect.CodeOf(err); code == connect.CodeFailedPrecondition || code == connect.CodeNotFound {
+		fs.MarkLeaseLost()
+	}
 	return !shouldRetryReclaim(err)
 }
 
@@ -698,12 +745,15 @@ func (fs *RawFS) releaseRetryLoop() {
 }
 
 func (fs *RawFS) drainReleaseQueueOnce(ctx context.Context) {
+	if fs.IsLeaseLost() {
+		return
+	}
 	fs.releaseMu.Lock()
 	queue := fs.releaseQueue
 	fs.releaseQueue = nil
 	fs.releaseMu.Unlock()
 	for _, item := range queue {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || fs.IsLeaseLost() {
 			fs.releaseMu.Lock()
 			fs.releaseQueue = append(fs.releaseQueue, item)
 			fs.releaseMu.Unlock()
@@ -734,6 +784,12 @@ func (fs *RawFS) stopAndDrainReleaseQueue() {
 	fs.releaseCancel()
 	if started {
 		<-done
+	}
+	if fs.IsLeaseLost() {
+		fs.releaseMu.Lock()
+		fs.releaseQueue = nil
+		fs.releaseMu.Unlock()
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -829,6 +885,7 @@ func BuildMountOptions(cfg Config) *fuse.MountOptions {
 		// truncate_pagecache + invalidate_inode_pages2 兜底。
 		DisabledCapabilities: fuse.CAP_WRITEBACK_CACHE | fuse.CAP_AUTO_INVAL_DATA,
 		DirectMount:          true,
+		DirectMountFlags:     directMountFlags(cfg.ReadOnly),
 		Debug:                cfg.Debug,
 	}
 }

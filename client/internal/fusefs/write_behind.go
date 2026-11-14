@@ -443,12 +443,20 @@ func (st *inodeWriteBehind) flushStageSyncLocked(ctx context.Context, c *WriteBe
 	st.mu.Unlock()
 
 	baseCtx := context.Background()
+	var dlCancel context.CancelFunc
 	if ctx != nil {
 		baseCtx = context.WithoutCancel(ctx)
+		// 保留外层传入的超时截止时间（如 OnUnmount 总刷盘预算），避免单次阻塞撑满 30 秒。
+		if deadline, ok := ctx.Deadline(); ok {
+			baseCtx, dlCancel = context.WithDeadline(baseCtx, deadline)
+		}
 	}
 	rpcCtx, cancel := context.WithTimeout(baseCtx, DefaultRPCTimeout)
 	written, respInode, err := writer(rpcCtx, ino, chunkOff, buf[:chunkLen:chunkLen])
 	cancel()
+	if dlCancel != nil {
+		dlCancel()
+	}
 	releaseWriteBehindBuf(buf)
 
 	if err == nil && written < uint32(chunkLen) {
@@ -1068,7 +1076,9 @@ func (c *WriteBehindCoordinator) Clear(ctx context.Context) {
 	for _, st := range targets {
 		st.opMu.Lock()
 		st.mu.Lock()
-		st.barrierLocked(ctx, c)
+		if ctx == nil || ctx.Err() == nil {
+			st.barrierLocked(ctx, c)
+		}
 		st.discardStageLocked(&c.pendingCount)
 		st.removed = true
 		st.mu.Unlock()

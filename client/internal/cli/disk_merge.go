@@ -245,10 +245,10 @@ func (a *diskMergeAdapter) preRPC(ports diskPorts, _ io.Writer) *diskCLIError {
 			msg:      fmt.Sprintf("检查本机挂载表失败: %v", err),
 		}
 	}
-	if targetInfo.Mounted {
+	if targetInfo.Mounted && !targetInfo.ReadOnly {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("目标磁盘 %s 当前正在本机挂载点 %s 处于挂载状态，请先执行 bowl umount %s 卸载后再合并", a.targetDiskID, targetInfo.Mountpoint, targetInfo.Mountpoint),
+			msg:      fmt.Sprintf("目标磁盘 %s 当前正在本机挂载点 %s 处于读写挂载状态，请先执行 bowl umount %s 卸载后再合并", a.targetDiskID, targetInfo.Mountpoint, targetInfo.Mountpoint),
 		}
 	}
 

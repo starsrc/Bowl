@@ -50,6 +50,7 @@ var mappings = []errorMapping{
 	{sentinel: ErrNoBaseCommit, code: codes.FailedPrecondition, reason: "EINVAL"},
 	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: store.ErrWriterLeaseActive, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
 }
 

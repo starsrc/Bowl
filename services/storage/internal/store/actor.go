@@ -43,6 +43,21 @@ type pebbleReader interface {
 	NewIter(opts *pebble.IterOptions) (*pebble.Iterator, error)
 }
 
+const (
+	// DefaultWriterLeaseTTL 定义单写者租约的默认有效时长（30 秒）。
+	DefaultWriterLeaseTTL = 30 * time.Second
+)
+
+var (
+	minUnixNanoTime = time.Unix(0, math.MinInt64).UTC()
+	maxUnixNanoTime = time.Unix(0, math.MaxInt64).UTC()
+)
+
+type writerLeaseSnapshot struct {
+	epoch     uint64
+	expiresAt int64
+}
+
 // opKind 标识投递到 StoreActor 双缓冲队列的操作类型。
 type opKind uint8
 
@@ -65,7 +80,9 @@ const (
 	opFsyncDir
 	opPurgeOrphan
 	opCleanOrphans
-	opAdvanceEpoch
+	opAcquireWriterLease
+	opRenewWriterLease
+	opReleaseWriterLease
 	opUpdateMaxBytes
 	opCompactSelect
 	opCompactRelocate
@@ -111,8 +128,12 @@ func (op opKind) String() string {
 		return "purge_orphan"
 	case opCleanOrphans:
 		return "clean_orphans"
-	case opAdvanceEpoch:
-		return "advance_epoch"
+	case opAcquireWriterLease:
+		return "acquire_writer_lease"
+	case opRenewWriterLease:
+		return "renew_writer_lease"
+	case opReleaseWriterLease:
+		return "release_writer_lease"
 	case opUpdateMaxBytes:
 		return "update_max_bytes"
 	case opCompactSelect:
@@ -139,6 +160,7 @@ type writeCmd struct {
 	dequeueAt   time.Time
 	spanCtx     trace.SpanContext
 	epoch       uint64
+	forceStale  bool
 	syncBarrier bool
 	syncIno     uint64
 	stagedBlobs []BlobRef
@@ -251,13 +273,13 @@ type StoreActor struct {
 	// 3. 并发读路径与监控快照无锁镜像（每次 Batch 提交后刷新）
 	atomicLogicalBytes      atomic.Uint64
 	atomicInodes            atomic.Uint64
-	atomicWriterEpoch       atomic.Uint64
+	leaseSnap               atomic.Pointer[writerLeaseSnapshot]
 	atomicPackPhysicalBytes atomic.Uint64
 	atomicPackLiveBytes     atomic.Uint64
 	atomicLowWatermarkPacks atomic.Int64
 	atomicPendingDeadPacks  atomic.Int64
 	pebbleStallCount        atomic.Int64
-	pendingEpochAdvances    atomic.Int32
+	pendingLeaseUpdates     atomic.Int32
 
 	lastStaleEpochLogNano   atomic.Int64
 	suppressedStaleEpochLog atomic.Uint64
@@ -463,7 +485,7 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 		s.stat = stat
 		s.atomicLogicalBytes.Store(stat.LogicalBytes)
 		s.atomicInodes.Store(stat.Inodes)
-		s.atomicWriterEpoch.Store(stat.WriterEpoch)
+		s.publishLeaseSnapshot()
 		s.maxExistingIno = RootIno
 		if s.inoAllocator != nil {
 			s.nextIno = 0
@@ -491,6 +513,7 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 			s.maxBytes.Store(stat.MaxBytes)
 		}
 		stat.WriterEpoch = 0
+		stat.WriterExpiresAt = 0
 		resetBatch := s.db.NewBatch()
 		BatchSetStatDeferred(resetBatch, stat)
 		applyErr := s.db.Apply(resetBatch, pebble.Sync)
@@ -506,7 +529,7 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 	s.stat = stat
 	s.atomicLogicalBytes.Store(stat.LogicalBytes)
 	s.atomicInodes.Store(stat.Inodes)
-	s.atomicWriterEpoch.Store(stat.WriterEpoch)
+	s.publishLeaseSnapshot()
 
 	if !s.readOnly {
 		maxIno, scanErr := s.scanMaxInode()
@@ -568,44 +591,149 @@ func (s *StoreActor) SetMaxBytes(maxBytes uint64) { s.maxBytes.Store(maxBytes) }
 func (s *StoreActor) MaxBytes() uint64 { return s.maxBytes.Load() }
 
 // WriterEpoch 返回当前已持久化生效的写世代号。
-func (s *StoreActor) WriterEpoch() uint64 { return s.atomicWriterEpoch.Load() }
-
-type advanceEpochOp struct {
-	plans    []inodeReclaimPlan
-	root     Inode
-	oldEpoch uint64
-	epoch    uint64
-	rootAttr Attribute
+func (s *StoreActor) publishLeaseSnapshot() {
+	s.leaseSnap.Store(&writerLeaseSnapshot{
+		epoch:     s.stat.WriterEpoch,
+		expiresAt: s.stat.WriterExpiresAt,
+	})
 }
 
-// AdvanceEpoch 通过 Actor 队列原子递增 WriterEpoch 并以 pebble.Sync 持久化至 "sys:stat"，
-// 同时清扫所有残留 Orphan Inode 并返回新 WriterEpoch 与根目录 Inode(1) 的最新 Attribute。
+func (s *StoreActor) currentUTCUnixNano() (int64, error) {
+	nowUTC := s.now().UTC()
+	if nowUTC.Before(minUnixNanoTime) || nowUTC.After(maxUnixNanoTime) {
+		return 0, ErrInvalid
+	}
+	return nowUTC.UnixNano(), nil
+}
+
+func (s *StoreActor) calcLeaseExpiresAt(ttl time.Duration) (nowNano, expiresAt int64, err error) {
+	if ttl <= 0 {
+		return 0, 0, ErrInvalid
+	}
+	nowUTC := s.now().UTC()
+	if nowUTC.Before(minUnixNanoTime) || nowUTC.After(maxUnixNanoTime) {
+		return 0, 0, ErrInvalid
+	}
+	nowNano = nowUTC.UnixNano()
+	exp := nowUTC.Add(ttl)
+	if !exp.After(nowUTC) || exp.After(maxUnixNanoTime) {
+		return 0, 0, ErrInvalid
+	}
+	expiresAt = exp.UnixNano()
+	ttlNano := ttl.Nanoseconds()
+	if expiresAt <= 0 || expiresAt <= nowNano || nowNano > math.MaxInt64-ttlNano {
+		return 0, 0, ErrInvalid
+	}
+	return nowNano, expiresAt, nil
+}
+
+func isWriterLeaseActive(st BranchStat, nowNano int64) bool {
+	return st.WriterEpoch > 0 && st.WriterExpiresAt > 0 && nowNano < st.WriterExpiresAt
+}
+
+// WriterEpoch 返回当前写世代号的原子只读快照。
+func (s *StoreActor) WriterEpoch() uint64 {
+	if snap := s.leaseSnap.Load(); snap != nil {
+		return snap.epoch
+	}
+	return 0
+}
+
+// WriterExpiresAt 返回当前写租约过期时间（UTC UnixNano）的原子只读快照。
+func (s *StoreActor) WriterExpiresAt() int64 {
+	if snap := s.leaseSnap.Load(); snap != nil {
+		return snap.expiresAt
+	}
+	return 0
+}
+
+// HasActiveWriterLease 只读检查磁盘当前是否持有未过期的写租约。
+func (s *StoreActor) HasActiveWriterLease(_ context.Context) bool {
+	if s == nil {
+		return false
+	}
+	snap := s.leaseSnap.Load()
+	if snap == nil || snap.epoch == 0 || snap.expiresAt <= 0 {
+		return false
+	}
+	nowNano, err := s.currentUTCUnixNano()
+	if err != nil {
+		return false
+	}
+	return nowNano < snap.expiresAt
+}
+
+type acquireWriterLeaseOp struct {
+	ttl       time.Duration
+	force     bool
+	plans     []inodeReclaimPlan
+	root      Inode
+	oldEpoch  uint64
+	epoch     uint64
+	expiresAt int64
+	rootAttr  Attribute
+}
+
+type renewWriterLeaseOp struct {
+	epoch     uint64
+	ttl       time.Duration
+	expiresAt int64
+}
+
+type releaseWriterLeaseOp struct {
+	epoch uint64
+	noop  bool
+}
+
+// AdvanceEpoch 委托 AcquireWriterLease(ctx, DefaultWriterLeaseTTL, true) 获取一个默认时长的抢占式写租约，
+// 并保持历史调用方的返回契约不变。
 func (s *StoreActor) AdvanceEpoch(ctx context.Context) (uint64, Attribute, error) {
+	return s.AcquireWriterLease(ctx, DefaultWriterLeaseTTL, true)
+}
+
+// AcquireWriterLease 通过 Actor 队列获取或抢占单写者租约并推进 WriterEpoch，
+// 清扫所有残留 Orphan Inode，以 pebble.Sync 持久化 49 字节 BranchStat 至 "sys:stat"。
+func (s *StoreActor) AcquireWriterLease(ctx context.Context, ttl time.Duration, force bool) (uint64, Attribute, error) {
 	if s.readOnly {
 		return 0, Attribute{}, ErrReadOnly
 	}
-	s.pendingEpochAdvances.Add(1)
-	defer s.pendingEpochAdvances.Add(-1)
+	if ttl <= 0 {
+		return 0, Attribute{}, ErrInvalid
+	}
+	s.pendingLeaseUpdates.Add(1)
+	defer s.pendingLeaseUpdates.Add(-1)
 
-	op := &advanceEpochOp{}
+	op := &acquireWriterLeaseOp{
+		ttl:   ttl,
+		force: force,
+	}
 	cmd := s.acquireCmd()
-	cmd.op = opAdvanceEpoch
+	cmd.op = opAcquireWriterLease
 	cmd.req = op
 	if err := s.submit(ctx, cmd); err != nil {
 		return 0, Attribute{}, err
 	}
 	if s.logger != nil {
-		s.logger.Info("writer epoch advanced",
+		s.logger.Info("writer lease acquired",
 			"old_epoch", op.oldEpoch,
 			"new_epoch", op.epoch,
+			"expires_at", op.expiresAt,
+			"force", force,
 			"reclaimed_orphans", len(op.plans),
 		)
 	}
 	return op.epoch, op.rootAttr, nil
 }
 
-func (s *StoreActor) validateAdvanceEpochCmd(cmd *writeCmd) error {
-	op, _ := cmd.req.(*advanceEpochOp)
+func (s *StoreActor) validateAcquireWriterLeaseCmd(cmd *writeCmd) error {
+	op, _ := cmd.req.(*acquireWriterLeaseOp)
+	nowNano, expNano, err := s.calcLeaseExpiresAt(op.ttl)
+	if err != nil {
+		return err
+	}
+	if !op.force && isWriterLeaseActive(s.stat, nowNano) {
+		return ErrWriterLeaseActive
+	}
 	if s.stat.WriterEpoch == math.MaxUint64 {
 		return ErrNoSpace
 	}
@@ -617,15 +745,20 @@ func (s *StoreActor) validateAdvanceEpochCmd(cmd *writeCmd) error {
 	if err != nil {
 		return err
 	}
+	if len(plans) > 0 && s.stat.NextWriteSeq == math.MaxUint64 {
+		return ErrNoSpace
+	}
 	op.root = root
 	op.plans = plans
+	op.expiresAt = expNano
 	return nil
 }
 
-func (s *StoreActor) mutateAdvanceEpochCmd(cmd *writeCmd) {
-	op, _ := cmd.req.(*advanceEpochOp)
+func (s *StoreActor) mutateAcquireWriterLeaseCmd(cmd *writeCmd) {
+	op, _ := cmd.req.(*acquireWriterLeaseOp)
 	op.oldEpoch = s.stat.WriterEpoch
 	s.stat.WriterEpoch++
+	s.stat.WriterExpiresAt = op.expiresAt
 	if len(op.plans) > 0 {
 		s.stat.NextWriteSeq++
 		for i := range op.plans {
@@ -635,6 +768,78 @@ func (s *StoreActor) mutateAdvanceEpochCmd(cmd *writeCmd) {
 	s.overlayAtime(&op.root)
 	op.epoch = s.stat.WriterEpoch
 	op.rootAttr = op.root.ToAttribute()
+	cmd.syncBarrier = true
+}
+
+// RenewWriterLease 在写世代仍活跃且未过期时续延当前 WriterExpiresAt，不递增 WriterEpoch 或 NextWriteSeq。
+func (s *StoreActor) RenewWriterLease(ctx context.Context, epoch uint64, ttl time.Duration) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
+	if ttl <= 0 {
+		return ErrInvalid
+	}
+	s.pendingLeaseUpdates.Add(1)
+	defer s.pendingLeaseUpdates.Add(-1)
+
+	op := &renewWriterLeaseOp{
+		epoch: epoch,
+		ttl:   ttl,
+	}
+	cmd := s.acquireCmd()
+	cmd.op = opRenewWriterLease
+	cmd.req = op
+	return s.submit(ctx, cmd)
+}
+
+func (s *StoreActor) validateRenewWriterLeaseCmd(cmd *writeCmd) error {
+	op, _ := cmd.req.(*renewWriterLeaseOp)
+	nowNano, expNano, err := s.calcLeaseExpiresAt(op.ttl)
+	if err != nil {
+		return err
+	}
+	if op.epoch == 0 || op.epoch != s.stat.WriterEpoch || !isWriterLeaseActive(s.stat, nowNano) {
+		return ErrStaleEpoch
+	}
+	op.expiresAt = expNano
+	return nil
+}
+
+func (s *StoreActor) mutateRenewWriterLeaseCmd(cmd *writeCmd) {
+	op, _ := cmd.req.(*renewWriterLeaseOp)
+	s.stat.WriterExpiresAt = op.expiresAt
+	cmd.syncBarrier = true
+}
+
+// ReleaseWriterLease 幂等清零匹配写世代的 WriterExpiresAt，保持 WriterEpoch 单调不回退。
+func (s *StoreActor) ReleaseWriterLease(ctx context.Context, epoch uint64) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
+	s.pendingLeaseUpdates.Add(1)
+	defer s.pendingLeaseUpdates.Add(-1)
+
+	op := &releaseWriterLeaseOp{epoch: epoch}
+	cmd := s.acquireCmd()
+	cmd.op = opReleaseWriterLease
+	cmd.req = op
+	return s.submit(ctx, cmd)
+}
+
+func (s *StoreActor) validateReleaseWriterLeaseCmd(cmd *writeCmd) error {
+	op, _ := cmd.req.(*releaseWriterLeaseOp)
+	if op.epoch == 0 || op.epoch != s.stat.WriterEpoch || s.stat.WriterExpiresAt == 0 {
+		op.noop = true
+	}
+	return nil
+}
+
+func (s *StoreActor) mutateReleaseWriterLeaseCmd(cmd *writeCmd) {
+	op, _ := cmd.req.(*releaseWriterLeaseOp)
+	if op.noop {
+		return
+	}
+	s.stat.WriterExpiresAt = 0
 	cmd.syncBarrier = true
 }
 
@@ -925,6 +1130,7 @@ func (s *StoreActor) releaseCmd(cmd *writeCmd) {
 	cmd.dequeueAt = time.Time{}
 	cmd.spanCtx = trace.SpanContext{}
 	cmd.epoch = 0
+	cmd.forceStale = false
 	cmd.syncBarrier = false
 	cmd.syncIno = 0
 	cmd.stagedBlobs = cmd.stagedBlobs[:0]
@@ -959,20 +1165,34 @@ func resolveEpoch(epoch []uint64) uint64 {
 }
 
 func (s *StoreActor) isDefinitelyStaleEpoch(epoch uint64) bool {
-	cur := s.atomicWriterEpoch.Load()
-	if epoch < cur {
+	if s.pendingLeaseUpdates.Load() != 0 {
+		return false
+	}
+	snap := s.leaseSnap.Load()
+	if snap == nil {
+		return false
+	}
+	if epoch != snap.epoch {
 		return true
 	}
-	if epoch > cur && s.pendingEpochAdvances.Load() == 0 {
+	if snap.epoch == 0 {
+		return false
+	}
+	if snap.expiresAt <= 0 {
 		return true
 	}
-	return false
+	nowNano, err := s.currentUTCUnixNano()
+	if err != nil {
+		return false
+	}
+	return nowNano >= snap.expiresAt
 }
 
 func (s *StoreActor) submitStaleEpoch(ctx context.Context, op opKind, epoch uint64) error {
 	cmd := s.acquireCmd()
 	cmd.op = op
 	cmd.epoch = epoch
+	cmd.forceStale = true
 	return s.submit(ctx, cmd)
 }
 
@@ -1184,6 +1404,8 @@ func (s *StoreActor) processTick() {
 		phaseBDur       time.Duration
 	)
 
+	tickStartStat := s.stat
+
 	// Step 2：逐条两阶段串行演进（Phase A Validate -> Phase B Mutate）
 	for _, cmd := range cmds {
 		// Phase A — 纯内存只读预校验（绝不触碰 s.batch 写接口）
@@ -1214,7 +1436,7 @@ func (s *StoreActor) processTick() {
 		}
 		s.unpinStagedBlobs(cmd.stagedBlobs)
 		cmd.stagedBlobs = cmd.stagedBlobs[:0]
-		if s.batch.Count() > prevCount || s.stat != prevStat || len(s.dirtyPackStats) > 0 || cmd.op == opUpdateMaxBytes {
+		if s.batch.Count() > prevCount || s.stat != prevStat || len(s.dirtyPackStats) > 0 || cmd.op == opUpdateMaxBytes || cmd.op == opAcquireWriterLease || cmd.op == opRenewWriterLease {
 			mutated = true
 		}
 		if cmd.op == opCheckpoint {
@@ -1286,6 +1508,8 @@ func (s *StoreActor) processTick() {
 		}
 		if commitErr == nil {
 			s.publishAtomicStats()
+		} else {
+			s.stat = tickStartStat
 		}
 	} else if hasSyncBarrier {
 		var syncSpan trace.Span
@@ -1297,6 +1521,9 @@ func (s *StoreActor) processTick() {
 		}
 		packSyncDur, walApplyDur, deadRemoveDur, reclaimedPacks, commitErr = s.syncBarrierWithoutBatch(fsyncFileInodes)
 		finishSpan(syncSpan, commitErr)
+		if commitErr != nil {
+			s.stat = tickStartStat
+		}
 	}
 
 	// Step 4：防膨胀重置与执行切面固化（仍在 tickSpan 生命周期内）、唤醒调用方（Reset & Wake）
@@ -1423,10 +1650,29 @@ func (s *StoreActor) logStaleEpochFenced(op opKind, reqEpoch, curEpoch uint64) {
 }
 
 func (s *StoreActor) validateCmd(cmd *writeCmd) error {
-	if isExternalWriteOp(cmd.op) && cmd.epoch != s.stat.WriterEpoch {
-		s.metrics.incEpochFenced()
-		s.logStaleEpochFenced(cmd.op, cmd.epoch, s.stat.WriterEpoch)
-		return ErrStaleEpoch
+	if isExternalWriteOp(cmd.op) {
+		if cmd.forceStale || cmd.req == nil {
+			s.metrics.incEpochFenced()
+			s.logStaleEpochFenced(cmd.op, cmd.epoch, s.stat.WriterEpoch)
+			return ErrStaleEpoch
+		}
+		if s.stat.WriterEpoch == 0 {
+			if cmd.epoch != 0 {
+				s.metrics.incEpochFenced()
+				s.logStaleEpochFenced(cmd.op, cmd.epoch, s.stat.WriterEpoch)
+				return ErrStaleEpoch
+			}
+		} else {
+			nowNano, err := s.currentUTCUnixNano()
+			if err != nil {
+				return err
+			}
+			if cmd.epoch != s.stat.WriterEpoch || !isWriterLeaseActive(s.stat, nowNano) {
+				s.metrics.incEpochFenced()
+				s.logStaleEpochFenced(cmd.op, cmd.epoch, s.stat.WriterEpoch)
+				return ErrStaleEpoch
+			}
+		}
 	}
 	switch cmd.op {
 	case opMknod, opMkdir, opCreate, opSymlink:
@@ -1457,8 +1703,12 @@ func (s *StoreActor) validateCmd(cmd *writeCmd) error {
 		return s.validatePurgeOrphanCmd(cmd)
 	case opCleanOrphans:
 		return s.validateCleanOrphansCmd(cmd)
-	case opAdvanceEpoch:
-		return s.validateAdvanceEpochCmd(cmd)
+	case opAcquireWriterLease:
+		return s.validateAcquireWriterLeaseCmd(cmd)
+	case opRenewWriterLease:
+		return s.validateRenewWriterLeaseCmd(cmd)
+	case opReleaseWriterLease:
+		return s.validateReleaseWriterLeaseCmd(cmd)
 	case opUpdateMaxBytes:
 		return s.validateUpdateMaxBytesCmd(cmd)
 	case opCompactSelect:
@@ -1502,8 +1752,12 @@ func (s *StoreActor) mutateCmd(cmd *writeCmd) {
 		s.mutatePurgeOrphanCmd(cmd)
 	case opCleanOrphans:
 		s.mutateCleanOrphansCmd(cmd)
-	case opAdvanceEpoch:
-		s.mutateAdvanceEpochCmd(cmd)
+	case opAcquireWriterLease:
+		s.mutateAcquireWriterLeaseCmd(cmd)
+	case opRenewWriterLease:
+		s.mutateRenewWriterLeaseCmd(cmd)
+	case opReleaseWriterLease:
+		s.mutateReleaseWriterLeaseCmd(cmd)
 	case opUpdateMaxBytes:
 		s.mutateUpdateMaxBytesCmd(cmd)
 	case opCompactRelocate:
@@ -1517,35 +1771,93 @@ func (s *StoreActor) mutateCmd(cmd *writeCmd) {
 
 func (s *StoreActor) commitWithSyncBarrier(fsyncFileInodes, deadPacks []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
 	toReclaim := s.takePendingDeadPacks()
+	var allReclaim []uint64
+	if len(toReclaim)+len(deadPacks) > 0 {
+		allReclaim = make([]uint64, 0, len(toReclaim)+len(deadPacks))
+		allReclaim = append(allReclaim, toReclaim...)
+		allReclaim = append(allReclaim, deadPacks...)
+	}
+	needFullBlobSync := s.blobs != nil && (len(allReclaim) > 0 || s.blobs.hasDirty())
+	var dataErr error
+	if len(fsyncFileInodes) > 0 || needFullBlobSync {
+		packStart := time.Now()
+		if len(fsyncFileInodes) > 0 {
+			dataErr = s.syncFileInodes(fsyncFileInodes)
+		}
+		if needFullBlobSync && s.blobs.hasDirty() {
+			dataErr = errors.Join(dataErr, s.blobs.sync())
+		}
+		packSyncDur = time.Since(packStart)
+		s.metrics.observePhasePackSyncBarrier(packSyncDur)
+		if dataErr != nil {
+			s.restorePendingDeadPacks(allReclaim)
+			return packSyncDur, 0, 0, 0, dataErr
+		}
+	}
+
 	applyStart := time.Now()
 	if applyErr := s.db.ApplyNoSyncWait(s.batch, pebble.Sync); applyErr != nil {
 		walSyncDur = time.Since(applyStart)
 		s.metrics.observePhaseWALApplySync(walSyncDur)
-		s.restorePendingDeadPacks(toReclaim)
-		return 0, walSyncDur, 0, 0, applyErr
-	}
-
-	toReclaim = append(toReclaim, deadPacks...)
-	var dataErr error
-	if len(fsyncFileInodes) > 0 {
-		packStart := time.Now()
-		dataErr = s.syncFileInodes(fsyncFileInodes)
-		packSyncDur = time.Since(packStart)
-		s.metrics.observePhasePackSyncBarrier(packSyncDur)
+		s.restorePendingDeadPacks(allReclaim)
+		return packSyncDur, walSyncDur, 0, 0, applyErr
 	}
 
 	walErr := s.batch.SyncWait()
-	// 记录从 ApplyNoSyncWait 提交至 SyncWait 返回的完整 WAL 同步墙钟耗时，避免被并发执行的 .pack fdatasync 掩盖。
+	// 记录从 ApplyNoSyncWait 提交至 SyncWait 返回的完整 WAL 同步墙钟耗时。
 	walSyncDur = time.Since(applyStart)
 	s.metrics.observePhaseWALApplySync(walSyncDur)
 
 	if walErr != nil {
-		s.restorePendingDeadPacks(toReclaim)
+		s.restorePendingDeadPacks(allReclaim)
 		s.walDirty.Store(true)
 	} else {
-		if dataErr == nil {
-			s.walDirty.Store(false)
+		s.walDirty.Store(false)
+		if len(allReclaim) > 0 {
+			remStart := time.Now()
+			s.enqueueRemovePacks(allReclaim)
+			deadRemoveDur = time.Since(remStart)
+			reclaimed = len(allReclaim)
 		}
+	}
+	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, walErr
+}
+
+func (s *StoreActor) syncBarrierWithoutBatch(fsyncFileInodes []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
+	toReclaim := s.takePendingDeadPacks()
+	wasDirty := s.walDirty.Load()
+	needFullBlobSync := s.blobs != nil && (len(toReclaim) > 0 || s.blobs.hasDirty())
+	needPackSync := len(fsyncFileInodes) > 0 || needFullBlobSync
+	needWALSync := wasDirty || len(toReclaim) > 0
+
+	var dataErr error
+	if needPackSync {
+		packStart := time.Now()
+		if len(fsyncFileInodes) > 0 {
+			dataErr = s.syncFileInodes(fsyncFileInodes)
+		}
+		if needFullBlobSync && s.blobs.hasDirty() {
+			dataErr = errors.Join(dataErr, s.blobs.sync())
+		}
+		packSyncDur = time.Since(packStart)
+		s.metrics.observePhasePackSyncBarrier(packSyncDur)
+		if dataErr != nil {
+			s.restorePendingDeadPacks(toReclaim)
+			return packSyncDur, 0, 0, 0, dataErr
+		}
+	}
+
+	var walErr error
+	if needWALSync {
+		walStart := time.Now()
+		walErr = s.db.LogData(nil, pebble.Sync)
+		walSyncDur = time.Since(walStart)
+		s.metrics.observePhaseWALApplySync(walSyncDur)
+		if walErr != nil {
+			s.restorePendingDeadPacks(toReclaim)
+			return packSyncDur, walSyncDur, 0, 0, walErr
+		}
+		s.walDirty.Store(false)
 		if len(toReclaim) > 0 {
 			remStart := time.Now()
 			s.enqueueRemovePacks(toReclaim)
@@ -1553,57 +1865,7 @@ func (s *StoreActor) commitWithSyncBarrier(fsyncFileInodes, deadPacks []uint64) 
 			reclaimed = len(toReclaim)
 		}
 	}
-	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, errors.Join(dataErr, walErr)
-}
-
-func (s *StoreActor) syncBarrierWithoutBatch(fsyncFileInodes []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
-	toReclaim := s.takePendingDeadPacks()
-	wasDirty := s.walDirty.Swap(false)
-	needPackSync := len(fsyncFileInodes) > 0
-	needWALSync := wasDirty || len(toReclaim) > 0
-
-	var (
-		dataErr error
-		walErr  error
-	)
-	switch {
-	case needPackSync && needWALSync:
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			packStart := time.Now()
-			dataErr = s.syncFileInodes(fsyncFileInodes)
-			packSyncDur = time.Since(packStart)
-		})
-		walStart := time.Now()
-		walErr = s.db.LogData(nil, pebble.Sync)
-		walSyncDur = time.Since(walStart)
-		wg.Wait()
-	case needPackSync:
-		packStart := time.Now()
-		dataErr = s.syncFileInodes(fsyncFileInodes)
-		packSyncDur = time.Since(packStart)
-	case needWALSync:
-		walStart := time.Now()
-		walErr = s.db.LogData(nil, pebble.Sync)
-		walSyncDur = time.Since(walStart)
-	}
-
-	if needPackSync {
-		s.metrics.observePhasePackSyncBarrier(packSyncDur)
-	}
-	if needWALSync {
-		s.metrics.observePhaseWALApplySync(walSyncDur)
-		if walErr != nil {
-			s.restorePendingDeadPacks(toReclaim)
-			s.walDirty.Store(true)
-		} else if len(toReclaim) > 0 {
-			remStart := time.Now()
-			s.enqueueRemovePacks(toReclaim)
-			deadRemoveDur = time.Since(remStart)
-			reclaimed = len(toReclaim)
-		}
-	}
-	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, errors.Join(dataErr, walErr)
+	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, nil
 }
 
 func (s *StoreActor) takeDirtyAtime() map[uint64]int64 {

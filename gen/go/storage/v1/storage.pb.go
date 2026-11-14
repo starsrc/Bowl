@@ -3545,9 +3545,13 @@ func (*RemoveXattrResponse) Descriptor() ([]byte, []int) {
 
 // MountDiskRequest 定义 MountDisk 接口输入参数。
 type MountDiskRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DiskId        string                 `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
-	ReadOnly      bool                   `protobuf:"varint,2,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 目标磁盘唯一标识符（UUID 格式）。
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 是否以只读模式挂载（true 时无状态且不递增写世代，返回 epoch = 0）。
+	ReadOnly bool `protobuf:"varint,2,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// 是否强制抢占当前持有未过期写租约的在线读写挂载（仅允许在 read_only = false 时设为 true）。
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3596,6 +3600,13 @@ func (x *MountDiskRequest) GetReadOnly() bool {
 	return false
 }
 
+func (x *MountDiskRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
 // MountDiskResponse 定义 MountDisk 接口输出参数。
 type MountDiskResponse struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
@@ -3603,10 +3614,8 @@ type MountDiskResponse struct {
 	RootInode           *Inode                 `protobuf:"bytes,2,opt,name=root_inode,json=rootInode,proto3" json:"root_inode,omitempty"`
 	EntryTimeoutSeconds float64                `protobuf:"fixed64,3,opt,name=entry_timeout_seconds,json=entryTimeoutSeconds,proto3" json:"entry_timeout_seconds,omitempty"`
 	AttrTimeoutSeconds  float64                `protobuf:"fixed64,4,opt,name=attr_timeout_seconds,json=attrTimeoutSeconds,proto3" json:"attr_timeout_seconds,omitempty"`
-	// 本次在线挂载实例的唯一标识符（UUID 格式）。
-	MountId string `protobuf:"bytes,5,opt,name=mount_id,json=mountId,proto3" json:"mount_id,omitempty"`
-	// 在线挂载软租约的有效时长（秒）。
-	LeaseTtlSeconds uint32 `protobuf:"varint,6,opt,name=lease_ttl_seconds,json=leaseTtlSeconds,proto3" json:"lease_ttl_seconds,omitempty"`
+	// 读写租约的有效时长（秒；只读挂载返回 0）。
+	LeaseTtlSeconds uint32 `protobuf:"varint,5,opt,name=lease_ttl_seconds,json=leaseTtlSeconds,proto3" json:"lease_ttl_seconds,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -3669,13 +3678,6 @@ func (x *MountDiskResponse) GetAttrTimeoutSeconds() float64 {
 	return 0
 }
 
-func (x *MountDiskResponse) GetMountId() string {
-	if x != nil {
-		return x.MountId
-	}
-	return ""
-}
-
 func (x *MountDiskResponse) GetLeaseTtlSeconds() uint32 {
 	if x != nil {
 		return x.LeaseTtlSeconds
@@ -3688,12 +3690,8 @@ type RenewMountRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
 	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
-	// 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。
-	MountId string `protobuf:"bytes,2,opt,name=mount_id,json=mountId,proto3" json:"mount_id,omitempty"`
-	// 是否为只读挂载。
-	ReadOnly bool `protobuf:"varint,3,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
-	// 写挂载世代号（只读挂载必须为 0；可写挂载必须大于 0 且在 int64 正数范围内）。
-	Epoch         uint64 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// 当前读写挂载持有的写世代号（必须大于 0 且在 int64 正数范围内）。
+	Epoch         uint64 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3735,20 +3733,6 @@ func (x *RenewMountRequest) GetDiskId() string {
 	return ""
 }
 
-func (x *RenewMountRequest) GetMountId() string {
-	if x != nil {
-		return x.MountId
-	}
-	return ""
-}
-
-func (x *RenewMountRequest) GetReadOnly() bool {
-	if x != nil {
-		return x.ReadOnly
-	}
-	return false
-}
-
 func (x *RenewMountRequest) GetEpoch() uint64 {
 	if x != nil {
 		return x.Epoch
@@ -3759,7 +3743,7 @@ func (x *RenewMountRequest) GetEpoch() uint64 {
 // RenewMountResponse 定义 RenewMount 接口输出参数。
 type RenewMountResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 续期后的在线挂载软租约有效时长（秒）。
+	// 续期后的在线写租约有效时长（秒）。
 	LeaseTtlSeconds uint32 `protobuf:"varint,1,opt,name=lease_ttl_seconds,json=leaseTtlSeconds,proto3" json:"lease_ttl_seconds,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -3807,8 +3791,8 @@ type UnmountDiskRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
 	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
-	// 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。
-	MountId       string `protobuf:"bytes,2,opt,name=mount_id,json=mountId,proto3" json:"mount_id,omitempty"`
+	// 待释放读写挂载持有的写世代号（必须大于 0 且在 int64 正数范围内）。
+	Epoch         uint64 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3850,11 +3834,11 @@ func (x *UnmountDiskRequest) GetDiskId() string {
 	return ""
 }
 
-func (x *UnmountDiskRequest) GetMountId() string {
+func (x *UnmountDiskRequest) GetEpoch() uint64 {
 	if x != nil {
-		return x.MountId
+		return x.Epoch
 	}
-	return ""
+	return 0
 }
 
 // UnmountDiskResponse 定义 UnmountDisk 接口输出参数。
@@ -5841,7 +5825,7 @@ type MergeDiskRequest struct {
 	DryRun bool `protobuf:"varint,5,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`
 	// 可选的合并后目标盘容量配额上限字节数（指定时必须在 int64 正数区间内）。
 	MaxBytes *uint64 `protobuf:"varint,6,opt,name=max_bytes,json=maxBytes,proto3,oneof" json:"max_bytes,omitempty"`
-	// 是否忽略在线挂载软租约门禁强制执行合并。
+	// 是否忽略在线挂载写租约门禁强制执行合并。
 	Force         bool `protobuf:"varint,7,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6322,35 +6306,30 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\adisk_id\x18\x03 \x01(\tBv\xbaHs\xba\x01k\n" +
 	"\x1bremovexattr_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12'\n" +
 	"\x05epoch\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x05epoch\"\x15\n" +
-	"\x13RemoveXattrResponse\"\xc0\x01\n" +
+	"\x13RemoveXattrResponse\"\xc8\x02\n" +
 	"\x10MountDiskRequest\x12\x8e\x01\n" +
 	"\adisk_id\x18\x01 \x01(\tBu\xbaHr\xba\x01j\n" +
 	"\x1amount_disk.disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x1b\n" +
-	"\tread_only\x18\x02 \x01(\bR\breadOnly\"\x88\x02\n" +
+	"\tread_only\x18\x02 \x01(\bR\breadOnly\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force:p\xbaHm\x1ak\n" +
+	"\x1cmount_disk_force_requires_rw\x12+force cannot be true when read_only is true\x1a\x1e!this.read_only || !this.force\"\xed\x01\n" +
 	"\x11MountDiskResponse\x12\x14\n" +
 	"\x05epoch\x18\x01 \x01(\x04R\x05epoch\x120\n" +
 	"\n" +
 	"root_inode\x18\x02 \x01(\v2\x11.storage.v1.InodeR\trootInode\x122\n" +
 	"\x15entry_timeout_seconds\x18\x03 \x01(\x01R\x13entryTimeoutSeconds\x120\n" +
-	"\x14attr_timeout_seconds\x18\x04 \x01(\x01R\x12attrTimeoutSeconds\x12\x19\n" +
-	"\bmount_id\x18\x05 \x01(\tR\amountId\x12*\n" +
-	"\x11lease_ttl_seconds\x18\x06 \x01(\rR\x0fleaseTtlSeconds\"\xa7\x04\n" +
+	"\x14attr_timeout_seconds\x18\x04 \x01(\x01R\x12attrTimeoutSeconds\x12*\n" +
+	"\x11lease_ttl_seconds\x18\x05 \x01(\rR\x0fleaseTtlSeconds\"\xce\x01\n" +
 	"\x11RenewMountRequest\x12\x8f\x01\n" +
 	"\adisk_id\x18\x01 \x01(\tBv\xbaHs\xba\x01k\n" +
-	"\x1brenew_mount_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x93\x01\n" +
-	"\bmount_id\x18\x02 \x01(\tBx\xbaHu\xba\x01m\n" +
-	"\x1crenew_mount_mount_id_not_nil\x12\x1dmount_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\amountId\x12\x1b\n" +
-	"\tread_only\x18\x03 \x01(\bR\breadOnly\x12%\n" +
-	"\x05epoch\x18\x04 \x01(\x04B\x0f\xbaH\f2\n" +
-	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x05epoch:\xa5\x01\xbaH\xa1\x01\x1a\x9e\x01\n" +
-	"\x1erenew_mount_epoch_matches_mode\x12Gepoch must be 0 when read_only is true, and > 0 when read_only is false\x1a3this.read_only ? this.epoch == 0u : this.epoch > 0u\"@\n" +
+	"\x1brenew_mount_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12'\n" +
+	"\x05epoch\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x05epoch\"@\n" +
 	"\x12RenewMountResponse\x12*\n" +
-	"\x11lease_ttl_seconds\x18\x01 \x01(\rR\x0fleaseTtlSeconds\"\xbe\x02\n" +
+	"\x11lease_ttl_seconds\x18\x01 \x01(\rR\x0fleaseTtlSeconds\"\xd0\x01\n" +
 	"\x12UnmountDiskRequest\x12\x90\x01\n" +
 	"\adisk_id\x18\x01 \x01(\tBw\xbaHt\xba\x01l\n" +
-	"\x1cunmount_disk_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x94\x01\n" +
-	"\bmount_id\x18\x02 \x01(\tBy\xbaHv\xba\x01n\n" +
-	"\x1dunmount_disk_mount_id_not_nil\x12\x1dmount_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\amountId\"\x15\n" +
+	"\x1cunmount_disk_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12'\n" +
+	"\x05epoch\x18\x02 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x05epoch\"\x15\n" +
 	"\x13UnmountDiskResponse\"z\n" +
 	"\x05Inode\x12\x19\n" +
 	"\x03ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x03ino\x12\x1e\n" +

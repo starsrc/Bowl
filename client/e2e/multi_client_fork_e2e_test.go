@@ -295,35 +295,65 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	disk := createTestDisk(t, client)
 	diskID := disk.GetDiskId()
 
-	// Given: 客户端 A 挂载并写入文件、打开预持句柄与已解链孤儿句柄
-	mpA, _ := mountWithCleanup(t, endpoint, diskID)
+	// 参数门禁：--ro 与 --force 冲突必须在 fork 守护进程前即以退出码 2 失败
+	roForceOut := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, diskID, t.TempDir(), "--ro", "--force")
+	require.Contains(t, roForceOut, "--ro 与 --force 不能同时使用")
+
+	// Given: 客户端 A 以后台守护进程挂载并写入文件、打开预持句柄与已解链孤儿句柄
+	mpA := t.TempDir()
+	runBowlSuccess(t, "mount", "--endpoint", endpoint, diskID, mpA)
+	waitForMount(t, mpA)
+	daemonAPID := findBowlDaemonPID(t, mpA)
+	t.Cleanup(func() {
+		_ = exec.Command("fusermount3", "-uz", mpA).Run()
+		if syscall.Kill(daemonAPID, 0) == nil {
+			_ = exec.Command(getBowlBin(), "umount", "-f", mpA).Run()
+		}
+	})
+
 	snapPath := filepath.Join(mpA, "snapshot.txt")
 	require.NoError(t, os.WriteFile(snapPath, []byte("v1"), 0o644))
 
-	// When: 只读客户端挂载并发读，写操作返回 EROFS，且可实时读到客户端 A 新写入内容
-	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--ro", "--direct-io")
-	roData, err := os.ReadFile(filepath.Join(mpRO, "snapshot.txt"))
-	require.NoError(t, err)
-	require.Equal(t, []byte("v1"), roData)
-	require.ErrorIs(t, os.WriteFile(filepath.Join(mpRO, "denied.txt"), []byte("x"), 0o644), syscall.EROFS)
+	// When: 两路只读客户端并发挂载，写操作返回 EROFS，且可实时读到客户端 A 新写入内容
+	mpRO1, stopRO1 := mountWithCleanup(t, endpoint, diskID, "--ro", "--direct-io")
+	mpRO2, stopRO2 := mountWithCleanup(t, endpoint, diskID, "--ro", "--direct-io")
+	for _, roMP := range []string{mpRO1, mpRO2} {
+		roData, err := os.ReadFile(filepath.Join(roMP, "snapshot.txt"))
+		require.NoError(t, err)
+		require.Equal(t, []byte("v1"), roData)
+		require.ErrorIs(t, os.WriteFile(filepath.Join(roMP, "denied.txt"), []byte("x"), 0o644), syscall.EROFS)
+	}
 
 	require.NoError(t, os.WriteFile(filepath.Join(mpA, "live.txt"), []byte("live-from-A"), 0o644))
-	liveRO, err := os.ReadFile(filepath.Join(mpRO, "live.txt"))
-	require.NoError(t, err)
-	require.Equal(t, []byte("live-from-A"), liveRO)
-	stopRO()
+	for _, roMP := range []string{mpRO1, mpRO2} {
+		liveRO, err := os.ReadFile(filepath.Join(roMP, "live.txt"))
+		require.NoError(t, err)
+		require.Equal(t, []byte("live-from-A"), liveRO)
+	}
+	stopRO1()
+	stopRO2()
 
 	preOpenFile, err := os.OpenFile(filepath.Join(mpA, "preopened.txt"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = preOpenFile.Close() })
+	orphanPath := filepath.Join(mpA, "orphan.bin")
+	orphanFile, err := os.OpenFile(orphanPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	closeOpenFiles := func() {
+		if preOpenFile != nil {
+			_ = preOpenFile.Close()
+			preOpenFile = nil
+		}
+		if orphanFile != nil {
+			_ = orphanFile.Close()
+			orphanFile = nil
+		}
+	}
+	t.Cleanup(closeOpenFiles)
+
 	_, err = preOpenFile.WriteString("before-takeover")
 	require.NoError(t, err)
 	require.NoError(t, preOpenFile.Sync())
 
-	orphanPath := filepath.Join(mpA, "orphan.bin")
-	orphanFile, err := os.OpenFile(orphanPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = orphanFile.Close() })
 	orphanPayload := bytes.Repeat([]byte{'O'}, 64*1024)
 	_, err = orphanFile.Write(orphanPayload)
 	require.NoError(t, err)
@@ -340,9 +370,16 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	require.NoError(t, err)
 	usedBefore := diskBefore.Msg.GetDisk().GetUsedBytes()
 
-	// When: 客户端 B 零等待可写挂载抢占 Epoch
+	// 未传 --force 的第二个 RW 挂载必须被未过期活跃写租约拦截并返回单行明确错误
+	conflictMP := t.TempDir()
+	conflictOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, diskID, conflictMP)
+	require.Contains(t, conflictOut, "存在未过期的活跃读写挂载")
+	require.Contains(t, conflictOut, "--force")
+	require.False(t, isMounted(conflictMP))
+
+	// When: 客户端 B 传入 --force 零等待可写挂载抢占 Epoch
 	takeoverStart := time.Now()
-	mpB, _ := mountWithCleanup(t, endpoint, diskID)
+	mpB, stopB := mountWithCleanup(t, endpoint, diskID, "--force")
 	require.Less(t, time.Since(takeoverStart), 3*time.Second, "新可写挂载必须零等待立即接管")
 
 	// Then: 前任孤儿被清扫释放配额，A 的新写入及旧句柄写/截断/同步均被围栏拦截返回 EBUSY
@@ -362,6 +399,50 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	gotPreOpen, err := os.ReadFile(filepath.Join(mpB, "preopened.txt"))
 	require.NoError(t, err)
 	require.Equal(t, []byte("before-takeover"), gotPreOpen)
+	stopB()
+
+	// 启动忙碌进程占住 mpA；等 A 的 RenewMount 收到终态失败后应触发自动卸载并回退懒卸载
+	cleanupOccupier := startMountBusyOccupier(t, mpA)
+	t.Cleanup(cleanupOccupier)
+
+	require.Eventually(t, func() bool {
+		return !isMounted(mpA)
+	}, 20*time.Second, 100*time.Millisecond, "旧写者续期收到终态拒绝后必须自动触发懒卸载")
+
+	// 趁旧进程仍被打开句柄与忙碌进程挂起时，在同一挂载点重挂其他磁盘并验证 mountMeta PID 归属保护
+	disk2 := createTestDisk(t, client)
+	runBowlSuccess(t, "mount", "--endpoint", endpoint, disk2.GetDiskId(), mpA)
+	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mpA).Run() })
+	waitForMount(t, mpA)
+
+	metaFile := mountMetaPath(t, mpA)
+	readMeta := func() (pid int, gotDiskID string) {
+		data, rErr := os.ReadFile(metaFile)
+		require.NoError(t, rErr)
+		var m struct {
+			PID    int    `json:"pid"`
+			DiskID string `json:"disk_id"`
+		}
+		require.NoError(t, json.Unmarshal(data, &m))
+		return m.PID, m.DiskID
+	}
+	newPID, gotDisk2ID := readMeta()
+	require.NotEqual(t, daemonAPID, newPID)
+	require.Equal(t, disk2.GetDiskId(), gotDisk2ID)
+
+	// 释放旧占用句柄与忙碌进程，旧守护进程 A 必须正常退出且不得误删新挂载的 mountMeta
+	closeOpenFiles()
+	cleanupOccupier()
+	waitForProcessExit(t, daemonAPID)
+
+	require.True(t, isMounted(mpA))
+	afterPID, afterDiskID := readMeta()
+	require.Equal(t, newPID, afterPID, "旧守护进程退出时不得误删同路径新挂载的 mountMeta")
+	require.Equal(t, disk2.GetDiskId(), afterDiskID)
+	require.NoError(t, os.WriteFile(filepath.Join(mpA, "remounted.txt"), []byte("ok"), 0o644))
+
+	runBowlSuccess(t, "umount", mpA)
+	waitForProcessExit(t, newPID)
 }
 
 // TestOnlineFork_DualMountIsolationAndParentDelete 验证在线挂载期间触发 `bowl disk fork` 的内存缓冲隔离、

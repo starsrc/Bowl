@@ -18,6 +18,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/version"
@@ -116,11 +117,15 @@ type fakeStorage struct {
 	returnNilDisk   map[string]bool
 	mountZeroRoot   bool
 	mountZeroEpoch  bool
-	mountIDSeq      int
+	mountZeroTTL    bool
+	enforceRWLease  bool
+	activeRWLease   map[string]uint64
 	mountLeaseTTL   uint32
+	mountReqs       []*storagev1.MountDiskRequest
 	renewReqs       []*storagev1.RenewMountRequest
 	unmountReqs     []*storagev1.UnmountDiskRequest
 	renewErr        error
+	onRenewMount    func(*storagev1.RenewMountRequest) (*connect.Response[storagev1.RenewMountResponse], error)
 	unmountErr      error
 	onUnmountDisk   func(*storagev1.UnmountDiskRequest)
 }
@@ -129,6 +134,7 @@ func newFakeStorage() *fakeStorage {
 	return &fakeStorage{
 		disks:         make(map[string]*storagev1.Disk),
 		mounted:       make(map[string]bool),
+		activeRWLease: make(map[string]uint64),
 		commitNodes:   make(map[string]*storagev1.ReadCommitNodeResponse),
 		liveFiles:     make(map[string][]byte),
 		liveSymlinks:  make(map[string][]byte),
@@ -346,8 +352,12 @@ func (f *fakeStorage) MountDisk(_ context.Context, req *connect.Request[storagev
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recordHeaders(req.Header())
+	f.mountReqs = append(f.mountReqs, req.Msg)
 	if err := f.forcedErr["MountDisk"]; err != nil {
 		return nil, err
+	}
+	if req.Msg.GetReadOnly() && req.Msg.GetForce() {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("read_only and force cannot both be true"))
 	}
 	d, ok := f.disks[req.Msg.GetDiskId()]
 	if !ok {
@@ -356,16 +366,42 @@ func (f *fakeStorage) MountDisk(_ context.Context, req *connect.Request[storagev
 	if f.mountZeroRoot {
 		return connect.NewResponse(&storagev1.MountDiskResponse{}), nil
 	}
+	if req.Msg.GetReadOnly() {
+		return connect.NewResponse(&storagev1.MountDiskResponse{
+			Epoch: 0,
+			RootInode: &storagev1.Inode{
+				Ino:  d.GetRootIno(),
+				Attr: &storagev1.InodeAttribute{Mode: 0o040755},
+			},
+			EntryTimeoutSeconds: 1.0,
+			AttrTimeoutSeconds:  1.0,
+			LeaseTtlSeconds:     0,
+		}), nil
+	}
+	if f.enforceRWLease && f.activeRWLease[req.Msg.GetDiskId()] != 0 && !req.Msg.GetForce() {
+		err := connect.NewError(connect.CodeAborted, fmt.Errorf("disk %s already has active writer lease", req.Msg.GetDiskId()))
+		if detail, detailErr := connect.NewErrorDetail(&errdetails.ErrorInfo{
+			Domain: "bowl.storage",
+			Reason: "EBUSY",
+		}); detailErr == nil {
+			err.AddDetail(detail)
+		}
+		return nil, err
+	}
 	var epoch uint64
-	if !f.mountZeroEpoch && !req.Msg.GetReadOnly() {
+	if !f.mountZeroEpoch {
 		f.epochSeq++
 		epoch = f.epochSeq
 	}
-	f.mountIDSeq++
-	mountID := fmt.Sprintf("01950000-0000-7000-9000-%012d", f.mountIDSeq)
-	ttl := f.mountLeaseTTL
-	if ttl == 0 {
-		ttl = 30
+	var ttl uint32
+	if !f.mountZeroTTL {
+		ttl = f.mountLeaseTTL
+		if ttl == 0 {
+			ttl = 30
+		}
+	}
+	if f.enforceRWLease && epoch > 0 && ttl > 0 {
+		f.activeRWLease[req.Msg.GetDiskId()] = epoch
 	}
 	return connect.NewResponse(&storagev1.MountDiskResponse{
 		Epoch: epoch,
@@ -375,25 +411,42 @@ func (f *fakeStorage) MountDisk(_ context.Context, req *connect.Request[storagev
 		},
 		EntryTimeoutSeconds: 1.0,
 		AttrTimeoutSeconds:  1.0,
-		MountId:             mountID,
 		LeaseTtlSeconds:     ttl,
 	}), nil
 }
 
 func (f *fakeStorage) RenewMount(_ context.Context, req *connect.Request[storagev1.RenewMountRequest]) (*connect.Response[storagev1.RenewMountResponse], error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.recordHeaders(req.Header())
 	f.renewReqs = append(f.renewReqs, req.Msg)
-	if f.renewErr != nil {
-		return nil, f.renewErr
+	hook := f.onRenewMount
+	renewErr := f.renewErr
+	if renewErr == nil {
+		renewErr = f.forcedErr["RenewMount"]
 	}
-	if err := f.forcedErr["RenewMount"]; err != nil {
-		return nil, err
-	}
+	enforce := f.enforceRWLease
+	activeEpoch := f.activeRWLease[req.Msg.GetDiskId()]
 	ttl := f.mountLeaseTTL
 	if ttl == 0 {
 		ttl = 30
+	}
+	f.mu.Unlock()
+
+	if hook != nil {
+		return hook(req.Msg)
+	}
+	if renewErr != nil {
+		return nil, renewErr
+	}
+	if enforce && (activeEpoch == 0 || req.Msg.GetEpoch() != activeEpoch) {
+		err := connect.NewError(connect.CodeFailedPrecondition, errors.New("writer epoch fenced"))
+		if detail, detailErr := connect.NewErrorDetail(&errdetails.ErrorInfo{
+			Domain: "bowl.storage",
+			Reason: "EBUSY",
+		}); detailErr == nil {
+			err.AddDetail(detail)
+		}
+		return nil, err
 	}
 	return connect.NewResponse(&storagev1.RenewMountResponse{
 		LeaseTtlSeconds: ttl,
@@ -404,6 +457,9 @@ func (f *fakeStorage) UnmountDisk(_ context.Context, req *connect.Request[storag
 	f.mu.Lock()
 	f.recordHeaders(req.Header())
 	f.unmountReqs = append(f.unmountReqs, req.Msg)
+	if f.enforceRWLease && f.activeRWLease[req.Msg.GetDiskId()] == req.Msg.GetEpoch() {
+		delete(f.activeRWLease, req.Msg.GetDiskId())
+	}
 	hook := f.onUnmountDisk
 	unmountErr := f.unmountErr
 	if unmountErr == nil {
@@ -418,6 +474,14 @@ func (f *fakeStorage) UnmountDisk(_ context.Context, req *connect.Request[storag
 		return nil, unmountErr
 	}
 	return connect.NewResponse(&storagev1.UnmountDiskResponse{}), nil
+}
+
+func (f *fakeStorage) getMountReqs() []*storagev1.MountDiskRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*storagev1.MountDiskRequest, len(f.mountReqs))
+	copy(out, f.mountReqs)
+	return out
 }
 
 func (f *fakeStorage) getRenewReqs() []*storagev1.RenewMountRequest {

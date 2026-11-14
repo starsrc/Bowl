@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/starsrc/pkg/serverx"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 	"github.com/starsrc/bowl/client/internal/rpc"
@@ -40,6 +42,7 @@ const mountUsageHelp = `用法:
   --log-file string              日志文件路径 (仅用于后台守护模式)
   --allow-other                  允许本机其他非 root 用户访问挂载点
   --ro                           只读挂载
+  --force                        强制抢占当前持有未过期写租约的活跃读写挂载（不可与 --ro 同时使用）
   --direct-io                    绕过内核页缓存直通数据
   --debug                        开启 FUSE 协议调试日志
   --admin-addr string            本地管理面 HTTP 监听地址，"off" 关闭 (默认读取 $BOWL_ADMIN_ADDR/$OBS_ADMIN_ADDR 或 127.0.0.1:0)
@@ -56,6 +59,7 @@ const (
 	defaultTraceSampleRatio = 0.001
 	mountUnmountRPCTimeout  = 3 * time.Second
 	mountRenewRPCTimeout    = 5 * time.Second
+	mountRenewRetryInterval = 2 * time.Second
 )
 
 // mountOptions 汇总 mount 命令解析后的非 fusefs 参数（daemon 子进程通过原样透传 argv 获得同一组值）。
@@ -67,6 +71,7 @@ type mountOptions struct {
 	logLevel         string
 	logFormat        string
 	traceSampleRatio float64
+	force            bool
 }
 
 type mountFlagPresence struct {
@@ -76,15 +81,16 @@ type mountFlagPresence struct {
 	traceSampleRatio bool
 }
 
-// serveFUSE、mountHTTPClient 与 mountRenewIntervalFn 为测试接缝：ready 必须在内核挂载就绪后调用一次。
+// serveFUSE、mountHTTPClient、mountRenewIntervalFn 与 mountRenewRetryIntervalFn 为测试接缝：
+// ready 必须在内核挂载就绪后调用一次。
 var (
-	serveFUSE            = defaultServeFUSE
-	mountHTTPClient      *http.Client
-	mountRenewIntervalFn = defaultMountRenewInterval
+	serveFUSE                 = defaultServeFUSE
+	mountHTTPClient           *http.Client
+	mountRenewIntervalFn      = defaultMountRenewInterval
+	mountRenewRetryIntervalFn = defaultMountRenewRetryInterval
 )
 
 type mountLeaseInfo struct {
-	mountID         string
 	leaseTTLSeconds uint32
 }
 
@@ -96,20 +102,36 @@ func defaultMountRenewInterval(leaseTTLSeconds uint32) time.Duration {
 	return d
 }
 
+func defaultMountRenewRetryInterval(normalInterval time.Duration) time.Duration {
+	if normalInterval < mountRenewRetryInterval {
+		return normalInterval
+	}
+	return mountRenewRetryInterval
+}
+
 // mountHandshake 向服务端发起单次 MountDisk 握手，返回注入了权威 Epoch、RootIno 与缓存超时配置的 fusefs.Config 及租约信息。
-func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceClient, baseCfg *fusefs.Config) (*fusefs.Config, mountLeaseInfo, error) {
+func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceClient, baseCfg *fusefs.Config, force bool) (*fusefs.Config, mountLeaseInfo, error) {
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer rpcCancel()
 
 	resp, err := client.MountDisk(rpcCtx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId:   baseCfg.DiskID,
 		ReadOnly: baseCfg.ReadOnly,
+		Force:    force,
 	}))
 	if err != nil {
-		if connectErr, ok := errors.AsType[*connect.Error](err); ok && connectErr.Code() == connect.CodeNotFound {
-			return nil, mountLeaseInfo{}, fmt.Errorf("磁盘不存在: %s", baseCfg.DiskID)
+		if connectErr, ok := errors.AsType[*connect.Error](err); ok {
+			switch connectErr.Code() {
+			case connect.CodeNotFound:
+				return nil, mountLeaseInfo{}, fmt.Errorf("磁盘不存在: %s", baseCfg.DiskID)
+			case connect.CodeAborted:
+				info := serverx.ExtractErrorInfo(err)
+				if info == nil || info.GetReason() == "" || info.GetReason() == "EBUSY" {
+					return nil, mountLeaseInfo{}, fmt.Errorf("磁盘 %s 存在未过期的活跃读写挂载，请先卸载或使用 --force 抢占", baseCfg.DiskID)
+				}
+			}
 		}
-		return nil, mountLeaseInfo{}, fmt.Errorf("挂载磁盘握手失败: %w", err)
+		return nil, mountLeaseInfo{}, fmt.Errorf("挂载磁盘握手失败: %s", singleLineError(err))
 	}
 
 	rootInode := resp.Msg.GetRootInode()
@@ -118,8 +140,14 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 	}
 
 	epoch := resp.Msg.GetEpoch()
-	if !baseCfg.ReadOnly && epoch == 0 {
-		return nil, mountLeaseInfo{}, errors.New("服务端未返回有效的写挂载世代号")
+	ttlSeconds := resp.Msg.GetLeaseTtlSeconds()
+	if !baseCfg.ReadOnly {
+		if epoch == 0 {
+			return nil, mountLeaseInfo{}, errors.New("服务端未返回有效的写挂载世代号")
+		}
+		if ttlSeconds == 0 {
+			return nil, mountLeaseInfo{}, errors.New("服务端未返回有效的写挂载租约时长")
+		}
 	}
 
 	cfg := *baseCfg
@@ -129,20 +157,21 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 	cfg.EntryTimeoutSeconds = resp.Msg.GetEntryTimeoutSeconds()
 	cfg.AttrTimeoutSeconds = resp.Msg.GetAttrTimeoutSeconds()
 	lease := mountLeaseInfo{
-		mountID:         resp.Msg.GetMountId(),
-		leaseTTLSeconds: resp.Msg.GetLeaseTtlSeconds(),
+		leaseTTLSeconds: ttlSeconds,
 	}
 	return &cfg, lease, nil
 }
 
 // startMountLeaseRenewer 启动后台租约续期协程，并在收到停止函数调用时阻塞等待协程安全退出。
+// 只读挂载跳过续期；遇到临时错误时调度短间隔重试，遇到终态拒绝时调用 onLeaseLost 触发下线。
 func startMountLeaseRenewer(
 	client storagev1connect.StorageServiceClient,
 	cfg *fusefs.Config,
 	lease mountLeaseInfo,
 	logger *slog.Logger,
+	onLeaseLost func(),
 ) func() {
-	if lease.mountID == "" {
+	if cfg == nil || cfg.ReadOnly || cfg.Epoch == 0 || lease.leaseTTLSeconds == 0 {
 		return func() {}
 	}
 	renewCtx, renewCancel := context.WithCancel(context.Background())
@@ -152,22 +181,20 @@ func startMountLeaseRenewer(
 
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
 
 		for {
 			select {
 			case <-renewCtx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
 			}
 
 			rpcCtx, rpcCancel := context.WithTimeout(renewCtx, mountRenewRPCTimeout)
 			resp, err := client.RenewMount(rpcCtx, connect.NewRequest(&storagev1.RenewMountRequest{
-				DiskId:   cfg.DiskID,
-				MountId:  lease.mountID,
-				ReadOnly: cfg.ReadOnly,
-				Epoch:    cfg.Epoch,
+				DiskId: cfg.DiskID,
+				Epoch:  cfg.Epoch,
 			}))
 			rpcCancel()
 
@@ -180,29 +207,30 @@ func startMountLeaseRenewer(
 					if code == connect.CodeFailedPrecondition || code == connect.CodeNotFound {
 						logger.Warn("mount_lease_renew_stopped",
 							slog.String("disk_id", cfg.DiskID),
-							slog.String("mount_id", lease.mountID),
+							slog.Uint64("epoch", cfg.Epoch),
 							slog.String("code", code.String()),
 							slog.String("error", err.Error()),
 						)
+						if onLeaseLost != nil {
+							onLeaseLost()
+						}
 						return
 					}
 				}
 				logger.Warn("mount_lease_renew_failed",
 					slog.String("disk_id", cfg.DiskID),
-					slog.String("mount_id", lease.mountID),
+					slog.Uint64("epoch", cfg.Epoch),
 					slog.String("error", err.Error()),
 				)
+				timer.Reset(mountRenewRetryIntervalFn(interval))
 				continue
 			}
 
 			if nextTTL := resp.Msg.GetLeaseTtlSeconds(); nextTTL > 0 && nextTTL != currentTTL {
 				currentTTL = nextTTL
-				nextInterval := mountRenewIntervalFn(currentTTL)
-				if nextInterval != interval {
-					interval = nextInterval
-					ticker.Reset(interval)
-				}
+				interval = mountRenewIntervalFn(currentTTL)
 			}
+			timer.Reset(interval)
 		}
 	}()
 
@@ -212,21 +240,54 @@ func startMountLeaseRenewer(
 	}
 }
 
-// unmountMountLease 使用独立超时上下文释放服务端在线挂载租约（避免被外层信号上下文取消）。
-func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mountID string, logger *slog.Logger) {
-	if mountID == "" {
+// unmountMountLease 使用独立超时上下文释放读写挂载写租约（只读挂载自动跳过）。
+func unmountMountLease(client storagev1connect.StorageServiceClient, cfg *fusefs.Config, logger *slog.Logger) {
+	if cfg == nil || cfg.ReadOnly || cfg.Epoch == 0 {
 		return
 	}
 	unmountCtx, unmountCancel := context.WithTimeout(context.Background(), mountUnmountRPCTimeout)
 	defer unmountCancel()
 	if _, err := client.UnmountDisk(unmountCtx, connect.NewRequest(&storagev1.UnmountDiskRequest{
-		DiskId:  diskID,
-		MountId: mountID,
+		DiskId: cfg.DiskID,
+		Epoch:  cfg.Epoch,
 	})); err != nil {
 		logger.Warn("unmount_disk_rpc_failed",
-			slog.String("disk_id", diskID),
-			slog.String("mount_id", mountID),
+			slog.String("disk_id", cfg.DiskID),
+			slog.Uint64("epoch", cfg.Epoch),
 			slog.String("error", err.Error()),
+		)
+	}
+}
+
+type fuseMountServer interface {
+	Serve()
+	WaitMount() error
+	Unmount() error
+}
+
+func unmountServerWithLazyFallback(server fuseMountServer, mountpoint string, logger *slog.Logger) {
+	err := server.Unmount()
+	if err == nil {
+		return
+	}
+	if logger != nil {
+		logger.Warn("fuse_unmount_failed_fallback_lazy",
+			slog.String("mountpoint", mountpoint),
+			slog.String("error", err.Error()),
+		)
+	}
+	binPath, cmdArgs, found := findUmountCommand(mountpoint, true)
+	if !found {
+		if logger != nil {
+			logger.Warn("fuse_lazy_unmount_tool_missing", slog.String("mountpoint", mountpoint))
+		}
+		return
+	}
+	if out, cmdErr := runCommand(binPath, cmdArgs...); cmdErr != nil && logger != nil {
+		logger.Warn("fuse_lazy_unmount_failed",
+			slog.String("mountpoint", mountpoint),
+			slog.String("error", cmdErr.Error()),
+			slog.String("output", string(out)),
 		)
 	}
 }
@@ -240,6 +301,54 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 		return fmt.Errorf("创建 FUSE 服务失败: %w", err)
 	}
 
+	return serveFUSEWithServer(ctx, server, fs, mountpoint, cfg.Logger, nil, ready)
+}
+
+func serveFUSEWithServer(
+	ctx context.Context,
+	server fuseMountServer,
+	fs *fusefs.RawFS,
+	mountpoint string,
+	logger *slog.Logger,
+	sigCh chan os.Signal,
+	ready func(),
+) error {
+	if sigCh == nil {
+		sigCh = make(chan os.Signal, 2)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
+	}
+
+	stopWait := make(chan struct{})
+	forceExitCh := make(chan struct{})
+	watchDone := make(chan struct{})
+	ctxDone := ctx.Done()
+	var unmountTriggered bool
+
+	go func() {
+		defer close(watchDone)
+		for {
+			select {
+			case <-sigCh:
+				if unmountTriggered {
+					mounted, mErr := IsMountPoint(mountpoint)
+					if mErr == nil && !mounted {
+						close(forceExitCh)
+						return
+					}
+				}
+				unmountTriggered = true
+				unmountServerWithLazyFallback(server, mountpoint, logger)
+			case <-ctxDone:
+				unmountTriggered = true
+				unmountServerWithLazyFallback(server, mountpoint, logger)
+				ctxDone = nil
+			case <-stopWait:
+				return
+			}
+		}
+	}()
+
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
@@ -247,30 +356,32 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 	}()
 
 	if waitErr := server.WaitMount(); waitErr != nil {
-		_ = server.Unmount()
-		<-serveDone
+		close(stopWait)
+		<-watchDone
+		if !unmountTriggered {
+			unmountServerWithLazyFallback(server, mountpoint, logger)
+		}
+		select {
+		case <-serveDone:
+		case <-forceExitCh:
+		}
 		return fmt.Errorf("等待挂载就绪失败: %w", waitErr)
 	}
-	fs.BindMountpoint(mountpoint)
-	ready()
+	if fs != nil {
+		fs.BindMountpoint(mountpoint)
+	}
+	if ready != nil {
+		ready()
+	}
 
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
-	stopWait := make(chan struct{})
-	go func() {
-		select {
-		case <-sigCh:
-			_ = server.Unmount()
-		case <-ctx.Done():
-			_ = server.Unmount()
-		case <-stopWait:
-		}
-	}()
-
-	<-serveDone
-	close(stopWait)
+	select {
+	case <-serveDone:
+		close(stopWait)
+		<-watchDone
+	case <-forceExitCh:
+		close(stopWait)
+		<-watchDone
+	}
 	return nil
 }
 
@@ -302,7 +413,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		return fmt.Errorf("创建 RPC 客户端失败: %w", err)
 	}
 
-	cfg, lease, err := mountHandshake(ctx, client, baseCfg)
+	cfg, lease, err := mountHandshake(ctx, client, baseCfg, opts.force)
 	if err != nil {
 		return err
 	}
@@ -312,13 +423,13 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 
 	rawFS := fusefs.NewRawFS(client, *cfg)
 	if regErr := obs.RegisterCollector(rpcMetrics, rawFS.Collector()); regErr != nil {
-		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+		unmountMountLease(client, cfg, logger)
 		return fmt.Errorf("注册指标收集器失败: %w", regErr)
 	}
 
 	admin, err := startAdminServer(opts.adminAddr, obs, rawFS)
 	if err != nil {
-		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+		unmountMountLease(client, cfg, logger)
 		return err
 	}
 	defer func() {
@@ -360,11 +471,23 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		}
 	}
 
-	stopRenew := startMountLeaseRenewer(client, cfg, lease, logger)
-	serveErr := serveFUSE(ctx, rawFS, cfg, mountpoint, ready)
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
+	var leaseLost atomic.Bool
+	onLeaseLost := func() {
+		leaseLost.Store(true)
+		rawFS.MarkLeaseLost()
+		serveCancel()
+	}
+
+	stopRenew := startMountLeaseRenewer(client, cfg, lease, logger, onLeaseLost)
+	serveErr := serveFUSE(serveCtx, rawFS, cfg, mountpoint, ready)
 	stopRenew()
-	unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
-	if metaPath != "" {
+	if !leaseLost.Load() {
+		unmountMountLease(client, cfg, logger)
+	}
+	if metaPath != "" && readMountMetaPID(metaPath) == selfPID {
 		_ = os.Remove(metaPath)
 	}
 	if serveErr != nil {
@@ -457,6 +580,7 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		foreground bool
 		allowOther bool
 		ro         bool
+		force      bool
 		directIO   bool
 		debug      bool
 		statsFile  bool
@@ -492,6 +616,8 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 			allowOther, err = parseBoolFlag(val, hasVal)
 		case "ro":
 			ro, err = parseBoolFlag(val, hasVal)
+		case "force":
+			force, err = parseBoolFlag(val, hasVal)
 		case "direct-io":
 			directIO, err = parseBoolFlag(val, hasVal)
 		case "debug":
@@ -534,10 +660,17 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	if ro && force {
+		fmt.Fprintln(stderr, "错误: --ro 与 --force 不能同时使用")
+		return 2
+	}
+
 	if len(posArgs) != 2 {
 		fmt.Fprintf(stderr, "错误: mount 命令需要且仅需要 2 个位置参数 (<disk-id> 与 <mountpoint>)\n\n%s", mountUsageHelp)
 		return 2
 	}
+
+	opts.force = force
 
 	if valErr := applyEnvAndValidateOptions(&opts, set); valErr != nil {
 		fmt.Fprintf(stderr, "错误: %v\n", valErr)

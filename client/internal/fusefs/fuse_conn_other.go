@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// directMountFlags 在非 Linux 平台返回 0，供跨平台编译占位。
+func directMountFlags(_ bool) uintptr { return 0 }
+
 func resolveFuseSysfsConnectionDir(_ string) string {
 	return ""
 }

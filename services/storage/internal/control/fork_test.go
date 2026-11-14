@@ -209,6 +209,8 @@ func TestForkDisk_OnlineFork_IsolatesParentAndChildWrites(t *testing.T) {
 	childActor, err := mgr.Actor(ctx, childDisk.DiskID)
 	require.NoError(t, err, "获取子盘 StoreActor 失败")
 	require.Zero(t, childActor.WriterEpoch(), "子盘初始 WriterEpoch 必须归零")
+	require.Zero(t, childActor.WriterExpiresAt(), "子盘初始 WriterExpiresAt 必须归零")
+	require.False(t, childActor.HasActiveWriterLease(ctx), "子盘不得继承父盘活跃写租约")
 
 	childMount, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: childDisk.DiskID})
 	require.NoError(t, err, "挂载子盘失败")

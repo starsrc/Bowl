@@ -45,7 +45,7 @@ func (s *StoreActor) deletePackMeta(packID uint64) {
 func (s *StoreActor) publishAtomicStats() {
 	s.atomicLogicalBytes.Store(s.stat.LogicalBytes)
 	s.atomicInodes.Store(s.stat.Inodes)
-	s.atomicWriterEpoch.Store(s.stat.WriterEpoch)
+	s.publishLeaseSnapshot()
 	s.atomicPackPhysicalBytes.Store(s.totalPackPhysicalBytes)
 	s.atomicPackLiveBytes.Store(s.totalPackLiveBytes)
 
@@ -391,7 +391,7 @@ func (s *StoreActor) syncWALAndReclaimDeadPacks() error {
 
 func (s *StoreActor) syncWALAndReclaimDeadPacksTimed() (didWALSync bool, walDur time.Duration, reclaimed int, removeDur time.Duration, err error) {
 	toReclaim := s.takePendingDeadPacks()
-	wasDirty := s.walDirty.Swap(false)
+	wasDirty := s.walDirty.Load()
 	if !wasDirty && len(toReclaim) == 0 {
 		if s.blobs != nil {
 			remStart := time.Now()
@@ -400,13 +400,19 @@ func (s *StoreActor) syncWALAndReclaimDeadPacksTimed() (didWALSync bool, walDur 
 		}
 		return false, 0, 0, removeDur, nil
 	}
+	if len(toReclaim) > 0 && s.blobs != nil {
+		if syncErr := s.blobs.sync(); syncErr != nil {
+			s.restorePendingDeadPacks(toReclaim)
+			return false, 0, 0, 0, syncErr
+		}
+	}
 	walStart := time.Now()
 	if syncErr := s.db.LogData(nil, pebble.Sync); syncErr != nil {
 		walDur = time.Since(walStart)
 		s.restorePendingDeadPacks(toReclaim)
-		s.walDirty.Store(true)
 		return true, walDur, 0, 0, syncErr
 	}
+	s.walDirty.Store(false)
 	walDur = time.Since(walStart)
 	remStart := time.Now()
 	if len(toReclaim) > 0 {

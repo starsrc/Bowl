@@ -48,5 +48,6 @@ var Module = fx.Module("config",
 		func(cfg *Config) serverx.ServerConfig { return cfg.ServerConfig },
 		func(cfg *Config) tx.PoolConfig { return cfg.PoolConfig },
 		func(cfg *Config) MetaConfig { return cfg.Meta },
+		func(cfg *Config) AuthToken { return cfg.AuthToken },
 	),
 )

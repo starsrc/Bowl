@@ -216,6 +216,24 @@ service StorageService {
 
   // MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
   rpc MergeDisk(MergeDiskRequest) returns (MergeDiskResponse);
+
+  // PushDisk 把虚拟磁盘当前状态同步到交接远端；release 为 true 时同时交出写权限，供其他存储节点认领。
+  // 本节点不是该磁盘的写者时，必须返回 FailedPrecondition。
+  // release 为 true 而磁盘仍被可写挂载时，必须返回 Aborted。
+  // 本节点未配置交接远端时，必须返回 Unimplemented。
+  rpc PushDisk(PushDiskRequest) returns (PushDiskResponse);
+
+  // PullDisk 从交接远端拉取虚拟磁盘的最新快照并把本节点登记为写者。
+  // 写权限仍被其他节点持有且未指定 force 时，必须返回 FailedPrecondition。
+  // 本地存在从未同步的写入且未指定 force 或 keep_local 时，必须返回 FailedPrecondition。
+  // 远端没有该磁盘的记录时，必须返回 NotFound。
+  rpc PullDisk(PullDiskRequest) returns (PullDiskResponse);
+
+  // GetDiskHead 读取交接远端记录的当前写者与最新快照。
+  rpc GetDiskHead(GetDiskHeadRequest) returns (GetDiskHeadResponse);
+
+  // GetDiskHandoffStatus 查询虚拟磁盘在本节点视角下的交接状态（角色、同步位置、待下载数据包数量）。
+  rpc GetDiskHandoffStatus(GetDiskHandoffStatusRequest) returns (GetDiskHandoffStatusResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -2123,4 +2141,197 @@ message MergeDiskResponse {
 
   // 冲突报告（无冲突或非冲突失败时可能为空）。
   optional MergeConflictReport conflict_report = 6;
+}
+
+// DiskHead 是交接远端为一块虚拟磁盘保存的记录：当前写者与最新快照。
+message DiskHead {
+  // 磁盘唯一标识符。
+  string disk_id = 1;
+
+  // 磁盘名称。
+  string name = 2;
+
+  // 记录的代数，每次改写加一。
+  uint64 generation = 3;
+
+  // 当前写者的节点标识；为空表示写权限已交出，任何节点都可以认领。
+  string owner = 4;
+
+  // 最新一次完整上传的快照名。
+  string snapshot = 5;
+
+  // 快照固化时磁盘的写世代。
+  uint64 writer_epoch = 6;
+
+  // 快照固化时磁盘的写序号。
+  uint64 write_seq = 7;
+
+  // 记录最后一次改写的时间。
+  google.protobuf.Timestamp updated_at = 8;
+
+  // 最后一次改写该记录的节点标识。
+  string updated_by = 9;
+}
+
+// PushDiskRequest 定义 PushDisk 接口输入参数。
+message PushDiskRequest {
+  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "push_disk_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  // 上传完成后是否交出写权限。
+  bool release = 2;
+}
+
+// PushDiskResponse 定义 PushDisk 接口输出参数。
+message PushDiskResponse {
+  // 推送完成后的远端记录。
+  DiskHead head = 1;
+
+  // 本次快照引用的数据包总数。
+  uint64 packs = 2;
+
+  // 本次实际上传的数据包数量（远端已有的不重复上传）。
+  uint64 packs_uploaded = 3;
+
+  // 本次实际上传的数据包字节数。
+  uint64 pack_bytes_uploaded = 4;
+
+  // 本次上传的元数据字节数。
+  uint64 meta_bytes = 5;
+
+  // 本地自上次同步后没有新写入，本次没有上传任何内容。
+  bool unchanged = 6;
+}
+
+// PullDiskRequest 定义 PullDisk 接口输入参数。
+message PullDiskRequest {
+  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "pull_disk_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  // 强行接管仍被其他节点持有的磁盘，并允许覆盖本地从未同步的写入。
+  bool force = 2;
+
+  // 本地存在从未同步的写入时，把本地这份另存为一块新磁盘，之后可用 MergeDisk 合并回来。
+  bool keep_local = 3;
+}
+
+// PullDiskResponse 定义 PullDisk 接口输出参数。
+message PullDiskResponse {
+  // 拉取完成后的远端记录。
+  DiskHead head = 1;
+
+  // 本次调用是否替换了本地副本；写权限本来就在本节点时为 false。
+  bool installed = 2;
+
+  // 快照引用的数据包总数。
+  uint64 packs = 3;
+
+  // 本地已有、直接复用的数据包数量。
+  uint64 packs_reused = 4;
+
+  // 本次下载的数据包数量。
+  uint64 packs_downloaded = 5;
+
+  // 本次下载的数据包字节数。
+  uint64 pack_bytes_downloaded = 6;
+
+  // 只留了占位、读到时再向远端取的数据包数量。
+  uint64 packs_deferred = 7;
+
+  // 留待按需读取的数据包字节数。
+  uint64 pack_bytes_deferred = 8;
+
+  // 本次下载的元数据字节数。
+  uint64 meta_bytes = 9;
+
+  // 非空表示本地从未同步的写入被另存成了这块磁盘（keep_local 生效时）。
+  string kept_local_disk_id = 10;
+}
+
+// GetDiskHeadRequest 定义 GetDiskHead 接口输入参数。
+message GetDiskHeadRequest {
+  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "get_disk_head_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// GetDiskHeadResponse 定义 GetDiskHead 接口输出参数。
+message GetDiskHeadResponse {
+  // 远端记录。
+  DiskHead head = 1;
+}
+
+// DiskHandoffRole 是一个存储节点对一块虚拟磁盘的交接角色。
+enum DiskHandoffRole {
+  // 未指定。
+  DISK_HANDOFF_ROLE_UNSPECIFIED = 0;
+
+  // 本节点是写者，本地即最新。
+  DISK_HANDOFF_ROLE_WRITER = 1;
+
+  // 写者在其他节点，本地是只读副本。
+  DISK_HANDOFF_ROLE_REPLICA = 2;
+
+  // 没有写者，任何节点都可以认领。
+  DISK_HANDOFF_ROLE_RELEASED = 3;
+
+  // 该磁盘从未推送到远端，只存在于本节点。
+  DISK_HANDOFF_ROLE_UNBOUND = 4;
+
+  // 远端有该磁盘，本节点没有它的副本。
+  DISK_HANDOFF_ROLE_ABSENT = 5;
+}
+
+// GetDiskHandoffStatusRequest 定义 GetDiskHandoffStatus 接口输入参数。
+message GetDiskHandoffStatusRequest {
+  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "get_disk_handoff_status_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// GetDiskHandoffStatusResponse 定义 GetDiskHandoffStatus 接口输出参数。
+message GetDiskHandoffStatusResponse {
+  // 磁盘唯一标识符。
+  string disk_id = 1;
+
+  // 应答节点的标识。
+  string node_id = 2;
+
+  // 本节点对该磁盘的角色。
+  DiskHandoffRole role = 3;
+
+  // 远端记录；该磁盘从未推送过时不设置。
+  optional DiskHead head = 4;
+
+  // 本地副本最后一次与远端一致时对应的快照名。
+  string local_snapshot = 5;
+
+  // 本地尚未下载、读到时才向远端取的数据包数量。
+  uint64 pending_packs = 6;
 }

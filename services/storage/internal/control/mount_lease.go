@@ -76,6 +76,15 @@ func (m *manager) upsertMountLease(diskKey, mountKey string, readOnly bool, epoc
 	m.mountsMu.Lock()
 	defer m.mountsMu.Unlock()
 
+	if !readOnly && !isRenew && m.handoffReleasing[diskKey] {
+		return 0, ErrHandoffInProgress
+	}
+	if !readOnly && m.handoffRemote != nil {
+		if m.handoffDirty == nil {
+			m.handoffDirty = make(map[string]bool)
+		}
+		m.handoffDirty[diskKey] = true
+	}
 	leases := m.pruneExpiredDiskLeasesLocked(diskKey, now)
 	if isRenew {
 		if existing, ok := leases[mountKey]; ok && existing.readOnly != readOnly {
@@ -174,6 +183,9 @@ func (m *manager) RenewMount(ctx context.Context, params RenewMountParams) (*Ren
 	if !params.ReadOnly {
 		if currentEpoch := actor.WriterEpoch(); params.Epoch != currentEpoch {
 			return nil, fmt.Errorf("%w: mount epoch %d != current writer epoch %d", ErrStaleEpoch, params.Epoch, currentEpoch)
+		}
+		if lostErr := m.fenceIfOwnershipLost(ctx, diskKey, actor); lostErr != nil {
+			return nil, lostErr
 		}
 	}
 

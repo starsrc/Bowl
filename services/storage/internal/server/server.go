@@ -186,6 +186,7 @@ func New(p Params) (*Server, error) {
 		handlerOpts...,
 	)
 	mux.Handle(path, handler)
+	registerHandoffRoutes(mux, p.Control)
 
 	httpServer := serverx.NewHTTPServer(p.Config.Addr(), mux, p.Config)
 	httpServer.Handler = WrapHTTPHandler(httpServer.Handler, httpMetrics)

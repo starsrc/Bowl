@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
 
 const (
@@ -33,6 +34,12 @@ type MetaConfig struct {
 	OpenDirCacheVal           bool    `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
 	DataDirVal                string  `env:"DATA_DIR"`
 	StorageDataDirVal         string  `env:"STORAGE_DATA_DIR"`
+	// 交接（handoff）原型：两个存储节点指向同一个目录即视为共用一个远端；留空则关闭交接。
+	HandoffRemoteDirVal string `env:"HANDOFF_REMOTE_DIR"`
+	// 本节点在交接 HEAD 里的身份；留空取主机名。
+	HandoffNodeIDVal string `env:"HANDOFF_NODE_ID"`
+	// 后台同步周期；0 关闭后台同步。
+	HandoffSyncIntervalVal time.Duration `env:"HANDOFF_SYNC_INTERVAL" envDefault:"30s"`
 }
 
 // AtimeMode 返回最后访问时间更新策略的小写标准化字符串（"noatime" / "relatime" / "strictatime"）。

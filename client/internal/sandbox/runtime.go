@@ -145,9 +145,10 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 		"--device", "/dev/fuse",
 		"--security-opt", "no-new-privileges",
 		"--mount", "type=bind,source=" + spec.ClientBinary + ",destination=" + ClientPath + ",readonly",
-		"-e", env[0],
 	}
-	args = append(args, env[1:]...)
+	for _, kv := range env {
+		args = append(args, "-e", kv)
+	}
 	if spec.Network != "" {
 		args = append(args, "--network", spec.Network)
 	}

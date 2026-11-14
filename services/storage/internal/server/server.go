@@ -187,7 +187,6 @@ func New(p Params) (*Server, error) {
 		handlerOpts...,
 	)
 	mux.Handle(path, handler)
-	registerHandoffRoutes(mux, p.Control)
 
 	httpServer := serverx.NewHTTPServer(p.Config.Addr(), requireBearerToken(mux, string(p.AuthToken)), p.Config)
 	httpServer.Handler = WrapHTTPHandler(httpServer.Handler, httpMetrics)

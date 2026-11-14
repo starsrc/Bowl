@@ -65,6 +65,10 @@ var storageMessages = []proto.Message{
 	&storagev1.DiffDiskRequest{},
 	&storagev1.ReadCommitNodeRequest{},
 	&storagev1.MergeDiskRequest{},
+	&storagev1.PushDiskRequest{},
+	&storagev1.PullDiskRequest{},
+	&storagev1.GetDiskHeadRequest{},
+	&storagev1.GetDiskHandoffStatusRequest{},
 
 	// 响应消息 (Responses)
 	&storagev1.MountDiskResponse{},
@@ -104,6 +108,10 @@ var storageMessages = []proto.Message{
 	&storagev1.DiffDiskResponse{},
 	&storagev1.ReadCommitNodeResponse{},
 	&storagev1.MergeDiskResponse{},
+	&storagev1.PushDiskResponse{},
+	&storagev1.PullDiskResponse{},
+	&storagev1.GetDiskHeadResponse{},
+	&storagev1.GetDiskHandoffStatusResponse{},
 
 	// 嵌套与共享消息
 	&storagev1.DirEntry{},
@@ -111,6 +119,7 @@ var storageMessages = []proto.Message{
 	&storagev1.Inode{},
 	&storagev1.InodeAttribute{},
 	&storagev1.Disk{},
+	&storagev1.DiskHead{},
 	&storagev1.DiffNodeSummary{},
 	&storagev1.DiffEntry{},
 	&storagev1.DiffSummary{},
@@ -457,6 +466,10 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.UpdateDiskResponse.disk",
 		"storage.v1.DeleteDiskRequest.disk_id",
 		"storage.v1.ForkDiskRequest.source_disk_id",
+		"storage.v1.PushDiskRequest.disk_id",
+		"storage.v1.PullDiskRequest.disk_id",
+		"storage.v1.GetDiskHeadRequest.disk_id",
+		"storage.v1.GetDiskHandoffStatusRequest.disk_id",
 		"storage.v1.ForkDiskRequest.max_bytes",
 		"storage.v1.ForkDiskResponse.disk",
 		"storage.v1.StatFSRequest.ino":

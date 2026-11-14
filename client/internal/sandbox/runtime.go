@@ -53,6 +53,8 @@ type Runtime struct {
 // Row 是 docker ps 里一个沙箱的展示信息。
 type Row struct {
 	ID, Status, Image, Mount, Created string
+	// Endpoint 是沙箱的盘所在的存储节点；早期创建、没有记录节点的沙箱为空。
+	Endpoint string
 }
 
 // Mount 是容器内一个已挂载的 Bowl 磁盘。
@@ -190,6 +192,7 @@ func (rt *Runtime) List(ctx context.Context) ([]Row, error) {
 		`{{.Label "` + labelImage + `"}}`,
 		`{{.Label "` + labelMount + `"}}`,
 		"{{.CreatedAt}}",
+		`{{.Label "` + labelEndpoint + `"}}`,
 	}, `\t`)
 	out, err := rt.output(ctx, "ps", "-a", "--filter", "label="+labelOwner+"=1", "--format", format)
 	if err != nil {
@@ -592,13 +595,17 @@ func parseRows(out string) []Row {
 		if len(parts) < 5 || strings.TrimSpace(parts[0]) == "" {
 			continue
 		}
-		rows = append(rows, Row{
+		row := Row{
 			ID:      parts[0],
 			Status:  parts[1],
 			Image:   parts[2],
 			Mount:   parts[3],
 			Created: strings.TrimSuffix(parts[4], " +0000 UTC"),
-		})
+		}
+		if len(parts) > 5 {
+			row.Endpoint = strings.TrimSpace(parts[5])
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }

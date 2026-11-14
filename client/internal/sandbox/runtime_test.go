@@ -42,6 +42,10 @@ func TestParseRows_跳过标签缺失行(t *testing.T) {
 	assert.Equal(t, "Up 3 minutes", rows[0].Status)
 	assert.Equal(t, "/mnt/data", rows[0].Mount)
 	assert.Equal(t, "disk-2", rows[1].ID)
+	assert.Empty(t, rows[0].Endpoint, "没有节点列的旧输出照常解析")
+
+	withNode := parseRows("disk-3\tUp 1 second\tubuntu:24.04\t/mnt/data\t2026-11-14 10:00:00 +0800 CST\thttp://127.0.0.1:9200\n")
+	assert.Equal(t, "http://127.0.0.1:9200", withNode[0].Endpoint)
 }
 
 func TestParseRows_空输出返回空列表(t *testing.T) {

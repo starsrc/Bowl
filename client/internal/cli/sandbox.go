@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -214,9 +215,10 @@ func sandboxList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "本机没有沙箱")
 		return 0
 	}
-	fmt.Fprintf(stdout, "%-38s %-24s %-22s %-12s %s\n", "SANDBOX ID", "STATUS", "IMAGE", "MOUNT", "CREATED")
+	// NODE 是沙箱的盘所在的存储节点：move 之后靠这一列分辨哪个沙箱在本地、哪个在云端。
+	fmt.Fprintf(stdout, "%-38s %-24s %-22s %-12s %-26s %s\n", "SANDBOX ID", "STATUS", "IMAGE", "MOUNT", "NODE", "CREATED")
 	for _, r := range rows {
-		fmt.Fprintf(stdout, "%-38s %-24s %-22s %-12s %s\n", r.ID, r.Status, r.Image, r.Mount, r.Created)
+		fmt.Fprintf(stdout, "%-38s %-24s %-22s %-12s %-26s %s\n", r.ID, r.Status, r.Image, r.Mount, cmp.Or(r.Endpoint, "-"), r.Created)
 	}
 	return 0
 }

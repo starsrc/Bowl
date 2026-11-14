@@ -20,6 +20,8 @@ type handoffRequest struct {
 	DiskID  string `json:"disk_id"`
 	Release bool   `json:"release"`
 	Force   bool   `json:"force"`
+	// KeepLocal 仅对 pull 有效：本地有未同步写入时另存为一块新盘，而不是拒绝。
+	KeepLocal bool `json:"keep_local"`
 }
 
 type handoffErrorBody struct {
@@ -46,7 +48,7 @@ func registerHandoffRoutes(mux *http.ServeMux, ctrl control.Manager) {
 		if !ok {
 			return
 		}
-		res, err := h.PullDisk(r.Context(), control.PullDiskParams{DiskID: req.DiskID, Force: req.Force})
+		res, err := h.PullDisk(r.Context(), control.PullDiskParams{DiskID: req.DiskID, Force: req.Force, KeepLocal: req.KeepLocal})
 		writeHandoffResult(w, res, err)
 	})
 	mux.HandleFunc("GET /handoff/v1/head", func(w http.ResponseWriter, r *http.Request) {

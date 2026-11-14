@@ -366,3 +366,80 @@ func TestHandoff_LazyPull_拉取不下载数据包且fork与merge仍然可用(t 
 	require.Equal(t, []byte("child"), readRegularFile(t, ctx, merged, "from-child.txt", 16))
 	require.Equal(t, base, readRegularFile(t, ctx, merged, "base.txt", uint32(len(base)+64)))
 }
+
+func TestHandoff_KeepLocal_掉线期间的本地改动在云端接管后能合并回来(t *testing.T) {
+	ctx := context.Background()
+	remote := newSharedRemote(t)
+	local := newHandoffNode(t, remote, "local")
+	cloud := newHandoffNode(t, remote, "cloud")
+
+	disk, err := local.CreateDisk(ctx, CreateDiskParams{Name: "workspace", MaxBytes: 64 << 20})
+	require.NoError(t, err)
+	mount, err := local.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	localActor, err := local.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, localActor, mount.Epoch, "shared.txt", []byte("base"))
+	writeRegularFile(t, ctx, localActor, mount.Epoch, "both-edit.txt", []byte("base"))
+	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+
+	// Given: 本地同步之后又写了东西，然后掉线；云端强行接管并在同一个基线上各干各的
+	writeRegularFile(t, ctx, localActor, mount.Epoch, "only-local.txt", []byte("written offline on local"))
+	overwriteRegularFile(t, ctx, localActor, mount.Epoch, "shared.txt", []byte("edited on local"))
+	overwriteRegularFile(t, ctx, localActor, mount.Epoch, "both-edit.txt", []byte("local version"))
+
+	_, err = cloud.PullDisk(ctx, PullDiskParams{DiskID: disk.DiskID, Force: true})
+	require.NoError(t, err)
+	cloudMount, err := cloud.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	cloudActor, err := cloud.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	// 两边新建的文件很可能拿到相同的 inode 号与数据包编号：合并必须能处理
+	writeRegularFile(t, ctx, cloudActor, cloudMount.Epoch, "only-cloud.txt", []byte("written on cloud"))
+	overwriteRegularFile(t, ctx, cloudActor, cloudMount.Epoch, "both-edit.txt", []byte("cloud version"))
+	require.NoError(t, cloud.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: cloudMount.MountID}))
+	_, err = cloud.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID, Release: true})
+	require.NoError(t, err)
+
+	// When: 本地恢复，带 KeepLocal 拉取
+	require.NoError(t, local.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: mount.MountID}))
+	_, err = local.PullDisk(ctx, PullDiskParams{DiskID: disk.DiskID})
+	require.ErrorIs(t, err, ErrLocalDiverged, "不带 KeepLocal 时仍然拒绝覆盖")
+	pulled, err := local.PullDisk(ctx, PullDiskParams{DiskID: disk.DiskID, KeepLocal: true})
+	require.NoError(t, err)
+	require.NotEmpty(t, pulled.KeptLocalDiskID)
+	require.Equal(t, "local", pulled.Head.Owner)
+
+	// Then: 原盘是云端的内容，本地改动完整地在另存的那块盘里
+	mainActor, err := local.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("written on cloud"), readRegularFile(t, ctx, mainActor, "only-cloud.txt", 64))
+	_, _, lookupErr := mainActor.Lookup(ctx, RootIno, []byte("only-local.txt"))
+	require.ErrorIs(t, lookupErr, ErrNotFound)
+	keptActor, err := local.Actor(ctx, pulled.KeptLocalDiskID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("written offline on local"), readRegularFile(t, ctx, keptActor, "only-local.txt", 64))
+
+	// 两边都改过的文件：默认策略下合并报冲突，不会悄悄选边
+	_, err = local.MergeDisk(ctx, &MergeDiskParams{SourceDiskID: pulled.KeptLocalDiskID, TargetDiskID: disk.DiskID})
+	require.Error(t, err, "both-edit.txt 两边都改了，应当报冲突")
+
+	// When: 指定冲突时取本地那份（source）再合并
+	_, err = local.MergeDisk(ctx, &MergeDiskParams{
+		SourceDiskID: pulled.KeptLocalDiskID, TargetDiskID: disk.DiskID, Strategy: store.MergeStrategyTheirs,
+	})
+	require.NoError(t, err)
+
+	// Then: 原盘同时拥有两边各自新增的文件、只有一边改过的文件，以及按策略解决的冲突文件
+	mainActor, err = local.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("written on cloud"), readRegularFile(t, ctx, mainActor, "only-cloud.txt", 64))
+	require.Equal(t, []byte("written offline on local"), readRegularFile(t, ctx, mainActor, "only-local.txt", 64))
+	require.Equal(t, []byte("edited on local"), readRegularFile(t, ctx, mainActor, "shared.txt", 64))
+	require.Equal(t, []byte("local version"), readRegularFile(t, ctx, mainActor, "both-edit.txt", 64))
+
+	// 合并结果能正常推回远端
+	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+}

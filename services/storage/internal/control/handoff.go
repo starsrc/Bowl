@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/starsrc/bowl/services/storage/internal/db"
 	"github.com/starsrc/bowl/services/storage/internal/handoff"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
@@ -62,6 +63,9 @@ type PullDiskParams struct {
 	// Mirror 只把本地副本刷新到远端最新快照，不认领写权限：写者仍是原来的节点，
 	// 本节点得到一份可以只读挂载的最新副本。
 	Mirror bool
+	// KeepLocal 在本地存在未同步写入时不拒绝也不丢弃它们：把本地这份另存为同血缘的一块新盘，
+	// 并以双方最后一次共同同步的快照登记为它们的共同祖先，之后可用 MergeDisk 把本地改动合回来。
+	KeepLocal bool
 }
 
 // HandoffResult 汇报一次交接后的远端状态。
@@ -72,6 +76,8 @@ type HandoffResult struct {
 	Pulled handoff.PullStats `json:"pulled"`
 	// Installed 表示本次调用确实替换了本地副本（Pull 专用）。
 	Installed bool `json:"installed"`
+	// KeptLocalDiskID 非空表示本地未同步的写入被另存成了这块盘（Pull 带 KeepLocal 时）。
+	KeptLocalDiskID string `json:"kept_local_disk_id,omitempty"`
 	// Unchanged 表示本地自上次同步后没有新写入，本次没有上传任何东西（Push 专用）。
 	Unchanged bool `json:"unchanged"`
 }
@@ -337,13 +343,24 @@ func (m *manager) PullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 		return nil, fmt.Errorf("%w: head owner is %q; it must push --release first (or pull --force)", ErrNotOwner, head.Owner)
 	}
 
+	// keepBase 非空表示要保留本地分叉，值为双方的共同基线快照名。
+	var keepBase, keptLocalDiskID string
 	row, getErr := m.store.GetDisk(ctx, id)
 	hasLocal := getErr == nil
 	if getErr != nil && !errors.Is(mapDBErr(getErr), ErrNotFound) {
 		return nil, mapDBErr(getErr)
 	}
 	if hasLocal {
-		if localErr := m.checkLocalReplaceable(ctx, diskID, row.LineageID, params.Force); localErr != nil {
+		localErr := m.checkLocalReplaceable(ctx, diskID, row.LineageID, params.Force)
+		switch {
+		case localErr == nil:
+		case params.KeepLocal && errors.Is(localErr, ErrLocalDiverged):
+			mark, ok := m.readSyncMark(diskID)
+			if !ok || mark.Snapshot == "" {
+				return nil, fmt.Errorf("%w: no record of the last synced snapshot, so there is no common base to keep the local changes against", ErrLocalDiverged)
+			}
+			keepBase = mark.Snapshot
+		default:
 			return nil, localErr
 		}
 	}
@@ -374,7 +391,12 @@ func (m *manager) PullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 		}
 	}()
 
-	if installErr := m.installPulledDir(ctx, diskID, tmp); installErr != nil {
+	if keepBase != "" {
+		keptLocalDiskID, err = m.keepLocalDivergence(ctx, id, row.Name, keepBase, tmp)
+		if err != nil {
+			return nil, err
+		}
+	} else if installErr := m.installPulledDir(ctx, diskID, tmp); installErr != nil {
 		return nil, installErr
 	}
 	installed = true
@@ -397,7 +419,7 @@ func (m *manager) PullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 	}
 
 	if params.Mirror {
-		return &HandoffResult{Head: head, Pulled: pullStats, Installed: true}, nil
+		return &HandoffResult{Head: head, Pulled: pullStats, Installed: true, KeptLocalDiskID: keptLocalDiskID}, nil
 	}
 
 	next := head
@@ -416,7 +438,7 @@ func (m *manager) PullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 		"forced", params.Force && head.Owner != "",
 		"previous_owner", head.Owner,
 	)
-	return &HandoffResult{Head: next, Pulled: pullStats, Installed: true}, nil
+	return &HandoffResult{Head: next, Pulled: pullStats, Installed: true, KeptLocalDiskID: keptLocalDiskID}, nil
 }
 
 // checkLocalReplaceable 确认本地副本可以被远端快照替换：没有任何挂载，且没有未同步的写入。
@@ -504,6 +526,76 @@ func (m *manager) installPulledDir(ctx context.Context, diskID, pulled string) e
 		}
 	}
 	return nil
+}
+
+// keepLocalDivergence 处理"本地有未同步写入，而写权限已经去过别的节点"的情况：
+//
+//	本地盘目录        → 另存为新盘 kept（内容 = 共同基线 + 本地未同步的写入）
+//	远端最新快照      → 安装为原盘（内容 = 共同基线 + 对方的写入）
+//	远端共同基线快照  → 登记为提交切面，作为两块盘的共同祖先
+//
+// 血缘关系随盘跨节点是带不过来的（它记在各节点自己的控制面库里），所以这里用远端快照
+// 在本节点重建出合并所需的那一个祖先。登记方式与 Fork 完全相同，之后 MergeDisk 无需区分。
+func (m *manager) keepLocalDivergence(ctx context.Context, id uuid.UUID, name, baseSnapshot, pulled string) (string, error) {
+	diskID := id.String()
+	commitUUID, err := uuid.NewV7()
+	if err != nil {
+		return "", err
+	}
+	keptUUID, err := uuid.NewV7()
+	if err != nil {
+		return "", err
+	}
+	if closeErr := m.closeLocalActor(diskID); closeErr != nil {
+		return "", closeErr
+	}
+	dir, keptDir, commitDir := m.diskDir(diskID), m.diskDir(keptUUID.String()), m.commitDir(commitUUID.String())
+	if mkErr := os.MkdirAll(filepath.Dir(commitDir), 0o755); mkErr != nil {
+		return "", mkErr
+	}
+	if _, pullErr := handoff.PullSnapshot(ctx, m.handoffRemote, diskID, baseSnapshot, commitDir, dir, deferPack); pullErr != nil {
+		return "", fmt.Errorf("下载共同基线快照 %s: %w", baseSnapshot, pullErr)
+	}
+	dropCommit := func() { _ = m.removeAll(commitDir) }
+	if _, _, orphans, statErr := store.InspectBranchStat(commitDir); statErr != nil {
+		dropCommit()
+		return "", fmt.Errorf("检查共同基线快照: %w", statErr)
+	} else if orphans {
+		if _, sanErr := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
+			Dir: commitDir, CommitID: commitUUID.String(), Logger: m.baseLogger, Metrics: m.storeMetrics, OpenActor: m.openDiskActor,
+		}); sanErr != nil {
+			dropCommit()
+			return "", fmt.Errorf("净化共同基线快照: %w", sanErr)
+		}
+	}
+
+	if mvErr := os.Rename(dir, keptDir); mvErr != nil {
+		dropCommit()
+		return "", fmt.Errorf("另存本地副本: %w", mvErr)
+	}
+	undo := func() {
+		_ = os.Rename(dir, pulled)
+		_ = os.Rename(keptDir, dir)
+		dropCommit()
+	}
+	if mvErr := os.Rename(pulled, dir); mvErr != nil {
+		_ = os.Rename(keptDir, dir)
+		dropCommit()
+		return "", fmt.Errorf("安装交接快照: %w", mvErr)
+	}
+	keptName := name + "-local"
+	if name == "" || validateDiskName(keptName) != nil {
+		keptName = "local-changes"
+	}
+	if _, dbErr := m.store.ForkDisk(ctx, db.ForkDiskInput{
+		SourceDiskID: id, ChildDiskID: keptUUID, CommitID: commitUUID, Name: keptName,
+	}); dbErr != nil {
+		undo()
+		return "", fmt.Errorf("登记保留的本地副本: %w", mapDBErr(dbErr))
+	}
+	m.logger.InfoContext(ctx, "local divergence kept as a sibling disk",
+		"disk_id", diskID, "kept_disk_id", keptUUID.String(), "base_snapshot", baseSnapshot, "base_commit_id", commitUUID.String())
+	return keptUUID.String(), nil
 }
 
 // fenceIfOwnershipLost 在可写租约续期时核对远端写者。一旦发现写权限已被别的节点接管，

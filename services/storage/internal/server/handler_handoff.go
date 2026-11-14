@@ -51,6 +51,10 @@ func registerHandoffRoutes(mux *http.ServeMux, ctrl control.Manager) {
 		res, err := h.PullDisk(r.Context(), control.PullDiskParams{DiskID: req.DiskID, Force: req.Force, KeepLocal: req.KeepLocal})
 		writeHandoffResult(w, res, err)
 	})
+	mux.HandleFunc("GET /handoff/v1/status", func(w http.ResponseWriter, r *http.Request) {
+		status, err := h.StatusDisk(r.Context(), r.URL.Query().Get("disk_id"))
+		writeHandoffResult(w, status, err)
+	})
 	mux.HandleFunc("GET /handoff/v1/head", func(w http.ResponseWriter, r *http.Request) {
 		head, err := h.HeadDisk(r.Context(), r.URL.Query().Get("disk_id"))
 		writeHandoffResult(w, head, err)

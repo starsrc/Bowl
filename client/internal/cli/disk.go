@@ -39,6 +39,7 @@ const diskUsageHelp = `用法:
   push        把磁盘当前状态同步到远端 (--release 同时交出写权限)
   pull        从远端认领磁盘并拉取最新状态 (--force 强行接管)
   head        查看远端记录的当前写者与最新快照
+  status      查看这块盘在该存储节点上的角色、同步位置与待下载数据
   help        查看命令帮助
 
 标志:
@@ -306,7 +307,7 @@ func executeDiskWithPorts(args []string, stdout, stderr io.Writer, ports diskPor
 		spec = &diskDiffSpec
 	case "merge":
 		spec = &diskMergeSpec
-	case "push", "pull", "head":
+	case "push", "pull", "head", "status":
 		return executeDiskHandoff(subcmd, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "错误: 未知 disk 子命令 \"%s\"\n\n%s", subcmd, diskUsageHelp)

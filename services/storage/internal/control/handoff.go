@@ -87,6 +87,27 @@ type Handoff interface {
 	PushDisk(ctx context.Context, params PushDiskParams) (*HandoffResult, error)
 	PullDisk(ctx context.Context, params PullDiskParams) (*HandoffResult, error)
 	HeadDisk(ctx context.Context, diskID string) (*handoff.Head, error)
+	StatusDisk(ctx context.Context, diskID string) (*HandoffStatus, error)
+}
+
+// HandoffStatus 汇总一块盘在本节点视角下的交接状态。
+type HandoffStatus struct {
+	DiskID string `json:"disk_id"`
+	NodeID string `json:"node_id"`
+	// Role 是本节点对这块盘的角色：
+	//   writer    本节点是写者，本地即最新；
+	//   replica   写者在别的节点，本地是只读副本；
+	//   released  没有写者，任何节点都可以认领；
+	//   unbound   这块盘从未推送到远端，只存在于本节点；
+	//   absent    远端有这块盘，本节点没有它的副本。
+	Role string `json:"role"`
+	// Head 是远端记录；从未推送过时为空。
+	Head *handoff.Head `json:"head,omitempty"`
+	// LocalSnapshot 是本地副本最后一次与远端一致时对应的快照；与 Head.Snapshot 不同说明
+	// 远端有本地还没拿到的内容（副本），或本地有还没推上去的内容（写者）。
+	LocalSnapshot string `json:"local_snapshot,omitempty"`
+	// PendingPacks 是本地还没下载、读到时才会去远端取的数据包数量。
+	PendingPacks int `json:"pending_packs"`
 }
 
 // syncMark 记录本地副本上一次与远端一致时的位置，用来判断之后本地有没有再写过。
@@ -779,4 +800,54 @@ func (m *manager) syncBeforeMount(ctx context.Context, diskID string, readOnly b
 		return pullErr
 	}
 	return nil
+}
+
+// StatusDisk 返回一块盘在本节点视角下的交接状态。
+func (m *manager) StatusDisk(ctx context.Context, diskID string) (*HandoffStatus, error) {
+	if m.handoffRemote == nil {
+		return nil, ErrHandoffDisabled
+	}
+	id, err := parseDiskID(diskID)
+	if err != nil {
+		return nil, err
+	}
+	diskID = id.String()
+	status := &HandoffStatus{DiskID: diskID, NodeID: m.nodeID}
+
+	head, _, headErr := handoff.ReadHead(ctx, m.handoffRemote, diskID)
+	switch {
+	case headErr == nil:
+		status.Head = &head
+	case !errors.Is(headErr, handoff.ErrNotFound):
+		return nil, fmt.Errorf("读取交接 HEAD: %w", headErr)
+	}
+	_, getErr := m.store.GetDisk(ctx, id)
+	hasLocal := getErr == nil
+	if getErr != nil && !errors.Is(mapDBErr(getErr), ErrNotFound) {
+		return nil, mapDBErr(getErr)
+	}
+	if status.Head == nil && !hasLocal {
+		return nil, ErrNotFound
+	}
+	if hasLocal {
+		if mark, ok := m.readSyncMark(diskID); ok {
+			status.LocalSnapshot = mark.Snapshot
+		}
+		if actor, actorErr := m.Actor(ctx, diskID); actorErr == nil {
+			status.PendingPacks = actor.RemotePackCount()
+		}
+	}
+	switch {
+	case status.Head == nil:
+		status.Role = "unbound"
+	case !hasLocal:
+		status.Role = "absent"
+	case status.Head.Owner == m.nodeID:
+		status.Role = "writer"
+	case status.Head.Owner == "":
+		status.Role = "released"
+	default:
+		status.Role = "replica"
+	}
+	return status, nil
 }

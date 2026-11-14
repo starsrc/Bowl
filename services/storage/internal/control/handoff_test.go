@@ -443,3 +443,54 @@ func TestHandoff_KeepLocal_掉线期间的本地改动在云端接管后能合�
 	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
 	require.NoError(t, err)
 }
+
+func TestHandoff_Status_各节点看到自己的角色与待下载数据(t *testing.T) {
+	ctx := context.Background()
+	remote := newSharedRemote(t)
+	local := newHandoffNode(t, remote, "local")
+	cloud := newHandoffNode(t, remote, "cloud")
+
+	disk, err := local.CreateDisk(ctx, CreateDiskParams{Name: "workspace", MaxBytes: 64 << 20})
+	require.NoError(t, err)
+	st, err := local.StatusDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "unbound", st.Role)
+	_, err = cloud.StatusDisk(ctx, disk.DiskID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	mount, err := local.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	actor, err := local.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, actor, mount.Epoch, "a.txt", bytes.Repeat([]byte("x"), 4096))
+	pushed, err := local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+
+	st, err = local.StatusDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "writer", st.Role)
+	require.Equal(t, pushed.Head.Snapshot, st.LocalSnapshot)
+	st, err = cloud.StatusDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "absent", st.Role)
+
+	require.NoError(t, local.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: mount.MountID}))
+	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID, Release: true})
+	require.NoError(t, err)
+	st, err = local.StatusDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "released", st.Role)
+
+	_, err = cloud.PullDisk(ctx, PullDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	st, err = cloud.StatusDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "writer", st.Role)
+	require.Eventually(t, func() bool {
+		s, statusErr := cloud.StatusDisk(ctx, disk.DiskID)
+		return statusErr == nil && s.PendingPacks == 0
+	}, 5*time.Second, 20*time.Millisecond, "后台补齐后不应再有待下载的数据包")
+	st, err = local.StatusDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "replica", st.Role)
+}

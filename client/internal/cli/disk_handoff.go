@@ -1,16 +1,19 @@
 package cli
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
+	"connectrpc.com/connect"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+
 	"github.com/starsrc/bowl/client/internal/rpc"
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 const diskHandoffUsageHelp = `用法:
@@ -31,12 +34,15 @@ const diskHandoffUsageHelp = `用法:
 标志:
   --endpoint string    StorageService 基础地址 (默认读取 $BOWL_STORAGE_ENDPOINT 或 http://127.0.0.1:9000)
   --token string       访问令牌 (默认读取 $BOWL_TOKEN)
-  --json               输出服务端返回的原始 JSON
+  --json               以 JSON 输出结果
   -h, --help           查看帮助信息
 `
 
 // 上传与下载的耗时取决于数据量，给足时间；连不上的情况由拨号超时兜住。
-var diskHandoffHTTPClient = &http.Client{Timeout: 30 * time.Minute}
+const diskHandoffTimeout = 30 * time.Minute
+
+// handoffErrorDomain 与服务端 server.HandoffErrorDomain 保持一致。
+const handoffErrorDomain = "bowl.storage.handoff"
 
 type diskHandoffHead struct {
 	DiskID      string `json:"disk_id"`
@@ -78,8 +84,7 @@ func (r *diskHandoffResult) transferSummary(verb string) string {
 		r.Pulled.Packs, r.Pulled.PacksReused, r.Pulled.PacksDeferred, FormatSize(uint64(r.Pulled.DeferredBytes)))
 }
 
-// executeDiskHandoff 处理 disk push / pull / head。
-// 这三个命令走存储服务的 JSON 管理路由而不是 RPC，见服务端 handler_handoff.go 的说明。
+// executeDiskHandoff 处理 disk push / pull / head / status。
 func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) int {
 	var (
 		diskID, endpoint, token            string
@@ -128,13 +133,9 @@ func executeDiskHandoff(verb string, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	raw, status, err := callDiskHandoff(base, verb, diskID, handoffFlags{release: release, force: force, keepLocal: keepLocal, token: token})
+	raw, err := callDiskHandoff(base, verb, diskID, handoffFlags{release: release, force: force, keepLocal: keepLocal, token: token})
 	if err != nil {
-		fmt.Fprintf(stderr, "错误: 请求存储节点失败: %v\n", err)
-		return 1
-	}
-	if status != http.StatusOK {
-		fmt.Fprintf(stderr, "错误: %s\n", describeHandoffFailure(raw, status))
+		fmt.Fprintf(stderr, "错误: %s\n", describeHandoffFailure(err))
 		return 1
 	}
 	if jsonOut {
@@ -151,42 +152,106 @@ type handoffFlags struct {
 	token string
 }
 
-func callDiskHandoff(base, verb, diskID string, flags handoffFlags) (raw []byte, status int, err error) {
-	base = strings.TrimRight(base, "/")
-	var req *http.Request
-	if verb == "head" || verb == "status" {
-		req, err = http.NewRequest(http.MethodGet, base+"/handoff/v1/"+verb+"?disk_id="+url.QueryEscape(diskID), http.NoBody)
-	} else {
-		body, _ := json.Marshal(map[string]any{"disk_id": diskID, "release": flags.release, "force": flags.force, "keep_local": flags.keepLocal})
-		req, err = http.NewRequest(http.MethodPost, base+"/handoff/v1/"+verb, bytes.NewReader(body))
-	}
+// callDiskHandoff 对一个存储节点执行一次交接 RPC，返回结果的 JSON（字段见 diskHandoffResult / diskHandoffHead / diskHandoffStatus）。
+func callDiskHandoff(base, verb, diskID string, flags handoffFlags) ([]byte, error) {
+	client, err := rpc.NewClient(base, flags.token)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if token := rpc.ResolveToken(flags.token); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	ctx, cancel := context.WithTimeout(context.Background(), diskHandoffTimeout)
+	defer cancel()
+
+	var out any
+	switch verb {
+	case "push":
+		resp, callErr := client.PushDisk(ctx, connect.NewRequest(&storagev1.PushDiskRequest{DiskId: diskID, Release: flags.release}))
+		if callErr != nil {
+			return nil, callErr
+		}
+		res := diskHandoffResult{Head: fromProtoDiskHead(resp.Msg.GetHead())}
+		res.Stats.Packs = int(resp.Msg.GetPacks())
+		res.Stats.PacksUploaded = int(resp.Msg.GetPacksUploaded())
+		res.Stats.PackBytes = int64(resp.Msg.GetPackBytesUploaded())
+		res.Stats.MetaBytes = int64(resp.Msg.GetMetaBytes())
+		out = res
+	case "pull":
+		resp, callErr := client.PullDisk(ctx, connect.NewRequest(&storagev1.PullDiskRequest{DiskId: diskID, Force: flags.force, KeepLocal: flags.keepLocal}))
+		if callErr != nil {
+			return nil, callErr
+		}
+		res := diskHandoffResult{Head: fromProtoDiskHead(resp.Msg.GetHead()), Installed: resp.Msg.GetInstalled(), KeptLocalDiskID: resp.Msg.GetKeptLocalDiskId()}
+		res.Pulled.Packs = int(resp.Msg.GetPacks())
+		res.Pulled.PacksReused = int(resp.Msg.GetPacksReused())
+		res.Pulled.PacksDownloaded = int(resp.Msg.GetPacksDownloaded())
+		res.Pulled.PackBytes = int64(resp.Msg.GetPackBytesDownloaded())
+		res.Pulled.PacksDeferred = int(resp.Msg.GetPacksDeferred())
+		res.Pulled.DeferredBytes = int64(resp.Msg.GetPackBytesDeferred())
+		out = res
+	case "head":
+		resp, callErr := client.GetDiskHead(ctx, connect.NewRequest(&storagev1.GetDiskHeadRequest{DiskId: diskID}))
+		if callErr != nil {
+			return nil, callErr
+		}
+		out = fromProtoDiskHead(resp.Msg.GetHead())
+	default:
+		resp, callErr := client.GetDiskHandoffStatus(ctx, connect.NewRequest(&storagev1.GetDiskHandoffStatusRequest{DiskId: diskID}))
+		if callErr != nil {
+			return nil, callErr
+		}
+		st := diskHandoffStatus{
+			DiskID:        resp.Msg.GetDiskId(),
+			NodeID:        resp.Msg.GetNodeId(),
+			Role:          strings.ToLower(strings.TrimPrefix(resp.Msg.GetRole().String(), "DISK_HANDOFF_ROLE_")),
+			LocalSnapshot: resp.Msg.GetLocalSnapshot(),
+			PendingPacks:  int(resp.Msg.GetPendingPacks()),
+		}
+		if resp.Msg.Head != nil {
+			head := fromProtoDiskHead(resp.Msg.Head)
+			st.Head = &head
+		}
+		out = st
 	}
-	resp, err := diskHandoffHTTPClient.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	raw, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return raw, resp.StatusCode, err
+	return json.Marshal(out)
 }
 
-// describeHandoffFailure 把服务端的失败原因翻成"下一步该做什么"。
-func describeHandoffFailure(raw []byte, status int) string {
-	var body struct {
-		Error  string `json:"error"`
-		Reason string `json:"reason"`
+func fromProtoDiskHead(head *storagev1.DiskHead) diskHandoffHead {
+	out := diskHandoffHead{
+		DiskID:      head.GetDiskId(),
+		Name:        head.GetName(),
+		Generation:  head.GetGeneration(),
+		Owner:       head.GetOwner(),
+		Snapshot:    head.GetSnapshot(),
+		WriterEpoch: head.GetWriterEpoch(),
+		UpdatedBy:   head.GetUpdatedBy(),
 	}
-	if status == http.StatusUnauthorized {
+	if ts := head.GetUpdatedAt(); ts != nil {
+		out.UpdatedAt = ts.AsTime().Format(time.RFC3339Nano)
+	}
+	return out
+}
+
+// handoffFailureReason 取出服务端在交接专用 ErrorInfo 里给的失败原因；没有则为空。
+func handoffFailureReason(err error) string {
+	connectErr, ok := errors.AsType[*connect.Error](err)
+	if !ok {
+		return ""
+	}
+	for _, detail := range connectErr.Details() {
+		msg, valueErr := detail.Value()
+		if valueErr != nil {
+			continue
+		}
+		if info, isInfo := msg.(*errdetails.ErrorInfo); isInfo && info.GetDomain() == handoffErrorDomain {
+			return info.GetReason()
+		}
+	}
+	return ""
+}
+
+// describeHandoffFailure 把失败原因翻成"下一步该做什么"。
+func describeHandoffFailure(err error) string {
+	if connect.CodeOf(err) == connect.CodeUnauthenticated {
 		return "存储节点拒绝了访问令牌。用 --token 或 $BOWL_TOKEN 提供正确的令牌"
-	}
-	if json.Unmarshal(raw, &body) != nil || body.Error == "" {
-		return fmt.Sprintf("存储节点返回 HTTP %d: %s", status, strings.TrimSpace(string(raw)))
 	}
 	hint := map[string]string{
 		"NOT_OWNER":      "这块盘的写权限在别的节点上。先在那个节点 push --release，或在这里 pull --force 强行接管",
@@ -195,11 +260,11 @@ func describeHandoffFailure(raw []byte, status int) string {
 		"CONFLICT":       "交接过程中远端被别的节点改写了，重试一次",
 		"DISABLED":       "这个存储节点没有配置交接远端 (HANDOFF_REMOTE_DIR)",
 		"NOT_FOUND":      "远端没有这块盘的记录，它还没被 push 过",
-	}[body.Reason]
+	}[handoffFailureReason(err)]
 	if hint == "" {
-		return body.Error
+		return "请求存储节点失败: " + err.Error()
 	}
-	return hint + "\n      (" + body.Error + ")"
+	return hint + "\n      (" + err.Error() + ")"
 }
 
 type diskHandoffStatus struct {

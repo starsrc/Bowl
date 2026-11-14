@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"time"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
@@ -164,13 +163,9 @@ func sandboxMove(args []string, stdout, stderr io.Writer) int {
 
 // sboxHandoffStep 对一个存储节点执行一次 push 或 pull，返回传输量摘要；失败时打印可操作的原因。
 func sboxHandoffStep(endpoint, verb, diskID string, flags handoffFlags, stderr io.Writer) (summary string, code int) {
-	raw, status, err := callDiskHandoff(endpoint, verb, diskID, flags)
+	raw, err := callDiskHandoff(endpoint, verb, diskID, flags)
 	if err != nil {
-		fmt.Fprintf(stderr, "错误: 请求存储节点 %s 失败: %v\n", endpoint, err)
-		return "", 1
-	}
-	if status != http.StatusOK {
-		fmt.Fprintf(stderr, "错误: 节点 %s: %s\n", endpoint, describeHandoffFailure(raw, status))
+		fmt.Fprintf(stderr, "错误: 节点 %s: %s\n", endpoint, describeHandoffFailure(err))
 		return "", 1
 	}
 	var res diskHandoffResult

@@ -21,6 +21,7 @@ const diskHandoffUsageHelp = `用法:
                                          --keep-local 本地有未同步的写入时把它们另存为一块新盘，
                                          之后可用 bowl disk merge 合并回来
   bowl disk head <disk-id>               查看远端记录的当前写者与最新快照
+  bowl disk status <disk-id>             查看这块盘在 --endpoint 指向的节点上的角色、同步位置与待下载数据
 
 说明:
   交接在两个存储节点之间转移一块盘的写权限。切换算力的完整动作是：
@@ -145,8 +146,8 @@ type handoffFlags struct {
 func callDiskHandoff(base, verb, diskID string, flags handoffFlags) (raw []byte, status int, err error) {
 	base = strings.TrimRight(base, "/")
 	var resp *http.Response
-	if verb == "head" {
-		resp, err = diskHandoffHTTPClient.Get(base + "/handoff/v1/head?disk_id=" + url.QueryEscape(diskID))
+	if verb == "head" || verb == "status" {
+		resp, err = diskHandoffHTTPClient.Get(base + "/handoff/v1/" + verb + "?disk_id=" + url.QueryEscape(diskID))
 	} else {
 		body, _ := json.Marshal(map[string]any{"disk_id": diskID, "release": flags.release, "force": flags.force, "keep_local": flags.keepLocal})
 		resp, err = diskHandoffHTTPClient.Post(base+"/handoff/v1/"+verb, "application/json", bytes.NewReader(body))
@@ -182,7 +183,56 @@ func describeHandoffFailure(raw []byte, status int) string {
 	return hint + "\n      (" + body.Error + ")"
 }
 
+type diskHandoffStatus struct {
+	DiskID        string           `json:"disk_id"`
+	NodeID        string           `json:"node_id"`
+	Role          string           `json:"role"`
+	Head          *diskHandoffHead `json:"head"`
+	LocalSnapshot string           `json:"local_snapshot"`
+	PendingPacks  int              `json:"pending_packs"`
+}
+
+func printDiskHandoffStatus(stdout io.Writer, st *diskHandoffStatus) {
+	role := map[string]string{
+		"writer":   "写者（本节点持有写权限，本地即最新）",
+		"replica":  "只读副本（写者在别的节点）",
+		"released": "无写者（已释放，任何节点都可以认领）",
+		"unbound":  "未绑定远端（这块盘只存在于本节点，还没 push 过）",
+		"absent":   "本节点没有这块盘的副本（挂载或 pull 时会自动拉取）",
+	}[st.Role]
+	if role == "" {
+		role = st.Role
+	}
+	fmt.Fprintf(stdout, "磁盘   %s\n", st.DiskID)
+	fmt.Fprintf(stdout, "节点   %s\n", st.NodeID)
+	fmt.Fprintf(stdout, "角色   %s\n", role)
+	if st.Head != nil {
+		printDiskHandoffHead(stdout, st.Head)
+		switch st.LocalSnapshot {
+		case "":
+		case st.Head.Snapshot:
+			fmt.Fprintln(stdout, "  本地   与远端最新快照一致（写者在此之后的写入由后台同步推送）")
+		default:
+			fmt.Fprintf(stdout, "  本地   基于快照 %s，与远端最新快照不同\n", st.LocalSnapshot)
+		}
+	}
+	if st.PendingPacks > 0 {
+		fmt.Fprintf(stdout, "  待取   %d 个数据包尚未下载到本节点（读到时按需取，后台也在补齐）\n", st.PendingPacks)
+	} else if st.Role != "absent" {
+		fmt.Fprintln(stdout, "  待取   无，数据已全部在本节点")
+	}
+}
+
 func printDiskHandoff(verb string, raw []byte, stdout, stderr io.Writer) int {
+	if verb == "status" {
+		var st diskHandoffStatus
+		if err := json.Unmarshal(raw, &st); err != nil {
+			fmt.Fprintf(stderr, "错误: 无法解析响应: %v\n", err)
+			return 1
+		}
+		printDiskHandoffStatus(stdout, &st)
+		return 0
+	}
 	if verb == "head" {
 		var head diskHandoffHead
 		if err := json.Unmarshal(raw, &head); err != nil {

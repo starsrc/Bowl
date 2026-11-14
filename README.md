@@ -4,11 +4,9 @@
 
 **面向云原生沙箱与开发环境的远程 POSIX 虚拟磁盘系统**
 
-提供 Linux FUSE 挂载、单写者世代栅栏（WriterEpoch Fencing）以及盘级零拷贝 Fork / 结构化 Diff / 三路 Merge 能力
+提供 Linux FUSE 挂载、WriterEpoch 单写者栅栏与盘级零拷贝 Fork / Diff / 三路 Merge
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.26.5-00ADD8?logo=go&logoColor=white)](go.mod)
-[![Status](https://img.shields.io/badge/Release-Pre--release%20(No%20Release%20Yet)-orange.svg)](https://github.com/starsrc/Bowl/releases)
+<a href="LICENSE"><kbd>MIT License</kbd></a> &nbsp;·&nbsp; <a href="go.mod"><kbd>Go 1.26.5</kbd></a> &nbsp;·&nbsp; <a href="https://github.com/starsrc/Bowl/releases"><kbd>Status: Pre-release（尚未发布可用版本）</kbd></a>
 
 [快速开始](#快速开始) · [系统架构](#系统架构) · [开发手册](docs/index.md) · [提交 Issue](https://github.com/starsrc/Bowl/issues)
 

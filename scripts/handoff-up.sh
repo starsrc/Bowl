@@ -12,12 +12,10 @@ COMPOSE="$ROOT/deploy/handoff/docker-compose.yaml"
 command -v docker >/dev/null || { echo "需要 docker" >&2; exit 1; }
 
 # 容器内构建拉不到私有模块 github.com/starsrc/pkg，需要先在本机准备 vendor。
-# go.mod 比 vendor 新（加过依赖）时也要重新生成，否则构建会报 inconsistent vendoring。
-VENDOR="$ROOT/services/storage/vendor"
-if [[ ! -f "$VENDOR/modules.txt" || "$ROOT/services/storage/go.mod" -nt "$VENDOR/modules.txt" ]]; then
-  echo "[handoff-up] 准备 vendor"
-  ( cd "$ROOT/services/storage" && GOWORK=off go mod vendor )
-fi
+# 每次都重新生成：vendor 里还带着本仓库 gen/ 和 pkg/ 的副本，协议或公共包一改它就过期，
+# 构建会用旧代码或直接编译失败。
+echo "[handoff-up] 准备 vendor"
+( cd "$ROOT/services/storage" && GOWORK=off GOFLAGS=-mod=mod go mod vendor )
 
 echo "[handoff-up] 启动两个存储节点（首次会构建镜像，需要几分钟）"
 services=(storage-local storage-cloud)

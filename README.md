@@ -20,6 +20,7 @@
     <a href="#适用场景">适用场景</a> •
     <a href="#系统架构">系统架构</a> •
     <a href="docs/index.md">开发手册</a> •
+    <a href="#交流讨论">交流群</a> •
     <a href="https://github.com/starsrc/Bowl/issues">提交 Issue</a>
   </p>
 </div>
@@ -213,6 +214,27 @@ task docs:install && task docs:dev   # 生成最新 RPC 文档并启动本地 Vi
 2. 请先阅读 [开发与测试规范](AGENTS.md)，修改 `.proto` 或数据库定义后务必执行对应生成命令（禁止手改 `gen/` 与 sqlc 生成文件）。
 3. 提交前确保通过 `task test`、`task test:client` 与 `task lint`。
 4. 向 `main` 发起 Pull Request。
+
+## 交流讨论
+
+欢迎加入社区群聊讨论架构设计、使用问题与需求建议：
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <strong>微信交流群（到碗里来）</strong><br/><br/>
+      <img src="./.github/media/wechat-group.jpg" alt="微信交流群：到碗里来" height="280"><br/>
+      <sub>微信扫码入群（群二维码 7 天内有效）</sub>
+    </td>
+    <td align="center" width="50%">
+      <strong>Telegram 群组</strong><br/><br/>
+      <a href="https://t.me/ai_infra_bowl">
+        <img src="./.github/media/telegram-group.png" alt="Telegram: t.me/ai_infra_bowl" height="280">
+      </a><br/>
+      <sub>扫码或点击加入：<a href="https://t.me/ai_infra_bowl">t.me/ai_infra_bowl</a></sub>
+    </td>
+  </tr>
+</table>
 
 ## 开源协议
 

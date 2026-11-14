@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"syscall"
 	"time"
 
@@ -147,15 +148,19 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	if status != fuse.OK {
 		return status
 	}
-	fs.writeBehind.BarrierInode(opCtx, srcIno)
+	fs.stage.BarrierInode(opCtx, srcIno)
 
 	newParentIno, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
 		return status
 	}
 
+	unlock := fs.inodeLocks.lock(input.Oldnodeid)
+	defer unlock()
+
 	epoch := fs.cache.version()
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	detachedCtx := context.WithoutCancel(opCtx)
+	ctx, cancelFunc := fs.RPCContextFrom(detachedCtx, nil)
 	defer cancelFunc()
 
 	resp, err := fs.client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
@@ -166,12 +171,22 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 		Epoch:        fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err, nil)
+	}
+	if fs.clearOrphan(input.Oldnodeid) {
+		fs.metrics.incTmpPromote()
 	}
 
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 0, resp.Msg.GetAttrTimeoutSeconds())
+	inode := resp.Msg.GetInode()
+	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, inode, 0, resp.Msg.GetAttrTimeoutSeconds())
 	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
-	fs.cache.putInodeAt(epoch, input.Oldnodeid, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
-	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	if inode != nil && inode.GetAttr() != nil {
+		fs.cache.putInodeAt(epoch, input.Oldnodeid, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	} else {
+		fs.cache.invalidateInode(input.Oldnodeid)
+	}
+	fs.topologySeq.Add(1)
+	fs.recordInodeSpecial(input.Oldnodeid, inode)
+	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }

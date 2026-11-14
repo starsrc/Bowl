@@ -6,7 +6,9 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -64,21 +66,65 @@ type Config struct {
 	RootInode              *storagev1.Inode
 	EntryTimeoutSeconds    float64
 	AttrTimeoutSeconds     float64
-	ReadOnly               bool
+	Mode                   string
 	DirectIO               bool
 	AllowOther             bool
 	Debug                  bool
 	EnableStatsFile        bool
 	OrphanBacklogThreshold int
+	StageSize              uint64
+	StageDir               string
+	StageSession           *StageDirSession
 	Logger                 *slog.Logger
 	Metrics                *Metrics
 	TracerProvider         trace.TracerProvider
+}
+
+func normalizeMountMode(mode string) string {
+	if m := strings.ToLower(strings.TrimSpace(mode)); m != "" {
+		return m
+	}
+	return MountModeStaged
+}
+
+// EffectiveMode returns the normalized mount mode, defaulting an empty Mode to MountModeStaged.
+func (c *Config) EffectiveMode() string {
+	if c == nil {
+		return MountModeStaged
+	}
+	return normalizeMountMode(c.Mode)
+}
+
+// IsReadOnly reports whether the mount mode is MountModeRO.
+func (c *Config) IsReadOnly() bool {
+	return c.EffectiveMode() == MountModeRO
+}
+
+// IsStaged reports whether the mount mode is MountModeStaged.
+func (c *Config) IsStaged() bool {
+	return c.EffectiveMode() == MountModeStaged
 }
 
 type reclaimRetryItem struct {
 	ino      uint64
 	spanCtx  trace.SpanContext
 	attempts int
+}
+
+// UnmountProgress reports cloud sync progress observed during OnUnmount.
+type UnmountProgress struct {
+	Active    bool   `json:"active"`
+	Completed uint64 `json:"completed"`
+	Total     uint64 `json:"total"`
+}
+
+type unmountProgressState struct {
+	active        bool
+	completedOnce bool
+	phase         uint8
+	stageTotal    uint64
+	completed     uint64
+	total         uint64
 }
 
 // RawFS 封装底层 FUSE 请求处理，桥接 Linux 内核 VFS 与 StorageService RPC。
@@ -100,11 +146,13 @@ type RawFS struct {
 	statsSnapshots map[uint64][]byte
 	// inodeLocks 按 Inode 粒度串行化 O_APPEND 定序与 Unlink/Release 孤儿标记。
 	inodeLocks inodeLocks
-	tmpMgr     *TmpFileManager
-	cfg        Config
-	metrics    *Metrics
-	tracer     trace.Tracer
-	nextReqID  atomic.Uint64
+	// topologySeq increments after Link, Unlink, or Rename mutates directory links.
+	topologySeq atomic.Uint64
+	tmpMgr      *TmpFileManager
+	cfg         Config
+	metrics     *Metrics
+	tracer      trace.Tracer
+	nextReqID   atomic.Uint64
 
 	releaseMu       sync.Mutex
 	releaseQueue    []reclaimRetryItem
@@ -117,14 +165,21 @@ type RawFS struct {
 	lastOrphanWarnUnixNano atomic.Int64
 	fuseSysfsDir           atomic.Pointer[string]
 
-	readAhead   *ReadAheadCoordinator
-	writeBehind *WriteBehindCoordinator
+	readAhead          *ReadAheadCoordinator
+	stage              *StageCoordinator
+	stageSession       *StageDirSession
+	ephemeralStageRoot string
+	specialMu          sync.RWMutex
+	specialInodes      map[uint64]bool
+	unmountMu          sync.Mutex
+	unmountState       unmountProgressState
 }
 
 // NewRawFS 创建并初始化 RawFS 实例。
 //
 //nolint:gocritic // Config 按值传入，RawFS 持有独立副本，避免调用方后续突变
 func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
+	cfg.Mode = cfg.EffectiveMode()
 	if cfg.RootIno == 0 && cfg.RootInode != nil {
 		cfg.RootIno = cfg.RootInode.GetIno()
 	}
@@ -137,67 +192,129 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 	if metrics == nil {
 		metrics = NewMetrics()
 	}
+
+	var (
+		session       *StageDirSession
+		ephemeralRoot string
+		instanceDir   string
+	)
+	if cfg.IsStaged() {
+		if cfg.StageSize == 0 {
+			cfg.StageSize = DefaultStageSize
+		}
+		session = cfg.StageSession
+		if session == nil {
+			if cfg.StageDir != "" {
+				if s, err := OpenStageDirSession(cfg.StageDir); err == nil {
+					session = s
+				}
+			}
+			if session == nil {
+				if tmpRoot, err := os.MkdirTemp("", "bowl-stage-*"); err == nil {
+					if s, sErr := OpenStageDirSession(tmpRoot); sErr == nil {
+						session = s
+						ephemeralRoot = tmpRoot
+					} else {
+						_ = os.RemoveAll(tmpRoot)
+					}
+				}
+			}
+		}
+		if session != nil {
+			instanceDir = session.InstanceDir()
+		}
+	}
+
 	releaseCtx, releaseCancel := context.WithCancel(context.Background())
 	fs := &RawFS{
-		RawFileSystem:  fuse.NewDefaultRawFileSystem(),
-		client:         client,
-		locks:          NewLockTable(),
-		cache:          NewNamespaceCache(DefaultNamespaceCacheCapacity),
-		caps:           newCapabilityCache(),
-		dirtyInodes:    make(map[uint64]struct{}),
-		orphanInodes:   make(map[uint64]struct{}),
-		orphanSpans:    make(map[uint64]trace.SpanContext),
-		statsSnapshots: make(map[uint64][]byte),
-		tmpMgr:         NewTmpFileManager(cfg.RootIno),
-		cfg:            cfg,
-		metrics:        metrics,
-		releaseCtx:     releaseCtx,
-		releaseCancel:  releaseCancel,
-		readAhead:      NewReadAheadCoordinator(),
+		RawFileSystem:      fuse.NewDefaultRawFileSystem(),
+		client:             client,
+		locks:              NewLockTable(),
+		cache:              NewNamespaceCache(DefaultNamespaceCacheCapacity),
+		caps:               newCapabilityCache(),
+		dirtyInodes:        make(map[uint64]struct{}),
+		orphanInodes:       make(map[uint64]struct{}),
+		orphanSpans:        make(map[uint64]trace.SpanContext),
+		statsSnapshots:     make(map[uint64][]byte),
+		specialInodes:      make(map[uint64]bool),
+		tmpMgr:             NewTmpFileManager(cfg.RootIno, instanceDir),
+		cfg:                cfg,
+		metrics:            metrics,
+		releaseCtx:         releaseCtx,
+		releaseCancel:      releaseCancel,
+		readAhead:          NewReadAheadCoordinator(),
+		stageSession:       session,
+		ephemeralStageRoot: ephemeralRoot,
 	}
 	fs.cache.configure(fuse.FUSE_ROOT_ID, cfg.EntryTimeoutSeconds, cfg.AttrTimeoutSeconds)
 	if cfg.RootInode != nil && cfg.RootInode.GetAttr() != nil {
 		fs.cache.putInode(fuse.FUSE_ROOT_ID, cfg.RootInode, cfg.EntryTimeoutSeconds, cfg.AttrTimeoutSeconds)
 	}
-	var onStage func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
-	if cfg.AttrTimeoutSeconds > 0 {
-		onStage = func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp) {
-			fs.cache.stageWriteInodeAt(cacheEpoch, nodeID, endOffset, ts)
+	if cfg.IsStaged() {
+		var onStage func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
+		if cfg.AttrTimeoutSeconds > 0 {
+			onStage = func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp) {
+				fs.cache.stageWriteInodeAt(cacheEpoch, nodeID, endOffset, ts)
+			}
 		}
-	}
-	fs.writeBehind = NewWriteBehindCoordinator(
-		func(ctx context.Context, ino, offset uint64, data []byte) (uint32, *storagev1.Inode, error) {
-			if fs.client == nil {
-				return 0, nil, syscall.EIO
-			}
-			reqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
-			resp, err := fs.client.Write(reqCtx, connect.NewRequest(&storagev1.WriteRequest{
-				Ino:    ino,
-				Fh:     0,
-				Offset: offset,
-				Data:   data,
-				DiskId: fs.cfg.DiskID,
-				Epoch:  fs.cfg.Epoch,
-			}))
-			if err != nil {
-				return 0, nil, err
-			}
-			return resp.Msg.GetSize(), resp.Msg.GetInode(), nil
-		},
-		WriteBehindHooks{
-			OnStage: onStage,
-			OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr bool) {
-				fs.markDirty(ino)
-				if refreshAttr && inode != nil {
-					fs.cache.refreshInodeFromWriteAt(cacheEpoch, nodeID, inode, minSize, DefaultWriteAttrTimeoutSeconds)
+		fs.stage = NewStageCoordinator(
+			instanceDir,
+			cfg.StageSize,
+			func(ctx context.Context, ino, offset uint64, data []byte) (uint32, *storagev1.Inode, error) {
+				if fs.client == nil {
+					return 0, nil, syscall.EIO
 				}
-				fs.caps.markAbsent(nodeID)
+				reqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
+				resp, err := fs.client.Write(reqCtx, connect.NewRequest(&storagev1.WriteRequest{
+					Ino:    ino,
+					Fh:     0,
+					Offset: offset,
+					Data:   data,
+					DiskId: fs.cfg.DiskID,
+					Epoch:  fs.cfg.Epoch,
+				}))
+				if err != nil {
+					return 0, nil, err
+				}
+				return resp.Msg.GetSize(), resp.Msg.GetInode(), nil
 			},
-			OnError: func(nodeID uint64) {
-				fs.cache.invalidateInode(nodeID)
+			func(ctx context.Context, ino, size uint64, atime, mtime *timestamppb.Timestamp) (*storagev1.Inode, error) {
+				if fs.client == nil {
+					return nil, syscall.EIO
+				}
+				reqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
+				resp, err := fs.client.SetAttr(reqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
+					Ino:    ino,
+					Size:   &size,
+					Atime:  atime,
+					Mtime:  mtime,
+					DiskId: fs.cfg.DiskID,
+					Epoch:  fs.cfg.Epoch,
+				}))
+				if err != nil {
+					return nil, err
+				}
+				return resp.Msg.GetInode(), nil
 			},
-		},
-	)
+			StageHooks{
+				OnStage: onStage,
+				OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr bool) {
+					fs.markDirty(ino)
+					if inode != nil {
+						fs.recordInodeSpecial(nodeID, inode)
+					}
+					if refreshAttr && inode != nil {
+						fs.cache.refreshInodeFromWriteAt(cacheEpoch, nodeID, inode, minSize, DefaultWriteAttrTimeoutSeconds)
+					}
+					fs.caps.markAbsent(nodeID)
+				},
+				OnError: func(nodeID uint64) {
+					fs.cache.invalidateInode(nodeID)
+				},
+			},
+		)
+		fs.stage.bindLogger(fs.logger())
+	}
 	fs.handles = NewHandleTableWithContext(fs.reclaimOrphan)
 	fs.bindMetrics(metrics)
 	fs.bindTracerProvider(fs.tracerProvider())
@@ -215,7 +332,7 @@ func (fs *RawFS) bindMetrics(m *Metrics) {
 	fs.caps.bindMetrics(m)
 	fs.tmpMgr.bindMetrics(m)
 	fs.readAhead.bindMetrics(m)
-	fs.writeBehind.bindMetrics(m)
+	fs.stage.bindMetrics(m)
 	fs.inodeLocks.bindMetrics(m)
 }
 
@@ -235,7 +352,74 @@ func (fs *RawFS) bindTracerProvider(tp trace.TracerProvider) {
 		fs.tracer = tp.Tracer("bowl/client/fusefs")
 	}
 	fs.readAhead.bindTracerProvider(tp)
-	fs.writeBehind.bindTracerProvider(tp)
+	fs.stage.bindTracerProvider(tp)
+}
+
+func isSpecialAttr(inode *storagev1.Inode) bool {
+	if inode == nil || inode.GetAttr() == nil {
+		return true
+	}
+	attr := inode.GetAttr()
+	return attr.GetFlags()&(ProtoFlagImmutable|ProtoFlagAppend) != 0 ||
+		attr.GetMode()&(syscall.S_ISUID|syscall.S_ISGID) != 0
+}
+
+func (fs *RawFS) recordInodeSpecial(nodeID uint64, inode *storagev1.Inode) {
+	if inode == nil || inode.GetAttr() == nil {
+		return
+	}
+	special := isSpecialAttr(inode)
+	fs.specialMu.Lock()
+	if fs.specialInodes == nil {
+		fs.specialInodes = make(map[uint64]bool)
+	}
+	fs.specialInodes[nodeID] = special
+	fs.specialMu.Unlock()
+}
+
+func (fs *RawFS) setInodeSpecialFlag(nodeID uint64, special bool) {
+	fs.specialMu.Lock()
+	if fs.specialInodes == nil {
+		fs.specialInodes = make(map[uint64]bool)
+	}
+	fs.specialInodes[nodeID] = special
+	fs.specialMu.Unlock()
+}
+
+func (fs *RawFS) forgetInodeSpecial(nodeID uint64) {
+	fs.specialMu.Lock()
+	delete(fs.specialInodes, nodeID)
+	fs.specialMu.Unlock()
+}
+
+func (fs *RawFS) isInodeSpecial(nodeID uint64) bool {
+	fs.specialMu.RLock()
+	special, ok := fs.specialInodes[nodeID]
+	fs.specialMu.RUnlock()
+	if ok {
+		return special
+	}
+	if cached, hit := fs.cache.inodeReadOnly(nodeID); hit && cached.inode != nil && cached.inode.GetAttr() != nil {
+		special = isSpecialAttr(cached.inode)
+		fs.specialMu.Lock()
+		if fs.specialInodes == nil {
+			fs.specialInodes = make(map[uint64]bool)
+		}
+		fs.specialInodes[nodeID] = special
+		fs.specialMu.Unlock()
+		return special
+	}
+	return true
+}
+
+func (fs *RawFS) stageErrToStatus(err error) fuse.Status {
+	if err == nil {
+		return fuse.OK
+	}
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
+		return fuse.Status(errno)
+	}
+	return fs.ToStatus(err, nil)
 }
 
 // BindMountpoint 在 FUSE 挂载完成后解析并绑定对应的 /sys/fs/fuse/connections/<dev> 目录。
@@ -285,7 +469,8 @@ func (fs *RawFS) collectSubsystemGauges() subsystemGauges {
 	nsEntries, nsUsed, nsCap := fs.cache.stats()
 	openFiles, openDirs := fs.handles.stats()
 	tmpActive := fs.tmpMgr.activeLocalFiles()
-	pages := max(int64(0), fs.metrics.tmpResidentPages.Load())
+	tmpResBytes := uint64(max(int64(0), fs.metrics.tmpResidentBytes.Load()))
+	stagePending, stageUsed, stageCap := fs.stage.gauges()
 
 	fs.stateMu.Lock()
 	dirtyCount := len(fs.dirtyInodes)
@@ -302,9 +487,11 @@ func (fs *RawFS) collectSubsystemGauges() subsystemGauges {
 		nsUsedWeight:            nsUsed,
 		nsCapacity:              nsCap,
 		capEntries:              fs.caps.count(),
-		wbPendingSlots:          fs.writeBehind.PendingSlots(),
+		stagePendingChunks:      stagePending,
+		stageUsedBytes:          stageUsed,
+		stageCapacityBytes:      stageCap,
 		tmpActiveFiles:          tmpActive,
-		tmpResidentByte:         uint64(pages) * tmpSparsePageSize,
+		tmpResidentByte:         tmpResBytes,
 		openFiles:               openFiles,
 		openDirs:                openDirs,
 		activeLocks:             fs.locks.activeLocks(),
@@ -367,7 +554,7 @@ func (fs *RawFS) ToKernelIno(serverIno uint64) uint64 {
 
 // CheckWritable 检查文件系统当前是否允许写操作。只读挂载时返回 EROFS。
 func (fs *RawFS) CheckWritable() fuse.Status {
-	if fs.cfg.ReadOnly {
+	if fs.cfg.IsReadOnly() {
 		return fuse.Status(syscall.EROFS)
 	}
 	return fuse.OK
@@ -419,7 +606,7 @@ func (fs *RawFS) openHandle(ino uint64, flags uint32, dir bool) (uint64, fuse.St
 	}
 	fs.locks.RegisterHandle(fh, flags)
 	if !dir && ino != VirtualStatsIno {
-		fs.writeBehind.RegisterHandle(fh)
+		fs.stage.RegisterHandle(fh)
 	}
 	return fh, fuse.OK
 }
@@ -471,6 +658,46 @@ func (fs *RawFS) Statx(cancel <-chan struct{}, input *fuse.StatxIn, out *fuse.St
 	return status
 }
 
+// UnmountProgress returns a monotonic snapshot of OnUnmount cloud sync progress.
+func (fs *RawFS) UnmountProgress() UnmountProgress {
+	if fs == nil {
+		return UnmountProgress{}
+	}
+	fs.unmountMu.Lock()
+	defer fs.unmountMu.Unlock()
+	if fs.unmountState.active && fs.unmountState.phase == 1 {
+		livePending := uint64(max(int64(0), fs.stage.pendingChunkCount()))
+		var stageDone uint64
+		if livePending < fs.unmountState.stageTotal {
+			stageDone = fs.unmountState.stageTotal - livePending
+		}
+		if stageDone > fs.unmountState.completed {
+			fs.unmountState.completed = stageDone
+		}
+	}
+	return UnmountProgress{
+		Active:    fs.unmountState.active,
+		Completed: fs.unmountState.completed,
+		Total:     fs.unmountState.total,
+	}
+}
+
+func (fs *RawFS) countDirtyAndStagedInodes(stagedInodes []uint64) int {
+	fs.stateMu.Lock()
+	defer fs.stateMu.Unlock()
+	if len(stagedInodes) == 0 {
+		return len(fs.dirtyInodes)
+	}
+	seen := make(map[uint64]struct{}, len(fs.dirtyInodes)+len(stagedInodes))
+	for ino := range fs.dirtyInodes {
+		seen[ino] = struct{}{}
+	}
+	for _, ino := range stagedInodes {
+		seen[ino] = struct{}{}
+	}
+	return len(seen)
+}
+
 // OnUnmount 在文件系统卸载完成时被调用。
 func (fs *RawFS) OnUnmount() {
 	start := fs.metrics.beginOp(OpOnUnmount)
@@ -481,33 +708,90 @@ func (fs *RawFS) OnUnmount() {
 	}()
 
 	fs.locks.Close()
-	// 排他锁等待所有在途请求释放读锁，先排空异步写缓冲确保 dirtyInodes 完整，再逐一同步落盘。
+	// 排他锁等待所有在途请求释放读锁，先排空本地暂存上传队列确保 dirtyInodes 完整，再逐一同步落盘，最后关闭 StageSession。
 	fs.lifecycleMu.Lock()
-	fs.writeBehind.Clear(opCtx)
-	for _, ino := range fs.takeDirtyInodes() {
-		ctx, done := fs.RPCContextFrom(opCtx, nil)
-		_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
-			Ino:    ino,
-			DiskId: fs.cfg.DiskID,
-			Epoch:  fs.cfg.Epoch,
-		}))
-		done()
-		if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
-			fs.metrics.incDirtyFlushError()
-			fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
-		} else {
-			fs.metrics.incDirtyFlushOK()
+	pendingChunks, stagedInodes := fs.stage.unmountSnapshot()
+	stageTotal := uint64(max(int64(0), pendingChunks))
+	dirtyUnionCount := fs.countDirtyAndStagedInodes(stagedInodes)
+	total := stageTotal + uint64(dirtyUnionCount)
+
+	fs.unmountMu.Lock()
+	repeatNoop := fs.unmountState.completedOnce && total == 0
+	if repeatNoop {
+		fs.unmountState.active = false
+	} else {
+		fs.unmountState.active = true
+		fs.unmountState.phase = 1
+		fs.unmountState.stageTotal = stageTotal
+		fs.unmountState.completed = 0
+		fs.unmountState.total = total
+	}
+	fs.unmountMu.Unlock()
+
+	fs.stage.Clear(opCtx)
+	dirtyInodes := fs.takeDirtyInodes()
+
+	fs.unmountMu.Lock()
+	if !repeatNoop {
+		baseDone := fs.unmountState.completed
+		if fs.unmountState.total >= uint64(len(dirtyInodes)) {
+			if candidate := fs.unmountState.total - uint64(len(dirtyInodes)); candidate > baseDone {
+				baseDone = candidate
+			}
 		}
+		fs.unmountState.phase = 2
+		fs.unmountState.completed = baseDone
+	}
+	fs.unmountMu.Unlock()
+
+	for _, ino := range dirtyInodes {
+		if fs.client != nil {
+			ctx, done := fs.RPCContextFrom(opCtx, nil)
+			_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
+				Ino:    ino,
+				DiskId: fs.cfg.DiskID,
+				Epoch:  fs.cfg.Epoch,
+			}))
+			done()
+			if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
+				fs.metrics.incDirtyFlushError()
+				fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
+			} else {
+				fs.metrics.incDirtyFlushOK()
+			}
+		}
+		fs.unmountMu.Lock()
+		if !repeatNoop && fs.unmountState.completed < fs.unmountState.total {
+			fs.unmountState.completed++
+		}
+		fs.unmountMu.Unlock()
 	}
 	fs.handles.clear()
 	fs.cache.clear()
 	fs.caps.reset()
 	fs.tmpMgr.Clear()
+	fs.specialMu.Lock()
+	clear(fs.specialInodes)
+	fs.specialMu.Unlock()
 	fs.stateMu.Lock()
 	clear(fs.orphanInodes)
 	clear(fs.orphanSpans)
 	clear(fs.statsSnapshots)
 	fs.stateMu.Unlock()
+	if fs.stageSession != nil {
+		_ = fs.stageSession.Close()
+	}
+	if fs.ephemeralStageRoot != "" {
+		_ = os.RemoveAll(fs.ephemeralStageRoot)
+	}
+	fs.unmountMu.Lock()
+	if !repeatNoop {
+		fs.unmountState.completed = fs.unmountState.total
+		fs.unmountState.completedOnce = true
+	}
+	fs.unmountState.active = false
+	fs.unmountState.phase = 2
+	fs.unmountMu.Unlock()
 	fs.lifecycleMu.Unlock()
 	fs.readAhead.Clear()
 	fs.stopAndDrainReleaseQueue()
@@ -601,6 +885,20 @@ func (fs *RawFS) markOrphanWithContext(ctx context.Context, ino uint64) {
 	}
 	fs.stateMu.Unlock()
 	fs.handles.MarkOrphanContext(ctx, ino)
+}
+
+// clearOrphan removes local orphan tracking when Link promotes a server-backed O_TMPFILE.
+func (fs *RawFS) clearOrphan(ino uint64) bool {
+	wasOrphan := fs.handles.IsOrphan(ino)
+	fs.stateMu.Lock()
+	if _, ok := fs.orphanInodes[ino]; ok {
+		wasOrphan = true
+		delete(fs.orphanInodes, ino)
+		delete(fs.orphanSpans, ino)
+	}
+	fs.stateMu.Unlock()
+	fs.handles.ClearOrphan(ino)
+	return wasOrphan
 }
 
 func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
@@ -801,7 +1099,7 @@ func (fs *RawFS) FillAttrOut(out *fuse.AttrOut, ino *storagev1.Inode, attrTimeou
 //nolint:gocritic // 既有公开签名按值接收 Config，本任务不变更对外契约
 func BuildMountOptions(cfg Config) *fuse.MountOptions {
 	options := []string{"default_permissions"}
-	if cfg.ReadOnly {
+	if cfg.IsReadOnly() {
 		options = append(options, "ro")
 	}
 

@@ -445,6 +445,7 @@ func (c *NamespaceCache) putInodeAt(epoch, ino uint64, inode *storagev1.Inode, e
 	if epoch != ^uint64(0) && epoch != c.epoch {
 		return
 	}
+	c.mutations++
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 
@@ -523,7 +524,7 @@ func (c *NamespaceCache) refreshInodeLocked(ino uint64, inode *storagev1.Inode, 
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 
-// stageWriteInodeAt 在 WriteBehind 内存缓冲写入成功后，以写时复制方式单调推进本地缓存的 Size 与 Mtime/Ctime，
+// stageWriteInodeAt 在 Stage 写暂存落盘成功后，以写时复制方式单调推进本地缓存的 Size 与 Mtime/Ctime，
 // 使 AttrTimeout > 0 时随后的本地 fstat/stat 零 RPC 即可观测最新文件大小，且绝不原地修改已发布指针。
 func (c *NamespaceCache) stageWriteInodeAt(epoch, ino, endOffset uint64, ts *timestamppb.Timestamp) {
 	c.mu.Lock()
@@ -812,24 +813,6 @@ func (c *NamespaceCache) invalidateDir(parent uint64) {
 }
 
 // invalidateDirListing 只失效父目录的目录流、父目录属性以及引用了父目录的祖先目录流，
-// 保留父目录下未变动的兄弟目录项。单写者约束保证命名空间变化只来自本客户端，
-// 因此无需为一次增删清空整个父目录的兄弟项。
-//
-// 目录流不会被直接丢弃，而是按条目降级为独立目录项并标记为权威完整目录：
-// 这样后续同名 Lookup 仍可命中，目录内新增名字也可直接判定 ENOENT，避免每次创建
-// 都先发一次必然返回 ENOENT 的 Lookup RPC。
-func (c *NamespaceCache) invalidateDirListing(parent uint64) {
-	c.mu.Lock()
-	c.demoteDirStreamToEntriesLocked(parent)
-	c.removeKey(cacheKey{kind: 'i', ino: parent})
-	for dir := range copyInoSet(c.dirsByChild[parent]) {
-		c.removeKey(cacheKey{kind: 'd', ino: dir})
-	}
-	c.mutations++
-	c.mu.Unlock()
-	c.metrics.Load().incNSCacheInvalidation()
-}
-
 // demoteDirStreamToEntriesLocked 把父目录的完整目录流拆成独立目录项，并保留尚无独立属性项的子节点属性。
 // 只在目录流条目数不超过容量四分之一时降级，避免小容量缓存被单个大目录挤爆；
 // 若降级过程中同父目录的目录项被 LRU 淘汰，则不能声称内容完整，撤销权威标记。

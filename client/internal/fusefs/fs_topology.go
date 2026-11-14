@@ -210,6 +210,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 
+	seq0 := fs.topologySeq.Load()
 	child, _ := fs.cache.entry(header.NodeId, name)
 	var inode *storagev1.Inode
 	if child != 0 {
@@ -217,7 +218,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			inode = cached.inode
 		}
 	}
-	needLookup := fs.handles.AnyOpen() || fs.writeBehind.HasAnyPending() ||
+	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending() ||
 		(fs.hasDirtyInodes() && (child == 0 || inode == nil || inode.GetAttr() == nil))
 	if needLookup {
 		cached, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
@@ -234,11 +235,21 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		if sIno, st := fs.ToServerIno(child); st == fuse.OK {
 			childServerIno = sIno
 			hasChildServerIno = true
-			fs.writeBehind.BarrierInode(opCtx, childServerIno)
 		}
 		// 与并发 Release 的最后一个句柄关闭按 Inode 串行，保证孤儿标记不会互相错过。
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
+		if fs.topologySeq.Load() != seq0 && (fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
+			refreshed, st := fs.getInodeWithContext(opCtx, cancel, child)
+			switch st {
+			case fuse.OK:
+				inode = refreshed.inode
+			case fuse.ENOENT:
+				inode = nil
+			default:
+				return st
+			}
+		}
 	}
 	open := child != 0 && fs.handles.IsOpen(child)
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
@@ -265,13 +276,19 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	if child != 0 {
 		fs.cache.invalidateInode(child)
 	}
+	fs.topologySeq.Add(1)
 	if inode != nil && inode.GetAttr() != nil && inode.GetAttr().GetNlink() == 1 {
 		if open {
 			fs.markOrphanWithContext(opCtx, child)
-		} else if hasChildServerIno {
-			fs.writeBehind.RemoveInode(opCtx, childServerIno)
-			fs.readAhead.InvalidateInode(childServerIno)
-			fs.clearDirty(childServerIno)
+		} else {
+			if hasChildServerIno {
+				fs.stage.DiscardInode(childServerIno)
+				fs.readAhead.InvalidateInode(childServerIno)
+				fs.clearDirty(childServerIno)
+			}
+			if child != 0 {
+				fs.forgetInodeSpecial(child)
+			}
 		}
 	}
 	return fuse.OK

@@ -48,11 +48,13 @@ service StorageService {
   // 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
   rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
 
-  // Link 为已有非目录 Inode 在目标父目录下创建硬链接。
-  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-  // 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+  // Link creates a hard link in the target parent directory for an existing non-directory inode.
+  // It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
+  // Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
+  // The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
+  // The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
+  // The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
+  // The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
   rpc Link(LinkRequest) returns (LinkResponse);
 
   // Unlink 删除指定父目录下的非目录项（解链）。
@@ -88,6 +90,18 @@ service StorageService {
   // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
   // 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
   rpc Create(CreateRequest) returns (CreateResponse);
+
+  // CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
+  // If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
+  // When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
+  // When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
+  // The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
+  // The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
+  // The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
+  // The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
+  // The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
+  // The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
+  rpc CreateTmpfile(CreateTmpfileRequest) returns (CreateTmpfileResponse);
 
   // Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
   // 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
@@ -856,6 +870,55 @@ message CreateResponse {
 
   // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 5 [(buf.validate.field).double.gte = 0];
+}
+
+// CreateTmpfileRequest defines input parameters for CreateTmpfile.
+message CreateTmpfileRequest {
+  // Parent directory inode number. The value must be between 1 and 9223372036854775807.
+  uint64 parent_ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  // File mode bits containing optional S_IFREG type bits and POSIX permission bits.
+  uint32 mode = 2;
+
+  // Owner user ID. The value must not exceed 2147483647.
+  uint32 uid = 3 [(buf.validate.field).uint32.lte = 2147483647];
+
+  // Owner group ID. The parent directory gid overrides this value when S_ISGID is set, and the value must not exceed 2147483647.
+  uint32 gid = 4 [(buf.validate.field).uint32.lte = 2147483647];
+
+  // When true for `O_TMPFILE | O_EXCL`, the server marks the orphan non-linkable so `Link` rejects promotion.
+  bool exclusive = 5;
+
+  // Target virtual disk UUID. It must be a valid non-nil UUID.
+  string disk_id = 6 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "create_tmpfile_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  // Writer mount epoch fence. The value must be between 1 and 9223372036854775807.
+  uint64 epoch = 7 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// CreateTmpfileResponse returns the newly allocated anonymous inode and FUSE kernel cache timeouts.
+message CreateTmpfileResponse {
+  // Allocated anonymous regular-file inode with `nlink == 0`.
+  Inode inode = 1 [(buf.validate.field).required = true];
+
+  // FUSE kernel entry cache timeout in seconds.
+  double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
+
+  // FUSE kernel attribute cache timeout in seconds.
+  double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
 // ReadRequest 定义 Read 接口输入参数。

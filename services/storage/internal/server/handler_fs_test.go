@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -12,7 +13,9 @@ import (
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/control"
+	"github.com/starsrc/bowl/services/storage/internal/db"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
@@ -687,4 +690,514 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 	cancel()
 	_, cErr := srv.GetAttr(canceledCtx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Ino: 1}))
 	require.Equal(t, connect.CodeCanceled, connect.CodeOf(cErr), "已取消上下文应返回 CodeCanceled: got=%v", cErr)
+}
+
+func TestServerFSRPC_CreateTmpfile_ProcedureRegisteredInMetrics(t *testing.T) {
+	// Given: the Connect procedure path for CreateTmpfile.
+	proc := storagev1connect.StorageServiceCreateTmpfileProcedure
+
+	// When: normalizing the procedure path for HTTP metrics.
+	got := normalizeProcedure(proc)
+
+	// Then: the normalized procedure keeps its canonical path instead of falling back to "other".
+	require.Equal(t, proc, got, "CreateTmpfile procedure must be registered in knownProcedures: want=%q got=%q", proc, got)
+}
+
+func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing.T) {
+	// Given: a storage server with distinct timeouts and a mounted writable disk.
+	ctx := context.Background()
+	_, client := newTestServerAndClient(
+		t,
+		control.WithEntryTimeout(1.5),
+		control.WithAttrTimeout(3.5),
+	)
+	diskID, epoch1 := createAndMountTestDisk(t, client)
+
+	// When: creating a linkable tmpfile, writing data, punching a hole, reading back, and promoting via Link.
+	linkableResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		DiskId:    diskID,
+		Epoch:     epoch1,
+		ParentIno: 1,
+		Mode:      store.S_IFREG | 0o640,
+		Uid:       1000,
+		Gid:       2000,
+		Exclusive: false,
+	}))
+	require.NoError(t, err, "CreateTmpfile(exclusive=false) RPC failed")
+	linkableIno := linkableResp.Msg.GetInode().GetIno()
+	require.NotZero(t, linkableIno, "CreateTmpfile must allocate a positive inode number")
+	require.Zero(t, linkableResp.Msg.GetInode().GetAttr().GetNlink(), "unpromoted tmpfile must start with nlink=0")
+	require.Equal(t, store.S_IFREG|0o640, linkableResp.Msg.GetInode().GetAttr().GetMode(), "tmpfile mode mismatch")
+	require.Equal(t, uint32(1000), linkableResp.Msg.GetInode().GetAttr().GetUid(), "tmpfile uid mismatch")
+	require.Equal(t, uint32(2000), linkableResp.Msg.GetInode().GetAttr().GetGid(), "tmpfile gid mismatch")
+	require.InDelta(t, 1.5, linkableResp.Msg.GetEntryTimeoutSeconds(), 1e-9, "entry timeout mismatch")
+	require.InDelta(t, 3.5, linkableResp.Msg.GetAttrTimeoutSeconds(), 1e-9, "attr timeout mismatch")
+
+	dirBeforeLink, err := client.ReadDir(ctx, connect.NewRequest(&storagev1.ReadDirRequest{
+		DiskId: diskID,
+		Ino:    1,
+		Offset: 0,
+		Limit:  16,
+	}))
+	require.NoError(t, err, "ReadDir before Link failed")
+	require.Len(t, dirBeforeLink.Msg.GetEntries(), 2, "unpromoted tmpfile must not add a directory entry")
+
+	payload := bytes.Repeat([]byte{0xA5}, 8192)
+	writeResp, err := client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    linkableIno,
+		Offset: 0,
+		Data:   payload,
+	}))
+	require.NoError(t, err, "Write to linkable tmpfile failed")
+	require.Equal(t, uint32(8192), writeResp.Msg.GetSize(), "Write byte count mismatch")
+
+	_, err = client.Fallocate(ctx, connect.NewRequest(&storagev1.FallocateRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    linkableIno,
+		Offset: 1024,
+		Length: 2048,
+		Mode:   store.FallocPunchHole | store.FallocKeepSize,
+	}))
+	require.NoError(t, err, "Fallocate punch-hole on tmpfile failed")
+
+	readResp, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: diskID,
+		Ino:    linkableIno,
+		Offset: 0,
+		Size:   8192,
+	}))
+	require.NoError(t, err, "Read from tmpfile failed")
+	wantData := bytes.Repeat([]byte{0xA5}, 8192)
+	clear(wantData[1024:3072])
+	require.Equal(t, wantData, readResp.Msg.GetData(), "punched hole data mismatch on tmpfile")
+
+	linkResp, err := client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
+		DiskId:       diskID,
+		Epoch:        epoch1,
+		Ino:          linkableIno,
+		NewParentIno: 1,
+		NewName:      []byte("promoted.bin"),
+	}))
+	require.NoError(t, err, "Link promotion of linkable tmpfile failed")
+	require.Equal(t, linkableIno, linkResp.Msg.GetInode().GetIno(), "promoted inode number mismatch")
+	require.Equal(t, uint32(1), linkResp.Msg.GetInode().GetAttr().GetNlink(), "promoted inode nlink mismatch")
+
+	lookupResp, err := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+		DiskId:    diskID,
+		ParentIno: 1,
+		Name:      []byte("promoted.bin"),
+	}))
+	require.NoError(t, err, "Lookup promoted tmpfile failed")
+	require.Equal(t, linkableIno, lookupResp.Msg.GetInode().GetIno(), "Lookup inode mismatch")
+	require.Equal(t, uint32(1), lookupResp.Msg.GetInode().GetAttr().GetNlink(), "Lookup nlink mismatch")
+	require.Equal(t, uint64(8192), lookupResp.Msg.GetInode().GetAttr().GetSize(), "Lookup size mismatch")
+
+	statAfterPromote, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err, "StatFS after promotion failed")
+	require.Equal(t, uint64(8192), statAfterPromote.Msg.GetUsedBytes(), "StatFS UsedBytes after promotion mismatch")
+	require.Equal(t, uint64(2), statAfterPromote.Msg.GetFiles(), "StatFS Files after promotion mismatch")
+
+	// When: creating an exclusive tmpfile, writing data, trying Link, and reclaiming via ReclaimOrphan.
+	exclResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		DiskId:    diskID,
+		Epoch:     epoch1,
+		ParentIno: 1,
+		Mode:      store.S_IFREG | 0o600,
+		Exclusive: true,
+	}))
+	require.NoError(t, err, "CreateTmpfile(exclusive=true) RPC failed")
+	exclIno := exclResp.Msg.GetInode().GetIno()
+	require.Zero(t, exclResp.Msg.GetInode().GetAttr().GetNlink(), "exclusive tmpfile must start with nlink=0")
+
+	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    exclIno,
+		Offset: 0,
+		Data:   bytes.Repeat([]byte{0x5B}, 4096),
+	}))
+	require.NoError(t, err, "Write to exclusive tmpfile failed")
+
+	statWithExcl, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err, "StatFS with exclusive tmpfile failed")
+	require.Equal(t, uint64(12288), statWithExcl.Msg.GetUsedBytes(), "StatFS UsedBytes with exclusive tmpfile mismatch")
+	require.Equal(t, uint64(3), statWithExcl.Msg.GetFiles(), "StatFS Files with exclusive tmpfile mismatch")
+
+	_, linkExclErr := client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
+		DiskId:       diskID,
+		Epoch:        epoch1,
+		Ino:          exclIno,
+		NewParentIno: 1,
+		NewName:      []byte("exclusive.bin"),
+	}))
+	requireConnectErrorCodeAndReason(t, linkExclErr, connect.CodeNotFound, "ENOENT")
+
+	_, err = client.ReclaimOrphan(ctx, connect.NewRequest(&storagev1.ReclaimOrphanRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    exclIno,
+	}))
+	require.NoError(t, err, "ReclaimOrphan on exclusive tmpfile failed")
+
+	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
+		DiskId: diskID,
+		Ino:    exclIno,
+	}))
+	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
+
+	statAfterReclaim, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err, "StatFS after ReclaimOrphan failed")
+	require.Equal(t, uint64(8192), statAfterReclaim.Msg.GetUsedBytes(), "StatFS UsedBytes after ReclaimOrphan mismatch")
+	require.Equal(t, uint64(2), statAfterReclaim.Msg.GetFiles(), "StatFS Files after ReclaimOrphan mismatch")
+
+	// When: leaving an unpromoted tmpfile with data and advancing epoch via MountDisk.
+	lingeringResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		DiskId:    diskID,
+		Epoch:     epoch1,
+		ParentIno: 1,
+		Mode:      store.S_IFREG | 0o600,
+		Exclusive: false,
+	}))
+	require.NoError(t, err, "CreateTmpfile for lingering orphan failed")
+	lingeringIno := lingeringResp.Msg.GetInode().GetIno()
+
+	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    lingeringIno,
+		Offset: 0,
+		Data:   bytes.Repeat([]byte{0x7C}, 2048),
+	}))
+	require.NoError(t, err, "Write to lingering tmpfile failed")
+
+	mountResp2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId: diskID,
+	}))
+	require.NoError(t, err, "MountDisk epoch advance failed")
+	require.Equal(t, uint64(2), mountResp2.Msg.GetEpoch(), "epoch after remount mismatch")
+
+	// Then: the lingering tmpfile is reclaimed while the promoted file remains intact.
+	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
+		DiskId: diskID,
+		Ino:    lingeringIno,
+	}))
+	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
+
+	statAfterMount, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err, "StatFS after remount cleanup failed")
+	require.Equal(t, uint64(8192), statAfterMount.Msg.GetUsedBytes(), "StatFS UsedBytes after remount cleanup mismatch")
+	require.Equal(t, uint64(2), statAfterMount.Msg.GetFiles(), "StatFS Files after remount cleanup mismatch")
+
+	readAfterMount, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: diskID,
+		Ino:    linkableIno,
+		Offset: 0,
+		Size:   8192,
+	}))
+	require.NoError(t, err, "Read promoted file after remount failed")
+	require.Equal(t, wantData, readAfterMount.Msg.GetData(), "promoted file data must survive remount orphan cleanup")
+}
+
+type readOnlyActorManager struct {
+	control.Manager
+	diskID  string
+	roActor *store.StoreActor
+}
+
+func (m *readOnlyActorManager) Actor(ctx context.Context, diskID string) (*store.StoreActor, error) {
+	if diskID == m.diskID {
+		return m.roActor, nil
+	}
+	return m.Manager.Actor(ctx, diskID)
+}
+
+func TestServerFSRPC_CreateTmpfile_StaleEpoch_RejectsWithEBUSY(t *testing.T) {
+	// Given: a disk mounted twice so writer epoch advances to 2.
+	ctx := context.Background()
+	_, client := newTestServerAndClient(t)
+	diskID, _ := createAndMountTestDisk(t, client)
+
+	remountResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId: diskID,
+	}))
+	require.NoError(t, err, "second MountDisk failed")
+	require.Equal(t, uint64(2), remountResp.Msg.GetEpoch(), "second mount must advance epoch to 2")
+
+	cases := []struct {
+		name  string
+		epoch uint64
+	}{
+		{name: "epoch lower than current", epoch: 1},
+		{name: "epoch higher than current", epoch: 3},
+	}
+
+	// When / Then: calling CreateTmpfile with a stale or future epoch fails with EBUSY.
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+				DiskId:    diskID,
+				Epoch:     tc.epoch,
+				ParentIno: 1,
+				Mode:      store.S_IFREG | 0o600,
+			}))
+			requireConnectErrorCodeAndReason(t, callErr, connect.CodeFailedPrecondition, "EBUSY")
+		})
+	}
+}
+
+func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("read-only mount returns epoch 0 which CreateTmpfile rejects as EINVAL", func(t *testing.T) {
+		// Given: a newly created disk mounted read-only.
+		_, client := newTestServerAndClient(t)
+		created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+			Name:     "ro-mount-disk",
+			MaxBytes: 16 << 20,
+		}))
+		require.NoError(t, err, "CreateDisk failed")
+		diskID := created.Msg.GetDisk().GetDiskId()
+
+		roMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+			DiskId:   diskID,
+			ReadOnly: true,
+		}))
+		require.NoError(t, err, "read-only MountDisk failed")
+		require.Zero(t, roMount.Msg.GetEpoch(), "read-only mount must return epoch 0")
+
+		// When / Then: CreateTmpfile with the returned epoch 0 is rejected with EINVAL.
+		_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+			DiskId:    diskID,
+			Epoch:     roMount.Msg.GetEpoch(),
+			ParentIno: 1,
+			Mode:      store.S_IFREG | 0o600,
+		}))
+		requireConnectErrorCodeAndReason(t, callErr, connect.CodeInvalidArgument, "EINVAL")
+	})
+
+	t.Run("unmounted disk rejects epoch 1 with EBUSY", func(t *testing.T) {
+		// Given: a newly created disk whose writer epoch is still 0.
+		_, client := newTestServerAndClient(t)
+		created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+			Name:     "unmounted-disk",
+			MaxBytes: 16 << 20,
+		}))
+		require.NoError(t, err, "CreateDisk failed")
+		diskID := created.Msg.GetDisk().GetDiskId()
+
+		// When / Then: CreateTmpfile with epoch 1 fails with EBUSY because the disk is unmounted.
+		_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+			DiskId:    diskID,
+			Epoch:     1,
+			ParentIno: 1,
+			Mode:      store.S_IFREG | 0o600,
+		}))
+		requireConnectErrorCodeAndReason(t, callErr, connect.CodeFailedPrecondition, "EBUSY")
+	})
+
+	t.Run("read-only StoreActor rejects CreateTmpfile with EPERM", func(t *testing.T) {
+		// Given: a seeded Pebble disk reopened with ReadOnly=true and returned by a control.Manager wrapper.
+		roDiskID := "018f0000-0000-7000-8000-000000000042"
+		roDir := t.TempDir()
+
+		seedActor, err := store.Open(store.Options{Dir: roDir, DiskID: roDiskID})
+		require.NoError(t, err, "seed store.Open failed")
+		epoch, _, err := seedActor.AdvanceEpoch(ctx)
+		require.NoError(t, err, "seed AdvanceEpoch failed")
+		require.NoError(t, seedActor.Close(), "seed Close failed")
+
+		roActor, err := store.Open(store.Options{Dir: roDir, DiskID: roDiskID, ReadOnly: true})
+		require.NoError(t, err, "read-only store.Open failed")
+		t.Cleanup(func() { _ = roActor.Close() })
+
+		baseMgr := control.New(db.NewMemStore(), control.WithStorageRoot(t.TempDir()))
+		t.Cleanup(func() { _ = baseMgr.Close() })
+
+		roMgr := &readOnlyActorManager{
+			Manager: baseMgr,
+			diskID:  roDiskID,
+			roActor: roActor,
+		}
+		srv, err := New(Params{
+			Config: config.ServerConfig{
+				ServerPort:         0,
+				InternalServerPort: 0,
+				ServerReadMaxBytes: 8 << 20,
+			},
+			Control: roMgr,
+		})
+		require.NoError(t, err, "server.New with readOnlyActorManager failed")
+
+		httpClient := &http.Client{Transport: memoryRoundTripper{handler: srv.Handler()}}
+		roClient := storagev1connect.NewStorageServiceClient(httpClient, "http://storage.local")
+
+		// When / Then: calling CreateTmpfile against the read-only actor returns CodePermissionDenied + EPERM.
+		_, callErr := roClient.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+			DiskId:    roDiskID,
+			Epoch:     epoch,
+			ParentIno: 1,
+			Mode:      store.S_IFREG | 0o600,
+		}))
+		requireConnectErrorCodeAndReason(t, callErr, connect.CodePermissionDenied, "EPERM")
+	})
+}
+
+func TestServerFSRPC_CreateTmpfile_ValidationAndDomainErrors_RejectsInvalidRequests(t *testing.T) {
+	// Given: a mounted disk with an existing regular file inode for ENOTDIR checks.
+	ctx := context.Background()
+	srv, client := newTestServerAndClient(t)
+	diskID, epoch := createAndMountTestDisk(t, client)
+
+	regResp, err := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Epoch:     epoch,
+		ParentIno: 1,
+		Name:      []byte("regular.txt"),
+		Mode:      store.S_IFREG | 0o644,
+	}))
+	require.NoError(t, err, "Create regular file failed")
+	regIno := regResp.Msg.GetInode().GetIno()
+
+	nilUUID := "00000000-0000-0000-0000-000000000000"
+	unknownUUID := "018f0000-0000-7000-8000-000000000099"
+
+	cases := []struct {
+		name       string
+		req        *storagev1.CreateTmpfileRequest
+		wantCode   connect.Code
+		wantReason string
+	}{
+		{
+			name: "invalid disk_id",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: "invalid-uuid", Epoch: epoch, ParentIno: 1, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "nil disk_id",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: nilUUID, Epoch: epoch, ParentIno: 1, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "unknown disk_id",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: unknownUUID, Epoch: epoch, ParentIno: 1, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeNotFound, wantReason: "ENOENT",
+		},
+		{
+			name: "epoch 0",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: 0, ParentIno: 1, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "epoch above MaxInt64",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: uint64(math.MaxInt64) + 1, ParentIno: 1, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "parent_ino 0",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: 0, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "parent_ino above MaxInt64",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: uint64(math.MaxInt64) + 1, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "uid above MaxInt32",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: 1, Mode: store.S_IFREG | 0o600, Uid: math.MaxInt32 + 1,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "gid above MaxInt32",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: 1, Mode: store.S_IFREG | 0o600, Gid: math.MaxInt32 + 1,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "directory mode",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: 1, Mode: store.S_IFDIR | 0o755,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "mode out of range",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: 1, Mode: 0o200000,
+			},
+			wantCode: connect.CodeInvalidArgument, wantReason: "EINVAL",
+		},
+		{
+			name: "missing parent directory",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: 999999, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeNotFound, wantReason: "ENOENT",
+		},
+		{
+			name: "non-directory parent",
+			req: &storagev1.CreateTmpfileRequest{
+				DiskId: diskID, Epoch: epoch, ParentIno: regIno, Mode: store.S_IFREG | 0o600,
+			},
+			wantCode: connect.CodeFailedPrecondition, wantReason: "ENOTDIR",
+		},
+	}
+
+	// When / Then: both client interceptor and direct handler enforce identical error codes and reasons.
+	for _, tc := range cases {
+		t.Run("client/"+tc.name, func(t *testing.T) {
+			_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(tc.req))
+			requireConnectErrorCodeAndReason(t, callErr, tc.wantCode, tc.wantReason)
+		})
+		t.Run("direct/"+tc.name, func(t *testing.T) {
+			_, callErr := srv.CreateTmpfile(ctx, connect.NewRequest(tc.req))
+			requireConnectErrorCodeAndReason(t, callErr, tc.wantCode, tc.wantReason)
+		})
+	}
+
+	// When / Then: canceled context entering the handler returns CodeCanceled.
+	t.Run("direct/canceled context", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		_, callErr := srv.CreateTmpfile(canceledCtx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+			DiskId:    diskID,
+			Epoch:     epoch,
+			ParentIno: 1,
+			Mode:      store.S_IFREG | 0o600,
+		}))
+		require.Error(t, callErr, "canceled CreateTmpfile must return an error")
+		require.Equal(t, connect.CodeCanceled, connect.CodeOf(callErr), "canceled CreateTmpfile must return CodeCanceled: got=%v", callErr)
+	})
 }

@@ -47,9 +47,6 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 	if _, status := fs.checkedHandle(input.NodeId, input.Fh, true); status != fuse.OK {
 		return nil, status
 	}
-	if fs.writeBehind.HasAnyPending() {
-		fs.writeBehind.BarrierAll(parentCtx)
-	}
 	if entries, ok := fs.cache.dir(input.NodeId); ok {
 		return entries, fuse.OK
 	}
@@ -87,7 +84,11 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 				return nil, fuse.EIO
 			}
 			offset = e.GetNextOffset()
-			e.Ino = fs.ToKernelIno(e.GetIno())
+			serverEntryIno := e.GetIno()
+			if e.GetInode() != nil {
+				fs.stage.OverlayInode(serverEntryIno, e.GetInode())
+			}
+			e.Ino = fs.ToKernelIno(serverEntryIno)
 		}
 		entries = append(entries, page...)
 		if input.Offset != 0 || len(entries)+1 > fs.cache.capacity {
@@ -162,6 +163,9 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 			*eo = fuse.EntryOut{}
 		} else {
 			fs.FillEntryOut(eo, entry.GetInode(), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds())
+			if entry.GetInode() != nil {
+				fs.stage.OverlayAttr(entry.GetInode().GetIno(), &eo.Attr)
+			}
 			eo.NodeId = fs.tmpMgr.ObserveKernelLookup(entry.GetIno())
 			eo.Ino = eo.NodeId
 		}

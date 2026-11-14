@@ -78,76 +78,160 @@ func TestToProtoOpenFlags_剥离宿主机高位防碰撞远端存储临时文件
 }
 
 func TestCreate与Open_校验标志位截断行为与缓存策略(t *testing.T) {
-	t.Run("非法访问模式只读挂载与目录误用按契约返回错误码", func(t *testing.T) {
+	t.Run("Create传入非法O_ACCMODE返回EINVAL", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		dirIno := srv.seedDir(1, "sub", 0o755)
-		fileIno := srv.seedFile(1, "exist.txt", 0o644, []byte("old"))
 		rwFS := newTestRawFS(t, srv)
-		roFS := newTestRawFS(t, srv, withReadOnly(true))
+		var out fuse.CreateOut
 
-		// When & Then
-		var cOut fuse.CreateOut
-		requireStatus(t, "Create 非法 O_ACCMODE", fuse.Status(syscall.EINVAL), rwFS.Create(nil, &fuse.CreateIn{
+		// When
+		st := rwFS.Create(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Flags:    uint32(syscall.O_ACCMODE),
 			Mode:     0o644,
-		}, "bad-acc", &cOut))
-		requireStatus(t, "只读 Create", fuse.Status(syscall.EROFS), roFS.Create(nil, &fuse.CreateIn{
+		}, "bad-acc", &out)
+
+		// Then
+		requireStatus(t, "Create 非法 O_ACCMODE", fuse.Status(syscall.EINVAL), st)
+	})
+
+	t.Run("只读挂载调用Create拦截并返回EROFS", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
+		var out fuse.CreateOut
+
+		// When
+		st := roFS.Create(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Flags:    uint32(syscall.O_RDWR),
 			Mode:     0o644,
-		}, "ro-file", &cOut))
+		}, "ro-file", &out)
 
-		var oOut fuse.OpenOut
-		requireStatus(t, "Open 非法 O_ACCMODE", fuse.Status(syscall.EINVAL), rwFS.Open(nil, &fuse.OpenIn{
-			InHeader: fuse.InHeader{NodeId: fileIno},
-			Flags:    uint32(syscall.O_ACCMODE),
-		}, &oOut))
-		requireStatus(t, "只读 Open(O_TRUNC)", fuse.Status(syscall.EROFS), roFS.Open(nil, &fuse.OpenIn{
-			InHeader: fuse.InHeader{NodeId: fileIno},
-			Flags:    uint32(syscall.O_RDONLY | syscall.O_TRUNC),
-		}, &oOut))
-		requireStatus(t, "只读 Open(O_WRONLY)", fuse.Status(syscall.EROFS), roFS.Open(nil, &fuse.OpenIn{
-			InHeader: fuse.InHeader{NodeId: fileIno},
-			Flags:    uint32(syscall.O_WRONLY),
-		}, &oOut))
-		requireStatus(t, "目录 Open(O_WRONLY)", fuse.Status(syscall.EISDIR), rwFS.Open(nil, &fuse.OpenIn{
-			InHeader: fuse.InHeader{NodeId: dirIno},
-			Flags:    uint32(syscall.O_WRONLY),
-		}, &oOut))
+		// Then
+		requireStatus(t, "只读 Create", fuse.Status(syscall.EROFS), st)
 	})
 
-	t.Run("DirectIO开关控制OpenFlags且O_TRUNC清空挂起写并刷新节点尺寸", func(t *testing.T) {
+	t.Run("Open传入非法O_ACCMODE返回EINVAL", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fileIno := srv.seedFile(1, "exist.txt", 0o644, []byte("old"))
+		rwFS := newTestRawFS(t, srv)
+		var out fuse.OpenOut
+
+		// When
+		st := rwFS.Open(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: fileIno},
+			Flags:    uint32(syscall.O_ACCMODE),
+		}, &out)
+
+		// Then
+		requireStatus(t, "Open 非法 O_ACCMODE", fuse.Status(syscall.EINVAL), st)
+	})
+
+	t.Run("只读挂载Open携带O_TRUNC返回EROFS", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fileIno := srv.seedFile(1, "exist.txt", 0o644, []byte("old"))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
+		var out fuse.OpenOut
+
+		// When
+		st := roFS.Open(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: fileIno},
+			Flags:    uint32(syscall.O_RDONLY | syscall.O_TRUNC),
+		}, &out)
+
+		// Then
+		requireStatus(t, "只读 Open(O_TRUNC)", fuse.Status(syscall.EROFS), st)
+	})
+
+	t.Run("只读挂载Open携带O_WRONLY返回EROFS", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fileIno := srv.seedFile(1, "exist.txt", 0o644, []byte("old"))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
+		var out fuse.OpenOut
+
+		// When
+		st := roFS.Open(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: fileIno},
+			Flags:    uint32(syscall.O_WRONLY),
+		}, &out)
+
+		// Then
+		requireStatus(t, "只读 Open(O_WRONLY)", fuse.Status(syscall.EROFS), st)
+	})
+
+	t.Run("目录节点以O_WRONLY打开返回EISDIR", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		dirIno := srv.seedDir(1, "sub", 0o755)
+		rwFS := newTestRawFS(t, srv)
+		var out fuse.OpenOut
+
+		// When
+		st := rwFS.Open(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: dirIno},
+			Flags:    uint32(syscall.O_WRONLY),
+		}, &out)
+
+		// Then
+		requireStatus(t, "目录 Open(O_WRONLY)", fuse.Status(syscall.EISDIR), st)
+	})
+
+	t.Run("DirectIO关闭时普通Create与Open设置FOPEN_KEEP_CACHE", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fsKeep := newTestRawFS(t, srv, withDirectIO(false))
+
+		// When
+		created := mustCreateFile(t, fsKeep, fuse.FUSE_ROOT_ID, "keep.dat", syscall.O_RDWR, 0o644)
+		opened := mustOpenFile(t, fsKeep, created.NodeId, syscall.O_RDONLY)
+
+		// Then
+		require.NotZero(t, created.OpenFlags&fuse.FOPEN_KEEP_CACHE, "Create 应设置 FOPEN_KEEP_CACHE")
+		require.Zero(t, created.OpenFlags&fuse.FOPEN_DIRECT_IO, "DirectIO=false 时 Create 不应设 FOPEN_DIRECT_IO")
+		require.NotZero(t, opened.OpenFlags&fuse.FOPEN_KEEP_CACHE, "非截断常规 Open 应设置 FOPEN_KEEP_CACHE")
+
+		fsKeep.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+		fsKeep.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: opened.Fh})
+	})
+
+	t.Run("DirectIO开启时Open强制设置FOPEN_DIRECT_IO并清除KEEP_CACHE", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		ino := srv.seedFile(1, "direct.dat", 0o644, []byte("payload"))
 		fsDirect := newTestRawFS(t, srv, withDirectIO(true))
 
 		// When
-		cKeep := mustCreateFile(t, fsKeep, fuse.FUSE_ROOT_ID, "keep.dat", syscall.O_RDWR, 0o644)
-		mustWriteAt(t, fsKeep, cKeep.NodeId, cKeep.Fh, 0, []byte("before-truncate"))
-		truncOut := mustOpenFile(t, fsKeep, cKeep.NodeId, syscall.O_RDWR|syscall.O_TRUNC)
-		keepOpenOut := mustOpenFile(t, fsKeep, cKeep.NodeId, syscall.O_RDONLY)
-		directOut := mustOpenFile(t, fsDirect, cKeep.NodeId, syscall.O_RDONLY)
+		opened := mustOpenFile(t, fsDirect, ino, syscall.O_RDONLY)
 
 		// Then
-		require.NotZero(t, cKeep.OpenFlags&fuse.FOPEN_KEEP_CACHE)
-		require.Zero(t, cKeep.OpenFlags&fuse.FOPEN_DIRECT_IO)
-		require.Zero(t, truncOut.OpenFlags&fuse.FOPEN_KEEP_CACHE, "O_TRUNC 打开时不得设置 FOPEN_KEEP_CACHE")
-		require.NotZero(t, keepOpenOut.OpenFlags&fuse.FOPEN_KEEP_CACHE, "常规非截断非 DirectIO 打开必须设置 FOPEN_KEEP_CACHE")
-		require.NotZero(t, directOut.OpenFlags&fuse.FOPEN_DIRECT_IO)
-		require.Zero(t, directOut.OpenFlags&fuse.FOPEN_KEEP_CACHE)
-		require.Zero(t, mustGetAttr(t, fsKeep, cKeep.NodeId).Size, "O_TRUNC 必须重置写缓冲并刷新长度为 0")
+		require.NotZero(t, opened.OpenFlags&fuse.FOPEN_DIRECT_IO, "DirectIO=true 必须设置 FOPEN_DIRECT_IO")
+		require.Zero(t, opened.OpenFlags&fuse.FOPEN_KEEP_CACHE, "DirectIO=true 不得设置 FOPEN_KEEP_CACHE")
+		fsDirect.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
+	})
 
-		fsKeep.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cKeep.NodeId}, Fh: cKeep.Fh})
-		fsKeep.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cKeep.NodeId}, Fh: truncOut.Fh})
-		fsKeep.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cKeep.NodeId}, Fh: keepOpenOut.Fh})
-		fsDirect.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cKeep.NodeId}, Fh: directOut.Fh})
+	t.Run("Open携带O_TRUNC清除KEEP_CACHE并截零挂起写入与文件尺寸", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "trunc.dat", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, fs, created.NodeId, created.Fh, 0, []byte("before-truncate"))
+
+		// When
+		truncOut := mustOpenFile(t, fs, created.NodeId, syscall.O_RDWR|syscall.O_TRUNC)
+
+		// Then
+		require.Zero(t, truncOut.OpenFlags&fuse.FOPEN_KEEP_CACHE, "O_TRUNC 打开时不得设置 FOPEN_KEEP_CACHE")
+		require.Zero(t, mustGetAttr(t, fs, created.NodeId).Size, "O_TRUNC 后文件尺寸: want=0")
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: truncOut.Fh})
 	})
 }
 
-func TestWrite与WriteBehind_小块聚合直通探测与特权位绕过(t *testing.T) {
+func TestWrite与Stage_小块聚合直通探测与特权位绕过(t *testing.T) {
 	t.Run("Create播撒WAL聚合96次小块写并在Fsync单次落盘且GetAttr不拆分缓冲", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
@@ -165,65 +249,94 @@ func TestWrite与WriteBehind_小块聚合直通探测与特权位绕过(t *testi
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 
 		// Then
-		require.Zero(t, writesBeforeFsync, "Create 播撒写流未满 4 MiB 前必须保留在内存中")
-		require.Equal(t, uint64(coalesceWrites*smallWriteSize), attrDuringWrite.Size, "GetAttr 必须读取到暂存后的最新尺寸")
-		require.Zero(t, writesAfterGetAttr, "TTL>0 时 GetAttr 不得拆散 stageBuf 提前触发 Write RPC")
+		require.Zero(t, writesBeforeFsync, "Create 播撒写流未满 4 MiB 前必须保留在本地暂存分块")
+		require.Equal(t, uint64(98304), attrDuringWrite.Size, "GetAttr 暂存尺寸: want=98304, got=%d", attrDuringWrite.Size)
+		require.Zero(t, writesAfterGetAttr, "GetAttr 不得拆散本地暂存分块提前触发 Write RPC")
 		require.Equal(t, int64(1), writesAfterFsync, "96 次小块写必须在 Fsync 时合并为单次 Write RPC")
 		stored, ok := srv.fileBytes(created.NodeId)
 		require.True(t, ok)
 		requireBytesMatch(t, "Fsync 落盘数据", expected, stored)
 	})
 
-	t.Run("Open既有文件首写直通探测且后续连续与回退聚合并在跳跃间隙排空", func(t *testing.T) {
+	t.Run("Open既有文件首写直通远端完成能力探测", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
-		ino := srv.seedFile(1, "existing.bin", 0o644, buildRepeatingBytes(8192, 'A'))
+		ino := srv.seedFile(1, "existing-probe.bin", 0o644, buildRepeatingBytes(8192, 'A'))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		opened := mustOpenFile(t, fs, ino, syscall.O_RDWR)
 
-		// When: 首写直通探测（1 次 RPC），随后连续追加 [100..200) 与向后邻接 [50..100) 合并暂存，
-		// 跳转到存在间隙的 [1000..1100) 时触发前序聚合刷新。
+		// When
 		mustWriteAt(t, fs, ino, opened.Fh, 0, []byte("probe-0123"))
-		afterProbe := srv.writeCalls.Load()
+
+		// Then
+		require.Equal(t, int64(1), srv.writeCalls.Load(), "Open 既有文件首写 Write RPC 次数: want=1, got=%d", srv.writeCalls.Load())
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
+	})
+
+	t.Run("Open既有多段连续与回退及跳跃写经Flush非阻塞并在Fsync落盘一致", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		ino := srv.seedFile(1, "existing-stage.bin", 0o644, buildRepeatingBytes(8192, 'A'))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		opened := mustOpenFile(t, fs, ino, syscall.O_RDWR)
+		mustWriteAt(t, fs, ino, opened.Fh, 0, []byte("probe-0123"))
+
+		// When
 		mustWriteAt(t, fs, ino, opened.Fh, 100, []byte("second"))
 		mustWriteAt(t, fs, ino, opened.Fh, 94, []byte("first-"))
-		afterCoalesce := srv.writeCalls.Load()
+		writesBeforeJump := srv.writeCalls.Load()
 		mustWriteAt(t, fs, ino, opened.Fh, 1000, []byte("gap"))
-		afterGap := srv.writeCalls.Load()
-		requireStatus(t, "Flush", fuse.OK, fs.Flush(nil, &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh}))
+		flushSt := fs.Flush(nil, &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
+		fsyncSt := fs.Fsync(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
+		afterFsync := srv.writeCalls.Load()
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
 		// Then
-		require.Equal(t, int64(1), afterProbe, "Open 既有文件首写必须直通远端探测权属")
-		require.Equal(t, int64(1), afterCoalesce, "连续与向左邻接小块写必须合并暂存")
-		require.Equal(t, int64(2), afterGap, "出现偏移间隙时必须先刷出前序暂存缓冲")
+		require.Equal(t, int64(1), writesBeforeJump, "连续与向左回退写期间 Write RPC 次数: want=1, got=%d", writesBeforeJump)
+		requireStatus(t, "Flush", fuse.OK, flushSt)
+		requireStatus(t, "Fsync", fuse.OK, fsyncSt)
+		require.Equal(t, int64(3), afterFsync, "Fsync 后总 Write RPC 次数: want=3, got=%d", afterFsync)
 		stored, _ := srv.fileBytes(ino)
 		requireBytesMatch(t, "邻接聚合结果", []byte("first-second"), stored[94:106])
 		requireBytesMatch(t, "间隙写入结果", []byte("gap"), stored[1000:1003])
 	})
 
-	t.Run("SetUID文件与零秒AttrTimeout强制每次写入直通远端", func(t *testing.T) {
+	t.Run("零秒AttrTimeout下普通文件写入仍进入Stage暂存并支持本地直读", func(t *testing.T) {
 		// Given
 		srvZero := newFakeStorage(t, withTTL(0, 0))
 		fsZero := newTestRawFS(t, srvZero)
 		cZero := mustCreateFile(t, fsZero, fuse.FUSE_ROOT_ID, "zero-ttl.bin", syscall.O_RDWR, 0o644)
 
+		// When
+		mustWriteAt(t, fsZero, cZero.NodeId, cZero.Fh, 0, []byte("a"))
+		mustWriteAt(t, fsZero, cZero.NodeId, cZero.Fh, 1, []byte("b"))
+		zeroWritesBeforeFsync := srvZero.writeCalls.Load()
+		zeroAttr := mustGetAttr(t, fsZero, cZero.NodeId)
+		zeroRead := mustReadAt(t, fsZero, cZero.NodeId, cZero.Fh, 0, 2)
+		requireStatus(t, "Fsync zero-ttl", fuse.OK, fsZero.Fsync(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: cZero.NodeId}, Fh: cZero.Fh}))
+
+		// Then
+		require.Zero(t, zeroWritesBeforeFsync, "AttrTimeout=0 模式下普通文件写入仍必须进入本地 Stage 暂存")
+		require.Equal(t, uint64(2), zeroAttr.Size, "AttrTimeout=0 下 GetAttr 暂存尺寸: want=2, got=%d", zeroAttr.Size)
+		requireBytesMatch(t, "AttrTimeout=0 下本地读己所写", []byte("ab"), zeroRead)
+		require.Zero(t, srvZero.readCalls.Load(), "完全由本地 Stage 覆盖的读取不得触发远端 Read RPC")
+		require.Equal(t, int64(1), srvZero.writeCalls.Load(), "Fsync 后 Write RPC 次数: want=1, got=%d", srvZero.writeCalls.Load())
+		fsZero.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cZero.NodeId}, Fh: cZero.Fh})
+	})
+
+	t.Run("含SetUID特权位文件绕过Stage直接同步落盘", func(t *testing.T) {
+		// Given
 		srvSuid := newFakeStorage(t, withTTL(2.0, 2.0))
 		suidIno := srvSuid.seedFile(1, "suid.bin", syscall.S_ISUID|0o755, nil)
 		fsSuid := newTestRawFS(t, srvSuid)
 		oSuid := mustOpenFile(t, fsSuid, suidIno, syscall.O_RDWR)
 
 		// When
-		mustWriteAt(t, fsZero, cZero.NodeId, cZero.Fh, 0, []byte("a"))
-		mustWriteAt(t, fsZero, cZero.NodeId, cZero.Fh, 1, []byte("b"))
 		mustWriteAt(t, fsSuid, suidIno, oSuid.Fh, 0, []byte("x"))
 		mustWriteAt(t, fsSuid, suidIno, oSuid.Fh, 1, []byte("y"))
 
 		// Then
-		require.Equal(t, int64(2), srvZero.writeCalls.Load(), "AttrTimeout=0 模式下每次写入必须直通存储")
-		require.Equal(t, int64(2), srvSuid.writeCalls.Load(), "含 S_ISUID 特权位文件不得进入写聚合缓存")
-
-		fsZero.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cZero.NodeId}, Fh: cZero.Fh})
+		require.Equal(t, int64(2), srvSuid.writeCalls.Load(), "SetUID 同步直通 Write RPC 次数: want=2, got=%d", srvSuid.writeCalls.Load())
 		fsSuid.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: suidIno}, Fh: oSuid.Fh})
 	})
 }
@@ -259,47 +372,75 @@ func TestWrite_追加模式分片长写POSIX短写与Writev多段写入(t *testi
 		requireBytesMatch(t, "O_APPEND 尾部追加内容", []byte("head-tail"), stored)
 	})
 
-	t.Run("超过4MiB按分片落盘且中途片ENOSPC按POSIX返回短写成功", func(t *testing.T) {
+	t.Run("超过4MiB单次写入按4MiB分片完整直写落盘", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		var failSecondChunk atomic.Bool
-		srv.writeHook = makeSecondChunkEnospcHook(&failSecondChunk, chunk4MiB)
 		fs := newTestRawFS(t, srv)
-		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "large.bin", syscall.O_RDWR, 0o644)
+		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "large-ok.bin", syscall.O_RDWR, 0o644)
+		okBuf := buildSeededBytes(4718592, 0x5A)
 
-		// When: 5 MiB 成功写入后，开启二片故障注入再写 5 MiB
-		okBuf := buildSeededBytes(chunk4MiB+512*1024, 0x5A)
+		// When
 		nOK, stOK := fs.Write(nil, &fuse.WriteIn{
 			InHeader: fuse.InHeader{NodeId: created.NodeId},
 			Fh:       created.Fh,
 			Offset:   0,
-			Size:     uint32(len(okBuf)),
+			Size:     4718592,
 		}, okBuf)
-		requireStatus(t, "超 4 MiB 正常写入", fuse.OK, stOK)
-		require.Equal(t, uint32(len(okBuf)), nOK)
 
+		// Then
+		requireStatus(t, "超 4 MiB 正常写入", fuse.OK, stOK)
+		require.Equal(t, uint32(4718592), nOK, "超 4 MiB 写入长度: want=4718592, got=%d", nOK)
+		stored, ok := srv.fileBytes(created.NodeId)
+		require.True(t, ok)
+		requireBytesMatch(t, "超 4 MiB 分片落盘数据", okBuf, stored)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+	})
+
+	t.Run("超过4MiB多片写入第二片遇ENOSPC按POSIX返回首片短写成功", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		var failSecondChunk atomic.Bool
 		failSecondChunk.Store(true)
-		shortBuf := buildRepeatingBytes(chunk4MiB+1024, 'Z')
+		srv.writeHook = makeSecondChunkEnospcHook(&failSecondChunk, chunk4MiB)
+		fs := newTestRawFS(t, srv)
+		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "large-short.bin", syscall.O_RDWR, 0o644)
+		shortBuf := buildRepeatingBytes(4195328, 'Z')
+
+		// When
 		nShort, stShort := fs.Write(nil, &fuse.WriteIn{
 			InHeader: fuse.InHeader{NodeId: created.NodeId},
 			Fh:       created.Fh,
 			Offset:   0,
-			Size:     uint32(len(shortBuf)),
+			Size:     4195328,
 		}, shortBuf)
-
-		// 首片直接失败时必须返回对应错误码
-		nErr, stErr := fs.Write(nil, &fuse.WriteIn{
-			InHeader: fuse.InHeader{NodeId: created.NodeId},
-			Fh:       created.Fh,
-			Offset:   chunk4MiB,
-			Size:     4096,
-		}, shortBuf[:4096])
 
 		// Then
 		requireStatus(t, "二片 ENOSPC 按 POSIX 短写返回 OK", fuse.OK, stShort)
-		require.Equal(t, uint32(chunk4MiB), nShort)
+		require.Equal(t, uint32(4194304), nShort, "短写返回字节: want=4194304, got=%d", nShort)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+	})
+
+	t.Run("超过4MiB多片写入首片遇ENOSPC直接返回ENOSPC", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		var failAtOffset atomic.Bool
+		failAtOffset.Store(true)
+		srv.writeHook = makeSecondChunkEnospcHook(&failAtOffset, chunk4MiB)
+		fs := newTestRawFS(t, srv)
+		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "large-first-fail.bin", syscall.O_RDWR, 0o644)
+		buf := buildRepeatingBytes(4195328, 'Z')
+
+		// When
+		nErr, stErr := fs.Write(nil, &fuse.WriteIn{
+			InHeader: fuse.InHeader{NodeId: created.NodeId},
+			Fh:       created.Fh,
+			Offset:   4194304,
+			Size:     4195328,
+		}, buf)
+
+		// Then
 		requireStatus(t, "首片 ENOSPC 返回 ENOSPC", fuse.Status(syscall.ENOSPC), stErr)
-		require.Zero(t, nErr)
+		require.Zero(t, nErr, "首片即失败返回字节数: want=0, got=%d", nErr)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 	})
 
@@ -326,78 +467,134 @@ func TestWrite_追加模式分片长写POSIX短写与Writev多段写入(t *testi
 	})
 }
 
-func TestRead与ReadAhead_校验读写权限屏障保护顺序预读命中及随机读零放大(t *testing.T) {
-	t.Run("只写句柄读返回EBADF且零长读直接成功且ReadAhead前排空WriteBehind", func(t *testing.T) {
+func TestRead与ReadAhead_校验读写权限本地Stage直读顺序预读命中及随机读零放大(t *testing.T) {
+	t.Run("O_WRONLY只写句柄调用Read返回EBADF", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
-		wrOnly := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "barrier.bin", syscall.O_WRONLY, 0o644)
+		wrOnly := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "wronly.bin", syscall.O_WRONLY, 0o644)
+
+		// When
+		_, ebadfSt := fs.Read(nil, &fuse.ReadIn{InHeader: fuse.InHeader{NodeId: wrOnly.NodeId}, Fh: wrOnly.Fh, Size: 16}, make([]byte, 16))
+
+		// Then
+		requireStatus(t, "O_WRONLY Read", fuse.EBADF, ebadfSt)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: wrOnly.NodeId}, Fh: wrOnly.Fh})
+	})
+
+	t.Run("零长度Read请求直接返回OK空切片且不发RPC", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "zero-read.bin", syscall.O_RDWR, 0o644)
+
+		// When
+		zeroRes, zeroSt := fs.Read(nil, &fuse.ReadIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh, Size: 0}, nil)
+		zeroBytes, _ := zeroRes.Bytes(nil)
+
+		// Then
+		requireStatus(t, "零字节 Read", fuse.OK, zeroSt)
+		require.Empty(t, zeroBytes, "零长度 Read 返回长度: want=0, got=%d", len(zeroBytes))
+		require.Zero(t, srv.readCalls.Load(), "零长度 Read RPC 次数: want=0, got=%d", srv.readCalls.Load())
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+	})
+
+	t.Run("未Fsync的Stage暂存写入被只读句柄立即从本地分片读见", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		wrOnly := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "stage-read.bin", syscall.O_WRONLY, 0o644)
 		mustWriteAt(t, fs, wrOnly.NodeId, wrOnly.Fh, 0, []byte("staged-payload"))
 		rdOnly := mustOpenFile(t, fs, wrOnly.NodeId, syscall.O_RDONLY)
 
 		// When
-		_, ebadfSt := fs.Read(nil, &fuse.ReadIn{InHeader: fuse.InHeader{NodeId: wrOnly.NodeId}, Fh: wrOnly.Fh, Size: 16}, make([]byte, 16))
-		zeroRes, zeroSt := fs.Read(nil, &fuse.ReadIn{InHeader: fuse.InHeader{NodeId: wrOnly.NodeId}, Fh: rdOnly.Fh, Size: 0}, nil)
-		zeroBytes, _ := zeroRes.Bytes(nil)
 		readBack := mustReadAt(t, fs, wrOnly.NodeId, rdOnly.Fh, 0, 14)
 
 		// Then
-		requireStatus(t, "O_WRONLY Read", fuse.EBADF, ebadfSt)
-		requireStatus(t, "零字节 Read", fuse.OK, zeroSt)
-		require.Empty(t, zeroBytes)
-		requireBytesMatch(t, "Read 触发写缓冲屏障后应读见未手动Fsync的新写内容", []byte("staged-payload"), readBack)
+		requireBytesMatch(t, "Read 直接从本地 Stage 读见未Fsync写入", []byte("staged-payload"), readBack)
+		require.Zero(t, srv.writeCalls.Load(), "Read 不得阻塞等待或主动触发后台 Write RPC")
+		require.Zero(t, srv.readCalls.Load(), "本地 Stage 已全覆盖的读取不得产生远端 Read RPC")
 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: wrOnly.NodeId}, Fh: wrOnly.Fh})
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: wrOnly.NodeId}, Fh: rdOnly.Fh})
 	})
 
-	t.Run("顺序流触发预读且写后失效并在随机大跨度读下保持零预读放大", func(t *testing.T) {
-		// Given: 构造 16 MiB 文件分别验证顺序流预读命中、写入失效及随机 1 MiB 跳跃零放大
-		const fileBytes = 16 << 20
-		truth := buildSeededBytes(fileBytes, 0x71)
+	t.Run("顺序大步长读取通过ReadAhead预读合并将RPC次数收敛至12次以内", func(t *testing.T) {
+		// Given
+		truth := buildSeededBytes(16777216, 0x71)
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		seqIno := srv.seedFile(1, "seq.bin", 0o644, truth)
-		randIno := srv.seedFile(1, "rand.bin", 0o644, truth)
 		fs := newTestRawFS(t, srv, withDirectIO(false))
-
-		// When: 1. 顺序按 512 KiB 步长读完 16 MiB（含 EOF），总 Read RPC 远少于 32 次，随后覆写末尾触发预读失效
 		seqFH := mustOpenFile(t, fs, seqIno, syscall.O_RDWR)
-		gotSeq := performSequentialReads(t, fs, seqIno, seqFH.Fh, fileBytes, 512<<10)
-		seqRPCCalls := srv.readCalls.Load()
-		requireBytesMatch(t, "顺序预读完整内容", truth, gotSeq)
-		require.Less(t, seqRPCCalls, int64(12), "16 MiB 按 512 KiB 顺序读经 4 MiB 窗口与预读合并后 RPC 次数必须显著收敛")
 
-		// 覆写首部使 ReadAhead 缓存失效，再次读取必须观察到新内容
-		mustWriteAt(t, fs, seqIno, seqFH.Fh, 0, []byte("PATCHED!"))
-		requireBytesMatch(t, "Write 使 ReadAhead 失效后应读见最新数据", []byte("PATCHED!"), mustReadAt(t, fs, seqIno, seqFH.Fh, 0, 8))
+		// When
+		gotSeq := performSequentialReads(t, fs, seqIno, seqFH.Fh, 16777216, 524288)
+		seqRPCCalls := srv.readCalls.Load()
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: seqIno}, Fh: seqFH.Fh})
 
-		// 2. 随机跳跃读取 6 个离散 1 MiB 切片，不得产生投机预读放大
+		// Then
+		requireBytesMatch(t, "顺序预读完整内容", truth, gotSeq)
+		require.Less(t, seqRPCCalls, int64(12), "16 MiB 顺序预读 RPC 次数: want<12, got=%d", seqRPCCalls)
+	})
+
+	t.Run("Write覆写首部使ReadAhead失效后立即读见最新写入数据", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		ino := srv.seedFile(1, "inval.bin", 0o644, buildSeededBytes(1048576, 0x71))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		fh := mustOpenFile(t, fs, ino, syscall.O_RDWR)
+		_ = mustReadAt(t, fs, ino, fh.Fh, 0, 524288)
+
+		// When
+		mustWriteAt(t, fs, ino, fh.Fh, 0, []byte("PATCHED!"))
+		got := mustReadAt(t, fs, ino, fh.Fh, 0, 8)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: fh.Fh})
+
+		// Then
+		requireBytesMatch(t, "Write 使 ReadAhead 失效后应读见最新数据", []byte("PATCHED!"), got)
+	})
+
+	t.Run("随机大跨度跳跃读取零预读放大", func(t *testing.T) {
+		// Given
+		truth := buildSeededBytes(16777216, 0x71)
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		randIno := srv.seedFile(1, "rand.bin", 0o644, truth)
+		fs := newTestRawFS(t, srv, withDirectIO(false))
 		randFH := mustOpenFile(t, fs, randIno, syscall.O_RDONLY)
-		beforeRandCalls := srv.readCalls.Load()
-		jumps := []uint64{13 << 20, 2 << 20, 10 << 20, 5 << 20, 15 << 20, 0}
-		performRandomReads(t, fs, randIno, randFH.Fh, jumps, 1<<20, truth)
-		randCalls := srv.readCalls.Load() - beforeRandCalls
+		jumps := []uint64{13631488, 2097152, 10485760, 5242880, 15728640, 0}
+
+		// When
+		performRandomReads(t, fs, randIno, randFH.Fh, jumps, 1048576, truth)
+		randCalls := srv.readCalls.Load()
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: randIno}, Fh: randFH.Fh})
 
 		// Then
-		require.Equal(t, int64(len(jumps)), randCalls, "非顺序随机跳跃读取不得触发投机预读放大")
+		require.Equal(t, int64(6), randCalls, "6 次随机跳跃读取 Read RPC 次数: want=6, got=%d", randCalls)
 	})
 }
 
-func TestTmpfile与OnUnmount_匿名文件具名化孤儿持久化与乱序双清零回收(t *testing.T) {
-	t.Run("Tmpfile具名化可读取且禁止O_RDONLY创建与二次Link", func(t *testing.T) {
+func TestTmpfile与OnUnmount_匿名文件具名化本地零RPC与关闭同步(t *testing.T) {
+	t.Run("O_RDONLY创建Tmpfile被拒绝返回EINVAL", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
-
 		var badOut fuse.CreateOut
-		requireStatus(t, "O_RDONLY Tmpfile", fuse.EINVAL, fs.Tmpfile(nil, &fuse.CreateIn{
+
+		// When
+		st := fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Flags:    uint32(syscall.O_RDONLY),
 			Mode:     0o644,
-		}, &badOut))
+		}, &badOut)
 
+		// Then
+		requireStatus(t, "O_RDONLY Tmpfile", fuse.EINVAL, st)
+	})
+
+	t.Run("Tmpfile非法Fallocate偏移返回EINVAL且非法SetAttr尺寸返回EFBIG", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
 		var tmpOut fuse.CreateOut
 		requireStatus(t, "Tmpfile O_RDWR", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -405,7 +602,39 @@ func TestTmpfile与OnUnmount_匿名文件具名化孤儿持久化与乱序双清
 			Mode:     0o640,
 		}, &tmpOut))
 
-		// When: 写入数据、扩展大小与 Fallocate 打洞后具名化为正常文件，再尝试二次 Link 应被拒绝
+		// When
+		fallocSt := fs.Fallocate(nil, &fuse.FallocateIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+			Offset:   uint64(1) << 63,
+			Length:   4096,
+			Mode:     0,
+		})
+		setattrSt := fs.SetAttr(nil, &fuse.SetAttrIn{
+			SetAttrInCommon: fuse.SetAttrInCommon{
+				InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+				Valid:    fuse.FATTR_SIZE,
+				Size:     uint64(1) << 63,
+			},
+		}, &fuse.AttrOut{})
+
+		// Then
+		requireStatus(t, "Tmpfile 非法 Fallocate 偏移", fuse.EINVAL, fallocSt)
+		requireStatus(t, "Tmpfile 非法 SetAttr 大小返回 EFBIG", fuse.Status(syscall.EFBIG), setattrSt)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		fs.Forget(tmpOut.NodeId, 1)
+	})
+
+	t.Run("Tmpfile写入并局部打洞后Link具名化可读取完整打洞数据", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile O_RDWR", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o640,
+		}, &tmpOut))
 		mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, []byte("tmp-header-tail"))
 		requireStatus(t, "Tmpfile Fallocate 打洞", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
@@ -414,78 +643,132 @@ func TestTmpfile与OnUnmount_匿名文件具名化孤儿持久化与乱序双清
 			Length:   7,
 			Mode:     fallocFlPunchHole | fallocFlKeepSize,
 		}))
-		requireStatus(t, "Tmpfile 非法 Fallocate 偏移", fuse.EINVAL, fs.Fallocate(nil, &fuse.FallocateIn{
-			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
-			Fh:       tmpOut.Fh,
-			Offset:   uint64(1) << 63,
-			Length:   4096,
-			Mode:     0,
-		}))
-		requireStatus(t, "Tmpfile 非法 SetAttr 大小返回 EFBIG", fuse.Status(syscall.EFBIG), fs.SetAttr(nil, &fuse.SetAttrIn{
-			SetAttrInCommon: fuse.SetAttrInCommon{
-				InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
-				Valid:    fuse.FATTR_SIZE,
-				Size:     uint64(1) << 63,
-			},
-		}, &fuse.AttrOut{}))
 
+		// When
 		var promoted fuse.EntryOut
-		requireStatus(t, "Tmpfile Link 具名化", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+		linkSt := fs.Link(nil, &fuse.LinkIn{
 			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Oldnodeid: tmpOut.NodeId,
-		}, "materialized.txt", &promoted))
-		var doubleLink fuse.EntryOut
-		requireStatus(t, "禁止对已具名 Tmpfile 二次 Link", fuse.ENOENT, fs.Link(nil, &fuse.LinkIn{
-			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
-			Oldnodeid: tmpOut.NodeId,
-		}, "second-link.txt", &doubleLink))
-
+		}, "materialized.txt", &promoted)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 		fs.Forget(tmpOut.NodeId, 2)
 
-		// Then: 通过具名文件读取确认打洞与数据完整持久化
 		looked := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "materialized.txt")
 		opened := mustOpenFile(t, fs, looked.NodeId, syscall.O_RDONLY)
 		got := mustReadAt(t, fs, looked.NodeId, opened.Fh, 0, 15)
-		requireBytesMatch(t, "具名化后的打洞文件内容", []byte("tmp-\x00\x00\x00\x00\x00\x00\x00tail"), got)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: looked.NodeId}, Fh: opened.Fh})
+
+		// Then
+		requireStatus(t, "Tmpfile Link 具名化", fuse.OK, linkSt)
+		requireBytesMatch(t, "具名化后的打洞文件内容", []byte("tmp-\x00\x00\x00\x00\x00\x00\x00tail"), got)
 	})
 
-	t.Run("匿名文件Flush上云孤儿并在Forget与Release乱序双清零时触发回收", func(t *testing.T) {
+	t.Run("已具名化的Tmpfile禁止二次Link并返回ENOENT", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
-		var tmpA, tmpB fuse.CreateOut
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile O_RDWR", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o640,
+		}, &tmpOut))
+		var first fuse.EntryOut
+		requireStatus(t, "首次 Link", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: tmpOut.NodeId,
+		}, "first-link.txt", &first))
+
+		// When
+		var second fuse.EntryOut
+		secondSt := fs.Link(nil, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: tmpOut.NodeId,
+		}, "second-link.txt", &second)
+
+		// Then
+		requireStatus(t, "禁止对已具名 Tmpfile 二次 Link", fuse.ENOENT, secondSt)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		fs.Forget(tmpOut.NodeId, 2)
+	})
+
+	t.Run("未具名匿名文件Flush与SetAttr与Fsync纯本地执行零服务端RPC", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o600,
+		}, &tmpOut))
+
+		// When
+		mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, []byte("local-host-file"))
+		var truncOut fuse.AttrOut
+		truncSt := fs.SetAttr(nil, &fuse.SetAttrIn{
+			SetAttrInCommon: fuse.SetAttrInCommon{
+				InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+				Valid:    fuse.FATTR_SIZE,
+				Size:     10,
+			},
+		}, &truncOut)
+		fsyncSt := fs.Fsync(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		flushSt := fs.Flush(nil, &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+
+		// Then
+		requireStatus(t, "Tmpfile Truncate", fuse.OK, truncSt)
+		require.Equal(t, uint64(10), truncOut.Size, "Truncate 后尺寸: want=10, got=%d", truncOut.Size)
+		requireStatus(t, "Tmpfile Fsync", fuse.OK, fsyncSt)
+		requireStatus(t, "Tmpfile Flush", fuse.OK, flushSt)
+		require.Zero(t, srv.mknodCalls.Load()+srv.writeCalls.Load()+srv.unlinkCalls.Load()+srv.reclaimOrphanCalls.Load(),
+			"未具名 O_TMPFILE 服务端 RPC 总数: want=0")
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		fs.Forget(tmpOut.NodeId, 1)
+	})
+
+	t.Run("未具名匿名文件先Forget后Release双清零本地销毁返回ENOENT", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
+		var tmpA fuse.CreateOut
 		requireStatus(t, "Tmpfile A", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Flags:    uint32(syscall.O_RDWR),
 			Mode:     0o600,
 		}, &tmpA))
+		mustWriteAt(t, fs, tmpA.NodeId, tmpA.Fh, 0, []byte("forget-first"))
+
+		// When
+		fs.Forget(tmpA.NodeId, 1)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpA.NodeId}, Fh: tmpA.Fh})
+
+		// Then
+		require.Zero(t, srv.reclaimOrphanCalls.Load(), "本地回收 ReclaimOrphan 次数: want=0, got=%d", srv.reclaimOrphanCalls.Load())
+		var attrAfter fuse.AttrOut
+		requireStatus(t, "tmpA 双清零后 GetAttr", fuse.ENOENT, fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: tmpA.NodeId}}, &attrAfter))
+	})
+
+	t.Run("未具名匿名文件先Release后Forget双清零本地销毁返回ENOENT", func(t *testing.T) {
+		// Given
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
+		var tmpB fuse.CreateOut
 		requireStatus(t, "Tmpfile B", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Flags:    uint32(syscall.O_RDWR),
 			Mode:     0o600,
 		}, &tmpB))
+		mustWriteAt(t, fs, tmpB.NodeId, tmpB.Fh, 0, []byte("release-first"))
 
-		// When: tmpA Flush 上云成为孤儿后，先 Forget 再 Release；tmpB 保持纯内存匿名后先 Release 再 Forget
-		mustWriteAt(t, fs, tmpA.NodeId, tmpA.Fh, 0, []byte("orphan-flush"))
-		requireStatus(t, "Tmpfile A Flush 上云", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
-			InHeader: fuse.InHeader{NodeId: tmpA.NodeId},
-			Fh:       tmpA.Fh,
-		}))
-		fs.Forget(tmpA.NodeId, 1)
-		require.Zero(t, srv.reclaimOrphanCalls.Load(), "仅有 Forget 但句柄未 Release 时不得提前回收孤儿")
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpA.NodeId}, Fh: tmpA.Fh})
-		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "Forget 后最终 Release 必须回收已上云孤儿")
-
-		mustWriteAt(t, fs, tmpB.NodeId, tmpB.Fh, 0, []byte("local-only"))
+		// When
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpB.NodeId}, Fh: tmpB.Fh})
-		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load())
 		fs.Forget(tmpB.NodeId, 1)
 
-		// Then: 双清零后原本地节点编号不可再访问
+		// Then
+		require.Zero(t, srv.reclaimOrphanCalls.Load(), "本地回收 ReclaimOrphan 次数: want=0, got=%d", srv.reclaimOrphanCalls.Load())
 		var attrAfter fuse.AttrOut
-		requireStatus(t, "tmpA 双清零后 GetAttr", fuse.ENOENT, fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: tmpA.NodeId}}, &attrAfter))
 		requireStatus(t, "tmpB 双清零后 GetAttr", fuse.ENOENT, fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: tmpB.NodeId}}, &attrAfter))
 	})
 

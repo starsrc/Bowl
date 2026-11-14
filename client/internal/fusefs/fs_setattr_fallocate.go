@@ -5,15 +5,15 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 const (
-	fallocFlKeepSize  = unix.FALLOC_FL_KEEP_SIZE
-	fallocFlPunchHole = unix.FALLOC_FL_PUNCH_HOLE
+	// FUSE/Linux fallocate ABI 位标志（跨平台编译测试保持与 Linux uapi 一致）。
+	fallocFlKeepSize  = 0x01
+	fallocFlPunchHole = 0x02
 )
 
 // SetAttr 实现按需部分更新 Inode 属性或截断文件空间，对应 Linux FUSE FUSE_SETATTR 协议。
@@ -127,11 +127,12 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		cached, st := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
 		if st == fuse.OK {
 			fs.FillAttrOut(out, cached.inode, cached.attrTimeout)
+			fs.stage.OverlayAttr(ino, &out.Attr)
 		}
 		return st
 	}
 
-	fs.writeBehind.ResetInodeStream(opCtx, ino)
+	fs.stage.ResetInodeStream(opCtx, ino)
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
 
@@ -144,6 +145,8 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		return fs.ToStatus(err, cancel)
 	}
 
+	fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
+	fs.stage.ObserveServerInode(ino, resp.Msg.GetInode(), valid&fuse.FATTR_SIZE != 0 && input.Size == 0)
 	fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), resp.Msg.GetAttrTimeoutSeconds())
 	if valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
 		fs.caps.markAbsent(input.NodeId)
@@ -197,7 +200,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		}
 		return localSt
 	}
-	fs.writeBehind.ResetInodeStream(opCtx, ino)
+	fs.stage.ResetInodeStream(opCtx, ino)
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
 
@@ -219,6 +222,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.stage.InvalidateKnownSize(ino)
 	fs.caps.markAbsent(input.NodeId)
 
 	return fuse.OK

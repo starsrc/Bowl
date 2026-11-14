@@ -50,6 +50,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 
+	seq0 := fs.topologySeq.Load()
 	source, _ := fs.cache.entry(input.NodeId, oldName)
 	target, targetKnown := fs.cache.entry(input.Newdir, newName)
 	var targetAttr *storagev1.Inode
@@ -59,7 +60,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		}
 	}
 
-	needLookup := fs.handles.AnyOpen() || fs.writeBehind.HasAnyPending() ||
+	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending() ||
 		(input.Flags&(renameExchange|renameNoReplace) == 0 && fs.hasDirtyInodes() && (!targetKnown || (target != 0 && (targetAttr == nil || targetAttr.GetAttr() == nil))))
 	if needLookup {
 		old, oldStatus := fs.lookupInodeWithContext(opCtx, cancel, input.NodeId, oldName)
@@ -82,7 +83,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 
 	if source != 0 {
 		if sourceServerIno, sSt := fs.ToServerIno(source); sSt == fuse.OK {
-			fs.writeBehind.BarrierInode(opCtx, sourceServerIno)
+			fs.stage.BarrierInode(opCtx, sourceServerIno)
 		}
 	}
 	var targetServerIno uint64
@@ -92,12 +93,26 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 			targetServerIno = tIno
 			hasTargetServerIno = true
 			if target != source {
-				fs.writeBehind.BarrierInode(opCtx, targetServerIno)
+				fs.stage.BarrierInode(opCtx, targetServerIno)
 			}
 		}
 		// 与并发 Release 按 Inode 串行，避免目标节点孤儿标记与最后句柄关闭互相错过。
 		unlock := fs.inodeLocks.lock(target)
 		defer unlock()
+		if target != source &&
+			input.Flags&(renameExchange|renameNoReplace) == 0 &&
+			fs.topologySeq.Load() != seq0 &&
+			(fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
+			refreshed, st := fs.getInodeWithContext(opCtx, cancel, target)
+			switch st {
+			case fuse.OK:
+				targetAttr = refreshed.inode
+			case fuse.ENOENT:
+				targetAttr = nil
+			default:
+				return st
+			}
+		}
 	}
 	targetOpen := target != 0 && fs.handles.IsOpen(target)
 
@@ -188,14 +203,16 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	if target != 0 && target != source {
 		fs.cache.invalidateInode(target)
 	}
+	fs.topologySeq.Add(1)
 	if target != 0 && target != source && input.Flags&renameExchange == 0 &&
 		targetAttr != nil && targetAttr.GetAttr() != nil && targetAttr.GetAttr().GetNlink() == 1 {
 		if targetOpen {
 			fs.markOrphanWithContext(opCtx, target)
 		} else if hasTargetServerIno {
-			fs.writeBehind.RemoveInode(opCtx, targetServerIno)
+			fs.stage.DiscardInode(targetServerIno)
 			fs.readAhead.InvalidateInode(targetServerIno)
 			fs.clearDirty(targetServerIno)
+			fs.forgetInodeSpecial(target)
 		}
 	}
 	return fuse.OK

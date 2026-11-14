@@ -332,8 +332,8 @@ func TestGetAttr与StatFs_存在挂起写入时先排空写缓冲再查询远端
 
 func TestBuildMountOptions_按读写配置返回预期挂载选项(t *testing.T) {
 	// Given / When
-	rwOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-rw", ReadOnly: false, AllowOther: true})
-	roOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-ro", ReadOnly: true})
+	rwOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-rw", Mode: fusefs.MountModeStaged, AllowOther: true})
+	roOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-ro", Mode: fusefs.MountModeRO})
 
 	// Then
 	require.Equal(t, "bowl:disk-rw", rwOpts.FsName)

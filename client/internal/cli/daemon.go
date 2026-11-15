@@ -52,9 +52,6 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 
 	subArgs := append([]string{"mount"}, args...)
 	cmd := exec.Command(binPath, subArgs...)
-	// 守护进程不能继承调用者的工作目录：它会一直持有该目录，导致同一挂载点所属
-	// 文件系统上的 umount 因 Resource busy 失败。
-	cmd.Dir = "/"
 	cmd.ExtraFiles = []*os.File{w}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = append(os.Environ(), "BOWL_DAEMON_WORKER=1")
@@ -102,6 +99,13 @@ func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Co
 		return 1
 	}
 	defer logF.Close()
+
+	// 守护进程不能一直停在调用者的工作目录：它会持有该目录，使其所在文件系统的 umount 因
+	// Resource busy 失败。挂载点与日志路径此时都已按原目录解析完毕，之后不再有相对路径。
+	if chdirErr := os.Chdir("/"); chdirErr != nil {
+		notifyErr(fmt.Errorf("切换守护进程工作目录失败: %w", chdirErr))
+		return 1
+	}
 
 	logFd := int(logF.Fd())
 	_ = unix.Dup2(logFd, int(os.Stdout.Fd()))

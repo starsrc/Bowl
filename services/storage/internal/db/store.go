@@ -2,6 +2,7 @@
 package db
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -19,10 +21,10 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/config"
 )
 
-// 领域哨兵错误（吞并底层驱动细节，避免 pgx.ErrNoRows 泄露至调用方）。
+// 领域哨兵错误，吞并底层驱动细节以避免 pgx.ErrNoRows 或 *pgconn.PgError 泄露至调用方。
 var (
 	ErrNotFound        = errors.New("db: not found")
-	ErrDiskNotFound    = ErrNotFound
+	ErrAlreadyExists   = errors.New("db: already exists")
 	ErrInvalidArgument = errors.New("db: invalid argument")
 	ErrCrossLineage    = errors.New("db: cross lineage")
 	ErrStaleBaseCommit = errors.New("db: stale base commit")
@@ -180,13 +182,23 @@ func validateMergeDiskInput(input *MergeDiskInput) error {
 	if input.NewMergeCommitID == uuid.Nil {
 		return fmt.Errorf("%w: new merge commit id cannot be nil uuid", ErrInvalidArgument)
 	}
-	if !input.SkipSourceCommit {
-		if input.NewSourceCommitID == uuid.Nil {
-			return fmt.Errorf("%w: new source commit id cannot be nil uuid", ErrInvalidArgument)
+	if input.NewMergeCommitID == input.ExpectedTargetBaseCommitID {
+		return fmt.Errorf("%w: new merge commit id cannot equal expected target base commit id", ErrInvalidArgument)
+	}
+	if input.SkipSourceCommit {
+		if input.NewMergeCommitID == input.ExpectedSourceBaseCommitID {
+			return fmt.Errorf("%w: new merge commit id cannot equal expected source base commit id", ErrInvalidArgument)
 		}
-		if input.NewSourceCommitID == input.NewMergeCommitID {
-			return fmt.Errorf("%w: new source and merge commit ids must differ", ErrInvalidArgument)
-		}
+		return nil
+	}
+	if input.NewSourceCommitID == uuid.Nil {
+		return fmt.Errorf("%w: new source commit id cannot be nil uuid", ErrInvalidArgument)
+	}
+	if input.NewSourceCommitID == input.NewMergeCommitID {
+		return fmt.Errorf("%w: new source and merge commit ids must differ", ErrInvalidArgument)
+	}
+	if input.NewSourceCommitID == input.ExpectedSourceBaseCommitID {
+		return fmt.Errorf("%w: new source commit id cannot equal expected source base commit id", ErrInvalidArgument)
 	}
 	return nil
 }
@@ -197,6 +209,23 @@ func mapPGXErr(err error) error {
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
+		var sentinel error
+		switch pgErr.Code {
+		case "23505":
+			sentinel = ErrAlreadyExists
+		case "23503":
+			sentinel = ErrNotFound
+		case "23514":
+			sentinel = ErrInvalidArgument
+		}
+		if sentinel != nil {
+			if detail := cmp.Or(pgErr.ConstraintName, pgErr.Message); detail != "" {
+				return fmt.Errorf("%w: %s", sentinel, detail)
+			}
+			return sentinel
+		}
 	}
 	return err
 }
@@ -242,14 +271,14 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
 		srcSnapshot, getErr := q.GetDisk(ctx, pgSource)
 		if getErr != nil {
-			return mapPGXErr(getErr)
+			return getErr
 		}
 		if _, lockErr := q.LockDiskLineage(ctx, srcSnapshot.LineageID); lockErr != nil {
-			return mapPGXErr(lockErr)
+			return lockErr
 		}
 		lockedSource, lockSrcErr := q.GetDiskForUpdate(ctx, pgSource)
 		if lockSrcErr != nil {
-			return mapPGXErr(lockSrcErr)
+			return lockSrcErr
 		}
 		if _, commitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
 			CommitID:       pgCommit,
@@ -322,7 +351,7 @@ func (s *SQLStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDis
 		PageLimit:       int32(pageSize + 1),
 	})
 	if err != nil {
-		return ListDisksPage{}, err
+		return ListDisksPage{}, mapPGXErr(err)
 	}
 
 	var nextPageToken string
@@ -371,7 +400,7 @@ func (s *SQLStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name st
 			Name:   name,
 		})
 		if updateErr != nil {
-			return mapPGXErr(updateErr)
+			return updateErr
 		}
 		row = updated
 		return nil
@@ -395,7 +424,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	var targetRow Disk
 	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
 		if _, lockErr := q.LockDiskLineage(ctx, pgLineage); lockErr != nil {
-			return mapPGXErr(lockErr)
+			return lockErr
 		}
 
 		firstID, secondID := pgSource, pgTarget
@@ -407,11 +436,11 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 
 		firstRow, lockFirstErr := q.GetDiskForUpdate(ctx, firstID)
 		if lockFirstErr != nil {
-			return mapPGXErr(lockFirstErr)
+			return lockFirstErr
 		}
 		secondRow, lockSecondErr := q.GetDiskForUpdate(ctx, secondID)
 		if lockSecondErr != nil {
-			return mapPGXErr(lockSecondErr)
+			return lockSecondErr
 		}
 
 		sourceRow, curTargetRow := firstRow, secondRow
@@ -487,16 +516,16 @@ func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUI
 
 		diskRow, getErr := q.GetDisk(ctx, pgID)
 		if getErr != nil {
-			return mapPGXErr(getErr)
+			return getErr
 		}
 		lineageID := diskRow.LineageID
 
 		// 统一遵守 disk_lineages -> disks 的全局加锁顺序，消除并发 ForkDisk 与 DeleteDisk 死锁风险。
 		if _, lockErr := q.LockDiskLineage(ctx, lineageID); lockErr != nil {
-			return mapPGXErr(lockErr)
+			return lockErr
 		}
 		if _, lockDiskErr := q.GetDiskForUpdate(ctx, pgID); lockDiskErr != nil {
-			return mapPGXErr(lockDiskErr)
+			return lockDiskErr
 		}
 
 		count, delErr := q.DeleteDisk(ctx, pgID)

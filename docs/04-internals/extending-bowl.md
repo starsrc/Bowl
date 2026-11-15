@@ -64,7 +64,7 @@ func (s *Server) GetDiskUsage(ctx context.Context, req *connect.Request[storagev
 | `server/interceptor.go` 的 `isControlPlaneProcedure`（`:116`） | 控制面慢请求阈值 `200ms`，否则按 `50ms` | 新 RPC 属于控制面 |
 | `server/interceptor.go` 的 `classifyStorageLogLevel`（`:86`） | 成功日志级别：列表内为 Info，其余 Debug | 低频高价值变更操作 |
 | `pkg/validator/validator.go` 的 `classifyViolationInternal` | 校验失败映射为 `EINVAL` 以外的 errno（`ERANGE`、`E2BIG`、`ENAMETOOLONG`） | 新字段有长度或范围约束 |
-| `services/storage/internal/control/status.go` 的 `mappings`（`:25`） | 新增领域哨兵错误 → gRPC code 与 errno reason | 新增 `ErrXxx` |
+| `services/storage/internal/control/status.go` 的 `mappings`，位于 `:24` | 新增领域哨兵错误 → gRPC code 与 errno reason | 新增 `ErrXxx` |
 | `client/internal/rpc/retry.go` 的 `idempotentProcedures`（`:80`） | 允许对 `Unavailable` 与传输错误重试 | **仅**严格只读或幂等的 RPC；写类 RPC 加入会造成重复提交 |
 
 新增 errno `Reason` 时还要同步客户端 `client/internal/rpc/errors.go` 的 `MapError` 分支（目前 25 类），否则退化为 Connect 状态码兜底。
@@ -154,11 +154,11 @@ var diskInspectSpec = diskSubcommandSpec{
 | 3 | 应用迁移到本地库 | `task goose:storage:up`（DSN 取 `STORAGE_DB_DSN`，默认 `postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable`）；回滚 `task goose:storage:down`；查看 `task goose:storage:status` |
 | 4 | 写查询 | `services/storage/db/queries/metadata.sql`，`-- name: Xxx :one` / `:many` / `:exec` / `:execrows` 注释声明；具名参数用 `@name::type` |
 | 5 | 生成代码 | `task sqlc:generate`（`services/storage/sqlc.yaml`，schema 读 `db/migrations`）。只会更新 `internal/db/metadata.sql.go` 与 `models.go` |
-| 6 | 扩展 `db.Store` 接口 | `services/storage/internal/db/store.go:100`：加方法；实现 `SQLStore` 方法，事务统一走 `s.tx.ExecTxWithOptions(..., tx.WithDefaultRetry())`，注意锁序（见 [控制面 §4.3](/04-internals/storage-control-plane)）；领域哨兵错误经 `mapPGXErr` 转换 |
+| 6 | 扩展 `db.Store` 接口 | 在 `services/storage/internal/db/store.go:102` 新增方法，并实现 `SQLStore` 方法，事务统一走 `s.tx.ExecTxWithOptions(..., tx.WithDefaultRetry())` 并遵守 [控制面 §4.3](/04-internals/storage-control-plane) 锁序，领域哨兵错误在最外层经 `mapPGXErr` 转换 |
 | 7 | **同步 `MemStore`** | `services/storage/internal/db/mem_store.go`：为同一方法写进程内实现，语义（哨兵错误、排序、分页、原子性）与 SQL 一致 |
 | 8 | 契约测试 | `services/storage/internal/db/store_contract_test.go` 新增 `TestStoreContract_Given...` 用例，使用 `runStoreAdapters`，让 `MemStore` 与 `SQLStore` 各跑一遍 |
 | 9 | 隔离库同步 | 若新增**表**，`testdb_helper_test.go` 的 `cloneDDL` 只克隆 `disk_lineages`、`disk_commits`、`disks`，新表要加入，否则 `SQLStore` 子测试因缺表失败 |
-| 10 | 控制面接入 | `control` 通过 `db.Store` 调用，并在 `control/status.go` 的 `mapDBErr` 与 `mappings` 补错误映射 |
+| 10 | 控制面接入 | `control` 通过 `db.Store` 调用，在 `control/control.go` 的 `mapDBErr` 转换持久化哨兵错误，并在 `control/status.go` 的 `mappings` 补错误映射 |
 
 ### 3.2 运行契约测试
 

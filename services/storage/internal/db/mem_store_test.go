@@ -86,6 +86,43 @@ func TestMemStore_GivenInjectedWriteError_WhenMergeDiskCalled_ThenRollsBackAtomi
 	require.Equal(t, cmFork, snapAfterFail.Disks[childID].BaseCommitID)
 }
 
+func TestMemStore_GivenInjectedWriteError_WhenReserveSegmentCalled_ThenFailsWithoutAdvancing(t *testing.T) {
+	ctx := context.Background()
+	mem := db.NewMemStore()
+
+	rootID := mustNewUUIDv7(t)
+	_, err := mem.CreateDisk(ctx, rootID, "root")
+	require.NoError(t, err)
+
+	injectedInoErr := errors.New("injected inode reserve error")
+	mem.SetFailNextWrite(injectedInoErr)
+	_, err = mem.ReserveSegment(ctx, db.SegmentKindInode, rootID, 2, 10)
+	require.ErrorIs(t, err, injectedInoErr)
+
+	snapAfterInoFail := mem.Inspect()
+	require.Equal(t, int64(2), snapAfterInoFail.Lineages[rootID].NextIno, "注入失败后 NextIno 不得推进")
+	require.Equal(t, int64(1), snapAfterInoFail.Lineages[rootID].NextPackID, "注入失败后 NextPackID 不得推进")
+	require.Equal(t, 0, snapAfterInoFail.InodeReserveCalls, "注入失败后 InodeReserveCalls 应保持 0")
+
+	segIno, err := mem.ReserveSegment(ctx, db.SegmentKindInode, rootID, 2, 10)
+	require.NoError(t, err)
+	require.Equal(t, db.SegmentRange{First: 2, Last: 11}, segIno)
+
+	injectedPackErr := errors.New("injected pack reserve error")
+	mem.SetFailNextWrite(injectedPackErr)
+	_, err = mem.ReserveSegment(ctx, db.SegmentKindPack, rootID, 1, 8)
+	require.ErrorIs(t, err, injectedPackErr)
+
+	snapAfterPackFail := mem.Inspect()
+	require.Equal(t, int64(12), snapAfterPackFail.Lineages[rootID].NextIno)
+	require.Equal(t, int64(1), snapAfterPackFail.Lineages[rootID].NextPackID, "注入失败后 NextPackID 不得推进")
+	require.Equal(t, 0, snapAfterPackFail.PackReserveCalls, "注入失败后 PackReserveCalls 应保持 0")
+
+	segPack, err := mem.ReserveSegment(ctx, db.SegmentKindPack, rootID, 1, 8)
+	require.NoError(t, err)
+	require.Equal(t, db.SegmentRange{First: 1, Last: 8}, segPack)
+}
+
 func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

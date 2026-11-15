@@ -12,10 +12,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
+
+func requireContractError(t *testing.T, err, sentinel error, msgAndArgs ...any) {
+	t.Helper()
+	require.ErrorIs(t, err, sentinel, msgAndArgs...)
+	require.NotErrorIs(t, err, pgx.ErrNoRows, "契约错误不得泄露 pgx.ErrNoRows: err=%v", err)
+	_, hasPG := errors.AsType[*pgconn.PgError](err)
+	require.False(t, hasPG, "契约错误不得泄露 *pgconn.PgError: err=%v", err)
+}
 
 type storeAdapter struct {
 	name     string
@@ -211,7 +221,7 @@ func TestStoreContract_GivenValidDisk_WhenCreatedUpdatedRead_ThenPersistsEndStat
 		require.Equal(t, updated, reloaded, "GetDisk 应观测到更新后的名称")
 
 		_, dupErr := s.CreateDisk(ctx, diskID, "alpha-dup")
-		require.Error(t, dupErr, "重复 DiskID 创建必须失败")
+		requireContractError(t, dupErr, db.ErrAlreadyExists, "重复 DiskID 创建必须返回 ErrAlreadyExists")
 		afterDup, err := s.GetDisk(ctx, diskID)
 		require.NoError(t, err)
 		require.Equal(t, "alpha-renamed", afterDup.Name, "失败的重复创建不得覆盖已有记录")
@@ -245,17 +255,17 @@ func TestStoreContract_GivenInvalidInputsOrMissingTargets_WhenCalled_ThenFailsFa
 
 		missingID := mustNewUUIDv7(t)
 		_, err = s.GetDisk(ctx, missingID)
-		require.ErrorIs(t, err, db.ErrNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 		_, err = s.UpdateDiskName(ctx, missingID, "missing")
-		require.ErrorIs(t, err, db.ErrNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 		_, err = s.DeleteDisk(ctx, missingID)
-		require.ErrorIs(t, err, db.ErrNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: missingID, ChildDiskID: mustNewUUIDv7(t), CommitID: mustNewUUIDv7(t), Name: "child"})
-		require.ErrorIs(t, err, db.ErrNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 		_, err = s.ReserveSegment(ctx, db.SegmentKindInode, missingID, 2, 10)
-		require.ErrorIs(t, err, db.ErrNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 		_, err = s.ReserveSegment(ctx, db.SegmentKindPack, missingID, 1, 10)
-		require.ErrorIs(t, err, db.ErrNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 	})
 }
 
@@ -351,14 +361,14 @@ func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaim
 			CommitID:     mustNewUUIDv7(t),
 			Name:         "dup-child",
 		})
-		require.Error(t, dupChildErr, "重复 ChildDiskID ForkDisk 必须失败")
+		requireContractError(t, dupChildErr, db.ErrAlreadyExists, "重复 ChildDiskID ForkDisk 必须返回 ErrAlreadyExists")
 		_, dupCommitErr := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  mustNewUUIDv7(t),
 			CommitID:     cm1ID,
 			Name:         "dup-commit",
 		})
-		require.Error(t, dupCommitErr, "重复 CommitID ForkDisk 必须失败")
+		requireContractError(t, dupCommitErr, db.ErrAlreadyExists, "重复 CommitID ForkDisk 必须返回 ErrAlreadyExists")
 
 		// |D| == 2：删 root 后必须保留全部切面。
 		reclaimed, err := s.DeleteDisk(ctx, rootID)
@@ -754,7 +764,7 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 			NewSourceCommitID:          mustNewUUIDv7(t),
 			NewMergeCommitID:           mustNewUUIDv7(t),
 		})
-		require.ErrorIs(t, err, db.ErrDiskNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  root.LineageID,
@@ -765,7 +775,7 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 			NewSourceCommitID:          mustNewUUIDv7(t),
 			NewMergeCommitID:           mustNewUUIDv7(t),
 		})
-		require.ErrorIs(t, err, db.ErrDiskNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  missingID,
@@ -776,7 +786,7 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 			NewSourceCommitID:          mustNewUUIDv7(t),
 			NewMergeCommitID:           mustNewUUIDv7(t),
 		})
-		require.ErrorIs(t, err, db.ErrDiskNotFound)
+		requireContractError(t, err, db.ErrNotFound)
 
 		// 4. CAS 切面过期冲突（源盘与目标盘各测一次）
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
@@ -812,5 +822,228 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		require.NoError(t, err)
 		require.Len(t, commits, 1, "失败合并后血缘不得残留任何新 Commit")
 		require.Equal(t, cmFork, commits[0].CommitID)
+	})
+}
+
+func TestStoreContract_GivenExistingDiskOrAliveLineage_WhenCreateDiskCalled_ThenReturnsErrAlreadyExistsWithoutPollution(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "root")
+		require.NoError(t, err)
+
+		_, err = s.CreateDisk(ctx, rootID, "dup-root")
+		requireContractError(t, err, db.ErrAlreadyExists)
+
+		childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  childID,
+			CommitID:     cmFork,
+			Name:         "child",
+		})
+		require.NoError(t, err)
+
+		// 删除根盘后血缘仍存活，原根盘 ID 对应的血缘主键冲突必须被拦截。
+		_, err = s.DeleteDisk(ctx, rootID)
+		require.NoError(t, err)
+
+		_, err = s.CreateDisk(ctx, rootID, "recreate-root")
+		requireContractError(t, err, db.ErrAlreadyExists)
+
+		_, err = s.GetDisk(ctx, rootID)
+		requireContractError(t, err, db.ErrNotFound)
+
+		gotChild, err := s.GetDisk(ctx, childID)
+		require.NoError(t, err)
+		require.Equal(t, "child", gotChild.Name)
+		require.Equal(t, root.LineageID, gotChild.LineageID)
+		require.Equal(t, uuid.Nil, gotChild.BaseCommitID)
+
+		commits, err := s.ListLineageCommits(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.Empty(t, commits)
+	})
+}
+
+func TestStoreContract_GivenConflictingOrSelfParentForkInputs_WhenForkDiskCalled_ThenFailsWithoutSideEffects(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "root")
+		require.NoError(t, err)
+
+		c1ID, cm1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  c1ID,
+			CommitID:     cm1,
+			Name:         "child-1",
+		})
+		require.NoError(t, err)
+
+		c2ID, cm2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  c2ID,
+			CommitID:     cm2,
+			Name:         "child-2",
+		})
+		require.NoError(t, err)
+
+		// 1. 传入已存在的 ChildDiskID，即使 CommitID 全新也必须原子回滚并返回 ErrAlreadyExists。
+		freshCommit := mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  c1ID,
+			CommitID:     freshCommit,
+			Name:         "dup-child",
+		})
+		requireContractError(t, err, db.ErrAlreadyExists)
+
+		// 2. 传入已存在的历史 CommitID，非当前源盘 BaseCommitID，返回 ErrAlreadyExists。
+		unusedChildA := mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  unusedChildA,
+			CommitID:     cm1,
+			Name:         "dup-history-commit",
+		})
+		requireContractError(t, err, db.ErrAlreadyExists)
+
+		// 3. 源盘已有非空 BaseCommitID 且 CommitID 等于源盘 BaseCommitID，触发自指父提交返回 ErrInvalidArgument。
+		unusedChildB := mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  unusedChildB,
+			CommitID:     cm2,
+			Name:         "self-parent-commit",
+		})
+		requireContractError(t, err, db.ErrInvalidArgument)
+
+		// 验证零副作用回滚。
+		gotRoot, err := s.GetDisk(ctx, rootID)
+		require.NoError(t, err)
+		require.Equal(t, cm2, gotRoot.BaseCommitID)
+
+		gotC1, err := s.GetDisk(ctx, c1ID)
+		require.NoError(t, err)
+		require.Equal(t, "child-1", gotC1.Name)
+
+		_, err = s.GetDisk(ctx, unusedChildA)
+		requireContractError(t, err, db.ErrNotFound)
+		_, err = s.GetDisk(ctx, unusedChildB)
+		requireContractError(t, err, db.ErrNotFound)
+
+		commits, err := s.ListLineageCommits(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.Len(t, commits, 2)
+		require.Equal(t, cm1, commits[0].CommitID)
+		require.Equal(t, cm2, commits[1].CommitID)
+	})
+}
+
+func TestStoreContract_GivenConflictingOrSelfParentMergeInputs_WhenMergeDiskCalled_ThenFailsWithoutSideEffects(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "main")
+		require.NoError(t, err)
+
+		branchID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  branchID,
+			CommitID:     cmFork,
+			Name:         "feature",
+		})
+		require.NoError(t, err)
+
+		cmSrc1, cmMerge1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               branchID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmFork,
+			ExpectedTargetBaseCommitID: cmFork,
+			NewSourceCommitID:          cmSrc1,
+			NewMergeCommitID:           cmMerge1,
+			SkipSourceCommit:           false,
+		})
+		require.NoError(t, err)
+
+		// 1. 历史 CommitID 冲突检测，包括 NewSourceCommitID 与 NewMergeCommitID。
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               branchID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmSrc1,
+			ExpectedTargetBaseCommitID: cmMerge1,
+			NewSourceCommitID:          cmFork,
+			NewMergeCommitID:           mustNewUUIDv7(t),
+			SkipSourceCommit:           false,
+		})
+		requireContractError(t, err, db.ErrAlreadyExists)
+
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               branchID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmSrc1,
+			ExpectedTargetBaseCommitID: cmMerge1,
+			NewSourceCommitID:          mustNewUUIDv7(t),
+			NewMergeCommitID:           cmFork,
+			SkipSourceCommit:           false,
+		})
+		requireContractError(t, err, db.ErrAlreadyExists)
+
+		// 2. 自指父提交参数校验。
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               branchID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmSrc1,
+			ExpectedTargetBaseCommitID: cmMerge1,
+			NewSourceCommitID:          cmSrc1,
+			NewMergeCommitID:           mustNewUUIDv7(t),
+			SkipSourceCommit:           false,
+		})
+		requireContractError(t, err, db.ErrInvalidArgument)
+
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               branchID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmSrc1,
+			ExpectedTargetBaseCommitID: cmMerge1,
+			NewSourceCommitID:          mustNewUUIDv7(t),
+			NewMergeCommitID:           cmMerge1,
+			SkipSourceCommit:           false,
+		})
+		requireContractError(t, err, db.ErrInvalidArgument)
+
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               branchID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmSrc1,
+			ExpectedTargetBaseCommitID: cmMerge1,
+			NewMergeCommitID:           cmSrc1,
+			SkipSourceCommit:           true,
+		})
+		requireContractError(t, err, db.ErrInvalidArgument)
+
+		// 验证零副作用回滚。
+		gotBranch, err := s.GetDisk(ctx, branchID)
+		require.NoError(t, err)
+		require.Equal(t, cmSrc1, gotBranch.BaseCommitID)
+
+		gotRoot, err := s.GetDisk(ctx, rootID)
+		require.NoError(t, err)
+		require.Equal(t, cmMerge1, gotRoot.BaseCommitID)
+
+		commits, err := s.ListLineageCommits(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.Len(t, commits, 3)
+		require.Equal(t, cmFork, commits[0].CommitID)
+		require.Equal(t, cmSrc1, commits[1].CommitID)
+		require.Equal(t, cmMerge1, commits[2].CommitID)
 	})
 }

@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `config.Module` | `services/storage/internal/config/` | `ServerConfig`、`ObservabilityConfig`、`DBPoolConfig`、`MetaConfig` 等配置视图 |
 | `obsfx.Module` | 外部包 `github.com/starsrc/pkg/observability/obsfx` | 隔离 Prometheus Registry、`observability.Ready`、Gatherer |
-| `db.Module` | `services/storage/internal/db/store.go:628` | `ProvidePool`（`*pgxpool.Pool`）、`NewStore`（`db.Store`） |
+| `db.Module` | `services/storage/internal/db/store.go:657` | `ProvidePool` 返回 `*pgxpool.Pool`，`NewStore` 返回 `db.Store` |
 | `control.Module` | `services/storage/internal/control/module.go:85` | `store.NewMetrics`、`newStorageEngineCollector`、`newManagerFromParams`（`control.Manager`） |
 | `server.Module` | `services/storage/internal/server/module.go:15` | `NewHTTPMetrics`、`ConfigureFineBucketMeterProvider`、`ConfigureStorageTracerProvider`、`New`（`*Server`） |
 
@@ -134,7 +134,7 @@ flowchart LR
     M --> X["serverx.StatusToConnectError"]
 ```
 
-`control.ToStatus`（`control/status.go:62`）顺序执行：`MergeConflictError` → `mappings` 表（`errors.Is` 逐项匹配）→ 已有 gRPC status 透传 → `context` 错误 → `codes.Unknown`。`mappings`（`status.go:25-54`）的代表性条目：
+`control.ToStatus` 定义在 `control/status.go:61`，按顺序执行如下分支：`MergeConflictError`，经 `errors.Is` 逐项匹配 `mappings` 表，透传已有 gRPC status，处理 `context` 错误，其余回落 `codes.Unknown`。`mappings` 定义在 `status.go:24-53`，代表性条目如下：
 
 | 哨兵错误 | gRPC code | errno reason |
 | --- | --- | --- |
@@ -145,7 +145,7 @@ flowchart LR
 | `store.ErrReadOnly`、`store.ErrPerm` | `PermissionDenied` | `EPERM` |
 | `store.ErrNotEmpty` | `FailedPrecondition` | `ENOTEMPTY` |
 | `control.ErrCrossLineage` | `FailedPrecondition` | `EXDEV` |
-| `control.ErrConcurrentMerge`、`control.ErrDiskMounted`、`db.ErrStaleBaseCommit` | `Aborted` | `EBUSY` |
+| `control.ErrConcurrentMerge`、`control.ErrDiskMounted`、`control.ErrStaleBaseCommit` | `Aborted` | `EBUSY` |
 
 客户端把同一组 `Reason` 还原为 `syscall.Errno`，见 [客户端流水线 §5](/04-internals/client-fuse-pipeline)。
 
@@ -166,17 +166,17 @@ flowchart LR
 
 ### 3.2 Actor 获取：三段式快路径
 
-`Manager.Actor`（`control.go:1355`）是每个数据面 RPC 的入口：
+`Manager.Actor` 定义在 `control.go:1357`，是每个数据面 RPC 的入口：
 
-1. 持 `poolMu.RLock` 直接查 `actors[diskID]`，命中即返回（热路径，零分配）。
+1. 持 `poolMu.RLock` 直接查 `actors[diskID]`，命中即返回，热路径零分配。
 2. 未命中则 `parseDiskID` 规范化，再次查池。
-3. 仍未命中：`lockDisk(diskID)` → 复查池 → `store.GetDisk` 取 `LineageID` → `getOrOpenActorWithLineageLocked`（`control.go:606`）打开 Actor。打开期间不持 `poolMu`；写回池时二次检查，竞争失败者调用 `CloseDiscard()` 丢弃，返回已有实例。
+3. 仍未命中时先调用 `lockDisk` 按 `diskID` 加锁，复查池后再通过 `store.GetDisk` 取 `LineageID`，最后调用 `control.go:608` 的 `getOrOpenActorWithLineageLocked` 打开 Actor。打开期间不持 `poolMu`，写回池时二次检查，竞争失败者调用 `CloseDiscard()` 丢弃并返回已有实例。
 
 打开 Actor 时会注入两个号段分配器（`newSegmentAllocators`，`control.go:402`）：Inode 号段步长 `store.InodeSegment = 4096`、Pack 号段步长 `store.PackSegment = 64`，二者通过 `db.Store.ReserveSegment` 在 PostgreSQL 中按血缘预留，保证同一血缘下各盘的 `ino` 与 `packID` 不冲突。预留使用 `context.WithoutCancel` 加 `5s` 超时（`segmentReserveTimeout`），避免客户端取消导致号段半分配。
 
 ### 3.3 租约与世代栅栏
 
-- `MountDisk`（`control.go:1293`）：读写挂载调用 `actor.AdvanceEpoch` 原子递增 `WriterEpoch`，再 `issueMountLease` 签发 `mountID`；只读挂载不递增世代，`Epoch = 0`。
+- `MountDisk` 定义在 `control.go:1295`，读写挂载调用 `actor.AdvanceEpoch` 原子递增 `WriterEpoch`，再由 `issueMountLease` 签发 `mountID`，只读挂载不递增世代且 `Epoch = 0`。
 - `RenewMount` / `UnmountDisk`（`mount_lease.go`）：租约保存在内存 `activeMounts`，过期条目由 `pruneExpiredDiskLeasesLocked` 惰性清理。
 - 旧写者被世代栅栏隔离：`StoreActor.validateCmd` 对所有外部写操作比较 `cmd.epoch` 与当前 `WriterEpoch`，不一致返回 `ErrStaleEpoch`（映射为 `EBUSY`）。机制细节见 [挂载与世代栅栏](/02-features/mount-and-fencing)。
 - `checkMergeMountGate` 在非 `DryRun` 且非 `Force` 的合并前，检查源盘与目标盘是否仍有活跃挂载租约，否则返回 `ErrDiskMounted`。
@@ -185,7 +185,7 @@ flowchart LR
 
 控制面把"文件系统目录状态"与"PostgreSQL 血缘 DAG"两份状态做原子对账。顺序统一为：**先物化目录，再提交数据库事务，失败则回滚目录**。
 
-**`ForkDisk`（`control.go:767`）**
+**`ForkDisk`，见 `control.go:769`**
 
 ```mermaid
 sequenceDiagram
@@ -217,22 +217,36 @@ sequenceDiagram
 | Phase 1 | 目标盘保持在线；两盘各做只读快照；`store.DiffTrees` / `store.MergeTrees` 在 `StagingDir` 演算；物化 `commits/` 切面与 `srccommit` 崩溃标记 | 持 `lineageCommitMu.RLock` |
 | Phase 2 | 摘除并关闭旧目标 Actor；`InspectBranchStat` 比较 `(WriterEpoch, NextWriteSeq)` 水位，变化则 `ErrConcurrentMerge`；`db.Store.MergeDisk` 事务提交；`os.Rename` 把 `disks/target` 换成 staging 目录；重新打开 Actor | CAS 校验加数据库期望基线提交校验 |
 
-数据库事务内再做一次 CAS：`SQLStore.MergeDisk`（`db/store.go:386`）校验两盘 `BaseCommitID` 与期望值一致，否则返回 `db.ErrStaleBaseCommit`（映射 `Aborted/EBUSY`）。
+数据库事务内再执行一次 CAS 校验，`SQLStore.MergeDisk` 位于 `db/store.go:415`，校验两盘 `BaseCommitID` 与期望值一致，否则返回 `db.ErrStaleBaseCommit`，上层映射为 `Aborted` 与 `EBUSY`。
 
-**崩溃恢复**：`openDiskActor`（`control.go:578`）在打开读写 Actor 前调用 `reconcilePendingMergeLocked`，扫描 `disks/` 中残留的 `.merge.*`、`.old.*`、`.srccommit.*` 产物，以 PostgreSQL 记录的 `BaseCommitID` 为准前滚或回滚。`DeleteDisk` 在清理血缘前也会先协助他盘完成挂起合并（`reconcileOtherPendingMergesBeforeDelete`）。
+**崩溃恢复。** `openDiskActor` 位于 `control.go:580`，在打开读写 Actor 前调用 `reconcilePendingMergeLocked`，扫描 `disks/` 中残留的 `.merge.*`、`.old.*` 与 `.srccommit.*` 产物，以 PostgreSQL 记录的 `BaseCommitID` 为准前滚或回滚。`DeleteDisk` 在清理血缘前也会通过 `reconcileOtherPendingMergesBeforeDelete` 协助他盘完成挂起合并。
 
-**`DeleteDisk`（`control.go:1167`）**：先 `store.DeleteDisk` 事务返回需回收的 `commitsToClean`；再摘除并 `CloseDiscard` Actor、删盘目录；最后持 `lineageCommitMu.Lock` 逐个删除 `commits/` 目录。任一清理失败会汇总为 `errors.Join` 返回，并计入 `incCleanupError` 指标。
+**`DeleteDisk`，见 `control.go:1169`。** 先执行 `store.DeleteDisk` 事务返回需回收的 `commitsToClean`，再摘除并 `CloseDiscard` Actor 与删除盘目录，最后持 `lineageCommitMu.Lock` 逐个删除 `commits/` 目录。任一清理失败会汇总为 `errors.Join` 返回，并计入 `incCleanupError` 指标。
 
 ## 4. `db` 抽象层
 
 ### 4.1 `Store` 接缝
 
-`db.Store`（`db/store.go:100`）是控制面唯一的持久化接口，共 9 个方法：`CreateDisk`、`ForkDisk`、`GetDisk`、`ListDisks`、`ListLineageCommits`、`UpdateDiskName`、`MergeDisk`、`DeleteDisk`、`ReserveSegment`。上层只依赖这个接口。
+`db.Store` 接口定义在 `db/store.go:102`，是控制面唯一的持久化抽象，共 9 个方法：`CreateDisk`、`ForkDisk`、`GetDisk`、`ListDisks`、`ListLineageCommits`、`UpdateDiskName`、`MergeDisk`、`DeleteDisk` 与 `ReserveSegment`。上层只依赖这个接口。
 
 | 实现 | 文件 | 用途 |
 | --- | --- | --- |
 | `SQLStore` | `db/store.go` | 生产实现，`sqlc` 生成的 `Queries` 加 `tx.PGXTransactor` 事务封装 |
-| `MemStore` | `db/mem_store.go` | 进程内实现，用于 `control` 与 `server` 单测；`SetFailNextWrite` 注入写失败，`Inspect` 取深拷贝快照 |
+| `MemStore` | `db/mem_store.go` | 进程内实现，用于 `control` 与 `server` 单测，`SetFailNextWrite` 注入写失败，`Inspect` 取深拷贝快照 |
+
+`db` 包在 `db/store.go:25-31` 导出 5 个领域哨兵错误：`ErrNotFound`、`ErrAlreadyExists`、`ErrInvalidArgument`、`ErrCrossLineage` 与 `ErrStaleBaseCommit`。`SQLStore` 的全部 9 个公开方法均只在最外层出口调用一次 `mapPGXErr`，该函数定义在 `db/store.go:206-231`；事务闭包内部直接返回原始错误，使重试层能继续识别 `40001` 串行化冲突与 `40P01` 死锁错误。
+
+`mapPGXErr` 使用 `errors.AsType[*pgconn.PgError]` 吞并底层驱动类型，防止 `pgx.ErrNoRows` 或 `*pgconn.PgError` 泄露至调用方，映射规则如下：
+
+| 底层驱动错误或 SQLSTATE | 领域哨兵错误 | 控制面与 gRPC 映射 |
+| --- | --- | --- |
+| `pgx.ErrNoRows` | `db.ErrNotFound` | `NotFound` 与 `ENOENT` |
+| `23505` 唯一约束冲突 | `db.ErrAlreadyExists` | `AlreadyExists` 与 `EEXIST` |
+| `23503` 外键约束冲突 | `db.ErrNotFound` | `NotFound` 与 `ENOENT` |
+| `23514` 检查约束冲突 | `db.ErrInvalidArgument` | `InvalidArgument` 与 `EINVAL` |
+| `40001` 与 `40P01` | 原样透传供事务重试 | 不吞并原始 `*pgconn.PgError` |
+
+`MemStore` 在 `CreateDisk` 血缘存活冲突、`ForkDisk` 与 `MergeDisk` 自指父提交校验、`ReserveSegment` 写失败注入及全部冲突与缺失路径上与 `SQLStore` 保持对称哨兵契约。
 
 ### 4.2 `sqlc` 与迁移
 
@@ -247,10 +261,10 @@ sequenceDiagram
 
 | 操作 | 锁序 |
 | --- | --- |
-| `ForkDisk`（`store.go:233`） | `GetDisk` 取血缘 → `LockDiskLineage` → `GetDiskForUpdate` → `CreateDiskCommit` → `SetDiskBaseCommit` → `CreateDisk` |
-| `MergeDisk`（`store.go:386`） | `LockDiskLineage` → 两盘按 UUID 字符串升序 `GetDiskForUpdate` → 校验血缘与基线 → 建提交 → `SetDiskBaseCommitAndTouch` |
-| `DeleteDisk`（`store.go:478`） | `disk_lineages` → `disks`，并执行三态血缘提交回收 |
-| `ReserveSegment`（`store.go:556`） | 对 `disk_lineages` 执行单条 `UPDATE ... RETURNING`（`ReserveInodeSegment` / `ReservePackSegment`），`tx.Retry` 包装 |
+| `ForkDisk`，见 `store.go:262` | `GetDisk` 取血缘 → `LockDiskLineage` → `GetDiskForUpdate` → `CreateDiskCommit` → `SetDiskBaseCommit` → `CreateDisk` |
+| `MergeDisk`，见 `store.go:415` | `LockDiskLineage` → 两盘按 UUID 字符串升序 `GetDiskForUpdate` → 校验血缘与基线 → 建提交 → `SetDiskBaseCommitAndTouch` |
+| `DeleteDisk`，见 `store.go:507` | `disk_lineages` → `disks`，并执行三态血缘提交回收 |
+| `ReserveSegment`，见 `store.go:585` | 对 `disk_lineages` 执行 `ReserveInodeSegment` 或 `ReservePackSegment` 单条 `UPDATE ... RETURNING`，由 `tx.Retry` 包装 |
 
 ### 4.4 契约互验：`store_contract_test.go`
 

@@ -147,3 +147,15 @@ func TestToStatusAndToGRPCError_NilAndSentinelError_HandlesCorrectly(t *testing.
 	require.True(t, ok, "ToGRPCError 输出应可被 status.FromError 解析: err=%v", grpcErr)
 	require.Equal(t, codes.FailedPrecondition, st.Code(), "ErrStaleEpoch 状态码不匹配: want=%v got=%v", codes.FailedPrecondition, st.Code())
 }
+
+func TestMapDBErr_GivenDBAlreadyExists_ThenMapsToAlreadyExistsStatus(t *testing.T) {
+	// Given: 来自 db 层的包装唯一键冲突哨兵错误
+	wrapped := fmt.Errorf("wrap: %w", db.ErrAlreadyExists)
+
+	// When: 经控制面 mapDBErr 与 ToStatus 转换
+	mapped := mapDBErr(wrapped)
+
+	// Then: 命中 ErrAlreadyExists 并映射为 codes.AlreadyExists 与 EEXIST
+	require.ErrorIs(t, mapped, ErrAlreadyExists)
+	requireMappedStatus(t, mapped, codes.AlreadyExists, "EEXIST")
+}

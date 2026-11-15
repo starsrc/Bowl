@@ -526,6 +526,8 @@ func mapDBErr(err error) error {
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		return ErrNotFound
+	case errors.Is(err, db.ErrAlreadyExists):
+		return ErrAlreadyExists
 	case errors.Is(err, db.ErrInvalidArgument):
 		return ErrInvalidArgument
 	default:

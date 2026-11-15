@@ -8,7 +8,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/starsrc/bowl/services/storage/internal/db"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
@@ -50,7 +49,7 @@ var mappings = []errorMapping{
 	{sentinel: ErrNoBaseCommit, code: codes.FailedPrecondition, reason: "EINVAL"},
 	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
-	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
 }
 
 // ToStatus 将领域层与存储层返回的 error 映射为携带 google.rpc.ErrorInfo 详情的 gRPC status.Status。

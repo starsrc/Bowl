@@ -3,7 +3,6 @@ package db
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -154,7 +153,10 @@ func (m *MemStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string
 		return DiskRecord{}, err
 	}
 	if _, exists := m.disks[diskID]; exists {
-		return DiskRecord{}, errors.New("db: disk already exists")
+		return DiskRecord{}, fmt.Errorf("%w: disk already exists", ErrAlreadyExists)
+	}
+	if _, linExists := m.lineages[diskID]; linExists {
+		return DiskRecord{}, fmt.Errorf("%w: lineage already exists", ErrAlreadyExists)
 	}
 
 	now := m.nextNowLocked()
@@ -197,11 +199,14 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	if _, linOK := m.lineages[srcRow.LineageID]; !linOK {
 		return DiskRecord{}, ErrNotFound
 	}
+	if srcRow.BaseCommitID != uuid.Nil && arg.CommitID == srcRow.BaseCommitID {
+		return DiskRecord{}, fmt.Errorf("%w: commit id cannot equal source base commit id", ErrInvalidArgument)
+	}
 	if _, childExists := m.disks[arg.ChildDiskID]; childExists {
-		return DiskRecord{}, errors.New("db: child disk already exists")
+		return DiskRecord{}, fmt.Errorf("%w: child disk already exists", ErrAlreadyExists)
 	}
 	if _, commitExists := m.commits[arg.CommitID]; commitExists {
-		return DiskRecord{}, errors.New("db: commit already exists")
+		return DiskRecord{}, fmt.Errorf("%w: commit already exists", ErrAlreadyExists)
 	}
 
 	now := m.nextNowLocked()
@@ -382,15 +387,15 @@ func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	}
 
 	if _, linOK := m.lineages[input.LineageID]; !linOK {
-		return DiskRecord{}, ErrDiskNotFound
+		return DiskRecord{}, ErrNotFound
 	}
 	srcRow, srcOK := m.disks[input.SourceDiskID]
 	if !srcOK {
-		return DiskRecord{}, ErrDiskNotFound
+		return DiskRecord{}, ErrNotFound
 	}
 	tgtRow, tgtOK := m.disks[input.TargetDiskID]
 	if !tgtOK {
-		return DiskRecord{}, ErrDiskNotFound
+		return DiskRecord{}, ErrNotFound
 	}
 	if srcRow.LineageID != input.LineageID || tgtRow.LineageID != input.LineageID {
 		return DiskRecord{}, ErrCrossLineage
@@ -401,11 +406,11 @@ func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	}
 	if !input.SkipSourceCommit {
 		if _, exists := m.commits[input.NewSourceCommitID]; exists {
-			return DiskRecord{}, errors.New("db: commit already exists")
+			return DiskRecord{}, fmt.Errorf("%w: commit already exists", ErrAlreadyExists)
 		}
 	}
 	if _, exists := m.commits[input.NewMergeCommitID]; exists {
-		return DiskRecord{}, errors.New("db: commit already exists")
+		return DiskRecord{}, fmt.Errorf("%w: commit already exists", ErrAlreadyExists)
 	}
 
 	srcFinalCommitID := input.ExpectedSourceBaseCommitID
@@ -514,6 +519,9 @@ func (m *MemStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineage
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return SegmentRange{}, err
+	}
 	lin, ok := m.lineages[lineageID]
 	if !ok {
 		return SegmentRange{}, ErrNotFound

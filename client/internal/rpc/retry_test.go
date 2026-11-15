@@ -17,6 +17,7 @@ import (
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 func newTestErrorInfo(t *testing.T, domain, reason string) *connect.Error {
@@ -220,7 +221,7 @@ func TestRetry_GivenBusinessErrorInfo_WhenUnavailableCodeSet_NeverRetries(t *tes
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
 			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
-				return nil, newTestErrorInfo(t, "bowl.storage", "ENOENT")
+				return nil, newTestErrorInfo(t, rpcerr.Domain, rpcerr.ReasonNotFound)
 			},
 		},
 	}
@@ -240,13 +241,14 @@ func TestRetry_GivenBusinessErrorInfo_WhenUnavailableCodeSet_NeverRetries(t *tes
 	require.Empty(t, clk.Sleeps())
 }
 
-func TestRetry_GivenEmptyReasonErrorInfo_WhenUnavailable_FallsBackToRetry(t *testing.T) {
+func requireUnavailableFallbackRetries(t *testing.T, domain, reason string) {
+	t.Helper()
 	// Given
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
 			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
-				return nil, newTestErrorInfo(t, "bowl.storage", "")
+				return nil, newTestErrorInfo(t, domain, reason)
 			},
 			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
 				return connect.NewResponse(&storagev1.ReadResponse{Data: []byte("ok")}), nil
@@ -271,6 +273,14 @@ func TestRetry_GivenEmptyReasonErrorInfo_WhenUnavailable_FallsBackToRetry(t *tes
 	require.Equal(t, []byte("ok"), payload.Data)
 	payload.Release()
 	require.Equal(t, 2, handler.calls)
+}
+
+func TestRetry_GivenEmptyReasonErrorInfo_WhenUnavailable_FallsBackToRetry(t *testing.T) {
+	requireUnavailableFallbackRetries(t, rpcerr.Domain, "")
+}
+
+func TestRetry_GivenForeignDomainErrorInfo_WhenUnavailable_FallsBackToRetry(t *testing.T) {
+	requireUnavailableFallbackRetries(t, "custom.domain", rpcerr.ReasonNotFound)
 }
 
 func TestRetry_GivenTerminalConnectCode_WhenIdempotentRead_NeverRetries(t *testing.T) {

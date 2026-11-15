@@ -15,6 +15,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
+
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 func requireCLIError2(t *testing.T, wantSubstr string, args ...string) {
@@ -401,7 +403,10 @@ func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testin
 	require.Contains(t, errOut, "无效的请求参数")
 
 	ebusyErr := connect.NewError(connect.CodeUnavailable, errors.New("busy"))
-	detail, detailErr := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
+	detail, detailErr := connect.NewErrorDetail(&errdetails.ErrorInfo{
+		Domain: rpcerr.Domain,
+		Reason: rpcerr.ReasonBusy,
+	})
 	require.NoError(t, detailErr)
 	ebusyErr.AddDetail(detail)
 	storage.forcedErr["DeleteDisk"] = ebusyErr

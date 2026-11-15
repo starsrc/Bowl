@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 	"github.com/starsrc/bowl/pkg/validator"
 )
 
@@ -57,7 +58,7 @@ func assertValidationRejected(t *testing.T, msg any) {
 	t.Helper()
 	called, err := runValidationIntercept(t, msg)
 	require.False(t, called, "非法请求必须在校验拦截器短路返回")
-	requireConnectErrorCodeAndReason(t, err, connect.CodeInvalidArgument, validator.ReasonInvalidArgument)
+	requireConnectErrorCodeAndReason(t, err, connect.CodeInvalidArgument, rpcerr.ReasonInvalidArgument)
 }
 
 func assertValidationAccepted(t *testing.T, msg any) {

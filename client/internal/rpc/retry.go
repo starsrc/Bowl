@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/starsrc/pkg/serverx"
 
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 const (
@@ -97,11 +97,11 @@ func IsIdempotentProcedure(procedure string) bool {
 	return ok
 }
 
-// hasErrorInfo 检查错误是否解包出非空业务 ErrorInfo。
-// 任何携带业务 ErrorInfo 的错误表明服务端已明确处理并拒绝，必须绝不重试。
+// hasErrorInfo 检查错误是否解包出 Domain == rpcerr.Domain 且 Reason 非空的业务 ErrorInfo。
+// 任何携带服务端业务 ErrorInfo 的错误表明服务端已明确处理并拒绝，必须绝不重试。
 func hasErrorInfo(err error) bool {
-	info := serverx.ExtractErrorInfo(err)
-	return info != nil && info.Reason != ""
+	_, ok := rpcerr.ExtractReason(err)
+	return ok
 }
 
 // isNeverRetryCode 检查 Connect 错误状态码是否属于绝不重试的状态码。

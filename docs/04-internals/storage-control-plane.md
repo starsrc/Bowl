@@ -56,7 +56,7 @@ flowchart TD
 | 3 | `serverx.NewErrorReasonInterceptor` | 外部包 `github.com/starsrc/pkg/serverx` | 提取 `ErrorInfo.Reason` 写入 Span |
 | 4 | `slogx.NewConnectInterceptor` | 外部包 `github.com/starsrc/pkg/observability/slogx`，由 `serverx` 装配 | 唯一访问日志；`classifyStorageLogLevel` 把高频成功路径降到 Debug，`Lookup` / `GetXattr` 的 `NotFound` 也降级 |
 | 5 | `NewStorageObservabilityInterceptor` | `server/interceptor.go:218` | `pprof.Labels("rpc", procedure)`、`bowl.*` Span 属性、慢请求日志 |
-| 6 | `NewValidationInterceptor` | `server/validator.go:73` | `protovalidate` 请求校验，位于最内层 |
+| 6 | `NewValidationInterceptor` | `server/validator.go:74` | `protovalidate` 请求校验，位于最内层 |
 
 序号 1 到 6 由 `BuildInterceptors`（`interceptor.go:326`）委托外部包 `github.com/starsrc/pkg/serverx` 的 `NewInterceptorsWithValidator` 构建；它们不在本仓库根目录 `pkg/`（根 `pkg/` 仅有 `rpccodec` 与 `validator`）。
 
@@ -107,13 +107,13 @@ flowchart TD
 
 ### 2.4 `protovalidate` 校验拦截器
 
-`NewValidationInterceptor`（`server/validator.go:73`）的执行逻辑：
+`NewValidationInterceptor` 位于 `server/validator.go:74`，执行逻辑如下：
 
-1. 先判断 `isValidFastPathDataReq`（`validator.go:39`）。`WriteRequest` 与 `ReadRequest` 的字段边界（`ino > 0`、偏移不溢出、载荷不超 4 MiB、`epoch > 0`、`disk_id` 为非 Nil UUID）用手写判断，命中则跳过 CEL，避免热路径反射开销。
-2. 未命中快路径时调用 `protovalidate.Validator.Validate(msg)`。校验器由 `validator.NewStorageValidator()`（`pkg/validator/validator.go:181`）创建，用 `protovalidate.WithMessages(storageMessages...)` 在启动期预编译全部请求、响应与嵌套消息的 CEL 规则。
-3. 校验失败时 `validator.ToStatus(err)` 生成 `codes.InvalidArgument` 状态，并附带 `google.rpc.ErrorInfo{Reason, Domain: "bowl.storage"}`，再经 `statusToConnectError` 返回，请求不会进入业务处理器。
+1. 先判断 `isValidFastPathDataReq`，该函数位于 `validator.go:40`。`WriteRequest` 与 `ReadRequest` 的字段边界通过手写分支校验，覆盖 `ino > 0`、偏移不溢出、载荷不超 4 MiB、`epoch > 0` 与非 Nil UUID 格式的 `disk_id`，命中后跳过 CEL 以消除热路径反射开销。
+2. 未命中快路径时调用 `protovalidate.Validator.Validate`。校验器由位于 `pkg/validator/validator.go:171` 的 `validator.NewStorageValidator` 创建，在启动期通过 `protovalidate.WithMessages` 预编译全部请求、响应与嵌套消息的 CEL 规则。
+3. 校验失败时 `validator.ToStatus` 生成 `codes.InvalidArgument` 状态，并附带 `google.rpc.ErrorInfo`，其 `Domain` 为 `rpcerr.Domain`，随后经 `serverx.StatusToConnectError` 返回，请求不会进入业务处理器。
 
-`Reason` 由 `translateValidation` 按优先级挑出最强违规项，取值范围是 `EINVAL`、`ENAMETOOLONG`、`ERANGE`、`E2BIG`。`classifyViolationInternal` 按字段全名（如 `storage.v1.MountDiskRequest.disk_id`）分级。
+`Reason` 由 `translateValidation` 按优先级挑出最强违规项，取值来自 `pkg/rpcerr`，包括 `EINVAL`、`ENAMETOOLONG` 与 `ERANGE`。`classifyViolationInternal` 按字段全名分级，例如 `storage.v1.MountDiskRequest.disk_id`。
 
 ::: warning 新增 RPC 必改清单
 新增消息后，必须把消息类型加入 `pkg/validator/validator.go` 的 `storageMessages`，否则规则不会预编译。需要非 `EINVAL` 的 errno 时，还要在 `classifyViolationInternal` 追加字段映射。完整流程见 [扩展指南](/04-internals/extending-bowl)。
@@ -121,20 +121,22 @@ flowchart TD
 
 ### 2.5 gRPC 错误码映射
 
-处理器统一用 `toConnectError(err)`（`server/errors.go:31`）返回错误，路径如下：
+处理器统一用位于 `server/errors.go:18` 的 `toConnectError` 返回错误，路径如下：
 
 ```mermaid
 flowchart LR
     E["领域错误 / store 哨兵错误"] --> T["toConnectError"]
     T -->|"context.Canceled"| C1["connect.CodeCanceled"]
     T -->|"context.DeadlineExceeded"| C2["connect.CodeDeadlineExceeded"]
-    T -->|"MergeConflictError"| C3["CodeAborted + ErrorInfo ECONFLICT + MergeConflictReport"]
-    T -->|"其余"| S["control.ToStatus"]
-    S --> M["mappings 表: 哨兵错误 -> code + errno reason"]
-    M --> X["serverx.StatusToConnectError"]
+    T -->|"其余错误"| S["control.ToStatus"]
+    S -->|"MergeConflictError"| MC["CodeAborted + ErrorInfo ECONFLICT"]
+    S -->|"mappings 表命中"| M["对应 gRPC code + errno reason"]
+    MC --> X["serverx.StatusToConnectError"]
+    M --> X
+    X -->|"附加 MergeConflictReport"| R["最终 *connect.Error"]
 ```
 
-`control.ToStatus`（`control/status.go:62`）顺序执行：`MergeConflictError` → `mappings` 表（`errors.Is` 逐项匹配）→ 已有 gRPC status 透传 → `context` 错误 → `codes.Unknown`。`mappings`（`status.go:25-54`）的代表性条目：
+`control.ToStatus` 位于 `control/status.go:60`，按顺序匹配 `MergeConflictError`、`mappings` 表、已有 gRPC status 透传与 `context` 错误，未命中时返回 `codes.Unknown`。`mappings` 位于 `status.go:23-52`，代表性条目如下：
 
 | 哨兵错误 | gRPC code | errno reason |
 | --- | --- | --- |
@@ -142,7 +144,8 @@ flowchart LR
 | `store.ErrExist` | `AlreadyExists` | `EEXIST` |
 | `store.ErrStaleEpoch` | `FailedPrecondition` | `EBUSY` |
 | `store.ErrNoSpace`、`store.ErrInodeExhausted` | `ResourceExhausted` | `ENOSPC` |
-| `store.ErrReadOnly`、`store.ErrPerm` | `PermissionDenied` | `EPERM` |
+| `store.ErrPerm` | `PermissionDenied` | `EPERM` |
+| `store.ErrReadOnly` | `FailedPrecondition` | `EROFS` |
 | `store.ErrNotEmpty` | `FailedPrecondition` | `ENOTEMPTY` |
 | `control.ErrCrossLineage` | `FailedPrecondition` | `EXDEV` |
 | `control.ErrConcurrentMerge`、`control.ErrDiskMounted`、`db.ErrStaleBaseCommit` | `Aborted` | `EBUSY` |

@@ -24,6 +24,7 @@ import (
 	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 var _ storagev1connect.StorageServiceClient = (*fakeStorage)(nil)
@@ -224,7 +225,7 @@ func errnoError(code connect.Code, reason string) error {
 	ce := connect.NewError(code, errors.New(reason))
 	if detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
 		Reason: reason,
-		Domain: "bowl.storage",
+		Domain: rpcerr.Domain,
 	}); err == nil {
 		ce.AddDetail(detail)
 	}

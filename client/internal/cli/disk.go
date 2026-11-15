@@ -13,12 +13,12 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
-	"github.com/starsrc/pkg/serverx"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 // MaxDiskNameBytes 定义虚拟磁盘名称的最大字节数上限。
@@ -235,11 +235,13 @@ func mapDiskRPCError(err error, policy diskRPCErrorPolicy) *diskCLIError {
 			}
 		}
 	}
-	if policy.checkEBUSYReason && serverx.ExtractErrorInfo(err).GetReason() == "EBUSY" {
-		return &diskCLIError{
-			exitCode: 1,
-			msg:      fmt.Sprintf("磁盘 %s 当前仍处于挂载状态（存在活跃客户端会话），请先卸载后再删除", policy.diskID),
-			cause:    err,
+	if policy.checkEBUSYReason {
+		if reason, ok := rpcerr.ExtractReason(err); ok && reason == rpcerr.ReasonBusy {
+			return &diskCLIError{
+				exitCode: 1,
+				msg:      fmt.Sprintf("磁盘 %s 当前仍处于挂载状态（存在活跃客户端会话），请先卸载后再删除", policy.diskID),
+				cause:    err,
+			}
 		}
 	}
 	return &diskCLIError{

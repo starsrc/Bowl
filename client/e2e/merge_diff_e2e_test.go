@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/starsrc/pkg/serverx"
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 func TestClientE2E_ForkDiffPatchMergeAndFUSEMountVerification(t *testing.T) {
@@ -126,9 +126,9 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		}))
 		require.Error(t, rpcErr)
 		require.Equal(t, connect.CodeAborted, connect.CodeOf(rpcErr))
-		info := serverx.ExtractErrorInfo(rpcErr)
-		require.NotNil(t, info)
-		require.Equal(t, "EBUSY", info.GetReason())
+		reason, ok := rpcerr.ExtractReason(rpcErr)
+		require.True(t, ok)
+		require.Equal(t, rpcerr.ReasonBusy, reason)
 
 		// 本机 `bowl disk merge --dry-run` 在父盘 --ro 挂载态下必须正常成功
 		dryOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--dry-run")

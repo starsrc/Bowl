@@ -8,12 +8,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/starsrc/bowl/pkg/rpcerr"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
-
-// ErrorDomain 定义全项目统一的 ErrorInfo 错误领域标识符。
-const ErrorDomain = "bowl.storage"
 
 // errorMapping 记录领域哨兵错误与 gRPC 状态码及 POSIX errno reason 的契约映射。
 type errorMapping struct {
@@ -23,34 +21,34 @@ type errorMapping struct {
 }
 
 var mappings = []errorMapping{
-	{sentinel: store.ErrQuotaShrinkBelowUsed, code: codes.FailedPrecondition, reason: "EINVAL"},
-	{sentinel: store.ErrStaleEpoch, code: codes.FailedPrecondition, reason: "EBUSY"},
-	{sentinel: store.ErrInvalid, code: codes.InvalidArgument, reason: "EINVAL"},
-	{sentinel: store.ErrInvalidKey, code: codes.InvalidArgument, reason: "EINVAL"},
-	{sentinel: store.ErrInvalidValue, code: codes.InvalidArgument, reason: "EINVAL"},
-	{sentinel: store.ErrNameTooLong, code: codes.InvalidArgument, reason: "ENAMETOOLONG"},
-	{sentinel: store.ErrRange, code: codes.InvalidArgument, reason: "ERANGE"},
-	{sentinel: store.ErrNotFound, code: codes.NotFound, reason: "ENOENT"},
-	{sentinel: store.ErrNoData, code: codes.NotFound, reason: "ENODATA"},
-	{sentinel: store.ErrExist, code: codes.AlreadyExists, reason: "EEXIST"},
-	{sentinel: store.ErrPerm, code: codes.PermissionDenied, reason: "EPERM"},
-	{sentinel: store.ErrReadOnly, code: codes.PermissionDenied, reason: "EPERM"},
-	{sentinel: store.ErrNotDir, code: codes.FailedPrecondition, reason: "ENOTDIR"},
-	{sentinel: store.ErrIsDir, code: codes.FailedPrecondition, reason: "EISDIR"},
-	{sentinel: store.ErrNotEmpty, code: codes.FailedPrecondition, reason: "ENOTEMPTY"},
-	{sentinel: store.ErrNoSpace, code: codes.ResourceExhausted, reason: "ENOSPC"},
-	{sentinel: store.ErrInodeExhausted, code: codes.ResourceExhausted, reason: "ENOSPC"},
-	{sentinel: store.ErrNotSupported, code: codes.Unimplemented, reason: "EOPNOTSUPP"},
-	{sentinel: store.ErrTooManyLinks, code: codes.ResourceExhausted, reason: "EMLINK"},
-	{sentinel: store.ErrFileTooLarge, code: codes.InvalidArgument, reason: "EFBIG"},
-	{sentinel: store.ErrIO, code: codes.Internal, reason: "EIO"},
-	{sentinel: store.ErrClosed, code: codes.Internal, reason: "EIO"},
-	{sentinel: ErrCrossLineage, code: codes.FailedPrecondition, reason: "EXDEV"},
-	{sentinel: ErrAmbiguousLCA, code: codes.FailedPrecondition, reason: "EINVAL"},
-	{sentinel: ErrNoBaseCommit, code: codes.FailedPrecondition, reason: "EINVAL"},
-	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: "EBUSY"},
-	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
-	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: store.ErrQuotaShrinkBelowUsed, code: codes.FailedPrecondition, reason: rpcerr.ReasonInvalidArgument},
+	{sentinel: store.ErrStaleEpoch, code: codes.FailedPrecondition, reason: rpcerr.ReasonBusy},
+	{sentinel: store.ErrInvalid, code: codes.InvalidArgument, reason: rpcerr.ReasonInvalidArgument},
+	{sentinel: store.ErrInvalidKey, code: codes.InvalidArgument, reason: rpcerr.ReasonInvalidArgument},
+	{sentinel: store.ErrInvalidValue, code: codes.InvalidArgument, reason: rpcerr.ReasonInvalidArgument},
+	{sentinel: store.ErrNameTooLong, code: codes.InvalidArgument, reason: rpcerr.ReasonNameTooLong},
+	{sentinel: store.ErrRange, code: codes.InvalidArgument, reason: rpcerr.ReasonRange},
+	{sentinel: store.ErrNotFound, code: codes.NotFound, reason: rpcerr.ReasonNotFound},
+	{sentinel: store.ErrNoData, code: codes.NotFound, reason: rpcerr.ReasonNoData},
+	{sentinel: store.ErrExist, code: codes.AlreadyExists, reason: rpcerr.ReasonAlreadyExists},
+	{sentinel: store.ErrPerm, code: codes.PermissionDenied, reason: rpcerr.ReasonPermissionDenied},
+	{sentinel: store.ErrReadOnly, code: codes.FailedPrecondition, reason: rpcerr.ReasonReadOnly},
+	{sentinel: store.ErrNotDir, code: codes.FailedPrecondition, reason: rpcerr.ReasonNotDir},
+	{sentinel: store.ErrIsDir, code: codes.FailedPrecondition, reason: rpcerr.ReasonIsDir},
+	{sentinel: store.ErrNotEmpty, code: codes.FailedPrecondition, reason: rpcerr.ReasonNotEmpty},
+	{sentinel: store.ErrNoSpace, code: codes.ResourceExhausted, reason: rpcerr.ReasonNoSpace},
+	{sentinel: store.ErrInodeExhausted, code: codes.ResourceExhausted, reason: rpcerr.ReasonNoSpace},
+	{sentinel: store.ErrNotSupported, code: codes.Unimplemented, reason: rpcerr.ReasonNotSupported},
+	{sentinel: store.ErrTooManyLinks, code: codes.ResourceExhausted, reason: rpcerr.ReasonTooManyLinks},
+	{sentinel: store.ErrFileTooLarge, code: codes.InvalidArgument, reason: rpcerr.ReasonFileTooLarge},
+	{sentinel: store.ErrIO, code: codes.Internal, reason: rpcerr.ReasonIO},
+	{sentinel: store.ErrClosed, code: codes.Internal, reason: rpcerr.ReasonIO},
+	{sentinel: ErrCrossLineage, code: codes.FailedPrecondition, reason: rpcerr.ReasonCrossDevice},
+	{sentinel: ErrAmbiguousLCA, code: codes.FailedPrecondition, reason: rpcerr.ReasonInvalidArgument},
+	{sentinel: ErrNoBaseCommit, code: codes.FailedPrecondition, reason: rpcerr.ReasonInvalidArgument},
+	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: rpcerr.ReasonBusy},
+	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: rpcerr.ReasonBusy},
+	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: rpcerr.ReasonBusy},
 }
 
 // ToStatus 将领域层与存储层返回的 error 映射为携带 google.rpc.ErrorInfo 详情的 gRPC status.Status。
@@ -67,8 +65,8 @@ func ToStatus(err error) *status.Status {
 	if conflictErr, ok := errors.AsType[*MergeConflictError](err); ok {
 		st := status.New(codes.Aborted, conflictErr.Error())
 		stWithDetails, detailErr := st.WithDetails(&errdetails.ErrorInfo{
-			Reason: "ECONFLICT",
-			Domain: ErrorDomain,
+			Reason: rpcerr.ReasonConflict,
+			Domain: rpcerr.Domain,
 		})
 		if detailErr == nil {
 			return stWithDetails
@@ -81,7 +79,7 @@ func ToStatus(err error) *status.Status {
 			st := status.New(m.code, err.Error())
 			stWithDetails, detailErr := st.WithDetails(&errdetails.ErrorInfo{
 				Reason: m.reason,
-				Domain: ErrorDomain,
+				Domain: rpcerr.Domain,
 			})
 			if detailErr == nil {
 				return stWithDetails

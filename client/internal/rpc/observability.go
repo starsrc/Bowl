@@ -14,9 +14,10 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/starsrc/pkg/serverx"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 const (
@@ -28,12 +29,6 @@ const (
 
 	// defaultLogRateLimitInterval 为异常告警结构化日志的默认限频窗口（1 次/秒）。
 	defaultLogRateLimitInterval = time.Second
-
-	// storageErrorDomain 为服务端业务 ErrorInfo 的统一领域标识。
-	storageErrorDomain = "bowl.storage"
-
-	// staleEpochReason 为写端世代号过期围栏拦截对应的 POSIX errno 原因码。
-	staleEpochReason = "EBUSY"
 )
 
 type requestIDContextKey struct{}
@@ -245,8 +240,8 @@ func (l *logRateLimiter) allow(now time.Time) bool {
 }
 
 func isStaleEpochError(err error) bool {
-	info := serverx.ExtractErrorInfo(err)
-	return info != nil && info.GetDomain() == storageErrorDomain && info.GetReason() == staleEpochReason
+	reason, ok := rpcerr.ExtractReason(err)
+	return ok && reason == rpcerr.ReasonBusy
 }
 
 func extractRequestEpoch(req connect.AnyRequest) uint64 {
@@ -287,7 +282,7 @@ func extractTraceID(ctx context.Context, req connect.AnyRequest, err error) stri
 
 // newRequestObservabilityInterceptor 构建第 2 层洋葱拦截器（位于 Retry 内层、otelconnect 外层）：
 // 1. 确保 100% 出站请求通过栈缓冲写入 X-Request-Id；
-// 2. 识别服务端旧 Epoch 围栏错误（ErrorInfo{Reason: "EBUSY", Domain: "bowl.storage"}），递增 stale_epoch_total 并限频输出 writer_epoch_fenced；
+// 2. 识别服务端旧 Epoch 围栏错误，即 Domain 为 rpcerr.Domain 且 Reason 为 rpcerr.ReasonBusy，递增 stale_epoch_total 并限频输出 writer_epoch_fenced；
 // 3. 单次尝试耗时超过 slowThreshold（默认 1s）时输出 slow_rpc 结构化告警。
 func newRequestObservabilityInterceptor(
 	logger *slog.Logger,

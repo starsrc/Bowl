@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 func setupTestOTel(t *testing.T) (*prometheus.Registry, *sdkmetric.ManualReader, *tracetest.InMemoryExporter, *sdktrace.TracerProvider) {
@@ -142,8 +143,8 @@ func TestObservability_GivenStaleEpochError_ExportsCounterErrorReasonAndStructur
 			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
 				cErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("stale writer epoch"))
 				detail, dErr := connect.NewErrorDetail(&errdetails.ErrorInfo{
-					Domain: "bowl.storage",
-					Reason: "EBUSY",
+					Domain: rpcerr.Domain,
+					Reason: rpcerr.ReasonBusy,
 				})
 				require.NoError(t, dErr)
 				cErr.AddDetail(detail)
@@ -188,7 +189,7 @@ func TestObservability_GivenStaleEpochError_ExportsCounterErrorReasonAndStructur
 	require.Equal(t, rootSpan.SpanContext().TraceID().String(), logEntry["trace_id"])
 
 	clientSpan := requireSpanByName(t, spanExp.GetSpans(), "storage.v1.StorageService/Write")
-	requireSpanAttr(t, clientSpan, "rpc.error_reason", "EBUSY")
+	requireSpanAttr(t, clientSpan, "rpc.error_reason", rpcerr.ReasonBusy)
 }
 
 func TestObservability_GivenSlowAttemptAndExhaustedRetry_EmitsSlowAndExhaustedLogsWithoutRealSleep(t *testing.T) {

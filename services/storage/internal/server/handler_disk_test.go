@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/starsrc/pkg/serverx"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -18,6 +19,7 @@ import (
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/control"
 	"github.com/starsrc/bowl/services/storage/internal/db"
@@ -62,9 +64,9 @@ func requireConnectErrorCodeAndReason(t *testing.T, err error, wantCode connect.
 	require.Error(t, err, "预期返回 Connect 错误，但得到 nil")
 	gotCode := connect.CodeOf(err)
 	require.Equal(t, wantCode, gotCode, "Connect 状态码不匹配: want=%v got=%v err=%v", wantCode, gotCode, err)
-	info := ExtractErrorInfo(err)
+	info := serverx.ExtractErrorInfo(err)
 	require.NotNil(t, info, "错误应携带 google.rpc.ErrorInfo 详情: err=%v", err)
-	require.Equal(t, control.ErrorDomain, info.GetDomain(), "ErrorInfo 领域不匹配: want=%q got=%q", control.ErrorDomain, info.GetDomain())
+	require.Equal(t, rpcerr.Domain, info.GetDomain(), "ErrorInfo 领域不匹配: want=%q got=%q", rpcerr.Domain, info.GetDomain())
 	require.Equal(t, wantReason, info.GetReason(), "ErrorInfo reason 不匹配: want=%q got=%q", wantReason, info.GetReason())
 }
 
@@ -434,29 +436,30 @@ func TestServerErrors_ToConnectError_MapsSentinelsContextAndGRPCStatus(t *testin
 	// Given: 各类型错误输入
 	stWithInfo, err := status.New(codes.PermissionDenied, "perm denied").WithDetails(&errdetails.ErrorInfo{
 		Reason: "EPERM",
-		Domain: control.ErrorDomain,
+		Domain: rpcerr.Domain,
 	})
 	require.NoError(t, err, "构造测试 status 失败")
 
 	// When / Then 1: nil 返回 nil
-	require.NoError(t, ToConnectError(nil), "nil 错误转换必须返回 nil")
-	require.NoError(t, StatusToConnectError(nil), "nil status 转换必须返回 nil")
+	require.NoError(t, toConnectError(nil), "nil 错误转换必须返回 nil")
+	require.NoError(t, serverx.StatusToConnectError(nil), "nil status 转换必须返回 nil")
 
 	// When / Then 2: 上下文取消与超时保留原始错误链
-	cancelErr := ToConnectError(fmt.Errorf("client aborted: %w", context.Canceled))
+	cancelErr := toConnectError(fmt.Errorf("client aborted: %w", context.Canceled))
 	require.Equal(t, connect.CodeCanceled, connect.CodeOf(cancelErr))
 	require.ErrorIs(t, cancelErr, context.Canceled)
 
-	deadlineErr := ToConnectError(fmt.Errorf("rpc timed out: %w", context.DeadlineExceeded))
+	deadlineErr := toConnectError(fmt.Errorf("rpc timed out: %w", context.DeadlineExceeded))
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(deadlineErr))
 	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
 
 	// When / Then 3: 领域哨兵与 gRPC Status 携带 ErrorInfo 无损透传
-	requireConnectErrorCodeAndReason(t, ToConnectError(store.ErrStaleEpoch), connect.CodeFailedPrecondition, "EBUSY")
-	requireConnectErrorCodeAndReason(t, StatusToConnectError(stWithInfo), connect.CodePermissionDenied, "EPERM")
+	requireConnectErrorCodeAndReason(t, toConnectError(store.ErrStaleEpoch), connect.CodeFailedPrecondition, "EBUSY")
+	requireConnectErrorCodeAndReason(t, toConnectError(store.ErrReadOnly), connect.CodeFailedPrecondition, rpcerr.ReasonReadOnly)
+	requireConnectErrorCodeAndReason(t, serverx.StatusToConnectError(stWithInfo), connect.CodePermissionDenied, "EPERM")
 
 	// When / Then 4: 未知错误映射为 CodeUnknown 且无 ErrorInfo
-	unknownErr := ToConnectError(errors.New("opaque failure"))
+	unknownErr := toConnectError(errors.New("opaque failure"))
 	require.Equal(t, connect.CodeUnknown, connect.CodeOf(unknownErr))
-	require.Nil(t, ExtractErrorInfo(unknownErr))
+	require.Nil(t, serverx.ExtractErrorInfo(unknownErr))
 }

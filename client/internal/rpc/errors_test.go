@@ -11,12 +11,14 @@ import (
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
+
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 func requireReasonMapping(t *testing.T, reason string, expected syscall.Errno) {
 	t.Helper()
 	connErr := connect.NewError(connect.CodeInternal, nil)
-	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: reason, Domain: "bowl.storage"})
+	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: reason, Domain: rpcerr.Domain})
 	require.NoError(t, err)
 	connErr.AddDetail(detail)
 	require.Equal(t, expected, MapError(connErr), "Reason %s 必须映射为 %v", reason, expected)
@@ -27,38 +29,40 @@ func requireCodeMapping(t *testing.T, code connect.Code, expected syscall.Errno)
 	require.Equal(t, expected, MapError(connect.NewError(code, nil)), "状态码 %s 必须映射为 %v", code, expected)
 }
 
-func TestMapError_GivenAll25ErrorInfos_MapsToExpectedErrno(t *testing.T) {
-	requireReasonMapping(t, "EINVAL", syscall.EINVAL)
-	requireReasonMapping(t, "ENAMETOOLONG", syscall.ENAMETOOLONG)
-	requireReasonMapping(t, "ERANGE", syscall.ERANGE)
-	requireReasonMapping(t, "E2BIG", syscall.E2BIG)
-	requireReasonMapping(t, "ENOENT", syscall.ENOENT)
-	requireReasonMapping(t, "ENODATA", syscall.ENODATA)
-	requireReasonMapping(t, "EEXIST", syscall.EEXIST)
-	requireReasonMapping(t, "EPERM", syscall.EPERM)
-	requireReasonMapping(t, "EACCES", syscall.EACCES)
-	requireReasonMapping(t, "ENOTDIR", syscall.ENOTDIR)
-	requireReasonMapping(t, "EISDIR", syscall.EISDIR)
-	requireReasonMapping(t, "ENOTEMPTY", syscall.ENOTEMPTY)
-	requireReasonMapping(t, "EBADF", syscall.EBADF)
-	requireReasonMapping(t, "ENOSPC", syscall.ENOSPC)
-	requireReasonMapping(t, "EAGAIN", syscall.EAGAIN)
-	requireReasonMapping(t, "EDEADLK", syscall.EDEADLK)
-	requireReasonMapping(t, "EINTR", syscall.EINTR)
-	requireReasonMapping(t, "EOPNOTSUPP", syscall.EOPNOTSUPP)
-	requireReasonMapping(t, "EMLINK", syscall.EMLINK)
-	requireReasonMapping(t, "EFBIG", syscall.EFBIG)
-	requireReasonMapping(t, "ESPIPE", syscall.ESPIPE)
-	requireReasonMapping(t, "EXDEV", syscall.EXDEV)
-	requireReasonMapping(t, "EIO", syscall.EIO)
-	requireReasonMapping(t, "EROFS", syscall.EROFS)
-	requireReasonMapping(t, "EBUSY", syscall.EBUSY)
+func TestMapError_GivenAll18POSIXErrorInfos_MapsToExpectedErrno(t *testing.T) {
+	requireReasonMapping(t, rpcerr.ReasonInvalidArgument, syscall.EINVAL)
+	requireReasonMapping(t, rpcerr.ReasonNameTooLong, syscall.ENAMETOOLONG)
+	requireReasonMapping(t, rpcerr.ReasonRange, syscall.ERANGE)
+	requireReasonMapping(t, rpcerr.ReasonNotFound, syscall.ENOENT)
+	requireReasonMapping(t, rpcerr.ReasonNoData, syscall.ENODATA)
+	requireReasonMapping(t, rpcerr.ReasonAlreadyExists, syscall.EEXIST)
+	requireReasonMapping(t, rpcerr.ReasonPermissionDenied, syscall.EPERM)
+	requireReasonMapping(t, rpcerr.ReasonReadOnly, syscall.EROFS)
+	requireReasonMapping(t, rpcerr.ReasonNotDir, syscall.ENOTDIR)
+	requireReasonMapping(t, rpcerr.ReasonIsDir, syscall.EISDIR)
+	requireReasonMapping(t, rpcerr.ReasonNotEmpty, syscall.ENOTEMPTY)
+	requireReasonMapping(t, rpcerr.ReasonNoSpace, syscall.ENOSPC)
+	requireReasonMapping(t, rpcerr.ReasonNotSupported, syscall.EOPNOTSUPP)
+	requireReasonMapping(t, rpcerr.ReasonTooManyLinks, syscall.EMLINK)
+	requireReasonMapping(t, rpcerr.ReasonFileTooLarge, syscall.EFBIG)
+	requireReasonMapping(t, rpcerr.ReasonCrossDevice, syscall.EXDEV)
+	requireReasonMapping(t, rpcerr.ReasonIO, syscall.EIO)
+	requireReasonMapping(t, rpcerr.ReasonBusy, syscall.EBUSY)
+
+	conflictErr := connect.NewError(connect.CodeAborted, nil)
+	conflictDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+		Domain: rpcerr.Domain,
+		Reason: rpcerr.ReasonConflict,
+	})
+	require.NoError(t, err)
+	conflictErr.AddDetail(conflictDetail)
+	require.Equal(t, syscall.EIO, MapError(conflictErr))
 }
 
 func TestMapError_GivenEmptyReason_FallsBackToConnectCode(t *testing.T) {
 	// Given
 	connErr := connect.NewError(connect.CodeNotFound, nil)
-	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "", Domain: "bowl.storage"})
+	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "", Domain: rpcerr.Domain})
 	require.NoError(t, err)
 	connErr.AddDetail(detail)
 
@@ -66,15 +70,20 @@ func TestMapError_GivenEmptyReason_FallsBackToConnectCode(t *testing.T) {
 	require.Equal(t, syscall.ENOENT, MapError(connErr))
 }
 
-func TestMapError_GivenCustomDomainWithValidReason_MapsReason(t *testing.T) {
-	// Given
-	connErr := connect.NewError(connect.CodeInvalidArgument, nil)
-	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EEXIST", Domain: "custom.domain"})
-	require.NoError(t, err)
-	connErr.AddDetail(detail)
+func TestMapError_GivenForeignOrEmptyDomain_IgnoresReasonAndFallsBackToConnectCode(t *testing.T) {
+	for _, domain := range []string{"custom.domain", ""} {
+		// Given
+		connErr := connect.NewError(connect.CodeInvalidArgument, nil)
+		detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+			Domain: domain,
+			Reason: rpcerr.ReasonAlreadyExists,
+		})
+		require.NoError(t, err)
+		connErr.AddDetail(detail)
 
-	// When / Then
-	require.Equal(t, syscall.EEXIST, MapError(connErr))
+		// When / Then
+		require.Equal(t, syscall.EINVAL, MapError(connErr), "domain %q 必须忽略 Reason 并回退为 EINVAL", domain)
+	}
 }
 
 func TestMapError_GivenConnectCodesWithoutErrorInfo_MapsDeterministically(t *testing.T) {

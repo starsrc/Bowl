@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/starsrc/pkg/serverx"
 	"go.opentelemetry.io/otel/attribute"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 const (
@@ -330,8 +330,8 @@ func (a *diskMergeAdapter) invoke(ctx context.Context, client storagev1connect.S
 
 func (a *diskMergeAdapter) mapMergeRPCError(err error) *diskCLIError {
 	connectErr, isConnect := errors.AsType[*connect.Error](err)
-	info := serverx.ExtractErrorInfo(err)
-	if isConnect && connectErr.Code() == connect.CodeAborted && info.GetReason() == "ECONFLICT" {
+	reason, hasReason := rpcerr.ExtractReason(err)
+	if isConnect && connectErr.Code() == connect.CodeAborted && hasReason && reason == rpcerr.ReasonConflict {
 		report := extractMergeConflictReport(connectErr)
 		reportJSON := toMergeConflictReportJSON(report)
 		if reportJSON == nil {
@@ -354,7 +354,7 @@ func (a *diskMergeAdapter) mapMergeRPCError(err error) *diskCLIError {
 			},
 		}
 	}
-	if isConnect && connectErr.Code() == connect.CodeAborted && info.GetReason() == "EBUSY" {
+	if isConnect && connectErr.Code() == connect.CodeAborted && hasReason && reason == rpcerr.ReasonBusy {
 		lowerMsg := strings.ToLower(connectErr.Message())
 		if strings.Contains(lowerMsg, "source disk") || strings.Contains(lowerMsg, strings.ToLower(a.sourceDiskID)) {
 			return &diskCLIError{

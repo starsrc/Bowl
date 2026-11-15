@@ -24,6 +24,7 @@ import (
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 type spanStartNotifier struct {
@@ -549,7 +550,7 @@ func TestStructuredLogging_验证unmountFsyncFailed与orphanBacklogged与tmpfile
 
 		// 1. 构造 OnUnmount 时 Fsync 失败 -> 记录 unmount_fsync_failed
 		srv.fsyncHook = func(context.Context, *storagev1.FsyncRequest) error {
-			return errnoError(connect.CodeInternal, "EIO")
+			return errnoError(connect.CodeInternal, rpcerr.ReasonIO)
 		}
 		fs1 := newTestRawFS(t, srv, withDirectIO(false), withLogger(logger))
 		dirty := mustCreateFile(t, fs1, fuse.FUSE_ROOT_ID, "dirty-fail.txt", syscall.O_RDWR, 0o644)
@@ -560,7 +561,7 @@ func TestStructuredLogging_验证unmountFsyncFailed与orphanBacklogged与tmpfile
 		// 2. 构造孤儿回收失败且阈值=1 -> 记录 orphan_reclaim_backlogged
 		srv.fsyncHook = nil
 		srv.reclaimOrphanHook = func(context.Context, *storagev1.ReclaimOrphanRequest) error {
-			return errnoError(connect.CodeUnavailable, "EAGAIN")
+			return errnoError(connect.CodeInternal, rpcerr.ReasonIO)
 		}
 		fs2 := newTestRawFS(t, srv, withOrphanThreshold(1), withLogger(logger))
 		orp := mustCreateFile(t, fs2, fuse.FUSE_ROOT_ID, "orp-fail.txt", syscall.O_RDWR, 0o644)

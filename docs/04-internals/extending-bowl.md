@@ -63,11 +63,11 @@ func (s *Server) GetDiskUsage(ctx context.Context, req *connect.Request[storagev
 | --- | --- | --- |
 | `server/interceptor.go` 的 `isControlPlaneProcedure`（`:116`） | 控制面慢请求阈值 `200ms`，否则按 `50ms` | 新 RPC 属于控制面 |
 | `server/interceptor.go` 的 `classifyStorageLogLevel`（`:86`） | 成功日志级别：列表内为 Info，其余 Debug | 低频高价值变更操作 |
-| `pkg/validator/validator.go` 的 `classifyViolationInternal` | 校验失败映射为 `EINVAL` 以外的 errno（`ERANGE`、`E2BIG`、`ENAMETOOLONG`） | 新字段有长度或范围约束 |
-| `services/storage/internal/control/status.go` 的 `mappings`（`:25`） | 新增领域哨兵错误 → gRPC code 与 errno reason | 新增 `ErrXxx` |
+| `pkg/validator/validator.go` 的 `classifyViolationInternal` | 校验失败映射为 `EINVAL` 以外的 errno，如 `ERANGE` 与 `ENAMETOOLONG` | 新字段有长度或范围约束 |
+| `services/storage/internal/control/status.go:23` 的 `mappings` | 新增领域哨兵错误到 gRPC code 与 `rpcerr.Reason*` 的映射 | 新增 `ErrXxx` |
 | `client/internal/rpc/retry.go` 的 `idempotentProcedures`（`:80`） | 允许对 `Unavailable` 与传输错误重试 | **仅**严格只读或幂等的 RPC；写类 RPC 加入会造成重复提交 |
 
-新增 errno `Reason` 时还要同步客户端 `client/internal/rpc/errors.go` 的 `MapError` 分支（目前 25 类），否则退化为 Connect 状态码兜底。
+全部 `ErrorInfo` 错误域与原因码常量统一定义于 `pkg/rpcerr`。新增 errno `Reason` 时需在 `pkg/rpcerr` 定义常量，并同步更新客户端 `client/internal/rpc/errors.go` 的 `MapError` 分支，目前支持 18 类 POSIX 原因码，否则客户端会忽略未识别原因并退化为 Connect 状态码兜底。
 
 ### 1.3 兼容性约束
 

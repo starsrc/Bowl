@@ -20,6 +20,7 @@ import (
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 func withCleanOTelAndLogger(t *testing.T) {
@@ -365,7 +366,7 @@ func TestRunMount_GivenServeLifecycleAndCanceledCtx_RenewsPeriodicallyAndUnmount
 
 func TestRunMount_GivenRenewTerminalError_StopsSubsequentRenewRequests(t *testing.T) {
 	ebusyErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("stale epoch"))
-	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Domain: "bowl.storage", Reason: "EBUSY"})
+	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Domain: rpcerr.Domain, Reason: rpcerr.ReasonBusy})
 	require.NoError(t, err)
 	ebusyErr.AddDetail(detail)
 

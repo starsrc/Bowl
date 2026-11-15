@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/starsrc/bowl/pkg/rpcerr"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
@@ -26,7 +27,7 @@ func requireMappedStatus(t *testing.T, err error, wantCode codes.Code, wantReaso
 	require.Len(t, details, 1, "错误=%v 应携带 1 个 ErrorInfo 详情: want=1 got=%d", err, len(details))
 	info, ok := details[0].(*errdetails.ErrorInfo)
 	require.True(t, ok, "错误=%v 的详情类型应为 *errdetails.ErrorInfo: got=%T", err, details[0])
-	require.Equal(t, ErrorDomain, info.GetDomain(), "错误=%v 的 ErrorInfo 领域不匹配: want=%q got=%q", err, ErrorDomain, info.GetDomain())
+	require.Equal(t, rpcerr.Domain, info.GetDomain(), "错误=%v 的 ErrorInfo 领域不匹配: want=%q got=%q", err, rpcerr.Domain, info.GetDomain())
 	require.Equal(t, wantReason, info.GetReason(), "错误=%v 的 ErrorInfo reason 不匹配: want=%q got=%q", err, wantReason, info.GetReason())
 }
 
@@ -49,7 +50,7 @@ func TestToStatus_SentinelErrors_MapsToExpectedGRPCCodeAndErrorInfo(t *testing.T
 		{name: "扩展属性不存在", err: ErrNoData, wantCode: codes.NotFound, wantReason: "ENODATA"},
 		{name: "目标已存在", err: ErrAlreadyExists, wantCode: codes.AlreadyExists, wantReason: "EEXIST"},
 		{name: "权限拒绝", err: ErrPerm, wantCode: codes.PermissionDenied, wantReason: "EPERM"},
-		{name: "只读保护", err: store.ErrReadOnly, wantCode: codes.PermissionDenied, wantReason: "EPERM"},
+		{name: "只读保护", err: store.ErrReadOnly, wantCode: codes.FailedPrecondition, wantReason: rpcerr.ReasonReadOnly},
 		{name: "目标非目录", err: ErrNotDir, wantCode: codes.FailedPrecondition, wantReason: "ENOTDIR"},
 		{name: "目标为目录", err: ErrIsDir, wantCode: codes.FailedPrecondition, wantReason: "EISDIR"},
 		{name: "目录非空", err: ErrNotEmpty, wantCode: codes.FailedPrecondition, wantReason: "ENOTEMPTY"},
@@ -98,7 +99,7 @@ func TestToStatus_ExistingGRPCStatus_PassesThroughUnchanged(t *testing.T) {
 	// Given: 已携带 ErrorInfo 详情的原生 gRPC 状态错误
 	base, err := status.New(codes.InvalidArgument, "validator_erange").WithDetails(&errdetails.ErrorInfo{
 		Reason: "ERANGE",
-		Domain: ErrorDomain,
+		Domain: rpcerr.Domain,
 	})
 	require.NoError(t, err, "构造基准 status 失败")
 

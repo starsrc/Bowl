@@ -216,7 +216,7 @@ TLS（`https://`）路径不包装，直接用标准传输。两种路径都开�
 
 默认参数：总预算 `30s`、初始间隔 `100ms`、倍数 `2.0`、单次上限 `1s`，每次等待带 `[0.5, 1.0]` 抖动。`shouldRetry`（`retry.go:167`）按顺序判定：
 
-1. 携带业务 `ErrorInfo.Reason` 的错误：**绝不重试**（服务端已明确拒绝）。
+1. 携带归属 `rpcerr.Domain` 错误域且非空 `ErrorInfo.Reason` 的错误：**绝不重试**，表明服务端已明确拒绝。
 2. `InvalidArgument`、`NotFound`、`AlreadyExists`、`PermissionDenied`、`FailedPrecondition`、`ResourceExhausted`、`Aborted`、`Unimplemented`：绝不重试。
 3. 建连阶段失败（`ECONNREFUSED`、`dial` 错误）：请求未送达，幂等与非幂等都重试。
 4. 在 17 个只读与幂等 RPC 白名单（`idempotentProcedures`，`retry.go:80-98`，含 `Read`、`Fsync`、`Lookup`、`GetAttr`、`ReadDirPlus`、`RenewMount`、`UnmountDisk` 等）内：`Unavailable` 或底层传输错误可重试。
@@ -226,13 +226,13 @@ TLS（`https://`）路径不包装，直接用标准传输。两种路径都开�
 
 ## 5. Connect 错误到 `syscall.Errno`
 
-`rpc.MapError`（`rpc/errors.go:81`）是唯一的映射入口；`RawFS.ToStatus(err, cancel)` 调用 `MapErrorWithCancel`，若内核 `cancel` 通道已关闭则优先返回 `EINTR`。
+`rpc.MapError` 位于 `rpc/errors.go:82`，是唯一的错误映射入口。`RawFS.ToStatus` 调用 `MapErrorWithCancel`，若内核 `cancel` 通道已关闭则优先返回 `EINTR`。
 
 判定顺序：
 
-1. `nil` → 0；`ErrKernelInterrupted` 或 `context.Canceled` → `EINTR`。
-2. 错误携带 `ErrorInfo.Reason`：按 **25 类** 原因字符串一一映射为同名 errno：`EINVAL`、`ENAMETOOLONG`、`ERANGE`、`E2BIG`、`ENOENT`、`ENODATA`、`EEXIST`、`EPERM`、`EACCES`、`ENOTDIR`、`EISDIR`、`ENOTEMPTY`、`EBADF`、`ENOSPC`、`EAGAIN`、`EDEADLK`、`EINTR`、`EOPNOTSUPP`、`EMLINK`、`EFBIG`、`ESPIPE`、`EXDEV`、`EIO`、`EROFS`、`EBUSY`。
-3. 无匹配 `Reason` 时按 Connect 状态码兜底：
+1. `nil` 映射为 0；`ErrKernelInterrupted` 或 `context.Canceled` 映射为 `EINTR`。
+2. 错误携带归属 `bowl.storage` 错误域且非空的 `ErrorInfo.Reason` 时，通过 `rpcerr.ExtractReason` 提取，按 **18 类** POSIX 原因字符串一一映射为同名 errno，包括 `EINVAL`、`ENAMETOOLONG`、`ERANGE`、`ENOENT`、`ENODATA`、`EEXIST`、`EPERM`、`EROFS`、`ENOTDIR`、`EISDIR`、`ENOTEMPTY`、`ENOSPC`、`EOPNOTSUPP`、`EMLINK`、`EFBIG`、`EXDEV`、`EIO` 与 `EBUSY`。异域或空域 `ErrorInfo` 会忽略 `Reason`，并按 Connect 状态码兜底。
+3. 未匹配到受支持域 `Reason` 时按 Connect 状态码兜底：
 
 | Connect code | errno |
 | --- | --- |
@@ -246,11 +246,11 @@ TLS（`https://`）路径不包装，直接用标准传输。两种路径都开�
 | `Canceled` | 传输层错误为 `EIO`，否则 `EINTR` |
 | 其余 | `EIO` |
 
-注意 `ECONFLICT`（合并冲突原因）不在 25 类里：合并由 `bowl disk merge` 走控制面 RPC 而不经 FUSE 路径，FUSE 侧即使遇到也落入 `Aborted → EIO` 兜底。
+注意合并冲突原因 `ECONFLICT` 定义在 `pkg/rpcerr` 中，但不在上述 18 类 FUSE 映射内。合并操作由 `bowl disk merge` 走控制面 RPC 而不经 FUSE 路径，FUSE 侧即使收到 `CodeAborted` 与 `ECONFLICT` 也会落入 `EIO` 兜底。
 
 ### 内核 `cancel` 联动
 
-`ContextWithCancelChan`（`rpc/errors.go:27`）把 FUSE 的 `cancel` 通道转成 `context`。收到中断后给在途 RPC `15ms` 宽限（`inFlightCancelGracePeriod`），因为 Go 运行时约每 10 ms 的 `SIGURG` 抢占会触发内核下发 `FUSE_INTERRUPT`，立即取消会把可在数毫秒完成的快速 RPC 误杀成伪 `EINTR`。
+`ContextWithCancelChan` 位于 `rpc/errors.go:28`，把 FUSE 的 `cancel` 通道转成 `context`。收到中断后给在途 RPC `15ms` 的 `inFlightCancelGracePeriod` 宽限，因为 Go 运行时约每 10 ms 的 `SIGURG` 抢占会触发内核下发 `FUSE_INTERRUPT`，立即取消会把可在数毫秒完成的快速 RPC 误杀成伪 `EINTR`。
 
 ## 6. 排错入口
 

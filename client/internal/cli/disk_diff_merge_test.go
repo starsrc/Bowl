@@ -13,6 +13,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 const (
@@ -404,8 +405,8 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 
 	conflictErr := connect.NewError(connect.CodeAborted, errors.New("merge conflicts detected"))
 	errInfoDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
-		Domain: "bowl.storage",
-		Reason: "ECONFLICT",
+		Domain: rpcerr.Domain,
+		Reason: rpcerr.ReasonConflict,
 	})
 	require.NoError(t, err)
 	conflictErr.AddDetail(errInfoDetail)
@@ -582,7 +583,10 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 
 	// EBUSY on CodeAborted (目标盘挂载/并发写入)
 	ebusyErr := connect.NewError(connect.CodeAborted, errors.New("concurrent write on target disk"))
-	ebusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
+	ebusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+		Domain: rpcerr.Domain,
+		Reason: rpcerr.ReasonBusy,
+	})
 	require.NoError(t, err)
 	ebusyErr.AddDetail(ebusyDetail)
 	storage.forcedErr["MergeDisk"] = ebusyErr
@@ -593,7 +597,10 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 
 	// EBUSY on CodeAborted (源盘读写挂载)
 	srcBusyErr := connect.NewError(connect.CodeAborted, errors.New("source disk "+testDiskID1+" is currently mounted read-write"))
-	srcBusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
+	srcBusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+		Domain: rpcerr.Domain,
+		Reason: rpcerr.ReasonBusy,
+	})
 	require.NoError(t, err)
 	srcBusyErr.AddDetail(srcBusyDetail)
 	storage.forcedErr["MergeDisk"] = srcBusyErr

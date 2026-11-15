@@ -11,6 +11,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 
+	"github.com/starsrc/bowl/pkg/rpcerr"
 	"github.com/starsrc/bowl/services/storage/internal/db"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
@@ -50,7 +51,7 @@ func requireDiskMountedStatus(t *testing.T, err error) {
 	info, ok := st.Details()[0].(*errdetails.ErrorInfo)
 	require.True(t, ok)
 	require.Equal(t, "EBUSY", info.GetReason())
-	require.Equal(t, ErrorDomain, info.GetDomain())
+	require.Equal(t, rpcerr.Domain, info.GetDomain())
 }
 
 func TestMountLease_IssueUnmountAndRejectOnlineTargetMerge(t *testing.T) {

@@ -12,17 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-)
-
-// ErrorDomain 定义与 storage 领域层一致的 ErrorInfo 错误领域标识符。
-const ErrorDomain = "bowl.storage"
-
-// POSIX errno reason 常量，与 meta.ToStatus 映射契约保持严格一致。
-const (
-	ReasonInvalidArgument = "EINVAL"
-	ReasonNameTooLong     = "ENAMETOOLONG"
-	ReasonRange           = "ERANGE"
-	ReasonTooBig          = "E2BIG"
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 // storageMessages 汇总 StorageService 全部现有的请求与响应消息，用于启动期预编译校验规则。
@@ -137,17 +127,17 @@ func (e *ValidationError) Unwrap() error {
 	return e.err
 }
 
-// Reason 返回映射后的标准 POSIX errno 名称（如 "EINVAL"、"ERANGE"、"E2BIG"、"ENAMETOOLONG"）。
+// Reason 返回映射后的标准 POSIX errno 名称，包括 "EINVAL"、"ERANGE" 与 "ENAMETOOLONG"。
 func (e *ValidationError) Reason() string {
 	return e.reason
 }
 
-// Domain 返回错误所属的服务领域标识符（如 "bowl.storage"）。
+// Domain 返回错误所属的服务领域标识符，默认为 rpcerr.Domain。
 func (e *ValidationError) Domain() string {
 	if e.domain != "" {
 		return e.domain
 	}
-	return ErrorDomain
+	return rpcerr.Domain
 }
 
 // GRPCStatus 构造携带 google.rpc.ErrorInfo 的 InvalidArgument 状态。
@@ -165,7 +155,7 @@ func (v *storageValidator) Validate(msg proto.Message, options ...protovalidate.
 		return nil
 	}
 	if valErr, ok := errors.AsType[*protovalidate.ValidationError](err); ok {
-		reason, domain := translateValidation(valErr, ErrorDomain)
+		reason, domain := translateValidation(valErr, rpcerr.Domain)
 		return &ValidationError{
 			err:    valErr,
 			reason: reason,
@@ -177,7 +167,7 @@ func (v *storageValidator) Validate(msg proto.Message, options ...protovalidate.
 
 // NewStorageValidator 创建并初始化一个预编译好 StorageService 全部请求、响应与实体消息的 protovalidate.Validator。
 // 通过 protovalidate.WithMessages 选项在启动阶段编译 CEL 约束规则，避免在首次运行时产生编译延迟；
-// 同时将字段边界校验违规自动关联至对应的 POSIX errno reason（ERANGE、E2BIG、ENAMETOOLONG、EINVAL）。
+// 同时将字段边界校验违规自动关联至对应的 POSIX errno reason，包括 ERANGE、ENAMETOOLONG 与 EINVAL。
 func NewStorageValidator() (protovalidate.Validator, error) {
 	inner, err := protovalidate.New(protovalidate.WithMessages(storageMessages...))
 	if err != nil {
@@ -202,8 +192,8 @@ func ErrnoReason(err error) (string, bool) {
 }
 
 // ToStatus 将校验错误转换为携带 google.rpc.ErrorInfo 的 gRPC *status.Status。
-// 若 err 为 protovalidate 校验违规（含原始 *protovalidate.ValidationError），
-// 按字段与规则优先级映射为 codes.InvalidArgument 及对应的 ERANGE / E2BIG / ENAMETOOLONG / EINVAL。
+// 若 err 为 protovalidate 校验违规，包括原始 *protovalidate.ValidationError，
+// 按字段与规则优先级映射为 codes.InvalidArgument 及对应的 ERANGE、ENAMETOOLONG 或 EINVAL。
 func ToStatus(err error) *status.Status {
 	if err == nil {
 		return nil
@@ -215,7 +205,7 @@ func ToStatus(err error) *status.Status {
 		return buildInvalidArgumentStatus(err.Error(), storageValErr.Reason(), storageValErr.Domain())
 	}
 	if protoValErr, ok := errors.AsType[*protovalidate.ValidationError](err); ok {
-		reason, domain := translateValidation(protoValErr, ErrorDomain)
+		reason, domain := translateValidation(protoValErr, rpcerr.Domain)
 		return buildInvalidArgumentStatus(err.Error(), reason, domain)
 	}
 	return status.New(codes.Unknown, err.Error())
@@ -231,7 +221,7 @@ func ToGRPCError(err error) error {
 
 func buildInvalidArgumentStatus(msg, reason, domain string) *status.Status {
 	if domain == "" {
-		domain = ErrorDomain
+		domain = rpcerr.Domain
 	}
 	st := status.New(codes.InvalidArgument, msg)
 	stWithDetails, detailErr := st.WithDetails(&errdetails.ErrorInfo{
@@ -247,16 +237,16 @@ func buildInvalidArgumentStatus(msg, reason, domain string) *status.Status {
 // translateValidationReason 按照与 meta.Manager 静态校验完全一致的求值优先级，
 // 将 protovalidate 违规项还原为对应的 POSIX errno reason。
 func translateValidationReason(valErr *protovalidate.ValidationError) string {
-	reason, _ := translateValidation(valErr, ErrorDomain)
+	reason, _ := translateValidation(valErr, rpcerr.Domain)
 	return reason
 }
 
 func translateValidation(valErr *protovalidate.ValidationError, defaultDomain string) (reason, domain string) {
 	bestPriority := 100
-	bestReason := ReasonInvalidArgument
+	bestReason := rpcerr.ReasonInvalidArgument
 	bestDomain := defaultDomain
 	if bestDomain == "" {
-		bestDomain = ErrorDomain
+		bestDomain = rpcerr.Domain
 	}
 
 	for _, v := range valErr.Violations {
@@ -282,9 +272,9 @@ func classifyViolation(v *protovalidate.Violation) (priority int, reason, domain
 
 	domain = ""
 	if strings.HasPrefix(fullName, "storage.v1.") {
-		domain = ErrorDomain
+		domain = rpcerr.Domain
 	} else if fullName == "" {
-		// 消息级约束（如 update_disk_has_update）无 field descriptor，返回空 domain，保留调用方的 defaultDomain
+		// 消息级约束如 update_disk_has_update 无 field descriptor，返回空 domain，保留调用方的 defaultDomain
 		domain = ""
 	}
 	return priority, reason, domain
@@ -292,7 +282,7 @@ func classifyViolation(v *protovalidate.Violation) (priority int, reason, domain
 
 func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason string) {
 	if v == nil || v.Proto == nil {
-		return 60, ReasonInvalidArgument
+		return 60, rpcerr.ReasonInvalidArgument
 	}
 
 	ruleID := v.Proto.GetRuleId()
@@ -300,7 +290,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		ruleID == "string.max_bytes" || strings.HasSuffix(ruleID, ".string.max_bytes")
 
 	if ruleID == "update_disk_has_update" || ruleID == "write_request_offset_len_overflow" || ruleID == "renew_mount_epoch_matches_mode" {
-		return 10, ReasonInvalidArgument
+		return 10, rpcerr.ReasonInvalidArgument
 	}
 
 	fullName := ""
@@ -460,7 +450,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.ForkDiskRequest.max_bytes",
 		"storage.v1.ForkDiskResponse.disk",
 		"storage.v1.StatFSRequest.ino":
-		return 10, ReasonInvalidArgument
+		return 10, rpcerr.ReasonInvalidArgument
 
 	// 第 2/3 优先级：Xattr 属性名称长度边界 (仅 >255 为 ERANGE，空名称或含 NUL 为 EINVAL)
 	case "storage.v1.SetXattrRequest.name",
@@ -468,9 +458,9 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.RemoveXattrRequest.name",
 		"storage.v1.ListXattrResponse.names":
 		if isMaxLen {
-			return 20, ReasonRange
+			return 20, rpcerr.ReasonRange
 		}
-		return 30, ReasonInvalidArgument
+		return 30, rpcerr.ReasonInvalidArgument
 
 	// 第 2/3 优先级：主目录项名称超长 (>255) -> ENAMETOOLONG；为空或包含 '/' / NUL -> EINVAL
 	case "storage.v1.LookupRequest.name",
@@ -489,33 +479,33 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.UpdateDiskRequest.name",
 		"storage.v1.ForkDiskRequest.name":
 		if isMaxLen {
-			return 20, ReasonNameTooLong
+			return 20, rpcerr.ReasonNameTooLong
 		}
-		return 30, ReasonInvalidArgument
+		return 30, rpcerr.ReasonInvalidArgument
 
 	// 第 4/5 优先级：Rename 目标新名称超长 (>255) -> ENAMETOOLONG；为空或包含 '/' / NUL -> EINVAL
 	case "storage.v1.RenameRequest.new_name":
 		if isMaxLen {
-			return 40, ReasonNameTooLong
+			return 40, rpcerr.ReasonNameTooLong
 		}
-		return 50, ReasonInvalidArgument
+		return 50, rpcerr.ReasonInvalidArgument
 
 	// 第 4/5 优先级：Symlink / Readlink 目标路径为空或包含 NUL -> EINVAL；超长 (>4095) -> ENAMETOOLONG
 	case "storage.v1.SymlinkRequest.target",
 		"storage.v1.ReadlinkResponse.target":
 		if isMaxLen {
-			return 50, ReasonNameTooLong
+			return 50, rpcerr.ReasonNameTooLong
 		}
-		return 40, ReasonInvalidArgument
+		return 40, rpcerr.ReasonInvalidArgument
 
 	// 第 4 优先级：Xattr 属性值超长 (>65536) -> ERANGE (对齐 JuiceFS Linux 行为)
 	case "storage.v1.SetXattrRequest.value",
 		"storage.v1.GetXattrResponse.value":
 		if isMaxLen {
-			return 40, ReasonRange
+			return 40, rpcerr.ReasonRange
 		}
-		return 45, ReasonInvalidArgument
+		return 45, rpcerr.ReasonInvalidArgument
 	}
 
-	return 60, ReasonInvalidArgument
+	return 60, rpcerr.ReasonInvalidArgument
 }

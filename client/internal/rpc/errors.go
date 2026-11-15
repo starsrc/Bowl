@@ -7,7 +7,8 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/starsrc/pkg/serverx"
+
+	"github.com/starsrc/bowl/pkg/rpcerr"
 )
 
 // inFlightCancelGracePeriod 为在途 RPC 收到内核 cancel (FUSE_INTERRUPT) 信号后的宽限期。
@@ -72,12 +73,12 @@ func MapErrorWithCancel(err error, cancel <-chan struct{}) syscall.Errno {
 	return MapError(err)
 }
 
-// MapError 将 ConnectRPC 错误或底层传输错误无损还原为 Linux syscall.Errno。
-// 若 err 为 nil，返回 0（成功）。
-// 若 err 因内核中断信号取消（ErrKernelInterrupted 或 context.Canceled），返回 syscall.EINTR。
-// 若 err 携带 google.rpc.ErrorInfo（Domain == "bowl.storage" 或非空 Reason），
-// 严格按 25 类 Reason 契约映射为对应 syscall.Errno。
-// 若未携带匹配 ErrorInfo，按 Connect 状态码确定性兜底映射（其余未知或普通传输错误一律兜底为 syscall.EIO）。
+// MapError 将 ConnectRPC 错误或底层传输错误还原为 Linux syscall.Errno。
+// 若 err 为 nil，返回 0。
+// 若 err 因 ErrKernelInterrupted 或 context.Canceled 取消，返回 syscall.EINTR。
+// 若 err 携带 Domain == rpcerr.Domain 且非空 Reason 的 google.rpc.ErrorInfo，
+// 按 18 类 POSIX Reason 契约映射为对应 syscall.Errno。
+// 若未携带匹配域的 ErrorInfo 或 Reason 为非 POSIX 契约值，按 Connect 状态码兜底映射，其余未知或传输错误统一返回 syscall.EIO。
 func MapError(err error) syscall.Errno {
 	if err == nil {
 		return 0
@@ -87,58 +88,44 @@ func MapError(err error) syscall.Errno {
 		return syscall.EINTR
 	}
 
-	if connectErr, ok := errors.AsType[*connect.Error](err); ok {
-		if info := serverx.ExtractErrorInfo(connectErr); info != nil && info.Reason != "" {
-			switch info.Reason {
-			case "EINVAL":
+	if connectErr, isConnect := errors.AsType[*connect.Error](err); isConnect {
+		if reason, ok := rpcerr.ExtractReason(connectErr); ok {
+			switch reason {
+			case rpcerr.ReasonInvalidArgument:
 				return syscall.EINVAL
-			case "ENAMETOOLONG":
+			case rpcerr.ReasonNameTooLong:
 				return syscall.ENAMETOOLONG
-			case "ERANGE":
+			case rpcerr.ReasonRange:
 				return syscall.ERANGE
-			case "E2BIG":
-				return syscall.E2BIG
-			case "ENOENT":
+			case rpcerr.ReasonNotFound:
 				return syscall.ENOENT
-			case "ENODATA":
+			case rpcerr.ReasonNoData:
 				return syscall.ENODATA
-			case "EEXIST":
+			case rpcerr.ReasonAlreadyExists:
 				return syscall.EEXIST
-			case "EPERM":
+			case rpcerr.ReasonPermissionDenied:
 				return syscall.EPERM
-			case "EACCES":
-				return syscall.EACCES
-			case "ENOTDIR":
-				return syscall.ENOTDIR
-			case "EISDIR":
-				return syscall.EISDIR
-			case "ENOTEMPTY":
-				return syscall.ENOTEMPTY
-			case "EBADF":
-				return syscall.EBADF
-			case "ENOSPC":
-				return syscall.ENOSPC
-			case "EAGAIN":
-				return syscall.EAGAIN
-			case "EDEADLK":
-				return syscall.EDEADLK
-			case "EINTR":
-				return syscall.EINTR
-			case "EOPNOTSUPP":
-				return syscall.EOPNOTSUPP
-			case "EMLINK":
-				return syscall.EMLINK
-			case "EFBIG":
-				return syscall.EFBIG
-			case "ESPIPE":
-				return syscall.ESPIPE
-			case "EXDEV":
-				return syscall.EXDEV
-			case "EIO":
-				return syscall.EIO
-			case "EROFS":
+			case rpcerr.ReasonReadOnly:
 				return syscall.EROFS
-			case "EBUSY":
+			case rpcerr.ReasonNotDir:
+				return syscall.ENOTDIR
+			case rpcerr.ReasonIsDir:
+				return syscall.EISDIR
+			case rpcerr.ReasonNotEmpty:
+				return syscall.ENOTEMPTY
+			case rpcerr.ReasonNoSpace:
+				return syscall.ENOSPC
+			case rpcerr.ReasonNotSupported:
+				return syscall.EOPNOTSUPP
+			case rpcerr.ReasonTooManyLinks:
+				return syscall.EMLINK
+			case rpcerr.ReasonFileTooLarge:
+				return syscall.EFBIG
+			case rpcerr.ReasonCrossDevice:
+				return syscall.EXDEV
+			case rpcerr.ReasonIO:
+				return syscall.EIO
+			case rpcerr.ReasonBusy:
 				return syscall.EBUSY
 			}
 		}

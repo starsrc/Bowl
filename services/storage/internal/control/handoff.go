@@ -61,7 +61,7 @@ type PullDiskParams struct {
 	// Force 允许从仍被其他节点持有的 HEAD 强行接管，并允许覆盖本地未同步的写入。
 	Force bool
 	// Mirror 只把本地副本刷新到远端最新快照，不认领写权限：写者仍是原来的节点，
-	// 本节点得到一份可以只读挂载的最新副本。
+	// 本节点得到一份可以只读挂载的最新副本。副本正被只读挂载时也可以刷新，挂载保持不动。
 	Mirror bool
 	// KeepLocal 在本地存在未同步写入时不拒绝也不丢弃它们：把本地这份另存为同血缘的一块新盘，
 	// 并以双方最后一次共同同步的快照登记为它们的共同祖先，之后可用 MergeDisk 把本地改动合回来。
@@ -385,7 +385,7 @@ func (m *manager) pullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 		return nil, mapDBErr(getErr)
 	}
 	if hasLocal {
-		localErr := m.checkLocalReplaceable(ctx, diskID, row.LineageID, params.Force)
+		localErr := m.checkLocalReplaceable(ctx, diskID, row.LineageID, params.Force, params.Mirror)
 		switch {
 		case localErr == nil:
 		case params.KeepLocal && errors.Is(localErr, ErrLocalDiverged):
@@ -406,10 +406,15 @@ func (m *manager) pullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 	}
 	// 本地已有这块盘时，内容相同的数据包直接复用，只下载离开期间新写出来的部分。
 	// 复用前先关掉本地实例：它不再是写者，之后也要被替换，关掉后包文件就不会再变。
+	// 刷新只读副本时不提前关：副本没有写入，包文件只会被后台补齐（整包原子替换），
+	// 而只读挂载在下载期间还要继续读它。
 	reuseDir := ""
 	if hasLocal {
-		if closeErr := m.closeLocalActor(diskID); closeErr != nil {
-			return nil, closeErr
+		if !params.Mirror {
+			if closeErr := m.closeLocalActor(diskID); closeErr != nil {
+				return nil, closeErr
+			}
+			m.clearDiskMounts(diskID)
 		}
 		reuseDir = m.diskDir(diskID)
 	}
@@ -432,6 +437,9 @@ func (m *manager) pullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 		}
 	} else if installErr := m.installPulledDir(ctx, diskID, tmp); installErr != nil {
 		return nil, installErr
+	}
+	if !params.Mirror {
+		m.clearDiskMounts(diskID)
 	}
 	installed = true
 	if err = m.writeSyncMark(diskID, syncMark{Generation: head.Generation, WriterEpoch: head.WriterEpoch, WriteSeq: head.WriteSeq, Snapshot: head.Snapshot}); err != nil {
@@ -476,10 +484,16 @@ func (m *manager) pullDisk(ctx context.Context, params PullDiskParams) (*Handoff
 }
 
 // checkLocalReplaceable 确认本地副本可以被远端快照替换：没有任何挂载，且没有未同步的写入。
-func (m *manager) checkLocalReplaceable(ctx context.Context, diskID string, lineageID uuid.UUID, force bool) error {
+// allowReadOnlyMounts 为 true 时只读挂载不算阻碍：它们不持有写世代，换掉底下的实例后照常读。
+func (m *manager) checkLocalReplaceable(ctx context.Context, diskID string, lineageID uuid.UUID, force, allowReadOnlyMounts bool) error {
 	now := m.currentTime()
 	m.mountsMu.Lock()
-	leases := len(m.pruneExpiredDiskLeasesLocked(diskID, now))
+	leases := 0
+	for _, lease := range m.pruneExpiredDiskLeasesLocked(diskID, now) {
+		if !lease.readOnly || !allowReadOnlyMounts {
+			leases++
+		}
+	}
 	m.mountsMu.Unlock()
 	if leases > 0 {
 		return fmt.Errorf("%w: unmount it on this node before pulling", ErrDiskMounted)
@@ -515,6 +529,7 @@ func (m *manager) checkLocalReplaceable(ctx context.Context, diskID string, line
 }
 
 // closeLocalActor 把本地实例从池里摘掉并关闭；之后再访问这块盘会按需重新打开。
+// 不动挂载租约：是否清掉由调用方决定（刷新只读副本时要保留）。
 func (m *manager) closeLocalActor(diskID string) error {
 	m.poolMu.Lock()
 	actor := m.actors[diskID]
@@ -525,7 +540,6 @@ func (m *manager) closeLocalActor(diskID string) error {
 			return fmt.Errorf("关闭本地磁盘实例: %w", err)
 		}
 	}
-	m.clearDiskMounts(diskID)
 	return nil
 }
 
@@ -698,6 +712,7 @@ func (m *manager) startHandoffSync() {
 				return
 			case <-syncC:
 				m.syncDirtyDisks(context.Background())
+				m.refreshReadOnlyReplicas(context.Background())
 			case <-gcC:
 				// 先把本节点提交切面里的占位包补齐，再回收：切面引用的旧包可能已不在任何
 				// 保留快照里，回收之后就取不回来了。
@@ -821,6 +836,40 @@ func (m *manager) syncDirtyDisks(ctx context.Context) int {
 		}
 	}
 	return synced
+}
+
+// refreshReadOnlyReplicas 让正被只读挂载的副本跟上远端：写者在别的节点时，每个同步周期
+// 把本地副本换成远端最新快照，挂载着的客户端不用重新挂载就能看到新内容。
+// 看到的内容最多落后「写者的同步周期 + 本节点的同步周期」。返回实际换了快照的盘数。
+func (m *manager) refreshReadOnlyReplicas(ctx context.Context) int {
+	now := m.currentTime()
+	m.mountsMu.Lock()
+	var replicas []string
+	for diskID := range m.activeMounts {
+		leases := m.pruneExpiredDiskLeasesLocked(diskID, now)
+		readOnlyOnly := len(leases) > 0
+		for _, lease := range leases {
+			readOnlyOnly = readOnlyOnly && lease.readOnly
+		}
+		if readOnlyOnly {
+			replicas = append(replicas, diskID)
+		}
+	}
+	m.mountsMu.Unlock()
+
+	refreshed := 0
+	for _, diskID := range replicas {
+		res, err := m.PullDisk(ctx, PullDiskParams{DiskID: diskID, Mirror: true})
+		switch {
+		case err == nil && res.Installed:
+			refreshed++
+		case err == nil, errors.Is(err, ErrNotFound), errors.Is(err, ErrClosed):
+			// 已是最新、本节点就是写者、或这块盘没推送过：不需要处理。
+		default:
+			m.logger.InfoContext(ctx, "read-only replica refresh skipped; will retry", "disk_id", diskID, "reason", err)
+		}
+	}
+	return refreshed
 }
 
 // remotePackSource 让存储引擎按内容哈希从交接远端取数据包。

@@ -581,3 +581,43 @@ func TestHandoff_ForcePull_HEAD被并发改写时自动重试(t *testing.T) {
 	require.Equal(t, "cloud", pulled.Head.Owner)
 	require.Zero(t, flaky.remaining)
 }
+
+func TestHandoff_ReadOnlyReplica_挂着不动也能跟上写者(t *testing.T) {
+	ctx := context.Background()
+	remote := newSharedRemote(t)
+	local := newHandoffNode(t, remote, "local")
+	cloud := newHandoffNode(t, remote, "cloud")
+
+	// Given: 写者在本地，云端只读挂着这块盘
+	disk, err := local.CreateDisk(ctx, CreateDiskParams{Name: "workspace", MaxBytes: 64 << 20})
+	require.NoError(t, err)
+	mount, err := local.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	localActor, err := local.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, localActor, mount.Epoch, "v1.txt", []byte("v1"))
+	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	ro, err := cloud.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+	require.Zero(t, cloud.refreshReadOnlyReplicas(ctx), "远端没有新快照时不应替换本地副本")
+
+	// When: 写者继续写并同步，云端到了刷新周期
+	writeRegularFile(t, ctx, localActor, mount.Epoch, "v2.txt", []byte("v2"))
+	_, err = local.PushDisk(ctx, PushDiskParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	require.Equal(t, 1, cloud.refreshReadOnlyReplicas(ctx))
+
+	// Then: 不重新挂载就读到新内容，原来的只读租约仍然有效
+	cloudActor, err := cloud.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("v2"), readRegularFile(t, ctx, cloudActor, "v2.txt", 16))
+	_, err = cloud.RenewMount(ctx, RenewMountParams{DiskID: disk.DiskID, MountID: ro.MountID, ReadOnly: true})
+	require.NoError(t, err, "刷新不应清掉只读挂载的租约")
+	head, err := cloud.HeadDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, "local", head.Owner, "只读跟随不改变写者")
+
+	// 写者自己的节点不受影响：可写挂载着的盘不会被当成副本刷新
+	require.Zero(t, local.refreshReadOnlyReplicas(ctx))
+}

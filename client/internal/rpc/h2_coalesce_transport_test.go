@@ -92,7 +92,7 @@ func TestH2CoalesceConn_GivenTimerFlushFailsOnRealTransport_FailsFastAndRedials(
 	if elapsed > time.Second {
 		t.Fatalf("request hung %v after flush failure; underlying conn was not closed", elapsed)
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := do(strings.NewReader("x")); err != nil {
 			t.Fatalf("follow-up %d failed: %v", i, err)
 		}

@@ -100,6 +100,13 @@ func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Co
 	}
 	defer logF.Close()
 
+	// 守护进程不能一直停在调用者的工作目录：它会持有该目录，使其所在文件系统的 umount 因
+	// Resource busy 失败。挂载点与日志路径此时都已按原目录解析完毕，之后不再有相对路径。
+	if chdirErr := os.Chdir("/"); chdirErr != nil {
+		notifyErr(fmt.Errorf("切换守护进程工作目录失败: %w", chdirErr))
+		return 1
+	}
+
 	logFd := int(logF.Fd())
 	_ = unix.Dup2(logFd, int(os.Stdout.Fd()))
 	_ = unix.Dup2(logFd, int(os.Stderr.Fd()))

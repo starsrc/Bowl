@@ -32,6 +32,15 @@ const DefaultReleaseRetryInterval = 200 * time.Millisecond
 // DefaultRPCTimeout 是 FUSE 常规请求（不含阻塞锁 SetLkw）的默认单请求超时预算。
 const DefaultRPCTimeout = 30 * time.Second
 
+// readOnlyCacheRefreshInterval 是只读挂载丢弃本地目录与属性缓存的周期。
+//
+// 这份缓存没有过期时间：可写挂载是盘的唯一写者，自己改了什么自己最清楚。只读挂载不成立，
+// 盘的内容会被写者（同节点的可写挂载，或另一个节点经交接同步过来）改掉，所以定期整份丢弃，
+// 之后的访问重新问存储节点。
+// ponytail: 固定周期整份清空；只读挂载上的元数据请求多到成为负担时，改成由续租应答带回
+// 盘的版本号、版本变了才清。
+const readOnlyCacheRefreshInterval = 5 * time.Second
+
 // DefaultWriteAttrTimeoutSeconds 是写操作成功后回填内核属性缓存的有效期。
 // 严禁置 0：置 0 会使内核在连续 write() 前重新发起 GetAttr RPC 核对文件尺寸。
 const DefaultWriteAttrTimeoutSeconds = 1.0
@@ -199,9 +208,26 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 		},
 	)
 	fs.handles = NewHandleTableWithContext(fs.reclaimOrphan)
+	if cfg.ReadOnly {
+		go fs.refreshReadOnlyCache(readOnlyCacheRefreshInterval)
+	}
 	fs.bindMetrics(metrics)
 	fs.bindTracerProvider(fs.tracerProvider())
 	return fs
+}
+
+// refreshReadOnlyCache 周期性丢弃目录与属性缓存，直到文件系统关闭。
+func (fs *RawFS) refreshReadOnlyCache(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-fs.releaseCtx.Done():
+			return
+		case <-ticker.C:
+			fs.cache.clear()
+		}
+	}
 }
 
 func (fs *RawFS) bindMetrics(m *Metrics) {

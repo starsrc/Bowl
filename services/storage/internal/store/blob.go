@@ -209,9 +209,10 @@ func (s *blobStore) writeAtTimed(file *os.File, data []byte, off int64) (int, er
 		start := time.Now()
 		n, err := file.WriteAt(data, off)
 		s.metrics.observeBlobPwrite(time.Since(start))
-		return n, err
+		return n, wrapIOErr(err)
 	}
-	return file.WriteAt(data, off)
+	n, err := file.WriteAt(data, off)
+	return n, wrapIOErr(err)
 }
 
 // advanceMinPackID 确保后续分配的 PackID 严格大于 minPackID（供 StoreActor 启动恢复 sys:pack 时对齐游标）。
@@ -558,7 +559,7 @@ func (s *blobStore) extendTail(ino uint64, oldRef BlobRef, patchOffset uint32, p
 func (s *blobStore) openNextActivePackLocked(ctx context.Context) error {
 	if !s.dirReady.Load() {
 		if err := os.MkdirAll(s.dir, 0o755); err != nil {
-			return err
+			return wrapIOErr(err)
 		}
 		s.dirReady.Store(true)
 	}
@@ -569,7 +570,7 @@ func (s *blobStore) openNextActivePackLocked(ctx context.Context) error {
 	path := packFilePath(s.dir, packID)
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
 
 	prevPackID := s.curActivePackID
@@ -741,7 +742,7 @@ func (s *blobStore) readAtContext(ctx context.Context, ref BlobRef, offset int64
 		return ErrInvalidValue
 	}
 	if offset < 0 || uint64(offset)+uint64(len(dst)) > uint64(ref.Length) {
-		return io.ErrUnexpectedEOF
+		return wrapIOErr(io.ErrUnexpectedEOF)
 	}
 	if s.tryReadHot(ref, offset, dst) {
 		return nil
@@ -792,9 +793,9 @@ func (s *blobStore) readRangeAtContext(ctx context.Context, packID uint64, packO
 		if n == len(dst) {
 			return nil
 		}
-		return io.ErrUnexpectedEOF
+		return wrapIOErr(io.ErrUnexpectedEOF)
 	}
-	return err
+	return wrapIOErr(err)
 }
 
 func (s *blobStore) getOrOpenPackFile(packID uint64) (*os.File, error) {
@@ -812,7 +813,7 @@ func (s *blobStore) getOrOpenPackFile(packID uint64) (*os.File, error) {
 	}
 	f, err := os.Open(packFilePath(s.dir, packID))
 	if err != nil {
-		return nil, err
+		return nil, wrapIOErr(err)
 	}
 	s.packFiles[packID] = f
 	return f, nil
@@ -1054,12 +1055,13 @@ func (s *blobStore) sealAndSync(ctx context.Context, livePackIDs []uint64) error
 		packID := s.curActivePackID
 		file := s.activeFile
 		offset := s.activeOffset
+		var emptyCleanErr error
 		if offset > 0 {
 			var syncStart time.Time
 			if s.metrics != nil {
 				syncStart = time.Now()
 			}
-			syncErr := file.Sync()
+			syncErr := wrapIOErr(file.Sync())
 			if s.metrics != nil {
 				s.metrics.observeBlobSync(syncTargetPackData, syncTriggerFlushWAL, time.Since(syncStart))
 			}
@@ -1076,14 +1078,24 @@ func (s *blobStore) sealAndSync(ctx context.Context, livePackIDs []uint64) error
 			s.filesMu.Lock()
 			delete(s.packFiles, packID)
 			s.filesMu.Unlock()
-			_ = file.Close()
-			_ = os.Remove(packFilePath(s.dir, packID))
+			closeErr := wrapIOErr(file.Close())
+			rmErr := os.Remove(packFilePath(s.dir, packID))
+			if errors.Is(rmErr, os.ErrNotExist) {
+				rmErr = nil
+			} else {
+				rmErr = wrapIOErr(rmErr)
+			}
+			emptyCleanErr = errors.Join(closeErr, rmErr)
 		}
 		s.curActivePackID = 0
 		s.atomicActivePackID.Store(0)
 		s.activeFile = nil
 		s.activeOffset = 0
 		s.activeFlushedTo = 0
+		if emptyCleanErr != nil {
+			s.mu.Unlock()
+			return emptyCleanErr
+		}
 	}
 
 	var residualDirty []uint64
@@ -1194,7 +1206,7 @@ func (s *blobStore) syncPackWithTrigger(packID uint64, trigger syncTrigger) erro
 			if s.metrics != nil {
 				syncStart = time.Now()
 			}
-			err = syncFileData(file)
+			err = wrapIOErr(syncFileData(file))
 			if s.metrics != nil {
 				s.metrics.observeBlobSync(syncTargetPackData, trigger, time.Since(syncStart))
 			}
@@ -1284,13 +1296,13 @@ func (s *blobStore) syncPacksDir(trigger syncTrigger) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
 	var syncStart time.Time
 	if s.metrics != nil {
 		syncStart = time.Now()
 	}
-	syncErr := errors.Join(handle.Sync(), handle.Close())
+	syncErr := errors.Join(wrapIOErr(handle.Sync()), wrapIOErr(handle.Close()))
 	if s.metrics != nil {
 		s.metrics.observeBlobSync(syncTargetPacksDir, trigger, time.Since(syncStart))
 	}
@@ -1490,25 +1502,29 @@ func (s *blobStore) removePack(packID uint64) error {
 		<-flight.done
 	}
 
+	var closeErr error
 	s.filesMu.Lock()
 	if f, ok := s.packFiles[packID]; ok {
 		delete(s.packFiles, packID)
 		if f != nil {
-			_ = f.Close()
+			if fErr := f.Close(); fErr != nil && !errors.Is(fErr, os.ErrClosed) {
+				closeErr = wrapIOErr(fErr)
+			}
 		}
 	}
 	s.filesMu.Unlock()
 
 	err := os.Remove(packFilePath(s.dir, packID))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return closeErr
 	}
 	if err == nil {
 		s.mu.Lock()
 		s.markDirDirtyLocked()
 		s.mu.Unlock()
+		return closeErr
 	}
-	return err
+	return errors.Join(closeErr, wrapIOErr(err))
 }
 
 // close 安全停止后台回写与刷盘协程、排空待回收死包队列并关闭所有常驻 .pack 文件句柄。
@@ -1572,7 +1588,7 @@ func (s *blobStore) close() error {
 		delete(s.packFiles, id)
 		if f != nil {
 			if err := f.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-				errs = append(errs, err)
+				errs = append(errs, wrapIOErr(err))
 			}
 		}
 	}

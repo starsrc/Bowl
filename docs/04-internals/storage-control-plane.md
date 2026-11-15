@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `config.Module` | `services/storage/internal/config/` | `ServerConfig`、`ObservabilityConfig`、`DBPoolConfig`、`MetaConfig` 等配置视图 |
 | `obsfx.Module` | 外部包 `github.com/starsrc/pkg/observability/obsfx` | 隔离 Prometheus Registry、`observability.Ready`、Gatherer |
-| `db.Module` | `services/storage/internal/db/store.go:628` | `ProvidePool`（`*pgxpool.Pool`）、`NewStore`（`db.Store`） |
+| `db.Module` | `services/storage/internal/db/store.go:710` | `ProvidePool` 与 `NewStore` |
 | `control.Module` | `services/storage/internal/control/module.go:85` | `store.NewMetrics`、`newStorageEngineCollector`、`newManagerFromParams`（`control.Manager`） |
 | `server.Module` | `services/storage/internal/server/module.go:15` | `NewHTTPMetrics`、`ConfigureFineBucketMeterProvider`、`ConfigureStorageTracerProvider`、`New`（`*Server`） |
 
@@ -217,7 +217,7 @@ sequenceDiagram
 | Phase 1 | 目标盘保持在线；两盘各做只读快照；`store.DiffTrees` / `store.MergeTrees` 在 `StagingDir` 演算；物化 `commits/` 切面与 `srccommit` 崩溃标记 | 持 `lineageCommitMu.RLock` |
 | Phase 2 | 摘除并关闭旧目标 Actor；`InspectBranchStat` 比较 `(WriterEpoch, NextWriteSeq)` 水位，变化则 `ErrConcurrentMerge`；`db.Store.MergeDisk` 事务提交；`os.Rename` 把 `disks/target` 换成 staging 目录；重新打开 Actor | CAS 校验加数据库期望基线提交校验 |
 
-数据库事务内再做一次 CAS：`SQLStore.MergeDisk`（`db/store.go:386`）校验两盘 `BaseCommitID` 与期望值一致，否则返回 `db.ErrStaleBaseCommit`（映射 `Aborted/EBUSY`）。
+数据库事务内再做一次 CAS，位于 `db/store.go:468` 的 `SQLStore.MergeDisk` 校验两盘 `BaseCommitID` 与期望值一致，不一致时返回 `db.ErrStaleBaseCommit` 并映射为 `Aborted` 与 `EBUSY`。
 
 **崩溃恢复**：`openDiskActor`（`control.go:578`）在打开读写 Actor 前调用 `reconcilePendingMergeLocked`，扫描 `disks/` 中残留的 `.merge.*`、`.old.*`、`.srccommit.*` 产物，以 PostgreSQL 记录的 `BaseCommitID` 为准前滚或回滚。`DeleteDisk` 在清理血缘前也会先协助他盘完成挂起合并（`reconcileOtherPendingMergesBeforeDelete`）。
 
@@ -227,11 +227,11 @@ sequenceDiagram
 
 ### 4.1 `Store` 接缝
 
-`db.Store`（`db/store.go:100`）是控制面唯一的持久化接口，共 9 个方法：`CreateDisk`、`ForkDisk`、`GetDisk`、`ListDisks`、`ListLineageCommits`、`UpdateDiskName`、`MergeDisk`、`DeleteDisk`、`ReserveSegment`。上层只依赖这个接口。
+`db.Store`（`db/store.go:101`）是控制面唯一的持久化接口，共 9 个方法：`CreateDisk`、`ForkDisk`、`GetDisk`、`ListDisks`、`ListLineageCommits`、`UpdateDiskName`、`MergeDisk`、`DeleteDisk`、`ReserveSegment`。上层只依赖这个接口。
 
 | 实现 | 文件 | 用途 |
 | --- | --- | --- |
-| `SQLStore` | `db/store.go` | 生产实现，`sqlc` 生成的 `Queries` 加 `tx.PGXTransactor` 事务封装 |
+| `SQLStore` | `db/store.go` | 生产实现，组合 `sqlc` 生成的 `Queries`、`tx.Beginner` 与 `tx.Retry` 执行 `execTx` 与 `execQuery` |
 | `MemStore` | `db/mem_store.go` | 进程内实现，用于 `control` 与 `server` 单测；`SetFailNextWrite` 注入写失败，`Inspect` 取深拷贝快照 |
 
 ### 4.2 `sqlc` 与迁移
@@ -243,14 +243,17 @@ sequenceDiagram
 
 ### 4.3 事务与锁序
 
-`SQLStore` 的写操作都在 `ExecTxWithOptions(..., tx.WithDefaultRetry())` 内执行，序列化冲突自动重试。锁序固定，防止死锁：
+`SQLStore` 将多语句写操作收敛至 `execTx`，将单语句写操作与只读查询收敛至 `execQuery`。`execTx` 调用 `tx.Retry` 包裹 `execSingleTx`，在每轮重试中通过 `attemptCtx` 开启事务、执行闭包并在失败或 panic 时以 `context.WithoutCancel` 加 5 秒超时回滚；`execQuery` 直接调用 `tx.Retry` 复用连接池查询并透传 `attemptCtx`，不开启数据库事务。两条路径均采用 `tx.WithDefaultRetry` 自动重试 SQLSTATE `40001` 与 `40P01` 冲突，并在外层返回前统一调用一次 `mapPGXErr` 转换驱动错误。各操作路径与锁序如下：
 
-| 操作 | 锁序 |
-| --- | --- |
-| `ForkDisk`（`store.go:233`） | `GetDisk` 取血缘 → `LockDiskLineage` → `GetDiskForUpdate` → `CreateDiskCommit` → `SetDiskBaseCommit` → `CreateDisk` |
-| `MergeDisk`（`store.go:386`） | `LockDiskLineage` → 两盘按 UUID 字符串升序 `GetDiskForUpdate` → 校验血缘与基线 → 建提交 → `SetDiskBaseCommitAndTouch` |
-| `DeleteDisk`（`store.go:478`） | `disk_lineages` → `disks`，并执行三态血缘提交回收 |
-| `ReserveSegment`（`store.go:556`） | 对 `disk_lineages` 执行单条 `UPDATE ... RETURNING`（`ReserveInodeSegment` / `ReservePackSegment`），`tx.Retry` 包装 |
+| 操作 | 源码位置 | 执行路径与锁序 |
+| --- | --- | --- |
+| `CreateDisk` | `store.go:261` | 走 `execTx`，依次执行 `CreateDiskLineage` 与 `CreateDisk` |
+| `ForkDisk` | `store.go:289` | 走 `execTx`，先调用 `GetDisk` 取血缘，再依次执行 `LockDiskLineage`、`GetDiskForUpdate`、`CreateDiskCommit`、`SetDiskBaseCommit`、`CreateDisk` |
+| `GetDisk`、`ListDisks`、`ListLineageCommits` | `store.go:344`、`store.go:365`、`store.go:419` | 走 `execQuery`，通过 `attemptCtx` 执行单条只读查询 |
+| `UpdateDiskName` | `store.go:444` | 走 `execQuery`，对 `disks` 执行单条 `UpdateDisk` 语句 |
+| `MergeDisk` | `store.go:468` | 走 `execTx`，先执行 `LockDiskLineage`，再按 UUID 升序调用 `GetDiskForUpdate`，校验血缘与基线后写入提交并调用 `SetDiskBaseCommitAndTouch` |
+| `DeleteDisk` | `store.go:560` | 走 `execTx`，按 `disk_lineages` 到 `disks` 顺序加锁删盘，再按剩余盘数执行三态血缘提交回收 |
+| `ReserveSegment` | `store.go:638` | 走 `execQuery`，对 `disk_lineages` 执行单条 `ReserveInodeSegment` 或 `ReservePackSegment` 语句 |
 
 ### 4.4 契约互验：`store_contract_test.go`
 

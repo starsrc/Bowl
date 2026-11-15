@@ -2,7 +2,9 @@
 package store
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"math"
 )
 
@@ -118,3 +120,47 @@ const (
 	AtimeModeRelAtime    AtimeMode = 1
 	AtimeModeStrictAtime AtimeMode = 2
 )
+
+var storeSentinels = [...]error{
+	ErrClosed,
+	ErrReadOnly,
+	ErrNotFound,
+	ErrExist,
+	ErrNotDir,
+	ErrIsDir,
+	ErrNotEmpty,
+	ErrInvalid,
+	ErrInvalidKey,
+	ErrInvalidValue,
+	ErrPerm,
+	ErrNoData,
+	ErrNoSpace,
+	ErrInodeExhausted,
+	ErrNameTooLong,
+	ErrTooManyLinks,
+	ErrFileTooLarge,
+	ErrNotSupported,
+	ErrRange,
+	ErrIO,
+	ErrStaleEpoch,
+	ErrQuotaShrinkBelowUsed,
+}
+
+// wrapIOErr 将底层 OS、Pebble 或块存储错误包装为 ErrIO，保留领域哨兵错误、合并冲突错误与上下文取消错误原值。
+func wrapIOErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	for _, s := range storeSentinels {
+		if errors.Is(err, s) {
+			return err
+		}
+	}
+	if _, ok := errors.AsType[*ErrMergeConflict](err); ok {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrIO, err)
+}

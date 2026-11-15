@@ -9,9 +9,9 @@
 | 路径 | 入口 | 并发模型 |
 | --- | --- | --- |
 | 读（`GetAttr`、`Read`、`ReadDir` 等） | 直接调用 `s.db.Get` / `s.db.NewIter` | **队列外无锁直读**：不入队，只持 `lifecycleMu` 读锁（`enter()`）防止 Actor 被关闭 |
-| 写（`Write`、`Create`、`Rename` 等） | `submit` → `enqueueAndWait`（`actor.go:979`、`actor.go:995`） | **双缓冲 MPSC 队列**，由单个 Actor 协程串行处理 |
+| 写（`Write`、`Create`、`Rename` 等） | `submit` → `enqueueAndWait`（`actor.go:997`、`actor.go:1013`） | **双缓冲 MPSC 队列**，由单个 Actor 协程串行处理 |
 
-写队列在 `StoreActor.mb`（`actor.go:225-231`）：`active` 供任意 RPC 协程追加，`draining` 供 Actor 协程处理。`runLoop`（`actor.go:1102`）收到 `notify` 信号后，在持锁状态下交换两个切片（指针交换，不拷贝命令），随后无锁处理 `draining`。命令载体 `writeCmd` 由 `sync.Pool` 复用，每个命令带一个容量为 1 的 `done` 通道，调用方阻塞在 `<-cmd.done`。
+写队列在 `StoreActor.mb`（`actor.go:225-231`）：`active` 供任意 RPC 协程追加，`draining` 供 Actor 协程处理。`runLoop`（`actor.go:1120`）收到 `notify` 信号后，在持锁状态下交换两个切片（指针交换，不拷贝命令），随后无锁处理 `draining`。命令载体 `writeCmd` 由 `sync.Pool` 复用，每个命令带一个容量为 1 的 `done` 通道，调用方阻塞在 `<-cmd.done`。
 
 ```mermaid
 flowchart TD
@@ -36,7 +36,7 @@ flowchart TD
     PB -.->|"BatchSet*Deferred"| PDB
 ```
 
-### 1.2 一次 Tick 的四步（`processTick`，`actor.go:1129`）
+### 1.2 一次 Tick 的四步（`processTick`，`actor.go:1147`）
 
 | 步骤 | 动作 |
 | --- | --- |
@@ -47,7 +47,7 @@ flowchart TD
 
 ### 1.3 Phase A：只读预校验
 
-`validateCmd`（`actor.go:1425`）的约束：
+`validateCmd`（`actor.go:1449`）的约束：
 
 - 只读取，不写入 `s.batch`。校验读取的是 `s.batch`（`IndexedBatch`），因此**同一 Tick 内前序命令的未提交写入对后序命令可见**，不会出现读到旧状态的竞态。
 - 所有外部写操作先比较 `cmd.epoch` 与 `s.stat.WriterEpoch`，不一致返回 `ErrStaleEpoch` 并计入世代栅栏指标。
@@ -56,7 +56,7 @@ flowchart TD
 
 ### 1.4 Phase B：`SetDeferred` / `DeleteDeferred` 编码
 
-`mutateCmd`（`actor.go:1475`）在 Phase A 通过后"必定成功"：
+`mutateCmd`（`actor.go:1499`）在 Phase A 通过后"必定成功"：
 
 - 修改内存中的 `s.stat`（`LogicalBytes`、`Inodes`、`NextWriteSeq`）与 `s.packStats`。
 - 通过 `values.go` 中的 `Batch*Deferred` 函数把键值编码写入 `s.batch`：`BatchSetInodeDeferred`、`BatchSetEntryDeferred`、`BatchSetDataDeferred`、`BatchDeleteEntryDeferred` 等。"Deferred"指 `pebble.Batch.SetDeferred` / `DeleteDeferred`：先预留键值空间，再原地填充字节，免去中间缓冲拷贝。
@@ -67,10 +67,23 @@ flowchart TD
 | 场景 | 提交方式 | 含义 |
 | --- | --- | --- |
 | 普通写批次 | `db.Apply(batch, NoSync)`，并置 `walDirty=true` | 写进 WAL 缓冲，不等落盘；崩溃可能丢失最近写入 |
-| 批次含 `Fsync` / `FsyncDir`（`syncBarrier`） | `commitWithSyncBarrier`（`actor.go:1518`） | `ApplyNoSyncWait(batch, Sync)` 后，并行执行脏 `.pack` 的 `fdatasync`，再 `batch.SyncWait()`；两者都成功才算持久 |
-| 仅有屏障、无批次 | `syncBarrierWithoutBatch`（`actor.go:1559`） | `db.LogData(nil, Sync)` 加 `.pack` 同步并行 |
+| 批次含 `Fsync` / `FsyncDir`（`syncBarrier`） | `commitWithSyncBarrier`（`actor.go:1542`） | `ApplyNoSyncWait(batch, Sync)` 后，并行执行脏 `.pack` 的 `fdatasync`，再 `batch.SyncWait()`；两者都成功才算持久 |
+| 仅有屏障、无批次 | `syncBarrierWithoutBatch`（`actor.go:1583`） | `db.LogData(nil, Sync)` 加 `.pack` 同步并行 |
 
 屏障保证"索引不先于数据落盘"：`BlobRef` 指向的 `.pack` 字节在 WAL 同步返回前已 `fdatasync`。
+
+### 1.6 I/O 错误分类与关闭错误聚合
+
+底层 OS、Pebble 与 `.pack` 读写错误经过 `errors.go:150` 的 `wrapIOErr` 归类。
+
+| 分类规则 | 适用输入 | 返回语义 |
+| --- | --- | --- |
+| 空值直通 | `err == nil` | 返回 `nil` |
+| 原值保留 | `context.Canceled`、`context.DeadlineExceeded`、22 个 `Err*` 领域哨兵与 `*ErrMergeConflict` | 返回原错误，不包装进 `ErrIO` |
+| 外部回调透传 | `InoAllocator`、`PackAllocator`、`SanitizeCheckpoint` 传入的 `openFn` 与遍历回调 `fn` | 不调用 `wrapIOErr`，原样返回回调错误 |
+| 底层 I/O 包装 | 上述错误以外的 OS、Pebble 与块文件短读错误 | 用 `%w: %w` 包装为 `ErrIO`，保留底层错误供 `errors.Is` 匹配 |
+
+单函数作用域的 `NewIter` 迭代器通过命名返回值与 `errors.Join` 合并 `wrapIOErr(iter.Error())` 与 `wrapIOErr(iter.Close())`。跨方法持有的游标包装器 `sideIter` 与 `dataBlockCursor` 在解码与步进时调用 `wrapIOErr(iter.Error())`，在 `close` 方法内调用 `wrapIOErr(iter.Close())`，并由调用方在 `defer` 中用 `errors.Join` 聚合 `close` 错误。各路径对独立的 `pebble.Batch` 与临时 `stagingDB` 同样使用 `errors.Join` 聚合关闭错误，不丢弃 `Close` 返回值。`Open` 在 `ReadOnly` 模式打开缺失目录时先调用 `Stat` 并经过 `wrapIOErr` 返回，返回错误同时匹配 `os.ErrNotExist` 与 `ErrIO`。`.pack` 冷读在 `blob.go:732` 的 `readAtContext` 与 `blob.go:755` 的 `readRangeAtContext` 遇到短读时返回 `wrapIOErr(io.ErrUnexpectedEOF)`，返回错误同时匹配 `ErrIO` 与 `io.ErrUnexpectedEOF`。
 
 ## 2. Pebble 键空间与值编码
 
@@ -110,15 +123,15 @@ flowchart TD
 
 | 常量 | 值 | 位置 |
 | --- | --- | --- |
-| `BlobSize` | `256 KiB`（`256 << 10`）：逻辑分块网格 | `errors.go:59` |
-| `PackMaxSize` | `64 MiB`：单个 `.pack` 封口上限 | `errors.go:60` |
-| `InodeSegment` / `PackSegment` | `4096` / `64`：向血缘预留号段的步长 | `errors.go:58`、`blob.go:23` |
+| `BlobSize` | `256 KiB`（`256 << 10`）：逻辑分块网格 | `errors.go:61` |
+| `PackMaxSize` | `64 MiB`：单个 `.pack` 封口上限 | `errors.go:62` |
+| `InodeSegment` / `PackSegment` | `4096` / `64`：向血缘预留号段的步长 | `errors.go:60`、`blob.go:23` |
 | 热块缓存 | 16 分片 x 64 槽位，总预算 `64 MiB`，每分片 `4 MiB` | `blob.go:31-35` |
 | 异步回写窗口 | `8 MiB`（`packWritebackWindow`） | `blob.go:38` |
 
 文件数据的映射关系：文件内偏移 `off` 落在逻辑块 `off / 256 KiB`；每个逻辑块在 Pebble 中恰好对应 1 条 `data:<ino>:<blockIdx>` 键，值指向 `.pack` 内一段 `1..256 KiB` 的紧凑字节。稀疏空洞没有键，读取时填零；全零块在写入时被省略（`writeModeZeroElide`）。
 
-物理文件为 `<disk_dir>/packs/<packID 的 16 位十六进制>.pack`（`packFileName`，`blob.go:330`）。`PackID` 由控制面按血缘预留号段，保证同一血缘的所有分叉盘不会生成同名 `.pack`。
+物理文件为 `<disk_dir>/packs/<packID 的 16 位十六进制>.pack`（`packFileName`，`blob.go:331`）。`PackID` 由控制面按血缘预留号段，保证同一血缘的所有分叉盘不会生成同名 `.pack`。
 
 ### 3.2 写路径：块在队列外落盘，索引在队列内提交
 
@@ -134,10 +147,10 @@ flowchart TD
 
 1. 中间整块且全零：直接省略。
 2. 整块且非零：`stageAppend` 追加，无需读旧块。
-3. 旧块存在且写入起点不小于旧块长度：尝试 **`ExtendTail`**（`blob.go:489`）。条件是旧块恰好位于当前活跃 `.pack` 的最末尾（`oldRef.PackID == curActivePackID` 且 `oldRef.Offset + oldRef.Length == activeOffset`）且扩展后不超 64 MiB。命中则原地顺延写指针，不产生新块、写放大为 0；不满足返回 `(BlobRef{}, false, nil)` 回退。
+3. 旧块存在且写入起点不小于旧块长度：尝试 **`extendTail`**（`blob.go:490`）。条件是旧块恰好位于当前活跃 `.pack` 的最末尾（`oldRef.PackID == curActivePackID` 且 `oldRef.Offset + oldRef.Length == activeOffset`）且扩展后不超 64 MiB。命中则原地顺延写指针，不产生新块、写放大为 0；不满足返回 `(BlobRef{}, false, nil)` 回退。
 4. 其余：**RMW 局部写合并**：读旧块（`readAtContext`）→ 在 `merged` 缓冲覆盖新数据 → 若合并结果全零则省略 → 否则 `stageAppend` 追加新块。旧块变成死空间。
 
-追加写由 `blobStore.append` / `appendBlocks`（`blob.go:356`、`blob.go:406`）完成：当前活跃 `.pack` 剩余不足时 `openNextActivePackLocked` 封口并创建新包；写入后 `markPackDirtyLocked` 登记 inode 的脏包，并把数据写入热块缓存（整块批量写跳过用户态缓存拷贝）。
+追加写由 `blobStore.append` / `appendBlocks`（`blob.go:357`、`blob.go:407`）完成：当前活跃 `.pack` 剩余不足时 `openNextActivePackLocked` 封口并创建新包；写入后 `markPackDirtyLocked` 登记 inode 的脏包，并把数据写入热块缓存（整块批量写跳过用户态缓存拷贝）。
 
 预写成功后，命令携带 `stagedBlobs` 入队。预写块在 Phase B 入账前被 `pinPackID` 钉住，防止被并发回收。Phase A 失败时，预写块被 `recordDeadBlobWrite` 记为死空间，不会让 `LiveBytes` 虚增。
 
@@ -155,11 +168,11 @@ flowchart TD
 
 ### 4.1 存活记账
 
-每个 `.pack` 在 Pebble 中有一条 `sys:pack:<packID>` 记录 `PackMeta{LiveBytes, TotalBytes}`，由 Actor 协程在 Phase B 通过 `addBlobRef` / `removeBlobRef`（`pack_lifecycle.go:145`、`pack_lifecycle.go:162`）实时维护，并在 Seal 阶段由 `flushDirtyPackStatsToBatch` 写入批次。
+每个 `.pack` 在 Pebble 中有一条 `sys:pack:<packID>` 记录 `PackMeta{LiveBytes, TotalBytes}`，由 Actor 协程在 Phase B 通过 `addBlobRef` / `removeBlobRef`（`pack_lifecycle.go:148`、`pack_lifecycle.go:165`）实时维护，并在 Seal 阶段由 `flushDirtyPackStatsToBatch` 写入批次。
 
 ### 4.2 `LiveBytes == 0`：WAL 同步后秒删
 
-`flushDirtyPackStatsToBatch`（`pack_lifecycle.go:309`）对满足以下条件的包删除其 `sys:pack` 键并收集为 `deadPacks`：`LiveBytes == 0`、不是当前活跃包、没有被 `pinPackID` 钉住。随后：
+`flushDirtyPackStatsToBatch`（`pack_lifecycle.go:312`）对满足以下条件的包删除其 `sys:pack` 键并收集为 `deadPacks`：`LiveBytes == 0`、不是当前活跃包、没有被 `pinPackID` 钉住。随后：
 
 - 批次走 `commitWithSyncBarrier` 时，WAL 同步成功后调用 `enqueueRemovePacks`，由后台 `reclaimLoop` 执行 `removePack`（关闭句柄、`evictHotPack`、`os.Remove`）。
 - 批次走普通 `NoSync` 提交时，死包进入 `pendingDeadPacks`，等下一次屏障（`takePendingDeadPacks`）再删除；WAL 同步失败则 `restorePendingDeadPacks` 放回。
@@ -190,11 +203,11 @@ sequenceDiagram
 关键点：
 
 - **CAS 搬迁**：`validateCompactRelocateCmd`（`compact.go`）在 Phase A 用 `s.batch.Get(DataKey)` 检查该块仍属于存活的常规文件，且 `curRef == oldRef`。扫描到搬迁之间若被前台覆写、截断或删除，CAS 不通过，该块不更新指针，预写的新块记为死空间（`recordDeadBlobWrite`），避免"旧值回写覆盖新数据"。
-- **双重持久化屏障**：先 `blobs.sync()`（新包 `fdatasync`），再 `FlushWAL()`（`db.LogData(nil, pebble.Sync)`，`actor.go:902`）。只有两者都完成，旧 `.pack` 才会被物理删除；若顺序颠倒，崩溃后索引可能指向未落盘的新包或已删的旧包。
+- **双重持久化屏障**：先 `blobs.sync()`（新包 `fdatasync`），再 `FlushWAL()`（`db.LogData(nil, pebble.Sync)`，`actor.go:920`）。只有两者都完成，旧 `.pack` 才会被物理删除；若顺序颠倒，崩溃后索引可能指向未落盘的新包或已删的旧包。
 - 搬迁期间源包被 `pinPackIDs` 钉住，屏障完成后 `unpinPackIDs`。
 
 ::: tip 排错入口
-Actor 内部的 `atomicLowWatermarkPacks` 与 `atomicPendingDeadPacks` 计数反映回收积压（由控制面的 `storageEngineCollector` 导出为指标）；`slow actor tick` 日志包含 `pack_sync_ms`、`wal_apply_ms`、`dead_pack_remove_ms` 各阶段耗时（`actor.go:1368-1386`）。指标全集见 [可观测性](/03-interfaces/observability)。
+Actor 内部的 `atomicLowWatermarkPacks` 与 `atomicPendingDeadPacks` 计数反映回收积压（由控制面的 `storageEngineCollector` 导出为指标）；`slow actor tick` 日志包含 `pack_sync_ms`、`wal_apply_ms`、`dead_pack_remove_ms` 各阶段耗时（`actor.go:1392-1410`）。指标全集见 [可观测性](/03-interfaces/observability)。
 :::
 
 ## 5. 相关测试入口
@@ -204,5 +217,6 @@ Actor 内部的 `atomicLowWatermarkPacks` 与 `atomicPendingDeadPacks` 计数反
 | 引擎全部单测 | `cd services/storage && go test ./internal/store/...` |
 | 回收与 CAS 搬迁 | `go test ./internal/store -run CompactPacks`（文件 `pack_compact_test.go`，例如 `TestGivenLowAndHighWatermarkPacksWhenCompactPacksThenLowWatermarkRelocatedAndHighKept`） |
 | 数据读写与部分写 | 文件 `data_io_test.go`、`internal_race_test.go` |
+| I/O 分类与关闭契约 | 文件 `io_close_contract_test.go`，运行 `GOWORK=off go -C services/storage test ./internal/store -run TestIOClose` |
 
 测试钩子（`beforeTickHook`、`beforeCompactRelocateHook`、`syncFileHook`、`removePackHook`）仅在包内测试中注入，生产路径保持零值。

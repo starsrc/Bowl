@@ -83,17 +83,22 @@ func xattrExists(reader pebbleReader, ino uint64, name []byte) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, wrapIOErr(err)
 	}
-	return true, closer.Close()
+	if closeErr := wrapIOErr(closer.Close()); closeErr != nil {
+		return false, closeErr
+	}
+	return true, nil
 }
 
 func checkXattrListQuota(reader pebbleReader, ino uint64, newName []byte) (err error) {
-	iter, err := reader.NewIter(nil)
-	if err != nil {
-		return err
+	iter, openErr := reader.NewIter(nil)
+	if openErr != nil {
+		return wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+	}()
 
 	total := len(newName) + 1
 	prefix := XattrPrefix(ino)
@@ -106,9 +111,6 @@ func checkXattrListQuota(reader pebbleReader, ino uint64, newName []byte) (err e
 		if total > MaxXattrListBytes {
 			return ErrNoSpace
 		}
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return iterErr
 	}
 	if total > MaxXattrListBytes {
 		return ErrNoSpace
@@ -236,10 +238,10 @@ func (s *StoreActor) GetXattr(ctx context.Context, ino uint64, name []byte) ([]b
 		return nil, ErrNoData
 	}
 	if err != nil {
-		return nil, err
+		return nil, wrapIOErr(err)
 	}
 	out := append([]byte{}, val...)
-	if closeErr := closer.Close(); closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); closeErr != nil {
 		return nil, closeErr
 	}
 	return out, nil
@@ -291,11 +293,16 @@ func (s *StoreActor) ListXattr(ctx context.Context, ino uint64) (names [][]byte,
 		finishSpan(scanSpan, err)
 	}()
 
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			names = nil
+		}
+	}()
 
 	names = [][]byte{}
 	prefix := XattrPrefix(ino)
@@ -305,9 +312,6 @@ func (s *StoreActor) ListXattr(ctx context.Context, ino uint64) (names [][]byte,
 			return nil, decErr
 		}
 		names = append(names, name)
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return names, nil
 }

@@ -55,17 +55,19 @@ func (s *StoreActor) HasOrphans() (has bool, err error) {
 }
 
 func (s *StoreActor) hasOrphansInDB() (has bool, err error) {
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return false, err
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return false, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			has = false
+		}
+	}()
 
 	prefix := OrphanPrefix()
 	valid := iter.SeekGE(prefix) && bytes.HasPrefix(iter.Key(), prefix)
-	if iterErr := iter.Error(); iterErr != nil {
-		return false, iterErr
-	}
 	return valid, nil
 }
 
@@ -90,7 +92,7 @@ func (s *StoreActor) Checkpoint(ctx context.Context, destDir string) (Checkpoint
 	if _, statErr := os.Stat(cleanDest); statErr == nil {
 		return CheckpointStats{}, ErrExist
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return CheckpointStats{}, statErr
+		return CheckpointStats{}, wrapIOErr(statErr)
 	}
 
 	op := &checkpointOp{destDir: cleanDest}
@@ -111,7 +113,7 @@ func (s *StoreActor) validateCheckpointCmd(cmd *writeCmd) error {
 	if _, statErr := os.Stat(op.destDir); statErr == nil {
 		return ErrExist
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return statErr
+		return wrapIOErr(statErr)
 	}
 	return nil
 }
@@ -130,7 +132,7 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 	}
 
 	// 1. 将活跃 MemTable 刷为不可变 L0 .sst，消除切面打开时的 WAL 回放开销。
-	if flushErr := s.db.Flush(); flushErr != nil {
+	if flushErr := wrapIOErr(s.db.Flush()); flushErr != nil {
 		return flushErr
 	}
 
@@ -149,7 +151,7 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 
 	// 3. Pebble DB.Checkpoint 要求目标目录预先不存在（否则返回 os.ErrExist），
 	//    故先在 runLoop 静止屏障内创建 Pebble Checkpoint，再封口刷盘活跃 .pack 并硬链接存活包至切面目录。
-	if ckErr := s.db.Checkpoint(op.destDir); ckErr != nil {
+	if ckErr := wrapIOErr(s.db.Checkpoint(op.destDir)); ckErr != nil {
 		return ckErr
 	}
 	if sealErr := s.blobs.sealAndSync(ctx, livePackIDs); sealErr != nil {
@@ -242,21 +244,17 @@ func SanitizeCheckpoint(ctx context.Context, opts SanitizeOptions) (st StatFSRes
 	}
 
 	if cleanErr := actor.CleanOrphans(ctx); cleanErr != nil {
-		_ = actor.Close()
-		return StatFSResult{}, cleanErr
+		return StatFSResult{}, errors.Join(cleanErr, actor.Close())
 	}
 	if walErr := actor.FlushWAL(); walErr != nil {
-		_ = actor.Close()
-		return StatFSResult{}, walErr
+		return StatFSResult{}, errors.Join(walErr, actor.Close())
 	}
-	if flushErr := actor.db.Flush(); flushErr != nil {
-		_ = actor.Close()
-		return StatFSResult{}, flushErr
+	if flushErr := wrapIOErr(actor.db.Flush()); flushErr != nil {
+		return StatFSResult{}, errors.Join(flushErr, actor.Close())
 	}
 	st, statErr := actor.StatFS(ctx)
 	if statErr != nil {
-		_ = actor.Close()
-		return StatFSResult{}, statErr
+		return StatFSResult{}, errors.Join(statErr, actor.Close())
 	}
 	if closeErr := actor.Close(); closeErr != nil {
 		return StatFSResult{}, closeErr
@@ -294,7 +292,7 @@ func CloneCheckpointDir(ctx context.Context, srcDir, dstDir string) (retErr erro
 
 	srcInfo, err := os.Stat(srcClean)
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
 	if !srcInfo.IsDir() {
 		return ErrNotDir
@@ -303,15 +301,15 @@ func CloneCheckpointDir(ctx context.Context, srcDir, dstDir string) (retErr erro
 	if _, statErr := os.Stat(dstClean); statErr == nil {
 		return ErrExist
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return statErr
+		return wrapIOErr(statErr)
 	}
 
 	parentDir := filepath.Dir(dstClean)
 	if mkParentErr := os.MkdirAll(parentDir, 0o755); mkParentErr != nil {
-		return mkParentErr
+		return wrapIOErr(mkParentErr)
 	}
 	if mkErr := os.Mkdir(dstClean, 0o755); mkErr != nil {
-		return mkErr
+		return wrapIOErr(mkErr)
 	}
 	defer func() {
 		if retErr != nil {
@@ -321,7 +319,7 @@ func CloneCheckpointDir(ctx context.Context, srcDir, dstDir string) (retErr erro
 
 	entries, readErr := os.ReadDir(srcClean)
 	if readErr != nil {
-		return readErr
+		return wrapIOErr(readErr)
 	}
 
 	for _, entry := range entries {
@@ -347,7 +345,7 @@ func CloneCheckpointDir(ctx context.Context, srcDir, dstDir string) (retErr erro
 
 		if isImmutablePebbleDataFile(name) {
 			if linkErr := os.Link(srcPath, dstPath); linkErr != nil {
-				return linkErr
+				return wrapIOErr(linkErr)
 			}
 			continue
 		}
@@ -368,11 +366,11 @@ func isImmutablePebbleDataFile(name string) bool {
 
 func clonePacksSubdir(srcPacksDir, dstPacksDir string) error {
 	if mkErr := os.MkdirAll(dstPacksDir, 0o755); mkErr != nil {
-		return mkErr
+		return wrapIOErr(mkErr)
 	}
 	entries, readErr := os.ReadDir(srcPacksDir)
 	if readErr != nil {
-		return readErr
+		return wrapIOErr(readErr)
 	}
 
 	packNames := make([]string, 0, len(entries))
@@ -398,13 +396,13 @@ func linkPackFilesToDir(srcPacksDir, dstPacksDir string, packNames []string, met
 		return ErrInvalid
 	}
 	if mkErr := os.MkdirAll(dstPacksDir, 0o755); mkErr != nil {
-		return mkErr
+		return wrapIOErr(mkErr)
 	}
 
 	if len(packNames) < checkpointLinkThreshold {
 		for _, name := range packNames {
 			if linkErr := os.Link(filepath.Join(srcPacksDir, name), filepath.Join(dstPacksDir, name)); linkErr != nil {
-				return linkErr
+				return wrapIOErr(linkErr)
 			}
 		}
 	} else {
@@ -425,7 +423,7 @@ func linkPackFilesToDir(srcPacksDir, dstPacksDir string, packNames []string, met
 					}
 					name := packNames[i]
 					if linkErr := os.Link(filepath.Join(srcPacksDir, name), filepath.Join(dstPacksDir, name)); linkErr != nil {
-						errList[i] = linkErr
+						errList[i] = wrapIOErr(linkErr)
 						failed.Store(true)
 						return
 					}
@@ -457,11 +455,11 @@ func linkPackFilesToDir(srcPacksDir, dstPacksDir string, packNames []string, met
 
 func copySubdirRecursive(srcDir, dstDir string) error {
 	if mkErr := os.MkdirAll(dstDir, 0o755); mkErr != nil {
-		return mkErr
+		return wrapIOErr(mkErr)
 	}
 	entries, readErr := os.ReadDir(srcDir)
 	if readErr != nil {
-		return readErr
+		return wrapIOErr(readErr)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -483,30 +481,32 @@ func copySubdirRecursive(srcDir, dstDir string) error {
 	return syncDirPath(dstDir)
 }
 
-func copyFileWithSync(srcPath, dstPath string) error {
+func copyFileWithSync(srcPath, dstPath string) (retErr error) {
 	srcFile, openErr := os.Open(srcPath)
 	if openErr != nil {
-		return openErr
+		return wrapIOErr(openErr)
 	}
-	defer func() { _ = srcFile.Close() }()
+	defer func() {
+		retErr = errors.Join(retErr, wrapIOErr(srcFile.Close()))
+	}()
 
 	dstFile, createErr := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if createErr != nil {
-		return createErr
+		return wrapIOErr(createErr)
 	}
 	defer func() {
 		if dstFile != nil {
-			_ = dstFile.Close()
+			retErr = errors.Join(retErr, wrapIOErr(dstFile.Close()))
 		}
 	}()
 
 	if _, copyErr := io.Copy(dstFile, srcFile); copyErr != nil {
-		return copyErr
+		return wrapIOErr(copyErr)
 	}
 	if syncErr := dstFile.Sync(); syncErr != nil {
-		return syncErr
+		return wrapIOErr(syncErr)
 	}
-	closeErr := dstFile.Close()
+	closeErr := wrapIOErr(dstFile.Close())
 	dstFile = nil
 	return closeErr
 }
@@ -517,7 +517,7 @@ func syncDirPath(dir string) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
-	return errors.Join(handle.Sync(), handle.Close())
+	return errors.Join(wrapIOErr(handle.Sync()), wrapIOErr(handle.Close()))
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -233,12 +234,12 @@ type MergeResult struct {
 	NextWriteSeq   uint64
 }
 
-func openReadOnlyForInspect(dir string, cache *pebble.Cache) (*StoreActor, func(), error) {
+func openReadOnlyForInspect(dir string, cache *pebble.Cache) (*StoreActor, func() error, error) {
 	if dir == "" {
 		return nil, nil, ErrInvalid
 	}
 	if _, err := os.Stat(dir); err != nil {
-		return nil, nil, err
+		return nil, nil, wrapIOErr(err)
 	}
 	var owned *pebble.Cache
 	if cache == nil {
@@ -256,33 +257,41 @@ func openReadOnlyForInspect(dir string, cache *pebble.Cache) (*StoreActor, func(
 		}
 		return nil, nil, err
 	}
-	cleanup := func() {
-		_ = actor.Close()
+	cleanup := func() error {
+		closeErr := actor.Close()
 		if owned != nil {
 			owned.Unref()
 		}
+		return closeErr
 	}
 	return actor, cleanup, nil
 }
 
 // InspectBranchStat 以零后台协程只读模式打开 rootDir，读取 sys:stat 的 WriterEpoch/NextWriteSeq 及是否存在孤儿前缀。
 func InspectBranchStat(rootDir string) (writerEpoch, nextWriteSeq uint64, hasOrphans bool, err error) {
-	actor, cleanup, err := openReadOnlyForInspect(rootDir, nil)
-	if err != nil {
-		return 0, 0, false, err
+	actor, cleanup, openErr := openReadOnlyForInspect(rootDir, nil)
+	if openErr != nil {
+		return 0, 0, false, openErr
 	}
-	defer cleanup()
+	defer func() {
+		err = errors.Join(err, cleanup())
+		if err != nil {
+			writerEpoch = 0
+			nextWriteSeq = 0
+			hasOrphans = false
+		}
+	}()
 
-	orphans, err := actor.hasOrphansInDB()
-	if err != nil {
-		return 0, 0, false, err
+	orphans, orphErr := actor.hasOrphansInDB()
+	if orphErr != nil {
+		return 0, 0, false, orphErr
 	}
 	return actor.stat.WriterEpoch, actor.stat.NextWriteSeq, orphans, nil
 }
 
 // ReadCommitNodeSlice 以零后台协程只读模式读取 rootDir 中指定存活常规文件或符号链接的切片载荷，
 // 对常规文件严格按已有稀疏空洞与尾部截断语义补齐 0x00。
-func ReadCommitNodeSlice(rootDir string, ino, offset uint64, size uint32) (*ReadNodeResult, error) {
+func ReadCommitNodeSlice(rootDir string, ino, offset uint64, size uint32) (res *ReadNodeResult, retErr error) {
 	if rootDir == "" || ino == 0 || ino > uint64(math.MaxInt64) || offset > MaxFileSize || size > MaxReadNodeSliceBytes {
 		return nil, ErrInvalid
 	}
@@ -290,7 +299,12 @@ func ReadCommitNodeSlice(rootDir string, ino, offset uint64, size uint32) (*Read
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
+	defer func() {
+		retErr = errors.Join(retErr, cleanup())
+		if retErr != nil {
+			res = nil
+		}
+	}()
 
 	ctx := context.Background()
 	inode, err := actor.readInodeFromDB(ctx, ino)

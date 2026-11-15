@@ -325,7 +325,18 @@ func Open(opts Options) (*StoreActor, error) {
 			if ownedCache != nil {
 				ownedCache.Unref()
 			}
-			return nil, err
+			return nil, wrapIOErr(err)
+		}
+	} else {
+		statFS := opts.pebbleFS
+		if statFS == nil {
+			statFS = vfs.Default
+		}
+		if _, err := statFS.Stat(opts.Dir); err != nil {
+			if ownedCache != nil {
+				ownedCache.Unref()
+			}
+			return nil, wrapIOErr(err)
 		}
 	}
 
@@ -365,26 +376,28 @@ func Open(opts Options) (*StoreActor, error) {
 
 	db, err := pebble.Open(opts.Dir, pebbleOpts)
 	if err != nil {
+		var fsErr error
 		if fsCloser != nil {
-			_ = fsCloser.Close()
+			fsErr = wrapIOErr(fsCloser.Close())
 		}
 		if ownedCache != nil {
 			ownedCache.Unref()
 		}
-		return nil, err
+		return nil, errors.Join(wrapIOErr(err), fsErr)
 	}
 	s.db = db
 	s.fsCloser = fsCloser
 
 	if err := s.initOrLoadState(&opts); err != nil {
-		_ = db.Close()
+		dbErr := wrapIOErr(db.Close())
+		var fsErr error
 		if fsCloser != nil {
-			_ = fsCloser.Close()
+			fsErr = wrapIOErr(fsCloser.Close())
 		}
 		if ownedCache != nil {
 			ownedCache.Unref()
 		}
-		return nil, err
+		return nil, errors.Join(err, dbErr, fsErr)
 	}
 
 	s.blobs = newBlobStore(
@@ -398,15 +411,16 @@ func Open(opts Options) (*StoreActor, error) {
 	)
 
 	if err := s.syncPackStatsWithBlobs(); err != nil {
-		_ = s.blobs.close()
-		_ = db.Close()
+		blobErr := wrapIOErr(s.blobs.close())
+		dbErr := wrapIOErr(db.Close())
+		var fsErr error
 		if fsCloser != nil {
-			_ = fsCloser.Close()
+			fsErr = wrapIOErr(fsCloser.Close())
 		}
 		if ownedCache != nil {
 			ownedCache.Unref()
 		}
-		return nil, err
+		return nil, errors.Join(err, blobErr, dbErr, fsErr)
 	}
 
 	s.publishAtomicStats()
@@ -423,9 +437,9 @@ func Open(opts Options) (*StoreActor, error) {
 	return s, nil
 }
 
-func (s *StoreActor) initOrLoadState(opts *Options) error {
-	val, closer, err := s.db.Get(StatKey())
-	if errors.Is(err, pebble.ErrNotFound) {
+func (s *StoreActor) initOrLoadState(opts *Options) (err error) {
+	val, closer, getErr := s.db.Get(StatKey())
+	if errors.Is(getErr, pebble.ErrNotFound) {
 		if s.readOnly {
 			return ErrNotFound
 		}
@@ -450,15 +464,13 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 			MaxBytes:     s.maxBytes.Load(),
 		}
 		initBatch := s.db.NewBatch()
-		defer func() { _ = initBatch.Close() }()
-		err = BatchSetInodeDeferred(initBatch, root)
-		if err != nil {
-			return err
+		defer func() { err = errors.Join(err, wrapIOErr(initBatch.Close())) }()
+		if encErr := BatchSetInodeDeferred(initBatch, root); encErr != nil {
+			return encErr
 		}
 		BatchSetStatDeferred(initBatch, stat)
-		err = s.db.Apply(initBatch, pebble.Sync)
-		if err != nil {
-			return err
+		if applyErr := s.db.Apply(initBatch, pebble.Sync); applyErr != nil {
+			return wrapIOErr(applyErr)
 		}
 		s.stat = stat
 		s.atomicLogicalBytes.Store(stat.LogicalBytes)
@@ -473,11 +485,12 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 		}
 		return nil
 	}
-	if err != nil {
-		return err
+	if getErr != nil {
+		return wrapIOErr(getErr)
 	}
 	stat, decErr := DecodeBranchStat(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	closeErr := wrapIOErr(closer.Close())
+	if decErr != nil || closeErr != nil {
 		return errors.Join(decErr, closeErr)
 	}
 	if !s.readOnly && opts.ResetEpoch {
@@ -493,8 +506,8 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 		stat.WriterEpoch = 0
 		resetBatch := s.db.NewBatch()
 		BatchSetStatDeferred(resetBatch, stat)
-		applyErr := s.db.Apply(resetBatch, pebble.Sync)
-		closeBatchErr := resetBatch.Close()
+		applyErr := wrapIOErr(s.db.Apply(resetBatch, pebble.Sync))
+		closeBatchErr := wrapIOErr(resetBatch.Close())
 		if applyErr != nil || closeBatchErr != nil {
 			return errors.Join(applyErr, closeBatchErr)
 		}
@@ -524,22 +537,27 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 	return s.loadPackStats()
 }
 
-func (s *StoreActor) scanMaxInode() (uint64, error) {
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return 0, err
+func (s *StoreActor) scanMaxInode() (ino uint64, err error) {
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return 0, wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			ino = 0
+		}
+	}()
 
 	// "inode;" 紧邻 "inode:" 之后（':' = 0x3a, ';' = 0x3b），SeekLT 直接定位最大 InodeKey。
 	if iter.SeekLT([]byte("inode;")) && bytes.HasPrefix(iter.Key(), inodePrefixBytes) {
-		ino, err := DecodeInodeKey(iter.Key())
-		if err != nil {
-			return 0, err
+		decodedIno, decErr := DecodeInodeKey(iter.Key())
+		if decErr != nil {
+			return 0, decErr
 		}
-		return ino, iter.Error()
+		return decodedIno, nil
 	}
-	return RootIno, iter.Error()
+	return RootIno, nil
 }
 
 // enter 是所有直读路径与写阶段 1 预读的统一生命周期读守卫。
@@ -791,10 +809,10 @@ func (s *StoreActor) readInodeFromDB(ctx context.Context, ino uint64) (Inode, er
 		return Inode{}, ErrNotFound
 	}
 	if err != nil {
-		return Inode{}, err
+		return Inode{}, wrapIOErr(err)
 	}
 	inode, decErr := DecodeInode(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); decErr != nil || closeErr != nil {
 		return Inode{}, errors.Join(decErr, closeErr)
 	}
 	if inode.Ino != ino {
@@ -817,9 +835,9 @@ func (s *StoreActor) checkInodeLiveFromDB(ctx context.Context, inode *Inode) err
 		return ErrNotFound
 	}
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
-	return closer.Close()
+	return wrapIOErr(closer.Close())
 }
 
 func (s *StoreActor) readInode(reader pebbleReader, ino uint64) (Inode, error) {
@@ -830,10 +848,10 @@ func (s *StoreActor) readInode(reader pebbleReader, ino uint64) (Inode, error) {
 		return Inode{}, ErrNotFound
 	}
 	if err != nil {
-		return Inode{}, err
+		return Inode{}, wrapIOErr(err)
 	}
 	inode, decErr := DecodeInode(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); decErr != nil || closeErr != nil {
 		return Inode{}, errors.Join(decErr, closeErr)
 	}
 	if inode.Ino != ino {
@@ -856,9 +874,9 @@ func (s *StoreActor) checkInodeLive(reader pebbleReader, inode *Inode) error {
 		return ErrNotFound
 	}
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
-	return closer.Close()
+	return wrapIOErr(closer.Close())
 }
 
 // MarkAtimeDirty 非阻塞登记节点最新访问时间至内存 dirtyAtime 表。
@@ -1276,7 +1294,7 @@ func (s *StoreActor) processTick() {
 			finishSpan(syncSpan, commitErr)
 		} else {
 			applyStart := time.Now()
-			commitErr = s.db.Apply(s.batch, pebble.NoSync)
+			commitErr = wrapIOErr(s.db.Apply(s.batch, pebble.NoSync))
 			walApplyDur = time.Since(applyStart)
 			s.metrics.observePhaseWALApplyNoSync(walApplyDur)
 			if commitErr == nil {
@@ -1301,6 +1319,12 @@ func (s *StoreActor) processTick() {
 
 	// Step 4：防膨胀重置与执行切面固化（仍在 tickSpan 生命周期内）、唤醒调用方（Reset & Wake）
 	if len(s.batch.Repr()) > BatchResetMaxReprBytes || s.batch.Count() > BatchResetMaxCount {
+		if closeErr := wrapIOErr(s.batch.Close()); closeErr != nil {
+			commitErr = errors.Join(commitErr, closeErr)
+			if s.logger != nil {
+				s.logger.Error("store: failed to close oversized indexed batch", "error", closeErr)
+			}
+		}
 		s.batch = s.db.NewIndexedBatch()
 		s.batchResetCnt.Add(1)
 	} else {
@@ -1518,7 +1542,7 @@ func (s *StoreActor) mutateCmd(cmd *writeCmd) {
 func (s *StoreActor) commitWithSyncBarrier(fsyncFileInodes, deadPacks []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
 	toReclaim := s.takePendingDeadPacks()
 	applyStart := time.Now()
-	if applyErr := s.db.ApplyNoSyncWait(s.batch, pebble.Sync); applyErr != nil {
+	if applyErr := wrapIOErr(s.db.ApplyNoSyncWait(s.batch, pebble.Sync)); applyErr != nil {
 		walSyncDur = time.Since(applyStart)
 		s.metrics.observePhaseWALApplySync(walSyncDur)
 		s.restorePendingDeadPacks(toReclaim)
@@ -1534,7 +1558,7 @@ func (s *StoreActor) commitWithSyncBarrier(fsyncFileInodes, deadPacks []uint64) 
 		s.metrics.observePhasePackSyncBarrier(packSyncDur)
 	}
 
-	walErr := s.batch.SyncWait()
+	walErr := wrapIOErr(s.batch.SyncWait())
 	// 记录从 ApplyNoSyncWait 提交至 SyncWait 返回的完整 WAL 同步墙钟耗时，避免被并发执行的 .pack fdatasync 掩盖。
 	walSyncDur = time.Since(applyStart)
 	s.metrics.observePhaseWALApplySync(walSyncDur)
@@ -1575,7 +1599,7 @@ func (s *StoreActor) syncBarrierWithoutBatch(fsyncFileInodes []uint64) (packSync
 			packSyncDur = time.Since(packStart)
 		})
 		walStart := time.Now()
-		walErr = s.db.LogData(nil, pebble.Sync)
+		walErr = wrapIOErr(s.db.LogData(nil, pebble.Sync))
 		walSyncDur = time.Since(walStart)
 		wg.Wait()
 	case needPackSync:
@@ -1584,7 +1608,7 @@ func (s *StoreActor) syncBarrierWithoutBatch(fsyncFileInodes []uint64) (packSync
 		packSyncDur = time.Since(packStart)
 	case needWALSync:
 		walStart := time.Now()
-		walErr = s.db.LogData(nil, pebble.Sync)
+		walErr = wrapIOErr(s.db.LogData(nil, pebble.Sync))
 		walSyncDur = time.Since(walStart)
 	}
 
@@ -1645,7 +1669,7 @@ func (s *StoreActor) flushOnClose() error {
 	wroteAtime := s.flushDirtyAtimeToBatch(s.batch)
 	deadPacks, wrotePacks := s.flushDirtyPackStatsToBatch(s.batch)
 	if wroteAtime || wrotePacks {
-		applyErr = s.db.Apply(s.batch, pebble.NoSync)
+		applyErr = wrapIOErr(s.db.Apply(s.batch, pebble.NoSync))
 		s.batch.Reset()
 		if applyErr == nil {
 			s.addPendingDeadPacks(deadPacks)
@@ -1692,14 +1716,15 @@ func (s *StoreActor) closeInternal(discard bool) error {
 
 		// Step 3 — 排空在途直读并安全关闭 Pebble、健康检测包装与常驻 .pack 文件句柄
 		s.lifecycleMu.Lock()
+		var batchErr error
 		if s.batch != nil {
-			_ = s.batch.Close()
+			batchErr = wrapIOErr(s.batch.Close())
 			s.batch = nil
 		}
-		dbErr := s.db.Close()
+		dbErr := wrapIOErr(s.db.Close())
 		var fsErr error
 		if s.fsCloser != nil {
-			fsErr = s.fsCloser.Close()
+			fsErr = wrapIOErr(s.fsCloser.Close())
 			s.fsCloser = nil
 		}
 		if s.ownedCache != nil {
@@ -1708,11 +1733,11 @@ func (s *StoreActor) closeInternal(discard bool) error {
 		}
 		var blobErr error
 		if s.blobs != nil {
-			blobErr = s.blobs.close()
+			blobErr = wrapIOErr(s.blobs.close())
 		}
 		s.lifecycleMu.Unlock()
 
-		s.closeErr = errors.Join(s.closeErr, dbErr, fsErr, blobErr)
+		s.closeErr = errors.Join(wrapIOErr(s.closeErr), batchErr, dbErr, fsErr, blobErr)
 	})
 	return s.closeErr
 }

@@ -160,11 +160,16 @@ type liveBlockCandidate struct {
 }
 
 func (s *StoreActor) scanLiveBlocksInPacks(candSet map[uint64]struct{}) (out []liveBlockCandidate, err error) {
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			out = nil
+		}
+	}()
 
 	for valid := iter.SeekGE(dataPrefixBytes); valid && bytes.HasPrefix(iter.Key(), dataPrefixBytes); valid = iter.Next() {
 		ino, blockIdx, decErr := DecodeDataKey(iter.Key())
@@ -182,9 +187,6 @@ func (s *StoreActor) scanLiveBlocksInPacks(candSet map[uint64]struct{}) (out []l
 				oldRef:   ref,
 			})
 		}
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return out, nil
 }

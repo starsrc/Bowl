@@ -540,11 +540,16 @@ func (s *StoreActor) scanDataBlockRefs(ctx context.Context, ino, firstBlock, las
 		}
 	}()
 
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			hits = nil
+		}
+	}()
 
 	var startKey [DataKeyLen]byte
 	putDataKey(startKey[:], ino, firstBlock)
@@ -567,9 +572,6 @@ func (s *StoreActor) scanDataBlockRefs(ctx context.Context, ino, firstBlock, las
 			blockIdx: blockIdx,
 			ref:      ref,
 		})
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return hits, nil
 }

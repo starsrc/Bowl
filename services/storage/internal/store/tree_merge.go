@@ -124,7 +124,7 @@ type splitPackKey struct {
 
 // MergeTrees 执行三路/两路只读分析并将零拷贝合并结果落盘至 opts.StagingDir（或 DryRun 仅校验并估算结果）。
 // 原 BaseRoot、TargetRoot、SourceRoot 仅以 ReadOnly 模式打开且绝不被修改。
-func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
+func MergeTrees(ctx context.Context, opts *MergeOptions) (retRes *MergeResult, retErr error) {
 	if opts == nil || opts.BaseRoot == "" || opts.TargetRoot == "" || opts.SourceRoot == "" {
 		return nil, ErrInvalid
 	}
@@ -137,7 +137,7 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 		if _, statErr := os.Lstat(stagingClean); statErr == nil {
 			return nil, ErrExist
 		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, statErr
+			return nil, wrapIOErr(statErr)
 		}
 	}
 	if ctx == nil {
@@ -162,7 +162,12 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer baseCleanup()
+	defer func() {
+		retErr = errors.Join(retErr, baseCleanup())
+		if retErr != nil {
+			retRes = nil
+		}
+	}()
 
 	targetClean := filepath.Clean(opts.TargetRoot)
 	targetIsBase := targetClean == baseClean
@@ -170,12 +175,17 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 	if targetIsBase {
 		targetActor = baseActor
 	} else {
-		var targetCleanup func()
+		var targetCleanup func() error
 		targetActor, targetCleanup, err = openReadOnlyForInspect(targetClean, cache)
 		if err != nil {
 			return nil, err
 		}
-		defer targetCleanup()
+		defer func() {
+			retErr = errors.Join(retErr, targetCleanup())
+			if retErr != nil {
+				retRes = nil
+			}
+		}()
 	}
 
 	sourceClean := filepath.Clean(opts.SourceRoot)
@@ -186,12 +196,17 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 	case targetClean:
 		sourceActor = targetActor
 	default:
-		var sourceCleanup func()
+		var sourceCleanup func() error
 		sourceActor, sourceCleanup, err = openReadOnlyForInspect(sourceClean, cache)
 		if err != nil {
 			return nil, err
 		}
-		defer sourceCleanup()
+		defer func() {
+			retErr = errors.Join(retErr, sourceCleanup())
+			if retErr != nil {
+				retRes = nil
+			}
+		}()
 	}
 
 	tStat, err := readBranchStatFromDB(targetActor.db)
@@ -321,15 +336,12 @@ func readBranchStatFromDB(db *pebble.DB) (BranchStat, error) {
 		if errors.Is(err, pebble.ErrNotFound) {
 			return BranchStat{}, ErrNotFound
 		}
-		return BranchStat{}, err
+		return BranchStat{}, wrapIOErr(err)
 	}
 	st, decErr := DecodeBranchStat(val)
-	closeErr := closer.Close()
-	if decErr != nil {
-		return BranchStat{}, decErr
-	}
-	if closeErr != nil {
-		return BranchStat{}, closeErr
+	closeErr := wrapIOErr(closer.Close())
+	if decErr != nil || closeErr != nil {
+		return BranchStat{}, errors.Join(decErr, closeErr)
 	}
 	return st, nil
 }
@@ -465,12 +477,14 @@ func buildMergePlan(
 	return mp, nil
 }
 
-func (mp *mergePlanner) scanTargetInodesAndOrphans() error {
-	iter, err := mp.tc.target.db.NewIter(nil)
-	if err != nil {
-		return err
+func (mp *mergePlanner) scanTargetInodesAndOrphans() (err error) {
+	iter, openErr := mp.tc.target.db.NewIter(nil)
+	if openErr != nil {
+		return wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+	}()
 
 	inoPrefix := inodePrefixBytes
 	for iter.SeekGE(inoPrefix); iter.Valid() && bytes.HasPrefix(iter.Key(), inoPrefix); iter.Next() {
@@ -489,8 +503,8 @@ func (mp *mergePlanner) scanTargetInodesAndOrphans() error {
 			mp.targetLiveInos[ino] = inode
 		}
 	}
-	if err := iter.Error(); err != nil {
-		return err
+	if iterErr := iter.Error(); iterErr != nil {
+		return wrapIOErr(iterErr)
 	}
 
 	orphPrefix := OrphanPrefix()
@@ -501,7 +515,7 @@ func (mp *mergePlanner) scanTargetInodesAndOrphans() error {
 		}
 		mp.targetOrphans = append(mp.targetOrphans, ino)
 	}
-	return iter.Error()
+	return nil
 }
 
 func (mp *mergePlanner) analyzeRootNode(global MergeStrategy, byPath map[string]MergeStrategy) error {
@@ -837,12 +851,14 @@ func (mp *mergePlanner) recordPlannedChild(parentDir string, name []byte, relPat
 	mp.childrenByParent[parentDir] = append(mp.childrenByParent[parentDir], child)
 }
 
-func (mp *mergePlanner) collectSingleSideSubtree(actor *StoreActor, dirIno uint64, dirPath string, origin inodeOriginKind) error {
-	iter, err := newSideIter(actor, dirIno)
-	if err != nil {
-		return err
+func (mp *mergePlanner) collectSingleSideSubtree(actor *StoreActor, dirIno uint64, dirPath string, origin inodeOriginKind) (err error) {
+	iter, openErr := newSideIter(actor, dirIno)
+	if openErr != nil {
+		return openErr
 	}
-	defer func() { _ = iter.close() }()
+	defer func() {
+		err = errors.Join(err, iter.close())
+	}()
 
 	type subDirWork struct {
 		ino  uint64
@@ -866,14 +882,14 @@ func (mp *mergePlanner) collectSingleSideSubtree(actor *StoreActor, dirIno uint6
 				subDirs = append(subDirs, subDirWork{ino: childInode.Ino, path: childPathStr})
 			}
 		}
-		if err := iter.advance(); err != nil {
-			return err
+		if advErr := iter.advance(); advErr != nil {
+			return advErr
 		}
 	}
 
 	for _, sd := range subDirs {
-		if err := mp.collectSingleSideSubtree(actor, sd.ino, sd.path, origin); err != nil {
-			return err
+		if subErr := mp.collectSingleSideSubtree(actor, sd.ino, sd.path, origin); subErr != nil {
+			return subErr
 		}
 	}
 	return nil
@@ -1052,18 +1068,18 @@ func (mp *mergePlanner) commitToStaging(
 	targetActor, sourceActor *StoreActor,
 	result *MergeResult,
 	cache *pebble.Cache,
-) error {
+) (retErr error) {
 	if err := CloneCheckpointDir(ctx, targetDir, opts.StagingDir); err != nil {
 		return err
 	}
 	stagingDB, err := pebble.Open(opts.StagingDir, NewPebbleOptions(cache, false))
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
 	dbClosed := false
 	defer func() {
 		if !dbClosed {
-			_ = stagingDB.Close()
+			retErr = errors.Join(retErr, wrapIOErr(stagingDB.Close()))
 		}
 	}()
 
@@ -1101,7 +1117,11 @@ func (mp *mergePlanner) commitToStaging(
 	}
 
 	batch := stagingDB.NewBatch()
-	defer func() { _ = batch.Close() }()
+	defer func() {
+		if batch != nil {
+			retErr = errors.Join(retErr, wrapIOErr(batch.Close()))
+		}
+	}()
 
 	// 清理全部 Target 孤儿与死亡（被删除或替换）的 Target Inode 及其 DataKey/XattrKey/EntryKey
 	for _, orphIno := range mp.targetOrphans {
@@ -1161,7 +1181,7 @@ func (mp *mergePlanner) commitToStaging(
 				tgtInfo, tStatErr := os.Stat(tgtPackPath)
 				srcInfo, sStatErr := os.Stat(srcPackPath)
 				if sStatErr != nil {
-					return sStatErr
+					return wrapIOErr(sStatErr)
 				}
 				srcTotal := uint64(srcInfo.Size())
 				if meta, hasMeta := srcStats[ref.PackID]; hasMeta && meta.TotalBytes > srcTotal {
@@ -1186,7 +1206,7 @@ func (mp *mergePlanner) commitToStaging(
 					linksToCreate[mappedPackID] = srcPackPath
 					packTotalBytes[mappedPackID] = srcTotal
 				default:
-					return tStatErr
+					return wrapIOErr(tStatErr)
 				}
 				defaultPackMap[ref.PackID] = mappedPackID
 			}
@@ -1205,7 +1225,7 @@ func (mp *mergePlanner) commitToStaging(
 					linksToCreate[splitID] = srcPackPath
 					srcInfo, sStatErr := os.Stat(srcPackPath)
 					if sStatErr != nil {
-						return sStatErr
+						return wrapIOErr(sStatErr)
 					}
 					srcTotal := uint64(srcInfo.Size())
 					if meta, hasMeta := srcStats[ref.PackID]; hasMeta && meta.TotalBytes > srcTotal {
@@ -1245,19 +1265,25 @@ func (mp *mergePlanner) commitToStaging(
 	// 硬链接导入新/重映射 Pack 文件并 fsync packs 目录
 	if len(linksToCreate) > 0 {
 		if mkErr := os.MkdirAll(stagingPacksDir, 0o755); mkErr != nil {
-			return mkErr
+			return wrapIOErr(mkErr)
 		}
 	}
 	for dstPackID, srcPackPath := range linksToCreate {
 		dstPackPath := packFilePath(stagingPacksDir, dstPackID)
 		if linkErr := os.Link(srcPackPath, dstPackPath); linkErr != nil {
 			if !errors.Is(linkErr, os.ErrExist) {
-				return linkErr
+				return wrapIOErr(linkErr)
 			}
 			srcInfo, sErr := os.Stat(srcPackPath)
+			if sErr != nil {
+				return wrapIOErr(sErr)
+			}
 			dstInfo, dErr := os.Stat(dstPackPath)
-			if sErr != nil || dErr != nil || !os.SameFile(srcInfo, dstInfo) {
-				return linkErr
+			if dErr != nil {
+				return wrapIOErr(dErr)
+			}
+			if !os.SameFile(srcInfo, dstInfo) {
+				return wrapIOErr(linkErr)
 			}
 		}
 	}
@@ -1362,21 +1388,26 @@ func (mp *mergePlanner) commitToStaging(
 		WriterEpoch:  result.WriterEpoch,
 	})
 
-	if err := batch.Commit(pebble.Sync); err != nil {
-		return err
+	if commitErr := batch.Commit(pebble.Sync); commitErr != nil {
+		return wrapIOErr(commitErr)
 	}
-	if err := stagingDB.Flush(); err != nil {
-		return err
+	closeBatchErr := wrapIOErr(batch.Close())
+	batch = nil
+	if closeBatchErr != nil {
+		return closeBatchErr
 	}
-	if err := stagingDB.Close(); err != nil {
-		return err
+	if flushErr := stagingDB.Flush(); flushErr != nil {
+		return wrapIOErr(flushErr)
 	}
 	dbClosed = true
+	if closeDBErr := stagingDB.Close(); closeDBErr != nil {
+		return wrapIOErr(closeDBErr)
+	}
 
 	for _, pid := range deadPackIDs {
 		p := packFilePath(stagingPacksDir, pid)
 		if rmErr := os.Remove(p); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			return rmErr
+			return wrapIOErr(rmErr)
 		}
 	}
 	if len(deadPackIDs) > 0 {
@@ -1405,11 +1436,17 @@ func isUnderAnyPrefix(pathStr string, prefixes []string) bool {
 }
 
 func loadPackStatsMap(db *pebble.DB) (stats map[uint64]PackMeta, maxPID uint64, err error) {
-	iter, err := db.NewIter(nil)
-	if err != nil {
-		return nil, 0, err
+	iter, openErr := db.NewIter(nil)
+	if openErr != nil {
+		return nil, 0, wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			stats = nil
+			maxPID = 0
+		}
+	}()
 
 	stats = make(map[uint64]PackMeta)
 	prefix := PackStatPrefix()
@@ -1427,7 +1464,7 @@ func loadPackStatsMap(db *pebble.DB) (stats map[uint64]PackMeta, maxPID uint64, 
 			maxPID = pid
 		}
 	}
-	return stats, maxPID, iter.Error()
+	return stats, maxPID, nil
 }
 
 func existingPackIDsFromDir(baseDir string) []uint64 {
@@ -1460,13 +1497,15 @@ func reclaimTargetInodeKV(db *pebble.DB, batch *pebble.Batch, ino uint64, packLi
 	return reclaimDataPrefix(db, batch, ino, packLiveBytes)
 }
 
-func reclaimDataPrefix(db *pebble.DB, batch *pebble.Batch, ino uint64, packLiveBytes map[uint64]uint64) error {
+func reclaimDataPrefix(db *pebble.DB, batch *pebble.Batch, ino uint64, packLiveBytes map[uint64]uint64) (err error) {
 	prefix := DataPrefix(ino)
-	iter, err := db.NewIter(nil)
-	if err != nil {
-		return err
+	iter, openErr := db.NewIter(nil)
+	if openErr != nil {
+		return wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+	}()
 
 	for iter.SeekGE(prefix); iter.Valid() && bytes.HasPrefix(iter.Key(), prefix); iter.Next() {
 		ref, decErr := DecodeBlobRef(iter.Value())
@@ -1480,20 +1519,22 @@ func reclaimDataPrefix(db *pebble.DB, batch *pebble.Batch, ino uint64, packLiveB
 		}
 		BatchDeleteDeferred(batch, iter.Key())
 	}
-	return iter.Error()
+	return nil
 }
 
-func deleteKeyPrefix(db *pebble.DB, batch *pebble.Batch, prefix []byte) error {
-	iter, err := db.NewIter(nil)
-	if err != nil {
-		return err
+func deleteKeyPrefix(db *pebble.DB, batch *pebble.Batch, prefix []byte) (err error) {
+	iter, openErr := db.NewIter(nil)
+	if openErr != nil {
+		return wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+	}()
 
 	for iter.SeekGE(prefix); iter.Valid() && bytes.HasPrefix(iter.Key(), prefix); iter.Next() {
 		BatchDeleteDeferred(batch, iter.Key())
 	}
-	return iter.Error()
+	return nil
 }
 
 func scanExistingDataOffsets(db *pebble.DB, ino uint64, used map[packOffsetKey]bool) error {
@@ -1503,13 +1544,15 @@ func scanExistingDataOffsets(db *pebble.DB, ino uint64, used map[packOffsetKey]b
 	})
 }
 
-func forEachDataKey(db *pebble.DB, ino uint64, fn func(blockIdx uint64, ref BlobRef) error) error {
+func forEachDataKey(db *pebble.DB, ino uint64, fn func(blockIdx uint64, ref BlobRef) error) (err error) {
 	prefix := DataPrefix(ino)
-	iter, err := db.NewIter(nil)
-	if err != nil {
-		return err
+	iter, openErr := db.NewIter(nil)
+	if openErr != nil {
+		return wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+	}()
 
 	for iter.SeekGE(prefix); iter.Valid() && bytes.HasPrefix(iter.Key(), prefix); iter.Next() {
 		_, idx, decKeyErr := DecodeDataKey(iter.Key())
@@ -1520,9 +1563,9 @@ func forEachDataKey(db *pebble.DB, ino uint64, fn func(blockIdx uint64, ref Blob
 		if decValErr != nil {
 			return decValErr
 		}
-		if err := fn(idx, ref); err != nil {
-			return err
+		if fnErr := fn(idx, ref); fnErr != nil {
+			return fnErr
 		}
 	}
-	return iter.Error()
+	return nil
 }

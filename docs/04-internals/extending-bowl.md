@@ -32,7 +32,7 @@ flowchart LR
 | 3 | 生成 Go 代码 | `task buf:generate`（`buf.gen.yaml` 用 `buf.build` 远程插件，**需联网**；`clean: true` 会重建 `gen/go/`） |
 | 4 | 重新生成 RPC 手册 | `task docs:gen`，随后 `task docs:build` 验证站点可构建 |
 | 5 | 注册校验 | `pkg/validator/validator.go` 的 `storageMessages` 追加新请求与响应消息 |
-| 6 | 数据面才需要：引擎方法 | `services/storage/internal/store/` 加方法；写操作还要加 `opKind`、`String()`、`validateCmd` 与 `mutateCmd` 的 `case`，对外部写加入 `isExternalWriteOp`（`actor.go:49-129`、`actor.go:1390`） |
+| 6 | 数据面才需要：引擎方法 | `services/storage/internal/store/` 加方法；写操作还要加 `opKind`、`String()`、`validateCmd` 与 `mutateCmd` 的 `case`，对外部写加入 `isExternalWriteOp`（`actor.go:47-129`、`actor.go:1414`） |
 | 7 | 控制面接口与实现 | `services/storage/internal/control/control.go`：`Manager` 接口（`:165`）加方法，`manager` 实现 |
 | 8 | 服务端处理器 | `services/storage/internal/server/handler_disk_node.go` 或同类 `handler_*.go` 加 `func (s *Server) GetDiskUsage(...)`；`var _ storagev1connect.StorageServiceHandler = (*Server)(nil)`（`server.go:23`）会在漏实现时编译失败 |
 | 9 | 客户端调用 | FUSE 路径在 `client/internal/fusefs/` 调 `fs.client.GetDiskUsage`；CLI 路径见 §2 |
@@ -154,7 +154,7 @@ var diskInspectSpec = diskSubcommandSpec{
 | 3 | 应用迁移到本地库 | `task goose:storage:up`（DSN 取 `STORAGE_DB_DSN`，默认 `postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disable`）；回滚 `task goose:storage:down`；查看 `task goose:storage:status` |
 | 4 | 写查询 | `services/storage/db/queries/metadata.sql`，`-- name: Xxx :one` / `:many` / `:exec` / `:execrows` 注释声明；具名参数用 `@name::type` |
 | 5 | 生成代码 | `task sqlc:generate`（`services/storage/sqlc.yaml`，schema 读 `db/migrations`）。只会更新 `internal/db/metadata.sql.go` 与 `models.go` |
-| 6 | 扩展 `db.Store` 接口 | `services/storage/internal/db/store.go:100`：加方法；实现 `SQLStore` 方法，事务统一走 `s.tx.ExecTxWithOptions(..., tx.WithDefaultRetry())`，注意锁序（见 [控制面 §4.3](/04-internals/storage-control-plane)）；领域哨兵错误经 `mapPGXErr` 转换 |
+| 6 | 扩展 `db.Store` 接口 | 在 `services/storage/internal/db/store.go:101` 新增接口方法并编写 `SQLStore` 实现。多语句事务走 `s.execTx` 并遵循 [控制面 §4.3](/04-internals/storage-control-plane) 规定的锁序，单语句写或只读查询走 `s.execQuery`，闭包内统一透传 `attemptCtx`，最外层返回前调用 `mapPGXErr` 转换错误 |
 | 7 | **同步 `MemStore`** | `services/storage/internal/db/mem_store.go`：为同一方法写进程内实现，语义（哨兵错误、排序、分页、原子性）与 SQL 一致 |
 | 8 | 契约测试 | `services/storage/internal/db/store_contract_test.go` 新增 `TestStoreContract_Given...` 用例，使用 `runStoreAdapters`，让 `MemStore` 与 `SQLStore` 各跑一遍 |
 | 9 | 隔离库同步 | 若新增**表**，`testdb_helper_test.go` 的 `cloneDDL` 只克隆 `disk_lineages`、`disk_commits`、`disks`，新表要加入，否则 `SQLStore` 子测试因缺表失败 |

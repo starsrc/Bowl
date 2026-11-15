@@ -32,10 +32,10 @@ func (s *StoreActor) readDataBlobRef(reader pebbleReader, ino, blockIdx uint64) 
 		return BlobRef{}, false, nil
 	}
 	if err != nil {
-		return BlobRef{}, false, err
+		return BlobRef{}, false, wrapIOErr(err)
 	}
 	ref, decErr := DecodeBlobRef(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); decErr != nil || closeErr != nil {
 		return BlobRef{}, false, errors.Join(decErr, closeErr)
 	}
 	return ref, true, nil
@@ -49,10 +49,10 @@ func (s *StoreActor) readDataBlobRefFromDB(ctx context.Context, ino, blockIdx ui
 		return BlobRef{}, false, nil
 	}
 	if err != nil {
-		return BlobRef{}, false, err
+		return BlobRef{}, false, wrapIOErr(err)
 	}
 	ref, decErr := DecodeBlobRef(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); decErr != nil || closeErr != nil {
 		return BlobRef{}, false, errors.Join(decErr, closeErr)
 	}
 	return ref, true, nil
@@ -74,11 +74,16 @@ func (s *StoreActor) collectDataKeysInRange(reader pebbleReader, ino, startBlock
 	if startBlockIdx > endBlockIdx {
 		return nil, nil
 	}
-	iter, err := reader.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := reader.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			entries = nil
+		}
+	}()
 
 	var startKey [DataKeyLen]byte
 	putDataKey(startKey[:], ino, startBlockIdx)
@@ -102,9 +107,6 @@ func (s *StoreActor) collectDataKeysInRange(reader pebbleReader, ino, startBlock
 			key: append([]byte(nil), iter.Key()...),
 			ref: ref,
 		})
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return entries, nil
 }

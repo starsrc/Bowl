@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -111,20 +112,75 @@ type Store interface {
 
 var _ Store = (*SQLStore)(nil)
 
+const defaultRollbackTimeout = 5 * time.Second
+
 // SQLStore 提供 PostgreSQL 控制面持久化适配器。
 type SQLStore struct {
-	queries *Queries
-	tx      *tx.PGXTransactor[*Queries]
+	queries   *Queries
+	beginner  tx.Beginner
+	pgxTxOpts pgx.TxOptions
+	retryOpts []tx.Option
 }
 
 // NewStore 基于连接池创建控制面访问器。
 func NewStore(pool *pgxpool.Pool) Store {
+	return newSQLStore(pool, pool, tx.WithDefaultRetry())
+}
+
+func newSQLStore(dbtx DBTX, beginner tx.Beginner, opts ...tx.Option) *SQLStore {
+	options := tx.ApplyOptions(opts...)
 	return &SQLStore{
-		queries: New(pool),
-		tx: tx.NewPGXTransactor(pool, func(rawTx pgx.Tx) *Queries {
-			return New(rawTx)
-		}),
+		queries:   New(dbtx),
+		beginner:  beginner,
+		pgxTxOpts: tx.ToPGXTxOptions(options),
+		retryOpts: slices.Clone(opts),
 	}
+}
+
+func (s *SQLStore) execQuery(ctx context.Context, fn func(attemptCtx context.Context, q *Queries) error) error {
+	return tx.Retry(ctx, func(attemptCtx context.Context) error {
+		return fn(attemptCtx, s.queries)
+	}, s.retryOpts...)
+}
+
+func (s *SQLStore) execTx(ctx context.Context, fn func(attemptCtx context.Context, q *Queries) error) error {
+	return tx.Retry(ctx, func(attemptCtx context.Context) error {
+		return s.execSingleTx(attemptCtx, fn)
+	}, s.retryOpts...)
+}
+
+func (s *SQLStore) execSingleTx(attemptCtx context.Context, fn func(attemptCtx context.Context, q *Queries) error) (txErr error) {
+	rawTx, err := s.beginner.BeginTx(attemptCtx, s.pgxTxOpts)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			_ = rollbackTx(attemptCtx, rawTx)
+			panic(p)
+		}
+
+		if txErr != nil {
+			if rbErr := rollbackTx(attemptCtx, rawTx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+				txErr = errors.Join(txErr, rbErr)
+			}
+			return
+		}
+
+		if commitErr := rawTx.Commit(attemptCtx); commitErr != nil {
+			txErr = commitErr
+		}
+	}()
+
+	txErr = fn(attemptCtx, New(rawTx))
+	return txErr
+}
+
+func rollbackTx(ctx context.Context, rawTx pgx.Tx) error {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRollbackTimeout)
+	defer cancel()
+	return rawTx.Rollback(rollbackCtx)
 }
 
 func toPGUUID(id uuid.UUID) pgtype.UUID {
@@ -208,11 +264,11 @@ func (s *SQLStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string
 	}
 	pgID := toPGUUID(diskID)
 	var row Disk
-	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
-		if _, linErr := q.CreateDiskLineage(ctx, pgID); linErr != nil {
+	err := s.execTx(ctx, func(attemptCtx context.Context, q *Queries) error {
+		if _, linErr := q.CreateDiskLineage(attemptCtx, pgID); linErr != nil {
 			return linErr
 		}
-		created, createErr := q.CreateDisk(ctx, CreateDiskParams{
+		created, createErr := q.CreateDisk(attemptCtx, CreateDiskParams{
 			DiskID:    pgID,
 			Name:      name,
 			LineageID: pgID,
@@ -222,7 +278,7 @@ func (s *SQLStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string
 		}
 		row = created
 		return nil
-	}, tx.WithDefaultRetry())
+	})
 	if err != nil {
 		return DiskRecord{}, mapPGXErr(err)
 	}
@@ -239,19 +295,19 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	pgCommit := toPGUUID(arg.CommitID)
 
 	var childRow Disk
-	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
-		srcSnapshot, getErr := q.GetDisk(ctx, pgSource)
+	err := s.execTx(ctx, func(attemptCtx context.Context, q *Queries) error {
+		srcSnapshot, getErr := q.GetDisk(attemptCtx, pgSource)
 		if getErr != nil {
-			return mapPGXErr(getErr)
+			return getErr
 		}
-		if _, lockErr := q.LockDiskLineage(ctx, srcSnapshot.LineageID); lockErr != nil {
-			return mapPGXErr(lockErr)
+		if _, lockErr := q.LockDiskLineage(attemptCtx, srcSnapshot.LineageID); lockErr != nil {
+			return lockErr
 		}
-		lockedSource, lockSrcErr := q.GetDiskForUpdate(ctx, pgSource)
+		lockedSource, lockSrcErr := q.GetDiskForUpdate(attemptCtx, pgSource)
 		if lockSrcErr != nil {
-			return mapPGXErr(lockSrcErr)
+			return lockSrcErr
 		}
-		if _, commitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
+		if _, commitErr := q.CreateDiskCommit(attemptCtx, CreateDiskCommitParams{
 			CommitID:       pgCommit,
 			LineageID:      lockedSource.LineageID,
 			SourceDiskID:   pgSource,
@@ -259,13 +315,13 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 		}); commitErr != nil {
 			return commitErr
 		}
-		if setErr := q.SetDiskBaseCommit(ctx, SetDiskBaseCommitParams{
+		if setErr := q.SetDiskBaseCommit(attemptCtx, SetDiskBaseCommitParams{
 			DiskID:       pgSource,
 			BaseCommitID: pgCommit,
 		}); setErr != nil {
 			return setErr
 		}
-		created, createErr := q.CreateDisk(ctx, CreateDiskParams{
+		created, createErr := q.CreateDisk(attemptCtx, CreateDiskParams{
 			DiskID:       pgChild,
 			Name:         arg.Name,
 			LineageID:    lockedSource.LineageID,
@@ -277,7 +333,7 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 		}
 		childRow = created
 		return nil
-	}, tx.WithDefaultRetry())
+	})
 	if err != nil {
 		return DiskRecord{}, mapPGXErr(err)
 	}
@@ -289,7 +345,16 @@ func (s *SQLStore) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, e
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
 	}
-	row, err := s.queries.GetDisk(ctx, toPGUUID(diskID))
+	pgID := toPGUUID(diskID)
+	var row Disk
+	err := s.execQuery(ctx, func(attemptCtx context.Context, q *Queries) error {
+		got, getErr := q.GetDisk(attemptCtx, pgID)
+		if getErr != nil {
+			return getErr
+		}
+		row = got
+		return nil
+	})
 	if err != nil {
 		return DiskRecord{}, mapPGXErr(err)
 	}
@@ -315,14 +380,22 @@ func (s *SQLStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDis
 		cursorDiskID = toPGUUID(id)
 	}
 
-	rows, err := s.queries.ListDisks(ctx, ListDisksParams{
-		HasCursor:       hasCursor,
-		CursorCreatedAt: cursorCreatedAt,
-		CursorDiskID:    cursorDiskID,
-		PageLimit:       int32(pageSize + 1),
+	var rows []Disk
+	err := s.execQuery(ctx, func(attemptCtx context.Context, q *Queries) error {
+		got, listErr := q.ListDisks(attemptCtx, ListDisksParams{
+			HasCursor:       hasCursor,
+			CursorCreatedAt: cursorCreatedAt,
+			CursorDiskID:    cursorDiskID,
+			PageLimit:       int32(pageSize + 1),
+		})
+		if listErr != nil {
+			return listErr
+		}
+		rows = got
+		return nil
 	})
 	if err != nil {
-		return ListDisksPage{}, err
+		return ListDisksPage{}, mapPGXErr(err)
 	}
 
 	var nextPageToken string
@@ -347,7 +420,16 @@ func (s *SQLStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) 
 	if lineageID == uuid.Nil {
 		return nil, fmt.Errorf("%w: lineage id cannot be nil uuid", ErrInvalidArgument)
 	}
-	rows, err := s.queries.ListLineageCommits(ctx, toPGUUID(lineageID))
+	pgLineage := toPGUUID(lineageID)
+	var rows []DiskCommit
+	err := s.execQuery(ctx, func(attemptCtx context.Context, q *Queries) error {
+		got, listErr := q.ListLineageCommits(attemptCtx, pgLineage)
+		if listErr != nil {
+			return listErr
+		}
+		rows = got
+		return nil
+	})
 	if err != nil {
 		return nil, mapPGXErr(err)
 	}
@@ -365,17 +447,17 @@ func (s *SQLStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name st
 	}
 	pgID := toPGUUID(diskID)
 	var row Disk
-	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
-		updated, updateErr := q.UpdateDisk(ctx, UpdateDiskParams{
+	err := s.execQuery(ctx, func(attemptCtx context.Context, q *Queries) error {
+		updated, updateErr := q.UpdateDisk(attemptCtx, UpdateDiskParams{
 			DiskID: pgID,
 			Name:   name,
 		})
 		if updateErr != nil {
-			return mapPGXErr(updateErr)
+			return updateErr
 		}
 		row = updated
 		return nil
-	}, tx.WithDefaultRetry())
+	})
 	if err != nil {
 		return DiskRecord{}, mapPGXErr(err)
 	}
@@ -393,9 +475,9 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	pgTarget := toPGUUID(input.TargetDiskID)
 
 	var targetRow Disk
-	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
-		if _, lockErr := q.LockDiskLineage(ctx, pgLineage); lockErr != nil {
-			return mapPGXErr(lockErr)
+	err := s.execTx(ctx, func(attemptCtx context.Context, q *Queries) error {
+		if _, lockErr := q.LockDiskLineage(attemptCtx, pgLineage); lockErr != nil {
+			return lockErr
 		}
 
 		firstID, secondID := pgSource, pgTarget
@@ -405,13 +487,13 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 			sourceFirst = false
 		}
 
-		firstRow, lockFirstErr := q.GetDiskForUpdate(ctx, firstID)
+		firstRow, lockFirstErr := q.GetDiskForUpdate(attemptCtx, firstID)
 		if lockFirstErr != nil {
-			return mapPGXErr(lockFirstErr)
+			return lockFirstErr
 		}
-		secondRow, lockSecondErr := q.GetDiskForUpdate(ctx, secondID)
+		secondRow, lockSecondErr := q.GetDiskForUpdate(attemptCtx, secondID)
 		if lockSecondErr != nil {
-			return mapPGXErr(lockSecondErr)
+			return lockSecondErr
 		}
 
 		sourceRow, curTargetRow := firstRow, secondRow
@@ -430,7 +512,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 		srcFinalCommitID := input.ExpectedSourceBaseCommitID
 		if !input.SkipSourceCommit {
 			pgNewSrc := toPGUUID(input.NewSourceCommitID)
-			if _, srcCommitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
+			if _, srcCommitErr := q.CreateDiskCommit(attemptCtx, CreateDiskCommitParams{
 				CommitID:       pgNewSrc,
 				LineageID:      pgLineage,
 				SourceDiskID:   pgSource,
@@ -438,7 +520,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 			}); srcCommitErr != nil {
 				return srcCommitErr
 			}
-			if setSrcErr := q.SetDiskBaseCommit(ctx, SetDiskBaseCommitParams{
+			if setSrcErr := q.SetDiskBaseCommit(attemptCtx, SetDiskBaseCommitParams{
 				DiskID:       pgSource,
 				BaseCommitID: pgNewSrc,
 			}); setSrcErr != nil {
@@ -448,7 +530,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 		}
 
 		pgNewMerge := toPGUUID(input.NewMergeCommitID)
-		if _, mergeCommitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
+		if _, mergeCommitErr := q.CreateDiskCommit(attemptCtx, CreateDiskCommitParams{
 			CommitID:            pgNewMerge,
 			LineageID:           pgLineage,
 			SourceDiskID:        pgTarget,
@@ -458,7 +540,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 			return mergeCommitErr
 		}
 
-		updatedTarget, touchErr := q.SetDiskBaseCommitAndTouch(ctx, SetDiskBaseCommitAndTouchParams{
+		updatedTarget, touchErr := q.SetDiskBaseCommitAndTouch(attemptCtx, SetDiskBaseCommitAndTouchParams{
 			DiskID:       pgTarget,
 			BaseCommitID: pgNewMerge,
 		})
@@ -467,7 +549,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 		}
 		targetRow = updatedTarget
 		return nil
-	}, tx.WithDefaultRetry())
+	})
 	if err != nil {
 		return DiskRecord{}, mapPGXErr(err)
 	}
@@ -482,24 +564,24 @@ func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUI
 	pgID := toPGUUID(diskID)
 
 	var commitsToClean []uuid.UUID
-	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
+	err := s.execTx(ctx, func(attemptCtx context.Context, q *Queries) error {
 		commitsToClean = nil
 
-		diskRow, getErr := q.GetDisk(ctx, pgID)
+		diskRow, getErr := q.GetDisk(attemptCtx, pgID)
 		if getErr != nil {
-			return mapPGXErr(getErr)
+			return getErr
 		}
 		lineageID := diskRow.LineageID
 
 		// 统一遵守 disk_lineages -> disks 的全局加锁顺序，消除并发 ForkDisk 与 DeleteDisk 死锁风险。
-		if _, lockErr := q.LockDiskLineage(ctx, lineageID); lockErr != nil {
-			return mapPGXErr(lockErr)
+		if _, lockErr := q.LockDiskLineage(attemptCtx, lineageID); lockErr != nil {
+			return lockErr
 		}
-		if _, lockDiskErr := q.GetDiskForUpdate(ctx, pgID); lockDiskErr != nil {
-			return mapPGXErr(lockDiskErr)
+		if _, lockDiskErr := q.GetDiskForUpdate(attemptCtx, pgID); lockDiskErr != nil {
+			return lockDiskErr
 		}
 
-		count, delErr := q.DeleteDisk(ctx, pgID)
+		count, delErr := q.DeleteDisk(attemptCtx, pgID)
 		if delErr != nil {
 			return delErr
 		}
@@ -507,32 +589,32 @@ func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUI
 			return ErrNotFound
 		}
 
-		remaining, cntErr := q.CountDisksByLineage(ctx, lineageID)
+		remaining, cntErr := q.CountDisksByLineage(attemptCtx, lineageID)
 		if cntErr != nil {
 			return cntErr
 		}
 		switch remaining {
 		case 1:
-			if clearErr := q.ClearLineageBaseCommits(ctx, lineageID); clearErr != nil {
+			if clearErr := q.ClearLineageBaseCommits(attemptCtx, lineageID); clearErr != nil {
 				return clearErr
 			}
-			deletedCommits, cleanErr := q.DeleteLineageCommits(ctx, lineageID)
+			deletedCommits, cleanErr := q.DeleteLineageCommits(attemptCtx, lineageID)
 			if cleanErr != nil {
 				return cleanErr
 			}
 			commitsToClean = toUUIDSlice(deletedCommits)
 		case 0:
-			deletedCommits, cleanErr := q.DeleteLineageCommits(ctx, lineageID)
+			deletedCommits, cleanErr := q.DeleteLineageCommits(attemptCtx, lineageID)
 			if cleanErr != nil {
 				return cleanErr
 			}
 			commitsToClean = toUUIDSlice(deletedCommits)
-			if delLinErr := q.DeleteDiskLineage(ctx, lineageID); delLinErr != nil {
+			if delLinErr := q.DeleteDiskLineage(attemptCtx, lineageID); delLinErr != nil {
 				return delLinErr
 			}
 		}
 		return nil
-	}, tx.WithDefaultRetry())
+	})
 	if err != nil {
 		return nil, mapPGXErr(err)
 	}
@@ -563,10 +645,10 @@ func (s *SQLStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineage
 
 	pgLineage := toPGUUID(lineageID)
 	var seg SegmentRange
-	err := tx.Retry(ctx, func(attemptCtx context.Context) error {
+	err := s.execQuery(ctx, func(attemptCtx context.Context, q *Queries) error {
 		switch kind {
 		case SegmentKindInode:
-			row, rErr := s.queries.ReserveInodeSegment(attemptCtx, ReserveInodeSegmentParams{
+			row, rErr := q.ReserveInodeSegment(attemptCtx, ReserveInodeSegmentParams{
 				MinNext:   minNext,
 				Count:     count,
 				LineageID: pgLineage,
@@ -577,7 +659,7 @@ func (s *SQLStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineage
 			seg = SegmentRange{First: row.FirstIno, Last: row.LastIno}
 			return nil
 		case SegmentKindPack:
-			row, rErr := s.queries.ReservePackSegment(attemptCtx, ReservePackSegmentParams{
+			row, rErr := q.ReservePackSegment(attemptCtx, ReservePackSegmentParams{
 				MinNext:   minNext,
 				Count:     count,
 				LineageID: pgLineage,
@@ -590,7 +672,7 @@ func (s *SQLStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineage
 		default:
 			return ErrInvalidArgument
 		}
-	}, tx.WithDefaultRetry())
+	})
 	if err != nil {
 		return SegmentRange{}, mapPGXErr(err)
 	}

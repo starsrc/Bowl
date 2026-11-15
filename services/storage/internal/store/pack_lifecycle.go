@@ -58,12 +58,14 @@ func (s *StoreActor) publishAtomicStats() {
 	s.atomicLowWatermarkPacks.Store(int64(max(0, low)))
 }
 
-func (s *StoreActor) loadPackStats() error {
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return err
+func (s *StoreActor) loadPackStats() (err error) {
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+	}()
 
 	prefix := PackStatPrefix()
 	for valid := iter.SeekGE(prefix); valid && bytes.HasPrefix(iter.Key(), prefix); valid = iter.Next() {
@@ -77,7 +79,7 @@ func (s *StoreActor) loadPackStats() error {
 		}
 		s.setPackMeta(packID, meta)
 	}
-	return iter.Error()
+	return nil
 }
 
 func (s *StoreActor) syncPackStatsWithBlobs() error {
@@ -115,7 +117,6 @@ func (s *StoreActor) syncPackStatsWithBlobs() error {
 
 	if len(zeroLiveMetaPacks) > 0 {
 		cleanBatch := s.db.NewBatch()
-		defer func() { _ = cleanBatch.Close() }()
 		for _, packID := range zeroLiveMetaPacks {
 			s.deletePackMeta(packID)
 			BatchDeletePackMetaDeferred(cleanBatch, packID)
@@ -123,12 +124,14 @@ func (s *StoreActor) syncPackStatsWithBlobs() error {
 				deadDiskPacks = append(deadDiskPacks, packID)
 			}
 		}
-		if err := s.db.Apply(cleanBatch, pebble.Sync); err != nil {
-			return err
+		applyErr := wrapIOErr(s.db.Apply(cleanBatch, pebble.Sync))
+		closeErr := wrapIOErr(cleanBatch.Close())
+		if applyErr != nil || closeErr != nil {
+			return errors.Join(applyErr, closeErr)
 		}
 	} else if len(deadDiskPacks) > 0 {
 		if err := s.db.LogData(nil, pebble.Sync); err != nil {
-			return err
+			return wrapIOErr(err)
 		}
 	}
 	for _, packID := range deadDiskPacks {
@@ -401,7 +404,7 @@ func (s *StoreActor) syncWALAndReclaimDeadPacksTimed() (didWALSync bool, walDur 
 		return false, 0, 0, removeDur, nil
 	}
 	walStart := time.Now()
-	if syncErr := s.db.LogData(nil, pebble.Sync); syncErr != nil {
+	if syncErr := wrapIOErr(s.db.LogData(nil, pebble.Sync)); syncErr != nil {
 		walDur = time.Since(walStart)
 		s.restorePendingDeadPacks(toReclaim)
 		s.walDirty.Store(true)

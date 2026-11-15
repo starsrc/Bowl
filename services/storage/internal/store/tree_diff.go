@@ -40,7 +40,7 @@ func newSideIter(actor *StoreActor, dirIno uint64) (*sideIter, error) {
 	}
 	iter, err := actor.db.NewIter(nil)
 	if err != nil {
-		return nil, err
+		return nil, wrapIOErr(err)
 	}
 	prefix := EntryPrefix(dirIno)
 	si := &sideIter{
@@ -48,13 +48,11 @@ func newSideIter(actor *StoreActor, dirIno uint64) (*sideIter, error) {
 		prefix: prefix,
 	}
 	if iter.SeekGE(prefix) {
-		if err := si.decodeCurrent(); err != nil {
-			_ = iter.Close()
-			return nil, err
+		if decErr := si.decodeCurrent(); decErr != nil {
+			return nil, errors.Join(decErr, wrapIOErr(iter.Close()))
 		}
-	} else if err := iter.Error(); err != nil {
-		_ = iter.Close()
-		return nil, err
+	} else if iterErr := iter.Error(); iterErr != nil {
+		return nil, errors.Join(wrapIOErr(iterErr), wrapIOErr(iter.Close()))
 	}
 	return si, nil
 }
@@ -63,7 +61,7 @@ func (si *sideIter) decodeCurrent() error {
 	if !si.iter.Valid() || !bytes.HasPrefix(si.iter.Key(), si.prefix) {
 		si.valid = false
 		si.cur = dirChildEntry{}
-		return si.iter.Error()
+		return wrapIOErr(si.iter.Error())
 	}
 	_, name, err := DecodeEntryKey(si.iter.Key())
 	if err != nil {
@@ -85,7 +83,7 @@ func (si *sideIter) advance() error {
 	if !si.iter.Next() {
 		si.valid = false
 		si.cur = dirChildEntry{}
-		return si.iter.Error()
+		return wrapIOErr(si.iter.Error())
 	}
 	return si.decodeCurrent()
 }
@@ -94,7 +92,7 @@ func (si *sideIter) close() error {
 	if si == nil || si.iter == nil {
 		return nil
 	}
-	err := si.iter.Close()
+	err := wrapIOErr(si.iter.Close())
 	si.iter = nil
 	si.valid = false
 	return err
@@ -395,14 +393,19 @@ func (tc *treeCompareCtx) readLiveInode(actor *StoreActor, ino uint64) (Inode, b
 	return inode, true, nil
 }
 
-func readAllXattrs(actor *StoreActor, ino uint64) (map[string][]byte, error) {
-	iter, err := actor.db.NewIter(nil)
-	if err != nil {
-		return nil, err
+func readAllXattrs(actor *StoreActor, ino uint64) (out map[string][]byte, err error) {
+	iter, openErr := actor.db.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { _ = iter.Close() }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			out = nil
+		}
+	}()
 
-	out := make(map[string][]byte)
+	out = make(map[string][]byte)
 	prefix := XattrPrefix(ino)
 	for valid := iter.SeekGE(prefix); valid && bytes.HasPrefix(iter.Key(), prefix); valid = iter.Next() {
 		keyIno, name, decErr := DecodeXattrKey(iter.Key())
@@ -413,9 +416,6 @@ func readAllXattrs(actor *StoreActor, ino uint64) (map[string][]byte, error) {
 			break
 		}
 		out[string(name)] = append([]byte(nil), iter.Value()...)
-	}
-	if err := iter.Error(); err != nil {
-		return nil, err
 	}
 	return out, nil
 }
@@ -482,20 +482,18 @@ type dataBlockCursor struct {
 func newDataBlockCursor(actor *StoreActor, ino uint64) (*dataBlockCursor, error) {
 	iter, err := actor.db.NewIter(nil)
 	if err != nil {
-		return nil, err
+		return nil, wrapIOErr(err)
 	}
 	prefix := DataPrefix(ino)
 	dc := &dataBlockCursor{iter: iter, prefix: prefix, ino: ino}
 	var startKey [DataKeyLen]byte
 	putDataKey(startKey[:], ino, 0)
 	if iter.SeekGE(startKey[:]) {
-		if err := dc.decode(); err != nil {
-			_ = iter.Close()
-			return nil, err
+		if decErr := dc.decode(); decErr != nil {
+			return nil, errors.Join(decErr, wrapIOErr(iter.Close()))
 		}
-	} else if err := iter.Error(); err != nil {
-		_ = iter.Close()
-		return nil, err
+	} else if iterErr := iter.Error(); iterErr != nil {
+		return nil, errors.Join(wrapIOErr(iterErr), wrapIOErr(iter.Close()))
 	}
 	return dc, nil
 }
@@ -503,7 +501,7 @@ func newDataBlockCursor(actor *StoreActor, ino uint64) (*dataBlockCursor, error)
 func (dc *dataBlockCursor) decode() error {
 	if !dc.iter.Valid() || !bytes.HasPrefix(dc.iter.Key(), dc.prefix) {
 		dc.valid = false
-		return dc.iter.Error()
+		return wrapIOErr(dc.iter.Error())
 	}
 	keyIno, idx, err := DecodeDataKey(dc.iter.Key())
 	if err != nil {
@@ -511,7 +509,7 @@ func (dc *dataBlockCursor) decode() error {
 	}
 	if keyIno != dc.ino {
 		dc.valid = false
-		return dc.iter.Error()
+		return wrapIOErr(dc.iter.Error())
 	}
 	ref, err := DecodeBlobRef(dc.iter.Value())
 	if err != nil {
@@ -529,7 +527,7 @@ func (dc *dataBlockCursor) advance() error {
 	}
 	if !dc.iter.Next() {
 		dc.valid = false
-		return dc.iter.Error()
+		return wrapIOErr(dc.iter.Error())
 	}
 	return dc.decode()
 }
@@ -538,63 +536,73 @@ func (dc *dataBlockCursor) close() error {
 	if dc.iter == nil {
 		return nil
 	}
-	err := dc.iter.Close()
+	err := wrapIOErr(dc.iter.Close())
 	dc.iter = nil
 	return err
 }
 
-func (tc *treeCompareCtx) regDataEqual(actorA *StoreActor, a *Inode, actorB *StoreActor, b *Inode) (bool, error) {
-	curA, err := newDataBlockCursor(actorA, a.Ino)
-	if err != nil {
-		return false, err
+func (tc *treeCompareCtx) regDataEqual(actorA *StoreActor, a *Inode, actorB *StoreActor, b *Inode) (equal bool, err error) {
+	curA, openErr := newDataBlockCursor(actorA, a.Ino)
+	if openErr != nil {
+		return false, openErr
 	}
-	defer func() { _ = curA.close() }()
+	defer func() {
+		err = errors.Join(err, curA.close())
+		if err != nil {
+			equal = false
+		}
+	}()
 
-	curB, err := newDataBlockCursor(actorB, b.Ino)
-	if err != nil {
-		return false, err
+	curB, openErr := newDataBlockCursor(actorB, b.Ino)
+	if openErr != nil {
+		return false, openErr
 	}
-	defer func() { _ = curB.close() }()
+	defer func() {
+		err = errors.Join(err, curB.close())
+		if err != nil {
+			equal = false
+		}
+	}()
 
 	for curA.valid || curB.valid {
 		switch {
 		case curA.valid && (!curB.valid || curA.idx < curB.idx):
 			// 单侧有块：校验其逻辑有效区间是否含非零字节（通常必含非零字节）。
-			eq, err := tc.singleBlockIsZero(actorA, a.Size, curA.idx, curA.ref)
-			if err != nil || !eq {
-				return false, err
+			eq, eqErr := tc.singleBlockIsZero(actorA, a.Size, curA.idx, curA.ref)
+			if eqErr != nil || !eq {
+				return false, eqErr
 			}
-			if err := curA.advance(); err != nil {
-				return false, err
+			if advErr := curA.advance(); advErr != nil {
+				return false, advErr
 			}
 		case curB.valid && (!curA.valid || curB.idx < curA.idx):
-			eq, err := tc.singleBlockIsZero(actorB, b.Size, curB.idx, curB.ref)
-			if err != nil || !eq {
-				return false, err
+			eq, eqErr := tc.singleBlockIsZero(actorB, b.Size, curB.idx, curB.ref)
+			if eqErr != nil || !eq {
+				return false, eqErr
 			}
-			if err := curB.advance(); err != nil {
-				return false, err
+			if advErr := curB.advance(); advErr != nil {
+				return false, advErr
 			}
 		default:
 			// curA.idx == curB.idx
 			if curA.ref == curB.ref && tc.samePackFile(actorA, actorB, curA.ref.PackID) {
-				if err := curA.advance(); err != nil {
-					return false, err
+				if advErr := curA.advance(); advErr != nil {
+					return false, advErr
 				}
-				if err := curB.advance(); err != nil {
-					return false, err
+				if advErr := curB.advance(); advErr != nil {
+					return false, advErr
 				}
 				continue
 			}
-			eq, err := tc.blocksEqual(actorA, a.Size, curA.idx, curA.ref, actorB, curB.ref)
-			if err != nil || !eq {
-				return false, err
+			eq, eqErr := tc.blocksEqual(actorA, a.Size, curA.idx, curA.ref, actorB, curB.ref)
+			if eqErr != nil || !eq {
+				return false, eqErr
 			}
-			if err := curA.advance(); err != nil {
-				return false, err
+			if advErr := curA.advance(); advErr != nil {
+				return false, advErr
 			}
-			if err := curB.advance(); err != nil {
-				return false, err
+			if advErr := curB.advance(); advErr != nil {
+				return false, advErr
 			}
 		}
 	}
@@ -692,14 +700,14 @@ func (tc *treeCompareCtx) dirSelfEqual(actorA *StoreActor, a *Inode, actorB *Sto
 
 // isSubtreeModifiedVsBase 检查分支相对祖先在 dirIno 子树内是否存在节点自身元信息/xattr修改或子孙新增/修改/类型变化；
 // 仅含子孙删除不算修改（用于判定删除整棵目录是否安全）。
-func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *StoreActor, branchIno uint64) (bool, error) {
-	bNode, bOK, err := tc.readLiveInode(tc.base, baseIno)
-	if err != nil || !bOK {
-		return true, err
+func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *StoreActor, branchIno uint64) (modified bool, err error) {
+	bNode, bOK, rErr := tc.readLiveInode(tc.base, baseIno)
+	if rErr != nil || !bOK {
+		return true, rErr
 	}
-	xNode, xOK, err := tc.readLiveInode(branchActor, branchIno)
-	if err != nil || !xOK {
-		return true, err
+	xNode, xOK, rErr := tc.readLiveInode(branchActor, branchIno)
+	if rErr != nil || !xOK {
+		return true, rErr
 	}
 	if (xNode.Mode & S_IFMT) != (bNode.Mode & S_IFMT) {
 		return true, nil
@@ -711,17 +719,27 @@ func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *S
 		}
 	}
 
-	bIt, err := newSideIter(tc.base, baseIno)
-	if err != nil {
-		return false, err
+	bIt, openErr := newSideIter(tc.base, baseIno)
+	if openErr != nil {
+		return false, openErr
 	}
-	defer func() { _ = bIt.close() }()
+	defer func() {
+		err = errors.Join(err, bIt.close())
+		if err != nil {
+			modified = false
+		}
+	}()
 
-	xIt, err := newSideIter(branchActor, branchIno)
-	if err != nil {
-		return false, err
+	xIt, openErr := newSideIter(branchActor, branchIno)
+	if openErr != nil {
+		return false, openErr
 	}
-	defer func() { _ = xIt.close() }()
+	defer func() {
+		err = errors.Join(err, xIt.close())
+		if err != nil {
+			modified = false
+		}
+	}()
 
 	for bIt.valid || xIt.valid {
 		switch {
@@ -730,8 +748,8 @@ func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *S
 			return true, nil
 		case bIt.valid && (!xIt.valid || bytes.Compare(bIt.cur.name, xIt.cur.name) < 0):
 			// 分支仅删除了该子节点：允许
-			if err := bIt.advance(); err != nil {
-				return false, err
+			if advErr := bIt.advance(); advErr != nil {
+				return false, advErr
 			}
 		default:
 			bc := bIt.cur.entry
@@ -745,13 +763,13 @@ func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *S
 					return subMod, subErr
 				}
 			} else {
-				bn, bnOK, rErr := tc.readLiveInode(tc.base, bc.Ino)
-				if rErr != nil || !bnOK {
-					return true, rErr
+				bn, bnOK, bnErr := tc.readLiveInode(tc.base, bc.Ino)
+				if bnErr != nil || !bnOK {
+					return true, bnErr
 				}
-				xn, xnOK, rErr := tc.readLiveInode(branchActor, xc.Ino)
-				if rErr != nil || !xnOK {
-					return true, rErr
+				xn, xnOK, xnErr := tc.readLiveInode(branchActor, xc.Ino)
+				if xnErr != nil || !xnOK {
+					return true, xnErr
 				}
 				if !isUnchangedVsBase(&xn, &bn) {
 					eq, eqErr := tc.nodesEqual(tc.base, &bn, branchActor, &xn)
@@ -760,11 +778,11 @@ func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *S
 					}
 				}
 			}
-			if err := bIt.advance(); err != nil {
-				return false, err
+			if advErr := bIt.advance(); advErr != nil {
+				return false, advErr
 			}
-			if err := xIt.advance(); err != nil {
-				return false, err
+			if advErr := xIt.advance(); advErr != nil {
+				return false, advErr
 			}
 		}
 	}
@@ -1547,15 +1565,12 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 	if !tc.targetIsBase {
 		rootT, err = newSideIter(tc.target, RootIno)
 		if err != nil {
-			_ = rootB.close()
-			return err
+			return errors.Join(err, rootB.close())
 		}
 	}
 	rootS, err := newSideIter(tc.source, RootIno)
 	if err != nil {
-		_ = rootB.close()
-		_ = rootT.close()
-		return err
+		return errors.Join(err, rootB.close(), rootT.close())
 	}
 
 	rootFrame := &dirMergeFrame{
@@ -1576,8 +1591,7 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 
 	ok, err := rootFrame.peekNext()
 	if err != nil {
-		_ = rootFrame.close()
-		return err
+		return errors.Join(err, rootFrame.close())
 	}
 	if ok {
 		heap.Push(h, rootFrame)
@@ -1604,8 +1618,7 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 		// 先推进并放回当前 frame 或关闭
 		hasMore, advErr := frame.consumeAndPeekNext()
 		if advErr != nil {
-			_ = frame.close()
-			return advErr
+			return errors.Join(advErr, frame.close())
 		}
 		if hasMore {
 			heap.Push(h, frame)
@@ -1656,16 +1669,13 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 			if !tc.targetIsBase && tDirIno != 0 {
 				tIt, err = newSideIter(tc.target, tDirIno)
 				if err != nil {
-					_ = bIt.close()
-					return err
+					return errors.Join(err, bIt.close())
 				}
 			}
 			if sDirIno != 0 {
 				sIt, err = newSideIter(tc.source, sDirIno)
 				if err != nil {
-					_ = bIt.close()
-					_ = tIt.close()
-					return err
+					return errors.Join(err, bIt.close(), tIt.close())
 				}
 			}
 			childFrame := &dirMergeFrame{
@@ -1677,8 +1687,7 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 			}
 			cOK, pErr := childFrame.peekNext()
 			if pErr != nil {
-				_ = childFrame.close()
-				return pErr
+				return errors.Join(pErr, childFrame.close())
 			}
 			if cOK {
 				heap.Push(h, childFrame)
@@ -1693,7 +1702,7 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 // DiffTrees 只读打开 BaseRoot、TargetRoot、SourceRoot（TargetRoot == BaseRoot 或为空时复用同一句柄），
 // 按规范化字节路径字典序流式对比三路/两路目录树，支持 WriteSeq 纵向剪枝、Sparse/CompactPacks 块判等、
 // PathPrefix 过滤、ConflictsOnly、PageToken 分页及全量 Summary 统计。
-func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
+func DiffTrees(ctx context.Context, opts *DiffOptions) (retRes *DiffResult, retErr error) {
 	if opts == nil || opts.BaseRoot == "" || opts.SourceRoot == "" {
 		return nil, ErrInvalid
 	}
@@ -1734,7 +1743,12 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer baseCleanup()
+	defer func() {
+		retErr = errors.Join(retErr, baseCleanup())
+		if retErr != nil {
+			retRes = nil
+		}
+	}()
 
 	targetClean := baseClean
 	if opts.TargetRoot != "" {
@@ -1745,12 +1759,17 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 	if targetIsBase {
 		targetActor = baseActor
 	} else {
-		var targetCleanup func()
+		var targetCleanup func() error
 		targetActor, targetCleanup, err = openReadOnlyForInspect(targetClean, cache)
 		if err != nil {
 			return nil, err
 		}
-		defer targetCleanup()
+		defer func() {
+			retErr = errors.Join(retErr, targetCleanup())
+			if retErr != nil {
+				retRes = nil
+			}
+		}()
 	}
 
 	sourceClean := filepath.Clean(opts.SourceRoot)
@@ -1761,12 +1780,17 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 	case targetClean:
 		sourceActor = targetActor
 	default:
-		var sourceCleanup func()
+		var sourceCleanup func() error
 		sourceActor, sourceCleanup, err = openReadOnlyForInspect(sourceClean, cache)
 		if err != nil {
 			return nil, err
 		}
-		defer sourceCleanup()
+		defer func() {
+			retErr = errors.Join(retErr, sourceCleanup())
+			if retErr != nil {
+				retRes = nil
+			}
+		}()
 	}
 
 	tc := newTreeCompareCtx(ctx, baseActor, targetActor, sourceActor, targetIsBase)

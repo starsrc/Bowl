@@ -329,9 +329,9 @@ func (s *StoreActor) checkEntryNotExists(reader pebbleReader, parentIno uint64, 
 		return nil
 	}
 	if err != nil {
-		return err
+		return wrapIOErr(err)
 	}
-	if closeErr := closer.Close(); closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); closeErr != nil {
 		return closeErr
 	}
 	return ErrExist
@@ -574,10 +574,10 @@ func (s *StoreActor) readEntry(reader pebbleReader, parentIno uint64, name []byt
 		return Entry{}, ErrNotFound
 	}
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, wrapIOErr(err)
 	}
 	entry, decErr := DecodeEntry(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); decErr != nil || closeErr != nil {
 		return Entry{}, errors.Join(decErr, closeErr)
 	}
 	return entry, nil
@@ -589,10 +589,10 @@ func (s *StoreActor) readEntryFromDB(ctx context.Context, parentIno uint64, name
 		return Entry{}, ErrNotFound
 	}
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, wrapIOErr(err)
 	}
 	entry, decErr := DecodeEntry(val)
-	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+	if closeErr := wrapIOErr(closer.Close()); decErr != nil || closeErr != nil {
 		return Entry{}, errors.Join(decErr, closeErr)
 	}
 	return entry, nil
@@ -745,11 +745,16 @@ func (s *StoreActor) ReadDir(ctx context.Context, ino, offset uint64, maxEntries
 	}()
 
 	// 严格使用 db.NewIter(nil) + iter.SeekPrefixGE(EntryPrefix(ino)) 激活 15B Prefix Bloom Filter。
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			entries = nil
+		}
+	}()
 
 	var skip uint64
 	if offset > 2 {
@@ -781,9 +786,6 @@ func (s *StoreActor) ReadDir(ctx context.Context, ino, offset uint64, maxEntries
 			Mode:       entry.Mode,
 			NextOffset: next,
 		})
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return entries, nil
 }
@@ -883,11 +885,16 @@ func (s *StoreActor) ReadDirPlus(ctx context.Context, ino, offset uint64, maxEnt
 		finishSpan(scanSpan, err)
 	}()
 
-	iter, err := s.db.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := s.db.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			entries = nil
+		}
+	}()
 
 	var skip uint64
 	if offset > 2 {
@@ -927,7 +934,7 @@ func (s *StoreActor) ReadDirPlus(ctx context.Context, ino, offset uint64, maxEnt
 		})
 	}
 	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
+		return nil, wrapIOErr(iterErr)
 	}
 	if len(children) == 0 {
 		return entries, nil
@@ -961,9 +968,6 @@ func (s *StoreActor) ReadDirPlus(ctx context.Context, ino, offset uint64, maxEnt
 		}
 		s.overlayAtime(&inode)
 		attrByIno[childIno] = inode.ToAttribute()
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 
 	for _, c := range children {

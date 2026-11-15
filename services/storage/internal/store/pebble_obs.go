@@ -147,7 +147,7 @@ func (w *pebbleEventLogWriter) Close() error {
 	w.file = nil
 	w.mu.Unlock()
 	if f != nil {
-		return f.Close()
+		return wrapIOErr(f.Close())
 	}
 	return nil
 }
@@ -163,12 +163,12 @@ func (c *pebbleObsCloser) Close() error {
 	}
 	var fsErr error
 	if c.fsCloser != nil {
-		fsErr = c.fsCloser.Close()
+		fsErr = wrapIOErr(c.fsCloser.Close())
 	}
 	if c.eventLog != nil {
 		c.eventLog.write("close", nil, false)
 	}
-	logErr := c.eventLog.Close()
+	logErr := wrapIOErr(c.eventLog.Close())
 	return errors.Join(fsErr, logErr)
 }
 

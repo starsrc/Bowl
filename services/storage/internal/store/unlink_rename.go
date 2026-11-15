@@ -72,26 +72,33 @@ func (s *StoreActor) readLiveChildByEntry(reader pebbleReader, parentIno uint64,
 // isDirEmpty 通过 reader.NewIter(nil) + iter.SeekPrefixGE(EntryPrefix(ino)) 激活 15B Prefix Bloom Filter，
 // 检查目录是否不含任何子目录项。
 func (s *StoreActor) isDirEmpty(reader pebbleReader, ino uint64) (empty bool, err error) {
-	iter, err := reader.NewIter(nil)
-	if err != nil {
-		return false, err
+	iter, openErr := reader.NewIter(nil)
+	if openErr != nil {
+		return false, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			empty = false
+		}
+	}()
 
 	valid := iter.SeekPrefixGE(EntryPrefix(ino))
-	if iterErr := iter.Error(); iterErr != nil {
-		return false, iterErr
-	}
 	return !valid, nil
 }
 
 // collectXattrKeys 通过 reader.NewIter(nil) + iter.SeekPrefixGE(XattrPrefix(ino)) 收集指定节点的全部扩展属性键。
 func (s *StoreActor) collectXattrKeys(reader pebbleReader, ino uint64) (keys [][]byte, err error) {
-	iter, err := reader.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := reader.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			keys = nil
+		}
+	}()
 
 	prefix := XattrPrefix(ino)
 	for valid := iter.SeekPrefixGE(prefix); valid; valid = iter.Next() {
@@ -99,9 +106,6 @@ func (s *StoreActor) collectXattrKeys(reader pebbleReader, ino uint64) (keys [][
 			return nil, decErr
 		}
 		keys = append(keys, append([]byte(nil), iter.Key()...))
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return keys, nil
 }
@@ -131,9 +135,12 @@ func (s *StoreActor) hasOrphanMarker(reader pebbleReader, ino uint64) (bool, err
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, wrapIOErr(err)
 	}
-	return true, closer.Close()
+	if closeErr := wrapIOErr(closer.Close()); closeErr != nil {
+		return false, closeErr
+	}
+	return true, nil
 }
 
 func (s *StoreActor) buildInodeReclaimPlan(reader pebbleReader, ino uint64, target *Inode, hasInode bool) (inodeReclaimPlan, error) {
@@ -477,11 +484,16 @@ func (s *StoreActor) CleanOrphans(ctx context.Context) error {
 }
 
 func (s *StoreActor) collectOrphanInodes(reader pebbleReader) (inos []uint64, err error) {
-	iter, err := reader.NewIter(nil)
-	if err != nil {
-		return nil, err
+	iter, openErr := reader.NewIter(nil)
+	if openErr != nil {
+		return nil, wrapIOErr(openErr)
 	}
-	defer func() { err = errors.Join(err, iter.Close()) }()
+	defer func() {
+		err = errors.Join(err, wrapIOErr(iter.Error()), wrapIOErr(iter.Close()))
+		if err != nil {
+			inos = nil
+		}
+	}()
 
 	prefix := OrphanPrefix()
 	for valid := iter.SeekGE(prefix); valid && bytes.HasPrefix(iter.Key(), prefix); valid = iter.Next() {
@@ -490,9 +502,6 @@ func (s *StoreActor) collectOrphanInodes(reader pebbleReader) (inos []uint64, er
 			return nil, decErr
 		}
 		inos = append(inos, ino)
-	}
-	if iterErr := iter.Error(); iterErr != nil {
-		return nil, iterErr
 	}
 	return inos, nil
 }

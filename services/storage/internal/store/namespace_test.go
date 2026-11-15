@@ -397,6 +397,70 @@ func TestGivenNamespaceValidationCasesWhenCalledThenRejectsWithExpectedErrors(t 
 			want: store.ErrInvalid,
 		},
 		{
+			name: "Mknod_UID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Mknod(ctx, store.MknodReq{ParentIno: store.RootIno, Name: []byte("bad-uid"), Mode: store.S_IFREG | 0o644, UID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Mknod_GID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Mknod(ctx, store.MknodReq{ParentIno: store.RootIno, Name: []byte("bad-gid"), Mode: store.S_IFREG | 0o644, GID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Mkdir_UID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Mkdir(ctx, store.MkdirReq{ParentIno: store.RootIno, Name: []byte("bad-dir-uid"), Mode: store.S_IFDIR | 0o755, UID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Mkdir_GID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Mkdir(ctx, store.MkdirReq{ParentIno: store.RootIno, Name: []byte("bad-dir-gid"), Mode: store.S_IFDIR | 0o755, GID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Create_UID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("bad-file-uid"), Mode: store.S_IFREG | 0o644, UID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Create_GID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("bad-file-gid"), Mode: store.S_IFREG | 0o644, GID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Symlink_UID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Symlink(ctx, store.SymlinkReq{ParentIno: store.RootIno, Name: []byte("bad-sym-uid"), Target: []byte("/a"), UID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "Symlink_GID越界返回ErrInvalid",
+			run: func() error {
+				_, e := actor.Symlink(ctx, store.SymlinkReq{ParentIno: store.RootIno, Name: []byte("bad-sym-gid"), Target: []byte("/a"), GID: math.MaxInt32 + 1})
+				return e
+			},
+			want: store.ErrInvalid,
+		},
+		{
 			name: "Symlink_空目标返回ErrInvalid",
 			run: func() error {
 				_, e := actor.Symlink(ctx, store.SymlinkReq{ParentIno: store.RootIno, Name: []byte("sym"), Target: nil})

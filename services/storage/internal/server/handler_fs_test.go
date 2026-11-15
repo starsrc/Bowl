@@ -579,10 +579,22 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 	require.NoError(t, err)
 
 	// 先将 epoch 推进至 2，使旧 epoch=1 变为陈旧
-	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	mount2Resp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
 	require.NoError(t, err, "推进 epoch 失败")
+	newEpoch := mount2Resp.Msg.GetEpoch()
 
 	zeroFh := uint64(0)
+	overMaxInt64Fh := uint64(math.MaxInt64) + 1
+
+	_, err = client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
+		DiskId:   diskID,
+		Ino:      1,
+		Epoch:    newEpoch,
+		Fh:       &zeroFh,
+		CtimeNow: true,
+	}))
+	require.NoError(t, err, "SetAttr 传入 Fh=0 与 CtimeNow=true 应通过校验并成功")
+
 	cases := []struct {
 		name       string
 		invoke     func() error
@@ -590,28 +602,13 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 		wantReason string
 	}{
 		{
-			name: "SetAttr 直接调用 Epoch=0 拦截",
+			name: "SetAttr Epoch=0 拦截",
 			invoke: func() error {
-				_, hErr := srv.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{DiskId: diskID, Ino: 1, Epoch: 0}))
-				return hErr
-			},
-			wantCode:   connect.CodeInvalidArgument,
-			wantReason: "EINVAL",
-		},
-		{
-			name: "SetAttr 直接调用 Fh=0 拦截",
-			invoke: func() error {
-				_, hErr := srv.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{DiskId: diskID, Ino: 1, Epoch: 2, Fh: &zeroFh}))
-				return hErr
-			},
-			wantCode:   connect.CodeInvalidArgument,
-			wantReason: "EINVAL",
-		},
-		{
-			name: "Create 直接调用 Uid 超过 MaxInt32 拦截",
-			invoke: func() error {
-				_, hErr := srv.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
-					DiskId: diskID, Epoch: 2, ParentIno: 1, Name: []byte("baduid"), Uid: math.MaxInt32 + 1,
+				_, hErr := client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
+					DiskId:   diskID,
+					Ino:      1,
+					Epoch:    0,
+					CtimeNow: true,
 				}))
 				return hErr
 			},
@@ -619,9 +616,35 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 			wantReason: "EINVAL",
 		},
 		{
-			name: "Read 直接调用 Size 超过 4MiB 拦截",
+			name: "SetAttr Fh 超过 MaxInt64 拦截",
 			invoke: func() error {
-				_, hErr := srv.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+				_, hErr := client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
+					DiskId:   diskID,
+					Ino:      1,
+					Epoch:    newEpoch,
+					Fh:       &overMaxInt64Fh,
+					CtimeNow: true,
+				}))
+				return hErr
+			},
+			wantCode:   connect.CodeInvalidArgument,
+			wantReason: "EINVAL",
+		},
+		{
+			name: "Create Uid 超过 MaxInt32 拦截",
+			invoke: func() error {
+				_, hErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+					DiskId: diskID, Epoch: newEpoch, ParentIno: 1, Name: []byte("baduid"), Uid: math.MaxInt32 + 1,
+				}))
+				return hErr
+			},
+			wantCode:   connect.CodeInvalidArgument,
+			wantReason: "EINVAL",
+		},
+		{
+			name: "Read Size 超过 4MiB 拦截",
+			invoke: func() error {
+				_, hErr := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
 					DiskId: diskID, Ino: 1, Size: maxReadWriteSize + 1,
 				}))
 				return hErr
@@ -630,10 +653,27 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 			wantReason: "EINVAL",
 		},
 		{
-			name: "Write 直接调用 Fh 超过 MaxInt64 拦截",
+			name: "Write Fh 超过 MaxInt64 拦截",
 			invoke: func() error {
-				_, hErr := srv.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
-					DiskId: diskID, Epoch: 2, Ino: 1, Fh: uint64(math.MaxInt64) + 1,
+				_, hErr := client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+					DiskId: diskID, Epoch: newEpoch, Ino: 1, Fh: overMaxInt64Fh,
+				}))
+				return hErr
+			},
+			wantCode:   connect.CodeInvalidArgument,
+			wantReason: "EINVAL",
+		},
+		{
+			name: "Rename Flags 为 RenameWhiteout 拦截",
+			invoke: func() error {
+				_, hErr := client.Rename(ctx, connect.NewRequest(&storagev1.RenameRequest{
+					DiskId:       diskID,
+					Epoch:        newEpoch,
+					OldParentIno: nonEmptyResp.Msg.GetInode().GetIno(),
+					OldName:      []byte("child"),
+					NewParentIno: 1,
+					NewName:      []byte("whiteout-child"),
+					Flags:        store.RenameWhiteout,
 				}))
 				return hErr
 			},
@@ -655,7 +695,7 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 			name: "Rmdir 非空目录拦截",
 			invoke: func() error {
 				_, hErr := client.Rmdir(ctx, connect.NewRequest(&storagev1.RmdirRequest{
-					DiskId: diskID, Epoch: 2, ParentIno: 1, Name: []byte("nonempty"),
+					DiskId: diskID, Epoch: newEpoch, ParentIno: 1, Name: []byte("nonempty"),
 				}))
 				return hErr
 			},

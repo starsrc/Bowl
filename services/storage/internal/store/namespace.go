@@ -146,6 +146,9 @@ func (s *StoreActor) Mknod(ctx context.Context, req MknodReq) (Attribute, error)
 	if req.Mode > 0o177777 {
 		return Attribute{}, ErrInvalid
 	}
+	if req.UID > math.MaxInt32 || req.GID > math.MaxInt32 {
+		return Attribute{}, ErrInvalid
+	}
 	modeType := req.Mode & S_IFMT
 	switch modeType {
 	case S_IFREG, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK:
@@ -181,6 +184,9 @@ func (s *StoreActor) Mkdir(ctx context.Context, req MkdirReq) (Attribute, error)
 	if req.Mode > 0o177777 {
 		return Attribute{}, ErrInvalid
 	}
+	if req.UID > math.MaxInt32 || req.GID > math.MaxInt32 {
+		return Attribute{}, ErrInvalid
+	}
 	modeType := req.Mode & S_IFMT
 	if modeType != 0 && modeType != S_IFDIR {
 		return Attribute{}, ErrInvalid
@@ -211,6 +217,9 @@ func (s *StoreActor) Create(ctx context.Context, req CreateReq) (Attribute, erro
 		return Attribute{}, err
 	}
 	if req.Mode > 0o177777 {
+		return Attribute{}, ErrInvalid
+	}
+	if req.UID > math.MaxInt32 || req.GID > math.MaxInt32 {
 		return Attribute{}, ErrInvalid
 	}
 	if (req.Flags & O_TMPFILE) != 0 {
@@ -244,6 +253,9 @@ func (s *StoreActor) Symlink(ctx context.Context, req SymlinkReq) (Attribute, er
 	}
 	if err := validateEntryName(req.Name); err != nil {
 		return Attribute{}, err
+	}
+	if req.UID > math.MaxInt32 || req.GID > math.MaxInt32 {
+		return Attribute{}, ErrInvalid
 	}
 	if len(req.Target) == 0 || bytes.IndexByte(req.Target, 0) >= 0 {
 		return Attribute{}, ErrInvalid

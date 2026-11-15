@@ -2958,7 +2958,7 @@ type FallocateRequest struct {
 	Offset uint64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	// 操作区间长度（字节）。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
 	Length uint64 `protobuf:"varint,4,opt,name=length,proto3" json:"length,omitempty"`
-	// fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
+	// fallocate 模式位标志，支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE、FALLOC_FL_ZERO_RANGE 与 FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE；单独传入 FALLOC_FL_PUNCH_HOLE 返回 InvalidArgument 与 EINVAL，其余不支持模式返回 Unimplemented 与 EOPNOTSUPP。
 	Mode uint32 `protobuf:"varint,5,opt,name=mode,proto3" json:"mode,omitempty"`
 	// 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
 	DiskId string `protobuf:"bytes,6,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
@@ -6022,10 +6022,10 @@ var File_storage_v1_storage_proto protoreflect.FileDescriptor
 const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"\x18storage/v1/storage.proto\x12\n" +
-	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd8\x02\n" +
-	"\rLookupRequest\x12&\n" +
+	"storage.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe2\x02\n" +
+	"\rLookupRequest\x120\n" +
 	"\n" +
-	"parent_ino\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\tparentIno\x12\x91\x01\n" +
+	"parent_ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\tparentIno\x12\x91\x01\n" +
 	"\x04name\x18\x02 \x01(\fB}\xbaHz\xba\x01r\n" +
 	"\x1abytes_name_no_slash_or_nul\x12#name cannot contain '/' or NUL byte\x1a/!this.contains(b'\\x00') && !this.contains(b'/')z\x03\x18\xff\x01R\x04name\x12\x8a\x01\n" +
 	"\adisk_id\x18\x03 \x01(\tBq\xbaHn\xba\x01f\n" +
@@ -6040,7 +6040,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x17getattr_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\"\x84\x01\n" +
 	"\x0fGetAttrResponse\x12/\n" +
 	"\x05inode\x18\x01 \x01(\v2\x11.storage.v1.InodeB\x06\xbaH\x03\xc8\x01\x01R\x05inode\x12@\n" +
-	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x9d\t\n" +
+	"\x14attr_timeout_seconds\x18\x02 \x01(\x01B\x0e\xbaH\v\x12\t)\x00\x00\x00\x00\x00\x00\x00\x00R\x12attrTimeoutSeconds\"\x9b\t\n" +
 	"\x0eSetAttrRequest\x12#\n" +
 	"\x03ino\x18\x01 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12\x17\n" +
 	"\x04mode\x18\x02 \x01(\rH\x00R\x04mode\x88\x01\x01\x12\"\n" +
@@ -6051,9 +6051,10 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05atime\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampH\x04R\x05atime\x88\x01\x01\x125\n" +
 	"\x05mtime\x18\a \x01(\v2\x1a.google.protobuf.TimestampH\x05R\x05mtime\x88\x01\x01\x12\x1b\n" +
 	"\tatime_now\x18\b \x01(\bR\batimeNow\x12\x1b\n" +
-	"\tmtime_now\x18\t \x01(\bR\bmtimeNow\x12&\n" +
+	"\tmtime_now\x18\t \x01(\bR\bmtimeNow\x12$\n" +
 	"\x02fh\x18\n" +
-	" \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00H\x06R\x02fh\x88\x01\x01\x12\x8b\x01\n" +
+	" \x01(\x04B\x0f\xbaH\f2\n" +
+	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fH\x06R\x02fh\x88\x01\x01\x12\x8b\x01\n" +
 	"\adisk_id\x18\v \x01(\tBr\xbaHo\xba\x01g\n" +
 	"\x17setattr_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x1b\n" +
 	"\tctime_now\x18\f \x01(\bR\bctimeNow\x12&\n" +

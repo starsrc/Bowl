@@ -5,15 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
+	"buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate"
 	"buf.build/go/protovalidate"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -197,6 +200,10 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 			name: "forked_disk_entity_and_response",
 			msg:  &storagev1.ForkDiskResponse{Disk: validForkedDisk},
 		},
+		{
+			name: "setattr_fh_zero_with_ctime_now",
+			msg:  &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Fh: new(uint64(0)), CtimeNow: true},
+		},
 	}
 
 	runSubtests(t, cases, func(tc validCase) string { return tc.name }, func(t *testing.T, tc validCase) {
@@ -373,6 +380,7 @@ func TestStorageValidator_GivenOutOfRangeNumericOrControlFields_WhenValidated_Th
 	}
 	cases := []validCase{
 		{name: "lookup_parent_ino_zero", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 0, Name: []byte("test.txt")}},
+		{name: "lookup_parent_ino_over_max_int64", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: testOverMaxInt64, Name: []byte("test.txt")}},
 		{name: "create_parent_ino_zero", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 0, Name: []byte("c")}},
 		{name: "create_parent_ino_over_max_int64", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: testOverMaxInt64, Name: []byte("c")}},
 		{name: "create_uid_over_max_int32", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("c"), Uid: math.MaxInt32 + 1}},
@@ -395,7 +403,9 @@ func TestStorageValidator_GivenOutOfRangeNumericOrControlFields_WhenValidated_Th
 		{name: "fallocate_offset_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Offset: testOverMaxInt64, Length: 1}},
 		{name: "fallocate_length_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Length: testOverMaxInt64}},
 		{name: "setattr_no_updates", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1}},
+		{name: "setattr_fh_over_max_int64", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Fh: new(testOverMaxInt64), CtimeNow: true}},
 		{name: "setattr_atime_conflict", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Atime: now, AtimeNow: true}},
+		{name: "setattr_mtime_conflict", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Mtime: now, MtimeNow: true}},
 		{name: "reclaim_orphan_ino_zero", msg: &storagev1.ReclaimOrphanRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 0}},
 		{name: "reclaim_orphan_ino_over_max_int64", msg: &storagev1.ReclaimOrphanRequest{DiskId: testValidDiskID, Epoch: 1, Ino: testOverMaxInt64}},
 		{name: "mount_disk_empty_id", msg: &storagev1.MountDiskRequest{}},
@@ -599,4 +609,252 @@ func TestStorageValidator_GivenCodecRoundTrippedRequest_WhenValidated_ThenPreser
 	require.Equal(t, validator.ReasonInvalidArgument, typedValErr.Reason())
 	require.Equal(t, validator.ErrorDomain, typedValErr.Domain())
 	require.NotEmpty(t, typedValErr.Error())
+}
+
+func TestStorageValidator_GivenDiffReadCommitMergeAndSetAttrViolations_WhenValidated_ThenKeepsDeterministicPriority(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	now := timestamppb.Now()
+	tooManyStrategies := make(map[string]storagev1.MergeStrategy, 4097)
+	for i := range 4097 {
+		tooManyStrategies[fmt.Sprintf("path/%d", i)] = storagev1.MergeStrategy_MERGE_STRATEGY_OURS
+	}
+
+	type violationExpectation struct {
+		name         string
+		msg          proto.Message
+		wantReason   string
+		wantMinPrio  int
+		wantFieldSet []string
+	}
+	cases := []violationExpectation{
+		{
+			name:         "diff_disk_path_prefix_over_max_len_returns_einval",
+			msg:          &storagev1.DiffDiskRequest{SourceDiskId: testValidDiskID, PathPrefix: bytes.Repeat([]byte("p"), 4097)},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.DiffDiskRequest.path_prefix"},
+		},
+		{
+			name:         "diff_disk_page_token_over_max_len_returns_einval",
+			msg:          &storagev1.DiffDiskRequest{SourceDiskId: testValidDiskID, PageToken: strings.Repeat("t", 4097)},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.DiffDiskRequest.page_token"},
+		},
+		{
+			name:         "diff_disk_same_source_and_target_returns_einval_at_prio_10",
+			msg:          &storagev1.DiffDiskRequest{SourceDiskId: testValidDiskID, TargetDiskId: new(testValidDiskID), PathPrefix: bytes.Repeat([]byte("p"), 4097)},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  10,
+			wantFieldSet: []string{"", "storage.v1.DiffDiskRequest.path_prefix"},
+		},
+		{
+			name:         "read_commit_node_bad_commit_and_oversize_returns_einval_at_prio_10",
+			msg:          &storagev1.ReadCommitNodeRequest{DiskId: testValidDiskID, CommitId: testNilUUID, Ino: 0, Offset: testOverMaxInt64, Size: testMaxReadWrite + 1},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  10,
+			wantFieldSet: []string{"storage.v1.ReadCommitNodeRequest.commit_id", "storage.v1.ReadCommitNodeRequest.ino", "storage.v1.ReadCommitNodeRequest.offset", "storage.v1.ReadCommitNodeRequest.size"},
+		},
+		{
+			name: "merge_disk_path_strategies_empty_key_returns_einval",
+			msg: &storagev1.MergeDiskRequest{
+				SourceDiskId:   testValidDiskID,
+				TargetDiskId:   testParentDiskID,
+				PathStrategies: map[string]storagev1.MergeStrategy{"": storagev1.MergeStrategy_MERGE_STRATEGY_OURS},
+			},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.MergeDiskRequest.path_strategies"},
+		},
+		{
+			name: "merge_disk_path_strategies_long_key_returns_einval",
+			msg: &storagev1.MergeDiskRequest{
+				SourceDiskId:   testValidDiskID,
+				TargetDiskId:   testParentDiskID,
+				PathStrategies: map[string]storagev1.MergeStrategy{strings.Repeat("k", 4097): storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS},
+			},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.MergeDiskRequest.path_strategies"},
+		},
+		{
+			name: "merge_disk_path_strategies_nul_key_returns_einval",
+			msg: &storagev1.MergeDiskRequest{
+				SourceDiskId:   testValidDiskID,
+				TargetDiskId:   testParentDiskID,
+				PathStrategies: map[string]storagev1.MergeStrategy{"a\x00b": storagev1.MergeStrategy_MERGE_STRATEGY_FAIL},
+			},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.MergeDiskRequest.path_strategies"},
+		},
+		{
+			name: "merge_disk_path_strategies_unspecified_value_returns_einval",
+			msg: &storagev1.MergeDiskRequest{
+				SourceDiskId:   testValidDiskID,
+				TargetDiskId:   testParentDiskID,
+				PathStrategies: map[string]storagev1.MergeStrategy{"dir/file": storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED},
+			},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.MergeDiskRequest.path_strategies"},
+		},
+		{
+			name: "merge_disk_path_strategies_max_pairs_returns_einval",
+			msg: &storagev1.MergeDiskRequest{
+				SourceDiskId:   testValidDiskID,
+				TargetDiskId:   testParentDiskID,
+				PathStrategies: tooManyStrategies,
+			},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  30,
+			wantFieldSet: []string{"storage.v1.MergeDiskRequest.path_strategies"},
+		},
+		{
+			name: "merge_disk_same_source_target_beats_path_strategies",
+			msg: &storagev1.MergeDiskRequest{
+				SourceDiskId:   testValidDiskID,
+				TargetDiskId:   testValidDiskID,
+				PathStrategies: map[string]storagev1.MergeStrategy{strings.Repeat("k", 4097): storagev1.MergeStrategy_MERGE_STRATEGY_OURS},
+			},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  10,
+			wantFieldSet: []string{"", "storage.v1.MergeDiskRequest.path_strategies"},
+		},
+		{
+			name:         "setattr_cel_rules_run_at_prio_10",
+			msg:          &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Atime: now, AtimeNow: true, Mtime: now, MtimeNow: true},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  10,
+			wantFieldSet: []string{""},
+		},
+		{
+			name:         "setattr_has_update_runs_at_prio_10",
+			msg:          &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1},
+			wantReason:   validator.ReasonInvalidArgument,
+			wantMinPrio:  10,
+			wantFieldSet: []string{""},
+		},
+		{
+			name:         "listxattr_resp_long_item_beats_empty_item",
+			msg:          &storagev1.ListXattrResponse{Names: [][]byte{{}, bytes.Repeat([]byte("n"), 256)}},
+			wantReason:   validator.ReasonRange,
+			wantMinPrio:  20,
+			wantFieldSet: []string{"storage.v1.ListXattrResponse.names"},
+		},
+	}
+
+	runSubtests(t, cases, func(tc violationExpectation) string { return tc.name }, func(t *testing.T, tc violationExpectation) {
+		valErr := v.Validate(tc.msg)
+		assertValidationReason(t, valErr, tc.wantReason)
+
+		var pvErr *protovalidate.ValidationError
+		require.ErrorAs(t, valErr, &pvErr)
+		require.NotEmpty(t, pvErr.Violations)
+
+		minPrio := 100
+		gotFields := make(map[string]struct{})
+		for _, viol := range pvErr.Violations {
+			prio, _, domain := validator.ClassifyViolation(viol)
+			fullName := validator.ViolationFieldFullName(viol)
+			gotFields[fullName] = struct{}{}
+			if fullName != "" {
+				require.Equal(t, validator.ErrorDomain, domain, "带字段全名的违规必须归属 bowl.storage domain: field=%s", fullName)
+			}
+			if prio < minPrio {
+				minPrio = prio
+			}
+		}
+
+		require.Equal(t, tc.wantMinPrio, minPrio, "最小优先级不匹配")
+		for _, wantField := range tc.wantFieldSet {
+			_, ok := gotFields[wantField]
+			require.True(t, ok, "未观测到预期违规字段 %q，实际字段集合=%v", wantField, gotFields)
+		}
+	})
+}
+
+func collectProtoContractFromFile(fd protoreflect.FileDescriptor) (msgNames, fieldNames, msgRuleIDs []string, maxLenOnlyFields map[string]bool) {
+	msgNameSet := make(map[string]struct{})
+	fieldNameSet := make(map[string]struct{})
+	msgRuleSet := make(map[string]struct{})
+	maxLenOnlyFields = make(map[string]bool)
+
+	var walkMessages func(mds protoreflect.MessageDescriptors)
+	walkMessages = func(mds protoreflect.MessageDescriptors) {
+		for i := range mds.Len() {
+			md := mds.Get(i)
+			if md.IsMapEntry() {
+				continue
+			}
+			msgNameSet[string(md.FullName())] = struct{}{}
+
+			if proto.HasExtension(md.Options(), validate.E_Message) {
+				if msgRules, ok := proto.GetExtension(md.Options(), validate.E_Message).(*validate.MessageRules); ok && msgRules != nil {
+					for _, cel := range msgRules.GetCel() {
+						msgRuleSet[cel.GetId()] = struct{}{}
+					}
+				}
+			}
+
+			fields := md.Fields()
+			for j := range fields.Len() {
+				field := fields.Get(j)
+				if proto.HasExtension(field.Options(), validate.E_Field) {
+					fullName := string(field.FullName())
+					fieldNameSet[fullName] = struct{}{}
+					if fr, ok := proto.GetExtension(field.Options(), validate.E_Field).(*validate.FieldRules); ok && fr != nil {
+						maxLenOnlyFields[fullName] = isBytesMaxLenOnlyRule(fr)
+					}
+				}
+			}
+
+			walkMessages(md.Messages())
+		}
+	}
+
+	walkMessages(fd.Messages())
+
+	msgNames = sortedKeys(msgNameSet)
+	fieldNames = sortedKeys(fieldNameSet)
+	msgRuleIDs = sortedKeys(msgRuleSet)
+	return msgNames, fieldNames, msgRuleIDs, maxLenOnlyFields
+}
+
+func isBytesMaxLenOnlyRule(fr *validate.FieldRules) bool {
+	if len(fr.GetCel()) > 0 || fr.GetRequired() {
+		return false
+	}
+	br := fr.GetBytes()
+	if br == nil || !br.HasMaxLen() {
+		return false
+	}
+	return !br.HasMinLen() && !br.HasLen() && !br.HasPattern() && !br.HasPrefix() && !br.HasSuffix() && !br.HasContains() && len(br.GetIn()) == 0 && len(br.GetNotIn()) == 0
+}
+
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestStorageValidator_ProtoreflectContractMatchesProtoRules(t *testing.T) {
+	protoMsgs, protoFields, protoMsgRules, maxLenOnlyFields := collectProtoContractFromFile(storagev1.File_storage_v1_storage_proto)
+
+	require.Equal(t, protoMsgs, validator.RegisteredMessageFullNames(), "storageMessages 预编译列表必须覆盖且仅覆盖 storage.proto 全部非 MapEntry 消息")
+	require.Equal(t, protoMsgRules, validator.ClassifiedMessageRuleIDs(), "分类器消息级 CEL 规则必须与 storage.proto 完全对齐")
+	require.Equal(t, protoFields, validator.ClassifiedFieldFullNames(), "分类器字段列表必须与 storage.proto 中带 buf.validate.field 的字段完全对齐，不得有死分支或遗漏")
+
+	for fullName, isMaxLenOnly := range maxLenOnlyFields {
+		hasRule, hasMaxLenBranch := validator.FieldRuleHasMaxLenBranch(fullName)
+		require.True(t, hasRule, "字段 %s 必须在分类器中存在规则", fullName)
+		if isMaxLenOnly {
+			require.False(t, hasMaxLenBranch, "仅含 bytes.max_len 约束的字段 %s 不应保留 isMaxLen 死分支", fullName)
+		}
+	}
 }

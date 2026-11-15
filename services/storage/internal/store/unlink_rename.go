@@ -621,9 +621,6 @@ func (s *StoreActor) Rename(ctx context.Context, req RenameReq) error {
 	if s.isDefinitelyStaleEpoch(req.Epoch) {
 		return s.submitStaleEpoch(ctx, opRename, req.Epoch)
 	}
-	if req.Flags&RenameWhiteout != 0 {
-		return ErrNotSupported
-	}
 	if req.Flags&^(RenameNoreplace|RenameExchange) != 0 {
 		return ErrInvalid
 	}

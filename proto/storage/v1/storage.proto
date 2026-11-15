@@ -221,7 +221,10 @@ service StorageService {
 // LookupRequest 定义 Lookup 接口输入参数。
 message LookupRequest {
   // 父目录的 Inode 编号。根目录通常为 1。
-  uint64 parent_ino = 1 [(buf.validate.field).uint64.gt = 0];
+  uint64 parent_ino = 1 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
 
   // 待查找的子项名称（文件或目录名）。
   // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
@@ -336,10 +339,7 @@ message SetAttrRequest {
   bool mtime_now = 9;
 
   // 保留的兼容字段；句柄由客户端在本地管理。
-  optional uint64 fh = 10 [(buf.validate.field).uint64 = {
-    gt: 0
-    lte: 9223372036854775807
-  }];
+  optional uint64 fh = 10 [(buf.validate.field).uint64.lte = 9223372036854775807];
 
   // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 11 [
@@ -1157,7 +1157,7 @@ message FallocateRequest {
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
+  // fallocate 模式位标志，支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE、FALLOC_FL_ZERO_RANGE 与 FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE；单独传入 FALLOC_FL_PUNCH_HOLE 返回 InvalidArgument 与 EINVAL，其余不支持模式返回 Unimplemented 与 EOPNOTSUPP。
   uint32 mode = 5;
 
   // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。

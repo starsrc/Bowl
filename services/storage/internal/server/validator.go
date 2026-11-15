@@ -69,7 +69,7 @@ func isValidFastPathDataReq(anyMsg any) bool {
 // 若校验失败，通过 validator.ToStatus(err) 提取 gRPC InvalidArgument 状态与
 // google.rpc.ErrorInfo{Reason, Domain: "bowl.storage"}，
 // 并通过 statusToConnectError 转换为携带该 ErrorInfo Detail 的 *connect.Error 直接返回，
-// 从而阻止非法请求进入下游 Handler 或底层 meta.Manager。
+// 从而阻止非法请求进入下游 Handler 或底层存储引擎。
 func NewValidationInterceptor(v protovalidate.Validator) connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {

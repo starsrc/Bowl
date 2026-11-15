@@ -53,7 +53,7 @@ func (s *Server) GetDiskUsage(ctx context.Context, req *connect.Request[storagev
 }
 ```
 
-数据面 RPC 的范式见 `server/handler_data.go`：`validateWriteEpoch` → `s.control.Actor(ctx, diskID)` → `ctx.Err()` 检查 → `actor.Xxx` → `toConnectError`。所有错误必须经 `toConnectError`，不要直接返回 `connect.NewError`，否则丢失 `ErrorInfo.Reason`。
+数据面 RPC 的入口参数边界由 `NewValidationInterceptor` 统一守门。处理器范式见 `server/handler_data.go`：先通过 `s.control.Actor` 获取目标 Actor 并检查 `ctx.Err`，再调用 `actor.Xxx`，最终经 `toConnectError` 转换错误。所有错误必须经 `toConnectError`，不要直接返回 `connect.NewError`，否则丢失 `ErrorInfo.Reason`。
 
 ### 1.2 新 RPC 的"分类表"核对
 
@@ -63,7 +63,7 @@ func (s *Server) GetDiskUsage(ctx context.Context, req *connect.Request[storagev
 | --- | --- | --- |
 | `server/interceptor.go` 的 `isControlPlaneProcedure`（`:116`） | 控制面慢请求阈值 `200ms`，否则按 `50ms` | 新 RPC 属于控制面 |
 | `server/interceptor.go` 的 `classifyStorageLogLevel`（`:86`） | 成功日志级别：列表内为 Info，其余 Debug | 低频高价值变更操作 |
-| `pkg/validator/validator.go` 的 `classifyViolationInternal` | 校验失败映射为 `EINVAL` 以外的 errno（`ERANGE`、`E2BIG`、`ENAMETOOLONG`） | 新字段有长度或范围约束 |
+| `pkg/validator/validator.go` 的 `classifyViolationInternal` | 校验失败映射为 `EINVAL` 以外的 errno，包括 `ERANGE` 与 `ENAMETOOLONG` | 新字段有长度或范围约束 |
 | `services/storage/internal/control/status.go` 的 `mappings`（`:25`） | 新增领域哨兵错误 → gRPC code 与 errno reason | 新增 `ErrXxx` |
 | `client/internal/rpc/retry.go` 的 `idempotentProcedures`（`:80`） | 允许对 `Unavailable` 与传输错误重试 | **仅**严格只读或幂等的 RPC；写类 RPC 加入会造成重复提交 |
 

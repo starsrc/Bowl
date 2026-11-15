@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"math"
 
 	"connectrpc.com/connect"
 
@@ -16,12 +15,6 @@ const fopenKeepCache uint32 = 1 << 1
 // Create 在指定父目录下原子创建常规文件。
 func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Uid > math.MaxInt32 || msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -59,12 +52,6 @@ func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.Crea
 // Fsync 同步并持久化文件节点与句柄关联的状态。
 func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.FsyncRequest]) (*connect.Response[storagev1.FsyncResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -82,12 +69,6 @@ func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.Fsync
 // FsyncDir 同步并持久化目录节点与目录句柄关联的状态。
 func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.FsyncDirRequest]) (*connect.Response[storagev1.FsyncDirResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -105,9 +86,6 @@ func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.Fs
 // ReadDir 读取指定目录的子项流（基本条目）。
 func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	msg := req.Msg
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -138,9 +116,6 @@ func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.Rea
 // ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
 func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1.ReadDirPlusRequest]) (*connect.Response[storagev1.ReadDirPlusResponse], error) {
 	msg := req.Msg
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -179,12 +154,6 @@ func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1
 // Fallocate 为常规文件扩展逻辑空间或清零指定区间。
 func (s *Server) Fallocate(ctx context.Context, req *connect.Request[storagev1.FallocateRequest]) (*connect.Response[storagev1.FallocateResponse], error) {
 	msg := req.Msg
-	if err := validateWriteEpoch(msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)

@@ -266,7 +266,7 @@ func TestGivenFilesAndDirsWhenRenameOverwriteOrExchangeThenSemanticsPreserved(t 
 		OldParentIno: dirB.Ino, OldName: []byte("moved"),
 		NewParentIno: dirA.Ino, NewName: []byte("x"),
 		Flags: store.RenameWhiteout,
-	}), store.ErrNotSupported)
+	}), store.ErrInvalid)
 	require.ErrorIs(t, actor.Rename(ctx, store.RenameReq{
 		OldParentIno: dirB.Ino, OldName: []byte("moved"),
 		NewParentIno: dirA.Ino, NewName: []byte("x"),

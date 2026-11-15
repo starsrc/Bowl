@@ -38,7 +38,7 @@ Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块�
 
 服务端通过三道防线对僵尸写者实施零宽容栅栏：
 
-1. **RPC 入口守卫（`validateWriteEpoch`）**：位于 `services/storage/internal/server/`，拒绝 `epoch == 0` 或 `&gt; MaxInt64` 的非法写请求（返回 `InvalidArgument`）。
+1. **RPC 入口守卫 `NewValidationInterceptor`**：依据 `storage.proto` 协议规则在服务端拦截器统一校验，拦截 `epoch == 0` 或超过 `MaxInt64` 的非法写请求，返回 `InvalidArgument` 与 `EINVAL`。
 2. **Actor 无锁快筛（`isDefinitelyStaleEpoch`）**：位于 `services/storage/internal/store/actor.go`，通过原子变量 `atomicWriterEpoch`（且无在途 `pendingEpochAdvances`）快速判定 `epoch != currentEpoch` 并立即拦截返回 `store.ErrStaleEpoch`。
 3. **写循环 Phase A 严格校验**：即使请求在世代切换并发窗口进入排队队列，单协程写循环 `validateCmd` 在 Phase A 阶段再次核对 `cmd.epoch == s.stat.WriterEpoch`，不相等绝不触碰 Pebble `Batch`。
 4. **错误语义还原**：`store.ErrStaleEpoch` 经 `services/storage/internal/control/status.go` 映射为 gRPC `codes.FailedPrecondition` + `ErrorInfo{Reason: "EBUSY", Domain: "bowl.storage"}`；客户端 `rpc.MapError` 精确还原为 Linux `syscall.EBUSY`。

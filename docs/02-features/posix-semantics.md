@@ -33,7 +33,7 @@
 | 默认覆盖 (`0`) | `0x0` | **支持** | 若目标不存在则直接移动；若目标存在，要求类型兼容（文件不可覆盖目录 -&gt; `EISDIR`，目录不可覆盖非目录 -&gt; `ENOTDIR`，目标目录非空 -&gt; `ENOTEMPTY`）。被覆盖文件若 `Nlink == 1` 且 `TargetOpenHandle = true`，则转为孤儿节点 |
 | `RENAME_NOREPLACE` | `0x1` | **支持** | 要求目标目录项绝对不存在，否则原子拒绝并返回 `EEXIST` |
 | `RENAME_EXCHANGE` | `0x2` | **支持** | 要求源与目标目录项均存在，支持不同类型节点（如文件与目录互换）原子交换；跨父目录互换文件与目录时同步精确增减双方父目录 `Nlink` 并在溢出 `MaxNlink = 65000` 时拦截返回 `EMLINK` |
-| `RENAME_WHITEOUT` | `0x4` | **明确不支持** | 服务端严格返回 `ErrNotSupported`（映射为 `EOPNOTSUPP`） |
+| `RENAME_WHITEOUT` | `0x4` | **明确不支持** | 客户端与服务端统一拒绝并返回 `EINVAL` |
 | 互斥或未知标志位 | 其他组合 | **拒绝** | 若同时传入 `RENAME_NOREPLACE \| RENAME_EXCHANGE` 或携带未知位，返回 `ErrInvalid`（`EINVAL`） |
 
 **双向祖先环检测（`isSubdirectory`）**：
@@ -60,16 +60,16 @@
 ### `SetAttr` 按位部分更新与 `Fallocate` 模式差异
 
 - **`SetAttr`**：支持独立或组合更新 `Mode`、`UID`、`GID`、`Size`（截断或稀疏扩长）、`Atime` / `AtimeNow`、`Mtime` / `MtimeNow`、`CtimeNow` 与 `Flags`。客户端在 `FATTR_ATIME_NOW` 与 `FATTR_ATIME`（或 `MTIME_NOW` 与 `MTIME`）同时置位时强制优先发送 `*Now = true` 并置空显式时间戳，避免触发协议互斥校验。当 `UID`、`GID` 或 `Size` 发生变化时，服务端自动剥离 `S_ISUID | S_ISGID` 及 `security.capability`。
-- **`Fallocate` 支持矩阵（区分客户端入口与存储引擎）**：
+- **`Fallocate` 支持矩阵**：
 
-| 模式组合 | 存储引擎层（`store/data_partial.go`） | 客户端 FUSE 层（`fs_setattr_fallocate.go`） | 语义说明 |
+| 模式组合 | 存储引擎层 `store/data_partial.go` | 客户端 FUSE 层 `fs_setattr_fallocate.go` | 语义说明 |
 | :--- | :--- | :--- | :--- |
-| `0`（默认预分配） | **支持** | **支持** | 区间越过当前文件尾时扩展 `Inode.Size`（更新 `LogicalBytes` 与配额），以稀疏语义保留空间而不填充物理垃圾 |
+| `0` | **支持** | **支持** | 默认预分配模式，区间越过文件尾时扩展 `Inode.Size` 并更新 `LogicalBytes` 与配额，按稀疏语义保留空间而不填充物理垃圾 |
 | `FALLOC_FL_KEEP_SIZE` | **支持** | **支持** | 保持 `Inode.Size` 不变，仅校验配额与边界 |
-| `FALLOC_FL_PUNCH_HOLE \| FALLOC_FL_KEEP_SIZE` | **支持** | **支持** | 对 `[offset, offset+len)` 打洞释放覆盖的 `256 KiB` 块引用并对部分重叠块局部清零，保持 `Size` 不变 |
-| `FALLOC_FL_PUNCH_HOLE`（无 `KEEP_SIZE`） | `ErrInvalid`（`EINVAL`） | `EOPNOTSUPP` | POSIX 规定打洞必须同时携带 `KEEP_SIZE` |
-| `FALLOC_FL_ZERO_RANGE`（含或不含 `KEEP_SIZE`） | **支持** | **拦截返回 `EOPNOTSUPP`** | 存储引擎已实现范围置零逻辑，但当前客户端 FUSE 入口显式白名单限制仅放行前三种模式 |
-| `COLLAPSE_RANGE` / `INSERT_RANGE` 等其他模式 | `ErrNotSupported`（`EOPNOTSUPP`） | `EOPNOTSUPP` | 不支持改变中间块偏移或折叠范围的操作 |
+| `FALLOC_FL_PUNCH_HOLE \| FALLOC_FL_KEEP_SIZE` | **支持** | **支持** | 对指定字节范围打洞，释放覆盖的 `256 KiB` 块引用并对部分重叠块局部清零，保持 `Size` 不变 |
+| `FALLOC_FL_PUNCH_HOLE` | `ErrInvalid`，对应 `EINVAL` | `EINVAL` | 单独传入缺少 `KEEP_SIZE`，客户端与服务端统一拒绝并返回 `EINVAL` |
+| `FALLOC_FL_ZERO_RANGE` 与 `FALLOC_FL_ZERO_RANGE \| FALLOC_FL_KEEP_SIZE` | **支持** | **支持** | 双端均支持范围置零，包括客户端本地 `O_TMPFILE` 缓冲 |
+| `COLLAPSE_RANGE` / `INSERT_RANGE` 等其他模式 | `ErrNotSupported`，对应 `EOPNOTSUPP` | `EOPNOTSUPP` | 不支持改变中间块偏移或折叠范围的操作 |
 
 ### `Flush` 与 `Fsync` / `FsyncDir` 刷盘语义
 

@@ -520,7 +520,7 @@ LookupRequest 定义 Lookup 接口输入参数。
 
 | 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `parent_ino` | `uint64` | singular | `uint64`: `gt=0` | 父目录的 Inode 编号。根目录通常为 1。 |
+| 1 | `parent_ino` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | 父目录的 Inode 编号。根目录通常为 1。 |
 | 2 | `name` | `bytes` | singular | CEL `bytes_name_no_slash_or_nul`: `!this.contains(b'\x00') && !this.contains(b'/')`（name cannot contain '/' or NUL byte）<br>`bytes`: `maxLen=255` | 待查找的子项名称（文件或目录名）。&lt;br&gt;长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。 |
 | 3 | `disk_id` | `string` | singular | CEL `lookup_disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。 |
 
@@ -575,7 +575,7 @@ SetAttrRequest 定义 SetAttr 接口输入参数。
 | 7 | `mtime` | `google.protobuf.Timestamp` | optional | — | 待修改的最后修改时间。 |
 | 8 | `atime_now` | `bool` | singular | — | 是否将最后访问时间设置为当前服务端时间。与 atime 互斥。 |
 | 9 | `mtime_now` | `bool` | singular | — | 是否将最后修改时间设置为当前服务端时间。与 mtime 互斥。 |
-| 10 | `fh` | `uint64` | optional | `uint64`: `lte=9223372036854775807`, `gt=0` | 保留的兼容字段；句柄由客户端在本地管理。 |
+| 10 | `fh` | `uint64` | optional | `uint64`: `lte=9223372036854775807` | 保留的兼容字段；句柄由客户端在本地管理。 |
 | 11 | `disk_id` | `string` | singular | CEL `setattr_disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。 |
 | 12 | `ctime_now` | `bool` | singular | — | 是否将状态变更时间设置为当前服务端时间。 |
 | 13 | `flags` | `uint32` | optional | `uint32`: `lte=2147483647` | 可选的文件系统标志位（如 chattr 所设）。 |
@@ -941,7 +941,7 @@ FallocateRequest 定义 Fallocate 接口输入参数。
 | 2 | `fh` | `uint64` | singular | `uint64`: `lte=9223372036854775807` | 保留的兼容字段；文件句柄由客户端在本地管理。 |
 | 3 | `offset` | `uint64` | singular | `uint64`: `lte=9223372036854775807` | 操作起始偏移量（字节）。必须在 int64 正数范围内 (&lt;= 9223372036854775807)。 |
 | 4 | `length` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | 操作区间长度（字节）。必须大于 0 且在 int64 正数范围内 (&lt;= 9223372036854775807)。 |
-| 5 | `mode` | `uint32` | singular | — | fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE \| FALLOC_FL_KEEP_SIZE）。 |
+| 5 | `mode` | `uint32` | singular | — | fallocate 模式位标志，支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE \| FALLOC_FL_KEEP_SIZE、FALLOC_FL_ZERO_RANGE 与 FALLOC_FL_ZERO_RANGE \| FALLOC_FL_KEEP_SIZE；单独传入 FALLOC_FL_PUNCH_HOLE 返回 InvalidArgument 与 EINVAL，其余不支持模式返回 Unimplemented 与 EOPNOTSUPP。 |
 | 6 | `disk_id` | `string` | singular | CEL `fallocate_disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。 |
 | 7 | `epoch` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。 |
 

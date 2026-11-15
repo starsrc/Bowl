@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"math"
 	"time"
 
 	"connectrpc.com/connect"
@@ -12,13 +11,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/control"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
-
-func validateWriteEpoch(epoch uint64) error {
-	if epoch == 0 || epoch > math.MaxInt64 {
-		return store.ErrInvalid
-	}
-	return nil
-}
 
 // toProtoAttribute 将 store.Attribute 领域实体转换为 Protobuf InodeAttribute。
 func toProtoAttribute(attr *store.Attribute) *storagev1.InodeAttribute {
@@ -271,12 +263,6 @@ func (s *Server) GetAttr(ctx context.Context, req *connect.Request[storagev1.Get
 
 // SetAttr 修改指定 Inode 的元数据属性。
 func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.SetAttrRequest]) (*connect.Response[storagev1.SetAttrResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Fh != nil && (*req.Msg.Fh == 0 || *req.Msg.Fh > math.MaxInt64) {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -316,12 +302,6 @@ func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.Set
 
 // Mknod 在指定父目录下创建常规文件或特殊设备节点。
 func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.MknodRequest]) (*connect.Response[storagev1.MknodResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -350,12 +330,6 @@ func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.Mknod
 
 // Mkdir 在指定父目录下创建子目录。
 func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.MkdirRequest]) (*connect.Response[storagev1.MkdirResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
@@ -383,12 +357,6 @@ func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.Mkdir
 
 // Symlink 在指定父目录下创建指向目标路径的符号链接节点。
 func (s *Server) Symlink(ctx context.Context, req *connect.Request[storagev1.SymlinkRequest]) (*connect.Response[storagev1.SymlinkResponse], error) {
-	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
-		return nil, toConnectError(err)
-	}
-	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
-	}
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)

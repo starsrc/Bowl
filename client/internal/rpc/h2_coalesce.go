@@ -121,6 +121,9 @@ func (c *h2CoalesceConn) flushOnTimer() {
 	c.pendingLen = 0
 	if _, err := writeFull(c.Conn, c.pendingBuf[:hdrLen]); err != nil {
 		c.asyncErr = err
+		// 定时冲刷没有调用方可以返回错误：立即关闭底层连接，让 http2 读循环感知断连、Transport 换新连接。
+		// 不关闭时，HEADERS 已丢失的那个请求要等到下一次写或自身超时才失败。
+		_ = c.Conn.Close()
 	}
 }
 

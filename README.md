@@ -188,7 +188,7 @@ task down
 常用开发与测试命令（全部由 `Taskfile.yml` 管理）：
 
 ```bash
-task hooks:install    # 安装 .githooks/pre-commit（按变更模块自动执行 buf lint 与 golangci-lint）
+task hooks:install    # 安装 .githooks：pre-commit 跑 lint，pre-push 跑不依赖 Docker 的测试
 task test             # 运行根模块与 services/storage 单元测试
 task test:client      # 在 Linux Docker 容器内编译并运行 client 单元测试（macOS 可用）
 task test:client:e2e  # 拉起 storage-service 并在带 /dev/fuse 的容器内运行 FUSE 黑盒 E2E 测试

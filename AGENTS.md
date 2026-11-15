@@ -36,7 +36,11 @@
 - **静态检查与 Git Hook**：
   - 执行 `task hooks:install` 配置 `git config core.hooksPath .githooks`。
   - `.githooks/pre-commit` 按暂存区变更按需执行 `buf lint` 及对应模块的 `golangci-lint`（其中 `client` 固定以 `GOOS=linux CGO_ENABLED=0` 检查；`gen/*.go`、`pkg/*.go` 或 `.golangci.yml` 变更会联检全部三个模块）。
+  - `.githooks/pre-push` 在推送前跑不依赖 Docker / PostgreSQL 的测试：根模块与 `services/storage`（不含 `internal/db`）的 `go test`、`client` 的 `GOOS=linux go vet` 与本机可跑的包。未改 Go / proto 文件时跳过。
   - 手动全量检查执行 `task lint`。
+- **CI（`.github/workflows/ci.yml`）**：
+  - fast：`task lint`、`go.mod` 整洁检查、`task test`（带已迁移的 PostgreSQL）、`task test:client`。仓库 OWNER / MEMBER / COLLABORATOR 的 PR 跑这一档。
+  - full：fast 加 `task test:e2e`、`task test:client:e2e`、`task docs:build`。外部贡献者的 PR、`release/` 分支的 PR、`v*` 标签、带 `full-ci` 标签的 PR 跑这一档。
 
 ## 4. 契约与文档同步
 

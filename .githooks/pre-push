@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# 推送前守门：跑 CI 里不依赖 Docker / PostgreSQL 的那部分测试（约 30 秒），让明显的破坏在本地就被拦下。
+# 完整测试（数据库适配器、Linux 容器内的客户端全量、E2E）由 .github/workflows/ci.yml 负责。
+# 启用：task hooks:install    临时跳过：git push --no-verify
+
+set -euo pipefail
+
+export PATH="${PATH}:/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:${HOME}/go/bin"
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+# 只在本次推送相对 origin/main 改动了 Go 或 proto 相关文件时才跑
+base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+if [[ -n "${base}" ]] && ! git diff --name-only "${base}" HEAD | grep -qE '\.(go|proto)$|(^|/)go\.(mod|sum)$'; then
+  exit 0
+fi
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+export GOWORK=off
+
+run_step() {
+  local label="$1"
+  shift
+  local out
+  printf "pre-push: %s ... " "${label}" >&2
+  if out="$("$@" 2>&1)"; then
+    echo "ok" >&2
+  else
+    echo "FAILED" >&2
+    echo "${out}" >&2
+    return 1
+  fi
+}
+
+run_step "go test [root]" go test ./...
+
+# internal/db 需要已迁移的 PostgreSQL，留给 CI
+run_step "go test [services/storage，不含 internal/db]" \
+  bash -c 'cd services/storage && go test $(go list ./... | grep -v "/internal/db$")'
+
+# 客户端以 Linux 为目标：先交叉编译检查全部包（含测试），再跑当前系统能跑的测试
+run_step "go vet [client, GOOS=linux]" \
+  bash -c 'cd client && GOOS=linux CGO_ENABLED=0 go vet ./...'
+if [[ "$(uname -s)" == "Linux" ]]; then
+  run_step "go test [client]" bash -c 'cd client && go test ./...'
+else
+  run_step "go test [client/internal/rpc]" bash -c 'cd client && go test ./internal/rpc/...'
+fi

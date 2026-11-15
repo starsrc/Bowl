@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -881,7 +882,7 @@ func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1
 		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
 	}
 	flags := req.Msg.GetFlags()
-	if flags&^(uint32(0x1|0x2|0x4)) != 0 || ((flags&0x2 != 0) && (flags&0x1 != 0 || flags&0x4 != 0)) {
+	if flags&^(uint32(0x1|0x2)) != 0 || (flags&0x1 != 0 && flags&0x2 != 0) {
 		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
 	}
 	s.mu.Lock()
@@ -965,26 +966,6 @@ func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1
 		}
 	}
 	delete(s.entries[req.Msg.GetOldParentIno()], oldName)
-	if flags&0x4 != 0 && (req.Msg.GetOldParentIno() != req.Msg.GetNewParentIno() || oldName != newName) {
-		woIno := s.allocInoLocked()
-		now := timestamppb.Now()
-		s.nodes[woIno] = &fakeNode{
-			inode: &storagev1.Inode{
-				Ino:        woIno,
-				Generation: 1,
-				Attr: &storagev1.InodeAttribute{
-					Mode:    syscall.S_IFCHR,
-					Nlink:   1,
-					Blksize: 4096,
-					Atime:   now,
-					Mtime:   now,
-					Ctime:   now,
-				},
-			},
-			xattrs: make(map[string][]byte),
-		}
-		s.entries[req.Msg.GetOldParentIno()][oldName] = woIno
-	}
 	s.entries[req.Msg.GetNewParentIno()][newName] = srcIno
 	if srcIsDir && req.Msg.GetOldParentIno() != req.Msg.GetNewParentIno() {
 		oldParent.inode.Attr.Nlink--
@@ -1311,7 +1292,7 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 	if err := s.checkEpoch("Fallocate", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
-	if req.Msg.GetLength() == 0 {
+	if req.Msg.GetLength() == 0 || req.Msg.GetOffset() > math.MaxInt64 || req.Msg.GetLength() > math.MaxInt64-req.Msg.GetOffset() {
 		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
 	}
 	s.mu.Lock()
@@ -1320,8 +1301,15 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 	if node == nil {
 		return nil, errnoError(connect.CodeNotFound, "ENOENT")
 	}
+	offset := int(req.Msg.GetOffset())
 	end := int(req.Msg.GetOffset() + req.Msg.GetLength())
-	const punchAndKeep = 0x02 | 0x01 // FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE
+	const (
+		keepSizeFlag  = 0x01
+		punchHoleFlag = 0x02
+		zeroRangeFlag = 0x10
+		punchAndKeep  = punchHoleFlag | keepSizeFlag
+		zeroAndKeep   = zeroRangeFlag | keepSizeFlag
+	)
 	switch req.Msg.GetMode() {
 	case 0:
 		if end > len(node.data) {
@@ -1330,13 +1318,25 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 			node.data = grown
 			node.inode.Attr.Size = uint64(end)
 		}
-	case 0x01: // FALLOC_FL_KEEP_SIZE
-		// 仅保留空间，不改变可见长度
-	case punchAndKeep:
-		if int(req.Msg.GetOffset()) < len(node.data) {
+	case keepSizeFlag:
+		// 仅保留空间，不改变可见长度。
+	case punchHoleFlag:
+		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
+	case punchAndKeep, zeroAndKeep:
+		if offset < len(node.data) {
 			clearEnd := min(end, len(node.data))
-			clear(node.data[int(req.Msg.GetOffset()):clearEnd])
+			clear(node.data[offset:clearEnd])
 		}
+		node.inode.Attr.Mode &^= syscall.S_ISUID | syscall.S_ISGID
+	case zeroRangeFlag:
+		if end > len(node.data) {
+			grown := make([]byte, end)
+			copy(grown, node.data)
+			node.data = grown
+			node.inode.Attr.Size = uint64(end)
+		}
+		clear(node.data[offset:end])
+		node.inode.Attr.Mode &^= syscall.S_ISUID | syscall.S_ISGID
 	default:
 		return nil, errnoError(connect.CodeUnimplemented, "EOPNOTSUPP")
 	}

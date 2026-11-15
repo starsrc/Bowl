@@ -36,7 +36,7 @@ const (
 
 //revive:enable:var-naming
 
-// 服务端协议标志位常量（对应 storage.proto / meta.Flag*）。
+// 服务端协议标志位常量，对应 storage.proto 与 store.Flag*。
 const (
 	ProtoFlagImmutable uint32 = 0x1
 	ProtoFlagAppend    uint32 = 0x2

@@ -21,6 +21,7 @@ const (
 	linuxCloexecFlag  uint32 = 0o2000000
 	fallocFlKeepSize  uint32 = 0x01
 	fallocFlPunchHole uint32 = 0x02
+	fallocFlZeroRange uint32 = 0x10
 	smallWriteSize           = 1024
 	coalesceWrites           = 96
 	chunk4MiB                = fusefs.MaxRPCChunkSize
@@ -405,7 +406,7 @@ func TestTmpfile与OnUnmount_匿名文件具名化孤儿持久化与乱序双清
 			Mode:     0o640,
 		}, &tmpOut))
 
-		// When: 写入数据、扩展大小与 Fallocate 打洞后具名化为正常文件，再尝试二次 Link 应被拒绝
+		// When: 写入数据并执行 Fallocate 打洞、零范围清零与越界扩展，随后具名化为正常文件并拒绝二次 Link
 		mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, []byte("tmp-header-tail"))
 		requireStatus(t, "Tmpfile Fallocate 打洞", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
@@ -414,6 +415,29 @@ func TestTmpfile与OnUnmount_匿名文件具名化孤儿持久化与乱序双清
 			Length:   7,
 			Mode:     fallocFlPunchHole | fallocFlKeepSize,
 		}))
+		requireStatus(t, "Tmpfile 单独 PUNCH_HOLE 返回 EINVAL", fuse.EINVAL, fs.Fallocate(nil, &fuse.FallocateIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+			Offset:   0,
+			Length:   4,
+			Mode:     fallocFlPunchHole,
+		}))
+		requireStatus(t, "Tmpfile ZERO_RANGE KEEP_SIZE", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+			Offset:   13,
+			Length:   6,
+			Mode:     fallocFlZeroRange | fallocFlKeepSize,
+		}))
+		require.Equal(t, uint64(15), mustGetAttr(t, fs, tmpOut.NodeId).Size)
+		requireStatus(t, "Tmpfile ZERO_RANGE 越界扩展", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+			Offset:   12,
+			Length:   8,
+			Mode:     fallocFlZeroRange,
+		}))
+		require.Equal(t, uint64(20), mustGetAttr(t, fs, tmpOut.NodeId).Size)
 		requireStatus(t, "Tmpfile 非法 Fallocate 偏移", fuse.EINVAL, fs.Fallocate(nil, &fuse.FallocateIn{
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
 			Fh:       tmpOut.Fh,
@@ -443,11 +467,12 @@ func TestTmpfile与OnUnmount_匿名文件具名化孤儿持久化与乱序双清
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 		fs.Forget(tmpOut.NodeId, 2)
 
-		// Then: 通过具名文件读取确认打洞与数据完整持久化
+		// Then: 通过具名文件读取确认打洞、零范围清零与越界扩展完整持久化
 		looked := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "materialized.txt")
+		require.Equal(t, uint64(20), looked.Size)
 		opened := mustOpenFile(t, fs, looked.NodeId, syscall.O_RDONLY)
-		got := mustReadAt(t, fs, looked.NodeId, opened.Fh, 0, 15)
-		requireBytesMatch(t, "具名化后的打洞文件内容", []byte("tmp-\x00\x00\x00\x00\x00\x00\x00tail"), got)
+		got := mustReadAt(t, fs, looked.NodeId, opened.Fh, 0, 20)
+		requireBytesMatch(t, "具名化后的打洞与零范围文件内容", []byte("tmp-\x00\x00\x00\x00\x00\x00\x00t\x00\x00\x00\x00\x00\x00\x00\x00"), got)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: looked.NodeId}, Fh: opened.Fh})
 	})
 

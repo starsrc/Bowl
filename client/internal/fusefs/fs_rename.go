@@ -10,15 +10,13 @@ import (
 )
 
 const (
-	// renameNoReplace 对应 Linux RENAME_NOREPLACE (0x1)，要求目标目录项不存在。
+	// renameNoReplace 对应 Linux RENAME_NOREPLACE 标志，要求目标目录项不存在。
 	renameNoReplace = 0x1
-	// renameExchange 对应 Linux RENAME_EXCHANGE (0x2)，原子双向交换两个目录项。
+	// renameExchange 对应 Linux RENAME_EXCHANGE 标志，原子双向交换两个目录项。
 	renameExchange = 0x2
-	// renameWhiteout 对应 Linux RENAME_WHITEOUT (0x4)，在源项位置创建 whiteout 特殊节点。
-	renameWhiteout = 0x4
 )
 
-// Rename 实现目录项重命名、跨目录移动与双向原子交换操作（支持 Linux FUSE_RENAME2 协议标志位）。
+// Rename 实现目录项重命名、跨目录移动与双向原子交换操作，支持 Linux FUSE_RENAME2 协议标志位。
 func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, newName string) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpRename)
 	opCtx, endSpan := fs.startFuseOp(OpRename)
@@ -35,6 +33,10 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	}
 	if fs.isVirtualStatsIno(input.NodeId) || fs.isVirtualStatsIno(input.Newdir) {
 		return fuse.Status(syscall.ENOTDIR)
+	}
+	if input.Flags&^(renameNoReplace|renameExchange) != 0 ||
+		(input.Flags&renameNoReplace != 0 && input.Flags&renameExchange != 0) {
+		return fuse.EINVAL
 	}
 
 	oldParentIno, st := fs.ToServerIno(input.NodeId)
@@ -102,18 +104,11 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	targetOpen := target != 0 && fs.handles.IsOpen(target)
 
 	var protoFlags uint32
-	if (input.Flags & renameNoReplace) != 0 {
-		protoFlags |= 0x1
-	}
-	if (input.Flags & renameExchange) != 0 {
-		protoFlags |= 0x2
-	}
-	if (input.Flags & renameWhiteout) != 0 {
-		protoFlags |= 0x4
-	}
-	// 保留未知位透传给服务端，由服务端契约校验返回 EINVAL
-	if unknown := input.Flags &^ (renameNoReplace | renameExchange | renameWhiteout); unknown != 0 {
-		protoFlags |= unknown
+	switch input.Flags {
+	case renameNoReplace:
+		protoFlags = 0x1
+	case renameExchange:
+		protoFlags = 0x2
 	}
 
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
@@ -168,12 +163,8 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 			fs.cache.removeEntry(input.Newdir, newName)
 		}
 	} else {
-		// 旧名消失。WHITEOUT 会在旧名留下特殊节点，保守地按未命中处理；
-		// 普通重命名的旧名已确定不存在，回填负缓存（ino=0），避免随后 access()/stat()
-		// 再次穿透 RPC。同名同目录自重命名由下面的新名回填统一处理。
-		if input.Flags&renameWhiteout != 0 {
-			fs.cache.removeEntry(input.NodeId, oldName)
-		} else if input.NodeId != input.Newdir || oldName != newName {
+		// 普通重命名后旧名不再存在，回填负缓存避免后续查找穿透 RPC；同名同目录自重命名由新名回填处理。
+		if input.NodeId != input.Newdir || oldName != newName {
 			fs.cache.putEntryAt(epoch, input.NodeId, oldName, 0)
 		}
 		if source != 0 {

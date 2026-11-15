@@ -407,7 +407,7 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 	return cloned, true, fuse.OK
 }
 
-// Allocate 在尚未上云的本地匿名文件上执行预分配扩展或打洞清零（FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
+// Allocate 在尚未上云的本地匿名文件上执行预分配、打洞与零范围清零。
 func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -418,9 +418,16 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool
 	if tmp.serverIno != 0 {
 		return false, fuse.OK
 	}
-	if mode != 0 &&
-		mode != fallocFlKeepSize &&
-		mode != (fallocFlPunchHole|fallocFlKeepSize) {
+	if mode == fallocFlPunchHole {
+		return true, fuse.EINVAL
+	}
+	switch mode {
+	case 0,
+		fallocFlKeepSize,
+		fallocFlPunchHole | fallocFlKeepSize,
+		fallocFlZeroRange,
+		fallocFlZeroRange | fallocFlKeepSize:
+	default:
 		return true, fuse.Status(syscall.EOPNOTSUPP)
 	}
 	if length == 0 || offset > math.MaxInt64 || length > math.MaxInt64-offset {
@@ -432,8 +439,8 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool
 	if mode&fallocFlKeepSize == 0 && end > a.Size {
 		a.Size = end
 	}
-	punch := mode&fallocFlPunchHole != 0
-	if punch {
+	zeroRange := mode&(fallocFlPunchHole|fallocFlZeroRange) != 0
+	if zeroRange {
 		before := len(tmp.pages)
 		holeEnd := min(end, a.Size)
 		for pos := offset; pos < holeEnd; {
@@ -457,7 +464,7 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool
 	}
 	a.Blocks = uint64(len(tmp.pages)) * (tmpSparsePageSize / 512)
 	now := timestamppb.Now()
-	if punch || a.Size > oldSize {
+	if zeroRange || a.Size > oldSize {
 		a.Mtime = now
 	}
 	a.Ctime = now

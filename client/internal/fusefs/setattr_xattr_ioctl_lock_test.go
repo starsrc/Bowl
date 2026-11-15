@@ -157,6 +157,23 @@ func TestFallocate_空间预分配保持尺寸打洞与错误拦截(t *testing.T
 	}))
 	requireBytesMatch(t, "打洞清零区间", []byte("HELLO-\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), mustReadAt(t, fs, rw.NodeId, rd.Fh, 0, 16))
 
+	requireStatus(t, "Fallocate ZERO_RANGE KEEP_SIZE", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
+		InHeader: fuse.InHeader{NodeId: rw.NodeId}, Fh: rw.Fh, Offset: 2, Length: 20, Mode: fallocFlZeroRange | fallocFlKeepSize,
+	}))
+	require.Equal(t, uint64(16), mustGetAttr(t, fs, rw.NodeId).Size)
+	requireBytesMatch(t, "ZERO_RANGE KEEP_SIZE 清零并保持尺寸", []byte("HE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), mustReadAt(t, fs, rw.NodeId, rd.Fh, 0, 16))
+
+	requireStatus(t, "Fallocate ZERO_RANGE 越界扩展", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
+		InHeader: fuse.InHeader{NodeId: rw.NodeId}, Fh: rw.Fh, Offset: 1, Length: 20, Mode: fallocFlZeroRange,
+	}))
+	require.Equal(t, uint64(21), mustGetAttr(t, fs, rw.NodeId).Size)
+	expectedZeroExtended := append([]byte{'H'}, make([]byte, 20)...)
+	requireBytesMatch(t, "ZERO_RANGE 清零并越过 EOF 扩展", expectedZeroExtended, mustReadAt(t, fs, rw.NodeId, rd.Fh, 0, 21))
+
+	requireStatus(t, "单独 PUNCH_HOLE 返回 EINVAL", fuse.EINVAL, fs.Fallocate(nil, &fuse.FallocateIn{
+		InHeader: fuse.InHeader{NodeId: rw.NodeId}, Fh: rw.Fh, Offset: 0, Length: 4, Mode: fallocFlPunchHole,
+	}))
+
 	requireStatus(t, "非法 Fallocate 标志", fuse.Status(syscall.EOPNOTSUPP), fs.Fallocate(nil, &fuse.FallocateIn{
 		InHeader: fuse.InHeader{NodeId: rw.NodeId}, Fh: rw.Fh, Offset: 0, Length: 4, Mode: 0x8,
 	}))

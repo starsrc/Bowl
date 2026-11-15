@@ -380,7 +380,7 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 		requireStatus(t, "原目录项应返回 ENOENT", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: srcParent.NodeId}, "sub", &gone))
 	})
 
-	t.Run("NOREPLACE与EXCHANGE和WHITEOUT标志按契约生效", func(t *testing.T) {
+	t.Run("NOREPLACE与EXCHANGE生效并拦截WHITEOUT与互斥或未知标志", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
@@ -390,7 +390,7 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "a")
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "b")
 
-		// When & Then: NOREPLACE 冲突返回 EEXIST；EXCHANGE 原子互换；WHITEOUT 留下字符设备占位并穿透缓存
+		// When & Then: NOREPLACE 冲突返回 EEXIST，EXCHANGE 原子互换，WHITEOUT、互斥与未知标志返回 EINVAL
 		requireStatus(t, "NOREPLACE 冲突", fuse.Status(syscall.EEXIST), fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Newdir:   fuse.FUSE_ROOT_ID,
@@ -405,14 +405,23 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 		require.Equal(t, bIno, mustLookup(t, fs, fuse.FUSE_ROOT_ID, "a").NodeId)
 		require.Equal(t, aIno, mustLookup(t, fs, fuse.FUSE_ROOT_ID, "b").NodeId)
 
-		requireStatus(t, "WHITEOUT 重命名", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
-			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
-			Newdir:   fuse.FUSE_ROOT_ID,
-			Flags:    renameWhiteout,
-		}, "a", "c"))
-		wo := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "a")
-		require.Equal(t, uint32(syscall.S_IFCHR), wo.Mode&syscall.S_IFMT, "WHITEOUT 后必须穿透缓存查见字符设备占位节点")
-		require.Equal(t, bIno, mustLookup(t, fs, fuse.FUSE_ROOT_ID, "c").NodeId)
+		for _, tc := range []struct {
+			name  string
+			flags uint32
+		}{
+			{name: "WHITEOUT", flags: renameWhiteout},
+			{name: "NOREPLACE与EXCHANGE互斥", flags: renameNoReplace | renameExchange},
+			{name: "未知标志", flags: 0x8},
+		} {
+			requireStatus(t, tc.name, fuse.EINVAL, fs.Rename(nil, &fuse.RenameIn{
+				InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+				Newdir:   fuse.FUSE_ROOT_ID,
+				Flags:    tc.flags,
+			}, "a", "c"))
+		}
+		require.Equal(t, bIno, mustLookup(t, fs, fuse.FUSE_ROOT_ID, "a").NodeId)
+		var missing fuse.EntryOut
+		requireStatus(t, "非法 Rename 不得创建目标目录项", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "c", &missing))
 	})
 
 	t.Run("祖先成环返回EINVAL且覆盖已打开目标后延后回收并清除脏位", func(t *testing.T) {

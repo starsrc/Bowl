@@ -14,6 +14,7 @@ import (
 const (
 	fallocFlKeepSize  = unix.FALLOC_FL_KEEP_SIZE
 	fallocFlPunchHole = unix.FALLOC_FL_PUNCH_HOLE
+	fallocFlZeroRange = unix.FALLOC_FL_ZERO_RANGE
 )
 
 // SetAttr 实现按需部分更新 Inode 属性或截断文件空间，对应 Linux FUSE FUSE_SETATTR 协议。
@@ -152,7 +153,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	return fuse.OK
 }
 
-// Fallocate 实现文件空间预分配与稀疏空洞打洞，对应 Linux FUSE FUSE_FALLOCATE 协议。
+// Fallocate 实现文件空间预分配、打洞与零范围清零，对应 Linux FUSE FUSE_FALLOCATE 协议。
 func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpFallocate)
 	opCtx, endSpan := fs.startFuseOp(OpFallocate)
@@ -183,11 +184,17 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fuse.EBADF
 	}
 
-	// 模式位校验：仅支持默认预留 0、FALLOC_FL_KEEP_SIZE 与 FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE。
-	// 其余不支持模式（如单独 PUNCH_HOLE、COLLAPSE_RANGE、ZERO_RANGE、INSERT_RANGE 等）按规范直接拦截返回 EOPNOTSUPP。
-	if input.Mode != 0 &&
-		input.Mode != fallocFlKeepSize &&
-		input.Mode != (fallocFlPunchHole|fallocFlKeepSize) {
+	// 单独传递 FALLOC_FL_PUNCH_HOLE 时返回 EINVAL，其余未支持模式返回 EOPNOTSUPP。
+	if input.Mode == fallocFlPunchHole {
+		return fuse.EINVAL
+	}
+	switch input.Mode {
+	case 0,
+		fallocFlKeepSize,
+		fallocFlPunchHole | fallocFlKeepSize,
+		fallocFlZeroRange,
+		fallocFlZeroRange | fallocFlKeepSize:
+	default:
 		return fuse.Status(syscall.EOPNOTSUPP)
 	}
 

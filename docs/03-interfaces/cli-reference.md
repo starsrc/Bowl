@@ -38,6 +38,7 @@ bowl <command> [flags] [arguments]
 | 命令 | 别名 | 核心功能 |
 | :--- | :--- | :--- |
 | `bowl disk <subcommand>` | — | 磁盘生命周期管理（`create` / `fork` / `list` / `get` / `update` / `delete` / `diff` / `merge`） |
+| `bowl sandbox <subcommand>` | — | 在本机容器里跑以虚拟磁盘为数据盘的沙箱（`create` / `list` / `info` / `exec` / `logs` / `wait` / `shell` / `cp` / `kill`） |
 | `bowl mount <disk-id> <mountpoint>` | — | 将指定虚拟磁盘挂载到 Linux 本地目录（默认后台守护进程） |
 | `bowl umount <mountpoint>` | `unmount` | 卸载指定挂载点并等待守护进程优雅退出 |
 | `bowl stats [mountpoint]` | — | 查询客户端挂载实例的实时 FUSE / RPC / 缓存统计 |
@@ -230,6 +231,26 @@ bowl <command> [flags] [arguments]
 
 > [!WARNING]
 > 当 `merge` 检测到未决冲突（服务端返回 `ECONFLICT` 或报告包含冲突条目）时，即使传入了 `--json`，CLI 仍会在输出 `merged: false` 与 `conflict_report` 后以**退出码 `1`** 退出，确保 CI/自动化脚本不会误判合入成功。
+
+## `bowl sandbox` 子命令
+
+沙箱是一个 Docker 容器加一块挂在容器内的虚拟磁盘。沙箱 ID 即磁盘 ID；容器名为 `bowl-sbx-<id>`，沙箱状态只记录在容器标签上，客户端不保存本地状态。依赖本机可用的 `docker` 命令，macOS 与 Linux 均可使用。
+
+容器以 `--cap-drop ALL --cap-add SYS_ADMIN --device /dev/fuse --security-opt no-new-privileges` 启动，不使用 `--privileged`。Linux 版 `bowl` 客户端在创建时拷入容器，由它在容器内完成挂载。
+
+| 子命令 | 说明 |
+| :--- | :--- |
+| `create [--image <镜像>] [--size <容量>] [--from <disk-id>] [--name <名称>] [--mount <路径>] [--network <网络>] [-q]` | 建盘（或用 `--from` 从既有磁盘分叉）、起容器、把盘挂到容器内（默认镜像 `ubuntu:24.04`，默认挂载点 `/mnt/data`，默认容量 `1GiB`） |
+| `list`（别名 `ls`） | 列出本机沙箱：ID、状态、镜像、挂载点、存储节点、创建时间 |
+| `info <id>` | 查看单个沙箱的状态、镜像与挂载 |
+| `exec [-b] [--cwd <目录>] <id> -- <命令...>` | 在沙箱内执行命令，默认工作目录为磁盘挂载点，退出码透传；`-b` 后台执行并打印运行 ID |
+| `logs [-f] [--exec <运行ID>] <id>` | 查看或跟随后台执行的输出（默认最近一次） |
+| `wait <id> <运行ID>` | 等待后台执行结束，并以它的退出码退出 |
+| `shell <id>` | 进入交互式 shell（有 `bash` 用 `bash`，否则 `sh`） |
+| `cp <源> <目标>` | 在本机与沙箱之间复制文件或目录，沙箱一侧写作 `<id>:<路径>` |
+| `kill <id> [--keep-disk]`（别名 `rm` / `delete`） | 卸载磁盘并删除容器；默认同时删除磁盘，`--keep-disk` 保留；`--all` 处理本机全部沙箱 |
+
+`--endpoint` 必须同时能被本机和沙箱容器访问。回环地址（`127.0.0.1` / `localhost`）在容器内会自动改写为 `host.docker.internal`。
 
 ## `bowl mount` / `bowl umount` / `bowl stats`
 

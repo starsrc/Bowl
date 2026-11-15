@@ -15,6 +15,7 @@ const usageHelp = `bowl - 分布式虚拟磁盘 Linux FUSE 客户端
 
 可用命令:
   disk        管理虚拟磁盘生命周期 (创建、列表、详情、更新/扩缩容、删除)
+  sandbox     在本机容器里跑以虚拟磁盘为数据盘的沙箱 (创建、列表、执行、销毁)
   mount       挂载远端虚拟磁盘至本地目录
   umount      卸载本地已挂载的虚拟磁盘 (别名: unmount)
   stats       查看本机挂载进程的 FUSE 统计视图
@@ -45,6 +46,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "disk":
 		return executeDisk(args[1:], stdout, stderr)
+	case "sandbox":
+		return executeSandbox(args[1:], stdout, stderr)
 	case "mount":
 		return executeMount(args[1:], stdout, stderr)
 	case "umount", "unmount":

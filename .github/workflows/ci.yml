@@ -3,7 +3,7 @@
 #   full —— fast 的全部，加跨服务 E2E、FUSE 客户端 E2E、文档构建。
 #
 # 跑 full 的情况（其余 PR 跑 fast）：
-#   - PR 作者不是仓库的 OWNER / MEMBER / COLLABORATOR（外部贡献者）
+#   - PR 作者对仓库没有写权限（外部贡献者）
 #   - 发版：推送 v* 标签，或 PR 的源分支 / 目标分支以 release/ 开头
 #   - PR 带 full-ci 标签，或手动触发（workflow_dispatch）
 #
@@ -39,15 +39,25 @@ jobs:
     steps:
       - id: decide
         env:
-          FULL: >-
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          FORCED_FULL: >-
             ${{ github.event_name != 'pull_request'
-            || !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
             || startsWith(github.head_ref, 'release/')
             || startsWith(github.base_ref, 'release/')
             || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
-          echo "full=${FULL}" >> "$GITHUB_OUTPUT"
-          echo "mode: $([ "${FULL}" = true ] && echo full || echo fast)" >> "$GITHUB_STEP_SUMMARY"
+          # 事件里的 author_association 对未公开成员身份的组织成员返回 CONTRIBUTOR，不可靠；
+          # 直接查作者对本仓库的实际权限。查询失败按无权限处理（跑 full）。
+          full=true
+          perm=n/a
+          if [ "${FORCED_FULL}" != true ]; then
+            perm="$(gh api "repos/${REPO}/collaborators/${AUTHOR}/permission" -q .permission 2>/dev/null || echo none)"
+            case "${perm}" in admin|write) full=false ;; esac
+          fi
+          echo "full=${full}" >> "$GITHUB_OUTPUT"
+          echo "mode: $([ "${full}" = true ] && echo full || echo fast)（forced_full=${FORCED_FULL}, author_permission=${perm}）" | tee -a "$GITHUB_STEP_SUMMARY"
 
   lint:
     name: lint

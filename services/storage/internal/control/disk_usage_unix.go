@@ -88,7 +88,7 @@ func scanStorageRootUsage(root string) storageRootUsage {
 		}
 
 		key := devInoKey{
-			dev: uint64(st.Dev),
+			dev: uint64(st.Dev), //nolint:unconvert,nolintlint // Dev 在 Linux 是 uint64，在 darwin 是 int32
 			ino: st.Ino,
 		}
 		if _, exists := allSeen[key]; !exists {

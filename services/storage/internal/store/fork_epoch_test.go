@@ -58,7 +58,7 @@ func fileNlink(t *testing.T, path string) uint64 {
 	require.NoErrorf(t, err, "获取文件 Stat 失败: path=%s", path)
 	st, ok := info.Sys().(*syscall.Stat_t)
 	require.Truef(t, ok, "Stat_t 类型转换失败: path=%s", path)
-	return uint64(st.Nlink)
+	return uint64(st.Nlink) //nolint:unconvert,nolintlint // Nlink 在 linux/amd64 是 uint64，在 darwin 与 linux/arm64 更窄
 }
 
 func requireAllPackNlink(t *testing.T, dir string, wantNlink uint64) {

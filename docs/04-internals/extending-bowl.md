@@ -260,10 +260,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
 
 | 档位 | 内容 | 谁触发 |
 | --- | --- | --- |
-| fast | `task lint`、`task tidy` 后 `go.mod` / `go.sum` 无差异、`task test`（先起 PostgreSQL 并迁移）、`task test:client` | 作者是仓库 OWNER、MEMBER 或 COLLABORATOR 的 PR |
+| fast | `task lint`、`task tidy` 后 `go.mod` / `go.sum` 无差异、`task test`（先起 PostgreSQL 并迁移）、`task test:client` | 作者对仓库有写权限的 PR |
 | full | fast 全部，加 `task test:e2e`、`task test:client:e2e`、`task docs:build` 且 `docs/03-interfaces` 无差异 | 外部贡献者的 PR；源分支或目标分支以 `release/` 开头的 PR；`v*` 标签；带 `full-ci` 标签的 PR；手动触发 |
 
-组织成员若未公开成员身份，GitHub 会把其 PR 的作者关系报告为 `CONTRIBUTOR`，此时跑 full。
+作者权限由 `mode` job 调用 GitHub 的协作者权限接口查询（`admin` 或 `write` 算有权限），查询失败按无权限处理。客户端的两个容器任务带 `GOFLAGS=-buildvcs=false`：CI 里工作区属主与容器内用户不同，Go 读取 VCS 信息会失败。
 
 ### 4.3 按改动选择最小验证集
 

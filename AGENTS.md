@@ -39,7 +39,7 @@
   - `.githooks/pre-push` 在推送前跑不依赖 Docker / PostgreSQL 的测试：根模块与 `services/storage`（不含 `internal/db`）的 `go test`、`client` 的 `GOOS=linux go vet` 与本机可跑的包。未改 Go / proto 文件时跳过。
   - 手动全量检查执行 `task lint`。
 - **CI（`.github/workflows/ci.yml`）**：
-  - fast：`task lint`、`go.mod` 整洁检查、`task test`（带已迁移的 PostgreSQL）、`task test:client`。仓库 OWNER / MEMBER / COLLABORATOR 的 PR 跑这一档。
+  - fast：`task lint`、`go.mod` 整洁检查、`task test`（带已迁移的 PostgreSQL）、`task test:client`。对仓库有写权限的作者的 PR 跑这一档。
   - full：fast 加 `task test:e2e`、`task test:client:e2e`、`task docs:build`。外部贡献者的 PR、`release/` 分支的 PR、`v*` 标签、带 `full-ci` 标签的 PR 跑这一档。
 
 ## 4. 契约与文档同步

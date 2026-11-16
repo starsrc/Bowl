@@ -453,7 +453,7 @@ class BenchEnv:
             str(self.ephemeral_log),
         ]
         if read_only:
-            cmd.append("--ro")
+            cmd += ["--mode", "ro"]
         t0 = time.perf_counter()
         subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         return (time.perf_counter() - t0) * 1000.0

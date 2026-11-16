@@ -337,7 +337,9 @@ type subsystemGauges struct {
 	dirtyInodes             int
 	orphanInodes            int
 	releaseQueue            int
-	wbPendingSlots          int64
+	stagePendingChunks      int64
+	stageUsedBytes          uint64
+	stageCapacityBytes      uint64
 	fuseWaiting             int
 	fuseCongestionThreshold int
 }
@@ -370,22 +372,20 @@ type Metrics struct {
 	readAheadInflight        atomic.Int64
 	readAheadWaitHist        waitHist
 
-	// 4. WriteBehindCoordinator
-	wbStagedCalls          atomic.Uint64
-	wbStagedBytes          atomic.Uint64
-	wbPassthroughCalls     atomic.Uint64
-	wbPassthroughBytes     atomic.Uint64
-	wbFlushRPCOK           atomic.Uint64
-	wbFlushRPCErrors       atomic.Uint64
-	wbInflight             atomic.Int64
-	wbBackpressureWaitHist waitHist
-	wbBarrierWaitHist      waitHist
+	// 4. StageCoordinator
+	stageStagedCalls          atomic.Uint64
+	stageStagedBytes          atomic.Uint64
+	stagePassthroughCalls     atomic.Uint64
+	stagePassthroughBytes     atomic.Uint64
+	stageUploadRPCOK          atomic.Uint64
+	stageUploadRPCErrors      atomic.Uint64
+	stageInflight             atomic.Int64
+	stageBackpressureWaitHist waitHist
+	stageBarrierWaitHist      waitHist
 
 	// 5. TmpFileManager
-	tmpPromotes       atomic.Uint64
-	tmpRollbacks      atomic.Uint64
-	tmpRollbackErrors atomic.Uint64
-	tmpResidentPages  atomic.Int64
+	tmpPromotes      atomic.Uint64
+	tmpResidentBytes atomic.Int64
 
 	// 7. LockTable
 	lockConflicts atomic.Uint64
@@ -437,19 +437,19 @@ type Metrics struct {
 	raInflightDesc     *prometheus.Desc
 	raWaitDurationDesc *prometheus.Desc
 
-	wbWritesTotalDesc      *prometheus.Desc
-	wbBytesTotalDesc       *prometheus.Desc
-	wbFlushRPCsTotalDesc   *prometheus.Desc
-	wbInflightDesc         *prometheus.Desc
-	wbPendingSlotsDesc     *prometheus.Desc
-	wbBackpressureWaitDesc *prometheus.Desc
-	wbBarrierWaitDesc      *prometheus.Desc
+	stageWritesTotalDesc      *prometheus.Desc
+	stageBytesTotalDesc       *prometheus.Desc
+	stageUploadRPCsTotalDesc  *prometheus.Desc
+	stageInflightDesc         *prometheus.Desc
+	stagePendingChunksDesc    *prometheus.Desc
+	stageUsedBytesDesc        *prometheus.Desc
+	stageCapacityBytesDesc    *prometheus.Desc
+	stageBackpressureWaitDesc *prometheus.Desc
+	stageBarrierWaitDesc      *prometheus.Desc
 
-	tmpActiveFilesDesc    *prometheus.Desc
-	tmpResidentBytesDesc  *prometheus.Desc
-	tmpPromotesDesc       *prometheus.Desc
-	tmpRollbacksDesc      *prometheus.Desc
-	tmpRollbackErrorsDesc *prometheus.Desc
+	tmpActiveFilesDesc   *prometheus.Desc
+	tmpResidentBytesDesc *prometheus.Desc
+	tmpPromotesDesc      *prometheus.Desc
 
 	openHandlesDesc *prometheus.Desc
 
@@ -613,76 +613,76 @@ func NewMetrics() *Metrics {
 			nil,
 		),
 
-		wbWritesTotalDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_writes_total",
-			"Total number of client write calls routed through write-behind staging vs synchronous passthrough.",
+		stageWritesTotalDesc: prometheus.NewDesc(
+			"bowl_client_stage_writes_total",
+			"Total number of client write calls routed through local-disk staging vs synchronous passthrough.",
 			[]string{"mode"},
 			nil,
 		),
-		wbBytesTotalDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_bytes_total",
-			"Total payload bytes routed through write-behind staging vs synchronous passthrough.",
+		stageBytesTotalDesc: prometheus.NewDesc(
+			"bowl_client_stage_bytes_total",
+			"Total payload bytes routed through local-disk staging vs synchronous passthrough.",
 			[]string{"mode"},
 			nil,
 		),
-		wbFlushRPCsTotalDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_flush_rpcs_total",
-			"Total number of asynchronous write-behind Write RPC flushes by result.",
+		stageUploadRPCsTotalDesc: prometheus.NewDesc(
+			"bowl_client_stage_upload_rpcs_total",
+			"Total number of background staged chunk Write RPC uploads by result.",
 			[]string{"result"},
 			nil,
 		),
-		wbInflightDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_inflight",
-			"Current number of in-flight asynchronous write-behind Write RPCs.",
+		stageInflightDesc: prometheus.NewDesc(
+			"bowl_client_stage_inflight",
+			"Current number of in-flight background staged chunk upload RPCs.",
 			nil,
 			nil,
 		),
-		wbPendingSlotsDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_pending_slots",
-			"Current number of active write-behind inode slots holding staged or in-flight data.",
+		stagePendingChunksDesc: prometheus.NewDesc(
+			"bowl_client_stage_pending_chunks",
+			"Current number of active, queued, and in-flight staged chunk files.",
 			nil,
 			nil,
 		),
-		wbBackpressureWaitDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_backpressure_wait_duration_seconds",
-			"Blocking wait duration in seconds when write-behind pipeline reaches max in-flight concurrency.",
+		stageUsedBytesDesc: prometheus.NewDesc(
+			"bowl_client_stage_used_bytes",
+			"Current host-disk staging quota bytes occupied by pending chunks.",
 			nil,
 			nil,
 		),
-		wbBarrierWaitDesc: prometheus.NewDesc(
-			"bowl_client_write_behind_barrier_wait_duration_seconds",
-			"Blocking drain duration in seconds when FUSE barrier operations wait for in-flight write-behind RPCs.",
+		stageCapacityBytesDesc: prometheus.NewDesc(
+			"bowl_client_stage_capacity_bytes",
+			"Configured local-disk staging capacity limit in bytes.",
+			nil,
+			nil,
+		),
+		stageBackpressureWaitDesc: prometheus.NewDesc(
+			"bowl_client_stage_backpressure_wait_duration_seconds",
+			"Blocking wait duration in seconds when foreground writes wait for local-disk stage quota.",
+			nil,
+			nil,
+		),
+		stageBarrierWaitDesc: prometheus.NewDesc(
+			"bowl_client_stage_barrier_wait_duration_seconds",
+			"Blocking drain duration in seconds when FUSE barrier operations wait for staged uploads.",
 			nil,
 			nil,
 		),
 
 		tmpActiveFilesDesc: prometheus.NewDesc(
 			"bowl_client_tmpfile_active_files",
-			"Current number of active anonymous temporary files managed locally.",
+			"Current number of active anonymous temporary files managed on host disk.",
 			nil,
 			nil,
 		),
 		tmpResidentBytesDesc: prometheus.NewDesc(
 			"bowl_client_tmpfile_resident_bytes",
-			"Current local sparse-page memory bytes held by unpromoted temporary files.",
+			"Current host-disk bytes occupied by unpromoted temporary files.",
 			nil,
 			nil,
 		),
 		tmpPromotesDesc: prometheus.NewDesc(
 			"bowl_client_tmpfile_promotes_total",
 			"Total number of anonymous temporary files promoted to named entries via Link.",
-			nil,
-			nil,
-		),
-		tmpRollbacksDesc: prometheus.NewDesc(
-			"bowl_client_tmpfile_rollbacks_total",
-			"Total number of temporary inode rollback attempts after upload failure.",
-			nil,
-			nil,
-		),
-		tmpRollbackErrorsDesc: prometheus.NewDesc(
-			"bowl_client_tmpfile_rollback_errors_total",
-			"Total number of failed temporary inode rollback Unlink RPCs.",
 			nil,
 			nil,
 		),
@@ -791,9 +791,8 @@ func (m *Metrics) collectGauges() subsystemGauges {
 	if ptr := m.provider.Load(); ptr != nil && *ptr != nil {
 		return (*ptr).collectSubsystemGauges()
 	}
-	pages := max(int64(0), m.tmpResidentPages.Load())
 	return subsystemGauges{
-		tmpResidentByte: uint64(pages) * tmpSparsePageSize,
+		tmpResidentByte: uint64(max(int64(0), m.tmpResidentBytes.Load())),
 	}
 }
 
@@ -915,74 +914,62 @@ func (m *Metrics) observeReadAheadWait(d time.Duration) {
 	}
 }
 
-func (m *Metrics) addWriteBehindStaged(n uint64) {
+func (m *Metrics) addStageStaged(n uint64) {
 	if m != nil {
-		m.wbStagedCalls.Add(1)
+		m.stageStagedCalls.Add(1)
 		if n > 0 {
-			m.wbStagedBytes.Add(n)
+			m.stageStagedBytes.Add(n)
 		}
 	}
 }
 
-func (m *Metrics) addWriteBehindPassthrough(n uint64) {
+func (m *Metrics) addStagePassthrough(n uint64) {
 	if m != nil {
-		m.wbPassthroughCalls.Add(1)
+		m.stagePassthroughCalls.Add(1)
 		if n > 0 {
-			m.wbPassthroughBytes.Add(n)
+			m.stagePassthroughBytes.Add(n)
 		}
 	}
 }
 
-func (m *Metrics) incWriteBehindFlushRPC(isErr bool) {
+func (m *Metrics) incStageUploadRPC(isErr bool) {
 	if m == nil {
 		return
 	}
 	if isErr {
-		m.wbFlushRPCErrors.Add(1)
+		m.stageUploadRPCErrors.Add(1)
 	} else {
-		m.wbFlushRPCOK.Add(1)
+		m.stageUploadRPCOK.Add(1)
 	}
 }
 
-func (m *Metrics) addWriteBehindInflight(delta int64) {
+func (m *Metrics) addStageInflight(delta int64) {
 	if m != nil && delta != 0 {
-		m.wbInflight.Add(delta)
+		m.stageInflight.Add(delta)
 	}
 }
 
-func (m *Metrics) observeWriteBehindBackpressureWait(d time.Duration) {
+func (m *Metrics) observeStageBackpressureWait(d time.Duration) {
 	if m != nil {
-		m.wbBackpressureWaitHist.observe(d)
+		m.stageBackpressureWaitHist.observe(d)
 	}
 }
 
-func (m *Metrics) observeWriteBehindBarrierWait(d time.Duration) {
+func (m *Metrics) observeStageBarrierWait(d time.Duration) {
 	if m != nil {
-		m.wbBarrierWaitHist.observe(d)
+		m.stageBarrierWaitHist.observe(d)
 	}
 }
 
-func (m *Metrics) addTmpResidentPages(delta int64) {
+func (m *Metrics) addTmpResidentBytes(delta int64) {
 	if m != nil && delta != 0 {
-		m.tmpResidentPages.Add(delta)
+		m.tmpResidentBytes.Add(delta)
 	}
 }
 
 func (m *Metrics) incTmpPromote() {
 	if m != nil {
 		m.tmpPromotes.Add(1)
-	}
-}
-
-func (m *Metrics) incTmpRollback() {
-	if m != nil {
-		m.tmpRollbacks.Add(1)
-	}
-}
-
-func (m *Metrics) incTmpRollbackError() {
-	if m != nil {
-		m.tmpRollbackErrors.Add(1)
 	}
 }
 
@@ -1085,19 +1072,19 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.raInflightDesc
 	ch <- m.raWaitDurationDesc
 
-	ch <- m.wbWritesTotalDesc
-	ch <- m.wbBytesTotalDesc
-	ch <- m.wbFlushRPCsTotalDesc
-	ch <- m.wbInflightDesc
-	ch <- m.wbPendingSlotsDesc
-	ch <- m.wbBackpressureWaitDesc
-	ch <- m.wbBarrierWaitDesc
+	ch <- m.stageWritesTotalDesc
+	ch <- m.stageBytesTotalDesc
+	ch <- m.stageUploadRPCsTotalDesc
+	ch <- m.stageInflightDesc
+	ch <- m.stagePendingChunksDesc
+	ch <- m.stageUsedBytesDesc
+	ch <- m.stageCapacityBytesDesc
+	ch <- m.stageBackpressureWaitDesc
+	ch <- m.stageBarrierWaitDesc
 
 	ch <- m.tmpActiveFilesDesc
 	ch <- m.tmpResidentBytesDesc
 	ch <- m.tmpPromotesDesc
-	ch <- m.tmpRollbacksDesc
-	ch <- m.tmpRollbackErrorsDesc
 
 	ch <- m.openHandlesDesc
 
@@ -1214,24 +1201,24 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(m.raInflightDesc, prometheus.GaugeValue, float64(m.readAheadInflight.Load()))
 	ch <- m.readAheadWaitHist.constHistogram(m.raWaitDurationDesc)
 
-	// 4. WriteBehindCoordinator
-	ch <- prometheus.MustNewConstMetric(m.wbWritesTotalDesc, prometheus.CounterValue, float64(m.wbStagedCalls.Load()), "staged")
-	ch <- prometheus.MustNewConstMetric(m.wbWritesTotalDesc, prometheus.CounterValue, float64(m.wbPassthroughCalls.Load()), "passthrough")
-	ch <- prometheus.MustNewConstMetric(m.wbBytesTotalDesc, prometheus.CounterValue, float64(m.wbStagedBytes.Load()), "staged")
-	ch <- prometheus.MustNewConstMetric(m.wbBytesTotalDesc, prometheus.CounterValue, float64(m.wbPassthroughBytes.Load()), "passthrough")
-	ch <- prometheus.MustNewConstMetric(m.wbFlushRPCsTotalDesc, prometheus.CounterValue, float64(m.wbFlushRPCOK.Load()), "ok")
-	ch <- prometheus.MustNewConstMetric(m.wbFlushRPCsTotalDesc, prometheus.CounterValue, float64(m.wbFlushRPCErrors.Load()), "error")
-	ch <- prometheus.MustNewConstMetric(m.wbInflightDesc, prometheus.GaugeValue, float64(m.wbInflight.Load()))
-	ch <- prometheus.MustNewConstMetric(m.wbPendingSlotsDesc, prometheus.GaugeValue, float64(gauges.wbPendingSlots))
-	ch <- m.wbBackpressureWaitHist.constHistogram(m.wbBackpressureWaitDesc)
-	ch <- m.wbBarrierWaitHist.constHistogram(m.wbBarrierWaitDesc)
+	// 4. StageCoordinator
+	ch <- prometheus.MustNewConstMetric(m.stageWritesTotalDesc, prometheus.CounterValue, float64(m.stageStagedCalls.Load()), "staged")
+	ch <- prometheus.MustNewConstMetric(m.stageWritesTotalDesc, prometheus.CounterValue, float64(m.stagePassthroughCalls.Load()), "passthrough")
+	ch <- prometheus.MustNewConstMetric(m.stageBytesTotalDesc, prometheus.CounterValue, float64(m.stageStagedBytes.Load()), "staged")
+	ch <- prometheus.MustNewConstMetric(m.stageBytesTotalDesc, prometheus.CounterValue, float64(m.stagePassthroughBytes.Load()), "passthrough")
+	ch <- prometheus.MustNewConstMetric(m.stageUploadRPCsTotalDesc, prometheus.CounterValue, float64(m.stageUploadRPCOK.Load()), "ok")
+	ch <- prometheus.MustNewConstMetric(m.stageUploadRPCsTotalDesc, prometheus.CounterValue, float64(m.stageUploadRPCErrors.Load()), "error")
+	ch <- prometheus.MustNewConstMetric(m.stageInflightDesc, prometheus.GaugeValue, float64(m.stageInflight.Load()))
+	ch <- prometheus.MustNewConstMetric(m.stagePendingChunksDesc, prometheus.GaugeValue, float64(gauges.stagePendingChunks))
+	ch <- prometheus.MustNewConstMetric(m.stageUsedBytesDesc, prometheus.GaugeValue, float64(gauges.stageUsedBytes))
+	ch <- prometheus.MustNewConstMetric(m.stageCapacityBytesDesc, prometheus.GaugeValue, float64(gauges.stageCapacityBytes))
+	ch <- m.stageBackpressureWaitHist.constHistogram(m.stageBackpressureWaitDesc)
+	ch <- m.stageBarrierWaitHist.constHistogram(m.stageBarrierWaitDesc)
 
 	// 5. TmpFileManager
 	ch <- prometheus.MustNewConstMetric(m.tmpActiveFilesDesc, prometheus.GaugeValue, float64(gauges.tmpActiveFiles))
 	ch <- prometheus.MustNewConstMetric(m.tmpResidentBytesDesc, prometheus.GaugeValue, float64(gauges.tmpResidentByte))
 	ch <- prometheus.MustNewConstMetric(m.tmpPromotesDesc, prometheus.CounterValue, float64(m.tmpPromotes.Load()))
-	ch <- prometheus.MustNewConstMetric(m.tmpRollbacksDesc, prometheus.CounterValue, float64(m.tmpRollbacks.Load()))
-	ch <- prometheus.MustNewConstMetric(m.tmpRollbackErrorsDesc, prometheus.CounterValue, float64(m.tmpRollbackErrors.Load()))
 
 	// 6. HandleTable
 	ch <- prometheus.MustNewConstMetric(m.openHandlesDesc, prometheus.GaugeValue, float64(gauges.openFiles), "file")
@@ -1330,29 +1317,29 @@ type ReadAheadStats struct {
 	WaitSeconds     float64 `json:"wait_seconds"`
 }
 
-// WriteBehindStats 承载 WriteBehindCoordinator 的聚批/直通、后台刷盘、背压等待与屏障等待指标。
-type WriteBehindStats struct {
+// StageStats 承载本地磁盘暂存协调器的分片写入/直通、后台上传、空间水位、背压等待与屏障等待指标。
+type StageStats struct {
 	StagedCalls             uint64  `json:"staged_calls"`
 	StagedBytes             uint64  `json:"staged_bytes"`
 	PassthroughCalls        uint64  `json:"passthrough_calls"`
 	PassthroughBytes        uint64  `json:"passthrough_bytes"`
-	FlushRPCs               uint64  `json:"flush_rpcs"`
-	FlushErrors             uint64  `json:"flush_errors"`
+	UploadRPCs              uint64  `json:"upload_rpcs"`
+	UploadErrors            uint64  `json:"upload_errors"`
 	Inflight                int64   `json:"inflight"`
-	PendingSlots            int64   `json:"pending_slots"`
+	PendingChunks           int64   `json:"pending_chunks"`
+	UsedBytes               uint64  `json:"used_bytes"`
+	CapacityBytes           uint64  `json:"capacity_bytes"`
 	BackpressureWaits       uint64  `json:"backpressure_waits"`
 	BackpressureWaitSeconds float64 `json:"backpressure_wait_seconds"`
 	BarrierWaits            uint64  `json:"barrier_waits"`
 	BarrierWaitSeconds      float64 `json:"barrier_wait_seconds"`
 }
 
-// TmpFileStats 承载 TmpFileManager 的驻留内存、转正与回滚指标。
+// TmpFileStats 承载 TmpFileManager 的宿主机匿名文件驻留字节与转正指标。
 type TmpFileStats struct {
-	ActiveFiles    int    `json:"active_files"`
-	ResidentBytes  uint64 `json:"resident_bytes"`
-	Promotes       uint64 `json:"promotes"`
-	Rollbacks      uint64 `json:"rollbacks"`
-	RollbackErrors uint64 `json:"rollback_errors"`
+	ActiveFiles   int    `json:"active_files"`
+	ResidentBytes uint64 `json:"resident_bytes"`
+	Promotes      uint64 `json:"promotes"`
 }
 
 // HandleStats 承载 HandleTable 当前打开的文件与目录句柄计数。
@@ -1402,7 +1389,7 @@ type Snapshot struct {
 	NamespaceCache    NamespaceCacheStats  `json:"namespace_cache"`
 	CapabilityCache   CapabilityCacheStats `json:"capability_cache"`
 	ReadAhead         ReadAheadStats       `json:"read_ahead"`
-	WriteBehind       WriteBehindStats     `json:"write_behind"`
+	Stage             StageStats           `json:"stage"`
 	TmpFile           TmpFileStats         `json:"tmp_file"`
 	Handles           HandleStats          `json:"handles"`
 	Locks             LockStats            `json:"locks"`
@@ -1490,8 +1477,8 @@ func (m *Metrics) Snapshot() Snapshot {
 		totalInflight += inf
 	}
 
-	flushOK := m.wbFlushRPCOK.Load()
-	flushErr := m.wbFlushRPCErrors.Load()
+	uploadOK := m.stageUploadRPCOK.Load()
+	uploadErr := m.stageUploadRPCErrors.Load()
 
 	return Snapshot{
 		TimestampUnixNano: nowNs,
@@ -1541,26 +1528,26 @@ func (m *Metrics) Snapshot() Snapshot {
 			Waits:           m.readAheadWaitHist.count.Load(),
 			WaitSeconds:     float64(m.readAheadWaitHist.sumNanos.Load()) * 1e-9,
 		},
-		WriteBehind: WriteBehindStats{
-			StagedCalls:             m.wbStagedCalls.Load(),
-			StagedBytes:             m.wbStagedBytes.Load(),
-			PassthroughCalls:        m.wbPassthroughCalls.Load(),
-			PassthroughBytes:        m.wbPassthroughBytes.Load(),
-			FlushRPCs:               flushOK + flushErr,
-			FlushErrors:             flushErr,
-			Inflight:                m.wbInflight.Load(),
-			PendingSlots:            gauges.wbPendingSlots,
-			BackpressureWaits:       m.wbBackpressureWaitHist.count.Load(),
-			BackpressureWaitSeconds: float64(m.wbBackpressureWaitHist.sumNanos.Load()) * 1e-9,
-			BarrierWaits:            m.wbBarrierWaitHist.count.Load(),
-			BarrierWaitSeconds:      float64(m.wbBarrierWaitHist.sumNanos.Load()) * 1e-9,
+		Stage: StageStats{
+			StagedCalls:             m.stageStagedCalls.Load(),
+			StagedBytes:             m.stageStagedBytes.Load(),
+			PassthroughCalls:        m.stagePassthroughCalls.Load(),
+			PassthroughBytes:        m.stagePassthroughBytes.Load(),
+			UploadRPCs:              uploadOK + uploadErr,
+			UploadErrors:            uploadErr,
+			Inflight:                m.stageInflight.Load(),
+			PendingChunks:           gauges.stagePendingChunks,
+			UsedBytes:               gauges.stageUsedBytes,
+			CapacityBytes:           gauges.stageCapacityBytes,
+			BackpressureWaits:       m.stageBackpressureWaitHist.count.Load(),
+			BackpressureWaitSeconds: float64(m.stageBackpressureWaitHist.sumNanos.Load()) * 1e-9,
+			BarrierWaits:            m.stageBarrierWaitHist.count.Load(),
+			BarrierWaitSeconds:      float64(m.stageBarrierWaitHist.sumNanos.Load()) * 1e-9,
 		},
 		TmpFile: TmpFileStats{
-			ActiveFiles:    gauges.tmpActiveFiles,
-			ResidentBytes:  gauges.tmpResidentByte,
-			Promotes:       m.tmpPromotes.Load(),
-			Rollbacks:      m.tmpRollbacks.Load(),
-			RollbackErrors: m.tmpRollbackErrors.Load(),
+			ActiveFiles:   gauges.tmpActiveFiles,
+			ResidentBytes: gauges.tmpResidentByte,
+			Promotes:      m.tmpPromotes.Load(),
 		},
 		Handles: HandleStats{
 			OpenFiles: gauges.openFiles,
@@ -1627,17 +1614,17 @@ func (s *Snapshot) FormatText() string {
 		s.ReadAhead.HitBytes, s.ReadAhead.DiscardedBytes, s.ReadAhead.Inflight,
 		s.ReadAhead.Waits, s.ReadAhead.WaitSeconds,
 	)
-	fmt.Fprintf(&b, "WriteBehind: staged=%d/%dB passthrough=%d/%dB flush_rpcs=%d flush_err=%d inflight=%d slots=%d bp_waits=%d/%.6fs barrier_waits=%d/%.6fs\n",
-		s.WriteBehind.StagedCalls, s.WriteBehind.StagedBytes,
-		s.WriteBehind.PassthroughCalls, s.WriteBehind.PassthroughBytes,
-		s.WriteBehind.FlushRPCs, s.WriteBehind.FlushErrors,
-		s.WriteBehind.Inflight, s.WriteBehind.PendingSlots,
-		s.WriteBehind.BackpressureWaits, s.WriteBehind.BackpressureWaitSeconds,
-		s.WriteBehind.BarrierWaits, s.WriteBehind.BarrierWaitSeconds,
+	fmt.Fprintf(&b, "Stage: staged=%d/%dB passthrough=%d/%dB upload_rpcs=%d upload_err=%d inflight=%d chunks=%d used=%d/%dB bp_waits=%d/%.6fs barrier_waits=%d/%.6fs\n",
+		s.Stage.StagedCalls, s.Stage.StagedBytes,
+		s.Stage.PassthroughCalls, s.Stage.PassthroughBytes,
+		s.Stage.UploadRPCs, s.Stage.UploadErrors,
+		s.Stage.Inflight, s.Stage.PendingChunks,
+		s.Stage.UsedBytes, s.Stage.CapacityBytes,
+		s.Stage.BackpressureWaits, s.Stage.BackpressureWaitSeconds,
+		s.Stage.BarrierWaits, s.Stage.BarrierWaitSeconds,
 	)
-	fmt.Fprintf(&b, "TmpFile: active=%d resident_bytes=%d promotes=%d rollbacks=%d rollback_errors=%d\n",
-		s.TmpFile.ActiveFiles, s.TmpFile.ResidentBytes,
-		s.TmpFile.Promotes, s.TmpFile.Rollbacks, s.TmpFile.RollbackErrors,
+	fmt.Fprintf(&b, "TmpFile: active=%d resident_bytes=%d promotes=%d\n",
+		s.TmpFile.ActiveFiles, s.TmpFile.ResidentBytes, s.TmpFile.Promotes,
 	)
 	fmt.Fprintf(&b, "Handles: open_files=%d open_dirs=%d\n", s.Handles.OpenFiles, s.Handles.OpenDirs)
 	fmt.Fprintf(&b, "Locks: active=%d conflicts=%d waits=%d wait_sec=%.6f\n",
@@ -1720,8 +1707,8 @@ func (s *Snapshot) FormatStatsFile() string {
 	writeF64("juicefs_object_request_durations_histogram_seconds_GET_sum", float64(readDurNs)*1e-9)
 	writeU64("juicefs_object_request_durations_histogram_seconds_DELETE_total", deleteCalls)
 	writeF64("juicefs_object_request_durations_histogram_seconds_DELETE_sum", float64(deleteDurNs)*1e-9)
-	writeU64("juicefs_blockcache_write_hist_seconds_total", s.WriteBehind.StagedCalls)
-	writeF64("juicefs_blockcache_write_hist_seconds_sum", s.WriteBehind.BackpressureWaitSeconds)
+	writeU64("juicefs_blockcache_write_hist_seconds_total", s.Stage.StagedCalls)
+	writeF64("juicefs_blockcache_write_hist_seconds_sum", s.Stage.BackpressureWaitSeconds)
 	writeU64("juicefs_blockcache_read_hist_seconds_total", s.ReadAhead.Hits)
 	writeF64("juicefs_blockcache_read_hist_seconds_sum", s.ReadAhead.WaitSeconds)
 
@@ -1778,24 +1765,24 @@ func (s *Snapshot) FormatStatsFile() string {
 	writeU64("bowl_client_readahead_waits_total", s.ReadAhead.Waits)
 	writeF64("bowl_client_readahead_wait_seconds_total", s.ReadAhead.WaitSeconds)
 
-	writeU64("bowl_client_write_behind_staged_calls_total", s.WriteBehind.StagedCalls)
-	writeU64("bowl_client_write_behind_staged_bytes_total", s.WriteBehind.StagedBytes)
-	writeU64("bowl_client_write_behind_passthrough_calls_total", s.WriteBehind.PassthroughCalls)
-	writeU64("bowl_client_write_behind_passthrough_bytes_total", s.WriteBehind.PassthroughBytes)
-	writeU64("bowl_client_write_behind_flush_rpcs_total", s.WriteBehind.FlushRPCs)
-	writeU64("bowl_client_write_behind_flush_errors_total", s.WriteBehind.FlushErrors)
-	writeI64("bowl_client_write_behind_inflight", s.WriteBehind.Inflight)
-	writeI64("bowl_client_write_behind_pending_slots", s.WriteBehind.PendingSlots)
-	writeU64("bowl_client_write_behind_backpressure_waits_total", s.WriteBehind.BackpressureWaits)
-	writeF64("bowl_client_write_behind_backpressure_wait_seconds_total", s.WriteBehind.BackpressureWaitSeconds)
-	writeU64("bowl_client_write_behind_barrier_waits_total", s.WriteBehind.BarrierWaits)
-	writeF64("bowl_client_write_behind_barrier_wait_seconds_total", s.WriteBehind.BarrierWaitSeconds)
+	writeU64("bowl_client_stage_staged_calls_total", s.Stage.StagedCalls)
+	writeU64("bowl_client_stage_staged_bytes_total", s.Stage.StagedBytes)
+	writeU64("bowl_client_stage_passthrough_calls_total", s.Stage.PassthroughCalls)
+	writeU64("bowl_client_stage_passthrough_bytes_total", s.Stage.PassthroughBytes)
+	writeU64("bowl_client_stage_upload_rpcs_total", s.Stage.UploadRPCs)
+	writeU64("bowl_client_stage_upload_errors_total", s.Stage.UploadErrors)
+	writeI64("bowl_client_stage_inflight", s.Stage.Inflight)
+	writeI64("bowl_client_stage_pending_chunks", s.Stage.PendingChunks)
+	writeU64("bowl_client_stage_used_bytes", s.Stage.UsedBytes)
+	writeU64("bowl_client_stage_capacity_bytes", s.Stage.CapacityBytes)
+	writeU64("bowl_client_stage_backpressure_waits_total", s.Stage.BackpressureWaits)
+	writeF64("bowl_client_stage_backpressure_wait_seconds_total", s.Stage.BackpressureWaitSeconds)
+	writeU64("bowl_client_stage_barrier_waits_total", s.Stage.BarrierWaits)
+	writeF64("bowl_client_stage_barrier_wait_seconds_total", s.Stage.BarrierWaitSeconds)
 
 	writeI64("bowl_client_tmpfile_active_files", int64(s.TmpFile.ActiveFiles))
 	writeU64("bowl_client_tmpfile_resident_bytes", s.TmpFile.ResidentBytes)
 	writeU64("bowl_client_tmpfile_promotes_total", s.TmpFile.Promotes)
-	writeU64("bowl_client_tmpfile_rollbacks_total", s.TmpFile.Rollbacks)
-	writeU64("bowl_client_tmpfile_rollback_errors_total", s.TmpFile.RollbackErrors)
 
 	writeI64("bowl_client_open_handles_file", int64(s.Handles.OpenFiles))
 	writeI64("bowl_client_open_handles_dir", int64(s.Handles.OpenDirs))

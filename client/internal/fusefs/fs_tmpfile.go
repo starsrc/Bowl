@@ -2,6 +2,7 @@ package fusefs
 
 import (
 	"context"
+	"os"
 	"syscall"
 
 	"connectrpc.com/connect"
@@ -15,12 +16,14 @@ import (
 type rawFSTmpMaterializer struct {
 	fs     *RawFS
 	cancel <-chan struct{}
+	epoch  uint64
 }
 
-func (fs *RawFS) newTmpMaterializer(cancel <-chan struct{}) *rawFSTmpMaterializer {
+func (fs *RawFS) newTmpMaterializer(cancel <-chan struct{}, epoch uint64) *rawFSTmpMaterializer {
 	return &rawFSTmpMaterializer{
 		fs:     fs,
 		cancel: cancel,
+		epoch:  epoch,
 	}
 }
 
@@ -41,98 +44,11 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
-func (m *rawFSTmpMaterializer) WriteChunk(ctx context.Context, serverIno, offset uint64, data []byte) fuse.Status {
-	reqCtx := rpc.WithRequestID(ctx, m.fs.NextRequestID())
-	written, err := m.fs.client.Write(reqCtx, connect.NewRequest(&storagev1.WriteRequest{
-		Ino:    serverIno,
-		Offset: offset,
-		Data:   data,
-		DiskId: m.fs.cfg.DiskID,
-		Epoch:  m.fs.cfg.Epoch,
-	}))
-	if err != nil {
-		return m.fs.ToStatus(err, m.cancel)
-	}
-	if written.Msg.GetSize() != uint32(len(data)) {
-		return fuse.EIO
-	}
-	return fuse.OK
+func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, size uint64, atime, mtime *timestamppb.Timestamp, extents []stageExtent) {
+	m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, size, atime, mtime, extents)
 }
 
-func (m *rawFSTmpMaterializer) CommitTmpAttr(ctx context.Context, serverIno, size uint64, atime, mtime *timestamppb.Timestamp) (*storagev1.Inode, fuse.Status) {
-	reqCtx := rpc.WithRequestID(ctx, m.fs.NextRequestID())
-	updated, err := m.fs.client.SetAttr(reqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
-		Ino:    serverIno,
-		Size:   &size,
-		Atime:  atime,
-		Mtime:  mtime,
-		DiskId: m.fs.cfg.DiskID,
-		Epoch:  m.fs.cfg.Epoch,
-	}))
-	if err != nil {
-		return nil, m.fs.ToStatus(err, m.cancel)
-	}
-	return updated.Msg.GetInode(), fuse.OK
-}
-
-func (m *rawFSTmpMaterializer) RollbackTmpInode(ctx context.Context, parentIno uint64, name string) {
-	m.fs.metrics.incTmpRollback()
-	baseCtx := context.Background()
-	if ctx != nil {
-		baseCtx = context.WithoutCancel(ctx)
-	}
-	rollbackCtx, done := m.fs.RPCContextFrom(baseCtx, nil)
-	defer done()
-	open := false
-	_, err := m.fs.client.Unlink(rollbackCtx, connect.NewRequest(&storagev1.UnlinkRequest{
-		ParentIno:    parentIno,
-		Name:         []byte(name),
-		OpenInClient: &open,
-		DiskId:       m.fs.cfg.DiskID,
-		Epoch:        m.fs.cfg.Epoch,
-	}))
-	if err != nil {
-		m.fs.metrics.incTmpRollbackError()
-		m.fs.logger().WarnContext(rollbackCtx, "tmpfile_rollback_failed",
-			"parent_ino", parentIno,
-			"name", name,
-			"error", err,
-		)
-	}
-}
-
-func (m *rawFSTmpMaterializer) UnlinkOpenTmpInode(ctx context.Context, parentIno uint64, name string) fuse.Status {
-	reqCtx := rpc.WithRequestID(ctx, m.fs.NextRequestID())
-	open := true
-	_, err := m.fs.client.Unlink(reqCtx, connect.NewRequest(&storagev1.UnlinkRequest{
-		ParentIno:    parentIno,
-		Name:         []byte(name),
-		OpenInClient: &open,
-		DiskId:       m.fs.cfg.DiskID,
-		Epoch:        m.fs.cfg.Epoch,
-	}))
-	if err != nil {
-		return m.fs.ToStatus(err, m.cancel)
-	}
-	return fuse.OK
-}
-
-func (m *rawFSTmpMaterializer) LinkInode(ctx context.Context, serverIno, newParentIno uint64, name string) (inode *storagev1.Inode, entryTimeout, attrTimeout float64, status fuse.Status) {
-	reqCtx := rpc.WithRequestID(ctx, m.fs.NextRequestID())
-	resp, err := m.fs.client.Link(reqCtx, connect.NewRequest(&storagev1.LinkRequest{
-		Ino:          serverIno,
-		NewParentIno: newParentIno,
-		NewName:      []byte(name),
-		DiskId:       m.fs.cfg.DiskID,
-		Epoch:        m.fs.cfg.Epoch,
-	}))
-	if err != nil {
-		return nil, 0, 0, m.fs.ToStatus(err, m.cancel)
-	}
-	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
-}
-
-// Tmpfile 创建只存在于客户端内存的匿名文件。
+// Tmpfile 在宿主机暂存目录创建匿名磁盘文件。
 func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpTmpfile)
 	_, endSpan := fs.startFuseOp(OpTmpfile)
@@ -156,13 +72,17 @@ func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.Crea
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	ino, inode := fs.tmpMgr.Create(input.NodeId, input.Uid, input.Gid, input.Mode, input.Flags)
+	ino, inode, status := fs.tmpMgr.Create(input.NodeId, input.Uid, input.Gid, input.Mode, input.Flags)
+	if status != fuse.OK {
+		return status
+	}
 	fh, status := fs.openHandle(ino, input.Flags, false)
 	if status != fuse.OK {
 		fs.tmpMgr.OnForget(ino, 1, fs.handles.IsOpen)
 		return status
 	}
 	fs.caps.markAbsent(ino)
+	fs.recordInodeSpecial(ino, inode)
 	fs.FillEntryOut(&out.EntryOut, inode, 0, 0)
 	out.Fh = fh
 	if fs.cfg.DirectIO {
@@ -171,7 +91,7 @@ func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.Crea
 	return fuse.OK
 }
 
-// Forget 释放内核对具名匿名节点的引用。
+// Forget 释放内核对具名或匿名节点的引用，并在无挂起任务时清理本地跟踪状态。
 func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	start := fs.metrics.beginOp(OpForget)
 	defer fs.metrics.endOp(OpForget, start, fuse.OK, 0)
@@ -181,13 +101,18 @@ func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	serverIno, st := fs.ToServerIno(nodeID)
 	fs.caps.forget(nodeID)
+	fs.forgetInodeSpecial(nodeID)
 	if fs.tmpMgr.OnForget(nodeID, nlookup, fs.handles.IsOpen) {
 		fs.cache.invalidateInode(nodeID)
 	}
+	if st == fuse.OK && !fs.handles.IsOpen(nodeID) {
+		fs.stage.RemoveIdleInode(serverIno)
+	}
 }
 
-// linkTmp 将匿名文件具名化，已具名化的匿名节点不能再次通过此路径 Link。
+// linkTmp 将匿名文件通过 Mknod + StageCoordinator 后台接管具名化，已具名化节点不能再次通过此路径 Link。
 func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (fuse.Status, bool) {
 	if fs.tmpMgr.getFile(input.Oldnodeid) == nil {
 		return fuse.OK, false
@@ -195,7 +120,7 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, inpu
 	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
 	defer done()
 	epoch := fs.cache.version()
-	mat := fs.newTmpMaterializer(cancel)
+	mat := fs.newTmpMaterializer(cancel, epoch)
 	res, handled, status := fs.tmpMgr.Link(
 		ctx, input.Oldnodeid, input.NodeId, filename, fs.handles.IsOpen(input.Oldnodeid), mat, out,
 	)
@@ -205,40 +130,11 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, inpu
 	if status != fuse.OK {
 		return status, true
 	}
-	if res.FirstUpload {
-		fs.markDirty(res.ServerIno)
-	} else {
-		fs.handles.ClearOrphan(input.Oldnodeid)
-		fs.stateMu.Lock()
-		delete(fs.orphanInodes, input.Oldnodeid)
-		delete(fs.orphanSpans, input.Oldnodeid)
-		fs.stateMu.Unlock()
-	}
-	fs.cache.invalidateDirListing(input.NodeId)
+	fs.markDirty(res.ServerIno)
+	fs.caps.markAbsent(input.Oldnodeid)
+	fs.recordInodeSpecial(input.Oldnodeid, res.Inode)
+	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, res.Inode, 0, res.AttrTimeout)
 	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
 	fs.cache.putInodeAt(epoch, input.Oldnodeid, res.Inode, res.EntryTimeout, res.AttrTimeout)
 	return fuse.OK, true
-}
-
-// syncTmpFileWithContext 将匿名文件上云并解链，供 Flush / Fsync 完成持久化。
-func (fs *RawFS) syncTmpFileWithContext(parentCtx context.Context, cancel <-chan struct{}, ino uint64) fuse.Status {
-	if !fs.tmpMgr.HasPendingSync(ino) {
-		return fuse.OK
-	}
-	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
-	defer done()
-	mat := fs.newTmpMaterializer(cancel)
-	parentKernelIno, tempName, serverIno, uploaded, status := fs.tmpMgr.Sync(ctx, ino, mat)
-	if tempName != "" {
-		fs.cache.invalidateDirListing(parentKernelIno)
-		fs.cache.removeEntry(parentKernelIno, tempName)
-	}
-	if status != fuse.OK {
-		return status
-	}
-	if uploaded {
-		fs.markDirty(serverIno)
-		fs.markOrphanWithContext(parentCtx, ino)
-	}
-	return fuse.OK
 }

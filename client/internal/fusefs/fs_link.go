@@ -147,7 +147,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	if status != fuse.OK {
 		return status
 	}
-	fs.writeBehind.BarrierInode(opCtx, srcIno)
+	fs.stage.BarrierInode(opCtx, srcIno)
 
 	newParentIno, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
@@ -172,6 +172,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 0, resp.Msg.GetAttrTimeoutSeconds())
 	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
 	fs.cache.putInodeAt(epoch, input.Oldnodeid, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	fs.recordInodeSpecial(input.Oldnodeid, resp.Msg.GetInode())
 	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }

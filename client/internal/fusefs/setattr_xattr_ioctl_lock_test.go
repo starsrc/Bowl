@@ -293,12 +293,12 @@ func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t
 	roFS := newTestRawFS(t, srv, withReadOnly(true))
 	f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "flags.bin", syscall.O_RDWR, 0o644)
 
-	// When & Then: 1. 存在未刷盘 WriteBehind 缓冲时调用不支持的 cmd，必须直接返回 ENOTTY 且不触发 Write RPC
+	// When & Then: 1. 存在未刷盘 Stage 缓冲时调用不支持的 cmd，必须直接返回 ENOTTY 且不触发 Write RPC
 	mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("buffered"))
 	var ioOut fuse.IoctlOut
 	enottySt := fs.Ioctl(nil, &fuse.IoctlIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Cmd: 0x12345678}, nil, &ioOut, nil)
 	requireStatus(t, "不支持的 ioctl 命令", fuse.Status(syscall.ENOTTY), enottySt)
-	require.Zero(t, srv.writeCalls.Load(), "未知 ioctl 命令返回 ENOTTY 前不得无谓刷空 WriteBehind")
+	require.Zero(t, srv.writeCalls.Load(), "未知 ioctl 命令返回 ENOTTY 前不得无谓刷空 Stage")
 
 	// 2. 64位 SETFLAGS/GETFLAGS、32位 SETFLAGS/GETFLAGS 与 FS_IOC_FSSETXATTR/FS_IOC_FSGETXATTR 往返校验
 	in64 := make([]byte, 8)

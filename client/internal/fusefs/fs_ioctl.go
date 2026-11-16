@@ -70,7 +70,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 	if st != fuse.OK {
 		return st
 	}
-	fs.writeBehind.BarrierInode(opCtx, ino)
+	fs.stage.BarrierInode(opCtx, ino)
 
 	switch input.Cmd {
 	case FS_IOC_GETFLAGS, FS_IOC32_GETFLAGS:
@@ -173,7 +173,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			protoFlags |= ProtoFlagAppend
 		}
 
-		fs.writeBehind.ResetInodeStream(opCtx, ino)
+		fs.stage.ResetInodeStream(opCtx, ino)
 		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 		defer cancelFunc()
 
@@ -186,7 +186,12 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		if err != nil {
 			return fs.ToStatus(err, cancel)
 		}
-		fs.writeBehind.ResetInodeStream(opCtx, ino)
+		fs.stage.ResetInodeStream(opCtx, ino)
+		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
+			fs.setInodeSpecialFlag(input.NodeId, true)
+		} else {
+			fs.forgetInodeSpecial(input.NodeId)
+		}
 		fs.cache.invalidateInode(input.NodeId)
 
 		if output != nil {
@@ -217,7 +222,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			protoFlags |= ProtoFlagAppend
 		}
 
-		fs.writeBehind.ResetInodeStream(opCtx, ino)
+		fs.stage.ResetInodeStream(opCtx, ino)
 		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 		defer cancelFunc()
 
@@ -230,7 +235,12 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		if err != nil {
 			return fs.ToStatus(err, cancel)
 		}
-		fs.writeBehind.ResetInodeStream(opCtx, ino)
+		fs.stage.ResetInodeStream(opCtx, ino)
+		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
+			fs.setInodeSpecialFlag(input.NodeId, true)
+		} else {
+			fs.forgetInodeSpecial(input.NodeId)
+		}
 		fs.cache.invalidateInode(input.NodeId)
 
 		if output != nil {

@@ -217,7 +217,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			inode = cached.inode
 		}
 	}
-	needLookup := fs.handles.AnyOpen() || fs.writeBehind.HasAnyPending() ||
+	needLookup := fs.handles.AnyOpen() || fs.stage.HasAnyPending() ||
 		(fs.hasDirtyInodes() && (child == 0 || inode == nil || inode.GetAttr() == nil))
 	if needLookup {
 		cached, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
@@ -234,7 +234,6 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		if sIno, st := fs.ToServerIno(child); st == fuse.OK {
 			childServerIno = sIno
 			hasChildServerIno = true
-			fs.writeBehind.BarrierInode(opCtx, childServerIno)
 		}
 		// 与并发 Release 的最后一个句柄关闭按 Inode 串行，保证孤儿标记不会互相错过。
 		unlock := fs.inodeLocks.lock(child)
@@ -268,10 +267,15 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	if inode != nil && inode.GetAttr() != nil && inode.GetAttr().GetNlink() == 1 {
 		if open {
 			fs.markOrphanWithContext(opCtx, child)
-		} else if hasChildServerIno {
-			fs.writeBehind.RemoveInode(opCtx, childServerIno)
-			fs.readAhead.InvalidateInode(childServerIno)
-			fs.clearDirty(childServerIno)
+		} else {
+			if hasChildServerIno {
+				fs.stage.DiscardInode(childServerIno)
+				fs.readAhead.InvalidateInode(childServerIno)
+				fs.clearDirty(childServerIno)
+			}
+			if child != 0 {
+				fs.forgetInodeSpecial(child)
+			}
 		}
 	}
 	return fuse.OK

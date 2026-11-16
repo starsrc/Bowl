@@ -191,7 +191,7 @@ func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	var hardStat unix.Stat_t
 	require.NoError(t, unix.Stat(hardlinkPath, &hardStat))
 	require.Equal(t, origStat.Ino, hardStat.Ino)
-	require.Equal(t, uint64(2), uint64(hardStat.Nlink))
+	require.Equal(t, uint64(2), uint64(hardStat.Nlink)) //nolint:unconvert,nolintlint // Nlink 在 linux/amd64 是 uint64，在 linux/arm64 是 uint32
 
 	symPath := filepath.Join(mountpoint, "sym.txt")
 	require.NoError(t, os.Symlink("orig.txt", symPath))

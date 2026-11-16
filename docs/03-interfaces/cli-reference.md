@@ -15,7 +15,7 @@
 
 ### 容量单位解析与格式化
 
-`--size` 支持十进制风格后缀，底层严格按 **1024 二进制幂** 换算为字节（参见 `client/internal/cli/size.go`）：
+`--size` 与 `--stage-size` 均调用 `cli.ParseSize` 解析十进制风格后缀，底层严格按 **1024 二进制幂** 换算为字节（参见 `client/internal/cli/size.go`）：
 
 | 输入后缀（不区分大小写） | 换算系数 | 示例与换算结果 |
 | :--- | :--- | :--- |
@@ -27,7 +27,7 @@
 | `P` / `PB` / `PIB` | `1125899906842624`（$2^{50}$） | `1P` → `1125899906842624 B` |
 
 > [!IMPORTANT]
-> `--size` 仅接受严格大于 `0` 且不超过 `math.MaxInt64`（`9223372036854775807`）的整数值，不支持小数（如 `1.5G`）或负值。人类可读输出统一格式化为 `%.2f KiB/MiB/GiB/TiB/PiB`（小于 `1 KiB` 显示整数 `B`）。
+> `cli.ParseSize` 仅接受严格大于 `0` 且不超过 `math.MaxInt64`（`9223372036854775807`）的整数值，不支持小数（如 `1.5G`）或负值。其中 `--stage-size` 额外要求不小于 `4MiB`。人类可读输出统一格式化为 `%.2f KiB/MiB/GiB/TiB/PiB`（小于 `1 KiB` 显示整数 `B`）。
 
 ## 顶层命令速查
 
@@ -244,7 +244,9 @@ bowl <command> [flags] [arguments]
 | `-f`, `--foreground` | `false` | 前台运行，直接响应 `SIGINT` / `SIGTERM` 退出 |
 | `--log-file <path>` | `/var/log/bowl/mount-<disk-id>.log`（无权限回退 `$XDG_STATE_HOME/bowl/logs/` 或 `~/.local/state/bowl/logs/`） | 仅后台守护模式生效；与 `-f` 同时传入会报参数错误（退出 `2`） |
 | `--allow-other` | `false` | 允许非挂载用户访问挂载点（需 `/etc/fuse.conf` 开启 `user_allow_other`） |
-| `--ro` | `false` | 只读挂载（`epoch = 0`，允许多节点并发挂载） |
+| `--mode <staged\|ro>` | `$BOWL_MOUNT_MODE` / `staged` | 挂载模式。`staged` 为默认读写模式，启用本地磁盘写暂存与后台上传；`ro` 为只读挂载（`epoch = 0`，允许多节点并发挂载）。其他取值退出码 `2` |
+| `--stage-size <size>` | `$BOWL_STAGE_SIZE` / `512MiB` | 本地磁盘写暂存总配额上限，通过 `cli.ParseSize` 解析，最小 `4MiB` |
+| `--stage-dir <path>` | `$BOWL_STAGE_DIR` / `/var/tmp/bowl-stage` | 本地写暂存分片与宿主机 `O_TMPFILE` 根目录 |
 | `--direct-io` | `false` | 强制 FUSE 绕过内核页缓存直通存储服务 |
 | `--debug` | `false` | 开启 `go-fuse` 底层协议调试日志 |
 | `--admin-addr <host:port\|off>` | `$BOWL_ADMIN_ADDR` / `$OBS_ADMIN_ADDR` / `127.0.0.1:0` | 本地回环 HTTP 管理端口；设 `"off"` 完全关闭管理端口 |
@@ -252,6 +254,12 @@ bowl <command> [flags] [arguments]
 | `--log-level <level>` | `$BOWL_LOG_LEVEL` / `$LOG_LEVEL` / `info` | 日志级别（`debug` / `info` / `warn` / `error`） |
 | `--log-format <json\|text>` | `$BOWL_LOG_FORMAT` / `$LOG_FORMAT` / `json` | 结构化日志格式 |
 | `--trace-sample-ratio <float>` | `$OTEL_TRACES_SAMPLER_ARG` / `0.001` | 客户端 Trace 采样率（`0.0 .. 1.0`） |
+
+挂载模式与暂存目录约束：
+
+- **`--mode=ro` 互斥规则**：在 `--mode ro`（或 `--mode=ro`）下，若在命令行显式传入 `--stage-size` 或 `--stage-dir` 标志，CLI 会报错并以退出码 `2` 退出；未传标志时环境变量 `$BOWL_STAGE_SIZE` 与 `$BOWL_STAGE_DIR` 会被忽略。只读挂载不创建暂存目录，也不启动后台上传协程。
+- **`--stage-size` 下限**：通过 `cli.ParseSize` 解析后低于 `4MiB` 时返回退出码 `2`。
+- **`--stage-dir` 校验与启动行为**：拒绝与 `<mountpoint>` 相同或嵌套在 `<mountpoint>` 内部的目录（返回退出码 `2`）。启动时基于 `flock` 清理已退出进程的遗留暂存目录（保留持锁活跃进程目录），并调用 `statfs` 检测目录是否位于 `tmpfs` 上；若命中 `tmpfs` 则记录 `stage_dir_on_tmpfs` 告警日志。
 
 挂载成功后，客户端会在 `/run/bowl/mounts/<sha256_16B>.json`（无权限时回退至 `$TMPDIR/bowl-mounts/`）写入挂载发现元数据，记录 `mountpoint`、`pid`、`disk_id`、`admin_addr` 与 `started_at`。
 
@@ -274,7 +282,7 @@ bowl <command> [flags] [arguments]
 | :--- | :--- | :--- |
 | **`0`** | 成功 | 命令正常执行完毕；`--help` / `version`；`merge --dry-run` 且冲突数为 `0` |
 | **`1`** | 运行时 / 业务错误 | RPC 超时或网络不可达；服务端返回配额超限 / `EBUSY` / `ECONFLICT`（含 `merge` 冲突）；本地挂载预检失败；`delete` 用户交互取消；`mount` / `umount` / `stats` 执行失败 |
-| **`2`** | 参数或语法校验失败 | 未知命令或未知标志；缺少必填位置参数或多余参数；UUID / `--size` / `--endpoint` / `--limit` / `--admin-addr` 格式错误；互斥标志同时出现（`-q` + `--json`、`--json` + `--raw`、`-f` + `--log-file`）；在 `delete`/`diff`/`merge` 上触发服务端 `InvalidArgument` |
+| **`2`** | 参数或语法校验失败 | 未知命令或未知标志；缺少必填位置参数或多余参数；UUID / `--size` / `--stage-size` / `--mode` / `--stage-dir` / `--endpoint` / `--limit` / `--admin-addr` 格式或范围错误（如 `--stage-size < 4MiB`、`--stage-dir` 位于 `<mountpoint>` 内）；互斥标志同时出现（`-q` + `--json`、`--json` + `--raw`、`-f` + `--log-file`、`--mode=ro` + 显式 `--stage-size`/`--stage-dir`）；在 `delete`/`diff`/`merge` 上触发服务端 `InvalidArgument` |
 
 ## 延伸阅读
 

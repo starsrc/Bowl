@@ -15,9 +15,9 @@
 | :--- | :--- | :--- | :--- |
 | **磁盘生命周期** | 创建、查询、分页列表、在线扩容/改名、删除 | 在线扩容仅支持增大容量（不允许低于 `used_bytes`）；删除挂载中的磁盘返回 `EBUSY` | `services/storage/internal/control/control.go` |
 | **分支、对比与合并** | `ForkDisk`、`DiffDisk`（含 `--patch`、`--conflicts-only`）、`MergeDisk`（`fail`/`ours`/`theirs` 及路径级覆盖 `--resolve`、`--dry-run`） | `diff --patch` 对单文件超过 `32 MiB` 自动跳过文本补丁；`merge` 遇到冲突默认中止并返回退出码 `1` | `services/storage/internal/control/{control,merge_diff}.go` |
-| **挂载与并发控制** | 读写挂载（`WriterEpoch` 栅栏 + `RenewMount` 心跳）、多节点只读挂载（`--ro`）、后台守护进程与优雅卸载 | 默认租约 `30s`，客户端每 `TTL/3`（最低 `1s`）续约一次；读写挂载仅允许单活跃写者 | `services/storage/internal/control/{control,mount_lease}.go`、`client/internal/cli/mount.go` |
+| **挂载与并发控制** | 读写挂载（`WriterEpoch` 栅栏 + `RenewMount` 心跳，默认 `--mode staged` 本地磁盘暂存）、多节点只读挂载（`--mode ro`）、后台守护进程与优雅卸载 | 默认租约 `30s`，客户端每 `TTL/3`（最低 `1s`）续约一次；读写挂载仅允许单活跃写者 | `services/storage/internal/control/{control,mount_lease}.go`、`client/internal/cli/mount.go` |
 | **POSIX 文件与目录** | `Lookup`、`GetAttr`、`SetAttr`、`Read`/`Write`、`Create`/`Mkdir`/`Mknod`/`Symlink`/`Link`/`Unlink`/`Rmdir`/`Rename`、`ReadDir`/`ReadDirPlus`、`StatFS` | `Rename` 支持 `0`、`RENAME_NOREPLACE`（`0x1`）、`RENAME_EXCHANGE`（`0x2`）；`Mknod` 支持常规文件（`S_IFREG`）、字符/块设备（`S_IFCHR`/`S_IFBLK`，含 `rdev`）、FIFO（`S_IFIFO`）与 Socket（`S_IFSOCK`） | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/` |
-| **高级存储特性** | `Fallocate`（默认分配与 `FALLOC_FL_PUNCH_HOLE` / `FALLOC_FL_KEEP_SIZE`）、`xattr`（增删改查列表）、`O_TMPFILE` + `linkat` 物化、预读与异步回写 | `user.*` 扩展属性仅允许设置在常规文件、目录与 Socket 上 | `services/storage/internal/store/{xattr_setattr,data_rw}.go`、`client/internal/fusefs/` |
+| **高级存储特性** | `Fallocate`（默认分配与 `FALLOC_FL_PUNCH_HOLE` / `FALLOC_FL_KEEP_SIZE`）、`xattr`（增删改查列表）、宿主机磁盘 `O_TMPFILE` + `linkat` 物化、顺序预读与有界本地磁盘暂存异步上传 | `user.*` 扩展属性仅允许设置在常规文件、目录与 Socket 上 | `services/storage/internal/store/{xattr_setattr,data_rw}.go`、`client/internal/fusefs/` |
 | **传输与可观测性** | ConnectRPC HTTP/2（`h2c` / HTTPS）、客户端 1 条元信息连接 + 8 条数据分片连接池、双端口 Prometheus + OTel 链路追踪 + 客户端 `.stats` 虚拟文件 | `--token` / `$BOWL_TOKEN` 在客户端注入 `Authorization: Bearer` 头 | `client/internal/rpc/client.go`、`services/storage/internal/server/` |
 
 ## 硬性边界与配额表
@@ -46,9 +46,9 @@
 
 1. **不支持多节点并发读写同一磁盘**
    - 读写挂载采用**单写者 Epoch 栅栏**（`WriterEpoch > 0`），后发起的读写挂载会递增 `epoch` 并立即 fenced 掉旧写者，不存在多写者共享锁或分布式缓存一致性协议。
-   - 多节点共享同一数据集请通过只读挂载（`--ro`，`epoch = 0`）或 `bowl disk fork` 派生独立分支再 `merge` 的模式实现。
-2. **文件句柄与文件锁状态仅驻留客户端内存**
-   - 客户端的 `HandleTable`（已打开文件描述符映射）、`LockTable`（`GetLk` / `SetLk` / `SetLkw` 建议锁）、`TmpFileManager`（`O_TMPFILE` 状态）、`NamespaceCache` 与 `capabilityCache` 均为本地进程内状态。
+   - 多节点共享同一数据集请通过只读挂载（`--mode ro`，`epoch = 0`）或 `bowl disk fork` 派生独立分支再 `merge` 的模式实现。
+2. **文件句柄、文件锁与暂存状态仅驻留客户端本地**
+   - 客户端的 `HandleTable`（已打开文件描述符映射）、`LockTable`（`GetLk` / `SetLk` / `SetLkw` 建议锁）、`StageCoordinator`（本地磁盘暂存分片状态）、`TmpFileManager`（宿主机磁盘 `O_TMPFILE` 状态）、`NamespaceCache` 与 `capabilityCache` 均为单个客户端实例的本地状态。
    - 因此跨主机挂载同一磁盘时，POSIX `fcntl` 字节范围锁与 `flock` 锁**不会**在多台客户端之间同步，仅对同一挂载点内的本地进程生效。
 3. **不支持 `RENAME_WHITEOUT`**
    - `Rename` 仅支持标志位 `0`、`RENAME_NOREPLACE`（`0x1`）与 `RENAME_EXCHANGE`（`0x2`）；传入 `RENAME_WHITEOUT`（`0x4`）、组合标志或未知标志位会直接返回 `EINVAL`（参见 `client/internal/fusefs/fs_rename.go` 与 `services/storage/internal/store/unlink_rename.go`）。

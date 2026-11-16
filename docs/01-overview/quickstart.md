@@ -67,7 +67,7 @@ mkdir -p /mnt/bowl-main/src
 echo "package main" > /mnt/bowl-main/src/main.go
 sync
 
-# 3. 卸载主盘（或以 --ro 只读方式保留），确保最新写入落盘后派生分支
+# 3. 卸载主盘（或以 --mode ro 只读方式保留），确保最新写入落盘后派生分支
 ./bin/bowl umount /mnt/bowl-main
 
 # 4. 基于主盘瞬间 Fork 一块独立分支盘
@@ -92,7 +92,7 @@ sync
 ./bin/bowl disk merge "$FEAT_DISK" --into "$MAIN_DISK"
 
 # 8. 重新挂载主盘验证合并结果，随后清理资源
-./bin/bowl mount "$MAIN_DISK" /mnt/bowl-main --ro
+./bin/bowl mount "$MAIN_DISK" /mnt/bowl-main --mode ro
 cat /mnt/bowl-main/config.env
 cat /mnt/bowl-main/README.md
 ./bin/bowl umount /mnt/bowl-main

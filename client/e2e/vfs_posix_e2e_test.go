@@ -28,7 +28,7 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	diskID := disk.GetDiskId()
 	mountpoint, stop := mountWithCleanup(t, endpoint, diskID, "--debug")
 
-	// 1. 跨 4 MiB WriteBehind 聚合槽与 256 KiB Blob 块的大文件写入、跨分片覆写及 SHA-256 校验
+	// 1. 跨 4 MiB StageCoordinator 分片槽与 256 KiB Blob 块的大文件写入、跨分片覆写及 SHA-256 校验
 	const totalSize = 10 * 1024 * 1024
 	model := deterministicPayload("posix-10m", totalSize)
 	largePath := filepath.Join(mountpoint, "large-10m.bin")

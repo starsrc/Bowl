@@ -74,7 +74,7 @@ Bowl 在服务端与客户端构建了同构的可观测性体系，涵盖**双�
 | `GET /metrics` | Prometheus 格式客户端指标 |
 | `GET /debug/pprof/*` | 客户端进程 Go 运行时剖析 |
 | `GET /healthz` / `GET /readyz` | 进程存活与 FUSE 就绪探针 |
-| `GET /debug/stats?format=<text\|json\|stats>` | `bowl stats` 命令的数据源，输出人类可读表格（`text`）、JSON（`json`）或两列原始文本（`stats`） |
+| `GET /debug/stats?format=<text\|json\|stats>` | `bowl stats` 命令的数据源，输出人类可读表格（`text`）、JSON（`json`，其中暂存模块字段为 `"stage"`）或两列原始文本（`stats`） |
 
 ### 2. 客户端核心指标（`rpc/observability.go` & `fusefs/metrics.go`）
 
@@ -82,8 +82,25 @@ Bowl 在服务端与客户端构建了同构的可观测性体系，涵盖**双�
 | :--- | :--- | :--- |
 | **RPC 客户端** | `bowl_client_rpc_retries_total`、`bowl_client_rpc_retry_exhausted_total`、`bowl_client_stale_epoch_total`、`bowl_client_rpc_logical_duration_seconds` | 瞬态重试计数、重试耗尽计数、Epoch 过期计数与端到端逻辑 RPC 耗时；同时发出 `X-Request-Id` 与 `otelconnect` `rpc.client.*` 亚毫秒指标 |
 | **FUSE 操作层** | `bowl_client_fuse_*` | 覆盖全部 `41` 个 FUSE 操作的调用次数、错误数与延迟（`26` 个对数微秒桶：`1µs .. 33.55s`） |
-| **客户端缓存与队列** | `bowl_client_nscache_*`、`bowl_client_capcache_*`、`bowl_client_readahead_*`、`bowl_client_write_behind_*`、`bowl_client_tmpfile_*` | 命名空间负/正缓存、Capability 缓存、顺序预读窗口、异步回写缓冲、`O_TMPFILE` 状态统计 |
+| **客户端缓存与队列** | `bowl_client_nscache_*`、`bowl_client_capcache_*`、`bowl_client_readahead_*`、`bowl_client_stage_*`、`bowl_client_tmpfile_*` | 命名空间负/正缓存、Capability 缓存、顺序预读窗口、本地磁盘写暂存与后台上传、宿主机磁盘 `O_TMPFILE` 状态统计 |
 | **句柄、锁与连接** | `bowl_client_open_handles`、`bowl_client_locks_*`、`bowl_client_inodelock_*`、`bowl_client_queue_*`、`bowl_client_fuse_connection_*` | 当前打开句柄数、本地 POSIX/flock 锁表、客户端 Inode 锁等待与异步请求队列深度 |
+
+#### 写暂存（`bowl_client_stage_*`）与 `O_TMPFILE`（`bowl_client_tmpfile_*`）指标明细
+
+| 指标名 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `bowl_client_stage_writes_total` | Counter | 路由至本地磁盘暂存与同步直通写的请求次数统计 |
+| `bowl_client_stage_bytes_total` | Counter | 路由至本地磁盘暂存与同步直通写的载荷字节数统计 |
+| `bowl_client_stage_upload_rpcs_total` | Counter | 后台上传工作协程发起 `Write` RPC 的累计次数统计（按结果区分） |
+| `bowl_client_stage_inflight` | Gauge | 当前正在向服务端传输的后台暂存分片 `Write` RPC 并发数 |
+| `bowl_client_stage_pending_chunks` | Gauge | `StageCoordinator` 中尚未完成上传的活跃与待传分片数量 |
+| `bowl_client_stage_used_bytes` | Gauge | 当前占用的 `--stage-size` 本地暂存配额字节数（含常规分片与已具名转正的 `O_TMPFILE`） |
+| `bowl_client_stage_capacity_bytes` | Gauge | 当前挂载实例配置的 `--stage-size` 暂存配额上限字节数 |
+| `bowl_client_stage_backpressure_wait_duration_seconds` | Histogram | 前台 `Write` 因触发 `--stage-size` 上限阻塞等待配额释放的耗时分布 |
+| `bowl_client_stage_barrier_wait_duration_seconds` | Histogram | FUSE 屏障操作等待对应 Inode 或全盘暂存分片排空的耗时分布 |
+| `bowl_client_tmpfile_active_files` | Gauge | 当前由 `TmpFileManager` 管理的未具名 `O_TMPFILE` 活跃文件数 |
+| `bowl_client_tmpfile_resident_bytes` | Gauge | 当前未具名 `O_TMPFILE` 在宿主机 `--stage-dir` 磁盘上的实际字节占用 |
+| `bowl_client_tmpfile_promotes_total` | Counter | 通过 `linkat`（`Link`）具名转正并移交 `StageCoordinator` 上传的 `O_TMPFILE` 累计次数 |
 
 ### 3. 挂载根目录虚拟 `.stats` 文件
 
@@ -115,8 +132,9 @@ Bowl 采用自定义的**优先级采样器（Priority Sampler）**，兼顾日�
    - 对所有控制面与栅栏写入 RPC（`CreateDisk`、`ForkDisk`、`UpdateDisk`、`DeleteDisk`、`MountDisk`、`UnmountDisk`、`MergeDisk`、`ReclaimOrphan`）强制 **100% 采样**；
    - 携带已采样 Span Link 的请求强制跟随采样；
    - 针对来自短生命周期 CLI 进程的未采样远端 `traceparent`，按服务端局部策略重新评估采样决策（避免 CLI 低采样率导致服务端关键路径盲区）。
-2. **客户端 `mount`（`client/internal/cli/admin.go`）**：
-   - 默认采样率仅 `0.001`，但对关键落盘与卸载链路（`fuse.Fsync`、`fuse.FsyncDir`、`fuse.OnUnmount`）强制 **100% 采样**。
+2. **客户端 `mount`（`client/internal/cli/admin.go` & `client/internal/fusefs/stage.go`）**：
+   - 默认采样率仅 `0.001`，但对关键落盘与卸载链路（`fuse.Fsync`、`fuse.FsyncDir`、`fuse.OnUnmount`）及携带已采样 `SpanLink` 的 Span 强制 **100% 采样**。
+   - `StageCoordinator` 在异步暂存与上传路径中发出 3 类追踪 Span：`stage.UploadChunk`（携带指向各前序写入者/转正者 Span 的 `SpanLinks`）、`stage.BackpressureWait`（配额背压阻塞）与 `stage.BarrierWait`（写屏障排空）。
 3. **客户端 `bowl disk`（`client/internal/cli/disk_obs.go`）**：
    - 每次 CLI 执行自动创建 `cli.disk.<subcommand>` 根 Span（服务名 `bowl-cli`），并在命令退出前预留最多 `2s` 刷新导出缓冲区，便于在 Jaeger 中从 CLI 命令直接下钻到服务端 PostgreSQL 与 `StoreActor` Span。
 
@@ -127,7 +145,7 @@ Bowl 采用自定义的**优先级采样器（Priority Sampler）**，兼顾日�
 | 组件 | 日志输出与格式 | 分级与慢请求告警阈值 |
 | :--- | :--- | :--- |
 | **存储服务端** | 标准输出 JSON/Text 日志；单盘 Pebble 额外写入 `$DATA_DIR/<disk>/pebble_events.log` | 控制面写请求以 `INFO` 记录；高频数据/元数据正常请求及 `Lookup`/`GetXattr` 的 `NotFound` 降为 `DEBUG`；**数据面耗时 `> 50ms`**、**控制面耗时 `> 200ms`** 或 **Pebble 写慢盘 `> 500ms`** 输出慢操作告警 |
-| **客户端 `mount`** | 后台模式默认写 `/var/log/bowl/mount-<disk-id>.log`（无权限回退 `$XDG_STATE_HOME/bowl/logs/` 或 `~/.local/state/bowl/logs/`），支持 `--log-file`、`--log-level`、`--log-format` | 客户端单次 RPC 耗时超过 **`1s`** 输出慢调用告警日志 |
+| **客户端 `mount`** | 后台模式默认写 `/var/log/bowl/mount-<disk-id>.log`（无权限回退 `$XDG_STATE_HOME/bowl/logs/` 或 `~/.local/state/bowl/logs/`），支持 `--log-file`、`--log-level`、`--log-format` | 客户端单次 RPC 耗时超过 **`1s`** 输出慢调用告警日志；`--stage-dir` 位于 `tmpfs` 时启动输出 `stage_dir_on_tmpfs` 告警；后台上传遇终端业务错误输出 `stage_upload_failed` 错误日志 |
 
 ### 生产环境全链路可观测性栈（`deploy/prod/`）
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,7 +40,9 @@ const mountUsageHelp = `用法:
   -f, --foreground               前台阻塞模式运行，输出日志到标准错误并响应 SIGINT/SIGTERM 退出
   --log-file string              日志文件路径 (仅用于后台守护模式)
   --allow-other                  允许本机其他非 root 用户访问挂载点
-  --ro                           只读挂载
+  --mode string                  挂载模式: staged|ro (默认读取 $BOWL_MOUNT_MODE 或 staged)
+  --stage-size string            本地暂存区容量上限，最小 4MiB (默认读取 $BOWL_STAGE_SIZE 或 512MiB)
+  --stage-dir string             本地暂存根目录 (默认读取 $BOWL_STAGE_DIR 或 /var/tmp/bowl-stage)
   --direct-io                    绕过内核页缓存直通数据
   --debug                        开启 FUSE 协议调试日志
   --admin-addr string            本地管理面 HTTP 监听地址，"off" 关闭 (默认读取 $BOWL_ADMIN_ADDR/$OBS_ADMIN_ADDR 或 127.0.0.1:0)
@@ -67,6 +70,12 @@ type mountOptions struct {
 	logLevel         string
 	logFormat        string
 	traceSampleRatio float64
+	mode             string
+	stageSizeRaw     string
+	stageDirRaw      string
+	readOnly         bool
+	stageSizeBytes   uint64
+	stageDir         string
 }
 
 type mountFlagPresence struct {
@@ -74,13 +83,17 @@ type mountFlagPresence struct {
 	logLevel         bool
 	logFormat        bool
 	traceSampleRatio bool
+	mode             bool
+	stageSize        bool
+	stageDir         bool
 }
 
-// serveFUSE、mountHTTPClient 与 mountRenewIntervalFn 为测试接缝：ready 必须在内核挂载就绪后调用一次。
+// serveFUSE、mountHTTPClient、mountRenewIntervalFn 与 stageDirIsTmpfs 为测试接缝：ready 必须在内核挂载就绪后调用一次。
 var (
 	serveFUSE            = defaultServeFUSE
 	mountHTTPClient      *http.Client
 	mountRenewIntervalFn = defaultMountRenewInterval
+	stageDirIsTmpfs      = func(s *fusefs.StageDirSession) bool { return s.IsTmpfs() }
 )
 
 type mountLeaseInfo struct {
@@ -290,6 +303,21 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		}
 	}()
 
+	var stageSession *fusefs.StageDirSession
+	if !baseCfg.ReadOnly {
+		var stageErr error
+		stageSession, stageErr = fusefs.OpenStageDirSession(baseCfg.StageDir)
+		if stageErr != nil {
+			return fmt.Errorf("初始化暂存目录失败: %w", stageErr)
+		}
+		defer func() {
+			_ = stageSession.Close()
+		}()
+		if stageDirIsTmpfs(stageSession) {
+			logger.Warn("stage_dir_on_tmpfs", slog.String("stage_dir", baseCfg.StageDir))
+		}
+	}
+
 	rpcMetrics := rpc.NewMetrics()
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
 		Endpoint:   opts.endpoint,
@@ -309,8 +337,15 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	cfg.Logger = logger
 	cfg.Metrics = fusefs.NewMetrics()
 	cfg.TracerProvider = obs.TracerProvider()
+	if !cfg.ReadOnly {
+		cfg.StageSession = stageSession
+		if cfg.StageSize == 0 {
+			cfg.StageSize = fusefs.DefaultStageSize
+		}
+	}
 
 	rawFS := fusefs.NewRawFS(client, *cfg)
+	defer rawFS.OnUnmount()
 	if regErr := obs.RegisterCollector(rpcMetrics, rawFS.Collector()); regErr != nil {
 		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
 		return fmt.Errorf("注册指标收集器失败: %w", regErr)
@@ -406,7 +441,7 @@ func firstNonEmptyEnv(keys ...string) string {
 	return ""
 }
 
-// applyEnvAndValidateOptions 应用环境变量兜底并校验可观测性相关标志。
+// applyEnvAndValidateOptions 应用环境变量兜底并校验挂载模式、暂存配置与可观测性相关标志。
 func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence) error {
 	if !set.adminAddr {
 		if env := firstNonEmptyEnv("BOWL_ADMIN_ADDR", "OBS_ADMIN_ADDR"); env != "" {
@@ -448,6 +483,146 @@ func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence) error {
 	if math.IsNaN(o.traceSampleRatio) || math.IsInf(o.traceSampleRatio, 0) || o.traceSampleRatio < 0 || o.traceSampleRatio > 1 {
 		return fmt.Errorf("无效的 --trace-sample-ratio %v，取值范围 [0,1]", o.traceSampleRatio)
 	}
+	return applyStageOptions(o, set)
+}
+
+func applyStageOptions(o *mountOptions, set mountFlagPresence) error {
+	if !set.mode {
+		if env := firstNonEmptyEnv("BOWL_MOUNT_MODE"); env != "" {
+			o.mode = env
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(o.mode)) {
+	case fusefs.MountModeStaged:
+		o.readOnly = false
+	case fusefs.MountModeRO:
+		o.readOnly = true
+	default:
+		return fmt.Errorf("无效的 --mode %q，可选 %s|%s", o.mode, fusefs.MountModeStaged, fusefs.MountModeRO)
+	}
+
+	if o.readOnly {
+		if set.stageSize {
+			return errors.New("--mode ro 只读模式下不能指定 --stage-size")
+		}
+		if set.stageDir {
+			return errors.New("--mode ro 只读模式下不能指定 --stage-dir")
+		}
+		o.stageSizeBytes = 0
+		o.stageDir = ""
+		return nil
+	}
+
+	stageSize := fusefs.DefaultStageSize
+	if set.stageSize {
+		parsed, err := ParseSize(o.stageSizeRaw)
+		if err != nil {
+			return fmt.Errorf("无效的 --stage-size %q: %w", o.stageSizeRaw, err)
+		}
+		stageSize = parsed
+	} else if env := firstNonEmptyEnv("BOWL_STAGE_SIZE"); env != "" {
+		parsed, err := ParseSize(env)
+		if err != nil {
+			return fmt.Errorf("无效的环境变量 BOWL_STAGE_SIZE=%q: %w", env, err)
+		}
+		stageSize = parsed
+	}
+	if stageSize < fusefs.MinStageSize {
+		return fmt.Errorf("无效的 --stage-size (%s)，最小允许 %s", FormatSize(stageSize), FormatSize(fusefs.MinStageSize))
+	}
+	o.stageSizeBytes = stageSize
+
+	var rawStageDir string
+	switch {
+	case set.stageDir:
+		if strings.TrimSpace(o.stageDirRaw) == "" {
+			return errors.New("--stage-dir 不能为空")
+		}
+		rawStageDir = o.stageDirRaw
+	default:
+		if env := firstNonEmptyEnv("BOWL_STAGE_DIR"); env != "" {
+			rawStageDir = env
+		} else {
+			rawStageDir = fusefs.DefaultStageDir
+		}
+	}
+
+	absStageDir, err := filepath.Abs(rawStageDir)
+	if err != nil {
+		return fmt.Errorf("--stage-dir 路径解析失败: %w", err)
+	}
+	absStageDir = filepath.Clean(absStageDir)
+	if info, statErr := os.Stat(absStageDir); statErr == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("--stage-dir %q 已存在且不是目录", absStageDir)
+		}
+	} else if errors.Is(statErr, syscall.ENOTDIR) || errors.Is(statErr, syscall.ELOOP) {
+		return fmt.Errorf("--stage-dir %q 路径无效: %w", absStageDir, statErr)
+	}
+	o.stageDir = absStageDir
+	return nil
+}
+
+func resolvePathWithSymlinks(absPath string) (string, error) {
+	clean := filepath.Clean(absPath)
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	cur := clean
+	var tail []string
+	for hops := 0; hops < 40; {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			for _, part := range slices.Backward(tail) {
+				resolved = filepath.Join(resolved, part)
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if info, lErr := os.Lstat(cur); lErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(cur)
+			if readErr != nil {
+				return "", readErr
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(cur), target)
+			}
+			cur = filepath.Clean(target)
+			hops++
+			continue
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return clean, nil
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+	return "", fmt.Errorf("符号链接层级过多: %q", absPath)
+}
+
+func isSameOrSubpath(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func validateStageDirMountpoint(stageDir, absMountpoint string) error {
+	if isSameOrSubpath(absMountpoint, stageDir) {
+		return fmt.Errorf("--stage-dir %q 不能等于或位于挂载点 %q 内部", stageDir, absMountpoint)
+	}
+	canonMP, errMP := resolvePathWithSymlinks(absMountpoint)
+	canonStage, errStage := resolvePathWithSymlinks(stageDir)
+	if errStage != nil {
+		return fmt.Errorf("--stage-dir %q 路径解析失败: %w", stageDir, errStage)
+	}
+	if errMP == nil && isSameOrSubpath(canonMP, canonStage) {
+		return fmt.Errorf("--stage-dir %q 不能等于或位于挂载点 %q 内部", stageDir, absMountpoint)
+	}
 	return nil
 }
 
@@ -456,7 +631,6 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 	var (
 		foreground bool
 		allowOther bool
-		ro         bool
 		directIO   bool
 		debug      bool
 		statsFile  bool
@@ -468,6 +642,7 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		logLevel:         "info",
 		logFormat:        "json",
 		traceSampleRatio: defaultTraceSampleRatio,
+		mode:             fusefs.MountModeStaged,
 	}
 
 	var posArgs []string
@@ -490,14 +665,21 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 			foreground, err = parseBoolFlag(val, hasVal)
 		case "allow-other":
 			allowOther, err = parseBoolFlag(val, hasVal)
-		case "ro":
-			ro, err = parseBoolFlag(val, hasVal)
 		case "direct-io":
 			directIO, err = parseBoolFlag(val, hasVal)
 		case "debug":
 			debug, err = parseBoolFlag(val, hasVal)
 		case "stats-file":
 			statsFile, err = parseBoolFlag(val, hasVal)
+		case "mode":
+			set.mode = true
+			opts.mode, err = takeFlagValue(args, &i, name, val, hasVal)
+		case "stage-size":
+			set.stageSize = true
+			opts.stageSizeRaw, err = takeFlagValue(args, &i, name, val, hasVal)
+		case "stage-dir":
+			set.stageDir = true
+			opts.stageDirRaw, err = takeFlagValue(args, &i, name, val, hasVal)
 		case "endpoint":
 			opts.endpoint, err = takeFlagValue(args, &i, name, val, hasVal)
 		case "token":
@@ -572,6 +754,13 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	if !opts.readOnly {
+		if stageErr := validateStageDirMountpoint(opts.stageDir, absMountpoint); stageErr != nil {
+			fmt.Fprintf(stderr, "错误: %v\n", stageErr)
+			return 2
+		}
+	}
+
 	// 挂载前重复挂载校验：解析 /proc/self/mountinfo，若目标 <mountpoint> 已是活跃挂载点，在前台立即报错
 	mounted, err := IsMountPoint(absMountpoint)
 	if err != nil {
@@ -593,11 +782,13 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 
 	baseCfg := fusefs.Config{
 		DiskID:          diskIDStr,
-		ReadOnly:        ro,
+		ReadOnly:        opts.readOnly,
 		DirectIO:        directIO,
 		AllowOther:      allowOther,
 		Debug:           debug,
 		EnableStatsFile: statsFile,
+		StageSize:       opts.stageSizeBytes,
+		StageDir:        opts.stageDir,
 	}
 
 	// 4. 归一化 OTLP 环境变量（对缺 http:///https:// 的裸 host:port 自动补齐 http://，确保守护子进程同享）

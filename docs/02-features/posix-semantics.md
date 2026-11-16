@@ -12,7 +12,7 @@
 | `Mkdir` | 创建目录，初始化 `Nlink = 2` 并递增父目录 `Nlink`；客户端本地标记空目录以加速后续负向查表 | 同名返回 `EEXIST`；父目录达 `MaxNlink = 65000` 返回 `EMLINK` | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/fs_topology.go` |
 | `Mknod` | 创建常规文件（`S_IFREG`）、FIFO 管道（`S_IFIFO`）、字符/块设备（`S_IFCHR`/`S_IFBLK`）及 Unix Socket（`S_IFSOCK`），支持传入 `rdev` | 若 `mode` 类型位为 `0`，按常规文件处理；禁止直接创建目录（应走 `Mkdir`） | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/fs_topology.go` |
 | `Create` | 原子创建常规文件并分配本地句柄；客户端 `ToProtoOpenFlags` 仅保留访问模式及 `O_CREAT`/`O_EXCL`/`O_TRUNC`/`O_APPEND`，剥离内核高位标志 | 存储端直接拒绝 `O_TMPFILE`（`0o20000000`）返回 `EOPNOTSUPP`；带 `O_CREAT \| O_EXCL` 遇已存在返回 `EEXIST` | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/fs_file_handle.go` |
-| `Tmpfile` (`O_TMPFILE`) | 客户端 `TmpFileManager` 在本地内存创建匿名临时文件（要求 `O_WRONLY` 或 `O_RDWR`），未具名前读写截断均在本地执行；`linkat` 具名或 `Flush`/`Fsync` 时自动通过 `Mknod + Write + SetAttr` 上云物化 | 只读挂载返回 `EROFS`；非法访问模式返回 `EINVAL` | `client/internal/fusefs/fs_tmpfile.go` |
+| `Tmpfile` (`O_TMPFILE`) | 客户端 `TmpFileManager` 在 `--stage-dir` 实例目录通过宿主机 `O_TMPFILE`（不支持时回退 `CreateTemp` 后立即 `unlink`）创建匿名临时文件（要求 `O_WRONLY` 或 `O_RDWR`）。未具名前读写、`Truncate`、`Fallocate` 与 `Fsync` 均在宿主机文件上本地执行，`Flush` 直接返回成功且零 RPC；未具名关闭直接销毁描述符且零 RPC；`linkat` 具名化时先同步 `Mknod` 分配服务端 Inode，再移交 `StageCoordinator` 后台分片上传 | 只读挂载返回 `EROFS`；非法访问模式返回 `EINVAL` | `client/internal/fusefs/fs_tmpfile.go` |
 | `Symlink` / `Readlink` | 创建符号链接（`S_IFLNK \| 0o777`），目标路径直接内联于 `Inode` 尾部，计入 `LogicalBytes`；读取返回原目标字节切片 | 目标路径不可为空且最长 `MaxSymlinkTargetBytes = 4095` 字节（超限返回 `ENAMETOOLONG`） | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/fs_link.go` |
 | `Link` | 为非目录存活节点创建硬链接，递增 `Nlink` | 严禁对目录创建硬链接（`EPERM`）；禁止对已解链的 `orphan` 节点（`Nlink == 0`）创建硬链接（`ENOENT`）；`Nlink &gt;= 65000` 返回 `EMLINK` | `services/storage/internal/store/namespace.go`、`client/internal/fusefs/fs_link.go` |
 | `Rmdir` | 删除空目录并递减父目录 `Nlink` | `.` 返回 `EINVAL`；`..` 或非空目录返回 `ENOTEMPTY`；非目录返回 `ENOTDIR` | `services/storage/internal/store/unlink_rename.go`、`client/internal/fusefs/fs_topology.go` |
@@ -49,7 +49,7 @@
 - **协议与客户端分片**：
   - FUSE 内核单次握手上限配置为 `MaxWrite = 1 MiB`、`MaxReadAhead = 1 MiB`；
   - Storage RPC 单次传输载荷上限为 `maxReadWriteSize = 4 MiB`（`4 &lt;&lt; 20`）；若单次 FUSE 读写请求超过 `4 MiB`，客户端自动按 `4 MiB` 顺序循环分片，中途遇到 `EOF` 或后续分片失败时严格遵守 POSIX **短读 / 短写**语义（已成功读写部分返回正字节数与 `fuse.OK`，仅首片失败返回 errno）；
-  - 客户端 `ReadAheadCoordinator` 对连续顺序读维持 `W_read = 4` 个 `4 MiB` 对齐预读窗口；`WriteBehindCoordinator` 支持顺序常规文件异步批量写回（遇 `O_APPEND`、`O_SYNC`/`O_DSYNC`、`AttrTimeoutSeconds &lt;= 0`、特殊权限位或携带未确认 `security.capability` 时退化为同步直通写，且通过 `inodeLocks` 保证 `O_APPEND` 的"排空 -&gt; 读大小 -&gt; 追加写"严格串行）。
+  - 客户端 `ReadAheadCoordinator` 对连续顺序读维持 `W_read = 4` 个 `4 MiB` 对齐预读窗口；`StageCoordinator` 为常规文件提供有界本地磁盘写暂存与 8 协程后台异步上传（仅 `O_APPEND`、`O_SYNC`/`O_DSYNC`、`Immutable`/`Append`/SUID/SGID 特殊权限位、未确认 `security.capability` 首次探测、0 字节写入或单次写入超过 `4 MiB` 时先执行上传屏障再同步直通写，且通过 `inodeLocks` 保证 `O_APPEND` 的"屏障排空、读取最新大小、追加写入"严格串行）。
   - `Write` 一旦发出在途 RPC，客户端使用 `context.WithoutCancel` 屏蔽内核 `FUSE_INTERRUPT`（如 Go `SIGURG` 信号），避免非幂等追加写重复提交。
 - **底层分块与稀疏空洞**：
   - 引擎以固定 `BlobSize = 256 KiB` 网格映射文件数据键 `data:&lt;ino&gt;:&lt;blockIdx&gt;` -&gt; `16B BlobRef{PackID, Offset, Length}`，`.pack` 容器单包封口上限为 `PackMaxSize = 64 MiB`；
@@ -73,8 +73,8 @@
 
 ### `Flush` 与 `Fsync` / `FsyncDir` 刷盘语义
 
-- **延迟落盘策略**：`close(fd)` 触发 FUSE `Flush` 时，客户端仅排空本地 `WriteBehind` 队列并释放该进程的 POSIX 记录锁（对未具名 `O_TMPFILE` 则上传写入服务端 WAL），**不再**跨机发起物理 `Fsync` RPC，以保障高频小文件吞吐。
-- **物理持久化屏障**：仅当应用显式调用 `fsync()`/`fdatasync()`（`Fsync`）、`fsync(dirfd)`（`FsyncDir`）或卸载触发 `OnUnmount` 排空所有 `dirtyInodes` 时，存储引擎将 `syncBarrier = true` 送入单协程写循环执行 WAL 同步落盘与死包清理。
+- **非阻塞 `Flush` 策略**：`close(fd)` 触发 FUSE `Flush` 时，客户端将当前活跃部分暂存分片封口并投入 `StageCoordinator` 后台上传队列，释放该进程的 POSIX 记录锁并检查本句柄未观测的延迟写错误（`errseq`），随即立即返回而不等待网络上传（对未具名 `O_TMPFILE` 直接返回 `OK`，零服务端 RPC），也不跨机发起物理 `Fsync` RPC，以保障高频小文件吞吐。
+- **物理持久化与元数据屏障**：当应用显式调用 `fsync()`/`fdatasync()`（`Fsync`）、`fsync(dirfd)`（`FsyncDir`）或卸载触发 `OnUnmount` 排空所有 `dirtyInodes` 时，客户端先阻塞等待暂存分片上传排空，再向存储引擎发起带 `syncBarrier = true` 的落盘请求执行 WAL 同步落盘与死包清理；`Rename` 与常规文件 `Link` 在发送元数据 RPC 前同样先阻塞排空相关节点暂存上传。
 - **边界约束**：`Fsync` 对目录返回 `EISDIR`；`FsyncDir` 对非目录返回 `ENOTDIR`，且对已被 `Rmdir` 但仍被本地持有句柄的已删除目录安全放行返回 `OK`。
 
 ---
@@ -125,7 +125,7 @@ flowchart LR
 
 | 命令号 | 映射服务端字段 | 支持标志位 | 拒绝 / 边界行为 |
 | :--- | :--- | :--- | :--- |
-| `FS_IOC_GETFLAGS` (`0x80086601`) / `FS_IOC32_GETFLAGS` (`0x80046601`) | `InodeAttribute.flags` | 读取 `FS_IMMUTABLE_FL` (`0x00000010`)、`FS_APPEND_FL` (`0x00000020`) | 缓冲区 `&lt; 4` 字节返回 `EINVAL`；先对当前节点执行 `WriteBehind.BarrierInode` 保证顺序一致 |
+| `FS_IOC_GETFLAGS` (`0x80086601`) / `FS_IOC32_GETFLAGS` (`0x80046601`) | `InodeAttribute.flags` | 读取 `FS_IMMUTABLE_FL` (`0x00000010`)、`FS_APPEND_FL` (`0x00000020`) | 缓冲区 `&lt; 4` 字节返回 `EINVAL`；先对当前节点执行 `StageCoordinator.BarrierInode` 保证顺序一致 |
 | `FS_IOC_SETFLAGS` (`0x40086602`) / `FS_IOC32_SETFLAGS` (`0x40046602`) | `SetAttrRequest.flags` | 设置/清除 `ProtoFlagImmutable` (`0x1`)、`ProtoFlagAppend` (`0x2`) | 只读挂载返回 `EROFS`；包含除这两个标志外的其余位返回 `EOPNOTSUPP` |
 | `FS_IOC_FSGETXATTR` (`0x801c581f`) / `FS_IOC_FSSETXATTR` (`0x401c5820`) | `InodeAttribute.flags` | 双向桥接 `FS_XFLAG_IMMUTABLE` (`0x00000008`)、`FS_XFLAG_APPEND` (`0x00000010`) | 缓冲区 `&lt; 28` 字节返回 `EINVAL`；出现未知 `fsxattr` 标志返回 `EOPNOTSUPP` |
 | 其余所有命令（如 `TCGETS` 终端探测） | — | — | **在加锁与写屏障前直接短路返回 `ENOTTY`**（严禁返回 `ENOSYS`，以免内核永久禁用整个挂载点的所有 `ioctl` 能力） |

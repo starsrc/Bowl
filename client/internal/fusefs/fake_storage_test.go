@@ -108,6 +108,8 @@ type fakeStorage struct {
 	linkHook          func(context.Context, *storagev1.LinkRequest) error
 	readDirPlusHook   func(context.Context, *storagev1.ReadDirPlusRequest) ([]*storagev1.DirEntryPlus, error)
 	reclaimOrphanHook func(context.Context, *storagev1.ReclaimOrphanRequest) error
+	renameHook        func(context.Context, *storagev1.RenameRequest) error
+	statFSHook        func(context.Context, *storagev1.StatFSRequest) error
 }
 
 func newFakeStorage(tb testing.TB, opts ...fakeStorageOption) *fakeStorage {
@@ -875,6 +877,11 @@ func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkEpoch("Rename", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	if s.renameHook != nil {
+		if err := s.renameHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
 	oldName := string(req.Msg.GetOldName())
 	newName := string(req.Msg.GetNewName())
 	if oldName == "." || oldName == ".." || newName == "." || newName == ".." {
@@ -1466,6 +1473,11 @@ func (s *fakeStorage) StatFS(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkDiskID("StatFS", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if s.statFSHook != nil {
+		if err := s.statFSHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.nodes[req.Msg.GetIno()] == nil {
@@ -1597,6 +1609,24 @@ func withLogger(l *slog.Logger) rawFSOption {
 func withMetrics(m *fusefs.Metrics) rawFSOption {
 	return func(c *fusefs.Config) {
 		c.Metrics = m
+	}
+}
+
+func withStageSize(size uint64) rawFSOption {
+	return func(c *fusefs.Config) {
+		c.StageSize = size
+	}
+}
+
+func withStageDir(dir string) rawFSOption {
+	return func(c *fusefs.Config) {
+		c.StageDir = dir
+	}
+}
+
+func withStageSession(sess *fusefs.StageDirSession) rawFSOption {
+	return func(c *fusefs.Config) {
+		c.StageSession = sess
 	}
 }
 

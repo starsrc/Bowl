@@ -113,7 +113,7 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		stopFeat()
 
 		// 父盘以只读方式在线 FUSE 挂载
-		_, stopMainRO := mountWithCleanup(t, endpoint, mainID, "--ro")
+		_, stopMainRO := mountWithCleanup(t, endpoint, mainID, "--mode", "ro")
 		defer stopMainRO()
 
 		// 绕过本机 CLI 直调 StorageServiceClient.MergeDisk，服务端必须拦截为 CodeAborted + EBUSY
@@ -130,7 +130,7 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		require.NotNil(t, info)
 		require.Equal(t, "EBUSY", info.GetReason())
 
-		// 本机 `bowl disk merge --dry-run` 在父盘 --ro 挂载态下必须正常成功
+		// 本机 `bowl disk merge --dry-run` 在父盘 --mode ro 挂载态下必须正常成功
 		dryOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--dry-run")
 		require.Contains(t, dryOut, "Dry Run")
 	})

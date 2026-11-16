@@ -77,6 +77,7 @@ func setupTestObsAndMux(t *testing.T) (*clientRuntime, *http.ServeMux) {
 		DiskID:  testDiskID1,
 		RootIno: 1,
 	})
+	t.Cleanup(rawFS.OnUnmount)
 	require.NoError(t, obs.RegisterCollector(rawFS.Collector()))
 	return obs, newAdminMux(obs, rawFS)
 }
@@ -270,7 +271,7 @@ func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(
 		SpanID:     [8]byte{1, 2, 3, 4, 5, 6, 7, 8},
 		TraceFlags: trace.FlagsSampled,
 	}))
-	_, linkedRoot := tracer.Start(context.Background(), "write_behind.FlushChunk",
+	_, linkedRoot := tracer.Start(context.Background(), "stage.UploadChunk",
 		trace.WithNewRoot(),
 		trace.WithLinks(trace.LinkFromContext(sampledCtx)),
 	)
@@ -302,7 +303,7 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 	metricsText := metricsRec.Body.String()
 	require.Contains(t, metricsText, `le="2.5e-05"} 0`)
 	require.Contains(t, metricsText, `le="5e-05"} 1`)
-	require.Contains(t, metricsText, "bowl_client_write_behind_writes_total")
+	require.Contains(t, metricsText, "bowl_client_stage_writes_total")
 	require.Contains(t, metricsText, "bowl_client_fuse_connection_waiting")
 
 	// When: 非法 format 返回 400

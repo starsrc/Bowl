@@ -214,7 +214,7 @@ VPC_ID=vpc-xxx VSWITCH_ID=vsw-xxx SECURITY_GROUP_ID=sg-xxx bash benchmark/fork/r
 ```
 
 ::: danger 会产生云费用
-不要在日常开发循环里运行。仅在改动数据路径（`store`、`rpc` 传输、预读与写回）并需要性能或合规回归证据时执行，并确认账号凭据与同可用区网络参数。脚本内置 `trap cleanup EXIT` 做强制销毁与零残留核验，仍应在结束后到控制台复核。
+不要在日常开发循环里运行。仅在改动数据路径（`store`、`rpc` 传输、预读与暂存上传）并需要性能或合规回归证据时执行，并确认账号凭据与同可用区网络参数。脚本内置 `trap cleanup EXIT` 做强制销毁与零残留核验，仍应在结束后到控制台复核。
 :::
 
 不开云也能验证解析与报告逻辑（各目录 README 的"基于已有结果重新生成"小节），以 `fork` 为例：

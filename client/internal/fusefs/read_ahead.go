@@ -17,7 +17,7 @@ import (
 // MaxRPCChunkSize 定义客户端单次读写 RPC 的最大载荷切片大小 (4 MiB = 4,194,304 字节)。
 const MaxRPCChunkSize = 4 * 1024 * 1024
 
-// ReadAheadMaxPrefetch 定义确认连续顺序流后单句柄最多并发维持的 4 MiB 异步预读窗口数（W_read = 4，对齐 WriteBehind W* = 4）。
+// ReadAheadMaxPrefetch 定义确认连续顺序流后单句柄最多并发维持的 4 MiB 异步预读窗口数（W_read = 4）。
 const ReadAheadMaxPrefetch = 4
 
 // ReadAheadMaxGlobalInflight 定义单个客户端实例跨所有活跃句柄允许并发在途的最大异步预读 RPC 数（32 * 4 MiB = 128 MiB）。

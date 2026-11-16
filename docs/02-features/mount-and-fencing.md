@@ -1,6 +1,6 @@
 # 挂载租约与写栅栏
 
-Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块虚拟磁盘可以并发承载任意数量的只读挂载（`--ro`）以及**至多一个有效读写写者**。通过单调递增的 `WriterEpoch` 硬栅栏与 `MountLease` 软租约协同，系统在不引入分布式锁服务的前提下，既能瞬间隔离脑裂僵尸写者，又能为三路合并等控制面变更提供安全门禁。
+Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块虚拟磁盘可以并发承载任意数量的只读挂载（`--mode ro`）以及**至多一个有效读写写者**。通过单调递增的 `WriterEpoch` 硬栅栏与 `MountLease` 软租约协同，系统在不引入分布式锁服务的前提下，既能瞬间隔离脑裂僵尸写者，又能为三路合并等控制面变更提供安全门禁。
 
 ---
 
@@ -16,8 +16,24 @@ Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块�
 | 返回 `epoch` 值 | 固定返回 `0` | 返回递增后的新 `WriterEpoch`（必为 `&gt;= 1`） |
 | 孤儿节点清理 | **不触发**孤儿清理 | **同步触发** `planCleanOrphans`，彻底清除上任写者崩溃残留的 `orphan:&lt;ino&gt;` 节点并扣减逻辑用量 |
 | 租约淘汰策略 | 登记只读租约，与已有 RW / RO 租约共存 | 登记新 RW 租约，并立即淘汰内存中所有 `lease.epoch &lt; epoch` 的旧 RW 租约（**保留 RO 租约**） |
-| 服务端/客户端写保护 | 客户端在 `BuildMountOptions` 传入 `ro`，并在 FUSE 层 `CheckWritable()` 直接拦截返回 `EROFS` | 所有写类 RPC（`Create`、`Write`、`Unlink`、`Rename`、`SetAttr`、`Fallocate`、`SetXattr`、`RemoveXattr`、`Fsync`、`FsyncDir`、`ReclaimOrphan` 等）必须携带当前 `epoch` |
+| 服务端/客户端写保护 | 客户端在 `BuildMountOptions` 传入 `ro`，在 FUSE 层 `CheckWritable()` 直接拦截返回 `EROFS`，且不创建暂存目录或启动后台上传协程 | 所有写类 RPC（`Create`、`Write`、`Unlink`、`Rename`、`SetAttr`、`Fallocate`、`SetXattr`、`RemoveXattr`、`Fsync`、`FsyncDir`、`ReclaimOrphan` 等）必须携带当前 `epoch` |
 | 共用响应参数 | 均颁发 UUIDv7 `mount_id`、`lease_ttl_seconds`（默认 `30s`）、`root_inode`、`entry_timeout_seconds` 及 `attr_timeout_seconds` | 同左 |
+
+### 挂载模式与本地磁盘暂存配置
+
+`bowl mount` 通过 `--mode`、`--stage-size` 与 `--stage-dir` 控制客户端挂载模式及本地写暂存资源边界（解析逻辑位于 `client/internal/cli/mount.go`）：
+
+| 参数 | 默认值 / 环境变量 | 校验与运行行为 |
+| :--- | :--- | :--- |
+| `--mode <staged\|ro>` | `$BOWL_MOUNT_MODE` / `staged` | `staged` 为默认读写模式，启用本地磁盘暂存与 8 协程后台上传；`ro`（`--mode ro` / `--mode=ro`）为只读模式（`epoch = 0`）。其他取值返回退出码 `2` |
+| `--stage-size <size>` | `$BOWL_STAGE_SIZE` / `512MiB` | 经 `cli.ParseSize` 解析，最小 `4MiB`（低于下限返回退出码 `2`）。约束常规写分片与具名转正 `O_TMPFILE` 占用的本地暂存总配额 |
+| `--stage-dir <path>` | `$BOWL_STAGE_DIR` / `/var/tmp/bowl-stage` | 禁止与 `<mountpoint>` 相同或嵌套在 `<mountpoint>` 内部（返回退出码 `2`），防止把暂存文件写回自身 FUSE 挂载点 |
+
+关键运行约束：
+
+- **`--mode=ro` 隔离**：在 `--mode=ro` 下，显式传入 `--stage-size` 或 `--stage-dir` CLI 标志会报错并退出码 `2`；环境变量 `$BOWL_STAGE_SIZE` 与 `$BOWL_STAGE_DIR` 被忽略。客户端既不初始化暂存目录，也不启动后台上传工作协程。
+- **启动僵尸残留清理（`flock`）**：在 `--mode=staged` 启动阶段，客户端在 `--stage-dir` 下创建实例目录 `inst-<pid>-<hex>/` 并对 `.lock` 文件持有非阻塞排他 `flock`（`LOCK_EX | LOCK_NB`）。同时扫描既有的 `inst-*` 目录：凡能成功加锁的 `.lock`（或缺少 `.lock` 且对应 PID 已退出）以及根目录下散落的旧文件都会被 `os.RemoveAll` 清理，持锁运行中的活跃进程目录（返回 `EWOULDBLOCK`）保持不变。
+- **`tmpfs` 告警检测**：客户端通过 `statfs` 检测 `--stage-dir` 所在文件系统类型（Linux 下判定 `TMPFS_MAGIC`）。若暂存目录落在 `tmpfs` 上，日志输出 `stage_dir_on_tmpfs` 告警提示，因为 `tmpfs` 占用宿主内存而非磁盘空间。
 
 ### 客户端 FUSE 内核能力协商
 
@@ -25,7 +41,7 @@ Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块�
 
 - **开启 `CAP_HANDLE_KILLPRIV`**：允许存储引擎在 `Write` / `SetAttr` 批次中自行剥离 `security.capability` 与 `S_ISUID`/`S_ISGID`，消除内核每次写前探测 `GetXattr("security.capability")` 的跨机往返开销。
 - **禁用 `CAP_WRITEBACK_CACHE | CAP_AUTO_INVAL_DATA`**：
-  - 禁用 `CAP_WRITEBACK_CACHE` 以维持 1 MiB 写直通（或客户端 `WriteBehind` 顺序缓冲）语义，避免内核 4 KiB 脏页碎块回写与写前尺寸核对。
+  - 禁用 `CAP_WRITEBACK_CACHE` 以维持 1 MiB 请求粒度并交由客户端 `StageCoordinator` 在本地磁盘暂存合并，避免内核 4 KiB 脏页碎块回写与写前尺寸核对。
   - 禁用 `CAP_AUTO_INVAL_DATA`：因 SWMR 保证了同一挂载视图内无第三方并发写入，而服务端 Go 时钟与宿主机内核 `i_mtime` 存在毫秒级时钟偏差，禁止内核因 `mtime` 不等而误清整文件页缓存（文件长度变化仍由内核 `fuse_change_attributes` 自动淘汰越界页）。
 
 ---
@@ -106,8 +122,8 @@ sequenceDiagram
 1. **排空在途 FUSE 请求与本地脏数据（`RawFS.OnUnmount`）**：
    - 关闭本地文件锁表 `LockTable.Close()`，中断阻塞等待中的 `SetLkw`；
    - 获取 `lifecycleMu` 排他锁等待所有在途 FUSE 调用完成；
-   - 排空 `WriteBehind` 异步写队列，并对所有 `dirtyInodes` 逐一发起同步 `Fsync` 落盘；
-   - 清理本地句柄、缓存、临时匿名文件与预读表，排空 `ReclaimOrphan` 异步重试队列（上限 `2s` 等待）。
+   - 排空 `StageCoordinator` 本地磁盘暂存分片与在途上传任务，并对所有 `dirtyInodes` 逐一发起同步 `Fsync` 落盘；
+   - 清理本地句柄、缓存、未具名临时文件与预读表，关闭 `StageDirSession`（解锁并移除实例目录 `inst-<pid>-<hex>/`），排空 `ReclaimOrphan` 异步重试队列（上限 `2s` 等待）。
 2. **发送 `UnmountDisk` 释放租约**：`defaultServeFUSE` 退出阻塞后，调用 `unmountMountLease`（采用独立的 `context.Background()` 与 `3s` 超时预算，防止因进程退出主上下文取消而漏发 RPC），随后清除本地挂载元信息文件。
 3. **服务端幂等删除**：`control.UnmountDisk` 从 `activeMounts` 中删除 `(disk_id, mount_id)` 对应的租约；若磁盘已删除、租约早已过期或重复调用 `UnmountDisk`，均视为幂等成功直接返回 `UnmountDiskResponse{}`。
 

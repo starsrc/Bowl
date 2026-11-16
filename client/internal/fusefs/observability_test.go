@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -302,19 +301,27 @@ func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量�
 	require.Zero(t, srv.lookupCalls.Load()+srv.getAttrCalls.Load()+srv.readCalls.Load(), "虚拟统计文件不得产生任何远端存储 RPC")
 }
 
-func makeWriteBehindSpanGateHook(barrierOffset uint64, allInflightEntered, barrierFlushEntered chan struct{}, inflightGate, barrierGate <-chan struct{}) func(context.Context, *storagev1.WriteRequest) (uint32, error) {
-	var gateOnce, barOnce sync.Once
+func makeStageBPGateHook(targetInflight int32, entered chan<- struct{}, gate <-chan struct{}) func(context.Context, *storagev1.WriteRequest) (uint32, error) {
+	var once sync.Once
 	var enteredCount atomic.Int32
 	return func(_ context.Context, req *storagev1.WriteRequest) (uint32, error) {
-		if req.GetOffset() >= barrierOffset {
-			barOnce.Do(func() { close(barrierFlushEntered) })
-			<-barrierGate
-			return 0, nil
+		if req.GetOffset() < 8388608 {
+			if enteredCount.Add(1) == targetInflight {
+				once.Do(func() { close(entered) })
+			}
+			<-gate
 		}
-		if enteredCount.Add(1) == fusefs.WriteBehindMaxInFlight {
-			gateOnce.Do(func() { close(allInflightEntered) })
+		return 0, nil
+	}
+}
+
+func makeStageBarrierGateHook(holdOffset uint64, entered chan<- struct{}, gate <-chan struct{}) func(context.Context, *storagev1.WriteRequest) (uint32, error) {
+	var once sync.Once
+	return func(_ context.Context, req *storagev1.WriteRequest) (uint32, error) {
+		if req.GetOffset() >= holdOffset {
+			once.Do(func() { close(entered) })
+			<-gate
 		}
-		<-inflightGate
 		return 0, nil
 	}
 }
@@ -330,131 +337,150 @@ func makePrefetchGateReadHook(targetOffset uint64, prefetchReached chan struct{}
 	}
 }
 
-func makeTmpPrefixUnlinkFailHook() func(context.Context, *storagev1.UnlinkRequest) error {
-	return func(_ context.Context, req *storagev1.UnlinkRequest) error {
-		if strings.HasPrefix(string(req.GetName()), ".bowl-tmp-") {
-			return errors.New("injected unlink failure")
-		}
-		return nil
-	}
-}
+func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
+	t.Run("Lookup遇到ENOENT不将Span标记为Error", func(t *testing.T) {
+		// Given
+		tp, exp := newTestTracerProvider(t)
+		srv := newFakeStorage(t, withTTL(0, 0))
+		fs := newTestRawFS(t, srv, withTracerProvider(tp))
 
-func TestTracing_验证OTel根Span状态语义与分页同Trace及异步流水线与孤儿回收链路(t *testing.T) {
-	t.Run("fuse根Span覆盖EACCES报错与ENOENT非报错及ReadDirPlus分页同TraceID", func(t *testing.T) {
+		// When
+		var missOut fuse.EntryOut
+		st := fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "absent.txt", &missOut)
+
+		// Then
+		requireStatus(t, "Lookup 缺失文件", fuse.ENOENT, st)
+		lookupSpans := findSpansByName(exp.GetSpans(), "fuse.Lookup")
+		require.NotEmpty(t, lookupSpans)
+		require.NotEqual(t, codes.Error, lookupSpans[0].Status.Code, "预期业务 ENOENT 不得把 Span 标红为 Error")
+	})
+
+	t.Run("只读挂载拒绝Mkdir返回EROFS并将Span标记为Error", func(t *testing.T) {
+		// Given
+		tp, exp := newTestTracerProvider(t)
+		srv := newFakeStorage(t, withTTL(0, 0))
+		roFS := newTestRawFS(t, srv, withReadOnly(true), withTracerProvider(tp))
+
+		// When
+		var missOut fuse.EntryOut
+		st := roFS.Mkdir(nil, &fuse.MkdirIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Mode: 0o755}, "ro", &missOut)
+
+		// Then
+		requireStatus(t, "只读 Mkdir 返回 EROFS", fuse.Status(syscall.EROFS), st)
+		mkdirSpans := findSpansByName(exp.GetSpans(), "fuse.Mkdir")
+		require.NotEmpty(t, mkdirSpans)
+		require.Equal(t, codes.Error, mkdirSpans[0].Status.Code, "写入拒绝等系统错误必须将 Span 标记为 Error")
+	})
+
+	t.Run("600条目大目录ReadDirPlus多页拉取共享根Span唯一TraceID", func(t *testing.T) {
 		// Given
 		tp, exp := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(0, 0))
 		seedLargeDirectory(srv, 1, 600)
 		fs := newTestRawFS(t, srv, withTracerProvider(tp))
 
-		// When: 1. ENOENT Lookup 不得标记 Span Status=Error；EACCES（只读挂载 Mkdir）必须标记 Error
-		var missOut fuse.EntryOut
-		requireStatus(t, "Lookup 缺失文件", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "absent.txt", &missOut))
-		roFS := newTestRawFS(t, srv, withReadOnly(true), withTracerProvider(tp))
-		requireStatus(t, "只读 Mkdir 返回 EROFS", fuse.Status(syscall.EROFS), roFS.Mkdir(nil, &fuse.MkdirIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Mode: 0o755}, "ro", &missOut))
-
-		// 2. 600 条目目录单次 ReadDirPlus 内部多页（512 + 88）共享唯一 TraceID
+		// When
 		var dh fuse.OpenOut
 		requireStatus(t, "OpenDir", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}}, &dh))
 		buf := make([]byte, 128<<10)
-		requireStatus(t, "ReadDirPlus 首页加载全目录", fuse.OK, fs.ReadDirPlus(nil, &fuse.ReadIn{
+		st := fs.ReadDirPlus(nil, &fuse.ReadIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Fh: dh.Fh, Offset: 0, Size: uint32(len(buf)),
-		}, fuse.NewDirEntryList(buf, 0)))
+		}, fuse.NewDirEntryList(buf, 0))
 		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Fh: dh.Fh})
 
 		// Then
-		spans := exp.GetSpans()
-		lookupSpans := findSpansByName(spans, "fuse.Lookup")
-		require.NotEmpty(t, lookupSpans)
-		require.NotEqual(t, codes.Error, lookupSpans[0].Status.Code, "预期业务 ENOENT 不得把 Span 标红为 Error")
-
-		mkdirSpans := findSpansByName(spans, "fuse.Mkdir")
-		require.NotEmpty(t, mkdirSpans)
-		require.Equal(t, codes.Error, mkdirSpans[0].Status.Code, "写入拒绝等系统错误必须将 Span 标记为 Error")
-
+		requireStatus(t, "ReadDirPlus 首页加载全目录", fuse.OK, st)
 		rdpRPCs := srv.spansFor("ReadDirPlus")
 		require.Len(t, rdpRPCs, 2, "600 条目应分 512+88 两页拉取")
 		rdpTraceID := mustAllSpansShareSameTraceID(t, rdpRPCs, "ReadDirPlus 分页")
-		rdpRootSpans := findSpansByName(spans, "fuse.ReadDirPlus")
+		rdpRootSpans := findSpansByName(exp.GetSpans(), "fuse.ReadDirPlus")
 		require.NotEmpty(t, rdpRootSpans)
 		require.Equal(t, rdpTraceID, rdpRootSpans[0].SpanContext.TraceID())
 	})
 
-	t.Run("WriteBehind异步刷盘SpanLink与BackpressureWait及BarrierWait全链路观测", func(t *testing.T) {
-		// Given: 使用 SpanProcessor.OnStart 精准观测阻塞入口，零 sleep 完成 BackpressureWait 与 BarrierWait
+	t.Run("Stage异步上传Chunk记录独立SpanLink并观测BackpressureWait", func(t *testing.T) {
+		// Given
 		notifier := newSpanStartNotifier()
-		bpEntered := notifier.watch("write_behind.BackpressureWait")
-		barrierEntered := notifier.watch("write_behind.BarrierWait")
+		bpEntered := notifier.watch("stage.BackpressureWait")
 		tp, exp := newTestTracerProvider(t, notifier)
 
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
-		inflightGate := make(chan struct{})
+		inflightGate, unblockInflight := newTestGate()
+		defer unblockInflight()
 		allInflightEntered := make(chan struct{})
-		barrierGate := make(chan struct{})
-		barrierFlushEntered := make(chan struct{})
-		srv.writeHook = makeWriteBehindSpanGateHook(uint64(6)*uint64(fusefs.WriteBehindChunkSize), allInflightEntered, barrierFlushEntered, inflightGate, barrierGate)
+		srv.writeHook = makeStageBPGateHook(2, allInflightEntered, inflightGate)
 
-		fs := newTestRawFS(t, srv, withDirectIO(false), withTracerProvider(tp))
-		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "wb-trace.bin", syscall.O_RDWR, 0o644)
-		chunkPayload := buildRepeatingBytes(fusefs.WriteBehindChunkSize, 'W')
+		fs := newTestRawFS(t, srv, withDirectIO(false), withStageSize(8388608), withTracerProvider(tp))
+		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "bp-trace.bin", syscall.O_RDWR, 0o644)
+		chunkPayload := buildRepeatingBytes(4194304, 'W')
 
-		// When: 1. 通过 256 KiB 对齐小块写填满 4 个 4 MiB 槽位占满全部在途并发，
-		// 再写入第 5 块触发 BackpressureWait，确认进入后放行。
-		writeFullChunksViaAlignedFrames(t, fs, f.NodeId, f.Fh, 0, chunkPayload, fusefs.WriteBehindMaxInFlight)
+		// When
+		writeFullChunksViaAlignedFrames(t, fs, f.NodeId, f.Fh, 0, chunkPayload, 2)
 		<-allInflightEntered
 
-		fifthDone := make(chan fuse.Status, 1)
+		thirdDone := make(chan fuse.Status, 1)
 		go func() {
-			fifthDone <- writeFullChunkViaAlignedFramesStatus(
-				fs, f.NodeId, f.Fh,
-				uint64(fusefs.WriteBehindMaxInFlight)*uint64(fusefs.WriteBehindChunkSize),
-				chunkPayload,
-			)
+			thirdDone <- writeFullChunkViaAlignedFramesStatus(fs, f.NodeId, f.Fh, 8388608, chunkPayload)
 		}()
 		<-bpEntered
-		close(inflightGate)
-		requireStatus(t, "第5块写入完成", fuse.OK, waitUntilStatusChan(t, fifthDone, "第5块 Write"))
-
-		// 2. 再提交第 6、7 块使第 7 块在后台挂起（不持有 opMu），并发起 Read 触发 BarrierWait
-		writeFullChunksViaAlignedFrames(t, fs, f.NodeId, f.Fh, uint64(5)*uint64(fusefs.WriteBehindChunkSize), chunkPayload, 2)
-		<-barrierFlushEntered
-
-		barrierDone := make(chan fuse.Status, 1)
-		go func() {
-			_, st := fs.Read(nil, &fuse.ReadIn{
-				InHeader: fuse.InHeader{NodeId: f.NodeId},
-				Fh:       f.Fh,
-				Offset:   0,
-				Size:     64,
-			}, make([]byte, 64))
-			barrierDone <- st
-		}()
-		<-barrierEntered
-
-		close(barrierGate)
-		requireStatus(t, "屏障读完成", fuse.OK, waitUntilStatusChan(t, barrierDone, "BarrierWait Read"))
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+		unblockInflight()
 
 		// Then
+		requireStatus(t, "第3块写入完成", fuse.OK, waitUntilStatusChan(t, thirdDone, "第3块 Write"))
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+		fs.OnUnmount()
+
 		spans := exp.GetSpans()
-		flushSpans := findSpansByName(spans, "write_behind.FlushChunk")
-		bpSpans := findSpansByName(spans, "write_behind.BackpressureWait")
-		barSpans := findSpansByName(spans, "write_behind.BarrierWait")
-		require.NotEmpty(t, flushSpans, "必须记录 write_behind.FlushChunk 独立根 Span")
-		require.NotEmpty(t, flushSpans[0].Links, "write_behind.FlushChunk 必须携带关联触发写入请求的 SpanLink")
-		require.NotEmpty(t, bpSpans, "必须记录 write_behind.BackpressureWait")
-		require.NotEmpty(t, barSpans, "必须记录 write_behind.BarrierWait")
+		uploadSpans := findSpansByName(spans, "stage.UploadChunk")
+		bpSpans := findSpansByName(spans, "stage.BackpressureWait")
+		require.NotEmpty(t, uploadSpans, "必须记录 stage.UploadChunk 独立根 Span")
+		require.NotEmpty(t, uploadSpans[0].Links, "stage.UploadChunk 必须携带关联触发写入请求的 SpanLink")
+		require.NotEmpty(t, bpSpans, "必须记录 stage.BackpressureWait")
 	})
 
-	t.Run("ReadAhead异步预取Prefetch与WaitSpan及孤儿Unlink到ReclaimOrphanSpan传播", func(t *testing.T) {
+	t.Run("Stage挂起上传时Fsync触发BarrierWait阻塞等待", func(t *testing.T) {
+		// Given
+		notifier := newSpanStartNotifier()
+		barrierEntered := notifier.watch("stage.BarrierWait")
+		tp, exp := newTestTracerProvider(t, notifier)
+
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		barrierGate, unblockBarrier := newTestGate()
+		defer unblockBarrier()
+		barrierUploadEntered := make(chan struct{})
+		srv.writeHook = makeStageBarrierGateHook(8388608, barrierUploadEntered, barrierGate)
+
+		fs := newTestRawFS(t, srv, withDirectIO(false), withStageSize(16777216), withTracerProvider(tp))
+		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "bar-trace.bin", syscall.O_RDWR, 0o644)
+		chunkPayload := buildRepeatingBytes(4194304, 'B')
+		writeFullChunksViaAlignedFrames(t, fs, f.NodeId, f.Fh, 8388608, chunkPayload, 1)
+		<-barrierUploadEntered
+
+		// When
+		barrierDone := make(chan fuse.Status, 1)
+		go func() {
+			barrierDone <- fs.Fsync(nil, &fuse.FsyncIn{
+				InHeader: fuse.InHeader{NodeId: f.NodeId},
+				Fh:       f.Fh,
+			})
+		}()
+		<-barrierEntered
+		unblockBarrier()
+
+		// Then
+		requireStatus(t, "Fsync 屏障完成", fuse.OK, waitUntilStatusChan(t, barrierDone, "BarrierWait Fsync"))
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+		require.NotEmpty(t, findSpansByName(exp.GetSpans(), "stage.BarrierWait"), "必须记录 stage.BarrierWait")
+	})
+
+	t.Run("ReadAhead异步预取记录PrefetchSpanLink与Wait子Span", func(t *testing.T) {
 		// Given
 		notifier := newSpanStartNotifier()
 		waitEntered := notifier.watch("read_ahead.Wait")
 		tp, exp := newTestTracerProvider(t, notifier)
 
-		const size = 16 << 20
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		ino := srv.seedFile(1, "ra-trace.bin", 0o644, buildSeededBytes(size, 0x29))
+		ino := srv.seedFile(1, "ra-trace.bin", 0o644, buildSeededBytes(16777216, 0x29))
 
 		prefetchReached := make(chan struct{})
 		prefetchGate := make(chan struct{})
@@ -463,11 +489,10 @@ func TestTracing_验证OTel根Span状态语义与分页同Trace及异步流水�
 		fs := newTestRawFS(t, srv, withDirectIO(false), withTracerProvider(tp))
 		opened := mustOpenFile(t, fs, ino, syscall.O_RDWR)
 
-		// When: 1. 在首窗口（0..4MiB）连续步进读以稳定触发 offset=4MiB 的异步预取，
-		// 待 Prefetch 抵达 offset=4MiB 并挂起后，读 offset=4MiB 精准进入 read_ahead.Wait 阻塞等待。
-		_ = mustReadAt(t, fs, ino, opened.Fh, 0, 512<<10)
-		_ = mustReadAt(t, fs, ino, opened.Fh, 512<<10, 512<<10)
-		_ = mustReadAt(t, fs, ino, opened.Fh, 1024<<10, 512<<10)
+		// When
+		_ = mustReadAt(t, fs, ino, opened.Fh, 0, 524288)
+		_ = mustReadAt(t, fs, ino, opened.Fh, 524288, 524288)
+		_ = mustReadAt(t, fs, ino, opened.Fh, 1048576, 524288)
 		<-prefetchReached
 
 		waitReadDone := make(chan []byte, 1)
@@ -476,20 +501,31 @@ func TestTracing_验证OTel根Span状态语义与分页同Trace及异步流水�
 		}()
 		<-waitEntered
 		close(prefetchGate)
-		require.Len(t, <-waitReadDone, 4096)
-
-		// 2. Unlink 后 Release 孤儿回收传播有效的 TraceID
-		requireStatus(t, "Unlink 打开文件", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "ra-trace.bin"))
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
 		// Then
+		require.Len(t, <-waitReadDone, 4096)
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
+
 		spans := exp.GetSpans()
 		pfSpans := findSpansByName(spans, "read_ahead.Prefetch")
 		waitSpans := findSpansByName(spans, "read_ahead.Wait")
 		require.NotEmpty(t, pfSpans, "必须记录 read_ahead.Prefetch 根 Span")
 		require.NotEmpty(t, pfSpans[0].Links, "read_ahead.Prefetch 必须保留 SpanLink")
 		require.NotEmpty(t, waitSpans, "必须记录 read_ahead.Wait 子 Span")
+	})
 
+	t.Run("孤儿Unlink到Release异步ReclaimOrphan传播同一TraceID", func(t *testing.T) {
+		// Given
+		tp, _ := newTestTracerProvider(t)
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv, withTracerProvider(tp))
+		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan-trace.bin", syscall.O_RDWR, 0o644)
+
+		// When
+		requireStatus(t, "Unlink 打开文件", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orphan-trace.bin"))
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+
+		// Then
 		reclaimCtxs := srv.spansFor("ReclaimOrphan")
 		mustAllSpansShareSameTraceID(t, reclaimCtxs, "孤儿回收 ReclaimOrphan")
 	})
@@ -540,51 +576,64 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func TestStructuredLogging_验证unmountFsyncFailed与orphanBacklogged与tmpfileRollbackFailed(t *testing.T) {
-	t.Run("真实slogJSON记录unmount_fsync_failed与orphan_reclaim_backlogged与tmpfile_rollback_failed", func(t *testing.T) {
+func TestStructuredLogging_关键异常事件输出结构化JSON日志(t *testing.T) {
+	t.Run("OnUnmount遇到Fsync失败输出unmount_fsync_failed", func(t *testing.T) {
 		// Given
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-
-		// 1. 构造 OnUnmount 时 Fsync 失败 -> 记录 unmount_fsync_failed
 		srv.fsyncHook = func(context.Context, *storagev1.FsyncRequest) error {
 			return errnoError(connect.CodeInternal, "EIO")
 		}
-		fs1 := newTestRawFS(t, srv, withDirectIO(false), withLogger(logger))
-		dirty := mustCreateFile(t, fs1, fuse.FUSE_ROOT_ID, "dirty-fail.txt", syscall.O_RDWR, 0o644)
-		mustWriteAt(t, fs1, dirty.NodeId, dirty.Fh, 0, []byte("fail-on-unmount"))
-		fs1.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirty.NodeId}, Fh: dirty.Fh})
-		fs1.OnUnmount()
+		fs := newTestRawFS(t, srv, withDirectIO(false), withLogger(logger))
+		dirty := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "dirty-fail.txt", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, fs, dirty.NodeId, dirty.Fh, 0, []byte("fail-on-unmount"))
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirty.NodeId}, Fh: dirty.Fh})
 
-		// 2. 构造孤儿回收失败且阈值=1 -> 记录 orphan_reclaim_backlogged
-		srv.fsyncHook = nil
+		// When
+		fs.OnUnmount()
+
+		// Then
+		requireLogMsgPresent(t, logBuf.String(), "unmount_fsync_failed")
+	})
+
+	t.Run("孤儿回收瞬态失败达到积压阈值输出orphan_reclaim_backlogged", func(t *testing.T) {
+		// Given
+		var logBuf syncBuffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		srv.reclaimOrphanHook = func(context.Context, *storagev1.ReclaimOrphanRequest) error {
 			return errnoError(connect.CodeUnavailable, "EAGAIN")
 		}
-		fs2 := newTestRawFS(t, srv, withOrphanThreshold(1), withLogger(logger))
-		orp := mustCreateFile(t, fs2, fuse.FUSE_ROOT_ID, "orp-fail.txt", syscall.O_RDWR, 0o644)
-		requireStatus(t, "Unlink", fuse.OK, fs2.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orp-fail.txt"))
-		fs2.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: orp.NodeId}, Fh: orp.Fh})
+		fs := newTestRawFS(t, srv, withOrphanThreshold(1), withLogger(logger))
+		orp := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orp-fail.txt", syscall.O_RDWR, 0o644)
+		requireStatus(t, "Unlink", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orp-fail.txt"))
 
-		// 3. 构造匿名文件 Flush 上云时临时 Unlink 与回滚 Unlink 双失败 -> 记录 tmpfile_rollback_failed
-		srv.reclaimOrphanHook = nil
-		srv.unlinkHook = makeTmpPrefixUnlinkFailHook()
-		fs3 := newTestRawFS(t, srv, withLogger(logger))
-		var tmpOut fuse.CreateOut
-		requireStatus(t, "Tmpfile", fuse.OK, fs3.Tmpfile(nil, &fuse.CreateIn{
-			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Flags: uint32(syscall.O_RDWR), Mode: 0o600,
-		}, &tmpOut))
-		mustWriteAt(t, fs3, tmpOut.NodeId, tmpOut.Fh, 0, []byte("rollback-me"))
-		flushSt := fs3.Flush(nil, &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
-		require.NotEqual(t, fuse.OK, flushSt)
-		fs3.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
-		fs3.Forget(tmpOut.NodeId, 1)
+		// When
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: orp.NodeId}, Fh: orp.Fh})
 
 		// Then
-		out := logBuf.String()
-		requireLogMsgPresent(t, out, "unmount_fsync_failed")
-		requireLogMsgPresent(t, out, "orphan_reclaim_backlogged")
-		requireLogMsgPresent(t, out, "tmpfile_rollback_failed")
+		requireLogMsgPresent(t, logBuf.String(), "orphan_reclaim_backlogged")
+	})
+
+	t.Run("Stage后台上传遇到不可恢复ENOSPC输出stage_upload_failed", func(t *testing.T) {
+		// Given
+		var logBuf syncBuffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		srv.writeHook = func(context.Context, *storagev1.WriteRequest) (uint32, error) {
+			return 0, errnoError(connect.CodeResourceExhausted, "ENOSPC")
+		}
+		fs := newTestRawFS(t, srv, withLogger(logger))
+		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "stage-enospc.bin", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("fail-upload"))
+
+		// When
+		fsyncSt := fs.Fsync(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+
+		// Then
+		requireStatus(t, "Fsync ENOSPC", fuse.Status(syscall.ENOSPC), fsyncSt)
+		requireLogMsgPresent(t, logBuf.String(), "stage_upload_failed")
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 	})
 }

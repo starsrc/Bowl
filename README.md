@@ -38,7 +38,7 @@
 
 - **完整远程 POSIX 语义**：基于 `hanwen/go-fuse/v2` 与 `/dev/fuse` 暴露标准挂载点，支持常规随机读写、硬链接与符号链接、`rename2`（`RENAME_NOREPLACE` / `RENAME_EXCHANGE`）、`fallocate`（预分配与打洞）、`xattr`、`O_TMPFILE` 以及建议锁（`flock` / `fcntl`）。
 - **零拷贝 Fork、结构化 Diff 与三路 Merge**：基于不可变提交切面与全局血缘 DAG，瞬间完成 `bowl disk fork` 写时复制派生；支持文本补丁级 `diff --patch`、冲突预检 `merge --dry-run` 与策略裁决（`fail` / `ours` / `theirs` / `--resolve`）。
-- **单写者 Epoch 栅栏与软租约**：通过 PostgreSQL 18 持久化单调递增的 `writer_epoch` 与 `MountDisk` / `RenewMount` 软租约隔离陈旧写者（防止脑裂），同时支持多节点并发只读（`--ro`）挂载。
+- **单写者 Epoch 栅栏与软租约**：通过 PostgreSQL 18 持久化单调递增的 `writer_epoch` 与 `MountDisk` / `RenewMount` 软租约隔离陈旧写者（防止脑裂），同时支持多节点并发只读（`--mode ro`）挂载。
 - **双层存储架构**：全局元数据与血缘树存于 PostgreSQL 18；单盘文件系统与块数据由服务端 `StoreActor` 独占串行微批处理，底层基于 Pebble KV 与 64 MiB Append-Only `.pack` 数据容器（256 KiB 逻辑分块网格 + 64 MiB 热块缓存）实现高吞吐写入与在线压缩回收。
 - **多路分片传输与全链路可观测**：客户端采用 1 条元信息连接 + 8 条数据分片连接的 ConnectRPC HTTP/2（`h2c` / HTTPS）连接池；服务端内建 Prometheus `/metrics`、OpenTelemetry Tracing（Jaeger）与客户端 `.stats` 实时虚拟文件。
 
@@ -46,7 +46,7 @@
 
 - **AI Agent 沙箱工作区**：基于基线磁盘秒级 `fork` 独立工作区挂载进容器或沙箱，Agent 改坏直接丢弃分支盘，验证通过后 `diff --patch` 审查并 `merge` 回主盘。
 - **多分支隔离开发与测试**：在不重复拷贝数 GB 文件的前提下，为多个并行任务或测试流水线派生各自可写的 POSIX 磁盘分支。
-- **单写多读数据分发**：通过单个写入挂载生成基线或合并结果，多节点以 `--ro`（`epoch = 0`）只读挂载共享同一数据集。
+- **单写多读数据分发**：通过单个写入挂载生成基线或合并结果，多节点以 `--mode ro`（`epoch = 0`）只读挂载共享同一数据集。
 
 ## 系统架构
 
@@ -56,7 +56,7 @@ flowchart LR
 
     subgraph Client["客户端 (client / bowl)"]
         direction TB
-        FuseFS["fusefs (队列调度 · 句柄表 · 锁表 · 预读/回写 · 命名空间缓存)"]
+        FuseFS["fusefs (队列调度 · 句柄表 · 锁表 · 预读/本地磁盘暂存 · 命名空间缓存)"]
         RPCClient["rpc.Client (ConnectRPC HTTP/2: 1 元信息连接 + 8 数据分片连接)"]
         FuseFS --> RPCClient
     end
@@ -148,7 +148,7 @@ sync
 ./bin/bowl disk merge "$FEAT_DISK" --into "$MAIN_DISK"
 
 # 5. 验证结果并清理
-./bin/bowl mount "$MAIN_DISK" /mnt/bowl-main --ro
+./bin/bowl mount "$MAIN_DISK" /mnt/bowl-main --mode ro
 cat /mnt/bowl-main/config.env
 ./bin/bowl umount /mnt/bowl-main
 ./bin/bowl disk delete "$FEAT_DISK" -y
@@ -165,8 +165,8 @@ task down
 
 为了保持系统模型简洁并避免误用，以下边界已在设计与源码层面明确界定（详见 [能力全景](docs/01-overview/capabilities.md)）：
 
-- **单写者约束**：同一磁盘同一时刻只允许一个读写挂载（后发起的读写挂载会递增 `writer_epoch` 并隔离旧写者）；多节点共享请使用 `--ro` 只读挂载或 `fork` 派生分支。
-- **本地进程内句柄与锁**：打开句柄表、`flock` / `fcntl` 建议锁与 `O_TMPFILE` 状态维护在单个客户端进程内存中，不跨主机同步。
+- **单写者约束**：同一磁盘同一时刻只允许一个读写挂载（后发起的读写挂载会递增 `writer_epoch` 并隔离旧写者）；多节点共享请使用 `--mode ro` 只读挂载或 `fork` 派生分支。
+- **本地进程内句柄与锁**：打开句柄表、`flock` / `fcntl` 建议锁与未具名 `O_TMPFILE` 句柄状态维护在单个客户端实例本地（写暂存分片与匿名临时文件存放在 `--stage-dir` 宿主机磁盘），不跨主机同步。
 - **单节点数据面**：单盘的 `StoreActor`、Pebble 实例与 `.pack` 文件驻留在单个 `storage-service` 节点上，暂不支持跨节点分片与自动副本。
 - **FUSE 依赖 Linux 内核**：`bowl mount` / `umount` 需要 `/dev/fuse` 与 `fusermount3`；不支持 `RENAME_WHITEOUT`。
 - **服务端鉴权待补齐**：客户端已支持通过 `--token` / `$BOWL_TOKEN` 注入 Bearer Token，但服务端尚未内置鉴权拦截器，当前需依赖内网隔离或前端反代控制访问。

@@ -10,7 +10,7 @@ flowchart LR
 
     subgraph Client["客户端进程 (bowl mount)"]
         direction TB
-        FuseFS["fusefs (队列调度 · 句柄表 · 锁表 · 预读/回写 · 命名空间缓存)"]
+        FuseFS["fusefs (队列调度 · 句柄表 · 锁表 · 预读/本地磁盘暂存 · 命名空间缓存)"]
         ClientAdmin["本地 Loopback 管理面 (:0) & mountmeta (/run/bowl/mounts)"]
         RPCClient["rpc.Client (ConnectRPC HTTP/2: 1 元信息连接 + 8 数据分片连接)"]
         FuseFS --> RPCClient
@@ -80,4 +80,4 @@ Bowl 刻意避免将海量 POSIX 元数据（Inode、目录项、Xattr、Block �
 
 - [系统能力与边界](/01-overview/capabilities) —— 查看配额上限与明确的不支持项。
 - [Storage 控制面](/04-internals/storage-control-plane) 与 [Storage 存储引擎](/04-internals/storage-store-engine) —— 深入 PostgreSQL 事务状态机与 `StoreActor` 内部实现。
-- [Client FUSE 流水线](/04-internals/client-fuse-pipeline) —— 了解客户端异步预读/回写与缓存一致性设计。
+- [Client FUSE 流水线](/04-internals/client-fuse-pipeline) —— 了解客户端顺序预读、本地磁盘暂存异步上传与缓存一致性设计。

@@ -300,17 +300,19 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	snapPath := filepath.Join(mpA, "snapshot.txt")
 	require.NoError(t, os.WriteFile(snapPath, []byte("v1"), 0o644))
 
-	// When: 只读客户端挂载并发读，写操作返回 EROFS，且可实时读到客户端 A 新写入内容
-	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--ro", "--direct-io")
-	roData, err := os.ReadFile(filepath.Join(mpRO, "snapshot.txt"))
-	require.NoError(t, err)
-	require.Equal(t, []byte("v1"), roData)
+	// When: 只读客户端挂载并发读，写操作返回 EROFS，且可实时读到客户端 A 后台上传落盘的新内容
+	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--direct-io")
+	require.Eventually(t, func() bool {
+		roData, readErr := os.ReadFile(filepath.Join(mpRO, "snapshot.txt"))
+		return readErr == nil && string(roData) == "v1"
+	}, 5*time.Second, 20*time.Millisecond, "只读挂载必须读到客户端 A 写入的 snapshot.txt")
 	require.ErrorIs(t, os.WriteFile(filepath.Join(mpRO, "denied.txt"), []byte("x"), 0o644), syscall.EROFS)
 
 	require.NoError(t, os.WriteFile(filepath.Join(mpA, "live.txt"), []byte("live-from-A"), 0o644))
-	liveRO, err := os.ReadFile(filepath.Join(mpRO, "live.txt"))
-	require.NoError(t, err)
-	require.Equal(t, []byte("live-from-A"), liveRO)
+	require.Eventually(t, func() bool {
+		liveRO, readErr := os.ReadFile(filepath.Join(mpRO, "live.txt"))
+		return readErr == nil && string(liveRO) == "live-from-A"
+	}, 5*time.Second, 20*time.Millisecond, "只读挂载必须读到客户端 A 异步上传的 live.txt")
 	stopRO()
 
 	preOpenFile, err := os.OpenFile(filepath.Join(mpA, "preopened.txt"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
@@ -386,7 +388,12 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(parentMnt, "app"), 0o755))
 	baseCfg := []byte("{\"env\":\"staging\"}\n")
-	require.NoError(t, os.WriteFile(filepath.Join(parentMnt, "app", "config.json"), baseCfg, 0o644))
+	cfgF, err := os.OpenFile(filepath.Join(parentMnt, "app", "config.json"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	_, err = cfgF.Write(baseCfg)
+	require.NoError(t, err)
+	require.NoError(t, cfgF.Sync())
+	require.NoError(t, cfgF.Close())
 
 	largePayload := deterministicPayload("fork-shared-512k", 512*1024)
 	largeF, err := os.OpenFile(filepath.Join(parentMnt, "large.bin"), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)

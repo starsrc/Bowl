@@ -280,3 +280,198 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: child1ID}))
 	require.NoError(t, err)
 }
+
+// TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim verifies server-side
+// CreateTmpfile, Link promotion, exclusive rejection, ReclaimOrphan, and mount-time orphan cleanup.
+func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	client := testutil.NewStorageClient()
+
+	// Given: a freshly created and mounted disk.
+	created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     "e2e-live-tmpfile",
+		MaxBytes: 16 << 20,
+	}))
+	require.NoError(t, err)
+	diskID := created.Msg.GetDisk().GetDiskId()
+	registerDiskCleanup(t, client, diskID)
+
+	mount1, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	epoch1 := mount1.Msg.GetEpoch()
+	require.Equal(t, uint64(1), epoch1)
+
+	// When: creating a non-exclusive tmpfile, writing and reading data, and promoting it via Link.
+	linkableResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		DiskId:    diskID,
+		Epoch:     epoch1,
+		ParentIno: 1,
+		Mode:      0o100644,
+		Exclusive: false,
+	}))
+	require.NoError(t, err)
+	linkableIno := linkableResp.Msg.GetInode().GetIno()
+	require.NotZero(t, linkableIno)
+	require.Zero(t, linkableResp.Msg.GetInode().GetAttr().GetNlink())
+	require.Equal(t, uint32(0o100644), linkableResp.Msg.GetInode().GetAttr().GetMode())
+
+	linkablePayload := bytes.Repeat([]byte{0xA5}, 8192)
+	writeResp, err := client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    linkableIno,
+		Offset: 0,
+		Data:   linkablePayload,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint32(len(linkablePayload)), writeResp.Msg.GetSize())
+
+	readResp, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: diskID,
+		Ino:    linkableIno,
+		Offset: 0,
+		Size:   uint32(len(linkablePayload)),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, linkablePayload, readResp.Msg.GetData())
+
+	linkResp, err := client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
+		DiskId:       diskID,
+		Epoch:        epoch1,
+		Ino:          linkableIno,
+		NewParentIno: 1,
+		NewName:      []byte("promoted.bin"),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, linkableIno, linkResp.Msg.GetInode().GetIno())
+	require.Equal(t, uint32(1), linkResp.Msg.GetInode().GetAttr().GetNlink())
+
+	lookupResp, err := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+		DiskId:    diskID,
+		ParentIno: 1,
+		Name:      []byte("promoted.bin"),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, linkableIno, lookupResp.Msg.GetInode().GetIno())
+	require.Equal(t, uint32(1), lookupResp.Msg.GetInode().GetAttr().GetNlink())
+	require.Equal(t, uint64(len(linkablePayload)), lookupResp.Msg.GetInode().GetAttr().GetSize())
+
+	statPromoted, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(linkablePayload)), statPromoted.Msg.GetUsedBytes())
+	require.Equal(t, uint64(2), statPromoted.Msg.GetFiles())
+
+	// When: creating an exclusive tmpfile, writing data, rejecting Link, and reclaiming via ReclaimOrphan.
+	exclResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		DiskId:    diskID,
+		Epoch:     epoch1,
+		ParentIno: 1,
+		Mode:      0o100600,
+		Exclusive: true,
+	}))
+	require.NoError(t, err)
+	exclIno := exclResp.Msg.GetInode().GetIno()
+	require.NotZero(t, exclIno)
+	require.Zero(t, exclResp.Msg.GetInode().GetAttr().GetNlink())
+
+	exclPayload := bytes.Repeat([]byte{0x5B}, 4096)
+	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    exclIno,
+		Offset: 0,
+		Data:   exclPayload,
+	}))
+	require.NoError(t, err)
+
+	statWithExcl, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(linkablePayload)+len(exclPayload)), statWithExcl.Msg.GetUsedBytes())
+	require.Equal(t, uint64(3), statWithExcl.Msg.GetFiles())
+
+	_, linkExclErr := client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
+		DiskId:       diskID,
+		Epoch:        epoch1,
+		Ino:          exclIno,
+		NewParentIno: 1,
+		NewName:      []byte("exclusive.bin"),
+	}))
+	testutil.RequireConnectError(t, linkExclErr, connect.CodeNotFound, "ENOENT")
+
+	_, err = client.ReclaimOrphan(ctx, connect.NewRequest(&storagev1.ReclaimOrphanRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    exclIno,
+	}))
+	require.NoError(t, err)
+
+	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
+		DiskId: diskID,
+		Ino:    exclIno,
+	}))
+	testutil.RequireConnectError(t, err, connect.CodeNotFound, "ENOENT")
+
+	statReclaimed, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(linkablePayload)), statReclaimed.Msg.GetUsedBytes())
+	require.Equal(t, uint64(2), statReclaimed.Msg.GetFiles())
+
+	// When: creating a lingering unpromoted tmpfile with data and advancing the writer epoch.
+	lingeringResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		DiskId:    diskID,
+		Epoch:     epoch1,
+		ParentIno: 1,
+		Mode:      0o100600,
+		Exclusive: false,
+	}))
+	require.NoError(t, err)
+	lingeringIno := lingeringResp.Msg.GetInode().GetIno()
+	require.NotZero(t, lingeringIno)
+
+	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Epoch:  epoch1,
+		Ino:    lingeringIno,
+		Offset: 0,
+		Data:   bytes.Repeat([]byte{0x7C}, 2048),
+	}))
+	require.NoError(t, err)
+
+	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
+
+	// Then: the lingering tmpfile is cleaned while the promoted file data remains intact.
+	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
+		DiskId: diskID,
+		Ino:    lingeringIno,
+	}))
+	testutil.RequireConnectError(t, err, connect.CodeNotFound, "ENOENT")
+
+	statFinal, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Ino:    1,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(linkablePayload)), statFinal.Msg.GetUsedBytes())
+	require.Equal(t, uint64(2), statFinal.Msg.GetFiles())
+
+	promotedRead, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: diskID,
+		Ino:    linkableIno,
+		Offset: 0,
+		Size:   uint32(len(linkablePayload)),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, linkablePayload, promotedRead.Msg.GetData())
+}

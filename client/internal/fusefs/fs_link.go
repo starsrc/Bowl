@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"syscall"
 	"time"
 
@@ -158,7 +159,8 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	defer unlock()
 
 	epoch := fs.cache.version()
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	detachedCtx := context.WithoutCancel(opCtx)
+	ctx, cancelFunc := fs.RPCContextFrom(detachedCtx, nil)
 	defer cancelFunc()
 
 	resp, err := fs.client.Link(ctx, connect.NewRequest(&storagev1.LinkRequest{
@@ -169,7 +171,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 		Epoch:        fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err, nil)
 	}
 	if fs.clearOrphan(input.Oldnodeid) {
 		fs.metrics.incTmpPromote()

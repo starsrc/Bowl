@@ -49,7 +49,7 @@ func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, no
 }
 
 // Tmpfile creates an anonymous temporary file via local staging in staged mode or StorageService.CreateTmpfile in sync mode.
-func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
+func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpTmpfile)
 	opCtx, endSpan := fs.startFuseOp(OpTmpfile)
 	defer func() {
@@ -74,7 +74,7 @@ func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 	if !fs.cfg.IsStaged() {
-		return fs.tmpfileSync(opCtx, cancel, parentIno, input, out)
+		return fs.tmpfileSync(opCtx, parentIno, input, out)
 	}
 	ino, inode, status := fs.tmpMgr.Create(input.NodeId, input.Uid, input.Gid, input.Mode, input.Flags)
 	if status != fuse.OK {
@@ -95,9 +95,10 @@ func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse
 	return fuse.OK
 }
 
-func (fs *RawFS) tmpfileSync(opCtx context.Context, cancel <-chan struct{}, parentIno uint64, input *fuse.CreateIn, out *fuse.CreateOut) fuse.Status {
+func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fuse.CreateIn, out *fuse.CreateOut) fuse.Status {
 	epoch := fs.cache.version()
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	detachedCtx := context.WithoutCancel(opCtx)
+	ctx, cancelFunc := fs.RPCContextFrom(detachedCtx, nil)
 	defer cancelFunc()
 	resp, err := fs.client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		ParentIno: parentIno,
@@ -109,7 +110,7 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, cancel <-chan struct{}, pare
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err, nil)
 	}
 	inode := resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil || inode.GetIno() == 0 {

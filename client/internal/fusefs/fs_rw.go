@@ -159,14 +159,6 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		return 0, fuse.EBADF
 	}
 
-	if cancel != nil {
-		select {
-		case <-cancel:
-			return 0, fuse.EINTR
-		default:
-		}
-	}
-
 	appendMode := handle.Flags&syscall.O_APPEND != 0
 	if n, local, st := fs.tmpMgr.Write(input.NodeId, input.Offset, data, appendMode); local {
 		return n, st
@@ -186,7 +178,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			fs.cache.invalidateInode(input.NodeId)
 			return 0, fs.stageErrToStatus(flushErr)
 		}
-		cached, st := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
+		cached, st := fs.getInodeWithContext(context.WithoutCancel(opCtx), nil, input.NodeId)
 		if st != fuse.OK {
 			return 0, st
 		}
@@ -247,13 +239,10 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 
 	var totalWritten uint32
 	for totalWritten < uint32(dataLen) {
-		if cancel != nil {
+		if totalWritten > 0 && cancel != nil {
 			select {
 			case <-cancel:
-				if totalWritten > 0 {
-					return totalWritten, fuse.OK
-				}
-				return 0, fuse.EINTR
+				return totalWritten, fuse.OK
 			default:
 			}
 		}

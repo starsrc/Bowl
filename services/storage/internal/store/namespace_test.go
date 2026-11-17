@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -512,4 +513,604 @@ func TestGivenQuotaLimitsWhenExceededOnCreateOrSymlinkThenReturnsErrNoSpace(t *t
 	})
 	// Then: 返回 ErrNoSpace
 	require.ErrorIsf(t, err, store.ErrNoSpace, "超出 MaxInodes 配额应返回 ErrNoSpace: got=%v", err)
+}
+
+func TestGivenLiveDirectoryWhenCreateTmpfileCalledThenAllocatesUnlinkedOrphanWithoutDirEntry(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	now := time.Unix(1_700_000_000, 0)
+	actor := openTestActor(t, &store.Options{
+		Dir:    dir,
+		DiskID: "create-tmpfile-live",
+		Now:    func() time.Time { return now },
+	})
+
+	// Given: an S_ISGID directory and a plain directory at an initial timestamp.
+	sgidDir, err := actor.Mkdir(ctx, store.MkdirReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("sgid"),
+		Mode:      store.S_IFDIR | store.S_ISGID | 0o755,
+		UID:       1000,
+		GID:       2000,
+	})
+	require.NoErrorf(t, err, "setup mkdir sgid failed")
+
+	rootBefore, err := actor.GetAttr(ctx, store.RootIno)
+	require.NoErrorf(t, err, "setup getattr root failed")
+
+	now = now.Add(5 * time.Second)
+
+	// When: creating a linkable tmpfile inside the S_ISGID directory and an exclusive tmpfile under root.
+	linkable, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: sgidDir.Ino,
+		Mode:      store.S_IFREG | 0o666,
+		Umask:     0o022,
+		UID:       1001,
+		GID:       3000,
+		Exclusive: false,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile linkable failed")
+
+	exclusive, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      0o640,
+		Umask:     0o027,
+		UID:       1002,
+		GID:       3001,
+		Exclusive: true,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile exclusive failed")
+
+	// Then: both tmpfiles have Nlink=0, masked regular modes, expected GID inheritance, and no directory entry.
+	require.Equalf(t, store.S_IFREG|0o644, linkable.Mode, "linkable mode mismatch: want=%o got=%o", store.S_IFREG|0o644, linkable.Mode)
+	require.Zerof(t, linkable.Nlink, "linkable Nlink mismatch: want=0 got=%d", linkable.Nlink)
+	require.Zerof(t, linkable.ParentIno, "linkable ParentIno mismatch: want=0 got=%d", linkable.ParentIno)
+	require.Zerof(t, linkable.Size, "linkable Size mismatch: want=0 got=%d", linkable.Size)
+	require.Zerof(t, linkable.Flags, "linkable Flags mismatch: want=0 got=%d", linkable.Flags)
+	require.Equalf(t, uint64(1), linkable.Generation, "linkable Generation mismatch: want=1 got=%d", linkable.Generation)
+	require.Equalf(t, uint32(1001), linkable.UID, "linkable UID mismatch: want=1001 got=%d", linkable.UID)
+	require.Equalf(t, uint32(2000), linkable.GID, "linkable S_ISGID inherited GID mismatch: want=2000 got=%d", linkable.GID)
+	require.Equalf(t, now.UnixNano(), linkable.Mtime, "linkable Mtime mismatch: want=%d got=%d", now.UnixNano(), linkable.Mtime)
+
+	require.Equalf(t, store.S_IFREG|0o640, exclusive.Mode, "exclusive mode mismatch: want=%o got=%o", store.S_IFREG|0o640, exclusive.Mode)
+	require.Zerof(t, exclusive.Nlink, "exclusive Nlink mismatch: want=0 got=%d", exclusive.Nlink)
+	require.Zerof(t, exclusive.ParentIno, "exclusive ParentIno mismatch: want=0 got=%d", exclusive.ParentIno)
+	require.Equalf(t, uint32(3001), exclusive.GID, "exclusive GID mismatch: want=3001 got=%d", exclusive.GID)
+
+	sgidAfter, err := actor.GetAttr(ctx, sgidDir.Ino)
+	require.NoErrorf(t, err, "getattr sgid after CreateTmpfile failed")
+	require.Equalf(t, sgidDir.Mtime, sgidAfter.Mtime, "parent Mtime changed on CreateTmpfile: want=%d got=%d", sgidDir.Mtime, sgidAfter.Mtime)
+	require.Equalf(t, sgidDir.WriteSeq, sgidAfter.WriteSeq, "parent WriteSeq changed on CreateTmpfile: want=%d got=%d", sgidDir.WriteSeq, sgidAfter.WriteSeq)
+
+	rootAfter, err := actor.GetAttr(ctx, store.RootIno)
+	require.NoErrorf(t, err, "getattr root after CreateTmpfile failed")
+	require.Equalf(t, rootBefore.Mtime, rootAfter.Mtime, "root Mtime changed on CreateTmpfile: want=%d got=%d", rootBefore.Mtime, rootAfter.Mtime)
+
+	hasOrphans, err := actor.HasOrphans()
+	require.NoErrorf(t, err, "HasOrphans failed")
+	require.Truef(t, hasOrphans, "HasOrphans must be true after CreateTmpfile: want=true got=%v", hasOrphans)
+
+	st, err := actor.StatFS(ctx)
+	require.NoErrorf(t, err, "StatFS failed")
+	require.Equalf(t, uint64(4), st.Files, "StatFS Files mismatch: want=4 got=%d", st.Files)
+	require.Zerof(t, st.UsedBytes, "StatFS UsedBytes mismatch: want=0 got=%d", st.UsedBytes)
+
+	sgidEntries, err := actor.ReadDir(ctx, sgidDir.Ino, 0, 16)
+	require.NoErrorf(t, err, "ReadDir sgid failed")
+	requireDirEntryNames(t, sgidEntries, []string{".", ".."})
+
+	rootEntries, err := actor.ReadDirPlus(ctx, store.RootIno, 0, 16)
+	require.NoErrorf(t, err, "ReadDirPlus root failed")
+	requireDirEntryPlusNames(t, rootEntries, []string{".", "..", "sgid"})
+
+	// Reopen verifies tmpfile attributes and orphan state persist cleanly.
+	require.NoErrorf(t, actor.Close(), "Close actor failed")
+	reopened := openTestActor(t, &store.Options{Dir: dir, DiskID: "create-tmpfile-live"})
+
+	gotLinkable, err := reopened.GetAttr(ctx, linkable.Ino)
+	require.NoErrorf(t, err, "reopened GetAttr linkable failed")
+	require.Zerof(t, gotLinkable.Nlink, "reopened linkable Nlink mismatch: want=0 got=%d", gotLinkable.Nlink)
+	require.Equalf(t, linkable.Mode, gotLinkable.Mode, "reopened linkable Mode mismatch: want=%o got=%o", linkable.Mode, gotLinkable.Mode)
+
+	gotExclusive, err := reopened.GetAttr(ctx, exclusive.Ino)
+	require.NoErrorf(t, err, "reopened GetAttr exclusive failed")
+	require.Zerof(t, gotExclusive.Nlink, "reopened exclusive Nlink mismatch: want=0 got=%d", gotExclusive.Nlink)
+
+	reopenOrphans, err := reopened.HasOrphans()
+	require.NoErrorf(t, err, "reopened HasOrphans failed")
+	require.Truef(t, reopenOrphans, "reopened HasOrphans must be true")
+}
+
+func TestGivenInvalidStateOrArgsWhenCreateTmpfileCalledThenReturnsExpectedErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	actor := openTestActor(t, &store.Options{
+		Dir:       dir,
+		DiskID:    "create-tmpfile-errors",
+		MaxInodes: 5,
+	})
+
+	// Given: a regular file, a removed directory, an unlinked open-handle directory, and an advanced writer epoch.
+	regFile, err := actor.Create(ctx, store.CreateReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("file.txt"),
+		Mode:      store.S_IFREG | 0o644,
+	})
+	require.NoErrorf(t, err, "setup create file failed")
+
+	removedDir, err := actor.Mkdir(ctx, store.MkdirReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("gone"),
+		Mode:      store.S_IFDIR | 0o755,
+	})
+	require.NoErrorf(t, err, "setup mkdir gone failed")
+	require.NoErrorf(t, actor.Rmdir(ctx, store.RootIno, []byte("gone")), "setup rmdir gone failed")
+
+	newEpoch, _, err := actor.AdvanceEpoch(ctx)
+	require.NoErrorf(t, err, "setup advance epoch failed")
+
+	unlinkedDir, err := actor.Mkdir(ctx, store.MkdirReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("unlinked-dir"),
+		Mode:      store.S_IFDIR | 0o755,
+		Epoch:     newEpoch,
+	})
+	require.NoErrorf(t, err, "setup mkdir unlinked-dir failed")
+	_, err = actor.Mkdir(ctx, store.MkdirReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("repl-dir"),
+		Mode:      store.S_IFDIR | 0o755,
+		Epoch:     newEpoch,
+	})
+	require.NoErrorf(t, err, "setup mkdir repl-dir failed")
+	require.NoErrorf(t, actor.Rename(ctx, store.RenameReq{
+		OldParentIno:     store.RootIno,
+		OldName:          []byte("repl-dir"),
+		NewParentIno:     store.RootIno,
+		NewName:          []byte("unlinked-dir"),
+		TargetOpenHandle: true,
+		Epoch:            newEpoch,
+	}), "setup overwrite unlinked-dir failed")
+
+	// When & Then: invalid inputs and state return the expected domain errors.
+	cases := []struct {
+		name string
+		req  store.CreateTmpfileReq
+		want error
+	}{
+		{
+			name: "stale_epoch_zero",
+			req:  store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: 0},
+			want: store.ErrStaleEpoch,
+		},
+		{
+			name: "future_epoch",
+			req:  store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch + 1},
+			want: store.ErrStaleEpoch,
+		},
+		{
+			name: "zero_parent_ino",
+			req:  store.CreateTmpfileReq{ParentIno: 0, Mode: 0o600, Epoch: newEpoch},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "overflow_parent_ino",
+			req:  store.CreateTmpfileReq{ParentIno: uint64(math.MaxInt64) + 1, Mode: 0o600, Epoch: newEpoch},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "mode_above_max",
+			req:  store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o200000, Epoch: newEpoch},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "directory_mode",
+			req:  store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: store.S_IFDIR | 0o755, Epoch: newEpoch},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "symlink_mode",
+			req:  store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: store.S_IFLNK | 0o777, Epoch: newEpoch},
+			want: store.ErrInvalid,
+		},
+		{
+			name: "missing_parent",
+			req:  store.CreateTmpfileReq{ParentIno: 999999, Mode: 0o600, Epoch: newEpoch},
+			want: store.ErrNotFound,
+		},
+		{
+			name: "removed_parent",
+			req:  store.CreateTmpfileReq{ParentIno: removedDir.Ino, Mode: 0o600, Epoch: newEpoch},
+			want: store.ErrNotFound,
+		},
+		{
+			name: "unlinked_parent",
+			req:  store.CreateTmpfileReq{ParentIno: unlinkedDir.Ino, Mode: 0o600, Epoch: newEpoch},
+			want: store.ErrNotFound,
+		},
+		{
+			name: "non_dir_parent",
+			req:  store.CreateTmpfileReq{ParentIno: regFile.Ino, Mode: 0o600, Epoch: newEpoch},
+			want: store.ErrNotDir,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, gotErr := actor.CreateTmpfile(ctx, tc.req)
+			require.ErrorIsf(t, gotErr, tc.want, "case %s: want=%v got=%v", tc.name, tc.want, gotErr)
+		})
+	}
+
+	// When: filling remaining MaxInodes=5 quota (root=1, file.txt=2, unlinkedDir=3, replDir=4), the fifth inode succeeds and sixth hits ErrNoSpace.
+	_, err = actor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
+	require.NoErrorf(t, err, "tmpfile within MaxInodes=5 quota failed")
+	_, err = actor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
+	require.ErrorIsf(t, err, store.ErrNoSpace, "tmpfile exceeding MaxInodes must return ErrNoSpace: got=%v", err)
+
+	// When: closed or read-only actor receives CreateTmpfile, lifecycle errors are returned.
+	require.NoErrorf(t, actor.Close(), "close actor failed")
+	_, err = actor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
+	require.ErrorIsf(t, err, store.ErrClosed, "closed CreateTmpfile must return ErrClosed: got=%v", err)
+
+	roActor := openTestActor(t, &store.Options{Dir: dir, DiskID: "create-tmpfile-ro", ReadOnly: true})
+	_, err = roActor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
+	require.ErrorIsf(t, err, store.ErrReadOnly, "read-only CreateTmpfile must return ErrReadOnly: got=%v", err)
+}
+
+func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContractsHold(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		exclusive bool
+		pattern   byte
+	}{
+		{
+			name:      "linkable_tmpfile",
+			exclusive: false,
+			pattern:   0x41,
+		},
+		{
+			name:      "exclusive_tmpfile",
+			exclusive: true,
+			pattern:   0x51,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given: an actor capped at 2 * BlobSize and an unpromoted tmpfile.
+			actor := openTestActor(t, &store.Options{
+				DiskID:   "tmpfile-io-" + tc.name,
+				MaxBytes: 2 * store.BlobSize,
+			})
+			tmp, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+				ParentIno: store.RootIno,
+				Mode:      store.S_IFREG | 0o644,
+				Exclusive: tc.exclusive,
+			})
+			require.NoErrorf(t, err, "case %s: CreateTmpfile failed", tc.name)
+
+			// When: performing a full-block write followed by an unaligned partial write.
+			fullBlock := bytes.Repeat([]byte{tc.pattern}, store.BlobSize)
+			n1, attr1, err := actor.Write(ctx, tmp.Ino, 0, fullBlock)
+			require.NoErrorf(t, err, "case %s: full-block Write failed", tc.name)
+			require.Equalf(t, uint32(store.BlobSize), n1, "case %s: full-block write count mismatch: want=%d got=%d", tc.name, store.BlobSize, n1)
+			require.Equalf(t, uint64(store.BlobSize), attr1.Size, "case %s: size after full-block Write mismatch: want=%d got=%d", tc.name, store.BlobSize, attr1.Size)
+
+			partBlock := bytes.Repeat([]byte{tc.pattern + 1}, 512)
+			n2, attr2, err := actor.Write(ctx, tmp.Ino, store.BlobSize+64, partBlock)
+			require.NoErrorf(t, err, "case %s: partial Write failed", tc.name)
+			require.Equalf(t, uint32(512), n2, "case %s: partial write count mismatch: want=512 got=%d", tc.name, n2)
+			require.Equalf(t, uint64(store.BlobSize+576), attr2.Size, "case %s: size after partial Write mismatch: want=%d got=%d", tc.name, store.BlobSize+576, attr2.Size)
+
+			// Then: reading across the block boundary preserves data and the sparse gap.
+			gotSpan, err := actor.Read(ctx, tmp.Ino, store.BlobSize-16, 592)
+			require.NoErrorf(t, err, "case %s: Read across boundary failed", tc.name)
+			wantSpan := make([]byte, 592)
+			copy(wantSpan[:16], bytes.Repeat([]byte{tc.pattern}, 16))
+			copy(wantSpan[80:], partBlock)
+			require.Equalf(t, wantSpan, gotSpan, "case %s: readback mismatch across block boundary", tc.name)
+
+			// When: extending, preallocating with keep-size, and punching a hole via Fallocate.
+			require.NoErrorf(t, actor.Fallocate(ctx, tmp.Ino, store.BlobSize+576, 1024, 0), "case %s: Fallocate(0) failed", tc.name)
+			afterAlloc, err := actor.GetAttr(ctx, tmp.Ino)
+			require.NoErrorf(t, err, "case %s: GetAttr after Fallocate(0) failed", tc.name)
+			require.Equalf(t, uint64(store.BlobSize+1600), afterAlloc.Size, "case %s: size after Fallocate(0) mismatch: want=%d got=%d", tc.name, store.BlobSize+1600, afterAlloc.Size)
+
+			require.NoErrorf(t, actor.Fallocate(ctx, tmp.Ino, store.BlobSize+1600, 1024, store.FallocKeepSize), "case %s: Fallocate(KeepSize) failed", tc.name)
+			afterKeep, err := actor.GetAttr(ctx, tmp.Ino)
+			require.NoErrorf(t, err, "case %s: GetAttr after Fallocate(KeepSize) failed", tc.name)
+			require.Equalf(t, uint64(store.BlobSize+1600), afterKeep.Size, "case %s: size after Fallocate(KeepSize) mismatch: want=%d got=%d", tc.name, store.BlobSize+1600, afterKeep.Size)
+
+			require.NoErrorf(t, actor.Fallocate(ctx, tmp.Ino, 512, 1024, store.FallocPunchHole|store.FallocKeepSize), "case %s: Fallocate(PunchHole) failed", tc.name)
+			gotHole, err := actor.Read(ctx, tmp.Ino, 500, 1048)
+			require.NoErrorf(t, err, "case %s: Read punched hole failed", tc.name)
+			wantHole := make([]byte, 1048)
+			copy(wantHole[:12], bytes.Repeat([]byte{tc.pattern}, 12))
+			copy(wantHole[1036:], bytes.Repeat([]byte{tc.pattern}, 12))
+			require.Equalf(t, wantHole, gotHole, "case %s: punched hole bytes mismatch", tc.name)
+
+			// When: modifying Flags, Mode, UID, and GID via SetAttr and appending at EOF.
+			appendFlag := store.FlagAppend
+			_, err = actor.SetAttr(ctx, tmp.Ino, store.SetAttrReq{Flags: &appendFlag})
+			require.NoErrorf(t, err, "case %s: SetAttr FlagAppend failed", tc.name)
+			_, _, err = actor.Write(ctx, tmp.Ino, 0, []byte("denied"))
+			require.ErrorIsf(t, err, store.ErrPerm, "case %s: non-EOF Write under FlagAppend must return ErrPerm: got=%v", tc.name, err)
+
+			tail := bytes.Repeat([]byte{tc.pattern + 2}, 16)
+			_, attrAppended, err := actor.Write(ctx, tmp.Ino, store.BlobSize+1600, tail)
+			require.NoErrorf(t, err, "case %s: EOF Write under FlagAppend failed", tc.name)
+			require.Equalf(t, uint64(store.BlobSize+1616), attrAppended.Size, "case %s: size after EOF append mismatch: want=%d got=%d", tc.name, store.BlobSize+1616, attrAppended.Size)
+
+			newMode := uint32(0o600)
+			newUID := uint32(2222)
+			newGID := uint32(3333)
+			zeroFlags := uint32(0)
+			attrUpdated, err := actor.SetAttr(ctx, tmp.Ino, store.SetAttrReq{
+				Mode:  &newMode,
+				UID:   &newUID,
+				GID:   &newGID,
+				Flags: &zeroFlags,
+			})
+			require.NoErrorf(t, err, "case %s: SetAttr owner/mode/clear flags failed", tc.name)
+			require.Equalf(t, store.S_IFREG|0o600, attrUpdated.Mode, "case %s: updated Mode mismatch: want=%o got=%o", tc.name, store.S_IFREG|0o600, attrUpdated.Mode)
+			require.Equalf(t, uint32(2222), attrUpdated.UID, "case %s: updated UID mismatch: want=2222 got=%d", tc.name, attrUpdated.UID)
+			require.Equalf(t, uint32(3333), attrUpdated.GID, "case %s: updated GID mismatch: want=3333 got=%d", tc.name, attrUpdated.GID)
+			require.Zerof(t, attrUpdated.Flags, "case %s: cleared Flags mismatch: want=0 got=%d", tc.name, attrUpdated.Flags)
+			require.Zerof(t, attrUpdated.Nlink, "case %s: tmpfile Nlink must remain 0: got=%d", tc.name, attrUpdated.Nlink)
+
+			// When: exceeding MaxBytes logical quota, Write rejects with ErrNoSpace and leaves accounting unchanged.
+			_, _, err = actor.Write(ctx, tmp.Ino, store.BlobSize+1616, bytes.Repeat([]byte{0x77}, store.BlobSize))
+			require.ErrorIsf(t, err, store.ErrNoSpace, "case %s: Write exceeding MaxBytes must return ErrNoSpace: got=%v", tc.name, err)
+
+			st, err := actor.StatFS(ctx)
+			require.NoErrorf(t, err, "case %s: StatFS failed", tc.name)
+			require.Equalf(t, uint64(store.BlobSize+1616), st.UsedBytes, "case %s: StatFS UsedBytes mismatch: want=%d got=%d", tc.name, store.BlobSize+1616, st.UsedBytes)
+
+			// When: flushing via Fsync, WAL dirty flag clears.
+			require.NoErrorf(t, actor.Fsync(ctx, tmp.Ino), "case %s: Fsync on tmpfile failed", tc.name)
+			require.Falsef(t, actor.WALDirty(), "case %s: WALDirty must be false after Fsync", tc.name)
+		})
+	}
+}
+
+func TestGivenExclusiveTmpfileOrUnlinkedOrphanWhenLinkCalledThenReturnsErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	actor := openTestActor(t, &store.Options{DiskID: "link-reject-orphans"})
+
+	// Given: an exclusive tmpfile (0x02), an unlinked open-handle file (0x01), and a rename-overwritten open-handle file (0x01).
+	exclusiveTmp, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o600,
+		Exclusive: true,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile exclusive failed")
+
+	unlinkedFile, err := actor.Create(ctx, store.CreateReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("unlinked.bin"),
+		Mode:      store.S_IFREG | 0o644,
+	})
+	require.NoErrorf(t, err, "Create unlinked.bin failed")
+	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("unlinked.bin"), true), "Unlink openHandle failed")
+
+	overwrittenFile, err := actor.Create(ctx, store.CreateReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("target.bin"),
+		Mode:      store.S_IFREG | 0o644,
+	})
+	require.NoErrorf(t, err, "Create target.bin failed")
+	_, err = actor.Create(ctx, store.CreateReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("src.bin"),
+		Mode:      store.S_IFREG | 0o644,
+	})
+	require.NoErrorf(t, err, "Create src.bin failed")
+	require.NoErrorf(t, actor.Rename(ctx, store.RenameReq{
+		OldParentIno:     store.RootIno,
+		OldName:          []byte("src.bin"),
+		NewParentIno:     store.RootIno,
+		NewName:          []byte("target.bin"),
+		TargetOpenHandle: true,
+	}), "Rename overwrite openHandle failed")
+
+	unlinkedFIFO, err := actor.Mknod(ctx, store.MknodReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("fifo.pipe"),
+		Mode:      store.S_IFIFO | 0o600,
+	})
+	require.NoErrorf(t, err, "Mknod fifo.pipe failed")
+	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("fifo.pipe"), true), "Unlink fifo.pipe openHandle failed")
+
+	// When & Then: Link rejects exclusive tmpfiles and unlinked orphans before and after SetAttr flag changes.
+	cases := []struct {
+		name string
+		ino  uint64
+	}{
+		{name: "exclusive_tmpfile", ino: exclusiveTmp.Ino},
+		{name: "unlinked_open_orphan", ino: unlinkedFile.Ino},
+		{name: "rename_overwritten_orphan", ino: overwrittenFile.Ino},
+		{name: "unlinked_fifo_orphan", ino: unlinkedFIFO.Ino},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, linkErr := actor.Link(ctx, store.LinkReq{
+				Ino:          tc.ino,
+				NewParentIno: store.RootIno,
+				NewName:      []byte("link-" + tc.name),
+			})
+			require.ErrorIsf(t, linkErr, store.ErrNotFound, "case %s: initial Link must fail with ErrNotFound: got=%v", tc.name, linkErr)
+
+			appendFlag := store.FlagAppend
+			_, setErr := actor.SetAttr(ctx, tc.ino, store.SetAttrReq{Flags: &appendFlag})
+			require.NoErrorf(t, setErr, "case %s: SetAttr FlagAppend failed", tc.name)
+
+			_, linkAfterFlagErr := actor.Link(ctx, store.LinkReq{
+				Ino:          tc.ino,
+				NewParentIno: store.RootIno,
+				NewName:      []byte("link-after-flag-" + tc.name),
+			})
+			require.ErrorIsf(t, linkAfterFlagErr, store.ErrNotFound, "case %s: Link after FlagAppend must fail with ErrNotFound: got=%v", tc.name, linkAfterFlagErr)
+
+			zeroFlag := uint32(0)
+			_, clearErr := actor.SetAttr(ctx, tc.ino, store.SetAttrReq{Flags: &zeroFlag})
+			require.NoErrorf(t, clearErr, "case %s: SetAttr clear flags failed", tc.name)
+
+			_, linkAfterClearErr := actor.Link(ctx, store.LinkReq{
+				Ino:          tc.ino,
+				NewParentIno: store.RootIno,
+				NewName:      []byte("link-after-clear-" + tc.name),
+			})
+			require.ErrorIsf(t, linkAfterClearErr, store.ErrNotFound, "case %s: Link after clearing flags must fail with ErrNotFound: got=%v", tc.name, linkAfterClearErr)
+
+			_, _, lookupErr := actor.Lookup(ctx, store.RootIno, []byte("link-"+tc.name))
+			require.ErrorIsf(t, lookupErr, store.ErrNotFound, "case %s: rejected link entry must not exist", tc.name)
+		})
+	}
+}
+
+func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksRelinkAfterUnlink(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	now := time.Unix(1_700_000_000, 0)
+	actor := openTestActor(t, &store.Options{
+		Dir:       dir,
+		DiskID:    "tmpfile-promote",
+		AtimeMode: store.AtimeModeStrictAtime,
+		Now:       func() time.Time { return now },
+	})
+
+	// Given: an existing entry and a linkable tmpfile (0x03) with full-block writes, hole punching, xattr, flags toggled, and dirtyAtime.
+	_, err := actor.Create(ctx, store.CreateReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("occupied.bin"),
+		Mode:      store.S_IFREG | 0o644,
+	})
+	require.NoErrorf(t, err, "setup create occupied.bin failed")
+
+	tmp, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o644,
+		Exclusive: false,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile linkable failed")
+
+	_, _, err = actor.Write(ctx, tmp.Ino, 0, bytes.Repeat([]byte{0x61}, store.BlobSize))
+	require.NoErrorf(t, err, "full-block Write on tmpfile failed")
+	_, _, err = actor.Write(ctx, tmp.Ino, store.BlobSize+128, bytes.Repeat([]byte{0x62}, 256))
+	require.NoErrorf(t, err, "partial Write on tmpfile failed")
+	require.NoErrorf(t, actor.Fallocate(ctx, tmp.Ino, 512, 1024, store.FallocPunchHole|store.FallocKeepSize), "Fallocate PunchHole failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, tmp.Ino, []byte("user.role"), []byte("staged"), 0), "SetXattr failed")
+
+	appendFlag := store.FlagAppend
+	_, err = actor.SetAttr(ctx, tmp.Ino, store.SetAttrReq{Flags: &appendFlag})
+	require.NoErrorf(t, err, "SetAttr FlagAppend failed")
+	zeroFlag := uint32(0)
+	_, err = actor.SetAttr(ctx, tmp.Ino, store.SetAttrReq{Flags: &zeroFlag})
+	require.NoErrorf(t, err, "SetAttr clear flags failed")
+
+	now = now.Add(10 * time.Second)
+	dirtyReadTime := now.UnixNano()
+	_, err = actor.Read(ctx, tmp.Ino, 0, 4)
+	require.NoErrorf(t, err, "Read for dirtyAtime failed")
+
+	// Linking onto an existing name must fail without promoting the tmpfile.
+	_, err = actor.Link(ctx, store.LinkReq{
+		Ino:          tmp.Ino,
+		NewParentIno: store.RootIno,
+		NewName:      []byte("occupied.bin"),
+	})
+	require.ErrorIsf(t, err, store.ErrExist, "Link onto existing name must return ErrExist: got=%v", err)
+
+	stBefore, err := actor.StatFS(ctx)
+	require.NoErrorf(t, err, "StatFS before promotion failed")
+
+	// When: promoting the linkable tmpfile into the namespace via Link.
+	now = now.Add(2 * time.Second)
+	promotedAttr, err := actor.Link(ctx, store.LinkReq{
+		Ino:          tmp.Ino,
+		NewParentIno: store.RootIno,
+		NewName:      []byte("promoted.bin"),
+	})
+	require.NoErrorf(t, err, "Link promotion on linkable tmpfile failed")
+
+	// Then: Nlink becomes 1, orphan marker clears, StatFS counts stay unchanged, and namespace/data/xattr match.
+	require.Equalf(t, uint32(1), promotedAttr.Nlink, "promoted Nlink mismatch: want=1 got=%d", promotedAttr.Nlink)
+	require.Equalf(t, tmp.Ino, promotedAttr.Ino, "promoted Ino mismatch: want=%d got=%d", tmp.Ino, promotedAttr.Ino)
+	require.Equalf(t, uint64(store.BlobSize+384), promotedAttr.Size, "promoted Size mismatch: want=%d got=%d", store.BlobSize+384, promotedAttr.Size)
+	require.Equalf(t, dirtyReadTime, promotedAttr.Atime, "promoted Atime must reflect overlaid dirtyAtime: want=%d got=%d", dirtyReadTime, promotedAttr.Atime)
+	require.Equalf(t, now.UnixNano(), promotedAttr.Ctime, "promoted Ctime mismatch: want=%d got=%d", now.UnixNano(), promotedAttr.Ctime)
+
+	hasOrphans, err := actor.HasOrphans()
+	require.NoErrorf(t, err, "HasOrphans after promotion failed")
+	require.Falsef(t, hasOrphans, "HasOrphans must be false after promotion: got=%v", hasOrphans)
+
+	stAfter, err := actor.StatFS(ctx)
+	require.NoErrorf(t, err, "StatFS after promotion failed")
+	require.Equalf(t, stBefore.Files, stAfter.Files, "StatFS Files must not change on promotion: want=%d got=%d", stBefore.Files, stAfter.Files)
+	require.Equalf(t, stBefore.UsedBytes, stAfter.UsedBytes, "StatFS UsedBytes must not change on promotion: want=%d got=%d", stBefore.UsedBytes, stAfter.UsedBytes)
+
+	entry, lookedUp, err := actor.Lookup(ctx, store.RootIno, []byte("promoted.bin"))
+	require.NoErrorf(t, err, "Lookup promoted.bin failed")
+	require.Equalf(t, tmp.Ino, entry.Ino, "Lookup Ino mismatch: want=%d got=%d", tmp.Ino, entry.Ino)
+	require.Equalf(t, uint32(1), lookedUp.Nlink, "Lookup Nlink mismatch: want=1 got=%d", lookedUp.Nlink)
+
+	dirEntries, err := actor.ReadDir(ctx, store.RootIno, 0, 16)
+	require.NoErrorf(t, err, "ReadDir root failed")
+	requireDirEntryNames(t, dirEntries, []string{".", "..", "occupied.bin", "promoted.bin"})
+
+	gotPayload, err := actor.Read(ctx, tmp.Ino, 0, store.BlobSize+384)
+	require.NoErrorf(t, err, "Read promoted payload failed")
+	wantPayload := make([]byte, store.BlobSize+384)
+	copy(wantPayload[:store.BlobSize], bytes.Repeat([]byte{0x61}, store.BlobSize))
+	clear(wantPayload[512:1536])
+	copy(wantPayload[store.BlobSize+128:], bytes.Repeat([]byte{0x62}, 256))
+	require.Equalf(t, wantPayload, gotPayload, "promoted sparse payload mismatch")
+
+	gotXattr, err := actor.GetXattr(ctx, tmp.Ino, []byte("user.role"))
+	require.NoErrorf(t, err, "GetXattr after promotion failed")
+	require.Equalf(t, []byte("staged"), gotXattr, "xattr mismatch: want=staged got=%q", string(gotXattr))
+
+	// When: creating a second hardlink and checking orphan operations on the live promoted file.
+	secondAttr, err := actor.Link(ctx, store.LinkReq{
+		Ino:          tmp.Ino,
+		NewParentIno: store.RootIno,
+		NewName:      []byte("second.bin"),
+	})
+	require.NoErrorf(t, err, "second Link failed")
+	require.Equalf(t, uint32(2), secondAttr.Nlink, "second Link Nlink mismatch: want=2 got=%d", secondAttr.Nlink)
+
+	require.ErrorIsf(t, actor.PurgeOrphanInode(ctx, tmp.Ino), store.ErrInvalid, "PurgeOrphanInode on promoted live file must return ErrInvalid")
+	require.NoErrorf(t, actor.CleanOrphans(ctx), "CleanOrphans failed")
+	_, stillThere, err := actor.Lookup(ctx, store.RootIno, []byte("promoted.bin"))
+	require.NoErrorf(t, err, "promoted.bin must survive CleanOrphans")
+	require.Equalf(t, uint32(2), stillThere.Nlink, "Nlink after CleanOrphans mismatch: want=2 got=%d", stillThere.Nlink)
+
+	// When: unlinking both links with the last unlink keeping an open handle (writes 0x01 orphan marker).
+	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("second.bin"), false), "Unlink second.bin failed")
+	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("promoted.bin"), true), "Unlink promoted.bin openHandle failed")
+
+	hasOrphansAfterUnlink, err := actor.HasOrphans()
+	require.NoErrorf(t, err, "HasOrphans after open-handle unlink failed")
+	require.Truef(t, hasOrphansAfterUnlink, "HasOrphans must be true after open-handle unlink")
+
+	_, err = actor.Link(ctx, store.LinkReq{
+		Ino:          tmp.Ino,
+		NewParentIno: store.RootIno,
+		NewName:      []byte("relink.bin"),
+	})
+	require.ErrorIsf(t, err, store.ErrNotFound, "re-linking unlinked open-handle orphan must return ErrNotFound: got=%v", err)
+
+	// Reopen confirms unlinked orphan blocks re-linking across restarts.
+	require.NoErrorf(t, actor.Close(), "Close actor failed")
+	reopened := openTestActor(t, &store.Options{Dir: dir, DiskID: "tmpfile-promote"})
+	_, err = reopened.Link(ctx, store.LinkReq{
+		Ino:          tmp.Ino,
+		NewParentIno: store.RootIno,
+		NewName:      []byte("relink.bin"),
+	})
+	require.ErrorIsf(t, err, store.ErrNotFound, "reopened re-link of unlinked orphan must return ErrNotFound: got=%v", err)
 }

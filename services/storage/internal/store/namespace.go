@@ -48,6 +48,17 @@ type CreateReq struct {
 	Epoch     uint64
 }
 
+// CreateTmpfileReq defines parameters for creating an anonymous temporary regular file.
+type CreateTmpfileReq struct {
+	ParentIno uint64
+	Mode      uint32
+	UID       uint32
+	GID       uint32
+	Umask     uint32
+	Exclusive bool
+	Epoch     uint64
+}
+
 // SymlinkReq 定义 Symlink 符号链接创建参数。
 type SymlinkReq struct {
 	ParentIno uint64
@@ -93,6 +104,18 @@ type createNodeOp struct {
 	target    []byte
 
 	// Phase A 校验缓存至 Phase B
+	parent Inode
+	attr   Attribute
+}
+
+type createTmpfileOp struct {
+	parentIno uint64
+	mode      uint32
+	uid       uint32
+	gid       uint32
+	exclusive bool
+
+	// Phase A validation cached for Phase B.
 	parent Inode
 	attr   Attribute
 }
@@ -196,6 +219,17 @@ func (s *StoreActor) Mkdir(ctx context.Context, req MkdirReq) (Attribute, error)
 	})
 }
 
+func resolveRegCreateMode(mode, umask uint32) (uint32, error) {
+	if mode > 0o177777 {
+		return 0, ErrInvalid
+	}
+	modeType := mode & S_IFMT
+	if modeType != 0 && modeType != S_IFREG {
+		return 0, ErrInvalid
+	}
+	return S_IFREG | ((mode & PermMask) &^ (umask & 0o777)), nil
+}
+
 // Create 在 Actor 双阶段循环内创建常规文件节点。
 func (s *StoreActor) Create(ctx context.Context, req CreateReq) (Attribute, error) {
 	if s.readOnly {
@@ -210,18 +244,14 @@ func (s *StoreActor) Create(ctx context.Context, req CreateReq) (Attribute, erro
 	if err := validateEntryName(req.Name); err != nil {
 		return Attribute{}, err
 	}
-	if req.Mode > 0o177777 {
-		return Attribute{}, ErrInvalid
-	}
 	if (req.Flags & O_TMPFILE) != 0 {
 		return Attribute{}, ErrInvalid
 	}
-	modeType := req.Mode & S_IFMT
-	if modeType != 0 && modeType != S_IFREG {
-		return Attribute{}, ErrInvalid
+	effMode, err := resolveRegCreateMode(req.Mode, req.Umask)
+	if err != nil {
+		return Attribute{}, err
 	}
 
-	effMode := S_IFREG | ((req.Mode & PermMask) &^ (req.Umask & 0o777))
 	return s.submitCreateNode(ctx, opCreate, req.Epoch, &createNodeOp{
 		parentIno: req.ParentIno,
 		name:      req.Name,
@@ -229,6 +259,39 @@ func (s *StoreActor) Create(ctx context.Context, req CreateReq) (Attribute, erro
 		uid:       req.UID,
 		gid:       req.GID,
 	})
+}
+
+// CreateTmpfile allocates an unlinked regular-file inode and writes its orphan marker.
+func (s *StoreActor) CreateTmpfile(ctx context.Context, req CreateTmpfileReq) (Attribute, error) {
+	if s.readOnly {
+		return Attribute{}, ErrReadOnly
+	}
+	if s.isDefinitelyStaleEpoch(req.Epoch) {
+		return Attribute{}, s.submitStaleEpoch(ctx, opCreateTmpfile, req.Epoch)
+	}
+	if err := validateNodeIno(req.ParentIno); err != nil {
+		return Attribute{}, err
+	}
+	effMode, err := resolveRegCreateMode(req.Mode, req.Umask)
+	if err != nil {
+		return Attribute{}, err
+	}
+
+	op := &createTmpfileOp{
+		parentIno: req.ParentIno,
+		mode:      effMode,
+		uid:       req.UID,
+		gid:       req.GID,
+		exclusive: req.Exclusive,
+	}
+	cmd := s.acquireCmd()
+	cmd.op = opCreateTmpfile
+	cmd.epoch = req.Epoch
+	cmd.req = op
+	if err := s.submit(ctx, cmd); err != nil {
+		return Attribute{}, err
+	}
+	return op.attr, nil
 }
 
 // Symlink 在 Actor 双阶段循环内创建符号链接节点。
@@ -431,6 +494,65 @@ func (s *StoreActor) mutateCreateNodeCmd(cmd *writeCmd) {
 	op.attr = child.ToAttribute()
 }
 
+func (s *StoreActor) validateCreateTmpfileCmd(cmd *writeCmd) error {
+	op, _ := cmd.req.(*createTmpfileOp)
+	if s.stat.NextWriteSeq == math.MaxUint64 || s.stat.Inodes == math.MaxUint64 {
+		return ErrNoSpace
+	}
+	parent, err := s.readLiveDir(s.batch, op.parentIno)
+	if err != nil {
+		return err
+	}
+	if err := s.checkQuota(0, 1); err != nil {
+		return err
+	}
+	if _, err := s.prepareIno(cmd.spanCtx); err != nil {
+		return err
+	}
+	op.parent = parent
+	return nil
+}
+
+func (s *StoreActor) mutateCreateTmpfileCmd(cmd *writeCmd) {
+	op, _ := cmd.req.(*createTmpfileOp)
+	ino := s.consumeIno()
+	seq := s.stat.NextWriteSeq + 1
+	s.stat.NextWriteSeq = seq
+	nowNano := s.now().UnixNano()
+
+	gid := op.gid
+	if op.parent.Mode&S_ISGID != 0 {
+		gid = op.parent.GID
+	}
+
+	child := Inode{
+		Ino:        ino,
+		ParentIno:  0,
+		Mode:       op.mode,
+		Nlink:      0,
+		UID:        op.uid,
+		GID:        gid,
+		Size:       0,
+		Atime:      nowNano,
+		Mtime:      nowNano,
+		Ctime:      nowNano,
+		Flags:      0,
+		Generation: 1,
+		WriteSeq:   seq,
+	}
+
+	s.stat.Inodes++
+	_ = BatchSetInodeDeferred(s.batch, child)
+
+	orphanKind := OrphanKindTmpfileLinkable
+	if op.exclusive {
+		orphanKind = OrphanKindTmpfileExclusive
+	}
+	BatchSetOrphanKindDeferred(s.batch, ino, orphanKind)
+
+	op.attr = child.ToAttribute()
+}
+
 func (s *StoreActor) validateLinkCmd(cmd *writeCmd) error {
 	op, _ := cmd.req.(*linkNodeOp)
 	if s.stat.NextWriteSeq == math.MaxUint64 {
@@ -451,7 +573,16 @@ func (s *StoreActor) validateLinkCmd(cmd *writeCmd) error {
 		return ErrTooManyLinks
 	}
 	if target.Nlink == 0 {
-		return ErrNotFound
+		if target.Mode&S_IFMT != S_IFREG {
+			return ErrNotFound
+		}
+		kind, hasOrphan, orphanErr := s.readOrphanKind(s.batch, op.ino)
+		if orphanErr != nil {
+			return orphanErr
+		}
+		if !hasOrphan || kind != OrphanKindTmpfileLinkable {
+			return ErrNotFound
+		}
 	}
 	if err := s.checkEntryNotExists(s.batch, op.newParentIno, op.newName); err != nil {
 		return err
@@ -467,6 +598,7 @@ func (s *StoreActor) mutateLinkCmd(cmd *writeCmd) {
 	s.stat.NextWriteSeq = seq
 	nowNano := s.now().UnixNano()
 
+	promoteOrphan := op.target.Nlink == 0
 	op.target.Nlink++
 	op.target.Ctime = nowNano
 	op.target.WriteSeq = seq
@@ -481,7 +613,11 @@ func (s *StoreActor) mutateLinkCmd(cmd *writeCmd) {
 		Ino:  op.target.Ino,
 		Mode: op.target.Mode,
 	})
+	if promoteOrphan {
+		BatchDeleteOrphanDeferred(s.batch, op.target.Ino)
+	}
 
+	s.overlayAtime(&op.target)
 	op.attr = op.target.ToAttribute()
 }
 

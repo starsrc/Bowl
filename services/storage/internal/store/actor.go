@@ -51,6 +51,7 @@ const (
 	opMknod
 	opMkdir
 	opCreate
+	opCreateTmpfile
 	opSymlink
 	opLink
 	opUnlink
@@ -83,6 +84,8 @@ func (op opKind) String() string {
 		return "mkdir"
 	case opCreate:
 		return "create"
+	case opCreateTmpfile:
+		return "create_tmpfile"
 	case opSymlink:
 		return "symlink"
 	case opLink:
@@ -1389,7 +1392,7 @@ func (s *StoreActor) processTick() {
 
 func isExternalWriteOp(op opKind) bool {
 	switch op {
-	case opMknod, opMkdir, opCreate, opSymlink, opLink,
+	case opMknod, opMkdir, opCreate, opCreateTmpfile, opSymlink, opLink,
 		opUnlink, opRmdir, opRename,
 		opSetAttr, opSetXattr, opRemoveXattr,
 		opWrite, opFallocate,
@@ -1431,6 +1434,8 @@ func (s *StoreActor) validateCmd(cmd *writeCmd) error {
 	switch cmd.op {
 	case opMknod, opMkdir, opCreate, opSymlink:
 		return s.validateCreateNodeCmd(cmd)
+	case opCreateTmpfile:
+		return s.validateCreateTmpfileCmd(cmd)
 	case opLink:
 		return s.validateLinkCmd(cmd)
 	case opUnlink:
@@ -1476,6 +1481,8 @@ func (s *StoreActor) mutateCmd(cmd *writeCmd) {
 	switch cmd.op {
 	case opMknod, opMkdir, opCreate, opSymlink:
 		s.mutateCreateNodeCmd(cmd)
+	case opCreateTmpfile:
+		s.mutateCreateTmpfileCmd(cmd)
 	case opLink:
 		s.mutateLinkCmd(cmd)
 	case opUnlink:

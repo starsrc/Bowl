@@ -141,7 +141,7 @@ func TestMkdir与Mknod_创建节点可查询并拦截重名超长与只读挂载
 	t.Run("只读挂载拦截Mkdir与Mknod并返回EROFS", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t)
-		fs := newTestRawFS(t, srv, withReadOnly(true))
+		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var entryOut fuse.EntryOut
 
 		// When
@@ -265,7 +265,7 @@ func TestSymlink与Link_硬链接共享节点计数并拦截目录链接与只�
 		// Given
 		srv := newFakeStorage(t)
 		ino := srv.seedFile(1, "target.txt", 0o644, []byte("x"))
-		fs := newTestRawFS(t, srv, withReadOnly(true))
+		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var out fuse.EntryOut
 
 		// When

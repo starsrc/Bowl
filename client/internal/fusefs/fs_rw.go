@@ -193,7 +193,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		copyInput := *input
 		copyInput.Offset = cached.inode.GetAttr().GetSize()
 		input = &copyInput
-	case syncMode || specialInode || !fs.caps.knownAbsent(input.NodeId) || dataLen == 0 || dataLen > MaxRPCChunkSize:
+	case fs.stage == nil || syncMode || specialInode || !fs.caps.knownAbsent(input.NodeId) || dataLen == 0 || dataLen > MaxRPCChunkSize:
 		if flushErr := fs.stage.FlushAndResetInodeForHandle(opCtx, input.Fh, ino); flushErr != nil {
 			fs.cache.invalidateInode(input.NodeId)
 			return 0, fs.stageErrToStatus(flushErr)

@@ -40,7 +40,7 @@ const mountUsageHelp = `用法:
   -f, --foreground               前台阻塞模式运行，输出日志到标准错误并响应 SIGINT/SIGTERM 退出
   --log-file string              日志文件路径 (仅用于后台守护模式)
   --allow-other                  允许本机其他非 root 用户访问挂载点
-  --mode string                  挂载模式: staged|ro (默认读取 $BOWL_MOUNT_MODE 或 staged)
+  --mode string                  挂载模式: staged|sync|ro (默认读取 $BOWL_MOUNT_MODE 或 staged)
   --stage-size string            本地暂存区容量上限，最小 4MiB (默认读取 $BOWL_STAGE_SIZE 或 512MiB)
   --stage-dir string             本地暂存根目录 (默认读取 $BOWL_STAGE_DIR 或 /var/tmp/bowl-stage)
   --direct-io                    绕过内核页缓存直通数据
@@ -73,7 +73,6 @@ type mountOptions struct {
 	mode             string
 	stageSizeRaw     string
 	stageDirRaw      string
-	readOnly         bool
 	stageSizeBytes   uint64
 	stageDir         string
 }
@@ -116,7 +115,7 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 
 	resp, err := client.MountDisk(rpcCtx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId:   baseCfg.DiskID,
-		ReadOnly: baseCfg.ReadOnly,
+		ReadOnly: baseCfg.IsReadOnly(),
 	}))
 	if err != nil {
 		if connectErr, ok := errors.AsType[*connect.Error](err); ok && connectErr.Code() == connect.CodeNotFound {
@@ -131,7 +130,7 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 	}
 
 	epoch := resp.Msg.GetEpoch()
-	if !baseCfg.ReadOnly && epoch == 0 {
+	if !baseCfg.IsReadOnly() && epoch == 0 {
 		return nil, mountLeaseInfo{}, errors.New("服务端未返回有效的写挂载世代号")
 	}
 
@@ -179,7 +178,7 @@ func startMountLeaseRenewer(
 			resp, err := client.RenewMount(rpcCtx, connect.NewRequest(&storagev1.RenewMountRequest{
 				DiskId:   cfg.DiskID,
 				MountId:  lease.mountID,
-				ReadOnly: cfg.ReadOnly,
+				ReadOnly: cfg.IsReadOnly(),
 				Epoch:    cfg.Epoch,
 			}))
 			rpcCancel()
@@ -304,7 +303,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	}()
 
 	var stageSession *fusefs.StageDirSession
-	if !baseCfg.ReadOnly {
+	if baseCfg.IsStaged() {
 		var stageErr error
 		stageSession, stageErr = fusefs.OpenStageDirSession(baseCfg.StageDir)
 		if stageErr != nil {
@@ -337,7 +336,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	cfg.Logger = logger
 	cfg.Metrics = fusefs.NewMetrics()
 	cfg.TracerProvider = obs.TracerProvider()
-	if !cfg.ReadOnly {
+	if cfg.IsStaged() {
 		cfg.StageSession = stageSession
 		if cfg.StageSize == 0 {
 			cfg.StageSize = fusefs.DefaultStageSize
@@ -492,21 +491,31 @@ func applyStageOptions(o *mountOptions, set mountFlagPresence) error {
 			o.mode = env
 		}
 	}
-	switch strings.ToLower(strings.TrimSpace(o.mode)) {
-	case fusefs.MountModeStaged:
-		o.readOnly = false
-	case fusefs.MountModeRO:
-		o.readOnly = true
+	mode := strings.ToLower(strings.TrimSpace(o.mode))
+	switch mode {
+	case fusefs.MountModeStaged, fusefs.MountModeSync, fusefs.MountModeRO:
+		o.mode = mode
 	default:
-		return fmt.Errorf("无效的 --mode %q，可选 %s|%s", o.mode, fusefs.MountModeStaged, fusefs.MountModeRO)
+		return fmt.Errorf("无效的 --mode %q，可选 %s|%s|%s", o.mode, fusefs.MountModeStaged, fusefs.MountModeSync, fusefs.MountModeRO)
 	}
 
-	if o.readOnly {
+	switch o.mode {
+	case fusefs.MountModeRO:
 		if set.stageSize {
 			return errors.New("--mode ro 只读模式下不能指定 --stage-size")
 		}
 		if set.stageDir {
 			return errors.New("--mode ro 只读模式下不能指定 --stage-dir")
+		}
+		o.stageSizeBytes = 0
+		o.stageDir = ""
+		return nil
+	case fusefs.MountModeSync:
+		if set.stageSize {
+			return errors.New("--mode sync 同步直通模式下不能指定 --stage-size")
+		}
+		if set.stageDir {
+			return errors.New("--mode sync 同步直通模式下不能指定 --stage-dir")
 		}
 		o.stageSizeBytes = 0
 		o.stageDir = ""
@@ -754,7 +763,7 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	if !opts.readOnly {
+	if opts.mode == fusefs.MountModeStaged {
 		if stageErr := validateStageDirMountpoint(opts.stageDir, absMountpoint); stageErr != nil {
 			fmt.Fprintf(stderr, "错误: %v\n", stageErr)
 			return 2
@@ -782,7 +791,7 @@ func executeMount(args []string, stdout, stderr io.Writer) int {
 
 	baseCfg := fusefs.Config{
 		DiskID:          diskIDStr,
-		ReadOnly:        opts.readOnly,
+		Mode:            opts.mode,
 		DirectIO:        directIO,
 		AllowOther:      allowOther,
 		Debug:           debug,

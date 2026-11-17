@@ -180,7 +180,7 @@ func TestMount_Help_GivenHelpFlag_PrintsUpdatedUsageWithoutLegacyRO(t *testing.T
 			require.Equal(t, 0, code, "scene=mount_help flag=%s want=0 got=%d stderr=%s", tc.flag, code, errOut)
 			require.Empty(t, errOut)
 			require.Contains(t, out, "bowl mount <disk-id> <mountpoint>")
-			require.Contains(t, out, "--mode")
+			require.Contains(t, out, "staged|sync|ro")
 			require.Contains(t, out, "--stage-size")
 			require.Contains(t, out, "--stage-dir")
 			require.NotContains(t, out, "--ro")
@@ -216,10 +216,12 @@ func TestMount_Validation_GivenInvalidFlagsOrArgs_Exits2(t *testing.T) {
 		{name: "InvalidLogLevel", args: []string{"mount", testDiskID1, validMP, "--log-level", "verbose"}, wantSubstr: "无效的 --log-level"},
 		{name: "InvalidLogFormat", args: []string{"mount", testDiskID1, validMP, "--log-format", "yaml"}, wantSubstr: "无效的 --log-format"},
 		{name: "InvalidAdminAddr", args: []string{"mount", testDiskID1, validMP, "--admin-addr", "bad-addr"}, wantSubstr: "无效的 --admin-addr"},
-		{name: "InvalidModeSync", args: []string{"mount", testDiskID1, validMP, "--mode", "sync"}, wantSubstr: "无效的 --mode"},
-		{name: "EmptyMode", args: []string{"mount", testDiskID1, validMP, "--mode="}, wantSubstr: "无效的 --mode"},
+		{name: "InvalidModeBogus", args: []string{"mount", testDiskID1, validMP, "--mode", "bogus"}, wantSubstr: "可选 staged|sync|ro"},
+		{name: "EmptyMode", args: []string{"mount", testDiskID1, validMP, "--mode="}, wantSubstr: "可选 staged|sync|ro"},
 		{name: "ROWithStageSize", args: []string{"mount", testDiskID1, validMP, "--mode", "ro", "--stage-size", "8MiB"}, wantSubstr: "不能指定 --stage-size"},
 		{name: "ROWithStageDir", args: []string{"mount", testDiskID1, validMP, "--mode=ro", "--stage-dir", "/tmp/x"}, wantSubstr: "不能指定 --stage-dir"},
+		{name: "SyncWithStageSize", args: []string{"mount", testDiskID1, validMP, "--mode", "sync", "--stage-size", "8MiB"}, wantSubstr: "--mode sync 同步直通模式下不能指定 --stage-size"},
+		{name: "SyncWithStageDir", args: []string{"mount", testDiskID1, validMP, "--mode=sync", "--stage-dir", "/tmp/x"}, wantSubstr: "--mode sync 同步直通模式下不能指定 --stage-dir"},
 		{name: "StageSize1MiB", args: []string{"mount", testDiskID1, validMP, "--stage-size", "1MiB"}, wantSubstr: "最小允许"},
 		{name: "StageSizeBelow4MiBBy1B", args: []string{"mount", testDiskID1, validMP, "--stage-size", "4194303"}, wantSubstr: "最小允许"},
 		{name: "StageSizeBadUnit", args: []string{"mount", testDiskID1, validMP, "--stage-size", "bad"}, wantSubstr: "无效的 --stage-size"},
@@ -252,7 +254,7 @@ func TestMount_Validation_GivenInvalidEnvVars_Exits2(t *testing.T) {
 		wantSubstr string
 	}{
 		{name: "BadOTELSampleRatio", envKey: "OTEL_TRACES_SAMPLER_ARG", envVal: "not-float", wantSubstr: "无效的环境变量 OTEL_TRACES_SAMPLER_ARG"},
-		{name: "InvalidModeSync", envKey: "BOWL_MOUNT_MODE", envVal: "sync", wantSubstr: "无效的 --mode"},
+		{name: "InvalidModeBogus", envKey: "BOWL_MOUNT_MODE", envVal: "bogus", wantSubstr: "可选 staged|sync|ro"},
 		{name: "StageSize1MiB", envKey: "BOWL_STAGE_SIZE", envVal: "1MiB", wantSubstr: "最小允许"},
 		{name: "StageSizeBogus", envKey: "BOWL_STAGE_SIZE", envVal: "bogus", wantSubstr: "BOWL_STAGE_SIZE"},
 		{name: "StageDirInsideMountpoint", envKey: "BOWL_STAGE_DIR", envVal: filepath.Join(mp, "env-sub"), wantSubstr: "挂载点"},
@@ -375,7 +377,8 @@ func TestMount_DefaultConfig_GivenNoModeOrStageFlags_UsesStaged512MiBAndDefaultS
 
 	// Then
 	require.Equal(t, 0, code, "scene=default_mount want=0 got=%d stderr=%s", code, errOut)
-	require.False(t, captured.cfg.ReadOnly)
+	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
+	require.False(t, captured.cfg.IsReadOnly())
 	require.Equal(t, uint64(536_870_912), captured.cfg.StageSize)
 	require.Equal(t, "/var/tmp/bowl-stage", captured.cfg.StageDir)
 	require.NotNil(t, captured.cfg.StageSession)
@@ -404,7 +407,8 @@ func TestMount_WhitespaceEnvFallbacks_GivenBlankStageEnvs_UsesDefaults(t *testin
 
 	// Then
 	require.Equal(t, 0, code, "scene=whitespace_env_defaults want=0 got=%d stderr=%s", code, errOut)
-	require.False(t, captured.cfg.ReadOnly)
+	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
+	require.False(t, captured.cfg.IsReadOnly())
 	require.Equal(t, uint64(536_870_912), captured.cfg.StageSize)
 	require.Equal(t, "/var/tmp/bowl-stage", captured.cfg.StageDir)
 	require.NotNil(t, captured.cfg.StageSession)
@@ -440,7 +444,8 @@ func TestMount_ForegroundStaged_GivenExplicitFlags_AppliesStageConfigAndCleansIn
 	require.Equal(t, 0, code, "scene=foreground_staged want=0 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
 	require.Equal(t, "Bearer mount-tok", storage.lastAuth)
-	require.False(t, captured.cfg.ReadOnly)
+	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
+	require.False(t, captured.cfg.IsReadOnly())
 	require.Equal(t, uint64(16_777_216), captured.cfg.StageSize)
 	require.Equal(t, stageDir, captured.cfg.StageDir)
 	require.NotNil(t, captured.cfg.StageSession)
@@ -508,7 +513,8 @@ func TestMount_ForegroundStaged_GivenEnvFallbacksAndTmpfsSeam_AppliesEnvAndLogsT
 
 	// Then
 	require.Equal(t, 0, code, "scene=env_staged_tmpfs_warn want=0 got=%d stderr=%s", code, errOut)
-	require.False(t, captured.cfg.ReadOnly)
+	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
+	require.False(t, captured.cfg.IsReadOnly())
 	require.Equal(t, uint64(33_554_432), captured.cfg.StageSize)
 	require.Equal(t, siblingStageDir, captured.cfg.StageDir)
 	require.NotNil(t, captured.cfg.StageSession)
@@ -544,7 +550,8 @@ func TestMount_ForegroundRO_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvAndSki
 
 	// Then
 	require.Equal(t, 0, code, "scene=ro_ignores_stage_env want=0 got=%d stderr=%s", code, errOut)
-	require.True(t, captured.cfg.ReadOnly)
+	require.Equal(t, fusefs.MountModeRO, captured.cfg.Mode)
+	require.True(t, captured.cfg.IsReadOnly())
 	require.Zero(t, captured.cfg.Epoch)
 	require.Zero(t, captured.cfg.StageSize)
 	require.Empty(t, captured.cfg.StageDir)
@@ -575,7 +582,98 @@ func TestMount_ForegroundRO_GivenEnvModeWhitespaceMixedCase_EnablesReadOnly(t *t
 
 	// Then
 	require.Equal(t, 0, code, "scene=env_ro_mode want=0 got=%d stderr=%s", code, errOut)
-	require.True(t, captured.cfg.ReadOnly)
+	require.Equal(t, fusefs.MountModeRO, captured.cfg.Mode)
+	require.True(t, captured.cfg.IsReadOnly())
+	require.Nil(t, captured.cfg.StageSession)
+	require.NoDirExists(t, unusedStageDir)
+}
+
+func TestMount_ForegroundSync_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvSkipsSessionAndMountsWritable(t *testing.T) {
+	// Given ambient BOWL_STAGE_SIZE and nested BOWL_STAGE_DIR values that fail in staged mode.
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, true)
+	withMountRenewIntervalStub(t, 15*time.Millisecond)
+	mp := t.TempDir()
+	nestedStageDir := filepath.Join(mp, "ambient-stage-inside-mp")
+	t.Setenv("BOWL_MOUNT_MODE", "ro")
+	t.Setenv("BOWL_STAGE_SIZE", "1MiB")
+	t.Setenv("BOWL_STAGE_DIR", nestedStageDir)
+
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "sync-disk", 1<<30, 0)
+	storage.mountLeaseTTL = 30
+	withMountStorageFake(t, storage)
+
+	var captured fusefs.Config
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
+		captured = *cfg
+		require.Equal(t, mp, gotMP)
+		ready()
+		require.Eventually(t, func() bool {
+			return len(storage.getRenewReqs()) >= 1
+		}, time.Second, 5*time.Millisecond, "scene=sync_renew want>=1_renew_req")
+		return nil
+	})
+
+	// When
+	code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode", "sync", "--admin-addr", "off")
+
+	// Then
+	require.Equal(t, 0, code, "scene=sync_ignores_stage_env want=0 got=%d stderr=%s", code, errOut)
+	require.Equal(t, fusefs.MountModeSync, captured.Mode)
+	require.False(t, captured.IsReadOnly())
+	require.False(t, captured.IsStaged())
+	require.Equal(t, uint64(1), captured.Epoch, "scene=sync_writable_epoch want=1 got=%d", captured.Epoch)
+	require.Zero(t, captured.StageSize)
+	require.Empty(t, captured.StageDir)
+	require.Nil(t, captured.StageSession)
+	require.NoDirExists(t, nestedStageDir)
+	require.NotContains(t, errOut, "stage_dir_on_tmpfs")
+	requireRenewRequestsMatch(t, storage.getRenewReqs(), testDiskID1, "01950000-0000-7000-9000-000000000001", false, 1)
+}
+
+func TestMount_ForegroundSync_GivenEnvModeMixedCaseAndExplicitStageFlagsOrZeroEpoch_EnforcesSyncRules(t *testing.T) {
+	// Given BOWL_MOUNT_MODE set to mixed-case whitespace-padded sync.
+	t.Setenv("BOWL_MOUNT_MODE", "  SyNc  ")
+	t.Setenv("BOWL_STAGE_SIZE", "bogus-ignored")
+	unusedStageDir := filepath.Join(t.TempDir(), "should-not-exist-env-sync")
+	t.Setenv("BOWL_STAGE_DIR", unusedStageDir)
+	mp := t.TempDir()
+
+	// Explicit --stage-size or --stage-dir with BOWL_MOUNT_MODE=sync exits with code 2.
+	codeSize, _, errSize := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-size", "8MiB")
+	require.Equal(t, 2, codeSize, "scene=env_sync_with_stage_size want=2 got=%d stderr=%s", codeSize, errSize)
+	require.Contains(t, errSize, "--mode sync 同步直通模式下不能指定 --stage-size")
+
+	codeDir, _, errDir := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", "/tmp/x")
+	require.Equal(t, 2, codeDir, "scene=env_sync_with_stage_dir want=2 got=%d stderr=%s", codeDir, errDir)
+	require.Contains(t, errDir, "--mode sync 同步直通模式下不能指定 --stage-dir")
+
+	// Server returning Epoch=0 under sync mode fails handshake with exit code 1.
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	faultyStorage := newFakeStorage()
+	seedFaultyMountStorage(false, true)(faultyStorage)
+	withMountStorageFake(t, faultyStorage)
+
+	codeZeroEpoch, _, errZeroEpoch := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	require.Equal(t, 1, codeZeroEpoch, "scene=env_sync_zero_epoch want=1 got=%d stderr=%s", codeZeroEpoch, errZeroEpoch)
+	require.Contains(t, errZeroEpoch, "有效的写挂载世代号")
+	require.NoDirExists(t, unusedStageDir)
+
+	// Valid server Epoch succeeds via BOWL_MOUNT_MODE fallback without opening a stage session.
+	okStorage := newFakeStorage()
+	okStorage.seedDisk(testDiskID1, "sync-env-disk", 1<<30, 0)
+	withMountStorageFake(t, okStorage)
+	captured := stubMountServeFUSE(t, mp)
+
+	codeOK, _, errOK := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
+	require.Equal(t, 0, codeOK, "scene=env_sync_ok want=0 got=%d stderr=%s", codeOK, errOK)
+	require.Equal(t, fusefs.MountModeSync, captured.cfg.Mode)
+	require.Equal(t, uint64(1), captured.cfg.Epoch)
 	require.Nil(t, captured.cfg.StageSession)
 	require.NoDirExists(t, unusedStageDir)
 }
@@ -672,7 +770,7 @@ func TestRunMount_StageSessionError_GivenUncreatableStageDir_FailsBeforeMountHan
 	}
 	baseCfg := &fusefs.Config{
 		DiskID:    testDiskID1,
-		ReadOnly:  false,
+		Mode:      fusefs.MountModeStaged,
 		StageSize: fusefs.DefaultStageSize,
 		StageDir:  filepath.Join(blockerFile, "nested"),
 	}
@@ -821,7 +919,7 @@ func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovin
 	stageDir := t.TempDir()
 	baseCfg := &fusefs.Config{
 		DiskID:    testDiskID1,
-		ReadOnly:  false,
+		Mode:      fusefs.MountModeStaged,
 		StageSize: fusefs.DefaultStageSize,
 		StageDir:  stageDir,
 	}
@@ -890,7 +988,7 @@ func TestRunMount_LeaseRenewTerminalError_GivenEBUSYOrNotFound_StopsRenewLoop(t 
 			}
 			baseCfg := &fusefs.Config{
 				DiskID:    testDiskID1,
-				ReadOnly:  false,
+				Mode:      fusefs.MountModeStaged,
 				StageSize: fusefs.DefaultStageSize,
 				StageDir:  t.TempDir(),
 			}

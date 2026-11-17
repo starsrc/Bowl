@@ -1512,6 +1512,11 @@ func (s *fakeStorage) ReclaimOrphan(ctx context.Context, req *connect.Request[st
 
 // 以下控制面与旧版目录接口在 fusefs 数据面调用中属于 Fail Fast 违例。
 
+// CreateTmpfile fails fast on unexpected calls until fusefs adds O_TMPFILE support.
+func (s *fakeStorage) CreateTmpfile(context.Context, *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
+	return nil, s.failFast("CreateTmpfile")
+}
+
 func (s *fakeStorage) ReadDir(context.Context, *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	return nil, s.failFast("ReadDir")
 }

@@ -600,3 +600,170 @@ func TestStorageValidator_GivenCodecRoundTrippedRequest_WhenValidated_ThenPreser
 	require.Equal(t, validator.ErrorDomain, typedValErr.Domain())
 	require.NotEmpty(t, typedValErr.Error())
 }
+
+func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucceeds(t *testing.T) {
+	// Given
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err, "create storage validator: want nil error, got=%v", err)
+
+	now := timestamppb.Now()
+	validInode := &storagev1.Inode{
+		Ino:        42,
+		Generation: 1,
+		Attr: &storagev1.InodeAttribute{
+			Mode:  0o100600,
+			Nlink: 0,
+			Uid:   1000,
+			Gid:   1000,
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
+		},
+	}
+
+	type validCase struct {
+		name string
+		msg  proto.Message
+	}
+	cases := []validCase{
+		{
+			name: "request_mode_zero_non_exclusive",
+			msg: &storagev1.CreateTmpfileRequest{
+				ParentIno: 1,
+				Mode:      0,
+				Uid:       0,
+				Gid:       0,
+				Exclusive: false,
+				DiskId:    testValidDiskID,
+				Epoch:     1,
+			},
+		},
+		{
+			name: "request_s_ifreg_0600_exclusive",
+			msg: &storagev1.CreateTmpfileRequest{
+				ParentIno: 1,
+				Mode:      0o100600,
+				Uid:       1000,
+				Gid:       1000,
+				Exclusive: true,
+				DiskId:    testValidDiskID,
+				Epoch:     1,
+			},
+		},
+		{
+			name: "request_max_int64_and_max_int32_boundaries",
+			msg: &storagev1.CreateTmpfileRequest{
+				ParentIno: math.MaxInt64,
+				Mode:      0o100777,
+				Uid:       math.MaxInt32,
+				Gid:       math.MaxInt32,
+				Exclusive: false,
+				DiskId:    testValidDiskID,
+				Epoch:     math.MaxInt64,
+			},
+		},
+		{
+			name: "response_nlink_zero_zero_timeouts",
+			msg: &storagev1.CreateTmpfileResponse{
+				Inode:               validInode,
+				EntryTimeoutSeconds: 0,
+				AttrTimeoutSeconds:  0,
+			},
+		},
+		{
+			name: "response_nlink_zero_positive_timeouts",
+			msg: &storagev1.CreateTmpfileResponse{
+				Inode:               validInode,
+				EntryTimeoutSeconds: 1.5,
+				AttrTimeoutSeconds:  2.5,
+			},
+		},
+	}
+
+	// When / Then
+	runSubtests(t, cases, func(tc validCase) string { return tc.name }, func(t *testing.T, tc validCase) {
+		gotErr := v.Validate(tc.msg)
+		require.NoError(t, gotErr, "case=%s: want validation success, got=%v", tc.name, gotErr)
+	})
+}
+
+func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
+	// Given
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err, "create storage validator: want nil error, got=%v", err)
+
+	now := timestamppb.Now()
+	validInode := &storagev1.Inode{
+		Ino:        42,
+		Generation: 1,
+		Attr: &storagev1.InodeAttribute{
+			Mode:  0o100600,
+			Nlink: 0,
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
+		},
+	}
+
+	type invalidCase struct {
+		name string
+		msg  proto.Message
+	}
+	cases := []invalidCase{
+		{
+			name: "request_empty_disk_id",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: "", Epoch: 1},
+		},
+		{
+			name: "request_malformed_disk_id",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: "not-a-uuid", Epoch: 1},
+		},
+		{
+			name: "request_nil_disk_id",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testNilUUID, Epoch: 1},
+		},
+		{
+			name: "request_epoch_zero",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Epoch: 0},
+		},
+		{
+			name: "request_epoch_over_max_int64",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Epoch: testOverMaxInt64},
+		},
+		{
+			name: "request_parent_ino_zero",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 0, Mode: 0o600, DiskId: testValidDiskID, Epoch: 1},
+		},
+		{
+			name: "request_parent_ino_over_max_int64",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: testOverMaxInt64, Mode: 0o600, DiskId: testValidDiskID, Epoch: 1},
+		},
+		{
+			name: "request_uid_over_max_int32",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, Uid: math.MaxInt32 + 1, DiskId: testValidDiskID, Epoch: 1},
+		},
+		{
+			name: "request_gid_over_max_int32",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, Gid: math.MaxInt32 + 1, DiskId: testValidDiskID, Epoch: 1},
+		},
+		{
+			name: "response_missing_inode",
+			msg:  &storagev1.CreateTmpfileResponse{EntryTimeoutSeconds: 1.0, AttrTimeoutSeconds: 1.0},
+		},
+		{
+			name: "response_negative_entry_timeout",
+			msg:  &storagev1.CreateTmpfileResponse{Inode: validInode, EntryTimeoutSeconds: -0.1, AttrTimeoutSeconds: 1.0},
+		},
+		{
+			name: "response_negative_attr_timeout",
+			msg:  &storagev1.CreateTmpfileResponse{Inode: validInode, EntryTimeoutSeconds: 1.0, AttrTimeoutSeconds: -0.1},
+		},
+	}
+
+	// When / Then
+	runSubtests(t, cases, func(tc invalidCase) string { return tc.name }, func(t *testing.T, tc invalidCase) {
+		gotErr := v.Validate(tc.msg)
+		require.Error(t, gotErr, "case=%s: want validation failure with reason %s, got nil", tc.name, validator.ReasonInvalidArgument)
+		assertValidationReason(t, gotErr, validator.ReasonInvalidArgument)
+	})
+}

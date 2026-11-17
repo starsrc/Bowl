@@ -58,6 +58,7 @@ func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpect
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceForkDiskProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMergeDiskProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateTmpfileProcedure), "CreateTmpfile is non-idempotent")
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceWriteProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceUnlinkProcedure))
 }

@@ -8,7 +8,7 @@
 
 StorageService 提供针对分布式文件系统的元数据操作与 FUSE 协议对接能力。
 
-共包含 **37** 个 RPC 方法：
+共包含 **38** 个 RPC 方法：
 
 | # | RPC 方法 | 请求类型 | 响应类型 | 调用模式 |
 | --- | --- | --- | --- | --- |
@@ -24,31 +24,32 @@ StorageService 提供针对分布式文件系统的元数据操作与 FUSE 协�
 | 10 | [Rmdir](#rmdir) | [RmdirRequest](#rmdirrequest) | [RmdirResponse](#rmdirresponse) | 一元调用 (Unary) |
 | 11 | [Rename](#rename) | [RenameRequest](#renamerequest) | [RenameResponse](#renameresponse) | 一元调用 (Unary) |
 | 12 | [Create](#create) | [CreateRequest](#createrequest) | [CreateResponse](#createresponse) | 一元调用 (Unary) |
-| 13 | [Read](#read) | [ReadRequest](#readrequest) | [ReadResponse](#readresponse) | 一元调用 (Unary) |
-| 14 | [Write](#write) | [WriteRequest](#writerequest) | [WriteResponse](#writeresponse) | 一元调用 (Unary) |
-| 15 | [Fsync](#fsync) | [FsyncRequest](#fsyncrequest) | [FsyncResponse](#fsyncresponse) | 一元调用 (Unary) |
-| 16 | [FsyncDir](#fsyncdir) | [FsyncDirRequest](#fsyncdirrequest) | [FsyncDirResponse](#fsyncdirresponse) | 一元调用 (Unary) |
-| 17 | [ReadDir](#readdir) | [ReadDirRequest](#readdirrequest) | [ReadDirResponse](#readdirresponse) | 一元调用 (Unary) |
-| 18 | [ReadDirPlus](#readdirplus) | [ReadDirPlusRequest](#readdirplusrequest) | [ReadDirPlusResponse](#readdirplusresponse) | 一元调用 (Unary) |
-| 19 | [Fallocate](#fallocate) | [FallocateRequest](#fallocaterequest) | [FallocateResponse](#fallocateresponse) | 一元调用 (Unary) |
-| 20 | [SetXattr](#setxattr) | [SetXattrRequest](#setxattrrequest) | [SetXattrResponse](#setxattrresponse) | 一元调用 (Unary) |
-| 21 | [GetXattr](#getxattr) | [GetXattrRequest](#getxattrrequest) | [GetXattrResponse](#getxattrresponse) | 一元调用 (Unary) |
-| 22 | [ListXattr](#listxattr) | [ListXattrRequest](#listxattrrequest) | [ListXattrResponse](#listxattrresponse) | 一元调用 (Unary) |
-| 23 | [RemoveXattr](#removexattr) | [RemoveXattrRequest](#removexattrrequest) | [RemoveXattrResponse](#removexattrresponse) | 一元调用 (Unary) |
-| 24 | [MountDisk](#mountdisk) | [MountDiskRequest](#mountdiskrequest) | [MountDiskResponse](#mountdiskresponse) | 一元调用 (Unary) |
-| 25 | [RenewMount](#renewmount) | [RenewMountRequest](#renewmountrequest) | [RenewMountResponse](#renewmountresponse) | 一元调用 (Unary) |
-| 26 | [UnmountDisk](#unmountdisk) | [UnmountDiskRequest](#unmountdiskrequest) | [UnmountDiskResponse](#unmountdiskresponse) | 一元调用 (Unary) |
-| 27 | [CreateDisk](#createdisk) | [CreateDiskRequest](#creatediskrequest) | [CreateDiskResponse](#creatediskresponse) | 一元调用 (Unary) |
-| 28 | [GetDisk](#getdisk) | [GetDiskRequest](#getdiskrequest) | [GetDiskResponse](#getdiskresponse) | 一元调用 (Unary) |
-| 29 | [ListDisks](#listdisks) | [ListDisksRequest](#listdisksrequest) | [ListDisksResponse](#listdisksresponse) | 一元调用 (Unary) |
-| 30 | [UpdateDisk](#updatedisk) | [UpdateDiskRequest](#updatediskrequest) | [UpdateDiskResponse](#updatediskresponse) | 一元调用 (Unary) |
-| 31 | [DeleteDisk](#deletedisk) | [DeleteDiskRequest](#deletediskrequest) | [DeleteDiskResponse](#deletediskresponse) | 一元调用 (Unary) |
-| 32 | [ForkDisk](#forkdisk) | [ForkDiskRequest](#forkdiskrequest) | [ForkDiskResponse](#forkdiskresponse) | 一元调用 (Unary) |
-| 33 | [StatFS](#statfs) | [StatFSRequest](#statfsrequest) | [StatFSResponse](#statfsresponse) | 一元调用 (Unary) |
-| 34 | [ReclaimOrphan](#reclaimorphan) | [ReclaimOrphanRequest](#reclaimorphanrequest) | [ReclaimOrphanResponse](#reclaimorphanresponse) | 一元调用 (Unary) |
-| 35 | [DiffDisk](#diffdisk) | [DiffDiskRequest](#diffdiskrequest) | [DiffDiskResponse](#diffdiskresponse) | 一元调用 (Unary) |
-| 36 | [ReadCommitNode](#readcommitnode) | [ReadCommitNodeRequest](#readcommitnoderequest) | [ReadCommitNodeResponse](#readcommitnoderesponse) | 一元调用 (Unary) |
-| 37 | [MergeDisk](#mergedisk) | [MergeDiskRequest](#mergediskrequest) | [MergeDiskResponse](#mergediskresponse) | 一元调用 (Unary) |
+| 13 | [CreateTmpfile](#createtmpfile) | [CreateTmpfileRequest](#createtmpfilerequest) | [CreateTmpfileResponse](#createtmpfileresponse) | 一元调用 (Unary) |
+| 14 | [Read](#read) | [ReadRequest](#readrequest) | [ReadResponse](#readresponse) | 一元调用 (Unary) |
+| 15 | [Write](#write) | [WriteRequest](#writerequest) | [WriteResponse](#writeresponse) | 一元调用 (Unary) |
+| 16 | [Fsync](#fsync) | [FsyncRequest](#fsyncrequest) | [FsyncResponse](#fsyncresponse) | 一元调用 (Unary) |
+| 17 | [FsyncDir](#fsyncdir) | [FsyncDirRequest](#fsyncdirrequest) | [FsyncDirResponse](#fsyncdirresponse) | 一元调用 (Unary) |
+| 18 | [ReadDir](#readdir) | [ReadDirRequest](#readdirrequest) | [ReadDirResponse](#readdirresponse) | 一元调用 (Unary) |
+| 19 | [ReadDirPlus](#readdirplus) | [ReadDirPlusRequest](#readdirplusrequest) | [ReadDirPlusResponse](#readdirplusresponse) | 一元调用 (Unary) |
+| 20 | [Fallocate](#fallocate) | [FallocateRequest](#fallocaterequest) | [FallocateResponse](#fallocateresponse) | 一元调用 (Unary) |
+| 21 | [SetXattr](#setxattr) | [SetXattrRequest](#setxattrrequest) | [SetXattrResponse](#setxattrresponse) | 一元调用 (Unary) |
+| 22 | [GetXattr](#getxattr) | [GetXattrRequest](#getxattrrequest) | [GetXattrResponse](#getxattrresponse) | 一元调用 (Unary) |
+| 23 | [ListXattr](#listxattr) | [ListXattrRequest](#listxattrrequest) | [ListXattrResponse](#listxattrresponse) | 一元调用 (Unary) |
+| 24 | [RemoveXattr](#removexattr) | [RemoveXattrRequest](#removexattrrequest) | [RemoveXattrResponse](#removexattrresponse) | 一元调用 (Unary) |
+| 25 | [MountDisk](#mountdisk) | [MountDiskRequest](#mountdiskrequest) | [MountDiskResponse](#mountdiskresponse) | 一元调用 (Unary) |
+| 26 | [RenewMount](#renewmount) | [RenewMountRequest](#renewmountrequest) | [RenewMountResponse](#renewmountresponse) | 一元调用 (Unary) |
+| 27 | [UnmountDisk](#unmountdisk) | [UnmountDiskRequest](#unmountdiskrequest) | [UnmountDiskResponse](#unmountdiskresponse) | 一元调用 (Unary) |
+| 28 | [CreateDisk](#createdisk) | [CreateDiskRequest](#creatediskrequest) | [CreateDiskResponse](#creatediskresponse) | 一元调用 (Unary) |
+| 29 | [GetDisk](#getdisk) | [GetDiskRequest](#getdiskrequest) | [GetDiskResponse](#getdiskresponse) | 一元调用 (Unary) |
+| 30 | [ListDisks](#listdisks) | [ListDisksRequest](#listdisksrequest) | [ListDisksResponse](#listdisksresponse) | 一元调用 (Unary) |
+| 31 | [UpdateDisk](#updatedisk) | [UpdateDiskRequest](#updatediskrequest) | [UpdateDiskResponse](#updatediskresponse) | 一元调用 (Unary) |
+| 32 | [DeleteDisk](#deletedisk) | [DeleteDiskRequest](#deletediskrequest) | [DeleteDiskResponse](#deletediskresponse) | 一元调用 (Unary) |
+| 33 | [ForkDisk](#forkdisk) | [ForkDiskRequest](#forkdiskrequest) | [ForkDiskResponse](#forkdiskresponse) | 一元调用 (Unary) |
+| 34 | [StatFS](#statfs) | [StatFSRequest](#statfsrequest) | [StatFSResponse](#statfsresponse) | 一元调用 (Unary) |
+| 35 | [ReclaimOrphan](#reclaimorphan) | [ReclaimOrphanRequest](#reclaimorphanrequest) | [ReclaimOrphanResponse](#reclaimorphanresponse) | 一元调用 (Unary) |
+| 36 | [DiffDisk](#diffdisk) | [DiffDiskRequest](#diffdiskrequest) | [DiffDiskResponse](#diffdiskresponse) | 一元调用 (Unary) |
+| 37 | [ReadCommitNode](#readcommitnode) | [ReadCommitNodeRequest](#readcommitnoderequest) | [ReadCommitNodeResponse](#readcommitnoderesponse) | 一元调用 (Unary) |
+| 38 | [MergeDisk](#mergedisk) | [MergeDiskRequest](#mergediskrequest) | [MergeDiskResponse](#mergediskresponse) | 一元调用 (Unary) |
 
 ### RPC 方法详述
 
@@ -134,15 +135,19 @@ Readlink 获取符号链接节点指向的目标路径。
 
 - **请求**: [LinkRequest](#linkrequest)　|　**响应**: [LinkResponse](#linkresponse)　|　**模式**: 一元调用 (Unary)
 
-Link 为已有非目录 Inode 在目标父目录下创建硬链接。
+Link creates a hard link in the target parent directory for an existing non-directory inode.
 
-若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
+It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
 
-若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
 
-若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
 
-若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
+
+The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
+
+The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
 
 #### Unlink
 
@@ -211,6 +216,30 @@ Create 在指定父目录下创建常规文件，文件句柄由客户端管理�
 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 
 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+
+#### CreateTmpfile
+
+- **请求**: [CreateTmpfileRequest](#createtmpfilerequest)　|　**响应**: [CreateTmpfileResponse](#createtmpfileresponse)　|　**模式**: 一元调用 (Unary)
+
+CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
+
+If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
+
+When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
+
+When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
+
+The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
+
+The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
+
+The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
+
+The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
+
+The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
+
+The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
 
 #### Read
 
@@ -784,6 +813,30 @@ CreateResponse 包含新创建常规文件的元数据和 FUSE 内核缓存有�
 | 3 | `open_flags` | `uint32` | singular | — | 打开响应标志位 (open flags)。 |
 | 4 | `entry_timeout_seconds` | `double` | singular | `double`: `gte=0` | 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。 |
 | 5 | `attr_timeout_seconds` | `double` | singular | `double`: `gte=0` | 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。 |
+
+### CreateTmpfileRequest
+
+CreateTmpfileRequest defines input parameters for CreateTmpfile.
+
+| 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `parent_ino` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | Parent directory inode number. The value must be between 1 and 9223372036854775807. |
+| 2 | `mode` | `uint32` | singular | — | File mode bits containing optional S_IFREG type bits and POSIX permission bits. |
+| 3 | `uid` | `uint32` | singular | `uint32`: `lte=2147483647` | Owner user ID. The value must not exceed 2147483647. |
+| 4 | `gid` | `uint32` | singular | `uint32`: `lte=2147483647` | Owner group ID. The parent directory gid overrides this value when S_ISGID is set, and the value must not exceed 2147483647. |
+| 5 | `exclusive` | `bool` | singular | — | When true for `O_TMPFILE \| O_EXCL`, the server marks the orphan non-linkable so `Link` rejects promotion. |
+| 6 | `disk_id` | `string` | singular | CEL `create_tmpfile_disk_id_not_nil`: `this != '00000000-0000-0000-0000-000000000000'`（disk_id must not be nil UUID）<br>`string`: `uuid=true` | Target virtual disk UUID. It must be a valid non-nil UUID. |
+| 7 | `epoch` | `uint64` | singular | `uint64`: `lte=9223372036854775807`, `gt=0` | Writer mount epoch fence. The value must be between 1 and 9223372036854775807. |
+
+### CreateTmpfileResponse
+
+CreateTmpfileResponse returns the newly allocated anonymous inode and FUSE kernel cache timeouts.
+
+| 编号 | 字段名 | 类型 | 标签 | 校验规则 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `inode` | [Inode](#inode) | singular | `required` | Allocated anonymous regular-file inode with `nlink == 0`. |
+| 2 | `entry_timeout_seconds` | `double` | singular | `double`: `gte=0` | FUSE kernel entry cache timeout in seconds. |
+| 3 | `attr_timeout_seconds` | `double` | singular | `double`: `gte=0` | FUSE kernel attribute cache timeout in seconds. |
 
 ### ReadRequest
 

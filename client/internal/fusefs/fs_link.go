@@ -175,10 +175,16 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 		fs.metrics.incTmpPromote()
 	}
 
-	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 0, resp.Msg.GetAttrTimeoutSeconds())
+	inode := resp.Msg.GetInode()
+	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, inode, 0, resp.Msg.GetAttrTimeoutSeconds())
 	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
-	fs.cache.putInodeAt(epoch, input.Oldnodeid, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
-	fs.recordInodeSpecial(input.Oldnodeid, resp.Msg.GetInode())
-	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	if inode != nil && inode.GetAttr() != nil {
+		fs.cache.putInodeAt(epoch, input.Oldnodeid, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	} else {
+		fs.cache.invalidateInode(input.Oldnodeid)
+	}
+	fs.topologySeq.Add(1)
+	fs.recordInodeSpecial(input.Oldnodeid, inode)
+	fs.FillEntryOut(out, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }

@@ -1,0 +1,187 @@
+# 分级 CI：
+#   fast —— lint、单元测试（含 PostgreSQL 适配器）、Linux 容器内的客户端测试、go.mod 整洁检查。
+#   full —— fast 的全部，加跨服务 E2E、FUSE 客户端 E2E、文档构建。
+#
+# 跑 full 的情况（其余 PR 跑 fast）：
+#   - PR 作者对仓库没有写权限（外部贡献者）
+#   - 发版：推送 v* 标签，或 PR 的源分支 / 目标分支以 release/ 开头
+#   - PR 带 full-ci 标签，或手动触发（workflow_dispatch）
+#
+# 分支保护只需把 "CI 结果" 这一个检查设为必过。
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOWORK: 'off'
+  GOLANGCI_LINT_VERSION: v2.15.0
+  BUF_VERSION: 1.75.0
+  COMPOSE_FILE: deploy/dev/docker-compose.yaml
+
+jobs:
+  mode:
+    name: 判定 fast / full
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          FORCED_FULL: >-
+            ${{ github.event_name != 'pull_request'
+            || startsWith(github.head_ref, 'release/')
+            || startsWith(github.base_ref, 'release/')
+            || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          # 事件里的 author_association 对未公开成员身份的组织成员返回 CONTRIBUTOR，不可靠；
+          # 直接查作者对本仓库的实际权限。查询失败按无权限处理（跑 full）。
+          full=true
+          perm=n/a
+          if [ "${FORCED_FULL}" != true ]; then
+            perm="$(gh api "repos/${REPO}/collaborators/${AUTHOR}/permission" -q .permission 2>/dev/null || echo none)"
+            case "${perm}" in admin|write) full=false ;; esac
+          fi
+          echo "full=${full}" >> "$GITHUB_OUTPUT"
+          echo "mode: $([ "${full}" = true ] && echo full || echo fast)（forced_full=${FORCED_FULL}, author_permission=${perm}）" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+          version: ${{ env.BUF_VERSION }}
+      - name: 安装 golangci-lint
+        run: curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
+      - run: task lint
+      - name: go.mod / go.sum 保持整洁
+        run: |
+          task tidy
+          git diff --exit-code -- '*go.mod' '*go.sum'
+
+  test:
+    name: 单元测试（根模块 + storage）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - name: 启动 PostgreSQL 并执行迁移
+        run: |
+          docker compose -f "${COMPOSE_FILE}" up -d --wait postgres
+          docker compose -f "${COMPOSE_FILE}" run --rm migration
+      - run: task test
+
+  test-client:
+    name: 客户端测试（Linux 容器）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - run: task test:client
+
+  e2e:
+    name: 跨服务 E2E
+    needs: mode
+    if: needs.mode.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - run: task test:e2e
+
+  client-e2e:
+    name: FUSE 客户端 E2E
+    needs: mode
+    if: needs.mode.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - run: sudo modprobe fuse
+      - run: task test:client:e2e
+
+  docs:
+    name: 文档构建
+    needs: mode
+    if: needs.mode.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+          version: ${{ env.BUF_VERSION }}
+      - run: npm --prefix docs ci
+      - run: task docs:build
+      - name: 生成的 RPC 文档与 proto 一致
+        run: git diff --exit-code -- docs/03-interfaces
+
+  result:
+    name: CI 结果
+    needs: [mode, lint, test, test-client, e2e, client-e2e, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 任一 job 失败或被取消则失败（full 档的 job 在 fast 模式下被跳过，不算失败）
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: ${RESULTS}"
+          case " ${RESULTS} " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

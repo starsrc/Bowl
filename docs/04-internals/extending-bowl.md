@@ -195,6 +195,8 @@ STORAGE_TEST_DSN='postgres://postgres:postgres@127.0.0.1:9432/bowl?sslmode=disab
 | 4 客户端 FUSE E2E | `task test:client:e2e` | `client/e2e/`（`//go:build e2e && linux`）：守护进程生命周期、POSIX 语义、多客户端 fork、merge/diff | Docker 特权容器（`--device /dev/fuse`、`SYS_ADMIN`、`LINUX_IMMUTABLE`）；同样支持 `KEEP_E2E_ENV=1` |
 | 5 基准与一致性 | `benchmark/{pjdfstest,drive9,fork,juicefs}` | POSIX 合规、与 drive9 / JuiceFS 对比、fork 性能与一致性 | **阿里云双机**，见下 |
 | 6 提交守门 | `.githooks/pre-commit` | 暂存区触发的 `buf lint` 与 `golangci-lint` | `task hooks:install` |
+| 7 推送守门 | `.githooks/pre-push` | 层 1 中不需要 PostgreSQL 的部分，加 `client` 的交叉编译检查 | `task hooks:install` |
+| 8 CI | `.github/workflows/ci.yml` | fast：lint 加层 1、2；full：再加层 3、4 与文档构建 | GitHub Actions |
 
 可向 `task` 命令追加测试参数，例如 `task test:storage -- -run TestStoreContract`、`task test:client:e2e -- -run Daemon`（`CLI_ARGS` 透传）。
 
@@ -238,6 +240,30 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
 | `.golangci.yml`、根 `go.mod` / `go.sum` | 三模块全检 |
 
 缺少 `buf` 或 `golangci-lint` 命令时直接失败并提示安装。全量静态检查可手动执行 `task lint`。
+
+### 4.2.1 推送守门（层 7）
+
+`.githooks/pre-push` 与 pre-commit 一起由 `task hooks:install` 启用。相对 `origin/main` 没有改动 `*.go`、`*.proto`、`go.mod`、`go.sum` 时直接跳过；否则依次执行，约 30 秒：
+
+| 步骤 | 命令 |
+| --- | --- |
+| 根模块 | `go test ./...` |
+| storage | `go test`，排除需要 PostgreSQL 的 `internal/db` |
+| client 编译 | `GOOS=linux CGO_ENABLED=0 go vet ./...` |
+| client 测试 | Linux 上 `go test ./...`；其他系统只跑 `./internal/rpc/...`（`fusefs`、`cli` 在非 Linux 上无法编译） |
+
+临时跳过用 `git push --no-verify`。
+
+### 4.2.2 CI（层 8）
+
+`.github/workflows/ci.yml` 分两档，分支保护只需要求 `CI 结果` 这一个检查：
+
+| 档位 | 内容 | 谁触发 |
+| --- | --- | --- |
+| fast | `task lint`、`task tidy` 后 `go.mod` / `go.sum` 无差异、`task test`（先起 PostgreSQL 并迁移）、`task test:client` | 作者对仓库有写权限的 PR |
+| full | fast 全部，加 `task test:e2e`、`task test:client:e2e`、`task docs:build` 且 `docs/03-interfaces` 无差异 | 外部贡献者的 PR；源分支或目标分支以 `release/` 开头的 PR；`v*` 标签；带 `full-ci` 标签的 PR；手动触发 |
+
+作者权限由 `mode` job 调用 GitHub 的协作者权限接口查询（`admin` 或 `write` 算有权限），查询失败按无权限处理。客户端的两个容器任务带 `GOFLAGS=-buildvcs=false`：CI 里工作区属主与容器内用户不同，Go 读取 VCS 信息会失败。
 
 ### 4.3 按改动选择最小验证集
 

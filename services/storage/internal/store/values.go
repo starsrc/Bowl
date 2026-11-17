@@ -18,6 +18,26 @@ const (
 
 const codecVersion byte = 1
 
+// Orphan marker 1-byte kind values stored under "orphan:<ino>".
+const (
+	OrphanKindUnlinked         byte = 0x01
+	OrphanKindTmpfileExclusive byte = 0x02
+	OrphanKindTmpfileLinkable  byte = 0x03
+)
+
+// DecodeOrphanKind decodes and validates the 1-byte value of an orphan marker.
+func DecodeOrphanKind(b []byte) (byte, error) {
+	if len(b) != 1 {
+		return 0, ErrInvalidValue
+	}
+	switch b[0] {
+	case OrphanKindUnlinked, OrphanKindTmpfileExclusive, OrphanKindTmpfileLinkable:
+		return b[0], nil
+	default:
+		return 0, ErrInvalidValue
+	}
+}
+
 // BranchStat 表示单盘实时逻辑用量、节点计数、写序列号、最高已激活写世代（WriterEpoch）与逻辑容量配额上限（MaxBytes）。
 type BranchStat struct {
 	LogicalBytes uint64
@@ -363,12 +383,17 @@ func BatchSetXattrDeferred(b *pebble.Batch, ino uint64, name, val []byte) {
 	_ = op.Finish()
 }
 
-// BatchSetOrphanDeferred 使用 SetDeferred 原地零拷贝写入 OrphanKey。
-func BatchSetOrphanDeferred(b *pebble.Batch, ino uint64) {
+// BatchSetOrphanKindDeferred writes OrphanKey with the given 1-byte orphan kind in place.
+func BatchSetOrphanKindDeferred(b *pebble.Batch, ino uint64, kind byte) {
 	op := b.SetDeferred(OrphanKeyLen, 1)
 	putOrphanKey(op.Key, ino)
-	op.Value[0] = 1
+	op.Value[0] = kind
 	_ = op.Finish()
+}
+
+// BatchSetOrphanDeferred 使用 SetDeferred 原地零拷贝写入 OrphanKey。
+func BatchSetOrphanDeferred(b *pebble.Batch, ino uint64) {
+	BatchSetOrphanKindDeferred(b, ino, OrphanKindUnlinked)
 }
 
 // BatchSetDataDeferred 使用 SetDeferred 原地零拷贝写入 DataKey。

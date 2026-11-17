@@ -57,6 +57,9 @@ const (
 	StorageServiceRenameProcedure = "/storage.v1.StorageService/Rename"
 	// StorageServiceCreateProcedure is the fully-qualified name of the StorageService's Create RPC.
 	StorageServiceCreateProcedure = "/storage.v1.StorageService/Create"
+	// StorageServiceCreateTmpfileProcedure is the fully-qualified name of the StorageService's
+	// CreateTmpfile RPC.
+	StorageServiceCreateTmpfileProcedure = "/storage.v1.StorageService/CreateTmpfile"
 	// StorageServiceReadProcedure is the fully-qualified name of the StorageService's Read RPC.
 	StorageServiceReadProcedure = "/storage.v1.StorageService/Read"
 	// StorageServiceWriteProcedure is the fully-qualified name of the StorageService's Write RPC.
@@ -157,11 +160,13 @@ type StorageServiceClient interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error)
-	// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// Link creates a hard link in the target parent directory for an existing non-directory inode.
+	// It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
+	// Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
+	// The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
+	// The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
+	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
+	// The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
 	Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error)
 	// Unlink 删除指定父目录下的非目录项（解链）。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
@@ -193,6 +198,17 @@ type StorageServiceClient interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error)
+	// CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
+	// If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
+	// When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
+	// When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
+	// The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
+	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
+	// The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
+	// The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
+	// The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
+	// The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
+	CreateTmpfile(context.Context, *connect.Request[v1.CreateTmpfileRequest]) (*connect.Response[v1.CreateTmpfileResponse], error)
 	// Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
 	// 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -381,6 +397,12 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("Create")),
 			connect.WithClientOptions(opts...),
 		),
+		createTmpfile: connect.NewClient[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse](
+			httpClient,
+			baseURL+StorageServiceCreateTmpfileProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("CreateTmpfile")),
+			connect.WithClientOptions(opts...),
+		),
 		read: connect.NewClient[v1.ReadRequest, v1.ReadResponse](
 			httpClient,
 			baseURL+StorageServiceReadProcedure,
@@ -548,6 +570,7 @@ type storageServiceClient struct {
 	rmdir          *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
 	rename         *connect.Client[v1.RenameRequest, v1.RenameResponse]
 	create         *connect.Client[v1.CreateRequest, v1.CreateResponse]
+	createTmpfile  *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
 	read           *connect.Client[v1.ReadRequest, v1.ReadResponse]
 	write          *connect.Client[v1.WriteRequest, v1.WriteResponse]
 	fsync          *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
@@ -633,6 +656,11 @@ func (c *storageServiceClient) Rename(ctx context.Context, req *connect.Request[
 // Create calls storage.v1.StorageService.Create.
 func (c *storageServiceClient) Create(ctx context.Context, req *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error) {
 	return c.create.CallUnary(ctx, req)
+}
+
+// CreateTmpfile calls storage.v1.StorageService.CreateTmpfile.
+func (c *storageServiceClient) CreateTmpfile(ctx context.Context, req *connect.Request[v1.CreateTmpfileRequest]) (*connect.Response[v1.CreateTmpfileResponse], error) {
+	return c.createTmpfile.CallUnary(ctx, req)
 }
 
 // Read calls storage.v1.StorageService.Read.
@@ -794,11 +822,13 @@ type StorageServiceHandler interface {
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error)
-	// Link 为已有非目录 Inode 在目标父目录下创建硬链接。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在或源节点不存在/已解链，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若源节点为目录，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// Link creates a hard link in the target parent directory for an existing non-directory inode.
+	// It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
+	// Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
+	// The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
+	// The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
+	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
+	// The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
 	Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error)
 	// Unlink 删除指定父目录下的非目录项（解链）。
 	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
@@ -830,6 +860,17 @@ type StorageServiceHandler interface {
 	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
 	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
 	Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error)
+	// CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
+	// If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
+	// When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
+	// When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
+	// The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
+	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
+	// The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
+	// The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
+	// The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
+	// The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
+	CreateTmpfile(context.Context, *connect.Request[v1.CreateTmpfileRequest]) (*connect.Response[v1.CreateTmpfileResponse], error)
 	// Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
 	// 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
 	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
@@ -1014,6 +1055,12 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("Create")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceCreateTmpfileHandler := connect.NewUnaryHandler(
+		StorageServiceCreateTmpfileProcedure,
+		svc.CreateTmpfile,
+		connect.WithSchema(storageServiceMethods.ByName("CreateTmpfile")),
+		connect.WithHandlerOptions(opts...),
+	)
 	storageServiceReadHandler := connect.NewUnaryHandler(
 		StorageServiceReadProcedure,
 		svc.Read,
@@ -1190,6 +1237,8 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceRenameHandler.ServeHTTP(w, r)
 		case StorageServiceCreateProcedure:
 			storageServiceCreateHandler.ServeHTTP(w, r)
+		case StorageServiceCreateTmpfileProcedure:
+			storageServiceCreateTmpfileHandler.ServeHTTP(w, r)
 		case StorageServiceReadProcedure:
 			storageServiceReadHandler.ServeHTTP(w, r)
 		case StorageServiceWriteProcedure:
@@ -1295,6 +1344,10 @@ func (UnimplementedStorageServiceHandler) Rename(context.Context, *connect.Reque
 
 func (UnimplementedStorageServiceHandler) Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.Create is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) CreateTmpfile(context.Context, *connect.Request[v1.CreateTmpfileRequest]) (*connect.Response[v1.CreateTmpfileResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CreateTmpfile is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {

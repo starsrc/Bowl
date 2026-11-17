@@ -56,6 +56,41 @@ func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.Crea
 	}), nil
 }
 
+// CreateTmpfile allocates an anonymous regular-file inode with no directory entry.
+func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
+	msg := req.Msg
+	if err := validateWriteEpoch(msg.GetEpoch()); err != nil {
+		return nil, toConnectError(err)
+	}
+	if msg.GetUid() > math.MaxInt32 || msg.GetGid() > math.MaxInt32 {
+		return nil, toConnectError(store.ErrInvalid)
+	}
+	actor, err := s.control.Actor(ctx, msg.GetDiskId())
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, toConnectError(ctxErr)
+	}
+	attr, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: msg.GetParentIno(),
+		Mode:      msg.GetMode(),
+		UID:       msg.GetUid(),
+		GID:       msg.GetGid(),
+		Exclusive: msg.GetExclusive(),
+		Epoch:     msg.GetEpoch(),
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+
+	return connect.NewResponse(&storagev1.CreateTmpfileResponse{
+		Inode:               toProtoInode(&attr),
+		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
+		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+	}), nil
+}
+
 // Fsync 同步并持久化文件节点与句柄关联的状态。
 func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.FsyncRequest]) (*connect.Response[storagev1.FsyncResponse], error) {
 	msg := req.Msg

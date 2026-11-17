@@ -3,6 +3,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -276,4 +277,159 @@ func TestGivenFilesAndDirsWhenRenameOverwriteOrExchangeThenSemanticsPreserved(t 
 		OldParentIno: dirB.Ino, OldName: []byte("moved"),
 		NewParentIno: dirB.Ino, NewName: []byte("dst.txt"),
 	}), store.ErrNotDir)
+}
+
+func TestGivenUnpromotedTmpfileOrphansWhenPurgedOrCleanedThenResourcesReclaimed(t *testing.T) {
+	ctx := context.Background()
+	actor := openTestActor(t, &store.Options{DiskID: "tmpfile-purge-clean"})
+
+	// Given: unpromoted exclusive (0x02) and linkable (0x03) tmpfiles with data blocks and xattrs.
+	excl, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o600,
+		Exclusive: true,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile exclusive failed")
+	_, _, err = actor.Write(ctx, excl.Ino, 0, bytes.Repeat([]byte{0x21}, 4096))
+	require.NoErrorf(t, err, "Write exclusive tmpfile failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, excl.Ino, []byte("user.k1"), []byte("v1"), 0), "SetXattr exclusive failed")
+
+	linkable, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o644,
+		Exclusive: false,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile linkable failed")
+	_, _, err = actor.Write(ctx, linkable.Ino, 0, bytes.Repeat([]byte{0x31}, store.BlobSize+2048))
+	require.NoErrorf(t, err, "Write linkable tmpfile failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, linkable.Ino, []byte("user.k2"), []byte("v2"), 0), "SetXattr linkable failed")
+
+	// When: purging the exclusive tmpfile first, then cleaning all remaining orphans.
+	require.NoErrorf(t, actor.PurgeOrphanInode(ctx, excl.Ino), "PurgeOrphanInode on exclusive tmpfile failed")
+
+	// Then: exclusive tmpfile is gone, linkable tmpfile remains until CleanOrphans reclaims everything.
+	_, err = actor.GetAttr(ctx, excl.Ino)
+	require.ErrorIsf(t, err, store.ErrNotFound, "purged exclusive tmpfile must return ErrNotFound: got=%v", err)
+
+	hasOrphansMid, err := actor.HasOrphans()
+	require.NoErrorf(t, err, "HasOrphans mid check failed")
+	require.Truef(t, hasOrphansMid, "HasOrphans must remain true while linkable tmpfile exists")
+
+	stMid, err := actor.StatFS(ctx)
+	require.NoErrorf(t, err, "StatFS mid check failed")
+	require.Equalf(t, uint64(2), stMid.Files, "StatFS Files mid mismatch: want=2 got=%d", stMid.Files)
+	require.Equalf(t, uint64(store.BlobSize+2048), stMid.UsedBytes, "StatFS UsedBytes mid mismatch: want=%d got=%d", store.BlobSize+2048, stMid.UsedBytes)
+
+	require.NoErrorf(t, actor.CleanOrphans(ctx), "CleanOrphans failed")
+	_, err = actor.GetAttr(ctx, linkable.Ino)
+	require.ErrorIsf(t, err, store.ErrNotFound, "cleaned linkable tmpfile must return ErrNotFound: got=%v", err)
+
+	hasOrphansAfter, err := actor.HasOrphans()
+	require.NoErrorf(t, err, "HasOrphans after CleanOrphans failed")
+	require.Falsef(t, hasOrphansAfter, "HasOrphans must be false after CleanOrphans")
+
+	stAfter, err := actor.StatFS(ctx)
+	require.NoErrorf(t, err, "StatFS after CleanOrphans failed")
+	require.Zerof(t, stAfter.UsedBytes, "StatFS UsedBytes must return to 0: got=%d", stAfter.UsedBytes)
+	require.Equalf(t, uint64(1), stAfter.Files, "StatFS Files must return to 1: got=%d", stAfter.Files)
+}
+
+func TestGivenUnpromotedTmpfileOrphansWhenAdvanceEpochCalledThenOrphansReclaimed(t *testing.T) {
+	ctx := context.Background()
+	actor := openTestActor(t, &store.Options{DiskID: "tmpfile-advance-epoch"})
+
+	// Given: unpromoted exclusive (0x02) and linkable (0x03) tmpfiles with data and xattrs.
+	excl, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o600,
+		Exclusive: true,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile exclusive failed")
+	_, _, err = actor.Write(ctx, excl.Ino, 0, bytes.Repeat([]byte{0x41}, 8192))
+	require.NoErrorf(t, err, "Write exclusive tmpfile failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, excl.Ino, []byte("user.tag"), []byte("excl"), 0), "SetXattr exclusive failed")
+
+	linkable, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o644,
+		Exclusive: false,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile linkable failed")
+	_, _, err = actor.Write(ctx, linkable.Ino, 0, bytes.Repeat([]byte{0x42}, 8192))
+	require.NoErrorf(t, err, "Write linkable tmpfile failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, linkable.Ino, []byte("user.tag"), []byte("link"), 0), "SetXattr linkable failed")
+
+	// When: advancing the writer epoch.
+	epoch, _, err := actor.AdvanceEpoch(ctx)
+	require.NoErrorf(t, err, "AdvanceEpoch failed")
+	require.Equalf(t, uint64(1), epoch, "epoch mismatch: want=1 got=%d", epoch)
+
+	// Then: both tmpfiles and their accounting are reclaimed.
+	_, err = actor.GetAttr(ctx, excl.Ino)
+	require.ErrorIsf(t, err, store.ErrNotFound, "exclusive tmpfile must be reclaimed on AdvanceEpoch: got=%v", err)
+	_, err = actor.GetAttr(ctx, linkable.Ino)
+	require.ErrorIsf(t, err, store.ErrNotFound, "linkable tmpfile must be reclaimed on AdvanceEpoch: got=%v", err)
+
+	hasOrphans, err := actor.HasOrphans()
+	require.NoErrorf(t, err, "HasOrphans after AdvanceEpoch failed")
+	require.Falsef(t, hasOrphans, "HasOrphans must be false after AdvanceEpoch")
+
+	st, err := actor.StatFS(ctx)
+	require.NoErrorf(t, err, "StatFS after AdvanceEpoch failed")
+	require.Zerof(t, st.UsedBytes, "StatFS UsedBytes must return to 0: got=%d", st.UsedBytes)
+	require.Equalf(t, uint64(1), st.Files, "StatFS Files must return to 1: got=%d", st.Files)
+}
+
+func TestGivenCheckpointWithUnpromotedTmpfileOrphansWhenSanitizedThenStatFSRestored(t *testing.T) {
+	ctx := context.Background()
+	actor := openTestActor(t, &store.Options{DiskID: "tmpfile-sanitize-src"})
+
+	// Given: unpromoted exclusive (0x02) and linkable (0x03) tmpfiles with data blocks and xattrs.
+	excl, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o600,
+		Exclusive: true,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile exclusive failed")
+	_, _, err = actor.Write(ctx, excl.Ino, 0, bytes.Repeat([]byte{0x51}, 4096))
+	require.NoErrorf(t, err, "Write exclusive tmpfile failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, excl.Ino, []byte("user.tmp"), []byte("e"), 0), "SetXattr exclusive failed")
+
+	linkable, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
+		ParentIno: store.RootIno,
+		Mode:      store.S_IFREG | 0o644,
+		Exclusive: false,
+	})
+	require.NoErrorf(t, err, "CreateTmpfile linkable failed")
+	_, _, err = actor.Write(ctx, linkable.Ino, 0, bytes.Repeat([]byte{0x52}, 4096))
+	require.NoErrorf(t, err, "Write linkable tmpfile failed")
+	require.NoErrorf(t, actor.SetXattr(ctx, linkable.Ino, []byte("user.tmp"), []byte("l"), 0), "SetXattr linkable failed")
+
+	ckDir := filepath.Join(t.TempDir(), "ck")
+	ckStats, err := actor.Checkpoint(ctx, ckDir)
+	require.NoErrorf(t, err, "Checkpoint failed")
+	require.Truef(t, ckStats.HasOrphans, "checkpoint must report HasOrphans=true")
+	require.Equalf(t, uint64(3), ckStats.Inodes, "checkpoint Inodes mismatch: want=3 got=%d", ckStats.Inodes)
+	require.Equalf(t, uint64(8192), ckStats.LogicalBytes, "checkpoint LogicalBytes mismatch: want=8192 got=%d", ckStats.LogicalBytes)
+
+	// When: sanitizing the checkpoint directory.
+	sanitized, err := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
+		Dir:      ckDir,
+		CommitID: "tmpfile-sanitize",
+	})
+	require.NoErrorf(t, err, "SanitizeCheckpoint failed")
+
+	// Then: sanitized checkpoint reports UsedBytes=0 and Files=1, with all tmpfile orphans gone.
+	require.Zerof(t, sanitized.UsedBytes, "sanitized UsedBytes must be 0: got=%d", sanitized.UsedBytes)
+	require.Equalf(t, uint64(1), sanitized.Files, "sanitized Files must be 1: got=%d", sanitized.Files)
+
+	ro := openTestActor(t, &store.Options{Dir: ckDir, DiskID: "tmpfile-sanitize-ro", ReadOnly: true})
+	roOrphans, err := ro.HasOrphans()
+	require.NoErrorf(t, err, "read-only HasOrphans on sanitized checkpoint failed")
+	require.Falsef(t, roOrphans, "sanitized checkpoint must have HasOrphans=false")
+
+	_, err = ro.GetAttr(ctx, excl.Ino)
+	require.ErrorIsf(t, err, store.ErrNotFound, "exclusive tmpfile must not exist in sanitized checkpoint: got=%v", err)
+	_, err = ro.GetAttr(ctx, linkable.Ino)
+	require.ErrorIsf(t, err, store.ErrNotFound, "linkable tmpfile must not exist in sanitized checkpoint: got=%v", err)
 }

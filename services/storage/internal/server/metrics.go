@@ -52,6 +52,7 @@ var knownProcedures = map[string]string{
 	storagev1connect.StorageServiceRmdirProcedure:          storagev1connect.StorageServiceRmdirProcedure,
 	storagev1connect.StorageServiceRenameProcedure:         storagev1connect.StorageServiceRenameProcedure,
 	storagev1connect.StorageServiceCreateProcedure:         storagev1connect.StorageServiceCreateProcedure,
+	storagev1connect.StorageServiceCreateTmpfileProcedure:  storagev1connect.StorageServiceCreateTmpfileProcedure,
 	storagev1connect.StorageServiceReadProcedure:           storagev1connect.StorageServiceReadProcedure,
 	storagev1connect.StorageServiceWriteProcedure:          storagev1connect.StorageServiceWriteProcedure,
 	storagev1connect.StorageServiceFsyncProcedure:          storagev1connect.StorageServiceFsyncProcedure,

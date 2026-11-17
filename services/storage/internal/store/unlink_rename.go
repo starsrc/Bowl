@@ -136,6 +136,23 @@ func (s *StoreActor) hasOrphanMarker(reader pebbleReader, ino uint64) (bool, err
 	return true, closer.Close()
 }
 
+func (s *StoreActor) readOrphanKind(reader pebbleReader, ino uint64) (kind byte, ok bool, err error) {
+	var keyBuf [OrphanKeyLen]byte
+	putOrphanKey(keyBuf[:], ino)
+	val, closer, getErr := reader.Get(keyBuf[:])
+	if errors.Is(getErr, pebble.ErrNotFound) {
+		return 0, false, nil
+	}
+	if getErr != nil {
+		return 0, false, getErr
+	}
+	kind, decErr := DecodeOrphanKind(val)
+	if closeErr := closer.Close(); decErr != nil || closeErr != nil {
+		return 0, false, errors.Join(decErr, closeErr)
+	}
+	return kind, true, nil
+}
+
 func (s *StoreActor) buildInodeReclaimPlan(reader pebbleReader, ino uint64, target *Inode, hasInode bool) (inodeReclaimPlan, error) {
 	xattrKeys, err := s.collectXattrKeys(reader, ino)
 	if err != nil {

@@ -5,10 +5,12 @@ package e2e_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -53,6 +55,85 @@ func requireZeroDaemonHostStageOrTmpFDs(t *testing.T, daemonPID int, scene strin
 			strings.HasSuffix(target, " (deleted)") {
 			t.Fatalf("scene=%s pid=%d want=zero_host_stage_or_tmpfile_fd got_fd=%s->%s", scene, daemonPID, entry.Name(), target)
 		}
+	}
+}
+
+func openEINTR(path string, mode int, perm uint32) (int, error) {
+	for {
+		fd, err := unix.Open(path, mode, perm)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return fd, err
+	}
+}
+
+func writeEINTR(fd int, p []byte) (int, error) {
+	total := 0
+	for {
+		n, err := unix.Write(fd, p[total:])
+		if n > 0 {
+			total += n
+		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil || total == len(p) || n == 0 {
+			return total, err
+		}
+	}
+}
+
+func fallocateEINTR(fd int, mode uint32, off, length int64) error {
+	for {
+		err := unix.Fallocate(fd, mode, off, length)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return err
+	}
+}
+
+func fsyncEINTR(fd int) error {
+	for {
+		err := unix.Fsync(fd)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return err
+	}
+}
+
+func linkatEINTR(olddirfd int, oldpath string, newdirfd int, newpath string, flags int) error {
+	for {
+		err := unix.Linkat(olddirfd, oldpath, newdirfd, newpath, flags)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return err
+	}
+}
+
+func statfsEINTR(path string, buf *unix.Statfs_t) error {
+	for {
+		err := unix.Statfs(path, buf)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return err
+	}
+}
+
+func closeFDGuard(fd int) func() error {
+	var (
+		once sync.Once
+		err  error
+	)
+	return func() error {
+		once.Do(func() {
+			err = unix.Close(fd)
+		})
+		return err
 	}
 }
 
@@ -130,7 +211,7 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		}
 		writeDoneCh := make(chan writeResult, 1)
 		go func() {
-			n, wErr := unix.Write(int(f.Fd()), payload64K)
+			n, wErr := writeEINTR(int(f.Fd()), payload64K)
 			writeDoneCh <- writeResult{n: n, err: wErr}
 		}()
 
@@ -177,16 +258,17 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		mp, stopMount := mountWithCleanup(t, realEndpoint, diskID, "--mode", "sync")
 		defer stopMount()
 
-		fd, err := unix.Open(filepath.Join(mp, "quota.bin"), unix.O_CREAT|unix.O_RDWR|unix.O_TRUNC, 0o644)
+		fd, err := openEINTR(filepath.Join(mp, "quota.bin"), unix.O_CREAT|unix.O_RDWR|unix.O_TRUNC, 0o644)
 		require.NoError(t, err)
-		defer func() { _ = unix.Close(fd) }()
+		closeFD := closeFDGuard(fd)
+		defer func() { _ = closeFD() }()
 
 		// When the first 256 KiB write fits within quota and the second 512 KiB write exceeds quota.
-		n1, err1 := unix.Write(fd, deterministicPayload("quota-ok", 256*1024))
+		n1, err1 := writeEINTR(fd, deterministicPayload("quota-ok", 256*1024))
 		require.NoError(t, err1)
 		require.Equal(t, 256*1024, n1)
 
-		_, err2 := unix.Write(fd, deterministicPayload("quota-exceed", 512*1024))
+		_, err2 := writeEINTR(fd, deterministicPayload("quota-exceed", 512*1024))
 
 		// Then the failing write syscall returns ENOSPC synchronously.
 		require.ErrorIs(t, err2, syscall.ENOSPC, "scene=sync_quota_write want=ENOSPC got=%v", err2)
@@ -198,11 +280,12 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		mp, stopMount := mountWithCleanup(t, realEndpoint, diskID, "--mode", "sync")
 		defer stopMount()
 
-		fd, err := unix.Open(filepath.Join(mp, "fenced.bin"), unix.O_CREAT|unix.O_RDWR|unix.O_TRUNC, 0o644)
+		fd, err := openEINTR(filepath.Join(mp, "fenced.bin"), unix.O_CREAT|unix.O_RDWR|unix.O_TRUNC, 0o644)
 		require.NoError(t, err)
-		defer func() { _ = unix.Close(fd) }()
+		closeFD := closeFDGuard(fd)
+		defer func() { _ = closeFD() }()
 
-		n1, err1 := unix.Write(fd, []byte("before-fence"))
+		n1, err1 := writeEINTR(fd, []byte("before-fence"))
 		require.NoError(t, err1)
 		require.Equal(t, 12, n1)
 
@@ -223,7 +306,7 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 			}))
 		})
 
-		_, fenceErr := unix.Write(fd, []byte("after-fence"))
+		_, fenceErr := writeEINTR(fd, []byte("after-fence"))
 
 		// Then the failing write syscall returns EBUSY synchronously.
 		require.ErrorIs(t, fenceErr, syscall.EBUSY, "scene=sync_fenced_write want=EBUSY got=%v", fenceErr)
@@ -241,11 +324,13 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 
 	baseBytes, baseInodes := fetchDiskUsage(t, client, diskID)
 	var baseStatfs unix.Statfs_t
-	require.NoError(t, unix.Statfs(mp, &baseStatfs))
+	require.NoError(t, statfsEINTR(mp, &baseStatfs))
 
 	// Step 1 creates an unlinked 12 MiB O_TMPFILE on the server and reclaims quota on close.
-	unlinkedFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o600)
+	unlinkedFD, err := openEINTR(mp, unix.O_TMPFILE|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
+	closeUnlinked := closeFDGuard(unlinkedFD)
+	defer func() { _ = closeUnlinked() }()
 	writeRepeatedChunksFD(t, unlinkedFD, deterministicPayload("sync-unlinked-tmp-12m", 4_194_304), 3)
 
 	requireZeroDaemonHostStageOrTmpFDs(t, daemonPID, "sync_tmpfile_unlinked_open")
@@ -258,11 +343,11 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	require.Equal(t, baseBytes+12_582_912, openBytes, "scene=sync_tmpfile_server_bytes want=%d got=%d", baseBytes+12_582_912, openBytes)
 	require.Equal(t, baseInodes+1, openInodes, "scene=sync_tmpfile_server_inodes want=%d got=%d", baseInodes+1, openInodes)
 
-	require.NoError(t, unix.Close(unlinkedFD))
+	require.NoError(t, closeUnlinked())
 	require.Eventually(t, func() bool {
 		curBytes, curInodes := fetchDiskUsage(t, client, diskID)
 		var curStatfs unix.Statfs_t
-		if sfErr := unix.Statfs(mp, &curStatfs); sfErr != nil {
+		if sfErr := statfsEINTR(mp, &curStatfs); sfErr != nil {
 			return false
 		}
 		snap := fetchDebugStats(t, adminAddr)
@@ -276,11 +361,13 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	}, 5*time.Second, 20*time.Millisecond, "scene=sync_unlinked_tmpfile_reclaim want=quota_and_statfs_restored")
 
 	// Step 2 verifies that O_TMPFILE with O_EXCL rejects linkat with ENOENT and reclaims quota on close.
-	exclFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_EXCL|unix.O_RDWR, 0o600)
+	exclFD, err := openEINTR(mp, unix.O_TMPFILE|unix.O_EXCL|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
+	closeExcl := closeFDGuard(exclFD)
+	defer func() { _ = closeExcl() }()
 	writeFullFD(t, exclFD, deterministicPayload("sync-excl-4m", 4_194_304), 0)
 
-	exclLinkErr := unix.Linkat(
+	exclLinkErr := linkatEINTR(
 		unix.AT_FDCWD,
 		fmt.Sprintf("/proc/self/fd/%d", exclFD),
 		unix.AT_FDCWD,
@@ -288,7 +375,7 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 		unix.AT_SYMLINK_FOLLOW,
 	)
 	require.ErrorIs(t, exclLinkErr, syscall.ENOENT, "scene=sync_excl_linkat want=ENOENT got=%v", exclLinkErr)
-	require.NoError(t, unix.Close(exclFD))
+	require.NoError(t, closeExcl())
 
 	require.Eventually(t, func() bool {
 		curBytes, curInodes := fetchDiskUsage(t, client, diskID)
@@ -296,8 +383,10 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	}, 5*time.Second, 20*time.Millisecond, "scene=sync_excl_tmpfile_reclaim want=quota_restored")
 
 	// Step 3 writes 8 MiB, preallocates 2 MiB, punches a 512 KiB hole, calls fsync, and promotes via linkat.
-	promFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o640)
+	promFD, err := openEINTR(mp, unix.O_TMPFILE|unix.O_RDWR, 0o640)
 	require.NoError(t, err)
+	closeProm := closeFDGuard(promFD)
+	defer func() { _ = closeProm() }()
 
 	const (
 		writtenLen = 8_388_608
@@ -312,19 +401,19 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	clear(wantPromoted[holeOff : holeOff+holeLen])
 
 	writeFullFD(t, promFD, basePayload, 0)
-	require.NoError(t, unix.Fallocate(promFD, 0, writtenLen, prealloc))
-	require.NoError(t, unix.Fallocate(promFD, unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, holeOff, holeLen))
-	require.NoError(t, unix.Fsync(promFD))
+	require.NoError(t, fallocateEINTR(promFD, 0, writtenLen, prealloc))
+	require.NoError(t, fallocateEINTR(promFD, unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, holeOff, holeLen))
+	require.NoError(t, fsyncEINTR(promFD))
 
 	promotedPath := filepath.Join(mp, "promoted-sync-10m.bin")
-	require.NoError(t, unix.Linkat(
+	require.NoError(t, linkatEINTR(
 		unix.AT_FDCWD,
 		fmt.Sprintf("/proc/self/fd/%d", promFD),
 		unix.AT_FDCWD,
 		promotedPath,
 		unix.AT_SYMLINK_FOLLOW,
 	))
-	require.NoError(t, unix.Close(promFD))
+	require.NoError(t, closeProm())
 
 	require.Eventually(t, func() bool {
 		snap := fetchDebugStats(t, adminAddr)

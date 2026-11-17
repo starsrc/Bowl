@@ -318,9 +318,16 @@ func writeFullFD(t *testing.T, fd int, data []byte, offset int64) {
 	written := 0
 	for written < len(data) {
 		n, err := unix.Pwrite(fd, data[written:], offset+int64(written))
-		require.NoError(t, err)
+		if n > 0 {
+			written += n
+		}
+		if err != nil {
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			require.NoError(t, err)
+		}
 		require.Positive(t, n)
-		written += n
 	}
 }
 

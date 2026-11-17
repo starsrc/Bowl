@@ -154,6 +154,9 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 		return status
 	}
 
+	unlock := fs.inodeLocks.lock(input.Oldnodeid)
+	defer unlock()
+
 	epoch := fs.cache.version()
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
@@ -167,6 +170,9 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	}))
 	if err != nil {
 		return fs.ToStatus(err, cancel)
+	}
+	if fs.clearOrphan(input.Oldnodeid) {
+		fs.metrics.incTmpPromote()
 	}
 
 	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 0, resp.Msg.GetAttrTimeoutSeconds())

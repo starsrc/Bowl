@@ -98,7 +98,7 @@ func TestCreate与Open_校验标志位截断行为与缓存策略(t *testing.T) 
 	t.Run("只读挂载调用Create拦截并返回EROFS", func(t *testing.T) {
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		roFS := newTestRawFS(t, srv, withReadOnly(true))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var out fuse.CreateOut
 
 		// When
@@ -133,7 +133,7 @@ func TestCreate与Open_校验标志位截断行为与缓存策略(t *testing.T) 
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fileIno := srv.seedFile(1, "exist.txt", 0o644, []byte("old"))
-		roFS := newTestRawFS(t, srv, withReadOnly(true))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var out fuse.OpenOut
 
 		// When
@@ -150,7 +150,7 @@ func TestCreate与Open_校验标志位截断行为与缓存策略(t *testing.T) 
 		// Given
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fileIno := srv.seedFile(1, "exist.txt", 0o644, []byte("old"))
-		roFS := newTestRawFS(t, srv, withReadOnly(true))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var out fuse.OpenOut
 
 		// When

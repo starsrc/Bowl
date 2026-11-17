@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -65,7 +66,7 @@ type Config struct {
 	RootInode              *storagev1.Inode
 	EntryTimeoutSeconds    float64
 	AttrTimeoutSeconds     float64
-	ReadOnly               bool
+	Mode                   string
 	DirectIO               bool
 	AllowOther             bool
 	Debug                  bool
@@ -77,6 +78,31 @@ type Config struct {
 	Logger                 *slog.Logger
 	Metrics                *Metrics
 	TracerProvider         trace.TracerProvider
+}
+
+func normalizeMountMode(mode string) string {
+	if m := strings.ToLower(strings.TrimSpace(mode)); m != "" {
+		return m
+	}
+	return MountModeStaged
+}
+
+// EffectiveMode returns the normalized mount mode, defaulting an empty Mode to MountModeStaged.
+func (c *Config) EffectiveMode() string {
+	if c == nil {
+		return MountModeStaged
+	}
+	return normalizeMountMode(c.Mode)
+}
+
+// IsReadOnly reports whether the mount mode is MountModeRO.
+func (c *Config) IsReadOnly() bool {
+	return c.EffectiveMode() == MountModeRO
+}
+
+// IsStaged reports whether the mount mode is MountModeStaged.
+func (c *Config) IsStaged() bool {
+	return c.EffectiveMode() == MountModeStaged
 }
 
 type reclaimRetryItem struct {
@@ -133,6 +159,7 @@ type RawFS struct {
 //
 //nolint:gocritic // Config 按值传入，RawFS 持有独立副本，避免调用方后续突变
 func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
+	cfg.Mode = cfg.EffectiveMode()
 	if cfg.RootIno == 0 && cfg.RootInode != nil {
 		cfg.RootIno = cfg.RootInode.GetIno()
 	}
@@ -151,7 +178,7 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 		ephemeralRoot string
 		instanceDir   string
 	)
-	if !cfg.ReadOnly {
+	if cfg.IsStaged() {
 		if cfg.StageSize == 0 {
 			cfg.StageSize = DefaultStageSize
 		}
@@ -203,7 +230,7 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 	if cfg.RootInode != nil && cfg.RootInode.GetAttr() != nil {
 		fs.cache.putInode(fuse.FUSE_ROOT_ID, cfg.RootInode, cfg.EntryTimeoutSeconds, cfg.AttrTimeoutSeconds)
 	}
-	if !cfg.ReadOnly {
+	if cfg.IsStaged() {
 		var onStage func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
 		if cfg.AttrTimeoutSeconds > 0 {
 			onStage = func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp) {
@@ -507,7 +534,7 @@ func (fs *RawFS) ToKernelIno(serverIno uint64) uint64 {
 
 // CheckWritable 检查文件系统当前是否允许写操作。只读挂载时返回 EROFS。
 func (fs *RawFS) CheckWritable() fuse.Status {
-	if fs.cfg.ReadOnly {
+	if fs.cfg.IsReadOnly() {
 		return fuse.Status(syscall.EROFS)
 	}
 	return fuse.OK
@@ -755,6 +782,20 @@ func (fs *RawFS) markOrphanWithContext(ctx context.Context, ino uint64) {
 	fs.handles.MarkOrphanContext(ctx, ino)
 }
 
+// clearOrphan removes local orphan tracking when Link promotes a server-backed O_TMPFILE.
+func (fs *RawFS) clearOrphan(ino uint64) bool {
+	wasOrphan := fs.handles.IsOrphan(ino)
+	fs.stateMu.Lock()
+	if _, ok := fs.orphanInodes[ino]; ok {
+		wasOrphan = true
+		delete(fs.orphanInodes, ino)
+		delete(fs.orphanSpans, ino)
+	}
+	fs.stateMu.Unlock()
+	fs.handles.ClearOrphan(ino)
+	return wasOrphan
+}
+
 func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 	fs.stateMu.Lock()
 	_, exists := fs.orphanInodes[ino]
@@ -953,7 +994,7 @@ func (fs *RawFS) FillAttrOut(out *fuse.AttrOut, ino *storagev1.Inode, attrTimeou
 //nolint:gocritic // 既有公开签名按值接收 Config，本任务不变更对外契约
 func BuildMountOptions(cfg Config) *fuse.MountOptions {
 	options := []string{"default_permissions"}
-	if cfg.ReadOnly {
+	if cfg.IsReadOnly() {
 		options = append(options, "ro")
 	}
 

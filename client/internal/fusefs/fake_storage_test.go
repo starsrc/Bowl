@@ -28,11 +28,18 @@ import (
 
 var _ storagev1connect.StorageServiceClient = (*fakeStorage)(nil)
 
+const (
+	fakeOrphanUnlinked         byte = 0x01
+	fakeOrphanTmpfileExclusive byte = 0x02
+	fakeOrphanTmpfileLinkable  byte = 0x03
+)
+
 type fakeNode struct {
-	inode  *storagev1.Inode
-	data   []byte
-	link   []byte
-	xattrs map[string][]byte
+	inode      *storagev1.Inode
+	data       []byte
+	link       []byte
+	xattrs     map[string][]byte
+	orphanKind byte
 }
 
 type fakeStorageOption func(*fakeStorage)
@@ -79,6 +86,7 @@ type fakeStorage struct {
 	rmdirCalls         atomic.Int64
 	renameCalls        atomic.Int64
 	createCalls        atomic.Int64
+	createTmpfileCalls atomic.Int64
 	readCalls          atomic.Int64
 	writeCalls         atomic.Int64
 	fsyncCalls         atomic.Int64
@@ -108,6 +116,7 @@ type fakeStorage struct {
 	linkHook          func(context.Context, *storagev1.LinkRequest) error
 	readDirPlusHook   func(context.Context, *storagev1.ReadDirPlusRequest) ([]*storagev1.DirEntryPlus, error)
 	reclaimOrphanHook func(context.Context, *storagev1.ReclaimOrphanRequest) error
+	createTmpfileHook func(context.Context, *storagev1.CreateTmpfileRequest) (*storagev1.CreateTmpfileResponse, error)
 	renameHook        func(context.Context, *storagev1.RenameRequest) error
 	statFSHook        func(context.Context, *storagev1.StatFSRequest) error
 }
@@ -725,8 +734,24 @@ func (s *fakeStorage) Link(ctx context.Context, req *connect.Request[storagev1.L
 		}
 	}
 	name := string(req.Msg.GetNewName())
+	if name == "" {
+		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
+	}
+	if len(name) > fusefs.MaxFilenameBytes {
+		return nil, errnoError(connect.CodeInvalidArgument, "ENAMETOOLONG")
+	}
+	if name == "." || name == ".." {
+		return nil, errnoError(connect.CodeAlreadyExists, "EEXIST")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	parent := s.nodes[req.Msg.GetNewParentIno()]
+	if parent == nil || parent.inode.GetAttr().GetNlink() == 0 {
+		return nil, errnoError(connect.CodeNotFound, "ENOENT")
+	}
+	if parent.inode.GetAttr().GetMode()&syscall.S_IFMT != syscall.S_IFDIR {
+		return nil, errnoError(connect.CodeFailedPrecondition, "ENOTDIR")
+	}
 	src := s.nodes[req.Msg.GetIno()]
 	if src == nil {
 		return nil, errnoError(connect.CodeNotFound, "ENOENT")
@@ -734,17 +759,18 @@ func (s *fakeStorage) Link(ctx context.Context, req *connect.Request[storagev1.L
 	if src.inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
 		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
 	}
-	parent := s.nodes[req.Msg.GetNewParentIno()]
-	if parent == nil {
-		return nil, errnoError(connect.CodeNotFound, "ENOENT")
-	}
-	if parent.inode.GetAttr().GetMode()&syscall.S_IFMT != syscall.S_IFDIR {
-		return nil, errnoError(connect.CodeFailedPrecondition, "ENOTDIR")
+	if src.inode.GetAttr().GetNlink() == 0 {
+		if src.inode.GetAttr().GetMode()&syscall.S_IFMT != syscall.S_IFREG || src.orphanKind != fakeOrphanTmpfileLinkable {
+			return nil, errnoError(connect.CodeNotFound, "ENOENT")
+		}
 	}
 	if s.entries[req.Msg.GetNewParentIno()][name] != 0 {
 		return nil, errnoError(connect.CodeAlreadyExists, "EEXIST")
 	}
 	now := timestamppb.Now()
+	if src.inode.Attr.Nlink == 0 {
+		src.orphanKind = 0
+	}
 	src.inode.Attr.Nlink++
 	src.inode.Attr.Ctime = now
 	s.entries[req.Msg.GetNewParentIno()][name] = req.Msg.GetIno()
@@ -804,8 +830,12 @@ func (s *fakeStorage) Unlink(ctx context.Context, req *connect.Request[storagev1
 			node.inode.Attr.Nlink--
 		}
 		node.inode.Attr.Ctime = now
-		if node.inode.Attr.Nlink == 0 && !req.Msg.GetOpenInClient() {
-			delete(s.nodes, ino)
+		if node.inode.Attr.Nlink == 0 {
+			if req.Msg.GetOpenInClient() {
+				node.orphanKind = fakeOrphanUnlinked
+			} else {
+				delete(s.nodes, ino)
+			}
 		}
 	}
 	return connect.NewResponse(&storagev1.UnlinkResponse{}), nil
@@ -966,8 +996,12 @@ func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1
 			if dstNode.inode.Attr.Nlink > 0 {
 				dstNode.inode.Attr.Nlink--
 			}
-			if dstNode.inode.Attr.Nlink == 0 && !req.Msg.GetTargetOpenInClient() {
-				delete(s.nodes, dstIno)
+			if dstNode.inode.Attr.Nlink == 0 {
+				if req.Msg.GetTargetOpenInClient() {
+					dstNode.orphanKind = fakeOrphanUnlinked
+				} else {
+					delete(s.nodes, dstIno)
+				}
 			}
 		}
 	}
@@ -1505,17 +1539,87 @@ func (s *fakeStorage) ReclaimOrphan(ctx context.Context, req *connect.Request[st
 		}
 	}
 	s.mu.Lock()
-	delete(s.nodes, req.Msg.GetIno())
+	if node := s.nodes[req.Msg.GetIno()]; node != nil {
+		if node.inode.GetAttr().GetNlink() > 0 {
+			node.orphanKind = 0
+		} else {
+			delete(s.nodes, req.Msg.GetIno())
+		}
+	}
 	s.mu.Unlock()
 	return connect.NewResponse(&storagev1.ReclaimOrphanResponse{}), nil
 }
 
-// 以下控制面与旧版目录接口在 fusefs 数据面调用中属于 Fail Fast 违例。
-
-// CreateTmpfile fails fast on unexpected calls until fusefs adds O_TMPFILE support.
-func (s *fakeStorage) CreateTmpfile(context.Context, *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
-	return nil, s.failFast("CreateTmpfile")
+// CreateTmpfile allocates an unlinked regular-file inode and records its orphan kind.
+func (s *fakeStorage) CreateTmpfile(ctx context.Context, req *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
+	s.createTmpfileCalls.Add(1)
+	if err := s.recordCtx(ctx, "CreateTmpfile"); err != nil {
+		return nil, err
+	}
+	if err := s.checkDiskID("CreateTmpfile", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkEpoch("CreateTmpfile", req.Msg.GetEpoch()); err != nil {
+		return nil, err
+	}
+	if s.createTmpfileHook != nil {
+		resp, err := s.createTmpfileHook(ctx, req.Msg)
+		if err != nil {
+			return nil, err
+		}
+		if resp != nil {
+			return connect.NewResponse(resp), nil
+		}
+	}
+	if ftype := req.Msg.GetMode() & syscall.S_IFMT; ftype != 0 && ftype != syscall.S_IFREG {
+		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent := s.nodes[req.Msg.GetParentIno()]
+	if parent == nil || parent.inode.GetAttr().GetNlink() == 0 {
+		return nil, errnoError(connect.CodeNotFound, "ENOENT")
+	}
+	if parent.inode.GetAttr().GetMode()&syscall.S_IFMT != syscall.S_IFDIR {
+		return nil, errnoError(connect.CodeFailedPrecondition, "ENOTDIR")
+	}
+	gid := req.Msg.GetGid()
+	if parent.inode.GetAttr().GetMode()&syscall.S_ISGID != 0 {
+		gid = parent.inode.GetAttr().GetGid()
+	}
+	orphanKind := fakeOrphanTmpfileLinkable
+	if req.Msg.GetExclusive() {
+		orphanKind = fakeOrphanTmpfileExclusive
+	}
+	ino := s.allocInoLocked()
+	now := timestamppb.Now()
+	node := &fakeNode{
+		inode: &storagev1.Inode{
+			Ino:        ino,
+			Generation: 1,
+			Attr: &storagev1.InodeAttribute{
+				Mode:    syscall.S_IFREG | (req.Msg.GetMode() & 0o7777),
+				Nlink:   0,
+				Uid:     req.Msg.GetUid(),
+				Gid:     gid,
+				Blksize: 4096,
+				Atime:   now,
+				Mtime:   now,
+				Ctime:   now,
+			},
+		},
+		xattrs:     make(map[string][]byte),
+		orphanKind: orphanKind,
+	}
+	s.nodes[ino] = node
+	return connect.NewResponse(&storagev1.CreateTmpfileResponse{
+		Inode:               cloneProtoInode(node.inode),
+		EntryTimeoutSeconds: s.entryTTL,
+		AttrTimeoutSeconds:  s.attrTTL,
+	}), nil
 }
+
+// 以下控制面与旧版目录接口在 fusefs 数据面调用中属于 Fail Fast 违例。
 
 func (s *fakeStorage) ReadDir(context.Context, *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	return nil, s.failFast("ReadDir")
@@ -1575,9 +1679,9 @@ func (s *fakeStorage) MergeDisk(context.Context, *connect.Request[storagev1.Merg
 
 type rawFSOption func(*fusefs.Config)
 
-func withReadOnly(ro bool) rawFSOption {
+func withMode(mode string) rawFSOption {
 	return func(c *fusefs.Config) {
-		c.ReadOnly = ro
+		c.Mode = mode
 	}
 }
 

@@ -104,7 +104,7 @@ func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *te
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "ro-fh.txt", 0o644, []byte("abcdef"))
 		fs := newTestRawFS(t, srv)
-		roFS := newTestRawFS(t, srv, withReadOnly(true))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		rdHandle := mustOpenFile(t, fs, ino, syscall.O_RDONLY)
 
 		// When
@@ -136,7 +136,7 @@ func TestFallocate_空间预分配保持尺寸打洞与错误拦截(t *testing.T
 	// Given
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	fs := newTestRawFS(t, srv)
-	roFS := newTestRawFS(t, srv, withReadOnly(true))
+	roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 	rw := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "alloc.bin", syscall.O_RDWR, 0o644)
 	mustWriteAt(t, fs, rw.NodeId, rw.Fh, 0, []byte("HELLO-WORLD"))
 	rd := mustOpenFile(t, fs, rw.NodeId, syscall.O_RDONLY)
@@ -290,7 +290,7 @@ func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t
 	// Given
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))
 	fs := newTestRawFS(t, srv, withDirectIO(false))
-	roFS := newTestRawFS(t, srv, withReadOnly(true))
+	roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 	f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "flags.bin", syscall.O_RDWR, 0o644)
 
 	// When & Then: 1. 存在未刷盘 Stage 缓冲时调用不支持的 cmd，必须直接返回 ENOTTY 且不触发 Write RPC

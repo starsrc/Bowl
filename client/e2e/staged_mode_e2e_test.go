@@ -556,9 +556,11 @@ func TestStagedMode_FlagValidation_GivenInvalidArgsOrEnv_Exits2(t *testing.T) {
 		args []string
 	}{
 		{name: "LegacyROFlag", args: []string{"mount", "--endpoint", endpoint, "--ro", dummyID, invalidMP}},
-		{name: "InvalidModeSync", args: []string{"mount", "--endpoint", endpoint, "--mode", "sync", dummyID, invalidMP}},
+		{name: "InvalidModeBogus", args: []string{"mount", "--endpoint", endpoint, "--mode", "bogus", dummyID, invalidMP}},
 		{name: "ROWithStageSize", args: []string{"mount", "--endpoint", endpoint, "--mode", "ro", "--stage-size", "8MiB", dummyID, invalidMP}},
 		{name: "ROWithStageDir", args: []string{"mount", "--endpoint", endpoint, "--mode", "ro", "--stage-dir", "/tmp/x", dummyID, invalidMP}},
+		{name: "SyncWithStageSize", args: []string{"mount", "--endpoint", endpoint, "--mode", "sync", "--stage-size", "8MiB", dummyID, invalidMP}},
+		{name: "SyncWithStageDir", args: []string{"mount", "--endpoint", endpoint, "--mode", "sync", "--stage-dir", "/tmp/x", dummyID, invalidMP}},
 		{name: "StageSizeBelowMin", args: []string{"mount", "--endpoint", endpoint, "--stage-size", "1MiB", dummyID, invalidMP}},
 		{name: "StageDirNestedInMountpoint", args: []string{"mount", "--endpoint", endpoint, "--stage-dir", filepath.Join(invalidMP, "sub"), dummyID, invalidMP}},
 		{name: "StageDirEqualToMountpoint", args: []string{"mount", "--endpoint", endpoint, "--stage-dir", invalidMP, dummyID, invalidMP}},

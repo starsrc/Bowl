@@ -37,6 +37,9 @@ const (
 	// MountModeStaged 为默认读写挂载模式，启用有界本地磁盘暂存与异步上传流水线。
 	MountModeStaged = "staged"
 
+	// MountModeSync is the synchronous passthrough writable mount mode with no host-disk staging.
+	MountModeSync = "sync"
+
 	// MountModeRO 为只读挂载模式，不创建本地暂存目录，也不启动后台上传协程。
 	MountModeRO = "ro"
 

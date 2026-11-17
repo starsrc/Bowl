@@ -135,7 +135,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	if mode == syscall.O_ACCMODE {
 		return fuse.EINVAL
 	}
-	if fs.cfg.ReadOnly && (mode != syscall.O_RDONLY || input.Flags&syscall.O_TRUNC != 0) {
+	if fs.cfg.IsReadOnly() && (mode != syscall.O_RDONLY || input.Flags&syscall.O_TRUNC != 0) {
 		return fuse.Status(syscall.EROFS)
 	}
 	if _, st := fs.ToServerIno(input.NodeId); st != fuse.OK {
@@ -349,6 +349,9 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 			fs.readAhead.InvalidateInode(serverIno)
 			fs.clearDirty(serverIno)
 		}
+		fs.cache.invalidateInode(input.NodeId)
+		fs.forgetInodeSpecial(input.NodeId)
+		fs.caps.forget(input.NodeId)
 		fs.handles.ReleaseContext(opCtx, input.Fh)
 	} else {
 		if isRealServerIno {

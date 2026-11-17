@@ -408,7 +408,7 @@ func TestNewRawFS_ReadOnly模式_零目录零工作协程且写操作返回EROFS
 	// Given
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	roDir := filepath.Join(t.TempDir(), "ro-stage")
-	roFS := newTestRawFS(t, srv, withReadOnly(true), withStageDir(roDir))
+	roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO), withStageDir(roDir))
 	t.Cleanup(roFS.OnUnmount)
 
 	// When

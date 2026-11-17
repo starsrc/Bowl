@@ -359,7 +359,7 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		// Given
 		tp, exp := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(0, 0))
-		roFS := newTestRawFS(t, srv, withReadOnly(true), withTracerProvider(tp))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO), withTracerProvider(tp))
 
 		// When
 		var missOut fuse.EntryOut

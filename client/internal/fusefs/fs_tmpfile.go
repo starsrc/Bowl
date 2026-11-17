@@ -48,10 +48,10 @@ func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, no
 	m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, size, atime, mtime, extents)
 }
 
-// Tmpfile 在宿主机暂存目录创建匿名磁盘文件。
-func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
+// Tmpfile creates an anonymous temporary file via local staging in staged mode or StorageService.CreateTmpfile in sync mode.
+func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpTmpfile)
-	_, endSpan := fs.startFuseOp(OpTmpfile)
+	opCtx, endSpan := fs.startFuseOp(OpTmpfile)
 	defer func() {
 		endSpan(status)
 		fs.metrics.endOp(OpTmpfile, start, status, 0)
@@ -63,7 +63,8 @@ func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.Crea
 	if fs.isVirtualStatsIno(input.NodeId) {
 		return fuse.Status(syscall.ENOTDIR)
 	}
-	if _, st := fs.ToServerIno(input.NodeId); st != fuse.OK {
+	parentIno, st := fs.ToServerIno(input.NodeId)
+	if st != fuse.OK {
 		return st
 	}
 	mode := input.Flags & uint32(syscall.O_ACCMODE)
@@ -72,6 +73,9 @@ func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.Crea
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	if !fs.cfg.IsStaged() {
+		return fs.tmpfileSync(opCtx, cancel, parentIno, input, out)
+	}
 	ino, inode, status := fs.tmpMgr.Create(input.NodeId, input.Uid, input.Gid, input.Mode, input.Flags)
 	if status != fuse.OK {
 		return status
@@ -87,6 +91,47 @@ func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.Crea
 	out.Fh = fh
 	if fs.cfg.DirectIO {
 		out.OpenFlags = fuse.FOPEN_DIRECT_IO
+	}
+	return fuse.OK
+}
+
+func (fs *RawFS) tmpfileSync(opCtx context.Context, cancel <-chan struct{}, parentIno uint64, input *fuse.CreateIn, out *fuse.CreateOut) fuse.Status {
+	epoch := fs.cache.version()
+	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	defer cancelFunc()
+	resp, err := fs.client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
+		ParentIno: parentIno,
+		Mode:      syscall.S_IFREG | (input.Mode & 0o7777),
+		Uid:       input.Uid,
+		Gid:       input.Gid,
+		Exclusive: input.Flags&uint32(syscall.O_EXCL) != 0,
+		DiskId:    fs.cfg.DiskID,
+		Epoch:     fs.cfg.Epoch,
+	}))
+	if err != nil {
+		return fs.ToStatus(err, cancel)
+	}
+	inode := resp.Msg.GetInode()
+	if inode == nil || inode.GetAttr() == nil || inode.GetIno() == 0 {
+		return fuse.EIO
+	}
+	ino := fs.ToKernelIno(inode.GetIno())
+	isDir := inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
+	fh, status := fs.openHandle(ino, input.Flags, isDir)
+	if status != fuse.OK {
+		fs.markOrphanWithContext(opCtx, ino)
+		return status
+	}
+	fs.markOrphanWithContext(opCtx, ino)
+	fs.caps.markAbsent(ino)
+	fs.recordInodeSpecial(ino, inode)
+	fs.cache.putInodeAt(epoch, ino, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	fs.FillEntryOut(&out.EntryOut, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
+	out.Fh = fh
+	if fs.cfg.DirectIO {
+		out.OpenFlags = fuse.FOPEN_DIRECT_IO
+	} else {
+		out.OpenFlags = fuse.FOPEN_KEEP_CACHE
 	}
 	return fuse.OK
 }

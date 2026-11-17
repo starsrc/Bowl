@@ -72,6 +72,15 @@ flowchart TD
 
 屏障保证"索引不先于数据落盘"：`BlobRef` 指向的 `.pack` 字节在 WAL 同步返回前已 `fdatasync`。
 
+### 1.6 `opCreateTmpfile` and `Link` orphan promotion
+
+`StoreActor.CreateTmpfile`, defined at `namespace.go:265`, submits `opCreateTmpfile` from `actor.go:54`, whose `String` method returns `"create_tmpfile"` at `actor.go:87`. `isExternalWriteOp` at `actor.go:1395`, `validateCmd` at `actor.go:1437`, and `mutateCmd` at `actor.go:1484` process `opCreateTmpfile` under `WriterEpoch` fencing.
+
+- **Pre-queue validation.** `StoreActor.CreateTmpfile` rejects read-only actors with `ErrReadOnly`, rejects stale epochs early through `isDefinitelyStaleEpoch` and `submitStaleEpoch`, validates `ParentIno` with `validateNodeIno`, and resolves `Mode` and `Umask` with `resolveRegCreateMode` at `namespace.go:222`. Only type bits `0` or `S_IFREG` with mode `<= 0o177777` pass.
+- **Phase A validation.** `validateCreateTmpfileCmd` at `namespace.go:497` checks that `s.stat.NextWriteSeq` and `s.stat.Inodes` have not reached `math.MaxUint64`, reads `parent_ino` as a live directory via `readLiveDir` at `unlink_rename.go:43`, checks inode quota via `checkQuota(0, 1)`, and reserves an inode ID with `prepareIno`.
+- **Phase B mutation.** `mutateCreateTmpfileCmd` at `namespace.go:516` consumes the reserved inode ID, advances `s.stat.NextWriteSeq`, increments `s.stat.Inodes`, inherits `op.parent.GID` when `op.parent.Mode & S_ISGID != 0`, and writes an anonymous `S_IFREG` `Inode` with `ParentIno: 0`, `Nlink: 0`, `Size: 0`, `Flags: 0`, and `Generation: 1` via `BatchSetInodeDeferred`. It writes the 1-byte `orphan:<ino>` marker via `BatchSetOrphanKindDeferred` at `values.go:387`, storing `0x02` for `OrphanKindTmpfileExclusive` when `op.exclusive` is true or `0x03` for `OrphanKindTmpfileLinkable` when `op.exclusive` is false. No `entry:` key is written and the parent inode stays unchanged.
+- **Atomic promotion in `Link`.** In Phase A, `validateLinkCmd` at `namespace.go:556` inspects `target.Nlink == 0`. When `Nlink == 0`, it requires `target.Mode & S_IFMT == S_IFREG` and reads the marker via `readOrphanKind` at `unlink_rename.go:139` on `s.batch`. Any missing marker, `0x01` unlinked open handle, or `0x02` exclusive tmpfile fails with `ErrNotFound`. When `0x03` passes validation, `mutateLinkCmd` at `namespace.go:595` executes inside the same `IndexedBatch`, sets `op.target.Nlink` from `0` to `1`, updates `op.target` and `op.parent` metadata, writes the `Entry`, and deletes `orphan:<ino>` via `BatchDeleteOrphanDeferred` at `values.go:436`. Because `mutateCreateTmpfileCmd` already counted the inode, `mutateLinkCmd` does not increment `s.stat.Inodes`. Calling `s.overlayAtime(&op.target)` before building `op.attr` keeps pending `dirtyAtime` intact across promotion.
+
 ## 2. Pebble 键空间与值编码
 
 `NewPebbleOptions`（`actor.go:178`）自定义 `Comparer.Split = SplitKey`，使 `entry:`、`xattr:`、`data:` 的 8 字节父标识成为 Prefix Bloom 前缀，全部 7 层启用 `bloom.FilterPolicy(10)`。所有整数一律**大端序**，使字节序等于数值序，支持按前缀范围扫描。
@@ -85,10 +94,12 @@ flowchart TD
 | `inode` | `inode:` + 8B `ino` | 14 B | `Inode` | 93 B 头 + 变长 `SymlinkTarget` | `keys.go:13`、`values.go:15` |
 | `entry` | `entry:` + 8B `parent` + `:` + `name` | 15 B + 名称 | `Entry` | 13 B | `keys.go:14`、`values.go:14` |
 | `xattr` | `xattr:` + 8B `ino` + `:` + `name` | 15 B + 名称 | 原始字节 | 变长 | `keys.go:15` |
-| `orphan` | `orphan:` + 8B `ino` | 15 B | 标记字节 `0x01` | 1 B | `keys.go:16`、`values.go:367` |
+| `orphan` | `orphan:` + 8B `ino` | 15 B | 1-byte `OrphanKind`: `0x01` unlinked open handle, `0x02` exclusive tmpfile, `0x03` linkable tmpfile | 1 B | `keys.go:16`, `values.go:22-39`, `values.go:387-397` |
 | `data` | `data:` + 8B `ino` + `:` + 8B `blockIdx` | 22 B | `BlobRef` | 16 B | `keys.go:18`、`values.go:16` |
 
 扫描前缀：`EntryPrefix(parent)` 与 `XattrPrefix(ino)` 为 15 B，`DataPrefix(ino)` 为 14 B。
+
+The `orphan:<ino>` key stores a 1-byte `OrphanKind` discriminant defined at `values.go:22-26`. `OrphanKindUnlinked`, value `0x01`, marks an open-handle orphan from `Unlink` or overwrite `Rename`. `OrphanKindTmpfileExclusive`, value `0x02`, marks a non-linkable `CreateTmpfile` inode with `exclusive = true`, and `OrphanKindTmpfileLinkable`, value `0x03`, marks a linkable `CreateTmpfile` inode with `exclusive = false`. `DecodeOrphanKind` at `values.go:29` accepts only those three 1-byte payloads and returns `ErrInvalidValue` for any other length or byte value. `BatchSetOrphanKindDeferred` at `values.go:387` writes a given kind byte in place, and `BatchSetOrphanDeferred` at `values.go:395` defaults to `OrphanKindUnlinked`. `hasOrphanMarker` at `unlink_rename.go:126` checks key existence across all three kinds so `PurgeOrphanInode`, `CleanOrphans`, `AdvanceEpoch`, `SanitizeCheckpoint`, and `tree_merge.go` reclaim every orphan uniformly, while `readOrphanKind` at `unlink_rename.go:139` decodes the kind byte for `validateLinkCmd`.
 
 ### 2.2 值的二进制布局
 

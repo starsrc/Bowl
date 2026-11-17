@@ -14,10 +14,13 @@ Bowl 采用**单盘单写多读（SWMR）**挂载模型：同一时刻同一块�
 | :--- | :--- | :--- |
 | 引擎状态推进 | **只读探测**根目录 `RootIno = 1`，**不推进** `WriterEpoch` | 调用 `StoreActor.AdvanceEpoch`，原子递增 `WriterEpoch` 并 `pebble.Sync` 落盘 |
 | 返回 `epoch` 值 | 固定返回 `0` | 返回递增后的新 `WriterEpoch`（必为 `&gt;= 1`） |
-| 孤儿节点清理 | **不触发**孤儿清理 | **同步触发** `planCleanOrphans`，彻底清除上任写者崩溃残留的 `orphan:&lt;ino&gt;` 节点并扣减逻辑用量 |
+| 孤儿节点清理 | **不触发**孤儿清理 | Runs `planCleanOrphans` inside `AdvanceEpoch` to reclaim all `orphan:<ino>` records left behind by crashed clients, including unlinked open handles of kind `0x01` and unpromoted `CreateTmpfile` orphans of kinds `0x02` and `0x03`, and reduces `StatFS.Files` and `StatFS.UsedBytes` |
 | 租约淘汰策略 | 登记只读租约，与已有 RW / RO 租约共存 | 登记新 RW 租约，并立即淘汰内存中所有 `lease.epoch &lt; epoch` 的旧 RW 租约（**保留 RO 租约**） |
-| 服务端/客户端写保护 | 客户端在 `BuildMountOptions` 传入 `ro`，在 FUSE 层 `CheckWritable()` 直接拦截返回 `EROFS`，且不创建暂存目录或启动后台上传协程 | 所有写类 RPC（`Create`、`Write`、`Unlink`、`Rename`、`SetAttr`、`Fallocate`、`SetXattr`、`RemoveXattr`、`Fsync`、`FsyncDir`、`ReclaimOrphan` 等）必须携带当前 `epoch` |
+| 服务端/客户端写保护 | 客户端在 `BuildMountOptions` 传入 `ro`，在 FUSE 层 `CheckWritable()` 直接拦截返回 `EROFS`，且不创建暂存目录或启动后台上传协程 | All write RPCs must carry the active `epoch`, including `Create`, `CreateTmpfile`, `Mknod`, `Mkdir`, `Symlink`, `Link`, `Unlink`, `Rmdir`, `Rename`, `Write`, `SetAttr`, `Fallocate`, `SetXattr`, `RemoveXattr`, `Fsync`, `FsyncDir`, and `ReclaimOrphan` |
 | 共用响应参数 | 均颁发 UUIDv7 `mount_id`、`lease_ttl_seconds`（默认 `30s`）、`root_inode`、`entry_timeout_seconds` 及 `attr_timeout_seconds` | 同左 |
+
+> [!NOTE]
+> Under writable mounts, `CreateTmpfile` passes `validateWriteEpoch` on the RPC server and `isExternalWriteOp` in `StoreActor`, so stale-epoch tmpfile requests fail with `EBUSY`. When a new writer calls writable `MountDisk`, `AdvanceEpoch` runs `planCleanOrphans` to purge any unpromoted `0x02` and `0x03` tmpfiles alongside `0x01` unlinked open handles left by crashed clients.
 
 ### 挂载模式与本地磁盘暂存配置
 

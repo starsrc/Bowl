@@ -19,7 +19,6 @@
     <a href="#快速开始">快速开始</a> •
     <a href="#适用场景">适用场景</a> •
     <a href="#系统架构">系统架构</a> •
-    <a href="docs/index.md">开发手册</a> •
     <a href="#交流讨论">交流群</a> •
     <a href="https://github.com/starsrc/Bowl/issues">提交 Issue</a>
   </p>
@@ -100,10 +99,9 @@ flowchart LR
 | 工具 / 环境 | 用途与要求 | 备注 |
 | --- | --- | --- |
 | **Go `1.26.5`** | 编译各模块与运行测试 | 仓库强制 `GOWORK=off`（由 `Taskfile.yml` 注入） |
-| **Task (`go-task`)** | 统一任务编排 | 执行构建、容器栈、测试与文档脚本 |
+| **Task (`go-task`)** | 统一任务编排 | 执行构建、容器栈与测试任务 |
 | **Docker & Docker Compose v2** | 启动服务端与依赖栈 | PostgreSQL 18、Goose 迁移、Storage、Jaeger |
 | **Linux `/dev/fuse` + `fusermount3`** | 运行 `bowl mount` / `umount` | macOS 可编译 CLI 及运行容器化 Linux 测试，挂载需在 Linux 环境执行 |
-| **Node.js + npm** | 构建开发者文档（可选） | 仅运行 `task docs:*` 时需要 |
 
 ### 1. 启动服务端并编译客户端
 
@@ -163,7 +161,7 @@ task down
 
 ## 当前边界与非目标
 
-为了保持系统模型简洁并避免误用，以下边界已在设计与源码层面明确界定（详见 [能力全景](docs/01-overview/capabilities.md)）：
+为了保持系统模型简洁并避免误用，以下边界已在设计与源码层面明确界定：
 
 - **单写者约束**：同一磁盘同一时刻只允许一个读写挂载（后发起的读写挂载会递增 `writer_epoch` 并隔离旧写者）；多节点共享请使用 `--mode ro` 只读挂载或 `fork` 派生分支。
 - **本地进程内句柄与锁**：打开句柄表、`flock` / `fcntl` 建议锁与未具名 `O_TMPFILE` 句柄状态维护在单个客户端实例本地（写暂存分片与匿名临时文件存放在 `--stage-dir` 宿主机磁盘），不跨主机同步。
@@ -183,7 +181,6 @@ task down
 | `client/` | `bowl` CLI、Linux FUSE 客户端及容器化黑盒 E2E 测试 |
 | `deploy/` | `dev` / `prod` Docker Compose（`prod` 额外集成 Prometheus / Loki / Alloy / Grafana） |
 | `e2e/` · `benchmark/` | 跨服务 E2E 测试与 `pjdfstest` / `drive9` / `fork` / `juicefs` 基准套件 |
-| `docs/` | Bowl Developer Book（VitePress 站点与 RPC 文档生成脚本） |
 
 常用开发与测试命令（全部由 `Taskfile.yml` 管理）：
 
@@ -194,17 +191,7 @@ task test:client      # 在 Linux Docker 容器内编译并运行 client 单元�
 task test:client:e2e  # 拉起 storage-service 并在带 /dev/fuse 的容器内运行 FUSE 黑盒 E2E 测试
 task test:e2e         # 运行跨服务控制面/RPC E2E 测试
 task lint             # 全模块执行 buf lint 与 golangci-lint
-task docs:install && task docs:dev   # 生成最新 RPC 文档并启动本地 VitePress 文档预览
 ```
-
-## 文档导航
-
-完整系统设计、契约参考与二次开发指南请阅读 [Bowl Developer Book](docs/index.md)：
-
-- **全局认知**：[能力全景](docs/01-overview/capabilities.md) · [系统架构](docs/01-overview/architecture.md) · [快速开始](docs/01-overview/quickstart.md)
-- **功能规格**：[磁盘生命周期](docs/02-features/disk-lifecycle.md) · [派生、差异与三路合并](docs/02-features/fork-diff-merge.md) · [挂载租约与写栅栏](docs/02-features/mount-and-fencing.md) · [POSIX 语义与扩展属性](docs/02-features/posix-semantics.md)
-- **接口契约**：[CLI 命令参考](docs/03-interfaces/cli-reference.md) · [RPC 接口契约](docs/03-interfaces/rpc-api.md) · [可观测性与运维指标](docs/03-interfaces/observability.md)
-- **内部实现**：[Storage 控制面](docs/04-internals/storage-control-plane.md) · [Storage 存储引擎](docs/04-internals/storage-store-engine.md) · [Client 与 FUSE 流水线](docs/04-internals/client-fuse-pipeline.md) · [二次开发指南](docs/04-internals/extending-bowl.md)
 
 ## 参与贡献
 

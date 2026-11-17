@@ -22,7 +22,6 @@
 | --- | --- | --- |
 | `gen/**` | `task buf:generate` | `proto/storage/v1/storage.proto`、`buf.gen.yaml` |
 | `services/storage/internal/db/db.go`、`models.go`、`metadata.sql.go` | `task sqlc:generate` | `services/storage/db/migrations/`、`services/storage/db/queries/` |
-| `docs/03-interfaces/rpc-api.md` | `task docs:gen` | `proto/storage/v1/storage.proto`（由 `docs/scripts/gen-rpc-doc.mjs` 提取） |
 
 ## 3. 测试与质量守门
 
@@ -38,7 +37,6 @@
   - `.githooks/pre-commit` 按暂存区变更按需执行 `buf lint` 及对应模块的 `golangci-lint`（其中 `client` 固定以 `GOOS=linux CGO_ENABLED=0` 检查；`gen/*.go`、`pkg/*.go` 或 `.golangci.yml` 变更会联检全部三个模块）。
   - 手动全量检查执行 `task lint`。
 
-## 4. 契约与文档同步
+## 4. 契约同步
 
-- 修改 `proto/` 后须依次执行：`task buf:lint` → `task buf:generate` → `task docs:gen`。
-- 变更 CLI 子命令、RPC 接口、可观测性指标、核心架构或存储引擎实现时，必须同步更新 `docs/` 对应章节，并在全部页面就绪后执行 `task docs:build` 验证无死链与 Vue SFC 编译错误。
+- 修改 `proto/` 后须依次执行：`task buf:lint` → `task buf:generate`。

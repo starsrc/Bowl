@@ -130,11 +130,13 @@ type RawFS struct {
 	statsSnapshots map[uint64][]byte
 	// inodeLocks 按 Inode 粒度串行化 O_APPEND 定序与 Unlink/Release 孤儿标记。
 	inodeLocks inodeLocks
-	tmpMgr     *TmpFileManager
-	cfg        Config
-	metrics    *Metrics
-	tracer     trace.Tracer
-	nextReqID  atomic.Uint64
+	// topologySeq increments after Link, Unlink, or Rename mutates directory links.
+	topologySeq atomic.Uint64
+	tmpMgr      *TmpFileManager
+	cfg         Config
+	metrics     *Metrics
+	tracer      trace.Tracer
+	nextReqID   atomic.Uint64
 
 	releaseMu       sync.Mutex
 	releaseQueue    []reclaimRetryItem

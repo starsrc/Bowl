@@ -162,6 +162,8 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, inpu
 	if fs.tmpMgr.getFile(input.Oldnodeid) == nil {
 		return fuse.OK, false
 	}
+	unlock := fs.inodeLocks.lock(input.Oldnodeid)
+	defer unlock()
 	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
 	defer done()
 	epoch := fs.cache.version()
@@ -180,6 +182,11 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, inpu
 	fs.recordInodeSpecial(input.Oldnodeid, res.Inode)
 	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, res.Inode, 0, res.AttrTimeout)
 	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)
-	fs.cache.putInodeAt(epoch, input.Oldnodeid, res.Inode, res.EntryTimeout, res.AttrTimeout)
+	if res.Inode != nil && res.Inode.GetAttr() != nil {
+		fs.cache.putInodeAt(epoch, input.Oldnodeid, res.Inode, res.EntryTimeout, res.AttrTimeout)
+	} else {
+		fs.cache.invalidateInode(input.Oldnodeid)
+	}
+	fs.topologySeq.Add(1)
 	return fuse.OK, true
 }

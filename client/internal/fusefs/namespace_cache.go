@@ -445,6 +445,7 @@ func (c *NamespaceCache) putInodeAt(epoch, ino uint64, inode *storagev1.Inode, e
 	if epoch != ^uint64(0) && epoch != c.epoch {
 		return
 	}
+	c.mutations++
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 

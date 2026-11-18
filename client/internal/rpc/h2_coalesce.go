@@ -113,14 +113,21 @@ func writeFull(w io.Writer, buf []byte) (int, error) {
 
 func (c *h2CoalesceConn) flushOnTimer() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed || c.pendingLen == 0 || c.asyncErr != nil {
+		c.mu.Unlock()
 		return
 	}
 	hdrLen := c.pendingLen
 	c.pendingLen = 0
-	if _, err := writeFull(c.Conn, c.pendingBuf[:hdrLen]); err != nil {
+	_, err := writeFull(c.Conn, c.pendingBuf[:hdrLen])
+	if err != nil {
 		c.asyncErr = err
+	}
+	c.mu.Unlock()
+
+	if err != nil {
+		// Close c.Conn outside c.mu so http2ClientConn.readLoop aborts the stalled stream immediately.
+		_ = c.Conn.Close()
 	}
 }
 

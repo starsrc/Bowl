@@ -39,10 +39,10 @@ const (
 	// 确保单次 4 MiB + Protobuf 信封载荷无需流级 WINDOW_UPDATE 停顿即可完整接收。
 	HTTP2MaxReceiveBufferPerStream = 8 << 20
 
-	// HTTP2MaxReceiveBufferPerConnection 为单连接最大 HTTP/2 接收流控窗口基准上限 (128 MiB)。
-	HTTP2MaxReceiveBufferPerConnection = 128 << 20
+	// HTTP2ControlMaxReceiveBufferPerConnection sets the per-connection HTTP/2 receive window to 8 MiB for the control transport.
+	HTTP2ControlMaxReceiveBufferPerConnection = 8 << 20
 
-	// HTTP2MetaMaxReceiveBufferPerConnection 为专用元数据/控制面轻量连接的 HTTP/2 接收流控窗口上限 (32 MiB)。
+	// HTTP2MetaMaxReceiveBufferPerConnection sets the per-connection HTTP/2 receive window to 32 MiB for the metadata transport.
 	HTTP2MetaMaxReceiveBufferPerConnection = 32 << 20
 
 	// HTTP2DataMaxReceiveBufferPerConnection 为每条大块数据条带连接的 HTTP/2 接收流控窗口上限 (64 MiB)。
@@ -50,6 +50,12 @@ const (
 
 	// HTTP2DataConnectionShards 为客户端并发大块读写（Read/Write）条带化的独立 H2C/TLS 连接数。
 	HTTP2DataConnectionShards = 8
+
+	// HTTP2SendPingTimeout sets the idle read period before HTTP/2 sends a PING frame to 3 seconds.
+	HTTP2SendPingTimeout = 3 * time.Second
+
+	// HTTP2PingTimeout sets the wait duration for a PING acknowledgment before closing the connection to 2 seconds.
+	HTTP2PingTimeout = 2 * time.Second
 )
 
 // ClientConfig 定义 StorageServiceClient 的连接配置。
@@ -127,6 +133,8 @@ func newHTTPTransport(endpoint string, tlsConfig *tls.Config, maxRecvBufPerConn 
 		MaxReadFrameSize:              HTTP2MaxReadFrameSize,
 		MaxReceiveBufferPerStream:     HTTP2MaxReceiveBufferPerStream,
 		MaxReceiveBufferPerConnection: maxRecvBufPerConn,
+		SendPingTimeout:               HTTP2SendPingTimeout,
+		PingTimeout:                   HTTP2PingTimeout,
 	}
 
 	dialer := &net.Dialer{
@@ -177,35 +185,64 @@ func newHTTPTransport(endpoint string, tlsConfig *tls.Config, maxRecvBufPerConn 
 	return tlsTransport, nil
 }
 
-// isBulkDataProcedure 判断请求路径是否为大块数据面 RPC（Read / Write）。
+func matchesProcedure(urlPath string, procedures ...string) bool {
+	for _, proc := range procedures {
+		if urlPath == proc || strings.HasSuffix(urlPath, proc) {
+			return true
+		}
+	}
+	return false
+}
+
+// isControlProcedure reports whether urlPath matches a mount lifecycle RPC routed to the dedicated control transport.
+func isControlProcedure(urlPath string) bool {
+	return matchesProcedure(
+		urlPath,
+		storagev1connect.StorageServiceMountDiskProcedure,
+		storagev1connect.StorageServiceRenewMountProcedure,
+		storagev1connect.StorageServiceUnmountDiskProcedure,
+	)
+}
+
+// isBulkDataProcedure reports whether urlPath matches a bulk chunk transfer RPC routed across the 8 data shards.
 func isBulkDataProcedure(urlPath string) bool {
-	return urlPath == storagev1connect.StorageServiceReadProcedure ||
-		urlPath == storagev1connect.StorageServiceWriteProcedure ||
-		strings.HasSuffix(urlPath, storagev1connect.StorageServiceReadProcedure) ||
-		strings.HasSuffix(urlPath, storagev1connect.StorageServiceWriteProcedure)
+	return matchesProcedure(
+		urlPath,
+		storagev1connect.StorageServiceReadProcedure,
+		storagev1connect.StorageServiceWriteProcedure,
+		storagev1connect.StorageServiceReadCommitNodeProcedure,
+	)
 }
 
 type idleConnCloser interface {
 	CloseIdleConnections()
 }
 
-// shardedRoundTripper 将客户端传输物理隔离为 1 条专用元数据/控制轻量连接与 8 条独立大块数据连接：
-//   - Read / Write 大块流量通过原子轮询均匀打散到 8 条独立 H2C/TLS 连接，消除单连接 readLoop / writeSched 串行瓶颈；
-//   - Lookup / GetAttr / Create / Unlink / Fsync / ReadDirPlus 等元数据与屏障 RPC 走专用 metaTransport，彻底杜绝 4 MiB DATA 帧队头阻塞。
+// shardedRoundTripper isolates client HTTP/2 traffic across 1 control transport, 1 metadata transport, and 8 bulk data shards.
+// MountDisk, RenewMount, and UnmountDisk route to controlTransport, Read, Write, and ReadCommitNode round-robin across
+// 8 dataTransports, and all remaining metadata and disk RPCs route to metaTransport.
 type shardedRoundTripper struct {
-	metaTransport  http.RoundTripper
-	dataTransports [HTTP2DataConnectionShards]http.RoundTripper
-	nextDataShard  atomic.Uint64
+	controlTransport http.RoundTripper
+	metaTransport    http.RoundTripper
+	dataTransports   [HTTP2DataConnectionShards]http.RoundTripper
+	nextDataShard    atomic.Uint64
 }
 
 func newShardedRoundTripper(endpoint string, tlsConfig *tls.Config) (*shardedRoundTripper, error) {
-	metaTr, err := newHTTPTransport(endpoint, tlsConfig, HTTP2MetaMaxReceiveBufferPerConnection)
+	rt := &shardedRoundTripper{}
+	controlTr, err := newHTTPTransport(endpoint, tlsConfig, HTTP2ControlMaxReceiveBufferPerConnection)
 	if err != nil {
 		return nil, err
 	}
-	rt := &shardedRoundTripper{
-		metaTransport: metaTr,
+	rt.controlTransport = controlTr
+
+	metaTr, err := newHTTPTransport(endpoint, tlsConfig, HTTP2MetaMaxReceiveBufferPerConnection)
+	if err != nil {
+		rt.CloseIdleConnections()
+		return nil, err
 	}
+	rt.metaTransport = metaTr
+
 	for i := range HTTP2DataConnectionShards {
 		dataTr, trErr := newHTTPTransport(endpoint, tlsConfig, HTTP2DataMaxReceiveBufferPerConnection)
 		if trErr != nil {
@@ -218,9 +255,15 @@ func newShardedRoundTripper(endpoint string, tlsConfig *tls.Config) (*shardedRou
 }
 
 func (rt *shardedRoundTripper) selectTransport(req *http.Request) http.RoundTripper {
-	if req != nil && req.URL != nil && isBulkDataProcedure(req.URL.Path) {
-		idx := (rt.nextDataShard.Add(1) - 1) % HTTP2DataConnectionShards
-		return rt.dataTransports[idx]
+	if req != nil && req.URL != nil {
+		urlPath := req.URL.Path
+		if isControlProcedure(urlPath) {
+			return rt.controlTransport
+		}
+		if isBulkDataProcedure(urlPath) {
+			idx := (rt.nextDataShard.Add(1) - 1) % HTTP2DataConnectionShards
+			return rt.dataTransports[idx]
+		}
 	}
 	return rt.metaTransport
 }
@@ -229,8 +272,11 @@ func (rt *shardedRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return rt.selectTransport(req).RoundTrip(req)
 }
 
-// CloseIdleConnections 转发空闲连接清理至全部底层元数据与大块数据 Transport。
+// CloseIdleConnections forwards idle connection cleanup to the control, metadata, and all 8 bulk data transports.
 func (rt *shardedRoundTripper) CloseIdleConnections() {
+	if closer, ok := rt.controlTransport.(idleConnCloser); ok {
+		closer.CloseIdleConnections()
+	}
 	if closer, ok := rt.metaTransport.(idleConnCloser); ok {
 		closer.CloseIdleConnections()
 	}

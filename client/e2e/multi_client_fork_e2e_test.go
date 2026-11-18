@@ -6,9 +6,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -24,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/starsrc/bowl/client/internal/fusefs"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
@@ -500,4 +504,217 @@ func TestOnlineFork_RealGitCommitLoop(t *testing.T) {
 	require.Equal(t, strconv.Itoa(totalCommits+1), strings.TrimSpace(runGitCmd(t, repoDir, "rev-list", "--count", "HEAD")))
 	_, childLeakErr := os.Stat(filepath.Join(repoDir, "child_fork_1.txt"))
 	require.ErrorIs(t, childLeakErr, os.ErrNotExist)
+}
+
+func overwriteFileInPlace(t *testing.T, path string, data []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	written := 0
+	for written < len(data) {
+		n, wErr := f.Write(data[written:])
+		require.NoError(t, wErr)
+		written += n
+	}
+	require.NoError(t, f.Sync())
+	require.NoError(t, f.Close())
+}
+
+func tryReadFromStartFD(f *os.File, chunkSize int) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, chunkSize)
+	var out []byte
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			out = append(out, buf[:n]...)
+		}
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// TestMultiClient_ReadOnlyCacheCoherence verifies read-write and read-only metadata expiry,
+// kernel page-cache invalidation and retention, and read-ahead coherence across reopened and open file descriptors.
+func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	diskID := createTestDisk(t, client).GetDiskId()
+
+	// Given: RW mount seeds initial files, and RO buffered + RO DirectIO mounts open and cache them.
+	mpW, stopW := mountWithCleanup(t, endpoint, diskID)
+	defer stopW()
+
+	unchangedBytes := deterministicPayload("ro-unchanged", 256*1024)
+	unchangedOpenBytes := deterministicPayload("ro-unchanged-open", 256*1024)
+	smallV1 := []byte("small-v1-exact-len")
+	smallV2 := []byte("small-v2-exact-len")
+	smallOpenV1 := []byte("open-small-v1-payload")
+	smallOpenV2 := []byte("open-small-v2-payload")
+	appendBase := []byte("line-1\n")
+	appendTail := []byte("line-2\n")
+	const largeSize = 5 * 1024 * 1024
+	largeV1 := deterministicPayload("ro-large-v1", largeSize)
+	largeV2 := deterministicPayload("ro-large-v2", largeSize)
+	largeOpenV1 := deterministicPayload("ro-large-open-v1", largeSize)
+	largeOpenV2 := deterministicPayload("ro-large-open-v2", largeSize)
+	directOpenV1 := deterministicPayload("ro-direct-open-v1", largeSize)
+	directOpenV2 := deterministicPayload("ro-direct-open-v2", largeSize)
+
+	writeFullFile(t, filepath.Join(mpW, "unchanged.bin"), unchangedBytes, 64*1024)
+	writeFullFile(t, filepath.Join(mpW, "unchanged_open.bin"), unchangedOpenBytes, 64*1024)
+	writeFullFile(t, filepath.Join(mpW, "small_reopen.txt"), smallV1, len(smallV1))
+	writeFullFile(t, filepath.Join(mpW, "small_open.txt"), smallOpenV1, len(smallOpenV1))
+	writeFullFile(t, filepath.Join(mpW, "append.log"), appendBase, len(appendBase))
+	writeFullFile(t, filepath.Join(mpW, "to_unlink.txt"), []byte("gone-soon"), 9)
+	writeFullFile(t, filepath.Join(mpW, "rename_src.txt"), []byte("moved-content"), 13)
+	writeFullFile(t, filepath.Join(mpW, "large_reopen.bin"), largeV1, 512*1024)
+	writeFullFile(t, filepath.Join(mpW, "large_open.bin"), largeOpenV1, 512*1024)
+	writeFullFile(t, filepath.Join(mpW, "direct_open.bin"), directOpenV1, 512*1024)
+
+	mpRO, _, roAdminAddr, stopRO := startMountedDaemon(t, endpoint, diskID, "--mode", "ro")
+	defer stopRO()
+	mpRODirect, stopRODirect := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--direct-io")
+	defer stopRODirect()
+
+	// Warm negative lookup, directory cache, small/large files, and open descriptors on RO mounts.
+	_, missingErr := os.Stat(filepath.Join(mpRO, "late_created.txt"))
+	require.ErrorIs(t, missingErr, os.ErrNotExist)
+	_, dirErr := os.ReadDir(mpRO)
+	require.NoError(t, dirErr)
+
+	gotUnchanged, err := os.ReadFile(filepath.Join(mpRO, "unchanged.bin"))
+	require.NoError(t, err)
+	require.Equal(t, unchangedBytes, gotUnchanged)
+
+	unchangedOpenFD, err := os.Open(filepath.Join(mpRO, "unchanged_open.bin"))
+	require.NoError(t, err)
+	defer func() { _ = unchangedOpenFD.Close() }()
+	gotUnchangedOpen, err := tryReadFromStartFD(unchangedOpenFD, 64*1024)
+	require.NoError(t, err)
+	require.Equal(t, unchangedOpenBytes, gotUnchangedOpen)
+
+	gotSmallV1, err := os.ReadFile(filepath.Join(mpRO, "small_reopen.txt"))
+	require.NoError(t, err)
+	require.Equal(t, smallV1, gotSmallV1)
+
+	smallOpenFD, err := os.Open(filepath.Join(mpRO, "small_open.txt"))
+	require.NoError(t, err)
+	defer func() { _ = smallOpenFD.Close() }()
+	gotSmallOpenV1, err := tryReadFromStartFD(smallOpenFD, 4096)
+	require.NoError(t, err)
+	require.Equal(t, smallOpenV1, gotSmallOpenV1)
+
+	appendOpenFD, err := os.Open(filepath.Join(mpRO, "append.log"))
+	require.NoError(t, err)
+	defer func() { _ = appendOpenFD.Close() }()
+	gotAppendV1, err := tryReadFromStartFD(appendOpenFD, 4096)
+	require.NoError(t, err)
+	require.Equal(t, appendBase, gotAppendV1)
+
+	gotLargeV1, err := os.ReadFile(filepath.Join(mpRO, "large_reopen.bin"))
+	require.NoError(t, err)
+	require.Equal(t, sha256.Sum256(largeV1), sha256.Sum256(gotLargeV1))
+
+	largeOpenFD, err := os.Open(filepath.Join(mpRO, "large_open.bin"))
+	require.NoError(t, err)
+	defer func() { _ = largeOpenFD.Close() }()
+	gotLargeOpenV1, err := tryReadFromStartFD(largeOpenFD, 512*1024)
+	require.NoError(t, err)
+	require.Equal(t, sha256.Sum256(largeOpenV1), sha256.Sum256(gotLargeOpenV1))
+
+	directOpenFD, err := os.Open(filepath.Join(mpRODirect, "direct_open.bin"))
+	require.NoError(t, err)
+	defer func() { _ = directOpenFD.Close() }()
+	gotDirectOpenV1, err := tryReadFromStartFD(directOpenFD, 512*1024)
+	require.NoError(t, err)
+	require.Equal(t, sha256.Sum256(directOpenV1), sha256.Sum256(gotDirectOpenV1))
+
+	// When: RW mount creates, unlinks, renames, appends, and performs same-size in-place overwrites.
+	writeFullFile(t, filepath.Join(mpW, "late_created.txt"), []byte("fresh-entry"), 11)
+	require.NoError(t, os.Remove(filepath.Join(mpW, "to_unlink.txt")))
+	require.NoError(t, os.Rename(filepath.Join(mpW, "rename_src.txt"), filepath.Join(mpW, "rename_dst.txt")))
+
+	appendW, err := os.OpenFile(filepath.Join(mpW, "append.log"), os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	_, err = appendW.Write(appendTail)
+	require.NoError(t, err)
+	require.NoError(t, appendW.Sync())
+	require.NoError(t, appendW.Close())
+
+	overwriteFileInPlace(t, filepath.Join(mpW, "small_reopen.txt"), smallV2)
+	overwriteFileInPlace(t, filepath.Join(mpW, "small_open.txt"), smallOpenV2)
+	overwriteFileInPlace(t, filepath.Join(mpW, "large_reopen.bin"), largeV2)
+	overwriteFileInPlace(t, filepath.Join(mpW, "large_open.bin"), largeOpenV2)
+	overwriteFileInPlace(t, filepath.Join(mpW, "direct_open.bin"), directOpenV2)
+
+	// Then: RO mount observes create, unlink, rename, append, and overwrites on reopened and open fds within bounded TTL.
+	require.Eventually(t, func() bool {
+		b, rErr := os.ReadFile(filepath.Join(mpRO, "late_created.txt"))
+		return rErr == nil && string(b) == "fresh-entry"
+	}, 5*time.Second, 100*time.Millisecond, "RO must observe newly created file")
+
+	require.Eventually(t, func() bool {
+		_, uErr := os.Stat(filepath.Join(mpRO, "to_unlink.txt"))
+		return errors.Is(uErr, os.ErrNotExist)
+	}, 5*time.Second, 100*time.Millisecond, "RO must observe unlinked file removal")
+
+	require.Eventually(t, func() bool {
+		_, oldErr := os.Stat(filepath.Join(mpRO, "rename_src.txt"))
+		dst, newErr := os.ReadFile(filepath.Join(mpRO, "rename_dst.txt"))
+		return errors.Is(oldErr, os.ErrNotExist) && newErr == nil && string(dst) == "moved-content"
+	}, 5*time.Second, 100*time.Millisecond, "RO must observe renamed file")
+
+	wantAppended := append(append([]byte(nil), appendBase...), appendTail...)
+	require.Eventually(t, func() bool {
+		reopenGot, rErr := os.ReadFile(filepath.Join(mpRO, "append.log"))
+		openGot, oErr := tryReadFromStartFD(appendOpenFD, 4096)
+		return rErr == nil && oErr == nil && bytes.Equal(wantAppended, reopenGot) && bytes.Equal(wantAppended, openGot)
+	}, 5*time.Second, 100*time.Millisecond, "RO reopened and open fds must observe appended bytes")
+
+	require.Eventually(t, func() bool {
+		reopenGot, rErr := os.ReadFile(filepath.Join(mpRO, "small_reopen.txt"))
+		openGot, oErr := tryReadFromStartFD(smallOpenFD, 4096)
+		return rErr == nil && oErr == nil && bytes.Equal(smallV2, reopenGot) && bytes.Equal(smallOpenV2, openGot)
+	}, 5*time.Second, 100*time.Millisecond, "RO reopened and open fds must observe small same-size in-place overwrites")
+
+	wantLargeV2Sum := sha256.Sum256(largeV2)
+	wantLargeOpenV2Sum := sha256.Sum256(largeOpenV2)
+	require.Eventually(t, func() bool {
+		reopenGot, rErr := os.ReadFile(filepath.Join(mpRO, "large_reopen.bin"))
+		openGot, oErr := tryReadFromStartFD(largeOpenFD, 512*1024)
+		return rErr == nil && oErr == nil &&
+			sha256.Sum256(reopenGot) == wantLargeV2Sum &&
+			sha256.Sum256(openGot) == wantLargeOpenV2Sum
+	}, 5*time.Second, 100*time.Millisecond, "RO reopened and open fds must observe >=512 KiB same-size in-place overwrites")
+
+	wantDirectV2Sum := sha256.Sum256(directOpenV2)
+	require.Eventually(t, func() bool {
+		directGot, dErr := tryReadFromStartFD(directOpenFD, 512*1024)
+		return dErr == nil && sha256.Sum256(directGot) == wantDirectV2Sum
+	}, 5*time.Second, 100*time.Millisecond, "RO --direct-io open fd must refresh read-ahead window after same-size overwrite")
+
+	// And: Unchanged files keep kernel page cache across attr timeout revalidation and re-open.
+	time.Sleep(1200 * time.Millisecond)
+	snapBefore := fetchDebugStats(t, roAdminAddr)
+
+	reopenedUnchanged, err := os.ReadFile(filepath.Join(mpRO, "unchanged.bin"))
+	require.NoError(t, err)
+	require.Equal(t, unchangedBytes, reopenedUnchanged)
+
+	reReadOpenUnchanged, err := tryReadFromStartFD(unchangedOpenFD, 64*1024)
+	require.NoError(t, err)
+	require.Equal(t, unchangedOpenBytes, reReadOpenUnchanged)
+
+	snapAfter := fetchDebugStats(t, roAdminAddr)
+	require.Greater(t, snapAfter.FUSE.Ops[fusefs.OpGetAttr].Calls, snapBefore.FUSE.Ops[fusefs.OpGetAttr].Calls,
+		"kernel CAP_AUTO_INVAL_DATA must revalidate attr after AttrTimeoutSeconds")
+	require.Equal(t, snapBefore.FUSE.Ops[fusefs.OpRead].Calls, snapAfter.FUSE.Ops[fusefs.OpRead].Calls,
+		"unchanged files must retain kernel page cache with zero extra FUSE Read ops")
 }

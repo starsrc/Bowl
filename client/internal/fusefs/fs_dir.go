@@ -43,16 +43,16 @@ func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 }
 
 // readDirEntries 获取完整目录流；超出容量的目录按页读取且不进入缓存。
-func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{}, input *fuse.ReadIn) ([]*storagev1.DirEntryPlus, fuse.Status) {
+func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{}, input *fuse.ReadIn) (cachedDir, fuse.Status) {
 	if _, status := fs.checkedHandle(input.NodeId, input.Fh, true); status != fuse.OK {
-		return nil, status
+		return cachedDir{}, status
 	}
-	if entries, ok := fs.cache.dir(input.NodeId); ok {
-		return entries, fuse.OK
+	if cached, ok := fs.cache.dir(input.NodeId); ok {
+		return cached, fuse.OK
 	}
 	ino, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
-		return nil, status
+		return cachedDir{}, status
 	}
 	epoch, generation := fs.cache.snapshot()
 	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
@@ -73,30 +73,33 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			DiskId: fs.cfg.DiskID,
 		}))
 		if fs.cache.version() != epoch {
-			return nil, fuse.Status(syscall.ESTALE)
+			return cachedDir{}, fuse.Status(syscall.ESTALE)
 		}
 		if err != nil {
-			return nil, fs.ToStatus(err, cancel)
+			return cachedDir{}, fs.ToStatus(err, cancel)
 		}
 		page := resp.Msg.GetEntries()
 		for _, e := range page {
 			if e.GetNextOffset() <= offset {
-				return nil, fuse.EIO
+				return cachedDir{}, fuse.EIO
 			}
 			offset = e.GetNextOffset()
 			serverEntryIno := e.GetIno()
 			if e.GetInode() != nil {
+				if fs.cfg.IsReadOnly() {
+					fs.readAhead.ObserveInode(serverEntryIno, e.GetInode())
+				}
 				fs.stage.OverlayInode(serverEntryIno, e.GetInode())
 			}
 			e.Ino = fs.ToKernelIno(serverEntryIno)
 		}
 		entries = append(entries, page...)
 		if input.Offset != 0 || len(entries)+1 > fs.cache.capacity {
-			return entries, fuse.OK
+			return cachedDir{entries: entries}, fuse.OK
 		}
 		if len(page) < 512 {
 			fs.cache.putDirAtIf(generation, epoch, input.NodeId, entries)
-			return entries, fuse.OK
+			return cachedDir{entries: entries}, fuse.OK
 		}
 	}
 }
@@ -112,11 +115,11 @@ func (fs *RawFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.D
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	entries, status := fs.readDirEntries(opCtx, cancel, input)
+	res, status := fs.readDirEntries(opCtx, cancel, input)
 	if status != fuse.OK {
 		return status
 	}
-	for _, entry := range entries {
+	for _, entry := range res.entries {
 		if entry.GetNextOffset() <= input.Offset {
 			continue
 		}
@@ -142,11 +145,11 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	entries, status := fs.readDirEntries(opCtx, cancel, input)
+	res, status := fs.readDirEntries(opCtx, cancel, input)
 	if status != fuse.OK {
 		return status
 	}
-	for _, entry := range entries {
+	for i, entry := range res.entries {
 		if entry.GetNextOffset() <= input.Offset {
 			continue
 		}
@@ -162,7 +165,13 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 		if name == "." || name == ".." {
 			*eo = fuse.EntryOut{}
 		} else {
-			fs.FillEntryOut(eo, entry.GetInode(), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds())
+			entryTTL := entry.GetEntryTimeoutSeconds()
+			attrTTL := entry.GetAttrTimeoutSeconds()
+			if res.fromCache && fs.cfg.IsReadOnly() {
+				entryTTL = min(entryTTL, remainingSeconds(res.entryExpiryAt(i), res.nowNano))
+				attrTTL = min(attrTTL, remainingSeconds(res.attrExpiryAt(i), res.nowNano))
+			}
+			fs.FillEntryOut(eo, entry.GetInode(), entryTTL, attrTTL)
 			if entry.GetInode() != nil {
 				fs.stage.OverlayAttr(entry.GetInode().GetIno(), &eo.Attr)
 			}

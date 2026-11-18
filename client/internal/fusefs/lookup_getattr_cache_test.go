@@ -333,6 +333,7 @@ func TestGetAttr与StatFs_存在挂起写入时先排空写缓冲再查询远端
 func TestBuildMountOptions_按读写配置返回预期挂载选项(t *testing.T) {
 	// Given / When
 	rwOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-rw", Mode: fusefs.MountModeStaged, AllowOther: true})
+	syncOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-sync", Mode: fusefs.MountModeSync})
 	roOpts := fusefs.BuildMountOptions(fusefs.Config{DiskID: "disk-ro", Mode: fusefs.MountModeRO})
 
 	// Then
@@ -341,7 +342,10 @@ func TestBuildMountOptions_按读写配置返回预期挂载选项(t *testing.T)
 	require.Equal(t, []string{"default_permissions"}, rwOpts.Options)
 	require.Equal(t, []string{"default_permissions", "ro"}, roOpts.Options)
 	require.NotZero(t, rwOpts.ExtraCapabilities&fuse.CAP_HANDLE_KILLPRIV)
-	require.NotZero(t, rwOpts.DisabledCapabilities&(fuse.CAP_WRITEBACK_CACHE|fuse.CAP_AUTO_INVAL_DATA))
+	require.Equal(t, uint64(fuse.CAP_WRITEBACK_CACHE|fuse.CAP_AUTO_INVAL_DATA), rwOpts.DisabledCapabilities)
+	require.Equal(t, uint64(fuse.CAP_WRITEBACK_CACHE|fuse.CAP_AUTO_INVAL_DATA), syncOpts.DisabledCapabilities)
+	require.Equal(t, uint64(fuse.CAP_WRITEBACK_CACHE), roOpts.DisabledCapabilities)
+	require.Zero(t, roOpts.DisabledCapabilities&fuse.CAP_AUTO_INVAL_DATA, "RO mounts must allow CAP_AUTO_INVAL_DATA")
 }
 
 func TestLookup_远端返回空属性节点时兜底返回EIO(t *testing.T) {

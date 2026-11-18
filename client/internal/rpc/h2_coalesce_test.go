@@ -2,8 +2,15 @@ package rpc
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,10 +119,195 @@ func TestH2CoalesceConn_GivenTimerExpiresBeforeData_FlushesHeldHeadersAndPropaga
 	_, err := conn.Write(headers)
 	require.NoError(t, err)
 	createdTimer.Fire()
+	require.True(t, raw.IsClosed(), "timer-flush failure must close underlying conn immediately")
 	_, nextErr := conn.Write([]byte("next"))
 
 	// Then
 	require.ErrorIs(t, nextErr, boom)
+}
+
+type closeHookNetConn struct {
+	*recordingNetConn
+	onClose func()
+}
+
+func (c *closeHookNetConn) Close() error {
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return c.recordingNetConn.Close()
+}
+
+func TestH2CoalesceConn_GivenTimerFlushFailure_UnlocksMutexBeforeClosingConnAndPreservesAsyncErr(t *testing.T) {
+	// Given
+	boom := errors.New("broken pipe")
+	raw := &recordingNetConn{failAfter: 0, failErr: boom}
+	var conn net.Conn
+	var closeProbeErr error
+	var closeProbeTimedOut bool
+	var wg sync.WaitGroup
+
+	hooked := &closeHookNetConn{
+		recordingNetConn: raw,
+		onClose: func() {
+			done := make(chan error, 1)
+			wg.Go(func() {
+				_, writeErr := conn.Write([]byte("probe-during-close"))
+				done <- writeErr
+			})
+			timer := time.NewTimer(500 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case closeProbeErr = <-done:
+			case <-timer.C:
+				closeProbeTimedOut = true
+			}
+		},
+	}
+
+	var createdTimer *manualCoalesceTimer
+	conn = newH2CoalesceConnWithAfterFunc(hooked, func(_ time.Duration, f func()) coalesceTimer {
+		createdTimer = &manualCoalesceTimer{fn: f}
+		return createdTimer
+	})
+	headers := buildTestH2HeadersFrame(7, h2FlagHeadersEndHeaders, []byte("hdr"))
+
+	// When
+	_, err := conn.Write(headers)
+	require.NoError(t, err)
+	createdTimer.Fire()
+	wg.Wait()
+	closedByTimerFlush := raw.IsClosed()
+	require.NoError(t, conn.Close())
+	_, postCloseWriteErr := conn.Write([]byte("after-close"))
+
+	// Then
+	require.True(t, closedByTimerFlush, "flushOnTimer must close underlying conn on write error")
+	require.False(t, closeProbeTimedOut, "flushOnTimer must release c.mu before calling c.Conn.Close")
+	require.ErrorIs(t, closeProbeErr, boom)
+	require.ErrorIs(t, postCloseWriteErr, boom)
+}
+
+type failHoldableHeadersConn struct {
+	net.Conn
+	failErr  error
+	failures *atomic.Int64
+}
+
+func (c *failHoldableHeadersConn) Write(p []byte) (int, error) {
+	if isHoldableH2HeadersFrame(p) {
+		c.failures.Add(1)
+		return 0, c.failErr
+	}
+	return c.Conn.Write(p)
+}
+
+func startEchoH2CServer(t *testing.T) string {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+	return startH2CHTTPServer(t, handler)
+}
+
+func requireWarmupH2CGet(t *testing.T, client *http.Client, targetURL string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, readErr)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func doHangingPipePost(ctx context.Context, client *http.Client, targetURL string) error {
+	pr, pw := io.Pipe()
+	defer func() {
+		_ = pw.Close()
+		_ = pr.Close()
+	}()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, pr)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	return err
+}
+
+func requireFollowUpH2CPostsSucceed(t *testing.T, client *http.Client, targetURL string, count int) {
+	t.Helper()
+	for i := range count {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("follow-up"))
+		require.NoError(t, err, "follow-up request %d build", i)
+		resp, err := client.Do(req)
+		cancel()
+		require.NoError(t, err, "follow-up request %d do", i)
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.NoError(t, readErr, "follow-up request %d read body", i)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "follow-up request %d status", i)
+		require.Equal(t, "ok", string(body), "follow-up request %d body", i)
+	}
+}
+
+func TestH2CoalesceConn_GivenTimerFlushFailureOnRealH2CTransport_FailsFastAndRedialsOnce(t *testing.T) {
+	// Given
+	serverURL := startEchoH2CServer(t)
+	var dials atomic.Int64
+	var heldHeaderFailures atomic.Int64
+	boom := errors.New("injected timer-flush write failure")
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{
+		Protocols: &protocols,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			rawConn, dialErr := dialer.DialContext(ctx, network, addr)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			if dials.Add(1) == 1 {
+				return newH2CoalesceConn(&failHoldableHeadersConn{
+					Conn:     rawConn,
+					failErr:  boom,
+					failures: &heldHeaderFailures,
+				}), nil
+			}
+			return newH2CoalesceConn(rawConn), nil
+		},
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr}
+
+	// Complete the HTTP/2 SETTINGS handshake before testing held POST HEADERS.
+	requireWarmupH2CGet(t, client, serverURL)
+	require.Equal(t, int64(1), dials.Load())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// When
+	start := time.Now()
+	firstErr := doHangingPipePost(ctx, client, serverURL)
+	elapsed := time.Since(start)
+
+	// Then
+	require.Error(t, firstErr)
+	require.Equal(t, int64(1), heldHeaderFailures.Load(), "timer flush must hit the injected held HEADERS error")
+	require.Less(t, elapsed, time.Second, "stalled request must fail fast rather than wait for 3s timeout")
+	requireFollowUpH2CPostsSucceed(t, client, serverURL, 5)
+	require.Equal(t, int64(2), dials.Load(), "transport must redial once after timer-flush teardown")
 }
 
 func TestH2CoalesceConn_GivenTimerExpiresWithHealthyConn_FlushesHeldHeaders(t *testing.T) {

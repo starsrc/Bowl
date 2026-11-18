@@ -3,6 +3,7 @@ package rpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -479,4 +480,29 @@ func (t *manualCoalesceTimer) Fire() {
 	if fn != nil {
 		fn()
 	}
+}
+
+func startH2CHTTPServer(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	srv := &http.Server{
+		Handler:   handler,
+		Protocols: &protocols,
+	}
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- srv.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		serveErr := <-serveErrCh
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			t.Errorf("unexpected h2c server exit: %v", serveErr)
+		}
+	})
+	return "http://" + ln.Addr().String()
 }

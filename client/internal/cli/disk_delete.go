@@ -10,25 +10,12 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
-
-const diskDeleteUsageHelp = `用法:
-  bowl disk delete <disk-id> [flags]
-
-参数:
-  <disk-id>            目标虚拟磁盘 UUID（必填，非 Nil UUID）
-
-标志:
-  -y, --yes            跳过交互式确认提示，直接执行删除
-  --json               以 JSON 格式输出删除结果
-  --endpoint string    StorageService 基础地址 (默认读取 $BOWL_STORAGE_ENDPOINT 或 http://127.0.0.1:9000)
-  --token string       访问令牌 (默认读取 $BOWL_TOKEN)
-  -h, --help           查看帮助信息
-`
 
 type diskDeleteJSON struct {
 	DiskID  string `json:"disk_id"`
@@ -36,13 +23,17 @@ type diskDeleteJSON struct {
 }
 
 var diskDeleteSpec = diskSubcommandSpec{
-	name:        "delete",
-	usageHelp:   diskDeleteUsageHelp,
-	posArgLabel: "<disk-id>",
-	uuidLabel:   "disk-id",
-	spanName:    "cli.disk.delete",
-	timeout:     15 * time.Second,
-	newAdapter:  func() diskRequestAdapter { return &diskDeleteAdapter{} },
+	use:       "delete <disk-id>",
+	short:     "Delete a virtual disk",
+	args:      cobra.ExactArgs(1),
+	uuidLabel: "disk-id",
+	spanName:  "cli.disk.delete",
+	timeout:   15 * time.Second,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskDeleteAdapter{}
+		cmd.Flags().BoolVarP(&a.yes, "yes", "y", false, "Skip interactive confirmation prompt")
+		return a
+	},
 }
 
 type diskDeleteAdapter struct {
@@ -50,15 +41,7 @@ type diskDeleteAdapter struct {
 	yes    bool
 }
 
-func (a *diskDeleteAdapter) parseFlag(name, _ string, _ bool, _ []string, _ *int) (bool, error) {
-	if name == "y" || name == "yes" {
-		a.yes = true
-		return true, nil
-	}
-	return false, nil
-}
-
-func (a *diskDeleteAdapter) finalize(posArgs []string) (bool, error) {
+func (a *diskDeleteAdapter) finalize(_ *cobra.Command, posArgs []string) (bool, error) {
 	a.diskID = posArgs[0]
 	return false, nil
 }
@@ -68,34 +51,32 @@ func (a *diskDeleteAdapter) spanAttrs() []attribute.KeyValue {
 }
 
 func (a *diskDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIError {
-	// 步骤 1：本机挂载表快检
 	info, err := ports.findMountpoint(a.diskID)
 	if err != nil {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("检查本机挂载表失败: %v", err),
+			msg:      fmt.Sprintf("check local mount table: %v", err),
 		}
 	}
 	if info.Mounted {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("磁盘 %s 当前正在本机挂载点 %s 处于挂载状态，请先执行 bowl umount %s 卸载后再删除", a.diskID, info.Mountpoint, info.Mountpoint),
+			msg:      fmt.Sprintf("disk %s is currently mounted at %s; run bowl umount %s before deleting", a.diskID, info.Mountpoint, info.Mountpoint),
 		}
 	}
 
-	// 步骤 2：交互式二次确认
 	if !a.yes {
-		fmt.Fprintf(stderr, "确认删除虚拟磁盘 %s？此操作不可逆 [y/N]: ", a.diskID)
+		fmt.Fprintf(stderr, "Delete virtual disk %s? This action is irreversible [y/N]: ", a.diskID)
 		line, readErr := bufio.NewReader(ports.stdin).ReadString('\n')
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return &diskCLIError{
 				exitCode: 1,
-				msg:      fmt.Sprintf("读取终端确认输入失败: %v", readErr),
+				msg:      fmt.Sprintf("read confirmation input: %v", readErr),
 			}
 		}
 		answer := strings.ToLower(strings.TrimSpace(line))
 		if answer != "y" && answer != "yes" {
-			fmt.Fprintln(stderr, "操作已取消")
+			fmt.Fprintln(stderr, "Operation canceled")
 			return &diskCLIError{exitCode: 1}
 		}
 	}
@@ -110,11 +91,11 @@ func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.
 	if err != nil {
 		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
 			diskID:           a.diskID,
-			defaultOp:        "删除虚拟磁盘失败",
+			defaultOp:        "delete virtual disk failed",
 			checkInvalidArg:  true,
 			checkEBUSYReason: true,
 			preconditionMsg: func(id string, _ error) string {
-				return fmt.Sprintf("磁盘 %s 当前仍处于挂载状态（存在活跃客户端会话），请先卸载后再删除", id)
+				return fmt.Sprintf("disk %s is still mounted with an active client session; unmount it before deleting", id)
 			},
 		})
 	}
@@ -125,7 +106,7 @@ func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.
 			Deleted: true,
 		},
 		renderHuman: func(w io.Writer) {
-			fmt.Fprintf(w, "已删除虚拟磁盘 %s\n", a.diskID)
+			fmt.Fprintf(w, "Deleted virtual disk %s\n", a.diskID)
 		},
 	}, nil
 }

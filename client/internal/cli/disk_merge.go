@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
 	"github.com/starsrc/pkg/serverx"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -22,26 +23,6 @@ const (
 	maxMergeResolvePairs  = 4096
 	maxMergeResolveKeyLen = 4096
 )
-
-const diskMergeUsageHelp = `用法:
-  bowl disk merge <source-disk-id> --into <target-disk-id> [flags]
-
-参数:
-  <source-disk-id>        源虚拟磁盘 UUID（必填，非 Nil UUID）
-
-标志:
-  --into string           目标虚拟磁盘 UUID（必填，非 Nil UUID，且不能与源盘相同）
-  --strategy string       全局冲突解决策略: fail|ours|theirs (默认 fail)
-  --resolve string        按路径覆写冲突解决策略 <path>=ours|theirs (可重复指定)
-  --dry-run               仅执行冲突与容量预演检查，不实际修改目标盘
-  -f, --force             忽略在线挂载门禁强制执行合并
-  --size string           合并后目标盘新容量配额上限 (支持 B/K/KB/KiB/M/MB/MiB/G/GB/GiB/T/TB/TiB/P/PB/PiB)
-  -q, --quiet             静默模式，仅输出合并后的目标磁盘 ID
-  --json                  以 JSON 格式输出合并结果或冲突报告
-  --endpoint string       StorageService 基础地址 (默认读取 $BOWL_STORAGE_ENDPOINT 或 http://127.0.0.1:9000)
-  --token string          访问令牌 (默认读取 $BOWL_TOKEN)
-  -h, --help              查看帮助信息
-`
 
 type mergeConflictJSON struct {
 	Path   string               `json:"path"`
@@ -72,94 +53,57 @@ type diskMergeJSON struct {
 }
 
 var diskMergeSpec = diskSubcommandSpec{
-	name:        "merge",
-	usageHelp:   diskMergeUsageHelp,
-	posArgLabel: "<source-disk-id>",
-	uuidLabel:   "source-disk-id",
-	allowQuiet:  true,
-	spanName:    "cli.disk.merge",
-	timeout:     diskMergeTimeout,
-	newAdapter:  func() diskRequestAdapter { return &diskMergeAdapter{} },
+	use:        "merge <source-disk-id>",
+	short:      "Three-way merge changes from a source disk into a target disk",
+	args:       cobra.ExactArgs(1),
+	uuidLabel:  "source-disk-id",
+	allowQuiet: true,
+	spanName:   "cli.disk.merge",
+	timeout:    diskMergeTimeout,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskMergeAdapter{}
+		flags := cmd.Flags()
+		flags.StringVar(&a.intoRaw, "into", "", "Required target virtual disk UUID, distinct from source disk")
+		flags.StringVar(&a.strategyRaw, "strategy", "fail", "Global conflict resolution strategy: fail, ours, or theirs")
+		flags.StringArrayVar(&a.resolveRaw, "resolve", nil, "Per-path conflict strategy override as <path>=ours|theirs")
+		flags.BoolVar(&a.dryRun, "dry-run", false, "Run conflict and capacity checks without modifying target disk")
+		flags.BoolVarP(&a.force, "force", "f", false, "Ignore online mount guards and force merge")
+		flags.StringVar(&a.sizeRaw, "size", "", "New capacity quota limit for the target disk after merge")
+		return a
+	},
 }
 
 type diskMergeAdapter struct {
 	sourceDiskID   string
-	intoRaw        *string
+	intoRaw        string
 	targetDiskID   string
-	strategyRaw    *string
+	strategyRaw    string
 	strategy       storagev1.MergeStrategy
 	resolveRaw     []string
 	pathStrategies map[string]storagev1.MergeStrategy
 	dryRun         bool
 	force          bool
-	sizeRaw        *string
+	sizeRaw        string
 	sizePtr        *uint64
 }
 
-func (a *diskMergeAdapter) parseFlag(name, val string, hasVal bool, args []string, idx *int) (bool, error) {
-	switch name {
-	case "into":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.intoRaw = &v
-		return true, nil
-	case "strategy":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.strategyRaw = &v
-		return true, nil
-	case "resolve":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.resolveRaw = append(a.resolveRaw, v)
-		return true, nil
-	case "dry-run":
-		b, err := parseBoolFlag(val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.dryRun = b
-		return true, nil
-	case "f", "force":
-		b, err := parseBoolFlag(val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.force = b
-		return true, nil
-	case "size":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.sizeRaw = &v
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-func (a *diskMergeAdapter) finalize(posArgs []string) (bool, error) {
+func (a *diskMergeAdapter) finalize(cmd *cobra.Command, posArgs []string) (bool, error) {
 	a.sourceDiskID = posArgs[0]
-	if a.intoRaw == nil || strings.TrimSpace(*a.intoRaw) == "" {
-		return true, errors.New("必须指定 --into 参数")
+	flags := cmd.Flags()
+
+	if !flags.Changed("into") || strings.TrimSpace(a.intoRaw) == "" {
+		return true, errors.New("--into is required")
 	}
-	if _, err := parseNonNilUUID(*a.intoRaw, "target-disk-id"); err != nil {
+	if _, err := parseNonNilUUID(a.intoRaw, "target-disk-id"); err != nil {
 		return false, err
 	}
-	if *a.intoRaw == a.sourceDiskID {
-		return false, errors.New("目标磁盘不能与源磁盘相同")
+	if a.intoRaw == a.sourceDiskID {
+		return false, errors.New("target disk cannot be the same as source disk")
 	}
-	a.targetDiskID = *a.intoRaw
+	a.targetDiskID = a.intoRaw
 
-	if a.strategyRaw != nil {
-		strategy, err := parseMergeStrategy(*a.strategyRaw)
+	if flags.Changed("strategy") {
+		strategy, err := parseMergeStrategy(a.strategyRaw)
 		if err != nil {
 			return false, err
 		}
@@ -175,15 +119,15 @@ func (a *diskMergeAdapter) finalize(posArgs []string) (bool, error) {
 			}
 			a.pathStrategies[pathKey] = sideStrategy
 			if len(a.pathStrategies) > maxMergeResolvePairs {
-				return false, fmt.Errorf("--resolve 规则数量不能超过 %d 条", maxMergeResolvePairs)
+				return false, fmt.Errorf("--resolve rule count cannot exceed %d", maxMergeResolvePairs)
 			}
 		}
 	}
 
-	if a.sizeRaw != nil {
-		maxBytes, err := ParseSize(*a.sizeRaw)
+	if flags.Changed("size") {
+		maxBytes, err := ParseSize(a.sizeRaw)
 		if err != nil {
-			return false, fmt.Errorf("无效的 --size 参数: %w", err)
+			return false, fmt.Errorf("invalid --size: %w", err)
 		}
 		a.sizePtr = &maxBytes
 	}
@@ -199,22 +143,22 @@ func parseMergeStrategy(raw string) (storagev1.MergeStrategy, error) {
 	case "theirs":
 		return storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS, nil
 	default:
-		return storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("无效的 --strategy 参数 %q，可选值: fail, ours, theirs", raw)
+		return storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("invalid --strategy %q: must be fail, ours, or theirs", raw)
 	}
 }
 
 func parseResolveRule(raw string) (string, storagev1.MergeStrategy, error) {
 	sep := strings.LastIndex(raw, "=")
 	if sep <= 0 {
-		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("无效的 --resolve 参数 %q，格式必须为 <path>=ours|theirs", raw)
+		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("invalid --resolve %q: expected <path>=ours|theirs", raw)
 	}
 	pathKey := raw[:sep]
 	sideRaw := strings.ToLower(strings.TrimSpace(raw[sep+1:]))
 	if len(pathKey) > maxMergeResolveKeyLen {
-		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("--resolve 路径长度不能超过 %d 字节", maxMergeResolveKeyLen)
+		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("--resolve path cannot exceed %d bytes", maxMergeResolveKeyLen)
 	}
 	if strings.Contains(pathKey, "\x00") {
-		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, errors.New("--resolve 路径不能包含空字节 (NUL)")
+		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, errors.New("--resolve path cannot contain NUL bytes")
 	}
 	switch sideRaw {
 	case "ours":
@@ -222,7 +166,7 @@ func parseResolveRule(raw string) (string, storagev1.MergeStrategy, error) {
 	case "theirs":
 		return pathKey, storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS, nil
 	default:
-		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("无效的 --resolve 参数 %q，策略必须为 ours 或 theirs", raw)
+		return "", storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED, fmt.Errorf("invalid --resolve %q: strategy must be ours or theirs", raw)
 	}
 }
 
@@ -242,13 +186,13 @@ func (a *diskMergeAdapter) preRPC(ports diskPorts, _ io.Writer) *diskCLIError {
 	if err != nil {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("检查本机挂载表失败: %v", err),
+			msg:      fmt.Sprintf("check local mount table: %v", err),
 		}
 	}
 	if targetInfo.Mounted {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("目标磁盘 %s 当前正在本机挂载点 %s 处于挂载状态，请先执行 bowl umount %s 卸载后再合并", a.targetDiskID, targetInfo.Mountpoint, targetInfo.Mountpoint),
+			msg:      fmt.Sprintf("target disk %s is currently mounted at %s; run bowl umount %s before merging", a.targetDiskID, targetInfo.Mountpoint, targetInfo.Mountpoint),
 		}
 	}
 
@@ -256,13 +200,13 @@ func (a *diskMergeAdapter) preRPC(ports diskPorts, _ io.Writer) *diskCLIError {
 	if srcErr != nil {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("检查本机挂载表失败: %v", srcErr),
+			msg:      fmt.Sprintf("check local mount table: %v", srcErr),
 		}
 	}
 	if srcInfo.Mounted && !srcInfo.ReadOnly {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("源磁盘 %s 当前正在本机挂载点 %s 处于读写挂载状态，请先执行 bowl umount %s 卸载后再合并", a.sourceDiskID, srcInfo.Mountpoint, srcInfo.Mountpoint),
+			msg:      fmt.Sprintf("source disk %s is currently mounted read-write at %s; run bowl umount %s before merging", a.sourceDiskID, srcInfo.Mountpoint, srcInfo.Mountpoint),
 		}
 	}
 	return nil
@@ -359,28 +303,28 @@ func (a *diskMergeAdapter) mapMergeRPCError(err error) *diskCLIError {
 		if strings.Contains(lowerMsg, "source disk") || strings.Contains(lowerMsg, strings.ToLower(a.sourceDiskID)) {
 			return &diskCLIError{
 				exitCode: 1,
-				msg:      fmt.Sprintf("源磁盘 %s 当前处于读写挂载状态，请先执行 bowl umount 卸载后再合并（或使用 --force 强制合并）: %v", a.sourceDiskID, err),
+				msg:      fmt.Sprintf("source disk %s is currently mounted read-write; run bowl umount before merging or pass --force: %v", a.sourceDiskID, err),
 				cause:    err,
 			}
 		}
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("目标磁盘 %s 在合并期间发生并发写入或仍处于挂载状态，请先执行 bowl umount 卸载并重试: %v", a.targetDiskID, err),
+			msg:      fmt.Sprintf("target disk %s had concurrent writes or is still mounted; run bowl umount and retry: %v", a.targetDiskID, err),
 			cause:    err,
 		}
 	}
 	if isConnect && connectErr.Code() == connect.CodeResourceExhausted {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("目标磁盘 %s 容量配额不足，请通过 --size 扩容后重试: %v", a.targetDiskID, err),
+			msg:      fmt.Sprintf("target disk %s quota exceeded; expand with --size and retry: %v", a.targetDiskID, err),
 			cause:    err,
 		}
 	}
 	return mapDiskRPCError(err, diskRPCErrorPolicy{
-		defaultOp:       "合并虚拟磁盘失败",
+		defaultOp:       "merge virtual disks failed",
 		checkInvalidArg: true,
 		preconditionMsg: func(_ string, rpcErr error) string {
-			return fmt.Sprintf("合并前置条件校验失败: %v", rpcErr)
+			return fmt.Sprintf("merge precondition failed: %v", rpcErr)
 		},
 	})
 }
@@ -425,9 +369,9 @@ func toMergeConflictReportJSON(r *storagev1.MergeConflictReport) *mergeConflictR
 
 func renderDiskMergeHuman(w io.Writer, res *diskMergeJSON, disk *storagev1.Disk) {
 	if res.DryRun {
-		fmt.Fprintln(w, "[Dry Run] 合并预演通过，无未决冲突（未修改目标盘）")
+		fmt.Fprintln(w, "[Dry Run] Merge check passed with no unresolved conflicts; target disk was not modified")
 	} else {
-		fmt.Fprintln(w, "合并成功")
+		fmt.Fprintln(w, "Merged successfully")
 	}
 	fmt.Fprintf(w, "Source Disk:    %s\n", res.SourceDiskID)
 	fmt.Fprintf(w, "Target Disk:    %s\n", res.TargetDiskID)
@@ -452,9 +396,9 @@ func renderDiskMergeHuman(w io.Writer, res *diskMergeJSON, disk *storagev1.Disk)
 
 func renderMergeConflictHuman(w io.Writer, sourceDiskID, targetDiskID string, report *mergeConflictReportJSON, dryRun bool) {
 	if dryRun {
-		fmt.Fprintf(w, "[Dry Run] 合并预演中止 (ECONFLICT)，共检测到 %d 处未决冲突\n", report.TotalConflicts)
+		fmt.Fprintf(w, "[Dry Run] Merge check aborted with ECONFLICT: %d unresolved conflicts detected\n", report.TotalConflicts)
 	} else {
-		fmt.Fprintf(w, "错误: 合并中止 (ECONFLICT)，共检测到 %d 处未决冲突\n", report.TotalConflicts)
+		fmt.Fprintf(w, "Error: merge aborted with ECONFLICT: %d unresolved conflicts detected\n", report.TotalConflicts)
 	}
 	if report.LCACommitID != "" {
 		fmt.Fprintf(w, "LCA Commit: %s\n", report.LCACommitID)
@@ -477,15 +421,15 @@ func renderMergeConflictHuman(w io.Writer, sourceDiskID, targetDiskID string, re
 		_ = tw.Flush()
 	}
 	if report.ConflictsTruncated {
-		fmt.Fprintf(w, "\n注意: 冲突列表已截断，仅展示前 %d 条；完整清单请执行:\n  bowl disk diff %s --target %s --conflicts-only\n",
+		fmt.Fprintf(w, "\nNote: conflict list truncated to the first %d entries. Run this command for the full list:\n  bowl disk diff %s --target %s --conflicts-only\n",
 			len(report.Conflicts), sourceDiskID, targetDiskID)
 	}
 
-	fmt.Fprintf(w, "\n消解指导:\n"+
-		"  1. 若按文件级快速裁决，请补充 --resolve <path>=ours|theirs 或 --strategy ours|theirs 后重试。\n"+
-		"  2. 若需人工合并文本内容，建议先将目标盘变更合入分支盘并在本地挂载沙箱中编辑验证:\n"+
+	fmt.Fprintf(w, "\nResolution steps:\n"+
+		"  1. For file-level resolution, re-run with --resolve <path>=ours|theirs or --strategy ours|theirs.\n"+
+		"  2. For manual text conflict resolution, merge target changes into the source disk and edit in a local mount:\n"+
 		"     bowl disk merge %s --into %s --strategy ours\n"+
-		"     bowl mount %s <mountpoint>   # 编辑消解并验证\n"+
+		"     bowl mount %s <mountpoint>\n"+
 		"     bowl umount <mountpoint>\n"+
 		"     bowl disk merge %s --into %s\n",
 		targetDiskID, sourceDiskID,

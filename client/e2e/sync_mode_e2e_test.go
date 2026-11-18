@@ -147,17 +147,17 @@ func TestSyncMode_CLIFlagsAndAmbientEnv_RejectsExplicitStageFlagsWithExit2AndIgn
 
 	// Explicit --stage-size or --stage-dir under --mode=sync or BOWL_MOUNT_MODE=sync exits with code 2.
 	outFlagSize := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--mode", "sync", "--stage-size", "8MiB", dummyID, mp)
-	require.Contains(t, outFlagSize, "--mode sync 同步直通模式下不能指定 --stage-size")
+	require.Contains(t, outFlagSize, "--stage-size cannot be set when --mode is sync")
 
 	outFlagDir := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--mode=sync", "--stage-dir", "/tmp/sync-forbidden", dummyID, mp)
-	require.Contains(t, outFlagDir, "--mode sync 同步直通模式下不能指定 --stage-dir")
+	require.Contains(t, outFlagDir, "--stage-dir cannot be set when --mode is sync")
 
 	t.Setenv("BOWL_MOUNT_MODE", "  SyNc  ")
 	outEnvSize := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--stage-size", "8MiB", dummyID, mp)
-	require.Contains(t, outEnvSize, "--mode sync 同步直通模式下不能指定 --stage-size")
+	require.Contains(t, outEnvSize, "--stage-size cannot be set when --mode is sync")
 
 	outEnvDir := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--stage-dir", "/tmp/sync-forbidden", dummyID, mp)
-	require.Contains(t, outEnvDir, "--mode sync 同步直通模式下不能指定 --stage-dir")
+	require.Contains(t, outEnvDir, "--stage-dir cannot be set when --mode is sync")
 
 	// Mounting via BOWL_MOUNT_MODE ignores invalid BOWL_STAGE_SIZE and tmpfs BOWL_STAGE_DIR values.
 	diskID := createTestDisk(t, client).GetDiskId()

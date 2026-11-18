@@ -11,6 +11,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
+	github.com/spf13/cobra v1.10.2
 	github.com/starsrc/bowl v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
@@ -23,6 +24,11 @@ require (
 	golang.org/x/sys v0.49.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941
 	google.golang.org/protobuf v1.36.12
+)
+
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.9 // indirect
 )
 
 require (

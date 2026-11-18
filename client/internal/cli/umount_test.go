@@ -40,30 +40,58 @@ func TestUmount_GivenHelpAndInvalidArgs_ReturnsExpectedExitCodes(t *testing.T) {
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Contains(t, out, "bowl umount <mountpoint>")
+	require.Contains(t, out, "umount, unmount")
 
 	code, out, errOut = runCLI("unmount", "--help")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Contains(t, out, "bowl umount <mountpoint>")
+	require.Contains(t, out, "umount, unmount")
 
 	code, out, errOut = runCLI("umount")
 	require.Equal(t, 2, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "需要且仅需要 1 个位置参数")
+	require.Contains(t, errOut, "Error: accepts 1 arg(s), received 0")
 
 	code, out, errOut = runCLI("umount", "/mnt/a", "/mnt/b")
 	require.Equal(t, 2, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "需要且仅需要 1 个位置参数")
+	require.Contains(t, errOut, "Error: accepts 1 arg(s), received 2")
 
-	code, out, errOut = runCLI("umount", "--bogus", "/mnt/a")
-	require.Equal(t, 2, code)
+	for _, badArgs := range [][]string{
+		{"umount", "--bogus", "/mnt/a"},
+		{"umount", "--force=bad", "/mnt/a"},
+		{"umount", "-f=bad", "/mnt/a"},
+		{"umount", "-yes", "/mnt/a"},
+		{"umount", "--y", "/mnt/a"},
+		{"umount", "---json", "/mnt/a"},
+	} {
+		code, out, errOut = runCLI(badArgs...)
+		require.Equal(t, 2, code, "args=%v stderr=%s", badArgs, errOut)
+		require.Empty(t, out, "args=%v", badArgs)
+		require.Contains(t, errOut, "Error:", "args=%v", badArgs)
+	}
+}
+
+func TestUmount_GivenForceFalseFlag_PreservesNormalUnmountAndDrain(t *testing.T) {
+	// Given
+	mp := "/mnt/bowl-force-false"
+	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+
+	// When: --force=false must use normal -u rather than lazy -uz
+	code, out, errOut := runCLI("umount", "--force=false", mp)
+
+	// Then
+	require.Equal(t, 0, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, `未知标志 "--bogus"`)
+	require.Empty(t, errOut)
+	require.Equal(t, "/usr/bin/fusermount3", *binName)
+	require.Equal(t, []string{"-u", mp}, *binArgs)
 }
 
 func TestUmount_GivenUnmountedOrUnreadableMountInfo_ReturnsExit1(t *testing.T) {
-	// Given: 未挂载目录
+	// Given: not mounted
 	withMountInfoContent(t, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
 	// When
@@ -72,14 +100,14 @@ func TestUmount_GivenUnmountedOrUnreadableMountInfo_ReturnsExit1(t *testing.T) {
 	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "不是已挂载的文件系统")
+	require.Contains(t, errOut, "is not a mounted filesystem")
 
-	// Given: mountinfo 文件不可读
+	// Given: unreadable mountinfo
 	withUnreadableMountInfo(t)
 	code, out, errOut = runCLI("umount", "/mnt/not-mounted")
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "检查挂载点状态失败")
+	require.Contains(t, errOut, "failed to check mountpoint status")
 }
 
 func TestUmount_GivenFusermount3Available_ExecutesNormalAndForceArgs(t *testing.T) {
@@ -140,7 +168,7 @@ func TestUmount_GivenFusermountAndUmountFallbacks_SelectsExpectedToolAndFlags(t 
 }
 
 func TestUmount_GivenMissingToolOrToolFailure_ReturnsExit1WithErrorMessage(t *testing.T) {
-	// Given: 无可用卸载工具
+	// Given: no unmount tool available
 	mp := "/mnt/bowl-c"
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	withUmountToolStub(t, "none", "", nil, nil)
@@ -150,9 +178,9 @@ func TestUmount_GivenMissingToolOrToolFailure_ReturnsExit1WithErrorMessage(t *te
 
 	// Then
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "未找到系统卸载工具")
+	require.Contains(t, errOut, "no system unmount tool found")
 
-	// Given: 卸载工具执行报错
+	// Given: unmount tool returns failure
 	withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", []byte("device busy"), errors.New("exit status 1"))
 
 	// When
@@ -160,7 +188,7 @@ func TestUmount_GivenMissingToolOrToolFailure_ReturnsExit1WithErrorMessage(t *te
 
 	// Then
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "卸载执行失败")
+	require.Contains(t, errOut, "unmount failed")
 	require.Contains(t, errOut, "device busy")
 }
 
@@ -242,7 +270,7 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 
 	// Then
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "超时")
+	require.Contains(t, errOut, "timed out")
 
 	// Given: -f 强制卸载即使 mountMeta 仍存在也不等待，直接返回 0
 	_, statErr2 := os.Stat(metaPath2)

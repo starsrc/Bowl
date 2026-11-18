@@ -87,25 +87,28 @@ func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
 	requireHelpExit0(t, "bowl stats [mountpoint]", "stats", "-h")
 	requireHelpExit0(t, "bowl stats [mountpoint]", "stats", "--help")
 
-	requireCLIError2(t, "最多接受 1 个位置参数", "stats", "/mnt/a", "/mnt/b")
-	requireCLIError2(t, "--json 与 --raw 不能同时指定", "stats", "--json", "--raw")
-	requireCLIError2(t, `未知标志 "--bogus"`, "stats", "--bogus")
-	requireCLIError2(t, "--admin-addr 需要指定参数值", "stats", "--admin-addr")
-	requireCLIError2(t, "无效的 --admin-addr", "stats", "--admin-addr", "off")
-	requireCLIError2(t, "无效的 --admin-addr", "stats", "--admin-addr", "invalid-host")
+	requireCLIError2(t, "accepts at most 1 arg(s), received 2", "stats", "/mnt/a", "/mnt/b")
+	requireCLIError2(t, "--json and --raw cannot be used together", "stats", "--json", "--raw")
+	requireCLIError2(t, `unknown flag: --bogus`, "stats", "--bogus")
+	requireCLIError2(t, "flag needs an argument: --admin-addr", "stats", "--admin-addr")
+	requireCLIError2(t, "invalid --admin-addr", "stats", "--admin-addr", "off")
+	requireCLIError2(t, "invalid --admin-addr", "stats", "--admin-addr", "invalid-host")
+	requireCLIError2(t, "invalid --admin-addr", "stats", "--admin-addr", "")
+	requireCLIError2(t, "Error:", "stats", "--json=bad")
+	requireCLIError2(t, "Error:", "stats", "--raw=bad")
 }
 
 func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *testing.T) {
-	// Given: 空元数据目录
+	// Given: empty metadata directory
 	metaDir := t.TempDir()
 	withTempMountMetaDirs(t, metaDir)
 
-	// When / Then: 无活跃挂载
+	// When / Then: no active mounts
 	code, _, errOut := runCLI("stats")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "未发现活跃的 bowl 挂载")
+	require.Contains(t, errOut, "no active bowl mounts found")
 
-	// Given: 写入两个存活挂载，且另写入一个已死亡 PID 元数据应被自动忽略
+	// Given: two alive mounts and one dead PID metadata entry that must be ignored
 	_, err := writeMountMeta(&mountMeta{
 		Mountpoint: "/mnt/a",
 		PID:        os.Getpid(),
@@ -131,17 +134,17 @@ func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *tes
 	})
 	require.NoError(t, err)
 
-	// When / Then: 多挂载未指定路径报错，指定不存在挂载点也报错
+	// When / Then: ambiguous mounts fail and unknown mountpoint fails
 	code, _, errOut = runCLI("stats")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "发现多个活跃挂载")
+	require.Contains(t, errOut, "multiple active mounts found")
 	require.Contains(t, errOut, "/mnt/a")
 	require.Contains(t, errOut, "/mnt/b")
 	require.NotContains(t, errOut, "/mnt/dead")
 
 	code, _, errOut = runCLI("stats", "/mnt/missing")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "未找到挂载点")
+	require.Contains(t, errOut, "no active bowl mount process found for mountpoint")
 }
 
 func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(t *testing.T) {
@@ -172,7 +175,14 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=text", *lastURL)
 	require.NotEmpty(t, textOut)
 
-	// When: 通过符号链接指定挂载点输出 --json
+	// When: explicit --json=false and --raw=false keep text format
+	code, falseOut, errOut := runCLI("stats", "--json=false", "--raw=false")
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=text", *lastURL)
+	require.Contains(t, falseOut, "Uptime:")
+
+	// When: symlink mountpoint with --json
 	code, jsonOut, errOut := runCLI("stats", symMP, "--json")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -204,21 +214,21 @@ func TestStats_GivenDisabledAdminOrHTTPError_ReturnsExit1(t *testing.T) {
 
 	code, _, errOut := runCLI("stats")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "未开启管理面")
+	require.Contains(t, errOut, "admin endpoint is disabled")
 
-	// Given: 传输失败
+	// Given: transport error
 	withStatsErrorTransport(t, errors.New("connection refused"))
 	code, _, errOut = runCLI("stats", "--admin-addr", "127.0.0.1:19300")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "请求管理面 127.0.0.1:19300 失败")
+	require.Contains(t, errOut, "failed to query admin endpoint 127.0.0.1:19300")
 
-	// Given: 非 200 响应
+	// Given: non-200 HTTP response
 	withStatsMuxTransport(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
 	code, _, errOut = runCLI("stats", "--admin-addr", "127.0.0.1:19300")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "管理面返回 500")
+	require.Contains(t, errOut, "admin endpoint returned 500")
 }
 
 func TestAdminObservability_GivenBareOTLPEndpoint_NormalizesSchemeWithoutExternalDial(t *testing.T) {

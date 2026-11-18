@@ -20,30 +20,34 @@ const (
 )
 
 func TestDiskDiffMerge_GivenHelpAndRoutingArgs_ReturnsExpectedUsage(t *testing.T) {
-	// Given / When / Then: disk 总帮助包含 diff 与 merge
-	requireHelpExit0(t, "diff", "disk", "help")
-	requireHelpExit0(t, "merge", "disk", "help")
+	// Given / When / Then: disk help lists diff and merge
+	requireHelpExit0(t, "diff", "help", "disk")
+	requireHelpExit0(t, "merge", "help", "disk")
 
 	requireHelpExit0(t, "bowl disk diff <source-disk-id>", "disk", "diff", "-h")
-	requireHelpExit0(t, "bowl disk merge <source-disk-id> --into <target-disk-id>", "disk", "merge", "--help")
+	requireHelpExit0(t, "bowl disk merge <source-disk-id>", "disk", "merge", "--help")
 }
 
 func TestDiskDiff_GivenInvalidInputs_ReturnsExit2WithDiagnostics(t *testing.T) {
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "diff")
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "diff", testDiskID1, "extra")
-	requireCLIError2(t, "无效的 source-disk-id", "disk", "diff", "bad-uuid")
-	requireCLIError2(t, "无效的 source-disk-id", "disk", "diff", testNilUUID)
-	requireCLIError2(t, "未知标志", "disk", "diff", testDiskID1, "-q")
-	requireCLIError2(t, "无效的 target-disk-id", "disk", "diff", testDiskID1, "--target", "bad")
-	requireCLIError2(t, "无效的 target-disk-id", "disk", "diff", testDiskID1, "--target", testNilUUID)
-	requireCLIError2(t, "不能与源磁盘相同", "disk", "diff", testDiskID1, "--target", testDiskID1)
-	requireCLIError2(t, "必须为 [1, 1000] 范围内的整数", "disk", "diff", testDiskID1, "--limit", "0")
-	requireCLIError2(t, "必须为 [1, 1000] 范围内的整数", "disk", "diff", testDiskID1, "--limit", "1001")
-	requireCLIError2(t, "必须为 [1, 1000] 范围内的整数", "disk", "diff", testDiskID1, "--limit", "abc")
-	requireCLIError2(t, "不能包含空字节", "disk", "diff", testDiskID1, "--prefix", "bad\x00prefix")
-	requireCLIError2(t, "不能超过 4096 字节", "disk", "diff", testDiskID1, "--prefix", strings.Repeat("a", 4097))
-	requireCLIError2(t, "不能包含空字节", "disk", "diff", testDiskID1, "--page-token", "tok\x001")
-	requireCLIError2(t, "不能超过 4096 字节", "disk", "diff", testDiskID1, "--page-token", strings.Repeat("t", 4097))
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "diff")
+	requireCLIError2(t, "accepts 1 arg(s), received 2", "disk", "diff", testDiskID1, "extra")
+	requireCLIError2(t, "invalid source-disk-id", "disk", "diff", "bad-uuid")
+	requireCLIError2(t, "invalid source-disk-id", "disk", "diff", testNilUUID)
+	requireCLIError2(t, "unknown shorthand flag", "disk", "diff", testDiskID1, "-q")
+	requireCLIError2(t, "invalid target-disk-id", "disk", "diff", testDiskID1, "--target", "bad")
+	requireCLIError2(t, "invalid target-disk-id", "disk", "diff", testDiskID1, "--target", testNilUUID)
+	requireCLIError2(t, "cannot be the same as source disk", "disk", "diff", testDiskID1, "--target", testDiskID1)
+	requireCLIError2(t, "must be an integer in [1, 1000]", "disk", "diff", testDiskID1, "--limit", "0")
+	requireCLIError2(t, "must be an integer in [1, 1000]", "disk", "diff", testDiskID1, "--limit", "1001")
+	requireCLIError2(t, "Error:", "disk", "diff", testDiskID1, "--limit", "abc")
+	requireCLIError2(t, "cannot contain NUL", "disk", "diff", testDiskID1, "--prefix", "bad\x00prefix")
+	requireCLIError2(t, "cannot exceed 4096 bytes", "disk", "diff", testDiskID1, "--prefix", strings.Repeat("a", 4097))
+	requireCLIError2(t, "cannot contain NUL", "disk", "diff", testDiskID1, "--page-token", "tok\x001")
+	requireCLIError2(t, "cannot exceed 4096 bytes", "disk", "diff", testDiskID1, "--page-token", strings.Repeat("t", 4097))
+	requireCLIError2(t, "Error:", "disk", "diff", testDiskID1, "--conflicts-only=bad")
+	requireCLIError2(t, "Error:", "disk", "diff", testDiskID1, "-p=bad")
+	requireCLIError2(t, "Error:", "disk", "diff", testDiskID1, "--patch=bad")
+	requireCLIError2(t, "Error:", "disk", "diff", testDiskID1, "--json=bad")
 }
 
 func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testing.T) {
@@ -251,21 +255,49 @@ func TestDiskDiff_GivenPatchLargeFileOver4MiB_ReadsMultipleChunks(t *testing.T) 
 }
 
 func TestDiskMerge_GivenInvalidInputs_ReturnsExit2WithDiagnostics(t *testing.T) {
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "merge")
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "merge", testDiskID1, "extra", "--into", testDiskID2)
-	requireCLIError2(t, "无效的 source-disk-id", "disk", "merge", "bad", "--into", testDiskID2)
-	requireCLIError2(t, "必须指定 --into", "disk", "merge", testDiskID1)
-	requireCLIError2(t, "无效的 target-disk-id", "disk", "merge", testDiskID1, "--into", "bad")
-	requireCLIError2(t, "无效的 target-disk-id", "disk", "merge", testDiskID1, "--into", testNilUUID)
-	requireCLIError2(t, "不能与源磁盘相同", "disk", "merge", testDiskID1, "--into", testDiskID1)
-	requireCLIError2(t, "无效的 --strategy 参数", "disk", "merge", testDiskID1, "--into", testDiskID2, "--strategy", "auto")
-	requireCLIError2(t, "无效的 --resolve 参数", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "missing-eq")
-	requireCLIError2(t, "无效的 --resolve 参数", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "=ours")
-	requireCLIError2(t, "无效的 --resolve 参数", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "/a=fail")
-	requireCLIError2(t, "无效的 --resolve 参数", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "/a=bad")
-	requireCLIError2(t, "不能包含空字节", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "/a\x00b=ours")
-	requireCLIError2(t, "无效的 --size 参数", "disk", "merge", testDiskID1, "--into", testDiskID2, "--size", "0")
-	requireCLIError2(t, "不能同时使用", "disk", "merge", testDiskID1, "--into", testDiskID2, "-q", "--json")
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "merge")
+	requireCLIError2(t, "accepts 1 arg(s), received 2", "disk", "merge", testDiskID1, "extra", "--into", testDiskID2)
+	requireCLIError2(t, "invalid source-disk-id", "disk", "merge", "bad", "--into", testDiskID2)
+	requireCLIError2(t, "--into is required", "disk", "merge", testDiskID1)
+	requireCLIError2(t, "invalid target-disk-id", "disk", "merge", testDiskID1, "--into", "bad")
+	requireCLIError2(t, "invalid target-disk-id", "disk", "merge", testDiskID1, "--into", testNilUUID)
+	requireCLIError2(t, "cannot be the same as source disk", "disk", "merge", testDiskID1, "--into", testDiskID1)
+	requireCLIError2(t, "invalid --strategy", "disk", "merge", testDiskID1, "--into", testDiskID2, "--strategy", "auto")
+	requireCLIError2(t, "invalid --resolve", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "missing-eq")
+	requireCLIError2(t, "invalid --resolve", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "=ours")
+	requireCLIError2(t, "invalid --resolve", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "/a=fail")
+	requireCLIError2(t, "invalid --resolve", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "/a=bad")
+	requireCLIError2(t, "cannot contain NUL", "disk", "merge", testDiskID1, "--into", testDiskID2, "--resolve", "/a\x00b=ours")
+	requireCLIError2(t, "invalid --size", "disk", "merge", testDiskID1, "--into", testDiskID2, "--size", "0")
+	requireCLIError2(t, "cannot be used together", "disk", "merge", testDiskID1, "--into", testDiskID2, "-q", "--json")
+	requireCLIError2(t, "Error:", "disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run=bad")
+	requireCLIError2(t, "Error:", "disk", "merge", testDiskID1, "--into", testDiskID2, "-f=bad")
+	requireCLIError2(t, "Error:", "disk", "merge", testDiskID1, "--into", testDiskID2, "--force=bad")
+	requireCLIError2(t, "Error:", "disk", "merge", testDiskID1, "--into", testDiskID2, "-q=bad")
+	requireCLIError2(t, "Error:", "disk", "merge", testDiskID1, "--into", testDiskID2, "--json=bad")
+}
+
+func TestDiskMerge_GivenDryRunFalseAndForceFalse_EnforcesGuardsAndCommits(t *testing.T) {
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "src", 1<<30, 1024)
+	storage.seedDisk(testDiskID2, "tgt", 1<<30, 1024)
+	withDiskStorageFake(t, storage)
+	withMountInfoContent(t, "100 30 0:50 / /mnt/target rw - fuse.bowl bowl:"+testDiskID2+" rw\n")
+
+	code, out, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run=false", "--force=false")
+	require.Equal(t, 1, code)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "bowl umount /mnt/target")
+	require.Equal(t, 0, storage.mergeCalls)
+
+	withMissingMountInfo(t)
+	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run=false", "--force=false")
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Merged successfully")
+	require.Equal(t, 1, storage.mergeCalls)
+	require.False(t, storage.lastMergeReq.GetDryRun())
+	require.False(t, storage.lastMergeReq.GetForce())
 }
 
 func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce(t *testing.T) {
@@ -308,20 +340,20 @@ func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce
 	require.Equal(t, 3, storage.mergeCalls)
 	require.True(t, storage.lastMergeReq.GetForce())
 
-	// Given: mountinfo 不可读（非 dry-run 非 force）-> 拦截
+	// Given: unreadable mountinfo without dry-run or force -> blocks
 	withUnreadableMountInfo(t)
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "检查本机挂载表失败")
+	require.Contains(t, errOut, "check local mount table")
 	require.Equal(t, 3, storage.mergeCalls)
 
-	// Given: 仅源盘在本机处于 rw 挂载且未传 --force -> preRPC 直接拒绝并提示先执行 bowl umount
+	// Given: source disk mounted read-write locally without --force -> preRPC blocks and suggests bowl umount
 	withMountInfoContent(t, "101 30 0:51 / /mnt/source rw,nosuid - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "读写挂载")
+	require.Contains(t, errOut, "mounted read-write")
 	require.Contains(t, errOut, "bowl umount /mnt/source")
 	require.Equal(t, 3, storage.mergeCalls)
 
@@ -580,7 +612,7 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// EBUSY on CodeAborted (目标盘挂载/并发写入)
+	// EBUSY on CodeAborted for target disk concurrent write or mount
 	ebusyErr := connect.NewError(connect.CodeAborted, errors.New("concurrent write on target disk"))
 	ebusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
 	require.NoError(t, err)
@@ -588,10 +620,10 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 	storage.forcedErr["MergeDisk"] = ebusyErr
 	code, _, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "目标磁盘")
-	require.Contains(t, errOut, "并发写入或仍处于挂载状态")
+	require.Contains(t, errOut, "target disk")
+	require.Contains(t, errOut, "concurrent writes or is still mounted")
 
-	// EBUSY on CodeAborted (源盘读写挂载)
+	// EBUSY on CodeAborted for source disk read-write mount
 	srcBusyErr := connect.NewError(connect.CodeAborted, errors.New("source disk "+testDiskID1+" is currently mounted read-write"))
 	srcBusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
 	require.NoError(t, err)
@@ -599,25 +631,25 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 	storage.forcedErr["MergeDisk"] = srcBusyErr
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "源磁盘")
-	require.Contains(t, errOut, "读写挂载状态")
+	require.Contains(t, errOut, "source disk")
+	require.Contains(t, errOut, "mounted read-write")
 	require.Contains(t, errOut, "bowl umount")
 
 	// CodeResourceExhausted
 	storage.forcedErr["MergeDisk"] = connect.NewError(connect.CodeResourceExhausted, errors.New("quota exceeded"))
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "容量配额不足")
+	require.Contains(t, errOut, "quota exceeded")
 
 	// CodeInvalidArgument -> exit 2
 	storage.forcedErr["MergeDisk"] = connect.NewError(connect.CodeInvalidArgument, errors.New("invalid arg"))
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 2, code)
-	require.Contains(t, errOut, "无效的请求参数")
+	require.Contains(t, errOut, "invalid request argument")
 }
 
 func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts(t *testing.T) {
-	// Given: dry-run 检测到未决冲突时服务端正常返回带 ConflictReport 的 MergeDiskResponse（Disk 为 nil）
+	// Given: dry-run returns ConflictReport with nil Disk
 	storage := newFakeStorage()
 	storage.mergeResponse = &storagev1.MergeDiskResponse{
 		LcaCommitId:        testCommitID1,
@@ -640,17 +672,17 @@ func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: 人类可读模式
+	// When: human mode
 	code, out, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run")
 
 	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "[Dry Run]")
-	require.Contains(t, errOut, "未决冲突")
+	require.Contains(t, errOut, "unresolved conflicts")
 	require.Contains(t, errOut, "CONTENT")
 	require.Contains(t, errOut, "/conflict.txt")
-	require.Contains(t, errOut, "消解指导")
+	require.Contains(t, errOut, "Resolution steps")
 
 	// When: --json 模式
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run", "--json")

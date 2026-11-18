@@ -4,28 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strconv"
 	"text/tabwriter"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
-
-const diskListUsageHelp = `用法:
-  bowl disk list [flags]
-
-标志:
-  --limit int          单页最大返回条数，取值范围 [1, 1000] (默认 50)
-  --page-token string  游标分页令牌
-  --json               以 JSON 格式输出虚拟磁盘列表与下一页游标
-  --endpoint string    StorageService 基础地址 (默认读取 $BOWL_STORAGE_ENDPOINT 或 http://127.0.0.1:9000)
-  --token string       访问令牌 (默认读取 $BOWL_TOKEN)
-  -h, --help           查看帮助信息
-`
 
 type diskListJSON struct {
 	Disks         []diskJSON `json:"disks"`
@@ -33,42 +21,32 @@ type diskListJSON struct {
 }
 
 var diskListSpec = diskSubcommandSpec{
-	name:       "list",
-	usageHelp:  diskListUsageHelp,
-	spanName:   "cli.disk.list",
-	timeout:    10 * time.Second,
-	newAdapter: func() diskRequestAdapter { return &diskListAdapter{} },
+	use:      "list",
+	short:    "List virtual disks with pagination",
+	args:     cobra.NoArgs,
+	spanName: "cli.disk.list",
+	timeout:  10 * time.Second,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskListAdapter{}
+		flags := cmd.Flags()
+		flags.IntVar(&a.limit, "limit", 50, "Maximum number of disks per page in [1, 1000]")
+		flags.StringVar(&a.pageToken, "page-token", "", "Pagination cursor token")
+		return a
+	},
 }
 
 type diskListAdapter struct {
-	limitRaw  string
-	limitSet  bool
+	limit     int
 	pageToken string
 	pageSize  uint32
 }
 
-func (a *diskListAdapter) parseFlag(name, val string, hasVal bool, args []string, idx *int) (bool, error) {
-	var err error
-	switch name {
-	case "limit":
-		a.limitSet = true
-		a.limitRaw, err = takeFlagValue(args, idx, name, val, hasVal)
-		return true, err
-	case "page-token":
-		a.pageToken, err = takeFlagValue(args, idx, name, val, hasVal)
-		return true, err
-	default:
-		return false, nil
-	}
-}
-
-func (a *diskListAdapter) finalize(_ []string) (bool, error) {
-	if a.limitSet {
-		parsedLimit, err := strconv.Atoi(a.limitRaw)
-		if err != nil || parsedLimit < 1 || parsedLimit > 1000 {
-			return false, fmt.Errorf("无效的 --limit 参数 \"%s\"，必须为 [1, 1000] 范围内的整数", a.limitRaw)
+func (a *diskListAdapter) finalize(cmd *cobra.Command, _ []string) (bool, error) {
+	if cmd.Flags().Changed("limit") {
+		if a.limit < 1 || a.limit > 1000 {
+			return false, fmt.Errorf("invalid --limit %d: must be an integer in [1, 1000]", a.limit)
 		}
-		a.pageSize = uint32(parsedLimit)
+		a.pageSize = uint32(a.limit)
 	}
 	return false, nil
 }
@@ -88,7 +66,7 @@ func (a *diskListAdapter) invoke(ctx context.Context, client storagev1connect.St
 	}))
 	if err != nil {
 		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
-			defaultOp: "列出虚拟磁盘失败",
+			defaultOp: "list virtual disks failed",
 		})
 	}
 

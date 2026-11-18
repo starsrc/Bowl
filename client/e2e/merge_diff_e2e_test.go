@@ -198,9 +198,9 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		forceLazyUnmountMountpoint(t, mainMP)
 		require.False(t, isMounted(mainMP))
 
-		// 无 --force 时被服务端活跃租约拦截（退出码 1）
+		// Without --force, active server lease blocks merge with exit code 1.
 		blockedOut := runBowlExpectExit(t, 1, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID)
-		require.Contains(t, blockedOut, "仍处于挂载状态")
+		require.Contains(t, blockedOut, "still mounted")
 
 		// 加 --force 立即成功合并
 		forcedOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--force")

@@ -107,6 +107,8 @@ type ExecOptions struct {
 	Cwd string
 	// TTY 表示分配伪终端（仅前台执行有效）。
 	TTY bool
+	// Env 是追加给命令的环境变量，形如 KEY=VALUE。
+	Env []string
 }
 
 // ContainerName 由沙箱 ID 派生容器名；同 ID 必然同名，无需额外映射。
@@ -295,10 +297,14 @@ func (rt *Runtime) Exec(ctx context.Context, id, cwd string, argv []string, opts
 		cwd = opts.Cwd
 	}
 	// 参数原样透传为 argv，不拼 shell 字符串：引号、管道与退出码都由用户自己的 shell 决定。
-	args := []string{"exec", "-i", "-w", cwd, ContainerName(id)}
+	args := []string{"exec", "-i", "-w", cwd}
 	if opts.TTY {
 		args = append(args, "-t")
 	}
+	for _, kv := range opts.Env {
+		args = append(args, "-e", kv)
+	}
+	args = append(args, ContainerName(id))
 	args = append(args, argv...)
 	return rt.runCode(ctx, in, out, errOut, args...), nil
 }

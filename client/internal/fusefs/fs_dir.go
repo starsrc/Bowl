@@ -207,6 +207,7 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 	if status != fuse.OK {
 		return status
 	}
+	seq := fs.metaDirtySeq.Load()
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
 	_, err := fs.client.FsyncDir(ctx, connect.NewRequest(&storagev1.FsyncDirRequest{
@@ -216,6 +217,9 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 		DiskId:   fs.cfg.DiskID,
 		Epoch:    fs.cfg.Epoch,
 	}))
+	if err == nil || connect.CodeOf(err) == connect.CodeUnimplemented {
+		fs.advanceMetaSyncedSeq(seq)
+	}
 	return fs.ToStatus(err, cancel)
 }
 

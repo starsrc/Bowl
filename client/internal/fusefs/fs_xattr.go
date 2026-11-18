@@ -49,6 +49,7 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 	if attr == securityCapabilityXattr {
 		fs.caps.markPresent(input.NodeId)
 	}
@@ -206,6 +207,7 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 	if attr == securityCapabilityXattr {
 		fs.caps.markAbsent(header.NodeId)
 	}

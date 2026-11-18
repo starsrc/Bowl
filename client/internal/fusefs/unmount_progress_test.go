@@ -2,6 +2,7 @@ package fusefs_test
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,30 +17,47 @@ import (
 )
 
 type stepGate struct {
-	mu    sync.Mutex
-	allow bool
-	ch    chan struct{}
+	mu      sync.Mutex
+	allow   bool
+	tokens  int
+	waiters []chan struct{}
 }
 
 func newStepGate() *stepGate {
-	return &stepGate{ch: make(chan struct{})}
+	return &stepGate{}
 }
 
 func (g *stepGate) allowOne() {
 	g.mu.Lock()
-	ch := g.ch
-	g.ch = make(chan struct{})
+	if g.allow {
+		g.mu.Unlock()
+		return
+	}
+	if len(g.waiters) > 0 {
+		w := g.waiters[0]
+		g.waiters[0] = nil
+		g.waiters = g.waiters[1:]
+		g.mu.Unlock()
+		close(w)
+		return
+	}
+	g.tokens++
 	g.mu.Unlock()
-	close(ch)
 }
 
 func (g *stepGate) allowAll() {
 	g.mu.Lock()
-	if !g.allow {
-		g.allow = true
-		close(g.ch)
+	if g.allow {
+		g.mu.Unlock()
+		return
 	}
+	g.allow = true
+	waiters := g.waiters
+	g.waiters = nil
 	g.mu.Unlock()
+	for _, w := range waiters {
+		close(w)
+	}
 }
 
 func (g *stepGate) wait(ctx context.Context) error {
@@ -48,12 +66,23 @@ func (g *stepGate) wait(ctx context.Context) error {
 		g.mu.Unlock()
 		return nil
 	}
-	ch := g.ch
+	if g.tokens > 0 {
+		g.tokens--
+		g.mu.Unlock()
+		return nil
+	}
+	w := make(chan struct{})
+	g.waiters = append(g.waiters, w)
 	g.mu.Unlock()
 	select {
-	case <-ch:
+	case <-w:
 		return nil
 	case <-ctx.Done():
+		g.mu.Lock()
+		if idx := slices.Index(g.waiters, w); idx >= 0 {
+			g.waiters = slices.Delete(g.waiters, idx, idx+1)
+		}
+		g.mu.Unlock()
 		return ctx.Err()
 	}
 }
@@ -139,22 +168,22 @@ func TestRawFS_UnmountProgress_GivenStagedChunksAndDirtyInodes_AdvancesMonotonic
 
 	writeGate.allowAll()
 
-	// Wait for first Fsync RPC: Phase 1 stage uploads are done so Completed == 2.
-	select {
-	case <-fsyncEnteredCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for first Fsync RPC")
+	// Wait for both concurrent Fsync RPCs to enter fsyncHook: Phase 1 stage uploads are done so Completed == 2.
+	for range 2 {
+		select {
+		case <-fsyncEnteredCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent Fsync RPCs")
+		}
 	}
 	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 2, Total: 4}, fs.UnmountProgress())
 
 	fsyncGate.allowOne()
 
-	// Wait for second Fsync RPC: Completed advances to 3.
-	select {
-	case <-fsyncEnteredCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for second Fsync RPC")
-	}
+	// Strictly 1 Fsync completes while the second remains gated, advancing Completed to 3.
+	require.Eventually(t, func() bool {
+		return fs.UnmountProgress().Completed == 3
+	}, 2*time.Second, 5*time.Millisecond, "Completed must advance to 3 after first Fsync completes")
 	require.Equal(t, fusefs.UnmountProgress{Active: true, Completed: 3, Total: 4}, fs.UnmountProgress())
 
 	fsyncGate.allowAll()

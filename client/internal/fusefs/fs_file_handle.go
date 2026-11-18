@@ -197,6 +197,11 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	if status != fuse.OK {
 		return status
 	}
+	if fs.cfg.IsReadOnly() {
+		if serverIno, st := fs.ToServerIno(input.NodeId); st == fuse.OK {
+			fs.readAhead.TrackOpenInode(serverIno, cached.inode)
+		}
+	}
 	out.Fh = fh
 	if fs.cfg.DirectIO {
 		out.OpenFlags |= fuse.FOPEN_DIRECT_IO
@@ -343,6 +348,9 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 	orphan := fs.handles.IsOrphan(input.NodeId)
 	lastHandle := fs.handles.OpenCount(input.NodeId) == 1
 	isRealServerIno := serverStatus == fuse.OK && !fs.tmpMgr.IsUnpromoted(input.NodeId)
+	if isRealServerIno && fs.cfg.IsReadOnly() {
+		fs.readAhead.UntrackOpenInode(serverIno)
+	}
 	if orphan && lastHandle {
 		if isRealServerIno {
 			fs.stage.DiscardInode(serverIno)

@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 // MaxRPCChunkSize 定义客户端单次读写 RPC 的最大载荷切片大小 (4 MiB = 4,194,304 字节)。
@@ -97,6 +98,7 @@ type windowSlot struct {
 	waiters        int
 	waiterConsumed uint64
 	fetchedBytes   uint64
+	expiresAtNano  int64
 	buf            *sharedReadBuf
 	err            error
 }
@@ -114,21 +116,23 @@ type handleReadAhead struct {
 	// 单靠 lastReadEnd 无法判定“是否同一股顺序流”，必须用单调高水位。
 	streamEnd uint64
 	// reads 是该句柄已收到的读请求数；首个请求一律直通，避免一次性大读被放大。
-	reads         int
-	firstWinStart uint64
-	hasFirstWin   bool
-	winOffset     uint64
-	winBuf        *sharedReadBuf
-	winValid      bool
-	winEOF        bool
-	winConsumed   int
+	reads            int
+	firstWinStart    uint64
+	hasFirstWin      bool
+	winOffset        uint64
+	winBuf           *sharedReadBuf
+	winValid         bool
+	winEOF           bool
+	winConsumed      int
+	winExpiresAtNano int64
 
 	// prevWinBuf 保留顺序推进刚滑出的上一 4 MiB 窗口，供乱序晚到的内核并发 readahead 请求直接命中内存，
 	// 避免跨 4 MiB 边界乱序请求误判为随机跳读而清空整条流水线。
-	prevWinOffset   uint64
-	prevWinBuf      *sharedReadBuf
-	prevWinValid    bool
-	prevWinConsumed int
+	prevWinOffset        uint64
+	prevWinBuf           *sharedReadBuf
+	prevWinValid         bool
+	prevWinConsumed      int
+	prevWinExpiresAtNano int64
 
 	// slots 按 offset 升序维护所有在途或已就绪待晋升的 4 MiB 对齐窗口槽位（统一承载前台单飞与后台预取）。
 	slots []*windowSlot
@@ -163,12 +167,48 @@ func (hra *handleReadAhead) requestInWindowLocked(offset uint64, want int) bool 
 // ChunkFetcher 定义在指定字节偏移与期望长度下向底层存储拉取数据块的窄端口适配器。
 type ChunkFetcher func(ctx context.Context, offset uint64, length uint32) (rpc.ReadPayload, error)
 
+type inodeStamp struct {
+	generation uint64
+	size       uint64
+	mtimeSec   int64
+	mtimeNsec  int32
+	ctimeSec   int64
+	ctimeNsec  int32
+}
+
+type inodeTrack struct {
+	openCount int
+	hasStamp  bool
+	stamp     inodeStamp
+}
+
+func stampFromInode(inode *storagev1.Inode) (inodeStamp, bool) {
+	if inode == nil || inode.GetAttr() == nil {
+		return inodeStamp{}, false
+	}
+	attr := inode.GetAttr()
+	mtime := attr.GetMtime()
+	ctime := attr.GetCtime()
+	return inodeStamp{
+		generation: inode.GetGeneration(),
+		size:       attr.GetSize(),
+		mtimeSec:   mtime.GetSeconds(),
+		mtimeNsec:  mtime.GetNanos(),
+		ctimeSec:   ctime.GetSeconds(),
+		ctimeNsec:  ctime.GetNanos(),
+	}, true
+}
+
 // ReadAheadCoordinator 协调单个客户端实例中所有打开句柄的 4 MiB 对齐预读窗口、
 // W_read=4 并发流水线预取、跨窗口边界拼接、单飞（Singleflight）窗口合并及并发写代数（gen）失效。
 type ReadAheadCoordinator struct {
 	mu                 sync.Mutex
+	readOnly           bool
+	windowTTL          float64
+	nowFn              func() time.Time
 	handles            map[uint64]*handleReadAhead
 	byInode            map[uint64]map[uint64]*handleReadAhead
+	inodeTracks        map[uint64]*inodeTrack
 	inflightPrefetches atomic.Int32
 	activePipelined    atomic.Int32
 	metrics            atomic.Pointer[Metrics]
@@ -178,9 +218,37 @@ type ReadAheadCoordinator struct {
 // NewReadAheadCoordinator 创建并初始化 ReadAheadCoordinator。
 func NewReadAheadCoordinator() *ReadAheadCoordinator {
 	return &ReadAheadCoordinator{
-		handles: make(map[uint64]*handleReadAhead),
-		byInode: make(map[uint64]map[uint64]*handleReadAhead),
+		handles:     make(map[uint64]*handleReadAhead),
+		byInode:     make(map[uint64]map[uint64]*handleReadAhead),
+		inodeTracks: make(map[uint64]*inodeTrack),
 	}
+}
+
+func (c *ReadAheadCoordinator) configureReadOnly(windowTTL float64, nowFn func() time.Time) {
+	c.mu.Lock()
+	c.readOnly = true
+	c.windowTTL = windowTTL
+	c.nowFn = nowFn
+	c.mu.Unlock()
+}
+
+func (c *ReadAheadCoordinator) currentTime() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+func (c *ReadAheadCoordinator) ttlDisabled() bool {
+	return c.readOnly && ttlDuration(c.windowTTL) <= 0
+}
+
+func (c *ReadAheadCoordinator) stampExpiry() int64 {
+	dur := ttlDuration(c.windowTTL)
+	if dur <= 0 {
+		return 0
+	}
+	return c.currentTime().Add(dur).UnixNano()
 }
 
 func (c *ReadAheadCoordinator) bindInodeLocked(fh, ino uint64, hra *handleReadAhead) {
@@ -363,10 +431,10 @@ func (c *ReadAheadCoordinator) discardPrevWindowLocked(hra *handleReadAhead) {
 	hra.prevWinOffset = 0
 	hra.prevWinValid = false
 	hra.prevWinConsumed = 0
+	hra.prevWinExpiresAtNano = 0
 }
 
-func (c *ReadAheadCoordinator) discardAllWindowsLocked(hra *handleReadAhead) {
-	c.discardPrevWindowLocked(hra)
+func (c *ReadAheadCoordinator) discardCurrentWindowLocked(hra *handleReadAhead) {
 	if hra.winValid {
 		dataLen := len(hra.winData())
 		if dataLen > hra.winConsumed {
@@ -381,6 +449,41 @@ func (c *ReadAheadCoordinator) discardAllWindowsLocked(hra *handleReadAhead) {
 	hra.winValid = false
 	hra.winEOF = false
 	hra.winConsumed = 0
+	hra.winExpiresAtNano = 0
+}
+
+func (c *ReadAheadCoordinator) discardAllWindowsLocked(hra *handleReadAhead) {
+	c.discardPrevWindowLocked(hra)
+	c.discardCurrentWindowLocked(hra)
+}
+
+func (c *ReadAheadCoordinator) discardExpiredSlotsLocked(hra *handleReadAhead, nowNano int64) {
+	keep := 0
+	for _, s := range hra.slots {
+		if s.completed && s.err == nil && nowNano >= s.expiresAtNano {
+			s.inSlots = false
+			s.discarded = true
+			c.maybeReleaseSlotBufLocked(s)
+			continue
+		}
+		hra.slots[keep] = s
+		keep++
+	}
+	clear(hra.slots[keep:])
+	hra.slots = hra.slots[:keep]
+}
+
+func (c *ReadAheadCoordinator) discardExpiredLocked(hra *handleReadAhead, nowNano int64) {
+	if !c.readOnly {
+		return
+	}
+	if hra.prevWinValid && nowNano >= hra.prevWinExpiresAtNano {
+		c.discardPrevWindowLocked(hra)
+	}
+	if (hra.winValid || hra.winEOF) && nowNano >= hra.winExpiresAtNano {
+		c.discardCurrentWindowLocked(hra)
+	}
+	c.discardExpiredSlotsLocked(hra, nowNano)
 }
 
 // installWindowMonotonicLocked 按单调递增偏移语义将新完成的对齐窗口安装到句柄上：
@@ -394,6 +497,7 @@ func (c *ReadAheadCoordinator) installWindowMonotonicLocked(
 	buf *sharedReadBuf,
 	eof bool,
 	consumed int,
+	expiresAtNano int64,
 ) (installed bool) {
 	dataLen := len(buf.bytes())
 	clampedConsumed := min(dataLen, max(0, consumed))
@@ -413,6 +517,7 @@ func (c *ReadAheadCoordinator) installWindowMonotonicLocked(
 				hra.prevWinBuf = buf.retain()
 				hra.prevWinValid = hra.prevWinBuf != nil
 				hra.prevWinConsumed = clampedConsumed
+				hra.prevWinExpiresAtNano = expiresAtNano
 				return hra.prevWinValid
 			}
 			return false
@@ -425,9 +530,11 @@ func (c *ReadAheadCoordinator) installWindowMonotonicLocked(
 		hra.prevWinBuf = hra.winBuf
 		hra.prevWinValid = true
 		hra.prevWinConsumed = hra.winConsumed
+		hra.prevWinExpiresAtNano = hra.winExpiresAtNano
 		hra.winBuf = nil
 		hra.winValid = false
 		hra.winConsumed = 0
+		hra.winExpiresAtNano = 0
 	} else {
 		c.discardAllWindowsLocked(hra)
 	}
@@ -442,6 +549,7 @@ func (c *ReadAheadCoordinator) installWindowMonotonicLocked(
 	}
 	hra.winEOF = eof
 	hra.winConsumed = clampedConsumed
+	hra.winExpiresAtNano = expiresAtNano
 	return true
 }
 
@@ -600,6 +708,7 @@ func (c *ReadAheadCoordinator) launchPrefetchSlotLocked(
 		payload, err := fetch(pfCtx, nextOffset, MaxRPCChunkSize)
 		var fetchedBuf *sharedReadBuf
 		var fetchedLen uint64
+		var expiresAtNano int64
 		if err != nil {
 			pfSpan.RecordError(err)
 			pfSpan.SetStatus(codes.Error, err.Error())
@@ -608,6 +717,9 @@ func (c *ReadAheadCoordinator) launchPrefetchSlotLocked(
 			fetchedLen = uint64(len(fetchedBuf.bytes()))
 			pfSpan.SetAttributes(attribute.Int64("read_ahead.fetched_bytes", int64(fetchedLen)))
 			c.metrics.Load().addReadAheadPrefetchedBytes(fetchedLen)
+			if c.readOnly {
+				expiresAtNano = c.stampExpiry()
+			}
 		}
 
 		// 在唤醒等待者前先释放全局预读配额并结束 Prefetch Span，
@@ -619,6 +731,7 @@ func (c *ReadAheadCoordinator) launchPrefetchSlotLocked(
 		s.err = err
 		s.buf = fetchedBuf
 		s.fetchedBytes = fetchedLen
+		s.expiresAtNano = expiresAtNano
 		if err != nil || s.discarded || hra.gen != s.gen {
 			if err == nil {
 				s.discarded = true
@@ -636,7 +749,7 @@ func (c *ReadAheadCoordinator) launchPrefetchSlotLocked(
 //   - 首窗口刚建立时预取 1 个 4 MiB 窗口；
 //   - 一旦确认连续流（累计 >= 3 次顺序读、窗口内已消费 >= 1 MiB 或已有预取晋升），按活跃流数公平收敛在 [1, W_read=4] 深度补齐后续窗口。
 func (c *ReadAheadCoordinator) ensurePrefetchPipelineLocked(triggerCtx context.Context, hra *handleReadAhead, fetch ChunkFetcher) {
-	if fetch == nil || !hra.winValid || hra.winEOF {
+	if c.ttlDisabled() || fetch == nil || !hra.winValid || hra.winEOF {
 		c.discardUnawaitedSlotsLocked(hra)
 		return
 	}
@@ -657,11 +770,16 @@ func (c *ReadAheadCoordinator) ensurePrefetchPipelineLocked(triggerCtx context.C
 	maxAllowedOffset := hra.winOffset + uint64(ReadAheadMaxPrefetch)*MaxRPCChunkSize
 	var eofCutoff uint64
 	hasEOFCutoff := false
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
 
 	keep := 0
 	for _, s := range hra.slots {
 		outOfRange := s.offset <= hra.winOffset || s.offset > maxAllowedOffset || (hasEOFCutoff && s.offset > eofCutoff)
-		if (s.discarded || outOfRange) && s.waiters == 0 {
+		expired := c.readOnly && s.completed && s.err == nil && nowNano >= s.expiresAtNano
+		if (s.discarded || outOfRange || expired) && s.waiters == 0 {
 			s.inSlots = false
 			s.discarded = true
 			if s.cancel != nil {
@@ -730,13 +848,16 @@ func (c *ReadAheadCoordinator) consumeSlotResultLocked(
 		s.installed = true
 		if !hra.winValid || s.offset >= hra.winOffset {
 			hra.winEOF = true
+			if !hra.winValid {
+				hra.winExpiresAtNano = s.expiresAtNano
+			}
 			c.discardUnawaitedSlotsLocked(hra)
 		}
 		return
 	}
 
 	winEOF := len(data) < MaxRPCChunkSize
-	if c.installWindowMonotonicLocked(hra, s.offset, buf, winEOF, consumed) {
+	if c.installWindowMonotonicLocked(hra, s.offset, buf, winEOF, consumed, s.expiresAtNano) {
 		s.installed = true
 		if hra.winEOF {
 			c.discardUnawaitedSlotsLocked(hra)
@@ -757,6 +878,9 @@ func (c *ReadAheadCoordinator) acquireWindowLocked(
 	fetch ChunkFetcher,
 ) (buf *sharedReadBuf, fromCacheOrPrefetch, genMatched bool, err error) {
 	for attempt := range 2 {
+		if c.readOnly {
+			c.discardExpiredLocked(hra, c.currentTime().UnixNano())
+		}
 		if hra.winValid && hra.winOffset == alignedOffset {
 			if b := hra.winBuf.retain(); b != nil {
 				data := b.bytes()
@@ -802,6 +926,14 @@ func (c *ReadAheadCoordinator) acquireWindowLocked(
 				return nil, false, false, slotErr
 			}
 
+			if c.readOnly && attempt == 0 && ctx.Err() == nil && (s.discarded || c.currentTime().UnixNano() >= s.expiresAtNano) {
+				s.waiters--
+				s.discarded = true
+				c.removeSlotLocked(hra, s)
+				c.maybeReleaseSlotBufLocked(s)
+				continue
+			}
+
 			callerBuf := s.buf.retain()
 			c.consumeSlotResultLocked(hra, s, callerBuf, startGen, relOffset, maxConsume)
 			s.waiters--
@@ -822,10 +954,14 @@ func (c *ReadAheadCoordinator) acquireWindowLocked(
 		payload, fetchErr := fetch(ctx, alignedOffset, MaxRPCChunkSize)
 		var fetchedBuf *sharedReadBuf
 		var fetchedLen uint64
+		var expiresAtNano int64
 		if fetchErr == nil {
 			fetchedBuf = newSharedReadBuf(payload)
 			fetchedLen = uint64(len(fetchedBuf.bytes()))
 			c.metrics.Load().addReadAheadPrefetchedBytes(fetchedLen)
+			if c.readOnly {
+				expiresAtNano = c.stampExpiry()
+			}
 		}
 
 		hra.mu.Lock()
@@ -833,6 +969,7 @@ func (c *ReadAheadCoordinator) acquireWindowLocked(
 		s.err = fetchErr
 		s.buf = fetchedBuf
 		s.fetchedBytes = fetchedLen
+		s.expiresAtNano = expiresAtNano
 		if fetchErr != nil {
 			c.removeSlotLocked(hra, s)
 			s.waiters--
@@ -859,10 +996,24 @@ func (c *ReadAheadCoordinator) Read(ctx context.Context, fh, ino, offset uint64,
 		return 0, nil
 	}
 
+	if c.ttlDisabled() && want <= MaxRPCChunkSize {
+		payload, err := fetch(ctx, offset, uint32(want))
+		if err != nil {
+			return 0, err
+		}
+		n := min(want, len(payload.Data))
+		copy(dest[:n], payload.Data[:n])
+		payload.Release()
+		return n, nil
+	}
+
 	hra := c.getOrCreateHandle(fh, ino)
 
 	if want <= MaxRPCChunkSize {
 		hra.mu.Lock()
+		if c.readOnly {
+			c.discardExpiredLocked(hra, c.currentTime().UnixNano())
+		}
 		hra.reads++
 		if hra.reads == 1 {
 			hra.firstWinStart = offset &^ uint64(MaxRPCChunkSize-1)
@@ -1110,20 +1261,19 @@ func (c *ReadAheadCoordinator) Read(ctx context.Context, fh, ino, offset uint64,
 	return totalRead, nil
 }
 
-// InvalidateInode 递增目标 Inode 下所有打开句柄的代数（gen），取消在途预取并清空缓存窗口。
-func (c *ReadAheadCoordinator) InvalidateInode(ino uint64) {
-	c.mu.Lock()
+func (c *ReadAheadCoordinator) collectTargetsLocked(ino uint64) []*handleReadAhead {
 	set := c.byInode[ino]
 	if len(set) == 0 {
-		c.mu.Unlock()
-		return
+		return nil
 	}
 	targets := make([]*handleReadAhead, 0, len(set))
 	for _, hra := range set {
 		targets = append(targets, hra)
 	}
-	c.mu.Unlock()
+	return targets
+}
 
+func (c *ReadAheadCoordinator) invalidateTargets(ino uint64, targets []*handleReadAhead) {
 	for _, hra := range targets {
 		hra.mu.Lock()
 		if hra.ino == ino {
@@ -1131,6 +1281,98 @@ func (c *ReadAheadCoordinator) InvalidateInode(ino uint64) {
 		}
 		hra.mu.Unlock()
 	}
+}
+
+func (c *ReadAheadCoordinator) updateTrackStampLocked(tr *inodeTrack, ino uint64, stamp inodeStamp) []*handleReadAhead {
+	var targets []*handleReadAhead
+	if tr.hasStamp && tr.stamp != stamp && len(c.byInode[ino]) > 0 {
+		targets = c.collectTargetsLocked(ino)
+	}
+	tr.stamp = stamp
+	tr.hasStamp = true
+	return targets
+}
+
+// TrackOpenInode records an open read-only file descriptor for ino and seeds its initial stamp when absent.
+func (c *ReadAheadCoordinator) TrackOpenInode(ino uint64, inode *storagev1.Inode) {
+	if !c.readOnly {
+		return
+	}
+	stamp, hasStamp := stampFromInode(inode)
+	c.mu.Lock()
+	if c.inodeTracks == nil {
+		c.inodeTracks = make(map[uint64]*inodeTrack)
+	}
+	tr := c.inodeTracks[ino]
+	if tr == nil {
+		tr = &inodeTrack{}
+		c.inodeTracks[ino] = tr
+	}
+	tr.openCount++
+	if hasStamp && !tr.hasStamp {
+		tr.stamp = stamp
+		tr.hasStamp = true
+	}
+	c.mu.Unlock()
+}
+
+// UntrackOpenInode releases an open read-only file descriptor reference and prunes idle stamp state.
+func (c *ReadAheadCoordinator) UntrackOpenInode(ino uint64) {
+	if !c.readOnly {
+		return
+	}
+	c.mu.Lock()
+	if tr := c.inodeTracks[ino]; tr != nil {
+		if tr.openCount > 0 {
+			tr.openCount--
+		}
+		if tr.openCount == 0 && len(c.byInode[ino]) == 0 {
+			delete(c.inodeTracks, ino)
+		}
+	}
+	c.mu.Unlock()
+}
+
+// ObserveInode compares a server Inode stamp against the last observed stamp for active read-only inodes
+// and invalidates open read-ahead handles immediately when the stamp differs.
+func (c *ReadAheadCoordinator) ObserveInode(ino uint64, inode *storagev1.Inode) {
+	if !c.readOnly {
+		return
+	}
+	stamp, ok := stampFromInode(inode)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	if c.inodeTracks == nil {
+		c.inodeTracks = make(map[uint64]*inodeTrack)
+	}
+	tr := c.inodeTracks[ino]
+	if tr == nil {
+		if len(c.byInode[ino]) == 0 {
+			c.mu.Unlock()
+			return
+		}
+		c.inodeTracks[ino] = &inodeTrack{hasStamp: true, stamp: stamp}
+		c.mu.Unlock()
+		return
+	}
+	if tr.hasStamp && tr.stamp == stamp {
+		c.mu.Unlock()
+		return
+	}
+	targets := c.updateTrackStampLocked(tr, ino, stamp)
+	c.mu.Unlock()
+	c.invalidateTargets(ino, targets)
+}
+
+// InvalidateInode 递增目标 Inode 下所有打开句柄的代数（gen），取消在途预取并清空缓存窗口。
+func (c *ReadAheadCoordinator) InvalidateInode(ino uint64) {
+	c.mu.Lock()
+	targets := c.collectTargetsLocked(ino)
+	c.mu.Unlock()
+
+	c.invalidateTargets(ino, targets)
 }
 
 // RemoveHandle 在本地句柄释放时取消在途预取并移除其预读状态。
@@ -1141,6 +1383,11 @@ func (c *ReadAheadCoordinator) RemoveHandle(fh uint64) {
 		delete(c.handles, fh)
 		if hra != nil {
 			c.unbindInodeLocked(fh, hra.ino)
+			if c.readOnly {
+				if tr := c.inodeTracks[hra.ino]; tr != nil && tr.openCount == 0 && len(c.byInode[hra.ino]) == 0 {
+					delete(c.inodeTracks, hra.ino)
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
@@ -1158,6 +1405,7 @@ func (c *ReadAheadCoordinator) Clear() {
 	handles := c.handles
 	c.handles = make(map[uint64]*handleReadAhead)
 	c.byInode = make(map[uint64]map[uint64]*handleReadAhead)
+	c.inodeTracks = make(map[uint64]*inodeTrack)
 	c.mu.Unlock()
 
 	for _, hra := range handles {

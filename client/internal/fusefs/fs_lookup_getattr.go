@@ -52,7 +52,7 @@ func (fs *RawFS) lookupInodeAfterCache(
 		status := fs.ToStatus(err, cancel)
 		if status == fuse.ENOENT {
 			fs.metrics.incNSCacheMiss(nsCacheNegativeEntry)
-			fs.cache.putEntryAtIf(generation, epoch, parent, name, 0)
+			fs.cache.putEntryAtIf(generation, epoch, parent, name, 0, fs.cfg.EntryTimeoutSeconds)
 		}
 		return cachedInode{}, status
 	}
@@ -63,8 +63,11 @@ func (fs *RawFS) lookupInodeAfterCache(
 	ino := fs.ToKernelIno(inode.GetIno())
 	fs.recordInodeSpecial(ino, inode)
 	fs.stage.OverlayInode(inode.GetIno(), inode)
+	if fs.cfg.IsReadOnly() {
+		fs.readAhead.ObserveInode(inode.GetIno(), inode)
+	}
 	cached = cachedInode{inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds()}
-	fs.cache.putEntryAtIf(generation, epoch, parent, name, ino)
+	fs.cache.putEntryAtIf(generation, epoch, parent, name, ino, cached.entryTimeout)
 	fs.cache.putInodeAtIf(generation, epoch, ino, inode, cached.entryTimeout, cached.attrTimeout)
 	return cached, fuse.OK
 }
@@ -103,6 +106,9 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 	}
 	fs.recordInodeSpecial(ino, inode)
 	fs.stage.OverlayInode(serverIno, inode)
+	if fs.cfg.IsReadOnly() {
+		fs.readAhead.ObserveInode(serverIno, inode)
+	}
 	cached := cachedInode{inode: inode, attrTimeout: resp.Msg.GetAttrTimeoutSeconds()}
 	fs.cache.refreshInodeAtIf(generation, epoch, ino, inode, cached.attrTimeout)
 	return cached, fuse.OK

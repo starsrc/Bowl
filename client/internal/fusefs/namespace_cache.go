@@ -2,6 +2,7 @@ package fusefs
 
 import (
 	"container/list"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -33,13 +34,52 @@ type cachedInode struct {
 }
 
 type cacheItem struct {
-	key           cacheKey
-	inode         cachedInode
-	entry         uint64
-	dir           []*storagev1.DirEntryPlus
-	linkTarget    []byte
-	expiresAtNano int64
-	weight        int
+	key             cacheKey
+	inode           cachedInode
+	entry           uint64
+	dir             []*storagev1.DirEntryPlus
+	dirEntryExpires []int64
+	dirAttrExpires  []int64
+	linkTarget      []byte
+	expiresAtNano   int64
+	weight          int
+}
+
+func (item *cacheItem) dirEntryExpiryAt(idx int) int64 {
+	if idx >= 0 && idx < len(item.dirEntryExpires) {
+		return item.dirEntryExpires[idx]
+	}
+	return item.expiresAtNano
+}
+
+func (item *cacheItem) dirAttrExpiryAt(idx int) int64 {
+	if idx >= 0 && idx < len(item.dirAttrExpires) {
+		return item.dirAttrExpires[idx]
+	}
+	return item.expiresAtNano
+}
+
+type cachedDir struct {
+	entries         []*storagev1.DirEntryPlus
+	fromCache       bool
+	nowNano         int64
+	expiresAtNano   int64
+	dirEntryExpires []int64
+	dirAttrExpires  []int64
+}
+
+func (d *cachedDir) entryExpiryAt(idx int) int64 {
+	if idx >= 0 && idx < len(d.dirEntryExpires) {
+		return d.dirEntryExpires[idx]
+	}
+	return d.expiresAtNano
+}
+
+func (d *cachedDir) attrExpiryAt(idx int) int64 {
+	if idx >= 0 && idx < len(d.dirAttrExpires) {
+		return d.dirAttrExpires[idx]
+	}
+	return d.expiresAtNano
 }
 
 func itemOf(el *list.Element) *cacheItem {
@@ -63,6 +103,8 @@ type NamespaceCache struct {
 	rootIno     uint64
 	entryTTL    float64
 	attrTTL     float64
+	readOnly    bool
+	nowFn       func() time.Time
 	items       map[cacheKey]*list.Element
 	lru         list.List
 	byParent    map[uint64]map[string]struct{}
@@ -71,7 +113,8 @@ type NamespaceCache struct {
 	// completeDirs 记录“目录内容已被完整掌握”的父节点：目录流已加载，或目录刚由 Mkdir 创建且为空。
 	// 命中时未找到的名字可以确定返回 ENOENT，无需再发 Lookup RPC。
 	// 任一目录项被淘汰或目录发生未知变更时必须同步撤销该标记，避免把已存在名字误判为不存在。
-	completeDirs map[uint64]struct{}
+	// 在只读挂载模式下，值保存目录完整性的过期纳秒时间戳；可写挂载模式下保持为 0（永不过期）。
+	completeDirs map[uint64]int64
 	// parentByDir 记录已知目录的权威父目录内核 Inode（来自 Mkdir 或 ReadDirPlus 的 ".."），
 	// 供 completeDirs 在目录流缺失时本地合成包含 "." 与 ".." 的完整目录流。
 	parentByDir map[uint64]uint64
@@ -90,7 +133,7 @@ func NewNamespaceCache(capacity int) *NamespaceCache {
 		byParent:     make(map[uint64]map[string]struct{}),
 		dirsByChild:  make(map[uint64]map[uint64]struct{}),
 		inodeDirs:    make(map[uint64]map[uint64]struct{}),
-		completeDirs: make(map[uint64]struct{}),
+		completeDirs: make(map[uint64]int64),
 		parentByDir:  make(map[uint64]uint64),
 	}
 }
@@ -103,6 +146,37 @@ func (c *NamespaceCache) configure(rootIno uint64, entryTTL, attrTTL float64) {
 	c.entryTTL = entryTTL
 	c.attrTTL = attrTTL
 	c.mu.Unlock()
+}
+
+func (c *NamespaceCache) configureReadOnly(nowFn func() time.Time) {
+	c.mu.Lock()
+	c.readOnly = true
+	c.nowFn = nowFn
+	c.mu.Unlock()
+}
+
+func (c *NamespaceCache) currentTime() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+func ttlDuration(ttlSeconds float64) time.Duration {
+	if ttlSeconds <= 0 || math.IsNaN(ttlSeconds) {
+		return 0
+	}
+	if ttlSeconds >= float64(math.MaxInt64)/float64(time.Second) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(ttlSeconds * float64(time.Second))
+}
+
+func remainingSeconds(expiresAtNano, nowNano int64) float64 {
+	if expiresAtNano <= nowNano {
+		return 0
+	}
+	return max(0, float64(expiresAtNano-nowNano)/1e9)
 }
 
 func (c *NamespaceCache) bindMetrics(m *Metrics) {
@@ -223,13 +297,18 @@ func (c *NamespaceCache) putItem(item *cacheItem) {
 	c.index(item)
 }
 
-func (c *NamespaceCache) get(key cacheKey) (*cacheItem, bool) {
+func (c *NamespaceCache) getValidLocked(key cacheKey, nowNano int64) (*cacheItem, bool) {
 	el := c.items[key]
 	if el == nil {
 		return nil, false
 	}
+	item := itemOf(el)
+	if c.readOnly && nowNano >= item.expiresAtNano {
+		c.remove(el)
+		return nil, false
+	}
 	c.lru.MoveToFront(el)
-	return itemOf(el), true
+	return item, true
 }
 
 func cloneTimestamp(ts *timestamppb.Timestamp) *timestamppb.Timestamp {
@@ -290,44 +369,94 @@ func cloneDir(entries []*storagev1.DirEntryPlus) []*storagev1.DirEntryPlus {
 	return out
 }
 
-func (c *NamespaceCache) peekCachedInodeLocked(ino uint64) (cachedInode, bool) {
-	if el := c.items[cacheKey{kind: 'i', ino: ino}]; el != nil {
-		return itemOf(el).inode, true
+func (c *NamespaceCache) isCompleteDirValidLocked(dirIno uint64, nowNano int64) (int64, bool) {
+	exp, ok := c.completeDirs[dirIno]
+	if !ok {
+		return 0, false
 	}
-	for dir := range c.dirsByChild[ino] {
-		el := c.items[cacheKey{kind: 'd', ino: dir}]
-		if el == nil {
-			continue
-		}
-		for _, entry := range itemOf(el).dir {
-			if entry.GetIno() != ino || entry.GetInode() == nil || entry.GetInode().GetAttr() == nil {
-				continue
-			}
-			return cachedInode{entry.GetInode(), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds()}, true
-		}
+	if c.readOnly && nowNano >= exp {
+		delete(c.completeDirs, dirIno)
+		return 0, false
 	}
-	return cachedInode{}, false
+	return exp, true
 }
 
-func (c *NamespaceCache) getCachedInodeLocked(ino uint64) (cachedInode, bool) {
-	if item, ok := c.get(cacheKey{kind: 'i', ino: ino}); ok {
-		return item.inode, true
+func (c *NamespaceCache) readCachedInodeAtLocked(ino uint64, nowNano int64, touchLRU bool) (cachedInode, int64, bool) {
+	el := c.items[cacheKey{kind: 'i', ino: ino}]
+	if el != nil {
+		item := itemOf(el)
+		if c.readOnly && nowNano >= item.expiresAtNano {
+			c.remove(el)
+		} else {
+			if touchLRU {
+				c.lru.MoveToFront(el)
+			}
+			v := item.inode
+			if c.readOnly {
+				v.attrTimeout = min(v.attrTimeout, remainingSeconds(item.expiresAtNano, nowNano))
+			}
+			return v, item.expiresAtNano, true
+		}
 	}
 	// 完整目录流本身包含属性，即使独立属性项被淘汰也可定向命中。
 	for dir := range c.dirsByChild[ino] {
-		el := c.items[cacheKey{kind: 'd', ino: dir}]
-		if el == nil {
+		dirEl := c.items[cacheKey{kind: 'd', ino: dir}]
+		if dirEl == nil {
 			continue
 		}
-		for _, entry := range itemOf(el).dir {
+		dItem := itemOf(dirEl)
+		if c.readOnly && nowNano >= dItem.expiresAtNano {
+			c.remove(dirEl)
+			continue
+		}
+		for i, entry := range dItem.dir {
 			if entry.GetIno() != ino || entry.GetInode() == nil || entry.GetInode().GetAttr() == nil {
 				continue
 			}
-			c.lru.MoveToFront(el)
-			return cachedInode{entry.GetInode(), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds()}, true
+			v := cachedInode{entry.GetInode(), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds()}
+			var attrExp int64
+			if c.readOnly {
+				attrExp = dItem.dirAttrExpiryAt(i)
+				if nowNano >= attrExp {
+					continue
+				}
+				v.attrTimeout = min(v.attrTimeout, remainingSeconds(attrExp, nowNano))
+				if entryExp := dItem.dirEntryExpiryAt(i); entryExp > nowNano {
+					v.entryTimeout = min(v.entryTimeout, remainingSeconds(entryExp, nowNano))
+				} else {
+					v.entryTimeout = 0
+				}
+			}
+			if touchLRU {
+				c.lru.MoveToFront(dirEl)
+			}
+			return v, attrExp, true
 		}
 	}
-	return cachedInode{}, false
+	return cachedInode{}, 0, false
+}
+
+func (c *NamespaceCache) peekCachedInodeLocked(ino uint64) (cachedInode, bool) {
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
+	v, _, ok := c.readCachedInodeAtLocked(ino, nowNano, false)
+	return v, ok
+}
+
+func (c *NamespaceCache) getCachedInodeLocked(ino uint64) (cachedInode, bool) {
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
+	v, _, ok := c.readCachedInodeAtLocked(ino, nowNano, true)
+	return v, ok
+}
+
+func (c *NamespaceCache) getCachedInodeAtLocked(ino uint64, nowNano int64) (cachedInode, bool) {
+	v, _, ok := c.readCachedInodeAtLocked(ino, nowNano, true)
+	return v, ok
 }
 
 // inode 返回深拷贝后的节点属性，供外部调用方安全读写。
@@ -366,15 +495,22 @@ func (c *NamespaceCache) lookupReadOnly(parent uint64, name string) (cached cach
 	if len(name) > MaxFilenameBytes {
 		return cachedInode{}, 0, false, false
 	}
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
 	c.mu.Lock()
-	if item, hit := c.get(cacheKey{kind: 'e', ino: parent, name: name}); hit {
+	if item, hit := c.getValidLocked(cacheKey{kind: 'e', ino: parent, name: name}, nowNano); hit {
 		ino := item.entry
 		if ino == 0 {
 			c.mu.Unlock()
 			c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
 			return cachedInode{}, 0, true, true
 		}
-		v, attrHit := c.getCachedInodeLocked(ino)
+		v, attrHit := c.getCachedInodeAtLocked(ino, nowNano)
+		if attrHit && c.readOnly {
+			v.entryTimeout = min(v.entryTimeout, remainingSeconds(item.expiresAtNano, nowNano))
+		}
 		c.mu.Unlock()
 		m := c.metrics.Load()
 		m.incNSCacheHit(nsCacheEntry)
@@ -385,8 +521,8 @@ func (c *NamespaceCache) lookupReadOnly(parent uint64, name string) (cached cach
 		m.incNSCacheMiss(nsCacheAttr)
 		return cachedInode{}, ino, false, false
 	}
-	if item, hit := c.get(cacheKey{kind: 'd', ino: parent}); hit {
-		for _, entry := range item.dir {
+	if item, hit := c.getValidLocked(cacheKey{kind: 'd', ino: parent}, nowNano); hit {
+		for i, entry := range item.dir {
 			if string(entry.GetName()) != name {
 				continue
 			}
@@ -396,8 +532,21 @@ func (c *NamespaceCache) lookupReadOnly(parent uint64, name string) (cached cach
 				c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
 				return cachedInode{}, 0, true, true
 			}
-			if attrItem, attrHit := c.get(cacheKey{kind: 'i', ino: ino}); attrHit {
+			var entryExp int64
+			if c.readOnly {
+				entryExp = item.dirEntryExpiryAt(i)
+				if nowNano >= entryExp {
+					c.mu.Unlock()
+					c.metrics.Load().incNSCacheMiss(nsCacheEntry)
+					return cachedInode{}, 0, false, false
+				}
+			}
+			if attrItem, attrHit := c.getValidLocked(cacheKey{kind: 'i', ino: ino}, nowNano); attrHit {
 				v := attrItem.inode
+				if c.readOnly {
+					v.entryTimeout = min(entry.GetEntryTimeoutSeconds(), remainingSeconds(entryExp, nowNano))
+					v.attrTimeout = min(v.attrTimeout, remainingSeconds(attrItem.expiresAtNano, nowNano))
+				}
 				c.mu.Unlock()
 				m := c.metrics.Load()
 				m.incNSCacheHit(nsCacheEntry)
@@ -406,6 +555,18 @@ func (c *NamespaceCache) lookupReadOnly(parent uint64, name string) (cached cach
 			}
 			if entry.GetInode() != nil && entry.GetInode().GetAttr() != nil {
 				v := cachedInode{entry.GetInode(), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds()}
+				if c.readOnly {
+					attrExp := item.dirAttrExpiryAt(i)
+					if nowNano >= attrExp {
+						c.mu.Unlock()
+						m := c.metrics.Load()
+						m.incNSCacheHit(nsCacheEntry)
+						m.incNSCacheMiss(nsCacheAttr)
+						return cachedInode{}, ino, false, false
+					}
+					v.entryTimeout = min(v.entryTimeout, remainingSeconds(entryExp, nowNano))
+					v.attrTimeout = min(v.attrTimeout, remainingSeconds(attrExp, nowNano))
+				}
 				c.mu.Unlock()
 				m := c.metrics.Load()
 				m.incNSCacheHit(nsCacheEntry)
@@ -422,7 +583,7 @@ func (c *NamespaceCache) lookupReadOnly(parent uint64, name string) (cached cach
 		c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
 		return cachedInode{}, 0, true, true
 	}
-	if _, complete := c.completeDirs[parent]; complete {
+	if _, complete := c.isCompleteDirValidLocked(parent, nowNano); complete {
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
 		return cachedInode{}, 0, true, true
@@ -463,28 +624,125 @@ func (c *NamespaceCache) putInodeAtIf(generation, epoch, ino uint64, inode *stor
 }
 
 func (c *NamespaceCache) putInodeLocked(ino uint64, inode *storagev1.Inode, entryTimeout, attrTimeout float64) {
+	var expiresAtNano int64
+	var nowNano int64
+	if c.readOnly {
+		ttlDur := ttlDuration(attrTimeout)
+		if ttlDur <= 0 {
+			c.removeKey(cacheKey{kind: 'i', ino: ino})
+			if len(c.dirsByChild[ino]) > 0 {
+				c.updateDirChildInodesLocked(ino, inode, attrTimeout, c.currentTime().UnixNano(), 0)
+			}
+			return
+		}
+		now := c.currentTime()
+		nowNano = now.UnixNano()
+		expiresAtNano = now.Add(ttlDur).UnixNano()
+	}
+	c.updateDirChildInodesLocked(ino, inode, attrTimeout, nowNano, expiresAtNano)
+	c.putItem(&cacheItem{
+		key:           cacheKey{kind: 'i', ino: ino},
+		inode:         cachedInode{cloneInode(inode), entryTimeout, attrTimeout},
+		expiresAtNano: expiresAtNano,
+		weight:        1,
+	})
+}
+
+func (c *NamespaceCache) updateDirChildInodesLocked(ino uint64, inode *storagev1.Inode, attrTimeout float64, nowNano, expiresAtNano int64) {
 	for dir := range c.dirsByChild[ino] {
 		el := c.items[cacheKey{kind: 'd', ino: dir}]
 		if el == nil {
 			continue
 		}
-		entries := itemOf(el).dir
+		dItem := itemOf(el)
+		if c.readOnly && nowNano >= dItem.expiresAtNano {
+			c.remove(el)
+			continue
+		}
+		entries := dItem.dir
 		for i, entry := range entries {
-			if entry.GetIno() == ino {
-				// 替换而非原地改写：目录流一旦发布就不再被修改，
-				// dir() 只需做指针快照即可安全并发读取。
-				updated := cloneDirEntry(entry)
-				updated.Inode = cloneInode(inode)
-				updated.AttrTimeoutSeconds = attrTimeout
-				entries[i] = updated
+			if entry.GetIno() != ino {
+				continue
+			}
+			// 替换而非原地改写：目录流一旦发布就不再被修改，
+			// dir() 只需做指针快照即可安全并发读取。
+			updated := cloneDirEntry(entry)
+			updated.Inode = cloneInode(inode)
+			updated.AttrTimeoutSeconds = attrTimeout
+			entries[i] = updated
+			if c.readOnly && i < len(dItem.dirAttrExpires) {
+				nextAttrExp := slices.Clone(dItem.dirAttrExpires)
+				if expiresAtNano <= 0 {
+					nextAttrExp[i] = 0
+				} else {
+					nextAttrExp[i] = min(dItem.expiresAtNano, expiresAtNano)
+				}
+				dItem.dirAttrExpires = nextAttrExp
 			}
 		}
 	}
-	c.putItem(&cacheItem{
-		key:    cacheKey{kind: 'i', ino: ino},
-		inode:  cachedInode{cloneInode(inode), entryTimeout, attrTimeout},
-		weight: 1,
-	})
+}
+
+// refreshExistingInodesFromReadDirAt updates already-cached inode items and parent directory
+// entries using fresh attributes returned by ReadDirPlus in read-only mode without inserting
+// uncached child inodes or bumping mutations.
+func (c *NamespaceCache) refreshExistingInodesFromReadDirAt(epoch uint64, entries []*storagev1.DirEntryPlus) {
+	if !c.readOnly || len(entries) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if epoch != ^uint64(0) && epoch != c.epoch {
+		return
+	}
+	now := c.currentTime()
+	nowNano := now.UnixNano()
+	for _, entry := range entries {
+		inode := entry.GetInode()
+		if inode == nil || inode.GetAttr() == nil {
+			continue
+		}
+		kernelIno := entry.GetIno()
+		if kernelIno == 0 {
+			continue
+		}
+		attrTimeout := entry.GetAttrTimeoutSeconds()
+		el := c.items[cacheKey{kind: 'i', ino: kernelIno}]
+		if el != nil && nowNano >= itemOf(el).expiresAtNano {
+			c.remove(el)
+			el = nil
+		}
+		ttlDur := ttlDuration(attrTimeout)
+		if ttlDur <= 0 {
+			if el != nil {
+				c.remove(el)
+			}
+			if len(c.dirsByChild[kernelIno]) > 0 {
+				c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, 0)
+			}
+			continue
+		}
+		expiresAtNano := now.Add(ttlDur).UnixNano()
+		if el != nil {
+			entryTimeout := entry.GetEntryTimeoutSeconds()
+			if entryTimeout <= 0 {
+				entryTimeout = itemOf(el).inode.entryTimeout
+			}
+			c.putItem(&cacheItem{
+				key:           cacheKey{kind: 'i', ino: kernelIno},
+				inode:         cachedInode{cloneInode(inode), entryTimeout, attrTimeout},
+				expiresAtNano: expiresAtNano,
+				weight:        1,
+			})
+			if len(c.dirsByChild[kernelIno]) > 0 {
+				c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, expiresAtNano)
+			}
+			continue
+		}
+		if len(c.dirsByChild[kernelIno]) > 0 {
+			c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, expiresAtNano)
+		}
+	}
 }
 
 // refreshInodeAt 用写操作返回的最新属性刷新缓存项，但保留既有目录项有效期。
@@ -520,7 +778,9 @@ func (c *NamespaceCache) refreshInodeAtIf(generation, epoch, ino uint64, inode *
 func (c *NamespaceCache) refreshInodeLocked(ino uint64, inode *storagev1.Inode, attrTimeout float64) {
 	entryTimeout := c.entryTimeoutLocked(ino, attrTimeout)
 	c.removeKey(cacheKey{kind: 'i', ino: ino})
-	c.mutations++
+	if !c.readOnly {
+		c.mutations++
+	}
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 
@@ -585,6 +845,12 @@ func (c *NamespaceCache) refreshInodeFromWriteAt(epoch, ino uint64, inode *stora
 // fallback 由调用方提供（GetAttr / SetAttr 用服务端返回的 attr timeout，Write 用默认写回填值），
 // 保证 STORAGE_ENTRY_TIMEOUT_SECONDS=0 的 pjdfstest 场景不会产生非预期的非零 EntryValid。
 func (c *NamespaceCache) entryTimeoutLocked(ino uint64, fallback float64) float64 {
+	if c.readOnly {
+		if v, ok := c.peekCachedInodeLocked(ino); ok {
+			return v.entryTimeout
+		}
+		return fallback
+	}
 	if el := c.items[cacheKey{kind: 'i', ino: ino}]; el != nil {
 		return itemOf(el).inode.entryTimeout
 	}
@@ -606,30 +872,24 @@ func (c *NamespaceCache) entryTimeoutLocked(ino uint64, fallback float64) float6
 func (c *NamespaceCache) peekInode(ino uint64) (cachedInode, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if el := c.items[cacheKey{kind: 'i', ino: ino}]; el != nil {
-		v := itemOf(el).inode
-		v.inode = cloneInode(v.inode)
-		return v, true
+	v, ok := c.peekCachedInodeLocked(ino)
+	if !ok {
+		return cachedInode{}, false
 	}
-	for dir := range c.dirsByChild[ino] {
-		el := c.items[cacheKey{kind: 'd', ino: dir}]
-		if el == nil {
-			continue
-		}
-		for _, entry := range itemOf(el).dir {
-			if entry.GetIno() != ino || entry.GetInode() == nil || entry.GetInode().GetAttr() == nil {
-				continue
-			}
-			return cachedInode{cloneInode(entry.GetInode()), entry.GetEntryTimeoutSeconds(), entry.GetAttrTimeoutSeconds()}, true
-		}
-	}
-	return cachedInode{}, false
+	v.inode = cloneInode(v.inode)
+	return v, true
 }
 
 // inodeAttrTimeout 读取缓存中已知的节点属性 TTL；未缓存时回退至 fallback。
 func (c *NamespaceCache) inodeAttrTimeout(ino uint64, fallback float64) float64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.readOnly {
+		if v, ok := c.peekCachedInodeLocked(ino); ok {
+			return v.attrTimeout
+		}
+		return fallback
+	}
 	if el := c.items[cacheKey{kind: 'i', ino: ino}]; el != nil {
 		return itemOf(el).inode.attrTimeout
 	}
@@ -724,8 +984,12 @@ func (c *NamespaceCache) entry(parent uint64, name string) (uint64, bool) {
 	if len(name) > MaxFilenameBytes {
 		return 0, false
 	}
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
 	c.mu.Lock()
-	if item, ok := c.get(cacheKey{kind: 'e', ino: parent, name: name}); ok {
+	if item, ok := c.getValidLocked(cacheKey{kind: 'e', ino: parent, name: name}, nowNano); ok {
 		ino := item.entry
 		c.mu.Unlock()
 		if ino == 0 {
@@ -735,14 +999,20 @@ func (c *NamespaceCache) entry(parent uint64, name string) (uint64, bool) {
 		}
 		return ino, true
 	}
-	if item, ok := c.get(cacheKey{kind: 'd', ino: parent}); ok {
-		for _, entry := range item.dir {
-			if string(entry.GetName()) == name {
-				ino := entry.GetIno()
-				c.mu.Unlock()
-				c.metrics.Load().incNSCacheHit(nsCacheEntry)
-				return ino, true
+	if item, ok := c.getValidLocked(cacheKey{kind: 'd', ino: parent}, nowNano); ok {
+		for i, entry := range item.dir {
+			if string(entry.GetName()) != name {
+				continue
 			}
+			if c.readOnly && nowNano >= item.dirEntryExpiryAt(i) {
+				c.mu.Unlock()
+				c.metrics.Load().incNSCacheMiss(nsCacheEntry)
+				return 0, false
+			}
+			ino := entry.GetIno()
+			c.mu.Unlock()
+			c.metrics.Load().incNSCacheHit(nsCacheEntry)
+			return ino, true
 		}
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
@@ -750,7 +1020,7 @@ func (c *NamespaceCache) entry(parent uint64, name string) (uint64, bool) {
 	}
 	// 目录内容已被完整掌握（目录流已降级为独立目录项，或目录刚创建且为空）：
 	// 未命中即权威 ENOENT，可直接返回 0 而不发网络 Lookup。
-	if _, ok := c.completeDirs[parent]; ok {
+	if _, ok := c.isCompleteDirValidLocked(parent, nowNano); ok {
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
 		return 0, true
@@ -766,31 +1036,45 @@ func (c *NamespaceCache) putEntryAt(epoch, parent uint64, name string, ino uint6
 	if epoch != ^uint64(0) && epoch != c.epoch {
 		return
 	}
-	c.putEntryLocked(parent, name, ino)
+	c.putEntryLocked(parent, name, ino, c.entryTTL)
 	c.mutations++
 }
 
 // putEntryAtIf 仅在缓存未被任何目录变更改写时回填，避免在途 Lookup 的过期结果覆盖新目录项。
-func (c *NamespaceCache) putEntryAtIf(generation, epoch, parent uint64, name string, ino uint64) {
+func (c *NamespaceCache) putEntryAtIf(generation, epoch, parent uint64, name string, ino uint64, entryTimeout float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if generation != c.mutations || (epoch != ^uint64(0) && epoch != c.epoch) {
 		return
 	}
-	c.putEntryLocked(parent, name, ino)
+	c.putEntryLocked(parent, name, ino, entryTimeout)
 }
 
-func (c *NamespaceCache) putEntryLocked(parent uint64, name string, ino uint64) {
+func (c *NamespaceCache) putEntryLocked(parent uint64, name string, ino uint64, entryTimeout float64) {
 	if len(name) > MaxFilenameBytes {
 		return
+	}
+	var expiresAtNano int64
+	if c.readOnly {
+		ttl := entryTimeout
+		if ino == 0 {
+			ttl = c.entryTTL
+		}
+		ttlDur := ttlDuration(ttl)
+		if ttlDur <= 0 {
+			c.removeKey(cacheKey{kind: 'e', ino: parent, name: name})
+			return
+		}
+		expiresAtNano = c.currentTime().Add(ttlDur).UnixNano()
 	}
 	// 独立目录项与旧目录流冲突：先把目录流按条目降级，保留未变动兄弟项的权威命中，
 	// 再写入本次变更的目录项。
 	c.demoteDirStreamToEntriesLocked(parent)
 	c.putItem(&cacheItem{
-		key:    cacheKey{kind: 'e', ino: parent, name: name},
-		entry:  ino,
-		weight: 1,
+		key:           cacheKey{kind: 'e', ino: parent, name: name},
+		entry:         ino,
+		expiresAtNano: expiresAtNano,
+		weight:        1,
 	})
 }
 
@@ -821,19 +1105,42 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 	if el == nil {
 		return
 	}
-	entries := itemOf(el).dir
+	dItem := itemOf(el)
+	entries := dItem.dir
+	dExpires := dItem.expiresAtNano
+	dEntryExpires := dItem.dirEntryExpires
+	dAttrExpires := dItem.dirAttrExpires
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
 	c.remove(el)
+	if c.readOnly && nowNano >= dExpires {
+		return
+	}
 	if len(entries) > c.capacity/4 {
 		return
 	}
 	evictedSameParent := false
-	for _, entry := range entries {
+	for idx, entry := range entries {
 		name := string(entry.GetName())
 		if name == ".." && entry.GetIno() != 0 && len(c.parentByDir) < c.capacity {
 			c.parentByDir[parent] = entry.GetIno()
 		}
 		if name == "" || name == "." || name == ".." || entry.GetIno() == 0 {
 			continue
+		}
+		var entryExp int64
+		if c.readOnly {
+			if idx < len(dEntryExpires) {
+				entryExp = dEntryExpires[idx]
+			} else {
+				entryExp = dExpires
+			}
+			if nowNano >= entryExp {
+				evictedSameParent = true
+				continue
+			}
 		}
 		key := cacheKey{kind: 'e', ino: parent, name: name}
 		// put 每个目录项最多触发一次容量淘汰，预先判断被淘汰项是否属于同一父目录。
@@ -844,14 +1151,14 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 				}
 			}
 		}
-		c.putItem(&cacheItem{key: key, entry: entry.GetIno(), weight: 1})
+		c.putItem(&cacheItem{key: key, entry: entry.GetIno(), expiresAtNano: entryExp, weight: 1})
 	}
 	if !evictedSameParent {
-		c.completeDirs[parent] = struct{}{}
+		c.completeDirs[parent] = dExpires
 	}
 	// 当目录流携带有效属性（AttrTimeoutSeconds > 0）时，为尚无独立 'i' 项的子节点及父目录（".."）保留属性，
 	// 消除祖先目录流因局部目录变更降级后后续 OpenDir/GetAttr 对未变动子目录的穿透 RPC。
-	for _, entry := range entries {
+	for idx, entry := range entries {
 		childIno := entry.GetIno()
 		if childIno == 0 || childIno == parent {
 			continue
@@ -860,6 +1167,17 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 		at := entry.GetAttrTimeoutSeconds()
 		if inode == nil || inode.GetAttr() == nil || at <= 0 {
 			continue
+		}
+		var attrExp int64
+		if c.readOnly {
+			if idx < len(dAttrExpires) {
+				attrExp = dAttrExpires[idx]
+			} else {
+				attrExp = dExpires
+			}
+			if nowNano >= attrExp {
+				continue
+			}
 		}
 		key := cacheKey{kind: 'i', ino: childIno}
 		if c.items[key] != nil {
@@ -870,9 +1188,10 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 			et = c.entryTimeoutLocked(childIno, c.entryTTL)
 		}
 		c.putItem(&cacheItem{
-			key:    key,
-			inode:  cachedInode{cloneInode(inode), et, at},
-			weight: 1,
+			key:           key,
+			inode:         cachedInode{cloneInode(inode), et, at},
+			expiresAtNano: attrExp,
+			weight:        1,
 		})
 	}
 }
@@ -886,7 +1205,7 @@ func (c *NamespaceCache) markNewDirWithParentAt(epoch, dirIno, parentIno uint64)
 	}
 	// 标记不参与 LRU 计费，用容量作为上界，避免长生命周期客户端创建海量目录后无界增长。
 	if len(c.completeDirs) < c.capacity {
-		c.completeDirs[dirIno] = struct{}{}
+		c.completeDirs[dirIno] = 0
 		if parentIno != 0 && len(c.parentByDir) < c.capacity {
 			c.parentByDir[dirIno] = parentIno
 		}
@@ -989,25 +1308,46 @@ func (c *NamespaceCache) removeEntry(parent uint64, name string) {
 	c.metrics.Load().incNSCacheInvalidation()
 }
 
-func (c *NamespaceCache) dir(ino uint64) ([]*storagev1.DirEntryPlus, bool) {
+func (c *NamespaceCache) dir(ino uint64) (cachedDir, bool) {
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
 	c.mu.Lock()
-	if item, ok := c.get(cacheKey{kind: 'd', ino: ino}); ok {
+	if item, ok := c.getValidLocked(cacheKey{kind: 'd', ino: ino}, nowNano); ok {
 		// 只做指针快照：缓存项一经发布就不再原地修改（putInodeLocked 以替换元素的方式更新），
 		// 因此调用方可以安全并发读取。500 项目录从 2,001 次分配 / 65~97µs 降到 1 次分配 / ~0.3µs。
-		out := append([]*storagev1.DirEntryPlus(nil), item.dir...)
+		res := cachedDir{
+			entries:         append([]*storagev1.DirEntryPlus(nil), item.dir...),
+			fromCache:       true,
+			nowNano:         nowNano,
+			expiresAtNano:   item.expiresAtNano,
+			dirEntryExpires: item.dirEntryExpires,
+			dirAttrExpires:  item.dirAttrExpires,
+		}
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheHit(nsCacheReadDir)
-		return out, true
+		return res, true
 	}
-	if synth, ok := c.synthesizeCompleteDirLocked(ino); ok {
-		out := append([]*storagev1.DirEntryPlus(nil), synth...)
+	if synth, ok := c.synthesizeCompleteDirAtLocked(ino, nowNano); ok {
+		res := cachedDir{
+			entries:   append([]*storagev1.DirEntryPlus(nil), synth...),
+			fromCache: true,
+			nowNano:   nowNano,
+		}
+		if el := c.items[cacheKey{kind: 'd', ino: ino}]; el != nil {
+			item := itemOf(el)
+			res.expiresAtNano = item.expiresAtNano
+			res.dirEntryExpires = item.dirEntryExpires
+			res.dirAttrExpires = item.dirAttrExpires
+		}
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheHit(nsCacheReadDir)
-		return out, true
+		return res, true
 	}
 	c.mu.Unlock()
 	c.metrics.Load().incNSCacheMiss(nsCacheReadDir)
-	return nil, false
+	return cachedDir{}, false
 }
 
 type synthChildEntry struct {
@@ -1020,12 +1360,22 @@ type synthChildEntry struct {
 // 直接按服务端 ReadDirPlus 契约（"."、".." 及按字节序升序排列的正子项与连续 NextOffset）本地合成完整目录流并回填 'd'。
 // 任一子项或父项缺失有效属性缓存时立即返回 false，由调用方安全回退远端 ReadDirPlus RPC。
 func (c *NamespaceCache) synthesizeCompleteDirLocked(dirIno uint64) ([]*storagev1.DirEntryPlus, bool) {
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
+	return c.synthesizeCompleteDirAtLocked(dirIno, nowNano)
+}
+
+func (c *NamespaceCache) synthesizeCompleteDirAtLocked(dirIno uint64, nowNano int64) ([]*storagev1.DirEntryPlus, bool) {
 	if c.entryTTL <= 0 || c.attrTTL <= 0 {
 		return nil, false
 	}
-	if _, complete := c.completeDirs[dirIno]; !complete {
+	completeExp, complete := c.isCompleteDirValidLocked(dirIno, nowNano)
+	if !complete {
 		return nil, false
 	}
+	minExp := completeExp
 	var parentIno uint64
 	if c.rootIno != 0 && dirIno == c.rootIno {
 		parentIno = dirIno
@@ -1035,15 +1385,22 @@ func (c *NamespaceCache) synthesizeCompleteDirLocked(dirIno uint64) ([]*storagev
 			return nil, false
 		}
 	}
-	dirCached, ok := c.peekCachedInodeLocked(dirIno)
+	dirCached, dirExp, ok := c.readCachedInodeAtLocked(dirIno, nowNano, false)
 	if !ok || dirCached.inode == nil || dirCached.inode.GetAttr() == nil || dirCached.attrTimeout <= 0 {
 		return nil, false
 	}
+	if c.readOnly && dirExp < minExp {
+		minExp = dirExp
+	}
 	parentCached := dirCached
 	if parentIno != dirIno {
-		parentCached, ok = c.peekCachedInodeLocked(parentIno)
+		var parentExp int64
+		parentCached, parentExp, ok = c.readCachedInodeAtLocked(parentIno, nowNano, false)
 		if !ok || parentCached.inode == nil || parentCached.inode.GetAttr() == nil || parentCached.attrTimeout <= 0 {
 			return nil, false
+		}
+		if c.readOnly && parentExp < minExp {
+			minExp = parentExp
 		}
 	}
 
@@ -1054,20 +1411,36 @@ func (c *NamespaceCache) synthesizeCompleteDirLocked(dirIno uint64) ([]*storagev
 		if el == nil {
 			return nil, false
 		}
-		childIno := itemOf(el).entry
+		eItem := itemOf(el)
+		if c.readOnly && nowNano >= eItem.expiresAtNano {
+			c.remove(el)
+			delete(c.completeDirs, dirIno)
+			return nil, false
+		}
+		if c.readOnly && eItem.expiresAtNano < minExp {
+			minExp = eItem.expiresAtNano
+		}
+		childIno := eItem.entry
 		if childIno == 0 {
 			continue
 		}
-		childCached, hit := c.peekCachedInodeLocked(childIno)
+		childCached, childExp, hit := c.readCachedInodeAtLocked(childIno, nowNano, false)
 		if !hit || childCached.inode == nil || childCached.inode.GetAttr() == nil ||
 			childCached.attrTimeout <= 0 || childCached.entryTimeout <= 0 {
 			return nil, false
+		}
+		if c.readOnly && childExp < minExp {
+			minExp = childExp
 		}
 		children = append(children, synthChildEntry{
 			name:   name,
 			ino:    childIno,
 			cached: childCached,
 		})
+	}
+	if c.readOnly && nowNano >= minExp {
+		delete(c.completeDirs, dirIno)
+		return nil, false
 	}
 
 	total := 2 + len(children)
@@ -1115,7 +1488,7 @@ func (c *NamespaceCache) synthesizeCompleteDirLocked(dirIno uint64) ([]*storagev
 		})
 	}
 
-	c.putDirLocked(dirIno, entries)
+	c.putDirWithMaxExpiryLocked(dirIno, entries, minExp)
 	if el := c.items[cacheKey{kind: 'd', ino: dirIno}]; el != nil {
 		return itemOf(el).dir, true
 	}
@@ -1133,6 +1506,46 @@ func (c *NamespaceCache) putDirAtIf(generation, epoch, ino uint64, entries []*st
 }
 
 func (c *NamespaceCache) putDirLocked(ino uint64, entries []*storagev1.DirEntryPlus) {
+	c.putDirWithMaxExpiryLocked(ino, entries, 0)
+}
+
+func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storagev1.DirEntryPlus, maxExpNano int64) {
+	var expiresAtNano int64
+	var dirEntryExpires []int64
+	var dirAttrExpires []int64
+	if c.readOnly {
+		if c.entryTTL <= 0 || c.attrTTL <= 0 {
+			c.removeKey(cacheKey{kind: 'd', ino: ino})
+			delete(c.completeDirs, ino)
+			return
+		}
+		dirDur := ttlDuration(min(c.entryTTL, c.attrTTL))
+		if dirDur <= 0 {
+			c.removeKey(cacheKey{kind: 'd', ino: ino})
+			delete(c.completeDirs, ino)
+			return
+		}
+		now := c.currentTime()
+		expiresAtNano = now.Add(dirDur).UnixNano()
+		if maxExpNano > 0 && maxExpNano < expiresAtNano {
+			expiresAtNano = maxExpNano
+		}
+		if now.UnixNano() >= expiresAtNano {
+			c.removeKey(cacheKey{kind: 'd', ino: ino})
+			delete(c.completeDirs, ino)
+			return
+		}
+		dirEntryExpires = make([]int64, len(entries))
+		dirAttrExpires = make([]int64, len(entries))
+		for i, entry := range entries {
+			if eDur := ttlDuration(entry.GetEntryTimeoutSeconds()); eDur > 0 {
+				dirEntryExpires[i] = min(expiresAtNano, now.Add(eDur).UnixNano())
+			}
+			if aDur := ttlDuration(entry.GetAttrTimeoutSeconds()); aDur > 0 {
+				dirAttrExpires[i] = min(expiresAtNano, now.Add(aDur).UnixNano())
+			}
+		}
+	}
 	// 旧的独立目录项可能与新目录流冲突，按父目录定向清理。
 	for _, name := range copyNames(c.byParent[ino]) {
 		c.removeKey(cacheKey{kind: 'e', ino: ino, name: name})
@@ -1150,13 +1563,16 @@ func (c *NamespaceCache) putDirLocked(ino uint64, entries []*storagev1.DirEntryP
 		}
 	}
 	c.putItem(&cacheItem{
-		key:    cacheKey{kind: 'd', ino: ino},
-		dir:    cloneDir(entries),
-		weight: len(entries) + 1,
+		key:             cacheKey{kind: 'd', ino: ino},
+		dir:             cloneDir(entries),
+		dirEntryExpires: dirEntryExpires,
+		dirAttrExpires:  dirAttrExpires,
+		expiresAtNano:   expiresAtNano,
+		weight:          len(entries) + 1,
 	})
 	// 目录流已完整加载：未命中的名字可权威判定为 ENOENT。
 	if len(entries)+1 <= c.capacity {
-		c.completeDirs[ino] = struct{}{}
+		c.completeDirs[ino] = expiresAtNano
 	} else {
 		delete(c.completeDirs, ino)
 	}
@@ -1173,7 +1589,7 @@ func (c *NamespaceCache) clear() {
 	c.byParent = make(map[uint64]map[string]struct{})
 	c.dirsByChild = make(map[uint64]map[uint64]struct{})
 	c.inodeDirs = make(map[uint64]map[uint64]struct{})
-	c.completeDirs = make(map[uint64]struct{})
+	c.completeDirs = make(map[uint64]int64)
 	c.parentByDir = make(map[uint64]uint64)
 	c.mu.Unlock()
 	c.metrics.Load().incNSCacheInvalidation()

@@ -630,12 +630,25 @@ func (c *NamespaceCache) putInodeLocked(ino uint64, inode *storagev1.Inode, entr
 		ttlDur := ttlDuration(attrTimeout)
 		if ttlDur <= 0 {
 			c.removeKey(cacheKey{kind: 'i', ino: ino})
+			if len(c.dirsByChild[ino]) > 0 {
+				c.updateDirChildInodesLocked(ino, inode, attrTimeout, c.currentTime().UnixNano(), 0)
+			}
 			return
 		}
 		now := c.currentTime()
 		nowNano = now.UnixNano()
 		expiresAtNano = now.Add(ttlDur).UnixNano()
 	}
+	c.updateDirChildInodesLocked(ino, inode, attrTimeout, nowNano, expiresAtNano)
+	c.putItem(&cacheItem{
+		key:           cacheKey{kind: 'i', ino: ino},
+		inode:         cachedInode{cloneInode(inode), entryTimeout, attrTimeout},
+		expiresAtNano: expiresAtNano,
+		weight:        1,
+	})
+}
+
+func (c *NamespaceCache) updateDirChildInodesLocked(ino uint64, inode *storagev1.Inode, attrTimeout float64, nowNano, expiresAtNano int64) {
 	for dir := range c.dirsByChild[ino] {
 		el := c.items[cacheKey{kind: 'd', ino: dir}]
 		if el == nil {
@@ -659,17 +672,77 @@ func (c *NamespaceCache) putInodeLocked(ino uint64, inode *storagev1.Inode, entr
 			entries[i] = updated
 			if c.readOnly && i < len(dItem.dirAttrExpires) {
 				nextAttrExp := slices.Clone(dItem.dirAttrExpires)
-				nextAttrExp[i] = min(dItem.expiresAtNano, expiresAtNano)
+				if expiresAtNano <= 0 {
+					nextAttrExp[i] = 0
+				} else {
+					nextAttrExp[i] = min(dItem.expiresAtNano, expiresAtNano)
+				}
 				dItem.dirAttrExpires = nextAttrExp
 			}
 		}
 	}
-	c.putItem(&cacheItem{
-		key:           cacheKey{kind: 'i', ino: ino},
-		inode:         cachedInode{cloneInode(inode), entryTimeout, attrTimeout},
-		expiresAtNano: expiresAtNano,
-		weight:        1,
-	})
+}
+
+// refreshExistingInodesFromReadDirAt updates already-cached inode items and parent directory
+// entries using fresh attributes returned by ReadDirPlus in read-only mode without inserting
+// uncached child inodes or bumping mutations.
+func (c *NamespaceCache) refreshExistingInodesFromReadDirAt(epoch uint64, entries []*storagev1.DirEntryPlus) {
+	if !c.readOnly || len(entries) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if epoch != ^uint64(0) && epoch != c.epoch {
+		return
+	}
+	now := c.currentTime()
+	nowNano := now.UnixNano()
+	for _, entry := range entries {
+		inode := entry.GetInode()
+		if inode == nil || inode.GetAttr() == nil {
+			continue
+		}
+		kernelIno := entry.GetIno()
+		if kernelIno == 0 {
+			continue
+		}
+		attrTimeout := entry.GetAttrTimeoutSeconds()
+		el := c.items[cacheKey{kind: 'i', ino: kernelIno}]
+		if el != nil && nowNano >= itemOf(el).expiresAtNano {
+			c.remove(el)
+			el = nil
+		}
+		ttlDur := ttlDuration(attrTimeout)
+		if ttlDur <= 0 {
+			if el != nil {
+				c.remove(el)
+			}
+			if len(c.dirsByChild[kernelIno]) > 0 {
+				c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, 0)
+			}
+			continue
+		}
+		expiresAtNano := now.Add(ttlDur).UnixNano()
+		if el != nil {
+			entryTimeout := entry.GetEntryTimeoutSeconds()
+			if entryTimeout <= 0 {
+				entryTimeout = itemOf(el).inode.entryTimeout
+			}
+			c.putItem(&cacheItem{
+				key:           cacheKey{kind: 'i', ino: kernelIno},
+				inode:         cachedInode{cloneInode(inode), entryTimeout, attrTimeout},
+				expiresAtNano: expiresAtNano,
+				weight:        1,
+			})
+			if len(c.dirsByChild[kernelIno]) > 0 {
+				c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, expiresAtNano)
+			}
+			continue
+		}
+		if len(c.dirsByChild[kernelIno]) > 0 {
+			c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, expiresAtNano)
+		}
+	}
 }
 
 // refreshInodeAt 用写操作返回的最新属性刷新缓存项，但保留既有目录项有效期。
@@ -705,7 +778,9 @@ func (c *NamespaceCache) refreshInodeAtIf(generation, epoch, ino uint64, inode *
 func (c *NamespaceCache) refreshInodeLocked(ino uint64, inode *storagev1.Inode, attrTimeout float64) {
 	entryTimeout := c.entryTimeoutLocked(ino, attrTimeout)
 	c.removeKey(cacheKey{kind: 'i', ino: ino})
-	c.mutations++
+	if !c.readOnly {
+		c.mutations++
+	}
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 

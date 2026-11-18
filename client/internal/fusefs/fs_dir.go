@@ -93,6 +93,9 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			}
 			e.Ino = fs.ToKernelIno(serverEntryIno)
 		}
+		if fs.cfg.IsReadOnly() {
+			fs.cache.refreshExistingInodesFromReadDirAt(epoch, page)
+		}
 		entries = append(entries, page...)
 		if input.Offset != 0 || len(entries)+1 > fs.cache.capacity {
 			return cachedDir{entries: entries}, fuse.OK

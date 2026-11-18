@@ -1,6 +1,8 @@
 package fusefs
 
 import (
+	"context"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
@@ -159,6 +162,61 @@ func TestRO_NamespaceCache_InternalPeekAndSynthesizeCompleteDirRespectExpiration
 		require.Empty(t, coord.inodeTracks, "unopened inode ObserveInode must not allocate track")
 		coord.mu.Unlock()
 	})
+
+	t.Run("TrackOpenInode with stale cached inode does not roll back newer stamp or invalidate fresh read-ahead", func(t *testing.T) {
+		t0 := time.Unix(1_700_000_000, 0)
+		clk := newFakeClockInternal(t0)
+		coord := NewReadAheadCoordinator()
+		coord.configureReadOnly(5.0, clk.Now)
+
+		const ino uint64 = 777
+		const fh1 uint64 = 10
+		v1Inode := makeTestProtoInode(ino, 1<<20, t0)
+		v2Inode := makeTestProtoInode(ino, 1<<20, t0.Add(time.Second))
+
+		coord.TrackOpenInode(ino, v1Inode)
+		coord.ObserveInode(ino, v2Inode)
+
+		var fetchCalls atomic.Int32
+		v2Payload := makeFilledChunk(1<<20, 0x22)
+		fetch := func(_ context.Context, off uint64, size uint32) (rpc.ReadPayload, error) {
+			fetchCalls.Add(1)
+			end := min(len(v2Payload), int(off)+int(size))
+			return rpc.ReadPayload{Data: v2Payload[off:end]}, nil
+		}
+
+		// Warm fh1's read-ahead window with v2 data.
+		buf := make([]byte, 256<<10)
+		_, err := coord.Read(context.Background(), fh1, ino, 0, buf, fetch)
+		require.NoError(t, err)
+		_, err = coord.Read(context.Background(), fh1, ino, 256<<10, buf, fetch)
+		require.NoError(t, err)
+		callsAfterWarm := fetchCalls.Load()
+
+		// Cached Open(fh2) observes stale v1 from NamespaceCache and calls TrackOpenInode.
+		coord.TrackOpenInode(ino, v1Inode)
+
+		coord.mu.Lock()
+		tr := coord.inodeTracks[ino]
+		require.NotNil(t, tr)
+		require.Equal(t, stampFromInodeMust(v2Inode), tr.stamp, "TrackOpenInode must not roll back newer observed stamp")
+		coord.mu.Unlock()
+
+		// fh1 must keep its valid v2 read-ahead window with zero extra fetch calls.
+		n, err := coord.Read(context.Background(), fh1, ino, 512<<10, buf, fetch)
+		require.NoError(t, err)
+		require.Equal(t, len(buf), n)
+		require.Equal(t, byte(0x22), buf[0])
+		require.Equal(t, callsAfterWarm, fetchCalls.Load(), "stale TrackOpenInode must not invalidate valid v2 window")
+	})
+}
+
+func stampFromInodeMust(inode *storagev1.Inode) inodeStamp {
+	s, ok := stampFromInode(inode)
+	if !ok {
+		panic("invalid test inode")
+	}
+	return s
 }
 
 type fakeClockInternal struct {

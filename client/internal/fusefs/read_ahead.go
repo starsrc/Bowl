@@ -1293,7 +1293,7 @@ func (c *ReadAheadCoordinator) updateTrackStampLocked(tr *inodeTrack, ino uint64
 	return targets
 }
 
-// TrackOpenInode records an open read-only file descriptor for ino and invalidates active read-ahead handles if its stamp changed.
+// TrackOpenInode records an open read-only file descriptor for ino and seeds its initial stamp when absent.
 func (c *ReadAheadCoordinator) TrackOpenInode(ino uint64, inode *storagev1.Inode) {
 	if !c.readOnly {
 		return
@@ -1309,12 +1309,11 @@ func (c *ReadAheadCoordinator) TrackOpenInode(ino uint64, inode *storagev1.Inode
 		c.inodeTracks[ino] = tr
 	}
 	tr.openCount++
-	var targets []*handleReadAhead
-	if hasStamp {
-		targets = c.updateTrackStampLocked(tr, ino, stamp)
+	if hasStamp && !tr.hasStamp {
+		tr.stamp = stamp
+		tr.hasStamp = true
 	}
 	c.mu.Unlock()
-	c.invalidateTargets(ino, targets)
 }
 
 // UntrackOpenInode releases an open read-only file descriptor reference and prunes idle stamp state.

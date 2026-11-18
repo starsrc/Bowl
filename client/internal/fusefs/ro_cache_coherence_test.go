@@ -752,3 +752,143 @@ func TestRO_ReadAhead_WindowAndSlotTTLExpiration(t *testing.T) {
 		}
 	})
 }
+
+func readDirPlusAtOffset(t *testing.T, fs *fusefs.RawFS, dirIno, offset uint64) []decodedDirEntryPlus {
+	t.Helper()
+	var openOut fuse.OpenOut
+	requireStatus(t, "OpenDir", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: dirIno}}, &openOut))
+	defer fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirIno}, Fh: openOut.Fh})
+
+	buf := make([]byte, 64<<10)
+	list := fuse.NewDirEntryList(buf, 0)
+	requireStatus(t, "ReadDirPlus", fuse.OK, fs.ReadDirPlus(nil, &fuse.ReadIn{
+		InHeader: fuse.InHeader{NodeId: dirIno},
+		Fh:       openOut.Fh,
+		Offset:   offset,
+		Size:     uint32(len(buf)),
+	}, list))
+
+	raw := list.Bytes()
+	const entryOutSize = int(unsafe.Sizeof(fuse.EntryOut{}))
+	const direntSize = 24
+	var out []decodedDirEntryPlus
+	for pos := 0; pos < len(raw); {
+		require.LessOrEqual(t, pos+entryOutSize+direntSize, len(raw))
+		eo := *(*fuse.EntryOut)(unsafe.Pointer(&raw[pos]))
+		pos += entryOutSize
+		nameLen := int(*(*uint32)(unsafe.Pointer(&raw[pos+16])))
+		pos += direntSize
+		require.LessOrEqual(t, pos+nameLen, len(raw))
+		name := string(raw[pos : pos+nameLen])
+		pos += nameLen
+		padding := (8 - nameLen&7) & 7
+		pos += padding
+		out = append(out, decodedDirEntryPlus{name: name, entryOut: eo})
+	}
+	return out
+}
+
+func TestRO_NamespaceCache_ReadDirPlusRefreshesExistingInodeAndConcurrentMisses(t *testing.T) {
+	t.Run("ReadDirPlus updates existing cached inode attrs and avoids inserting uncached siblings", func(t *testing.T) {
+		// Given: entryTTL=0.2s, attrTTL=5.0s; tracked.txt is cached via Lookup at v1, uncached.txt is not cached.
+		clk := newFakeClock(time.Unix(1_700_000_000, 0))
+		srv := newFakeStorage(t, withTTL(0.2, 5.0))
+		trackedIno := srv.seedFile(1, "tracked.txt", 0o644, []byte("v1"))
+		uncachedIno := srv.seedFile(1, "uncached.txt", 0o644, []byte("sib"))
+		fs := newTestRawFSWithClock(t, srv, clk, withMode(fusefs.MountModeRO))
+
+		initialLookup := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "tracked.txt")
+		require.Equal(t, uint64(2), initialLookup.Size)
+
+		// When: external writer updates tracked.txt to v2, entryTTL expires (0.3s < 5.0s attrTTL),
+		// and ReadDirPlus runs at Offset=1 (does not insert 'd' stream) so only existing 'i' refresh can update tracked.txt.
+		mutateServerFile(srv, trackedIno, []byte("v2-updated"), 1, time.Second, time.Second)
+		clk.Advance(300 * time.Millisecond)
+
+		entries := readDirPlusAtOffset(t, fs, fuse.FUSE_ROOT_ID, 1)
+		trackedEntry := findDecodedEntry(t, entries, "tracked.txt")
+		require.Equal(t, uint64(10), trackedEntry.entryOut.Size)
+
+		// Then: immediate GetAttr on tracked.txt before initial 5.0s attrTTL expires returns v2 with zero extra GetAttr RPC.
+		getAttrBefore := srv.getAttrCalls.Load()
+		gotAttr := mustGetAttr(t, fs, trackedIno)
+		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load(), "updated existing 'i' entry must serve v2 without GetAttr RPC")
+		require.Equal(t, uint64(10), gotAttr.Size)
+
+		// Uncached sibling must NOT have a new 'i' item inserted by ReadDirPlus.
+		_ = mustGetAttr(t, fs, uncachedIno)
+		require.Equal(t, getAttrBefore+1, srv.getAttrCalls.Load(), "uncached sibling must still miss to server GetAttr")
+	})
+
+	t.Run("ReadDirPlus preserves entryTimeout when entry EntryTimeoutSeconds <= 0 and evicts cached inode when AttrTimeoutSeconds <= 0", func(t *testing.T) {
+		clk := newFakeClock(time.Unix(1_700_000_000, 0))
+		srv := newFakeStorage(t, withTTL(2.0, 5.0))
+		inoA := srv.seedFile(1, "keep-entry-ttl.txt", 0o644, []byte("v1"))
+		inoB := srv.seedFile(1, "zero-attr-ttl.txt", 0o644, []byte("b1"))
+		fs := newTestRawFSWithClock(t, srv, clk, withMode(fusefs.MountModeRO))
+
+		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "keep-entry-ttl.txt")
+		_ = mustGetAttr(t, fs, inoB)
+
+		// Serve ReadDirPlus with EntryTimeoutSeconds=0 for keep-entry-ttl.txt and AttrTimeoutSeconds=0 for zero-attr-ttl.txt.
+		mutateServerFile(srv, inoA, []byte("v2-longer"), 1, time.Second, time.Second)
+		srv.readDirPlusHook = func(_ context.Context, _ *storagev1.ReadDirPlusRequest) ([]*storagev1.DirEntryPlus, error) {
+			srv.mu.Lock()
+			nodeA := cloneProtoInode(srv.nodes[inoA].inode)
+			nodeB := cloneProtoInode(srv.nodes[inoB].inode)
+			srv.mu.Unlock()
+			return []*storagev1.DirEntryPlus{
+				{Ino: inoA, Name: []byte("keep-entry-ttl.txt"), NextOffset: 3, Inode: nodeA, EntryTimeoutSeconds: 0, AttrTimeoutSeconds: 5.0},
+				{Ino: inoB, Name: []byte("zero-attr-ttl.txt"), NextOffset: 4, Inode: nodeB, EntryTimeoutSeconds: 2.0, AttrTimeoutSeconds: 0},
+			}, nil
+		}
+
+		_ = readDirPlusAtOffset(t, fs, fuse.FUSE_ROOT_ID, 2)
+
+		// Lookup on keep-entry-ttl.txt should still have positive EntryValid (preserved from earlier Lookup) and updated size.
+		lookupA := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "keep-entry-ttl.txt")
+		require.Equal(t, uint64(9), lookupA.Size)
+		require.Equal(t, int64(1), srv.lookupCalls.Load())
+		require.Positive(t, lookupA.EntryValid)
+
+		// zero-attr-ttl.txt must have had its cached 'i' evicted so GetAttr hits server.
+		beforeB := srv.getAttrCalls.Load()
+		_ = mustGetAttr(t, fs, inoB)
+		require.Equal(t, beforeB+1, srv.getAttrCalls.Load())
+	})
+
+	t.Run("Concurrent GetAttr miss does not increment mutations or drop concurrent Lookup backfill on RO", func(t *testing.T) {
+		clk := newFakeClock(time.Unix(1_700_000_000, 0))
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		_ = srv.seedFile(1, "foo.bin", 0o644, []byte("foo"))
+		barIno := srv.seedFile(1, "bar.bin", 0o644, []byte("bar"))
+
+		lookupEntered := make(chan struct{})
+		releaseLookup := make(chan struct{})
+		srv.lookupHook = func(_ context.Context, req *storagev1.LookupRequest) (*storagev1.LookupResponse, error) {
+			if string(req.GetName()) == "foo.bin" {
+				close(lookupEntered)
+				<-releaseLookup
+			}
+			return nil, nil
+		}
+		fs := newTestRawFSWithClock(t, srv, clk, withMode(fusefs.MountModeRO))
+
+		var fooOut fuse.EntryOut
+		done := make(chan fuse.Status, 1)
+		go func() {
+			done <- fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "foo.bin", &fooOut)
+		}()
+		<-lookupEntered
+
+		// While Lookup(foo.bin) RPC is in flight, run a GetAttr miss on bar.bin (calls refreshInodeLocked).
+		_ = mustGetAttr(t, fs, barIno)
+		close(releaseLookup)
+		requireStatus(t, "concurrent Lookup(foo.bin)", fuse.OK, <-done)
+
+		// Lookup(foo.bin) backfill must NOT be dropped by refreshInodeLocked bumping mutations.
+		lookup2 := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "foo.bin")
+		require.Equal(t, uint64(3), lookup2.Size)
+		require.Equal(t, int64(1), srv.lookupCalls.Load(), "second Lookup(foo.bin) must hit cache backfilled by first Lookup")
+	})
+}

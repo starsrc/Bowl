@@ -368,3 +368,137 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 	require.NoError(t, json.Unmarshal(nilRec.Body.Bytes(), &prog))
 	require.Equal(t, fusefs.UnmountProgress{}, prog)
 }
+
+func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *testing.T) {
+	// Given
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	metaDir := t.TempDir()
+	withTempMountMetaDirs(t, metaDir)
+
+	// When: writeMountMeta is given a symlink mountpoint
+	writtenPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: symMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "127.0.0.1:19401",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	// Then: filename and stored JSON both use canonical mountpoint
+	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(canonMP)), writtenPath)
+	data, err := os.ReadFile(writtenPath)
+	require.NoError(t, err)
+	var stored mountMeta
+	require.NoError(t, json.Unmarshal(data, &stored))
+	require.Equal(t, canonMP, stored.Mountpoint)
+
+	// And listMountMetas reads the persisted canonical entry without altering it
+	metas := listMountMetas()
+	require.Len(t, metas, 1)
+	require.Equal(t, canonMP, metas[0].Mountpoint)
+	require.Equal(t, "127.0.0.1:19401", metas[0].AdminAddr)
+}
+
+func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountRoots(t *testing.T) {
+	// Given: realWedgedMP with admin off and realOkMP are active mount roots in mountinfo
+	const (
+		realWedgedMP = "/wedged-root/mnt"
+		realOkMP     = "/ok-root/mnt"
+		symWedgedMP  = "/tmp/sym-wedged"
+		symOkMP      = "/tmp/sym-ok"
+	)
+	_, mux := setupTestObsAndMux(t)
+	lastURL := withStatsMuxTransport(t, mux)
+	metaDir := t.TempDir()
+	withTempMountMetaDirs(t, metaDir)
+	withMountInfoContent(t,
+		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
+	)
+	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+		"/tmp":      {mode: os.ModeDir | 0o755},
+		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
+		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
+	})
+
+	// When: writing metadata via symlinked mountpoints
+	wedgedMetaPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: symWedgedMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "off",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	okMetaPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: symOkMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID2,
+		AdminAddr:  "127.0.0.1:19401",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	// Then: metadata files use canonical mountpoint hashes with zero Lstat on active mount roots
+	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realWedgedMP)), wedgedMetaPath)
+	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realOkMP)), okMetaPath)
+
+	// When: listMountMetas reads entries, including a stored symlink entry to verify pure filepath.Clean without EvalSymlinks
+	realTarget := t.TempDir()
+	hostSym := filepath.Join(t.TempDir(), "host-sym")
+	require.NoError(t, os.Symlink(realTarget, hostSym))
+	extraPath := filepath.Join(metaDir, mountMetaFileName(hostSym))
+	extraBytes, err := json.Marshal(mountMeta{
+		Mountpoint: hostSym + "/",
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "off",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(extraPath, extraBytes, 0o644))
+
+	metas := listMountMetas()
+	require.Len(t, metas, 3)
+	gotMountpoints := []string{metas[0].Mountpoint, metas[1].Mountpoint, metas[2].Mountpoint}
+	require.Contains(t, gotMountpoints, hostSym)
+	require.NoError(t, os.Remove(extraPath))
+
+	// When: bowl stats with no args lists multiple mounts
+	code, _, errOut := runCLI("stats")
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "multiple active mounts found")
+	require.Contains(t, errOut, realOkMP)
+	require.Contains(t, errOut, realWedgedMP)
+
+	// When: bowl stats <symOkMP> queries healthy mount while wedged mount is present
+	code, jsonOut, errOut := runCLI("stats", symOkMP, "--json")
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, errOut)
+	require.Equal(t, "http://127.0.0.1:19401/debug/stats?format=json", *lastURL)
+	var snap fusefs.Snapshot
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &snap))
+
+	// When: bowl stats <symWedgedMP> fails immediately on disabled admin without hanging
+	code, _, errOut = runCLI("stats", symWedgedMP)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "admin endpoint is disabled")
+	require.Contains(t, errOut, realWedgedMP)
+
+	// When: sole wedged mount with --admin-addr off fails immediately on bowl stats without args
+	require.NoError(t, os.Remove(okMetaPath))
+	code, _, errOut = runCLI("stats")
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "admin endpoint is disabled")
+	require.Contains(t, errOut, realWedgedMP)
+
+	require.NotContains(t, *lstatCalls, realWedgedMP)
+	require.NotContains(t, *lstatCalls, realOkMP)
+}

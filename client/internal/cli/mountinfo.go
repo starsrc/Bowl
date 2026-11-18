@@ -13,7 +13,13 @@ import (
 	"strings"
 )
 
-var mountInfoPath = "/proc/self/mountinfo"
+const maxMountInfoSymlinkHops = 40
+
+var (
+	mountInfoPath     = "/proc/self/mountinfo"
+	mountInfoLstat    = os.Lstat
+	mountInfoReadlink = os.Readlink
+)
 
 // DiskMountInfo describes the local mount state and read-only mode of a virtual disk from /proc/self/mountinfo.
 type DiskMountInfo struct {
@@ -104,15 +110,6 @@ func readMountPoints() ([]mountPoint, error) {
 	return parseMountPointsFromReader(file)
 }
 
-func containsMountPoint(points []mountPoint, target string) bool {
-	for _, point := range points {
-		if point.path == target {
-			return true
-		}
-	}
-	return false
-}
-
 func findDiskMountpoint(points []mountPoint, diskID string) DiskMountInfo {
 	expectedSource := "bowl:" + strings.TrimSpace(diskID)
 	var found DiskMountInfo
@@ -134,17 +131,96 @@ func findDiskMountpoint(points []mountPoint, diskID string) DiskMountInfo {
 	return found
 }
 
-// IsMountPoint reports whether path is an active mountpoint in /proc/self/mountinfo.
-func IsMountPoint(path string) (bool, error) {
+func splitAbsComponents(cleanAbs string) []string {
+	trimmed := strings.TrimPrefix(cleanAbs, string(filepath.Separator))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, string(filepath.Separator))
+}
+
+func walkMountPointComponents(candidate string, hops *int, mountSet map[string]struct{}) (nextCandidate string, mounted, expanded bool) {
+	parts := splitAbsComponents(candidate)
+	curPrefix := string(filepath.Separator)
+	for idx, comp := range parts {
+		// Check the full remaining candidate before Lstat so this walk never stats a mounted FUSE root.
+		checkCandidate := filepath.Clean(filepath.Join(append([]string{curPrefix}, parts[idx:]...)...))
+		if _, ok := mountSet[checkCandidate]; ok {
+			return checkCandidate, true, false
+		}
+		nextPath := filepath.Join(curPrefix, comp)
+		if _, isMount := mountSet[nextPath]; isMount {
+			// Active Linux mount roots are never symlinks; advance past them without calling Lstat.
+			curPrefix = nextPath
+			continue
+		}
+		info, lerr := mountInfoLstat(nextPath)
+		if lerr != nil || info == nil {
+			return candidate, false, false
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			curPrefix = nextPath
+			continue
+		}
+		*hops++
+		if *hops > maxMountInfoSymlinkHops {
+			return candidate, false, false
+		}
+		target, rerr := mountInfoReadlink(nextPath)
+		if rerr != nil {
+			return candidate, false, false
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(curPrefix, target)
+		}
+		joined := append([]string{target}, parts[idx+1:]...)
+		return filepath.Clean(filepath.Join(joined...)), false, true
+	}
+	return candidate, false, false
+}
+
+// ResolveMountPoint checks /proc/self/mountinfo first and expands path symlinks component-by-component
+// without calling Lstat on active mount roots that can block on unresponsive FUSE daemons.
+func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return false, fmt.Errorf("resolve absolute path: %w", err)
+		return "", false, fmt.Errorf("resolve absolute path: %w", err)
 	}
+	cleanAbs := filepath.Clean(absPath)
+
 	points, err := readMountPoints()
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	return containsMountPoint(points, filepath.Clean(absPath)), nil
+	mountSet := make(map[string]struct{}, len(points))
+	for _, point := range points {
+		mountSet[point.path] = struct{}{}
+	}
+	if _, ok := mountSet[cleanAbs]; ok {
+		return cleanAbs, true, nil
+	}
+
+	candidate := cleanAbs
+	hops := 0
+	for {
+		if _, ok := mountSet[candidate]; ok {
+			return candidate, true, nil
+		}
+		nextCandidate, matched, expanded := walkMountPointComponents(candidate, &hops, mountSet)
+		if matched {
+			return nextCandidate, true, nil
+		}
+		if !expanded {
+			return nextCandidate, false, nil
+		}
+		candidate = nextCandidate
+	}
+}
+
+// IsMountPoint reports whether path is an active mountpoint in /proc/self/mountinfo.
+func IsMountPoint(path string) (bool, error) {
+	_, mounted, err := ResolveMountPoint(path)
+	return mounted, err
 }
 
 // FindDiskMountpoint scans /proc/self/mountinfo to check if diskID is actively mounted locally.

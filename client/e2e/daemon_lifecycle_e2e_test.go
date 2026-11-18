@@ -410,3 +410,117 @@ func TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelat
 		stopBowlMountGracefully(t, fgCmd, fgMP)
 	})
 }
+
+// TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount verifies symlinked mountpoints across
+// mount, duplicate-mount checks, stats, normal umount drain, data persistence, and wedged force umount.
+func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	disk := createTestDisk(t, client)
+
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonRealMP, err := filepath.EvalSymlinks(realMP)
+	require.NoError(t, err)
+
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	// When: mount through the symlinked mountpoint
+	runBowlSuccess(t, "mount", "--endpoint", endpoint, "--admin-addr", "127.0.0.1:0", disk.GetDiskId(), symMP)
+	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", canonRealMP).Run() })
+
+	require.True(t, isMounted(canonRealMP), "mountinfo must record the canonical mountpoint")
+	canonMetaPath := mountMetaPath(t, canonRealMP)
+	symMetaPath := mountMetaPath(t, symMP)
+	metaBytes, err := os.ReadFile(canonMetaPath)
+	require.NoError(t, err, "canonical mountMeta must exist at %s", canonMetaPath)
+	_, symMetaErr := os.Stat(symMetaPath)
+	require.ErrorIs(t, symMetaErr, os.ErrNotExist, "symlink mountMeta path must not be created")
+
+	var meta1 struct {
+		Mountpoint string `json:"mountpoint"`
+		PID        int    `json:"pid"`
+	}
+	require.NoError(t, json.Unmarshal(metaBytes, &meta1))
+	require.Equal(t, canonRealMP, meta1.Mountpoint)
+	require.Positive(t, meta1.PID)
+
+	// When: write a file via symlink and check duplicate mount rejection via both paths
+	probePayload := []byte("symlink-persist-ok")
+	require.NoError(t, os.WriteFile(filepath.Join(symMP, "symlink-probe.txt"), probePayload, 0o644))
+	readViaReal, err := os.ReadFile(filepath.Join(canonRealMP, "symlink-probe.txt"))
+	require.NoError(t, err)
+	require.Equal(t, probePayload, readViaReal)
+
+	dupSymOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, disk.GetDiskId(), symMP)
+	require.Contains(t, dupSymOut, "already mounted")
+	dupRealOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, disk.GetDiskId(), canonRealMP)
+	require.Contains(t, dupRealOut, "already mounted")
+
+	// When: query stats via symlink and run normal umount via symlink
+	statsOut := runBowlSuccess(t, "stats", symMP)
+	require.Contains(t, statsOut, "Uptime:")
+
+	runBowlSuccess(t, "umount", symMP)
+	waitForUnmount(t, canonRealMP)
+	waitForProcessExit(t, meta1.PID)
+	_, err = os.Stat(canonMetaPath)
+	require.ErrorIs(t, err, os.ErrNotExist, "mountMeta must be removed after normal umount")
+
+	// When: remount via symlink, verify persistence, stop the daemon with SIGSTOP, and force unmount
+	runBowlSuccess(t, "mount", "--endpoint", endpoint, "--admin-addr", "off", disk.GetDiskId(), symMP)
+	waitForMount(t, canonRealMP)
+
+	metaBytes2, err := os.ReadFile(canonMetaPath)
+	require.NoError(t, err)
+	var meta2 struct {
+		PID int `json:"pid"`
+	}
+	require.NoError(t, json.Unmarshal(metaBytes2, &meta2))
+	require.Positive(t, meta2.PID)
+
+	t.Cleanup(func() {
+		_ = syscall.Kill(meta2.PID, syscall.SIGCONT)
+		_ = syscall.Kill(meta2.PID, syscall.SIGKILL)
+		_ = exec.Command(getBowlBin(), "umount", "-f", canonRealMP).Run()
+		_ = os.Remove(canonMetaPath)
+	})
+
+	persisted, err := os.ReadFile(filepath.Join(symMP, "symlink-probe.txt"))
+	require.NoError(t, err)
+	require.Equal(t, probePayload, persisted)
+
+	require.NoError(t, syscall.Kill(meta2.PID, syscall.SIGSTOP))
+	// Wait longer than the 1s attr cache TTL so any stat on the FUSE root would trigger FUSE_GETATTR and block.
+	time.Sleep(1300 * time.Millisecond)
+
+	for _, statsArgs := range [][]string{{"stats"}, {"stats", symMP}} {
+		statsCtx, statsCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		statsStart := time.Now()
+		statsOut, statsErr := exec.CommandContext(statsCtx, getBowlBin(), statsArgs...).CombinedOutput()
+		statsElapsed := time.Since(statsStart)
+		ctxErr := statsCtx.Err()
+		statsCancel()
+		require.NoError(t, ctxErr, "bowl %v timed out after %s: %s", statsArgs, statsElapsed, string(statsOut))
+		require.Less(t, statsElapsed, 3*time.Second)
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, statsErr, &exitErr, "bowl %v must exit with code 1, got err=%v out=%s", statsArgs, statsErr, string(statsOut))
+		require.Equal(t, 1, exitErr.ExitCode(), "bowl %v out=%s", statsArgs, string(statsOut))
+		require.Contains(t, string(statsOut), "admin endpoint is disabled")
+	}
+
+	forceCtx, forceCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer forceCancel()
+	start := time.Now()
+	forceCmd := exec.CommandContext(forceCtx, getBowlBin(), "umount", "-f", symMP)
+	forceOut, forceErr := forceCmd.CombinedOutput()
+	elapsed := time.Since(start)
+	require.NoError(t, forceErr, "bowl umount -f %s failed in %s: %s", symMP, elapsed, string(forceOut))
+	require.Less(t, elapsed, 3*time.Second)
+	waitForUnmount(t, canonRealMP)
+
+	// Resume the stopped daemon so it observes the lazy unmount and releases its lease before disk cleanup.
+	require.NoError(t, syscall.Kill(meta2.PID, syscall.SIGCONT))
+	waitForProcessExit(t, meta2.PID)
+}

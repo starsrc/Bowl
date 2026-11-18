@@ -313,7 +313,7 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
-	mounted, err := IsMountPoint(absMountpoint)
+	canonMountpoint, mounted, err := ResolveMountPoint(absMountpoint)
 	if err != nil {
 		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
@@ -321,7 +321,7 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 		return runtimeExitErr(fmt.Errorf("path %q is not a mounted filesystem", absMountpoint))
 	}
 
-	binPath, cmdArgs, found := findUmountCommand(absMountpoint, force)
+	binPath, cmdArgs, found := findUmountCommand(canonMountpoint, force)
 	if !found {
 		return runtimeExitErr(errors.New("no system unmount tool found: expected fusermount3, fusermount, or umount"))
 	}
@@ -332,7 +332,7 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 		hasMeta  bool
 	)
 	if !force {
-		metaPath, meta, hasMeta = resolveUmountMountMeta(absMountpoint)
+		metaPath, meta, hasMeta = resolveUmountMountMeta(canonMountpoint)
 	}
 
 	if out, runErr := runCommand(binPath, cmdArgs...); runErr != nil {

@@ -122,16 +122,17 @@ func withRedirectDaemonStdioStub(t *testing.T, fn func(*os.File)) {
 
 func stubMountServeFUSE(t *testing.T, wantMP string) *capturedMountServe {
 	t.Helper()
+	wantCanon := canonicalMountpoint(wantMP)
 	res := &capturedMountServe{}
 	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
 		res.cfg = *cfg
-		require.Equal(t, wantMP, gotMP, "scene=serveFUSE_mountpoint want=%s got=%s", wantMP, gotMP)
+		require.Equal(t, wantCanon, gotMP, "scene=serveFUSE_mountpoint want=%s got=%s", wantCanon, gotMP)
 		if cfg.StageSession != nil {
 			_, statErr := os.Stat(cfg.StageSession.InstanceDir())
 			res.instDirAlive = statErr == nil
 		}
 		ready()
-		res.metaInReady, res.metaFoundNow = findMountMeta(wantMP)
+		res.metaInReady, res.metaFoundNow = findMountMeta(wantCanon)
 		return nil
 	})
 	return res
@@ -618,7 +619,7 @@ func TestMount_BackgroundDaemon_GivenValidLogFile_PassesRawArgsVerbatimAndDefers
 
 func TestMount_AlreadyMounted_GivenActiveMountInfo_ReturnsExit1(t *testing.T) {
 	// Given
-	mp := t.TempDir()
+	mp := canonicalMountpoint(t.TempDir())
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
 	// When
@@ -884,7 +885,7 @@ func TestMount_ForegroundSync_GivenCLIFlagAndAmbientStageEnv_IgnoresStageEnvSkip
 	var captured fusefs.Config
 	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, gotMP string, ready func()) error {
 		captured = *cfg
-		require.Equal(t, mp, gotMP)
+		require.Equal(t, canonicalMountpoint(mp), gotMP)
 		ready()
 		require.Eventually(t, func() bool {
 			return len(storage.getRenewReqs()) >= 1
@@ -1337,18 +1338,18 @@ func TestDefaultMountRenewInterval_GivenTTLValues_ClampsMinimumOneSecond(t *test
 }
 
 func TestValidatePathNotInMountpoint_GivenEqualAndSymlinkLoop_ReturnsFlagErrors(t *testing.T) {
-	mp := t.TempDir()
+	mp := canonicalMountpoint(t.TempDir())
 	loopDir := t.TempDir()
 	loopA := filepath.Join(loopDir, "loop-a")
 	loopB := filepath.Join(loopDir, "loop-b")
 	require.NoError(t, os.Symlink(loopB, loopA))
 	require.NoError(t, os.Symlink(loopA, loopB))
 
-	equalErr := validatePathNotInMountpoint("--log-file", mp, mp)
+	equalErr := validatePathNotInMountpoint("--log-file", mp, mp, mp)
 	require.ErrorContains(t, equalErr, "--log-file")
 	require.ErrorContains(t, equalErr, "cannot equal or be inside mountpoint")
 
-	loopErr := validatePathNotInMountpoint("--log-file", loopA, mp)
+	loopErr := validatePathNotInMountpoint("--log-file", loopA, mp, mp)
 	require.ErrorContains(t, loopErr, "failed to resolve --log-file")
 }
 
@@ -1560,4 +1561,232 @@ func TestMount_Foreground_GivenRelativePaths_PreservesCallerWorkingDirectory(t *
 	require.NoError(t, err)
 	require.Equal(t, cwdBefore, cwdAfter)
 	require.Equal(t, filepath.Join(cwdBefore, "fg-stage"), captured.cfg.StageDir)
+}
+
+func TestMount_AlreadyMounted_GivenSymlinkToActiveMount_ReturnsExit1(t *testing.T) {
+	// Given
+	realParent := t.TempDir()
+	realMP := filepath.Join(realParent, "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	symParent := filepath.Join(t.TempDir(), "sym-parent")
+	require.NoError(t, os.Symlink(realParent, symParent))
+	viaSymParent := filepath.Join(symParent, "real-mp")
+
+	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+	// When / Then: leaf symlink rejected as already mounted
+	code, out, errOut := runCLI("mount", testDiskID1, symMP, "-f")
+	require.Equal(t, 1, code, "scene=dup_mount_leaf_symlink want=1 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "already mounted")
+
+	// When / Then: symlinked parent rejected as already mounted
+	code, out, errOut = runCLI("mount", testDiskID1, viaSymParent, "-f")
+	require.Equal(t, 1, code, "scene=dup_mount_parent_symlink want=1 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "already mounted")
+}
+
+func TestMount_Foreground_GivenSymlinkMountpoint_CanonicalizesServeFUSEAndMountMeta(t *testing.T) {
+	// Given
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	metaDir := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, metaDir)
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "symlink-mount-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	var gotServeMP string
+	var gotMeta mountMeta
+	var metaFileCanonExists bool
+	var metaFileSymExists bool
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+		gotServeMP = gotMP
+		ready()
+		gotMeta, _ = findMountMeta(canonMP)
+		_, errCanon := os.Stat(filepath.Join(metaDir, mountMetaFileName(canonMP)))
+		metaFileCanonExists = errCanon == nil
+		_, errSym := os.Stat(filepath.Join(metaDir, mountMetaFileName(symMP)))
+		metaFileSymExists = errSym == nil
+		return nil
+	})
+
+	// When
+	code, _, errOut := runCLI("mount", testDiskID1, symMP, "-f", "--admin-addr", "off")
+
+	// Then
+	require.Equal(t, 0, code, "scene=mount_symlink want=0 got=%d stderr=%s", code, errOut)
+	require.Equal(t, canonMP, gotServeMP, "serveFUSE must receive canonical mountpoint")
+	require.Equal(t, canonMP, gotMeta.Mountpoint, "mountMeta must store canonical mountpoint")
+	require.True(t, metaFileCanonExists, "mountMeta file must use canonical mountpoint hash")
+	require.False(t, metaFileSymExists, "mountMeta file must not use symlink mountpoint hash")
+}
+
+func TestMount_DaemonWorker_GivenRelativeSymlinkMountpoint_CanonicalizesBeforeChdir(t *testing.T) {
+	// Given
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	metaDir := t.TempDir()
+	withTempMountMetaDirs(t, metaDir)
+	withStageDirTmpfsStub(t, false)
+
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	callerDir, err := os.Getwd()
+	require.NoError(t, err)
+	realMP := filepath.Join(callerDir, "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	require.NoError(t, os.Symlink("real-mp", filepath.Join(callerDir, "sym-mp")))
+	canonMP := canonicalMountpoint(realMP)
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "worker-sym-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer r.Close()
+	withReadinessPipeStub(t, w)
+	withRedirectDaemonStdioStub(t, func(*os.File) {})
+
+	var chdirTarget string
+	withChdirStub(t, func(dir string) error {
+		chdirTarget = dir
+		return nil
+	})
+
+	var gotServeMP string
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+		gotServeMP = gotMP
+		ready()
+		return nil
+	})
+	t.Setenv("BOWL_DAEMON_WORKER", "1")
+
+	// When
+	code, out, errOut := runCLI("mount", testDiskID1, "sym-mp", "--admin-addr", "off")
+
+	// Then
+	require.Equal(t, 0, code, "scene=worker_symlink want=0 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, "/", chdirTarget)
+	require.Equal(t, canonMP, gotServeMP)
+}
+
+func TestMount_Validation_GivenSymlinkLoopMountpoint_Exits2(t *testing.T) {
+	// Given
+	loopDir := t.TempDir()
+	loopA := filepath.Join(loopDir, "loop-a")
+	loopB := filepath.Join(loopDir, "loop-b")
+	require.NoError(t, os.Symlink(loopB, loopA))
+	require.NoError(t, os.Symlink(loopA, loopB))
+
+	// When
+	code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, loopA)
+
+	// Then
+	require.Equal(t, 2, code, "scene=mountpoint_symlink_loop want=2 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "Error:")
+}
+
+func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsWithoutMountRootLstat(t *testing.T) {
+	// Given: synthetic mount roots in mountinfo that do not exist on host disk, so os.Stat or EvalSymlinks would fail with exit 2
+	const (
+		realWedgedMP = "/wedged-root/mnt"
+		realOkMP     = "/ok-root/mnt"
+		symWedgedMP  = "/tmp/sym-wedged"
+		symOkMP      = "/tmp/sym-ok"
+	)
+	withMountInfoContent(t,
+		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
+	)
+	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+		"/tmp":      {mode: os.ModeDir | 0o755},
+		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
+		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
+	})
+
+	// When / Then: direct canonical wedged path returns exit 1 with zero Lstat calls
+	code, out, errOut := runCLI("mount", testDiskID1, realWedgedMP, "-f")
+	require.Equal(t, 1, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "already mounted")
+	require.Contains(t, errOut, realWedgedMP)
+	require.Empty(t, *lstatCalls)
+
+	// When / Then: symlinked wedged and ok paths return exit 1 without os.Stat, EvalSymlinks, or Lstat on active mount roots
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: symWedgedMP, want: realWedgedMP},
+		{input: symOkMP, want: realOkMP},
+	} {
+		code, out, errOut = runCLI("mount", testDiskID1, tc.input, "-f")
+		require.Equal(t, 1, code, "input=%s stderr=%s", tc.input, errOut)
+		require.Empty(t, out)
+		require.Contains(t, errOut, "already mounted")
+		require.Contains(t, errOut, tc.want)
+	}
+
+	// When / Then: bad flags on an already-mounted wedged mountpoint still exit 2 without touching active mount roots
+	loopDir := t.TempDir()
+	loopA := filepath.Join(loopDir, "loop-a")
+	loopB := filepath.Join(loopDir, "loop-b")
+	require.NoError(t, os.Symlink(loopB, loopA))
+	require.NoError(t, os.Symlink(loopA, loopB))
+
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantSubstr string
+	}{
+		{
+			name:       "StageDirInsideSymlinkWedgedMount",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "-f", "--stage-dir", filepath.Join(symWedgedMP, "sub")},
+			wantSubstr: "mountpoint",
+		},
+		{
+			name:       "LogFileInsideCanonicalWedgedMount",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "--log-file", filepath.Join(realWedgedMP, "daemon.log")},
+			wantSubstr: "mountpoint",
+		},
+		{
+			name:       "StageDirSymlinkLoop",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "-f", "--stage-dir", loopA},
+			wantSubstr: "Error:",
+		},
+		{
+			name:       "InvalidModeFlagCombo",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "-f", "--mode", "ro", "--stage-size", "8MiB"},
+			wantSubstr: "--stage-size cannot be set",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errOut = runCLI(tc.args...)
+			require.Equal(t, 2, code, "scene=%s stderr=%s", tc.name, errOut)
+			require.Empty(t, out)
+			require.Contains(t, errOut, tc.wantSubstr)
+		})
+	}
+
+	require.NotContains(t, *lstatCalls, realWedgedMP)
+	require.NotContains(t, *lstatCalls, realOkMP)
 }

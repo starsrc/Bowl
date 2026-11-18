@@ -35,14 +35,14 @@ var mountMetaDirs = func() []string {
 	return []string{primaryMountMetaDir, fallbackMountMetaDir()}
 }
 
-// canonicalMountpoint normalizes mountpoint paths by resolving symlinks when possible and falling back to Abs plus Clean.
+// canonicalMountpoint normalizes mountpoint paths through ResolveMountPoint without calling Lstat on active mount roots,
+// falling back to Abs plus Clean on error.
 func canonicalMountpoint(mountpoint string) string {
-	abs, err := filepath.Abs(mountpoint)
-	if err == nil {
-		mountpoint = abs
+	if resolved, _, err := ResolveMountPoint(mountpoint); err == nil {
+		return resolved
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(mountpoint); evalErr == nil {
-		return filepath.Clean(resolved)
+	if abs, err := filepath.Abs(mountpoint); err == nil {
+		return filepath.Clean(abs)
 	}
 	return filepath.Clean(mountpoint)
 }
@@ -56,7 +56,7 @@ func mountMetaFileName(mountpoint string) string {
 // writeMountMeta atomically writes discovery metadata via temp file and rename, returning the written path.
 func writeMountMeta(meta *mountMeta) (string, error) {
 	normalized := *meta
-	normalized.Mountpoint = filepath.Clean(normalized.Mountpoint)
+	normalized.Mountpoint = canonicalMountpoint(normalized.Mountpoint)
 	data, err := json.Marshal(normalized)
 	if err != nil {
 		return "", fmt.Errorf("marshal mount metadata: %w", err)
@@ -196,7 +196,7 @@ func findMountMeta(mountpoint string) (mountMeta, bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)
 	for _, m := range listMountMetas() {
-		if m.Mountpoint == cleaned || canonicalMountpoint(m.Mountpoint) == canon {
+		if m.Mountpoint == cleaned || m.Mountpoint == canon {
 			return m, true
 		}
 	}

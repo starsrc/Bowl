@@ -985,3 +985,158 @@ func TestUmount_GivenDefaultTerminalDetector_ReturnsFalseForBuffersAndPipes(t *t
 	}()
 	require.False(t, umountIsTerminal(w))
 }
+
+func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t *testing.T) {
+	// Given
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	metaDir := t.TempDir()
+	withTempMountMetaDirs(t, metaDir)
+	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	withUmountDrainStub(t, 500*time.Millisecond, 5*time.Millisecond)
+
+	metaPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: canonMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "off",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+	prevRun := runCommand
+	var calledBin string
+	var calledArgs []string
+	runCommand = func(bin string, args ...string) ([]byte, error) {
+		calledBin = bin
+		calledArgs = append([]string(nil), args...)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = os.Remove(metaPath)
+		}()
+		return nil, nil
+	}
+	t.Cleanup(func() { runCommand = prevRun })
+
+	// When
+	code, out, errOut := runCLI("umount", symMP)
+
+	// Then
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, "/usr/bin/fusermount3", calledBin)
+	require.Equal(t, []string{"-u", canonMP}, calledArgs)
+	_, statErr := os.Stat(metaPath)
+	require.True(t, os.IsNotExist(statErr), "mountMeta must be drained after umount via symlink")
+}
+
+func TestUmount_GivenUnmountedSymlink_ReportsOriginalAbsPath(t *testing.T) {
+	// Given
+	realMP := filepath.Join(t.TempDir(), "unmounted-real")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	symMP := filepath.Join(t.TempDir(), "unmounted-sym")
+	require.NoError(t, os.Symlink(realMP, symMP))
+	withMountInfoContent(t, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+	// When
+	code, out, errOut := runCLI("umount", symMP)
+
+	// Then
+	require.Equal(t, 1, code)
+	require.Empty(t, out)
+	require.Contains(t, errOut, filepath.Clean(symMP))
+	require.Contains(t, errOut, "is not a mounted filesystem")
+}
+
+func TestUmount_GivenLegacySymlinkNamedMountMetaAndDeadCanonMeta_PrefersAliveScannedMeta(t *testing.T) {
+	// Given: a dead canonical hash file plus an alive legacy symlink-hashed file
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	metaDir := t.TempDir()
+	withTempMountMetaDirs(t, metaDir)
+	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	withUmountDrainStub(t, 500*time.Millisecond, 5*time.Millisecond)
+
+	deadData, err := json.Marshal(mountMeta{
+		Mountpoint: canonMP,
+		PID:        99999999,
+		DiskID:     testDiskID1,
+		AdminAddr:  "off",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(metaDir, mountMetaFileName(canonMP)), deadData, 0o644))
+
+	liveData, err := json.Marshal(mountMeta{
+		Mountpoint: symMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "off",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	legacyMetaPath := filepath.Join(metaDir, mountMetaFileName(symMP))
+	require.NoError(t, os.WriteFile(legacyMetaPath, liveData, 0o644))
+
+	withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+	prevRun := runCommand
+	runCommand = func(_ string, _ ...string) ([]byte, error) {
+		go func() {
+			time.Sleep(25 * time.Millisecond)
+			_ = os.Remove(legacyMetaPath)
+		}()
+		return nil, nil
+	}
+	t.Cleanup(func() { runCommand = prevRun })
+
+	// When: unmounting via the canonical real path
+	code, out, errOut := runCLI("umount", canonMP)
+
+	// Then: must wait for the alive symlink-named mountMeta entry rather than exiting immediately on the dead canonical file
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	_, statErr := os.Stat(legacyMetaPath)
+	require.True(t, os.IsNotExist(statErr), "alive legacy mountMeta must be drained before umount returns")
+}
+
+func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCanonicalPath(t *testing.T) {
+	// Given: /tmp/sym points to /data/mnt while /data/mnt is mounted, so Lstat on /data/mnt must not run
+	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
+		"/tmp":     {mode: os.ModeDir | 0o755},
+		"/tmp/sym": {mode: os.ModeSymlink | 0o777, target: "/data/mnt"},
+	})
+	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+
+	// When: force umount via direct canonical path invokes zero Lstat calls
+	code, out, errOut := runCLI("umount", "-f", "/data/mnt")
+
+	// Then
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, "/usr/bin/fusermount3", *binName)
+	require.Equal(t, []string{"-uz", "/data/mnt"}, *binArgs)
+	require.Empty(t, *lstatCalls)
+
+	// When: force umount via symlink resolves to /data/mnt without calling Lstat on /data/mnt
+	code, out, errOut = runCLI("umount", "-f", "/tmp/sym")
+
+	// Then
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, []string{"-uz", "/data/mnt"}, *binArgs)
+	require.Equal(t, []string{"/tmp", "/tmp/sym"}, *lstatCalls)
+}

@@ -368,3 +368,95 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 	require.NoError(t, json.Unmarshal(nilRec.Body.Bytes(), &prog))
 	require.Equal(t, fusefs.UnmountProgress{}, prog)
 }
+
+func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndDeduplicatesList(t *testing.T) {
+	// Given
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	withTempMountMetaDirs(t, dir1, dir2)
+
+	// When: writeMountMeta is given a symlink mountpoint
+	writtenPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: symMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "127.0.0.1:19401",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	// Then: filename and stored JSON both use canonical mountpoint
+	require.Equal(t, filepath.Join(dir1, mountMetaFileName(canonMP)), writtenPath)
+	data, err := os.ReadFile(writtenPath)
+	require.NoError(t, err)
+	var stored mountMeta
+	require.NoError(t, json.Unmarshal(data, &stored))
+	require.Equal(t, canonMP, stored.Mountpoint)
+
+	// When: a legacy symlink-path metadata file also exists in dir2
+	legacyBytes, err := json.Marshal(mountMeta{
+		Mountpoint: symMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "127.0.0.1:19402",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, mountMetaFileName(symMP)), legacyBytes, 0o644))
+
+	// Then: listMountMetas canonicalizes and deduplicates to a single entry
+	metas := listMountMetas()
+	require.Len(t, metas, 1)
+	require.Equal(t, canonMP, metas[0].Mountpoint)
+	require.Equal(t, "127.0.0.1:19401", metas[0].AdminAddr)
+}
+
+func TestStats_GivenDuplicateCanonicalAndLegacySymlinkMeta_DeduplicatesAndSucceeds(t *testing.T) {
+	// Given
+	_, mux := setupTestObsAndMux(t)
+	lastURL := withStatsMuxTransport(t, mux)
+	realMP := filepath.Join(t.TempDir(), "real-mp")
+	require.NoError(t, os.MkdirAll(realMP, 0o755))
+	canonMP := canonicalMountpoint(realMP)
+	symMP := filepath.Join(t.TempDir(), "sym-mp")
+	require.NoError(t, os.Symlink(realMP, symMP))
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	withTempMountMetaDirs(t, dir1, dir2)
+
+	canonBytes, err := json.Marshal(mountMeta{
+		Mountpoint: canonMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "127.0.0.1:19410",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, mountMetaFileName(canonMP)), canonBytes, 0o644))
+
+	legacyBytes, err := json.Marshal(mountMeta{
+		Mountpoint: symMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "127.0.0.1:19411",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, mountMetaFileName(symMP)), legacyBytes, 0o644))
+
+	// When: auto-discovering sole active mount via `bowl stats`
+	code, textOut, errOut := runCLI("stats")
+
+	// Then
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, errOut)
+	require.Equal(t, "http://127.0.0.1:19410/debug/stats?format=text", *lastURL)
+	require.NotEmpty(t, textOut)
+}

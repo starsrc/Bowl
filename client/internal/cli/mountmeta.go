@@ -56,7 +56,7 @@ func mountMetaFileName(mountpoint string) string {
 // writeMountMeta atomically writes discovery metadata via temp file and rename, returning the written path.
 func writeMountMeta(meta *mountMeta) (string, error) {
 	normalized := *meta
-	normalized.Mountpoint = filepath.Clean(normalized.Mountpoint)
+	normalized.Mountpoint = canonicalMountpoint(normalized.Mountpoint)
 	data, err := json.Marshal(normalized)
 	if err != nil {
 		return "", fmt.Errorf("marshal mount metadata: %w", err)
@@ -115,11 +115,8 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// listMountMetas reads metadata files for alive processes across all discovery directories, sorted by mountpoint.
-func listMountMetas() []mountMeta {
-	seen := make(map[string]struct{})
-	var out []mountMeta
-	for _, dir := range mountMetaDirs() {
+func forEachAliveMountMeta(dirs []string, fn func(path string, meta mountMeta) bool) {
+	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -129,7 +126,8 @@ func listMountMetas() []mountMeta {
 			if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			data, readErr := os.ReadFile(filepath.Join(dir, name))
+			candidate := filepath.Join(dir, name)
+			data, readErr := os.ReadFile(candidate)
 			if readErr != nil {
 				continue
 			}
@@ -137,14 +135,26 @@ func listMountMetas() []mountMeta {
 			if json.Unmarshal(data, &m) != nil || !processAlive(m.PID) {
 				continue
 			}
-			m.Mountpoint = filepath.Clean(m.Mountpoint)
-			if _, dup := seen[m.Mountpoint]; dup {
-				continue
+			m.Mountpoint = canonicalMountpoint(m.Mountpoint)
+			if fn(candidate, m) {
+				return
 			}
-			seen[m.Mountpoint] = struct{}{}
-			out = append(out, m)
 		}
 	}
+}
+
+// listMountMetas reads metadata files for alive processes across all discovery directories, sorted by mountpoint.
+func listMountMetas() []mountMeta {
+	seen := make(map[string]struct{})
+	var out []mountMeta
+	forEachAliveMountMeta(mountMetaDirs(), func(_ string, m mountMeta) bool {
+		if _, dup := seen[m.Mountpoint]; dup {
+			return false
+		}
+		seen[m.Mountpoint] = struct{}{}
+		out = append(out, m)
+		return false
+	})
 	slices.SortFunc(out, func(a, b mountMeta) int {
 		return cmp.Compare(a.Mountpoint, b.Mountpoint)
 	})
@@ -161,11 +171,12 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 		names = append(names, mountMetaFileName(canon))
 	}
 
+	dirs := mountMetaDirs()
 	var fallbackPath string
 	var fallbackMeta mountMeta
 	hasFallback := false
 
-	for _, dir := range mountMetaDirs() {
+	for _, dir := range dirs {
 		for _, name := range names {
 			candidate := filepath.Join(dir, name)
 			data, err := os.ReadFile(candidate)
@@ -185,6 +196,24 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 			}
 		}
 	}
+
+	// Fall back to scanning metadata entries in case an older file was hashed under a symlink alias.
+	var matchedPath string
+	var matchedMeta mountMeta
+	var matched bool
+	forEachAliveMountMeta(dirs, func(path string, m mountMeta) bool {
+		if m.Mountpoint == canon {
+			matchedPath = path
+			matchedMeta = m
+			matched = true
+			return true
+		}
+		return false
+	})
+	if matched {
+		return matchedPath, matchedMeta, true
+	}
+
 	if hasFallback {
 		return fallbackPath, fallbackMeta, true
 	}

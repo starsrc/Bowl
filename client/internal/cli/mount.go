@@ -699,23 +699,29 @@ func executeMountValidated(
 		return usageExitErr(fmt.Errorf("mountpoint %q is not a directory", absMountpoint), false)
 	}
 
+	canonMountpoint, err := filepath.EvalSymlinks(absMountpoint)
+	if err != nil {
+		return usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
+	}
+	canonMountpoint = filepath.Clean(canonMountpoint)
+
 	if opts.mode == fusefs.MountModeStaged {
-		if stageErr := validatePathNotInMountpoint("--stage-dir", opts.stageDir, absMountpoint); stageErr != nil {
+		if stageErr := validatePathNotInMountpoint("--stage-dir", opts.stageDir, canonMountpoint); stageErr != nil {
 			return usageExitErr(stageErr, false)
 		}
 	}
 	if set.logFile {
-		if logErr := validatePathNotInMountpoint("--log-file", opts.logFile, absMountpoint); logErr != nil {
+		if logErr := validatePathNotInMountpoint("--log-file", opts.logFile, canonMountpoint); logErr != nil {
 			return usageExitErr(logErr, false)
 		}
 	}
 
-	mounted, err := IsMountPoint(absMountpoint)
+	mounted, err := IsMountPoint(canonMountpoint)
 	if err != nil {
 		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
 	if mounted {
-		return runtimeExitErr(fmt.Errorf("mountpoint %q is already mounted", absMountpoint))
+		return runtimeExitErr(fmt.Errorf("mountpoint %q is already mounted", canonMountpoint))
 	}
 
 	opts.endpoint, err = rpc.ResolveEndpoint(opts.endpoint)
@@ -740,7 +746,7 @@ func executeMountValidated(
 
 	stderr := cmd.ErrOrStderr()
 	if os.Getenv("BOWL_DAEMON_WORKER") == "1" {
-		if code := runDaemonWorker(context.Background(), opts, &baseCfg, absMountpoint); code != 0 {
+		if code := runDaemonWorker(context.Background(), opts, &baseCfg, canonMountpoint); code != 0 {
 			return &cliExitError{code: code, silent: true}
 		}
 		return nil
@@ -757,7 +763,7 @@ func executeMountValidated(
 	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	defer runnerCancel()
 
-	if mountErr := runMount(runnerCtx, opts, &baseCfg, absMountpoint, stderr, nil); mountErr != nil {
+	if mountErr := runMount(runnerCtx, opts, &baseCfg, canonMountpoint, stderr, nil); mountErr != nil {
 		return runtimeExitErr(fmt.Errorf("mount failed: %w", mountErr))
 	}
 	return nil

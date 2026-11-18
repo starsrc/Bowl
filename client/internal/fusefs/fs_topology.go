@@ -239,6 +239,9 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			childServerIno = sIno
 			hasChildServerIno = true
 		}
+		if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
+			fs.stage.BarrierInode(opCtx, childServerIno)
+		}
 		// 与并发 Release 的最后一个句柄关闭按 Inode 串行，保证孤儿标记不会互相错过。
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
@@ -247,6 +250,9 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			switch st {
 			case fuse.OK:
 				inode = refreshed.inode
+				if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
+					fs.stage.BarrierInode(opCtx, childServerIno)
+				}
 			case fuse.ENOENT:
 				inode = nil
 			default:

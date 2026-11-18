@@ -9,6 +9,40 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
+func copyXattrValue(val, dest []byte) (uint32, fuse.Status) {
+	valLen := uint32(len(val))
+	if len(dest) == 0 {
+		return valLen, fuse.OK
+	}
+	if len(dest) < len(val) {
+		return valLen, fuse.Status(syscall.ERANGE)
+	}
+	copy(dest, val)
+	return valLen, fuse.OK
+}
+
+func formatXattrList(names [][]byte, dest []byte) (uint32, fuse.Status) {
+	var total int
+	for _, name := range names {
+		total += len(name) + 1
+	}
+	totalLen := uint32(total)
+	if len(dest) == 0 {
+		return totalLen, fuse.OK
+	}
+	if len(dest) < total {
+		return totalLen, fuse.Status(syscall.ERANGE)
+	}
+	var offset int
+	for _, name := range names {
+		copy(dest[offset:], name)
+		offset += len(name)
+		dest[offset] = 0
+		offset++
+	}
+	return totalLen, fuse.OK
+}
+
 // SetXAttr 实现设置扩展属性请求，透传属性名、属性值与创建/替换标志位。
 // 在只读挂载模式下直接拦截返回 EROFS。
 func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr string, data []byte) (status fuse.Status) {
@@ -26,13 +60,20 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 		return fuse.EACCES
 	}
 
+	fs.lifecycleMu.RLock()
+	defer fs.lifecycleMu.RUnlock()
+	if local, localSt := fs.tmpMgr.SetXAttr(input.NodeId, attr, data, input.Flags); local {
+		if localSt == fuse.OK && attr == securityCapabilityXattr {
+			fs.caps.markPresent(input.NodeId)
+		}
+		return localSt
+	}
+
 	ino, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
 		return status
 	}
 
-	fs.lifecycleMu.RLock()
-	defer fs.lifecycleMu.RUnlock()
 	fs.stage.BarrierInode(opCtx, ino)
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
@@ -71,12 +112,23 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	if attr == securityCapabilityXattr && fs.caps.knownAbsent(header.NodeId) {
+		return 0, fuse.Status(syscall.ENODATA)
+	}
+	if localSz, local, localSt := fs.tmpMgr.GetXAttr(header.NodeId, attr, dest); local {
+		if attr == securityCapabilityXattr {
+			switch localSt {
+			case fuse.Status(syscall.ENODATA):
+				fs.caps.markAbsent(header.NodeId)
+			case fuse.OK, fuse.Status(syscall.ERANGE):
+				fs.caps.markPresent(header.NodeId)
+			}
+		}
+		return localSz, localSt
+	}
 	ino, status := fs.ToServerIno(header.NodeId)
 	if status != fuse.OK {
 		return 0, status
-	}
-	if attr == securityCapabilityXattr && fs.caps.knownAbsent(header.NodeId) {
-		return 0, fuse.Status(syscall.ENODATA)
 	}
 	fs.stage.BarrierInode(opCtx, ino)
 
@@ -99,18 +151,7 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 		fs.caps.markPresent(header.NodeId)
 	}
 
-	val := resp.Msg.GetValue()
-	valLen := uint32(len(val))
-
-	if len(dest) == 0 {
-		return valLen, fuse.OK
-	}
-	if len(dest) < len(val) {
-		return valLen, fuse.Status(syscall.ERANGE)
-	}
-
-	copy(dest, val)
-	return valLen, fuse.OK
+	return copyXattrValue(resp.Msg.GetValue(), dest)
 }
 
 // ListXAttr 实现列出扩展属性名称请求，组装以 '\x00' 结尾的连续字节序列。
@@ -127,6 +168,9 @@ func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest [
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	if localSz, local, localSt := fs.tmpMgr.ListXAttr(header.NodeId, dest); local {
+		return localSz, localSt
+	}
 	ino, status := fs.ToServerIno(header.NodeId)
 	if status != fuse.OK {
 		return 0, status
@@ -144,29 +188,7 @@ func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest [
 		return 0, fs.ToStatus(err, cancel)
 	}
 
-	names := resp.Msg.GetNames()
-	var total int
-	for _, name := range names {
-		total += len(name) + 1
-	}
-
-	totalLen := uint32(total)
-	if len(dest) == 0 {
-		return totalLen, fuse.OK
-	}
-	if len(dest) < total {
-		return totalLen, fuse.Status(syscall.ERANGE)
-	}
-
-	var offset int
-	for _, name := range names {
-		copy(dest[offset:], name)
-		offset += len(name)
-		dest[offset] = 0
-		offset++
-	}
-
-	return totalLen, fuse.OK
+	return formatXattrList(resp.Msg.GetNames(), dest)
 }
 
 // RemoveXAttr 实现删除指定扩展属性请求。
@@ -186,13 +208,20 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 		return fuse.EACCES
 	}
 
+	fs.lifecycleMu.RLock()
+	defer fs.lifecycleMu.RUnlock()
+	if local, localSt := fs.tmpMgr.RemoveXAttr(header.NodeId, attr); local {
+		if localSt == fuse.OK && attr == securityCapabilityXattr {
+			fs.caps.markAbsent(header.NodeId)
+		}
+		return localSt
+	}
+
 	ino, status := fs.ToServerIno(header.NodeId)
 	if status != fuse.OK {
 		return status
 	}
 
-	fs.lifecycleMu.RLock()
-	defer fs.lifecycleMu.RUnlock()
 	fs.stage.BarrierInode(opCtx, ino)
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()

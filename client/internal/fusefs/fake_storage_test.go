@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -109,6 +110,8 @@ type fakeStorage struct {
 	lookupHook        func(context.Context, *storagev1.LookupRequest) (*storagev1.LookupResponse, error)
 	getAttrHook       func(context.Context, *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error)
 	setAttrHook       func(context.Context, *storagev1.SetAttrRequest) error
+	mknodHook         func(context.Context, *storagev1.MknodRequest) error
+	setXattrHook      func(context.Context, *storagev1.SetXattrRequest) error
 	readHook          func(context.Context, *storagev1.ReadRequest) ([]byte, error)
 	writeHook         func(context.Context, *storagev1.WriteRequest) (uint32, error)
 	fsyncHook         func(context.Context, *storagev1.FsyncRequest) error
@@ -496,9 +499,17 @@ func (s *fakeStorage) SetAttr(ctx context.Context, req *connect.Request[storagev
 		return nil, errnoError(connect.CodeNotFound, "ENOENT")
 	}
 	attr := node.inode.Attr
+	if attr.Flags&fusefs.ProtoFlagImmutable != 0 && (req.Msg.Flags == nil || req.Msg.GetFlags()&fusefs.ProtoFlagImmutable != 0) {
+		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
+	}
+	if attr.Flags&fusefs.ProtoFlagAppend != 0 && req.Msg.Size != nil {
+		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
+	}
+	ftype := attr.Mode & syscall.S_IFMT
 	if req.Msg.Mode != nil {
-		ftype := attr.Mode & syscall.S_IFMT
 		attr.Mode = ftype | (req.Msg.GetMode() & 0o7777)
+	} else if ftype != syscall.S_IFDIR && (req.Msg.Uid != nil || req.Msg.Gid != nil || req.Msg.Size != nil) {
+		attr.Mode &^= syscall.S_ISUID | syscall.S_ISGID
 	}
 	if req.Msg.Uid != nil {
 		attr.Uid = req.Msg.GetUid()
@@ -507,7 +518,7 @@ func (s *fakeStorage) SetAttr(ctx context.Context, req *connect.Request[storagev
 		attr.Gid = req.Msg.GetGid()
 	}
 	if req.Msg.Size != nil {
-		if attr.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+		if ftype == syscall.S_IFDIR {
 			return nil, errnoError(connect.CodeFailedPrecondition, "EISDIR")
 		}
 		target := int(req.Msg.GetSize())
@@ -523,6 +534,9 @@ func (s *fakeStorage) SetAttr(ctx context.Context, req *connect.Request[storagev
 	}
 	if req.Msg.Flags != nil {
 		attr.Flags = req.Msg.GetFlags()
+	}
+	if req.Msg.Size != nil || req.Msg.Uid != nil || req.Msg.Gid != nil || req.Msg.Mode != nil {
+		delete(node.xattrs, "security.capability")
 	}
 	now := timestamppb.Now()
 	if req.Msg.GetAtimeNow() {
@@ -554,6 +568,11 @@ func (s *fakeStorage) Mknod(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkEpoch("Mknod", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	if s.mknodHook != nil {
+		if err := s.mknodHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
 	name := string(req.Msg.GetName())
 	if len(name) > fusefs.MaxFilenameBytes {
 		return nil, errnoError(connect.CodeInvalidArgument, "ENAMETOOLONG")
@@ -574,6 +593,13 @@ func (s *fakeStorage) Mknod(ctx context.Context, req *connect.Request[storagev1.
 	if mode&syscall.S_IFMT == 0 {
 		mode |= syscall.S_IFREG
 	}
+	gid := req.Msg.GetGid()
+	if parent.inode.GetAttr().GetMode()&syscall.S_ISGID != 0 {
+		gid = parent.inode.GetAttr().GetGid()
+		if mode&syscall.S_IFMT == syscall.S_IFDIR {
+			mode |= syscall.S_ISGID
+		}
+	}
 	ino := s.allocInoLocked()
 	now := timestamppb.Now()
 	node := &fakeNode{
@@ -584,7 +610,7 @@ func (s *fakeStorage) Mknod(ctx context.Context, req *connect.Request[storagev1.
 				Mode:    mode,
 				Nlink:   1,
 				Uid:     req.Msg.GetUid(),
-				Gid:     req.Msg.GetGid(),
+				Gid:     gid,
 				Rdev:    req.Msg.GetRdev(),
 				Blksize: 4096,
 				Atime:   now,
@@ -631,6 +657,12 @@ func (s *fakeStorage) Mkdir(ctx context.Context, req *connect.Request[storagev1.
 	if s.entries[req.Msg.GetParentIno()][name] != 0 {
 		return nil, errnoError(connect.CodeAlreadyExists, "EEXIST")
 	}
+	mode := syscall.S_IFDIR | (req.Msg.GetMode() & 0o7777)
+	gid := req.Msg.GetGid()
+	if parent.inode.GetAttr().GetMode()&syscall.S_ISGID != 0 {
+		gid = parent.inode.GetAttr().GetGid()
+		mode |= syscall.S_ISGID
+	}
 	ino := s.allocInoLocked()
 	now := timestamppb.Now()
 	node := &fakeNode{
@@ -638,10 +670,10 @@ func (s *fakeStorage) Mkdir(ctx context.Context, req *connect.Request[storagev1.
 			Ino:        ino,
 			Generation: 1,
 			Attr: &storagev1.InodeAttribute{
-				Mode:    syscall.S_IFDIR | (req.Msg.GetMode() & 0o7777),
+				Mode:    mode,
 				Nlink:   2,
 				Uid:     req.Msg.GetUid(),
-				Gid:     req.Msg.GetGid(),
+				Gid:     gid,
 				Blksize: 4096,
 				Atime:   now,
 				Mtime:   now,
@@ -693,6 +725,10 @@ func (s *fakeStorage) Symlink(ctx context.Context, req *connect.Request[storagev
 	}
 	ino := s.allocInoLocked()
 	now := timestamppb.Now()
+	gid := req.Msg.GetGid()
+	if parent.inode.GetAttr().GetMode()&syscall.S_ISGID != 0 {
+		gid = parent.inode.GetAttr().GetGid()
+	}
 	target := slices.Clone(req.Msg.GetTarget())
 	node := &fakeNode{
 		inode: &storagev1.Inode{
@@ -703,7 +739,7 @@ func (s *fakeStorage) Symlink(ctx context.Context, req *connect.Request[storagev
 				Nlink:   1,
 				Size:    uint64(len(target)),
 				Uid:     req.Msg.GetUid(),
-				Gid:     req.Msg.GetGid(),
+				Gid:     gid,
 				Blksize: 4096,
 				Atime:   now,
 				Mtime:   now,
@@ -849,6 +885,9 @@ func (s *fakeStorage) Unlink(ctx context.Context, req *connect.Request[storagev1
 		return nil, errnoError(connect.CodeNotFound, "ENOENT")
 	}
 	node := s.nodes[ino]
+	if node != nil && node.inode.GetAttr().GetFlags()&fusefs.ProtoFlagImmutable != 0 {
+		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
+	}
 	if node != nil && node.inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
 		return nil, errnoError(connect.CodeFailedPrecondition, "EISDIR")
 	}
@@ -1103,6 +1142,10 @@ func (s *fakeStorage) Create(ctx context.Context, req *connect.Request[storagev1
 	}
 	ino := s.allocInoLocked()
 	now := timestamppb.Now()
+	gid := req.Msg.GetGid()
+	if parent.inode.GetAttr().GetMode()&syscall.S_ISGID != 0 {
+		gid = parent.inode.GetAttr().GetGid()
+	}
 	node := &fakeNode{
 		inode: &storagev1.Inode{
 			Ino:        ino,
@@ -1111,7 +1154,7 @@ func (s *fakeStorage) Create(ctx context.Context, req *connect.Request[storagev1
 				Mode:    syscall.S_IFREG | (req.Msg.GetMode() & 0o7777),
 				Nlink:   1,
 				Uid:     req.Msg.GetUid(),
-				Gid:     req.Msg.GetGid(),
+				Gid:     gid,
 				Blksize: 4096,
 				Atime:   now,
 				Mtime:   now,
@@ -1168,6 +1211,46 @@ func (s *fakeStorage) Read(ctx context.Context, req *connect.Request[storagev1.R
 	}), nil
 }
 
+func (s *fakeStorage) applyFakeWriteLocked(node *fakeNode, offset uint64, payload []byte) (*storagev1.WriteResponse, error) {
+	if node == nil {
+		return nil, errnoError(connect.CodeNotFound, "ENOENT")
+	}
+	attr := node.inode.GetAttr()
+	if attr.GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
+		return nil, errnoError(connect.CodeFailedPrecondition, "EISDIR")
+	}
+	if attr.GetFlags()&fusefs.ProtoFlagImmutable != 0 {
+		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
+	}
+	if len(payload) > 0 && attr.GetFlags()&fusefs.ProtoFlagAppend != 0 && offset != attr.GetSize() {
+		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
+	}
+	if len(payload) == 0 {
+		return &storagev1.WriteResponse{
+			Size:  0,
+			Inode: cloneProtoInode(node.inode),
+		}, nil
+	}
+	end := int(offset) + len(payload)
+	if end > len(node.data) {
+		grown := make([]byte, end)
+		copy(grown, node.data)
+		node.data = grown
+	}
+	copy(node.data[offset:end], payload)
+	attr.Size = uint64(len(node.data))
+	attr.Blocks = (attr.Size + 511) / 512
+	attr.Mode &^= syscall.S_ISUID | syscall.S_ISGID
+	delete(node.xattrs, "security.capability")
+	now := timestamppb.Now()
+	attr.Mtime = now
+	attr.Ctime = now
+	return &storagev1.WriteResponse{
+		Size:  uint32(len(payload)),
+		Inode: cloneProtoInode(node.inode),
+	}, nil
+}
+
 // Write 写入文件数据块并同步更新长度与时间戳。
 func (s *fakeStorage) Write(ctx context.Context, req *connect.Request[storagev1.WriteRequest]) (*connect.Response[storagev1.WriteResponse], error) {
 	s.writeCalls.Add(1)
@@ -1180,61 +1263,23 @@ func (s *fakeStorage) Write(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkEpoch("Write", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	payload := req.Msg.GetData()
 	if s.writeHook != nil {
 		shortLen, err := s.writeHook(ctx, req.Msg)
 		if err != nil {
 			return nil, err
 		}
-		if shortLen > 0 && shortLen < uint32(len(req.Msg.GetData())) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			node := s.nodes[req.Msg.GetIno()]
-			if node == nil {
-				return nil, errnoError(connect.CodeNotFound, "ENOENT")
-			}
-			end := int(req.Msg.GetOffset()) + int(shortLen)
-			if end > len(node.data) {
-				grown := make([]byte, end)
-				copy(grown, node.data)
-				node.data = grown
-			}
-			copy(node.data[req.Msg.GetOffset():end], req.Msg.GetData()[:shortLen])
-			node.inode.Attr.Size = uint64(len(node.data))
-			node.inode.Attr.Blocks = (node.inode.Attr.Size + 511) / 512
-			now := timestamppb.Now()
-			node.inode.Attr.Mtime = now
-			node.inode.Attr.Ctime = now
-			return connect.NewResponse(&storagev1.WriteResponse{
-				Size:  shortLen,
-				Inode: cloneProtoInode(node.inode),
-			}), nil
+		if shortLen > 0 && shortLen < uint32(len(payload)) {
+			payload = payload[:shortLen]
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	node := s.nodes[req.Msg.GetIno()]
-	if node == nil {
-		return nil, errnoError(connect.CodeNotFound, "ENOENT")
+	resp, err := s.applyFakeWriteLocked(s.nodes[req.Msg.GetIno()], req.Msg.GetOffset(), payload)
+	if err != nil {
+		return nil, err
 	}
-	if node.inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
-		return nil, errnoError(connect.CodeFailedPrecondition, "EISDIR")
-	}
-	end := int(req.Msg.GetOffset()) + len(req.Msg.GetData())
-	if end > len(node.data) {
-		grown := make([]byte, end)
-		copy(grown, node.data)
-		node.data = grown
-	}
-	copy(node.data[req.Msg.GetOffset():end], req.Msg.GetData())
-	node.inode.Attr.Size = uint64(len(node.data))
-	node.inode.Attr.Blocks = (node.inode.Attr.Size + 511) / 512
-	now := timestamppb.Now()
-	node.inode.Attr.Mtime = now
-	node.inode.Attr.Ctime = now
-	return connect.NewResponse(&storagev1.WriteResponse{
-		Size:  uint32(len(req.Msg.GetData())),
-		Inode: cloneProtoInode(node.inode),
-	}), nil
+	return connect.NewResponse(resp), nil
 }
 
 // Fsync 同步持久化文件节点。
@@ -1397,6 +1442,9 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 	if node == nil {
 		return nil, errnoError(connect.CodeNotFound, "ENOENT")
 	}
+	if node.inode.GetAttr().GetFlags()&(fusefs.ProtoFlagImmutable|fusefs.ProtoFlagAppend) != 0 {
+		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
+	}
 	end := int(req.Msg.GetOffset() + req.Msg.GetLength())
 	const punchAndKeep = 0x02 | 0x01 // FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE
 	switch req.Msg.GetMode() {
@@ -1414,9 +1462,11 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 			clearEnd := min(end, len(node.data))
 			clear(node.data[int(req.Msg.GetOffset()):clearEnd])
 		}
+		node.inode.Attr.Mode &^= syscall.S_ISUID | syscall.S_ISGID
 	default:
 		return nil, errnoError(connect.CodeUnimplemented, "EOPNOTSUPP")
 	}
+	delete(node.xattrs, "security.capability")
 	now := timestamppb.Now()
 	node.inode.Attr.Mtime = now
 	node.inode.Attr.Ctime = now
@@ -1435,22 +1485,43 @@ func (s *fakeStorage) SetXattr(ctx context.Context, req *connect.Request[storage
 	if err := s.checkEpoch("SetXattr", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	if s.setXattrHook != nil {
+		if err := s.setXattrHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
+	flags := req.Msg.GetFlags()
+	if flags&^0x3 != 0 {
+		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
+	}
+	name := string(req.Msg.GetName())
+	if name == "" || strings.IndexByte(name, 0) >= 0 {
+		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
+	}
+	if len(name) > 255 || len(req.Msg.GetValue()) > 65536 {
+		return nil, errnoError(connect.CodeInvalidArgument, "ERANGE")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	node := s.nodes[req.Msg.GetIno()]
 	if node == nil {
 		return nil, errnoError(connect.CodeNotFound, "ENOENT")
 	}
-	name := string(req.Msg.GetName())
 	_, exists := node.xattrs[name]
-	switch req.Msg.GetFlags() {
-	case 0x1: // XATTR_CREATE
-		if exists {
+	if exists {
+		if flags&0x1 != 0 {
 			return nil, errnoError(connect.CodeAlreadyExists, "EEXIST")
 		}
-	case 0x2: // XATTR_REPLACE
-		if !exists {
+	} else {
+		if flags&0x2 != 0 {
 			return nil, errnoError(connect.CodeNotFound, "ENODATA")
+		}
+		total := len(name) + 1
+		for k := range node.xattrs {
+			total += len(k) + 1
+		}
+		if total > 65536 {
+			return nil, errnoError(connect.CodeResourceExhausted, "ENOSPC")
 		}
 	}
 	node.xattrs[name] = slices.Clone(req.Msg.GetValue())

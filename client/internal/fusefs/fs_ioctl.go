@@ -42,6 +42,87 @@ const (
 	ProtoFlagAppend    uint32 = 0x2
 )
 
+func protoToVFSFlags(protoFlags uint32) uint32 {
+	var vfsFlags uint32
+	if protoFlags&ProtoFlagImmutable != 0 {
+		vfsFlags |= FS_IMMUTABLE_FL
+	}
+	if protoFlags&ProtoFlagAppend != 0 {
+		vfsFlags |= FS_APPEND_FL
+	}
+	return vfsFlags
+}
+
+func protoToXFlags(protoFlags uint32) uint32 {
+	var xflags uint32
+	if protoFlags&ProtoFlagImmutable != 0 {
+		xflags |= FS_XFLAG_IMMUTABLE
+	}
+	if protoFlags&ProtoFlagAppend != 0 {
+		xflags |= FS_XFLAG_APPEND
+	}
+	return xflags
+}
+
+func parseVFSFlagsIn(inbuf []byte) (uint32, fuse.Status) {
+	if len(inbuf) < 4 {
+		return 0, fuse.Status(syscall.EINVAL)
+	}
+	var rawFlags uint64
+	if len(inbuf) >= 8 {
+		rawFlags = binary.LittleEndian.Uint64(inbuf[:8])
+	} else {
+		rawFlags = uint64(binary.LittleEndian.Uint32(inbuf[:4]))
+	}
+	supportedMask := uint64(FS_IMMUTABLE_FL | FS_APPEND_FL)
+	if rawFlags&^supportedMask != 0 {
+		return 0, fuse.Status(syscall.EOPNOTSUPP)
+	}
+	vfsFlags := uint32(rawFlags)
+	var protoFlags uint32
+	if vfsFlags&FS_IMMUTABLE_FL != 0 {
+		protoFlags |= ProtoFlagImmutable
+	}
+	if vfsFlags&FS_APPEND_FL != 0 {
+		protoFlags |= ProtoFlagAppend
+	}
+	return protoFlags, fuse.OK
+}
+
+func parseXFlagsIn(inbuf []byte) (uint32, fuse.Status) {
+	if len(inbuf) < 28 {
+		return 0, fuse.Status(syscall.EINVAL)
+	}
+	xflags := binary.LittleEndian.Uint32(inbuf[:4])
+	supportedXMask := FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND
+	if xflags&^supportedXMask != 0 {
+		return 0, fuse.Status(syscall.EOPNOTSUPP)
+	}
+	var protoFlags uint32
+	if xflags&FS_XFLAG_IMMUTABLE != 0 {
+		protoFlags |= ProtoFlagImmutable
+	}
+	if xflags&FS_XFLAG_APPEND != 0 {
+		protoFlags |= ProtoFlagAppend
+	}
+	return protoFlags, fuse.OK
+}
+
+func writeVFSFlagsOut(outbuf []byte, protoFlags uint32) {
+	vfsFlags := protoToVFSFlags(protoFlags)
+	clear(outbuf)
+	if len(outbuf) >= 8 {
+		binary.LittleEndian.PutUint64(outbuf[:8], uint64(vfsFlags))
+	} else {
+		binary.LittleEndian.PutUint32(outbuf[:4], vfsFlags)
+	}
+}
+
+func writeXFlagsOut(outbuf []byte, protoFlags uint32) {
+	clear(outbuf)
+	binary.LittleEndian.PutUint32(outbuf[:4], protoToXFlags(protoFlags))
+}
+
 // Ioctl 实现 FUSE_IOCTL 请求处理，将 Linux 标准 FS_IOC_GETFLAGS / FS_IOC_SETFLAGS 双向桥接至 StorageService RPC。
 func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte, output *fuse.IoctlOut, outbuf []byte) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpIoctl)
@@ -66,163 +147,77 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	ino, st := fs.ToServerIno(input.NodeId)
-	if st != fuse.OK {
-		return st
-	}
-	fs.stage.BarrierInode(opCtx, ino)
 
 	switch input.Cmd {
-	case FS_IOC_GETFLAGS, FS_IOC32_GETFLAGS:
-		if len(outbuf) < 4 {
+	case FS_IOC_GETFLAGS, FS_IOC32_GETFLAGS, FS_IOC_FSGETXATTR:
+		minOutLen := 4
+		if input.Cmd == FS_IOC_FSGETXATTR {
+			minOutLen = 28
+		}
+		if len(outbuf) < minOutLen {
 			return fuse.Status(syscall.EINVAL)
 		}
-
-		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
-		defer cancelFunc()
-
-		resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
-			Ino:    ino,
-			DiskId: fs.cfg.DiskID,
-		}))
-		if err != nil {
-			return fs.ToStatus(err, cancel)
-		}
-
-		protoFlags := resp.Msg.GetInode().GetAttr().GetFlags()
-		var vfsFlags uint32
-		if (protoFlags & ProtoFlagImmutable) != 0 {
-			vfsFlags |= FS_IMMUTABLE_FL
-		}
-		if (protoFlags & ProtoFlagAppend) != 0 {
-			vfsFlags |= FS_APPEND_FL
-		}
-
-		clear(outbuf)
-		if len(outbuf) >= 8 {
-			binary.LittleEndian.PutUint64(outbuf[:8], uint64(vfsFlags))
+		var protoFlags uint32
+		if localFlags, local := fs.tmpMgr.GetFlags(input.NodeId); local {
+			protoFlags = localFlags
 		} else {
-			binary.LittleEndian.PutUint32(outbuf[:4], vfsFlags)
-		}
+			ino, st := fs.ToServerIno(input.NodeId)
+			if st != fuse.OK {
+				return st
+			}
+			fs.stage.BarrierInode(opCtx, ino)
+			ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+			defer cancelFunc()
 
+			resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
+				Ino:    ino,
+				DiskId: fs.cfg.DiskID,
+			}))
+			if err != nil {
+				return fs.ToStatus(err, cancel)
+			}
+			protoFlags = resp.Msg.GetInode().GetAttr().GetFlags()
+		}
+		if input.Cmd == FS_IOC_FSGETXATTR {
+			writeXFlagsOut(outbuf, protoFlags)
+		} else {
+			writeVFSFlagsOut(outbuf, protoFlags)
+		}
 		if output != nil {
 			output.Result = 0
 		}
 		return fuse.OK
 
-	case FS_IOC_FSGETXATTR:
-		if len(outbuf) < 28 {
-			return fuse.Status(syscall.EINVAL)
-		}
-
-		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
-		defer cancelFunc()
-
-		resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
-			Ino:    ino,
-			DiskId: fs.cfg.DiskID,
-		}))
-		if err != nil {
-			return fs.ToStatus(err, cancel)
-		}
-
-		protoFlags := resp.Msg.GetInode().GetAttr().GetFlags()
-		var xflags uint32
-		if (protoFlags & ProtoFlagImmutable) != 0 {
-			xflags |= FS_XFLAG_IMMUTABLE
-		}
-		if (protoFlags & ProtoFlagAppend) != 0 {
-			xflags |= FS_XFLAG_APPEND
-		}
-
-		clear(outbuf)
-		binary.LittleEndian.PutUint32(outbuf[:4], xflags)
-
-		if output != nil {
-			output.Result = 0
-		}
-		return fuse.OK
-
-	case FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS:
+	case FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS, FS_IOC_FSSETXATTR:
 		if st := fs.CheckWritable(); st != fuse.OK {
 			return st
 		}
-
-		if len(inbuf) < 4 {
-			return fuse.Status(syscall.EINVAL)
-		}
-
-		var rawFlags uint64
-		if len(inbuf) >= 8 {
-			rawFlags = binary.LittleEndian.Uint64(inbuf[:8])
-		} else {
-			rawFlags = uint64(binary.LittleEndian.Uint32(inbuf[:4]))
-		}
-
-		supportedMask := uint64(FS_IMMUTABLE_FL | FS_APPEND_FL)
-		if (rawFlags & ^supportedMask) != 0 {
-			return fuse.Status(syscall.EOPNOTSUPP)
-		}
-
-		vfsFlags := uint32(rawFlags)
 		var protoFlags uint32
-		if (vfsFlags & FS_IMMUTABLE_FL) != 0 {
-			protoFlags |= ProtoFlagImmutable
-		}
-		if (vfsFlags & FS_APPEND_FL) != 0 {
-			protoFlags |= ProtoFlagAppend
-		}
-
-		fs.stage.ResetInodeStream(opCtx, ino)
-		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
-		defer cancelFunc()
-
-		_, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
-			Ino:    ino,
-			Flags:  &protoFlags,
-			DiskId: fs.cfg.DiskID,
-			Epoch:  fs.cfg.Epoch,
-		}))
-		if err != nil {
-			return fs.ToStatus(err, cancel)
-		}
-		fs.markMetaDirty()
-		fs.stage.ResetInodeStream(opCtx, ino)
-		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
-			fs.setInodeSpecialFlag(input.NodeId, true)
+		var parseSt fuse.Status
+		if input.Cmd == FS_IOC_FSSETXATTR {
+			protoFlags, parseSt = parseXFlagsIn(inbuf)
 		} else {
-			fs.forgetInodeSpecial(input.NodeId)
+			protoFlags, parseSt = parseVFSFlagsIn(inbuf)
 		}
-		fs.cache.invalidateInode(input.NodeId)
-
-		if output != nil {
-			output.Result = 0
+		if parseSt != fuse.OK {
+			return parseSt
 		}
-		return fuse.OK
 
-	case FS_IOC_FSSETXATTR:
-		if st := fs.CheckWritable(); st != fuse.OK {
+		if updatedInode, local, localSt := fs.tmpMgr.SetFlags(input.NodeId, protoFlags); local {
+			if localSt != fuse.OK {
+				return localSt
+			}
+			fs.setInodeSpecialFlag(input.NodeId, isSpecialAttr(updatedInode))
+			if output != nil {
+				output.Result = 0
+			}
+			return fuse.OK
+		}
+
+		ino, st := fs.ToServerIno(input.NodeId)
+		if st != fuse.OK {
 			return st
 		}
-
-		if len(inbuf) < 28 {
-			return fuse.Status(syscall.EINVAL)
-		}
-
-		xflags := binary.LittleEndian.Uint32(inbuf[:4])
-		supportedXMask := FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND
-		if (xflags & ^supportedXMask) != 0 {
-			return fuse.Status(syscall.EOPNOTSUPP)
-		}
-
-		var protoFlags uint32
-		if (xflags & FS_XFLAG_IMMUTABLE) != 0 {
-			protoFlags |= ProtoFlagImmutable
-		}
-		if (xflags & FS_XFLAG_APPEND) != 0 {
-			protoFlags |= ProtoFlagAppend
-		}
-
 		fs.stage.ResetInodeStream(opCtx, ino)
 		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 		defer cancelFunc()

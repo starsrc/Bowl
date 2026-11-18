@@ -331,8 +331,17 @@ func TestWrite与Stage_小块聚合直通探测与特权位绕过(t *testing.T) 
 		fsSuid := newTestRawFS(t, srvSuid)
 		oSuid := mustOpenFile(t, fsSuid, suidIno, syscall.O_RDWR)
 
-		// When
+		// When the first Write bypasses Stage and strips S_ISUID, re-arm S_ISUID so the second Write also bypasses Stage.
 		mustWriteAt(t, fsSuid, suidIno, oSuid.Fh, 0, []byte("x"))
+		require.Equal(t, int64(1), srvSuid.writeCalls.Load(), "first SetUID write must issue one synchronous Write RPC")
+		require.Zero(t, mustGetAttr(t, fsSuid, suidIno).Mode&syscall.S_ISUID, "first Write must strip S_ISUID")
+		requireStatus(t, "SetAttr re-arms S_ISUID", fuse.OK, fsSuid.SetAttr(nil, &fuse.SetAttrIn{
+			SetAttrInCommon: fuse.SetAttrInCommon{
+				InHeader: fuse.InHeader{NodeId: suidIno},
+				Valid:    fuse.FATTR_MODE,
+				Mode:     syscall.S_ISUID | 0o755,
+			},
+		}, &fuse.AttrOut{}))
 		mustWriteAt(t, fsSuid, suidIno, oSuid.Fh, 1, []byte("y"))
 
 		// Then

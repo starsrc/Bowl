@@ -61,8 +61,8 @@ func (fs *RawFS) lookupInodeAfterCache(
 		return cachedInode{}, fuse.EIO
 	}
 	ino := fs.ToKernelIno(inode.GetIno())
-	fs.recordInodeSpecial(ino, inode)
 	fs.stage.OverlayInode(inode.GetIno(), inode)
+	fs.recordInodeSpecial(ino, inode)
 	if fs.cfg.IsReadOnly() {
 		fs.readAhead.ObserveInode(inode.GetIno(), inode)
 	}
@@ -104,8 +104,8 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 	if inode == nil || inode.GetAttr() == nil {
 		return cachedInode{}, fuse.EIO
 	}
-	fs.recordInodeSpecial(ino, inode)
 	fs.stage.OverlayInode(serverIno, inode)
+	fs.recordInodeSpecial(ino, inode)
 	if fs.cfg.IsReadOnly() {
 		fs.readAhead.ObserveInode(serverIno, inode)
 	}

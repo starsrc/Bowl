@@ -492,13 +492,30 @@ type StageChunkWriter func(ctx context.Context, ino, offset uint64, data []byte)
 // StageChunkReader 定义在局部未命中时向底层存储读取基准数据块的端口函数。
 type StageChunkReader func(ctx context.Context, offset uint64, length uint32) (rpc.ReadPayload, error)
 
-// StageAttrCommitter 定义转正匿名文件在所有数据分片落盘后提交最终属性（Size/Atime/Mtime）的端口函数。
-type StageAttrCommitter func(ctx context.Context, ino, size uint64, atime, mtime *timestamppb.Timestamp) (*storagev1.Inode, error)
+// StagedXattr stores one snapshotted extended attribute from an unpromoted O_TMPFILE.
+type StagedXattr struct {
+	Name  string
+	Value []byte
+}
 
-// StageHooks 定义暂存写入、后台提交与失败回调的本地状态同步钩子。
+// StagePromotedMeta carries final metadata committed after all promoted extents finish uploading.
+type StagePromotedMeta struct {
+	Size   uint64
+	Atime  *timestamppb.Timestamp
+	Mtime  *timestamppb.Timestamp
+	Mode   uint32
+	Gid    uint32
+	Flags  uint32
+	Xattrs []StagedXattr
+}
+
+// StageAttrCommitter commits final inode attributes and extended attributes after promoted extents finish uploading.
+type StageAttrCommitter func(ctx context.Context, ino uint64, meta StagePromotedMeta) (*storagev1.Inode, error)
+
+// StageHooks updates client cache and capability state when stage chunks and promoted commits finish or fail.
 type StageHooks struct {
 	OnStage  func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
-	OnCommit func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr bool)
+	OnCommit func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool)
 	OnError  func(nodeID uint64)
 }
 
@@ -524,6 +541,11 @@ type promotedTmpState struct {
 	size     uint64
 	atime    *timestamppb.Timestamp
 	mtime    *timestamppb.Timestamp
+	mode     uint32
+	gid      uint32
+	flags    uint32
+	xattrs   []StagedXattr
+	hasCap   bool
 	readers  int
 	finished bool
 	hasErr   bool
@@ -1042,6 +1064,10 @@ func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
 			attr.Ctimensec = nsec
 		}
 	}
+	if st.promoted != nil && !st.promoted.finished {
+		attr.Mode = st.promoted.mode
+		attr.Gid = st.promoted.gid
+	}
 	c.mu.Unlock()
 }
 
@@ -1071,6 +1097,11 @@ func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
 		if compareProtoTimestamp(st.lastWriteTS, a.Ctime) > 0 {
 			a.Ctime = cloneTimestamp(st.lastWriteTS)
 		}
+	}
+	if st.promoted != nil && !st.promoted.finished {
+		a.Mode = st.promoted.mode
+		a.Gid = st.promoted.gid
+		a.Flags = st.promoted.flags
 	}
 	c.mu.Unlock()
 }
@@ -1387,13 +1418,12 @@ func (c *StageCoordinator) rollbackWriteStepLocked(st *stageInode, activeChunk *
 	c.wakeBackpressureLocked()
 }
 
-// PromoteTmpfile 将已通过 Mknod 具名化的匿名文件宿主机 *os.File 所有权移交至 StageCoordinator 异步上云。
+// PromoteTmpfile transfers an open staged O_TMPFILE file and its metadata snapshot to StageCoordinator for ordered upload.
 func (c *StageCoordinator) PromoteTmpfile(
 	ctx context.Context,
 	serverIno, nodeID, cacheEpoch uint64,
 	file *os.File,
-	size uint64,
-	atime, mtime *timestamppb.Timestamp,
+	meta StagePromotedMeta,
 	extents []stageExtent,
 ) {
 	if c == nil {
@@ -1403,11 +1433,31 @@ func (c *StageCoordinator) PromoteTmpfile(
 		return
 	}
 
+	var xattrsCopy []StagedXattr
+	hasCap := false
+	if len(meta.Xattrs) > 0 {
+		xattrsCopy = make([]StagedXattr, len(meta.Xattrs))
+		for i, xa := range meta.Xattrs {
+			if xa.Name == securityCapabilityXattr {
+				hasCap = true
+			}
+			xattrsCopy[i] = StagedXattr{
+				Name:  xa.Name,
+				Value: slices.Clone(xa.Value),
+			}
+		}
+	}
+
 	p := &promotedTmpState{
-		file:  file,
-		size:  size,
-		atime: cloneTimestamp(atime),
-		mtime: cloneTimestamp(mtime),
+		file:   file,
+		size:   meta.Size,
+		atime:  cloneTimestamp(meta.Atime),
+		mtime:  cloneTimestamp(meta.Mtime),
+		mode:   meta.Mode,
+		gid:    meta.Gid,
+		flags:  meta.Flags,
+		xattrs: xattrsCopy,
+		hasCap: hasCap,
 	}
 
 	var totalExtentBytes uint64
@@ -1422,11 +1472,11 @@ func (c *StageCoordinator) PromoteTmpfile(
 	st.promoted = p
 	st.createdInSession = true
 	st.hasKnownSize = true
-	if size > st.logicalSize {
-		st.logicalSize = size
+	if meta.Size > st.logicalSize {
+		st.logicalSize = meta.Size
 	}
-	if mtime != nil {
-		st.lastWriteTS = cloneTimestamp(mtime)
+	if meta.Mtime != nil {
+		st.lastWriteTS = cloneTimestamp(meta.Mtime)
 	}
 
 	for _, ext := range extents {
@@ -1897,6 +1947,18 @@ func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) {
 	c.mu.Unlock()
 }
 
+// HasPromotedPending reports whether the inode has an uncommitted Link promotion queued or in flight.
+func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
+	if c == nil || c.totalActiveItems.Load() == 0 {
+		return false
+	}
+	c.mu.Lock()
+	st := c.inodes[ino]
+	pending := st != nil && st.promoted != nil && !st.promoted.finished
+	c.mu.Unlock()
+	return pending
+}
+
 // BarrierAll 封口并等待所有活跃节点的挂起分片全部上传完成。
 func (c *StageCoordinator) BarrierAll(ctx context.Context) {
 	if c == nil || c.totalActiveItems.Load() == 0 {
@@ -2226,7 +2288,16 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 			}
 			rpcCtx, cancel := context.WithTimeout(uploadBaseCtx, DefaultRPCTimeout)
 			if c.committer != nil && item.promoted != nil {
-				respInode, finalErr = c.committer(rpcCtx, item.ino, item.promoted.size, item.promoted.atime, item.promoted.mtime)
+				meta := StagePromotedMeta{
+					Size:   item.promoted.size,
+					Atime:  cloneTimestamp(item.promoted.atime),
+					Mtime:  cloneTimestamp(item.promoted.mtime),
+					Mode:   item.promoted.mode,
+					Gid:    item.promoted.gid,
+					Flags:  item.promoted.flags,
+					Xattrs: item.promoted.xattrs,
+				}
+				respInode, finalErr = c.committer(rpcCtx, item.ino, meta)
 			} else {
 				finalErr = syscall.EIO
 			}
@@ -2352,6 +2423,8 @@ func (c *StageCoordinator) finishUploadItem(
 	var onCommitEpoch uint64
 	var onCommitMinSize uint64
 	var onCommitRefresh bool
+	var onCommitPreserveMeta bool
+	var onCommitCapPresent bool
 	var callOnCommit bool
 	var callOnError bool
 	var onErrorNodeID uint64
@@ -2433,6 +2506,9 @@ func (c *StageCoordinator) finishUploadItem(
 				onCommitNodeID = item.nodeID
 				onCommitIno = item.ino
 				onCommitEpoch = item.cacheEpoch
+				if item.kind == stageItemPromotedCommit && item.promoted != nil {
+					onCommitCapPresent = item.promoted.hasCap
+				}
 				if item.gen == st.streamGen {
 					onCommitMinSize = st.logicalSize
 					if isNotOlderCommittedInode(st.lastCommitted, respInode) {
@@ -2445,6 +2521,7 @@ func (c *StageCoordinator) finishUploadItem(
 				onCommitNodeID = item.nodeID
 				onCommitIno = item.ino
 				onCommitEpoch = item.cacheEpoch
+				onCommitPreserveMeta = true
 			}
 		}
 	}
@@ -2470,7 +2547,7 @@ func (c *StageCoordinator) finishUploadItem(
 		c.hooks.OnError(onErrorNodeID)
 	}
 	if callOnCommit && c.hooks.OnCommit != nil {
-		c.hooks.OnCommit(onCommitNodeID, onCommitIno, onCommitEpoch, respInode, onCommitMinSize, onCommitRefresh)
+		c.hooks.OnCommit(onCommitNodeID, onCommitIno, onCommitEpoch, respInode, onCommitMinSize, onCommitRefresh, onCommitPreserveMeta, onCommitCapPresent)
 	}
 	if waitHooks {
 		c.mu.Lock()

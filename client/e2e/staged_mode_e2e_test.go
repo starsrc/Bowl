@@ -1046,3 +1046,306 @@ func TestStagedMode_UmountDrainProgress_GivenUnsyncedWrites_ReportsSyncProgressO
 		require.NotContains(t, errText, "%")
 	})
 }
+
+func requireFDXattrEqual(t *testing.T, fd int, name string, want []byte) {
+	t.Helper()
+	buf := make([]byte, len(want)+16)
+	n, err := unix.Fgetxattr(fd, name, buf)
+	require.NoError(t, err, "fgetxattr(%s) failed", name)
+	require.Equal(t, want, buf[:n], "fgetxattr(%s) mismatch", name)
+}
+
+func requireFDXattrAbsent(t *testing.T, fd int, name string) {
+	t.Helper()
+	_, err := unix.Fgetxattr(fd, name, make([]byte, 32))
+	require.ErrorIs(t, err, syscall.ENODATA, "fgetxattr(%s) must return ENODATA", name)
+}
+
+func requireFDXattrListed(t *testing.T, fd int, name string) {
+	t.Helper()
+	require.Contains(t, readFDXattrNames(t, fd), name, "flistxattr must contain %s", name)
+}
+
+func requireFDXattrNotListed(t *testing.T, fd int, name string) {
+	t.Helper()
+	require.NotContains(t, readFDXattrNames(t, fd), name, "flistxattr must not contain %s", name)
+}
+
+func readFDXattrNames(t *testing.T, fd int) []string {
+	t.Helper()
+	sz, err := unix.Flistxattr(fd, nil)
+	require.NoError(t, err)
+	if sz == 0 {
+		return nil
+	}
+	buf := make([]byte, sz)
+	n, err := unix.Flistxattr(fd, buf)
+	require.NoError(t, err)
+	return strings.Split(strings.TrimSuffix(string(buf[:n]), "\x00"), "\x00")
+}
+
+// TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E verifies staged O_TMPFILE xattrs, ioctl flags,
+// killpriv stripping, S_ISGID inheritance, and ordered linkat promotion in Linux FUSE.
+func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
+	client := newTestStorageClient(t)
+	realEndpoint := getStorageEndpoint()
+	capVal := []byte{0x01, 0x00, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	t.Run("UnpromotedXattrIoctlKillprivAndCleanClose", func(t *testing.T) {
+		proxy := startControllableStorageProxy(t, realEndpoint)
+		diskID := createTestDisk(t, client).GetDiskId()
+		mp, _, adminAddr, stopMount := startMountedDaemon(t, proxy.Endpoint, diskID, "--stage-size", "8MiB")
+		defer stopMount()
+
+		usedBytesBefore, usedInodesBefore := fetchDiskUsage(t, client, diskID)
+		writeCallsBefore := proxy.WriteCalls()
+
+		fd, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o600)
+		require.NoError(t, err)
+		closeFD := closeFDGuard(fd)
+		defer func() { _ = closeFD() }()
+		require.NoError(t, unix.Fchmod(fd, 0o6755))
+
+		// Exercise extended attribute create, replace, ERANGE probing, removal, and sorted listing on an unpromoted descriptor.
+		require.NoError(t, unix.Fsetxattr(fd, "user.z", []byte("vz"), unix.XATTR_CREATE))
+		require.ErrorIs(t, unix.Fsetxattr(fd, "user.z", []byte("dup"), unix.XATTR_CREATE), syscall.EEXIST)
+		require.ErrorIs(t, unix.Fsetxattr(fd, "user.missing", []byte("v"), unix.XATTR_REPLACE), syscall.ENODATA)
+		require.NoError(t, unix.Fsetxattr(fd, "user.a", []byte("val-a"), 0))
+		require.NoError(t, unix.Fsetxattr(fd, "security.capability", capVal, 0))
+
+		_, err = unix.Fgetxattr(fd, "user.a", make([]byte, 2))
+		require.ErrorIs(t, err, syscall.ERANGE)
+		requireFDXattrEqual(t, fd, "user.a", []byte("val-a"))
+		requireFDXattrListed(t, fd, "security.capability")
+		_, err = unix.Flistxattr(fd, make([]byte, 2))
+		require.ErrorIs(t, err, syscall.ERANGE)
+		require.Equal(t, []string{"security.capability", "user.a", "user.z"}, readFDXattrNames(t, fd))
+		require.NoError(t, unix.Fremovexattr(fd, "user.z"))
+		requireFDXattrAbsent(t, fd, "user.z")
+
+		// Write, Fchown, and Fallocate hole punching strip S_ISUID, S_ISGID, and security.capability locally.
+		writeFullFD(t, fd, []byte("initial-payload"), 0)
+		var st unix.Stat_t
+		require.NoError(t, unix.Fstat(fd, &st))
+		require.Zero(t, st.Mode&(unix.S_ISUID|unix.S_ISGID), "write must strip S_ISUID|S_ISGID")
+		requireFDXattrNotListed(t, fd, "security.capability")
+		requireFDXattrEqual(t, fd, "user.a", []byte("val-a"))
+
+		require.NoError(t, unix.Fchmod(fd, 0o6755))
+		require.NoError(t, unix.Fsetxattr(fd, "security.capability", capVal, 0))
+		requireFDXattrListed(t, fd, "security.capability")
+		require.NoError(t, unix.Fchown(fd, 1001, -1))
+		require.NoError(t, unix.Fstat(fd, &st))
+		require.Zero(t, st.Mode&(unix.S_ISUID|unix.S_ISGID), "fchown must strip S_ISUID|S_ISGID")
+		requireFDXattrNotListed(t, fd, "security.capability")
+
+		require.NoError(t, unix.Fchmod(fd, 0o6755))
+		require.NoError(t, unix.Fsetxattr(fd, "security.capability", capVal, 0))
+		requireFDXattrListed(t, fd, "security.capability")
+		require.NoError(t, unix.Fallocate(fd, unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, 0, 4))
+		require.NoError(t, unix.Fstat(fd, &st))
+		require.Zero(t, st.Mode&(unix.S_ISUID|unix.S_ISGID), "punch hole must strip S_ISUID|S_ISGID")
+		requireFDXattrNotListed(t, fd, "security.capability")
+
+		// The mount enforces FS_APPEND_FL and FS_IMMUTABLE_FL locally on the unpromoted descriptor.
+		require.NoError(t, unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(fusefs.FS_APPEND_FL)))
+		gotFlags, err := unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS)
+		require.NoError(t, err)
+		require.Equal(t, int(fusefs.FS_APPEND_FL), gotFlags)
+		require.ErrorIs(t, unix.Ftruncate(fd, 2), syscall.EPERM)
+		_, err = unix.Pwrite(fd, []byte("x"), 0)
+		require.ErrorIs(t, err, syscall.EPERM)
+
+		require.NoError(t, unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(fusefs.FS_IMMUTABLE_FL)))
+		gotFlags, err = unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS)
+		require.NoError(t, err)
+		require.Equal(t, int(fusefs.FS_IMMUTABLE_FL), gotFlags)
+		_, err = unix.Pwrite(fd, []byte("x"), 15)
+		require.ErrorIs(t, err, syscall.EPERM)
+		require.ErrorIs(t, unix.Fchmod(fd, 0o600), syscall.EPERM)
+
+		// Closing an unpromoted descriptor without linkat produces zero server usage delta and zero Write RPCs.
+		require.NoError(t, closeFD())
+		require.Eventually(t, func() bool {
+			snap := fetchDebugStats(t, adminAddr)
+			return snap.TmpFile.ActiveFiles == 0 && snap.TmpFile.ResidentBytes == 0
+		}, 5*time.Second, 20*time.Millisecond)
+		require.Equal(t, writeCallsBefore, proxy.WriteCalls())
+		requireDiskUsageUnchanged(t, client, diskID, usedBytesBefore, usedInodesBefore, "unlinked_xattr_ioctl_tmpfile")
+	})
+
+	t.Run("SGIDInheritanceParentValidationAndLinkatGidPreservation", func(t *testing.T) {
+		diskID := createTestDisk(t, client).GetDiskId()
+		mp, stopMount := mountWithCleanup(t, realEndpoint, diskID)
+		defer stopMount()
+
+		regFile := filepath.Join(mp, "regular.txt")
+		require.NoError(t, os.WriteFile(regFile, []byte("x"), 0o644))
+		_, err := unix.Open(regFile, unix.O_TMPFILE|unix.O_RDWR, 0o600)
+		require.ErrorIs(t, err, syscall.ENOTDIR)
+
+		removedDir := filepath.Join(mp, "removed-dir")
+		require.NoError(t, os.Mkdir(removedDir, 0o755))
+		removedFD, err := unix.Open(removedDir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+		require.NoError(t, err)
+		closeRemoved := closeFDGuard(removedFD)
+		defer func() { _ = closeRemoved() }()
+		require.NoError(t, os.Remove(removedDir))
+		_, err = unix.Openat(removedFD, ".", unix.O_TMPFILE|unix.O_RDWR, 0o600)
+		require.ErrorIs(t, err, syscall.ENOENT)
+		require.NoError(t, closeRemoved())
+
+		sgidSrc := filepath.Join(mp, "sgid-src")
+		plainDst := filepath.Join(mp, "plain-dst")
+		sgidDst := filepath.Join(mp, "sgid-dst")
+		require.NoError(t, os.Mkdir(sgidSrc, 0o755))
+		require.NoError(t, os.Chown(sgidSrc, 1000, 2000))
+		require.NoError(t, os.Chmod(sgidSrc, 0o755|os.ModeSetgid))
+		require.NoError(t, os.Mkdir(plainDst, 0o755))
+		require.NoError(t, os.Mkdir(sgidDst, 0o755))
+		require.NoError(t, os.Chown(sgidDst, 1000, 3000))
+		require.NoError(t, os.Chmod(sgidDst, 0o755|os.ModeSetgid))
+
+		// Inherit group 2000 from sgidSrc and preserve it when linkat promotes the file into sgidDst with group 3000.
+		fd1, err := unix.Open(sgidSrc, unix.O_TMPFILE|unix.O_RDWR, 0o640)
+		require.NoError(t, err)
+		close1 := closeFDGuard(fd1)
+		defer func() { _ = close1() }()
+		var st1 unix.Stat_t
+		require.NoError(t, unix.Fstat(fd1, &st1))
+		require.Equal(t, uint32(2000), st1.Gid)
+		require.Zero(t, st1.Mode&unix.S_ISGID)
+		require.NoError(t, linkatEINTR(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd1), unix.AT_FDCWD, filepath.Join(sgidDst, "keep-2000.bin"), unix.AT_SYMLINK_FOLLOW))
+		require.NoError(t, close1())
+
+		// Override the inherited group with fchown to group 2500 and preserve it across linkat into plainDst.
+		fd2, err := unix.Open(sgidSrc, unix.O_TMPFILE|unix.O_RDWR, 0o640)
+		require.NoError(t, err)
+		close2 := closeFDGuard(fd2)
+		defer func() { _ = close2() }()
+		require.NoError(t, unix.Fchown(fd2, 1001, 2500))
+		require.NoError(t, linkatEINTR(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd2), unix.AT_FDCWD, filepath.Join(plainDst, "keep-2500.bin"), unix.AT_SYMLINK_FOLLOW))
+		require.NoError(t, close2())
+
+		stopMount()
+		mpRO, stopRO := mountWithCleanup(t, realEndpoint, diskID, "--mode", "ro", "--direct-io")
+		defer stopRO()
+
+		var ro1, ro2 unix.Stat_t
+		require.NoError(t, unix.Stat(filepath.Join(mpRO, "sgid-dst", "keep-2000.bin"), &ro1))
+		require.Equal(t, uint32(2000), ro1.Gid)
+		require.NoError(t, unix.Stat(filepath.Join(mpRO, "plain-dst", "keep-2500.bin"), &ro2))
+		require.Equal(t, uint32(1001), ro2.Uid)
+		require.Equal(t, uint32(2500), ro2.Gid)
+	})
+
+	t.Run("PromotedDataSUIDCapabilitiesImmutableAppendAndRemountPersistence", func(t *testing.T) {
+		diskID := createTestDisk(t, client).GetDiskId()
+		mp, _, _, stopMount := startMountedDaemon(t, realEndpoint, diskID, "--stage-size", "8MiB")
+		defer stopMount()
+
+		// Promote an immutable O_TMPFILE carrying payload data, S_ISUID mode bits, user.tag, and security.capability.
+		immPayload := deterministicPayload("e2e-tmp-imm", 65_536)
+		immFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o644)
+		require.NoError(t, err)
+		closeImm := closeFDGuard(immFD)
+		defer func() { _ = closeImm() }()
+		writeFullFD(t, immFD, immPayload, 0)
+		require.NoError(t, unix.Fchmod(immFD, 0o4755))
+		require.NoError(t, unix.Fsetxattr(immFD, "user.tag", []byte("imm-tag"), 0))
+		require.NoError(t, unix.Fsetxattr(immFD, "security.capability", capVal, 0))
+		require.NoError(t, unix.IoctlSetPointerInt(immFD, unix.FS_IOC_SETFLAGS, int(fusefs.FS_IMMUTABLE_FL)))
+
+		immPath := filepath.Join(mp, "promoted-imm.bin")
+		require.NoError(t, linkatEINTR(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", immFD), unix.AT_FDCWD, immPath, unix.AT_SYMLINK_FOLLOW))
+		require.NoError(t, closeImm())
+
+		require.ErrorIs(t, os.Remove(immPath), syscall.EPERM)
+		_, err = os.OpenFile(immPath, os.O_WRONLY|os.O_TRUNC, 0)
+		require.ErrorIs(t, err, syscall.EPERM)
+
+		// Promote an append-only O_TMPFILE carrying payload data, S_ISUID mode bits, user.app, and security.capability.
+		appFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR|unix.O_APPEND, 0o644)
+		require.NoError(t, err)
+		closeApp := closeFDGuard(appFD)
+		defer func() { _ = closeApp() }()
+		writeFullFD(t, appFD, []byte("part1-"), 0)
+		require.NoError(t, unix.Fchmod(appFD, 0o4755))
+		require.NoError(t, unix.Fsetxattr(appFD, "user.app", []byte("app-tag"), 0))
+		require.NoError(t, unix.Fsetxattr(appFD, "security.capability", capVal, 0))
+		require.NoError(t, unix.IoctlSetPointerInt(appFD, unix.FS_IOC_SETFLAGS, int(fusefs.FS_APPEND_FL)))
+
+		appPath := filepath.Join(mp, "promoted-app.bin")
+		require.NoError(t, linkatEINTR(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", appFD), unix.AT_FDCWD, appPath, unix.AT_SYMLINK_FOLLOW))
+		require.NoError(t, closeApp())
+
+		nonAppHandle, err := unix.Open(appPath, unix.O_RDWR, 0)
+		require.NoError(t, err)
+		_, err = unix.Pwrite(nonAppHandle, []byte("bad"), 0)
+		require.ErrorIs(t, err, syscall.EPERM)
+		require.NoError(t, unix.Close(nonAppHandle))
+
+		appHandle, err := unix.Open(appPath, unix.O_WRONLY|unix.O_APPEND, 0)
+		require.NoError(t, err)
+		_, err = unix.Write(appHandle, []byte("part2"))
+		require.NoError(t, err)
+		require.NoError(t, unix.Close(appHandle))
+
+		// Unmount and verify full persistence under --mode ro --direct-io and StorageService.
+		stopMount()
+		mpRO, stopRO := mountWithCleanup(t, realEndpoint, diskID, "--mode", "ro", "--direct-io")
+		defer stopRO()
+
+		roImm := filepath.Join(mpRO, "promoted-imm.bin")
+		require.Equal(t, sha256.Sum256(immPayload), fileSHA256(t, roImm))
+		var immStat unix.Stat_t
+		require.NoError(t, unix.Stat(roImm, &immStat))
+		require.Equal(t, uint32(0o4755), immStat.Mode&0o7777)
+		roImmFD, err := unix.Open(roImm, unix.O_RDONLY, 0)
+		require.NoError(t, err)
+		defer func() { _ = unix.Close(roImmFD) }()
+		requireFDXattrEqual(t, roImmFD, "user.tag", []byte("imm-tag"))
+		requireFDXattrListed(t, roImmFD, "security.capability")
+		roImmFlags, err := unix.IoctlGetInt(roImmFD, unix.FS_IOC_GETFLAGS)
+		require.NoError(t, err)
+		require.NotZero(t, roImmFlags&int(fusefs.FS_IMMUTABLE_FL))
+
+		roApp := filepath.Join(mpRO, "promoted-app.bin")
+		gotAppBytes, err := os.ReadFile(roApp)
+		require.NoError(t, err)
+		require.Equal(t, []byte("part1-part2"), gotAppBytes)
+		var appStat unix.Stat_t
+		require.NoError(t, unix.Stat(roApp, &appStat))
+		require.Equal(t, uint32(0o755), appStat.Mode&0o7777)
+		roAppFD, err := unix.Open(roApp, unix.O_RDONLY, 0)
+		require.NoError(t, err)
+		defer func() { _ = unix.Close(roAppFD) }()
+		requireFDXattrEqual(t, roAppFD, "user.app", []byte("app-tag"))
+		requireFDXattrNotListed(t, roAppFD, "security.capability")
+		roAppFlags, err := unix.IoctlGetInt(roAppFD, unix.FS_IOC_GETFLAGS)
+		require.NoError(t, err)
+		require.NotZero(t, roAppFlags&int(fusefs.FS_APPEND_FL))
+
+		// Verify exact capability bytes persisted on StorageService for immutable file and absent on append file.
+		rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer rpcCancel()
+		immLookup, err := client.Lookup(rpcCtx, connect.NewRequest(&storagev1.LookupRequest{
+			ParentIno: 1, Name: []byte("promoted-imm.bin"), DiskId: diskID,
+		}))
+		require.NoError(t, err)
+		immCapResp, err := client.GetXattr(rpcCtx, connect.NewRequest(&storagev1.GetXattrRequest{
+			Ino: immLookup.Msg.GetInode().GetIno(), Name: []byte("security.capability"), DiskId: diskID,
+		}))
+		require.NoError(t, err)
+		require.Equal(t, capVal, immCapResp.Msg.GetValue())
+
+		appLookup, err := client.Lookup(rpcCtx, connect.NewRequest(&storagev1.LookupRequest{
+			ParentIno: 1, Name: []byte("promoted-app.bin"), DiskId: diskID,
+		}))
+		require.NoError(t, err)
+		_, appCapErr := client.GetXattr(rpcCtx, connect.NewRequest(&storagev1.GetXattrRequest{
+			Ino: appLookup.Msg.GetInode().GetIno(), Name: []byte("security.capability"), DiskId: diskID,
+		}))
+		require.Error(t, appCapErr)
+	})
+}

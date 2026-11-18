@@ -5,6 +5,8 @@ import (
 	"errors"
 	"math"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,12 +23,18 @@ const (
 	tmpLocalInoBit = uint64(1) << 63
 	// tmpDefaultBlksize 是匿名文件属性返回的块尺寸 (4 KiB)。
 	tmpDefaultBlksize = 4 * 1024
+
+	xattrCreateFlag    uint32 = 0x1
+	xattrReplaceFlag   uint32 = 0x2
+	maxXattrNameBytes         = 255
+	maxXattrValueBytes        = 65536
+	maxXattrListBytes         = 65536
 )
 
 // TmpMaterializer 定义本地匿名文件通过 linkat 具名化转正时的服务端建项与后台接管端口。
 type TmpMaterializer interface {
 	CreateTmpInode(ctx context.Context, parentIno uint64, name string, mode, uid, gid uint32) (inode *storagev1.Inode, entryTimeout, attrTimeout float64, status fuse.Status)
-	PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, size uint64, atime, mtime *timestamppb.Timestamp, extents []stageExtent)
+	PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent)
 }
 
 type managedTmpFile struct {
@@ -40,6 +48,7 @@ type managedTmpFile struct {
 	lookups       uint64
 	serverIno     uint64
 	uploaded      atomic.Bool
+	xattrs        map[string][]byte
 }
 
 // TmpFileManager 封装宿主机暂存盘匿名文件（O_TMPFILE / CreateTemp+unlink）、
@@ -304,38 +313,46 @@ func (m *TmpFileManager) Read(ino, offset uint64, dest []byte) (n int, handled b
 }
 
 // Write 将数据写入尚未具名化的宿主机匿名文件，不占用 --stage-size 配额。
-func (m *TmpFileManager) Write(ino, offset uint64, data []byte, appendMode bool) (written uint32, handled bool, status fuse.Status) {
+func (m *TmpFileManager) Write(ino, offset uint64, data []byte, appendMode bool) (written uint32, inode *storagev1.Inode, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
-		return 0, false, fuse.OK
+		return 0, nil, false, fuse.OK
 	}
 	tmp.mu.Lock()
 	defer tmp.mu.Unlock()
 	if tmp.serverIno != 0 {
-		return 0, false, fuse.OK
+		return 0, nil, false, fuse.OK
+	}
+	if tmp.inode.Attr.Flags&ProtoFlagImmutable != 0 {
+		return 0, nil, true, fuse.EPERM
 	}
 	if appendMode {
 		offset = tmp.inode.Attr.Size
 	}
+	if len(data) > 0 && tmp.inode.Attr.Flags&ProtoFlagAppend != 0 && offset != tmp.inode.Attr.Size {
+		return 0, nil, true, fuse.EPERM
+	}
 	if offset > math.MaxInt64 || uint64(len(data)) > math.MaxInt64-offset {
-		return 0, true, fuse.Status(syscall.EFBIG)
+		return 0, nil, true, fuse.Status(syscall.EFBIG)
 	}
 	if len(data) == 0 {
-		return 0, true, fuse.OK
+		return 0, nil, true, fuse.OK
 	}
 	if tmp.file == nil {
-		return 0, true, fuse.EIO
+		return 0, nil, true, fuse.EIO
 	}
 	if err := writeAtFull(tmp.file, data, int64(offset)); err != nil {
-		return 0, true, hostErrToStatus(err)
+		return 0, nil, true, hostErrToStatus(err)
 	}
 	m.refreshResidentBytesLocked(tmp)
 	tmp.inode.Attr.Size = max(tmp.inode.Attr.Size, offset+uint64(len(data)))
 	tmp.inode.Attr.Blocks = tmp.residentBytes / 512
+	tmp.inode.Attr.Mode &^= syscall.S_ISUID | syscall.S_ISGID
+	delete(tmp.xattrs, securityCapabilityXattr)
 	now := timestamppb.Now()
 	tmp.inode.Attr.Mtime = now
 	tmp.inode.Attr.Ctime = now
-	return uint32(len(data)), true, fuse.OK
+	return uint32(len(data)), cloneInode(tmp.inode), true, fuse.OK
 }
 
 // SetAttr 更新尚未具名化的本地匿名文件属性或截断宿主机磁盘文件尺寸。
@@ -355,6 +372,16 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 		}
 	}
 	a := tmp.inode.Attr
+	const attrUpdateMask = fuse.FATTR_SIZE | fuse.FATTR_MODE | fuse.FATTR_UID | fuse.FATTR_GID |
+		fuse.FATTR_ATIME | fuse.FATTR_ATIME_NOW | fuse.FATTR_MTIME | fuse.FATTR_MTIME_NOW | fuse.FATTR_CTIME
+	if input.Valid&attrUpdateMask != 0 {
+		if a.Flags&ProtoFlagImmutable != 0 {
+			return nil, true, fuse.EPERM
+		}
+		if a.Flags&ProtoFlagAppend != 0 && input.Valid&fuse.FATTR_SIZE != 0 {
+			return nil, true, fuse.EPERM
+		}
+	}
 	if input.Valid&fuse.FATTR_SIZE != 0 {
 		if input.Size > math.MaxInt64 {
 			return nil, true, fuse.Status(syscall.EFBIG)
@@ -372,12 +399,17 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 	}
 	if input.Valid&fuse.FATTR_MODE != 0 {
 		a.Mode = (a.Mode & syscall.S_IFMT) | (input.Mode & 0o7777)
+	} else if input.Valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID) != 0 {
+		a.Mode &^= syscall.S_ISUID | syscall.S_ISGID
 	}
 	if input.Valid&fuse.FATTR_UID != 0 {
 		a.Uid = input.Uid
 	}
 	if input.Valid&fuse.FATTR_GID != 0 {
 		a.Gid = input.Gid
+	}
+	if input.Valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
+		delete(tmp.xattrs, securityCapabilityXattr)
 	}
 	if input.Valid&fuse.FATTR_ATIME_NOW != 0 {
 		a.Atime = timestamppb.Now()
@@ -398,31 +430,34 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 }
 
 // Allocate 在尚未具名化的宿主机匿名文件上执行预分配或打洞（支持 EOPNOTSUPP 写零回退）。
-func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool, fuse.Status) {
+func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (*storagev1.Inode, bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
-		return false, fuse.OK
+		return nil, false, fuse.OK
 	}
 	tmp.mu.Lock()
 	defer tmp.mu.Unlock()
 	if tmp.serverIno != 0 {
-		return false, fuse.OK
+		return nil, false, fuse.OK
 	}
 	if mode != 0 &&
 		mode != fallocFlKeepSize &&
 		mode != (fallocFlPunchHole|fallocFlKeepSize) {
-		return true, fuse.Status(syscall.EOPNOTSUPP)
+		return nil, true, fuse.Status(syscall.EOPNOTSUPP)
 	}
 	if length == 0 || offset > math.MaxInt64 || length > math.MaxInt64-offset {
-		return true, fuse.EINVAL
-	}
-	if tmp.file == nil {
-		return true, fuse.EIO
+		return nil, true, fuse.EINVAL
 	}
 	a := tmp.inode.Attr
+	if a.Flags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
+		return nil, true, fuse.EPERM
+	}
+	if tmp.file == nil {
+		return nil, true, fuse.EIO
+	}
 	oldSize := a.Size
 	if err := fallocateHostFile(tmp.file, mode, int64(offset), int64(length), oldSize); err != nil {
-		return true, hostErrToStatus(err)
+		return nil, true, hostErrToStatus(err)
 	}
 	end := offset + length
 	if mode&fallocFlKeepSize == 0 && end > a.Size {
@@ -432,6 +467,7 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool
 	if punch {
 		a.Mode &^= syscall.S_ISUID | syscall.S_ISGID
 	}
+	delete(tmp.xattrs, securityCapabilityXattr)
 	m.refreshResidentBytesLocked(tmp)
 	a.Blocks = tmp.residentBytes / 512
 	now := timestamppb.Now()
@@ -439,7 +475,7 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (bool
 		a.Mtime = now
 	}
 	a.Ctime = now
-	return true, fuse.OK
+	return cloneInode(tmp.inode), true, fuse.OK
 }
 
 // Fsync 对尚未具名化的宿主机匿名文件执行本地 f.Sync()，零服务端 RPC。
@@ -462,10 +498,165 @@ func (m *TmpFileManager) Fsync(ino uint64) (bool, fuse.Status) {
 	return true, fuse.OK
 }
 
+func validateXattrName(name string) fuse.Status {
+	if name == "" || strings.IndexByte(name, 0) >= 0 {
+		return fuse.EINVAL
+	}
+	if len(name) > maxXattrNameBytes {
+		return fuse.Status(syscall.ERANGE)
+	}
+	return fuse.OK
+}
+
+// SetXAttr updates an extended attribute in memory on an unpromoted staged O_TMPFILE.
+func (m *TmpFileManager) SetXAttr(ino uint64, name string, value []byte, flags uint32) (bool, fuse.Status) {
+	tmp := m.getFile(ino)
+	if tmp == nil {
+		return false, fuse.OK
+	}
+	tmp.mu.Lock()
+	defer tmp.mu.Unlock()
+	if tmp.serverIno != 0 {
+		return false, fuse.OK
+	}
+	if flags&^(xattrCreateFlag|xattrReplaceFlag) != 0 {
+		return true, fuse.EINVAL
+	}
+	if st := validateXattrName(name); st != fuse.OK {
+		return true, st
+	}
+	if len(value) > maxXattrValueBytes {
+		return true, fuse.Status(syscall.ERANGE)
+	}
+	_, exists := tmp.xattrs[name]
+	if exists {
+		if flags&xattrCreateFlag != 0 {
+			return true, fuse.Status(syscall.EEXIST)
+		}
+	} else {
+		if flags&xattrReplaceFlag != 0 {
+			return true, fuse.Status(syscall.ENODATA)
+		}
+		total := len(name) + 1
+		for k := range tmp.xattrs {
+			total += len(k) + 1
+		}
+		if total > maxXattrListBytes {
+			return true, fuse.Status(syscall.ENOSPC)
+		}
+	}
+	if tmp.xattrs == nil {
+		tmp.xattrs = make(map[string][]byte)
+	}
+	tmp.xattrs[name] = slices.Clone(value)
+	tmp.inode.Attr.Ctime = timestamppb.Now()
+	return true, fuse.OK
+}
+
+// GetXAttr reads an extended attribute from an unpromoted staged O_TMPFILE.
+func (m *TmpFileManager) GetXAttr(ino uint64, name string, dest []byte) (sz uint32, handled bool, status fuse.Status) {
+	tmp := m.getFile(ino)
+	if tmp == nil {
+		return 0, false, fuse.OK
+	}
+	tmp.mu.Lock()
+	defer tmp.mu.Unlock()
+	if tmp.serverIno != 0 {
+		return 0, false, fuse.OK
+	}
+	if st := validateXattrName(name); st != fuse.OK {
+		return 0, true, st
+	}
+	val, exists := tmp.xattrs[name]
+	if !exists {
+		return 0, true, fuse.Status(syscall.ENODATA)
+	}
+	sz, st := copyXattrValue(val, dest)
+	return sz, true, st
+}
+
+// ListXAttr returns sorted extended attribute names on an unpromoted staged O_TMPFILE.
+func (m *TmpFileManager) ListXAttr(ino uint64, dest []byte) (sz uint32, handled bool, status fuse.Status) {
+	tmp := m.getFile(ino)
+	if tmp == nil {
+		return 0, false, fuse.OK
+	}
+	tmp.mu.Lock()
+	defer tmp.mu.Unlock()
+	if tmp.serverIno != 0 {
+		return 0, false, fuse.OK
+	}
+	names := make([][]byte, 0, len(tmp.xattrs))
+	for k := range tmp.xattrs {
+		names = append(names, []byte(k))
+	}
+	slices.SortFunc(names, func(a, b []byte) int {
+		return strings.Compare(string(a), string(b))
+	})
+	sz, st := formatXattrList(names, dest)
+	return sz, true, st
+}
+
+// RemoveXAttr deletes an extended attribute from an unpromoted staged O_TMPFILE.
+func (m *TmpFileManager) RemoveXAttr(ino uint64, name string) (bool, fuse.Status) {
+	tmp := m.getFile(ino)
+	if tmp == nil {
+		return false, fuse.OK
+	}
+	tmp.mu.Lock()
+	defer tmp.mu.Unlock()
+	if tmp.serverIno != 0 {
+		return false, fuse.OK
+	}
+	if st := validateXattrName(name); st != fuse.OK {
+		return true, st
+	}
+	if _, exists := tmp.xattrs[name]; !exists {
+		return true, fuse.Status(syscall.ENODATA)
+	}
+	delete(tmp.xattrs, name)
+	tmp.inode.Attr.Ctime = timestamppb.Now()
+	return true, fuse.OK
+}
+
+// GetFlags reads in-memory inode flags on an unpromoted staged O_TMPFILE.
+func (m *TmpFileManager) GetFlags(ino uint64) (uint32, bool) {
+	tmp := m.getFile(ino)
+	if tmp == nil {
+		return 0, false
+	}
+	tmp.mu.Lock()
+	defer tmp.mu.Unlock()
+	if tmp.serverIno != 0 {
+		return 0, false
+	}
+	return tmp.inode.Attr.Flags, true
+}
+
+// SetFlags updates in-memory inode flags on an unpromoted staged O_TMPFILE.
+func (m *TmpFileManager) SetFlags(ino uint64, flags uint32) (*storagev1.Inode, bool, fuse.Status) {
+	tmp := m.getFile(ino)
+	if tmp == nil {
+		return nil, false, fuse.OK
+	}
+	tmp.mu.Lock()
+	defer tmp.mu.Unlock()
+	if tmp.serverIno != 0 {
+		return nil, false, fuse.OK
+	}
+	if tmp.inode.Attr.Flags&ProtoFlagImmutable != 0 && flags&ProtoFlagImmutable != 0 {
+		return nil, true, fuse.EPERM
+	}
+	tmp.inode.Attr.Flags = flags
+	tmp.inode.Attr.Ctime = timestamppb.Now()
+	return cloneInode(tmp.inode), true, fuse.OK
+}
+
 func (m *TmpFileManager) installAliasLocked(localIno uint64, tmp *managedTmpFile, serverIno uint64) {
 	m.releaseResidentBytesLocked(tmp)
 	tmp.serverIno = serverIno
 	tmp.file = nil
+	tmp.xattrs = nil
 	tmp.uploaded.Store(true)
 	m.mu.Lock()
 	m.serverToLocal[serverIno] = localIno
@@ -474,10 +665,11 @@ func (m *TmpFileManager) installAliasLocked(localIno uint64, tmp *managedTmpFile
 
 // TmpLinkResult 承载匿名文件具名化成功后的服务端属性与超时信息。
 type TmpLinkResult struct {
-	ServerIno    uint64
-	Inode        *storagev1.Inode
-	EntryTimeout float64
-	AttrTimeout  float64
+	ServerIno      uint64
+	Inode          *storagev1.Inode
+	EntryTimeout   float64
+	AttrTimeout    float64
+	HasSecurityCap bool
 }
 
 // Link 通过同步 Mknod 在服务端分配 serverIno 与目录项，并将宿主机 *os.File 所有权移交至 StageCoordinator 后台上传。
@@ -506,7 +698,8 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 		return TmpLinkResult{}, true, hostErrToStatus(extErr)
 	}
 
-	inode, entryTimeout, attrTimeout, status := mat.CreateTmpInode(ctx, parentServerIno, name, attr.Mode, attr.Uid, attr.Gid)
+	baseMode := uint32(syscall.S_IFREG) | (attr.Mode & 0o777)
+	inode, entryTimeout, attrTimeout, status := mat.CreateTmpInode(ctx, parentServerIno, name, baseMode, attr.Uid, attr.Gid)
 	if status != fuse.OK {
 		return TmpLinkResult{}, true, status
 	}
@@ -514,10 +707,34 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 		return TmpLinkResult{}, true, fuse.EIO
 	}
 
+	var stagedXattrs []StagedXattr
+	hasSecurityCap := false
+	if len(tmp.xattrs) > 0 {
+		keys := make([]string, 0, len(tmp.xattrs))
+		for k := range tmp.xattrs {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		stagedXattrs = make([]StagedXattr, 0, len(keys))
+		for _, k := range keys {
+			if k == securityCapabilityXattr {
+				hasSecurityCap = true
+			}
+			stagedXattrs = append(stagedXattrs, StagedXattr{
+				Name:  k,
+				Value: slices.Clone(tmp.xattrs[k]),
+			})
+		}
+	}
+
 	serverIno := inode.GetIno()
 	mergedInode := cloneInode(inode)
 	mergedInode.Attr.Size = attr.Size
 	mergedInode.Attr.Blocks = max(mergedInode.Attr.Blocks, (attr.Size+511)/512)
+	mergedInode.Attr.Mode = attr.Mode
+	mergedInode.Attr.Uid = attr.Uid
+	mergedInode.Attr.Gid = attr.Gid
+	mergedInode.Attr.Flags = attr.Flags
 	if attr.Atime != nil {
 		mergedInode.Attr.Atime = cloneTimestamp(attr.Atime)
 	}
@@ -530,18 +747,28 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 	mergedInode.Attr.Nlink = 1
 
 	hostFile := tmp.file
+	meta := StagePromotedMeta{
+		Size:   attr.Size,
+		Atime:  cloneTimestamp(attr.Atime),
+		Mtime:  cloneTimestamp(attr.Mtime),
+		Mode:   attr.Mode,
+		Gid:    attr.Gid,
+		Flags:  attr.Flags,
+		Xattrs: stagedXattrs,
+	}
 	m.installAliasLocked(ino, tmp, serverIno)
 	tmp.named = true
 	tmp.lookups++
-	mat.PromoteTmpfile(ctx, serverIno, ino, hostFile, attr.Size, attr.Atime, attr.Mtime, extents)
+	mat.PromoteTmpfile(ctx, serverIno, ino, hostFile, meta, extents)
 	m.metrics.Load().incTmpPromote()
 
 	m.fillEntryOut(out, mergedInode, entryTimeout, attrTimeout)
 	return TmpLinkResult{
-		ServerIno:    serverIno,
-		Inode:        mergedInode,
-		EntryTimeout: entryTimeout,
-		AttrTimeout:  attrTimeout,
+		ServerIno:      serverIno,
+		Inode:          mergedInode,
+		EntryTimeout:   entryTimeout,
+		AttrTimeout:    attrTimeout,
+		HasSecurityCap: hasSecurityCap,
 	}, true, fuse.OK
 }
 

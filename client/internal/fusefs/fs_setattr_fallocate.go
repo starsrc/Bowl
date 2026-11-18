@@ -35,7 +35,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 	epoch := fs.cache.version()
-	if _, local, localSt := fs.tmpMgr.SetAttr(input.NodeId, input, func(fh uint64, needWrite bool) fuse.Status {
+	if updatedInode, local, localSt := fs.tmpMgr.SetAttr(input.NodeId, input, func(fh uint64, needWrite bool) fuse.Status {
 		h, st := fs.checkedHandle(input.NodeId, fh, false)
 		if st != fuse.OK {
 			return st
@@ -46,6 +46,12 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		return fuse.OK
 	}, &out.Attr); local {
 		out.SetTimeout(0)
+		if localSt == fuse.OK {
+			fs.recordInodeSpecial(input.NodeId, updatedInode)
+			if input.Valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
+				fs.caps.markAbsent(input.NodeId)
+			}
+		}
 		return localSt
 	}
 	ino, status := fs.ToServerIno(input.NodeId)
@@ -198,8 +204,9 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fuse.Status(syscall.EOPNOTSUPP)
 	}
 
-	if local, localSt := fs.tmpMgr.Allocate(input.NodeId, input.Offset, input.Length, input.Mode); local {
+	if updatedInode, local, localSt := fs.tmpMgr.Allocate(input.NodeId, input.Offset, input.Length, input.Mode); local {
 		if localSt == fuse.OK {
+			fs.recordInodeSpecial(input.NodeId, updatedInode)
 			fs.caps.markAbsent(input.NodeId)
 		}
 		return localSt

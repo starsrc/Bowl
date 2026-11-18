@@ -41,8 +41,6 @@ type MicroVM struct {
 	CPUs, MemoryMiB int
 }
 
-var _ Backend = (*MicroVM)(nil)
-
 const (
 	// guestAgentPath 是代理在虚机里的位置,也是内核的 init。
 	guestAgentPath = "/.bowl/guest"
@@ -378,7 +376,7 @@ func (m *MicroVM) Logs(ctx context.Context, id, runID string, follow bool, out, 
 		return fmt.Errorf("读取日志失败(运行 %s)", runID)
 	}
 	if exit, err := m.shellOutput(ctx, id, "cat "+dir+"/exit 2>/dev/null"); err == nil && strings.TrimSpace(exit) != "" {
-		fmt.Fprintf(errOut, "退出码 %s\n", strings.TrimSpace(exit))
+		fmt.Fprintf(errOut, "exit code %s\n", strings.TrimSpace(exit))
 	}
 	return nil
 }

@@ -344,7 +344,7 @@ func (rt *Runtime) Logs(ctx context.Context, id, runID string, follow bool, out,
 		return fmt.Errorf("读取日志失败（运行 %s）", runID)
 	}
 	if exitOut, err := rt.output(ctx, "exec", container, "cat", dir+"/exit"); err == nil {
-		fmt.Fprintf(errOut, "退出码 %s\n", strings.TrimSpace(exitOut))
+		fmt.Fprintf(errOut, "exit code %s\n", strings.TrimSpace(exitOut))
 	}
 	return nil
 }

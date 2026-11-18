@@ -19,6 +19,9 @@ type Backend interface {
 	Exists(ctx context.Context, id string) bool
 	List(ctx context.Context) ([]Row, error)
 	Info(ctx context.Context, id string) (Info, error)
+	IDs(ctx context.Context) ([]string, error)
+	// DefaultMount 是不指定工作目录时命令的默认目录。
+	DefaultMount(ctx context.Context, id string) (string, error)
 
 	// Exec 前台执行并返回退出码；ExecBackground 后台执行并返回这次运行的 ID，
 	// 之后用 Logs 读输出、用 Wait 等退出码。
@@ -31,4 +34,7 @@ type Backend interface {
 	CopyFrom(ctx context.Context, id, sandboxPath, localPath string, errOut io.Writer) error
 }
 
-var _ Backend = (*Runtime)(nil)
+var (
+	_ Backend = (*Runtime)(nil)
+	_ Backend = (*MicroVM)(nil)
+)

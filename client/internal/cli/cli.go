@@ -93,7 +93,23 @@ func newRootCmd(args []string, stdout, stderr io.Writer) *cobra.Command {
 // Execute runs the bowl CLI with args excluding the executable name.
 // It returns 0 on success, 2 on CLI syntax or validation errors, and 1 on runtime errors.
 func Execute(args []string, stdout, stderr io.Writer) int {
-	rootCmd := newRootCmd(args, stdout, stderr)
+	return execute(newRootCmd(args, stdout, stderr), stderr)
+}
+
+// ExecuteSandbox runs the bowl-sandbox CLI with args excluding the executable name.
+// Exit codes follow Execute, except that exec, shell and wait pass the sandboxed command's code through.
+func ExecuteSandbox(args []string, stdout, stderr io.Writer) int {
+	rootCmd := newSandboxCmd()
+	rootCmd.SetOut(stdout)
+	rootCmd.SetErr(stderr)
+	if args == nil {
+		args = []string{}
+	}
+	rootCmd.SetArgs(args)
+	return execute(rootCmd, stderr)
+}
+
+func execute(rootCmd *cobra.Command, stderr io.Writer) int {
 	executedCmd, err := rootCmd.ExecuteC()
 	if err == nil {
 		return 0

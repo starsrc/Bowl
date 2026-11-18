@@ -53,6 +53,7 @@ type mountOptions struct {
 }
 
 type mountFlagPresence struct {
+	logFile          bool
 	adminAddr        bool
 	logLevel         bool
 	logFormat        bool
@@ -402,8 +403,21 @@ func firstNonEmptyEnv(keys ...string) string {
 	return ""
 }
 
-// applyEnvAndValidateOptions applies environment fallbacks and validates mode, stage, and observability options.
-func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence) error {
+// applyEnvAndValidateOptions applies environment fallbacks and validates mode, stage, log file, and observability options.
+func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence, foreground bool) error {
+	if set.logFile {
+		if foreground {
+			return errors.New("--log-file cannot be set with -f/--foreground")
+		}
+		if strings.TrimSpace(o.logFile) == "" {
+			return errors.New("--log-file cannot be empty")
+		}
+		absLogFile, err := resolveAbsFlagPath("--log-file", o.logFile, false)
+		if err != nil {
+			return err
+		}
+		o.logFile = absLogFile
+	}
 	if !set.adminAddr {
 		if env := firstNonEmptyEnv("BOWL_ADMIN_ADDR", "OBS_ADMIN_ADDR"); env != "" {
 			o.adminAddr = env
@@ -505,20 +519,31 @@ func applyStageOptions(o *mountOptions, set mountFlagPresence) error {
 		rawStageDir = fusefs.DefaultStageDir
 	}
 
-	absStageDir, err := filepath.Abs(rawStageDir)
+	absStageDir, err := resolveAbsFlagPath("--stage-dir", rawStageDir, true)
 	if err != nil {
-		return fmt.Errorf("failed to resolve --stage-dir path: %w", err)
-	}
-	absStageDir = filepath.Clean(absStageDir)
-	if info, statErr := os.Stat(absStageDir); statErr == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("--stage-dir %q already exists and is not a directory", absStageDir)
-		}
-	} else if errors.Is(statErr, syscall.ENOTDIR) || errors.Is(statErr, syscall.ELOOP) {
-		return fmt.Errorf("--stage-dir %q has invalid path: %w", absStageDir, statErr)
+		return err
 	}
 	o.stageDir = absStageDir
 	return nil
+}
+
+func resolveAbsFlagPath(flagName, rawPath string, wantDir bool) (string, error) {
+	absPath, err := filepath.Abs(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve %s path: %w", flagName, err)
+	}
+	absPath = filepath.Clean(absPath)
+	if info, statErr := os.Stat(absPath); statErr == nil {
+		if wantDir && !info.IsDir() {
+			return "", fmt.Errorf("%s %q already exists and is not a directory", flagName, absPath)
+		}
+		if !wantDir && info.IsDir() {
+			return "", fmt.Errorf("%s %q already exists and is a directory", flagName, absPath)
+		}
+	} else if errors.Is(statErr, syscall.ENOTDIR) || errors.Is(statErr, syscall.ELOOP) {
+		return "", fmt.Errorf("%s %q has invalid path: %w", flagName, absPath, statErr)
+	}
+	return absPath, nil
 }
 
 func resolvePathWithSymlinks(absPath string) (string, error) {
@@ -569,17 +594,17 @@ func isSameOrSubpath(base, target string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-func validateStageDirMountpoint(stageDir, absMountpoint string) error {
-	if isSameOrSubpath(absMountpoint, stageDir) {
-		return fmt.Errorf("--stage-dir %q cannot equal or be inside mountpoint %q", stageDir, absMountpoint)
+func validatePathNotInMountpoint(flagName, targetPath, absMountpoint string) error {
+	if isSameOrSubpath(absMountpoint, targetPath) {
+		return fmt.Errorf("%s %q cannot equal or be inside mountpoint %q", flagName, targetPath, absMountpoint)
 	}
 	canonMP, errMP := resolvePathWithSymlinks(absMountpoint)
-	canonStage, errStage := resolvePathWithSymlinks(stageDir)
-	if errStage != nil {
-		return fmt.Errorf("failed to resolve --stage-dir %q: %w", stageDir, errStage)
+	canonTarget, errTarget := resolvePathWithSymlinks(targetPath)
+	if errTarget != nil {
+		return fmt.Errorf("failed to resolve %s %q: %w", flagName, targetPath, errTarget)
 	}
-	if errMP == nil && isSameOrSubpath(canonMP, canonStage) {
-		return fmt.Errorf("--stage-dir %q cannot equal or be inside mountpoint %q", stageDir, absMountpoint)
+	if errMP == nil && isSameOrSubpath(canonMP, canonTarget) {
+		return fmt.Errorf("%s %q cannot equal or be inside mountpoint %q", flagName, targetPath, absMountpoint)
 	}
 	return nil
 }
@@ -607,6 +632,7 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
 			flags := cmd.Flags()
 			set := mountFlagPresence{
+				logFile:          flags.Changed("log-file"),
 				adminAddr:        flags.Changed("admin-addr"),
 				logLevel:         flags.Changed("log-level"),
 				logFormat:        flags.Changed("log-format"),
@@ -647,7 +673,7 @@ func executeMountValidated(
 	foreground, allowOther, directIO, debug, statsFile bool,
 	rawArgs []string,
 ) error {
-	if valErr := applyEnvAndValidateOptions(opts, set); valErr != nil {
+	if valErr := applyEnvAndValidateOptions(opts, set, foreground); valErr != nil {
 		return usageExitErr(valErr, false)
 	}
 
@@ -674,8 +700,13 @@ func executeMountValidated(
 	}
 
 	if opts.mode == fusefs.MountModeStaged {
-		if stageErr := validateStageDirMountpoint(opts.stageDir, absMountpoint); stageErr != nil {
+		if stageErr := validatePathNotInMountpoint("--stage-dir", opts.stageDir, absMountpoint); stageErr != nil {
 			return usageExitErr(stageErr, false)
+		}
+	}
+	if set.logFile {
+		if logErr := validatePathNotInMountpoint("--log-file", opts.logFile, absMountpoint); logErr != nil {
+			return usageExitErr(logErr, false)
 		}
 	}
 

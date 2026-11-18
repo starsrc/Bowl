@@ -32,7 +32,18 @@ func readDaemonHandshake(r io.Reader, stderr io.Writer) int {
 	return 1
 }
 
-var spawnDaemon = spawnDaemonProcess
+var (
+	spawnDaemon         = spawnDaemonProcess
+	chdirFn             = os.Chdir
+	readinessPipeFile   = func() *os.File { return os.NewFile(3, "readiness-pipe") }
+	redirectDaemonStdio = defaultRedirectDaemonStdio
+)
+
+func defaultRedirectDaemonStdio(logF *os.File) {
+	logFd := int(logF.Fd())
+	_ = unix.Dup2(logFd, int(os.Stdout.Fd()))
+	_ = unix.Dup2(logFd, int(os.Stderr.Fd()))
+}
 
 // spawnDaemonProcess spawns a background mount daemon and waits for its readiness handshake.
 func spawnDaemonProcess(args []string, stderr io.Writer) int {
@@ -75,7 +86,7 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 
 // runDaemonWorker runs inside the background daemon child, redirects stdout/stderr to the log file, and signals readiness over fd 3.
 func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string) int {
-	pipeWriter := os.NewFile(3, "readiness-pipe")
+	pipeWriter := readinessPipeFile()
 	notifyErr := func(err error) {
 		if pipeWriter != nil {
 			fmt.Fprintf(pipeWriter, "ERR:%v\n", err)
@@ -98,9 +109,12 @@ func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Co
 	}
 	defer logF.Close()
 
-	logFd := int(logF.Fd())
-	_ = unix.Dup2(logFd, int(os.Stdout.Fd()))
-	_ = unix.Dup2(logFd, int(os.Stderr.Fd()))
+	if chdirErr := chdirFn("/"); chdirErr != nil {
+		notifyErr(fmt.Errorf("change daemon working directory to /: %w", chdirErr))
+		return 1
+	}
+
+	redirectDaemonStdio(logF)
 
 	if mountErr := runMount(ctx, opts, baseCfg, mountpoint, logF, notifyOK); mountErr != nil {
 		notifyErr(mountErr)

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -306,10 +307,11 @@ func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS) *http.ServeMux {
 	mux := http.NewServeMux()
 	obs.MountAdminRoutes(mux)
 	mux.Handle("GET /debug/stats", statsHandler(fs))
+	mux.Handle("GET /debug/unmount", unmountProgressHandler(fs))
 	return mux
 }
 
-// startAdminServer starts /metrics, /debug/pprof/*, /healthz, /readyz, and /debug/stats on addr, or returns nil for "off".
+// startAdminServer starts /metrics, /debug/pprof/*, /healthz, /readyz, /debug/stats, and /debug/unmount on addr, or returns nil for "off".
 func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS) (*adminServer, error) {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil, nil
@@ -372,5 +374,18 @@ func statsHandler(fs *fusefs.RawFS) http.Handler {
 		default:
 			http.Error(w, fmt.Sprintf("unsupported format %q (json|text|stats)", format), http.StatusBadRequest)
 		}
+	})
+}
+
+// unmountProgressHandler serves current OnUnmount sync progress as JSON.
+func unmountProgressHandler(fs *fusefs.RawFS) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, err := json.Marshal(fs.UnmountProgress())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write(body)
 	})
 }

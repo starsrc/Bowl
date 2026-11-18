@@ -299,3 +299,114 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	_, getErr := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: disk2ID}))
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(getErr))
 }
+
+// TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelativePaths verifies
+// background mount resolves relative paths against the caller working directory, detaches cwd to /,
+// allows synchronous tmpfs unmount without EBUSY, and keeps foreground mode in the caller directory.
+func TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelativePaths(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	disk := createTestDisk(t, client)
+
+	baseDir := t.TempDir()
+	scratchTmpfs := filepath.Join(baseDir, "scratch-tmpfs")
+	require.NoError(t, os.MkdirAll(scratchTmpfs, 0o755))
+	require.NoError(t, unix.Mount("tmpfs", scratchTmpfs, "tmpfs", 0, "size=16m"))
+	tmpfsUnmounted := false
+	t.Cleanup(func() {
+		if !tmpfsUnmounted {
+			_ = unix.Unmount(scratchTmpfs, unix.MNT_DETACH)
+		}
+	})
+
+	mountpoint := filepath.Join(baseDir, "mnt")
+	require.NoError(t, os.MkdirAll(mountpoint, 0o755))
+	stageDir := filepath.Join(baseDir, "stage")
+	logFile := filepath.Join(baseDir, "logs", "daemon.log")
+
+	relMP := filepath.Join("..", "mnt")
+	relStageDir := filepath.Join("..", "stage")
+	relLogFile := filepath.Join("..", "logs", "daemon.log")
+
+	// When: invoke background bowl mount from inside scratchTmpfs with relative paths outside it
+	ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, getBowlBin(),
+		"mount",
+		"--endpoint", endpoint,
+		"--admin-addr", "off",
+		"--stage-dir", relStageDir,
+		"--log-file", relLogFile,
+		disk.GetDiskId(),
+		relMP,
+	)
+	cmd.Dir = scratchTmpfs
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "bowl mount from tmpfs scratch directory failed: %s", string(out))
+	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mountpoint).Run() })
+
+	// Then: daemon detaches cwd to / so tmpfs unmounts cleanly while Bowl mount remains active
+	require.True(t, isMounted(mountpoint), "bowl mount must appear in mountinfo")
+	metaBytes, err := os.ReadFile(mountMetaPath(t, mountpoint))
+	require.NoError(t, err, "mount metadata must exist for %s", mountpoint)
+	var meta struct {
+		PID int `json:"pid"`
+	}
+	require.NoError(t, json.Unmarshal(metaBytes, &meta))
+	require.Positive(t, meta.PID)
+
+	daemonCwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", meta.PID))
+	require.NoError(t, err)
+	require.Equal(t, "/", daemonCwd, "background daemon working directory must be /")
+
+	require.NoError(t, unix.Unmount(scratchTmpfs, 0), "unmounting caller tmpfs must succeed without EBUSY")
+	tmpfsUnmounted = true
+
+	require.True(t, isMounted(mountpoint), "bowl mount must stay active after tmpfs unmount")
+	probeFile := filepath.Join(mountpoint, "after-tmpfs-umount.txt")
+	require.NoError(t, os.WriteFile(probeFile, []byte("cwd-detached-ok"), 0o644))
+	gotData, err := os.ReadFile(probeFile)
+	require.NoError(t, err)
+	require.Equal(t, "cwd-detached-ok", string(gotData))
+
+	logData, err := os.ReadFile(logFile)
+	require.NoError(t, err, "relative --log-file must be created at caller-relative path %s", logFile)
+	require.Contains(t, string(logData), `"msg":"mount_ready"`)
+
+	stageEntries, err := os.ReadDir(stageDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, stageEntries, "relative --stage-dir must resolve under %s", stageDir)
+
+	runBowlSuccess(t, "umount", mountpoint)
+	waitForUnmount(t, mountpoint)
+	waitForProcessExit(t, meta.PID)
+
+	t.Run("ForegroundPreservesCallerWorkingDirectory", func(t *testing.T) {
+		fgDisk := createTestDisk(t, client)
+		fgWorkDir := t.TempDir()
+		fgMP := t.TempDir()
+		fgCtx, fgCancel := context.WithTimeout(context.Background(), mountProcessTimeout)
+		defer fgCancel()
+
+		fgCmd := exec.CommandContext(fgCtx, getBowlBin(), "mount", "-f", "--endpoint", endpoint, "--admin-addr", "off", fgDisk.GetDiskId(), fgMP)
+		fgCmd.Dir = fgWorkDir
+		var fgStderr bytes.Buffer
+		fgCmd.Stderr = &fgStderr
+		require.NoError(t, fgCmd.Start())
+		t.Cleanup(func() {
+			if fgCmd.Process != nil && fgCmd.ProcessState == nil {
+				_ = fgCmd.Process.Signal(syscall.SIGTERM)
+			}
+			_ = exec.Command(getBowlBin(), "umount", "-f", fgMP).Run()
+		})
+
+		waitForMount(t, fgMP, "foreground mount did not become ready: %s", fgStderr.String())
+		resolvedWorkDir, evalErr := filepath.EvalSymlinks(fgWorkDir)
+		require.NoError(t, evalErr)
+		fgCwd, readlinkErr := os.Readlink(fmt.Sprintf("/proc/%d/cwd", fgCmd.Process.Pid))
+		require.NoError(t, readlinkErr)
+		require.Equal(t, resolvedWorkDir, fgCwd)
+
+		stopBowlMountGracefully(t, fgCmd, fgMP)
+	})
+}

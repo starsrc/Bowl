@@ -99,6 +99,27 @@ func withMountRenewIntervalStub(t *testing.T, interval time.Duration) {
 	t.Cleanup(func() { mountRenewIntervalFn = prev })
 }
 
+func withChdirStub(t *testing.T, fn func(string) error) {
+	t.Helper()
+	prev := chdirFn
+	chdirFn = fn
+	t.Cleanup(func() { chdirFn = prev })
+}
+
+func withReadinessPipeStub(t *testing.T, w *os.File) {
+	t.Helper()
+	prev := readinessPipeFile
+	readinessPipeFile = func() *os.File { return w }
+	t.Cleanup(func() { readinessPipeFile = prev })
+}
+
+func withRedirectDaemonStdioStub(t *testing.T, fn func(*os.File)) {
+	t.Helper()
+	prev := redirectDaemonStdio
+	redirectDaemonStdio = fn
+	t.Cleanup(func() { redirectDaemonStdio = prev })
+}
+
 func stubMountServeFUSE(t *testing.T, wantMP string) *capturedMountServe {
 	t.Helper()
 	res := &capturedMountServe{}
@@ -346,6 +367,253 @@ func TestMount_Validation_GivenStageDirSymlinkLoop_Exits2(t *testing.T) {
 	require.Equal(t, 2, code, "scene=stage_dir_symlink_loop want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "Error:")
+}
+
+func TestMount_Validation_GivenLogFileWithForegroundOrEmpty_Exits2(t *testing.T) {
+	validMP := t.TempDir()
+	validLog := filepath.Join(t.TempDir(), "daemon.log")
+
+	cases := []struct {
+		name       string
+		args       []string
+		wantSubstr string
+	}{
+		{
+			name:       "ShortForegroundWithLogFile",
+			args:       []string{"mount", testDiskID1, validMP, "-f", "--log-file", validLog},
+			wantSubstr: "--log-file cannot be set with -f/--foreground",
+		},
+		{
+			name:       "LongForegroundWithLogFile",
+			args:       []string{"mount", testDiskID1, validMP, "--foreground", "--log-file", validLog},
+			wantSubstr: "--log-file cannot be set with -f/--foreground",
+		},
+		{
+			name:       "ExplicitTrueForegroundWithLogFile",
+			args:       []string{"mount", testDiskID1, validMP, "--foreground=true", "--log-file", validLog},
+			wantSubstr: "--log-file cannot be set with -f/--foreground",
+		},
+		{
+			name:       "EmptyLogFile",
+			args:       []string{"mount", testDiskID1, validMP, "--log-file", ""},
+			wantSubstr: "--log-file cannot be empty",
+		},
+		{
+			name:       "WhitespaceLogFile",
+			args:       []string{"mount", testDiskID1, validMP, "--log-file=   "},
+			wantSubstr: "--log-file cannot be empty",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given: spawnDaemon fails the test if validation lets invalid flags through
+			spawnCalled := false
+			withSpawnDaemonStub(t, func([]string, io.Writer) int {
+				spawnCalled = true
+				return 0
+			})
+
+			// When
+			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, tc.args...)
+
+			// Then
+			require.False(t, spawnCalled, "scene=%s want=no_daemon_spawn", tc.name)
+			require.Equal(t, 2, code, "scene=%s args=%v want=2 got=%d stderr=%s", tc.name, tc.args, code, errOut)
+			require.Empty(t, out)
+			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
+		})
+	}
+}
+
+func TestMount_Validation_GivenLogFilePathViolations_Exits2(t *testing.T) {
+	mp := t.TempDir()
+	existingDir := t.TempDir()
+	regularFile := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(regularFile, []byte("x"), 0o600))
+
+	regularInsideMP := filepath.Join(mp, "inside.log")
+	require.NoError(t, os.WriteFile(regularInsideMP, []byte("x"), 0o600))
+
+	symParent := t.TempDir()
+	symToDir := filepath.Join(symParent, "dir-link")
+	require.NoError(t, os.Symlink(existingDir, symToDir))
+
+	symIntoMP := filepath.Join(symParent, "log-link")
+	require.NoError(t, os.Symlink(filepath.Join(mp, "nested.log"), symIntoMP))
+
+	symMP := filepath.Join(symParent, "mp-link")
+	require.NoError(t, os.Symlink(mp, symMP))
+
+	loopDir := t.TempDir()
+	loopA := filepath.Join(loopDir, "loop-a")
+	loopB := filepath.Join(loopDir, "loop-b")
+	require.NoError(t, os.Symlink(loopB, loopA))
+	require.NoError(t, os.Symlink(loopA, loopB))
+
+	cases := []struct {
+		name       string
+		mountpoint string
+		extraArgs  []string
+		logFile    string
+		wantSubstr string
+	}{
+		{
+			name:       "ExistingDirectory",
+			mountpoint: mp,
+			logFile:    existingDir,
+			wantSubstr: "already exists and is a directory",
+		},
+		{
+			name:       "SymlinkToDirectory",
+			mountpoint: mp,
+			logFile:    symToDir,
+			wantSubstr: "already exists and is a directory",
+		},
+		{
+			name:       "NestedInsideRegularFile",
+			mountpoint: mp,
+			logFile:    filepath.Join(regularFile, "sub.log"),
+			wantSubstr: "has invalid path",
+		},
+		{
+			name:       "SymlinkLoop",
+			mountpoint: mp,
+			logFile:    loopA,
+			wantSubstr: "has invalid path",
+		},
+		{
+			name:       "SubpathOfMountpoint",
+			mountpoint: mp,
+			logFile:    filepath.Join(mp, "daemon.log"),
+			wantSubstr: "cannot equal or be inside mountpoint",
+		},
+		{
+			name:       "ExistingFileInsideMountpoint",
+			mountpoint: mp,
+			logFile:    regularInsideMP,
+			wantSubstr: "cannot equal or be inside mountpoint",
+		},
+		{
+			name:       "SymlinkIntoMountpoint",
+			mountpoint: mp,
+			logFile:    symIntoMP,
+			wantSubstr: "cannot equal or be inside mountpoint",
+		},
+		{
+			name:       "SymlinkMountpointWithRealSubpath",
+			mountpoint: symMP,
+			logFile:    filepath.Join(mp, "via-real.log"),
+			wantSubstr: "cannot equal or be inside mountpoint",
+		},
+		{
+			name:       "SyncModeInsideMountpoint",
+			mountpoint: mp,
+			extraArgs:  []string{"--mode", "sync"},
+			logFile:    filepath.Join(mp, "sync.log"),
+			wantSubstr: "cannot equal or be inside mountpoint",
+		},
+		{
+			name:       "ROModeInsideMountpoint",
+			mountpoint: mp,
+			extraArgs:  []string{"--mode", "ro"},
+			logFile:    filepath.Join(mp, "ro.log"),
+			wantSubstr: "cannot equal or be inside mountpoint",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given: spawnDaemon must not run when --log-file validation fails
+			spawnCalled := false
+			withSpawnDaemonStub(t, func([]string, io.Writer) int {
+				spawnCalled = true
+				return 0
+			})
+			args := []string{"mount", testDiskID1, tc.mountpoint}
+			args = append(args, tc.extraArgs...)
+			args = append(args, "--log-file", tc.logFile)
+
+			// When
+			code, out, errOut := runCLIWithDeadline(t, 2*time.Second, args...)
+
+			// Then
+			require.False(t, spawnCalled, "scene=%s want=no_daemon_spawn", tc.name)
+			require.Equal(t, 2, code, "scene=%s want=2 got=%d stderr=%s", tc.name, code, errOut)
+			require.Empty(t, out)
+			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
+		})
+	}
+}
+
+func TestMount_Validation_GivenRelativeLogFileInsideMountpoint_Exits2(t *testing.T) {
+	// Given: caller working directory is a subdirectory inside the mountpoint
+	mp := t.TempDir()
+	subDir := filepath.Join(mp, "nested")
+	require.NoError(t, os.MkdirAll(subDir, 0o755))
+	t.Chdir(subDir)
+	spawnCalled := false
+	withSpawnDaemonStub(t, func([]string, io.Writer) int {
+		spawnCalled = true
+		return 0
+	})
+
+	// When
+	code, out, errOut := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--log-file", "bowl.log")
+
+	// Then
+	require.False(t, spawnCalled)
+	require.Equal(t, 2, code, "scene=relative_log_in_mountpoint want=2 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "cannot equal or be inside mountpoint")
+}
+
+func TestMount_BackgroundDaemon_GivenValidLogFile_PassesRawArgsVerbatimAndDefersCreation(t *testing.T) {
+	mp := t.TempDir()
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	withMissingMountInfo(t)
+
+	existingLog := filepath.Join(t.TempDir(), "existing.log")
+	require.NoError(t, os.WriteFile(existingLog, []byte("prior\n"), 0o600))
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantArgs []string
+	}{
+		{
+			name:     "RelativeNonExistentLogFile",
+			args:     []string{"mount", testDiskID1, mp, "--log-file", "logs/daemon.log"},
+			wantArgs: []string{testDiskID1, mp, "--log-file", "logs/daemon.log"},
+		},
+		{
+			name:     "ForegroundFalseWithRelativeLogFile",
+			args:     []string{"mount", testDiskID1, mp, "--foreground=false", "--log-file", "logs/fgfalse.log"},
+			wantArgs: []string{testDiskID1, mp, "--foreground=false", "--log-file", "logs/fgfalse.log"},
+		},
+		{
+			name:     "ExistingRegularLogFile",
+			args:     []string{"mount", testDiskID1, mp, "--log-file", existingLog},
+			wantArgs: []string{testDiskID1, mp, "--log-file", existingLog},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var spawnedArgs []string
+			withSpawnDaemonStub(t, func(args []string, _ io.Writer) int {
+				spawnedArgs = append([]string(nil), args...)
+				return 0
+			})
+
+			code, _, errOut := runCLI(tc.args...)
+			require.Equal(t, 0, code, "scene=%s want=0 got=%d stderr=%s", tc.name, code, errOut)
+			require.Empty(t, errOut)
+			require.Equal(t, tc.wantArgs, spawnedArgs)
+			require.NoDirExists(t, filepath.Join(workDir, "logs"), "scene=%s want=parent_never_creates_log_dir", tc.name)
+		})
+	}
 }
 
 func TestMount_AlreadyMounted_GivenActiveMountInfo_ReturnsExit1(t *testing.T) {
@@ -1066,4 +1334,230 @@ func TestDefaultMountRenewInterval_GivenTTLValues_ClampsMinimumOneSecond(t *test
 			require.Equal(t, tc.want, defaultMountRenewInterval(tc.ttl), "scene=%s ttl=%d", tc.name, tc.ttl)
 		})
 	}
+}
+
+func TestValidatePathNotInMountpoint_GivenEqualAndSymlinkLoop_ReturnsFlagErrors(t *testing.T) {
+	mp := t.TempDir()
+	loopDir := t.TempDir()
+	loopA := filepath.Join(loopDir, "loop-a")
+	loopB := filepath.Join(loopDir, "loop-b")
+	require.NoError(t, os.Symlink(loopB, loopA))
+	require.NoError(t, os.Symlink(loopA, loopB))
+
+	equalErr := validatePathNotInMountpoint("--log-file", mp, mp)
+	require.ErrorContains(t, equalErr, "--log-file")
+	require.ErrorContains(t, equalErr, "cannot equal or be inside mountpoint")
+
+	loopErr := validatePathNotInMountpoint("--log-file", loopA, mp)
+	require.ErrorContains(t, loopErr, "failed to resolve --log-file")
+}
+
+func TestRunDaemonWorker_GivenValidPaths_DetachesCwdToRootAndSignalsOK(t *testing.T) {
+	// Given
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withStageDirTmpfsStub(t, false)
+
+	mp := t.TempDir()
+	stageDir := filepath.Join(t.TempDir(), "daemon-stage")
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "daemon-worker-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer r.Close()
+	withReadinessPipeStub(t, w)
+
+	var redirectedFile *os.File
+	withRedirectDaemonStdioStub(t, func(f *os.File) {
+		redirectedFile = f
+	})
+
+	var events []string
+	withChdirStub(t, func(dir string) error {
+		_, statErr := os.Stat(logPath)
+		require.NoError(t, statErr, "log file must be opened before chdir")
+		events = append(events, "chdir:"+dir)
+		return nil
+	})
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+		require.Equal(t, mp, gotMP)
+		events = append(events, "serve")
+		ready()
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		logFile:   logPath,
+		adminAddr: "off",
+		logLevel:  "info",
+		logFormat: "json",
+		mode:      fusefs.MountModeStaged,
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  stageDir,
+	}
+
+	// When
+	code := runDaemonWorker(context.Background(), opts, baseCfg, mp)
+
+	// Then
+	require.Equal(t, 0, code)
+	require.Equal(t, []string{"chdir:/", "serve"}, events)
+	require.NotNil(t, redirectedFile)
+	pipeBytes, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+	require.Equal(t, "OK\n", string(pipeBytes))
+}
+
+func TestRunDaemonWorker_GivenChdirError_ReportsERRAndExits1(t *testing.T) {
+	// Given
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	mp := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "daemon-err.log")
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "daemon-err-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer r.Close()
+	withReadinessPipeStub(t, w)
+	withRedirectDaemonStdioStub(t, func(*os.File) {})
+
+	serveCalled := false
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
+		serveCalled = true
+		return nil
+	})
+	withChdirStub(t, func(dir string) error {
+		require.Equal(t, "/", dir)
+		return errors.New("chdir denied")
+	})
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		logFile:   logPath,
+		adminAddr: "off",
+		logLevel:  "info",
+		logFormat: "json",
+		mode:      fusefs.MountModeRO,
+	}
+	baseCfg := &fusefs.Config{
+		DiskID: testDiskID1,
+		Mode:   fusefs.MountModeRO,
+	}
+
+	// When
+	code := runDaemonWorker(context.Background(), opts, baseCfg, mp)
+
+	// Then
+	require.Equal(t, 1, code)
+	require.False(t, serveCalled, "runMount must not execute when chdirFn fails")
+	pipeBytes, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+	require.Equal(t, "ERR:change daemon working directory to /: chdir denied\n", string(pipeBytes))
+}
+
+func TestMount_DaemonWorker_GivenRelativePaths_ResolvesBeforeChdirToRoot(t *testing.T) {
+	// Given
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withStageDirTmpfsStub(t, false)
+
+	t.Chdir(t.TempDir())
+	callerDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(callerDir, "rel-mp"), 0o755))
+	absMP := filepath.Join(callerDir, "rel-mp")
+	absStageDir := filepath.Join(callerDir, "rel-stage")
+	absLogFile := filepath.Join(callerDir, "rel-logs", "worker.log")
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "worker-rel-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer r.Close()
+	withReadinessPipeStub(t, w)
+	withRedirectDaemonStdioStub(t, func(*os.File) {})
+
+	var chdirArgs []string
+	withChdirStub(t, func(dir string) error {
+		_, statErr := os.Stat(absLogFile)
+		require.NoError(t, statErr, "relative --log-file must open against caller cwd before chdir")
+		chdirArgs = append(chdirArgs, dir)
+		return nil
+	})
+	captured := stubMountServeFUSE(t, absMP)
+	t.Setenv("BOWL_DAEMON_WORKER", "1")
+
+	// When
+	code, out, errOut := runCLI(
+		"mount", testDiskID1, "rel-mp",
+		"--stage-dir", "rel-stage",
+		"--log-file", filepath.Join("rel-logs", "worker.log"),
+		"--admin-addr", "off",
+	)
+
+	// Then
+	require.Equal(t, 0, code, "scene=daemon_worker_relative_paths want=0 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, []string{"/"}, chdirArgs)
+	require.Equal(t, absStageDir, captured.cfg.StageDir)
+
+	var handshakeErr strings.Builder
+	require.Equal(t, 0, readDaemonHandshake(r, &handshakeErr), "stderr=%s", handshakeErr.String())
+	logData, readErr := os.ReadFile(absLogFile)
+	require.NoError(t, readErr)
+	require.Contains(t, string(logData), `"msg":"mount_ready"`)
+}
+
+func TestMount_Foreground_GivenRelativePaths_PreservesCallerWorkingDirectory(t *testing.T) {
+	// Given
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withStageDirTmpfsStub(t, false)
+
+	t.Chdir(t.TempDir())
+	cwdBefore, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(cwdBefore, "fg-mp"), 0o755))
+
+	chdirCalled := false
+	withChdirStub(t, func(string) error {
+		chdirCalled = true
+		return nil
+	})
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "fg-cwd-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+	captured := stubMountServeFUSE(t, filepath.Join(cwdBefore, "fg-mp"))
+
+	// When
+	code, _, errOut := runCLI("mount", testDiskID1, "fg-mp", "-f", "--stage-dir", "fg-stage", "--admin-addr", "off")
+
+	// Then
+	require.Equal(t, 0, code, "scene=foreground_preserves_cwd want=0 got=%d stderr=%s", code, errOut)
+	require.False(t, chdirCalled, "foreground mode must not call chdirFn")
+	cwdAfter, err := os.Getwd()
+	require.NoError(t, err)
+	require.Equal(t, cwdBefore, cwdAfter)
+	require.Equal(t, filepath.Join(cwdBefore, "fg-stage"), captured.cfg.StageDir)
 }

@@ -7,7 +7,6 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
@@ -45,12 +44,12 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
-func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, size uint64, atime, mtime *timestamppb.Timestamp, extents []stageExtent) {
-	m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, size, atime, mtime, extents)
+func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent) {
+	m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, meta, extents)
 }
 
 // Tmpfile creates an anonymous temporary file via local staging in staged mode or StorageService.CreateTmpfile in sync mode.
-func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
+func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpTmpfile)
 	opCtx, endSpan := fs.startFuseOp(OpTmpfile)
 	defer func() {
@@ -77,7 +76,25 @@ func (fs *RawFS) Tmpfile(_ <-chan struct{}, input *fuse.CreateIn, out *fuse.Crea
 	if !fs.cfg.IsStaged() {
 		return fs.tmpfileSync(opCtx, parentIno, input, out)
 	}
-	ino, inode, status := fs.tmpMgr.Create(input.NodeId, input.Uid, input.Gid, input.Mode, input.Flags)
+	if _, removed := fs.handles.RemovedDir(input.NodeId); removed {
+		return fuse.ENOENT
+	}
+	parent, st := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
+	if st != fuse.OK {
+		return st
+	}
+	parentAttr := parent.inode.GetAttr()
+	if parentAttr == nil {
+		return fuse.EIO
+	}
+	if parentAttr.GetMode()&syscall.S_IFMT != syscall.S_IFDIR {
+		return fuse.Status(syscall.ENOTDIR)
+	}
+	gid := input.Gid
+	if parentAttr.GetMode()&syscall.S_ISGID != 0 {
+		gid = parentAttr.GetGid()
+	}
+	ino, inode, status := fs.tmpMgr.Create(input.NodeId, input.Uid, gid, input.Mode, input.Flags)
 	if status != fuse.OK {
 		return status
 	}
@@ -181,7 +198,11 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, inpu
 		return status, true
 	}
 	fs.markDirty(res.ServerIno)
-	fs.caps.markAbsent(input.Oldnodeid)
+	if res.HasSecurityCap {
+		fs.caps.markPresent(input.Oldnodeid)
+	} else {
+		fs.caps.markAbsent(input.Oldnodeid)
+	}
 	fs.recordInodeSpecial(input.Oldnodeid, res.Inode)
 	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, res.Inode, 0, res.AttrTimeout)
 	fs.cache.putEntryAt(epoch, input.NodeId, filename, input.Oldnodeid)

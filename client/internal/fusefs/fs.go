@@ -293,16 +293,21 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 				fs.markMetaDirty()
 				return resp.Msg.GetSize(), resp.Msg.GetInode(), nil
 			},
-			func(ctx context.Context, ino, size uint64, atime, mtime *timestamppb.Timestamp) (*storagev1.Inode, error) {
+			func(ctx context.Context, ino uint64, meta StagePromotedMeta) (*storagev1.Inode, error) {
 				if fs.client == nil {
 					return nil, syscall.EIO
 				}
+				size := meta.Size
+				mode := meta.Mode
+				gid := meta.Gid
 				reqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
 				resp, err := fs.client.SetAttr(reqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
 					Ino:    ino,
 					Size:   &size,
-					Atime:  atime,
-					Mtime:  mtime,
+					Atime:  meta.Atime,
+					Mtime:  meta.Mtime,
+					Mode:   &mode,
+					Gid:    &gid,
 					DiskId: fs.cfg.DiskID,
 					Epoch:  fs.cfg.Epoch,
 				}))
@@ -310,20 +315,61 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					return nil, err
 				}
 				fs.markMetaDirty()
-				return resp.Msg.GetInode(), nil
+				finalInode := resp.Msg.GetInode()
+
+				for _, xa := range meta.Xattrs {
+					xReqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
+					if _, xErr := fs.client.SetXattr(xReqCtx, connect.NewRequest(&storagev1.SetXattrRequest{
+						Ino:    ino,
+						Name:   []byte(xa.Name),
+						Value:  xa.Value,
+						Flags:  0,
+						DiskId: fs.cfg.DiskID,
+						Epoch:  fs.cfg.Epoch,
+					})); xErr != nil {
+						return nil, xErr
+					}
+					fs.markMetaDirty()
+				}
+
+				if meta.Flags != 0 {
+					flags := meta.Flags
+					fReqCtx := rpc.WithRequestID(ctx, fs.NextRequestID())
+					fResp, fErr := fs.client.SetAttr(fReqCtx, connect.NewRequest(&storagev1.SetAttrRequest{
+						Ino:    ino,
+						Flags:  &flags,
+						DiskId: fs.cfg.DiskID,
+						Epoch:  fs.cfg.Epoch,
+					}))
+					if fErr != nil {
+						return nil, fErr
+					}
+					fs.markMetaDirty()
+					if fResp.Msg.GetInode() != nil {
+						finalInode = fResp.Msg.GetInode()
+					}
+				}
+				return finalInode, nil
 			},
 			StageHooks{
 				OnStage: onStage,
-				OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr bool) {
+				OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool) {
 					fs.markMetaDirty()
 					fs.markDirty(ino)
+					if preserveMeta {
+						return
+					}
 					if inode != nil {
 						fs.recordInodeSpecial(nodeID, inode)
 					}
 					if refreshAttr && inode != nil {
 						fs.cache.refreshInodeFromWriteAt(cacheEpoch, nodeID, inode, minSize, DefaultWriteAttrTimeoutSeconds)
 					}
-					fs.caps.markAbsent(nodeID)
+					if capPresent {
+						fs.caps.markPresent(nodeID)
+					} else {
+						fs.caps.markAbsent(nodeID)
+					}
 				},
 				OnError: func(nodeID uint64) {
 					fs.cache.invalidateInode(nodeID)

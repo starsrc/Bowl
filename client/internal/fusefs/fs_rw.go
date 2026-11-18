@@ -160,7 +160,11 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 	}
 
 	appendMode := handle.Flags&syscall.O_APPEND != 0
-	if n, local, st := fs.tmpMgr.Write(input.NodeId, input.Offset, data, appendMode); local {
+	if n, updatedInode, local, st := fs.tmpMgr.Write(input.NodeId, input.Offset, data, appendMode); local {
+		if st == fuse.OK && len(data) > 0 {
+			fs.caps.markAbsent(input.NodeId)
+			fs.recordInodeSpecial(input.NodeId, updatedInode)
+		}
 		return n, st
 	}
 

@@ -160,16 +160,22 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 		set := &fuse.SetAttrIn{}
 		set.NodeId = input.NodeId
 		set.Valid = fuse.FATTR_SIZE
-		if _, local, truncStatus := fs.tmpMgr.SetAttr(input.NodeId, set, nil, &fuse.Attr{}); local {
+		if updatedInode, local, truncStatus := fs.tmpMgr.SetAttr(input.NodeId, set, nil, &fuse.Attr{}); local {
 			if truncStatus != fuse.OK {
 				return truncStatus
 			}
+			fs.recordInodeSpecial(input.NodeId, updatedInode)
+			fs.caps.markAbsent(input.NodeId)
 		} else {
 			ino, st := fs.ToServerIno(input.NodeId)
 			if st != fuse.OK {
 				return st
 			}
-			fs.stage.DiscardInode(ino)
+			if cached.inode.GetAttr().GetFlags()&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
+				fs.stage.BarrierInode(opCtx, ino)
+			} else {
+				fs.stage.DiscardInode(ino)
+			}
 			ctx, done := fs.RPCContextFrom(opCtx, cancel)
 			zero := uint64(0)
 			resp, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{

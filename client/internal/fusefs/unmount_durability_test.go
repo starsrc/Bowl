@@ -788,25 +788,29 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 	})
 
 	t.Run("AllUnmountFileFsyncsFailDoesNotHangOrCallFsyncDir", func(t *testing.T) {
-		// Given: Mkdir + dirty file whose Fsync RPC fails.
+		// Given: Mkdir + 3 dirty files whose Fsync RPCs fail.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		srv.fsyncHook = func(context.Context, *storagev1.FsyncRequest) error {
 			return errnoError(connect.CodeInternal, "EIO")
 		}
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "d5", 0o755)
-		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "f5.bin", syscall.O_RDWR, 0o644)
-		mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("payload"))
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+		createDirtySyncFiles(t, fs, 3)
 
 		// When
 		fs.OnUnmount()
 
-		// Then
-		require.Equal(t, int64(1), srv.fsyncCalls.Load())
+		// Then: first unmount records 3 Fsync errors and 0 FsyncDir calls; repeat OnUnmount is a no-op.
+		require.Equal(t, int64(3), srv.fsyncCalls.Load())
 		require.Zero(t, srv.fsyncDirCalls.Load())
-		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
-		require.Equal(t, uint64(1), fs.Snapshot().Queues.DirtyFlushErrors)
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
+		require.Equal(t, uint64(3), fs.Snapshot().Queues.DirtyFlushErrors)
+
+		fs.OnUnmount()
+		require.Equal(t, int64(3), srv.fsyncCalls.Load())
+		require.Zero(t, srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
+		require.Equal(t, uint64(3), fs.Snapshot().Queues.DirtyFlushErrors)
 	})
 }
 
@@ -896,7 +900,7 @@ func TestRawFS_OnUnmount_FsyncDirErrorAndUnimplementedHandling(t *testing.T) {
 		// When
 		fs.OnUnmount()
 
-		// Then
+		// Then: first unmount logs once and records 1 error; repeat OnUnmount is a no-op with zero extra RPCs.
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 		snap := fs.Snapshot()
@@ -904,8 +908,11 @@ func TestRawFS_OnUnmount_FsyncDirErrorAndUnimplementedHandling(t *testing.T) {
 		require.Equal(t, uint64(1), snap.Queues.DirtyFlushErrors)
 		require.Equal(t, []uint64{55}, collectUnmountFsyncLogInodes(t, logBuf.String()))
 
-		// Clear hook before cleanup repeat OnUnmount.
-		srv.fsyncDirHook = nil
+		fs.OnUnmount()
+		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
+		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
+		require.Equal(t, uint64(1), fs.Snapshot().Queues.DirtyFlushErrors)
+		require.Equal(t, []uint64{55}, collectUnmountFsyncLogInodes(t, logBuf.String()))
 	})
 
 	t.Run("FsyncDirUnimplementedCountsOKWithoutWarning", func(t *testing.T) {

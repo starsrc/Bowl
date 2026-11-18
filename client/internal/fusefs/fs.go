@@ -752,6 +752,7 @@ func (fs *RawFS) OnUnmount() {
 
 	fs.stage.Clear(opCtx)
 	fs.stopAndDrainReleaseQueue()
+	unmountSeq := fs.metaDirtySeq.Load()
 	dirtyInodes := fs.takeDirtyInodes()
 
 	phase2Remaining := uint64(len(dirtyInodes))
@@ -776,6 +777,9 @@ func (fs *RawFS) OnUnmount() {
 		fs.syncDirtyInodesOnUnmount(opCtx, dirtyInodes, repeatNoop)
 	} else if fs.hasUnsyncedMeta() {
 		fs.syncRootDirOnUnmount(opCtx, repeatNoop)
+	}
+	if !repeatNoop {
+		fs.advanceMetaSyncedSeq(unmountSeq)
 	}
 	fs.handles.clear()
 	fs.cache.clear()

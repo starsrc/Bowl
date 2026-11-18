@@ -55,6 +55,7 @@ func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedT
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 
 	attrTTL := resp.Msg.GetAttrTimeoutSeconds()
 	fs.cache.invalidateDirListingTouchParentAt(epoch, header.NodeId, resp.Msg.GetInode(), 0, attrTTL)
@@ -173,6 +174,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	if err != nil {
 		return fs.ToStatus(err, nil)
 	}
+	fs.markMetaDirty()
 	if fs.clearOrphan(input.Oldnodeid) {
 		fs.metrics.incTmpPromote()
 	}

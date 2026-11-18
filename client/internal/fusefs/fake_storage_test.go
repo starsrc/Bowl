@@ -112,6 +112,7 @@ type fakeStorage struct {
 	readHook          func(context.Context, *storagev1.ReadRequest) ([]byte, error)
 	writeHook         func(context.Context, *storagev1.WriteRequest) (uint32, error)
 	fsyncHook         func(context.Context, *storagev1.FsyncRequest) error
+	fsyncDirHook      func(context.Context, *storagev1.FsyncDirRequest) error
 	unlinkHook        func(context.Context, *storagev1.UnlinkRequest) error
 	linkHook          func(context.Context, *storagev1.LinkRequest) error
 	readDirPlusHook   func(context.Context, *storagev1.ReadDirPlusRequest) ([]*storagev1.DirEntryPlus, error)
@@ -307,6 +308,36 @@ func (s *fakeStorage) seedDir(parentIno uint64, name string, mode uint32) uint64
 	if p := s.nodes[parentIno]; p != nil {
 		p.inode.Attr.Nlink++
 	}
+	return ino
+}
+
+func (s *fakeStorage) seedSymlink(parentIno uint64, name, target string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ino := s.allocInoLocked()
+	now := timestamppb.Now()
+	node := &fakeNode{
+		inode: &storagev1.Inode{
+			Ino:        ino,
+			Generation: 1,
+			Attr: &storagev1.InodeAttribute{
+				Mode:    syscall.S_IFLNK | 0o777,
+				Nlink:   1,
+				Size:    uint64(len(target)),
+				Blksize: 4096,
+				Atime:   now,
+				Mtime:   now,
+				Ctime:   now,
+			},
+		},
+		link:   []byte(target),
+		xattrs: make(map[string][]byte),
+	}
+	s.nodes[ino] = node
+	if s.entries[parentIno] == nil {
+		s.entries[parentIno] = make(map[string]uint64)
+	}
+	s.entries[parentIno][name] = ino
 	return ino
 }
 
@@ -1242,6 +1273,11 @@ func (s *fakeStorage) FsyncDir(ctx context.Context, req *connect.Request[storage
 	}
 	if err := s.checkEpoch("FsyncDir", req.Msg.GetEpoch()); err != nil {
 		return nil, err
+	}
+	if s.fsyncDirHook != nil {
+		if err := s.fsyncDirHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

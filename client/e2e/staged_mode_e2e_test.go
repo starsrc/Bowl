@@ -54,14 +54,19 @@ func (c *countingReadCloser) Read(p []byte) (int, error) {
 type controllableStorageProxy struct {
 	Endpoint string
 
-	gateMu      sync.Mutex
-	gateCh      chan struct{}
-	writeDelay  atomic.Int64
-	writeCalls  atomic.Int64
-	writeActive atomic.Int64
-	writeDone   atomic.Int64
-	writeBytes  atomic.Int64
-	readCalls   atomic.Int64
+	gateMu           sync.Mutex
+	gateCh           chan struct{}
+	writeDelay       atomic.Int64
+	fsyncDelay       atomic.Int64
+	writeCalls       atomic.Int64
+	writeActive      atomic.Int64
+	writeDone        atomic.Int64
+	writeBytes       atomic.Int64
+	readCalls        atomic.Int64
+	fsyncCalls       atomic.Int64
+	fsyncActive      atomic.Int64
+	fsyncMaxInflight atomic.Int64
+	fsyncDirCalls    atomic.Int64
 }
 
 func startControllableStorageProxy(t *testing.T, targetEndpoint string) *controllableStorageProxy {
@@ -88,6 +93,27 @@ func startControllableStorageProxy(t *testing.T, targetEndpoint string) *control
 		switch r.URL.Path {
 		case storagev1connect.StorageServiceReadProcedure:
 			p.readCalls.Add(1)
+		case storagev1connect.StorageServiceFsyncProcedure:
+			p.fsyncCalls.Add(1)
+			cur := p.fsyncActive.Add(1)
+			for {
+				prev := p.fsyncMaxInflight.Load()
+				if cur <= prev || p.fsyncMaxInflight.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+			defer p.fsyncActive.Add(-1)
+			if delay := time.Duration(p.fsyncDelay.Load()); delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-r.Context().Done():
+					timer.Stop()
+					return
+				}
+			}
+		case storagev1connect.StorageServiceFsyncDirProcedure:
+			p.fsyncDirCalls.Add(1)
 		case storagev1connect.StorageServiceWriteProcedure:
 			p.writeCalls.Add(1)
 			p.writeActive.Add(1)
@@ -179,11 +205,18 @@ func (p *controllableStorageProxy) SetWriteDelay(d time.Duration) {
 	p.writeDelay.Store(int64(d))
 }
 
-func (p *controllableStorageProxy) WriteInflight() int64  { return p.writeActive.Load() }
-func (p *controllableStorageProxy) WriteCompleted() int64 { return p.writeDone.Load() }
-func (p *controllableStorageProxy) WriteCalls() int64     { return p.writeCalls.Load() }
-func (p *controllableStorageProxy) WriteWireBytes() int64 { return p.writeBytes.Load() }
-func (p *controllableStorageProxy) ReadCalls() int64      { return p.readCalls.Load() }
+func (p *controllableStorageProxy) SetFsyncDelay(d time.Duration) {
+	p.fsyncDelay.Store(int64(d))
+}
+
+func (p *controllableStorageProxy) WriteInflight() int64    { return p.writeActive.Load() }
+func (p *controllableStorageProxy) WriteCompleted() int64   { return p.writeDone.Load() }
+func (p *controllableStorageProxy) WriteCalls() int64       { return p.writeCalls.Load() }
+func (p *controllableStorageProxy) WriteWireBytes() int64   { return p.writeBytes.Load() }
+func (p *controllableStorageProxy) ReadCalls() int64        { return p.readCalls.Load() }
+func (p *controllableStorageProxy) FsyncCalls() int64       { return p.fsyncCalls.Load() }
+func (p *controllableStorageProxy) FsyncMaxInflight() int64 { return p.fsyncMaxInflight.Load() }
+func (p *controllableStorageProxy) FsyncDirCalls() int64    { return p.fsyncDirCalls.Load() }
 
 func readMountAdminAddr(t *testing.T, mountpoint string) string {
 	t.Helper()

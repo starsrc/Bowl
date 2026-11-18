@@ -41,6 +41,7 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 	if err != nil {
 		return nil, 0, 0, m.fs.ToStatus(err, m.cancel)
 	}
+	m.fs.markMetaDirty()
 	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
@@ -112,6 +113,7 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fus
 	if err != nil {
 		return fs.ToStatus(err, nil)
 	}
+	fs.markMetaDirty()
 	inode := resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil || inode.GetIno() == 0 {
 		return fuse.EIO

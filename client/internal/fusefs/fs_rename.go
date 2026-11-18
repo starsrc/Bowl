@@ -148,6 +148,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 
 	// 保留父目录 Inode 缓存并用当前时间刷新属性，避免 rename 后内核 fuse_invalidate_attr
 	// 触发的 GETATTR 每次穿透到服务端。目录跨父目录移动时同步修正父目录 nlink。

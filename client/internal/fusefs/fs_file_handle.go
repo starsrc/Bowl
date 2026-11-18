@@ -83,6 +83,7 @@ func (fs *RawFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name strin
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 	inode := resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil {
 		return fuse.EIO
@@ -183,6 +184,8 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				fs.cache.invalidateInode(input.NodeId)
 				return fs.ToStatus(err, cancel)
 			}
+			fs.markMetaDirty()
+			fs.markDirty(ino)
 			fs.stage.ResetTruncatedInode(ino)
 			fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())
 			fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), resp.Msg.GetAttrTimeoutSeconds())
@@ -292,6 +295,7 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 		fs.cache.invalidateInode(input.NodeId)
 		return fs.stageErrToStatus(err)
 	}
+	seq := fs.metaDirtySeq.Load()
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()
 	_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
@@ -301,6 +305,9 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 		DiskId:   fs.cfg.DiskID,
 		Epoch:    fs.cfg.Epoch,
 	}))
+	if err == nil || connect.CodeOf(err) == connect.CodeUnimplemented {
+		fs.advanceMetaSyncedSeq(seq)
+	}
 	if err == nil {
 		fs.clearDirty(ino)
 		fs.metrics.incDirtyFlushOK()

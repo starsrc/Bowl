@@ -41,6 +41,9 @@ const DefaultWriteAttrTimeoutSeconds = 1.0
 // DefaultOrphanBacklogThreshold 是触发孤儿回收积压告警的默认队列深度阈值。
 const DefaultOrphanBacklogThreshold = 16
 
+// DefaultUnmountFsyncConcurrency limits concurrent Fsync RPCs dispatched by OnUnmount over metaTransport.
+const DefaultUnmountFsyncConcurrency = 64
+
 const orphanWarnMinInterval = time.Second
 
 var (
@@ -147,12 +150,14 @@ type RawFS struct {
 	// inodeLocks 按 Inode 粒度串行化 O_APPEND 定序与 Unlink/Release 孤儿标记。
 	inodeLocks inodeLocks
 	// topologySeq increments after Link, Unlink, or Rename mutates directory links.
-	topologySeq atomic.Uint64
-	tmpMgr      *TmpFileManager
-	cfg         Config
-	metrics     *Metrics
-	tracer      trace.Tracer
-	nextReqID   atomic.Uint64
+	topologySeq   atomic.Uint64
+	metaDirtySeq  atomic.Uint64
+	metaSyncedSeq atomic.Uint64
+	tmpMgr        *TmpFileManager
+	cfg           Config
+	metrics       *Metrics
+	tracer        trace.Tracer
+	nextReqID     atomic.Uint64
 
 	releaseMu       sync.Mutex
 	releaseQueue    []reclaimRetryItem
@@ -285,6 +290,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 				if err != nil {
 					return 0, nil, err
 				}
+				fs.markMetaDirty()
 				return resp.Msg.GetSize(), resp.Msg.GetInode(), nil
 			},
 			func(ctx context.Context, ino, size uint64, atime, mtime *timestamppb.Timestamp) (*storagev1.Inode, error) {
@@ -303,11 +309,13 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 				if err != nil {
 					return nil, err
 				}
+				fs.markMetaDirty()
 				return resp.Msg.GetInode(), nil
 			},
 			StageHooks{
 				OnStage: onStage,
 				OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr bool) {
+					fs.markMetaDirty()
 					fs.markDirty(ino)
 					if inode != nil {
 						fs.recordInodeSpecial(nodeID, inode)
@@ -722,7 +730,12 @@ func (fs *RawFS) OnUnmount() {
 	pendingChunks, stagedInodes := fs.stage.unmountSnapshot()
 	stageTotal := uint64(max(int64(0), pendingChunks))
 	dirtyUnionCount := fs.countDirtyAndStagedInodes(stagedInodes)
-	total := stageTotal + uint64(dirtyUnionCount)
+	needMetaBarrier := dirtyUnionCount == 0 && (fs.hasUnsyncedMeta() || fs.releaseQueueDepth() > 0)
+	phase2Units := uint64(dirtyUnionCount)
+	if needMetaBarrier {
+		phase2Units = 1
+	}
+	total := stageTotal + phase2Units
 
 	fs.unmountMu.Lock()
 	repeatNoop := fs.unmountState.completedOnce && total == 0
@@ -738,13 +751,19 @@ func (fs *RawFS) OnUnmount() {
 	fs.unmountMu.Unlock()
 
 	fs.stage.Clear(opCtx)
+	fs.stopAndDrainReleaseQueue()
 	dirtyInodes := fs.takeDirtyInodes()
+
+	phase2Remaining := uint64(len(dirtyInodes))
+	if phase2Remaining == 0 && fs.hasUnsyncedMeta() && fs.client != nil {
+		phase2Remaining = 1
+	}
 
 	fs.unmountMu.Lock()
 	if !repeatNoop {
 		baseDone := fs.unmountState.completed
-		if fs.unmountState.total >= uint64(len(dirtyInodes)) {
-			if candidate := fs.unmountState.total - uint64(len(dirtyInodes)); candidate > baseDone {
+		if fs.unmountState.total >= phase2Remaining {
+			if candidate := fs.unmountState.total - phase2Remaining; candidate > baseDone {
 				baseDone = candidate
 			}
 		}
@@ -753,27 +772,10 @@ func (fs *RawFS) OnUnmount() {
 	}
 	fs.unmountMu.Unlock()
 
-	for _, ino := range dirtyInodes {
-		if fs.client != nil {
-			ctx, done := fs.RPCContextFrom(opCtx, nil)
-			_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
-				Ino:    ino,
-				DiskId: fs.cfg.DiskID,
-				Epoch:  fs.cfg.Epoch,
-			}))
-			done()
-			if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
-				fs.metrics.incDirtyFlushError()
-				fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
-			} else {
-				fs.metrics.incDirtyFlushOK()
-			}
-		}
-		fs.unmountMu.Lock()
-		if !repeatNoop && fs.unmountState.completed < fs.unmountState.total {
-			fs.unmountState.completed++
-		}
-		fs.unmountMu.Unlock()
+	if len(dirtyInodes) > 0 {
+		fs.syncDirtyInodesOnUnmount(opCtx, dirtyInodes, repeatNoop)
+	} else if fs.hasUnsyncedMeta() {
+		fs.syncRootDirOnUnmount(opCtx, repeatNoop)
 	}
 	fs.handles.clear()
 	fs.cache.clear()
@@ -803,7 +805,112 @@ func (fs *RawFS) OnUnmount() {
 	fs.unmountMu.Unlock()
 	fs.lifecycleMu.Unlock()
 	fs.readAhead.Clear()
-	fs.stopAndDrainReleaseQueue()
+}
+
+func (fs *RawFS) syncDirtyInodesOnUnmount(opCtx context.Context, dirtyInodes []uint64, repeatNoop bool) {
+	switch len(dirtyInodes) {
+	case 0:
+		return
+	case 1:
+		fs.syncDirtyInodeOnUnmount(opCtx, dirtyInodes[0], repeatNoop)
+		return
+	}
+
+	workers := min(DefaultUnmountFsyncConcurrency, len(dirtyInodes))
+	var next atomic.Uint64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for {
+				idx := int(next.Add(1) - 1)
+				if idx >= len(dirtyInodes) {
+					return
+				}
+				fs.syncDirtyInodeOnUnmount(opCtx, dirtyInodes[idx], repeatNoop)
+			}
+		})
+	}
+	wg.Wait()
+}
+
+func (fs *RawFS) syncDirtyInodeOnUnmount(opCtx context.Context, ino uint64, repeatNoop bool) {
+	if fs.client == nil {
+		fs.incrementUnmountCompleted(repeatNoop)
+		return
+	}
+	seq := fs.metaDirtySeq.Load()
+	ctx, done := fs.RPCContextFrom(opCtx, nil)
+	_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
+		Ino:    ino,
+		DiskId: fs.cfg.DiskID,
+		Epoch:  fs.cfg.Epoch,
+	}))
+	done()
+	fs.recordUnmountSyncOutcome(ctx, ino, seq, err, repeatNoop)
+}
+
+func (fs *RawFS) syncRootDirOnUnmount(opCtx context.Context, repeatNoop bool) {
+	if fs.client == nil {
+		return
+	}
+	fs.unmountMu.Lock()
+	if !repeatNoop && fs.unmountState.total <= fs.unmountState.completed {
+		fs.unmountState.total = fs.unmountState.completed + 1
+	}
+	fs.unmountMu.Unlock()
+
+	rootIno := fs.cfg.RootIno
+	if rootIno == 0 {
+		rootIno = fuse.FUSE_ROOT_ID
+	}
+	seq := fs.metaDirtySeq.Load()
+	ctx, done := fs.RPCContextFrom(opCtx, nil)
+	_, err := fs.client.FsyncDir(ctx, connect.NewRequest(&storagev1.FsyncDirRequest{
+		Ino:    rootIno,
+		DiskId: fs.cfg.DiskID,
+		Epoch:  fs.cfg.Epoch,
+	}))
+	done()
+	fs.recordUnmountSyncOutcome(ctx, rootIno, seq, err, repeatNoop)
+}
+
+func (fs *RawFS) recordUnmountSyncOutcome(ctx context.Context, ino, seq uint64, err error, repeatNoop bool) {
+	if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
+		fs.metrics.incDirtyFlushError()
+		fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
+	} else {
+		fs.advanceMetaSyncedSeq(seq)
+		fs.metrics.incDirtyFlushOK()
+	}
+	fs.incrementUnmountCompleted(repeatNoop)
+}
+
+func (fs *RawFS) incrementUnmountCompleted(repeatNoop bool) {
+	fs.unmountMu.Lock()
+	if !repeatNoop && fs.unmountState.completed < fs.unmountState.total {
+		fs.unmountState.completed++
+	}
+	fs.unmountMu.Unlock()
+}
+
+func (fs *RawFS) markMetaDirty() {
+	fs.metaDirtySeq.Add(1)
+}
+
+func (fs *RawFS) advanceMetaSyncedSeq(seq uint64) {
+	for {
+		cur := fs.metaSyncedSeq.Load()
+		if cur >= seq {
+			return
+		}
+		if fs.metaSyncedSeq.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
+}
+
+func (fs *RawFS) hasUnsyncedMeta() bool {
+	return fs.metaDirtySeq.Load() > fs.metaSyncedSeq.Load()
 }
 
 func shouldRetryReclaim(err error) bool {
@@ -976,6 +1083,7 @@ func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, from
 	}
 	_, err := fs.client.ReclaimOrphan(ctx, connect.NewRequest(req))
 	if err == nil {
+		fs.markMetaDirty()
 		fs.metrics.incOrphanReclaimOK()
 		if fromQueue {
 			fs.metrics.incAsyncReleaseOK()

@@ -52,6 +52,7 @@ func (fs *RawFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string,
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 
 	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 1, resp.Msg.GetAttrTimeoutSeconds())
 	inode := resp.Msg.GetInode()
@@ -111,6 +112,7 @@ func (fs *RawFS) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string,
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 
 	fs.cache.invalidateDirListingTouchParentAt(epoch, input.NodeId, resp.Msg.GetInode(), 0, resp.Msg.GetAttrTimeoutSeconds())
 	inode := resp.Msg.GetInode()
@@ -170,6 +172,7 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 
 	// Rmdir 使父目录 nlink 减 1；保留父目录 Inode 缓存避免随后的 GetAttr 穿透。
 	fs.cache.invalidateDirListingTouchParentNowAt(epoch, header.NodeId, -1)
@@ -265,6 +268,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	if err != nil {
 		return fs.ToStatus(err, cancel)
 	}
+	fs.markMetaDirty()
 
 	// Unlink 不改变父目录 nlink；保留父目录 Inode 缓存避免下一次 unlink 前
 	// inode_permission(MAY_EXEC) 触发一次跨机 GetAttr。

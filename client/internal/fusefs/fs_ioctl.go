@@ -186,6 +186,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		if err != nil {
 			return fs.ToStatus(err, cancel)
 		}
+		fs.markMetaDirty()
 		fs.stage.ResetInodeStream(opCtx, ino)
 		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
 			fs.setInodeSpecialFlag(input.NodeId, true)
@@ -235,6 +236,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		if err != nil {
 			return fs.ToStatus(err, cancel)
 		}
+		fs.markMetaDirty()
 		fs.stage.ResetInodeStream(opCtx, ino)
 		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
 			fs.setInodeSpecialFlag(input.NodeId, true)

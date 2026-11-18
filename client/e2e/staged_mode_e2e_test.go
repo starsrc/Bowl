@@ -1106,7 +1106,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		defer func() { _ = closeFD() }()
 		require.NoError(t, unix.Fchmod(fd, 0o6755))
 
-		// Xattr CRUD, ERANGE probing, and sorted list order.
+		// Exercise extended attribute create, replace, ERANGE probing, removal, and sorted listing on an unpromoted descriptor.
 		require.NoError(t, unix.Fsetxattr(fd, "user.z", []byte("vz"), unix.XATTR_CREATE))
 		require.ErrorIs(t, unix.Fsetxattr(fd, "user.z", []byte("dup"), unix.XATTR_CREATE), syscall.EEXIST)
 		require.ErrorIs(t, unix.Fsetxattr(fd, "user.missing", []byte("v"), unix.XATTR_REPLACE), syscall.ENODATA)
@@ -1123,7 +1123,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, unix.Fremovexattr(fd, "user.z"))
 		requireFDXattrAbsent(t, fd, "user.z")
 
-		// Write, Fchown, and Fallocate(PUNCH_HOLE) strip killpriv locally.
+		// Write, Fchown, and Fallocate hole punching strip S_ISUID, S_ISGID, and security.capability locally.
 		writeFullFD(t, fd, []byte("initial-payload"), 0)
 		var st unix.Stat_t
 		require.NoError(t, unix.Fstat(fd, &st))
@@ -1147,7 +1147,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.Zero(t, st.Mode&(unix.S_ISUID|unix.S_ISGID), "punch hole must strip S_ISUID|S_ISGID")
 		requireFDXattrNotListed(t, fd, "security.capability")
 
-		// Local FS_APPEND_FL and FS_IMMUTABLE_FL enforcement.
+		// The mount enforces FS_APPEND_FL and FS_IMMUTABLE_FL locally on the unpromoted descriptor.
 		require.NoError(t, unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(fusefs.FS_APPEND_FL)))
 		gotFlags, err := unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS)
 		require.NoError(t, err)
@@ -1164,7 +1164,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.ErrorIs(t, err, syscall.EPERM)
 		require.ErrorIs(t, unix.Fchmod(fd, 0o600), syscall.EPERM)
 
-		// Close without linkat produces zero server usage and zero Write RPCs.
+		// Closing an unpromoted descriptor without linkat produces zero server usage delta and zero Write RPCs.
 		require.NoError(t, closeFD())
 		require.Eventually(t, func() bool {
 			snap := fetchDebugStats(t, adminAddr)
@@ -1206,7 +1206,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, os.Chown(sgidDst, 1000, 3000))
 		require.NoError(t, os.Chmod(sgidDst, 0o755|os.ModeSetgid))
 
-		// Inherit gid=2000 from sgidSrc and preserve it when promoted into sgidDst (gid=3000).
+		// Inherit group 2000 from sgidSrc and preserve it when linkat promotes the file into sgidDst with group 3000.
 		fd1, err := unix.Open(sgidSrc, unix.O_TMPFILE|unix.O_RDWR, 0o640)
 		require.NoError(t, err)
 		close1 := closeFDGuard(fd1)
@@ -1218,7 +1218,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, linkatEINTR(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd1), unix.AT_FDCWD, filepath.Join(sgidDst, "keep-2000.bin"), unix.AT_SYMLINK_FOLLOW))
 		require.NoError(t, close1())
 
-		// Inherit gid=2000, override via fchown to gid=2500, and preserve across linkat into plainDst.
+		// Override the inherited group with fchown to group 2500 and preserve it across linkat into plainDst.
 		fd2, err := unix.Open(sgidSrc, unix.O_TMPFILE|unix.O_RDWR, 0o640)
 		require.NoError(t, err)
 		close2 := closeFDGuard(fd2)
@@ -1244,7 +1244,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		mp, _, _, stopMount := startMountedDaemon(t, realEndpoint, diskID, "--stage-size", "8MiB")
 		defer stopMount()
 
-		// 1. Immutable promoted O_TMPFILE with data, S_ISUID, user.tag, and security.capability.
+		// Promote an immutable O_TMPFILE carrying payload data, S_ISUID mode bits, user.tag, and security.capability.
 		immPayload := deterministicPayload("e2e-tmp-imm", 65_536)
 		immFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o644)
 		require.NoError(t, err)
@@ -1264,7 +1264,7 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		_, err = os.OpenFile(immPath, os.O_WRONLY|os.O_TRUNC, 0)
 		require.ErrorIs(t, err, syscall.EPERM)
 
-		// 2. Append-only promoted O_TMPFILE with data, S_ISUID, user.app, and security.capability.
+		// Promote an append-only O_TMPFILE carrying payload data, S_ISUID mode bits, user.app, and security.capability.
 		appFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR|unix.O_APPEND, 0o644)
 		require.NoError(t, err)
 		closeApp := closeFDGuard(appFD)

@@ -22,7 +22,7 @@ import (
 
 func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 	t.Run("RemovedOpenDirectoryReturnsENOENTWithZeroRPCs", func(t *testing.T) {
-		// Given: an open directory that is removed via Rmdir while still open.
+		// Given an open directory that Rmdir removes while the descriptor stays open.
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		dir := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "removed-dir", 0o755)
@@ -31,7 +31,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 		requireStatus(t, "Rmdir", fuse.OK, fs.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "removed-dir"))
 		getAttrBefore := srv.getAttrCalls.Load()
 
-		// When: Tmpfile targets the removed directory inode.
+		// When Tmpfile targets the removed directory inode.
 		var out fuse.CreateOut
 		st := fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: dir.NodeId},
@@ -39,14 +39,14 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 			Mode:     0o600,
 		}, &out)
 
-		// Then: returns ENOENT with zero GetAttr RPCs.
+		// Then Tmpfile returns ENOENT with zero GetAttr RPCs.
 		requireStatus(t, "Tmpfile on removed dir", fuse.ENOENT, st)
 		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load(), "RemovedDir must short-circuit without GetAttr RPC")
 		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dir.NodeId}, Fh: dh.Fh})
 	})
 
 	t.Run("NonDirectoryParentReturnsENOTDIR", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE and a regular file on the server.
+		// Given an unpromoted staged O_TMPFILE and a regular file on the server.
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		regIno := srv.seedFile(1, "not-a-dir.txt", 0o644, []byte("x"))
 		fs := newTestRawFS(t, srv)
@@ -58,7 +58,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 			Mode:     0o600,
 		}, &tmpOut))
 
-		// When: Tmpfile targets either the unpromoted file or the server regular file.
+		// When Tmpfile targets either the unpromoted file or the server regular file.
 		var out1, out2 fuse.CreateOut
 		stUnpromoted := fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
@@ -71,7 +71,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 			Mode:     0o600,
 		}, &out2)
 
-		// Then: both reject with ENOTDIR.
+		// Then both calls reject with ENOTDIR.
 		requireStatus(t, "Tmpfile on unpromoted file", fuse.Status(syscall.ENOTDIR), stUnpromoted)
 		requireStatus(t, "Tmpfile on server regular file", fuse.Status(syscall.ENOTDIR), stServerReg)
 
@@ -80,7 +80,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 	})
 
 	t.Run("CachedSGIDParentInheritsGidWithZeroRPCsAndCacheMissFallsBackToOneGetAttr", func(t *testing.T) {
-		// Given: a cached S_ISGID directory (gid=2000) and an uncached S_ISGID directory (gid=3000).
+		// Given a cached S_ISGID directory with group 2000 and an uncached S_ISGID directory with group 3000.
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 
@@ -121,7 +121,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 
 		getAttrBefore := srv.getAttrCalls.Load()
 
-		// When: Tmpfile is created in cached S_ISGID dir (caller gid=1000) and uncached S_ISGID dir.
+		// When Tmpfile runs in a cached or uncached S_ISGID directory with caller group 1000.
 		var cachedOut, uncachedOut fuse.CreateOut
 		requireStatus(t, "Tmpfile cached SGID", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{
@@ -143,7 +143,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 		}, &uncachedOut))
 		getAttrAfterUncached := srv.getAttrCalls.Load()
 
-		// Then: cached hits NamespaceCache with 0 GetAttr RPCs; uncached issues 1 GetAttr RPC; both inherit parent Gid.
+		// Then the cached directory hits NamespaceCache with zero RPCs, the uncached directory issues one GetAttr RPC, and both files inherit the parent group.
 		require.Equal(t, getAttrBefore, getAttrAfterCached, "cached SGID parent must issue zero GetAttr RPCs")
 		require.Equal(t, getAttrBefore+1, getAttrAfterUncached, "cache-miss SGID parent must issue one GetAttr RPC")
 		require.Equal(t, uint32(2000), cachedOut.Gid, "cached SGID parent must inherit gid=2000")
@@ -157,7 +157,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 	})
 
 	t.Run("CacheMissParentRespectsCancelChannel", func(t *testing.T) {
-		// Given: an uncached directory and a GetAttr hook waiting on context cancellation.
+		// Given an uncached directory and a GetAttr hook waiting on context cancellation.
 		srv := newFakeStorage(t, withTTL(0, 0))
 		dirIno := srv.seedDir(1, "cancel-dir", 0o755)
 		var sawCanceled atomic.Bool
@@ -170,7 +170,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 		}
 		fs := newTestRawFS(t, srv)
 
-		// When: Tmpfile triggers GetAttr on cache miss and cancel closes in flight.
+		// When Tmpfile triggers GetAttr on a cache miss and the cancel channel closes in flight.
 		var out fuse.CreateOut
 		st := fs.Tmpfile(cancel, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: dirIno},
@@ -178,7 +178,7 @@ func TestStagedTmpfile_ParentValidationAndSGIDInheritance(t *testing.T) {
 			Mode:     0o600,
 		}, &out)
 
-		// Then: returns EINTR and cancels the in-flight parent GetAttr RPC context.
+		// Then Tmpfile returns EINTR and cancels the in-flight parent GetAttr RPC context.
 		requireStatus(t, "Tmpfile canceled parent GetAttr", fuse.EINTR, st)
 		require.Equal(t, int64(1), srv.getAttrCalls.Load())
 		require.True(t, sawCanceled.Load(), "cancel channel must propagate to parent GetAttr RPC")
@@ -208,7 +208,7 @@ func fillTmpfileXattrQuota(t *testing.T, fs *fusefs.RawFS, nodeID uint64) string
 
 func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t *testing.T) {
 	t.Run("ValidationFlagsBoundsSortingAndCapsCoherenceWithZeroRPCs", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE.
+		// Given an unpromoted staged O_TMPFILE.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		var tmpOut fuse.CreateOut
@@ -219,7 +219,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		}, &tmpOut))
 		nodeID := tmpOut.NodeId
 
-		// Empty ListXAttr and missing GetXAttr/RemoveXAttr.
+		// Verify empty ListXAttr results and ENODATA on missing GetXAttr or RemoveXAttr targets.
 		emptyListSz, emptyListSt := fs.ListXAttr(nil, &fuse.InHeader{NodeId: nodeID}, nil)
 		requireStatus(t, "empty ListXAttr", fuse.OK, emptyListSt)
 		require.Zero(t, emptyListSz)
@@ -227,7 +227,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		requireStatus(t, "missing GetXAttr", fuse.Status(syscall.ENODATA), missGetSt)
 		requireStatus(t, "missing RemoveXAttr", fuse.Status(syscall.ENODATA), fs.RemoveXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "user.missing"))
 
-		// Validation errors on SetXAttr / GetXAttr / RemoveXAttr.
+		// Verify input validation errors on SetXAttr, GetXAttr, and RemoveXAttr.
 		requireStatus(t, "invalid SetXAttr flags", fuse.EINVAL, fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Flags: 0x4,
 		}, "user.a", []byte("1")))
@@ -250,7 +250,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		requireStatus(t, "RemoveXAttr empty name", fuse.EINVAL, fs.RemoveXAttr(nil, &fuse.InHeader{NodeId: nodeID}, ""))
 		requireStatus(t, "RemoveXAttr name > 255", fuse.Status(syscall.ERANGE), fs.RemoveXAttr(nil, &fuse.InHeader{NodeId: nodeID}, strings.Repeat("k", 256)))
 
-		// XATTR_CREATE, XATTR_REPLACE, and flags==3 existence checks.
+		// Verify XATTR_CREATE, XATTR_REPLACE, and combined existence checks.
 		requireStatus(t, "REPLACE on missing", fuse.Status(syscall.ENODATA), fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Flags: xattrReplaceFlag,
 		}, "user.z", []byte("v")))
@@ -270,7 +270,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 			InHeader: fuse.InHeader{NodeId: nodeID}, Flags: xattrReplaceFlag,
 		}, "user.z", []byte("z-new")))
 
-		// Max boundary 255-byte name and 65536-byte value, plus empty value.
+		// Verify the maximum 255-byte name, maximum 65536-byte value, and empty value boundaries.
 		maxName := strings.Repeat("m", 255)
 		maxVal := buildSeededBytes(65536, 7)
 		requireStatus(t, "max 255 name and 65536 value", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
@@ -290,7 +290,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		requireStatus(t, "GetXAttr empty value", fuse.OK, emptySt)
 		require.Zero(t, emptySz)
 
-		// GetXAttr zero-length probe, ERANGE, and exact read.
+		// Verify GetXAttr zero-length sizing, ERANGE short-buffer reporting, and exact reads.
 		probeSz, probeSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "user.z", nil)
 		requireStatus(t, "GetXAttr probe", fuse.OK, probeSt)
 		require.Equal(t, uint32(5), probeSz)
@@ -302,7 +302,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		requireStatus(t, "GetXAttr read", fuse.OK, gotSt)
 		require.Equal(t, "z-new", string(buf[:gotSz]))
 
-		// security.capability coherence + sorted ListXAttr.
+		// Verify security.capability cache coherence and sorted ListXAttr output.
 		_, initialCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", make([]byte, 16))
 		requireStatus(t, "initial capability absent", fuse.Status(syscall.ENODATA), initialCapSt)
 		requireStatus(t, "set security.capability", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
@@ -325,12 +325,12 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 		requireStatus(t, "ListXAttr read", fuse.OK, gotListSt)
 		require.Equal(t, wantList, string(listBuf[:gotListSz]))
 
-		// Removing security.capability marks caps absent cleanly.
+		// Removing security.capability marks capability cache absent cleanly.
 		requireStatus(t, "remove security.capability", fuse.OK, fs.RemoveXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability"))
 		_, afterRmCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", make([]byte, 16))
 		requireStatus(t, "get security.capability after remove", fuse.Status(syscall.ENODATA), afterRmCapSt)
 
-		// Zero server RPCs across the entire unpromoted xattr lifecycle.
+		// Confirm zero server RPCs occurred across the entire unpromoted extended attribute lifecycle.
 		require.Zero(t, srv.setXattrCalls.Load()+srv.getXattrCalls.Load()+srv.listXattrCalls.Load()+srv.removeXattrCalls.Load()+srv.getAttrCalls.Load()+srv.setAttrCalls.Load())
 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
@@ -338,7 +338,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 	})
 
 	t.Run("ListQuotaEnforces65536ByteLimitOnNewKeysAndAllowsUpdate", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE filled to exactly 65536 bytes of xattr names.
+		// Given an unpromoted staged O_TMPFILE filled to 65536 bytes of extended attribute names.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		var tmpOut fuse.CreateOut
@@ -350,7 +350,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 
 		existingKey := fillTmpfileXattrQuota(t, fs, tmpOut.NodeId)
 
-		// When: adding a new key past 65536 bytes vs updating an existing key.
+		// When adding a new key past 65536 bytes and updating an existing key at the limit.
 		overflowSt := fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
 		}, "a", []byte("1"))
@@ -358,7 +358,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Flags: xattrReplaceFlag,
 		}, existingKey, []byte("updated"))
 
-		// Then: new key fails with ENOSPC, updating existing key succeeds, and zero RPCs occur.
+		// Then the new key fails with ENOSPC, updating the existing key succeeds, and zero RPCs occur.
 		requireStatus(t, "new xattr over quota", fuse.Status(syscall.ENOSPC), overflowSt)
 		requireStatus(t, "update existing xattr at quota", fuse.OK, updateSt)
 		require.Zero(t, srv.setXattrCalls.Load())
@@ -370,7 +370,7 @@ func TestStagedTmpfile_LocalXAttr_ValidationBoundsQuotaSortingAndCapsCoherence(t
 
 func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t *testing.T) {
 	t.Run("IoctlFlagsRoundTripAndValidationWithZeroRPCs", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE.
+		// Given an unpromoted staged O_TMPFILE.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
@@ -382,7 +382,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		}, &tmpOut))
 		nodeID := tmpOut.NodeId
 
-		// Unsupported cmd, bad flag mask, short buffers, and RO mount checks.
+		// Reject unsupported ioctl commands, unsupported flag masks, short output buffers, and writes on read-only mounts.
 		var ioOut fuse.IoctlOut
 		requireStatus(t, "unsupported ioctl", fuse.Status(syscall.ENOTTY), fs.Ioctl(nil, &fuse.IoctlIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: 0x12345678,
@@ -413,7 +413,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, in64, &ioOut, nil))
 
-		// 64-bit SETFLAGS / GETFLAGS.
+		// Verify 64-bit SETFLAGS and GETFLAGS round-trip behavior.
 		requireStatus(t, "SETFLAGS 64-bit APPEND", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, in64, &ioOut, nil))
@@ -423,7 +423,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		}, nil, &ioOut, out64))
 		require.Equal(t, uint64(fusefs.FS_APPEND_FL), binary.LittleEndian.Uint64(out64))
 
-		// 32-bit SETFLAGS / GETFLAGS.
+		// Verify 32-bit SETFLAGS and GETFLAGS round-trip behavior.
 		in32 := make([]byte, 4)
 		binary.LittleEndian.PutUint32(in32, fusefs.FS_IMMUTABLE_FL)
 		requireStatus(t, "SETFLAGS 32-bit IMMUTABLE", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
@@ -435,7 +435,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		}, nil, &ioOut, out32))
 		require.Equal(t, fusefs.FS_IMMUTABLE_FL, binary.LittleEndian.Uint32(out32))
 
-		// Keeping IMMUTABLE while already IMMUTABLE fails with EPERM; clearing via FSSETXATTR succeeds.
+		// Keeping IMMUTABLE while already IMMUTABLE fails with EPERM, and clearing it via FSSETXATTR succeeds.
 		requireStatus(t, "re-set IMMUTABLE while immutable", fuse.EPERM, fs.Ioctl(nil, &fuse.IoctlIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC32_SETFLAGS,
 		}, in32, &ioOut, nil))
@@ -457,7 +457,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 	})
 
 	t.Run("AppendAndImmutableEnforceEPERMOnWriteSetAttrAndAllocateLocally", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE with initial data "hello" and a second O_APPEND handle.
+		// Given an unpromoted staged O_TMPFILE with initial data and a second O_APPEND handle.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		var tmpOut fuse.CreateOut
@@ -470,7 +470,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		mustWriteAt(t, fs, nodeID, tmpOut.Fh, 0, []byte("hello"))
 		appHandle := mustOpenFile(t, fs, nodeID, syscall.O_RDWR|syscall.O_APPEND)
 
-		// When: FS_APPEND_FL is set.
+		// When FS_APPEND_FL is set on the local inode.
 		var ioOut fuse.IoctlOut
 		appBuf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(appBuf, uint64(fusefs.FS_APPEND_FL))
@@ -478,8 +478,8 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, appBuf, &ioOut, nil))
 
-		// Then: non-EOF non-append Write, SetAttr(SIZE), Open(O_TRUNC), and Fallocate fail with EPERM;
-		// EOF write, O_APPEND write, 0-byte write, and SetAttr(MODE) succeed.
+		// Then non-EOF non-append Write, SetAttr with FATTR_SIZE, Open with O_TRUNC, and Fallocate fail with EPERM,
+		// while EOF writes, O_APPEND writes, 0-byte writes, and SetAttr with FATTR_MODE succeed.
 		_, nonEOFSt := fs.Write(nil, &fuse.WriteIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh, Offset: 1, Size: 1,
 		}, []byte("x"))
@@ -516,15 +516,15 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 		}, &attrOut))
 		requireBytesMatch(t, "append content", []byte("hello-eof-app"), mustReadAt(t, fs, nodeID, tmpOut.Fh, 0, 13))
 
-		// When: FS_IMMUTABLE_FL is set.
+		// When FS_IMMUTABLE_FL is set on the local inode.
 		immBuf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(immBuf, uint64(fusefs.FS_IMMUTABLE_FL))
 		requireStatus(t, "set FS_IMMUTABLE_FL", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, immBuf, &ioOut, nil))
 
-		// Then: all writes (even 0-byte and O_APPEND), SetAttr mutations, and Fallocate reject with EPERM;
-		// zero-valid SetAttr read and clearing FlagImmutable succeed.
+		// Then 0-byte writes, O_APPEND writes, SetAttr mutations, and Fallocate reject with EPERM,
+		// while a zero-valid SetAttr read and clearing FlagImmutable succeed.
 		_, immZeroWrSt := fs.Write(nil, &fuse.WriteIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh, Offset: 13, Size: 0,
 		}, nil)
@@ -563,7 +563,7 @@ func TestStagedTmpfile_LocalIoctlFlags_RoundTripAndImmutableAppendEnforcement(t 
 
 func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) {
 	t.Run("WriteSetAttrFallocateOpenTruncStripKillprivLocally", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE with S_ISUID|S_ISGID, user.keep, and security.capability.
+		// Given an unpromoted staged O_TMPFILE carrying S_ISUID, S_ISGID, user.keep, and security.capability.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		var tmpOut fuse.CreateOut
@@ -582,7 +582,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 			InHeader: fuse.InHeader{NodeId: nodeID},
 		}, "security.capability", []byte("cap1")))
 
-		// 0-byte Write preserves S_ISUID|S_ISGID and security.capability.
+		// Verify a 0-byte Write preserves S_ISUID, S_ISGID, and security.capability.
 		_, zeroSt := fs.Write(nil, &fuse.WriteIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh, Offset: 0, Size: 0,
 		}, nil)
@@ -592,7 +592,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 		_, zeroCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", capBuf)
 		requireStatus(t, "0-byte write keeps cap", fuse.OK, zeroCapSt)
 
-		// Non-empty Write strips S_ISUID|S_ISGID and deletes security.capability.
+		// Verify a non-empty Write strips S_ISUID and S_ISGID and deletes security.capability.
 		mustWriteAt(t, fs, nodeID, fh, 0, []byte("payload"))
 		require.Equal(t, uint32(syscall.S_IFREG|0o755), mustGetAttr(t, fs, nodeID).Mode)
 		_, afterWriteCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", capBuf)
@@ -602,9 +602,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 		requireStatus(t, "ListXAttr after Write", fuse.OK, listSt)
 		require.Equal(t, "user.keep\x00", string(listAfterWrite[:listSz]))
 
-		// SetAttr(UID) without FATTR_MODE strips S_ISUID|S_ISGID and security.capability;
-		// SetAttr(MODE) preserves explicit mode while deleting security.capability;
-		// SetAttr(ATIME_NOW) preserves both.
+		// Verify SetAttr with FATTR_ATIME_NOW keeps privileges, while FATTR_UID without FATTR_MODE strips S_ISUID, S_ISGID, and security.capability.
 		var attrOut fuse.AttrOut
 		requireStatus(t, "restore 06755", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -637,7 +635,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 		_, uidCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", capBuf)
 		requireStatus(t, "UID strips cap", fuse.Status(syscall.ENODATA), uidCapSt)
 
-		// SetAttr(FATTR_MODE) deletes security.capability while keeping explicit mode bits.
+		// Verify SetAttr with FATTR_MODE deletes security.capability while keeping explicit mode bits.
 		requireStatus(t, "restore cap for MODE", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: nodeID},
 		}, "security.capability", []byte("cap3")))
@@ -656,8 +654,8 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 		requireStatus(t, "ListXAttr after SetAttr MODE", fuse.OK, listModeSt)
 		require.Equal(t, "user.keep\x00", string(listAfterMode[:listModeSz]))
 
-		// Fallocate(mode=0) clears security.capability while preserving S_ISUID|S_ISGID;
-		// Fallocate(PUNCH_HOLE) strips S_ISUID|S_ISGID and clears security.capability.
+		// Verify Fallocate mode zero clears security.capability while preserving S_ISUID and S_ISGID,
+		// and Fallocate hole punching strips S_ISUID, S_ISGID, and security.capability.
 		requireStatus(t, "restore cap for falloc0", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: nodeID},
 		}, "security.capability", []byte("cap4")))
@@ -678,7 +676,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 		_, punchCapSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", capBuf)
 		requireStatus(t, "Fallocate PUNCH_HOLE strips cap", fuse.Status(syscall.ENODATA), punchCapSt)
 
-		// Open(O_TRUNC) strips S_ISUID|S_ISGID and security.capability.
+		// Verify Open with O_TRUNC strips S_ISUID, S_ISGID, and security.capability.
 		requireStatus(t, "restore 06755 for O_TRUNC", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
 				InHeader: fuse.InHeader{NodeId: nodeID},
@@ -701,7 +699,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 	})
 
 	t.Run("UnlinkedCloseAfterXattrAndIoctlLeavesZeroServerRPCsAndCleanUnmount", func(t *testing.T) {
-		// Given: an unpromoted staged O_TMPFILE with data, xattrs, and FS_IMMUTABLE_FL set.
+		// Given an unpromoted staged O_TMPFILE with data, extended attributes, and FS_IMMUTABLE_FL set.
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		var tmpOut fuse.CreateOut
@@ -721,7 +719,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, immBuf, &ioOut, nil))
 
-		// When: flushed, released, forgotten without Link, then unmounted.
+		// When the descriptor is flushed, released, forgotten without Link, and unmounted.
 		requireStatus(t, "Flush", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
 			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh,
 		}))
@@ -729,7 +727,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 		fs.Forget(tmpOut.NodeId, 1)
 		fs.OnUnmount()
 
-		// Then: zero server RPCs across all operations and clean unmount progress.
+		// Then zero server RPCs occur across all operations and unmount progress stays clean.
 		totalRPCs := srv.mknodCalls.Load() + srv.writeCalls.Load() + srv.setAttrCalls.Load() +
 			srv.setXattrCalls.Load() + srv.getXattrCalls.Load() + srv.listXattrCalls.Load() +
 			srv.removeXattrCalls.Load() + srv.fsyncCalls.Load() + srv.fsyncDirCalls.Load() +
@@ -743,7 +741,7 @@ func TestStagedTmpfile_LocalKillprivAndUnlinkedUnmountCleanliness(t *testing.T) 
 
 func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUnlinkBarriersImmutable(t *testing.T) {
 	t.Run("NonBlockingLinkAndOrderedCommitAndUnlinkBarrierOnImmutable", func(t *testing.T) {
-		// Given: SGID source dir (gid=2000) and SGID target dir (gid=3000), plus gated storage hooks recording RPC order.
+		// Given S_ISGID source and target directories with groups 2000 and 3000 and storage hooks that record RPC ordering.
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		var (
 			traceMu sync.Mutex
@@ -808,8 +806,8 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		events = nil
 		traceMu.Unlock()
 
-		// Create O_TMPFILE in srcDir (inherits gid=2000), override gid=2500, write sparse data,
-		// set S_ISUID mode 0o4755, set unsorted xattrs + security.capability, and set FS_IMMUTABLE_FL.
+		// Create an O_TMPFILE inside srcDir to inherit group 2000, override its group to 2500, write sparse data,
+		// apply mode 0o4755, set unsorted extended attributes with security.capability, and set FS_IMMUTABLE_FL.
 		var tmpOut fuse.CreateOut
 		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{
@@ -849,14 +847,14 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, immBuf, &ioOut, nil))
 
-		// When: Link promotes into dstDir (gid=3000) while background Write RPCs are gated.
+		// When Link promotes the file into dstDir while background Write RPCs remain gated.
 		var linkOut fuse.EntryOut
 		requireStatus(t, "Link promote", fuse.OK, fs.Link(nil, &fuse.LinkIn{
 			InHeader: fuse.InHeader{NodeId: dstDir.NodeId}, Oldnodeid: nodeID,
 		}, "promoted.bin", &linkOut))
 		<-uploadStarted
 
-		// Then: Link returned immediately with Mknod count=1 and full local metadata preserved.
+		// Then Link returns immediately with one Mknod RPC and keeps full local metadata visible.
 		require.Equal(t, int64(1), srv.mknodCalls.Load())
 		require.Equal(t, uint32(syscall.S_IFREG|0o4755), linkOut.Mode)
 		require.Equal(t, uint32(2500), linkOut.Gid)
@@ -868,7 +866,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		require.Equal(t, uint32(syscall.S_IFREG|0o4755), duringLookup.Mode)
 		require.Equal(t, uint32(2500), duringLookup.Gid)
 
-		// Unlink and Open(O_TRUNC) while commit is blocked must barrier until stageItemPromotedCommit finishes, then fail with EPERM.
+		// Unlink and Open with O_TRUNC must barrier until stageItemPromotedCommit finishes and then fail with EPERM.
 		setAttrBefore := srv.setAttrCalls.Load()
 		unlinkDone := make(chan fuse.Status, 1)
 		go func() {
@@ -892,7 +890,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 			InHeader: fuse.InHeader{NodeId: nodeID}, Fh: fh,
 		}))
 
-		// Verify strict causal RPC ordering on server.
+		// Verify strict causal RPC ordering on the server.
 		traceMu.Lock()
 		gotEvents := slices.Clone(events)
 		traceMu.Unlock()
@@ -908,7 +906,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 			"SetAttr(size=0,mode=0,gid=0)",
 		}, gotEvents[3:])
 
-		// Verify post-commit security.capability coherence, sorted xattrs, and immutable write rejection.
+		// Verify post-commit capability cache coherence, sorted extended attributes, and immutable write rejection.
 		capOut := make([]byte, 16)
 		capSz, capSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "security.capability", capOut)
 		requireStatus(t, "GetXAttr security.capability after commit", fuse.OK, capSt)
@@ -923,7 +921,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		}, []byte("x"))
 		requireStatus(t, "post-commit Write on immutable", fuse.EPERM, postWrSt)
 
-		// Clear immutable and verify Unlink succeeds.
+		// Clear the immutable flag and verify Unlink succeeds.
 		clearBuf := make([]byte, 8)
 		requireStatus(t, "clear immutable", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
@@ -934,7 +932,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 	})
 
 	t.Run("PromotedAppendAndZeroByteTmpfilePreserveCommitSemantics", func(t *testing.T) {
-		// Given: O_TMPFILE with FS_APPEND_FL, S_ISUID, and security.capability promoted via Link.
+		// Given an O_TMPFILE with FS_APPEND_FL, S_ISUID, and security.capability promoted via Link.
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 
@@ -967,7 +965,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: appOut.NodeId,
 		}, "app.bin", &linkOut))
 
-		// Open a non-O_APPEND handle and verify non-EOF write returns EPERM while O_APPEND write succeeds and strips killpriv.
+		// Open a non-O_APPEND handle and verify non-EOF writes return EPERM while O_APPEND writes succeed and strip killpriv.
 		rwHandle := mustOpenFile(t, fs, appOut.NodeId, syscall.O_RDWR)
 		_, nonEOFSt := fs.Write(nil, &fuse.WriteIn{
 			InHeader: fuse.InHeader{NodeId: appOut.NodeId}, Fh: rwHandle.Fh, Offset: 0, Size: 1,
@@ -979,7 +977,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		requireStatus(t, "post-Link append write strips security.capability", fuse.Status(syscall.ENODATA), afterAppCapSt)
 		requireBytesMatch(t, "promoted append bytes", []byte("base-tail"), mustReadAt(t, fs, appOut.NodeId, rwHandle.Fh, 0, 9))
 
-		// Zero-byte O_TMPFILE with xattr and FS_IMMUTABLE_FL promotes cleanly without Write RPCs.
+		// A zero-byte O_TMPFILE with extended attributes and FS_IMMUTABLE_FL promotes cleanly without Write RPCs.
 		var emptyOut fuse.CreateOut
 		requireStatus(t, "Tmpfile empty", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -1011,7 +1009,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 	})
 
 	t.Run("FailedMknodPreservesLocalStateAndMidFlightExtentPreservesSpecialAndCapsAcrossCacheMiss", func(t *testing.T) {
-		// Given: an existing target file causing EEXIST on first Link, and a gated second extent write.
+		// Given an existing target file causing EEXIST on the first Link and a gated second extent write.
 		srv := newFakeStorage(t, withTTL(0, 0))
 		srv.seedFile(1, "taken.bin", 0o644, []byte("x"))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -1025,7 +1023,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		nodeID := tmpOut.NodeId
 		mustWriteAt(t, fs, nodeID, tmpOut.Fh, 0, []byte("ext1"))
 		mustWriteAt(t, fs, nodeID, tmpOut.Fh, 8192, []byte("ext2"))
-		requireStatus(t, "set SUID+GID", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
+		requireStatus(t, "set SUID and GID", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
 				InHeader: fuse.InHeader{NodeId: nodeID},
 				Valid:    fuse.FATTR_MODE | fuse.FATTR_GID,
@@ -1043,7 +1041,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 			InHeader: fuse.InHeader{NodeId: nodeID}, Cmd: fusefs.FS_IOC_SETFLAGS,
 		}, immBuf, &ioOut, nil))
 
-		// First Link fails with EEXIST: local tmpfile retains xattrs, flags, mode, gid, and data.
+		// Verify the first Link fails with EEXIST while the local tmpfile retains extended attributes, flags, mode, gid, and data.
 		var failedEntry fuse.EntryOut
 		requireStatus(t, "Link EEXIST", fuse.Status(syscall.EEXIST), fs.Link(nil, &fuse.LinkIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: nodeID,
@@ -1055,7 +1053,7 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		requireStatus(t, "local cap preserved after failed Link", fuse.OK, capSt)
 		require.Equal(t, "cap-edge", string(capCheck[:capSz]))
 
-		// Gate second extent upload after first extent completes so commit is still pending.
+		// Gate the second extent upload after the first extent finishes so stageItemPromotedCommit stays pending.
 		ext1Done := make(chan struct{})
 		ext2Started := make(chan struct{})
 		ext2Gate, releaseExt2 := newTestGate()
@@ -1096,5 +1094,176 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
 		fs.Forget(nodeID, 2)
+	})
+
+	t.Run("OpenTruncateWhilePromotedCommitPendingPreservesXattrsAndExplicitGid", func(t *testing.T) {
+		// Given a directory with S_ISGID group 3000 and an O_TMPFILE carrying user xattrs and explicit group 2500 with zero inode flags.
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		uploadGate, releaseUpload := newTestGate()
+		defer releaseUpload()
+		uploadStarted := make(chan struct{})
+		var startedOnce sync.Once
+		srv.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) (uint32, error) {
+			startedOnce.Do(func() { close(uploadStarted) })
+			<-uploadGate
+			return 0, nil
+		}
+
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		sgidDst := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "sgid-dst-trunc", 0o755)
+		requireStatus(t, "dst SetAttr SGID", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
+			SetAttrInCommon: fuse.SetAttrInCommon{
+				InHeader: fuse.InHeader{NodeId: sgidDst.NodeId},
+				Valid:    fuse.FATTR_MODE | fuse.FATTR_GID,
+				Mode:     0o2755,
+				Owner:    fuse.Owner{Gid: 3000},
+			},
+		}, &fuse.AttrOut{}))
+
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpOut))
+		nodeID := tmpOut.NodeId
+		mustWriteAt(t, fs, nodeID, tmpOut.Fh, 0, []byte("data"))
+		requireStatus(t, "set explicit Gid 2500", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
+			SetAttrInCommon: fuse.SetAttrInCommon{
+				InHeader: fuse.InHeader{NodeId: nodeID},
+				Valid:    fuse.FATTR_GID,
+				Owner:    fuse.Owner{Gid: 2500},
+			},
+		}, &fuse.AttrOut{}))
+		requireStatus(t, "set user.keep", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
+			InHeader: fuse.InHeader{NodeId: nodeID},
+		}, "user.keep", []byte("stay")))
+
+		// When Link promotes into sgidDst while uploadGate holds stageItemPromotedCommit, and Open with O_TRUNC arrives before commit completes.
+		var linkOut fuse.EntryOut
+		requireStatus(t, "Link into sgidDst", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader: fuse.InHeader{NodeId: sgidDst.NodeId}, Oldnodeid: nodeID,
+		}, "trunc-pending.bin", &linkOut))
+		<-uploadStarted
+
+		setAttrBefore := srv.setAttrCalls.Load()
+		truncDone := make(chan fuse.Status, 1)
+		var openOut fuse.OpenOut
+		go func() {
+			truncDone <- fs.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: nodeID}, Flags: uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+			}, &openOut)
+		}()
+		time.Sleep(30 * time.Millisecond)
+
+		// Then Open barriers on stageItemPromotedCommit instead of discarding it, so truncate preserves user.keep and explicit group 2500.
+		require.Equal(t, setAttrBefore, srv.setAttrCalls.Load(), "Open with O_TRUNC must barrier on pending stageItemPromotedCommit")
+
+		releaseUpload()
+		requireStatus(t, "Open with O_TRUNC after commit", fuse.OK, waitUntilStatusChan(t, truncDone, "Open O_TRUNC"))
+		afterAttr := mustGetAttr(t, fs, nodeID)
+		require.Zero(t, afterAttr.Size)
+		require.Equal(t, uint32(2500), afterAttr.Gid, "Open with O_TRUNC must not revert Gid to S_ISGID parent directory")
+		xattrBuf := make([]byte, 16)
+		xattrSz, xattrSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: nodeID}, "user.keep", xattrBuf)
+		requireStatus(t, "user.keep preserved after O_TRUNC", fuse.OK, xattrSt)
+		require.Equal(t, "stay", string(xattrBuf[:xattrSz]))
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: openOut.Fh})
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
+		fs.Forget(nodeID, 2)
+	})
+
+	t.Run("CacheMissAfterUnlinkOrZeroTTLLookupWhilePromotedCommitPendingPreservesSpecialFlags", func(t *testing.T) {
+		// Given a zero-TTL mount with writeHook gating extent uploads so stageItemPromotedCommit stays pending after Link.
+		srv := newFakeStorage(t, withTTL(0, 0))
+		uploadGate, releaseUpload := newTestGate()
+		defer releaseUpload()
+		var startedCount atomic.Int32
+		allStarted := make(chan struct{})
+		srv.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) (uint32, error) {
+			if startedCount.Add(1) == 2 {
+				close(allStarted)
+			}
+			<-uploadGate
+			return 0, nil
+		}
+
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		var ioOut fuse.IoctlOut
+		appFlags := make([]byte, 8)
+		binary.LittleEndian.PutUint64(appFlags, uint64(fusefs.FS_APPEND_FL))
+
+		var tmpUnlink fuse.CreateOut
+		requireStatus(t, "Tmpfile unlink case", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpUnlink))
+		mustWriteAt(t, fs, tmpUnlink.NodeId, tmpUnlink.Fh, 0, []byte("base1"))
+		requireStatus(t, "set FS_APPEND_FL on unlink case", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
+			InHeader: fuse.InHeader{NodeId: tmpUnlink.NodeId}, Cmd: fusefs.FS_IOC_SETFLAGS,
+		}, appFlags, &ioOut, nil))
+
+		var tmpLookup fuse.CreateOut
+		requireStatus(t, "Tmpfile lookup case", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpLookup))
+		mustWriteAt(t, fs, tmpLookup.NodeId, tmpLookup.Fh, 0, []byte("base2"))
+		requireStatus(t, "set FS_APPEND_FL on lookup case", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{
+			InHeader: fuse.InHeader{NodeId: tmpLookup.NodeId}, Cmd: fusefs.FS_IOC_SETFLAGS,
+		}, appFlags, &ioOut, nil))
+
+		var linkUnlink, linkLookup fuse.EntryOut
+		requireStatus(t, "Link unlink case", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: tmpUnlink.NodeId,
+		}, "app-unlink.bin", &linkUnlink))
+		requireStatus(t, "Link lookup case", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: tmpLookup.NodeId,
+		}, "app-lookup.bin", &linkLookup))
+		<-allStarted
+
+		// When Unlink invalidates the first inode and GetAttr misses the cache, and Lookup misses the cache on the second inode.
+		requireStatus(t, "Unlink append file", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "app-unlink.bin"))
+		gotUnlinkAttr := mustGetAttr(t, fs, tmpUnlink.NodeId)
+		require.Equal(t, uint32(syscall.S_IFREG|0o644), gotUnlinkAttr.Mode)
+		gotLookupAttr := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "app-lookup.bin")
+		require.Equal(t, uint32(syscall.S_IFREG|0o644), gotLookupAttr.Mode)
+
+		// Then non-EOF writes on non-O_APPEND handles must still treat both inodes as special, barrier for commit, and fail with EPERM.
+		wr1Done := make(chan fuse.Status, 1)
+		go func() {
+			_, st := fs.Write(nil, &fuse.WriteIn{
+				InHeader: fuse.InHeader{NodeId: tmpUnlink.NodeId}, Fh: tmpUnlink.Fh, Offset: 0, Size: 3,
+			}, []byte("bad"))
+			wr1Done <- st
+		}()
+		wr2Done := make(chan fuse.Status, 1)
+		go func() {
+			_, st := fs.Write(nil, &fuse.WriteIn{
+				InHeader: fuse.InHeader{NodeId: tmpLookup.NodeId}, Fh: tmpLookup.Fh, Offset: 0, Size: 3,
+			}, []byte("bad"))
+			wr2Done <- st
+		}()
+
+		time.Sleep(30 * time.Millisecond)
+		select {
+		case st := <-wr1Done:
+			t.Fatalf("getInodeMissWithContext lost specialInodes flag and allowed early staged Write with status %v", st)
+		case st := <-wr2Done:
+			t.Fatalf("lookupInodeAfterCache lost specialInodes flag and allowed early staged Write with status %v", st)
+		default:
+		}
+
+		releaseUpload()
+		requireStatus(t, "post-unlink cache-miss non-EOF Write on append file", fuse.EPERM, waitUntilStatusChan(t, wr1Done, "wr1Done"))
+		requireStatus(t, "lookup cache-miss non-EOF Write on append file", fuse.EPERM, waitUntilStatusChan(t, wr2Done, "wr2Done"))
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpUnlink.NodeId}, Fh: tmpUnlink.Fh})
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpLookup.NodeId}, Fh: tmpLookup.Fh})
+		fs.Forget(tmpUnlink.NodeId, 2)
+		fs.Forget(tmpLookup.NodeId, 3)
 	})
 }

@@ -509,10 +509,10 @@ type StagePromotedMeta struct {
 	Xattrs []StagedXattr
 }
 
-// StageAttrCommitter 定义转正匿名文件在所有数据分片落盘后提交最终属性与扩展属性的端口函数。
+// StageAttrCommitter commits final inode attributes and extended attributes after promoted extents finish uploading.
 type StageAttrCommitter func(ctx context.Context, ino uint64, meta StagePromotedMeta) (*storagev1.Inode, error)
 
-// StageHooks 定义暂存写入、后台提交与失败回调的本地状态同步钩子。
+// StageHooks updates client cache and capability state when stage chunks and promoted commits finish or fail.
 type StageHooks struct {
 	OnStage  func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
 	OnCommit func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool)
@@ -1418,7 +1418,7 @@ func (c *StageCoordinator) rollbackWriteStepLocked(st *stageInode, activeChunk *
 	c.wakeBackpressureLocked()
 }
 
-// PromoteTmpfile 将已通过 Mknod 具名化的匿名文件宿主机 *os.File 所有权与最终元数据移交至 StageCoordinator 异步上云。
+// PromoteTmpfile transfers an open staged O_TMPFILE file and its metadata snapshot to StageCoordinator for ordered upload.
 func (c *StageCoordinator) PromoteTmpfile(
 	ctx context.Context,
 	serverIno, nodeID, cacheEpoch uint64,
@@ -1945,6 +1945,18 @@ func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) {
 		st.createdInSession = false
 	}
 	c.mu.Unlock()
+}
+
+// HasPromotedPending reports whether the inode has an uncommitted Link promotion queued or in flight.
+func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
+	if c == nil || c.totalActiveItems.Load() == 0 {
+		return false
+	}
+	c.mu.Lock()
+	st := c.inodes[ino]
+	pending := st != nil && st.promoted != nil && !st.promoted.finished
+	c.mu.Unlock()
+	return pending
 }
 
 // BarrierAll 封口并等待所有活跃节点的挂起分片全部上传完成。

@@ -171,7 +171,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			if st != fuse.OK {
 				return st
 			}
-			if cached.inode.GetAttr().GetFlags()&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
+			if cached.inode.GetAttr().GetFlags()&(ProtoFlagImmutable|ProtoFlagAppend) != 0 || fs.stage.HasPromotedPending(ino) {
 				fs.stage.BarrierInode(opCtx, ino)
 			} else {
 				fs.stage.DiscardInode(ino)

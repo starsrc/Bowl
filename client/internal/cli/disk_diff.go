@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/starsrc/bowl/client/internal/rpc"
@@ -23,8 +23,8 @@ const (
 	diskDiffTimeout       = 60 * time.Second
 	maxDiffPathBytes      = 4096
 	maxDiffPageTokenBytes = 4096
-	readNodeChunkSize     = 4 << 20  // 4 MiB 单次读取上限
-	maxPatchFileBytes     = 32 << 20 // 32 MiB --patch 文本渲染保护上限
+	readNodeChunkSize     = 4 << 20  // 4 MiB chunk limit per read RPC
+	maxPatchFileBytes     = 32 << 20 // 32 MiB max text size for --patch rendering
 	maxMyersEditDist      = 2000
 
 	posixIFMT = 0o170000
@@ -32,25 +32,6 @@ const (
 	posixIFRG = 0o100000
 	posixIFLN = 0o120000
 )
-
-const diskDiffUsageHelp = `用法:
-  bowl disk diff <source-disk-id> [flags]
-
-参数:
-  <source-disk-id>     源虚拟磁盘 UUID（必填，非 Nil UUID）
-
-标志:
-  --target string      目标虚拟磁盘 UUID（可选；省略时与最近共同祖先对比）
-  --prefix string      路径前缀过滤条件（最大 4096 字节）
-  --conflicts-only     仅返回存在冲突的条目
-  -p, --patch          输出文本行级 Unified Diff / 符号链接变化 / 二进制提示
-  --limit int          单页最大返回条数，取值范围 [1, 1000]
-  --page-token string  游标分页令牌
-  --json               以 JSON 格式输出差异与冲突结果
-  --endpoint string    StorageService 基础地址 (默认读取 $BOWL_STORAGE_ENDPOINT 或 http://127.0.0.1:9000)
-  --token string       访问令牌 (默认读取 $BOWL_TOKEN)
-  -h, --help           查看帮助信息
-`
 
 type diffNodeSummaryJSON struct {
 	Ino  uint64 `json:"ino"`
@@ -85,107 +66,66 @@ type diskDiffJSON struct {
 }
 
 var diskDiffSpec = diskSubcommandSpec{
-	name:        "diff",
-	usageHelp:   diskDiffUsageHelp,
-	posArgLabel: "<source-disk-id>",
-	uuidLabel:   "source-disk-id",
-	spanName:    "cli.disk.diff",
-	timeout:     diskDiffTimeout,
-	newAdapter:  func() diskRequestAdapter { return &diskDiffAdapter{} },
+	use:       "diff <source-disk-id>",
+	short:     "Show differences and conflicts between disks or against the common ancestor",
+	args:      cobra.ExactArgs(1),
+	uuidLabel: "source-disk-id",
+	spanName:  "cli.disk.diff",
+	timeout:   diskDiffTimeout,
+	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
+		a := &diskDiffAdapter{}
+		flags := cmd.Flags()
+		flags.StringVar(&a.targetRaw, "target", "", "Target virtual disk UUID; omit to compare with the lowest common ancestor")
+		flags.StringVar(&a.prefix, "prefix", "", "Path prefix filter up to 4096 bytes")
+		flags.BoolVar(&a.conflictsOnly, "conflicts-only", false, "Return only entries with conflicts")
+		flags.BoolVarP(&a.patch, "patch", "p", false, "Render unified line diffs, symlink changes, and binary notices")
+		flags.IntVar(&a.limit, "limit", 0, "Maximum number of entries per page in [1, 1000]")
+		flags.StringVar(&a.pageToken, "page-token", "", "Pagination cursor token")
+		return a
+	},
 }
 
 type diskDiffAdapter struct {
 	sourceDiskID  string
-	targetRaw     *string
+	targetRaw     string
 	targetDiskID  string
 	prefix        string
 	conflictsOnly bool
 	patch         bool
-	limitRaw      string
-	limitSet      bool
+	limit         int
 	pageSize      uint32
 	pageToken     string
 }
 
-func (a *diskDiffAdapter) parseFlag(name, val string, hasVal bool, args []string, idx *int) (bool, error) {
-	switch name {
-	case "target":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.targetRaw = &v
-		return true, nil
-	case "prefix":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.prefix = v
-		return true, nil
-	case "conflicts-only":
-		b, err := parseBoolFlag(val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.conflictsOnly = b
-		return true, nil
-	case "p", "patch":
-		b, err := parseBoolFlag(val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.patch = b
-		return true, nil
-	case "limit":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.limitSet = true
-		a.limitRaw = v
-		return true, nil
-	case "page-token":
-		v, err := takeFlagValue(args, idx, name, val, hasVal)
-		if err != nil {
-			return true, err
-		}
-		a.pageToken = v
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-func (a *diskDiffAdapter) finalize(posArgs []string) (bool, error) {
+func (a *diskDiffAdapter) finalize(cmd *cobra.Command, posArgs []string) (bool, error) {
 	a.sourceDiskID = posArgs[0]
-	if a.targetRaw != nil {
-		if _, err := parseNonNilUUID(*a.targetRaw, "target-disk-id"); err != nil {
+	flags := cmd.Flags()
+	if flags.Changed("target") {
+		if _, err := parseNonNilUUID(a.targetRaw, "target-disk-id"); err != nil {
 			return false, err
 		}
-		if *a.targetRaw == a.sourceDiskID {
-			return false, errors.New("目标磁盘不能与源磁盘相同")
+		if a.targetRaw == a.sourceDiskID {
+			return false, errors.New("target disk cannot be the same as source disk")
 		}
-		a.targetDiskID = *a.targetRaw
+		a.targetDiskID = a.targetRaw
 	}
 	if len(a.prefix) > maxDiffPathBytes {
-		return false, fmt.Errorf("--prefix 长度不能超过 %d 字节", maxDiffPathBytes)
+		return false, fmt.Errorf("--prefix cannot exceed %d bytes", maxDiffPathBytes)
 	}
 	if strings.Contains(a.prefix, "\x00") {
-		return false, errors.New("--prefix 不能包含空字节 (NUL)")
+		return false, errors.New("--prefix cannot contain NUL bytes")
 	}
 	if len(a.pageToken) > maxDiffPageTokenBytes {
-		return false, fmt.Errorf("--page-token 长度不能超过 %d 字节", maxDiffPageTokenBytes)
+		return false, fmt.Errorf("--page-token cannot exceed %d bytes", maxDiffPageTokenBytes)
 	}
 	if strings.Contains(a.pageToken, "\x00") {
-		return false, errors.New("--page-token 不能包含空字节 (NUL)")
+		return false, errors.New("--page-token cannot contain NUL bytes")
 	}
-	if a.limitSet {
-		parsedLimit, err := strconv.Atoi(a.limitRaw)
-		if err != nil || parsedLimit < 1 || parsedLimit > 1000 {
-			return false, fmt.Errorf("无效的 --limit 参数 \"%s\"，必须为 [1, 1000] 范围内的整数", a.limitRaw)
+	if flags.Changed("limit") {
+		if a.limit < 1 || a.limit > 1000 {
+			return false, fmt.Errorf("invalid --limit %d: must be an integer in [1, 1000]", a.limit)
 		}
-		a.pageSize = uint32(parsedLimit)
+		a.pageSize = uint32(a.limit)
 	}
 	return false, nil
 }
@@ -224,7 +164,7 @@ func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.St
 	}))
 	if err != nil {
 		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
-			defaultOp:       "计算磁盘差异失败",
+			defaultOp:       "diff disks failed",
 			checkInvalidArg: true,
 		})
 	}
@@ -240,7 +180,7 @@ func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.St
 			patchStr, patchErr := a.renderEntryPatch(ctx, client, lcaCommitID, entry)
 			if patchErr != nil {
 				return diskOutcome{}, mapDiskRPCError(patchErr, diskRPCErrorPolicy{
-					defaultOp: fmt.Sprintf("读取差异内容失败 (%s)", string(entry.GetPath())),
+					defaultOp: fmt.Sprintf("read diff content for %s failed", string(entry.GetPath())),
 				})
 			}
 			patches[idx] = patchStr
@@ -427,7 +367,7 @@ func (a *diskDiffAdapter) renderEntryPatch(
 		}
 	} else if entry.GetBase() != nil {
 		if lcaCommitID == "" {
-			return fmt.Sprintf("--- a/%s\n+++ b/%s\n(缺少 lca_commit_id，无法读取祖先切面内容)\n", relPath, relPath), nil
+			return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing lca_commit_id: cannot read ancestor snapshot content\n", relPath, relPath), nil
 		}
 		left, err = fetchCommitNode(ctx, client, a.sourceDiskID, lcaCommitID, entry.GetBase())
 		if err != nil {
@@ -444,7 +384,7 @@ func (a *diskDiffAdapter) renderEntryPatch(
 		return "", nil
 	}
 
-	// 目录或非普通文件/符号链接节点跳过数据 diff
+	// Skip file data diff for directories and special files.
 	if (left.present && left.isDir) || (right.present && right.isDir) {
 		if left.isDir != right.isDir {
 			return fmt.Sprintf("diff a/%s b/%s\nFile type changed (directory vs non-directory)\n", relPath, relPath), nil
@@ -841,7 +781,7 @@ func computeMyersMiddle(a, b []string, baseOffset int) []diffLineOp {
 		})
 	}
 
-	// 反转得到正序
+	// Reverse operations to restore forward order.
 	for l, r := 0, len(revOps)-1; l < r; l, r = l+1, r-1 {
 		revOps[l], revOps[r] = revOps[r], revOps[l]
 	}
@@ -876,7 +816,7 @@ func formatUnifiedDiff(oldLabel, newLabel string, oldData, newData []byte) strin
 				hEnd++
 				continue
 			}
-			// 向前探测是否能在 2*contextLines 内遇到下一处变更
+			// Look ahead to merge hunks within 2*contextLines.
 			nextChange := -1
 			limit := min(len(ops), hEnd+2*contextLines+1)
 			for j := hEnd; j < limit; j++ {

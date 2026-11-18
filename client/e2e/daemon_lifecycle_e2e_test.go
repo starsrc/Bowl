@@ -78,7 +78,7 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	require.Equal(t, disk.GetMaxBytes()/4096, stfs.Blocks)
 
 	dupOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, disk.GetDiskId(), mountpoint)
-	require.Contains(t, dupOut, "已挂载")
+	require.Contains(t, dupOut, "already mounted")
 
 	daemonPID := findBowlDaemonPID(t, mountpoint)
 	require.Positive(t, daemonPID)

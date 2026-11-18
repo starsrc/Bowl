@@ -17,16 +17,14 @@ const (
 	unitPiB  uint64 = 1 << 50
 )
 
-// ParseSize 解析人类可读的容量字符串并返回字节数。
-// 支持不区分大小写的 1024 二进制幂单位：B 或无单位、K/KB/KiB、M/MB/MiB、G/GB/GiB、T/TB/TiB、P/PB/PiB。
-// 结果必须为大于 0 且不超过 math.MaxInt64 的正整数。
+// ParseSize parses a human-readable size string using binary 1024 units and returns bytes up to math.MaxInt64.
 func ParseSize(raw string) (uint64, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return 0, errors.New("容量不能为空")
+		return 0, errors.New("size cannot be empty")
 	}
 	if strings.HasPrefix(s, "-") {
-		return 0, fmt.Errorf("容量必须为正整数: %q", raw)
+		return 0, fmt.Errorf("size must be a positive integer: %q", raw)
 	}
 
 	idx := 0
@@ -34,7 +32,7 @@ func ParseSize(raw string) (uint64, error) {
 		idx++
 	}
 	if idx == 0 {
-		return 0, fmt.Errorf("无效的容量格式: %q", raw)
+		return 0, fmt.Errorf("invalid size format: %q", raw)
 	}
 
 	numStr := s[:idx]
@@ -42,10 +40,10 @@ func ParseSize(raw string) (uint64, error) {
 
 	val, err := strconv.ParseUint(numStr, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("解析容量数值失败 %q: %w", raw, err)
+		return 0, fmt.Errorf("parse size value %q: %w", raw, err)
 	}
 	if val == 0 {
-		return 0, fmt.Errorf("容量必须大于 0: %q", raw)
+		return 0, fmt.Errorf("size must be greater than 0: %q", raw)
 	}
 
 	var mult uint64
@@ -63,17 +61,17 @@ func ParseSize(raw string) (uint64, error) {
 	case "P", "PB", "PIB":
 		mult = unitPiB
 	default:
-		return 0, fmt.Errorf("不支持的容量单位 %q (原始输入: %q)", strings.TrimSpace(s[idx:]), raw)
+		return 0, fmt.Errorf("unsupported size unit %q in %q", strings.TrimSpace(s[idx:]), raw)
 	}
 
 	if val > uint64(math.MaxInt64)/mult {
-		return 0, fmt.Errorf("容量超出最大允许上限 (%d 字节): %q", int64(math.MaxInt64), raw)
+		return 0, fmt.Errorf("size %q exceeds maximum limit of %d bytes", raw, int64(math.MaxInt64))
 	}
 
 	return val * mult, nil
 }
 
-// FormatSize 将字节数格式化为人类可读的 1024 二进制幂单位字符串。
+// FormatSize formats byte counts into human-readable binary unit strings.
 func FormatSize(bytes uint64) string {
 	switch {
 	case bytes >= unitPiB:

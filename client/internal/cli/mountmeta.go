@@ -17,7 +17,7 @@ import (
 
 const primaryMountMetaDir = "/run/bowl/mounts"
 
-// mountMeta 是挂载就绪后写入的发现元数据，供 `bowl stats` 定位挂载进程的管理面地址。
+// mountMeta stores discovery metadata written after mount readiness so bowl stats can locate the admin endpoint.
 type mountMeta struct {
 	Mountpoint string    `json:"mountpoint"`
 	PID        int       `json:"pid"`
@@ -30,13 +30,12 @@ func fallbackMountMetaDir() string {
 	return filepath.Join(os.TempDir(), "bowl-mounts")
 }
 
-// mountMetaDirs 返回发现元数据目录（按优先级）：/run/bowl/mounts，无权限时回退 $TMPDIR/bowl-mounts。
-// 定义为变量以便单测替换为临时目录。
+// mountMetaDirs returns discovery directories in priority order, overridden in unit tests.
 var mountMetaDirs = func() []string {
 	return []string{primaryMountMetaDir, fallbackMountMetaDir()}
 }
 
-// canonicalMountpoint 规范化挂载点路径（优先解析符号链接并 Clean，不存在时回退 Abs+Clean）。
+// canonicalMountpoint normalizes mountpoint paths by resolving symlinks when possible and falling back to Abs plus Clean.
 func canonicalMountpoint(mountpoint string) string {
 	abs, err := filepath.Abs(mountpoint)
 	if err == nil {
@@ -48,19 +47,19 @@ func canonicalMountpoint(mountpoint string) string {
 	return filepath.Clean(mountpoint)
 }
 
-// mountMetaFileName 以规范化挂载点的 SHA-256 前 16 字节十六进制作为文件名。
+// mountMetaFileName returns the metadata file name derived from the first 16 SHA-256 bytes of the cleaned mountpoint.
 func mountMetaFileName(mountpoint string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(mountpoint)))
 	return hex.EncodeToString(sum[:16]) + ".json"
 }
 
-// writeMountMeta 原子写入（临时文件 + rename）发现元数据，返回写入路径。
+// writeMountMeta atomically writes discovery metadata via temp file and rename, returning the written path.
 func writeMountMeta(meta *mountMeta) (string, error) {
 	normalized := *meta
 	normalized.Mountpoint = filepath.Clean(normalized.Mountpoint)
 	data, err := json.Marshal(normalized)
 	if err != nil {
-		return "", fmt.Errorf("序列化挂载元数据失败: %w", err)
+		return "", fmt.Errorf("marshal mount metadata: %w", err)
 	}
 	fallbackDir := fallbackMountMetaDir()
 	var errs error
@@ -81,7 +80,7 @@ func writeFileAtomic(dir, name string, data []byte, sharedSticky bool) (string, 
 		return "", err
 	}
 	if createdDir && sharedSticky {
-		// 共享回退目录允许不同 UID 的挂载进程各自写入与清理自身元数据文件。
+		// Shared fallback directory allows different UIDs to write and clean their own metadata files.
 		_ = os.Chmod(dir, 0o777|os.ModeSticky)
 	}
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
@@ -107,7 +106,7 @@ func writeFileAtomic(dir, name string, data []byte, sharedSticky bool) (string, 
 	return path, nil
 }
 
-// processAlive 通过 kill(pid, 0) 判断进程是否存活（EPERM 表示存在但无权发信号）。
+// processAlive checks whether pid is alive via signal 0, treating EPERM as alive.
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -116,7 +115,7 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// listMountMetas 读取全部目录下进程仍存活的发现元数据（同一挂载点仅保留首个目录中的记录），按挂载点排序。
+// listMountMetas reads metadata files for alive processes across all discovery directories, sorted by mountpoint.
 func listMountMetas() []mountMeta {
 	seen := make(map[string]struct{})
 	var out []mountMeta
@@ -152,7 +151,7 @@ func listMountMetas() []mountMeta {
 	return out
 }
 
-// mountMetaFilePath 查找指定挂载点对应的本地元数据文件路径（不校验 PID 存活）。
+// mountMetaFilePath finds the metadata file path for mountpoint without checking process liveness.
 func mountMetaFilePath(mountpoint string) (string, bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)
@@ -171,7 +170,7 @@ func mountMetaFilePath(mountpoint string) (string, bool) {
 	return "", false
 }
 
-// readMountMetaPID 读取元数据文件记录的守护进程 PID。
+// readMountMetaPID reads the daemon PID recorded in the mount metadata file.
 func readMountMetaPID(path string) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -184,7 +183,7 @@ func readMountMetaPID(path string) int {
 	return m.PID
 }
 
-// findMountMeta 按规范化挂载点查找存活进程的发现元数据（兼容符号链接路径）。
+// findMountMeta looks up active mount metadata for mountpoint, supporting symlink paths.
 func findMountMeta(mountpoint string) (mountMeta, bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)

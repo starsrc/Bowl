@@ -54,75 +54,90 @@ func setupDiskTestTracer(t *testing.T) *tracetest.InMemoryExporter {
 
 func TestDisk_GivenHelpAndRoutingArgs_ReturnsExpectedUsageAndExitCodes(t *testing.T) {
 	// Given / When / Then
-	requireCLIError2(t, "bowl disk <subcommand>", "disk")
-	requireCLIError2(t, `未知 disk 子命令 "unknown"`, "disk", "unknown")
+	requireCLIError2(t, "bowl disk [command]", "disk")
+	requireCLIError2(t, `unknown command "unknown" for "bowl disk"`, "disk", "unknown")
 
-	requireHelpExit0(t, "create", "disk", "help")
-	requireHelpExit0(t, "fork", "disk", "-h")
-	requireHelpExit0(t, "delete", "disk", "--help")
+	for _, args := range [][]string{{"help", "disk"}, {"disk", "-h"}, {"disk", "--help"}} {
+		for _, sub := range []string{"create", "fork", "list", "get", "update", "delete", "diff", "merge"} {
+			requireHelpExit0(t, sub, args...)
+		}
+	}
 
-	requireHelpExit0(t, "bowl disk create --size <size>", "disk", "create", "-h")
+	requireHelpExit0(t, "bowl disk create", "disk", "create", "-h")
 	requireHelpExit0(t, "bowl disk fork <source-disk-id>", "disk", "fork", "--help")
-	requireHelpExit0(t, "bowl disk list [flags]", "disk", "list", "-h")
+	requireHelpExit0(t, "bowl disk list", "disk", "list", "-h")
 	requireHelpExit0(t, "bowl disk get <disk-id>", "disk", "get", "--help")
-	requireHelpExit0(t, "bowl disk resize <disk-id>", "disk", "update", "-h")
-	requireHelpExit0(t, "bowl disk resize <disk-id>", "disk", "resize", "--help")
+	requireHelpExit0(t, "update, resize", "disk", "update", "-h")
+	requireHelpExit0(t, "update, resize", "disk", "resize", "--help")
 	requireHelpExit0(t, "bowl disk delete <disk-id>", "disk", "delete", "-h")
 }
 
 func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testing.T) {
-	// fork 校验
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "fork")
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "fork", testDiskID1, "extra")
-	requireCLIError2(t, "无效的 source-disk-id", "disk", "fork", "not-a-uuid")
-	requireCLIError2(t, "无效的 source-disk-id", "disk", "fork", testNilUUID)
-	requireCLIError2(t, "未知标志", "disk", "fork", testDiskID1, "--unknown")
-	requireCLIError2(t, "--size 需要指定参数值", "disk", "fork", testDiskID1, "--size")
-	requireCLIError2(t, "--name 需要指定参数值", "disk", "fork", testDiskID1, "--name")
-	requireCLIError2(t, "--endpoint 需要指定参数值", "disk", "fork", testDiskID1, "--endpoint")
-	requireCLIError2(t, "--token 需要指定参数值", "disk", "fork", testDiskID1, "--token")
-	requireCLIError2(t, "不能同时使用", "disk", "fork", testDiskID1, "-q", "--json")
-	requireCLIError2(t, "无效的 --size 参数", "disk", "fork", testDiskID1, "--size=")
-	requireCLIError2(t, "无效的 --size 参数", "disk", "fork", testDiskID1, "--size", "0")
-	requireCLIError2(t, "不能超过 255 字节", "disk", "fork", testDiskID1, "--name", strings.Repeat("n", 256))
-	requireCLIError2(t, "不能包含空字节", "disk", "fork", testDiskID1, "--name", "bad\x00name")
-	requireCLIError2(t, "无效的 endpoint", "disk", "fork", testDiskID1, "--endpoint", "ftp://127.0.0.1:9000")
+	// fork validation
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "fork")
+	requireCLIError2(t, "accepts 1 arg(s), received 2", "disk", "fork", testDiskID1, "extra")
+	requireCLIError2(t, "invalid source-disk-id", "disk", "fork", "not-a-uuid")
+	requireCLIError2(t, "invalid source-disk-id", "disk", "fork", testNilUUID)
+	requireCLIError2(t, "unknown flag: --unknown", "disk", "fork", testDiskID1, "--unknown")
+	requireCLIError2(t, "flag needs an argument: --size", "disk", "fork", testDiskID1, "--size")
+	requireCLIError2(t, "flag needs an argument: --name", "disk", "fork", testDiskID1, "--name")
+	requireCLIError2(t, "flag needs an argument: --endpoint", "disk", "fork", testDiskID1, "--endpoint")
+	requireCLIError2(t, "flag needs an argument: --token", "disk", "fork", testDiskID1, "--token")
+	requireCLIError2(t, "cannot be used together", "disk", "fork", testDiskID1, "-q", "--json")
+	requireCLIError2(t, "invalid --size", "disk", "fork", testDiskID1, "--size=")
+	requireCLIError2(t, "invalid --size", "disk", "fork", testDiskID1, "--size", "0")
+	requireCLIError2(t, "cannot exceed 255 bytes", "disk", "fork", testDiskID1, "--name", strings.Repeat("n", 256))
+	requireCLIError2(t, "cannot contain NUL", "disk", "fork", testDiskID1, "--name", "bad\x00name")
+	requireCLIError2(t, "invalid endpoint", "disk", "fork", testDiskID1, "--endpoint", "ftp://127.0.0.1:9000")
+	requireCLIError2(t, "Error:", "disk", "fork", testDiskID1, "-q=bad")
+	requireCLIError2(t, "Error:", "disk", "fork", testDiskID1, "--json=bad")
 
-	// create 校验
-	requireCLIError2(t, "create 命令不接受位置参数", "disk", "create", "--size", "1GiB", "extra")
-	requireCLIError2(t, "必须指定 --size 参数", "disk", "create")
-	requireCLIError2(t, "不能同时使用", "disk", "create", "--size", "1GiB", "-q", "--json")
-	requireCLIError2(t, "无效的 --size 参数", "disk", "create", "--size", "bad")
-	requireCLIError2(t, "不能超过 255 字节", "disk", "create", "--size", "1GiB", "--name", strings.Repeat("a", 256))
-	requireCLIError2(t, "不能包含空字节", "disk", "create", "--size", "1GiB", "--name", "bad\x00")
+	// create validation
+	requireCLIError2(t, `unknown command "extra"`, "disk", "create", "--size", "1GiB", "extra")
+	requireCLIError2(t, "--size is required", "disk", "create")
+	requireCLIError2(t, "cannot be used together", "disk", "create", "--size", "1GiB", "-q", "--json")
+	requireCLIError2(t, "invalid --size", "disk", "create", "--size", "bad")
+	requireCLIError2(t, "cannot exceed 255 bytes", "disk", "create", "--size", "1GiB", "--name", strings.Repeat("a", 256))
+	requireCLIError2(t, "cannot contain NUL", "disk", "create", "--size", "1GiB", "--name", "bad\x00")
+	requireCLIError2(t, "Error:", "disk", "create", "--size", "1GiB", "-q=bad")
+	requireCLIError2(t, "Error:", "disk", "create", "--size", "1GiB", "--json=bad")
 
-	// list 校验
-	requireCLIError2(t, "list 命令不接受位置参数", "disk", "list", "extra")
-	requireCLIError2(t, "未知标志", "disk", "list", "-q")
-	requireCLIError2(t, "--limit 需要指定参数值", "disk", "list", "--limit")
-	requireCLIError2(t, "--page-token 需要指定参数值", "disk", "list", "--page-token")
-	requireCLIError2(t, "必须为 [1, 1000] 范围内的整数", "disk", "list", "--limit", "0")
-	requireCLIError2(t, "必须为 [1, 1000] 范围内的整数", "disk", "list", "--limit", "1001")
-	requireCLIError2(t, "必须为 [1, 1000] 范围内的整数", "disk", "list", "--limit", "abc")
+	// list validation
+	requireCLIError2(t, `unknown command "extra"`, "disk", "list", "extra")
+	requireCLIError2(t, "unknown shorthand flag", "disk", "list", "-q")
+	requireCLIError2(t, "flag needs an argument: --limit", "disk", "list", "--limit")
+	requireCLIError2(t, "flag needs an argument: --page-token", "disk", "list", "--page-token")
+	requireCLIError2(t, "must be an integer in [1, 1000]", "disk", "list", "--limit", "0")
+	requireCLIError2(t, "must be an integer in [1, 1000]", "disk", "list", "--limit", "1001")
+	requireCLIError2(t, "Error:", "disk", "list", "--limit", "abc")
+	requireCLIError2(t, "Error:", "disk", "list", "--json=bad")
 
-	// get 校验
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "get")
-	requireCLIError2(t, "无效的 disk-id", "disk", "get", "bad")
-	requireCLIError2(t, "未知标志", "disk", "get", testDiskID1, "-q")
+	// get validation
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "get")
+	requireCLIError2(t, "invalid disk-id", "disk", "get", "bad")
+	requireCLIError2(t, "unknown shorthand flag", "disk", "get", testDiskID1, "-q")
+	requireCLIError2(t, "bad flag syntax: ---json", "disk", "get", testDiskID1, "---json")
+	requireCLIError2(t, "Error:", "disk", "get", testDiskID1, "--json=bad")
 
-	// update / resize 校验
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "update")
-	requireCLIError2(t, "无效的 disk-id", "disk", "update", testNilUUID, "--size", "1GiB")
-	requireCLIError2(t, "未知标志", "disk", "update", testDiskID1, "--size", "1GiB", "--quiet")
-	requireCLIError2(t, "必须至少指定 --size 或 --name 之一", "disk", "update", testDiskID1)
-	requireCLIError2(t, "必须至少指定 --size 或 --name 之一", "disk", "resize", testDiskID1)
-	requireCLIError2(t, "不能超过 255 字节", "disk", "update", testDiskID1, "--name", strings.Repeat("b", 256))
-	requireCLIError2(t, "无效的 --size 参数", "disk", "update", testDiskID1, "--size", "0")
+	// update / resize validation
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "update")
+	requireCLIError2(t, "invalid disk-id", "disk", "update", testNilUUID, "--size", "1GiB")
+	requireCLIError2(t, "unknown flag: --quiet", "disk", "update", testDiskID1, "--size", "1GiB", "--quiet")
+	requireCLIError2(t, "at least one of --size or --name must be specified", "disk", "update", testDiskID1)
+	requireCLIError2(t, "at least one of --size or --name must be specified", "disk", "resize", testDiskID1)
+	requireCLIError2(t, "cannot exceed 255 bytes", "disk", "update", testDiskID1, "--name", strings.Repeat("b", 256))
+	requireCLIError2(t, "invalid --size", "disk", "update", testDiskID1, "--size", "0")
+	requireCLIError2(t, "Error:", "disk", "update", testDiskID1, "--size", "1GiB", "--json=bad")
 
-	// delete 校验
-	requireCLIError2(t, "需要且仅需要 1 个位置参数", "disk", "delete")
-	requireCLIError2(t, "无效的 disk-id", "disk", "delete", "bad")
-	requireCLIError2(t, "未知标志", "disk", "delete", testDiskID1, "-q")
+	// delete validation
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "delete")
+	requireCLIError2(t, "invalid disk-id", "disk", "delete", "bad")
+	requireCLIError2(t, "unknown shorthand flag", "disk", "delete", testDiskID1, "-q")
+	requireCLIError2(t, "unknown shorthand flag", "disk", "delete", testDiskID1, "-yes")
+	requireCLIError2(t, "unknown flag: --y", "disk", "delete", testDiskID1, "--y")
+	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--yes=abc")
+	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "-y=bad")
+	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--json=bad")
 }
 
 func TestDiskCreate_GivenValidSizeAndToken_CreatesDiskInQuietAndJSONModes(t *testing.T) {
@@ -270,12 +285,12 @@ func TestDiskUpdate_GivenTargetBelowUsedBytes_RejectsBeforeUpdateRPC(t *testing.
 	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "不允许缩容至已用水位以下")
-	require.Equal(t, 0, storage.updateCalls, "前置水位校验拦截后不得发起 UpdateDisk 调用")
+	require.Contains(t, errOut, "shrinking below used space is not allowed")
+	require.Equal(t, 0, storage.updateCalls, "pre-check rejection must not call UpdateDisk")
 }
 
 func TestDiskDelete_GivenLocalMountOrInteractiveCancel_BlocksBeforeRPC(t *testing.T) {
-	// Given: 本地 mountinfo 显示磁盘处于挂载状态
+	// Given: local mountinfo shows the disk is mounted
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "busy-disk", 1<<30, 0)
 	withDiskStorageFake(t, storage)
@@ -290,38 +305,82 @@ func TestDiskDelete_GivenLocalMountOrInteractiveCancel_BlocksBeforeRPC(t *testin
 	require.Contains(t, errOut, "bowl umount /mnt/bowl-test")
 	require.Equal(t, 0, storage.deleteCalls)
 
-	// Given: 本机挂载信息不可读
+	// Given: unreadable local mountinfo
 	withUnreadableMountInfo(t)
 	code, out, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "检查本机挂载表失败")
+	require.Contains(t, errOut, "check local mount table")
 	require.Equal(t, 0, storage.deleteCalls)
 
-	// Given: 未挂载但交互输入 n 或 EOF 取消
+	// Given: unmounted but interactive n or EOF cancels
 	withMissingMountInfo(t)
 	withDiskStdin(t, strings.NewReader("n\n"))
 	code, out, errOut = runCLI("disk", "delete", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "操作已取消")
-	require.NotContains(t, errOut, "错误:")
+	require.Contains(t, errOut, "Operation canceled")
+	require.NotContains(t, errOut, "Error:")
 	require.Equal(t, 0, storage.deleteCalls)
 
 	withDiskStdin(t, strings.NewReader(""))
 	code, out, errOut = runCLI("disk", "delete", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "操作已取消")
+	require.Contains(t, errOut, "Operation canceled")
 	require.Equal(t, 0, storage.deleteCalls)
 
-	// Given: stdin 读取报错
+	// Given: stdin read error
 	withDiskStdin(t, errReader{err: errors.New("broken pipe")})
 	code, out, errOut = runCLI("disk", "delete", testDiskID1)
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "读取终端确认输入失败")
+	require.Contains(t, errOut, "read confirmation input")
 	require.Equal(t, 0, storage.deleteCalls)
+}
+
+func TestDiskDelete_GivenYesFalseFlag_PreservesInteractiveConfirmation(t *testing.T) {
+	// Given
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "d1", 1<<30, 0)
+	storage.seedDisk(testDiskID2, "d2", 1<<30, 0)
+	withDiskStorageFake(t, storage)
+	withMissingMountInfo(t)
+
+	// When: --yes=false with "n" cancels without deleting
+	withDiskStdin(t, strings.NewReader("n\n"))
+	code, out, errOut := runCLI("disk", "delete", testDiskID1, "--yes=false")
+
+	// Then
+	require.Equal(t, 1, code)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "Delete virtual disk "+testDiskID1+"? This action is irreversible [y/N]: ")
+	require.Contains(t, errOut, "Operation canceled")
+	require.Equal(t, 0, storage.deleteCalls)
+
+	// When: --yes=false with "y" proceeds to delete
+	withDiskStdin(t, strings.NewReader("y\n"))
+	code, out, errOut = runCLI("disk", "delete", testDiskID1, "--yes=false")
+
+	// Then
+	require.Equal(t, 0, code)
+	require.Contains(t, errOut, "Delete virtual disk "+testDiskID1+"? This action is irreversible [y/N]: ")
+	require.Equal(t, "Deleted virtual disk "+testDiskID1+"\n", out)
+	require.Equal(t, 1, storage.deleteCalls)
+
+	// When: repeated Execute call without -y after -y must still prompt
+	code, _, errOut = runCLI("disk", "delete", testDiskID2, "-y")
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	require.Equal(t, 2, storage.deleteCalls)
+
+	storage.seedDisk(testDiskID2, "d2-reseeded", 1<<30, 0)
+	withDiskStdin(t, strings.NewReader("n\n"))
+	code, out, errOut = runCLI("disk", "delete", testDiskID2)
+	require.Equal(t, 1, code)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "Operation canceled")
+	require.Equal(t, 2, storage.deleteCalls)
 }
 
 func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) {
@@ -332,7 +391,7 @@ func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) 
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: --yes --json 删除第一块
+	// When: --yes --json deletes first disk
 	code, jsonOut, errOut := runCLI("disk", "delete", testDiskID1, "--yes", "--json")
 
 	// Then
@@ -343,14 +402,62 @@ func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) 
 	require.Equal(t, testDiskID1, delRes.DiskID)
 	require.True(t, delRes.Deleted)
 
-	// When: 交互输入 YES 删除第二块
+	// When: interactive YES deletes second disk
 	withDiskStdin(t, strings.NewReader("YES\n"))
 	code, textOut, errOut := runCLI("disk", "delete", testDiskID2)
 
 	// Then
 	require.Equal(t, 0, code)
-	require.Contains(t, errOut, "确认删除虚拟磁盘")
-	require.Equal(t, "已删除虚拟磁盘 "+testDiskID2+"\n", textOut)
+	require.Contains(t, errOut, "Delete virtual disk "+testDiskID2+"? This action is irreversible [y/N]: ")
+	require.Equal(t, "Deleted virtual disk "+testDiskID2+"\n", textOut)
+}
+
+func TestDisk_GivenJSONFalseFlag_KeepsHumanOutput(t *testing.T) {
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "root", 2<<30, 4096)
+	storage.seedDisk(testDiskID2, "target", 2<<30, 0)
+	withDiskStorageFake(t, storage)
+	withMissingMountInfo(t)
+
+	code, out, errOut := runCLI("disk", "create", "--size", "1GiB", "--name", "c-human", "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Disk ID:")
+
+	code, out, errOut = runCLI("disk", "fork", testDiskID1, "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Parent Disk:  "+testDiskID1)
+
+	code, out, errOut = runCLI("disk", "list", "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "DISK ID")
+
+	code, out, errOut = runCLI("disk", "get", testDiskID1, "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Disk ID:      "+testDiskID1)
+
+	code, out, errOut = runCLI("disk", "update", testDiskID1, "--name", "updated-human", "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Name:         updated-human")
+
+	code, out, errOut = runCLI("disk", "diff", testDiskID1, "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Summary:")
+
+	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Merged successfully")
+
+	code, out, errOut = runCLI("disk", "delete", testDiskID1, "--yes", "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Equal(t, "Deleted virtual disk "+testDiskID1+"\n", out)
 }
 
 func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testing.T) {
@@ -359,46 +466,46 @@ func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testin
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// CodeNotFound 场景 (fork / get / update / delete)
+	// CodeNotFound across fork, get, update, delete
 	code, _, errOut := runCLI("disk", "fork", testDiskID1)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "磁盘不存在: "+testDiskID1)
+	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
 	code, _, errOut = runCLI("disk", "get", testDiskID1)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "磁盘不存在: "+testDiskID1)
+	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
 	code, _, errOut = runCLI("disk", "update", testDiskID1, "--name", "only-name")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "磁盘不存在: "+testDiskID1)
+	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "磁盘不存在: "+testDiskID1)
+	require.Contains(t, errOut, "disk not found: "+testDiskID1)
 
-	// CodeFailedPrecondition 场景 (fork 缩容 / update 并发缩容 / delete 活跃会话)
+	// CodeFailedPrecondition across fork, delete, update
 	storage.seedDisk(testDiskID1, "root", 100<<20, 10<<20)
 	code, _, errOut = runCLI("disk", "fork", testDiskID1, "--size", "1MiB")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "目标容量小于源磁盘已用容量")
+	require.Contains(t, errOut, "target size is smaller than source disk used bytes")
 
 	storage.mounted[testDiskID1] = true
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "仍处于挂载状态")
+	require.Contains(t, errOut, "still mounted")
 	delete(storage.mounted, testDiskID1)
 
 	storage.forcedErr["UpdateDisk"] = connect.NewError(connect.CodeFailedPrecondition, errors.New("shrink conflict"))
 	code, _, errOut = runCLI("disk", "update", testDiskID1, "--name", "only-name")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "目标容量小于磁盘当前已用容量")
+	require.Contains(t, errOut, "target size is smaller than current used bytes")
 	delete(storage.forcedErr, "UpdateDisk")
 
-	// delete: CodeInvalidArgument -> 退出码 2; ErrorInfo{Reason:"EBUSY"} -> 挂载提示退出码 1
+	// delete: CodeInvalidArgument -> exit 2; ErrorInfo Reason EBUSY -> exit 1
 	storage.forcedErr["DeleteDisk"] = connect.NewError(connect.CodeInvalidArgument, errors.New("bad disk id"))
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 2, code)
-	require.Contains(t, errOut, "无效的请求参数")
+	require.Contains(t, errOut, "invalid request argument")
 
 	ebusyErr := connect.NewError(connect.CodeUnavailable, errors.New("busy"))
 	detail, detailErr := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
@@ -407,37 +514,37 @@ func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testin
 	storage.forcedErr["DeleteDisk"] = ebusyErr
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "仍处于挂载状态")
+	require.Contains(t, errOut, "still mounted")
 
 	storage.forcedErr["DeleteDisk"] = connect.NewError(connect.CodeInternal, errors.New("delete boom"))
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "删除虚拟磁盘失败")
+	require.Contains(t, errOut, "delete virtual disk failed")
 	delete(storage.forcedErr, "DeleteDisk")
 
-	// ListDisks 内部错误与空元数据返回
+	// ListDisks internal error and empty disk metadata responses
 	storage.forcedErr["ListDisks"] = connect.NewError(connect.CodeInternal, errors.New("list boom"))
 	code, _, errOut = runCLI("disk", "list")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "列出虚拟磁盘失败")
+	require.Contains(t, errOut, "list virtual disks failed")
 	delete(storage.forcedErr, "ListDisks")
 
 	storage.returnNilDisk["CreateDisk"] = true
 	code, _, errOut = runCLI("disk", "create", "--size", "1GiB")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "空的虚拟磁盘元数据")
+	require.Contains(t, errOut, "empty virtual disk metadata")
 	delete(storage.returnNilDisk, "CreateDisk")
 
 	storage.returnNilDisk["ForkDisk"] = true
 	code, _, errOut = runCLI("disk", "fork", testDiskID1)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "空的虚拟磁盘元数据")
+	require.Contains(t, errOut, "empty virtual disk metadata")
 	delete(storage.returnNilDisk, "ForkDisk")
 
 	storage.returnNilDisk["UpdateDisk"] = true
 	code, _, errOut = runCLI("disk", "update", testDiskID1, "--name", "only-name")
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "空的虚拟磁盘元数据")
+	require.Contains(t, errOut, "empty virtual disk metadata")
 }
 
 func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(t *testing.T) {
@@ -448,7 +555,7 @@ func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: create 链路追踪
+	// When: create tracing
 	exporter.Reset()
 	code, createOut, errOut := runCLI("disk", "create", "--size", "1GiB", "-q")
 	require.Equal(t, 0, code)
@@ -459,7 +566,7 @@ func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(
 	require.NotEmpty(t, storage.lastRequestID)
 	require.NotEqual(t, "1", storage.lastRequestID)
 
-	// When: fork 链路追踪与磁盘属性记录
+	// When: fork tracing and disk attributes
 	exporter.Reset()
 	code, forkOut, errOut := runCLI("disk", "fork", createdID, "--name", "traced-fork", "-q")
 	require.Equal(t, 0, code)
@@ -470,7 +577,7 @@ func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(
 	requireSpanStringAttr(t, forkSpan, "bowl.source_disk_id", createdID)
 	requireSpanStringAttr(t, forkSpan, "bowl.disk_id", forkedID)
 
-	// When: list / get / resize / delete 链路追踪
+	// When: list / get / resize / delete tracing
 	exporter.Reset()
 	code, _, errOut = runCLI("disk", "list")
 	require.Equal(t, 0, code)
@@ -499,11 +606,11 @@ func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(
 	deleteSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.delete")
 	require.Contains(t, storage.lastTraceparent, deleteSpan.SpanContext.TraceID().String())
 
-	// When: 失败路径标记 Span Error 状态
+	// When: failure path marks span status as error
 	exporter.Reset()
 	code, _, errOut = runCLI("disk", "fork", testDiskID2)
 	require.Equal(t, 1, code)
-	require.Contains(t, errOut, "磁盘不存在")
+	require.Contains(t, errOut, "disk not found")
 	errSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.fork")
 	require.Equal(t, codes.Error, errSpan.Status.Code)
 }

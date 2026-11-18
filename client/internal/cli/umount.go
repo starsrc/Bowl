@@ -3,26 +3,15 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
-const umountUsageHelp = `用法:
-  bowl umount <mountpoint> [flags] (别名: unmount)
-
-参数:
-  <mountpoint>    已挂载的目录路径（必填）
-
-标志:
-  -f, --force     强制/懒卸载忙碌挂载点
-  -h, --help      查看帮助信息
-`
-
-// runCommand、lookPath 与排空等待参数允许在单元测试中替身注入。
+// Test seams for unmount tool discovery, execution, and drain polling.
 var (
 	lookPath   = exec.LookPath
 	runCommand = func(name string, args ...string) ([]byte, error) {
@@ -65,75 +54,47 @@ func waitMountMetaDrained(metaPath string, pid int) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("卸载命令已返回，但等待挂载进程完成刷盘与租约释放超时 (%s)", metaPath)
+			return fmt.Errorf("unmount command returned, but timed out waiting for mount process drain and lease release for %s", metaPath)
 		}
 		time.Sleep(umountDrainPollInterval)
 	}
 }
 
-// executeUmount 解析 umount / unmount 命令参数并调用系统卸载工具。
-func executeUmount(args []string, stdout, stderr io.Writer) int {
-	var (
-		force bool
-		help  bool
-	)
+func newUmountCmd() *cobra.Command {
+	var force bool
 
-	var posArgs []string
-	for i := range args {
-		arg := args[i]
-		if arg == "--" {
-			posArgs = append(posArgs, args[i+1:]...)
-			break
-		}
-		if strings.HasPrefix(arg, "-") {
-			switch arg {
-			case "-h", "--help":
-				help = true
-			case "-f", "--force":
-				force = true
-			default:
-				fmt.Fprintf(stderr, "错误: 未知标志 \"%s\"\n\n%s", arg, umountUsageHelp)
-				return 2
-			}
-		} else {
-			posArgs = append(posArgs, arg)
-		}
+	cmd := &cobra.Command{
+		Use:     "umount <mountpoint>",
+		Aliases: []string{"unmount"},
+		Short:   "Unmount a locally mounted virtual disk",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, posArgs []string) error {
+			return runUmount(posArgs[0], force)
+		},
 	}
 
-	if help {
-		fmt.Fprint(stdout, umountUsageHelp)
-		return 0
-	}
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Force or lazy unmount a busy mountpoint")
+	return cmd
+}
 
-	if len(posArgs) != 1 {
-		fmt.Fprintf(stderr, "错误: umount 命令需要且仅需要 1 个位置参数 (<mountpoint>)\n\n%s", umountUsageHelp)
-		return 2
-	}
-
-	mountpoint := posArgs[0]
+func runUmount(mountpoint string, force bool) error {
 	absMountpoint, err := filepath.Abs(mountpoint)
 	if err != nil {
-		fmt.Fprintf(stderr, "错误: 挂载点路径解析失败: %v\n", err)
-		return 1
+		return runtimeExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err))
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
-	// 1. 校验目标是否为活跃挂载点
 	mounted, err := IsMountPoint(absMountpoint)
 	if err != nil {
-		fmt.Fprintf(stderr, "错误: 检查挂载点状态失败: %v\n", err)
-		return 1
+		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
 	if !mounted {
-		fmt.Fprintf(stderr, "错误: 路径 \"%s\" 不是已挂载的文件系统\n", absMountpoint)
-		return 1
+		return runtimeExitErr(fmt.Errorf("path %q is not a mounted filesystem", absMountpoint))
 	}
 
-	// 2. 按优先级查找并执行系统卸载工具
 	binPath, cmdArgs, found := findUmountCommand(absMountpoint, force)
 	if !found {
-		fmt.Fprintln(stderr, "错误: 未找到系统卸载工具 (fusermount3/fusermount/umount)")
-		return 1
+		return runtimeExitErr(errors.New("no system unmount tool found: expected fusermount3, fusermount, or umount"))
 	}
 
 	var (
@@ -148,16 +109,18 @@ func executeUmount(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	if out, err := runCommand(binPath, cmdArgs...); err != nil {
-		fmt.Fprintf(stderr, "错误: 卸载执行失败: %v\n%s", err, string(out))
-		return 1
+	if out, runErr := runCommand(binPath, cmdArgs...); runErr != nil {
+		outStr := string(out)
+		if outStr != "" {
+			return runtimeExitErr(fmt.Errorf("unmount failed: %w\n%s", runErr, outStr))
+		}
+		return runtimeExitErr(fmt.Errorf("unmount failed: %w", runErr))
 	}
 
 	if !force && hasMeta {
 		if drainErr := waitMountMetaDrained(metaPath, metaPID); drainErr != nil {
-			fmt.Fprintf(stderr, "错误: %v\n", drainErr)
-			return 1
+			return runtimeExitErr(drainErr)
 		}
 	}
-	return 0
+	return nil
 }

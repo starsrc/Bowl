@@ -578,7 +578,7 @@ func TestStagedMode_FlagValidation_GivenInvalidArgsOrEnv_Exits2(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := runBowlExpectExit(t, 2, tc.args...)
-			require.Contains(t, out, "错误:", "scene=%s want=错误_prefix got=%s", tc.name, out)
+			require.Contains(t, out, "Error:", "scene=%s want=Error_prefix got=%s", tc.name, out)
 		})
 	}
 }

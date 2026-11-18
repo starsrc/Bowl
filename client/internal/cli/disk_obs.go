@@ -19,9 +19,7 @@ import (
 
 const cliTracerServiceName = "bowl-cli"
 
-// startDiskCLISpan 在执行 bowl disk 控制面命令前建立根 Span（或复用调用方测试注入的全局 TracerProvider），
-// 并确保全局 TracerProvider 与 W3C TraceContext Propagator 在 newDiskStorageClient 构造 otelconnect 拦截器前已就绪。
-// 必须配合 defer finish() 使用，以在短命 CLI 退出前冲洗导出 BatchSpanProcessor 缓存。
+// startDiskCLISpan starts a root span before disk control-plane RPCs, reusing any preconfigured SDK TracerProvider.
 func startDiskCLISpan(
 	ctx context.Context,
 	spanName string,
@@ -31,7 +29,6 @@ func startDiskCLISpan(
 		ctx = context.Background()
 	}
 
-	// 若单测或上游已预先注入 SDK TracerProvider，则直接复用且不覆写全局状态。
 	if _, isSDK := otel.GetTracerProvider().(*sdktrace.TracerProvider); isSDK {
 		spanCtx, span := otel.Tracer(cliTracerServiceName).Start(ctx, spanName, trace.WithAttributes(attrs...))
 		return spanCtx, span, func() { span.End() }

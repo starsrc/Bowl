@@ -180,7 +180,7 @@ func TestMount_Help_GivenHelpFlag_PrintsUpdatedUsageWithoutLegacyRO(t *testing.T
 			require.Equal(t, 0, code, "scene=mount_help flag=%s want=0 got=%d stderr=%s", tc.flag, code, errOut)
 			require.Empty(t, errOut)
 			require.Contains(t, out, "bowl mount <disk-id> <mountpoint>")
-			require.Contains(t, out, "staged|sync|ro")
+			require.Contains(t, out, "staged, sync, or ro")
 			require.Contains(t, out, "--stage-size")
 			require.Contains(t, out, "--stage-dir")
 			require.NotContains(t, out, "--ro")
@@ -199,39 +199,46 @@ func TestMount_Validation_GivenInvalidFlagsOrArgs_Exits2(t *testing.T) {
 		args       []string
 		wantSubstr string
 	}{
-		{name: "ZeroPosArgs", args: []string{"mount"}, wantSubstr: "需要且仅需要 2 个位置参数"},
-		{name: "OnePosArg", args: []string{"mount", testDiskID1}, wantSubstr: "需要且仅需要 2 个位置参数"},
-		{name: "ThreePosArgs", args: []string{"mount", testDiskID1, validMP, "extra"}, wantSubstr: "需要且仅需要 2 个位置参数"},
-		{name: "UnknownFlag", args: []string{"mount", testDiskID1, validMP, "--bogus"}, wantSubstr: `未知标志 "--bogus"`},
-		{name: "LegacyROFlag", args: []string{"mount", testDiskID1, validMP, "--ro"}, wantSubstr: `未知标志 "--ro"`},
-		{name: "LegacyROFalseFlag", args: []string{"mount", testDiskID1, validMP, "--ro=false"}, wantSubstr: `未知标志 "--ro=false"`},
-		{name: "MissingEndpointValue", args: []string{"mount", testDiskID1, validMP, "--endpoint"}, wantSubstr: "取值无效"},
-		{name: "MissingModeValue", args: []string{"mount", testDiskID1, validMP, "--mode"}, wantSubstr: "取值无效"},
-		{name: "MissingStageSizeValue", args: []string{"mount", testDiskID1, validMP, "--stage-size"}, wantSubstr: "取值无效"},
-		{name: "MissingStageDirValue", args: []string{"mount", testDiskID1, validMP, "--stage-dir"}, wantSubstr: "取值无效"},
-		{name: "InvalidStatsBool", args: []string{"mount", testDiskID1, validMP, "--stats-file=not-bool"}, wantSubstr: "取值无效"},
-		{name: "NegativeTraceRatio", args: []string{"mount", testDiskID1, validMP, "--trace-sample-ratio", "-0.1"}, wantSubstr: "无效的 --trace-sample-ratio"},
-		{name: "OverOneTraceRatio", args: []string{"mount", testDiskID1, validMP, "--trace-sample-ratio", "1.5"}, wantSubstr: "无效的 --trace-sample-ratio"},
-		{name: "NonNumericTraceRatio", args: []string{"mount", testDiskID1, validMP, "--trace-sample-ratio", "NaN-bad"}, wantSubstr: "取值无效"},
-		{name: "InvalidLogLevel", args: []string{"mount", testDiskID1, validMP, "--log-level", "verbose"}, wantSubstr: "无效的 --log-level"},
-		{name: "InvalidLogFormat", args: []string{"mount", testDiskID1, validMP, "--log-format", "yaml"}, wantSubstr: "无效的 --log-format"},
-		{name: "InvalidAdminAddr", args: []string{"mount", testDiskID1, validMP, "--admin-addr", "bad-addr"}, wantSubstr: "无效的 --admin-addr"},
-		{name: "InvalidModeBogus", args: []string{"mount", testDiskID1, validMP, "--mode", "bogus"}, wantSubstr: "可选 staged|sync|ro"},
-		{name: "EmptyMode", args: []string{"mount", testDiskID1, validMP, "--mode="}, wantSubstr: "可选 staged|sync|ro"},
-		{name: "ROWithStageSize", args: []string{"mount", testDiskID1, validMP, "--mode", "ro", "--stage-size", "8MiB"}, wantSubstr: "不能指定 --stage-size"},
-		{name: "ROWithStageDir", args: []string{"mount", testDiskID1, validMP, "--mode=ro", "--stage-dir", "/tmp/x"}, wantSubstr: "不能指定 --stage-dir"},
-		{name: "SyncWithStageSize", args: []string{"mount", testDiskID1, validMP, "--mode", "sync", "--stage-size", "8MiB"}, wantSubstr: "--mode sync 同步直通模式下不能指定 --stage-size"},
-		{name: "SyncWithStageDir", args: []string{"mount", testDiskID1, validMP, "--mode=sync", "--stage-dir", "/tmp/x"}, wantSubstr: "--mode sync 同步直通模式下不能指定 --stage-dir"},
-		{name: "StageSize1MiB", args: []string{"mount", testDiskID1, validMP, "--stage-size", "1MiB"}, wantSubstr: "最小允许"},
-		{name: "StageSizeBelow4MiBBy1B", args: []string{"mount", testDiskID1, validMP, "--stage-size", "4194303"}, wantSubstr: "最小允许"},
-		{name: "StageSizeBadUnit", args: []string{"mount", testDiskID1, validMP, "--stage-size", "bad"}, wantSubstr: "无效的 --stage-size"},
-		{name: "EmptyStageDir", args: []string{"mount", testDiskID1, validMP, "--stage-dir", ""}, wantSubstr: "--stage-dir 不能为空"},
-		{name: "WhitespaceStageDir", args: []string{"mount", testDiskID1, validMP, "--stage-dir=   "}, wantSubstr: "--stage-dir 不能为空"},
-		{name: "InvalidUUID", args: []string{"mount", "not-a-uuid", validMP}, wantSubstr: "无效的 disk-id"},
-		{name: "NilUUID", args: []string{"mount", testNilUUID, validMP}, wantSubstr: "无效的 disk-id"},
-		{name: "MissingMountpoint", args: []string{"mount", testDiskID1, missingMP}, wantSubstr: "不存在或无法访问"},
-		{name: "NonDirMountpoint", args: []string{"mount", testDiskID1, fileMP}, wantSubstr: "不是目录"},
-		{name: "InvalidEndpoint", args: []string{"mount", testDiskID1, validMP, "--endpoint", "ftp://127.0.0.1:9000"}, wantSubstr: "无效的 endpoint"},
+		{name: "ZeroPosArgs", args: []string{"mount"}, wantSubstr: "accepts 2 arg(s), received 0"},
+		{name: "OnePosArg", args: []string{"mount", testDiskID1}, wantSubstr: "accepts 2 arg(s), received 1"},
+		{name: "ThreePosArgs", args: []string{"mount", testDiskID1, validMP, "extra"}, wantSubstr: "accepts 2 arg(s), received 3"},
+		{name: "UnknownFlag", args: []string{"mount", testDiskID1, validMP, "--bogus"}, wantSubstr: "unknown flag: --bogus"},
+		{name: "LegacyROFlag", args: []string{"mount", testDiskID1, validMP, "--ro"}, wantSubstr: "unknown flag: --ro"},
+		{name: "LegacyROFalseFlag", args: []string{"mount", testDiskID1, validMP, "--ro=false"}, wantSubstr: "unknown flag: --ro"},
+		{name: "ShortLookalikeYesFlag", args: []string{"mount", testDiskID1, validMP, "-yes"}, wantSubstr: "unknown shorthand flag"},
+		{name: "LongYFlag", args: []string{"mount", testDiskID1, validMP, "--y"}, wantSubstr: "unknown flag: --y"},
+		{name: "TripleDashJSONFlag", args: []string{"mount", testDiskID1, validMP, "---json"}, wantSubstr: "bad flag syntax: ---json"},
+		{name: "MissingEndpointValue", args: []string{"mount", testDiskID1, validMP, "--endpoint"}, wantSubstr: "flag needs an argument: --endpoint"},
+		{name: "MissingModeValue", args: []string{"mount", testDiskID1, validMP, "--mode"}, wantSubstr: "flag needs an argument: --mode"},
+		{name: "MissingStageSizeValue", args: []string{"mount", testDiskID1, validMP, "--stage-size"}, wantSubstr: "flag needs an argument: --stage-size"},
+		{name: "MissingStageDirValue", args: []string{"mount", testDiskID1, validMP, "--stage-dir"}, wantSubstr: "flag needs an argument: --stage-dir"},
+		{name: "InvalidStatsBool", args: []string{"mount", testDiskID1, validMP, "--stats-file=not-bool"}, wantSubstr: "invalid argument"},
+		{name: "InvalidForegroundBool", args: []string{"mount", testDiskID1, validMP, "--foreground=bad"}, wantSubstr: "invalid argument"},
+		{name: "InvalidAllowOtherBool", args: []string{"mount", testDiskID1, validMP, "--allow-other=bad"}, wantSubstr: "invalid argument"},
+		{name: "InvalidDirectIOBool", args: []string{"mount", testDiskID1, validMP, "--direct-io=bad"}, wantSubstr: "invalid argument"},
+		{name: "InvalidDebugBool", args: []string{"mount", testDiskID1, validMP, "--debug=bad"}, wantSubstr: "invalid argument"},
+		{name: "NegativeTraceRatio", args: []string{"mount", testDiskID1, validMP, "--trace-sample-ratio", "-0.1"}, wantSubstr: "invalid --trace-sample-ratio"},
+		{name: "OverOneTraceRatio", args: []string{"mount", testDiskID1, validMP, "--trace-sample-ratio", "1.5"}, wantSubstr: "invalid --trace-sample-ratio"},
+		{name: "NonNumericTraceRatio", args: []string{"mount", testDiskID1, validMP, "--trace-sample-ratio", "NaN-bad"}, wantSubstr: "invalid argument"},
+		{name: "InvalidLogLevel", args: []string{"mount", testDiskID1, validMP, "--log-level", "verbose"}, wantSubstr: "invalid --log-level"},
+		{name: "InvalidLogFormat", args: []string{"mount", testDiskID1, validMP, "--log-format", "yaml"}, wantSubstr: "invalid --log-format"},
+		{name: "InvalidAdminAddr", args: []string{"mount", testDiskID1, validMP, "--admin-addr", "bad-addr"}, wantSubstr: "invalid --admin-addr"},
+		{name: "InvalidModeBogus", args: []string{"mount", testDiskID1, validMP, "--mode", "bogus"}, wantSubstr: "must be staged, sync, or ro"},
+		{name: "EmptyMode", args: []string{"mount", testDiskID1, validMP, "--mode="}, wantSubstr: "must be staged, sync, or ro"},
+		{name: "ROWithStageSize", args: []string{"mount", testDiskID1, validMP, "--mode", "ro", "--stage-size", "8MiB"}, wantSubstr: "--stage-size cannot be set when --mode is ro"},
+		{name: "ROWithStageDir", args: []string{"mount", testDiskID1, validMP, "--mode=ro", "--stage-dir", "/tmp/x"}, wantSubstr: "--stage-dir cannot be set when --mode is ro"},
+		{name: "SyncWithStageSize", args: []string{"mount", testDiskID1, validMP, "--mode", "sync", "--stage-size", "8MiB"}, wantSubstr: "--stage-size cannot be set when --mode is sync"},
+		{name: "SyncWithStageDir", args: []string{"mount", testDiskID1, validMP, "--mode=sync", "--stage-dir", "/tmp/x"}, wantSubstr: "--stage-dir cannot be set when --mode is sync"},
+		{name: "StageSize1MiB", args: []string{"mount", testDiskID1, validMP, "--stage-size", "1MiB"}, wantSubstr: "minimum is"},
+		{name: "StageSizeBelow4MiBBy1B", args: []string{"mount", testDiskID1, validMP, "--stage-size", "4194303"}, wantSubstr: "minimum is"},
+		{name: "StageSizeBadUnit", args: []string{"mount", testDiskID1, validMP, "--stage-size", "bad"}, wantSubstr: "invalid --stage-size"},
+		{name: "EmptyStageDir", args: []string{"mount", testDiskID1, validMP, "--stage-dir", ""}, wantSubstr: "--stage-dir cannot be empty"},
+		{name: "WhitespaceStageDir", args: []string{"mount", testDiskID1, validMP, "--stage-dir=   "}, wantSubstr: "--stage-dir cannot be empty"},
+		{name: "InvalidUUID", args: []string{"mount", "not-a-uuid", validMP}, wantSubstr: "invalid disk-id"},
+		{name: "NilUUID", args: []string{"mount", testNilUUID, validMP}, wantSubstr: "invalid disk-id"},
+		{name: "MissingMountpoint", args: []string{"mount", testDiskID1, missingMP}, wantSubstr: "does not exist or cannot be accessed"},
+		{name: "NonDirMountpoint", args: []string{"mount", testDiskID1, fileMP}, wantSubstr: "is not a directory"},
+		{name: "InvalidEndpoint", args: []string{"mount", testDiskID1, validMP, "--endpoint", "ftp://127.0.0.1:9000"}, wantSubstr: "invalid endpoint"},
 	}
 
 	for _, tc := range cases {
@@ -253,11 +260,11 @@ func TestMount_Validation_GivenInvalidEnvVars_Exits2(t *testing.T) {
 		envVal     string
 		wantSubstr string
 	}{
-		{name: "BadOTELSampleRatio", envKey: "OTEL_TRACES_SAMPLER_ARG", envVal: "not-float", wantSubstr: "无效的环境变量 OTEL_TRACES_SAMPLER_ARG"},
-		{name: "InvalidModeBogus", envKey: "BOWL_MOUNT_MODE", envVal: "bogus", wantSubstr: "可选 staged|sync|ro"},
-		{name: "StageSize1MiB", envKey: "BOWL_STAGE_SIZE", envVal: "1MiB", wantSubstr: "最小允许"},
+		{name: "BadOTELSampleRatio", envKey: "OTEL_TRACES_SAMPLER_ARG", envVal: "not-float", wantSubstr: "invalid environment variable OTEL_TRACES_SAMPLER_ARG"},
+		{name: "InvalidModeBogus", envKey: "BOWL_MOUNT_MODE", envVal: "bogus", wantSubstr: "must be staged, sync, or ro"},
+		{name: "StageSize1MiB", envKey: "BOWL_STAGE_SIZE", envVal: "1MiB", wantSubstr: "minimum is"},
 		{name: "StageSizeBogus", envKey: "BOWL_STAGE_SIZE", envVal: "bogus", wantSubstr: "BOWL_STAGE_SIZE"},
-		{name: "StageDirInsideMountpoint", envKey: "BOWL_STAGE_DIR", envVal: filepath.Join(mp, "env-sub"), wantSubstr: "挂载点"},
+		{name: "StageDirInsideMountpoint", envKey: "BOWL_STAGE_DIR", envVal: filepath.Join(mp, "env-sub"), wantSubstr: "mountpoint"},
 	}
 
 	for _, tc := range cases {
@@ -289,12 +296,12 @@ func TestMount_Validation_GivenStageDirPathViolations_Exits2(t *testing.T) {
 		stageDir   string
 		wantSubstr string
 	}{
-		{name: "ExistingRegularFile", mountpoint: mp, stageDir: regularFile, wantSubstr: "已存在且不是目录"},
-		{name: "NestedInsideRegularFile", mountpoint: mp, stageDir: filepath.Join(regularFile, "sub"), wantSubstr: "路径无效"},
-		{name: "EqualToMountpoint", mountpoint: mp, stageDir: mp, wantSubstr: "挂载点"},
-		{name: "SubdirOfMountpoint", mountpoint: mp, stageDir: filepath.Join(mp, "sub"), wantSubstr: "挂载点"},
-		{name: "SymlinkIntoMountpoint", mountpoint: mp, stageDir: symIntoMP, wantSubstr: "挂载点"},
-		{name: "SymlinkMountpointWithRealSubdir", mountpoint: symMP, stageDir: filepath.Join(mp, "via-real"), wantSubstr: "挂载点"},
+		{name: "ExistingRegularFile", mountpoint: mp, stageDir: regularFile, wantSubstr: "already exists and is not a directory"},
+		{name: "NestedInsideRegularFile", mountpoint: mp, stageDir: filepath.Join(regularFile, "sub"), wantSubstr: "invalid path"},
+		{name: "EqualToMountpoint", mountpoint: mp, stageDir: mp, wantSubstr: "mountpoint"},
+		{name: "SubdirOfMountpoint", mountpoint: mp, stageDir: filepath.Join(mp, "sub"), wantSubstr: "mountpoint"},
+		{name: "SymlinkIntoMountpoint", mountpoint: mp, stageDir: symIntoMP, wantSubstr: "mountpoint"},
+		{name: "SymlinkMountpointWithRealSubdir", mountpoint: symMP, stageDir: filepath.Join(mp, "via-real"), wantSubstr: "mountpoint"},
 	}
 
 	for _, tc := range cases {
@@ -308,7 +315,7 @@ func TestMount_Validation_GivenStageDirPathViolations_Exits2(t *testing.T) {
 }
 
 func TestMount_Validation_GivenRelativeDotInsideMountpoint_Exits2(t *testing.T) {
-	// Given: 当前工作目录为挂载点子目录且 --stage-dir 为 "."
+	// Given: current working directory is inside the mountpoint and --stage-dir is "."
 	mp := t.TempDir()
 	subDir := filepath.Join(mp, "nested")
 	require.NoError(t, os.MkdirAll(subDir, 0o755))
@@ -320,11 +327,11 @@ func TestMount_Validation_GivenRelativeDotInsideMountpoint_Exits2(t *testing.T) 
 	// Then
 	require.Equal(t, 2, code, "scene=relative_dot_in_mountpoint want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "挂载点")
+	require.Contains(t, errOut, "mountpoint")
 }
 
 func TestMount_Validation_GivenStageDirSymlinkLoop_Exits2(t *testing.T) {
-	// Given: --stage-dir 指向循环符号链接
+	// Given: --stage-dir points to a symlink loop
 	mp := t.TempDir()
 	loopDir := t.TempDir()
 	loopA := filepath.Join(loopDir, "loop-a")
@@ -338,7 +345,7 @@ func TestMount_Validation_GivenStageDirSymlinkLoop_Exits2(t *testing.T) {
 	// Then
 	require.Equal(t, 2, code, "scene=stage_dir_symlink_loop want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "错误:")
+	require.Contains(t, errOut, "Error:")
 }
 
 func TestMount_AlreadyMounted_GivenActiveMountInfo_ReturnsExit1(t *testing.T) {
@@ -352,7 +359,7 @@ func TestMount_AlreadyMounted_GivenActiveMountInfo_ReturnsExit1(t *testing.T) {
 	// Then
 	require.Equal(t, 1, code, "scene=already_mounted want=1 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "当前已挂载")
+	require.Contains(t, errOut, "already mounted")
 }
 
 func TestMount_DefaultConfig_GivenNoModeOrStageFlags_UsesStaged512MiBAndDefaultStageDir(t *testing.T) {
@@ -645,11 +652,11 @@ func TestMount_ForegroundSync_GivenEnvModeMixedCaseAndExplicitStageFlagsOrZeroEp
 	// Explicit --stage-size or --stage-dir with BOWL_MOUNT_MODE=sync exits with code 2.
 	codeSize, _, errSize := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-size", "8MiB")
 	require.Equal(t, 2, codeSize, "scene=env_sync_with_stage_size want=2 got=%d stderr=%s", codeSize, errSize)
-	require.Contains(t, errSize, "--mode sync 同步直通模式下不能指定 --stage-size")
+	require.Contains(t, errSize, "--stage-size cannot be set when --mode is sync")
 
 	codeDir, _, errDir := runCLIWithDeadline(t, 2*time.Second, "mount", testDiskID1, mp, "--stage-dir", "/tmp/x")
 	require.Equal(t, 2, codeDir, "scene=env_sync_with_stage_dir want=2 got=%d stderr=%s", codeDir, errDir)
-	require.Contains(t, errDir, "--mode sync 同步直通模式下不能指定 --stage-dir")
+	require.Contains(t, errDir, "--stage-dir cannot be set when --mode is sync")
 
 	// Server returning Epoch=0 under sync mode fails handshake with exit code 1.
 	withCleanOTelAndLogger(t)
@@ -661,7 +668,7 @@ func TestMount_ForegroundSync_GivenEnvModeMixedCaseAndExplicitStageFlagsOrZeroEp
 
 	codeZeroEpoch, _, errZeroEpoch := runCLI("mount", testDiskID1, mp, "-f", "--admin-addr", "off")
 	require.Equal(t, 1, codeZeroEpoch, "scene=env_sync_zero_epoch want=1 got=%d stderr=%s", codeZeroEpoch, errZeroEpoch)
-	require.Contains(t, errZeroEpoch, "有效的写挂载世代号")
+	require.Contains(t, errZeroEpoch, "valid write mount epoch")
 	require.NoDirExists(t, unusedStageDir)
 
 	// Valid server Epoch succeeds via BOWL_MOUNT_MODE fallback without opening a stage session.
@@ -694,9 +701,9 @@ func TestMount_HandshakeErrors_GivenServerRejectsMount_ReturnsExit1AndCleansStag
 		setup      func(*fakeStorage)
 		wantSubstr string
 	}{
-		{name: "DiskNotFound", setup: noOpStorageSetup, wantSubstr: "磁盘不存在: " + testDiskID1},
-		{name: "EmptyRootInode", setup: seedFaultyMountStorage(true, false), wantSubstr: "无效的磁盘根目录元数据"},
-		{name: "RWZeroEpoch", setup: seedFaultyMountStorage(false, true), wantSubstr: "有效的写挂载世代号"},
+		{name: "DiskNotFound", setup: noOpStorageSetup, wantSubstr: "disk not found: " + testDiskID1},
+		{name: "EmptyRootInode", setup: seedFaultyMountStorage(true, false), wantSubstr: "invalid root directory metadata"},
+		{name: "RWZeroEpoch", setup: seedFaultyMountStorage(false, true), wantSubstr: "valid write mount epoch"},
 	}
 
 	for _, tc := range cases {
@@ -781,7 +788,7 @@ func TestRunMount_StageSessionError_GivenUncreatableStageDir_FailsBeforeMountHan
 
 	// Then
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "初始化暂存目录失败")
+	require.Contains(t, err.Error(), "initialize stage directory")
 	requireStorageEpochZero(t, storage, "stage_session_error_before_handshake")
 }
 
@@ -799,6 +806,11 @@ func TestMount_BackgroundDaemon_GivenROAndStagedFlags_SpawnsWithoutParentStageSe
 			name:     "ReadOnlyMode",
 			args:     []string{"mount", testDiskID1, mp, "--mode", "ro"},
 			wantArgs: []string{testDiskID1, mp, "--mode", "ro"},
+		},
+		{
+			name:     "ForegroundFalseExplicit",
+			args:     []string{"mount", testDiskID1, mp, "--foreground=false", "--mode", "ro"},
+			wantArgs: []string{testDiskID1, mp, "--foreground=false", "--mode", "ro"},
 		},
 		{
 			name:     "StagedModeDefersStageDirCreation",
@@ -824,6 +836,42 @@ func TestMount_BackgroundDaemon_GivenROAndStagedFlags_SpawnsWithoutParentStageSe
 	}
 }
 
+func TestMount_GivenBoolFalseAndRepeatedInvocations_ResetsPerCallState(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "isolation-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	captured := stubMountServeFUSE(t, mp)
+	code, _, errOut := runCLI(
+		"mount", testDiskID1, mp,
+		"-f", "--mode=ro", "--allow-other", "--direct-io", "--debug", "--stats-file", "--admin-addr", "off",
+	)
+	require.Equal(t, 0, code, "first invocation stderr=%s", errOut)
+	require.Equal(t, fusefs.MountModeRO, captured.cfg.Mode)
+	require.True(t, captured.cfg.AllowOther)
+	require.True(t, captured.cfg.DirectIO)
+	require.True(t, captured.cfg.Debug)
+	require.True(t, captured.cfg.EnableStatsFile)
+
+	captured2 := stubMountServeFUSE(t, mp)
+	code, _, errOut = runCLI(
+		"mount", testDiskID1, mp,
+		"-f", "--allow-other=false", "--direct-io=false", "--debug=false", "--stats-file=false", "--admin-addr", "off",
+	)
+	require.Equal(t, 0, code, "second invocation stderr=%s", errOut)
+	require.Equal(t, fusefs.MountModeStaged, captured2.cfg.Mode)
+	require.False(t, captured2.cfg.AllowOther)
+	require.False(t, captured2.cfg.DirectIO)
+	require.False(t, captured2.cfg.Debug)
+	require.False(t, captured2.cfg.EnableStatsFile)
+}
+
 func TestReadDaemonHandshake_GivenOKErrorAndEOF_ReturnsExpectedExitCodes(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -832,8 +880,8 @@ func TestReadDaemonHandshake_GivenOKErrorAndEOF_ReturnsExpectedExitCodes(t *test
 		wantSubstr string
 	}{
 		{name: "OK", input: "OK\n", wantCode: 0, wantSubstr: ""},
-		{name: "ExplicitError", input: "ERR:mount failed\n", wantCode: 1, wantSubstr: "后台守护进程初始化失败: mount failed"},
-		{name: "UnexpectedEOF", input: "", wantCode: 1, wantSubstr: "未完成挂载握手"},
+		{name: "ExplicitError", input: "ERR:mount failed\n", wantCode: 1, wantSubstr: "background daemon failed to initialize: mount failed"},
+		{name: "UnexpectedEOF", input: "", wantCode: 1, wantSubstr: "before completing mount handshake"},
 	}
 
 	for _, tc := range cases {

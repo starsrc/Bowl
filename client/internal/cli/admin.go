@@ -33,8 +33,7 @@ import (
 
 const clientServiceName = "bowl-client"
 
-// normalizeOTLPEndpoint 对缺少 URL scheme（http:// 或 https://）的裸 host:port OTLP 地址自动补齐 http://，
-// 修复 OTel Go SDK url.Parse("172.16.1.x:4317") 报 "first path segment in URL cannot contain colon" 的缺陷。
+// normalizeOTLPEndpoint prepends http:// to bare host:port OTLP endpoints so the OTel Go SDK parses them cleanly.
 func normalizeOTLPEndpoint(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -46,7 +45,7 @@ func normalizeOTLPEndpoint(raw string) string {
 	return trimmed
 }
 
-// normalizeOTLPEnv 原地归一化进程环境变量中的 OTLP Endpoint（同时覆盖守护子进程继承与 OTel SDK 内部环境读取）。
+// normalizeOTLPEnv normalizes OTLP endpoint environment variables in place for the process and spawned daemons.
 func normalizeOTLPEnv() {
 	for _, key := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"} {
 		raw := strings.TrimSpace(os.Getenv(key))
@@ -59,13 +58,12 @@ func normalizeOTLPEnv() {
 	}
 }
 
-// priorityOpSampler 为低频高价值持久化与生命周期屏障（Fsync / FsyncDir / OnUnmount）提供确定性采样提权，
-// 防止默认 0.001 比率将其全部漏采，其余高频操作仍严格遵循基础采样率。
+// priorityOpSampler deterministically samples durability and lifecycle barriers Fsync, FsyncDir, and OnUnmount.
 type priorityOpSampler struct {
 	base sdktrace.Sampler
 }
 
-//nolint:gocritic // sdktrace.Sampler 接口锁定按值传参签名
+//nolint:gocritic // sdktrace.Sampler requires a value receiver signature.
 func (s priorityOpSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
 	switch p.Name {
 	case "fuse.Fsync", "fuse.FsyncDir", "fuse.OnUnmount":
@@ -112,9 +110,7 @@ func newClientMetricView() sdkmetric.View {
 	)
 }
 
-// buildObsConfig 生成客户端可观测性配置：始终启用 Tracing 以生成并透传 W3C traceparent；
-// 仅当设置 OTEL_EXPORTER_OTLP_ENDPOINT 时启用 OTLP 导出，否则使用零网络开销的 "none" 导出器。
-// 管理面由 startAdminServer 自行监听（需挂载 /debug/stats），故 AdminAddr 置空。
+// buildObsConfig constructs observability settings with W3C tracing always active and OTLP export enabled when configured.
 func buildObsConfig(opts *mountOptions) *observability.EnvConfig {
 	normalizeOTLPEnv()
 
@@ -150,7 +146,7 @@ func buildObsConfig(opts *mountOptions) *observability.EnvConfig {
 	return &cfg
 }
 
-// clientRuntime 承载客户端定制的可观测性运行时（含亚毫秒指标桶 View 与持久化屏障提权 Sampler）。
+// clientRuntime holds logger, isolated Prometheus registry, and OTel providers for the mount process.
 type clientRuntime struct {
 	logger         *slog.Logger
 	registry       *prometheus.Registry
@@ -223,7 +219,7 @@ func newClientTracerProvider(ctx context.Context, cfg *observability.EnvConfig, 
 		}
 		exporter, err := otlptracegrpc.New(ctx, otlpOpts...)
 		if err != nil {
-			return nil, fmt.Errorf("创建 OTLP Trace 导出器失败: %w", err)
+			return nil, fmt.Errorf("create OTLP trace exporter: %w", err)
 		}
 		return sdktrace.NewTracerProvider(
 			sdktrace.WithBatcher(exporter),
@@ -231,15 +227,15 @@ func newClientTracerProvider(ctx context.Context, cfg *observability.EnvConfig, 
 			sdktrace.WithSampler(sampler),
 		), nil
 	default:
-		return nil, fmt.Errorf("不支持的链路导出器类型 %q", cfg.TracesExporter())
+		return nil, fmt.Errorf("unsupported trace exporter %q", cfg.TracesExporter())
 	}
 }
 
-// setupObservability 初始化日志、隔离 Registry、带亚毫秒桶 View 的 MeterProvider 与带屏障提权采样的 TracerProvider。
+// setupObservability initializes structured logging, Prometheus metrics, and OTel tracing.
 func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Writer) (*clientRuntime, error) {
 	cfg := buildObsConfig(opts)
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("初始化可观测性失败: %w", err)
+		return nil, fmt.Errorf("initialize observability: %w", err)
 	}
 
 	var slogOpts []slogx.Option
@@ -251,12 +247,12 @@ func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Wr
 
 	reg := telemetry.NewRegistry()
 	if err := telemetry.RegisterRuntimeCollectors(reg); err != nil {
-		return nil, fmt.Errorf("初始化可观测性失败: %w", err)
+		return nil, fmt.Errorf("initialize observability: %w", err)
 	}
 
 	res, err := telemetry.NewResource(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("初始化可观测性失败: %w", err)
+		return nil, fmt.Errorf("initialize observability: %w", err)
 	}
 
 	promExporter, err := otelprom.New(
@@ -264,7 +260,7 @@ func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Wr
 		otelprom.WithoutScopeInfo(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("初始化可观测性失败: %w", err)
+		return nil, fmt.Errorf("initialize observability: %w", err)
 	}
 
 	mp := sdkmetric.NewMeterProvider(
@@ -277,7 +273,7 @@ func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Wr
 	tp, err := newClientTracerProvider(ctx, cfg, res)
 	if err != nil {
 		_ = mp.Shutdown(ctx)
-		return nil, fmt.Errorf("初始化可观测性失败: %w", err)
+		return nil, fmt.Errorf("initialize observability: %w", err)
 	}
 	telemetry.RegisterGlobalTracer(tp)
 
@@ -289,18 +285,18 @@ func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Wr
 	}, nil
 }
 
-// validateAdminAddr 校验管理面地址："off" 表示关闭，其余必须为 host:port。
+// validateAdminAddr checks that addr is "off" or a valid host:port address.
 func validateAdminAddr(addr string) error {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil
 	}
 	if _, _, err := net.SplitHostPort(addr); err != nil {
-		return fmt.Errorf("无效的 --admin-addr \"%s\": %w", addr, err)
+		return fmt.Errorf("invalid --admin-addr %q: %w", addr, err)
 	}
 	return nil
 }
 
-// adminServer 是挂载进程的 loopback 管理面 HTTP 服务；nil 值表示已关闭。
+// adminServer serves the mount process loopback HTTP admin endpoints; a nil pointer indicates disabled.
 type adminServer struct {
 	ln  net.Listener
 	srv *http.Server
@@ -313,22 +309,21 @@ func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS) *http.ServeMux {
 	return mux
 }
 
-// startAdminServer 在 addr 上启动管理面：/metrics、/debug/pprof/*、/healthz、/readyz 与 /debug/stats。
-// addr 为 "off" 时返回 nil（方法对 nil 安全）。
+// startAdminServer starts /metrics, /debug/pprof/*, /healthz, /readyz, and /debug/stats on addr, or returns nil for "off".
 func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS) (*adminServer, error) {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil, nil
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("监听管理面地址 \"%s\" 失败: %w", addr, err)
+		return nil, fmt.Errorf("listen on admin address %q: %w", addr, err)
 	}
 	mux := newAdminMux(obs, fs)
 
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		// WriteTimeout 保持 0：/debug/pprof/profile?seconds=N 为长时流式响应。
+		// Keep WriteTimeout zero because /debug/pprof/profile?seconds=N streams over long intervals.
 	}
 	go func() {
 		if serveErr := srv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -338,7 +333,7 @@ func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS) (*admin
 	return &adminServer{ln: ln, srv: srv}, nil
 }
 
-// addr 返回实际监听地址；关闭时返回 "off"。
+// addr returns the active listen address or "off" when disabled.
 func (a *adminServer) addr() string {
 	if a == nil {
 		return adminAddrOff
@@ -355,7 +350,7 @@ func (a *adminServer) shutdown(ctx context.Context) {
 	}
 }
 
-// statsHandler 渲染 FUSE 统计快照：默认 JSON，?format=text 为人类可读文本，?format=stats 为 .stats 键值格式。
+// statsHandler renders FUSE statistics snapshots in JSON, human text, or .stats format.
 func statsHandler(fs *fusefs.RawFS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snap := fs.Snapshot()

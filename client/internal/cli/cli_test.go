@@ -674,18 +674,19 @@ func TestExecute_GivenNoArgs_PrintsUsageToStderrAndReturns2(t *testing.T) {
 	// Then
 	require.Equal(t, 2, code)
 	require.Empty(t, out)
-	require.Contains(t, errOut, "bowl <command>")
+	require.Contains(t, errOut, "Usage:")
+	require.Contains(t, errOut, "bowl [command]")
 }
 
 func TestExecute_GivenUnknownCommand_PrintsErrorAndReturns2(t *testing.T) {
-	// Given / When
-	code, out, errOut := runCLI("unknown-cmd")
-
-	// Then
-	require.Equal(t, 2, code)
-	require.Empty(t, out)
-	require.Contains(t, errOut, `错误: 未知命令 "unknown-cmd"`)
-	require.Contains(t, errOut, "可用命令:")
+	// Given / When / Then
+	for _, cmdName := range []string{"unknown-cmd", "sandbox"} {
+		code, out, errOut := runCLI(cmdName)
+		require.Equal(t, 2, code, "cmd=%s", cmdName)
+		require.Empty(t, out, "cmd=%s", cmdName)
+		require.Contains(t, errOut, fmt.Sprintf(`Error: unknown command %q for "bowl"`, cmdName))
+		require.Contains(t, errOut, "Available Commands:")
+	}
 }
 
 func TestExecute_GivenVersionFlags_PrintsVersionAndReturns0(t *testing.T) {
@@ -708,20 +709,73 @@ func TestExecute_GivenVersionFlags_PrintsVersionAndReturns0(t *testing.T) {
 	require.Equal(t, want, out)
 }
 
-func TestExecute_GivenHelpFlags_PrintsUsageAndReturns0(t *testing.T) {
+func TestExecute_GivenVersionExtraArgsOrInvalidFlag_Returns2(t *testing.T) {
+	for _, args := range [][]string{
+		{"version", "extra"},
+		{"version", "--bogus"},
+		{"--version=bad"},
+		{"-v=bad"},
+	} {
+		code, out, errOut := runCLI(args...)
+		require.Equal(t, 2, code, "args=%v stderr=%s", args, errOut)
+		require.Empty(t, out, "args=%v", args)
+		require.Contains(t, errOut, "Error:", "args=%v", args)
+	}
+}
+
+func TestExecute_GivenHelpFlags_PrintsNativeScopeAndReturns0(t *testing.T) {
 	// Given / When / Then
-	code, out, errOut := runCLI("help")
-	require.Equal(t, 0, code)
-	require.Empty(t, errOut)
-	require.Contains(t, out, "可用命令:")
+	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
+		code, out, errOut := runCLI(args...)
+		require.Equal(t, 0, code, "args=%v stderr=%s", args, errOut)
+		require.Empty(t, errOut)
+		require.Contains(t, out, "Available Commands:")
+		for _, wantCmd := range []string{"disk", "mount", "umount", "stats", "version", "help", "completion"} {
+			require.Contains(t, out, wantCmd, "args=%v", args)
+		}
+		require.NotContains(t, out, "sandbox", "args=%v", args)
+	}
+}
 
-	code, out, errOut = runCLI("--help")
-	require.Equal(t, 0, code)
-	require.Empty(t, errOut)
-	require.Contains(t, out, "可用命令:")
+func TestExecute_GivenHelpSubcommand_PrintsTargetHelpAndReturns0(t *testing.T) {
+	cases := []struct {
+		args       []string
+		wantSubstr string
+	}{
+		{args: []string{"help", "disk"}, wantSubstr: "bowl disk [command]"},
+		{args: []string{"help", "disk", "create"}, wantSubstr: "bowl disk create"},
+		{args: []string{"help", "disk", "update"}, wantSubstr: "update, resize"},
+		{args: []string{"help", "mount"}, wantSubstr: "bowl mount <disk-id> <mountpoint>"},
+		{args: []string{"help", "umount"}, wantSubstr: "umount, unmount"},
+		{args: []string{"help", "stats"}, wantSubstr: "bowl stats [mountpoint]"},
+		{args: []string{"help", "version"}, wantSubstr: "bowl version"},
+		{args: []string{"help", "completion"}, wantSubstr: "bowl completion"},
+	}
 
-	code, out, errOut = runCLI("-h")
-	require.Equal(t, 0, code)
-	require.Empty(t, errOut)
-	require.Contains(t, out, "可用命令:")
+	for _, tc := range cases {
+		code, out, errOut := runCLI(tc.args...)
+		require.Equal(t, 0, code, "args=%v stderr=%s", tc.args, errOut)
+		require.Empty(t, errOut, "args=%v", tc.args)
+		require.Contains(t, out, tc.wantSubstr, "args=%v", tc.args)
+	}
+}
+
+func TestExecute_GivenCompletionCommand_GeneratesScriptsAndRejectsExtraArgsOrBadFlags(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+		code, out, errOut := runCLI("completion", shell)
+		require.Equal(t, 0, code, "shell=%s stderr=%s", shell, errOut)
+		require.Empty(t, errOut, "shell=%s", shell)
+		require.NotEmpty(t, out, "shell=%s", shell)
+		require.Contains(t, out, "bowl", "shell=%s", shell)
+	}
+
+	for _, badArgs := range [][]string{
+		{"completion", "bash", "extra"},
+		{"completion", "--bogus"},
+	} {
+		code, out, errOut := runCLI(badArgs...)
+		require.Equal(t, 2, code, "args=%v stderr=%s", badArgs, errOut)
+		require.Empty(t, out, "args=%v", badArgs)
+		require.Contains(t, errOut, "Error:", "args=%v", badArgs)
+	}
 }

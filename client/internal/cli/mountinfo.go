@@ -15,7 +15,7 @@ import (
 
 var mountInfoPath = "/proc/self/mountinfo"
 
-// DiskMountInfo 描述本机 /proc/self/mountinfo 中某块虚拟磁盘的挂载状态与读写模式。
+// DiskMountInfo describes the local mount state and read-only mode of a virtual disk from /proc/self/mountinfo.
 type DiskMountInfo struct {
 	Mountpoint string
 	Mounted    bool
@@ -32,7 +32,7 @@ func hasReadOnlyMountOption(vfsOpts string) bool {
 	return slices.Contains(strings.Split(vfsOpts, ","), "ro")
 }
 
-// unescapeMountInfo 解析 /proc/self/mountinfo 中被八进制转义的字符（例如 \040 为空格）。
+// unescapeMountInfo decodes octal escape sequences such as \040 for spaces in /proc/self/mountinfo.
 func unescapeMountInfo(s string) string {
 	if !strings.Contains(s, "\\") {
 		return s
@@ -59,7 +59,7 @@ func isOctal(b byte) bool {
 	return b >= '0' && b <= '7'
 }
 
-// parseMountPointsFromReader 解析 mountinfo 文本，跳过空行与字段不足的畸形行。
+// parseMountPointsFromReader parses mountinfo text and skips blank or malformed lines.
 func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 	var points []mountPoint
 	scanner := bufio.NewScanner(r)
@@ -86,7 +86,7 @@ func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 		})
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("扫描挂载信息失败: %w", err)
+		return nil, fmt.Errorf("scan mountinfo: %w", err)
 	}
 	return points, nil
 }
@@ -95,10 +95,10 @@ func readMountPoints() ([]mountPoint, error) {
 	file, err := os.Open(mountInfoPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// 在非 procfs 环境（如宿主机单元测试无 /proc 时）视为未挂载
+			// Treat absent procfs mountinfo as unmounted on non-Linux hosts.
 			return nil, nil
 		}
-		return nil, fmt.Errorf("读取挂载信息文件失败: %w", err)
+		return nil, fmt.Errorf("read mountinfo file: %w", err)
 	}
 	defer file.Close()
 	return parseMountPointsFromReader(file)
@@ -134,11 +134,11 @@ func findDiskMountpoint(points []mountPoint, diskID string) DiskMountInfo {
 	return found
 }
 
-// IsMountPoint 检查指定路径在当前系统 (/proc/self/mountinfo) 中是否为已生效的活跃挂载点。
+// IsMountPoint reports whether path is an active mountpoint in /proc/self/mountinfo.
 func IsMountPoint(path string) (bool, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return false, fmt.Errorf("解析绝对路径失败: %w", err)
+		return false, fmt.Errorf("resolve absolute path: %w", err)
 	}
 	points, err := readMountPoints()
 	if err != nil {
@@ -147,9 +147,8 @@ func IsMountPoint(path string) (bool, error) {
 	return containsMountPoint(points, filepath.Clean(absPath)), nil
 }
 
-// FindDiskMountpoint 扫描 /proc/self/mountinfo 检查指定 diskID 是否在当前机器处于活跃挂载状态。
-// 挂载时 FUSE fsname 固定为 "bowl:<disk-id>"（位于 mountinfo "-" 分隔符后的第 2 个字段），并解析第 6 列 VFS 选项判定只读模式。
-// 若 /proc/self/mountinfo 不存在（如非 Linux 环境），返回零值 DiskMountInfo 与 nil。
+// FindDiskMountpoint scans /proc/self/mountinfo to check if diskID is actively mounted locally.
+// FUSE fsname is set to "bowl:<disk-id>" after the "-" separator, and column 6 VFS options determine read-only mode.
 func FindDiskMountpoint(diskID string) (DiskMountInfo, error) {
 	points, err := readMountPoints()
 	if err != nil {

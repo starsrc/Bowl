@@ -151,36 +151,44 @@ func listMountMetas() []mountMeta {
 	return out
 }
 
-// mountMetaFilePath finds the metadata file path for mountpoint without checking process liveness.
-func mountMetaFilePath(mountpoint string) (string, bool) {
+// resolveUmountMountMeta finds metadata for mountpoint across discovery directories,
+// preferring an entry whose daemon PID is alive and falling back to the first matching file.
+func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta, ok bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)
 	names := []string{mountMetaFileName(cleaned)}
 	if canon != cleaned {
 		names = append(names, mountMetaFileName(canon))
 	}
+
+	var fallbackPath string
+	var fallbackMeta mountMeta
+	hasFallback := false
+
 	for _, dir := range mountMetaDirs() {
 		for _, name := range names {
-			path := filepath.Join(dir, name)
-			if _, err := os.Stat(path); err == nil {
-				return path, true
+			candidate := filepath.Join(dir, name)
+			data, err := os.ReadFile(candidate)
+			if err != nil {
+				continue
+			}
+			var m mountMeta
+			if json.Unmarshal(data, &m) != nil {
+				m = mountMeta{}
+			} else if processAlive(m.PID) {
+				return candidate, m, true
+			}
+			if !hasFallback {
+				fallbackPath = candidate
+				fallbackMeta = m
+				hasFallback = true
 			}
 		}
 	}
-	return "", false
-}
-
-// readMountMetaPID reads the daemon PID recorded in the mount metadata file.
-func readMountMetaPID(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
+	if hasFallback {
+		return fallbackPath, fallbackMeta, true
 	}
-	var m mountMeta
-	if json.Unmarshal(data, &m) != nil {
-		return 0
-	}
-	return m.PID
+	return "", mountMeta{}, false
 }
 
 // findMountMeta looks up active mount metadata for mountpoint, supporting symlink paths.

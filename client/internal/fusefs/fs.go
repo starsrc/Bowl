@@ -111,6 +111,22 @@ type reclaimRetryItem struct {
 	attempts int
 }
 
+// UnmountProgress reports cloud sync progress observed during OnUnmount.
+type UnmountProgress struct {
+	Active    bool   `json:"active"`
+	Completed uint64 `json:"completed"`
+	Total     uint64 `json:"total"`
+}
+
+type unmountProgressState struct {
+	active        bool
+	completedOnce bool
+	phase         uint8
+	stageTotal    uint64
+	completed     uint64
+	total         uint64
+}
+
 // RawFS 封装底层 FUSE 请求处理，桥接 Linux 内核 VFS 与 StorageService RPC。
 type RawFS struct {
 	fuse.RawFileSystem
@@ -155,6 +171,8 @@ type RawFS struct {
 	ephemeralStageRoot string
 	specialMu          sync.RWMutex
 	specialInodes      map[uint64]bool
+	unmountMu          sync.Mutex
+	unmountState       unmountProgressState
 }
 
 // NewRawFS 创建并初始化 RawFS 实例。
@@ -640,6 +658,46 @@ func (fs *RawFS) Statx(cancel <-chan struct{}, input *fuse.StatxIn, out *fuse.St
 	return status
 }
 
+// UnmountProgress returns a monotonic snapshot of OnUnmount cloud sync progress.
+func (fs *RawFS) UnmountProgress() UnmountProgress {
+	if fs == nil {
+		return UnmountProgress{}
+	}
+	fs.unmountMu.Lock()
+	defer fs.unmountMu.Unlock()
+	if fs.unmountState.active && fs.unmountState.phase == 1 {
+		livePending := uint64(max(int64(0), fs.stage.pendingChunkCount()))
+		var stageDone uint64
+		if livePending < fs.unmountState.stageTotal {
+			stageDone = fs.unmountState.stageTotal - livePending
+		}
+		if stageDone > fs.unmountState.completed {
+			fs.unmountState.completed = stageDone
+		}
+	}
+	return UnmountProgress{
+		Active:    fs.unmountState.active,
+		Completed: fs.unmountState.completed,
+		Total:     fs.unmountState.total,
+	}
+}
+
+func (fs *RawFS) countDirtyAndStagedInodes(stagedInodes []uint64) int {
+	fs.stateMu.Lock()
+	defer fs.stateMu.Unlock()
+	if len(stagedInodes) == 0 {
+		return len(fs.dirtyInodes)
+	}
+	seen := make(map[uint64]struct{}, len(fs.dirtyInodes)+len(stagedInodes))
+	for ino := range fs.dirtyInodes {
+		seen[ino] = struct{}{}
+	}
+	for _, ino := range stagedInodes {
+		seen[ino] = struct{}{}
+	}
+	return len(seen)
+}
+
 // OnUnmount 在文件系统卸载完成时被调用。
 func (fs *RawFS) OnUnmount() {
 	start := fs.metrics.beginOp(OpOnUnmount)
@@ -652,24 +710,61 @@ func (fs *RawFS) OnUnmount() {
 	fs.locks.Close()
 	// 排他锁等待所有在途请求释放读锁，先排空本地暂存上传队列确保 dirtyInodes 完整，再逐一同步落盘，最后关闭 StageSession。
 	fs.lifecycleMu.Lock()
+	pendingChunks, stagedInodes := fs.stage.unmountSnapshot()
+	stageTotal := uint64(max(int64(0), pendingChunks))
+	dirtyUnionCount := fs.countDirtyAndStagedInodes(stagedInodes)
+	total := stageTotal + uint64(dirtyUnionCount)
+
+	fs.unmountMu.Lock()
+	repeatNoop := fs.unmountState.completedOnce && total == 0
+	if repeatNoop {
+		fs.unmountState.active = false
+	} else {
+		fs.unmountState.active = true
+		fs.unmountState.phase = 1
+		fs.unmountState.stageTotal = stageTotal
+		fs.unmountState.completed = 0
+		fs.unmountState.total = total
+	}
+	fs.unmountMu.Unlock()
+
 	fs.stage.Clear(opCtx)
-	for _, ino := range fs.takeDirtyInodes() {
-		if fs.client == nil {
-			continue
+	dirtyInodes := fs.takeDirtyInodes()
+
+	fs.unmountMu.Lock()
+	if !repeatNoop {
+		baseDone := fs.unmountState.completed
+		if fs.unmountState.total >= uint64(len(dirtyInodes)) {
+			if candidate := fs.unmountState.total - uint64(len(dirtyInodes)); candidate > baseDone {
+				baseDone = candidate
+			}
 		}
-		ctx, done := fs.RPCContextFrom(opCtx, nil)
-		_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
-			Ino:    ino,
-			DiskId: fs.cfg.DiskID,
-			Epoch:  fs.cfg.Epoch,
-		}))
-		done()
-		if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
-			fs.metrics.incDirtyFlushError()
-			fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
-		} else {
-			fs.metrics.incDirtyFlushOK()
+		fs.unmountState.phase = 2
+		fs.unmountState.completed = baseDone
+	}
+	fs.unmountMu.Unlock()
+
+	for _, ino := range dirtyInodes {
+		if fs.client != nil {
+			ctx, done := fs.RPCContextFrom(opCtx, nil)
+			_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
+				Ino:    ino,
+				DiskId: fs.cfg.DiskID,
+				Epoch:  fs.cfg.Epoch,
+			}))
+			done()
+			if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
+				fs.metrics.incDirtyFlushError()
+				fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
+			} else {
+				fs.metrics.incDirtyFlushOK()
+			}
 		}
+		fs.unmountMu.Lock()
+		if !repeatNoop && fs.unmountState.completed < fs.unmountState.total {
+			fs.unmountState.completed++
+		}
+		fs.unmountMu.Unlock()
 	}
 	fs.handles.clear()
 	fs.cache.clear()
@@ -689,6 +784,14 @@ func (fs *RawFS) OnUnmount() {
 	if fs.ephemeralStageRoot != "" {
 		_ = os.RemoveAll(fs.ephemeralStageRoot)
 	}
+	fs.unmountMu.Lock()
+	if !repeatNoop {
+		fs.unmountState.completed = fs.unmountState.total
+		fs.unmountState.completedOnce = true
+	}
+	fs.unmountState.active = false
+	fs.unmountState.phase = 2
+	fs.unmountMu.Unlock()
 	fs.lifecycleMu.Unlock()
 	fs.readAhead.Clear()
 	fs.stopAndDrainReleaseQueue()

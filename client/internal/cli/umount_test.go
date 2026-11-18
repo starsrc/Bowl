@@ -1,12 +1,22 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/starsrc/bowl/client/internal/fusefs"
 )
 
 func withUmountToolStub(t *testing.T, availableTool, toolPath string, out []byte, err error) (calledName *string, calledArgs *[]string) {
@@ -279,4 +289,699 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
+}
+
+func TestUmount_GivenDefaultDrainTimingAndNoTimeoutFlag_Enforces5mBudgetAndRejectsTimeoutFlag(t *testing.T) {
+	// Given / When / Then
+	require.Equal(t, 5*time.Minute, umountDrainTimeout)
+	require.Equal(t, 20*time.Millisecond, umountDrainPollInterval)
+
+	code, out, errOut := runCLI("umount", "--timeout", "1s", "/mnt/a")
+	require.Equal(t, 2, code)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "unknown flag: --timeout")
+}
+
+func withUmountProgressSeams(
+	t *testing.T,
+	isTTY bool,
+	client *http.Client,
+	drainTimeout, drainPoll, progressPoll, nonTTYInterval, fallbackGrace, fallbackInterval time.Duration,
+) {
+	t.Helper()
+	prevTTY := umountIsTerminal
+	prevClient := umountHTTPClient
+	prevTimeout := umountDrainTimeout
+	prevDrainPoll := umountDrainPollInterval
+	prevProgPoll := umountProgressPollInterval
+	prevNonTTY := umountNonTTYLogInterval
+	prevGrace := umountFallbackGracePeriod
+	prevFallback := umountFallbackLogInterval
+
+	umountIsTerminal = func(io.Writer) bool { return isTTY }
+	if client != nil {
+		umountHTTPClient = client
+	}
+	umountDrainTimeout = drainTimeout
+	umountDrainPollInterval = drainPoll
+	umountProgressPollInterval = progressPoll
+	umountNonTTYLogInterval = nonTTYInterval
+	umountFallbackGracePeriod = fallbackGrace
+	umountFallbackLogInterval = fallbackInterval
+
+	t.Cleanup(func() {
+		umountIsTerminal = prevTTY
+		umountHTTPClient = prevClient
+		umountDrainTimeout = prevTimeout
+		umountDrainPollInterval = prevDrainPoll
+		umountProgressPollInterval = prevProgPoll
+		umountNonTTYLogInterval = prevNonTTY
+		umountFallbackGracePeriod = prevGrace
+		umountFallbackLogInterval = prevFallback
+	})
+}
+
+func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t *testing.T) {
+	for _, isTTY := range []bool{false, true} {
+		name := "NonTTY"
+		if isTTY {
+			name = "TTY"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Given
+			mp := "/mnt/bowl-zero-progress"
+			dir1 := t.TempDir()
+			dir2 := t.TempDir()
+			withTempMountMetaDirs(t, dir1, dir2)
+			withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+			staleData, err := json.Marshal(mountMeta{
+				Mountpoint: mp,
+				PID:        99999999,
+				DiskID:     testDiskID1,
+				AdminAddr:  "127.0.0.1:19991",
+				StartedAt:  time.Now().UTC(),
+			})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(dir1, mountMetaFileName(mp)), staleData, 0o644))
+
+			liveData, err := json.Marshal(mountMeta{
+				Mountpoint: mp,
+				PID:        os.Getpid(),
+				DiskID:     testDiskID1,
+				AdminAddr:  "127.0.0.1:19992",
+				StartedAt:  time.Now().UTC(),
+			})
+			require.NoError(t, err)
+			liveMetaPath := filepath.Join(dir2, mountMetaFileName(mp))
+			require.NoError(t, os.WriteFile(liveMetaPath, liveData, 0o644))
+
+			var queriedURLs []string
+			var urlMu sync.Mutex
+			client := &http.Client{
+				Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					urlMu.Lock()
+					queriedURLs = append(queriedURLs, req.URL.String())
+					urlMu.Unlock()
+					body, _ := json.Marshal(fusefs.UnmountProgress{Active: true, Completed: 0, Total: 0})
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+						Body:       io.NopCloser(bytes.NewReader(body)),
+						Request:    req,
+					}, nil
+				}),
+			}
+			withUmountProgressSeams(
+				t,
+				isTTY,
+				client,
+				500*time.Millisecond,
+				5*time.Millisecond,
+				10*time.Millisecond,
+				40*time.Millisecond,
+				30*time.Millisecond,
+				40*time.Millisecond,
+			)
+
+			prevLook := lookPath
+			prevRun := runCommand
+			lookPath = func(file string) (string, error) {
+				if file == "fusermount3" {
+					return "/usr/bin/fusermount3", nil
+				}
+				return "", errors.New("not found")
+			}
+			runCommand = func(_ string, _ ...string) ([]byte, error) {
+				go func() {
+					time.Sleep(45 * time.Millisecond)
+					_ = os.Remove(liveMetaPath)
+				}()
+				return nil, nil
+			}
+			t.Cleanup(func() {
+				lookPath = prevLook
+				runCommand = prevRun
+			})
+
+			// When
+			code, out, errOut := runCLI("umount", mp)
+
+			// Then
+			require.Equal(t, 0, code)
+			require.Empty(t, out)
+			require.Empty(t, errOut)
+			_, statErr := os.Stat(liveMetaPath)
+			require.True(t, os.IsNotExist(statErr), "live mountMeta must be removed before umount exits")
+
+			urlMu.Lock()
+			defer urlMu.Unlock()
+			require.NotEmpty(t, queriedURLs, "umount must query /debug/unmount on the alive admin address")
+			for _, u := range queriedURLs {
+				require.Equal(t, "http://127.0.0.1:19992/debug/unmount", u)
+			}
+		})
+	}
+}
+
+func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Percent(t *testing.T) {
+	// Given: verify default polling and logging cadences before overriding seams.
+	require.Equal(t, 100*time.Millisecond, umountProgressPollInterval)
+	require.Equal(t, 2*time.Second, umountNonTTYLogInterval)
+	require.Equal(t, 1*time.Second, umountFallbackGracePeriod)
+	require.Equal(t, 5*time.Second, umountFallbackLogInterval)
+
+	t.Run("PrintsFirstIntervalAndFinal100Percent", func(t *testing.T) {
+		mp := "/mnt/bowl-nontty-progress"
+		withTempMountMetaDirs(t, t.TempDir())
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "127.0.0.1:19993",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+
+		var pollNum atomic.Int64
+		var req1TimeMu sync.Mutex
+		var req1Time time.Time
+		midPrintedCh := make(chan struct{})
+		var midOnce sync.Once
+		client := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				n := pollNum.Add(1)
+				var completed uint64
+				if n == 1 {
+					req1TimeMu.Lock()
+					req1Time = time.Now()
+					req1TimeMu.Unlock()
+					completed = 0
+				} else {
+					completed = 2
+					req1TimeMu.Lock()
+					elapsed := time.Since(req1Time)
+					req1TimeMu.Unlock()
+					if elapsed >= 45*time.Millisecond {
+						midOnce.Do(func() { close(midPrintedCh) })
+					}
+				}
+				body, _ := json.Marshal(fusefs.UnmountProgress{
+					Active:    true,
+					Completed: completed,
+					Total:     4,
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Request:    req,
+				}, nil
+			}),
+		}
+		withUmountProgressSeams(
+			t,
+			false,
+			client,
+			2*time.Second,
+			5*time.Millisecond,
+			10*time.Millisecond,
+			35*time.Millisecond,
+			time.Second,
+			time.Second,
+		)
+
+		prevLook := lookPath
+		prevRun := runCommand
+		lookPath = func(file string) (string, error) {
+			if file == "fusermount3" {
+				return "/usr/bin/fusermount3", nil
+			}
+			return "", errors.New("not found")
+		}
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				<-midPrintedCh
+				time.Sleep(15 * time.Millisecond)
+				_ = os.Remove(metaPath)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() {
+			lookPath = prevLook
+			runCommand = prevRun
+		})
+
+		// When
+		code, out, errOut := runCLI("umount", mp)
+
+		// Then
+		require.Equal(t, 0, code)
+		require.Empty(t, out)
+		require.NotContains(t, errOut, "\r")
+		require.NotContains(t, errOut, "\x1b")
+
+		lines := strings.Split(strings.TrimSuffix(errOut, "\n"), "\n")
+		require.GreaterOrEqual(t, len(lines), 3, "expected initial, interval, and final lines, got stderr=%q", errOut)
+		require.Equal(t, "Syncing to cloud: 0% (0/4)", lines[0])
+		require.Contains(t, errOut, "Syncing to cloud: 50% (2/4)\n")
+		require.Equal(t, "Syncing to cloud: 100% (4/4)", lines[len(lines)-1])
+		require.Equal(t, 1, strings.Count(errOut, "100% (4/4)"))
+	})
+
+	t.Run("SkipsDuplicateFinalLineWhen100PercentAlreadyPrinted", func(t *testing.T) {
+		mp := "/mnt/bowl-nontty-dedup100"
+		withTempMountMetaDirs(t, t.TempDir())
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "127.0.0.1:19994",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+
+		client := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				body, _ := json.Marshal(fusefs.UnmountProgress{
+					Active:    false,
+					Completed: 4,
+					Total:     4,
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Request:    req,
+				}, nil
+			}),
+		}
+		withUmountProgressSeams(
+			t,
+			false,
+			client,
+			time.Second,
+			5*time.Millisecond,
+			10*time.Millisecond,
+			50*time.Millisecond,
+			time.Second,
+			time.Second,
+		)
+
+		prevLook := lookPath
+		prevRun := runCommand
+		lookPath = func(file string) (string, error) {
+			if file == "fusermount3" {
+				return "/usr/bin/fusermount3", nil
+			}
+			return "", errors.New("not found")
+		}
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(25 * time.Millisecond)
+				_ = os.Remove(metaPath)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() {
+			lookPath = prevLook
+			runCommand = prevRun
+		})
+
+		// When
+		code, out, errOut := runCLI("umount", mp)
+
+		// Then
+		require.Equal(t, 0, code)
+		require.Empty(t, out)
+		require.Equal(t, "Syncing to cloud: 100% (4/4)\n", errOut)
+	})
+}
+
+func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentWithNewline(t *testing.T) {
+	// Given
+	mp := "/mnt/bowl-tty-progress"
+	withTempMountMetaDirs(t, t.TempDir())
+	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+	metaPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: mp,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID1,
+		AdminAddr:  "127.0.0.1:19995",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	var pollNum atomic.Int64
+	reachedMidCh := make(chan struct{})
+	var midOnce sync.Once
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			n := pollNum.Add(1)
+			var completed uint64
+			switch n {
+			case 1:
+				completed = 0
+			case 2:
+				completed = 2
+				midOnce.Do(func() { close(reachedMidCh) })
+			default:
+				completed = 3
+			}
+			body, _ := json.Marshal(fusefs.UnmountProgress{
+				Active:    true,
+				Completed: completed,
+				Total:     4,
+			})
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+				Body:       io.NopCloser(bytes.NewReader(body)),
+				Request:    req,
+			}, nil
+		}),
+	}
+	withUmountProgressSeams(
+		t,
+		true,
+		client,
+		2*time.Second,
+		5*time.Millisecond,
+		10*time.Millisecond,
+		time.Second,
+		time.Second,
+		time.Second,
+	)
+
+	prevLook := lookPath
+	prevRun := runCommand
+	lookPath = func(file string) (string, error) {
+		if file == "fusermount3" {
+			return "/usr/bin/fusermount3", nil
+		}
+		return "", errors.New("not found")
+	}
+	runCommand = func(_ string, _ ...string) ([]byte, error) {
+		go func() {
+			<-reachedMidCh
+			time.Sleep(15 * time.Millisecond)
+			_ = os.Remove(metaPath)
+		}()
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		lookPath = prevLook
+		runCommand = prevRun
+	})
+
+	// When
+	code, out, errOut := runCLI("umount", mp)
+
+	// Then
+	require.Equal(t, 0, code)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "Syncing to cloud")
+	require.Contains(t, errOut, "\r")
+	require.Contains(t, errOut, "50%")
+	require.Contains(t, errOut, "100%")
+	require.Contains(t, errOut, "(4/4)")
+	require.True(t, strings.HasSuffix(errOut, "\n"), "TTY progress bar must end with newline, got=%q", errOut)
+	require.Equal(t, 1, strings.Count(errOut, "\n"), "TTY progress bar must stay single-line until final newline, got=%q", errOut)
+}
+
+func TestUmount_GivenAdminOffOrUnreachable_StaysSilentDuringGraceAndShowsIndeterminateAfterGrace(t *testing.T) {
+	t.Run("SilentDuringGracePeriod", func(t *testing.T) {
+		for _, isTTY := range []bool{false, true} {
+			mp := "/mnt/bowl-fallback-silent"
+			withTempMountMetaDirs(t, t.TempDir())
+			withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+			metaPath, err := writeMountMeta(&mountMeta{
+				Mountpoint: mp,
+				PID:        os.Getpid(),
+				DiskID:     testDiskID1,
+				AdminAddr:  "off",
+				StartedAt:  time.Now().UTC(),
+			})
+			require.NoError(t, err)
+
+			withUmountProgressSeams(
+				t,
+				isTTY,
+				nil,
+				time.Second,
+				5*time.Millisecond,
+				10*time.Millisecond,
+				time.Second,
+				150*time.Millisecond,
+				time.Second,
+			)
+			withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+			prevRun := runCommand
+			runCommand = func(_ string, _ ...string) ([]byte, error) {
+				go func() {
+					time.Sleep(20 * time.Millisecond)
+					_ = os.Remove(metaPath)
+				}()
+				return nil, nil
+			}
+			t.Cleanup(func() { runCommand = prevRun })
+
+			code, out, errOut := runCLI("umount", mp)
+			require.Equal(t, 0, code)
+			require.Empty(t, out)
+			require.Empty(t, errOut)
+		}
+	})
+
+	t.Run("NonTTY_AdminOff_LogsAtGraceAndInterval", func(t *testing.T) {
+		mp := "/mnt/bowl-fallback-nontty-off"
+		withTempMountMetaDirs(t, t.TempDir())
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "off",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+
+		withUmountProgressSeams(
+			t,
+			false,
+			nil,
+			2*time.Second,
+			5*time.Millisecond,
+			10*time.Millisecond,
+			time.Second,
+			20*time.Millisecond,
+			30*time.Millisecond,
+		)
+		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		prevRun := runCommand
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(70 * time.Millisecond)
+				_ = os.Remove(metaPath)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() { runCommand = prevRun })
+
+		code, out, errOut := runCLI("umount", mp)
+		require.Equal(t, 0, code)
+		require.Empty(t, out)
+		require.NotContains(t, errOut, "\r")
+		require.NotContains(t, errOut, "\x1b")
+		require.NotContains(t, errOut, "%")
+		require.GreaterOrEqual(t, strings.Count(errOut, "Syncing to cloud...\n"), 2, "stderr=%q", errOut)
+	})
+
+	t.Run("NonTTY_UnreachableEndpoint_FallsBackAfterGrace", func(t *testing.T) {
+		mp := "/mnt/bowl-fallback-nontty-err"
+		withTempMountMetaDirs(t, t.TempDir())
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "127.0.0.1:19996",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+
+		client := &http.Client{
+			Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("connection refused")
+			}),
+		}
+		withUmountProgressSeams(
+			t,
+			false,
+			client,
+			2*time.Second,
+			5*time.Millisecond,
+			10*time.Millisecond,
+			time.Second,
+			20*time.Millisecond,
+			35*time.Millisecond,
+		)
+		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		prevRun := runCommand
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				_ = os.Remove(metaPath)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() { runCommand = prevRun })
+
+		code, out, errOut := runCLI("umount", mp)
+		require.Equal(t, 0, code)
+		require.Empty(t, out)
+		require.Contains(t, errOut, "Syncing to cloud...\n")
+	})
+
+	t.Run("TTY_AdminOff_RendersSpinnerAndFinishesCleanly", func(t *testing.T) {
+		mp := "/mnt/bowl-fallback-tty-spinner"
+		withTempMountMetaDirs(t, t.TempDir())
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+
+		withUmountProgressSeams(
+			t,
+			true,
+			nil,
+			2*time.Second,
+			5*time.Millisecond,
+			10*time.Millisecond,
+			time.Second,
+			20*time.Millisecond,
+			time.Second,
+		)
+		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		prevRun := runCommand
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(60 * time.Millisecond)
+				_ = os.Remove(metaPath)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() { runCommand = prevRun })
+
+		code, out, errOut := runCLI("umount", mp)
+		require.Equal(t, 0, code)
+		require.Empty(t, out)
+		require.Contains(t, errOut, "Syncing to cloud")
+		require.Contains(t, errOut, "\r")
+		require.NotContains(t, errOut, "%")
+		require.True(t, strings.HasSuffix(errOut, "\n"), "TTY spinner must finish with newline, got=%q", errOut)
+		require.Equal(t, 1, strings.Count(errOut, "\n"), "TTY spinner must stay single-line until Finish, got=%q", errOut)
+	})
+
+	t.Run("TTY_UnreachableThenRecovered_TransitionsCleanlyToDeterminate", func(t *testing.T) {
+		mp := "/mnt/bowl-fallback-recover"
+		withTempMountMetaDirs(t, t.TempDir())
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "127.0.0.1:19997",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+
+		var allowSuccess atomic.Bool
+		var recovered atomic.Bool
+		recoveredCh := make(chan struct{})
+		var recOnce sync.Once
+		client := &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if !allowSuccess.Load() {
+					return nil, errors.New("connection refused")
+				}
+				recovered.Store(true)
+				recOnce.Do(func() { close(recoveredCh) })
+				body, _ := json.Marshal(fusefs.UnmountProgress{
+					Active:    true,
+					Completed: 1,
+					Total:     2,
+				})
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Request:    req,
+				}, nil
+			}),
+		}
+		withUmountProgressSeams(
+			t,
+			true,
+			client,
+			2*time.Second,
+			5*time.Millisecond,
+			10*time.Millisecond,
+			time.Second,
+			15*time.Millisecond,
+			time.Second,
+		)
+		withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		prevRun := runCommand
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(35 * time.Millisecond)
+				allowSuccess.Store(true)
+				<-recoveredCh
+				time.Sleep(15 * time.Millisecond)
+				_ = os.Remove(metaPath)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() { runCommand = prevRun })
+
+		code, out, errOut := runCLI("umount", mp)
+		require.Equal(t, 0, code)
+		require.Empty(t, out)
+		require.True(t, recovered.Load())
+		require.Contains(t, errOut, "Syncing to cloud")
+		require.Contains(t, errOut, "100%")
+		require.Contains(t, errOut, "(2/2)")
+		require.True(t, strings.HasSuffix(errOut, "\n"))
+	})
+}
+
+func TestUmount_GivenDefaultTerminalDetector_ReturnsFalseForBuffersAndPipes(t *testing.T) {
+	var nilFile *os.File
+	require.False(t, umountIsTerminal(nil))
+	require.False(t, umountIsTerminal(nilFile))
+	require.False(t, umountIsTerminal(&bytes.Buffer{}))
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() {
+		_ = r.Close()
+		_ = w.Close()
+	}()
+	require.False(t, umountIsTerminal(w))
 }

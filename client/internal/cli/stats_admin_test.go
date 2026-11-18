@@ -329,3 +329,42 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 	require.Equal(t, "off", disabled.addr())
 	disabled.shutdown(context.Background())
 }
+
+func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringStats(t *testing.T) {
+	// Given
+	obs, mux := setupTestObsAndMux(t)
+
+	// When: query /debug/unmount and /debug/stats before any unmount
+	unmountReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
+	unmountRec := httptest.NewRecorder()
+	mux.ServeHTTP(unmountRec, unmountReq)
+
+	// Then
+	require.Equal(t, http.StatusOK, unmountRec.Code)
+	require.Equal(t, "application/json; charset=utf-8", unmountRec.Header().Get("Content-Type"))
+	var prog fusefs.UnmountProgress
+	require.NoError(t, json.Unmarshal(unmountRec.Body.Bytes(), &prog))
+	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, prog)
+
+	// And /debug/stats Snapshot schema remains unchanged without unmount progress fields.
+	statsReq := httptest.NewRequest(http.MethodGet, "/debug/stats?format=json", http.NoBody)
+	statsRec := httptest.NewRecorder()
+	mux.ServeHTTP(statsRec, statsReq)
+	require.Equal(t, http.StatusOK, statsRec.Code)
+	var rawStats map[string]any
+	require.NoError(t, json.Unmarshal(statsRec.Body.Bytes(), &rawStats))
+	require.NotContains(t, rawStats, "active")
+	require.NotContains(t, rawStats, "completed")
+	require.NotContains(t, rawStats, "total")
+	require.NotContains(t, rawStats, "unmount")
+
+	// And a nil RawFS still returns 200 OK zero progress safely.
+	nilMux := newAdminMux(obs, nil)
+	nilReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
+	nilRec := httptest.NewRecorder()
+	nilMux.ServeHTTP(nilRec, nilReq)
+	require.Equal(t, http.StatusOK, nilRec.Code)
+	require.Equal(t, "application/json; charset=utf-8", nilRec.Header().Get("Content-Type"))
+	require.NoError(t, json.Unmarshal(nilRec.Body.Bytes(), &prog))
+	require.Equal(t, fusefs.UnmountProgress{}, prog)
+}

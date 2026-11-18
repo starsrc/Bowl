@@ -4,6 +4,7 @@ package e2e_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -865,4 +866,150 @@ func TestStagedMode_RenameBarrier_GivenBlockedUpload_BlocksRenameUntilCommittedA
 	gotRename, err := os.ReadFile(filepath.Join(mpRO, "rename-barrier-dst.bin"))
 	require.NoError(t, err, "scene=rename_barrier_ro_read want=immediate_success")
 	require.Equal(t, sha256.Sum256(wantRename), sha256.Sum256(gotRename), "scene=rename_barrier_ro_read want=sha256_match")
+}
+
+type syncE2EBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncE2EBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncE2EBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func fetchDebugUnmount(t *testing.T, adminAddr string) fusefs.UnmountProgress {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+adminAddr+"/debug/unmount", http.NoBody)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var prog fusefs.UnmountProgress
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&prog))
+	return prog
+}
+
+// TestStagedMode_UmountDrainProgress_GivenUnsyncedWrites_ReportsSyncProgressOnStderr verifies
+// bowl umount drains unsynced writes with empty stdout, determinate stderr progress when admin
+// is enabled, zero output when clean, and fallback notice after 1s when admin is off.
+func TestStagedMode_UmountDrainProgress_GivenUnsyncedWrites_ReportsSyncProgressOnStderr(t *testing.T) {
+	client := newTestStorageClient(t)
+	realEndpoint := getStorageEndpoint()
+
+	t.Run("UnsyncedWritesWithAdmin", func(t *testing.T) {
+		proxy := startControllableStorageProxy(t, realEndpoint)
+		diskID := createTestDisk(t, client).GetDiskId()
+		stageDir := filepath.Join(t.TempDir(), "umount-progress-stage")
+		mp, daemonPID, adminAddr, _ := startMountedDaemon(t, proxy.Endpoint, diskID, "--stage-size", "16MiB", "--stage-dir", stageDir)
+
+		proxy.BlockWrites()
+		t.Cleanup(proxy.UnblockWrites)
+		wantA := deterministicPayload("umount-prog-a", 4_194_304)
+		wantB := deterministicPayload("umount-prog-b", 1_048_576)
+		writeFullFile(t, filepath.Join(mp, "umount-a.bin"), wantA, 524_288)
+		writeFullFile(t, filepath.Join(mp, "umount-b.bin"), wantB, 524_288)
+		require.Eventually(t, func() bool {
+			return proxy.WriteInflight() >= 1
+		}, 5*time.Second, 10*time.Millisecond, "scene=umount_progress want=write_rpc_in_flight")
+		require.Zero(t, proxy.WriteCompleted())
+
+		ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
+		defer cancel()
+		var outBuf, errBuf syncE2EBuffer
+		umountCmd := exec.CommandContext(ctx, getBowlBin(), "umount", mp)
+		umountCmd.Stdout = &outBuf
+		umountCmd.Stderr = &errBuf
+		require.NoError(t, umountCmd.Start())
+
+		require.Eventually(t, func() bool {
+			prog := fetchDebugUnmount(t, adminAddr)
+			return prog.Active && prog.Total > 0 && strings.Contains(errBuf.String(), "Syncing to cloud:")
+		}, 5*time.Second, 20*time.Millisecond, "scene=umount_progress want=active_debug_unmount_and_stderr_progress")
+
+		proxy.UnblockWrites()
+		require.NoError(t, umountCmd.Wait(), "bowl umount failed: stderr=%s", errBuf.String())
+		waitForUnmount(t, mp)
+		waitForProcessExit(t, daemonPID)
+
+		require.Empty(t, outBuf.String(), "bowl umount stdout must remain empty")
+		errText := errBuf.String()
+		require.Contains(t, errText, "Syncing to cloud:")
+		require.Contains(t, errText, "100%")
+		require.NotContains(t, errText, "\r")
+		require.NotContains(t, errText, "\x1b")
+
+		mpVerify, stopVerify := mountWithCleanup(t, realEndpoint, diskID, "--mode", "ro", "--direct-io")
+		defer stopVerify()
+		require.Equal(t, sha256.Sum256(wantA), fileSHA256(t, filepath.Join(mpVerify, "umount-a.bin")))
+		require.Equal(t, sha256.Sum256(wantB), fileSHA256(t, filepath.Join(mpVerify, "umount-b.bin")))
+	})
+
+	t.Run("CleanMountEmitsNoOutput", func(t *testing.T) {
+		diskID := createTestDisk(t, client).GetDiskId()
+		mp, daemonPID, _, _ := startMountedDaemon(t, realEndpoint, diskID)
+
+		ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
+		defer cancel()
+		var outBuf, errBuf bytes.Buffer
+		umountCmd := exec.CommandContext(ctx, getBowlBin(), "umount", mp)
+		umountCmd.Stdout = &outBuf
+		umountCmd.Stderr = &errBuf
+		require.NoError(t, umountCmd.Run(), "clean bowl umount failed: stderr=%s", errBuf.String())
+		waitForUnmount(t, mp)
+		waitForProcessExit(t, daemonPID)
+
+		require.Empty(t, outBuf.String())
+		require.Empty(t, errBuf.String())
+	})
+
+	t.Run("AdminOffSlowDrainFallsBackAfterGrace", func(t *testing.T) {
+		proxy := startControllableStorageProxy(t, realEndpoint)
+		diskID := createTestDisk(t, client).GetDiskId()
+		mp := t.TempDir()
+		runBowlSuccess(t, "mount", "--endpoint", proxy.Endpoint, "--admin-addr", "off", "--stage-size", "8MiB", diskID, mp)
+		t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mp).Run() })
+		daemonPID := findBowlDaemonPID(t, mp)
+
+		proxy.BlockWrites()
+		t.Cleanup(proxy.UnblockWrites)
+		writeFullFile(t, filepath.Join(mp, "fallback.bin"), deterministicPayload("umount-fallback", 1_048_576), 524_288)
+		require.Eventually(t, func() bool {
+			return proxy.WriteInflight() >= 1
+		}, 5*time.Second, 10*time.Millisecond)
+
+		ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
+		defer cancel()
+		var outBuf, errBuf syncE2EBuffer
+		umountCmd := exec.CommandContext(ctx, getBowlBin(), "umount", mp)
+		umountCmd.Stdout = &outBuf
+		umountCmd.Stderr = &errBuf
+		require.NoError(t, umountCmd.Start())
+
+		require.Eventually(t, func() bool {
+			return strings.Contains(errBuf.String(), "Syncing to cloud...\n")
+		}, 5*time.Second, 20*time.Millisecond, "bowl umount must emit fallback notice after 1s grace period")
+
+		proxy.UnblockWrites()
+		require.NoError(t, umountCmd.Wait(), "fallback bowl umount failed: stderr=%s", errBuf.String())
+		waitForUnmount(t, mp)
+		waitForProcessExit(t, daemonPID)
+
+		require.Empty(t, outBuf.String())
+		errText := errBuf.String()
+		require.Contains(t, errText, "Syncing to cloud...\n")
+		require.NotContains(t, errText, "\r")
+		require.NotContains(t, errText, "\x1b")
+		require.NotContains(t, errText, "%")
+	})
 }

@@ -806,6 +806,28 @@ func (c *StageCoordinator) gauges() (pendingChunks int64, usedBytes, capacityByt
 	return max(int64(0), c.pendingChunks.Load()), used, capBytes
 }
 
+func (c *StageCoordinator) unmountSnapshot() (pendingChunks int64, stagedInodes []uint64) {
+	if c == nil {
+		return 0, nil
+	}
+	c.mu.Lock()
+	for ino, st := range c.inodes {
+		if st != nil && (st.hasPendingLocked() || st.activeWriteBusy || st.active != nil) {
+			stagedInodes = append(stagedInodes, ino)
+		}
+	}
+	pendingChunks = max(int64(0), c.pendingChunks.Load())
+	c.mu.Unlock()
+	return pendingChunks, stagedInodes
+}
+
+func (c *StageCoordinator) pendingChunkCount() int64 {
+	if c == nil {
+		return 0
+	}
+	return max(int64(0), c.pendingChunks.Load())
+}
+
 // RegisterHandle 在打开文件句柄时按 Linux errseq_t 语义采样当前全局错误水位。
 func (c *StageCoordinator) RegisterHandle(fh uint64) {
 	if c == nil || fh == 0 {

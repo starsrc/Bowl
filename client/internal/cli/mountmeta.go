@@ -35,14 +35,14 @@ var mountMetaDirs = func() []string {
 	return []string{primaryMountMetaDir, fallbackMountMetaDir()}
 }
 
-// canonicalMountpoint normalizes mountpoint paths by resolving symlinks when possible and falling back to Abs plus Clean.
+// canonicalMountpoint normalizes mountpoint paths through ResolveMountPoint without calling Lstat on active mount roots,
+// falling back to Abs plus Clean on error.
 func canonicalMountpoint(mountpoint string) string {
-	abs, err := filepath.Abs(mountpoint)
-	if err == nil {
-		mountpoint = abs
+	if resolved, _, err := ResolveMountPoint(mountpoint); err == nil {
+		return resolved
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(mountpoint); evalErr == nil {
-		return filepath.Clean(resolved)
+	if abs, err := filepath.Abs(mountpoint); err == nil {
+		return filepath.Clean(abs)
 	}
 	return filepath.Clean(mountpoint)
 }
@@ -115,8 +115,11 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func forEachAliveMountMeta(dirs []string, fn func(path string, meta mountMeta) bool) {
-	for _, dir := range dirs {
+// listMountMetas reads metadata files for alive processes across all discovery directories, sorted by mountpoint.
+func listMountMetas() []mountMeta {
+	seen := make(map[string]struct{})
+	var out []mountMeta
+	for _, dir := range mountMetaDirs() {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -126,8 +129,7 @@ func forEachAliveMountMeta(dirs []string, fn func(path string, meta mountMeta) b
 			if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			candidate := filepath.Join(dir, name)
-			data, readErr := os.ReadFile(candidate)
+			data, readErr := os.ReadFile(filepath.Join(dir, name))
 			if readErr != nil {
 				continue
 			}
@@ -135,26 +137,14 @@ func forEachAliveMountMeta(dirs []string, fn func(path string, meta mountMeta) b
 			if json.Unmarshal(data, &m) != nil || !processAlive(m.PID) {
 				continue
 			}
-			m.Mountpoint = canonicalMountpoint(m.Mountpoint)
-			if fn(candidate, m) {
-				return
+			m.Mountpoint = filepath.Clean(m.Mountpoint)
+			if _, dup := seen[m.Mountpoint]; dup {
+				continue
 			}
+			seen[m.Mountpoint] = struct{}{}
+			out = append(out, m)
 		}
 	}
-}
-
-// listMountMetas reads metadata files for alive processes across all discovery directories, sorted by mountpoint.
-func listMountMetas() []mountMeta {
-	seen := make(map[string]struct{})
-	var out []mountMeta
-	forEachAliveMountMeta(mountMetaDirs(), func(_ string, m mountMeta) bool {
-		if _, dup := seen[m.Mountpoint]; dup {
-			return false
-		}
-		seen[m.Mountpoint] = struct{}{}
-		out = append(out, m)
-		return false
-	})
 	slices.SortFunc(out, func(a, b mountMeta) int {
 		return cmp.Compare(a.Mountpoint, b.Mountpoint)
 	})
@@ -171,12 +161,11 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 		names = append(names, mountMetaFileName(canon))
 	}
 
-	dirs := mountMetaDirs()
 	var fallbackPath string
 	var fallbackMeta mountMeta
 	hasFallback := false
 
-	for _, dir := range dirs {
+	for _, dir := range mountMetaDirs() {
 		for _, name := range names {
 			candidate := filepath.Join(dir, name)
 			data, err := os.ReadFile(candidate)
@@ -196,24 +185,6 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 			}
 		}
 	}
-
-	// Fall back to scanning metadata entries in case an older file was hashed under a symlink alias.
-	var matchedPath string
-	var matchedMeta mountMeta
-	var matched bool
-	forEachAliveMountMeta(dirs, func(path string, m mountMeta) bool {
-		if m.Mountpoint == canon {
-			matchedPath = path
-			matchedMeta = m
-			matched = true
-			return true
-		}
-		return false
-	})
-	if matched {
-		return matchedPath, matchedMeta, true
-	}
-
 	if hasFallback {
 		return fallbackPath, fallbackMeta, true
 	}
@@ -225,7 +196,7 @@ func findMountMeta(mountpoint string) (mountMeta, bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)
 	for _, m := range listMountMetas() {
-		if m.Mountpoint == cleaned || canonicalMountpoint(m.Mountpoint) == canon {
+		if m.Mountpoint == cleaned || m.Mountpoint == canon {
 			return m, true
 		}
 	}

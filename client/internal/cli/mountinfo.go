@@ -143,12 +143,17 @@ func walkMountPointComponents(candidate string, hops *int, mountSet map[string]s
 	parts := splitAbsComponents(candidate)
 	curPrefix := string(filepath.Separator)
 	for idx, comp := range parts {
-		// Check the full remaining candidate before Lstat so a mounted FUSE root is never stat'd.
+		// Check the full remaining candidate before Lstat so this walk never stats a mounted FUSE root.
 		checkCandidate := filepath.Clean(filepath.Join(append([]string{curPrefix}, parts[idx:]...)...))
 		if _, ok := mountSet[checkCandidate]; ok {
 			return checkCandidate, true, false
 		}
 		nextPath := filepath.Join(curPrefix, comp)
+		if _, isMount := mountSet[nextPath]; isMount {
+			// Active Linux mount roots are never symlinks; advance past them without calling Lstat.
+			curPrefix = nextPath
+			continue
+		}
 		info, lerr := mountInfoLstat(nextPath)
 		if lerr != nil || info == nil {
 			return candidate, false, false
@@ -193,9 +198,6 @@ func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err erro
 	}
 	if _, ok := mountSet[cleanAbs]; ok {
 		return cleanAbs, true, nil
-	}
-	if len(mountSet) == 0 {
-		return cleanAbs, false, nil
 	}
 
 	candidate := cleanAbs

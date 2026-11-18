@@ -495,6 +495,21 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	// Wait longer than the 1s attr cache TTL so any stat on the FUSE root would trigger FUSE_GETATTR and block.
 	time.Sleep(1300 * time.Millisecond)
 
+	for _, statsArgs := range [][]string{{"stats"}, {"stats", symMP}} {
+		statsCtx, statsCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		statsStart := time.Now()
+		statsOut, statsErr := exec.CommandContext(statsCtx, getBowlBin(), statsArgs...).CombinedOutput()
+		statsElapsed := time.Since(statsStart)
+		ctxErr := statsCtx.Err()
+		statsCancel()
+		require.NoError(t, ctxErr, "bowl %v timed out after %s: %s", statsArgs, statsElapsed, string(statsOut))
+		require.Less(t, statsElapsed, 3*time.Second)
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, statsErr, &exitErr, "bowl %v must exit with code 1, got err=%v out=%s", statsArgs, statsErr, string(statsOut))
+		require.Equal(t, 1, exitErr.ExitCode(), "bowl %v out=%s", statsArgs, string(statsOut))
+		require.Contains(t, string(statsOut), "admin endpoint is disabled")
+	}
+
 	forceCtx, forceCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer forceCancel()
 	start := time.Now()

@@ -594,17 +594,16 @@ func isSameOrSubpath(base, target string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-func validatePathNotInMountpoint(flagName, targetPath, absMountpoint string) error {
-	if isSameOrSubpath(absMountpoint, targetPath) {
-		return fmt.Errorf("%s %q cannot equal or be inside mountpoint %q", flagName, targetPath, absMountpoint)
+func validatePathNotInMountpoint(flagName, targetPath, rawMP, canonMP string) error {
+	if isSameOrSubpath(rawMP, targetPath) || isSameOrSubpath(canonMP, targetPath) {
+		return fmt.Errorf("%s %q cannot equal or be inside mountpoint %q", flagName, targetPath, canonMP)
 	}
-	canonMP, errMP := resolvePathWithSymlinks(absMountpoint)
 	canonTarget, errTarget := resolvePathWithSymlinks(targetPath)
 	if errTarget != nil {
 		return fmt.Errorf("failed to resolve %s %q: %w", flagName, targetPath, errTarget)
 	}
-	if errMP == nil && isSameOrSubpath(canonMP, canonTarget) {
-		return fmt.Errorf("%s %q cannot equal or be inside mountpoint %q", flagName, targetPath, absMountpoint)
+	if isSameOrSubpath(canonMP, canonTarget) {
+		return fmt.Errorf("%s %q cannot equal or be inside mountpoint %q", flagName, targetPath, canonMP)
 	}
 	return nil
 }
@@ -691,35 +690,36 @@ func executeMountValidated(
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
-	fi, err := os.Stat(absMountpoint)
+	canonMountpoint, mounted, err := ResolveMountPoint(absMountpoint)
 	if err != nil {
-		return usageExitErr(fmt.Errorf("mountpoint %q does not exist or cannot be accessed: %w", absMountpoint, err), false)
+		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
-	if !fi.IsDir() {
-		return usageExitErr(fmt.Errorf("mountpoint %q is not a directory", absMountpoint), false)
+	if !mounted {
+		fi, statErr := os.Stat(absMountpoint)
+		if statErr != nil {
+			return usageExitErr(fmt.Errorf("mountpoint %q does not exist or cannot be accessed: %w", absMountpoint, statErr), false)
+		}
+		if !fi.IsDir() {
+			return usageExitErr(fmt.Errorf("mountpoint %q is not a directory", absMountpoint), false)
+		}
+		canonMountpoint, err = filepath.EvalSymlinks(absMountpoint)
+		if err != nil {
+			return usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
+		}
+		canonMountpoint = filepath.Clean(canonMountpoint)
 	}
-
-	canonMountpoint, err := filepath.EvalSymlinks(absMountpoint)
-	if err != nil {
-		return usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
-	}
-	canonMountpoint = filepath.Clean(canonMountpoint)
 
 	if opts.mode == fusefs.MountModeStaged {
-		if stageErr := validatePathNotInMountpoint("--stage-dir", opts.stageDir, canonMountpoint); stageErr != nil {
+		if stageErr := validatePathNotInMountpoint("--stage-dir", opts.stageDir, absMountpoint, canonMountpoint); stageErr != nil {
 			return usageExitErr(stageErr, false)
 		}
 	}
 	if set.logFile {
-		if logErr := validatePathNotInMountpoint("--log-file", opts.logFile, canonMountpoint); logErr != nil {
+		if logErr := validatePathNotInMountpoint("--log-file", opts.logFile, absMountpoint, canonMountpoint); logErr != nil {
 			return usageExitErr(logErr, false)
 		}
 	}
 
-	mounted, err := IsMountPoint(canonMountpoint)
-	if err != nil {
-		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
-	}
 	if mounted {
 		return runtimeExitErr(fmt.Errorf("mountpoint %q is already mounted", canonMountpoint))
 	}

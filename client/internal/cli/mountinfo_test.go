@@ -163,10 +163,24 @@ type fakeFSNode struct {
 
 func withMountInfoFSStub(t *testing.T, nodes map[string]fakeFSNode) *[]string {
 	t.Helper()
+	return withMountInfoNoRootLstatStub(t, nil, nodes)
+}
+
+func withMountInfoNoRootLstatStub(t *testing.T, forbiddenRoots []string, nodes map[string]fakeFSNode) *[]string {
+	t.Helper()
+	forbidden := make(map[string]struct{}, len(forbiddenRoots))
+	for _, r := range forbiddenRoots {
+		forbidden[filepath.Clean(r)] = struct{}{}
+	}
 	prevLstat := mountInfoLstat
 	prevReadlink := mountInfoReadlink
 	var lstatCalls []string
 	mountInfoLstat = func(path string) (os.FileInfo, error) {
+		cleanPath := filepath.Clean(path)
+		if _, banned := forbidden[cleanPath]; banned {
+			t.Errorf("unexpected mountInfoLstat call on active mount root %q", cleanPath)
+			return nil, fmt.Errorf("forbidden Lstat on active mount root %q", cleanPath)
+		}
 		lstatCalls = append(lstatCalls, path)
 		node, ok := nodes[path]
 		if !ok {
@@ -312,14 +326,62 @@ func TestResolveMountPoint_GivenHopLimitErrorsAndMissingMountInfo_HandlesCleanly
 		}
 	})
 
-	t.Run("MissingMountInfoSkipsLstat", func(t *testing.T) {
+	t.Run("EmptyMountSetExpandsSymlinksUpTo40Hops", func(t *testing.T) {
 		withMissingMountInfo(t)
-		lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{})
+		nodes := buildSymlinkChainNodes(40, "/data/mnt")
+		nodes["/data"] = fakeFSNode{mode: os.ModeDir | 0o755}
+		nodes["/data/mnt"] = fakeFSNode{mode: os.ModeDir | 0o755}
+		withMountInfoFSStub(t, nodes)
 
-		resolved, mounted, err := ResolveMountPoint("/mnt/anything")
+		resolved, mounted, err := ResolveMountPoint("/tmp/hop-00")
 		require.NoError(t, err)
 		require.False(t, mounted)
-		require.Equal(t, "/mnt/anything", resolved)
-		require.Empty(t, *lstatCalls)
+		require.Equal(t, "/data/mnt", resolved)
+
+		withMountInfoFSStub(t, buildSymlinkChainNodes(41, "/data/mnt"))
+		resolvedOver, mountedOver, err := ResolveMountPoint("/tmp/hop-00")
+		require.NoError(t, err)
+		require.False(t, mountedOver)
+		require.Equal(t, "/tmp/hop-40", resolvedOver)
 	})
+}
+
+func TestResolveMountPoint_GivenActiveMountRootsInPath_SkipsLstatOnMountRoots(t *testing.T) {
+	// Given: /run, /real-wedged, and /real-ok are active mount roots in mountinfo
+	const (
+		realWedgedMP = "/real-wedged"
+		realOkMP     = "/real-ok"
+	)
+	withMountInfoContent(t,
+		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+			"35 30 0:25 / /run rw - tmpfs tmpfs rw\n"+
+			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
+	)
+	lstatCalls := withMountInfoNoRootLstatStub(t, []string{"/", "/run", realWedgedMP, realOkMP}, map[string]fakeFSNode{
+		"/run/sym-ok": {mode: os.ModeSymlink | 0o777, target: realOkMP},
+		"/var":        {mode: os.ModeDir | 0o755},
+		"/var/sym":    {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
+	})
+
+	// When: resolving a symlink beneath the active intermediate mount root /run
+	resolvedOk, mountedOk, err := ResolveMountPoint("/run/sym-ok")
+	require.NoError(t, err)
+	require.True(t, mountedOk)
+	require.Equal(t, realOkMP, resolvedOk)
+
+	// When: resolving a path beneath the active wedged mount root /real-wedged/sub/leaf
+	resolvedSub, mountedSub, err := ResolveMountPoint("/real-wedged/sub/leaf")
+	require.NoError(t, err)
+	require.False(t, mountedSub)
+	require.Equal(t, "/real-wedged/sub/leaf", resolvedSub)
+
+	// When: resolving symlink pointing directly to wedged mount root
+	resolvedWedged, mountedWedged, err := ResolveMountPoint("/var/sym")
+	require.NoError(t, err)
+	require.True(t, mountedWedged)
+	require.Equal(t, realWedgedMP, resolvedWedged)
+
+	// Then: mountInfoLstat only inspected non-mount entries, never /, /run, /real-wedged, or /real-ok
+	require.Equal(t, []string{"/run/sym-ok", "/real-wedged/sub", "/var", "/var/sym"}, *lstatCalls)
 }

@@ -1338,18 +1338,18 @@ func TestDefaultMountRenewInterval_GivenTTLValues_ClampsMinimumOneSecond(t *test
 }
 
 func TestValidatePathNotInMountpoint_GivenEqualAndSymlinkLoop_ReturnsFlagErrors(t *testing.T) {
-	mp := t.TempDir()
+	mp := canonicalMountpoint(t.TempDir())
 	loopDir := t.TempDir()
 	loopA := filepath.Join(loopDir, "loop-a")
 	loopB := filepath.Join(loopDir, "loop-b")
 	require.NoError(t, os.Symlink(loopB, loopA))
 	require.NoError(t, os.Symlink(loopA, loopB))
 
-	equalErr := validatePathNotInMountpoint("--log-file", mp, mp)
+	equalErr := validatePathNotInMountpoint("--log-file", mp, mp, mp)
 	require.ErrorContains(t, equalErr, "--log-file")
 	require.ErrorContains(t, equalErr, "cannot equal or be inside mountpoint")
 
-	loopErr := validatePathNotInMountpoint("--log-file", loopA, mp)
+	loopErr := validatePathNotInMountpoint("--log-file", loopA, mp, mp)
 	require.ErrorContains(t, loopErr, "failed to resolve --log-file")
 }
 
@@ -1702,4 +1702,91 @@ func TestMount_Validation_GivenSymlinkLoopMountpoint_Exits2(t *testing.T) {
 	require.Equal(t, 2, code, "scene=mountpoint_symlink_loop want=2 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "Error:")
+}
+
+func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsWithoutMountRootLstat(t *testing.T) {
+	// Given: synthetic mount roots in mountinfo that do not exist on host disk, so os.Stat or EvalSymlinks would fail with exit 2
+	const (
+		realWedgedMP = "/wedged-root/mnt"
+		realOkMP     = "/ok-root/mnt"
+		symWedgedMP  = "/tmp/sym-wedged"
+		symOkMP      = "/tmp/sym-ok"
+	)
+	withMountInfoContent(t,
+		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
+	)
+	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+		"/tmp":      {mode: os.ModeDir | 0o755},
+		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
+		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
+	})
+
+	// When / Then: direct canonical wedged path returns exit 1 with zero Lstat calls
+	code, out, errOut := runCLI("mount", testDiskID1, realWedgedMP, "-f")
+	require.Equal(t, 1, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Contains(t, errOut, "already mounted")
+	require.Contains(t, errOut, realWedgedMP)
+	require.Empty(t, *lstatCalls)
+
+	// When / Then: symlinked wedged and ok paths return exit 1 without os.Stat, EvalSymlinks, or Lstat on active mount roots
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: symWedgedMP, want: realWedgedMP},
+		{input: symOkMP, want: realOkMP},
+	} {
+		code, out, errOut = runCLI("mount", testDiskID1, tc.input, "-f")
+		require.Equal(t, 1, code, "input=%s stderr=%s", tc.input, errOut)
+		require.Empty(t, out)
+		require.Contains(t, errOut, "already mounted")
+		require.Contains(t, errOut, tc.want)
+	}
+
+	// When / Then: bad flags on an already-mounted wedged mountpoint still exit 2 without touching active mount roots
+	loopDir := t.TempDir()
+	loopA := filepath.Join(loopDir, "loop-a")
+	loopB := filepath.Join(loopDir, "loop-b")
+	require.NoError(t, os.Symlink(loopB, loopA))
+	require.NoError(t, os.Symlink(loopA, loopB))
+
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantSubstr string
+	}{
+		{
+			name:       "StageDirInsideSymlinkWedgedMount",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "-f", "--stage-dir", filepath.Join(symWedgedMP, "sub")},
+			wantSubstr: "mountpoint",
+		},
+		{
+			name:       "LogFileInsideCanonicalWedgedMount",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "--log-file", filepath.Join(realWedgedMP, "daemon.log")},
+			wantSubstr: "mountpoint",
+		},
+		{
+			name:       "StageDirSymlinkLoop",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "-f", "--stage-dir", loopA},
+			wantSubstr: "Error:",
+		},
+		{
+			name:       "InvalidModeFlagCombo",
+			args:       []string{"mount", testDiskID1, symWedgedMP, "-f", "--mode", "ro", "--stage-size", "8MiB"},
+			wantSubstr: "--stage-size cannot be set",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errOut = runCLI(tc.args...)
+			require.Equal(t, 2, code, "scene=%s stderr=%s", tc.name, errOut)
+			require.Empty(t, out)
+			require.Contains(t, errOut, tc.wantSubstr)
+		})
+	}
+
+	require.NotContains(t, *lstatCalls, realWedgedMP)
+	require.NotContains(t, *lstatCalls, realOkMP)
 }

@@ -1054,60 +1054,87 @@ func TestUmount_GivenUnmountedSymlink_ReportsOriginalAbsPath(t *testing.T) {
 	require.Contains(t, errOut, "is not a mounted filesystem")
 }
 
-func TestUmount_GivenLegacySymlinkNamedMountMetaAndDeadCanonMeta_PrefersAliveScannedMeta(t *testing.T) {
-	// Given: a dead canonical hash file plus an alive legacy symlink-hashed file
-	realMP := filepath.Join(t.TempDir(), "real-mp")
-	require.NoError(t, os.MkdirAll(realMP, 0o755))
-	canonMP := canonicalMountpoint(realMP)
-	symMP := filepath.Join(t.TempDir(), "sym-mp")
-	require.NoError(t, os.Symlink(realMP, symMP))
-
+func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithoutMountRootLstat(t *testing.T) {
+	// Given: realWedgedMP and realOkMP are active mount roots in mountinfo
+	const (
+		realWedgedMP = "/wedged-root/mnt"
+		realOkMP     = "/ok-root/mnt"
+		symWedgedMP  = "/tmp/sym-wedged"
+		symOkMP      = "/tmp/sym-ok"
+	)
 	metaDir := t.TempDir()
 	withTempMountMetaDirs(t, metaDir)
-	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+	withMountInfoContent(t,
+		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+			"100 30 0:50 / "+realWedgedMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+			"101 30 0:51 / "+realOkMP+" rw - fuse.bowl bowl:"+testDiskID2+" rw\n",
+	)
+	lstatCalls := withMountInfoNoRootLstatStub(t, []string{realWedgedMP, realOkMP}, map[string]fakeFSNode{
+		"/tmp":      {mode: os.ModeDir | 0o755},
+		symWedgedMP: {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
+		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
+	})
 	withUmountDrainStub(t, 500*time.Millisecond, 5*time.Millisecond)
 
-	deadData, err := json.Marshal(mountMeta{
-		Mountpoint: canonMP,
-		PID:        99999999,
-		DiskID:     testDiskID1,
-		AdminAddr:  "off",
-		StartedAt:  time.Now().UTC(),
-	})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(metaDir, mountMetaFileName(canonMP)), deadData, 0o644))
-
-	liveData, err := json.Marshal(mountMeta{
-		Mountpoint: symMP,
+	_, err := writeMountMeta(&mountMeta{
+		Mountpoint: realWedgedMP,
 		PID:        os.Getpid(),
 		DiskID:     testDiskID1,
 		AdminAddr:  "off",
 		StartedAt:  time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	legacyMetaPath := filepath.Join(metaDir, mountMetaFileName(symMP))
-	require.NoError(t, os.WriteFile(legacyMetaPath, liveData, 0o644))
+	okMetaPath, err := writeMountMeta(&mountMeta{
+		Mountpoint: realOkMP,
+		PID:        os.Getpid(),
+		DiskID:     testDiskID2,
+		AdminAddr:  "off",
+		StartedAt:  time.Now().UTC(),
+	})
+	require.NoError(t, err)
 
-	withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+	// When: resolving umount metadata via symlinked paths
+	gotWedgedPath, gotWedgedMeta, okWedged := resolveUmountMountMeta(symWedgedMP)
+	require.True(t, okWedged)
+	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realWedgedMP)), gotWedgedPath)
+	require.Equal(t, realWedgedMP, gotWedgedMeta.Mountpoint)
+
+	gotOkPath, gotOkMeta, okHealthy := resolveUmountMountMeta(symOkMP)
+	require.True(t, okHealthy)
+	require.Equal(t, okMetaPath, gotOkPath)
+	require.Equal(t, realOkMP, gotOkMeta.Mountpoint)
+
+	// When: normal unmount via symOkMP while realWedgedMP is mounted
+	_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 	prevRun := runCommand
-	runCommand = func(_ string, _ ...string) ([]byte, error) {
+	var calledArgs []string
+	runCommand = func(_ string, args ...string) ([]byte, error) {
+		calledArgs = append([]string(nil), args...)
 		go func() {
-			time.Sleep(25 * time.Millisecond)
-			_ = os.Remove(legacyMetaPath)
+			time.Sleep(15 * time.Millisecond)
+			_ = os.Remove(okMetaPath)
 		}()
 		return nil, nil
 	}
 	t.Cleanup(func() { runCommand = prevRun })
 
-	// When: unmounting via the canonical real path
-	code, out, errOut := runCLI("umount", canonMP)
-
-	// Then: must wait for the alive symlink-named mountMeta entry rather than exiting immediately on the dead canonical file
+	code, out, errOut := runCLI("umount", symOkMP)
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
-	_, statErr := os.Stat(legacyMetaPath)
-	require.True(t, os.IsNotExist(statErr), "alive legacy mountMeta must be drained before umount returns")
+	require.Equal(t, []string{"-u", realOkMP}, calledArgs)
+	_, statErr := os.Stat(okMetaPath)
+	require.True(t, os.IsNotExist(statErr))
+
+	// When: force unmount via symWedgedMP
+	code, out, errOut = runCLI("umount", "-f", symWedgedMP)
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, []string{"-uz", realWedgedMP}, calledArgs)
+
+	require.NotContains(t, *lstatCalls, realWedgedMP)
+	require.NotContains(t, *lstatCalls, realOkMP)
 }
 
 func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCanonicalPath(t *testing.T) {

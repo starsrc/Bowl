@@ -528,6 +528,8 @@ func vmStatus(st *vmState) string {
 	return "stopped"
 }
 
+// ponytail: startDetached 不回收子进程,同一个进程里起过的虚机退出后是僵尸,Kill(pid, 0) 仍成功,
+// 会被当成 running。CLI 每次都退出所以没事;长期运行的控制面要改成持有 *os.Process 并 Wait。
 func processAlive(pid int) bool {
 	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
@@ -587,18 +589,20 @@ func isSocket(p string) bool {
 	return err == nil && fi.Mode()&os.ModeSocket != 0
 }
 
-// isMountpoint 查 /proc/self/mountinfo,判断 p 是不是一个挂载点。
+// isMountpoint 判断 p 是不是挂载点:它和父目录不在同一个设备上。
+// 这个判断决定删不删状态目录,判错会把盘里的内容一起删掉,所以出错时按"是挂载点"处理。
 func isMountpoint(p string) bool {
-	b, err := os.ReadFile("/proc/self/mountinfo")
-	if err != nil {
+	fi, err := os.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
 		return false
 	}
-	for line := range strings.SplitSeq(string(b), "\n") {
-		if fields := strings.Fields(line); len(fields) > 4 && fields[4] == p {
-			return true
-		}
+	parent, perr := os.Stat(filepath.Dir(p))
+	if err != nil || perr != nil {
+		return true
 	}
-	return false
+	a, ok1 := fi.Sys().(*syscall.Stat_t)
+	b, ok2 := parent.Sys().(*syscall.Stat_t)
+	return !ok1 || !ok2 || a.Dev != b.Dev
 }
 
 func installFile(src, dst string) error {

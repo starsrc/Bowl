@@ -44,3 +44,10 @@ func TestReadFrame_RejectsOversizedLength(t *testing.T) {
 	_, _, err := readFrame(bytes.NewReader([]byte{frameStdout, 0xff, 0xff, 0xff, 0xff}))
 	assert.Error(t, err)
 }
+
+func TestIsMountpoint(t *testing.T) {
+	dir := t.TempDir()
+	assert.False(t, isMountpoint(dir+"/missing"))
+	assert.False(t, isMountpoint(dir))
+	assert.True(t, isMountpoint("/dev"), "/dev is its own filesystem on Linux and macOS")
+}

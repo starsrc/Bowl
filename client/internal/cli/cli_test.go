@@ -118,10 +118,12 @@ type fakeStorage struct {
 	mountZeroEpoch  bool
 	mountIDSeq      int
 	mountLeaseTTL   uint32
+	mountReqs       []*storagev1.MountDiskRequest
 	renewReqs       []*storagev1.RenewMountRequest
 	unmountReqs     []*storagev1.UnmountDiskRequest
 	renewErr        error
 	unmountErr      error
+	onRenewMount    func(*storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error)
 	onUnmountDisk   func(*storagev1.UnmountDiskRequest)
 }
 
@@ -346,6 +348,7 @@ func (f *fakeStorage) MountDisk(_ context.Context, req *connect.Request[storagev
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recordHeaders(req.Header())
+	f.mountReqs = append(f.mountReqs, req.Msg)
 	if err := f.forcedErr["MountDisk"]; err != nil {
 		return nil, err
 	}
@@ -382,16 +385,27 @@ func (f *fakeStorage) MountDisk(_ context.Context, req *connect.Request[storagev
 
 func (f *fakeStorage) RenewMount(_ context.Context, req *connect.Request[storagev1.RenewMountRequest]) (*connect.Response[storagev1.RenewMountResponse], error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.recordHeaders(req.Header())
 	f.renewReqs = append(f.renewReqs, req.Msg)
-	if f.renewErr != nil {
-		return nil, f.renewErr
-	}
-	if err := f.forcedErr["RenewMount"]; err != nil {
-		return nil, err
-	}
+	hook := f.onRenewMount
+	renewErr := f.renewErr
+	forced := f.forcedErr["RenewMount"]
 	ttl := f.mountLeaseTTL
+	f.mu.Unlock()
+
+	if hook != nil {
+		resp, err := hook(req.Msg)
+		if err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(resp), nil
+	}
+	if renewErr != nil {
+		return nil, renewErr
+	}
+	if forced != nil {
+		return nil, forced
+	}
 	if ttl == 0 {
 		ttl = 30
 	}
@@ -418,6 +432,14 @@ func (f *fakeStorage) UnmountDisk(_ context.Context, req *connect.Request[storag
 		return nil, unmountErr
 	}
 	return connect.NewResponse(&storagev1.UnmountDiskResponse{}), nil
+}
+
+func (f *fakeStorage) getMountReqs() []*storagev1.MountDiskRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*storagev1.MountDiskRequest, len(f.mountReqs))
+	copy(out, f.mountReqs)
+	return out
 }
 
 func (f *fakeStorage) getRenewReqs() []*storagev1.RenewMountRequest {

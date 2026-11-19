@@ -177,11 +177,11 @@ func (r *clientRuntime) RegisterCollector(cs ...prometheus.Collector) error {
 	return nil
 }
 
-func (r *clientRuntime) MountAdminRoutes(mux *http.ServeMux) {
+func (r *clientRuntime) MountAdminRoutes(mux *http.ServeMux, opts ...observability.AdminOption) {
 	observability.RegisterAdminRoutes(mux, r.registry, observability.AdminConfig{
 		MetricsEnabled: true,
 		PprofEnabled:   true,
-	})
+	}, opts...)
 }
 
 func (r *clientRuntime) Shutdown(ctx context.Context) error {
@@ -303,16 +303,18 @@ type adminServer struct {
 	srv *http.Server
 }
 
-func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS) *http.ServeMux {
+func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) *http.ServeMux {
 	mux := http.NewServeMux()
-	obs.MountAdminRoutes(mux)
+	obs.MountAdminRoutes(mux, observability.WithReadyCheck("mount_lease", func(context.Context) error {
+		return checkMountLeaseReady(fs, tracker)
+	}))
 	mux.Handle("GET /debug/stats", statsHandler(fs))
 	mux.Handle("GET /debug/unmount", unmountProgressHandler(fs))
 	return mux
 }
 
 // startAdminServer starts /metrics, /debug/pprof/*, /healthz, /readyz, /debug/stats, and /debug/unmount on addr, or returns nil for "off".
-func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS) (*adminServer, error) {
+func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) (*adminServer, error) {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil, nil
 	}
@@ -320,7 +322,7 @@ func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS) (*admin
 	if err != nil {
 		return nil, fmt.Errorf("listen on admin address %q: %w", addr, err)
 	}
-	mux := newAdminMux(obs, fs)
+	mux := newAdminMux(obs, fs, tracker)
 
 	srv := &http.Server{
 		Handler:           mux,

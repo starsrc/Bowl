@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -79,7 +80,7 @@ func setupTestObsAndMux(t *testing.T) (*clientRuntime, *http.ServeMux) {
 	})
 	t.Cleanup(rawFS.OnUnmount)
 	require.NoError(t, obs.RegisterCollector(rawFS.Collector()))
-	return obs, newAdminMux(obs, rawFS)
+	return obs, newAdminMux(obs, rawFS, nil)
 }
 
 func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
@@ -323,7 +324,7 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 	require.Equal(t, http.StatusBadRequest, badRec.Code)
 
 	// When: startAdminServer("off") 返回 nil 且方法对 nil 安全
-	disabled, startErr := startAdminServer("off", obs, nil)
+	disabled, startErr := startAdminServer("off", obs, nil, nil)
 	require.NoError(t, startErr)
 	require.Nil(t, disabled)
 	require.Equal(t, "off", disabled.addr())
@@ -359,7 +360,7 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 	require.NotContains(t, rawStats, "unmount")
 
 	// And a nil RawFS still returns 200 OK zero progress safely.
-	nilMux := newAdminMux(obs, nil)
+	nilMux := newAdminMux(obs, nil, nil)
 	nilReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
 	nilRec := httptest.NewRecorder()
 	nilMux.ServeHTTP(nilRec, nilReq)
@@ -501,4 +502,57 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 
 	require.NotContains(t, *lstatCalls, realWedgedMP)
 	require.NotContains(t, *lstatCalls, realOkMP)
+}
+
+func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpectedStatus(t *testing.T) {
+	// Given: isolated observability runtime, RawFS, and deterministic clock.
+	obs, _ := setupTestObsAndMux(t)
+	rawFS := fusefs.NewRawFS(nil, fusefs.Config{
+		DiskID:  testDiskID1,
+		RootIno: 1,
+	})
+	t.Cleanup(rawFS.OnUnmount)
+
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	tracker := newMountLeaseTracker(mountLeaseInfo{
+		mountID:         "01950000-0000-7000-9000-000000000010",
+		leaseTTLSeconds: 30,
+	}, func() time.Time { return now })
+	mux := newAdminMux(obs, rawFS, tracker)
+
+	queryReadyz := func(m *http.ServeMux) (int, string) {
+		req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
+		rec := httptest.NewRecorder()
+		m.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	// Healthy active lease -> 200 OK.
+	code, body := queryReadyz(mux)
+	require.Equal(t, http.StatusOK, code, "body=%s", body)
+
+	// Lease reaches exact expiry boundary (now == leaseExpiresAt) -> 503.
+	now = now.Add(30 * time.Second)
+	code, body = queryReadyz(mux)
+	require.Equal(t, http.StatusServiceUnavailable, code, "body=%s", body)
+	require.Contains(t, body, "mount_lease")
+
+	// Renewal refreshes leaseExpiresAt -> heals back to 200 OK.
+	tracker.refresh(30)
+	code, body = queryReadyz(mux)
+	require.Equal(t, http.StatusOK, code, "body=%s", body)
+
+	// Permanent fence flips /readyz to 503 with reason even while lease has not expired.
+	rawFS.Fence(fuse.EBUSY, "writer epoch superseded")
+	code, body = queryReadyz(mux)
+	require.Equal(t, http.StatusServiceUnavailable, code, "body=%s", body)
+	require.Contains(t, body, "writer epoch superseded")
+
+	// Lease-free tracker (mountID == "") stays 200 OK while unfenced.
+	leaseFreeFS := fusefs.NewRawFS(nil, fusefs.Config{DiskID: testDiskID1, RootIno: 1})
+	t.Cleanup(leaseFreeFS.OnUnmount)
+	leaseFreeTracker := newMountLeaseTracker(mountLeaseInfo{}, func() time.Time { return now })
+	leaseFreeMux := newAdminMux(obs, leaseFreeFS, leaseFreeTracker)
+	code, body = queryReadyz(leaseFreeMux)
+	require.Equal(t, http.StatusOK, code, "body=%s", body)
 }

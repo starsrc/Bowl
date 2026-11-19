@@ -524,3 +524,107 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	require.NoError(t, syscall.Kill(meta2.PID, syscall.SIGCONT))
 	waitForProcessExit(t, meta2.PID)
 }
+
+// TestDaemonLifecycle_MountForceAdmissionAndStagedFencing verifies single-writer RW admission,
+// --force preemption, RenewMount-driven fencing, /readyz 503, local EBUSY write rejection,
+// cache-bypassing reads on the fenced mount, and clean bowl umount exit.
+func TestDaemonLifecycle_MountForceAdmissionAndStagedFencing(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	diskID := createTestDisk(t, client).GetDiskId()
+
+	// Given: active RW --mode=staged mount 1 with committed baseline file and cached read.
+	mp1, _, adminAddr1, stopMount1 := startMountedDaemon(t, endpoint, diskID, "--mode=staged")
+	defer stopMount1()
+
+	readyCode, readyBody := httpGetStatusAndBody(t, "http://"+adminAddr1+"/readyz")
+	require.Equal(t, http.StatusOK, readyCode, "body=%s", readyBody)
+
+	sharedPath1 := filepath.Join(mp1, "shared.txt")
+	fSeed, err := os.OpenFile(sharedPath1, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	_, err = fSeed.WriteString("v1-initial")
+	require.NoError(t, err)
+	require.NoError(t, fSeed.Sync())
+	require.NoError(t, fSeed.Close())
+
+	gotSeed, err := os.ReadFile(sharedPath1)
+	require.NoError(t, err)
+	require.Equal(t, "v1-initial", string(gotSeed))
+
+	openFD, err := openEINTR(filepath.Join(mp1, "open-handle.txt"), unix.O_CREAT|unix.O_RDWR|unix.O_TRUNC|unix.O_CLOEXEC, 0o644)
+	require.NoError(t, err)
+	closeOpenFD := closeFDGuard(openFD)
+	defer func() { _ = closeOpenFD() }()
+	nSeed, err := writeEINTR(openFD, []byte("before-preempt"))
+	require.NoError(t, err)
+	require.Equal(t, len("before-preempt"), nSeed)
+	require.NoError(t, fsyncEINTR(openFD))
+
+	// When: second RW mount without --force is rejected (exit 1, mentions --force).
+	rejectedMP := t.TempDir()
+	busyOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, "--admin-addr", "off", diskID, rejectedMP)
+	require.Contains(t, busyOut, "active read-write mount")
+	require.Contains(t, busyOut, "--force")
+	require.False(t, isMounted(rejectedMP))
+
+	// When: --mode=ro --force is rejected with exit 2.
+	roForceOut := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--mode=ro", "--force", diskID, rejectedMP)
+	require.Contains(t, roForceOut, "--force cannot be set with --mode=ro")
+
+	// When: concurrent --mode=ro mount succeeds alongside active RW mount 1.
+	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--mode=ro")
+	defer stopRO()
+	roData, err := os.ReadFile(filepath.Join(mpRO, "shared.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "v1-initial", string(roData))
+	stopRO()
+
+	// When: bowl mount --force preempts mount 1 on a second mountpoint.
+	mp2, _, adminAddr2, stopMount2 := startMountedDaemon(t, endpoint, diskID, "--mode=staged", "--force")
+	defer stopMount2()
+
+	ready2, readyBody2 := httpGetStatusAndBody(t, "http://"+adminAddr2+"/readyz")
+	require.Equal(t, http.StatusOK, ready2, "body=%s", readyBody2)
+
+	// Then: mount 1 RenewMount detects stale epoch, fences RawFS, and flips /readyz to 503.
+	require.Eventually(t, func() bool {
+		code, _ := httpGetStatusAndBody(t, "http://"+adminAddr1+"/readyz")
+		return code == http.StatusServiceUnavailable
+	}, 15*time.Second, 100*time.Millisecond, "fenced mount 1 /readyz must flip to 503 after lease preemption")
+
+	// Subsequent writes on fenced --mode=staged mount 1 fail locally with EBUSY, and closing the writable handle surfaces EBUSY on flush.
+	_, openWriteErr := writeEINTR(openFD, []byte("after-fence"))
+	require.ErrorIs(t, openWriteErr, syscall.EBUSY, "write on existing open fd must fail locally with EBUSY")
+	require.ErrorIs(t, os.WriteFile(filepath.Join(mp1, "new-blocked.txt"), []byte("blocked"), 0o644), syscall.EBUSY)
+	require.ErrorIs(t, closeOpenFD(), syscall.EBUSY, "closing writable handle on fenced mount must surface EBUSY from flush")
+
+	// When: mount 2 commits new data to shared.txt and creates a new file.
+	fUpdate, err := os.OpenFile(filepath.Join(mp2, "shared.txt"), os.O_WRONLY|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	_, err = fUpdate.WriteString("v2-committed-by-mount2")
+	require.NoError(t, err)
+	require.NoError(t, fUpdate.Sync())
+	require.NoError(t, fUpdate.Close())
+
+	fNew, err := os.OpenFile(filepath.Join(mp2, "from-mount2.txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	require.NoError(t, err)
+	_, err = fNew.WriteString("fresh-mount2-file")
+	require.NoError(t, err)
+	require.NoError(t, fNew.Sync())
+	require.NoError(t, fNew.Close())
+
+	// Then: reads on fenced mount 1 bypass stale cache and see committed writes from mount 2.
+	require.Eventually(t, func() bool {
+		gotShared, sErr := os.ReadFile(sharedPath1)
+		gotNew, nErr := os.ReadFile(filepath.Join(mp1, "from-mount2.txt"))
+		return sErr == nil && nErr == nil &&
+			string(gotShared) == "v2-committed-by-mount2" &&
+			string(gotNew) == "fresh-mount2-file"
+	}, 5*time.Second, 50*time.Millisecond, "fenced mount 1 reads must bypass stale cache and see mount 2 commits")
+
+	// And bowl umount on fenced mount 1 exits 0 cleanly without disturbing mount 2.
+	stopMount1()
+	ready2After, readyBody2After := httpGetStatusAndBody(t, "http://"+adminAddr2+"/readyz")
+	require.Equal(t, http.StatusOK, ready2After, "mount 2 must remain ready after mount 1 umount, body=%s", readyBody2After)
+}

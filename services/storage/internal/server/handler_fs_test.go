@@ -582,7 +582,7 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 	require.NoError(t, err)
 
 	// 先将 epoch 推进至 2，使旧 epoch=1 变为陈旧
-	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err, "推进 epoch 失败")
 
 	zeroFh := uint64(0)
@@ -884,6 +884,7 @@ func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing
 
 	mountResp2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId: diskID,
+		Force:  true,
 	}))
 	require.NoError(t, err, "MountDisk epoch advance failed")
 	require.Equal(t, uint64(2), mountResp2.Msg.GetEpoch(), "epoch after remount mismatch")
@@ -934,6 +935,7 @@ func TestServerFSRPC_CreateTmpfile_StaleEpoch_RejectsWithEBUSY(t *testing.T) {
 
 	remountResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId: diskID,
+		Force:  true,
 	}))
 	require.NoError(t, err, "second MountDisk failed")
 	require.Equal(t, uint64(2), remountResp.Msg.GetEpoch(), "second mount must advance epoch to 2")

@@ -158,6 +158,7 @@ func (s *Server) MountDisk(ctx context.Context, req *connect.Request[storagev1.M
 	res, err := s.control.MountDisk(ctx, control.MountDiskParams{
 		DiskID:   req.Msg.DiskId,
 		ReadOnly: req.Msg.ReadOnly,
+		Force:    req.Msg.Force,
 	})
 	if err != nil {
 		return nil, toConnectError(err)

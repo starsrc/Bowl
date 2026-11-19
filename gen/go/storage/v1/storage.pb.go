@@ -3709,9 +3709,11 @@ func (*RemoveXattrResponse) Descriptor() ([]byte, []int) {
 
 // MountDiskRequest 定义 MountDisk 接口输入参数。
 type MountDiskRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DiskId        string                 `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
-	ReadOnly      bool                   `protobuf:"varint,2,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	DiskId   string                 `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	ReadOnly bool                   `protobuf:"varint,2,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// 是否在磁盘存在未过期可写挂载租约时强制抢占并推进 WriterEpoch。
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3756,6 +3758,13 @@ func (x *MountDiskRequest) GetDiskId() string {
 func (x *MountDiskRequest) GetReadOnly() bool {
 	if x != nil {
 		return x.ReadOnly
+	}
+	return false
+}
+
+func (x *MountDiskRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
 	}
 	return false
 }
@@ -6500,11 +6509,12 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\adisk_id\x18\x03 \x01(\tBv\xbaHs\xba\x01k\n" +
 	"\x1bremovexattr_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12'\n" +
 	"\x05epoch\x18\x04 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x05epoch\"\x15\n" +
-	"\x13RemoveXattrResponse\"\xc0\x01\n" +
+	"\x13RemoveXattrResponse\"\xd6\x01\n" +
 	"\x10MountDiskRequest\x12\x8e\x01\n" +
 	"\adisk_id\x18\x01 \x01(\tBu\xbaHr\xba\x01j\n" +
 	"\x1amount_disk.disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x1b\n" +
-	"\tread_only\x18\x02 \x01(\bR\breadOnly\"\x88\x02\n" +
+	"\tread_only\x18\x02 \x01(\bR\breadOnly\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"\x88\x02\n" +
 	"\x11MountDiskResponse\x12\x14\n" +
 	"\x05epoch\x18\x01 \x01(\x04R\x05epoch\x120\n" +
 	"\n" +

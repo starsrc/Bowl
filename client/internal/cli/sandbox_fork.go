@@ -54,6 +54,7 @@ func sboxFork(src, name, binary, token string, log io.Writer) (newID string, for
 	spec := &sandbox.CreateSpec{
 		ID: newID, Image: info.Image, Name: name, MountPath: info.MountPath, Network: info.Network,
 		HostEndpoint: info.Endpoint, Token: rpc.ResolveToken(token),
+		CPUs: info.CPUs, MemoryMiB: info.MemoryMiB, // a fork keeps the source's size
 	}
 	if sboxRuntimeName == runtimeMicroVM {
 		err = sboxStartMicroVM(spec, binary)

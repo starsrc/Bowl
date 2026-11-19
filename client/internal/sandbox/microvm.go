@@ -303,7 +303,8 @@ func (m *MicroVM) Info(_ context.Context, id string) (Info, error) {
 	return Info{
 		ID: id, Status: vmStatus(&st), Image: st.Template, Created: st.Created,
 		Container: "pid " + strconv.Itoa(st.VMPid), Endpoint: st.Endpoint, MountPath: "/",
-		Address: guestIP(st.NetIndex), Mounts: []Mount{{DiskID: id, Path: "/"}},
+		Address: guestIP(st.NetIndex), CPUs: st.CPUs, MemoryMiB: st.MemoryMiB,
+		Mounts: []Mount{{DiskID: id, Path: "/"}},
 	}, nil
 }
 

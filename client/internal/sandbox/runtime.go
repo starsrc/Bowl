@@ -75,7 +75,9 @@ type Info struct {
 	Endpoint, MountPath, Network string
 	// Address 是从宿主机访问沙箱里端口用的 IP;拿不到时为空。
 	Address string
-	Mounts  []Mount
+	// CPUs 和 MemoryMiB 是创建时定的规格;0 表示没有限制或不知道。
+	CPUs, MemoryMiB int
+	Mounts          []Mount
 }
 
 // CreateSpec 描述起一个沙箱容器所需的全部参数。

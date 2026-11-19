@@ -52,6 +52,31 @@ type Runtime struct {
 	// （ssh://user@host、tcp://host:2376）按 docker -H 使用；其余当作 docker context 名。
 	// 沙箱跑在另一台机器上时，本包的所有动作都经由这个 Docker 的 API 完成，不依赖共享文件系统。
 	Host string
+	// RootFS 为真时盘是沙箱的根文件系统，而不是挂在 MountPath 的数据盘：容器只跑 Bowl 客户端，
+	// 盘挂在 rootfsMount，用户的命令都 chroot 进去执行。这样和 MicroVM 用同一种模板盘，
+	// fork 的效果也一样。两种模式的沙箱各列各的，互不可见。
+	RootFS bool
+	// DefaultCaps 保留 Docker 默认的能力集合,而不是只留 SYS_ADMIN。RootFS 模式总是这样;
+	// 往盘里解镜像(要改属主、建设备节点)的临时容器也要它。
+	DefaultCaps bool
+}
+
+// rootfsMount 是 RootFS 模式下盘在容器里的挂载点。
+const rootfsMount = "/bowl/root"
+
+// in 把要在沙箱里执行的命令包一层 chroot(仅 RootFS 模式)。
+func (rt *Runtime) in(argv ...string) []string {
+	if !rt.RootFS {
+		return argv
+	}
+	return append([]string{"chroot", rootfsMount}, argv...)
+}
+
+func (rt *Runtime) owner() string {
+	if rt.RootFS {
+		return labelOwner + "=rootfs"
+	}
+	return labelOwner + "=1"
 }
 
 // Row 是 docker ps 里一个沙箱的展示信息。
@@ -153,6 +178,11 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 		spec.SandboxEndpoint = containerEndpoint(spec.HostEndpoint)
 	}
 	container := ContainerName(spec.ID)
+	image := spec.Image
+	if rt.RootFS {
+		// 系统内容在盘上,容器镜像只用来跑 Bowl 客户端、mount 和 chroot;spec.Image 记成模板名。
+		spec.MountPath, image = rootfsMount, DefaultImage
+	}
 	env := []string{"BOWL_STORAGE_ENDPOINT=" + spec.SandboxEndpoint}
 	if spec.Token != "" {
 		env = append(env, "BOWL_TOKEN="+spec.Token)
@@ -160,15 +190,27 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 	args := []string{"create", "--name", container,
 		// 容器架构必须与注入的 Linux 客户端一致，否则会在模拟层里跑。
 		"--platform", "linux/" + spec.Arch,
-		"--label", labelOwner + "=1",
+		"--label", rt.owner(),
 		"--label", labelDisk + "=" + spec.ID,
 		"--label", labelMount + "=" + spec.MountPath,
 		"--label", labelImage + "=" + spec.Image,
 		"--label", labelEndpoint + "=" + spec.HostEndpoint,
-		// 只给挂载 FUSE 需要的能力，绝不用 --privileged。
-		"--cap-drop", "ALL", "--cap-add", "SYS_ADMIN",
 		"--device", "/dev/fuse",
 		"--security-opt", "no-new-privileges",
+		// Ubuntu 等宿主机上 Docker 默认的 AppArmor 策略禁止容器里 mount,挂不了 FUSE。
+		// 仓库的 test:client:e2e 也是这样放开的。没有 AppArmor 的宿主机(macOS)上这一项不起作用。
+		"--security-opt", "apparmor=unconfined",
+		// 回环地址会改写成 host.docker.internal(见 containerEndpoint)。Docker Desktop 自带这个名字,
+		// Linux 上的 Docker 要显式加,否则容器里解析不到。
+		"--add-host", "host.docker.internal:host-gateway",
+	}
+	if rt.RootFS || rt.DefaultCaps {
+		// 盘上是完整的系统,里面的 apt、su 这类程序要 Docker 默认那组能力(换用户、改属主、chroot),
+		// 再加挂 FUSE 和 bind mount 要的 SYS_ADMIN。仍然不用 --privileged。
+		args = append(args, "--cap-add", "SYS_ADMIN")
+	} else {
+		// 只给挂载 FUSE 需要的能力，绝不用 --privileged。
+		args = append(args, "--cap-drop", "ALL", "--cap-add", "SYS_ADMIN")
 	}
 	for _, kv := range env {
 		args = append(args, "-e", kv)
@@ -185,7 +227,7 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 	if spec.MemoryMiB > 0 {
 		args = append(args, "--memory", strconv.Itoa(spec.MemoryMiB)+"m")
 	}
-	args = append(args, spec.Image, "sleep", "infinity")
+	args = append(args, image, "sleep", "infinity")
 
 	// 标准输出是容器 ID，用不上；错误直接抛给调用方。
 	if err := rt.run(ctx, io.Discard, io.Discard, args...); err != nil {
@@ -202,16 +244,44 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 		_ = rt.Remove(context.WithoutCancel(ctx), spec.ID)
 		return fmt.Errorf("启动沙箱容器失败: %w", err)
 	}
-	if err := rt.mountInside(ctx, container, spec.ID, spec.MountPath); err != nil {
+	if err := rt.attach(ctx, container, spec.ID, spec.MountPath); err != nil {
 		_ = rt.Remove(context.WithoutCancel(ctx), spec.ID)
 		return fmt.Errorf("容器内挂载磁盘失败: %w", err)
 	}
 	return nil
 }
 
+// attach 在容器里挂上盘;RootFS 模式下再把 /proc、/sys、/dev 接进盘里,放好 resolv.conf。
+//
+// RootFS 模式用 sync 模式挂载:Bowl 客户端跑在容器里,容器暂停时它也停了,没法在暂停后
+// 再把暂存的写入推上去。sync 模式下写入直接到存储节点,暂停之后 fork 就是一致的。
+func (rt *Runtime) attach(ctx context.Context, container, diskID, path string) error {
+	if !rt.RootFS {
+		return rt.mountInside(ctx, container, diskID, path)
+	}
+	if err := rt.mountInside(ctx, container, diskID, path, "--mode", "sync"); err != nil {
+		return err
+	}
+	setup := "set -e; R=" + rootfsMount + "; for d in proc sys dev; do mkdir -p $R/$d; mount --rbind /$d $R/$d; done; " +
+		"rm -f $R/etc/resolv.conf; cp /etc/resolv.conf $R/etc/resolv.conf; mkdir -p $R/tmp $R/root"
+	return rt.run(ctx, io.Discard, io.Discard, "exec", container, "sh", "-c", setup)
+}
+
+// detachBinds 杀掉 chroot 在盘里的进程、卸掉 attach 接进盘里的 /proc、/sys、/dev,
+// 不然盘本身卸不下来(target is busy)。Bowl 客户端和容器的 PID 1 不在盘里,不受影响。
+func (rt *Runtime) detachBinds(ctx context.Context, id string) {
+	if !rt.RootFS {
+		return
+	}
+	script := `for p in /proc/[0-9]*; do [ "$(readlink $p/root)" = ` + rootfsMount + ` ] && kill -9 ${p#/proc/} 2>/dev/null; done; ` +
+		"sleep 0.2; for d in proc sys dev; do umount -R -l " + rootfsMount + "/$d 2>/dev/null; done; true"
+	_ = rt.run(ctx, io.Discard, io.Discard, "exec", ContainerName(id), "sh", "-c", script)
+}
+
 // Remove 删除沙箱容器。删除前先尽力卸载容器内的磁盘：正常卸载会把缓冲的写入刷到存储节点
 // 并立即释放挂载租约；直接杀容器的话，租约要等超时才过期，期间这块盘既删不掉也交接不了。
 func (rt *Runtime) Remove(ctx context.Context, id string) error {
+	rt.detachBinds(ctx, id)
 	if mounts, err := rt.Mounts(ctx, id); err == nil {
 		for _, m := range mounts {
 			_ = rt.Unmount(ctx, id, m.Path)
@@ -233,7 +303,7 @@ func (rt *Runtime) List(ctx context.Context) ([]Row, error) {
 		"{{.CreatedAt}}",
 		`{{.Label "` + labelEndpoint + `"}}`,
 	}, `\t`)
-	out, err := rt.output(ctx, "ps", "-a", "--filter", "label="+labelOwner+"=1", "--format", format)
+	out, err := rt.output(ctx, "ps", "-a", "--filter", "label="+rt.owner(), "--format", format)
 	if err != nil {
 		return nil, fmt.Errorf("列出沙箱失败: %w", err)
 	}
@@ -242,7 +312,7 @@ func (rt *Runtime) List(ctx context.Context) ([]Row, error) {
 
 // IDs 列出本机所有沙箱 ID（每行一个）。
 func (rt *Runtime) IDs(ctx context.Context) ([]string, error) {
-	out, err := rt.output(ctx, "ps", "-a", "--filter", "label="+labelOwner+"=1",
+	out, err := rt.output(ctx, "ps", "-a", "--filter", "label="+rt.owner(),
 		"--format", `{{.Label "`+labelDisk+`"}}`)
 	if err != nil {
 		return nil, fmt.Errorf("列出沙箱失败: %w", err)
@@ -254,8 +324,9 @@ func (rt *Runtime) IDs(ctx context.Context) ([]string, error) {
 func (rt *Runtime) Info(ctx context.Context, id string) (Info, error) {
 	container := ContainerName(id)
 	out, err := rt.output(ctx, "inspect", "-f",
-		`{{.State.Status}}|{{.Config.Image}}|{{.Created}}|{{index .Config.Labels "`+labelEndpoint+
-			`"}}|{{index .Config.Labels "`+labelMount+`"}}|{{.HostConfig.NetworkMode}}`,
+		`{{.State.Status}}|{{index .Config.Labels "`+labelImage+`"}}|{{.Created}}|{{index .Config.Labels "`+labelEndpoint+
+			`"}}|{{index .Config.Labels "`+labelMount+`"}}|{{.HostConfig.NetworkMode}}|`+
+			`{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}`,
 		container)
 	if err != nil {
 		return Info{}, fmt.Errorf("沙箱 %s 不存在: %w", id, err)
@@ -264,6 +335,10 @@ func (rt *Runtime) Info(ctx context.Context, id string) (Info, error) {
 	info := Info{ID: id, Container: container}
 	if len(parts) > 0 {
 		info.Status = parts[0]
+		// 和 MicroVM 用同一套状态名:running、paused、stopped。
+		if info.Status == "exited" || info.Status == "created" {
+			info.Status = "stopped"
+		}
 	}
 	if len(parts) > 1 {
 		info.Image = parts[1]
@@ -277,6 +352,17 @@ func (rt *Runtime) Info(ctx context.Context, id string) (Info, error) {
 			info.Network = net
 		}
 	}
+	if len(parts) > 8 {
+		if ips := strings.Fields(parts[6]); len(ips) > 0 {
+			info.Address = ips[0]
+		}
+		if nano, err := strconv.ParseInt(parts[7], 10, 64); err == nil {
+			info.CPUs = int(nano / 1e9)
+		}
+		if mem, err := strconv.ParseInt(parts[8], 10, 64); err == nil {
+			info.MemoryMiB = int(mem >> 20)
+		}
+	}
 	if info.MountPath == "" {
 		info.MountPath = DefaultMountPath
 	}
@@ -286,8 +372,19 @@ func (rt *Runtime) Info(ctx context.Context, id string) (Info, error) {
 	return info, nil
 }
 
-// DefaultMount 读取沙箱的默认挂载点（创建时记录在容器标签上）。
+// DefaultMount 是不指定工作目录时命令的默认目录:数据盘模式是盘的挂载点,RootFS 模式是 /root。
 func (rt *Runtime) DefaultMount(ctx context.Context, id string) (string, error) {
+	if rt.RootFS {
+		if !rt.Exists(ctx, id) {
+			return "", fmt.Errorf("沙箱 %s 不存在或容器已被删除", id)
+		}
+		return "/root", nil
+	}
+	return rt.mountPath(ctx, id)
+}
+
+// mountPath 读取盘在容器里的挂载点（创建时记录在容器标签上）。
+func (rt *Runtime) mountPath(ctx context.Context, id string) (string, error) {
 	out, err := rt.output(ctx, "inspect", "-f",
 		`{{index .Config.Labels "`+labelMount+`"}}`, ContainerName(id))
 	if err != nil {
@@ -309,7 +406,10 @@ func (rt *Runtime) Exec(ctx context.Context, id, cwd string, argv []string, opts
 		cwd = opts.Cwd
 	}
 	// 参数原样透传为 argv，不拼 shell 字符串：引号、管道与退出码都由用户自己的 shell 决定。
-	args := []string{"exec", "-i", "-w", cwd}
+	args := []string{"exec", "-i"}
+	if !rt.RootFS {
+		args = append(args, "-w", cwd)
+	}
 	if opts.TTY {
 		args = append(args, "-t")
 	}
@@ -317,7 +417,12 @@ func (rt *Runtime) Exec(ctx context.Context, id, cwd string, argv []string, opts
 		args = append(args, "-e", kv)
 	}
 	args = append(args, ContainerName(id))
-	args = append(args, argv...)
+	if rt.RootFS {
+		// chroot 之后工作目录是 /,所以先 cd 再 exec 用户的命令。
+		args = append(args, rt.in(append([]string{"sh", "-c", `cd "$0" && exec "$@"`, cwd}, argv...)...)...)
+	} else {
+		args = append(args, argv...)
+	}
 	return rt.runCode(ctx, in, out, errOut, args...), nil
 }
 
@@ -331,7 +436,7 @@ func (rt *Runtime) ExecBackground(ctx context.Context, id, cwd string, argv []st
 	line := "mkdir -p " + dir +
 		" && ( " + commandScript(cwd, argv) + " ) > " + dir + "/out.log 2>&1" +
 		"; echo $? > " + dir + "/exit"
-	if err := rt.run(ctx, io.Discard, io.Discard, "exec", "-d", ContainerName(id), "sh", "-c", line); err != nil {
+	if err := rt.run(ctx, io.Discard, io.Discard, append([]string{"exec", "-d", ContainerName(id)}, rt.in("sh", "-c", line)...)...); err != nil {
 		return "", fmt.Errorf("启动后台命令失败: %w", err)
 	}
 	return runID, nil
@@ -349,13 +454,13 @@ func (rt *Runtime) Logs(ctx context.Context, id, runID string, follow bool, out,
 	}
 	dir := runDir + "/" + runID
 	if follow {
-		rt.runCode(ctx, os.Stdin, out, errOut, "exec", "-i", container, "sh", "-c", "tail -f "+dir+"/out.log")
+		rt.runCode(ctx, os.Stdin, out, errOut, append([]string{"exec", "-i", container}, rt.in("sh", "-c", "tail -f "+dir+"/out.log")...)...)
 		return nil
 	}
-	if code := rt.runCode(ctx, nil, out, errOut, "exec", container, "cat", dir+"/out.log"); code != 0 {
+	if code := rt.runCode(ctx, nil, out, errOut, append([]string{"exec", container}, rt.in("cat", dir+"/out.log")...)...); code != 0 {
 		return fmt.Errorf("读取日志失败（运行 %s）", runID)
 	}
-	if exitOut, err := rt.output(ctx, "exec", container, "cat", dir+"/exit"); err == nil {
+	if exitOut, err := rt.output(ctx, append([]string{"exec", container}, rt.in("cat", dir+"/exit")...)...); err == nil {
 		fmt.Fprintf(errOut, "exit code %s\n", strings.TrimSpace(exitOut))
 	}
 	return nil
@@ -364,8 +469,8 @@ func (rt *Runtime) Logs(ctx context.Context, id, runID string, follow bool, out,
 // Wait 阻塞到后台运行结束，返回其退出码。
 func (rt *Runtime) Wait(ctx context.Context, id, runID string) (int, error) {
 	dir := runDir + "/" + runID
-	out, err := rt.output(ctx, "exec", ContainerName(id), "sh", "-c",
-		"while [ ! -f "+dir+"/exit ]; do sleep 0.2; done; cat "+dir+"/exit")
+	out, err := rt.output(ctx, append([]string{"exec", ContainerName(id)}, rt.in("sh", "-c",
+		"while [ ! -f "+dir+"/exit ]; do sleep 0.2; done; cat "+dir+"/exit")...)...)
 	if err != nil {
 		return 1, fmt.Errorf("等待运行结束失败: %w", err)
 	}
@@ -475,7 +580,7 @@ func (rt *Runtime) CopyFrom(ctx context.Context, id, sandboxPath, localPath stri
 	if name == "" || name == "." || name == "/" {
 		return fmt.Errorf("不能复制根目录 %s，请指定具体文件或目录", sandboxPath)
 	}
-	if err := rt.run(ctx, io.Discard, io.Discard, "exec", container, "test", "-e", sandboxPath); err != nil {
+	if err := rt.run(ctx, io.Discard, io.Discard, append([]string{"exec", container}, rt.in("test", "-e", sandboxPath)...)...); err != nil {
 		return fmt.Errorf("沙箱 %s 里没有 %s", id, sandboxPath)
 	}
 	target := localPath
@@ -490,7 +595,7 @@ func (rt *Runtime) CopyFrom(ctx context.Context, id, sandboxPath, localPath stri
 
 	unpack := localTar(false, errOut, "-x", "-f", "-", "-C", target)
 	code := pipeCommands(errOut,
-		rt.command(ctx, "exec", container, "tar", "-c", "-f", "-", "-C", dir, name),
+		rt.command(ctx, append([]string{"exec", container}, rt.in("tar", "-c", "-f", "-", "-C", dir, name)...)...),
 		unpack,
 	)
 	if code != 0 {
@@ -518,14 +623,14 @@ func (rt *Runtime) CopyInto(ctx context.Context, id, localPath, sandboxPath stri
 	}
 	code := pipeCommands(errOut,
 		localTar(true, errOut, "-c", "-f", "-", "-C", srcDir, base),
-		rt.command(ctx, "exec", "-i", container, "tar", "-x", "-f", "-", "-C", dir),
+		rt.command(ctx, append([]string{"exec", "-i", container}, rt.in("tar", "-x", "-f", "-", "-C", dir)...)...),
 	)
 	if code != 0 {
 		return errors.New("复制到沙箱失败")
 	}
 	if name != base {
-		if err := rt.run(ctx, io.Discard, io.Discard, "exec", container, "mv",
-			filepath.Join(dir, base), filepath.Join(dir, name)); err != nil {
+		if err := rt.run(ctx, io.Discard, io.Discard, append([]string{"exec", container},
+			rt.in("mv", filepath.Join(dir, base), filepath.Join(dir, name))...)...); err != nil {
 			return fmt.Errorf("目标路径改名失败: %w", err)
 		}
 	}
@@ -535,11 +640,12 @@ func (rt *Runtime) CopyInto(ctx context.Context, id, localPath, sandboxPath stri
 // --- 容器内部 ---
 
 // mountInside 在容器内建挂载点并调用 bowl mount，返回前确认挂载已生效。
-func (rt *Runtime) mountInside(ctx context.Context, container, diskID, path string) error {
+func (rt *Runtime) mountInside(ctx context.Context, container, diskID, path string, extra ...string) error {
 	if err := rt.run(ctx, io.Discard, io.Discard, "exec", container, "mkdir", "-p", path); err != nil {
 		return err
 	}
-	if err := rt.run(ctx, io.Discard, io.Discard, "exec", container, ClientPath, "mount", diskID, path); err != nil {
+	if err := rt.run(ctx, io.Discard, io.Discard,
+		append([]string{"exec", container, ClientPath, "mount", diskID, path}, extra...)...); err != nil {
 		return err
 	}
 	probe := "grep -q ' " + path + " fuse' /proc/mounts"
@@ -554,7 +660,7 @@ func (rt *Runtime) mountInside(ctx context.Context, container, diskID, path stri
 
 // latestRun 取该沙箱最近一次后台运行的 ID。
 func (rt *Runtime) latestRun(ctx context.Context, container string) (string, error) {
-	out, err := rt.output(ctx, "exec", container, "sh", "-c", "ls -1 "+runDir+" 2>/dev/null | sort | tail -1")
+	out, err := rt.output(ctx, append([]string{"exec", container}, rt.in("sh", "-c", "ls -1 "+runDir+" 2>/dev/null | sort | tail -1")...)...)
 	if err != nil {
 		return "", fmt.Errorf("读取运行记录失败: %w", err)
 	}
@@ -601,6 +707,7 @@ func (rt *Runtime) Arch(ctx context.Context) (string, error) {
 
 // Stop 卸载容器里的盘再停容器,容器保留。
 func (rt *Runtime) Stop(ctx context.Context, id string) error {
+	rt.detachBinds(ctx, id)
 	if mounts, err := rt.Mounts(ctx, id); err == nil {
 		for _, m := range mounts {
 			if err := rt.Unmount(ctx, id, m.Path); err != nil {
@@ -614,19 +721,22 @@ func (rt *Runtime) Stop(ctx context.Context, id string) error {
 // Start 启动停掉的容器并重新挂上它的盘。
 func (rt *Runtime) Start(ctx context.Context, id string) error {
 	container := ContainerName(id)
-	mountAt, err := rt.DefaultMount(ctx, id)
+	mountAt, err := rt.mountPath(ctx, id)
 	if err != nil {
 		return err
 	}
 	if err := rt.run(ctx, io.Discard, io.Discard, "start", container); err != nil {
 		return fmt.Errorf("启动沙箱容器失败: %w", err)
 	}
-	return rt.mountInside(ctx, container, StripID(id), mountAt)
+	return rt.attach(ctx, container, StripID(id), mountAt)
 }
 
 // Sync 在容器里对盘的挂载点做 statfs,Bowl 客户端会等暂存的写入全部上传完。
 func (rt *Runtime) Sync(ctx context.Context, id string) error {
-	mountAt, err := rt.DefaultMount(ctx, id)
+	if rt.RootFS {
+		return nil // sync 模式挂载,写入已经在存储节点上,见 attach
+	}
+	mountAt, err := rt.mountPath(ctx, id)
 	if err != nil {
 		return err
 	}

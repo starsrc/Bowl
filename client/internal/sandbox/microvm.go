@@ -117,7 +117,7 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 	if err := m.attachSystemDisk(ctx, st, token, root); err != nil {
 		return err
 	}
-	if err := installFile(m.agentPath(), filepath.Join(root, guestAgentPath)); err != nil {
+	if err := m.InstallAgent(root); err != nil {
 		return fmt.Errorf("放入执行代理: %w", err)
 	}
 	netArgs, ipArg, err := m.setupNetwork(st, root)

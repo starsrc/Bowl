@@ -102,7 +102,9 @@ type Info struct {
 	Address string
 	// CPUs 和 MemoryMiB 是创建时定的规格;0 表示没有限制或不知道。
 	CPUs, MemoryMiB int
-	Mounts          []Mount
+	// Block 为真时系统盘是块设备镜像(见 BlockImage),盘里只有这一个文件,diff 和 merge 看不到里面。
+	Block  bool
+	Mounts []Mount
 }
 
 // CreateSpec 描述起一个沙箱容器所需的全部参数。
@@ -261,6 +263,9 @@ func (rt *Runtime) attach(ctx context.Context, container, diskID, path string) e
 	}
 	if err := rt.mountInside(ctx, container, diskID, path, "--mode", "sync"); err != nil {
 		return err
+	}
+	if err := rt.run(ctx, io.Discard, io.Discard, "exec", container, "test", "!", "-f", path+"/"+BlockImage); err != nil {
+		return fmt.Errorf("盘 %s 是块设备模板(里面只有 %s),container 后端用不了,请用 microvm", diskID, BlockImage)
 	}
 	setup := "set -e; R=" + rootfsMount + "; for d in proc sys dev; do mkdir -p $R/$d; mount --rbind /$d $R/$d; done; " +
 		"rm -f $R/etc/resolv.conf; cp /etc/resolv.conf $R/etc/resolv.conf; mkdir -p $R/tmp $R/root"

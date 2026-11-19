@@ -68,7 +68,15 @@ type vmState struct {
 	MemoryMiB    int    `json:"memory_mib"`
 	NetIndex     int    `json:"net_index"`
 	Paused       bool   `json:"paused"`
+	// Block 为真时系统盘是盘里的 BlockImage 文件,以块设备交给虚机;否则整块盘经 virtio-fs 当根。
+	Block bool `json:"block"`
 }
+
+// BlockImage 是块设备模板盘里那个 ext4 镜像的文件名,放在盘的根上。
+//
+// ponytail: 这是 Bowl 原生块设备的替身。镜像文件放在 Bowl 盘上,fork 盘就是写时复制地 fork 镜像,
+// 虚机看到普通磁盘。Bowl 在存储引擎上直接提供块设备之后,只换 attachSystemDisk 和 blockDevicePath。
+const BlockImage = "root.img"
 
 func (m *MicroVM) stateDir() string {
 	if m.StateDir != "" {
@@ -117,29 +125,45 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 	if err := m.attachSystemDisk(ctx, st, token, root); err != nil {
 		return err
 	}
-	if err := m.InstallAgent(root); err != nil {
-		return fmt.Errorf("放入执行代理: %w", err)
+	st.Block = isRegularFile(blockDevicePath(root))
+	var rootArgs []string
+	// 块设备模板在做模板时就把代理和 resolv.conf 放进了镜像,这里只处理 virtio-fs 的根。
+	dnsRoot := ""
+	if !st.Block {
+		if err := m.InstallAgent(root); err != nil {
+			return fmt.Errorf("放入执行代理: %w", err)
+		}
+		dnsRoot = root
 	}
-	netArgs, ipArg, err := m.setupNetwork(st, root)
+	netArgs, ipArg, err := m.setupNetwork(st, dnsRoot)
 	if err != nil {
 		return err
 	}
 
-	fsSock := filepath.Join(dir, "fs.sock")
-	fs, err := startDetached(filepath.Join(dir, "virtiofsd.log"), m.virtiofsd(),
-		"--socket-path="+fsSock, "--shared-dir="+root, "--cache=auto", "--sandbox=none", "--xattr")
-	if err != nil {
-		return fmt.Errorf("启动 virtiofsd: %w", err)
-	}
-	st.FSPid = fs
-	if err = waitFor(ctx, 5*time.Second, func() bool { return isSocket(fsSock) }); err != nil {
-		return fmt.Errorf("virtiofsd 没有就绪: %w", err)
+	if st.Block {
+		rootArgs = []string{
+			"--cmdline", "console=ttyS0 root=/dev/vda rw init=" + guestAgentPath + " quiet " + ipArg,
+			"--disk", "path=" + blockDevicePath(root) + ",image_type=raw",
+		}
+	} else {
+		fsSock := filepath.Join(dir, "fs.sock")
+		fs, fsErr := startDetached(filepath.Join(dir, "virtiofsd.log"), m.virtiofsd(),
+			"--socket-path="+fsSock, "--shared-dir="+root, "--cache=auto", "--sandbox=none", "--xattr")
+		if fsErr != nil {
+			return fmt.Errorf("启动 virtiofsd: %w", fsErr)
+		}
+		st.FSPid = fs
+		if err = waitFor(ctx, 5*time.Second, func() bool { return isSocket(fsSock) }); err != nil {
+			return fmt.Errorf("virtiofsd 没有就绪: %w", err)
+		}
+		rootArgs = []string{
+			"--cmdline", "console=ttyS0 root=rootfs rootfstype=virtiofs rw init=" + guestAgentPath + " quiet " + ipArg,
+			"--fs", "tag=rootfs,socket=" + fsSock,
+		}
 	}
 
-	vm, err := startDetached(filepath.Join(dir, "vm.log"), m.cloudHypervisor(),
-		"--kernel", m.kernel(),
-		"--cmdline", "console=ttyS0 root=rootfs rootfstype=virtiofs rw init="+guestAgentPath+" quiet "+ipArg,
-		"--fs", "tag=rootfs,socket="+fsSock,
+	vm, err := startDetached(filepath.Join(dir, "vm.log"), m.cloudHypervisor(), append(append([]string{
+		"--kernel", m.kernel()}, rootArgs...),
 		"--memory", "size="+strconv.Itoa(st.MemoryMiB)+"M,shared=on",
 		"--cpus", "boot="+strconv.Itoa(st.CPUs),
 		"--vsock", "cid=3,socket="+filepath.Join(dir, "vsock.sock"),
@@ -147,7 +171,7 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 		"--net", netArgs,
 		"--serial", "file="+filepath.Join(dir, "console.log"),
 		"--console", "off",
-	)
+	)...)
 	if err != nil {
 		return fmt.Errorf("启动虚机: %w", err)
 	}
@@ -181,6 +205,9 @@ func (m *MicroVM) attachSystemDisk(ctx context.Context, st *vmState, token, root
 	return nil
 }
 
+// blockDevicePath 是块设备根在宿主机上的位置。
+func blockDevicePath(root string) string { return filepath.Join(root, BlockImage) }
+
 func (m *MicroVM) detachSystemDisk(ctx context.Context, st *vmState, root string) error {
 	if !isMountpoint(root) {
 		return nil
@@ -213,6 +240,10 @@ func (m *MicroVM) Stop(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if st.Block && !st.Paused && processAlive(st.VMPid) {
+		// 块设备根的虚机自己有页缓存,停机前先让它写回,否则最后的写入会丢。
+		m.guestSync(ctx, id)
+	}
 	stopProcess(st.VMPid)
 	stopProcess(st.FSPid)
 	if err := m.detachSystemDisk(ctx, &st, filepath.Join(m.dir(id), "root")); err != nil {
@@ -243,7 +274,8 @@ func (m *MicroVM) Start(ctx context.Context, id string) error {
 }
 
 // Sync 对系统盘的挂载点做一次 statfs:Bowl 客户端在 statfs 时会等暂存的写入全部上传完。
-// 虚机里 virtio-fs 不做写回缓存,写下去的数据已经到了宿主机的挂载点。
+// 虚机里 virtio-fs 不做写回缓存,写下去的数据已经到了宿主机的挂载点。块设备根的虚机有自己的
+// 页缓存,由 Pause 先在虚机里 sync,所以 fork 前的顺序 Pause、Sync 对两种根都成立。
 func (m *MicroVM) Sync(_ context.Context, id string) error {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(filepath.Join(m.dir(StripID(id)), "root"), &st); err != nil {
@@ -303,7 +335,7 @@ func (m *MicroVM) Info(_ context.Context, id string) (Info, error) {
 	return Info{
 		ID: id, Status: vmStatus(&st), Image: st.Template, Created: st.Created,
 		Container: "pid " + strconv.Itoa(st.VMPid), Endpoint: st.Endpoint, MountPath: "/",
-		Address: guestIP(st.NetIndex), CPUs: st.CPUs, MemoryMiB: st.MemoryMiB,
+		Address: guestIP(st.NetIndex), CPUs: st.CPUs, MemoryMiB: st.MemoryMiB, Block: st.Block,
 		Mounts: []Mount{{DiskID: id, Path: "/"}},
 	}, nil
 }
@@ -692,4 +724,11 @@ func tailFile(p string, n int) string {
 	}
 	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
 	return strings.Join(lines[max(0, len(lines)-n):], "\n")
+}
+
+// guestSync 在虚机里执行 sync,把虚机页缓存里的写入推到块设备上。失败不致命,调用方接着做。
+func (m *MicroVM) guestSync(ctx context.Context, id string) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	_, _ = m.Exec(ctx, id, "/", []string{"sync"}, ExecOptions{}, nil, io.Discard, io.Discard)
 }

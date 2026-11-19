@@ -93,6 +93,14 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 		return rpc.TakeReadPayload(resp.Msg), nil
 	}
 
+	if fs.IsFenced() {
+		n, err := readDirectChunks(ctx, input.Offset, dest, fetchChunk)
+		if err != nil {
+			return nil, fs.ToStatus(err, cancel)
+		}
+		return fuse.ReadResultData(dest[:n]), fuse.OK
+	}
+
 	if fs.stage.HasPending(ino) {
 		n, handled, stageErr := fs.stage.Read(ctx, ino, input.Offset, dest, fetchChunk)
 		if stageErr != nil {
@@ -111,6 +119,33 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 		return nil, fs.ToStatus(err, cancel)
 	}
 	return fuse.ReadResultData(dest[:n]), fuse.OK
+}
+
+func readDirectChunks(ctx context.Context, offset uint64, dest []byte, fetch ChunkFetcher) (int, error) {
+	want := len(dest)
+	var totalRead int
+	for totalRead < want {
+		chunkReqSize := min(want-totalRead, MaxRPCChunkSize)
+		payload, err := fetch(ctx, offset+uint64(totalRead), uint32(chunkReqSize))
+		if err != nil {
+			if totalRead > 0 {
+				return totalRead, nil
+			}
+			return 0, err
+		}
+		if len(payload.Data) == 0 {
+			payload.Release()
+			break
+		}
+		n := min(chunkReqSize, len(payload.Data))
+		copy(dest[totalRead:totalRead+n], payload.Data[:n])
+		payload.Release()
+		totalRead += n
+		if n < chunkReqSize {
+			break
+		}
+	}
+	return totalRead, nil
 }
 
 // Write 实现常规文件数据写入，对应 Linux FUSE FUSE_WRITE 协议。
@@ -267,6 +302,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		}))
 		chunkCancel()
 		if err != nil {
+			fs.fenceIfStaleEpoch(err)
 			fs.cache.invalidateInode(input.NodeId)
 			if totalWritten > 0 {
 				return totalWritten, fuse.OK

@@ -19,6 +19,9 @@ func (fs *RawFS) lookupInodeWithContext(parentCtx context.Context, cancel <-chan
 	if len(name) > MaxFilenameBytes {
 		return cachedInode{}, fuse.Status(syscall.ENAMETOOLONG)
 	}
+	if fs.IsFenced() {
+		return fs.lookupInodeAfterCache(parentCtx, cancel, parent, parentIno, name, cachedInode{}, false, false)
+	}
 	cached, _, negative, ok := fs.cache.lookupReadOnly(parent, name)
 	return fs.lookupInodeAfterCache(parentCtx, cancel, parent, parentIno, name, cached, negative, ok)
 }
@@ -45,12 +48,13 @@ func (fs *RawFS) lookupInodeAfterCache(
 		Name:      []byte(name),
 		DiskId:    fs.cfg.DiskID,
 	}))
-	if fs.cache.version() != epoch {
+	fenced := fs.IsFenced()
+	if !fenced && fs.cache.version() != epoch {
 		return cachedInode{}, fuse.Status(syscall.ESTALE)
 	}
 	if err != nil {
 		status := fs.ToStatus(err, cancel)
-		if status == fuse.ENOENT {
+		if !fenced && !fs.IsFenced() && status == fuse.ENOENT {
 			fs.metrics.incNSCacheMiss(nsCacheNegativeEntry)
 			fs.cache.putEntryAtIf(generation, epoch, parent, name, 0, fs.cfg.EntryTimeoutSeconds)
 		}
@@ -59,6 +63,9 @@ func (fs *RawFS) lookupInodeAfterCache(
 	inode := resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil {
 		return cachedInode{}, fuse.EIO
+	}
+	if fenced {
+		return cachedInode{inode: inode}, fuse.OK
 	}
 	ino := fs.ToKernelIno(inode.GetIno())
 	fs.stage.OverlayInode(inode.GetIno(), inode)
@@ -80,8 +87,10 @@ func (fs *RawFS) getInodeWithContext(parentCtx context.Context, cancel <-chan st
 	if status != fuse.OK {
 		return cachedInode{}, status
 	}
-	if cached, ok := fs.cache.inodeReadOnly(ino); ok {
-		return cached, fuse.OK
+	if !fs.IsFenced() {
+		if cached, ok := fs.cache.inodeReadOnly(ino); ok {
+			return cached, fuse.OK
+		}
 	}
 	return fs.getInodeMissWithContext(parentCtx, cancel, ino, serverIno)
 }
@@ -94,7 +103,8 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 		Ino:    serverIno,
 		DiskId: fs.cfg.DiskID,
 	}))
-	if fs.cache.version() != epoch {
+	fenced := fs.IsFenced()
+	if !fenced && fs.cache.version() != epoch {
 		return cachedInode{}, fuse.Status(syscall.ESTALE)
 	}
 	if err != nil {
@@ -103,6 +113,9 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 	inode := resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil {
 		return cachedInode{}, fuse.EIO
+	}
+	if fenced {
+		return cachedInode{inode: inode}, fuse.OK
 	}
 	fs.stage.OverlayInode(serverIno, inode)
 	fs.recordInodeSpecial(ino, inode)
@@ -118,7 +131,7 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 // 主体保持零 defer、零闭包，确保本地缓存命中快路径 0 allocs/op。
 func (fs *RawFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpLookup)
-	if !fs.isVirtualStatsName(header.NodeId, name) && len(name) <= MaxFilenameBytes && fs.cfg.AttrTimeoutSeconds > 0 {
+	if fs.fencedStatus.Load() == 0 && !fs.isVirtualStatsName(header.NodeId, name) && len(name) <= MaxFilenameBytes && fs.cfg.AttrTimeoutSeconds > 0 {
 		if _, st := fs.ToServerIno(header.NodeId); st == fuse.OK {
 			fs.lifecycleMu.RLock()
 			cached, _, negative, ok := fs.cache.lookupReadOnly(header.NodeId, name)
@@ -179,7 +192,7 @@ func (fs *RawFS) lookupSlow(cancel <-chan struct{}, header *fuse.InHeader, name 
 // 主体保持零 defer、零闭包，确保本地缓存命中快路径 0 allocs/op。
 func (fs *RawFS) GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpGetAttr)
-	if !fs.isVirtualStatsIno(in.NodeId) && fs.cfg.AttrTimeoutSeconds > 0 {
+	if fs.fencedStatus.Load() == 0 && !fs.isVirtualStatsIno(in.NodeId) && fs.cfg.AttrTimeoutSeconds > 0 {
 		if serverIno, st := fs.ToServerIno(in.NodeId); st == fuse.OK {
 			fs.lifecycleMu.RLock()
 			if inode, removed := fs.handles.RemovedDir(in.NodeId); removed {

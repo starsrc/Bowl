@@ -31,6 +31,7 @@ import (
 var (
 	sboxRuntime     sandbox.Backend
 	sboxRuntimeName string
+	sboxStateDir    string
 )
 
 const (
@@ -77,7 +78,7 @@ func newSandboxCmd() *cobra.Command {
 			if err != nil {
 				return usageExitErr(err, false)
 			}
-			sboxRuntime, sboxRuntimeName = backend, name
+			sboxRuntime, sboxRuntimeName, sboxStateDir = backend, name, stateDir
 			return nil
 		},
 		Args: func(cmd *cobra.Command, posArgs []string) error {
@@ -101,6 +102,10 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxShellCmd(),
 		newSandboxCpCmd(),
 		newSandboxKillCmd(),
+		newSandboxPauseCmd(true),
+		newSandboxPauseCmd(false),
+		newSandboxTimeoutCmd(),
+		newSandboxReapCmd(),
 	)
 	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists)")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")
@@ -111,6 +116,8 @@ func newSandboxCreateCmd() *cobra.Command {
 	var (
 		from, size, image, name, mountAt, network, binary, endpoint, token string
 		rebuild, quiet                                                     bool
+		cpus, memoryMiB                                                    int
+		timeout                                                            time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -143,6 +150,7 @@ func newSandboxCreateCmd() *cobra.Command {
 			spec := &sandbox.CreateSpec{
 				ID: diskID, Image: image, Name: name, MountPath: mountAt,
 				Network: network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(token),
+				CPUs: cpus, MemoryMiB: memoryMiB,
 			}
 			if sboxRuntimeName == runtimeMicroVM {
 				// The disk is mounted on this host, so the host's own Linux bowl client does it.
@@ -159,6 +167,11 @@ func newSandboxCreateCmd() *cobra.Command {
 				return runtimeExitErr(err)
 			}
 
+			if timeout > 0 {
+				if err = sboxSetDeadline(diskID, timeout); err != nil {
+					return runtimeExitErr(fmt.Errorf("sandbox %s is up but the timeout was not set: %w", diskID, err))
+				}
+			}
 			out := cmd.OutOrStdout()
 			if quiet {
 				fmt.Fprintln(out, diskID)
@@ -186,6 +199,9 @@ func newSandboxCreateCmd() *cobra.Command {
 	flags.StringVar(&binary, "binary", "", "Linux bowl client: injected into the container for docker (default: build and cache one), run on this host for microvm (default: bowl in PATH)")
 	flags.BoolVar(&rebuild, "rebuild", false, "Force rebuilding the Linux client")
 	flags.BoolVarP(&quiet, "quiet", "q", false, "Quiet mode, output only the sandbox ID")
+	flags.IntVar(&cpus, "cpus", 0, "CPU limit (default: 1 for microvm, unlimited for docker)")
+	flags.IntVar(&memoryMiB, "memory", 0, "Memory limit in MiB (default: 1024 for microvm, unlimited for docker)")
+	flags.DurationVar(&timeout, "timeout", 0, "Remove the sandbox and its disk after this long, e.g. 30m; renew with bowl-sandbox timeout")
 	addSandboxStorageFlags(cmd, &endpoint, &token)
 	return cmd
 }
@@ -303,6 +319,12 @@ func newSandboxInfoCmd() *cobra.Command {
 			fmt.Fprintf(out, "Container:  %s\n", info.Container)
 			if info.Endpoint != "" {
 				fmt.Fprintf(out, "Node:       %s\n", info.Endpoint)
+			}
+			if info.Address != "" {
+				fmt.Fprintf(out, "Address:    %s\n", info.Address)
+			}
+			if deadline, ok := sboxDeadline(info.ID); ok {
+				fmt.Fprintf(out, "Expires:    %s (in %s)\n", deadline.Format(time.RFC3339), time.Until(deadline).Round(time.Second))
 			}
 			if len(info.Mounts) == 0 {
 				fmt.Fprintln(out, "Mount:      (none)")
@@ -536,6 +558,7 @@ func sboxKillOne(ctx context.Context, id string, keepDisk bool, endpoint, token 
 	if err := sboxRuntime.Remove(ctx, id); err != nil {
 		return err
 	}
+	sboxClearDeadline(id)
 	if keepDisk {
 		fmt.Fprintf(stdout, "Removed the container of sandbox %s; disk kept\n", id)
 		return nil

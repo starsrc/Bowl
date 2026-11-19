@@ -50,6 +50,11 @@ var mappings = []errorMapping{
 	{sentinel: ErrNoBaseCommit, code: codes.FailedPrecondition, reason: "EINVAL"},
 	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: ErrNotOwner, code: codes.FailedPrecondition, reason: "EBUSY"},
+	{sentinel: ErrHandoffInProgress, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: ErrLocalDiverged, code: codes.FailedPrecondition, reason: "EBUSY"},
+	{sentinel: ErrHandoffConflict, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: ErrHandoffDisabled, code: codes.Unimplemented, reason: "EOPNOTSUPP"},
 	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
 }
 

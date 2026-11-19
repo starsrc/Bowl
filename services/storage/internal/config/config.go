@@ -64,7 +64,13 @@ type Config struct {
 	observability.EnvConfig
 	tx.PoolConfig
 	Meta MetaConfig
+	// AuthToken 非空时，公网端口上的全部请求（RPC 与交接路由）都必须携带
+	// Authorization: Bearer <token>。留空表示不鉴权，仅适用于可信网络内的开发环境。
+	AuthToken AuthToken `env:"STORAGE_AUTH_TOKEN"`
 }
+
+// AuthToken 是公网端口的访问令牌，独立成类型以便按类型注入给 server 模块。
+type AuthToken string
 
 var (
 	_ serverx.AdminServerConfig      = (*Config)(nil)

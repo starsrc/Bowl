@@ -35,8 +35,8 @@ RUN apk --no-cache add ca-certificates tzdata
 RUN addgroup -g 10001 -S appgroup && \
     adduser -u 10001 -S appuser -G appgroup
 
-# 预建持久化数据目录并赋予非 root 运行用户所有权，确保新命名卷初始化时自动继承可写权限
-RUN mkdir -p /var/lib/bowl/data && \
+# 预建持久化数据目录与交接远端目录（HANDOFF_REMOTE_DIR 用共享卷时挂在这里）并赋予非 root 运行用户所有权，确保新命名卷初始化时自动继承可写权限
+RUN mkdir -p /var/lib/bowl/data /var/lib/bowl/remote && \
     chown -R appuser:appgroup /var/lib/bowl
 
 WORKDIR /app

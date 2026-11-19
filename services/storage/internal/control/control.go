@@ -23,6 +23,7 @@ import (
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
 	"github.com/starsrc/bowl/services/storage/internal/db"
+	"github.com/starsrc/bowl/services/storage/internal/handoff"
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
@@ -225,6 +226,20 @@ type manager struct {
 	mountLeaseTTL time.Duration
 	mountsMu      sync.Mutex
 	activeMounts  map[string]map[string]mountLease
+
+	// 交接（handoff）：远端为 nil 时整套能力关闭；handoffReleasing 受 mountsMu 保护。
+	handoffRemote    handoff.Remote
+	nodeID           string
+	handoffReleasing map[string]bool
+	// handoffDirty 记录自上次后台同步以来有过可写租约活动的盘，受 mountsMu 保护。
+	handoffDirty        map[string]bool
+	handoffSyncInterval time.Duration
+	handoffStop         chan struct{}
+	handoffDone         chan struct{}
+	handoffStopOnce     sync.Once
+	handoffGCInterval   time.Duration
+	handoffGC           handoff.GCOptions
+	commitHydrateMu     sync.Mutex
 }
 
 // Option 配置单盘控制面管理器。
@@ -365,6 +380,7 @@ func newManager(dbStore db.Store, opts ...Option) *manager {
 		m.collector = newStorageEngineCollector()
 	}
 	m.collector.bind(m)
+	m.startHandoffSync()
 	return m
 }
 
@@ -589,6 +605,13 @@ func (m *manager) openDiskActor(ctx context.Context, opts store.Options) (*store
 				attribute.Bool("disk.read_only", opts.ReadOnly),
 			),
 		)
+	}
+	if opts.PackSource == nil {
+		if src := m.packSource(); src != nil {
+			opts.PackSource = src
+			// 临时打开的提交切面不做后台补齐，只有常驻的可写盘才值得把数据逐步拉回本地。
+			opts.PackPrefetch = !opts.ReadOnly && !strings.HasPrefix(opts.DiskID, "commit:")
+		}
 	}
 	openStart := time.Now()
 	actor, err := store.Open(opts)
@@ -1280,6 +1303,8 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return errors.Join(cleanupErrs...)
 	}
 	m.clearDiskMounts(diskID)
+	_ = os.Remove(m.syncMarkPath(diskID))
+	m.dropRemoteDisk(ctx, diskID)
 
 	m.logger.InfoContext(ctx, "disk deleted",
 		"disk_id", diskID,
@@ -1297,6 +1322,9 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	}
 	diskID := id.String()
 
+	if syncErr := m.syncBeforeMount(ctx, diskID, params.ReadOnly); syncErr != nil {
+		return nil, syncErr
+	}
 	actor, err := m.Actor(ctx, diskID)
 	if err != nil {
 		return nil, err
@@ -1326,6 +1354,9 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 		}, nil
 	}
 
+	if ownerErr := m.checkHandoffOwner(ctx, diskID); ownerErr != nil {
+		return nil, ownerErr
+	}
 	prevEpoch := actor.WriterEpoch()
 	epoch, rootAttr, err := actor.AdvanceEpoch(ctx)
 	if err != nil {
@@ -1402,6 +1433,8 @@ func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, 
 }
 
 func (m *manager) Close() error {
+	// 先停后台同步并等它退出：它会拿着 Actor 做 Checkpoint，不能和下面的关闭并发。
+	m.stopHandoffSync()
 	m.poolMu.Lock()
 	if m.closed {
 		m.poolMu.Unlock()

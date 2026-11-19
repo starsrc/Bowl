@@ -93,6 +93,8 @@ func classifyStorageLogLevel(procedure string, code connect.Code, err error) slo
 			storagev1connect.StorageServiceMountDiskProcedure, "MountDisk",
 			storagev1connect.StorageServiceUnmountDiskProcedure, "UnmountDisk",
 			storagev1connect.StorageServiceMergeDiskProcedure, "MergeDisk",
+			storagev1connect.StorageServicePushDiskProcedure, "PushDisk",
+			storagev1connect.StorageServicePullDiskProcedure, "PullDisk",
 			storagev1connect.StorageServiceReclaimOrphanProcedure, "ReclaimOrphan":
 			return slog.LevelInfo
 		default:
@@ -127,6 +129,10 @@ func isControlPlaneProcedure(procedure string) bool {
 		storagev1connect.StorageServiceDiffDiskProcedure, "DiffDisk",
 		storagev1connect.StorageServiceReadCommitNodeProcedure, "ReadCommitNode",
 		storagev1connect.StorageServiceMergeDiskProcedure, "MergeDisk",
+		storagev1connect.StorageServicePushDiskProcedure, "PushDisk",
+		storagev1connect.StorageServicePullDiskProcedure, "PullDisk",
+		storagev1connect.StorageServiceGetDiskHeadProcedure, "GetDiskHead",
+		storagev1connect.StorageServiceGetDiskHandoffStatusProcedure, "GetDiskHandoffStatus",
 		storagev1connect.StorageServiceReclaimOrphanProcedure, "ReclaimOrphan":
 		return true
 	default:

@@ -109,6 +109,7 @@ type Params struct {
 	fx.In
 
 	Config        config.ServerConfig
+	AuthToken     config.AuthToken `optional:"true"`
 	Control       control.Manager
 	Observability serverx.ObservabilityConfig    `optional:"true"`
 	Telemetry     telemetry.Config               `optional:"true"`
@@ -187,7 +188,7 @@ func New(p Params) (*Server, error) {
 	)
 	mux.Handle(path, handler)
 
-	httpServer := serverx.NewHTTPServer(p.Config.Addr(), mux, p.Config)
+	httpServer := serverx.NewHTTPServer(p.Config.Addr(), requireBearerToken(mux, string(p.AuthToken)), p.Config)
 	httpServer.Handler = WrapHTTPHandler(httpServer.Handler, httpMetrics)
 	httpServer.HTTP2 = &http.HTTP2Config{
 		MaxReadFrameSize:              HTTP2MaxReadFrameSize,

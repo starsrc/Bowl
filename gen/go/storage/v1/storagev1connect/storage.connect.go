@@ -124,6 +124,16 @@ const (
 	// StorageServiceMergeDiskProcedure is the fully-qualified name of the StorageService's MergeDisk
 	// RPC.
 	StorageServiceMergeDiskProcedure = "/storage.v1.StorageService/MergeDisk"
+	// StorageServicePushDiskProcedure is the fully-qualified name of the StorageService's PushDisk RPC.
+	StorageServicePushDiskProcedure = "/storage.v1.StorageService/PushDisk"
+	// StorageServicePullDiskProcedure is the fully-qualified name of the StorageService's PullDisk RPC.
+	StorageServicePullDiskProcedure = "/storage.v1.StorageService/PullDisk"
+	// StorageServiceGetDiskHeadProcedure is the fully-qualified name of the StorageService's
+	// GetDiskHead RPC.
+	StorageServiceGetDiskHeadProcedure = "/storage.v1.StorageService/GetDiskHead"
+	// StorageServiceGetDiskHandoffStatusProcedure is the fully-qualified name of the StorageService's
+	// GetDiskHandoffStatus RPC.
+	StorageServiceGetDiskHandoffStatusProcedure = "/storage.v1.StorageService/GetDiskHandoffStatus"
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -312,6 +322,20 @@ type StorageServiceClient interface {
 	ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error)
 	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
+	// PushDisk 把虚拟磁盘当前状态同步到交接远端；release 为 true 时同时交出写权限，供其他存储节点认领。
+	// 本节点不是该磁盘的写者时，必须返回 FailedPrecondition。
+	// release 为 true 而磁盘仍被可写挂载时，必须返回 Aborted。
+	// 本节点未配置交接远端时，必须返回 Unimplemented。
+	PushDisk(context.Context, *connect.Request[v1.PushDiskRequest]) (*connect.Response[v1.PushDiskResponse], error)
+	// PullDisk 从交接远端拉取虚拟磁盘的最新快照并把本节点登记为写者。
+	// 写权限仍被其他节点持有且未指定 force 时，必须返回 FailedPrecondition。
+	// 本地存在从未同步的写入且未指定 force 或 keep_local 时，必须返回 FailedPrecondition。
+	// 远端没有该磁盘的记录时，必须返回 NotFound。
+	PullDisk(context.Context, *connect.Request[v1.PullDiskRequest]) (*connect.Response[v1.PullDiskResponse], error)
+	// GetDiskHead 读取交接远端记录的当前写者与最新快照。
+	GetDiskHead(context.Context, *connect.Request[v1.GetDiskHeadRequest]) (*connect.Response[v1.GetDiskHeadResponse], error)
+	// GetDiskHandoffStatus 查询虚拟磁盘在本节点视角下的交接状态（角色、同步位置、待下载数据包数量）。
+	GetDiskHandoffStatus(context.Context, *connect.Request[v1.GetDiskHandoffStatusRequest]) (*connect.Response[v1.GetDiskHandoffStatusResponse], error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. By
@@ -553,49 +577,77 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("MergeDisk")),
 			connect.WithClientOptions(opts...),
 		),
+		pushDisk: connect.NewClient[v1.PushDiskRequest, v1.PushDiskResponse](
+			httpClient,
+			baseURL+StorageServicePushDiskProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("PushDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		pullDisk: connect.NewClient[v1.PullDiskRequest, v1.PullDiskResponse](
+			httpClient,
+			baseURL+StorageServicePullDiskProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("PullDisk")),
+			connect.WithClientOptions(opts...),
+		),
+		getDiskHead: connect.NewClient[v1.GetDiskHeadRequest, v1.GetDiskHeadResponse](
+			httpClient,
+			baseURL+StorageServiceGetDiskHeadProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("GetDiskHead")),
+			connect.WithClientOptions(opts...),
+		),
+		getDiskHandoffStatus: connect.NewClient[v1.GetDiskHandoffStatusRequest, v1.GetDiskHandoffStatusResponse](
+			httpClient,
+			baseURL+StorageServiceGetDiskHandoffStatusProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("GetDiskHandoffStatus")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // storageServiceClient implements StorageServiceClient.
 type storageServiceClient struct {
-	lookup         *connect.Client[v1.LookupRequest, v1.LookupResponse]
-	getAttr        *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
-	setAttr        *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
-	mknod          *connect.Client[v1.MknodRequest, v1.MknodResponse]
-	mkdir          *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
-	symlink        *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
-	readlink       *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
-	link           *connect.Client[v1.LinkRequest, v1.LinkResponse]
-	unlink         *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
-	rmdir          *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
-	rename         *connect.Client[v1.RenameRequest, v1.RenameResponse]
-	create         *connect.Client[v1.CreateRequest, v1.CreateResponse]
-	createTmpfile  *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
-	read           *connect.Client[v1.ReadRequest, v1.ReadResponse]
-	write          *connect.Client[v1.WriteRequest, v1.WriteResponse]
-	fsync          *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
-	fsyncDir       *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
-	readDir        *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
-	readDirPlus    *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
-	fallocate      *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
-	setXattr       *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
-	getXattr       *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
-	listXattr      *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
-	removeXattr    *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
-	mountDisk      *connect.Client[v1.MountDiskRequest, v1.MountDiskResponse]
-	renewMount     *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
-	unmountDisk    *connect.Client[v1.UnmountDiskRequest, v1.UnmountDiskResponse]
-	createDisk     *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
-	getDisk        *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
-	listDisks      *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
-	updateDisk     *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
-	deleteDisk     *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
-	forkDisk       *connect.Client[v1.ForkDiskRequest, v1.ForkDiskResponse]
-	statFS         *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
-	reclaimOrphan  *connect.Client[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse]
-	diffDisk       *connect.Client[v1.DiffDiskRequest, v1.DiffDiskResponse]
-	readCommitNode *connect.Client[v1.ReadCommitNodeRequest, v1.ReadCommitNodeResponse]
-	mergeDisk      *connect.Client[v1.MergeDiskRequest, v1.MergeDiskResponse]
+	lookup               *connect.Client[v1.LookupRequest, v1.LookupResponse]
+	getAttr              *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
+	setAttr              *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
+	mknod                *connect.Client[v1.MknodRequest, v1.MknodResponse]
+	mkdir                *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
+	symlink              *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
+	readlink             *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
+	link                 *connect.Client[v1.LinkRequest, v1.LinkResponse]
+	unlink               *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
+	rmdir                *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
+	rename               *connect.Client[v1.RenameRequest, v1.RenameResponse]
+	create               *connect.Client[v1.CreateRequest, v1.CreateResponse]
+	createTmpfile        *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
+	read                 *connect.Client[v1.ReadRequest, v1.ReadResponse]
+	write                *connect.Client[v1.WriteRequest, v1.WriteResponse]
+	fsync                *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
+	fsyncDir             *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
+	readDir              *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
+	readDirPlus          *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
+	fallocate            *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
+	setXattr             *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
+	getXattr             *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
+	listXattr            *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
+	removeXattr          *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
+	mountDisk            *connect.Client[v1.MountDiskRequest, v1.MountDiskResponse]
+	renewMount           *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
+	unmountDisk          *connect.Client[v1.UnmountDiskRequest, v1.UnmountDiskResponse]
+	createDisk           *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
+	getDisk              *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
+	listDisks            *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
+	updateDisk           *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
+	deleteDisk           *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
+	forkDisk             *connect.Client[v1.ForkDiskRequest, v1.ForkDiskResponse]
+	statFS               *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
+	reclaimOrphan        *connect.Client[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse]
+	diffDisk             *connect.Client[v1.DiffDiskRequest, v1.DiffDiskResponse]
+	readCommitNode       *connect.Client[v1.ReadCommitNodeRequest, v1.ReadCommitNodeResponse]
+	mergeDisk            *connect.Client[v1.MergeDiskRequest, v1.MergeDiskResponse]
+	pushDisk             *connect.Client[v1.PushDiskRequest, v1.PushDiskResponse]
+	pullDisk             *connect.Client[v1.PullDiskRequest, v1.PullDiskResponse]
+	getDiskHead          *connect.Client[v1.GetDiskHeadRequest, v1.GetDiskHeadResponse]
+	getDiskHandoffStatus *connect.Client[v1.GetDiskHandoffStatusRequest, v1.GetDiskHandoffStatusResponse]
 }
 
 // Lookup calls storage.v1.StorageService.Lookup.
@@ -788,6 +840,26 @@ func (c *storageServiceClient) MergeDisk(ctx context.Context, req *connect.Reque
 	return c.mergeDisk.CallUnary(ctx, req)
 }
 
+// PushDisk calls storage.v1.StorageService.PushDisk.
+func (c *storageServiceClient) PushDisk(ctx context.Context, req *connect.Request[v1.PushDiskRequest]) (*connect.Response[v1.PushDiskResponse], error) {
+	return c.pushDisk.CallUnary(ctx, req)
+}
+
+// PullDisk calls storage.v1.StorageService.PullDisk.
+func (c *storageServiceClient) PullDisk(ctx context.Context, req *connect.Request[v1.PullDiskRequest]) (*connect.Response[v1.PullDiskResponse], error) {
+	return c.pullDisk.CallUnary(ctx, req)
+}
+
+// GetDiskHead calls storage.v1.StorageService.GetDiskHead.
+func (c *storageServiceClient) GetDiskHead(ctx context.Context, req *connect.Request[v1.GetDiskHeadRequest]) (*connect.Response[v1.GetDiskHeadResponse], error) {
+	return c.getDiskHead.CallUnary(ctx, req)
+}
+
+// GetDiskHandoffStatus calls storage.v1.StorageService.GetDiskHandoffStatus.
+func (c *storageServiceClient) GetDiskHandoffStatus(ctx context.Context, req *connect.Request[v1.GetDiskHandoffStatusRequest]) (*connect.Response[v1.GetDiskHandoffStatusResponse], error) {
+	return c.getDiskHandoffStatus.CallUnary(ctx, req)
+}
+
 // StorageServiceHandler is an implementation of the storage.v1.StorageService service.
 type StorageServiceHandler interface {
 	// Lookup 执行单级目录项查找。
@@ -974,6 +1046,20 @@ type StorageServiceHandler interface {
 	ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error)
 	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
+	// PushDisk 把虚拟磁盘当前状态同步到交接远端；release 为 true 时同时交出写权限，供其他存储节点认领。
+	// 本节点不是该磁盘的写者时，必须返回 FailedPrecondition。
+	// release 为 true 而磁盘仍被可写挂载时，必须返回 Aborted。
+	// 本节点未配置交接远端时，必须返回 Unimplemented。
+	PushDisk(context.Context, *connect.Request[v1.PushDiskRequest]) (*connect.Response[v1.PushDiskResponse], error)
+	// PullDisk 从交接远端拉取虚拟磁盘的最新快照并把本节点登记为写者。
+	// 写权限仍被其他节点持有且未指定 force 时，必须返回 FailedPrecondition。
+	// 本地存在从未同步的写入且未指定 force 或 keep_local 时，必须返回 FailedPrecondition。
+	// 远端没有该磁盘的记录时，必须返回 NotFound。
+	PullDisk(context.Context, *connect.Request[v1.PullDiskRequest]) (*connect.Response[v1.PullDiskResponse], error)
+	// GetDiskHead 读取交接远端记录的当前写者与最新快照。
+	GetDiskHead(context.Context, *connect.Request[v1.GetDiskHeadRequest]) (*connect.Response[v1.GetDiskHeadResponse], error)
+	// GetDiskHandoffStatus 查询虚拟磁盘在本节点视角下的交接状态（角色、同步位置、待下载数据包数量）。
+	GetDiskHandoffStatus(context.Context, *connect.Request[v1.GetDiskHandoffStatusRequest]) (*connect.Response[v1.GetDiskHandoffStatusResponse], error)
 }
 
 // NewStorageServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1211,6 +1297,30 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("MergeDisk")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServicePushDiskHandler := connect.NewUnaryHandler(
+		StorageServicePushDiskProcedure,
+		svc.PushDisk,
+		connect.WithSchema(storageServiceMethods.ByName("PushDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServicePullDiskHandler := connect.NewUnaryHandler(
+		StorageServicePullDiskProcedure,
+		svc.PullDisk,
+		connect.WithSchema(storageServiceMethods.ByName("PullDisk")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceGetDiskHeadHandler := connect.NewUnaryHandler(
+		StorageServiceGetDiskHeadProcedure,
+		svc.GetDiskHead,
+		connect.WithSchema(storageServiceMethods.ByName("GetDiskHead")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceGetDiskHandoffStatusHandler := connect.NewUnaryHandler(
+		StorageServiceGetDiskHandoffStatusProcedure,
+		svc.GetDiskHandoffStatus,
+		connect.WithSchema(storageServiceMethods.ByName("GetDiskHandoffStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/storage.v1.StorageService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case StorageServiceLookupProcedure:
@@ -1289,6 +1399,14 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceReadCommitNodeHandler.ServeHTTP(w, r)
 		case StorageServiceMergeDiskProcedure:
 			storageServiceMergeDiskHandler.ServeHTTP(w, r)
+		case StorageServicePushDiskProcedure:
+			storageServicePushDiskHandler.ServeHTTP(w, r)
+		case StorageServicePullDiskProcedure:
+			storageServicePullDiskHandler.ServeHTTP(w, r)
+		case StorageServiceGetDiskHeadProcedure:
+			storageServiceGetDiskHeadHandler.ServeHTTP(w, r)
+		case StorageServiceGetDiskHandoffStatusProcedure:
+			storageServiceGetDiskHandoffStatusHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1448,4 +1566,20 @@ func (UnimplementedStorageServiceHandler) ReadCommitNode(context.Context, *conne
 
 func (UnimplementedStorageServiceHandler) MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.MergeDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) PushDisk(context.Context, *connect.Request[v1.PushDiskRequest]) (*connect.Response[v1.PushDiskResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.PushDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) PullDisk(context.Context, *connect.Request[v1.PullDiskRequest]) (*connect.Response[v1.PullDiskResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.PullDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) GetDiskHead(context.Context, *connect.Request[v1.GetDiskHeadRequest]) (*connect.Response[v1.GetDiskHeadResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetDiskHead is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) GetDiskHandoffStatus(context.Context, *connect.Request[v1.GetDiskHandoffStatusRequest]) (*connect.Response[v1.GetDiskHandoffStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.GetDiskHandoffStatus is not implemented"))
 }

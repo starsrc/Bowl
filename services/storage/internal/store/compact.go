@@ -145,7 +145,8 @@ func (s *StoreActor) validateCompactSelectCmd(cmd *writeCmd) error {
 		if packID == 0 || packID == activeID {
 			continue
 		}
-		if meta.LiveBytes > 0 && meta.LiveBytes*2 <= meta.TotalBytes {
+		// 还没下载回来的包不参与搬迁：否则一次回收就会把它们全部拉到本地。
+		if meta.LiveBytes > 0 && meta.LiveBytes*2 <= meta.TotalBytes && !s.blobs.isRemotePack(packID) {
 			*out = append(*out, packID)
 		}
 	}

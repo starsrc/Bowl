@@ -169,6 +169,10 @@ func (m *manager) snapshotDiskForInspect(
 	if mkErr := os.MkdirAll(tmpRoot, 0o755); mkErr != nil {
 		return "", false, nil, mkErr
 	}
+	// diff / merge 按文件处理数据包：先把这块盘还没下载的包补齐，切面里就都是真实的包。
+	if hydErr := actor.HydrateRemotePacks(ctx); hydErr != nil {
+		return "", false, nil, hydErr
+	}
 	snapDir = m.tmpSnapshotPath(prefix)
 	stats, err := actor.Checkpoint(ctx, snapDir)
 	if err != nil {
@@ -375,6 +379,9 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 	m.lineageCommitMu.RLock()
 	defer m.lineageCommitMu.RUnlock()
 
+	if hydErr := m.hydrateCommitDir(ctx, m.commitDir(lcaCommitID.String())); hydErr != nil {
+		return nil, mapInspectErr(hydErr)
+	}
 	diffRes, err := store.DiffTrees(ctx, &store.DiffOptions{
 		BaseRoot:      m.commitDir(lcaCommitID.String()),
 		TargetRoot:    targetSnapDir,
@@ -436,6 +443,9 @@ func (m *manager) ReadCommitNode(ctx context.Context, params *ReadCommitNodePara
 	defer m.lineageCommitMu.RUnlock()
 
 	cDir := m.commitDir(commitID.String())
+	if hydErr := m.hydrateCommitDir(ctx, cDir); hydErr != nil {
+		return nil, mapInspectErr(hydErr)
+	}
 	if !belongsToLineage {
 		if _, statErr := os.Stat(cDir); statErr == nil {
 			return nil, fmt.Errorf("%w: commit %s does not belong to disk lineage %s", ErrCrossLineage, commitID, diskRow.LineageID)
@@ -569,6 +579,13 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 
 	m.lineageCommitMu.RLock()
 	baseCommitDir := m.commitDir(sourceRow.BaseCommitID.String())
+	for _, dir := range []string{baseCommitDir, m.commitDir(lcaCommitID.String())} {
+		if hydErr := m.hydrateCommitDir(ctx, dir); hydErr != nil {
+			m.lineageCommitMu.RUnlock()
+			cleanupUncommittedDirs()
+			return nil, mapInspectErr(hydErr)
+		}
+	}
 	srcDiffRes, srcDiffErr := store.DiffTrees(ctx, &store.DiffOptions{
 		BaseRoot:   baseCommitDir,
 		SourceRoot: sourceSnapDir,

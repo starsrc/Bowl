@@ -1673,6 +1673,22 @@ func (s *fakeStorage) MergeDisk(context.Context, *connect.Request[storagev1.Merg
 	return nil, s.failFast("MergeDisk")
 }
 
+func (s *fakeStorage) PushDisk(context.Context, *connect.Request[storagev1.PushDiskRequest]) (*connect.Response[storagev1.PushDiskResponse], error) {
+	return nil, s.failFast("PushDisk")
+}
+
+func (s *fakeStorage) PullDisk(context.Context, *connect.Request[storagev1.PullDiskRequest]) (*connect.Response[storagev1.PullDiskResponse], error) {
+	return nil, s.failFast("PullDisk")
+}
+
+func (s *fakeStorage) GetDiskHead(context.Context, *connect.Request[storagev1.GetDiskHeadRequest]) (*connect.Response[storagev1.GetDiskHeadResponse], error) {
+	return nil, s.failFast("GetDiskHead")
+}
+
+func (s *fakeStorage) GetDiskHandoffStatus(context.Context, *connect.Request[storagev1.GetDiskHandoffStatusRequest]) (*connect.Response[storagev1.GetDiskHandoffStatusResponse], error) {
+	return nil, s.failFast("GetDiskHandoffStatus")
+}
+
 // ---------------------------------------------------------------------------
 // 测试通用装配与自诊断辅助函数（置于接缝外侧，零业务分支）
 // ---------------------------------------------------------------------------

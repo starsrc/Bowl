@@ -19,44 +19,48 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StorageService_Lookup_FullMethodName         = "/storage.v1.StorageService/Lookup"
-	StorageService_GetAttr_FullMethodName        = "/storage.v1.StorageService/GetAttr"
-	StorageService_SetAttr_FullMethodName        = "/storage.v1.StorageService/SetAttr"
-	StorageService_Mknod_FullMethodName          = "/storage.v1.StorageService/Mknod"
-	StorageService_Mkdir_FullMethodName          = "/storage.v1.StorageService/Mkdir"
-	StorageService_Symlink_FullMethodName        = "/storage.v1.StorageService/Symlink"
-	StorageService_Readlink_FullMethodName       = "/storage.v1.StorageService/Readlink"
-	StorageService_Link_FullMethodName           = "/storage.v1.StorageService/Link"
-	StorageService_Unlink_FullMethodName         = "/storage.v1.StorageService/Unlink"
-	StorageService_Rmdir_FullMethodName          = "/storage.v1.StorageService/Rmdir"
-	StorageService_Rename_FullMethodName         = "/storage.v1.StorageService/Rename"
-	StorageService_Create_FullMethodName         = "/storage.v1.StorageService/Create"
-	StorageService_CreateTmpfile_FullMethodName  = "/storage.v1.StorageService/CreateTmpfile"
-	StorageService_Read_FullMethodName           = "/storage.v1.StorageService/Read"
-	StorageService_Write_FullMethodName          = "/storage.v1.StorageService/Write"
-	StorageService_Fsync_FullMethodName          = "/storage.v1.StorageService/Fsync"
-	StorageService_FsyncDir_FullMethodName       = "/storage.v1.StorageService/FsyncDir"
-	StorageService_ReadDir_FullMethodName        = "/storage.v1.StorageService/ReadDir"
-	StorageService_ReadDirPlus_FullMethodName    = "/storage.v1.StorageService/ReadDirPlus"
-	StorageService_Fallocate_FullMethodName      = "/storage.v1.StorageService/Fallocate"
-	StorageService_SetXattr_FullMethodName       = "/storage.v1.StorageService/SetXattr"
-	StorageService_GetXattr_FullMethodName       = "/storage.v1.StorageService/GetXattr"
-	StorageService_ListXattr_FullMethodName      = "/storage.v1.StorageService/ListXattr"
-	StorageService_RemoveXattr_FullMethodName    = "/storage.v1.StorageService/RemoveXattr"
-	StorageService_MountDisk_FullMethodName      = "/storage.v1.StorageService/MountDisk"
-	StorageService_RenewMount_FullMethodName     = "/storage.v1.StorageService/RenewMount"
-	StorageService_UnmountDisk_FullMethodName    = "/storage.v1.StorageService/UnmountDisk"
-	StorageService_CreateDisk_FullMethodName     = "/storage.v1.StorageService/CreateDisk"
-	StorageService_GetDisk_FullMethodName        = "/storage.v1.StorageService/GetDisk"
-	StorageService_ListDisks_FullMethodName      = "/storage.v1.StorageService/ListDisks"
-	StorageService_UpdateDisk_FullMethodName     = "/storage.v1.StorageService/UpdateDisk"
-	StorageService_DeleteDisk_FullMethodName     = "/storage.v1.StorageService/DeleteDisk"
-	StorageService_ForkDisk_FullMethodName       = "/storage.v1.StorageService/ForkDisk"
-	StorageService_StatFS_FullMethodName         = "/storage.v1.StorageService/StatFS"
-	StorageService_ReclaimOrphan_FullMethodName  = "/storage.v1.StorageService/ReclaimOrphan"
-	StorageService_DiffDisk_FullMethodName       = "/storage.v1.StorageService/DiffDisk"
-	StorageService_ReadCommitNode_FullMethodName = "/storage.v1.StorageService/ReadCommitNode"
-	StorageService_MergeDisk_FullMethodName      = "/storage.v1.StorageService/MergeDisk"
+	StorageService_Lookup_FullMethodName               = "/storage.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName              = "/storage.v1.StorageService/GetAttr"
+	StorageService_SetAttr_FullMethodName              = "/storage.v1.StorageService/SetAttr"
+	StorageService_Mknod_FullMethodName                = "/storage.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName                = "/storage.v1.StorageService/Mkdir"
+	StorageService_Symlink_FullMethodName              = "/storage.v1.StorageService/Symlink"
+	StorageService_Readlink_FullMethodName             = "/storage.v1.StorageService/Readlink"
+	StorageService_Link_FullMethodName                 = "/storage.v1.StorageService/Link"
+	StorageService_Unlink_FullMethodName               = "/storage.v1.StorageService/Unlink"
+	StorageService_Rmdir_FullMethodName                = "/storage.v1.StorageService/Rmdir"
+	StorageService_Rename_FullMethodName               = "/storage.v1.StorageService/Rename"
+	StorageService_Create_FullMethodName               = "/storage.v1.StorageService/Create"
+	StorageService_CreateTmpfile_FullMethodName        = "/storage.v1.StorageService/CreateTmpfile"
+	StorageService_Read_FullMethodName                 = "/storage.v1.StorageService/Read"
+	StorageService_Write_FullMethodName                = "/storage.v1.StorageService/Write"
+	StorageService_Fsync_FullMethodName                = "/storage.v1.StorageService/Fsync"
+	StorageService_FsyncDir_FullMethodName             = "/storage.v1.StorageService/FsyncDir"
+	StorageService_ReadDir_FullMethodName              = "/storage.v1.StorageService/ReadDir"
+	StorageService_ReadDirPlus_FullMethodName          = "/storage.v1.StorageService/ReadDirPlus"
+	StorageService_Fallocate_FullMethodName            = "/storage.v1.StorageService/Fallocate"
+	StorageService_SetXattr_FullMethodName             = "/storage.v1.StorageService/SetXattr"
+	StorageService_GetXattr_FullMethodName             = "/storage.v1.StorageService/GetXattr"
+	StorageService_ListXattr_FullMethodName            = "/storage.v1.StorageService/ListXattr"
+	StorageService_RemoveXattr_FullMethodName          = "/storage.v1.StorageService/RemoveXattr"
+	StorageService_MountDisk_FullMethodName            = "/storage.v1.StorageService/MountDisk"
+	StorageService_RenewMount_FullMethodName           = "/storage.v1.StorageService/RenewMount"
+	StorageService_UnmountDisk_FullMethodName          = "/storage.v1.StorageService/UnmountDisk"
+	StorageService_CreateDisk_FullMethodName           = "/storage.v1.StorageService/CreateDisk"
+	StorageService_GetDisk_FullMethodName              = "/storage.v1.StorageService/GetDisk"
+	StorageService_ListDisks_FullMethodName            = "/storage.v1.StorageService/ListDisks"
+	StorageService_UpdateDisk_FullMethodName           = "/storage.v1.StorageService/UpdateDisk"
+	StorageService_DeleteDisk_FullMethodName           = "/storage.v1.StorageService/DeleteDisk"
+	StorageService_ForkDisk_FullMethodName             = "/storage.v1.StorageService/ForkDisk"
+	StorageService_StatFS_FullMethodName               = "/storage.v1.StorageService/StatFS"
+	StorageService_ReclaimOrphan_FullMethodName        = "/storage.v1.StorageService/ReclaimOrphan"
+	StorageService_DiffDisk_FullMethodName             = "/storage.v1.StorageService/DiffDisk"
+	StorageService_ReadCommitNode_FullMethodName       = "/storage.v1.StorageService/ReadCommitNode"
+	StorageService_MergeDisk_FullMethodName            = "/storage.v1.StorageService/MergeDisk"
+	StorageService_PushDisk_FullMethodName             = "/storage.v1.StorageService/PushDisk"
+	StorageService_PullDisk_FullMethodName             = "/storage.v1.StorageService/PullDisk"
+	StorageService_GetDiskHead_FullMethodName          = "/storage.v1.StorageService/GetDiskHead"
+	StorageService_GetDiskHandoffStatus_FullMethodName = "/storage.v1.StorageService/GetDiskHandoffStatus"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -249,6 +253,20 @@ type StorageServiceClient interface {
 	ReadCommitNode(ctx context.Context, in *ReadCommitNodeRequest, opts ...grpc.CallOption) (*ReadCommitNodeResponse, error)
 	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
 	MergeDisk(ctx context.Context, in *MergeDiskRequest, opts ...grpc.CallOption) (*MergeDiskResponse, error)
+	// PushDisk 把虚拟磁盘当前状态同步到交接远端；release 为 true 时同时交出写权限，供其他存储节点认领。
+	// 本节点不是该磁盘的写者时，必须返回 FailedPrecondition。
+	// release 为 true 而磁盘仍被可写挂载时，必须返回 Aborted。
+	// 本节点未配置交接远端时，必须返回 Unimplemented。
+	PushDisk(ctx context.Context, in *PushDiskRequest, opts ...grpc.CallOption) (*PushDiskResponse, error)
+	// PullDisk 从交接远端拉取虚拟磁盘的最新快照并把本节点登记为写者。
+	// 写权限仍被其他节点持有且未指定 force 时，必须返回 FailedPrecondition。
+	// 本地存在从未同步的写入且未指定 force 或 keep_local 时，必须返回 FailedPrecondition。
+	// 远端没有该磁盘的记录时，必须返回 NotFound。
+	PullDisk(ctx context.Context, in *PullDiskRequest, opts ...grpc.CallOption) (*PullDiskResponse, error)
+	// GetDiskHead 读取交接远端记录的当前写者与最新快照。
+	GetDiskHead(ctx context.Context, in *GetDiskHeadRequest, opts ...grpc.CallOption) (*GetDiskHeadResponse, error)
+	// GetDiskHandoffStatus 查询虚拟磁盘在本节点视角下的交接状态（角色、同步位置、待下载数据包数量）。
+	GetDiskHandoffStatus(ctx context.Context, in *GetDiskHandoffStatusRequest, opts ...grpc.CallOption) (*GetDiskHandoffStatusResponse, error)
 }
 
 type storageServiceClient struct {
@@ -639,6 +657,46 @@ func (c *storageServiceClient) MergeDisk(ctx context.Context, in *MergeDiskReque
 	return out, nil
 }
 
+func (c *storageServiceClient) PushDisk(ctx context.Context, in *PushDiskRequest, opts ...grpc.CallOption) (*PushDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PushDiskResponse)
+	err := c.cc.Invoke(ctx, StorageService_PushDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) PullDisk(ctx context.Context, in *PullDiskRequest, opts ...grpc.CallOption) (*PullDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PullDiskResponse)
+	err := c.cc.Invoke(ctx, StorageService_PullDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) GetDiskHead(ctx context.Context, in *GetDiskHeadRequest, opts ...grpc.CallOption) (*GetDiskHeadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDiskHeadResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetDiskHead_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) GetDiskHandoffStatus(ctx context.Context, in *GetDiskHandoffStatusRequest, opts ...grpc.CallOption) (*GetDiskHandoffStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDiskHandoffStatusResponse)
+	err := c.cc.Invoke(ctx, StorageService_GetDiskHandoffStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -829,6 +887,20 @@ type StorageServiceServer interface {
 	ReadCommitNode(context.Context, *ReadCommitNodeRequest) (*ReadCommitNodeResponse, error)
 	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *MergeDiskRequest) (*MergeDiskResponse, error)
+	// PushDisk 把虚拟磁盘当前状态同步到交接远端；release 为 true 时同时交出写权限，供其他存储节点认领。
+	// 本节点不是该磁盘的写者时，必须返回 FailedPrecondition。
+	// release 为 true 而磁盘仍被可写挂载时，必须返回 Aborted。
+	// 本节点未配置交接远端时，必须返回 Unimplemented。
+	PushDisk(context.Context, *PushDiskRequest) (*PushDiskResponse, error)
+	// PullDisk 从交接远端拉取虚拟磁盘的最新快照并把本节点登记为写者。
+	// 写权限仍被其他节点持有且未指定 force 时，必须返回 FailedPrecondition。
+	// 本地存在从未同步的写入且未指定 force 或 keep_local 时，必须返回 FailedPrecondition。
+	// 远端没有该磁盘的记录时，必须返回 NotFound。
+	PullDisk(context.Context, *PullDiskRequest) (*PullDiskResponse, error)
+	// GetDiskHead 读取交接远端记录的当前写者与最新快照。
+	GetDiskHead(context.Context, *GetDiskHeadRequest) (*GetDiskHeadResponse, error)
+	// GetDiskHandoffStatus 查询虚拟磁盘在本节点视角下的交接状态（角色、同步位置、待下载数据包数量）。
+	GetDiskHandoffStatus(context.Context, *GetDiskHandoffStatusRequest) (*GetDiskHandoffStatusResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -952,6 +1024,18 @@ func (UnimplementedStorageServiceServer) ReadCommitNode(context.Context, *ReadCo
 }
 func (UnimplementedStorageServiceServer) MergeDisk(context.Context, *MergeDiskRequest) (*MergeDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MergeDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) PushDisk(context.Context, *PushDiskRequest) (*PushDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PushDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) PullDisk(context.Context, *PullDiskRequest) (*PullDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PullDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) GetDiskHead(context.Context, *GetDiskHeadRequest) (*GetDiskHeadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDiskHead not implemented")
+}
+func (UnimplementedStorageServiceServer) GetDiskHandoffStatus(context.Context, *GetDiskHandoffStatusRequest) (*GetDiskHandoffStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDiskHandoffStatus not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1658,6 +1742,78 @@ func _StorageService_MergeDisk_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_PushDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PushDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).PushDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_PushDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).PushDisk(ctx, req.(*PushDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_PullDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PullDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).PullDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_PullDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).PullDisk(ctx, req.(*PullDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_GetDiskHead_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDiskHeadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetDiskHead(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetDiskHead_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetDiskHead(ctx, req.(*GetDiskHeadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_GetDiskHandoffStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDiskHandoffStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).GetDiskHandoffStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_GetDiskHandoffStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).GetDiskHandoffStatus(ctx, req.(*GetDiskHandoffStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1816,6 +1972,22 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MergeDisk",
 			Handler:    _StorageService_MergeDisk_Handler,
+		},
+		{
+			MethodName: "PushDisk",
+			Handler:    _StorageService_PushDisk_Handler,
+		},
+		{
+			MethodName: "PullDisk",
+			Handler:    _StorageService_PullDisk_Handler,
+		},
+		{
+			MethodName: "GetDiskHead",
+			Handler:    _StorageService_GetDiskHead_Handler,
+		},
+		{
+			MethodName: "GetDiskHandoffStatus",
+			Handler:    _StorageService_GetDiskHandoffStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

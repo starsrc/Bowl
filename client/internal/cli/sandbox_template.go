@@ -64,7 +64,9 @@ func newTemplateCreateCmd() *cobra.Command {
 			if block && sboxRuntimeName != runtimeMicroVM {
 				return usageExitErr(errors.New("--block templates boot only on the microvm runtime"), false)
 			}
-			if binary == "" {
+			// microvm mounts the disk on this host with the host's bowl; the Docker runtimes inject a
+			// Linux client into a helper container and build one when --binary is empty.
+			if binary == "" && sboxRuntimeName == runtimeMicroVM {
 				if binary, err = exec.LookPath("bowl"); err != nil {
 					return runtimeExitErr(errors.New("bowl client not found in PATH; pass --binary"))
 				}
@@ -99,7 +101,8 @@ func newTemplateCreateCmd() *cobra.Command {
 	flags.StringVar(&size, "size", "4GiB", "Capacity of the template disk; sandboxes forked from it get the same")
 	flags.BoolVar(&block, "block", false, "Store the system as an ext4 block-device image on the disk (microvm only); "+
 		"faster for many small files, but diff and merge see one image file")
-	flags.StringVar(&binary, "binary", "", "Linux bowl client used to mount the disk on this host (default: bowl in PATH)")
+	flags.StringVar(&binary, "binary", "", "Linux bowl client that mounts the disk: on this host for microvm (default: bowl in PATH), "+
+		"inside a helper container otherwise (default: build one)")
 	addSandboxStorageFlags(cmd, &endpoint, &token)
 	return cmd
 }

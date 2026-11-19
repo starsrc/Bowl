@@ -31,18 +31,11 @@ echo "[handoff-up] 就绪"
 echo "  local  http://127.0.0.1:${LOCAL_PORT:-9100}"
 echo "  cloud  http://127.0.0.1:${CLOUD_PORT:-9200}"
 echo
-echo "试一下:"
-echo "  S=\$(bowl sandbox create --endpoint http://127.0.0.1:${LOCAL_PORT:-9100} -q)"
-echo "  bowl disk push \$S --endpoint http://127.0.0.1:${LOCAL_PORT:-9100}     # 绑定远端，之后自动同步"
-echo "  bowl sandbox move \$S --to http://127.0.0.1:${CLOUD_PORT:-9200}       # 切到云端"
-if [[ "${COMPUTE:-}" == 1 ]]; then
-  echo
-  echo "云端算力（独立的 Docker）在 tcp://127.0.0.1:${CLOUD_DOCKER_PORT:-2385}。登记后沙箱会真正起在它上面:"
-  echo "  bowl node set local --endpoint http://127.0.0.1:${LOCAL_PORT:-9100}"
-  echo "  bowl node set cloud --endpoint http://127.0.0.1:${CLOUD_PORT:-9200} \\"
-  echo "       --docker tcp://127.0.0.1:${CLOUD_DOCKER_PORT:-2385} --sandbox-endpoint http://172.31.250.10:9000"
-  echo "  bowl sandbox move \$S --to cloud"
-  echo "跑一遍全部场景: COMPUTE=1 scripts/handoff-smoke.sh"
-else
-  echo "或者跑一遍全部场景: scripts/handoff-smoke.sh"
-fi
+echo "试一下(用 bowl-sandbox,container 后端在 macOS 和 Linux 上都能跑):"
+echo "  export BOWL_SANDBOX_RUNTIME=container"
+echo "  bowl-sandbox template create alpine:3.20 --endpoint http://127.0.0.1:${LOCAL_PORT:-9100}"
+echo "  S=\$(bowl-sandbox create --template alpine:3.20 --endpoint http://127.0.0.1:${LOCAL_PORT:-9100} -q)"
+echo "  bowl-sandbox move \$S --to http://127.0.0.1:${CLOUD_PORT:-9200}       # 切到云端"
+echo
+echo "COMPUTE=1 的独立云端算力和 scripts/handoff-smoke.sh 还依赖 bowl disk push/pull/head、bowl node"
+echo "这些交接命令,它们还没有迁到 cobra 版的 bowl 上,现在跑不了。"

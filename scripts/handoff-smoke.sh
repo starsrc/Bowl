@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 注意:这个脚本调用 bowl disk push/pull/head、bowl node set、bowl sandbox mount/move 等交接命令。
+# 它们来自迁移 cobra 之前的客户端,还没有迁到现在的 bowl 上,所以现在跑不了。sandbox 一级的交接
+# 已经是 bowl-sandbox move。
 # 本地 ⇄ 云端交接的端到端冒烟：把六个目标场景按顺序各跑一遍并断言结果。
 #
 #   A 本地干活，写入自动同步到远端

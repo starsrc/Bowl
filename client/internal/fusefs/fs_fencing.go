@@ -41,9 +41,7 @@ func (fs *RawFS) Fence(status fuse.Status, reason string) {
 	}
 	fs.fenceReason = reason
 	fs.fencedStatus.Store(uint32(status))
-	if fs.fenceCh != nil {
-		close(fs.fenceCh)
-	}
+	fenceCh := fs.fenceCh
 	cb := fs.onFence
 	fs.fenceMu.Unlock()
 
@@ -65,6 +63,9 @@ func (fs *RawFS) Fence(status fuse.Status, reason string) {
 
 	if cb != nil {
 		cb(status, reason)
+	}
+	if fenceCh != nil {
+		close(fenceCh)
 	}
 }
 

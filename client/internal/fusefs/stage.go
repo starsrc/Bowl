@@ -2195,7 +2195,7 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	for st.hasInflightLocked() && !c.aborted.Load() {
 		c.stateCond.Wait()
 	}
-	if st.promoted != nil {
+	if st.promoted != nil && len(st.pending) == 0 {
 		st.promoted.finished = true
 		if f := st.promoted.maybeDetachFileLocked(); f != nil {
 			fileToClose = f

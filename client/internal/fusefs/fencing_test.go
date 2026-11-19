@@ -822,3 +822,71 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
 	})
 }
+
+func TestRawFS_FencedReleaseOfUnlinkedOrphan_SkipsReclaimOrphanRPC(t *testing.T) {
+	// Given: an open file unlinked before fencing enters orphanInodes and handles.orphans.
+	srv := newFakeStorage(t, withTTL(2.0, 2.0))
+	fs := newTestRawFS(t, srv)
+	orphanFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "open-orphan.bin", syscall.O_RDWR, 0o644)
+	requireStatus(t, "Unlink open orphan", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "open-orphan.bin"))
+
+	fs.Fence(fuse.EBUSY, "lease preempted")
+	reclaimsBefore := srv.reclaimOrphanCalls.Load()
+
+	// When: the application closes the open descriptor after fencing.
+	fs.Release(nil, &fuse.ReleaseIn{
+		InHeader: fuse.InHeader{NodeId: orphanFile.NodeId},
+		Fh:       orphanFile.Fh,
+	})
+
+	// Then: Release must not send a mutating ReclaimOrphan RPC with a stale epoch.
+	require.Equal(t, reclaimsBefore, srv.reclaimOrphanCalls.Load(), "fenced Release must skip ReclaimOrphan RPC")
+}
+
+func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromotedExtent(t *testing.T) {
+	// Given: promoted O_TMPFILE with a 4 MiB extent popped by a StageCoordinator upload worker.
+	payload := buildRepeatingBytes(fusefs.StageChunkSize, 'P')
+
+	srv := newFakeStorage(t, withTTL(2.0, 2.0))
+	releaseWrites := make(chan struct{})
+	srv.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) (uint32, error) {
+		<-releaseWrites
+		return 0, connect.NewError(connect.CodeUnavailable, errors.New("aborted"))
+	}
+
+	session, err := fusefs.OpenStageDirSession(t.TempDir())
+	require.NoError(t, err)
+	fs := newTestRawFS(t, srv, withStageSession(session), withStageSize(16*1024*1024))
+
+	var tmpOut fuse.CreateOut
+	requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Flags:    syscall.O_RDWR,
+		Mode:     0o600,
+	}, &tmpOut))
+	mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, payload)
+
+	// Promote via Link and unlink while still open so Release invokes StageCoordinator.DiscardInode.
+	var linkOut fuse.EntryOut
+	requireStatus(t, "Link promote", fuse.OK, fs.Link(nil, &fuse.LinkIn{
+		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Oldnodeid: tmpOut.NodeId,
+	}, "promoted-orphan", &linkOut))
+	requireStatus(t, "Unlink promoted open orphan", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "promoted-orphan"))
+
+	// Wait for the worker to pop the promoted extent (Inflight increments before processUploadItem reads promoted.file).
+	require.Eventually(t, func() bool {
+		return fs.Snapshot().Stage.Inflight >= 1
+	}, 2*time.Second, time.Millisecond, "promoted extent upload did not become inflight")
+
+	// When: Fence invokes AbortAll and Release invokes DiscardInode while the promoted extent remains inflight.
+	fs.Fence(fuse.EBUSY, "preempted during promoted upload")
+	fs.Release(nil, &fuse.ReleaseIn{
+		InHeader: fuse.InHeader{NodeId: linkOut.NodeId},
+		Fh:       tmpOut.Fh,
+	})
+	close(releaseWrites)
+
+	// Then: clean shutdown completes without data race or premature promoted.file close.
+	fs.OnUnmount()
+}

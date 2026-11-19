@@ -753,12 +753,12 @@ func TestTmpfile_SyncMode_GivenClosedOrMidFlightCancel_CompletesCreateTmpfileWit
 }
 
 func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithServerErrorMapping(t *testing.T) {
-	// Given three linkable sync tmpfiles with pre-closed and mid-flight cancel channels.
+	// Given four linkable sync tmpfiles with pre-closed and mid-flight cancel channels.
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 	preClosed := newClosedCancelChan()
 
-	var tmpPre, tmpMid, tmpErr fuse.CreateOut
+	var tmpPre, tmpMid, tmpErr, tmpFence fuse.CreateOut
 	requireStatus(t, "Tmpfile 1", fuse.OK, syncFS.Tmpfile(nil, &fuse.CreateIn{
 		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 		Flags:    uint32(syscall.O_RDWR),
@@ -774,7 +774,12 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 		Flags:    uint32(syscall.O_RDWR),
 		Mode:     0o644,
 	}, &tmpErr))
-	require.Equal(t, 3, syncFS.Snapshot().Queues.OrphanInodes, "scene=initial_orphans want=3")
+	requireStatus(t, "Tmpfile 4", fuse.OK, syncFS.Tmpfile(nil, &fuse.CreateIn{
+		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Flags:    uint32(syscall.O_RDWR),
+		Mode:     0o644,
+	}, &tmpFence))
+	require.Equal(t, 4, syncFS.Snapshot().Queues.OrphanInodes, "scene=initial_orphans want=4")
 
 	var deadlinePresent bool
 	var remainingTimeout time.Duration
@@ -809,7 +814,7 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 	require.Greater(t, remainingTimeout, 20*time.Second, "scene=link_rpc_timeout_low want>20s got=%v", remainingTimeout)
 	require.LessOrEqual(t, remainingTimeout, fusefs.DefaultRPCTimeout, "scene=link_rpc_timeout_high want<=30s got=%v", remainingTimeout)
 	require.Equal(t, uint64(2), syncFS.Snapshot().TmpFile.Promotes, "scene=link_promotes want=2 got=%d", syncFS.Snapshot().TmpFile.Promotes)
-	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=remaining_orphan want=1 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
+	require.Equal(t, 2, syncFS.Snapshot().Queues.OrphanInodes, "scene=remaining_orphans want=2 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 
 	syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpPre.NodeId}, Fh: tmpPre.Fh})
 	syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpMid.NodeId}, Fh: tmpMid.Fh})
@@ -817,6 +822,7 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 	require.True(t, srv.hasNode(tmpPre.NodeId))
 	require.True(t, srv.hasNode(tmpMid.NodeId))
 
+	// Unfenced ENOSPC failure preserves orphan tracking and Release reclaims it via ReclaimOrphan.
 	srv.linkHook = func(_ context.Context, _ *storagev1.LinkRequest) error {
 		return errnoError(connect.CodeResourceExhausted, "ENOSPC")
 	}
@@ -826,20 +832,28 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 		Oldnodeid: tmpErr.NodeId,
 	}, "quota-fail.bin", &quotaOut)
 	requireStatus(t, "sync Link ENOSPC under closed cancel", fuse.Status(syscall.ENOSPC), stQuota)
+	require.Equal(t, uint64(2), syncFS.Snapshot().TmpFile.Promotes, "scene=failed_link_promotes_unchanged want=2")
+	require.Equal(t, 2, syncFS.Snapshot().Queues.OrphanInodes, "scene=failed_link_orphan_preserved want=2")
 
+	syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpErr.NodeId}, Fh: tmpErr.Fh})
+	require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=unpromoted_tmpfile_reclaimed want=1 got=%d", srv.reclaimOrphanCalls.Load())
+	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=one_orphan_remaining want=1")
+
+	// Stale-epoch EBUSY failure maps to EBUSY, fences syncFS, and fenced Release clears local orphan without sending ReclaimOrphan.
 	srv.linkHook = func(_ context.Context, _ *storagev1.LinkRequest) error {
 		return errnoError(connect.CodeFailedPrecondition, "EBUSY")
 	}
 	var fenceOut fuse.EntryOut
 	stFence := syncFS.Link(preClosed, &fuse.LinkIn{
 		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
-		Oldnodeid: tmpErr.NodeId,
+		Oldnodeid: tmpFence.NodeId,
 	}, "fence-fail.bin", &fenceOut)
 	requireStatus(t, "sync Link EBUSY under closed cancel", fuse.Status(syscall.EBUSY), stFence)
-	require.Equal(t, uint64(2), syncFS.Snapshot().TmpFile.Promotes, "scene=failed_link_promotes_unchanged want=2")
-	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=failed_link_orphan_preserved want=1")
+	require.True(t, syncFS.IsFenced(), "scene=stale_epoch_link_fences_fs want=true")
+	require.Equal(t, uint64(2), syncFS.Snapshot().TmpFile.Promotes, "scene=fenced_link_promotes_unchanged want=2")
+	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=fenced_link_orphan_preserved want=1")
 
-	syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpErr.NodeId}, Fh: tmpErr.Fh})
-	require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=unpromoted_tmpfile_reclaimed want=1 got=%d", srv.reclaimOrphanCalls.Load())
+	syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpFence.NodeId}, Fh: tmpFence.Fh})
+	require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=fenced_release_skips_reclaim want=1 got=%d", srv.reclaimOrphanCalls.Load())
 	require.Zero(t, syncFS.Snapshot().Queues.OrphanInodes, "scene=all_orphans_cleared want=0")
 }

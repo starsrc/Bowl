@@ -1152,7 +1152,7 @@ func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 		return
 	}
 	fs.clearDirty(serverIno)
-	if fs.client == nil {
+	if fs.client == nil || fs.IsFenced() {
 		return
 	}
 	sc := trace.SpanContextFromContext(ctx)
@@ -1188,7 +1188,7 @@ func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 
 // tryReclaim 返回 true 表示回收完成或错误不可重试。
 func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, fromQueue bool) bool {
-	if fromQueue && fs.IsFenced() {
+	if fs.IsFenced() {
 		return true
 	}
 	if parent == nil {

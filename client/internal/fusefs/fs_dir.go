@@ -79,7 +79,7 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			return cachedDir{}, fuse.Status(syscall.ESTALE)
 		}
 		if err != nil {
-			return cachedDir{}, fs.ToStatus(err, cancel)
+			return cachedDir{}, fs.ToStatus(err)
 		}
 		page := resp.Msg.GetEntries()
 		for _, e := range page {
@@ -231,7 +231,7 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 	if err == nil || connect.CodeOf(err) == connect.CodeUnimplemented {
 		fs.advanceMetaSyncedSeq(seq)
 	}
-	return fs.ToStatus(err, cancel)
+	return fs.ToStatus(err)
 }
 
 // ReleaseDir 只释放本地目录句柄。

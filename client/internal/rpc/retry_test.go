@@ -1,10 +1,12 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"syscall"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
@@ -178,8 +181,12 @@ func TestRetry_GivenJitterRandZero_WhenRetrying_AppliesHalfIntervalFloor(t *test
 }
 
 func TestRetry_GivenIdempotentRead_WhenBudgetExhausted_WrapsDeadlineExceededAndMapsEIO(t *testing.T) {
-	// Given: 总预算 350ms，步长 100ms -> 200ms -> 250ms(截断为剩余 50ms)
+	// Given: total budget 350ms, backoff steps 100ms -> 200ms -> 250ms (>= remaining 50ms, exits without dead sleep).
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+	reg := prometheus.NewRegistry()
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
 			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
@@ -190,6 +197,7 @@ func TestRetry_GivenIdempotentRead_WhenBudgetExhausted_WrapsDeadlineExceededAndM
 	client, err := newClientWithClock(ClientConfig{
 		Endpoint:   "http://127.0.0.1:9000",
 		HTTPClient: newInMemoryHTTPClient(handler),
+		Metrics:    rpcMetrics,
 		RetryConfig: &RetryConfig{
 			InitialInterval: 100 * time.Millisecond,
 			Multiplier:      2.0,
@@ -211,8 +219,13 @@ func TestRetry_GivenIdempotentRead_WhenBudgetExhausted_WrapsDeadlineExceededAndM
 	require.Equal(t, []time.Duration{
 		100 * time.Millisecond,
 		200 * time.Millisecond,
-		50 * time.Millisecond,
 	}, clk.Sleeps())
+
+	mfs, gatherErr := reg.Gather()
+	require.NoError(t, gatherErr)
+	proc := storagev1connect.StorageServiceReadProcedure
+	require.InDelta(t, 2.0, counterValueForProcedure(mfs, "bowl_client_rpc_retries_total", proc), 1e-9)
+	require.InDelta(t, 1.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
 }
 
 func TestRetry_GivenBusinessErrorInfo_WhenUnavailableCodeSet_NeverRetries(t *testing.T) {
@@ -295,6 +308,33 @@ func TestRetry_GivenTerminalConnectCode_WhenIdempotentRead_NeverRetries(t *testi
 
 	// Then
 	require.Error(t, err)
+	require.Equal(t, syscall.EACCES, MapError(err))
+	require.Equal(t, 1, handler.calls)
+	require.Empty(t, clk.Sleeps())
+}
+
+func TestRetry_GivenUnauthenticatedCode_WhenIdempotentRead_NeverRetriesAndMapsEACCES(t *testing.T) {
+	// Given
+	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+	handler := &scriptedReadHandler{
+		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("missing token"))
+			},
+		},
+	}
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(handler),
+	}, clk)
+	require.NoError(t, err)
+
+	// When
+	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
+
+	// Then
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 	require.Equal(t, syscall.EACCES, MapError(err))
 	require.Equal(t, 1, handler.calls)
 	require.Empty(t, clk.Sleeps())
@@ -444,6 +484,8 @@ func TestRetry_GivenSyscallConnectError_ShouldRetryEvenForNonIdempotentProcedure
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeResourceExhausted, nil)))
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeAborted, nil)))
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeUnimplemented, nil)))
+	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeUnauthenticated, io.ErrUnexpectedEOF)))
+	require.True(t, isNeverRetryCode(connect.CodeUnauthenticated))
 }
 
 type scriptedDiffMergeHandler struct {
@@ -455,6 +497,7 @@ type scriptedDiffMergeHandler struct {
 	commitErrs  []error
 	mergeCalls  int
 	mergeErrs   []error
+	mergeStep   func(context.Context, *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error)
 }
 
 func (h *scriptedDiffMergeHandler) DiffDisk(_ context.Context, _ *connect.Request[storagev1.DiffDiskRequest]) (*connect.Response[storagev1.DiffDiskResponse], error) {
@@ -475,9 +518,12 @@ func (h *scriptedDiffMergeHandler) ReadCommitNode(_ context.Context, _ *connect.
 	return connect.NewResponse(&storagev1.ReadCommitNodeResponse{Data: []byte("commit-data"), Eof: true}), nil
 }
 
-func (h *scriptedDiffMergeHandler) MergeDisk(_ context.Context, _ *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
+func (h *scriptedDiffMergeHandler) MergeDisk(ctx context.Context, req *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
 	idx := h.mergeCalls
 	h.mergeCalls++
+	if h.mergeStep != nil {
+		return h.mergeStep(ctx, req)
+	}
 	if idx < len(h.mergeErrs) && h.mergeErrs[idx] != nil {
 		return nil, h.mergeErrs[idx]
 	}
@@ -578,4 +624,538 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 	require.Equal(t, "01950000-0000-7000-8000-000000000088", mergeResp.Msg.GetMergeCommitId())
 	require.Equal(t, 2, dialAttempts)
 	require.Equal(t, []time.Duration{40 * time.Millisecond}, clk.Sleeps())
+}
+
+func TestRetry_GivenCallerDeadlineLongerThanMaxElapsedTime_WhenFirstAttemptTakes35s_SucceedsWithoutRetryOrExhaustedMetrics(t *testing.T) {
+	// Given: caller sets a 60s deadline (> 30s default MaxElapsedTime) and MergeDisk takes 35s.
+	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	clk := newAutoAdvanceClock(start)
+	reg := prometheus.NewRegistry()
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	handler := &scriptedDiffMergeHandler{
+		mergeStep: func(ctx context.Context, _ *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
+			clk.Advance(35 * time.Second)
+			if err := ctx.Err(); err != nil {
+				return nil, connect.NewError(connect.CodeDeadlineExceeded, err)
+			}
+			return connect.NewResponse(&storagev1.MergeDiskResponse{
+				MergeCommitId: "01950000-0000-7000-8000-000000000088",
+			}), nil
+		},
+	}
+
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(handler),
+		Logger:     logger,
+		Metrics:    rpcMetrics,
+		RetryConfig: &RetryConfig{
+			MaxElapsedTime: 30 * time.Second,
+		},
+	}, clk)
+	require.NoError(t, err)
+
+	callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
+	defer cancel()
+
+	// When
+	resp, err := client.MergeDisk(callerCtx, connect.NewRequest(&storagev1.MergeDiskRequest{}))
+
+	// Then
+	require.NoError(t, err, "scene=caller_60s_deadline_35s_merge want=nil got=%v", err)
+	require.Equal(t, "01950000-0000-7000-8000-000000000088", resp.Msg.GetMergeCommitId())
+	require.Equal(t, 1, handler.mergeCalls)
+	require.Empty(t, clk.Sleeps())
+
+	mfs, gatherErr := reg.Gather()
+	require.NoError(t, gatherErr)
+	proc := storagev1connect.StorageServiceMergeDiskProcedure
+	require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retries_total", proc), 1e-9)
+	require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
+	require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "ok"))
+	require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
+}
+
+func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_ReturnsTimeoutWithoutRetryExhaustedMetrics(t *testing.T) {
+	t.Run("default MaxElapsedTime slow first attempt", func(t *testing.T) {
+		// Given: no caller deadline, 30s MaxElapsedTime, first attempt times out with CodeDeadlineExceeded.
+		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+		clk := newAutoAdvanceClock(start)
+		reg := prometheus.NewRegistry()
+		rpcMetrics := NewMetrics()
+		require.NoError(t, reg.Register(rpcMetrics))
+
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+		handler := &scriptedReadHandler{
+			steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+				func(ctx context.Context, _ *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+					clk.Advance(31 * time.Second)
+					return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+				},
+			},
+		}
+
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+			Logger:     logger,
+			Metrics:    rpcMetrics,
+			RetryConfig: &RetryConfig{
+				MaxElapsedTime: 30 * time.Second,
+			},
+		}, clk)
+		require.NoError(t, err)
+
+		// When
+		_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+
+		// Then
+		require.Error(t, err)
+		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+		require.Equal(t, syscall.EIO, MapError(err))
+		require.Equal(t, 1, handler.calls)
+		require.Empty(t, clk.Sleeps())
+
+		mfs, gatherErr := reg.Gather()
+		require.NoError(t, gatherErr)
+		proc := storagev1connect.StorageServiceReadProcedure
+		require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9,
+			"scene=slow_first_attempt_default_deadline want=0_retry_exhausted")
+		require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "deadline_exceeded"))
+		require.Equal(t, uint64(0), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "unknown"))
+		require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
+	})
+
+	t.Run("caller 60s deadline slow first MergeDisk attempt", func(t *testing.T) {
+		// Given: caller 60s deadline, MergeDisk exceeds 60s with zero retryable failures.
+		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+		clk := newAutoAdvanceClock(start)
+		reg := prometheus.NewRegistry()
+		rpcMetrics := NewMetrics()
+		require.NoError(t, reg.Register(rpcMetrics))
+
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+		handler := &scriptedDiffMergeHandler{
+			mergeStep: func(ctx context.Context, _ *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
+				clk.Advance(61 * time.Second)
+				return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+			},
+		}
+
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+			Logger:     logger,
+			Metrics:    rpcMetrics,
+			RetryConfig: &RetryConfig{
+				MaxElapsedTime: 30 * time.Second,
+			},
+		}, clk)
+		require.NoError(t, err)
+
+		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
+		defer cancel()
+
+		// When
+		_, err = client.MergeDisk(callerCtx, connect.NewRequest(&storagev1.MergeDiskRequest{}))
+
+		// Then
+		require.Error(t, err)
+		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+		require.Equal(t, syscall.EIO, MapError(err))
+		require.Equal(t, 1, handler.mergeCalls)
+
+		mfs, gatherErr := reg.Gather()
+		require.NoError(t, gatherErr)
+		proc := storagev1connect.StorageServiceMergeDiskProcedure
+		require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
+		require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "deadline_exceeded"))
+		require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
+	})
+
+	t.Run("already expired caller deadline before first attempt", func(t *testing.T) {
+		// Given: caller context deadline already expired before next runs.
+		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+		clk := newAutoAdvanceClock(start)
+		reg := prometheus.NewRegistry()
+		rpcMetrics := NewMetrics()
+		require.NoError(t, reg.Register(rpcMetrics))
+
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+		handler := &scriptedReadHandler{}
+
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+			Logger:     logger,
+			Metrics:    rpcMetrics,
+		}, clk)
+		require.NoError(t, err)
+
+		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(-1*time.Second))
+		defer cancel()
+
+		// When
+		_, err = client.Read(callerCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+
+		// Then
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Equal(t, syscall.EIO, MapError(err))
+		require.Equal(t, 0, handler.calls)
+
+		mfs, gatherErr := reg.Gather()
+		require.NoError(t, gatherErr)
+		proc := storagev1connect.StorageServiceReadProcedure
+		require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
+		require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "deadline_exceeded"))
+		require.Equal(t, uint64(0), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "unknown"))
+		require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
+	})
+}
+
+func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringNextAttempt_ExhaustsBudgetWithDeadlineExceededCode(t *testing.T) {
+	// Given: FUSE-like 30s parent ctx deadline, attempt 1 returns retryable CodeUnavailable,
+	// and attempt 2 hits the 30s parent deadline mid-flight.
+	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	clk := newAutoAdvanceClock(start)
+	reg := prometheus.NewRegistry()
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	handler := &scriptedReadHandler{
+		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("backend-down"))
+			},
+			func(ctx context.Context, _ *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+				clk.Advance(30 * time.Second)
+				return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+			},
+		},
+	}
+
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(handler),
+		Logger:     logger,
+		Metrics:    rpcMetrics,
+		RetryConfig: &RetryConfig{
+			InitialInterval: 100 * time.Millisecond,
+			MaxElapsedTime:  30 * time.Second,
+			RandFloat64:     func() float64 { return 1.0 },
+		},
+	}, clk)
+	require.NoError(t, err)
+
+	parentCtx, cancel := clk.WithDeadline(context.Background(), start.Add(30*time.Second))
+	defer cancel()
+
+	// When
+	_, err = client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+
+	// Then
+	require.Error(t, err)
+	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	require.Equal(t, syscall.EIO, MapError(err))
+	require.Contains(t, err.Error(), "backend-down")
+	require.Equal(t, 2, handler.calls)
+
+	mfs, gatherErr := reg.Gather()
+	require.NoError(t, gatherErr)
+	proc := storagev1connect.StorageServiceReadProcedure
+	require.InDelta(t, 1.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9,
+		"scene=parent_deadline_during_next want=1_retry_exhausted")
+	require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "deadline_exceeded"))
+	require.Equal(t, uint64(0), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "unknown"))
+	require.Contains(t, logBuf.String(), `"msg":"rpc_retry_exhausted_eio"`)
+	require.Contains(t, logBuf.String(), "backend-down")
+}
+
+func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringBackoffSleep_ExhaustsBudgetWithDeadlineExceededCode(t *testing.T) {
+	// Given: parent deadline context with 200ms remaining; attempt 1 fails with CodeUnavailable,
+	// backoff timer arms for 100ms, and parent deadline expires before the backoff timer fires.
+	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	clk := newManualClock(start)
+	reg := prometheus.NewRegistry()
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	handler := &scriptedReadHandler{
+		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("backoff-root-cause"))
+			},
+		},
+	}
+
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(handler),
+		Logger:     logger,
+		Metrics:    rpcMetrics,
+		RetryConfig: &RetryConfig{
+			InitialInterval: 100 * time.Millisecond,
+			MaxElapsedTime:  30 * time.Second,
+			RandFloat64:     func() float64 { return 1.0 },
+		},
+	}, clk)
+	require.NoError(t, err)
+
+	baseCtx, cancelCause := context.WithCancelCause(context.Background())
+	defer cancelCause(nil)
+	parentCtx := &fakeDeadlineContext{
+		Context:  baseCtx,
+		deadline: start.Add(200 * time.Millisecond),
+	}
+
+	errCh := make(chan error, 1)
+
+	// When
+	go func() {
+		_, callErr := client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+		errCh <- callErr
+	}()
+
+	require.Equal(t, 100*time.Millisecond, <-clk.TimerArmed())
+	cancelCause(context.DeadlineExceeded)
+	gotErr := <-errCh
+
+	// Then
+	require.Error(t, gotErr)
+	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(gotErr))
+	require.Equal(t, syscall.EIO, MapError(gotErr))
+	require.Contains(t, gotErr.Error(), "backoff-root-cause")
+	require.Equal(t, 1, handler.calls)
+
+	mfs, gatherErr := reg.Gather()
+	require.NoError(t, gatherErr)
+	proc := storagev1connect.StorageServiceReadProcedure
+	require.InDelta(t, 1.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9,
+		"scene=parent_deadline_during_backoff want=1_retry_exhausted")
+	require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "deadline_exceeded"))
+	require.Equal(t, uint64(0), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "unknown"))
+	require.Contains(t, logBuf.String(), `"msg":"rpc_retry_exhausted_eio"`)
+	require.Contains(t, logBuf.String(), "backoff-root-cause")
+}
+
+func TestRetry_GivenKernelInterruptedCancelAfterRetryableFailure_DoesNotFireRetryExhausted(t *testing.T) {
+	// Given: parent context has a 30s deadline and is canceled with ErrKernelInterrupted during backoff sleep.
+	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	clk := newManualClock(start)
+	reg := prometheus.NewRegistry()
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	handler := &scriptedReadHandler{
+		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+				return nil, connect.NewError(connect.CodeUnavailable, errors.New("transient"))
+			},
+		},
+	}
+
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(handler),
+		Logger:     logger,
+		Metrics:    rpcMetrics,
+		RetryConfig: &RetryConfig{
+			InitialInterval: 100 * time.Millisecond,
+			MaxElapsedTime:  30 * time.Second,
+			RandFloat64:     func() float64 { return 1.0 },
+		},
+	}, clk)
+	require.NoError(t, err)
+
+	deadlineCtx, cancelDeadline := clk.WithDeadline(context.Background(), start.Add(30*time.Second))
+	defer cancelDeadline()
+	parentCtx, cancelCause := context.WithCancelCause(deadlineCtx)
+	defer cancelCause(nil)
+
+	errCh := make(chan error, 1)
+
+	// When
+	go func() {
+		_, callErr := client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+		errCh <- callErr
+	}()
+
+	require.Equal(t, 100*time.Millisecond, <-clk.TimerArmed())
+	cancelCause(ErrKernelInterrupted)
+	gotErr := <-errCh
+
+	// Then
+	require.ErrorIs(t, gotErr, context.Canceled)
+	require.Equal(t, syscall.EINTR, MapError(gotErr))
+
+	mfs, gatherErr := reg.Gather()
+	require.NoError(t, gatherErr)
+	proc := storagev1connect.StorageServiceReadProcedure
+	require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
+	require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "canceled"))
+	require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
+}
+
+func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_ExitsImmediatelyWithoutDeadSleepOrRetryMetric(t *testing.T) {
+	t.Run("sleepDuration equals remaining", func(t *testing.T) {
+		// Given: MaxElapsedTime 100ms and first backoff sleepDuration 100ms (sleepDuration == remaining).
+		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+		clk := newAutoAdvanceClock(start)
+		reg := prometheus.NewRegistry()
+		rpcMetrics := NewMetrics()
+		require.NoError(t, reg.Register(rpcMetrics))
+
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+		handler := &scriptedReadHandler{
+			steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+				func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+					return nil, connect.NewError(connect.CodeUnavailable, errors.New("unavailable-at-boundary"))
+				},
+			},
+		}
+
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+			Logger:     logger,
+			Metrics:    rpcMetrics,
+			RetryConfig: &RetryConfig{
+				InitialInterval: 100 * time.Millisecond,
+				MaxElapsedTime:  100 * time.Millisecond,
+				RandFloat64:     func() float64 { return 1.0 },
+			},
+		}, clk)
+		require.NoError(t, err)
+
+		// When
+		_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+
+		// Then
+		require.Error(t, err)
+		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+		require.Equal(t, syscall.EIO, MapError(err))
+		require.Equal(t, 1, handler.calls)
+		require.Empty(t, clk.Sleeps(), "must not arm dead sleep when sleepDuration == remaining")
+
+		mfs, gatherErr := reg.Gather()
+		require.NoError(t, gatherErr)
+		proc := storagev1connect.StorageServiceReadProcedure
+		require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retries_total", proc), 1e-9)
+		require.InDelta(t, 1.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
+		require.NotContains(t, logBuf.String(), "rpc_retry_triggered")
+		require.Contains(t, logBuf.String(), `"msg":"rpc_retry_exhausted_eio"`)
+	})
+
+	t.Run("caller 60s deadline with 50ms remaining after 59.95s attempt", func(t *testing.T) {
+		// Given: caller deadline 60s (> 30s MaxElapsedTime); attempt 1 fails with CodeUnavailable after 59.95s,
+		// leaving 50ms remaining (< 100ms backoff).
+		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+		clk := newAutoAdvanceClock(start)
+		reg := prometheus.NewRegistry()
+		rpcMetrics := NewMetrics()
+		require.NoError(t, reg.Register(rpcMetrics))
+
+		handler := &scriptedReadHandler{
+			steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+				func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+					clk.Advance(59950 * time.Millisecond)
+					return nil, connect.NewError(connect.CodeUnavailable, errors.New("late-unavailable"))
+				},
+			},
+		}
+
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+			Metrics:    rpcMetrics,
+			RetryConfig: &RetryConfig{
+				InitialInterval: 100 * time.Millisecond,
+				MaxElapsedTime:  30 * time.Second,
+				RandFloat64:     func() float64 { return 1.0 },
+			},
+		}, clk)
+		require.NoError(t, err)
+
+		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
+		defer cancel()
+
+		// When
+		_, err = client.Read(callerCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+
+		// Then
+		require.Error(t, err)
+		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+		require.Equal(t, 1, handler.calls)
+		require.Empty(t, clk.Sleeps())
+
+		mfs, gatherErr := reg.Gather()
+		require.NoError(t, gatherErr)
+		proc := storagev1connect.StorageServiceReadProcedure
+		require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retries_total", proc), 1e-9)
+		require.InDelta(t, 1.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
+	})
+
+	t.Run("caller 60s deadline continues retrying past 30s MaxElapsedTime when budget remains", func(t *testing.T) {
+		// Given: caller deadline 60s (> 30s MaxElapsedTime); attempt 1 fails at 35s with CodeUnavailable,
+		// remaining 25s > 100ms backoff, attempt 2 succeeds.
+		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+		clk := newAutoAdvanceClock(start)
+		handler := &scriptedReadHandler{
+			steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+				func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+					clk.Advance(35 * time.Second)
+					return nil, connect.NewError(connect.CodeUnavailable, errors.New("transient-at-35s"))
+				},
+				func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+					return connect.NewResponse(&storagev1.ReadResponse{Data: []byte("ok")}), nil
+				},
+			},
+		}
+
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+			RetryConfig: &RetryConfig{
+				InitialInterval: 100 * time.Millisecond,
+				MaxElapsedTime:  30 * time.Second,
+				RandFloat64:     func() float64 { return 1.0 },
+			},
+		}, clk)
+		require.NoError(t, err)
+
+		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
+		defer cancel()
+
+		// When
+		resp, err := client.Read(callerCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
+
+		// Then
+		require.NoError(t, err)
+		payload := TakeReadPayload(resp.Msg)
+		require.Equal(t, []byte("ok"), payload.Data)
+		payload.Release()
+		require.Equal(t, 2, handler.calls)
+		require.Equal(t, []time.Duration{100 * time.Millisecond}, clk.Sleeps())
+	})
 }

@@ -93,7 +93,7 @@ func TestMapError_GivenConnectCodesWithoutErrorInfo_MapsDeterministically(t *tes
 	requireCodeMapping(t, connect.CodeFailedPrecondition, syscall.EBUSY)
 	requireCodeMapping(t, connect.CodeOutOfRange, syscall.EIO)
 	requireCodeMapping(t, connect.CodeDataLoss, syscall.EIO)
-	requireCodeMapping(t, connect.CodeUnauthenticated, syscall.EIO)
+	requireCodeMapping(t, connect.CodeUnauthenticated, syscall.EACCES)
 }
 
 func TestMapError_GivenNilAndTransportErrors_MapsExpectedErrno(t *testing.T) {
@@ -128,11 +128,6 @@ func TestContextWithCancelChan_GivenPreClosedAndNilAndManualCancel_PropagatesExp
 	cancelNil()
 	<-nilChanCtx.Done()
 	require.ErrorIs(t, nilChanCtx.Err(), context.Canceled)
-
-	// MapErrorWithCancel 优先检查已关闭内核 cancel 通道
-	require.Equal(t, syscall.EINTR, MapErrorWithCancel(connect.NewError(connect.CodeInternal, errors.New("boom")), closedCancel))
-	require.Equal(t, syscall.ENOENT, MapErrorWithCancel(connect.NewError(connect.CodeNotFound, nil), openCancel))
-	require.Equal(t, syscall.EACCES, MapErrorWithCancel(connect.NewError(connect.CodePermissionDenied, nil), nil))
 }
 
 func TestContextWithCancelChan_GivenGracePeriod_CompletedWithinGraceIgnoresInterruptExpiredTriggersEINTR(t *testing.T) {

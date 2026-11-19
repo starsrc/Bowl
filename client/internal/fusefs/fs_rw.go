@@ -96,7 +96,7 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 	if fs.IsFenced() {
 		n, err := readDirectChunks(ctx, input.Offset, dest, fetchChunk)
 		if err != nil {
-			return nil, fs.ToStatus(err, cancel)
+			return nil, fs.ToStatus(err)
 		}
 		return fuse.ReadResultData(dest[:n]), fuse.OK
 	}
@@ -107,7 +107,7 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 			if errno, ok := errors.AsType[syscall.Errno](stageErr); ok {
 				return nil, fuse.Status(errno)
 			}
-			return nil, fs.ToStatus(stageErr, cancel)
+			return nil, fs.ToStatus(stageErr)
 		}
 		if handled {
 			return fuse.ReadResultData(dest[:n]), fuse.OK
@@ -116,7 +116,7 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 
 	n, err := fs.readAhead.Read(ctx, input.Fh, ino, input.Offset, dest, fetchChunk)
 	if err != nil {
-		return nil, fs.ToStatus(err, cancel)
+		return nil, fs.ToStatus(err)
 	}
 	return fuse.ReadResultData(dest[:n]), fuse.OK
 }
@@ -264,7 +264,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		}))
 		if err != nil {
 			fs.cache.invalidateInode(input.NodeId)
-			return 0, fs.ToStatus(err, nil)
+			return 0, fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
 		fs.markDirty(ino)
@@ -307,7 +307,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			if totalWritten > 0 {
 				return totalWritten, fuse.OK
 			}
-			return 0, fs.ToStatus(err, nil)
+			return 0, fs.ToStatus(err)
 		}
 
 		fs.recordInodeSpecial(input.NodeId, resp.Msg.GetInode())

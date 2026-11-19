@@ -174,7 +174,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 				DiskId: fs.cfg.DiskID,
 			}))
 			if err != nil {
-				return fs.ToStatus(err, cancel)
+				return fs.ToStatus(err)
 			}
 			protoFlags = resp.Msg.GetInode().GetAttr().GetFlags()
 		}
@@ -229,7 +229,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			Epoch:  fs.cfg.Epoch,
 		}))
 		if err != nil {
-			return fs.ToStatus(err, cancel)
+			return fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
 		fs.stage.ResetInodeStream(opCtx, ino)

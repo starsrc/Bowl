@@ -81,7 +81,7 @@ func (fs *RawFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name strin
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	inode := resp.Msg.GetInode()
@@ -193,7 +193,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			fs.readAhead.InvalidateInode(ino)
 			if err != nil {
 				fs.cache.invalidateInode(input.NodeId)
-				return fs.ToStatus(err, cancel)
+				return fs.ToStatus(err)
 			}
 			fs.markMetaDirty()
 			fs.markDirty(ino)
@@ -328,7 +328,7 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 	} else {
 		fs.metrics.incDirtyFlushError()
 	}
-	return fs.ToStatus(err, cancel)
+	return fs.ToStatus(err)
 }
 
 // Release 在本地释放句柄与 flock；最后一个孤儿句柄先本地丢弃未上传暂存分片再触发回收。

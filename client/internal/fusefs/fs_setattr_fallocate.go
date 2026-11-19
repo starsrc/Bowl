@@ -148,7 +148,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	resp, err := fs.client.SetAttr(ctx, connect.NewRequest(req))
 	if err != nil {
 		fs.cache.invalidateInode(input.NodeId)
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	if valid&fuse.FATTR_SIZE != 0 && isRegularOrUnknownInode(resp.Msg.GetInode()) {
@@ -231,7 +231,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 	_, err := fs.client.Fallocate(ctx, connect.NewRequest(req))
 	fs.cache.invalidateInode(input.NodeId)
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	fs.markDirty(ino)

@@ -53,7 +53,7 @@ func (fs *RawFS) lookupInodeAfterCache(
 		return cachedInode{}, fuse.Status(syscall.ESTALE)
 	}
 	if err != nil {
-		status := fs.ToStatus(err, cancel)
+		status := fs.ToStatus(err)
 		if !fenced && !fs.IsFenced() && status == fuse.ENOENT {
 			fs.metrics.incNSCacheMiss(nsCacheNegativeEntry)
 			fs.cache.putEntryAtIf(generation, epoch, parent, name, 0, fs.cfg.EntryTimeoutSeconds)
@@ -108,7 +108,7 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 		return cachedInode{}, fuse.Status(syscall.ESTALE)
 	}
 	if err != nil {
-		return cachedInode{}, fs.ToStatus(err, cancel)
+		return cachedInode{}, fs.ToStatus(err)
 	}
 	inode := resp.Msg.GetInode()
 	if inode == nil || inode.GetAttr() == nil {
@@ -298,7 +298,7 @@ func (fs *RawFS) StatFs(cancel <-chan struct{}, in *fuse.InHeader, out *fuse.Sta
 		DiskId: fs.cfg.DiskID,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 
 	msg := resp.Msg

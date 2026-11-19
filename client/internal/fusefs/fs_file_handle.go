@@ -200,7 +200,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	out.Fh = fh
 	if fs.cfg.DirectIO {
 		out.OpenFlags |= fuse.FOPEN_DIRECT_IO
-	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 && !fs.cfg.ReadOnly {
+	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 && !fs.cfg.IsReadOnly() {
 		// 非截断且非 DirectIO 时保留内核 Page Cache，避免每次 open 全量清空。
 		// 只读挂载除外：文件会被写者原地改写，保留的旧页会让新打开的读者读到旧内容。
 		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE

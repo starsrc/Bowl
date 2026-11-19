@@ -325,7 +325,7 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 		fs.stage.bindLogger(fs.logger())
 	}
 	fs.handles = NewHandleTableWithContext(fs.reclaimOrphan)
-	if cfg.ReadOnly {
+	if cfg.IsReadOnly() {
 		go fs.refreshReadOnlyCache(readOnlyCacheRefreshInterval)
 	}
 	fs.bindMetrics(metrics)

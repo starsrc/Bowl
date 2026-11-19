@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,6 @@ import (
 // 每台虚机一块 tap 网卡和一个 /24:宿主机这端是 172.30.<n>.1,虚机是 172.30.<n>.2。
 // 出网走宿主机 NAT;宿主机直接访问虚机 IP 就能连到虚机里监听的端口。
 //
-// ponytail: 所有 sandbox 的 tap 都放行转发,sandbox 之间能互相访问;多租户上线前要按 tap 隔离。
 // ponytail: 编号分配是扫状态目录,两个 create 同时跑可能拿到同一个编号;要并发建时加文件锁。
 const (
 	netPrefix  = "172.30."
@@ -89,24 +89,39 @@ func (m *MicroVM) freeNetIndex() (int, error) {
 	return 0, fmt.Errorf("这台机器上已经有 %d 个 sandbox,没有空闲的网段", maxNetwork)
 }
 
-// ensureHostNAT 打开 IPv4 转发,并加上 sandbox 网段的 NAT 和转发规则。规则已在时不重复加。
-// Docker 会把 FORWARD 链默认策略设成 DROP,所以转发要显式放行。
+// ensureHostNAT 打开 IPv4 转发,加上 sandbox 网段的 NAT,并把 sandbox 能连的地方限制在外网:
+// 宿主机本身、私有网段(其中有 Docker 网络里的存储服务和别的 sandbox)、链路本地地址
+// (云主机的元数据服务在 169.254.169.254,能拿到云账号的凭证)都不让连。宿主机主动连进
+// sandbox 的端口不受影响,回包按已建立的连接放行。规则已在时不重复加。
+//
+// ponytail: 已经存在的规则不会被挪位置。如果宿主机上留着旧版本加的放行规则,排在前面的那条说了算。
 func ensureHostNAT() error {
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o600); err != nil {
 		return err
 	}
-	rules := [][]string{
-		{"-t", "nat", "POSTROUTING", "-s", natSubnet, "!", "-o", tapPrefix + "+", "-j", "MASQUERADE"},
-		{"-t", "filter", "FORWARD", "-i", tapPrefix + "+", "-j", "ACCEPT"},
-		{"-t", "filter", "FORWARD", "-o", tapPrefix + "+", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+	tap := tapPrefix + "+"
+	established := []string{"-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"}
+	// 每条链里按从上到下的顺序列出,插入时倒着插到第一位。
+	rules := []struct {
+		table, chain string
+		spec         []string
+	}{
+		{"nat", "POSTROUTING", []string{"-s", natSubnet, "!", "-o", tap, "-j", "MASQUERADE"}},
+		{"filter", "FORWARD", append([]string{"-o", tap}, established...)},
+		{"filter", "FORWARD", []string{"-i", tap, "-d", "10.0.0.0/8", "-j", "DROP"}},
+		{"filter", "FORWARD", []string{"-i", tap, "-d", "172.16.0.0/12", "-j", "DROP"}},
+		{"filter", "FORWARD", []string{"-i", tap, "-d", "192.168.0.0/16", "-j", "DROP"}},
+		{"filter", "FORWARD", []string{"-i", tap, "-d", "169.254.0.0/16", "-j", "DROP"}},
+		{"filter", "FORWARD", []string{"-i", tap, "-j", "ACCEPT"}},
+		{"filter", "INPUT", append([]string{"-i", tap}, established...)},
+		{"filter", "INPUT", []string{"-i", tap, "-j", "DROP"}},
 	}
-	for _, r := range rules {
-		table, chain, spec := r[:2], r[2], r[3:]
-		check := append(append(append([]string{}, table...), "-C", chain), spec...)
+	for _, r := range slices.Backward(rules) {
+		check := append([]string{"-t", r.table, "-C", r.chain}, r.spec...)
 		if exec.Command("iptables", check...).Run() == nil { //nolint:gosec // 参数是本包写死的
 			continue
 		}
-		insert := append(append(append([]string{}, table...), "-I", chain), spec...)
+		insert := append([]string{"-t", r.table, "-I", r.chain, "1"}, r.spec...)
 		if out, err := exec.Command("iptables", insert...).CombinedOutput(); err != nil { //nolint:gosec // 同上
 			return fmt.Errorf("iptables %s: %w: %s", strings.Join(insert, " "), err, strings.TrimSpace(string(out)))
 		}

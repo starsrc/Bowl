@@ -46,6 +46,7 @@ func newSandboxTemplateCmd() *cobra.Command {
 
 func newTemplateCreateCmd() *cobra.Command {
 	var name, size, binary, endpoint, token string
+	var block bool
 	cmd := &cobra.Command{
 		Use:   "create <image>",
 		Short: "Turn a container image (e.g. ubuntu:24.04) into a template disk; needs a local Docker",
@@ -59,6 +60,9 @@ func newTemplateCreateCmd() *cobra.Command {
 			}
 			if err = validateDiskName(templateDiskPrefix + name); err != nil {
 				return usageExitErr(err, false)
+			}
+			if block && sboxRuntimeName != runtimeMicroVM {
+				return usageExitErr(errors.New("--block templates boot only on the microvm runtime"), false)
 			}
 			if binary == "" {
 				if binary, err = exec.LookPath("bowl"); err != nil {
@@ -81,7 +85,7 @@ func newTemplateCreateCmd() *cobra.Command {
 			}
 			diskID := resp.Msg.GetDisk().GetDiskId()
 			start := time.Now()
-			if err = fillTemplate(ctx, binary, diskID, image, endpoint, token); err != nil {
+			if err = fillTemplate(ctx, binary, diskID, image, endpoint, token, blockSize(block, maxBytes)); err != nil {
 				_ = sboxDeleteDisk(endpoint, token, diskID)
 				return runtimeExitErr(err)
 			}
@@ -93,6 +97,8 @@ func newTemplateCreateCmd() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&name, "name", "", "Template name (default: the image name)")
 	flags.StringVar(&size, "size", "4GiB", "Capacity of the template disk; sandboxes forked from it get the same")
+	flags.BoolVar(&block, "block", false, "Store the system as an ext4 block-device image on the disk (microvm only); "+
+		"faster for many small files, but diff and merge see one image file")
 	flags.StringVar(&binary, "binary", "", "Linux bowl client used to mount the disk on this host (default: bowl in PATH)")
 	addSandboxStorageFlags(cmd, &endpoint, &token)
 	return cmd
@@ -102,7 +108,7 @@ func newTemplateCreateCmd() *cobra.Command {
 // flushes everything to the storage node. The microvm runtime mounts the disk on this host;
 // the Docker-based ones mount it in a throwaway container, so it also works where the host has
 // no FUSE (macOS).
-func fillTemplate(ctx context.Context, binary, diskID, image, endpoint, token string) error {
+func fillTemplate(ctx context.Context, binary, diskID, image, endpoint, token string, blockBytes int64) error {
 	if sboxRuntimeName != runtimeMicroVM {
 		return fillTemplateInContainer(ctx, binary, diskID, image, endpoint, token)
 	}
@@ -127,11 +133,18 @@ func fillTemplate(ctx context.Context, binary, diskID, image, endpoint, token st
 		}
 		return nil
 	}
+	vm := &sandbox.MicroVM{StateDir: sboxStateDir}
+	if blockBytes > 0 {
+		if err = vm.BuildBlockImage(ctx, image, runtime.GOARCH, dir, blockBytes, os.Stderr); err != nil {
+			_ = umount()
+			return err
+		}
+		return umount()
+	}
 	if err = sandbox.ExportImage(ctx, image, runtime.GOARCH, dir, os.Stderr); err != nil {
 		_ = umount()
 		return err
 	}
-	vm := &sandbox.MicroVM{StateDir: sboxStateDir}
 	if err = vm.InstallAgent(dir); err != nil {
 		_ = umount()
 		return fmt.Errorf("install guest agent: %w", err)
@@ -265,4 +278,12 @@ func newTemplateDeleteCmd() *cobra.Command {
 	}
 	addSandboxStorageFlags(cmd, &endpoint, &token)
 	return cmd
+}
+
+// blockSize leaves headroom on the disk for the image file's own metadata.
+func blockSize(block bool, diskBytes uint64) int64 {
+	if !block {
+		return 0
+	}
+	return int64(diskBytes - min(diskBytes/10, 256<<20)) //nolint:gosec // disk sizes fit in int64
 }

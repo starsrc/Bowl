@@ -5,9 +5,10 @@ Run against `bowl-sandbox serve` with a python template:
 
     bowl-sandbox template create python:3.12-slim
     bowl-sandbox serve &
-    python3 examples/try_fixes_in_forks.py
+    python3 examples/try_fixes_in_forks.py      # BOWL_TEMPLATE picks another template
 """
 
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -77,7 +78,7 @@ def try_candidate(base: Sandbox, name: str, code: str):
 
 
 def main() -> None:
-    with Sandbox.create(template="python:3.12-slim", timeout=600) as sbx:
+    with Sandbox.create(template=os.environ.get("BOWL_TEMPLATE", "python:3.12-slim"), timeout=600) as sbx:
         print(f"sandbox {sbx.sandbox_id}")
         sbx.files.write("/work/stats.py", BUGGY)
         sbx.files.write("/work/test_stats.py", TESTS)

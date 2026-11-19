@@ -164,6 +164,12 @@ func newSandboxMergeCmd() *cobra.Command {
 			src, dst := sandbox.StripID(args[0]), sandbox.StripID(args[i+1])
 			rest := append(slices.Clone(args[1:i]), args[i+2:]...)
 			ctx := context.Background()
+			for _, id := range []string{src, dst} {
+				if info, err := sboxRuntime.Info(ctx, id); err == nil && info.Block {
+					return usageExitErr(fmt.Errorf("sandbox %s boots from a block-device image; merge works on files, "+
+						"and its disk holds a single image file", id), false)
+				}
+			}
 
 			// bowl disk merge refuses a mounted target and a read-write mounted source.
 			var stopped []string

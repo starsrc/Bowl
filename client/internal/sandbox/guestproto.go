@@ -30,6 +30,10 @@ type execRequest struct {
 	Argv []string `json:"argv"`
 	Cwd  string   `json:"cwd"`
 	Env  []string `json:"env,omitempty"`
+	// TTY 时代理给命令分配伪终端,stdout 帧里是终端输出,没有 stderr 帧。
+	TTY  bool   `json:"tty,omitempty"`
+	Rows uint16 `json:"rows,omitempty"`
+	Cols uint16 `json:"cols,omitempty"`
 }
 
 func writeFrame(w io.Writer, typ byte, p []byte) error {

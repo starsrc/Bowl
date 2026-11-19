@@ -30,6 +30,10 @@ type Backend interface {
 	Logs(ctx context.Context, id, runID string, follow bool, out, errOut io.Writer) error
 	Wait(ctx context.Context, id, runID string) (int, error)
 
+	// Pause 冻结沙箱,内存和进程保留;Resume 接着运行。
+	Pause(ctx context.Context, id string) error
+	Resume(ctx context.Context, id string) error
+
 	CopyInto(ctx context.Context, id, localPath, sandboxPath string, errOut io.Writer) error
 	CopyFrom(ctx context.Context, id, sandboxPath, localPath string, errOut io.Writer) error
 }

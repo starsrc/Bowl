@@ -38,9 +38,14 @@ func ServeGuest() error {
 			{"proc", "/proc", "proc"},
 			{"sysfs", "/sys", "sysfs"},
 			{"tmpfs", "/dev/shm", "tmpfs"},
+			{"devpts", "/dev/pts", "devpts"},
 		} {
 			_ = os.MkdirAll(m.dst, 0o755)
-			if err := unix.Mount(m.src, m.dst, m.typ, 0, ""); err != nil {
+			data := ""
+			if m.typ == "devpts" {
+				data = "gid=5,mode=620,ptmxmode=666"
+			}
+			if err := unix.Mount(m.src, m.dst, m.typ, 0, data); err != nil {
 				fmt.Fprintf(os.Stderr, "bowl guest: mount %s: %v\n", m.dst, err)
 			}
 		}
@@ -86,21 +91,39 @@ func serveExec(conn *os.File) {
 	cmd := exec.Command(req.Argv[0], req.Argv[1:]...) //nolint:gosec // 执行调用方给的命令就是这个代理的用途
 	cmd.Dir = req.Cwd
 	cmd.Env = append(append([]string{}, guestEnv...), req.Env...)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		finishExec(&mu, conn, stderr, 1, err)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		// 和 shell 一样:找不到命令是 127。
-		finishExec(&mu, conn, stderr, 127, err)
-		return
+	var stdin io.WriteCloser
+	var ptyOut chan struct{}
+	if req.TTY {
+		ptmx, ptyErr := startWithPTY(cmd, req.Rows, req.Cols)
+		if ptyErr != nil {
+			finishExec(&mu, conn, stderr, 127, ptyErr)
+			return
+		}
+		stdin = ptmx
+		// 终端输出读完(命令退出后读 ptmx 返回 EIO)再发退出码,不丢最后一段输出。
+		ptyOut = make(chan struct{})
+		go func() {
+			defer close(ptyOut)
+			_, _ = io.Copy(stdout, ptmx)
+		}()
+	} else {
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+		if stdin, err = cmd.StdinPipe(); err != nil {
+			finishExec(&mu, conn, stderr, 1, err)
+			return
+		}
+		if err = cmd.Start(); err != nil {
+			// 和 shell 一样:找不到命令是 127。
+			finishExec(&mu, conn, stderr, 127, err)
+			return
+		}
 	}
 
 	// 宿主机断开(调用方被取消)时杀掉命令,不留下没人等的进程。
 	go func() {
-		defer stdin.Close()
+		if ptyOut == nil {
+			defer stdin.Close()
+		}
 		for {
 			typ, p, err := readFrame(conn)
 			if err != nil {
@@ -120,7 +143,12 @@ func serveExec(conn *os.File) {
 	}()
 
 	code := 0
-	if err := cmd.Wait(); err != nil {
+	waitErr := cmd.Wait()
+	if ptyOut != nil {
+		<-ptyOut
+		_ = stdin.Close()
+	}
+	if err := waitErr; err != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
 			finishExec(&mu, conn, stderr, 1, err)
@@ -141,4 +169,39 @@ func finishExec(mu *sync.Mutex, conn, stderr io.Writer, code int, err error) {
 	mu.Lock()
 	defer mu.Unlock()
 	_ = writeFrame(conn, frameExit, exitPayload(code))
+}
+
+// startWithPTY 开一对伪终端,把从端给命令当标准流和控制终端,返回主端。
+func startWithPTY(cmd *exec.Cmd, rows, cols uint16) (*os.File, error) {
+	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("打开 /dev/ptmx: %w", err)
+	}
+	fail := func(err error) (*os.File, error) {
+		_ = ptmx.Close()
+		return nil, err
+	}
+	fd := int(ptmx.Fd()) //nolint:gosec // 文件描述符不会溢出 int
+	if err = unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
+		return fail(fmt.Errorf("解锁伪终端: %w", err))
+	}
+	n, err := unix.IoctlGetInt(fd, unix.TIOCGPTN)
+	if err != nil {
+		return fail(fmt.Errorf("取伪终端编号: %w", err))
+	}
+	pts, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		return fail(fmt.Errorf("打开伪终端从端: %w", err))
+	}
+	defer pts.Close()
+	if rows > 0 && cols > 0 {
+		_ = unix.IoctlSetWinsize(int(pts.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: rows, Col: cols}) //nolint:gosec // 同上
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = pts, pts, pts
+	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	if err = cmd.Start(); err != nil {
+		return fail(err)
+	}
+	return ptmx, nil
 }

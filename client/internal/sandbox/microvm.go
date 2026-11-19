@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // MicroVM 用 Cloud Hypervisor 跑沙箱,系统盘就是这个沙箱的 Bowl 盘。
@@ -37,8 +39,10 @@ type MicroVM struct {
 	GuestAgent string
 	// CloudHypervisor 和 Virtiofsd 是两个可执行文件,默认从 PATH 找,virtiofsd 再找 /usr/libexec。
 	CloudHypervisor, Virtiofsd string
-	// CPUs 和 MemoryMiB 是每台虚机的规格,默认 1 核 1024 MiB。
+	// CPUs 和 MemoryMiB 是 CreateSpec 没指定时每台虚机的规格,默认 1 核 1024 MiB。
 	CPUs, MemoryMiB int
+	// DNS 是写进虚机 /etc/resolv.conf 的域名服务器,默认 1.1.1.1。
+	DNS string
 }
 
 const (
@@ -60,6 +64,10 @@ type vmState struct {
 	Created      string `json:"created"`
 	VMPid        int    `json:"vm_pid"`
 	FSPid        int    `json:"fs_pid"`
+	CPUs         int    `json:"cpus"`
+	MemoryMiB    int    `json:"memory_mib"`
+	NetIndex     int    `json:"net_index"`
+	Paused       bool   `json:"paused"`
 }
 
 func (m *MicroVM) stateDir() string {
@@ -91,6 +99,7 @@ func (m *MicroVM) Create(ctx context.Context, spec *CreateSpec) error {
 	st := vmState{
 		ID: id, Template: spec.Image, Endpoint: spec.HostEndpoint, ClientBinary: spec.ClientBinary,
 		Created: time.Now().UTC().Format(time.RFC3339),
+		CPUs:    cmp.Or(spec.CPUs, m.CPUs, 1), MemoryMiB: cmp.Or(spec.MemoryMiB, m.MemoryMiB, 1024),
 	}
 	if err := m.start(ctx, &st, spec.Token); err != nil {
 		_ = m.Remove(context.WithoutCancel(ctx), id)
@@ -111,6 +120,10 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 	if err := installFile(m.agentPath(), filepath.Join(root, guestAgentPath)); err != nil {
 		return fmt.Errorf("放入执行代理: %w", err)
 	}
+	netArgs, ipArg, err := m.setupNetwork(st, root)
+	if err != nil {
+		return err
+	}
 
 	fsSock := filepath.Join(dir, "fs.sock")
 	fs, err := startDetached(filepath.Join(dir, "virtiofsd.log"), m.virtiofsd(),
@@ -125,11 +138,13 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 
 	vm, err := startDetached(filepath.Join(dir, "vm.log"), m.cloudHypervisor(),
 		"--kernel", m.kernel(),
-		"--cmdline", "console=ttyS0 root=rootfs rootfstype=virtiofs rw init="+guestAgentPath+" quiet",
+		"--cmdline", "console=ttyS0 root=rootfs rootfstype=virtiofs rw init="+guestAgentPath+" quiet "+ipArg,
 		"--fs", "tag=rootfs,socket="+fsSock,
-		"--memory", "size="+strconv.Itoa(defaultInt(m.MemoryMiB, 1024))+"M,shared=on",
-		"--cpus", "boot="+strconv.Itoa(defaultInt(m.CPUs, 1)),
+		"--memory", "size="+strconv.Itoa(st.MemoryMiB)+"M,shared=on",
+		"--cpus", "boot="+strconv.Itoa(st.CPUs),
 		"--vsock", "cid=3,socket="+filepath.Join(dir, "vsock.sock"),
+		"--api-socket", filepath.Join(dir, "api.sock"),
+		"--net", netArgs,
 		"--serial", "file="+filepath.Join(dir, "console.log"),
 		"--console", "off",
 	)
@@ -154,7 +169,8 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 // attachSystemDisk 把沙箱的盘接成虚机的系统盘:现在是宿主机挂载、再由 virtiofsd 传进去。
 // M8 换成块设备时只改这里和 detachSystemDisk。
 func (m *MicroVM) attachSystemDisk(ctx context.Context, st *vmState, token, root string) error {
-	cmd := exec.CommandContext(ctx, st.ClientBinary, "mount", st.ID, root, //nolint:gosec // 路径来自调用方配置
+	// --allow-other:virtiofsd 以虚机里进程的身份访问挂载点,不加的话虚机里非 root 用户全被 FUSE 拒掉。
+	cmd := exec.CommandContext(ctx, st.ClientBinary, "mount", st.ID, root, "--allow-other", //nolint:gosec // 路径来自调用方配置
 		"--endpoint", st.Endpoint, "--log-file", filepath.Join(m.dir(st.ID), "mount.log"))
 	if token != "" {
 		cmd.Env = append(os.Environ(), "BOWL_TOKEN="+token)
@@ -248,7 +264,7 @@ func (m *MicroVM) Info(_ context.Context, id string) (Info, error) {
 	return Info{
 		ID: id, Status: vmStatus(&st), Image: st.Template, Created: st.Created,
 		Container: "pid " + strconv.Itoa(st.VMPid), Endpoint: st.Endpoint, MountPath: "/",
-		Mounts: []Mount{{DiskID: id, Path: "/"}},
+		Address: guestIP(st.NetIndex), Mounts: []Mount{{DiskID: id, Path: "/"}},
 	}, nil
 }
 
@@ -256,8 +272,9 @@ func (m *MicroVM) Info(_ context.Context, id string) (Info, error) {
 func (m *MicroVM) DefaultMount(context.Context, string) (string, error) { return microVMWorkdir, nil }
 
 // Exec 经 vsock 让虚机里的代理执行命令,返回命令的退出码。
+// opts.TTY 时虚机里分配伪终端;in 是本机终端时把它切到原始模式,结束后恢复。
 //
-// ponytail: opts.TTY 被忽略,命令总是用管道执行;交互式终端在 M2 做。
+// ponytail: 只在开始时传一次窗口大小,中途改窗口大小虚机里看不到。
 func (m *MicroVM) Exec(ctx context.Context, id, cwd string, argv []string, opts ExecOptions, in io.Reader, out, errOut io.Writer) (int, error) {
 	if len(argv) == 0 {
 		return 2, errors.New("缺少要执行的命令")
@@ -271,7 +288,17 @@ func (m *MicroVM) Exec(ctx context.Context, id, cwd string, argv []string, opts 
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 
-	req, err := json.Marshal(execRequest{Argv: argv, Cwd: cwd, Env: opts.Env})
+	reqBody := execRequest{Argv: argv, Cwd: cwd, Env: opts.Env, TTY: opts.TTY}
+	if f, ok := in.(*os.File); ok && opts.TTY && term.IsTerminal(int(f.Fd())) { //nolint:gosec // fd 不会溢出 int
+		fd := int(f.Fd()) //nolint:gosec // 同上
+		if cols, rows, sizeErr := term.GetSize(fd); sizeErr == nil {
+			reqBody.Rows, reqBody.Cols = uint16(rows), uint16(cols) //nolint:gosec // 终端尺寸在 uint16 范围内
+		}
+		if old, rawErr := term.MakeRaw(fd); rawErr == nil {
+			defer func() { _ = term.Restore(fd, old) }()
+		}
+	}
+	req, err := json.Marshal(reqBody)
 	if err != nil {
 		return 1, err
 	}
@@ -520,10 +547,14 @@ func (m *MicroVM) virtiofsd() string {
 //
 // ponytail: 只看 pid 是否存在,pid 被别的进程复用时会误报 running;要准就比对 /proc/<pid>/cmdline。
 func vmStatus(st *vmState) string {
-	if processAlive(st.VMPid) {
+	switch {
+	case !processAlive(st.VMPid):
+		return "stopped"
+	case st.Paused:
+		return "paused"
+	default:
 		return "running"
 	}
-	return "stopped"
 }
 
 // ponytail: startDetached 不回收子进程,同一个进程里起过的虚机退出后是僵尸,Kill(pid, 0) 仍成功,
@@ -621,11 +652,4 @@ func tailFile(p string, n int) string {
 	}
 	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
 	return strings.Join(lines[max(0, len(lines)-n):], "\n")
-}
-
-func defaultInt(v, def int) int {
-	if v > 0 {
-		return v
-	}
-	return def
 }

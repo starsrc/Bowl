@@ -73,7 +73,9 @@ type Info struct {
 	ID, Status, Image, Created, Container string
 	// Endpoint 是沙箱的盘所在的存储节点；MountPath 是默认挂载点；Network 是加入的 docker 网络（默认网络为空）。
 	Endpoint, MountPath, Network string
-	Mounts                       []Mount
+	// Address 是从宿主机访问沙箱里端口用的 IP;拿不到时为空。
+	Address string
+	Mounts  []Mount
 }
 
 // CreateSpec 描述起一个沙箱容器所需的全部参数。
@@ -96,6 +98,8 @@ type CreateSpec struct {
 	ClientBinary string
 	// Arch 是容器的 CPU 架构（arm64 / amd64），必须与 ClientBinary 一致；为空取本机架构。
 	Arch string
+	// CPUs 和 MemoryMiB 是规格上限,0 表示用后端的默认值。
+	CPUs, MemoryMiB int
 	// SandboxEndpoint 是沙箱内访问 StorageService 用的地址。为空时由 HostEndpoint 推出
 	// （回环地址改写成 host.docker.internal）。算力和存储在同一内网时填内网地址。
 	SandboxEndpoint string
@@ -172,6 +176,12 @@ func (rt *Runtime) Create(ctx context.Context, in *CreateSpec) error {
 	}
 	if spec.Name != "" {
 		args = append(args, "--hostname", spec.Name)
+	}
+	if spec.CPUs > 0 {
+		args = append(args, "--cpus", strconv.Itoa(spec.CPUs))
+	}
+	if spec.MemoryMiB > 0 {
+		args = append(args, "--memory", strconv.Itoa(spec.MemoryMiB)+"m")
 	}
 	args = append(args, spec.Image, "sleep", "infinity")
 
@@ -585,6 +595,16 @@ func (rt *Runtime) Arch(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("连不上 Docker%s: %w", describeHost(rt.Host), err)
 	}
 	return normalizeArch(out), nil
+}
+
+// Pause 冻结容器里的所有进程,内存保留。
+func (rt *Runtime) Pause(ctx context.Context, id string) error {
+	return rt.run(ctx, io.Discard, io.Discard, "pause", ContainerName(id))
+}
+
+// Resume 让 Pause 冻结的进程继续运行。
+func (rt *Runtime) Resume(ctx context.Context, id string) error {
+	return rt.run(ctx, io.Discard, io.Discard, "unpause", ContainerName(id))
 }
 
 // Exists 判断这个 Docker 上有没有该沙箱的容器。

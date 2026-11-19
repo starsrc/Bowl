@@ -1399,6 +1399,14 @@ func (c *ReadAheadCoordinator) RemoveHandle(fh uint64) {
 	}
 }
 
+// InvalidateAll cancels all in-flight prefetches and clears all cached read-ahead windows and handle state.
+func (c *ReadAheadCoordinator) InvalidateAll() {
+	if c == nil {
+		return
+	}
+	c.Clear()
+}
+
 // Clear 取消所有句柄的在途预取并清空全部预读状态。
 func (c *ReadAheadCoordinator) Clear() {
 	c.mu.Lock()

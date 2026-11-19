@@ -136,8 +136,10 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	if mode == syscall.O_ACCMODE {
 		return fuse.EINVAL
 	}
-	if fs.cfg.IsReadOnly() && (mode != syscall.O_RDONLY || input.Flags&syscall.O_TRUNC != 0) {
-		return fuse.Status(syscall.EROFS)
+	if mode != syscall.O_RDONLY || input.Flags&syscall.O_TRUNC != 0 {
+		if st := fs.CheckWritable(); st != fuse.OK {
+			return st
+		}
 	}
 	if _, st := fs.ToServerIno(input.NodeId); st != fuse.OK {
 		return st
@@ -149,13 +151,16 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	if status != fuse.OK {
 		return status
 	}
-	if fs.cache.version() != epoch {
+	fenced := fs.IsFenced()
+	if !fenced && fs.cache.version() != epoch {
 		return fuse.Status(syscall.ESTALE)
 	}
 	if cached.inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR {
 		return fuse.Status(syscall.EISDIR)
 	}
-	fs.recordInodeSpecial(input.NodeId, cached.inode)
+	if !fenced {
+		fs.recordInodeSpecial(input.NodeId, cached.inode)
+	}
 	if input.Flags&syscall.O_TRUNC != 0 {
 		set := &fuse.SetAttrIn{}
 		set.NodeId = input.NodeId
@@ -197,7 +202,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			fs.cache.refreshInodeAt(epoch, input.NodeId, resp.Msg.GetInode(), resp.Msg.GetAttrTimeoutSeconds())
 			fs.caps.markAbsent(input.NodeId)
 		}
-	} else if !fs.tmpMgr.IsUnpromoted(input.NodeId) {
+	} else if !fenced && !fs.tmpMgr.IsUnpromoted(input.NodeId) {
 		if ino, st := fs.ToServerIno(input.NodeId); st == fuse.OK {
 			fs.stage.ObserveServerInode(ino, cached.inode, false)
 		}
@@ -206,7 +211,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	if status != fuse.OK {
 		return status
 	}
-	if fs.cfg.IsReadOnly() {
+	if fs.cfg.IsReadOnly() && !fenced {
 		if serverIno, st := fs.ToServerIno(input.NodeId); st == fuse.OK {
 			fs.readAhead.TrackOpenInode(serverIno, cached.inode)
 		}
@@ -214,7 +219,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	out.Fh = fh
 	if fs.cfg.DirectIO {
 		out.OpenFlags |= fuse.FOPEN_DIRECT_IO
-	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 {
+	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 && !fenced {
 		// 非截断且非 DirectIO 时保留内核 Page Cache，避免每次 open 全量清空。
 		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE
 	}
@@ -300,6 +305,9 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 	if err := fs.stage.FlushInodeForHandle(opCtx, input.Fh, ino); err != nil {
 		fs.cache.invalidateInode(input.NodeId)
 		return fs.stageErrToStatus(err)
+	}
+	if st := fs.FenceStatus(); st != fuse.OK {
+		return st
 	}
 	seq := fs.metaDirtySeq.Load()
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)

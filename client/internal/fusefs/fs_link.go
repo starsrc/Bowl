@@ -95,8 +95,10 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 	}
 
 	now := time.Now()
-	if cachedTarget, ok := fs.cache.readlink(header.NodeId, now); ok {
-		return cachedTarget, fuse.OK
+	if !fs.IsFenced() {
+		if cachedTarget, ok := fs.cache.readlink(header.NodeId, now); ok {
+			return cachedTarget, fuse.OK
+		}
 	}
 
 	epoch, generation := fs.cache.snapshot()
@@ -107,7 +109,8 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 		Ino:    ino,
 		DiskId: fs.cfg.DiskID,
 	}))
-	if fs.cache.version() != epoch {
+	fenced := fs.IsFenced()
+	if !fenced && fs.cache.version() != epoch {
 		return nil, fuse.Status(syscall.ESTALE)
 	}
 	if err != nil {
@@ -115,8 +118,10 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 	}
 
 	target = resp.Msg.GetTarget()
-	ttl := fs.cache.inodeAttrTimeout(header.NodeId, fs.cfg.AttrTimeoutSeconds)
-	fs.cache.putReadlinkAtIf(generation, epoch, header.NodeId, target, ttl, time.Now())
+	if !fenced {
+		ttl := fs.cache.inodeAttrTimeout(header.NodeId, fs.cfg.AttrTimeoutSeconds)
+		fs.cache.putReadlinkAtIf(generation, epoch, header.NodeId, target, ttl, time.Now())
+	}
 	return target, fuse.OK
 }
 

@@ -47,8 +47,10 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 	if _, status := fs.checkedHandle(input.NodeId, input.Fh, true); status != fuse.OK {
 		return cachedDir{}, status
 	}
-	if cached, ok := fs.cache.dir(input.NodeId); ok {
-		return cached, fuse.OK
+	if !fs.IsFenced() {
+		if cached, ok := fs.cache.dir(input.NodeId); ok {
+			return cached, fuse.OK
+		}
 	}
 	ino, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
@@ -72,7 +74,8 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			Limit:  512,
 			DiskId: fs.cfg.DiskID,
 		}))
-		if fs.cache.version() != epoch {
+		fenced := fs.IsFenced()
+		if !fenced && fs.cache.version() != epoch {
 			return cachedDir{}, fuse.Status(syscall.ESTALE)
 		}
 		if err != nil {
@@ -85,7 +88,7 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			}
 			offset = e.GetNextOffset()
 			serverEntryIno := e.GetIno()
-			if e.GetInode() != nil {
+			if !fenced && e.GetInode() != nil {
 				if fs.cfg.IsReadOnly() {
 					fs.readAhead.ObserveInode(serverEntryIno, e.GetInode())
 				}
@@ -93,7 +96,7 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			}
 			e.Ino = fs.ToKernelIno(serverEntryIno)
 		}
-		if fs.cfg.IsReadOnly() {
+		if !fenced && fs.cfg.IsReadOnly() {
 			fs.cache.refreshExistingInodesFromReadDirAt(epoch, page)
 		}
 		entries = append(entries, page...)
@@ -101,7 +104,9 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			return cachedDir{entries: entries}, fuse.OK
 		}
 		if len(page) < 512 {
-			fs.cache.putDirAtIf(generation, epoch, input.NodeId, entries)
+			if !fenced {
+				fs.cache.putDirAtIf(generation, epoch, input.NodeId, entries)
+			}
 			return cachedDir{entries: entries}, fuse.OK
 		}
 	}
@@ -170,7 +175,10 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 		} else {
 			entryTTL := entry.GetEntryTimeoutSeconds()
 			attrTTL := entry.GetAttrTimeoutSeconds()
-			if res.fromCache && fs.cfg.IsReadOnly() {
+			if fs.IsFenced() {
+				entryTTL = 0
+				attrTTL = 0
+			} else if res.fromCache && fs.cfg.IsReadOnly() {
 				entryTTL = min(entryTTL, remainingSeconds(res.entryExpiryAt(i), res.nowNano))
 				attrTTL = min(attrTTL, remainingSeconds(res.attrExpiryAt(i), res.nowNano))
 			}
@@ -206,6 +214,9 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 	ino, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {
 		return status
+	}
+	if st := fs.FenceStatus(); st != fuse.OK {
+		return st
 	}
 	seq := fs.metaDirtySeq.Load()
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)

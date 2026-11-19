@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -66,4 +67,48 @@ func (m *MicroVM) GuestAgentFile() string {
 		return m.agentPath()
 	}
 	return ""
+}
+
+// BuildBlockImage 在 diskRoot(一块挂在本机的模板盘)里做一个 sizeBytes 大小的 ext4 镜像
+// BlockImage,把容器镜像解进去,再放好执行代理和 resolv.conf。需要 Linux 的 mkfs.ext4 和 loop 设备。
+func (m *MicroVM) BuildBlockImage(ctx context.Context, image, arch, diskRoot string, sizeBytes int64, errOut io.Writer) error {
+	img := blockDevicePath(diskRoot)
+	f, err := os.Create(img)
+	if err != nil {
+		return err
+	}
+	// 稀疏文件:没写过的块不占 Bowl 盘的空间。
+	if err = f.Truncate(sizeBytes); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return closeErr
+	}
+	if out, mkfsErr := exec.CommandContext(ctx, "mkfs.ext4", "-q", "-F", "-E", "nodiscard", img).CombinedOutput(); mkfsErr != nil { //nolint:gosec // 路径由本包构造
+		return fmt.Errorf("mkfs.ext4: %w: %s", mkfsErr, strings.TrimSpace(string(out)))
+	}
+	dir, err := os.MkdirTemp("", "bowl-block-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(dir)
+	if out, mountErr := exec.CommandContext(ctx, "mount", "-o", "loop", img, dir).CombinedOutput(); mountErr != nil { //nolint:gosec // 同上
+		return fmt.Errorf("挂载镜像: %w: %s", mountErr, strings.TrimSpace(string(out)))
+	}
+	fill := func() error {
+		if err := ExportImage(ctx, image, arch, dir, errOut); err != nil {
+			return err
+		}
+		if err := installFile(m.agentPath(), filepath.Join(dir, guestAgentPath)); err != nil {
+			return fmt.Errorf("放入执行代理: %w", err)
+		}
+		return writeResolvConf(dir, m.DNS)
+	}
+	fillErr := fill()
+	// umount 会把镜像里的脏页写回到 Bowl 盘上的文件。
+	if out, umountErr := exec.Command("umount", dir).CombinedOutput(); umountErr != nil { //nolint:gosec // 同上
+		return errors.Join(fillErr, fmt.Errorf("卸载镜像: %w: %s", umountErr, strings.TrimSpace(string(out))))
+	}
+	return fillErr
 }

@@ -45,12 +45,10 @@ func (m *MicroVM) setupNetwork(st *vmState, root string) (netArg, ipArg string, 
 	if err = ensureHostNAT(); err != nil {
 		return "", "", fmt.Errorf("配置宿主机转发: %w", err)
 	}
-	dns := cmp.Or(m.DNS, "1.1.1.1")
-	resolv := filepath.Join(root, "etc", "resolv.conf")
-	// Ubuntu 镜像里这常是指向 systemd-resolved 的符号链接,虚机里没有它,换成普通文件。
-	_ = os.Remove(resolv)
-	if err = os.WriteFile(resolv, []byte("nameserver "+dns+"\n"), 0o644); err != nil { //nolint:gosec // resolv.conf 本来就是全员可读
-		return "", "", fmt.Errorf("写 resolv.conf: %w", err)
+	if root != "" {
+		if dnsErr := writeResolvConf(root, m.DNS); dnsErr != nil {
+			return "", "", dnsErr
+		}
 	}
 	n := strconv.Itoa(st.NetIndex)
 	hostIP := netPrefix + n + ".1"
@@ -59,6 +57,17 @@ func (m *MicroVM) setupNetwork(st *vmState, root string) (netArg, ipArg string, 
 	// ip=<client>::<gateway>:<netmask>::<device>:<autoconf>,内核在挂根之前就配好网卡。
 	ipArg = "ip=" + guestIP(st.NetIndex) + "::" + hostIP + ":255.255.255.0::eth0:off"
 	return netArg, ipArg, nil
+}
+
+// writeResolvConf 把虚机的 /etc/resolv.conf 写成一个指向 dns(默认 1.1.1.1)的普通文件。
+// Ubuntu 镜像里这常是指向 systemd-resolved 的符号链接,虚机里没有它。
+func writeResolvConf(root, dns string) error {
+	resolv := filepath.Join(root, "etc", "resolv.conf")
+	_ = os.Remove(resolv)
+	if err := os.WriteFile(resolv, []byte("nameserver "+cmp.Or(dns, "1.1.1.1")+"\n"), 0o644); err != nil { //nolint:gosec // resolv.conf 本来就是全员可读
+		return fmt.Errorf("写 resolv.conf: %w", err)
+	}
+	return nil
 }
 
 func (m *MicroVM) freeNetIndex() (int, error) {
@@ -127,6 +136,9 @@ func (m *MicroVM) setPaused(ctx context.Context, id string, paused bool) error {
 	action := "vm.resume"
 	if paused {
 		action = "vm.pause"
+		if st.Block {
+			m.guestSync(ctx, id) // 暂停后紧接着的 fork 要看到虚机页缓存里的写入
+		}
 	}
 	if err := m.vmAPI(ctx, id, action); err != nil {
 		return err

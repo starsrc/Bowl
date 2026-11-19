@@ -30,12 +30,23 @@ func sboxFork(src, name, binary, token string, log io.Writer) (newID string, for
 	}
 	start := time.Now()
 	wasRunning := info.Status == "running"
+	// The docker runtime's bowl client runs inside the container, so it cannot flush once the
+	// container is paused: flush first. Writes made between this flush and the pause can miss
+	// the fork. The other runtimes flush after the pause and get an exact point in time.
+	flushFirst := sboxRuntimeName == runtimeDocker
+	if flushFirst {
+		if err = sboxRuntime.Sync(ctx, src); err != nil {
+			return "", 0, runtimeExitErr(fmt.Errorf("sync source: %w", err))
+		}
+	}
 	if wasRunning {
 		if err = sboxRuntime.Pause(ctx, src); err != nil {
 			return "", 0, runtimeExitErr(fmt.Errorf("pause source: %w", err))
 		}
 	}
-	err = sboxRuntime.Sync(ctx, src)
+	if !flushFirst {
+		err = sboxRuntime.Sync(ctx, src)
+	}
 	var resp *connect.Response[storagev1.ForkDiskResponse]
 	if err == nil {
 		resp, err = client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{SourceDiskId: src, Name: name}))

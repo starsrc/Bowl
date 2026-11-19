@@ -35,9 +35,14 @@ var (
 )
 
 const (
-	runtimeMicroVM = "microvm"
-	runtimeDocker  = "docker"
+	runtimeMicroVM   = "microvm"
+	runtimeContainer = "container"
+	runtimeDocker    = "docker"
 )
+
+// sboxBootsFromDisk reports whether the selected runtime's root filesystem is the disk, so a
+// sandbox needs a template to start from.
+func sboxBootsFromDisk() bool { return sboxRuntimeName != runtimeDocker }
 
 // pickSandboxRuntime resolves --runtime: an explicit value wins, then $BOWL_SANDBOX_RUNTIME,
 // then microvm on Linux hosts with /dev/kvm and docker everywhere else.
@@ -52,10 +57,12 @@ func pickSandboxRuntime(flagValue, stateDir string) (sandbox.Backend, string, er
 	switch name {
 	case runtimeMicroVM:
 		return &sandbox.MicroVM{StateDir: stateDir}, name, nil
+	case runtimeContainer:
+		return &sandbox.Runtime{RootFS: true}, name, nil
 	case runtimeDocker:
 		return &sandbox.Runtime{}, name, nil
 	default:
-		return nil, "", fmt.Errorf("unknown --runtime %q: use %s or %s", name, runtimeMicroVM, runtimeDocker)
+		return nil, "", fmt.Errorf("unknown --runtime %q: use %s, %s or %s", name, runtimeMicroVM, runtimeContainer, runtimeDocker)
 	}
 }
 
@@ -66,13 +73,18 @@ func newSandboxCmd() *cobra.Command {
 		Short: "Run sandboxes whose disk is a Bowl virtual disk",
 		Long: "Run sandboxes whose disk is a Bowl virtual disk. The sandbox ID is the disk ID.\n\n" +
 			"Runtimes:\n" +
-			"  microvm  Cloud Hypervisor VM; the disk is the VM's root filesystem. Linux with /dev/kvm, run as root.\n" +
-			"           create needs --from <template disk> holding an installed system.\n" +
-			"  docker   container with the disk mounted at --mount. --endpoint must be reachable from the\n" +
-			"           container; loopback addresses are rewritten to host.docker.internal.",
+			"  microvm    Cloud Hypervisor VM; the disk is the VM's root filesystem. Linux with /dev/kvm, run as root.\n" +
+			"  container  Docker container; the disk is the root filesystem, commands run chrooted into it.\n" +
+			"             Uses the same templates as microvm. Works wherever Docker does, including macOS.\n" +
+			"  docker     Docker container with the disk mounted at --mount as a data disk.\n" +
+			"microvm and container need --template or --from. For the Docker-based runtimes --endpoint must be\n" +
+			"reachable from the container; loopback addresses are rewritten to host.docker.internal.",
 		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Parse --runtime and --state-dir before the subcommand name too, including for diff and
+		// merge, which hand their own flags to bowl disk unparsed.
+		TraverseChildren: true,
 		PersistentPreRunE: func(*cobra.Command, []string) error {
 			backend, name, err := pickSandboxRuntime(runtimeFlag, stateDir)
 			if err != nil {
@@ -115,7 +127,7 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxServeCmd(),
 		newSandboxMoveCmd(),
 	)
-	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists)")
+	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm, container or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists, else docker)")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")
 	return cmd
 }
@@ -135,10 +147,10 @@ func sboxCreate(o *sboxCreateOpts) (string, error) {
 	if o.From != "" && o.Template != "" {
 		return "", usageExitErr(errors.New("--from and --template cannot be used together"), false)
 	}
-	if sboxRuntimeName == runtimeMicroVM && o.From == "" && o.Template == "" {
-		return "", usageExitErr(errors.New("the microvm runtime boots from the disk, so --template <name> or --from <disk> is required"), false)
+	if sboxBootsFromDisk() && o.From == "" && o.Template == "" {
+		return "", usageExitErr(fmt.Errorf("the %s runtime boots from the disk, so --template <name> or --from <disk> is required", sboxRuntimeName), false)
 	}
-	if sboxRuntimeName == runtimeDocker {
+	if sboxRuntimeName != runtimeMicroVM {
 		if _, err := exec.LookPath("docker"); err != nil {
 			return "", runtimeExitErr(errors.New("docker command not found; the docker runtime needs a local Docker"))
 		}
@@ -170,9 +182,11 @@ func sboxCreate(o *sboxCreateOpts) (string, error) {
 		Network: o.Network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(o.Token),
 		CPUs: o.CPUs, MemoryMiB: o.MemoryMiB,
 	}
+	if sboxBootsFromDisk() {
+		spec.Image = cmp.Or(o.Template, from)
+	}
 	if sboxRuntimeName == runtimeMicroVM {
 		// The disk is mounted on this host, so the host's own Linux bowl client does it.
-		spec.Image = cmp.Or(o.Template, from)
 		err = sboxStartMicroVM(spec, o.Binary)
 	} else {
 		err = sboxStart(spec, o.Binary, o.Rebuild, cmp.Or[io.Writer](o.Log, io.Discard))
@@ -213,9 +227,9 @@ func newSandboxCreateCmd() *cobra.Command {
 				return nil
 			}
 			fmt.Fprintf(out, "Sandbox %s is ready (%s)\n", diskID, sboxRuntimeName)
-			if sboxRuntimeName == runtimeMicroVM {
+			if sboxBootsFromDisk() {
 				fmt.Fprintf(out, "  Template:  %s\n", cmp.Or(o.Template, o.From))
-				fmt.Fprintf(out, "  Disk:      %s (the VM's root filesystem)\n", diskID)
+				fmt.Fprintf(out, "  Disk:      %s (the root filesystem)\n", diskID)
 			} else {
 				fmt.Fprintf(out, "  Image:     %s\n", o.Image)
 				fmt.Fprintf(out, "  Disk:      %s (mounted at %s)\n", diskID, o.MountPath)
@@ -262,12 +276,16 @@ func sboxStartMicroVM(spec *sandbox.CreateSpec, binary string) error {
 
 // sboxStart prepares a Linux client matching the local Docker architecture and starts the sandbox.
 func sboxStart(spec *sandbox.CreateSpec, binary string, rebuild bool, stderr io.Writer) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
 	docker, ok := sboxRuntime.(*sandbox.Runtime)
 	if !ok {
 		return errors.New("internal error: docker start called for another runtime")
 	}
+	return sboxStartOn(docker, spec, binary, rebuild, stderr)
+}
+
+func sboxStartOn(docker *sandbox.Runtime, spec *sandbox.CreateSpec, binary string, rebuild bool, stderr io.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
 	arch, err := docker.Arch(ctx)
 	if err != nil {
 		return err
@@ -277,7 +295,7 @@ func sboxStart(spec *sandbox.CreateSpec, binary string, rebuild bool, stderr io.
 		return err
 	}
 	spec.Arch, spec.ClientBinary = arch, bin
-	return sboxRuntime.Create(ctx, spec)
+	return docker.Create(ctx, spec)
 }
 
 // sboxCreateDisk forks or creates the sandbox disk and returns its ID.

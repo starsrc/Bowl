@@ -195,22 +195,61 @@ func (m *MicroVM) detachSystemDisk(ctx context.Context, st *vmState, root string
 // Remove 停虚机和 virtiofsd、卸载系统盘(写入刷回存储节点)、删状态目录。盘本身不删。
 func (m *MicroVM) Remove(ctx context.Context, id string) error {
 	id = StripID(id)
-	dir := m.dir(id)
+	if err := m.Stop(ctx, id); err != nil {
+		return err
+	}
+	root := filepath.Join(m.dir(id), "root")
+	// 盘还挂着时删目录会删掉盘里的内容,所以再确认一次。
+	if isMountpoint(root) {
+		return fmt.Errorf("系统盘仍挂在 %s,没有删除状态目录", root)
+	}
+	return os.RemoveAll(m.dir(id))
+}
+
+// Stop 停虚机和 virtiofsd、卸载系统盘,状态目录留着,之后可以 Start。
+func (m *MicroVM) Stop(ctx context.Context, id string) error {
+	id = StripID(id)
 	st, err := m.loadState(id)
 	if err != nil {
 		return err
 	}
 	stopProcess(st.VMPid)
 	stopProcess(st.FSPid)
-	root := filepath.Join(dir, "root")
-	if err := m.detachSystemDisk(ctx, &st, root); err != nil {
+	if err := m.detachSystemDisk(ctx, &st, filepath.Join(m.dir(id), "root")); err != nil {
 		return err
 	}
-	// 盘还挂着时删目录会删掉盘里的内容,所以再确认一次。
-	if isMountpoint(root) {
-		return fmt.Errorf("系统盘仍挂在 %s,没有删除状态目录", root)
+	st.VMPid, st.FSPid, st.Paused = 0, 0, false
+	return m.saveState(&st)
+}
+
+// Start 用原来的盘、规格和网段重新启动一台停掉的虚机,冷启动。令牌从 $BOWL_TOKEN 取。
+func (m *MicroVM) Start(ctx context.Context, id string) error {
+	id = StripID(id)
+	st, err := m.loadState(id)
+	if err != nil {
+		return err
 	}
-	return os.RemoveAll(dir)
+	if processAlive(st.VMPid) {
+		return fmt.Errorf("沙箱 %s 已经在运行", id)
+	}
+	for _, sock := range []string{"fs.sock", "vsock.sock", "api.sock"} {
+		_ = os.Remove(filepath.Join(m.dir(id), sock))
+	}
+	if err := m.start(ctx, &st, ""); err != nil {
+		_ = m.Stop(context.WithoutCancel(ctx), id)
+		return err
+	}
+	return nil
+}
+
+// Sync 对系统盘的挂载点做一次 statfs:Bowl 客户端在 statfs 时会等暂存的写入全部上传完。
+// 虚机里 virtio-fs 不做写回缓存,写下去的数据已经到了宿主机的挂载点。
+func (m *MicroVM) Sync(_ context.Context, id string) error {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(filepath.Join(m.dir(StripID(id)), "root"), &st); err != nil {
+		return fmt.Errorf("刷写系统盘: %w", err)
+	}
+	return nil
 }
 
 // Exists 判断这个沙箱的状态目录在不在。

@@ -30,6 +30,12 @@ type Backend interface {
 	Logs(ctx context.Context, id, runID string, follow bool, out, errOut io.Writer) error
 	Wait(ctx context.Context, id, runID string) (int, error)
 
+	// Stop 停掉沙箱并卸载它的盘(写入刷回存储节点),记录保留;Start 用同一块盘重新启动,进程不保留。
+	Stop(ctx context.Context, id string) error
+	Start(ctx context.Context, id string) error
+	// Sync 让沙箱里已经写下的数据全部到达存储节点,fork 和 diff 之前调用。
+	Sync(ctx context.Context, id string) error
+
 	// Pause 冻结沙箱,内存和进程保留;Resume 接着运行。
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error

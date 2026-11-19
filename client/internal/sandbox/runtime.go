@@ -597,6 +597,40 @@ func (rt *Runtime) Arch(ctx context.Context) (string, error) {
 	return normalizeArch(out), nil
 }
 
+// Stop 卸载容器里的盘再停容器,容器保留。
+func (rt *Runtime) Stop(ctx context.Context, id string) error {
+	if mounts, err := rt.Mounts(ctx, id); err == nil {
+		for _, m := range mounts {
+			if err := rt.Unmount(ctx, id, m.Path); err != nil {
+				return err
+			}
+		}
+	}
+	return rt.run(ctx, io.Discard, io.Discard, "stop", ContainerName(id))
+}
+
+// Start 启动停掉的容器并重新挂上它的盘。
+func (rt *Runtime) Start(ctx context.Context, id string) error {
+	container := ContainerName(id)
+	mountAt, err := rt.DefaultMount(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := rt.run(ctx, io.Discard, io.Discard, "start", container); err != nil {
+		return fmt.Errorf("启动沙箱容器失败: %w", err)
+	}
+	return rt.mountInside(ctx, container, StripID(id), mountAt)
+}
+
+// Sync 在容器里对盘的挂载点做 statfs,Bowl 客户端会等暂存的写入全部上传完。
+func (rt *Runtime) Sync(ctx context.Context, id string) error {
+	mountAt, err := rt.DefaultMount(ctx, id)
+	if err != nil {
+		return err
+	}
+	return rt.run(ctx, io.Discard, io.Discard, "exec", ContainerName(id), "stat", "-f", mountAt)
+}
+
 // Pause 冻结容器里的所有进程,内存保留。
 func (rt *Runtime) Pause(ctx context.Context, id string) error {
 	return rt.run(ctx, io.Discard, io.Discard, "pause", ContainerName(id))

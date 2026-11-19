@@ -245,6 +245,9 @@ func (l *logRateLimiter) allow(now time.Time) bool {
 }
 
 func isStaleEpochError(err error) bool {
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		return false
+	}
 	info := serverx.ExtractErrorInfo(err)
 	return info != nil && info.GetDomain() == storageErrorDomain && info.GetReason() == staleEpochReason
 }
@@ -287,7 +290,7 @@ func extractTraceID(ctx context.Context, req connect.AnyRequest, err error) stri
 
 // newRequestObservabilityInterceptor 构建第 2 层洋葱拦截器（位于 Retry 内层、otelconnect 外层）：
 // 1. 确保 100% 出站请求通过栈缓冲写入 X-Request-Id；
-// 2. 识别服务端旧 Epoch 围栏错误（ErrorInfo{Reason: "EBUSY", Domain: "bowl.storage"}），递增 stale_epoch_total 并限频输出 writer_epoch_fenced；
+// 2. 识别服务端旧 Epoch 围栏错误（CodeFailedPrecondition + ErrorInfo{Reason: "EBUSY", Domain: "bowl.storage"}），递增 stale_epoch_total 并限频输出 writer_epoch_fenced；
 // 3. 单次尝试耗时超过 slowThreshold（默认 1s）时输出 slow_rpc 结构化告警。
 func newRequestObservabilityInterceptor(
 	logger *slog.Logger,

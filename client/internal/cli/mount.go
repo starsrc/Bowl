@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/spf13/cobra"
+	"github.com/starsrc/pkg/serverx"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 	"github.com/starsrc/bowl/client/internal/rpc"
@@ -50,6 +52,7 @@ type mountOptions struct {
 	stageDirRaw      string
 	stageSizeBytes   uint64
 	stageDir         string
+	force            bool
 }
 
 type mountFlagPresence struct {
@@ -63,17 +66,71 @@ type mountFlagPresence struct {
 	stageDir         bool
 }
 
-// Test seams for FUSE serving, HTTP transport, lease renewal timing, and tmpfs detection.
+// Test seams for FUSE serving, HTTP transport, lease renewal timing, clock, and tmpfs detection.
 var (
-	serveFUSE            = defaultServeFUSE
-	mountHTTPClient      *http.Client
-	mountRenewIntervalFn = defaultMountRenewInterval
-	stageDirIsTmpfs      = func(s *fusefs.StageDirSession) bool { return s.IsTmpfs() }
+	serveFUSE                 = defaultServeFUSE
+	mountHTTPClient           *http.Client
+	mountRenewIntervalFn      = defaultMountRenewInterval
+	mountRenewRetryIntervalFn = defaultMountRenewRetryInterval
+	mountNowFn                = time.Now
+	stageDirIsTmpfs           = func(s *fusefs.StageDirSession) bool { return s.IsTmpfs() }
 )
 
 type mountLeaseInfo struct {
 	mountID         string
 	leaseTTLSeconds uint32
+}
+
+type mountLeaseTracker struct {
+	mu             sync.Mutex
+	active         bool
+	leaseExpiresAt time.Time
+	now            func() time.Time
+}
+
+func newMountLeaseTracker(lease mountLeaseInfo, nowFn func() time.Time) *mountLeaseTracker {
+	if nowFn == nil {
+		nowFn = mountNowFn
+	}
+	t := &mountLeaseTracker{
+		active: lease.mountID != "",
+		now:    nowFn,
+	}
+	if t.active {
+		t.leaseExpiresAt = nowFn().Add(time.Duration(lease.leaseTTLSeconds) * time.Second)
+	}
+	return t
+}
+
+func (t *mountLeaseTracker) refresh(ttlSeconds uint32) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	if t.active {
+		t.leaseExpiresAt = t.now().Add(time.Duration(ttlSeconds) * time.Second)
+	}
+	t.mu.Unlock()
+}
+
+func checkMountLeaseReady(rawFS *fusefs.RawFS, tracker *mountLeaseTracker) error {
+	if rawFS != nil && rawFS.IsFenced() {
+		if reason := rawFS.FenceReason(); reason != "" {
+			return fmt.Errorf("mount fenced: %s", reason)
+		}
+		return errors.New("mount fenced")
+	}
+	if tracker != nil {
+		tracker.mu.Lock()
+		active := tracker.active
+		expiresAt := tracker.leaseExpiresAt
+		now := tracker.now()
+		tracker.mu.Unlock()
+		if active && !now.Before(expiresAt) {
+			return fmt.Errorf("mount lease expired at %s", expiresAt.UTC().Format(time.RFC3339))
+		}
+	}
+	return nil
 }
 
 func defaultMountRenewInterval(leaseTTLSeconds uint32) time.Duration {
@@ -84,18 +141,38 @@ func defaultMountRenewInterval(leaseTTLSeconds uint32) time.Duration {
 	return d
 }
 
+func defaultMountRenewRetryInterval(normalInterval time.Duration) time.Duration {
+	if normalInterval > 0 && normalInterval < time.Second {
+		return normalInterval
+	}
+	return time.Second
+}
+
+func isDiskMountedError(err error) bool {
+	connectErr, ok := errors.AsType[*connect.Error](err)
+	if !ok || connectErr.Code() != connect.CodeAborted {
+		return false
+	}
+	info := serverx.ExtractErrorInfo(err)
+	return info != nil && info.GetDomain() == "bowl.storage" && info.GetReason() == "EBUSY"
+}
+
 // mountHandshake sends a single MountDisk RPC and returns the updated fusefs.Config and lease metadata.
-func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceClient, baseCfg *fusefs.Config) (*fusefs.Config, mountLeaseInfo, error) {
+func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceClient, baseCfg *fusefs.Config, force bool) (*fusefs.Config, mountLeaseInfo, error) {
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer rpcCancel()
 
 	resp, err := client.MountDisk(rpcCtx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId:   baseCfg.DiskID,
 		ReadOnly: baseCfg.IsReadOnly(),
+		Force:    force,
 	}))
 	if err != nil {
 		if connectErr, ok := errors.AsType[*connect.Error](err); ok && connectErr.Code() == connect.CodeNotFound {
 			return nil, mountLeaseInfo{}, fmt.Errorf("disk not found: %s", baseCfg.DiskID)
+		}
+		if isDiskMountedError(err) {
+			return nil, mountLeaseInfo{}, fmt.Errorf("disk %s already has an active read-write mount; unmount it first or pass --force to preempt: %w", baseCfg.DiskID, err)
 		}
 		return nil, mountLeaseInfo{}, fmt.Errorf("mount handshake failed: %w", err)
 	}
@@ -123,31 +200,76 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 	return &cfg, lease, nil
 }
 
+func permanentRenewFenceStatus(err error) (fuse.Status, connect.Code, bool) {
+	connectErr, ok := errors.AsType[*connect.Error](err)
+	if !ok {
+		return fuse.OK, 0, false
+	}
+	code := connectErr.Code()
+	switch code {
+	case connect.CodeFailedPrecondition:
+		return fuse.EBUSY, code, true
+	case connect.CodeNotFound:
+		return fuse.ENOENT, code, true
+	case connect.CodeUnauthenticated:
+		return fuse.Status(syscall.EACCES), code, true
+	case connect.CodePermissionDenied:
+		return fuse.EPERM, code, true
+	case connect.CodeInvalidArgument:
+		return fuse.EINVAL, code, true
+	case connect.CodeUnimplemented:
+		return fuse.ENOSYS, code, true
+	default:
+		return fuse.OK, code, false
+	}
+}
+
 // startMountLeaseRenewer runs periodic RenewMount calls in the background and returns a stop function that waits for exit.
 func startMountLeaseRenewer(
 	client storagev1connect.StorageServiceClient,
 	cfg *fusefs.Config,
 	lease mountLeaseInfo,
+	rawFS *fusefs.RawFS,
+	tracker *mountLeaseTracker,
 	logger *slog.Logger,
 ) func() {
 	if lease.mountID == "" {
 		return func() {}
 	}
 	renewCtx, renewCancel := context.WithCancel(context.Background())
+	var fencedCh <-chan struct{}
+	if rawFS != nil {
+		fencedCh = rawFS.FencedCh()
+	}
+	if fencedCh != nil {
+		go func() {
+			select {
+			case <-fencedCh:
+				renewCancel()
+			case <-renewCtx.Done():
+			}
+		}()
+	}
+
 	done := make(chan struct{})
 	currentTTL := lease.leaseTTLSeconds
-	interval := mountRenewIntervalFn(currentTTL)
 
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		if rawFS != nil && rawFS.IsFenced() {
+			return
+		}
+		normalInterval := mountRenewIntervalFn(currentTTL)
+		timer := time.NewTimer(normalInterval)
+		defer timer.Stop()
 
 		for {
 			select {
 			case <-renewCtx.Done():
 				return
-			case <-ticker.C:
+			case <-fencedCh:
+				return
+			case <-timer.C:
 			}
 
 			rpcCtx, rpcCancel := context.WithTimeout(renewCtx, mountRenewRPCTimeout)
@@ -160,37 +282,37 @@ func startMountLeaseRenewer(
 			rpcCancel()
 
 			if err != nil {
-				if renewCtx.Err() != nil {
+				if renewCtx.Err() != nil || (rawFS != nil && rawFS.IsFenced()) {
 					return
 				}
-				if connectErr, ok := errors.AsType[*connect.Error](err); ok {
-					code := connectErr.Code()
-					if code == connect.CodeFailedPrecondition || code == connect.CodeNotFound {
-						logger.Warn("mount_lease_renew_stopped",
-							slog.String("disk_id", cfg.DiskID),
-							slog.String("mount_id", lease.mountID),
-							slog.String("code", code.String()),
-							slog.String("error", err.Error()),
-						)
-						return
-					}
+				if fenceStatus, code, permanent := permanentRenewFenceStatus(err); permanent {
+					logger.Warn("mount_lease_renew_stopped",
+						slog.String("disk_id", cfg.DiskID),
+						slog.String("mount_id", lease.mountID),
+						slog.String("code", code.String()),
+						slog.String("error", err.Error()),
+					)
+					rawFS.Fence(fenceStatus, err.Error())
+					return
 				}
 				logger.Warn("mount_lease_renew_failed",
 					slog.String("disk_id", cfg.DiskID),
 					slog.String("mount_id", lease.mountID),
 					slog.String("error", err.Error()),
 				)
+				timer.Reset(mountRenewRetryIntervalFn(normalInterval))
 				continue
 			}
 
-			if nextTTL := resp.Msg.GetLeaseTtlSeconds(); nextTTL > 0 && nextTTL != currentTTL {
-				currentTTL = nextTTL
-				nextInterval := mountRenewIntervalFn(currentTTL)
-				if nextInterval != interval {
-					interval = nextInterval
-					ticker.Reset(interval)
-				}
+			if rawFS != nil && rawFS.IsFenced() {
+				return
 			}
+			if nextTTL := resp.Msg.GetLeaseTtlSeconds(); nextTTL > 0 {
+				currentTTL = nextTTL
+			}
+			tracker.refresh(currentTTL)
+			normalInterval = mountRenewIntervalFn(currentTTL)
+			timer.Reset(normalInterval)
 		}
 	}()
 
@@ -304,10 +426,11 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		return fmt.Errorf("create RPC client: %w", err)
 	}
 
-	cfg, lease, err := mountHandshake(ctx, client, baseCfg)
+	cfg, lease, err := mountHandshake(ctx, client, baseCfg, opts.force)
 	if err != nil {
 		return err
 	}
+	leaseTracker := newMountLeaseTracker(lease, mountNowFn)
 	cfg.Logger = logger
 	cfg.Metrics = fusefs.NewMetrics()
 	cfg.TracerProvider = obs.TracerProvider()
@@ -325,7 +448,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		return fmt.Errorf("register metrics collector: %w", regErr)
 	}
 
-	admin, err := startAdminServer(opts.adminAddr, obs, rawFS)
+	admin, err := startAdminServer(opts.adminAddr, obs, rawFS, leaseTracker)
 	if err != nil {
 		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
 		return err
@@ -369,10 +492,19 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		}
 	}
 
-	stopRenew := startMountLeaseRenewer(client, cfg, lease, logger)
+	stopRenew := startMountLeaseRenewer(client, cfg, lease, rawFS, leaseTracker, logger)
 	serveErr := serveFUSE(ctx, rawFS, cfg, mountpoint, ready)
 	stopRenew()
-	unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+	if rawFS.IsFenced() {
+		logger.Info("unmount_disk_rpc_skipped_fenced",
+			slog.String("disk_id", cfg.DiskID),
+			slog.String("mount_id", lease.mountID),
+			slog.String("fence_status", rawFS.FenceStatus().String()),
+			slog.String("fence_reason", rawFS.FenceReason()),
+		)
+	} else {
+		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+	}
 	if metaPath != "" {
 		_ = os.Remove(metaPath)
 	}
@@ -477,6 +609,9 @@ func applyStageOptions(o *mountOptions, set mountFlagPresence) error {
 
 	switch o.mode {
 	case fusefs.MountModeRO, fusefs.MountModeSync:
+		if o.mode == fusefs.MountModeRO && o.force {
+			return errors.New("--force cannot be set with --mode=ro")
+		}
 		if set.stageSize {
 			return fmt.Errorf("--stage-size cannot be set when --mode is %s", o.mode)
 		}
@@ -648,6 +783,7 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 	flags.StringVar(&opts.endpoint, "endpoint", "", "StorageService base URL, defaults to $BOWL_STORAGE_ENDPOINT or http://127.0.0.1:9000")
 	flags.StringVar(&opts.token, "token", "", "Access token, defaults to $BOWL_TOKEN")
 	flags.BoolVarP(&foreground, "foreground", "f", false, "Run in foreground, log to stderr, and exit on SIGINT or SIGTERM")
+	flags.BoolVar(&opts.force, "force", false, "Preempt an active read-write mount lease on the disk")
 	flags.StringVar(&opts.logFile, "log-file", "", "Log file path for background daemon mode")
 	flags.BoolVar(&allowOther, "allow-other", false, "Allow other local users to access the mountpoint")
 	flags.StringVar(&opts.mode, "mode", fusefs.MountModeStaged, "Mount mode: staged, sync, or ro; defaults to $BOWL_MOUNT_MODE or staged")

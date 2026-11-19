@@ -78,6 +78,7 @@ type Config struct {
 	StageSize              uint64
 	StageDir               string
 	StageSession           *StageDirSession
+	OnFence                func(status fuse.Status, reason string)
 	Logger                 *slog.Logger
 	Metrics                *Metrics
 	TracerProvider         trace.TracerProvider
@@ -178,6 +179,12 @@ type RawFS struct {
 	specialInodes      map[uint64]bool
 	unmountMu          sync.Mutex
 	unmountState       unmountProgressState
+
+	fencedStatus atomic.Uint32
+	fenceMu      sync.Mutex
+	fenceReason  string
+	fenceCh      chan struct{}
+	onFence      func(status fuse.Status, reason string)
 }
 
 // NewRawFS 创建并初始化 RawFS 实例。
@@ -255,6 +262,8 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 		readAhead:          NewReadAheadCoordinator(),
 		stageSession:       session,
 		ephemeralStageRoot: ephemeralRoot,
+		fenceCh:            make(chan struct{}),
+		onFence:            cfg.OnFence,
 	}
 	fs.cache.configure(fuse.FUSE_ROOT_ID, cfg.EntryTimeoutSeconds, cfg.AttrTimeoutSeconds)
 	if cfg.IsReadOnly() {
@@ -268,6 +277,9 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 		var onStage func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
 		if cfg.AttrTimeoutSeconds > 0 {
 			onStage = func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp) {
+				if fs.IsFenced() {
+					return
+				}
 				fs.cache.stageWriteInodeAt(cacheEpoch, nodeID, endOffset, ts)
 			}
 		}
@@ -288,6 +300,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					Epoch:  fs.cfg.Epoch,
 				}))
 				if err != nil {
+					fs.fenceIfStaleEpoch(err)
 					return 0, nil, err
 				}
 				fs.markMetaDirty()
@@ -312,6 +325,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					Epoch:  fs.cfg.Epoch,
 				}))
 				if err != nil {
+					fs.fenceIfStaleEpoch(err)
 					return nil, err
 				}
 				fs.markMetaDirty()
@@ -327,6 +341,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 						DiskId: fs.cfg.DiskID,
 						Epoch:  fs.cfg.Epoch,
 					})); xErr != nil {
+						fs.fenceIfStaleEpoch(xErr)
 						return nil, xErr
 					}
 					fs.markMetaDirty()
@@ -342,6 +357,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 						Epoch:  fs.cfg.Epoch,
 					}))
 					if fErr != nil {
+						fs.fenceIfStaleEpoch(fErr)
 						return nil, fErr
 					}
 					fs.markMetaDirty()
@@ -354,6 +370,9 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 			StageHooks{
 				OnStage: onStage,
 				OnCommit: func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool) {
+					if fs.IsFenced() {
+						return
+					}
 					fs.markMetaDirty()
 					fs.markDirty(ino)
 					if preserveMeta {
@@ -615,8 +634,12 @@ func (fs *RawFS) ToKernelIno(serverIno uint64) uint64 {
 	return fs.tmpMgr.ToKernelIno(serverIno)
 }
 
-// CheckWritable 检查文件系统当前是否允许写操作。只读挂载时返回 EROFS。
+// CheckWritable checks whether mutations are allowed.
+// A fenced filesystem fails closed with its fence status before checking read-only mode.
 func (fs *RawFS) CheckWritable() fuse.Status {
+	if st := fs.FenceStatus(); st != fuse.OK {
+		return st
+	}
 	if fs.cfg.IsReadOnly() {
 		return fuse.Status(syscall.EROFS)
 	}
@@ -647,6 +670,7 @@ func (fs *RawFS) ToStatus(err error, cancel <-chan struct{}) fuse.Status {
 	if err == nil {
 		return fuse.OK
 	}
+	fs.fenceIfStaleEpoch(err)
 	errno := rpc.MapErrorWithCancel(err, cancel)
 	return fuse.Status(errno)
 }
@@ -723,7 +747,7 @@ func (fs *RawFS) Statx(cancel <-chan struct{}, input *fuse.StatxIn, out *fuse.St
 
 // UnmountProgress returns a monotonic snapshot of OnUnmount cloud sync progress.
 func (fs *RawFS) UnmountProgress() UnmountProgress {
-	if fs == nil {
+	if fs == nil || fs.IsFenced() {
 		return UnmountProgress{}
 	}
 	fs.unmountMu.Lock()
@@ -773,6 +797,13 @@ func (fs *RawFS) OnUnmount() {
 	fs.locks.Close()
 	// 排他锁等待所有在途请求释放读锁，先排空本地暂存上传队列确保 dirtyInodes 完整，再逐一同步落盘，最后关闭 StageSession。
 	fs.lifecycleMu.Lock()
+	if fs.IsFenced() {
+		fs.unmountFencedLocked(opCtx)
+		fs.lifecycleMu.Unlock()
+		fs.readAhead.Clear()
+		return
+	}
+
 	pendingChunks, stagedInodes := fs.stage.unmountSnapshot()
 	stageTotal := uint64(max(int64(0), pendingChunks))
 	dirtyUnionCount := fs.countDirtyAndStagedInodes(stagedInodes)
@@ -797,6 +828,17 @@ func (fs *RawFS) OnUnmount() {
 	fs.unmountMu.Unlock()
 
 	fs.stage.Clear(opCtx)
+	if fs.IsFenced() {
+		fs.stopAndDiscardReleaseQueue()
+		_ = fs.takeDirtyInodes()
+		fs.advanceMetaSyncedSeq(fs.metaDirtySeq.Load())
+		fs.cleanupLocalStateOnUnmountLocked()
+		fs.resetFencedUnmountProgress()
+		fs.lifecycleMu.Unlock()
+		fs.readAhead.Clear()
+		return
+	}
+
 	fs.stopAndDrainReleaseQueue()
 	unmountSeq := fs.metaDirtySeq.Load()
 	dirtyInodes := fs.takeDirtyInodes()
@@ -819,14 +861,51 @@ func (fs *RawFS) OnUnmount() {
 	}
 	fs.unmountMu.Unlock()
 
-	if len(dirtyInodes) > 0 {
-		fs.syncDirtyInodesOnUnmount(opCtx, dirtyInodes, repeatNoop)
-	} else if fs.hasUnsyncedMeta() {
-		fs.syncRootDirOnUnmount(opCtx, repeatNoop)
+	if !fs.IsFenced() {
+		if len(dirtyInodes) > 0 {
+			fs.syncDirtyInodesOnUnmount(opCtx, dirtyInodes, repeatNoop)
+		} else if fs.hasUnsyncedMeta() {
+			fs.syncRootDirOnUnmount(opCtx, repeatNoop)
+		}
 	}
 	if !repeatNoop {
 		fs.advanceMetaSyncedSeq(unmountSeq)
 	}
+	fs.cleanupLocalStateOnUnmountLocked()
+	fs.unmountMu.Lock()
+	if !repeatNoop {
+		fs.unmountState.completed = fs.unmountState.total
+		fs.unmountState.completedOnce = true
+	}
+	fs.unmountState.active = false
+	fs.unmountState.phase = 2
+	fs.unmountMu.Unlock()
+	fs.lifecycleMu.Unlock()
+	fs.readAhead.Clear()
+}
+
+func (fs *RawFS) unmountFencedLocked(opCtx context.Context) {
+	fs.resetFencedUnmountProgress()
+	fs.stage.AbortAll(fs.fenceErrToErrno())
+	fs.stage.Clear(opCtx)
+	fs.stopAndDiscardReleaseQueue()
+	_ = fs.takeDirtyInodes()
+	fs.advanceMetaSyncedSeq(fs.metaDirtySeq.Load())
+	fs.cleanupLocalStateOnUnmountLocked()
+}
+
+func (fs *RawFS) resetFencedUnmountProgress() {
+	fs.unmountMu.Lock()
+	fs.unmountState.active = false
+	fs.unmountState.phase = 2
+	fs.unmountState.stageTotal = 0
+	fs.unmountState.completed = 0
+	fs.unmountState.total = 0
+	fs.unmountState.completedOnce = true
+	fs.unmountMu.Unlock()
+}
+
+func (fs *RawFS) cleanupLocalStateOnUnmountLocked() {
 	fs.handles.clear()
 	fs.cache.clear()
 	fs.caps.reset()
@@ -845,16 +924,6 @@ func (fs *RawFS) OnUnmount() {
 	if fs.ephemeralStageRoot != "" {
 		_ = os.RemoveAll(fs.ephemeralStageRoot)
 	}
-	fs.unmountMu.Lock()
-	if !repeatNoop {
-		fs.unmountState.completed = fs.unmountState.total
-		fs.unmountState.completedOnce = true
-	}
-	fs.unmountState.active = false
-	fs.unmountState.phase = 2
-	fs.unmountMu.Unlock()
-	fs.lifecycleMu.Unlock()
-	fs.readAhead.Clear()
 }
 
 func (fs *RawFS) syncDirtyInodesOnUnmount(opCtx context.Context, dirtyInodes []uint64, repeatNoop bool) {
@@ -884,7 +953,7 @@ func (fs *RawFS) syncDirtyInodesOnUnmount(opCtx context.Context, dirtyInodes []u
 }
 
 func (fs *RawFS) syncDirtyInodeOnUnmount(opCtx context.Context, ino uint64, repeatNoop bool) {
-	if fs.client == nil {
+	if fs.client == nil || fs.IsFenced() {
 		fs.incrementUnmountCompleted(repeatNoop)
 		return
 	}
@@ -926,6 +995,7 @@ func (fs *RawFS) syncRootDirOnUnmount(opCtx context.Context, repeatNoop bool) {
 
 func (fs *RawFS) recordUnmountSyncOutcome(ctx context.Context, ino, seq uint64, err error, repeatNoop bool) {
 	if err != nil && connect.CodeOf(err) != connect.CodeUnimplemented {
+		fs.fenceIfStaleEpoch(err)
 		fs.metrics.incDirtyFlushError()
 		fs.logger().WarnContext(ctx, "unmount_fsync_failed", "ino", ino, "error", err)
 	} else {
@@ -1082,7 +1152,7 @@ func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 		return
 	}
 	fs.clearDirty(serverIno)
-	if fs.client == nil {
+	if fs.client == nil || fs.IsFenced() {
 		return
 	}
 	sc := trace.SpanContextFromContext(ctx)
@@ -1118,6 +1188,9 @@ func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 
 // tryReclaim 返回 true 表示回收完成或错误不可重试。
 func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, fromQueue bool) bool {
+	if fs.IsFenced() {
+		return true
+	}
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -1140,11 +1213,15 @@ func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, from
 		}
 		return true
 	}
+	fs.fenceIfStaleEpoch(err)
 	fs.metrics.incOrphanReclaimError()
 	if fromQueue {
 		fs.metrics.incAsyncReleaseError()
 	}
 	fs.warnOrphanBacklog(ctx, item.ino, item.attempts+1, fs.releaseQueueDepth(), err)
+	if fs.IsFenced() {
+		return true
+	}
 	return !shouldRetryReclaim(err)
 }
 
@@ -1188,6 +1265,18 @@ func (fs *RawFS) drainReleaseQueueOnce(ctx context.Context) {
 				fs.warnOrphanBacklog(logCtx, item.ino, item.attempts, qDepth, nil)
 			}
 		}
+	}
+}
+
+func (fs *RawFS) stopAndDiscardReleaseQueue() {
+	fs.releaseMu.Lock()
+	fs.releaseClosed = true
+	fs.releaseQueue = nil
+	started, done := fs.releaseStarted, fs.releaseLoopDone
+	fs.releaseMu.Unlock()
+	fs.releaseCancel()
+	if started {
+		<-done
 	}
 }
 

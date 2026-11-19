@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -368,4 +369,142 @@ func TestMountLease_DeleteDiskClearsLeasesAndCustomTTLApplies(t *testing.T) {
 		Epoch:    mnt.Epoch,
 	})
 	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestMountDisk_RWAdmissionGate_RejectsDuplicateWithoutForceAndAllowsAfterReleaseOrExpiry(t *testing.T) {
+	// Given: a disk with an active read-only mount lease and virtual clock.
+	ctx := context.Background()
+	clk := newFakeClock(time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC))
+	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "rw-gate-disk", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+
+	roMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), roMnt.Epoch)
+
+	// When: non-force RW mount is requested while an RO mount is active.
+	// Then: active RO mount does not block RW mount, and epoch advances to 1.
+	rw1, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rw1.Epoch)
+
+	actor, err := mgr.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), actor.WriterEpoch())
+
+	// When: a second non-force RW mount arrives while rw1 lease is unexpired.
+	// Then: rejected with ErrDiskMounted (CodeAborted + EBUSY), WriterEpoch stays 1, and rw1 remains valid.
+	_, err = mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	requireDiskMountedStatus(t, err)
+	require.Equal(t, uint64(1), actor.WriterEpoch())
+
+	_, err = mgr.RenewMount(ctx, RenewMountParams{
+		DiskID:   disk.DiskID,
+		MountID:  rw1.MountID,
+		ReadOnly: false,
+		Epoch:    rw1.Epoch,
+	})
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, actor, rw1.Epoch, "owner1.txt", []byte("alive"))
+
+	// When: rw1 unmounts while RO lease is still active.
+	// Then: non-force RW mount succeeds and advances epoch to 2.
+	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: rw1.MountID}))
+	rw2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), rw2.Epoch)
+
+	// When: virtual clock advances past DefaultMountLeaseTTL (30s) so rw2 lease expires.
+	// Then: non-force RW mount succeeds and advances epoch to 3.
+	clk.Advance(31 * time.Second)
+	rw3, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), rw3.Epoch)
+}
+
+func TestMountDisk_ForceRW_PreemptsActiveLeaseAndAdvancesEpoch(t *testing.T) {
+	// Given: a disk with an active unexpired RW mount lease (epoch=1).
+	ctx := context.Background()
+	clk := newFakeClock(time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC))
+	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "force-preempt-disk", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+
+	rw1, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rw1.Epoch)
+
+	// When: a second RW mount arrives with Force: true.
+	rw2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false, Force: true})
+
+	// Then: epoch advances to 2, old lease is preempted (RenewMount fails with ErrStaleEpoch),
+	// and subsequent non-force RW mount is rejected by rw2's active lease.
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), rw2.Epoch)
+	require.NotEqual(t, rw1.MountID, rw2.MountID)
+
+	actor, err := mgr.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), actor.WriterEpoch())
+
+	_, err = mgr.RenewMount(ctx, RenewMountParams{
+		DiskID:   disk.DiskID,
+		MountID:  rw1.MountID,
+		ReadOnly: false,
+		Epoch:    rw1.Epoch,
+	})
+	require.ErrorIs(t, err, ErrStaleEpoch)
+
+	_, err = mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	requireDiskMountedStatus(t, err)
+}
+
+func TestMountDisk_ConcurrentNonForceRW_AdmitsAtMostOneWriter(t *testing.T) {
+	// Given: a freshly created disk with no active mount leases.
+	ctx := context.Background()
+	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "concurrent-rw-disk", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+
+	const workers = 16
+	start := make(chan struct{})
+	results := make([]*MountDiskResult, workers)
+	errs := make([]error, workers)
+
+	// When: 16 goroutines concurrently request non-force RW MountDisk on the same disk.
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Go(func() {
+			<-start
+			results[i], errs[i] = mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	// Then: exactly one caller succeeds with Epoch=1, all others get ErrDiskMounted (CodeAborted + EBUSY),
+	// and authoritative WriterEpoch remains 1.
+	succeeded := 0
+	for i := range workers {
+		if errs[i] == nil {
+			succeeded++
+			require.NotNil(t, results[i])
+			require.Equal(t, uint64(1), results[i].Epoch)
+			requireValidNonNilUUID(t, results[i].MountID)
+			continue
+		}
+		requireDiskMountedStatus(t, errs[i])
+	}
+	require.Equal(t, 1, succeeded, "concurrent non-force RW mounts must admit exactly 1 writer")
+
+	actor, err := mgr.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), actor.WriterEpoch())
 }

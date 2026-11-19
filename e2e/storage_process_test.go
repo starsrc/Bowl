@@ -301,7 +301,7 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	mount2, err := client1.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	mount2, err := client1.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
 

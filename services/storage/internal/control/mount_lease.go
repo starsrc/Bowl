@@ -192,6 +192,22 @@ func (m *manager) clearDiskMounts(diskID string) {
 	m.mountsMu.Unlock()
 }
 
+func (m *manager) checkRWMountGate(diskID string) error {
+	now := m.currentTime()
+
+	m.mountsMu.Lock()
+	defer m.mountsMu.Unlock()
+
+	if leases := m.pruneExpiredDiskLeasesLocked(diskID, now); len(leases) > 0 {
+		for _, lease := range leases {
+			if !lease.readOnly {
+				return fmt.Errorf("%w: disk %s has active read-write mount lease", ErrDiskMounted, diskID)
+			}
+		}
+	}
+	return nil
+}
+
 func (m *manager) checkMergeMountGate(sourceKey, targetKey string) error {
 	now := m.currentTime()
 

@@ -460,3 +460,64 @@ func TestServerErrors_ToConnectError_MapsSentinelsContextAndGRPCStatus(t *testin
 	require.Equal(t, connect.CodeUnknown, connect.CodeOf(unknownErr))
 	require.Nil(t, ExtractErrorInfo(unknownErr))
 }
+
+func TestServerDiskRPC_MountDisk_NonForceRejectsActiveRWAndForcePreempts(t *testing.T) {
+	// Given: a freshly created disk with an active RO mount and RW mount (epoch=1).
+	ctx := context.Background()
+	_, client := newTestServerAndClient(t)
+
+	created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     "mount-force-rpc-disk",
+		MaxBytes: 16 << 20,
+	}))
+	require.NoError(t, err)
+	diskID := created.Msg.GetDisk().GetDiskId()
+
+	roMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId:   diskID,
+		ReadOnly: true,
+	}))
+	require.NoError(t, err)
+	require.Zero(t, roMount.Msg.GetEpoch())
+
+	rw1, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId: diskID,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rw1.Msg.GetEpoch())
+
+	// When: a second non-force RW MountDisk arrives while rw1 is active.
+	_, busyErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId: diskID,
+	}))
+
+	// Then: rejected with CodeAborted + EBUSY and rw1 epoch=1 can still write.
+	requireConnectErrorCodeAndReason(t, busyErr, connect.CodeAborted, "EBUSY")
+	_, err = client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Epoch:     rw1.Msg.GetEpoch(),
+		ParentIno: 1,
+		Name:      []byte("still-owner.txt"),
+		Mode:      store.S_IFREG | 0o644,
+	}))
+	require.NoError(t, err)
+
+	// When: a forced RW MountDisk arrives (Force: true).
+	rw2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId: diskID,
+		Force:  true,
+	}))
+
+	// Then: succeeds with epoch=2 and fences old epoch=1 writer with CodeFailedPrecondition + EBUSY.
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), rw2.Msg.GetEpoch())
+
+	_, fencedErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Epoch:     rw1.Msg.GetEpoch(),
+		ParentIno: 1,
+		Name:      []byte("fenced.txt"),
+		Mode:      store.S_IFREG | 0o644,
+	}))
+	requireConnectErrorCodeAndReason(t, fencedErr, connect.CodeFailedPrecondition, "EBUSY")
+}

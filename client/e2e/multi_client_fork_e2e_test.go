@@ -346,9 +346,9 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	require.NoError(t, err)
 	usedBefore := diskBefore.Msg.GetDisk().GetUsedBytes()
 
-	// When: 客户端 B 零等待可写挂载抢占 Epoch
+	// When: 客户端 B 通过 --force 零等待可写挂载抢占 Epoch
 	takeoverStart := time.Now()
-	mpB, _ := mountWithCleanup(t, endpoint, diskID)
+	mpB, _ := mountWithCleanup(t, endpoint, diskID, "--force")
 	require.Less(t, time.Since(takeoverStart), 3*time.Second, "新可写挂载必须零等待立即接管")
 
 	// Then: 前任孤儿被清扫释放配额，A 的新写入及旧句柄写/截断/同步均被围栏拦截返回 EBUSY

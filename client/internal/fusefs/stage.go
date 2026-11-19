@@ -712,28 +712,34 @@ type StageCoordinator struct {
 	pendingChunks    atomic.Int64
 	inflight         atomic.Int64
 	errSeqGen        atomic.Uint64
+	aborted          atomic.Bool
 
 	seqMu     sync.Mutex
 	handleSeq map[uint64]uint64
 
-	clearMu      sync.Mutex
-	mu           sync.Mutex
-	inodes       map[uint64]*stageInode
-	queue        []*stageItem
-	usedBytes    uint64
-	closed       bool
-	stopWorkers  bool
-	workersDone  bool
-	bpWakeCh     chan struct{}
-	stateCond    *sync.Cond
-	workerCond   *sync.Cond
-	stopRetryCh  chan struct{}
-	workerWG     sync.WaitGroup
-	metrics      atomic.Pointer[Metrics]
-	logger       atomic.Pointer[slog.Logger]
-	tracerProv   atomic.Pointer[trace.TracerProvider]
-	backoffInit  time.Duration
-	backoffLimit time.Duration
+	clearMu       sync.Mutex
+	mu            sync.Mutex
+	inodes        map[uint64]*stageInode
+	queue         []*stageItem
+	usedBytes     uint64
+	abortErr      error
+	abortErrSeq   uint64
+	abortCtx      context.Context
+	abortCancel   context.CancelFunc
+	closed        bool
+	stopWorkers   bool
+	workersDone   bool
+	bpWakeCh      chan struct{}
+	stateCond     *sync.Cond
+	workerCond    *sync.Cond
+	stopRetryCh   chan struct{}
+	stopRetryOnce sync.Once
+	workerWG      sync.WaitGroup
+	metrics       atomic.Pointer[Metrics]
+	logger        atomic.Pointer[slog.Logger]
+	tracerProv    atomic.Pointer[trace.TracerProvider]
+	backoffInit   time.Duration
+	backoffLimit  time.Duration
 }
 
 // NewStageCoordinator 创建并启动携带 8 个后台上传协程的 StageCoordinator。
@@ -747,6 +753,7 @@ func NewStageCoordinator(
 	if stageSize == 0 {
 		stageSize = DefaultStageSize
 	}
+	abortCtx, abortCancel := context.WithCancel(context.Background())
 	c := &StageCoordinator{
 		instanceDir:  instanceDir,
 		stageSize:    stageSize,
@@ -755,6 +762,8 @@ func NewStageCoordinator(
 		hooks:        hooks,
 		handleSeq:    make(map[uint64]uint64),
 		inodes:       make(map[uint64]*stageInode),
+		abortCtx:     abortCtx,
+		abortCancel:  abortCancel,
 		stopRetryCh:  make(chan struct{}),
 		backoffInit:  stageBackoffInitial,
 		backoffLimit: stageBackoffMax,
@@ -825,11 +834,14 @@ func (c *StageCoordinator) gauges() (pendingChunks int64, usedBytes, capacityByt
 	used := c.usedBytes
 	capBytes := c.stageSize
 	c.mu.Unlock()
+	if c.aborted.Load() {
+		return 0, 0, capBytes
+	}
 	return max(int64(0), c.pendingChunks.Load()), used, capBytes
 }
 
 func (c *StageCoordinator) unmountSnapshot() (pendingChunks int64, stagedInodes []uint64) {
-	if c == nil {
+	if c == nil || c.aborted.Load() {
 		return 0, nil
 	}
 	c.mu.Lock()
@@ -844,7 +856,7 @@ func (c *StageCoordinator) unmountSnapshot() (pendingChunks int64, stagedInodes 
 }
 
 func (c *StageCoordinator) pendingChunkCount() int64 {
-	if c == nil {
+	if c == nil || c.aborted.Load() {
 		return 0
 	}
 	return max(int64(0), c.pendingChunks.Load())
@@ -945,12 +957,12 @@ func (c *StageCoordinator) sealAllIdleActiveLocked() bool {
 
 // HasAnyPending 无锁报告当前是否存在任何挂起的暂存分片、在途上传或转正提交。
 func (c *StageCoordinator) HasAnyPending() bool {
-	return c != nil && c.totalActiveItems.Load() > 0
+	return c != nil && !c.aborted.Load() && c.totalActiveItems.Load() > 0
 }
 
 // HasPending 报告指定服务端 Inode 是否存在挂起的暂存分片或转正上传任务。
 func (c *StageCoordinator) HasPending(ino uint64) bool {
-	if c == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return false
 	}
 	c.mu.Lock()
@@ -1036,7 +1048,7 @@ func (c *StageCoordinator) RemoveIdleInode(ino uint64) {
 
 // OverlayAttr 在存在挂起写时零分配地向 fuse.Attr 叠加本地逻辑尺寸与最新修改时间。
 func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
-	if c == nil || attr == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || attr == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
 	}
 	c.mu.Lock()
@@ -1073,7 +1085,7 @@ func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
 
 // OverlayInode 在缓存未命中或零 TTL 回填时向 storagev1.Inode 叠加本地逻辑尺寸与最新时间戳。
 func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
-	if c == nil || inode == nil || inode.GetAttr() == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || inode == nil || inode.GetAttr() == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
 	}
 	c.mu.Lock()
@@ -1141,6 +1153,15 @@ func (c *StageCoordinator) WriteForHandle(
 		var onStageEnd uint64
 		var onStageTS *timestamppb.Timestamp
 		c.mu.Lock()
+		if c.aborted.Load() {
+			abortErr := c.abortErr
+			pathToRemove := c.abortActiveWriteStepLocked(step.st, step.activeChunk, step.oldLength, step.deltaBytes)
+			c.mu.Unlock()
+			if pathToRemove != "" {
+				_ = os.Remove(pathToRemove)
+			}
+			return 0, true, abortErr
+		}
 		if ioErr != nil {
 			c.rollbackWriteStepLocked(step.st, step.activeChunk, step.oldLength, step.deltaBytes)
 			c.mu.Unlock()
@@ -1221,6 +1242,12 @@ func (c *StageCoordinator) prepareWriteStep(
 	var needSealFirst bool
 	c.mu.Lock()
 	for {
+		if c.aborted.Load() {
+			err := c.abortErr
+			finishBP()
+			c.mu.Unlock()
+			return stageWriteStep{}, true, err
+		}
 		if c.closed {
 			finishBP()
 			c.mu.Unlock()
@@ -1232,6 +1259,12 @@ func (c *StageCoordinator) prepareWriteStep(
 
 		for st.activeWriteBusy {
 			c.stateCond.Wait()
+		}
+		if c.aborted.Load() {
+			err := c.abortErr
+			finishBP()
+			c.mu.Unlock()
+			return stageWriteStep{}, true, err
 		}
 		if st.hasUnseenErrLocked(c, fh) {
 			unseenErr := st.consumeErrLocked(c, fh)
@@ -1418,6 +1451,31 @@ func (c *StageCoordinator) rollbackWriteStepLocked(st *stageInode, activeChunk *
 	c.wakeBackpressureLocked()
 }
 
+func (c *StageCoordinator) abortActiveWriteStepLocked(st *stageInode, activeChunk *stageItem, oldLength, deltaBytes uint64) string {
+	totalBytes := oldLength + deltaBytes
+	if c.usedBytes >= totalBytes {
+		c.usedBytes -= totalBytes
+	} else {
+		c.usedBytes = 0
+	}
+	var pathToRemove string
+	if st.active == activeChunk {
+		st.active = nil
+		activeChunk.state = stageStateDone
+		activeChunk.discarded = true
+		c.pendingChunks.Add(-1)
+		c.totalActiveItems.Add(-1)
+		if activeChunk.readers == 0 && !activeChunk.unlinked && activeChunk.path != "" {
+			activeChunk.unlinked = true
+			pathToRemove = activeChunk.path
+		}
+	}
+	st.activeWriteBusy = false
+	c.stateCond.Broadcast()
+	c.wakeBackpressureLocked()
+	return pathToRemove
+}
+
 // PromoteTmpfile transfers an open staged O_TMPFILE file and its metadata snapshot to StageCoordinator for ordered upload.
 func (c *StageCoordinator) PromoteTmpfile(
 	ctx context.Context,
@@ -1466,6 +1524,13 @@ func (c *StageCoordinator) PromoteTmpfile(
 	}
 
 	c.mu.Lock()
+	if c.aborted.Load() {
+		c.mu.Unlock()
+		if file != nil {
+			_ = file.Close()
+		}
+		return
+	}
 	st := c.getOrCreateInodeLocked(serverIno)
 	st.nodeID = nodeID
 	st.cacheEpoch = cacheEpoch
@@ -1541,11 +1606,15 @@ func (c *StageCoordinator) Read(
 	dest []byte,
 	serverRead StageChunkReader,
 ) (n int, handled bool, err error) {
-	if c == nil || len(dest) == 0 || c.totalActiveItems.Load() == 0 {
+	if c == nil || len(dest) == 0 || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return 0, false, nil
 	}
 
 	c.mu.Lock()
+	if c.aborted.Load() {
+		c.mu.Unlock()
+		return 0, false, nil
+	}
 	st := c.inodes[ino]
 	if st == nil {
 		c.mu.Unlock()
@@ -1554,7 +1623,7 @@ func (c *StageCoordinator) Read(
 	for st.activeWriteBusy {
 		c.stateCond.Wait()
 	}
-	if !st.hasPendingLocked() {
+	if c.aborted.Load() || !st.hasPendingLocked() {
 		c.mu.Unlock()
 		return 0, false, nil
 	}
@@ -1818,6 +1887,14 @@ func (c *StageCoordinator) FlushHandle(fh, ino uint64) error {
 		return nil
 	}
 	c.mu.Lock()
+	if c.aborted.Load() {
+		err := c.abortErr
+		if st := c.inodes[ino]; st != nil {
+			_ = st.consumeErrLocked(c, fh)
+		}
+		c.mu.Unlock()
+		return err
+	}
 	st := c.inodes[ino]
 	if st == nil {
 		c.mu.Unlock()
@@ -1825,6 +1902,12 @@ func (c *StageCoordinator) FlushHandle(fh, ino uint64) error {
 	}
 	for st.activeWriteBusy {
 		c.stateCond.Wait()
+	}
+	if c.aborted.Load() {
+		err := c.abortErr
+		_ = st.consumeErrLocked(c, fh)
+		c.mu.Unlock()
+		return err
 	}
 	c.sealActiveLocked(st)
 	err := st.consumeErrLocked(c, fh)
@@ -1834,7 +1917,7 @@ func (c *StageCoordinator) FlushHandle(fh, ino uint64) error {
 
 // SealInode 非阻塞封口指定节点的活跃暂存分片进入后台上传队列。
 func (c *StageCoordinator) SealInode(ino uint64) {
-	if c == nil {
+	if c == nil || c.aborted.Load() {
 		return
 	}
 	c.mu.Lock()
@@ -1843,14 +1926,22 @@ func (c *StageCoordinator) SealInode(ino uint64) {
 		for st.activeWriteBusy {
 			c.stateCond.Wait()
 		}
-		c.sealActiveLocked(st)
+		if !c.aborted.Load() {
+			c.sealActiveLocked(st)
+		}
 	}
 	c.mu.Unlock()
 }
 
 func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInode) {
+	if c.aborted.Load() {
+		return
+	}
 	for st.activeWriteBusy {
 		c.stateCond.Wait()
+	}
+	if c.aborted.Load() {
+		return
 	}
 	c.sealActiveLocked(st)
 	if len(st.pending) == 0 && st.inflightHooks == 0 {
@@ -1870,9 +1961,12 @@ func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInod
 			),
 		)
 	}
-	for {
+	for !c.aborted.Load() {
 		for st.activeWriteBusy {
 			c.stateCond.Wait()
+		}
+		if c.aborted.Load() {
+			break
 		}
 		c.sealActiveLocked(st)
 		if len(st.pending) == 0 && st.inflightHooks == 0 {
@@ -1886,7 +1980,7 @@ func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInod
 
 // BarrierInode 封口并等待指定节点的所有挂起分片与转正任务上传完成，保留粘性错误游标。
 func (c *StageCoordinator) BarrierInode(ctx context.Context, ino uint64) {
-	if c == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
 	}
 	c.mu.Lock()
@@ -1903,6 +1997,14 @@ func (c *StageCoordinator) FlushInodeForHandle(ctx context.Context, fh, ino uint
 		return nil
 	}
 	c.mu.Lock()
+	if c.aborted.Load() {
+		err := c.abortErr
+		if st := c.inodes[ino]; st != nil {
+			_ = st.consumeErrLocked(c, fh)
+		}
+		c.mu.Unlock()
+		return err
+	}
 	st := c.inodes[ino]
 	if st == nil {
 		c.mu.Unlock()
@@ -1910,6 +2012,9 @@ func (c *StageCoordinator) FlushInodeForHandle(ctx context.Context, fh, ino uint
 	}
 	c.barrierInodeLocked(ctx, st)
 	err := st.consumeErrLocked(c, fh)
+	if c.aborted.Load() && err == nil {
+		err = c.abortErr
+	}
 	c.mu.Unlock()
 	return err
 }
@@ -1920,6 +2025,15 @@ func (c *StageCoordinator) FlushAndResetInodeForHandle(ctx context.Context, fh, 
 		return nil
 	}
 	c.mu.Lock()
+	if c.aborted.Load() {
+		err := c.abortErr
+		if st := c.inodes[ino]; st != nil {
+			_ = st.consumeErrLocked(c, fh)
+			st.resetStreamLocked()
+		}
+		c.mu.Unlock()
+		return err
+	}
 	st := c.inodes[ino]
 	if st == nil {
 		c.mu.Unlock()
@@ -1927,6 +2041,9 @@ func (c *StageCoordinator) FlushAndResetInodeForHandle(ctx context.Context, fh, 
 	}
 	c.barrierInodeLocked(ctx, st)
 	err := st.consumeErrLocked(c, fh)
+	if c.aborted.Load() && err == nil {
+		err = c.abortErr
+	}
 	st.resetStreamLocked()
 	c.mu.Unlock()
 	return err
@@ -1934,7 +2051,7 @@ func (c *StageCoordinator) FlushAndResetInodeForHandle(ctx context.Context, fh, 
 
 // ResetInodeStream 排空目标节点的所有挂起上传并重置提交世代与会话尺寸标记（不消费句柄级写错误）。
 func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) {
-	if c == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
 	}
 	c.mu.Lock()
@@ -1949,7 +2066,7 @@ func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) {
 
 // HasPromotedPending reports whether the inode has an uncommitted Link promotion queued or in flight.
 func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
-	if c == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return false
 	}
 	c.mu.Lock()
@@ -1961,11 +2078,14 @@ func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
 
 // BarrierAll 封口并等待所有活跃节点的挂起分片全部上传完成。
 func (c *StageCoordinator) BarrierAll(ctx context.Context) {
-	if c == nil || c.totalActiveItems.Load() == 0 {
+	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
 	}
 	c.mu.Lock()
 	for _, st := range c.inodes {
+		if c.aborted.Load() {
+			break
+		}
 		if st.hasPendingLocked() || st.activeWriteBusy {
 			c.barrierInodeLocked(ctx, st)
 		}
@@ -2072,10 +2192,10 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	c.wakeBackpressureLocked()
 
 	// 仅等待已经在途发出 Write RPC 的分片结束，绝不阻塞等待未发出的队列。
-	for st.hasInflightLocked() {
+	for st.hasInflightLocked() && !c.aborted.Load() {
 		c.stateCond.Wait()
 	}
-	if st.promoted != nil {
+	if st.promoted != nil && len(st.pending) == 0 {
 		st.promoted.finished = true
 		if f := st.promoted.maybeDetachFileLocked(); f != nil {
 			fileToClose = f
@@ -2099,6 +2219,139 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	}
 }
 
+// AbortAll immediately cancels and drains all staged writes, unlinks local stage files,
+// records a sticky error for Flush/Fsync, and wakes all blocked waiters.
+// Safe to invoke from any goroutine, including an in-flight upload worker.
+func (c *StageCoordinator) AbortAll(err error) {
+	if c == nil {
+		return
+	}
+	if err == nil {
+		err = syscall.EBUSY
+	}
+
+	var pathsToRemove []string
+	var filesToClose []*os.File
+
+	c.mu.Lock()
+	if c.aborted.Load() {
+		c.mu.Unlock()
+		return
+	}
+	c.aborted.Store(true)
+	c.abortErr = err
+	seq := c.errSeqGen.Add(1)
+	c.abortErrSeq = seq
+
+	var freedBytes uint64
+	var droppedChunks int64
+	var droppedTotal int64
+	for i, qIt := range c.queue {
+		c.queue[i] = nil
+		if qIt != nil && qIt.state == stageStateQueued {
+			qIt.state = stageStateDone
+			qIt.discarded = true
+			droppedTotal++
+			if qIt.kind != stageItemPromotedCommit {
+				droppedChunks++
+				freedBytes += qIt.length
+			}
+			if qIt.kind == stageItemChunkFile && qIt.readers == 0 && !qIt.unlinked && qIt.path != "" {
+				qIt.unlinked = true
+				pathsToRemove = append(pathsToRemove, qIt.path)
+			}
+		}
+	}
+	c.queue = c.queue[:0]
+
+	for _, st := range c.inodes {
+		if st == nil {
+			continue
+		}
+		close(st.discardCh)
+		st.discardCh = make(chan struct{})
+
+		st.lastErr = err
+		st.errSeq = seq
+		st.errGen = st.streamGen
+		st.resetStreamLocked()
+
+		if st.active != nil {
+			it := st.active
+			it.discarded = true
+			if !st.activeWriteBusy {
+				st.active = nil
+				it.state = stageStateDone
+				droppedChunks++
+				droppedTotal++
+				freedBytes += it.length
+				if it.readers == 0 && !it.unlinked && it.path != "" {
+					it.unlinked = true
+					pathsToRemove = append(pathsToRemove, it.path)
+				}
+			}
+		}
+
+		keepPending := 0
+		for _, pIt := range st.pending {
+			if pIt.state == stageStateInflight {
+				pIt.discarded = true
+				st.pending[keepPending] = pIt
+				keepPending++
+			}
+		}
+		clear(st.pending[keepPending:])
+		st.pending = st.pending[:keepPending]
+
+		if st.promoted != nil {
+			st.promoted.hasErr = true
+			if len(st.pending) == 0 {
+				st.promoted.finished = true
+				if f := st.promoted.maybeDetachFileLocked(); f != nil {
+					filesToClose = append(filesToClose, f)
+				}
+				st.promoted = nil
+			}
+		}
+
+		st.createdInSession = false
+		st.hasKnownSize = false
+		st.logicalSize = 0
+		st.lastWriteTS = nil
+	}
+
+	if droppedChunks > 0 {
+		c.pendingChunks.Add(-droppedChunks)
+	}
+	if droppedTotal > 0 {
+		c.totalActiveItems.Add(-droppedTotal)
+	}
+	if freedBytes > 0 {
+		if c.usedBytes >= freedBytes {
+			c.usedBytes -= freedBytes
+		} else {
+			c.usedBytes = 0
+		}
+	}
+
+	c.wakeBackpressureLocked()
+	c.stateCond.Broadcast()
+	c.workerCond.Broadcast()
+	c.mu.Unlock()
+
+	c.stopRetryOnce.Do(func() { close(c.stopRetryCh) })
+	if c.abortCancel != nil {
+		c.abortCancel()
+	}
+
+	for _, p := range pathsToRemove {
+		_ = os.Remove(p)
+	}
+	for _, f := range filesToClose {
+		_ = f.Close()
+	}
+}
+
 // Clear 排空所有活跃节点的挂起分片并等待 8 个后台上传协程全部退出（幂等，供卸载时调用）。
 func (c *StageCoordinator) Clear(ctx context.Context) {
 	if c == nil {
@@ -2113,24 +2366,27 @@ func (c *StageCoordinator) Clear(ctx context.Context) {
 		return
 	}
 	c.closed = true
+	aborted := c.aborted.Load()
 	c.wakeBackpressureLocked()
 	c.mu.Unlock()
 
-	drainDone := make(chan struct{})
-	go func() {
-		c.BarrierAll(ctx)
-		close(drainDone)
-	}()
+	if !aborted {
+		drainDone := make(chan struct{})
+		go func() {
+			c.BarrierAll(ctx)
+			close(drainDone)
+		}()
 
-	if ctx != nil {
-		select {
-		case <-drainDone:
-		case <-ctx.Done():
-			close(c.stopRetryCh)
+		if ctx != nil {
+			select {
+			case <-drainDone:
+			case <-ctx.Done():
+				c.stopRetryOnce.Do(func() { close(c.stopRetryCh) })
+				<-drainDone
+			}
+		} else {
 			<-drainDone
 		}
-	} else {
-		<-drainDone
 	}
 
 	c.mu.Lock()
@@ -2139,6 +2395,9 @@ func (c *StageCoordinator) Clear(ctx context.Context) {
 	c.mu.Unlock()
 
 	c.workerWG.Wait()
+	if c.abortCancel != nil {
+		c.abortCancel()
+	}
 
 	var leftoverFiles []*os.File
 	var leftoverPaths []string
@@ -2204,6 +2463,9 @@ func (c *StageCoordinator) canRunItemLocked(it *stageItem) bool {
 }
 
 func (c *StageCoordinator) nextRunnableItemLocked() *stageItem {
+	if c.aborted.Load() {
+		return nil
+	}
 	for i, it := range c.queue {
 		if !c.canRunItemLocked(it) {
 			continue
@@ -2227,7 +2489,7 @@ func (c *StageCoordinator) uploadWorker() {
 			if item != nil {
 				break
 			}
-			if c.stopWorkers && len(c.queue) == 0 {
+			if c.stopWorkers && (len(c.queue) == 0 || c.aborted.Load()) {
 				c.mu.Unlock()
 				return
 			}
@@ -2245,7 +2507,10 @@ func (c *StageCoordinator) uploadWorker() {
 }
 
 func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh chan struct{}) {
-	uploadBaseCtx := context.Background()
+	uploadBaseCtx := c.abortCtx
+	if uploadBaseCtx == nil {
+		uploadBaseCtx = context.Background()
+	}
 	var uploadSpan trace.Span = noopSpanInstance
 	if tracer, ok := c.activeTracer(); ok {
 		opts := make([]trace.SpanStartOption, 0, 3)
@@ -2279,6 +2544,10 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 
 	discardCh := initialDiscardCh
 	for {
+		if c.aborted.Load() {
+			discardedMid = true
+			break
+		}
 		if item.kind == stageItemPromotedCommit {
 			c.mu.Lock()
 			skipCommit := item.promoted != nil && item.promoted.hasErr
@@ -2333,6 +2602,10 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 		if finalErr == nil {
 			break
 		}
+		if c.aborted.Load() {
+			discardedMid = true
+			break
+		}
 
 		action := classifyStageError(finalErr)
 		if action == stageErrNotFound {
@@ -2349,7 +2622,7 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 		if st != nil {
 			discardCh = st.discardCh
 		}
-		aborted := item.discarded || (st == nil)
+		aborted := c.aborted.Load() || item.discarded || (st == nil)
 		c.mu.Unlock()
 		if aborted {
 			discardedMid = true
@@ -2360,6 +2633,9 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 		select {
 		case <-timer.C:
 		case <-discardCh:
+			timer.Stop()
+			discardedMid = true
+		case <-uploadBaseCtx.Done():
 			timer.Stop()
 			discardedMid = true
 		case <-c.stopRetryCh:
@@ -2472,56 +2748,63 @@ func (c *StageCoordinator) finishUploadItem(
 			if st.promoted == item.promoted {
 				st.promoted = nil
 			}
+		} else if c.aborted.Load() && st.promoted != nil && len(st.pending) == 0 {
+			st.promoted.finished = true
+			fileToClose = st.promoted.maybeDetachFileLocked()
+			st.promoted = nil
 		}
 
-		if finalErr != nil && !discardedMid {
-			if notFoundAbort {
-				if item.promoted != nil {
-					item.promoted.hasErr = true
-				}
-			} else {
-				if item.promoted != nil {
-					item.promoted.hasErr = true
-				}
-				if st.errGen != item.gen {
-					st.errGen = item.gen
-					st.lastErr = finalErr
-					st.errSeq = c.errSeqGen.Add(1)
-				}
-				if st.streamGen == item.gen {
-					st.resetStreamLocked()
-				}
-				callOnError = true
-				onErrorNodeID = item.nodeID
-			}
-		} else if finalErr == nil && !discardedMid && !item.discarded {
-			if respInode != nil && respInode.GetAttr() != nil {
-				if respInode.GetAttr().GetSize() > st.logicalSize {
-					st.logicalSize = respInode.GetAttr().GetSize()
-				}
-				st.hasKnownSize = true
-			}
-			if item.kind == stageItemChunkFile || (item.kind == stageItemPromotedCommit && respInode != nil) {
-				callOnCommit = true
-				onCommitNodeID = item.nodeID
-				onCommitIno = item.ino
-				onCommitEpoch = item.cacheEpoch
-				if item.kind == stageItemPromotedCommit && item.promoted != nil {
-					onCommitCapPresent = item.promoted.hasCap
-				}
-				if item.gen == st.streamGen {
-					onCommitMinSize = st.logicalSize
-					if isNotOlderCommittedInode(st.lastCommitted, respInode) {
-						st.lastCommitted = cloneInode(respInode)
-						onCommitRefresh = true
+		// Skip OnCommit/OnError hooks once AbortAll has recorded the sticky error and cleared caches.
+		if !c.aborted.Load() {
+			if finalErr != nil && !discardedMid {
+				if notFoundAbort {
+					if item.promoted != nil {
+						item.promoted.hasErr = true
 					}
+				} else {
+					if item.promoted != nil {
+						item.promoted.hasErr = true
+					}
+					if st.errGen != item.gen {
+						st.errGen = item.gen
+						st.lastErr = finalErr
+						st.errSeq = c.errSeqGen.Add(1)
+					}
+					if st.streamGen == item.gen {
+						st.resetStreamLocked()
+					}
+					callOnError = true
+					onErrorNodeID = item.nodeID
 				}
-			} else if item.kind == stageItemPromotedExtent {
-				callOnCommit = true
-				onCommitNodeID = item.nodeID
-				onCommitIno = item.ino
-				onCommitEpoch = item.cacheEpoch
-				onCommitPreserveMeta = true
+			} else if finalErr == nil && !discardedMid && !item.discarded {
+				if respInode != nil && respInode.GetAttr() != nil {
+					if respInode.GetAttr().GetSize() > st.logicalSize {
+						st.logicalSize = respInode.GetAttr().GetSize()
+					}
+					st.hasKnownSize = true
+				}
+				if item.kind == stageItemChunkFile || (item.kind == stageItemPromotedCommit && respInode != nil) {
+					callOnCommit = true
+					onCommitNodeID = item.nodeID
+					onCommitIno = item.ino
+					onCommitEpoch = item.cacheEpoch
+					if item.kind == stageItemPromotedCommit && item.promoted != nil {
+						onCommitCapPresent = item.promoted.hasCap
+					}
+					if item.gen == st.streamGen {
+						onCommitMinSize = st.logicalSize
+						if isNotOlderCommittedInode(st.lastCommitted, respInode) {
+							st.lastCommitted = cloneInode(respInode)
+							onCommitRefresh = true
+						}
+					}
+				} else if item.kind == stageItemPromotedExtent {
+					callOnCommit = true
+					onCommitNodeID = item.nodeID
+					onCommitIno = item.ino
+					onCommitEpoch = item.cacheEpoch
+					onCommitPreserveMeta = true
+				}
 			}
 		}
 	}

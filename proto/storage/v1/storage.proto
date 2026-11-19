@@ -171,7 +171,8 @@ service StorageService {
   rpc RemoveXattr(RemoveXattrRequest) returns (RemoveXattrResponse);
 
   // MountDisk 执行单盘挂载握手。
-  // 可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
+  // 可写挂载 (read_only = false) 在不存在未过期可写租约或显式指定 force = true 时原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode；
+  // 若已存在未过期可写租约且 force = false，返回 Aborted (映射至 POSIX EBUSY) 且不推进 WriterEpoch。
   // 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
   rpc MountDisk(MountDiskRequest) returns (MountDiskResponse);
 
@@ -1421,6 +1422,8 @@ message MountDiskRequest {
     }
   ];
   bool read_only = 2;
+  // 是否在磁盘存在未过期可写挂载租约时强制抢占并推进 WriterEpoch。
+  bool force = 3;
 }
 
 // MountDiskResponse 定义 MountDisk 接口输出参数。

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -277,8 +278,11 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 	t.Run("StaleEpochEBUSYReturnedDirectlyOnFailingWrite", func(t *testing.T) {
 		// Given writer 1 mounted with --mode=sync and an open writable file descriptor.
 		diskID := createTestDisk(t, client).GetDiskId()
-		mp, stopMount := mountWithCleanup(t, realEndpoint, diskID, "--mode", "sync")
+		mp, _, adminAddr, stopMount := startMountedDaemon(t, realEndpoint, diskID, "--mode", "sync")
 		defer stopMount()
+
+		readyBefore, _ := httpGetStatusAndBody(t, "http://"+adminAddr+"/readyz")
+		require.Equal(t, http.StatusOK, readyBefore)
 
 		fd, err := openEINTR(filepath.Join(mp, "fenced.bin"), unix.O_CREAT|unix.O_RDWR|unix.O_TRUNC, 0o644)
 		require.NoError(t, err)
@@ -289,12 +293,13 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		require.NoError(t, err1)
 		require.Equal(t, 12, n1)
 
-		// When a newer writer handshake bumps the server epoch and fences writer 1.
+		// When a newer forced writer handshake bumps the server epoch and fences writer 1.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		preemptResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 			DiskId:   diskID,
 			ReadOnly: false,
+			Force:    true,
 		}))
 		require.NoError(t, err)
 		t.Cleanup(func() {
@@ -308,8 +313,10 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 
 		_, fenceErr := writeEINTR(fd, []byte("after-fence"))
 
-		// Then the failing write syscall returns EBUSY synchronously.
+		// Then the failing write syscall returns EBUSY synchronously and /readyz flips to 503.
 		require.ErrorIs(t, fenceErr, syscall.EBUSY, "scene=sync_fenced_write want=EBUSY got=%v", fenceErr)
+		readyAfter, readyAfterBody := httpGetStatusAndBody(t, "http://"+adminAddr+"/readyz")
+		require.Equal(t, http.StatusServiceUnavailable, readyAfter, "body=%s", readyAfterBody)
 	})
 }
 

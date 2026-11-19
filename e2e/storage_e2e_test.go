@@ -147,7 +147,7 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	require.Equal(t, chunk1, r1.Msg.GetData())
 
 	// Then: 新可写挂载抢占 Epoch=2 后，旧 Epoch=1 写入被拦截返回 EBUSY；删盘后返回 ENOENT
-	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
 
@@ -447,7 +447,7 @@ func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
 

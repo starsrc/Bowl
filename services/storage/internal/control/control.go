@@ -130,6 +130,7 @@ type UpdateDiskParams struct {
 type MountDiskParams struct {
 	DiskID   string
 	ReadOnly bool
+	Force    bool
 }
 
 // MountDiskResult 描述挂载虚拟磁盘握手返回结果。
@@ -1297,11 +1298,11 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	}
 	diskID := id.String()
 
-	actor, err := m.Actor(ctx, diskID)
-	if err != nil {
-		return nil, err
-	}
 	if params.ReadOnly {
+		actor, actorErr := m.Actor(ctx, diskID)
+		if actorErr != nil {
+			return nil, actorErr
+		}
 		rootAttr, attrErr := actor.GetAttr(ctx, store.RootIno)
 		if attrErr != nil {
 			return nil, attrErr
@@ -1324,6 +1325,23 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 			MountID:             mountID,
 			LeaseTTLSeconds:     ttlSeconds,
 		}, nil
+	}
+
+	if openErr := m.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+
+	unlockDisk := m.lockDisk(ctx, diskID)
+	defer unlockDisk()
+
+	actor, err := m.actorLocked(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !params.Force {
+		if gateErr := m.checkRWMountGate(diskID); gateErr != nil {
+			return nil, gateErr
+		}
 	}
 
 	prevEpoch := actor.WriterEpoch()
@@ -1350,6 +1368,26 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 		MountID:             mountID,
 		LeaseTTLSeconds:     ttlSeconds,
 	}, nil
+}
+
+func (m *manager) actorLocked(ctx context.Context, id uuid.UUID) (*store.StoreActor, error) {
+	diskID := id.String()
+	m.poolMu.RLock()
+	if m.closed {
+		m.poolMu.RUnlock()
+		return nil, ErrClosed
+	}
+	if actor := m.actors[diskID]; actor != nil {
+		m.poolMu.RUnlock()
+		return actor, nil
+	}
+	m.poolMu.RUnlock()
+
+	row, err := m.store.GetDisk(ctx, id)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	return m.getOrOpenActorWithLineageLocked(ctx, diskID, row.LineageID)
 }
 
 func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, error) {
@@ -1383,22 +1421,7 @@ func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, 
 	unlockDisk := m.lockDisk(ctx, diskID)
 	defer unlockDisk()
 
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
-		return nil, ErrClosed
-	}
-	if actor := m.actors[diskID]; actor != nil {
-		m.poolMu.RUnlock()
-		return actor, nil
-	}
-	m.poolMu.RUnlock()
-
-	row, err := m.store.GetDisk(ctx, id)
-	if err != nil {
-		return nil, mapDBErr(err)
-	}
-	return m.getOrOpenActorWithLineageLocked(ctx, diskID, row.LineageID)
+	return m.actorLocked(ctx, id)
 }
 
 func (m *manager) Close() error {

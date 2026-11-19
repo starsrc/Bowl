@@ -266,7 +266,8 @@ type StorageServiceClient interface {
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error)
 	// MountDisk 执行单盘挂载握手。
-	// 可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
+	// 可写挂载 (read_only = false) 在不存在未过期可写租约或显式指定 force = true 时原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode；
+	// 若已存在未过期可写租约且 force = false，返回 Aborted (映射至 POSIX EBUSY) 且不推进 WriterEpoch。
 	// 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
 	MountDisk(context.Context, *connect.Request[v1.MountDiskRequest]) (*connect.Response[v1.MountDiskResponse], error)
 	// RenewMount 为已建立的在线挂载软租约执行周期续期。
@@ -928,7 +929,8 @@ type StorageServiceHandler interface {
 	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
 	RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error)
 	// MountDisk 执行单盘挂载握手。
-	// 可写挂载 (read_only = false) 原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode。
+	// 可写挂载 (read_only = false) 在不存在未过期可写租约或显式指定 force = true 时原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode；
+	// 若已存在未过期可写租约且 force = false，返回 Aborted (映射至 POSIX EBUSY) 且不推进 WriterEpoch。
 	// 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
 	MountDisk(context.Context, *connect.Request[v1.MountDiskRequest]) (*connect.Response[v1.MountDiskResponse], error)
 	// RenewMount 为已建立的在线挂载软租约执行周期续期。

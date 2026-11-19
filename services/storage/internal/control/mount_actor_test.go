@@ -90,8 +90,8 @@ func TestMountDisk_ReadWrite_AdvancesEpochAndFencesStaleWriter(t *testing.T) {
 	})
 	require.NoError(t, err, "初始 epoch 创建文件失败")
 
-	// When: 再次执行可写挂载推进 epoch 至 2
-	mnt2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	// When: 再次执行强制可写挂载推进 epoch 至 2
+	mnt2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, Force: true})
 	require.NoError(t, err, "第二次可写挂载失败")
 
 	// Then: 新 epoch=2 生效，旧 epoch=1 写入被拦截为 ErrStaleEpoch

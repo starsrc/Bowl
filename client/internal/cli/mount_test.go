@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -97,6 +99,20 @@ func withMountRenewIntervalStub(t *testing.T, interval time.Duration) {
 	prev := mountRenewIntervalFn
 	mountRenewIntervalFn = func(uint32) time.Duration { return interval }
 	t.Cleanup(func() { mountRenewIntervalFn = prev })
+}
+
+func withMountRenewRetryIntervalStub(t *testing.T, interval time.Duration) {
+	t.Helper()
+	prev := mountRenewRetryIntervalFn
+	mountRenewRetryIntervalFn = func(time.Duration) time.Duration { return interval }
+	t.Cleanup(func() { mountRenewRetryIntervalFn = prev })
+}
+
+func withMountNowStub(t *testing.T, fn func() time.Time) {
+	t.Helper()
+	prev := mountNowFn
+	mountNowFn = fn
+	t.Cleanup(func() { mountNowFn = prev })
 }
 
 func withChdirStub(t *testing.T, fn func(string) error) {
@@ -1261,18 +1277,66 @@ func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovin
 	require.False(t, metaAfter, "UnmountDisk 完成后必须移除 mountMeta 文件")
 }
 
-func TestRunMount_LeaseRenewTerminalError_GivenEBUSYOrNotFound_StopsRenewLoop(t *testing.T) {
+func fetchReadyzStatusAndBody(t *testing.T, adminAddr string) (statusCode int, body string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+adminAddr+"/readyz", http.NoBody)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	rawBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(rawBody)
+}
+
+func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlipsReadyzStopsLoopAndSkipsUnmount(t *testing.T) {
 	ebusyErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("stale epoch"))
 	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Domain: "bowl.storage", Reason: "EBUSY"})
 	require.NoError(t, err)
 	ebusyErr.AddDetail(detail)
 
 	cases := []struct {
-		name     string
-		renewErr error
+		name       string
+		renewErr   error
+		wantStatus fuse.Status
+		wantReason string
 	}{
-		{name: "CodeFailedPrecondition_EBUSY", renewErr: ebusyErr},
-		{name: "CodeNotFound", renewErr: connect.NewError(connect.CodeNotFound, errors.New("mount not found"))},
+		{
+			name:       "CodeFailedPrecondition_EBUSY",
+			renewErr:   ebusyErr,
+			wantStatus: fuse.EBUSY,
+			wantReason: "stale epoch",
+		},
+		{
+			name:       "CodeNotFound",
+			renewErr:   connect.NewError(connect.CodeNotFound, errors.New("mount not found")),
+			wantStatus: fuse.ENOENT,
+			wantReason: "mount not found",
+		},
+		{
+			name:       "CodeUnauthenticated",
+			renewErr:   connect.NewError(connect.CodeUnauthenticated, errors.New("invalid token")),
+			wantStatus: fuse.Status(syscall.EACCES),
+			wantReason: "invalid token",
+		},
+		{
+			name:       "CodePermissionDenied",
+			renewErr:   connect.NewError(connect.CodePermissionDenied, errors.New("permission denied")),
+			wantStatus: fuse.EPERM,
+			wantReason: "permission denied",
+		},
+		{
+			name:       "CodeInvalidArgument",
+			renewErr:   connect.NewError(connect.CodeInvalidArgument, errors.New("bad mount id")),
+			wantStatus: fuse.EINVAL,
+			wantReason: "bad mount id",
+		},
+		{
+			name:       "CodeUnimplemented",
+			renewErr:   connect.NewError(connect.CodeUnimplemented, errors.New("renew unsupported")),
+			wantStatus: fuse.ENOSYS,
+			wantReason: "renew unsupported",
+		},
 	}
 
 	for _, tc := range cases {
@@ -1288,18 +1352,35 @@ func TestRunMount_LeaseRenewTerminalError_GivenEBUSYOrNotFound_StopsRenewLoop(t 
 			storage.renewErr = tc.renewErr
 			withMountStorageFake(t, storage)
 
-			var logBuf syncBuffer
-			withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			var (
+				logBuf    syncBuffer
+				gotFenced bool
+				gotStatus fuse.Status
+				gotReason string
+				readyCode int
+				readyBody string
+			)
+			withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
 				ready()
+				meta, ok := findMountMeta(gotMP)
+				require.True(t, ok)
+
 				require.Eventually(t, func() bool {
-					return strings.Contains(logBuf.String(), "mount_lease_renew_stopped")
-				}, time.Second, 5*time.Millisecond, "scene=%s want=mount_lease_renew_stopped", tc.name)
+					return strings.Contains(logBuf.String(), "mount_lease_renew_stopped") && rawFS.IsFenced()
+				}, time.Second, 5*time.Millisecond, "scene=%s want=mount_lease_renew_stopped_and_fenced", tc.name)
+
+				gotFenced = rawFS.IsFenced()
+				gotStatus = rawFS.FenceStatus()
+				gotReason = rawFS.FenceReason()
+				readyCode, readyBody = fetchReadyzStatusAndBody(t, meta.AdminAddr)
+				// Wait across multiple intervals to verify renew loop truly stopped.
+				time.Sleep(35 * time.Millisecond)
 				return nil
 			})
 
 			opts := &mountOptions{
 				endpoint:  "http://127.0.0.1:9000",
-				adminAddr: "off",
+				adminAddr: "127.0.0.1:0",
 				logLevel:  "info",
 				logFormat: "json",
 			}
@@ -1312,8 +1393,231 @@ func TestRunMount_LeaseRenewTerminalError_GivenEBUSYOrNotFound_StopsRenewLoop(t 
 
 			runErr := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
 			require.NoError(t, runErr)
+			require.True(t, gotFenced, "scene=%s want=rawFS_fenced", tc.name)
+			require.Equal(t, tc.wantStatus, gotStatus, "scene=%s", tc.name)
+			require.Contains(t, gotReason, tc.wantReason, "scene=%s", tc.name)
+			require.Equal(t, http.StatusServiceUnavailable, readyCode, "scene=%s readyz body=%s", tc.name, readyBody)
+			require.Contains(t, readyBody, tc.wantReason, "scene=%s", tc.name)
 			require.Len(t, storage.getRenewReqs(), 1, "scene=%s want=1_renew_req got=%d", tc.name, len(storage.getRenewReqs()))
-			require.Len(t, storage.getUnmountReqs(), 1)
+			require.Empty(t, storage.getUnmountReqs(), "scene=%s fenced mount must skip UnmountDisk RPC", tc.name)
+		})
+	}
+}
+
+func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsReadyzAndSkipsUnmount(t *testing.T) {
+	// Given: renewer runs with fast interval and healthy storage.
+	withCleanOTelAndLogger(t)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withMountRenewIntervalStub(t, 15*time.Millisecond)
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "rpc-fenced-disk", 1<<30, 0)
+	storage.mountLeaseTTL = 30
+	withMountStorageFake(t, storage)
+
+	var (
+		logBuf         syncBuffer
+		renewsAtFence  int
+		readyBefore    int
+		readyAfter     int
+		readyAfterBody string
+	)
+	withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+		ready()
+		meta, ok := findMountMeta(gotMP)
+		require.True(t, ok)
+
+		readyBefore, _ = fetchReadyzStatusAndBody(t, meta.AdminAddr)
+		require.Eventually(t, func() bool {
+			return len(storage.getRenewReqs()) >= 1
+		}, time.Second, 5*time.Millisecond)
+
+		// When: RPC layer fences RawFS directly (Step 31).
+		rawFS.Fence(fuse.EBUSY, "rpc stale epoch")
+		// Allow any in-flight RenewMount call to settle, then snapshot count.
+		time.Sleep(20 * time.Millisecond)
+		renewsAtFence = len(storage.getRenewReqs())
+		readyAfter, readyAfterBody = fetchReadyzStatusAndBody(t, meta.AdminAddr)
+
+		// Wait across several renew intervals to confirm renewer exited on FencedCh.
+		time.Sleep(60 * time.Millisecond)
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: "127.0.0.1:0",
+		logLevel:  "info",
+		logFormat: "json",
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  t.TempDir(),
+	}
+
+	// When
+	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+
+	// Then
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, readyBefore)
+	require.Equal(t, http.StatusServiceUnavailable, readyAfter)
+	require.Contains(t, readyAfterBody, "rpc stale epoch")
+	require.Len(t, storage.getRenewReqs(), renewsAtFence, "renewer must stop immediately after RawFS.FencedCh closes")
+	require.Empty(t, storage.getUnmountReqs(), "fenced mount must skip UnmountDisk RPC")
+}
+
+func TestRunMount_LeaseRenewTransientError_GivenTransientFailuresThenRecovery_RetriesAcceleratedExpiresReadyzHealsAndRestoresCadence(t *testing.T) {
+	// Given: controllable clock, 120ms normal interval, 15ms accelerated retry interval, and 30s lease TTL.
+	withCleanOTelAndLogger(t)
+	mp := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withMountRenewIntervalStub(t, 120*time.Millisecond)
+	withMountRenewRetryIntervalStub(t, 15*time.Millisecond)
+
+	var (
+		clockMu sync.Mutex
+		nowTime = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	)
+	withMountNowStub(t, func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return nowTime
+	})
+	advanceClock := func(d time.Duration) {
+		clockMu.Lock()
+		nowTime = nowTime.Add(d)
+		clockMu.Unlock()
+	}
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "transient-disk", 1<<30, 0)
+	storage.mountLeaseTTL = 30
+
+	var (
+		mu          sync.Mutex
+		renewTimes  []time.Time
+		renewCalls  int
+		allowHealCh = make(chan struct{})
+	)
+	storage.onRenewMount = func(_ *storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error) {
+		mu.Lock()
+		renewCalls++
+		callNum := renewCalls
+		renewTimes = append(renewTimes, time.Now())
+		mu.Unlock()
+		switch callNum {
+		case 1:
+			return nil, connect.NewError(connect.CodeDeadlineExceeded, errors.New("temporary timeout"))
+		case 2:
+			return nil, connect.NewError(connect.CodeInternal, errors.New("transient backend error"))
+		case 3:
+			<-allowHealCh
+			return &storagev1.RenewMountResponse{LeaseTtlSeconds: 30}, nil
+		default:
+			return &storagev1.RenewMountResponse{LeaseTtlSeconds: 30}, nil
+		}
+	}
+	withMountStorageFake(t, storage)
+
+	var (
+		logBuf           syncBuffer
+		readyInitial     int
+		readyExpired     int
+		readyHealed      int
+		fencedAfterRetry bool
+	)
+	withServeFUSEStub(t, func(_ context.Context, rawFS *fusefs.RawFS, _ *fusefs.Config, gotMP string, ready func()) error {
+		ready()
+		meta, ok := findMountMeta(gotMP)
+		require.True(t, ok)
+
+		readyInitial, _ = fetchReadyzStatusAndBody(t, meta.AdminAddr)
+
+		// Wait until both transient failures occurred quickly on accelerated cadence.
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return renewCalls >= 2
+		}, time.Second, 5*time.Millisecond)
+
+		fencedAfterRetry = rawFS.IsFenced()
+		// Advance virtual clock past leaseExpiresAt (30s) while renewals are failing -> /readyz flips to 503.
+		advanceClock(31 * time.Second)
+		readyExpired, _ = fetchReadyzStatusAndBody(t, meta.AdminAddr)
+
+		// Allow call 3 to succeed and refresh leaseExpiresAt -> /readyz heals back to 200.
+		close(allowHealCh)
+		require.Eventually(t, func() bool {
+			code, _ := fetchReadyzStatusAndBody(t, meta.AdminAddr)
+			return code == http.StatusOK
+		}, time.Second, 5*time.Millisecond)
+		readyHealed, _ = fetchReadyzStatusAndBody(t, meta.AdminAddr)
+
+		// Wait for call 4 so we can verify normal cadence (120ms) was restored after healing.
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return renewCalls >= 4
+		}, time.Second, 5*time.Millisecond)
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: "127.0.0.1:0",
+		logLevel:  "info",
+		logFormat: "json",
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  t.TempDir(),
+	}
+
+	// When
+	err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+
+	// Then
+	require.NoError(t, err)
+	require.Contains(t, logBuf.String(), "mount_lease_renew_failed")
+	require.Equal(t, http.StatusOK, readyInitial)
+	require.False(t, fencedAfterRetry, "transient error must not fence RawFS")
+	require.Equal(t, http.StatusServiceUnavailable, readyExpired, "expired lease must flip /readyz to 503")
+	require.Equal(t, http.StatusOK, readyHealed, "successful RenewMount must heal /readyz back to 200")
+	require.Len(t, storage.getUnmountReqs(), 1, "unfenced mount must still call UnmountDisk on exit")
+
+	mu.Lock()
+	times := append([]time.Time(nil), renewTimes...)
+	mu.Unlock()
+	require.GreaterOrEqual(t, len(times), 4)
+	acceleratedGap := times[1].Sub(times[0])
+	restoredNormalGap := times[3].Sub(times[2])
+	require.Less(t, acceleratedGap, 80*time.Millisecond, "transient failure must use accelerated retry interval, got %s", acceleratedGap)
+	require.GreaterOrEqual(t, restoredNormalGap, 90*time.Millisecond, "recovery must restore normal renew interval, got %s", restoredNormalGap)
+}
+
+func TestDefaultMountRenewRetryInterval_GivenNormalIntervals_ClampsToMinOneSecond(t *testing.T) {
+	cases := []struct {
+		name   string
+		normal time.Duration
+		want   time.Duration
+	}{
+		{name: "TenSecondsNormal", normal: 10 * time.Second, want: time.Second},
+		{name: "OneSecondNormal", normal: time.Second, want: time.Second},
+		{name: "SubSecondNormal", normal: 200 * time.Millisecond, want: 200 * time.Millisecond},
+		{name: "ZeroNormal", normal: 0, want: time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, defaultMountRenewRetryInterval(tc.normal), "scene=%s", tc.name)
 		})
 	}
 }
@@ -1789,4 +2093,191 @@ func TestMount_AlreadyMounted_GivenWedgedMountRoots_RejectsDuplicateAndBadFlagsW
 
 	require.NotContains(t, *lstatCalls, realWedgedMP)
 	require.NotContains(t, *lstatCalls, realOkMP)
+}
+
+func TestMount_ForceFlag_GivenHelpAndValidation_PreservesShortFAndRejectsROMode(t *testing.T) {
+	// Given / When: inspect mount help output
+	code, out, errOut := runCLI("mount", "--help")
+
+	// Then: --force is documented as long-only and -f stays bound to --foreground
+	require.Equal(t, 0, code, "stderr=%s", errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "-f, --foreground")
+	require.Contains(t, out, "--force")
+	require.NotContains(t, out, "-f, --force")
+
+	validMP := t.TempDir()
+	cases := []struct {
+		name       string
+		envMode    string
+		args       []string
+		wantSubstr string
+	}{
+		{
+			name:       "ForceWithExplicitROMode",
+			args:       []string{"mount", testDiskID1, validMP, "--mode=ro", "--force"},
+			wantSubstr: "--force cannot be set with --mode=ro",
+		},
+		{
+			name:       "ForceWithEnvROMode",
+			envMode:    "ro",
+			args:       []string{"mount", testDiskID1, validMP, "--force"},
+			wantSubstr: "--force cannot be set with --mode=ro",
+		},
+		{
+			name:       "InvalidForceBool",
+			args:       []string{"mount", testDiskID1, validMP, "--force=bad"},
+			wantSubstr: "invalid argument",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envMode != "" {
+				t.Setenv("BOWL_MOUNT_MODE", tc.envMode)
+			}
+			spawnCalled := false
+			withSpawnDaemonStub(t, func([]string, io.Writer) int {
+				spawnCalled = true
+				return 0
+			})
+			storage := newFakeStorage()
+			storage.seedDisk(testDiskID1, "force-val-disk", 1<<30, 0)
+			withMountStorageFake(t, storage)
+
+			gotCode, gotOut, gotErr := runCLIWithDeadline(t, 2*time.Second, tc.args...)
+			require.Equal(t, 2, gotCode, "scene=%s stderr=%s", tc.name, gotErr)
+			require.Empty(t, gotOut)
+			require.Contains(t, gotErr, tc.wantSubstr)
+			require.False(t, spawnCalled, "scene=%s must not spawn daemon on exit 2", tc.name)
+			require.Empty(t, storage.getMountReqs(), "scene=%s must not call MountDisk on exit 2", tc.name)
+		})
+	}
+
+	// Explicit --force=false with --mode=ro is accepted and sends Force=false.
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	roStorage := newFakeStorage()
+	roStorage.seedDisk(testDiskID1, "ro-force-false-disk", 1<<30, 0)
+	withMountStorageFake(t, roStorage)
+	stubMountServeFUSE(t, validMP)
+
+	roCode, _, roErr := runCLI("mount", testDiskID1, validMP, "-f", "--mode=ro", "--force=false", "--admin-addr", "off")
+	require.Equal(t, 0, roCode, "stderr=%s", roErr)
+	roReqs := roStorage.getMountReqs()
+	require.Len(t, roReqs, 1)
+	require.True(t, roReqs[0].GetReadOnly())
+	require.False(t, roReqs[0].GetForce())
+}
+
+func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndFormatsErrDiskMounted(t *testing.T) {
+	t.Run("ShortFRemainsForegroundWithoutForce", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		withTempMountMetaDirs(t, t.TempDir())
+		mp := t.TempDir()
+		stageDir := filepath.Join(t.TempDir(), "stage-short-f")
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "short-f-disk", 1<<30, 0)
+		withMountStorageFake(t, storage)
+		stubMountServeFUSE(t, mp)
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
+		require.Equal(t, 0, code, "stderr=%s", errOut)
+		reqs := storage.getMountReqs()
+		require.Len(t, reqs, 1)
+		require.False(t, reqs[0].GetReadOnly())
+		require.False(t, reqs[0].GetForce())
+	})
+
+	t.Run("ForegroundForceForwardsForceTrue", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		withTempMountMetaDirs(t, t.TempDir())
+		mp := t.TempDir()
+		stageDir := filepath.Join(t.TempDir(), "stage-fg-force")
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "fg-force-disk", 1<<30, 0)
+		withMountStorageFake(t, storage)
+		stubMountServeFUSE(t, mp)
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--force", "--stage-dir", stageDir, "--admin-addr", "off")
+		require.Equal(t, 0, code, "stderr=%s", errOut)
+		reqs := storage.getMountReqs()
+		require.Len(t, reqs, 1)
+		require.False(t, reqs[0].GetReadOnly())
+		require.True(t, reqs[0].GetForce())
+	})
+
+	t.Run("BackgroundSpawnAndDaemonWorkerForwardForce", func(t *testing.T) {
+		mp := t.TempDir()
+		withMissingMountInfo(t)
+
+		var spawnedArgs []string
+		withSpawnDaemonStub(t, func(args []string, _ io.Writer) int {
+			spawnedArgs = append([]string(nil), args...)
+			return 0
+		})
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "--force", "--mode=sync")
+		require.Equal(t, 0, code, "stderr=%s", errOut)
+		require.Equal(t, []string{testDiskID1, mp, "--force", "--mode=sync"}, spawnedArgs)
+
+		// Now execute as daemon worker with the same flags.
+		withCleanOTelAndLogger(t)
+		withTempMountMetaDirs(t, t.TempDir())
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "worker-force-disk", 1<<30, 0)
+		withMountStorageFake(t, storage)
+		stubMountServeFUSE(t, mp)
+
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		withReadinessPipeStub(t, w)
+		withRedirectDaemonStdioStub(t, func(*os.File) {})
+		withChdirStub(t, func(string) error { return nil })
+		t.Setenv("BOWL_DAEMON_WORKER", "1")
+		logFile := filepath.Join(t.TempDir(), "worker-force.log")
+
+		workerCode, _, workerErr := runCLI("mount", testDiskID1, mp, "--force", "--mode=sync", "--log-file", logFile, "--admin-addr", "off")
+		require.Equal(t, 0, workerCode, "stderr=%s", workerErr)
+		reqs := storage.getMountReqs()
+		require.Len(t, reqs, 1)
+		require.True(t, reqs[0].GetForce())
+	})
+
+	t.Run("ErrDiskMountedReturnsActionableExit1Message", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		withTempMountMetaDirs(t, t.TempDir())
+		mp := t.TempDir()
+		stageDir := filepath.Join(t.TempDir(), "stage-busy")
+
+		abortedBusyErr := connect.NewError(connect.CodeAborted, errors.New("disk has active read-write mount lease"))
+		detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+			Domain: "bowl.storage",
+			Reason: "EBUSY",
+		})
+		require.NoError(t, err)
+		abortedBusyErr.AddDetail(detail)
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "busy-disk", 1<<30, 0)
+		storage.forcedErr["MountDisk"] = abortedBusyErr
+		withMountStorageFake(t, storage)
+
+		code, out, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
+		require.Equal(t, 1, code, "stderr=%s", errOut)
+		require.Empty(t, out)
+		require.Contains(t, errOut, "active read-write mount")
+		require.Contains(t, errOut, "unmount")
+		require.Contains(t, errOut, "--force")
+		requireEmptyDir(t, stageDir, "err_disk_mounted_stage_cleanup")
+	})
 }

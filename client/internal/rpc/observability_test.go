@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
 func setupTestOTel(t *testing.T) (*prometheus.Registry, *sdkmetric.ManualReader, *tracetest.InMemoryExporter, *sdktrace.TracerProvider) {
@@ -240,4 +241,58 @@ func TestObservability_GivenSlowAttemptAndExhaustedRetry_EmitsSlowAndExhaustedLo
 	logOutput := logBuf.String()
 	require.Contains(t, logOutput, `"msg":"slow_rpc"`)
 	require.Contains(t, logOutput, `"msg":"rpc_retry_exhausted_eio"`)
+}
+
+type scriptedMountDiskHandler struct {
+	storagev1connect.UnimplementedStorageServiceHandler
+	mountErr error
+}
+
+func (h *scriptedMountDiskHandler) MountDisk(
+	_ context.Context,
+	_ *connect.Request[storagev1.MountDiskRequest],
+) (*connect.Response[storagev1.MountDiskResponse], error) {
+	return nil, h.mountErr
+}
+
+func TestObservability_GivenAbortedEBUSYError_DoesNotTriggerStaleEpochMetricOrLog(t *testing.T) {
+	// Given: server returns CodeAborted + ErrorInfo{Domain: "bowl.storage", Reason: "EBUSY"} (ErrDiskMounted / ErrConcurrentMerge).
+	reg, _, _, _ := setupTestOTel(t)
+	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	abortedBusyErr := connect.NewError(connect.CodeAborted, errors.New("disk is currently mounted"))
+	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+		Domain: "bowl.storage",
+		Reason: "EBUSY",
+	})
+	require.NoError(t, err)
+	abortedBusyErr.AddDetail(detail)
+
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(&scriptedMountDiskHandler{mountErr: abortedBusyErr}),
+		Logger:     logger,
+		Metrics:    rpcMetrics,
+	}, clk)
+	require.NoError(t, err)
+
+	// When: calling MountDisk and receiving CodeAborted + EBUSY.
+	_, err = client.MountDisk(context.Background(), connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId: "11111111-1111-4111-8111-111111111111",
+	}))
+
+	// Then: error propagates as CodeAborted, but stale_epoch counter stays 0 and no writer_epoch_fenced log is emitted.
+	require.Error(t, err)
+	require.Equal(t, connect.CodeAborted, connect.CodeOf(err))
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	staleMF := requireMetricFamily(t, mfs, "bowl_client_stale_epoch_total")
+	require.InDelta(t, 0.0, staleMF.GetMetric()[0].GetCounter().GetValue(), 1e-9)
+	require.NotContains(t, logBuf.String(), "writer_epoch_fenced")
 }

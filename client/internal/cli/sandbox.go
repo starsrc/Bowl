@@ -112,80 +112,99 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxMergeCmd(),
 		newSandboxStopCmd(true),
 		newSandboxStopCmd(false),
+		newSandboxServeCmd(),
 	)
 	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists)")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")
 	return cmd
 }
 
+// sboxCreateOpts is everything create needs; the CLI command and the HTTP API both fill it.
+type sboxCreateOpts struct {
+	From, Template, Size, Image, Name, MountPath, Network, Binary, Endpoint, Token string
+	Rebuild                                                                        bool
+	CPUs, MemoryMiB                                                                int
+	Timeout                                                                        time.Duration
+	Log                                                                            io.Writer
+}
+
+// sboxCreate creates or forks the sandbox disk, starts the sandbox on it and returns its ID.
+// Errors carry the CLI exit code (usage 2, runtime 1).
+func sboxCreate(o *sboxCreateOpts) (string, error) {
+	if o.From != "" && o.Template != "" {
+		return "", usageExitErr(errors.New("--from and --template cannot be used together"), false)
+	}
+	if sboxRuntimeName == runtimeMicroVM && o.From == "" && o.Template == "" {
+		return "", usageExitErr(errors.New("the microvm runtime boots from the disk, so --template <name> or --from <disk> is required"), false)
+	}
+	if sboxRuntimeName == runtimeDocker {
+		if _, err := exec.LookPath("docker"); err != nil {
+			return "", runtimeExitErr(errors.New("docker command not found; the docker runtime needs a local Docker"))
+		}
+	}
+	resolvedEndpoint, err := rpc.ResolveEndpoint(o.Endpoint)
+	if err != nil {
+		return "", usageExitErr(fmt.Errorf("invalid endpoint: %w", err), false)
+	}
+	client, code, err := newDiskStorageClient(resolvedEndpoint, o.Token)
+	if err != nil {
+		return "", &cliExitError{code: code, err: err}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	from := o.From
+	if o.Template != "" {
+		if from, err = findTemplate(ctx, client, o.Template); err != nil {
+			cancel()
+			return "", runtimeExitErr(err)
+		}
+	}
+	diskID, cliErr := sboxCreateDisk(ctx, client, from, cmp.Or(o.Size, "1GiB"), o.Name)
+	cancel()
+	if cliErr != nil {
+		return "", &cliExitError{code: cliErr.exitCode, err: errors.New(cliErr.msg)}
+	}
+
+	spec := &sandbox.CreateSpec{
+		ID: diskID, Image: cmp.Or(o.Image, sandbox.DefaultImage), Name: o.Name, MountPath: o.MountPath,
+		Network: o.Network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(o.Token),
+		CPUs: o.CPUs, MemoryMiB: o.MemoryMiB,
+	}
+	if sboxRuntimeName == runtimeMicroVM {
+		// The disk is mounted on this host, so the host's own Linux bowl client does it.
+		spec.Image = cmp.Or(o.Template, from)
+		err = sboxStartMicroVM(spec, o.Binary)
+	} else {
+		err = sboxStart(spec, o.Binary, o.Rebuild, cmp.Or[io.Writer](o.Log, io.Discard))
+	}
+	if err != nil {
+		// Best effort: the caller is already getting the start error.
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, _ = client.DeleteDisk(dropCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
+		dropCancel()
+		return "", runtimeExitErr(err)
+	}
+	if o.Timeout > 0 {
+		if err = sboxSetDeadline(diskID, o.Timeout); err != nil {
+			return diskID, runtimeExitErr(fmt.Errorf("sandbox %s is up but the timeout was not set: %w", diskID, err))
+		}
+	}
+	return diskID, nil
+}
+
 func newSandboxCreateCmd() *cobra.Command {
 	var (
-		from, template, size, image, name, mountAt, network, binary, endpoint, token string
-		rebuild, quiet                                                               bool
-		cpus, memoryMiB                                                              int
-		timeout                                                                      time.Duration
+		o     sboxCreateOpts
+		quiet bool
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a sandbox, forking its disk from --from or creating an empty one",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if from != "" && template != "" {
-				return usageExitErr(errors.New("--from and --template cannot be used together"), false)
-			}
-			if sboxRuntimeName == runtimeMicroVM && from == "" && template == "" {
-				return usageExitErr(errors.New("the microvm runtime boots from the disk, so --template <name> or --from <disk> is required"), false)
-			}
-			if sboxRuntimeName == runtimeDocker {
-				if _, err := exec.LookPath("docker"); err != nil {
-					return runtimeExitErr(errors.New("docker command not found; the docker runtime needs a local Docker"))
-				}
-			}
-			resolvedEndpoint, err := rpc.ResolveEndpoint(endpoint)
+			o.Log = cmd.ErrOrStderr()
+			diskID, err := sboxCreate(&o)
 			if err != nil {
-				return usageExitErr(fmt.Errorf("invalid endpoint: %w", err), false)
-			}
-			client, code, err := newDiskStorageClient(resolvedEndpoint, token)
-			if err != nil {
-				return &cliExitError{code: code, err: err}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-			if template != "" {
-				if from, err = findTemplate(ctx, client, template); err != nil {
-					cancel()
-					return runtimeExitErr(err)
-				}
-			}
-			diskID, cliErr := sboxCreateDisk(ctx, client, from, size, name)
-			cancel()
-			if cliErr != nil {
-				return &cliExitError{code: cliErr.exitCode, err: errors.New(cliErr.msg)}
-			}
-
-			spec := &sandbox.CreateSpec{
-				ID: diskID, Image: image, Name: name, MountPath: mountAt,
-				Network: network, HostEndpoint: resolvedEndpoint, Token: rpc.ResolveToken(token),
-				CPUs: cpus, MemoryMiB: memoryMiB,
-			}
-			if sboxRuntimeName == runtimeMicroVM {
-				// The disk is mounted on this host, so the host's own Linux bowl client does it.
-				spec.Image = from
-				err = sboxStartMicroVM(spec, binary)
-			} else {
-				err = sboxStart(spec, binary, rebuild, cmd.ErrOrStderr())
-			}
-			if err != nil {
-				// Best effort: the caller is already getting the start error.
-				dropCtx, dropCancel := context.WithTimeout(context.Background(), 15*time.Second)
-				_, _ = client.DeleteDisk(dropCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
-				dropCancel()
-				return runtimeExitErr(err)
-			}
-
-			if timeout > 0 {
-				if err = sboxSetDeadline(diskID, timeout); err != nil {
-					return runtimeExitErr(fmt.Errorf("sandbox %s is up but the timeout was not set: %w", diskID, err))
-				}
+				return err
 			}
 			out := cmd.OutOrStdout()
 			if quiet {
@@ -194,31 +213,31 @@ func newSandboxCreateCmd() *cobra.Command {
 			}
 			fmt.Fprintf(out, "Sandbox %s is ready (%s)\n", diskID, sboxRuntimeName)
 			if sboxRuntimeName == runtimeMicroVM {
-				fmt.Fprintf(out, "  Template:  %s\n", cmp.Or(template, from))
+				fmt.Fprintf(out, "  Template:  %s\n", cmp.Or(o.Template, o.From))
 				fmt.Fprintf(out, "  Disk:      %s (the VM's root filesystem)\n", diskID)
 			} else {
-				fmt.Fprintf(out, "  Image:     %s\n", image)
-				fmt.Fprintf(out, "  Disk:      %s (mounted at %s)\n", diskID, mountAt)
+				fmt.Fprintf(out, "  Image:     %s\n", o.Image)
+				fmt.Fprintf(out, "  Disk:      %s (mounted at %s)\n", diskID, o.MountPath)
 			}
 			fmt.Fprintf(out, "  Run:       bowl-sandbox exec %s -- <command>\n", diskID)
 			return nil
 		},
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&from, "from", "", "Fork the sandbox disk from an existing disk (the source is untouched); required for microvm")
-	flags.StringVar(&template, "template", "", "Fork the sandbox disk from this template (see bowl-sandbox template list)")
-	flags.StringVar(&size, "size", "1GiB", "Capacity of the new disk; ignored with --from")
-	flags.StringVar(&image, "image", sandbox.DefaultImage, "Container image (docker only)")
-	flags.StringVar(&name, "name", "", "Disk name and container hostname")
-	flags.StringVar(&mountAt, "mount", sandbox.DefaultMountPath, "Disk mountpoint inside the container (docker only)")
-	flags.StringVar(&network, "network", "", "Attach the sandbox to this docker network (docker only)")
-	flags.StringVar(&binary, "binary", "", "Linux bowl client: injected into the container for docker (default: build and cache one), run on this host for microvm (default: bowl in PATH)")
-	flags.BoolVar(&rebuild, "rebuild", false, "Force rebuilding the Linux client")
+	flags.StringVar(&o.From, "from", "", "Fork the sandbox disk from an existing disk (the source is untouched)")
+	flags.StringVar(&o.Template, "template", "", "Fork the sandbox disk from this template (see bowl-sandbox template list)")
+	flags.StringVar(&o.Size, "size", "1GiB", "Capacity of the new disk; ignored with --from")
+	flags.StringVar(&o.Image, "image", sandbox.DefaultImage, "Container image (docker only)")
+	flags.StringVar(&o.Name, "name", "", "Disk name and container hostname")
+	flags.StringVar(&o.MountPath, "mount", sandbox.DefaultMountPath, "Disk mountpoint inside the container (docker only)")
+	flags.StringVar(&o.Network, "network", "", "Attach the sandbox to this docker network (docker only)")
+	flags.StringVar(&o.Binary, "binary", "", "Linux bowl client: injected into the container for docker (default: build and cache one), run on this host for microvm (default: bowl in PATH)")
+	flags.BoolVar(&o.Rebuild, "rebuild", false, "Force rebuilding the Linux client")
 	flags.BoolVarP(&quiet, "quiet", "q", false, "Quiet mode, output only the sandbox ID")
-	flags.IntVar(&cpus, "cpus", 0, "CPU limit (default: 1 for microvm, unlimited for docker)")
-	flags.IntVar(&memoryMiB, "memory", 0, "Memory limit in MiB (default: 1024 for microvm, unlimited for docker)")
-	flags.DurationVar(&timeout, "timeout", 0, "Remove the sandbox and its disk after this long, e.g. 30m; renew with bowl-sandbox timeout")
-	addSandboxStorageFlags(cmd, &endpoint, &token)
+	flags.IntVar(&o.CPUs, "cpus", 0, "CPU limit (default: 1 for microvm, unlimited for docker)")
+	flags.IntVar(&o.MemoryMiB, "memory", 0, "Memory limit in MiB (default: 1024 for microvm, unlimited for docker)")
+	flags.DurationVar(&o.Timeout, "timeout", 0, "Remove the sandbox and its disk after this long, e.g. 30m; renew with bowl-sandbox timeout")
+	addSandboxStorageFlags(cmd, &o.Endpoint, &o.Token)
 	return cmd
 }
 

@@ -2,9 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/starsrc/bowl/client/internal/sandbox"
 )
 
 func TestSboxSplitCpSpec(t *testing.T) {
@@ -53,4 +57,26 @@ func TestSandboxRuntimeFlag(t *testing.T) {
 	stderr.Reset()
 	assert.Equal(t, 2, ExecuteSandbox([]string{"--runtime", "microvm", "create"}, &stdout, &stderr))
 	assert.Contains(t, stderr.String(), "--from")
+}
+
+// The API refuses to listen beyond loopback without a key, and checks the key when there is one.
+func TestSandboxAPIAuth(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	assert.Equal(t, 2, ExecuteSandbox([]string{"--runtime", "docker", "serve", "--listen", "0.0.0.0:0"}, &stdout, &stderr))
+	assert.Contains(t, stderr.String(), "api-key")
+
+	sboxRuntime, sboxRuntimeName = &sandbox.Runtime{}, runtimeDocker
+	h := (&apiServer{}).routes("secret")
+	for auth, want := range map[string]int{"": 401, "Bearer nope": 401, "Bearer secret": 400} {
+		req := httptest.NewRequest("POST", "/sandboxes/x/commands", strings.NewReader(`{"cmd":"true","argv":["true"]}`))
+		req.Header.Set("Authorization", auth)
+		rec := httptest.NewRecorder()
+		// With the right key the request reaches the handler, which rejects the unknown sandbox or the body.
+		h.ServeHTTP(rec, req)
+		if want == 400 {
+			assert.NotEqual(t, 401, rec.Code, "auth %q", auth)
+			continue
+		}
+		assert.Equal(t, want, rec.Code, "auth %q", auth)
+	}
 }

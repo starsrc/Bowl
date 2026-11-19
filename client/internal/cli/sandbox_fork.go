@@ -16,6 +16,57 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
+// sboxFork pauses the source, syncs it, forks its disk and resumes it, so the fork is a consistent
+// point in time; then it starts a new sandbox on the fork. forkTook covers pause through resume.
+func sboxFork(src, name, binary, token string, log io.Writer) (newID string, forkTook time.Duration, err error) {
+	ctx := context.Background()
+	info, err := sboxRuntime.Info(ctx, src)
+	if err != nil {
+		return "", 0, runtimeExitErr(err)
+	}
+	client, code, err := newDiskStorageClient(info.Endpoint, token)
+	if err != nil {
+		return "", 0, &cliExitError{code: code, err: err}
+	}
+	start := time.Now()
+	wasRunning := info.Status == "running"
+	if wasRunning {
+		if err = sboxRuntime.Pause(ctx, src); err != nil {
+			return "", 0, runtimeExitErr(fmt.Errorf("pause source: %w", err))
+		}
+	}
+	err = sboxRuntime.Sync(ctx, src)
+	var resp *connect.Response[storagev1.ForkDiskResponse]
+	if err == nil {
+		resp, err = client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{SourceDiskId: src, Name: name}))
+	}
+	if wasRunning {
+		if resumeErr := sboxRuntime.Resume(ctx, src); resumeErr != nil {
+			err = errors.Join(err, fmt.Errorf("resume source: %w", resumeErr))
+		}
+	}
+	if err != nil {
+		return "", 0, runtimeExitErr(fmt.Errorf("fork sandbox disk: %w", err))
+	}
+	forkTook = time.Since(start)
+	newID = resp.Msg.GetDisk().GetDiskId()
+
+	spec := &sandbox.CreateSpec{
+		ID: newID, Image: info.Image, Name: name, MountPath: info.MountPath, Network: info.Network,
+		HostEndpoint: info.Endpoint, Token: rpc.ResolveToken(token),
+	}
+	if sboxRuntimeName == runtimeMicroVM {
+		err = sboxStartMicroVM(spec, binary)
+	} else {
+		err = sboxStart(spec, binary, false, log)
+	}
+	if err != nil {
+		_ = sboxDeleteDisk(info.Endpoint, token, newID)
+		return "", 0, runtimeExitErr(err)
+	}
+	return newID, forkTook, nil
+}
+
 func newSandboxForkCmd() *cobra.Command {
 	var name, binary, token string
 	var quiet bool
@@ -24,54 +75,11 @@ func newSandboxForkCmd() *cobra.Command {
 		Short: "Fork a sandbox's disk and start a new sandbox on the copy; the original keeps running",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
-			ctx := context.Background()
-			src := sandbox.StripID(posArgs[0])
-			info, err := sboxRuntime.Info(ctx, src)
-			if err != nil {
-				return runtimeExitErr(err)
-			}
-			client, code, err := newDiskStorageClient(info.Endpoint, token)
-			if err != nil {
-				return &cliExitError{code: code, err: err}
-			}
-
-			// Freeze the source so the fork is a consistent point in time, push its staged
-			// writes to the storage node, fork, and let it run again.
 			start := time.Now()
-			wasRunning := info.Status == "running"
-			if wasRunning {
-				if err = sboxRuntime.Pause(ctx, src); err != nil {
-					return runtimeExitErr(fmt.Errorf("pause source: %w", err))
-				}
-			}
-			err = sboxRuntime.Sync(ctx, src)
-			var resp *connect.Response[storagev1.ForkDiskResponse]
-			if err == nil {
-				resp, err = client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{SourceDiskId: src, Name: name}))
-			}
-			if wasRunning {
-				if resumeErr := sboxRuntime.Resume(ctx, src); resumeErr != nil {
-					err = errors.Join(err, fmt.Errorf("resume source: %w", resumeErr))
-				}
-			}
+			src := sandbox.StripID(posArgs[0])
+			newID, forkTook, err := sboxFork(src, name, binary, token, cmd.ErrOrStderr())
 			if err != nil {
-				return runtimeExitErr(fmt.Errorf("fork sandbox disk: %w", err))
-			}
-			forkTook := time.Since(start)
-			newID := resp.Msg.GetDisk().GetDiskId()
-
-			spec := &sandbox.CreateSpec{
-				ID: newID, Image: info.Image, Name: name, MountPath: info.MountPath, Network: info.Network,
-				HostEndpoint: info.Endpoint, Token: rpc.ResolveToken(token),
-			}
-			if sboxRuntimeName == runtimeMicroVM {
-				err = sboxStartMicroVM(spec, binary)
-			} else {
-				err = sboxStart(spec, binary, false, cmd.ErrOrStderr())
-			}
-			if err != nil {
-				_ = sboxDeleteDisk(info.Endpoint, token, newID)
-				return runtimeExitErr(err)
+				return err
 			}
 			out := cmd.OutOrStdout()
 			if quiet {

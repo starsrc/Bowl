@@ -107,6 +107,11 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxTimeoutCmd(),
 		newSandboxReapCmd(),
 		newSandboxTemplateCmd(),
+		newSandboxForkCmd(),
+		newSandboxDiffCmd(),
+		newSandboxMergeCmd(),
+		newSandboxStopCmd(true),
+		newSandboxStopCmd(false),
 	)
 	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists)")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")

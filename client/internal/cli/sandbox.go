@@ -106,6 +106,7 @@ func newSandboxCmd() *cobra.Command {
 		newSandboxPauseCmd(false),
 		newSandboxTimeoutCmd(),
 		newSandboxReapCmd(),
+		newSandboxTemplateCmd(),
 	)
 	cmd.PersistentFlags().StringVar(&runtimeFlag, "runtime", "", "Sandbox runtime: microvm or docker (default: $BOWL_SANDBOX_RUNTIME, else microvm when /dev/kvm exists)")
 	cmd.PersistentFlags().StringVar(&stateDir, "state-dir", "", "MicroVM state directory holding vmlinux and bowl-sandbox-guest (default /var/lib/bowl-sandbox)")
@@ -114,18 +115,21 @@ func newSandboxCmd() *cobra.Command {
 
 func newSandboxCreateCmd() *cobra.Command {
 	var (
-		from, size, image, name, mountAt, network, binary, endpoint, token string
-		rebuild, quiet                                                     bool
-		cpus, memoryMiB                                                    int
-		timeout                                                            time.Duration
+		from, template, size, image, name, mountAt, network, binary, endpoint, token string
+		rebuild, quiet                                                               bool
+		cpus, memoryMiB                                                              int
+		timeout                                                                      time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a sandbox, forking its disk from --from or creating an empty one",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if sboxRuntimeName == runtimeMicroVM && from == "" {
-				return usageExitErr(errors.New("the microvm runtime boots from the disk, so --from <template disk> is required"), false)
+			if from != "" && template != "" {
+				return usageExitErr(errors.New("--from and --template cannot be used together"), false)
+			}
+			if sboxRuntimeName == runtimeMicroVM && from == "" && template == "" {
+				return usageExitErr(errors.New("the microvm runtime boots from the disk, so --template <name> or --from <disk> is required"), false)
 			}
 			if sboxRuntimeName == runtimeDocker {
 				if _, err := exec.LookPath("docker"); err != nil {
@@ -141,6 +145,12 @@ func newSandboxCreateCmd() *cobra.Command {
 				return &cliExitError{code: code, err: err}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			if template != "" {
+				if from, err = findTemplate(ctx, client, template); err != nil {
+					cancel()
+					return runtimeExitErr(err)
+				}
+			}
 			diskID, cliErr := sboxCreateDisk(ctx, client, from, size, name)
 			cancel()
 			if cliErr != nil {
@@ -179,7 +189,7 @@ func newSandboxCreateCmd() *cobra.Command {
 			}
 			fmt.Fprintf(out, "Sandbox %s is ready (%s)\n", diskID, sboxRuntimeName)
 			if sboxRuntimeName == runtimeMicroVM {
-				fmt.Fprintf(out, "  Template:  %s\n", from)
+				fmt.Fprintf(out, "  Template:  %s\n", cmp.Or(template, from))
 				fmt.Fprintf(out, "  Disk:      %s (the VM's root filesystem)\n", diskID)
 			} else {
 				fmt.Fprintf(out, "  Image:     %s\n", image)
@@ -191,6 +201,7 @@ func newSandboxCreateCmd() *cobra.Command {
 	}
 	flags := cmd.Flags()
 	flags.StringVar(&from, "from", "", "Fork the sandbox disk from an existing disk (the source is untouched); required for microvm")
+	flags.StringVar(&template, "template", "", "Fork the sandbox disk from this template (see bowl-sandbox template list)")
 	flags.StringVar(&size, "size", "1GiB", "Capacity of the new disk; ignored with --from")
 	flags.StringVar(&image, "image", sandbox.DefaultImage, "Container image (docker only)")
 	flags.StringVar(&name, "name", "", "Disk name and container hostname")

@@ -220,7 +220,7 @@ func TestObservability_GivenSlowAttemptAndExhaustedRetry_EmitsSlowAndExhaustedLo
 		Metrics:    rpcMetrics,
 		RetryConfig: &RetryConfig{
 			InitialInterval: 100 * time.Millisecond,
-			MaxElapsedTime:  500 * time.Millisecond,
+			MaxElapsedTime:  1250 * time.Millisecond,
 			RandFloat64:     func() float64 { return 1.0 },
 		},
 	}, clk)

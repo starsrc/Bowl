@@ -53,7 +53,7 @@ func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedT
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 
@@ -114,7 +114,7 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 		return nil, fuse.Status(syscall.ESTALE)
 	}
 	if err != nil {
-		return nil, fs.ToStatus(err, cancel)
+		return nil, fs.ToStatus(err)
 	}
 
 	target = resp.Msg.GetTarget()
@@ -177,7 +177,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 		Epoch:        fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, nil)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	if fs.clearOrphan(input.Oldnodeid) {

@@ -1322,7 +1322,7 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 		{
 			name:       "CodePermissionDenied",
 			renewErr:   connect.NewError(connect.CodePermissionDenied, errors.New("permission denied")),
-			wantStatus: fuse.EPERM,
+			wantStatus: fuse.EACCES,
 			wantReason: "permission denied",
 		},
 		{
@@ -1334,7 +1334,7 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 		{
 			name:       "CodeUnimplemented",
 			renewErr:   connect.NewError(connect.CodeUnimplemented, errors.New("renew unsupported")),
-			wantStatus: fuse.ENOSYS,
+			wantStatus: fuse.Status(syscall.EOPNOTSUPP),
 			wantReason: "renew unsupported",
 		},
 	}
@@ -1402,6 +1402,52 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 			require.Empty(t, storage.getUnmountReqs(), "scene=%s fenced mount must skip UnmountDisk RPC", tc.name)
 		})
 	}
+}
+
+func TestPermanentRenewFenceStatus_GivenErrorInfoOverrideAndPermanentCodes_DelegatesToRPCMapError(t *testing.T) {
+	newErrWithReason := func(code connect.Code, reason string) error {
+		cErr := connect.NewError(code, errors.New("server detail"))
+		detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+			Domain: "bowl.storage",
+			Reason: reason,
+		})
+		require.NoError(t, err)
+		cErr.AddDetail(detail)
+		return cErr
+	}
+
+	// Given / When / Then: ErrorInfo Reason overrides default Connect code mapping.
+	st, code, permanent := permanentRenewFenceStatus(newErrWithReason(connect.CodePermissionDenied, "EPERM"))
+	require.True(t, permanent)
+	require.Equal(t, connect.CodePermissionDenied, code)
+	require.Equal(t, fuse.EPERM, st)
+
+	st, code, permanent = permanentRenewFenceStatus(newErrWithReason(connect.CodeFailedPrecondition, "EROFS"))
+	require.True(t, permanent)
+	require.Equal(t, connect.CodeFailedPrecondition, code)
+	require.Equal(t, fuse.Status(syscall.EROFS), st)
+
+	// Without ErrorInfo, all 6 permanent codes delegate to rpc.MapError.
+	st, code, permanent = permanentRenewFenceStatus(connect.NewError(connect.CodeUnauthenticated, errors.New("unauth")))
+	require.True(t, permanent)
+	require.Equal(t, connect.CodeUnauthenticated, code)
+	require.Equal(t, fuse.EACCES, st)
+
+	st, code, permanent = permanentRenewFenceStatus(connect.NewError(connect.CodePermissionDenied, errors.New("denied")))
+	require.True(t, permanent)
+	require.Equal(t, connect.CodePermissionDenied, code)
+	require.Equal(t, fuse.EACCES, st)
+
+	st, code, permanent = permanentRenewFenceStatus(connect.NewError(connect.CodeUnimplemented, errors.New("unimpl")))
+	require.True(t, permanent)
+	require.Equal(t, connect.CodeUnimplemented, code)
+	require.Equal(t, fuse.Status(syscall.EOPNOTSUPP), st)
+
+	// Non-permanent errors return permanent=false.
+	st, code, permanent = permanentRenewFenceStatus(connect.NewError(connect.CodeUnavailable, errors.New("transient")))
+	require.False(t, permanent)
+	require.Equal(t, connect.CodeUnavailable, code)
+	require.Equal(t, fuse.OK, st)
 }
 
 func TestRunMount_LeaseRenewExternalFence_GivenRawFSFenced_StopsRenewerFlipsReadyzAndSkipsUnmount(t *testing.T) {

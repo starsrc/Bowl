@@ -146,7 +146,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		Epoch:              fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 

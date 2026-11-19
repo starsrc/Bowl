@@ -152,7 +152,30 @@ func (c *fakeClock) NewTimer(d time.Duration) rpcTimer {
 	return tm
 }
 
+type fakeDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c *fakeDeadlineContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+
+func (c *fakeDeadlineContext) Err() error {
+	err := c.Context.Err()
+	if err == nil {
+		return nil
+	}
+	if errors.Is(context.Cause(c.Context), context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
 func (c *fakeClock) WithDeadline(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	if parentDL, ok := parent.Deadline(); ok && !parentDL.After(deadline) {
+		return context.WithCancel(parent)
+	}
 	ctx, cancelCause := context.WithCancelCause(parent)
 	c.mu.Lock()
 	dl := &fakeClockDeadline{
@@ -166,12 +189,15 @@ func (c *fakeClock) WithDeadline(parent context.Context, deadline time.Time) (co
 		c.deadlines = append(c.deadlines, dl)
 	}
 	c.mu.Unlock()
-	return ctx, func() {
-		c.mu.Lock()
-		dl.done = true
-		c.mu.Unlock()
-		cancelCause(nil)
-	}
+	return &fakeDeadlineContext{
+			Context:  ctx,
+			deadline: deadline,
+		}, func() {
+			c.mu.Lock()
+			dl.done = true
+			c.mu.Unlock()
+			cancelCause(nil)
+		}
 }
 
 // inMemoryHandlerClient 将 ConnectRPC 处理适配器直接挂载在进程内 RoundTripper 接缝上，避免监听真实 TCP 端口。
@@ -330,6 +356,45 @@ func requireMetricFamily(t *testing.T, mfs []*dto.MetricFamily, name string) *dt
 	}
 	t.Fatalf("未找到期望的 Prometheus 指标 %q", name)
 	return nil
+}
+
+func counterValueForProcedure(mfs []*dto.MetricFamily, name, procedure string) float64 {
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "procedure" && lp.GetValue() == procedure {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func histogramCountForProcedureCode(mfs []*dto.MetricFamily, name, procedure, code string) uint64 {
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			var matchProc, matchCode bool
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "procedure" && lp.GetValue() == procedure {
+					matchProc = true
+				}
+				if lp.GetName() == "code" && lp.GetValue() == code {
+					matchCode = true
+				}
+			}
+			if matchProc && matchCode {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
 }
 
 func requirePrometheusHistogramTotalCount(t *testing.T, mf *dto.MetricFamily, wantCount uint64, wantBuckets int, wantFirstBucket float64) {

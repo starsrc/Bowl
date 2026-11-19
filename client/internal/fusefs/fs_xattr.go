@@ -88,7 +88,7 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 	}))
 	fs.cache.invalidateInode(input.NodeId)
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	if attr == securityCapabilityXattr {
@@ -142,7 +142,7 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 		DiskId: fs.cfg.DiskID,
 	}))
 	if err != nil {
-		status = fs.ToStatus(err, cancel)
+		status = fs.ToStatus(err)
 		if !fenced && !fs.IsFenced() && attr == securityCapabilityXattr && status == fuse.Status(syscall.ENODATA) {
 			fs.caps.markAbsent(header.NodeId)
 		}
@@ -186,7 +186,7 @@ func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest [
 		DiskId: fs.cfg.DiskID,
 	}))
 	if err != nil {
-		return 0, fs.ToStatus(err, cancel)
+		return 0, fs.ToStatus(err)
 	}
 
 	return formatXattrList(resp.Msg.GetNames(), dest)
@@ -235,7 +235,7 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 	}))
 	fs.cache.invalidateInode(header.NodeId)
 	if err != nil {
-		return fs.ToStatus(err, cancel)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	if attr == securityCapabilityXattr {

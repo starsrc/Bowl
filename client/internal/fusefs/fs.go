@@ -501,7 +501,7 @@ func (fs *RawFS) stageErrToStatus(err error) fuse.Status {
 	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		return fuse.Status(errno)
 	}
-	return fs.ToStatus(err, nil)
+	return fs.ToStatus(err)
 }
 
 // BindMountpoint 在 FUSE 挂载完成后解析并绑定对应的 /sys/fs/fuse/connections/<dev> 目录。
@@ -666,12 +666,12 @@ func (fs *RawFS) RPCContextFrom(parent context.Context, cancel <-chan struct{}) 
 }
 
 // ToStatus 将 ConnectRPC 错误解码为对应的 Linux fuse.Status。
-func (fs *RawFS) ToStatus(err error, cancel <-chan struct{}) fuse.Status {
+func (fs *RawFS) ToStatus(err error) fuse.Status {
 	if err == nil {
 		return fuse.OK
 	}
 	fs.fenceIfStaleEpoch(err)
-	errno := rpc.MapErrorWithCancel(err, cancel)
+	errno := rpc.MapError(err)
 	return fuse.Status(errno)
 }
 

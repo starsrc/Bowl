@@ -59,19 +59,6 @@ func contextWithCancelChanClock(parent context.Context, cancel <-chan struct{}, 
 	return ctx, func() { cancelCause(nil) }
 }
 
-// MapErrorWithCancel 在调用 MapError 前优先检查内核 cancel 通道是否已触发关闭。
-// 若内核 cancel 通道已关闭，直接优先返回 syscall.EINTR。
-func MapErrorWithCancel(err error, cancel <-chan struct{}) syscall.Errno {
-	if cancel != nil {
-		select {
-		case <-cancel:
-			return syscall.EINTR
-		default:
-		}
-	}
-	return MapError(err)
-}
-
 // MapError 将 ConnectRPC 错误或底层传输错误无损还原为 Linux syscall.Errno。
 // 若 err 为 nil，返回 0（成功）。
 // 若 err 因内核中断信号取消（ErrKernelInterrupted 或 context.Canceled），返回 syscall.EINTR。
@@ -149,7 +136,7 @@ func MapError(err error) syscall.Errno {
 			return syscall.ENOENT
 		case connect.CodeAlreadyExists:
 			return syscall.EEXIST
-		case connect.CodePermissionDenied:
+		case connect.CodePermissionDenied, connect.CodeUnauthenticated:
 			return syscall.EACCES
 		case connect.CodeInvalidArgument:
 			return syscall.EINVAL

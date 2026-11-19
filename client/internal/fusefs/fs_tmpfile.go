@@ -13,16 +13,14 @@ import (
 )
 
 type rawFSTmpMaterializer struct {
-	fs     *RawFS
-	cancel <-chan struct{}
-	epoch  uint64
+	fs    *RawFS
+	epoch uint64
 }
 
-func (fs *RawFS) newTmpMaterializer(cancel <-chan struct{}, epoch uint64) *rawFSTmpMaterializer {
+func (fs *RawFS) newTmpMaterializer(epoch uint64) *rawFSTmpMaterializer {
 	return &rawFSTmpMaterializer{
-		fs:     fs,
-		cancel: cancel,
-		epoch:  epoch,
+		fs:    fs,
+		epoch: epoch,
 	}
 }
 
@@ -38,7 +36,7 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 		Epoch:     m.fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return nil, 0, 0, m.fs.ToStatus(err, m.cancel)
+		return nil, 0, 0, m.fs.ToStatus(err)
 	}
 	m.fs.markMetaDirty()
 	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
@@ -128,7 +126,7 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fus
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
-		return fs.ToStatus(err, nil)
+		return fs.ToStatus(err)
 	}
 	fs.markMetaDirty()
 	inode := resp.Msg.GetInode()
@@ -187,7 +185,7 @@ func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, inpu
 	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
 	defer done()
 	epoch := fs.cache.version()
-	mat := fs.newTmpMaterializer(cancel, epoch)
+	mat := fs.newTmpMaterializer(epoch)
 	res, handled, status := fs.tmpMgr.Link(
 		ctx, input.Oldnodeid, input.NodeId, filename, fs.handles.IsOpen(input.Oldnodeid), mat, out,
 	)

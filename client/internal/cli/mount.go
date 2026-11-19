@@ -207,18 +207,13 @@ func permanentRenewFenceStatus(err error) (fuse.Status, connect.Code, bool) {
 	}
 	code := connectErr.Code()
 	switch code {
-	case connect.CodeFailedPrecondition:
-		return fuse.EBUSY, code, true
-	case connect.CodeNotFound:
-		return fuse.ENOENT, code, true
-	case connect.CodeUnauthenticated:
-		return fuse.Status(syscall.EACCES), code, true
-	case connect.CodePermissionDenied:
-		return fuse.EPERM, code, true
-	case connect.CodeInvalidArgument:
-		return fuse.EINVAL, code, true
-	case connect.CodeUnimplemented:
-		return fuse.ENOSYS, code, true
+	case connect.CodeFailedPrecondition,
+		connect.CodeNotFound,
+		connect.CodeUnauthenticated,
+		connect.CodePermissionDenied,
+		connect.CodeInvalidArgument,
+		connect.CodeUnimplemented:
+		return fuse.Status(rpc.MapError(err)), code, true
 	default:
 		return fuse.OK, code, false
 	}

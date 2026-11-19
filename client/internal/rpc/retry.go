@@ -111,6 +111,7 @@ func isNeverRetryCode(code connect.Code) bool {
 		connect.CodeNotFound,
 		connect.CodeAlreadyExists,
 		connect.CodePermissionDenied,
+		connect.CodeUnauthenticated,
 		connect.CodeFailedPrecondition,
 		connect.CodeResourceExhausted,
 		connect.CodeAborted,
@@ -271,6 +272,19 @@ func (realClock) WithDeadline(parent context.Context, deadline time.Time) (conte
 	return context.WithDeadline(parent, deadline)
 }
 
+func rpcStatusCode(err error) string {
+	if connectErr, ok := errors.AsType[*connect.Error](err); ok {
+		return connectErr.Code().String()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.CodeDeadlineExceeded.String()
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrKernelInterrupted) {
+		return connect.CodeCanceled.String()
+	}
+	return connect.CodeOf(err).String()
+}
+
 // NewRetryInterceptor 创建遵循有界指数退避策略的 ConnectRPC 客户端一元拦截器。
 func NewRetryInterceptor(cfg RetryConfig) connect.UnaryInterceptorFunc {
 	return newRetryInterceptor(cfg, nil, nil, realClock{})
@@ -291,7 +305,7 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 				defer func() {
 					code := "ok"
 					if retErr != nil {
-						code = connect.CodeOf(retErr).String()
+						code = rpcStatusCode(retErr)
 					}
 					metrics.observeLogicalDuration(procedure, code, clk.Since(startTime))
 				}()
@@ -303,10 +317,7 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 
 			ctx, reqID := ensureRequestID(ctx)
 			interval := config.InitialInterval
-			var (
-				lastErr          error
-				lastRetryableErr error
-			)
+			var lastRetryableErr error
 			attempts := 0
 			retryCount := 0
 
@@ -336,25 +347,35 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 				return wrapped
 			}
 
+			callerDeadline, hasCallerDeadline := ctx.Deadline()
 			attemptCtx := ctx
-			if config.MaxElapsedTime > 0 {
+			var (
+				effectiveDeadline time.Time
+				hasDeadline       bool
+			)
+			if hasCallerDeadline {
+				effectiveDeadline = callerDeadline
+				hasDeadline = true
+			} else if config.MaxElapsedTime > 0 {
+				effectiveDeadline = startTime.Add(config.MaxElapsedTime)
+				hasDeadline = true
 				var cancel context.CancelFunc
-				attemptCtx, cancel = clk.WithDeadline(ctx, startTime.Add(config.MaxElapsedTime))
+				attemptCtx, cancel = clk.WithDeadline(ctx, effectiveDeadline)
 				defer cancel()
 			}
 
 			for {
 				if err := ctx.Err(); err != nil {
+					if errors.Is(err, context.DeadlineExceeded) && lastRetryableErr != nil {
+						return nil, exhaustBudget(lastRetryableErr)
+					}
 					return nil, err
 				}
 				if err := attemptCtx.Err(); err != nil {
-					if lastRetryableErr != nil {
+					if errors.Is(err, context.DeadlineExceeded) && lastRetryableErr != nil {
 						return nil, exhaustBudget(lastRetryableErr)
 					}
-					if lastErr != nil {
-						return nil, exhaustBudget(lastErr)
-					}
-					return nil, exhaustBudget(err)
+					return nil, err
 				}
 
 				attempts++
@@ -363,38 +384,36 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 					return resp, nil
 				}
 
-				lastErr = err
+				retryable := shouldRetry(procedure, err)
+				if retryable {
+					lastRetryableErr = err
+				}
 
-				// 若父上下文已取消或超时，直接返回原始错误
-				if ctx.Err() != nil {
+				// If caller context was explicitly canceled (not deadline exceeded), return immediately without exhaustBudget.
+				if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) {
 					return nil, err
 				}
 
-				// 若父上下文未取消但重试总预算上下文已耗尽，停止重试并返回错误（映射为 EIO）；
-				// 若本次尝试因预算到期被本地截断且此前已有真实可重试故障，保留真实故障作为根因以便排障留痕。
-				if attemptCtx.Err() != nil {
+				// If effective deadline expired (caller deadline or MaxElapsedTime), exit via exhaustBudget only when
+				// at least one retryable failure happened and the error carries no business ErrorInfo.
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
 					if !hasErrorInfo(err) && lastRetryableErr != nil {
 						return nil, exhaustBudget(lastRetryableErr)
 					}
-					return nil, exhaustBudget(err)
+					return nil, err
 				}
 
 				// 若不满足重试条件，立即终止并返回原始错误
-				if !shouldRetry(procedure, err) {
+				if !retryable {
 					return nil, err
-				}
-				lastRetryableErr = err
-
-				// 计算已过去的总耗时，若超出总预算则终止重试
-				elapsed := clk.Since(startTime)
-				if elapsed >= config.MaxElapsedTime {
-					return nil, exhaustBudget(lastErr)
 				}
 
 				sleepDuration := computeJitteredInterval(interval, config.RandFloat64)
-				remaining := config.MaxElapsedTime - elapsed
-				if sleepDuration > remaining {
-					sleepDuration = remaining
+				if hasDeadline {
+					remaining := effectiveDeadline.Sub(clk.Now())
+					if remaining <= 0 || sleepDuration >= remaining {
+						return nil, exhaustBudget(lastRetryableErr)
+					}
 				}
 
 				retryCount++
@@ -418,7 +437,19 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 				select {
 				case <-ctx.Done():
 					timer.Stop()
+					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						return nil, exhaustBudget(lastRetryableErr)
+					}
 					return nil, ctx.Err()
+				case <-attemptCtx.Done():
+					timer.Stop()
+					if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) {
+						return nil, ctxErr
+					}
+					if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+						return nil, exhaustBudget(lastRetryableErr)
+					}
+					return nil, attemptCtx.Err()
 				case <-timer.Chan():
 				}
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -97,9 +98,14 @@ func newTemplateCreateCmd() *cobra.Command {
 	return cmd
 }
 
-// fillTemplate mounts the new disk, unpacks the image and the guest agent into it, and unmounts,
-// which flushes everything to the storage node.
+// fillTemplate unpacks the image and the guest agent into the new disk and unmounts it, which
+// flushes everything to the storage node. The microvm runtime mounts the disk on this host;
+// the Docker-based ones mount it in a throwaway container, so it also works where the host has
+// no FUSE (macOS).
 func fillTemplate(ctx context.Context, binary, diskID, image, endpoint, token string) error {
+	if sboxRuntimeName != runtimeMicroVM {
+		return fillTemplateInContainer(ctx, binary, diskID, image, endpoint, token)
+	}
 	dir, err := os.MkdirTemp("", "bowl-template-")
 	if err != nil {
 		return err
@@ -131,6 +137,36 @@ func fillTemplate(ctx context.Context, binary, diskID, image, endpoint, token st
 		return fmt.Errorf("install guest agent: %w", err)
 	}
 	return umount()
+}
+
+func fillTemplateInContainer(ctx context.Context, binary, diskID, image, endpoint, token string) error {
+	resolved, err := rpc.ResolveEndpoint(endpoint)
+	if err != nil {
+		return err
+	}
+	helper := &sandbox.Runtime{DefaultCaps: true}
+	const at = "/mnt/template"
+	spec := &sandbox.CreateSpec{ID: diskID, MountPath: at, HostEndpoint: resolved, Token: rpc.ResolveToken(token)}
+	if err = sboxStartOn(helper, spec, binary, false, os.Stderr); err != nil {
+		return fmt.Errorf("start a container to fill the template: %w", err)
+	}
+	defer func() { _ = helper.Remove(context.WithoutCancel(ctx), diskID) }()
+	if importErr := helper.ImportImage(ctx, diskID, image, spec.Arch, at, os.Stderr); importErr != nil {
+		return importErr
+	}
+	// The guest agent only matters for the microvm runtime; put it in when this host has one so
+	// the template works there too.
+	if agent := (&sandbox.MicroVM{StateDir: sboxStateDir}).GuestAgentFile(); agent != "" {
+		code, execErr := helper.Exec(ctx, diskID, "/", []string{"mkdir", "-p", at + "/.bowl"}, sandbox.ExecOptions{}, nil, io.Discard, os.Stderr)
+		if execErr != nil || code != 0 {
+			return fmt.Errorf("prepare guest agent directory: %w", errors.Join(execErr, fmt.Errorf("exit code %d", code)))
+		}
+		if err = helper.CopyInto(ctx, diskID, agent, at+"/.bowl/guest", os.Stderr); err != nil {
+			return fmt.Errorf("install guest agent: %w", err)
+		}
+	}
+	// Unmount before the deferred Remove so a flush failure is reported, not swallowed.
+	return helper.Unmount(ctx, diskID, at)
 }
 
 // findTemplate returns the disk ID of the newest template with this name.

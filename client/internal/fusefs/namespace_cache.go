@@ -206,6 +206,15 @@ func (c *NamespaceCache) removeKey(key cacheKey) {
 	}
 }
 
+// pruneOrphanDirMetaLocked drops completeDirs and parentByDir entries for ino
+// once neither its inode ('i') nor its directory stream ('d') remains live in the LRU cache.
+func (c *NamespaceCache) pruneOrphanDirMetaLocked(ino uint64) {
+	if c.items[cacheKey{kind: 'i', ino: ino}] == nil && c.items[cacheKey{kind: 'd', ino: ino}] == nil {
+		delete(c.completeDirs, ino)
+		delete(c.parentByDir, ino)
+	}
+}
+
 // index 登记缓存项对应的二级索引。
 func (c *NamespaceCache) index(item *cacheItem) {
 	switch item.key.kind {
@@ -275,8 +284,11 @@ func (c *NamespaceCache) putItem(item *cacheItem) {
 	}
 	if weight > c.capacity {
 		// 无法容纳的目录项意味着该父目录的完整内容不再可信。
-		if key.kind == 'e' {
+		switch key.kind {
+		case 'e':
 			delete(c.completeDirs, key.ino)
+		case 'i', 'd':
+			c.pruneOrphanDirMetaLocked(key.ino)
 		}
 		return
 	}
@@ -285,11 +297,15 @@ func (c *NamespaceCache) putItem(item *cacheItem) {
 		if back == nil {
 			break
 		}
-		// 目录项被容量淘汰后，该父目录的完整内容不再可信；属性与目录流的淘汰不影响完整标记。
-		if evicted := itemOf(back); evicted.key.kind == 'e' {
+		evicted := itemOf(back)
+		// 目录项被容量淘汰后，该父目录的完整内容不再可信。
+		if evicted.key.kind == 'e' {
 			delete(c.completeDirs, evicted.key.ino)
 		}
 		c.remove(back)
+		if evicted.key.kind == 'i' || evicted.key.kind == 'd' {
+			c.pruneOrphanDirMetaLocked(evicted.key.ino)
+		}
 		c.metrics.Load().incNSCacheEviction()
 	}
 	c.items[key] = c.lru.PushFront(item)
@@ -305,6 +321,9 @@ func (c *NamespaceCache) getValidLocked(key cacheKey, nowNano int64) (*cacheItem
 	item := itemOf(el)
 	if c.readOnly && nowNano >= item.expiresAtNano {
 		c.remove(el)
+		if key.kind == 'i' || key.kind == 'd' {
+			c.pruneOrphanDirMetaLocked(key.ino)
+		}
 		return nil, false
 	}
 	c.lru.MoveToFront(el)
@@ -387,6 +406,7 @@ func (c *NamespaceCache) readCachedInodeAtLocked(ino uint64, nowNano int64, touc
 		item := itemOf(el)
 		if c.readOnly && nowNano >= item.expiresAtNano {
 			c.remove(el)
+			c.pruneOrphanDirMetaLocked(ino)
 		} else {
 			if touchLRU {
 				c.lru.MoveToFront(el)
@@ -407,6 +427,7 @@ func (c *NamespaceCache) readCachedInodeAtLocked(ino uint64, nowNano int64, touc
 		dItem := itemOf(dirEl)
 		if c.readOnly && nowNano >= dItem.expiresAtNano {
 			c.remove(dirEl)
+			c.pruneOrphanDirMetaLocked(dir)
 			continue
 		}
 		for i, entry := range dItem.dir {
@@ -630,6 +651,7 @@ func (c *NamespaceCache) putInodeLocked(ino uint64, inode *storagev1.Inode, entr
 		ttlDur := ttlDuration(attrTimeout)
 		if ttlDur <= 0 {
 			c.removeKey(cacheKey{kind: 'i', ino: ino})
+			c.pruneOrphanDirMetaLocked(ino)
 			if len(c.dirsByChild[ino]) > 0 {
 				c.updateDirChildInodesLocked(ino, inode, attrTimeout, c.currentTime().UnixNano(), 0)
 			}
@@ -657,6 +679,7 @@ func (c *NamespaceCache) updateDirChildInodesLocked(ino uint64, inode *storagev1
 		dItem := itemOf(el)
 		if c.readOnly && nowNano >= dItem.expiresAtNano {
 			c.remove(el)
+			c.pruneOrphanDirMetaLocked(dir)
 			continue
 		}
 		entries := dItem.dir
@@ -710,12 +733,14 @@ func (c *NamespaceCache) refreshExistingInodesFromReadDirAt(epoch uint64, entrie
 		el := c.items[cacheKey{kind: 'i', ino: kernelIno}]
 		if el != nil && nowNano >= itemOf(el).expiresAtNano {
 			c.remove(el)
+			c.pruneOrphanDirMetaLocked(kernelIno)
 			el = nil
 		}
 		ttlDur := ttlDuration(attrTimeout)
 		if ttlDur <= 0 {
 			if el != nil {
 				c.remove(el)
+				c.pruneOrphanDirMetaLocked(kernelIno)
 			}
 			if len(c.dirsByChild[kernelIno]) > 0 {
 				c.updateDirChildInodesLocked(kernelIno, inode, attrTimeout, nowNano, 0)
@@ -907,7 +932,11 @@ func (c *NamespaceCache) inodeAttrTimeout(ino uint64, fallback float64) float64 
 	return fallback
 }
 
-func (c *NamespaceCache) readlink(ino uint64, now time.Time) ([]byte, bool) {
+func (c *NamespaceCache) readlink(ino uint64) ([]byte, bool) {
+	var nowNano int64
+	if c.readOnly {
+		nowNano = c.currentTime().UnixNano()
+	}
 	c.mu.Lock()
 	el := c.items[cacheKey{kind: 'l', ino: ino}]
 	if el == nil {
@@ -916,7 +945,7 @@ func (c *NamespaceCache) readlink(ino uint64, now time.Time) ([]byte, bool) {
 		return nil, false
 	}
 	item := itemOf(el)
-	if now.UnixNano() >= item.expiresAtNano {
+	if c.readOnly && nowNano >= item.expiresAtNano {
 		c.remove(el)
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheMiss(nsCacheReadlink)
@@ -929,8 +958,8 @@ func (c *NamespaceCache) readlink(ino uint64, now time.Time) ([]byte, bool) {
 	return out, true
 }
 
-func (c *NamespaceCache) putReadlinkAt(epoch, ino uint64, target []byte, ttlSeconds float64, now time.Time) {
-	if ttlSeconds <= 0 {
+func (c *NamespaceCache) putReadlinkAt(epoch, ino uint64, target []byte, ttlSeconds float64) {
+	if ttlDuration(ttlSeconds) <= 0 {
 		return
 	}
 	c.mu.Lock()
@@ -938,11 +967,11 @@ func (c *NamespaceCache) putReadlinkAt(epoch, ino uint64, target []byte, ttlSeco
 	if epoch != ^uint64(0) && epoch != c.epoch {
 		return
 	}
-	c.putReadlinkLocked(ino, target, ttlSeconds, now)
+	c.putReadlinkLocked(ino, target, ttlSeconds)
 }
 
-func (c *NamespaceCache) putReadlinkAtIf(generation, epoch, ino uint64, target []byte, ttlSeconds float64, now time.Time) {
-	if ttlSeconds <= 0 {
+func (c *NamespaceCache) putReadlinkAtIf(generation, epoch, ino uint64, target []byte, ttlSeconds float64) {
+	if ttlDuration(ttlSeconds) <= 0 {
 		return
 	}
 	c.mu.Lock()
@@ -950,18 +979,22 @@ func (c *NamespaceCache) putReadlinkAtIf(generation, epoch, ino uint64, target [
 	if generation != c.mutations || (epoch != ^uint64(0) && epoch != c.epoch) {
 		return
 	}
-	c.putReadlinkLocked(ino, target, ttlSeconds, now)
+	c.putReadlinkLocked(ino, target, ttlSeconds)
 }
 
-func (c *NamespaceCache) putReadlinkLocked(ino uint64, target []byte, ttlSeconds float64, now time.Time) {
-	ttlDur := time.Duration(ttlSeconds * float64(time.Second))
+func (c *NamespaceCache) putReadlinkLocked(ino uint64, target []byte, ttlSeconds float64) {
+	ttlDur := ttlDuration(ttlSeconds)
 	if ttlDur <= 0 {
 		return
+	}
+	var expiresAtNano int64
+	if c.readOnly {
+		expiresAtNano = c.currentTime().Add(ttlDur).UnixNano()
 	}
 	c.putItem(&cacheItem{
 		key:           cacheKey{kind: 'l', ino: ino},
 		linkTarget:    append([]byte(nil), target...),
-		expiresAtNano: now.Add(ttlDur).UnixNano(),
+		expiresAtNano: expiresAtNano,
 		weight:        1,
 	})
 }
@@ -973,7 +1006,9 @@ func (c *NamespaceCache) invalidateInode(ino uint64) {
 	c.removeKey(cacheKey{kind: 'l', ino: ino})
 	for dir := range copyInoSet(c.dirsByChild[ino]) {
 		c.removeKey(cacheKey{kind: 'd', ino: dir})
+		c.pruneOrphanDirMetaLocked(dir)
 	}
+	c.pruneOrphanDirMetaLocked(ino)
 	c.mutations++
 	c.mu.Unlock()
 	c.metrics.Load().incNSCacheInvalidation()
@@ -1090,6 +1125,7 @@ func (c *NamespaceCache) invalidateDir(parent uint64) {
 	// 父节点属性变化会使其出现在其它目录流的目录项中，一并定向失效。
 	for dir := range copyInoSet(c.dirsByChild[parent]) {
 		c.removeKey(cacheKey{kind: 'd', ino: dir})
+		c.pruneOrphanDirMetaLocked(dir)
 	}
 	c.mutations++
 	c.mu.Unlock()
@@ -1116,16 +1152,19 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 	}
 	c.remove(el)
 	if c.readOnly && nowNano >= dExpires {
+		c.pruneOrphanDirMetaLocked(parent)
 		return
 	}
 	if len(entries) > c.capacity/4 {
+		c.pruneOrphanDirMetaLocked(parent)
 		return
 	}
+	var parentIno uint64
 	evictedSameParent := false
 	for idx, entry := range entries {
 		name := string(entry.GetName())
-		if name == ".." && entry.GetIno() != 0 && len(c.parentByDir) < c.capacity {
-			c.parentByDir[parent] = entry.GetIno()
+		if name == ".." && entry.GetIno() != 0 {
+			parentIno = entry.GetIno()
 		}
 		if name == "" || name == "." || name == ".." || entry.GetIno() == 0 {
 			continue
@@ -1153,8 +1192,15 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 		}
 		c.putItem(&cacheItem{key: key, entry: entry.GetIno(), expiresAtNano: entryExp, weight: 1})
 	}
-	if !evictedSameParent {
-		c.completeDirs[parent] = dExpires
+	if c.items[cacheKey{kind: 'i', ino: parent}] != nil {
+		if parentIno != 0 {
+			c.parentByDir[parent] = parentIno
+		}
+		if !evictedSameParent {
+			c.completeDirs[parent] = dExpires
+		}
+	} else {
+		c.pruneOrphanDirMetaLocked(parent)
 	}
 	// 当目录流携带有效属性（AttrTimeoutSeconds > 0）时，为尚无独立 'i' 项的子节点及父目录（".."）保留属性，
 	// 消除祖先目录流因局部目录变更降级后后续 OpenDir/GetAttr 对未变动子目录的穿透 RPC。
@@ -1203,12 +1249,12 @@ func (c *NamespaceCache) markNewDirWithParentAt(epoch, dirIno, parentIno uint64)
 	if epoch != ^uint64(0) && epoch != c.epoch {
 		return
 	}
-	// 标记不参与 LRU 计费，用容量作为上界，避免长生命周期客户端创建海量目录后无界增长。
-	if len(c.completeDirs) < c.capacity {
-		c.completeDirs[dirIno] = 0
-		if parentIno != 0 && len(c.parentByDir) < c.capacity {
-			c.parentByDir[dirIno] = parentIno
-		}
+	if c.items[cacheKey{kind: 'i', ino: dirIno}] == nil && c.items[cacheKey{kind: 'd', ino: dirIno}] == nil {
+		return
+	}
+	c.completeDirs[dirIno] = 0
+	if parentIno != 0 {
+		c.parentByDir[dirIno] = parentIno
 	}
 }
 
@@ -1230,11 +1276,13 @@ func (c *NamespaceCache) invalidateDirListingTouchParentAt(epoch, parent uint64,
 	c.removeKey(cacheKey{kind: 'i', ino: parent})
 	for dir := range copyInoSet(c.dirsByChild[parent]) {
 		c.removeKey(cacheKey{kind: 'd', ino: dir})
+		c.pruneOrphanDirMetaLocked(dir)
 	}
 	c.mutations++
 	if !hadParent || (epoch != ^uint64(0) && epoch != c.epoch) ||
 		parentEntry.inode == nil || parentEntry.inode.GetAttr() == nil ||
 		child == nil || child.GetAttr() == nil {
+		c.pruneOrphanDirMetaLocked(parent)
 		return
 	}
 	ts := child.GetAttr().GetCtime()
@@ -1242,6 +1290,7 @@ func (c *NamespaceCache) invalidateDirListingTouchParentAt(epoch, parent uint64,
 		ts = child.GetAttr().GetMtime()
 	}
 	if ts == nil {
+		c.pruneOrphanDirMetaLocked(parent)
 		return
 	}
 	updatedParent := cloneInode(parentEntry.inode)
@@ -1279,10 +1328,12 @@ func (c *NamespaceCache) invalidateDirListingTouchParentNowAt(epoch, parent uint
 	c.removeKey(cacheKey{kind: 'i', ino: parent})
 	for dir := range copyInoSet(c.dirsByChild[parent]) {
 		c.removeKey(cacheKey{kind: 'd', ino: dir})
+		c.pruneOrphanDirMetaLocked(dir)
 	}
 	c.mutations++
 	if !hadParent || (epoch != ^uint64(0) && epoch != c.epoch) ||
 		parentEntry.inode == nil || parentEntry.inode.GetAttr() == nil {
+		c.pruneOrphanDirMetaLocked(parent)
 		return
 	}
 	ts := timestamppb.Now()
@@ -1295,6 +1346,36 @@ func (c *NamespaceCache) invalidateDirListingTouchParentNowAt(epoch, parent uint
 		updated.Attr.Nlink--
 	}
 	c.putInodeLocked(parent, updated, parentEntry.entryTimeout, parentEntry.attrTimeout)
+}
+
+// invalidateDirListingDropParent invalidates parent's directory listing and drops its cached inode
+// when the exact parent nlink delta cannot be determined locally (e.g. uncached rename operands).
+func (c *NamespaceCache) invalidateDirListingDropParent(parent uint64) {
+	c.metrics.Load().incNSCacheInvalidation()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.demoteDirStreamToEntriesLocked(parent)
+	c.removeKey(cacheKey{kind: 'i', ino: parent})
+	for dir := range copyInoSet(c.dirsByChild[parent]) {
+		c.removeKey(cacheKey{kind: 'd', ino: dir})
+		c.pruneOrphanDirMetaLocked(dir)
+	}
+	c.pruneOrphanDirMetaLocked(parent)
+	c.mutations++
+}
+
+// invalidateChildParents purges cached child->parent directory pointers (and cached child streams
+// whose ".." entry points to parent) when a cross-parent rename moves an uncached directory.
+func (c *NamespaceCache) invalidateChildParents(parent uint64) {
+	c.mu.Lock()
+	for dir, p := range c.parentByDir {
+		if p == parent && dir != parent {
+			delete(c.parentByDir, dir)
+			c.removeKey(cacheKey{kind: 'd', ino: dir})
+		}
+	}
+	c.mutations++
+	c.mu.Unlock()
 }
 
 // removeEntry 定向删除单个目录项，用于 Unlink/Rmdir/Rename 的旧名。
@@ -1517,12 +1598,14 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 		if c.entryTTL <= 0 || c.attrTTL <= 0 {
 			c.removeKey(cacheKey{kind: 'd', ino: ino})
 			delete(c.completeDirs, ino)
+			c.pruneOrphanDirMetaLocked(ino)
 			return
 		}
 		dirDur := ttlDuration(min(c.entryTTL, c.attrTTL))
 		if dirDur <= 0 {
 			c.removeKey(cacheKey{kind: 'd', ino: ino})
 			delete(c.completeDirs, ino)
+			c.pruneOrphanDirMetaLocked(ino)
 			return
 		}
 		now := c.currentTime()
@@ -1533,6 +1616,7 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 		if now.UnixNano() >= expiresAtNano {
 			c.removeKey(cacheKey{kind: 'd', ino: ino})
 			delete(c.completeDirs, ino)
+			c.pruneOrphanDirMetaLocked(ino)
 			return
 		}
 		dirEntryExpires = make([]int64, len(entries))
@@ -1550,18 +1634,6 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 	for _, name := range copyNames(c.byParent[ino]) {
 		c.removeKey(cacheKey{kind: 'e', ino: ino, name: name})
 	}
-	if c.rootIno != 0 && ino == c.rootIno && len(c.parentByDir) < c.capacity {
-		c.parentByDir[ino] = ino
-	} else {
-		for _, entry := range entries {
-			if string(entry.GetName()) == ".." && entry.GetIno() != 0 {
-				if len(c.parentByDir) < c.capacity {
-					c.parentByDir[ino] = entry.GetIno()
-				}
-				break
-			}
-		}
-	}
 	c.putItem(&cacheItem{
 		key:             cacheKey{kind: 'd', ino: ino},
 		dir:             cloneDir(entries),
@@ -1570,11 +1642,22 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 		expiresAtNano:   expiresAtNano,
 		weight:          len(entries) + 1,
 	})
-	// 目录流已完整加载：未命中的名字可权威判定为 ENOENT。
-	if len(entries)+1 <= c.capacity {
+	// Record directory completeness and parent pointer only when the stream fits in the LRU cache.
+	if c.items[cacheKey{kind: 'd', ino: ino}] != nil {
 		c.completeDirs[ino] = expiresAtNano
+		if c.rootIno != 0 && ino == c.rootIno {
+			c.parentByDir[ino] = ino
+		} else {
+			for _, entry := range entries {
+				if string(entry.GetName()) == ".." && entry.GetIno() != 0 {
+					c.parentByDir[ino] = entry.GetIno()
+					break
+				}
+			}
+		}
 	} else {
 		delete(c.completeDirs, ino)
+		c.pruneOrphanDirMetaLocked(ino)
 	}
 }
 

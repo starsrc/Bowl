@@ -3,7 +3,6 @@ package fusefs
 import (
 	"context"
 	"syscall"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -68,14 +67,16 @@ func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedT
 		if linkTTL <= 0 {
 			linkTTL = fs.cfg.AttrTimeoutSeconds
 		}
-		fs.cache.putReadlinkAt(epoch, child, []byte(pointedTo), linkTTL, time.Now())
+		fs.cache.putReadlinkAt(epoch, child, []byte(pointedTo), linkTTL)
 	}
 	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), attrTTL)
 	return fuse.OK
 }
 
-// Readlink 实现读取符号链接目标路径操作。
-// 在受 TTL 管控的缓存有效期（attrTimeout > 0）内直接命中本地缓存；strict 0s 模式下自动穿透服务端。
+// Readlink returns the target path of a symbolic link.
+// When attrTimeout > 0, writable mounts serve cached targets without TTL expiration
+// until invalidated, while read-only mounts expire cached targets lazily on the cache clock.
+// When attrTimeout <= 0, Readlink bypasses the cache and queries StorageService directly.
 func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target []byte, status fuse.Status) {
 	start := fs.metrics.beginOp(OpReadlink)
 	opCtx, endSpan := fs.startFuseOp(OpReadlink)
@@ -94,9 +95,8 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 		return nil, status
 	}
 
-	now := time.Now()
 	if !fs.IsFenced() {
-		if cachedTarget, ok := fs.cache.readlink(header.NodeId, now); ok {
+		if cachedTarget, ok := fs.cache.readlink(header.NodeId); ok {
 			return cachedTarget, fuse.OK
 		}
 	}
@@ -120,7 +120,7 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 	target = resp.Msg.GetTarget()
 	if !fenced {
 		ttl := fs.cache.inodeAttrTimeout(header.NodeId, fs.cfg.AttrTimeoutSeconds)
-		fs.cache.putReadlinkAtIf(generation, epoch, header.NodeId, target, ttl, time.Now())
+		fs.cache.putReadlinkAtIf(generation, epoch, header.NodeId, target, ttl)
 	}
 	return target, fuse.OK
 }

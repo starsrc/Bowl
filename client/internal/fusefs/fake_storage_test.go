@@ -369,6 +369,20 @@ func (s *fakeStorage) nodeNlink(ino uint64) uint32 {
 	return 0
 }
 
+func (s *fakeStorage) parentOfLocked(ino uint64) uint64 {
+	if ino == s.rootIno {
+		return s.rootIno
+	}
+	for parent, children := range s.entries {
+		for _, child := range children {
+			if child == ino {
+				return parent
+			}
+		}
+	}
+	return s.rootIno
+}
+
 func (s *fakeStorage) isAncestorLocked(candidateAncestor, node uint64) bool {
 	if candidateAncestor == node {
 		return true
@@ -1369,6 +1383,13 @@ func (s *fakeStorage) ReadDirPlus(ctx context.Context, req *connect.Request[stor
 	}
 	slices.Sort(names)
 
+	parentIno := s.parentOfLocked(req.Msg.GetIno())
+	parentNode := s.nodes[parentIno]
+	if parentNode == nil {
+		parentIno = s.rootIno
+		parentNode = s.nodes[s.rootIno]
+	}
+
 	all := make([]*storagev1.DirEntryPlus, 0, len(names)+2)
 	all = append(all,
 		&storagev1.DirEntryPlus{
@@ -1380,10 +1401,10 @@ func (s *fakeStorage) ReadDirPlus(ctx context.Context, req *connect.Request[stor
 			AttrTimeoutSeconds:  s.attrTTL,
 		},
 		&storagev1.DirEntryPlus{
-			Ino:                 s.rootIno,
+			Ino:                 parentIno,
 			Name:                []byte(".."),
 			NextOffset:          2,
-			Inode:               cloneProtoInode(s.nodes[s.rootIno].inode),
+			Inode:               cloneProtoInode(parentNode.inode),
 			EntryTimeoutSeconds: s.entryTTL,
 			AttrTimeoutSeconds:  s.attrTTL,
 		},

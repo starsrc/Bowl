@@ -246,6 +246,79 @@ func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	stopRemount()
 }
 
+// TestVFS_RenameDirNlinkAndParentCoherence verifies parent st_nlink and ".." coherence across
+// same-parent empty-dir overwrite, cross-parent empty-dir overwrite, and cross-parent RENAME_EXCHANGE.
+func TestVFS_RenameDirNlinkAndParentCoherence(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	disk := createTestDisk(t, client)
+	mountpoint, stop := mountWithCleanup(t, endpoint, disk.GetDiskId())
+	defer stop()
+
+	statOf := func(p string) unix.Stat_t {
+		t.Helper()
+		var st unix.Stat_t
+		require.NoError(t, unix.Stat(p, &st), "stat %s", p)
+		return st
+	}
+
+	// 1. Same-parent directory overwrite of empty directory decrements parent nlink (4 -> 3).
+	sameParent := filepath.Join(mountpoint, "same-parent")
+	require.NoError(t, os.Mkdir(sameParent, 0o755))
+	sameSrc := filepath.Join(sameParent, "src")
+	sameDst := filepath.Join(sameParent, "dst")
+	require.NoError(t, os.Mkdir(sameSrc, 0o755))
+	require.NoError(t, os.Mkdir(sameDst, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sameSrc, "keep.txt"), []byte("ok"), 0o644))
+	require.Equal(t, uint64(4), uint64(statOf(sameParent).Nlink))
+
+	require.NoError(t, unix.Rename(sameSrc, sameDst))
+	require.Equal(t, uint64(3), uint64(statOf(sameParent).Nlink), "same-parent dir overwrite must decrement parent nlink")
+	require.Equal(t, statOf(sameParent).Ino, statOf(filepath.Join(sameDst, "..")).Ino)
+	gotKeep, err := os.ReadFile(filepath.Join(sameDst, "keep.txt"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("ok"), gotKeep)
+
+	// 2. Cross-parent directory overwrite of empty directory decrements old parent (3 -> 2) and keeps new parent unchanged (3 -> 3).
+	crossOld := filepath.Join(mountpoint, "cross-old")
+	crossNew := filepath.Join(mountpoint, "cross-new")
+	require.NoError(t, os.Mkdir(crossOld, 0o755))
+	require.NoError(t, os.Mkdir(crossNew, 0o755))
+	crossSrc := filepath.Join(crossOld, "moving")
+	crossDst := filepath.Join(crossNew, "victim")
+	require.NoError(t, os.Mkdir(crossSrc, 0o755))
+	require.NoError(t, os.Mkdir(crossDst, 0o755))
+	require.Equal(t, uint64(3), uint64(statOf(crossOld).Nlink))
+	require.Equal(t, uint64(3), uint64(statOf(crossNew).Nlink))
+
+	require.NoError(t, unix.Rename(crossSrc, crossDst))
+	require.Equal(t, uint64(2), uint64(statOf(crossOld).Nlink), "cross-parent dir overwrite must decrement old parent nlink")
+	require.Equal(t, uint64(3), uint64(statOf(crossNew).Nlink), "cross-parent dir overwrite must keep new parent nlink unchanged")
+	require.Equal(t, statOf(crossNew).Ino, statOf(filepath.Join(crossDst, "..")).Ino)
+
+	// 3. Cross-parent RENAME_EXCHANGE between dir and file updates both parents' nlink and ".." in both directions.
+	exOld := filepath.Join(mountpoint, "ex-old")
+	exNew := filepath.Join(mountpoint, "ex-new")
+	require.NoError(t, os.Mkdir(exOld, 0o755))
+	require.NoError(t, os.Mkdir(exNew, 0o755))
+	exA := filepath.Join(exOld, "slot-a")
+	exB := filepath.Join(exNew, "slot-b")
+	require.NoError(t, os.Mkdir(exA, 0o755))
+	require.NoError(t, os.WriteFile(exB, []byte("file-b"), 0o644))
+	require.Equal(t, uint64(3), uint64(statOf(exOld).Nlink))
+	require.Equal(t, uint64(2), uint64(statOf(exNew).Nlink))
+
+	require.NoError(t, unix.Renameat2(unix.AT_FDCWD, exA, unix.AT_FDCWD, exB, unix.RENAME_EXCHANGE))
+	require.Equal(t, uint64(2), uint64(statOf(exOld).Nlink), "dir->file cross-parent exchange must decrement old parent nlink")
+	require.Equal(t, uint64(3), uint64(statOf(exNew).Nlink), "dir->file cross-parent exchange must increment new parent nlink")
+	require.Equal(t, statOf(exNew).Ino, statOf(filepath.Join(exB, "..")).Ino)
+
+	require.NoError(t, unix.Renameat2(unix.AT_FDCWD, exA, unix.AT_FDCWD, exB, unix.RENAME_EXCHANGE))
+	require.Equal(t, uint64(3), uint64(statOf(exOld).Nlink), "file->dir cross-parent exchange must restore old parent nlink")
+	require.Equal(t, uint64(2), uint64(statOf(exNew).Nlink), "file->dir cross-parent exchange must restore new parent nlink")
+	require.Equal(t, statOf(exOld).Ino, statOf(filepath.Join(exA, "..")).Ino)
+}
+
 // TestVFS_PosixFlockAndMultiUserPermissions 验证内核 `flock` 跨独立句柄及 `dup` 互斥语义，
 // 以及 `--allow-other` 挂载下的多用户权限与 Sticky Bit 隔离。
 func TestVFS_PosixFlockAndMultiUserPermissions(t *testing.T) {

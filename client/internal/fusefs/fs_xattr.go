@@ -112,12 +112,12 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	fenced := fs.IsFenced()
-	if !fenced && attr == securityCapabilityXattr && fs.caps.knownAbsent(header.NodeId) {
+	useCapCache := !fs.cfg.IsReadOnly() && !fs.IsFenced()
+	if useCapCache && attr == securityCapabilityXattr && fs.caps.knownAbsent(header.NodeId) {
 		return 0, fuse.Status(syscall.ENODATA)
 	}
 	if localSz, local, localSt := fs.tmpMgr.GetXAttr(header.NodeId, attr, dest); local {
-		if !fenced && attr == securityCapabilityXattr {
+		if useCapCache && attr == securityCapabilityXattr {
 			switch localSt {
 			case fuse.Status(syscall.ENODATA):
 				fs.caps.markAbsent(header.NodeId)
@@ -143,12 +143,12 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 	}))
 	if err != nil {
 		status = fs.ToStatus(err)
-		if !fenced && !fs.IsFenced() && attr == securityCapabilityXattr && status == fuse.Status(syscall.ENODATA) {
+		if useCapCache && !fs.IsFenced() && attr == securityCapabilityXattr && status == fuse.Status(syscall.ENODATA) {
 			fs.caps.markAbsent(header.NodeId)
 		}
 		return 0, status
 	}
-	if !fenced && !fs.IsFenced() && attr == securityCapabilityXattr {
+	if useCapCache && !fs.IsFenced() && attr == securityCapabilityXattr {
 		fs.caps.markPresent(header.NodeId)
 	}
 

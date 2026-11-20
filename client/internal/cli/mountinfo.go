@@ -27,8 +27,20 @@ type DiskMountInfo struct {
 	ReadOnly   bool
 }
 
+type MountPointInfo struct {
+	Path     string
+	FSType   string
+	Source   string
+	ReadOnly bool
+}
+
+func (m MountPointInfo) IsBowl() bool {
+	return m.FSType == "fuse.bowl" || strings.HasPrefix(m.Source, "bowl:")
+}
+
 type mountPoint struct {
 	path     string
+	fsType   string
 	source   string
 	readOnly bool
 }
@@ -71,12 +83,19 @@ func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 		if len(fields) < 5 {
 			continue
 		}
+		fsType := ""
 		source := ""
 		for i, field := range fields {
-			if field == "-" && i+2 < len(fields) {
-				source = unescapeMountInfo(fields[i+2])
-				break
+			if field != "-" {
+				continue
 			}
+			if i+1 < len(fields) {
+				fsType = unescapeMountInfo(fields[i+1])
+			}
+			if i+2 < len(fields) {
+				source = unescapeMountInfo(fields[i+2])
+			}
+			break
 		}
 		var readOnly bool
 		if len(fields) > 5 {
@@ -84,6 +103,7 @@ func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 		}
 		points = append(points, mountPoint{
 			path:     filepath.Clean(unescapeMountInfo(fields[4])),
+			fsType:   fsType,
 			source:   source,
 			readOnly: readOnly,
 		})
@@ -136,24 +156,24 @@ func splitAbsComponents(cleanAbs string) []string {
 	return strings.Split(trimmed, string(filepath.Separator))
 }
 
-func walkMountPointComponents(candidate string, hops *int, mountSet map[string]struct{}) (nextCandidate string, mounted, expanded bool) {
+func walkMountPointComponents(candidate string, hops *int, mountMap map[string]mountPoint) (nextCandidate string, matchedPoint mountPoint, mounted, expanded bool) {
 	parts := splitAbsComponents(candidate)
 	curPrefix := string(filepath.Separator)
 	for idx, comp := range parts {
 
 		checkCandidate := filepath.Clean(filepath.Join(append([]string{curPrefix}, parts[idx:]...)...))
-		if _, ok := mountSet[checkCandidate]; ok {
-			return checkCandidate, true, false
+		if mp, ok := mountMap[checkCandidate]; ok {
+			return checkCandidate, mp, true, false
 		}
 		nextPath := filepath.Join(curPrefix, comp)
-		if _, isMount := mountSet[nextPath]; isMount {
+		if _, isMount := mountMap[nextPath]; isMount {
 
 			curPrefix = nextPath
 			continue
 		}
 		info, lerr := mountInfoLstat(nextPath)
 		if lerr != nil || info == nil {
-			return candidate, false, false
+			return candidate, mountPoint{}, false, false
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			curPrefix = nextPath
@@ -161,55 +181,73 @@ func walkMountPointComponents(candidate string, hops *int, mountSet map[string]s
 		}
 		*hops++
 		if *hops > maxMountInfoSymlinkHops {
-			return candidate, false, false
+			return candidate, mountPoint{}, false, false
 		}
 		target, rerr := mountInfoReadlink(nextPath)
 		if rerr != nil {
-			return candidate, false, false
+			return candidate, mountPoint{}, false, false
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(curPrefix, target)
 		}
 		joined := append([]string{target}, parts[idx+1:]...)
-		return filepath.Clean(filepath.Join(joined...)), false, true
+		return filepath.Clean(filepath.Join(joined...)), mountPoint{}, false, true
 	}
-	return candidate, false, false
+	return candidate, mountPoint{}, false, false
 }
 
-func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err error) {
+func resolveMountPoint(path string) (resolvedPath string, point mountPoint, mounted bool, err error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", false, fmt.Errorf("resolve absolute path: %w", err)
+		return "", mountPoint{}, false, fmt.Errorf("resolve absolute path: %w", err)
 	}
 	cleanAbs := filepath.Clean(absPath)
 
 	points, err := readMountPoints()
 	if err != nil {
-		return "", false, err
+		return "", mountPoint{}, false, err
 	}
-	mountSet := make(map[string]struct{}, len(points))
-	for _, point := range points {
-		mountSet[point.path] = struct{}{}
+	mountMap := make(map[string]mountPoint, len(points))
+	for _, p := range points {
+		mountMap[p.path] = p
 	}
-	if _, ok := mountSet[cleanAbs]; ok {
-		return cleanAbs, true, nil
+	if mp, ok := mountMap[cleanAbs]; ok {
+		return cleanAbs, mp, true, nil
 	}
 
 	candidate := cleanAbs
 	hops := 0
 	for {
-		if _, ok := mountSet[candidate]; ok {
-			return candidate, true, nil
+		if mp, ok := mountMap[candidate]; ok {
+			return candidate, mp, true, nil
 		}
-		nextCandidate, matched, expanded := walkMountPointComponents(candidate, &hops, mountSet)
+		nextCandidate, mp, matched, expanded := walkMountPointComponents(candidate, &hops, mountMap)
 		if matched {
-			return nextCandidate, true, nil
+			return nextCandidate, mp, true, nil
 		}
 		if !expanded {
-			return nextCandidate, false, nil
+			return nextCandidate, mountPoint{}, false, nil
 		}
 		candidate = nextCandidate
 	}
+}
+
+func ResolveMountPointInfo(path string) (MountPointInfo, bool, error) {
+	_, mp, mounted, err := resolveMountPoint(path)
+	if err != nil || !mounted {
+		return MountPointInfo{}, false, err
+	}
+	return MountPointInfo{
+		Path:     mp.path,
+		FSType:   mp.fsType,
+		Source:   mp.source,
+		ReadOnly: mp.readOnly,
+	}, true, nil
+}
+
+func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err error) {
+	resolvedPath, _, mounted, err = resolveMountPoint(path)
+	return resolvedPath, mounted, err
 }
 
 func IsMountPoint(path string) (bool, error) {

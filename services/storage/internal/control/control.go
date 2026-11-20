@@ -146,6 +146,23 @@ type UnmountDiskParams struct {
 	MountID string
 }
 
+type MountLeaseInfo struct {
+	MountID   string
+	ReadOnly  bool
+	Epoch     uint64
+	ExpiresAt time.Time
+}
+
+type EvictMountsParams struct {
+	DiskID  string
+	MountID string
+}
+
+type EvictMountsResult struct {
+	EvictedCount uint32
+	WriterEpoch  uint64
+}
+
 type Manager interface {
 	CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error)
 	ForkDisk(ctx context.Context, params ForkDiskParams) (*Disk, error)
@@ -156,6 +173,8 @@ type Manager interface {
 	MountDisk(ctx context.Context, params MountDiskParams) (*MountDiskResult, error)
 	RenewMount(ctx context.Context, params RenewMountParams) (*RenewMountResult, error)
 	UnmountDisk(ctx context.Context, params UnmountDiskParams) error
+	ListMounts(ctx context.Context, diskID string) ([]MountLeaseInfo, error)
+	EvictMounts(ctx context.Context, params EvictMountsParams) (*EvictMountsResult, error)
 	DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDiskResult, error)
 	ReadCommitNode(ctx context.Context, params *ReadCommitNodeParams) (*store.ReadNodeResult, error)
 	MergeDisk(ctx context.Context, params *MergeDiskParams) (*MergeDiskResult, error)
@@ -1152,6 +1171,9 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	if openErr := m.ensureOpen(); openErr != nil {
 		return openErr
 	}
+	if gateErr := m.checkDeleteMountGate(diskID); gateErr != nil {
+		return gateErr
+	}
 	if recErr := m.reconcilePendingMergeLocked(ctx, diskID); recErr != nil {
 		return recErr
 	}
@@ -1264,11 +1286,19 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	}
 	diskID := id.String()
 
+	if openErr := m.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+
+	unlockDisk := m.lockDisk(ctx, diskID)
+	defer unlockDisk()
+
+	actor, err := m.actorLocked(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
 	if params.ReadOnly {
-		actor, actorErr := m.Actor(ctx, diskID)
-		if actorErr != nil {
-			return nil, actorErr
-		}
 		rootAttr, attrErr := actor.GetAttr(ctx, store.RootIno)
 		if attrErr != nil {
 			return nil, attrErr
@@ -1293,17 +1323,6 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 		}, nil
 	}
 
-	if openErr := m.ensureOpen(); openErr != nil {
-		return nil, openErr
-	}
-
-	unlockDisk := m.lockDisk(ctx, diskID)
-	defer unlockDisk()
-
-	actor, err := m.actorLocked(ctx, id)
-	if err != nil {
-		return nil, err
-	}
 	if !params.Force {
 		if gateErr := m.checkRWMountGate(diskID); gateErr != nil {
 			return nil, gateErr

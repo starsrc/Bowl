@@ -188,6 +188,39 @@ func (s *Server) UnmountDisk(ctx context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(&storagev1.UnmountDiskResponse{}), nil
 }
 
+func (s *Server) ListMounts(ctx context.Context, req *connect.Request[storagev1.ListMountsRequest]) (*connect.Response[storagev1.ListMountsResponse], error) {
+	leases, err := s.control.ListMounts(ctx, req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	mounts := make([]*storagev1.MountLease, 0, len(leases))
+	for _, lease := range leases {
+		mounts = append(mounts, &storagev1.MountLease{
+			MountId:   lease.MountID,
+			ReadOnly:  lease.ReadOnly,
+			Epoch:     lease.Epoch,
+			ExpiresAt: timestamppb.New(lease.ExpiresAt),
+		})
+	}
+	return connect.NewResponse(&storagev1.ListMountsResponse{
+		Mounts: mounts,
+	}), nil
+}
+
+func (s *Server) EvictMounts(ctx context.Context, req *connect.Request[storagev1.EvictMountsRequest]) (*connect.Response[storagev1.EvictMountsResponse], error) {
+	res, err := s.control.EvictMounts(ctx, control.EvictMountsParams{
+		DiskID:  req.Msg.DiskId,
+		MountID: req.Msg.GetMountId(),
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	return connect.NewResponse(&storagev1.EvictMountsResponse{
+		EvictedCount: res.EvictedCount,
+		WriterEpoch:  res.WriterEpoch,
+	}), nil
+}
+
 func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.StatFSRequest]) (*connect.Response[storagev1.StatFSResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {

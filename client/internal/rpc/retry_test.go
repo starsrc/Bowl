@@ -54,7 +54,9 @@ func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpect
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceReadCommitNodeProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceRenewMountProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceUnmountDiskProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListMountsProcedure))
 
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceEvictMountsProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateDiskProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceForkDiskProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMergeDiskProcedure))

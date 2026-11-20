@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
@@ -58,7 +59,7 @@ func TestDisk_GivenHelpAndRoutingArgs_ReturnsExpectedUsageAndExitCodes(t *testin
 	requireCLIError2(t, `unknown command "unknown" for "bowl disk"`, "disk", "unknown")
 
 	for _, args := range [][]string{{"help", "disk"}, {"disk", "-h"}, {"disk", "--help"}} {
-		for _, sub := range []string{"create", "fork", "list", "get", "update", "delete", "diff", "merge"} {
+		for _, sub := range []string{"create", "fork", "list", "get", "update", "delete", "mounts", "evict", "diff", "merge"} {
 			requireHelpExit0(t, sub, args...)
 		}
 	}
@@ -70,6 +71,8 @@ func TestDisk_GivenHelpAndRoutingArgs_ReturnsExpectedUsageAndExitCodes(t *testin
 	requireHelpExit0(t, "update, resize", "disk", "update", "-h")
 	requireHelpExit0(t, "update, resize", "disk", "resize", "--help")
 	requireHelpExit0(t, "bowl disk delete <disk-id>", "disk", "delete", "-h")
+	requireHelpExit0(t, "bowl disk mounts <disk-id>", "disk", "mounts", "-h")
+	requireHelpExit0(t, "bowl disk evict <disk-id>", "disk", "evict", "--help")
 }
 
 func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testing.T) {
@@ -133,6 +136,24 @@ func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testin
 	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--yes=abc")
 	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "-y=bad")
 	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--json=bad")
+
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "mounts")
+	requireCLIError2(t, "accepts 1 arg(s), received 2", "disk", "mounts", testDiskID1, "extra")
+	requireCLIError2(t, "invalid disk-id", "disk", "mounts", "bad")
+	requireCLIError2(t, "invalid disk-id", "disk", "mounts", testNilUUID)
+	requireCLIError2(t, "unknown shorthand flag", "disk", "mounts", testDiskID1, "-q")
+	requireCLIError2(t, "Error:", "disk", "mounts", testDiskID1, "--json=bad")
+
+	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "evict")
+	requireCLIError2(t, "accepts 1 arg(s), received 2", "disk", "evict", testDiskID1, "extra")
+	requireCLIError2(t, "invalid disk-id", "disk", "evict", "bad")
+	requireCLIError2(t, "invalid disk-id", "disk", "evict", testNilUUID)
+	requireCLIError2(t, "unknown shorthand flag", "disk", "evict", testDiskID1, "-q")
+	requireCLIError2(t, "flag needs an argument: --mount-id", "disk", "evict", testDiskID1, "--mount-id")
+	requireCLIError2(t, "invalid mount-id", "disk", "evict", testDiskID1, "--mount-id", "bad")
+	requireCLIError2(t, "invalid mount-id", "disk", "evict", testDiskID1, "--mount-id", testNilUUID)
+	requireCLIError2(t, "invalid mount-id", "disk", "evict", testDiskID1, "--mount-id=")
+	requireCLIError2(t, "Error:", "disk", "evict", testDiskID1, "--json=bad")
 }
 
 func TestDiskCreate_GivenValidSizeAndToken_CreatesDiskInQuietAndJSONModes(t *testing.T) {
@@ -419,6 +440,109 @@ func TestDisk_GivenJSONFalseFlag_KeepsHumanOutput(t *testing.T) {
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
 	require.Equal(t, "Deleted virtual disk "+testDiskID1+"\n", out)
+
+	code, out, errOut = runCLI("disk", "mounts", testDiskID2, "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "MOUNT ID")
+
+	code, out, errOut = runCLI("disk", "evict", testDiskID2, "--json=false")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Evicted 0 mount lease(s)")
+}
+
+func TestDiskMounts_GivenActiveLeasesAndEmpty_RendersTableAndJSON(t *testing.T) {
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "mounted-disk", 1<<30, 0)
+	storage.seedDisk(testDiskID2, "idle-disk", 1<<30, 0)
+	exp1 := time.Date(2026, 11, 20, 12, 0, 30, 0, time.UTC)
+	exp2 := time.Date(2026, 11, 20, 12, 0, 45, 0, time.UTC)
+	const (
+		mountRW = "01950000-0000-7000-9000-000000000001"
+		mountRO = "01950000-0000-7000-9000-000000000002"
+	)
+	storage.seedMountLease(testDiskID1, mountRW, false, 3, exp1)
+	storage.seedMountLease(testDiskID1, mountRO, true, 0, exp2)
+	withDiskStorageFake(t, storage)
+
+	code, out, errOut := runCLI("disk", "mounts", testDiskID1)
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "MOUNT ID")
+	require.Contains(t, out, "MODE")
+	require.Contains(t, out, "EPOCH")
+	require.Contains(t, out, "EXPIRES AT")
+	require.Contains(t, out, mountRW)
+	require.Contains(t, out, "rw")
+	require.Contains(t, out, "2026-11-20T12:00:30Z")
+	require.Contains(t, out, mountRO)
+	require.Contains(t, out, "ro")
+	require.Contains(t, out, "2026-11-20T12:00:45Z")
+
+	code, jsonOut, errOut := runCLI("disk", "mounts", testDiskID1, "--json")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	var parsed struct {
+		DiskID string `json:"disk_id"`
+		Mounts []struct {
+			MountID   string `json:"mount_id"`
+			Mode      string `json:"mode"`
+			Epoch     uint64 `json:"epoch"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"mounts"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	require.Equal(t, testDiskID1, parsed.DiskID)
+	require.Len(t, parsed.Mounts, 2)
+	require.Equal(t, mountRW, parsed.Mounts[0].MountID)
+	require.Equal(t, "rw", parsed.Mounts[0].Mode)
+	require.Equal(t, uint64(3), parsed.Mounts[0].Epoch)
+	require.Equal(t, "2026-11-20T12:00:30Z", parsed.Mounts[0].ExpiresAt)
+	require.Equal(t, mountRO, parsed.Mounts[1].MountID)
+	require.Equal(t, "ro", parsed.Mounts[1].Mode)
+	require.Equal(t, uint64(0), parsed.Mounts[1].Epoch)
+	require.Equal(t, "2026-11-20T12:00:45Z", parsed.Mounts[1].ExpiresAt)
+
+	code, emptyJSON, errOut := runCLI("disk", "mounts", testDiskID2, "--json")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, emptyJSON, `"mounts": []`)
+}
+
+func TestDiskEvict_GivenSingleAndAllModes_RendersHumanAndJSON(t *testing.T) {
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "evict-cli-disk", 1<<30, 0)
+	exp := time.Date(2026, 11, 20, 12, 0, 30, 0, time.UTC)
+	const (
+		mountRW = "01950000-0000-7000-9000-000000000011"
+		mountRO = "01950000-0000-7000-9000-000000000012"
+	)
+	storage.seedMountLease(testDiskID1, mountRW, false, 1, exp)
+	storage.seedMountLease(testDiskID1, mountRO, true, 0, exp)
+	withDiskStorageFake(t, storage)
+
+	code, out, errOut := runCLI("disk", "evict", testDiskID1, "--mount-id", mountRO)
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Contains(t, out, "Evicted 1 mount lease(s)")
+	require.Contains(t, out, "writer epoch: 0")
+	require.NotNil(t, storage.lastEvictReq.MountId)
+	require.Equal(t, mountRO, storage.lastEvictReq.GetMountId())
+
+	code, jsonOut, errOut := runCLI("disk", "evict", testDiskID1, "--json")
+	require.Equal(t, 0, code, errOut)
+	require.Empty(t, errOut)
+	require.Nil(t, storage.lastEvictReq.MountId)
+	var parsed struct {
+		DiskID       string `json:"disk_id"`
+		EvictedCount uint32 `json:"evicted_count"`
+		WriterEpoch  uint64 `json:"writer_epoch"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	require.Equal(t, testDiskID1, parsed.DiskID)
+	require.Equal(t, uint32(1), parsed.EvictedCount)
+	require.Equal(t, uint64(1), parsed.WriterEpoch)
 }
 
 func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testing.T) {
@@ -465,7 +589,7 @@ func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testin
 	require.Equal(t, 2, code)
 	require.Contains(t, errOut, "invalid request argument")
 
-	ebusyErr := connect.NewError(connect.CodeUnavailable, errors.New("busy"))
+	ebusyErr := connect.NewError(connect.CodeAborted, errors.New("busy"))
 	detail, detailErr := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
 	require.NoError(t, detailErr)
 	ebusyErr.AddDetail(detail)
@@ -473,12 +597,46 @@ func TestDisk_GivenServerErrorsAndEmptyResponses_MapsExpectedExitCodes(t *testin
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "still mounted")
+	require.Contains(t, errOut, "bowl disk mounts")
+	require.Contains(t, errOut, "bowl disk evict")
 
 	storage.forcedErr["DeleteDisk"] = connect.NewError(connect.CodeInternal, errors.New("delete boom"))
 	code, _, errOut = runCLI("disk", "delete", testDiskID1, "-y")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "delete virtual disk failed")
 	delete(storage.forcedErr, "DeleteDisk")
+
+	code, _, errOut = runCLI("disk", "mounts", testDiskID2)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "disk not found: "+testDiskID2)
+
+	storage.forcedErr["ListMounts"] = connect.NewError(connect.CodeInvalidArgument, errors.New("bad disk"))
+	code, _, errOut = runCLI("disk", "mounts", testDiskID1)
+	require.Equal(t, 2, code)
+	require.Contains(t, errOut, "invalid request argument")
+	delete(storage.forcedErr, "ListMounts")
+
+	storage.forcedErr["ListMounts"] = connect.NewError(connect.CodeInternal, errors.New("mounts boom"))
+	code, _, errOut = runCLI("disk", "mounts", testDiskID1)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "list disk mounts failed")
+	delete(storage.forcedErr, "ListMounts")
+
+	code, _, errOut = runCLI("disk", "evict", testDiskID2)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "disk not found: "+testDiskID2)
+
+	storage.forcedErr["EvictMounts"] = connect.NewError(connect.CodeInvalidArgument, errors.New("bad mount"))
+	code, _, errOut = runCLI("disk", "evict", testDiskID1)
+	require.Equal(t, 2, code)
+	require.Contains(t, errOut, "invalid request argument")
+	delete(storage.forcedErr, "EvictMounts")
+
+	storage.forcedErr["EvictMounts"] = connect.NewError(connect.CodeInternal, errors.New("evict boom"))
+	code, _, errOut = runCLI("disk", "evict", testDiskID1)
+	require.Equal(t, 1, code)
+	require.Contains(t, errOut, "evict disk mounts failed")
+	delete(storage.forcedErr, "EvictMounts")
 
 	storage.forcedErr["ListDisks"] = connect.NewError(connect.CodeInternal, errors.New("list boom"))
 	code, _, errOut = runCLI("disk", "list")
@@ -552,6 +710,22 @@ func TestDisk_GivenActiveOTelTracer_PropagatesTraceparentRequestIDAndSpanStatus(
 	require.Empty(t, errOut)
 	updateSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.update")
 	require.Contains(t, storage.lastTraceparent, updateSpan.SpanContext.TraceID().String())
+
+	exporter.Reset()
+	code, _, errOut = runCLI("disk", "mounts", forkedID)
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	mountsSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.mounts")
+	require.Contains(t, storage.lastTraceparent, mountsSpan.SpanContext.TraceID().String())
+	requireSpanStringAttr(t, mountsSpan, "bowl.disk_id", forkedID)
+
+	exporter.Reset()
+	code, _, errOut = runCLI("disk", "evict", forkedID)
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	evictSpan := requireSpanByName(t, exporter.GetSpans(), "cli.disk.evict")
+	require.Contains(t, storage.lastTraceparent, evictSpan.SpanContext.TraceID().String())
+	requireSpanStringAttr(t, evictSpan, "bowl.disk_id", forkedID)
 
 	exporter.Reset()
 	code, _, errOut = runCLI("disk", "delete", forkedID, "-y")

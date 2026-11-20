@@ -1733,6 +1733,14 @@ func (s *fakeStorage) UnmountDisk(context.Context, *connect.Request[storagev1.Un
 	return nil, s.failFast("UnmountDisk")
 }
 
+func (s *fakeStorage) ListMounts(context.Context, *connect.Request[storagev1.ListMountsRequest]) (*connect.Response[storagev1.ListMountsResponse], error) {
+	return nil, s.failFast("ListMounts")
+}
+
+func (s *fakeStorage) EvictMounts(context.Context, *connect.Request[storagev1.EvictMountsRequest]) (*connect.Response[storagev1.EvictMountsResponse], error) {
+	return nil, s.failFast("EvictMounts")
+}
+
 func (s *fakeStorage) CreateDisk(context.Context, *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
 	return nil, s.failFast("CreateDisk")
 }

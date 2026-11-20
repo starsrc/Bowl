@@ -44,6 +44,7 @@ func isSampledControlSpanName(name string) bool {
 		strings.TrimPrefix(storagev1connect.StorageServiceDeleteDiskProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceMountDiskProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceUnmountDiskProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceEvictMountsProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceMergeDiskProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceReclaimOrphanProcedure, "/"):
 		return true

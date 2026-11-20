@@ -64,6 +64,7 @@ var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceReadCommitNodeProcedure: {},
 	storagev1connect.StorageServiceRenewMountProcedure:     {},
 	storagev1connect.StorageServiceUnmountDiskProcedure:    {},
+	storagev1connect.StorageServiceListMountsProcedure:     {},
 	storagev1connect.StorageServiceLookupProcedure:         {},
 	storagev1connect.StorageServiceGetAttrProcedure:        {},
 	storagev1connect.StorageServiceReadlinkProcedure:       {},

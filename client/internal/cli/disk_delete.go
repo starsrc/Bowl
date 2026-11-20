@@ -95,7 +95,7 @@ func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.
 			checkInvalidArg:  true,
 			checkEBUSYReason: true,
 			preconditionMsg: func(id string, _ error) string {
-				return fmt.Sprintf("disk %s is still mounted with an active client session; unmount it before deleting", id)
+				return fmt.Sprintf("disk %s is still mounted with an active client session; unmount it, or run `bowl disk mounts %s` / `bowl disk evict %s` before deleting", id, id, id)
 			},
 		})
 	}

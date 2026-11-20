@@ -341,6 +341,9 @@ func TestMountLease_DeleteDiskClearsLeasesAndCustomTTLApplies(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(5), mnt.LeaseTTLSeconds)
 
+	requireDiskMountedStatus(t, mgr.DeleteDisk(ctx, disk.DiskID))
+
+	clk.Advance(6 * time.Second)
 	require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
 
 	_, err = mgr.RenewMount(ctx, RenewMountParams{
@@ -474,4 +477,311 @@ func TestMountDisk_ConcurrentNonForceRW_AdmitsAtMostOneWriter(t *testing.T) {
 	actor, err := mgr.Actor(ctx, disk.DiskID)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), actor.WriterEpoch())
+}
+
+func TestDeleteDisk_MountLeaseGate_RejectsActiveRWOrROAndAllowsAfterUnmountOrExpiry(t *testing.T) {
+	ctx := context.Background()
+	clk := newFakeClock(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "gated-delete", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+
+	rwMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	roMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+
+	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	requireDiskMountedStatus(t, err)
+	_, err = mgr.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: rwMnt.MountID}))
+	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	requireDiskMountedStatus(t, err)
+	_, err = mgr.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: roMnt.MountID}))
+	require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
+	_, err = mgr.GetDisk(ctx, disk.DiskID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	expiringDisk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "expiring-delete", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+	expMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: expiringDisk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	err = mgr.DeleteDisk(ctx, expiringDisk.DiskID)
+	requireDiskMountedStatus(t, err)
+
+	clk.Advance(31 * time.Second)
+	require.NoError(t, mgr.DeleteDisk(ctx, expiringDisk.DiskID))
+	_, err = mgr.RenewMount(ctx, RenewMountParams{
+		DiskID:   expiringDisk.DiskID,
+		MountID:  expMnt.MountID,
+		ReadOnly: false,
+		Epoch:    expMnt.Epoch,
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestDeleteDisk_ConcurrentWithMountROAndRenew_SerializesWithoutLeakedLease(t *testing.T) {
+	ctx := context.Background()
+	clk := newFakeClock(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+	mgr := newManager(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	for range 20 {
+		disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "race-disk", MaxBytes: 16 << 20})
+		require.NoError(t, err)
+		roSeed, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+		require.NoError(t, err)
+		require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: roSeed.MountID}))
+
+		start := make(chan struct{})
+		var (
+			wg        sync.WaitGroup
+			deleteErr error
+			mountRes  *MountDiskResult
+			mountErr  error
+			renewErr  error
+		)
+		wg.Go(func() {
+			<-start
+			deleteErr = mgr.DeleteDisk(ctx, disk.DiskID)
+		})
+		wg.Go(func() {
+			<-start
+			mountRes, mountErr = mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+		})
+		wg.Go(func() {
+			<-start
+			_, renewErr = mgr.RenewMount(ctx, RenewMountParams{
+				DiskID:   disk.DiskID,
+				MountID:  roSeed.MountID,
+				ReadOnly: true,
+				Epoch:    0,
+			})
+		})
+		close(start)
+		wg.Wait()
+
+		if deleteErr == nil {
+			require.ErrorIs(t, mountErr, ErrNotFound)
+			require.ErrorIs(t, renewErr, ErrNotFound)
+			mgr.mountsMu.Lock()
+			leaked := len(mgr.activeMounts[disk.DiskID])
+			mgr.mountsMu.Unlock()
+			require.Zero(t, leaked, "deleted disk must not retain leaked mount leases")
+		} else {
+			requireDiskMountedStatus(t, deleteErr)
+			if mountErr == nil {
+				require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: mountRes.MountID}))
+			}
+			if renewErr == nil {
+				require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: roSeed.MountID}))
+			}
+			require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
+		}
+	}
+}
+
+func TestListMounts_ReturnsSortedActiveLeasesPrunesExpiredAndAvoidsColdOpen(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	memDB := db.NewMemStore()
+	clk := newFakeClock(time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
+
+	mgr1 := newManager(memDB, WithStorageRoot(rootDir), WithClock(clk.Now))
+	disk, err := mgr1.CreateDisk(ctx, CreateDiskParams{Name: "list-mounts-disk", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+	require.NoError(t, mgr1.Close())
+
+	mgr2 := newManager(memDB, WithStorageRoot(rootDir), WithClock(clk.Now))
+	t.Cleanup(func() { _ = mgr2.Close() })
+
+	_, err = mgr2.ListMounts(ctx, "not-a-uuid")
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mgr2.ListMounts(ctx, uuid.Nil.String())
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mgr2.ListMounts(ctx, uuid.Must(uuid.NewV7()).String())
+	require.ErrorIs(t, err, ErrNotFound)
+
+	coldLeases, err := mgr2.ListMounts(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Empty(t, coldLeases)
+	mgr2.poolMu.RLock()
+	loadedActor := mgr2.actors[disk.DiskID]
+	mgr2.poolMu.RUnlock()
+	require.Nil(t, loadedActor, "ListMounts must not cold-open Pebble actor")
+
+	rwMnt, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	ro1, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+	ro2, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+
+	active, err := mgr2.ListMounts(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Len(t, active, 3)
+	require.Less(t, active[0].MountID, active[1].MountID)
+	require.Less(t, active[1].MountID, active[2].MountID)
+
+	byID := make(map[string]MountLeaseInfo, len(active))
+	for _, item := range active {
+		byID[item.MountID] = item
+	}
+	require.Equal(t, MountLeaseInfo{
+		MountID:   rwMnt.MountID,
+		ReadOnly:  false,
+		Epoch:     1,
+		ExpiresAt: clk.Now().Add(DefaultMountLeaseTTL),
+	}, byID[rwMnt.MountID])
+	require.Equal(t, MountLeaseInfo{
+		MountID:   ro1.MountID,
+		ReadOnly:  true,
+		Epoch:     0,
+		ExpiresAt: clk.Now().Add(DefaultMountLeaseTTL),
+	}, byID[ro1.MountID])
+	require.Equal(t, MountLeaseInfo{
+		MountID:   ro2.MountID,
+		ReadOnly:  true,
+		Epoch:     0,
+		ExpiresAt: clk.Now().Add(DefaultMountLeaseTTL),
+	}, byID[ro2.MountID])
+
+	clk.Advance(20 * time.Second)
+	_, err = mgr2.RenewMount(ctx, RenewMountParams{
+		DiskID:   disk.DiskID,
+		MountID:  ro2.MountID,
+		ReadOnly: true,
+		Epoch:    0,
+	})
+	require.NoError(t, err)
+	renewedExpiry := clk.Now().Add(DefaultMountLeaseTTL)
+
+	clk.Advance(11 * time.Second)
+	remaining, err := mgr2.ListMounts(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, []MountLeaseInfo{{
+		MountID:   ro2.MountID,
+		ReadOnly:  true,
+		Epoch:     0,
+		ExpiresAt: renewedExpiry,
+	}}, remaining)
+}
+
+func TestEvictMounts_SingleRO_SingleRW_AllAndRestartFencing(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	memDB := db.NewMemStore()
+	clk := newFakeClock(time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
+
+	mgr := newManager(memDB, WithStorageRoot(rootDir), WithClock(clk.Now))
+
+	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "evict-disk", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+
+	_, err = mgr.EvictMounts(ctx, EvictMountsParams{DiskID: "bad"})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mgr.EvictMounts(ctx, EvictMountsParams{DiskID: uuid.Nil.String()})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mgr.EvictMounts(ctx, EvictMountsParams{DiskID: disk.DiskID, MountID: "bad"})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mgr.EvictMounts(ctx, EvictMountsParams{DiskID: disk.DiskID, MountID: uuid.Nil.String()})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	_, err = mgr.EvictMounts(ctx, EvictMountsParams{DiskID: uuid.Must(uuid.NewV7()).String()})
+	require.ErrorIs(t, err, ErrNotFound)
+
+	rw1, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rw1.Epoch)
+	ro1, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+	ro2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
+	require.NoError(t, err)
+
+	missingRes, err := mgr.EvictMounts(ctx, EvictMountsParams{
+		DiskID:  disk.DiskID,
+		MountID: uuid.Must(uuid.NewV7()).String(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, &EvictMountsResult{EvictedCount: 0, WriterEpoch: 0}, missingRes)
+
+	roEvictRes, err := mgr.EvictMounts(ctx, EvictMountsParams{
+		DiskID:  disk.DiskID,
+		MountID: ro1.MountID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, &EvictMountsResult{EvictedCount: 1, WriterEpoch: 0}, roEvictRes)
+
+	actor, err := mgr.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), actor.WriterEpoch(), "evicting RO lease must not advance WriterEpoch")
+	_, err = mgr.RenewMount(ctx, RenewMountParams{
+		DiskID:   disk.DiskID,
+		MountID:  rw1.MountID,
+		ReadOnly: false,
+		Epoch:    rw1.Epoch,
+	})
+	require.NoError(t, err)
+
+	rwEvictRes, err := mgr.EvictMounts(ctx, EvictMountsParams{
+		DiskID:  disk.DiskID,
+		MountID: rw1.MountID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, &EvictMountsResult{EvictedCount: 1, WriterEpoch: 2}, rwEvictRes)
+	require.Equal(t, uint64(2), actor.WriterEpoch())
+
+	_, err = mgr.RenewMount(ctx, RenewMountParams{
+		DiskID:   disk.DiskID,
+		MountID:  rw1.MountID,
+		ReadOnly: false,
+		Epoch:    rw1.Epoch,
+	})
+	require.ErrorIs(t, err, ErrStaleEpoch)
+	_, err = actor.Create(ctx, store.CreateReq{
+		ParentIno: store.RootIno,
+		Name:      []byte("fenced.txt"),
+		Mode:      store.S_IFREG | 0o644,
+		Epoch:     rw1.Epoch,
+	})
+	require.ErrorIs(t, err, ErrStaleEpoch)
+
+	listed, err := mgr.ListMounts(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, ro2.MountID, listed[0].MountID)
+
+	rw2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), rw2.Epoch)
+
+	evictAllRes, err := mgr.EvictMounts(ctx, EvictMountsParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	require.Equal(t, &EvictMountsResult{EvictedCount: 2, WriterEpoch: 4}, evictAllRes)
+	require.Equal(t, uint64(4), actor.WriterEpoch())
+
+	emptyList, err := mgr.ListMounts(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Empty(t, emptyList)
+
+	require.NoError(t, mgr.Close())
+
+	mgr2 := newManager(memDB, WithStorageRoot(rootDir), WithClock(clk.Now))
+	t.Cleanup(func() { _ = mgr2.Close() })
+
+	postRestartEvict, err := mgr2.EvictMounts(ctx, EvictMountsParams{DiskID: disk.DiskID})
+	require.NoError(t, err)
+	require.Equal(t, &EvictMountsResult{EvictedCount: 0, WriterEpoch: 5}, postRestartEvict)
+
+	actor2, err := mgr2.Actor(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), actor2.WriterEpoch())
+
+	require.NoError(t, mgr2.DeleteDisk(ctx, disk.DiskID))
 }

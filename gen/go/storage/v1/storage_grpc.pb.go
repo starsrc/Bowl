@@ -46,6 +46,8 @@ const (
 	StorageService_MountDisk_FullMethodName      = "/storage.v1.StorageService/MountDisk"
 	StorageService_RenewMount_FullMethodName     = "/storage.v1.StorageService/RenewMount"
 	StorageService_UnmountDisk_FullMethodName    = "/storage.v1.StorageService/UnmountDisk"
+	StorageService_ListMounts_FullMethodName     = "/storage.v1.StorageService/ListMounts"
+	StorageService_EvictMounts_FullMethodName    = "/storage.v1.StorageService/EvictMounts"
 	StorageService_CreateDisk_FullMethodName     = "/storage.v1.StorageService/CreateDisk"
 	StorageService_GetDisk_FullMethodName        = "/storage.v1.StorageService/GetDisk"
 	StorageService_ListDisks_FullMethodName      = "/storage.v1.StorageService/ListDisks"
@@ -211,6 +213,10 @@ type StorageServiceClient interface {
 	RenewMount(ctx context.Context, in *RenewMountRequest, opts ...grpc.CallOption) (*RenewMountResponse, error)
 	// UnmountDisk 幂等释放指定的在线挂载软租约。
 	UnmountDisk(ctx context.Context, in *UnmountDiskRequest, opts ...grpc.CallOption) (*UnmountDiskResponse, error)
+	// ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
+	ListMounts(ctx context.Context, in *ListMountsRequest, opts ...grpc.CallOption) (*ListMountsResponse, error)
+	// EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
+	EvictMounts(ctx context.Context, in *EvictMountsRequest, opts ...grpc.CallOption) (*EvictMountsResponse, error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -530,6 +536,26 @@ func (c *storageServiceClient) UnmountDisk(ctx context.Context, in *UnmountDiskR
 	return out, nil
 }
 
+func (c *storageServiceClient) ListMounts(ctx context.Context, in *ListMountsRequest, opts ...grpc.CallOption) (*ListMountsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMountsResponse)
+	err := c.cc.Invoke(ctx, StorageService_ListMounts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) EvictMounts(ctx context.Context, in *EvictMountsRequest, opts ...grpc.CallOption) (*EvictMountsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EvictMountsResponse)
+	err := c.cc.Invoke(ctx, StorageService_EvictMounts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *storageServiceClient) CreateDisk(ctx context.Context, in *CreateDiskRequest, opts ...grpc.CallOption) (*CreateDiskResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateDiskResponse)
@@ -792,6 +818,10 @@ type StorageServiceServer interface {
 	RenewMount(context.Context, *RenewMountRequest) (*RenewMountResponse, error)
 	// UnmountDisk 幂等释放指定的在线挂载软租约。
 	UnmountDisk(context.Context, *UnmountDiskRequest) (*UnmountDiskResponse, error)
+	// ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
+	ListMounts(context.Context, *ListMountsRequest) (*ListMountsResponse, error)
+	// EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
+	EvictMounts(context.Context, *EvictMountsRequest) (*EvictMountsResponse, error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -921,6 +951,12 @@ func (UnimplementedStorageServiceServer) RenewMount(context.Context, *RenewMount
 }
 func (UnimplementedStorageServiceServer) UnmountDisk(context.Context, *UnmountDiskRequest) (*UnmountDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UnmountDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) ListMounts(context.Context, *ListMountsRequest) (*ListMountsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMounts not implemented")
+}
+func (UnimplementedStorageServiceServer) EvictMounts(context.Context, *EvictMountsRequest) (*EvictMountsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method EvictMounts not implemented")
 }
 func (UnimplementedStorageServiceServer) CreateDisk(context.Context, *CreateDiskRequest) (*CreateDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDisk not implemented")
@@ -1462,6 +1498,42 @@ func _StorageService_UnmountDisk_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_ListMounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMountsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ListMounts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ListMounts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ListMounts(ctx, req.(*ListMountsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_EvictMounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EvictMountsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).EvictMounts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_EvictMounts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).EvictMounts(ctx, req.(*EvictMountsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StorageService_CreateDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateDiskRequest)
 	if err := dec(in); err != nil {
@@ -1774,6 +1846,14 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UnmountDisk",
 			Handler:    _StorageService_UnmountDisk_Handler,
+		},
+		{
+			MethodName: "ListMounts",
+			Handler:    _StorageService_ListMounts_Handler,
+		},
+		{
+			MethodName: "EvictMounts",
+			Handler:    _StorageService_EvictMounts_Handler,
 		},
 		{
 			MethodName: "CreateDisk",

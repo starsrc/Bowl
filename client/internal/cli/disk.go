@@ -212,7 +212,7 @@ func mapDiskRPCError(err error, policy diskRPCErrorPolicy) *diskCLIError {
 	if policy.checkEBUSYReason && serverx.ExtractErrorInfo(err).GetReason() == "EBUSY" {
 		return &diskCLIError{
 			exitCode: 1,
-			msg:      fmt.Sprintf("disk %s is still mounted with an active client session; unmount it before deleting", policy.diskID),
+			msg:      fmt.Sprintf("disk %s is still mounted with an active client session; unmount it, or run `bowl disk mounts %s` / `bowl disk evict %s` before deleting", policy.diskID, policy.diskID, policy.diskID),
 			cause:    err,
 		}
 	}
@@ -264,6 +264,8 @@ func newDiskCmd(ports diskPorts) *cobra.Command {
 		&diskGetSpec,
 		&diskUpdateSpec,
 		&diskDeleteSpec,
+		&diskMountsSpec,
+		&diskEvictSpec,
 		&diskDiffSpec,
 		&diskMergeSpec,
 	}

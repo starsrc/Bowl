@@ -182,6 +182,12 @@ service StorageService {
   // UnmountDisk 幂等释放指定的在线挂载软租约。
   rpc UnmountDisk(UnmountDiskRequest) returns (UnmountDiskResponse);
 
+  // ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
+  rpc ListMounts(ListMountsRequest) returns (ListMountsResponse);
+
+  // EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
+  rpc EvictMounts(EvictMountsRequest) returns (EvictMountsResponse);
+
   // CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
   // 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
   // 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -1504,6 +1510,58 @@ message UnmountDiskRequest {
 
 // UnmountDiskResponse 定义 UnmountDisk 接口输出参数。
 message UnmountDiskResponse {}
+
+// MountLease describes an active mount lease on a virtual disk.
+message MountLease {
+  string mount_id = 1;
+  bool read_only = 2;
+  uint64 epoch = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// ListMountsRequest requests active mount leases for a virtual disk.
+message ListMountsRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "list_mounts_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// ListMountsResponse returns unexpired mount leases sorted by mount_id ascending.
+message ListMountsResponse {
+  repeated MountLease mounts = 1;
+}
+
+// EvictMountsRequest evicts one specific mount lease or all active mount leases for a virtual disk.
+message EvictMountsRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "evict_mounts_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  optional string mount_id = 2 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "evict_mounts_mount_id_not_nil"
+      message: "mount_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// EvictMountsResponse returns the number of evicted leases and the fenced writer epoch if advanced.
+message EvictMountsResponse {
+  uint32 evicted_count = 1;
+  uint64 writer_epoch = 2;
+}
 
 // Inode 代表文件系统中的实体节点。
 

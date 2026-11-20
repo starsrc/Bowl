@@ -24,6 +24,7 @@ func registerDiskCleanup(t *testing.T, client storagev1connect.StorageServiceCli
 	t.Cleanup(func() {
 		cleanupCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stop()
+		_, _ = client.EvictMounts(cleanupCtx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: diskID}))
 		_, _ = client.DeleteDisk(cleanupCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	})
 }
@@ -149,6 +150,18 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	}))
 	testutil.RequireConnectError(t, fencedErr, connect.CodeFailedPrecondition, "EBUSY")
 
+	_, busyDelErr := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
+	testutil.RequireConnectError(t, busyDelErr, connect.CodeAborted, "EBUSY")
+
+	mountsResp, err := client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Len(t, mountsResp.Msg.GetMounts(), 2)
+
+	evictResp, err := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), evictResp.Msg.GetEvictedCount())
+	require.Equal(t, uint64(3), evictResp.Msg.GetWriterEpoch())
+
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)
 	_, getDeletedErr := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
@@ -253,6 +266,11 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	registerDiskCleanup(t, client, grandID)
 	require.Equal(t, child1ID, grandResp.Msg.GetDisk().GetParentDiskId())
 
+	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  parentID,
+		MountId: parentMount.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: parentID}))
 	require.NoError(t, err)
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: grandID}))
@@ -264,6 +282,11 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, sharedPayload, child1AfterGC.Msg.GetData())
 
+	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  child1ID,
+		MountId: child1Mount.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: child1ID}))
 	require.NoError(t, err)
 }

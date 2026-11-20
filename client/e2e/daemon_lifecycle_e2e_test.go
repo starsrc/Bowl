@@ -277,9 +277,41 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	_ = os.Remove(metaKill)
 	_ = os.Remove(fallbackMetaKill)
 
+	blockedAfterKillOut := runBowlExpectExit(t, 1, "disk", "delete", "--endpoint", endpoint, disk2ID, "-y")
+	require.Contains(t, blockedAfterKillOut, "still mounted")
+	require.Contains(t, blockedAfterKillOut, "bowl disk mounts")
+	require.Contains(t, blockedAfterKillOut, "bowl disk evict")
+
+	mountsOut := runBowlSuccess(t, "disk", "mounts", "--endpoint", endpoint, disk2ID, "--json")
+	var mountsRes struct {
+		DiskID string `json:"disk_id"`
+		Mounts []struct {
+			MountID   string `json:"mount_id"`
+			Mode      string `json:"mode"`
+			Epoch     uint64 `json:"epoch"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"mounts"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(mountsOut), &mountsRes))
+	require.Equal(t, disk2ID, mountsRes.DiskID)
+	require.Len(t, mountsRes.Mounts, 1)
+	require.Equal(t, "rw", mountsRes.Mounts[0].Mode)
+	require.Equal(t, uint64(1), mountsRes.Mounts[0].Epoch)
+
+	evictOut := runBowlSuccess(t, "disk", "evict", "--endpoint", endpoint, disk2ID, "--json")
+	var evictRes struct {
+		DiskID       string `json:"disk_id"`
+		EvictedCount uint32 `json:"evicted_count"`
+		WriterEpoch  uint64 `json:"writer_epoch"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(evictOut), &evictRes))
+	require.Equal(t, disk2ID, evictRes.DiskID)
+	require.Equal(t, uint32(1), evictRes.EvictedCount)
+	require.Equal(t, uint64(2), evictRes.WriterEpoch)
+
 	delStart := time.Now()
 	runBowlSuccess(t, "disk", "delete", "--endpoint", endpoint, disk2ID, "-y", "--json")
-	require.Less(t, time.Since(delStart), 2*time.Second, "`kill -9` 清理挂载后删盘必须零等待完成")
+	require.Less(t, time.Since(delStart), 2*time.Second, "`kill -9` 清理挂载并驱逐租约后删盘必须零等待完成")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

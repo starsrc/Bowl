@@ -95,6 +95,12 @@ const (
 	// StorageServiceUnmountDiskProcedure is the fully-qualified name of the StorageService's
 	// UnmountDisk RPC.
 	StorageServiceUnmountDiskProcedure = "/storage.v1.StorageService/UnmountDisk"
+	// StorageServiceListMountsProcedure is the fully-qualified name of the StorageService's ListMounts
+	// RPC.
+	StorageServiceListMountsProcedure = "/storage.v1.StorageService/ListMounts"
+	// StorageServiceEvictMountsProcedure is the fully-qualified name of the StorageService's
+	// EvictMounts RPC.
+	StorageServiceEvictMountsProcedure = "/storage.v1.StorageService/EvictMounts"
 	// StorageServiceCreateDiskProcedure is the fully-qualified name of the StorageService's CreateDisk
 	// RPC.
 	StorageServiceCreateDiskProcedure = "/storage.v1.StorageService/CreateDisk"
@@ -274,6 +280,10 @@ type StorageServiceClient interface {
 	RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error)
 	// UnmountDisk 幂等释放指定的在线挂载软租约。
 	UnmountDisk(context.Context, *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error)
+	// ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
+	ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error)
+	// EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
+	EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -488,6 +498,18 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("UnmountDisk")),
 			connect.WithClientOptions(opts...),
 		),
+		listMounts: connect.NewClient[v1.ListMountsRequest, v1.ListMountsResponse](
+			httpClient,
+			baseURL+StorageServiceListMountsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListMounts")),
+			connect.WithClientOptions(opts...),
+		),
+		evictMounts: connect.NewClient[v1.EvictMountsRequest, v1.EvictMountsResponse](
+			httpClient,
+			baseURL+StorageServiceEvictMountsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("EvictMounts")),
+			connect.WithClientOptions(opts...),
+		),
 		createDisk: connect.NewClient[v1.CreateDiskRequest, v1.CreateDiskResponse](
 			httpClient,
 			baseURL+StorageServiceCreateDiskProcedure,
@@ -586,6 +608,8 @@ type storageServiceClient struct {
 	mountDisk      *connect.Client[v1.MountDiskRequest, v1.MountDiskResponse]
 	renewMount     *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
 	unmountDisk    *connect.Client[v1.UnmountDiskRequest, v1.UnmountDiskResponse]
+	listMounts     *connect.Client[v1.ListMountsRequest, v1.ListMountsResponse]
+	evictMounts    *connect.Client[v1.EvictMountsRequest, v1.EvictMountsResponse]
 	createDisk     *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
 	getDisk        *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
 	listDisks      *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
@@ -732,6 +756,16 @@ func (c *storageServiceClient) RenewMount(ctx context.Context, req *connect.Requ
 // UnmountDisk calls storage.v1.StorageService.UnmountDisk.
 func (c *storageServiceClient) UnmountDisk(ctx context.Context, req *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error) {
 	return c.unmountDisk.CallUnary(ctx, req)
+}
+
+// ListMounts calls storage.v1.StorageService.ListMounts.
+func (c *storageServiceClient) ListMounts(ctx context.Context, req *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error) {
+	return c.listMounts.CallUnary(ctx, req)
+}
+
+// EvictMounts calls storage.v1.StorageService.EvictMounts.
+func (c *storageServiceClient) EvictMounts(ctx context.Context, req *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error) {
+	return c.evictMounts.CallUnary(ctx, req)
 }
 
 // CreateDisk calls storage.v1.StorageService.CreateDisk.
@@ -937,6 +971,10 @@ type StorageServiceHandler interface {
 	RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error)
 	// UnmountDisk 幂等释放指定的在线挂载软租约。
 	UnmountDisk(context.Context, *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error)
+	// ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
+	ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error)
+	// EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
+	EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error)
 	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
 	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
@@ -1147,6 +1185,18 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("UnmountDisk")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceListMountsHandler := connect.NewUnaryHandler(
+		StorageServiceListMountsProcedure,
+		svc.ListMounts,
+		connect.WithSchema(storageServiceMethods.ByName("ListMounts")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceEvictMountsHandler := connect.NewUnaryHandler(
+		StorageServiceEvictMountsProcedure,
+		svc.EvictMounts,
+		connect.WithSchema(storageServiceMethods.ByName("EvictMounts")),
+		connect.WithHandlerOptions(opts...),
+	)
 	storageServiceCreateDiskHandler := connect.NewUnaryHandler(
 		StorageServiceCreateDiskProcedure,
 		svc.CreateDisk,
@@ -1269,6 +1319,10 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceRenewMountHandler.ServeHTTP(w, r)
 		case StorageServiceUnmountDiskProcedure:
 			storageServiceUnmountDiskHandler.ServeHTTP(w, r)
+		case StorageServiceListMountsProcedure:
+			storageServiceListMountsHandler.ServeHTTP(w, r)
+		case StorageServiceEvictMountsProcedure:
+			storageServiceEvictMountsHandler.ServeHTTP(w, r)
 		case StorageServiceCreateDiskProcedure:
 			storageServiceCreateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceGetDiskProcedure:
@@ -1406,6 +1460,14 @@ func (UnimplementedStorageServiceHandler) RenewMount(context.Context, *connect.R
 
 func (UnimplementedStorageServiceHandler) UnmountDisk(context.Context, *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.UnmountDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListMounts is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.EvictMounts is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error) {

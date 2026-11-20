@@ -22,6 +22,7 @@ func e2eRegisterDiskCleanup(t *testing.T, client storagev1connect.StorageService
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		_, _ = client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: diskID}))
 		_, err := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 		if err != nil && connect.CodeOf(err) != connect.CodeNotFound {
 			require.NoError(t, err, "清理测试磁盘失败: %s", diskID)

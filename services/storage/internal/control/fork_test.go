@@ -433,6 +433,7 @@ func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T
 	require.NoError(t, err, "派生 sibling-2 失败")
 	require.Equal(t, uint64(5), fileHardLinkCount(t, sharedPackPath), "二次 Fork 后硬链接计数应为 5")
 
+	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: rootDisk.DiskID, MountID: mnt.MountID}), "卸载根盘失败")
 	require.NoError(t, mgr.DeleteDisk(ctx, rootDisk.DiskID), "删除根盘失败")
 
 	snapAfterRoot := memDB.Inspect()

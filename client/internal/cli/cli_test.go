@@ -92,6 +92,7 @@ type fakeStorage struct {
 	mu              sync.Mutex
 	disks           map[string]*storagev1.Disk
 	mounted         map[string]bool
+	mountLeases     map[string]map[string]*storagev1.MountLease
 	nextSeq         int
 	epochSeq        uint64
 	lastAuth        string
@@ -104,8 +105,11 @@ type fakeStorage struct {
 	readCalls       int
 	readlinkCalls   int
 	mergeCalls      int
+	listMountsCalls int
+	evictCalls      int
 	lastDiffReq     *storagev1.DiffDiskRequest
 	lastMergeReq    *storagev1.MergeDiskRequest
+	lastEvictReq    *storagev1.EvictMountsRequest
 	diffResponse    *storagev1.DiffDiskResponse
 	commitNodes     map[string]*storagev1.ReadCommitNodeResponse
 	liveFiles       map[string][]byte
@@ -130,11 +134,26 @@ func newFakeStorage() *fakeStorage {
 	return &fakeStorage{
 		disks:         make(map[string]*storagev1.Disk),
 		mounted:       make(map[string]bool),
+		mountLeases:   make(map[string]map[string]*storagev1.MountLease),
 		commitNodes:   make(map[string]*storagev1.ReadCommitNodeResponse),
 		liveFiles:     make(map[string][]byte),
 		liveSymlinks:  make(map[string][]byte),
 		forcedErr:     make(map[string]error),
 		returnNilDisk: make(map[string]bool),
+	}
+}
+
+func (f *fakeStorage) seedMountLease(diskID, mountID string, readOnly bool, epoch uint64, expiresAt time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mountLeases[diskID] == nil {
+		f.mountLeases[diskID] = make(map[string]*storagev1.MountLease)
+	}
+	f.mountLeases[diskID][mountID] = &storagev1.MountLease{
+		MountId:   mountID,
+		ReadOnly:  readOnly,
+		Epoch:     epoch,
+		ExpiresAt: timestamppb.New(expiresAt.UTC()),
 	}
 }
 
@@ -431,6 +450,76 @@ func (f *fakeStorage) UnmountDisk(_ context.Context, req *connect.Request[storag
 		return nil, unmountErr
 	}
 	return connect.NewResponse(&storagev1.UnmountDiskResponse{}), nil
+}
+
+func (f *fakeStorage) ListMounts(_ context.Context, req *connect.Request[storagev1.ListMountsRequest]) (*connect.Response[storagev1.ListMountsResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listMountsCalls++
+	f.recordHeaders(req.Header())
+	if err := f.forcedErr["ListMounts"]; err != nil {
+		return nil, err
+	}
+	diskID := req.Msg.GetDiskId()
+	if _, ok := f.disks[diskID]; !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("disk not found"))
+	}
+	leases := f.mountLeases[diskID]
+	ids := make([]string, 0, len(leases))
+	for id := range leases {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*storagev1.MountLease, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, leases[id])
+	}
+	return connect.NewResponse(&storagev1.ListMountsResponse{
+		Mounts: out,
+	}), nil
+}
+
+func (f *fakeStorage) EvictMounts(_ context.Context, req *connect.Request[storagev1.EvictMountsRequest]) (*connect.Response[storagev1.EvictMountsResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.evictCalls++
+	f.recordHeaders(req.Header())
+	f.lastEvictReq = req.Msg
+	if err := f.forcedErr["EvictMounts"]; err != nil {
+		return nil, err
+	}
+	diskID := req.Msg.GetDiskId()
+	if _, ok := f.disks[diskID]; !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("disk not found"))
+	}
+	leases := f.mountLeases[diskID]
+	if req.Msg.MountId != nil {
+		mountID := req.Msg.GetMountId()
+		lease, ok := leases[mountID]
+		if !ok {
+			return connect.NewResponse(&storagev1.EvictMountsResponse{}), nil
+		}
+		delete(leases, mountID)
+		if len(leases) == 0 {
+			delete(f.mountLeases, diskID)
+		}
+		var writerEpoch uint64
+		if !lease.GetReadOnly() {
+			f.epochSeq++
+			writerEpoch = f.epochSeq
+		}
+		return connect.NewResponse(&storagev1.EvictMountsResponse{
+			EvictedCount: 1,
+			WriterEpoch:  writerEpoch,
+		}), nil
+	}
+	evicted := uint32(len(leases))
+	delete(f.mountLeases, diskID)
+	f.epochSeq++
+	return connect.NewResponse(&storagev1.EvictMountsResponse{
+		EvictedCount: evicted,
+		WriterEpoch:  f.epochSeq,
+	}), nil
 }
 
 func (f *fakeStorage) getMountReqs() []*storagev1.MountDiskRequest {

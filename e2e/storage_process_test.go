@@ -247,7 +247,9 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stopCleanup()
-		_, _ = testutil.NewStorageClient().DeleteDisk(cleanupCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
+		cleanupClient := testutil.NewStorageClient()
+		_, _ = cleanupClient.EvictMounts(cleanupCtx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: diskID}))
+		_, _ = cleanupClient.DeleteDisk(cleanupCtx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	})
 
 	diskDir := filepath.Join(dataDir, "disks", diskID)
@@ -329,6 +331,15 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	mount3, err := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), mount3.Msg.GetEpoch(), "重启后写入世代号必须在持久化世代 2 基础上递增至 3")
+
+	_, err = client2.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
+	testutil.RequireConnectError(t, err, connect.CodeAborted, "EBUSY")
+
+	_, err = client2.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  diskID,
+		MountId: mount3.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
 
 	_, err = client2.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)

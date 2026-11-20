@@ -43,11 +43,14 @@ INSERT INTO disks (
     lineage_id,
     parent_disk_id,
     base_commit_id,
+    max_bytes,
+    used_bytes,
+    used_inodes,
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp())
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 `
 
 type CreateDiskParams struct {
@@ -56,6 +59,9 @@ type CreateDiskParams struct {
 	LineageID    pgtype.UUID `json:"lineage_id"`
 	ParentDiskID pgtype.UUID `json:"parent_disk_id"`
 	BaseCommitID pgtype.UUID `json:"base_commit_id"`
+	MaxBytes     int64       `json:"max_bytes"`
+	UsedBytes    int64       `json:"used_bytes"`
+	UsedInodes   int64       `json:"used_inodes"`
 }
 
 func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error) {
@@ -65,6 +71,9 @@ func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, e
 		arg.LineageID,
 		arg.ParentDiskID,
 		arg.BaseCommitID,
+		arg.MaxBytes,
+		arg.UsedBytes,
+		arg.UsedInodes,
 	)
 	var i Disk
 	err := row.Scan(
@@ -75,6 +84,9 @@ func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, e
 		&i.LineageID,
 		&i.ParentDiskID,
 		&i.BaseCommitID,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
 	)
 	return i, err
 }
@@ -138,6 +150,49 @@ func (q *Queries) CreateDiskLineage(ctx context.Context, lineageID pgtype.UUID) 
 	return i, err
 }
 
+const createMountLease = `-- name: CreateMountLease :one
+INSERT INTO disk_mounts (
+    disk_id,
+    mount_id,
+    read_only,
+    epoch,
+    expires_at,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp())
+RETURNING disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
+`
+
+type CreateMountLeaseParams struct {
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	MountID   pgtype.UUID        `json:"mount_id"`
+	ReadOnly  bool               `json:"read_only"`
+	Epoch     int64              `json:"epoch"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreateMountLease(ctx context.Context, arg CreateMountLeaseParams) (DiskMount, error) {
+	row := q.db.QueryRow(ctx, createMountLease,
+		arg.DiskID,
+		arg.MountID,
+		arg.ReadOnly,
+		arg.Epoch,
+		arg.ExpiresAt,
+	)
+	var i DiskMount
+	err := row.Scan(
+		&i.DiskID,
+		&i.MountID,
+		&i.ReadOnly,
+		&i.Epoch,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const deleteDisk = `-- name: DeleteDisk :execrows
 DELETE FROM disks
 WHERE disk_id = $1
@@ -158,6 +213,48 @@ WHERE lineage_id = $1
 
 func (q *Queries) DeleteDiskLineage(ctx context.Context, lineageID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteDiskLineage, lineageID)
+	return err
+}
+
+const deleteDiskMountLeases = `-- name: DeleteDiskMountLeases :many
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+RETURNING expires_at
+`
+
+func (q *Queries) DeleteDiskMountLeases(ctx context.Context, diskID pgtype.UUID) ([]pgtype.Timestamptz, error) {
+	rows, err := q.db.Query(ctx, deleteDiskMountLeases, diskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.Timestamptz
+	for rows.Next() {
+		var expires_at pgtype.Timestamptz
+		if err := rows.Scan(&expires_at); err != nil {
+			return nil, err
+		}
+		items = append(items, expires_at)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const deleteExpiredDiskMountLeases = `-- name: DeleteExpiredDiskMountLeases :exec
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+  AND expires_at <= $2
+`
+
+type DeleteExpiredDiskMountLeasesParams struct {
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) DeleteExpiredDiskMountLeases(ctx context.Context, arg DeleteExpiredDiskMountLeasesParams) error {
+	_, err := q.db.Exec(ctx, deleteExpiredDiskMountLeases, arg.DiskID, arg.ExpiresAt)
 	return err
 }
 
@@ -187,8 +284,44 @@ func (q *Queries) DeleteLineageCommits(ctx context.Context, lineageID pgtype.UUI
 	return items, nil
 }
 
+const deleteMountLease = `-- name: DeleteMountLease :execrows
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+  AND mount_id = $2
+`
+
+type DeleteMountLeaseParams struct {
+	DiskID  pgtype.UUID `json:"disk_id"`
+	MountID pgtype.UUID `json:"mount_id"`
+}
+
+func (q *Queries) DeleteMountLease(ctx context.Context, arg DeleteMountLeaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteMountLease, arg.DiskID, arg.MountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteSupersededRWMountLeases = `-- name: DeleteSupersededRWMountLeases :exec
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+  AND NOT read_only
+  AND epoch < $2
+`
+
+type DeleteSupersededRWMountLeasesParams struct {
+	DiskID pgtype.UUID `json:"disk_id"`
+	Epoch  int64       `json:"epoch"`
+}
+
+func (q *Queries) DeleteSupersededRWMountLeases(ctx context.Context, arg DeleteSupersededRWMountLeasesParams) error {
+	_, err := q.db.Exec(ctx, deleteSupersededRWMountLeases, arg.DiskID, arg.Epoch)
+	return err
+}
+
 const getDisk = `-- name: GetDisk :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1
 `
@@ -204,12 +337,15 @@ func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 		&i.LineageID,
 		&i.ParentDiskID,
 		&i.BaseCommitID,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
 	)
 	return i, err
 }
 
 const getDiskForUpdate = `-- name: GetDiskForUpdate :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1
 FOR UPDATE
@@ -226,12 +362,84 @@ func (q *Queries) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Dis
 		&i.LineageID,
 		&i.ParentDiskID,
 		&i.BaseCommitID,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
 	)
 	return i, err
 }
 
+const getMountLeaseForUpdate = `-- name: GetMountLeaseForUpdate :one
+SELECT disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
+FROM disk_mounts
+WHERE disk_id = $1
+  AND mount_id = $2
+FOR UPDATE
+`
+
+type GetMountLeaseForUpdateParams struct {
+	DiskID  pgtype.UUID `json:"disk_id"`
+	MountID pgtype.UUID `json:"mount_id"`
+}
+
+func (q *Queries) GetMountLeaseForUpdate(ctx context.Context, arg GetMountLeaseForUpdateParams) (DiskMount, error) {
+	row := q.db.QueryRow(ctx, getMountLeaseForUpdate, arg.DiskID, arg.MountID)
+	var i DiskMount
+	err := row.Scan(
+		&i.DiskID,
+		&i.MountID,
+		&i.ReadOnly,
+		&i.Epoch,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listActiveMountLeases = `-- name: ListActiveMountLeases :many
+SELECT disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
+FROM disk_mounts
+WHERE disk_id = $1
+  AND expires_at > $2
+ORDER BY mount_id ASC
+`
+
+type ListActiveMountLeasesParams struct {
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) ListActiveMountLeases(ctx context.Context, arg ListActiveMountLeasesParams) ([]DiskMount, error) {
+	rows, err := q.db.Query(ctx, listActiveMountLeases, arg.DiskID, arg.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DiskMount
+	for rows.Next() {
+		var i DiskMount
+		if err := rows.Scan(
+			&i.DiskID,
+			&i.MountID,
+			&i.ReadOnly,
+			&i.Epoch,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDisks = `-- name: ListDisks :many
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE (NOT $1::boolean)
    OR (created_at, disk_id) < ($2::timestamptz, $3::uuid)
@@ -268,6 +476,9 @@ func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, e
 			&i.LineageID,
 			&i.ParentDiskID,
 			&i.BaseCommitID,
+			&i.MaxBytes,
+			&i.UsedBytes,
+			&i.UsedInodes,
 		); err != nil {
 			return nil, err
 		}
@@ -328,6 +539,62 @@ func (q *Queries) LockDiskLineage(ctx context.Context, lineageID pgtype.UUID) (D
 		&i.NextIno,
 		&i.NextPackID,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const pruneExpiredMountLeases = `-- name: PruneExpiredMountLeases :execrows
+DELETE FROM disk_mounts
+WHERE expires_at <= $1
+`
+
+func (q *Queries) PruneExpiredMountLeases(ctx context.Context, expiresAt pgtype.Timestamptz) (int64, error) {
+	result, err := q.db.Exec(ctx, pruneExpiredMountLeases, expiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const renewMountLease = `-- name: RenewMountLease :one
+UPDATE disk_mounts
+SET expires_at = $1::timestamptz,
+    updated_at = clock_timestamp()
+WHERE disk_id = $2::uuid
+  AND mount_id = $3::uuid
+  AND read_only = $4::boolean
+  AND epoch = $5::bigint
+  AND expires_at > $6::timestamptz
+RETURNING disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
+`
+
+type RenewMountLeaseParams struct {
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	MountID   pgtype.UUID        `json:"mount_id"`
+	ReadOnly  bool               `json:"read_only"`
+	Epoch     int64              `json:"epoch"`
+	Now       pgtype.Timestamptz `json:"now"`
+}
+
+func (q *Queries) RenewMountLease(ctx context.Context, arg RenewMountLeaseParams) (DiskMount, error) {
+	row := q.db.QueryRow(ctx, renewMountLease,
+		arg.ExpiresAt,
+		arg.DiskID,
+		arg.MountID,
+		arg.ReadOnly,
+		arg.Epoch,
+		arg.Now,
+	)
+	var i DiskMount
+	err := row.Scan(
+		&i.DiskID,
+		&i.MountID,
+		&i.ReadOnly,
+		&i.Epoch,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -406,18 +673,31 @@ func (q *Queries) SetDiskBaseCommit(ctx context.Context, arg SetDiskBaseCommitPa
 
 const setDiskBaseCommitAndTouch = `-- name: SetDiskBaseCommitAndTouch :one
 UPDATE disks
-SET base_commit_id = $2, updated_at = clock_timestamp()
+SET base_commit_id = $2,
+    max_bytes = COALESCE($3::bigint, max_bytes),
+    used_bytes = COALESCE($4::bigint, used_bytes),
+    used_inodes = COALESCE($5::bigint, used_inodes),
+    updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 `
 
 type SetDiskBaseCommitAndTouchParams struct {
 	DiskID       pgtype.UUID `json:"disk_id"`
 	BaseCommitID pgtype.UUID `json:"base_commit_id"`
+	MaxBytes     pgtype.Int8 `json:"max_bytes"`
+	UsedBytes    pgtype.Int8 `json:"used_bytes"`
+	UsedInodes   pgtype.Int8 `json:"used_inodes"`
 }
 
 func (q *Queries) SetDiskBaseCommitAndTouch(ctx context.Context, arg SetDiskBaseCommitAndTouchParams) (Disk, error) {
-	row := q.db.QueryRow(ctx, setDiskBaseCommitAndTouch, arg.DiskID, arg.BaseCommitID)
+	row := q.db.QueryRow(ctx, setDiskBaseCommitAndTouch,
+		arg.DiskID,
+		arg.BaseCommitID,
+		arg.MaxBytes,
+		arg.UsedBytes,
+		arg.UsedInodes,
+	)
 	var i Disk
 	err := row.Scan(
 		&i.DiskID,
@@ -427,24 +707,30 @@ func (q *Queries) SetDiskBaseCommitAndTouch(ctx context.Context, arg SetDiskBase
 		&i.LineageID,
 		&i.ParentDiskID,
 		&i.BaseCommitID,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
 	)
 	return i, err
 }
 
 const updateDisk = `-- name: UpdateDisk :one
 UPDATE disks
-SET name = $2, updated_at = clock_timestamp()
+SET name = COALESCE($2::text, name),
+    max_bytes = COALESCE($3::bigint, max_bytes),
+    updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 `
 
 type UpdateDiskParams struct {
-	DiskID pgtype.UUID `json:"disk_id"`
-	Name   string      `json:"name"`
+	DiskID   pgtype.UUID `json:"disk_id"`
+	Name     pgtype.Text `json:"name"`
+	MaxBytes pgtype.Int8 `json:"max_bytes"`
 }
 
 func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, error) {
-	row := q.db.QueryRow(ctx, updateDisk, arg.DiskID, arg.Name)
+	row := q.db.QueryRow(ctx, updateDisk, arg.DiskID, arg.Name, arg.MaxBytes)
 	var i Disk
 	err := row.Scan(
 		&i.DiskID,
@@ -454,6 +740,30 @@ func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, e
 		&i.LineageID,
 		&i.ParentDiskID,
 		&i.BaseCommitID,
+		&i.MaxBytes,
+		&i.UsedBytes,
+		&i.UsedInodes,
 	)
 	return i, err
+}
+
+const updateDiskUsage = `-- name: UpdateDiskUsage :execrows
+UPDATE disks
+SET used_bytes = $2,
+    used_inodes = $3
+WHERE disk_id = $1
+`
+
+type UpdateDiskUsageParams struct {
+	DiskID     pgtype.UUID `json:"disk_id"`
+	UsedBytes  int64       `json:"used_bytes"`
+	UsedInodes int64       `json:"used_inodes"`
+}
+
+func (q *Queries) UpdateDiskUsage(ctx context.Context, arg UpdateDiskUsageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateDiskUsage, arg.DiskID, arg.UsedBytes, arg.UsedInodes)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -52,19 +52,22 @@ INSERT INTO disks (
     lineage_id,
     parent_disk_id,
     base_commit_id,
+    max_bytes,
+    used_bytes,
+    used_inodes,
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp())
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id;
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes;
 
 -- name: GetDisk :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1;
 
 -- name: ListDisks :many
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE (NOT @has_cursor::boolean)
    OR (created_at, disk_id) < (@cursor_created_at::timestamptz, @cursor_disk_id::uuid)
@@ -72,16 +75,24 @@ ORDER BY created_at DESC, disk_id DESC
 LIMIT @page_limit::int;
 
 -- name: GetDiskForUpdate :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1
 FOR UPDATE;
 
 -- name: UpdateDisk :one
 UPDATE disks
-SET name = $2, updated_at = clock_timestamp()
+SET name = COALESCE(sqlc.narg('name')::text, name),
+    max_bytes = COALESCE(sqlc.narg('max_bytes')::bigint, max_bytes),
+    updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id;
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes;
+
+-- name: UpdateDiskUsage :execrows
+UPDATE disks
+SET used_bytes = $2,
+    used_inodes = $3
+WHERE disk_id = $1;
 
 -- name: SetDiskBaseCommit :exec
 UPDATE disks
@@ -90,9 +101,13 @@ WHERE disk_id = $1;
 
 -- name: SetDiskBaseCommitAndTouch :one
 UPDATE disks
-SET base_commit_id = $2, updated_at = clock_timestamp()
+SET base_commit_id = $2,
+    max_bytes = COALESCE(sqlc.narg('max_bytes')::bigint, max_bytes),
+    used_bytes = COALESCE(sqlc.narg('used_bytes')::bigint, used_bytes),
+    used_inodes = COALESCE(sqlc.narg('used_inodes')::bigint, used_inodes),
+    updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING *;
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes;
 
 -- name: ClearLineageBaseCommits :exec
 UPDATE disks
@@ -117,3 +132,66 @@ WHERE lineage_id = $1;
 -- name: DeleteDisk :execrows
 DELETE FROM disks
 WHERE disk_id = $1;
+
+-- name: CreateMountLease :one
+INSERT INTO disk_mounts (
+    disk_id,
+    mount_id,
+    read_only,
+    epoch,
+    expires_at,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, clock_timestamp(), clock_timestamp())
+RETURNING disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at;
+
+-- name: GetMountLeaseForUpdate :one
+SELECT disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
+FROM disk_mounts
+WHERE disk_id = $1
+  AND mount_id = $2
+FOR UPDATE;
+
+-- name: RenewMountLease :one
+UPDATE disk_mounts
+SET expires_at = @expires_at::timestamptz,
+    updated_at = clock_timestamp()
+WHERE disk_id = @disk_id::uuid
+  AND mount_id = @mount_id::uuid
+  AND read_only = @read_only::boolean
+  AND epoch = @epoch::bigint
+  AND expires_at > @now::timestamptz
+RETURNING disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at;
+
+-- name: DeleteMountLease :execrows
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+  AND mount_id = $2;
+
+-- name: DeleteExpiredDiskMountLeases :exec
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+  AND expires_at <= $2;
+
+-- name: DeleteSupersededRWMountLeases :exec
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+  AND NOT read_only
+  AND epoch < $2;
+
+-- name: DeleteDiskMountLeases :many
+DELETE FROM disk_mounts
+WHERE disk_id = $1
+RETURNING expires_at;
+
+-- name: ListActiveMountLeases :many
+SELECT disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
+FROM disk_mounts
+WHERE disk_id = $1
+  AND expires_at > $2
+ORDER BY mount_id ASC;
+
+-- name: PruneExpiredMountLeases :execrows
+DELETE FROM disk_mounts
+WHERE expires_at <= $1;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -18,7 +19,7 @@ func TestMemStore_GivenInjectedWriteError_WhenForkDiskCalled_ThenRollsBackAtomic
 	mem := db.NewMemStore()
 
 	rootID := mustNewUUIDv7(t)
-	_, err := mem.CreateDisk(ctx, rootID, "root")
+	_, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 	require.NoError(t, err)
 
 	injected := errors.New("injected write error")
@@ -54,7 +55,7 @@ func TestMemStore_GivenInjectedWriteError_WhenMergeDiskCalled_ThenRollsBackAtomi
 	mem := db.NewMemStore()
 
 	rootID := mustNewUUIDv7(t)
-	root, err := mem.CreateDisk(ctx, rootID, "root")
+	root, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 	require.NoError(t, err)
 
 	childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
@@ -91,8 +92,11 @@ func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testin
 
 	mem := db.NewMemStore()
 	id := mustNewUUIDv7(t)
+	mntID := mustNewUUIDv7(t)
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	name := "x"
 
-	_, err := mem.CreateDisk(ctx, id, "canceled")
+	_, err := mem.CreateDisk(ctx, id, "canceled", testDefaultMaxBytes)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: id, ChildDiskID: mustNewUUIDv7(t), CommitID: mustNewUUIDv7(t), Name: "c"})
 	require.ErrorIs(t, err, context.Canceled)
@@ -100,7 +104,9 @@ func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testin
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.ListDisks(ctx, db.ListDisksQuery{})
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = mem.UpdateDiskName(ctx, id, "x")
+	_, err = mem.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: id, Name: &name})
+	require.ErrorIs(t, err, context.Canceled)
+	err = mem.UpdateDiskUsage(ctx, id, 0, 1)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.DeleteDisk(ctx, id)
 	require.ErrorIs(t, err, context.Canceled)
@@ -116,24 +122,49 @@ func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testin
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.ReserveSegment(ctx, db.SegmentKindInode, id, 2, 10)
 	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.CreateMountLease(ctx, db.CreateMountLeaseInput{DiskID: id, MountID: mntID, ReadOnly: true, Now: now, ExpiresAt: now.Add(time.Second)})
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.RenewMountLease(ctx, db.RenewMountLeaseInput{DiskID: id, MountID: mntID, ReadOnly: true, Now: now, ExpiresAt: now.Add(time.Second)})
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.DeleteMountLease(ctx, id, mntID)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.DeleteDiskMountLeases(ctx, id, now)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.ListActiveMountLeases(ctx, id, now)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.PruneExpiredMountLeases(ctx, now)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestMemStore_GivenReserveSegmentCalls_WhenInspected_ThenTracksCounters(t *testing.T) {
+func TestMemStore_GivenReserveAndUsageCalls_WhenInspected_ThenTracksCountersAndMounts(t *testing.T) {
 	ctx := context.Background()
 	mem := db.NewMemStore()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 	rootID := mustNewUUIDv7(t)
-	_, err := mem.CreateDisk(ctx, rootID, "root")
+	_, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 	require.NoError(t, err)
 
 	_, err = mem.ReserveSegment(ctx, db.SegmentKindInode, rootID, 2, 10)
 	require.NoError(t, err)
 	_, err = mem.ReserveSegment(ctx, db.SegmentKindPack, rootID, 1, 10)
 	require.NoError(t, err)
+	require.NoError(t, mem.UpdateDiskUsage(ctx, rootID, 1024, 2))
+	mntID := mustNewUUIDv7(t)
+	_, err = mem.CreateMountLease(ctx, db.CreateMountLeaseInput{
+		DiskID:    rootID,
+		MountID:   mntID,
+		ReadOnly:  true,
+		Now:       now,
+		ExpiresAt: now.Add(30 * time.Second),
+	})
+	require.NoError(t, err)
 
 	snap := mem.Inspect()
 	require.Equal(t, 1, snap.InodeReserveCalls, "InodeReserveCalls want=1, got=%d", snap.InodeReserveCalls)
 	require.Equal(t, 1, snap.PackReserveCalls, "PackReserveCalls want=1, got=%d", snap.PackReserveCalls)
+	require.Equal(t, 1, snap.UpdateUsageCalls, "UpdateUsageCalls want=1, got=%d", snap.UpdateUsageCalls)
+	require.Len(t, snap.Mounts[rootID], 1)
 }
 
 func TestMemStore_GivenTriStateDelete_WhenInspected_ThenClearsSurvivorBaseCommit(t *testing.T) {
@@ -141,7 +172,7 @@ func TestMemStore_GivenTriStateDelete_WhenInspected_ThenClearsSurvivorBaseCommit
 	mem := db.NewMemStore()
 
 	rootID := mustNewUUIDv7(t)
-	_, err := mem.CreateDisk(ctx, rootID, "root")
+	_, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 	require.NoError(t, err)
 
 	childID, cmID := mustNewUUIDv7(t), mustNewUUIDv7(t)

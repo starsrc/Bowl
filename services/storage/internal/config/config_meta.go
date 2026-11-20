@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
 
 const (
@@ -19,18 +20,21 @@ const (
 
 	DefaultOpenDirCache = false
 
+	DefaultActorIdleTTL = 5 * time.Minute
+
 	DefaultDataDir = "/tmp/bowl-storage-data"
 )
 
 type MetaConfig struct {
-	AtimeModeVal              string  `env:"STORAGE_ATIME_MODE" envDefault:"noatime"`
-	EntryTimeoutSecondsVal    float64 `env:"STORAGE_ENTRY_TIMEOUT_SECONDS" envDefault:"1.0"`
-	AttrTimeoutSecondsVal     float64 `env:"STORAGE_ATTR_TIMEOUT_SECONDS" envDefault:"1.0"`
-	DirEntryTimeoutSecondsVal float64 `env:"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS" envDefault:"1.0"`
-	OpenKeepCacheVal          bool    `env:"STORAGE_OPEN_KEEP_CACHE" envDefault:"false"`
-	OpenDirCacheVal           bool    `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
-	DataDirVal                string  `env:"DATA_DIR"`
-	StorageDataDirVal         string  `env:"STORAGE_DATA_DIR"`
+	AtimeModeVal              string        `env:"STORAGE_ATIME_MODE" envDefault:"noatime"`
+	EntryTimeoutSecondsVal    float64       `env:"STORAGE_ENTRY_TIMEOUT_SECONDS" envDefault:"1.0"`
+	AttrTimeoutSecondsVal     float64       `env:"STORAGE_ATTR_TIMEOUT_SECONDS" envDefault:"1.0"`
+	DirEntryTimeoutSecondsVal float64       `env:"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS" envDefault:"1.0"`
+	OpenKeepCacheVal          bool          `env:"STORAGE_OPEN_KEEP_CACHE" envDefault:"false"`
+	OpenDirCacheVal           bool          `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
+	ActorIdleTTLVal           time.Duration `env:"STORAGE_ACTOR_IDLE_TTL" envDefault:"5m"`
+	DataDirVal                string        `env:"DATA_DIR"`
+	StorageDataDirVal         string        `env:"STORAGE_DATA_DIR"`
 }
 
 func (c *MetaConfig) AtimeMode() string {
@@ -58,6 +62,10 @@ func (c *MetaConfig) OpenKeepCache() bool {
 
 func (c *MetaConfig) OpenDirCache() bool {
 	return c.OpenDirCacheVal
+}
+
+func (c *MetaConfig) ActorIdleTTL() time.Duration {
+	return c.ActorIdleTTLVal
 }
 
 func (c *MetaConfig) DataDir() string {
@@ -96,6 +104,9 @@ func (c *MetaConfig) Validate() error {
 	}
 	if err := validateNonNegativeTimeout("dir entry timeout", c.DirEntryTimeoutSecondsVal); err != nil {
 		return err
+	}
+	if c.ActorIdleTTLVal < 0 {
+		return fmt.Errorf("invalid actor idle ttl %s: must be non-negative", c.ActorIdleTTLVal)
 	}
 
 	return nil

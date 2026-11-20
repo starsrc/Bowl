@@ -168,7 +168,9 @@ func TestMountDisk_AfterRestart_PersistsEpochAndReclaimsOrphans(t *testing.T) {
 
 	mgr2 := New(memDB, WithStorageRoot(rootDir))
 	t.Cleanup(func() { _ = mgr2.Close() })
-	mnt2, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	_, nonForceErr := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
+	require.ErrorIs(t, nonForceErr, ErrDiskMounted, "重启后未过期租约应继续拦截非强制挂载")
+	mnt2, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, Force: true})
 
 	require.NoError(t, err, "重启后可写挂载失败")
 	require.Equal(t, uint64(2), mnt2.Epoch, "重启后可写挂载 epoch 应延续递增: want=2 got=%d", mnt2.Epoch)

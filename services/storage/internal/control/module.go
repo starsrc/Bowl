@@ -47,6 +47,7 @@ func newManagerFromParams(params ManagerParams) Manager {
 			WithDirEntryTimeout(cfg.DirEntryTimeoutSeconds()),
 			WithOpenKeepCache(cfg.OpenKeepCache()),
 			WithOpenDirCache(cfg.OpenDirCache()),
+			WithActorIdleTTL(cfg.ActorIdleTTL()),
 		)
 	}
 	if params.Logger != nil {

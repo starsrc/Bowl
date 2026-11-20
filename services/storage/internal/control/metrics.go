@@ -400,6 +400,13 @@ func (c *storageEngineCollector) incActorLoad(readOnly bool) {
 	c.actorLoadsRW.Add(1)
 }
 
+func (c *storageEngineCollector) incActorEviction() {
+	if c == nil {
+		return
+	}
+	c.actorEvictions.Add(1)
+}
+
 func (c *storageEngineCollector) incCleanupError() {
 	if c == nil {
 		return
@@ -564,12 +571,12 @@ func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 			storageRoot = m.storageRoot
 			if len(m.actors) > 0 {
 				actors = make([]*store.StoreActor, 0, len(m.actors))
-				for _, actor := range m.actors {
-					if actor == nil {
+				for _, entry := range m.actors {
+					if entry == nil || entry.actor == nil {
 						continue
 					}
-					actors = append(actors, actor)
-					if actor.ReadOnly() {
+					actors = append(actors, entry.actor)
+					if entry.actor.ReadOnly() {
 						roLoaded++
 					} else {
 						rwLoaded++

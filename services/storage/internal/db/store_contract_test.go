@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"testing"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
 )
+
+const testDefaultMaxBytes uint64 = 16 << 20
 
 type storeAdapter struct {
 	name     string
@@ -74,7 +77,7 @@ func createTestDisks(t *testing.T, ctx context.Context, s db.Store, names ...str
 	t.Helper()
 	created := make([]db.DiskRecord, 0, len(names))
 	for _, name := range names {
-		rec, err := s.CreateDisk(ctx, mustNewUUIDv7(t), name)
+		rec, err := s.CreateDisk(ctx, mustNewUUIDv7(t), name, testDefaultMaxBytes)
 		require.NoError(t, err, "创建磁盘 %s 失败", name)
 		created = append(created, rec)
 	}
@@ -171,7 +174,7 @@ func runConcurrentForkDeleteRounds(t *testing.T, ctx context.Context, s db.Store
 	t.Helper()
 	for i := range rounds {
 		rootID := mustNewUUIDv7(t)
-		_, err := s.CreateDisk(ctx, rootID, fmt.Sprintf("race-root-%d", i))
+		_, err := s.CreateDisk(ctx, rootID, fmt.Sprintf("race-root-%d", i), testDefaultMaxBytes)
 		require.NoError(t, err)
 
 		forkErr, delErr := runConcurrentForkAndDelete(t, ctx, s, rootID)
@@ -186,13 +189,16 @@ func TestStoreContract_GivenValidDisk_WhenCreatedUpdatedRead_ThenPersistsEndStat
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		diskID := mustNewUUIDv7(t)
 
-		created, err := s.CreateDisk(ctx, diskID, "alpha")
+		created, err := s.CreateDisk(ctx, diskID, "alpha", 8<<20)
 		require.NoError(t, err)
 		require.Equal(t, diskID, created.DiskID, "DiskID want=%s, got=%s", diskID, created.DiskID)
 		require.Equal(t, uuid.Nil, created.ParentDiskID, "根盘 ParentDiskID 应为 Nil UUID, got=%s", created.ParentDiskID)
 		require.Equal(t, diskID, created.LineageID, "根盘 LineageID want=%s, got=%s", diskID, created.LineageID)
 		require.Equal(t, uuid.Nil, created.BaseCommitID, "根盘初始 BaseCommitID 应为 Nil UUID, got=%s", created.BaseCommitID)
 		require.Equal(t, "alpha", created.Name, "Name want=alpha, got=%s", created.Name)
+		require.Equal(t, uint64(8<<20), created.MaxBytes, "MaxBytes want=%d, got=%d", uint64(8<<20), created.MaxBytes)
+		require.Equal(t, uint64(0), created.UsedBytes, "UsedBytes want=0, got=%d", created.UsedBytes)
+		require.Equal(t, uint64(1), created.UsedInodes, "UsedInodes want=1, got=%d", created.UsedInodes)
 		require.False(t, created.CreatedAt.IsZero(), "CreatedAt 不应为零值")
 		require.Equal(t, created.CreatedAt.Truncate(time.Microsecond), created.CreatedAt, "CreatedAt 应为微秒精度")
 
@@ -200,17 +206,28 @@ func TestStoreContract_GivenValidDisk_WhenCreatedUpdatedRead_ThenPersistsEndStat
 		require.NoError(t, err)
 		require.Equal(t, created, got, "GetDisk 返回应与 CreateDisk 一致")
 
-		updated, err := s.UpdateDiskName(ctx, diskID, "alpha-renamed")
+		renamedName := "alpha-renamed"
+		updated, err := s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: diskID, Name: &renamedName})
 		require.NoError(t, err)
 		require.Equal(t, "alpha-renamed", updated.Name, "更新后 Name want=alpha-renamed, got=%s", updated.Name)
-		require.Equal(t, created.CreatedAt, updated.CreatedAt, "UpdateDiskName 不得篡改 CreatedAt")
+		require.Equal(t, uint64(8<<20), updated.MaxBytes, "仅改名不得修改 MaxBytes")
+		require.Equal(t, created.CreatedAt, updated.CreatedAt, "UpdateDisk 不得篡改 CreatedAt")
 		require.False(t, updated.UpdatedAt.Before(created.UpdatedAt), "UpdatedAt 不得早于创建时间")
 
+		newQuota := uint64(32 << 20)
+		resized, err := s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: diskID, MaxBytes: &newQuota})
+		require.NoError(t, err)
+		require.Equal(t, "alpha-renamed", resized.Name, "仅改配额不得修改 Name")
+		require.Equal(t, newQuota, resized.MaxBytes, "更新后 MaxBytes want=%d, got=%d", newQuota, resized.MaxBytes)
+
+		require.NoError(t, s.UpdateDiskUsage(ctx, diskID, 4096, 5))
 		reloaded, err := s.GetDisk(ctx, diskID)
 		require.NoError(t, err)
-		require.Equal(t, updated, reloaded, "GetDisk 应观测到更新后的名称")
+		require.Equal(t, uint64(4096), reloaded.UsedBytes)
+		require.Equal(t, uint64(5), reloaded.UsedInodes)
+		require.Equal(t, resized.UpdatedAt, reloaded.UpdatedAt, "UpdateDiskUsage 不得改动 UpdatedAt")
 
-		_, dupErr := s.CreateDisk(ctx, diskID, "alpha-dup")
+		_, dupErr := s.CreateDisk(ctx, diskID, "alpha-dup", 8<<20)
 		require.Error(t, dupErr, "重复 DiskID 创建必须失败")
 		afterDup, err := s.GetDisk(ctx, diskID)
 		require.NoError(t, err)
@@ -221,12 +238,33 @@ func TestStoreContract_GivenValidDisk_WhenCreatedUpdatedRead_ThenPersistsEndStat
 func TestStoreContract_GivenInvalidInputsOrMissingTargets_WhenCalled_ThenFailsFastWithSentinelErrors(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		validID := mustNewUUIDv7(t)
+		badName := "bad"
+		zeroQuota := uint64(0)
+		overflowQuota := uint64(math.MaxInt64) + 1
 
-		_, err := s.CreateDisk(ctx, uuid.Nil, "bad")
+		_, err := s.CreateDisk(ctx, uuid.Nil, "bad", testDefaultMaxBytes)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.CreateDisk(ctx, validID, "bad", 0)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.CreateDisk(ctx, validID, "bad", overflowQuota)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.GetDisk(ctx, uuid.Nil)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
-		_, err = s.UpdateDiskName(ctx, uuid.Nil, "bad")
+		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: uuid.Nil, Name: &badName})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: validID})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: validID, MaxBytes: &zeroQuota})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: validID, MaxBytes: &overflowQuota})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		err = s.UpdateDiskUsage(ctx, uuid.Nil, 0, 1)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		err = s.UpdateDiskUsage(ctx, validID, 0, 0)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		err = s.UpdateDiskUsage(ctx, validID, overflowQuota, 1)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		err = s.UpdateDiskUsage(ctx, validID, 0, overflowQuota)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.DeleteDisk(ctx, uuid.Nil)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
@@ -244,9 +282,12 @@ func TestStoreContract_GivenInvalidInputsOrMissingTargets_WhenCalled_ThenFailsFa
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 
 		missingID := mustNewUUIDv7(t)
+		missingName := "missing"
 		_, err = s.GetDisk(ctx, missingID)
 		require.ErrorIs(t, err, db.ErrNotFound)
-		_, err = s.UpdateDiskName(ctx, missingID, "missing")
+		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: missingID, Name: &missingName})
+		require.ErrorIs(t, err, db.ErrNotFound)
+		err = s.UpdateDiskUsage(ctx, missingID, 128, 2)
 		require.ErrorIs(t, err, db.ErrNotFound)
 		_, err = s.DeleteDisk(ctx, missingID)
 		require.ErrorIs(t, err, db.ErrNotFound)
@@ -320,7 +361,7 @@ func TestStoreContract_GivenFiveDisks_WhenListedWithCursorPagination_ThenReturns
 func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaimsCommitsAndLineage(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		rootID := mustNewUUIDv7(t)
-		root, err := s.CreateDisk(ctx, rootID, "root")
+		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 		require.NoError(t, err)
 
 		c1ID, cm1ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
@@ -397,11 +438,11 @@ func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaim
 func TestStoreContract_GivenSharedAndIsolatedLineages_WhenReserveSegmentCalled_ThenMonotonicAndDisjoint(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		rootID := mustNewUUIDv7(t)
-		root, err := s.CreateDisk(ctx, rootID, "seg-root")
+		root, err := s.CreateDisk(ctx, rootID, "seg-root", testDefaultMaxBytes)
 		require.NoError(t, err)
 
 		otherID := mustNewUUIDv7(t)
-		other, err := s.CreateDisk(ctx, otherID, "seg-other")
+		other, err := s.CreateDisk(ctx, otherID, "seg-other", testDefaultMaxBytes)
 		require.NoError(t, err)
 
 		r1, err := s.ReserveSegment(ctx, db.SegmentKindInode, root.LineageID, 1, 100)
@@ -453,7 +494,7 @@ func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBase
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 
 		rootID := mustNewUUIDv7(t)
-		root, err := s.CreateDisk(ctx, rootID, "root")
+		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 		require.NoError(t, err)
 		require.Equal(t, uuid.Nil, root.BaseCommitID)
 
@@ -462,7 +503,7 @@ func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBase
 		require.Empty(t, emptyCommits, "未分叉血缘 Commit 列表应为空")
 
 		otherID := mustNewUUIDv7(t)
-		other, err := s.CreateDisk(ctx, otherID, "other")
+		other, err := s.CreateDisk(ctx, otherID, "other", testDefaultMaxBytes)
 		require.NoError(t, err)
 		otherChildID, otherCmID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
@@ -491,9 +532,10 @@ func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBase
 		require.NoError(t, err)
 		require.Equal(t, cm1ID, gotC1.BaseCommitID, "GetDisk 子盘应填充 BaseCommitID")
 
-		renamedC1, err := s.UpdateDiskName(ctx, c1ID, "child-1-renamed")
+		child1Renamed := "child-1-renamed"
+		renamedC1, err := s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: c1ID, Name: &child1Renamed})
 		require.NoError(t, err)
-		require.Equal(t, cm1ID, renamedC1.BaseCommitID, "UpdateDiskName 应保留并填充 BaseCommitID")
+		require.Equal(t, cm1ID, renamedC1.BaseCommitID, "UpdateDisk 应保留并填充 BaseCommitID")
 
 		c2ID, cm2ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
@@ -539,7 +581,7 @@ func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBase
 func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGAndAdvancesBaseCommits(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		rootID := mustNewUUIDv7(t)
-		root, err := s.CreateDisk(ctx, rootID, "main")
+		root, err := s.CreateDisk(ctx, rootID, "main", testDefaultMaxBytes)
 		require.NoError(t, err)
 
 		branchID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
@@ -641,7 +683,7 @@ func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGA
 func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_ThenFailsAtomicallyWithoutSideEffects(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		rootID := mustNewUUIDv7(t)
-		root, err := s.CreateDisk(ctx, rootID, "root")
+		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 		require.NoError(t, err)
 
 		childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
@@ -654,7 +696,7 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		require.NoError(t, err)
 
 		otherID := mustNewUUIDv7(t)
-		_, err = s.CreateDisk(ctx, otherID, "other")
+		_, err = s.CreateDisk(ctx, otherID, "other", testDefaultMaxBytes)
 		require.NoError(t, err)
 		otherChildID, otherForkCm := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
@@ -798,5 +840,286 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		require.NoError(t, err)
 		require.Len(t, commits, 1, "失败合并后血缘不得残留任何新 Commit")
 		require.Equal(t, cmFork, commits[0].CommitID)
+	})
+}
+
+func TestStoreContract_GivenForkAndMergeWithQuotaAndUsage_WhenExecuted_ThenPersistsQuotaAndUsage(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "root", 16<<20)
+		require.NoError(t, err)
+		require.NoError(t, s.UpdateDiskUsage(ctx, rootID, 8192, 4))
+
+		childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		child, err := s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  childID,
+			CommitID:     cmFork,
+			Name:         "child-explicit",
+			MaxBytes:     32 << 20,
+			UsedBytes:    4096,
+			UsedInodes:   3,
+		})
+		require.NoError(t, err)
+		require.Equal(t, uint64(32<<20), child.MaxBytes)
+		require.Equal(t, uint64(4096), child.UsedBytes)
+		require.Equal(t, uint64(3), child.UsedInodes)
+
+		inheritedID, cmFork2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		inherited, err := s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  inheritedID,
+			CommitID:     cmFork2,
+			Name:         "child-inherited",
+		})
+		require.NoError(t, err)
+		require.Equal(t, uint64(16<<20), inherited.MaxBytes)
+		require.Equal(t, uint64(8192), inherited.UsedBytes)
+		require.Equal(t, uint64(4), inherited.UsedInodes)
+
+		cmSrc, cmMerge := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		merged, err := s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                  root.LineageID,
+			SourceDiskID:               childID,
+			TargetDiskID:               rootID,
+			ExpectedSourceBaseCommitID: cmFork,
+			ExpectedTargetBaseCommitID: cmFork2,
+			NewSourceCommitID:          cmSrc,
+			NewMergeCommitID:           cmMerge,
+			TargetMaxBytes:             64 << 20,
+			TargetUsedBytes:            12288,
+			TargetUsedInodes:           6,
+		})
+		require.NoError(t, err)
+		require.Equal(t, uint64(64<<20), merged.MaxBytes)
+		require.Equal(t, uint64(12288), merged.UsedBytes)
+		require.Equal(t, uint64(6), merged.UsedInodes)
+
+		reloaded, err := s.GetDisk(ctx, rootID)
+		require.NoError(t, err)
+		require.Equal(t, merged, reloaded)
+	})
+}
+
+func TestStoreContract_GivenMountLeases_WhenCreatedRenewedListedDeletedPrunedAndCascaded_ThenEnforcesStrictContract(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+		diskID := mustNewUUIDv7(t)
+		_, err := s.CreateDisk(ctx, diskID, "mount-disk", 16<<20)
+		require.NoError(t, err)
+
+		missingDiskID := mustNewUUIDv7(t)
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    missingDiskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0,
+			ExpiresAt: t0.Add(30 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrNotFound)
+
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  true,
+			Epoch:     1,
+			Now:       t0,
+			ExpiresAt: t0.Add(30 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  false,
+			Epoch:     0,
+			Now:       t0,
+			ExpiresAt: t0.Add(30 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0,
+			ExpiresAt: t0,
+		})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+
+		ro1ID := uuid.MustParse("01900000-0000-7000-8000-000000000020")
+		rw1ID := uuid.MustParse("01900000-0000-7000-8000-000000000010")
+		ro1, err := s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   ro1ID,
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0,
+			ExpiresAt: t0.Add(30 * time.Second),
+		})
+		require.NoError(t, err)
+		require.Equal(t, db.MountLeaseRecord{
+			DiskID:    diskID,
+			MountID:   ro1ID,
+			ReadOnly:  true,
+			Epoch:     0,
+			ExpiresAt: t0.Add(30 * time.Second),
+		}, ro1)
+
+		rw1, err := s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw1ID,
+			ReadOnly:  false,
+			Epoch:     1,
+			Now:       t0,
+			ExpiresAt: t0.Add(30 * time.Second),
+		})
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), rw1.Epoch)
+
+		active, err := s.ListActiveMountLeases(ctx, diskID, t0)
+		require.NoError(t, err)
+		require.Equal(t, []db.MountLeaseRecord{rw1, ro1}, active)
+
+		_, err = s.RenewMountLease(ctx, db.RenewMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw1ID,
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0.Add(5 * time.Second),
+			ExpiresAt: t0.Add(35 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+
+		_, err = s.RenewMountLease(ctx, db.RenewMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw1ID,
+			ReadOnly:  false,
+			Epoch:     2,
+			Now:       t0.Add(5 * time.Second),
+			ExpiresAt: t0.Add(35 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrStaleEpoch)
+
+		renewedRW1, err := s.RenewMountLease(ctx, db.RenewMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw1ID,
+			ReadOnly:  false,
+			Epoch:     1,
+			Now:       t0.Add(10 * time.Second),
+			ExpiresAt: t0.Add(40 * time.Second),
+		})
+		require.NoError(t, err)
+		require.Equal(t, t0.Add(40*time.Second), renewedRW1.ExpiresAt)
+
+		rw2ID := uuid.MustParse("01900000-0000-7000-8000-000000000030")
+		rw2, err := s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw2ID,
+			ReadOnly:  false,
+			Epoch:     2,
+			Now:       t0.Add(12 * time.Second),
+			ExpiresAt: t0.Add(42 * time.Second),
+		})
+		require.NoError(t, err)
+		activeAfterPreempt, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(12*time.Second))
+		require.NoError(t, err)
+		require.Equal(t, []db.MountLeaseRecord{ro1, rw2}, activeAfterPreempt)
+
+		_, err = s.RenewMountLease(ctx, db.RenewMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw1ID,
+			ReadOnly:  false,
+			Epoch:     1,
+			Now:       t0.Add(13 * time.Second),
+			ExpiresAt: t0.Add(43 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrNotFound)
+
+		_, err = s.RenewMountLease(ctx, db.RenewMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   ro1ID,
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0.Add(30 * time.Second),
+			ExpiresAt: t0.Add(60 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrNotFound)
+
+		activeAt30, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(30*time.Second))
+		require.NoError(t, err)
+		require.Equal(t, []db.MountLeaseRecord{rw2}, activeAt30)
+
+		deleted, err := s.DeleteMountLease(ctx, diskID, rw2ID)
+		require.NoError(t, err)
+		require.True(t, deleted)
+		deletedAgain, err := s.DeleteMountLease(ctx, diskID, rw2ID)
+		require.NoError(t, err)
+		require.False(t, deletedAgain)
+
+		_, err = s.RenewMountLease(ctx, db.RenewMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   rw2ID,
+			ReadOnly:  false,
+			Epoch:     2,
+			Now:       t0.Add(31 * time.Second),
+			ExpiresAt: t0.Add(61 * time.Second),
+		})
+		require.ErrorIs(t, err, db.ErrNotFound)
+
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0.Add(35 * time.Second),
+			ExpiresAt: t0.Add(40 * time.Second),
+		})
+		require.NoError(t, err)
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  false,
+			Epoch:     3,
+			Now:       t0.Add(35 * time.Second),
+			ExpiresAt: t0.Add(65 * time.Second),
+		})
+		require.NoError(t, err)
+
+		evicted, err := s.DeleteDiskMountLeases(ctx, diskID, t0.Add(45*time.Second))
+		require.NoError(t, err)
+		require.Equal(t, uint32(1), evicted)
+
+		_, err = s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0.Add(50 * time.Second),
+			ExpiresAt: t0.Add(55 * time.Second),
+		})
+		require.NoError(t, err)
+		liveKeep, err := s.CreateMountLease(ctx, db.CreateMountLeaseInput{
+			DiskID:    diskID,
+			MountID:   mustNewUUIDv7(t),
+			ReadOnly:  true,
+			Epoch:     0,
+			Now:       t0.Add(50 * time.Second),
+			ExpiresAt: t0.Add(80 * time.Second),
+		})
+		require.NoError(t, err)
+
+		pruned, err := s.PruneExpiredMountLeases(ctx, t0.Add(60*time.Second))
+		require.NoError(t, err)
+		require.Equal(t, int64(1), pruned)
+		remaining, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(60*time.Second))
+		require.NoError(t, err)
+		require.Equal(t, []db.MountLeaseRecord{liveKeep}, remaining)
+
+		_, err = s.DeleteDisk(ctx, diskID)
+		require.NoError(t, err)
+		afterDelete, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(60*time.Second))
+		require.NoError(t, err)
+		require.Empty(t, afterDelete)
 	})
 }

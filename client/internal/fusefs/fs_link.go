@@ -145,7 +145,9 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 	if status != fuse.OK {
 		return status
 	}
-	fs.stage.BarrierInode(opCtx, srcIno)
+	if st := fs.barrierInode(opCtx, cancel, srcIno); st != fuse.OK {
+		return st
+	}
 
 	newParentIno, status := fs.ToServerIno(input.NodeId)
 	if status != fuse.OK {

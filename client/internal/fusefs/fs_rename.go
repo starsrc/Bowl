@@ -87,9 +87,13 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		}
 	}
 
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
 	if source != 0 {
 		if sourceServerIno, sSt := fs.ToServerIno(source); sSt == fuse.OK {
-			fs.stage.BarrierInode(opCtx, sourceServerIno)
+			if err := fs.stage.BarrierInode(barrierCtx, sourceServerIno); err != nil {
+				return fs.stageErrToStatus(err)
+			}
 		}
 	}
 	var targetServerIno uint64
@@ -99,7 +103,9 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 			targetServerIno = tIno
 			hasTargetServerIno = true
 			if target != source {
-				fs.stage.BarrierInode(opCtx, targetServerIno)
+				if err := fs.stage.BarrierInode(barrierCtx, targetServerIno); err != nil {
+					return fs.stageErrToStatus(err)
+				}
 			}
 		}
 
@@ -109,7 +115,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 			input.Flags&(renameExchange|renameNoReplace) == 0 &&
 			fs.topologySeq.Load() != seq0 &&
 			(fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
-			refreshed, st := fs.getInodeWithContext(opCtx, cancel, target)
+			refreshed, st := fs.getInodeWithContext(barrierCtx, nil, target)
 			switch st {
 			case fuse.OK:
 				targetAttr = refreshed.inode
@@ -138,7 +144,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		protoFlags |= unknown
 	}
 
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	epoch := fs.cache.version()

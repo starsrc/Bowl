@@ -18,11 +18,12 @@ import (
 const primaryMountMetaDir = "/run/bowl/mounts"
 
 type mountMeta struct {
-	Mountpoint string    `json:"mountpoint"`
-	PID        int       `json:"pid"`
-	DiskID     string    `json:"disk_id"`
-	AdminAddr  string    `json:"admin_addr"`
-	StartedAt  time.Time `json:"started_at"`
+	Mountpoint       string    `json:"mountpoint"`
+	PID              int       `json:"pid"`
+	DiskID           string    `json:"disk_id"`
+	AdminAddr        string    `json:"admin_addr"`
+	StartedAt        time.Time `json:"started_at"`
+	UnmountTimeoutMs int64     `json:"unmount_timeout_ms,omitempty"`
 }
 
 func fallbackMountMetaDir() string {

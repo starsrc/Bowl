@@ -283,9 +283,13 @@ func (fs *RawFS) StatFs(cancel <-chan struct{}, in *fuse.InHeader, out *fuse.Sta
 	if status != fuse.OK {
 		return status
 	}
-	fs.stage.BarrierAll(opCtx)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.BarrierAll(barrierCtx); err != nil {
+		return fs.stageErrToStatus(err)
+	}
 
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	resp, err := fs.client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{

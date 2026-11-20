@@ -153,8 +153,12 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			if st != fuse.OK {
 				return st
 			}
-			fs.stage.BarrierInode(opCtx, ino)
-			ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+			barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+			defer barrierCancel()
+			if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
+				return fs.stageErrToStatus(err)
+			}
+			ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 			defer cancelFunc()
 
 			resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
@@ -206,8 +210,12 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		if st != fuse.OK {
 			return st
 		}
-		fs.stage.ResetInodeStream(opCtx, ino)
-		ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+		barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+		defer barrierCancel()
+		if err := fs.stage.ResetInodeStream(barrierCtx, ino); err != nil {
+			return fs.stageErrToStatus(err)
+		}
+		ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 		defer cancelFunc()
 
 		_, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
@@ -220,7 +228,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			return fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
-		fs.stage.ResetInodeStream(opCtx, ino)
+		_ = fs.stage.ResetInodeStream(barrierCtx, ino)
 		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
 			fs.setInodeSpecialFlag(input.NodeId, true)
 		} else {

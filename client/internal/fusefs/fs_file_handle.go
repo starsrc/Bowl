@@ -1,11 +1,13 @@
 package fusefs
 
 import (
+	"errors"
 	"syscall"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
@@ -171,12 +173,12 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 			if st != fuse.OK {
 				return st
 			}
-			if cached.inode.GetAttr().GetFlags()&(ProtoFlagImmutable|ProtoFlagAppend) != 0 || fs.stage.HasPromotedPending(ino) {
-				fs.stage.BarrierInode(opCtx, ino)
-			} else {
-				fs.stage.DiscardInode(ino)
+			barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+			if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
+				barrierCancel()
+				return fs.stageErrToStatus(err)
 			}
-			ctx, done := fs.RPCContextFrom(opCtx, cancel)
+			ctx, done := fs.RPCContextFrom(barrierCtx, nil)
 			zero := uint64(0)
 			resp, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
 				Ino:    ino,
@@ -185,6 +187,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				Epoch:  fs.cfg.Epoch,
 			}))
 			done()
+			barrierCancel()
 			fs.readAhead.InvalidateInode(ino)
 			if err != nil {
 				fs.cache.invalidateInode(input.NodeId)
@@ -292,15 +295,19 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 	if status != fuse.OK {
 		return status
 	}
-	if err := fs.stage.FlushInodeForHandle(opCtx, input.Fh, ino); err != nil {
-		fs.cache.invalidateInode(input.NodeId)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.FlushInodeForHandle(barrierCtx, input.Fh, ino); err != nil {
+		if !errors.Is(err, rpc.ErrKernelInterrupted) && !errors.Is(err, syscall.EINTR) {
+			fs.cache.invalidateInode(input.NodeId)
+		}
 		return fs.stageErrToStatus(err)
 	}
 	if st := fs.FenceStatus(); st != fuse.OK {
 		return st
 	}
 	seq := fs.metaDirtySeq.Load()
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 	_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
 		Ino:      ino,

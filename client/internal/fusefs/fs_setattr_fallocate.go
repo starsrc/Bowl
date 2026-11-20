@@ -132,8 +132,12 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		return st
 	}
 
-	fs.stage.ResetInodeStream(opCtx, ino)
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.ResetInodeStream(barrierCtx, ino); err != nil {
+		return fs.stageErrToStatus(err)
+	}
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	fs.readAhead.InvalidateInode(ino)
@@ -202,8 +206,12 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		}
 		return localSt
 	}
-	fs.stage.ResetInodeStream(opCtx, ino)
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.ResetInodeStream(barrierCtx, ino); err != nil {
+		return fs.stageErrToStatus(err)
+	}
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	req := &storagev1.FallocateRequest{

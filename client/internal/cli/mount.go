@@ -39,30 +39,38 @@ const (
 )
 
 type mountOptions struct {
-	endpoint         string
-	token            string
-	logFile          string
-	adminAddr        string
-	logLevel         string
-	logFormat        string
-	traceSampleRatio float64
-	mode             string
-	stageSizeRaw     string
-	stageDirRaw      string
-	stageSizeBytes   uint64
-	stageDir         string
-	force            bool
+	endpoint                 string
+	token                    string
+	logFile                  string
+	adminAddr                string
+	logLevel                 string
+	logFormat                string
+	traceSampleRatio         float64
+	mode                     string
+	stageSizeRaw             string
+	stageDirRaw              string
+	stageSizeBytes           uint64
+	stageDir                 string
+	unmountTimeout           time.Duration
+	unmountStageTimeout      time.Duration
+	unmountStageStallTimeout time.Duration
+	unmountFsyncTimeout      time.Duration
+	force                    bool
 }
 
 type mountFlagPresence struct {
-	logFile          bool
-	adminAddr        bool
-	logLevel         bool
-	logFormat        bool
-	traceSampleRatio bool
-	mode             bool
-	stageSize        bool
-	stageDir         bool
+	logFile                  bool
+	adminAddr                bool
+	logLevel                 bool
+	logFormat                bool
+	traceSampleRatio         bool
+	mode                     bool
+	stageSize                bool
+	stageDir                 bool
+	unmountTimeout           bool
+	unmountStageTimeout      bool
+	unmountStageStallTimeout bool
+	unmountFsyncTimeout      bool
 }
 
 var (
@@ -313,11 +321,11 @@ func startMountLeaseRenewer(
 	}
 }
 
-func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mountID string, logger *slog.Logger) {
-	if mountID == "" {
+func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mountID string, timeout time.Duration, logger *slog.Logger) {
+	if mountID == "" || timeout <= 0 {
 		return
 	}
-	unmountCtx, unmountCancel := context.WithTimeout(context.Background(), mountUnmountRPCTimeout)
+	unmountCtx, unmountCancel := context.WithTimeout(context.Background(), timeout)
 	defer unmountCancel()
 	if _, err := client.UnmountDisk(unmountCtx, connect.NewRequest(&storagev1.UnmountDiskRequest{
 		DiskId:  diskID,
@@ -432,13 +440,13 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	rawFS := fusefs.NewRawFS(client, *cfg)
 	defer rawFS.OnUnmount()
 	if regErr := obs.RegisterCollector(rpcMetrics, rawFS.Collector()); regErr != nil {
-		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
 		return fmt.Errorf("register metrics collector: %w", regErr)
 	}
 
 	admin, err := startAdminServer(opts.adminAddr, obs, rawFS, leaseTracker)
 	if err != nil {
-		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
 		return err
 	}
 	defer func() {
@@ -455,11 +463,12 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	ready := func() {
 		startedAt = time.Now().UTC()
 		meta := mountMeta{
-			Mountpoint: mountpoint,
-			PID:        selfPID,
-			DiskID:     cfg.DiskID,
-			AdminAddr:  admin.addr(),
-			StartedAt:  startedAt,
+			Mountpoint:       mountpoint,
+			PID:              selfPID,
+			DiskID:           cfg.DiskID,
+			AdminAddr:        admin.addr(),
+			StartedAt:        startedAt,
+			UnmountTimeoutMs: rawFS.Config().UnmountTimeout.Milliseconds(),
 		}
 		path, werr := writeMountMeta(&meta)
 		if werr != nil {
@@ -490,8 +499,13 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			slog.String("fence_status", rawFS.FenceStatus().String()),
 			slog.String("fence_reason", rawFS.FenceReason()),
 		)
+	} else if remaining := rawFS.UnmountRemainingBudget(); remaining <= 0 {
+		logger.Warn("unmount_disk_rpc_skipped_timeout",
+			slog.String("disk_id", cfg.DiskID),
+			slog.String("mount_id", lease.mountID),
+		)
 	} else {
-		unmountMountLease(client, cfg.DiskID, lease.mountID, logger)
+		unmountMountLease(client, cfg.DiskID, lease.mountID, min(mountUnmountRPCTimeout, remaining), logger)
 	}
 	if metaPath != "" {
 		_ = os.Remove(metaPath)
@@ -577,7 +591,120 @@ func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence, foregrou
 	if math.IsNaN(o.traceSampleRatio) || math.IsInf(o.traceSampleRatio, 0) || o.traceSampleRatio < 0 || o.traceSampleRatio > 1 {
 		return fmt.Errorf("invalid --trace-sample-ratio %v: must be in [0, 1]", o.traceSampleRatio)
 	}
-	return applyStageOptions(o, set)
+	if err := applyStageOptions(o, set); err != nil {
+		return err
+	}
+	return applyUnmountOptions(o, set)
+}
+
+func resolvePositiveDurationOption(flagName, envKey string, flagSet bool, flagVal, defaultVal time.Duration) (val time.Duration, explicit bool, err error) {
+	if flagSet {
+		if flagVal <= 0 {
+			return 0, false, fmt.Errorf("invalid %s %v: must be > 0", flagName, flagVal)
+		}
+		return flagVal, true, nil
+	}
+	if env := firstNonEmptyEnv(envKey); env != "" {
+		parsed, parseErr := time.ParseDuration(env)
+		if parseErr != nil {
+			return 0, false, fmt.Errorf("invalid environment variable %s=%q: %w", envKey, env, parseErr)
+		}
+		if parsed <= 0 {
+			return 0, false, fmt.Errorf("invalid environment variable %s=%q: must be > 0", envKey, env)
+		}
+		return parsed, true, nil
+	}
+	return defaultVal, false, nil
+}
+
+func applyUnmountOptions(o *mountOptions, set mountFlagPresence) error {
+	if o.mode == fusefs.MountModeRO || o.mode == fusefs.MountModeSync {
+		if set.unmountStageTimeout {
+			return fmt.Errorf("--unmount-stage-timeout cannot be set when --mode is %s", o.mode)
+		}
+		if set.unmountStageStallTimeout {
+			return fmt.Errorf("--unmount-stage-stall-timeout cannot be set when --mode is %s", o.mode)
+		}
+	}
+
+	total, _, err := resolvePositiveDurationOption(
+		"--unmount-timeout",
+		"BOWL_UNMOUNT_TIMEOUT",
+		set.unmountTimeout,
+		o.unmountTimeout,
+		fusefs.DefaultUnmountTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	o.unmountTimeout = total
+
+	fsyncTimeout, fsyncExplicit, err := resolvePositiveDurationOption(
+		"--unmount-fsync-timeout",
+		"BOWL_UNMOUNT_FSYNC_TIMEOUT",
+		set.unmountFsyncTimeout,
+		o.unmountFsyncTimeout,
+		fusefs.DefaultUnmountFsyncTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	if fsyncTimeout > total {
+		if fsyncExplicit {
+			return fmt.Errorf("--unmount-fsync-timeout (%s) cannot exceed --unmount-timeout (%s)", fsyncTimeout, total)
+		}
+		fsyncTimeout = total
+	}
+	o.unmountFsyncTimeout = fsyncTimeout
+
+	if o.mode != fusefs.MountModeStaged {
+		o.unmountStageTimeout = 0
+		o.unmountStageStallTimeout = 0
+		return nil
+	}
+
+	stageTimeout, stageExplicit, err := resolvePositiveDurationOption(
+		"--unmount-stage-timeout",
+		"BOWL_UNMOUNT_STAGE_TIMEOUT",
+		set.unmountStageTimeout,
+		o.unmountStageTimeout,
+		fusefs.DefaultUnmountStageTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	if stageTimeout > total {
+		if stageExplicit {
+			return fmt.Errorf("--unmount-stage-timeout (%s) cannot exceed --unmount-timeout (%s)", stageTimeout, total)
+		}
+		stageTimeout = total
+	}
+	o.unmountStageTimeout = stageTimeout
+
+	stallTimeout, stallExplicit, err := resolvePositiveDurationOption(
+		"--unmount-stage-stall-timeout",
+		"BOWL_UNMOUNT_STAGE_STALL_TIMEOUT",
+		set.unmountStageStallTimeout,
+		o.unmountStageStallTimeout,
+		fusefs.DefaultUnmountStageStallTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	if stallTimeout > total {
+		if stallExplicit {
+			return fmt.Errorf("--unmount-stage-stall-timeout (%s) cannot exceed --unmount-timeout (%s)", stallTimeout, total)
+		}
+		stallTimeout = total
+	}
+	if stallTimeout > stageTimeout {
+		if stallExplicit {
+			return fmt.Errorf("--unmount-stage-stall-timeout (%s) cannot exceed --unmount-stage-timeout (%s)", stallTimeout, stageTimeout)
+		}
+		stallTimeout = stageTimeout
+	}
+	o.unmountStageStallTimeout = stallTimeout
+	return nil
 }
 
 func applyStageOptions(o *mountOptions, set mountFlagPresence) error {
@@ -739,11 +866,15 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 		statsFile  bool
 	)
 	opts := mountOptions{
-		adminAddr:        defaultAdminAddr,
-		logLevel:         "info",
-		logFormat:        "json",
-		traceSampleRatio: defaultTraceSampleRatio,
-		mode:             fusefs.MountModeStaged,
+		adminAddr:                defaultAdminAddr,
+		logLevel:                 "info",
+		logFormat:                "json",
+		traceSampleRatio:         defaultTraceSampleRatio,
+		mode:                     fusefs.MountModeStaged,
+		unmountTimeout:           fusefs.DefaultUnmountTimeout,
+		unmountStageTimeout:      fusefs.DefaultUnmountStageTimeout,
+		unmountStageStallTimeout: fusefs.DefaultUnmountStageStallTimeout,
+		unmountFsyncTimeout:      fusefs.DefaultUnmountFsyncTimeout,
 	}
 
 	cmd := &cobra.Command{
@@ -753,14 +884,18 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
 			flags := cmd.Flags()
 			set := mountFlagPresence{
-				logFile:          flags.Changed("log-file"),
-				adminAddr:        flags.Changed("admin-addr"),
-				logLevel:         flags.Changed("log-level"),
-				logFormat:        flags.Changed("log-format"),
-				traceSampleRatio: flags.Changed("trace-sample-ratio"),
-				mode:             flags.Changed("mode"),
-				stageSize:        flags.Changed("stage-size"),
-				stageDir:         flags.Changed("stage-dir"),
+				logFile:                  flags.Changed("log-file"),
+				adminAddr:                flags.Changed("admin-addr"),
+				logLevel:                 flags.Changed("log-level"),
+				logFormat:                flags.Changed("log-format"),
+				traceSampleRatio:         flags.Changed("trace-sample-ratio"),
+				mode:                     flags.Changed("mode"),
+				stageSize:                flags.Changed("stage-size"),
+				stageDir:                 flags.Changed("stage-dir"),
+				unmountTimeout:           flags.Changed("unmount-timeout"),
+				unmountStageTimeout:      flags.Changed("unmount-stage-timeout"),
+				unmountStageStallTimeout: flags.Changed("unmount-stage-stall-timeout"),
+				unmountFsyncTimeout:      flags.Changed("unmount-fsync-timeout"),
 			}
 			return executeMountValidated(cmd, posArgs, &opts, set, foreground, allowOther, directIO, debug, statsFile, rawArgs)
 		},
@@ -776,6 +911,10 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 	flags.StringVar(&opts.mode, "mode", fusefs.MountModeStaged, "Mount mode: staged, sync, or ro; defaults to $BOWL_MOUNT_MODE or staged")
 	flags.StringVar(&opts.stageSizeRaw, "stage-size", "", "Local staging capacity limit, minimum 4MiB; defaults to $BOWL_STAGE_SIZE or 512MiB")
 	flags.StringVar(&opts.stageDirRaw, "stage-dir", "", "Local staging root directory, defaults to $BOWL_STAGE_DIR or /var/tmp/bowl-stage")
+	flags.DurationVar(&opts.unmountTimeout, "unmount-timeout", fusefs.DefaultUnmountTimeout, "Total unmount drain timeout budget, defaults to $BOWL_UNMOUNT_TIMEOUT or 5m")
+	flags.DurationVar(&opts.unmountStageTimeout, "unmount-stage-timeout", fusefs.DefaultUnmountStageTimeout, "Staged upload drain budget during unmount (staged mode only), defaults to $BOWL_UNMOUNT_STAGE_TIMEOUT or 4m")
+	flags.DurationVar(&opts.unmountStageStallTimeout, "unmount-stage-stall-timeout", fusefs.DefaultUnmountStageStallTimeout, "Staged upload stall timeout without chunk commit progress during unmount (staged mode only), defaults to $BOWL_UNMOUNT_STAGE_STALL_TIMEOUT or 30s")
+	flags.DurationVar(&opts.unmountFsyncTimeout, "unmount-fsync-timeout", fusefs.DefaultUnmountFsyncTimeout, "Dirty inode fsync timeout budget during unmount, defaults to $BOWL_UNMOUNT_FSYNC_TIMEOUT or 45s")
 	flags.BoolVar(&directIO, "direct-io", false, "Bypass kernel page cache for direct data I/O")
 	flags.BoolVar(&debug, "debug", false, "Enable FUSE protocol debug logging")
 	flags.BoolVar(&statsFile, "stats-file", false, "Expose hidden virtual .stats file at the mount root")
@@ -854,14 +993,18 @@ func executeMountValidated(
 	opts.token = rpc.ResolveToken(opts.token)
 
 	baseCfg := fusefs.Config{
-		DiskID:          diskIDStr,
-		Mode:            opts.mode,
-		DirectIO:        directIO,
-		AllowOther:      allowOther,
-		Debug:           debug,
-		EnableStatsFile: statsFile,
-		StageSize:       opts.stageSizeBytes,
-		StageDir:        opts.stageDir,
+		DiskID:                   diskIDStr,
+		Mode:                     opts.mode,
+		DirectIO:                 directIO,
+		AllowOther:               allowOther,
+		Debug:                    debug,
+		EnableStatsFile:          statsFile,
+		StageSize:                opts.stageSizeBytes,
+		StageDir:                 opts.stageDir,
+		UnmountTimeout:           opts.unmountTimeout,
+		UnmountStageTimeout:      opts.unmountStageTimeout,
+		UnmountStageStallTimeout: opts.unmountStageStallTimeout,
+		UnmountFsyncTimeout:      opts.unmountFsyncTimeout,
 	}
 
 	normalizeOTLPEnv()

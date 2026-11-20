@@ -35,6 +35,14 @@ const DefaultWriteAttrTimeoutSeconds = 1.0
 
 const DefaultOrphanBacklogThreshold = 16
 
+const (
+	DefaultUnmountTimeout           = 5 * time.Minute
+	DefaultUnmountStageTimeout      = 4 * time.Minute
+	DefaultUnmountStageStallTimeout = 30 * time.Second
+	DefaultUnmountFsyncTimeout      = 45 * time.Second
+	DefaultUnmountReleaseTimeout    = 2 * time.Second
+)
+
 const DefaultUnmountFsyncConcurrency = 64
 
 const orphanWarnMinInterval = time.Second
@@ -54,25 +62,29 @@ var (
 var _ fuse.RawFileSystem = (*RawFS)(nil)
 
 type Config struct {
-	DiskID                 string
-	Epoch                  uint64
-	RootIno                uint64
-	RootInode              *storagev1.Inode
-	EntryTimeoutSeconds    float64
-	AttrTimeoutSeconds     float64
-	Mode                   string
-	DirectIO               bool
-	AllowOther             bool
-	Debug                  bool
-	EnableStatsFile        bool
-	OrphanBacklogThreshold int
-	StageSize              uint64
-	StageDir               string
-	StageSession           *StageDirSession
-	OnFence                func(status fuse.Status, reason string)
-	Logger                 *slog.Logger
-	Metrics                *Metrics
-	TracerProvider         trace.TracerProvider
+	DiskID                   string
+	Epoch                    uint64
+	RootIno                  uint64
+	RootInode                *storagev1.Inode
+	EntryTimeoutSeconds      float64
+	AttrTimeoutSeconds       float64
+	Mode                     string
+	DirectIO                 bool
+	AllowOther               bool
+	Debug                    bool
+	EnableStatsFile          bool
+	OrphanBacklogThreshold   int
+	StageSize                uint64
+	StageDir                 string
+	StageSession             *StageDirSession
+	UnmountTimeout           time.Duration
+	UnmountStageTimeout      time.Duration
+	UnmountStageStallTimeout time.Duration
+	UnmountFsyncTimeout      time.Duration
+	OnFence                  func(status fuse.Status, reason string)
+	Logger                   *slog.Logger
+	Metrics                  *Metrics
+	TracerProvider           trace.TracerProvider
 }
 
 func normalizeMountMode(mode string) string {
@@ -164,6 +176,7 @@ type RawFS struct {
 	specialInodes      map[uint64]bool
 	unmountMu          sync.Mutex
 	unmountState       unmountProgressState
+	unmountDeadline    time.Time
 
 	fencedStatus atomic.Uint32
 	fenceMu      sync.Mutex
@@ -178,6 +191,27 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 
 func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn func() time.Time) *RawFS {
 	cfg.Mode = cfg.EffectiveMode()
+	if cfg.UnmountTimeout <= 0 {
+		cfg.UnmountTimeout = DefaultUnmountTimeout
+	}
+	if cfg.UnmountStageTimeout <= 0 {
+		cfg.UnmountStageTimeout = DefaultUnmountStageTimeout
+	}
+	if cfg.UnmountStageTimeout > cfg.UnmountTimeout {
+		cfg.UnmountStageTimeout = cfg.UnmountTimeout
+	}
+	if cfg.UnmountStageStallTimeout <= 0 {
+		cfg.UnmountStageStallTimeout = DefaultUnmountStageStallTimeout
+	}
+	if cfg.UnmountStageStallTimeout > cfg.UnmountStageTimeout {
+		cfg.UnmountStageStallTimeout = cfg.UnmountStageTimeout
+	}
+	if cfg.UnmountFsyncTimeout <= 0 {
+		cfg.UnmountFsyncTimeout = DefaultUnmountFsyncTimeout
+	}
+	if cfg.UnmountFsyncTimeout > cfg.UnmountTimeout {
+		cfg.UnmountFsyncTimeout = cfg.UnmountTimeout
+	}
 	if cfg.RootIno == 0 && cfg.RootInode != nil {
 		cfg.RootIno = cfg.RootInode.GetIno()
 	}
@@ -483,6 +517,33 @@ func (fs *RawFS) stageErrToStatus(err error) fuse.Status {
 	return fs.ToStatus(err)
 }
 
+func (fs *RawFS) stageBarrierContext(opCtx context.Context, cancel <-chan struct{}) (context.Context, context.CancelFunc) {
+	if opCtx == nil {
+		opCtx = context.Background()
+	}
+	return rpc.ContextWithCancelChan(opCtx, cancel)
+}
+
+func (fs *RawFS) barrierInode(opCtx context.Context, cancel <-chan struct{}, ino uint64) fuse.Status {
+	if fs.stage == nil {
+		return fuse.OK
+	}
+	ctx, done := fs.stageBarrierContext(opCtx, cancel)
+	err := fs.stage.BarrierInode(ctx, ino)
+	done()
+	return fs.stageErrToStatus(err)
+}
+
+func (fs *RawFS) flushAndResetInodeForHandle(opCtx context.Context, cancel <-chan struct{}, fh, ino uint64) error {
+	if fs.stage == nil {
+		return nil
+	}
+	ctx, done := fs.stageBarrierContext(opCtx, cancel)
+	err := fs.stage.FlushAndResetInodeForHandle(ctx, fh, ino)
+	done()
+	return err
+}
+
 func (fs *RawFS) BindMountpoint(mountpoint string) {
 	if fs == nil || mountpoint == "" {
 		return
@@ -703,6 +764,23 @@ func (fs *RawFS) Statx(cancel <-chan struct{}, input *fuse.StatxIn, out *fuse.St
 	return status
 }
 
+func (fs *RawFS) UnmountRemainingBudget() time.Duration {
+	if fs == nil {
+		return 0
+	}
+	fs.unmountMu.Lock()
+	deadline := fs.unmountDeadline
+	fs.unmountMu.Unlock()
+	if deadline.IsZero() {
+		return fs.cfg.UnmountTimeout
+	}
+	rem := time.Until(deadline)
+	if rem <= 0 {
+		return 0
+	}
+	return rem
+}
+
 func (fs *RawFS) UnmountProgress() UnmountProgress {
 	if fs == nil || fs.IsFenced() {
 		return UnmountProgress{}
@@ -768,7 +846,14 @@ func (fs *RawFS) OnUnmount() {
 	}
 	total := stageTotal + phase2Units
 
+	totalCtx, totalCancel := context.WithTimeout(opCtx, fs.cfg.UnmountTimeout)
+	defer totalCancel()
+	totalDeadline, _ := totalCtx.Deadline()
+
 	fs.unmountMu.Lock()
+	if fs.unmountDeadline.IsZero() {
+		fs.unmountDeadline = totalDeadline
+	}
 	repeatNoop := fs.unmountState.completedOnce && total == 0
 	if repeatNoop {
 		fs.unmountState.active = false
@@ -781,7 +866,9 @@ func (fs *RawFS) OnUnmount() {
 	}
 	fs.unmountMu.Unlock()
 
-	fs.stage.Clear(opCtx)
+	stageCtx, stageCancel := context.WithTimeout(totalCtx, fs.cfg.UnmountStageTimeout)
+	fs.stage.Clear(stageCtx, fs.cfg.UnmountStageStallTimeout)
+	stageCancel()
 	if fs.IsFenced() {
 		fs.stopAndDiscardReleaseQueue()
 		_ = fs.takeDirtyInodes()
@@ -793,7 +880,7 @@ func (fs *RawFS) OnUnmount() {
 		return
 	}
 
-	fs.stopAndDrainReleaseQueue()
+	fs.stopAndDrainReleaseQueue(totalCtx)
 	unmountSeq := fs.metaDirtySeq.Load()
 	dirtyInodes := fs.takeDirtyInodes()
 
@@ -815,12 +902,14 @@ func (fs *RawFS) OnUnmount() {
 	}
 	fs.unmountMu.Unlock()
 
-	if !fs.IsFenced() {
+	if !fs.IsFenced() && totalCtx.Err() == nil {
+		fsyncCtx, fsyncCancel := context.WithTimeout(totalCtx, fs.cfg.UnmountFsyncTimeout)
 		if len(dirtyInodes) > 0 {
-			fs.syncDirtyInodesOnUnmount(opCtx, dirtyInodes, repeatNoop)
+			fs.syncDirtyInodesOnUnmount(fsyncCtx, dirtyInodes, repeatNoop)
 		} else if fs.hasUnsyncedMeta() {
-			fs.syncRootDirOnUnmount(opCtx, repeatNoop)
+			fs.syncRootDirOnUnmount(fsyncCtx, repeatNoop)
 		}
+		fsyncCancel()
 	}
 	if !repeatNoop {
 		fs.advanceMetaSyncedSeq(unmountSeq)
@@ -841,7 +930,7 @@ func (fs *RawFS) OnUnmount() {
 func (fs *RawFS) unmountFencedLocked(opCtx context.Context) {
 	fs.resetFencedUnmountProgress()
 	fs.stage.AbortAll(fs.fenceErrToErrno())
-	fs.stage.Clear(opCtx)
+	fs.stage.Clear(opCtx, 0)
 	fs.stopAndDiscardReleaseQueue()
 	_ = fs.takeDirtyInodes()
 	fs.advanceMetaSyncedSeq(fs.metaDirtySeq.Load())
@@ -885,6 +974,10 @@ func (fs *RawFS) syncDirtyInodesOnUnmount(opCtx context.Context, dirtyInodes []u
 	case 0:
 		return
 	case 1:
+		if opCtx.Err() != nil {
+			fs.incrementUnmountCompleted(repeatNoop)
+			return
+		}
 		fs.syncDirtyInodeOnUnmount(opCtx, dirtyInodes[0], repeatNoop)
 		return
 	}
@@ -895,6 +988,9 @@ func (fs *RawFS) syncDirtyInodesOnUnmount(opCtx context.Context, dirtyInodes []u
 	for range workers {
 		wg.Go(func() {
 			for {
+				if opCtx.Err() != nil {
+					return
+				}
 				idx := int(next.Add(1) - 1)
 				if idx >= len(dirtyInodes) {
 					return
@@ -907,7 +1003,7 @@ func (fs *RawFS) syncDirtyInodesOnUnmount(opCtx context.Context, dirtyInodes []u
 }
 
 func (fs *RawFS) syncDirtyInodeOnUnmount(opCtx context.Context, ino uint64, repeatNoop bool) {
-	if fs.client == nil || fs.IsFenced() {
+	if fs.client == nil || fs.IsFenced() || opCtx.Err() != nil {
 		fs.incrementUnmountCompleted(repeatNoop)
 		return
 	}
@@ -923,7 +1019,7 @@ func (fs *RawFS) syncDirtyInodeOnUnmount(opCtx context.Context, ino uint64, repe
 }
 
 func (fs *RawFS) syncRootDirOnUnmount(opCtx context.Context, repeatNoop bool) {
-	if fs.client == nil {
+	if fs.client == nil || opCtx.Err() != nil {
 		return
 	}
 	fs.unmountMu.Lock()
@@ -1228,7 +1324,7 @@ func (fs *RawFS) stopAndDiscardReleaseQueue() {
 	}
 }
 
-func (fs *RawFS) stopAndDrainReleaseQueue() {
+func (fs *RawFS) stopAndDrainReleaseQueue(parentCtx context.Context) {
 	fs.releaseMu.Lock()
 	fs.releaseClosed = true
 	started, done := fs.releaseStarted, fs.releaseLoopDone
@@ -1237,7 +1333,13 @@ func (fs *RawFS) stopAndDrainReleaseQueue() {
 	if started {
 		<-done
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	if parentCtx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, DefaultUnmountReleaseTimeout)
 	defer cancel()
 	fs.drainReleaseQueueOnce(ctx)
 }

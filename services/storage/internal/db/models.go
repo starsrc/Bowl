@@ -16,6 +16,9 @@ type Disk struct {
 	LineageID    pgtype.UUID        `json:"lineage_id"`
 	ParentDiskID pgtype.UUID        `json:"parent_disk_id"`
 	BaseCommitID pgtype.UUID        `json:"base_commit_id"`
+	MaxBytes     int64              `json:"max_bytes"`
+	UsedBytes    int64              `json:"used_bytes"`
+	UsedInodes   int64              `json:"used_inodes"`
 }
 
 type DiskCommit struct {
@@ -32,4 +35,14 @@ type DiskLineage struct {
 	NextIno    int64              `json:"next_ino"`
 	NextPackID int64              `json:"next_pack_id"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type DiskMount struct {
+	DiskID    pgtype.UUID        `json:"disk_id"`
+	MountID   pgtype.UUID        `json:"mount_id"`
+	ReadOnly  bool               `json:"read_only"`
+	Epoch     int64              `json:"epoch"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }

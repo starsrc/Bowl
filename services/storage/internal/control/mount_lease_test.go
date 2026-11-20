@@ -258,6 +258,14 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	mgr2 := New(memDB, WithStorageRoot(rootDir), WithClock(clk.Now))
 	t.Cleanup(func() { _ = mgr2.Close() })
 
+	survivingTgt, err := mgr2.ListMounts(ctx, target.DiskID)
+	require.NoError(t, err)
+	require.Len(t, survivingTgt, 1)
+	require.Equal(t, tgtMnt.MountID, survivingTgt[0].MountID)
+
+	_, err = mgr2.MountDisk(ctx, MountDiskParams{DiskID: target.DiskID, ReadOnly: false})
+	requireDiskMountedStatus(t, err)
+
 	_, err = mgr2.RenewMount(ctx, RenewMountParams{
 		DiskID:   target.DiskID,
 		MountID:  tgtMnt.MountID,
@@ -318,7 +326,29 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrStaleEpoch)
 
+	evictRO, err := mgr2.EvictMounts(ctx, EvictMountsParams{DiskID: roDisk.DiskID, MountID: roMnt.MountID})
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), evictRO.EvictedCount)
+	_, err = mgr2.RenewMount(ctx, RenewMountParams{
+		DiskID:   roDisk.DiskID,
+		MountID:  roMnt.MountID,
+		ReadOnly: true,
+		Epoch:    0,
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+	roAfterEvict, err := mgr2.ListMounts(ctx, roDisk.DiskID)
+	require.NoError(t, err)
+	require.Empty(t, roAfterEvict)
+
 	require.NoError(t, mgr2.UnmountDisk(ctx, UnmountDiskParams{DiskID: source.DiskID, MountID: srcMnt.MountID}))
+	_, err = mgr2.RenewMount(ctx, RenewMountParams{
+		DiskID:   source.DiskID,
+		MountID:  srcMnt.MountID,
+		ReadOnly: false,
+		Epoch:    srcMnt.Epoch,
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+
 	cleanFork, err := mgr2.ForkDisk(ctx, ForkDiskParams{SourceDiskID: target.DiskID, Name: "clean"})
 	require.NoError(t, err)
 	_, err = mgr2.MergeDisk(ctx, &MergeDiskParams{
@@ -530,11 +560,14 @@ func TestDeleteDisk_MountLeaseGate_RejectsActiveRWOrROAndAllowsAfterUnmountOrExp
 func TestDeleteDisk_ConcurrentWithMountROAndRenew_SerializesWithoutLeakedLease(t *testing.T) {
 	ctx := context.Background()
 	clk := newFakeClock(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
-	mgr := newManager(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
+	memDB := db.NewMemStore()
+	mgr := newManager(memDB, WithStorageRoot(t.TempDir()), WithClock(clk.Now))
 	t.Cleanup(func() { _ = mgr.Close() })
 
 	for range 20 {
 		disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "race-disk", MaxBytes: 16 << 20})
+		require.NoError(t, err)
+		diskUUID, err := uuid.Parse(disk.DiskID)
 		require.NoError(t, err)
 		roSeed, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
 		require.NoError(t, err)
@@ -568,20 +601,15 @@ func TestDeleteDisk_ConcurrentWithMountROAndRenew_SerializesWithoutLeakedLease(t
 		close(start)
 		wg.Wait()
 
+		require.ErrorIs(t, renewErr, ErrNotFound)
 		if deleteErr == nil {
 			require.ErrorIs(t, mountErr, ErrNotFound)
-			require.ErrorIs(t, renewErr, ErrNotFound)
-			mgr.mountsMu.Lock()
-			leaked := len(mgr.activeMounts[disk.DiskID])
-			mgr.mountsMu.Unlock()
+			leaked := len(memDB.Inspect().Mounts[diskUUID])
 			require.Zero(t, leaked, "deleted disk must not retain leaked mount leases")
 		} else {
 			requireDiskMountedStatus(t, deleteErr)
 			if mountErr == nil {
 				require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: mountRes.MountID}))
-			}
-			if renewErr == nil {
-				require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: roSeed.MountID}))
 			}
 			require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
 		}

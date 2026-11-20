@@ -417,3 +417,39 @@ func TestGivenInvalidForkInputsAndFailingAllocatorsWhenInvokedThenReturnsErrors(
 	_, _, err = badPackActor.Write(ctx, f.Ino, 0, []byte("hello"))
 	require.ErrorIsf(t, err, boom, "PackAllocator 失败应透传错误")
 }
+
+func TestGivenExistingRWDiskWhenReopenedWithUpdatedMaxBytesThenAlignsAndPersistsQuota(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	initial, err := store.Open(store.Options{Dir: dir, DiskID: "align-max-bytes", MaxBytes: 4 << 20})
+	require.NoError(t, err)
+	epoch, _, err := initial.AdvanceEpoch(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), epoch)
+	f, err := initial.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("f.bin"), Mode: store.S_IFREG | 0o644, Epoch: epoch})
+	require.NoError(t, err)
+	_, _, err = initial.Write(ctx, f.Ino, 0, make([]byte, 4096), epoch)
+	require.NoError(t, err)
+	require.NoError(t, initial.Close())
+
+	reopened, err := store.Open(store.Options{Dir: dir, DiskID: "align-max-bytes", MaxBytes: 12 << 20})
+	require.NoError(t, err)
+	require.Equal(t, uint64(12<<20), reopened.MaxBytes(), "reopen must align MaxBytes to opts.MaxBytes")
+	st, err := reopened.StatFS(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(12<<20), st.TotalBytes, "StatFS TotalBytes must reflect aligned MaxBytes")
+	require.Equal(t, uint64(1), reopened.WriterEpoch(), "reopen without ResetEpoch must preserve WriterEpoch")
+	require.NoError(t, reopened.Close())
+
+	persisted, err := store.Open(store.Options{Dir: dir, DiskID: "align-max-bytes"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = persisted.Close() })
+	require.Equal(t, uint64(12<<20), persisted.MaxBytes(), "aligned MaxBytes must persist in Pebble StatKey")
+	require.NoError(t, persisted.Close())
+
+	ro, err := store.Open(store.Options{Dir: dir, DiskID: "align-max-bytes", ReadOnly: true, MaxBytes: 64 << 20})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ro.Close() })
+	require.Equal(t, uint64(12<<20), ro.MaxBytes(), "read-only open must not overwrite persisted MaxBytes")
+}

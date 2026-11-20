@@ -56,6 +56,7 @@ func setupMetaTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
 		CREATE TABLE %[1]s.disk_lineages (LIKE public.disk_lineages INCLUDING ALL);
 		CREATE TABLE %[1]s.disk_commits (LIKE public.disk_commits INCLUDING ALL);
 		CREATE TABLE %[1]s.disks (LIKE public.disks INCLUDING ALL);
+		CREATE TABLE %[1]s.disk_mounts (LIKE public.disk_mounts INCLUDING ALL);
 		ALTER TABLE %[1]s.disk_commits
 			ADD CONSTRAINT disk_commits_lineage_id_fkey FOREIGN KEY (lineage_id) REFERENCES %[1]s.disk_lineages(lineage_id) ON DELETE CASCADE,
 			ADD CONSTRAINT fk_disk_commits_parent FOREIGN KEY (lineage_id, parent_commit_id) REFERENCES %[1]s.disk_commits(lineage_id, commit_id),
@@ -63,6 +64,8 @@ func setupMetaTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
 		ALTER TABLE %[1]s.disks
 			ADD CONSTRAINT fk_disks_lineage FOREIGN KEY (lineage_id) REFERENCES %[1]s.disk_lineages(lineage_id),
 			ADD CONSTRAINT fk_disks_base_commit FOREIGN KEY (lineage_id, base_commit_id) REFERENCES %[1]s.disk_commits(lineage_id, commit_id);
+		ALTER TABLE %[1]s.disk_mounts
+			ADD CONSTRAINT disk_mounts_disk_id_fkey FOREIGN KEY (disk_id) REFERENCES %[1]s.disks(disk_id) ON DELETE CASCADE;
 	`, schema)
 	_, err = adminPool.Exec(ctx, cloneDDL)
 	require.NoError(t, err, "在 schema %s 克隆表结构失败", schema)

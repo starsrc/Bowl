@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -21,6 +22,9 @@ type MemDiskView struct {
 	LineageID    uuid.UUID
 	BaseCommitID uuid.UUID
 	Name         string
+	MaxBytes     uint64
+	UsedBytes    uint64
+	UsedInodes   uint64
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -32,6 +36,9 @@ func (v *MemDiskView) toRecord() DiskRecord {
 		LineageID:    v.LineageID,
 		BaseCommitID: v.BaseCommitID,
 		Name:         v.Name,
+		MaxBytes:     v.MaxBytes,
+		UsedBytes:    v.UsedBytes,
+		UsedInodes:   v.UsedInodes,
 		CreatedAt:    v.CreatedAt,
 		UpdatedAt:    v.UpdatedAt,
 	}
@@ -68,8 +75,10 @@ type MemSnapshot struct {
 	Disks             map[uuid.UUID]MemDiskView
 	Lineages          map[uuid.UUID]MemLineageView
 	Commits           map[uuid.UUID]MemCommitView
+	Mounts            map[uuid.UUID]map[uuid.UUID]MountLeaseRecord
 	InodeReserveCalls int
 	PackReserveCalls  int
+	UpdateUsageCalls  int
 }
 
 type MemStore struct {
@@ -77,10 +86,12 @@ type MemStore struct {
 	disks             map[uuid.UUID]MemDiskView
 	lineages          map[uuid.UUID]MemLineageView
 	commits           map[uuid.UUID]MemCommitView
+	mounts            map[uuid.UUID]map[uuid.UUID]MountLeaseRecord
 	lastTS            time.Time
 	failNextWrite     error
 	inodeReserveCalls int
 	packReserveCalls  int
+	updateUsageCalls  int
 }
 
 func NewMemStore() *MemStore {
@@ -88,6 +99,7 @@ func NewMemStore() *MemStore {
 		disks:    make(map[uuid.UUID]MemDiskView),
 		lineages: make(map[uuid.UUID]MemLineageView),
 		commits:  make(map[uuid.UUID]MemCommitView),
+		mounts:   make(map[uuid.UUID]map[uuid.UUID]MountLeaseRecord),
 	}
 }
 
@@ -100,12 +112,18 @@ func (m *MemStore) SetFailNextWrite(err error) {
 func (m *MemStore) Inspect() MemSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	mountsCopy := make(map[uuid.UUID]map[uuid.UUID]MountLeaseRecord, len(m.mounts))
+	for diskID, diskMounts := range m.mounts {
+		mountsCopy[diskID] = maps.Clone(diskMounts)
+	}
 	return MemSnapshot{
 		Disks:             maps.Clone(m.disks),
 		Lineages:          maps.Clone(m.lineages),
 		Commits:           maps.Clone(m.commits),
+		Mounts:            mountsCopy,
 		InodeReserveCalls: m.inodeReserveCalls,
 		PackReserveCalls:  m.packReserveCalls,
+		UpdateUsageCalls:  m.updateUsageCalls,
 	}
 }
 
@@ -131,12 +149,15 @@ func (m *MemStore) nextNowLocked() time.Time {
 	return now
 }
 
-func (m *MemStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error) {
+func (m *MemStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string, maxBytes uint64) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
 	}
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+	if maxBytes == 0 || maxBytes > math.MaxInt64 {
+		return DiskRecord{}, fmt.Errorf("%w: max_bytes must be within [1, MaxInt64]", ErrInvalidArgument)
 	}
 
 	m.mu.Lock()
@@ -156,11 +177,14 @@ func (m *MemStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string
 		CreatedAt:  now,
 	}
 	row := MemDiskView{
-		DiskID:    diskID,
-		LineageID: diskID,
-		Name:      name,
-		CreatedAt: now,
-		UpdatedAt: now,
+		DiskID:     diskID,
+		LineageID:  diskID,
+		Name:       name,
+		MaxBytes:   maxBytes,
+		UsedBytes:  0,
+		UsedInodes: 1,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	m.disks[diskID] = row
 	return row.toRecord(), nil
@@ -170,8 +194,8 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
 	}
-	if arg.SourceDiskID == uuid.Nil || arg.ChildDiskID == uuid.Nil || arg.CommitID == uuid.Nil || arg.SourceDiskID == arg.ChildDiskID {
-		return DiskRecord{}, fmt.Errorf("%w: invalid fork disk identifiers", ErrInvalidArgument)
+	if err := validateForkDiskInput(arg); err != nil {
+		return DiskRecord{}, err
 	}
 
 	m.mu.Lock()
@@ -194,6 +218,17 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 		return DiskRecord{}, errors.New("db: commit already exists")
 	}
 
+	childMaxBytes := srcRow.MaxBytes
+	if arg.MaxBytes > 0 {
+		childMaxBytes = arg.MaxBytes
+	}
+	childUsedBytes := srcRow.UsedBytes
+	childUsedInodes := srcRow.UsedInodes
+	if arg.UsedInodes > 0 {
+		childUsedBytes = arg.UsedBytes
+		childUsedInodes = arg.UsedInodes
+	}
+
 	now := m.nextNowLocked()
 	m.commits[arg.CommitID] = MemCommitView{
 		CommitID:       arg.CommitID,
@@ -211,6 +246,9 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 		LineageID:    srcRow.LineageID,
 		BaseCommitID: arg.CommitID,
 		Name:         arg.Name,
+		MaxBytes:     childMaxBytes,
+		UsedBytes:    childUsedBytes,
+		UsedInodes:   childUsedInodes,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -328,12 +366,12 @@ func (m *MemStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) 
 	return commits, nil
 }
 
-func (m *MemStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error) {
+func (m *MemStore) UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
 	}
-	if diskID == uuid.Nil {
-		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	if err := validateUpdateDiskInput(input); err != nil {
+		return DiskRecord{}, err
 	}
 
 	m.mu.Lock()
@@ -342,14 +380,44 @@ func (m *MemStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name st
 		return DiskRecord{}, err
 	}
 
-	row, ok := m.disks[diskID]
+	row, ok := m.disks[input.DiskID]
 	if !ok {
 		return DiskRecord{}, ErrNotFound
 	}
-	row.Name = name
+	if input.Name != nil {
+		row.Name = *input.Name
+	}
+	if input.MaxBytes != nil {
+		row.MaxBytes = *input.MaxBytes
+	}
 	row.UpdatedAt = m.nextNowLocked()
-	m.disks[diskID] = row
+	m.disks[input.DiskID] = row
 	return row.toRecord(), nil
+}
+
+func (m *MemStore) UpdateDiskUsage(ctx context.Context, diskID uuid.UUID, usedBytes, usedInodes uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateUsageParams(diskID, usedBytes, usedInodes); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return err
+	}
+
+	row, ok := m.disks[diskID]
+	if !ok {
+		return ErrNotFound
+	}
+	row.UsedBytes = usedBytes
+	row.UsedInodes = usedInodes
+	m.disks[diskID] = row
+	m.updateUsageCalls++
+	return nil
 }
 
 func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRecord, error) {
@@ -418,6 +486,13 @@ func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 		CreatedAt:           mergeNow,
 	}
 	tgtRow.BaseCommitID = input.NewMergeCommitID
+	if input.TargetMaxBytes > 0 {
+		tgtRow.MaxBytes = input.TargetMaxBytes
+	}
+	if input.TargetUsedInodes > 0 {
+		tgtRow.UsedBytes = input.TargetUsedBytes
+		tgtRow.UsedInodes = input.TargetUsedInodes
+	}
 	tgtRow.UpdatedAt = mergeNow
 	m.disks[input.TargetDiskID] = tgtRow
 	return tgtRow.toRecord(), nil
@@ -447,6 +522,7 @@ func (m *MemStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUI
 	}
 
 	delete(m.disks, diskID)
+	delete(m.mounts, diskID)
 
 	var remaining int
 	for id := range m.disks {
@@ -518,4 +594,193 @@ func (m *MemStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineage
 	default:
 		return SegmentRange{}, ErrInvalidArgument
 	}
+}
+
+func (m *MemStore) CreateMountLease(ctx context.Context, arg CreateMountLeaseInput) (MountLeaseRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return MountLeaseRecord{}, err
+	}
+	nowUTC, expUTC, err := validateMountLeaseParams(arg.DiskID, arg.MountID, arg.ReadOnly, arg.Epoch, arg.Now, arg.ExpiresAt)
+	if err != nil {
+		return MountLeaseRecord{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return MountLeaseRecord{}, err
+	}
+	if _, ok := m.disks[arg.DiskID]; !ok {
+		return MountLeaseRecord{}, ErrNotFound
+	}
+
+	leases := m.mounts[arg.DiskID]
+	for id, lease := range leases {
+		if !lease.ExpiresAt.After(nowUTC) {
+			delete(leases, id)
+			continue
+		}
+		if !arg.ReadOnly && !lease.ReadOnly && lease.Epoch < arg.Epoch {
+			delete(leases, id)
+		}
+	}
+	if leases == nil {
+		leases = make(map[uuid.UUID]MountLeaseRecord)
+		m.mounts[arg.DiskID] = leases
+	}
+	if _, dup := leases[arg.MountID]; dup {
+		return MountLeaseRecord{}, errors.New("db: mount lease already exists")
+	}
+	rec := MountLeaseRecord{
+		DiskID:    arg.DiskID,
+		MountID:   arg.MountID,
+		ReadOnly:  arg.ReadOnly,
+		Epoch:     arg.Epoch,
+		ExpiresAt: expUTC,
+	}
+	leases[arg.MountID] = rec
+	return rec, nil
+}
+
+func (m *MemStore) RenewMountLease(ctx context.Context, arg RenewMountLeaseInput) (MountLeaseRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return MountLeaseRecord{}, err
+	}
+	nowUTC, expUTC, err := validateMountLeaseParams(arg.DiskID, arg.MountID, arg.ReadOnly, arg.Epoch, arg.Now, arg.ExpiresAt)
+	if err != nil {
+		return MountLeaseRecord{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return MountLeaseRecord{}, err
+	}
+
+	leases := m.mounts[arg.DiskID]
+	existing, ok := leases[arg.MountID]
+	if !ok {
+		return MountLeaseRecord{}, ErrNotFound
+	}
+	if !existing.ExpiresAt.After(nowUTC) {
+		return MountLeaseRecord{}, ErrNotFound
+	}
+	if existing.ReadOnly != arg.ReadOnly {
+		return MountLeaseRecord{}, fmt.Errorf("%w: mount mode mismatch for mount_id %s", ErrInvalidArgument, arg.MountID)
+	}
+	if !arg.ReadOnly && existing.Epoch != arg.Epoch {
+		return MountLeaseRecord{}, fmt.Errorf("%w: mount epoch %d != lease epoch %d", ErrStaleEpoch, arg.Epoch, existing.Epoch)
+	}
+	existing.ExpiresAt = expUTC
+	leases[arg.MountID] = existing
+	return existing, nil
+}
+
+func (m *MemStore) DeleteMountLease(ctx context.Context, diskID, mountID uuid.UUID) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if diskID == uuid.Nil || mountID == uuid.Nil {
+		return false, fmt.Errorf("%w: disk id and mount id cannot be nil uuid", ErrInvalidArgument)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return false, err
+	}
+
+	leases := m.mounts[diskID]
+	if leases == nil {
+		return false, nil
+	}
+	if _, ok := leases[mountID]; !ok {
+		return false, nil
+	}
+	delete(leases, mountID)
+	if len(leases) == 0 {
+		delete(m.mounts, diskID)
+	}
+	return true, nil
+}
+
+func (m *MemStore) DeleteDiskMountLeases(ctx context.Context, diskID uuid.UUID, now time.Time) (uint32, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if diskID == uuid.Nil || now.IsZero() {
+		return 0, fmt.Errorf("%w: disk id and now are required", ErrInvalidArgument)
+	}
+	nowUTC := now.UTC().Truncate(time.Microsecond)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return 0, err
+	}
+
+	leases := m.mounts[diskID]
+	var activeCount uint32
+	for _, lease := range leases {
+		if lease.ExpiresAt.After(nowUTC) {
+			activeCount++
+		}
+	}
+	delete(m.mounts, diskID)
+	return activeCount, nil
+}
+
+func (m *MemStore) ListActiveMountLeases(ctx context.Context, diskID uuid.UUID, now time.Time) ([]MountLeaseRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if diskID == uuid.Nil || now.IsZero() {
+		return nil, fmt.Errorf("%w: disk id and now are required", ErrInvalidArgument)
+	}
+	nowUTC := now.UTC().Truncate(time.Microsecond)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	leases := m.mounts[diskID]
+	out := make([]MountLeaseRecord, 0, len(leases))
+	for _, lease := range leases {
+		if lease.ExpiresAt.After(nowUTC) {
+			out = append(out, lease)
+		}
+	}
+	slices.SortFunc(out, func(a, b MountLeaseRecord) int {
+		return bytes.Compare(a.MountID[:], b.MountID[:])
+	})
+	return out, nil
+}
+
+func (m *MemStore) PruneExpiredMountLeases(ctx context.Context, now time.Time) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if now.IsZero() {
+		return 0, fmt.Errorf("%w: now must be non-zero", ErrInvalidArgument)
+	}
+	nowUTC := now.UTC().Truncate(time.Microsecond)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return 0, err
+	}
+
+	var pruned int64
+	for diskID, leases := range m.mounts {
+		for mountID, lease := range leases {
+			if !lease.ExpiresAt.After(nowUTC) {
+				delete(leases, mountID)
+				pruned++
+			}
+		}
+		if len(leases) == 0 {
+			delete(m.mounts, diskID)
+		}
+	}
+	return pruned, nil
 }

@@ -566,10 +566,10 @@ func requireDiskUsageUnchanged(t *testing.T, client storagev1connect.StorageServ
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	resp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
 	require.NoError(t, err)
-	gotBytes := resp.Msg.GetDisk().GetUsedBytes()
-	gotInodes := resp.Msg.GetDisk().GetUsedInodes()
+	gotBytes := resp.Msg.GetUsedBytes()
+	gotInodes := resp.Msg.GetFiles()
 	require.Equal(t, wantBytes, gotBytes, "scene=%s field=used_bytes want=%d got=%d", scene, wantBytes, gotBytes)
 	require.Equal(t, wantInodes, gotInodes, "scene=%s field=used_inodes want=%d got=%d", scene, wantInodes, gotInodes)
 }
@@ -578,9 +578,9 @@ func fetchDiskUsage(t *testing.T, client storagev1connect.StorageServiceClient, 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	resp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
 	require.NoError(t, err)
-	return resp.Msg.GetDisk().GetUsedBytes(), resp.Msg.GetDisk().GetUsedInodes()
+	return resp.Msg.GetUsedBytes(), resp.Msg.GetFiles()
 }
 
 func TestStagedMode_FlagValidation_GivenInvalidArgsOrEnv_Exits2(t *testing.T) {

@@ -328,7 +328,10 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, persistedPayload, readAfterRestart.Msg.GetData())
 
-	mount3, err := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	_, err = client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	testutil.RequireConnectError(t, err, connect.CodeAborted, "EBUSY")
+
+	mount3, err := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), mount3.Msg.GetEpoch(), "重启后写入世代号必须在持久化世代 2 基础上递增至 3")
 

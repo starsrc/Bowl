@@ -146,20 +146,20 @@ func (m *manager) sharedCache() (*pebble.Cache, error) {
 
 func (m *manager) snapshotDiskForInspect(
 	ctx context.Context,
-	diskID string,
-	lineageID uuid.UUID,
+	row *db.DiskRecord,
 	prefix string,
 ) (snapDir string, hasOrphans bool, cleanup func(), err error) {
-	actor, err := m.getOrOpenActorWithLineageLocked(ctx, diskID, lineageID)
+	entry, err := m.getOrOpenActorWithRecordLocked(ctx, row)
 	if err != nil {
 		return "", false, nil, err
 	}
+	diskID := row.DiskID.String()
 	tmpRoot := filepath.Join(m.storageRoot, ".tmp")
 	if mkErr := os.MkdirAll(tmpRoot, 0o755); mkErr != nil {
 		return "", false, nil, mkErr
 	}
 	snapDir = m.tmpSnapshotPath(prefix)
-	stats, err := actor.Checkpoint(ctx, snapDir)
+	stats, err := entry.actor.Checkpoint(ctx, snapDir)
 	if err != nil {
 		_ = m.removeAll(snapDir)
 		return "", false, nil, err
@@ -341,7 +341,7 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 		lcaCommitID = sourceRow.BaseCommitID
 	}
 
-	sourceSnapDir, _, cleanupSrc, err := m.snapshotDiskForInspect(ctx, sourceKey, sourceRow.LineageID, "diff-src")
+	sourceSnapDir, _, cleanupSrc, err := m.snapshotDiskForInspect(ctx, &sourceRow, "diff-src")
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +350,7 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 	var targetSnapDir string
 	if hasTarget {
 		var cleanupTgt func()
-		targetSnapDir, _, cleanupTgt, err = m.snapshotDiskForInspect(ctx, targetKey, targetRow.LineageID, "diff-tgt")
+		targetSnapDir, _, cleanupTgt, err = m.snapshotDiskForInspect(ctx, &targetRow, "diff-tgt")
 		if err != nil {
 			return nil, err
 		}
@@ -504,18 +504,18 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	}
 
 	if !params.DryRun && !params.Force {
-		if gateErr := m.checkMergeMountGate(sourceKey, targetKey); gateErr != nil {
+		if gateErr := m.checkMergeMountGate(ctx, sourceID, targetID); gateErr != nil {
 			return nil, gateErr
 		}
 	}
 
-	sourceSnapDir, srcHasOrphans, cleanupSrc, err := m.snapshotDiskForInspect(ctx, sourceKey, sourceRow.LineageID, "merge-src")
+	sourceSnapDir, srcHasOrphans, cleanupSrc, err := m.snapshotDiskForInspect(ctx, &sourceRow, "merge-src")
 	if err != nil {
 		return nil, err
 	}
 	defer cleanupSrc()
 
-	targetSnapDir, _, cleanupTgt, err := m.snapshotDiskForInspect(ctx, targetKey, targetRow.LineageID, "merge-tgt")
+	targetSnapDir, _, cleanupTgt, err := m.snapshotDiskForInspect(ctx, &targetRow, "merge-tgt")
 	if err != nil {
 		return nil, err
 	}
@@ -662,14 +662,14 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		cleanupUncommittedDirs()
 		return nil, ErrClosed
 	}
-	oldTargetActor := m.actors[targetKey]
-	if oldTargetActor != nil {
+	oldTargetEntry := m.actors[targetKey]
+	if oldTargetEntry != nil {
 		delete(m.actors, targetKey)
 	}
 	m.poolMu.Unlock()
 
-	if oldTargetActor != nil {
-		if closeErr := oldTargetActor.Close(); closeErr != nil {
+	if oldTargetEntry != nil {
+		if closeErr := oldTargetEntry.actor.Close(); closeErr != nil {
 			cleanupUncommittedDirs()
 			return nil, fmt.Errorf("关闭旧目标盘实例: %w", closeErr)
 		}
@@ -698,6 +698,9 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		NewSourceCommitID:          newSourceCommitID,
 		NewMergeCommitID:           newMergeCommitID,
 		SkipSourceCommit:           skipSourceCommit,
+		TargetMaxBytes:             mergeRes.TargetMaxBytes,
+		TargetUsedBytes:            mergeRes.UsedBytes,
+		TargetUsedInodes:           mergeRes.Inodes,
 	})
 	if err != nil {
 		cleanupUncommittedDirs()
@@ -745,15 +748,35 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		return nil, fmt.Errorf("重新打开合并后目标盘实例: %w", err)
 	}
 
+	newTargetEntry := newActorEntry(
+		updatedTargetRow.DiskID,
+		newTargetActor,
+		m.currentTime().UnixNano(),
+		updatedTargetRow.UsedBytes,
+		updatedTargetRow.UsedInodes,
+	)
+
 	m.poolMu.Lock()
 	if m.closed {
 		m.poolMu.Unlock()
 		_ = newTargetActor.Close()
 		return nil, ErrClosed
 	}
-	m.actors[targetKey] = newTargetActor
+	m.actors[targetKey] = newTargetEntry
 	m.poolMu.Unlock()
-	m.clearDiskMounts(targetKey)
+
+	if _, clearErr := m.clearDiskMounts(ctx, targetID); clearErr != nil {
+		m.logger.WarnContext(ctx, "merge disk clear mount leases failed",
+			"disk_id", targetKey,
+			"err", clearErr,
+		)
+	}
+	if flushErr := m.flushEntryUsage(ctx, newTargetEntry); flushErr != nil {
+		m.logger.WarnContext(ctx, "merge disk usage flush failed",
+			"disk_id", targetKey,
+			"err", flushErr,
+		)
+	}
 
 	stat, statErr := newTargetActor.StatFS(ctx)
 	if statErr != nil {

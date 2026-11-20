@@ -478,6 +478,16 @@ func (s *StoreActor) initOrLoadState(opts *Options) error {
 		if applyErr != nil || closeBatchErr != nil {
 			return errors.Join(applyErr, closeBatchErr)
 		}
+	} else if !s.readOnly && opts.MaxBytes > 0 && opts.MaxBytes != stat.MaxBytes {
+		stat.MaxBytes = opts.MaxBytes
+		syncBatch := s.db.NewBatch()
+		BatchSetStatDeferred(syncBatch, stat)
+		applyErr := s.db.Apply(syncBatch, pebble.Sync)
+		closeBatchErr := syncBatch.Close()
+		if applyErr != nil || closeBatchErr != nil {
+			return errors.Join(applyErr, closeBatchErr)
+		}
+		s.maxBytes.Store(opts.MaxBytes)
 	} else if stat.MaxBytes > 0 {
 		s.maxBytes.Store(stat.MaxBytes)
 	} else if maxB := s.maxBytes.Load(); maxB > 0 {

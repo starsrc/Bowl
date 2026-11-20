@@ -1,21 +1,15 @@
 package control
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
-)
 
-type mountLease struct {
-	readOnly  bool
-	epoch     uint64
-	expiresAt time.Time
-}
+	"github.com/starsrc/bowl/services/storage/internal/db"
+)
 
 func (m *manager) currentTime() time.Time {
 	if m.now != nil {
@@ -54,76 +48,26 @@ func parseMountID(mountID string) (uuid.UUID, error) {
 	return id, nil
 }
 
-func (m *manager) pruneExpiredDiskLeasesLocked(diskID string, now time.Time) map[string]mountLease {
-	leases := m.activeMounts[diskID]
-	if len(leases) == 0 {
-		return nil
-	}
-	for id, lease := range leases {
-		if !lease.expiresAt.After(now) {
-			delete(leases, id)
-		}
-	}
-	if len(leases) == 0 {
-		delete(m.activeMounts, diskID)
-		return nil
-	}
-	return leases
-}
-
-func (m *manager) upsertMountLease(diskKey, mountKey string, readOnly bool, epoch uint64, isRenew bool) (uint32, error) {
-	now := m.currentTime()
-	ttl := m.leaseTTL()
-
-	m.mountsMu.Lock()
-	defer m.mountsMu.Unlock()
-
-	leases := m.pruneExpiredDiskLeasesLocked(diskKey, now)
-	if isRenew {
-		if existing, ok := leases[mountKey]; ok && existing.readOnly != readOnly {
-			return 0, fmt.Errorf("%w: mount mode mismatch for mount_id %s", ErrInvalidArgument, mountKey)
-		}
-	}
-	if !readOnly && len(leases) > 0 {
-		for id, lease := range leases {
-			if !lease.readOnly && lease.epoch < epoch {
-				delete(leases, id)
-			}
-			if !lease.readOnly && lease.epoch > epoch {
-				if isRenew {
-					return 0, fmt.Errorf("%w: mount epoch %d superseded by %d", ErrStaleEpoch, epoch, lease.epoch)
-				}
-
-				return m.leaseTTLSeconds(), nil
-			}
-		}
-	}
-	if leases == nil {
-		leases = make(map[string]mountLease)
-		m.activeMounts[diskKey] = leases
-	}
-	leases[mountKey] = mountLease{
-		readOnly:  readOnly,
-		epoch:     epoch,
-		expiresAt: now.Add(ttl),
-	}
-	return m.leaseTTLSeconds(), nil
-}
-
-func (m *manager) issueMountLease(diskID string, readOnly bool, epoch uint64) (mountID string, ttlSeconds uint32, err error) {
+func (m *manager) issueMountLease(ctx context.Context, diskUUID uuid.UUID, readOnly bool, epoch uint64) (mountID string, ttlSeconds uint32, err error) {
 	mountUUID, err := uuid.NewV7()
 	if err != nil {
 		return "", 0, err
 	}
-	mountID = mountUUID.String()
-	ttlSeconds, err = m.upsertMountLease(diskID, mountID, readOnly, epoch, false)
-	if err != nil {
-		return "", 0, err
+	now := m.currentTime()
+	if _, err = m.store.CreateMountLease(ctx, db.CreateMountLeaseInput{
+		DiskID:    diskUUID,
+		MountID:   mountUUID,
+		ReadOnly:  readOnly,
+		Epoch:     epoch,
+		Now:       now,
+		ExpiresAt: now.Add(m.leaseTTL()),
+	}); err != nil {
+		return "", 0, mapDBErr(err)
 	}
-	return mountID, ttlSeconds, nil
+	return mountUUID.String(), m.leaseTTLSeconds(), nil
 }
 
-func (m *manager) UnmountDisk(_ context.Context, params UnmountDiskParams) error {
+func (m *manager) UnmountDisk(ctx context.Context, params UnmountDiskParams) error {
 	diskUUID, err := parseDiskID(params.DiskID)
 	if err != nil {
 		return err
@@ -137,16 +81,23 @@ func (m *manager) UnmountDisk(_ context.Context, params UnmountDiskParams) error
 	}
 
 	diskKey := diskUUID.String()
-	mountKey := mountUUID.String()
+	unlockDisk := m.lockDisk(ctx, diskKey)
+	defer unlockDisk()
 
-	m.mountsMu.Lock()
-	if leases := m.activeMounts[diskKey]; leases != nil {
-		delete(leases, mountKey)
-		if len(leases) == 0 {
-			delete(m.activeMounts, diskKey)
+	if openErr := m.ensureOpen(); openErr != nil {
+		return openErr
+	}
+	if entry := m.getWarmEntry(diskKey); entry != nil {
+		if flushErr := m.flushEntryUsage(ctx, entry); flushErr != nil {
+			m.logger.WarnContext(ctx, "unmount disk usage flush failed",
+				"disk_id", diskKey,
+				"err", flushErr,
+			)
 		}
 	}
-	m.mountsMu.Unlock()
+	if _, delErr := m.store.DeleteMountLease(ctx, diskUUID, mountUUID); delErr != nil {
+		return mapDBErr(delErr)
+	}
 	return nil
 }
 
@@ -170,78 +121,86 @@ func (m *manager) RenewMount(ctx context.Context, params RenewMountParams) (*Ren
 	}
 
 	diskKey := diskUUID.String()
-	mountKey := mountUUID.String()
-
 	unlockDisk := m.lockDisk(ctx, diskKey)
 	defer unlockDisk()
 
-	actor, err := m.actorLocked(ctx, diskUUID)
+	if openErr := m.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+	entry, err := m.actorEntryLocked(ctx, diskUUID)
 	if err != nil {
 		return nil, err
 	}
 	if !params.ReadOnly {
-		if currentEpoch := actor.WriterEpoch(); params.Epoch != currentEpoch {
+		if currentEpoch := entry.actor.WriterEpoch(); params.Epoch != currentEpoch {
 			return nil, fmt.Errorf("%w: mount epoch %d != current writer epoch %d", ErrStaleEpoch, params.Epoch, currentEpoch)
 		}
 	}
 
-	ttlSeconds, err := m.upsertMountLease(diskKey, mountKey, params.ReadOnly, params.Epoch, true)
-	if err != nil {
-		return nil, err
+	now := m.currentTime()
+	if _, err = m.store.RenewMountLease(ctx, db.RenewMountLeaseInput{
+		DiskID:    diskUUID,
+		MountID:   mountUUID,
+		ReadOnly:  params.ReadOnly,
+		Epoch:     params.Epoch,
+		Now:       now,
+		ExpiresAt: now.Add(m.leaseTTL()),
+	}); err != nil {
+		return nil, mapDBErr(err)
 	}
 	return &RenewMountResult{
-		LeaseTTLSeconds: ttlSeconds,
+		LeaseTTLSeconds: m.leaseTTLSeconds(),
 	}, nil
 }
 
-func (m *manager) clearDiskMounts(diskID string) {
-	m.mountsMu.Lock()
-	delete(m.activeMounts, diskID)
-	m.mountsMu.Unlock()
+func (m *manager) clearDiskMounts(ctx context.Context, diskUUID uuid.UUID) (uint32, error) {
+	count, err := m.store.DeleteDiskMountLeases(ctx, diskUUID, m.currentTime())
+	if err != nil {
+		return 0, mapDBErr(err)
+	}
+	return count, nil
 }
 
-func (m *manager) checkDeleteMountGate(diskID string) error {
-	now := m.currentTime()
-
-	m.mountsMu.Lock()
-	defer m.mountsMu.Unlock()
-
-	if leases := m.pruneExpiredDiskLeasesLocked(diskID, now); len(leases) > 0 {
-		return fmt.Errorf("%w: disk %s has active mount lease(s)", ErrDiskMounted, diskID)
+func (m *manager) checkDeleteMountGate(ctx context.Context, diskUUID uuid.UUID) error {
+	leases, err := m.store.ListActiveMountLeases(ctx, diskUUID, m.currentTime())
+	if err != nil {
+		return mapDBErr(err)
+	}
+	if len(leases) > 0 {
+		return fmt.Errorf("%w: disk %s has active mount lease(s)", ErrDiskMounted, diskUUID.String())
 	}
 	return nil
 }
 
-func (m *manager) checkRWMountGate(diskID string) error {
-	now := m.currentTime()
-
-	m.mountsMu.Lock()
-	defer m.mountsMu.Unlock()
-
-	if leases := m.pruneExpiredDiskLeasesLocked(diskID, now); len(leases) > 0 {
-		for _, lease := range leases {
-			if !lease.readOnly {
-				return fmt.Errorf("%w: disk %s has active read-write mount lease", ErrDiskMounted, diskID)
-			}
+func (m *manager) checkRWMountGate(ctx context.Context, diskUUID uuid.UUID) error {
+	leases, err := m.store.ListActiveMountLeases(ctx, diskUUID, m.currentTime())
+	if err != nil {
+		return mapDBErr(err)
+	}
+	for _, lease := range leases {
+		if !lease.ReadOnly {
+			return fmt.Errorf("%w: disk %s has active read-write mount lease", ErrDiskMounted, diskUUID.String())
 		}
 	}
 	return nil
 }
 
-func (m *manager) checkMergeMountGate(sourceKey, targetKey string) error {
+func (m *manager) checkMergeMountGate(ctx context.Context, sourceUUID, targetUUID uuid.UUID) error {
 	now := m.currentTime()
-
-	m.mountsMu.Lock()
-	defer m.mountsMu.Unlock()
-
-	if targetLeases := m.pruneExpiredDiskLeasesLocked(targetKey, now); len(targetLeases) > 0 {
-		return fmt.Errorf("%w: target disk %s has active mount lease(s)", ErrDiskMounted, targetKey)
+	targetLeases, err := m.store.ListActiveMountLeases(ctx, targetUUID, now)
+	if err != nil {
+		return mapDBErr(err)
 	}
-	if sourceLeases := m.pruneExpiredDiskLeasesLocked(sourceKey, now); len(sourceLeases) > 0 {
-		for _, lease := range sourceLeases {
-			if !lease.readOnly {
-				return fmt.Errorf("%w: source disk %s has active read-write mount lease", ErrDiskMounted, sourceKey)
-			}
+	if len(targetLeases) > 0 {
+		return fmt.Errorf("%w: target disk %s has active mount lease(s)", ErrDiskMounted, targetUUID.String())
+	}
+	sourceLeases, err := m.store.ListActiveMountLeases(ctx, sourceUUID, now)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	for _, lease := range sourceLeases {
+		if !lease.ReadOnly {
+			return fmt.Errorf("%w: source disk %s has active read-write mount lease", ErrDiskMounted, sourceUUID.String())
 		}
 	}
 	return nil
@@ -267,23 +226,19 @@ func (m *manager) ListMounts(ctx context.Context, diskID string) ([]MountLeaseIn
 		return nil, mapDBErr(err)
 	}
 
-	now := m.currentTime()
-	m.mountsMu.Lock()
-	leases := m.pruneExpiredDiskLeasesLocked(diskKey, now)
+	leases, err := m.store.ListActiveMountLeases(ctx, id, m.currentTime())
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
 	out := make([]MountLeaseInfo, 0, len(leases))
-	for mountID, lease := range leases {
+	for _, lease := range leases {
 		out = append(out, MountLeaseInfo{
-			MountID:   mountID,
-			ReadOnly:  lease.readOnly,
-			Epoch:     lease.epoch,
-			ExpiresAt: lease.expiresAt,
+			MountID:   lease.MountID.String(),
+			ReadOnly:  lease.ReadOnly,
+			Epoch:     lease.Epoch,
+			ExpiresAt: lease.ExpiresAt,
 		})
 	}
-	m.mountsMu.Unlock()
-
-	slices.SortFunc(out, func(a, b MountLeaseInfo) int {
-		return cmp.Compare(a.MountID, b.MountID)
-	})
 	return out, nil
 }
 
@@ -292,13 +247,13 @@ func (m *manager) EvictMounts(ctx context.Context, params EvictMountsParams) (*E
 	if err != nil {
 		return nil, err
 	}
-	var mountKey string
+	var mountUUID uuid.UUID
 	if params.MountID != "" {
-		mountUUID, mountErr := parseMountID(params.MountID)
+		parsedMountID, mountErr := parseMountID(params.MountID)
 		if mountErr != nil {
 			return nil, mountErr
 		}
-		mountKey = mountUUID.String()
+		mountUUID = parsedMountID
 	}
 	if openErr := m.ensureOpen(); openErr != nil {
 		return nil, openErr
@@ -315,51 +270,55 @@ func (m *manager) EvictMounts(ctx context.Context, params EvictMountsParams) (*E
 		return nil, mapDBErr(err)
 	}
 
-	if mountKey != "" {
-		m.mountsMu.Lock()
-		leases := m.pruneExpiredDiskLeasesLocked(diskKey, m.currentTime())
-		lease, ok := leases[mountKey]
-		if !ok {
-			m.mountsMu.Unlock()
+	if mountUUID != uuid.Nil {
+		leases, listErr := m.store.ListActiveMountLeases(ctx, diskUUID, m.currentTime())
+		if listErr != nil {
+			return nil, mapDBErr(listErr)
+		}
+		var targetLease *db.MountLeaseRecord
+		for i := range leases {
+			if leases[i].MountID == mountUUID {
+				targetLease = &leases[i]
+				break
+			}
+		}
+		if targetLease == nil {
 			return &EvictMountsResult{}, nil
 		}
-		if lease.readOnly {
-			delete(leases, mountKey)
-			if len(leases) == 0 {
-				delete(m.activeMounts, diskKey)
+		if targetLease.ReadOnly {
+			if _, delErr := m.store.DeleteMountLease(ctx, diskUUID, mountUUID); delErr != nil {
+				return nil, mapDBErr(delErr)
 			}
-			m.mountsMu.Unlock()
 			m.logger.InfoContext(ctx, "mount lease evicted",
 				"disk_id", diskKey,
-				"mount_id", mountKey,
+				"mount_id", mountUUID.String(),
 				"mode", actorModeRO,
 				"evicted_count", uint32(1),
 			)
 			return &EvictMountsResult{EvictedCount: 1}, nil
 		}
-		m.mountsMu.Unlock()
 
-		actor, actorErr := m.actorLocked(ctx, diskUUID)
+		entry, actorErr := m.actorEntryLocked(ctx, diskUUID)
 		if actorErr != nil {
 			return nil, actorErr
 		}
-		epoch, _, advErr := actor.AdvanceEpoch(ctx)
+		epoch, _, advErr := entry.actor.AdvanceEpoch(ctx)
 		if advErr != nil {
 			return nil, advErr
 		}
-
-		m.mountsMu.Lock()
-		if currentLeases := m.activeMounts[diskKey]; currentLeases != nil {
-			delete(currentLeases, mountKey)
-			if len(currentLeases) == 0 {
-				delete(m.activeMounts, diskKey)
-			}
+		if flushErr := m.flushEntryUsage(ctx, entry); flushErr != nil {
+			m.logger.WarnContext(ctx, "evict rw mount usage flush failed",
+				"disk_id", diskKey,
+				"err", flushErr,
+			)
 		}
-		m.mountsMu.Unlock()
+		if _, delErr := m.store.DeleteMountLease(ctx, diskUUID, mountUUID); delErr != nil {
+			return nil, mapDBErr(delErr)
+		}
 
 		m.logger.InfoContext(ctx, "mount lease evicted",
 			"disk_id", diskKey,
-			"mount_id", mountKey,
+			"mount_id", mountUUID.String(),
 			"mode", actorModeRW,
 			"evicted_count", uint32(1),
 			"writer_epoch", epoch,
@@ -370,20 +329,25 @@ func (m *manager) EvictMounts(ctx context.Context, params EvictMountsParams) (*E
 		}, nil
 	}
 
-	actor, actorErr := m.actorLocked(ctx, diskUUID)
+	entry, actorErr := m.actorEntryLocked(ctx, diskUUID)
 	if actorErr != nil {
 		return nil, actorErr
 	}
-	epoch, _, advErr := actor.AdvanceEpoch(ctx)
+	epoch, _, advErr := entry.actor.AdvanceEpoch(ctx)
 	if advErr != nil {
 		return nil, advErr
 	}
+	if flushErr := m.flushEntryUsage(ctx, entry); flushErr != nil {
+		m.logger.WarnContext(ctx, "evict disk mounts usage flush failed",
+			"disk_id", diskKey,
+			"err", flushErr,
+		)
+	}
 
-	m.mountsMu.Lock()
-	leases := m.pruneExpiredDiskLeasesLocked(diskKey, m.currentTime())
-	evictedCount := uint32(len(leases))
-	delete(m.activeMounts, diskKey)
-	m.mountsMu.Unlock()
+	evictedCount, delErr := m.clearDiskMounts(ctx, diskUUID)
+	if delErr != nil {
+		return nil, delErr
+	}
 
 	m.logger.InfoContext(ctx, "disk mounts evicted",
 		"disk_id", diskKey,

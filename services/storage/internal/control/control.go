@@ -37,6 +37,7 @@ const (
 	DefaultDirEntryTimeoutSeconds float64 = 1.0
 	DefaultSharedCacheSize                = store.DefaultCacheSize
 	DefaultMountLeaseTTL                  = 30 * time.Second
+	DefaultActorIdleTTL                   = config.DefaultActorIdleTTL
 
 	segmentReserveTimeout = 5 * time.Second
 )
@@ -222,12 +223,16 @@ type manager struct {
 
 	poolMu sync.RWMutex
 	closed bool
-	actors map[string]*store.StoreActor
+	actors map[string]*actorEntry
 
-	now           func() time.Time
-	mountLeaseTTL time.Duration
-	mountsMu      sync.Mutex
-	activeMounts  map[string]map[string]mountLease
+	now               func() time.Time
+	mountLeaseTTL     time.Duration
+	actorIdleTTL      time.Duration
+	usageSyncInterval time.Duration
+
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 }
 
 type Option func(*manager)
@@ -321,6 +326,22 @@ func WithMountLeaseTTL(ttl time.Duration) Option {
 	}
 }
 
+func WithActorIdleTTL(ttl time.Duration) Option {
+	return func(m *manager) {
+		if ttl >= 0 {
+			m.actorIdleTTL = ttl
+		}
+	}
+}
+
+func WithUsageSyncInterval(interval time.Duration) Option {
+	return func(m *manager) {
+		if interval >= 0 {
+			m.usageSyncInterval = interval
+		}
+	}
+}
+
 func New(dbStore db.Store, opts ...Option) Manager {
 	return newManager(dbStore, opts...)
 }
@@ -328,20 +349,21 @@ func New(dbStore db.Store, opts ...Option) Manager {
 func newManager(dbStore db.Store, opts ...Option) *manager {
 	baseLogger := slog.Default()
 	m := &manager{
-		store:           dbStore,
-		storageRoot:     config.DefaultDataDir,
-		entryTimeout:    DefaultEntryTimeoutSeconds,
-		attrTimeout:     DefaultAttrTimeoutSeconds,
-		dirEntryTimeout: DefaultDirEntryTimeoutSeconds,
-		baseLogger:      baseLogger,
-		logger:          baseLogger.With("component", "control"),
-		removeAll:       os.RemoveAll,
-		cache:           pebble.NewCache(DefaultSharedCacheSize),
-		diskLocks:       make(map[string]*diskLockEntry),
-		actors:          make(map[string]*store.StoreActor),
-		now:             time.Now,
-		mountLeaseTTL:   DefaultMountLeaseTTL,
-		activeMounts:    make(map[string]map[string]mountLease),
+		store:             dbStore,
+		storageRoot:       config.DefaultDataDir,
+		entryTimeout:      DefaultEntryTimeoutSeconds,
+		attrTimeout:       DefaultAttrTimeoutSeconds,
+		dirEntryTimeout:   DefaultDirEntryTimeoutSeconds,
+		baseLogger:        baseLogger,
+		logger:            baseLogger.With("component", "control"),
+		removeAll:         os.RemoveAll,
+		cache:             pebble.NewCache(DefaultSharedCacheSize),
+		diskLocks:         make(map[string]*diskLockEntry),
+		actors:            make(map[string]*actorEntry),
+		now:               time.Now,
+		mountLeaseTTL:     DefaultMountLeaseTTL,
+		actorIdleTTL:      DefaultActorIdleTTL,
+		usageSyncInterval: DefaultUsageSyncInterval,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -355,6 +377,7 @@ func newManager(dbStore db.Store, opts ...Option) *manager {
 		m.collector = newStorageEngineCollector()
 	}
 	m.collector.bind(m)
+	m.startBackgroundLoops()
 	return m
 }
 
@@ -518,6 +541,8 @@ func mapDBErr(err error) error {
 		return ErrNotFound
 	case errors.Is(err, db.ErrInvalidArgument):
 		return ErrInvalidArgument
+	case errors.Is(err, db.ErrStaleEpoch):
+		return ErrStaleEpoch
 	default:
 		return err
 	}
@@ -562,6 +587,24 @@ func assembleDisk(row *db.DiskRecord, stat *store.StatFSResult) *Disk {
 	}
 }
 
+func assembleDiskFromRecord(row *db.DiskRecord) *Disk {
+	var parentDiskID string
+	if row.ParentDiskID != uuid.Nil {
+		parentDiskID = row.ParentDiskID.String()
+	}
+	return &Disk{
+		DiskID:       row.DiskID.String(),
+		ParentDiskID: parentDiskID,
+		Name:         row.Name,
+		RootIno:      RootIno,
+		MaxBytes:     row.MaxBytes,
+		UsedBytes:    row.UsedBytes,
+		UsedInodes:   row.UsedInodes,
+		CreatedAt:    row.CreatedAt,
+		UpdatedAt:    row.UpdatedAt,
+	}
+}
+
 func (m *manager) openDiskActor(ctx context.Context, opts store.Options) (*store.StoreActor, error) {
 	if !opts.ReadOnly && !strings.HasPrefix(opts.DiskID, "commit:") && m.store != nil {
 		if reconcileErr := m.reconcilePendingMergeLocked(ctx, opts.DiskID); reconcileErr != nil {
@@ -590,23 +633,26 @@ func (m *manager) openDiskActor(ctx context.Context, opts store.Options) (*store
 	return actor, err
 }
 
-func (m *manager) getOrOpenActorWithLineageLocked(ctx context.Context, diskID string, lineageID uuid.UUID) (*store.StoreActor, error) {
+func (m *manager) getOrOpenActorWithRecordLocked(ctx context.Context, row *db.DiskRecord) (*actorEntry, error) {
+	diskID := row.DiskID.String()
 	m.poolMu.RLock()
 	if m.closed {
 		m.poolMu.RUnlock()
 		return nil, ErrClosed
 	}
-	if actor := m.actors[diskID]; actor != nil {
+	if entry := m.actors[diskID]; entry != nil {
+		entry.touch(m.currentTime().UnixNano())
 		m.poolMu.RUnlock()
-		return actor, nil
+		return entry, nil
 	}
 	cache := m.cache
 	m.poolMu.RUnlock()
 
-	inoAlloc, packAlloc := m.newSegmentAllocators(lineageID)
+	inoAlloc, packAlloc := m.newSegmentAllocators(row.LineageID)
 	actor, err := m.openDiskActor(ctx, store.Options{
 		Dir:           m.diskDir(diskID),
 		DiskID:        diskID,
+		MaxBytes:      row.MaxBytes,
 		AtimeMode:     m.atimeMode,
 		MaxPackSize:   m.maxPackSize,
 		Cache:         cache,
@@ -618,6 +664,8 @@ func (m *manager) getOrOpenActorWithLineageLocked(ctx context.Context, diskID st
 	if err != nil {
 		return nil, err
 	}
+
+	entry := newActorEntry(row.DiskID, actor, m.currentTime().UnixNano(), row.UsedBytes, row.UsedInodes)
 
 	m.poolMu.Lock()
 	if m.closed {
@@ -633,6 +681,7 @@ func (m *manager) getOrOpenActorWithLineageLocked(ctx context.Context, diskID st
 		return nil, ErrClosed
 	}
 	if existing := m.actors[diskID]; existing != nil {
+		existing.touch(m.currentTime().UnixNano())
 		m.poolMu.Unlock()
 		if closeErr := actor.CloseDiscard(); closeErr != nil {
 			m.collector.incCleanupError()
@@ -644,7 +693,7 @@ func (m *manager) getOrOpenActorWithLineageLocked(ctx context.Context, diskID st
 		}
 		return existing, nil
 	}
-	m.actors[diskID] = actor
+	m.actors[diskID] = entry
 	m.poolMu.Unlock()
 
 	mode := actorModeLabel(actor.ReadOnly())
@@ -654,7 +703,7 @@ func (m *manager) getOrOpenActorWithLineageLocked(ctx context.Context, diskID st
 		"epoch", actor.WriterEpoch(),
 		"mode", mode,
 	)
-	return actor, nil
+	return entry, nil
 }
 
 func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error) {
@@ -699,7 +748,7 @@ func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 		return nil, fmt.Errorf("初始化磁盘存储: %w", err)
 	}
 
-	row, createErr := m.store.CreateDisk(ctx, id, params.Name)
+	row, createErr := m.store.CreateDisk(ctx, id, params.Name, params.MaxBytes)
 	if createErr != nil {
 		if closeErr := actor.CloseDiscard(); closeErr != nil {
 			m.collector.incCleanupError()
@@ -719,6 +768,8 @@ func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 		return nil, fmt.Errorf("创建磁盘: %w", mapDBErr(createErr))
 	}
 
+	entry := newActorEntry(row.DiskID, actor, m.currentTime().UnixNano(), row.UsedBytes, row.UsedInodes)
+
 	m.poolMu.Lock()
 	if m.closed {
 		m.poolMu.Unlock()
@@ -731,11 +782,18 @@ func (m *manager) CreateDisk(ctx context.Context, params CreateDiskParams) (*Dis
 		}
 		return nil, ErrClosed
 	}
-	m.actors[diskID] = actor
+	m.actors[diskID] = entry
 	m.poolMu.Unlock()
 
 	mode := actorModeLabel(actor.ReadOnly())
 	m.collector.incActorLoad(actor.ReadOnly())
+
+	if flushErr := m.flushEntryUsage(ctx, entry); flushErr != nil {
+		m.logger.WarnContext(ctx, "create disk usage flush failed",
+			"disk_id", diskID,
+			"err", flushErr,
+		)
+	}
 
 	stat, err := actor.StatFS(ctx)
 	if err != nil {
@@ -786,10 +844,11 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		return nil, mapDBErr(err)
 	}
 
-	sourceActor, err := m.getOrOpenActorWithLineageLocked(ctx, sourceDiskID, sourceRow.LineageID)
+	sourceEntry, err := m.getOrOpenActorWithRecordLocked(ctx, &sourceRow)
 	if err != nil {
 		return nil, err
 	}
+	sourceActor := sourceEntry.actor
 
 	if params.MaxBytes != nil {
 		hasOrphans, orphanErr := sourceActor.HasOrphans()
@@ -916,6 +975,14 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		return nil, fmt.Errorf("打开派生子盘存储实例: %w", err)
 	}
 
+	childStat, err := childActor.StatFS(ctx)
+	if err != nil {
+		_ = childActor.CloseDiscard()
+		removeChildDirOnRollback("statfs")
+		removeCommitDirOnRollback("statfs")
+		return nil, err
+	}
+
 	var (
 		txSpan    trace.Span
 		txCtxWrap = ctx
@@ -935,6 +1002,9 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		ChildDiskID:  childUUID,
 		CommitID:     commitUUID,
 		Name:         params.Name,
+		MaxBytes:     targetMaxBytes,
+		UsedBytes:    childStat.UsedBytes,
+		UsedInodes:   childStat.Files,
 	})
 	m.collector.observeForkStage(ctx, "commit_tx", time.Since(commitTxStart))
 	if err != nil {
@@ -960,6 +1030,8 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		return nil, fmt.Errorf("派生磁盘: %w", err)
 	}
 
+	childEntry := newActorEntry(childRow.DiskID, childActor, m.currentTime().UnixNano(), childRow.UsedBytes, childRow.UsedInodes)
+
 	m.poolMu.Lock()
 	if m.closed {
 		m.poolMu.Unlock()
@@ -972,16 +1044,19 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		}
 		return nil, ErrClosed
 	}
-	m.actors[childDiskID] = childActor
+	m.actors[childDiskID] = childEntry
 	m.poolMu.Unlock()
 
 	mode := actorModeLabel(childActor.ReadOnly())
 	m.collector.incActorLoad(childActor.ReadOnly())
 
-	stat, err := childActor.StatFS(ctx)
-	if err != nil {
-		return nil, err
+	if flushErr := m.flushEntryUsage(ctx, sourceEntry); flushErr != nil {
+		m.logger.WarnContext(ctx, "fork disk source usage flush failed",
+			"source_disk_id", sourceDiskID,
+			"err", flushErr,
+		)
 	}
+
 	m.logger.InfoContext(ctx, "disk forked",
 		"disk_id", childDiskID,
 		"source_disk_id", sourceDiskID,
@@ -991,7 +1066,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		"epoch", childActor.WriterEpoch(),
 		"mode", mode,
 	)
-	return assembleDisk(&childRow, &stat), nil
+	return assembleDisk(&childRow, &childStat), nil
 }
 
 func (m *manager) ensureOpen() error {
@@ -1009,28 +1084,15 @@ func (m *manager) GetDisk(ctx context.Context, diskID string) (*Disk, error) {
 	if err != nil {
 		return nil, err
 	}
-	diskID = id.String()
 	if openErr := m.ensureOpen(); openErr != nil {
 		return nil, openErr
 	}
-
-	unlockDisk := m.lockDisk(ctx, diskID)
-	defer unlockDisk()
 
 	row, err := m.store.GetDisk(ctx, id)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
-
-	actor, err := m.getOrOpenActorWithLineageLocked(ctx, diskID, row.LineageID)
-	if err != nil {
-		return nil, err
-	}
-	stat, err := actor.StatFS(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return assembleDisk(&row, &stat), nil
+	return assembleDiskFromRecord(&row), nil
 }
 
 func (m *manager) ListDisks(ctx context.Context, params ListDisksParams) (*ListDisksResult, error) {
@@ -1055,40 +1117,13 @@ func (m *manager) ListDisks(ctx context.Context, params ListDisksParams) (*ListD
 
 	disks := make([]*Disk, 0, len(page.Disks))
 	for i := range page.Disks {
-		row := page.Disks[i]
-		diskID := row.DiskID.String()
-		actor, actorErr := m.actorForDisk(ctx, diskID, row.LineageID)
-		if actorErr != nil {
-			return nil, actorErr
-		}
-		stat, statErr := actor.StatFS(ctx)
-		if statErr != nil {
-			return nil, statErr
-		}
-		disks = append(disks, assembleDisk(&row, &stat))
+		disks = append(disks, assembleDiskFromRecord(&page.Disks[i]))
 	}
 
 	return &ListDisksResult{
 		Disks:         disks,
 		NextPageToken: page.NextPageToken,
 	}, nil
-}
-
-func (m *manager) actorForDisk(ctx context.Context, diskID string, lineageID uuid.UUID) (*store.StoreActor, error) {
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
-		return nil, ErrClosed
-	}
-	if actor := m.actors[diskID]; actor != nil {
-		m.poolMu.RUnlock()
-		return actor, nil
-	}
-	m.poolMu.RUnlock()
-
-	unlockDisk := m.lockDisk(ctx, diskID)
-	defer unlockDisk()
-	return m.getOrOpenActorWithLineageLocked(ctx, diskID, lineageID)
 }
 
 func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error) {
@@ -1116,39 +1151,84 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	unlockDisk := m.lockDisk(ctx, diskID)
 	defer unlockDisk()
 
+	if openErr := m.ensureOpen(); openErr != nil {
+		return nil, openErr
+	}
+
 	row, err := m.store.GetDisk(ctx, id)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
 
-	actor, err := m.getOrOpenActorWithLineageLocked(ctx, diskID, row.LineageID)
-	if err != nil {
-		return nil, err
-	}
-
-	if params.MaxBytes != nil {
-		if maxErr := actor.UpdateMaxBytes(ctx, *params.MaxBytes); maxErr != nil {
-			return nil, maxErr
+	entry := m.getWarmEntry(diskID)
+	if entry != nil {
+		if params.MaxBytes != nil {
+			liveStat, statErr := entry.actor.StatFS(ctx)
+			if statErr != nil {
+				return nil, statErr
+			}
+			if *params.MaxBytes < liveStat.UsedBytes {
+				return nil, ErrInvalidShrink
+			}
 		}
-	}
 
-	if params.Name != nil {
-		row, err = m.store.UpdateDiskName(ctx, id, *params.Name)
-		if err != nil {
-			return nil, mapDBErr(err)
+		updatedRow, updateErr := m.store.UpdateDisk(ctx, db.UpdateDiskInput{
+			DiskID:   id,
+			Name:     params.Name,
+			MaxBytes: params.MaxBytes,
+		})
+		if updateErr != nil {
+			return nil, mapDBErr(updateErr)
 		}
+
+		if params.MaxBytes != nil {
+			if maxErr := entry.actor.UpdateMaxBytes(ctx, *params.MaxBytes); maxErr != nil {
+				rollback := db.UpdateDiskInput{
+					DiskID:   id,
+					MaxBytes: &row.MaxBytes,
+				}
+				if params.Name != nil {
+					rollback.Name = &row.Name
+				}
+				if _, rbErr := m.store.UpdateDisk(context.WithoutCancel(ctx), rollback); rbErr != nil {
+					m.logger.WarnContext(ctx, "update disk rollback pg failed",
+						"disk_id", diskID,
+						"err", rbErr,
+					)
+				}
+				return nil, maxErr
+			}
+		}
+
+		stat, statErr := entry.actor.StatFS(ctx)
+		if statErr != nil {
+			return nil, statErr
+		}
+		m.logger.InfoContext(ctx, "disk updated",
+			"disk_id", diskID,
+			"name", updatedRow.Name,
+			"max_bytes", stat.TotalBytes,
+		)
+		return assembleDisk(&updatedRow, &stat), nil
 	}
 
-	stat, err := actor.StatFS(ctx)
-	if err != nil {
-		return nil, err
+	if params.MaxBytes != nil && *params.MaxBytes < row.UsedBytes {
+		return nil, ErrInvalidShrink
+	}
+	updatedRow, updateErr := m.store.UpdateDisk(ctx, db.UpdateDiskInput{
+		DiskID:   id,
+		Name:     params.Name,
+		MaxBytes: params.MaxBytes,
+	})
+	if updateErr != nil {
+		return nil, mapDBErr(updateErr)
 	}
 	m.logger.InfoContext(ctx, "disk updated",
 		"disk_id", diskID,
-		"name", row.Name,
-		"max_bytes", stat.TotalBytes,
+		"name", updatedRow.Name,
+		"max_bytes", updatedRow.MaxBytes,
 	)
-	return assembleDisk(&row, &stat), nil
+	return assembleDiskFromRecord(&updatedRow), nil
 }
 
 func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
@@ -1171,7 +1251,7 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	if openErr := m.ensureOpen(); openErr != nil {
 		return openErr
 	}
-	if gateErr := m.checkDeleteMountGate(diskID); gateErr != nil {
+	if gateErr := m.checkDeleteMountGate(ctx, id); gateErr != nil {
 		return gateErr
 	}
 	if recErr := m.reconcilePendingMergeLocked(ctx, diskID); recErr != nil {
@@ -1184,7 +1264,7 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	}
 
 	m.poolMu.Lock()
-	actor := m.actors[diskID]
+	entry := m.actors[diskID]
 	delete(m.actors, diskID)
 	m.poolMu.Unlock()
 
@@ -1193,7 +1273,8 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		mode        = actorModeRW
 		cleanupErrs []error
 	)
-	if actor != nil {
+	if entry != nil && entry.actor != nil {
+		actor := entry.actor
 		epoch = actor.WriterEpoch()
 		mode = actorModeLabel(actor.ReadOnly())
 		if closeErr := actor.CloseDiscard(); closeErr != nil {
@@ -1268,7 +1349,6 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 	if len(cleanupErrs) > 0 {
 		return errors.Join(cleanupErrs...)
 	}
-	m.clearDiskMounts(diskID)
 
 	m.logger.InfoContext(ctx, "disk deleted",
 		"disk_id", diskID,
@@ -1293,17 +1373,18 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	unlockDisk := m.lockDisk(ctx, diskID)
 	defer unlockDisk()
 
-	actor, err := m.actorLocked(ctx, id)
+	entry, err := m.actorEntryLocked(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	actor := entry.actor
 
 	if params.ReadOnly {
 		rootAttr, attrErr := actor.GetAttr(ctx, store.RootIno)
 		if attrErr != nil {
 			return nil, attrErr
 		}
-		mountID, ttlSeconds, leaseErr := m.issueMountLease(diskID, true, 0)
+		mountID, ttlSeconds, leaseErr := m.issueMountLease(ctx, id, true, 0)
 		if leaseErr != nil {
 			return nil, leaseErr
 		}
@@ -1324,7 +1405,7 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	}
 
 	if !params.Force {
-		if gateErr := m.checkRWMountGate(diskID); gateErr != nil {
+		if gateErr := m.checkRWMountGate(ctx, id); gateErr != nil {
 			return nil, gateErr
 		}
 	}
@@ -1334,7 +1415,13 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	if err != nil {
 		return nil, err
 	}
-	mountID, ttlSeconds, leaseErr := m.issueMountLease(diskID, false, epoch)
+	if flushErr := m.flushEntryUsage(ctx, entry); flushErr != nil {
+		m.logger.WarnContext(ctx, "mount disk post-orphan-reclaim usage flush failed",
+			"disk_id", diskID,
+			"err", flushErr,
+		)
+	}
+	mountID, ttlSeconds, leaseErr := m.issueMountLease(ctx, id, false, epoch)
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
@@ -1355,16 +1442,17 @@ func (m *manager) MountDisk(ctx context.Context, params MountDiskParams) (*Mount
 	}, nil
 }
 
-func (m *manager) actorLocked(ctx context.Context, id uuid.UUID) (*store.StoreActor, error) {
+func (m *manager) actorEntryLocked(ctx context.Context, id uuid.UUID) (*actorEntry, error) {
 	diskID := id.String()
 	m.poolMu.RLock()
 	if m.closed {
 		m.poolMu.RUnlock()
 		return nil, ErrClosed
 	}
-	if actor := m.actors[diskID]; actor != nil {
+	if entry := m.actors[diskID]; entry != nil {
+		entry.touch(m.currentTime().UnixNano())
 		m.poolMu.RUnlock()
-		return actor, nil
+		return entry, nil
 	}
 	m.poolMu.RUnlock()
 
@@ -1372,14 +1460,16 @@ func (m *manager) actorLocked(ctx context.Context, id uuid.UUID) (*store.StoreAc
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
-	return m.getOrOpenActorWithLineageLocked(ctx, diskID, row.LineageID)
+	return m.getOrOpenActorWithRecordLocked(ctx, &row)
 }
 
 func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, error) {
 
 	m.poolMu.RLock()
 	if !m.closed {
-		if actor := m.actors[diskID]; actor != nil {
+		if entry := m.actors[diskID]; entry != nil {
+			entry.lastUsedAtNano.Store(m.currentTime().UnixNano())
+			actor := entry.actor
 			m.poolMu.RUnlock()
 			return actor, nil
 		}
@@ -1397,7 +1487,9 @@ func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, 
 		m.poolMu.RUnlock()
 		return nil, ErrClosed
 	}
-	if actor := m.actors[diskID]; actor != nil {
+	if entry := m.actors[diskID]; entry != nil {
+		entry.lastUsedAtNano.Store(m.currentTime().UnixNano())
+		actor := entry.actor
 		m.poolMu.RUnlock()
 		return actor, nil
 	}
@@ -1406,7 +1498,11 @@ func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, 
 	unlockDisk := m.lockDisk(ctx, diskID)
 	defer unlockDisk()
 
-	return m.actorLocked(ctx, id)
+	entry, err := m.actorEntryLocked(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return entry.actor, nil
 }
 
 func (m *manager) Close() error {
@@ -1416,15 +1512,38 @@ func (m *manager) Close() error {
 		return nil
 	}
 	m.closed = true
+	bgCancel := m.bgCancel
+	m.poolMu.Unlock()
+
+	if bgCancel != nil {
+		bgCancel()
+	}
+	m.bgWG.Wait()
+
+	m.poolMu.Lock()
 	actors := m.actors
-	m.actors = make(map[string]*store.StoreActor)
+	m.actors = make(map[string]*actorEntry)
 	cache := m.cache
 	m.cache = nil
 	m.poolMu.Unlock()
 
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), closeUsageFlushTimeout)
+	defer cancelFlush()
+	for diskID, entry := range actors {
+		if flushErr := m.flushEntryUsage(flushCtx, entry); flushErr != nil {
+			m.logger.Warn("manager shutdown usage flush failed",
+				"disk_id", diskID,
+				"err", flushErr,
+			)
+		}
+	}
+
 	var errs []error
-	for diskID, actor := range actors {
-		if closeErr := actor.Close(); closeErr != nil {
+	for diskID, entry := range actors {
+		if entry == nil || entry.actor == nil {
+			continue
+		}
+		if closeErr := entry.actor.Close(); closeErr != nil {
 			m.collector.incCleanupError()
 			m.logger.Warn("manager shutdown actor close failed",
 				"disk_id", diskID,

@@ -72,8 +72,12 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 		return status
 	}
 
-	fs.stage.BarrierInode(opCtx, ino)
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
+		return fs.stageErrToStatus(err)
+	}
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	_, err := fs.client.SetXattr(ctx, connect.NewRequest(&storagev1.SetXattrRequest{
@@ -128,9 +132,13 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 	if status != fuse.OK {
 		return 0, status
 	}
-	fs.stage.BarrierInode(opCtx, ino)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
+		return 0, fs.stageErrToStatus(err)
+	}
 
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	resp, err := fs.client.GetXattr(ctx, connect.NewRequest(&storagev1.GetXattrRequest{
@@ -172,9 +180,13 @@ func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest [
 	if status != fuse.OK {
 		return 0, status
 	}
-	fs.stage.BarrierInode(opCtx, ino)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
+		return 0, fs.stageErrToStatus(err)
+	}
 
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	resp, err := fs.client.ListXattr(ctx, connect.NewRequest(&storagev1.ListXattrRequest{
@@ -217,8 +229,12 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 		return status
 	}
 
-	fs.stage.BarrierInode(opCtx, ino)
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
+	if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
+		return fs.stageErrToStatus(err)
+	}
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 
 	_, err := fs.client.RemoveXattr(ctx, connect.NewRequest(&storagev1.RemoveXattrRequest{

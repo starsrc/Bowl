@@ -226,6 +226,8 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		child = fs.ToKernelIno(inode.GetIno())
 	}
 
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	defer barrierCancel()
 	var childServerIno uint64
 	var hasChildServerIno bool
 	if child != 0 {
@@ -234,18 +236,22 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 			hasChildServerIno = true
 		}
 		if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
-			fs.stage.BarrierInode(opCtx, childServerIno)
+			if err := fs.stage.BarrierInode(barrierCtx, childServerIno); err != nil {
+				return fs.stageErrToStatus(err)
+			}
 		}
 
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
 		if fs.topologySeq.Load() != seq0 && (fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
-			refreshed, st := fs.getInodeWithContext(opCtx, cancel, child)
+			refreshed, st := fs.getInodeWithContext(barrierCtx, nil, child)
 			switch st {
 			case fuse.OK:
 				inode = refreshed.inode
 				if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
-					fs.stage.BarrierInode(opCtx, childServerIno)
+					if err := fs.stage.BarrierInode(barrierCtx, childServerIno); err != nil {
+						return fs.stageErrToStatus(err)
+					}
 				}
 			case fuse.ENOENT:
 				inode = nil
@@ -255,7 +261,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		}
 	}
 	open := child != 0 && fs.handles.IsOpen(child)
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
 	defer cancelFunc()
 	epoch := fs.cache.version()
 	_, err := fs.client.Unlink(ctx, connect.NewRequest(&storagev1.UnlinkRequest{

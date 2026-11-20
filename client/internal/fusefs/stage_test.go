@@ -417,7 +417,7 @@ func TestNewRawFS_ReadOnly模式_零目录零工作协程且写操作返回EROFS
 	requireStatus(t, "ReadOnly Tmpfile", fuse.Status(syscall.EROFS), tmpSt)
 }
 
-func TestStageCoordinator_连续与向左回退小块写_合并进0600标准分片文件且闲置零OpenFD(t *testing.T) {
+func TestStageCoordinator_连续追加小块写_合并进0600标准分片文件且闲置零OpenFD(t *testing.T) {
 
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	stageRoot := filepath.Join(t.TempDir(), "coalesce-stage")
@@ -428,11 +428,11 @@ func TestStageCoordinator_连续与向左回退小块写_合并进0600标准分�
 	fs := newTestRawFS(t, srv, withDirectIO(false), withStageSession(sess))
 	created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "coalesce.bin", syscall.O_RDWR, 0o644)
 
-	mustWriteAt(t, fs, created.NodeId, created.Fh, 3, []byte("lo-go"))
 	mustWriteAt(t, fs, created.NodeId, created.Fh, 0, []byte("hel"))
+	mustWriteAt(t, fs, created.NodeId, created.Fh, 3, []byte("lo-go"))
 
 	chunkFiles := listStageChunkFiles(t, sess.InstanceDir())
-	require.Len(t, chunkFiles, 1, "连续与向左回退写入分片数: want=1, got=%d", len(chunkFiles))
+	require.Len(t, chunkFiles, 1, "连续追加写入分片数: want=1, got=%d", len(chunkFiles))
 	info, statErr := os.Stat(chunkFiles[0])
 	require.NoError(t, statErr)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "分片文件权限: want=0600, got=%o", info.Mode().Perm())
@@ -710,7 +710,7 @@ func TestStageCoordinator_Unlink丢弃排队中分片_不产生WriteRPC浪费(t 
 		"Unlink 丢弃排队分片后 Write RPC 次数: want=%d, got=%d", blockerWrites, srv.writeCalls.Load())
 }
 
-func TestStageCoordinator_OpenTrunc丢弃排队中分片_不产生WriteRPC浪费(t *testing.T) {
+func TestStageCoordinator_OpenTrunc等待排队中分片落盘后再截零(t *testing.T) {
 
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -720,26 +720,31 @@ func TestStageCoordinator_OpenTrunc丢弃排队中分片_不产生WriteRPC浪费
 	<-allWorkersBusy
 	blockerWrites := srv.writeCalls.Load()
 
-	truncFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "discard-trunc.bin", syscall.O_RDWR, 0o644)
-	mustWriteAt(t, fs, truncFile.NodeId, truncFile.Fh, 0, []byte("never-upload-trunc"))
+	truncFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "barrier-trunc.bin", syscall.O_RDWR, 0o644)
+	mustWriteAt(t, fs, truncFile.NodeId, truncFile.Fh, 0, []byte("barrier-before-trunc"))
 	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: truncFile.NodeId}, Fh: truncFile.Fh})
+
 	var truncOpen fuse.OpenOut
-	openSt := fs.Open(nil, &fuse.OpenIn{
-		InHeader: fuse.InHeader{NodeId: truncFile.NodeId}, Flags: uint32(syscall.O_RDWR | syscall.O_TRUNC),
-	}, &truncOpen)
-	truncAttr := mustGetAttr(t, fs, truncFile.NodeId)
-	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: truncFile.NodeId}, Fh: truncOpen.Fh})
+	openDone := make(chan fuse.Status, 1)
+	go func() {
+		openDone <- fs.Open(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: truncFile.NodeId}, Flags: uint32(syscall.O_RDWR | syscall.O_TRUNC),
+		}, &truncOpen)
+	}()
 
 	releaseBlockers()
+	openSt := waitUntilStatusChan(t, openDone, "Open O_TRUNC")
+	truncAttr := mustGetAttr(t, fs, truncFile.NodeId)
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: truncFile.NodeId}, Fh: truncOpen.Fh})
 	fs.OnUnmount()
 
 	requireStatus(t, "Open O_TRUNC", fuse.OK, openSt)
 	require.Zero(t, truncAttr.Size, "Open(O_TRUNC) 后尺寸: want=0, got=%d", truncAttr.Size)
-	require.Equal(t, blockerWrites, srv.writeCalls.Load(),
-		"Open(O_TRUNC) 丢弃排队分片后 Write RPC 次数: want=%d, got=%d", blockerWrites, srv.writeCalls.Load())
+	require.Equal(t, blockerWrites+1, srv.writeCalls.Load(),
+		"Open(O_TRUNC) 必须先 Barrier 排空分片再执行截零: want=%d, got=%d", blockerWrites+1, srv.writeCalls.Load())
 }
 
-func TestStageCoordinator_OpenTrunc遇到未关闭活跃分片_立即本地丢弃未传数据(t *testing.T) {
+func TestStageCoordinator_OpenTrunc遇到未关闭活跃分片_先排空再截零(t *testing.T) {
 
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	fs := newTestRawFS(t, srv, withDirectIO(false))
@@ -751,7 +756,7 @@ func TestStageCoordinator_OpenTrunc遇到未关闭活跃分片_立即本地丢�
 		InHeader: fuse.InHeader{NodeId: f1.NodeId}, Flags: uint32(syscall.O_RDWR | syscall.O_TRUNC),
 	}, &f2))
 
-	require.Zero(t, srv.writeCalls.Load(), "O_TRUNC 不得上传已作废的活跃分片: want=0, got=%d", srv.writeCalls.Load())
+	require.Equal(t, int64(1), srv.writeCalls.Load(), "O_TRUNC 必须先 Barrier 上传活跃分片: want=1, got=%d", srv.writeCalls.Load())
 	require.Zero(t, mustGetAttr(t, fs, f1.NodeId).Size, "O_TRUNC 后 GetAttr Size: want=0")
 	require.Empty(t, mustReadAt(t, fs, f1.NodeId, f2.Fh, 0, 16), "O_TRUNC 后读取内容必须为空")
 

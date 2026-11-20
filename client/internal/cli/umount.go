@@ -38,6 +38,7 @@ var (
 	}
 	umountHTTPClient           = http.DefaultClient
 	umountDrainTimeout         = 5 * time.Minute
+	umountDrainExitGrace       = 5 * time.Second
 	umountDrainPollInterval    = 20 * time.Millisecond
 	umountProgressPollInterval = 100 * time.Millisecond
 	umountNonTTYLogInterval    = 2 * time.Second
@@ -262,7 +263,11 @@ func waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) er
 	adminAddr := normalizeUmountAdminAddr(rawAdminAddr)
 	hasAdmin := adminAddr != "" && !strings.EqualFold(adminAddr, adminAddrOff)
 	start := time.Now()
-	deadline := start.Add(umountDrainTimeout)
+	drainTimeout := umountDrainTimeout
+	if meta != nil && meta.UnmountTimeoutMs > 0 {
+		drainTimeout = time.Duration(meta.UnmountTimeoutMs)*time.Millisecond + umountDrainExitGrace
+	}
+	deadline := start.Add(drainTimeout)
 	reporter := newUmountProgressReporter(stderr)
 	var lastPollAt time.Time
 

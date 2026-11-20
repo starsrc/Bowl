@@ -358,7 +358,7 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		close(cleanupDone)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		coord.Clear(ctx)
+		coord.Clear(ctx, 0)
 	})
 
 	const (
@@ -397,13 +397,13 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 
 	barrierInodeDone := make(chan struct{})
 	go func() {
-		coord.BarrierInode(context.Background(), inoA)
+		_ = coord.BarrierInode(context.Background(), inoA)
 		close(barrierInodeDone)
 	}()
 
 	barrierAllDone := make(chan struct{})
 	go func() {
-		coord.BarrierAll(context.Background())
+		_ = coord.BarrierAll(context.Background())
 		close(barrierAllDone)
 	}()
 

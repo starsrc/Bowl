@@ -249,7 +249,7 @@ func TestWrite与Stage_小块聚合直通探测与特权位绕过(t *testing.T) 
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 	})
 
-	t.Run("Open既有多段连续与回退及跳跃写经Flush非阻塞并在Fsync落盘一致", func(t *testing.T) {
+	t.Run("Open既有多段连续追加及跳跃写经Flush非阻塞并在Fsync落盘一致", func(t *testing.T) {
 
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		ino := srv.seedFile(1, "existing-stage.bin", 0o644, buildRepeatingBytes(8192, 'A'))
@@ -257,8 +257,8 @@ func TestWrite与Stage_小块聚合直通探测与特权位绕过(t *testing.T) 
 		opened := mustOpenFile(t, fs, ino, syscall.O_RDWR)
 		mustWriteAt(t, fs, ino, opened.Fh, 0, []byte("probe-0123"))
 
-		mustWriteAt(t, fs, ino, opened.Fh, 100, []byte("second"))
 		mustWriteAt(t, fs, ino, opened.Fh, 94, []byte("first-"))
+		mustWriteAt(t, fs, ino, opened.Fh, 100, []byte("second"))
 		writesBeforeJump := srv.writeCalls.Load()
 		mustWriteAt(t, fs, ino, opened.Fh, 1000, []byte("gap"))
 		flushSt := fs.Flush(nil, &fuse.FlushIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
@@ -266,7 +266,7 @@ func TestWrite与Stage_小块聚合直通探测与特权位绕过(t *testing.T) 
 		afterFsync := srv.writeCalls.Load()
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
-		require.Equal(t, int64(1), writesBeforeJump, "连续与向左回退写期间 Write RPC 次数: want=1, got=%d", writesBeforeJump)
+		require.Equal(t, int64(1), writesBeforeJump, "连续追加写期间 Write RPC 次数: want=1, got=%d", writesBeforeJump)
 		requireStatus(t, "Flush", fuse.OK, flushSt)
 		requireStatus(t, "Fsync", fuse.OK, fsyncSt)
 		require.Equal(t, int64(3), afterFsync, "Fsync 后总 Write RPC 次数: want=3, got=%d", afterFsync)

@@ -195,8 +195,10 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 
 		unlock := fs.inodeLocks.lock(input.NodeId)
 		defer unlock()
-		if flushErr := fs.stage.FlushAndResetInodeForHandle(opCtx, input.Fh, ino); flushErr != nil {
-			fs.cache.invalidateInode(input.NodeId)
+		if flushErr := fs.flushAndResetInodeForHandle(opCtx, cancel, input.Fh, ino); flushErr != nil {
+			if !errors.Is(flushErr, rpc.ErrKernelInterrupted) && !errors.Is(flushErr, syscall.EINTR) {
+				fs.cache.invalidateInode(input.NodeId)
+			}
 			return 0, fs.stageErrToStatus(flushErr)
 		}
 		cached, st := fs.getInodeWithContext(context.WithoutCancel(opCtx), nil, input.NodeId)
@@ -207,8 +209,10 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 		copyInput.Offset = cached.inode.GetAttr().GetSize()
 		input = &copyInput
 	case fs.stage == nil || syncMode || specialInode || !fs.caps.knownAbsent(input.NodeId) || dataLen == 0 || dataLen > MaxRPCChunkSize:
-		if flushErr := fs.stage.FlushAndResetInodeForHandle(opCtx, input.Fh, ino); flushErr != nil {
-			fs.cache.invalidateInode(input.NodeId)
+		if flushErr := fs.flushAndResetInodeForHandle(opCtx, cancel, input.Fh, ino); flushErr != nil {
+			if !errors.Is(flushErr, rpc.ErrKernelInterrupted) && !errors.Is(flushErr, syscall.EINTR) {
+				fs.cache.invalidateInode(input.NodeId)
+			}
 			return 0, fs.stageErrToStatus(flushErr)
 		}
 	default:

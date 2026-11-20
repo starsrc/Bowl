@@ -290,8 +290,9 @@ func validateAdminAddr(addr string) error {
 }
 
 type adminServer struct {
-	ln  net.Listener
-	srv *http.Server
+	ln           net.Listener
+	srv          *http.Server
+	shutdownOnce sync.Once
 }
 
 func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) *http.ServeMux {
@@ -337,9 +338,11 @@ func (a *adminServer) shutdown(ctx context.Context) {
 	if a == nil {
 		return
 	}
-	if err := a.srv.Shutdown(ctx); err != nil {
-		_ = a.srv.Close()
-	}
+	a.shutdownOnce.Do(func() {
+		if err := a.srv.Shutdown(ctx); err != nil {
+			_ = a.srv.Close()
+		}
+	})
 }
 
 func statsHandler(fs *fusefs.RawFS) http.Handler {

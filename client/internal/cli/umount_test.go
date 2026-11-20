@@ -1124,3 +1124,181 @@ func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCan
 	require.Equal(t, []string{"-uz", "/data/mnt"}, *binArgs)
 	require.Equal(t, []string{"/tmp", "/tmp/sym"}, *lstatCalls)
 }
+
+func TestUmount_GivenNonBowlMounts_RejectsWithoutInvokingTool(t *testing.T) {
+	cases := []struct {
+		name           string
+		mountInfo      string
+		fsNodes        map[string]fakeFSNode
+		args           []string
+		wantPathInErr  string
+		wantFSTypeInEr string
+	}{
+		{
+			name:           "TmpfsNormal",
+			mountInfo:      "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n40 30 0:30 / /mnt/tmp rw - tmpfs tmpfs rw\n",
+			args:           []string{"umount", "/mnt/tmp"},
+			wantPathInErr:  "/mnt/tmp",
+			wantFSTypeInEr: "tmpfs",
+		},
+		{
+			name:           "TmpfsForce",
+			mountInfo:      "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n40 30 0:30 / /mnt/tmp rw - tmpfs tmpfs rw\n",
+			args:           []string{"umount", "-f", "/mnt/tmp"},
+			wantPathInErr:  "/mnt/tmp",
+			wantFSTypeInEr: "tmpfs",
+		},
+		{
+			name:           "FuseSshfsNormal",
+			mountInfo:      "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n41 30 0:31 / /mnt/ssh rw - fuse.sshfs user@host:/srv rw\n",
+			args:           []string{"umount", "/mnt/ssh"},
+			wantPathInErr:  "/mnt/ssh",
+			wantFSTypeInEr: "fuse.sshfs",
+		},
+		{
+			name:           "FuseSshfsForce",
+			mountInfo:      "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n41 30 0:31 / /mnt/ssh rw - fuse.sshfs user@host:/srv rw\n",
+			args:           []string{"umount", "-f", "/mnt/ssh"},
+			wantPathInErr:  "/mnt/ssh",
+			wantFSTypeInEr: "fuse.sshfs",
+		},
+		{
+			name: "NonBowlStackedOverBowlNormal",
+			mountInfo: "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n" +
+				"100 30 0:50 / /mnt/stacked rw - fuse.bowl bowl:" + testDiskID1 + " rw\n" +
+				"101 100 0:51 / /mnt/stacked rw - tmpfs tmpfs rw\n",
+			args:           []string{"umount", "/mnt/stacked"},
+			wantPathInErr:  "/mnt/stacked",
+			wantFSTypeInEr: "tmpfs",
+		},
+		{
+			name: "NonBowlStackedOverBowlForce",
+			mountInfo: "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n" +
+				"100 30 0:50 / /mnt/stacked rw - fuse.bowl bowl:" + testDiskID1 + " rw\n" +
+				"101 100 0:51 / /mnt/stacked rw - tmpfs tmpfs rw\n",
+			args:           []string{"umount", "-f", "/mnt/stacked"},
+			wantPathInErr:  "/mnt/stacked",
+			wantFSTypeInEr: "tmpfs",
+		},
+		{
+			name:      "SymlinkToNonBowlMountForce",
+			mountInfo: "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n40 30 0:30 / /mnt/tmp rw - tmpfs tmpfs rw\n",
+			fsNodes: map[string]fakeFSNode{
+				"/tmp":         {mode: os.ModeDir | 0o755},
+				"/tmp/sym-tmp": {mode: os.ModeSymlink | 0o777, target: "/mnt/tmp"},
+			},
+			args:           []string{"umount", "-f", "/tmp/sym-tmp"},
+			wantPathInErr:  "/tmp/sym-tmp",
+			wantFSTypeInEr: "tmpfs",
+		},
+		{
+			name:           "MissingSeparatorUnknownFSType",
+			mountInfo:      "100 30 0:50 / /mnt/no-sep rw\n",
+			args:           []string{"umount", "/mnt/no-sep"},
+			wantPathInErr:  "/mnt/no-sep",
+			wantFSTypeInEr: "unknown",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withMountInfoContent(t, tc.mountInfo)
+			if tc.fsNodes != nil {
+				withMountInfoFSStub(t, tc.fsNodes)
+			}
+
+			prevLook := lookPath
+			prevRun := runCommand
+			lookCalled := false
+			runCalled := false
+			lookPath = func(file string) (string, error) {
+				lookCalled = true
+				if file == "fusermount3" {
+					return "/usr/bin/fusermount3", nil
+				}
+				return "", errors.New("not found")
+			}
+			runCommand = func(_ string, _ ...string) ([]byte, error) {
+				runCalled = true
+				return nil, nil
+			}
+			t.Cleanup(func() {
+				lookPath = prevLook
+				runCommand = prevRun
+			})
+
+			code, out, errOut := runCLI(tc.args...)
+
+			require.Equal(t, 1, code, "args=%v stderr=%s", tc.args, errOut)
+			require.Empty(t, out)
+			require.Contains(t, errOut, tc.wantPathInErr)
+			require.Contains(t, errOut, tc.wantFSTypeInEr)
+			require.Contains(t, errOut, "not a bowl filesystem")
+			require.False(t, lookCalled, "findUmountCommand must not be invoked for non-Bowl mounts")
+			require.False(t, runCalled, "runCommand must not be invoked for non-Bowl mounts")
+		})
+	}
+}
+
+func TestUmount_GivenBowlMountsAndBowlStackedOverNonBowl_InvokesUnmountTool(t *testing.T) {
+	cases := []struct {
+		name      string
+		mountInfo string
+		args      []string
+		wantArgs  []string
+	}{
+		{
+			name:      "FuseBowlFSTypeNormal",
+			mountInfo: "100 30 0:50 / /mnt/bowl-type rw - fuse.bowl custom-source rw\n",
+			args:      []string{"umount", "/mnt/bowl-type"},
+			wantArgs:  []string{"-u", "/mnt/bowl-type"},
+		},
+		{
+			name:      "FuseBowlFSTypeForce",
+			mountInfo: "100 30 0:50 / /mnt/bowl-type rw - fuse.bowl custom-source rw\n",
+			args:      []string{"umount", "-f", "/mnt/bowl-type"},
+			wantArgs:  []string{"-uz", "/mnt/bowl-type"},
+		},
+		{
+			name:      "BowlSourcePrefixNormal",
+			mountInfo: "100 30 0:50 / /mnt/bowl-src rw - fuse bowl:" + testDiskID1 + " rw\n",
+			args:      []string{"umount", "/mnt/bowl-src"},
+			wantArgs:  []string{"-u", "/mnt/bowl-src"},
+		},
+		{
+			name:      "BowlSourcePrefixForce",
+			mountInfo: "100 30 0:50 / /mnt/bowl-src rw - fuse bowl:" + testDiskID1 + " rw\n",
+			args:      []string{"umount", "-f", "/mnt/bowl-src"},
+			wantArgs:  []string{"-uz", "/mnt/bowl-src"},
+		},
+		{
+			name: "BowlStackedOverNonBowlNormal",
+			mountInfo: "40 30 0:30 / /mnt/stacked rw - tmpfs tmpfs rw\n" +
+				"100 40 0:50 / /mnt/stacked rw - fuse.bowl bowl:" + testDiskID1 + " rw\n",
+			args:     []string{"umount", "/mnt/stacked"},
+			wantArgs: []string{"-u", "/mnt/stacked"},
+		},
+		{
+			name: "BowlStackedOverNonBowlForce",
+			mountInfo: "40 30 0:30 / /mnt/stacked rw - tmpfs tmpfs rw\n" +
+				"100 40 0:50 / /mnt/stacked rw - fuse.bowl bowl:" + testDiskID1 + " rw\n",
+			args:     []string{"umount", "-f", "/mnt/stacked"},
+			wantArgs: []string{"-uz", "/mnt/stacked"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withMountInfoContent(t, tc.mountInfo)
+			binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+
+			code, out, errOut := runCLI(tc.args...)
+
+			require.Equal(t, 0, code, "args=%v stderr=%s", tc.args, errOut)
+			require.Empty(t, out)
+			require.Empty(t, errOut)
+			require.Equal(t, "/usr/bin/fusermount3", *binName)
+			require.Equal(t, tc.wantArgs, *binArgs)
+		})
+	}
+}

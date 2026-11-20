@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -363,4 +364,166 @@ func TestResolveMountPoint_GivenActiveMountRootsInPath_SkipsLstatOnMountRoots(t 
 	require.Equal(t, realWedgedMP, resolvedWedged)
 
 	require.Equal(t, []string{"/run/sym-ok", "/real-wedged/sub", "/var", "/var/sym"}, *lstatCalls)
+}
+
+func TestParseMountPointsFromReader_GivenFSTypeAndOctalEscapes_ParsesFSTypeAndSource(t *testing.T) {
+	input := "100 30 0:50 / /mnt/bowl rw,nosuid shared:55 - fuse.bowl bowl:" + testDiskID1 + " rw\n" +
+		"101 30 0:51 / /mnt/tmp ro,nodev - tmpfs tmpfs ro\n" +
+		"102 30 0:52 / /mnt/ssh rw - fuse.sshfs user@host:/srv rw\n" +
+		"103 30 0:53 / /mnt/esc\\040dir rw - fuse.my\\040fs src\\040name rw\n" +
+		"104 30 0:54 / /mnt/no-sep rw\n"
+
+	points, err := parseMountPointsFromReader(strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.Equal(t, []mountPoint{
+		{path: "/mnt/bowl", fsType: "fuse.bowl", source: "bowl:" + testDiskID1, readOnly: false},
+		{path: "/mnt/tmp", fsType: "tmpfs", source: "tmpfs", readOnly: true},
+		{path: "/mnt/ssh", fsType: "fuse.sshfs", source: "user@host:/srv", readOnly: false},
+		{path: "/mnt/esc dir", fsType: "fuse.my fs", source: "src name", readOnly: false},
+		{path: "/mnt/no-sep", fsType: "", source: "", readOnly: false},
+	}, points)
+}
+
+func TestResolveMountPointInfo_GivenStackedMountsAndSymlinks_ReturnsTopmostMountWithoutRootLstat(t *testing.T) {
+	t.Run("NonBowlStackedOverBowl", func(t *testing.T) {
+		withMountInfoContent(t,
+			"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+				"100 30 0:50 / /mnt/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+				"101 100 0:51 / /mnt/stacked ro - tmpfs tmpfs ro\n",
+		)
+
+		info, mounted, err := ResolveMountPointInfo("/mnt/stacked")
+
+		require.NoError(t, err)
+		require.True(t, mounted)
+		require.Equal(t, MountPointInfo{
+			Path:     "/mnt/stacked",
+			FSType:   "tmpfs",
+			Source:   "tmpfs",
+			ReadOnly: true,
+		}, info)
+		require.False(t, info.IsBowl())
+	})
+
+	t.Run("BowlStackedOverNonBowl", func(t *testing.T) {
+		withMountInfoContent(t,
+			"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+				"100 30 0:50 / /mnt/stacked ro - tmpfs tmpfs ro\n"+
+				"101 100 0:51 / /mnt/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n",
+		)
+
+		info, mounted, err := ResolveMountPointInfo("/mnt/stacked")
+
+		require.NoError(t, err)
+		require.True(t, mounted)
+		require.Equal(t, MountPointInfo{
+			Path:     "/mnt/stacked",
+			FSType:   "fuse.bowl",
+			Source:   "bowl:" + testDiskID1,
+			ReadOnly: false,
+		}, info)
+		require.True(t, info.IsBowl())
+	})
+
+	t.Run("IsBowlMatchesFSTypeOrBowlSourcePrefix", func(t *testing.T) {
+		withMountInfoContent(t,
+			"100 30 0:50 / /mnt/by-type rw - fuse.bowl custom-source rw\n"+
+				"101 30 0:51 / /mnt/by-source ro - fuse bowl:"+testDiskID1+" ro\n"+
+				"102 30 0:52 / /mnt/sshfs rw - fuse.sshfs user@host:/data rw\n",
+		)
+
+		byType, mountedType, err := ResolveMountPointInfo("/mnt/by-type")
+		require.NoError(t, err)
+		require.True(t, mountedType)
+		require.True(t, byType.IsBowl())
+
+		bySource, mountedSource, err := ResolveMountPointInfo("/mnt/by-source")
+		require.NoError(t, err)
+		require.True(t, mountedSource)
+		require.True(t, bySource.IsBowl())
+		require.True(t, bySource.ReadOnly)
+
+		sshfsInfo, mountedSSH, err := ResolveMountPointInfo("/mnt/sshfs")
+		require.NoError(t, err)
+		require.True(t, mountedSSH)
+		require.False(t, sshfsInfo.IsBowl())
+	})
+
+	t.Run("SymlinkedLeafAndParentResolveTopmostWithoutMountRootLstat", func(t *testing.T) {
+		withMountInfoContent(t,
+			"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+				"35 30 0:25 / /run rw - tmpfs tmpfs rw\n"+
+				"100 35 0:50 / /run/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+				"101 100 0:51 / /run/stacked rw - fuse.sshfs user@host:/srv rw\n",
+		)
+		lstatCalls := withMountInfoNoRootLstatStub(t, []string{"/", "/run", "/run/stacked"}, map[string]fakeFSNode{
+			"/tmp":     {mode: os.ModeDir | 0o755},
+			"/tmp/sym": {mode: os.ModeSymlink | 0o777, target: "/run/stacked"},
+			"/var":     {mode: os.ModeDir | 0o755},
+			"/var/run": {mode: os.ModeSymlink | 0o777, target: "/run"},
+		})
+
+		leafInfo, leafMounted, err := ResolveMountPointInfo("/tmp/sym")
+		require.NoError(t, err)
+		require.True(t, leafMounted)
+		require.Equal(t, MountPointInfo{
+			Path:     "/run/stacked",
+			FSType:   "fuse.sshfs",
+			Source:   "user@host:/srv",
+			ReadOnly: false,
+		}, leafInfo)
+		require.False(t, leafInfo.IsBowl())
+
+		parentInfo, parentMounted, err := ResolveMountPointInfo("/var/run/stacked")
+		require.NoError(t, err)
+		require.True(t, parentMounted)
+		require.Equal(t, leafInfo, parentInfo)
+		require.Equal(t, []string{"/tmp", "/tmp/sym", "/var", "/var/run"}, *lstatCalls)
+	})
+
+	t.Run("UnmountedReturnsZeroInfo", func(t *testing.T) {
+		withMountInfoContent(t, "100 30 0:50 / /mnt/bowl rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+
+		info, mounted, err := ResolveMountPointInfo("/mnt/not-mounted")
+
+		require.NoError(t, err)
+		require.False(t, mounted)
+		require.Equal(t, MountPointInfo{}, info)
+	})
+}
+
+func TestResolveMountPointAndIsMountPoint_GivenNonBowlMounts_RemainFilesystemAgnostic(t *testing.T) {
+	withMountInfoContent(t,
+		"30 61 8:1 / / rw - ext4 /dev/sda1 rw\n"+
+			"40 30 0:30 / /mnt/tmp rw - tmpfs tmpfs rw\n"+
+			"41 30 0:31 / /mnt/ssh rw - fuse.sshfs user@host:/srv rw\n"+
+			"100 30 0:50 / /mnt/stacked rw - fuse.bowl bowl:"+testDiskID1+" rw\n"+
+			"101 100 0:51 / /mnt/stacked rw - tmpfs tmpfs rw\n",
+	)
+	withMountInfoFSStub(t, map[string]fakeFSNode{
+		"/tmp":         {mode: os.ModeDir | 0o755},
+		"/tmp/sym-tmp": {mode: os.ModeSymlink | 0o777, target: "/mnt/tmp"},
+	})
+
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "/mnt/tmp", want: "/mnt/tmp"},
+		{input: "/mnt/ssh", want: "/mnt/ssh"},
+		{input: "/mnt/stacked", want: "/mnt/stacked"},
+		{input: "/tmp/sym-tmp", want: "/mnt/tmp"},
+	}
+
+	for _, tc := range cases {
+		resolved, mounted, err := ResolveMountPoint(tc.input)
+		require.NoError(t, err, "input=%s", tc.input)
+		require.True(t, mounted, "input=%s", tc.input)
+		require.Equal(t, tc.want, resolved, "input=%s", tc.input)
+
+		isMounted, err := IsMountPoint(tc.input)
+		require.NoError(t, err, "input=%s", tc.input)
+		require.True(t, isMounted, "input=%s", tc.input)
+	}
 }

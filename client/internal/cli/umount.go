@@ -317,13 +317,21 @@ func runUmount(stderr io.Writer, mountpoint string, force bool) error {
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
-	canonMountpoint, mounted, err := ResolveMountPoint(absMountpoint)
+	info, mounted, err := ResolveMountPointInfo(absMountpoint)
 	if err != nil {
 		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
 	if !mounted {
 		return runtimeExitErr(fmt.Errorf("path %q is not a mounted filesystem", absMountpoint))
 	}
+	if !info.IsBowl() {
+		fsType := info.FSType
+		if fsType == "" {
+			fsType = "unknown"
+		}
+		return runtimeExitErr(fmt.Errorf("path %q is mounted as %q, not a bowl filesystem", absMountpoint, fsType))
+	}
+	canonMountpoint := info.Path
 
 	binPath, cmdArgs, found := findUmountCommand(canonMountpoint, force)
 	if !found {

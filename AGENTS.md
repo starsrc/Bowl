@@ -32,9 +32,12 @@
 - **Linux FUSE 客户端测试（Docker 容器内执行）**：
   - `task test:client`：在 `bowl-client-test` Linux 容器内构建 `GOOS=linux CGO_ENABLED=0` 二进制并运行 `client` 单元测试。
   - `task test:client:e2e`：拉起 `storage-service` 并在带 `/dev/fuse` 与 `SYS_ADMIN` 权限的测试容器内运行 `./e2e/...` 黑盒 FUSE 测试。
+- **手写 Go 文件零注释约束**：
+  - 所有手写 `.go` 文件禁止包含注释（含行注释、块注释与 `//nolint:` 指令），仅允许位于第 1 列的合法 `//go:` 编译器指令（如 `//go:build`，由 `gocheckcompilerdirectives` 校验）。生成文件（带 `// Code generated ... DO NOT EDIT.` 头）自动跳过。
+  - 通过清晰命名、类型与函数拆分表达意图；无法避免的静态检查豁免统一写入 `.golangci.yml`，不得在 Go 源码中写 `//nolint:`。
 - **静态检查与 Git Hook**：
   - 执行 `task hooks:install` 配置 `git config core.hooksPath .githooks`。
-  - `.githooks/pre-commit` 按暂存区变更按需执行 `buf lint` 及对应模块的 `golangci-lint`（其中 `client` 固定以 `GOOS=linux CGO_ENABLED=0` 检查；`gen/*.go`、`pkg/*.go` 或 `.golangci.yml` 变更会联检全部三个模块）。
+  - `.githooks/pre-commit` 按暂存区变更按需执行 `buf lint`、Go 无注释检查（`go run ./tools/nocomments`）及对应模块的 `golangci-lint`（其中 `client` 固定以 `GOOS=linux CGO_ENABLED=0` 检查；`gen/*.go`、`pkg/*.go` 或 `.golangci.yml` 变更会联检全部三个模块）。
   - 手动全量检查执行 `task lint`。
 
 ## 4. 契约同步

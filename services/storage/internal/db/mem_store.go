@@ -663,10 +663,6 @@ func (m *MemStore) RenewMountLease(ctx context.Context, arg RenewMountLeaseInput
 		return MountLeaseRecord{}, ErrNotFound
 	}
 	if !existing.ExpiresAt.After(nowUTC) {
-		delete(leases, arg.MountID)
-		if len(leases) == 0 {
-			delete(m.mounts, arg.DiskID)
-		}
 		return MountLeaseRecord{}, ErrNotFound
 	}
 	if existing.ReadOnly != arg.ReadOnly {

@@ -2,9 +2,11 @@ package control
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -539,4 +541,97 @@ func TestUsageSync_GivenBackgroundSyncDisabled_WhenUnmountForkMergeAndCloseRun_T
 	require.NoError(t, err)
 	require.Equal(t, uint64(7168), afterClose.UsedBytes)
 	require.Equal(t, uint64(4), afterClose.UsedInodes)
+}
+
+type hookUsageSyncStore struct {
+	*db.MemStore
+	mu                  sync.Mutex
+	onBeforeUpdateUsage func(diskID uuid.UUID, usedBytes, usedInodes uint64)
+}
+
+func (h *hookUsageSyncStore) UpdateDiskUsage(ctx context.Context, diskID uuid.UUID, usedBytes, usedInodes uint64) error {
+	h.mu.Lock()
+	fn := h.onBeforeUpdateUsage
+	h.mu.Unlock()
+	if fn != nil {
+		fn(diskID, usedBytes, usedInodes)
+	}
+	return h.MemStore.UpdateDiskUsage(ctx, diskID, usedBytes, usedInodes)
+}
+
+func TestUsageSync_GivenConcurrentMergeDisk_WhenSyncDirtyUsageInFlight_ThenNeverOverwritesNewerPGUsage(t *testing.T) {
+	ctx := context.Background()
+	memDB := db.NewMemStore()
+	hookStore := &hookUsageSyncStore{MemStore: memDB}
+	mgr := newManager(hookStore, WithStorageRoot(t.TempDir()), WithActorIdleTTL(0), WithUsageSyncInterval(0))
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	base, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "base", MaxBytes: 16 << 20})
+	require.NoError(t, err)
+	baseMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: base.DiskID})
+	require.NoError(t, err)
+	baseActor, err := mgr.Actor(ctx, base.DiskID)
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, baseActor, baseMnt.Epoch, "base.bin", make([]byte, 4096))
+	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: base.DiskID, MountID: baseMnt.MountID}))
+
+	child, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: base.DiskID, Name: "child"})
+	require.NoError(t, err)
+	childMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: child.DiskID})
+	require.NoError(t, err)
+	childActor, err := mgr.Actor(ctx, child.DiskID)
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, childActor, childMnt.Epoch, "child.bin", make([]byte, 2048))
+	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: child.DiskID, MountID: childMnt.MountID}))
+
+	baseMnt2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: base.DiskID})
+	require.NoError(t, err)
+	writeRegularFile(t, ctx, baseActor, baseMnt2.Epoch, "dirty-base.bin", make([]byte, 512))
+
+	syncEntered := make(chan struct{})
+	releaseSync := make(chan struct{})
+	var enterOnce sync.Once
+	baseUUID := uuid.MustParse(base.DiskID)
+	hookStore.mu.Lock()
+	hookStore.onBeforeUpdateUsage = func(diskID uuid.UUID, usedBytes, _ uint64) {
+		if diskID == baseUUID && usedBytes == 4608 {
+			enterOnce.Do(func() { close(syncEntered) })
+			<-releaseSync
+		}
+	}
+	hookStore.mu.Unlock()
+
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		mgr.syncDirtyUsage(ctx)
+	}()
+
+	<-syncEntered
+
+	mergeDone := make(chan error, 1)
+	go func() {
+		_, mErr := mgr.MergeDisk(ctx, &MergeDiskParams{
+			SourceDiskID: child.DiskID,
+			TargetDiskID: base.DiskID,
+			Strategy:     store.MergeStrategyFail,
+			Force:        true,
+		})
+		mergeDone <- mErr
+	}()
+
+	select {
+	case mErr := <-mergeDone:
+		require.NoError(t, mErr)
+		close(releaseSync)
+	case <-time.After(600 * time.Millisecond):
+		close(releaseSync)
+		require.NoError(t, <-mergeDone)
+	}
+	<-syncDone
+
+	got, err := mgr.GetDisk(ctx, base.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(6656), got.UsedBytes, "delayed syncDirtyUsage must not overwrite post-merge usage")
+	require.Equal(t, uint64(4), got.UsedInodes, "delayed syncDirtyUsage must not overwrite post-merge inodes")
 }

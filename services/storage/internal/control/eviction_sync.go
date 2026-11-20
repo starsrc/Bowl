@@ -70,12 +70,12 @@ func (m *manager) flushEntryUsage(ctx context.Context, entry *actorEntry) error 
 	if entry == nil || entry.actor == nil || m.store == nil {
 		return nil
 	}
+	entry.syncMu.Lock()
+	defer entry.syncMu.Unlock()
 	stat, err := entry.actor.StatFS(ctx)
 	if err != nil {
 		return err
 	}
-	entry.syncMu.Lock()
-	defer entry.syncMu.Unlock()
 	if entry.hasSynced && entry.syncedUsedBytes == stat.UsedBytes && entry.syncedUsedInodes == stat.Files {
 		return nil
 	}
@@ -127,24 +127,42 @@ func (m *manager) syncDirtyUsage(ctx context.Context) {
 		m.poolMu.RUnlock()
 		return
 	}
-	entries := make([]*actorEntry, 0, len(m.actors))
-	for _, entry := range m.actors {
+	diskIDs := make([]string, 0, len(m.actors))
+	for diskID, entry := range m.actors {
 		if entry != nil {
-			entries = append(entries, entry)
+			diskIDs = append(diskIDs, diskID)
 		}
 	}
 	m.poolMu.RUnlock()
 
-	for _, entry := range entries {
+	for _, diskID := range diskIDs {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := m.flushEntryUsage(ctx, entry); err != nil && ctx.Err() == nil && !errors.Is(err, store.ErrClosed) {
-			m.logger.WarnContext(ctx, "background usage sync failed",
-				"disk_id", entry.diskUUID.String(),
-				"err", err,
-			)
-		}
+		m.syncDirtyDisk(ctx, diskID)
+	}
+}
+
+func (m *manager) syncDirtyDisk(ctx context.Context, diskID string) {
+	unlockDisk := m.lockDisk(ctx, diskID)
+	defer unlockDisk()
+
+	m.poolMu.RLock()
+	if m.closed {
+		m.poolMu.RUnlock()
+		return
+	}
+	entry := m.actors[diskID]
+	m.poolMu.RUnlock()
+	if entry == nil {
+		return
+	}
+
+	if err := m.flushEntryUsage(ctx, entry); err != nil && ctx.Err() == nil && !errors.Is(err, store.ErrClosed) {
+		m.logger.WarnContext(ctx, "background usage sync failed",
+			"disk_id", diskID,
+			"err", err,
+		)
 	}
 }
 

@@ -1046,6 +1046,10 @@ func TestStoreContract_GivenMountLeases_WhenCreatedRenewedListedDeletedPrunedAnd
 		})
 		require.ErrorIs(t, err, db.ErrNotFound)
 
+		prunedExpiredRO, err := s.PruneExpiredMountLeases(ctx, t0.Add(30*time.Second))
+		require.NoError(t, err)
+		require.Equal(t, int64(1), prunedExpiredRO, "failed expired RenewMountLease must leave row intact until pruned")
+
 		activeAt30, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(30*time.Second))
 		require.NoError(t, err)
 		require.Equal(t, []db.MountLeaseRecord{rw2}, activeAt30)

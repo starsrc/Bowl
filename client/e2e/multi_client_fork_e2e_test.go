@@ -337,9 +337,9 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	diskBefore, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	statBefore, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
 	require.NoError(t, err)
-	usedBefore := diskBefore.Msg.GetDisk().GetUsedBytes()
+	usedBefore := statBefore.Msg.GetUsedBytes()
 
 	takeoverStart := time.Now()
 	mpB, _ := mountWithCleanup(t, endpoint, diskID, "--force")
@@ -347,6 +347,10 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 
 	_, orphanAttrErr := client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Ino: orphanIno}))
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(orphanAttrErr))
+
+	statAfter, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
+	require.NoError(t, err)
+	require.Less(t, statAfter.Msg.GetUsedBytes(), usedBefore)
 
 	diskAfter, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)

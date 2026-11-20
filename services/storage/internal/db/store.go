@@ -831,12 +831,6 @@ func (s *SQLStore) RenewMountLease(ctx context.Context, arg RenewMountLeaseInput
 			return mapPGXErr(getErr)
 		}
 		if !fromPGTime(existing.ExpiresAt).After(nowUTC) {
-			if _, delErr := q.DeleteMountLease(ctx, DeleteMountLeaseParams{
-				DiskID:  pgDisk,
-				MountID: pgMount,
-			}); delErr != nil {
-				return delErr
-			}
 			return ErrNotFound
 		}
 		if existing.ReadOnly != arg.ReadOnly {

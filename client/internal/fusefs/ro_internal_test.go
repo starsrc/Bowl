@@ -234,3 +234,172 @@ func (c *fakeClockInternal) Now() time.Time {
 func (c *fakeClockInternal) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
+
+func assertDirMetaSubsetInvariant(t *testing.T, cache *NamespaceCache) {
+	t.Helper()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	require.LessOrEqual(t, len(cache.completeDirs), cache.capacity, "completeDirs must never exceed cache capacity")
+	require.LessOrEqual(t, len(cache.parentByDir), cache.capacity, "parentByDir must never exceed cache capacity")
+	for ino := range cache.completeDirs {
+		hasI := cache.items[cacheKey{kind: 'i', ino: ino}] != nil
+		hasD := cache.items[cacheKey{kind: 'd', ino: ino}] != nil
+		require.True(t, hasI || hasD, "completeDirs[%d] outlived both 'i' and 'd' LRU entries", ino)
+	}
+	for ino := range cache.parentByDir {
+		hasI := cache.items[cacheKey{kind: 'i', ino: ino}] != nil
+		hasD := cache.items[cacheKey{kind: 'd', ino: ino}] != nil
+		require.True(t, hasI || hasD, "parentByDir[%d] outlived both 'i' and 'd' LRU entries", ino)
+	}
+}
+
+func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testing.T) {
+	t.Run("GivenSmallCapacity_WhenCreatingOver2xCapacityDirs_ThenCompleteDirsAndParentByDirStayBoundedAndTrackNewestDirs", func(t *testing.T) {
+		// Given: small capacity cache = 8.
+		const capacity = 8
+		cache := NewNamespaceCache(capacity)
+		cache.configure(1, 2.0, 2.0)
+		now := time.Unix(1_700_000_000, 0)
+
+		// When: create 24 directories (> 2*capacity) via putInodeAt + markNewDirWithParentAt.
+		for i := uint64(10); i < 10+3*capacity; i++ {
+			dirInode := makeTestProtoDirInode(i, now)
+			cache.putInodeAt(0, i, dirInode, 2.0, 2.0)
+			cache.markNewDirWithParentAt(0, i, 1)
+
+			// Then: invariant holds at every step and the newly created directory is tracked (not silently dropped).
+			assertDirMetaSubsetInvariant(t, cache)
+			cache.mu.Lock()
+			_, hasComplete := cache.completeDirs[i]
+			parent, hasParent := cache.parentByDir[i]
+			cache.mu.Unlock()
+			require.True(t, hasComplete, "newest dir %d must be recorded in completeDirs after LRU eviction", i)
+			require.True(t, hasParent, "newest dir %d must be recorded in parentByDir after LRU eviction", i)
+			require.Equal(t, uint64(1), parent)
+		}
+
+		// And: evicted oldest directory was purged from both maps.
+		cache.mu.Lock()
+		_, oldestComplete := cache.completeDirs[10]
+		_, oldestParent := cache.parentByDir[10]
+		cache.mu.Unlock()
+		require.False(t, oldestComplete, "evicted oldest dir must be purged from completeDirs")
+		require.False(t, oldestParent, "evicted oldest dir must be purged from parentByDir")
+	})
+
+	t.Run("GivenROCache_WhenDirInodeAndStreamExpire_ThenCompleteDirsAndParentByDirPruned", func(t *testing.T) {
+		clk := newFakeClockInternal(time.Unix(1_700_000_000, 0))
+		cache := NewNamespaceCache(16)
+		cache.configure(1, 1.0, 1.0)
+		cache.configureReadOnly(clk.Now)
+
+		parentInode := makeTestProtoDirInode(1, clk.Now())
+		dirInode := makeTestProtoDirInode(50, clk.Now())
+		cache.putInodeAt(0, 50, dirInode, 1.0, 1.0)
+		epoch, gen := cache.snapshot()
+		cache.putDirAtIf(gen, epoch, 50, []*storagev1.DirEntryPlus{
+			{Ino: 50, Name: []byte("."), NextOffset: 1, Inode: dirInode, AttrTimeoutSeconds: 1.0},
+			{Ino: 1, Name: []byte(".."), NextOffset: 2, Inode: parentInode, AttrTimeoutSeconds: 1.0},
+		})
+		assertDirMetaSubsetInvariant(t, cache)
+
+		// When: clock crosses TTL and reads lazily evict both 'd' and 'i'.
+		clk.Advance(1500 * time.Millisecond)
+		_, _ = cache.dir(50)
+		_, _ = cache.inode(50)
+
+		// Then: completeDirs[50] and parentByDir[50] are pruned once both 'i' and 'd' expire.
+		assertDirMetaSubsetInvariant(t, cache)
+		cache.mu.Lock()
+		_, hasComplete := cache.completeDirs[50]
+		_, hasParent := cache.parentByDir[50]
+		cache.mu.Unlock()
+		require.False(t, hasComplete)
+		require.False(t, hasParent)
+	})
+
+	t.Run("GivenDemotedDirWithoutParentInode_WhenDemoteRuns_ThenCompleteDirsAndParentByDirNotLeaked", func(t *testing.T) {
+		now := time.Unix(1_700_000_000, 0)
+		cache := NewNamespaceCache(16)
+		cache.configure(1, 2.0, 2.0)
+
+		parentInode := makeTestProtoDirInode(1, now)
+		dirInode := makeTestProtoDirInode(60, now)
+		childInode := makeTestProtoInode(61, 10, now)
+		epoch, gen := cache.snapshot()
+		// Insert 'd' without 'i' for dir 60.
+		cache.putDirAtIf(gen, epoch, 60, []*storagev1.DirEntryPlus{
+			{Ino: 60, Name: []byte("."), NextOffset: 1, Inode: dirInode, AttrTimeoutSeconds: 2.0},
+			{Ino: 1, Name: []byte(".."), NextOffset: 2, Inode: parentInode, AttrTimeoutSeconds: 2.0},
+			{Ino: 61, Name: []byte("a.txt"), NextOffset: 3, Inode: childInode, EntryTimeoutSeconds: 2.0, AttrTimeoutSeconds: 2.0},
+		})
+
+		cache.mu.Lock()
+		cache.demoteDirStreamToEntriesLocked(60)
+		_, hasComplete := cache.completeDirs[60]
+		_, hasParent := cache.parentByDir[60]
+		cache.mu.Unlock()
+
+		require.False(t, hasComplete, "demote without live 'i' must not leave orphan completeDirs")
+		require.False(t, hasParent, "demote without live 'i' must not leave orphan parentByDir")
+		assertDirMetaSubsetInvariant(t, cache)
+	})
+
+	t.Run("GivenOversizedDirStream_WhenPutDirExceedsCapacity_ThenCompleteDirsAndParentByDirNotRecorded", func(t *testing.T) {
+		now := time.Unix(1_700_000_000, 0)
+		cache := NewNamespaceCache(4)
+		cache.configure(1, 2.0, 2.0)
+
+		parentInode := makeTestProtoDirInode(1, now)
+		dirInode := makeTestProtoDirInode(70, now)
+		entries := []*storagev1.DirEntryPlus{
+			{Ino: 70, Name: []byte("."), NextOffset: 1, Inode: dirInode, AttrTimeoutSeconds: 2.0},
+			{Ino: 1, Name: []byte(".."), NextOffset: 2, Inode: parentInode, AttrTimeoutSeconds: 2.0},
+			{Ino: 71, Name: []byte("f1"), NextOffset: 3, Inode: makeTestProtoInode(71, 1, now), EntryTimeoutSeconds: 2.0, AttrTimeoutSeconds: 2.0},
+			{Ino: 72, Name: []byte("f2"), NextOffset: 4, Inode: makeTestProtoInode(72, 1, now), EntryTimeoutSeconds: 2.0, AttrTimeoutSeconds: 2.0},
+		}
+		epoch, gen := cache.snapshot()
+		cache.putDirAtIf(gen, epoch, 70, entries) // weight=5 > capacity=4
+
+		cache.mu.Lock()
+		_, hasComplete := cache.completeDirs[70]
+		_, hasParent := cache.parentByDir[70]
+		cache.mu.Unlock()
+		require.False(t, hasComplete)
+		require.False(t, hasParent)
+		assertDirMetaSubsetInvariant(t, cache)
+	})
+
+	t.Run("GivenInPlaceInodeRefresh_WhenParentInodeTouched_ThenCompleteDirsAndParentByDirPreserved", func(t *testing.T) {
+		now := time.Unix(1_700_000_000, 0)
+		cache := NewNamespaceCache(16)
+		cache.configure(1, 2.0, 2.0)
+
+		dirInode := makeTestProtoDirInode(80, now)
+		childInode := makeTestProtoInode(81, 8, now.Add(time.Second))
+		cache.putInodeAt(0, 80, dirInode, 2.0, 2.0)
+		cache.markNewDirWithParentAt(0, 80, 1)
+
+		cache.refreshInodeAt(0, 80, dirInode, 2.0)
+		cache.invalidateDirListingTouchParentAt(0, 80, childInode, 0, 2.0)
+		cache.invalidateDirListingTouchParentNowAt(0, 80, 0)
+
+		cache.mu.Lock()
+		_, hasComplete := cache.completeDirs[80]
+		parent := cache.parentByDir[80]
+		cache.mu.Unlock()
+		require.True(t, hasComplete, "in-place inode refresh must preserve completeDirs")
+		require.Equal(t, uint64(1), parent, "in-place inode refresh must preserve parentByDir")
+		assertDirMetaSubsetInvariant(t, cache)
+
+		// And: invalidateInode removes 'i', parentByDir, and completeDirs when no 'd' exists.
+		cache.invalidateInode(80)
+		cache.mu.Lock()
+		_, completeAfterInv := cache.completeDirs[80]
+		_, parentAfterInv := cache.parentByDir[80]
+		cache.mu.Unlock()
+		require.False(t, completeAfterInv)
+		require.False(t, parentAfterInv)
+		assertDirMetaSubsetInvariant(t, cache)
+	})
+}

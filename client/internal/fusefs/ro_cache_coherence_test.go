@@ -892,3 +892,91 @@ func TestRO_NamespaceCache_ReadDirPlusRefreshesExistingInodeAndConcurrentMisses(
 		require.Equal(t, int64(1), srv.lookupCalls.Load(), "second Lookup(foo.bin) must hit cache backfilled by first Lookup")
 	})
 }
+
+func TestRO_NamespaceCache_ReadlinkClockAndRWROExpiration(t *testing.T) {
+	t.Run("GivenROMountWithInjectedClock_WhenClockReachesAttrTTL_ThenReadlinkExpiresAndRefreshes", func(t *testing.T) {
+		// Given: RO mount with injected fake clock and AttrTTL=1.0s.
+		clk := newFakeClock(time.Unix(1_700_000_000, 0))
+		srv := newFakeStorage(t, withTTL(2.0, 1.0))
+		symIno := srv.seedSymlink(1, "link-ro", "/target/v1")
+		fs := newTestRawFSWithClock(t, srv, clk, withMode(fusefs.MountModeRO))
+
+		// Initial Readlink caches "/target/v1" until t0 + 1.0s.
+		got1, st1 := fs.Readlink(nil, &fuse.InHeader{NodeId: symIno})
+		requireStatus(t, "initial RO Readlink", fuse.OK, st1)
+		require.Equal(t, "/target/v1", string(got1))
+		require.Equal(t, int64(1), srv.readlinkCalls.Load())
+
+		// Server updates symlink target; before expiry, RO serves cached target with zero RPCs.
+		srv.mu.Lock()
+		srv.nodes[symIno].link = []byte("/target/v2")
+		srv.mu.Unlock()
+		clk.Advance(600 * time.Millisecond)
+
+		got2, st2 := fs.Readlink(nil, &fuse.InHeader{NodeId: symIno})
+		requireStatus(t, "cached RO Readlink before expiry", fuse.OK, st2)
+		require.Equal(t, "/target/v1", string(got2))
+		require.Equal(t, int64(1), srv.readlinkCalls.Load())
+
+		// When: injected clock reaches exact 1.0s expiration boundary.
+		clk.Advance(400 * time.Millisecond)
+		got3, st3 := fs.Readlink(nil, &fuse.InHeader{NodeId: symIno})
+
+		// Then: expired readlink entry lazily evicts and refreshes from server.
+		requireStatus(t, "expired RO Readlink refresh", fuse.OK, st3)
+		require.Equal(t, "/target/v2", string(got3))
+		require.Equal(t, int64(2), srv.readlinkCalls.Load())
+	})
+
+	t.Run("GivenWritableMount_WhenPositiveTinyAttrTTLConfigured_ThenReadlinkRemainsCachedWithoutTTLExpiryUntilUnlink", func(t *testing.T) {
+		for _, mode := range []string{fusefs.MountModeStaged, fusefs.MountModeSync} {
+			t.Run(mode, func(t *testing.T) {
+				// Given: writable mount with positive 1ns AttrTTL (>0 so caching is enabled,
+				// but would already be expired under wall-clock TTL expiry).
+				clk := newFakeClock(time.Unix(1_700_000_000, 0))
+				srv := newFakeStorage(t, withTTL(1.0, 1e-9))
+				fs := newTestRawFSWithClock(t, srv, clk, withMode(mode))
+				var symOut fuse.EntryOut
+				requireStatus(t, "Symlink", fuse.OK, fs.Symlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "/target/rw", "rw-link", &symOut))
+
+				// When: advance injected clock and read symlink twice.
+				clk.Advance(60 * time.Second)
+				got1, st1 := fs.Readlink(nil, &fuse.InHeader{NodeId: symOut.NodeId})
+				got2, st2 := fs.Readlink(nil, &fuse.InHeader{NodeId: symOut.NodeId})
+
+				// Then: writable readlink cache is TTL-free and stays warm with zero RPCs until Unlink.
+				requireStatus(t, "writable Readlink#1", fuse.OK, st1)
+				requireStatus(t, "writable Readlink#2", fuse.OK, st2)
+				require.Equal(t, "/target/rw", string(got1))
+				require.Equal(t, "/target/rw", string(got2))
+				require.Zero(t, srv.readlinkCalls.Load(), "writable mount readlink must not expire by TTL")
+
+				requireStatus(t, "Unlink symlink", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "rw-link"))
+				_, stAfter := fs.Readlink(nil, &fuse.InHeader{NodeId: symOut.NodeId})
+				requireStatus(t, "Readlink after Unlink", fuse.ENOENT, stAfter)
+				require.Equal(t, int64(1), srv.readlinkCalls.Load())
+			})
+		}
+	})
+
+	t.Run("GivenROAndWritableMountsWithZeroAttrTTL_WhenReadlinkRuns_ThenCacheIsBypassed", func(t *testing.T) {
+		for _, mode := range []string{fusefs.MountModeRO, fusefs.MountModeStaged} {
+			t.Run(mode, func(t *testing.T) {
+				clk := newFakeClock(time.Unix(1_700_000_000, 0))
+				srv := newFakeStorage(t, withTTL(2.0, 0))
+				symIno := srv.seedSymlink(1, "zero-link", "/target/zero")
+				fs := newTestRawFSWithClock(t, srv, clk, withMode(mode))
+
+				got1, st1 := fs.Readlink(nil, &fuse.InHeader{NodeId: symIno})
+				got2, st2 := fs.Readlink(nil, &fuse.InHeader{NodeId: symIno})
+
+				requireStatus(t, "zero-TTL Readlink#1", fuse.OK, st1)
+				requireStatus(t, "zero-TTL Readlink#2", fuse.OK, st2)
+				require.Equal(t, "/target/zero", string(got1))
+				require.Equal(t, "/target/zero", string(got2))
+				require.Equal(t, int64(2), srv.readlinkCalls.Load())
+				require.Zero(t, fs.Snapshot().NamespaceCache.ReadlinkHits)
+			})
+		}
+	})
+}

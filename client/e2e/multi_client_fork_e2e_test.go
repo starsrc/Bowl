@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
@@ -717,4 +718,91 @@ func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 		"kernel CAP_AUTO_INVAL_DATA must revalidate attr after AttrTimeoutSeconds")
 	require.Equal(t, snapBefore.FUSE.Ops[fusefs.OpRead].Calls, snapAfter.FUSE.Ops[fusefs.OpRead].Calls,
 		"unchanged files must retain kernel page cache with zero extra FUSE Read ops")
+}
+
+// TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss verifies that a read-only mount
+// bypasses capabilityCache so security.capability added by a concurrent writer is observed after an
+// initial ENODATA probe, subsequent killpriv removal is observed, and RO readlink refreshes after TTL.
+func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	diskID := createTestDisk(t, client).GetDiskId()
+
+	// Given: RW mount creates an executable file and symlink; RO FUSE mount and RO RawFS observe them.
+	mpW, stopW := mountWithCleanup(t, endpoint, diskID)
+	defer stopW()
+	rwPath := filepath.Join(mpW, "cap-tool.bin")
+	writeFullFile(t, rwPath, []byte("binary-v1"), 9)
+	require.NoError(t, os.Chmod(rwPath, 0o755))
+
+	rwSym := filepath.Join(mpW, "live-sym")
+	require.NoError(t, os.Symlink("/target/v1", rwSym))
+
+	mpRO, _, roAdminAddr, stopRO := startMountedDaemon(t, endpoint, diskID, "--mode", "ro")
+	defer stopRO()
+	roPath := filepath.Join(mpRO, "cap-tool.bin")
+	roSym := filepath.Join(mpRO, "live-sym")
+
+	var roStat unix.Stat_t
+	require.Eventually(t, func() bool {
+		return unix.Stat(roPath, &roStat) == nil
+	}, 5*time.Second, 50*time.Millisecond, "RO mount must see cap-tool.bin")
+	requireXattrAbsent(t, roPath, "security.capability")
+
+	gotSym1, err := os.Readlink(roSym)
+	require.NoError(t, err)
+	require.Equal(t, "/target/v1", gotSym1)
+
+	// Drive RawFS.GetXAttr("security.capability") directly against live StorageService in --mode=ro
+	// (Linux 6.10 FUSE cap_inode_getsecurity returns EINVAL before dispatching FUSE_GETXATTR).
+	roRawFS := fusefs.NewRawFS(client, fusefs.Config{
+		DiskID:              diskID,
+		RootIno:             1,
+		Mode:                fusefs.MountModeRO,
+		EntryTimeoutSeconds: 1.0,
+		AttrTimeoutSeconds:  1.0,
+	})
+	defer roRawFS.OnUnmount()
+
+	buf := make([]byte, 64)
+	_, st1 := roRawFS.GetXAttr(nil, &fuse.InHeader{NodeId: roStat.Ino}, "security.capability", buf)
+	require.Equal(t, fuse.Status(syscall.ENODATA), st1, "initial RO GetXAttr probe must observe ENODATA")
+
+	// When: RW mount sets Linux v2 file capability and atomically replaces the symlink target.
+	capVal := []byte{0x01, 0x00, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	require.NoError(t, unix.Setxattr(rwPath, "security.capability", capVal, 0))
+
+	rwSymTmp := filepath.Join(mpW, "live-sym.tmp")
+	require.NoError(t, os.Symlink("/target/v2", rwSymTmp))
+	require.NoError(t, unix.Rename(rwSymTmp, rwSym))
+
+	// Then: RO observes security.capability (not stuck on cached ENODATA) and refreshed symlink target.
+	requireXattrPresent(t, roPath, "security.capability")
+	sz2, st2 := roRawFS.GetXAttr(nil, &fuse.InHeader{NodeId: roStat.Ino}, "security.capability", buf)
+	require.Equal(t, fuse.OK, st2, "RO GetXAttr must bypass capabilityCache and observe newly set capability")
+	require.Equal(t, capVal, buf[:sz2])
+
+	require.Eventually(t, func() bool {
+		got, rErr := os.Readlink(roSym)
+		return rErr == nil && got == "/target/v2"
+	}, 5*time.Second, 100*time.Millisecond, "RO mount must observe replaced symlink target after TTL expiry")
+
+	// When: RW mount overwrites the file (triggering killpriv capability removal).
+	overwriteFileInPlace(t, rwPath, []byte("binary-v2"))
+
+	// Then: RO observes capability removal and both RO RawFS and mounted RO daemon keep capabilityCache unused.
+	requireXattrAbsent(t, roPath, "security.capability")
+	_, st3 := roRawFS.GetXAttr(nil, &fuse.InHeader{NodeId: roStat.Ino}, "security.capability", buf)
+	require.Equal(t, fuse.Status(syscall.ENODATA), st3, "RO GetXAttr must observe ENODATA after writer killpriv")
+
+	rawCapStats := roRawFS.Snapshot().CapabilityCache
+	require.Zero(t, rawCapStats.Entries, "RO RawFS must keep capabilityCache empty")
+	require.Zero(t, rawCapStats.Hits, "RO RawFS must not hit capabilityCache")
+	require.Zero(t, rawCapStats.Misses, "RO RawFS must not probe capabilityCache")
+	require.Zero(t, rawCapStats.Grants, "RO RawFS must not grant capabilityCache")
+
+	roStats := fetchDebugStats(t, roAdminAddr)
+	require.Zero(t, roStats.CapabilityCache.Entries, "mounted RO daemon must keep capabilityCache empty")
+	require.Zero(t, roStats.CapabilityCache.Hits, "mounted RO daemon must not hit capabilityCache")
+	require.Zero(t, roStats.CapabilityCache.Grants, "mounted RO daemon must not grant capabilityCache")
 }

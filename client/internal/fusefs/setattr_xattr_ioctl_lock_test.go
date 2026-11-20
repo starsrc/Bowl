@@ -286,6 +286,65 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 	})
 }
 
+func TestXAttr_ReadOnlyMountBypassesCapabilityCache(t *testing.T) {
+	t.Run("GivenReadOnlyMount_WhenCapabilityAddedAfterENODATA_ThenGetXAttrQueriesServerAndObservesValue", func(t *testing.T) {
+		// Given: RW mount and RO mount share the same disk with a file lacking security.capability.
+		srv := newFakeStorage(t, withTTL(2.0, 2.0))
+		ino := srv.seedFile(1, "bin.elf", 0o755, []byte("elf"))
+		rwFS := newTestRawFS(t, srv, withMode(fusefs.MountModeStaged))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
+
+		// Initial probe on RO observes ENODATA via server RPC.
+		buf := make([]byte, 32)
+		_, st1 := roFS.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", buf)
+		requireStatus(t, "RO initial GetXAttr capability", fuse.Status(syscall.ENODATA), st1)
+		require.Equal(t, int64(1), srv.getXattrCalls.Load())
+
+		// When: RW writer grants security.capability, and RO probes again.
+		wantCap := []byte("cap-net-bind")
+		requireStatus(t, "RW SetXAttr capability", fuse.OK, rwFS.SetXAttr(nil, &fuse.SetXAttrIn{
+			InHeader: fuse.InHeader{NodeId: ino},
+		}, "security.capability", wantCap))
+		sz2, st2 := roFS.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", buf)
+
+		// Then: RO queries server directly and observes the newly set capability value.
+		requireStatus(t, "RO GetXAttr after RW SetXAttr", fuse.OK, st2)
+		require.Equal(t, wantCap, buf[:sz2])
+		require.Equal(t, int64(2), srv.getXattrCalls.Load())
+
+		// When: RW writer removes security.capability, and RO probes again.
+		requireStatus(t, "RW RemoveXAttr capability", fuse.OK, rwFS.RemoveXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability"))
+		_, st3 := roFS.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", buf)
+		requireStatus(t, "RO GetXAttr after RW RemoveXAttr", fuse.Status(syscall.ENODATA), st3)
+		require.Equal(t, int64(3), srv.getXattrCalls.Load())
+
+		// And: RO mount never reads or populates capabilityCache.
+		capStats := roFS.Snapshot().CapabilityCache
+		require.Zero(t, capStats.Entries, "RO mount must never insert entries into capabilityCache")
+		require.Zero(t, capStats.Hits, "RO mount must never hit capabilityCache")
+		require.Zero(t, capStats.Misses, "RO mount must never probe capabilityCache")
+		require.Zero(t, capStats.Grants, "RO mount must never grant capabilityCache state")
+	})
+
+	t.Run("GivenWritableStagedAndSyncMounts_WhenCapabilityAbsent_ThenNegativeCacheStillShortCircuits", func(t *testing.T) {
+		for _, mode := range []string{fusefs.MountModeStaged, fusefs.MountModeSync} {
+			t.Run(mode, func(t *testing.T) {
+				srv := newFakeStorage(t, withTTL(2.0, 2.0))
+				ino := srv.seedFile(1, "plain.bin", 0o644, nil)
+				fs := newTestRawFS(t, srv, withMode(mode))
+
+				_, st1 := fs.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", make([]byte, 32))
+				_, st2 := fs.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", make([]byte, 32))
+
+				requireStatus(t, "first GetXAttr", fuse.Status(syscall.ENODATA), st1)
+				requireStatus(t, "second cached GetXAttr", fuse.Status(syscall.ENODATA), st2)
+				require.Equal(t, int64(1), srv.getXattrCalls.Load(), "writable mount must keep capability negative short-circuit")
+				require.Equal(t, uint64(1), fs.Snapshot().CapabilityCache.Hits)
+			})
+		}
+	})
+}
+
 func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t *testing.T) {
 	// Given
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))

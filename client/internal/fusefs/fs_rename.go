@@ -52,6 +52,12 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 
 	seq0 := fs.topologySeq.Load()
 	source, _ := fs.cache.entry(input.NodeId, oldName)
+	var sourceAttr *storagev1.Inode
+	if source != 0 {
+		if cached, ok := fs.cache.peekInode(source); ok {
+			sourceAttr = cached.inode
+		}
+	}
 	target, targetKnown := fs.cache.entry(input.Newdir, newName)
 	var targetAttr *storagev1.Inode
 	if target != 0 {
@@ -67,11 +73,13 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		if oldStatus != fuse.OK {
 			return oldStatus
 		}
-		source = fs.ToKernelIno(old.inode.GetIno())
+		sourceAttr = old.inode
+		source = fs.ToKernelIno(sourceAttr.GetIno())
 		cached, targetStatus := fs.lookupInodeWithContext(opCtx, cancel, input.Newdir, newName)
 		if targetStatus != fuse.OK && targetStatus != fuse.ENOENT {
 			return targetStatus
 		}
+		targetKnown = true
 		if targetStatus == fuse.OK {
 			targetAttr = cached.inode
 			target = fs.ToKernelIno(targetAttr.GetIno())
@@ -109,6 +117,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 				targetAttr = refreshed.inode
 			case fuse.ENOENT:
 				targetAttr = nil
+				targetKnown = false
 			default:
 				return st
 			}
@@ -150,26 +159,23 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	}
 	fs.markMetaDirty()
 
-	// 保留父目录 Inode 缓存并用当前时间刷新属性，避免 rename 后内核 fuse_invalidate_attr
-	// 触发的 GETATTR 每次穿透到服务端。目录跨父目录移动时同步修正父目录 nlink。
-	sourceIsDir := false
-	if source != 0 {
-		if cached, ok := fs.cache.inode(source); ok && cached.inode != nil && cached.inode.GetAttr() != nil {
-			sourceIsDir = cached.inode.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
-		}
+	// Keep parent inode caches warm when parent nlink deltas are known; drop the parent inode cache
+	// whenever the exact delta cannot be determined locally without extra RPCs.
+	oldDelta, oldKnown, newDelta, newKnown := renameParentNlinkDeltas(
+		input.NodeId, input.Newdir, oldName, newName, input.Flags,
+		source, sourceAttr, target, targetKnown, targetAttr,
+	)
+	if oldKnown {
+		fs.cache.invalidateDirListingTouchParentNowAt(epoch, input.NodeId, oldDelta)
+	} else {
+		fs.cache.invalidateDirListingDropParent(input.NodeId)
 	}
-	movedDir := sourceIsDir && input.NodeId != input.Newdir && input.Flags&renameExchange == 0
-	oldDelta := int32(0)
-	if movedDir {
-		oldDelta = -1
-	}
-	fs.cache.invalidateDirListingTouchParentNowAt(epoch, input.NodeId, oldDelta)
 	if input.Newdir != input.NodeId {
-		newDelta := int32(0)
-		if movedDir {
-			newDelta = 1
+		if newKnown {
+			fs.cache.invalidateDirListingTouchParentNowAt(epoch, input.Newdir, newDelta)
+		} else {
+			fs.cache.invalidateDirListingDropParent(input.Newdir)
 		}
-		fs.cache.invalidateDirListingTouchParentNowAt(epoch, input.Newdir, newDelta)
 	}
 	if input.Flags&renameExchange != 0 {
 		// 交换后旧名指向原目标节点，新名指向原源节点。
@@ -198,11 +204,26 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 			fs.cache.removeEntry(input.Newdir, newName)
 		}
 	}
+	sourceTypeKnown := source != 0 && sourceAttr != nil && sourceAttr.GetAttr() != nil
+	sourceIsDir := sourceTypeKnown && sourceAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
+	dstTypeKnown := target != 0 && targetAttr != nil && targetAttr.GetAttr() != nil
+	dstIsDir := dstTypeKnown && targetAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
 	if source != 0 {
 		fs.cache.invalidateInode(source)
 	}
 	if target != 0 && target != source {
 		fs.cache.invalidateInode(target)
+		if input.Flags&renameExchange == 0 && (dstIsDir || (!dstTypeKnown && (!sourceTypeKnown || sourceIsDir))) {
+			fs.cache.invalidateDir(target)
+		}
+	}
+	if input.NodeId != input.Newdir {
+		if source == 0 {
+			fs.cache.invalidateChildParents(input.NodeId)
+		}
+		if input.Flags&renameExchange != 0 && target == 0 {
+			fs.cache.invalidateChildParents(input.Newdir)
+		}
 	}
 	fs.topologySeq.Add(1)
 	if target != 0 && target != source && input.Flags&renameExchange == 0 &&
@@ -217,4 +238,80 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		}
 	}
 	return fuse.OK
+}
+
+// renameParentNlinkDeltas computes exact parent nlink changes matching the server Rename contract.
+// A false known flag tells the caller to drop that parent's cached inode instead of guessing delta=0.
+func renameParentNlinkDeltas(
+	oldDir, newDir uint64,
+	oldName, newName string,
+	flags uint32,
+	source uint64,
+	sourceAttr *storagev1.Inode,
+	target uint64,
+	targetKnown bool,
+	targetAttr *storagev1.Inode,
+) (oldDelta int32, oldKnown bool, newDelta int32, newKnown bool) {
+	sameParent := oldDir == newDir
+	if (sameParent && oldName == newName) || (source != 0 && target != 0 && source == target) {
+		return 0, true, 0, true
+	}
+
+	srcTypeKnown := source != 0 && sourceAttr != nil && sourceAttr.GetAttr() != nil
+	srcIsDir := srcTypeKnown && sourceAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
+
+	if flags&renameExchange != 0 {
+		if sameParent {
+			return 0, true, 0, true
+		}
+		dstTypeKnown := target != 0 && targetAttr != nil && targetAttr.GetAttr() != nil
+		if !srcTypeKnown || !dstTypeKnown {
+			return 0, false, 0, false
+		}
+		dstIsDir := targetAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
+		if srcIsDir == dstIsDir {
+			return 0, true, 0, true
+		}
+		if srcIsDir {
+			return -1, true, 1, true
+		}
+		return 1, true, -1, true
+	}
+
+	var targetExistenceKnown, hasTarget bool
+	switch {
+	case flags&renameNoReplace != 0:
+		targetExistenceKnown = true
+	case targetKnown && target == 0:
+		targetExistenceKnown = true
+	case targetKnown && target != 0:
+		targetExistenceKnown = true
+		hasTarget = true
+	}
+
+	if !srcTypeKnown {
+		if sameParent && targetExistenceKnown && !hasTarget {
+			return 0, true, 0, true
+		}
+		return 0, false, 0, false
+	}
+	if !srcIsDir {
+		return 0, true, 0, true
+	}
+	if sameParent {
+		if !targetExistenceKnown {
+			return 0, false, 0, false
+		}
+		if hasTarget {
+			return -1, true, 0, true
+		}
+		return 0, true, 0, true
+	}
+	if !targetExistenceKnown {
+		return -1, true, 0, false
+	}
+	if hasTarget {
+		return -1, true, 0, true
+	}
+	return -1, true, 1, true
 }

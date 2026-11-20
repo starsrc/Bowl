@@ -23,10 +23,8 @@ import (
 )
 
 const (
-	// SlowStorageRPCThreshold 定义数据面/元数据面单次 RPC 慢操作告警阈值。
 	SlowStorageRPCThreshold = 50 * time.Millisecond
 
-	// SlowControlRPCThreshold 定义控制面（Create/Fork/Delete/Mount 等）单次 RPC 慢操作告警阈值。
 	SlowControlRPCThreshold = 200 * time.Millisecond
 
 	headerRequestID = "X-Request-Id"
@@ -59,13 +57,11 @@ type (
 	}
 )
 
-// telemetryObsAdapter 适配器，将 telemetry.Config 桥接为 serverx.ObservabilityConfig。
 type telemetryObsAdapter struct {
 	telemetry.Config
 	slogx.LogConfig
 }
 
-// toObservabilityConfig 将 telemetry.Config 转换为 serverx.ObservabilityConfig 契约。
 func toObservabilityConfig(cfg telemetry.Config) serverx.ObservabilityConfig {
 	if cfg == nil {
 		return nil
@@ -96,7 +92,7 @@ func classifyStorageLogLevel(procedure string, code connect.Code, err error) slo
 			storagev1connect.StorageServiceReclaimOrphanProcedure, "ReclaimOrphan":
 			return slog.LevelInfo
 		default:
-			// 高频数据面/元数据面读写与只读查询成功路径降为 Debug，避免 LOG_LEVEL=info 下刷屏。
+
 			return slog.LevelDebug
 		}
 	}
@@ -211,10 +207,6 @@ func extractStorageAttrs(_ context.Context, req connect.AnyRequest, res connect.
 	return attrs
 }
 
-// NewStorageObservabilityInterceptor 构造 Storage 专属服务端可观测性拦截器：
-// 1. 使用 pprof.Labels("rpc", procedure) 标记协程热点归因；
-// 2. 仅当 Span 处于录制态时注入 bowl.disk_id / bowl.source_disk_id / bowl.epoch / bowl.ino / bowl.request_id 属性（未采样时 0 alloc）；
-// 3. 数据面耗时超 50ms 或控制面耗时超 200ms 时输出慢操作告警日志。
 func NewStorageObservabilityInterceptor(logger *slog.Logger) connect.UnaryInterceptorFunc {
 	return newStorageObservabilityInterceptorWithClock(logger, time.Now)
 }
@@ -316,13 +308,6 @@ func logSlowStorageRPC(
 	target.LogAttrs(ctx, slog.LevelWarn, "slow storage rpc", attrs...)
 }
 
-// BuildInterceptors 委托 starsrc/pkg/serverx 构建标准 ConnectRPC 拦截器链：
-// 1. 最外层脱敏 (slogx.NewMaskInterceptor)
-// 2. 次外层追踪与指标 (otelconnect.NewInterceptor)
-// 3. 错误原因提取 (serverx.NewErrorReasonInterceptor)
-// 4. 唯一访问日志拦截器 (slogx.NewConnectInterceptor，带 Lookup/GetXattr not_found 降级与业务字段提取)
-// 5. Storage 业务追踪属性、pprof 标签与慢请求日志拦截器 (NewStorageObservabilityInterceptor)
-// 6. 最内层请求校验 (NewValidationInterceptor)
 func BuildInterceptors(
 	obsCfg serverx.ObservabilityConfig,
 	logger *slog.Logger,

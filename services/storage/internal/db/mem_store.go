@@ -15,7 +15,6 @@ import (
 
 var _ Store = (*MemStore)(nil)
 
-// MemDiskView 描述 MemStore 中持久化磁盘的只读快照视图（供测试观测使用）。
 type MemDiskView struct {
 	DiskID       uuid.UUID
 	ParentDiskID uuid.UUID
@@ -38,7 +37,6 @@ func (v *MemDiskView) toRecord() DiskRecord {
 	}
 }
 
-// MemLineageView 描述 MemStore 中血缘状态的只读快照视图（供测试观测使用）。
 type MemLineageView struct {
 	LineageID  uuid.UUID
 	NextIno    int64
@@ -46,7 +44,6 @@ type MemLineageView struct {
 	CreatedAt  time.Time
 }
 
-// MemCommitView 描述 MemStore 中基准切面 DAG 记录的只读快照视图（供测试观测使用）。
 type MemCommitView struct {
 	CommitID            uuid.UUID
 	LineageID           uuid.UUID
@@ -67,7 +64,6 @@ func (v *MemCommitView) toRecord() CommitRecord {
 	}
 }
 
-// MemSnapshot 描述 MemStore 在某一时刻的深拷贝只读状态快照。
 type MemSnapshot struct {
 	Disks             map[uuid.UUID]MemDiskView
 	Lineages          map[uuid.UUID]MemLineageView
@@ -76,7 +72,6 @@ type MemSnapshot struct {
 	PackReserveCalls  int
 }
 
-// MemStore 提供与 SQLStore 契约一致的进程内控制面持久化适配器。
 type MemStore struct {
 	mu                sync.Mutex
 	disks             map[uuid.UUID]MemDiskView
@@ -88,7 +83,6 @@ type MemStore struct {
 	packReserveCalls  int
 }
 
-// NewMemStore 创建共享进程内测试适配器实例。
 func NewMemStore() *MemStore {
 	return &MemStore{
 		disks:    make(map[uuid.UUID]MemDiskView),
@@ -97,14 +91,12 @@ func NewMemStore() *MemStore {
 	}
 }
 
-// SetFailNextWrite 注入下一次写事务失败错误（触发一次后自动清空，且不产生部分状态变更）。
 func (m *MemStore) SetFailNextWrite(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.failNextWrite = err
 }
 
-// Inspect 返回当前内存表状态的深拷贝只读快照（仅在具体 *MemStore 上提供，不泄露至 Store 接口）。
 func (m *MemStore) Inspect() MemSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -139,7 +131,6 @@ func (m *MemStore) nextNowLocked() time.Time {
 	return now
 }
 
-// CreateDisk 原子创建新血缘行与根磁盘记录。
 func (m *MemStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
@@ -175,7 +166,6 @@ func (m *MemStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string
 	return row.toRecord(), nil
 }
 
-// ForkDisk 原子写入派生切面、更新源盘基准切面并创建子盘记录。
 func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
@@ -228,7 +218,6 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	return childRow.toRecord(), nil
 }
 
-// GetDisk 查询单盘元数据记录。
 func (m *MemStore) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
@@ -246,7 +235,6 @@ func (m *MemStore) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, e
 	return row.toRecord(), nil
 }
 
-// ListDisks 按 (created_at DESC, disk_id DESC) 稳定游标分页查询磁盘列表。
 func (m *MemStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDisksPage, error) {
 	if err := ctx.Err(); err != nil {
 		return ListDisksPage{}, err
@@ -308,7 +296,6 @@ func (m *MemStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDis
 	}, nil
 }
 
-// ListLineageCommits 按 (created_at ASC, commit_id ASC) 查询指定血缘的全部切面节点。
 func (m *MemStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) ([]CommitRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -341,7 +328,6 @@ func (m *MemStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) 
 	return commits, nil
 }
 
-// UpdateDiskName 更新磁盘名称。
 func (m *MemStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
@@ -366,7 +352,6 @@ func (m *MemStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name st
 	return row.toRecord(), nil
 }
 
-// MergeDisk 原子校验血缘与 CAS 切面并写入合并 Commit 节点（失败零副作用回滚）。
 func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return DiskRecord{}, err
@@ -438,7 +423,6 @@ func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	return tgtRow.toRecord(), nil
 }
 
-// DeleteDisk 删盘并按同血缘剩余盘数执行三态切面回收。
 func (m *MemStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -500,7 +484,6 @@ func (m *MemStore) deleteLineageCommitsLocked(lineageID uuid.UUID) []uuid.UUID {
 	return deleted
 }
 
-// ReserveSegment 为指定血缘单调预留 Inode 或 Pack 号段。
 func (m *MemStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineageID uuid.UUID, minNext, count int64) (SegmentRange, error) {
 	if err := ctx.Err(); err != nil {
 		return SegmentRange{}, err

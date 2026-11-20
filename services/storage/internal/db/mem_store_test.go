@@ -35,7 +35,6 @@ func TestMemStore_GivenInjectedWriteError_WhenForkDiskCalled_ThenRollsBackAtomic
 	require.Len(t, snapAfterFail.Disks, 1, "注入写失败后盘数量 want=1, got=%d", len(snapAfterFail.Disks))
 	require.Empty(t, snapAfterFail.Commits, "注入写失败后不得残留切面记录")
 
-	// 故障注入仅触发一次，后续写操作自动恢复。
 	childID := mustNewUUIDv7(t)
 	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{
 		SourceDiskID: rootID,

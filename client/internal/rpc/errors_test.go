@@ -56,24 +56,22 @@ func TestMapError_GivenAll25ErrorInfos_MapsToExpectedErrno(t *testing.T) {
 }
 
 func TestMapError_GivenEmptyReason_FallsBackToConnectCode(t *testing.T) {
-	// Given
+
 	connErr := connect.NewError(connect.CodeNotFound, nil)
 	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "", Domain: "bowl.storage"})
 	require.NoError(t, err)
 	connErr.AddDetail(detail)
 
-	// When / Then
 	require.Equal(t, syscall.ENOENT, MapError(connErr))
 }
 
 func TestMapError_GivenCustomDomainWithValidReason_MapsReason(t *testing.T) {
-	// Given
+
 	connErr := connect.NewError(connect.CodeInvalidArgument, nil)
 	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EEXIST", Domain: "custom.domain"})
 	require.NoError(t, err)
 	connErr.AddDetail(detail)
 
-	// When / Then
 	require.Equal(t, syscall.EEXIST, MapError(connErr))
 }
 
@@ -105,7 +103,7 @@ func TestMapError_GivenNilAndTransportErrors_MapsExpectedErrno(t *testing.T) {
 }
 
 func TestContextWithCancelChan_GivenPreClosedAndNilAndManualCancel_PropagatesExpectedCause(t *testing.T) {
-	// Given / When / Then: 已关闭 cancel 通道立即触发 ErrKernelInterrupted -> EINTR
+
 	closedCancel := make(chan struct{})
 	close(closedCancel)
 	interruptedCtx, cancelInterrupted := ContextWithCancelChan(context.Background(), closedCancel)
@@ -114,7 +112,6 @@ func TestContextWithCancelChan_GivenPreClosedAndNilAndManualCancel_PropagatesExp
 	require.ErrorIs(t, context.Cause(interruptedCtx), ErrKernelInterrupted)
 	require.Equal(t, syscall.EINTR, MapError(context.Cause(interruptedCtx)))
 
-	// 未关闭 cancel 通道在显式取消后不携带 ErrKernelInterrupted
 	openCancel := make(chan struct{})
 	normalCtx, cancelNormal := ContextWithCancelChan(context.Background(), openCancel)
 	cancelNormal()
@@ -122,7 +119,6 @@ func TestContextWithCancelChan_GivenPreClosedAndNilAndManualCancel_PropagatesExp
 	require.ErrorIs(t, normalCtx.Err(), context.Canceled)
 	require.NotErrorIs(t, context.Cause(normalCtx), ErrKernelInterrupted)
 
-	// nil cancel 通道安全工作
 	nilChanCtx, cancelNil := ContextWithCancelChan(context.Background(), nil)
 	require.NoError(t, nilChanCtx.Err())
 	cancelNil()
@@ -131,33 +127,28 @@ func TestContextWithCancelChan_GivenPreClosedAndNilAndManualCancel_PropagatesExp
 }
 
 func TestContextWithCancelChan_GivenGracePeriod_CompletedWithinGraceIgnoresInterruptExpiredTriggersEINTR(t *testing.T) {
-	// Given: 场景 1 —— 宽限期内正常结束不触发 ErrKernelInterrupted
+
 	clk1 := newManualClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	cancel1 := make(chan struct{})
 	ctx1, finish1 := contextWithCancelChanClock(context.Background(), cancel1, clk1)
 
-	// When
 	close(cancel1)
 	require.Equal(t, inFlightCancelGracePeriod, <-clk1.TimerArmed())
 	finish1()
 	<-ctx1.Done()
 
-	// Then
 	require.NotErrorIs(t, context.Cause(ctx1), ErrKernelInterrupted)
 
-	// Given: 场景 2 —— 超过 15ms 宽限期触发 ErrKernelInterrupted -> EINTR
 	clk2 := newManualClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	cancel2 := make(chan struct{})
 	ctx2, finish2 := contextWithCancelChanClock(context.Background(), cancel2, clk2)
 	defer finish2()
 
-	// When
 	close(cancel2)
 	require.Equal(t, inFlightCancelGracePeriod, <-clk2.TimerArmed())
 	clk2.Advance(inFlightCancelGracePeriod)
 	<-ctx2.Done()
 
-	// Then
 	require.ErrorIs(t, context.Cause(ctx2), ErrKernelInterrupted)
 	require.Equal(t, syscall.EINTR, MapError(context.Cause(ctx2)))
 }

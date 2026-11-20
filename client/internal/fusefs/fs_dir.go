@@ -11,7 +11,6 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// OpenDir 在本地检查节点类型并分配目录句柄。
 func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpOpenDir)
 	opCtx, endSpan := fs.startFuseOp(OpOpenDir)
@@ -42,7 +41,6 @@ func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 	return status
 }
 
-// readDirEntries 获取完整目录流；超出容量的目录按页读取且不进入缓存。
 func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{}, input *fuse.ReadIn) (cachedDir, fuse.Status) {
 	if _, status := fs.checkedHandle(input.NodeId, input.Fh, true); status != fuse.OK {
 		return cachedDir{}, status
@@ -112,7 +110,6 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 	}
 }
 
-// ReadDir 返回目录项及其续读位置。
 func (fs *RawFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpReadDir)
 	opCtx, endSpan := fs.startFuseOp(OpReadDir)
@@ -142,7 +139,6 @@ func (fs *RawFS) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.D
 	return fuse.OK
 }
 
-// ReadDirPlus 返回目录项和属性；点目录项不增加内核引用计数。
 func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpReadDirPlus)
 	opCtx, endSpan := fs.startFuseOp(OpReadDirPlus)
@@ -193,7 +189,6 @@ func (fs *RawFS) ReadDirPlus(cancel <-chan struct{}, input *fuse.ReadIn, out *fu
 	return fuse.OK
 }
 
-// FsyncDir 等待服务端完成目录持久化。
 func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpFsyncDir)
 	opCtx, endSpan := fs.startFuseOp(OpFsyncDir)
@@ -208,7 +203,7 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 		return st
 	}
 	if _, removed := fs.handles.RemovedDir(input.NodeId); removed {
-		// Rmdir 已同步持久化，已删除目录没有待同步的服务端状态。
+
 		return fuse.OK
 	}
 	ino, status := fs.ToServerIno(input.NodeId)
@@ -234,7 +229,6 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 	return fs.ToStatus(err)
 }
 
-// ReleaseDir 只释放本地目录句柄。
 func (fs *RawFS) ReleaseDir(input *fuse.ReleaseIn) {
 	start := fs.metrics.beginOp(OpReleaseDir)
 	_, endSpan := fs.startFuseOp(OpReleaseDir)

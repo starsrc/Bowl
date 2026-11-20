@@ -9,7 +9,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// CheckTmpfs 在非 Linux 平台始终返回 false, nil。
 func CheckTmpfs(_ string) (bool, error) {
 	return false, nil
 }

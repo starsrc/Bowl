@@ -97,7 +97,7 @@ func e2eOverwriteFile(
 }
 
 func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *testing.T) {
-	// Given: 连接真实 storage-service + PostgreSQL，创建主盘、写入基线并 Fork 分支盘
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -133,12 +133,10 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	featEpoch := featMnt.Msg.GetEpoch()
 	featMountID := featMnt.Msg.GetMountId()
 
-	// 在双边同时修改 shared.txt 并各自新增独占文件
 	e2eOverwriteFile(t, ctx, client, mainID, mainEpoch, "shared.txt", []byte("main-edited\n"))
 	e2eOverwriteFile(t, ctx, client, featID, featEpoch, "shared.txt", []byte("feat-edited\n"))
 	e2eWriteNewFile(t, ctx, client, featID, featEpoch, "feat.txt", []byte("feat-added\n"))
 
-	// When 1: DiffDisk 两路与三路对比 + ReadCommitNode 读取 LCA 基线内容
 	diffTwoWay, err := client.DiffDisk(ctx, connect.NewRequest(&storagev1.DiffDiskRequest{
 		SourceDiskId: featID,
 	}))
@@ -170,8 +168,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.Equal(t, []byte("base-shared\n"), commitSlice.Msg.GetData())
 	require.True(t, commitSlice.Msg.GetEof())
 
-	// When 2: 验证双盘在线挂载租约门禁契约
-	// 2.1 DryRun=true 允许在挂载态下直接预演成功且不修改数据或触发 epoch 围栏
 	dryResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
@@ -181,7 +177,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.NoError(t, err)
 	require.Empty(t, dryResp.Msg.GetMergeCommitId())
 
-	// 2.2 未卸载且 Force=false 时，MergeDisk 被服务端挂载门禁拦截为 CodeAborted + Reason=EBUSY
 	_, busyBothErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
@@ -189,7 +184,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	}))
 	testutil.RequireConnectError(t, busyBothErr, connect.CodeAborted, "EBUSY")
 
-	// 2.3 仅 UnmountDisk 释放源盘 featID、保留目标盘 mainID 挂载时，MergeDisk(Force:false) 仍被 EBUSY 拦截
 	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
 		DiskId:  featID,
 		MountId: featMountID,
@@ -203,14 +197,12 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	}))
 	testutil.RequireConnectError(t, busyTargetErr, connect.CodeAborted, "EBUSY")
 
-	// When 3 (方式一): UnmountDisk 释放目标盘 mainID 后，校验冲突检测与无 Force 正式合并成功
 	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
 		DiskId:  mainID,
 		MountId: mainMountID,
 	}))
 	require.NoError(t, err)
 
-	// Strategy=FAIL 命中冲突，校验 CodeAborted + ECONFLICT + MergeConflictReport
 	_, conflictErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
@@ -234,7 +226,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.Equal(t, lcaCommitID, report.GetLcaCommitId())
 	require.Equal(t, uint64(1), report.GetTotalConflicts())
 
-	// PathStrategies 定向裁决后在已卸载态正式提交合并 (Force=false)
 	mergeResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
@@ -246,7 +237,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.NoError(t, err)
 	require.NotEmpty(t, mergeResp.Msg.GetMergeCommitId())
 
-	// Then: 旧 mainEpoch 写入被栅栏拒绝（FailedPrecondition + EBUSY），重新挂载后验证合并数据
 	_, staleErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    mainID,
 		ParentIno: 1,
@@ -291,8 +281,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.NoError(t, err)
 	require.Equal(t, []byte("feat-edited\n"), readShared.Msg.GetData())
 
-	// When 4 (方式二): 验证 Force=true 抢占围栏契约
-	// 保持 mainID 在 reMntEpoch 在线挂载不卸载，并从 mainID Fork 新分支盘 feat2ID 写入后亦不卸载
 	fork2Resp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
 		SourceDiskId: mainID,
 		Name:         fmt.Sprintf("e2e-merge-feat2-%d", suffix),
@@ -313,7 +301,6 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.NoError(t, err)
 	require.NotEmpty(t, forceMergeResp.Msg.GetMergeCommitId())
 
-	// Then: 原客户端持旧 reMntEpoch 写入被 CodeFailedPrecondition (EBUSY) 栅栏拦截
 	_, fencedErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    mainID,
 		ParentIno: 1,

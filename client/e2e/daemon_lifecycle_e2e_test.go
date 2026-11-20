@@ -53,19 +53,15 @@ func startMountBusyOccupier(t *testing.T, mountpoint string) func() {
 	}
 }
 
-// TestDaemonLifecycle_MountAdminStatsAndUmount 验证真实后台挂载守护进程启停、
-// `mountinfo`、本地管理端口、`bowl stats` 发现与 `.stats` `sendfile`、`XDG_STATE_HOME` 日志回退及忙碌懒卸载清理。
 func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	disk := createTestDisk(t, client)
 	mountpoint := t.TempDir()
 
-	// Given / When: 后台模式启动守护进程并开启管理端、虚拟 .stats 与调试日志
 	runBowlSuccess(t, "mount", "--endpoint", endpoint, "--admin-addr", "127.0.0.1:0", "--stats-file", "--debug", disk.GetDiskId(), mountpoint)
 	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mountpoint).Run() })
 
-	// Then: 零延迟立即可查 mountinfo、Stat 与 Statfs，重复挂载被拦截
 	require.True(t, isMounted(mountpoint), "后台挂载返回后 `mountinfo` 必须立即包含挂载点")
 
 	var st unix.Stat_t
@@ -83,7 +79,6 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	daemonPID := findBowlDaemonPID(t, mountpoint)
 	require.Positive(t, daemonPID)
 
-	// When: 通过挂载点读写并经由管理端、bowl stats 与 sendfile 读取 .stats 观测指标
 	probePath := filepath.Join(mountpoint, "admin-probe.txt")
 	require.NoError(t, os.WriteFile(probePath, []byte("stats-probe"), 0o644))
 
@@ -141,7 +136,6 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	require.Regexp(t, statsTwoColumnPattern, string(sentRaw))
 	require.Positive(t, parseStatsOpsTotal(t, string(sentRaw)))
 
-	// When: 目录被占用时常规卸载拒绝，bowl unmount -f 懒卸载并清理元数据与端口
 	cleanupOccupier := startMountBusyOccupier(t, mountpoint)
 	t.Cleanup(cleanupOccupier)
 
@@ -162,7 +156,6 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	require.NoError(t, err, "默认系统日志文件必须存在: %s", expectedLog)
 	require.Positive(t, logFi.Size())
 
-	// When: 非 root 用户无权写 /var/log/bowl 时自动回退至 XDG_STATE_HOME
 	t.Run("非特权用户日志回退至XDG_STATE_HOME", func(t *testing.T) {
 		nonRootDisk := createTestDisk(t, client)
 		require.NoError(t, os.MkdirAll("/var/log/bowl", 0o755))
@@ -194,13 +187,10 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 	})
 }
 
-// TestDaemonLifecycle_RemountRecoveryAndKill9Delete 验证磁盘 CLI 全生命周期、
-// 跨卸载重挂持久化与在线扩容可见性、本地挂载删盘拦截以及 `kill -9` 崩溃解除挂载后零等待删盘。
 func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 
-	// Given: 通过 CLI 创建 1 GiB 磁盘
 	createOut := runBowlSuccess(t, "disk", "create", "--endpoint", endpoint, "--size", "1GiB", "--name", "e2e-daemon-persist", "--json")
 	var created struct {
 		DiskID   string `json:"disk_id"`
@@ -212,7 +202,6 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	diskID := created.DiskID
 	registerDiskCleanup(t, client, diskID)
 
-	// When: 首次挂载写入 64 KiB 数据并在线扩容至 2 GiB，期间本地挂载态删盘必须被拦截
 	mp1 := t.TempDir()
 	runBowlSuccess(t, "mount", "--endpoint", endpoint, diskID, mp1)
 	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mp1).Run() })
@@ -242,7 +231,6 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	waitForUnmount(t, mp1)
 	waitForProcessExit(t, pid1)
 
-	// Then: 重挂新挂载点，验证写入数据与扩容后配额跨守护进程重启完好恢复，随后卸载并删盘
 	mp2 := t.TempDir()
 	runBowlSuccess(t, "mount", "--endpoint", endpoint, diskID, mp2)
 	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mp2).Run() })
@@ -269,7 +257,6 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	require.True(t, delRes.Deleted)
 	_ = runBowlExpectExit(t, 1, "disk", "get", "--endpoint", endpoint, diskID)
 
-	// When: 守护进程被 kill -9 强杀并解除本机挂载后，无需等待会话租约即可立即删盘
 	disk2 := createTestDisk(t, client)
 	disk2ID := disk2.GetDiskId()
 	mpKill := t.TempDir()
@@ -300,9 +287,6 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(getErr))
 }
 
-// TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelativePaths verifies
-// background mount resolves relative paths against the caller working directory, detaches cwd to /,
-// allows synchronous tmpfs unmount without EBUSY, and keeps foreground mode in the caller directory.
 func TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelativePaths(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
@@ -328,7 +312,6 @@ func TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelat
 	relStageDir := filepath.Join("..", "stage")
 	relLogFile := filepath.Join("..", "logs", "daemon.log")
 
-	// When: invoke background bowl mount from inside scratchTmpfs with relative paths outside it
 	ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, getBowlBin(),
@@ -345,7 +328,6 @@ func TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelat
 	require.NoError(t, err, "bowl mount from tmpfs scratch directory failed: %s", string(out))
 	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", mountpoint).Run() })
 
-	// Then: daemon detaches cwd to / so tmpfs unmounts cleanly while Bowl mount remains active
 	require.True(t, isMounted(mountpoint), "bowl mount must appear in mountinfo")
 	metaBytes, err := os.ReadFile(mountMetaPath(t, mountpoint))
 	require.NoError(t, err, "mount metadata must exist for %s", mountpoint)
@@ -411,8 +393,6 @@ func TestDaemonLifecycle_BackgroundMountDetachesWorkingDirectoryAndResolvesRelat
 	})
 }
 
-// TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount verifies symlinked mountpoints across
-// mount, duplicate-mount checks, stats, normal umount drain, data persistence, and wedged force umount.
 func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
@@ -426,7 +406,6 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	symMP := filepath.Join(t.TempDir(), "sym-mp")
 	require.NoError(t, os.Symlink(realMP, symMP))
 
-	// When: mount through the symlinked mountpoint
 	runBowlSuccess(t, "mount", "--endpoint", endpoint, "--admin-addr", "127.0.0.1:0", disk.GetDiskId(), symMP)
 	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", canonRealMP).Run() })
 
@@ -446,7 +425,6 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	require.Equal(t, canonRealMP, meta1.Mountpoint)
 	require.Positive(t, meta1.PID)
 
-	// When: write a file via symlink and check duplicate mount rejection via both paths
 	probePayload := []byte("symlink-persist-ok")
 	require.NoError(t, os.WriteFile(filepath.Join(symMP, "symlink-probe.txt"), probePayload, 0o644))
 	readViaReal, err := os.ReadFile(filepath.Join(canonRealMP, "symlink-probe.txt"))
@@ -458,7 +436,6 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	dupRealOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, disk.GetDiskId(), canonRealMP)
 	require.Contains(t, dupRealOut, "already mounted")
 
-	// When: query stats via symlink and run normal umount via symlink
 	statsOut := runBowlSuccess(t, "stats", symMP)
 	require.Contains(t, statsOut, "Uptime:")
 
@@ -468,7 +445,6 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	_, err = os.Stat(canonMetaPath)
 	require.ErrorIs(t, err, os.ErrNotExist, "mountMeta must be removed after normal umount")
 
-	// When: remount via symlink, verify persistence, stop the daemon with SIGSTOP, and force unmount
 	runBowlSuccess(t, "mount", "--endpoint", endpoint, "--admin-addr", "off", disk.GetDiskId(), symMP)
 	waitForMount(t, canonRealMP)
 
@@ -492,7 +468,7 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	require.Equal(t, probePayload, persisted)
 
 	require.NoError(t, syscall.Kill(meta2.PID, syscall.SIGSTOP))
-	// Wait longer than the 1s attr cache TTL so any stat on the FUSE root would trigger FUSE_GETATTR and block.
+
 	time.Sleep(1300 * time.Millisecond)
 
 	for _, statsArgs := range [][]string{{"stats"}, {"stats", symMP}} {
@@ -520,20 +496,15 @@ func TestDaemonLifecycle_SymlinkMountpointAndWedgedForceUmount(t *testing.T) {
 	require.Less(t, elapsed, 3*time.Second)
 	waitForUnmount(t, canonRealMP)
 
-	// Resume the stopped daemon so it observes the lazy unmount and releases its lease before disk cleanup.
 	require.NoError(t, syscall.Kill(meta2.PID, syscall.SIGCONT))
 	waitForProcessExit(t, meta2.PID)
 }
 
-// TestDaemonLifecycle_MountForceAdmissionAndStagedFencing verifies single-writer RW admission,
-// --force preemption, RenewMount-driven fencing, /readyz 503, local EBUSY write rejection,
-// cache-bypassing reads on the fenced mount, and clean bowl umount exit.
 func TestDaemonLifecycle_MountForceAdmissionAndStagedFencing(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	diskID := createTestDisk(t, client).GetDiskId()
 
-	// Given: active RW --mode=staged mount 1 with committed baseline file and cached read.
 	mp1, _, adminAddr1, stopMount1 := startMountedDaemon(t, endpoint, diskID, "--mode=staged")
 	defer stopMount1()
 
@@ -561,18 +532,15 @@ func TestDaemonLifecycle_MountForceAdmissionAndStagedFencing(t *testing.T) {
 	require.Equal(t, len("before-preempt"), nSeed)
 	require.NoError(t, fsyncEINTR(openFD))
 
-	// When: second RW mount without --force is rejected (exit 1, mentions --force).
 	rejectedMP := t.TempDir()
 	busyOut := runBowlExpectExit(t, 1, "mount", "--endpoint", endpoint, "--admin-addr", "off", diskID, rejectedMP)
 	require.Contains(t, busyOut, "active read-write mount")
 	require.Contains(t, busyOut, "--force")
 	require.False(t, isMounted(rejectedMP))
 
-	// When: --mode=ro --force is rejected with exit 2.
 	roForceOut := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--mode=ro", "--force", diskID, rejectedMP)
 	require.Contains(t, roForceOut, "--force cannot be set with --mode=ro")
 
-	// When: concurrent --mode=ro mount succeeds alongside active RW mount 1.
 	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--mode=ro")
 	defer stopRO()
 	roData, err := os.ReadFile(filepath.Join(mpRO, "shared.txt"))
@@ -580,26 +548,22 @@ func TestDaemonLifecycle_MountForceAdmissionAndStagedFencing(t *testing.T) {
 	require.Equal(t, "v1-initial", string(roData))
 	stopRO()
 
-	// When: bowl mount --force preempts mount 1 on a second mountpoint.
 	mp2, _, adminAddr2, stopMount2 := startMountedDaemon(t, endpoint, diskID, "--mode=staged", "--force")
 	defer stopMount2()
 
 	ready2, readyBody2 := httpGetStatusAndBody(t, "http://"+adminAddr2+"/readyz")
 	require.Equal(t, http.StatusOK, ready2, "body=%s", readyBody2)
 
-	// Then: mount 1 RenewMount detects stale epoch, fences RawFS, and flips /readyz to 503.
 	require.Eventually(t, func() bool {
 		code, _ := httpGetStatusAndBody(t, "http://"+adminAddr1+"/readyz")
 		return code == http.StatusServiceUnavailable
 	}, 15*time.Second, 100*time.Millisecond, "fenced mount 1 /readyz must flip to 503 after lease preemption")
 
-	// Subsequent writes on fenced --mode=staged mount 1 fail locally with EBUSY, and closing the writable handle surfaces EBUSY on flush.
 	_, openWriteErr := writeEINTR(openFD, []byte("after-fence"))
 	require.ErrorIs(t, openWriteErr, syscall.EBUSY, "write on existing open fd must fail locally with EBUSY")
 	require.ErrorIs(t, os.WriteFile(filepath.Join(mp1, "new-blocked.txt"), []byte("blocked"), 0o644), syscall.EBUSY)
 	require.ErrorIs(t, closeOpenFD(), syscall.EBUSY, "closing writable handle on fenced mount must surface EBUSY from flush")
 
-	// When: mount 2 commits new data to shared.txt and creates a new file.
 	fUpdate, err := os.OpenFile(filepath.Join(mp2, "shared.txt"), os.O_WRONLY|os.O_TRUNC, 0o644)
 	require.NoError(t, err)
 	_, err = fUpdate.WriteString("v2-committed-by-mount2")
@@ -614,7 +578,6 @@ func TestDaemonLifecycle_MountForceAdmissionAndStagedFencing(t *testing.T) {
 	require.NoError(t, fNew.Sync())
 	require.NoError(t, fNew.Close())
 
-	// Then: reads on fenced mount 1 bypass stale cache and see committed writes from mount 2.
 	require.Eventually(t, func() bool {
 		gotShared, sErr := os.ReadFile(sharedPath1)
 		gotNew, nErr := os.ReadFile(filepath.Join(mp1, "from-mount2.txt"))
@@ -623,7 +586,6 @@ func TestDaemonLifecycle_MountForceAdmissionAndStagedFencing(t *testing.T) {
 			string(gotNew) == "fresh-mount2-file"
 	}, 5*time.Second, 50*time.Millisecond, "fenced mount 1 reads must bypass stale cache and see mount 2 commits")
 
-	// And bowl umount on fenced mount 1 exits 0 cleanly without disturbing mount 2.
 	stopMount1()
 	ready2After, readyBody2After := httpGetStatusAndBody(t, "http://"+adminAddr2+"/readyz")
 	require.Equal(t, http.StatusOK, ready2After, "mount 2 must remain ready after mount 1 umount, body=%s", readyBody2After)

@@ -70,13 +70,12 @@ func assertWriteRequestEquivalence(t *testing.T, tc *storagev1.WriteRequest) {
 }
 
 func TestProtoBinaryCodec_Given4MiBReadResponse_WhenReleased_ReusesPooledBuffer(t *testing.T) {
-	// Given
+
 	codec := newProtoBinaryCodec()
 	src := bytes.Repeat([]byte{0x5A, 0xA5, 0x3C, 0xC3}, MaxReadPayloadSize/4)
 	raw, err := proto.Marshal(&storagev1.ReadResponse{Data: src})
 	require.NoError(t, err)
 
-	// When
 	msg1 := &storagev1.ReadResponse{}
 	require.NoError(t, codec.Unmarshal(raw, msg1))
 	require.Equal(t, 1, leasedReadPayloadCount())
@@ -94,13 +93,12 @@ func TestProtoBinaryCodec_Given4MiBReadResponse_WhenReleased_ReusesPooledBuffer(
 	p2 := TakeReadPayload(msg2)
 	secondPtr := unsafe.SliceData(p2.Data)
 
-	// Then
 	require.Equal(t, firstPtr, secondPtr, "释放后的 4 MiB 池化缓冲应被确定性复用")
 	p2.Release()
 }
 
 func TestProtoBinaryCodec_GivenUnclaimedPooledRead_WhenGCCollected_DrainsLeaseWithoutUAF(t *testing.T) {
-	// Given
+
 	codec := newProtoBinaryCodec()
 	src := bytes.Repeat([]byte{0x5A, 0xA5, 0x3C, 0xC3}, MaxReadPayloadSize/4)
 	pooledRaw, err := proto.Marshal(&storagev1.ReadResponse{Data: src[:SmallReadPayloadCutoff+1024]})
@@ -113,12 +111,10 @@ func TestProtoBinaryCodec_GivenUnclaimedPooledRead_WhenGCCollected_DrainsLeaseWi
 		return unclaimed.GetData()
 	}
 
-	// When
 	retained := holdUnclaimedSlice()
 	expectedRetained := append([]byte(nil), retained...)
 	awaitLeasedPayloadDrain(t)
 
-	// Then
 	require.Equal(t, expectedRetained, retained, "未接管的切片在 msg 回收后不得被池重用覆盖")
 }
 
@@ -131,7 +127,7 @@ func TestProtoBinaryCodec_GivenSmallReadPayloads_Bypasses4MiBLeasePool(t *testin
 }
 
 func TestProtoBinaryCodec_GivenUnknownFieldInReadResponse_FallsBackToStandardUnmarshal(t *testing.T) {
-	// Given
+
 	codec := newProtoBinaryCodec()
 	var rawWithUnknown []byte
 	rawWithUnknown = protowire.AppendTag(rawWithUnknown, 1, protowire.BytesType)
@@ -139,11 +135,9 @@ func TestProtoBinaryCodec_GivenUnknownFieldInReadResponse_FallsBackToStandardUnm
 	rawWithUnknown = protowire.AppendTag(rawWithUnknown, 99, protowire.VarintType)
 	rawWithUnknown = protowire.AppendVarint(rawWithUnknown, 42)
 
-	// When
 	msgFallback := &storagev1.ReadResponse{}
 	require.NoError(t, codec.Unmarshal(rawWithUnknown, msgFallback))
 
-	// Then
 	require.Equal(t, []byte("hello-bowl"), msgFallback.GetData())
 }
 
@@ -176,7 +170,6 @@ func TestProtoBinaryCodec_GivenWriteRequests_MatchesStandardProtoAndZeroAllocs(t
 	assertWriteRequestEquivalence(t, smallReq)
 	assertWriteRequestEquivalence(t, bigReq)
 
-	// 非法 UTF-8 DiskId 回退至标准库返回错误
 	_, invalidErr := appender.MarshalAppend(nil, &storagev1.WriteRequest{
 		Ino:    1,
 		DiskId: string([]byte{0xff, 0xfe}),
@@ -184,7 +177,6 @@ func TestProtoBinaryCodec_GivenWriteRequests_MatchesStandardProtoAndZeroAllocs(t
 	})
 	require.Error(t, invalidErr)
 
-	// 容量充足时小载荷与 4 MiB 大载荷 WriteRequest 以及常规 Protobuf 请求均达成 0 allocs/op
 	readReq := &storagev1.ReadRequest{
 		Ino:    42,
 		Fh:     7,

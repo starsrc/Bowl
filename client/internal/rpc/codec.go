@@ -14,16 +14,10 @@ import (
 )
 
 const (
-	// MaxReadPayloadSize 为池化零分配解码支持的最大单次 ReadResponse 载荷上限（4 MiB）。
 	MaxReadPayloadSize = rpccodec.MaxPayloadSize
 
-	// SmallReadPayloadCutoff 为小读响应免 4 MiB 缓冲池租约的字节上限（256 KiB）。
-	// <= 256 KiB 的载荷（如 128 KiB 小文件读与 4 KiB 随机读）直接克隆为紧凑切片返回，
-	// 避免占用 4 MiB 大缓冲槽位、全局租约锁竞争与 runtime.AddCleanup 注册开销。
 	SmallReadPayloadCutoff = 256 << 10
 
-	// readPayloadRetainedCap 常驻保留 16 x 4 MiB = 64 MiB noscan 读缓冲，
-	// 支撑 W_read=4 多窗口并发流水线预读与直读在 GC 周期间零分配复用。
 	readPayloadRetainedCap = 16
 )
 
@@ -32,14 +26,11 @@ var readPayloadLeases = rpccodec.NewPayloadLeasePool[storagev1.ReadResponse](
 	rpccodec.OrphanDropEntryOnly,
 )
 
-// ReadPayload 封装从 ReadResponse 接管所有权的底层切片及其幂等池归还句柄。
-// 零值安全；调用 Release 后不得再读写 Data。
 type ReadPayload struct {
 	Data  []byte
 	guard *rpccodec.Guard
 }
 
-// Release 幂等地将底层 4 MiB 池化缓冲归还缓冲池，并清空 Data 引用。
 func (p *ReadPayload) Release() {
 	if p == nil {
 		return
@@ -55,10 +46,6 @@ func clearReadResponseData(msg *storagev1.ReadResponse) {
 	msg.Data = nil
 }
 
-// TakeReadPayload 从 ReadResponse 接管数据载荷所有权并返回带池归还能力的 ReadPayload。
-// 若底层切片来自 4 MiB 缓冲池，调用返回的 ReadPayload.Release() 将确定性归还缓冲；
-// 若遗漏调用 Release()，runtime.AddCleanup 会在 ReadPayload 不可达时兜底回收缓冲。
-// 若消息非池化分配（如空切片、<=256 KiB 小载荷、>4 MiB 载荷或单测手造消息），Release() 为安全空操作。
 func TakeReadPayload(msg *storagev1.ReadResponse) ReadPayload {
 	if msg == nil {
 		return ReadPayload{}
@@ -74,12 +61,10 @@ func TakeReadPayload(msg *storagev1.ReadResponse) ReadPayload {
 	}
 }
 
-// leasedReadPayloadCount 返回当前尚未接管或清理的 ReadResponse 映射项数（仅供单测校验零泄漏）。
 func leasedReadPayloadCount() int {
 	return readPayloadLeases.LeasedCount()
 }
 
-// newProtoBinaryCodec 构造客户端专用 ConnectRPC 二进制 Protobuf 编解码器。
 func newProtoBinaryCodec() connect.Codec {
 	return rpccodec.NewProtoBinaryCodec(rpccodec.CodecHooks{
 		MarshalAppend: marshalWriteRequestHook,
@@ -207,7 +192,7 @@ func unmarshalReadResponse(raw []byte, msg *storagev1.ReadResponse) error {
 		b = b[tagLen:]
 
 		switch num {
-		case 1: // bytes data
+		case 1:
 			if typ != protowire.BytesType {
 				return fallback()
 			}

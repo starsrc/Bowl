@@ -105,7 +105,7 @@ type dirMergeFrame struct {
 	baseIt     *sideIter
 	targetIt   *sideIter
 	sourceIt   *sideIter
-	targetSame bool // true 表示 Target 复用 Base 句柄（2-way 或 TargetRoot == BaseRoot）
+	targetSame bool
 
 	nextName []byte
 	nextPath []byte
@@ -440,8 +440,6 @@ func metaEqual(a, b *Inode) bool {
 		a.Flags == b.Flags
 }
 
-// isUnchangedVsBase 仅允许单侧分支相对直系祖先 Base 执行纵向 (Ino, WriteSeq) O(1) 免扫剪枝；
-// 严禁用于 Target 与 Source 之间的跨分支比较。
 func isUnchangedVsBase(branch, base *Inode) bool {
 	return branch != nil && base != nil && branch.Ino == base.Ino && branch.WriteSeq == base.WriteSeq
 }
@@ -559,7 +557,7 @@ func (tc *treeCompareCtx) regDataEqual(actorA *StoreActor, a *Inode, actorB *Sto
 	for curA.valid || curB.valid {
 		switch {
 		case curA.valid && (!curB.valid || curA.idx < curB.idx):
-			// 单侧有块：校验其逻辑有效区间是否含非零字节（通常必含非零字节）。
+
 			eq, err := tc.singleBlockIsZero(actorA, a.Size, curA.idx, curA.ref)
 			if err != nil || !eq {
 				return false, err
@@ -576,7 +574,7 @@ func (tc *treeCompareCtx) regDataEqual(actorA *StoreActor, a *Inode, actorB *Sto
 				return false, err
 			}
 		default:
-			// curA.idx == curB.idx
+
 			if curA.ref == curB.ref && tc.samePackFile(actorA, actorB, curA.ref.PackID) {
 				if err := curA.advance(); err != nil {
 					return false, err
@@ -690,8 +688,6 @@ func (tc *treeCompareCtx) dirSelfEqual(actorA *StoreActor, a *Inode, actorB *Sto
 	return xattrsEqual(xa, xb), nil
 }
 
-// isSubtreeModifiedVsBase 检查分支相对祖先在 dirIno 子树内是否存在节点自身元信息/xattr修改或子孙新增/修改/类型变化；
-// 仅含子孙删除不算修改（用于判定删除整棵目录是否安全）。
 func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *StoreActor, branchIno uint64) (bool, error) {
 	bNode, bOK, err := tc.readLiveInode(tc.base, baseIno)
 	if err != nil || !bOK {
@@ -726,10 +722,10 @@ func (tc *treeCompareCtx) isSubtreeModifiedVsBase(baseIno uint64, branchActor *S
 	for bIt.valid || xIt.valid {
 		switch {
 		case xIt.valid && (!bIt.valid || bytes.Compare(xIt.cur.name, bIt.cur.name) < 0):
-			// 分支新增节点
+
 			return true, nil
 		case bIt.valid && (!xIt.valid || bytes.Compare(bIt.cur.name, xIt.cur.name) < 0):
-			// 分支仅删除了该子节点：允许
+
 			if err := bIt.advance(); err != nil {
 				return false, err
 			}
@@ -808,12 +804,9 @@ func hasSecurityXattrChange(xa, xb map[string][]byte) bool {
 	return false
 }
 
-// mergeNodeAttributesAndXattrs 执行非类型冲突节点的标量属性（Perm/UID/GID/Flags）与 Xattr 三路融合及冲突分类。
-// 返回 mergedMeta, mergedXattrs, conflictKind。
 func mergeNodeAttributesAndXattrs(o, t, s *Inode, xo, xt, xs map[string][]byte, tPayloadChanged, sPayloadChanged bool) (mergedMeta Inode, mergedXattrs map[string][]byte, conflict ConflictKind) {
 	mergedMeta = *t
 
-	// 1. 先检查安全隔离铁律：Payload 变更 vs S_ISUID/S_ISGID/UID/GID/security.* 变更
 	if o != nil {
 		tSecChanged := isSecurityMetaChanged(o, t) || hasSecurityXattrChange(xo, xt)
 		sSecChanged := isSecurityMetaChanged(o, s) || hasSecurityXattrChange(xo, xs)
@@ -822,9 +815,8 @@ func mergeNodeAttributesAndXattrs(o, t, s *Inode, xo, xt, xs map[string][]byte, 
 		}
 	}
 
-	// 2. 标量字段逐项三路合并：Mode(perm), UID, GID, Flags
 	if o == nil {
-		// Add/Add 目录或同类型节点：比较各自标量属性
+
 		if !metaEqual(t, s) {
 			return mergedMeta, nil, ConflictAttr
 		}
@@ -856,7 +848,6 @@ func mergeNodeAttributesAndXattrs(o, t, s *Inode, xo, xt, xs map[string][]byte, 
 		}
 	}
 
-	// 3. Xattr 逐键三路合并
 	mergedXattrs = make(map[string][]byte)
 	allKeys := make(map[string]struct{}, len(xt)+len(xs))
 	for k := range xt {
@@ -904,7 +895,6 @@ func mergeNodeAttributesAndXattrs(o, t, s *Inode, xo, xt, xs map[string][]byte, 
 		}
 	}
 
-	// 4. 校验合并后 Xattr 键列表总长度配额（MaxXattrListBytes = 65536）
 	totalListBytes := 0
 	for k := range mergedXattrs {
 		totalListBytes += len(k) + 1
@@ -1001,14 +991,13 @@ func (tc *treeCompareCtx) analyzeEntry(relPath []byte, bEntry, tEntry, sEntry *E
 		return an, nil
 
 	case !hasO && !hasT && hasS:
-		// 仅 Source 新增
+
 		an.kind = DiffKindAdded
 		an.emitDiff = true
 		an.decision = nodeDecisionAdoptSource
 		an.isDir = (sNode.Mode & S_IFMT) == S_IFDIR
 		an.descend = an.isDir
 
-		// 硬链接冲突检测：Source 新增指向 Base 中已有 Inode 的非目录链接/改名，而 Target 已删除或修改该 Base Inode
 		if !tc.targetIsBase && (sNode.Mode&S_IFMT) != S_IFDIR {
 			if baseOrig, ok, rErr := tc.readLiveInode(tc.base, sNode.Ino); rErr != nil {
 				return nil, rErr
@@ -1035,14 +1024,14 @@ func (tc *treeCompareCtx) analyzeEntry(relPath []byte, bEntry, tEntry, sEntry *E
 		return an, nil
 
 	case !hasO && hasT && !hasS:
-		// 仅 Target 新增
+
 		an.decision = nodeDecisionKeepTarget
 		an.isDir = (tNode.Mode & S_IFMT) == S_IFDIR
 		an.descend = an.isDir
 		return an, nil
 
 	case !hasO && hasT && hasS:
-		// 双边新增
+
 		tIsDir := (tNode.Mode & S_IFMT) == S_IFDIR
 		sIsDir := (sNode.Mode & S_IFMT) == S_IFDIR
 		if tIsDir != sIsDir {
@@ -1085,7 +1074,7 @@ func (tc *treeCompareCtx) analyzeEntry(relPath []byte, bEntry, tEntry, sEntry *E
 			an.mergedXattrs = xattrs
 			return an, nil
 		}
-		// 均为非目录
+
 		if (tNode.Mode & S_IFMT) != (sNode.Mode & S_IFMT) {
 			an.kind = DiffKindAdded
 			an.conflict = ConflictType
@@ -1115,12 +1104,12 @@ func (tc *treeCompareCtx) analyzeEntry(relPath []byte, bEntry, tEntry, sEntry *E
 		return an, nil
 
 	case hasO && !hasT && !hasS:
-		// 双边删除：幂等收敛
+
 		an.decision = nodeDecisionSkip
 		return an, nil
 
 	case hasO && hasT && !hasS:
-		// Source 删除，Target 仍存在
+
 		oIsDir := (oNode.Mode & S_IFMT) == S_IFDIR
 		tIsDir := (tNode.Mode & S_IFMT) == S_IFDIR
 		if oIsDir {
@@ -1171,7 +1160,7 @@ func (tc *treeCompareCtx) analyzeEntry(relPath []byte, bEntry, tEntry, sEntry *E
 		return an, nil
 
 	case hasO && !hasT && hasS:
-		// Target 删除，Source 仍存在
+
 		oIsDir := (oNode.Mode & S_IFMT) == S_IFDIR
 		sIsDir := (sNode.Mode & S_IFMT) == S_IFDIR
 		if oIsDir {
@@ -1222,7 +1211,7 @@ func (tc *treeCompareCtx) analyzeEntry(relPath []byte, bEntry, tEntry, sEntry *E
 		return an, nil
 
 	default:
-		// hasO && hasT && hasS
+
 		return tc.analyzeAllThreePresent(an, &oNode, &tNode, &sNode)
 	}
 }
@@ -1260,7 +1249,7 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 			an.decision = nodeDecisionAdoptSource
 			return an, nil
 		}
-		// 双边目录均可能修改了自身属性
+
 		xo, err := readAllXattrs(tc.base, oNode.Ino)
 		if err != nil {
 			return nil, err
@@ -1306,7 +1295,7 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 	}
 
 	if tType == S_IFDIR && sType == S_IFDIR {
-		// oType != S_IFDIR：双侧均将 Base 非目录替换为目录
+
 		an.isDir = true
 		an.descend = true
 		selfEq, eqErr := tc.dirSelfEqual(tc.target, tNode, tc.source, sNode)
@@ -1342,7 +1331,6 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 		return an, nil
 	}
 
-	// 若某侧或双侧类型发生变化
 	if tType != sType {
 		dirOrTypeConflict := func(aType, bType uint32) ConflictKind {
 			if (aType == S_IFDIR) != (bType == S_IFDIR) {
@@ -1350,7 +1338,7 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 			}
 			return ConflictType
 		}
-		// 检查是否仅单侧变类型且另一侧未实质改动（目录检查子树，非目录检查节点元信息/xattr/载荷）
+
 		if sType == oType {
 			mod, err := tc.branchNodeOrSubtreeModifiedVsBase(oNode, sNode, tc.source, sUnchanged)
 			if err != nil {
@@ -1387,7 +1375,7 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 			an.descend = an.isDir
 			return an, nil
 		}
-		// 双侧都改变为不同类型
+
 		an.kind = DiffKindModified
 		an.conflict = dirOrTypeConflict(tType, sType)
 		an.emitDiff = true
@@ -1395,7 +1383,6 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 		return an, nil
 	}
 
-	// 两侧均为相同非目录文件类型
 	if sUnchanged {
 		an.decision = nodeDecisionKeepTarget
 		return an, nil
@@ -1415,9 +1402,8 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 		return an, nil
 	}
 
-	// 两侧 WriteSeq 都相对 Base 发生变化，或 O 类型不同于 T/S：绝不比较 WriteSeq，执行逐项比对
 	if oType != tType {
-		// 两侧都将 O 从其他类型改为同一新类型，检查是否完全一致
+
 		eq, err := tc.nodesEqual(tc.target, tNode, tc.source, sNode)
 		if err != nil {
 			return nil, err
@@ -1450,7 +1436,7 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 			return nil, pErr
 		}
 		if !tsPayloadEq {
-			// 先检是否还伴随安全属性冲突
+
 			xo, xErr := readAllXattrs(tc.base, oNode.Ino)
 			if xErr != nil {
 				return nil, xErr
@@ -1498,10 +1484,9 @@ func (tc *treeCompareCtx) analyzeAllThreePresent(an *analyzedNode, oNode, tNode,
 		return an, nil
 	}
 
-	// 检查最终融合态是否与 Target 完全相等（若完全相等则无需写入，也不产生 Diff）
 	tEqualFinal := metaEqual(tNode, &mergedMeta) && xattrsEqual(xt, mergedXattrs) && !sPayloadChanged
 	if !tEqualFinal && sPayloadChanged && tPayloadChanged {
-		// 两侧内容收敛相等
+
 		tEqualFinal = metaEqual(tNode, &mergedMeta) && xattrsEqual(xt, mergedXattrs)
 	}
 	if tEqualFinal {
@@ -1537,7 +1522,6 @@ func (tc *treeCompareCtx) branchNodeOrSubtreeModifiedVsBase(oNode, branchNode *I
 	return !eq, nil
 }
 
-// walkAnalyzedTree 按规范化字节路径字典序流式遍历 (Base, Target, Source) 并逐条回调。
 func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool, fn func(an *analyzedNode) error) (retErr error) {
 	rootB, err := newSideIter(tc.base, RootIno)
 	if err != nil {
@@ -1601,7 +1585,6 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 		tEntry := frame.tEntry
 		sEntry := frame.sEntry
 
-		// 先推进并放回当前 frame 或关闭
 		hasMore, advErr := frame.consumeAndPeekNext()
 		if advErr != nil {
 			_ = frame.close()
@@ -1690,9 +1673,6 @@ func (tc *treeCompareCtx) walkAnalyzedTree(normPrefix []byte, pruneToPrefix bool
 	return nil
 }
 
-// DiffTrees 只读打开 BaseRoot、TargetRoot、SourceRoot（TargetRoot == BaseRoot 或为空时复用同一句柄），
-// 按规范化字节路径字典序流式对比三路/两路目录树，支持 WriteSeq 纵向剪枝、Sparse/CompactPacks 块判等、
-// PathPrefix 过滤、ConflictsOnly、PageToken 分页及全量 Summary 统计。
 func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 	if opts == nil || opts.BaseRoot == "" || opts.SourceRoot == "" {
 		return nil, ErrInvalid
@@ -1779,7 +1759,6 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 		targetSum *DiffNodeSummary
 	}
 
-	// 记录双向硬链接冲突上下文（处理 Target 新增硬链接/改名指向 Base Inode 而 Source 修改/删除该 Inode 的情况）
 	var allMatched []*DiffEntry
 	tAddedHLs := make(map[uint64][]tAddedHLCandidate)
 	sTouchedBaseInos := make(map[uint64]struct{})
@@ -1820,7 +1799,7 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 	}
 
 	walkErr := tc.walkAnalyzedTree(normPrefix, targetIsBase, func(an *analyzedNode) error {
-		// 追踪 Target 新增指向 Base Inode 的非目录硬链接/改名
+
 		if !targetIsBase && an.oNode == nil && an.tNode != nil && an.sNode == nil && (an.tNode.Mode&S_IFMT) != S_IFDIR {
 			if _, ok, rErr := tc.readLiveInode(tc.base, an.tNode.Ino); rErr != nil {
 				return rErr
@@ -1835,7 +1814,7 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 				})
 			}
 		}
-		// 追踪 Source 修改或删除的 Base Inode
+
 		if !targetIsBase && an.oNode != nil && (an.oNode.Mode&S_IFMT) != S_IFDIR {
 			if an.sNode == nil {
 				sTouchedBaseInos[an.oNode.Ino] = struct{}{}
@@ -1876,7 +1855,6 @@ func DiffTrees(ctx context.Context, opts *DiffOptions) (*DiffResult, error) {
 		return nil, walkErr
 	}
 
-	// 若存在 Target 新增指向 Base Inode 的硬链接/改名且 Source 改/删了该 Base Inode，补充硬链接冲突检测与 Target 新路径差异条目
 	if !targetIsBase && len(tAddedHLs) > 0 {
 		for baseIno, items := range tAddedHLs {
 			if _, touched := sTouchedBaseInos[baseIno]; !touched {

@@ -20,7 +20,6 @@ func validateWriteEpoch(epoch uint64) error {
 	return nil
 }
 
-// toProtoAttribute 将 store.Attribute 领域实体转换为 Protobuf InodeAttribute。
 func toProtoAttribute(attr *store.Attribute) *storagev1.InodeAttribute {
 	return &storagev1.InodeAttribute{
 		Mode:    attr.Mode,
@@ -38,7 +37,6 @@ func toProtoAttribute(attr *store.Attribute) *storagev1.InodeAttribute {
 	}
 }
 
-// toProtoInode 将 store.Attribute 领域实体转换为 Protobuf Inode。
 func toProtoInode(attr *store.Attribute) *storagev1.Inode {
 	if attr == nil {
 		return nil
@@ -50,7 +48,6 @@ func toProtoInode(attr *store.Attribute) *storagev1.Inode {
 	}
 }
 
-// toProtoDisk 将 control.Disk 领域实体转换为 Protobuf Disk。
 func toProtoDisk(d *control.Disk) *storagev1.Disk {
 	if d == nil {
 		return nil
@@ -71,7 +68,6 @@ func toProtoDisk(d *control.Disk) *storagev1.Disk {
 	return pb
 }
 
-// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
 func (s *Server) CreateDisk(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
 	disk, err := s.control.CreateDisk(ctx, control.CreateDiskParams{
 		Name:     req.Msg.Name,
@@ -85,7 +81,6 @@ func (s *Server) CreateDisk(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-// ForkDisk 基于已有源虚拟磁盘在线零拷贝派生新的虚拟磁盘。
 func (s *Server) ForkDisk(ctx context.Context, req *connect.Request[storagev1.ForkDiskRequest]) (*connect.Response[storagev1.ForkDiskResponse], error) {
 	disk, err := s.control.ForkDisk(ctx, control.ForkDiskParams{
 		SourceDiskID: req.Msg.SourceDiskId,
@@ -100,7 +95,6 @@ func (s *Server) ForkDisk(ctx context.Context, req *connect.Request[storagev1.Fo
 	}), nil
 }
 
-// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
 func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
 	disk, err := s.control.GetDisk(ctx, req.Msg.DiskId)
 	if err != nil {
@@ -111,7 +105,6 @@ func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.Get
 	}), nil
 }
 
-// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
 func (s *Server) ListDisks(ctx context.Context, req *connect.Request[storagev1.ListDisksRequest]) (*connect.Response[storagev1.ListDisksResponse], error) {
 	res, err := s.control.ListDisks(ctx, control.ListDisksParams{
 		PageSize:  req.Msg.PageSize,
@@ -130,7 +123,6 @@ func (s *Server) ListDisks(ctx context.Context, req *connect.Request[storagev1.L
 	}), nil
 }
 
-// UpdateDisk 动态调整虚拟磁盘名称或容量配额上限。
 func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.UpdateDiskRequest]) (*connect.Response[storagev1.UpdateDiskResponse], error) {
 	disk, err := s.control.UpdateDisk(ctx, control.UpdateDiskParams{
 		DiskID:   req.Msg.DiskId,
@@ -145,7 +137,6 @@ func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-// DeleteDisk 删除指定的虚拟磁盘实体及其全部关联 Inode 与数据块。
 func (s *Server) DeleteDisk(ctx context.Context, req *connect.Request[storagev1.DeleteDiskRequest]) (*connect.Response[storagev1.DeleteDiskResponse], error) {
 	if err := s.control.DeleteDisk(ctx, req.Msg.DiskId); err != nil {
 		return nil, toConnectError(err)
@@ -153,7 +144,6 @@ func (s *Server) DeleteDisk(ctx context.Context, req *connect.Request[storagev1.
 	return connect.NewResponse(&storagev1.DeleteDiskResponse{}), nil
 }
 
-// MountDisk 执行单盘挂载握手，可写挂载原子递增 WriterEpoch 并清扫孤儿节点，只读挂载返回 epoch = 0。
 func (s *Server) MountDisk(ctx context.Context, req *connect.Request[storagev1.MountDiskRequest]) (*connect.Response[storagev1.MountDiskResponse], error) {
 	res, err := s.control.MountDisk(ctx, control.MountDiskParams{
 		DiskID:   req.Msg.DiskId,
@@ -173,7 +163,6 @@ func (s *Server) MountDisk(ctx context.Context, req *connect.Request[storagev1.M
 	}), nil
 }
 
-// RenewMount 为已建立的在线挂载软租约执行周期续期。
 func (s *Server) RenewMount(ctx context.Context, req *connect.Request[storagev1.RenewMountRequest]) (*connect.Response[storagev1.RenewMountResponse], error) {
 	res, err := s.control.RenewMount(ctx, control.RenewMountParams{
 		DiskID:   req.Msg.DiskId,
@@ -189,7 +178,6 @@ func (s *Server) RenewMount(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-// UnmountDisk 幂等释放指定的在线挂载软租约。
 func (s *Server) UnmountDisk(ctx context.Context, req *connect.Request[storagev1.UnmountDiskRequest]) (*connect.Response[storagev1.UnmountDiskResponse], error) {
 	if err := s.control.UnmountDisk(ctx, control.UnmountDiskParams{
 		DiskID:  req.Msg.DiskId,
@@ -200,7 +188,6 @@ func (s *Server) UnmountDisk(ctx context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(&storagev1.UnmountDiskResponse{}), nil
 }
 
-// StatFS 查询指定 Inode 所在虚拟磁盘的文件系统统计状态。
 func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.StatFSRequest]) (*connect.Response[storagev1.StatFSResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
@@ -231,7 +218,6 @@ func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.Stat
 	}), nil
 }
 
-// Lookup 执行单级目录项查找。
 func (s *Server) Lookup(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
@@ -251,7 +237,6 @@ func (s *Server) Lookup(ctx context.Context, req *connect.Request[storagev1.Look
 	}), nil
 }
 
-// GetAttr 获取指定 Inode 的属性与内核缓存时效。
 func (s *Server) GetAttr(ctx context.Context, req *connect.Request[storagev1.GetAttrRequest]) (*connect.Response[storagev1.GetAttrResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {
@@ -270,7 +255,6 @@ func (s *Server) GetAttr(ctx context.Context, req *connect.Request[storagev1.Get
 	}), nil
 }
 
-// SetAttr 修改指定 Inode 的元数据属性。
 func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.SetAttrRequest]) (*connect.Response[storagev1.SetAttrResponse], error) {
 	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
 		return nil, toConnectError(err)
@@ -315,7 +299,6 @@ func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.Set
 	}), nil
 }
 
-// Mknod 在指定父目录下创建常规文件或特殊设备节点。
 func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.MknodRequest]) (*connect.Response[storagev1.MknodResponse], error) {
 	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
 		return nil, toConnectError(err)
@@ -349,7 +332,6 @@ func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.Mknod
 	}), nil
 }
 
-// Mkdir 在指定父目录下创建子目录。
 func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.MkdirRequest]) (*connect.Response[storagev1.MkdirResponse], error) {
 	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
 		return nil, toConnectError(err)
@@ -382,7 +364,6 @@ func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.Mkdir
 	}), nil
 }
 
-// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
 func (s *Server) Symlink(ctx context.Context, req *connect.Request[storagev1.SymlinkRequest]) (*connect.Response[storagev1.SymlinkResponse], error) {
 	if err := validateWriteEpoch(req.Msg.Epoch); err != nil {
 		return nil, toConnectError(err)
@@ -415,7 +396,6 @@ func (s *Server) Symlink(ctx context.Context, req *connect.Request[storagev1.Sym
 	}), nil
 }
 
-// Readlink 获取符号链接节点指向的目标路径。
 func (s *Server) Readlink(ctx context.Context, req *connect.Request[storagev1.ReadlinkRequest]) (*connect.Response[storagev1.ReadlinkResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
 	if err != nil {

@@ -17,7 +17,6 @@ const (
 	unitPiB  uint64 = 1 << 50
 )
 
-// ParseSize parses a human-readable size string using binary 1024 units and returns bytes up to math.MaxInt64.
 func ParseSize(raw string) (uint64, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -71,7 +70,6 @@ func ParseSize(raw string) (uint64, error) {
 	return val * mult, nil
 }
 
-// FormatSize formats byte counts into human-readable binary unit strings.
 func FormatSize(bytes uint64) string {
 	switch {
 	case bytes >= unitPiB:

@@ -17,7 +17,6 @@ import (
 
 const primaryMountMetaDir = "/run/bowl/mounts"
 
-// mountMeta stores discovery metadata written after mount readiness so bowl stats can locate the admin endpoint.
 type mountMeta struct {
 	Mountpoint string    `json:"mountpoint"`
 	PID        int       `json:"pid"`
@@ -30,13 +29,10 @@ func fallbackMountMetaDir() string {
 	return filepath.Join(os.TempDir(), "bowl-mounts")
 }
 
-// mountMetaDirs returns discovery directories in priority order, overridden in unit tests.
 var mountMetaDirs = func() []string {
 	return []string{primaryMountMetaDir, fallbackMountMetaDir()}
 }
 
-// canonicalMountpoint normalizes mountpoint paths through ResolveMountPoint without calling Lstat on active mount roots,
-// falling back to Abs plus Clean on error.
 func canonicalMountpoint(mountpoint string) string {
 	if resolved, _, err := ResolveMountPoint(mountpoint); err == nil {
 		return resolved
@@ -47,13 +43,11 @@ func canonicalMountpoint(mountpoint string) string {
 	return filepath.Clean(mountpoint)
 }
 
-// mountMetaFileName returns the metadata file name derived from the first 16 SHA-256 bytes of the cleaned mountpoint.
 func mountMetaFileName(mountpoint string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(mountpoint)))
 	return hex.EncodeToString(sum[:16]) + ".json"
 }
 
-// writeMountMeta atomically writes discovery metadata via temp file and rename, returning the written path.
 func writeMountMeta(meta *mountMeta) (string, error) {
 	normalized := *meta
 	normalized.Mountpoint = canonicalMountpoint(normalized.Mountpoint)
@@ -80,7 +74,7 @@ func writeFileAtomic(dir, name string, data []byte, sharedSticky bool) (string, 
 		return "", err
 	}
 	if createdDir && sharedSticky {
-		// Shared fallback directory allows different UIDs to write and clean their own metadata files.
+
 		_ = os.Chmod(dir, 0o777|os.ModeSticky)
 	}
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
@@ -106,7 +100,6 @@ func writeFileAtomic(dir, name string, data []byte, sharedSticky bool) (string, 
 	return path, nil
 }
 
-// processAlive checks whether pid is alive via signal 0, treating EPERM as alive.
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -115,7 +108,6 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// listMountMetas reads metadata files for alive processes across all discovery directories, sorted by mountpoint.
 func listMountMetas() []mountMeta {
 	seen := make(map[string]struct{})
 	var out []mountMeta
@@ -151,8 +143,6 @@ func listMountMetas() []mountMeta {
 	return out
 }
 
-// resolveUmountMountMeta finds metadata for mountpoint across discovery directories,
-// preferring an entry whose daemon PID is alive and falling back to the first matching file.
 func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta, ok bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)
@@ -191,7 +181,6 @@ func resolveUmountMountMeta(mountpoint string) (metaPath string, meta mountMeta,
 	return "", mountMeta{}, false
 }
 
-// findMountMeta looks up active mount metadata for mountpoint, supporting symlink paths.
 func findMountMeta(mountpoint string) (mountMeta, bool) {
 	cleaned := filepath.Clean(mountpoint)
 	canon := canonicalMountpoint(cleaned)

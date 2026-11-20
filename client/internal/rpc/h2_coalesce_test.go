@@ -31,7 +31,7 @@ func buildTestH2HeadersFrame(streamID uint32, flags byte, payload []byte) []byte
 }
 
 func TestH2CoalesceConn_GivenHoldableHeadersFollowedBySmallData_CoalescesIntoSingleWrite(t *testing.T) {
-	// Given
+
 	raw := &recordingNetConn{}
 	var createdTimer *manualCoalesceTimer
 	conn := newH2CoalesceConnWithAfterFunc(raw, func(_ time.Duration, f func()) coalesceTimer {
@@ -41,7 +41,6 @@ func TestH2CoalesceConn_GivenHoldableHeadersFollowedBySmallData_CoalescesIntoSin
 	headers := buildTestH2HeadersFrame(1, h2FlagHeadersEndHeaders, []byte("hpack-hdr"))
 	data := []byte("small-data-frame-body")
 
-	// When
 	n1, err1 := conn.Write(headers)
 	require.NoError(t, err1)
 	require.Equal(t, len(headers), n1)
@@ -49,7 +48,6 @@ func TestH2CoalesceConn_GivenHoldableHeadersFollowedBySmallData_CoalescesIntoSin
 
 	n2, err2 := conn.Write(data)
 
-	// Then
 	require.NoError(t, err2)
 	require.Equal(t, len(data), n2)
 	require.True(t, createdTimer.stopped, "合并下发后必须停止兜底定时器")
@@ -59,7 +57,7 @@ func TestH2CoalesceConn_GivenHoldableHeadersFollowedBySmallData_CoalescesIntoSin
 }
 
 func TestH2CoalesceConn_GivenHoldableHeadersFollowedByLargeData_WritesCombinedPayloadViaWritev(t *testing.T) {
-	// Given
+
 	raw := &recordingNetConn{}
 	conn := newH2CoalesceConnWithAfterFunc(raw, func(_ time.Duration, f func()) coalesceTimer {
 		return &manualCoalesceTimer{fn: f}
@@ -67,12 +65,10 @@ func TestH2CoalesceConn_GivenHoldableHeadersFollowedByLargeData_WritesCombinedPa
 	headers := buildTestH2HeadersFrame(3, h2FlagHeadersEndHeaders, []byte("hdr"))
 	largeData := bytes.Repeat([]byte{0x42}, h2ScratchBufferBytes+512)
 
-	// When
 	_, err := conn.Write(headers)
 	require.NoError(t, err)
 	n2, err := conn.Write(largeData)
 
-	// Then
 	require.NoError(t, err)
 	require.Equal(t, len(largeData), n2)
 	combined := bytes.Join(raw.Writes(), nil)
@@ -80,7 +76,7 @@ func TestH2CoalesceConn_GivenHoldableHeadersFollowedByLargeData_WritesCombinedPa
 }
 
 func TestH2CoalesceConn_GivenNonHoldableFrame_FlushesImmediatelyWithoutTimer(t *testing.T) {
-	// Given
+
 	raw := &recordingNetConn{}
 	var timerCreated bool
 	conn := newH2CoalesceConnWithAfterFunc(raw, func(_ time.Duration, f func()) coalesceTimer {
@@ -90,13 +86,11 @@ func TestH2CoalesceConn_GivenNonHoldableFrame_FlushesImmediatelyWithoutTimer(t *
 	endStreamHeaders := buildTestH2HeadersFrame(5, h2FlagHeadersEndHeaders|h2FlagHeadersEndStream, []byte("no-body"))
 	settingsFrame := []byte{0, 0, 0, 0x04, 0x00, 0, 0, 0, 0}
 
-	// When
 	_, err := conn.Write(endStreamHeaders)
 	require.NoError(t, err)
 	_, err = conn.Write(settingsFrame)
 	require.NoError(t, err)
 
-	// Then
 	require.False(t, timerCreated, "非暂存帧不得启动合并定时器")
 	writes := raw.Writes()
 	require.Len(t, writes, 2)
@@ -105,7 +99,7 @@ func TestH2CoalesceConn_GivenNonHoldableFrame_FlushesImmediatelyWithoutTimer(t *
 }
 
 func TestH2CoalesceConn_GivenTimerExpiresBeforeData_FlushesHeldHeadersAndPropagatesAsyncError(t *testing.T) {
-	// Given: 虚拟定时器触发时连接写失败，后续 Write 应感知并传播异步错误
+
 	boom := errors.New("broken pipe")
 	raw := &recordingNetConn{failAfter: 0, failErr: boom}
 	var createdTimer *manualCoalesceTimer
@@ -115,14 +109,12 @@ func TestH2CoalesceConn_GivenTimerExpiresBeforeData_FlushesHeldHeadersAndPropaga
 	})
 	headers := buildTestH2HeadersFrame(7, h2FlagHeadersEndHeaders, []byte("hdr"))
 
-	// When
 	_, err := conn.Write(headers)
 	require.NoError(t, err)
 	createdTimer.Fire()
 	require.True(t, raw.IsClosed(), "timer-flush failure must close underlying conn immediately")
 	_, nextErr := conn.Write([]byte("next"))
 
-	// Then
 	require.ErrorIs(t, nextErr, boom)
 }
 
@@ -139,7 +131,7 @@ func (c *closeHookNetConn) Close() error {
 }
 
 func TestH2CoalesceConn_GivenTimerFlushFailure_UnlocksMutexBeforeClosingConnAndPreservesAsyncErr(t *testing.T) {
-	// Given
+
 	boom := errors.New("broken pipe")
 	raw := &recordingNetConn{failAfter: 0, failErr: boom}
 	var conn net.Conn
@@ -172,7 +164,6 @@ func TestH2CoalesceConn_GivenTimerFlushFailure_UnlocksMutexBeforeClosingConnAndP
 	})
 	headers := buildTestH2HeadersFrame(7, h2FlagHeadersEndHeaders, []byte("hdr"))
 
-	// When
 	_, err := conn.Write(headers)
 	require.NoError(t, err)
 	createdTimer.Fire()
@@ -181,7 +172,6 @@ func TestH2CoalesceConn_GivenTimerFlushFailure_UnlocksMutexBeforeClosingConnAndP
 	require.NoError(t, conn.Close())
 	_, postCloseWriteErr := conn.Write([]byte("after-close"))
 
-	// Then
 	require.True(t, closedByTimerFlush, "flushOnTimer must close underlying conn on write error")
 	require.False(t, closeProbeTimedOut, "flushOnTimer must release c.mu before calling c.Conn.Close")
 	require.ErrorIs(t, closeProbeErr, boom)
@@ -261,7 +251,7 @@ func requireFollowUpH2CPostsSucceed(t *testing.T, client *http.Client, targetURL
 }
 
 func TestH2CoalesceConn_GivenTimerFlushFailureOnRealH2CTransport_FailsFastAndRedialsOnce(t *testing.T) {
-	// Given
+
 	serverURL := startEchoH2CServer(t)
 	var dials atomic.Int64
 	var heldHeaderFailures atomic.Int64
@@ -290,19 +280,16 @@ func TestH2CoalesceConn_GivenTimerFlushFailureOnRealH2CTransport_FailsFastAndRed
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr}
 
-	// Complete the HTTP/2 SETTINGS handshake before testing held POST HEADERS.
 	requireWarmupH2CGet(t, client, serverURL)
 	require.Equal(t, int64(1), dials.Load())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// When
 	start := time.Now()
 	firstErr := doHangingPipePost(ctx, client, serverURL)
 	elapsed := time.Since(start)
 
-	// Then
 	require.Error(t, firstErr)
 	require.Equal(t, int64(1), heldHeaderFailures.Load(), "timer flush must hit the injected held HEADERS error")
 	require.Less(t, elapsed, time.Second, "stalled request must fail fast rather than wait for 3s timeout")
@@ -311,7 +298,7 @@ func TestH2CoalesceConn_GivenTimerFlushFailureOnRealH2CTransport_FailsFastAndRed
 }
 
 func TestH2CoalesceConn_GivenTimerExpiresWithHealthyConn_FlushesHeldHeaders(t *testing.T) {
-	// Given
+
 	raw := &recordingNetConn{}
 	var createdTimer *manualCoalesceTimer
 	conn := newH2CoalesceConnWithAfterFunc(raw, func(_ time.Duration, f func()) coalesceTimer {
@@ -320,19 +307,17 @@ func TestH2CoalesceConn_GivenTimerExpiresWithHealthyConn_FlushesHeldHeaders(t *t
 	})
 	headers := buildTestH2HeadersFrame(9, h2FlagHeadersEndHeaders, []byte("hdr"))
 
-	// When
 	_, err := conn.Write(headers)
 	require.NoError(t, err)
 	createdTimer.Fire()
 
-	// Then
 	writes := raw.Writes()
 	require.Len(t, writes, 1)
 	require.Equal(t, headers, writes[0])
 }
 
 func TestH2CoalesceConn_WhenClosed_StopsTimerAndClosesUnderlyingConn(t *testing.T) {
-	// Given
+
 	raw := &recordingNetConn{}
 	var createdTimer *manualCoalesceTimer
 	conn := newH2CoalesceConnWithAfterFunc(raw, func(_ time.Duration, f func()) coalesceTimer {
@@ -343,10 +328,8 @@ func TestH2CoalesceConn_WhenClosed_StopsTimerAndClosesUnderlyingConn(t *testing.
 	_, err := conn.Write(headers)
 	require.NoError(t, err)
 
-	// When
 	require.NoError(t, conn.Close())
 
-	// Then
 	require.True(t, createdTimer.stopped)
 	require.True(t, raw.IsClosed())
 	require.Nil(t, newH2CoalesceConn(nil))

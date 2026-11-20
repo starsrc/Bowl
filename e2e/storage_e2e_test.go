@@ -28,7 +28,6 @@ func registerDiskCleanup(t *testing.T, client storagev1connect.StorageServiceCli
 	})
 }
 
-// TestStorageLive_ProbesAndMetricsReachable 验证容器栈中运行的 `storage-service` 健康探针与指标端点可达。
 func TestStorageLive_ProbesAndMetricsReachable(t *testing.T) {
 	adminAddr := testutil.GetStorageAdminAddr()
 
@@ -48,14 +47,11 @@ func TestStorageLive_ProbesAndMetricsReachable(t *testing.T) {
 	require.Contains(t, metricsBody, "rpc_server_call_duration")
 }
 
-// TestStorageLive_DiskLifecycleResizeH2CAndEpochFence 验证真实容器与 PostgreSQL 下的盘创建、列表分页、
-// 在线扩容、h2c 并发 4 MiB 大块读写、写入世代号抢占围栏与删盘清理。
 func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client := testutil.NewStorageClient()
 
-	// Given: 创建测试盘并验证初始元数据与列表可达
 	created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 		Name:     "e2e-live-lifecycle",
 		MaxBytes: 4 << 20,
@@ -75,7 +71,6 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 		return d.GetDiskId() == diskID
 	}), "磁盘列表必须包含新创建的磁盘 %s", diskID)
 
-	// When: 只读挂载返回 Epoch=0，可写挂载返回 Epoch=1，写入后在线扩容至 16 MiB
 	mountRO, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId:   diskID,
 		ReadOnly: true,
@@ -101,7 +96,6 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(16<<20), statfs.Msg.GetTotalBytes())
 
-	// When: 通过 h2c 单连接并发写入两个 4 MiB 分片并回读校验
 	h2cClient := testutil.NewH2CStorageClient(testutil.GetStorageServiceAddr())
 	bigFile, err := h2cClient.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    diskID,
@@ -146,7 +140,6 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	require.Equal(t, chunk0, r0.Msg.GetData())
 	require.Equal(t, chunk1, r1.Msg.GetData())
 
-	// Then: 新可写挂载抢占 Epoch=2 后，旧 Epoch=1 写入被拦截返回 EBUSY；删盘后返回 ENOENT
 	mount2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
@@ -162,14 +155,11 @@ func TestStorageLive_DiskLifecycleResizeH2CAndEpochFence(t *testing.T) {
 	testutil.RequireConnectError(t, getDeletedErr, connect.CodeNotFound, "ENOENT")
 }
 
-// TestStorageLive_OnlineForkIsolationAndLineageDelete 验证在线无感 `ForkDisk`、
-// 孤儿净化配额水位、级联派生及真实 PostgreSQL 外键约束下的同血缘删盘回收。
 func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client := testutil.NewStorageClient()
 
-	// Given: 创建父盘，写入 300 KiB 常规文件与 256 KiB 未回收孤儿文件
 	createdParent, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 		Name:     "e2e-live-fork-parent",
 		MaxBytes: 16 << 20,
@@ -187,7 +177,7 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	sharedIno := sharedCreate.Msg.GetInode().GetIno()
-	sharedPayload := bytes.Repeat([]byte("FORK-BASE-DATA-"), 20480) // 300 KiB
+	sharedPayload := bytes.Repeat([]byte("FORK-BASE-DATA-"), 20480)
 	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
 		DiskId: parentID, Epoch: parentEpoch, Ino: sharedIno, Offset: 0, Data: sharedPayload,
 	}))
@@ -208,7 +198,6 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	// When: 以 512 KiB 配额在线派生 child1（低于含孤儿 556 KiB、高于净化后 300 KiB）并级联派生 grandchild
 	child1Resp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
 		SourceDiskId: parentID,
 		Name:         "e2e-live-fork-child1",
@@ -221,7 +210,6 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	require.Equal(t, parentID, child1.GetParentDiskId())
 	require.Equal(t, uint64(len(sharedPayload)), child1.GetUsedBytes())
 
-	// 父盘原 Epoch=1 继续覆写，孤儿句柄仍可读；子盘保持 Fork 时刻数据且新分配 Inode 不冲突
 	parentMutated := []byte("PARENT-NEW-PAYLOAD-AFTER-FORK")
 	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
 		DiskId: parentID, Epoch: parentEpoch, Ino: sharedIno, Offset: 0, Data: parentMutated,
@@ -265,7 +253,6 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	registerDiskCleanup(t, client, grandID)
 	require.Equal(t, child1ID, grandResp.Msg.GetDisk().GetParentDiskId())
 
-	// Then: 按 |D|>=2 -> |D|==1 -> |D|==0 顺序删盘，唯一幸存盘数据完好且最终全部清理
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: parentID}))
 	require.NoError(t, err)
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: grandID}))
@@ -281,14 +268,11 @@ func TestStorageLive_OnlineForkIsolationAndLineageDelete(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim verifies server-side
-// CreateTmpfile, Link promotion, exclusive rejection, ReclaimOrphan, and mount-time orphan cleanup.
 func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client := testutil.NewStorageClient()
 
-	// Given: a freshly created and mounted disk.
 	created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 		Name:     "e2e-live-tmpfile",
 		MaxBytes: 16 << 20,
@@ -302,7 +286,6 @@ func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
 	epoch1 := mount1.Msg.GetEpoch()
 	require.Equal(t, uint64(1), epoch1)
 
-	// When: creating a non-exclusive tmpfile, writing and reading data, and promoting it via Link.
 	linkableResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		DiskId:    diskID,
 		Epoch:     epoch1,
@@ -365,7 +348,6 @@ func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
 	require.Equal(t, uint64(len(linkablePayload)), statPromoted.Msg.GetUsedBytes())
 	require.Equal(t, uint64(2), statPromoted.Msg.GetFiles())
 
-	// When: creating an exclusive tmpfile, writing data, rejecting Link, and reclaiming via ReclaimOrphan.
 	exclResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		DiskId:    diskID,
 		Epoch:     epoch1,
@@ -426,7 +408,6 @@ func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
 	require.Equal(t, uint64(len(linkablePayload)), statReclaimed.Msg.GetUsedBytes())
 	require.Equal(t, uint64(2), statReclaimed.Msg.GetFiles())
 
-	// When: creating a lingering unpromoted tmpfile with data and advancing the writer epoch.
 	lingeringResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		DiskId:    diskID,
 		Epoch:     epoch1,
@@ -451,7 +432,6 @@ func TestStorageLive_CreateTmpfileLinkPromotionAndOrphanReclaim(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
 
-	// Then: the lingering tmpfile is cleaned while the promoted file data remains intact.
 	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
 		DiskId: diskID,
 		Ino:    lingeringIno,

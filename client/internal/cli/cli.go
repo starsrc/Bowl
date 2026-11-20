@@ -1,4 +1,3 @@
-// Package cli implements bowl command-line parsing, virtual disk control-plane operations, and FUSE mounting.
 package cli
 
 import (
@@ -90,8 +89,6 @@ func newRootCmd(args []string, stdout, stderr io.Writer) *cobra.Command {
 	return rootCmd
 }
 
-// Execute runs the bowl CLI with args excluding the executable name.
-// It returns 0 on success, 2 on CLI syntax or validation errors, and 1 on runtime errors.
 func Execute(args []string, stdout, stderr io.Writer) int {
 	rootCmd := newRootCmd(args, stdout, stderr)
 	executedCmd, err := rootCmd.ExecuteC()

@@ -7,8 +7,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// VirtualStatsIno 是挂载点根目录下 .stats / .jfs.stats 虚拟统计文件的固定内核 Inode 编号 ((1<<63) - 1)。
-// 该值不置位 tmpLocalInoBit (1<<63)，亦不与正整数服务端持久化 Inode 冲突。
 const VirtualStatsIno uint64 = (uint64(1) << 63) - 1
 
 const (

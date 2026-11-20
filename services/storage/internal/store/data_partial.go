@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// setAttrWithSize 按 256 KiB 逻辑块网格执行包含 Size 截断/扩容的 SetAttr 流水线：
-//   - 完全落入截断区间的整块直接在 Phase B 中执行 batchDeleteDeferred(DataKey)；
-//   - 边界残块在 inodeLocks[ino&0xfff] 保护下读取有效前缀，若全为零则直接删除该 DataKey，否则追加写入活跃 .pack 并更新 DataKey -> newRef。
 func (s *StoreActor) setAttrWithSize(ctx context.Context, ino uint64, req SetAttrReq) (Attribute, error) {
 	unlock, err := s.enter()
 	if err != nil {
@@ -30,7 +27,6 @@ func (s *StoreActor) setAttrWithSize(ctx context.Context, ino uint64, req SetAtt
 		staged    []BlobRef
 	)
 
-	// 若截断后尾部落在某个 256 KiB 块内部（0 < tailLen < BlobSize），读取有效前缀并追加至活跃 .pack（或全零时标记删除）。
 	if newSize > 0 {
 		tailBlock := (newSize - 1) / BlobSize
 		tailLen := uint32(newSize - tailBlock*BlobSize)
@@ -106,17 +102,12 @@ type fallocateDataOp struct {
 	zeroRange    bool
 	partialSpecs []writeBlockSpec
 
-	// Phase A 校验缓存至 Phase B
 	target         Inode
 	newSize        uint64
 	bytesDelta     uint64
 	fullDeleteKeys []dataKeyEntry
 }
 
-// Fallocate 按 256 KiB 逻辑块网格执行文件空间预留扩展或区间打洞/置零：
-//   - 支持 mode: 0（默认预留扩展）、FallocKeepSize、FallocPunchHole|FallocKeepSize、FallocZeroRange、FallocZeroRange|FallocKeepSize；
-//   - 完全落入打洞/置零区间的 256 KiB 整块直接在 Phase B 中执行 batchDeleteDeferred(DataKey)；
-//   - 首尾边界残块在 inodeLocks[ino&0xfff] 保护下读取并清零目标子区间，若打洞后全为零则直接删除该 DataKey，否则追加写入活跃 .pack 并更新 DataKey -> newRef。
 func (s *StoreActor) Fallocate(ctx context.Context, ino, offset, length uint64, mode uint32, epoch ...uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -161,8 +152,7 @@ func (s *StoreActor) Fallocate(ctx context.Context, ino, offset, length uint64, 
 	)
 
 	if zeroRange {
-		// 仅首尾非完整对齐的边界残块（最多 2 个块）需在阶段 1 读取旧块清零并追加写入活跃 .pack；
-		// 中间所有完整覆盖的 256 KiB 块无需阶段 1 磁盘 I/O，直接在阶段 2 扫描 DataKey 调 batchDeleteDeferred。
+
 		end := offset + length
 		firstBlock := offset / BlobSize
 		lastBlock := (end - 1) / BlobSize
@@ -179,7 +169,7 @@ func (s *StoreActor) Fallocate(ctx context.Context, ino, offset, length uint64, 
 			inBlock := int(rStart - blockStart)
 			clearLen := int(rEnd - rStart)
 			if inBlock == 0 && clearLen == BlobSize {
-				// 完整 256 KiB 块交由阶段 2 范围扫描删除
+
 				continue
 			}
 			spec, hasSpec, err := s.preparePunchPartialBlock(ctx, blobs, ino, blockIdx, inBlock, clearLen, &staged)
@@ -298,7 +288,7 @@ func (s *StoreActor) validateFallocateCmd(cmd *writeCmd) error {
 	}
 
 	if op.zeroRange {
-		// 计算完整 256 KiB 块的闭区间 [fullStart, fullEnd]
+
 		fullStart := (op.offset + BlobSize - 1) / BlobSize
 		var fullEnd uint64
 		hasFullRange := false

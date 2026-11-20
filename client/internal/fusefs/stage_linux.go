@@ -10,7 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// CheckTmpfs 检查目标路径所在的文件系统是否为 Linux tmpfs（TMPFS_MAGIC = 0x01021994）。
 func CheckTmpfs(path string) (bool, error) {
 	var st unix.Statfs_t
 	for {

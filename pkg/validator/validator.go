@@ -1,4 +1,3 @@
-// Package validator 提供 Storage RPC 请求参数的业务校验器。
 package validator
 
 import (
@@ -14,10 +13,8 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// ErrorDomain 定义与 storage 领域层一致的 ErrorInfo 错误领域标识符。
 const ErrorDomain = "bowl.storage"
 
-// POSIX errno reason 常量，与 meta.ToStatus 映射契约保持严格一致。
 const (
 	ReasonInvalidArgument = "EINVAL"
 	ReasonNameTooLong     = "ENAMETOOLONG"
@@ -25,9 +22,8 @@ const (
 	ReasonTooBig          = "E2BIG"
 )
 
-// storageMessages 汇总 StorageService 全部现有的请求与响应消息，用于启动期预编译校验规则。
 var storageMessages = []proto.Message{
-	// 请求消息 (Requests)
+
 	&storagev1.MountDiskRequest{},
 	&storagev1.RenewMountRequest{},
 	&storagev1.UnmountDiskRequest{},
@@ -67,7 +63,6 @@ var storageMessages = []proto.Message{
 	&storagev1.ReadCommitNodeRequest{},
 	&storagev1.MergeDiskRequest{},
 
-	// 响应消息 (Responses)
 	&storagev1.MountDiskResponse{},
 	&storagev1.RenewMountResponse{},
 	&storagev1.UnmountDiskResponse{},
@@ -107,7 +102,6 @@ var storageMessages = []proto.Message{
 	&storagev1.ReadCommitNodeResponse{},
 	&storagev1.MergeDiskResponse{},
 
-	// 嵌套与共享消息
 	&storagev1.DirEntry{},
 	&storagev1.DirEntryPlus{},
 	&storagev1.Inode{},
@@ -120,31 +114,24 @@ var storageMessages = []proto.Message{
 	&storagev1.MergeConflictReport{},
 }
 
-// ValidationError 包装 protovalidate.ValidationError，并将其边界违规映射为携带 google.rpc.ErrorInfo 的 gRPC Status。
-// 同时实现 Unwrap() error 与 GRPCStatus() *status.Status，确保 errors.As(..., **protovalidate.ValidationError)、
-// status.FromError 及 meta.ToStatus 均可无缝提取底层违规详情与对应的 POSIX errno reason。
 type ValidationError struct {
 	err    *protovalidate.ValidationError
 	reason string
 	domain string
 }
 
-// Error 返回底层 protovalidate 校验错误信息。
 func (e *ValidationError) Error() string {
 	return e.err.Error()
 }
 
-// Unwrap 返回底层 *protovalidate.ValidationError。
 func (e *ValidationError) Unwrap() error {
 	return e.err
 }
 
-// Reason 返回映射后的标准 POSIX errno 名称（如 "EINVAL"、"ERANGE"、"E2BIG"、"ENAMETOOLONG"）。
 func (e *ValidationError) Reason() string {
 	return e.reason
 }
 
-// Domain 返回错误所属的服务领域标识符（如 "bowl.storage"）。
 func (e *ValidationError) Domain() string {
 	if e.domain != "" {
 		return e.domain
@@ -152,7 +139,6 @@ func (e *ValidationError) Domain() string {
 	return ErrorDomain
 }
 
-// GRPCStatus 构造携带 google.rpc.ErrorInfo 的 InvalidArgument 状态。
 func (e *ValidationError) GRPCStatus() *status.Status {
 	return buildInvalidArgumentStatus(e.err.Error(), e.reason, e.Domain())
 }
@@ -177,9 +163,6 @@ func (v *storageValidator) Validate(msg proto.Message, options ...protovalidate.
 	return err
 }
 
-// NewStorageValidator 创建并初始化一个预编译好 StorageService 全部请求、响应与实体消息的 protovalidate.Validator。
-// 通过 protovalidate.WithMessages 选项在启动阶段编译 CEL 约束规则，避免在首次运行时产生编译延迟；
-// 同时将字段边界校验违规自动关联至对应的 POSIX errno reason（ERANGE、E2BIG、ENAMETOOLONG、EINVAL）。
 func NewStorageValidator() (protovalidate.Validator, error) {
 	inner, err := protovalidate.New(protovalidate.WithMessages(storageMessages...))
 	if err != nil {
@@ -188,8 +171,6 @@ func NewStorageValidator() (protovalidate.Validator, error) {
 	return &storageValidator{inner: inner}, nil
 }
 
-// ErrnoReason 从校验错误中提取对应的 POSIX errno reason。
-// 支持 NewStorageValidator 返回的 *ValidationError 以及原始 *protovalidate.ValidationError。
 func ErrnoReason(err error) (string, bool) {
 	if err == nil {
 		return "", false
@@ -203,9 +184,6 @@ func ErrnoReason(err error) (string, bool) {
 	return "", false
 }
 
-// ToStatus 将校验错误转换为携带 google.rpc.ErrorInfo 的 gRPC *status.Status。
-// 若 err 为 protovalidate 校验违规（含原始 *protovalidate.ValidationError），
-// 按字段与规则优先级映射为 codes.InvalidArgument 及对应的 ERANGE / E2BIG / ENAMETOOLONG / EINVAL。
 func ToStatus(err error) *status.Status {
 	if err == nil {
 		return nil
@@ -223,7 +201,6 @@ func ToStatus(err error) *status.Status {
 	return status.New(codes.Unknown, err.Error())
 }
 
-// ToGRPCError 将校验错误转换为携带 google.rpc.ErrorInfo 的 gRPC error。
 func ToGRPCError(err error) error {
 	if err == nil {
 		return nil
@@ -246,8 +223,6 @@ func buildInvalidArgumentStatus(msg, reason, domain string) *status.Status {
 	return st
 }
 
-// translateValidationReason 按照与 meta.Manager 静态校验完全一致的求值优先级，
-// 将 protovalidate 违规项还原为对应的 POSIX errno reason。
 func translateValidationReason(valErr *protovalidate.ValidationError) string {
 	reason, _ := translateValidation(valErr, ErrorDomain)
 	return reason
@@ -286,7 +261,7 @@ func classifyViolation(v *protovalidate.Violation) (priority int, reason, domain
 	if strings.HasPrefix(fullName, "storage.v1.") {
 		domain = ErrorDomain
 	} else if fullName == "" {
-		// 消息级约束（如 update_disk_has_update）无 field descriptor，返回空 domain，保留调用方的 defaultDomain
+
 		domain = ""
 	}
 	return priority, reason, domain
@@ -316,7 +291,7 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 	}
 
 	switch fullName {
-	// 第 1 优先级：基础整型/标识符与模式/标志字段校验 -> EINVAL
+
 	case "storage.v1.MountDiskRequest.disk_id",
 		"storage.v1.RenewMountRequest.disk_id",
 		"storage.v1.RenewMountRequest.mount_id",
@@ -471,7 +446,6 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.StatFSRequest.ino":
 		return 10, ReasonInvalidArgument
 
-	// 第 2/3 优先级：Xattr 属性名称长度边界 (仅 >255 为 ERANGE，空名称或含 NUL 为 EINVAL)
 	case "storage.v1.SetXattrRequest.name",
 		"storage.v1.GetXattrRequest.name",
 		"storage.v1.RemoveXattrRequest.name",
@@ -481,7 +455,6 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		}
 		return 30, ReasonInvalidArgument
 
-	// 第 2/3 优先级：主目录项名称超长 (>255) -> ENAMETOOLONG；为空或包含 '/' / NUL -> EINVAL
 	case "storage.v1.LookupRequest.name",
 		"storage.v1.MknodRequest.name",
 		"storage.v1.MkdirRequest.name",
@@ -502,14 +475,12 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		}
 		return 30, ReasonInvalidArgument
 
-	// 第 4/5 优先级：Rename 目标新名称超长 (>255) -> ENAMETOOLONG；为空或包含 '/' / NUL -> EINVAL
 	case "storage.v1.RenameRequest.new_name":
 		if isMaxLen {
 			return 40, ReasonNameTooLong
 		}
 		return 50, ReasonInvalidArgument
 
-	// 第 4/5 优先级：Symlink / Readlink 目标路径为空或包含 NUL -> EINVAL；超长 (>4095) -> ENAMETOOLONG
 	case "storage.v1.SymlinkRequest.target",
 		"storage.v1.ReadlinkResponse.target":
 		if isMaxLen {
@@ -517,7 +488,6 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		}
 		return 40, ReasonInvalidArgument
 
-	// 第 4 优先级：Xattr 属性值超长 (>65536) -> ERANGE (对齐 JuiceFS Linux 行为)
 	case "storage.v1.SetXattrRequest.value",
 		"storage.v1.GetXattrResponse.value":
 		if isMaxLen {

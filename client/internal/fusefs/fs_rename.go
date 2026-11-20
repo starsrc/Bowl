@@ -10,15 +10,13 @@ import (
 )
 
 const (
-	// renameNoReplace 对应 Linux RENAME_NOREPLACE (0x1)，要求目标目录项不存在。
 	renameNoReplace = 0x1
-	// renameExchange 对应 Linux RENAME_EXCHANGE (0x2)，原子双向交换两个目录项。
+
 	renameExchange = 0x2
-	// renameWhiteout 对应 Linux RENAME_WHITEOUT (0x4)，在源项位置创建 whiteout 特殊节点。
+
 	renameWhiteout = 0x4
 )
 
-// Rename 实现目录项重命名、跨目录移动与双向原子交换操作（支持 Linux FUSE_RENAME2 协议标志位）。
 func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, newName string) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpRename)
 	opCtx, endSpan := fs.startFuseOp(OpRename)
@@ -104,7 +102,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 				fs.stage.BarrierInode(opCtx, targetServerIno)
 			}
 		}
-		// 与并发 Release 按 Inode 串行，避免目标节点孤儿标记与最后句柄关闭互相错过。
+
 		unlock := fs.inodeLocks.lock(target)
 		defer unlock()
 		if target != source &&
@@ -135,7 +133,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	if (input.Flags & renameWhiteout) != 0 {
 		protoFlags |= 0x4
 	}
-	// 保留未知位透传给服务端，由服务端契约校验返回 EINVAL
+
 	if unknown := input.Flags &^ (renameNoReplace | renameExchange | renameWhiteout); unknown != 0 {
 		protoFlags |= unknown
 	}
@@ -159,8 +157,6 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	}
 	fs.markMetaDirty()
 
-	// Keep parent inode caches warm when parent nlink deltas are known; drop the parent inode cache
-	// whenever the exact delta cannot be determined locally without extra RPCs.
 	oldDelta, oldKnown, newDelta, newKnown := renameParentNlinkDeltas(
 		input.NodeId, input.Newdir, oldName, newName, input.Flags,
 		source, sourceAttr, target, targetKnown, targetAttr,
@@ -178,7 +174,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		}
 	}
 	if input.Flags&renameExchange != 0 {
-		// 交换后旧名指向原目标节点，新名指向原源节点。
+
 		if target != 0 {
 			fs.cache.putEntryAt(epoch, input.NodeId, oldName, target)
 		} else {
@@ -190,9 +186,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 			fs.cache.removeEntry(input.Newdir, newName)
 		}
 	} else {
-		// 旧名消失。WHITEOUT 会在旧名留下特殊节点，保守地按未命中处理；
-		// 普通重命名的旧名已确定不存在，回填负缓存（ino=0），避免随后 access()/stat()
-		// 再次穿透 RPC。同名同目录自重命名由下面的新名回填统一处理。
+
 		if input.Flags&renameWhiteout != 0 {
 			fs.cache.removeEntry(input.NodeId, oldName)
 		} else if input.NodeId != input.Newdir || oldName != newName {
@@ -240,8 +234,6 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 	return fuse.OK
 }
 
-// renameParentNlinkDeltas computes exact parent nlink changes matching the server Rename contract.
-// A false known flag tells the caller to drop that parent's cached inode instead of guessing delta=0.
 func renameParentNlinkDeltas(
 	oldDir, newDir uint64,
 	oldName, newName string,

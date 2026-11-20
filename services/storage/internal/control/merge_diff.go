@@ -17,7 +17,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
-// DiffDiskParams 描述差异对比请求的控制面参数。
 type DiffDiskParams struct {
 	SourceDiskID  string
 	TargetDiskID  string
@@ -27,7 +26,6 @@ type DiffDiskParams struct {
 	PageToken     string
 }
 
-// DiffDiskResult 描述差异对比返回的公共祖先、统计摘要与分页条目。
 type DiffDiskResult struct {
 	LCACommitID   string
 	Summary       store.DiffSummary
@@ -35,7 +33,6 @@ type DiffDiskResult struct {
 	NextPageToken string
 }
 
-// ReadCommitNodeParams 描述从指定不可变历史提交切面分片读取节点内容的参数。
 type ReadCommitNodeParams struct {
 	DiskID   string
 	CommitID string
@@ -44,7 +41,6 @@ type ReadCommitNodeParams struct {
 	Size     uint32
 }
 
-// MergeDiskParams 描述三路合并请求的控制面参数。
 type MergeDiskParams struct {
 	SourceDiskID   string
 	TargetDiskID   string
@@ -55,7 +51,6 @@ type MergeDiskParams struct {
 	MaxBytes       *uint64
 }
 
-// MergeDiskResult 描述三路合并返回的结果视图。
 type MergeDiskResult struct {
 	Disk               *Disk
 	LCACommitID        string
@@ -64,14 +59,12 @@ type MergeDiskResult struct {
 	TargetMaxBytes     uint64
 }
 
-// MergeConflictError 携带底层存储引擎检出的三路合并冲突报告，供服务端编码为 ECONFLICT 详情。
 type MergeConflictError struct {
 	LCACommitID string
 	Report      store.MergeConflictReport
 	Err         error
 }
 
-// Error 返回冲突错误的可读摘要。
 func (e *MergeConflictError) Error() string {
 	if e == nil {
 		return ""
@@ -82,7 +75,6 @@ func (e *MergeConflictError) Error() string {
 	return fmt.Sprintf("merge conflicts detected (%d total)", e.Report.TotalConflicts)
 }
 
-// Unwrap 暴露底层哨兵错误链，保持与 store.ErrMergeConflict 的双向判定。
 func (e *MergeConflictError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -127,7 +119,6 @@ func parseCommitID(commitID string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// lockDiskPair 按 UUID 字典序严格升序获取双盘控制面互斥锁，杜绝互锁并发请求产生死锁。
 func (m *manager) lockDiskPair(ctx context.Context, diskA, diskB string) func() {
 	if diskA == diskB {
 		return m.lockDisk(ctx, diskA)
@@ -153,8 +144,6 @@ func (m *manager) sharedCache() (*pebble.Cache, error) {
 	return m.cache, nil
 }
 
-// snapshotDiskForInspect 在不与 RW Pebble 句柄并发打开同一目录的前提下，
-// 通过在线 Actor 的 Checkpoint 机制生成一致性只读快照并返回清理函数。
 func (m *manager) snapshotDiskForInspect(
 	ctx context.Context,
 	diskID string,
@@ -188,8 +177,6 @@ func (m *manager) snapshotDiskForInspect(
 	return snapDir, stats.HasOrphans, cleanup, nil
 }
 
-// findLCA 基于同血缘提交 DAG 计算 commitA 与 commitB 的唯一极大公共祖先（MCA）。
-// 当且仅当 |MCA| == 1 时返回该提交；若存在多个不可比较公共祖先（Criss-Cross）则返回 ErrAmbiguousLCA。
 func findLCA(commits []db.CommitRecord, commitA, commitB uuid.UUID) (uuid.UUID, error) {
 	if commitA == uuid.Nil || commitB == uuid.Nil {
 		return uuid.Nil, ErrNoBaseCommit
@@ -248,8 +235,6 @@ func findLCA(commits []db.CommitRecord, commitA, commitB uuid.UUID) (uuid.UUID, 
 		return uuid.Nil, fmt.Errorf("%w: commits %s and %s share no common ancestor", ErrNoBaseCommit, commitA, commitB)
 	}
 
-	// 因为 ancA ∩ ancB 对祖先闭包封闭，任何被其他公共祖先支配的节点必为其某个公共祖先的直接或间接父代；
-	// 沿着公共集合内的父链向上标记即可精确筛选所有极大公共祖先（MCA）。
 	dominated := make(map[uuid.UUID]bool, len(common))
 	for id := range common {
 		rec := byID[id]
@@ -524,7 +509,6 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		}
 	}
 
-	// Phase 1：目标盘保持在线，利用只读 Checkpoint 快照运行三路合并演算。
 	sourceSnapDir, srcHasOrphans, cleanupSrc, err := m.snapshotDiskForInspect(ctx, sourceKey, sourceRow.LineageID, "merge-src")
 	if err != nil {
 		return nil, err
@@ -631,7 +615,6 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		}, nil
 	}
 
-	// 在数据库提交之前预先物化不可变历史切面，并落盘 srccommit 关联标记以支持崩溃回滚精确清理。
 	mergeCommitDir = m.commitDir(newMergeCommitID.String())
 	if cloneErr := store.CloneCheckpointDir(ctx, stagingDir, mergeCommitDir); cloneErr != nil {
 		m.lineageCommitMu.RUnlock()
@@ -673,7 +656,6 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		m.beforePhase2CutoverHook()
 	}
 
-	// Phase 2：摘除并关闭旧目标 Actor，执行 (WriterEpoch, NextWriteSeq) CAS 校验与原子切换。
 	m.poolMu.Lock()
 	if m.closed {
 		m.poolMu.Unlock()
@@ -725,7 +707,6 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		_ = os.Remove(srcMarkerPath)
 	}
 
-	// 数据库已提交 C_merge，后续目录切换若意外中断将由 openDiskActor 崩溃前滚接管。
 	oldDir := m.oldMergeDir(targetKey, newMergeCommitID)
 	_ = m.removeAll(oldDir)
 	if err = os.Rename(tgtDir, oldDir); err != nil {
@@ -787,8 +768,6 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	}, nil
 }
 
-// reconcilePendingMergeLocked 在打开读写 DiskActor 前扫描 disks/ 中残余的 .merge.<C_merge>、.old.<C_merge> 与 .srccommit.* 产物，
-// 以 PostgreSQL 记录的 target.BaseCommitID 及已物化切换事实为依据幂等执行前滚或回滚清理。
 func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string) error {
 	disksRoot := filepath.Join(m.storageRoot, "disks")
 	entries, err := os.ReadDir(disksRoot)
@@ -877,7 +856,6 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 		}
 	}
 
-	// 确定性排序：若 row.BaseCommitID 存在于待处理集合，优先执行其切换，再升序清理其余历史残留。
 	orderedCIDs := make([]uuid.UUID, 0, len(pendingCommitIDs))
 	if _, hasBase := pendingCommitIDs[row.BaseCommitID]; hasBase && row.BaseCommitID != uuid.Nil {
 		orderedCIDs = append(orderedCIDs, row.BaseCommitID)
@@ -906,7 +884,6 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 		_, oldErr := os.Stat(oldDir)
 		oldExists := oldErr == nil
 
-		// oldDir 仅在 PG 提交之后才会被创建；若目标目录缺失且 staging 与 old 同时存在，说明已越过 PG 提交点，必须前滚。
 		shouldRollForward := (row.BaseCommitID == cid) || (tgtMissing && stagingExists && oldExists)
 		if shouldRollForward {
 			if stagingExists {

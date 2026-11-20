@@ -50,7 +50,6 @@ func (c *countingReadCloser) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// controllableStorageProxy 为黑盒 E2E 测试提供可观测、可注入延迟与阻塞门控的 HTTP/2 反向代理。
 type controllableStorageProxy struct {
 	Endpoint string
 
@@ -584,7 +583,6 @@ func fetchDiskUsage(t *testing.T, client storagev1connect.StorageServiceClient, 
 	return resp.Msg.GetDisk().GetUsedBytes(), resp.Msg.GetDisk().GetUsedInodes()
 }
 
-// TestStagedMode_FlagValidation_GivenInvalidArgsOrEnv_Exits2 验证所有非法挂载模式与暂存参数组合均返回退出码 2。
 func TestStagedMode_FlagValidation_GivenInvalidArgsOrEnv_Exits2(t *testing.T) {
 	endpoint := getStorageEndpoint()
 	invalidMP := t.TempDir()
@@ -617,20 +615,17 @@ func TestStagedMode_FlagValidation_GivenInvalidArgsOrEnv_Exits2(t *testing.T) {
 	}
 }
 
-// TestStagedMode_DefaultMode_GivenNoModeFlag_UsesStaged512MiBAndPersistsWrite 验证默认模式为 staged 且默认容量为 512 MiB。
 func TestStagedMode_DefaultMode_GivenNoModeFlag_UsesStaged512MiBAndPersistsWrite(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	diskID := createTestDisk(t, client).GetDiskId()
 	mp, stop := mountWithCleanup(t, endpoint, diskID, "--admin-addr", "127.0.0.1:0")
 
-	// When
 	snap := fetchDebugStats(t, readMountAdminAddr(t, mp))
 	require.NoError(t, os.WriteFile(filepath.Join(mp, "default-staged.txt"), []byte("staged-ok"), 0o644))
 	stop()
 
-	// Then
 	require.Equal(t, uint64(536_870_912), snap.Stage.CapacityBytes, "scene=default_stage_capacity want=536870912 got=%d", snap.Stage.CapacityBytes)
 	mpVerify, stopVerify := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--direct-io")
 	defer stopVerify()
@@ -639,9 +634,8 @@ func TestStagedMode_DefaultMode_GivenNoModeFlag_UsesStaged512MiBAndPersistsWrite
 	require.Equal(t, []byte("staged-ok"), got)
 }
 
-// TestStagedMode_ReadOnlyMode_GivenAmbientStageEnv_IgnoresStageDirAndRejectsWritesAndTmpfileWithEROFS 验证 --mode ro 忽略暂存环境变量并拒绝常规写与 O_TMPFILE。
 func TestStagedMode_ReadOnlyMode_GivenAmbientStageEnv_IgnoresStageDirAndRejectsWritesAndTmpfileWithEROFS(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	diskID := createTestDisk(t, client).GetDiskId()
@@ -649,23 +643,20 @@ func TestStagedMode_ReadOnlyMode_GivenAmbientStageEnv_IgnoresStageDirAndRejectsW
 	t.Setenv("BOWL_STAGE_SIZE", "1MiB")
 	t.Setenv("BOWL_STAGE_DIR", unusedStageDir)
 
-	// When
 	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--admin-addr", "127.0.0.1:0")
 	defer stopRO()
 	roSnap := fetchDebugStats(t, readMountAdminAddr(t, mpRO))
 	writeErr := os.WriteFile(filepath.Join(mpRO, "ro-deny.txt"), []byte("nope"), 0o644)
 	_, tmpErr := unix.Open(mpRO, unix.O_TMPFILE|unix.O_RDWR, 0o600)
 
-	// Then
 	require.NoDirExists(t, unusedStageDir, "scene=ro_mode want=stage_dir_not_created")
 	require.Zero(t, roSnap.Stage.CapacityBytes, "scene=ro_mode want=stage_capacity_0 got=%d", roSnap.Stage.CapacityBytes)
 	require.ErrorIs(t, writeErr, syscall.EROFS)
 	require.ErrorIs(t, tmpErr, syscall.EROFS)
 }
 
-// TestStagedMode_TmpfsStageDir_GivenDevShmPath_LogsStageDirOnTmpfsWarning 验证暂存目录位于 /dev/shm 时记录 stage_dir_on_tmpfs 告警日志。
 func TestStagedMode_TmpfsStageDir_GivenDevShmPath_LogsStageDirOnTmpfsWarning(t *testing.T) {
-	// Given
+
 	requirePathIsTmpfs(t, "/dev/shm")
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
@@ -675,12 +666,10 @@ func TestStagedMode_TmpfsStageDir_GivenDevShmPath_LogsStageDirOnTmpfsWarning(t *
 	require.NoError(t, os.MkdirAll(shmStageDir, 0o755))
 	t.Cleanup(func() { _ = os.RemoveAll(shmStageDir) })
 
-	// When
 	logPath := filepath.Join(t.TempDir(), "mount-tmpfs.log")
 	_, _, _, stopMount := startMountedDaemon(t, endpoint, diskID, "--stage-dir", shmStageDir, "--log-file", logPath)
 	defer stopMount()
 
-	// Then
 	logBytes, err := os.ReadFile(logPath)
 	require.NoError(t, err)
 	logStr := string(logBytes)
@@ -689,9 +678,8 @@ func TestStagedMode_TmpfsStageDir_GivenDevShmPath_LogsStageDirOnTmpfsWarning(t *
 	require.Contains(t, logStr, shmStageDir)
 }
 
-// TestStagedMode_StageDirStartup_GivenDefunctLockAndLiveInstance_CleansOnlyDefunct 验证启动扫描清理失效 inst-999999-dead/.lock 残留并保留存活实例目录。
 func TestStagedMode_StageDirStartup_GivenDefunctLockAndLiveInstance_CleansOnlyDefunct(t *testing.T) {
-	// Given: 实例 #1 持锁运行并写入已死进程遗留 inst-999999-dead/.lock
+
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	disk1ID := createTestDisk(t, client).GetDiskId()
@@ -708,10 +696,8 @@ func TestStagedMode_StageDirStartup_GivenDefunctLockAndLiveInstance_CleansOnlyDe
 	require.NoError(t, os.WriteFile(filepath.Join(defunctDir, ".lock"), nil, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(defunctDir, "chunk-1.stage"), []byte("stale"), 0o600))
 
-	// When: 启动共享同一暂存根目录的实例 #2，然后双双卸载
 	_, _, _, stop2 := startMountedDaemon(t, endpoint, disk2ID, "--stage-dir", stageDir)
 
-	// Then
 	require.NoDirExists(t, defunctDir, "scene=startup_cleanup want=defunct_dir_removed")
 	require.DirExists(t, liveInstDir, "scene=startup_cleanup want=live_instance_dir_preserved")
 
@@ -720,9 +706,8 @@ func TestStagedMode_StageDirStartup_GivenDefunctLockAndLiveInstance_CleansOnlyDe
 	requireNoDirEntries(t, stageDir, "post_umount_shared_stage_dir")
 }
 
-// TestStagedMode_SlowServerReadYourOwnWrites_GivenBlockedWriteRPCs_ReadsExactBytesWithoutFsyncOrReadRPC 验证慢服务端期间 write/close/open/read 无需 fsync 即命中本地暂存并零 Read RPC。
 func TestStagedMode_SlowServerReadYourOwnWrites_GivenBlockedWriteRPCs_ReadsExactBytesWithoutFsyncOrReadRPC(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	proxy := startControllableStorageProxy(t, getStorageEndpoint())
 	diskID := createTestDisk(t, client).GetDiskId()
@@ -734,7 +719,6 @@ func TestStagedMode_SlowServerReadYourOwnWrites_GivenBlockedWriteRPCs_ReadsExact
 	wantRYOW := deterministicPayload("staged-ryow-5m", 5_242_880)
 	ryowPath := filepath.Join(mp, "ryow.bin")
 
-	// When: 写 5 MiB 后关闭（无 fsync）并立即打开读取
 	writeFullFile(t, ryowPath, wantRYOW, 524_288)
 	require.Eventually(t, func() bool {
 		return proxy.WriteInflight() >= 1
@@ -744,7 +728,6 @@ func TestStagedMode_SlowServerReadYourOwnWrites_GivenBlockedWriteRPCs_ReadsExact
 	readsBefore := proxy.ReadCalls()
 	gotRYOW, err := os.ReadFile(ryowPath)
 
-	// Then
 	require.NoError(t, err)
 	require.Equal(t, sha256.Sum256(wantRYOW), sha256.Sum256(gotRYOW), "scene=ryow want=exact_sha256_match")
 	require.Equal(t, readsBefore, proxy.ReadCalls(), "scene=ryow want=0_read_rpcs")
@@ -754,9 +737,8 @@ func TestStagedMode_SlowServerReadYourOwnWrites_GivenBlockedWriteRPCs_ReadsExact
 	stopMount()
 }
 
-// TestStagedMode_MultiXStageSize_Given256MiBWriteUnderSlowUpload_BoundsDiskAndMemoryAndPersistsSHA256 验证 32x --stage-size 大文件写入下背压、磁盘与内存受控且重挂 SHA-256 一致。
 func TestStagedMode_MultiXStageSize_Given256MiBWriteUnderSlowUpload_BoundsDiskAndMemoryAndPersistsSHA256(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
 	proxy := startControllableStorageProxy(t, realEndpoint)
@@ -771,14 +753,12 @@ func TestStagedMode_MultiXStageSize_Given256MiBWriteUnderSlowUpload_BoundsDiskAn
 	proxy.SetWriteDelay(20 * time.Millisecond)
 	stopSampler := startStageTelemetrySampler(adminAddr, stageDir, daemonPID, baseStats.MemoryBytes, baseRSS)
 
-	// When: 写入 256 MiB（64 块 x 4 MiB = 32x --stage-size）并等待排空与卸载
 	multiPath := filepath.Join(mp, "multi-256m.bin")
 	wantMultiSHA := writeCycledBlocksAndSHA256(t, multiPath, 64, 8, 4_194_304, 1_048_576)
 	afterStats := requireStageDrained(t, adminAddr, 45*time.Second, "multi_256m_drain")
 	telemetry := stopSampler()
 	proxy.SetWriteDelay(0)
 
-	// Then: 触发背压、暂存磁盘与客户端内存远低于文件大小、上传后清零、重挂 --mode ro --direct-io 校验一致
 	t.Logf("memory telemetry: baseRSS=%d MiB maxRSS=%d MiB baseMem=%d MiB maxMem=%d MiB",
 		baseRSS>>20, telemetry.maxRSSBytes>>20, baseStats.MemoryBytes>>20, telemetry.maxMemBytes>>20)
 	require.Positive(t, afterStats.Stage.BackpressureWaits, "scene=multi_256m want=backpressure_waits>0 got=0")
@@ -798,9 +778,8 @@ func TestStagedMode_MultiXStageSize_Given256MiBWriteUnderSlowUpload_BoundsDiskAn
 	require.Equal(t, wantMultiSHA, fileSHA256(t, filepath.Join(mpVerify, "multi-256m.bin")), "scene=multi_256m_verify want=sha256_match")
 }
 
-// TestStagedMode_UnlinkedTmpfile_Given16MiBWrittenWithoutLinkat_ProducesZeroServerUsageDelta 验证 16 MiB O_TMPFILE 未 linkat 关闭后服务端用量与 Write RPC 均零增长。
 func TestStagedMode_UnlinkedTmpfile_Given16MiBWrittenWithoutLinkat_ProducesZeroServerUsageDelta(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	proxy := startControllableStorageProxy(t, getStorageEndpoint())
 	diskID := createTestDisk(t, client).GetDiskId()
@@ -811,7 +790,6 @@ func TestStagedMode_UnlinkedTmpfile_Given16MiBWrittenWithoutLinkat_ProducesZeroS
 	usedBytesBefore, usedInodesBefore := fetchDiskUsage(t, client, diskID)
 	writeCallsBefore := proxy.WriteCalls()
 
-	// When: 打开 O_TMPFILE 写入 16 MiB（超出 --stage-size 8MiB）后不经 linkat 直接关闭
 	fd, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
 	writeRepeatedChunksFD(t, fd, deterministicPayload("unlinked-tmp-16m", 4_194_304), 4)
@@ -821,7 +799,6 @@ func TestStagedMode_UnlinkedTmpfile_Given16MiBWrittenWithoutLinkat_ProducesZeroS
 	require.GreaterOrEqual(t, midStats.TmpFile.ResidentBytes, uint64(16_777_216), "scene=unlinked_tmp_open want=resident>=16MiB got=%d", midStats.TmpFile.ResidentBytes)
 	require.NoError(t, unix.Close(fd))
 
-	// Then
 	require.Eventually(t, func() bool {
 		snap := fetchDebugStats(t, adminAddr)
 		return snap.TmpFile.ActiveFiles == 0 && snap.TmpFile.ResidentBytes == 0
@@ -830,9 +807,8 @@ func TestStagedMode_UnlinkedTmpfile_Given16MiBWrittenWithoutLinkat_ProducesZeroS
 	requireDiskUsageUnchanged(t, client, diskID, usedBytesBefore, usedInodesBefore, "unlinked_tmp_16m")
 }
 
-// TestStagedMode_SparseTmpfilePromotion_Given32MiBSparseLinkat_SkipsHolesAndPersistsSHA256OnDirectIORemount 验证 32 MiB 稀疏 O_TMPFILE linkat 跳过空洞上传并在 --mode ro --direct-io 重挂校验 SHA-256。
 func TestStagedMode_SparseTmpfilePromotion_Given32MiBSparseLinkat_SkipsHolesAndPersistsSHA256OnDirectIORemount(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
 	proxy := startControllableStorageProxy(t, realEndpoint)
@@ -843,7 +819,6 @@ func TestStagedMode_SparseTmpfilePromotion_Given32MiBSparseLinkat_SkipsHolesAndP
 	writeBytesBefore := proxy.WriteWireBytes()
 	writeCallsBefore := proxy.WriteCalls()
 
-	// When: 写入 3 段共 12 MiB 数据（逻辑总长 32 MiB，含 20 MiB 空洞）并 linkat 转正后卸载
 	fd, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
 	wantTmpSHA := buildSparse32MiBAndWriteFD(t, fd)
@@ -857,7 +832,6 @@ func TestStagedMode_SparseTmpfilePromotion_Given32MiBSparseLinkat_SkipsHolesAndP
 	uploadedBytes := proxy.WriteWireBytes() - writeBytesBefore
 	t.Logf("promoted tmpfile telemetry: writeCalls=%d uploadedBytes=%d", uploadedCalls, uploadedBytes)
 
-	// Then
 	require.Equal(t, int64(3), uploadedCalls, "scene=sparse_tmp_promote want=3_write_calls got=%d", uploadedCalls)
 	require.GreaterOrEqual(t, uploadedBytes, int64(12_582_912), "scene=sparse_tmp_promote want>=12MiB got=%d", uploadedBytes)
 	require.Less(t, uploadedBytes, int64(16_777_216), "scene=sparse_tmp_promote want<16MiB_skip_holes got=%d", uploadedBytes)
@@ -869,9 +843,8 @@ func TestStagedMode_SparseTmpfilePromotion_Given32MiBSparseLinkat_SkipsHolesAndP
 	require.Equal(t, wantTmpSHA, fileSHA256(t, filepath.Join(mpVerify, "sparse-tmp-32m.bin")), "scene=sparse_tmp_verify want=sha256_match")
 }
 
-// TestStagedMode_RenameBarrier_GivenBlockedUpload_BlocksRenameUntilCommittedAndVisibleToConcurrentRO 验证 write->close->rename 等待暂存落盘且并发 --mode ro 挂载在 rename 返回后立即可读完整文件。
 func TestStagedMode_RenameBarrier_GivenBlockedUpload_BlocksRenameUntilCommittedAndVisibleToConcurrentRO(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
 	proxy := startControllableStorageProxy(t, realEndpoint)
@@ -892,10 +865,8 @@ func TestStagedMode_RenameBarrier_GivenBlockedUpload_BlocksRenameUntilCommittedA
 		return proxy.WriteInflight() >= 1
 	}, 5*time.Second, 10*time.Millisecond, "scene=rename_barrier want=write_rpc_in_flight")
 
-	// When: 在 Write RPC 阻塞期间发起 Rename，150ms 后放行写入
 	requireRenameBlockedWhileWritesGated(t, proxy, renameSrc, renameDst, 150*time.Millisecond)
 
-	// Then: Rename 返回后并发 --mode ro --direct-io 挂载无需等待即可一次读回完整文件
 	gotRename, err := os.ReadFile(filepath.Join(mpRO, "rename-barrier-dst.bin"))
 	require.NoError(t, err, "scene=rename_barrier_ro_read want=immediate_success")
 	require.Equal(t, sha256.Sum256(wantRename), sha256.Sum256(gotRename), "scene=rename_barrier_ro_read want=sha256_match")
@@ -933,9 +904,6 @@ func fetchDebugUnmount(t *testing.T, adminAddr string) fusefs.UnmountProgress {
 	return prog
 }
 
-// TestStagedMode_UmountDrainProgress_GivenUnsyncedWrites_ReportsSyncProgressOnStderr verifies
-// bowl umount drains unsynced writes with empty stdout, determinate stderr progress when admin
-// is enabled, zero output when clean, and fallback notice after 1s when admin is off.
 func TestStagedMode_UmountDrainProgress_GivenUnsyncedWrites_ReportsSyncProgressOnStderr(t *testing.T) {
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
@@ -1084,8 +1052,6 @@ func readFDXattrNames(t *testing.T, fd int) []string {
 	return strings.Split(strings.TrimSuffix(string(buf[:n]), "\x00"), "\x00")
 }
 
-// TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E verifies staged O_TMPFILE xattrs, ioctl flags,
-// killpriv stripping, S_ISGID inheritance, and ordered linkat promotion in Linux FUSE.
 func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
@@ -1106,7 +1072,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		defer func() { _ = closeFD() }()
 		require.NoError(t, unix.Fchmod(fd, 0o6755))
 
-		// Exercise extended attribute create, replace, ERANGE probing, removal, and sorted listing on an unpromoted descriptor.
 		require.NoError(t, unix.Fsetxattr(fd, "user.z", []byte("vz"), unix.XATTR_CREATE))
 		require.ErrorIs(t, unix.Fsetxattr(fd, "user.z", []byte("dup"), unix.XATTR_CREATE), syscall.EEXIST)
 		require.ErrorIs(t, unix.Fsetxattr(fd, "user.missing", []byte("v"), unix.XATTR_REPLACE), syscall.ENODATA)
@@ -1123,7 +1088,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, unix.Fremovexattr(fd, "user.z"))
 		requireFDXattrAbsent(t, fd, "user.z")
 
-		// Write, Fchown, and Fallocate hole punching strip S_ISUID, S_ISGID, and security.capability locally.
 		writeFullFD(t, fd, []byte("initial-payload"), 0)
 		var st unix.Stat_t
 		require.NoError(t, unix.Fstat(fd, &st))
@@ -1147,7 +1111,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.Zero(t, st.Mode&(unix.S_ISUID|unix.S_ISGID), "punch hole must strip S_ISUID|S_ISGID")
 		requireFDXattrNotListed(t, fd, "security.capability")
 
-		// The mount enforces FS_APPEND_FL and FS_IMMUTABLE_FL locally on the unpromoted descriptor.
 		require.NoError(t, unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(fusefs.FS_APPEND_FL)))
 		gotFlags, err := unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS)
 		require.NoError(t, err)
@@ -1164,7 +1127,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.ErrorIs(t, err, syscall.EPERM)
 		require.ErrorIs(t, unix.Fchmod(fd, 0o600), syscall.EPERM)
 
-		// Closing an unpromoted descriptor without linkat produces zero server usage delta and zero Write RPCs.
 		require.NoError(t, closeFD())
 		require.Eventually(t, func() bool {
 			snap := fetchDebugStats(t, adminAddr)
@@ -1206,7 +1168,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, os.Chown(sgidDst, 1000, 3000))
 		require.NoError(t, os.Chmod(sgidDst, 0o755|os.ModeSetgid))
 
-		// Inherit group 2000 from sgidSrc and preserve it when linkat promotes the file into sgidDst with group 3000.
 		fd1, err := unix.Open(sgidSrc, unix.O_TMPFILE|unix.O_RDWR, 0o640)
 		require.NoError(t, err)
 		close1 := closeFDGuard(fd1)
@@ -1218,7 +1179,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, linkatEINTR(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd1), unix.AT_FDCWD, filepath.Join(sgidDst, "keep-2000.bin"), unix.AT_SYMLINK_FOLLOW))
 		require.NoError(t, close1())
 
-		// Override the inherited group with fchown to group 2500 and preserve it across linkat into plainDst.
 		fd2, err := unix.Open(sgidSrc, unix.O_TMPFILE|unix.O_RDWR, 0o640)
 		require.NoError(t, err)
 		close2 := closeFDGuard(fd2)
@@ -1244,7 +1204,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		mp, _, _, stopMount := startMountedDaemon(t, realEndpoint, diskID, "--stage-size", "8MiB")
 		defer stopMount()
 
-		// Promote an immutable O_TMPFILE carrying payload data, S_ISUID mode bits, user.tag, and security.capability.
 		immPayload := deterministicPayload("e2e-tmp-imm", 65_536)
 		immFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR, 0o644)
 		require.NoError(t, err)
@@ -1264,7 +1223,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		_, err = os.OpenFile(immPath, os.O_WRONLY|os.O_TRUNC, 0)
 		require.ErrorIs(t, err, syscall.EPERM)
 
-		// Promote an append-only O_TMPFILE carrying payload data, S_ISUID mode bits, user.app, and security.capability.
 		appFD, err := unix.Open(mp, unix.O_TMPFILE|unix.O_RDWR|unix.O_APPEND, 0o644)
 		require.NoError(t, err)
 		closeApp := closeFDGuard(appFD)
@@ -1291,7 +1249,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, unix.Close(appHandle))
 
-		// Unmount and verify full persistence under --mode ro --direct-io and StorageService.
 		stopMount()
 		mpRO, stopRO := mountWithCleanup(t, realEndpoint, diskID, "--mode", "ro", "--direct-io")
 		defer stopRO()
@@ -1326,7 +1283,6 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		require.NoError(t, err)
 		require.NotZero(t, roAppFlags&int(fusefs.FS_APPEND_FL))
 
-		// Verify exact capability bytes persisted on StorageService for immutable file and absent on append file.
 		rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer rpcCancel()
 		immLookup, err := client.Lookup(rpcCtx, connect.NewRequest(&storagev1.LookupRequest{

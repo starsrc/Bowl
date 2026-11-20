@@ -38,7 +38,6 @@ const (
 	mountRenewRPCTimeout    = 5 * time.Second
 )
 
-// mountOptions holds non-fusefs mount flags; daemon workers receive the same values via re-parsed argv.
 type mountOptions struct {
 	endpoint         string
 	token            string
@@ -66,7 +65,6 @@ type mountFlagPresence struct {
 	stageDir         bool
 }
 
-// Test seams for FUSE serving, HTTP transport, lease renewal timing, clock, and tmpfs detection.
 var (
 	serveFUSE                 = defaultServeFUSE
 	mountHTTPClient           *http.Client
@@ -157,7 +155,6 @@ func isDiskMountedError(err error) bool {
 	return info != nil && info.GetDomain() == "bowl.storage" && info.GetReason() == "EBUSY"
 }
 
-// mountHandshake sends a single MountDisk RPC and returns the updated fusefs.Config and lease metadata.
 func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceClient, baseCfg *fusefs.Config, force bool) (*fusefs.Config, mountLeaseInfo, error) {
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer rpcCancel()
@@ -219,7 +216,6 @@ func permanentRenewFenceStatus(err error) (fuse.Status, connect.Code, bool) {
 	}
 }
 
-// startMountLeaseRenewer runs periodic RenewMount calls in the background and returns a stop function that waits for exit.
 func startMountLeaseRenewer(
 	client storagev1connect.StorageServiceClient,
 	cfg *fusefs.Config,
@@ -317,7 +313,6 @@ func startMountLeaseRenewer(
 	}
 }
 
-// unmountMountLease releases the server mount lease using a fresh timeout context independent of cancellation signals.
 func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mountID string, logger *slog.Logger) {
 	if mountID == "" {
 		return
@@ -336,7 +331,6 @@ func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mou
 	}
 }
 
-// defaultServeFUSE starts the FUSE server, calls ready once mounted, and blocks until unmount or cancellation.
 func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config, mountpoint string, ready func()) error {
 	opts := fusefs.BuildMountOptions(*cfg)
 
@@ -379,7 +373,6 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 	return nil
 }
 
-// runMount configures observability, RPC, admin server, and FUSE, performs MountDisk, and blocks until unmount.
 func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string, logWriter io.Writer, onReady func()) error {
 	obs, err := setupObservability(ctx, opts, logWriter)
 	if err != nil {
@@ -530,7 +523,6 @@ func firstNonEmptyEnv(keys ...string) string {
 	return ""
 }
 
-// applyEnvAndValidateOptions applies environment fallbacks and validates mode, stage, log file, and observability options.
 func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence, foreground bool) error {
 	if set.logFile {
 		if foreground {
@@ -872,7 +864,6 @@ func executeMountValidated(
 		StageDir:        opts.stageDir,
 	}
 
-	// Normalize OTLP endpoints before spawning so daemon children inherit valid URLs.
 	normalizeOTLPEnv()
 
 	stderr := cmd.ErrOrStderr()
@@ -883,7 +874,6 @@ func executeMountValidated(
 		return nil
 	}
 
-	// Spawn a daemon child by default unless -f or --foreground is enabled, passing raw mount args verbatim.
 	if !foreground {
 		if code := spawnDaemon(rawArgs, stderr); code != 0 {
 			return &cliExitError{code: code, silent: true}

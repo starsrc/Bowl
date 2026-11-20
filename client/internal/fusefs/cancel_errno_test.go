@@ -29,7 +29,7 @@ func newStorageErrorInfo(t *testing.T, code connect.Code, reason, msg string) *c
 
 func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndOK(t *testing.T) {
 	t.Run("ENOENT preserved when cancel closes during fast Lookup", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		cancelCh := make(chan struct{})
 		srv.lookupHook = func(_ context.Context, _ *storagev1.LookupRequest) (*storagev1.LookupResponse, error) {
@@ -38,16 +38,14 @@ func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndO
 		}
 		fs := newTestRawFS(t, srv)
 
-		// When
 		var out fuse.EntryOut
 		st := fs.Lookup(cancelCh, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "absent", &out)
 
-		// Then
 		requireStatus(t, "fast Lookup ENOENT under cancel", fuse.ENOENT, st)
 	})
 
 	t.Run("ENOSPC preserved when cancel closes during fast Mknod", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		cancelCh := make(chan struct{})
 		srv.mknodHook = func(_ context.Context, _ *storagev1.MknodRequest) error {
@@ -56,19 +54,17 @@ func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndO
 		}
 		fs := newTestRawFS(t, srv)
 
-		// When
 		var out fuse.EntryOut
 		st := fs.Mknod(cancelCh, &fuse.MknodIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Mode:     syscall.S_IFREG | 0o644,
 		}, "full.bin", &out)
 
-		// Then
 		requireStatus(t, "fast Mknod ENOSPC under cancel", fuse.Status(syscall.ENOSPC), st)
 	})
 
 	t.Run("stale-epoch EBUSY preserved and fences RawFS when cancel closes during fast SetAttr", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		ino := srv.seedFile(1, "fenced.txt", 0o644, []byte("abc"))
 		cancelCh := make(chan struct{})
@@ -78,7 +74,6 @@ func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndO
 		}
 		fs := newTestRawFS(t, srv)
 
-		// When
 		var out fuse.AttrOut
 		st := fs.SetAttr(cancelCh, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -88,14 +83,13 @@ func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndO
 			},
 		}, &out)
 
-		// Then
 		requireStatus(t, "fast SetAttr stale-epoch EBUSY under cancel", fuse.EBUSY, st)
 		require.True(t, fs.IsFenced())
 		require.Equal(t, fuse.EBUSY, fs.FenceStatus())
 	})
 
 	t.Run("nil error returns OK when cancel closes during fast Lookup", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		ino := srv.seedFile(1, "fast.txt", 0o644, []byte("ok"))
 		cancelCh := make(chan struct{})
@@ -105,11 +99,9 @@ func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndO
 		}
 		fs := newTestRawFS(t, srv)
 
-		// When
 		var out fuse.EntryOut
 		st := fs.Lookup(cancelCh, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "fast.txt", &out)
 
-		// Then
 		requireStatus(t, "fast Lookup OK under cancel", fuse.OK, st)
 		require.Equal(t, ino, out.NodeId)
 	})
@@ -117,25 +109,23 @@ func TestRawFS_GivenCancelClosingDuringFastRPCWithinGrace_PreservesRealErrnoAndO
 
 func TestRawFS_GivenPreClosedOrGraceExpiredCancel_ReturnsEINTR(t *testing.T) {
 	t.Run("pre-closed cancel immediately cancels context with ErrKernelInterrupted and returns EINTR", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		fs := newTestRawFS(t, srv)
 		preClosed := newClosedCancelChan()
 
-		// When
 		ctx, cancelFunc := fs.RPCContext(preClosed)
 		defer cancelFunc()
 		var out fuse.EntryOut
 		st := fs.Lookup(preClosed, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "any.txt", &out)
 
-		// Then
 		require.ErrorIs(t, context.Cause(ctx), rpc.ErrKernelInterrupted)
 		require.Equal(t, fuse.EINTR, fs.ToStatus(ctx.Err()))
 		requireStatus(t, "pre-closed cancel Lookup", fuse.EINTR, st)
 	})
 
 	t.Run("cancel exceeding 15ms grace period cancels context with ErrKernelInterrupted and returns EINTR", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		cancelCh := make(chan struct{})
 		var sawCause error
@@ -146,11 +136,9 @@ func TestRawFS_GivenPreClosedOrGraceExpiredCancel_ReturnsEINTR(t *testing.T) {
 		}
 		fs := newTestRawFS(t, srv)
 
-		// When
 		var out fuse.EntryOut
 		st := fs.Lookup(cancelCh, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "slow.txt", &out)
 
-		// Then
 		requireStatus(t, "grace-expired cancel Lookup", fuse.EINTR, st)
 		require.ErrorIs(t, sawCause, rpc.ErrKernelInterrupted)
 	})

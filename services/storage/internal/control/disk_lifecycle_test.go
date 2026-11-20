@@ -69,18 +69,16 @@ func gatherMetricLabelValue(t *testing.T, reg *prometheus.Registry, metricName, 
 var _ = (*dto.MetricFamily)(nil)
 
 func TestCreateDisk_ValidParams_PersistsQuotaAndReadsBackConsistentState(t *testing.T) {
-	// Given: 空控制面管理器
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
 
-	// When: 创建配额为 16 MiB 的虚拟磁盘
 	created, err := mgr.CreateDisk(ctx, CreateDiskParams{
 		Name:     "alpha-disk",
 		MaxBytes: 16 << 20,
 	})
 
-	// Then: 返回完整领域实体且可通过 GetDisk 读回一致终态
 	require.NoError(t, err, "创建磁盘失败")
 	require.NotEmpty(t, created.DiskID, "创建磁盘必须分配非空 DiskID")
 	require.Empty(t, created.ParentDiskID, "根磁盘 ParentDiskID 必须为空")
@@ -98,7 +96,7 @@ func TestCreateDisk_ValidParams_PersistsQuotaAndReadsBackConsistentState(t *test
 }
 
 func TestCreateDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
-	// Given: 控制面管理器与非法入参组合
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -114,7 +112,6 @@ func TestCreateDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 		{name: "名称包含 NUL 字节", params: CreateDiskParams{Name: "bad\x00disk", MaxBytes: 4096}, wantErr: ErrInvalidArgument},
 	}
 
-	// When / Then: 拒绝创建并返回对应哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := mgr.CreateDisk(ctx, tc.params)
@@ -124,7 +121,7 @@ func TestCreateDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 }
 
 func TestCreateDisk_DBWriteFailure_RollsBackActorAndDirectory(t *testing.T) {
-	// Given: 注入下一次写事务失败的内存数据库适配器
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -134,10 +131,8 @@ func TestCreateDisk_DBWriteFailure_RollsBackActorAndDirectory(t *testing.T) {
 	injectedErr := errors.New("simulated db create failure")
 	memDB.SetFailNextWrite(injectedErr)
 
-	// When: 调用 CreateDisk
 	_, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "rollback-disk", MaxBytes: 8 << 20})
 
-	// Then: 返回注入错误，磁盘目录与控制面列表均无残留
 	require.ErrorIs(t, err, injectedErr, "CreateDisk 应返回注入的数据库错误: want=%v got=%v", injectedErr, err)
 
 	entries, readErr := os.ReadDir(filepath.Join(rootDir, "disks"))
@@ -150,7 +145,7 @@ func TestCreateDisk_DBWriteFailure_RollsBackActorAndDirectory(t *testing.T) {
 }
 
 func TestGetDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
-	// Given: 空控制面管理器
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -165,7 +160,6 @@ func TestGetDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 		{name: "不存在的磁盘", diskID: "018f0000-0000-7000-8000-000000009999", wantErr: ErrNotFound},
 	}
 
-	// When / Then: 返回对应哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := mgr.GetDisk(ctx, tc.diskID)
@@ -175,7 +169,7 @@ func TestGetDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 }
 
 func TestGetDisk_AfterRestart_LazyLoadsPersistedUsageAndQuota(t *testing.T) {
-	// Given: 创建盘并写入 4096 字节数据后关闭原管理器
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -198,12 +192,10 @@ func TestGetDisk_AfterRestart_LazyLoadsPersistedUsageAndQuota(t *testing.T) {
 	require.NoError(t, err, "写入测试数据失败")
 	require.NoError(t, mgr1.Close(), "关闭首任管理器失败")
 
-	// When: 基于同一数据库与根目录重启新管理器并调用 GetDisk
 	mgr2 := New(memDB, WithStorageRoot(rootDir))
 	t.Cleanup(func() { _ = mgr2.Close() })
 	got, err := mgr2.GetDisk(ctx, disk.DiskID)
 
-	// Then: 懒加载实例并返回准确的配额与已用空间统计
 	require.NoError(t, err, "重启后 GetDisk 失败")
 	require.Equal(t, uint64(8<<20), got.MaxBytes, "MaxBytes 不匹配: want=%d got=%d", uint64(8<<20), got.MaxBytes)
 	require.Equal(t, uint64(4096), got.UsedBytes, "UsedBytes 不匹配: want=4096 got=%d", got.UsedBytes)
@@ -211,7 +203,7 @@ func TestGetDisk_AfterRestart_LazyLoadsPersistedUsageAndQuota(t *testing.T) {
 }
 
 func TestListDisks_CursorPagination_ReturnsAllPagesWithoutOverlap(t *testing.T) {
-	// Given: 顺序创建 3 块虚拟磁盘
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -223,7 +215,6 @@ func TestListDisks_CursorPagination_ReturnsAllPagesWithoutOverlap(t *testing.T) 
 	d3, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "disk-3", MaxBytes: 4 << 20})
 	require.NoError(t, err, "创建 disk-3 失败")
 
-	// When: 以每页 2 条依次拉取两页
 	page1, err := mgr.ListDisks(ctx, ListDisksParams{PageSize: 2})
 	require.NoError(t, err, "拉取第 1 页失败")
 	require.Len(t, page1.Disks, 2, "第 1 页条数不匹配: want=2 got=%d", len(page1.Disks))
@@ -232,7 +223,6 @@ func TestListDisks_CursorPagination_ReturnsAllPagesWithoutOverlap(t *testing.T) 
 	page2, err := mgr.ListDisks(ctx, ListDisksParams{PageSize: 2, PageToken: page1.NextPageToken})
 	require.NoError(t, err, "拉取第 2 页失败")
 
-	// Then: 第 2 页返回剩余 1 条且令牌归空，两页合计覆盖全部 3 块盘
 	require.Len(t, page2.Disks, 1, "第 2 页条数不匹配: want=1 got=%d", len(page2.Disks))
 	require.Empty(t, page2.NextPageToken, "最后一页 NextPageToken 必须为空: got=%q", page2.NextPageToken)
 
@@ -244,7 +234,7 @@ func TestListDisks_CursorPagination_ReturnsAllPagesWithoutOverlap(t *testing.T) 
 }
 
 func TestListDisks_ZeroPageSize_UsesDefaultPageSize(t *testing.T) {
-	// Given: 创建 1 块磁盘
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -252,30 +242,26 @@ func TestListDisks_ZeroPageSize_UsesDefaultPageSize(t *testing.T) {
 	created, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "default-page", MaxBytes: 4 << 20})
 	require.NoError(t, err, "创建磁盘失败")
 
-	// When: 以 PageSize=0 查询
 	res, err := mgr.ListDisks(ctx, ListDisksParams{PageSize: 0})
 
-	// Then: 采用默认页大小返回该磁盘
 	require.NoError(t, err, "PageSize=0 查询失败")
 	require.Len(t, res.Disks, 1, "返回条数不匹配: want=1 got=%d", len(res.Disks))
 	require.Equal(t, created.DiskID, res.Disks[0].DiskID)
 }
 
 func TestListDisks_PageSizeExceedsMax_ReturnsInvalidArgument(t *testing.T) {
-	// Given: 控制面管理器
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
 
-	// When: 传入超出上限的 PageSize=1001
 	_, err := mgr.ListDisks(ctx, ListDisksParams{PageSize: 1001})
 
-	// Then: 返回 ErrInvalidArgument
 	require.ErrorIs(t, err, ErrInvalidArgument, "超限 PageSize 错误不匹配: want=%v got=%v", ErrInvalidArgument, err)
 }
 
 func TestUpdateDisk_NameAndQuota_PersistsAcrossRestart(t *testing.T) {
-	// Given: 创建初始名称为 before、配额为 8 MiB 的磁盘
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -284,7 +270,6 @@ func TestUpdateDisk_NameAndQuota_PersistsAcrossRestart(t *testing.T) {
 	disk, err := mgr1.CreateDisk(ctx, CreateDiskParams{Name: "before", MaxBytes: 8 << 20})
 	require.NoError(t, err, "创建磁盘失败")
 
-	// When: 更新名称为 after 并扩容至 16 MiB
 	newName := "after"
 	newQuota := uint64(16 << 20)
 	updated, err := mgr1.UpdateDisk(ctx, UpdateDiskParams{
@@ -293,7 +278,6 @@ func TestUpdateDisk_NameAndQuota_PersistsAcrossRestart(t *testing.T) {
 		MaxBytes: &newQuota,
 	})
 
-	// Then: 更新立即生效且重启后依然持久化保持
 	require.NoError(t, err, "UpdateDisk 失败")
 	require.Equal(t, "after", updated.Name, "更新后名称不匹配: want=after got=%q", updated.Name)
 	require.Equal(t, uint64(16<<20), updated.MaxBytes, "更新后配额不匹配: want=%d got=%d", uint64(16<<20), updated.MaxBytes)
@@ -308,7 +292,7 @@ func TestUpdateDisk_NameAndQuota_PersistsAcrossRestart(t *testing.T) {
 }
 
 func TestUpdateDisk_ShrinkBelowUsedBytes_ReturnsInvalidShrink(t *testing.T) {
-	// Given: 盘中写入 8192 字节数据
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -329,11 +313,9 @@ func TestUpdateDisk_ShrinkBelowUsedBytes_ReturnsInvalidShrink(t *testing.T) {
 	_, _, err = actor.Write(ctx, fAttr.Ino, 0, make([]byte, 8192), mnt.Epoch)
 	require.NoError(t, err, "写入文件失败")
 
-	// When: 尝试将配额缩容至 4096 字节
 	shrinkBytes := uint64(4096)
 	_, err = mgr.UpdateDisk(ctx, UpdateDiskParams{DiskID: disk.DiskID, MaxBytes: &shrinkBytes})
 
-	// Then: 拦截为 ErrInvalidShrink 且原配额保持不变
 	require.ErrorIs(t, err, ErrInvalidShrink, "缩容低于已用应返回 ErrInvalidShrink: want=%v got=%v", ErrInvalidShrink, err)
 
 	after, getErr := mgr.GetDisk(ctx, disk.DiskID)
@@ -342,7 +324,7 @@ func TestUpdateDisk_ShrinkBelowUsedBytes_ReturnsInvalidShrink(t *testing.T) {
 }
 
 func TestUpdateDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
-	// Given: 预建测试盘与非法更新参数表
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -371,7 +353,6 @@ func TestUpdateDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 		{name: "目标磁盘不存在", params: UpdateDiskParams{DiskID: "018f0000-0000-7000-8000-000000009999", Name: &validName}, wantErr: ErrNotFound},
 	}
 
-	// When / Then: 返回对应哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, uErr := mgr.UpdateDisk(ctx, tc.params)
@@ -381,7 +362,7 @@ func TestUpdateDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 }
 
 func TestDeleteDisk_ExistingDisk_RemovesDBRecordAndPhysicalDirectory(t *testing.T) {
-	// Given: 创建并打开磁盘
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	mgr := New(db.NewMemStore(), WithStorageRoot(rootDir))
@@ -390,10 +371,8 @@ func TestDeleteDisk_ExistingDisk_RemovesDBRecordAndPhysicalDirectory(t *testing.
 	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "to-delete", MaxBytes: 4 << 20})
 	require.NoError(t, err, "创建磁盘失败")
 
-	// When: 删除磁盘
 	err = mgr.DeleteDisk(ctx, disk.DiskID)
 
-	// Then: 删除成功，GetDisk 返回 ErrNotFound 且磁盘物理目录已移除
 	require.NoError(t, err, "DeleteDisk 失败")
 	_, getErr := mgr.GetDisk(ctx, disk.DiskID)
 	require.ErrorIs(t, getErr, ErrNotFound, "删除后 GetDisk 应返回 ErrNotFound: got=%v", getErr)
@@ -403,7 +382,7 @@ func TestDeleteDisk_ExistingDisk_RemovesDBRecordAndPhysicalDirectory(t *testing.
 }
 
 func TestDeleteDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
-	// Given: 空控制面管理器
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -418,7 +397,6 @@ func TestDeleteDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 		{name: "不存在的磁盘", diskID: "018f0000-0000-7000-8000-000000009999", wantErr: ErrNotFound},
 	}
 
-	// When / Then: 返回对应哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := mgr.DeleteDisk(ctx, tc.diskID)
@@ -428,7 +406,7 @@ func TestDeleteDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 }
 
 func TestDeleteDisk_DirCleanupFailure_ReturnsErrorAndIncrementsCleanupMetric(t *testing.T) {
-	// Given: 注入目录删除故障的管理器与已创建磁盘
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	mgr := newManager(db.NewMemStore(), WithStorageRoot(rootDir))
@@ -443,17 +421,15 @@ func TestDeleteDisk_DirCleanupFailure_ReturnsErrorAndIncrementsCleanupMetric(t *
 	removeErr := errors.New("simulated remove dir failure")
 	mgr.removeAll = func(string) error { return removeErr }
 
-	// When: 删除磁盘触发目录清理失败
 	err = mgr.DeleteDisk(ctx, disk.DiskID)
 
-	// Then: 返回包装清理错误且 cleanup_errors_total 计数加 1
 	require.ErrorIs(t, err, removeErr, "目录清理失败应向上暴露错误: want=%v got=%v", removeErr, err)
 	cleanupErrs := gatherCounterValue(t, reg, "bowl_storage_control_cleanup_errors_total")
 	require.InDelta(t, 1.0, cleanupErrs, 1e-9, "cleanup_errors_total 应递增为 1: got=%v", cleanupErrs)
 }
 
 func TestManagerOptions_AccessorsAndCollector_ReflectConfiguredValues(t *testing.T) {
-	// Given: 注入有效与负值超时选项的控制面管理器
+
 	rootDir := t.TempDir()
 	mgr := New(
 		db.NewMemStore(),
@@ -471,7 +447,6 @@ func TestManagerOptions_AccessorsAndCollector_ReflectConfiguredValues(t *testing
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(mgr.Collector()), "注册 Collector 失败")
 
-	// When / Then: 各配置访问器精确反映生效值且负值不覆盖已设有效值
 	require.Equal(t, rootDir, mgr.StorageRoot(), "StorageRoot 不匹配")
 	require.InDelta(t, 2.0, mgr.EntryTimeoutSeconds(), 1e-9, "负值不应覆盖 EntryTimeoutSeconds")
 	require.InDelta(t, 3.0, mgr.AttrTimeoutSeconds(), 1e-9, "AttrTimeoutSeconds 不匹配")

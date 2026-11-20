@@ -24,7 +24,6 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
-// fakeClock 为测试提供确定性虚拟时钟，消除真实 sleep 与系统时间抖动。
 type fakeClock struct {
 	mu          sync.Mutex
 	now         time.Time
@@ -200,7 +199,6 @@ func (c *fakeClock) WithDeadline(parent context.Context, deadline time.Time) (co
 		}
 }
 
-// inMemoryHandlerClient 将 ConnectRPC 处理适配器直接挂载在进程内 RoundTripper 接缝上，避免监听真实 TCP 端口。
 func newInMemoryHTTPClient(h storagev1connect.StorageServiceHandler) *http.Client {
 	path, connectHandler := storagev1connect.NewStorageServiceHandler(
 		h,
@@ -262,7 +260,6 @@ func (s *scriptedTransport) HTTPClient() *http.Client {
 	}
 }
 
-// scriptedReadHandler 按预设响应序列应答 Read 请求并记录请求头，无分支猜测逻辑。
 type scriptedReadHandler struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 
@@ -327,7 +324,6 @@ func (h *scriptedReadHandler) Write(_ context.Context, req *connect.Request[stor
 	return connect.NewResponse(&storagev1.WriteResponse{Size: uint32(len(req.Msg.GetData()))}), nil
 }
 
-// recordingRoundTripper 记录路由次数与空闲连接关闭调用，用于验证条带传输分布。
 type recordingRoundTripper struct {
 	calls      atomic.Int64
 	idleClosed atomic.Int64
@@ -455,7 +451,6 @@ func requireSpanAttr(t *testing.T, sp *tracetest.SpanStub, key, want string) {
 
 var _ sdkmetric.Reader = (*sdkmetric.ManualReader)(nil)
 
-// recordingNetConn 为 h2_coalesce_test.go 提供纯内存 net.Conn 适配器。
 type recordingNetConn struct {
 	mu        sync.Mutex
 	writes    [][]byte

@@ -11,7 +11,6 @@ import (
 
 var _ prometheus.Collector = (*Metrics)(nil)
 
-// FineDurationBuckets 定义存储引擎统一的微秒级至秒级精细桶边界（5µs ~ 10s）。
 var FineDurationBuckets = []float64{
 	0.000005, 0.00001, 0.000025, 0.00005, 0.0001,
 	0.00025, 0.0005, 0.001, 0.0025, 0.005,
@@ -93,8 +92,6 @@ var readOpNames = [readOpCount]string{
 	readOpStatFS:      "statfs",
 }
 
-// ActorMetricsSnapshot 承载单个 StoreActor 实例在抓取时刻的无锁/低开销状态快照，
-// 供上游 control 层 Pull Collector 按需聚合导出（读写热路径 0 开销）。
 type ActorMetricsSnapshot struct {
 	DiskID            string
 	ReadOnly          bool
@@ -113,8 +110,6 @@ type ActorMetricsSnapshot struct {
 	Pebble            *pebble.Metrics
 }
 
-// MetricsSnapshot 安全采集当前 StoreActor 的容量、封包账本、FD/热缓存与 Pebble 内部指标快照。
-// 若实例正在关闭或已关闭，自动跳过底层 DB 与句柄表访问，防止与并发 Close 产生竞态。
 func (s *StoreActor) MetricsSnapshot() ActorMetricsSnapshot {
 	if s == nil {
 		return ActorMetricsSnapshot{}
@@ -148,8 +143,6 @@ func (s *StoreActor) MetricsSnapshot() ActorMetricsSnapshot {
 	return snap
 }
 
-// Metrics 汇聚池级共享的存储引擎热路径指标（实现 prometheus.Collector，不注册至全局默认 Registry）。
-// 所有内部记录方法对 nil 接收者安全，确保未注入 Metrics 的调用方零改动零开销运行。
 type Metrics struct {
 	actorQueueWait     prometheus.Histogram
 	actorTickBatchSize prometheus.Histogram
@@ -163,7 +156,6 @@ type Metrics struct {
 	readOpDurVec       *prometheus.HistogramVec
 	kvReadDurVec       *prometheus.HistogramVec
 
-	// 预绑定 Observer 缓存，消除热路径 WithLabelValues 哈希查找与切片分配。
 	phaseAValidate       prometheus.Observer
 	phaseBMutate         prometheus.Observer
 	phasePackSyncBarrier prometheus.Observer
@@ -176,7 +168,6 @@ type Metrics struct {
 	kvPointGetObserver   prometheus.Observer
 	kvPrefixScanObserver prometheus.Observer
 
-	// 无锁原子计数器与对应 Desc（热路径 0 allocs/op）。
 	writeBlocksDesc       *prometheus.Desc
 	writeBytesDesc        *prometheus.Desc
 	readSourceDesc        *prometheus.Desc
@@ -200,7 +191,6 @@ type Metrics struct {
 	packRemoveErrors  atomic.Uint64
 }
 
-// NewMetrics 创建隔离的存储引擎指标收集器实例。
 func NewMetrics() *Metrics {
 	phaseVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "bowl_storage_actor_tick_phase_duration_seconds",
@@ -349,7 +339,6 @@ func NewMetrics() *Metrics {
 	return m
 }
 
-// Describe 实现 prometheus.Collector。
 func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	if m == nil {
 		return
@@ -377,7 +366,6 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.packRemoveErrorsDesc
 }
 
-// Collect 实现 prometheus.Collector。
 func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	if m == nil {
 		return

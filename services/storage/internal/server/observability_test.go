@@ -338,7 +338,7 @@ func makeStepClock(t0 time.Time, delta time.Duration) func() time.Time {
 }
 
 func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *testing.T) {
-	// Given: 装配 Prometheus 精细桶 MeterProvider、内存 Trace 导出器、真实 JSON slog 与内存 RoundTripper
+
 	ctx := context.Background()
 	installOTelCleanup(t)
 
@@ -408,7 +408,6 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	httpClient := &http.Client{Transport: memoryRoundTripper{handler: srv.Handler()}}
 	client := storagev1connect.NewStorageServiceClient(httpClient, "http://storage.local")
 
-	// When: 通过内存传输完成完整控制面与数据面 RPC，并探测未知路径
 	createDiskResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 		Name:     "obs-e2e-disk",
 		MaxBytes: 64 << 20,
@@ -484,7 +483,6 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 	require.NoError(t, err)
 	_ = probeResp.Body.Close()
 
-	// Then: Prometheus 指标、OTel 全链路 Span、管理面 /metrics 与结构化 JSON 日志全部准确生效
 	fams, err := rt.Gatherer().Gather()
 	require.NoError(t, err)
 	assertMetricFamiliesFineBuckets(t, fams, float64(ioSize), float64(ioSize))
@@ -503,7 +501,7 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 }
 
 func TestObservability_ManualMetricReader_CollectsSubMillisecondBuckets(t *testing.T) {
-	// Given: 使用真实 OTel sdkmetric.NewManualReader 与 18 级亚毫秒 View 注册全局 MeterProvider
+
 	ctx := context.Background()
 	installOTelCleanup(t)
 
@@ -543,14 +541,12 @@ func TestObservability_ManualMetricReader_CollectsSubMillisecondBuckets(t *testi
 	httpClient := &http.Client{Transport: memoryRoundTripper{handler: srv.Handler()}}
 	client := storagev1connect.NewStorageServiceClient(httpClient, "http://storage.local")
 
-	// When: 发起一次 ListDisks RPC 并调用 ManualReader.Collect
 	_, err = client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{}))
 	require.NoError(t, err)
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(ctx, &rm))
 
-	// Then: 采集的直方图 Bounds 严格等于 SubMillisecondBuckets
 	assertManualReaderHasFineBuckets(t, rm)
 }
 
@@ -682,7 +678,7 @@ func runSlowRPCTestCase(
 }
 
 func TestObservability_StorageSampler_PromotesControlPlaneOverUnsampledParent(t *testing.T) {
-	// Given: 低采样率(0.0001)的 StorageSampler 与未采样远端 traceparent (flags=00)
+
 	ctx := context.Background()
 	installOTelCleanup(t)
 
@@ -725,10 +721,8 @@ func TestObservability_StorageSampler_PromotesControlPlaneOverUnsampledParent(t 
 	})
 	req.Header().Set("Traceparent", "00-"+traceIDHex+"-"+parentSpanHex+"-00")
 
-	// When: 发起控制面 ForkDisk 请求
 	_, forkErr := client.ForkDisk(ctx, req)
 
-	// Then: 处理端提权采样录制该请求且保持同一 TraceID
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(forkErr))
 	wantTraceID, err := trace.TraceIDFromHex(traceIDHex)
 	require.NoError(t, err)
@@ -738,13 +732,11 @@ func TestObservability_StorageSampler_PromotesControlPlaneOverUnsampledParent(t 
 func TestObservability_TracerProviderFactory_HandlesExporters(t *testing.T) {
 	ctx := context.Background()
 
-	// Given & When & Then: nil 配置与禁用配置返回可用默认 TracerProvider
 	tpNil, err := NewStorageTracerProvider(ctx, nil)
 	require.NoError(t, err)
 	require.NotNil(t, tpNil)
 	require.NoError(t, tpNil.Shutdown(ctx))
 
-	// And: ExporterNone 返回带资源与采样器的 TracerProvider
 	cfgNone := telemetry.EnvConfig{
 		OtelEnabled:        true,
 		OtelServiceName:    "bowl-storage-test",
@@ -756,7 +748,6 @@ func TestObservability_TracerProviderFactory_HandlesExporters(t *testing.T) {
 	require.NotNil(t, tpNone)
 	require.NoError(t, tpNone.Shutdown(ctx))
 
-	// And: ExporterOTLP 支持 URL 与 host:port 两种地址格式
 	cfgOTLP := telemetry.EnvConfig{
 		OtelEnabled:        true,
 		OtelServiceName:    "bowl-storage-test",
@@ -770,7 +761,6 @@ func TestObservability_TracerProviderFactory_HandlesExporters(t *testing.T) {
 	require.NotNil(t, tpOTLP)
 	require.NoError(t, tpOTLP.Shutdown(ctx))
 
-	// And: 不支持的导出器类型必须明确报错
 	cfgBad := telemetry.EnvConfig{
 		OtelEnabled:        true,
 		OtelServiceName:    "bowl-storage-test",
@@ -781,7 +771,7 @@ func TestObservability_TracerProviderFactory_HandlesExporters(t *testing.T) {
 }
 
 func TestObservability_FxModule_ExportsMetricsAndStopsCleanly(t *testing.T) {
-	// Given: 通过 Fx 装配完整 config / obsfx / control / server 模块
+
 	ctx := context.Background()
 	installOTelCleanup(t)
 
@@ -825,7 +815,6 @@ func TestObservability_FxModule_ExportsMetricsAndStopsCleanly(t *testing.T) {
 	require.Nil(t, rt.MeterProvider(), "obsfx Runtime 默认 MeterProvider 必须被抑制以避免二次 Shutdown")
 	require.Nil(t, rt.TracerProvider(), "obsfx Runtime 默认 TracerProvider 必须被抑制以避免二次 Shutdown")
 
-	// When: 通过内存 RoundTripper 调用 ListDisks 并读取管理面 /metrics
 	httpClient := &http.Client{Transport: memoryRoundTripper{handler: srv.Handler()}}
 	client := storagev1connect.NewStorageServiceClient(httpClient, "http://storage.local")
 	_, err := client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{}))
@@ -842,7 +831,6 @@ func TestObservability_FxModule_ExportsMetricsAndStopsCleanly(t *testing.T) {
 	require.Contains(t, body, "bowl_storage_http_request_duration_seconds_bucket")
 	require.Contains(t, body, "rpc_server_call_duration_seconds_bucket")
 
-	// Then: Fx 优雅停机零错误退出
 	require.NoError(t, app.Stop(ctx), "Fx 应用优雅停机必须零错误退出")
 }
 
@@ -898,7 +886,7 @@ func TestObservability_MergeDiffProcedures_RegisteredInMetricsControlAndSampler(
 }
 
 func TestObservability_DiffAndMerge_ExtractsTargetDiskIDIntoLogsAndSpans(t *testing.T) {
-	// Given: 配备 OTel Span 导出器与 JSON 结构化日志拦截器的完整 Server
+
 	installOTelCleanup(t)
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
@@ -935,7 +923,6 @@ func TestObservability_DiffAndMerge_ExtractsTargetDiskIDIntoLogsAndSpans(t *test
 	exporter.Reset()
 	logBuf.Reset()
 
-	// When: 执行三路 DiffDisk 与 DryRun MergeDisk（响应均不携带 res.Disk）
 	_, err = client.DiffDisk(ctx, connect.NewRequest(&storagev1.DiffDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: &mainID,
@@ -950,7 +937,6 @@ func TestObservability_DiffAndMerge_ExtractsTargetDiskIDIntoLogsAndSpans(t *test
 	require.NoError(t, err)
 	require.NoError(t, tp.ForceFlush(ctx))
 
-	// Then: Span 属性与日志字段必须同时记录目标盘 disk_id / bowl.disk_id 与源盘 source_disk_id / bowl.source_disk_id
 	spans := exporter.GetSpans()
 	var sawDiffTarget, sawDryMergeTarget bool
 	for i := range spans {

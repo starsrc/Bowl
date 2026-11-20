@@ -11,12 +11,10 @@ import (
 )
 
 const (
-	// FUSE/Linux fallocate ABI 位标志（跨平台编译测试保持与 Linux uapi 一致）。
 	fallocFlKeepSize  = 0x01
 	fallocFlPunchHole = 0x02
 )
 
-// SetAttr 实现按需部分更新 Inode 属性或截断文件空间，对应 Linux FUSE FUSE_SETATTR 协议。
 func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpSetAttr)
 	opCtx, endSpan := fs.startFuseOp(OpSetAttr)
@@ -88,8 +86,6 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		hasUpdate = true
 	}
 
-	// 优先级保护：当 FATTR_ATIME_NOW 与 FATTR_ATIME 同时置位时，以 ATIME_NOW 优先，绝不设置 req.Atime，
-	// 避免触发服务端互斥 CEL 规则校验失败。
 	if (valid & fuse.FATTR_ATIME_NOW) != 0 {
 		req.AtimeNow = true
 		hasUpdate = true
@@ -101,7 +97,6 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		hasUpdate = true
 	}
 
-	// 同理，当 FATTR_MTIME_NOW 与 FATTR_MTIME 同时置位时，以 MTIME_NOW 优先。
 	if (valid & fuse.FATTR_MTIME_NOW) != 0 {
 		req.MtimeNow = true
 		hasUpdate = true
@@ -118,7 +113,6 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		hasUpdate = true
 	}
 
-	// 当 FATTR_FH 置位时校验本地句柄；服务端请求不携带旧版句柄。
 	if (valid & fuse.FATTR_FH) != 0 {
 		h, st := fs.checkedHandle(input.NodeId, input.Fh, false)
 		if st != fuse.OK {
@@ -165,7 +159,6 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	return fuse.OK
 }
 
-// Fallocate 实现文件空间预分配与稀疏空洞打洞，对应 Linux FUSE FUSE_FALLOCATE 协议。
 func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpFallocate)
 	opCtx, endSpan := fs.startFuseOp(OpFallocate)
@@ -196,8 +189,6 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fuse.EBADF
 	}
 
-	// 模式位校验：仅支持默认预留 0、FALLOC_FL_KEEP_SIZE 与 FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE。
-	// 其余不支持模式（如单独 PUNCH_HOLE、COLLAPSE_RANGE、ZERO_RANGE、INSERT_RANGE 等）按规范直接拦截返回 EOPNOTSUPP。
 	if input.Mode != 0 &&
 		input.Mode != fallocFlKeepSize &&
 		input.Mode != (fallocFlPunchHole|fallocFlKeepSize) {

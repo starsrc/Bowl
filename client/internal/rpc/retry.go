@@ -18,42 +18,29 @@ import (
 )
 
 const (
-	// DefaultMaxElapsedTime 为重试总预算上限，默认为 30s。
 	DefaultMaxElapsedTime = 30 * time.Second
 
-	// DefaultInitialInterval 为初始退避等待时长，默认为 100ms。
 	DefaultInitialInterval = 100 * time.Millisecond
 
-	// DefaultMultiplier 为指数退避乘数，默认为 2.0。
 	DefaultMultiplier = 2.0
 
-	// DefaultMaxInterval 为单次退避上限，默认为 1s。
 	DefaultMaxInterval = 1 * time.Second
 )
 
-// RetryConfig 定义传输层指数退避重试参数。
 type RetryConfig struct {
-	// Disable 为 true 时彻底禁用重试拦截器。
 	Disable bool
 
-	// MaxElapsedTime 为重试总预算上限（默认 30s）。
 	MaxElapsedTime time.Duration
 
-	// InitialInterval 为初始退避等待时长（默认 100ms）。
 	InitialInterval time.Duration
 
-	// Multiplier 为指数退避乘数（默认 2.0）。
 	Multiplier float64
 
-	// MaxInterval 为单次退避上限（默认 1s）。
 	MaxInterval time.Duration
 
-	// RandFloat64 为可选的随机浮点数生成函数（返回 [0.0, 1.0)），用于单测固定抖动。
-	// 若为 nil 则使用内置全局随机生成器。
 	RandFloat64 func() float64
 }
 
-// withDefaults 返回填充默认值后的 RetryConfig 副本。
 func (c RetryConfig) withDefaults() RetryConfig {
 	if c.MaxElapsedTime <= 0 {
 		c.MaxElapsedTime = DefaultMaxElapsedTime
@@ -70,7 +57,6 @@ func (c RetryConfig) withDefaults() RetryConfig {
 	return c
 }
 
-// idempotentProcedures 记录 17 个只读与幂等 RPC 白名单集合。
 var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceGetDiskProcedure:        {},
 	storagev1connect.StorageServiceListDisksProcedure:      {},
@@ -91,20 +77,16 @@ var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceStatFSProcedure:         {},
 }
 
-// IsIdempotentProcedure 判定指定 procedure 是否属于 17 个只读与幂等 RPC 白名单。
 func IsIdempotentProcedure(procedure string) bool {
 	_, ok := idempotentProcedures[procedure]
 	return ok
 }
 
-// hasErrorInfo 检查错误是否解包出非空业务 ErrorInfo。
-// 任何携带业务 ErrorInfo 的错误表明服务端已明确处理并拒绝，必须绝不重试。
 func hasErrorInfo(err error) bool {
 	info := serverx.ExtractErrorInfo(err)
 	return info != nil && info.Reason != ""
 }
 
-// isNeverRetryCode 检查 Connect 错误状态码是否属于绝不重试的状态码。
 func isNeverRetryCode(code connect.Code) bool {
 	switch code {
 	case connect.CodeInvalidArgument,
@@ -122,7 +104,6 @@ func isNeverRetryCode(code connect.Code) bool {
 	}
 }
 
-// isDialError 判定错误是否明确属于请求尚未送达服务端的建连阶段失败（如 ECONNREFUSED 或 dial 失败）。
 func isDialError(err error) bool {
 	if err == nil {
 		return false
@@ -147,7 +128,6 @@ func isDialError(err error) bool {
 	return false
 }
 
-// isTransportError 判定错误是否为底层网络传输错误（连接重置、意外 EOF、broken pipe 等）。
 func isTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -164,18 +144,15 @@ func isTransportError(err error) bool {
 	return errors.As(err, &opErr)
 }
 
-// shouldRetry 根据 procedure 与捕获的错误决定是否允许重试。
 func shouldRetry(procedure string, err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// 1. 任何携带业务 ErrorInfo 的错误，绝不重试
 	if hasErrorInfo(err) {
 		return false
 	}
 
-	// 2. 特定客户端或业务状态码，绝不重试
 	var connectErr *connect.Error
 	if errors.As(err, &connectErr) {
 		if isNeverRetryCode(connectErr.Code()) {
@@ -183,13 +160,10 @@ func shouldRetry(procedure string, err error) bool {
 		}
 	}
 
-	// 3. 建连阶段失败（ECONNREFUSED / dial error）：请求尚未送达服务端，幂等与非幂等均允许重试
 	if isDialError(err) {
 		return true
 	}
 
-	// 4. 针对 15 个只读与幂等 RPC 白名单：
-	// 在遇到 CodeUnavailable（且未携带 ErrorInfo）或底层传输错误时允许重试
 	if IsIdempotentProcedure(procedure) {
 		if connectErr != nil && connectErr.Code() == connect.CodeUnavailable {
 			return true
@@ -199,11 +173,9 @@ func shouldRetry(procedure string, err error) bool {
 		}
 	}
 
-	// 5. 其余情况（包含非幂等 RPC 在建连已完成后发生的中断/CodeUnavailable 等）严禁重试
 	return false
 }
 
-// computeJitteredInterval 计算带随机抖动的退避等待时长（区间为 [0.5 * interval, 1.0 * interval]）。
 func computeJitteredInterval(interval time.Duration, randFn func() float64) time.Duration {
 	var factor float64
 	if randFn != nil {
@@ -218,8 +190,6 @@ func computeJitteredInterval(interval time.Duration, randFn func() float64) time
 	return jittered
 }
 
-// wrapBudgetExceededError 将重试总预算耗尽的底层错误统一包装为 CodeDeadlineExceeded（若未携带业务 ErrorInfo），
-// 确保预算耗尽出口恒映射为 syscall.EIO。
 func wrapBudgetExceededError(err error) error {
 	if err == nil {
 		return connect.NewError(connect.CodeDeadlineExceeded, context.DeadlineExceeded)
@@ -285,7 +255,6 @@ func rpcStatusCode(err error) string {
 	return connect.CodeOf(err).String()
 }
 
-// NewRetryInterceptor 创建遵循有界指数退避策略的 ConnectRPC 客户端一元拦截器。
 func NewRetryInterceptor(cfg RetryConfig) connect.UnaryInterceptorFunc {
 	return newRetryInterceptor(cfg, nil, nil, realClock{})
 }
@@ -389,13 +358,10 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 					lastRetryableErr = err
 				}
 
-				// If caller context was explicitly canceled (not deadline exceeded), return immediately without exhaustBudget.
 				if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) {
 					return nil, err
 				}
 
-				// If effective deadline expired (caller deadline or MaxElapsedTime), exit via exhaustBudget only when
-				// at least one retryable failure happened and the error carries no business ErrorInfo.
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
 					if !hasErrorInfo(err) && lastRetryableErr != nil {
 						return nil, exhaustBudget(lastRetryableErr)
@@ -403,7 +369,6 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 					return nil, err
 				}
 
-				// 若不满足重试条件，立即终止并返回原始错误
 				if !retryable {
 					return nil, err
 				}
@@ -453,7 +418,6 @@ func newRetryInterceptor(cfg RetryConfig, logger *slog.Logger, metrics *Metrics,
 				case <-timer.Chan():
 				}
 
-				// 指数退避增长并钳位在 MaxInterval
 				interval = min(time.Duration(float64(interval)*config.Multiplier), config.MaxInterval)
 			}
 		}

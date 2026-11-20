@@ -71,7 +71,6 @@ func TestMountLease_IssueUnmountAndRejectOnlineTargetMerge(t *testing.T) {
 	require.NoError(t, err)
 	writeRegularFile(t, ctx, sActor, 0, "feat.txt", []byte("feat"))
 
-	// RW 挂载返回合法非零 UUID MountID 与 30s TTL，且拦截目标盘 MergeDisk
 	rwMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: target.DiskID, ReadOnly: false})
 	require.NoError(t, err)
 	requireValidNonNilUUID(t, rwMnt.MountID)
@@ -84,14 +83,13 @@ func TestMountLease_IssueUnmountAndRejectOnlineTargetMerge(t *testing.T) {
 	})
 	requireDiskMountedStatus(t, err)
 
-	// 同时存在 RO 挂载，释放 RW 后仍因 RO 活跃租约拦截 MergeDisk
 	roMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: target.DiskID, ReadOnly: true})
 	require.NoError(t, err)
 	requireValidNonNilUUID(t, roMnt.MountID)
 	require.Equal(t, uint32(30), roMnt.LeaseTTLSeconds)
 
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: target.DiskID, MountID: rwMnt.MountID}))
-	// 重复调用 UnmountDisk 必须幂等返回 nil
+
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: target.DiskID, MountID: rwMnt.MountID}))
 
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
@@ -101,7 +99,6 @@ func TestMountLease_IssueUnmountAndRejectOnlineTargetMerge(t *testing.T) {
 	})
 	requireDiskMountedStatus(t, err)
 
-	// 释放 RO 租约后，MergeDisk 成功提交
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: target.DiskID, MountID: roMnt.MountID}))
 	res, err := mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
@@ -129,7 +126,6 @@ func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t
 	require.NoError(t, err)
 	writeRegularFile(t, ctx, sActor, 0, "feat.txt", []byte("feat"))
 
-	// 1. 源盘 RW + 目标盘 RW 下，DryRun=true 放行且不清除租约
 	srcRW, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: source.DiskID, ReadOnly: false})
 	require.NoError(t, err)
 	tgtRW, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: target.DiskID, ReadOnly: false})
@@ -144,7 +140,6 @@ func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t
 	require.NoError(t, err)
 	require.Empty(t, dryRes.MergeCommitID)
 
-	// DryRun 不得清除活跃租约，立即调用正式合并仍被拦截
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
 		TargetDiskID: target.DiskID,
@@ -152,7 +147,6 @@ func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t
 	})
 	requireDiskMountedStatus(t, err)
 
-	// 释放目标盘后，仅源盘存在未过期 RW 租约，正式合并仍被拒绝且错误包含 "source disk <id>"
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: target.DiskID, MountID: tgtRW.MountID}))
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
@@ -162,7 +156,6 @@ func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t
 	requireDiskMountedStatus(t, err)
 	require.Contains(t, err.Error(), "source disk "+source.DiskID)
 
-	// 2. 释放源盘 RW 后改挂源盘 RO，目标盘未挂载时，正式合并成功放行
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: source.DiskID, MountID: srcRW.MountID}))
 	srcRO, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: source.DiskID, ReadOnly: true})
 	require.NoError(t, err)
@@ -200,7 +193,6 @@ func TestMountLease_RenewAndVirtualClockExpiration(t *testing.T) {
 	mnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: target.DiskID, ReadOnly: false})
 	require.NoError(t, err)
 
-	// 推进 +20s 续期
 	clk.Advance(20 * time.Second)
 	renewRes, err := mgr.RenewMount(ctx, RenewMountParams{
 		DiskID:   target.DiskID,
@@ -211,7 +203,6 @@ func TestMountLease_RenewAndVirtualClockExpiration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(30), renewRes.LeaseTTLSeconds)
 
-	// 再推进 +20s（距上次续期 20s < 30s，虽距首次挂载已 40s），仍拦截 MergeDisk
 	clk.Advance(20 * time.Second)
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
@@ -220,7 +211,6 @@ func TestMountLease_RenewAndVirtualClockExpiration(t *testing.T) {
 	})
 	requireDiskMountedStatus(t, err)
 
-	// 再推进 +11s（距上次续期 31s > 30s），租约自动过期，MergeDisk 自动放行
 	clk.Advance(11 * time.Second)
 	res, err := mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
@@ -263,13 +253,11 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	roMnt, err := mgr1.MountDisk(ctx, MountDiskParams{DiskID: roDisk.DiskID, ReadOnly: true})
 	require.NoError(t, err)
 
-	// 模拟 storage 进程重启
 	require.NoError(t, mgr1.Close())
 
 	mgr2 := New(memDB, WithStorageRoot(rootDir), WithClock(clk.Now))
 	t.Cleanup(func() { _ = mgr2.Close() })
 
-	// 1. 重启后调用 RenewMount（epoch 匹配当前 WriterEpoch）自动重建 RW 租约并拦截 MergeDisk
 	_, err = mgr2.RenewMount(ctx, RenewMountParams{
 		DiskID:   target.DiskID,
 		MountID:  tgtMnt.MountID,
@@ -286,7 +274,6 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// RO 续期重建同样校验磁盘存在并重建 RO 租约
 	_, err = mgr2.RenewMount(ctx, RenewMountParams{
 		DiskID:   roDisk.DiskID,
 		MountID:  roMnt.MountID,
@@ -295,7 +282,6 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// epoch 不匹配当前 WriterEpoch 时返回 ErrStaleEpoch
 	_, err = mgr2.RenewMount(ctx, RenewMountParams{
 		DiskID:   target.DiskID,
 		MountID:  tgtMnt.MountID,
@@ -304,7 +290,6 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrStaleEpoch)
 
-	// 重建后，未传 Force 的 MergeDisk 再次被拦截
 	_, err = mgr2.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
 		TargetDiskID: target.DiskID,
@@ -312,7 +297,6 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	})
 	requireDiskMountedStatus(t, err)
 
-	// 2. 双盘均处于未过期 RW 租约时，MergeDisk(Force: true) 成功提交，目标盘 WriterEpoch 递增且旧租约清除
 	mergeRes, err := mgr2.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
 		TargetDiskID: target.DiskID,
@@ -326,7 +310,6 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, epoch0+1, newTActor.WriterEpoch())
 
-	// 被抢占的旧目标盘续期返回 ErrStaleEpoch
 	_, err = mgr2.RenewMount(ctx, RenewMountParams{
 		DiskID:   target.DiskID,
 		MountID:  tgtMnt.MountID,
@@ -335,7 +318,6 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrStaleEpoch)
 
-	// 释放源盘 RW 租约后，目标盘旧租约已清除，无需 Force 即可再次合入 cleanFork
 	require.NoError(t, mgr2.UnmountDisk(ctx, UnmountDiskParams{DiskID: source.DiskID, MountID: srcMnt.MountID}))
 	cleanFork, err := mgr2.ForkDisk(ctx, ForkDiskParams{SourceDiskID: target.DiskID, Name: "clean"})
 	require.NoError(t, err)
@@ -361,7 +343,6 @@ func TestMountLease_DeleteDiskClearsLeasesAndCustomTTLApplies(t *testing.T) {
 
 	require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
 
-	// DeleteDisk 已清除租约且磁盘已销毁，后续 RenewMount 返回 ErrNotFound
 	_, err = mgr.RenewMount(ctx, RenewMountParams{
 		DiskID:   disk.DiskID,
 		MountID:  mnt.MountID,
@@ -372,7 +353,7 @@ func TestMountLease_DeleteDiskClearsLeasesAndCustomTTLApplies(t *testing.T) {
 }
 
 func TestMountDisk_RWAdmissionGate_RejectsDuplicateWithoutForceAndAllowsAfterReleaseOrExpiry(t *testing.T) {
-	// Given: a disk with an active read-only mount lease and virtual clock.
+
 	ctx := context.Background()
 	clk := newFakeClock(time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC))
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
@@ -385,8 +366,6 @@ func TestMountDisk_RWAdmissionGate_RejectsDuplicateWithoutForceAndAllowsAfterRel
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), roMnt.Epoch)
 
-	// When: non-force RW mount is requested while an RO mount is active.
-	// Then: active RO mount does not block RW mount, and epoch advances to 1.
 	rw1, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), rw1.Epoch)
@@ -395,8 +374,6 @@ func TestMountDisk_RWAdmissionGate_RejectsDuplicateWithoutForceAndAllowsAfterRel
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), actor.WriterEpoch())
 
-	// When: a second non-force RW mount arrives while rw1 lease is unexpired.
-	// Then: rejected with ErrDiskMounted (CodeAborted + EBUSY), WriterEpoch stays 1, and rw1 remains valid.
 	_, err = mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
 	requireDiskMountedStatus(t, err)
 	require.Equal(t, uint64(1), actor.WriterEpoch())
@@ -410,15 +387,11 @@ func TestMountDisk_RWAdmissionGate_RejectsDuplicateWithoutForceAndAllowsAfterRel
 	require.NoError(t, err)
 	writeRegularFile(t, ctx, actor, rw1.Epoch, "owner1.txt", []byte("alive"))
 
-	// When: rw1 unmounts while RO lease is still active.
-	// Then: non-force RW mount succeeds and advances epoch to 2.
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: rw1.MountID}))
 	rw2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), rw2.Epoch)
 
-	// When: virtual clock advances past DefaultMountLeaseTTL (30s) so rw2 lease expires.
-	// Then: non-force RW mount succeeds and advances epoch to 3.
 	clk.Advance(31 * time.Second)
 	rw3, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false})
 	require.NoError(t, err)
@@ -426,7 +399,7 @@ func TestMountDisk_RWAdmissionGate_RejectsDuplicateWithoutForceAndAllowsAfterRel
 }
 
 func TestMountDisk_ForceRW_PreemptsActiveLeaseAndAdvancesEpoch(t *testing.T) {
-	// Given: a disk with an active unexpired RW mount lease (epoch=1).
+
 	ctx := context.Background()
 	clk := newFakeClock(time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC))
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()), WithClock(clk.Now))
@@ -439,11 +412,8 @@ func TestMountDisk_ForceRW_PreemptsActiveLeaseAndAdvancesEpoch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), rw1.Epoch)
 
-	// When: a second RW mount arrives with Force: true.
 	rw2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: false, Force: true})
 
-	// Then: epoch advances to 2, old lease is preempted (RenewMount fails with ErrStaleEpoch),
-	// and subsequent non-force RW mount is rejected by rw2's active lease.
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), rw2.Epoch)
 	require.NotEqual(t, rw1.MountID, rw2.MountID)
@@ -465,7 +435,7 @@ func TestMountDisk_ForceRW_PreemptsActiveLeaseAndAdvancesEpoch(t *testing.T) {
 }
 
 func TestMountDisk_ConcurrentNonForceRW_AdmitsAtMostOneWriter(t *testing.T) {
-	// Given: a freshly created disk with no active mount leases.
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -478,7 +448,6 @@ func TestMountDisk_ConcurrentNonForceRW_AdmitsAtMostOneWriter(t *testing.T) {
 	results := make([]*MountDiskResult, workers)
 	errs := make([]error, workers)
 
-	// When: 16 goroutines concurrently request non-force RW MountDisk on the same disk.
 	var wg sync.WaitGroup
 	for i := range workers {
 		wg.Go(func() {
@@ -489,8 +458,6 @@ func TestMountDisk_ConcurrentNonForceRW_AdmitsAtMostOneWriter(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Then: exactly one caller succeeds with Epoch=1, all others get ErrDiskMounted (CodeAborted + EBUSY),
-	// and authoritative WriterEpoch remains 1.
 	succeeded := 0
 	for i := range workers {
 		if errs[i] == nil {

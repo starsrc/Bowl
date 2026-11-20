@@ -21,7 +21,6 @@ var (
 	mountInfoReadlink = os.Readlink
 )
 
-// DiskMountInfo describes the local mount state and read-only mode of a virtual disk from /proc/self/mountinfo.
 type DiskMountInfo struct {
 	Mountpoint string
 	Mounted    bool
@@ -38,7 +37,6 @@ func hasReadOnlyMountOption(vfsOpts string) bool {
 	return slices.Contains(strings.Split(vfsOpts, ","), "ro")
 }
 
-// unescapeMountInfo decodes octal escape sequences such as \040 for spaces in /proc/self/mountinfo.
 func unescapeMountInfo(s string) string {
 	if !strings.Contains(s, "\\") {
 		return s
@@ -65,7 +63,6 @@ func isOctal(b byte) bool {
 	return b >= '0' && b <= '7'
 }
 
-// parseMountPointsFromReader parses mountinfo text and skips blank or malformed lines.
 func parseMountPointsFromReader(r io.Reader) ([]mountPoint, error) {
 	var points []mountPoint
 	scanner := bufio.NewScanner(r)
@@ -101,7 +98,7 @@ func readMountPoints() ([]mountPoint, error) {
 	file, err := os.Open(mountInfoPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Treat absent procfs mountinfo as unmounted on non-Linux hosts.
+
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read mountinfo file: %w", err)
@@ -143,14 +140,14 @@ func walkMountPointComponents(candidate string, hops *int, mountSet map[string]s
 	parts := splitAbsComponents(candidate)
 	curPrefix := string(filepath.Separator)
 	for idx, comp := range parts {
-		// Check the full remaining candidate before Lstat so this walk never stats a mounted FUSE root.
+
 		checkCandidate := filepath.Clean(filepath.Join(append([]string{curPrefix}, parts[idx:]...)...))
 		if _, ok := mountSet[checkCandidate]; ok {
 			return checkCandidate, true, false
 		}
 		nextPath := filepath.Join(curPrefix, comp)
 		if _, isMount := mountSet[nextPath]; isMount {
-			// Active Linux mount roots are never symlinks; advance past them without calling Lstat.
+
 			curPrefix = nextPath
 			continue
 		}
@@ -179,8 +176,6 @@ func walkMountPointComponents(candidate string, hops *int, mountSet map[string]s
 	return candidate, false, false
 }
 
-// ResolveMountPoint checks /proc/self/mountinfo first and expands path symlinks component-by-component
-// without calling Lstat on active mount roots that can block on unresponsive FUSE daemons.
 func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -217,14 +212,11 @@ func ResolveMountPoint(path string) (resolvedPath string, mounted bool, err erro
 	}
 }
 
-// IsMountPoint reports whether path is an active mountpoint in /proc/self/mountinfo.
 func IsMountPoint(path string) (bool, error) {
 	_, mounted, err := ResolveMountPoint(path)
 	return mounted, err
 }
 
-// FindDiskMountpoint scans /proc/self/mountinfo to check if diskID is actively mounted locally.
-// FUSE fsname is set to "bowl:<disk-id>" after the "-" separator, and column 6 VFS options determine read-only mode.
 func FindDiskMountpoint(diskID string) (DiskMountInfo, error) {
 	points, err := readMountPoints()
 	if err != nil {

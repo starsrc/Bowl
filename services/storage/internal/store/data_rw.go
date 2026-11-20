@@ -16,7 +16,6 @@ type writeDataOp struct {
 	dataLen uint32
 	blocks  []writeBlockSpec
 
-	// Phase A 校验缓存至 Phase B
 	target     Inode
 	newSize    uint64
 	bytesDelta uint64
@@ -39,10 +38,6 @@ func isAllZero(data []byte) bool {
 	return true
 }
 
-// Write 执行跨 256 KiB 逻辑块的追加式数据写入流水线：
-//   - 满 256 KiB 对齐整块写：阶段 1 在不持 inodeLocks 的状态下向活跃 .pack 追加写入满块数据，随后获取 s.inodeLocks[ino&0xfff] 投递进 Actor 双阶段队列；
-//   - 局部或非对齐跨块写：全程持 s.inodeLocks[ino&0xfff]，若命中活跃 .pack 最末尾同块则走 ExtendTail 原地顺延写指针，否则读取旧块合并后通过 Append 追加至活跃 .pack；
-//   - 在 Actor Phase B 的同一个 IndexedBatch 中原子更新 InodeKey 与涉及的全部 DataKey -> 16B BlobRef{PackID, Offset, Length}。
 func (s *StoreActor) Write(ctx context.Context, ino, offset uint64, data []byte, epoch ...uint64) (uint32, Attribute, error) {
 	if s.readOnly {
 		return 0, Attribute{}, ErrReadOnly
@@ -104,7 +99,6 @@ func (s *StoreActor) writeFullBlocks(ctx context.Context, ino, offset uint64, da
 	specs := make([]writeBlockSpec, numBlocks)
 	var staged []BlobRef
 
-	// 阶段 1：在不持有 inodeLocks 的状态下向活跃 .pack 批量追加写入满块数据。
 	var blobSpan trace.Span
 	if isSpanRecording(ctx) {
 		_, blobSpan = startChildSpan(ctx, "store.BlobWrite",
@@ -130,7 +124,6 @@ func (s *StoreActor) writeFullBlocks(ctx context.Context, ino, offset uint64, da
 		}
 	}
 
-	// 预写成功后获取 per-Inode 定序锁，确保持有至阶段 3 db.Apply 完成（<-cmd.done 唤醒）后释放。
 	inoLock := s.lockInode(ctx, ino)
 	defer inoLock.Unlock()
 
@@ -221,7 +214,7 @@ func (s *StoreActor) writePartialData(ctx context.Context, ino, offset uint64, d
 }
 
 func (s *StoreActor) preparePartialWriteBlock(ctx context.Context, blobs *blobStore, ino, blockIdx uint64, inBlock int, chunk []byte, staged *[]BlobRef) (writeBlockSpec, error) {
-	// 跨块局部写中可能包含中间满块对齐整块：直接追加新块，无需读旧块。
+
 	if inBlock == 0 && len(chunk) == BlobSize {
 		if isAllZero(chunk) {
 			s.metrics.recordBlobWrite(writeModeZeroElide, 1, uint64(len(chunk)))
@@ -252,7 +245,6 @@ func (s *StoreActor) preparePartialWriteBlock(ctx context.Context, blobs *blobSt
 		newLen = int(oldRef.Length)
 	}
 
-	// 尝试活跃 .pack 尾部顺延扩展
 	if oldOK && inBlock >= int(oldRef.Length) {
 		if extRef, ok, extErr := s.stageExtendTail(blobs, ino, oldRef, uint32(inBlock), chunk, uint32(newLen), staged); extErr != nil {
 			return writeBlockSpec{}, extErr
@@ -342,7 +334,6 @@ func (s *StoreActor) validateWritableFileInode(reader pebbleReader, ino, offset 
 	return inode, nil
 }
 
-// validateWriteCmd 执行阶段 2 Phase A 纯内存只读预校验（绝不触碰 s.batch 写接口）。
 func (s *StoreActor) validateWriteCmd(cmd *writeCmd) error {
 	op, _ := cmd.req.(*writeDataOp)
 
@@ -383,7 +374,6 @@ func (s *StoreActor) validateWriteCmd(cmd *writeCmd) error {
 	return nil
 }
 
-// mutateWriteCmd 执行阶段 2 Phase B 内存记账与零拷贝批次编码。
 func (s *StoreActor) mutateWriteCmd(cmd *writeCmd) {
 	op, _ := cmd.req.(*writeDataOp)
 	if op.dataLen == 0 {
@@ -414,16 +404,10 @@ func (s *StoreActor) mutateWriteCmd(cmd *writeCmd) {
 	op.attr = inode.ToAttribute()
 }
 
-// Read 在队列外执行 100% 无锁并发直读：
-//   - 单块读直接调 1 次 s.db.Get(DataKey)，跨块读调 s.db.NewIter(nil) + SeekPrefixGE(DataKey(ino, firstBlock))；
-//   - 稀疏空洞直接填零；
-//   - 通过 16B BlobRef{PackID, Offset, Length} 优先从 hotShard 拷贝，未命中直接对常驻 .pack 句柄执行 ReadAt（0 open/close、0 撕裂读、无 ENOENT 重试）。
 func (s *StoreActor) Read(ctx context.Context, ino, offset uint64, size uint32) ([]byte, error) {
 	return s.ReadInto(ctx, ino, offset, size, nil)
 }
 
-// ReadInto 在队列外执行无锁并发直读；当 cap(dst) >= readLen 时直接复用调用方提供的池化缓冲，
-// 且仅对真实稀疏空洞区间执行精确清零，彻底消除对即将被物理块数据覆盖缓冲区的冗余清零开销。
 func (s *StoreActor) ReadInto(ctx context.Context, ino, offset uint64, size uint32, dst []byte) ([]byte, error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -652,8 +636,7 @@ func (s *StoreActor) readMultiBlocks(ctx context.Context, ino, firstBlock, lastB
 		}
 
 		n := min(reqLen, uint64(h.ref.Length)-inBlockStart)
-		// 一致性守卫：仍在 hotShard 内存热缓存中的块（活跃包尾块或部分覆写块）优先命中最新内存字节，
-		// 仅对不在 hotShard 中的相邻物理连续冷块区间合并执行单次底层 pread。
+
 		if blobs.tryReadHot(h.ref, int64(inBlockStart), dst[:n]) {
 			if err := flushRun(); err != nil {
 				return err
@@ -709,8 +692,6 @@ func (s *StoreActor) readMultiBlocks(ctx context.Context, ino, firstBlock, lastB
 	return nil
 }
 
-// readBlockSlice 从 ref 指向的物理封包区间读取 [rangeStart, rangeEnd) 填入 out，
-// 仅对块内尾部稀疏未落盘区间执行清零，避免对有效物理载荷区间的双重写入。
 func (s *StoreActor) readBlockSlice(ctx context.Context, ref BlobRef, rangeStart, rangeEnd, baseOffset uint64, out []byte, preZeroed bool) error {
 	blobs := s.blobs
 	if blobs == nil {

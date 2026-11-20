@@ -53,7 +53,7 @@ func findDirEntryByName(entries []*storagev1.DirEntry, name string) *storagev1.D
 }
 
 func TestServerFSRPC_FileLifecycleReadWriteFsyncAndStatFS_Succeeds(t *testing.T) {
-	// Given: 启用 OpenKeepCache 且已创建并挂载测试磁盘
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(
 		t,
@@ -63,7 +63,6 @@ func TestServerFSRPC_FileLifecycleReadWriteFsyncAndStatFS_Succeeds(t *testing.T)
 	)
 	diskID, epoch := createAndMountTestDisk(t, client)
 
-	// When: 创建文件、写入 512 KiB、Fsync、Read、SetAttr、GetAttr、Lookup 与 StatFS
 	createResp, err := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    diskID,
 		Epoch:     epoch,
@@ -104,7 +103,6 @@ func TestServerFSRPC_FileLifecycleReadWriteFsyncAndStatFS_Succeeds(t *testing.T)
 	require.NoError(t, err, "Read RPC 失败")
 	require.Equal(t, payload, readResp.Msg.GetData(), "Read 返回载荷与写入不一致")
 
-	// Zero-byte Read 与超出 EOF Read 同样不得泄漏读缓冲租约
 	emptyRead, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
 		DiskId: diskID,
 		Ino:    fileIno,
@@ -148,7 +146,6 @@ func TestServerFSRPC_FileLifecycleReadWriteFsyncAndStatFS_Succeeds(t *testing.T)
 	statResp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: fileIno}))
 	require.NoError(t, err, "StatFS RPC 失败")
 
-	// Then: StatFS 反映实时空间占用且所有借用的读写缓冲已归还零泄漏
 	require.Equal(t, uint64(32<<20), statResp.Msg.GetTotalBytes())
 	require.Equal(t, uint64(len(payload)), statResp.Msg.GetUsedBytes())
 	require.Equal(t, uint64(2), statResp.Msg.GetFiles())
@@ -157,7 +154,7 @@ func TestServerFSRPC_FileLifecycleReadWriteFsyncAndStatFS_Succeeds(t *testing.T)
 }
 
 func TestServerFSRPC_DirectoryAndLinkOps_EnforcesTimeoutsAndPOSIXSemantics(t *testing.T) {
-	// Given: 区分文件与目录入口缓存时长的处理端与已挂载盘
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(
 		t,
@@ -167,7 +164,6 @@ func TestServerFSRPC_DirectoryAndLinkOps_EnforcesTimeoutsAndPOSIXSemantics(t *te
 	)
 	diskID, epoch := createAndMountTestDisk(t, client)
 
-	// When: Mkdir / Mknod / Symlink / Readlink / Link / ReadDir / ReadDirPlus / Rename / Unlink / Rmdir / FsyncDir
 	dirResp, err := client.Mkdir(ctx, connect.NewRequest(&storagev1.MkdirRequest{
 		DiskId:    diskID,
 		Epoch:     epoch,
@@ -232,7 +228,6 @@ func TestServerFSRPC_DirectoryAndLinkOps_EnforcesTimeoutsAndPOSIXSemantics(t *te
 	}))
 	require.NoError(t, err, "ReadDirPlus RPC 失败")
 
-	// Then: "." 与 ".." entry_timeout_seconds 强制为 0，目录与常规项按模式区分缓存时长
 	dotEntry := findDirEntryPlusByName(readDirPlusResp.Msg.GetEntries(), ".")
 	dotDotEntry := findDirEntryPlusByName(readDirPlusResp.Msg.GetEntries(), "..")
 	subEntry := findDirEntryPlusByName(readDirPlusResp.Msg.GetEntries(), "subdir")
@@ -246,7 +241,6 @@ func TestServerFSRPC_DirectoryAndLinkOps_EnforcesTimeoutsAndPOSIXSemantics(t *te
 	require.InDelta(t, 5.0, subEntry.GetEntryTimeoutSeconds(), 1e-9, "子目录条目应返回 DirEntryTimeoutSeconds")
 	require.InDelta(t, 1.5, hardEntry.GetEntryTimeoutSeconds(), 1e-9, "常规文件条目应返回 EntryTimeoutSeconds")
 
-	// Rename -> Unlink -> Rmdir -> FsyncDir
 	_, err = client.Rename(ctx, connect.NewRequest(&storagev1.RenameRequest{
 		DiskId:       diskID,
 		Epoch:        epoch,
@@ -298,7 +292,7 @@ func TestServerFSRPC_DirectoryAndLinkOps_EnforcesTimeoutsAndPOSIXSemantics(t *te
 }
 
 func TestServerFSRPC_FallocateAndOrphanReclaim_UpdatesAndReclaimsSpace(t *testing.T) {
-	// Given: 已创建并挂载磁盘的常规文件
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 	diskID, epoch := createAndMountTestDisk(t, client)
@@ -313,7 +307,6 @@ func TestServerFSRPC_FallocateAndOrphanReclaim_UpdatesAndReclaimsSpace(t *testin
 	require.NoError(t, err, "Create 失败")
 	ino := cResp.Msg.GetInode().GetIno()
 
-	// When: Fallocate 扩展至 16384 字节，以 open_in_client=true 解链，再调用 ReclaimOrphan 回收
 	_, err = client.Fallocate(ctx, connect.NewRequest(&storagev1.FallocateRequest{
 		DiskId: diskID,
 		Epoch:  epoch,
@@ -343,18 +336,16 @@ func TestServerFSRPC_FallocateAndOrphanReclaim_UpdatesAndReclaimsSpace(t *testin
 	}))
 	require.NoError(t, err, "ReclaimOrphan RPC 失败")
 
-	// Then: 孤儿节点已被回收，GetAttr 返回 NotFound
 	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Ino: ino}))
 	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
 }
 
 func TestServerFSRPC_XattrLifecycle_SetsGetsListsAndRemoves(t *testing.T) {
-	// Given: 已创建并挂载磁盘的根目录
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 	diskID, epoch := createAndMountTestDisk(t, client)
 
-	// When: 设置、获取、列出并移除 user.meta 扩展属性
 	_, err := client.SetXattr(ctx, connect.NewRequest(&storagev1.SetXattrRequest{
 		DiskId: diskID,
 		Epoch:  epoch,
@@ -387,7 +378,6 @@ func TestServerFSRPC_XattrLifecycle_SetsGetsListsAndRemoves(t *testing.T) {
 	}))
 	require.NoError(t, err, "RemoveXattr RPC 失败")
 
-	// Then: 再次 GetXattr 返回 CodeNotFound + ENODATA
 	_, err = client.GetXattr(ctx, connect.NewRequest(&storagev1.GetXattrRequest{
 		DiskId: diskID,
 		Ino:    1,
@@ -397,7 +387,7 @@ func TestServerFSRPC_XattrLifecycle_SetsGetsListsAndRemoves(t *testing.T) {
 }
 
 func TestServerFSRPC_ValidationFastPathAndProtovalidate_RejectsWithExpectedReason(t *testing.T) {
-	// Given: 完整拦截器链保护的 ConnectRPC 客户端（覆盖 Read/Write 快检路径与通用 Protovalidate 路径）
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 	validUUID := "018f0000-0000-7000-8000-000000000001"
@@ -550,7 +540,6 @@ func TestServerFSRPC_ValidationFastPathAndProtovalidate_RejectsWithExpectedReaso
 		},
 	}
 
-	// When / Then: 入口校验拦截返回 InvalidArgument 与精确 reason
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			requireConnectErrorCodeAndReason(t, tc.invoke(), connect.CodeInvalidArgument, tc.wantReason)
@@ -559,7 +548,7 @@ func TestServerFSRPC_ValidationFastPathAndProtovalidate_RejectsWithExpectedReaso
 }
 
 func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *testing.T) {
-	// Given: 已建盘的处理端实现，直接穿过 StorageServiceHandler 接口测试绕过入口校验时的业务防御
+
 	ctx := context.Background()
 	srv, client := newTestServerAndClient(t)
 	diskID, epoch := createAndMountTestDisk(t, client)
@@ -581,7 +570,6 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 	}))
 	require.NoError(t, err)
 
-	// 先将 epoch 推进至 2，使旧 epoch=1 变为陈旧
 	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
 	require.NoError(t, err, "推进 epoch 失败")
 
@@ -678,14 +666,12 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 		},
 	}
 
-	// When / Then 1: 各业务防御与领域错误正确映射
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			requireConnectErrorCodeAndReason(t, tc.invoke(), tc.wantCode, tc.wantReason)
 		})
 	}
 
-	// When / Then 2: 已取消上下文进入 Handler 直接拦截返回 CodeCanceled
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
 	_, cErr := srv.GetAttr(canceledCtx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Ino: 1}))
@@ -693,18 +679,16 @@ func TestServerFSRPC_BusinessInterception_DirectHandlerGuardsAndDomainErrors(t *
 }
 
 func TestServerFSRPC_CreateTmpfile_ProcedureRegisteredInMetrics(t *testing.T) {
-	// Given: the Connect procedure path for CreateTmpfile.
+
 	proc := storagev1connect.StorageServiceCreateTmpfileProcedure
 
-	// When: normalizing the procedure path for HTTP metrics.
 	got := normalizeProcedure(proc)
 
-	// Then: the normalized procedure keeps its canonical path instead of falling back to "other".
 	require.Equal(t, proc, got, "CreateTmpfile procedure must be registered in knownProcedures: want=%q got=%q", proc, got)
 }
 
 func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing.T) {
-	// Given: a storage server with distinct timeouts and a mounted writable disk.
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(
 		t,
@@ -713,7 +697,6 @@ func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing
 	)
 	diskID, epoch1 := createAndMountTestDisk(t, client)
 
-	// When: creating a linkable tmpfile, writing data, punching a hole, reading back, and promoting via Link.
 	linkableResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		DiskId:    diskID,
 		Epoch:     epoch1,
@@ -803,7 +786,6 @@ func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing
 	require.Equal(t, uint64(8192), statAfterPromote.Msg.GetUsedBytes(), "StatFS UsedBytes after promotion mismatch")
 	require.Equal(t, uint64(2), statAfterPromote.Msg.GetFiles(), "StatFS Files after promotion mismatch")
 
-	// When: creating an exclusive tmpfile, writing data, trying Link, and reclaiming via ReclaimOrphan.
 	exclResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		DiskId:    diskID,
 		Epoch:     epoch1,
@@ -862,7 +844,6 @@ func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing
 	require.Equal(t, uint64(8192), statAfterReclaim.Msg.GetUsedBytes(), "StatFS UsedBytes after ReclaimOrphan mismatch")
 	require.Equal(t, uint64(2), statAfterReclaim.Msg.GetFiles(), "StatFS Files after ReclaimOrphan mismatch")
 
-	// When: leaving an unpromoted tmpfile with data and advancing epoch via MountDisk.
 	lingeringResp, err := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 		DiskId:    diskID,
 		Epoch:     epoch1,
@@ -889,7 +870,6 @@ func TestServerFSRPC_CreateTmpfile_LifecyclePromotionAndOrphanReclaim(t *testing
 	require.NoError(t, err, "MountDisk epoch advance failed")
 	require.Equal(t, uint64(2), mountResp2.Msg.GetEpoch(), "epoch after remount mismatch")
 
-	// Then: the lingering tmpfile is reclaimed while the promoted file remains intact.
 	_, err = client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
 		DiskId: diskID,
 		Ino:    lingeringIno,
@@ -928,7 +908,7 @@ func (m *readOnlyActorManager) Actor(ctx context.Context, diskID string) (*store
 }
 
 func TestServerFSRPC_CreateTmpfile_StaleEpoch_RejectsWithEBUSY(t *testing.T) {
-	// Given: a disk mounted twice so writer epoch advances to 2.
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 	diskID, _ := createAndMountTestDisk(t, client)
@@ -948,7 +928,6 @@ func TestServerFSRPC_CreateTmpfile_StaleEpoch_RejectsWithEBUSY(t *testing.T) {
 		{name: "epoch higher than current", epoch: 3},
 	}
 
-	// When / Then: calling CreateTmpfile with a stale or future epoch fails with EBUSY.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
@@ -966,7 +945,7 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 	ctx := context.Background()
 
 	t.Run("read-only mount returns epoch 0 which CreateTmpfile rejects as EINVAL", func(t *testing.T) {
-		// Given: a newly created disk mounted read-only.
+
 		_, client := newTestServerAndClient(t)
 		created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 			Name:     "ro-mount-disk",
@@ -982,7 +961,6 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 		require.NoError(t, err, "read-only MountDisk failed")
 		require.Zero(t, roMount.Msg.GetEpoch(), "read-only mount must return epoch 0")
 
-		// When / Then: CreateTmpfile with the returned epoch 0 is rejected with EINVAL.
 		_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 			DiskId:    diskID,
 			Epoch:     roMount.Msg.GetEpoch(),
@@ -993,7 +971,7 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 	})
 
 	t.Run("unmounted disk rejects epoch 1 with EBUSY", func(t *testing.T) {
-		// Given: a newly created disk whose writer epoch is still 0.
+
 		_, client := newTestServerAndClient(t)
 		created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 			Name:     "unmounted-disk",
@@ -1002,7 +980,6 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 		require.NoError(t, err, "CreateDisk failed")
 		diskID := created.Msg.GetDisk().GetDiskId()
 
-		// When / Then: CreateTmpfile with epoch 1 fails with EBUSY because the disk is unmounted.
 		_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 			DiskId:    diskID,
 			Epoch:     1,
@@ -1013,7 +990,7 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 	})
 
 	t.Run("read-only StoreActor rejects CreateTmpfile with EPERM", func(t *testing.T) {
-		// Given: a seeded Pebble disk reopened with ReadOnly=true and returned by a control.Manager wrapper.
+
 		roDiskID := "018f0000-0000-7000-8000-000000000042"
 		roDir := t.TempDir()
 
@@ -1048,7 +1025,6 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 		httpClient := &http.Client{Transport: memoryRoundTripper{handler: srv.Handler()}}
 		roClient := storagev1connect.NewStorageServiceClient(httpClient, "http://storage.local")
 
-		// When / Then: calling CreateTmpfile against the read-only actor returns CodePermissionDenied + EPERM.
 		_, callErr := roClient.CreateTmpfile(ctx, connect.NewRequest(&storagev1.CreateTmpfileRequest{
 			DiskId:    roDiskID,
 			Epoch:     epoch,
@@ -1060,7 +1036,7 @@ func TestServerFSRPC_CreateTmpfile_ReadOnlyAndUnmounted_RejectsWrite(t *testing.
 }
 
 func TestServerFSRPC_CreateTmpfile_ValidationAndDomainErrors_RejectsInvalidRequests(t *testing.T) {
-	// Given: a mounted disk with an existing regular file inode for ENOTDIR checks.
+
 	ctx := context.Background()
 	srv, client := newTestServerAndClient(t)
 	diskID, epoch := createAndMountTestDisk(t, client)
@@ -1177,7 +1153,6 @@ func TestServerFSRPC_CreateTmpfile_ValidationAndDomainErrors_RejectsInvalidReque
 		},
 	}
 
-	// When / Then: both client interceptor and direct handler enforce identical error codes and reasons.
 	for _, tc := range cases {
 		t.Run("client/"+tc.name, func(t *testing.T) {
 			_, callErr := client.CreateTmpfile(ctx, connect.NewRequest(tc.req))
@@ -1189,7 +1164,6 @@ func TestServerFSRPC_CreateTmpfile_ValidationAndDomainErrors_RejectsInvalidReque
 		})
 	}
 
-	// When / Then: canceled context entering the handler returns CodeCanceled.
 	t.Run("direct/canceled context", func(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()

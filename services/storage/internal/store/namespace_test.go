@@ -54,14 +54,12 @@ func requireDirEntryPlusNames(t *testing.T, entries []store.DirEntryPlus, wantNa
 }
 
 func TestGivenOpenOptionsWhenInvalidThenReturnsExpectedError(t *testing.T) {
-	// Given: 非法打开参数（空目录、只读打开未初始化目录）
+
 	emptyDir := t.TempDir()
 
-	// When & Then: 空 Dir 返回 ErrInvalid
 	_, err := store.Open(store.Options{Dir: ""})
 	require.ErrorIsf(t, err, store.ErrInvalid, "空 Dir 打开应返回 ErrInvalid: got=%v", err)
 
-	// When & Then: ReadOnly 打开未初始化目录返回错误（Pebble 数据库不存在）
 	_, err = store.Open(store.Options{Dir: emptyDir, DiskID: "ro-empty", ReadOnly: true})
 	require.Errorf(t, err, "只读打开未初始化目录应返回错误")
 	require.Containsf(t, err.Error(), "database does not exist", "只读空目录错误信息应标明数据库不存在: got=%v", err)
@@ -71,14 +69,12 @@ func TestGivenFreshStoreWhenOpenedThenRootAndStatFSInitialized(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Given & When: 首次可写打开空目录
 	actor := openTestActor(t, &store.Options{
 		Dir:      dir,
 		DiskID:   "fresh-init",
 		MaxBytes: 16 << 20,
 	})
 
-	// Then: 根目录 Inode(1) 与 StatFS 初始契约就绪
 	require.Equalf(t, dir, actor.Dir(), "Dir() 返回不一致: want=%s got=%s", dir, actor.Dir())
 	require.Falsef(t, actor.ReadOnly(), "可写实例 ReadOnly() 应为 false")
 
@@ -103,11 +99,9 @@ func TestGivenClosedOrReadOnlyActorWhenMutatingOrReadingThenRejectsWithLifecycle
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Given: 先初始化有效目录并关闭，分别获得已关闭实例与只读实例
 	actor := openTestActor(t, &store.Options{Dir: dir, DiskID: "lifecycle"})
 	require.NoErrorf(t, actor.Close(), "Close 失败")
 
-	// When & Then: 已关闭实例读写均返回 ErrClosed
 	_, err := actor.GetAttr(ctx, store.RootIno)
 	require.ErrorIsf(t, err, store.ErrClosed, "关闭后 GetAttr 应返回 ErrClosed: got=%v", err)
 	_, err = actor.StatFS(ctx)
@@ -119,11 +113,9 @@ func TestGivenClosedOrReadOnlyActorWhenMutatingOrReadingThenRejectsWithLifecycle
 	_, err = actor.ReadDir(ctx, store.RootIno, 0, 16)
 	require.ErrorIsf(t, err, store.ErrClosed, "关闭后 ReadDir 应返回 ErrClosed: got=%v", err)
 
-	// Given: 只读重开同一目录
 	roActor := openTestActor(t, &store.Options{Dir: dir, DiskID: "lifecycle-ro", ReadOnly: true})
 	require.Truef(t, roActor.ReadOnly(), "只读实例 ReadOnly() 应为 true")
 
-	// When & Then: 只读实例可查询，写入全部返回 ErrReadOnly
 	_, err = roActor.GetAttr(ctx, store.RootIno)
 	require.NoErrorf(t, err, "只读实例 GetAttr 不应失败: %v", err)
 	_, err = roActor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("ro.txt"), Mode: store.S_IFREG | 0o644})
@@ -144,7 +136,6 @@ func TestGivenEmptyRootWhenCreatingNodesThenLookupAndPersistenceMatchContract(t 
 	dir := t.TempDir()
 	actor := openTestActor(t, &store.Options{Dir: dir, DiskID: "create-nodes"})
 
-	// Given: 创建带 S_ISGID 的父目录
 	dirAttr, err := actor.Mkdir(ctx, store.MkdirReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("sgid-dir"),
@@ -161,7 +152,6 @@ func TestGivenEmptyRootWhenCreatingNodesThenLookupAndPersistenceMatchContract(t 
 	require.NoError(t, err)
 	require.Equalf(t, uint32(3), rootAfterMkdir.Nlink, "父目录创建子目录后 Nlink 应递增为 3: got=%d", rootAfterMkdir.Nlink)
 
-	// When: 在 S_ISGID 目录下创建子目录、常规文件、字符设备、FIFO 与符号链接
 	subDirAttr, err := actor.Mkdir(ctx, store.MkdirReq{
 		ParentIno: dirAttr.Ino,
 		Name:      []byte("child-dir"),
@@ -214,7 +204,6 @@ func TestGivenEmptyRootWhenCreatingNodesThenLookupAndPersistenceMatchContract(t 
 	require.Equalf(t, store.S_IFLNK|0o777, symAttr.Mode, "Symlink 模式应为 S_IFLNK|0777: got=%o", symAttr.Mode)
 	require.Equalf(t, uint64(len("app.bin")), symAttr.Size, "Symlink Size 应等于目标路径长度: want=%d got=%d", len("app.bin"), symAttr.Size)
 
-	// When: 为常规文件创建跨目录硬链接
 	linkAttr, err := actor.Link(ctx, store.LinkReq{
 		Ino:          fileAttr.Ino,
 		NewParentIno: store.RootIno,
@@ -223,7 +212,6 @@ func TestGivenEmptyRootWhenCreatingNodesThenLookupAndPersistenceMatchContract(t 
 	require.NoError(t, err)
 	require.Equalf(t, uint32(2), linkAttr.Nlink, "创建硬链接后 Nlink 应增至 2: got=%d", linkAttr.Nlink)
 
-	// Then: Close 并重新打开后，所有节点、Lookup(. / ..)、Readlink 与 StatFS 完整持久
 	require.NoError(t, actor.Close())
 	reopened := openTestActor(t, &store.Options{Dir: dir, DiskID: "create-nodes"})
 
@@ -254,7 +242,6 @@ func TestGivenPopulatedDirWhenReadDirAndReadDirPlusPaginatedThenOrderAndAttribut
 	ctx := context.Background()
 	actor := openTestActor(t, &store.Options{DiskID: "readdir-page"})
 
-	// Given: 创建子目录与多个有序文件（故意按非字典序创建，验证返回按字节字典序排序）
 	subDir, err := actor.Mkdir(ctx, store.MkdirReq{ParentIno: store.RootIno, Name: []byte("sub"), Mode: store.S_IFDIR | 0o755})
 	require.NoError(t, err)
 
@@ -265,7 +252,6 @@ func TestGivenPopulatedDirWhenReadDirAndReadDirPlusPaginatedThenOrderAndAttribut
 	_, err = actor.Create(ctx, store.CreateReq{ParentIno: subDir.Ino, Name: []byte("bravo"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
 
-	// When: 分页调用 ReadDir 与 ReadDirPlus（每页 2 条，依次推进 NextOffset）
 	page1, err := actor.ReadDir(ctx, subDir.Ino, 0, 2)
 	require.NoError(t, err)
 	requireDirEntryNames(t, page1, []string{".", ".."})
@@ -281,14 +267,12 @@ func TestGivenPopulatedDirWhenReadDirAndReadDirPlusPaginatedThenOrderAndAttribut
 	requireDirEntryNames(t, page3, []string{"charlie"})
 	require.Equalf(t, fCharly.Ino, page3[0].Ino, "charlie 节点号不符")
 
-	// When & Then: ReadDirPlus 全量读取并验证属性与节点号一致
 	plusAll, err := actor.ReadDirPlus(ctx, subDir.Ino, 0, 10)
 	require.NoError(t, err)
 	requireDirEntryPlusNames(t, plusAll, []string{".", "..", "alpha", "bravo", "charlie"})
 	require.Equalf(t, subDir.Ino, plusAll[0].Ino, ". 项应指向 subDir")
 	require.Equalf(t, store.RootIno, plusAll[1].Ino, ".. 项应指向父目录 RootIno")
 
-	// When & Then: 非法参数校验（maxEntries=0、超过上限、非目录调用 ReadDir/ReadDirPlus）
 	_, err = actor.ReadDir(ctx, subDir.Ino, 0, 0)
 	require.ErrorIsf(t, err, store.ErrInvalid, "maxEntries=0 应返回 ErrInvalid: got=%v", err)
 	_, err = actor.ReadDir(ctx, subDir.Ino, 0, store.MaxReadDirLimit+1)
@@ -482,23 +466,20 @@ func TestGivenNamespaceValidationCasesWhenCalledThenRejectsWithExpectedErrors(t 
 func TestGivenQuotaLimitsWhenExceededOnCreateOrSymlinkThenReturnsErrNoSpace(t *testing.T) {
 	ctx := context.Background()
 
-	// Given: MaxInodes=2 且 MaxBytes=16 的受限实例（根目录已占 1 个 inode）
 	actor := openTestActor(t, &store.Options{
 		DiskID:    "ns-quota",
 		MaxBytes:  16,
 		MaxInodes: 2,
 	})
 
-	// When: 创建一个超长目标的符号链接超出 MaxBytes=16
 	_, err := actor.Symlink(ctx, store.SymlinkReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("big-sym"),
 		Target:    []byte(strings.Repeat("x", 17)),
 	})
-	// Then: 返回 ErrNoSpace
+
 	require.ErrorIsf(t, err, store.ErrNoSpace, "超出 MaxBytes 配额应返回 ErrNoSpace: got=%v", err)
 
-	// When: 创建一个合法文件耗尽 MaxInodes=2，再尝试创建第三个节点
 	_, err = actor.Create(ctx, store.CreateReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("one.txt"),
@@ -511,7 +492,7 @@ func TestGivenQuotaLimitsWhenExceededOnCreateOrSymlinkThenReturnsErrNoSpace(t *t
 		Name:      []byte("two.txt"),
 		Mode:      store.S_IFREG | 0o644,
 	})
-	// Then: 返回 ErrNoSpace
+
 	require.ErrorIsf(t, err, store.ErrNoSpace, "超出 MaxInodes 配额应返回 ErrNoSpace: got=%v", err)
 }
 
@@ -525,7 +506,6 @@ func TestGivenLiveDirectoryWhenCreateTmpfileCalledThenAllocatesUnlinkedOrphanWit
 		Now:    func() time.Time { return now },
 	})
 
-	// Given: an S_ISGID directory and a plain directory at an initial timestamp.
 	sgidDir, err := actor.Mkdir(ctx, store.MkdirReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("sgid"),
@@ -540,7 +520,6 @@ func TestGivenLiveDirectoryWhenCreateTmpfileCalledThenAllocatesUnlinkedOrphanWit
 
 	now = now.Add(5 * time.Second)
 
-	// When: creating a linkable tmpfile inside the S_ISGID directory and an exclusive tmpfile under root.
 	linkable, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
 		ParentIno: sgidDir.Ino,
 		Mode:      store.S_IFREG | 0o666,
@@ -561,7 +540,6 @@ func TestGivenLiveDirectoryWhenCreateTmpfileCalledThenAllocatesUnlinkedOrphanWit
 	})
 	require.NoErrorf(t, err, "CreateTmpfile exclusive failed")
 
-	// Then: both tmpfiles have Nlink=0, masked regular modes, expected GID inheritance, and no directory entry.
 	require.Equalf(t, store.S_IFREG|0o644, linkable.Mode, "linkable mode mismatch: want=%o got=%o", store.S_IFREG|0o644, linkable.Mode)
 	require.Zerof(t, linkable.Nlink, "linkable Nlink mismatch: want=0 got=%d", linkable.Nlink)
 	require.Zerof(t, linkable.ParentIno, "linkable ParentIno mismatch: want=0 got=%d", linkable.ParentIno)
@@ -603,7 +581,6 @@ func TestGivenLiveDirectoryWhenCreateTmpfileCalledThenAllocatesUnlinkedOrphanWit
 	require.NoErrorf(t, err, "ReadDirPlus root failed")
 	requireDirEntryPlusNames(t, rootEntries, []string{".", "..", "sgid"})
 
-	// Reopen verifies tmpfile attributes and orphan state persist cleanly.
 	require.NoErrorf(t, actor.Close(), "Close actor failed")
 	reopened := openTestActor(t, &store.Options{Dir: dir, DiskID: "create-tmpfile-live"})
 
@@ -630,7 +607,6 @@ func TestGivenInvalidStateOrArgsWhenCreateTmpfileCalledThenReturnsExpectedErrors
 		MaxInodes: 5,
 	})
 
-	// Given: a regular file, a removed directory, an unlinked open-handle directory, and an advanced writer epoch.
 	regFile, err := actor.Create(ctx, store.CreateReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("file.txt"),
@@ -672,7 +648,6 @@ func TestGivenInvalidStateOrArgsWhenCreateTmpfileCalledThenReturnsExpectedErrors
 		Epoch:            newEpoch,
 	}), "setup overwrite unlinked-dir failed")
 
-	// When & Then: invalid inputs and state return the expected domain errors.
 	cases := []struct {
 		name string
 		req  store.CreateTmpfileReq
@@ -742,13 +717,11 @@ func TestGivenInvalidStateOrArgsWhenCreateTmpfileCalledThenReturnsExpectedErrors
 		})
 	}
 
-	// When: filling remaining MaxInodes=5 quota (root=1, file.txt=2, unlinkedDir=3, replDir=4), the fifth inode succeeds and sixth hits ErrNoSpace.
 	_, err = actor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
 	require.NoErrorf(t, err, "tmpfile within MaxInodes=5 quota failed")
 	_, err = actor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
 	require.ErrorIsf(t, err, store.ErrNoSpace, "tmpfile exceeding MaxInodes must return ErrNoSpace: got=%v", err)
 
-	// When: closed or read-only actor receives CreateTmpfile, lifecycle errors are returned.
 	require.NoErrorf(t, actor.Close(), "close actor failed")
 	_, err = actor.CreateTmpfile(ctx, store.CreateTmpfileReq{ParentIno: store.RootIno, Mode: 0o600, Epoch: newEpoch})
 	require.ErrorIsf(t, err, store.ErrClosed, "closed CreateTmpfile must return ErrClosed: got=%v", err)
@@ -780,7 +753,7 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Given: an actor capped at 2 * BlobSize and an unpromoted tmpfile.
+
 			actor := openTestActor(t, &store.Options{
 				DiskID:   "tmpfile-io-" + tc.name,
 				MaxBytes: 2 * store.BlobSize,
@@ -792,7 +765,6 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 			})
 			require.NoErrorf(t, err, "case %s: CreateTmpfile failed", tc.name)
 
-			// When: performing a full-block write followed by an unaligned partial write.
 			fullBlock := bytes.Repeat([]byte{tc.pattern}, store.BlobSize)
 			n1, attr1, err := actor.Write(ctx, tmp.Ino, 0, fullBlock)
 			require.NoErrorf(t, err, "case %s: full-block Write failed", tc.name)
@@ -805,7 +777,6 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 			require.Equalf(t, uint32(512), n2, "case %s: partial write count mismatch: want=512 got=%d", tc.name, n2)
 			require.Equalf(t, uint64(store.BlobSize+576), attr2.Size, "case %s: size after partial Write mismatch: want=%d got=%d", tc.name, store.BlobSize+576, attr2.Size)
 
-			// Then: reading across the block boundary preserves data and the sparse gap.
 			gotSpan, err := actor.Read(ctx, tmp.Ino, store.BlobSize-16, 592)
 			require.NoErrorf(t, err, "case %s: Read across boundary failed", tc.name)
 			wantSpan := make([]byte, 592)
@@ -813,7 +784,6 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 			copy(wantSpan[80:], partBlock)
 			require.Equalf(t, wantSpan, gotSpan, "case %s: readback mismatch across block boundary", tc.name)
 
-			// When: extending, preallocating with keep-size, and punching a hole via Fallocate.
 			require.NoErrorf(t, actor.Fallocate(ctx, tmp.Ino, store.BlobSize+576, 1024, 0), "case %s: Fallocate(0) failed", tc.name)
 			afterAlloc, err := actor.GetAttr(ctx, tmp.Ino)
 			require.NoErrorf(t, err, "case %s: GetAttr after Fallocate(0) failed", tc.name)
@@ -832,7 +802,6 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 			copy(wantHole[1036:], bytes.Repeat([]byte{tc.pattern}, 12))
 			require.Equalf(t, wantHole, gotHole, "case %s: punched hole bytes mismatch", tc.name)
 
-			// When: modifying Flags, Mode, UID, and GID via SetAttr and appending at EOF.
 			appendFlag := store.FlagAppend
 			_, err = actor.SetAttr(ctx, tmp.Ino, store.SetAttrReq{Flags: &appendFlag})
 			require.NoErrorf(t, err, "case %s: SetAttr FlagAppend failed", tc.name)
@@ -861,7 +830,6 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 			require.Zerof(t, attrUpdated.Flags, "case %s: cleared Flags mismatch: want=0 got=%d", tc.name, attrUpdated.Flags)
 			require.Zerof(t, attrUpdated.Nlink, "case %s: tmpfile Nlink must remain 0: got=%d", tc.name, attrUpdated.Nlink)
 
-			// When: exceeding MaxBytes logical quota, Write rejects with ErrNoSpace and leaves accounting unchanged.
 			_, _, err = actor.Write(ctx, tmp.Ino, store.BlobSize+1616, bytes.Repeat([]byte{0x77}, store.BlobSize))
 			require.ErrorIsf(t, err, store.ErrNoSpace, "case %s: Write exceeding MaxBytes must return ErrNoSpace: got=%v", tc.name, err)
 
@@ -869,7 +837,6 @@ func TestGivenUnpromotedTmpfilesWhenWrittenFallocatedSetAttrAndFsyncedThenContra
 			require.NoErrorf(t, err, "case %s: StatFS failed", tc.name)
 			require.Equalf(t, uint64(store.BlobSize+1616), st.UsedBytes, "case %s: StatFS UsedBytes mismatch: want=%d got=%d", tc.name, store.BlobSize+1616, st.UsedBytes)
 
-			// When: flushing via Fsync, WAL dirty flag clears.
 			require.NoErrorf(t, actor.Fsync(ctx, tmp.Ino), "case %s: Fsync on tmpfile failed", tc.name)
 			require.Falsef(t, actor.WALDirty(), "case %s: WALDirty must be false after Fsync", tc.name)
 		})
@@ -880,7 +847,6 @@ func TestGivenExclusiveTmpfileOrUnlinkedOrphanWhenLinkCalledThenReturnsErrNotFou
 	ctx := context.Background()
 	actor := openTestActor(t, &store.Options{DiskID: "link-reject-orphans"})
 
-	// Given: an exclusive tmpfile (0x02), an unlinked open-handle file (0x01), and a rename-overwritten open-handle file (0x01).
 	exclusiveTmp, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
 		ParentIno: store.RootIno,
 		Mode:      store.S_IFREG | 0o600,
@@ -924,7 +890,6 @@ func TestGivenExclusiveTmpfileOrUnlinkedOrphanWhenLinkCalledThenReturnsErrNotFou
 	require.NoErrorf(t, err, "Mknod fifo.pipe failed")
 	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("fifo.pipe"), true), "Unlink fifo.pipe openHandle failed")
 
-	// When & Then: Link rejects exclusive tmpfiles and unlinked orphans before and after SetAttr flag changes.
 	cases := []struct {
 		name string
 		ino  uint64
@@ -983,7 +948,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 		Now:       func() time.Time { return now },
 	})
 
-	// Given: an existing entry and a linkable tmpfile (0x03) with full-block writes, hole punching, xattr, flags toggled, and dirtyAtime.
 	_, err := actor.Create(ctx, store.CreateReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("occupied.bin"),
@@ -1017,7 +981,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 	_, err = actor.Read(ctx, tmp.Ino, 0, 4)
 	require.NoErrorf(t, err, "Read for dirtyAtime failed")
 
-	// Linking onto an existing name must fail without promoting the tmpfile.
 	_, err = actor.Link(ctx, store.LinkReq{
 		Ino:          tmp.Ino,
 		NewParentIno: store.RootIno,
@@ -1028,7 +991,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 	stBefore, err := actor.StatFS(ctx)
 	require.NoErrorf(t, err, "StatFS before promotion failed")
 
-	// When: promoting the linkable tmpfile into the namespace via Link.
 	now = now.Add(2 * time.Second)
 	promotedAttr, err := actor.Link(ctx, store.LinkReq{
 		Ino:          tmp.Ino,
@@ -1037,7 +999,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 	})
 	require.NoErrorf(t, err, "Link promotion on linkable tmpfile failed")
 
-	// Then: Nlink becomes 1, orphan marker clears, StatFS counts stay unchanged, and namespace/data/xattr match.
 	require.Equalf(t, uint32(1), promotedAttr.Nlink, "promoted Nlink mismatch: want=1 got=%d", promotedAttr.Nlink)
 	require.Equalf(t, tmp.Ino, promotedAttr.Ino, "promoted Ino mismatch: want=%d got=%d", tmp.Ino, promotedAttr.Ino)
 	require.Equalf(t, uint64(store.BlobSize+384), promotedAttr.Size, "promoted Size mismatch: want=%d got=%d", store.BlobSize+384, promotedAttr.Size)
@@ -1074,7 +1035,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 	require.NoErrorf(t, err, "GetXattr after promotion failed")
 	require.Equalf(t, []byte("staged"), gotXattr, "xattr mismatch: want=staged got=%q", string(gotXattr))
 
-	// When: creating a second hardlink and checking orphan operations on the live promoted file.
 	secondAttr, err := actor.Link(ctx, store.LinkReq{
 		Ino:          tmp.Ino,
 		NewParentIno: store.RootIno,
@@ -1089,7 +1049,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 	require.NoErrorf(t, err, "promoted.bin must survive CleanOrphans")
 	require.Equalf(t, uint32(2), stillThere.Nlink, "Nlink after CleanOrphans mismatch: want=2 got=%d", stillThere.Nlink)
 
-	// When: unlinking both links with the last unlink keeping an open handle (writes 0x01 orphan marker).
 	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("second.bin"), false), "Unlink second.bin failed")
 	require.NoErrorf(t, actor.Unlink(ctx, store.RootIno, []byte("promoted.bin"), true), "Unlink promoted.bin openHandle failed")
 
@@ -1104,7 +1063,6 @@ func TestGivenLinkableTmpfileWhenPromotedViaLinkThenBecomesLiveFileAndBlocksReli
 	})
 	require.ErrorIsf(t, err, store.ErrNotFound, "re-linking unlinked open-handle orphan must return ErrNotFound: got=%v", err)
 
-	// Reopen confirms unlinked orphan blocks re-linking across restarts.
 	require.NoErrorf(t, actor.Close(), "Close actor failed")
 	reopened := openTestActor(t, &store.Options{Dir: dir, DiskID: "tmpfile-promote"})
 	_, err = reopened.Link(ctx, store.LinkReq{

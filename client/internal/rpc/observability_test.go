@@ -60,7 +60,7 @@ func setupTestOTel(t *testing.T) (*prometheus.Registry, *sdkmetric.ManualReader,
 }
 
 func TestObservability_GivenRetryAndOTelProviders_ExportsSubMsHistogramsAndRetryMetrics(t *testing.T) {
-	// Given: 装配真实 Prometheus Exporter + ManualReader + InMemory SpanExporter 与虚拟时钟
+
 	reg, manualReader, spanExp, tp := setupTestOTel(t)
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	rpcMetrics := NewMetrics()
@@ -93,7 +93,6 @@ func TestObservability_GivenRetryAndOTelProviders_ExportsSubMsHistogramsAndRetry
 	ctx, rootSpan := tp.Tracer("test-caller").Start(context.Background(), "caller.read")
 	ctx = WithRequestID(ctx, 4242)
 
-	// When
 	resp, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
 		Ino:    1,
 		Offset: 0,
@@ -102,7 +101,6 @@ func TestObservability_GivenRetryAndOTelProviders_ExportsSubMsHistogramsAndRetry
 	}))
 	rootSpan.End()
 
-	// Then
 	require.NoError(t, err)
 	payload := TakeReadPayload(resp.Msg)
 	require.Equal(t, []byte("sub-ms-check"), payload.Data)
@@ -129,7 +127,7 @@ func TestObservability_GivenRetryAndOTelProviders_ExportsSubMsHistogramsAndRetry
 }
 
 func TestObservability_GivenStaleEpochError_ExportsCounterErrorReasonAndStructuredLog(t *testing.T) {
-	// Given
+
 	reg, _, spanExp, tp := setupTestOTel(t)
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	rpcMetrics := NewMetrics()
@@ -163,7 +161,6 @@ func TestObservability_GivenStaleEpochError_ExportsCounterErrorReasonAndStructur
 
 	ctx, rootSpan := tp.Tracer("test-caller").Start(context.Background(), "caller.write")
 
-	// When
 	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
 		DiskId: "11111111-1111-4111-8111-111111111111",
 		Epoch:  99,
@@ -172,7 +169,6 @@ func TestObservability_GivenStaleEpochError_ExportsCounterErrorReasonAndStructur
 	}))
 	rootSpan.End()
 
-	// Then
 	require.Error(t, err)
 	require.NotEmpty(t, handler.lastRequestID)
 	require.NotEqual(t, "1", handler.lastRequestID)
@@ -193,7 +189,7 @@ func TestObservability_GivenStaleEpochError_ExportsCounterErrorReasonAndStructur
 }
 
 func TestObservability_GivenSlowAttemptAndExhaustedRetry_EmitsSlowAndExhaustedLogsWithoutRealSleep(t *testing.T) {
-	// Given: handler.onCall 推进虚拟时钟 1200ms (> DefaultSlowRPCThreshold 1s)，并触发重试预算耗尽
+
 	reg, _, _, _ := setupTestOTel(t)
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	rpcMetrics := NewMetrics()
@@ -226,10 +222,8 @@ func TestObservability_GivenSlowAttemptAndExhaustedRetry_EmitsSlowAndExhaustedLo
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 
@@ -256,7 +250,7 @@ func (h *scriptedMountDiskHandler) MountDisk(
 }
 
 func TestObservability_GivenAbortedEBUSYError_DoesNotTriggerStaleEpochMetricOrLog(t *testing.T) {
-	// Given: server returns CodeAborted + ErrorInfo{Domain: "bowl.storage", Reason: "EBUSY"} (ErrDiskMounted / ErrConcurrentMerge).
+
 	reg, _, _, _ := setupTestOTel(t)
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	rpcMetrics := NewMetrics()
@@ -281,12 +275,10 @@ func TestObservability_GivenAbortedEBUSYError_DoesNotTriggerStaleEpochMetricOrLo
 	}, clk)
 	require.NoError(t, err)
 
-	// When: calling MountDisk and receiving CodeAborted + EBUSY.
 	_, err = client.MountDisk(context.Background(), connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId: "11111111-1111-4111-8111-111111111111",
 	}))
 
-	// Then: error propagates as CodeAborted, but stale_epoch counter stays 0 and no writer_epoch_fenced log is emitted.
 	require.Error(t, err)
 	require.Equal(t, connect.CodeAborted, connect.CodeOf(err))
 

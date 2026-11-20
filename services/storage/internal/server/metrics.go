@@ -22,8 +22,6 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
-// SubMillisecondBuckets 定义服务端 RPC 与外层 HTTP 延迟直方图的 18 级亚毫秒精细桶边界（25µs ~ 10s），
-// 消除 OTel 默认 5ms 首桶导致的微秒级 RPC 分位数插值失真。
 var SubMillisecondBuckets = []float64{
 	0.000025, 0.00005, 0.0001, 0.00025, 0.0005,
 	0.001, 0.0025, 0.005, 0.01, 0.025,
@@ -100,12 +98,8 @@ func classifyHTTPStatus(code int) string {
 	}
 }
 
-// FineBucketsReady 标记全局 OTel MeterProvider 已在构造 otelconnect 拦截器前升级为亚毫秒精细桶。
 type FineBucketsReady struct{}
 
-// NewFineBucketMeterProvider 构建带显式亚毫秒直方图 View 的 OTel MeterProvider，
-// 幂等预注册 Go/Process/BuildInfo 标准运行时 Collector，并覆盖 otelconnect 的
-// rpc.server.call.duration 及通用 rpc.server.duration 指标。
 func NewFineBucketMeterProvider(cfg telemetry.Config, reg *prometheus.Registry) (*sdkmetric.MeterProvider, error) {
 	if reg == nil {
 		reg = telemetry.NewRegistry()
@@ -145,7 +139,6 @@ func NewFineBucketMeterProvider(cfg telemetry.Config, reg *prometheus.Registry) 
 	return mp, nil
 }
 
-// FineBucketParams 定义注册全局亚毫秒桶 OTel MeterProvider 所需的 Fx 可选参数。
 type FineBucketParams struct {
 	fx.In
 
@@ -156,8 +149,6 @@ type FineBucketParams struct {
 	ObsReady  observability.Ready            `optional:"true"`
 }
 
-// ConfigureFineBucketMeterProvider 在 observability.Setup 完成后基于同一隔离 Registry
-// 一次性注册标准运行时 Collector 与 18 级亚毫秒桶 MeterProvider，并绑定 Fx OnStop 优雅关闭。
 func ConfigureFineBucketMeterProvider(p FineBucketParams) (FineBucketsReady, error) {
 	if p.Runtime == nil {
 		return FineBucketsReady{}, nil
@@ -187,14 +178,12 @@ func ConfigureFineBucketMeterProvider(p FineBucketParams) (FineBucketsReady, err
 
 var _ prometheus.Collector = (*HTTPMetrics)(nil)
 
-// HTTPMetrics 采集公网 HTTP 入口全生命周期耗时与进出字节吞吐（覆盖请求体读取、解码、业务执行与响应写出）。
 type HTTPMetrics struct {
 	reqDuration *prometheus.HistogramVec
 	reqBytes    *prometheus.CounterVec
 	respBytes   *prometheus.CounterVec
 }
 
-// NewHTTPMetrics 创建隔离的 HTTP 外层全包监控指标集。
 func NewHTTPMetrics() *HTTPMetrics {
 	return &HTTPMetrics{
 		reqDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -213,7 +202,6 @@ func NewHTTPMetrics() *HTTPMetrics {
 	}
 }
 
-// Describe 实现 prometheus.Collector。
 func (m *HTTPMetrics) Describe(ch chan<- *prometheus.Desc) {
 	if m == nil {
 		return
@@ -223,7 +211,6 @@ func (m *HTTPMetrics) Describe(ch chan<- *prometheus.Desc) {
 	m.respBytes.Describe(ch)
 }
 
-// Collect 实现 prometheus.Collector。
 func (m *HTTPMetrics) Collect(ch chan<- prometheus.Metric) {
 	if m == nil {
 		return
@@ -303,7 +290,6 @@ func (w *countingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// WrapHTTPHandler 在公网 HTTP 入口最外层包裹全生命周期计时与进出流量统计中间件。
 func WrapHTTPHandler(next http.Handler, metrics *HTTPMetrics) http.Handler {
 	if next == nil || metrics == nil {
 		return next

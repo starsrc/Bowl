@@ -20,7 +20,7 @@ const (
 )
 
 func TestDiskDiffMerge_GivenHelpAndRoutingArgs_ReturnsExpectedUsage(t *testing.T) {
-	// Given / When / Then: disk help lists diff and merge
+
 	requireHelpExit0(t, "diff", "help", "disk")
 	requireHelpExit0(t, "merge", "help", "disk")
 
@@ -51,7 +51,7 @@ func TestDiskDiff_GivenInvalidInputs_ReturnsExit2WithDiagnostics(t *testing.T) {
 }
 
 func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testing.T) {
-	// Given
+
 	storage := newFakeStorage()
 	storage.diffResponse = &storagev1.DiffDiskResponse{
 		LcaCommitId: testCommitID1,
@@ -89,7 +89,6 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 	}
 	withDiskStorageFake(t, storage)
 
-	// When: 人类可读输出 + 分页与过滤参数透传
 	code, out, errOut := runCLI(
 		"disk", "diff", testDiskID1,
 		"--target", testDiskID2,
@@ -99,7 +98,6 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 		"--page-token", "cursor-1",
 	)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, 1, storage.diffCalls)
@@ -118,10 +116,8 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 	require.Contains(t, out, "/old.txt")
 	require.Contains(t, out, "Next Page Token: cursor-2")
 
-	// When: --json 输出
 	code, jsonOut, errOut := runCLI("disk", "diff", testDiskID1, "--target", testDiskID2, "--json")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	var parsed diskDiffJSON
@@ -140,7 +136,7 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 }
 
 func TestDiskDiff_GivenPatchMode_RendersUnifiedTextSymlinkAndBinaryDiffs(t *testing.T) {
-	// Given: 2-way diff (LCA -> Source) 包含文本修改（>4MiB 分片或常规多行）、符号链接变更、二进制含 NUL 文件
+
 	storage := newFakeStorage()
 	baseText := "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\n"
 	srcText := "line1\nline2-edited\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n"
@@ -189,17 +185,14 @@ func TestDiskDiff_GivenPatchMode_RendersUnifiedTextSymlinkAndBinaryDiffs(t *test
 	}
 	withDiskStorageFake(t, storage)
 
-	// When
 	code, out, errOut := runCLI("disk", "diff", testDiskID1, "-p")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.GreaterOrEqual(t, storage.readCommitCalls, 3)
 	require.GreaterOrEqual(t, storage.readCalls, 3)
 	require.Equal(t, 1, storage.readlinkCalls)
 
-	// Unified diff header & hunk assertions
 	require.Contains(t, out, "--- a/code.txt")
 	require.Contains(t, out, "+++ b/code.txt")
 	require.Contains(t, out, "-line2")
@@ -207,23 +200,20 @@ func TestDiskDiff_GivenPatchMode_RendersUnifiedTextSymlinkAndBinaryDiffs(t *test
 	require.Contains(t, out, "+line9")
 	require.Contains(t, out, "@@ ")
 
-	// Symlink target diff
 	require.Contains(t, out, "-/old/target")
 	require.Contains(t, out, "+/new/target")
 
-	// Binary NUL diff
 	require.Contains(t, out, "Binary files a/blob.bin and b/blob.bin differ")
 
-	// Added file diff
 	require.Contains(t, out, "--- /dev/null")
 	require.Contains(t, out, "+++ b/added.txt")
 	require.Contains(t, out, "+brand new line")
 }
 
 func TestDiskDiff_GivenPatchLargeFileOver4MiB_ReadsMultipleChunks(t *testing.T) {
-	// Given: > 4MiB 文本文件验证分片读取拼接
+
 	storage := newFakeStorage()
-	largePrefix := strings.Repeat("a\n", 2*1024*1024+100) // > 4 MiB
+	largePrefix := strings.Repeat("a\n", 2*1024*1024+100)
 	baseData := []byte(largePrefix + "tail-old\n")
 	srcData := []byte(largePrefix + "tail-new\n")
 	storage.seedCommitFile(testDiskID1, testCommitID1, 200, 0o100644, baseData)
@@ -242,10 +232,8 @@ func TestDiskDiff_GivenPatchLargeFileOver4MiB_ReadsMultipleChunks(t *testing.T) 
 	}
 	withDiskStorageFake(t, storage)
 
-	// When
 	code, out, errOut := runCLI("disk", "diff", testDiskID1, "--patch")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.GreaterOrEqual(t, storage.readCommitCalls, 2)
@@ -301,31 +289,27 @@ func TestDiskMerge_GivenDryRunFalseAndForceFalse_EnforcesGuardsAndCommits(t *tes
 }
 
 func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce(t *testing.T) {
-	// Given: 目标盘本机已挂载 -> 非 dry-run 非 force 强制拦截并提示先执行 bowl umount
+
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "src", 1<<30, 1024)
 	storage.seedDisk(testDiskID2, "tgt", 1<<30, 1024)
 	withDiskStorageFake(t, storage)
 	withMountInfoContent(t, "100 30 0:50 / /mnt/target rw - fuse.bowl bowl:"+testDiskID2+" rw\n")
 
-	// When
 	code, out, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "bowl umount /mnt/target")
 	require.NotContains(t, errOut, "bowl unmount")
 	require.Equal(t, 0, storage.mergeCalls)
 
-	// Given: 目标盘本机已挂载，但使用 --dry-run -> 不被本地 preRPC 拦截，正常调用服务端返回预演结果
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Contains(t, out, "Dry Run")
 	require.Equal(t, 1, storage.mergeCalls)
 
-	// Given: 目标盘与源盘均在本机 rw 挂载，指定 --force / -f -> 跳过本地 preRPC 拦截并透传 Force: true
 	withMountInfoContent(t, "100 30 0:50 / /mnt/target rw - fuse.bowl bowl:"+testDiskID2+" rw\n101 30 0:51 / /mnt/source rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--force")
 	require.Equal(t, 0, code)
@@ -340,7 +324,6 @@ func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce
 	require.Equal(t, 3, storage.mergeCalls)
 	require.True(t, storage.lastMergeReq.GetForce())
 
-	// Given: unreadable mountinfo without dry-run or force -> blocks
 	withUnreadableMountInfo(t)
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
@@ -348,7 +331,6 @@ func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce
 	require.Contains(t, errOut, "check local mount table")
 	require.Equal(t, 3, storage.mergeCalls)
 
-	// Given: source disk mounted read-write locally without --force -> preRPC blocks and suggests bowl umount
 	withMountInfoContent(t, "101 30 0:51 / /mnt/source rw,nosuid - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
@@ -357,7 +339,6 @@ func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce
 	require.Contains(t, errOut, "bowl umount /mnt/source")
 	require.Equal(t, 3, storage.mergeCalls)
 
-	// Given: 源盘在本机仅处于 ro 只读挂载 -> preRPC 放行
 	withMountInfoContent(t, "101 30 0:51 / /mnt/source-ro ro,nosuid - fuse.bowl bowl:"+testDiskID1+" ro\n")
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 0, code)
@@ -368,14 +349,13 @@ func TestDiskMerge_GivenLocalMountGuards_EnforcesTargetSourceModesDryRunAndForce
 }
 
 func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *testing.T) {
-	// Given
+
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "branch", 2<<30, 4096)
 	storage.seedDisk(testDiskID2, "main", 2<<30, 8192)
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: --dry-run + --strategy + 可重复 --resolve (含路径带 '=') + --size
 	code, out, errOut := runCLI(
 		"disk", "merge", testDiskID1,
 		"--into", testDiskID2,
@@ -386,7 +366,6 @@ func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *tes
 		"--size", "4GiB",
 	)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, 1, storage.mergeCalls)
@@ -405,10 +384,8 @@ func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *tes
 	require.Contains(t, out, "Dry Run")
 	require.Contains(t, out, "4.00 GiB")
 
-	// When: 正式合并 --json
 	code, jsonOut, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--strategy=theirs", "--json")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	var parsed diskMergeJSON
@@ -421,7 +398,6 @@ func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *tes
 	require.NotNil(t, parsed.Disk)
 	require.Equal(t, testDiskID2, parsed.Disk.DiskID)
 
-	// When: -q 静默模式
 	code, qOut, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "-q")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -429,7 +405,7 @@ func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *tes
 }
 
 func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWithExit1(t *testing.T) {
-	// Given: 构造 CodeAborted + ErrorInfo{Reason:"ECONFLICT"} + *storagev1.MergeConflictReport
+
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "branch", 2<<30, 4096)
 	storage.seedDisk(testDiskID2, "main", 2<<30, 8192)
@@ -468,10 +444,8 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: 人类可读输出
 	code, out, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "ECONFLICT")
@@ -486,10 +460,8 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 	require.Contains(t, errOut, "bowl umount")
 	require.NotContains(t, errOut, "bowl unmount")
 
-	// When: --json 结构化输出
 	code, jsonOut, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--json")
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, errOut)
 	var parsed diskMergeJSON
@@ -505,7 +477,7 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 }
 
 func TestDiskDiffMerge_GivenActiveOTelTracer_PropagatesAttrsAndErrorStatus(t *testing.T) {
-	// Given
+
 	exporter := setupDiskTestTracer(t)
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "src", 1<<30, 0)
@@ -513,7 +485,6 @@ func TestDiskDiffMerge_GivenActiveOTelTracer_PropagatesAttrsAndErrorStatus(t *te
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: diff span
 	exporter.Reset()
 	code, _, errOut := runCLI("disk", "diff", testDiskID1, "--target", testDiskID2)
 	require.Equal(t, 0, code)
@@ -522,7 +493,6 @@ func TestDiskDiffMerge_GivenActiveOTelTracer_PropagatesAttrsAndErrorStatus(t *te
 	requireSpanStringAttr(t, diffSpan, "bowl.source_disk_id", testDiskID1)
 	requireSpanStringAttr(t, diffSpan, "bowl.target_disk_id", testDiskID2)
 
-	// When: merge span
 	exporter.Reset()
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 0, code)
@@ -531,7 +501,6 @@ func TestDiskDiffMerge_GivenActiveOTelTracer_PropagatesAttrsAndErrorStatus(t *te
 	requireSpanStringAttr(t, mergeSpan, "bowl.source_disk_id", testDiskID1)
 	requireSpanStringAttr(t, mergeSpan, "bowl.target_disk_id", testDiskID2)
 
-	// When: merge error sets span error
 	exporter.Reset()
 	storage.forcedErr["MergeDisk"] = connect.NewError(connect.CodeFailedPrecondition, errors.New("criss-cross"))
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
@@ -542,10 +511,9 @@ func TestDiskDiffMerge_GivenActiveOTelTracer_PropagatesAttrsAndErrorStatus(t *te
 }
 
 func TestUnifiedDiff_GivenEdgeCases_HandlesEmptyIdenticalAndMultipleHunks(t *testing.T) {
-	// Identical -> empty
+
 	require.Empty(t, formatUnifiedDiff("a.txt", "a.txt", []byte("x\ny\n"), []byte("x\ny\n")))
 
-	// Multiple separated hunks
 	var oldBuf, newBuf bytes.Buffer
 	for i := 1; i <= 15; i++ {
 		line := strings.Repeat("x", 2) + string(rune('a'+i-1)) + "\n"
@@ -567,7 +535,7 @@ func TestUnifiedDiff_GivenEdgeCases_HandlesEmptyIdenticalAndMultipleHunks(t *tes
 }
 
 func TestDiskDiff_GivenTargetThreeWayPatchAndDeletions_DiffsTargetAgainstSource(t *testing.T) {
-	// Given: 3-way diff --target --patch 比较 Target 与 Source 实时盘内容，并覆盖文件与软链删除
+
 	storage := newFakeStorage()
 	storage.seedLiveFile(testDiskID2, 301, []byte("target-v1\n"))
 	storage.seedLiveFile(testDiskID1, 302, []byte("source-v2\n"))
@@ -593,10 +561,8 @@ func TestDiskDiff_GivenTargetThreeWayPatchAndDeletions_DiffsTargetAgainstSource(
 	}
 	withDiskStorageFake(t, storage)
 
-	// When
 	code, out, errOut := runCLI("disk", "diff", testDiskID1, "--target", testDiskID2, "-p")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, 0, storage.readCommitCalls)
@@ -607,12 +573,11 @@ func TestDiskDiff_GivenTargetThreeWayPatchAndDeletions_DiffsTargetAgainstSource(
 }
 
 func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
-	// Given
+
 	storage := newFakeStorage()
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// EBUSY on CodeAborted for target disk concurrent write or mount
 	ebusyErr := connect.NewError(connect.CodeAborted, errors.New("concurrent write on target disk"))
 	ebusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
 	require.NoError(t, err)
@@ -623,7 +588,6 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 	require.Contains(t, errOut, "target disk")
 	require.Contains(t, errOut, "concurrent writes or is still mounted")
 
-	// EBUSY on CodeAborted for source disk read-write mount
 	srcBusyErr := connect.NewError(connect.CodeAborted, errors.New("source disk "+testDiskID1+" is currently mounted read-write"))
 	srcBusyDetail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{Reason: "EBUSY"})
 	require.NoError(t, err)
@@ -635,13 +599,11 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 	require.Contains(t, errOut, "mounted read-write")
 	require.Contains(t, errOut, "bowl umount")
 
-	// CodeResourceExhausted
 	storage.forcedErr["MergeDisk"] = connect.NewError(connect.CodeResourceExhausted, errors.New("quota exceeded"))
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "quota exceeded")
 
-	// CodeInvalidArgument -> exit 2
 	storage.forcedErr["MergeDisk"] = connect.NewError(connect.CodeInvalidArgument, errors.New("invalid arg"))
 	code, _, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2)
 	require.Equal(t, 2, code)
@@ -649,7 +611,7 @@ func TestDiskMerge_GivenServerErrors_MapsExpectedExitCodes(t *testing.T) {
 }
 
 func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts(t *testing.T) {
-	// Given: dry-run returns ConflictReport with nil Disk
+
 	storage := newFakeStorage()
 	storage.mergeResponse = &storagev1.MergeDiskResponse{
 		LcaCommitId:        testCommitID1,
@@ -672,10 +634,8 @@ func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When: human mode
 	code, out, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run")
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "[Dry Run]")
@@ -684,10 +644,8 @@ func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts
 	require.Contains(t, errOut, "/conflict.txt")
 	require.Contains(t, errOut, "Resolution steps")
 
-	// When: --json 模式
 	code, out, errOut = runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run", "--json")
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, errOut)
 	var payload diskMergeJSON
@@ -702,7 +660,7 @@ func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts
 }
 
 func TestDiskMerge_GivenDryRunQuietWithoutConflicts_PrintsTargetDiskIDAndExit0(t *testing.T) {
-	// Given: dry-run 无冲突时服务端返回 Disk=nil 且 ConflictReport=nil
+
 	storage := newFakeStorage()
 	storage.mergeResponse = &storagev1.MergeDiskResponse{
 		LcaCommitId:        testCommitID1,
@@ -712,17 +670,15 @@ func TestDiskMerge_GivenDryRunQuietWithoutConflicts_PrintsTargetDiskIDAndExit0(t
 	withDiskStorageFake(t, storage)
 	withMissingMountInfo(t)
 
-	// When
 	code, out, errOut := runCLI("disk", "merge", testDiskID1, "--into", testDiskID2, "--dry-run", "-q")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, testDiskID2+"\n", out)
 }
 
 func TestDiskDiff_GivenSpecialFilePatch_SkipsTextDiffAndReportsTypeChange(t *testing.T) {
-	// Given: FIFO(0010644) 变更及仅特殊文件改动场景不应把特殊文件当 0 字节文本执行 Unified Diff
+
 	storage := newFakeStorage()
 	storage.seedLiveFile(testDiskID1, 402, []byte("now-a-regular-file\n"))
 	storage.diffResponse = &storagev1.DiffDiskResponse{
@@ -750,10 +706,8 @@ func TestDiskDiff_GivenSpecialFilePatch_SkipsTextDiffAndReportsTypeChange(t *tes
 	}
 	withDiskStorageFake(t, storage)
 
-	// When
 	code, out, errOut := runCLI("disk", "diff", testDiskID1, "--patch")
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Contains(t, out, "diff a/pipe-to-file b/pipe-to-file\nFile type changed\n")

@@ -35,7 +35,7 @@ func newTestErrorInfo(t *testing.T, domain, reason string) *connect.Error {
 }
 
 func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpectedClassification(t *testing.T) {
-	// Given / When / Then: 13 个只读与幂等接口判定为 true
+
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceGetDiskProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListDisksProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceLookupProcedure))
@@ -50,13 +50,11 @@ func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpect
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListXattrProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceStatFSProcedure))
 
-	// 其余新增只读与幂等接口判定为 true
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffDiskProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceReadCommitNodeProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceRenewMountProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceUnmountDiskProcedure))
 
-	// 非幂等写接口判定为 false
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateDiskProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceForkDiskProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMergeDiskProcedure))
@@ -67,7 +65,7 @@ func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpect
 }
 
 func TestRetry_GivenDisabledConfig_WhenUnavailableOccurs_DoesNotRetry(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -88,10 +86,8 @@ func TestRetry_GivenDisabledConfig_WhenUnavailableOccurs_DoesNotRetry(t *testing
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
 	require.Equal(t, 1, handler.calls)
@@ -99,7 +95,7 @@ func TestRetry_GivenDisabledConfig_WhenUnavailableOccurs_DoesNotRetry(t *testing
 }
 
 func TestRetry_GivenIdempotentRead_WhenTransientFailuresRecover_RetriesWithBoundedBackoffAndSucceeds(t *testing.T) {
-	// Given: 前 3 次返回可重试的 CodeUnavailable，第 4 次成功；固定 RandFloat64=1.0 以便精确验证指数步长
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -130,10 +126,8 @@ func TestRetry_GivenIdempotentRead_WhenTransientFailuresRecover_RetriesWithBound
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	resp, err := client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 9}))
 
-	// Then
 	require.NoError(t, err)
 	payload := TakeReadPayload(resp.Msg)
 	require.Equal(t, []byte("recovered"), payload.Data)
@@ -147,7 +141,7 @@ func TestRetry_GivenIdempotentRead_WhenTransientFailuresRecover_RetriesWithBound
 }
 
 func TestRetry_GivenJitterRandZero_WhenRetrying_AppliesHalfIntervalFloor(t *testing.T) {
-	// Given: RandFloat64=0.0 时退避因子为 0.5
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -172,16 +166,14 @@ func TestRetry_GivenJitterRandZero_WhenRetrying_AppliesHalfIntervalFloor(t *test
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-	// Then
 	require.NoError(t, err)
 	require.Equal(t, []time.Duration{50 * time.Millisecond}, clk.Sleeps())
 }
 
 func TestRetry_GivenIdempotentRead_WhenBudgetExhausted_WrapsDeadlineExceededAndMapsEIO(t *testing.T) {
-	// Given: total budget 350ms, backoff steps 100ms -> 200ms -> 250ms (>= remaining 50ms, exits without dead sleep).
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	reg := prometheus.NewRegistry()
 	rpcMetrics := NewMetrics()
@@ -208,10 +200,8 @@ func TestRetry_GivenIdempotentRead_WhenBudgetExhausted_WrapsDeadlineExceededAndM
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 	require.Equal(t, syscall.EIO, MapError(err))
@@ -229,7 +219,7 @@ func TestRetry_GivenIdempotentRead_WhenBudgetExhausted_WrapsDeadlineExceededAndM
 }
 
 func TestRetry_GivenBusinessErrorInfo_WhenUnavailableCodeSet_NeverRetries(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -244,10 +234,8 @@ func TestRetry_GivenBusinessErrorInfo_WhenUnavailableCodeSet_NeverRetries(t *tes
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, syscall.ENOENT, MapError(err))
 	require.Equal(t, 1, handler.calls)
@@ -255,7 +243,7 @@ func TestRetry_GivenBusinessErrorInfo_WhenUnavailableCodeSet_NeverRetries(t *tes
 }
 
 func TestRetry_GivenEmptyReasonErrorInfo_WhenUnavailable_FallsBackToRetry(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -276,10 +264,8 @@ func TestRetry_GivenEmptyReasonErrorInfo_WhenUnavailable_FallsBackToRetry(t *tes
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	resp, err := client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-	// Then
 	require.NoError(t, err)
 	payload := TakeReadPayload(resp.Msg)
 	require.Equal(t, []byte("ok"), payload.Data)
@@ -288,7 +274,7 @@ func TestRetry_GivenEmptyReasonErrorInfo_WhenUnavailable_FallsBackToRetry(t *tes
 }
 
 func TestRetry_GivenTerminalConnectCode_WhenIdempotentRead_NeverRetries(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -303,10 +289,8 @@ func TestRetry_GivenTerminalConnectCode_WhenIdempotentRead_NeverRetries(t *testi
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, syscall.EACCES, MapError(err))
 	require.Equal(t, 1, handler.calls)
@@ -314,7 +298,7 @@ func TestRetry_GivenTerminalConnectCode_WhenIdempotentRead_NeverRetries(t *testi
 }
 
 func TestRetry_GivenUnauthenticatedCode_WhenIdempotentRead_NeverRetriesAndMapsEACCES(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -329,10 +313,8 @@ func TestRetry_GivenUnauthenticatedCode_WhenIdempotentRead_NeverRetriesAndMapsEA
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 	require.Equal(t, syscall.EACCES, MapError(err))
@@ -341,7 +323,7 @@ func TestRetry_GivenUnauthenticatedCode_WhenIdempotentRead_NeverRetriesAndMapsEA
 }
 
 func TestRetry_GivenNonIdempotentWrite_WhenUnavailableOrTransportEOF_DoesNotRetry(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -356,17 +338,15 @@ func TestRetry_GivenNonIdempotentWrite_WhenUnavailableOrTransportEOF_DoesNotRetr
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.Write(context.Background(), connect.NewRequest(&storagev1.WriteRequest{Ino: 1, Data: []byte("x")}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, 1, handler.calls)
 	require.Empty(t, clk.Sleeps())
 }
 
 func TestRetry_GivenNonIdempotentWrite_WhenDialConnectionRefused_RetriesAndSucceeds(t *testing.T) {
-	// Given: 通过 HTTPClient 注入建连阶段 ECONNREFUSED 故障，第 2 次由内存适配器接通
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{}
 	innerClient := newInMemoryHTTPClient(handler)
@@ -386,10 +366,8 @@ func TestRetry_GivenNonIdempotentWrite_WhenDialConnectionRefused_RetriesAndSucce
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	resp, err := client.Write(context.Background(), connect.NewRequest(&storagev1.WriteRequest{Ino: 1, Data: []byte("abc")}))
 
-	// Then
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), resp.Msg.GetSize())
 	require.Equal(t, 2, attempt)
@@ -397,7 +375,7 @@ func TestRetry_GivenNonIdempotentWrite_WhenDialConnectionRefused_RetriesAndSucce
 }
 
 func TestRetry_GivenIdempotentRead_WhenTransportEOFAndReset_RetriesAndSucceeds(t *testing.T) {
-	// Given: 第 1 次 io.ErrUnexpectedEOF，第 2 次 net.OpError(ECONNRESET)，第 3 次成功
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{}
 	innerClient := newInMemoryHTTPClient(handler)
@@ -420,10 +398,8 @@ func TestRetry_GivenIdempotentRead_WhenTransportEOFAndReset_RetriesAndSucceeds(t
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	resp, err := client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-	// Then
 	require.NoError(t, err)
 	payload := TakeReadPayload(resp.Msg)
 	require.Equal(t, []byte("ok"), payload.Data)
@@ -433,7 +409,7 @@ func TestRetry_GivenIdempotentRead_WhenTransportEOFAndReset_RetriesAndSucceeds(t
 }
 
 func TestRetry_GivenParentContextCanceledDuringBackoff_StopsImmediatelyWithCanceled(t *testing.T) {
-	// Given: 手动虚拟时钟在首次退避定时器挂起后触发父上下文取消
+
 	clk := newManualClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedReadHandler{
 		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
@@ -456,7 +432,6 @@ func TestRetry_GivenParentContextCanceledDuringBackoff_StopsImmediatelyWithCance
 	parentCtx, cancelParent := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 
-	// When
 	go func() {
 		_, callErr := client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 		errCh <- callErr
@@ -467,14 +442,13 @@ func TestRetry_GivenParentContextCanceledDuringBackoff_StopsImmediatelyWithCance
 	cancelParent()
 	gotErr := <-errCh
 
-	// Then
 	require.ErrorIs(t, gotErr, context.Canceled)
 	require.Equal(t, syscall.EINTR, MapError(gotErr))
 	require.Equal(t, 1, handler.calls)
 }
 
 func TestRetry_GivenSyscallConnectError_ShouldRetryEvenForNonIdempotentProcedure(t *testing.T) {
-	// Given / When / Then: 覆盖 os.SyscallError{Syscall:"connect"} 建连识别与绝不重试状态码
+
 	connectErr := fmt.Errorf("connect failed: %w", &os.SyscallError{Syscall: "connect", Err: errors.New("refused")})
 	require.True(t, shouldRetry(storagev1connect.StorageServiceCreateDiskProcedure, connectErr))
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeInvalidArgument, nil)))
@@ -531,7 +505,7 @@ func (h *scriptedDiffMergeHandler) MergeDisk(ctx context.Context, req *connect.R
 }
 
 func TestRetry_GivenDiffAndReadCommitNode_WhenUnavailableRecovers_RetriesAndSucceeds(t *testing.T) {
-	// Given
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedDiffMergeHandler{
 		diffErrs: []error{
@@ -551,7 +525,6 @@ func TestRetry_GivenDiffAndReadCommitNode_WhenUnavailableRecovers_RetriesAndSucc
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	diffResp, err := client.DiffDisk(context.Background(), connect.NewRequest(&storagev1.DiffDiskRequest{}))
 	require.NoError(t, err)
 	require.Equal(t, "01950000-0000-7000-8000-000000000099", diffResp.Msg.GetLcaCommitId())
@@ -565,7 +538,7 @@ func TestRetry_GivenDiffAndReadCommitNode_WhenUnavailableRecovers_RetriesAndSucc
 }
 
 func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetriesDialError(t *testing.T) {
-	// Given: CodeUnavailable 不重试
+
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedDiffMergeHandler{
 		mergeErrs: []error{
@@ -578,15 +551,12 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 	}, clk)
 	require.NoError(t, err)
 
-	// When
 	_, err = client.MergeDisk(context.Background(), connect.NewRequest(&storagev1.MergeDiskRequest{}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, 1, handler.mergeCalls)
 	require.Empty(t, clk.Sleeps())
 
-	// Given: 传输层 io.ErrUnexpectedEOF 不重试
 	innerClient := newInMemoryHTTPClient(&scriptedDiffMergeHandler{})
 	transport := &scriptedTransport{
 		errs: []error{io.ErrUnexpectedEOF},
@@ -602,7 +572,6 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 	require.Error(t, err)
 	require.Equal(t, 1, transport.calls)
 
-	// Given: 建连阶段 ECONNREFUSED 允许重试并成功
 	var dialAttempts int
 	dialErrClient := &httpClientWithFirstErr{
 		firstErr: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED},
@@ -627,7 +596,7 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 }
 
 func TestRetry_GivenCallerDeadlineLongerThanMaxElapsedTime_WhenFirstAttemptTakes35s_SucceedsWithoutRetryOrExhaustedMetrics(t *testing.T) {
-	// Given: caller sets a 60s deadline (> 30s default MaxElapsedTime) and MergeDisk takes 35s.
+
 	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	clk := newAutoAdvanceClock(start)
 	reg := prometheus.NewRegistry()
@@ -663,10 +632,8 @@ func TestRetry_GivenCallerDeadlineLongerThanMaxElapsedTime_WhenFirstAttemptTakes
 	callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
 	defer cancel()
 
-	// When
 	resp, err := client.MergeDisk(callerCtx, connect.NewRequest(&storagev1.MergeDiskRequest{}))
 
-	// Then
 	require.NoError(t, err, "scene=caller_60s_deadline_35s_merge want=nil got=%v", err)
 	require.Equal(t, "01950000-0000-7000-8000-000000000088", resp.Msg.GetMergeCommitId())
 	require.Equal(t, 1, handler.mergeCalls)
@@ -683,7 +650,7 @@ func TestRetry_GivenCallerDeadlineLongerThanMaxElapsedTime_WhenFirstAttemptTakes
 
 func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_ReturnsTimeoutWithoutRetryExhaustedMetrics(t *testing.T) {
 	t.Run("default MaxElapsedTime slow first attempt", func(t *testing.T) {
-		// Given: no caller deadline, 30s MaxElapsedTime, first attempt times out with CodeDeadlineExceeded.
+
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
 		reg := prometheus.NewRegistry()
@@ -713,10 +680,8 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 		}, clk)
 		require.NoError(t, err)
 
-		// When
 		_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-		// Then
 		require.Error(t, err)
 		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 		require.Equal(t, syscall.EIO, MapError(err))
@@ -734,7 +699,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 	})
 
 	t.Run("caller 60s deadline slow first MergeDisk attempt", func(t *testing.T) {
-		// Given: caller 60s deadline, MergeDisk exceeds 60s with zero retryable failures.
+
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
 		reg := prometheus.NewRegistry()
@@ -765,10 +730,8 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
 		defer cancel()
 
-		// When
 		_, err = client.MergeDisk(callerCtx, connect.NewRequest(&storagev1.MergeDiskRequest{}))
 
-		// Then
 		require.Error(t, err)
 		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 		require.Equal(t, syscall.EIO, MapError(err))
@@ -783,7 +746,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 	})
 
 	t.Run("already expired caller deadline before first attempt", func(t *testing.T) {
-		// Given: caller context deadline already expired before next runs.
+
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
 		reg := prometheus.NewRegistry()
@@ -805,10 +768,8 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(-1*time.Second))
 		defer cancel()
 
-		// When
 		_, err = client.Read(callerCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-		// Then
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		require.Equal(t, syscall.EIO, MapError(err))
 		require.Equal(t, 0, handler.calls)
@@ -824,8 +785,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 }
 
 func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringNextAttempt_ExhaustsBudgetWithDeadlineExceededCode(t *testing.T) {
-	// Given: FUSE-like 30s parent ctx deadline, attempt 1 returns retryable CodeUnavailable,
-	// and attempt 2 hits the 30s parent deadline mid-flight.
+
 	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	clk := newAutoAdvanceClock(start)
 	reg := prometheus.NewRegistry()
@@ -863,10 +823,8 @@ func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringN
 	parentCtx, cancel := clk.WithDeadline(context.Background(), start.Add(30*time.Second))
 	defer cancel()
 
-	// When
 	_, err = client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-	// Then
 	require.Error(t, err)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 	require.Equal(t, syscall.EIO, MapError(err))
@@ -885,8 +843,7 @@ func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringN
 }
 
 func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringBackoffSleep_ExhaustsBudgetWithDeadlineExceededCode(t *testing.T) {
-	// Given: parent deadline context with 200ms remaining; attempt 1 fails with CodeUnavailable,
-	// backoff timer arms for 100ms, and parent deadline expires before the backoff timer fires.
+
 	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	clk := newManualClock(start)
 	reg := prometheus.NewRegistry()
@@ -926,7 +883,6 @@ func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringB
 
 	errCh := make(chan error, 1)
 
-	// When
 	go func() {
 		_, callErr := client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 		errCh <- callErr
@@ -936,7 +892,6 @@ func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringB
 	cancelCause(context.DeadlineExceeded)
 	gotErr := <-errCh
 
-	// Then
 	require.Error(t, gotErr)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(gotErr))
 	require.Equal(t, syscall.EIO, MapError(gotErr))
@@ -955,7 +910,7 @@ func TestRetry_GivenParentDeadlineAndRetryableFailure_WhenDeadlineExpiresDuringB
 }
 
 func TestRetry_GivenKernelInterruptedCancelAfterRetryableFailure_DoesNotFireRetryExhausted(t *testing.T) {
-	// Given: parent context has a 30s deadline and is canceled with ErrKernelInterrupted during backoff sleep.
+
 	start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	clk := newManualClock(start)
 	reg := prometheus.NewRegistry()
@@ -993,7 +948,6 @@ func TestRetry_GivenKernelInterruptedCancelAfterRetryableFailure_DoesNotFireRetr
 
 	errCh := make(chan error, 1)
 
-	// When
 	go func() {
 		_, callErr := client.Read(parentCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 		errCh <- callErr
@@ -1003,7 +957,6 @@ func TestRetry_GivenKernelInterruptedCancelAfterRetryableFailure_DoesNotFireRetr
 	cancelCause(ErrKernelInterrupted)
 	gotErr := <-errCh
 
-	// Then
 	require.ErrorIs(t, gotErr, context.Canceled)
 	require.Equal(t, syscall.EINTR, MapError(gotErr))
 
@@ -1017,7 +970,7 @@ func TestRetry_GivenKernelInterruptedCancelAfterRetryableFailure_DoesNotFireRetr
 
 func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_ExitsImmediatelyWithoutDeadSleepOrRetryMetric(t *testing.T) {
 	t.Run("sleepDuration equals remaining", func(t *testing.T) {
-		// Given: MaxElapsedTime 100ms and first backoff sleepDuration 100ms (sleepDuration == remaining).
+
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
 		reg := prometheus.NewRegistry()
@@ -1048,10 +1001,8 @@ func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_E
 		}, clk)
 		require.NoError(t, err)
 
-		// When
 		_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-		// Then
 		require.Error(t, err)
 		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 		require.Equal(t, syscall.EIO, MapError(err))
@@ -1068,8 +1019,7 @@ func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_E
 	})
 
 	t.Run("caller 60s deadline with 50ms remaining after 59.95s attempt", func(t *testing.T) {
-		// Given: caller deadline 60s (> 30s MaxElapsedTime); attempt 1 fails with CodeUnavailable after 59.95s,
-		// leaving 50ms remaining (< 100ms backoff).
+
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
 		reg := prometheus.NewRegistry()
@@ -1100,10 +1050,8 @@ func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_E
 		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
 		defer cancel()
 
-		// When
 		_, err = client.Read(callerCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
 
-		// Then
 		require.Error(t, err)
 		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 		require.Equal(t, 1, handler.calls)
@@ -1117,8 +1065,7 @@ func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_E
 	})
 
 	t.Run("caller 60s deadline continues retrying past 30s MaxElapsedTime when budget remains", func(t *testing.T) {
-		// Given: caller deadline 60s (> 30s MaxElapsedTime); attempt 1 fails at 35s with CodeUnavailable,
-		// remaining 25s > 100ms backoff, attempt 2 succeeds.
+
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
 		handler := &scriptedReadHandler{
@@ -1147,10 +1094,8 @@ func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_E
 		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
 		defer cancel()
 
-		// When
 		resp, err := client.Read(callerCtx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-		// Then
 		require.NoError(t, err)
 		payload := TakeReadPayload(resp.Msg)
 		require.Equal(t, []byte("ok"), payload.Data)

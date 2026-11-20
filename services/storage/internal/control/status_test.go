@@ -31,7 +31,7 @@ func requireMappedStatus(t *testing.T, err error, wantCode codes.Code, wantReaso
 }
 
 func TestToStatus_SentinelErrors_MapsToExpectedGRPCCodeAndErrorInfo(t *testing.T) {
-	// Given: 控制模块与存储引擎模块定义的全部领域哨兵错误及其包装形式
+
 	cases := []struct {
 		name       string
 		err        error
@@ -78,7 +78,6 @@ func TestToStatus_SentinelErrors_MapsToExpectedGRPCCodeAndErrorInfo(t *testing.T
 		{name: "包装后的缩容错误", err: fmt.Errorf("shrink rejected: %w", store.ErrQuotaShrinkBelowUsed), wantCode: codes.FailedPrecondition, wantReason: "EINVAL"},
 	}
 
-	// When / Then: 逐一映射为 gRPC Status 并校验状态码与 ErrorInfo
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			requireMappedStatus(t, tc.err, tc.wantCode, tc.wantReason)
@@ -87,25 +86,22 @@ func TestToStatus_SentinelErrors_MapsToExpectedGRPCCodeAndErrorInfo(t *testing.T
 }
 
 func TestToStatus_JoinedSentinels_PrefersHigherPriorityMapping(t *testing.T) {
-	// Given: 同时包含低优先级通用参数错误与高优先级缩容错误的聚合错误
+
 	joined := errors.Join(store.ErrInvalid, store.ErrQuotaShrinkBelowUsed)
 
-	// When / Then: 应优先命中 ErrQuotaShrinkBelowUsed 对应的 FailedPrecondition
 	requireMappedStatus(t, joined, codes.FailedPrecondition, "EINVAL")
 }
 
 func TestToStatus_ExistingGRPCStatus_PassesThroughUnchanged(t *testing.T) {
-	// Given: 已携带 ErrorInfo 详情的原生 gRPC 状态错误
+
 	base, err := status.New(codes.InvalidArgument, "validator_erange").WithDetails(&errdetails.ErrorInfo{
 		Reason: "ERANGE",
 		Domain: ErrorDomain,
 	})
 	require.NoError(t, err, "构造基准 status 失败")
 
-	// When: 经 ToStatus 转换
 	got := ToStatus(base.Err())
 
-	// Then: 状态码与 ErrorInfo 详情原样透传
 	require.NotNil(t, got, "已有 gRPC status 透传不得返回 nil")
 	require.Equal(t, codes.InvalidArgument, got.Code(), "透传状态码不匹配: want=%v got=%v", codes.InvalidArgument, got.Code())
 	require.Len(t, got.Details(), 1, "透传详情数量不匹配: want=1 got=%d", len(got.Details()))
@@ -115,7 +111,7 @@ func TestToStatus_ExistingGRPCStatus_PassesThroughUnchanged(t *testing.T) {
 }
 
 func TestToStatus_ContextAndUnknownErrors_MapsWithoutErrorInfo(t *testing.T) {
-	// Given: 上下文取消、上下文超时与未分类内部错误
+
 	cases := []struct {
 		name     string
 		err      error
@@ -126,7 +122,6 @@ func TestToStatus_ContextAndUnknownErrors_MapsWithoutErrorInfo(t *testing.T) {
 		{name: "未知内部错误", err: errors.New("unexpected internal failure"), wantCode: codes.Unknown},
 	}
 
-	// When / Then: 映射为对应状态码且不附加 ErrorInfo
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := ToStatus(tc.err)
@@ -138,7 +133,7 @@ func TestToStatus_ContextAndUnknownErrors_MapsWithoutErrorInfo(t *testing.T) {
 }
 
 func TestToStatusAndToGRPCError_NilAndSentinelError_HandlesCorrectly(t *testing.T) {
-	// Given / When / Then: nil 输入直接返回 nil，哨兵错误转换为带 ErrorInfo 的 gRPC error
+
 	require.Nil(t, ToStatus(nil), "nil 错误经 ToStatus 应返回 nil")
 	require.NoError(t, ToGRPCError(nil), "nil 错误经 ToGRPCError 应返回 nil")
 

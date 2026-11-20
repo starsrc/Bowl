@@ -93,7 +93,6 @@ func repeatMarshalAndReleaseRead(t *testing.T, codec *rpccodec.ProtoBinaryCodec,
 	return dst
 }
 
-// waitForZeroLeases 通过有界 GC 周期等待 weak/cleanup 回收孤儿缓冲区，避免在 Small 测试中使用固定休眠。
 func waitForZeroLeases(t *testing.T, countFn func() int, targetName string) {
 	t.Helper()
 	const maxGCCycles = 200
@@ -160,20 +159,18 @@ func assertReadResponseCompatSize(t *testing.T, codec *rpccodec.ProtoBinaryCodec
 }
 
 func TestWriteCodec_UnmarshalAndRelease_IsolatesInputAndReclaimsPool(t *testing.T) {
-	// Given: 构造 4 MiB 载荷并序列化为标准 Protobuf 报文
+
 	codec := newProtoBinaryCodec()
 	require.Equal(t, "proto", codec.Name())
 
 	payload := newSampleWritePayload()
 	raw, orig := marshalSampleWriteRequest(t, codec, payload)
 
-	// When: 解包后立即破坏原输入切片
 	rawMut := append([]byte(nil), raw...)
 	var decoded storagev1.WriteRequest
 	require.NoError(t, codec.Unmarshal(rawMut, &decoded), "解包 4 MiB WriteRequest 失败")
 	clear(rawMut)
 
-	// Then: 解码字段与载荷保持完整且与原切片内存隔离，释放后租约归零
 	require.Equal(t, orig.Ino, decoded.Ino)
 	require.Equal(t, orig.Fh, decoded.Fh)
 	require.Equal(t, orig.Offset, decoded.Offset)
@@ -189,7 +186,7 @@ func TestWriteCodec_UnmarshalAndRelease_IsolatesInputAndReclaimsPool(t *testing.
 }
 
 func TestWriteCodec_PooledUnmarshal_StaysWithinLowAllocBudget(t *testing.T) {
-	// Given: 预热一次 4 MiB 写缓冲池后，记录初始堆分配基线
+
 	codec := newProtoBinaryCodec()
 	raw, _ := marshalSampleWriteRequest(t, codec, newSampleWritePayload())
 	unmarshalAndReleaseWritePayload(t, codec, raw)
@@ -197,10 +194,8 @@ func TestWriteCodec_PooledUnmarshal_StaysWithinLowAllocBudget(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	// When: 连续解包并归还 8 次 4 MiB 请求（无池化需要 32 MiB）
 	repeatUnmarshalAndReleaseWrite(t, codec, raw, 8)
 
-	// Then: 累计堆分配增量严格小于 64 KiB 且零租约残留
 	runtime.ReadMemStats(&after)
 	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(64<<10), "池化复用下 8 次 4 MiB 解包堆分配超限")
 	require.Zero(t, leasedWritePayloadCount(), "连续解包归还后不应残留写租约")
@@ -279,7 +274,7 @@ func assertWriteWireFallbackCase(
 }
 
 func TestWriteCodec_ReuseSameRequest_ReleasesPriorLease(t *testing.T) {
-	// Given: 构造 4 MiB 请求、空请求与带未知字段请求
+
 	codec := newProtoBinaryCodec()
 	raw, _ := marshalSampleWriteRequest(t, codec, newSampleWritePayload())
 	emptyRaw, err := proto.Marshal(&storagev1.WriteRequest{
@@ -290,7 +285,6 @@ func TestWriteCodec_ReuseSameRequest_ReleasesPriorLease(t *testing.T) {
 	require.NoError(t, err)
 	unknownTail := protowire.AppendVarint(protowire.AppendTag(append([]byte(nil), raw...), 99, protowire.VarintType), 12345)
 
-	// When & Then: 复用同一 WriteRequest 解包为空载荷或回退报文时，立即归还前一次租约
 	var reused storagev1.WriteRequest
 	require.NoError(t, codec.Unmarshal(raw, &reused))
 	require.Equal(t, 1, leasedWritePayloadCount(), "首次解包应持有 1 个租约")
@@ -304,7 +298,7 @@ func TestWriteCodec_ReuseSameRequest_ReleasesPriorLease(t *testing.T) {
 }
 
 func TestWriteCodec_ValidationRejectAndTypedNil_ReclaimsPoolWithoutPanic(t *testing.T) {
-	// Given: 挂载写载荷回收拦截器与请求校验拦截器链
+
 	codec := newProtoBinaryCodec()
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err)
@@ -328,16 +322,13 @@ func TestWriteCodec_ValidationRejectAndTypedNil_ReclaimsPoolWithoutPanic(t *test
 	require.NoError(t, codec.Unmarshal(rawInvalid, req.Msg))
 	require.Equal(t, 1, leasedWritePayloadCount(), "入链前应持有 1 个写缓冲租约")
 
-	// When: Epoch=0 的请求在校验拦截器短路拒收
 	_, callErr := chain(context.Background(), req)
 
-	// Then: 拦截器短路返回 InvalidArgument，入口回收拦截器确定性归还池缓冲
 	require.Error(t, callErr)
 	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(callErr))
 	require.Zero(t, leasedWritePayloadCount(), "校验拒绝路径必须释放写缓冲租约")
 	require.Nil(t, req.Msg.Data, "释放后 Data 必须置空")
 
-	// And: typed-nil WriteRequest 与 ReadRequest 进入快检分支不触发空指针崩溃
 	_, nilWriteErr := chain(context.Background(), connect.NewRequest[storagev1.WriteRequest](nil))
 	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(nilWriteErr))
 
@@ -346,7 +337,7 @@ func TestWriteCodec_ValidationRejectAndTypedNil_ReclaimsPoolWithoutPanic(t *test
 }
 
 func TestWriteCodec_AbandonedRequest_ReclaimedByGC(t *testing.T) {
-	// Given: 解包后未经过拦截器释放即被丢弃的 WriteRequest
+
 	codec := newProtoBinaryCodec()
 	orphanRaw, err := codec.Marshal(&storagev1.WriteRequest{
 		Ino:    10,
@@ -356,15 +347,13 @@ func TestWriteCodec_AbandonedRequest_ReclaimedByGC(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// When: 仅保留到辅助函数返回后脱离引用并触发 GC
 	unmarshalAbandonedWriteRequest(t, codec, orphanRaw)
 
-	// Then: weak/cleanup 机制自动将孤儿租约归零
 	waitForZeroLeases(t, leasedWritePayloadCount, "WriteRequest")
 }
 
 func TestReadCodec_MarshalAndMarshalStable_ReclaimsPoolAndPreservesBytes(t *testing.T) {
-	// Given: 从读缓冲池申请两块缓冲并注册租约
+
 	codec := newProtoBinaryCodec()
 	payload := bytes.Repeat([]byte{0x41, 0x42, 0x43, 0x44}, maxReadWriteSize/4)
 
@@ -374,10 +363,8 @@ func TestReadCodec_MarshalAndMarshalStable_ReclaimsPoolAndPreservesBytes(t *test
 	registerLeasedReadPayload(resp1, buf1)
 	require.Equal(t, 1, leasedReadPayloadCount())
 
-	// When: 使用 Marshal 编码
 	wireBytes, err := codec.Marshal(resp1)
 
-	// Then: 立即释放读缓冲租约且线格式字节完全保真
 	require.NoError(t, err)
 	require.Nil(t, resp1.Data)
 	require.Zero(t, leasedReadPayloadCount())
@@ -386,7 +373,6 @@ func TestReadCodec_MarshalAndMarshalStable_ReclaimsPoolAndPreservesBytes(t *test
 	require.NoError(t, proto.Unmarshal(wireBytes, &checkResp))
 	require.Equal(t, payload, checkResp.Data)
 
-	// And: MarshalStable 同样在编码后释放租约
 	buf2 := acquireReadPayloadBuf()
 	copy(buf2[:4096], payload[:4096])
 	resp2 := &storagev1.ReadResponse{Data: buf2[:4096:4096]}
@@ -397,7 +383,7 @@ func TestReadCodec_MarshalAndMarshalStable_ReclaimsPoolAndPreservesBytes(t *test
 }
 
 func TestReadCodec_PooledMarshalAppend_StaysWithinLowAllocBudget(t *testing.T) {
-	// Given: 预热读缓冲池与复用帧切片
+
 	codec := newProtoBinaryCodec()
 	frameDst := make([]byte, 0, maxReadWriteSize+64)
 	frameDst = marshalAndReleaseReadPayload(t, codec, frameDst)
@@ -405,20 +391,17 @@ func TestReadCodec_PooledMarshalAppend_StaysWithinLowAllocBudget(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	// When: 连续 8 次 4 MiB ReadResponse 借池并 MarshalAppend
 	_ = repeatMarshalAndReleaseRead(t, codec, frameDst, 8)
 
-	// Then: 堆分配增量严格小于 64 KiB 且无租约残留
 	runtime.ReadMemStats(&after)
 	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(64<<10), "池化 ReadResponse 编码堆分配超限")
 	require.Zero(t, leasedReadPayloadCount(), "连续编码归还后不应残留读租约")
 }
 
 func TestReadCodec_AbandonedResponse_ReclaimedByGC(t *testing.T) {
-	// Given & When: 构造未进入 Marshal 即被丢弃的 ReadResponse
+
 	registerAbandonedReadResponse(t)
 
-	// Then: GC cleanup 自动归还孤儿读缓冲租约
 	waitForZeroLeases(t, leasedReadPayloadCount, "ReadResponse")
 }
 

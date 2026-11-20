@@ -1,4 +1,3 @@
-// Package db 封装 Storage 控制面 PostgreSQL 连接池、事务与领域持久化接缝。
 package db
 
 import (
@@ -19,7 +18,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/config"
 )
 
-// 领域哨兵错误（吞并底层驱动细节，避免 pgx.ErrNoRows 泄露至调用方）。
 var (
 	ErrNotFound        = errors.New("db: not found")
 	ErrDiskNotFound    = ErrNotFound
@@ -28,16 +26,13 @@ var (
 	ErrStaleBaseCommit = errors.New("db: stale base commit")
 )
 
-// SegmentKind 标识血缘单调号段资源类别。
 type SegmentKind uint8
 
-// 血缘单调号段资源类别枚举。
 const (
 	SegmentKindInode SegmentKind = iota + 1
 	SegmentKindPack
 )
 
-// DiskRecord 描述控制面持久化的单盘领域记录。
 type DiskRecord struct {
 	DiskID       uuid.UUID
 	ParentDiskID uuid.UUID
@@ -48,7 +43,6 @@ type DiskRecord struct {
 	UpdatedAt    time.Time
 }
 
-// CommitRecord 描述血缘 DAG 中的不可变切面提交记录。
 type CommitRecord struct {
 	LineageID           uuid.UUID
 	CommitID            uuid.UUID
@@ -58,7 +52,6 @@ type CommitRecord struct {
 	CreatedAt           time.Time
 }
 
-// ForkDiskInput 描述派生子盘事务入参（64B，满足 gocritic hugeParam <= 80B）。
 type ForkDiskInput struct {
 	SourceDiskID uuid.UUID
 	ChildDiskID  uuid.UUID
@@ -66,7 +59,6 @@ type ForkDiskInput struct {
 	Name         string
 }
 
-// MergeDiskInput 描述原子合并事务入参（按指针传递以满足 gocritic hugeParam <= 80B）。
 type MergeDiskInput struct {
 	LineageID                  uuid.UUID
 	SourceDiskID               uuid.UUID
@@ -78,25 +70,21 @@ type MergeDiskInput struct {
 	SkipSourceCommit           bool
 }
 
-// ListDisksQuery 描述游标分页查询参数。
 type ListDisksQuery struct {
 	PageSize  uint32
 	PageToken string
 }
 
-// ListDisksPage 描述游标分页查询结果。
 type ListDisksPage struct {
 	Disks         []DiskRecord
 	NextPageToken string
 }
 
-// SegmentRange 描述号段分配闭区间 [First, Last]。
 type SegmentRange struct {
 	First int64
 	Last  int64
 }
 
-// Store 定义控制面粗粒度持久化接缝接口。
 type Store interface {
 	CreateDisk(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error)
 	ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord, error)
@@ -111,13 +99,11 @@ type Store interface {
 
 var _ Store = (*SQLStore)(nil)
 
-// SQLStore 提供 PostgreSQL 控制面持久化适配器。
 type SQLStore struct {
 	queries *Queries
 	tx      *tx.PGXTransactor[*Queries]
 }
 
-// NewStore 基于连接池创建控制面访问器。
 func NewStore(pool *pgxpool.Pool) Store {
 	return &SQLStore{
 		queries: New(pool),
@@ -201,7 +187,6 @@ func mapPGXErr(err error) error {
 	return err
 }
 
-// CreateDisk 原子写入新血缘行与根磁盘记录。
 func (s *SQLStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error) {
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
@@ -229,7 +214,6 @@ func (s *SQLStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string
 	return toDiskRecord(&row), nil
 }
 
-// ForkDisk 在单次可重试事务内按 disk_lineages -> disks 锁序派生子盘并写入基准切面。
 func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord, error) {
 	if arg.SourceDiskID == uuid.Nil || arg.ChildDiskID == uuid.Nil || arg.CommitID == uuid.Nil || arg.SourceDiskID == arg.ChildDiskID {
 		return DiskRecord{}, fmt.Errorf("%w: invalid fork disk identifiers", ErrInvalidArgument)
@@ -284,7 +268,6 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	return toDiskRecord(&childRow), nil
 }
 
-// GetDisk 按标识查询单盘元数据。
 func (s *SQLStore) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, error) {
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
@@ -296,7 +279,6 @@ func (s *SQLStore) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, e
 	return toDiskRecord(&row), nil
 }
 
-// ListDisks 按 (created_at DESC, disk_id DESC) 稳定游标分页查询磁盘。
 func (s *SQLStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDisksPage, error) {
 	pageSize := normalizePageSize(query.PageSize)
 
@@ -342,7 +324,6 @@ func (s *SQLStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDis
 	}, nil
 }
 
-// ListLineageCommits 按 (created_at ASC, commit_id ASC) 查询指定血缘的全部切面节点。
 func (s *SQLStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) ([]CommitRecord, error) {
 	if lineageID == uuid.Nil {
 		return nil, fmt.Errorf("%w: lineage id cannot be nil uuid", ErrInvalidArgument)
@@ -358,7 +339,6 @@ func (s *SQLStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) 
 	return commits, nil
 }
 
-// UpdateDiskName 更新磁盘名称。
 func (s *SQLStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name string) (DiskRecord, error) {
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
@@ -382,7 +362,6 @@ func (s *SQLStore) UpdateDiskName(ctx context.Context, diskID uuid.UUID, name st
 	return toDiskRecord(&row), nil
 }
 
-// MergeDisk 在单次可重试事务内按严格锁序与 CAS 切面校验原子提交合并节点。
 func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRecord, error) {
 	if err := validateMergeDiskInput(input); err != nil {
 		return DiskRecord{}, err
@@ -474,7 +453,6 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	return toDiskRecord(&targetRow), nil
 }
 
-// DeleteDisk 在单次可重试事务内按 disk_lineages -> disks 锁序删盘并执行三态血缘切面回收。
 func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUID, error) {
 	if diskID == uuid.Nil {
 		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
@@ -491,7 +469,6 @@ func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUI
 		}
 		lineageID := diskRow.LineageID
 
-		// 统一遵守 disk_lineages -> disks 的全局加锁顺序，消除并发 ForkDisk 与 DeleteDisk 死锁风险。
 		if _, lockErr := q.LockDiskLineage(ctx, lineageID); lockErr != nil {
 			return mapPGXErr(lockErr)
 		}
@@ -552,7 +529,6 @@ func toUUIDSlice(items []pgtype.UUID) []uuid.UUID {
 	return out
 }
 
-// ReserveSegment 为指定血缘预留单调递增的 Inode 或 Pack 号段。
 func (s *SQLStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineageID uuid.UUID, minNext, count int64) (SegmentRange, error) {
 	if lineageID == uuid.Nil || count <= 0 {
 		return SegmentRange{}, fmt.Errorf("%w: invalid segment reserve parameters", ErrInvalidArgument)
@@ -597,7 +573,6 @@ func (s *SQLStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineage
 	return seg, nil
 }
 
-// OpenPool 根据配置创建连接池。
 func OpenPool(cfg config.DBPoolConfig) (*pgxpool.Pool, error) {
 	pool, err := tx.OpenPool(cfg)
 	if err != nil {
@@ -606,7 +581,6 @@ func OpenPool(cfg config.DBPoolConfig) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// PoolParams 包含连接池所需依赖。
 type PoolParams struct {
 	fx.In
 	Ready     observability.Ready `optional:"true"`
@@ -614,7 +588,6 @@ type PoolParams struct {
 	Config    config.DBPoolConfig
 }
 
-// ProvidePool 创建连接池并注册生命周期。
 func ProvidePool(params PoolParams) (*pgxpool.Pool, error) {
 	pool, err := OpenPool(params.Config)
 	if err != nil {
@@ -624,5 +597,4 @@ func ProvidePool(params PoolParams) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// Module 提供控制面数据库依赖。
 var Module = fx.Module("db", fx.Provide(ProvidePool, NewStore))

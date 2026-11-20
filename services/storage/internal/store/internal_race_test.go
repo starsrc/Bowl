@@ -175,17 +175,14 @@ func TestCompactPacksPhaseACASFenceAgainstConcurrentOverwriteTruncateAndUnlink(t
 	require.NoError(t, err)
 	defer func() { require.NoError(t, actor2.Close()) }()
 
-	// 删除 dead.bin，使已封口 Pack 1 存活率降至 128 KiB / 384 KiB <= 50%
 	require.NoError(t, actor2.Unlink(ctx, RootIno, []byte("dead.bin"), false))
 
 	require.NoError(t, actor2.CompactPacks(ctx))
 	require.True(t, hookTriggered, "必须在搬迁读取追加后、提交 opCompactRelocate 前触发并发写钩子")
 
-	// 1. 源封口包 Pack 1 物理文件已彻底回收
 	_, statErr := os.Stat(packFilePath(actor2.blobs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
-	// 2. fKeep 成功搬迁至 Pack 2；fOverwrite 保持前台新写的 0xFE 而非旧 GC 块 0xCC
 	gotKeep, err := actor2.Read(ctx, fKeep.Ino, 0, 32768)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte{0xBB}, 32768), gotKeep)
@@ -194,7 +191,6 @@ func TestCompactPacksPhaseACASFenceAgainstConcurrentOverwriteTruncateAndUnlink(t
 	require.NoError(t, err)
 	require.Equal(t, newOverwritePayload, gotOverwrite)
 
-	// 3. fTruncate 与 fUnlink 不得被后台 GC 恢复或复活
 	truncAttr, err := actor2.GetAttr(ctx, fTruncate.Ino)
 	require.NoError(t, err)
 	require.Zero(t, truncAttr.Size)
@@ -205,7 +201,6 @@ func TestCompactPacksPhaseACASFenceAgainstConcurrentOverwriteTruncateAndUnlink(t
 	_, err = actor2.GetAttr(ctx, fUnlink.Ino)
 	require.ErrorIs(t, err, ErrNotFound)
 
-	// 4. 新包 Pack 2 的 LiveBytes 仅计入 fKeep + fOverwrite (64 KiB)，TotalBytes 包含 4 个预写块 + 1 个前台新写块 (160 KiB)
 	snap := actor2.MetricsSnapshot()
 	require.Equal(t, uint64(65536), snap.PackLiveBytes)
 	require.Equal(t, uint64(5*32768), snap.PackPhysicalBytes)
@@ -227,7 +222,7 @@ func TestAsyncDeadPackReclaimNonBlockingFsyncAndDrainOnClose(t *testing.T) {
 		Dir:            dir,
 		DiskID:         "disk-async-reclaim",
 		MaxBytes:       64 << 20,
-		MaxPackSize:    2 * BlobSize, // 将封包上限缩至 512 KiB，便于快速制造已封口死包
+		MaxPackSize:    2 * BlobSize,
 		removePackHook: makeDualRemovePackHook(removeEntered1, releaseRemove1, removeEntered2, releaseRemove2),
 	})
 	require.NoError(t, err)
@@ -239,18 +234,16 @@ func TestAsyncDeadPackReclaimNonBlockingFsyncAndDrainOnClose(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Pack 1: 写入 512 KiB 填满封口；随后覆写同区间切入 Pack 2，此时 Pack 1 LiveBytes 归零成为待回收死包
 	_, _, err = actor.Write(ctx, f.Ino, 0, bytes.Repeat([]byte{0x11}, 2*BlobSize))
 	require.NoError(t, err)
 	_, _, err = actor.Write(ctx, f.Ino, 0, bytes.Repeat([]byte{0x22}, 2*BlobSize))
 	require.NoError(t, err)
-	// 再追加写入切入 Pack 3，使 Pack 2 也封口，供后续验证 Close 排空
+
 	_, _, err = actor.Write(ctx, f.Ino, 2*BlobSize, bytes.Repeat([]byte{0x33}, BlobSize))
 	require.NoError(t, err)
 	_, statErr := os.Stat(packFilePath(actor.blobs.dir, 1))
 	require.NoError(t, statErr)
 
-	// 1. 前台 Fsync 在 Pebble WAL Sync 完成后必须立即返回，绝不被挂起在钩子上的死包物理删除阻塞
 	fsyncDone := make(chan error, 1)
 	go func() {
 		fsyncDone <- actor.Fsync(ctx, f.Ino)
@@ -272,7 +265,6 @@ func TestAsyncDeadPackReclaimNonBlockingFsyncAndDrainOnClose(t *testing.T) {
 	_, statErr = os.Stat(packFilePath(actor.blobs.dir, 1))
 	require.ErrorIs(t, statErr, os.ErrNotExist, "waitPendingReclaims 返回后死包 1 必须已物理删除")
 
-	// 2. 使已封口的 Pack 2 变为死包并卡在 removePackHook(2)，验证 Close() 必须阻塞等待后台排空后再返回
 	_, _, err = actor.Write(ctx, f.Ino, 0, bytes.Repeat([]byte{0x44}, 2*BlobSize))
 	require.NoError(t, err)
 	require.NoError(t, actor.Fsync(ctx, f.Ino))
@@ -337,7 +329,6 @@ func TestSyncBarrierCoalescingAndParallelPackSync(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 1. 验证 syncBarrierWithoutBatch 中 .pack fdatasync 钩子确切触发并通过 channel 屏障同步完成
 	_, _, err = actor.Write(ctx, f.Ino, 0, bytes.Repeat([]byte{0x31}, BlobSize))
 	require.NoError(t, err)
 
@@ -354,7 +345,6 @@ func TestSyncBarrierCoalescingAndParallelPackSync(t *testing.T) {
 	require.Equal(t, int32(1), syncHookCalls.Load())
 	syncHookArmed.Store(false)
 
-	// 2. 验证合并批次 commitWithSyncBarrier：通过 beforeTickHook 挂起当前 tick，等两个并发请求确定入队后再放行合批
 	f2, err := actor.Create(ctx, CreateReq{
 		ParentIno: dirAttr.Ino,
 		Name:      []byte("merged.bin"),

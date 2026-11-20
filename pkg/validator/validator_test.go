@@ -320,7 +320,7 @@ func TestStorageValidator_GivenInvalidNamesXattrsOrTargets_WhenValidated_ThenMap
 		wantReason string
 	}
 	cases := []reasonCase{
-		// 目录项名称与磁盘名称
+
 		{name: "lookup_name_too_long", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: long256Bytes}, wantReason: validator.ReasonNameTooLong},
 		{name: "lookup_name_has_nul", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: []byte("foo\x00bar")}, wantReason: validator.ReasonInvalidArgument},
 		{name: "lookup_name_has_slash", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: []byte("foo/bar")}, wantReason: validator.ReasonInvalidArgument},
@@ -337,7 +337,6 @@ func TestStorageValidator_GivenInvalidNamesXattrsOrTargets_WhenValidated_ThenMap
 		{name: "fork_disk_name_too_long", msg: &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: long256Str}, wantReason: validator.ReasonNameTooLong},
 		{name: "fork_disk_name_has_nul", msg: &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: "a\x00b"}, wantReason: validator.ReasonInvalidArgument},
 
-		// Xattr 名称、标志与值
 		{name: "setxattr_empty_name", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte{}, Value: []byte("val")}, wantReason: validator.ReasonInvalidArgument},
 		{name: "setxattr_invalid_flags", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte("user.k"), Value: []byte("v"), Flags: 4}, wantReason: validator.ReasonInvalidArgument},
 		{name: "setxattr_name_too_long", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: long256Bytes, Value: []byte("val")}, wantReason: validator.ReasonRange},
@@ -349,7 +348,6 @@ func TestStorageValidator_GivenInvalidNamesXattrsOrTargets_WhenValidated_ThenMap
 		{name: "listxattr_resp_long_item", msg: &storagev1.ListXattrResponse{Names: [][]byte{long256Bytes}}, wantReason: validator.ReasonRange},
 		{name: "getxattr_resp_value_too_long", msg: &storagev1.GetXattrResponse{Value: bytes.Repeat([]byte("v"), 65537)}, wantReason: validator.ReasonRange},
 
-		// Symlink / Readlink 目标路径
 		{name: "symlink_target_too_long", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: bytes.Repeat([]byte("t"), 4096)}, wantReason: validator.ReasonNameTooLong},
 		{name: "symlink_target_empty", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: []byte{}}, wantReason: validator.ReasonInvalidArgument},
 		{name: "symlink_target_4095_plus_nul", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: append(bytes.Repeat([]byte("t"), 4095), 0)}, wantReason: validator.ReasonInvalidArgument},
@@ -602,7 +600,7 @@ func TestStorageValidator_GivenCodecRoundTrippedRequest_WhenValidated_ThenPreser
 }
 
 func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucceeds(t *testing.T) {
-	// Given
+
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err, "create storage validator: want nil error, got=%v", err)
 
@@ -680,7 +678,6 @@ func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucc
 		},
 	}
 
-	// When / Then
 	runSubtests(t, cases, func(tc validCase) string { return tc.name }, func(t *testing.T, tc validCase) {
 		gotErr := v.Validate(tc.msg)
 		require.NoError(t, gotErr, "case=%s: want validation success, got=%v", tc.name, gotErr)
@@ -688,7 +685,7 @@ func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucc
 }
 
 func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
-	// Given
+
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err, "create storage validator: want nil error, got=%v", err)
 
@@ -760,7 +757,6 @@ func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenRe
 		},
 	}
 
-	// When / Then
 	runSubtests(t, cases, func(tc invalidCase) string { return tc.name }, func(t *testing.T, tc invalidCase) {
 		gotErr := v.Validate(tc.msg)
 		require.Error(t, gotErr, "case=%s: want validation failure with reason %s, got nil", tc.name, validator.ReasonInvalidArgument)

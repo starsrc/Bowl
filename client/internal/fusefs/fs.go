@@ -1,4 +1,3 @@
-// Package fusefs 实现基于 go-fuse RawFileSystem 的 Bowl 用户态文件系统适配层。
 package fusefs
 
 import (
@@ -28,20 +27,14 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
-// DefaultReleaseRetryInterval 是孤儿回收异步重试的默认轮询周期。
 const DefaultReleaseRetryInterval = 200 * time.Millisecond
 
-// DefaultRPCTimeout 是 FUSE 常规请求（不含阻塞锁 SetLkw）的默认单请求超时预算。
 const DefaultRPCTimeout = 30 * time.Second
 
-// DefaultWriteAttrTimeoutSeconds 是写操作成功后回填内核属性缓存的有效期。
-// 严禁置 0：置 0 会使内核在连续 write() 前重新发起 GetAttr RPC 核对文件尺寸。
 const DefaultWriteAttrTimeoutSeconds = 1.0
 
-// DefaultOrphanBacklogThreshold 是触发孤儿回收积压告警的默认队列深度阈值。
 const DefaultOrphanBacklogThreshold = 16
 
-// DefaultUnmountFsyncConcurrency limits concurrent Fsync RPCs dispatched by OnUnmount over metaTransport.
 const DefaultUnmountFsyncConcurrency = 64
 
 const orphanWarnMinInterval = time.Second
@@ -58,10 +51,8 @@ var (
 	}()
 )
 
-// 确保 RawFS 完整实现 fuse.RawFileSystem 接口。
 var _ fuse.RawFileSystem = (*RawFS)(nil)
 
-// Config 包含 FUSE 文件系统运行所需的所有静态与动态配置。
 type Config struct {
 	DiskID                 string
 	Epoch                  uint64
@@ -91,7 +82,6 @@ func normalizeMountMode(mode string) string {
 	return MountModeStaged
 }
 
-// EffectiveMode returns the normalized mount mode, defaulting an empty Mode to MountModeStaged.
 func (c *Config) EffectiveMode() string {
 	if c == nil {
 		return MountModeStaged
@@ -99,12 +89,10 @@ func (c *Config) EffectiveMode() string {
 	return normalizeMountMode(c.Mode)
 }
 
-// IsReadOnly reports whether the mount mode is MountModeRO.
 func (c *Config) IsReadOnly() bool {
 	return c.EffectiveMode() == MountModeRO
 }
 
-// IsStaged reports whether the mount mode is MountModeStaged.
 func (c *Config) IsStaged() bool {
 	return c.EffectiveMode() == MountModeStaged
 }
@@ -115,7 +103,6 @@ type reclaimRetryItem struct {
 	attempts int
 }
 
-// UnmountProgress reports cloud sync progress observed during OnUnmount.
 type UnmountProgress struct {
 	Active    bool   `json:"active"`
 	Completed uint64 `json:"completed"`
@@ -131,7 +118,6 @@ type unmountProgressState struct {
 	total         uint64
 }
 
-// RawFS 封装底层 FUSE 请求处理，桥接 Linux 内核 VFS 与 StorageService RPC。
 type RawFS struct {
 	fuse.RawFileSystem
 
@@ -140,17 +126,17 @@ type RawFS struct {
 	handles *HandleTable
 	cache   *NamespaceCache
 	caps    *capabilityCache
-	// lifecycleMu 保证 OnUnmount 等待所有在途 FUSE 请求排空；常规请求只持读锁。
+
 	lifecycleMu sync.RWMutex
-	// stateMu 仅保护本地内存态的微秒级读写，绝不包裹跨机 RPC。
+
 	stateMu        sync.Mutex
 	dirtyInodes    map[uint64]struct{}
 	orphanInodes   map[uint64]struct{}
 	orphanSpans    map[uint64]trace.SpanContext
 	statsSnapshots map[uint64][]byte
-	// inodeLocks 按 Inode 粒度串行化 O_APPEND 定序与 Unlink/Release 孤儿标记。
+
 	inodeLocks inodeLocks
-	// topologySeq increments after Link, Unlink, or Rename mutates directory links.
+
 	topologySeq   atomic.Uint64
 	metaDirtySeq  atomic.Uint64
 	metaSyncedSeq atomic.Uint64
@@ -187,14 +173,10 @@ type RawFS struct {
 	onFence      func(status fuse.Status, reason string)
 }
 
-// NewRawFS 创建并初始化 RawFS 实例。
-//
-//nolint:gocritic // Config 按值传入，RawFS 持有独立副本，避免调用方后续突变
 func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 	return newRawFS(client, cfg, nil)
 }
 
-//nolint:gocritic // Config passed by value so RawFS keeps an independent copy.
 func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn func() time.Time) *RawFS {
 	cfg.Mode = cfg.EffectiveMode()
 	if cfg.RootIno == 0 && cfg.RootInode != nil {
@@ -504,7 +486,6 @@ func (fs *RawFS) stageErrToStatus(err error) fuse.Status {
 	return fs.ToStatus(err)
 }
 
-// BindMountpoint 在 FUSE 挂载完成后解析并绑定对应的 /sys/fs/fuse/connections/<dev> 目录。
 func (fs *RawFS) BindMountpoint(mountpoint string) {
 	if fs == nil || mountpoint == "" {
 		return
@@ -523,7 +504,6 @@ func (fs *RawFS) setFuseSysfsDir(dir string) {
 	fs.fuseSysfsDir.Store(&copied)
 }
 
-// Metrics 返回绑定的统一指标数据源。
 func (fs *RawFS) Metrics() *Metrics {
 	if fs == nil {
 		return nil
@@ -531,7 +511,6 @@ func (fs *RawFS) Metrics() *Metrics {
 	return fs.metrics
 }
 
-// Collector 返回可直接注册至自定义 prometheus.Registerer 的指标收集器。
 func (fs *RawFS) Collector() prometheus.Collector {
 	if fs == nil || fs.metrics == nil {
 		return nil
@@ -539,7 +518,6 @@ func (fs *RawFS) Collector() prometheus.Collector {
 	return fs.metrics
 }
 
-// Snapshot 抓取当前时刻客户端 FUSE 41 操作与 9 大子系统的结构化一致性快照。
 func (fs *RawFS) Snapshot() Snapshot {
 	if fs == nil {
 		return Snapshot{}
@@ -617,25 +595,18 @@ func (fs *RawFS) startFuseOp(op FuseOp) (opCtx context.Context, endSpan func(fus
 	}
 }
 
-// Config 返回当前 RawFS 绑定的静态与握手配置副本。
 func (fs *RawFS) Config() Config {
 	return fs.cfg
 }
 
-// ToServerIno 将内核传入的 Inode 映射为服务端持久化 Inode。
-// 严防内核越过根映射以非 1 且等于 RootIno 的编号直接访问，返回 ENOENT。
 func (fs *RawFS) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
 	return fs.tmpMgr.ToServerIno(kernelIno)
 }
 
-// ToKernelIno 将服务端持久化 Inode 映射为 Linux 内核可见的 Inode。
-// 当 serverIno 等于目标 Disk.RootIno 时，强制映射为 1 (fuse.FUSE_ROOT_ID)。
 func (fs *RawFS) ToKernelIno(serverIno uint64) uint64 {
 	return fs.tmpMgr.ToKernelIno(serverIno)
 }
 
-// CheckWritable checks whether mutations are allowed.
-// A fenced filesystem fails closed with its fence status before checking read-only mode.
 func (fs *RawFS) CheckWritable() fuse.Status {
 	if st := fs.FenceStatus(); st != fuse.OK {
 		return st
@@ -646,12 +617,10 @@ func (fs *RawFS) CheckWritable() fuse.Status {
 	return fuse.OK
 }
 
-// RPCContext 包装内核 cancel 信号通道、单调递增 RequestID 与请求超时为派生 context，支持 FUSE_INTERRUPT 及时取消与 30s 超时保护。
 func (fs *RawFS) RPCContext(cancel <-chan struct{}) (context.Context, context.CancelFunc) {
 	return fs.RPCContextFrom(context.Background(), cancel)
 }
 
-// RPCContextFrom 基于指定父 Context 注入唯一 RequestID、30s 超时预算与可选 FUSE cancel 通道，确保跨阶段 RPC 不断链。
 func (fs *RawFS) RPCContextFrom(parent context.Context, cancel <-chan struct{}) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -665,7 +634,6 @@ func (fs *RawFS) RPCContextFrom(parent context.Context, cancel <-chan struct{}) 
 	}
 }
 
-// ToStatus 将 ConnectRPC 错误解码为对应的 Linux fuse.Status。
 func (fs *RawFS) ToStatus(err error) fuse.Status {
 	if err == nil {
 		return fuse.OK
@@ -698,7 +666,6 @@ func (fs *RawFS) openHandle(ino uint64, flags uint32, dir bool) (uint64, fuse.St
 	return fh, fuse.OK
 }
 
-// NextRequestID 原子单调递增生成在 [1, math.MaxInt64] 范围内的唯一请求 ID。
 func (fs *RawFS) NextRequestID() uint64 {
 	for {
 		curr := fs.nextReqID.Add(1)
@@ -709,7 +676,6 @@ func (fs *RawFS) NextRequestID() uint64 {
 	}
 }
 
-// Access 记录操作指标后委托内嵌 fuse.RawFileSystem 默认实现处理。
 func (fs *RawFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Status {
 	start := fs.metrics.beginOp(OpAccess)
 	status := fs.RawFileSystem.Access(cancel, input)
@@ -717,7 +683,6 @@ func (fs *RawFS) Access(cancel <-chan struct{}, input *fuse.AccessIn) fuse.Statu
 	return status
 }
 
-// Lseek 记录操作指标后委托内嵌 fuse.RawFileSystem 默认实现处理。
 func (fs *RawFS) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
 	start := fs.metrics.beginOp(OpLseek)
 	status := fs.RawFileSystem.Lseek(cancel, in, out)
@@ -725,7 +690,6 @@ func (fs *RawFS) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.Lseek
 	return status
 }
 
-// CopyFileRange 记录操作指标及传输字节数后委托内嵌 fuse.RawFileSystem 默认实现处理。
 func (fs *RawFS) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRangeIn) (uint32, fuse.Status) {
 	start := fs.metrics.beginOp(OpCopyFileRange)
 	written, status := fs.RawFileSystem.CopyFileRange(cancel, input)
@@ -737,7 +701,6 @@ func (fs *RawFS) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFileRange
 	return written, status
 }
 
-// Statx 记录操作指标后委托内嵌 fuse.RawFileSystem 默认实现处理。
 func (fs *RawFS) Statx(cancel <-chan struct{}, input *fuse.StatxIn, out *fuse.StatxOut) fuse.Status {
 	start := fs.metrics.beginOp(OpStatx)
 	status := fs.RawFileSystem.Statx(cancel, input, out)
@@ -745,7 +708,6 @@ func (fs *RawFS) Statx(cancel <-chan struct{}, input *fuse.StatxIn, out *fuse.St
 	return status
 }
 
-// UnmountProgress returns a monotonic snapshot of OnUnmount cloud sync progress.
 func (fs *RawFS) UnmountProgress() UnmountProgress {
 	if fs == nil || fs.IsFenced() {
 		return UnmountProgress{}
@@ -785,7 +747,6 @@ func (fs *RawFS) countDirtyAndStagedInodes(stagedInodes []uint64) int {
 	return len(seen)
 }
 
-// OnUnmount 在文件系统卸载完成时被调用。
 func (fs *RawFS) OnUnmount() {
 	start := fs.metrics.beginOp(OpOnUnmount)
 	opCtx, endSpan := fs.startFuseOp(OpOnUnmount)
@@ -795,7 +756,7 @@ func (fs *RawFS) OnUnmount() {
 	}()
 
 	fs.locks.Close()
-	// 排他锁等待所有在途请求释放读锁，先排空本地暂存上传队列确保 dirtyInodes 完整，再逐一同步落盘，最后关闭 StageSession。
+
 	fs.lifecycleMu.Lock()
 	if fs.IsFenced() {
 		fs.unmountFencedLocked(opCtx)
@@ -1045,14 +1006,12 @@ func shouldRetryReclaim(err error) bool {
 	}
 }
 
-// markDirty 记录尚未显式 Fsync 的节点。
 func (fs *RawFS) markDirty(ino uint64) {
 	fs.stateMu.Lock()
 	fs.dirtyInodes[ino] = struct{}{}
 	fs.stateMu.Unlock()
 }
 
-// clearDirty 在服务端确认落盘或节点已彻底删除后清除脏标记。
 func (fs *RawFS) clearDirty(ino uint64) {
 	fs.stateMu.Lock()
 	delete(fs.dirtyInodes, ino)
@@ -1066,7 +1025,6 @@ func (fs *RawFS) hasDirtyInodes() bool {
 	return has
 }
 
-// takeDirtyInodes 原子取走并清空全部脏节点，供卸载时排空。
 func (fs *RawFS) takeDirtyInodes() []uint64 {
 	fs.stateMu.Lock()
 	defer fs.stateMu.Unlock()
@@ -1111,7 +1069,6 @@ func (fs *RawFS) warnOrphanBacklog(ctx context.Context, ino uint64, attempts, qu
 	)
 }
 
-// markOrphanWithContext 记录待延迟回收的孤儿节点及其来源 SpanContext。
 func (fs *RawFS) markOrphanWithContext(ctx context.Context, ino uint64) {
 	sc := trace.SpanContextFromContext(ctx)
 	fs.stateMu.Lock()
@@ -1123,7 +1080,6 @@ func (fs *RawFS) markOrphanWithContext(ctx context.Context, ino uint64) {
 	fs.handles.MarkOrphanContext(ctx, ino)
 }
 
-// clearOrphan removes local orphan tracking when Link promotes a server-backed O_TMPFILE.
 func (fs *RawFS) clearOrphan(ino uint64) bool {
 	wasOrphan := fs.handles.IsOrphan(ino)
 	fs.stateMu.Lock()
@@ -1186,7 +1142,6 @@ func (fs *RawFS) reclaimOrphan(ctx context.Context, ino uint64) {
 	}
 }
 
-// tryReclaim 返回 true 表示回收完成或错误不可重试。
 func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, fromQueue bool) bool {
 	if fs.IsFenced() {
 		return true
@@ -1294,7 +1249,6 @@ func (fs *RawFS) stopAndDrainReleaseQueue() {
 	fs.drainReleaseQueueOnce(ctx)
 }
 
-// FillAttr 精确转换 Inode 属性并填入 fuse.Attr。
 func (fs *RawFS) FillAttr(out *fuse.Attr, ino *storagev1.Inode) {
 	if out == nil || ino == nil {
 		return
@@ -1329,7 +1283,6 @@ func (fs *RawFS) FillAttr(out *fuse.Attr, ino *storagev1.Inode) {
 	}
 }
 
-// FillEntryOut 精确填充 Lookup 等操作所需的 fuse.EntryOut 结构。
 func (fs *RawFS) FillEntryOut(out *fuse.EntryOut, ino *storagev1.Inode, entryTimeoutSec, attrTimeoutSec float64) {
 	if out == nil || ino == nil {
 		return
@@ -1341,7 +1294,6 @@ func (fs *RawFS) FillEntryOut(out *fuse.EntryOut, ino *storagev1.Inode, entryTim
 	fs.FillAttr(&out.Attr, ino)
 }
 
-// FillAttrOut 精确填充 GetAttr 等操作所需的 fuse.AttrOut 结构。
 func (fs *RawFS) FillAttrOut(out *fuse.AttrOut, ino *storagev1.Inode, attrTimeoutSec float64) {
 	if out == nil || ino == nil {
 		return
@@ -1350,15 +1302,9 @@ func (fs *RawFS) FillAttrOut(out *fuse.AttrOut, ino *storagev1.Inode, attrTimeou
 	fs.FillAttr(&out.Attr, ino)
 }
 
-// BuildMountOptions 根据 Config 构造标准化的 fuse.MountOptions。
-//
-//nolint:gocritic // 既有公开签名按值接收 Config，本任务不变更对外契约
 func BuildMountOptions(cfg Config) *fuse.MountOptions {
 	options := []string{"default_permissions"}
-	// Always disable CAP_WRITEBACK_CACHE to keep 1 MiB passthrough writes instead of 4 KiB dirty page writeback.
-	// Writable mounts (staged and sync) also disable CAP_AUTO_INVAL_DATA because they are sole writers on the branch
-	// and must prevent mtime-mismatch page-cache drops between local write() and read().
-	// Read-only mounts keep CAP_AUTO_INVAL_DATA enabled so the Linux kernel invalidates stale cached pages once attr timeout expires.
+
 	disabledCaps := uint64(fuse.CAP_WRITEBACK_CACHE | fuse.CAP_AUTO_INVAL_DATA)
 	if cfg.IsReadOnly() {
 		options = append(options, "ro")
@@ -1374,10 +1320,10 @@ func BuildMountOptions(cfg Config) *fuse.MountOptions {
 		DisableXAttrs: false,
 		MaxWrite:      1 << 20,
 		MaxReadAhead:  1 << 20,
-		// 64 个后台异步请求配合 3/4 拥塞阈值，释放多线程大块顺序写与小文件并发吞吐。
+
 		MaxBackground:       64,
 		CongestionThreshold: 48,
-		// 由文件系统自身在写批次中清除 security.capability，避免内核写前 GetXattr 探测。
+
 		ExtraCapabilities:    fuse.CAP_HANDLE_KILLPRIV,
 		DisabledCapabilities: disabledCaps,
 		DirectMount:          true,

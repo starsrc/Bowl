@@ -1,4 +1,3 @@
-// Package control 实现单盘 StoreActor 控制面管理、MountDisk 世代号颁发与实例池路由。
 package control
 
 import (
@@ -28,7 +27,6 @@ import (
 
 const controlInstrumentationName = "github.com/starsrc/bowl/services/storage/internal/control"
 
-// 控制面常量定义。
 const (
 	RootIno                       uint64  = store.RootIno
 	MaxDiskNameBytes                      = 255
@@ -37,13 +35,12 @@ const (
 	DefaultEntryTimeoutSeconds    float64 = 1.0
 	DefaultAttrTimeoutSeconds     float64 = 1.0
 	DefaultDirEntryTimeoutSeconds float64 = 1.0
-	DefaultSharedCacheSize                = store.DefaultCacheSize // 64 MiB
+	DefaultSharedCacheSize                = store.DefaultCacheSize
 	DefaultMountLeaseTTL                  = 30 * time.Second
 
 	segmentReserveTimeout = 5 * time.Second
 )
 
-// 领域哨兵错误（与 internal/store 哨兵错误对齐，支持双向 errors.Is 判定）。
 var (
 	ErrInvalidArgument = store.ErrInvalid
 	ErrNameTooLong     = store.ErrNameTooLong
@@ -71,17 +68,14 @@ var (
 	ErrDiskMounted     = errors.New("disk is currently mounted")
 )
 
-// AtimeMode 复用 store.AtimeMode。
 type AtimeMode = store.AtimeMode
 
-// 访问时间更新策略常量。
 const (
 	AtimeModeNoAtime     = store.AtimeModeNoAtime
 	AtimeModeRelAtime    = store.AtimeModeRelAtime
 	AtimeModeStrictAtime = store.AtimeModeStrictAtime
 )
 
-// Disk 描述单盘控制面领域实体。
 type Disk struct {
 	DiskID       string
 	ParentDiskID string
@@ -94,46 +88,39 @@ type Disk struct {
 	UpdatedAt    time.Time
 }
 
-// CreateDiskParams 描述创建虚拟磁盘入参。
 type CreateDiskParams struct {
 	Name     string
 	MaxBytes uint64
 }
 
-// ForkDiskParams 描述基于已有虚拟磁盘零拷贝派生新盘的入参。
 type ForkDiskParams struct {
 	SourceDiskID string
 	Name         string
 	MaxBytes     *uint64
 }
 
-// ListDisksParams 描述分页查询虚拟磁盘列表入参。
 type ListDisksParams struct {
 	PageSize  uint32
 	PageToken string
 }
 
-// ListDisksResult 描述分页查询虚拟磁盘列表返回结果。
 type ListDisksResult struct {
 	Disks         []*Disk
 	NextPageToken string
 }
 
-// UpdateDiskParams 描述更新虚拟磁盘入参。
 type UpdateDiskParams struct {
 	DiskID   string
 	Name     *string
 	MaxBytes *uint64
 }
 
-// MountDiskParams 描述挂载虚拟磁盘握手入参。
 type MountDiskParams struct {
 	DiskID   string
 	ReadOnly bool
 	Force    bool
 }
 
-// MountDiskResult 描述挂载虚拟磁盘握手返回结果。
 type MountDiskResult struct {
 	Epoch               uint64
 	RootAttr            store.Attribute
@@ -143,7 +130,6 @@ type MountDiskResult struct {
 	LeaseTTLSeconds     uint32
 }
 
-// RenewMountParams 描述在线挂载软租约续期入参。
 type RenewMountParams struct {
 	DiskID   string
 	MountID  string
@@ -151,18 +137,15 @@ type RenewMountParams struct {
 	Epoch    uint64
 }
 
-// RenewMountResult 描述在线挂载软租约续期返回结果。
 type RenewMountResult struct {
 	LeaseTTLSeconds uint32
 }
 
-// UnmountDiskParams 描述释放挂载软租约入参。
 type UnmountDiskParams struct {
 	DiskID  string
 	MountID string
 }
 
-// Manager 定义单盘控制面与 StoreActor 实例池管理接口。
 type Manager interface {
 	CreateDisk(ctx context.Context, params CreateDiskParams) (*Disk, error)
 	ForkDisk(ctx context.Context, params ForkDiskParams) (*Disk, error)
@@ -228,10 +211,8 @@ type manager struct {
 	activeMounts  map[string]map[string]mountLease
 }
 
-// Option 配置单盘控制面管理器。
 type Option func(*manager)
 
-// WithStorageRoot 配置磁盘存储根目录。
 func WithStorageRoot(root string) Option {
 	return func(m *manager) {
 		if root != "" {
@@ -240,7 +221,6 @@ func WithStorageRoot(root string) Option {
 	}
 }
 
-// WithEntryTimeout 配置非目录条目缓存时效（秒）。
 func WithEntryTimeout(d float64) Option {
 	return func(m *manager) {
 		if d >= 0 {
@@ -249,7 +229,6 @@ func WithEntryTimeout(d float64) Option {
 	}
 }
 
-// WithAttrTimeout 配置节点属性缓存时效（秒）。
 func WithAttrTimeout(d float64) Option {
 	return func(m *manager) {
 		if d >= 0 {
@@ -258,7 +237,6 @@ func WithAttrTimeout(d float64) Option {
 	}
 }
 
-// WithDirEntryTimeout 配置目录条目缓存时效（秒）。
 func WithDirEntryTimeout(d float64) Option {
 	return func(m *manager) {
 		if d >= 0 {
@@ -267,22 +245,18 @@ func WithDirEntryTimeout(d float64) Option {
 	}
 }
 
-// WithOpenKeepCache 配置打开文件时是否下发 FOPEN_KEEP_CACHE。
 func WithOpenKeepCache(enable bool) Option {
 	return func(m *manager) { m.openKeepCache = enable }
 }
 
-// WithOpenDirCache 配置打开目录时是否保留内核目录缓存。
 func WithOpenDirCache(enable bool) Option {
 	return func(m *manager) { m.openDirCache = enable }
 }
 
-// WithAtimeMode 配置访问时间更新策略。
 func WithAtimeMode(mode AtimeMode) Option {
 	return func(m *manager) { m.atimeMode = mode }
 }
 
-// WithLogger 配置控制面与下属 StoreActor 共享的结构化日志器（nil 时保持默认 slog.Default()）。
 func WithLogger(logger *slog.Logger) Option {
 	return func(m *manager) {
 		if logger != nil {
@@ -292,7 +266,6 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// WithStoreMetrics 配置下属 StoreActor 共享的热路径指标收集器（nil 时保持默认隔离实例）。
 func WithStoreMetrics(metrics *store.Metrics) Option {
 	return func(m *manager) {
 		if metrics != nil {
@@ -313,7 +286,6 @@ func withMaxPackSize(size uint32) Option {
 	return func(m *manager) { m.maxPackSize = size }
 }
 
-// WithClock 配置控制面租约时效判定的时钟源（nil 时回退为 time.Now）。
 func WithClock(now func() time.Time) Option {
 	return func(m *manager) {
 		if now != nil {
@@ -322,7 +294,6 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
-// WithMountLeaseTTL 配置在线挂载软租约有效时长（ttl <= 0 时保持默认值）。
 func WithMountLeaseTTL(ttl time.Duration) Option {
 	return func(m *manager) {
 		if ttl > 0 {
@@ -331,7 +302,6 @@ func WithMountLeaseTTL(ttl time.Duration) Option {
 	}
 }
 
-// New 创建单盘控制面管理器。
 func New(dbStore db.Store, opts ...Option) Manager {
 	return newManager(dbStore, opts...)
 }
@@ -534,7 +504,6 @@ func mapDBErr(err error) error {
 	}
 }
 
-// validateDiskName 校验磁盘名称合法性（优先校验超长 > 255B，后校验空字节 '\x00'）。
 func validateDiskName(name string) error {
 	if len(name) > MaxDiskNameBytes {
 		return fmt.Errorf("%w: disk name length %d exceeds max %d", ErrNameTooLong, len(name), MaxDiskNameBytes)
@@ -545,7 +514,6 @@ func validateDiskName(name string) error {
 	return nil
 }
 
-// parseDiskID 解析字符串形式的 UUID，并拦截非法格式或全零 Nil UUID。
 func parseDiskID(diskID string) (uuid.UUID, error) {
 	id, err := uuid.Parse(diskID)
 	if err != nil {
@@ -575,7 +543,6 @@ func assembleDisk(row *db.DiskRecord, stat *store.StatFSResult) *Disk {
 	}
 }
 
-//nolint:gocritic // hugeParam: store.Options 按值传递保持与 store.Open 构造契约一致。
 func (m *manager) openDiskActor(ctx context.Context, opts store.Options) (*store.StoreActor, error) {
 	if !opts.ReadOnly && !strings.HasPrefix(opts.DiskID, "commit:") && m.store != nil {
 		if reconcileErr := m.reconcilePendingMergeLocked(ctx, opts.DiskID); reconcileErr != nil {
@@ -1175,7 +1142,6 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return openErr
 	}
 
-	// 删盘触发 ClearLineageBaseCommits 前，先协助血缘中崩溃未重启的他盘完成挂起合并的前滚/回滚。
 	if recErr := m.reconcileOtherPendingMergesBeforeDelete(ctx, diskID); recErr != nil {
 		return recErr
 	}
@@ -1391,7 +1357,7 @@ func (m *manager) actorLocked(ctx context.Context, id uuid.UUID) (*store.StoreAc
 }
 
 func (m *manager) Actor(ctx context.Context, diskID string) (*store.StoreActor, error) {
-	// 热路径零分配快查：m.actors 仅登记规范化小写非零 UUID 键，已打开的磁盘可直接命中返回。
+
 	m.poolMu.RLock()
 	if !m.closed {
 		if actor := m.actors[diskID]; actor != nil {

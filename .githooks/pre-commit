@@ -20,11 +20,20 @@ run_buf=0
 run_root=0
 run_storage=0
 run_client=0
+run_nocomments_all=0
 lint_files=()
+nocomment_files=()
 
 while IFS= read -r f; do
   [[ -z "${f}" ]] && continue
   [[ "${f}" == vendor/* || "${f}" == */vendor/* ]] && continue
+
+  if [[ "${f}" == *.go && -f "${f}" ]]; then
+    nocomment_files+=("${f}")
+    if [[ "${f}" == tools/nocomments/* ]]; then
+      run_nocomments_all=1
+    fi
+  fi
 
   case "${f}" in
     *.proto|buf.yaml|buf.gen.yaml|buf.lock)
@@ -59,7 +68,7 @@ while IFS= read -r f; do
   esac
 done < <(git -c core.quotePath=false diff --cached --name-only)
 
-if [[ ${run_buf} -eq 0 && ${run_root} -eq 0 && ${run_storage} -eq 0 && ${run_client} -eq 0 ]]; then
+if [[ ${run_buf} -eq 0 && ${run_root} -eq 0 && ${run_storage} -eq 0 && ${run_client} -eq 0 && ${#nocomment_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
@@ -98,6 +107,18 @@ if [[ ${run_buf} -eq 1 ]]; then
     exit 1
   fi
   run_step "buf lint" buf lint
+fi
+
+if [[ ${run_nocomments_all} -eq 1 || ${#nocomment_files[@]} -gt 0 ]]; then
+  if ! command -v go >/dev/null 2>&1; then
+    echo "pre-commit: 未找到 go 命令，请先安装 Go" >&2
+    exit 1
+  fi
+  if [[ ${run_nocomments_all} -eq 1 ]]; then
+    run_step "nocomments [all]" go run ./tools/nocomments .
+  else
+    run_step "nocomments" go run ./tools/nocomments "${nocomment_files[@]}"
+  fi
 fi
 
 if [[ ${run_root} -eq 1 || ${run_storage} -eq 1 || ${run_client} -eq 1 ]]; then

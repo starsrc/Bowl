@@ -9,9 +9,6 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// ToProtoOpenFlags 将宿主机操作系统特定的打开标志位转换为平台无关的服务端协议标志位。
-// 仅保留访问模式（O_RDONLY / O_WRONLY / O_RDWR）及 O_CREAT、O_EXCL、O_TRUNC、O_APPEND 控制位，
-// 彻底剥离 Linux O_LARGEFILE、O_DIRECT、O_NOFOLLOW、O_CLOEXEC 等内核高位，严防碰撞服务端 O_TMPFILE (0o20000000) 禁区。
 func ToProtoOpenFlags(sysFlags uint32) uint32 {
 	var protoFlags uint32
 
@@ -40,7 +37,6 @@ func ToProtoOpenFlags(sysFlags uint32) uint32 {
 	return protoFlags
 }
 
-// Create 创建服务端目录项并分配本地句柄。
 func (fs *RawFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpCreate)
 	opCtx, endSpan := fs.startFuseOp(OpCreate)
@@ -112,13 +108,12 @@ func (fs *RawFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name strin
 	case input.Flags&uint32(syscall.O_TRUNC) != 0:
 		out.OpenFlags &^= fuse.FOPEN_KEEP_CACHE
 	default:
-		// 非截断且非 DirectIO 时保留内核 Page Cache，避免每次 open 全量清空。
+
 		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE
 	}
 	return fuse.OK
 }
 
-// Open 读取缓存中的节点类型并在本地分配句柄。
 func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpOpen)
 	opCtx, endSpan := fs.startFuseOp(OpOpen)
@@ -220,14 +215,12 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	if fs.cfg.DirectIO {
 		out.OpenFlags |= fuse.FOPEN_DIRECT_IO
 	} else if input.Flags&uint32(syscall.O_TRUNC) == 0 && !fenced {
-		// 非截断且非 DirectIO 时保留内核 Page Cache，避免每次 open 全量清空。
+
 		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE
 	}
 	return fuse.OK
 }
 
-// Flush 在 close(fd) 时排空内核页缓存写入并释放本地 POSIX 记录锁。
-// 常规文件不再发起跨机物理 Fsync RPC；显式 Fsync、FsyncDir 与 OnUnmount 才确认物理落盘。
 func (fs *RawFS) Flush(_ <-chan struct{}, input *fuse.FlushIn) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpFlush)
 	_, endSpan := fs.startFuseOp(OpFlush)
@@ -272,7 +265,6 @@ func (fs *RawFS) Flush(_ <-chan struct{}, input *fuse.FlushIn) (status fuse.Stat
 	return fuse.OK
 }
 
-// Fsync 等待服务端完成文件持久化。
 func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpFsync)
 	opCtx, endSpan := fs.startFuseOp(OpFsync)
@@ -331,7 +323,6 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 	return fs.ToStatus(err)
 }
 
-// Release 在本地释放句柄与 flock；最后一个孤儿句柄先本地丢弃未上传暂存分片再触发回收。
 func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 	start := fs.metrics.beginOp(OpRelease)
 	opCtx, endSpan := fs.startFuseOp(OpRelease)
@@ -356,7 +347,7 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 		return
 	}
 	serverIno, serverStatus := fs.ToServerIno(input.NodeId)
-	// 与在途 Unlink/Rename 的孤儿标记按 Inode 串行，避免最后句柄关闭与解链互相错过。
+
 	unlock := fs.inodeLocks.lock(h.Ino)
 	defer unlock()
 	if _, exists := fs.handles.Get(input.Fh); !exists {

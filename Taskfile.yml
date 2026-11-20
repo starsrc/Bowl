@@ -157,9 +157,10 @@ tasks:
       - git config core.hooksPath .githooks
 
   lint:
-    desc: "Run buf lint and golangci-lint across all modules"
+    desc: "Run buf lint, Go no-comment check, and golangci-lint across all modules"
     cmds:
       - buf lint
+      - go run ./tools/nocomments .
       - golangci-lint run ./...
       - cd services/storage && golangci-lint run --config ../../.golangci.yml ./...
       - cd client && GOOS=linux CGO_ENABLED=0 golangci-lint run --config ../.golangci.yml ./...

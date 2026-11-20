@@ -24,7 +24,6 @@ import (
 
 const umountProgressRequestTimeout = 200 * time.Millisecond
 
-// Test seams for unmount tool discovery, execution, terminal detection, HTTP progress polling, and drain timing.
 var (
 	lookPath   = exec.LookPath
 	runCommand = func(name string, args ...string) ([]byte, error) {

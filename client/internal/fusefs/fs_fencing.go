@@ -21,8 +21,6 @@ func isStaleEpochError(err error) bool {
 	return info != nil && info.GetDomain() == storageErrorDomain && info.GetReason() == staleEpochReason
 }
 
-// Fence transitions the filesystem into a sticky fail-closed fenced state.
-// Only the first call takes effect; subsequent calls are no-ops.
 func (fs *RawFS) Fence(status fuse.Status, reason string) {
 	if fs == nil {
 		return
@@ -69,12 +67,10 @@ func (fs *RawFS) Fence(status fuse.Status, reason string) {
 	}
 }
 
-// IsFenced reports whether the filesystem has been fenced.
 func (fs *RawFS) IsFenced() bool {
 	return fs != nil && fs.fencedStatus.Load() != 0
 }
 
-// FenceStatus returns the sticky errno status recorded on fence, or fuse.OK if unfenced.
 func (fs *RawFS) FenceStatus() fuse.Status {
 	if fs == nil {
 		return fuse.OK
@@ -82,7 +78,6 @@ func (fs *RawFS) FenceStatus() fuse.Status {
 	return fuse.Status(fs.fencedStatus.Load())
 }
 
-// FenceReason returns the human-readable reason recorded on fence.
 func (fs *RawFS) FenceReason() string {
 	if fs == nil {
 		return ""
@@ -93,7 +88,6 @@ func (fs *RawFS) FenceReason() string {
 	return reason
 }
 
-// FencedCh returns a channel closed once when the filesystem enters the fenced state.
 func (fs *RawFS) FencedCh() <-chan struct{} {
 	if fs == nil {
 		return nil
@@ -101,8 +95,6 @@ func (fs *RawFS) FencedCh() <-chan struct{} {
 	return fs.fenceCh
 }
 
-// SetOnFence registers a callback invoked once when the filesystem transitions to fenced.
-// If the filesystem is already fenced, fn is invoked immediately with the sticky status and reason.
 func (fs *RawFS) SetOnFence(fn func(status fuse.Status, reason string)) {
 	if fs == nil {
 		return
@@ -117,7 +109,6 @@ func (fs *RawFS) SetOnFence(fn func(status fuse.Status, reason string)) {
 	}
 }
 
-// fenceIfStaleEpoch immediately fences RawFS with EBUSY when an RPC fails with ErrStaleEpoch.
 func (fs *RawFS) fenceIfStaleEpoch(err error) {
 	if fs == nil || !isStaleEpochError(err) {
 		return
@@ -125,7 +116,6 @@ func (fs *RawFS) fenceIfStaleEpoch(err error) {
 	fs.Fence(fuse.EBUSY, err.Error())
 }
 
-// fenceErrToErrno converts the recorded fence status into a syscall.Errno for StageCoordinator.
 func (fs *RawFS) fenceErrToErrno() syscall.Errno {
 	st := fs.FenceStatus()
 	if st == fuse.OK {

@@ -41,8 +41,6 @@ type forkDiskJSON struct {
 	UsedBytes    uint64 `json:"used_bytes"`
 }
 
-// startIsolatedForkTrigger 在打开待测未刷句柄前启动独立子进程触发 `bowl disk fork`，
-// 避免当前测试进程 `fork+exec` 时触发内核 `do_close_on_exec` 提前冲刷聚合槽。
 func startIsolatedForkTrigger(t *testing.T, client storagev1connect.StorageServiceClient) func(sourceDiskID, childName string) forkDiskJSON {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), mountProcessTimeout)
@@ -292,20 +290,16 @@ func verifyGitChildForks(t *testing.T, endpoint string, snaps []gitForkSnap, tra
 	}
 }
 
-// TestMultiClient_ReadOnlyAndWriterEpochPreemption 验证只读并发挂载、
-// 新可写客户端零等待抢占 Epoch 围栏、旧已打开句柄被拦截至 `EBUSY` 及前任孤儿自动清扫。
 func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	disk := createTestDisk(t, client)
 	diskID := disk.GetDiskId()
 
-	// Given: 客户端 A 挂载并写入文件、打开预持句柄与已解链孤儿句柄
 	mpA, _ := mountWithCleanup(t, endpoint, diskID)
 	snapPath := filepath.Join(mpA, "snapshot.txt")
 	require.NoError(t, os.WriteFile(snapPath, []byte("v1"), 0o644))
 
-	// When: 只读客户端挂载并发读，写操作返回 EROFS，且可实时读到客户端 A 后台上传落盘的新内容
 	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--direct-io")
 	require.Eventually(t, func() bool {
 		roData, readErr := os.ReadFile(filepath.Join(mpRO, "snapshot.txt"))
@@ -347,12 +341,10 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	require.NoError(t, err)
 	usedBefore := diskBefore.Msg.GetDisk().GetUsedBytes()
 
-	// When: 客户端 B 通过 --force 零等待可写挂载抢占 Epoch
 	takeoverStart := time.Now()
 	mpB, _ := mountWithCleanup(t, endpoint, diskID, "--force")
 	require.Less(t, time.Since(takeoverStart), 3*time.Second, "新可写挂载必须零等待立即接管")
 
-	// Then: 前任孤儿被清扫释放配额，A 的新写入及旧句柄写/截断/同步均被围栏拦截返回 EBUSY
 	_, orphanAttrErr := client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Ino: orphanIno}))
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(orphanAttrErr))
 
@@ -371,13 +363,10 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	require.Equal(t, []byte("before-takeover"), gotPreOpen)
 }
 
-// TestOnlineFork_DualMountIsolationAndParentDelete 验证在线挂载期间触发 `bowl disk fork` 的内存缓冲隔离、
-// 孤儿排除、父子双挂载并发独立修改，以及卸载并删除父盘后子盘共享数据块依然完整可读可写。
 func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 
-	// Given: 创建并挂载父盘，同时预先启动隔离触发进程防止 exec 提前冲刷聚合槽
 	createOut := runBowlSuccess(t, "disk", "create", "--endpoint", endpoint, "--size", "2GiB", "--name", "e2e-fork-parent", "--json")
 	var parentDisk forkDiskJSON
 	require.NoError(t, json.Unmarshal([]byte(createOut), &parentDisk))
@@ -422,7 +411,6 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	t.Cleanup(func() { _ = stagedF.Close() })
 	writeStaged32KiBChunks(t, stagedF, stagedData)
 
-	// When: 保持未刷句柄与孤儿打开期间触发在线 Fork，并同时挂载子盘
 	childDisk := triggerIsolatedFork(parentID, "e2e-fork-child")
 	childID := childDisk.DiskID
 	require.Equal(t, uint64(len(baseCfg)+len(largePayload)), childDisk.UsedBytes,
@@ -430,7 +418,6 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 
 	childMnt, stopChild := mountWithCleanup(t, endpoint, childID, "--direct-io")
 
-	// Then: 子盘继承已落盘数据，不含孤儿且未刷文件为 0 B；关闭父盘未刷句柄不穿透子盘
 	gotChildLarge, err := os.ReadFile(filepath.Join(childMnt, "large.bin"))
 	require.NoError(t, err)
 	require.Equal(t, largePayload, gotChildLarge)
@@ -449,7 +436,6 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, gotChildStagedAfter)
 
-	// When: 父子双挂载点各自覆写同路径与新建独有文件，随后卸载并删除父盘
 	parentCfg := []byte("{\"env\":\"production\"}\n")
 	childCfg := []byte("{\"env\":\"experiment\"}\n")
 	require.NoError(t, os.WriteFile(filepath.Join(parentMnt, "app", "config.json"), parentCfg, 0o644))
@@ -465,7 +451,6 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	waitForProcessExit(t, parentPID)
 	runBowlSuccess(t, "disk", "delete", "--endpoint", endpoint, parentID, "-y")
 
-	// Then: 删除父盘后子盘共享块依然完好可读且可继续写入
 	gotChildAfterParentDel, err := os.ReadFile(filepath.Join(childMnt, "large.bin"))
 	require.NoError(t, err)
 	require.Equal(t, largePayload, gotChildAfterParentDel)
@@ -473,8 +458,6 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	stopChild()
 }
 
-// TestOnlineFork_RealGitCommitLoop 在真实 `git add/commit` 提交循环期间并发触发 3 次在线 `bowl disk fork`，
-// 验证子盘对象库零损坏、提交计数单调不退且可继续分叉提交。
 func TestOnlineFork_RealGitCommitLoop(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
@@ -541,14 +524,11 @@ func tryReadFromStartFD(f *os.File, chunkSize int) ([]byte, error) {
 	}
 }
 
-// TestMultiClient_ReadOnlyCacheCoherence verifies read-write and read-only metadata expiry,
-// kernel page-cache invalidation and retention, and read-ahead coherence across reopened and open file descriptors.
 func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	diskID := createTestDisk(t, client).GetDiskId()
 
-	// Given: RW mount seeds initial files, and RO buffered + RO DirectIO mounts open and cache them.
 	mpW, stopW := mountWithCleanup(t, endpoint, diskID)
 	defer stopW()
 
@@ -584,7 +564,6 @@ func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 	mpRODirect, stopRODirect := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--direct-io")
 	defer stopRODirect()
 
-	// Warm negative lookup, directory cache, small/large files, and open descriptors on RO mounts.
 	_, missingErr := os.Stat(filepath.Join(mpRO, "late_created.txt"))
 	require.ErrorIs(t, missingErr, os.ErrNotExist)
 	_, dirErr := os.ReadDir(mpRO)
@@ -637,7 +616,6 @@ func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, sha256.Sum256(directOpenV1), sha256.Sum256(gotDirectOpenV1))
 
-	// When: RW mount creates, unlinks, renames, appends, and performs same-size in-place overwrites.
 	writeFullFile(t, filepath.Join(mpW, "late_created.txt"), []byte("fresh-entry"), 11)
 	require.NoError(t, os.Remove(filepath.Join(mpW, "to_unlink.txt")))
 	require.NoError(t, os.Rename(filepath.Join(mpW, "rename_src.txt"), filepath.Join(mpW, "rename_dst.txt")))
@@ -655,7 +633,6 @@ func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 	overwriteFileInPlace(t, filepath.Join(mpW, "large_open.bin"), largeOpenV2)
 	overwriteFileInPlace(t, filepath.Join(mpW, "direct_open.bin"), directOpenV2)
 
-	// Then: RO mount observes create, unlink, rename, append, and overwrites on reopened and open fds within bounded TTL.
 	require.Eventually(t, func() bool {
 		b, rErr := os.ReadFile(filepath.Join(mpRO, "late_created.txt"))
 		return rErr == nil && string(b) == "fresh-entry"
@@ -701,7 +678,6 @@ func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 		return dErr == nil && sha256.Sum256(directGot) == wantDirectV2Sum
 	}, 5*time.Second, 100*time.Millisecond, "RO --direct-io open fd must refresh read-ahead window after same-size overwrite")
 
-	// And: Unchanged files keep kernel page cache across attr timeout revalidation and re-open.
 	time.Sleep(1200 * time.Millisecond)
 	snapBefore := fetchDebugStats(t, roAdminAddr)
 
@@ -720,15 +696,11 @@ func TestMultiClient_ReadOnlyCacheCoherence(t *testing.T) {
 		"unchanged files must retain kernel page cache with zero extra FUSE Read ops")
 }
 
-// TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss verifies that a read-only mount
-// bypasses capabilityCache so security.capability added by a concurrent writer is observed after an
-// initial ENODATA probe, subsequent killpriv removal is observed, and RO readlink refreshes after TTL.
 func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	diskID := createTestDisk(t, client).GetDiskId()
 
-	// Given: RW mount creates an executable file and symlink; RO FUSE mount and RO RawFS observe them.
 	mpW, stopW := mountWithCleanup(t, endpoint, diskID)
 	defer stopW()
 	rwPath := filepath.Join(mpW, "cap-tool.bin")
@@ -753,8 +725,6 @@ func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testi
 	require.NoError(t, err)
 	require.Equal(t, "/target/v1", gotSym1)
 
-	// Drive RawFS.GetXAttr("security.capability") directly against live StorageService in --mode=ro
-	// (Linux 6.10 FUSE cap_inode_getsecurity returns EINVAL before dispatching FUSE_GETXATTR).
 	roRawFS := fusefs.NewRawFS(client, fusefs.Config{
 		DiskID:              diskID,
 		RootIno:             1,
@@ -768,7 +738,6 @@ func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testi
 	_, st1 := roRawFS.GetXAttr(nil, &fuse.InHeader{NodeId: roStat.Ino}, "security.capability", buf)
 	require.Equal(t, fuse.Status(syscall.ENODATA), st1, "initial RO GetXAttr probe must observe ENODATA")
 
-	// When: RW mount sets Linux v2 file capability and atomically replaces the symlink target.
 	capVal := []byte{0x01, 0x00, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	require.NoError(t, unix.Setxattr(rwPath, "security.capability", capVal, 0))
 
@@ -776,7 +745,6 @@ func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testi
 	require.NoError(t, os.Symlink("/target/v2", rwSymTmp))
 	require.NoError(t, unix.Rename(rwSymTmp, rwSym))
 
-	// Then: RO observes security.capability (not stuck on cached ENODATA) and refreshed symlink target.
 	requireXattrPresent(t, roPath, "security.capability")
 	sz2, st2 := roRawFS.GetXAttr(nil, &fuse.InHeader{NodeId: roStat.Ino}, "security.capability", buf)
 	require.Equal(t, fuse.OK, st2, "RO GetXAttr must bypass capabilityCache and observe newly set capability")
@@ -787,10 +755,8 @@ func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testi
 		return rErr == nil && got == "/target/v2"
 	}, 5*time.Second, 100*time.Millisecond, "RO mount must observe replaced symlink target after TTL expiry")
 
-	// When: RW mount overwrites the file (triggering killpriv capability removal).
 	overwriteFileInPlace(t, rwPath, []byte("binary-v2"))
 
-	// Then: RO observes capability removal and both RO RawFS and mounted RO daemon keep capabilityCache unused.
 	requireXattrAbsent(t, roPath, "security.capability")
 	_, st3 := roRawFS.GetXAttr(nil, &fuse.InHeader{NodeId: roStat.Ino}, "security.capability", buf)
 	require.Equal(t, fuse.Status(syscall.ENODATA), st3, "RO GetXAttr must observe ENODATA after writer killpriv")

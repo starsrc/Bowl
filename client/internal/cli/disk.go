@@ -22,10 +22,8 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
-// MaxDiskNameBytes defines the maximum allowed byte length for a virtual disk name.
 const MaxDiskNameBytes = 255
 
-// diskPorts defines the external seams for the disk control-plane module.
 type diskPorts struct {
 	newClient      func(endpoint, token string) (storagev1connect.StorageServiceClient, int, error)
 	findMountpoint func(diskID string) (DiskMountInfo, error)

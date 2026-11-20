@@ -19,7 +19,6 @@ import (
 
 const cliTracerServiceName = "bowl-cli"
 
-// startDiskCLISpan starts a root span before disk control-plane RPCs, reusing any preconfigured SDK TracerProvider.
 func startDiskCLISpan(
 	ctx context.Context,
 	spanName string,

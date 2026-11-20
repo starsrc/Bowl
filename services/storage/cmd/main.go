@@ -1,4 +1,3 @@
-// Package main 启动 Bowl Storage 服务进程。
 package main
 
 import (

@@ -12,8 +12,6 @@ import (
 
 const defaultListDisksPageSize uint32 = 50
 
-// diskPageCursor 定义 ListDisks 游标令牌的序列化载荷。
-// PostgreSQL TIMESTAMPTZ 精度为微秒，使用 UnixMicro() 编码与还原以消除纳秒截断带来的翻页漂移。
 type diskPageCursor struct {
 	CreatedAtMicro *int64 `json:"t"`
 	DiskID         string `json:"id"`

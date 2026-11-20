@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	writePayloadRetainedCap = 8 // 常驻 8 x 4 MiB = 32 MiB noscan 写缓冲（免受 GC 周期驱逐与清零）
-	readPayloadRetainedCap  = 8 // 常驻 8 x 4 MiB = 32 MiB noscan 读缓冲（免受 GC 周期驱逐与清零）
+	writePayloadRetainedCap = 8
+	readPayloadRetainedCap  = 8
 )
 
 var (
@@ -41,7 +41,6 @@ func releaseWritePayload(msg *storagev1.WriteRequest) {
 	writePayloadLeases.Release(msg, clearWriteRequestData)
 }
 
-// leasedWritePayloadCount 返回当前尚未归还池的 WriteRequest 缓冲区数量（仅供单测校验零泄漏）。
 func leasedWritePayloadCount() int {
 	return writePayloadLeases.LeasedCount()
 }
@@ -62,13 +61,10 @@ func releaseReadPayload(msg *storagev1.ReadResponse) {
 	readPayloadLeases.Release(msg, clearReadResponseData)
 }
 
-// leasedReadPayloadCount 返回当前尚未归还池的 ReadResponse 缓冲区数量（仅供单测校验零泄漏）。
 func leasedReadPayloadCount() int {
 	return readPayloadLeases.LeasedCount()
 }
 
-// newWritePayloadReleaseInterceptor 构造挂载在拦截器链最外层的生命周期回收器，
-// 确保无论请求在校验拦截器被拒、正常处理完成还是发生异常，借用的 4 MiB 写缓冲均确定性归还缓冲池。
 func newWritePayloadReleaseInterceptor() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -82,7 +78,6 @@ func newWritePayloadReleaseInterceptor() connect.UnaryInterceptorFunc {
 	}
 }
 
-// newProtoBinaryCodec 构造存储端专用 ConnectRPC 二进制 Protobuf 编解码器。
 func newProtoBinaryCodec() *rpccodec.ProtoBinaryCodec {
 	return rpccodec.NewProtoBinaryCodec(rpccodec.CodecHooks{
 		MarshalAppend: marshalReadResponseHook,
@@ -110,7 +105,7 @@ func marshalReadResponseHook(dst []byte, message any) (out []byte, handled bool,
 		releaseReadPayload(readResp)
 		return dst, true, nil
 	}
-	// ReadResponse 仅含字段 `bytes data = 1`（wire tag = (1<<3)|2 = 0x0a）。
+
 	need := 1 + protowire.SizeVarint(uint64(len(data))) + len(data)
 	if cap(dst)-len(dst) < need {
 		grown := make([]byte, len(dst), len(dst)+need)
@@ -160,7 +155,7 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 		b = b[tagLen:]
 
 		switch num {
-		case 1: // uint64 ino
+		case 1:
 			if typ != protowire.VarintType {
 				return fallback()
 			}
@@ -170,7 +165,7 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 			}
 			msg.Ino = v
 			b = b[n:]
-		case 2: // uint64 fh
+		case 2:
 			if typ != protowire.VarintType {
 				return fallback()
 			}
@@ -180,7 +175,7 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 			}
 			msg.Fh = v
 			b = b[n:]
-		case 3: // uint64 offset
+		case 3:
 			if typ != protowire.VarintType {
 				return fallback()
 			}
@@ -190,7 +185,7 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 			}
 			msg.Offset = v
 			b = b[n:]
-		case 4: // bytes data
+		case 4:
 			if typ != protowire.BytesType {
 				return fallback()
 			}
@@ -219,7 +214,7 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 				msg.Data = append([]byte(nil), v...)
 			}
 			b = b[n:]
-		case 5: // string disk_id
+		case 5:
 			if typ != protowire.BytesType {
 				return fallback()
 			}
@@ -229,7 +224,7 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 			}
 			msg.DiskId = string(v)
 			b = b[n:]
-		case 6: // uint64 epoch
+		case 6:
 			if typ != protowire.VarintType {
 				return fallback()
 			}

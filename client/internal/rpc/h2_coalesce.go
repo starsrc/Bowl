@@ -14,21 +14,13 @@ const (
 	h2FlagHeadersEndStream  = 0x01
 	h2FlagHeadersEndHeaders = 0x04
 
-	// h2MaxHoldHeadersBytes 限定允许暂存合并的 HEADERS 帧最大字节数。
-	// ConnectRPC Unary 请求头经 HPACK 编码后通常仅 50~220 B。
 	h2MaxHoldHeadersBytes = 1024
 
-	// h2ScratchBufferBytes 覆盖 HEADERS + 元数据载荷及 4 KiB 小块写的单次连续缓冲区上限，
-	// 避免小 IO 热路径产生堆分配；超过该阈值的 4 MiB 大块写自动走 writev (net.Buffers)。
 	h2ScratchBufferBytes = 8192
 
-	// h2CoalesceFlushDelay 为极端连接/流控窗口耗尽导致 writeRequestBody 阻塞时的兜底冲刷时限。
-	// 正常 Unary 调用中 writeHeaders 与 writeRequestBody 仅相隔数微秒，不会触发定时器回调。
 	h2CoalesceFlushDelay = 150 * time.Microsecond
 )
 
-// isHoldableH2HeadersFrame 判断给定切片是否为单个完整且后续紧跟请求体 DATA 帧的 HTTP/2 HEADERS 帧
-// （Type=HEADERS, END_HEADERS=1, END_STREAM=0）。
 func isHoldableH2HeadersFrame(p []byte) bool {
 	if len(p) < h2FrameHeaderLen || len(p) > h2MaxHoldHeadersBytes {
 		return false
@@ -48,15 +40,6 @@ func isHoldableH2HeadersFrame(p []byte) bool {
 	return streamID != 0
 }
 
-// h2CoalesceConn 包装客户端明文 HTTP/2 (h2c) 底层连接，将 Go net/http http2ClientConn
-// 在单次 Unary POST 中拆分为两次 Flush 的 HEADERS(END_STREAM=0) 帧与紧随其后的 DATA 帧
-// 合并为单次底层 Write/writev 系统调用下发。
-//
-// 背景：Go 标准库 writeHeaders 与 writeRequestBody 分别执行 cc.bw.Flush()，产生两次微小 TCP 写；
-// 在 Linux 默认 net.ipv4.tcp_autocorking=1 与虚拟网卡（virtio-net）TX 完成中断聚合环境下，
-// 第 1 帧 HEADERS 触发远端服务端进入 HTTP Handler 等待 Body 并开启 TCP Delayed ACK (~4-10ms)，
-// 而第 2 帧小 DATA (< size_goal) 被客户端 tcp_should_autocork 挂起在 TSQ_THROTTLED 状态等待前序包释放，
-// 形成跨机 ~9-10ms 伪延迟死锁。合并为单次 Write 后，HEADERS+DATA(END_STREAM) 同包到达服务端，彻底消除死锁并减半系统调用。
 type coalesceTimer interface {
 	Stop() bool
 	Reset(d time.Duration) bool
@@ -126,7 +109,7 @@ func (c *h2CoalesceConn) flushOnTimer() {
 	c.mu.Unlock()
 
 	if err != nil {
-		// Close c.Conn outside c.mu so http2ClientConn.readLoop aborts the stalled stream immediately.
+
 		_ = c.Conn.Close()
 	}
 }

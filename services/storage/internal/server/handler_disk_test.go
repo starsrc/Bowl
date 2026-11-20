@@ -78,17 +78,15 @@ func findDiskByID(disks []*storagev1.Disk, diskID string) *storagev1.Disk {
 }
 
 func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
-	// Given: 通过内存 RoundTripper 直连完整 ConnectRPC 处理器栈
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t, control.WithEntryTimeout(2.5), control.WithAttrTimeout(3.5))
 
-	// When 1: 创建磁盘
 	createResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 		Name:     "rpc-disk",
 		MaxBytes: 16 << 20,
 	}))
 
-	// Then 1: 返回有效磁盘实体与根 Inode
 	require.NoError(t, err, "CreateDisk RPC 失败")
 	created := createResp.Msg.GetDisk()
 	require.NotNil(t, created, "CreateDisk 必须返回 Disk 实体")
@@ -99,7 +97,6 @@ func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
 	require.Equal(t, uint64(16<<20), created.GetMaxBytes())
 	require.Nil(t, created.ParentDiskId, "根盘不应设置 ParentDiskId")
 
-	// When 2: 查询、列表与更新磁盘
 	getResp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
 	require.NoError(t, err, "GetDisk RPC 失败")
 	require.Equal(t, diskID, getResp.Msg.GetDisk().GetDiskId())
@@ -119,7 +116,6 @@ func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
 	require.Equal(t, "rpc-disk-renamed", updateResp.Msg.GetDisk().GetName())
 	require.Equal(t, uint64(32<<20), updateResp.Msg.GetDisk().GetMaxBytes())
 
-	// When 3: 可写挂载与只读挂载
 	rwMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
 	require.NoError(t, err, "可写 MountDisk RPC 失败")
 	require.Equal(t, uint64(1), rwMount.Msg.GetEpoch())
@@ -131,7 +127,6 @@ func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
 	require.NoError(t, err, "只读 MountDisk RPC 失败")
 	require.Equal(t, uint64(0), roMount.Msg.GetEpoch())
 
-	// When 4: 删除磁盘
 	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	require.NoError(t, err, "DeleteDisk RPC 失败")
 
@@ -140,7 +135,7 @@ func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
 }
 
 func TestServerDiskRPC_ForkDisk_CreatesIsolatedChildWithParentDiskID(t *testing.T) {
-	// Given: 源盘写入测试文件
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 
@@ -171,13 +166,11 @@ func TestServerDiskRPC_ForkDisk_CreatesIsolatedChildWithParentDiskID(t *testing.
 	}))
 	require.NoError(t, err, "Write 写入失败")
 
-	// When: 执行 ForkDisk
 	forkResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
 		SourceDiskId: srcID,
 		Name:         "fork-child",
 	}))
 
-	// Then: 子盘携带 ParentDiskId 且继承已用字节数
 	require.NoError(t, err, "ForkDisk RPC 失败")
 	forked := forkResp.Msg.GetDisk()
 	require.NotNil(t, forked)
@@ -186,7 +179,7 @@ func TestServerDiskRPC_ForkDisk_CreatesIsolatedChildWithParentDiskID(t *testing.
 }
 
 func TestServerDiskRPC_ValidationErrors_MapsToExpectedConnectCodeAndReason(t *testing.T) {
-	// Given: 完整拦截器链保护下的 ConnectRPC 处理器
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 
@@ -307,7 +300,6 @@ func TestServerDiskRPC_ValidationErrors_MapsToExpectedConnectCodeAndReason(t *te
 		},
 	}
 
-	// When / Then: 均被入口拦截返回 InvalidArgument 与精确 POSIX errno reason
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.invoke()
@@ -317,7 +309,7 @@ func TestServerDiskRPC_ValidationErrors_MapsToExpectedConnectCodeAndReason(t *te
 }
 
 func TestServerDiskRPC_DomainErrors_MapsToExpectedConnectCodeAndReason(t *testing.T) {
-	// Given: 已建测试盘（含 8192 字节已用数据）的 ConnectRPC 处理器
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 
@@ -422,7 +414,6 @@ func TestServerDiskRPC_DomainErrors_MapsToExpectedConnectCodeAndReason(t *testin
 		},
 	}
 
-	// When / Then: 领域错误正确转换为 Connect 错误码与 ErrorInfo
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			requireConnectErrorCodeAndReason(t, tc.invoke(), tc.wantCode, tc.wantReason)
@@ -431,18 +422,16 @@ func TestServerDiskRPC_DomainErrors_MapsToExpectedConnectCodeAndReason(t *testin
 }
 
 func TestServerErrors_ToConnectError_MapsSentinelsContextAndGRPCStatus(t *testing.T) {
-	// Given: 各类型错误输入
+
 	stWithInfo, err := status.New(codes.PermissionDenied, "perm denied").WithDetails(&errdetails.ErrorInfo{
 		Reason: "EPERM",
 		Domain: control.ErrorDomain,
 	})
 	require.NoError(t, err, "构造测试 status 失败")
 
-	// When / Then 1: nil 返回 nil
 	require.NoError(t, ToConnectError(nil), "nil 错误转换必须返回 nil")
 	require.NoError(t, StatusToConnectError(nil), "nil status 转换必须返回 nil")
 
-	// When / Then 2: 上下文取消与超时保留原始错误链
 	cancelErr := ToConnectError(fmt.Errorf("client aborted: %w", context.Canceled))
 	require.Equal(t, connect.CodeCanceled, connect.CodeOf(cancelErr))
 	require.ErrorIs(t, cancelErr, context.Canceled)
@@ -451,18 +440,16 @@ func TestServerErrors_ToConnectError_MapsSentinelsContextAndGRPCStatus(t *testin
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(deadlineErr))
 	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
 
-	// When / Then 3: 领域哨兵与 gRPC Status 携带 ErrorInfo 无损透传
 	requireConnectErrorCodeAndReason(t, ToConnectError(store.ErrStaleEpoch), connect.CodeFailedPrecondition, "EBUSY")
 	requireConnectErrorCodeAndReason(t, StatusToConnectError(stWithInfo), connect.CodePermissionDenied, "EPERM")
 
-	// When / Then 4: 未知错误映射为 CodeUnknown 且无 ErrorInfo
 	unknownErr := ToConnectError(errors.New("opaque failure"))
 	require.Equal(t, connect.CodeUnknown, connect.CodeOf(unknownErr))
 	require.Nil(t, ExtractErrorInfo(unknownErr))
 }
 
 func TestServerDiskRPC_MountDisk_NonForceRejectsActiveRWAndForcePreempts(t *testing.T) {
-	// Given: a freshly created disk with an active RO mount and RW mount (epoch=1).
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 
@@ -486,12 +473,10 @@ func TestServerDiskRPC_MountDisk_NonForceRejectsActiveRWAndForcePreempts(t *test
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), rw1.Msg.GetEpoch())
 
-	// When: a second non-force RW MountDisk arrives while rw1 is active.
 	_, busyErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId: diskID,
 	}))
 
-	// Then: rejected with CodeAborted + EBUSY and rw1 epoch=1 can still write.
 	requireConnectErrorCodeAndReason(t, busyErr, connect.CodeAborted, "EBUSY")
 	_, err = client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    diskID,
@@ -502,13 +487,11 @@ func TestServerDiskRPC_MountDisk_NonForceRejectsActiveRWAndForcePreempts(t *test
 	}))
 	require.NoError(t, err)
 
-	// When: a forced RW MountDisk arrives (Force: true).
 	rw2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
 		DiskId: diskID,
 		Force:  true,
 	}))
 
-	// Then: succeeds with epoch=2 and fences old epoch=1 writer with CodeFailedPrecondition + EBUSY.
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), rw2.Msg.GetEpoch())
 

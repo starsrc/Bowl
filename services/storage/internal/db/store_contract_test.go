@@ -344,7 +344,6 @@ func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaim
 		require.NoError(t, err)
 		require.Equal(t, root.LineageID, c2.LineageID)
 
-		// 重复 ChildDiskID 或重复 CommitID 必须失败且不污染状态。
 		_, dupChildErr := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  c1ID,
@@ -360,19 +359,16 @@ func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaim
 		})
 		require.Error(t, dupCommitErr, "重复 CommitID ForkDisk 必须失败")
 
-		// |D| == 2：删 root 后必须保留全部切面。
 		reclaimed, err := s.DeleteDisk(ctx, rootID)
 		require.NoError(t, err)
 		require.Empty(t, reclaimed, "|D|==2 时不得提前回收任何切面")
 		_, err = s.GetDisk(ctx, rootID)
 		require.ErrorIs(t, err, db.ErrNotFound)
 
-		// |D| == 1：删 child-2 后必须自动回收 cm1, cm2 并清理幸存盘基准切面指针。
 		reclaimed, err = s.DeleteDisk(ctx, c2ID)
 		require.NoError(t, err)
 		require.ElementsMatch(t, []uuid.UUID{cm1ID, cm2ID}, reclaimed, "|D|==1 时应返回全部待清理切面")
 
-		// 唯一幸存盘 child-1 的 base_commit_id 被清空后，仍可继续作为源盘派生新子盘。
 		c3ID, cm3ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		c3, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: c1ID,
@@ -384,12 +380,10 @@ func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaim
 		require.Equal(t, c1ID, c3.ParentDiskID)
 		require.Equal(t, root.LineageID, c3.LineageID)
 
-		// 删掉 child-3（|D| == 1）回收 cm3。
 		reclaimed, err = s.DeleteDisk(ctx, c3ID)
 		require.NoError(t, err)
 		require.ElementsMatch(t, []uuid.UUID{cm3ID}, reclaimed)
 
-		// |D| == 0：删掉最后幸存盘 child-1 后必须彻底删除血缘行。
 		reclaimed, err = s.DeleteDisk(ctx, c1ID)
 		require.NoError(t, err)
 		require.Empty(t, reclaimed)
@@ -557,7 +551,6 @@ func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGA
 		})
 		require.NoError(t, err)
 
-		// 常规合并：SkipSourceCommit=false，同时推进 source 和 target 的 base_commit_id。
 		cmSrc1, cmMerge1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		merged1, err := s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  root.LineageID,
@@ -597,7 +590,6 @@ func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGA
 		require.Equal(t, cmSrc1, commits[2].MergeParentCommitID)
 		require.Equal(t, rootID, commits[2].BaseDiskID)
 
-		// 二次合并（SkipSourceCommit=true）：不插入 C_src，仅插入 C_merge 并保持 source BaseCommitID 不变。
 		cmMerge2 := mustNewUUIDv7(t)
 		merged2, err := s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  root.LineageID,
@@ -624,7 +616,6 @@ func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGA
 		require.Equal(t, cmSrc1, lastCommit.MergeParentCommitID)
 		require.Equal(t, rootID, lastCommit.BaseDiskID)
 
-		// 非单调 UUID（cmMerge < cmSrc）下，ListLineageCommits 仍须保证父切面 cmSrc 排在子切面 cmMerge 之前。
 		cmMerge3 := uuid.MustParse("01900000-0000-7000-8000-000000000001")
 		cmSrc3 := uuid.MustParse("01900000-0000-7000-8000-000000000002")
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
@@ -674,7 +665,6 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		})
 		require.NoError(t, err)
 
-		// 1. 非法入参
 		_, err = s.MergeDisk(ctx, nil)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
@@ -731,7 +721,6 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 
-		// 2. 跨血缘拦截
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  root.LineageID,
 			SourceDiskID:               otherID,
@@ -743,7 +732,6 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		})
 		require.ErrorIs(t, err, db.ErrCrossLineage)
 
-		// 3. 不存在目标/源盘/血缘
 		missingID := mustNewUUIDv7(t)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  root.LineageID,
@@ -778,7 +766,6 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		})
 		require.ErrorIs(t, err, db.ErrDiskNotFound)
 
-		// 4. CAS 切面过期冲突（源盘与目标盘各测一次）
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
 			LineageID:                  root.LineageID,
 			SourceDiskID:               childID,
@@ -801,7 +788,6 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		})
 		require.ErrorIs(t, err, db.ErrStaleBaseCommit)
 
-		// 验证全部失败路径零副作用回滚
 		gotRoot, err := s.GetDisk(ctx, rootID)
 		require.NoError(t, err)
 		require.Equal(t, cmFork, gotRoot.BaseCommitID, "失败合并后目标盘 BaseCommitID 不得变化")

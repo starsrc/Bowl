@@ -43,8 +43,6 @@ func formatXattrList(names [][]byte, dest []byte) (uint32, fuse.Status) {
 	return totalLen, fuse.OK
 }
 
-// SetXAttr 实现设置扩展属性请求，透传属性名、属性值与创建/替换标志位。
-// 在只读挂载模式下直接拦截返回 EROFS。
 func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr string, data []byte) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpSetXAttr)
 	opCtx, endSpan := fs.startFuseOp(OpSetXAttr)
@@ -98,7 +96,6 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 	return fuse.OK
 }
 
-// GetXAttr 实现读取扩展属性请求，支持零长度探测与 ERANGE 缓冲区过小语义。
 func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string, dest []byte) (sz uint32, status fuse.Status) {
 	start := fs.metrics.beginOp(OpGetXAttr)
 	opCtx, endSpan := fs.startFuseOp(OpGetXAttr)
@@ -155,7 +152,6 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 	return copyXattrValue(resp.Msg.GetValue(), dest)
 }
 
-// ListXAttr 实现列出扩展属性名称请求，组装以 '\x00' 结尾的连续字节序列。
 func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest []byte) (sz uint32, status fuse.Status) {
 	start := fs.metrics.beginOp(OpListXAttr)
 	opCtx, endSpan := fs.startFuseOp(OpListXAttr)
@@ -192,8 +188,6 @@ func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest [
 	return formatXattrList(resp.Msg.GetNames(), dest)
 }
 
-// RemoveXAttr 实现删除指定扩展属性请求。
-// 在只读挂载模式下直接拦截返回 EROFS。
 func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr string) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpRemoveXAttr)
 	opCtx, endSpan := fs.startFuseOp(OpRemoveXAttr)

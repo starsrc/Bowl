@@ -88,7 +88,7 @@ func overwriteTestFileViaRPC(
 }
 
 func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T) {
-	// Given: 通过 ConnectRPC 内存客户端创建主盘、写初始文件与符号链接、Fork 分支并制造冲突与独立变更
+
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
 
@@ -124,12 +124,10 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.NoError(t, err)
 	featEpoch := featMnt.Msg.GetEpoch()
 
-	// 制造双边冲突 cfg.ini 及源盘新增 feature.txt
 	overwriteTestFileViaRPC(t, ctx, client, mainID, mainEpoch, "cfg.ini", []byte("key=main\n"))
 	overwriteTestFileViaRPC(t, ctx, client, featID, featEpoch, "cfg.ini", []byte("key=feature\n"))
 	createTestFileViaRPC(t, ctx, client, featID, featEpoch, "feature.txt", []byte("feat-content\n"))
 
-	// When 1: DiffDisk 省略 target_disk_id（2-way diff）与指定 target_disk_id（3-way diff + 分页）
 	diffTwoWay, err := client.DiffDisk(ctx, connect.NewRequest(&storagev1.DiffDiskRequest{
 		SourceDiskId: featID,
 	}))
@@ -149,7 +147,6 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.NotEmpty(t, diffPage1.Msg.GetNextPageToken())
 	require.Equal(t, uint64(1), diffPage1.Msg.GetSummary().GetConflicts())
 
-	// When 2: ReadCommitNode 分片读取不可变 LCA 切面文件与符号链接
 	nodeSlice, err := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
 		DiskId:   featID,
 		CommitId: lcaCommitID,
@@ -171,21 +168,18 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, []byte("/cfg.ini"), symSlice.Msg.GetSymlinkTarget())
 
-	// 未卸载且未传 Force 时，MergeDisk 应被门禁拦截为 CodeAborted + EBUSY
 	_, busyErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
 	}))
 	requireConnectErrorCodeAndReason(t, busyErr, connect.CodeAborted, "EBUSY")
 
-	// 卸载源盘租约（保留目标盘 mainID 在线租约），后续用 Force=true 验证强行合并与旧 epoch 栅栏
 	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
 		DiskId:  featID,
 		MountId: featMnt.Msg.GetMountId(),
 	}))
 	require.NoError(t, err)
 
-	// When 3: MergeDisk 默认 Fail 策略命中冲突，应返回 CodeAborted + ErrorInfo(ECONFLICT) + *MergeConflictReport Detail
 	_, mergeErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
@@ -212,7 +206,6 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.Equal(t, []byte("cfg.ini"), conflictReport.GetConflicts()[0].GetPath())
 	require.Equal(t, storagev1.ConflictKind_CONFLICT_KIND_CONTENT, conflictReport.GetConflicts()[0].GetKind())
 
-	// When 4: DryRun 预演合并返回估算容量且不推进 epoch 或生成 commit
 	overrideQuota := uint64(64 << 20)
 	dryResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
@@ -225,7 +218,6 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.Empty(t, dryResp.Msg.GetMergeCommitId())
 	require.Equal(t, overrideQuota, dryResp.Msg.GetTargetMaxBytes())
 
-	// When 5: 使用 PathStrategies + Force 正式提交合并并扩容配额
 	mergeResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
 		TargetDiskId: mainID,
@@ -240,7 +232,6 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.NotEmpty(t, mergeResp.Msg.GetMergeCommitId())
 	require.Equal(t, overrideQuota, mergeResp.Msg.GetDisk().GetMaxBytes())
 
-	// 验证旧 epoch 写入被原子切换后的新 WriterEpoch 栅栏拒绝，新数据可读
 	_, staleErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    mainID,
 		ParentIno: control.RootIno,
@@ -265,7 +256,6 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, []byte("feat-content\n"), readFeat.Msg.GetData())
 
-	// 被 Force 抢占后，旧写者以原 mainEpoch 调用 RenewMount 应返回 CodeFailedPrecondition + EBUSY
 	_, renewStaleErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
 		DiskId:   mainID,
 		MountId:  mainMnt.Msg.GetMountId(),
@@ -274,7 +264,6 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	}))
 	requireConnectErrorCodeAndReason(t, renewStaleErr, connect.CodeFailedPrecondition, "EBUSY")
 
-	// 重新挂载 mainID 后 RenewMount 应成功返回 TTL = 30
 	mainMnt2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID}))
 	require.NoError(t, err)
 	renewResp, err := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{

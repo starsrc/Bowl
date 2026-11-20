@@ -34,7 +34,6 @@ import (
 
 const clientServiceName = "bowl-client"
 
-// normalizeOTLPEndpoint prepends http:// to bare host:port OTLP endpoints so the OTel Go SDK parses them cleanly.
 func normalizeOTLPEndpoint(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -46,7 +45,6 @@ func normalizeOTLPEndpoint(raw string) string {
 	return trimmed
 }
 
-// normalizeOTLPEnv normalizes OTLP endpoint environment variables in place for the process and spawned daemons.
 func normalizeOTLPEnv() {
 	for _, key := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"} {
 		raw := strings.TrimSpace(os.Getenv(key))
@@ -59,12 +57,10 @@ func normalizeOTLPEnv() {
 	}
 }
 
-// priorityOpSampler deterministically samples durability and lifecycle barriers Fsync, FsyncDir, and OnUnmount.
 type priorityOpSampler struct {
 	base sdktrace.Sampler
 }
 
-//nolint:gocritic // sdktrace.Sampler requires a value receiver signature.
 func (s priorityOpSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
 	switch p.Name {
 	case "fuse.Fsync", "fuse.FsyncDir", "fuse.OnUnmount":
@@ -111,7 +107,6 @@ func newClientMetricView() sdkmetric.View {
 	)
 }
 
-// buildObsConfig constructs observability settings with W3C tracing always active and OTLP export enabled when configured.
 func buildObsConfig(opts *mountOptions) *observability.EnvConfig {
 	normalizeOTLPEnv()
 
@@ -147,7 +142,6 @@ func buildObsConfig(opts *mountOptions) *observability.EnvConfig {
 	return &cfg
 }
 
-// clientRuntime holds logger, isolated Prometheus registry, and OTel providers for the mount process.
 type clientRuntime struct {
 	logger         *slog.Logger
 	registry       *prometheus.Registry
@@ -232,7 +226,6 @@ func newClientTracerProvider(ctx context.Context, cfg *observability.EnvConfig, 
 	}
 }
 
-// setupObservability initializes structured logging, Prometheus metrics, and OTel tracing.
 func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Writer) (*clientRuntime, error) {
 	cfg := buildObsConfig(opts)
 	if err := cfg.Validate(); err != nil {
@@ -286,7 +279,6 @@ func setupObservability(ctx context.Context, opts *mountOptions, logWriter io.Wr
 	}, nil
 }
 
-// validateAdminAddr checks that addr is "off" or a valid host:port address.
 func validateAdminAddr(addr string) error {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil
@@ -297,7 +289,6 @@ func validateAdminAddr(addr string) error {
 	return nil
 }
 
-// adminServer serves the mount process loopback HTTP admin endpoints; a nil pointer indicates disabled.
 type adminServer struct {
 	ln  net.Listener
 	srv *http.Server
@@ -313,7 +304,6 @@ func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracke
 	return mux
 }
 
-// startAdminServer starts /metrics, /debug/pprof/*, /healthz, /readyz, /debug/stats, and /debug/unmount on addr, or returns nil for "off".
 func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) (*adminServer, error) {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil, nil
@@ -327,7 +317,6 @@ func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		// Keep WriteTimeout zero because /debug/pprof/profile?seconds=N streams over long intervals.
 	}
 	go func() {
 		if serveErr := srv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -337,7 +326,6 @@ func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker
 	return &adminServer{ln: ln, srv: srv}, nil
 }
 
-// addr returns the active listen address or "off" when disabled.
 func (a *adminServer) addr() string {
 	if a == nil {
 		return adminAddrOff
@@ -354,7 +342,6 @@ func (a *adminServer) shutdown(ctx context.Context) {
 	}
 }
 
-// statsHandler renders FUSE statistics snapshots in JSON, human text, or .stats format.
 func statsHandler(fs *fusefs.RawFS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		snap := fs.Snapshot()
@@ -379,7 +366,6 @@ func statsHandler(fs *fusefs.RawFS) http.Handler {
 	})
 }
 
-// unmountProgressHandler serves current OnUnmount sync progress as JSON.
 func unmountProgressHandler(fs *fusefs.RawFS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		body, err := json.Marshal(fs.UnmountProgress())

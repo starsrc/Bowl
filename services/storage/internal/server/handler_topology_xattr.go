@@ -9,7 +9,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
-// Link 创建硬链接，返回更新后的 Inode 实体元数据与内核缓存超时时长。
 func (s *Server) Link(ctx context.Context, req *connect.Request[storagev1.LinkRequest]) (*connect.Response[storagev1.LinkResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
@@ -38,7 +37,6 @@ func (s *Server) Link(ctx context.Context, req *connect.Request[storagev1.LinkRe
 	}), nil
 }
 
-// Unlink 删除指定父目录下的非目录项（解链）。
 func (s *Server) Unlink(ctx context.Context, req *connect.Request[storagev1.UnlinkRequest]) (*connect.Response[storagev1.UnlinkResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
@@ -57,7 +55,6 @@ func (s *Server) Unlink(ctx context.Context, req *connect.Request[storagev1.Unli
 	return connect.NewResponse(&storagev1.UnlinkResponse{}), nil
 }
 
-// Rmdir 移除指定父目录下的空目录项。
 func (s *Server) Rmdir(ctx context.Context, req *connect.Request[storagev1.RmdirRequest]) (*connect.Response[storagev1.RmdirResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
@@ -76,7 +73,6 @@ func (s *Server) Rmdir(ctx context.Context, req *connect.Request[storagev1.Rmdir
 	return connect.NewResponse(&storagev1.RmdirResponse{}), nil
 }
 
-// Rename 执行原子文件/目录重命名、移动或双向交换。
 func (s *Server) Rename(ctx context.Context, req *connect.Request[storagev1.RenameRequest]) (*connect.Response[storagev1.RenameResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
@@ -104,7 +100,6 @@ func (s *Server) Rename(ctx context.Context, req *connect.Request[storagev1.Rena
 	return connect.NewResponse(&storagev1.RenameResponse{}), nil
 }
 
-// SetXattr 设置目标节点的扩展属性键值。
 func (s *Server) SetXattr(ctx context.Context, req *connect.Request[storagev1.SetXattrRequest]) (*connect.Response[storagev1.SetXattrResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
@@ -123,7 +118,6 @@ func (s *Server) SetXattr(ctx context.Context, req *connect.Request[storagev1.Se
 	return connect.NewResponse(&storagev1.SetXattrResponse{}), nil
 }
 
-// GetXattr 获取目标节点指定扩展属性键的属性值。
 func (s *Server) GetXattr(ctx context.Context, req *connect.Request[storagev1.GetXattrRequest]) (*connect.Response[storagev1.GetXattrResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
 	if err != nil {
@@ -142,7 +136,6 @@ func (s *Server) GetXattr(ctx context.Context, req *connect.Request[storagev1.Ge
 	}), nil
 }
 
-// ListXattr 列出目标节点绑定的所有扩展属性名称列表。
 func (s *Server) ListXattr(ctx context.Context, req *connect.Request[storagev1.ListXattrRequest]) (*connect.Response[storagev1.ListXattrResponse], error) {
 	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
 	if err != nil {
@@ -161,7 +154,6 @@ func (s *Server) ListXattr(ctx context.Context, req *connect.Request[storagev1.L
 	}), nil
 }
 
-// RemoveXattr 移除目标节点指定的扩展属性键。
 func (s *Server) RemoveXattr(ctx context.Context, req *connect.Request[storagev1.RemoveXattrRequest]) (*connect.Response[storagev1.RemoveXattrResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
@@ -180,7 +172,6 @@ func (s *Server) RemoveXattr(ctx context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(&storagev1.RemoveXattrResponse{}), nil
 }
 
-// ReclaimOrphan 回收最后一个本地句柄关闭的孤儿节点。
 func (s *Server) ReclaimOrphan(ctx context.Context, req *connect.Request[storagev1.ReclaimOrphanRequest]) (*connect.Response[storagev1.ReclaimOrphanResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)

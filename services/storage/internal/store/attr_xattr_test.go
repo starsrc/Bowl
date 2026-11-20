@@ -23,7 +23,7 @@ func requireXattrNames(t *testing.T, got [][]byte, want []string) {
 func fillXattrListQuota(t *testing.T, actor *store.StoreActor, ino uint64) {
 	t.Helper()
 	ctx := context.Background()
-	// 每条 key 记账 len(name)+1 = 256B，256 条即填满 MaxXattrListBytes = 65536B
+
 	for i := range 256 {
 		prefix := []byte{'u', 's', 'e', 'r', '.', byte('a' + (i / 26)), byte('a' + (i % 26)), '.'}
 		name := make([]byte, store.MaxXattrNameBytes)
@@ -37,7 +37,6 @@ func TestGivenRegularFileWhenSetAttrModeUIDGIDSizeAndFlagsThenContractsEnforced(
 	ctx := context.Background()
 	actor := openTestActor(t, &store.Options{DiskID: "setattr-contract"})
 
-	// Given: 带 S_ISUID|S_ISGID、security.capability 与初始数据的文件
 	f, err := actor.Create(ctx, store.CreateReq{
 		ParentIno: store.RootIno,
 		Name:      []byte("bin"),
@@ -48,20 +47,17 @@ func TestGivenRegularFileWhenSetAttrModeUIDGIDSizeAndFlagsThenContractsEnforced(
 	require.NoError(t, err)
 	require.NoError(t, actor.SetXattr(ctx, f.Ino, []byte("security.capability"), []byte{1, 2, 3}, 0))
 
-	// When: 修改 UID（未显式传 Mode）
 	uid := uint32(1000)
 	gid := uint32(2000)
 	afterOwner, err := actor.SetAttr(ctx, f.Ino, store.SetAttrReq{UID: &uid, GID: &gid})
 	require.NoError(t, err)
 
-	// Then: 剥离 S_ISUID|S_ISGID 且自动清除 security.capability
 	require.Equalf(t, store.S_IFREG|0o755, afterOwner.Mode, "变更 UID/GID 后必须剥离 S_ISUID|S_ISGID: got=%o", afterOwner.Mode)
 	require.Equalf(t, uint32(1000), afterOwner.UID, "UID 未更新")
 	require.Equalf(t, uint32(2000), afterOwner.GID, "GID 未更新")
 	_, err = actor.GetXattr(ctx, f.Ino, []byte("security.capability"))
 	require.ErrorIsf(t, err, store.ErrNoData, "变更属主后必须清除 security.capability: got=%v", err)
 
-	// When: 截断缩小再稀疏扩容
 	shrink := uint64(3)
 	afterShrink, err := actor.SetAttr(ctx, f.Ino, store.SetAttrReq{Size: &shrink})
 	require.NoError(t, err)
@@ -75,7 +71,6 @@ func TestGivenRegularFileWhenSetAttrModeUIDGIDSizeAndFlagsThenContractsEnforced(
 	require.NoError(t, err)
 	require.Equalf(t, []byte{'a', 'b', 'c', 0, 0, 0, 0, 0, 0, 0}, gotBytes, "截断再扩容后旧尾字节不得复活")
 
-	// When: 设置 FlagAppend，仅允许在 EOF 追加写，禁止改 Size
 	appendFlag := store.FlagAppend
 	_, err = actor.SetAttr(ctx, f.Ino, store.SetAttrReq{Flags: &appendFlag})
 	require.NoError(t, err)
@@ -88,7 +83,6 @@ func TestGivenRegularFileWhenSetAttrModeUIDGIDSizeAndFlagsThenContractsEnforced(
 	require.NoError(t, err)
 	require.Equalf(t, uint64(14), afterAppend.Size, "FlagAppend 允许在 EOF 写入: got=%d", afterAppend.Size)
 
-	// When: 设置 FlagImmutable，禁止写入与修改模式；清除 FlagImmutable 后恢复可写
 	immutFlag := store.FlagImmutable
 	_, err = actor.SetAttr(ctx, f.Ino, store.SetAttrReq{Flags: &immutFlag})
 	require.NoError(t, err)
@@ -148,7 +142,6 @@ func TestGivenVirtualClockAndAtimeModesWhenReadingThenRelAtimeAndStrictAtimePers
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Given: 注入可控虚拟时钟，以 AtimeModeRelAtime 打开实例
 	curTime := time.Unix(1700000000, 0)
 	nowFn := func() time.Time { return curTime }
 
@@ -163,7 +156,6 @@ func TestGivenVirtualClockAndAtimeModesWhenReadingThenRelAtimeAndStrictAtimePers
 	_, _, err = actor.Write(ctx, f.Ino, 0, []byte("hello"))
 	require.NoError(t, err)
 
-	// 1. 首次读取时 atime == mtime，触发 RelAtime 更新（推进 1 小时后读取）
 	curTime = curTime.Add(time.Hour)
 	_, err = actor.Read(ctx, f.Ino, 0, 5)
 	require.NoError(t, err)
@@ -171,7 +163,6 @@ func TestGivenVirtualClockAndAtimeModesWhenReadingThenRelAtimeAndStrictAtimePers
 	require.NoError(t, err)
 	require.Equalf(t, curTime.UnixNano(), attr1.Atime, "RelAtime 首次读取(atime<=mtime)应更新 Atime")
 
-	// 2. 再次推进 1 小时（此时 atime > mtime 且未满 24h），读取不得更新 Atime
 	firstUpdatedAtime := curTime.UnixNano()
 	curTime = curTime.Add(time.Hour)
 	_, err = actor.Read(ctx, f.Ino, 0, 5)
@@ -180,7 +171,6 @@ func TestGivenVirtualClockAndAtimeModesWhenReadingThenRelAtimeAndStrictAtimePers
 	require.NoError(t, err)
 	require.Equalf(t, firstUpdatedAtime, attr2.Atime, "RelAtime 未满 24h 且 atime>mtime 时读取不得更新 Atime")
 
-	// 3. 推进超过 24 小时后读取，触发 RelAtime 刷新并测试 Close 后持久化
 	curTime = curTime.Add(24 * time.Hour)
 	_, err = actor.Read(ctx, f.Ino, 0, 5)
 	require.NoError(t, err)
@@ -192,7 +182,6 @@ func TestGivenVirtualClockAndAtimeModesWhenReadingThenRelAtimeAndStrictAtimePers
 	require.NoError(t, err)
 	require.Equalf(t, expectedPersisted, attrReopened.Atime, "Close 后 dirtyAtime 必须刷盘持久")
 
-	// 4. StrictAtime 每次读取均立即刷新（推进 1 秒即可见），且通过 CloseDiscard 验证跳过尾部刷新
 	curTime = curTime.Add(time.Second)
 	_, err = reopened.Read(ctx, f.Ino, 0, 5)
 	require.NoError(t, err)
@@ -216,14 +205,12 @@ func TestGivenNodeWhenXattrSetListedAndRemovedThenFlagsNamespaceAndQuotasEnforce
 	sym, err := actor.Symlink(ctx, store.SymlinkReq{ParentIno: store.RootIno, Name: []byte("sym"), Target: []byte("/doc")})
 	require.NoError(t, err)
 
-	// When: XattrCreate / XattrReplace / 默认覆盖与空值
 	require.NoError(t, actor.SetXattr(ctx, f.Ino, []byte("user.b"), []byte("val-b"), store.XattrCreate))
 	require.NoError(t, actor.SetXattr(ctx, f.Ino, []byte("user.a"), []byte{}, store.XattrCreate))
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, []byte("user.b"), []byte("dup"), store.XattrCreate), store.ErrExist)
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, []byte("user.missing"), []byte("v"), store.XattrReplace), store.ErrNoData)
 	require.NoError(t, actor.SetXattr(ctx, f.Ino, []byte("user.b"), []byte("val-b2"), store.XattrReplace))
 
-	// Then: GetXattr 与 ListXattr 按字典序返回
 	gotA, err := actor.GetXattr(ctx, f.Ino, []byte("user.a"))
 	require.NoError(t, err)
 	require.Empty(t, gotA)
@@ -235,26 +222,22 @@ func TestGivenNodeWhenXattrSetListedAndRemovedThenFlagsNamespaceAndQuotasEnforce
 	require.NoError(t, err)
 	requireXattrNames(t, names, []string{"user.a", "user.b"})
 
-	// When: RemoveXattr 删除存在项成功，重复删除返回 ErrNoData
 	require.NoError(t, actor.RemoveXattr(ctx, f.Ino, []byte("user.a")))
 	require.ErrorIs(t, actor.RemoveXattr(ctx, f.Ino, []byte("user.a")), store.ErrNoData)
 	_, err = actor.GetXattr(ctx, f.Ino, []byte("user.a"))
 	require.ErrorIs(t, err, store.ErrNoData)
 
-	// When & Then: 符号链接禁止 user.*，允许 trusted.*
 	require.ErrorIs(t, actor.SetXattr(ctx, sym.Ino, []byte("user.k"), []byte("v"), 0), store.ErrPerm)
 	_, err = actor.GetXattr(ctx, sym.Ino, []byte("user.k"))
 	require.ErrorIs(t, err, store.ErrNoData)
 	require.NoError(t, actor.SetXattr(ctx, sym.Ino, []byte("trusted.k"), []byte("tv"), 0))
 
-	// When & Then: 名称与值超限校验
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, []byte(""), []byte("v"), 0), store.ErrInvalid)
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, []byte("user.\x00"), []byte("v"), 0), store.ErrInvalid)
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, bytes.Repeat([]byte("n"), store.MaxXattrNameBytes+1), []byte("v"), 0), store.ErrRange)
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, []byte("user.big"), make([]byte, store.MaxXattrValueBytes+1), 0), store.ErrRange)
 	require.ErrorIs(t, actor.SetXattr(ctx, f.Ino, []byte("user.flag"), []byte("v"), 0x10), store.ErrInvalid)
 
-	// When & Then: 单节点扩展属性列表字节总额超过 64 KiB 返回 ErrNoSpace
 	fQuota, err := actor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("xquota"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
 	fillXattrListQuota(t, actor, fQuota.Ino)

@@ -32,11 +32,11 @@ linters:
     - depguard      # 依赖包准入与架构分层边界检查
     - errorlint     # 检查 Go 1.13+ 错误包装与比较规范
     - forbidigo     # 禁用特定函数或类型调用（开启类型分析）
+    - gocheckcompilerdirectives # 校验 //go: 编译器指令合法性，防止伪造指令绕过无注释检查
     - gocritic      # 高阶代码异味、性能与风格检查
     - misspell      # 常见英文拼写错误检查
     - modernize     # Go 现代标准库与语法特性升级检查
     - nilerr        # 拦截 if err != nil { return nil } 逻辑漏洞
-    - nolintlint    # 规范 //nolint 指令（禁止裸写，必须指定 linter 与注释）
     - perfsprint    # 优化可替换为更快方法的 fmt.Sprintf 调用
     - revive        # 替代 golint 的代码规范检查
     - testifylint   # 规范 testify/require 与 assert 断言用法
@@ -115,9 +115,8 @@ linters:
         - diagnostic
         - style
         - performance
-    nolintlint:
-      require-explanation: true
-      require-specific: true
+      disabled-checks:
+        - hugeParam
     testifylint:
       enable-all: true
 
@@ -125,6 +124,7 @@ linters:
     generated: lax
     warn-unused: true
     presets:
+      - comments
       - common-false-positives
       - std-error-handling
     paths:
@@ -140,6 +140,21 @@ linters:
         linters:
           - forbidigo
         text: "pgxpool\\.New"
+      - path: 'internal/store/actor\.go$'
+        linters:
+          - revive
+        text: "exported: type name will be used as store\\.StoreActor"
+      - path: 'internal/control/disk_usage_unix\.go$'
+        linters:
+          - nilerr
+      - path: 'internal/store/errors\.go$'
+        linters:
+          - revive
+        text: "var-naming: don't use ALL_CAPS in Go names"
+      - path: 'internal/fusefs/fs_ioctl\.go$'
+        linters:
+          - revive
+        text: "var-naming: don't use ALL_CAPS in Go names"
 
 issues:
   # 解除单个 linter 报出问题的数量上限（默认 50），避免在 CI 中掩盖问题

@@ -58,8 +58,6 @@ func withTTL(entryTTL, attrTTL float64) fakeStorageOption {
 	}
 }
 
-// fakeStorage 是面向 StorageServiceClient 接缝的内存存储适配器，
-// 默认对未覆盖控制面接口执行 Fail Fast 契约拦截。
 type fakeStorage struct {
 	tb       testing.TB
 	mu       sync.Mutex
@@ -74,7 +72,6 @@ type fakeStorage struct {
 	nodes   map[uint64]*fakeNode
 	entries map[uint64]map[string]uint64
 
-	// 各外部存储调用次数计数器
 	lookupCalls        atomic.Int64
 	getAttrCalls       atomic.Int64
 	setAttrCalls       atomic.Int64
@@ -101,12 +98,10 @@ type fakeStorage struct {
 	statFSCalls        atomic.Int64
 	reclaimOrphanCalls atomic.Int64
 
-	// 观测到的上下文元数据
 	lastReqID       atomic.Uint64
 	capturedTraceMu sync.Mutex
 	capturedSpans   map[string][]trace.SpanContext
 
-	// 故障注入与自定义钩子
 	lookupHook        func(context.Context, *storagev1.LookupRequest) (*storagev1.LookupResponse, error)
 	getAttrHook       func(context.Context, *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error)
 	setAttrHook       func(context.Context, *storagev1.SetAttrRequest) error
@@ -408,7 +403,6 @@ func (s *fakeStorage) isAncestorLocked(candidateAncestor, node uint64) bool {
 	return false
 }
 
-// Lookup 实现单级目录项查找。
 func (s *fakeStorage) Lookup(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
 	s.lookupCalls.Add(1)
 	if err := s.recordCtx(ctx, "Lookup"); err != nil {
@@ -451,7 +445,6 @@ func (s *fakeStorage) Lookup(ctx context.Context, req *connect.Request[storagev1
 	}), nil
 }
 
-// GetAttr 获取节点属性。
 func (s *fakeStorage) GetAttr(ctx context.Context, req *connect.Request[storagev1.GetAttrRequest]) (*connect.Response[storagev1.GetAttrResponse], error) {
 	s.getAttrCalls.Add(1)
 	if err := s.recordCtx(ctx, "GetAttr"); err != nil {
@@ -481,7 +474,6 @@ func (s *fakeStorage) GetAttr(ctx context.Context, req *connect.Request[storagev
 	}), nil
 }
 
-// SetAttr 按需部分更新节点属性。
 func (s *fakeStorage) SetAttr(ctx context.Context, req *connect.Request[storagev1.SetAttrRequest]) (*connect.Response[storagev1.SetAttrResponse], error) {
 	s.setAttrCalls.Add(1)
 	if err := s.recordCtx(ctx, "SetAttr"); err != nil {
@@ -570,7 +562,6 @@ func (s *fakeStorage) SetAttr(ctx context.Context, req *connect.Request[storagev
 	}), nil
 }
 
-// Mknod 创建常规或特殊文件节点。
 func (s *fakeStorage) Mknod(ctx context.Context, req *connect.Request[storagev1.MknodRequest]) (*connect.Response[storagev1.MknodResponse], error) {
 	s.mknodCalls.Add(1)
 	if err := s.recordCtx(ctx, "Mknod"); err != nil {
@@ -643,7 +634,6 @@ func (s *fakeStorage) Mknod(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-// Mkdir 创建子目录。
 func (s *fakeStorage) Mkdir(ctx context.Context, req *connect.Request[storagev1.MkdirRequest]) (*connect.Response[storagev1.MkdirResponse], error) {
 	s.mkdirCalls.Add(1)
 	if err := s.recordCtx(ctx, "Mkdir"); err != nil {
@@ -709,7 +699,6 @@ func (s *fakeStorage) Mkdir(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-// Symlink 创建符号链接。
 func (s *fakeStorage) Symlink(ctx context.Context, req *connect.Request[storagev1.SymlinkRequest]) (*connect.Response[storagev1.SymlinkResponse], error) {
 	s.symlinkCalls.Add(1)
 	if err := s.recordCtx(ctx, "Symlink"); err != nil {
@@ -774,7 +763,6 @@ func (s *fakeStorage) Symlink(ctx context.Context, req *connect.Request[storagev
 	}), nil
 }
 
-// Readlink 读取符号链接目标路径。
 func (s *fakeStorage) Readlink(ctx context.Context, req *connect.Request[storagev1.ReadlinkRequest]) (*connect.Response[storagev1.ReadlinkResponse], error) {
 	s.readlinkCalls.Add(1)
 	if err := s.recordCtx(ctx, "Readlink"); err != nil {
@@ -797,7 +785,6 @@ func (s *fakeStorage) Readlink(ctx context.Context, req *connect.Request[storage
 	}), nil
 }
 
-// Link 创建硬链接。
 func (s *fakeStorage) Link(ctx context.Context, req *connect.Request[storagev1.LinkRequest]) (*connect.Response[storagev1.LinkResponse], error) {
 	s.linkCalls.Add(1)
 	if err := s.recordCtx(ctx, "Link"); err != nil {
@@ -864,7 +851,6 @@ func (s *fakeStorage) Link(ctx context.Context, req *connect.Request[storagev1.L
 	}), nil
 }
 
-// Unlink 删除目录项并维护孤儿或硬链接计数。
 func (s *fakeStorage) Unlink(ctx context.Context, req *connect.Request[storagev1.UnlinkRequest]) (*connect.Response[storagev1.UnlinkResponse], error) {
 	s.unlinkCalls.Add(1)
 	if err := s.recordCtx(ctx, "Unlink"); err != nil {
@@ -925,7 +911,6 @@ func (s *fakeStorage) Unlink(ctx context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(&storagev1.UnlinkResponse{}), nil
 }
 
-// Rmdir 移除空目录。
 func (s *fakeStorage) Rmdir(ctx context.Context, req *connect.Request[storagev1.RmdirRequest]) (*connect.Response[storagev1.RmdirResponse], error) {
 	s.rmdirCalls.Add(1)
 	if err := s.recordCtx(ctx, "Rmdir"); err != nil {
@@ -979,7 +964,6 @@ func (s *fakeStorage) Rmdir(ctx context.Context, req *connect.Request[storagev1.
 	return connect.NewResponse(&storagev1.RmdirResponse{}), nil
 }
 
-// Rename 执行原子重命名、覆盖或交换。
 func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1.RenameRequest]) (*connect.Response[storagev1.RenameResponse], error) {
 	s.renameCalls.Add(1)
 	if err := s.recordCtx(ctx, "Rename"); err != nil {
@@ -1118,7 +1102,6 @@ func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(&storagev1.RenameResponse{}), nil
 }
 
-// Create 创建常规文件。
 func (s *fakeStorage) Create(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
 	s.createCalls.Add(1)
 	if err := s.recordCtx(ctx, "Create"); err != nil {
@@ -1188,7 +1171,6 @@ func (s *fakeStorage) Create(ctx context.Context, req *connect.Request[storagev1
 	}), nil
 }
 
-// Read 读取文件数据块。
 func (s *fakeStorage) Read(ctx context.Context, req *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
 	s.readCalls.Add(1)
 	if err := s.recordCtx(ctx, "Read"); err != nil {
@@ -1265,7 +1247,6 @@ func (s *fakeStorage) applyFakeWriteLocked(node *fakeNode, offset uint64, payloa
 	}, nil
 }
 
-// Write 写入文件数据块并同步更新长度与时间戳。
 func (s *fakeStorage) Write(ctx context.Context, req *connect.Request[storagev1.WriteRequest]) (*connect.Response[storagev1.WriteResponse], error) {
 	s.writeCalls.Add(1)
 	if err := s.recordCtx(ctx, "Write"); err != nil {
@@ -1296,7 +1277,6 @@ func (s *fakeStorage) Write(ctx context.Context, req *connect.Request[storagev1.
 	return connect.NewResponse(resp), nil
 }
 
-// Fsync 同步持久化文件节点。
 func (s *fakeStorage) Fsync(ctx context.Context, req *connect.Request[storagev1.FsyncRequest]) (*connect.Response[storagev1.FsyncResponse], error) {
 	s.fsyncCalls.Add(1)
 	if err := s.recordCtx(ctx, "Fsync"); err != nil {
@@ -1321,7 +1301,6 @@ func (s *fakeStorage) Fsync(ctx context.Context, req *connect.Request[storagev1.
 	return connect.NewResponse(&storagev1.FsyncResponse{}), nil
 }
 
-// FsyncDir 同步持久化目录节点。
 func (s *fakeStorage) FsyncDir(ctx context.Context, req *connect.Request[storagev1.FsyncDirRequest]) (*connect.Response[storagev1.FsyncDirResponse], error) {
 	s.fsyncDirCalls.Add(1)
 	if err := s.recordCtx(ctx, "FsyncDir"); err != nil {
@@ -1350,7 +1329,6 @@ func (s *fakeStorage) FsyncDir(ctx context.Context, req *connect.Request[storage
 	return connect.NewResponse(&storagev1.FsyncDirResponse{}), nil
 }
 
-// ReadDirPlus 读取目录流与子项属性。
 func (s *fakeStorage) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1.ReadDirPlusRequest]) (*connect.Response[storagev1.ReadDirPlusResponse], error) {
 	s.readDirPlusCalls.Add(1)
 	if err := s.recordCtx(ctx, "ReadDirPlus"); err != nil {
@@ -1442,7 +1420,6 @@ func (s *fakeStorage) ReadDirPlus(ctx context.Context, req *connect.Request[stor
 	return connect.NewResponse(&storagev1.ReadDirPlusResponse{Entries: page}), nil
 }
 
-// Fallocate 执行空间预分配或打洞去分配。
 func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storagev1.FallocateRequest]) (*connect.Response[storagev1.FallocateResponse], error) {
 	s.fallocateCalls.Add(1)
 	if err := s.recordCtx(ctx, "Fallocate"); err != nil {
@@ -1467,7 +1444,7 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 		return nil, errnoError(connect.CodePermissionDenied, "EPERM")
 	}
 	end := int(req.Msg.GetOffset() + req.Msg.GetLength())
-	const punchAndKeep = 0x02 | 0x01 // FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE
+	const punchAndKeep = 0x02 | 0x01
 	switch req.Msg.GetMode() {
 	case 0:
 		if end > len(node.data) {
@@ -1476,8 +1453,8 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 			node.data = grown
 			node.inode.Attr.Size = uint64(end)
 		}
-	case 0x01: // FALLOC_FL_KEEP_SIZE
-		// 仅保留空间，不改变可见长度
+	case 0x01:
+
 	case punchAndKeep:
 		if int(req.Msg.GetOffset()) < len(node.data) {
 			clearEnd := min(end, len(node.data))
@@ -1494,7 +1471,6 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 	return connect.NewResponse(&storagev1.FallocateResponse{}), nil
 }
 
-// SetXattr 设置扩展属性。
 func (s *fakeStorage) SetXattr(ctx context.Context, req *connect.Request[storagev1.SetXattrRequest]) (*connect.Response[storagev1.SetXattrResponse], error) {
 	s.setXattrCalls.Add(1)
 	if err := s.recordCtx(ctx, "SetXattr"); err != nil {
@@ -1549,7 +1525,6 @@ func (s *fakeStorage) SetXattr(ctx context.Context, req *connect.Request[storage
 	return connect.NewResponse(&storagev1.SetXattrResponse{}), nil
 }
 
-// GetXattr 读取扩展属性。
 func (s *fakeStorage) GetXattr(ctx context.Context, req *connect.Request[storagev1.GetXattrRequest]) (*connect.Response[storagev1.GetXattrResponse], error) {
 	s.getXattrCalls.Add(1)
 	if err := s.recordCtx(ctx, "GetXattr"); err != nil {
@@ -1573,7 +1548,6 @@ func (s *fakeStorage) GetXattr(ctx context.Context, req *connect.Request[storage
 	}), nil
 }
 
-// ListXattr 按字典序返回扩展属性名称列表。
 func (s *fakeStorage) ListXattr(ctx context.Context, req *connect.Request[storagev1.ListXattrRequest]) (*connect.Response[storagev1.ListXattrResponse], error) {
 	s.listXattrCalls.Add(1)
 	if err := s.recordCtx(ctx, "ListXattr"); err != nil {
@@ -1600,7 +1574,6 @@ func (s *fakeStorage) ListXattr(ctx context.Context, req *connect.Request[storag
 	return connect.NewResponse(&storagev1.ListXattrResponse{Names: out}), nil
 }
 
-// RemoveXattr 移除扩展属性。
 func (s *fakeStorage) RemoveXattr(ctx context.Context, req *connect.Request[storagev1.RemoveXattrRequest]) (*connect.Response[storagev1.RemoveXattrResponse], error) {
 	s.removeXattrCalls.Add(1)
 	if err := s.recordCtx(ctx, "RemoveXattr"); err != nil {
@@ -1626,7 +1599,6 @@ func (s *fakeStorage) RemoveXattr(ctx context.Context, req *connect.Request[stor
 	return connect.NewResponse(&storagev1.RemoveXattrResponse{}), nil
 }
 
-// StatFS 返回文件系统配额与节点统计。
 func (s *fakeStorage) StatFS(ctx context.Context, req *connect.Request[storagev1.StatFSRequest]) (*connect.Response[storagev1.StatFSResponse], error) {
 	s.statFSCalls.Add(1)
 	if err := s.recordCtx(ctx, "StatFS"); err != nil {
@@ -1649,7 +1621,6 @@ func (s *fakeStorage) StatFS(ctx context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(resp), nil
 }
 
-// ReclaimOrphan 回收孤儿节点。
 func (s *fakeStorage) ReclaimOrphan(ctx context.Context, req *connect.Request[storagev1.ReclaimOrphanRequest]) (*connect.Response[storagev1.ReclaimOrphanResponse], error) {
 	s.reclaimOrphanCalls.Add(1)
 	if err := s.recordCtx(ctx, "ReclaimOrphan"); err != nil {
@@ -1678,7 +1649,6 @@ func (s *fakeStorage) ReclaimOrphan(ctx context.Context, req *connect.Request[st
 	return connect.NewResponse(&storagev1.ReclaimOrphanResponse{}), nil
 }
 
-// CreateTmpfile allocates an unlinked regular-file inode and records its orphan kind.
 func (s *fakeStorage) CreateTmpfile(ctx context.Context, req *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
 	s.createTmpfileCalls.Add(1)
 	if err := s.recordCtx(ctx, "CreateTmpfile"); err != nil {
@@ -1747,8 +1717,6 @@ func (s *fakeStorage) CreateTmpfile(ctx context.Context, req *connect.Request[st
 	}), nil
 }
 
-// 以下控制面与旧版目录接口在 fusefs 数据面调用中属于 Fail Fast 违例。
-
 func (s *fakeStorage) ReadDir(context.Context, *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	return nil, s.failFast("ReadDir")
 }
@@ -1800,10 +1768,6 @@ func (s *fakeStorage) ReadCommitNode(context.Context, *connect.Request[storagev1
 func (s *fakeStorage) MergeDisk(context.Context, *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
 	return nil, s.failFast("MergeDisk")
 }
-
-// ---------------------------------------------------------------------------
-// 测试通用装配与自诊断辅助函数（置于接缝外侧，零业务分支）
-// ---------------------------------------------------------------------------
 
 type rawFSOption func(*fusefs.Config)
 

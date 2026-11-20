@@ -235,7 +235,6 @@ func (fs *RawFS) Flush(_ <-chan struct{}, input *fuse.FlushIn) (status fuse.Stat
 		if _, st := fs.checkedHandle(VirtualStatsIno, input.Fh, false); st != fuse.OK {
 			return st
 		}
-		fs.locks.ReleasePOSIXByOwner(VirtualStatsIno, input.LockOwner)
 		return fuse.OK
 	}
 	if _, st := fs.ToServerIno(input.NodeId); st != fuse.OK {
@@ -247,7 +246,6 @@ func (fs *RawFS) Flush(_ <-chan struct{}, input *fuse.FlushIn) (status fuse.Stat
 	if status != fuse.OK {
 		return status
 	}
-	fs.locks.ReleasePOSIXByOwner(input.NodeId, input.LockOwner)
 	if fs.tmpMgr.IsUnpromoted(input.NodeId) {
 		return fuse.OK
 	}
@@ -338,8 +336,6 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 		return
 	}
 	if input.NodeId == VirtualStatsIno {
-		fs.locks.ReleaseFlockByFH(VirtualStatsIno, input.Fh, input.LockOwner)
-		fs.locks.ForgetHandle(input.Fh)
 		fs.handles.Release(input.Fh)
 		fs.stateMu.Lock()
 		delete(fs.statsSnapshots, input.Fh)
@@ -353,8 +349,6 @@ func (fs *RawFS) Release(_ <-chan struct{}, input *fuse.ReleaseIn) {
 	if _, exists := fs.handles.Get(input.Fh); !exists {
 		return
 	}
-	fs.locks.ReleaseFlockByFH(input.NodeId, input.Fh, input.LockOwner)
-	fs.locks.ForgetHandle(input.Fh)
 	fs.readAhead.RemoveHandle(input.Fh)
 	fs.stage.ForgetHandle(input.Fh)
 	orphan := fs.handles.IsOrphan(input.NodeId)

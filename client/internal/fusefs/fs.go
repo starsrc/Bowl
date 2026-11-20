@@ -122,7 +122,6 @@ type RawFS struct {
 	fuse.RawFileSystem
 
 	client  storagev1connect.StorageServiceClient
-	locks   *LockTable
 	handles *HandleTable
 	cache   *NamespaceCache
 	caps    *capabilityCache
@@ -228,7 +227,6 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 	fs := &RawFS{
 		RawFileSystem:      fuse.NewDefaultRawFileSystem(),
 		client:             client,
-		locks:              NewLockTable(),
 		cache:              NewNamespaceCache(DefaultNamespaceCacheCapacity),
 		caps:               newCapabilityCache(),
 		dirtyInodes:        make(map[uint64]struct{}),
@@ -391,7 +389,6 @@ func (fs *RawFS) bindMetrics(m *Metrics) {
 	}
 	fs.metrics = m
 	m.bindProvider(fs)
-	fs.locks.bindMetrics(m)
 	fs.cache.bindMetrics(m)
 	fs.caps.bindMetrics(m)
 	fs.tmpMgr.bindMetrics(m)
@@ -554,7 +551,6 @@ func (fs *RawFS) collectSubsystemGauges() subsystemGauges {
 		tmpResidentByte:         tmpResBytes,
 		openFiles:               openFiles,
 		openDirs:                openDirs,
-		activeLocks:             fs.locks.activeLocks(),
 		inodeLockActive:         fs.inodeLocks.activeEntries(),
 		dirtyInodes:             dirtyCount,
 		orphanInodes:            orphanCount,
@@ -659,7 +655,6 @@ func (fs *RawFS) openHandle(ino uint64, flags uint32, dir bool) (uint64, fuse.St
 		}
 		return 0, fuse.EIO
 	}
-	fs.locks.RegisterHandle(fh, flags)
 	if !dir && ino != VirtualStatsIno {
 		fs.stage.RegisterHandle(fh)
 	}
@@ -754,8 +749,6 @@ func (fs *RawFS) OnUnmount() {
 		endSpan(fuse.OK)
 		fs.metrics.endOp(OpOnUnmount, start, fuse.OK, 0)
 	}()
-
-	fs.locks.Close()
 
 	fs.lifecycleMu.Lock()
 	if fs.IsFenced() {
@@ -1316,7 +1309,7 @@ func BuildMountOptions(cfg Config) *fuse.MountOptions {
 		Name:          "bowl",
 		Options:       options,
 		AllowOther:    cfg.AllowOther,
-		EnableLocks:   true,
+		EnableLocks:   false,
 		DisableXAttrs: false,
 		MaxWrite:      1 << 20,
 		MaxReadAhead:  1 << 20,

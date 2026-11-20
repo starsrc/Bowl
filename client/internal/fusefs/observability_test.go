@@ -96,17 +96,6 @@ func findMetricFamily(t *testing.T, reg *prometheus.Registry, name string) *dto.
 	return nil
 }
 
-func findMetricWithoutLabels(t *testing.T, mf *dto.MetricFamily) *dto.Metric {
-	t.Helper()
-	for _, m := range mf.GetMetric() {
-		if len(m.GetLabel()) == 0 {
-			return m
-		}
-	}
-	t.Fatalf("指标族 %s 缺少无标签样本", mf.GetName())
-	return nil
-}
-
 func parseJSONLogMessages(t *testing.T, raw string) []map[string]any {
 	t.Helper()
 	var records []map[string]any
@@ -142,7 +131,7 @@ func mustAllSpansShareSameTraceID(t *testing.T, spans []trace.SpanContext, label
 	return first
 }
 
-func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图及空安全性(t *testing.T) {
+func TestMetrics与Prometheus与Snapshot_验证38个FUSE操作与26桶直方图及空安全性(t *testing.T) {
 	t.Run("空接收者Collector安全性与Prometheus全量采集及文本和JSON序列化", func(t *testing.T) {
 
 		var nilMetrics *fusefs.Metrics
@@ -195,44 +184,6 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 		durMF := findMetricFamily(t, reg, "bowl_client_fuse_op_duration_seconds")
 		require.NotEmpty(t, durMF.GetMetric())
 		require.Len(t, durMF.GetMetric()[0].GetHistogram().GetBucket(), 26, "FUSE 操作直方图必须精确为 26 桶")
-	})
-
-	t.Run("SetLkw真实阻塞等待更新锁等待计数与Prometheus直方图", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		fs := newTestRawFS(t, srv)
-		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "lock-hist.bin", syscall.O_RDWR, 0o644)
-		h2 := mustOpenFile(t, fs, f.NodeId, syscall.O_RDWR)
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
-			Lk: fuse.FileLock{Start: 0, End: 63, Typ: syscall.F_WRLCK, Pid: 1},
-		})
-
-		done := make(chan fuse.Status, 1)
-		go func() {
-			done <- fs.SetLkw(nil, &fuse.LkIn{
-				InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-				Lk: fuse.FileLock{Start: 0, End: 63, Typ: syscall.F_WRLCK, Pid: 2},
-			})
-		}()
-		waitUntilLockConflictsAtLeast(t, fs, 1)
-		requireStatus(t, "Flush 释放锁", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, LockOwner: 1,
-		}))
-		requireStatus(t, "SetLkw 阻塞获取成功", fuse.OK, waitUntilStatusChan(t, done, "SetLkw 统计唤醒"))
-
-		snap := fs.Snapshot()
-		require.Equal(t, uint64(1), snap.Locks.Waits)
-		require.Equal(t, uint64(1), snap.Locks.Conflicts)
-
-		reg := prometheus.NewRegistry()
-		require.NoError(t, reg.Register(fs.Collector()))
-		lockHistMF := findMetricFamily(t, reg, "bowl_client_lock_wait_duration_seconds")
-		m := findMetricWithoutLabels(t, lockHistMF)
-		require.Equal(t, uint64(1), m.GetHistogram().GetSampleCount())
-
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, LockOwner: 1})
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, LockOwner: 2})
 	})
 }
 

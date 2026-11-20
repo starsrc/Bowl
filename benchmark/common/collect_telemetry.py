@@ -1105,9 +1105,6 @@ def extract_client_prom_snapshot(
         "inodelock_wait_ms": summarize_prom_histogram(
             post_p, "bowl_client_inodelock_wait_duration_seconds", pre_parsed=pre_p, scale=1000.0
         ),
-        "lock_wait_ms": summarize_prom_histogram(
-            post_p, "bowl_client_lock_wait_duration_seconds", pre_parsed=pre_p, scale=1000.0
-        ),
         "counters_and_gauges": {
             "write_behind_writes_by_mode": _sum_prom_metric(
                 post_p, "bowl_client_write_behind_writes_total", "mode", pre_parsed=pre_p
@@ -1120,9 +1117,6 @@ def extract_client_prom_snapshot(
             ),
             "write_behind_inflight": _sum_prom_metric(post_p, "bowl_client_write_behind_inflight"),
             "write_behind_pending_slots": _sum_prom_metric(post_p, "bowl_client_write_behind_pending_slots"),
-            "lock_wait_seconds_total": _sum_prom_metric(
-                post_p, "bowl_client_lock_wait_seconds_total", pre_parsed=pre_p
-            ),
             "nscache_hits_by_kind": _sum_prom_metric(
                 post_p, "bowl_client_nscache_hits_total", "kind", pre_parsed=pre_p
             ),
@@ -1468,7 +1462,6 @@ def build_single_phase_breakdown(
     client_wait_added = False
     for label, p_rows, fallback_calls, fallback_ms in (
         ("Client InodeLock 等待", cp.get("inodelock_wait_ms") or [], int(cs.get("inode_lock_contended", 0)), float(cs.get("inode_lock_wait_ms", 0.0))),
-        ("Client LockTable 等待", cp.get("lock_wait_ms") or [], 0, 0.0),
         ("WriteBehind 背压等待", cp.get("write_behind_backpressure_wait_ms") or [], int(wb_cs.get("backpressure_waits", 0)), float(wb_cs.get("backpressure_wait_ms", 0.0))),
         ("WriteBehind 屏障等待", cp.get("write_behind_barrier_wait_ms") or [], int(wb_cs.get("barrier_waits", 0)), float(wb_cs.get("barrier_wait_ms", 0.0))),
         ("ReadAhead 预读等待", cp.get("read_ahead_wait_ms") or [], int(cs.get("readahead_waits", 0)), float(cs.get("readahead_wait_ms", 0.0))),

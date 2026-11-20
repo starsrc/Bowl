@@ -1,9 +1,7 @@
 package fusefs_test
 
 import (
-	"context"
 	"encoding/binary"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,18 +20,6 @@ const (
 	lockWaitDeadline        = 3 * time.Second
 )
 
-func waitUntilLockConflictsAtLeast(t *testing.T, fs *fusefs.RawFS, target uint64) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), lockWaitDeadline)
-	defer cancel()
-	for fs.Snapshot().Locks.Conflicts < target {
-		if ctx.Err() != nil {
-			t.Fatalf("等待锁冲突登记超时: want>=%d got=%d", target, fs.Snapshot().Locks.Conflicts)
-		}
-		runtime.Gosched()
-	}
-}
-
 func waitUntilStatusChan(t *testing.T, ch <-chan fuse.Status, label string) fuse.Status {
 	t.Helper()
 	timer := time.NewTimer(lockWaitDeadline)
@@ -45,11 +31,6 @@ func waitUntilStatusChan(t *testing.T, ch <-chan fuse.Status, label string) fuse
 		t.Fatalf("%s 等待阻塞操作返回超时", label)
 		return fuse.EIO
 	}
-}
-
-func mustSetLock(t *testing.T, fs *fusefs.RawFS, in *fuse.LkIn) {
-	t.Helper()
-	requireStatus(t, "SetLk", fuse.OK, fs.SetLk(nil, in))
 }
 
 func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *testing.T) {
@@ -370,200 +351,4 @@ func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t
 	requireStatus(t, "只读挂载 SETFLAGS", fuse.Status(syscall.EROFS), roFS.Ioctl(nil, &fuse.IoctlIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Cmd: fusefs.FS_IOC_SETFLAGS}, in64, &ioOut, nil))
 
 	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
-}
-
-func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁中断及OnUnmount(t *testing.T) {
-	t.Run("锁类型与无符号全区间映射以及读写句柄权限和F_UNLCK校验", func(t *testing.T) {
-
-		pRd, stRd := fusefs.ToProtoLockType(syscall.F_RDLCK)
-		pWr, stWr := fusefs.ToProtoLockType(syscall.F_WRLCK)
-		pUn, stUn := fusefs.ToProtoLockType(syscall.F_UNLCK)
-		hRd, stHRd := fusefs.ToHostLockType(fusefs.ProtoLockTypeRead)
-		hWr, stHWr := fusefs.ToHostLockType(fusefs.ProtoLockTypeWrite)
-		hUn, stHUn := fusefs.ToHostLockType(fusefs.ProtoLockTypeUnlock)
-		_, badProto := fusefs.ToProtoLockType(999)
-		_, badHost := fusefs.ToHostLockType(999)
-
-		normStart, normEnd, normSt := fusefs.NormalizeLockRange(0, 10, ^uint64(0))
-		flockStart, flockEnd, flockSt := fusefs.NormalizeLockRange(fuse.LK_FLOCK, 123, 456)
-		_, _, invRangeSt := fusefs.NormalizeLockRange(0, 50, 10)
-
-		requireStatus(t, "ToProto RD", fuse.OK, stRd)
-		requireStatus(t, "ToProto WR", fuse.OK, stWr)
-		requireStatus(t, "ToProto UN", fuse.OK, stUn)
-		require.Equal(t, fusefs.ProtoLockTypeRead, pRd)
-		require.Equal(t, fusefs.ProtoLockTypeWrite, pWr)
-		require.Equal(t, fusefs.ProtoLockTypeUnlock, pUn)
-		requireStatus(t, "ToHost RD", fuse.OK, stHRd)
-		requireStatus(t, "ToHost WR", fuse.OK, stHWr)
-		requireStatus(t, "ToHost UN", fuse.OK, stHUn)
-		require.Equal(t, uint32(syscall.F_RDLCK), hRd)
-		require.Equal(t, uint32(syscall.F_WRLCK), hWr)
-		require.Equal(t, uint32(syscall.F_UNLCK), hUn)
-		requireStatus(t, "未知主机锁类型", fuse.EINVAL, badProto)
-		requireStatus(t, "未知协议锁类型", fuse.EINVAL, badHost)
-		requireStatus(t, "MaxUint64 归一化", fuse.OK, normSt)
-		require.Equal(t, uint64(10), normStart)
-		require.Equal(t, ^uint64(0), normEnd)
-		requireStatus(t, "Flock 全区间归一化", fuse.OK, flockSt)
-		require.Zero(t, flockStart)
-		require.Equal(t, ^uint64(0), flockEnd)
-		requireStatus(t, "逆序区间", fuse.EINVAL, invRangeSt)
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		fs := newTestRawFS(t, srv)
-		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "lk-perm.bin", syscall.O_RDWR, 0o644)
-		rd := mustOpenFile(t, fs, f.NodeId, syscall.O_RDONLY)
-		wr := mustOpenFile(t, fs, f.NodeId, syscall.O_WRONLY)
-
-		requireStatus(t, "只读句柄加写锁", fuse.EBADF, fs.SetLk(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: rd.Fh, Owner: 1,
-			Lk: fuse.FileLock{Start: 0, End: 10, Typ: syscall.F_WRLCK, Pid: 1},
-		}))
-		requireStatus(t, "只写句柄加读锁", fuse.EBADF, fs.SetLk(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: wr.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 0, End: 10, Typ: syscall.F_RDLCK, Pid: 2},
-		}))
-		var lkOut fuse.LkOut
-		requireStatus(t, "GetLk 传入 F_UNLCK", fuse.EINVAL, fs.GetLk(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 3,
-			Lk: fuse.FileLock{Start: 0, End: 10, Typ: syscall.F_UNLCK, Pid: 3},
-		}, &lkOut))
-
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: rd.Fh})
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: wr.Fh})
-	})
-
-	t.Run("无符号最大值区间拆分合并与GetLk冲突探测及Flush或Release自动释放", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		fs := newTestRawFS(t, srv)
-		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "split.bin", syscall.O_RDWR, 0o644)
-		h2 := mustOpenFile(t, fs, f.NodeId, syscall.O_RDWR)
-
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
-			Lk: fuse.FileLock{Start: 0, End: ^uint64(0), Typ: syscall.F_WRLCK, Pid: 10},
-		})
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
-			Lk: fuse.FileLock{Start: 100, End: 199, Typ: syscall.F_UNLCK, Pid: 10},
-		})
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
-			Lk: fuse.FileLock{Start: 50, End: 79, Typ: syscall.F_RDLCK, Pid: 10},
-		})
-
-		var holeOut, tailOut fuse.LkOut
-		requireStatus(t, "GetLk 已拆解锁区间", fuse.OK, fs.GetLk(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 100, End: 199, Typ: syscall.F_WRLCK, Pid: 20},
-		}, &holeOut))
-		require.Equal(t, uint32(syscall.F_UNLCK), holeOut.Lk.Typ)
-
-		requireStatus(t, "GetLk 尾部写锁冲突", fuse.OK, fs.GetLk(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 200, End: ^uint64(0), Typ: syscall.F_WRLCK, Pid: 20},
-		}, &tailOut))
-		require.Equal(t, uint32(syscall.F_WRLCK), tailOut.Lk.Typ)
-		require.Equal(t, uint64(200), tailOut.Lk.Start)
-		require.Equal(t, ^uint64(0), tailOut.Lk.End)
-
-		requireStatus(t, "SetLk 冲突返回 EAGAIN", fuse.EAGAIN, fs.SetLk(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 200, End: 250, Typ: syscall.F_WRLCK, Pid: 20},
-		}))
-
-		requireStatus(t, "Flush 释放 POSIX 锁", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, LockOwner: 1,
-		}))
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 200, End: 250, Typ: syscall.F_WRLCK, Pid: 20},
-		})
-
-		flockIn1 := &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 101, LkFlags: fuse.LK_FLOCK,
-			Lk: fuse.FileLock{Typ: syscall.F_WRLCK, Pid: 101},
-		}
-		flockInBadFh := &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: 0, Owner: 202, LkFlags: fuse.LK_FLOCK,
-			Lk: fuse.FileLock{Typ: syscall.F_WRLCK, Pid: 202},
-		}
-		flockIn2 := &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 202, LkFlags: fuse.LK_FLOCK,
-			Lk: fuse.FileLock{Typ: syscall.F_WRLCK, Pid: 202},
-		}
-		mustSetLock(t, fs, flockIn1)
-		requireStatus(t, "Flock 无效 Fh=0 返回 EBADF", fuse.EBADF, fs.SetLk(nil, flockInBadFh))
-		requireStatus(t, "Flock 冲突返回 EAGAIN", fuse.EAGAIN, fs.SetLk(nil, flockIn2))
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, LockOwner: 1})
-		mustSetLock(t, fs, flockIn2)
-
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, LockOwner: 2})
-	})
-
-	t.Run("SetLkw解锁唤醒与ABBA死锁检测及取消与OnUnmount中断唤醒", func(t *testing.T) {
-
-		srv := newFakeStorage(t, withTTL(1.0, 1.0))
-		fs := newTestRawFS(t, srv)
-		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "wait.bin", syscall.O_RDWR, 0o644)
-		h2 := mustOpenFile(t, fs, f.NodeId, syscall.O_RDWR)
-
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
-			Lk: fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK, Pid: 1},
-		})
-		mustSetLock(t, fs, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 10, End: 19, Typ: syscall.F_WRLCK, Pid: 2},
-		})
-		ch1 := make(chan fuse.Status, 1)
-		go func() {
-			ch1 <- fs.SetLkw(nil, &fuse.LkIn{
-				InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
-				Lk: fuse.FileLock{Start: 10, End: 19, Typ: syscall.F_WRLCK, Pid: 1},
-			})
-		}()
-		waitUntilLockConflictsAtLeast(t, fs, 1)
-		deadSt := fs.SetLkw(nil, &fuse.LkIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-			Lk: fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK, Pid: 2},
-		})
-		requireStatus(t, "AB-BA 死锁检测", fuse.Status(syscall.EDEADLK), deadSt)
-
-		requireStatus(t, "Flush 解锁唤醒阻塞等待者", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
-			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, LockOwner: 2,
-		}))
-		requireStatus(t, "被阻塞的 SetLkw 唤醒结果", fuse.OK, waitUntilStatusChan(t, ch1, "SetLkw 唤醒"))
-
-		cancelCh := make(chan struct{})
-		eintrCh := make(chan fuse.Status, 1)
-		conflictsBeforeCancel := fs.Snapshot().Locks.Conflicts
-		go func() {
-			eintrCh <- fs.SetLkw(cancelCh, &fuse.LkIn{
-				InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-				Lk: fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK, Pid: 2},
-			})
-		}()
-		waitUntilLockConflictsAtLeast(t, fs, conflictsBeforeCancel+1)
-		close(cancelCh)
-		requireStatus(t, "cancel 中断 SetLkw", fuse.EINTR, waitUntilStatusChan(t, eintrCh, "SetLkw EINTR"))
-
-		unmountCh := make(chan fuse.Status, 1)
-		conflictsBeforeUnmount := fs.Snapshot().Locks.Conflicts
-		go func() {
-			unmountCh <- fs.SetLkw(nil, &fuse.LkIn{
-				InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
-				Lk: fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK, Pid: 2},
-			})
-		}()
-		waitUntilLockConflictsAtLeast(t, fs, conflictsBeforeUnmount+1)
-		fs.OnUnmount()
-		require.NotEqual(t, fuse.OK, waitUntilStatusChan(t, unmountCh, "OnUnmount 中断 SetLkw"))
-
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, LockOwner: 1})
-		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, LockOwner: 2})
-	})
 }

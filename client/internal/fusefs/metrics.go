@@ -52,16 +52,13 @@ const (
 	OpReleaseDir
 	OpTmpfile
 	OpForget
-	OpGetLk
-	OpSetLk
-	OpSetLkw
 	OpAccess
 	OpLseek
 	OpWritev
 	OpCopyFileRange
 	OpStatx
 
-	OpCount = 41
+	OpCount = 38
 )
 
 const (
@@ -106,9 +103,6 @@ var fuseOpNames = [OpCount]string{
 	OpReleaseDir:    "ReleaseDir",
 	OpTmpfile:       "Tmpfile",
 	OpForget:        "Forget",
-	OpGetLk:         "GetLk",
-	OpSetLk:         "SetLk",
-	OpSetLkw:        "SetLkw",
 	OpAccess:        "Access",
 	OpLseek:         "Lseek",
 	OpWritev:        "Writev",
@@ -322,7 +316,6 @@ type subsystemGauges struct {
 	tmpResidentByte         uint64
 	openFiles               int
 	openDirs                int
-	activeLocks             int
 	inodeLockActive         int
 	dirtyInodes             int
 	orphanInodes            int
@@ -368,11 +361,6 @@ type Metrics struct {
 
 	tmpPromotes      atomic.Uint64
 	tmpResidentBytes atomic.Int64
-
-	lockConflicts atomic.Uint64
-	lockWaits     atomic.Uint64
-	lockWaitNanos atomic.Uint64
-	lockWaitHist  waitHist
 
 	inodeLockFast      atomic.Uint64
 	inodeLockContended atomic.Uint64
@@ -430,12 +418,6 @@ type Metrics struct {
 	tmpPromotesDesc      *prometheus.Desc
 
 	openHandlesDesc *prometheus.Desc
-
-	locksActiveDesc      *prometheus.Desc
-	lockConflictsDesc    *prometheus.Desc
-	lockWaitsDesc        *prometheus.Desc
-	lockWaitSecDesc      *prometheus.Desc
-	lockWaitDurationDesc *prometheus.Desc
 
 	inodeLockAcqDesc          *prometheus.Desc
 	inodeLockWaitSecDesc      *prometheus.Desc
@@ -668,37 +650,6 @@ func NewMetrics() *Metrics {
 			"bowl_client_open_handles",
 			"Current number of open client handles by kind.",
 			[]string{"kind"},
-			nil,
-		),
-
-		locksActiveDesc: prometheus.NewDesc(
-			"bowl_client_locks_active",
-			"Current number of active local POSIX and BSD flock file locks.",
-			nil,
-			nil,
-		),
-		lockConflictsDesc: prometheus.NewDesc(
-			"bowl_client_lock_conflicts_total",
-			"Total number of local file lock conflicts (EAGAIN and EDEADLK).",
-			nil,
-			nil,
-		),
-		lockWaitsDesc: prometheus.NewDesc(
-			"bowl_client_lock_waits_total",
-			"Total number of blocking SetLkw file lock waits.",
-			nil,
-			nil,
-		),
-		lockWaitSecDesc: prometheus.NewDesc(
-			"bowl_client_lock_wait_seconds_total",
-			"Total contended wait time in seconds spent waiting on blocking local file locks.",
-			nil,
-			nil,
-		),
-		lockWaitDurationDesc: prometheus.NewDesc(
-			"bowl_client_lock_wait_duration_seconds",
-			"Contended wait duration distribution in seconds for blocking local file locks.",
-			nil,
 			nil,
 		),
 
@@ -948,22 +899,6 @@ func (m *Metrics) incTmpPromote() {
 	}
 }
 
-func (m *Metrics) incLockConflict() {
-	if m != nil {
-		m.lockConflicts.Add(1)
-	}
-}
-
-func (m *Metrics) observeLockWait(d time.Duration) {
-	if m != nil {
-		m.lockWaits.Add(1)
-		if ns := d.Nanoseconds(); ns > 0 {
-			m.lockWaitNanos.Add(uint64(ns))
-		}
-		m.lockWaitHist.observe(d)
-	}
-}
-
 func (m *Metrics) incInodeLockFast() {
 	if m != nil {
 		m.inodeLockFast.Add(1)
@@ -1061,12 +996,6 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.tmpPromotesDesc
 
 	ch <- m.openHandlesDesc
-
-	ch <- m.locksActiveDesc
-	ch <- m.lockConflictsDesc
-	ch <- m.lockWaitsDesc
-	ch <- m.lockWaitSecDesc
-	ch <- m.lockWaitDurationDesc
 
 	ch <- m.inodeLockAcqDesc
 	ch <- m.inodeLockWaitSecDesc
@@ -1191,12 +1120,6 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(m.openHandlesDesc, prometheus.GaugeValue, float64(gauges.openFiles), "file")
 	ch <- prometheus.MustNewConstMetric(m.openHandlesDesc, prometheus.GaugeValue, float64(gauges.openDirs), "dir")
 
-	ch <- prometheus.MustNewConstMetric(m.locksActiveDesc, prometheus.GaugeValue, float64(gauges.activeLocks))
-	ch <- prometheus.MustNewConstMetric(m.lockConflictsDesc, prometheus.CounterValue, float64(m.lockConflicts.Load()))
-	ch <- prometheus.MustNewConstMetric(m.lockWaitsDesc, prometheus.CounterValue, float64(m.lockWaits.Load()))
-	ch <- prometheus.MustNewConstMetric(m.lockWaitSecDesc, prometheus.CounterValue, float64(m.lockWaitNanos.Load())*1e-9)
-	ch <- m.lockWaitHist.constHistogram(m.lockWaitDurationDesc)
-
 	ch <- prometheus.MustNewConstMetric(m.inodeLockAcqDesc, prometheus.CounterValue, float64(m.inodeLockFast.Load()), "fast")
 	ch <- prometheus.MustNewConstMetric(m.inodeLockAcqDesc, prometheus.CounterValue, float64(m.inodeLockContended.Load()), "contended")
 	ch <- prometheus.MustNewConstMetric(m.inodeLockWaitSecDesc, prometheus.CounterValue, float64(m.inodeLockWaitNanos.Load())*1e-9)
@@ -1304,13 +1227,6 @@ type HandleStats struct {
 	OpenDirs  int `json:"open_dirs"`
 }
 
-type LockStats struct {
-	ActiveLocks int     `json:"active_locks"`
-	Conflicts   uint64  `json:"conflicts"`
-	Waits       uint64  `json:"waits"`
-	WaitSeconds float64 `json:"wait_seconds"`
-}
-
 type InodeLockStats struct {
 	FastAcquisitions      uint64  `json:"fast_acquisitions"`
 	ContendedAcquisitions uint64  `json:"contended_acquisitions"`
@@ -1344,7 +1260,6 @@ type Snapshot struct {
 	Stage             StageStats           `json:"stage"`
 	TmpFile           TmpFileStats         `json:"tmp_file"`
 	Handles           HandleStats          `json:"handles"`
-	Locks             LockStats            `json:"locks"`
 	InodeLocks        InodeLockStats       `json:"inode_locks"`
 	Queues            AsyncQueueStats      `json:"queues"`
 }
@@ -1504,12 +1419,6 @@ func (m *Metrics) Snapshot() Snapshot {
 			OpenFiles: gauges.openFiles,
 			OpenDirs:  gauges.openDirs,
 		},
-		Locks: LockStats{
-			ActiveLocks: gauges.activeLocks,
-			Conflicts:   m.lockConflicts.Load(),
-			Waits:       m.lockWaits.Load(),
-			WaitSeconds: float64(m.lockWaitNanos.Load()) * 1e-9,
-		},
 		InodeLocks: InodeLockStats{
 			FastAcquisitions:      m.inodeLockFast.Load(),
 			ContendedAcquisitions: m.inodeLockContended.Load(),
@@ -1576,9 +1485,6 @@ func (s *Snapshot) FormatText() string {
 		s.TmpFile.ActiveFiles, s.TmpFile.ResidentBytes, s.TmpFile.Promotes,
 	)
 	fmt.Fprintf(&b, "Handles: open_files=%d open_dirs=%d\n", s.Handles.OpenFiles, s.Handles.OpenDirs)
-	fmt.Fprintf(&b, "Locks: active=%d conflicts=%d waits=%d wait_sec=%.6f\n",
-		s.Locks.ActiveLocks, s.Locks.Conflicts, s.Locks.Waits, s.Locks.WaitSeconds,
-	)
 	fmt.Fprintf(&b, "InodeLocks: active=%d fast=%d contended=%d wait_sec=%.6f\n",
 		s.InodeLocks.ActiveEntries, s.InodeLocks.FastAcquisitions,
 		s.InodeLocks.ContendedAcquisitions, s.InodeLocks.WaitSeconds,
@@ -1731,11 +1637,6 @@ func (s *Snapshot) FormatStatsFile() string {
 
 	writeI64("bowl_client_open_handles_file", int64(s.Handles.OpenFiles))
 	writeI64("bowl_client_open_handles_dir", int64(s.Handles.OpenDirs))
-
-	writeI64("bowl_client_locks_active", int64(s.Locks.ActiveLocks))
-	writeU64("bowl_client_lock_conflicts_total", s.Locks.Conflicts)
-	writeU64("bowl_client_lock_waits_total", s.Locks.Waits)
-	writeF64("bowl_client_lock_wait_seconds_total", s.Locks.WaitSeconds)
 
 	writeU64("bowl_client_inodelock_fast_total", s.InodeLocks.FastAcquisitions)
 	writeU64("bowl_client_inodelock_contended_total", s.InodeLocks.ContendedAcquisitions)

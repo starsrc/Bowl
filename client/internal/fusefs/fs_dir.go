@@ -243,6 +243,5 @@ func (fs *RawFS) ReleaseDir(input *fuse.ReleaseIn) {
 	if !ok || !h.IsDir || h.Ino != input.NodeId {
 		return
 	}
-	fs.locks.ForgetHandle(input.Fh)
 	fs.handles.Release(input.Fh)
 }

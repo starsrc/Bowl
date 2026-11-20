@@ -636,6 +636,45 @@ class CollectTelemetryContractTest(unittest.TestCase):
             self.assertTrue((results_dir / "telemetry" / "overview.json").exists())
             self.assertTrue((results_dir / "telemetry" / "overview.md").exists())
 
+    def test_given_client_prom_when_extracting_and_building_breakdown_then_omits_locktable_and_preserves_inodelock(self) -> None:
+        prom_text = (
+            'bowl_client_inodelock_wait_duration_seconds_bucket{le="0.005"} 2\n'
+            'bowl_client_inodelock_wait_duration_seconds_bucket{le="+Inf"} 2\n'
+            'bowl_client_inodelock_wait_duration_seconds_sum 0.004\n'
+            'bowl_client_inodelock_wait_duration_seconds_count 2\n'
+            'bowl_client_lock_wait_duration_seconds_bucket{le="0.005"} 3\n'
+            'bowl_client_lock_wait_duration_seconds_bucket{le="+Inf"} 3\n'
+            'bowl_client_lock_wait_duration_seconds_sum 0.009\n'
+            'bowl_client_lock_wait_duration_seconds_count 3\n'
+            'bowl_client_lock_wait_seconds_total 0.009\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            prom_path = Path(tmp) / "client.prom"
+            prom_path.write_text(prom_text, encoding="utf-8")
+            parsed = collect_telemetry.parse_prom_text(prom_path)
+
+        cli_prom = collect_telemetry.extract_client_prom_snapshot(parsed)
+
+        self.assertNotIn("lock_wait_ms", cli_prom)
+        self.assertNotIn("lock_wait_seconds_total", cli_prom["counters_and_gauges"])
+        self.assertIn("inodelock_wait_ms", cli_prom)
+        self.assertEqual(cli_prom["inodelock_wait_ms"][0]["count"], 2)
+
+        cli_prom_with_legacy = dict(cli_prom)
+        cli_prom_with_legacy["lock_wait_ms"] = [
+            {"count": 3, "total_val": 9.0, "mean_val": 3.0, "p50_val": 2.5, "p99_val": 4.5}
+        ]
+        breakdown = collect_telemetry.build_single_phase_breakdown(
+            "lock_phase",
+            {"window_sec": 1.0, "inode_lock_contended": 2, "inode_lock_wait_ms": 4.0},
+            cli_prom_with_legacy,
+            {},
+            {"lock_phase": 1.0},
+        )
+        components = [hop["component"] for hop in breakdown["hops"]]
+        self.assertIn("Client InodeLock 等待", components)
+        self.assertNotIn("Client LockTable 等待", components)
+
 
 if __name__ == "__main__":
     unittest.main()

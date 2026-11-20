@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	// tmpLocalInoBit 是客户端本地匿名文件 Inode 的最高位标识 (1 << 63)。
 	tmpLocalInoBit = uint64(1) << 63
-	// tmpDefaultBlksize 是匿名文件属性返回的块尺寸 (4 KiB)。
+
 	tmpDefaultBlksize = 4 * 1024
 
 	xattrCreateFlag    uint32 = 0x1
@@ -31,7 +30,6 @@ const (
 	maxXattrListBytes         = 65536
 )
 
-// TmpMaterializer 定义本地匿名文件通过 linkat 具名化转正时的服务端建项与后台接管端口。
 type TmpMaterializer interface {
 	CreateTmpInode(ctx context.Context, parentIno uint64, name string, mode, uid, gid uint32) (inode *storagev1.Inode, entryTimeout, attrTimeout float64, status fuse.Status)
 	PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent)
@@ -51,8 +49,6 @@ type managedTmpFile struct {
 	xattrs        map[string][]byte
 }
 
-// TmpFileManager 封装宿主机暂存盘匿名文件（O_TMPFILE / CreateTemp+unlink）、
-// 高位本地 Inode (1 << 63) 与服务端 Inode 的双向别名映射，以及 nlookup 与句柄双重归零回收逻辑。
 type TmpFileManager struct {
 	rootIno       uint64
 	stageDir      string
@@ -63,7 +59,6 @@ type TmpFileManager struct {
 	metrics       atomic.Pointer[Metrics]
 }
 
-// NewTmpFileManager 创建并初始化基于宿主机磁盘的 TmpFileManager。
 func NewTmpFileManager(rootIno uint64, stageDir string) *TmpFileManager {
 	return &TmpFileManager{
 		rootIno:       rootIno,
@@ -99,7 +94,6 @@ func (m *TmpFileManager) activeLocalFiles() int {
 	return count
 }
 
-// IsUnpromoted 报告该内核 Inode 是否为尚未具名化的本地匿名文件。
 func (m *TmpFileManager) IsUnpromoted(ino uint64) bool {
 	tmp := m.getFile(ino)
 	return tmp != nil && !tmp.uploaded.Load()
@@ -131,7 +125,6 @@ func (m *TmpFileManager) releaseResidentBytesLocked(tmp *managedTmpFile) {
 	tmp.residentBytes = 0
 }
 
-// fillAttr 将 storagev1.Inode 转换为 fuse.Attr。
 func (m *TmpFileManager) fillAttr(out *fuse.Attr, ino *storagev1.Inode) {
 	if out == nil || ino == nil {
 		return
@@ -174,7 +167,6 @@ func (m *TmpFileManager) fillEntryOut(out *fuse.EntryOut, ino *storagev1.Inode, 
 	m.fillAttr(&out.Attr, ino)
 }
 
-// Create 在宿主机暂存目录创建匿名磁盘文件并分配高位 Inode (1<<63 | seq)，登记初始 nlookup=1。
 func (m *TmpFileManager) Create(parent uint64, uid, gid, mode, flags uint32) (uint64, *storagev1.Inode, fuse.Status) {
 	f, err := openHostTmpfile(m.stageDir)
 	if err != nil {
@@ -208,7 +200,6 @@ func (m *TmpFileManager) Create(parent uint64, uid, gid, mode, flags uint32) (ui
 	return ino, cloneInode(inode), fuse.OK
 }
 
-// ToServerIno 将内核传入的 Inode 映射为服务端持久化 Inode（未具名匿名文件返回自身高位 Inode）。
 func (m *TmpFileManager) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
 	tmp := m.getFile(kernelIno)
 	if tmp != nil {
@@ -232,7 +223,6 @@ func (m *TmpFileManager) ToServerIno(kernelIno uint64) (uint64, fuse.Status) {
 	return kernelIno, fuse.OK
 }
 
-// ToKernelIno 将服务端持久化 Inode 映射为 Linux 内核可见的 Inode（含已具名化匿名文件别名与 RootIno 映射）。
 func (m *TmpFileManager) ToKernelIno(serverIno uint64) uint64 {
 	m.mu.RLock()
 	localIno := m.serverToLocal[serverIno]
@@ -246,14 +236,12 @@ func (m *TmpFileManager) ToKernelIno(serverIno uint64) uint64 {
 	return serverIno
 }
 
-// ObserveKernelLookup 原子完成服务端或内核 Inode 向内核可见 Inode 的转换，并在命中匿名节点时递增其内核 nlookup 引用计数。
 func (m *TmpFileManager) ObserveKernelLookup(ino uint64) uint64 {
 	kernelIno := m.ToKernelIno(ino)
 	m.AddLookup(kernelIno)
 	return kernelIno
 }
 
-// AddLookup 在目标内核 Inode 是受管匿名文件时递增其 nlookup 引用计数。
 func (m *TmpFileManager) AddLookup(kernelIno uint64) {
 	tmp := m.getFile(kernelIno)
 	if tmp == nil {
@@ -264,7 +252,6 @@ func (m *TmpFileManager) AddLookup(kernelIno uint64) {
 	tmp.mu.Unlock()
 }
 
-// LocalInode 若目标节点是尚未具名化的本地匿名文件，返回其深拷贝 Inode 与 true。
 func (m *TmpFileManager) LocalInode(ino uint64) (*storagev1.Inode, bool) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -278,7 +265,6 @@ func (m *TmpFileManager) LocalInode(ino uint64) (*storagev1.Inode, bool) {
 	return cloneInode(tmp.inode), true
 }
 
-// GetAttr 读取尚未具名化的本地匿名文件属性并填入 fuse.Attr。
 func (m *TmpFileManager) GetAttr(ino uint64, out *fuse.Attr) (bool, fuse.Status) {
 	inode, ok := m.LocalInode(ino)
 	if !ok {
@@ -288,7 +274,6 @@ func (m *TmpFileManager) GetAttr(ino uint64, out *fuse.Attr) (bool, fuse.Status)
 	return true, fuse.OK
 }
 
-// Read 从尚未具名化的宿主机匿名文件读取数据，超出 EOF 自动截断。
 func (m *TmpFileManager) Read(ino, offset uint64, dest []byte) (n int, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -312,7 +297,6 @@ func (m *TmpFileManager) Read(ino, offset uint64, dest []byte) (n int, handled b
 	return int(length), true, fuse.OK
 }
 
-// Write 将数据写入尚未具名化的宿主机匿名文件，不占用 --stage-size 配额。
 func (m *TmpFileManager) Write(ino, offset uint64, data []byte, appendMode bool) (written uint32, inode *storagev1.Inode, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -355,7 +339,6 @@ func (m *TmpFileManager) Write(ino, offset uint64, data []byte, appendMode bool)
 	return uint32(len(data)), cloneInode(tmp.inode), true, fuse.OK
 }
 
-// SetAttr 更新尚未具名化的本地匿名文件属性或截断宿主机磁盘文件尺寸。
 func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle func(fh uint64, needWrite bool) fuse.Status, out *fuse.Attr) (*storagev1.Inode, bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -429,7 +412,6 @@ func (m *TmpFileManager) SetAttr(ino uint64, input *fuse.SetAttrIn, checkHandle 
 	return cloned, true, fuse.OK
 }
 
-// Allocate 在尚未具名化的宿主机匿名文件上执行预分配或打洞（支持 EOPNOTSUPP 写零回退）。
 func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (*storagev1.Inode, bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -478,7 +460,6 @@ func (m *TmpFileManager) Allocate(ino, offset, length uint64, mode uint32) (*sto
 	return cloneInode(tmp.inode), true, fuse.OK
 }
 
-// Fsync 对尚未具名化的宿主机匿名文件执行本地 f.Sync()，零服务端 RPC。
 func (m *TmpFileManager) Fsync(ino uint64) (bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -508,7 +489,6 @@ func validateXattrName(name string) fuse.Status {
 	return fuse.OK
 }
 
-// SetXAttr updates an extended attribute in memory on an unpromoted staged O_TMPFILE.
 func (m *TmpFileManager) SetXAttr(ino uint64, name string, value []byte, flags uint32) (bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -553,7 +533,6 @@ func (m *TmpFileManager) SetXAttr(ino uint64, name string, value []byte, flags u
 	return true, fuse.OK
 }
 
-// GetXAttr reads an extended attribute from an unpromoted staged O_TMPFILE.
 func (m *TmpFileManager) GetXAttr(ino uint64, name string, dest []byte) (sz uint32, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -575,7 +554,6 @@ func (m *TmpFileManager) GetXAttr(ino uint64, name string, dest []byte) (sz uint
 	return sz, true, st
 }
 
-// ListXAttr returns sorted extended attribute names on an unpromoted staged O_TMPFILE.
 func (m *TmpFileManager) ListXAttr(ino uint64, dest []byte) (sz uint32, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -597,7 +575,6 @@ func (m *TmpFileManager) ListXAttr(ino uint64, dest []byte) (sz uint32, handled 
 	return sz, true, st
 }
 
-// RemoveXAttr deletes an extended attribute from an unpromoted staged O_TMPFILE.
 func (m *TmpFileManager) RemoveXAttr(ino uint64, name string) (bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -619,7 +596,6 @@ func (m *TmpFileManager) RemoveXAttr(ino uint64, name string) (bool, fuse.Status
 	return true, fuse.OK
 }
 
-// GetFlags reads in-memory inode flags on an unpromoted staged O_TMPFILE.
 func (m *TmpFileManager) GetFlags(ino uint64) (uint32, bool) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -633,7 +609,6 @@ func (m *TmpFileManager) GetFlags(ino uint64) (uint32, bool) {
 	return tmp.inode.Attr.Flags, true
 }
 
-// SetFlags updates in-memory inode flags on an unpromoted staged O_TMPFILE.
 func (m *TmpFileManager) SetFlags(ino uint64, flags uint32) (*storagev1.Inode, bool, fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -663,7 +638,6 @@ func (m *TmpFileManager) installAliasLocked(localIno uint64, tmp *managedTmpFile
 	m.mu.Unlock()
 }
 
-// TmpLinkResult 承载匿名文件具名化成功后的服务端属性与超时信息。
 type TmpLinkResult struct {
 	ServerIno      uint64
 	Inode          *storagev1.Inode
@@ -672,8 +646,6 @@ type TmpLinkResult struct {
 	HasSecurityCap bool
 }
 
-// Link 通过同步 Mknod 在服务端分配 serverIno 与目录项，并将宿主机 *os.File 所有权移交至 StageCoordinator 后台上传。
-// 已具名化或携带 O_EXCL 的匿名节点拒绝再次 Link。
 func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint64, name string, isOpen bool, mat TmpMaterializer, out *fuse.EntryOut) (res TmpLinkResult, handled bool, status fuse.Status) {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -809,7 +781,6 @@ func (m *TmpFileManager) dropIfUnused(ino uint64, orphan bool, hasOpenHandles fu
 	return existed
 }
 
-// OnForget 递减内核 nlookup 引用计数，并在 nlookup 与打开句柄双重归零时关闭宿主机匿名文件并清理别名。
 func (m *TmpFileManager) OnForget(ino, nlookup uint64, hasOpenHandles func(uint64) bool) bool {
 	tmp := m.getFile(ino)
 	if tmp == nil {
@@ -825,12 +796,10 @@ func (m *TmpFileManager) OnForget(ino, nlookup uint64, hasOpenHandles func(uint6
 	return m.dropIfUnused(ino, false, hasOpenHandles)
 }
 
-// OnHandleReleased 在文件句柄释放后检查该节点是否满足双重归零（或孤儿无句柄）回收条件。
 func (m *TmpFileManager) OnHandleReleased(ino uint64, orphan bool, hasOpenHandles func(uint64) bool) bool {
 	return m.dropIfUnused(ino, orphan, hasOpenHandles)
 }
 
-// Clear 关闭所有尚未转正的宿主机匿名文件并清空双向别名映射（供卸载时调用）。
 func (m *TmpFileManager) Clear() {
 	m.mu.Lock()
 	detached := make([]*managedTmpFile, 0, len(m.files))

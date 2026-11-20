@@ -21,29 +21,26 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Pebble 初始化与批次重置阈值常量。
 const (
-	DefaultMemTableSize    = 16 << 20 // 16 MiB
-	DefaultCacheSize       = 64 << 20 // 64 MiB
+	DefaultMemTableSize    = 16 << 20
+	DefaultCacheSize       = 64 << 20
 	DefaultMaxOpenFiles    = 128
-	DefaultWALBytesPerSync = 4 << 20 // 4 MiB
+	DefaultWALBytesPerSync = 4 << 20
 	DefaultBloomBitsPerKey = 10
 	PebbleLevelCount       = 7
 
-	BatchResetMaxReprBytes = 1 << 20 // 1 MiB
+	BatchResetMaxReprBytes = 1 << 20
 	BatchResetMaxCount     = 8192
 
 	defaultSlowTickThreshold    = 20 * time.Millisecond
 	staleEpochLogRateLimitNanos = int64(time.Second)
 )
 
-// pebbleReader 抽象 *pebble.DB 与 *pebble.Batch 的共享只读接口。
 type pebbleReader interface {
 	Get(key []byte) ([]byte, io.Closer, error)
 	NewIter(opts *pebble.IterOptions) (*pebble.Iterator, error)
 }
 
-// opKind 标识投递到 StoreActor 双缓冲队列的操作类型。
 type opKind uint8
 
 const (
@@ -131,12 +128,11 @@ func (op opKind) String() string {
 	}
 }
 
-// writeCmd 是投递至 StoreActor 双缓冲 MPSC 队列的命令载体（由 sync.Pool 复用）。
 type writeCmd struct {
 	op   opKind
 	req  any
 	err  error
-	done chan struct{} // 容量为 1 的完成信号
+	done chan struct{}
 
 	enqueueAt   time.Time
 	dequeueAt   time.Time
@@ -147,7 +143,6 @@ type writeCmd struct {
 	stagedBlobs []BlobRef
 }
 
-// Options 配置 StoreActor 实例打开参数。
 type Options struct {
 	Dir               string
 	DiskID            string
@@ -165,7 +160,6 @@ type Options struct {
 	MaxPackSize       uint32
 	SlowTickThreshold time.Duration
 
-	// 包内单测注入钩子（生产路径留零值）。
 	pebbleFS                  vfs.FS
 	diskSlowThreshold         time.Duration
 	beforeTickHook            func()
@@ -174,10 +168,6 @@ type Options struct {
 	removePackHook            func(packID uint64)
 }
 
-// NewPebbleOptions 构建*pebble.Options：
-//   - 自定义 Comparer.Split（entry:/xattr: -> 15，data: -> 14，其余 -> len(key)）；
-//   - 全部 7 层启用 bloom.FilterPolicy(10)；
-//   - MemTableSize=16MiB, MaxOpenFiles=128, WALBytesPerSync=4MiB, FormatMajorVersion=pebble.FormatNewest。
 func NewPebbleOptions(cache *pebble.Cache, readOnly bool) *pebble.Options {
 	if cache == nil {
 		cache = pebble.NewCache(DefaultCacheSize)
@@ -205,9 +195,6 @@ func NewPebbleOptions(cache *pebble.Cache, readOnly bool) *pebble.Options {
 	}
 }
 
-// StoreActor 是单盘（或只读快照）存储引擎实例。
-//
-//nolint:revive // exported: StoreActor 为存储引擎锁定的核心实体名称。
 type StoreActor struct {
 	dir            string
 	diskID         string
@@ -224,7 +211,6 @@ type StoreActor struct {
 	maxBytes  atomic.Uint64
 	maxInodes atomic.Uint64
 
-	// 1. 双缓冲 MPSC 写命令队列（RPC 协程向 active 追加，Actor 协程交换到 draining 批量处理）
 	mb struct {
 		mu       sync.Mutex
 		active   []*writeCmd
@@ -234,7 +220,6 @@ type StoreActor struct {
 	}
 	cmdPool sync.Pool
 
-	// 2. Actor 写协程私有状态（仅在单协程 Loop 内无锁读写）
 	batch                  *pebble.Batch
 	stat                   BranchStat
 	packStats              map[uint64]PackMeta
@@ -251,7 +236,6 @@ type StoreActor struct {
 	tickCount              atomic.Uint64
 	batchResetCnt          atomic.Uint64
 
-	// 3. 并发读路径与监控快照无锁镜像（每次 Batch 提交后刷新）
 	atomicLogicalBytes      atomic.Uint64
 	atomicInodes            atomic.Uint64
 	atomicWriterEpoch       atomic.Uint64
@@ -266,11 +250,9 @@ type StoreActor struct {
 	suppressedStaleEpochLog atomic.Uint64
 	slowTickThreshold       time.Duration
 
-	// 4. 延迟 Atime 内存脏表（读路径登记/叠加，写循环或关闭时合并刷盘）
 	atimeMu    sync.Mutex
-	dirtyAtime map[uint64]int64 // ino -> unixNano
+	dirtyAtime map[uint64]int64
 
-	// 5. 生命周期守卫（保护 s.db 不在在途直读或写阶段 1 预读期间被 Close 关闭）
 	lifecycleMu    sync.RWMutex
 	closing        atomic.Bool
 	discardOnClose atomic.Bool
@@ -278,7 +260,6 @@ type StoreActor struct {
 	closeOnce      sync.Once
 	closeErr       error
 
-	// 6. Data Layer 协同锁与钩子
 	inodeLocks                [4096]sync.Mutex
 	blobs                     *blobStore
 	beforeTickHook            func()
@@ -289,10 +270,6 @@ type StoreActor struct {
 	pendingDeadPacks          []uint64
 }
 
-// Open 打开或初始化一个 StoreActor 实例。
-// 空库首次可写打开时通过单次 Batch 初始化根目录 Inode(1)（S_IFDIR | 0755, Nlink = 2）与 "sys:stat"（Inodes = 1, LogicalBytes = 0）。
-//
-//nolint:gocritic // hugeParam: Open 公开构造契约按值接收 Options。
 func Open(opts Options) (*StoreActor, error) {
 	if opts.Dir == "" {
 		return nil, ErrInvalid
@@ -534,7 +511,6 @@ func (s *StoreActor) scanMaxInode() (uint64, error) {
 	}
 	defer func() { _ = iter.Close() }()
 
-	// "inode;" 紧邻 "inode:" 之后（':' = 0x3a, ';' = 0x3b），SeekLT 直接定位最大 InodeKey。
 	if iter.SeekLT([]byte("inode;")) && bytes.HasPrefix(iter.Key(), inodePrefixBytes) {
 		ino, err := DecodeInodeKey(iter.Key())
 		if err != nil {
@@ -545,7 +521,6 @@ func (s *StoreActor) scanMaxInode() (uint64, error) {
 	return RootIno, iter.Error()
 }
 
-// enter 是所有直读路径与写阶段 1 预读的统一生命周期读守卫。
 func (s *StoreActor) enter() (func(), error) {
 	if s.closing.Load() {
 		return nil, ErrClosed
@@ -558,19 +533,14 @@ func (s *StoreActor) enter() (func(), error) {
 	return s.lifecycleMu.RUnlock, nil
 }
 
-// Dir 返回当前分支工作区目录路径。
 func (s *StoreActor) Dir() string { return s.dir }
 
-// ReadOnly 报告实例是否为只读模式。
 func (s *StoreActor) ReadOnly() bool { return s.readOnly }
 
-// SetMaxBytes 动态更新磁盘逻辑容量配额上限。
 func (s *StoreActor) SetMaxBytes(maxBytes uint64) { s.maxBytes.Store(maxBytes) }
 
-// MaxBytes 返回当前逻辑容量配额上限。
 func (s *StoreActor) MaxBytes() uint64 { return s.maxBytes.Load() }
 
-// WriterEpoch 返回当前已持久化生效的写世代号。
 func (s *StoreActor) WriterEpoch() uint64 { return s.atomicWriterEpoch.Load() }
 
 type advanceEpochOp struct {
@@ -581,8 +551,6 @@ type advanceEpochOp struct {
 	rootAttr Attribute
 }
 
-// AdvanceEpoch 通过 Actor 队列原子递增 WriterEpoch 并以 pebble.Sync 持久化至 "sys:stat"，
-// 同时清扫所有残留 Orphan Inode 并返回新 WriterEpoch 与根目录 Inode(1) 的最新 Attribute。
 func (s *StoreActor) AdvanceEpoch(ctx context.Context) (uint64, Attribute, error) {
 	if s.readOnly {
 		return 0, Attribute{}, ErrReadOnly
@@ -645,7 +613,6 @@ type updateMaxBytesOp struct {
 	maxBytes uint64
 }
 
-// UpdateMaxBytes 通过 Actor 队列在线扩容或安全缩容单盘逻辑容量配额上限，并以 pebble.Sync 持久化至 "sys:stat"。
 func (s *StoreActor) UpdateMaxBytes(ctx context.Context, maxBytes uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -677,22 +644,16 @@ func (s *StoreActor) mutateUpdateMaxBytesCmd(cmd *writeCmd) {
 	cmd.syncBarrier = true
 }
 
-// SetMaxInodes 动态更新节点数量配额上限。
 func (s *StoreActor) SetMaxInodes(maxInodes uint64) { s.maxInodes.Store(maxInodes) }
 
-// MaxInodes 返回当前节点数量配额上限。
 func (s *StoreActor) MaxInodes() uint64 { return s.maxInodes.Load() }
 
-// TickCount 返回 Actor 后台已执行的写批次轮数（用于并发合并测试观测）。
 func (s *StoreActor) TickCount() uint64 { return s.tickCount.Load() }
 
-// BatchReallocCount 返回 IndexedBatch 触发防膨胀重建的次数（用于测试观测）。
 func (s *StoreActor) BatchReallocCount() uint64 { return s.batchResetCnt.Load() }
 
-// WALDirty 报告是否存在尚未通过 pebble.Sync 刷盘的 NoSync WAL 写入（用于测试观测）。
 func (s *StoreActor) WALDirty() bool { return s.walDirty.Load() }
 
-// StatFS 直接从内存原子镜像读取逻辑已用字节数与节点数（0 锁、0 I/O）。
 func (s *StoreActor) StatFS(_ context.Context) (StatFSResult, error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -734,7 +695,6 @@ func (s *StoreActor) StatFS(_ context.Context) (StatFSResult, error) {
 	}, nil
 }
 
-// GetAttr 在 lifecycleMu.RLock() 守卫下直接调用 db.Get(InodeKey) 原地解码并叠加 dirtyAtime（严禁创建 Snapshot）。
 func (s *StoreActor) GetAttr(ctx context.Context, ino uint64) (Attribute, error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -864,7 +824,6 @@ func (s *StoreActor) checkInodeLive(reader pebbleReader, inode *Inode) error {
 	return closer.Close()
 }
 
-// MarkAtimeDirty 非阻塞登记节点最新访问时间至内存 dirtyAtime 表。
 func (s *StoreActor) MarkAtimeDirty(ino uint64, atime time.Time) {
 	s.markAtimeDirty(ino, atime.UnixNano())
 }
@@ -900,8 +859,6 @@ func (s *StoreActor) discardDirtyAtime(ino uint64) {
 	s.atimeMu.Unlock()
 }
 
-// FlushWAL 在存在未落盘 NoSync 写入时执行一次同步 WAL 刷盘（db.LogData(nil, pebble.Sync)），
-// 并在 WAL 落盘确认后物理清理挂起的全死封口 .pack 文件。
 func (s *StoreActor) FlushWAL() error {
 	if s.readOnly {
 		return nil
@@ -1026,7 +983,6 @@ func (s *StoreActor) enqueueAndWait(ctx context.Context, cmd *writeCmd) error {
 	return cmdErr
 }
 
-// prepareIno 在 Phase A 检查本地 Inode 号段余量；若已耗尽则按 4096 步长向分配器预留新号段。
 func (s *StoreActor) prepareIno(parentSC trace.SpanContext) (uint64, error) {
 	if s.nextIno == 0 || s.nextIno > s.reservedIno {
 		if err := s.reserveInoSegment(parentSC); err != nil {
@@ -1080,7 +1036,6 @@ func (s *StoreActor) reserveInoSegment(parentSC trace.SpanContext) error {
 	return nil
 }
 
-// consumeIno 在 Phase B 消费当前已预留的 Inode 编号并推进游标。
 func (s *StoreActor) consumeIno() uint64 {
 	ino := s.nextIno
 	s.nextIno++
@@ -1101,13 +1056,12 @@ func (s *StoreActor) checkQuota(bytesDelta, inodesDelta uint64) error {
 	return nil
 }
 
-// runLoop 是 StoreActor 单协程写循环。
 func (s *StoreActor) runLoop() {
 	defer close(s.loopDone)
 	for {
 		<-s.mb.notify
 		for {
-			// Step 1：单锁指针交换排空队列（Drain）
+
 			s.mb.mu.Lock()
 			if len(s.mb.active) == 0 {
 				closed := s.mb.closed
@@ -1128,7 +1082,6 @@ func (s *StoreActor) runLoop() {
 	}
 }
 
-// processTick 严格执行 Group Commit 的 Step 2 ~ Step 4。
 func (s *StoreActor) processTick() {
 	if s.beforeTickHook != nil {
 		s.beforeTickHook()
@@ -1187,9 +1140,8 @@ func (s *StoreActor) processTick() {
 		phaseBDur       time.Duration
 	)
 
-	// Step 2：逐条两阶段串行演进（Phase A Validate -> Phase B Mutate）
 	for _, cmd := range cmds {
-		// Phase A — 纯内存只读预校验（绝不触碰 s.batch 写接口）
+
 		aStart := time.Now()
 		err := s.validateCmd(cmd)
 		phaseADur += time.Since(aStart)
@@ -1205,7 +1157,6 @@ func (s *StoreActor) processTick() {
 			continue
 		}
 
-		// Phase B — 内存记账与原地写入（必定成功）
 		bStart := time.Now()
 		prevCount := s.batch.Count()
 		prevStat := s.stat
@@ -1232,7 +1183,6 @@ func (s *StoreActor) processTick() {
 		phaseBDur += time.Since(bStart)
 	}
 
-	// Step 3：批次收敛与合并提交（Seal & Commit）
 	var (
 		commitErr      error
 		deadPacks      []uint64
@@ -1243,7 +1193,7 @@ func (s *StoreActor) processTick() {
 	)
 	sealStart := time.Now()
 	if mutated || s.batch.Count() > 0 || hasSyncBarrier || len(s.dirtyPackStats) > 0 {
-		// 顺带将内存 dirtyAtime 与 dirtyPackStats 合入当前批次
+
 		s.flushDirtyAtimeToBatch(s.batch)
 		var wrotePacks bool
 		deadPacks, wrotePacks = s.flushDirtyPackStatsToBatch(s.batch)
@@ -1252,7 +1202,7 @@ func (s *StoreActor) processTick() {
 		}
 	}
 	if mutated {
-		// 批次末尾仅写 1 次 "sys:stat"
+
 		BatchSetStatDeferred(s.batch, s.stat)
 	}
 	phaseBDur += time.Since(sealStart)
@@ -1302,7 +1252,6 @@ func (s *StoreActor) processTick() {
 		finishSpan(syncSpan, commitErr)
 	}
 
-	// Step 4：防膨胀重置与执行切面固化（仍在 tickSpan 生命周期内）、唤醒调用方（Reset & Wake）
 	if len(s.batch.Repr()) > BatchResetMaxReprBytes || s.batch.Count() > BatchResetMaxCount {
 		s.batch = s.db.NewIndexedBatch()
 		s.batchResetCnt.Add(1)
@@ -1542,7 +1491,7 @@ func (s *StoreActor) commitWithSyncBarrier(fsyncFileInodes, deadPacks []uint64) 
 	}
 
 	walErr := s.batch.SyncWait()
-	// 记录从 ApplyNoSyncWait 提交至 SyncWait 返回的完整 WAL 同步墙钟耗时，避免被并发执行的 .pack fdatasync 掩盖。
+
 	walSyncDur = time.Since(applyStart)
 	s.metrics.observePhaseWALApplySync(walSyncDur)
 
@@ -1666,23 +1615,17 @@ func (s *StoreActor) flushOnClose() error {
 	return s.syncWALAndReclaimDeadPacks()
 }
 
-// Close 执行三步无死锁优雅关闭：
-//   - Step 1：置 closing=true 拒新，封闭 mb 队列并唤醒 Actor 协程；
-//   - Step 2：等待 <-loopDone 排空已入队写批次，刷入残留 dirtyAtime 与 WAL Sync；
-//   - Step 3：获取 lifecycleMu.Lock() 排空在途直读后安全关闭底层 *pebble.DB。
 func (s *StoreActor) Close() error {
 	return s.closeInternal(false)
 }
 
-// CloseDiscard 执行销毁型三步关闭（用于 Rollback / DeleteBranch / DeleteDisk）：
-// 排空已入队批次后直接跳过尾部 dirtyAtime 与 WAL Sync 刷盘，省去无意义磁盘 fsync。
 func (s *StoreActor) CloseDiscard() error {
 	return s.closeInternal(true)
 }
 
 func (s *StoreActor) closeInternal(discard bool) error {
 	s.closeOnce.Do(func() {
-		// Step 1 — 拉闸拒新并封闭写队列
+
 		s.discardOnClose.Store(discard)
 		s.closing.Store(true)
 
@@ -1694,10 +1637,8 @@ func (s *StoreActor) closeInternal(discard bool) error {
 		}
 		s.mb.mu.Unlock()
 
-		// Step 2 — 排空已入队写批次并等待 Actor 协程退出
 		<-s.loopDone
 
-		// Step 3 — 排空在途直读并安全关闭 Pebble、健康检测包装与常驻 .pack 文件句柄
 		s.lifecycleMu.Lock()
 		if s.batch != nil {
 			_ = s.batch.Close()

@@ -15,7 +15,6 @@ import (
 	"github.com/starsrc/bowl/client/internal/fusefs"
 )
 
-// readDaemonHandshake blocks waiting for the readiness status line from the daemon child.
 func readDaemonHandshake(r io.Reader, stderr io.Writer) int {
 	scanner := bufio.NewScanner(r)
 	if scanner.Scan() {
@@ -45,7 +44,6 @@ func defaultRedirectDaemonStdio(logF *os.File) {
 	_ = unix.Dup2(logFd, int(os.Stderr.Fd()))
 }
 
-// spawnDaemonProcess spawns a background mount daemon and waits for its readiness handshake.
 func spawnDaemonProcess(args []string, stderr io.Writer) int {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -78,13 +76,11 @@ func spawnDaemonProcess(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	// Close the parent write end immediately so child exit triggers EOF on r.
 	_ = w.Close()
 
 	return readDaemonHandshake(r, stderr)
 }
 
-// runDaemonWorker runs inside the background daemon child, redirects stdout/stderr to the log file, and signals readiness over fd 3.
 func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string) int {
 	pipeWriter := readinessPipeFile()
 	notifyErr := func(err error) {

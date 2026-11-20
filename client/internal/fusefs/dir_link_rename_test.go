@@ -104,12 +104,11 @@ func seedLargeDirectory(srv *fakeStorage, parentIno uint64, count int) {
 
 func TestMkdir与Mknod_创建节点可查询并拦截重名超长与只读挂载(t *testing.T) {
 	t.Run("Mkdir递增父目录链接计数且Mknod支持特殊设备节点", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		beforeRoot := mustGetAttr(t, fs, fuse.FUSE_ROOT_ID)
 
-		// When
 		subOut := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "workspace", 0o755)
 		var fifoOut fuse.EntryOut
 		fifoSt := fs.Mknod(nil, &fuse.MknodIn{
@@ -118,7 +117,6 @@ func TestMkdir与Mknod_创建节点可查询并拦截重名超长与只读挂载
 			Rdev:     0x102,
 		}, "pipe.fifo", &fifoOut)
 
-		// Then
 		requireStatus(t, "Mknod", fuse.OK, fifoSt)
 		require.Equal(t, uint32(syscall.S_IFIFO|0o600), fifoOut.Mode)
 		require.Equal(t, uint32(0x102), fifoOut.Rdev)
@@ -139,16 +137,14 @@ func TestMkdir与Mknod_创建节点可查询并拦截重名超长与只读挂载
 	})
 
 	t.Run("只读挂载拦截Mkdir与Mknod并返回EROFS", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t)
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var entryOut fuse.EntryOut
 
-		// When
 		mkdirSt := fs.Mkdir(nil, &fuse.MkdirIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Mode: 0o755}, "ro-dir", &entryOut)
 		mknodSt := fs.Mknod(nil, &fuse.MknodIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Mode: syscall.S_IFREG | 0o644}, "ro-node", &entryOut)
 
-		// Then
 		requireStatus(t, "只读 Mkdir", fuse.Status(syscall.EROFS), mkdirSt)
 		requireStatus(t, "只读 Mknod", fuse.Status(syscall.EROFS), mknodSt)
 		require.Zero(t, srv.mkdirCalls.Load())
@@ -158,18 +154,16 @@ func TestMkdir与Mknod_创建节点可查询并拦截重名超长与只读挂载
 
 func TestOpenDir与ReadDir_超单页大目录分页完整且校验非目录与已删除目录句柄(t *testing.T) {
 	t.Run("600项大目录通过ReadDir与ReadDirPlus多页偏移完整遍历", func(t *testing.T) {
-		// Given
+
 		const totalFiles = 600
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		bigDir := srv.seedDir(1, "big", 0o755)
 		seedLargeDirectory(srv, bigDir, totalFiles)
 		fs := newTestRawFS(t, srv)
 
-		// When: 使用受限页缓冲区强制触发 >512 条目且 offset != 0 的多次续页读取
 		entriesPlain, plainPages := readAllDirEntries(t, fs, bigDir, false, 4096)
 		entriesPlus, plusPages := readAllDirEntries(t, fs, bigDir, true, 8192)
 
-		// Then
 		require.Greater(t, plainPages, 1, "ReadDir 必须经过多页分页读取")
 		require.Greater(t, plusPages, 1, "ReadDirPlus 必须经过多页分页读取")
 		require.Len(t, entriesPlain, totalFiles+2)
@@ -186,19 +180,17 @@ func TestOpenDir与ReadDir_超单页大目录分页完整且校验非目录与�
 	})
 
 	t.Run("非目录OpenDir返回ENOTDIR且目录已打开时Rmdir后GetAttr与FsyncDir保持语义", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fileIno := srv.seedFile(1, "plain.txt", 0o644, []byte("abc"))
 		dirOut := mustMkdir(t, newTestRawFS(t, srv), fuse.FUSE_ROOT_ID, "open-then-rmdir", 0o755)
 		fs := newTestRawFS(t, srv)
 
-		// When: 普通文件 OpenDir 返回 ENOTDIR；目录带写标志 Open 返回 EISDIR
 		var dh fuse.OpenOut
 		notDirSt := fs.OpenDir(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: fileIno}}, &dh)
 		var fileOpenOut fuse.OpenOut
 		isDirSt := fs.Open(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: dirOut.NodeId}, Flags: uint32(syscall.O_RDWR)}, &fileOpenOut)
 
-		// 打开目录后再执行 Rmdir，仍持有的目录句柄 GetAttr/FsyncDir 按已删除目录快路径成功，ReleaseDir 后失效
 		var dirHandle fuse.OpenOut
 		requireStatus(t, "OpenDir", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: dirOut.NodeId}}, &dirHandle))
 		requireStatus(t, "Rmdir", fuse.OK, fs.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "open-then-rmdir"))
@@ -209,7 +201,6 @@ func TestOpenDir与ReadDir_超单页大目录分页完整且校验非目录与�
 		var afterReleaseAttr fuse.AttrOut
 		afterReleaseSt := fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: dirOut.NodeId}}, &afterReleaseAttr)
 
-		// Then
 		requireStatus(t, "文件 OpenDir", fuse.Status(syscall.ENOTDIR), notDirSt)
 		requireStatus(t, "目录写模式 Open", fuse.Status(syscall.EISDIR), isDirSt)
 		requireStatus(t, "已删除打开目录 GetAttr", fuse.OK, removedAttrSt)
@@ -221,7 +212,7 @@ func TestOpenDir与ReadDir_超单页大目录分页完整且校验非目录与�
 
 func TestSymlink与Link_硬链接共享节点计数并拦截目录链接与只读写入(t *testing.T) {
 	t.Run("Symlink与Link维护正确nlink并共享同一份文件数据", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orig.bin", syscall.O_RDWR, 0o644)
@@ -229,7 +220,6 @@ func TestSymlink与Link_硬链接共享节点计数并拦截目录链接与只�
 		mustWriteAt(t, fs, created.NodeId, created.Fh, 0, payload)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 
-		// When
 		var linkOut, symOut fuse.EntryOut
 		linkSt := fs.Link(nil, &fuse.LinkIn{
 			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -237,7 +227,6 @@ func TestSymlink与Link_硬链接共享节点计数并拦截目录链接与只�
 		}, "hard.bin", &linkOut)
 		symSt := fs.Symlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "hard.bin", "sym.bin", &symOut)
 
-		// Then
 		requireStatus(t, "Link", fuse.OK, linkSt)
 		requireStatus(t, "Symlink", fuse.OK, symSt)
 		require.Equal(t, created.NodeId, linkOut.NodeId)
@@ -262,17 +251,15 @@ func TestSymlink与Link_硬链接共享节点计数并拦截目录链接与只�
 	})
 
 	t.Run("只读挂载拦截Symlink与Link并返回EROFS", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t)
 		ino := srv.seedFile(1, "target.txt", 0o644, []byte("x"))
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		var out fuse.EntryOut
 
-		// When
 		symSt := fs.Symlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "target.txt", "ro-sym", &out)
 		linkSt := fs.Link(nil, &fuse.LinkIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Oldnodeid: ino}, "ro-hard", &out)
 
-		// Then
 		requireStatus(t, "只读 Symlink", fuse.Status(syscall.EROFS), symSt)
 		requireStatus(t, "只读 Link", fuse.Status(syscall.EROFS), linkSt)
 	})
@@ -280,14 +267,13 @@ func TestSymlink与Link_硬链接共享节点计数并拦截目录链接与只�
 
 func TestRmdir与Unlink_拦截非空目录删除并区分在途孤儿与硬链接脏位保留(t *testing.T) {
 	t.Run("Rmdir拒绝非空目录与常规文件并在删除空目录时防父链接下溢", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		dir := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "non-empty", 0o755)
 		child := mustCreateFile(t, fs, dir.NodeId, "child.txt", syscall.O_RDWR, 0o644)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: child.NodeId}, Fh: child.Fh})
 
-		// When & Then
 		requireStatus(t, "非空目录 Rmdir", fuse.Status(syscall.ENOTEMPTY), fs.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "non-empty"))
 		requireStatus(t, "对普通文件执行 Rmdir", fuse.Status(syscall.ENOTDIR), fs.Rmdir(nil, &fuse.InHeader{NodeId: dir.NodeId}, "child.txt"))
 
@@ -298,24 +284,21 @@ func TestRmdir与Unlink_拦截非空目录删除并区分在途孤儿与硬链�
 	})
 
 	t.Run("双句柄打开文件Unlink后延后至最后一次Release才触发孤儿回收", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		h1 := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan.bin", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, h1.NodeId, h1.Fh, 0, []byte("keep-until-last-close"))
 		h2 := mustOpenFile(t, fs, h1.NodeId, syscall.O_RDONLY)
 
-		// When: Unlink 时仍有 2 个打开句柄，不得提前回收
 		requireStatus(t, "Unlink 已打开文件", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orphan.bin"))
 		require.Zero(t, srv.reclaimOrphanCalls.Load(), "仍有打开句柄时不得触发 ReclaimOrphan")
 		require.True(t, srv.hasNode(h1.NodeId))
 
-		// 释放第一个句柄后仍有一个句柄存活，仍可读且不得回收
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: h1.NodeId}, Fh: h1.Fh})
 		require.Zero(t, srv.reclaimOrphanCalls.Load())
 		requireBytesMatch(t, "半关闭后通过第二句柄继续读取", []byte("keep-until-last-close"), mustReadAt(t, fs, h1.NodeId, h2.Fh, 0, 21))
 
-		// 释放最后一个句柄后立即回收孤儿节点，且 OnUnmount 不再发多余 Fsync
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: h1.NodeId}, Fh: h2.Fh})
 		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "最终句柄释放必须触发恰好 1 次 ReclaimOrphan")
 		require.False(t, srv.hasNode(h1.NodeId))
@@ -326,7 +309,7 @@ func TestRmdir与Unlink_拦截非空目录删除并区分在途孤儿与硬链�
 	})
 
 	t.Run("多硬链接删除一条链接后保留脏标记并在OnUnmount落盘", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "link-a", syscall.O_RDWR, 0o644)
@@ -336,14 +319,12 @@ func TestRmdir与Unlink_拦截非空目录删除并区分在途孤儿与硬链�
 			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Oldnodeid: created.NodeId,
 		}, "link-b", &linkOut))
-		// 先 Release 确保没有残留打开句柄，仅靠 dirtyInodes 验证残留链接语义
+
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 
-		// When: 删除 link-a 时 link-b 仍存活（nlink=2 -> 1）
 		fsyncBeforeUnlink := srv.fsyncCalls.Load()
 		requireStatus(t, "Unlink 首条硬链接", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "link-a"))
 
-		// Then: 未触发孤儿回收且 OnUnmount 必须为存活硬链接执行 Fsync
 		require.Zero(t, srv.reclaimOrphanCalls.Load())
 		fs.OnUnmount()
 		require.Equal(t, fsyncBeforeUnlink+1, srv.fsyncCalls.Load(), "多硬链接仅删除其一时必须保留脏位并在 OnUnmount 同步")
@@ -352,7 +333,7 @@ func TestRmdir与Unlink_拦截非空目录删除并区分在途孤儿与硬链�
 
 func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目标回收(t *testing.T) {
 	t.Run("常规重命名与跨目录目录迁移精准维护双亲nlink", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		srcParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "src-p", 0o755)
@@ -361,7 +342,6 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, srcParent.NodeId).Nlink)
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, dstParent.NodeId).Nlink)
 
-		// When: 跨父目录移动子目录，并执行同路径自重命名
 		requireStatus(t, "跨父目录 Rename 目录", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: srcParent.NodeId},
 			Newdir:   dstParent.NodeId,
@@ -371,7 +351,6 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 			Newdir:   dstParent.NodeId,
 		}, "sub-moved", "sub-moved"))
 
-		// Then
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, srcParent.NodeId).Nlink, "移出目录后原父目录 nlink 减 1")
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, dstParent.NodeId).Nlink, "移入目录后新父目录 nlink 加 1")
 		looked := mustLookup(t, fs, dstParent.NodeId, "sub-moved")
@@ -381,16 +360,15 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 	})
 
 	t.Run("NOREPLACE与EXCHANGE和WHITEOUT标志按契约生效", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		aIno := srv.seedFile(1, "a", 0o644, []byte("AAA"))
 		bIno := srv.seedFile(1, "b", 0o644, []byte("BBB"))
-		// 预热 Lookup 缓存以验证 Rename 后缓存同步切换
+
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "a")
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "b")
 
-		// When & Then: NOREPLACE 冲突返回 EEXIST；EXCHANGE 原子互换；WHITEOUT 留下字符设备占位并穿透缓存
 		requireStatus(t, "NOREPLACE 冲突", fuse.Status(syscall.EEXIST), fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Newdir:   fuse.FUSE_ROOT_ID,
@@ -416,7 +394,7 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 	})
 
 	t.Run("祖先成环返回EINVAL且覆盖已打开目标后延后回收并清除脏位", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		anc := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "anc", 0o755)
@@ -427,7 +405,6 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 		victim := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "victim.txt", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, victim.NodeId, victim.Fh, 0, []byte("victim-dirty"))
 
-		// When
 		cycleSt := fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Newdir:   desc.NodeId,
@@ -437,7 +414,6 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 			Newdir:   fuse.FUSE_ROOT_ID,
 		}, "src.txt", "victim.txt")
 
-		// Then
 		requireStatus(t, "祖先成环 Rename", fuse.Status(syscall.EINVAL), cycleSt)
 		requireStatus(t, "覆盖已打开目标 Rename", fuse.OK, overwriteSt)
 		require.Zero(t, srv.reclaimOrphanCalls.Load(), "被覆盖打开目标未关闭前不得回收")
@@ -453,7 +429,7 @@ func TestRename_跨目录迁移条件标志交换成环拦截与覆盖打开目�
 
 func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 	t.Run("GivenCachedDirs_WhenSameParentDirOverwritesEmptyDir_ThenParentNlinkDecrementsAndOverwrittenDirPurged", func(t *testing.T) {
-		// Given: parent has two cached subdirs (nlink=4), and target empty dir is marked complete in cache.
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		parent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "parent", 0o755)
@@ -463,13 +439,11 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		getAttrBefore := srv.getAttrCalls.Load()
 		lookupBefore := srv.lookupCalls.Load()
 
-		// When: src overwrites empty dir dst inside the same parent.
 		requireStatus(t, "same-parent dir overwrite", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: parent.NodeId},
 			Newdir:   parent.NodeId,
 		}, "src", "dst"))
 
-		// Then: parent cached nlink decrements to 3 with zero extra GetAttr RPCs, and dst's completeDirs entry is purged.
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, parent.NodeId).Nlink, "same-parent dir overwrite must decrement cached parent nlink")
 		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load(), "known delta must keep parent inode cached without GetAttr RPC")
 		var ghost fuse.EntryOut
@@ -478,7 +452,7 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 	})
 
 	t.Run("GivenCachedDirs_WhenCrossParentDirOverwritesEmptyDir_ThenOldParentDecrementsAndNewParentUnchanged", func(t *testing.T) {
-		// Given: oldParent has src (nlink=3) and newParent has empty dst (nlink=3).
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		oldParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "old-p", 0o755)
@@ -490,13 +464,11 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		getAttrBefore := srv.getAttrCalls.Load()
 		lookupBefore := srv.lookupCalls.Load()
 
-		// When: old-p/src overwrites empty dir new-p/dst across parents.
 		requireStatus(t, "cross-parent dir overwrite", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
 			Newdir:   newParent.NodeId,
 		}, "src", "dst"))
 
-		// Then: oldParent nlink drops to 2, newParent nlink stays 3 (not 4), zero extra GetAttr RPCs, and dst completeDirs purged.
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParent.NodeId).Nlink)
 		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load())
@@ -506,7 +478,7 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 	})
 
 	t.Run("GivenCachedDirAndFile_WhenCrossParentExchange_ThenBothParentNlinksAdjustWithoutExtraGetAttr", func(t *testing.T) {
-		// Given: oldParent holds subdir (nlink=3) and newParent holds regular file (nlink=2).
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		oldParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "ex-old", 0o755)
@@ -518,19 +490,16 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, newParent.NodeId).Nlink)
 		getAttrBefore := srv.getAttrCalls.Load()
 
-		// When: exchange oldParent/dir-a with newParent/file-b.
 		requireStatus(t, "cross-parent exchange dir<->file", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
 			Newdir:   newParent.NodeId,
 			Flags:    renameExchange,
 		}, "dir-a", "file-b"))
 
-		// Then: oldParent nlink drops to 2 and newParent nlink increments to 3 with zero GetAttr RPCs.
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParent.NodeId).Nlink)
 		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load())
 
-		// When: exchange back (file-a in oldParent <-> dir-b in newParent) after re-caching exchanged node attrs.
 		_ = mustGetAttr(t, fs, mustLookup(t, fs, oldParent.NodeId, "dir-a").NodeId)
 		_ = mustGetAttr(t, fs, mustLookup(t, fs, newParent.NodeId, "file-b").NodeId)
 		getAttrBeforeBack := srv.getAttrCalls.Load()
@@ -540,38 +509,35 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 			Flags:    renameExchange,
 		}, "dir-a", "file-b"))
 
-		// Then: oldParent nlink returns to 3 and newParent nlink returns to 2 with zero GetAttr RPCs.
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, newParent.NodeId).Nlink)
 		require.Equal(t, getAttrBeforeBack, srv.getAttrCalls.Load())
 	})
 
 	t.Run("GivenCachedFile_WhenNormalRename_ThenParentInodeCacheStaysWarmWithoutGetAttr", func(t *testing.T) {
-		// Given: cached file in oldParent and uncached target slot in newParent.
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		oldParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "f-old", 0o755)
 		newParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "f-new", 0o755)
 		f := mustCreateFile(t, fs, oldParent.NodeId, "doc.txt", syscall.O_RDWR, 0o644)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
-		// Seed a file in newParent without caching it so targetKnown=false on rename.
+
 		_ = srv.seedFile(newParent.NodeId, "uncached-target.txt", 0o644, []byte("x"))
 		getAttrBefore := srv.getAttrCalls.Load()
 
-		// When: move cached regular file over uncached target across parents.
 		requireStatus(t, "cross-parent file rename", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
 			Newdir:   newParent.NodeId,
 		}, "doc.txt", "uncached-target.txt"))
 
-		// Then: file cannot overwrite a dir, so both parents stay cached with nlink=2 and zero GetAttr RPCs.
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, oldParent.NodeId).Nlink)
 		require.Equal(t, uint32(2), mustGetAttr(t, fs, newParent.NodeId).Nlink)
 		require.Equal(t, getAttrBefore, srv.getAttrCalls.Load())
 	})
 
 	t.Run("GivenUncachedSourceOrTarget_WhenRenameSucceeds_ThenParentInodeDroppedAndGetAttrFetchesFreshNlink", func(t *testing.T) {
-		// Case A: source dir is uncached in oldParent (seeded on server before GetAttr warms parent).
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldParentIno := srv.seedDir(1, "u-old", 0o755)
 		newParentIno := srv.seedDir(1, "u-new", 0o755)
@@ -590,7 +556,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		require.Equal(t, uint32(3), mustGetAttr(t, fs, newParentIno).Nlink, "dropped newParent must refresh nlink from server")
 		require.Equal(t, getAttrBefore+2, srv.getAttrCalls.Load(), "unknown deltas must drop both parent inodes")
 
-		// Case B: cached source dir overwrites uncached empty dir in newParent -> oldParent stays cached (-1), newParent dropped.
 		srvB := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldB := srvB.seedDir(1, "b-old", 0o755)
 		newB := srvB.seedDir(1, "b-new", 0o755)
@@ -612,7 +577,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		require.Equal(t, uint32(3), mustGetAttr(t, fsB, newB).Nlink, "newParent must drop and refresh exact nlink=3")
 		require.Equal(t, getAttrBeforeB+1, srvB.getAttrCalls.Load(), "only newParent should hit GetAttr")
 
-		// Case C: cross-parent RENAME_EXCHANGE with uncached target drops both parents.
 		srvC := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldC := srvC.seedDir(1, "c-old", 0o755)
 		newC := srvC.seedDir(1, "c-new", 0o755)
@@ -633,7 +597,6 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		require.Equal(t, uint32(3), mustGetAttr(t, fsC, newC).Nlink)
 		require.Equal(t, getAttrBeforeC+2, srvC.getAttrCalls.Load(), "unknown exchange delta must drop both parents")
 
-		// Case D: cross-parent RENAME_NOREPLACE of cached dir into uncached newParent keeps both parents cached (-1, +1).
 		srvD := newFakeStorage(t, withTTL(2.0, 2.0))
 		oldD := srvD.seedDir(1, "d-old", 0o755)
 		newD := srvD.seedDir(1, "d-new", 0o755)
@@ -655,32 +618,27 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 	})
 
 	t.Run("GivenUncachedMovedDir_WhenCrossParentRenameSucceeds_ThenStaleParentByDirPurged", func(t *testing.T) {
-		// Given: child dir is seeded under oldParent (not cached in oldParent's entries),
-		// then child's own ReadDirPlus + Create populates parentByDir[child]=oldParent and completeDirs[child].
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		oldParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "p-old", 0o755)
 		newParent := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "p-new", 0o755)
 		childIno := srv.seedDir(oldParent.NodeId, "orphan-entry-dir", 0o755)
 
-		// Warm child's 'i', 'd', parentByDir[child]=oldParent, then Create a file to demote 'd' -> completeDirs + parentByDir.
 		_ = mustGetAttr(t, fs, childIno)
 		entriesBefore, _ := readAllDirEntries(t, fs, childIno, true, 4096)
 		require.Equal(t, oldParent.NodeId, collectEntryNameSet(entriesBefore)[".."])
 		cf := mustCreateFile(t, fs, childIno, "inner.txt", syscall.O_RDWR, 0o644)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: cf.NodeId}, Fh: cf.Fh})
 
-		// When: cross-parent rename moves child while source==0 (not cached in oldParent).
 		requireStatus(t, "cross-parent rename with uncached source entry", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: oldParent.NodeId},
 			Newdir:   newParent.NodeId,
 		}, "orphan-entry-dir", "moved-dir"))
 
-		// Then: ReadDirPlus(child) must NOT synthesize stale ".." == oldParent; it refreshes ".." == newParent.
 		entriesAfter, _ := readAllDirEntries(t, fs, childIno, true, 4096)
 		require.Equal(t, newParent.NodeId, collectEntryNameSet(entriesAfter)[".."], "cross-parent rename with source==0 must purge stale parentByDir")
 
-		// Sub-case: cross-parent RENAME_EXCHANGE with target==0 (target dir's entry in newParent is uncached).
 		srvEx := newFakeStorage(t, withTTL(2.0, 2.0))
 		fsEx := newTestRawFS(t, srvEx)
 		exOld := mustMkdir(t, fsEx, fuse.FUSE_ROOT_ID, "ex-p1", 0o755)
@@ -705,20 +663,18 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 	})
 
 	t.Run("GivenCachedSourceAndTarget_WhenRenameRuns_ThenPeekInodeDoesNotInflateAttrHits", func(t *testing.T) {
-		// Given: cached source and target in root.
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		_ = mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "peek-src", 0o755)
 		_ = mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "peek-dst", 0o755)
 		attrHitsBefore := fs.Snapshot().NamespaceCache.AttrHits
 
-		// When
 		requireStatus(t, "rename cached dirs", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Newdir:   fuse.FUSE_ROOT_ID,
 		}, "peek-src", "peek-dst"))
 
-		// Then: Rename inspects cached attrs via peekInode without inflating AttrHits.
 		require.Equal(t, attrHitsBefore, fs.Snapshot().NamespaceCache.AttrHits)
 	})
 }

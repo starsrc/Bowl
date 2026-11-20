@@ -24,10 +24,6 @@ type storageRootUsage struct {
 	VolumeAvailableBytes uint64
 }
 
-// scanStorageRootUsage 扫描磁盘存储根目录的真实物理容量占用与宿主机卷容量：
-//   - 按底层文件系统 (st_dev, st_ino) 对硬链接（.pack / .sst / .blob）去重，消除 Fork 跨分支虚高统计；
-//   - 统计 commits/ 下驻留基准切面数目及物理空间，反映未删子盘期间被锁定的历史数据体积；
-//   - 遇到目录瞬时不存在（冷启动尚未建盘或并发 DeleteDisk 清理目录）时静默跳过，绝不阻塞 /metrics 抓取。
 func scanStorageRootUsage(root string) storageRootUsage {
 	var usage storageRootUsage
 	if root == "" {
@@ -47,7 +43,7 @@ func scanStorageRootUsage(root string) storageRootUsage {
 
 	_ = filepath.WalkDir(cleanRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil //nolint:nilerr // 并发删改导致条目瞬时消失时静默跳过，不中断整盘指标采集
+			return nil
 		}
 		if d.IsDir() {
 			rel, relErr := filepath.Rel(cleanRoot, path)
@@ -61,7 +57,7 @@ func scanStorageRootUsage(root string) storageRootUsage {
 		}
 		info, infoErr := d.Info()
 		if infoErr != nil || !info.Mode().IsRegular() {
-			return nil //nolint:nilerr // 并发删改导致条目瞬时消失时静默跳过，不中断整盘指标采集
+			return nil
 		}
 		size := info.Size()
 		if size <= 0 {
@@ -71,7 +67,7 @@ func scanStorageRootUsage(root string) storageRootUsage {
 
 		rel, relErr := filepath.Rel(cleanRoot, path)
 		if relErr != nil {
-			return nil //nolint:nilerr // 并发删改导致条目瞬时消失时静默跳过，不中断整盘指标采集
+			return nil
 		}
 		slashRel := filepath.ToSlash(rel)
 

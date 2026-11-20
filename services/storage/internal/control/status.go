@@ -12,10 +12,8 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
-// ErrorDomain 定义全项目统一的 ErrorInfo 错误领域标识符。
 const ErrorDomain = "bowl.storage"
 
-// errorMapping 记录领域哨兵错误与 gRPC 状态码及 POSIX errno reason 的契约映射。
 type errorMapping struct {
 	sentinel error
 	code     codes.Code
@@ -53,12 +51,6 @@ var mappings = []errorMapping{
 	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
 }
 
-// ToStatus 将领域层与存储层返回的 error 映射为携带 google.rpc.ErrorInfo 详情的 gRPC status.Status。
-// 若 err == nil，直接返回 nil。
-// 若 err 命中领域哨兵错误，映射为对应的 gRPC 状态码并在 ErrorInfo 中注入 POSIX errno reason 与 bowl.storage domain。
-// 若 err 是已有 gRPC status，直接透传。
-// 若 err 是 context.Canceled 或 context.DeadlineExceeded，映射为对应状态码且不携带 ErrorInfo。
-// 若 err 为未知错误，映射为 codes.Unknown。
 func ToStatus(err error) *status.Status {
 	if err == nil {
 		return nil
@@ -105,8 +97,6 @@ func ToStatus(err error) *status.Status {
 	return status.New(codes.Unknown, err.Error())
 }
 
-// ToGRPCError 将领域层与存储层返回的 error 转换为携带 google.rpc.ErrorInfo 的 gRPC error。
-// 若 err == nil，直接返回 nil。
 func ToGRPCError(err error) error {
 	if err == nil {
 		return nil

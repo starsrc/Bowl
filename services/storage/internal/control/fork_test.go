@@ -173,7 +173,7 @@ func (w *threadSafeLogBuf) String() string {
 }
 
 func TestForkDisk_OnlineFork_IsolatesParentAndChildWrites(t *testing.T) {
-	// Given: 源盘在在线可写挂载状态下已写入 128 KiB 文件
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -188,14 +188,12 @@ func TestForkDisk_OnlineFork_IsolatesParentAndChildWrites(t *testing.T) {
 	basePayload := bytes.Repeat([]byte("BASE-ROOT-CONTENT-"), 512)
 	writeRegularFile(t, ctx, parentActor, parentMount.Epoch, "shared.txt", basePayload)
 
-	// When: 在线派生子盘，随后父子各自独立覆写与新增文件
 	childDisk, err := mgr.ForkDisk(ctx, ForkDiskParams{
 		SourceDiskID: parentDisk.DiskID,
 		Name:         "child-1",
 	})
 	require.NoError(t, err, "在线 ForkDisk 失败")
 
-	// Then: 源盘 epoch 不受打断可继续写入，子盘初始 epoch=0、继承 Fork 时刻基准数据且与父盘严格隔离
 	require.Equal(t, parentDisk.DiskID, childDisk.ParentDiskID, "子盘 ParentDiskID 应指向源盘")
 	require.Equal(t, parentDisk.MaxBytes, childDisk.MaxBytes, "省略 MaxBytes 时应继承源盘配额")
 	require.Equal(t, uint64(len(basePayload)), childDisk.UsedBytes, "子盘初始 UsedBytes 应等于基准数据大小")
@@ -225,7 +223,7 @@ func TestForkDisk_OnlineFork_IsolatesParentAndChildWrites(t *testing.T) {
 }
 
 func TestForkDisk_CascadingDAG_MaintainsLineageAndParentLinks(t *testing.T) {
-	// Given: 创建根盘并派生 Child1，再分别从 Child1 级联派生 GrandChild 与从 Root 二次派生 Child2
+
 	ctx := context.Background()
 	memDB := db.NewMemStore()
 	mgr := New(memDB, WithStorageRoot(t.TempDir()))
@@ -240,13 +238,11 @@ func TestForkDisk_CascadingDAG_MaintainsLineageAndParentLinks(t *testing.T) {
 	child2, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: rootDisk.DiskID, Name: "child-2"})
 	require.NoError(t, err, "二次派生 child-2 失败")
 
-	// When: 通过公开接口与数据库检查血缘拓扑
 	listed, err := mgr.ListDisks(ctx, ListDisksParams{PageSize: 10})
 	require.NoError(t, err, "列出磁盘失败")
 	gotGrand, err := mgr.GetDisk(ctx, grandChild.DiskID)
 	require.NoError(t, err, "查询 grand-child 失败")
 
-	// Then: 全部 4 块盘同属单一血缘，ParentDiskID 与切面 DAG 父子指向正确
 	require.Len(t, listed.Disks, 4, "应列出 4 块磁盘: got=%d", len(listed.Disks))
 	require.Equal(t, child1.DiskID, gotGrand.ParentDiskID, "GrandChild 父盘应为 Child1")
 	require.Equal(t, rootDisk.DiskID, child2.ParentDiskID, "Child2 父盘应为 Root")
@@ -276,7 +272,7 @@ func TestForkDisk_CascadingDAG_MaintainsLineageAndParentLinks(t *testing.T) {
 }
 
 func TestForkDisk_QuotaShrinkWithoutOrphans_RejectsBeforeCreatingCommitDir(t *testing.T) {
-	// Given: 无孤儿节点且已写入 4096 字节的源盘
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	mgr := New(db.NewMemStore(), WithStorageRoot(rootDir))
@@ -290,21 +286,19 @@ func TestForkDisk_QuotaShrinkWithoutOrphans_RejectsBeforeCreatingCommitDir(t *te
 	require.NoError(t, err, "获取源盘 StoreActor 失败")
 	writeRegularFile(t, ctx, srcActor, mnt.Epoch, "keep.bin", bytes.Repeat([]byte{0xAA}, 4096))
 
-	// When: 以低于已用空间的 MaxBytes=2048 发起 ForkDisk
 	_, err = mgr.ForkDisk(ctx, ForkDiskParams{
 		SourceDiskID: srcDisk.DiskID,
 		Name:         "too-small-fast",
 		MaxBytes:     new(uint64(2048)),
 	})
 
-	// Then: 前置快检直接拒绝为 ErrInvalidShrink 且未创建 commits 目录
 	require.ErrorIs(t, err, ErrInvalidShrink, "配额缩容应返回 ErrInvalidShrink: want=%v got=%v", ErrInvalidShrink, err)
 	_, statErr := os.Stat(filepath.Join(rootDir, "commits"))
 	require.ErrorIs(t, statErr, os.ErrNotExist, "无孤儿前置快检拦截不得触发任何切面目录 I/O")
 }
 
 func TestForkDisk_QuotaShrinkWithOrphans_SanitizesAndEnforcesEffectiveUsage(t *testing.T) {
-	// Given: 源盘包含 4096 字节活跃文件与 256 KiB 未关闭孤儿文件（总已用 4096 + BlobSize）
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	mgr := New(db.NewMemStore(), WithStorageRoot(rootDir))
@@ -322,27 +316,23 @@ func TestForkDisk_QuotaShrinkWithOrphans_SanitizesAndEnforcesEffectiveUsage(t *t
 	orphanIno := writeRegularFile(t, ctx, srcActor, mnt.Epoch, "temp-orphan.bin", orphanPayload)
 	require.NoError(t, srcActor.Unlink(ctx, RootIno, []byte("temp-orphan.bin"), true, mnt.Epoch), "解链构造孤儿失败")
 
-	// When 1: 目标配额 2048 仍低于净化后有效占用 4096
 	_, shrinkErr := mgr.ForkDisk(ctx, ForkDiskParams{
 		SourceDiskID: srcDisk.DiskID,
 		Name:         "too-small-after-sanitize",
 		MaxBytes:     new(uint64(2048)),
 	})
 
-	// Then 1: 净化后复核被拦截为 ErrInvalidShrink 且临时切面目录已回滚清空
 	require.ErrorIs(t, shrinkErr, ErrInvalidShrink, "净化后配额仍不足应返回 ErrInvalidShrink")
 	commitEntries, readErr := os.ReadDir(filepath.Join(rootDir, "commits"))
 	require.NoError(t, readErr, "读取 commits 目录失败")
 	require.Empty(t, commitEntries, "配额拦截回滚后 commits/ 目录必须零残留")
 
-	// When 2: 目标配额 8192 介于净化后 4096 与净化前 266240 之间
 	forked, err := mgr.ForkDisk(ctx, ForkDiskParams{
 		SourceDiskID: srcDisk.DiskID,
 		Name:         "sanitized-child",
 		MaxBytes:     new(uint64(8192)),
 	})
 
-	// Then 2: 净化孤儿后派生成功，子盘仅计入有效 4096 字节且源盘孤儿句柄仍可读
 	require.NoError(t, err, "净化孤儿后配额满足时应派生成功")
 	require.Equal(t, uint64(8192), forked.MaxBytes)
 	require.Equal(t, uint64(4096), forked.UsedBytes)
@@ -354,7 +344,7 @@ func TestForkDisk_QuotaShrinkWithOrphans_SanitizesAndEnforcesEffectiveUsage(t *t
 }
 
 func TestForkDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
-	// Given: 存在源盘与非法 Fork 入参矩阵
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -376,7 +366,6 @@ func TestForkDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 		{name: "源盘不存在", params: ForkDiskParams{SourceDiskID: "018f0000-0000-7000-8000-000000009999", Name: "missing"}, wantErr: ErrNotFound},
 	}
 
-	// When / Then: 逐一拒绝并返回对应领域哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, fErr := mgr.ForkDisk(ctx, tc.params)
@@ -386,7 +375,7 @@ func TestForkDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 }
 
 func TestForkDisk_DBTxFailure_RollsBackChildDirCommitDirAndRegistry(t *testing.T) {
-	// Given: 源盘就绪并注入下一次写事务失败
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -399,10 +388,8 @@ func TestForkDisk_DBTxFailure_RollsBackChildDirCommitDirAndRegistry(t *testing.T
 	injectedErr := errors.New("simulated database failure")
 	memDB.SetFailNextWrite(injectedErr)
 
-	// When: 执行 ForkDisk 触发事务失败
 	_, err = mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: src.DiskID, Name: "tx-fail-child"})
 
-	// Then: 返回数据库错误，disks/ 仅余源盘、commits/ 为空且 ListDisks 无残留子盘
 	require.ErrorIs(t, err, injectedErr, "事务失败应向上返回注入错误: want=%v got=%v", injectedErr, err)
 
 	diskDirEntries, readErr := os.ReadDir(filepath.Join(rootDir, "disks"))
@@ -420,7 +407,7 @@ func TestForkDisk_DBTxFailure_RollsBackChildDirCommitDirAndRegistry(t *testing.T
 }
 
 func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T) {
-	// Given: 含 256 KiB 共享封包的 3 盘同血缘分支（Root, Child1, Child2），st_nlink=5
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -446,10 +433,8 @@ func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T
 	require.NoError(t, err, "派生 sibling-2 失败")
 	require.Equal(t, uint64(5), fileHardLinkCount(t, sharedPackPath), "二次 Fork 后硬链接计数应为 5")
 
-	// When 1: 删除父盘 Root（剩余 |D| == 2）
 	require.NoError(t, mgr.DeleteDisk(ctx, rootDisk.DiskID), "删除根盘失败")
 
-	// Then 1: 保留 2 个历史切面与物理目录，硬链接计数降为 4
 	snapAfterRoot := memDB.Inspect()
 	require.Len(t, snapAfterRoot.Commits, 2, "|D|==2 时必须保留全部切面 DAG")
 	commitDirsAfterRoot, err := os.ReadDir(filepath.Join(rootDir, "commits"))
@@ -457,10 +442,8 @@ func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T
 	require.Len(t, commitDirsAfterRoot, 2)
 	require.Equal(t, uint64(4), fileHardLinkCount(t, sharedPackPath))
 
-	// When 2: 删除 Child2（剩余唯一幸存盘 |D| == 1）
 	require.NoError(t, mgr.DeleteDisk(ctx, child2.DiskID), "删除 sibling-2 失败")
 
-	// Then 2: 自动清空血缘切面与物理目录，幸存盘 .pack 硬链接计数回落至 1 且数据完整可读
 	idChild1, err := parseDiskID(child1.DiskID)
 	require.NoError(t, err)
 	snapAfterSibling := memDB.Inspect()
@@ -477,10 +460,8 @@ func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T
 	require.NoError(t, err, "获取幸存盘 StoreActor 失败")
 	require.Equal(t, packPayload, readRegularFile(t, ctx, child1Actor, "shared-pack.bin", store.BlobSize), "幸存盘数据必须完好可读")
 
-	// When 3: 删除最后一块幸存盘 Child1（|D| == 0）
 	require.NoError(t, mgr.DeleteDisk(ctx, child1.DiskID), "删除最后幸存盘失败")
 
-	// Then 3: 血缘记录彻底清空
 	snapAfterLast := memDB.Inspect()
 	require.Empty(t, snapAfterLast.Disks)
 	require.Empty(t, snapAfterLast.Commits)
@@ -488,7 +469,7 @@ func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T
 }
 
 func TestForkDisk_ConcurrentSegmentAllocation_CollisionFreeAcrossRestart(t *testing.T) {
-	// Given: 同血缘父子双盘并发各自写入 70 个满包文件以跨越 PackSegment=64 阈值
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -525,7 +506,6 @@ func TestForkDisk_ConcurrentSegmentAllocation_CollisionFreeAcrossRestart(t *test
 	allInos := assertDisjointInodes(t, pInos, cInos)
 	require.Len(t, allInos, filesPerBranch*2, "总分配唯一 Inode 数不匹配: want=%d got=%d", filesPerBranch*2, len(allInos))
 
-	// When: 重启新管理器懒加载两盘并继续各自创建新文件
 	require.NoError(t, mgr1.Close(), "关闭首任管理器失败")
 	mgr2 := newManager(memDB, WithStorageRoot(rootDir), withMaxPackSize(store.BlobSize))
 	t.Cleanup(func() { _ = mgr2.Close() })
@@ -538,7 +518,6 @@ func TestForkDisk_ConcurrentSegmentAllocation_CollisionFreeAcrossRestart(t *test
 	pInoRestart := writeRegularFile(t, ctx, pActor2, pMnt.Epoch, "after-restart-p.bin", blk)
 	cInoRestart := writeRegularFile(t, ctx, cActor2, cMnt.Epoch, "after-restart-c.bin", blk)
 
-	// Then: 重启后新分配的 Inode 与 .pack 编号零碰撞，且外部号段分配器被跨实例调用
 	require.NotContains(t, allInos, pInoRestart, "重启后父盘新 Inode 不得与历史冲突")
 	require.NotContains(t, allInos, cInoRestart, "重启后子盘新 Inode 不得与历史冲突")
 	require.NotEqual(t, pInoRestart, cInoRestart, "重启后父子新 Inode 不得相互冲突")
@@ -554,7 +533,7 @@ func TestForkDisk_ConcurrentSegmentAllocation_CollisionFreeAcrossRestart(t *test
 }
 
 func TestForkDisk_Observability_ExportsDedupMetricsSpansAndAuditLogs(t *testing.T) {
-	// Given: 配备真实 OTel Span 导出器、Prometheus Registry 与 JSON slog 记录器的控制面管理器
+
 	tp, exporter := setupTestTracer(t)
 	var logBuf threadSafeLogBuf
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -576,7 +555,6 @@ func TestForkDisk_Observability_ExportsDedupMetricsSpansAndAuditLogs(t *testing.
 	writeRegularFile(t, ctx, srcActor, 0, "orphan.bin", bytes.Repeat([]byte{0x7E}, 8192))
 	require.NoError(t, srcActor.Unlink(ctx, RootIno, []byte("orphan.bin"), true), "解链构造孤儿失败")
 
-	// When: 基于带孤儿源盘派生 2 个子盘、重命名源盘并全量删除回收
 	child1, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: src.DiskID, Name: "child-a"})
 	require.NoError(t, err, "Fork child-a 失败")
 	child2, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: src.DiskID, Name: "child-b"})
@@ -586,7 +564,6 @@ func TestForkDisk_Observability_ExportsDedupMetricsSpansAndAuditLogs(t *testing.
 	_, err = mgr.UpdateDisk(ctx, UpdateDiskParams{DiskID: src.DiskID, Name: &newName})
 	require.NoError(t, err, "UpdateDisk 重命名失败")
 
-	// Then 1: 去重物理占用维持约 1 MiB，逻辑引用字节叠加为 3 份，各阶段直方图计数与 Span 均正确记录
 	physBytes := gatherGaugeValue(t, reg, "bowl_storage_pack_physical_bytes")
 	refBytes := gatherGaugeValue(t, reg, "bowl_storage_pack_referenced_bytes")
 	require.InDelta(t, float64(payloadSize), physBytes, 65536, "Fork 后物理占用应去重维持约 1 MiB: got=%v", physBytes)
@@ -600,7 +577,6 @@ func TestForkDisk_Observability_ExportsDedupMetricsSpansAndAuditLogs(t *testing.
 	require.Equal(t, uint64(2), gatherForkStageCount(t, reg, "commit_tx"))
 	require.InDelta(t, 2.0, gatherForkCounter(t, reg, "ok"), 1e-9)
 
-	// Then 2: 依次删除全部磁盘触发血缘切面物理回收与 Span 闭环
 	require.NoError(t, mgr.DeleteDisk(ctx, src.DiskID))
 	require.NoError(t, mgr.DeleteDisk(ctx, child1.DiskID))
 	require.NoError(t, mgr.DeleteDisk(ctx, child2.DiskID))

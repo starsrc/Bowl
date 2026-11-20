@@ -46,7 +46,6 @@ func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, no
 	m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, meta, extents)
 }
 
-// Tmpfile creates an anonymous temporary file via local staging in staged mode or StorageService.CreateTmpfile in sync mode.
 func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpTmpfile)
 	opCtx, endSpan := fs.startFuseOp(OpTmpfile)
@@ -154,7 +153,6 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fus
 	return fuse.OK
 }
 
-// Forget 释放内核对具名或匿名节点的引用，并在无挂起任务时清理本地跟踪状态。
 func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	start := fs.metrics.beginOp(OpForget)
 	defer fs.metrics.endOp(OpForget, start, fuse.OK, 0)
@@ -175,7 +173,6 @@ func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	}
 }
 
-// linkTmp 将匿名文件通过 Mknod + StageCoordinator 后台接管具名化，已具名化节点不能再次通过此路径 Link。
 func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (fuse.Status, bool) {
 	if fs.tmpMgr.getFile(input.Oldnodeid) == nil {
 		return fuse.OK, false

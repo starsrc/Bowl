@@ -32,23 +32,19 @@ import (
 )
 
 const (
-	// helperProcessTimeout 为一次性辅助进程设定统一超时上界。
 	helperProcessTimeout = 30 * time.Second
-	// mountProcessTimeout 为前台 `bowl mount` 进程设定完整生命周期超时上界。
+
 	mountProcessTimeout = 2 * time.Minute
 )
 
-// getStorageEndpoint 获取测试环境的远端存储接入地址。
 func getStorageEndpoint() string {
 	return cmp.Or(os.Getenv("BOWL_STORAGE_ENDPOINT"), "http://storage-service:9000")
 }
 
-// getBowlBin 获取 `bowl` 客户端可执行文件路径。
 func getBowlBin() string {
 	return cmp.Or(os.Getenv("BOWL_BIN"), "/tmp/bowl")
 }
 
-// newTestStorageClient 创建直连远端存储的 RPC 客户端适配器。
 func newTestStorageClient(t *testing.T) storagev1connect.StorageServiceClient {
 	t.Helper()
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
@@ -58,7 +54,6 @@ func newTestStorageClient(t *testing.T) storagev1connect.StorageServiceClient {
 	return client
 }
 
-// createTestDisk 创建默认 10 GiB 容量的独立测试磁盘并注册自动清理。
 func createTestDisk(t *testing.T, client storagev1connect.StorageServiceClient) *storagev1.Disk {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -74,7 +69,6 @@ func createTestDisk(t *testing.T, client storagev1connect.StorageServiceClient) 
 	return disk
 }
 
-// registerDiskCleanup 注册幂等的测试磁盘清理回调，忽略已删除导致的 NotFound。
 func registerDiskCleanup(t *testing.T, client storagev1connect.StorageServiceClient, diskID string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -87,26 +81,22 @@ func registerDiskCleanup(t *testing.T, client storagev1connect.StorageServiceCli
 	})
 }
 
-// isMounted 通过读取 `/proc/self/mountinfo` 确认目标路径是否为已生效的挂载点。
 func isMounted(mountpoint string) bool {
 	data, err := os.ReadFile("/proc/self/mountinfo")
 	target := filepath.Clean(mountpoint)
 	return err == nil && strings.Contains(string(data), " "+target+" ")
 }
 
-// waitForMount 等待挂载点出现在 `/proc/self/mountinfo` 中。
 func waitForMount(t *testing.T, mountpoint string, msgAndArgs ...any) {
 	t.Helper()
 	require.Eventually(t, func() bool { return isMounted(mountpoint) }, 10*time.Second, 10*time.Millisecond, msgAndArgs...)
 }
 
-// waitForUnmount 等待挂载点从 `/proc/self/mountinfo` 中消失。
 func waitForUnmount(t *testing.T, mountpoint string, msgAndArgs ...any) {
 	t.Helper()
 	require.Eventually(t, func() bool { return !isMounted(mountpoint) }, 5*time.Second, 10*time.Millisecond, msgAndArgs...)
 }
 
-// findBowlDaemonPID 通过 `pgrep` 查找与指定挂载点绑定的后台 `bowl` 守护进程 PID。
 func findBowlDaemonPID(t *testing.T, mountpoint string) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
@@ -120,7 +110,6 @@ func findBowlDaemonPID(t *testing.T, mountpoint string) int {
 	return pid
 }
 
-// waitForProcessExit 等待指定 PID 的进程退出或进入僵尸状态。
 func waitForProcessExit(t *testing.T, pid int) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -129,13 +118,11 @@ func waitForProcessExit(t *testing.T, pid int) {
 	}, 5*time.Second, 10*time.Millisecond, "进程 PID %d 在超时内未退出", pid)
 }
 
-// runAs 以指定 uid/gid 运行可执行文件并返回退出码与输出。
 func runAs(t *testing.T, uid, gid uint32, name string, args ...string) (exitCode int, stdoutStr, stderrStr string) {
 	t.Helper()
 	return runAsWithStdin(t, uid, gid, "", name, args...)
 }
 
-// runAsWithStdin 以指定 uid/gid 运行可执行文件并写入标准输入。
 func runAsWithStdin(t *testing.T, uid, gid uint32, stdin, name string, args ...string) (exitCode int, stdoutStr, stderrStr string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
@@ -152,7 +139,6 @@ func runAsWithStdin(t *testing.T, uid, gid uint32, stdin, name string, args ...s
 	return cmd.ProcessState.ExitCode(), stdout.String(), stderr.String()
 }
 
-// startBowlMount 启动 `bowl mount -f` 前台子进程。
 func startBowlMount(t *testing.T, endpoint, diskID, mountpoint string, extraFlags ...string) (cmd *exec.Cmd, stdout, stderr *bytes.Buffer) {
 	t.Helper()
 	args := []string{"mount", "-f", "--endpoint", endpoint, diskID, mountpoint}
@@ -169,7 +155,6 @@ func startBowlMount(t *testing.T, endpoint, diskID, mountpoint string, extraFlag
 	return cmd, &outBuf, &errBuf
 }
 
-// mountWithCleanup 挂载磁盘并注册幂等的优雅卸载，返回挂载点与停止函数。
 func mountWithCleanup(t *testing.T, endpoint, diskID string, extraFlags ...string) (mountpoint string, stop func()) {
 	t.Helper()
 	mountpoint = t.TempDir()
@@ -181,7 +166,6 @@ func mountWithCleanup(t *testing.T, endpoint, diskID string, extraFlags ...strin
 	return mountpoint, stop
 }
 
-// stopBowlMountGracefully 向 `bowl mount` 前台子进程发送 SIGTERM 并验证优雅退出与无残留卸载。
 func stopBowlMountGracefully(t *testing.T, cmd *exec.Cmd, mountpoint string) {
 	t.Helper()
 	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM), "发送 SIGTERM 失败")
@@ -189,7 +173,6 @@ func stopBowlMountGracefully(t *testing.T, cmd *exec.Cmd, mountpoint string) {
 	waitForUnmount(t, mountpoint, "卸载后 `mountinfo` 不应残留该挂载点")
 }
 
-// runBowlSuccess 执行 `bowl` 命令并断言退出码为 0。
 func runBowlSuccess(t *testing.T, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
@@ -199,7 +182,6 @@ func runBowlSuccess(t *testing.T, args ...string) string {
 	return string(out)
 }
 
-// runBowlExpectExit 执行 `bowl` 命令并断言返回指定非零退出码。
 func runBowlExpectExit(t *testing.T, wantCode int, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), helperProcessTimeout)
@@ -212,7 +194,6 @@ func runBowlExpectExit(t *testing.T, wantCode int, args ...string) string {
 	return string(out)
 }
 
-// mountMetaPath 计算指定挂载点对应的发现元数据文件路径。
 func mountMetaPath(t *testing.T, mountpoint string) string {
 	t.Helper()
 	absMP, err := filepath.Abs(mountpoint)
@@ -221,7 +202,6 @@ func mountMetaPath(t *testing.T, mountpoint string) string {
 	return "/run/bowl/mounts/" + hex.EncodeToString(sum[:16]) + ".json"
 }
 
-// httpGetStatusAndBody 执行同步 HTTP GET 并返回状态码与响应体。
 func httpGetStatusAndBody(t *testing.T, targetURL string) (statusCode int, bodyText string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -236,13 +216,11 @@ func httpGetStatusAndBody(t *testing.T, targetURL string) (statusCode int, bodyT
 	return resp.StatusCode, string(body)
 }
 
-// sha256Hex 返回字节切片的小写十六进制 SHA-256 摘要。
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
 
-// deterministicPayload 生成指定标签与长度的非全零确定性字节序列。
 func deterministicPayload(tag string, size int) []byte {
 	out := make([]byte, size)
 	var blockIdx uint64

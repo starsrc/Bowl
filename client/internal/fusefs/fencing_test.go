@@ -21,7 +21,7 @@ import (
 )
 
 func TestRawFS_FenceState_IsStickyIdempotentAndNotifiesObservers(t *testing.T) {
-	// Given
+
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))
 	var cbCalls atomic.Int32
 	var cbMu sync.Mutex
@@ -47,11 +47,9 @@ func TestRawFS_FenceState_IsStickyIdempotentAndNotifiesObservers(t *testing.T) {
 	default:
 	}
 
-	// When: fence twice with different statuses; first permanent fence must win.
 	fs.Fence(fuse.EBUSY, "writer epoch 1 superseded by 2")
 	fs.Fence(fuse.ENOENT, "disk deleted later")
 
-	// Then
 	require.True(t, fs.IsFenced())
 	require.Equal(t, fuse.EBUSY, fs.FenceStatus())
 	require.Equal(t, "writer epoch 1 superseded by 2", fs.FenceReason())
@@ -66,7 +64,6 @@ func TestRawFS_FenceState_IsStickyIdempotentAndNotifiesObservers(t *testing.T) {
 	require.Equal(t, "writer epoch 1 superseded by 2", cbReason)
 	cbMu.Unlock()
 
-	// Late SetOnFence registration after fencing still receives the sticky state.
 	var lateStatus fuse.Status
 	var lateReason string
 	fs.SetOnFence(func(status fuse.Status, reason string) {
@@ -79,11 +76,11 @@ func TestRawFS_FenceState_IsStickyIdempotentAndNotifiesObservers(t *testing.T) {
 
 func TestRawFS_CheckWritableAndOpen_FailClosedWithZeroRPCsWhenFenced(t *testing.T) {
 	t.Run("RW mount fenced with EBUSY rejects mutations and writable Open locally", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		ino := srv.seedFile(1, "doc.txt", 0o644, []byte("hello"))
 		fs := newTestRawFS(t, srv)
-		// Warm cache and open a writable handle before fencing.
+
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "doc.txt")
 		var rwOpen fuse.OpenOut
 		requireStatus(t, "Open RW pre-fence", fuse.OK, fs.Open(nil, &fuse.OpenIn{
@@ -91,7 +88,6 @@ func TestRawFS_CheckWritableAndOpen_FailClosedWithZeroRPCsWhenFenced(t *testing.
 			Flags:    syscall.O_RDWR,
 		}, &rwOpen))
 
-		// When
 		fs.Fence(fuse.EBUSY, "preempted by newer writer")
 
 		beforeGetAttr := srv.getAttrCalls.Load()
@@ -102,7 +98,6 @@ func TestRawFS_CheckWritableAndOpen_FailClosedWithZeroRPCsWhenFenced(t *testing.
 		beforeFsync := srv.fsyncCalls.Load()
 		beforeFsyncDir := srv.fsyncDirCalls.Load()
 
-		// Then: CheckWritable and Open(O_WRONLY / O_RDWR / O_TRUNC) fail locally with EBUSY and zero RPCs.
 		require.Equal(t, fuse.EBUSY, fs.CheckWritable())
 
 		for _, flags := range []uint32{
@@ -119,7 +114,6 @@ func TestRawFS_CheckWritableAndOpen_FailClosedWithZeroRPCsWhenFenced(t *testing.
 			requireStatus(t, "fenced writable/trunc Open", fuse.EBUSY, st)
 		}
 
-		// Mutations also fail closed locally with zero RPCs.
 		var createOut fuse.CreateOut
 		requireStatus(t, "Create", fuse.EBUSY, fs.Create(nil, &fuse.CreateIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -173,18 +167,15 @@ func TestRawFS_CheckWritableAndOpen_FailClosedWithZeroRPCsWhenFenced(t *testing.
 	})
 
 	t.Run("RO mount fenced with ENOENT on disk delete returns ENOENT instead of EROFS", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		ino := srv.seedFile(1, "ro.txt", 0o644, []byte("ro"))
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 
-		// Unfenced RO returns EROFS.
 		require.Equal(t, fuse.Status(syscall.EROFS), fs.CheckWritable())
 
-		// When: disk is deleted and renewer fences the RO mount with ENOENT.
 		fs.Fence(fuse.ENOENT, "disk not found")
 
-		// Then
 		require.Equal(t, fuse.ENOENT, fs.CheckWritable())
 		var openOut fuse.OpenOut
 		requireStatus(t, "RO fenced Open(O_WRONLY)", fuse.ENOENT, fs.Open(nil, &fuse.OpenIn{
@@ -212,7 +203,7 @@ func customErrorInfoRPCError(code connect.Code, domain, reason string) error {
 
 func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testing.T) {
 	t.Run("synchronous RPC ErrStaleEpoch immediately fences RawFS and blocks follow-up mutations", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		ino := srv.seedFile(1, "sync.txt", 0o644, []byte("abc"))
 		var fenced atomic.Int32
@@ -227,7 +218,6 @@ func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testin
 			return staleEpochRPCError()
 		}
 
-		// When
 		var out fuse.AttrOut
 		st := fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -237,7 +227,6 @@ func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testin
 			},
 		}, &out)
 
-		// Then
 		requireStatus(t, "SetAttr ErrStaleEpoch", fuse.EBUSY, st)
 		require.True(t, fs.IsFenced())
 		require.Equal(t, fuse.EBUSY, fs.FenceStatus())
@@ -248,7 +237,6 @@ func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testin
 			t.Fatal("FencedCh must be closed on ErrStaleEpoch")
 		}
 
-		// Follow-up mutation fails locally with zero additional RPCs.
 		before := srv.setAttrCalls.Load()
 		st2 := fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -308,7 +296,7 @@ func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testin
 	})
 
 	t.Run("StageCoordinator background Write RPC ErrStaleEpoch immediately fences RawFS", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		var fenced atomic.Int32
 		fs := newTestRawFS(t, srv, withStageSize(8*1024*1024), func(cfg *fusefs.Config) {
@@ -324,14 +312,12 @@ func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testin
 			return 0, staleEpochRPCError()
 		}
 
-		// When: stage write locally and seal via Flush so background worker dispatches Write RPC.
 		mustWriteAt(t, fs, created.NodeId, created.Fh, 0, []byte("async-data"))
 		_ = fs.Flush(nil, &fuse.FlushIn{
 			InHeader: fuse.InHeader{NodeId: created.NodeId},
 			Fh:       created.Fh,
 		})
 
-		// Then: background Write ErrStaleEpoch immediately fences RawFS and notifies observers.
 		select {
 		case <-fs.FencedCh():
 		case <-time.After(2 * time.Second):
@@ -344,10 +330,9 @@ func TestRawFS_StaleEpochRPC_TriggersImmediateFenceOnSyncAndAsyncPaths(t *testin
 }
 
 func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWakesWaiters(t *testing.T) {
-	// Given: a StageCoordinator with 1 full chunk inflight (blocked in retry/RPC), 1 queued chunk,
-	// 1 active chunk, a blocked BarrierInode waiter, a blocked BarrierAll waiter, and a backpressure writer.
+
 	stageDir := t.TempDir()
-	const stageSize = 2 * fusefs.StageChunkSize // 8 MiB capacity
+	const stageSize = 2 * fusefs.StageChunkSize
 
 	firstEntered := make(chan struct{}, 1)
 	cleanupDone := make(chan struct{})
@@ -386,7 +371,6 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 	coord.RegisterHandle(fhA)
 	coord.RegisterHandle(fhB)
 
-	// Chunk 1 (full 4 MiB) seals immediately and enters inflight upload.
 	w1, handled1, err1 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 0, buildRepeatingBytes(chunkSz, '1'), 1)
 	require.NoError(t, err1)
 	require.True(t, handled1)
@@ -398,15 +382,12 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		t.Fatal("first chunk did not enter upload worker")
 	}
 
-	// Chunk 2 (2 MiB, unaligned/non-full) on same inode is sealed and stays queued behind chunk 1.
 	w2, handled2, err2 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, chunkSz, buildRepeatingBytes(2<<20, '2'), 1)
 	require.NoError(t, err2)
 	require.True(t, handled2)
 	require.Equal(t, uint32(2<<20), w2)
 	coord.SealInode(inoA)
 
-	// Chunk 3 (2 MiB) on inoA stays active (behind chunk 1 on inoA), filling remaining stageSize (4+2+2 = 8 MiB).
-	// Keeping chunk 3 on inoA guarantees deterministic ordering even when BarrierAll seals all idle active chunks.
 	w3, handled3, err3 := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 8<<20, buildRepeatingBytes(2<<20, '3'), 1)
 	require.NoError(t, err3)
 	require.True(t, handled3)
@@ -414,7 +395,6 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 
 	require.GreaterOrEqual(t, len(listStageChunkFiles(t, stageDir)), 3)
 
-	// Start blocked waiters: BarrierInode, BarrierAll, and a backpressure WriteForHandle on inoB.
 	barrierInodeDone := make(chan struct{})
 	go func() {
 		coord.BarrierInode(context.Background(), inoA)
@@ -433,13 +413,10 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		bpErrCh <- bpErr
 	}()
 
-	// Allow waiters to park before aborting.
 	time.Sleep(30 * time.Millisecond)
 
-	// When
 	coord.AbortAll(syscall.EBUSY)
 
-	// Then: all blocked waiters wake promptly.
 	select {
 	case <-barrierInodeDone:
 	case <-time.After(2 * time.Second):
@@ -457,25 +434,20 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 		t.Fatal("backpressure WriteForHandle did not wake after AbortAll")
 	}
 
-	// New WriteForHandle calls fail immediately with EBUSY.
 	_, newHandled, newErr := coord.WriteForHandle(context.Background(), nil, fhA, inoA, inoA, 0, []byte("rejected"), 1)
 	require.True(t, newHandled)
 	require.ErrorIs(t, newErr, syscall.EBUSY)
 
-	// Queued/active chunks were never uploaded; only the inflight chunk attempted upload.
 	require.Equal(t, int32(1), writeAttempts.Load())
 
-	// Local stage files are unlinked once inflight worker exits.
 	require.Eventually(t, func() bool {
 		return len(listStageChunkFiles(t, stageDir)) == 0
 	}, 2*time.Second, 10*time.Millisecond, "all local stage chunk files must be unlinked after AbortAll")
 
-	// FlushHandle, FlushInodeForHandle, and FlushAndResetInodeForHandle immediately return sticky EBUSY.
 	require.ErrorIs(t, coord.FlushHandle(fhA, inoA), syscall.EBUSY)
 	require.ErrorIs(t, coord.FlushInodeForHandle(context.Background(), fhA, inoA), syscall.EBUSY)
 	require.ErrorIs(t, coord.FlushAndResetInodeForHandle(context.Background(), fhB, inoB), syscall.EBUSY)
 
-	// HasPending, OverlayAttr, OverlayInode, and Read do NOT serve aborted staged bytes.
 	require.False(t, coord.HasPending(inoA))
 	require.False(t, coord.HasPending(inoB))
 
@@ -496,7 +468,7 @@ func TestStageCoordinator_AbortAll_DrainsQueueUnlinksFilesRecordsStickyErrAndWak
 }
 
 func TestRawFS_FenceAbortsStagedWritesAndPreventsStaleReadsAndUploads(t *testing.T) {
-	// Given: a file with committed server content "server-v1" and uncommitted local staged writes "local-dirty".
+
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))
 	ino := srv.seedFile(1, "staged.txt", 0o644, []byte("server-v1"))
 
@@ -506,7 +478,7 @@ func TestRawFS_FenceAbortsStagedWritesAndPreventsStaleReadsAndUploads(t *testing
 
 	fs := newTestRawFS(t, srv, withStageSession(session), withStageSize(8*1024*1024))
 	_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "staged.txt")
-	// Probe security.capability so subsequent writes enter StageCoordinator (matching Linux kernel VFS).
+
 	_, _ = fs.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", nil)
 
 	var openOut fuse.OpenOut
@@ -515,25 +487,20 @@ func TestRawFS_FenceAbortsStagedWritesAndPreventsStaleReadsAndUploads(t *testing
 		Flags:    syscall.O_RDWR,
 	}, &openOut))
 
-	// Stage a local write that stays active (unuploaded) in StageCoordinator.
 	mustWriteAt(t, fs, ino, openOut.Fh, 0, []byte("local-dirty-uncommitted-payload"))
 	require.Zero(t, srv.writeCalls.Load(), "write should be buffered in local stage")
 	require.NotEmpty(t, listStageChunkFiles(t, session.InstanceDir()))
 
-	// Server commits newer data from another writer before fencing.
 	srv.mu.Lock()
 	srv.nodes[ino].data = []byte("server-v2-from-new-writer")
 	srv.nodes[ino].inode.Attr.Size = uint64(len(srv.nodes[ino].data))
 	srv.mu.Unlock()
 
-	// When: RawFS is fenced due to lease preemption.
 	fs.Fence(fuse.EBUSY, "writer epoch preempted")
 
-	// Then: staged files are unlinked with zero Write RPCs sent.
 	require.Zero(t, srv.writeCalls.Load(), "aborted staged chunk must not be uploaded")
 	require.Empty(t, listStageChunkFiles(t, session.InstanceDir()))
 
-	// Flush and Fsync on the writable handle immediately return EBUSY.
 	requireStatus(t, "Flush after fence", fuse.EBUSY, fs.Flush(nil, &fuse.FlushIn{
 		InHeader: fuse.InHeader{NodeId: ino},
 		Fh:       openOut.Fh,
@@ -543,7 +510,6 @@ func TestRawFS_FenceAbortsStagedWritesAndPreventsStaleReadsAndUploads(t *testing
 		Fh:       openOut.Fh,
 	}))
 
-	// Reading and GetAttr must see latest committed server state, NOT aborted staged bytes.
 	got := mustReadAt(t, fs, ino, openOut.Fh, 0, 64)
 	require.Equal(t, "server-v2-from-new-writer", string(got))
 
@@ -553,14 +519,13 @@ func TestRawFS_FenceAbortsStagedWritesAndPreventsStaleReadsAndUploads(t *testing
 
 func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 	t.Run("preempted mount clears and bypasses NamespaceCache and ReadAheadCoordinator on all read ops", func(t *testing.T) {
-		// Given: warm NamespaceCache (Lookup, GetAttr, ReadDirPlus, Readlink) and ReadAheadCoordinator (sequential 4 MiB window).
+
 		srv := newFakeStorage(t, withTTL(60.0, 60.0))
 		initialData := buildRepeatingBytes(512*1024, 'A')
 		fileIno := srv.seedFile(1, "data.bin", 0o644, initialData)
 		linkIno := srv.seedSymlink(1, "sym", "old-target")
 		fs := newTestRawFS(t, srv)
 
-		// Warm NamespaceCache.
 		_ = mustLookup(t, fs, fuse.FUSE_ROOT_ID, "data.bin")
 		_ = mustGetAttr(t, fs, fileIno)
 		_ = collectDirEntryNames(t, fs, fuse.FUSE_ROOT_ID)
@@ -569,7 +534,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Equal(t, "old-target", string(targetBefore))
 		require.Positive(t, fs.Snapshot().NamespaceCache.Entries, "NamespaceCache must be populated before fence")
 
-		// Warm ReadAheadCoordinator with 2 sequential 128 KiB reads on an open RO handle so a 4 MiB window is cached.
 		var roOpen fuse.OpenOut
 		requireStatus(t, "Open RO warm", fuse.OK, fs.Open(nil, &fuse.OpenIn{
 			InHeader: fuse.InHeader{NodeId: fileIno},
@@ -577,13 +541,12 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		}, &roOpen))
 		_ = mustReadAt(t, fs, fileIno, roOpen.Fh, 0, 128*1024)
 		_ = mustReadAt(t, fs, fileIno, roOpen.Fh, 128*1024, 128*1024)
-		// Confirm 3rd sequential read hits ReadAhead window with 0 new server Read RPCs before fence.
+
 		readsBeforeHit := srv.readCalls.Load()
 		gotWarm := mustReadAt(t, fs, fileIno, roOpen.Fh, 256*1024, 64*1024)
 		require.Equal(t, byte('A'), gotWarm[0])
 		require.Equal(t, readsBeforeHit, srv.readCalls.Load(), "pre-fence sequential read must hit ReadAhead cache")
 
-		// Server state is updated by a new writer after preemption.
 		updatedData := buildRepeatingBytes(512*1024, 'Z')
 		srv.mu.Lock()
 		srv.nodes[fileIno].data = updatedData
@@ -592,13 +555,10 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		srv.mu.Unlock()
 		_ = srv.seedFile(1, "created-by-new-writer.txt", 0o644, []byte("fresh"))
 
-		// When
 		fs.Fence(fuse.EBUSY, "writer epoch superseded")
 
-		// Then: NamespaceCache is immediately cleared.
 		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "NamespaceCache must be empty immediately after Fence")
 
-		// Lookup bypasses cache on EVERY call (no read hit, no re-population) and returns 0 TTL.
 		lookupsBefore := srv.lookupCalls.Load()
 		e1 := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "created-by-new-writer.txt")
 		e2 := mustLookup(t, fs, fuse.FUSE_ROOT_ID, "created-by-new-writer.txt")
@@ -610,7 +570,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Zero(t, e1.AttrValidNsec)
 		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "fenced Lookup must not write back to NamespaceCache")
 
-		// GetAttr bypasses cache on EVERY call and returns 0 TTL.
 		getAttrsBefore := srv.getAttrCalls.Load()
 		a1 := mustGetAttr(t, fs, fileIno)
 		a2 := mustGetAttr(t, fs, fileIno)
@@ -621,7 +580,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Zero(t, a1.AttrValidNsec)
 		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "fenced GetAttr must not write back to NamespaceCache")
 
-		// Open(O_RDONLY) succeeds, bypasses cache, and does not set FOPEN_KEEP_CACHE.
 		var roOpen2 fuse.OpenOut
 		getAttrsBefore = srv.getAttrCalls.Load()
 		requireStatus(t, "Open RO fenced", fuse.OK, fs.Open(nil, &fuse.OpenIn{
@@ -631,7 +589,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Equal(t, getAttrsBefore+1, srv.getAttrCalls.Load())
 		require.Zero(t, roOpen2.OpenFlags&fuse.FOPEN_KEEP_CACHE, "fenced Open(O_RDONLY) must not set FOPEN_KEEP_CACHE")
 
-		// Read on pre-fence handle bypasses invalidated ReadAhead window and reads fresh 'Z' bytes on every call.
 		readsBefore := srv.readCalls.Load()
 		got1 := mustReadAt(t, fs, fileIno, roOpen.Fh, 320*1024, 64*1024)
 		got2 := mustReadAt(t, fs, fileIno, roOpen.Fh, 384*1024, 64*1024)
@@ -639,14 +596,12 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 		require.Equal(t, byte('Z'), got2[0])
 		require.Equal(t, readsBefore+2, srv.readCalls.Load(), "fenced Read must pass through directly to server on every call")
 
-		// ReadDir and ReadDirPlus bypass cache on every call.
 		readDirsBefore := srv.readDirPlusCalls.Load()
 		_ = collectDirEntryNames(t, fs, fuse.FUSE_ROOT_ID)
 		_ = collectDirEntryNames(t, fs, fuse.FUSE_ROOT_ID)
 		require.Equal(t, readDirsBefore+2, srv.readDirPlusCalls.Load(), "fenced ReadDirPlus must bypass cache on every call")
 		require.Zero(t, fs.Snapshot().NamespaceCache.Entries, "fenced ReadDirPlus must not write back to NamespaceCache")
 
-		// Readlink bypasses cache on every call and sees updated target.
 		readlinksBefore := srv.readlinkCalls.Load()
 		rl1, st1 := fs.Readlink(nil, &fuse.InHeader{NodeId: linkIno})
 		rl2, st2 := fs.Readlink(nil, &fuse.InHeader{NodeId: linkIno})
@@ -658,7 +613,7 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 	})
 
 	t.Run("deleted disk fenced with ENOENT passes read ops through to server ENOENT", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(60.0, 60.0))
 		fileIno := srv.seedFile(1, "gone.txt", 0o644, []byte("before-delete"))
 		fs := newTestRawFS(t, srv)
@@ -669,7 +624,6 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 			Flags:    syscall.O_RDONLY,
 		}, &roOpen))
 
-		// Disk is deleted on server -> read RPCs return CodeNotFound.
 		notFoundErr := errnoError(connect.CodeNotFound, "ENOENT")
 		srv.lookupHook = func(context.Context, *storagev1.LookupRequest) (*storagev1.LookupResponse, error) {
 			return nil, notFoundErr
@@ -681,10 +635,8 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 			return nil, notFoundErr
 		}
 
-		// When
 		fs.Fence(fuse.ENOENT, "disk deleted")
 
-		// Then: cached Lookup/GetAttr/Read are bypassed and return server ENOENT.
 		var entryOut fuse.EntryOut
 		requireStatus(t, "Lookup on deleted disk", fuse.ENOENT, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "gone.txt", &entryOut))
 		var attrOut fuse.AttrOut
@@ -695,7 +647,7 @@ func TestRawFS_FenceClearsAndBypassesNamespaceCacheAndReadAhead(t *testing.T) {
 }
 
 func TestReadAheadCoordinator_InvalidateAll_DropsCachedWindows(t *testing.T) {
-	// Given: warm a 4 MiB sequential read window.
+
 	const fileSize = 512 * 1024
 	ra := fusefs.NewReadAheadCoordinator()
 	var fetchCalls atomic.Int32
@@ -721,11 +673,9 @@ func TestReadAheadCoordinator_InvalidateAll_DropsCachedWindows(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, callsBeforeHit, fetchCalls.Load(), "window should be cached before InvalidateAll")
 
-	// When
 	payloadByte.Store('Y')
 	ra.InvalidateAll()
 
-	// Then: subsequent read misses the dropped window and fetches fresh 'Y' data.
 	n, err := ra.Read(context.Background(), 1, 100, 384*1024, buf, fetch)
 	require.NoError(t, err)
 	require.Equal(t, len(buf), n)
@@ -735,7 +685,7 @@ func TestReadAheadCoordinator_InvalidateAll_DropsCachedWindows(t *testing.T) {
 
 func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *testing.T) {
 	t.Run("skips stage upload, dirty Fsync, FsyncDir, and releaseQueue ReclaimOrphan RPCs", func(t *testing.T) {
-		// Given: dirty inode + pending orphan in releaseQueue + active staged chunk + open local tmpfile.
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		srv.reclaimOrphanHook = func(context.Context, *storagev1.ReclaimOrphanRequest) error {
 			return connect.NewError(connect.CodeUnavailable, errors.New("transient"))
@@ -748,7 +698,6 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 
 		fs := newTestRawFS(t, srv, withStageSession(session), withStageSize(8*1024*1024))
 
-		// 1. Create and flush a file so it is in dirtyInodes.
 		dirtyFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "dirty.bin", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, dirtyFile.NodeId, dirtyFile.Fh, 0, []byte("committed-dirty"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirtyFile.NodeId}, Fh: dirtyFile.Fh})
@@ -756,7 +705,6 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 			return fs.Snapshot().Queues.DirtyInodes == 1 && fs.Snapshot().Stage.PendingChunks == 0
 		}, 2*time.Second, 5*time.Millisecond)
 
-		// 2. Create, unlink while open, and release an orphan so it enters releaseQueue.
 		orphanFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan.bin", syscall.O_RDWR, 0o644)
 		requireStatus(t, "Unlink open orphan", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orphan.bin"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: orphanFile.NodeId}, Fh: orphanFile.Fh})
@@ -764,7 +712,6 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 			return fs.Snapshot().Queues.ReleaseQueueDepth >= 1
 		}, 2*time.Second, 5*time.Millisecond)
 
-		// 3. Stage an unuploaded chunk on a second file and open an unpromoted O_TMPFILE.
 		stagedFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "staged.bin", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, stagedFile.NodeId, stagedFile.Fh, 0, []byte("never-upload-me"))
 
@@ -775,26 +722,21 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 			Mode:     0o600,
 		}, &tmpOut))
 
-		// Fence the mount and snapshot RPC counts immediately after fencing.
 		fs.Fence(fuse.EBUSY, "lease preempted")
 		writesBefore := srv.writeCalls.Load()
 		fsyncsBefore := srv.fsyncCalls.Load()
 		fsyncDirsBefore := srv.fsyncDirCalls.Load()
 		reclaimsBefore := srv.reclaimOrphanCalls.Load()
 
-		// When
 		fs.OnUnmount()
 
-		// Then: zero server RPCs issued during fenced OnUnmount.
 		require.Equal(t, writesBefore, srv.writeCalls.Load(), "fenced OnUnmount must skip stage Write RPCs")
 		require.Equal(t, fsyncsBefore, srv.fsyncCalls.Load(), "fenced OnUnmount must skip dirty Fsync RPCs")
 		require.Equal(t, fsyncDirsBefore, srv.fsyncDirCalls.Load(), "fenced OnUnmount must skip root FsyncDir RPC")
 		require.Equal(t, reclaimsBefore, srv.reclaimOrphanCalls.Load(), "fenced OnUnmount must skip releaseQueue ReclaimOrphan RPCs")
 
-		// UnmountProgress reports clean non-active 0/0 state.
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
 
-		// Local resources and StageSession are cleanly torn down.
 		snap := fs.Snapshot()
 		require.Zero(t, snap.Handles.OpenFiles)
 		require.Zero(t, snap.NamespaceCache.Entries)
@@ -807,24 +749,22 @@ func TestRawFS_OnUnmount_WhenFenced_SkipsAllServerRPCsAndCleansLocalState(t *tes
 	})
 
 	t.Run("skips root FsyncDir RPC when only metadata is dirty", func(t *testing.T) {
-		// Given: Mkdir dirties metadata without dirtying any file inode.
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv)
 		_ = mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "meta-only", 0o755)
 		fs.Fence(fuse.ENOENT, "disk deleted")
 		fsyncDirsBefore := srv.fsyncDirCalls.Load()
 
-		// When
 		fs.OnUnmount()
 
-		// Then
 		require.Equal(t, fsyncDirsBefore, srv.fsyncDirCalls.Load(), "fenced OnUnmount must skip root FsyncDir RPC")
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
 	})
 }
 
 func TestRawFS_FencedReleaseOfUnlinkedOrphan_SkipsReclaimOrphanRPC(t *testing.T) {
-	// Given: an open file unlinked before fencing enters orphanInodes and handles.orphans.
+
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))
 	fs := newTestRawFS(t, srv)
 	orphanFile := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "open-orphan.bin", syscall.O_RDWR, 0o644)
@@ -833,18 +773,16 @@ func TestRawFS_FencedReleaseOfUnlinkedOrphan_SkipsReclaimOrphanRPC(t *testing.T)
 	fs.Fence(fuse.EBUSY, "lease preempted")
 	reclaimsBefore := srv.reclaimOrphanCalls.Load()
 
-	// When: the application closes the open descriptor after fencing.
 	fs.Release(nil, &fuse.ReleaseIn{
 		InHeader: fuse.InHeader{NodeId: orphanFile.NodeId},
 		Fh:       orphanFile.Fh,
 	})
 
-	// Then: Release must not send a mutating ReclaimOrphan RPC with a stale epoch.
 	require.Equal(t, reclaimsBefore, srv.reclaimOrphanCalls.Load(), "fenced Release must skip ReclaimOrphan RPC")
 }
 
 func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromotedExtent(t *testing.T) {
-	// Given: promoted O_TMPFILE with a 4 MiB extent popped by a StageCoordinator upload worker.
+
 	payload := buildRepeatingBytes(fusefs.StageChunkSize, 'P')
 
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))
@@ -866,7 +804,6 @@ func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromo
 	}, &tmpOut))
 	mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, payload)
 
-	// Promote via Link and unlink while still open so Release invokes StageCoordinator.DiscardInode.
 	var linkOut fuse.EntryOut
 	requireStatus(t, "Link promote", fuse.OK, fs.Link(nil, &fuse.LinkIn{
 		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -874,12 +811,10 @@ func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromo
 	}, "promoted-orphan", &linkOut))
 	requireStatus(t, "Unlink promoted open orphan", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "promoted-orphan"))
 
-	// Wait for the worker to pop the promoted extent (Inflight increments before processUploadItem reads promoted.file).
 	require.Eventually(t, func() bool {
 		return fs.Snapshot().Stage.Inflight >= 1
 	}, 2*time.Second, time.Millisecond, "promoted extent upload did not become inflight")
 
-	// When: Fence invokes AbortAll and Release invokes DiscardInode while the promoted extent remains inflight.
 	fs.Fence(fuse.EBUSY, "preempted during promoted upload")
 	fs.Release(nil, &fuse.ReleaseIn{
 		InHeader: fuse.InHeader{NodeId: linkOut.NodeId},
@@ -887,6 +822,5 @@ func TestStageCoordinator_DiscardInodeAfterAbortAll_DoesNotRaceWithInflightPromo
 	})
 	close(releaseWrites)
 
-	// Then: clean shutdown completes without data race or premature promoted.file close.
 	fs.OnUnmount()
 }

@@ -145,17 +145,14 @@ func TestGivenUnsampledContextWhenCallingStatFSThenZeroAllocsAndNoSpans(t *testi
 	exp, _ := setupTestTracer(t, sdktrace.NeverSample())
 	actor := openTestActor(t, &store.Options{DiskID: "obs-unsampled"})
 
-	// Given: 先预热一次 StatFS，确认未采样环境下调用路径
 	_, err := actor.StatFS(ctx)
 	require.NoError(t, err)
 	exp.Reset()
 
-	// When: 在无活跃录制 Span 的 ctx 上连续调用 StatFS
 	allocs := testing.AllocsPerRun(50, func() {
 		mustStatFSNoAllocErr(t, ctx, actor)
 	})
 
-	// Then: 零导出 Span，且热路径保持零额外 Span 分配开销
 	require.Emptyf(t, exp.GetSpans(), "未采样 ctx 下不得产生 OTel Span")
 	require.LessOrEqualf(t, allocs, 1.0, "未采样 StatFS 不得出现额外堆分配: got=%v", allocs)
 }
@@ -170,7 +167,6 @@ func TestGivenSampledContextWhenRunningStoreAndForkOpsThenSpansLinksAndExemplarE
 	cpDir := filepath.Join(t.TempDir(), "cp-obs")
 	childDir := filepath.Join(t.TempDir(), "child-obs")
 
-	// Given: 启用 AlwaysSample 追踪器、Prometheus 指标与号段分配器
 	actor, reg := newMeteredActor(t, &store.Options{
 		Dir:           srcDir,
 		DiskID:        "obs-sampled",
@@ -180,7 +176,6 @@ func TestGivenSampledContextWhenRunningStoreAndForkOpsThenSpansLinksAndExemplarE
 		PackAllocator: makeTraceCapturingSegmentAlloc(store.PackSegment, &seenPackAllocTraceID),
 	})
 
-	// When: 在采样 Root Span 下依次触发创建、写入、冷读、Checkpoint、Clone 与 Sanitize
 	rootCtx, rootSpan := tp.Tracer("obs-test").Start(ctx, "test.root")
 	wantTraceID := rootSpan.SpanContext().TraceID().String()
 
@@ -190,7 +185,6 @@ func TestGivenSampledContextWhenRunningStoreAndForkOpsThenSpansLinksAndExemplarE
 	require.NoError(t, err)
 	require.NoError(t, actor.Fsync(rootCtx, f.Ino))
 
-	// 重开冷读以触发 store.BlobPread + store.KVGet + store.KVScan
 	require.NoError(t, actor.Close())
 	coldActor := openTestActor(t, &store.Options{Dir: srcDir, DiskID: "obs-sampled", Metrics: store.NewMetrics()})
 	_, err = coldActor.Read(rootCtx, f.Ino, 0, 4096)
@@ -198,7 +192,6 @@ func TestGivenSampledContextWhenRunningStoreAndForkOpsThenSpansLinksAndExemplarE
 	_, err = coldActor.ReadDir(rootCtx, store.RootIno, 0, 16)
 	require.NoError(t, err)
 
-	// 在带 metrics 的新可写实例上执行 Checkpoint（发射 phase="checkpoint" Exemplar 与 store.Checkpoint）
 	require.NoError(t, coldActor.Close())
 	cpActor, cpReg := newMeteredActor(t, &store.Options{Dir: srcDir, DiskID: "obs-sampled", MaxPackSize: store.BlobSize})
 	cpCtx, cpSpan := tp.Tracer("obs-test").Start(ctx, "test.checkpoint")
@@ -212,7 +205,6 @@ func TestGivenSampledContextWhenRunningStoreAndForkOpsThenSpansLinksAndExemplarE
 	require.NoError(t, err)
 	rootSpan.End()
 
-	// Then: 所有关键 Span 均被导出，store.Tick 携带 SpanLink，分配器收到有效 TraceID，checkpoint 直方图携带 trace_id Exemplar
 	spans := exp.GetSpans()
 	byName := requireSpansPresent(t, spans, []string{
 		"store.QueueWait",
@@ -241,7 +233,6 @@ func TestGivenAllReadAndMetaOpsWhenExecutedThenPrometheusHistogramsAndCountersAc
 	ctx := context.Background()
 	actor, reg := newMeteredActor(t, &store.Options{DiskID: "obs-metrics"})
 
-	// Given: 创建常规文件、符号链接与 xattr 并写入 1 块数据
 	f, err := actor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("f.bin"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
 	_, _, err = actor.Write(ctx, f.Ino, 0, []byte("metrics-payload"))
@@ -250,7 +241,6 @@ func TestGivenAllReadAndMetaOpsWhenExecutedThenPrometheusHistogramsAndCountersAc
 	sym, err := actor.Symlink(ctx, store.SymlinkReq{ParentIno: store.RootIno, Name: []byte("s"), Target: []byte("/target")})
 	require.NoError(t, err)
 
-	// When: 触发全部 9 种读操作、KV 读写与 epoch 隔离错误
 	_, err = actor.Read(ctx, f.Ino, 0, 8)
 	require.NoError(t, err)
 	_, _, err = actor.Lookup(ctx, store.RootIno, []byte("f.bin"))
@@ -273,7 +263,6 @@ func TestGivenAllReadAndMetaOpsWhenExecutedThenPrometheusHistogramsAndCountersAc
 	_, _, err = actor.Write(ctx, f.Ino, 0, []byte("x"), 99)
 	require.ErrorIs(t, err, store.ErrStaleEpoch)
 
-	// Then: 9 个 read_op、KV point_get/prefix_scan、phase_a_validate/phase_b_mutate 与 epoch_fenced_total 准确记录，且无已废弃 validate_mutate 标签
 	requireAllReadOpHistogramsRecorded(t, reg, []string{
 		"read", "lookup", "getattr", "readdir", "readdirplus", "readlink", "getxattr", "listxattr", "statfs",
 	})
@@ -291,7 +280,6 @@ func TestGivenSlowThresholdAndWarnLoggerWhenRunningThenStructuredLogsAndPebbleEv
 	cpDir := filepath.Join(t.TempDir(), "cp-pebble-log")
 	sanDir := filepath.Join(t.TempDir(), "san-pebble-log")
 
-	// Given: 配置 slog.LevelWarn JSON 日志捕获与 1ns 慢 tick 阈值
 	var logBuf lockedLogBuffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -303,7 +291,6 @@ func TestGivenSlowThresholdAndWarnLoggerWhenRunningThenStructuredLogsAndPebbleEv
 		SlowTickThreshold: time.Nanosecond,
 	})
 
-	// When: 写入足够数据以产生 Pebble WAL/Table 事件，并触发陈旧 epoch 隔离及 Checkpoint + SanitizeCheckpoint
 	f, err := actor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("log.bin"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
 	_, _, err = actor.Write(ctx, f.Ino, 0, makePatternBytes(store.BlobSize, 0x7E))
@@ -322,7 +309,6 @@ func TestGivenSlowThresholdAndWarnLoggerWhenRunningThenStructuredLogsAndPebbleEv
 	require.NoError(t, err)
 	require.NoError(t, actor.Close())
 
-	// Then: slog 捕获到 slow actor tick 与 stale writer epoch fenced；pebble_events.log 持久化关键生命周期事件与 commit 标识
 	logs := logBuf.String()
 	require.Contains(t, logs, "slow actor tick", "应记录 slow actor tick 告警日志")
 	require.Contains(t, logs, "stale writer epoch fenced", "应记录 stale writer epoch fenced 告警日志")

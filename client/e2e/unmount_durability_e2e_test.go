@@ -50,14 +50,12 @@ func fallocateAndClose(t *testing.T, path string, mode uint32, off, length int64
 	require.NoError(t, unix.Close(fd))
 }
 
-// TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly_PersistsAcrossRemount
-// verifies bounded concurrent Fsync on unmount, O_TRUNC/SetAttr/Fallocate dirty tracking, and metadata-only FsyncDir barriers.
 func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly_PersistsAcrossRemount(t *testing.T) {
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
 
 	t.Run("MultiFileConcurrentFsyncOverMetaTransport", func(t *testing.T) {
-		// Given: 80 dirty files written without fsync and a 25ms proxy Fsync delay.
+
 		proxy := startControllableStorageProxy(t, realEndpoint)
 		diskID := createTestDisk(t, client).GetDiskId()
 		mp, _, _, stopMount := startMountedDaemon(t, proxy.Endpoint, diskID, "--stage-size", "16MiB")
@@ -65,10 +63,8 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 		wantHashes := writeMultiFilesAndExpectedHashes(t, mp, 80, 4096)
 		proxy.SetFsyncDelay(25 * time.Millisecond)
 
-		// When: bowl umount triggers OnUnmount without prior fsync.
 		stopMount()
 
-		// Then: all 80 files are Fsynced concurrently (<= 64 max in-flight) with 0 FsyncDir RPCs and persist across remount.
 		require.Equal(t, int64(80), proxy.FsyncCalls())
 		require.Zero(t, proxy.FsyncDirCalls())
 		require.Greater(t, proxy.FsyncMaxInflight(), int64(1))
@@ -80,7 +76,7 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 	})
 
 	t.Run("OpenTruncateSetAttrTruncateAndFallocateWithoutFsyncPersistAcrossRemount", func(t *testing.T) {
-		// Given: 4 files populated and flushed on mount 1.
+
 		diskID := createTestDisk(t, client).GetDiskId()
 		mpSeed, _, _, stopSeed := startMountedDaemon(t, realEndpoint, diskID)
 
@@ -99,7 +95,6 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 		writeFullFile(t, filepath.Join(mpSeed, growPath), growSeed, 4096)
 		stopSeed()
 
-		// When: mount 2 executes O_TRUNC, os.Truncate (SetAttr size), and Fallocate without fsync and unmounts.
 		proxy := startControllableStorageProxy(t, realEndpoint)
 		mpMut, _, _, stopMut := startMountedDaemon(t, proxy.Endpoint, diskID)
 
@@ -109,7 +104,6 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 		fallocateAndClose(t, filepath.Join(mpMut, growPath), 0, 4096, 16_384)
 		stopMut()
 
-		// Then: OnUnmount issues 4 file Fsync RPCs and 0 FsyncDir RPCs, and all 4 mutations persist across remount.
 		require.Equal(t, int64(4), proxy.FsyncCalls())
 		require.Zero(t, proxy.FsyncDirCalls())
 
@@ -138,14 +132,13 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 	})
 
 	t.Run("MetadataOnlyUnmountPersistsViaSingleFsyncDirAndCleanMountIssuesZero", func(t *testing.T) {
-		// Given: mount 1 seeds a target file and directory.
+
 		diskID := createTestDisk(t, client).GetDiskId()
 		mpSeed, _, _, stopSeed := startMountedDaemon(t, realEndpoint, diskID)
 		require.NoError(t, os.WriteFile(filepath.Join(mpSeed, "meta-target.txt"), []byte("meta-body"), 0o644))
 		require.NoError(t, os.Mkdir(filepath.Join(mpSeed, "existing-dir"), 0o755))
 		stopSeed()
 
-		// When: mount 2 executes metadata-only mutations without file writes or fsync and unmounts.
 		proxyMeta := startControllableStorageProxy(t, realEndpoint)
 		mpMeta, _, _, stopMeta := startMountedDaemon(t, proxyMeta.Endpoint, diskID)
 
@@ -157,7 +150,6 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 		require.NoError(t, os.Rename(filepath.Join(mpMeta, "existing-dir"), filepath.Join(mpMeta, "renamed-dir")))
 		stopMeta()
 
-		// Then: OnUnmount issues 0 Fsync RPCs and 1 FsyncDir RPC, and all metadata mutations persist across remount.
 		require.Zero(t, proxyMeta.FsyncCalls())
 		require.Equal(t, int64(1), proxyMeta.FsyncDirCalls())
 
@@ -188,7 +180,6 @@ func TestUnmountDurability_MultiFileConcurrentFsync_TruncateFallocateAndMetaOnly
 		require.NoDirExists(t, filepath.Join(mpVerify, "existing-dir"))
 		require.DirExists(t, filepath.Join(mpVerify, "renamed-dir"))
 
-		// Clean read-only pass on writable mount issues 0 Fsync and 0 FsyncDir RPCs on unmount.
 		stopVerify()
 		require.Zero(t, proxyClean.FsyncCalls())
 		require.Zero(t, proxyClean.FsyncDirCalls())

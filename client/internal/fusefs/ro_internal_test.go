@@ -91,7 +91,6 @@ func TestRO_NamespaceCache_InternalPeekAndSynthesizeCompleteDirRespectExpiration
 			{Ino: 300, Name: []byte("c.bin"), NextOffset: 3, Inode: childInode, EntryTimeoutSeconds: 2.0, AttrTimeoutSeconds: 1.0},
 		})
 
-		// Demote dir stream into entries + completeDirs + child 'i' at t + 200ms.
 		clk.Advance(200 * time.Millisecond)
 		cache.mu.Lock()
 		cache.demoteDirStreamToEntriesLocked(1)
@@ -100,7 +99,6 @@ func TestRO_NamespaceCache_InternalPeekAndSynthesizeCompleteDirRespectExpiration
 		require.True(t, ok)
 		require.Len(t, synth, 3)
 
-		// Synthesized 'd' must NOT outlive the original 1.0s TTL (expires at t0 + 1.0s, not t0 + 1.2s).
 		clk.Advance(800 * time.Millisecond)
 		cache.mu.Lock()
 		_, stillValid := cache.synthesizeCompleteDirLocked(1)
@@ -185,7 +183,6 @@ func TestRO_NamespaceCache_InternalPeekAndSynthesizeCompleteDirRespectExpiration
 			return rpc.ReadPayload{Data: v2Payload[off:end]}, nil
 		}
 
-		// Warm fh1's read-ahead window with v2 data.
 		buf := make([]byte, 256<<10)
 		_, err := coord.Read(context.Background(), fh1, ino, 0, buf, fetch)
 		require.NoError(t, err)
@@ -193,7 +190,6 @@ func TestRO_NamespaceCache_InternalPeekAndSynthesizeCompleteDirRespectExpiration
 		require.NoError(t, err)
 		callsAfterWarm := fetchCalls.Load()
 
-		// Cached Open(fh2) observes stale v1 from NamespaceCache and calls TrackOpenInode.
 		coord.TrackOpenInode(ino, v1Inode)
 
 		coord.mu.Lock()
@@ -202,7 +198,6 @@ func TestRO_NamespaceCache_InternalPeekAndSynthesizeCompleteDirRespectExpiration
 		require.Equal(t, stampFromInodeMust(v2Inode), tr.stamp, "TrackOpenInode must not roll back newer observed stamp")
 		coord.mu.Unlock()
 
-		// fh1 must keep its valid v2 read-ahead window with zero extra fetch calls.
 		n, err := coord.Read(context.Background(), fh1, ino, 512<<10, buf, fetch)
 		require.NoError(t, err)
 		require.Equal(t, len(buf), n)
@@ -255,19 +250,17 @@ func assertDirMetaSubsetInvariant(t *testing.T, cache *NamespaceCache) {
 
 func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testing.T) {
 	t.Run("GivenSmallCapacity_WhenCreatingOver2xCapacityDirs_ThenCompleteDirsAndParentByDirStayBoundedAndTrackNewestDirs", func(t *testing.T) {
-		// Given: small capacity cache = 8.
+
 		const capacity = 8
 		cache := NewNamespaceCache(capacity)
 		cache.configure(1, 2.0, 2.0)
 		now := time.Unix(1_700_000_000, 0)
 
-		// When: create 24 directories (> 2*capacity) via putInodeAt + markNewDirWithParentAt.
 		for i := uint64(10); i < 10+3*capacity; i++ {
 			dirInode := makeTestProtoDirInode(i, now)
 			cache.putInodeAt(0, i, dirInode, 2.0, 2.0)
 			cache.markNewDirWithParentAt(0, i, 1)
 
-			// Then: invariant holds at every step and the newly created directory is tracked (not silently dropped).
 			assertDirMetaSubsetInvariant(t, cache)
 			cache.mu.Lock()
 			_, hasComplete := cache.completeDirs[i]
@@ -278,7 +271,6 @@ func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testin
 			require.Equal(t, uint64(1), parent)
 		}
 
-		// And: evicted oldest directory was purged from both maps.
 		cache.mu.Lock()
 		_, oldestComplete := cache.completeDirs[10]
 		_, oldestParent := cache.parentByDir[10]
@@ -303,12 +295,10 @@ func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testin
 		})
 		assertDirMetaSubsetInvariant(t, cache)
 
-		// When: clock crosses TTL and reads lazily evict both 'd' and 'i'.
 		clk.Advance(1500 * time.Millisecond)
 		_, _ = cache.dir(50)
 		_, _ = cache.inode(50)
 
-		// Then: completeDirs[50] and parentByDir[50] are pruned once both 'i' and 'd' expire.
 		assertDirMetaSubsetInvariant(t, cache)
 		cache.mu.Lock()
 		_, hasComplete := cache.completeDirs[50]
@@ -327,7 +317,7 @@ func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testin
 		dirInode := makeTestProtoDirInode(60, now)
 		childInode := makeTestProtoInode(61, 10, now)
 		epoch, gen := cache.snapshot()
-		// Insert 'd' without 'i' for dir 60.
+
 		cache.putDirAtIf(gen, epoch, 60, []*storagev1.DirEntryPlus{
 			{Ino: 60, Name: []byte("."), NextOffset: 1, Inode: dirInode, AttrTimeoutSeconds: 2.0},
 			{Ino: 1, Name: []byte(".."), NextOffset: 2, Inode: parentInode, AttrTimeoutSeconds: 2.0},
@@ -359,7 +349,7 @@ func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testin
 			{Ino: 72, Name: []byte("f2"), NextOffset: 4, Inode: makeTestProtoInode(72, 1, now), EntryTimeoutSeconds: 2.0, AttrTimeoutSeconds: 2.0},
 		}
 		epoch, gen := cache.snapshot()
-		cache.putDirAtIf(gen, epoch, 70, entries) // weight=5 > capacity=4
+		cache.putDirAtIf(gen, epoch, 70, entries)
 
 		cache.mu.Lock()
 		_, hasComplete := cache.completeDirs[70]
@@ -392,7 +382,6 @@ func TestNamespaceCache_CompleteDirsAndParentByDirCoupledToLRUEviction(t *testin
 		require.Equal(t, uint64(1), parent, "in-place inode refresh must preserve parentByDir")
 		assertDirMetaSubsetInvariant(t, cache)
 
-		// And: invalidateInode removes 'i', parentByDir, and completeDirs when no 'd' exists.
 		cache.invalidateInode(80)
 		cache.mu.Lock()
 		_, completeAfterInv := cache.completeDirs[80]

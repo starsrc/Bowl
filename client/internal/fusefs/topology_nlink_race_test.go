@@ -116,7 +116,7 @@ func installFirstWriteGate(srv *fakeStorage) (entered <-chan struct{}, release f
 
 func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirtyState(t *testing.T) {
 	t.Run("cached AttrTimeout>0 on promoted sync O_TMPFILE with open handle and dirty data", func(t *testing.T) {
-		// Given a promoted sync O_TMPFILE at nlink=1 with an open handle and dirty write cached under AttrTimeout>0.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -137,7 +137,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		linkEntered, unblockLink := installFirstLinkGate(srv, "link-b.bin")
 		defer unblockLink()
 
-		// When Link on link-b.bin holds inodeLocks across RPC while Unlink on link-a.bin snapshots pre-lock nlink=1.
 		linkStCh := make(chan fuse.Status, 1)
 		go func() {
 			var out fuse.EntryOut
@@ -159,7 +158,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 
-		// Then OrphanInodes stays 0, Release issues 0 ReclaimOrphan RPCs, and OnUnmount flushes dirty state.
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=cached_unlink_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
 		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=cached_unlink_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
@@ -174,7 +172,7 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 	})
 
 	t.Run("uncached AttrTimeout=0 on promoted sync O_TMPFILE with open handle and dirty data", func(t *testing.T) {
-		// Given a promoted sync O_TMPFILE under AttrTimeout=0 whose cached inode is invalidated before the race.
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -198,7 +196,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		linkEntered, unblockLink := installFirstLinkGate(srv, "strict-b.bin")
 		defer unblockLink()
 
-		// When Link on strict-b.bin holds inodeLocks while Unlink on strict-a.bin fetches nlink=1 via Lookup RPC.
 		linkStCh := make(chan fuse.Status, 1)
 		go func() {
 			var out fuse.EntryOut
@@ -220,7 +217,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 
-		// Then Link replaces the zero-TTL cached inode, OrphanInodes stays 0, Release issues 0 ReclaimOrphan RPCs, and OnUnmount flushes dirty state.
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=zero_ttl_unlink_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
 		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=zero_ttl_unlink_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
@@ -234,7 +230,7 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 	})
 
 	t.Run("closed dirty file with zero open handles preserves dirtyInodes when raced by Link", func(t *testing.T) {
-		// Given a closed regular file with dirtyInodes=1 and invalidated inode cache so only hasDirtyInodes triggers lookup.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -250,7 +246,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		linkEntered, unblockLink := installFirstLinkGate(srv, "closed-b.bin")
 		defer unblockLink()
 
-		// When Link on closed-b.bin races Unlink on closed-a.bin with zero open handles.
 		linkStCh := make(chan fuse.Status, 1)
 		go func() {
 			var out fuse.EntryOut
@@ -272,7 +267,6 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 
-		// Then dirtyInodes stays 1 and OnUnmount flushes Fsync for the surviving link.
 		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes, "scene=closed_dirty_unlink_link_race want=1 got=%d", syncFS.Snapshot().Queues.DirtyInodes)
 		syncFS.OnUnmount()
 		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=closed_dirty_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
@@ -281,7 +275,7 @@ func TestUnlink_PreLockSingleNlinkRacedByConcurrentLink_PreservesLiveFileAndDirt
 
 func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendingStageOnSecondUnlink(t *testing.T) {
 	t.Run("open 2-hardlink file marks orphan on second Unlink and reclaims on Release", func(t *testing.T) {
-		// Given an open file with 2 hard links named u1.bin and u2.bin.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -296,7 +290,6 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		firstUnlinkEntered, unblockFirstUnlink := installFirstUnlinkGate(srv, "u1.bin")
 		defer unblockFirstUnlink()
 
-		// When Unlink on u1.bin holds inodeLocks in flight while Unlink on u2.bin snapshots pre-lock nlink=2.
 		u1StCh := make(chan fuse.Status, 1)
 		go func() {
 			u1StCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "u1.bin")
@@ -314,7 +307,6 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		requireStatus(t, "Unlink u1.bin", fuse.OK, <-u1StCh)
 		requireStatus(t, "Unlink u2.bin", fuse.OK, <-u2StCh)
 
-		// Then the second Unlink revalidates nlink=1 via GetAttr and marks the open file as an orphan, reclaimed on Release.
 		require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=double_unlink_revalidation_getattr want=1 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=double_unlink_orphan_marked want=1 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
@@ -323,7 +315,7 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 	})
 
 	t.Run("closed 2-hardlink staged file with HasAnyPending discards queued stage chunks on second Unlink", func(t *testing.T) {
-		// Given a closed 2-link file in staged mode with chunk 1 blocked in upload and chunk 2 queued, where OpenFiles=0, DirtyInodes=0, and HasAnyPending=true.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		writeEntered, unblockWrite := installFirstWriteGate(srv)
 		defer unblockWrite()
@@ -349,7 +341,6 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		firstUnlinkEntered, secondUnlinkEntered, unblockFirstUnlink := installTwoStepUnlinkGate(srv, "s1.bin", "s2.bin")
 		defer unblockFirstUnlink()
 
-		// When two concurrent Unlinks race while only HasAnyPending is true.
 		u1StCh := make(chan fuse.Status, 1)
 		go func() {
 			u1StCh <- stagedFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "s1.bin")
@@ -369,7 +360,6 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 		unblockWrite()
 		requireStatus(t, "Unlink s2.bin", fuse.OK, <-u2StCh)
 
-		// Then DiscardInode drops remaining pending stage state and leaves zero dirty inodes.
 		require.Zero(t, stagedFS.Snapshot().Stage.PendingChunks, "scene=double_unlink_stage_discarded want=0 got=%d", stagedFS.Snapshot().Stage.PendingChunks)
 		require.Zero(t, stagedFS.Snapshot().Queues.DirtyInodes, "scene=double_unlink_stage_dirty want=0 got=%d", stagedFS.Snapshot().Queues.DirtyInodes)
 		stagedFS.OnUnmount()
@@ -379,7 +369,7 @@ func TestUnlink_TwoHardlinksRacedByConcurrentUnlinks_MarksOrphanAndDiscardsPendi
 
 func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTargetAndDirtyState(t *testing.T) {
 	t.Run("cached AttrTimeout>0 overwriting open dirty target raced by Link", func(t *testing.T) {
-		// Given a closed source file and an open dirty target file at nlink=1 cached under AttrTimeout>0.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -392,7 +382,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		linkEntered, unblockLink := installFirstLinkGate(srv, "target-keep.bin")
 		defer unblockLink()
 
-		// When Link on target-keep.bin holds inodeLocks while Rename from src.bin to target.bin snapshots pre-lock nlink=1.
 		linkStCh := make(chan fuse.Status, 1)
 		go func() {
 			var out fuse.EntryOut
@@ -417,7 +406,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		// Then OrphanInodes stays 0, Release issues 0 ReclaimOrphan RPCs, and OnUnmount flushes dirty target state.
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=cached_rename_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
 		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=cached_rename_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
@@ -432,7 +420,7 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 	})
 
 	t.Run("uncached AttrTimeout=0 overwriting open dirty promoted sync O_TMPFILE target raced by Link", func(t *testing.T) {
-		// Given a promoted sync O_TMPFILE target under AttrTimeout=0 whose cached inode is invalidated before Rename.
+
 		srv := newFakeStorage(t, withTTL(0, 0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -458,7 +446,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		linkEntered, unblockLink := installFirstLinkGate(srv, "target-0-keep.bin")
 		defer unblockLink()
 
-		// When Link on target-0-keep.bin holds inodeLocks while Rename from src-0.bin to target-0.bin fetches nlink=1 via Lookup RPC.
 		linkStCh := make(chan fuse.Status, 1)
 		go func() {
 			var out fuse.EntryOut
@@ -483,7 +470,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		// Then OrphanInodes stays 0, Release issues 0 ReclaimOrphan RPCs, and OnUnmount flushes dirty state.
 		midSnap := syncFS.Snapshot()
 		require.Zero(t, midSnap.Queues.OrphanInodes, "scene=zero_ttl_rename_link_race_orphans want=0 got=%d", midSnap.Queues.OrphanInodes)
 		require.Equal(t, 1, midSnap.Queues.DirtyInodes, "scene=zero_ttl_rename_link_race_dirty want=1 got=%d", midSnap.Queues.DirtyInodes)
@@ -497,7 +483,7 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 	})
 
 	t.Run("closed dirty target with zero open handles preserves dirtyInodes when raced by Link", func(t *testing.T) {
-		// Given a closed dirty target file with invalidated inode cache and zero open handles.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -516,7 +502,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		linkEntered, unblockLink := installFirstLinkGate(srv, "target-closed-keep.bin")
 		defer unblockLink()
 
-		// When Link on target-closed-keep.bin races Rename from src-closed.bin to target-closed.bin.
 		linkStCh := make(chan fuse.Status, 1)
 		go func() {
 			var out fuse.EntryOut
@@ -541,7 +526,6 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 		requireStatus(t, "concurrent Link", fuse.OK, <-linkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		// Then dirtyInodes stays 1 and OnUnmount flushes Fsync for the surviving link.
 		require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes, "scene=closed_dirty_rename_link_race want=1 got=%d", syncFS.Snapshot().Queues.DirtyInodes)
 		syncFS.OnUnmount()
 		require.Equal(t, int64(1), srv.fsyncCalls.Load(), "scene=closed_dirty_rename_unmount_fsync want=1 got=%d", srv.fsyncCalls.Load())
@@ -550,7 +534,7 @@ func TestRename_PreLockSingleNlinkTargetRacedByConcurrentLink_PreservesLiveTarge
 
 func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClosedDirty(t *testing.T) {
 	t.Run("open 2-hardlink target overwritten concurrently with Unlink of sibling link marks orphan", func(t *testing.T) {
-		// Given a closed source file and an open 2-link target named t1.bin and t2.bin.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -568,7 +552,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "t2.bin")
 		defer unblockUnlink()
 
-		// When Unlink on t2.bin holds inodeLocks while Rename from repl.bin to t1.bin snapshots pre-lock nlink=2.
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "t2.bin")
@@ -589,7 +572,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		// Then Rename revalidates nlink=1 via GetAttr, marks target as an orphan, and Release reclaims it.
 		require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=unlink_rename_revalidation_getattr want=1 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=unlink_rename_orphan_marked want=1 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: target.Fh})
@@ -598,7 +580,7 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 	})
 
 	t.Run("closed 2-hardlink dirty target overwritten concurrently with Unlink clears dirtyInodes", func(t *testing.T) {
-		// Given a closed 2-link dirty target with uncached entry dt1.bin, cached entry dt2.bin, and zero open handles.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		targetIno := srv.seedFile(1, "dt1.bin", 0o644, nil)
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
@@ -620,7 +602,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "dt2.bin")
 		defer unblockUnlink()
 
-		// When Unlink on dt2.bin holds inodeLocks while Rename from drepl.bin to dt1.bin snapshots pre-lock nlink=2.
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "dt2.bin")
@@ -641,7 +622,6 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 		requireStatus(t, "concurrent Rename", fuse.OK, <-renameStCh)
 
-		// Then Rename revalidates nlink=1, clears dirtyInodes for the deleted target, and OnUnmount skips Fsync.
 		require.Zero(t, syncFS.Snapshot().Queues.DirtyInodes, "scene=unlink_rename_closed_dirty_cleared want=0 got=%d", syncFS.Snapshot().Queues.DirtyInodes)
 		syncFS.OnUnmount()
 		require.Zero(t, srv.fsyncCalls.Load(), "scene=unlink_rename_closed_no_fsync want=0 got=%d", srv.fsyncCalls.Load())
@@ -650,7 +630,7 @@ func TestRename_TwoHardlinkTargetRacedByConcurrentUnlink_MarksOrphanAndClearsClo
 
 func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 	t.Run("uncontended Unlink and Rename with open handles issue zero extra GetAttr RPCs", func(t *testing.T) {
-		// Given open files under sync mode with no concurrent topology mutations.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -659,14 +639,12 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		src := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "fast-src.bin", syscall.O_RDWR, 0o644)
 		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: src.NodeId}, Fh: src.Fh})
 
-		// When Unlink and Rename execute without concurrent topology changes.
 		requireStatus(t, "uncontended Unlink", fuse.OK, syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "fast-unlink.bin"))
 		requireStatus(t, "uncontended Rename", fuse.OK, syncFS.Rename(nil, &fuse.RenameIn{
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 			Newdir:   fuse.FUSE_ROOT_ID,
 		}, "fast-src.bin", "fast-target.bin"))
 
-		// Then zero GetAttr RPCs fire and both open files are tracked as orphans.
 		require.Zero(t, srv.getAttrCalls.Load(), "scene=uncontended_zero_getattr want=0 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, 2, syncFS.Snapshot().Queues.OrphanInodes, "scene=uncontended_orphans want=2 got=%d", syncFS.Snapshot().Queues.OrphanInodes)
 
@@ -676,7 +654,7 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 	})
 
 	t.Run("Rename racing Unlink of closed 1-link target tolerates ENOENT on GetAttr revalidation", func(t *testing.T) {
-		// Given an unrelated open file so AnyOpen is true, a closed source, and a closed single-link target.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -691,7 +669,6 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "enoent-target.bin")
 		defer unblockUnlink()
 
-		// When Unlink on enoent-target.bin deletes the closed target while Rename from enoent-src.bin to enoent-target.bin waits on inodeLocks.
 		unlinkStCh := make(chan fuse.Status, 1)
 		go func() {
 			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "enoent-target.bin")
@@ -712,14 +689,13 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		requireStatus(t, "concurrent Unlink", fuse.OK, <-unlinkStCh)
 		requireStatus(t, "concurrent Rename after target ENOENT", fuse.OK, <-renameStCh)
 
-		// Then GetAttr returned ENOENT, Rename still installed src at enoent-target.bin, and OrphanInodes stays 0.
 		require.Equal(t, int64(1), srv.getAttrCalls.Load(), "scene=rename_enoent_revalidation_getattr want=1 got=%d", srv.getAttrCalls.Load())
 		require.Equal(t, src.NodeId, mustLookup(t, syncFS, fuse.FUSE_ROOT_ID, "enoent-target.bin").NodeId)
 		require.Zero(t, syncFS.Snapshot().Queues.OrphanInodes)
 	})
 
 	t.Run("contended Unlink and Rename propagate non-ENOENT GetAttr revalidation errors before mutating RPC", func(t *testing.T) {
-		// Given a 3-link open file where GetAttr fails with EIO during contended revalidation.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -743,7 +719,6 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "err-a.bin")
 		defer unblockUnlink()
 
-		// When Unlink on err-a.bin invalidates cache and bumps topologySeq while Unlink on err-b.bin and Rename from err-src.bin to err-c.bin queue on inodeLocks.
 		u1StCh := make(chan fuse.Status, 1)
 		go func() {
 			u1StCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "err-a.bin")
@@ -772,7 +747,6 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		requireStatus(t, "second Unlink EIO", fuse.EIO, <-u2StCh)
 		requireStatus(t, "contended Rename EIO", fuse.EIO, <-renameStCh)
 
-		// Then neither the second Unlink RPC nor the Rename RPC fired.
 		require.Equal(t, int64(1), srv.unlinkCalls.Load(), "scene=eio_aborts_second_unlink_rpc want=1 got=%d", srv.unlinkCalls.Load())
 		require.Zero(t, srv.renameCalls.Load(), "scene=eio_aborts_rename_rpc want=0 got=%d", srv.renameCalls.Load())
 	})

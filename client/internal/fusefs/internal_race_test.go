@@ -150,7 +150,6 @@ func runMonotonicSizeRace(t *testing.T) {
 		}
 	}
 
-	// 1. 慢查询与推进写竞态：慢查询在 size=0 时拍摄 (epoch, gen)，推进写入 size=8192 后再回填必须被拦截
 	cache.putEntryAt(epoch, 1, "race.bin", ino)
 	cache.putInodeAt(epoch, ino, makeInode(0), 1.0, 1.0)
 	snapEpoch, snapGen := cache.snapshot()
@@ -162,7 +161,6 @@ func runMonotonicSizeRace(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint64(8192), got.inode.GetAttr().GetSize(), "过期快照回填不得使缓存尺寸回退")
 
-	// 2. 多协程并发 Lookup/GetAttr 与阶段性单调写回填，在 -race 下检验零倒退与零数据竞争
 	var stop atomic.Bool
 	var wg sync.WaitGroup
 	var errMsg atomic.Value
@@ -243,7 +241,7 @@ func waitUntilReadAheadSlotWaitersAtLeast(t *testing.T, coord *ReadAheadCoordina
 
 func runConcurrentSingleflightContended(t *testing.T, coord *ReadAheadCoordinator, fh, ino uint64, count int) int32 {
 	t.Helper()
-	// 先执行一次直通首读建立顺序参考位置，再在下一顺序偏移触发 4 MiB 窗口单飞槽位
+
 	primeChunk := makeFilledChunk(4096, 0x11)
 	primeBuf := make([]byte, 4096)
 	primeN, primeErr := coord.Read(context.Background(), fh, ino, 0, primeBuf, func(context.Context, uint64, uint32) (rpc.ReadPayload, error) {
@@ -256,7 +254,7 @@ func runConcurrentSingleflightContended(t *testing.T, coord *ReadAheadCoordinato
 	fetchEntered := make(chan struct{})
 	fetchGate := make(chan struct{})
 	var once sync.Once
-	// 返回小于 4 MiB 的窗口末尾分片，避免触发下一窗口投机预取干扰当前窗口单飞计数
+
 	chunk := makeFilledChunk(64*1024, 0x55)
 	fetch := func(context.Context, uint64, uint32) (rpc.ReadPayload, error) {
 		fetchCalls.Add(1)
@@ -269,7 +267,6 @@ func runConcurrentSingleflightContended(t *testing.T, coord *ReadAheadCoordinato
 	errs := make([]error, count)
 	reads := make([][]byte, count)
 
-	// 先启动首个领导者请求并等待其进入远端拉取，再放行其余 16 个从属读者合并到同一单飞槽位
 	wg.Go(func() {
 		buf := make([]byte, 4096)
 		n, err := coord.Read(context.Background(), fh, ino, 4096, buf, fetch)
@@ -335,35 +332,30 @@ func makeInvalidationRetryFetcher(firstEntered chan struct{}, firstGate <-chan s
 }
 
 func TestHandleTable_并发Release与MarkOrphan竞态恰好触发单次回收(t *testing.T) {
-	// Given / When / Then
+
 	runHandleOrphanRaceSuite(t, 128)
 }
 
 func TestReadAhead_全局并发预算与单飞合并及随机零放大与失效重试无泄漏(t *testing.T) {
 	t.Run("17个并发读者命中同一窗口单飞合并为单次拉取", func(t *testing.T) {
-		// Given
+
 		coord := NewReadAheadCoordinator()
 
-		// When
 		calls := runConcurrentSingleflightContended(t, coord, 1, 10, 17)
 
-		// Then
 		require.Equal(t, int32(1), calls, "17 个同窗并发读者必须通过单飞收敛为 1 次 RPC")
 	})
 
 	t.Run("16流并发顺序预读严守全局32配额且16流随机读零放大", func(t *testing.T) {
-		// Given
+
 		coordSeq := NewReadAheadCoordinator()
 		var activeInflight, maxObservedInflight atomic.Int32
 		seqFetch := makeBudgetProbeFetcher(&activeInflight, &maxObservedInflight, make([]byte, MaxRPCChunkSize))
 
-		// When
 		runSequentialStreamsForBudget(t, coordSeq, 16, seqFetch)
 
-		// Then
 		require.LessOrEqual(t, maxObservedInflight.Load(), int32(ReadAheadMaxGlobalInflight+16), "全局异步预取并发配额不得突破上限")
 
-		// Given / When / Then: 16 流随机跳读零投机预读放大
 		coordRand := NewReadAheadCoordinator()
 		var randFetches atomic.Int32
 		randChunk := make([]byte, MaxRPCChunkSize)
@@ -376,7 +368,7 @@ func TestReadAhead_全局并发预算与单飞合并及随机零放大与失效�
 	})
 
 	t.Run("在途拉取遭遇InvalidateInode后等待者重拉成功且不泄漏ContextCanceled", func(t *testing.T) {
-		// Given: 先连续读取建立 0..4MiB 活跃窗口，触发 4MiB..8MiB 后台异步预取并阻塞在首轮远端拉取
+
 		coord := NewReadAheadCoordinator()
 		firstEntered := make(chan struct{})
 		firstGate := make(chan struct{})
@@ -391,7 +383,6 @@ func TestReadAhead_全局并发预算与单飞合并及随机零放大与失效�
 		require.NoError(t, primeErr2)
 		<-firstEntered
 
-		// When: 前台等待者汇入在途异步预取槽位 -> 写者调用 InvalidateInode 废弃并取消预取 -> 放行旧拉取触发前台重拉
 		type readOutcome struct {
 			n    int
 			data []byte
@@ -408,7 +399,6 @@ func TestReadAhead_全局并发预算与单飞合并及随机零放大与失效�
 		close(firstGate)
 		res := <-done
 
-		// Then
 		require.NoError(t, res.err, "在途预取遇到 InvalidateInode 不得向前台等待者泄漏 context.Canceled")
 		require.Equal(t, 4096, res.n)
 		require.Equal(t, byte(0x7E), res.data[0], "失效后重拉必须返回最新数据")
@@ -421,13 +411,12 @@ func TestNamespaceCache与InodeLocks_并发写查单调尺寸不变式与互斥�
 	})
 
 	t.Run("inodeLocks竞争阻塞释放后准确记录ContendedAcquisitions并清理表项", func(t *testing.T) {
-		// Given
+
 		var locks inodeLocks
 		m := NewMetrics()
 		locks.bindMetrics(m)
 		unlock1 := locks.lock(42)
 
-		// When: 二号协程在 42 上竞争挂起，待 refs==2 确认排队后释放 unlock1
 		done := make(chan struct{})
 		go func() {
 			unlock2 := locks.lock(42)
@@ -438,7 +427,6 @@ func TestNamespaceCache与InodeLocks_并发写查单调尺寸不变式与互斥�
 		unlock1()
 		<-done
 
-		// Then
 		snap := m.Snapshot()
 		require.Equal(t, uint64(1), snap.InodeLocks.FastAcquisitions)
 		require.Equal(t, uint64(1), snap.InodeLocks.ContendedAcquisitions)

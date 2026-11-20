@@ -84,7 +84,7 @@ func setupTestObsAndMux(t *testing.T) (*clientRuntime, *http.ServeMux) {
 }
 
 func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
-	// Given / When / Then
+
 	requireHelpExit0(t, "bowl stats [mountpoint]", "stats", "-h")
 	requireHelpExit0(t, "bowl stats [mountpoint]", "stats", "--help")
 
@@ -100,16 +100,14 @@ func TestStats_GivenHelpAndInvalidFlags_ReturnsExpectedExitCodes(t *testing.T) {
 }
 
 func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *testing.T) {
-	// Given: empty metadata directory
+
 	metaDir := t.TempDir()
 	withTempMountMetaDirs(t, metaDir)
 
-	// When / Then: no active mounts
 	code, _, errOut := runCLI("stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "no active bowl mounts found")
 
-	// Given: two alive mounts and one dead PID metadata entry that must be ignored
 	_, err := writeMountMeta(&mountMeta{
 		Mountpoint: "/mnt/a",
 		PID:        os.Getpid(),
@@ -135,7 +133,6 @@ func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *tes
 	})
 	require.NoError(t, err)
 
-	// When / Then: ambiguous mounts fail and unknown mountpoint fails
 	code, _, errOut = runCLI("stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "multiple active mounts found")
@@ -149,7 +146,7 @@ func TestStats_GivenNoOrAmbiguousMounts_ReturnsExit1WithActionableMessage(t *tes
 }
 
 func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(t *testing.T) {
-	// Given
+
 	_, mux := setupTestObsAndMux(t)
 	lastURL := withStatsMuxTransport(t, mux)
 	metaDir := t.TempDir()
@@ -169,21 +166,18 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 	})
 	require.NoError(t, err)
 
-	// When: 自动发现单一挂载默认 text 输出
 	code, textOut, errOut := runCLI("stats")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=text", *lastURL)
 	require.NotEmpty(t, textOut)
 
-	// When: explicit --json=false and --raw=false keep text format
 	code, falseOut, errOut := runCLI("stats", "--json=false", "--raw=false")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "http://127.0.0.1:19100/debug/stats?format=text", *lastURL)
 	require.Contains(t, falseOut, "Uptime:")
 
-	// When: symlink mountpoint with --json
 	code, jsonOut, errOut := runCLI("stats", symMP, "--json")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -192,7 +186,6 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &snap))
 	require.Len(t, snap.FUSE.Ops, fusefs.OpCount)
 
-	// When: 显式 --admin-addr 归一化并输出 --raw (.stats 格式)
 	code, rawOut, errOut := runCLI("stats", "--admin-addr", "http://127.0.0.1:19200/", "--raw")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -201,7 +194,7 @@ func TestStats_GivenSingleActiveMountAndSymlink_DiscoversAdminAndRendersFormats(
 }
 
 func TestStats_GivenDisabledAdminOrHTTPError_ReturnsExit1(t *testing.T) {
-	// Given: 管理面被显式关闭
+
 	metaDir := t.TempDir()
 	withTempMountMetaDirs(t, metaDir)
 	_, err := writeMountMeta(&mountMeta{
@@ -217,13 +210,11 @@ func TestStats_GivenDisabledAdminOrHTTPError_ReturnsExit1(t *testing.T) {
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "admin endpoint is disabled")
 
-	// Given: transport error
 	withStatsErrorTransport(t, errors.New("connection refused"))
 	code, _, errOut = runCLI("stats", "--admin-addr", "127.0.0.1:19300")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "failed to query admin endpoint 127.0.0.1:19300")
 
-	// Given: non-200 HTTP response
 	withStatsMuxTransport(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
@@ -233,7 +224,7 @@ func TestStats_GivenDisabledAdminOrHTTPError_ReturnsExit1(t *testing.T) {
 }
 
 func TestAdminObservability_GivenBareOTLPEndpoint_NormalizesSchemeWithoutExternalDial(t *testing.T) {
-	// Given
+
 	require.Empty(t, normalizeOTLPEndpoint("   "))
 	require.Equal(t, "http://172.16.1.205:4317", normalizeOTLPEndpoint("172.16.1.205:4317"))
 	require.Equal(t, "http://172.16.1.205:4317", normalizeOTLPEndpoint("  172.16.1.205:4317  "))
@@ -243,27 +234,24 @@ func TestAdminObservability_GivenBareOTLPEndpoint_NormalizesSchemeWithoutExterna
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "172.16.1.205:4317")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
 
-	// When
 	cfg := buildObsConfig(&mountOptions{
 		logLevel:         "info",
 		logFormat:        "json",
 		traceSampleRatio: 0.001,
 	})
 
-	// Then
 	require.Equal(t, "http://172.16.1.205:4317", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	require.Equal(t, "http://172.16.1.205:4317", cfg.Endpoint())
 	require.True(t, cfg.Insecure())
 }
 
 func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(t *testing.T) {
-	// Given
+
 	exporter := tracetest.NewInMemoryExporter()
 	tp := newTestSamplerProvider(exporter, 1e-12)
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 	tracer := tp.Tracer("bowl/client/test")
 
-	// When / Then: Fsync / FsyncDir / OnUnmount 在极低采样率下确定性采样
 	_, spFsync := tracer.Start(context.Background(), "fuse.Fsync")
 	require.True(t, spFsync.SpanContext().IsSampled())
 	spFsync.End()
@@ -276,7 +264,6 @@ func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(
 	require.True(t, spUnmount.SpanContext().IsSampled())
 	spUnmount.End()
 
-	// 携带已采样 SpanLink 的后台异步根 Span 跟随采样
 	sampledCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
 		SpanID:     [8]byte{1, 2, 3, 4, 5, 6, 7, 8},
@@ -289,7 +276,6 @@ func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(
 	require.True(t, linkedRoot.SpanContext().IsSampled())
 	linkedRoot.End()
 
-	// 采样率为 0 时完全关闭采样
 	zeroTP := newTestSamplerProvider(exporter, 0)
 	defer func() { _ = zeroTP.Shutdown(context.Background()) }()
 	_, zeroSpan := zeroTP.Tracer("bowl/client/test").Start(context.Background(), "fuse.Fsync")
@@ -298,18 +284,16 @@ func TestAdminObservability_GivenPriorityOpSampler_BoostsBarriersAndLinkedSpans(
 }
 
 func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponsesWithoutNetwork(t *testing.T) {
-	// Given
+
 	obs, mux := setupTestObsAndMux(t)
 	hist, err := obs.meterProvider.Meter("connectrpc").Float64Histogram("rpc.client.duration")
 	require.NoError(t, err)
 	hist.Record(context.Background(), 0.00003)
 
-	// When: 请求 /metrics
 	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	metricsRec := httptest.NewRecorder()
 	mux.ServeHTTP(metricsRec, metricsReq)
 
-	// Then
 	require.Equal(t, http.StatusOK, metricsRec.Code)
 	metricsText := metricsRec.Body.String()
 	require.Contains(t, metricsText, `le="2.5e-05"} 0`)
@@ -317,13 +301,11 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 	require.Contains(t, metricsText, "bowl_client_stage_writes_total")
 	require.Contains(t, metricsText, "bowl_client_fuse_connection_waiting")
 
-	// When: 非法 format 返回 400
 	badReq := httptest.NewRequest(http.MethodGet, "/debug/stats?format=xml", http.NoBody)
 	badRec := httptest.NewRecorder()
 	mux.ServeHTTP(badRec, badReq)
 	require.Equal(t, http.StatusBadRequest, badRec.Code)
 
-	// When: startAdminServer("off") 返回 nil 且方法对 nil 安全
 	disabled, startErr := startAdminServer("off", obs, nil, nil)
 	require.NoError(t, startErr)
 	require.Nil(t, disabled)
@@ -332,22 +314,19 @@ func TestAdminMux_GivenSubMsMetricsAndInvalidStatsFormat_ServesExpectedResponses
 }
 
 func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringStats(t *testing.T) {
-	// Given
+
 	obs, mux := setupTestObsAndMux(t)
 
-	// When: query /debug/unmount and /debug/stats before any unmount
 	unmountReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
 	unmountRec := httptest.NewRecorder()
 	mux.ServeHTTP(unmountRec, unmountReq)
 
-	// Then
 	require.Equal(t, http.StatusOK, unmountRec.Code)
 	require.Equal(t, "application/json; charset=utf-8", unmountRec.Header().Get("Content-Type"))
 	var prog fusefs.UnmountProgress
 	require.NoError(t, json.Unmarshal(unmountRec.Body.Bytes(), &prog))
 	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, prog)
 
-	// And /debug/stats Snapshot schema remains unchanged without unmount progress fields.
 	statsReq := httptest.NewRequest(http.MethodGet, "/debug/stats?format=json", http.NoBody)
 	statsRec := httptest.NewRecorder()
 	mux.ServeHTTP(statsRec, statsReq)
@@ -359,7 +338,6 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 	require.NotContains(t, rawStats, "total")
 	require.NotContains(t, rawStats, "unmount")
 
-	// And a nil RawFS still returns 200 OK zero progress safely.
 	nilMux := newAdminMux(obs, nil, nil)
 	nilReq := httptest.NewRequest(http.MethodGet, "/debug/unmount", http.NoBody)
 	nilRec := httptest.NewRecorder()
@@ -371,7 +349,7 @@ func TestAdminMux_GivenDebugUnmountEndpoint_ReturnsJSONProgressWithoutAlteringSt
 }
 
 func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *testing.T) {
-	// Given
+
 	realMP := filepath.Join(t.TempDir(), "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
 	canonMP := canonicalMountpoint(realMP)
@@ -381,7 +359,6 @@ func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *t
 	metaDir := t.TempDir()
 	withTempMountMetaDirs(t, metaDir)
 
-	// When: writeMountMeta is given a symlink mountpoint
 	writtenPath, err := writeMountMeta(&mountMeta{
 		Mountpoint: symMP,
 		PID:        os.Getpid(),
@@ -391,7 +368,6 @@ func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *t
 	})
 	require.NoError(t, err)
 
-	// Then: filename and stored JSON both use canonical mountpoint
 	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(canonMP)), writtenPath)
 	data, err := os.ReadFile(writtenPath)
 	require.NoError(t, err)
@@ -399,7 +375,6 @@ func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *t
 	require.NoError(t, json.Unmarshal(data, &stored))
 	require.Equal(t, canonMP, stored.Mountpoint)
 
-	// And listMountMetas reads the persisted canonical entry without altering it
 	metas := listMountMetas()
 	require.Len(t, metas, 1)
 	require.Equal(t, canonMP, metas[0].Mountpoint)
@@ -407,7 +382,7 @@ func TestMountMeta_GivenSymlinkMountpoint_CanonicalizesWriteAndListsCleanly(t *t
 }
 
 func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountRoots(t *testing.T) {
-	// Given: realWedgedMP with admin off and realOkMP are active mount roots in mountinfo
+
 	const (
 		realWedgedMP = "/wedged-root/mnt"
 		realOkMP     = "/ok-root/mnt"
@@ -429,7 +404,6 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 		symOkMP:     {mode: os.ModeSymlink | 0o777, target: realOkMP},
 	})
 
-	// When: writing metadata via symlinked mountpoints
 	wedgedMetaPath, err := writeMountMeta(&mountMeta{
 		Mountpoint: symWedgedMP,
 		PID:        os.Getpid(),
@@ -447,11 +421,9 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 	})
 	require.NoError(t, err)
 
-	// Then: metadata files use canonical mountpoint hashes with zero Lstat on active mount roots
 	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realWedgedMP)), wedgedMetaPath)
 	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realOkMP)), okMetaPath)
 
-	// When: listMountMetas reads entries, including a stored symlink entry to verify pure filepath.Clean without EvalSymlinks
 	realTarget := t.TempDir()
 	hostSym := filepath.Join(t.TempDir(), "host-sym")
 	require.NoError(t, os.Symlink(realTarget, hostSym))
@@ -472,14 +444,12 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 	require.Contains(t, gotMountpoints, hostSym)
 	require.NoError(t, os.Remove(extraPath))
 
-	// When: bowl stats with no args lists multiple mounts
 	code, _, errOut := runCLI("stats")
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "multiple active mounts found")
 	require.Contains(t, errOut, realOkMP)
 	require.Contains(t, errOut, realWedgedMP)
 
-	// When: bowl stats <symOkMP> queries healthy mount while wedged mount is present
 	code, jsonOut, errOut := runCLI("stats", symOkMP, "--json")
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, errOut)
@@ -487,13 +457,11 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 	var snap fusefs.Snapshot
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &snap))
 
-	// When: bowl stats <symWedgedMP> fails immediately on disabled admin without hanging
 	code, _, errOut = runCLI("stats", symWedgedMP)
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "admin endpoint is disabled")
 	require.Contains(t, errOut, realWedgedMP)
 
-	// When: sole wedged mount with --admin-addr off fails immediately on bowl stats without args
 	require.NoError(t, os.Remove(okMetaPath))
 	code, _, errOut = runCLI("stats")
 	require.Equal(t, 1, code)
@@ -505,7 +473,7 @@ func TestStatsAndMountMeta_GivenWedgedAndHealthyMounts_AvoidsLstatOnActiveMountR
 }
 
 func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpectedStatus(t *testing.T) {
-	// Given: isolated observability runtime, RawFS, and deterministic clock.
+
 	obs, _ := setupTestObsAndMux(t)
 	rawFS := fusefs.NewRawFS(nil, fusefs.Config{
 		DiskID:  testDiskID1,
@@ -527,28 +495,23 @@ func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpe
 		return rec.Code, rec.Body.String()
 	}
 
-	// Healthy active lease -> 200 OK.
 	code, body := queryReadyz(mux)
 	require.Equal(t, http.StatusOK, code, "body=%s", body)
 
-	// Lease reaches exact expiry boundary (now == leaseExpiresAt) -> 503.
 	now = now.Add(30 * time.Second)
 	code, body = queryReadyz(mux)
 	require.Equal(t, http.StatusServiceUnavailable, code, "body=%s", body)
 	require.Contains(t, body, "mount_lease")
 
-	// Renewal refreshes leaseExpiresAt -> heals back to 200 OK.
 	tracker.refresh(30)
 	code, body = queryReadyz(mux)
 	require.Equal(t, http.StatusOK, code, "body=%s", body)
 
-	// Permanent fence flips /readyz to 503 with reason even while lease has not expired.
 	rawFS.Fence(fuse.EBUSY, "writer epoch superseded")
 	code, body = queryReadyz(mux)
 	require.Equal(t, http.StatusServiceUnavailable, code, "body=%s", body)
 	require.Contains(t, body, "writer epoch superseded")
 
-	// Lease-free tracker (mountID == "") stays 200 OK while unfenced.
 	leaseFreeFS := fusefs.NewRawFS(nil, fusefs.Config{DiskID: testDiskID1, RootIno: 1})
 	t.Cleanup(leaseFreeFS.OnUnmount)
 	leaseFreeTracker := newMountLeaseTracker(mountLeaseInfo{}, func() time.Time { return now })

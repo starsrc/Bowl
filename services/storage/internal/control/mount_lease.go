@@ -91,7 +91,7 @@ func (m *manager) upsertMountLease(diskKey, mountKey string, readOnly bool, epoc
 				if isRenew {
 					return 0, fmt.Errorf("%w: mount epoch %d superseded by %d", ErrStaleEpoch, epoch, lease.epoch)
 				}
-				// 并发挂载已被更新世代抢占时，跳过登记陈旧租约。
+
 				return m.leaseTTLSeconds(), nil
 			}
 		}

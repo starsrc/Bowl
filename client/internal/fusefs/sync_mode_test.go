@@ -19,7 +19,7 @@ import (
 )
 
 func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStagingAndSurfacesQuotaAndEpochErrors(t *testing.T) {
-	// Given sync mount mode with an explicit StageDir and an isolated TMPDIR.
+
 	emptyTmpDir := t.TempDir()
 	t.Setenv("TMPDIR", emptyTmpDir)
 
@@ -33,7 +33,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStagingAndSurfa
 	require.Equal(t, []string{"default_permissions"}, mountOpts.Options, "scene=sync_mount_options want=[default_permissions] got=%v", mountOpts.Options)
 	requireStatus(t, "sync CheckWritable", fuse.OK, syncFS.CheckWritable())
 
-	// When the caller creates a regular file and calls Write and multi-segment Writev without Flush or Fsync.
 	created := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "sync.bin", syscall.O_RDWR, 0o644)
 	mustWriteAt(t, syncFS, created.NodeId, created.Fh, 0, []byte("hello-"))
 	writtenV, writevSt := syncFS.Writev(nil, &fuse.WriteIn{
@@ -45,7 +44,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStagingAndSurfa
 	requireStatus(t, "sync Writev", fuse.OK, writevSt)
 	require.Equal(t, uint32(9), writtenV, "scene=sync_writev want=9 got=%d", writtenV)
 
-	// Then zero host stage directories exist and writes have reached StorageService synchronously.
 	_, stageStatErr := os.Stat(unusedStageDir)
 	require.ErrorIs(t, stageStatErr, os.ErrNotExist, "scene=sync_unused_stage_dir want=NotExist got=%v", stageStatErr)
 	tmpEntries, tmpReadErr := os.ReadDir(emptyTmpDir)
@@ -63,7 +61,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStagingAndSurfa
 	require.True(t, ok)
 	requireBytesMatch(t, "sync immediate server bytes", []byte("hello-sync-mode"), stored)
 
-	// Server quota ENOSPC and stale Epoch EBUSY fail synchronously on the Write call.
 	srv.writeHook = func(_ context.Context, _ *storagev1.WriteRequest) (uint32, error) {
 		return 0, errnoError(connect.CodeResourceExhausted, "ENOSPC")
 	}
@@ -92,13 +89,12 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStagingAndSurfa
 }
 
 func TestTmpfile_SyncMode_Validation_RejectsInvalidInputsWithoutRPC(t *testing.T) {
-	// Given
+
 	srv := newFakeStorage(t, withRootIno(99), withTTL(1.0, 1.0))
 	roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withStatsFile(true))
 	var out fuse.CreateOut
 
-	// When / Then
 	requireStatus(t, "RO Tmpfile", fuse.Status(syscall.EROFS), roFS.Tmpfile(nil, &fuse.CreateIn{
 		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
 		Flags:    uint32(syscall.O_RDWR),
@@ -128,7 +124,7 @@ func TestTmpfile_SyncMode_Validation_RejectsInvalidInputsWithoutRPC(t *testing.T
 }
 
 func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsOnLastRelease(t *testing.T) {
-	// Given sync RawFS instances with DirectIO disabled and enabled, RootIno 42, and isolated TMPDIR.
+
 	emptyTmpDir := t.TempDir()
 	t.Setenv("TMPDIR", emptyTmpDir)
 
@@ -142,7 +138,6 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 	dioFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(true))
 
-	// When the caller creates a linkable tmpfile on syncFS and an O_EXCL tmpfile on dioFS.
 	var tmpOut fuse.CreateOut
 	st := syncFS.Tmpfile(nil, &fuse.CreateIn{
 		InHeader: fuse.InHeader{
@@ -165,7 +160,6 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 	}, &dioOut)
 	requireStatus(t, "sync Tmpfile O_EXCL DirectIO", fuse.OK, stDIO)
 
-	// Then CreateTmpfile receives the mapped ParentIno, S_IFREG mode, and Exclusive flag with zero host files.
 	require.Len(t, capturedReqs, 2)
 	require.Equal(t, uint64(42), capturedReqs[0].GetParentIno())
 	require.Equal(t, uint32(syscall.S_IFREG|0o640), capturedReqs[0].GetMode())
@@ -187,12 +181,10 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 	require.Zero(t, syncFS.Snapshot().TmpFile.ActiveFiles)
 	require.Zero(t, syncFS.Snapshot().TmpFile.ResidentBytes)
 
-	// GetAttr hits the cached inode populated by Tmpfile without issuing an extra RPC.
 	attr0 := mustGetAttr(t, syncFS, tmpOut.NodeId)
 	require.Zero(t, srv.getAttrCalls.Load(), "scene=tmpfile_cached_getattr want=0_rpcs got=%d", srv.getAttrCalls.Load())
 	require.Zero(t, attr0.Nlink)
 
-	// Write, Read, SetAttr, Fallocate preallocation and hole punch, and Fsync execute on serverIno.
 	mustWriteAt(t, syncFS, tmpOut.NodeId, tmpOut.Fh, 0, []byte("helloWORLD!"))
 	requireBytesMatch(t, "sync tmpfile Read", []byte("helloWORLD!"), mustReadAt(t, syncFS, tmpOut.NodeId, tmpOut.Fh, 0, 11))
 
@@ -228,7 +220,6 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 	}))
 	require.Equal(t, int64(1), srv.fsyncCalls.Load())
 
-	// With a dirty write and a second open handle, ReclaimOrphan waits until the last handle closes.
 	mustWriteAt(t, syncFS, tmpOut.NodeId, tmpOut.Fh, 16, []byte("tail"))
 	secondOpen := mustOpenFile(t, syncFS, tmpOut.NodeId, syscall.O_RDONLY)
 
@@ -248,7 +239,7 @@ func TestTmpfile_SyncMode_UnlinkedLifecycle_RoutesAllFileOpsToServerAndReclaimsO
 }
 
 func TestTmpfile_SyncMode_OpenHandleFailure_ImmediatelyReclaimsServerOrphan(t *testing.T) {
-	// Given a faulty server returning an S_IFDIR inode on CreateTmpfile so openHandle fails with EISDIR.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	var leakedIno uint64
 	srv.createTmpfileHook = func(_ context.Context, _ *storagev1.CreateTmpfileRequest) (*storagev1.CreateTmpfileResponse, error) {
@@ -281,7 +272,6 @@ func TestTmpfile_SyncMode_OpenHandleFailure_ImmediatelyReclaimsServerOrphan(t *t
 	}
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
-	// When
 	var out fuse.CreateOut
 	st := syncFS.Tmpfile(nil, &fuse.CreateIn{
 		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -289,7 +279,6 @@ func TestTmpfile_SyncMode_OpenHandleFailure_ImmediatelyReclaimsServerOrphan(t *t
 		Mode:     0o600,
 	}, &out)
 
-	// Then openHandle fails with EISDIR and reclaims the server orphan without leaking.
 	requireStatus(t, "Tmpfile openHandle EISDIR", fuse.Status(syscall.EISDIR), st)
 	require.NotZero(t, leakedIno)
 	require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=open_handle_fail_reclaim want=1 got=%d", srv.reclaimOrphanCalls.Load())
@@ -298,7 +287,7 @@ func TestTmpfile_SyncMode_OpenHandleFailure_ImmediatelyReclaimsServerOrphan(t *t
 }
 
 func TestTmpfile_SyncMode_LinkPromotion_ClearsOrphanPreservesDirtyAndCountsSinglePromote(t *testing.T) {
-	// Given a linkable sync tmpfile with dirty written data and no explicit Fsync.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 
@@ -312,7 +301,6 @@ func TestTmpfile_SyncMode_LinkPromotion_ClearsOrphanPreservesDirtyAndCountsSingl
 	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes)
 	require.Equal(t, 1, syncFS.Snapshot().Queues.DirtyInodes)
 
-	// When the caller promotes via Link, releases the original handle, and creates a second hard link.
 	var linkOut fuse.EntryOut
 	requireStatus(t, "promote Link", fuse.OK, syncFS.Link(nil, &fuse.LinkIn{
 		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -330,7 +318,6 @@ func TestTmpfile_SyncMode_LinkPromotion_ClearsOrphanPreservesDirtyAndCountsSingl
 		Oldnodeid: tmpOut.NodeId,
 	}, "promoted-2.bin", &linkOut2))
 
-	// Then Release does not call ReclaimOrphan or clear dirtyInodes, and the second Link does not double-count Promotes.
 	require.Zero(t, srv.reclaimOrphanCalls.Load(), "scene=promoted_release want=0_reclaim got=%d", srv.reclaimOrphanCalls.Load())
 	require.True(t, srv.hasNode(tmpOut.NodeId))
 	require.Equal(t, uint32(2), linkOut2.Nlink)
@@ -346,7 +333,7 @@ func TestTmpfile_SyncMode_LinkPromotion_ClearsOrphanPreservesDirtyAndCountsSingl
 }
 
 func TestTmpfile_SyncMode_LinkFailure_PreservesOrphanStateAndReclaimsOnRelease(t *testing.T) {
-	// Given an existing named file plus an O_EXCL tmpfile and a linkable tmpfile.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	srv.seedFile(1, "taken.bin", 0o644, []byte("existing"))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
@@ -367,7 +354,6 @@ func TestTmpfile_SyncMode_LinkFailure_PreservesOrphanStateAndReclaimsOnRelease(t
 	}, &collideOut))
 	mustWriteAt(t, syncFS, collideOut.NodeId, collideOut.Fh, 0, []byte("collide"))
 
-	// When Link fails on O_EXCL with ENOENT and on target collision with EEXIST.
 	var entryOut fuse.EntryOut
 	exclLinkSt := syncFS.Link(nil, &fuse.LinkIn{
 		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -378,7 +364,6 @@ func TestTmpfile_SyncMode_LinkFailure_PreservesOrphanStateAndReclaimsOnRelease(t
 		Oldnodeid: collideOut.NodeId,
 	}, "taken.bin", &entryOut)
 
-	// Then both files remain tracked as orphans with zero Promotes, and Release reclaims both.
 	requireStatus(t, "O_EXCL Link ENOENT", fuse.ENOENT, exclLinkSt)
 	requireStatus(t, "collision Link EEXIST", fuse.Status(syscall.EEXIST), collideLinkSt)
 	require.Zero(t, syncFS.Snapshot().TmpFile.Promotes)
@@ -393,7 +378,7 @@ func TestTmpfile_SyncMode_LinkFailure_PreservesOrphanStateAndReclaimsOnRelease(t
 }
 
 func TestTmpfile_SyncMode_ConcurrentLinkAndRelease_SerializesUnderInodeLock(t *testing.T) {
-	// Given an in-flight Link RPC gated inside srv.linkHook while concurrent Release arrives.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	linkEntered := make(chan struct{})
 	linkGate, unblockLink := newTestGate()
@@ -413,7 +398,6 @@ func TestTmpfile_SyncMode_ConcurrentLinkAndRelease_SerializesUnderInodeLock(t *t
 	}, &tmpOut))
 	mustWriteAt(t, syncFS, tmpOut.NodeId, tmpOut.Fh, 0, []byte("race-payload"))
 
-	// When Link holds inodeLocks while Release concurrently attempts to close the last handle.
 	linkStatusCh := make(chan fuse.Status, 1)
 	go func() {
 		var out fuse.EntryOut
@@ -439,7 +423,6 @@ func TestTmpfile_SyncMode_ConcurrentLinkAndRelease_SerializesUnderInodeLock(t *t
 	requireStatus(t, "concurrent Link", fuse.OK, <-linkStatusCh)
 	releaseWG.Wait()
 
-	// Then Release observes the cleared orphan state after Link unlocks and leaves the promoted file intact.
 	snap := syncFS.Snapshot()
 	require.GreaterOrEqual(t, snap.InodeLocks.ContendedAcquisitions, uint64(1), "scene=inode_lock_contention want>=1")
 	require.Zero(t, srv.reclaimOrphanCalls.Load(), "scene=post_concurrent_link_release want=0_reclaim got=%d", srv.reclaimOrphanCalls.Load())
@@ -468,13 +451,12 @@ func awaitBeyondInterruptGrace(ctx context.Context, cancelCh chan struct{}) erro
 }
 
 func TestSyncMode_Write_GivenPreClosedCancel_CompletesRegularPassthrough(t *testing.T) {
-	// Given a sync RawFS regular file and an already-closed FUSE cancel channel.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 	created := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "cancel-sync.bin", syscall.O_RDWR, 0o644)
 	preClosed := newClosedCancelChan()
 
-	// When Write and multi-segment Writev execute with the closed cancel channel.
 	nWrite, stWrite := syncFS.Write(preClosed, &fuse.WriteIn{
 		InHeader: fuse.InHeader{NodeId: created.NodeId},
 		Fh:       created.Fh,
@@ -488,7 +470,6 @@ func TestSyncMode_Write_GivenPreClosedCancel_CompletesRegularPassthrough(t *test
 		Size:     9,
 	}, [][]byte{[]byte("sync"), []byte("-mode")})
 
-	// Then both synchronous RPCs complete without returning EINTR.
 	requireStatus(t, "sync Write with pre-closed cancel", fuse.OK, stWrite)
 	require.Equal(t, uint32(6), nWrite, "scene=sync_write_preclosed_cancel want=6 got=%d", nWrite)
 	requireStatus(t, "sync Writev with pre-closed cancel", fuse.OK, stWritev)
@@ -502,7 +483,7 @@ func TestSyncMode_Write_GivenPreClosedCancel_CompletesRegularPassthrough(t *test
 }
 
 func TestStagedMode_Write_GivenCancelSignal_StagesWithFreeCapacityThenReturnsEINTROnBackpressure(t *testing.T) {
-	// Given a staged RawFS with a 4 MiB stage limit and gated background uploads.
+
 	notifier := newSpanStartNotifier()
 	bpEntered := notifier.watch("stage.BackpressureWait")
 	tp, _ := newTestTracerProvider(t, notifier)
@@ -522,7 +503,6 @@ func TestStagedMode_Write_GivenCancelSignal_StagesWithFreeCapacityThenReturnsEIN
 	created := mustCreateFile(t, stagedFS, fuse.FUSE_ROOT_ID, "staged-bp.bin", syscall.O_RDWR, 0o644)
 	preClosed := newClosedCancelChan()
 
-	// When stage capacity is available, a pre-closed cancel still stages locally. Once 4 MiB fills the stage, backpressure wait returns EINTR on cancel.
 	nFree, stFree := stagedFS.Write(preClosed, &fuse.WriteIn{
 		InHeader: fuse.InHeader{NodeId: created.NodeId},
 		Fh:       created.Fh,
@@ -558,7 +538,6 @@ func TestStagedMode_Write_GivenCancelSignal_StagesWithFreeCapacityThenReturnsEIN
 	<-bpEntered
 	close(inflightCancel)
 
-	// Then backpressure wait honors cancel with EINTR without leaking stage quota.
 	requireStatus(t, "staged backpressure with in-flight cancel", fuse.EINTR, waitUntilStatusChan(t, inflightStCh, "staged backpressure EINTR"))
 	require.Equal(t, uint64(4194304), stagedFS.Snapshot().Stage.UsedBytes, "scene=staged_bp_used_bytes want=4194304 got=%d", stagedFS.Snapshot().Stage.UsedBytes)
 
@@ -571,7 +550,7 @@ func TestStagedMode_Write_GivenCancelSignal_StagesWithFreeCapacityThenReturnsEIN
 }
 
 func TestSyncMode_AppendWrite_GivenInvalidatedCacheUnderClosedCancel_ResolvesTailViaGetAttr(t *testing.T) {
-	// Given open O_APPEND handles after SetXAttr invalidates their cached inode entries.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	ino := srv.seedFile(1, "append-cold.log", 0o644, []byte("head-"))
 	fencedIno := srv.seedFile(1, "append-fenced.log", 0o644, []byte("old"))
@@ -600,7 +579,6 @@ func TestSyncMode_AppendWrite_GivenInvalidatedCacheUnderClosedCancel_ResolvesTai
 		return nil, nil
 	}
 
-	// When O_APPEND Write executes with an already-closed cancel channel and an invalidated inode cache.
 	written, st := syncFS.Write(preClosed, &fuse.WriteIn{
 		InHeader: fuse.InHeader{NodeId: ino},
 		Fh:       opened.Fh,
@@ -608,7 +586,6 @@ func TestSyncMode_AppendWrite_GivenInvalidatedCacheUnderClosedCancel_ResolvesTai
 		Size:     4,
 	}, []byte("tail"))
 
-	// Then getInodeWithContext completes GetAttr with DefaultRPCTimeout and appends at offset 5 without EINTR.
 	requireStatus(t, "sync O_APPEND Write with invalidated cache and closed cancel", fuse.OK, st)
 	require.Equal(t, uint32(4), written, "scene=sync_append_written want=4 got=%d", written)
 	require.Equal(t, getAttrBefore+1, srv.getAttrCalls.Load(), "scene=sync_append_cold_getattr want=%d got=%d", getAttrBefore+1, srv.getAttrCalls.Load())
@@ -635,7 +612,7 @@ func TestSyncMode_AppendWrite_GivenInvalidatedCacheUnderClosedCancel_ResolvesTai
 }
 
 func TestSyncMode_LargeWrite_GivenCancelSignal_CommitsFirstChunkThenReturnsShortWrite(t *testing.T) {
-	// Given two sync regular files and a 4195328-byte payload spanning two 4 MiB chunks.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 	firstFile := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "large-preclosed.bin", syscall.O_RDWR, 0o644)
@@ -643,7 +620,6 @@ func TestSyncMode_LargeWrite_GivenCancelSignal_CommitsFirstChunkThenReturnsShort
 	payload := buildSeededBytes(4195328, 0x3C)
 	preClosed := newClosedCancelChan()
 
-	// When Write starts with an already-closed cancel channel at totalWritten == 0.
 	nPre, stPre := syncFS.Write(preClosed, &fuse.WriteIn{
 		InHeader: fuse.InHeader{NodeId: firstFile.NodeId},
 		Fh:       firstFile.Fh,
@@ -651,7 +627,6 @@ func TestSyncMode_LargeWrite_GivenCancelSignal_CommitsFirstChunkThenReturnsShort
 		Size:     4195328,
 	}, payload)
 
-	// Then chunk 1 commits and the loop stops before chunk 2 with a 4 MiB POSIX short write instead of EINTR.
 	requireStatus(t, "sync >4MiB Write with pre-closed cancel", fuse.OK, stPre)
 	require.Equal(t, uint32(4194304), nPre, "scene=sync_large_preclosed_short_write want=4194304 got=%d", nPre)
 	require.Equal(t, int64(1), srv.writeCalls.Load(), "scene=sync_large_preclosed_rpcs want=1 got=%d", srv.writeCalls.Load())
@@ -684,7 +659,7 @@ func TestSyncMode_LargeWrite_GivenCancelSignal_CommitsFirstChunkThenReturnsShort
 }
 
 func TestTmpfile_SyncMode_GivenClosedOrMidFlightCancel_CompletesCreateTmpfileWithServerErrorMapping(t *testing.T) {
-	// Given a sync RawFS and both pre-closed and mid-flight cancel channels.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 	preClosed := newClosedCancelChan()
@@ -698,7 +673,6 @@ func TestTmpfile_SyncMode_GivenClosedOrMidFlightCancel_CompletesCreateTmpfileWit
 		return nil, nil
 	}
 
-	// When Tmpfile runs with a pre-closed cancel channel and with a cancel channel closed for 25ms mid-flight.
 	var preOut fuse.CreateOut
 	stPre := syncFS.Tmpfile(preClosed, &fuse.CreateIn{
 		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -717,7 +691,6 @@ func TestTmpfile_SyncMode_GivenClosedOrMidFlightCancel_CompletesCreateTmpfileWit
 		Mode:     0o600,
 	}, &midOut)
 
-	// Then both CreateTmpfile RPCs succeed with DefaultRPCTimeout. ToStatus maps ENOSPC and EBUSY directly instead of returning EINTR.
 	requireStatus(t, "sync Tmpfile with pre-closed cancel", fuse.OK, stPre)
 	requireStatus(t, "sync Tmpfile with >15ms mid-flight cancel", fuse.OK, stMid)
 	require.True(t, deadlinePresent, "scene=tmpfile_rpc_deadline want=true")
@@ -753,7 +726,7 @@ func TestTmpfile_SyncMode_GivenClosedOrMidFlightCancel_CompletesCreateTmpfileWit
 }
 
 func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithServerErrorMapping(t *testing.T) {
-	// Given four linkable sync tmpfiles with pre-closed and mid-flight cancel channels.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
 	preClosed := newClosedCancelChan()
@@ -790,7 +763,6 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 		return nil
 	}
 
-	// When Link promotes tmpPre with a pre-closed cancel and tmpMid with a cancel closed for 25ms mid-flight.
 	var linkPreOut fuse.EntryOut
 	stPre := syncFS.Link(preClosed, &fuse.LinkIn{
 		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
@@ -807,7 +779,6 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 		Oldnodeid: tmpMid.NodeId,
 	}, "promoted-mid.bin", &linkMidOut)
 
-	// Then both Link RPCs succeed with DefaultRPCTimeout, clear orphan tracking, and increment Promotes. ToStatus preserves ENOSPC and EBUSY error mapping.
 	requireStatus(t, "sync Link with pre-closed cancel", fuse.OK, stPre)
 	requireStatus(t, "sync Link with >15ms mid-flight cancel", fuse.OK, stMid)
 	require.True(t, deadlinePresent, "scene=link_rpc_deadline want=true")
@@ -822,7 +793,6 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 	require.True(t, srv.hasNode(tmpPre.NodeId))
 	require.True(t, srv.hasNode(tmpMid.NodeId))
 
-	// Unfenced ENOSPC failure preserves orphan tracking and Release reclaims it via ReclaimOrphan.
 	srv.linkHook = func(_ context.Context, _ *storagev1.LinkRequest) error {
 		return errnoError(connect.CodeResourceExhausted, "ENOSPC")
 	}
@@ -839,7 +809,6 @@ func TestTmpfile_SyncMode_Link_GivenClosedOrMidFlightCancel_PromotesOrphanWithSe
 	require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load(), "scene=unpromoted_tmpfile_reclaimed want=1 got=%d", srv.reclaimOrphanCalls.Load())
 	require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes, "scene=one_orphan_remaining want=1")
 
-	// Stale-epoch EBUSY failure maps to EBUSY, fences syncFS, and fenced Release clears local orphan without sending ReclaimOrphan.
 	srv.linkHook = func(_ context.Context, _ *storagev1.LinkRequest) error {
 		return errnoError(connect.CodeFailedPrecondition, "EBUSY")
 	}

@@ -138,15 +138,13 @@ func closeFDGuard(fd int) func() error {
 	}
 }
 
-// TestSyncMode_CLIFlagsAndAmbientEnv_RejectsExplicitStageFlagsWithExit2AndIgnoresStageEnv verifies CLI validation and ambient stage environment variable handling under --mode=sync.
 func TestSyncMode_CLIFlagsAndAmbientEnv_RejectsExplicitStageFlagsWithExit2AndIgnoresStageEnv(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	mp := t.TempDir()
 	dummyID := uuid.NewString()
 
-	// Explicit --stage-size or --stage-dir under --mode=sync or BOWL_MOUNT_MODE=sync exits with code 2.
 	outFlagSize := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--mode", "sync", "--stage-size", "8MiB", dummyID, mp)
 	require.Contains(t, outFlagSize, "--stage-size cannot be set when --mode is sync")
 
@@ -160,7 +158,6 @@ func TestSyncMode_CLIFlagsAndAmbientEnv_RejectsExplicitStageFlagsWithExit2AndIgn
 	outEnvDir := runBowlExpectExit(t, 2, "mount", "--endpoint", endpoint, "--stage-dir", "/tmp/sync-forbidden", dummyID, mp)
 	require.Contains(t, outEnvDir, "--stage-dir cannot be set when --mode is sync")
 
-	// Mounting via BOWL_MOUNT_MODE ignores invalid BOWL_STAGE_SIZE and tmpfs BOWL_STAGE_DIR values.
 	diskID := createTestDisk(t, client).GetDiskId()
 	unusedShmStageDir := fmt.Sprintf("/dev/shm/bowl-sync-unused-%d", time.Now().UnixNano())
 	t.Cleanup(func() { _ = os.RemoveAll(unusedShmStageDir) })
@@ -175,7 +172,6 @@ func TestSyncMode_CLIFlagsAndAmbientEnv_RejectsExplicitStageFlagsWithExit2AndIgn
 	snap := fetchDebugStats(t, adminAddr)
 	requireZeroDaemonHostStageOrTmpFDs(t, daemonPID, "env_sync_active")
 
-	// Zero stage directories exist and no tmpfs warning appears in logs.
 	require.NoDirExists(t, unusedShmStageDir)
 	require.Zero(t, snap.Stage.CapacityBytes)
 	require.Zero(t, snap.Stage.StagedCalls)
@@ -184,13 +180,12 @@ func TestSyncMode_CLIFlagsAndAmbientEnv_RejectsExplicitStageFlagsWithExit2AndIgn
 	require.NotContains(t, string(logBytes), "stage_dir_on_tmpfs")
 }
 
-// TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSurfacesENOSPCAndEBUSYOnWrite verifies synchronous passthrough writes, ENOSPC quota failure, and EBUSY fencing.
 func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSurfacesENOSPCAndEBUSYOnWrite(t *testing.T) {
 	client := newTestStorageClient(t)
 	realEndpoint := getStorageEndpoint()
 
 	t.Run("SynchronousPassthroughAndZeroHostStageFiles", func(t *testing.T) {
-		// Given
+
 		proxy := startControllableStorageProxy(t, realEndpoint)
 		diskID := createTestDisk(t, client).GetDiskId()
 		isolatedTmpDir := t.TempDir()
@@ -203,7 +198,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		require.NoError(t, err)
 		defer func() { _ = f.Close() }()
 
-		// When the proxy gates Write RPCs and the caller issues a 64 KiB write syscall.
 		proxy.BlockWrites()
 		payload64K := deterministicPayload("sync-64k", 65_536)
 		type writeResult struct {
@@ -220,7 +214,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 			return proxy.WriteInflight() == 1
 		}, 5*time.Second, 10*time.Millisecond, "scene=sync_write_inflight want=1")
 
-		// Then write remains blocked in the kernel until the server RPC responds, and zero host stage files exist.
 		select {
 		case early := <-writeDoneCh:
 			t.Fatalf("scene=sync_write_must_wait_for_rpc want=blocked got=returned_%d_%v", early.n, early.err)
@@ -235,7 +228,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		require.Equal(t, len(payload64K), res.n)
 		require.NoError(t, f.Close())
 
-		// A 10 MiB write persists directly and reports zero staged calls.
 		bigPath := filepath.Join(mp, "sync-10m.bin")
 		want10M := deterministicPayload("sync-10m-regular", 10_485_760)
 		writeFullFile(t, bigPath, want10M, 524_288)
@@ -254,7 +246,7 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 	})
 
 	t.Run("QuotaENOSPCReturnedDirectlyOnFailingWrite", func(t *testing.T) {
-		// Given a 512 KiB quota disk mounted with --mode=sync.
+
 		diskID := createQuotaTestDisk(t, client, 512*1024).GetDiskId()
 		mp, stopMount := mountWithCleanup(t, realEndpoint, diskID, "--mode", "sync")
 		defer stopMount()
@@ -264,19 +256,17 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		closeFD := closeFDGuard(fd)
 		defer func() { _ = closeFD() }()
 
-		// When the first 256 KiB write fits within quota and the second 512 KiB write exceeds quota.
 		n1, err1 := writeEINTR(fd, deterministicPayload("quota-ok", 256*1024))
 		require.NoError(t, err1)
 		require.Equal(t, 256*1024, n1)
 
 		_, err2 := writeEINTR(fd, deterministicPayload("quota-exceed", 512*1024))
 
-		// Then the failing write syscall returns ENOSPC synchronously.
 		require.ErrorIs(t, err2, syscall.ENOSPC, "scene=sync_quota_write want=ENOSPC got=%v", err2)
 	})
 
 	t.Run("StaleEpochEBUSYReturnedDirectlyOnFailingWrite", func(t *testing.T) {
-		// Given writer 1 mounted with --mode=sync and an open writable file descriptor.
+
 		diskID := createTestDisk(t, client).GetDiskId()
 		mp, _, adminAddr, stopMount := startMountedDaemon(t, realEndpoint, diskID, "--mode", "sync")
 		defer stopMount()
@@ -293,7 +283,6 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		require.NoError(t, err1)
 		require.Equal(t, 12, n1)
 
-		// When a newer forced writer handshake bumps the server epoch and fences writer 1.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		preemptResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
@@ -313,16 +302,14 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 
 		_, fenceErr := writeEINTR(fd, []byte("after-fence"))
 
-		// Then the failing write syscall returns EBUSY synchronously and /readyz flips to 503.
 		require.ErrorIs(t, fenceErr, syscall.EBUSY, "scene=sync_fenced_write want=EBUSY got=%v", fenceErr)
 		readyAfter, readyAfterBody := httpGetStatusAndBody(t, "http://"+adminAddr+"/readyz")
 		require.Equal(t, http.StatusServiceUnavailable, readyAfter, "body=%s", readyAfterBody)
 	})
 }
 
-// TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclusiveAndUnlinkedOrphanReclaim verifies server-backed O_TMPFILE under --mode=sync.
 func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclusiveAndUnlinkedOrphanReclaim(t *testing.T) {
-	// Given
+
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	diskID := createTestDisk(t, client).GetDiskId()
@@ -333,7 +320,6 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	var baseStatfs unix.Statfs_t
 	require.NoError(t, statfsEINTR(mp, &baseStatfs))
 
-	// Step 1 creates an unlinked 12 MiB O_TMPFILE on the server and reclaims quota on close.
 	unlinkedFD, err := openEINTR(mp, unix.O_TMPFILE|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
 	closeUnlinked := closeFDGuard(unlinkedFD)
@@ -367,7 +353,6 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 			snap.TmpFile.ResidentBytes == 0
 	}, 5*time.Second, 20*time.Millisecond, "scene=sync_unlinked_tmpfile_reclaim want=quota_and_statfs_restored")
 
-	// Step 2 verifies that O_TMPFILE with O_EXCL rejects linkat with ENOENT and reclaims quota on close.
 	exclFD, err := openEINTR(mp, unix.O_TMPFILE|unix.O_EXCL|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
 	closeExcl := closeFDGuard(exclFD)
@@ -389,7 +374,6 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 		return curBytes == baseBytes && curInodes == baseInodes
 	}, 5*time.Second, 20*time.Millisecond, "scene=sync_excl_tmpfile_reclaim want=quota_restored")
 
-	// Step 3 writes 8 MiB, preallocates 2 MiB, punches a 512 KiB hole, calls fsync, and promotes via linkat.
 	promFD, err := openEINTR(mp, unix.O_TMPFILE|unix.O_RDWR, 0o640)
 	require.NoError(t, err)
 	closeProm := closeFDGuard(promFD)
@@ -438,7 +422,6 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	require.Equal(t, baseBytes+totalLen, afterPromBytes, "scene=sync_promoted_used_bytes want=%d got=%d", baseBytes+totalLen, afterPromBytes)
 	require.Equal(t, baseInodes+1, afterPromInodes, "scene=sync_promoted_used_inodes want=%d got=%d", baseInodes+1, afterPromInodes)
 
-	// Remount with --mode=ro and --direct-io to verify the persisted 10 MiB file content.
 	stopMount()
 	mpRO, stopRO := mountWithCleanup(t, endpoint, diskID, "--mode", "ro", "--direct-io")
 	defer stopRO()

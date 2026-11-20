@@ -54,20 +54,18 @@ func mustSetLock(t *testing.T, fs *fusefs.RawFS, in *fuse.LkIn) {
 
 func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *testing.T) {
 	t.Run("精确更新Mode与Uid与Gid与Size以及ATIME_NOW优先覆盖", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "attr.txt", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, created.NodeId, created.Fh, 0, []byte("0123456789"))
 
-		// When: 1. 先执行无更新位 SetAttr，必须仅委派 GetAttr 而不发 SetAttr RPC
 		var noopOut fuse.AttrOut
 		noopSt := fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{InHeader: fuse.InHeader{NodeId: created.NodeId}},
 		}, &noopOut)
 		setCallsAfterNoop := srv.setAttrCalls.Load()
 
-		// 2. 同时传入 ATIME_NOW 与显式旧 Atime（100s），NOW 必须优先覆盖显式时间；并修改 Mode/Uid/Gid/Size
 		beforeNow := time.Now().Unix() - 5
 		var updatedOut fuse.AttrOut
 		setSt := fs.SetAttr(nil, &fuse.SetAttrIn{
@@ -83,7 +81,6 @@ func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *te
 			},
 		}, &updatedOut)
 
-		// Then
 		requireStatus(t, "无位 SetAttr 委派 GetAttr", fuse.OK, noopSt)
 		require.Zero(t, setCallsAfterNoop, "Valid=0 时不得发起 SetAttr RPC")
 		requireStatus(t, "全字段 SetAttr", fuse.OK, setSt)
@@ -100,14 +97,13 @@ func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *te
 	})
 
 	t.Run("只读句柄FATTR_FH截断返回EBADF且只读挂载返回EROFS", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "ro-fh.txt", 0o644, []byte("abcdef"))
 		fs := newTestRawFS(t, srv)
 		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 		rdHandle := mustOpenFile(t, fs, ino, syscall.O_RDONLY)
 
-		// When
 		var out fuse.AttrOut
 		ebadfSt := fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -125,7 +121,6 @@ func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *te
 			},
 		}, &out)
 
-		// Then
 		requireStatus(t, "只读句柄 FATTR_FH+FATTR_SIZE", fuse.EBADF, ebadfSt)
 		requireStatus(t, "只读挂载 SetAttr", fuse.Status(syscall.EROFS), erofsSt)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: rdHandle.Fh})
@@ -133,7 +128,7 @@ func TestSetAttr_字段修改时间戳优先序句柄校验与写回排空(t *te
 }
 
 func TestFallocate_空间预分配保持尺寸打洞与错误拦截(t *testing.T) {
-	// Given
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	fs := newTestRawFS(t, srv)
 	roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
@@ -141,7 +136,6 @@ func TestFallocate_空间预分配保持尺寸打洞与错误拦截(t *testing.T
 	mustWriteAt(t, fs, rw.NodeId, rw.Fh, 0, []byte("HELLO-WORLD"))
 	rd := mustOpenFile(t, fs, rw.NodeId, syscall.O_RDONLY)
 
-	// When & Then: 模式 0 扩展、KEEP_SIZE 不改可见长度、PUNCH_HOLE|KEEP_SIZE 清零中间段
 	requireStatus(t, "Fallocate mode=0", fuse.OK, fs.Fallocate(nil, &fuse.FallocateIn{
 		InHeader: fuse.InHeader{NodeId: rw.NodeId}, Fh: rw.Fh, Offset: 11, Length: 5, Mode: 0,
 	}))
@@ -173,12 +167,11 @@ func TestFallocate_空间预分配保持尺寸打洞与错误拦截(t *testing.T
 
 func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及失效(t *testing.T) {
 	t.Run("Set与Get与List与Remove覆盖CREATE_REPLACE_ERANGE契约", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "xa.txt", 0o644, nil)
 		fs := newTestRawFS(t, srv)
 
-		// When & Then
 		requireStatus(t, "不存在时 REPLACE", fuse.Status(syscall.ENODATA), fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: ino}, Flags: xattrReplaceFlag,
 		}, "user.b", []byte("v1")))
@@ -192,7 +185,6 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 			InHeader: fuse.InHeader{NodeId: ino},
 		}, "user.a", []byte("12")))
 
-		// GetXAttr 0 长探测、过小缓冲 ERANGE 与足量读取
 		probeSz, probeSt := fs.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "user.b", nil)
 		requireStatus(t, "GetXAttr 探测长度", fuse.OK, probeSt)
 		require.Equal(t, uint32(5), probeSz)
@@ -203,7 +195,6 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 		requireStatus(t, "GetXAttr 正常读取", fuse.OK, gotSt)
 		require.Equal(t, "val-b", string(valBuf[:gotSz]))
 
-		// ListXAttr 按字典序以 \x00 分隔返回
 		listSz, listProbeSt := fs.ListXAttr(nil, &fuse.InHeader{NodeId: ino}, nil)
 		requireStatus(t, "ListXAttr 长度探测", fuse.OK, listProbeSt)
 		listBuf := make([]byte, listSz)
@@ -218,7 +209,7 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 	})
 
 	t.Run("security.capability负缓存短路并在SetXAttr与Write与SetAttr与Fallocate间切换状态", func(t *testing.T) {
-		// Given: Create 预置已知缺失；已有文件首次探测后缓存缺失
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		fresh := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "fresh-cap.bin", syscall.O_RDWR, 0o644)
@@ -230,7 +221,6 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 		seededIno := srv.seedFile(1, "cap.bin", 0o644, nil)
 		f := mustOpenFile(t, fs, seededIno, syscall.O_RDWR)
 
-		// When: 首次查询 miss -> ENODATA 并记住缺失状态；后续连续查询零 RPC 短路
 		_, st1 := fs.GetXAttr(nil, &fuse.InHeader{NodeId: seededIno}, "security.capability", make([]byte, 32))
 		_, st2 := fs.GetXAttr(nil, &fuse.InHeader{NodeId: seededIno}, "security.capability", make([]byte, 32))
 		_, st3 := fs.GetXAttr(nil, &fuse.InHeader{NodeId: seededIno}, "security.capability", make([]byte, 32))
@@ -239,7 +229,6 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 		requireStatus(t, "第三次 capability 负缓存命中", fuse.Status(syscall.ENODATA), st3)
 		require.Equal(t, int64(1), srv.getXattrCalls.Load(), "重复查询缺失 capability 只能产生 1 次 GetXattr RPC")
 
-		// SetXAttr(security.capability) 标记为已知存在；随后 Write / SetAttr(MODE) / Fallocate 剥离特权并重新标回已知缺失（零 RPC 短路 ENODATA）
 		requireStatus(t, "SetXAttr security.capability", fuse.OK, fs.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: seededIno},
 		}, "security.capability", []byte("capv2")))
@@ -288,37 +277,32 @@ func TestXAttr_创建替换长度探测列表序与Capability负缓存短路及�
 
 func TestXAttr_ReadOnlyMountBypassesCapabilityCache(t *testing.T) {
 	t.Run("GivenReadOnlyMount_WhenCapabilityAddedAfterENODATA_ThenGetXAttrQueriesServerAndObservesValue", func(t *testing.T) {
-		// Given: RW mount and RO mount share the same disk with a file lacking security.capability.
+
 		srv := newFakeStorage(t, withTTL(2.0, 2.0))
 		ino := srv.seedFile(1, "bin.elf", 0o755, []byte("elf"))
 		rwFS := newTestRawFS(t, srv, withMode(fusefs.MountModeStaged))
 		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 
-		// Initial probe on RO observes ENODATA via server RPC.
 		buf := make([]byte, 32)
 		_, st1 := roFS.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", buf)
 		requireStatus(t, "RO initial GetXAttr capability", fuse.Status(syscall.ENODATA), st1)
 		require.Equal(t, int64(1), srv.getXattrCalls.Load())
 
-		// When: RW writer grants security.capability, and RO probes again.
 		wantCap := []byte("cap-net-bind")
 		requireStatus(t, "RW SetXAttr capability", fuse.OK, rwFS.SetXAttr(nil, &fuse.SetXAttrIn{
 			InHeader: fuse.InHeader{NodeId: ino},
 		}, "security.capability", wantCap))
 		sz2, st2 := roFS.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", buf)
 
-		// Then: RO queries server directly and observes the newly set capability value.
 		requireStatus(t, "RO GetXAttr after RW SetXAttr", fuse.OK, st2)
 		require.Equal(t, wantCap, buf[:sz2])
 		require.Equal(t, int64(2), srv.getXattrCalls.Load())
 
-		// When: RW writer removes security.capability, and RO probes again.
 		requireStatus(t, "RW RemoveXAttr capability", fuse.OK, rwFS.RemoveXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability"))
 		_, st3 := roFS.GetXAttr(nil, &fuse.InHeader{NodeId: ino}, "security.capability", buf)
 		requireStatus(t, "RO GetXAttr after RW RemoveXAttr", fuse.Status(syscall.ENODATA), st3)
 		require.Equal(t, int64(3), srv.getXattrCalls.Load())
 
-		// And: RO mount never reads or populates capabilityCache.
 		capStats := roFS.Snapshot().CapabilityCache
 		require.Zero(t, capStats.Entries, "RO mount must never insert entries into capabilityCache")
 		require.Zero(t, capStats.Hits, "RO mount must never hit capabilityCache")
@@ -346,20 +330,18 @@ func TestXAttr_ReadOnlyMountBypassesCapabilityCache(t *testing.T) {
 }
 
 func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t *testing.T) {
-	// Given
+
 	srv := newFakeStorage(t, withTTL(2.0, 2.0))
 	fs := newTestRawFS(t, srv, withDirectIO(false))
 	roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
 	f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "flags.bin", syscall.O_RDWR, 0o644)
 
-	// When & Then: 1. 存在未刷盘 Stage 缓冲时调用不支持的 cmd，必须直接返回 ENOTTY 且不触发 Write RPC
 	mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("buffered"))
 	var ioOut fuse.IoctlOut
 	enottySt := fs.Ioctl(nil, &fuse.IoctlIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Cmd: 0x12345678}, nil, &ioOut, nil)
 	requireStatus(t, "不支持的 ioctl 命令", fuse.Status(syscall.ENOTTY), enottySt)
 	require.Zero(t, srv.writeCalls.Load(), "未知 ioctl 命令返回 ENOTTY 前不得无谓刷空 Stage")
 
-	// 2. 64位 SETFLAGS/GETFLAGS、32位 SETFLAGS/GETFLAGS 与 FS_IOC_FSSETXATTR/FS_IOC_FSGETXATTR 往返校验
 	in64 := make([]byte, 8)
 	binary.LittleEndian.PutUint64(in64, uint64(fusefs.FS_APPEND_FL))
 	requireStatus(t, "SETFLAGS 64位", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Cmd: fusefs.FS_IOC_SETFLAGS}, in64, &ioOut, nil))
@@ -381,7 +363,6 @@ func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t
 	requireStatus(t, "FS_IOC_FSGETXATTR", fuse.OK, fs.Ioctl(nil, &fuse.IoctlIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Cmd: fusefs.FS_IOC_FSGETXATTR}, nil, &ioOut, fsxOut))
 	require.Equal(t, fusefs.FS_XFLAG_APPEND, binary.LittleEndian.Uint32(fsxOut[:4]))
 
-	// 3. 异常参数：未知标志 EOPNOTSUPP、短缓冲 EINVAL、只读挂载 SET EROFS
 	badFlag := make([]byte, 8)
 	binary.LittleEndian.PutUint64(badFlag, 0x40000000)
 	requireStatus(t, "未知标志 SETFLAGS", fuse.Status(syscall.EOPNOTSUPP), fs.Ioctl(nil, &fuse.IoctlIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Cmd: fusefs.FS_IOC_SETFLAGS}, badFlag, &ioOut, nil))
@@ -393,7 +374,7 @@ func TestIoctl_标准与32位与FSXATTR标志读写校验及ENOTTY快速短路(t
 
 func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁中断及OnUnmount(t *testing.T) {
 	t.Run("锁类型与无符号全区间映射以及读写句柄权限和F_UNLCK校验", func(t *testing.T) {
-		// Given
+
 		pRd, stRd := fusefs.ToProtoLockType(syscall.F_RDLCK)
 		pWr, stWr := fusefs.ToProtoLockType(syscall.F_WRLCK)
 		pUn, stUn := fusefs.ToProtoLockType(syscall.F_UNLCK)
@@ -407,7 +388,6 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 		flockStart, flockEnd, flockSt := fusefs.NormalizeLockRange(fuse.LK_FLOCK, 123, 456)
 		_, _, invRangeSt := fusefs.NormalizeLockRange(0, 50, 10)
 
-		// Then: 类型转换与无符号 MAX 归一化
 		requireStatus(t, "ToProto RD", fuse.OK, stRd)
 		requireStatus(t, "ToProto WR", fuse.OK, stWr)
 		requireStatus(t, "ToProto UN", fuse.OK, stUn)
@@ -430,7 +410,6 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 		require.Equal(t, ^uint64(0), flockEnd)
 		requireStatus(t, "逆序区间", fuse.EINVAL, invRangeSt)
 
-		// 句柄读写方向校验与 GetLk 传 F_UNLCK 返回 EINVAL
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "lk-perm.bin", syscall.O_RDWR, 0o644)
@@ -457,13 +436,12 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 	})
 
 	t.Run("无符号最大值区间拆分合并与GetLk冲突探测及Flush或Release自动释放", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "split.bin", syscall.O_RDWR, 0o644)
 		h2 := mustOpenFile(t, fs, f.NodeId, syscall.O_RDWR)
 
-		// When: owner 1 锁定 [0, ^uint64(0)]，再拆开中间 [100, 199] 并降级 [50, 79] 为读锁
 		mustSetLock(t, fs, &fuse.LkIn{
 			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
 			Lk: fuse.FileLock{Start: 0, End: ^uint64(0), Typ: syscall.F_WRLCK, Pid: 10},
@@ -477,7 +455,6 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 			Lk: fuse.FileLock{Start: 50, End: 79, Typ: syscall.F_RDLCK, Pid: 10},
 		})
 
-		// Then: owner 2 在已解锁区间 [100, 199] 探测为无冲突（F_UNLCK），在尾部 [200, ^uint64(0)] 冲突并返回 EAGAIN
 		var holeOut, tailOut fuse.LkOut
 		requireStatus(t, "GetLk 已拆解锁区间", fuse.OK, fs.GetLk(nil, &fuse.LkIn{
 			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, Owner: 2,
@@ -498,7 +475,6 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 			Lk: fuse.FileLock{Start: 200, End: 250, Typ: syscall.F_WRLCK, Pid: 20},
 		}))
 
-		// Flush 释放 owner 1 的 POSIX 锁后，owner 2 立即成功加锁
 		requireStatus(t, "Flush 释放 POSIX 锁", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
 			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, LockOwner: 1,
 		}))
@@ -507,7 +483,6 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 			Lk: fuse.FileLock{Start: 200, End: 250, Typ: syscall.F_WRLCK, Pid: 20},
 		})
 
-		// Flock 使用 Fh 追踪（无效句柄 Fh=0 返回 EBADF），Release 后释放锁
 		flockIn1 := &fuse.LkIn{
 			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 101, LkFlags: fuse.LK_FLOCK,
 			Lk: fuse.FileLock{Typ: syscall.F_WRLCK, Pid: 101},
@@ -530,13 +505,12 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 	})
 
 	t.Run("SetLkw解锁唤醒与ABBA死锁检测及取消与OnUnmount中断唤醒", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "wait.bin", syscall.O_RDWR, 0o644)
 		h2 := mustOpenFile(t, fs, f.NodeId, syscall.O_RDWR)
 
-		// 1. 同节点双区间 AB-BA 死锁：owner 1 锁 [0,9]，owner 2 锁 [10,19]；1 等 [10,19] 后，2 等 [0,9] 立即返回 EDEADLK
 		mustSetLock(t, fs, &fuse.LkIn{
 			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh, Owner: 1,
 			Lk: fuse.FileLock{Start: 0, End: 9, Typ: syscall.F_WRLCK, Pid: 1},
@@ -559,13 +533,11 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 		})
 		requireStatus(t, "AB-BA 死锁检测", fuse.Status(syscall.EDEADLK), deadSt)
 
-		// owner 2 Flush 解锁后，阻塞中的 owner 1 立即被唤醒并获锁成功
 		requireStatus(t, "Flush 解锁唤醒阻塞等待者", fuse.OK, fs.Flush(nil, &fuse.FlushIn{
 			InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: h2.Fh, LockOwner: 2,
 		}))
 		requireStatus(t, "被阻塞的 SetLkw 唤醒结果", fuse.OK, waitUntilStatusChan(t, ch1, "SetLkw 唤醒"))
 
-		// 2. cancel 通道取消返回 EINTR
 		cancelCh := make(chan struct{})
 		eintrCh := make(chan fuse.Status, 1)
 		conflictsBeforeCancel := fs.Snapshot().Locks.Conflicts
@@ -579,7 +551,6 @@ func TestLock_POSIX区间锁拆分合并无符号最大值与阻塞唤醒死锁�
 		close(cancelCh)
 		requireStatus(t, "cancel 中断 SetLkw", fuse.EINTR, waitUntilStatusChan(t, eintrCh, "SetLkw EINTR"))
 
-		// 3. OnUnmount 唤醒仍在阻塞的 SetLkw
 		unmountCh := make(chan fuse.Status, 1)
 		conflictsBeforeUnmount := fs.Snapshot().Locks.Conflicts
 		go func() {

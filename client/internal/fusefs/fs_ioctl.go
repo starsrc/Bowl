@@ -10,33 +10,24 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// Linux ioctl 文件系统标志位命令号（兼容 64 位与 32 位 ABI，以及 VFS fileattr 扩展属性桥接）。
-//
-//revive:disable:var-naming
 const (
 	FS_IOC_GETFLAGS   uint32 = 0x80086601
 	FS_IOC32_GETFLAGS uint32 = 0x80046601
 	FS_IOC_SETFLAGS   uint32 = 0x40086602
 	FS_IOC32_SETFLAGS uint32 = 0x40046602
 
-	// Linux VFS fileattr 扩展属性 ioctl 命令号（内核 fuse_fileattr_get/set 私有调用）。
 	FS_IOC_FSGETXATTR uint32 = 0x801c581f
 	FS_IOC_FSSETXATTR uint32 = 0x401c5820
 )
 
-// Linux VFS 标志位常量（对应 lsattr / chattr）。
 const (
 	FS_IMMUTABLE_FL uint32 = 0x00000010
 	FS_APPEND_FL    uint32 = 0x00000020
 
-	// Linux fsxattr 扩展标志位常量（对应 FS_IOC_FSGETXATTR / FS_IOC_FSSETXATTR）。
 	FS_XFLAG_IMMUTABLE uint32 = 0x00000008
 	FS_XFLAG_APPEND    uint32 = 0x00000010
 )
 
-//revive:enable:var-naming
-
-// 服务端协议标志位常量（对应 storage.proto / meta.Flag*）。
 const (
 	ProtoFlagImmutable uint32 = 0x1
 	ProtoFlagAppend    uint32 = 0x2
@@ -123,7 +114,6 @@ func writeXFlagsOut(outbuf []byte, protoFlags uint32) {
 	binary.LittleEndian.PutUint32(outbuf[:4], protoToXFlags(protoFlags))
 }
 
-// Ioctl 实现 FUSE_IOCTL 请求处理，将 Linux 标准 FS_IOC_GETFLAGS / FS_IOC_SETFLAGS 双向桥接至 StorageService RPC。
 func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte, output *fuse.IoctlOut, outbuf []byte) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpIoctl)
 	opCtx, endSpan := fs.startFuseOp(OpIoctl)
@@ -132,8 +122,6 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 		fs.metrics.endOp(OpIoctl, start, status, 0)
 	}()
 
-	// 在加锁与写回屏障前先短路不支持的命令（如终端探测 TCGETS 等），避免触发无谓的 BarrierInode 同步刷盘；
-	// 严格返回 ENOTTY，切勿返回 ENOSYS 导致整挂载点禁用合法 FS_IOC_* 命令。
 	switch input.Cmd {
 	case FS_IOC_GETFLAGS, FS_IOC32_GETFLAGS,
 		FS_IOC_SETFLAGS, FS_IOC32_SETFLAGS,

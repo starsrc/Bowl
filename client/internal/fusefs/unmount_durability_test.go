@@ -84,7 +84,7 @@ func pollUnmountProgressUntilDone(t *testing.T, fs *fusefs.RawFS, unmountDone <-
 }
 
 func TestRawFS_OnUnmount_BoundedConcurrentFsync_BoundsAt64AndAdvancesMonotonically(t *testing.T) {
-	// Given: 200 dirty regular files and an fsyncHook that holds the first 64 concurrent calls.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	var inflight atomic.Int64
 	var maxInflight atomic.Int64
@@ -121,7 +121,6 @@ func TestRawFS_OnUnmount_BoundedConcurrentFsync_BoundsAt64AndAdvancesMonotonical
 	})
 	createDirtySyncFiles(t, fs, 200)
 
-	// When: OnUnmount executes concurrently while polling UnmountProgress until completion.
 	unmountDone := make(chan struct{})
 	go func() {
 		fs.OnUnmount()
@@ -140,7 +139,6 @@ func TestRawFS_OnUnmount_BoundedConcurrentFsync_BoundsAt64AndAdvancesMonotonical
 	close(releaseGate)
 	pollUnmountProgressUntilDone(t, fs, unmountDone)
 
-	// Then: concurrency peaked at 64, all 200 Fsync RPCs succeeded, and progress finalized at 200/200.
 	require.Equal(t, 64, fusefs.DefaultUnmountFsyncConcurrency)
 	require.Equal(t, int64(64), maxInflight.Load())
 	require.Equal(t, int64(200), srv.fsyncCalls.Load())
@@ -152,7 +150,7 @@ func TestRawFS_OnUnmount_BoundedConcurrentFsync_BoundsAt64AndAdvancesMonotonical
 }
 
 func TestRawFS_OnUnmount_SingleDirtyInode_RunsFsyncInlineOnCallerGoroutine(t *testing.T) {
-	// Given: exactly 1 dirty regular file.
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	var hookGoroutineID atomic.Uint64
 	srv.fsyncHook = func(_ context.Context, _ *storagev1.FsyncRequest) error {
@@ -162,11 +160,9 @@ func TestRawFS_OnUnmount_SingleDirtyInode_RunsFsyncInlineOnCallerGoroutine(t *te
 	fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 	createDirtySyncFiles(t, fs, 1)
 
-	// When: OnUnmount runs on the caller goroutine.
 	callerID := currentGoroutineID()
 	fs.OnUnmount()
 
-	// Then: Fsync executes inline on the caller goroutine without spawning worker goroutines.
 	require.NotZero(t, callerID)
 	require.Equal(t, callerID, hookGoroutineID.Load())
 	require.Equal(t, int64(1), srv.fsyncCalls.Load())
@@ -192,7 +188,7 @@ func collectUnmountFsyncLogInodes(t *testing.T, raw string) []uint64 {
 }
 
 func TestRawFS_OnUnmount_ConcurrentFsyncErrors_AccountsMetricsLogsAndCompletesProgress(t *testing.T) {
-	// Given: 5 dirty regular files where 2 fail with Internal, 1 returns Unimplemented, and 2 succeed.
+
 	var logBuf syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -212,10 +208,8 @@ func TestRawFS_OnUnmount_ConcurrentFsyncErrors_AccountsMetricsLogsAndCompletesPr
 		return nil
 	}
 
-	// When: OnUnmount runs.
 	fs.OnUnmount()
 
-	// Then: errors and OK counts match, progress completes, and failing inodes are logged.
 	require.Equal(t, int64(5), srv.fsyncCalls.Load())
 	require.Zero(t, srv.fsyncDirCalls.Load())
 	require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 5, Total: 5}, fs.UnmountProgress())
@@ -229,7 +223,7 @@ func TestRawFS_OnUnmount_ConcurrentFsyncErrors_AccountsMetricsLogsAndCompletesPr
 
 func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmount(t *testing.T) {
 	t.Run("OpenWithOTruncMarksRegularFileDirtyAndFlushesFsync", func(t *testing.T) {
-		// Given: a pre-existing seeded regular file on the server.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "trunc-open.bin", 0o644, []byte("existing-payload"))
 		var fsyncedInos []uint64
@@ -242,11 +236,9 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		}
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 
-		// When: opening with O_TRUNC and releasing without calling Write.
 		opened := mustOpenFile(t, fs, ino, uint32(syscall.O_RDWR|syscall.O_TRUNC))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
-		// Then: the inode is dirty and OnUnmount dispatches Fsync for it.
 		require.Equal(t, 1, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
@@ -254,7 +246,7 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 	})
 
 	t.Run("SetAttrFATTRSIZEMarksRegularFileDirtyAndFlushesFsync", func(t *testing.T) {
-		// Given: a pre-existing seeded regular file on the server.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "trunc-setattr.bin", 0o644, []byte("0123456789"))
 		var fsyncedInos []uint64
@@ -267,7 +259,6 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		}
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 
-		// When: SetAttr truncates the file via FATTR_SIZE.
 		var out fuse.AttrOut
 		st := fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -278,7 +269,6 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		}, &out)
 		requireStatus(t, "SetAttr truncate", fuse.OK, st)
 
-		// Then: the inode is dirty and OnUnmount dispatches Fsync for it.
 		require.Equal(t, 1, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
@@ -286,7 +276,7 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 	})
 
 	t.Run("FallocateMarksRegularFileDirtyAndFlushesFsync", func(t *testing.T) {
-		// Given: a pre-existing seeded regular file opened for writing.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "alloc.bin", 0o644, []byte("0123456789"))
 		var fsyncedInos []uint64
@@ -300,7 +290,6 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		opened := mustOpenFile(t, fs, ino, syscall.O_RDWR)
 
-		// When: Fallocate modifies the file and the handle is released.
 		st := fs.Fallocate(nil, &fuse.FallocateIn{
 			InHeader: fuse.InHeader{NodeId: ino},
 			Fh:       opened.Fh,
@@ -311,7 +300,6 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 		requireStatus(t, "Fallocate punch hole", fuse.OK, st)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
-		// Then: the inode is dirty and OnUnmount dispatches Fsync for it.
 		require.Equal(t, 1, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
@@ -319,13 +307,12 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 	})
 
 	t.Run("DirectoryAndNonSizeSetAttrDoNotMarkDirtyInodes", func(t *testing.T) {
-		// Given: a seeded regular file and a newly created subdirectory.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		regIno := srv.seedFile(1, "chmod-only.bin", 0o644, []byte("data"))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		dir := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "sub", 0o755)
 
-		// When: SetAttr updates only mode/mtime on the directory and the regular file.
 		var out fuse.AttrOut
 		requireStatus(t, "dir chmod", fuse.OK, fs.SetAttr(nil, &fuse.SetAttrIn{
 			SetAttrInCommon: fuse.SetAttrInCommon{
@@ -342,7 +329,6 @@ func TestRawFS_DirtyInodes_OpenTruncateSetAttrSizeAndFallocate_FlushFsyncOnUnmou
 			},
 		}, &out))
 
-		// Then: dirtyInodes stays empty and OnUnmount issues zero file Fsync RPCs.
 		require.Zero(t, fs.Snapshot().Queues.DirtyInodes)
 		fs.OnUnmount()
 		require.Zero(t, srv.fsyncCalls.Load())
@@ -525,7 +511,7 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Given
+
 			srv := newFakeStorage(t, withRootIno(tc.rootIno), withTTL(1.0, 1.0))
 			entered := make(chan uint64, 2)
 			gate := make(chan struct{})
@@ -557,7 +543,6 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 			require.Zero(t, srv.fsyncCalls.Load())
 			require.Zero(t, srv.fsyncDirCalls.Load())
 
-			// When
 			done := make(chan struct{})
 			go func() {
 				fs.OnUnmount()
@@ -578,7 +563,6 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 			close(gate)
 			<-done
 
-			// Then
 			require.Zero(t, srv.fsyncCalls.Load())
 			require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 			require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
@@ -586,7 +570,6 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 			require.Equal(t, uint64(1), snap.Queues.DirtyFlushOK)
 			require.Zero(t, snap.Queues.DirtyFlushErrors)
 
-			// Repeat OnUnmount preserves progress and issues zero extra RPCs.
 			fs.OnUnmount()
 			require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 			require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
@@ -596,7 +579,7 @@ func TestRawFS_OnUnmount_MetadataOnlyMutations_IssuesSingleFsyncDirRootIno(t *te
 
 func TestRawFS_OnUnmount_CleanMountAndLocalTmpfile_IssuesZeroSyncRPCs(t *testing.T) {
 	t.Run("ReadOnlyOpsAndFailedMutationIssueZeroSyncRPCs", func(t *testing.T) {
-		// Given: a mount that executes only read-only RPCs and a failed mutation.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		ino := srv.seedFile(1, "ro-check.txt", 0o644, []byte("hello"))
 		srv.seedSymlink(1, "sym-check", "ro-check.txt")
@@ -639,17 +622,15 @@ func TestRawFS_OnUnmount_CleanMountAndLocalTmpfile_IssuesZeroSyncRPCs(t *testing
 			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Mode: 0o755,
 		}, "ro-check.txt", &dupOut))
 
-		// When
 		fs.OnUnmount()
 
-		// Then
 		require.Zero(t, srv.fsyncCalls.Load())
 		require.Zero(t, srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
 	})
 
 	t.Run("UnpromotedLocalTmpfileLifecycleIssuesZeroSyncRPCs", func(t *testing.T) {
-		// Given: a staged local O_TMPFILE written, truncated, fallocated, fsynced, and released without Link.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		var tmpOut fuse.CreateOut
@@ -679,10 +660,8 @@ func TestRawFS_OnUnmount_CleanMountAndLocalTmpfile_IssuesZeroSyncRPCs(t *testing
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
 		fs.Forget(tmpOut.NodeId, 1)
 
-		// When
 		fs.OnUnmount()
 
-		// Then
 		require.Zero(t, srv.fsyncCalls.Load())
 		require.Zero(t, srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
@@ -691,7 +670,7 @@ func TestRawFS_OnUnmount_CleanMountAndLocalTmpfile_IssuesZeroSyncRPCs(t *testing
 
 func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(t *testing.T) {
 	t.Run("ExplicitFsyncDirSyncsLatestMetadata", func(t *testing.T) {
-		// Given: Mkdir followed by explicit FsyncDir on root.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "d1", 0o755)
@@ -700,17 +679,15 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		requireStatus(t, "FsyncDir", fuse.OK, fs.FsyncDir(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Fh: dh.Fh}))
 		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Fh: dh.Fh})
 
-		// When
 		fs.OnUnmount()
 
-		// Then: OnUnmount issues zero extra FsyncDir RPCs.
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Zero(t, srv.fsyncCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
 	})
 
 	t.Run("ExplicitFileFsyncSyncsPriorMetadata", func(t *testing.T) {
-		// Given: Mkdir + Create + Write followed by explicit Fsync.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "d2", 0o755)
@@ -719,17 +696,15 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		requireStatus(t, "Fsync", fuse.OK, fs.Fsync(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh}))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 
-		// When
 		fs.OnUnmount()
 
-		// Then: OnUnmount issues zero Fsync or FsyncDir RPCs.
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
 		require.Zero(t, srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 0, Total: 0}, fs.UnmountProgress())
 	})
 
 	t.Run("MetadataMutationAfterExplicitFsyncTriggersFsyncDir", func(t *testing.T) {
-		// Given: Create + Write + Fsync, then a later Mkdir.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withDirectIO(false))
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "f3.bin", syscall.O_RDWR, 0o644)
@@ -738,17 +713,15 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "after-fsync", 0o755)
 
-		// When
 		fs.OnUnmount()
 
-		// Then: OnUnmount detects the post-Fsync metadata mutation and runs 1 FsyncDir.
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 	})
 
 	t.Run("ConcurrentMutationDuringExplicitFsyncStillTriggersFsyncDir", func(t *testing.T) {
-		// Given: Mkdir executes inside fsyncHook after Fsync captured metaDirtySeq.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "f-race.bin", syscall.O_RDWR, 0o644)
@@ -761,16 +734,14 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		srv.fsyncHook = nil
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 
-		// When
 		fs.OnUnmount()
 
-		// Then
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 	})
 
 	t.Run("UnmountFileFsyncSkipsRedundantFsyncDir", func(t *testing.T) {
-		// Given: Mkdir + Create + Write + Release without explicit Fsync.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "d4", 0o755)
@@ -778,17 +749,15 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("payload"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 
-		// When
 		fs.OnUnmount()
 
-		// Then: Phase 2 Fsync covers Pebble WAL so FsyncDir is skipped.
 		require.Equal(t, int64(1), srv.fsyncCalls.Load())
 		require.Zero(t, srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 	})
 
 	t.Run("AllUnmountFileFsyncsFailDoesNotHangOrCallFsyncDir", func(t *testing.T) {
-		// Given: Mkdir + 3 dirty files whose Fsync RPCs fail.
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		srv.fsyncHook = func(context.Context, *storagev1.FsyncRequest) error {
 			return errnoError(connect.CodeInternal, "EIO")
@@ -797,10 +766,8 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "d5", 0o755)
 		createDirtySyncFiles(t, fs, 3)
 
-		// When
 		fs.OnUnmount()
 
-		// Then: first unmount records 3 Fsync errors and 0 FsyncDir calls; repeat OnUnmount is a no-op.
 		require.Equal(t, int64(3), srv.fsyncCalls.Load())
 		require.Zero(t, srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 3, Total: 3}, fs.UnmountProgress())
@@ -816,8 +783,7 @@ func TestRawFS_OnUnmount_AlreadySyncedOrFileFsyncCovered_SkipsRedundantFsyncDir(
 
 func TestRawFS_OnUnmount_ReleaseQueueDrainAndFailedStageFallback_TriggersFsyncDir(t *testing.T) {
 	t.Run("RetriedReclaimOrphanDrainedBeforePhase2TriggersFsyncDir", func(t *testing.T) {
-		// Given: Create + open Unlink + explicit Fsync (metaSyncedSeq == metaDirtySeq),
-		// then Release encounters transient reclaim error so the item enters releaseQueue.
+
 		srv := newFakeStorage(t, withRootIno(77), withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withMode(fusefs.MountModeSync), withDirectIO(false))
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan-retry.bin", syscall.O_RDWR, 0o644)
@@ -836,17 +802,15 @@ func TestRawFS_OnUnmount_ReleaseQueueDrainAndFailedStageFallback_TriggersFsyncDi
 		require.Equal(t, 1, fs.Snapshot().Queues.ReleaseQueueDepth)
 		failReclaim.Store(false)
 
-		// When
 		fs.OnUnmount()
 
-		// Then: stopAndDrainReleaseQueue succeeds ReclaimOrphan before Phase 2, and FsyncDir flushes rootIno=77.
 		require.GreaterOrEqual(t, srv.reclaimOrphanCalls.Load(), int64(2))
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 	})
 
 	t.Run("FailedStageUploadAfterCreateFallsBackToFsyncDir", func(t *testing.T) {
-		// Given: Create succeeds (metadata dirty), then staged Write upload fails with ENOSPC leaving dirtyInodes empty.
+
 		srv := newFakeStorage(t, withRootIno(88), withTTL(1.0, 1.0))
 		writeGate := newStepGate()
 		writeEntered := make(chan struct{}, 2)
@@ -865,7 +829,6 @@ func TestRawFS_OnUnmount_ReleaseQueueDrainAndFailedStageFallback_TriggersFsyncDi
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 		<-writeEntered
 
-		// When: OnUnmount runs and unblocks the failing staged chunk upload.
 		done := make(chan struct{})
 		go func() {
 			fs.OnUnmount()
@@ -877,7 +840,6 @@ func TestRawFS_OnUnmount_ReleaseQueueDrainAndFailedStageFallback_TriggersFsyncDi
 		writeGate.allowAll()
 		<-done
 
-		// Then: dirtyInodes is empty after failed Stage upload, so fallback FsyncDir(88) runs and completes 2/2.
 		require.Zero(t, srv.fsyncCalls.Load())
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 2, Total: 2}, fs.UnmountProgress())
@@ -887,7 +849,7 @@ func TestRawFS_OnUnmount_ReleaseQueueDrainAndFailedStageFallback_TriggersFsyncDi
 
 func TestRawFS_OnUnmount_FsyncDirErrorAndUnimplementedHandling(t *testing.T) {
 	t.Run("FsyncDirErrorLogsAndCountsDirtyFlushError", func(t *testing.T) {
-		// Given
+
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withRootIno(55), withTTL(1.0, 1.0))
@@ -897,10 +859,8 @@ func TestRawFS_OnUnmount_FsyncDirErrorAndUnimplementedHandling(t *testing.T) {
 		fs := newTestRawFS(t, srv, withLogger(logger))
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "err-dir", 0o755)
 
-		// When
 		fs.OnUnmount()
 
-		// Then: first unmount logs once and records 1 error; repeat OnUnmount is a no-op with zero extra RPCs.
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 		snap := fs.Snapshot()
@@ -916,7 +876,7 @@ func TestRawFS_OnUnmount_FsyncDirErrorAndUnimplementedHandling(t *testing.T) {
 	})
 
 	t.Run("FsyncDirUnimplementedCountsOKWithoutWarning", func(t *testing.T) {
-		// Given
+
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withRootIno(56), withTTL(1.0, 1.0))
@@ -926,10 +886,8 @@ func TestRawFS_OnUnmount_FsyncDirErrorAndUnimplementedHandling(t *testing.T) {
 		fs := newTestRawFS(t, srv, withLogger(logger))
 		mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "unimpl-dir", 0o755)
 
-		// When
 		fs.OnUnmount()
 
-		// Then
 		require.Equal(t, int64(1), srv.fsyncDirCalls.Load())
 		require.Equal(t, fusefs.UnmountProgress{Active: false, Completed: 1, Total: 1}, fs.UnmountProgress())
 		snap := fs.Snapshot()

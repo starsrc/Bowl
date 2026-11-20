@@ -127,8 +127,6 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 	return cached, fuse.OK
 }
 
-// Lookup 在缓存命中时直接返回目录项，并零阻塞叠加本地暂存尺寸与时间戳。
-// 主体保持零 defer、零闭包，确保本地缓存命中快路径 0 allocs/op。
 func (fs *RawFS) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpLookup)
 	if fs.fencedStatus.Load() == 0 && !fs.isVirtualStatsName(header.NodeId, name) && len(name) <= MaxFilenameBytes && fs.cfg.AttrTimeoutSeconds > 0 {
@@ -188,8 +186,6 @@ func (fs *RawFS) lookupSlow(cancel <-chan struct{}, header *fuse.InHeader, name 
 	return status
 }
 
-// GetAttr 在缓存命中时直接返回节点属性，并零阻塞叠加本地暂存尺寸与时间戳。
-// 主体保持零 defer、零闭包，确保本地缓存命中快路径 0 allocs/op。
 func (fs *RawFS) GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpGetAttr)
 	if fs.fencedStatus.Load() == 0 && !fs.isVirtualStatsIno(in.NodeId) && fs.cfg.AttrTimeoutSeconds > 0 {
@@ -268,7 +264,6 @@ func (fs *RawFS) getAttrSlow(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fu
 	return status
 }
 
-// StatFs 实现文件系统容量与 Inode 配额统计查询，对应 Linux FUSE FUSE_STATFS 协议。
 func (fs *RawFS) StatFs(cancel <-chan struct{}, in *fuse.InHeader, out *fuse.StatfsOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpStatFs)
 	opCtx, endSpan := fs.startFuseOp(OpStatFs)

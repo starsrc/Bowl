@@ -19,8 +19,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestVFS_PosixRWDirectMmapExecAndTmpfile 验证 Linux FUSE 内核挂载下大文件跨分片读写、
-// 并发 `O_APPEND`、`mmap` 共享写回、直接执行 ELF 二进制、`O_TMPFILE` 打洞具名化持久化与 `SetAttr` 语义。
 func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
@@ -28,7 +26,6 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	diskID := disk.GetDiskId()
 	mountpoint, stop := mountWithCleanup(t, endpoint, diskID, "--debug")
 
-	// 1. 跨 4 MiB StageCoordinator 分片槽与 256 KiB Blob 块的大文件写入、跨分片覆写及 SHA-256 校验
 	const totalSize = 10 * 1024 * 1024
 	model := deterministicPayload("posix-10m", totalSize)
 	largePath := filepath.Join(mountpoint, "large-10m.bin")
@@ -48,7 +45,6 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, sha256.Sum256(model), sha256.Sum256(gotLarge), "10 MiB 跨块覆写读回 SHA-256 必须一致")
 
-	// 2. 并发 O_APPEND 原子追加
 	appendPath := filepath.Join(mountpoint, "append.log")
 	initAppend, err := os.OpenFile(appendPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
 	require.NoError(t, err)
@@ -72,7 +68,6 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	records := strings.Split(strings.TrimRight(string(appendContent), "\n"), "\n")
 	require.ElementsMatch(t, []string{lineA, lineB}, records)
 
-	// 3. mmap MAP_SHARED 修改与 Msync(MS_SYNC) 落盘
 	mmapPath := filepath.Join(mountpoint, "mmap.bin")
 	require.NoError(t, os.WriteFile(mmapPath, bytes.Repeat([]byte{'A'}, 8192), 0o644))
 	mf, err := os.OpenFile(mmapPath, os.O_RDWR, 0o644)
@@ -90,7 +85,6 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	require.Equal(t, []byte("MMAP_MUTATE"), persistedMmap[100:111])
 	require.Equal(t, []byte("MMAP_PAGE2_"), persistedMmap[5000:5011])
 
-	// 4. 在挂载点直接加载执行 Linux ELF 可执行文件
 	binBytes, err := os.ReadFile(getBowlBin())
 	require.NoError(t, err)
 	execPath := filepath.Join(mountpoint, "bowl-exec")
@@ -99,7 +93,6 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	require.NoError(t, err, "挂载点执行 ELF 二进制失败: %s", string(execOut))
 	require.Contains(t, string(execOut), "bowl version")
 
-	// 5. SetAttr：Chown 剥离 SUID/SGID、显式纳秒时间戳、Truncate 缩扩
 	attrPath := filepath.Join(mountpoint, "setattr.txt")
 	require.NoError(t, os.WriteFile(attrPath, bytes.Repeat([]byte("X"), 4096), 0o644))
 	require.NoError(t, os.Chmod(attrPath, 0o755|os.ModeSetuid|os.ModeSetgid))
@@ -123,7 +116,6 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	require.Len(t, truncData, 8192)
 	require.Equal(t, make([]byte, 4096), truncData[4096:])
 
-	// 6. O_TMPFILE 写入 + PUNCH_HOLE 打洞 + Linkat 具名化并跨重挂持久化
 	tmpFD, err := unix.Open(mountpoint, unix.O_TMPFILE|unix.O_RDWR, 0o600)
 	require.NoError(t, err)
 	tmpData := deterministicPayload("tmpfile-hole", 128*1024)
@@ -145,15 +137,12 @@ func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
 	stopRemount()
 }
 
-// TestVFS_PosixDirLinksRenameAndXattr 验证目录树与 `SGID` 继承、硬/软链接、
-// `Rename`/`Renameat2`（`NOREPLACE`/`EXCHANGE`）与扩展属性（含 `security.capability` 写剥离）主路径。
 func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 	disk := createTestDisk(t, client)
 	mountpoint, stop := mountWithCleanup(t, endpoint, disk.GetDiskId(), "--debug")
 
-	// 1. 目录 Nlink 守恒、SGID 属组继承、ReadDir 与 FIFO 节点
 	var rootBefore unix.Stat_t
 	require.NoError(t, unix.Stat(mountpoint, &rootBefore))
 
@@ -180,7 +169,6 @@ func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	require.Equal(t, uint32(syscall.S_IFIFO), fifoStat.Mode&syscall.S_IFMT)
 	require.NoError(t, syscall.Unlink(fifoPath))
 
-	// 2. 硬链接与符号链接
 	origPath := filepath.Join(mountpoint, "orig.txt")
 	require.NoError(t, os.WriteFile(origPath, []byte("link-payload"), 0o644))
 	var origStat unix.Stat_t
@@ -202,7 +190,6 @@ func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("link-payload"), symData)
 
-	// 3. 跨目录 Rename、RENAME_NOREPLACE 与 RENAME_EXCHANGE
 	movedPath := filepath.Join(sgidParent, "moved.txt")
 	require.NoError(t, os.Rename(origPath, movedPath))
 	require.ErrorIs(t, unix.Renameat2(unix.AT_FDCWD, movedPath, unix.AT_FDCWD, hardlinkPath, unix.RENAME_NOREPLACE), syscall.EEXIST)
@@ -217,7 +204,6 @@ func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	_, err = os.Stat(filepath.Join(movedPath, "inside.txt"))
 	require.NoError(t, err)
 
-	// 4. 扩展属性增删改查与 security.capability 写剥离及重挂持久化
 	xattrFile := filepath.Join(mountpoint, "xattr.bin")
 	require.NoError(t, os.WriteFile(xattrFile, []byte("base"), 0o755))
 	binVal := []byte("prefix\x00middle\xff\x00suffix")
@@ -246,8 +232,6 @@ func TestVFS_PosixDirLinksRenameAndXattr(t *testing.T) {
 	stopRemount()
 }
 
-// TestVFS_RenameDirNlinkAndParentCoherence verifies parent st_nlink and ".." coherence across
-// same-parent empty-dir overwrite, cross-parent empty-dir overwrite, and cross-parent RENAME_EXCHANGE.
 func TestVFS_RenameDirNlinkAndParentCoherence(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
@@ -262,7 +246,6 @@ func TestVFS_RenameDirNlinkAndParentCoherence(t *testing.T) {
 		return st
 	}
 
-	// 1. Same-parent directory overwrite of empty directory decrements parent nlink (4 -> 3).
 	sameParent := filepath.Join(mountpoint, "same-parent")
 	require.NoError(t, os.Mkdir(sameParent, 0o755))
 	sameSrc := filepath.Join(sameParent, "src")
@@ -279,7 +262,6 @@ func TestVFS_RenameDirNlinkAndParentCoherence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("ok"), gotKeep)
 
-	// 2. Cross-parent directory overwrite of empty directory decrements old parent (3 -> 2) and keeps new parent unchanged (3 -> 3).
 	crossOld := filepath.Join(mountpoint, "cross-old")
 	crossNew := filepath.Join(mountpoint, "cross-new")
 	require.NoError(t, os.Mkdir(crossOld, 0o755))
@@ -296,7 +278,6 @@ func TestVFS_RenameDirNlinkAndParentCoherence(t *testing.T) {
 	require.Equal(t, uint64(3), uint64(statOf(crossNew).Nlink), "cross-parent dir overwrite must keep new parent nlink unchanged")
 	require.Equal(t, statOf(crossNew).Ino, statOf(filepath.Join(crossDst, "..")).Ino)
 
-	// 3. Cross-parent RENAME_EXCHANGE between dir and file updates both parents' nlink and ".." in both directions.
 	exOld := filepath.Join(mountpoint, "ex-old")
 	exNew := filepath.Join(mountpoint, "ex-new")
 	require.NoError(t, os.Mkdir(exOld, 0o755))
@@ -319,8 +300,6 @@ func TestVFS_RenameDirNlinkAndParentCoherence(t *testing.T) {
 	require.Equal(t, statOf(exOld).Ino, statOf(filepath.Join(exA, "..")).Ino)
 }
 
-// TestVFS_PosixFlockAndMultiUserPermissions 验证内核 `flock` 跨独立句柄及 `dup` 互斥语义，
-// 以及 `--allow-other` 挂载下的多用户权限与 Sticky Bit 隔离。
 func TestVFS_PosixFlockAndMultiUserPermissions(t *testing.T) {
 	client := newTestStorageClient(t)
 	disk := createTestDisk(t, client)
@@ -332,7 +311,6 @@ func TestVFS_PosixFlockAndMultiUserPermissions(t *testing.T) {
 	waitForMount(t, mountpoint, "挂载失败: %s", stderr.String())
 	t.Cleanup(func() { stopBowlMountGracefully(t, cmd, mountpoint) })
 
-	// 1. flock 跨独立打开句柄与 dup 描述符互斥验证
 	flockPath := filepath.Join(mountpoint, "flock.txt")
 	require.NoError(t, os.WriteFile(flockPath, nil, 0o644))
 	fA, err := os.OpenFile(flockPath, os.O_RDWR, 0)
@@ -352,7 +330,6 @@ func TestVFS_PosixFlockAndMultiUserPermissions(t *testing.T) {
 		return unix.Flock(int(fB.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil
 	}, 5*time.Second, 10*time.Millisecond, "关闭全部持锁描述符后 `fB` 必须成功获取排他 `flock`")
 
-	// 2. 多用户权限与 Sticky Bit 隔离
 	secretPath := filepath.Join(mountpoint, "secret.txt")
 	require.NoError(t, os.WriteFile(secretPath, []byte("ROOT_SECRET"), 0o600))
 	roDir := filepath.Join(mountpoint, "ro-dir")

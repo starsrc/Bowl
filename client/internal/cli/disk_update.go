@@ -72,7 +72,7 @@ func (a *diskUpdateAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
 }
 
 func (a *diskUpdateAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
-	// Precheck used bytes before sending UpdateDisk when --size is requested.
+
 	if a.sizePtr != nil {
 		newMaxBytes := *a.sizePtr
 		getResp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{

@@ -25,7 +25,6 @@ func openSystemLog(diskID string) (*os.File, string, error) {
 	return nil, systemPath, mkdirErr
 }
 
-// isPermissionError reports whether err indicates a permission or read-only filesystem failure.
 func isPermissionError(err error) bool {
 	if err == nil {
 		return false
@@ -42,7 +41,6 @@ func isPermissionError(err error) bool {
 	return false
 }
 
-// ResolveLogFile opens the daemon log file at explicitPath, /var/log/bowl, or $XDG_STATE_HOME/bowl/logs on permission errors.
 func ResolveLogFile(explicitPath, diskID string) (*os.File, string, error) {
 	if explicitPath != "" {
 		dir := filepath.Dir(explicitPath)

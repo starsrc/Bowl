@@ -32,7 +32,6 @@ const (
 	storageLifecycleTimeout = 90 * time.Second
 )
 
-// syncBuffer 提供并发安全的进程标准输出与错误日志采集缓冲。
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -50,12 +49,10 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// storageTestDSN 返回 E2E 使用的 PostgreSQL DSN。
 func storageTestDSN() string {
 	return cmp.Or(os.Getenv("BOWL_TEST_POSTGRES_DSN"), defaultStorageTestDSN)
 }
 
-// buildStorageBinary 编译当前平台的 `storage-service` 二进制，供真实进程生命周期测试使用。
 func buildStorageBinary(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "storage-service")
@@ -69,7 +66,6 @@ func buildStorageBinary(t *testing.T) string {
 	return binary
 }
 
-// freeTCPPort 申请一个当前可用的本机端口。
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -81,7 +77,6 @@ func freeTCPPort(t *testing.T) int {
 	return port
 }
 
-// freeTCPPortPair 同时锁定并返回两个互不冲突的本机空闲端口。
 func freeTCPPortPair(t *testing.T) (pubPort, adminPort int) {
 	t.Helper()
 	pubListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -98,7 +93,6 @@ func freeTCPPortPair(t *testing.T) (pubPort, adminPort int) {
 	return pubPort, adminPort
 }
 
-// storageProcessEnv 构造 `storage-service` 的完整测试环境变量。
 func storageProcessEnv(publicPort, internalPort int, dataDir, dsn string, extra ...string) []string {
 	base := []string{
 		"SERVER_HOST=127.0.0.1",
@@ -111,7 +105,6 @@ func storageProcessEnv(publicPort, internalPort int, dataDir, dsn string, extra 
 	return append(base, extra...)
 }
 
-// runStorageProcessExpectFailure 启动 `storage-service` 并断言其在超时内以非零退出码失败。
 func runStorageProcessExpectFailure(t *testing.T, binary string, env []string) (exitCode int, out string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -125,7 +118,6 @@ func runStorageProcessExpectFailure(t *testing.T, binary string, env []string) (
 	return exitErr.ExitCode(), string(output)
 }
 
-// startStorageDaemon 启动真实双端口 `storage-service` 子进程并等待管理端 `/readyz` 就绪。
 func startStorageDaemon(t *testing.T, binary, dataDir string) (pubURL, adminURL string, logs *syncBuffer, stopAndWait func() int) {
 	t.Helper()
 	pubPort, adminPort := freeTCPPortPair(t)
@@ -169,7 +161,6 @@ func startStorageDaemon(t *testing.T, binary, dataDir string) (pubURL, adminURL 
 	return pubURL, adminURL, logs, stopAndWait
 }
 
-// waitHTTPStatus 轮询等待目标 HTTP 端点返回预期状态码并返回响应体。
 func waitHTTPStatus(t *testing.T, rawURL string, wantStatus int) string {
 	t.Helper()
 	httpClient := &http.Client{Timeout: time.Second}
@@ -188,7 +179,6 @@ func waitHTTPStatus(t *testing.T, rawURL string, wantStatus int) string {
 	return bodyText
 }
 
-// getHTTPStatusAndBody 执行单次同步 HTTP GET 并校验状态码。
 func getHTTPStatusAndBody(t *testing.T, rawURL string, wantStatus int) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -204,7 +194,6 @@ func getHTTPStatusAndBody(t *testing.T, rawURL string, wantStatus int) string {
 	return string(raw)
 }
 
-// TestStorageProcess_RejectsInvalidStartupConfig 验证真实二进制在缺少连接串或端口已被占用时拒绝启动。
 func TestStorageProcess_RejectsInvalidStartupConfig(t *testing.T) {
 	binary := buildStorageBinary(t)
 
@@ -228,10 +217,8 @@ func TestStorageProcess_RejectsInvalidStartupConfig(t *testing.T) {
 	})
 }
 
-// TestStorageProcess_DualPortAdminAndRestartRecovery 验证真实子进程双端口隔离、
-// `X-Request-Id` 日志传播、指标高基数防线、SIGTERM 重启后 PostgreSQL 与磁盘状态恢复及物理目录清理。
 func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
-	// Given: 编译并启动首个双端口存储守护进程
+
 	binary := buildStorageBinary(t)
 	dataDir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), storageLifecycleTimeout)
@@ -239,7 +226,6 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 
 	pubURL1, adminURL1, logs1, stop1 := startStorageDaemon(t, binary, dataDir)
 
-	// Then: 管理端口探针与诊断接口可达，公网端口物理隔离返回 404
 	healthBody := getHTTPStatusAndBody(t, adminURL1+"/healthz", http.StatusOK)
 	require.Contains(t, healthBody, `"status":"ok"`)
 	readyBody := getHTTPStatusAndBody(t, adminURL1+"/readyz", http.StatusOK)
@@ -251,7 +237,6 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	_ = getHTTPStatusAndBody(t, pubURL1+"/metrics", http.StatusNotFound)
 	_ = getHTTPStatusAndBody(t, pubURL1+"/debug/pprof/cmdline", http.StatusNotFound)
 
-	// When: 创建磁盘、携带 X-Request-Id 挂载写入并触发过期世代号 EBUSY
 	client1 := testutil.NewStorageClientAt(pubURL1)
 	created, err := client1.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
 		Name:     "process-recovery-disk",
@@ -326,7 +311,6 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 
 	require.Zero(t, stop1())
 
-	// When: 同一数据目录重启新进程并验证跨重启恢复与删盘清理
 	pubURL2, _, _, stop2 := startStorageDaemon(t, binary, dataDir)
 	client2 := testutil.NewStorageClientAt(pubURL2)
 

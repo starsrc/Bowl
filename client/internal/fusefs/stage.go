@@ -34,31 +34,22 @@ import (
 )
 
 const (
-	// MountModeStaged 为默认读写挂载模式，启用有界本地磁盘暂存与异步上传流水线。
 	MountModeStaged = "staged"
 
-	// MountModeSync is the synchronous passthrough writable mount mode with no host-disk staging.
 	MountModeSync = "sync"
 
-	// MountModeRO 为只读挂载模式，不创建本地暂存目录，也不启动后台上传协程。
 	MountModeRO = "ro"
 
-	// DefaultStageSize 为本地磁盘暂存区默认容量上限（512 MiB）。
 	DefaultStageSize uint64 = 512 * 1024 * 1024
 
-	// MinStageSize 为本地磁盘暂存区允许配置的最小容量上限（4 MiB）。
 	MinStageSize uint64 = MaxRPCChunkSize
 
-	// DefaultStageDir 为默认本地磁盘暂存根目录。
 	DefaultStageDir = "/var/tmp/bowl-stage"
 
-	// StageChunkSize 定义客户端单块本地暂存及上传上限（4 MiB = MaxRPCChunkSize）。
 	StageChunkSize = MaxRPCChunkSize
 
-	// StageBlockAlign 与服务端 store.BlobSize（256 KiB）对齐，用于判定并发安全的满块切片。
 	StageBlockAlign = 256 * 1024
 
-	// StageWorkers 定义后台异步上传工作协程数，匹配 8 条数据条带连接。
 	StageWorkers = rpc.HTTP2DataConnectionShards
 
 	stageExtentScanPageSize = 4096
@@ -100,7 +91,6 @@ func releaseStageBuf(buf *[StageChunkSize]byte) {
 	}
 }
 
-// StageDirSession 管理单个挂载实例在宿主机暂存目录下的独占子目录与 flock 实例锁。
 type StageDirSession struct {
 	mu           sync.Mutex
 	stageDir     string
@@ -111,7 +101,6 @@ type StageDirSession struct {
 	closed       bool
 }
 
-// InstanceDir 返回当前实例独占的暂存子目录绝对路径。
 func (s *StageDirSession) InstanceDir() string {
 	if s == nil {
 		return ""
@@ -119,7 +108,6 @@ func (s *StageDirSession) InstanceDir() string {
 	return s.instanceDir
 }
 
-// IsTmpfs 报告暂存目录所在文件系统是否为 tmpfs。
 func (s *StageDirSession) IsTmpfs() bool {
 	if s == nil {
 		return false
@@ -127,7 +115,6 @@ func (s *StageDirSession) IsTmpfs() bool {
 	return s.isTmpfs
 }
 
-// CleanedCount 返回启动扫描阶段清理的失效实例目录与残留散落文件总数。
 func (s *StageDirSession) CleanedCount() int {
 	if s == nil {
 		return 0
@@ -135,7 +122,6 @@ func (s *StageDirSession) CleanedCount() int {
 	return s.cleanedCount
 }
 
-// Close 幂等释放实例锁文件并清理当前实例暂存子目录。
 func (s *StageDirSession) Close() error {
 	if s == nil {
 		return nil
@@ -165,7 +151,6 @@ func (s *StageDirSession) Close() error {
 	return firstErr
 }
 
-// OpenStageDirSession 初始化宿主机暂存根目录、清理已退出进程的残留数据，并创建当前实例的独占锁目录。
 func OpenStageDirSession(stageDir string) (*StageDirSession, error) {
 	if strings.TrimSpace(stageDir) == "" {
 		return nil, errors.New("stage dir must not be empty")
@@ -274,7 +259,7 @@ func cleanupDefunctStageEntries(cleanDir string) int {
 			}
 			continue
 		}
-		// 缺失 .lock（或无法作为常规文件打开）时按目录名 PID 判定：活进程保留以避开建锁微秒窗口竞态，死进程清理。
+
 		if pid, ok := parseInstDirPID(name); !ok || !isPIDAlive(pid) {
 			if rmErr := os.RemoveAll(fullPath); rmErr == nil {
 				cleaned++
@@ -486,19 +471,15 @@ func scanNonZeroExtents(f *os.File, startOff, size uint64) ([]stageExtent, error
 	return extents, nil
 }
 
-// StageChunkWriter 定义向底层存储服务提交单块写入的端口函数。
 type StageChunkWriter func(ctx context.Context, ino, offset uint64, data []byte) (uint32, *storagev1.Inode, error)
 
-// StageChunkReader 定义在局部未命中时向底层存储读取基准数据块的端口函数。
 type StageChunkReader func(ctx context.Context, offset uint64, length uint32) (rpc.ReadPayload, error)
 
-// StagedXattr stores one snapshotted extended attribute from an unpromoted O_TMPFILE.
 type StagedXattr struct {
 	Name  string
 	Value []byte
 }
 
-// StagePromotedMeta carries final metadata committed after all promoted extents finish uploading.
 type StagePromotedMeta struct {
 	Size   uint64
 	Atime  *timestamppb.Timestamp
@@ -509,10 +490,8 @@ type StagePromotedMeta struct {
 	Xattrs []StagedXattr
 }
 
-// StageAttrCommitter commits final inode attributes and extended attributes after promoted extents finish uploading.
 type StageAttrCommitter func(ctx context.Context, ino uint64, meta StagePromotedMeta) (*storagev1.Inode, error)
 
-// StageHooks updates client cache and capability state when stage chunks and promoted commits finish or fail.
 type StageHooks struct {
 	OnStage  func(nodeID, cacheEpoch, endOffset uint64, ts *timestamppb.Timestamp)
 	OnCommit func(nodeID, ino, cacheEpoch uint64, inode *storagev1.Inode, minSize uint64, refreshAttr, preserveMeta, capPresent bool)
@@ -698,8 +677,6 @@ func (st *stageInode) consumeErrLocked(c *StageCoordinator, fh uint64) error {
 	return st.lastErr
 }
 
-// StageCoordinator 管理基于宿主机标准分片文件（chunk-<seq>.stage）的写暂存、
-// --stage-size 空间背压、8 协程 FIFO 后台上传、单节点顺序一致性与读己之所写合并。
 type StageCoordinator struct {
 	instanceDir string
 	stageSize   uint64
@@ -742,7 +719,6 @@ type StageCoordinator struct {
 	backoffLimit  time.Duration
 }
 
-// NewStageCoordinator 创建并启动携带 8 个后台上传协程的 StageCoordinator。
 func NewStageCoordinator(
 	instanceDir string,
 	stageSize uint64,
@@ -862,7 +838,6 @@ func (c *StageCoordinator) pendingChunkCount() int64 {
 	return max(int64(0), c.pendingChunks.Load())
 }
 
-// RegisterHandle 在打开文件句柄时按 Linux errseq_t 语义采样当前全局错误水位。
 func (c *StageCoordinator) RegisterHandle(fh uint64) {
 	if c == nil || fh == 0 {
 		return
@@ -879,7 +854,6 @@ func (c *StageCoordinator) RegisterHandle(fh uint64) {
 	c.seqMu.Unlock()
 }
 
-// ForgetHandle 在 Release 关闭本地文件句柄时清理其错误游标。
 func (c *StageCoordinator) ForgetHandle(fh uint64) {
 	if c == nil || fh == 0 || c.errSeqGen.Load() == 0 {
 		return
@@ -955,12 +929,10 @@ func (c *StageCoordinator) sealAllIdleActiveLocked() bool {
 	return sealedAny
 }
 
-// HasAnyPending 无锁报告当前是否存在任何挂起的暂存分片、在途上传或转正提交。
 func (c *StageCoordinator) HasAnyPending() bool {
 	return c != nil && !c.aborted.Load() && c.totalActiveItems.Load() > 0
 }
 
-// HasPending 报告指定服务端 Inode 是否存在挂起的暂存分片或转正上传任务。
 func (c *StageCoordinator) HasPending(ino uint64) bool {
 	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return false
@@ -972,7 +944,6 @@ func (c *StageCoordinator) HasPending(ino uint64) bool {
 	return pending
 }
 
-// SeedCreatedInode 标记会话内新创建的空文件，使后续读操作可完全在本地零 RPC 完成。
 func (c *StageCoordinator) SeedCreatedInode(ino uint64) {
 	if c == nil || ino == 0 {
 		return
@@ -988,7 +959,6 @@ func (c *StageCoordinator) SeedCreatedInode(ino uint64) {
 	c.mu.Unlock()
 }
 
-// ResetTruncatedInode 在 Open(O_TRUNC) 截断成功后重置该节点的会话尺寸与本地可见视图。
 func (c *StageCoordinator) ResetTruncatedInode(ino uint64) {
 	if c == nil || ino == 0 {
 		return
@@ -1003,7 +973,6 @@ func (c *StageCoordinator) ResetTruncatedInode(ino uint64) {
 	c.mu.Unlock()
 }
 
-// ObserveServerInode 在无挂起本地写时同步服务端已知尺寸，供后续随机读与尾部空洞补零对齐。
 func (c *StageCoordinator) ObserveServerInode(ino uint64, inode *storagev1.Inode, truncatedZero bool) {
 	if c == nil || ino == 0 || inode == nil || inode.GetAttr() == nil {
 		return
@@ -1021,7 +990,6 @@ func (c *StageCoordinator) ObserveServerInode(ino uint64, inode *storagev1.Inode
 	c.mu.Unlock()
 }
 
-// InvalidateKnownSize 在 Fallocate 等可能改变服务端文件长度的操作后清除已知尺寸缓存。
 func (c *StageCoordinator) InvalidateKnownSize(ino uint64) {
 	if c == nil || ino == 0 {
 		return
@@ -1034,7 +1002,6 @@ func (c *StageCoordinator) InvalidateKnownSize(ino uint64) {
 	c.mu.Unlock()
 }
 
-// RemoveIdleInode 在节点被内核 Forget 时回收已无挂起任务与错误状态的内存跟踪结构。
 func (c *StageCoordinator) RemoveIdleInode(ino uint64) {
 	if c == nil || ino == 0 {
 		return
@@ -1046,7 +1013,6 @@ func (c *StageCoordinator) RemoveIdleInode(ino uint64) {
 	c.mu.Unlock()
 }
 
-// OverlayAttr 在存在挂起写时零分配地向 fuse.Attr 叠加本地逻辑尺寸与最新修改时间。
 func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
 	if c == nil || attr == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
@@ -1083,7 +1049,6 @@ func (c *StageCoordinator) OverlayAttr(ino uint64, attr *fuse.Attr) {
 	c.mu.Unlock()
 }
 
-// OverlayInode 在缓存未命中或零 TTL 回填时向 storagev1.Inode 叠加本地逻辑尺寸与最新时间戳。
 func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
 	if c == nil || inode == nil || inode.GetAttr() == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
@@ -1118,12 +1083,10 @@ func (c *StageCoordinator) OverlayInode(ino uint64, inode *storagev1.Inode) {
 	c.mu.Unlock()
 }
 
-// Write 将常规文件写入暂存至宿主机标准分片文件（无句柄游标模式）。
 func (c *StageCoordinator) Write(ctx context.Context, ino, nodeID, offset uint64, data []byte, cacheEpoch uint64) (written uint32, handled bool, err error) {
 	return c.WriteForHandle(ctx, nil, 0, ino, nodeID, offset, data, cacheEpoch)
 }
 
-// WriteForHandle 将句柄 fh 的常规写入（<= 4 MiB）落盘至宿主机 <instanceDir>/chunk-<seq>.stage 并立即关闭 FD。
 func (c *StageCoordinator) WriteForHandle(
 	ctx context.Context,
 	cancel <-chan struct{},
@@ -1385,7 +1348,6 @@ func planWriteStepLocked(st *stageInode, curOff uint64, rem []byte) (take int, i
 	stageEnd := act.offset + act.length
 	writeEnd := curOff + uint64(len(rem))
 
-	// 若活跃分片正被并发 Read 读取且本次写入会覆写或向左偏移既有字节，先封口以保证读者零撕裂。
 	if act.readers > 0 && curOff < stageEnd {
 		return 0, false, 0, true
 	}
@@ -1476,7 +1438,6 @@ func (c *StageCoordinator) abortActiveWriteStepLocked(st *stageInode, activeChun
 	return pathToRemove
 }
 
-// PromoteTmpfile transfers an open staged O_TMPFILE file and its metadata snapshot to StageCoordinator for ordered upload.
 func (c *StageCoordinator) PromoteTmpfile(
 	ctx context.Context,
 	serverIno, nodeID, cacheEpoch uint64,
@@ -1598,8 +1559,6 @@ type byteRange struct {
 	end   uint64
 }
 
-// Read 在存在本地暂存分片或已转正匿名文件时直接提供读己之所写，避免阻塞等待后台上传。
-// 返回 handled == false 时，调用方回退至 ReadAheadCoordinator 读取服务端已提交数据。
 func (c *StageCoordinator) Read(
 	ctx context.Context,
 	ino, offset uint64,
@@ -1881,7 +1840,6 @@ func readUncoveredFromServer(ctx context.Context, reader StageChunkReader, offse
 	return total, nil
 }
 
-// FlushHandle 仅封口当前活跃分片并立即返回，同时消费该句柄尚未观测到的后台粘性错误。
 func (c *StageCoordinator) FlushHandle(fh, ino uint64) error {
 	if c == nil {
 		return nil
@@ -1915,7 +1873,6 @@ func (c *StageCoordinator) FlushHandle(fh, ino uint64) error {
 	return err
 }
 
-// SealInode 非阻塞封口指定节点的活跃暂存分片进入后台上传队列。
 func (c *StageCoordinator) SealInode(ino uint64) {
 	if c == nil || c.aborted.Load() {
 		return
@@ -1978,7 +1935,6 @@ func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInod
 	c.metrics.Load().observeStageBarrierWait(time.Since(waitStart))
 }
 
-// BarrierInode 封口并等待指定节点的所有挂起分片与转正任务上传完成，保留粘性错误游标。
 func (c *StageCoordinator) BarrierInode(ctx context.Context, ino uint64) {
 	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
@@ -1991,7 +1947,6 @@ func (c *StageCoordinator) BarrierInode(ctx context.Context, ino uint64) {
 	c.mu.Unlock()
 }
 
-// FlushInodeForHandle 排空指定节点的所有挂起上传并按句柄游标消费未观测到的粘性错误。
 func (c *StageCoordinator) FlushInodeForHandle(ctx context.Context, fh, ino uint64) error {
 	if c == nil {
 		return nil
@@ -2019,7 +1974,6 @@ func (c *StageCoordinator) FlushInodeForHandle(ctx context.Context, fh, ino uint
 	return err
 }
 
-// FlushAndResetInodeForHandle 排空指定节点的挂起上传、消费句柄错误并重置顺序流世代（供同步旁路写调用）。
 func (c *StageCoordinator) FlushAndResetInodeForHandle(ctx context.Context, fh, ino uint64) error {
 	if c == nil {
 		return nil
@@ -2049,7 +2003,6 @@ func (c *StageCoordinator) FlushAndResetInodeForHandle(ctx context.Context, fh, 
 	return err
 }
 
-// ResetInodeStream 排空目标节点的所有挂起上传并重置提交世代与会话尺寸标记（不消费句柄级写错误）。
 func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) {
 	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
@@ -2064,7 +2017,6 @@ func (c *StageCoordinator) ResetInodeStream(ctx context.Context, ino uint64) {
 	c.mu.Unlock()
 }
 
-// HasPromotedPending reports whether the inode has an uncommitted Link promotion queued or in flight.
 func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
 	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return false
@@ -2076,7 +2028,6 @@ func (c *StageCoordinator) HasPromotedPending(ino uint64) bool {
 	return pending
 }
 
-// BarrierAll 封口并等待所有活跃节点的挂起分片全部上传完成。
 func (c *StageCoordinator) BarrierAll(ctx context.Context) {
 	if c == nil || c.aborted.Load() || c.totalActiveItems.Load() == 0 {
 		return
@@ -2093,8 +2044,6 @@ func (c *StageCoordinator) BarrierAll(ctx context.Context) {
 	c.mu.Unlock()
 }
 
-// DiscardInode 在 Unlink、Open(O_TRUNC) 或孤儿最后句柄 Release 时本地丢弃尚未上传的分片文件并释放配额，
-// 仅等待该节点已在途发出网络 RPC 的分片收口以避免与后续服务端删除或截断竞态。
 func (c *StageCoordinator) DiscardInode(ino uint64) {
 	if c == nil {
 		return
@@ -2112,7 +2061,6 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 		c.stateCond.Wait()
 	}
 
-	// 通知正在退避重试的后台协程立即终止当前节点的重试睡眠。
 	close(st.discardCh)
 	st.discardCh = make(chan struct{})
 
@@ -2134,7 +2082,6 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 		}
 	}
 
-	// 从全局 FIFO 队列中移除目标节点尚未开始上传的分片。
 	var freedBytes uint64
 	var droppedChunks int64
 	var droppedTotal int64
@@ -2191,7 +2138,6 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	}
 	c.wakeBackpressureLocked()
 
-	// 仅等待已经在途发出 Write RPC 的分片结束，绝不阻塞等待未发出的队列。
 	for st.hasInflightLocked() && !c.aborted.Load() {
 		c.stateCond.Wait()
 	}
@@ -2219,9 +2165,6 @@ func (c *StageCoordinator) DiscardInode(ino uint64) {
 	}
 }
 
-// AbortAll immediately cancels and drains all staged writes, unlinks local stage files,
-// records a sticky error for Flush/Fsync, and wakes all blocked waiters.
-// Safe to invoke from any goroutine, including an in-flight upload worker.
 func (c *StageCoordinator) AbortAll(err error) {
 	if c == nil {
 		return
@@ -2352,7 +2295,6 @@ func (c *StageCoordinator) AbortAll(err error) {
 	}
 }
 
-// Clear 排空所有活跃节点的挂起分片并等待 8 个后台上传协程全部退出（幂等，供卸载时调用）。
 func (c *StageCoordinator) Clear(ctx context.Context) {
 	if c == nil {
 		return
@@ -2616,7 +2558,6 @@ func (c *StageCoordinator) processUploadItem(item *stageItem, initialDiscardCh c
 			break
 		}
 
-		// 检查是否已被 DiscardInode 或卸载强停，否则按有界退避重试。
 		c.mu.Lock()
 		st := item.inodeState
 		if st != nil {
@@ -2727,7 +2668,7 @@ func (c *StageCoordinator) finishUploadItem(
 	}
 
 	if st != nil {
-		// 从节点挂起列表摘除当前分片。
+
 		for i, p := range st.pending {
 			if p == item {
 				rem := copy(st.pending[i:], st.pending[i+1:])
@@ -2738,7 +2679,7 @@ func (c *StageCoordinator) finishUploadItem(
 		}
 
 		if item.kind == stageItemChunkFile || item.kind == stageItemPromotedCommit {
-			// 一旦分片或转正主体从本地移除，文件即可能同时依赖服务端基准，撤销纯本地视图标志。
+
 			st.createdInSession = false
 		}
 
@@ -2754,7 +2695,6 @@ func (c *StageCoordinator) finishUploadItem(
 			st.promoted = nil
 		}
 
-		// Skip OnCommit/OnError hooks once AbortAll has recorded the sticky error and cleared caches.
 		if !c.aborted.Load() {
 			if finalErr != nil && !discardedMid {
 				if notFoundAbort {

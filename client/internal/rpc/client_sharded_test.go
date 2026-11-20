@@ -76,10 +76,9 @@ func requireAllDataTransportsConfig(t *testing.T, rt *shardedRoundTripper, wantB
 }
 
 func TestShardedRoundTripper_GivenReadWriteAndReadCommitNodeTraffic_DistributesRoundRobinAcross8DataShards(t *testing.T) {
-	// Given
+
 	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
 
-	// When
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceWriteProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
@@ -97,17 +96,15 @@ func TestShardedRoundTripper_GivenReadWriteAndReadCommitNodeTraffic_DistributesR
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 
-	// Then
 	require.Zero(t, controlRT.calls.Load(), "bulk data traffic must not use controlTransport")
 	require.Zero(t, metaRT.calls.Load(), "bulk data traffic must not use metaTransport")
 	requireAllDataShardCalls(t, dataRTs, 2)
 }
 
 func TestShardedRoundTripper_GivenControlProcedures_RoutesToDedicatedControlTransport(t *testing.T) {
-	// Given
+
 	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
 
-	// When
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceMountDiskProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceRenewMountProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceUnmountDiskProcedure)
@@ -115,17 +112,15 @@ func TestShardedRoundTripper_GivenControlProcedures_RoutesToDedicatedControlTran
 	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceRenewMountProcedure)
 	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceUnmountDiskProcedure)
 
-	// Then
 	require.Equal(t, int64(6), controlRT.calls.Load())
 	require.Zero(t, metaRT.calls.Load())
 	requireAllDataShardCalls(t, dataRTs, 0)
 }
 
 func TestShardedRoundTripper_GivenMetadataAndRemainingDiskTraffic_RoutesToDedicatedMetaTransport(t *testing.T) {
-	// Given
+
 	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
 
-	// When
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceLookupProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceGetAttrProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceCreateProcedure)
@@ -143,28 +138,25 @@ func TestShardedRoundTripper_GivenMetadataAndRemainingDiskTraffic_RoutesToDedica
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceDiffDiskProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceMergeDiskProcedure)
 
-	// Then
 	require.Zero(t, controlRT.calls.Load())
 	require.Equal(t, int64(16), metaRT.calls.Load())
 	requireAllDataShardCalls(t, dataRTs, 0)
 }
 
 func TestShardedRoundTripper_WhenCloseIdleConnectionsCalled_ForwardsToControlMetaAndAll8DataShards(t *testing.T) {
-	// Given
+
 	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
 	httpCli := &http.Client{Transport: rt}
 
-	// When
 	httpCli.CloseIdleConnections()
 
-	// Then
 	require.Equal(t, int64(1), controlRT.idleClosed.Load())
 	require.Equal(t, int64(1), metaRT.idleClosed.Load())
 	requireAllDataShardIdleClosed(t, dataRTs, 1)
 }
 
 func TestNewClient_GivenEndpointAndTokenConfig_ResolvesAndInjectsHeaders(t *testing.T) {
-	// Given
+
 	t.Setenv(EnvStorageEndpoint, "http://10.0.0.5:9001/")
 	t.Setenv(EnvToken, "env-secret")
 	resolvedEP, epErr := ResolveEndpoint("")
@@ -178,7 +170,6 @@ func TestNewClient_GivenEndpointAndTokenConfig_ResolvesAndInjectsHeaders(t *test
 	_, missingHostErr := ResolveEndpoint("http://")
 	require.Error(t, missingHostErr)
 
-	// When: 通过 NewClientFromConfig 发送请求，校验 Bearer 与 Accept-Encoding: identity 注入
 	handler := &scriptedReadHandler{}
 	client, err := NewClientFromConfig(ClientConfig{
 		Endpoint:   "http://127.0.0.1:9000/",
@@ -188,14 +179,13 @@ func TestNewClient_GivenEndpointAndTokenConfig_ResolvesAndInjectsHeaders(t *test
 	require.NoError(t, err)
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
-	// Then
 	require.NoError(t, err)
 	require.Equal(t, "Bearer tok-123", handler.lastAuth)
 	require.Equal(t, "identity", handler.lastAcceptEnc)
 }
 
 func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresIsolatedH2Buffers(t *testing.T) {
-	// Given / When
+
 	h2cRT, err := newShardedRoundTripper("http://127.0.0.1:9000", nil)
 	require.NoError(t, err)
 	defer h2cRT.CloseIdleConnections()
@@ -346,7 +336,7 @@ func runRepeatedBulkCalls(t *testing.T, ctx context.Context, client storagev1con
 }
 
 func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t *testing.T) {
-	// Given
+
 	recorder := newRecordedProcedureAddrs()
 	endpoint := startH2CStorageServer(t, &tierTestStorageHandler{}, func(r *http.Request) {
 		recorder.Record(r.URL.Path, r.RemoteAddr)
@@ -359,7 +349,6 @@ func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// When
 	_, err = client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: "disk-1"}))
 	require.NoError(t, err)
 	_, err = client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{DiskId: "disk-1", MountId: "mount-1"}))
@@ -378,7 +367,6 @@ func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t 
 
 	runRepeatedBulkCalls(t, ctx, client, HTTP2DataConnectionShards)
 
-	// Then
 	controlAddrs := recorder.AddrSet(
 		storagev1connect.StorageServiceMountDiskProcedure,
 		storagev1connect.StorageServiceRenewMountProcedure,
@@ -425,7 +413,7 @@ func requireShardedRoundTripperPingTimeouts(t *testing.T, rt *shardedRoundTrippe
 }
 
 func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresPingTimeoutsAcrossAllThreeTiers(t *testing.T) {
-	// Given / When
+
 	h2cRT, err := newShardedRoundTripper("http://127.0.0.1:9000", nil)
 	require.NoError(t, err)
 	defer h2cRT.CloseIdleConnections()
@@ -435,7 +423,6 @@ func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresPingTimeoutsAcrossAl
 	require.NoError(t, err)
 	defer tlsRT.CloseIdleConnections()
 
-	// Then
 	require.Equal(t, 3*time.Second, HTTP2SendPingTimeout)
 	require.Equal(t, 2*time.Second, HTTP2PingTimeout)
 	requireShardedRoundTripperPingTimeouts(t, h2cRT, HTTP2SendPingTimeout, HTTP2PingTimeout)
@@ -596,7 +583,7 @@ func (p *tcpBlackholeProxy) Close() {
 }
 
 func TestNewClient_GivenBlackholedTCPConnectionAfterWarmup_EvictsViaPingWithin5sAndRedials(t *testing.T) {
-	// Given
+
 	backendURL := startH2CStorageServer(t, &tierTestStorageHandler{}, nil)
 	proxy := startTCPBlackholeProxy(t, strings.TrimPrefix(backendURL, "http://"))
 	client, err := NewClientFromConfig(ClientConfig{
@@ -611,16 +598,13 @@ func TestNewClient_GivenBlackholedTCPConnectionAfterWarmup_EvictsViaPingWithin5s
 	require.NoError(t, err)
 	require.Equal(t, int64(1), proxy.Dials())
 
-	// Drop all bytes on the first connection without closing TCP.
 	proxy.EnableBlackholeOnFirstConn()
 
-	// When
 	evicted, evictElapsed := proxy.WaitFirstConnEvicted(7500 * time.Millisecond)
 	followCtx, cancelFollow := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelFollow()
 	_, followErr := client.Lookup(followCtx, connect.NewRequest(&storagev1.LookupRequest{ParentIno: 1, Name: []byte("after-evict")}))
 
-	// Then
 	require.True(t, evicted, "HTTP/2 PING must close the blackholed connection within 7.5s")
 	require.GreaterOrEqual(t, evictElapsed, 4500*time.Millisecond, "HTTP/2 PING eviction must cover SendPingTimeout plus PingTimeout")
 	require.Less(t, evictElapsed, 7500*time.Millisecond, "HTTP/2 PING eviction must complete near 5s")

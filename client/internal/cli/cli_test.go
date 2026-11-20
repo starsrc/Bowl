@@ -86,7 +86,6 @@ func (r errReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
-// fakeStorage 提供内存状态化存储适配器，同时支撑 disk 与 mount 测试。
 type fakeStorage struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 
@@ -690,10 +689,9 @@ func requireSpanStringAttr(t *testing.T, sp *tracetest.SpanStub, key, want strin
 }
 
 func TestExecute_GivenNoArgs_PrintsUsageToStderrAndReturns2(t *testing.T) {
-	// Given / When
+
 	code, out, errOut := runCLI()
 
-	// Then
 	require.Equal(t, 2, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "Usage:")
@@ -701,7 +699,7 @@ func TestExecute_GivenNoArgs_PrintsUsageToStderrAndReturns2(t *testing.T) {
 }
 
 func TestExecute_GivenUnknownCommand_PrintsErrorAndReturns2(t *testing.T) {
-	// Given / When / Then
+
 	for _, cmdName := range []string{"unknown-cmd", "sandbox"} {
 		code, out, errOut := runCLI(cmdName)
 		require.Equal(t, 2, code, "cmd=%s", cmdName)
@@ -712,7 +710,7 @@ func TestExecute_GivenUnknownCommand_PrintsErrorAndReturns2(t *testing.T) {
 }
 
 func TestExecute_GivenVersionFlags_PrintsVersionAndReturns0(t *testing.T) {
-	// Given / When / Then
+
 	want := "bowl version " + version.Version + "\n"
 
 	code, out, errOut := runCLI("version")
@@ -746,7 +744,7 @@ func TestExecute_GivenVersionExtraArgsOrInvalidFlag_Returns2(t *testing.T) {
 }
 
 func TestExecute_GivenHelpFlags_PrintsNativeScopeAndReturns0(t *testing.T) {
-	// Given / When / Then
+
 	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
 		code, out, errOut := runCLI(args...)
 		require.Equal(t, 0, code, "args=%v stderr=%s", args, errOut)

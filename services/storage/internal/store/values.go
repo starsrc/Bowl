@@ -7,25 +7,22 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 )
 
-// 定长值物理编码字节数常量。
 const (
-	BranchStatSize  = 41 // [ver(1B) | LogicalBytes(8B) | Inodes(8B) | NextWriteSeq(8B) | WriterEpoch(8B) | MaxBytes(8B)]
-	PackMetaSize    = 17 // [ver(1B) | LiveBytes(8B) | TotalBytes(8B)]
-	EntryValueSize  = 13 // [ver(1B) | Ino(8B) | Mode(4B)]
-	InodeHeaderSize = 93 // 93B 定长属性头 + 可变长 SymlinkTarget
-	BlobRefSize     = 16 // [PackID(8B) | Offset(4B) | Length(4B)]
+	BranchStatSize  = 41
+	PackMetaSize    = 17
+	EntryValueSize  = 13
+	InodeHeaderSize = 93
+	BlobRefSize     = 16
 )
 
 const codecVersion byte = 1
 
-// Orphan marker 1-byte kind values stored under "orphan:<ino>".
 const (
 	OrphanKindUnlinked         byte = 0x01
 	OrphanKindTmpfileExclusive byte = 0x02
 	OrphanKindTmpfileLinkable  byte = 0x03
 )
 
-// DecodeOrphanKind decodes and validates the 1-byte value of an orphan marker.
 func DecodeOrphanKind(b []byte) (byte, error) {
 	if len(b) != 1 {
 		return 0, ErrInvalidValue
@@ -38,7 +35,6 @@ func DecodeOrphanKind(b []byte) (byte, error) {
 	}
 }
 
-// BranchStat 表示单盘实时逻辑用量、节点计数、写序列号、最高已激活写世代（WriterEpoch）与逻辑容量配额上限（MaxBytes）。
 type BranchStat struct {
 	LogicalBytes uint64
 	Inodes       uint64
@@ -47,7 +43,6 @@ type BranchStat struct {
 	MaxBytes     uint64
 }
 
-// EncodeBranchStat 编码 41 字节定长 BranchStat。
 func EncodeBranchStat(s BranchStat) []byte {
 	out := make([]byte, BranchStatSize)
 	putBranchStat(out, s)
@@ -63,7 +58,6 @@ func putBranchStat(dst []byte, s BranchStat) {
 	binary.BigEndian.PutUint64(dst[33:41], s.MaxBytes)
 }
 
-// DecodeBranchStat 解码 41 字节 BranchStat。
 func DecodeBranchStat(b []byte) (BranchStat, error) {
 	if len(b) != BranchStatSize || b[0] != codecVersion {
 		return BranchStat{}, ErrInvalidValue
@@ -77,13 +71,11 @@ func DecodeBranchStat(b []byte) (BranchStat, error) {
 	}, nil
 }
 
-// Entry 表示目录项绑定目标节点编号与文件模式。
 type Entry struct {
 	Ino  uint64
 	Mode uint32
 }
 
-// EncodeEntry 编码 13 字节定长 Entry。
 func EncodeEntry(e Entry) []byte {
 	out := make([]byte, EntryValueSize)
 	putEntry(out, e)
@@ -96,7 +88,6 @@ func putEntry(dst []byte, e Entry) {
 	binary.BigEndian.PutUint32(dst[9:13], e.Mode)
 }
 
-// DecodeEntry 解码 13 字节 Entry。
 func DecodeEntry(b []byte) (Entry, error) {
 	if len(b) != EntryValueSize || b[0] != codecVersion {
 		return Entry{}, ErrInvalidValue
@@ -107,7 +98,6 @@ func DecodeEntry(b []byte) (Entry, error) {
 	}, nil
 }
 
-// Inode 表示持久化在 Pebble 中的索引节点实体（93B 定长头 + 可变长 SymlinkTarget）。
 type Inode struct {
 	Ino           uint64
 	ParentIno     uint64
@@ -117,16 +107,15 @@ type Inode struct {
 	GID           uint32
 	Rdev          uint32
 	Size          uint64
-	Atime         int64 // UnixNano
-	Mtime         int64 // UnixNano
-	Ctime         int64 // UnixNano
+	Atime         int64
+	Mtime         int64
+	Ctime         int64
 	Flags         uint32
 	Generation    uint64
 	WriteSeq      uint64
 	SymlinkTarget []byte
 }
 
-// Attribute 表示对外返回的 POSIX 文件属性视图。
 type Attribute struct {
 	Ino        uint64
 	ParentIno  uint64
@@ -140,13 +129,12 @@ type Attribute struct {
 	Size       uint64
 	Blksize    uint32
 	Blocks     uint64
-	Atime      int64 // UnixNano
-	Mtime      int64 // UnixNano
-	Ctime      int64 // UnixNano
+	Atime      int64
+	Mtime      int64
+	Ctime      int64
 	Flags      uint32
 }
 
-// ToAttribute 将持久化 Inode 转换为 POSIX Attribute。
 func (i *Inode) ToAttribute() Attribute {
 	size := i.Size
 	if i.Mode&S_IFMT == S_IFDIR && size == 0 {
@@ -181,9 +169,6 @@ func (i *Inode) ToAttribute() Attribute {
 	}
 }
 
-// EncodeInode 编码 93 字节定长属性头与可变长 SymlinkTarget。
-//
-//nolint:gocritic // hugeParam: 保持与 Inode 编解码公开契约按值传参一致。
 func EncodeInode(i Inode) ([]byte, error) {
 	if uint64(len(i.SymlinkTarget)) > math.MaxUint32 {
 		return nil, ErrInvalidValue
@@ -213,7 +198,6 @@ func putInode(dst []byte, i *Inode) {
 	copy(dst[93:], i.SymlinkTarget)
 }
 
-// DecodeInode 解码节点属性，返回的 SymlinkTarget 与输入缓冲区完全解耦。
 func DecodeInode(b []byte) (Inode, error) {
 	if len(b) < InodeHeaderSize || b[0] != codecVersion {
 		return Inode{}, ErrInvalidValue
@@ -245,14 +229,12 @@ func DecodeInode(b []byte) (Inode, error) {
 	}, nil
 }
 
-// BlobRef 表示 DataKey 指向的 16 字节定长数据块定位指针。
 type BlobRef struct {
 	PackID uint64
 	Offset uint32
 	Length uint32
 }
 
-// EncodeBlobRef 编码 16 字节定长 BlobRef。
 func EncodeBlobRef(ref BlobRef) []byte {
 	out := make([]byte, BlobRefSize)
 	putBlobRef(out, ref)
@@ -265,7 +247,6 @@ func putBlobRef(dst []byte, ref BlobRef) {
 	binary.BigEndian.PutUint32(dst[12:16], ref.Length)
 }
 
-// DecodeBlobRef 解码并校验 16 字节 BlobRef。
 func DecodeBlobRef(b []byte) (BlobRef, error) {
 	if len(b) != BlobRefSize {
 		return BlobRef{}, ErrInvalidValue
@@ -281,13 +262,11 @@ func DecodeBlobRef(b []byte) (BlobRef, error) {
 	return ref, nil
 }
 
-// PackMeta 表示 "sys:pack:<pack_id>" 持久化的 17 字节封包存活字节与总字节统计。
 type PackMeta struct {
 	LiveBytes  uint64
 	TotalBytes uint64
 }
 
-// EncodePackMeta 编码 17 字节定长 PackMeta。
 func EncodePackMeta(m PackMeta) []byte {
 	out := make([]byte, PackMetaSize)
 	putPackMeta(out, m)
@@ -300,7 +279,6 @@ func putPackMeta(dst []byte, m PackMeta) {
 	binary.BigEndian.PutUint64(dst[9:17], m.TotalBytes)
 }
 
-// DecodePackMeta 解码并校验 17 字节 PackMeta。
 func DecodePackMeta(b []byte) (PackMeta, error) {
 	if len(b) != PackMetaSize || b[0] != codecVersion {
 		return PackMeta{}, ErrInvalidValue
@@ -315,7 +293,6 @@ func DecodePackMeta(b []byte) (PackMeta, error) {
 	return m, nil
 }
 
-// StatFSResult 表示文件系统容量与节点统计结果。
 type StatFSResult struct {
 	TotalBytes uint64
 	UsedBytes  uint64
@@ -330,7 +307,6 @@ type StatFSResult struct {
 	Namelen    uint32
 }
 
-// BatchSetStatDeferred 使用 SetDeferred 原地零拷贝写入 "sys:stat"。
 func BatchSetStatDeferred(b *pebble.Batch, s BranchStat) {
 	op := b.SetDeferred(StatKeyLen, BranchStatSize)
 	putStatKey(op.Key)
@@ -338,7 +314,6 @@ func BatchSetStatDeferred(b *pebble.Batch, s BranchStat) {
 	_ = op.Finish()
 }
 
-// BatchSetPackMetaDeferred 使用 SetDeferred 原地零拷贝写入 PackStatKey ("sys:pack:<pack_id>")。
 func BatchSetPackMetaDeferred(b *pebble.Batch, packID uint64, m PackMeta) {
 	op := b.SetDeferred(PackStatKeyLen, PackMetaSize)
 	putPackStatKey(op.Key, packID)
@@ -346,16 +321,12 @@ func BatchSetPackMetaDeferred(b *pebble.Batch, packID uint64, m PackMeta) {
 	_ = op.Finish()
 }
 
-// BatchDeletePackMetaDeferred 使用 DeleteDeferred 原地零拷贝删除 PackStatKey ("sys:pack:<pack_id>")。
 func BatchDeletePackMetaDeferred(b *pebble.Batch, packID uint64) {
 	op := b.DeleteDeferred(PackStatKeyLen)
 	putPackStatKey(op.Key, packID)
 	_ = op.Finish()
 }
 
-// BatchSetInodeDeferred 使用 SetDeferred 原地零拷贝写入 InodeKey。
-//
-//nolint:gocritic // hugeParam: 保持与 BatchSet*Deferred 零拷贝批次写入公开契约一致。
 func BatchSetInodeDeferred(b *pebble.Batch, i Inode) error {
 	if uint64(len(i.SymlinkTarget)) > math.MaxUint32 {
 		return ErrInvalidValue
@@ -367,7 +338,6 @@ func BatchSetInodeDeferred(b *pebble.Batch, i Inode) error {
 	return nil
 }
 
-// BatchSetEntryDeferred 使用 SetDeferred 原地零拷贝写入 EntryKey。
 func BatchSetEntryDeferred(b *pebble.Batch, parent uint64, name []byte, e Entry) {
 	op := b.SetDeferred(EntryPrefixLen+len(name), EntryValueSize)
 	putEntryKey(op.Key, parent, name)
@@ -375,7 +345,6 @@ func BatchSetEntryDeferred(b *pebble.Batch, parent uint64, name []byte, e Entry)
 	_ = op.Finish()
 }
 
-// BatchSetXattrDeferred 使用 SetDeferred 原地零拷贝写入 XattrKey。
 func BatchSetXattrDeferred(b *pebble.Batch, ino uint64, name, val []byte) {
 	op := b.SetDeferred(XattrPrefixLen+len(name), len(val))
 	putXattrKey(op.Key, ino, name)
@@ -383,7 +352,6 @@ func BatchSetXattrDeferred(b *pebble.Batch, ino uint64, name, val []byte) {
 	_ = op.Finish()
 }
 
-// BatchSetOrphanKindDeferred writes OrphanKey with the given 1-byte orphan kind in place.
 func BatchSetOrphanKindDeferred(b *pebble.Batch, ino uint64, kind byte) {
 	op := b.SetDeferred(OrphanKeyLen, 1)
 	putOrphanKey(op.Key, ino)
@@ -391,12 +359,10 @@ func BatchSetOrphanKindDeferred(b *pebble.Batch, ino uint64, kind byte) {
 	_ = op.Finish()
 }
 
-// BatchSetOrphanDeferred 使用 SetDeferred 原地零拷贝写入 OrphanKey。
 func BatchSetOrphanDeferred(b *pebble.Batch, ino uint64) {
 	BatchSetOrphanKindDeferred(b, ino, OrphanKindUnlinked)
 }
 
-// BatchSetDataDeferred 使用 SetDeferred 原地零拷贝写入 DataKey。
 func BatchSetDataDeferred(b *pebble.Batch, ino, blockIdx uint64, ref BlobRef) {
 	op := b.SetDeferred(DataKeyLen, BlobRefSize)
 	putDataKey(op.Key, ino, blockIdx)
@@ -404,42 +370,36 @@ func BatchSetDataDeferred(b *pebble.Batch, ino, blockIdx uint64, ref BlobRef) {
 	_ = op.Finish()
 }
 
-// BatchDeleteDeferred 使用 DeleteDeferred 原地零拷贝删除任意键（严禁使用 SingleDelete）。
 func BatchDeleteDeferred(b *pebble.Batch, key []byte) {
 	op := b.DeleteDeferred(len(key))
 	copy(op.Key, key)
 	_ = op.Finish()
 }
 
-// BatchDeleteInodeDeferred 使用 DeleteDeferred 原地零拷贝删除 InodeKey。
 func BatchDeleteInodeDeferred(b *pebble.Batch, ino uint64) {
 	op := b.DeleteDeferred(InodeKeyLen)
 	putInodeKey(op.Key, ino)
 	_ = op.Finish()
 }
 
-// BatchDeleteEntryDeferred 使用 DeleteDeferred 原地零拷贝删除 EntryKey。
 func BatchDeleteEntryDeferred(b *pebble.Batch, parent uint64, name []byte) {
 	op := b.DeleteDeferred(EntryPrefixLen + len(name))
 	putEntryKey(op.Key, parent, name)
 	_ = op.Finish()
 }
 
-// BatchDeleteXattrDeferred 使用 DeleteDeferred 原地零拷贝删除 XattrKey。
 func BatchDeleteXattrDeferred(b *pebble.Batch, ino uint64, name []byte) {
 	op := b.DeleteDeferred(XattrPrefixLen + len(name))
 	putXattrKey(op.Key, ino, name)
 	_ = op.Finish()
 }
 
-// BatchDeleteOrphanDeferred 使用 DeleteDeferred 原地零拷贝删除 OrphanKey。
 func BatchDeleteOrphanDeferred(b *pebble.Batch, ino uint64) {
 	op := b.DeleteDeferred(OrphanKeyLen)
 	putOrphanKey(op.Key, ino)
 	_ = op.Finish()
 }
 
-// BatchDeleteDataDeferred 使用 DeleteDeferred 原地零拷贝删除 DataKey。
 func BatchDeleteDataDeferred(b *pebble.Batch, ino, blockIdx uint64) {
 	op := b.DeleteDeferred(DataKeyLen)
 	putDataKey(op.Key, ino, blockIdx)

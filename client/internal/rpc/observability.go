@@ -20,19 +20,14 @@ import (
 )
 
 const (
-	// HeaderRequestID 为跨进程透传单调请求关联 ID 的 HTTP Header 名称。
 	HeaderRequestID = "X-Request-Id"
 
-	// DefaultSlowRPCThreshold 为单次客户端 RPC 慢调用告警阈值（默认 1s）。
 	DefaultSlowRPCThreshold = time.Second
 
-	// defaultLogRateLimitInterval 为异常告警结构化日志的默认限频窗口（1 次/秒）。
 	defaultLogRateLimitInterval = time.Second
 
-	// storageErrorDomain 为服务端业务 ErrorInfo 的统一领域标识。
 	storageErrorDomain = "bowl.storage"
 
-	// staleEpochReason 为写端世代号过期围栏拦截对应的 POSIX errno 原因码。
 	staleEpochReason = "EBUSY"
 )
 
@@ -43,7 +38,7 @@ var fallbackRequestIDSeq atomic.Uint64
 func init() {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err == nil {
-		// 清零最高位并保留低 8 位步进余量，既保证跨短命 CLI 进程高熵唯一性又规避有符号 64 位溢出。
+
 		seed := binary.LittleEndian.Uint64(b[:]) & 0x3fffffffffffff00
 		if seed == 0 {
 			seed = 1 << 20
@@ -54,8 +49,6 @@ func init() {
 	fallbackRequestIDSeq.Store(1 << 20)
 }
 
-// WithRequestID 将非零请求关联 ID 注入 context.Context（供上游如 fusefs.RawFS.RPCContext 传入 NextRequestID()）。
-// 若 reqID == 0，保持原上下文不变（出站拦截器将自动使用包内原子序列兜底生成）。
 func WithRequestID(ctx context.Context, reqID uint64) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -66,7 +59,6 @@ func WithRequestID(ctx context.Context, reqID uint64) context.Context {
 	return context.WithValue(ctx, requestIDContextKey{}, reqID)
 }
 
-// RequestIDFromContext 从 context.Context 提取已注入的非零请求关联 ID。
 func RequestIDFromContext(ctx context.Context) (uint64, bool) {
 	if ctx == nil {
 		return 0, false
@@ -100,15 +92,12 @@ func writeRequestIDHeader(header http.Header, reqID uint64) {
 	header.Set(HeaderRequestID, string(strconv.AppendUint(buf[:0], reqID, 10)))
 }
 
-// SubMillisecondDurationBuckets 定义客户端与服务端统一的 18 个亚毫秒至 10s 延迟直方图桶边界（25µs ~ 10s）。
 var SubMillisecondDurationBuckets = []float64{
 	0.000025, 0.00005, 0.0001, 0.00025, 0.0005,
 	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05,
 	0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 }
 
-// Metrics 封装客户端 RPC 传输层的自定义 Prometheus 指标收集器。
-// 实例级隔离（不触碰全局 DefaultRegisterer），且全部方法对 nil 接收者安全。
 type Metrics struct {
 	retries         *prometheus.CounterVec
 	retryExhausted  *prometheus.CounterVec
@@ -118,7 +107,6 @@ type Metrics struct {
 
 var _ prometheus.Collector = (*Metrics)(nil)
 
-// NewMetrics 创建全新的隔离客户端 RPC 指标收集器实例。
 func NewMetrics() *Metrics {
 	return &Metrics{
 		retries: prometheus.NewCounterVec(
@@ -152,7 +140,6 @@ func NewMetrics() *Metrics {
 	}
 }
 
-// Describe 实现 prometheus.Collector 接口；对 nil 接收者安全。
 func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	if m == nil {
 		return
@@ -171,7 +158,6 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	}
 }
 
-// Collect 实现 prometheus.Collector 接口；对 nil 接收者安全。
 func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	if m == nil {
 		return
@@ -218,7 +204,6 @@ func (m *Metrics) observeLogicalDuration(procedure, code string, d time.Duration
 	m.logicalDuration.WithLabelValues(procedure, code).Observe(d.Seconds())
 }
 
-// logRateLimiter 提供实例级无锁 CAS 原子限频器。
 type logRateLimiter struct {
 	intervalNs int64
 	lastUnixNs atomic.Int64
@@ -264,7 +249,6 @@ func extractRequestEpoch(req connect.AnyRequest) uint64 {
 
 var w3cTracePropagator = propagation.TraceContext{}
 
-// extractTraceID 依次从活跃上下文、出站请求头（otelconnect 注入）或服务端错误响应头中提取 W3C TraceID。
 func extractTraceID(ctx context.Context, req connect.AnyRequest, err error) string {
 	if ctx != nil {
 		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
@@ -288,10 +272,6 @@ func extractTraceID(ctx context.Context, req connect.AnyRequest, err error) stri
 	return ""
 }
 
-// newRequestObservabilityInterceptor 构建第 2 层洋葱拦截器（位于 Retry 内层、otelconnect 外层）：
-// 1. 确保 100% 出站请求通过栈缓冲写入 X-Request-Id；
-// 2. 识别服务端旧 Epoch 围栏错误（CodeFailedPrecondition + ErrorInfo{Reason: "EBUSY", Domain: "bowl.storage"}），递增 stale_epoch_total 并限频输出 writer_epoch_fenced；
-// 3. 单次尝试耗时超过 slowThreshold（默认 1s）时输出 slow_rpc 结构化告警。
 func newRequestObservabilityInterceptor(
 	logger *slog.Logger,
 	metrics *Metrics,

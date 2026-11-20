@@ -177,8 +177,6 @@ func (s *StoreActor) removeBlobRef(ref BlobRef) {
 	s.dirtyPackStats[ref.PackID] = struct{}{}
 }
 
-// recordDeadBlobWrite 记录 Stage 1 已预写至 .pack 但 Stage 2 Phase A 校验失败（或 CAS 未命中）的死块字节，
-// 确保目标 .pack 的 TotalBytes 准确反映物理已用偏移并在 LiveBytes == 0 时标记待回收。
 func (s *StoreActor) recordDeadBlobWrite(ref BlobRef) {
 	if ref.PackID == 0 || ref.Length == 0 {
 		return
@@ -199,7 +197,6 @@ func (s *StoreActor) activePackID() uint64 {
 	return 0
 }
 
-// stageAppend 在 Stage 1 向活跃 .pack 追加写入数据块，并将生成的 BlobRef 纳入命令级预写租约（自动 Pin 所属 PackID）。
 func (s *StoreActor) stageAppend(ctx context.Context, blobs *blobStore, ino uint64, data []byte, staged *[]BlobRef) (BlobRef, error) {
 	ref, err := blobs.append(ctx, ino, data)
 	if err != nil {
@@ -212,7 +209,6 @@ func (s *StoreActor) stageAppend(ctx context.Context, blobs *blobStore, ino uint
 	return ref, nil
 }
 
-// stageAppendBlocks 在 Stage 1 向活跃 .pack 批量追加连续的 256 KiB 满块，并将生成的 BlobRef 序列单次批量加锁纳入预写租约。
 func (s *StoreActor) stageAppendBlocks(ctx context.Context, blobs *blobStore, ino uint64, data []byte, staged *[]BlobRef) ([]BlobRef, error) {
 	refs, err := blobs.appendBlocks(ctx, ino, data)
 	if err != nil {
@@ -231,7 +227,6 @@ func (s *StoreActor) stageAppendBlocks(ctx context.Context, blobs *blobStore, in
 	return refs, nil
 }
 
-// stageExtendTail 在 Stage 1 尝试原地顺延扩展活跃 .pack 最末尾同块，成功后自动将更新后的 BlobRef 纳入预写租约。
 func (s *StoreActor) stageExtendTail(blobs *blobStore, ino uint64, oldRef BlobRef, patchOffset uint32, data []byte, newLen uint32, staged *[]BlobRef) (BlobRef, bool, error) {
 	extRef, ok, err := blobs.extendTail(ino, oldRef, patchOffset, data, newLen)
 	if err != nil || !ok {
@@ -382,8 +377,6 @@ func (s *StoreActor) syncFileInodes(inodes []uint64) error {
 	return err
 }
 
-// syncWALAndReclaimDeadPacks 在存在未落盘 NoSync WAL 写入或挂起死包时执行同步 WAL 屏障，
-// 并在 WAL 落盘确认后投递并等待死包物理删除完成。
 func (s *StoreActor) syncWALAndReclaimDeadPacks() error {
 	_, _, _, _, err := s.syncWALAndReclaimDeadPacksTimed()
 	return err

@@ -14,7 +14,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/store"
 )
 
-// ManagerParams 定义控制面管理器的 Fx 依赖注入参数。
 type ManagerParams struct {
 	fx.In
 	Lifecycle    fx.Lifecycle `optional:"true"`
@@ -26,7 +25,6 @@ type ManagerParams struct {
 	Collector    *storageEngineCollector `optional:"true"`
 }
 
-//nolint:gocritic // hugeParam: fx.In 依赖注入参数结构体必须按值传递。
 func newManagerFromParams(params ManagerParams) Manager {
 	cfg := params.MetaCfg
 	if cfg == nil && params.MetaVal != (config.MetaConfig{}) {
@@ -80,8 +78,6 @@ func provideEngineCollector(c *storageEngineCollector) prometheus.Collector {
 	return c
 }
 
-// Module 提供单盘控制面管理器依赖，并将共享 *store.Metrics 与 storageEngineCollector
-// 通过 obsfx.AsCollector 注册进实例级隔离 Prometheus Registry。
 var Module = fx.Module("control",
 	fx.Provide(
 		store.NewMetrics,

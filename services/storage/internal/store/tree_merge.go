@@ -44,7 +44,7 @@ type plannedInodeSpec struct {
 	isDir         bool
 	baseInode     Inode
 	srcInoForData uint64
-	payloadFrom   inodeOriginKind // originTarget or originSource (valid for regular files)
+	payloadFrom   inodeOriginKind
 	xattrMode     xattrMode
 	mergedXattrs  map[string][]byte
 	forceMergeSeq bool
@@ -122,8 +122,6 @@ type splitPackKey struct {
 	packID    uint64
 }
 
-// MergeTrees 执行三路/两路只读分析并将零拷贝合并结果落盘至 opts.StagingDir（或 DryRun 仅校验并估算结果）。
-// 原 BaseRoot、TargetRoot、SourceRoot 仅以 ReadOnly 模式打开且绝不被修改。
 func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 	if opts == nil || opts.BaseRoot == "" || opts.TargetRoot == "" || opts.SourceRoot == "" {
 		return nil, ErrInvalid
@@ -209,13 +207,11 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 
 	tc := newTreeCompareCtx(ctx, baseActor, targetActor, sourceActor, targetIsBase)
 
-	// 1. 扫描 RootIno 与收集增量树记录，同时侦测双向硬链接冲突
 	planner, err := buildMergePlan(ctx, tc, opts, normStrategies, seqMerge)
 	if err != nil {
 		return nil, err
 	}
 
-	// 若仍有未决冲突，返回有序样本报告，零副作用
 	if len(planner.conflicts) > 0 {
 		total := uint64(len(planner.conflicts))
 		samples := planner.conflicts
@@ -233,12 +229,10 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 		}
 	}
 
-	// 2. 分配目标 Ino 并重算目录树 Nlink / ParentIno / LogicalBytes / Inodes
 	if err := planner.finalizeInodesAndLedger(ctx, targetActor, opts); err != nil {
 		return nil, err
 	}
 
-	// 3. 配额检查（在创建 StagingDir 之前完成，失败零残留）
 	targetMaxBytes := tStat.MaxBytes
 	if opts.OverrideMaxBytes > 0 {
 		targetMaxBytes = opts.OverrideMaxBytes
@@ -260,7 +254,6 @@ func MergeTrees(ctx context.Context, opts *MergeOptions) (*MergeResult, error) {
 		return result, nil
 	}
 
-	// 4. 在独立 StagingDir 构建合并后分叉快照与硬链接复用 Pack
 	if err := planner.commitToStaging(ctx, targetClean, sourceClean, opts, targetActor, sourceActor, result, cache); err != nil {
 		if !errors.Is(err, ErrExist) && !errors.Is(err, os.ErrExist) {
 			_ = os.RemoveAll(stagingClean)
@@ -372,7 +365,6 @@ func buildMergePlan(
 		return nil, err
 	}
 
-	// 分析 RootIno 自身属性/Xattr
 	if err := mp.analyzeRootNode(opts.Strategy, normStrategies); err != nil {
 		return nil, err
 	}
@@ -415,7 +407,6 @@ func buildMergePlan(
 		return nil, walkErr
 	}
 
-	// 补全双向硬链接冲突标记
 	if !tc.targetIsBase && len(tAddedHLPaths) > 0 {
 		for _, rec := range records {
 			an := rec.an
@@ -441,7 +432,6 @@ func buildMergePlan(
 		}
 	}
 
-	// 逐条决议并构造合并树拓扑
 	skippedSubtreePrefixes := make([]string, 0)
 	for _, rec := range records {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -674,13 +664,13 @@ func (mp *mergePlanner) applyRecord(
 			if spec.isDir {
 				mp.dirSpecByPath[pathStr] = spec
 				if !an.descend {
-					// ConflictTreeDeleteModify 或 ConflictDirFile 下 Target 目录胜出：整棵导入 Target 子树
+
 					return mp.collectSingleSideSubtree(mp.tc.target, an.tNode.Ino, pathStr, originTarget)
 				}
 			}
 			return nil
 		}
-		// MergeStrategyTheirs
+
 		mp.dirChildrenChanged[rec.parentDir] = true
 		if an.sNode == nil {
 			if an.isDir && an.descend {
@@ -689,7 +679,7 @@ func (mp *mergePlanner) applyRecord(
 			return nil
 		}
 		if an.tNode != nil && (an.tNode.Mode&S_IFMT) == S_IFDIR && an.descend && (an.sNode.Mode&S_IFMT) == S_IFDIR {
-			// 双边目录因 Dir Attr/Xattr 冲突裁决为 Theirs，但子项继续正常三路遍历
+
 			meta := *an.tNode
 			copyMeta(&meta, an.sNode)
 			key := inodeOriginKey{kind: originFused, origIno: an.tNode.Ino, srcIno: an.sNode.Ino}
@@ -715,7 +705,7 @@ func (mp *mergePlanner) applyRecord(
 			mp.dirSpecByPath[pathStr] = spec
 			return nil
 		}
-		// 非目录或需要整棵导入 Source 子树的情况
+
 		spec := mp.getOrCreateOriginSpec(originSource, an.sNode, nil)
 		mp.recordPlannedChild(rec.parentDir, rec.name, pathStr, spec)
 		if spec.isDir {
@@ -880,7 +870,7 @@ func (mp *mergePlanner) collectSingleSideSubtree(actor *StoreActor, dirIno uint6
 }
 
 func (mp *mergePlanner) finalizeInodesAndLedger(ctx context.Context, _ *StoreActor, opts *MergeOptions) error {
-	// 收集所有被实际目录项引用的唯一节点与重算 Nlink
+
 	seenSpecs := make(map[*plannedInodeSpec]struct{})
 	var allSpecs []*plannedInodeSpec
 	addSpec := func(s *plannedInodeSpec) {
@@ -901,7 +891,6 @@ func (mp *mergePlanner) finalizeInodesAndLedger(ctx context.Context, _ *StoreAct
 		}
 	}
 
-	// 计算目录 Nlink = 2 + liveSubdirs 及目录父子关系
 	dirSubdirs := make(map[*plannedInodeSpec]uint32, len(mp.dirSpecByPath))
 	for parentPath, children := range mp.childrenByParent {
 		parentSpec := mp.dirSpecByPath[parentPath]
@@ -931,11 +920,6 @@ func (mp *mergePlanner) finalizeInodesAndLedger(ctx context.Context, _ *StoreAct
 		mp.rootSpec.forceMergeSeq = true
 	}
 
-	// 为存活节点分配 Target Ino：
-	// 1) RootIno 与 originTarget 优先保留原 Target Ino；
-	// 2) originFused 优先保留原 tgtOrigIno，若已被同一 Target 硬链接组中的其他存活分支声明（分裂），则分配新 Target Ino；
-	// 3) originSource 在未冲突时保留原 Ino，否则重分配；
-	// 4) DryRun 时不调用外部 InoAllocator（零副作用）。
 	claimedInos := make(map[uint64]struct{}, len(allSpecs))
 	maxIno := max(mp.maxExistingTgtIno, RootIno)
 	for _, spec := range allSpecs {
@@ -989,14 +973,13 @@ func (mp *mergePlanner) finalizeInodesAndLedger(ctx context.Context, _ *StoreAct
 		origIno := spec.key.origIno
 		_, alreadyClaimed := claimedInos[origIno]
 		_, wasLiveInTgt := mp.targetLiveInos[origIno]
-		// 若 origIno 在 Target 原先存在但不属于本次保留，仅当它未被 claimed 时？
-		// 按契约：!targetHasLiveIno(srcIno) 时保留 srcIno；若原 Target 已存在且与此次来源路径不同（异源冲突或分裂），则重新分配。
+
 		if !alreadyClaimed && !wasLiveInTgt {
 			spec.targetIno = origIno
 			claimedInos[origIno] = struct{}{}
 			continue
 		}
-		// 若 origIno 原本也是 Base 同源 Ino（即它没有被任何 originTarget/originFused 占用，且在 Target 中本属于同一路径但已被本次 Source 覆盖），保留之
+
 		if !alreadyClaimed {
 			spec.targetIno = origIno
 			claimedInos[origIno] = struct{}{}
@@ -1011,7 +994,6 @@ func (mp *mergePlanner) finalizeInodesAndLedger(ctx context.Context, _ *StoreAct
 		claimedInos[newIno] = struct{}{}
 	}
 
-	// 设置所有存活节点的 ParentIno（非目录统一置 0，非根目录置真实合并后父目录 Ino）与 WriteSeq
 	for dirPath, spec := range mp.dirSpecByPath {
 		if dirPath == "" {
 			spec.parentIno = RootIno
@@ -1067,7 +1049,6 @@ func (mp *mergePlanner) commitToStaging(
 		}
 	}()
 
-	// 加载 Target 和 Source 的 PackMeta，以及扫描 StagingDir 现有 pack 文件
 	tgtPackStats, maxPackID, err := loadPackStatsMap(targetActor.db)
 	if err != nil {
 		return err
@@ -1103,7 +1084,6 @@ func (mp *mergePlanner) commitToStaging(
 	batch := stagingDB.NewBatch()
 	defer func() { _ = batch.Close() }()
 
-	// 清理全部 Target 孤儿与死亡（被删除或替换）的 Target Inode 及其 DataKey/XattrKey/EntryKey
 	for _, orphIno := range mp.targetOrphans {
 		BatchDeleteOrphanDeferred(batch, orphIno)
 		if err := reclaimTargetInodeKV(stagingDB, batch, orphIno, packLiveBytes); err != nil {
@@ -1125,7 +1105,6 @@ func (mp *mergePlanner) commitToStaging(
 		}
 	}
 
-	// 对需要保留/重用的 Target 存活数据块：先登记其 (PackID, Offset)，并对 payload 被 Source 覆盖的节点回收旧 Target DataKey
 	usedPackOffsets := make(map[packOffsetKey]bool)
 	for _, spec := range mp.orderedSpecs {
 		if spec.isDir || (spec.baseInode.Mode&S_IFMT) != S_IFREG || spec.reallocated {
@@ -1136,21 +1115,20 @@ func (mp *mergePlanner) commitToStaging(
 				return err
 			}
 		} else if spec.key.kind == originFused && spec.payloadFrom == originSource {
-			// payload 切换为 Source：回收原 Target DataKey 并扣减 LiveBytes
+
 			if err := reclaimDataPrefix(stagingDB, batch, spec.targetIno, packLiveBytes); err != nil {
 				return err
 			}
 		}
 	}
 
-	// 导入数据块（Source 节点及硬链接分裂重分配 Target Ino 的节点）：处理 os.SameFile 复用、异源 PackID 碰撞重映射及分裂多重引用重映射
 	srcPacksDir := filepath.Join(sourceDir, "packs")
 	tgtPacksDir := filepath.Join(targetDir, "packs")
 	stagingPacksDir := filepath.Join(opts.StagingDir, "packs")
 	srcDefaultPackMap := make(map[uint64]uint64)
 	tgtDefaultPackMap := make(map[uint64]uint64)
 	splitPackMap := make(map[splitPackKey]uint64)
-	linksToCreate := make(map[uint64]string) // dstPackID -> srcPackPath
+	linksToCreate := make(map[uint64]string)
 
 	importSpecData := func(srcDB *pebble.DB, srcPacksDir string, srcStats map[uint64]PackMeta, defaultPackMap map[uint64]uint64, srcIno, targetIno uint64) error {
 		return forEachDataKey(srcDB, srcIno, func(blockIdx uint64, ref BlobRef) error {
@@ -1242,7 +1220,6 @@ func (mp *mergePlanner) commitToStaging(
 		}
 	}
 
-	// 硬链接导入新/重映射 Pack 文件并 fsync packs 目录
 	if len(linksToCreate) > 0 {
 		if mkErr := os.MkdirAll(stagingPacksDir, 0o755); mkErr != nil {
 			return mkErr
@@ -1267,7 +1244,6 @@ func (mp *mergePlanner) commitToStaging(
 		}
 	}
 
-	// 写入所有存活 Inode、目录项与 Xattr
 	for _, spec := range mp.orderedSpecs {
 		inode := spec.baseInode
 		inode.Ino = spec.targetIno
@@ -1316,7 +1292,7 @@ func (mp *mergePlanner) commitToStaging(
 		}
 
 		if spec.isDir {
-			// 重建该存活目录的直接子项表（先清理现有 EntryPrefix，再写入合并后子项）
+
 			if !spec.reallocated && (spec.key.kind == originTarget || spec.key.kind == originFused) {
 				if err := deleteKeyPrefix(stagingDB, batch, EntryPrefix(spec.targetIno)); err != nil {
 					return err
@@ -1338,7 +1314,6 @@ func (mp *mergePlanner) commitToStaging(
 		}
 	}
 
-	// 更新 sys:pack 账本并删除 0 活跃 Pack 文件
 	var deadPackIDs []uint64
 	for pid, live := range packLiveBytes {
 		if live == 0 {
@@ -1353,7 +1328,6 @@ func (mp *mergePlanner) commitToStaging(
 		})
 	}
 
-	// 持久化 sys:stat（WriterEpoch = ExpectedWriterEpoch + 1）
 	BatchSetStatDeferred(batch, BranchStat{
 		LogicalBytes: result.UsedBytes,
 		Inodes:       result.Inodes,

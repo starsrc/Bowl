@@ -10,9 +10,6 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// Symlink 实现创建符号链接操作。
-// 校验只读挂载、重写父 Inode，透传调用进程 UID/GID、目标路径与链接名称。
-// 注意 go-fuse 参数顺序：pointedTo 为符号链接指向的目标路径，linkName 为待创建的目录项名称。
 func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedTo, linkName string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpSymlink)
 	opCtx, endSpan := fs.startFuseOp(OpSymlink)
@@ -73,10 +70,6 @@ func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedT
 	return fuse.OK
 }
 
-// Readlink returns the target path of a symbolic link.
-// When attrTimeout > 0, writable mounts serve cached targets without TTL expiration
-// until invalidated, while read-only mounts expire cached targets lazily on the cache clock.
-// When attrTimeout <= 0, Readlink bypasses the cache and queries StorageService directly.
 func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target []byte, status fuse.Status) {
 	start := fs.metrics.beginOp(OpReadlink)
 	opCtx, endSpan := fs.startFuseOp(OpReadlink)
@@ -125,8 +118,6 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 	return target, fuse.OK
 }
 
-// Link 实现为非目录已有文件创建同盘硬链接操作。
-// 校验只读挂载，同时对源文件节点与目标父目录执行根 Inode 双向重写，回填递增 nlink 后的 Inode 属性。
 func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpLink)
 	opCtx, endSpan := fs.startFuseOp(OpLink)

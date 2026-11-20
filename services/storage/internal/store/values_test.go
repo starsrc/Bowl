@@ -9,7 +9,7 @@ import (
 )
 
 func TestGivenValidOrphanKindBytesWhenDecodedThenReturnsExpectedKind(t *testing.T) {
-	// Given: every valid 1-byte orphan marker kind defined by the storage format.
+
 	cases := []struct {
 		name     string
 		raw      []byte
@@ -34,10 +34,9 @@ func TestGivenValidOrphanKindBytesWhenDecodedThenReturnsExpectedKind(t *testing.
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// When: decoding the raw marker bytes.
+
 			got, err := store.DecodeOrphanKind(tc.raw)
 
-			// Then: decoding succeeds and returns the exact orphan kind byte.
 			require.NoErrorf(t, err, "case %s: decode orphan kind %x failed", tc.name, tc.raw)
 			require.Equalf(t, tc.wantKind, got, "case %s: orphan kind mismatch: want=0x%02x got=0x%02x", tc.name, tc.wantKind, got)
 		})
@@ -45,7 +44,7 @@ func TestGivenValidOrphanKindBytesWhenDecodedThenReturnsExpectedKind(t *testing.
 }
 
 func TestGivenInvalidOrphanKindBytesWhenDecodedThenReturnsErrInvalidValue(t *testing.T) {
-	// Given: malformed or unknown orphan marker payloads.
+
 	cases := []struct {
 		name string
 		raw  []byte
@@ -74,10 +73,9 @@ func TestGivenInvalidOrphanKindBytesWhenDecodedThenReturnsErrInvalidValue(t *tes
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// When: decoding the invalid marker bytes.
+
 			got, err := store.DecodeOrphanKind(tc.raw)
 
-			// Then: decoding fails with ErrInvalidValue and returns zero kind.
 			require.ErrorIsf(t, err, store.ErrInvalidValue, "case %s: raw=%x want ErrInvalidValue got=%v", tc.name, tc.raw, err)
 			require.Zerof(t, got, "case %s: invalid decode must return zero kind, got=0x%02x", tc.name, got)
 		})

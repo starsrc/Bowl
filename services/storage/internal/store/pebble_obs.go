@@ -22,16 +22,11 @@ const (
 	defaultPebbleDiskSlowThreshold = 500 * time.Millisecond
 	defaultPebbleSlowJobThreshold  = 500 * time.Millisecond
 
-	// PebbleEventsLogFileName 是每个磁盘数据目录下独立持久化的 Pebble 生命周期事件日志文件名。
 	PebbleEventsLogFileName = "pebble_events.log"
 )
 
 var _ pebble.Logger = (*slogPebbleLogger)(nil)
 
-// slogPebbleLogger 将 Pebble 内部日志桥接至结构化 slog.Logger：
-//   - Infof 降噪映射至 Debug，未开启 Debug 时跳过格式化（0 alloc）；
-//   - Warnf / Errorf 映射至 Warn / Error；
-//   - Fatalf 输出 Error 日志后执行 os.Exit(1) 保持 Pebble 数据损坏 fail-fast 契约。
 type slogPebbleLogger struct {
 	logger *slog.Logger
 	exitFn func(int)
@@ -86,8 +81,6 @@ func (l *slogPebbleLogger) Fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-// pebbleEventLogWriter 将 Pebble Flush / Compaction / WAL / Stall 等关键事件独立追加写入磁盘目录的 pebble_events.log，
-// 确保生产环境 LOG_LEVEL=warn 下仍可归档完整的 Pebble 引擎内部行为。
 type pebbleEventLogWriter struct {
 	mu     sync.Mutex
 	diskID string
@@ -179,8 +172,6 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// configurePebbleObservability 为 Pebble 实例挂载结构化日志器、事件监听器（同步落盘 pebble_events.log）与 500ms 慢盘健康检测包装。
-// 调用方必须在 StoreActor 关闭（或 Open 中途出错回滚）时显式关闭返回的 io.Closer 以停止后台健康检测协程并释放事件日志句柄。
 func (s *StoreActor) configurePebbleObservability(pebbleOpts *pebble.Options, baseLogger *slog.Logger, diskSlowThreshold time.Duration) io.Closer {
 	pLogger := newSlogPebbleLogger(baseLogger, s.diskID)
 	pebbleOpts.Logger = pLogger
@@ -202,7 +193,7 @@ func (s *StoreActor) configurePebbleObservability(pebbleOpts *pebble.Options, ba
 	}
 
 	onDiskSlow := func(info vfs.DiskSlowInfo) {
-		// DiskSlow 在监控协程中同步回调，使用 TryLock 非阻塞写入避免等待任何潜在 I/O 锁。
+
 		s.metrics.incPebbleDiskSlow()
 		fileBase := filepath.Base(info.Path)
 		pLogger.logger.Warn("pebble disk slow",

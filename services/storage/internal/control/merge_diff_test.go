@@ -16,7 +16,7 @@ import (
 )
 
 func TestFindLCA_LinearMultiMergeAndCrissCrossDAG(t *testing.T) {
-	// Given: 构造包含线性提交、单向合并以及经典 Criss-Cross 交叉合并的有向无环图
+
 	lineageID := uuid.Must(uuid.NewV7())
 	c0 := uuid.Must(uuid.NewV7())
 	c1 := uuid.Must(uuid.NewV7())
@@ -25,11 +25,6 @@ func TestFindLCA_LinearMultiMergeAndCrissCrossDAG(t *testing.T) {
 	c4 := uuid.Must(uuid.NewV7())
 	c5 := uuid.Must(uuid.NewV7())
 
-	// DAG:
-	//   c0 -> c1 -> c3 (merge parent: c2)
-	//   c0 -> c2 -> c4 (merge parent: c1)
-	//   c3 -> c5
-	//   c1 与 c2 同为 (c3, c4) 的极大公共祖先 (Criss-Cross)
 	commits := []db.CommitRecord{
 		{LineageID: lineageID, CommitID: c0},
 		{LineageID: lineageID, CommitID: c1, ParentCommitID: c0},
@@ -39,23 +34,20 @@ func TestFindLCA_LinearMultiMergeAndCrissCrossDAG(t *testing.T) {
 		{LineageID: lineageID, CommitID: c5, ParentCommitID: c3},
 	}
 
-	// When / Then 1: 同一提交 LCA 为其自身
 	gotSame, err := findLCA(commits, c1, c1)
 	require.NoError(t, err)
 	require.Equal(t, c1, gotSame)
 
-	// When / Then 2: 单向合并后继续前进 (c5 与 c2 的公共祖先为 {c0, c2}，唯一 MCA 为 c2)
 	gotMerged, err := findLCA(commits, c5, c2)
 	require.NoError(t, err)
 	require.Equal(t, c2, gotMerged)
 
-	// When / Then 3: Criss-Cross (c3 与 c4 的公共祖先为 {c0, c1, c2}，MCA 为 {c1, c2}) 应拒绝并返回 ErrAmbiguousLCA
 	_, err = findLCA(commits, c3, c4)
 	require.ErrorIs(t, err, ErrAmbiguousLCA)
 }
 
 func TestDiffDisk_SelfBaseAndTargetDisk_UsesCheckpointForOnlineRWActors(t *testing.T) {
-	// Given: 在线挂载的源盘与派生子盘，各自写入未关闭刷盘的新修改
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	mgr := New(db.NewMemStore(), WithStorageRoot(rootDir))
@@ -71,19 +63,16 @@ func TestDiffDisk_SelfBaseAndTargetDisk_UsesCheckpointForOnlineRWActors(t *testi
 	child, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: src.DiskID, Name: "feat"})
 	require.NoError(t, err)
 
-	// 在保持两个磁盘 Actor 均处于在线 RW 打开状态下执行写入
 	childActor, err := mgr.Actor(ctx, child.DiskID)
 	require.NoError(t, err)
 	writeRegularFile(t, ctx, childActor, 0, "feat.txt", []byte("feature-added\n"))
 	overwriteRegularFile(t, ctx, childActor, 0, "shared.txt", []byte("child-shared\n"))
 	overwriteRegularFile(t, ctx, srcActor, 0, "shared.txt", []byte("main-shared\n"))
 
-	// When 1: 省略 TargetDiskID，将 child 与其自身 BaseCommitID 对比（两路 diff）
 	twoWay, err := mgr.DiffDisk(ctx, &DiffDiskParams{
 		SourceDiskID: child.DiskID,
 	})
 
-	// Then 1: 返回新增 feat.txt 与修改 shared.txt，且未泄露临时快照目录
 	require.NoError(t, err)
 	require.NotEmpty(t, twoWay.LCACommitID)
 	require.Equal(t, uint64(1), twoWay.Summary.Added)
@@ -91,14 +80,12 @@ func TestDiffDisk_SelfBaseAndTargetDisk_UsesCheckpointForOnlineRWActors(t *testi
 	require.Equal(t, uint64(0), twoWay.Summary.Conflicts)
 	require.Len(t, twoWay.Entries, 2)
 
-	// When 2: 指定 TargetDiskID=main，执行三路 diff 与 ConflictsOnly 过滤
 	threeWay, err := mgr.DiffDisk(ctx, &DiffDiskParams{
 		SourceDiskID:  child.DiskID,
 		TargetDiskID:  src.DiskID,
 		ConflictsOnly: true,
 	})
 
-	// Then 2: 精准检出 shared.txt 的 CONTENT 冲突
 	require.NoError(t, err)
 	require.Equal(t, twoWay.LCACommitID, threeWay.LCACommitID)
 	require.Equal(t, uint64(1), threeWay.Summary.Conflicts)
@@ -106,7 +93,6 @@ func TestDiffDisk_SelfBaseAndTargetDisk_UsesCheckpointForOnlineRWActors(t *testi
 	require.Equal(t, "shared.txt", string(threeWay.Entries[0].Path))
 	require.Equal(t, store.ConflictContent, threeWay.Entries[0].Conflict)
 
-	// When 3: 跨血缘另一独立盘 Diff 应被拒绝
 	unrelated, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "other", MaxBytes: 16 << 20})
 	require.NoError(t, err)
 	_, err = mgr.DiffDisk(ctx, &DiffDiskParams{
@@ -115,7 +101,6 @@ func TestDiffDisk_SelfBaseAndTargetDisk_UsesCheckpointForOnlineRWActors(t *testi
 	})
 	require.ErrorIs(t, err, ErrCrossLineage)
 
-	// Then 3: .tmp 临时快照目录已被完全清理
 	tmpEntries, readErr := os.ReadDir(filepath.Join(rootDir, ".tmp"))
 	if readErr == nil {
 		require.Empty(t, tmpEntries, "DiffDisk 完成后不应残留临时快照目录")
@@ -123,7 +108,7 @@ func TestDiffDisk_SelfBaseAndTargetDisk_UsesCheckpointForOnlineRWActors(t *testi
 }
 
 func TestReadCommitNode_EnforcesLineageMembershipAndReadsImmutableSlice(t *testing.T) {
-	// Given: 包含普通文件与符号链接的基线提交，以及同血缘与跨血缘磁盘
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -149,10 +134,8 @@ func TestReadCommitNode_EnforcesLineageMembershipAndReadsImmutableSlice(t *testi
 	require.NoError(t, err)
 	commitID := diffRes.LCACommitID
 
-	// 修改主盘覆盖文件后，不可变切面内容必须保持原样
 	overwriteRegularFile(t, ctx, mainActor, 0, "doc.txt", []byte("mutated-after-fork"))
 
-	// When 1: 分片读取普通文件
 	slice1, err := mgr.ReadCommitNode(ctx, &ReadCommitNodeParams{
 		DiskID:   forkDisk.DiskID,
 		CommitID: commitID,
@@ -176,7 +159,6 @@ func TestReadCommitNode_EnforcesLineageMembershipAndReadsImmutableSlice(t *testi
 	require.Equal(t, []byte("-immutable-commit"), slice2.Data)
 	require.True(t, slice2.EOF)
 
-	// When 2: 读取符号链接
 	symRes, err := mgr.ReadCommitNode(ctx, &ReadCommitNodeParams{
 		DiskID:   mainDisk.DiskID,
 		CommitID: commitID,
@@ -187,7 +169,6 @@ func TestReadCommitNode_EnforcesLineageMembershipAndReadsImmutableSlice(t *testi
 	require.NoError(t, err)
 	require.Equal(t, []byte("/doc.txt"), symRes.SymlinkTarget)
 
-	// When 3: 使用跨血缘 disk_id 读取该 commit 应拒绝并返回 ErrCrossLineage
 	_, err = mgr.ReadCommitNode(ctx, &ReadCommitNodeParams{
 		DiskID:   otherDisk.DiskID,
 		CommitID: commitID,
@@ -199,7 +180,7 @@ func TestReadCommitNode_EnforcesLineageMembershipAndReadsImmutableSlice(t *testi
 }
 
 func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *testing.T) {
-	// Given: 主盘与分支盘产生内容冲突以及源盘独立新增文件
+
 	ctx := context.Background()
 	memDB := db.NewMemStore()
 	mgr := New(memDB, WithStorageRoot(t.TempDir()))
@@ -214,7 +195,6 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	source, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: target.DiskID, Name: "source"})
 	require.NoError(t, err)
 
-	// 挂载 target 获取 epoch0
 	mnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: target.DiskID})
 	require.NoError(t, err)
 	epoch0 := mnt.Epoch
@@ -224,10 +204,8 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	overwriteRegularFile(t, ctx, sActor, 0, "cfg.txt", []byte("from-source"))
 	writeRegularFile(t, ctx, sActor, 0, "new.txt", []byte("new-from-source"))
 
-	// target 在 epoch0 下也修改 cfg.txt，制造冲突
 	overwriteRegularFile(t, ctx, tActor, epoch0, "cfg.txt", []byte("from-target"))
 
-	// 未传入 Force 且未 UnmountDisk 时，正式合并必须被在线租约门禁拦截为 ErrDiskMounted
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
 		TargetDiskID: target.DiskID,
@@ -235,7 +213,6 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	})
 	require.ErrorIs(t, err, ErrDiskMounted)
 
-	// When 1: Strategy=Fail + Force=true 合并应返回 *MergeConflictError 且不推进 epoch 或修改 target
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
 		TargetDiskID: target.DiskID,
@@ -247,7 +224,6 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	require.Equal(t, uint64(1), conflictErr.Report.TotalConflicts)
 	require.Equal(t, []byte("from-target"), readRegularFile(t, ctx, tActor, "cfg.txt", 1024))
 
-	// When 2: DryRun=true + Strategy=Ours 应成功预演且不改动磁盘与 DB 提交历史
 	tRow, err := memDB.GetDisk(ctx, uuid.MustParse(target.DiskID))
 	require.NoError(t, err)
 	lineageID := tRow.LineageID
@@ -271,7 +247,6 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	require.NoError(t, err)
 	require.Len(t, commitsAfterDry, len(commitsBefore))
 
-	// When 3: 正式合并（Force=true 抢占在线租约），cfg.txt 用 theirs，并扩容至 64 MiB
 	res, err := mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID:   source.DiskID,
 		TargetDiskID:   target.DiskID,
@@ -285,7 +260,6 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	require.NotNil(t, res.Disk)
 	require.Equal(t, newMaxBytes, res.Disk.MaxBytes)
 
-	// 验证新 targetActor 已接管数据且旧 epoch0 被栅栏拒绝
 	newTActor, err := mgr.Actor(ctx, target.DiskID)
 	require.NoError(t, err)
 	require.Equal(t, epoch0+1, newTActor.WriterEpoch())
@@ -300,7 +274,6 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 	})
 	require.ErrorIs(t, staleErr, store.ErrStaleEpoch)
 
-	// When 4: 创建一个未发生任何修改的 cleanBranch，合并进 target 应触发 SkipSourceCommit（仅新增 1 个合并提交而非 2 个）
 	cleanBranch, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: target.DiskID, Name: "clean"})
 	require.NoError(t, err)
 	commitsPreClean, err := memDB.ListLineageCommits(ctx, lineageID)
@@ -320,7 +293,7 @@ func TestMergeDisk_DryRunConflictResolutionEpochFenceAndSkipSourceCommit(t *test
 }
 
 func TestMergeDisk_Phase2CASConcurrentWrite_AbortsAndCleansStaging(t *testing.T) {
-	// Given: Phase 1 结束后、Phase 2 CAS 前在目标盘产生一次并发写入
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	mgr, ok := New(db.NewMemStore(), WithStorageRoot(rootDir)).(*manager)
@@ -340,18 +313,16 @@ func TestMergeDisk_Phase2CASConcurrentWrite_AbortsAndCleansStaging(t *testing.T)
 	writeRegularFile(t, ctx, sActor, 0, "from-source.txt", []byte("source"))
 
 	mgr.beforePhase2CutoverHook = func() {
-		// 模拟客户端在 Phase 1 期间向仍在在线的目标盘写入并发变更
+
 		writeRegularFile(t, ctx, tActor, 0, "concurrent.txt", []byte("live-write"))
 	}
 
-	// When: 执行 MergeDisk
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
 		TargetDiskID: target.DiskID,
 		Strategy:     store.MergeStrategyFail,
 	})
 
-	// Then: CAS 检测到 nextWriteSeq1 != nextWriteSeq0，返回 ErrConcurrentMerge 并清理 Staging 与临时目录
 	require.ErrorIs(t, err, ErrConcurrentMerge)
 
 	entries, readErr := os.ReadDir(filepath.Join(rootDir, "disks"))
@@ -361,7 +332,6 @@ func TestMergeDisk_Phase2CASConcurrentWrite_AbortsAndCleansStaging(t *testing.T)
 		require.NotContains(t, e.Name(), ".old.", "CAS 中止后不应残留 .old 目录: %s", e.Name())
 	}
 
-	// 验证并发写入在重新加载 targetActor 后完好保留且未被源盘覆盖
 	reloaded, err := mgr.Actor(ctx, target.DiskID)
 	require.NoError(t, err)
 	require.Equal(t, []byte("live-write"), readRegularFile(t, ctx, reloaded, "concurrent.txt", 1024))
@@ -371,7 +341,7 @@ func TestOpenDiskActor_ReconcilePendingMerge_RollForwardAndRollback(t *testing.T
 	ctx := context.Background()
 
 	t.Run("PG已提交C_merge时崩溃前滚", func(t *testing.T) {
-		// Given: 模拟 PG 已推进 base_commit_id=C_merge，但目录仍处于 target + target.merge.<C_merge> 状态
+
 		rootDir := t.TempDir()
 		memDB := db.NewMemStore()
 		mgr1, ok := New(memDB, WithStorageRoot(rootDir)).(*manager)
@@ -389,7 +359,6 @@ func TestOpenDiskActor_ReconcilePendingMerge_RollForwardAndRollback(t *testing.T
 		require.NoError(t, err)
 		writeRegularFile(t, ctx, sActor, 0, "merged.txt", []byte("new-merged-data"))
 
-		// 准备真实 merge staging 并直接提交 DB 事务，模拟 PG 提交后、目录切换前崩溃
 		targetID := uuid.MustParse(target.DiskID)
 		sourceID := uuid.MustParse(source.DiskID)
 		tRow, err := memDB.GetDisk(ctx, targetID)
@@ -433,13 +402,11 @@ func TestOpenDiskActor_ReconcilePendingMerge_RollForwardAndRollback(t *testing.T
 		_ = os.RemoveAll(snapSrc)
 		_ = os.RemoveAll(snapTgt)
 
-		// When: 新控制器实例重启打开目标盘
 		mgr2 := New(memDB, WithStorageRoot(rootDir))
 		t.Cleanup(func() { _ = mgr2.Close() })
 
 		reopened, err := mgr2.Actor(ctx, target.DiskID)
 
-		// Then: 自动完成前滚，清理 .merge 目录并加载 merged.txt
 		require.NoError(t, err)
 		require.Equal(t, []byte("new-merged-data"), readRegularFile(t, ctx, reopened, "merged.txt", 1024))
 		_, statErr := os.Stat(stagingDir)
@@ -447,7 +414,7 @@ func TestOpenDiskActor_ReconcilePendingMerge_RollForwardAndRollback(t *testing.T
 	})
 
 	t.Run("PG未提交C_merge时崩溃回滚清理", func(t *testing.T) {
-		// Given: 残留未提交的 .merge.<orphanID> 与 .old.<orphanID>
+
 		rootDir := t.TempDir()
 		memDB := db.NewMemStore()
 		mgr1, ok := New(memDB, WithStorageRoot(rootDir)).(*manager)
@@ -466,13 +433,11 @@ func TestOpenDiskActor_ReconcilePendingMerge_RollForwardAndRollback(t *testing.T
 		require.NoError(t, os.MkdirAll(staleStaging, 0o755))
 		require.NoError(t, os.MkdirAll(staleOld, 0o755))
 
-		// When: 重启打开目标盘
 		mgr2 := New(memDB, WithStorageRoot(rootDir))
 		t.Cleanup(func() { _ = mgr2.Close() })
 
 		reopened, err := mgr2.Actor(ctx, target.DiskID)
 
-		// Then: 自动回滚清理残留临时目录并保持原盘数据完好
 		require.NoError(t, err)
 		require.Equal(t, []byte("keep-original"), readRegularFile(t, ctx, reopened, "keep.txt", 1024))
 		_, errStaging := os.Stat(staleStaging)
@@ -483,7 +448,7 @@ func TestOpenDiskActor_ReconcilePendingMerge_RollForwardAndRollback(t *testing.T
 }
 
 func TestReadCommitNode_ConcurrentWithDeleteDisk_NoRace(t *testing.T) {
-	// Given: 存在共享切面，并发执行 ReadCommitNode 与 DeleteDisk（验证 lineageCommitMu 读写锁保护）
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -523,7 +488,7 @@ func TestReadCommitNode_ConcurrentWithDeleteDisk_NoRace(t *testing.T) {
 }
 
 func TestMergeDisk_AllocatesLineageSegmentsOnFormalMergeAndSkipsOnDryRun(t *testing.T) {
-	// Given: Base 存在硬链接组 (a.txt, b.txt -> inoA)，Target 与 Source 同时修改后按不同策略拆解硬链接组触发重分配 Inode
+
 	ctx := context.Background()
 	memDB := db.NewMemStore()
 	mgr := New(memDB, WithStorageRoot(t.TempDir()))
@@ -558,7 +523,6 @@ func TestMergeDisk_AllocatesLineageSegmentsOnFormalMergeAndSkipsOnDryRun(t *test
 		"/b.txt": store.MergeStrategyOurs,
 	}
 
-	// When 1: DryRun 预演合并不得调用 DB ReserveSegment
 	snapBeforeDry := memDB.Inspect()
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID:   sourceDisk.DiskID,
@@ -572,7 +536,6 @@ func TestMergeDisk_AllocatesLineageSegmentsOnFormalMergeAndSkipsOnDryRun(t *test
 	require.Equal(t, snapBeforeDry.InodeReserveCalls, snapAfterDry.InodeReserveCalls, "DryRun 不得推进 Inode 预留调用次数")
 	require.Equal(t, snapBeforeDry.Lineages[lineageID].NextIno, snapAfterDry.Lineages[lineageID].NextIno, "DryRun 不得推进 DB NextIno 水位")
 
-	// When 2: 正式合并触发硬链接分裂重分配 Inode，必须向 DB 申请新号段并推进 NextIno 水位
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID:   sourceDisk.DiskID,
 		TargetDiskID:   mainDisk.DiskID,
@@ -586,7 +549,7 @@ func TestMergeDisk_AllocatesLineageSegmentsOnFormalMergeAndSkipsOnDryRun(t *test
 }
 
 func TestMergeDisk_SanitizedOrphanBaseCommit_WithSingleWriteStillCreatesSourceCommit(t *testing.T) {
-	// Given: 源盘携带孤儿节点被 Fork（SanitizeCheckpoint 使 commitDir.NextWriteSeq 比源盘多 1），随后源盘恰好写入 1 次
+
 	ctx := context.Background()
 	memDB := db.NewMemStore()
 	mgr := New(memDB, WithStorageRoot(t.TempDir()))
@@ -603,7 +566,6 @@ func TestMergeDisk_SanitizedOrphanBaseCommit_WithSingleWriteStillCreatesSourceCo
 	tgtDisk, err := mgr.ForkDisk(ctx, ForkDiskParams{SourceDiskID: srcDisk.DiskID, Name: "tgt"})
 	require.NoError(t, err)
 
-	// 仅执行单次 Write（使 srcActor NextWriteSeq 与经 CleanOrphans +1 后的 BaseCommitID 恰好相等）
 	_, _, err = srcActor.Write(ctx, dataIno, 0, []byte("v1"), 0)
 	require.NoError(t, err)
 
@@ -613,7 +575,6 @@ func TestMergeDisk_SanitizedOrphanBaseCommit_WithSingleWriteStillCreatesSourceCo
 	commitsBefore, err := memDB.ListLineageCommits(ctx, srcRecBefore.LineageID)
 	require.NoError(t, err)
 
-	// When: 首次 MergeDisk(src -> tgt)
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: srcDisk.DiskID,
 		TargetDiskID: tgtDisk.DiskID,
@@ -621,7 +582,6 @@ func TestMergeDisk_SanitizedOrphanBaseCommit_WithSingleWriteStillCreatesSourceCo
 	})
 	require.NoError(t, err)
 
-	// Then: 不得误判 skipSourceCommit，必须生成 C_src 与 C_merge 且推进 src.BaseCommitID
 	srcRecAfter, err := memDB.GetDisk(ctx, srcID)
 	require.NoError(t, err)
 	require.NotEqual(t, srcRecBefore.BaseCommitID, srcRecAfter.BaseCommitID, "源盘发生真实写入后必须创建 C_src 并推进 BaseCommitID")
@@ -629,7 +589,6 @@ func TestMergeDisk_SanitizedOrphanBaseCommit_WithSingleWriteStillCreatesSourceCo
 	require.NoError(t, err)
 	require.Len(t, commitsAfter, len(commitsBefore)+2, "应同时新增 C_src 与 C_merge")
 
-	// 连续第二次修改后再次合并，不应出现虚假冲突
 	_, _, err = srcActor.Write(ctx, dataIno, 0, []byte("v2"), 0)
 	require.NoError(t, err)
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
@@ -705,10 +664,8 @@ func TestCrashRecovery_DeleteSourceBeforeReopenTargetAndPreCommitSrcCleanup(t *t
 		_ = os.RemoveAll(snapSrc)
 		_ = os.RemoveAll(snapTgt)
 
-		// 模拟已执行 os.Rename(tgtDir, oldDir)，正准备 Rename(stagingDir, tgtDir) 时进程崩溃
 		require.NoError(t, os.Rename(mgr1.diskDir(target.DiskID), oldDir))
 
-		// When: 重启后用户先删掉 source 盘，再打开 target 盘
 		mgr2 := New(memDB, WithStorageRoot(rootDir))
 		t.Cleanup(func() { _ = mgr2.Close() })
 		require.NoError(t, mgr2.DeleteDisk(ctx, source.DiskID))
@@ -716,7 +673,6 @@ func TestCrashRecovery_DeleteSourceBeforeReopenTargetAndPreCommitSrcCleanup(t *t
 		reopened, err := mgr2.Actor(ctx, target.DiskID)
 		require.NoError(t, err)
 
-		// Then: 已提交的 merged.txt 必须完好存在，不能误回滚为 old.txt
 		require.Equal(t, []byte("must-survive"), readRegularFile(t, ctx, reopened, "merged.txt", 1024))
 		_, errStg := os.Stat(stagingDir)
 		require.ErrorIs(t, errStg, os.ErrNotExist)
@@ -749,13 +705,11 @@ func TestCrashRecovery_DeleteSourceBeforeReopenTargetAndPreCommitSrcCleanup(t *t
 		require.NoError(t, os.MkdirAll(srcCommitDir, 0o755))
 		require.NoError(t, os.WriteFile(markerPath, nil, 0o644))
 
-		// When: 重启打开目标盘触发回滚清理
 		mgr2 := New(memDB, WithStorageRoot(rootDir))
 		t.Cleanup(func() { _ = mgr2.Close() })
 		reopened, err := mgr2.Actor(ctx, target.DiskID)
 		require.NoError(t, err)
 
-		// Then: 原盘数据完好且未提交 staging/commits/marker 全数清理
 		require.Equal(t, []byte("keep-data"), readRegularFile(t, ctx, reopened, "keep.txt", 1024))
 		for _, leftover := range []string{stagingDir, mergeCommitDir, srcCommitDir, markerPath} {
 			_, statErr := os.Stat(leftover)

@@ -33,7 +33,6 @@ type lockWaiter struct {
 	canceled bool
 }
 
-// LockTable 在本地维护每个 Inode 的文件锁。
 type LockTable struct {
 	mu      sync.Mutex
 	nodes   map[uint64]*lockNode
@@ -42,7 +41,6 @@ type LockTable struct {
 	metrics atomic.Pointer[Metrics]
 }
 
-// NewLockTable 创建本地文件锁表。
 func NewLockTable() *LockTable {
 	return &LockTable{nodes: make(map[uint64]*lockNode), handles: make(map[uint64]uint32)}
 }
@@ -61,26 +59,22 @@ func (t *LockTable) activeLocks() int {
 	return total
 }
 
-// RegisterHandle 记录已知的打开模式。
 func (t *LockTable) RegisterHandle(fh uint64, flags uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.handles[fh] = flags
 }
 
-// ForgetHandle 清除句柄的打开模式。
 func (t *LockTable) ForgetHandle(fh uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.handles, fh)
 }
 
-// ReleasePOSIXByOwner 释放指定 Inode 和 LockOwner 的所有 POSIX 锁。
 func (t *LockTable) ReleasePOSIXByOwner(ino, owner uint64) {
 	t.release(ino, false, func(holder lockHolder) bool { return holder == (lockHolder{id: owner}) })
 }
 
-// ReleaseFlockByFH 释放指定 FileHandle 及其备用 LockOwner 对应的 flock 锁。
 func (t *LockTable) ReleaseFlockByFH(ino, fh, owner uint64) {
 	t.release(ino, true, func(holder lockHolder) bool {
 		return (fh != 0 && holder == (lockHolder{id: fh, fh: true})) || holder == (lockHolder{id: owner})
@@ -124,7 +118,6 @@ func (t *LockTable) prune(ino uint64, node *lockNode) {
 	}
 }
 
-// Close 中断所有等待并清除文件锁。
 func (t *LockTable) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -167,7 +160,6 @@ func findConflict(locks []localFileLock, holder lockHolder, requested fuse.FileL
 	return nil
 }
 
-// GetLk 查询不同持有者的冲突锁。
 func (t *LockTable) GetLk(in *fuse.LkIn) fuse.FileLock {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -180,12 +172,10 @@ func (t *LockTable) GetLk(in *fuse.LkIn) fuse.FileLock {
 	return fuse.FileLock{Start: in.Lk.Start, End: in.Lk.End, Typ: uint32(syscall.F_UNLCK)}
 }
 
-// SetLk 非阻塞设置文件锁。
 func (t *LockTable) SetLk(in *fuse.LkIn) fuse.Status {
 	return t.set(context.Background(), nil, in, false)
 }
 
-// SetLkw 等待文件锁，并在上下文或内核中断时取消。
 func (t *LockTable) SetLkw(ctx context.Context, cancel <-chan struct{}, in *fuse.LkIn) fuse.Status {
 	return t.set(ctx, cancel, in, true)
 }

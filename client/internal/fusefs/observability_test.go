@@ -144,7 +144,7 @@ func mustAllSpansShareSameTraceID(t *testing.T, spans []trace.SpanContext, label
 
 func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图及空安全性(t *testing.T) {
 	t.Run("空接收者Collector安全性与Prometheus全量采集及文本和JSON序列化", func(t *testing.T) {
-		// Given: nil Metrics 的 Collector 不崩溃，真实 RawFS 采集覆盖 Prometheus 与 Snapshot 全格式输出
+
 		var nilMetrics *fusefs.Metrics
 		emptyReg := prometheus.NewRegistry()
 		require.NoError(t, emptyReg.Register(nilMetrics))
@@ -158,7 +158,6 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 		fs.BindMountpoint("")
 		fs.BindMountpoint("/mnt/nonexistent-test-fusefs")
 
-		// When: 触发覆盖 Writev/Access/Lseek/CopyFileRange/Statx 等 41 个入口中的多种操作
 		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "obs.bin", syscall.O_RDWR, 0o644)
 		_, writevSt := fs.Writev(nil, &fuse.WriteIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh, Size: 5}, [][]byte{[]byte("ab"), []byte("cde")})
 		accSt := fs.Access(nil, &fuse.AccessIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Mask: fuse.R_OK})
@@ -169,7 +168,6 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 		statxSt := fs.Statx(nil, &fuse.StatxIn{InHeader: fuse.InHeader{NodeId: created.NodeId}}, &statxOut)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 
-		// Then
 		requireStatus(t, "Writev", fuse.OK, writevSt)
 		requireStatus(t, "Access", fuse.Status(syscall.ENOSYS), accSt)
 		requireStatus(t, "Lseek", fuse.Status(syscall.ENOSYS), lseekSt)
@@ -200,7 +198,7 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 	})
 
 	t.Run("SetLkw真实阻塞等待更新锁等待计数与Prometheus直方图", func(t *testing.T) {
-		// Given
+
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv)
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "lock-hist.bin", syscall.O_RDWR, 0o644)
@@ -210,7 +208,6 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 			Lk: fuse.FileLock{Start: 0, End: 63, Typ: syscall.F_WRLCK, Pid: 1},
 		})
 
-		// When: 协程进入 SetLkw 等待队列后，由主协程 Flush 释放并等待返回
 		done := make(chan fuse.Status, 1)
 		go func() {
 			done <- fs.SetLkw(nil, &fuse.LkIn{
@@ -224,7 +221,6 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 		}))
 		requireStatus(t, "SetLkw 阻塞获取成功", fuse.OK, waitUntilStatusChan(t, done, "SetLkw 统计唤醒"))
 
-		// Then
 		snap := fs.Snapshot()
 		require.Equal(t, uint64(1), snap.Locks.Waits)
 		require.Equal(t, uint64(1), snap.Locks.Conflicts)
@@ -241,11 +237,10 @@ func TestMetrics与Prometheus与Snapshot_验证41个FUSE操作与26桶直方图�
 }
 
 func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量写与元操作错误码(t *testing.T) {
-	// Given
+
 	srv := newFakeStorage(t, withTTL(1.0, 1.0))
 	fs := newTestRawFS(t, srv, withStatsFile(true))
 
-	// When: 1. Lookup 与 GetAttr .stats 与 .jfs.stats
 	var eStats, eJFS fuse.EntryOut
 	requireStatus(t, "Lookup .stats", fuse.OK, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, ".stats", &eStats))
 	requireStatus(t, "Lookup .jfs.stats", fuse.OK, fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, ".jfs.stats", &eJFS))
@@ -255,7 +250,6 @@ func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量�
 	var attrOut fuse.AttrOut
 	requireStatus(t, "GetAttr VirtualStatsIno", fuse.OK, fs.GetAttr(nil, &fuse.GetAttrIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}}, &attrOut))
 
-	// 2. Open / Read / EOF Read / Release
 	var openOut fuse.OpenOut
 	requireStatus(t, "Open .stats", fuse.OK, fs.Open(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: fusefs.VirtualStatsIno}, Flags: uint32(syscall.O_RDONLY)}, &openOut))
 	require.NotZero(t, openOut.OpenFlags&fuse.FOPEN_DIRECT_IO)
@@ -273,7 +267,6 @@ func TestVirtualStatsFile_校验stats与jfsStats只读读取越界EOF及全量�
 	eofBytes, _ := eofRes.Bytes(nil)
 	require.Empty(t, eofBytes)
 
-	// Then: 3. 拦截所有非法写/目录/元操作，不得触达远端存储
 	var dummyOpen fuse.OpenOut
 	var dummyEntry fuse.EntryOut
 	var dummyAttr fuse.AttrOut
@@ -339,16 +332,14 @@ func makePrefetchGateReadHook(targetOffset uint64, prefetchReached chan struct{}
 
 func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 	t.Run("Lookup遇到ENOENT不将Span标记为Error", func(t *testing.T) {
-		// Given
+
 		tp, exp := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(0, 0))
 		fs := newTestRawFS(t, srv, withTracerProvider(tp))
 
-		// When
 		var missOut fuse.EntryOut
 		st := fs.Lookup(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "absent.txt", &missOut)
 
-		// Then
 		requireStatus(t, "Lookup 缺失文件", fuse.ENOENT, st)
 		lookupSpans := findSpansByName(exp.GetSpans(), "fuse.Lookup")
 		require.NotEmpty(t, lookupSpans)
@@ -356,16 +347,14 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 	})
 
 	t.Run("只读挂载拒绝Mkdir返回EROFS并将Span标记为Error", func(t *testing.T) {
-		// Given
+
 		tp, exp := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(0, 0))
 		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO), withTracerProvider(tp))
 
-		// When
 		var missOut fuse.EntryOut
 		st := roFS.Mkdir(nil, &fuse.MkdirIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Mode: 0o755}, "ro", &missOut)
 
-		// Then
 		requireStatus(t, "只读 Mkdir 返回 EROFS", fuse.Status(syscall.EROFS), st)
 		mkdirSpans := findSpansByName(exp.GetSpans(), "fuse.Mkdir")
 		require.NotEmpty(t, mkdirSpans)
@@ -373,13 +362,12 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 	})
 
 	t.Run("600条目大目录ReadDirPlus多页拉取共享根Span唯一TraceID", func(t *testing.T) {
-		// Given
+
 		tp, exp := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(0, 0))
 		seedLargeDirectory(srv, 1, 600)
 		fs := newTestRawFS(t, srv, withTracerProvider(tp))
 
-		// When
 		var dh fuse.OpenOut
 		requireStatus(t, "OpenDir", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}}, &dh))
 		buf := make([]byte, 128<<10)
@@ -388,7 +376,6 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		}, fuse.NewDirEntryList(buf, 0))
 		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, Fh: dh.Fh})
 
-		// Then
 		requireStatus(t, "ReadDirPlus 首页加载全目录", fuse.OK, st)
 		rdpRPCs := srv.spansFor("ReadDirPlus")
 		require.Len(t, rdpRPCs, 2, "600 条目应分 512+88 两页拉取")
@@ -399,7 +386,7 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 	})
 
 	t.Run("Stage异步上传Chunk记录独立SpanLink并观测BackpressureWait", func(t *testing.T) {
-		// Given
+
 		notifier := newSpanStartNotifier()
 		bpEntered := notifier.watch("stage.BackpressureWait")
 		tp, exp := newTestTracerProvider(t, notifier)
@@ -414,7 +401,6 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "bp-trace.bin", syscall.O_RDWR, 0o644)
 		chunkPayload := buildRepeatingBytes(4194304, 'W')
 
-		// When
 		writeFullChunksViaAlignedFrames(t, fs, f.NodeId, f.Fh, 0, chunkPayload, 2)
 		<-allInflightEntered
 
@@ -425,7 +411,6 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		<-bpEntered
 		unblockInflight()
 
-		// Then
 		requireStatus(t, "第3块写入完成", fuse.OK, waitUntilStatusChan(t, thirdDone, "第3块 Write"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 		fs.OnUnmount()
@@ -439,7 +424,7 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 	})
 
 	t.Run("Stage挂起上传时Fsync触发BarrierWait阻塞等待", func(t *testing.T) {
-		// Given
+
 		notifier := newSpanStartNotifier()
 		barrierEntered := notifier.watch("stage.BarrierWait")
 		tp, exp := newTestTracerProvider(t, notifier)
@@ -456,7 +441,6 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		writeFullChunksViaAlignedFrames(t, fs, f.NodeId, f.Fh, 8388608, chunkPayload, 1)
 		<-barrierUploadEntered
 
-		// When
 		barrierDone := make(chan fuse.Status, 1)
 		go func() {
 			barrierDone <- fs.Fsync(nil, &fuse.FsyncIn{
@@ -467,14 +451,13 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		<-barrierEntered
 		unblockBarrier()
 
-		// Then
 		requireStatus(t, "Fsync 屏障完成", fuse.OK, waitUntilStatusChan(t, barrierDone, "BarrierWait Fsync"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 		require.NotEmpty(t, findSpansByName(exp.GetSpans(), "stage.BarrierWait"), "必须记录 stage.BarrierWait")
 	})
 
 	t.Run("ReadAhead异步预取记录PrefetchSpanLink与Wait子Span", func(t *testing.T) {
-		// Given
+
 		notifier := newSpanStartNotifier()
 		waitEntered := notifier.watch("read_ahead.Wait")
 		tp, exp := newTestTracerProvider(t, notifier)
@@ -489,7 +472,6 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		fs := newTestRawFS(t, srv, withDirectIO(false), withTracerProvider(tp))
 		opened := mustOpenFile(t, fs, ino, syscall.O_RDWR)
 
-		// When
 		_ = mustReadAt(t, fs, ino, opened.Fh, 0, 524288)
 		_ = mustReadAt(t, fs, ino, opened.Fh, 524288, 524288)
 		_ = mustReadAt(t, fs, ino, opened.Fh, 1048576, 524288)
@@ -502,7 +484,6 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 		<-waitEntered
 		close(prefetchGate)
 
-		// Then
 		require.Len(t, <-waitReadDone, 4096)
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: opened.Fh})
 
@@ -515,17 +496,15 @@ func TestTracing_OTel根Span与Stage和ReadAhead链路观测(t *testing.T) {
 	})
 
 	t.Run("孤儿Unlink到Release异步ReclaimOrphan传播同一TraceID", func(t *testing.T) {
-		// Given
+
 		tp, _ := newTestTracerProvider(t)
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
 		fs := newTestRawFS(t, srv, withTracerProvider(tp))
 		created := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan-trace.bin", syscall.O_RDWR, 0o644)
 
-		// When
 		requireStatus(t, "Unlink 打开文件", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orphan-trace.bin"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
 
-		// Then
 		reclaimCtxs := srv.spansFor("ReclaimOrphan")
 		mustAllSpansShareSameTraceID(t, reclaimCtxs, "孤儿回收 ReclaimOrphan")
 	})
@@ -578,7 +557,7 @@ func (b *syncBuffer) String() string {
 
 func TestStructuredLogging_关键异常事件输出结构化JSON日志(t *testing.T) {
 	t.Run("OnUnmount遇到Fsync失败输出unmount_fsync_failed", func(t *testing.T) {
-		// Given
+
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
@@ -590,15 +569,13 @@ func TestStructuredLogging_关键异常事件输出结构化JSON日志(t *testin
 		mustWriteAt(t, fs, dirty.NodeId, dirty.Fh, 0, []byte("fail-on-unmount"))
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirty.NodeId}, Fh: dirty.Fh})
 
-		// When
 		fs.OnUnmount()
 
-		// Then
 		requireLogMsgPresent(t, logBuf.String(), "unmount_fsync_failed")
 	})
 
 	t.Run("孤儿回收瞬态失败达到积压阈值输出orphan_reclaim_backlogged", func(t *testing.T) {
-		// Given
+
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
@@ -609,15 +586,13 @@ func TestStructuredLogging_关键异常事件输出结构化JSON日志(t *testin
 		orp := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orp-fail.txt", syscall.O_RDWR, 0o644)
 		requireStatus(t, "Unlink", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orp-fail.txt"))
 
-		// When
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: orp.NodeId}, Fh: orp.Fh})
 
-		// Then
 		requireLogMsgPresent(t, logBuf.String(), "orphan_reclaim_backlogged")
 	})
 
 	t.Run("Stage后台上传遇到不可恢复ENOSPC输出stage_upload_failed", func(t *testing.T) {
-		// Given
+
 		var logBuf syncBuffer
 		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		srv := newFakeStorage(t, withTTL(1.0, 1.0))
@@ -628,10 +603,8 @@ func TestStructuredLogging_关键异常事件输出结构化JSON日志(t *testin
 		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "stage-enospc.bin", syscall.O_RDWR, 0o644)
 		mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("fail-upload"))
 
-		// When
 		fsyncSt := fs.Fsync(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 
-		// Then
 		requireStatus(t, "Fsync ENOSPC", fuse.Status(syscall.ENOSPC), fsyncSt)
 		requireLogMsgPresent(t, logBuf.String(), "stage_upload_failed")
 		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})

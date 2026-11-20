@@ -13,12 +13,8 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// DefaultNamespaceCacheCapacity 限制缓存的节点、目录项和目录流所占条目数。
-// mdtest 1proc 会创建约 1.2 万个节点，16K 容量会在创建阶段持续 LRU 抖动，
-// 64K 可容纳整棵工作集，同时常驻内存增量仍在数十 MB 量级。
 const DefaultNamespaceCacheCapacity = 65536
 
-// MaxFilenameBytes 定义单个目录项名称的最大字节数（对齐 POSIX NAME_MAX 与服务端契约）。
 const MaxFilenameBytes = 255
 
 type cacheKey struct {
@@ -87,13 +83,6 @@ func itemOf(el *list.Element) *cacheItem {
 	return item
 }
 
-// NamespaceCache 按最近使用顺序淘汰属性、目录项和完整目录流。
-// 目录流按包含的目录项数计费，避免单个目录绕过容量限制。
-//
-// 除 LRU 链表外维护三组二级索引，把失效与回填从 O(N) 全链表扫描降为 O(1)/O(K) 定向查找：
-//   - byParent：父目录 Inode -> 其独立目录项名称集合；
-//   - dirsByChild：子 Inode -> 引用它的目录流父 Inode 集合；
-//   - inodeDirs：目录流父 Inode -> 它引用的子 Inode 集合（用于定向清理前两者）。
 type NamespaceCache struct {
 	mu          sync.Mutex
 	capacity    int
@@ -110,18 +99,13 @@ type NamespaceCache struct {
 	byParent    map[uint64]map[string]struct{}
 	dirsByChild map[uint64]map[uint64]struct{}
 	inodeDirs   map[uint64]map[uint64]struct{}
-	// completeDirs 记录“目录内容已被完整掌握”的父节点：目录流已加载，或目录刚由 Mkdir 创建且为空。
-	// 命中时未找到的名字可以确定返回 ENOENT，无需再发 Lookup RPC。
-	// 任一目录项被淘汰或目录发生未知变更时必须同步撤销该标记，避免把已存在名字误判为不存在。
-	// 在只读挂载模式下，值保存目录完整性的过期纳秒时间戳；可写挂载模式下保持为 0（永不过期）。
+
 	completeDirs map[uint64]int64
-	// parentByDir 记录已知目录的权威父目录内核 Inode（来自 Mkdir 或 ReadDirPlus 的 ".."），
-	// 供 completeDirs 在目录流缺失时本地合成包含 "." 与 ".." 的完整目录流。
+
 	parentByDir map[uint64]uint64
 	metrics     atomic.Pointer[Metrics]
 }
 
-// NewNamespaceCache 创建容量有界的缓存。
 func NewNamespaceCache(capacity int) *NamespaceCache {
 	if capacity <= 0 {
 		capacity = DefaultNamespaceCacheCapacity
@@ -206,8 +190,6 @@ func (c *NamespaceCache) removeKey(key cacheKey) {
 	}
 }
 
-// pruneOrphanDirMetaLocked drops completeDirs and parentByDir entries for ino
-// once neither its inode ('i') nor its directory stream ('d') remains live in the LRU cache.
 func (c *NamespaceCache) pruneOrphanDirMetaLocked(ino uint64) {
 	if c.items[cacheKey{kind: 'i', ino: ino}] == nil && c.items[cacheKey{kind: 'd', ino: ino}] == nil {
 		delete(c.completeDirs, ino)
@@ -215,7 +197,6 @@ func (c *NamespaceCache) pruneOrphanDirMetaLocked(ino uint64) {
 	}
 }
 
-// index 登记缓存项对应的二级索引。
 func (c *NamespaceCache) index(item *cacheItem) {
 	switch item.key.kind {
 	case 'e':
@@ -245,7 +226,6 @@ func (c *NamespaceCache) index(item *cacheItem) {
 	}
 }
 
-// unindex 在缓存项移除前撤销其二级索引。
 func (c *NamespaceCache) unindex(item *cacheItem) {
 	switch item.key.kind {
 	case 'e':
@@ -259,8 +239,7 @@ func (c *NamespaceCache) unindex(item *cacheItem) {
 		}
 	case 'd':
 		dir := item.key.ino
-		// 目录流一旦移除，就不再掌握该目录的完整内容：必须撤销权威完整标记，
-		// 否则后续缺失名字会被误判为 ENOENT（目录流本身已不再持有目录项）。
+
 		delete(c.completeDirs, dir)
 		for child := range c.inodeDirs[dir] {
 			dirs := c.dirsByChild[child]
@@ -283,7 +262,7 @@ func (c *NamespaceCache) putItem(item *cacheItem) {
 		c.remove(old)
 	}
 	if weight > c.capacity {
-		// 无法容纳的目录项意味着该父目录的完整内容不再可信。
+
 		switch key.kind {
 		case 'e':
 			delete(c.completeDirs, key.ino)
@@ -298,7 +277,7 @@ func (c *NamespaceCache) putItem(item *cacheItem) {
 			break
 		}
 		evicted := itemOf(back)
-		// 目录项被容量淘汰后，该父目录的完整内容不再可信。
+
 		if evicted.key.kind == 'e' {
 			delete(c.completeDirs, evicted.key.ino)
 		}
@@ -337,7 +316,6 @@ func cloneTimestamp(ts *timestamppb.Timestamp) *timestamppb.Timestamp {
 	return &timestamppb.Timestamp{Seconds: ts.GetSeconds(), Nanos: ts.GetNanos()}
 }
 
-// cloneInode 手写复制 Inode，避免 proto.Clone 的反射深拷贝开销。
 func cloneInode(inode *storagev1.Inode) *storagev1.Inode {
 	if inode == nil {
 		return nil
@@ -362,7 +340,6 @@ func cloneInode(inode *storagev1.Inode) *storagev1.Inode {
 	return out
 }
 
-// cloneDirEntry 手写复制目录项，名称字节与内嵌 Inode 均独立持有。
 func cloneDirEntry(entry *storagev1.DirEntryPlus) *storagev1.DirEntryPlus {
 	if entry == nil {
 		return nil
@@ -418,7 +395,7 @@ func (c *NamespaceCache) readCachedInodeAtLocked(ino uint64, nowNano int64, touc
 			return v, item.expiresAtNano, true
 		}
 	}
-	// 完整目录流本身包含属性，即使独立属性项被淘汰也可定向命中。
+
 	for dir := range c.dirsByChild[ino] {
 		dirEl := c.items[cacheKey{kind: 'd', ino: dir}]
 		if dirEl == nil {
@@ -480,7 +457,6 @@ func (c *NamespaceCache) getCachedInodeAtLocked(ino uint64, nowNano int64) (cach
 	return v, ok
 }
 
-// inode 返回深拷贝后的节点属性，供外部调用方安全读写。
 func (c *NamespaceCache) inode(ino uint64) (cachedInode, bool) {
 	c.mu.Lock()
 	v, ok := c.getCachedInodeLocked(ino)
@@ -495,7 +471,6 @@ func (c *NamespaceCache) inode(ino uint64) (cachedInode, bool) {
 	return cachedInode{}, false
 }
 
-// inodeReadOnly 单次加锁零分配读取节点属性快照；缓存内 Inode 一经发布严禁原地修改，调用方仅可只读访问返回值。
 func (c *NamespaceCache) inodeReadOnly(ino uint64) (cachedInode, bool) {
 	c.mu.Lock()
 	v, ok := c.getCachedInodeLocked(ino)
@@ -508,10 +483,6 @@ func (c *NamespaceCache) inodeReadOnly(ino uint64) (cachedInode, bool) {
 	return cachedInode{}, false
 }
 
-// lookupReadOnly 在单把锁内同时解析目录项与目标节点属性（零堆分配只读快路径）：
-//   - negative == true && ok == true：权威负缓存命中（ENOENT）；
-//   - negative == false && ok == true：目录项与节点属性同时命中，返回只读 cachedInode；
-//   - ok == false：未完整命中；若 childIno > 0 表示目录项已命中正子节点但缺少缓存属性。
 func (c *NamespaceCache) lookupReadOnly(parent uint64, name string) (cached cachedInode, childIno uint64, negative, ok bool) {
 	if len(name) > MaxFilenameBytes {
 		return cachedInode{}, 0, false, false
@@ -631,7 +602,6 @@ func (c *NamespaceCache) putInodeAt(epoch, ino uint64, inode *storagev1.Inode, e
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 
-// putInodeAtIf 仅在缓存未被任何目录变更改写时回填，避免在途读响应覆盖更新的属性。
 func (c *NamespaceCache) putInodeAtIf(generation, epoch, ino uint64, inode *storagev1.Inode, entryTimeout, attrTimeout float64) {
 	if inode == nil || inode.GetAttr() == nil {
 		return
@@ -687,8 +657,7 @@ func (c *NamespaceCache) updateDirChildInodesLocked(ino uint64, inode *storagev1
 			if entry.GetIno() != ino {
 				continue
 			}
-			// 替换而非原地改写：目录流一旦发布就不再被修改，
-			// dir() 只需做指针快照即可安全并发读取。
+
 			updated := cloneDirEntry(entry)
 			updated.Inode = cloneInode(inode)
 			updated.AttrTimeoutSeconds = attrTimeout
@@ -706,9 +675,6 @@ func (c *NamespaceCache) updateDirChildInodesLocked(ino uint64, inode *storagev1
 	}
 }
 
-// refreshExistingInodesFromReadDirAt updates already-cached inode items and parent directory
-// entries using fresh attributes returned by ReadDirPlus in read-only mode without inserting
-// uncached child inodes or bumping mutations.
 func (c *NamespaceCache) refreshExistingInodesFromReadDirAt(epoch uint64, entries []*storagev1.DirEntryPlus) {
 	if !c.readOnly || len(entries) == 0 {
 		return
@@ -770,11 +736,6 @@ func (c *NamespaceCache) refreshExistingInodesFromReadDirAt(epoch uint64, entrie
 	}
 }
 
-// refreshInodeAt 用写操作返回的最新属性刷新缓存项，但保留既有目录项有效期。
-// Write / SetAttr / Fallocate / Open(O_TRUNC) 的响应不携带 entry timeout；
-// 若沿用 putInodeAt(..., 0, ...) 把 0 写回缓存，后续 Lookup 命中缓存时会把
-// EntryValid=0 交给内核，内核据此拒绝缓存 dentry，使该文件每次 stat 都穿透到 FUSE Lookup。
-// 同时原地刷新所有引用该 Inode 的目录流，避免无谓丢弃整条目录流。
 func (c *NamespaceCache) refreshInodeAt(epoch, ino uint64, inode *storagev1.Inode, attrTimeout float64) {
 	if inode == nil || inode.GetAttr() == nil {
 		return
@@ -787,7 +748,6 @@ func (c *NamespaceCache) refreshInodeAt(epoch, ino uint64, inode *storagev1.Inod
 	c.refreshInodeLocked(ino, inode, attrTimeout)
 }
 
-// refreshInodeAtIf 是 refreshInodeAt 的代数校验版本，供 GetAttr 回填使用。
 func (c *NamespaceCache) refreshInodeAtIf(generation, epoch, ino uint64, inode *storagev1.Inode, attrTimeout float64) {
 	if inode == nil || inode.GetAttr() == nil {
 		return
@@ -809,8 +769,6 @@ func (c *NamespaceCache) refreshInodeLocked(ino uint64, inode *storagev1.Inode, 
 	c.putInodeLocked(ino, inode, entryTimeout, attrTimeout)
 }
 
-// stageWriteInodeAt 在 Stage 写暂存落盘成功后，以写时复制方式单调推进本地缓存的 Size 与 Mtime/Ctime，
-// 使 AttrTimeout > 0 时随后的本地 fstat/stat 零 RPC 即可观测最新文件大小，且绝不原地修改已发布指针。
 func (c *NamespaceCache) stageWriteInodeAt(epoch, ino, endOffset uint64, ts *timestamppb.Timestamp) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -842,7 +800,6 @@ func (c *NamespaceCache) stageWriteInodeAt(epoch, ino, endOffset uint64, ts *tim
 	c.putInodeLocked(ino, updated, cur.entryTimeout, at)
 }
 
-// refreshInodeFromWriteAt 在异步/聚合写提交完成时刷新缓存，并保护同一顺序写世代内已被后续缓冲推进的最小文件尺寸不倒退。
 func (c *NamespaceCache) refreshInodeFromWriteAt(epoch, ino uint64, inode *storagev1.Inode, minSize uint64, attrTimeout float64) {
 	if inode == nil || inode.GetAttr() == nil {
 		return
@@ -865,10 +822,6 @@ func (c *NamespaceCache) refreshInodeFromWriteAt(epoch, ino uint64, inode *stora
 	c.refreshInodeLocked(ino, target, attrTimeout)
 }
 
-// entryTimeoutLocked 取回该 Inode 已知的目录项有效期：优先独立属性项，
-// 其次仍引用它的目录流，都没有时才回落到 fallback。
-// fallback 由调用方提供（GetAttr / SetAttr 用服务端返回的 attr timeout，Write 用默认写回填值），
-// 保证 STORAGE_ENTRY_TIMEOUT_SECONDS=0 的 pjdfstest 场景不会产生非预期的非零 EntryValid。
 func (c *NamespaceCache) entryTimeoutLocked(ino uint64, fallback float64) float64 {
 	if c.readOnly {
 		if v, ok := c.peekCachedInodeLocked(ino); ok {
@@ -893,7 +846,6 @@ func (c *NamespaceCache) entryTimeoutLocked(ino uint64, fallback float64) float6
 	return fallback
 }
 
-// peekInode 在不污染属性命中率统计的前提下探查缓存中的节点属性（供 Unlink/Rename 判断 nlink 使用）。
 func (c *NamespaceCache) peekInode(ino uint64) (cachedInode, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -905,7 +857,6 @@ func (c *NamespaceCache) peekInode(ino uint64) (cachedInode, bool) {
 	return v, true
 }
 
-// inodeAttrTimeout 读取缓存中已知的节点属性 TTL；未缓存时回退至 fallback。
 func (c *NamespaceCache) inodeAttrTimeout(ino uint64, fallback float64) float64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1014,7 +965,6 @@ func (c *NamespaceCache) invalidateInode(ino uint64) {
 	c.metrics.Load().incNSCacheInvalidation()
 }
 
-// entry 返回子节点号；0 表示已缓存的 ENOENT。
 func (c *NamespaceCache) entry(parent uint64, name string) (uint64, bool) {
 	if len(name) > MaxFilenameBytes {
 		return 0, false
@@ -1053,8 +1003,7 @@ func (c *NamespaceCache) entry(parent uint64, name string) (uint64, bool) {
 		c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
 		return 0, true
 	}
-	// 目录内容已被完整掌握（目录流已降级为独立目录项，或目录刚创建且为空）：
-	// 未命中即权威 ENOENT，可直接返回 0 而不发网络 Lookup。
+
 	if _, ok := c.isCompleteDirValidLocked(parent, nowNano); ok {
 		c.mu.Unlock()
 		c.metrics.Load().incNSCacheHit(nsCacheNegativeEntry)
@@ -1075,7 +1024,6 @@ func (c *NamespaceCache) putEntryAt(epoch, parent uint64, name string, ino uint6
 	c.mutations++
 }
 
-// putEntryAtIf 仅在缓存未被任何目录变更改写时回填，避免在途 Lookup 的过期结果覆盖新目录项。
 func (c *NamespaceCache) putEntryAtIf(generation, epoch, parent uint64, name string, ino uint64, entryTimeout float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1102,8 +1050,7 @@ func (c *NamespaceCache) putEntryLocked(parent uint64, name string, ino uint64, 
 		}
 		expiresAtNano = c.currentTime().Add(ttlDur).UnixNano()
 	}
-	// 独立目录项与旧目录流冲突：先把目录流按条目降级，保留未变动兄弟项的权威命中，
-	// 再写入本次变更的目录项。
+
 	c.demoteDirStreamToEntriesLocked(parent)
 	c.putItem(&cacheItem{
 		key:           cacheKey{kind: 'e', ino: parent, name: name},
@@ -1122,7 +1069,7 @@ func (c *NamespaceCache) invalidateDir(parent uint64) {
 	for _, name := range copyNames(c.byParent[parent]) {
 		c.removeKey(cacheKey{kind: 'e', ino: parent, name: name})
 	}
-	// 父节点属性变化会使其出现在其它目录流的目录项中，一并定向失效。
+
 	for dir := range copyInoSet(c.dirsByChild[parent]) {
 		c.removeKey(cacheKey{kind: 'd', ino: dir})
 		c.pruneOrphanDirMetaLocked(dir)
@@ -1132,10 +1079,6 @@ func (c *NamespaceCache) invalidateDir(parent uint64) {
 	c.metrics.Load().incNSCacheInvalidation()
 }
 
-// invalidateDirListing 只失效父目录的目录流、父目录属性以及引用了父目录的祖先目录流，
-// demoteDirStreamToEntriesLocked 把父目录的完整目录流拆成独立目录项，并保留尚无独立属性项的子节点属性。
-// 只在目录流条目数不超过容量四分之一时降级，避免小容量缓存被单个大目录挤爆；
-// 若降级过程中同父目录的目录项被 LRU 淘汰，则不能声称内容完整，撤销权威标记。
 func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 	el := c.items[cacheKey{kind: 'd', ino: parent}]
 	if el == nil {
@@ -1182,7 +1125,7 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 			}
 		}
 		key := cacheKey{kind: 'e', ino: parent, name: name}
-		// put 每个目录项最多触发一次容量淘汰，预先判断被淘汰项是否属于同一父目录。
+
 		if c.items[key] == nil && c.used+1 > c.capacity {
 			if back := c.lru.Back(); back != nil {
 				if item := itemOf(back); item.key.kind == 'e' && item.key.ino == parent {
@@ -1202,8 +1145,7 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 	} else {
 		c.pruneOrphanDirMetaLocked(parent)
 	}
-	// 当目录流携带有效属性（AttrTimeoutSeconds > 0）时，为尚无独立 'i' 项的子节点及父目录（".."）保留属性，
-	// 消除祖先目录流因局部目录变更降级后后续 OpenDir/GetAttr 对未变动子目录的穿透 RPC。
+
 	for idx, entry := range entries {
 		childIno := entry.GetIno()
 		if childIno == 0 || childIno == parent {
@@ -1242,7 +1184,6 @@ func (c *NamespaceCache) demoteDirStreamToEntriesLocked(parent uint64) {
 	}
 }
 
-// markNewDirWithParentAt 把刚由 Mkdir 创建的空目录登记为权威完整目录并记录其权威父目录。
 func (c *NamespaceCache) markNewDirWithParentAt(epoch, dirIno, parentIno uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1258,10 +1199,6 @@ func (c *NamespaceCache) markNewDirWithParentAt(epoch, dirIno, parentIno uint64)
 	}
 }
 
-// invalidateDirListingTouchParentAt 在目录项变更后失效父目录的目录流与属性，
-// 并用服务端返回的子节点时间戳就地刷新父目录属性（mtime/ctime，Mkdir 时 nlink+1）。
-// 内核在 Create/Mkdir/Mknod/Symlink/Link 后会主动失效父目录属性并触发 FUSE_GETATTR；
-// 保留一份已更新的父属性可消除这次网络 GetAttr RPC。
 func (c *NamespaceCache) invalidateDirListingTouchParentAt(epoch, parent uint64, child *storagev1.Inode, nlinkDelta int32, attrTimeout float64) {
 	c.metrics.Load().incNSCacheInvalidation()
 	c.mu.Lock()
@@ -1308,12 +1245,6 @@ func (c *NamespaceCache) invalidateDirListingTouchParentAt(epoch, parent uint64,
 	c.putInodeLocked(parent, updatedParent, parentEntry.entryTimeout, at)
 }
 
-// invalidateDirListingTouchParentNowAt 在 Unlink/Rmdir/Rename 成功后失效父目录的
-// 目录流与引用它的祖先流，但保留父目录 Inode 缓存并用当前时间刷新 mtime/ctime。
-// 内核在每次目录变更后会 fuse_invalidate_attr(dir)，下一次 unlink/rename 前的
-// inode_permission(MAY_EXEC) 会下发 FUSE_GETATTR；保留一份刚更新的父属性可消除
-// 这次每操作一次的跨机 GetAttr RPC（cold unlink 500 次即 500 次 RPC）。
-// nlinkDelta 仅在目录被删除/移出/移入父目录时非零。
 func (c *NamespaceCache) invalidateDirListingTouchParentNowAt(epoch, parent uint64, nlinkDelta int32) {
 	c.metrics.Load().incNSCacheInvalidation()
 	c.mu.Lock()
@@ -1348,8 +1279,6 @@ func (c *NamespaceCache) invalidateDirListingTouchParentNowAt(epoch, parent uint
 	c.putInodeLocked(parent, updated, parentEntry.entryTimeout, parentEntry.attrTimeout)
 }
 
-// invalidateDirListingDropParent invalidates parent's directory listing and drops its cached inode
-// when the exact parent nlink delta cannot be determined locally (e.g. uncached rename operands).
 func (c *NamespaceCache) invalidateDirListingDropParent(parent uint64) {
 	c.metrics.Load().incNSCacheInvalidation()
 	c.mu.Lock()
@@ -1364,8 +1293,6 @@ func (c *NamespaceCache) invalidateDirListingDropParent(parent uint64) {
 	c.mutations++
 }
 
-// invalidateChildParents purges cached child->parent directory pointers (and cached child streams
-// whose ".." entry points to parent) when a cross-parent rename moves an uncached directory.
 func (c *NamespaceCache) invalidateChildParents(parent uint64) {
 	c.mu.Lock()
 	for dir, p := range c.parentByDir {
@@ -1378,10 +1305,9 @@ func (c *NamespaceCache) invalidateChildParents(parent uint64) {
 	c.mu.Unlock()
 }
 
-// removeEntry 定向删除单个目录项，用于 Unlink/Rmdir/Rename 的旧名。
 func (c *NamespaceCache) removeEntry(parent uint64, name string) {
 	c.mu.Lock()
-	// 删除单个名字后无法再断言目录内容完整，撤销权威标记，避免误判其它名字。
+
 	delete(c.completeDirs, parent)
 	c.removeKey(cacheKey{kind: 'e', ino: parent, name: name})
 	c.mutations++
@@ -1396,8 +1322,7 @@ func (c *NamespaceCache) dir(ino uint64) (cachedDir, bool) {
 	}
 	c.mu.Lock()
 	if item, ok := c.getValidLocked(cacheKey{kind: 'd', ino: ino}, nowNano); ok {
-		// 只做指针快照：缓存项一经发布就不再原地修改（putInodeLocked 以替换元素的方式更新），
-		// 因此调用方可以安全并发读取。500 项目录从 2,001 次分配 / 65~97µs 降到 1 次分配 / ~0.3µs。
+
 		res := cachedDir{
 			entries:         append([]*storagev1.DirEntryPlus(nil), item.dir...),
 			fromCache:       true,
@@ -1437,9 +1362,6 @@ type synthChildEntry struct {
 	cached cachedInode
 }
 
-// synthesizeCompleteDirLocked 在目录处于权威完整状态（completeDirs）且自身、父目录及全部正子项属性均在有效缓存中时，
-// 直接按服务端 ReadDirPlus 契约（"."、".." 及按字节序升序排列的正子项与连续 NextOffset）本地合成完整目录流并回填 'd'。
-// 任一子项或父项缺失有效属性缓存时立即返回 false，由调用方安全回退远端 ReadDirPlus RPC。
 func (c *NamespaceCache) synthesizeCompleteDirLocked(dirIno uint64) ([]*storagev1.DirEntryPlus, bool) {
 	var nowNano int64
 	if c.readOnly {
@@ -1576,7 +1498,6 @@ func (c *NamespaceCache) synthesizeCompleteDirAtLocked(dirIno uint64, nowNano in
 	return cloneDir(entries), true
 }
 
-// putDirAtIf 仅在缓存未被任何目录变更改写时回填，避免在途目录流覆盖新目录项。
 func (c *NamespaceCache) putDirAtIf(generation, epoch, ino uint64, entries []*storagev1.DirEntryPlus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1630,7 +1551,7 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 			}
 		}
 	}
-	// 旧的独立目录项可能与新目录流冲突，按父目录定向清理。
+
 	for _, name := range copyNames(c.byParent[ino]) {
 		c.removeKey(cacheKey{kind: 'e', ino: ino, name: name})
 	}
@@ -1642,7 +1563,7 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 		expiresAtNano:   expiresAtNano,
 		weight:          len(entries) + 1,
 	})
-	// Record directory completeness and parent pointer only when the stream fits in the LRU cache.
+
 	if c.items[cacheKey{kind: 'd', ino: ino}] != nil {
 		c.completeDirs[ino] = expiresAtNano
 		if c.rootIno != 0 && ino == c.rootIno {
@@ -1661,7 +1582,6 @@ func (c *NamespaceCache) putDirWithMaxExpiryLocked(ino uint64, entries []*storag
 	}
 }
 
-// clear 在会话失效后丢弃旧会话期间获得的全部缓存。
 func (c *NamespaceCache) clear() {
 	c.mu.Lock()
 	c.epoch++
@@ -1684,7 +1604,6 @@ func (c *NamespaceCache) version() uint64 {
 	return c.epoch
 }
 
-// snapshot 同时返回会话代数与目录变更代数，供在途 RPC 回填前校验。
 func (c *NamespaceCache) snapshot() (epoch, generation uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

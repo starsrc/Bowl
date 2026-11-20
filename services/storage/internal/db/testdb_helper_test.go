@@ -28,7 +28,6 @@ func resolveMetaTestDSN() string {
 	)
 }
 
-// setupMetaTestDB 为 PostgreSQL 适配器测试创建独立 schema 隔离连接池，并在测试结束时自动清理。
 func setupMetaTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

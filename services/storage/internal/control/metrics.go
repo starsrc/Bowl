@@ -48,14 +48,11 @@ func buildWALFsyncBucketBoundsSeconds() []float64 {
 	return bounds
 }
 
-// storageEngineCollector 按需拉取（Pull 模式）活跃 StoreActor 快照、Pebble 指标、
-// 进程级共享 Pebble BlockCache 指标以及控制面生命周期指标（读写热路径 0 开销，零 disk_id 标签）。
 type storageEngineCollector struct {
 	mgr atomic.Pointer[manager]
 
 	disksLoadedDesc *prometheus.Desc
 
-	// ActorMetricsSnapshot 池级聚合指标与底层物理占用去重指标
 	logicalBytesDesc         *prometheus.Desc
 	inodesDesc               *prometheus.Desc
 	packPhysicalBytesDesc    *prometheus.Desc
@@ -73,7 +70,6 @@ type storageEngineCollector struct {
 	volumeTotalBytesDesc     *prometheus.Desc
 	volumeAvailableBytesDesc *prometheus.Desc
 
-	// Pebble 活跃盘聚合指标
 	pebbleWALBytesInDesc          *prometheus.Desc
 	pebbleWALBytesWrittenDesc     *prometheus.Desc
 	pebbleWALFsyncDurationDesc    *prometheus.Desc
@@ -87,13 +83,11 @@ type storageEngineCollector struct {
 	pebbleFilterMissesDesc        *prometheus.Desc
 	pebbleOpenTableItersDesc      *prometheus.Desc
 
-	// 进程级共享 64 MiB Pebble BlockCache 指标（每次抓取仅调一次 m.cache.Metrics()）
 	pebbleBlockCacheBytesDesc  *prometheus.Desc
 	pebbleBlockCacheCountDesc  *prometheus.Desc
 	pebbleBlockCacheHitsDesc   *prometheus.Desc
 	pebbleBlockCacheMissesDesc *prometheus.Desc
 
-	// 控制面自身生命周期、Fork 阶段与错误指标
 	controlActorLoadsDesc       *prometheus.Desc
 	controlActorEvictionsDesc   *prometheus.Desc
 	controlCleanupErrorsDesc    *prometheus.Desc
@@ -501,7 +495,6 @@ func (c *storageEngineCollector) addCommitsReclaimed(n uint64) {
 	c.commitsReclaimed.Add(n)
 }
 
-// Describe 实现 prometheus.Collector。
 func (c *storageEngineCollector) Describe(ch chan<- *prometheus.Desc) {
 	if c == nil {
 		return
@@ -553,9 +546,6 @@ func (c *storageEngineCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.segmentReserveDurVec.Describe(ch)
 }
 
-// Collect 实现 prometheus.Collector。
-// 严格遵守锁粒度红线：仅在 m.poolMu.RLock() 内拷贝活跃 Actor 切片、统计加载模式并对共享 Cache 增加引用计数，
-// 立即释放 RLock 后再逐盘调用 MetricsSnapshot()、单次 cache.Metrics() 与目录物理占用去重扫描。
 func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 	if c == nil {
 		return
@@ -594,7 +584,6 @@ func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 		m.poolMu.RUnlock()
 	}
 
-	// 全局共享 64 MiB pebble.Cache 仅调用一次 Metrics()，严禁跨盘累加 snap.Pebble.BlockCache。
 	var cacheMetrics pebble.CacheMetrics
 	if cache != nil {
 		cacheMetrics = cache.Metrics()
@@ -638,7 +627,7 @@ func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, actor := range actors {
 		snap := actor.MetricsSnapshot()
 		if snap.Pebble == nil {
-			// 该 Actor 在释放 poolMu 后已被并发关闭，跳过快照聚合。
+
 			continue
 		}
 
@@ -677,7 +666,7 @@ func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 			if err := pm.LogWriter.FsyncLatency.Write(&dtoMetric); err == nil {
 				if h := dtoMetric.GetHistogram(); h != nil {
 					walFsyncCount += h.GetSampleCount()
-					// Pebble LogWriter.FsyncLatency 以 float64(time.Duration) 纳秒为单位观测，转换为秒。
+
 					walFsyncSumSeconds += h.GetSampleSum() / float64(time.Second)
 					for _, b := range h.GetBucket() {
 						ub := b.GetUpperBound()

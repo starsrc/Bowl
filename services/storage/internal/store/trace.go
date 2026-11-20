@@ -16,8 +16,6 @@ func currentStoreTracer() trace.Tracer {
 	return otel.GetTracerProvider().Tracer(storeInstrumentationName)
 }
 
-// isSpanRecording 在热路径上以零分配判断 ctx 中是否携带正在录制采样的活跃 Span。
-// 未开启追踪或未命中采样时立即返回 false，杜绝任何 Span 对象与属性切片分配。
 func isSpanRecording(ctx context.Context) bool {
 	if ctx == nil {
 		return false

@@ -20,7 +20,7 @@ import (
 )
 
 func TestClientE2E_ForkDiffPatchMergeAndFUSEMountVerification(t *testing.T) {
-	// Given: 通过 FUSE 挂载主盘写入基线文件 -> 卸载并 Fork 子盘 -> 双边修改制造冲突并各自新增文件
+
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 
@@ -46,26 +46,21 @@ func TestClientE2E_ForkDiffPatchMergeAndFUSEMountVerification(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(mpFeat, "feat-only.txt"), []byte("f\n"), 0o644))
 	stopFeat()
 
-	// When 1: `bowl disk diff --target --patch` 检出差异、冲突标记与统一补丁输出
 	diffOut := runBowlSuccess(t, "disk", "diff", featID, "--endpoint", endpoint, "--target", mainID, "--patch")
 	require.Contains(t, diffOut, "shared.txt")
 	require.Contains(t, diffOut, "CONTENT")
 	require.Contains(t, diffOut, "+feat")
 
-	// When 2: `bowl disk merge` 默认 Fail 策略触发 ECONFLICT 并返回退出码 1
 	conflictOut := runBowlExpectExit(t, 1, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID)
 	require.Contains(t, conflictOut, "ECONFLICT")
 	require.Contains(t, conflictOut, "shared.txt")
 
-	// When 3: `bowl disk merge --dry-run` 预演通过
 	dryOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--strategy=ours", "--dry-run")
 	require.Contains(t, dryOut, "Dry Run")
 
-	// When 4: 使用 `--resolve /shared.txt=theirs` + `--strategy=ours` 正式合并
 	mergeOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--strategy=ours", "--resolve", "/shared.txt=theirs")
 	require.Contains(t, mergeOut, mainID)
 
-	// Then: 重新挂载主盘，POSIX 文件读取确认保留 main-only.txt、新增 feat-only.txt 且 shared.txt 采用 theirs
 	mpMain3, stopMain3 := mountWithCleanup(t, endpoint, mainID)
 	defer stopMain3()
 
@@ -112,11 +107,9 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(mpFeat, "feat-ro.txt"), []byte("from-feat\n"), 0o644))
 		stopFeat()
 
-		// 父盘以只读方式在线 FUSE 挂载
 		_, stopMainRO := mountWithCleanup(t, endpoint, mainID, "--mode", "ro")
 		defer stopMainRO()
 
-		// 绕过本机 CLI 直调 StorageServiceClient.MergeDisk，服务端必须拦截为 CodeAborted + EBUSY
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_, rpcErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
@@ -130,7 +123,6 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		require.NotNil(t, info)
 		require.Equal(t, "EBUSY", info.GetReason())
 
-		// 本机 `bowl disk merge --dry-run` 在父盘 --mode ro 挂载态下必须正常成功
 		dryOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--dry-run")
 		require.Contains(t, dryOut, "Dry Run")
 	})
@@ -153,16 +145,13 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		const wantContent = "live-fuse-payload\n"
 		require.NoError(t, os.WriteFile(filepath.Join(featMP, "feat-live.txt"), []byte(wantContent), 0o644))
 
-		// 子盘未卸载时执行合并必须被拒绝（退出码 1）
 		blockedOut := runBowlExpectExit(t, 1, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID)
 		require.Contains(t, blockedOut, "bowl umount")
 
-		// 卸载子盘后零等待立即执行 bowl disk merge
 		runBowlSuccess(t, "umount", featMP)
 		mergeOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID)
 		require.Contains(t, mergeOut, mainID)
 
-		// 重新挂载父盘可完整读取子盘写入的文件内容
 		mpVerify, stopVerify := mountWithCleanup(t, endpoint, mainID)
 		defer stopVerify()
 		got, err := os.ReadFile(filepath.Join(mpVerify, "feat-live.txt"))
@@ -185,7 +174,6 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(mpFeat, "feat-kill9.txt"), []byte(wantContent), 0o644))
 		stopFeat()
 
-		// 启动父盘挂载守护进程后使用 SIGKILL 强杀并懒卸载清理本机挂载点（服务端 30s 租约仍活跃）
 		mainMP := t.TempDir()
 		runBowlSuccess(t, "mount", "--endpoint", endpoint, mainID, mainMP)
 		t.Cleanup(func() {
@@ -198,11 +186,9 @@ func TestClientE2E_MergeMountGateAndForceFencing(t *testing.T) {
 		forceLazyUnmountMountpoint(t, mainMP)
 		require.False(t, isMounted(mainMP))
 
-		// Without --force, active server lease blocks merge with exit code 1.
 		blockedOut := runBowlExpectExit(t, 1, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID)
 		require.Contains(t, blockedOut, "still mounted")
 
-		// 加 --force 立即成功合并
 		forcedOut := runBowlSuccess(t, "disk", "merge", featID, "--endpoint", endpoint, "--into", mainID, "--force")
 		require.Contains(t, forcedOut, mainID)
 

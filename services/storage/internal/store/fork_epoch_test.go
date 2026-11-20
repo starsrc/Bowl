@@ -163,14 +163,12 @@ func TestGivenWriterEpochWhenAdvancedOrResetThenStaleAndFutureEpochsFenced(t *te
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Given: 初始实例 WriterEpoch 必须为 0
 	actor := openTestActor(t, &store.Options{Dir: dir, DiskID: "epoch-disk", MaxBytes: 16 << 20})
 	require.Equalf(t, uint64(0), actor.WriterEpoch(), "初始 WriterEpoch 应为 0")
 
 	f, err := actor.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("ep.bin"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
 
-	// When: 以当前 epoch=0（含省略参数）写入成功，传入未来 epoch=1 遭隔离
 	_, _, err = actor.Write(ctx, f.Ino, 0, []byte("e0"))
 	require.NoError(t, err)
 	_, _, err = actor.Write(ctx, f.Ino, 2, []byte("e0-exp"), 0)
@@ -178,7 +176,6 @@ func TestGivenWriterEpochWhenAdvancedOrResetThenStaleAndFutureEpochsFenced(t *te
 	_, _, err = actor.Write(ctx, f.Ino, 2, []byte("e1"), 1)
 	require.ErrorIsf(t, err, store.ErrStaleEpoch, "未来 epoch=1 写入应返回 ErrStaleEpoch: got=%v", err)
 
-	// When: AdvanceEpoch 推进至 1，旧 epoch=0 与省略参数（等价 epoch=0）全部返回 ErrStaleEpoch
 	newEpoch, _, err := actor.AdvanceEpoch(ctx)
 	require.NoError(t, err)
 	require.Equalf(t, uint64(1), newEpoch, "首次 AdvanceEpoch 后应为 1")
@@ -195,11 +192,9 @@ func TestGivenWriterEpochWhenAdvancedOrResetThenStaleAndFutureEpochsFenced(t *te
 	require.ErrorIs(t, actor.Fsync(ctx, f.Ino, 0), store.ErrStaleEpoch)
 	require.ErrorIs(t, actor.FsyncDir(ctx, store.RootIno, 0), store.ErrStaleEpoch)
 
-	// 新 epoch=1 可正常写入
 	_, _, err = actor.Write(ctx, f.Ino, 2, []byte("-ok"), 1)
 	require.NoError(t, err)
 
-	// When: 关闭后用 ResetEpoch:true 且过小 MaxBytes 重开返回 ErrQuotaShrinkBelowUsed；合法 ResetEpoch 重开可将 epoch 复位为 0
 	_, _, err = actor.Write(ctx, f.Ino, 0, makePatternBytes(2*store.BlobSize, 0x31), 1)
 	require.NoError(t, err)
 	require.NoError(t, actor.Close())
@@ -217,7 +212,6 @@ func TestGiven36PacksWhenCheckpointAndCloneThenParallelHardlinksAndBranchIsolati
 	cpDir := filepath.Join(t.TempDir(), "cp")
 	childDir := filepath.Join(t.TempDir(), "child")
 
-	// Given: 每个 pack 上限 1 块，写入 36 块触发 >= 35 个 pack 文件（覆盖并发硬链接阈值 32）
 	src := openTestActor(t, &store.Options{Dir: srcDir, DiskID: "src-branch", MaxBytes: 64 << 20, MaxPackSize: store.BlobSize})
 	f, err := src.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("base.bin"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
@@ -226,11 +220,9 @@ func TestGiven36PacksWhenCheckpointAndCloneThenParallelHardlinksAndBranchIsolati
 	require.NoError(t, err)
 	epochBefore := src.WriterEpoch()
 
-	// When: 执行 Checkpoint 到 cpDir
 	cpStats, err := src.Checkpoint(ctx, cpDir)
 	require.NoError(t, err)
 
-	// Then: 统计吻合，源 WriterEpoch 未变，cpDir 内全部 .pack 硬链接数 == 2
 	require.GreaterOrEqualf(t, cpStats.LivePacks, 35, "Checkpoint 应包含至少 35 个活跃 pack: got=%d", cpStats.LivePacks)
 	require.Equalf(t, uint64(36*store.BlobSize), cpStats.LogicalBytes, "Checkpoint LogicalBytes 不符")
 	require.Falsef(t, cpStats.HasOrphans, "无孤儿时 HasOrphans 应为 false")
@@ -238,7 +230,6 @@ func TestGiven36PacksWhenCheckpointAndCloneThenParallelHardlinksAndBranchIsolati
 	requireMinPackCount(t, cpDir, 35)
 	requireAllPackNlink(t, cpDir, 2)
 
-	// When: 在源实例继续写入后应开启新 pack，同时通过 CloneCheckpointDir 派生子分支
 	fNew, err := src.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("src-only.bin"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
 	_, _, err = src.Write(ctx, fNew.Ino, 0, makePatternBytes(store.BlobSize, 0x6B))
@@ -246,7 +237,6 @@ func TestGiven36PacksWhenCheckpointAndCloneThenParallelHardlinksAndBranchIsolati
 
 	require.NoError(t, store.CloneCheckpointDir(ctx, cpDir, childDir))
 
-	// Then: Clone 跳过 LOCK 与 pebble_events.log；元数据文件独立拷贝（nlink==1）；只读快照与子分支完全隔离
 	_, err = os.Stat(filepath.Join(childDir, "LOCK"))
 	require.ErrorIsf(t, err, os.ErrNotExist, "CloneCheckpointDir 不得复制 Pebble LOCK")
 	_, err = os.Stat(filepath.Join(childDir, store.PebbleEventsLogFileName))
@@ -280,7 +270,6 @@ func TestGivenOrphanInCheckpointWhenSanitizedThenOrphanPacksDroppedWithoutAffect
 	cpDir := filepath.Join(t.TempDir(), "cp-orphan")
 	sanDir := filepath.Join(t.TempDir(), "sanitized")
 
-	// Given: 源实例包含 1 个正常文件（pack1）与 1 个 openHandle=true 孤儿文件（pack2）
 	src := openTestActor(t, &store.Options{Dir: srcDir, DiskID: "src-orphan", MaxBytes: 16 << 20, MaxPackSize: store.BlobSize})
 	liveFile, err := src.Create(ctx, store.CreateReq{ParentIno: store.RootIno, Name: []byte("live.bin"), Mode: store.S_IFREG | 0o644})
 	require.NoError(t, err)
@@ -299,12 +288,10 @@ func TestGivenOrphanInCheckpointWhenSanitizedThenOrphanPacksDroppedWithoutAffect
 	require.NoError(t, err)
 	require.Truef(t, stats.HasOrphans, "带未关闭孤儿的 Checkpoint 应标记 HasOrphans=true")
 
-	// When: 将 Checkpoint 克隆到 sanDir 后调用 SanitizeCheckpoint 净化
 	require.NoError(t, store.CloneCheckpointDir(ctx, cpDir, sanDir))
 	sanStatFS, err := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{Dir: sanDir, CommitID: "commit-san-1"})
 	require.NoError(t, err)
 
-	// Then: 净化后已用空间仅含活文件；孤儿包被物理移除（源侧 pack2 硬链接数比 pack1 更低）；源孤儿句柄依然可读
 	require.Equalf(t, uint64(store.BlobSize), sanStatFS.UsedBytes, "净化后 StatFS UsedBytes 应只剩活文件")
 	require.Equalf(t, uint64(3), fileNlink(t, filepath.Join(srcDir, "packs", "0000000000000001.pack")), "活包 pack1 应被源/cp/sanDir 三处共享")
 	require.Equalf(t, uint64(2), fileNlink(t, filepath.Join(srcDir, "packs", "0000000000000002.pack")), "孤儿包 pack2 在 sanDir 被删除后应仅剩源/cp 两处共享")
@@ -326,7 +313,6 @@ func TestGivenCrossBranchSegmentAllocatorsWhen70FilesPerBranchThenInodesAndPacks
 	cpDir := filepath.Join(t.TempDir(), "cp-alloc")
 	childDir := filepath.Join(t.TempDir(), "child-alloc")
 
-	// Given: 源实例注入外部号段分配器并 Checkpoint 派生子分支
 	src := openTestActor(t, &store.Options{
 		Dir:           baseDir,
 		DiskID:        "alloc-src",
@@ -352,11 +338,9 @@ func TestGivenCrossBranchSegmentAllocatorsWhen70FilesPerBranchThenInodesAndPacks
 		PackAllocator: pool.allocPack,
 	})
 
-	// When: 源分支与子分支各新建并写入 70 个整块文件（超过单段 PackSegment=64 与单段 InoSegment=32）
 	srcInos := createAndWriteManyFiles(t, src, "s", 70, store.BlobSize)
 	childInos := createAndWriteManyFiles(t, child, "c", 70, store.BlobSize)
 
-	// Then: 两分支分配到的 Inode 全集无碰撞，且 140 个文件全部可完整校验读回
 	requireNoDuplicateUint64s(t, srcInos, childInos)
 	verifyFilesPattern(t, src, srcInos, store.BlobSize)
 	verifyFilesPattern(t, child, childInos, store.BlobSize)
@@ -367,7 +351,6 @@ func TestGivenConcurrentWritesAndCompactPacksWhenCheckpointCalledThenSnapshotCon
 	srcDir := t.TempDir()
 	cpDir := filepath.Join(t.TempDir(), "cp-concurrent")
 
-	// Given: 并发持续写入和删除与前台 CompactPacks 交织运行
 	actor := openTestActor(t, &store.Options{Dir: srcDir, DiskID: "cp-race", MaxBytes: 64 << 20, MaxPackSize: 2 * store.BlobSize})
 	var stop atomic.Bool
 	var writeOps atomic.Int64
@@ -380,12 +363,10 @@ func TestGivenConcurrentWritesAndCompactPacksWhenCheckpointCalledThenSnapshotCon
 	waitUntilAtLeast(&stop, &writeOps, 8)
 	require.NoError(t, actor.CompactPacks(ctx))
 
-	// When: 并发压测期间执行在线 Checkpoint
 	stats, cpErr := actor.Checkpoint(ctx, cpDir)
 	stop.Store(true)
 	wg.Wait()
 
-	// Then: 后台写入无错，Checkpoint 成功且只读重开无损坏
 	require.Nilf(t, writeErr.Load(), "并发写入出现错误: %v", writeErr.Load())
 	require.NoError(t, cpErr)
 	roCP := openTestActor(t, &store.Options{Dir: cpDir, DiskID: "cp-race-ro", ReadOnly: true})
@@ -399,7 +380,6 @@ func TestGivenInvalidForkInputsAndFailingAllocatorsWhenInvokedThenReturnsErrors(
 	existingDir := t.TempDir()
 	actor := openTestActor(t, &store.Options{DiskID: "fork-err", MaxBytes: 16 << 20})
 
-	// Given & When & Then: Checkpoint 目标为空、已存在或对只读实例调用均返回预期错误
 	_, err := actor.Checkpoint(ctx, "")
 	require.ErrorIsf(t, err, store.ErrInvalid, "Checkpoint 空路径应返回 ErrInvalid")
 	_, err = actor.Checkpoint(ctx, existingDir)
@@ -412,12 +392,10 @@ func TestGivenInvalidForkInputsAndFailingAllocatorsWhenInvokedThenReturnsErrors(
 	_, err = ro.Checkpoint(ctx, filepath.Join(t.TempDir(), "cp2"))
 	require.ErrorIsf(t, err, store.ErrReadOnly, "只读实例调用 Checkpoint 应返回 ErrReadOnly")
 
-	// When & Then: CloneCheckpointDir 非法参数返回对应错误
 	require.ErrorIs(t, store.CloneCheckpointDir(ctx, "", filepath.Join(t.TempDir(), "d")), store.ErrInvalid)
 	require.ErrorIs(t, store.CloneCheckpointDir(ctx, cpDir, cpDir), store.ErrInvalid)
 	require.ErrorIs(t, store.CloneCheckpointDir(ctx, cpDir, existingDir), store.ErrExist)
 
-	// When & Then: 外部号段分配器返回错误时透传失败，不产生脏状态
 	boom := errors.New("allocator down")
 	badInoActor := openTestActor(t, &store.Options{
 		DiskID: "bad-ino-alloc",

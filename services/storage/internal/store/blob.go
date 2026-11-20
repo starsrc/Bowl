@@ -19,23 +19,19 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// PackSegment 定义外部血缘号段分配器单次预留的 PackID 步长。
 const PackSegment uint64 = 64
 
-// PackSegmentAllocator 定义同源血缘树跨实例防撞的 PackID 连续号段分配函数。
-// minNext 为当前实例已知最小可用起始编号（本地最大已有 PackID + 1），返回的闭区间 [first, last] 须满足 first >= minNext 且 last >= first。
 type PackSegmentAllocator func(ctx context.Context, minNext uint64) (first, last uint64, err error)
 
-// blobStore 规格与分片热块缓存参数。
 const (
 	BlobIDSegment           uint64 = 4096
 	hotBlobShards                  = 16
 	hotBlobSlots                   = 64
-	hotBlobTotalBudget             = 64 << 20                           // 64 MiB
-	hotBlobShardBudget             = hotBlobTotalBudget / hotBlobShards // 4 MiB per shard
-	hotExtendMinCap                = 16 << 10                           // ExtendTail 热块倍增扩容最小预留容量（16 KiB）
+	hotBlobTotalBudget             = 64 << 20
+	hotBlobShardBudget             = hotBlobTotalBudget / hotBlobShards
+	hotExtendMinCap                = 16 << 10
 	maxSyncBatchConcurrency        = 8
-	packWritebackWindow     uint32 = 8 << 20 // 活跃 .pack 渐进异步回写对齐窗口（8 MiB）
+	packWritebackWindow     uint32 = 8 << 20
 	writebackHintQueueCap          = 32
 )
 
@@ -63,7 +59,6 @@ type hotBlob struct {
 	data   []byte
 }
 
-// hotShard 是热块缓存的单个分片，独立加锁与独立 4 MiB 字节预算。
 type hotShard struct {
 	mu    sync.Mutex
 	slots [hotBlobSlots]hotBlob
@@ -72,8 +67,6 @@ type hotShard struct {
 	bytes int
 }
 
-// blobStore 管理单盘目录下扁平的 packs/<pack_id_hex16>.pack 封包文件（默认单包上限 64 MiB）、
-// 常驻活跃写句柄与已封口只读句柄池、64 MiB 分片环形热块缓存及脏包屏障追踪表。
 type blobStore struct {
 	dir         string
 	logger      *slog.Logger
@@ -81,7 +74,6 @@ type blobStore struct {
 	dirReady    atomic.Bool
 	maxPackSize uint32
 
-	// 1. 内置无锁 PackID 分配游标（支持可选外部血缘号段分配器，默认本地步长 4096 预留）
 	nextPackID     atomic.Uint64
 	reservedPackID atomic.Uint64
 	allocMu        sync.Mutex
@@ -89,10 +81,8 @@ type blobStore struct {
 	lastReserved   uint64
 	packAlloc      PackSegmentAllocator
 
-	// 2. 分片环形热块缓存（16 分片 × 64 槽位，总预算 64 MiB，按 (PackID, Offset) 定位）
 	hot [hotBlobShards]hotShard
 
-	// 3. 活跃 .pack 写句柄、脏包追踪表与前后台落盘协同状态
 	atomicActivePackID atomic.Uint64
 	mu                 sync.Mutex
 	closed             bool
@@ -101,11 +91,11 @@ type blobStore struct {
 	activeOffset       uint32
 	activeFlushedTo    uint32
 	writeSeq           uint64
-	dirtyPacks         map[uint64]uint64            // 未完成 fdatasync 的脏 packID -> 最新写序号
-	unownedDirty       map[uint64]uint64            // 未绑定特定 ino (ino=0) 的脏 packID -> 最新写序号
-	inoPacks           map[uint64]map[uint64]uint64 // ino -> (未同步脏 packID -> 最新写序号)
-	dirtyNew           map[uint64]struct{}          // 新建尚未完成首次 fdatasync 的 packID 集合
-	dirDirty           bool                         // packs/ 目录项发生变更（新建包落盘或 removePack）需执行目录 fsync
+	dirtyPacks         map[uint64]uint64
+	unownedDirty       map[uint64]uint64
+	inoPacks           map[uint64]map[uint64]uint64
+	dirtyNew           map[uint64]struct{}
+	dirDirty           bool
 	dirDirtySeq        uint64
 	syncFlights        map[uint64]*packSyncFlight
 	dirFlight          *dirSyncFlight
@@ -129,7 +119,6 @@ type blobStore struct {
 	reclaimDone     chan struct{}
 	removePackHook  func(packID uint64)
 
-	// 4. 常驻 .pack 文件句柄表（涵盖活跃包与已封口只读包，0 open/close 并发 ReadAt）
 	filesMu   sync.RWMutex
 	packFiles map[uint64]*os.File
 
@@ -214,7 +203,6 @@ func (s *blobStore) writeAtTimed(file *os.File, data []byte, off int64) (int, er
 	return file.WriteAt(data, off)
 }
 
-// advanceMinPackID 确保后续分配的 PackID 严格大于 minPackID（供 StoreActor 启动恢复 sys:pack 时对齐游标）。
 func (s *blobStore) advanceMinPackID(minPackID uint64) {
 	if minPackID == 0 {
 		return
@@ -232,7 +220,6 @@ func (s *blobStore) advanceMinPackID(minPackID uint64) {
 	}
 }
 
-// activePackID 无锁原子返回当前活跃可写 .pack 的编号（0 表示尚无活跃包或已封口）。
 func (s *blobStore) activePackID() uint64 {
 	return s.atomicActivePackID.Load()
 }
@@ -265,7 +252,6 @@ func (s *blobStore) existingPackIDs() []uint64 {
 	return ids
 }
 
-// allocPackID 无锁分配下一个唯一 PackID；当本地号段耗尽时加 allocMu 向外部血缘分配器或按本地 4096 步长预留新号段。
 func (s *blobStore) allocPackID(ctx context.Context) (uint64, error) {
 	for {
 		next := s.nextPackID.Load()
@@ -328,7 +314,7 @@ func (s *blobStore) allocPackID(ctx context.Context) (uint64, error) {
 }
 
 func packFileName(packID uint64) string {
-	var buf [21]byte // "0000000000000000.pack"
+	var buf [21]byte
 	const hexDigits = "0123456789abcdef"
 	for i := 15; i >= 0; i-- {
 		buf[i] = hexDigits[packID&0x0f]
@@ -339,7 +325,7 @@ func packFileName(packID uint64) string {
 }
 
 func packFilePath(dir string, packID uint64) string {
-	var buf [22]byte // "/0000000000000000.pack"
+	var buf [22]byte
 	const hexDigits = "0123456789abcdef"
 	buf[0] = filepath.Separator
 	for i := 16; i >= 1; i-- {
@@ -350,9 +336,6 @@ func packFilePath(dir string, packID uint64) string {
 	return dir + string(buf[:])
 }
 
-// append 将有效块数据（1..256 KiB）追加写入当前活跃 .pack：
-//   - 若当前活跃包剩余空间不足 maxPackSize，自动将当前活跃包封口并分配新 PackID 创建下一个活跃 .pack；
-//   - 在 activeOffset 处执行 WriteAt，推进 activeOffset，登记 ino 脏包并写入 hotShard 热缓存。
 func (s *blobStore) append(ctx context.Context, ino uint64, data []byte) (BlobRef, error) {
 	if len(data) == 0 || len(data) > BlobSize {
 		return BlobRef{}, ErrInvalidValue
@@ -400,9 +383,6 @@ func (s *blobStore) append(ctx context.Context, ino uint64, data []byte) (BlobRe
 	return ref, nil
 }
 
-// appendBlocks 将一个或多个连续的 256 KiB（BlobSize）满块批量追加写入活跃 .pack：
-//   - 当当前活跃 .pack 剩余容量可容纳连续多个满块时，在单次锁与单次 WriteAt 系统调用内合并写入整段数据；
-//   - 跨 maxPackSize 封口边界时自动分段切入新 .pack，按块顺序返回对应的 BlobRef 序列（满块批量写已落入内核页缓存，跳过用户态分片热缓存二次拷贝）。
 func (s *blobStore) appendBlocks(ctx context.Context, ino uint64, data []byte) ([]BlobRef, error) {
 	if len(data) == 0 || len(data)%BlobSize != 0 {
 		return nil, ErrInvalidValue
@@ -483,9 +463,6 @@ func (s *blobStore) appendBlocks(ctx context.Context, ino uint64, data []byte) (
 	return refs, nil
 }
 
-// extendTail 尝试对位于当前活跃 .pack 最末尾的逻辑块执行原地顺延扩展：
-//   - 仅当 oldRef.PackID == curActivePackID && oldRef.Offset + oldRef.Length == activeOffset 且扩展后不超过 maxPackSize 时生效；
-//   - 若不满足尾部顺延条件，返回 (BlobRef{}, false, nil)，调用方应回退为读取旧块合并后调用 append。
 func (s *blobStore) extendTail(ino uint64, oldRef BlobRef, patchOffset uint32, patchData []byte, newLength uint32) (BlobRef, bool, error) {
 	if oldRef.PackID == 0 || oldRef.Length == 0 || newLength < oldRef.Length || newLength == 0 || newLength > BlobSize {
 		return BlobRef{}, false, ErrInvalidValue
@@ -511,7 +488,6 @@ func (s *blobStore) extendTail(ino uint64, oldRef BlobRef, patchOffset uint32, p
 	file := s.activeFile
 	packID := s.curActivePackID
 
-	// 处理跨越旧块末尾空洞或尾部新增字节写入
 	writeStart := patchOffset
 	writePayload := patchData
 	if patchOffset > oldRef.Length {
@@ -712,7 +688,6 @@ func (s *blobStore) markDirDirtyLocked() {
 	s.dirDirty = true
 }
 
-// tryReadHot 尝试仅从分片内存热块缓存读取指定区间；命中时计入 hot_cache 指标并返回 true。
 func (s *blobStore) tryReadHot(ref BlobRef, offset int64, dst []byte) bool {
 	if len(dst) == 0 {
 		return true
@@ -727,7 +702,6 @@ func (s *blobStore) tryReadHot(ref BlobRef, offset int64, dst []byte) bool {
 	return false
 }
 
-// readAtContext 按块内相对偏移 offset 读取指定区间，并在命中磁盘冷读时记录 pread 耗时直方图与按需创建 store.BlobPread 子 Span。
 func (s *blobStore) readAtContext(ctx context.Context, ref BlobRef, offset int64, dst []byte) error {
 	if len(dst) == 0 {
 		return nil
@@ -749,8 +723,6 @@ func (s *blobStore) readAtContext(ctx context.Context, ref BlobRef, offset int64
 	return s.readRangeAtContext(ctx, ref.PackID, int64(ref.Offset)+offset, dst, 1)
 }
 
-// readRangeAtContext 对同一 .pack 文件内物理紧邻的冷块区间执行单次合并 ReadAt 系统调用，
-// 并按 blockCount 累加逻辑冷块计数、按单次系统调用记录 pread 耗时与追踪 Span。
 func (s *blobStore) readRangeAtContext(ctx context.Context, packID uint64, packOffset int64, dst []byte, blockCount uint64) (err error) {
 	if len(dst) == 0 {
 		return nil
@@ -818,7 +790,6 @@ func (s *blobStore) getOrOpenPackFile(packID uint64) (*os.File, error) {
 	return f, nil
 }
 
-// hotReadAt 在对应分片锁保护下直接将内存缓存切片的 [offset, offset+len(dst)) 拷贝至 dst。
 func (s *blobStore) hotReadAt(packID uint64, blockOffset uint32, offset int64, dst []byte) bool {
 	if offset < 0 {
 		return false
@@ -1015,7 +986,6 @@ func (s *blobStore) evictHotPack(packID uint64) {
 	}
 }
 
-// sync 将所有未刷盘的脏 .pack 常驻句柄与待刷 packs/ 目录持久化落盘。
 func (s *blobStore) sync() error {
 	s.mu.Lock()
 	if len(s.dirtyPacks) == 0 && !s.dirDirty {
@@ -1031,8 +1001,6 @@ func (s *blobStore) sync() error {
 	return s.syncBatch(packs, syncTriggerFlushWAL)
 }
 
-// sealAndSync 排空待回收死包、同步所有脏包并封口当前活跃 .pack（使其永久只读），
-// 随后同步残留脏包与源 packs/ 目录。
 func (s *blobStore) sealAndSync(ctx context.Context, livePackIDs []uint64) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1121,8 +1089,6 @@ func (s *blobStore) clearDirtyTrackingOnSealLocked(packID uint64) {
 	s.bgQueue = slices.DeleteFunc(s.bgQueue, func(id uint64) bool { return id == packID })
 }
 
-// syncInode 仅对包含指定 Inode 未刷盘写入的脏 .pack 常驻句柄执行 fdatasync，
-// 且仅在涉及新建 .pack 首次落盘或目录变更时对 packs/ 目录执行 1 次目录 fsync。
 func (s *blobStore) syncInode(ino uint64) error {
 	s.mu.Lock()
 	var packs []uint64
@@ -1336,8 +1302,6 @@ func (s *blobStore) syncBatch(packs []uint64, trigger syncTrigger) error {
 	return errors.Join(errs...)
 }
 
-// enqueueRemovePacks 将已完成 Pebble WAL Sync 确认的死包编号投递至后台回收协程异步物理删除，
-// 避免在前台 Fsync 屏障路径上同步阻塞 StoreActor。
 func (s *blobStore) enqueueRemovePacks(packIDs []uint64) {
 	if len(packIDs) == 0 {
 		return
@@ -1382,7 +1346,6 @@ func (s *blobStore) enqueueRemovePacks(packIDs []uint64) {
 	s.mu.Unlock()
 }
 
-// waitPendingReclaims 阻塞等待当前后台死包异步回收队列中所有已投递任务执行完毕。
 func (s *blobStore) waitPendingReclaims() {
 	for {
 		s.mu.Lock()
@@ -1474,7 +1437,6 @@ func (s *blobStore) clearDirtyStateForPackLocked(packID uint64) {
 	s.markDirDirtyLocked()
 }
 
-// removePack 关闭指定 .pack 的常驻文件句柄、剔除热块缓存并从宿主机删除物理 .pack 文件。
 func (s *blobStore) removePack(packID uint64) error {
 	if packID == 0 {
 		return nil
@@ -1511,7 +1473,6 @@ func (s *blobStore) removePack(packID uint64) error {
 	return err
 }
 
-// close 安全停止后台回写与刷盘协程、排空待回收死包队列并关闭所有常驻 .pack 文件句柄。
 func (s *blobStore) close() error {
 	s.mu.Lock()
 	wasClosed := s.closed

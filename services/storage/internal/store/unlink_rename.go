@@ -9,7 +9,6 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 )
 
-// RenameReq 定义 Rename 目录项重命名、覆盖或双向交换参数。
 type RenameReq struct {
 	OldParentIno     uint64
 	OldName          []byte
@@ -24,7 +23,6 @@ type rmdirNodeOp struct {
 	parentIno uint64
 	name      []byte
 
-	// Phase A 校验缓存至 Phase B
 	parent    Inode
 	target    Inode
 	xattrKeys [][]byte
@@ -69,8 +67,6 @@ func (s *StoreActor) readLiveChildByEntry(reader pebbleReader, parentIno uint64,
 	return child, nil
 }
 
-// isDirEmpty 通过 reader.NewIter(nil) + iter.SeekPrefixGE(EntryPrefix(ino)) 激活 15B Prefix Bloom Filter，
-// 检查目录是否不含任何子目录项。
 func (s *StoreActor) isDirEmpty(reader pebbleReader, ino uint64) (empty bool, err error) {
 	iter, err := reader.NewIter(nil)
 	if err != nil {
@@ -85,7 +81,6 @@ func (s *StoreActor) isDirEmpty(reader pebbleReader, ino uint64) (empty bool, er
 	return !valid, nil
 }
 
-// collectXattrKeys 通过 reader.NewIter(nil) + iter.SeekPrefixGE(XattrPrefix(ino)) 收集指定节点的全部扩展属性键。
 func (s *StoreActor) collectXattrKeys(reader pebbleReader, ino uint64) (keys [][]byte, err error) {
 	iter, err := reader.NewIter(nil)
 	if err != nil {
@@ -191,7 +186,6 @@ func (s *StoreActor) applyInodeReclaimPlan(plan *inodeReclaimPlan) {
 	}
 }
 
-// Rmdir 在 Actor 双阶段循环内移除空目录并递减父目录 Nlink 与分支节点计数。
 func (s *StoreActor) Rmdir(ctx context.Context, parentIno uint64, name []byte, epoch ...uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -301,7 +295,6 @@ type unlinkNodeOp struct {
 	name       []byte
 	openHandle bool
 
-	// Phase A 校验缓存至 Phase B
 	parent  Inode
 	target  Inode
 	reclaim inodeReclaimPlan
@@ -316,8 +309,6 @@ type cleanOrphansOp struct {
 	plans []inodeReclaimPlan
 }
 
-// Unlink 在 Actor 双阶段循环内移除非目录目录项并递减目标节点 Nlink；
-// 当 Nlink 归零时按 openHandle 转为孤儿节点或直接物理回收。
 func (s *StoreActor) Unlink(ctx context.Context, parentIno uint64, name []byte, openHandle bool, epoch ...uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -423,7 +414,6 @@ func (s *StoreActor) mutateUnlinkCmd(cmd *writeCmd) {
 	s.applyInodeReclaimPlan(&op.reclaim)
 }
 
-// PurgeOrphanInode 在 Actor 双阶段循环内物理清理指定孤儿节点及其关联 XattrKey、DataKey 与配额统计。
 func (s *StoreActor) PurgeOrphanInode(ctx context.Context, ino uint64, epoch ...uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -480,7 +470,6 @@ func (s *StoreActor) mutatePurgeOrphanCmd(cmd *writeCmd) {
 	s.applyInodeReclaimPlan(&op.plan)
 }
 
-// CleanOrphans 在 Actor 双阶段循环内批量扫描并清理分支内所有孤儿节点。
 func (s *StoreActor) CleanOrphans(ctx context.Context) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -589,7 +578,6 @@ func (s *StoreActor) mutateCleanOrphansCmd(cmd *writeCmd) {
 type renameNodeOp struct {
 	req RenameReq
 
-	// Phase A 校验缓存至 Phase B
 	noop          bool
 	crossParent   bool
 	oldIsDir      bool
@@ -603,7 +591,6 @@ type renameNodeOp struct {
 	reclaim       inodeReclaimPlan
 }
 
-// isSubdirectory 向上回溯 ParentIno 链，检查 childIno 是否为 ancestorIno 自身或其子孙目录。
 func (s *StoreActor) isSubdirectory(reader pebbleReader, childIno, ancestorIno uint64) (bool, error) {
 	seen := make(map[uint64]struct{})
 	for curr := childIno; ; {
@@ -628,9 +615,6 @@ func (s *StoreActor) isSubdirectory(reader pebbleReader, childIno, ancestorIno u
 	}
 }
 
-// Rename 在 Actor 双阶段循环内执行目录项重命名（支持默认覆盖、RenameNoreplace 与 RenameExchange）。
-//
-//nolint:gocritic // hugeParam: Rename 公开契约按值接收 RenameReq。
 func (s *StoreActor) Rename(ctx context.Context, req RenameReq) error {
 	if s.readOnly {
 		return ErrReadOnly

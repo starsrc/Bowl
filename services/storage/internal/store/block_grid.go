@@ -19,7 +19,6 @@ type writeBlockSpec struct {
 	keep     bool
 	sameRef  bool
 
-	// Phase A 校验时从 s.batch 读取的实时旧块状态
 	oldRef BlobRef
 	oldOK  bool
 }
@@ -58,18 +57,14 @@ func (s *StoreActor) readDataBlobRefFromDB(ctx context.Context, ino, blockIdx ui
 	return ref, true, nil
 }
 
-// collectDataKeys 通过 reader.NewIter(nil) + iter.SeekPrefixGE(DataPrefix(ino)) 激活 14B Prefix Bloom Filter，
-// 收集指定节点的全部 DataKey 及对应 BlobRef。
 func (s *StoreActor) collectDataKeys(reader pebbleReader, ino uint64) ([]dataKeyEntry, error) {
 	return s.collectDataKeysInRange(reader, ino, 0, math.MaxUint64)
 }
 
-// collectDataKeysFrom 扫描指定节点从 startBlockIdx 起（闭区间 [startBlockIdx, +∞)）的所有 DataKey 及对应 BlobRef。
 func (s *StoreActor) collectDataKeysFrom(reader pebbleReader, ino, startBlockIdx uint64) ([]dataKeyEntry, error) {
 	return s.collectDataKeysInRange(reader, ino, startBlockIdx, math.MaxUint64)
 }
 
-// collectDataKeysInRange 扫描指定节点在闭区间 [startBlockIdx, endBlockIdx] 内的全部 DataKey 及对应 BlobRef。
 func (s *StoreActor) collectDataKeysInRange(reader pebbleReader, ino, startBlockIdx, endBlockIdx uint64) (entries []dataKeyEntry, err error) {
 	if startBlockIdx > endBlockIdx {
 		return nil, nil
@@ -109,8 +104,6 @@ func (s *StoreActor) collectDataKeysInRange(reader pebbleReader, ino, startBlock
 	return entries, nil
 }
 
-// resolveWriteBlockSpecs 在 Stage 2 Phase A 中统一从 s.batch 读取各目标逻辑块的实时旧引用状态；
-// 对于 blockIdx * BlobSize >= inodeSize 的尾部越界新块，根据存储引擎不变量直接判定无旧引用（0 次点查）。
 func (s *StoreActor) resolveWriteBlockSpecs(reader pebbleReader, ino, inodeSize uint64, specs []writeBlockSpec) error {
 	for i := range specs {
 		if specs[i].blockIdx*BlobSize >= inodeSize {
@@ -128,7 +121,6 @@ func (s *StoreActor) resolveWriteBlockSpecs(reader pebbleReader, ino, inodeSize 
 	return nil
 }
 
-// deleteDataKeyEntries 在 Stage 2 Phase B 中统一扣减被移除块的存活字节并从批次中删除 DataKey。
 func (s *StoreActor) deleteDataKeyEntries(entries []dataKeyEntry) {
 	for _, entry := range entries {
 		s.removeBlobRef(entry.ref)
@@ -136,7 +128,6 @@ func (s *StoreActor) deleteDataKeyEntries(entries []dataKeyEntry) {
 	}
 }
 
-// applyWriteBlockSpecs 在 Stage 2 Phase B 中按 256 KiB 逻辑块网格计划统一更新存活字节账本与 DataKey。
 func (s *StoreActor) applyWriteBlockSpecs(ino uint64, specs []writeBlockSpec) {
 	for i := range specs {
 		b := &specs[i]
@@ -155,7 +146,6 @@ func (s *StoreActor) applyWriteBlockSpecs(ino uint64, specs []writeBlockSpec) {
 	}
 }
 
-// applyBlockMutations 在 Stage 2 Phase B 中统一执行整块范围删除与边界/覆写块更新。
 func (s *StoreActor) applyBlockMutations(ino uint64, specs []writeBlockSpec, deleted []dataKeyEntry) {
 	s.deleteDataKeyEntries(deleted)
 	s.applyWriteBlockSpecs(ino, specs)

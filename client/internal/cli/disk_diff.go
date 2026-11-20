@@ -23,8 +23,8 @@ const (
 	diskDiffTimeout       = 60 * time.Second
 	maxDiffPathBytes      = 4096
 	maxDiffPageTokenBytes = 4096
-	readNodeChunkSize     = 4 << 20  // 4 MiB chunk limit per read RPC
-	maxPatchFileBytes     = 32 << 20 // 32 MiB max text size for --patch rendering
+	readNodeChunkSize     = 4 << 20
+	maxPatchFileBytes     = 32 << 20
 	maxMyersEditDist      = 2000
 
 	posixIFMT = 0o170000
@@ -384,7 +384,6 @@ func (a *diskDiffAdapter) renderEntryPatch(
 		return "", nil
 	}
 
-	// Skip file data diff for directories and special files.
 	if (left.present && left.isDir) || (right.present && right.isDir) {
 		if left.isDir != right.isDir {
 			return fmt.Sprintf("diff a/%s b/%s\nFile type changed (directory vs non-directory)\n", relPath, relPath), nil
@@ -781,7 +780,6 @@ func computeMyersMiddle(a, b []string, baseOffset int) []diffLineOp {
 		})
 	}
 
-	// Reverse operations to restore forward order.
 	for l, r := 0, len(revOps)-1; l < r; l, r = l+1, r-1 {
 		revOps[l], revOps[r] = revOps[r], revOps[l]
 	}
@@ -816,7 +814,7 @@ func formatUnifiedDiff(oldLabel, newLabel string, oldData, newData []byte) strin
 				hEnd++
 				continue
 			}
-			// Look ahead to merge hunks within 2*contextLines.
+
 			nextChange := -1
 			limit := min(len(ops), hEnd+2*contextLines+1)
 			for j := hEnd; j < limit; j++ {

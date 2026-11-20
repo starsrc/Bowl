@@ -17,7 +17,6 @@ var (
 	securityCapabilityXattr = []byte("security.capability")
 )
 
-// SetAttrReq 定义 SetAttr 属性变更请求参数。
 type SetAttrReq struct {
 	Mode     *uint32
 	UID      *uint32
@@ -38,7 +37,6 @@ type setXattrOp struct {
 	value []byte
 	flags uint32
 
-	// Phase A 校验缓存至 Phase B
 	inode Inode
 }
 
@@ -46,7 +44,6 @@ type removeXattrOp struct {
 	ino  uint64
 	name []byte
 
-	// Phase A 校验缓存至 Phase B
 	inode Inode
 }
 
@@ -55,7 +52,6 @@ type setAttrOp struct {
 	req       SetAttrReq
 	tailSpecs []writeBlockSpec
 
-	// Phase A 校验缓存至 Phase B
 	inode      Inode
 	deleteKeys []dataKeyEntry
 	attr       Attribute
@@ -71,7 +67,6 @@ func validateXattrName(name []byte) error {
 	return nil
 }
 
-// isAllowedUserXattrFileType 判定文件模式是否允许访问 user.* 扩展属性命名空间（仅常规文件、目录与套接字）。
 func isAllowedUserXattrFileType(mode uint32) bool {
 	fileType := mode & S_IFMT
 	return fileType == S_IFREG || fileType == S_IFDIR || fileType == S_IFSOCK
@@ -116,7 +111,6 @@ func checkXattrListQuota(reader pebbleReader, ino uint64, newName []byte) (err e
 	return nil
 }
 
-// SetXattr 在 Actor 双阶段循环内设置或覆盖节点扩展属性。
 func (s *StoreActor) SetXattr(ctx context.Context, ino uint64, name, value []byte, flags uint32, epoch ...uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -199,7 +193,6 @@ func (s *StoreActor) mutateSetXattrCmd(cmd *writeCmd) {
 	_ = BatchSetInodeDeferred(s.batch, op.inode)
 }
 
-// GetXattr 在并发直读快路径（lifecycleMu.RLock()）直接调用 db.Get(XattrKey) 读取节点扩展属性值。
 func (s *StoreActor) GetXattr(ctx context.Context, ino uint64, name []byte) ([]byte, error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -245,8 +238,6 @@ func (s *StoreActor) GetXattr(ctx context.Context, ino uint64, name []byte) ([]b
 	return out, nil
 }
 
-// ListXattr 在并发直读快路径（lifecycleMu.RLock()）通过 db.NewIter(nil) + iter.SeekPrefixGE(XattrPrefix(ino))
-// 触发 15B 前缀布隆过滤器，按字节字典序升序返回节点扩展属性名列表。
 func (s *StoreActor) ListXattr(ctx context.Context, ino uint64) (names [][]byte, err error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -312,7 +303,6 @@ func (s *StoreActor) ListXattr(ctx context.Context, ino uint64) (names [][]byte,
 	return names, nil
 }
 
-// RemoveXattr 在 Actor 双阶段循环内删除节点指定扩展属性。
 func (s *StoreActor) RemoveXattr(ctx context.Context, ino uint64, name []byte, epoch ...uint64) error {
 	if s.readOnly {
 		return ErrReadOnly
@@ -405,7 +395,6 @@ func validateSetAttrReq(req SetAttrReq) error {
 	return nil
 }
 
-// validateSetAttrInode 在 Phase A 校验目标 Inode 是否允许执行 req 指定的属性变更（供 SetAttr 及 setAttrSizeHook 复用）。
 func (s *StoreActor) validateSetAttrInode(inode *Inode, req SetAttrReq) error {
 	fileType := inode.Mode & S_IFMT
 	if req.Size != nil {
@@ -440,7 +429,6 @@ func (s *StoreActor) validateSetAttrInode(inode *Inode, req SetAttrReq) error {
 	return nil
 }
 
-// applySetAttrFields 在 Phase B 将 req 属性更新应用至 inode，并同步更新分支逻辑容量、dirtyAtime 及 security.capability。
 func (s *StoreActor) applySetAttrFields(inode *Inode, req SetAttrReq, nowNano int64, seq uint64) {
 	fileType := inode.Mode & S_IFMT
 	if req.Mode != nil {
@@ -495,7 +483,6 @@ func (s *StoreActor) applySetAttrFields(inode *Inode, req SetAttrReq, nowNano in
 	}
 }
 
-// SetAttr 在 Actor 双阶段循环内修改节点属性。
 func (s *StoreActor) SetAttr(ctx context.Context, ino uint64, req SetAttrReq, epoch ...uint64) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly

@@ -102,7 +102,6 @@ func toProtoMergeConflictReport(lcaCommitID string, report *store.MergeConflictR
 	}
 }
 
-// DiffDisk 计算源虚拟磁盘与其祖先切面或指定目标盘之间的三路/两路差异列表。
 func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.DiffDiskRequest]) (*connect.Response[storagev1.DiffDiskResponse], error) {
 	var targetDiskID string
 	if req.Msg.TargetDiskId != nil {
@@ -145,7 +144,6 @@ func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.Di
 	}), nil
 }
 
-// ReadCommitNode 从所属血缘的不可变提交切面只读分片读取指定文件或符号链接内容。
 func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
 	res, err := s.control.ReadCommitNode(ctx, &control.ReadCommitNodeParams{
 		DiskID:   req.Msg.DiskId,
@@ -167,7 +165,6 @@ func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storag
 	}), nil
 }
 
-// MergeDisk 将源虚拟磁盘的变更三路合并进目标虚拟磁盘并原子推进目标盘世代号与基准提交。
 func (s *Server) MergeDisk(ctx context.Context, req *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
 	strategy, err := toStoreMergeStrategy(req.Msg.Strategy)
 	if err != nil {

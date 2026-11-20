@@ -45,7 +45,7 @@ func withUmountToolStub(t *testing.T, availableTool, toolPath string, out []byte
 }
 
 func TestUmount_GivenHelpAndInvalidArgs_ReturnsExpectedExitCodes(t *testing.T) {
-	// Given / When / Then
+
 	code, out, errOut := runCLI("umount", "-h")
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -84,15 +84,13 @@ func TestUmount_GivenHelpAndInvalidArgs_ReturnsExpectedExitCodes(t *testing.T) {
 }
 
 func TestUmount_GivenForceFalseFlag_PreservesNormalUnmountAndDrain(t *testing.T) {
-	// Given
+
 	mp := "/mnt/bowl-force-false"
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-	// When: --force=false must use normal -u rather than lazy -uz
 	code, out, errOut := runCLI("umount", "--force=false", mp)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
@@ -101,18 +99,15 @@ func TestUmount_GivenForceFalseFlag_PreservesNormalUnmountAndDrain(t *testing.T)
 }
 
 func TestUmount_GivenUnmountedOrUnreadableMountInfo_ReturnsExit1(t *testing.T) {
-	// Given: not mounted
+
 	withMountInfoContent(t, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	// When
 	code, out, errOut := runCLI("umount", "/mnt/not-mounted")
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "is not a mounted filesystem")
 
-	// Given: unreadable mountinfo
 	withUnreadableMountInfo(t)
 	code, out, errOut = runCLI("umount", "/mnt/not-mounted")
 	require.Equal(t, 1, code)
@@ -121,25 +116,21 @@ func TestUmount_GivenUnmountedOrUnreadableMountInfo_ReturnsExit1(t *testing.T) {
 }
 
 func TestUmount_GivenFusermount3Available_ExecutesNormalAndForceArgs(t *testing.T) {
-	// Given
+
 	mp := "/mnt/bowl-a"
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-	// When: 常规卸载
 	code, out, errOut := runCLI("umount", mp)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
 	require.Equal(t, "/usr/bin/fusermount3", *binName)
 	require.Equal(t, []string{"-u", mp}, *binArgs)
 
-	// When: unmount 别名 + -f 强制卸载
 	code, out, errOut = runCLI("unmount", "-f", mp)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
@@ -147,24 +138,20 @@ func TestUmount_GivenFusermount3Available_ExecutesNormalAndForceArgs(t *testing.
 }
 
 func TestUmount_GivenFusermountAndUmountFallbacks_SelectsExpectedToolAndFlags(t *testing.T) {
-	// Given: 仅 fusermount 可用
+
 	mp := "/mnt/bowl-b"
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	binName, binArgs := withUmountToolStub(t, "fusermount", "/bin/fusermount", nil, nil)
 
-	// When
 	code, _, errOut := runCLI("umount", "--force", mp)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	require.Equal(t, "/bin/fusermount", *binName)
 	require.Equal(t, []string{"-uz", mp}, *binArgs)
 
-	// Given: 仅系统 umount 可用
 	binName, binArgs = withUmountToolStub(t, "umount", "/bin/umount", nil, nil)
 
-	// When: 普通与 -f 模式
 	code, _, errOut = runCLI("umount", mp)
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
@@ -178,25 +165,20 @@ func TestUmount_GivenFusermountAndUmountFallbacks_SelectsExpectedToolAndFlags(t 
 }
 
 func TestUmount_GivenMissingToolOrToolFailure_ReturnsExit1WithErrorMessage(t *testing.T) {
-	// Given: no unmount tool available
+
 	mp := "/mnt/bowl-c"
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	withUmountToolStub(t, "none", "", nil, nil)
 
-	// When
 	code, _, errOut := runCLI("umount", mp)
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "no system unmount tool found")
 
-	// Given: unmount tool returns failure
 	withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", []byte("device busy"), errors.New("exit status 1"))
 
-	// When
 	code, _, errOut = runCLI("umount", mp)
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "unmount failed")
 	require.Contains(t, errOut, "device busy")
@@ -215,7 +197,7 @@ func withUmountDrainStub(t *testing.T, timeout, poll time.Duration) {
 }
 
 func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t *testing.T) {
-	// Given: 常规卸载前存在 mountMeta，卸载命令返回 0 后异步清理 mountMeta
+
 	mp := "/mnt/bowl-drain"
 	metaDir := t.TempDir()
 	withTempMountMetaDirs(t, metaDir)
@@ -251,17 +233,14 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 		runCommand = prevRun
 	})
 
-	// When
 	code, out, errOut := runCLI("umount", mp)
 
-	// Then: 等待 mountMeta 消失后才返回 0
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
 	_, statErr := os.Stat(metaPath)
 	require.True(t, os.IsNotExist(statErr), "bowl umount 返回 0 时 mountMeta 必须已消失")
 
-	// Given: 常规卸载等待超时（mountMeta 始终未消失且 PID 存活）
 	metaPath2, err := writeMountMeta(&mountMeta{
 		Mountpoint: mp,
 		PID:        os.Getpid(),
@@ -275,14 +254,11 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 		return nil, nil
 	}
 
-	// When
 	code, _, errOut = runCLI("umount", mp)
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Contains(t, errOut, "timed out")
 
-	// Given: -f 强制卸载即使 mountMeta 仍存在也不等待，直接返回 0
 	_, statErr2 := os.Stat(metaPath2)
 	require.NoError(t, statErr2)
 	code, out, errOut = runCLI("umount", "-f", mp)
@@ -292,7 +268,7 @@ func TestUmount_GivenActiveMountMeta_WaitsForDrainOnNormalAndTimesOutWhenStuck(t
 }
 
 func TestUmount_GivenDefaultDrainTimingAndNoTimeoutFlag_Enforces5mBudgetAndRejectsTimeoutFlag(t *testing.T) {
-	// Given / When / Then
+
 	require.Equal(t, 5*time.Minute, umountDrainTimeout)
 	require.Equal(t, 20*time.Millisecond, umountDrainPollInterval)
 
@@ -348,7 +324,7 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 			name = "TTY"
 		}
 		t.Run(name, func(t *testing.T) {
-			// Given
+
 			mp := "/mnt/bowl-zero-progress"
 			dir1 := t.TempDir()
 			dir2 := t.TempDir()
@@ -424,10 +400,8 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 				runCommand = prevRun
 			})
 
-			// When
 			code, out, errOut := runCLI("umount", mp)
 
-			// Then
 			require.Equal(t, 0, code)
 			require.Empty(t, out)
 			require.Empty(t, errOut)
@@ -445,7 +419,7 @@ func TestUmount_GivenStaleDeadMetaAndZeroTotal_PrefersAlivePIDAndEmitsNoOutput(t
 }
 
 func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Percent(t *testing.T) {
-	// Given: verify default polling and logging cadences before overriding seams.
+
 	require.Equal(t, 100*time.Millisecond, umountProgressPollInterval)
 	require.Equal(t, 2*time.Second, umountNonTTYLogInterval)
 	require.Equal(t, 1*time.Second, umountFallbackGracePeriod)
@@ -534,10 +508,8 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 			runCommand = prevRun
 		})
 
-		// When
 		code, out, errOut := runCLI("umount", mp)
 
-		// Then
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
 		require.NotContains(t, errOut, "\r")
@@ -612,10 +584,8 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 			runCommand = prevRun
 		})
 
-		// When
 		code, out, errOut := runCLI("umount", mp)
 
-		// Then
 		require.Equal(t, 0, code)
 		require.Empty(t, out)
 		require.Equal(t, "Syncing to cloud: 100% (4/4)\n", errOut)
@@ -623,7 +593,7 @@ func TestUmount_GivenNonTTYAndPendingWork_LogsPlainLinesAtIntervalAndFinal100Per
 }
 
 func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentWithNewline(t *testing.T) {
-	// Given
+
 	mp := "/mnt/bowl-tty-progress"
 	withTempMountMetaDirs(t, t.TempDir())
 	withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
@@ -699,10 +669,8 @@ func TestUmount_GivenTTYAndPendingWork_RendersSingleLineProgressBarTo100PercentW
 		runCommand = prevRun
 	})
 
-	// When
 	code, out, errOut := runCLI("umount", mp)
 
-	// Then
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "Syncing to cloud")
@@ -987,7 +955,7 @@ func TestUmount_GivenDefaultTerminalDetector_ReturnsFalseForBuffersAndPipes(t *t
 }
 
 func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t *testing.T) {
-	// Given
+
 	realMP := filepath.Join(t.TempDir(), "real-mp")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
 	canonMP := canonicalMountpoint(realMP)
@@ -1023,10 +991,8 @@ func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t 
 	}
 	t.Cleanup(func() { runCommand = prevRun })
 
-	// When
 	code, out, errOut := runCLI("umount", symMP)
 
-	// Then
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
@@ -1037,17 +1003,15 @@ func TestUmount_GivenSymlinkMountpoint_PassesCanonicalPathToToolAndDrainsMeta(t 
 }
 
 func TestUmount_GivenUnmountedSymlink_ReportsOriginalAbsPath(t *testing.T) {
-	// Given
+
 	realMP := filepath.Join(t.TempDir(), "unmounted-real")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
 	symMP := filepath.Join(t.TempDir(), "unmounted-sym")
 	require.NoError(t, os.Symlink(realMP, symMP))
 	withMountInfoContent(t, "100 30 0:50 / /mnt/other rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	// When
 	code, out, errOut := runCLI("umount", symMP)
 
-	// Then
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, filepath.Clean(symMP))
@@ -1055,7 +1019,7 @@ func TestUmount_GivenUnmountedSymlink_ReportsOriginalAbsPath(t *testing.T) {
 }
 
 func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithoutMountRootLstat(t *testing.T) {
-	// Given: realWedgedMP and realOkMP are active mount roots in mountinfo
+
 	const (
 		realWedgedMP = "/wedged-root/mnt"
 		realOkMP     = "/ok-root/mnt"
@@ -1093,7 +1057,6 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 	})
 	require.NoError(t, err)
 
-	// When: resolving umount metadata via symlinked paths
 	gotWedgedPath, gotWedgedMeta, okWedged := resolveUmountMountMeta(symWedgedMP)
 	require.True(t, okWedged)
 	require.Equal(t, filepath.Join(metaDir, mountMetaFileName(realWedgedMP)), gotWedgedPath)
@@ -1104,7 +1067,6 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 	require.Equal(t, okMetaPath, gotOkPath)
 	require.Equal(t, realOkMP, gotOkMeta.Mountpoint)
 
-	// When: normal unmount via symOkMP while realWedgedMP is mounted
 	_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 	prevRun := runCommand
 	var calledArgs []string
@@ -1126,7 +1088,6 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 	_, statErr := os.Stat(okMetaPath)
 	require.True(t, os.IsNotExist(statErr))
 
-	// When: force unmount via symWedgedMP
 	code, out, errOut = runCLI("umount", "-f", symWedgedMP)
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
@@ -1138,7 +1099,7 @@ func TestUmount_GivenWedgedAndHealthyMounts_ResolvesUmountMetaAndUnmountsWithout
 }
 
 func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCanonicalPath(t *testing.T) {
-	// Given: /tmp/sym points to /data/mnt while /data/mnt is mounted, so Lstat on /data/mnt must not run
+
 	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
 		"/tmp":     {mode: os.ModeDir | 0o755},
@@ -1146,10 +1107,8 @@ func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCan
 	})
 	binName, binArgs := withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
 
-	// When: force umount via direct canonical path invokes zero Lstat calls
 	code, out, errOut := runCLI("umount", "-f", "/data/mnt")
 
-	// Then
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Empty(t, errOut)
@@ -1157,10 +1116,8 @@ func TestUmount_GivenForceAndWedgedMountPaths_AvoidsLstatOnMountRootAndPassesCan
 	require.Equal(t, []string{"-uz", "/data/mnt"}, *binArgs)
 	require.Empty(t, *lstatCalls)
 
-	// When: force umount via symlink resolves to /data/mnt without calling Lstat on /data/mnt
 	code, out, errOut = runCLI("umount", "-f", "/tmp/sym")
 
-	// Then
 	require.Equal(t, 0, code, "stderr=%s", errOut)
 	require.Empty(t, out)
 	require.Empty(t, errOut)

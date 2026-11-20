@@ -20,10 +20,9 @@ const sampleMountInfo = `23 61 0:21 / /sys rw,nosuid,nodev,noexec,relatime share
 `
 
 func TestIsMountPoint_GivenMountedAndOctalEscapedPaths_ReturnsExpectedState(t *testing.T) {
-	// Given
+
 	withMountInfoContent(t, sampleMountInfo)
 
-	// When / Then
 	mountedBar, err := IsMountPoint("/mnt/foo/bar/")
 	require.NoError(t, err)
 	require.True(t, mountedBar)
@@ -38,10 +37,9 @@ func TestIsMountPoint_GivenMountedAndOctalEscapedPaths_ReturnsExpectedState(t *t
 }
 
 func TestIsMountPoint_GivenMalformedAndUnescapedLines_HandlesGracefully(t *testing.T) {
-	// Given
+
 	withMountInfoContent(t, "1 2 3\n\nnot-a-mountinfo-line\n100 30 0:50 / /mnt/no-separator rw\n101 30 0:51 / /mnt/keep\\999 rw - fuse.bowl bowl:disk rw\n")
 
-	// When / Then
 	noSep, err := IsMountPoint("/mnt/no-separator")
 	require.NoError(t, err)
 	require.True(t, noSep)
@@ -56,33 +54,28 @@ func TestIsMountPoint_GivenMalformedAndUnescapedLines_HandlesGracefully(t *testi
 }
 
 func TestIsMountPoint_GivenMissingMountInfoFile_ReturnsFalseWithoutError(t *testing.T) {
-	// Given
+
 	withMissingMountInfo(t)
 
-	// When
 	mounted, err := IsMountPoint("/mnt/anything")
 
-	// Then
 	require.NoError(t, err)
 	require.False(t, mounted)
 }
 
 func TestIsMountPoint_GivenUnreadableMountInfo_ReturnsError(t *testing.T) {
-	// Given
+
 	withUnreadableMountInfo(t)
 
-	// When
 	_, err := IsMountPoint("/mnt/anything")
 
-	// Then
 	require.Error(t, err)
 }
 
 func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAndDistinguishesReadOnly(t *testing.T) {
-	// Given
+
 	withMountInfoContent(t, sampleMountInfo)
 
-	// When / Then: rw 挂载
 	info1, err := FindDiskMountpoint("0192A3B4-C5D6-7E8F-9012-3456789ABCD1")
 	require.NoError(t, err)
 	require.Equal(t, DiskMountInfo{
@@ -91,7 +84,6 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 		ReadOnly:   false,
 	}, info1)
 
-	// When / Then: ro,nosuid 只读挂载
 	info2, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd2")
 	require.NoError(t, err)
 	require.Equal(t, DiskMountInfo{
@@ -100,7 +92,6 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 		ReadOnly:   true,
 	}, info2)
 
-	// When / Then: rw,errors=remount-ro 不应误判为只读挂载
 	info4, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd4")
 	require.NoError(t, err)
 	require.Equal(t, DiskMountInfo{
@@ -109,7 +100,6 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 		ReadOnly:   false,
 	}, info4)
 
-	// When / Then: 未挂载
 	info3, err := FindDiskMountpoint("0192a3b4-c5d6-7e8f-9012-3456789abcd3")
 	require.NoError(t, err)
 	require.False(t, info3.Mounted)
@@ -118,7 +108,7 @@ func TestFindDiskMountpoint_GivenActiveAndAbsentDisks_MatchesCaseInsensitivelyAn
 }
 
 func TestIsMountPoint_GivenSymlinkedLeafAndParent_MatchesCanonicalMountinfo(t *testing.T) {
-	// Given: real mountpoint recorded in mountinfo, accessed via leaf symlink and symlinked parent
+
 	realParent := t.TempDir()
 	realMP := filepath.Join(realParent, "real-mnt")
 	require.NoError(t, os.MkdirAll(realMP, 0o755))
@@ -133,7 +123,6 @@ func TestIsMountPoint_GivenSymlinkedLeafAndParent_MatchesCanonicalMountinfo(t *t
 
 	withMountInfoContent(t, "100 30 0:50 / "+canonMP+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 
-	// When / Then
 	symMounted, err := IsMountPoint(symMP)
 	require.NoError(t, err)
 	require.True(t, symMounted, "leaf symlink to active mountpoint must match mountinfo")
@@ -229,17 +218,15 @@ func buildSymlinkChainNodes(hops int, target string) map[string]fakeFSNode {
 }
 
 func TestResolveMountPoint_GivenDirectAndSyntheticMountedPaths_ReturnsZeroLstatCalls(t *testing.T) {
-	// Given: /mnt/bowl-a is synthetic and absent on host disk; /data/mnt is mounted
+
 	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /mnt/bowl-a rw - fuse.bowl bowl:"+testDiskID1+" rw\n101 30 0:51 / /data/mnt rw - fuse.bowl bowl:"+testDiskID2+" rw\n")
 	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{})
 
-	// When
 	resolvedSynthetic, mountedSynthetic, err := ResolveMountPoint("/mnt/bowl-a")
 	require.NoError(t, err)
 	resolvedTrailSlash, mountedTrailSlash, err := ResolveMountPoint("/data/mnt/")
 	require.NoError(t, err)
 
-	// Then
 	require.True(t, mountedSynthetic)
 	require.Equal(t, "/mnt/bowl-a", resolvedSynthetic)
 	require.True(t, mountedTrailSlash)
@@ -248,17 +235,15 @@ func TestResolveMountPoint_GivenDirectAndSyntheticMountedPaths_ReturnsZeroLstatC
 }
 
 func TestResolveMountPoint_GivenLeafSymlinkToMountpoint_StopsBeforeLstatOnMountRoot(t *testing.T) {
-	// Given: /tmp/sym points to /data/mnt, where /data/mnt is an active mountpoint
+
 	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n100 30 0:50 / /data/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
 		"/tmp":     {mode: os.ModeDir | 0o755},
 		"/tmp/sym": {mode: os.ModeSymlink | 0o777, target: "/data/mnt"},
 	})
 
-	// When
 	resolved, mounted, err := ResolveMountPoint("/tmp/sym")
 
-	// Then
 	require.NoError(t, err)
 	require.True(t, mounted)
 	require.Equal(t, "/data/mnt", resolved)
@@ -266,7 +251,7 @@ func TestResolveMountPoint_GivenLeafSymlinkToMountpoint_StopsBeforeLstatOnMountR
 }
 
 func TestResolveMountPoint_GivenSymlinkedParent_ResolvesCanonicalMountWithoutLstatOnMountRoot(t *testing.T) {
-	// Given: /var/run points to /run while /run/mnt is active, and /var/rel points to ../run
+
 	withMountInfoContent(t, "30 61 8:1 / / rw - ext4 /dev/sda1 rw\n35 30 0:25 / /run rw - tmpfs tmpfs rw\n100 35 0:50 / /run/mnt rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
 	lstatCalls := withMountInfoFSStub(t, map[string]fakeFSNode{
 		"/var":     {mode: os.ModeDir | 0o755},
@@ -274,13 +259,11 @@ func TestResolveMountPoint_GivenSymlinkedParent_ResolvesCanonicalMountWithoutLst
 		"/var/rel": {mode: os.ModeSymlink | 0o777, target: "../run"},
 	})
 
-	// When
 	resolvedAbs, mountedAbs, err := ResolveMountPoint("/var/run/mnt")
 	require.NoError(t, err)
 	resolvedRel, mountedRel, err := ResolveMountPoint("/var/rel/mnt")
 	require.NoError(t, err)
 
-	// Then
 	require.True(t, mountedAbs)
 	require.Equal(t, "/run/mnt", resolvedAbs)
 	require.True(t, mountedRel)
@@ -347,7 +330,7 @@ func TestResolveMountPoint_GivenHopLimitErrorsAndMissingMountInfo_HandlesCleanly
 }
 
 func TestResolveMountPoint_GivenActiveMountRootsInPath_SkipsLstatOnMountRoots(t *testing.T) {
-	// Given: /run, /real-wedged, and /real-ok are active mount roots in mountinfo
+
 	const (
 		realWedgedMP = "/real-wedged"
 		realOkMP     = "/real-ok"
@@ -364,24 +347,20 @@ func TestResolveMountPoint_GivenActiveMountRootsInPath_SkipsLstatOnMountRoots(t 
 		"/var/sym":    {mode: os.ModeSymlink | 0o777, target: realWedgedMP},
 	})
 
-	// When: resolving a symlink beneath the active intermediate mount root /run
 	resolvedOk, mountedOk, err := ResolveMountPoint("/run/sym-ok")
 	require.NoError(t, err)
 	require.True(t, mountedOk)
 	require.Equal(t, realOkMP, resolvedOk)
 
-	// When: resolving a path beneath the active wedged mount root /real-wedged/sub/leaf
 	resolvedSub, mountedSub, err := ResolveMountPoint("/real-wedged/sub/leaf")
 	require.NoError(t, err)
 	require.False(t, mountedSub)
 	require.Equal(t, "/real-wedged/sub/leaf", resolvedSub)
 
-	// When: resolving symlink pointing directly to wedged mount root
 	resolvedWedged, mountedWedged, err := ResolveMountPoint("/var/sym")
 	require.NoError(t, err)
 	require.True(t, mountedWedged)
 	require.Equal(t, realWedgedMP, resolvedWedged)
 
-	// Then: mountInfoLstat only inspected non-mount entries, never /, /run, /real-wedged, or /real-ok
 	require.Equal(t, []string{"/run/sym-ok", "/real-wedged/sub", "/var", "/var/sym"}, *lstatCalls)
 }

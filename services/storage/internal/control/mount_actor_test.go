@@ -68,7 +68,7 @@ func setupTestTracer(t *testing.T) (*sdktrace.TracerProvider, *tracetest.InMemor
 }
 
 func TestMountDisk_ReadWrite_AdvancesEpochAndFencesStaleWriter(t *testing.T) {
-	// Given: 创建磁盘并执行首次可写挂载拿到 epoch=1
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -90,11 +90,9 @@ func TestMountDisk_ReadWrite_AdvancesEpochAndFencesStaleWriter(t *testing.T) {
 	})
 	require.NoError(t, err, "初始 epoch 创建文件失败")
 
-	// When: 再次执行强制可写挂载推进 epoch 至 2
 	mnt2, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, Force: true})
 	require.NoError(t, err, "第二次可写挂载失败")
 
-	// Then: 新 epoch=2 生效，旧 epoch=1 写入被拦截为 ErrStaleEpoch
 	require.Equal(t, uint64(2), mnt2.Epoch, "第二次可写挂载 epoch 不匹配: want=2 got=%d", mnt2.Epoch)
 
 	_, _, staleErr := actor.Write(ctx, fAttr.Ino, 0, []byte("stale"), mnt1.Epoch)
@@ -106,7 +104,7 @@ func TestMountDisk_ReadWrite_AdvancesEpochAndFencesStaleWriter(t *testing.T) {
 }
 
 func TestMountDisk_ReadOnly_ReturnsZeroEpochWithoutFencingActiveWriter(t *testing.T) {
-	// Given: 创建配置自定义超时参数的磁盘并可写挂载拿到 epoch=1
+
 	ctx := context.Background()
 	mgr := New(
 		db.NewMemStore(),
@@ -123,10 +121,8 @@ func TestMountDisk_ReadOnly_ReturnsZeroEpochWithoutFencingActiveWriter(t *testin
 	require.NoError(t, err, "可写挂载失败")
 	require.Equal(t, uint64(1), rwMount.Epoch, "可写挂载 epoch 不匹配: want=1 got=%d", rwMount.Epoch)
 
-	// When: 执行只读挂载
 	roMount, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
 
-	// Then: 返回 epoch=0 与配置一致的缓存超时，且不影响活跃 epoch=1 的继续写入
 	require.NoError(t, err, "只读挂载失败")
 	require.Equal(t, uint64(0), roMount.Epoch, "只读挂载 epoch 应固定为 0: want=0 got=%d", roMount.Epoch)
 	require.Equal(t, RootIno, roMount.RootAttr.Ino, "根 Inode 不匹配: want=%d got=%d", RootIno, roMount.RootAttr.Ino)
@@ -145,7 +141,7 @@ func TestMountDisk_ReadOnly_ReturnsZeroEpochWithoutFencingActiveWriter(t *testin
 }
 
 func TestMountDisk_AfterRestart_PersistsEpochAndReclaimsOrphans(t *testing.T) {
-	// Given: 挂载写入并留下未关闭孤儿节点，随后关闭管理器模拟重启
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -170,12 +166,10 @@ func TestMountDisk_AfterRestart_PersistsEpochAndReclaimsOrphans(t *testing.T) {
 	require.NoError(t, actor1.Unlink(ctx, RootIno, []byte("orphan.bin"), true, mnt1.Epoch), "解链保留孤儿失败")
 	require.NoError(t, mgr1.Close(), "关闭旧管理器失败")
 
-	// When: 重启新管理器并执行可写挂载
 	mgr2 := New(memDB, WithStorageRoot(rootDir))
 	t.Cleanup(func() { _ = mgr2.Close() })
 	mnt2, err := mgr2.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID})
 
-	// Then: epoch 延续递增至 2 且孤儿节点已被清理回收
 	require.NoError(t, err, "重启后可写挂载失败")
 	require.Equal(t, uint64(2), mnt2.Epoch, "重启后可写挂载 epoch 应延续递增: want=2 got=%d", mnt2.Epoch)
 
@@ -186,7 +180,7 @@ func TestMountDisk_AfterRestart_PersistsEpochAndReclaimsOrphans(t *testing.T) {
 }
 
 func TestMountDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
-	// Given: 空控制面管理器与非法/不存在磁盘 ID 用例
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -201,7 +195,6 @@ func TestMountDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 		{name: "不存在的磁盘", diskID: "018f0000-0000-7000-8000-000000009999", wantErr: ErrNotFound},
 	}
 
-	// When / Then: 返回对应领域哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: tc.diskID})
@@ -222,7 +215,7 @@ func assertActorZeroAllocHit(t *testing.T, ctx context.Context, mgr Manager, dis
 }
 
 func TestActor_ColdLoadAndWarmPoolHit_ObservabilityAndZeroAllocHotPath(t *testing.T) {
-	// Given: 预建带写入数据与 epoch=1 的磁盘并关闭首任管理器
+
 	ctx := context.Background()
 	rootDir := t.TempDir()
 	memDB := db.NewMemStore()
@@ -239,7 +232,6 @@ func TestActor_ColdLoadAndWarmPoolHit_ObservabilityAndZeroAllocHotPath(t *testin
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(mgr2.Collector()), "注册 Collector 失败")
 
-	// When: 带采样 Span 冷加载磁盘 Actor，再验证热路径命中与不存在盘查询
 	sampledCtx, rootSpan := tp.Tracer("test-control").Start(ctx, "rpc.ColdLoad")
 	loaded, err := mgr2.Actor(sampledCtx, disk.DiskID)
 	require.NoError(t, err, "冷加载 StoreActor 失败")
@@ -251,14 +243,13 @@ func TestActor_ColdLoadAndWarmPoolHit_ObservabilityAndZeroAllocHotPath(t *testin
 	openOKCount := gatherMetricSampleCount(t, reg, "bowl_storage_control_open_actor_duration_seconds", "result", "ok")
 	require.Equal(t, uint64(1), openOKCount, "冷加载成功应记录 1 次 open_actor result=ok: want=1 got=%d", openOKCount)
 
-	// Then: 已加载磁盘热路径 Actor(ctx, diskID) 保持 0 allocs/op 且不产生冗余子 Span
 	exporter.Reset()
 	assertActorZeroAllocHit(t, ctx, mgr2, disk.DiskID, loaded)
 	require.Empty(t, exporter.GetSpans(), "热路径命中缓存池不应产生 OpenDiskActor 子 Span")
 }
 
 func TestActor_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
-	// Given: 空控制面管理器
+
 	ctx := context.Background()
 	mgr := New(db.NewMemStore(), WithStorageRoot(t.TempDir()))
 	t.Cleanup(func() { _ = mgr.Close() })
@@ -273,7 +264,6 @@ func TestActor_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 		{name: "不存在的磁盘", diskID: "018f0000-0000-7000-8000-000000009999", wantErr: ErrNotFound},
 	}
 
-	// When / Then: 返回对应领域哨兵错误
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := mgr.Actor(ctx, tc.diskID)
@@ -283,7 +273,7 @@ func TestActor_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 }
 
 func TestClose_IdempotentAndFencesSubsequentOperations(t *testing.T) {
-	// Given: 创建一块磁盘后两次关闭管理器
+
 	ctx := context.Background()
 	memDB := db.NewMemStore()
 	mgr := New(memDB, WithStorageRoot(t.TempDir()))
@@ -294,7 +284,6 @@ func TestClose_IdempotentAndFencesSubsequentOperations(t *testing.T) {
 	require.NoError(t, mgr.Close(), "首次 Close 应成功")
 	require.NoError(t, mgr.Close(), "重复 Close 应幂等成功")
 
-	// When / Then: 关闭后的所有控制面入口均返回 ErrClosed，且数据库记录不被误删
 	_, err = mgr.CreateDisk(ctx, CreateDiskParams{Name: "after-close", MaxBytes: 4096})
 	require.ErrorIs(t, err, ErrClosed, "关闭后 CreateDisk 应返回 ErrClosed: got=%v", err)
 

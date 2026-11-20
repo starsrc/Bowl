@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// MknodReq 定义 Mknod 节点创建参数。
 type MknodReq struct {
 	ParentIno uint64
 	Name      []byte
@@ -25,7 +24,6 @@ type MknodReq struct {
 	Epoch     uint64
 }
 
-// MkdirReq 定义 Mkdir 目录创建参数。
 type MkdirReq struct {
 	ParentIno uint64
 	Name      []byte
@@ -36,7 +34,6 @@ type MkdirReq struct {
 	Epoch     uint64
 }
 
-// CreateReq 定义 Create 常规文件创建参数。
 type CreateReq struct {
 	ParentIno uint64
 	Name      []byte
@@ -48,7 +45,6 @@ type CreateReq struct {
 	Epoch     uint64
 }
 
-// CreateTmpfileReq defines parameters for creating an anonymous temporary regular file.
 type CreateTmpfileReq struct {
 	ParentIno uint64
 	Mode      uint32
@@ -59,7 +55,6 @@ type CreateTmpfileReq struct {
 	Epoch     uint64
 }
 
-// SymlinkReq 定义 Symlink 符号链接创建参数。
 type SymlinkReq struct {
 	ParentIno uint64
 	Name      []byte
@@ -69,7 +64,6 @@ type SymlinkReq struct {
 	Epoch     uint64
 }
 
-// LinkReq 定义 Link 硬链接创建参数。
 type LinkReq struct {
 	Ino          uint64
 	NewParentIno uint64
@@ -77,7 +71,6 @@ type LinkReq struct {
 	Epoch        uint64
 }
 
-// DirEntry 表示 ReadDir 返回的单条目录项。
 type DirEntry struct {
 	Ino        uint64
 	Name       []byte
@@ -85,7 +78,6 @@ type DirEntry struct {
 	NextOffset uint64
 }
 
-// DirEntryPlus 表示 ReadDirPlus 返回的单条扩展目录项（内联目标节点 Attribute）。
 type DirEntryPlus struct {
 	Ino        uint64
 	Name       []byte
@@ -103,7 +95,6 @@ type createNodeOp struct {
 	rdev      uint32
 	target    []byte
 
-	// Phase A 校验缓存至 Phase B
 	parent Inode
 	attr   Attribute
 }
@@ -115,7 +106,6 @@ type createTmpfileOp struct {
 	gid       uint32
 	exclusive bool
 
-	// Phase A validation cached for Phase B.
 	parent Inode
 	attr   Attribute
 }
@@ -125,7 +115,6 @@ type linkNodeOp struct {
 	newParentIno uint64
 	newName      []byte
 
-	// Phase A 校验缓存至 Phase B
 	parent Inode
 	target Inode
 	attr   Attribute
@@ -152,7 +141,6 @@ func isDotOrDotDot(name []byte) bool {
 	return bytes.Equal(name, []byte(".")) || bytes.Equal(name, []byte(".."))
 }
 
-// Mknod 在 Actor 双阶段循环内创建非目录节点（S_IFREG / S_IFCHR / S_IFBLK / S_IFIFO / S_IFSOCK）。
 func (s *StoreActor) Mknod(ctx context.Context, req MknodReq) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly
@@ -187,7 +175,6 @@ func (s *StoreActor) Mknod(ctx context.Context, req MknodReq) (Attribute, error)
 	})
 }
 
-// Mkdir 在 Actor 双阶段循环内创建子目录并递增父目录 Nlink。
 func (s *StoreActor) Mkdir(ctx context.Context, req MkdirReq) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly
@@ -230,7 +217,6 @@ func resolveRegCreateMode(mode, umask uint32) (uint32, error) {
 	return S_IFREG | ((mode & PermMask) &^ (umask & 0o777)), nil
 }
 
-// Create 在 Actor 双阶段循环内创建常规文件节点。
 func (s *StoreActor) Create(ctx context.Context, req CreateReq) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly
@@ -261,7 +247,6 @@ func (s *StoreActor) Create(ctx context.Context, req CreateReq) (Attribute, erro
 	})
 }
 
-// CreateTmpfile allocates an unlinked regular-file inode and writes its orphan marker.
 func (s *StoreActor) CreateTmpfile(ctx context.Context, req CreateTmpfileReq) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly
@@ -294,7 +279,6 @@ func (s *StoreActor) CreateTmpfile(ctx context.Context, req CreateTmpfileReq) (A
 	return op.attr, nil
 }
 
-// Symlink 在 Actor 双阶段循环内创建符号链接节点。
 func (s *StoreActor) Symlink(ctx context.Context, req SymlinkReq) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly
@@ -325,7 +309,6 @@ func (s *StoreActor) Symlink(ctx context.Context, req SymlinkReq) (Attribute, er
 	})
 }
 
-// Link 在 Actor 双阶段循环内为已存在的非目录节点创建硬链接并递增 Nlink。
 func (s *StoreActor) Link(ctx context.Context, req LinkReq) (Attribute, error) {
 	if s.readOnly {
 		return Attribute{}, ErrReadOnly
@@ -621,7 +604,6 @@ func (s *StoreActor) mutateLinkCmd(cmd *writeCmd) {
 	op.attr = op.target.ToAttribute()
 }
 
-// Lookup 在并发直读快路径（lifecycleMu.RLock()）解析父目录下指定名称，返回 Entry 与叠加 dirtyAtime 后的 Attribute。
 func (s *StoreActor) Lookup(ctx context.Context, parentIno uint64, name []byte) (Entry, Attribute, error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -734,7 +716,6 @@ func (s *StoreActor) readEntryFromDB(ctx context.Context, parentIno uint64, name
 	return entry, nil
 }
 
-// Readlink 在并发直读快路径（lifecycleMu.RLock()）读取符号链接目标路径并按策略非阻塞登记 dirtyAtime。
 func (s *StoreActor) Readlink(ctx context.Context, ino uint64) ([]byte, error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -793,8 +774,6 @@ func (s *StoreActor) touchReadAtime(inode *Inode) {
 	}
 }
 
-// ReadDir 在并发直读快路径（lifecycleMu.RLock()）通过 db.NewIter(nil) + iter.SeekPrefixGE(EntryPrefix(ino))
-// 触发 15B 前缀布隆过滤器扫描目录项，合成 "." 与 ".." 并按游标 offset 分页返回。
 func (s *StoreActor) ReadDir(ctx context.Context, ino, offset uint64, maxEntries uint32) (entries []DirEntry, err error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -880,7 +859,6 @@ func (s *StoreActor) ReadDir(ctx context.Context, ino, offset uint64, maxEntries
 		finishSpan(scanSpan, err)
 	}()
 
-	// 严格使用 db.NewIter(nil) + iter.SeekPrefixGE(EntryPrefix(ino)) 激活 15B Prefix Bloom Filter。
 	iter, err := s.db.NewIter(nil)
 	if err != nil {
 		return nil, err
@@ -924,9 +902,6 @@ func (s *StoreActor) ReadDir(ctx context.Context, ino, offset uint64, maxEntries
 	return entries, nil
 }
 
-// ReadDirPlus 在并发直读快路径（lifecycleMu.RLock()）扫出当前页目录项后，
-// 将子项按 Ino 升序排序并复用同一个 iter 循环调用 iter.SeekPrefixGE(InodeKey(ino))
-// 激活 Pebble TrySeekUsingNext 批量获取子项 Attribute。
 func (s *StoreActor) ReadDirPlus(ctx context.Context, ino, offset uint64, maxEntries uint32) (entries []DirEntryPlus, err error) {
 	if s.metrics != nil {
 		opStart := time.Now()
@@ -1069,8 +1044,6 @@ func (s *StoreActor) ReadDirPlus(ctx context.Context, ino, offset uint64, maxEnt
 		return entries, nil
 	}
 
-	// 将子项按 Ino 升序去重排列，复用同一个 iter 循环调用 iter.SeekPrefixGE(InodeKey(ino))
-	// 使搜索键单调递增，自动触发 Pebble TrySeekUsingNext 块内步进优化。
 	sortedInos := make([]uint64, len(children))
 	for i, c := range children {
 		sortedInos[i] = c.entry.Ino

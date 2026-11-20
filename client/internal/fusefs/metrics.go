@@ -16,10 +16,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// FuseOp 标识 RawFS 实现的全部 41 个受观测 FUSE 操作枚举。
 type FuseOp uint8
 
-// 41 个受观测 FUSE 操作的枚举索引常量。
 const (
 	OpLookup FuseOp = iota
 	OpGetAttr
@@ -63,16 +61,14 @@ const (
 	OpCopyFileRange
 	OpStatx
 
-	// OpCount 是受观测的 FUSE 操作总数（36 个已实现核心入口 + 5 个内核协商探测/透传入口）。
 	OpCount = 41
 )
 
 const (
-	// opHistBuckets 是 opSlot 对数微秒直方图的有限桶数量（1µs .. 33,554,432µs，即 ~33.55s）。
 	opHistBuckets = 26
-	// errnoBucketCount 是单操作 POSIX errno 映射桶数量。
+
 	errnoBucketCount = 24
-	// waitHistBuckets 是阻塞等待亚毫秒直方图的桶数量（25µs .. 10s）。
+
 	waitHistBuckets = 18
 )
 
@@ -120,7 +116,6 @@ var fuseOpNames = [OpCount]string{
 	OpStatx:         "Statx",
 }
 
-// String 返回 FUSE 操作的规范名称。
 func (op FuseOp) String() string {
 	if int(op) < len(fuseOpNames) {
 		return fuseOpNames[op]
@@ -247,12 +242,10 @@ func errnoIndex(status fuse.Status) uint8 {
 	return errnoLookupTable[code]
 }
 
-// errnoName 返回非零 fuse.Status 对应的规范 POSIX 错误名。
 func errnoName(status fuse.Status) string {
 	return errnoBucketNames[errnoIndex(status)]
 }
 
-// opSlot 承载单个 FUSE 操作的零锁原子统计槽位，严格按 64B Cache-Line 整数倍（256B）对齐，消除多核伪共享。
 type opSlot struct {
 	inflight atomic.Int64
 	calls    atomic.Uint64
@@ -263,10 +256,8 @@ type opSlot struct {
 	_        [8]byte
 }
 
-// 编译期断言 opSlot 严格对齐至 64 字节缓存行边界（256 bytes = 4 * 64 bytes）。
 var _ [0]struct{} = [unsafe.Sizeof(opSlot{}) % 64]struct{}{}
 
-// waitHist 封装无锁原子亚毫秒延迟直方图（18 桶：25µs ~ 10s）。
 type waitHist struct {
 	count    atomic.Uint64
 	sumNanos atomic.Uint64
@@ -318,7 +309,6 @@ var nsCacheKindNames = [nsCacheKindCount]string{
 	nsCacheReadlink:      "readlink",
 }
 
-// stateSnapshotProvider 提供抓取时刻客户端各子系统的即时 Gauge 快照，避免热路径维护冗余锁。
 type stateSnapshotProvider interface {
 	collectSubsystemGauges() subsystemGauges
 }
@@ -344,26 +334,20 @@ type subsystemGauges struct {
 	fuseCongestionThreshold int
 }
 
-// Metrics 汇聚客户端 FUSE 41 个操作入口与 9 大有状态核心子系统的统一可观测性数据源。
-// 实例级隔离（不触碰全局 DefaultRegisterer），实现 prometheus.Collector，且全部方法对 nil 接收者安全。
 type Metrics struct {
-	// ops 置于结构体首位，配合 256B 对齐确保任意两个操作槽位不共享缓存行。
 	ops        [OpCount]opSlot
 	errnoTable [OpCount][errnoBucketCount]atomic.Uint64
 
-	// 1. NamespaceCache
 	nsHits          [nsCacheKindCount]atomic.Uint64
 	nsMisses        [nsCacheKindCount]atomic.Uint64
 	nsInvalidations atomic.Uint64
 	nsEvictions     atomic.Uint64
 
-	// 2. capabilityCache
 	capHits               atomic.Uint64
 	capMisses             atomic.Uint64
 	capGrants             atomic.Uint64
 	capEpochInvalidations atomic.Uint64
 
-	// 3. ReadAheadCoordinator
 	readAheadTriggers        atomic.Uint64
 	readAheadPrefetchedBytes atomic.Uint64
 	readAheadHits            atomic.Uint64
@@ -372,7 +356,6 @@ type Metrics struct {
 	readAheadInflight        atomic.Int64
 	readAheadWaitHist        waitHist
 
-	// 4. StageCoordinator
 	stageStagedCalls          atomic.Uint64
 	stageStagedBytes          atomic.Uint64
 	stagePassthroughCalls     atomic.Uint64
@@ -383,23 +366,19 @@ type Metrics struct {
 	stageBackpressureWaitHist waitHist
 	stageBarrierWaitHist      waitHist
 
-	// 5. TmpFileManager
 	tmpPromotes      atomic.Uint64
 	tmpResidentBytes atomic.Int64
 
-	// 7. LockTable
 	lockConflicts atomic.Uint64
 	lockWaits     atomic.Uint64
 	lockWaitNanos atomic.Uint64
 	lockWaitHist  waitHist
 
-	// 8. inodeLocks
 	inodeLockFast      atomic.Uint64
 	inodeLockContended atomic.Uint64
 	inodeLockWaitNanos atomic.Uint64
 	inodeLockWaitHist  waitHist
 
-	// 9. Async Queues (dirtyInodes / orphanInodes / releaseQueue)
 	dirtyFlushOK        atomic.Uint64
 	dirtyFlushErrors    atomic.Uint64
 	orphanReclaimOK     atomic.Uint64
@@ -410,7 +389,6 @@ type Metrics struct {
 	startedAtUnixNano int64
 	provider          atomic.Pointer[stateSnapshotProvider]
 
-	// Prometheus Descriptors（全部不含 ino/fh/path 等高基数标签）
 	fuseOpDurationDesc *prometheus.Desc
 	fuseOpsTotalDesc   *prometheus.Desc
 	fuseInflightDesc   *prometheus.Desc
@@ -472,7 +450,6 @@ type Metrics struct {
 
 var _ prometheus.Collector = (*Metrics)(nil)
 
-// NewMetrics 创建全新的客户端 FUSE 与子系统指标收集器实例。
 func NewMetrics() *Metrics {
 	return &Metrics{
 		startedAtUnixNano: time.Now().UnixNano(),
@@ -825,8 +802,6 @@ func (m *Metrics) endOp(op FuseOp, start time.Time, status fuse.Status, nBytes u
 	}
 }
 
-// --- 9 子系统内部零分配记录方法（全部对 nil 接收者安全） ---
-
 func (m *Metrics) incNSCacheHit(kind nsCacheKind) {
 	if m != nil && kind < nsCacheKindCount {
 		m.nsHits[kind].Add(1)
@@ -1041,7 +1016,6 @@ func (m *Metrics) incAsyncReleaseError() {
 	}
 }
 
-// Describe 实现 prometheus.Collector 接口。
 func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	if m == nil {
 		return
@@ -1105,7 +1079,6 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.fuseConnCongestionThrsDesc
 }
 
-// Collect 实现 prometheus.Collector 接口。
 func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	if m == nil {
 		return
@@ -1174,7 +1147,6 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 
 	gauges := m.collectGauges()
 
-	// 1. NamespaceCache
 	for k := range nsCacheKindCount {
 		label := nsCacheKindNames[k]
 		ch <- prometheus.MustNewConstMetric(m.nsHitsDesc, prometheus.CounterValue, float64(m.nsHits[k].Load()), label)
@@ -1186,14 +1158,12 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(m.nsWeightDesc, prometheus.GaugeValue, float64(gauges.nsUsedWeight), "used")
 	ch <- prometheus.MustNewConstMetric(m.nsWeightDesc, prometheus.GaugeValue, float64(gauges.nsCapacity), "capacity")
 
-	// 2. capabilityCache
 	ch <- prometheus.MustNewConstMetric(m.capHitsDesc, prometheus.CounterValue, float64(m.capHits.Load()))
 	ch <- prometheus.MustNewConstMetric(m.capMissesDesc, prometheus.CounterValue, float64(m.capMisses.Load()))
 	ch <- prometheus.MustNewConstMetric(m.capGrantsDesc, prometheus.CounterValue, float64(m.capGrants.Load()))
 	ch <- prometheus.MustNewConstMetric(m.capEpochInvalidationsDesc, prometheus.CounterValue, float64(m.capEpochInvalidations.Load()))
 	ch <- prometheus.MustNewConstMetric(m.capEntriesDesc, prometheus.GaugeValue, float64(gauges.capEntries))
 
-	// 3. ReadAheadCoordinator
 	ch <- prometheus.MustNewConstMetric(m.raTriggersDesc, prometheus.CounterValue, float64(m.readAheadTriggers.Load()))
 	ch <- prometheus.MustNewConstMetric(m.raPrefetchedDesc, prometheus.CounterValue, float64(m.readAheadPrefetchedBytes.Load()))
 	ch <- prometheus.MustNewConstMetric(m.raHitBytesDesc, prometheus.CounterValue, float64(m.readAheadHitBytes.Load()))
@@ -1201,7 +1171,6 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(m.raInflightDesc, prometheus.GaugeValue, float64(m.readAheadInflight.Load()))
 	ch <- m.readAheadWaitHist.constHistogram(m.raWaitDurationDesc)
 
-	// 4. StageCoordinator
 	ch <- prometheus.MustNewConstMetric(m.stageWritesTotalDesc, prometheus.CounterValue, float64(m.stageStagedCalls.Load()), "staged")
 	ch <- prometheus.MustNewConstMetric(m.stageWritesTotalDesc, prometheus.CounterValue, float64(m.stagePassthroughCalls.Load()), "passthrough")
 	ch <- prometheus.MustNewConstMetric(m.stageBytesTotalDesc, prometheus.CounterValue, float64(m.stageStagedBytes.Load()), "staged")
@@ -1215,30 +1184,25 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- m.stageBackpressureWaitHist.constHistogram(m.stageBackpressureWaitDesc)
 	ch <- m.stageBarrierWaitHist.constHistogram(m.stageBarrierWaitDesc)
 
-	// 5. TmpFileManager
 	ch <- prometheus.MustNewConstMetric(m.tmpActiveFilesDesc, prometheus.GaugeValue, float64(gauges.tmpActiveFiles))
 	ch <- prometheus.MustNewConstMetric(m.tmpResidentBytesDesc, prometheus.GaugeValue, float64(gauges.tmpResidentByte))
 	ch <- prometheus.MustNewConstMetric(m.tmpPromotesDesc, prometheus.CounterValue, float64(m.tmpPromotes.Load()))
 
-	// 6. HandleTable
 	ch <- prometheus.MustNewConstMetric(m.openHandlesDesc, prometheus.GaugeValue, float64(gauges.openFiles), "file")
 	ch <- prometheus.MustNewConstMetric(m.openHandlesDesc, prometheus.GaugeValue, float64(gauges.openDirs), "dir")
 
-	// 7. LockTable
 	ch <- prometheus.MustNewConstMetric(m.locksActiveDesc, prometheus.GaugeValue, float64(gauges.activeLocks))
 	ch <- prometheus.MustNewConstMetric(m.lockConflictsDesc, prometheus.CounterValue, float64(m.lockConflicts.Load()))
 	ch <- prometheus.MustNewConstMetric(m.lockWaitsDesc, prometheus.CounterValue, float64(m.lockWaits.Load()))
 	ch <- prometheus.MustNewConstMetric(m.lockWaitSecDesc, prometheus.CounterValue, float64(m.lockWaitNanos.Load())*1e-9)
 	ch <- m.lockWaitHist.constHistogram(m.lockWaitDurationDesc)
 
-	// 8. inodeLocks
 	ch <- prometheus.MustNewConstMetric(m.inodeLockAcqDesc, prometheus.CounterValue, float64(m.inodeLockFast.Load()), "fast")
 	ch <- prometheus.MustNewConstMetric(m.inodeLockAcqDesc, prometheus.CounterValue, float64(m.inodeLockContended.Load()), "contended")
 	ch <- prometheus.MustNewConstMetric(m.inodeLockWaitSecDesc, prometheus.CounterValue, float64(m.inodeLockWaitNanos.Load())*1e-9)
 	ch <- m.inodeLockWaitHist.constHistogram(m.inodeLockWaitDurationDesc)
 	ch <- prometheus.MustNewConstMetric(m.inodeLockActiveDesc, prometheus.GaugeValue, float64(gauges.inodeLockActive))
 
-	// 9. Async Queues & FUSE Connection Sysfs
 	ch <- prometheus.MustNewConstMetric(m.queueDepthDesc, prometheus.GaugeValue, float64(gauges.dirtyInodes), "dirty_inodes")
 	ch <- prometheus.MustNewConstMetric(m.queueDepthDesc, prometheus.GaugeValue, float64(gauges.orphanInodes), "orphan_inodes")
 	ch <- prometheus.MustNewConstMetric(m.queueDepthDesc, prometheus.GaugeValue, float64(gauges.releaseQueue), "release_queue")
@@ -1254,7 +1218,6 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(m.fuseConnCongestionThrsDesc, prometheus.GaugeValue, float64(gauges.fuseCongestionThreshold))
 }
 
-// OpSnapshot 表示单个 FUSE 操作在抓取时刻的结构化统计快照。
 type OpSnapshot struct {
 	Op            string                `json:"op"`
 	Inflight      int64                 `json:"inflight"`
@@ -1266,7 +1229,6 @@ type OpSnapshot struct {
 	Errnos        map[string]uint64     `json:"errnos,omitempty"`
 }
 
-// FUSESnapshot 汇总全部 41 个受观测 FUSE 操作的运行态指标快照。
 type FUSESnapshot struct {
 	TotalCalls           uint64       `json:"total_calls"`
 	TotalErrors          uint64       `json:"total_errors"`
@@ -1277,7 +1239,6 @@ type FUSESnapshot struct {
 	Ops                  []OpSnapshot `json:"ops"`
 }
 
-// NamespaceCacheStats 承载 NamespaceCache 的命中率与容量状态。
 type NamespaceCacheStats struct {
 	AttrHits            uint64 `json:"attr_hits"`
 	AttrMisses          uint64 `json:"attr_misses"`
@@ -1296,7 +1257,6 @@ type NamespaceCacheStats struct {
 	Capacity            int    `json:"capacity"`
 }
 
-// CapabilityCacheStats 承载 capabilityCache 的命中与失效状态。
 type CapabilityCacheStats struct {
 	Hits               uint64 `json:"hits"`
 	Misses             uint64 `json:"misses"`
@@ -1305,7 +1265,6 @@ type CapabilityCacheStats struct {
 	Entries            int    `json:"entries"`
 }
 
-// ReadAheadStats 承载 ReadAheadCoordinator 的预读、命中、等待与无效丢弃指标。
 type ReadAheadStats struct {
 	Triggers        uint64  `json:"triggers"`
 	PrefetchedBytes uint64  `json:"prefetched_bytes"`
@@ -1317,7 +1276,6 @@ type ReadAheadStats struct {
 	WaitSeconds     float64 `json:"wait_seconds"`
 }
 
-// StageStats 承载本地磁盘暂存协调器的分片写入/直通、后台上传、空间水位、背压等待与屏障等待指标。
 type StageStats struct {
 	StagedCalls             uint64  `json:"staged_calls"`
 	StagedBytes             uint64  `json:"staged_bytes"`
@@ -1335,20 +1293,17 @@ type StageStats struct {
 	BarrierWaitSeconds      float64 `json:"barrier_wait_seconds"`
 }
 
-// TmpFileStats 承载 TmpFileManager 的宿主机匿名文件驻留字节与转正指标。
 type TmpFileStats struct {
 	ActiveFiles   int    `json:"active_files"`
 	ResidentBytes uint64 `json:"resident_bytes"`
 	Promotes      uint64 `json:"promotes"`
 }
 
-// HandleStats 承载 HandleTable 当前打开的文件与目录句柄计数。
 type HandleStats struct {
 	OpenFiles int `json:"open_files"`
 	OpenDirs  int `json:"open_dirs"`
 }
 
-// LockStats 承载 LockTable 当前活跃文件锁与冲突/阻塞统计。
 type LockStats struct {
 	ActiveLocks int     `json:"active_locks"`
 	Conflicts   uint64  `json:"conflicts"`
@@ -1356,7 +1311,6 @@ type LockStats struct {
 	WaitSeconds float64 `json:"wait_seconds"`
 }
 
-// InodeLockStats 承载 inodeLocks 的快慢路径竞争指标。
 type InodeLockStats struct {
 	FastAcquisitions      uint64  `json:"fast_acquisitions"`
 	ContendedAcquisitions uint64  `json:"contended_acquisitions"`
@@ -1364,7 +1318,6 @@ type InodeLockStats struct {
 	ActiveEntries         int     `json:"active_entries"`
 }
 
-// AsyncQueueStats 承载脏节点、孤儿节点、异步释放重试队列与内核 FUSE 连接拥塞指标。
 type AsyncQueueStats struct {
 	DirtyInodes             int    `json:"dirty_inodes"`
 	OrphanInodes            int    `json:"orphan_inodes"`
@@ -1379,7 +1332,6 @@ type AsyncQueueStats struct {
 	FuseCongestionThreshold int    `json:"fuse_congestion_threshold"`
 }
 
-// Snapshot 承载客户端 FUSE 与 9 大子系统的完整一致性自省快照，统一服务于 bowl stats 与 .stats。
 type Snapshot struct {
 	TimestampUnixNano int64                `json:"timestamp_unix_nano"`
 	UptimeSeconds     float64              `json:"uptime_seconds"`
@@ -1418,7 +1370,6 @@ func readRuntimeProcessStats() (cpuSec float64, memBytes uint64) {
 	return cpuSec, memBytes
 }
 
-// Snapshot 抓取当前时刻的完整指标快照；对 nil 接收者安全。
 func (m *Metrics) Snapshot() Snapshot {
 	nowNs := time.Now().UnixNano()
 	cpuSec, memBytes := readRuntimeProcessStats()
@@ -1581,12 +1532,10 @@ func (m *Metrics) Snapshot() Snapshot {
 	}
 }
 
-// FormatJSON 将快照序列化为带缩进的 JSON 字节切片，供 bowl stats --json 直接输出。
 func (s *Snapshot) FormatJSON() ([]byte, error) {
 	return json.MarshalIndent(s, "", "  ")
 }
 
-// FormatText 将快照渲染为易读的多节文本摘要，供 bowl stats 默认输出。
 func (s *Snapshot) FormatText() string {
 	var b strings.Builder
 	b.Grow(1280)
@@ -1650,8 +1599,6 @@ var metaMutationOps = [...]FuseOp{
 	OpSetXAttr, OpRemoveXAttr, OpFsync, OpFsyncDir,
 }
 
-// FormatStatsFile 渲染两列空白分隔的键值统计文本，严格兼容 juicefs bench 对 .jfs.stats/.stats 的解析契约，
-// 同时附带完整的 bowl_client_* 扁平指标键值。
 func (s *Snapshot) FormatStatsFile() string {
 	var b strings.Builder
 	b.Grow(4096)
@@ -1693,7 +1640,6 @@ func (s *Snapshot) FormatStatsFile() string {
 		deleteDurNs = s.FUSE.Ops[OpUnlink].DurationNanos + s.FUSE.Ops[OpRmdir].DurationNanos
 	}
 
-	// 1. juicefs bench 兼容键（cmd/stats.go:readStats 逐行按两列空白符解析）
 	writeF64("juicefs_uptime", s.UptimeSeconds)
 	writeF64("juicefs_cpu_usage", s.CPUUsageSeconds)
 	writeU64("juicefs_memory", s.MemoryBytes)
@@ -1712,7 +1658,6 @@ func (s *Snapshot) FormatStatsFile() string {
 	writeU64("juicefs_blockcache_read_hist_seconds_total", s.ReadAhead.Hits)
 	writeF64("juicefs_blockcache_read_hist_seconds_sum", s.ReadAhead.WaitSeconds)
 
-	// 2. Bowl 原生扁平指标键值
 	writeF64("bowl_client_uptime_seconds", s.UptimeSeconds)
 	writeF64("bowl_client_cpu_usage_seconds", s.CPUUsageSeconds)
 	writeU64("bowl_client_memory_bytes", s.MemoryBytes)
@@ -1812,7 +1757,6 @@ func (s *Snapshot) FormatStatsFile() string {
 	return b.String()
 }
 
-// FormatStatsFile 抓取最新快照并渲染为 .stats 虚拟文件字节切片。
 func (m *Metrics) FormatStatsFile() []byte {
 	snap := m.Snapshot()
 	return []byte(snap.FormatStatsFile())

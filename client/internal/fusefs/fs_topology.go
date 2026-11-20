@@ -9,7 +9,6 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-// Mkdir 实现创建子目录操作，校验只读挂载、重写父 Inode，透传模式位与调用进程 UID/GID。
 func (fs *RawFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpMkdir)
 	opCtx, endSpan := fs.startFuseOp(OpMkdir)
@@ -60,15 +59,13 @@ func (fs *RawFS) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string,
 		child := fs.ToKernelIno(inode.GetIno())
 		fs.cache.putEntryAt(epoch, input.NodeId, name, child)
 		fs.cache.putInodeAt(epoch, child, inode, resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
-		// 新建目录在本次会话内为空：登记为权威完整目录并记录其父目录，目录内首次 Create/Mkdir 的
-		// Lookup 可直接返回 ENOENT，且后续冷读 ReadDirPlus 可直接从本地缓存合成完整目录流。
+
 		fs.cache.markNewDirWithParentAt(epoch, child, input.NodeId)
 	}
 	fs.FillEntryOut(out, resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds())
 	return fuse.OK
 }
 
-// Mknod 实现非目录特殊节点（如 FIFO 命名管道、设备节点、普通文件）的创建操作。
 func (fs *RawFS) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpMknod)
 	opCtx, endSpan := fs.startFuseOp(OpMknod)
@@ -126,7 +123,6 @@ func (fs *RawFS) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string,
 	return fuse.OK
 }
 
-// Rmdir 移除指定父目录下的空目录项。
 func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpRmdir)
 	opCtx, endSpan := fs.startFuseOp(OpRmdir)
@@ -174,9 +170,8 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 	}
 	fs.markMetaDirty()
 
-	// Rmdir 使父目录 nlink 减 1；保留父目录 Inode 缓存避免随后的 GetAttr 穿透。
 	fs.cache.invalidateDirListingTouchParentNowAt(epoch, header.NodeId, -1)
-	// 目录项已确定不存在，回填负缓存（ino=0），避免随后的 access()/stat() 再次穿透 RPC。
+
 	fs.cache.putEntryAt(epoch, header.NodeId, name, 0)
 	if child != 0 {
 		fs.handles.MarkRemovedDir(child, inode)
@@ -186,7 +181,6 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 	return fuse.OK
 }
 
-// Unlink 删除指定父目录下的非目录项（解链）。
 func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name string) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpUnlink)
 	opCtx, endSpan := fs.startFuseOp(OpUnlink)
@@ -242,7 +236,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		if hasChildServerIno && inode.GetAttr().GetFlags()&ProtoFlagImmutable != 0 {
 			fs.stage.BarrierInode(opCtx, childServerIno)
 		}
-		// 与并发 Release 的最后一个句柄关闭按 Inode 串行，保证孤儿标记不会互相错过。
+
 		unlock := fs.inodeLocks.lock(child)
 		defer unlock()
 		if fs.topologySeq.Load() != seq0 && (fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
@@ -276,12 +270,8 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 	}
 	fs.markMetaDirty()
 
-	// Unlink 不改变父目录 nlink；保留父目录 Inode 缓存避免下一次 unlink 前
-	// inode_permission(MAY_EXEC) 触发一次跨机 GetAttr。
 	fs.cache.invalidateDirListingTouchParentNowAt(epoch, header.NodeId, 0)
-	// 目录项已确定不存在，回填负缓存（ino=0）。SQLite DELETE 模式在提交后
-	// unlink("*-journal")，下一个事务的 hasHotJournal() 会立即 access() 该名字；
-	// 负缓存命中可消除这次 100% 穿透的跨机 Lookup RPC。
+
 	fs.cache.putEntryAt(epoch, header.NodeId, name, 0)
 	if child != 0 {
 		fs.cache.invalidateInode(child)

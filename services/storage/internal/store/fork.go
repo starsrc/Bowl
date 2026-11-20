@@ -24,12 +24,8 @@ const (
 	maxCheckpointLinkWorkers = 8
 )
 
-// InodeSegmentAllocator 定义同源血缘树跨实例防撞的 Inode 连续号段分配函数。
-// minNext 为当前实例已知最小可用起始节点号（max(本地最大已有 Inode, RootIno) + 1），
-// 返回的闭区间 [first, last] 须满足 first >= minNext 且 last >= first。
 type InodeSegmentAllocator func(ctx context.Context, minNext uint64) (first, last uint64, err error)
 
-// CheckpointStats 承载在线无感 Checkpoint 固化时刻的一致性统计快照。
 type CheckpointStats struct {
 	LogicalBytes uint64
 	Inodes       uint64
@@ -43,7 +39,6 @@ type checkpointOp struct {
 	stats   CheckpointStats
 }
 
-// HasOrphans 在生命周期读守卫下通过迭代器快速判定当前实例是否存在孤儿节点（orphan:<ino>）。
 func (s *StoreActor) HasOrphans() (has bool, err error) {
 	unlock, err := s.enter()
 	if err != nil {
@@ -69,11 +64,6 @@ func (s *StoreActor) hasOrphansInDB() (has bool, err error) {
 	return valid, nil
 }
 
-// Checkpoint 通过 Actor 内部同步屏障命令 opCheckpoint 在线生成一致性切面目录：
-//  1. 先将当前批次、dirtyAtime、dirtyPackStats 与 sys:stat 完整提交并完成 WAL Sync；
-//  2. 执行 db.Flush() 将活跃 MemTable 落盘为不可变 L0 .sst；
-//  3. 读取孤儿节点标记并收集所有 LiveBytes > 0 的存活 .pack 编号；
-//  4. 生成 Pebble Checkpoint 并将封口刷盘后的存活 .pack 硬链接至切面 packs/ 目录（全程不递增源盘 WriterEpoch）。
 func (s *StoreActor) Checkpoint(ctx context.Context, destDir string) (CheckpointStats, error) {
 	if s.readOnly {
 		return CheckpointStats{}, ErrReadOnly
@@ -129,12 +119,10 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 		return ErrIO
 	}
 
-	// 1. 将活跃 MemTable 刷为不可变 L0 .sst，消除切面打开时的 WAL 回放开销。
 	if flushErr := s.db.Flush(); flushErr != nil {
 		return flushErr
 	}
 
-	// 2. 检测孤儿节点并提取已提交且存活字节 > 0 的 .pack 集合。
 	hasOrphans, orphanErr := s.hasOrphansInDB()
 	if orphanErr != nil {
 		return orphanErr
@@ -147,8 +135,6 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 	}
 	slices.Sort(livePackIDs)
 
-	// 3. Pebble DB.Checkpoint 要求目标目录预先不存在（否则返回 os.ErrExist），
-	//    故先在 runLoop 静止屏障内创建 Pebble Checkpoint，再封口刷盘活跃 .pack 并硬链接存活包至切面目录。
 	if ckErr := s.db.Checkpoint(op.destDir); ckErr != nil {
 		return ckErr
 	}
@@ -190,7 +176,6 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 	return nil
 }
 
-// SanitizeOptions 定义独立执行 Checkpoint 孤儿净化与统计恢复的可观测配置。
 type SanitizeOptions struct {
 	Dir       string
 	CommitID  string
@@ -200,8 +185,6 @@ type SanitizeOptions struct {
 	OpenActor func(context.Context, Options) (*StoreActor, error)
 }
 
-// SanitizeCheckpoint 在临时可写 StoreActor（ResetEpoch: true）上清理切面目录中残留的孤儿节点及其独占死包，
-// 刷盘并关闭临时实例后返回净化后的容量与节点统计。
 func SanitizeCheckpoint(ctx context.Context, opts SanitizeOptions) (st StatFSResult, retErr error) {
 	if opts.Dir == "" {
 		return StatFSResult{}, ErrInvalid
@@ -270,10 +253,6 @@ func SanitizeCheckpoint(ctx context.Context, opts SanitizeOptions) (st StatFSRes
 	return st, nil
 }
 
-// CloneCheckpointDir 将不可变基准切面目录克隆至新盘工作目录：
-//   - 对不可变数据文件（*.sst、*.blob、packs/*.pack）执行 os.Link 零拷贝硬链接；
-//   - 对其余 Pebble 元数据文件（CURRENT、MANIFEST-*、OPTIONS-*、format-version.*、marker.*、*.log，跳过 LOCK）执行字节复制；
-//   - 同步目标目录与父目录，任意步骤失败时自动清理 dstDir。
 func CloneCheckpointDir(ctx context.Context, srcDir, dstDir string) (retErr error) {
 	if srcDir == "" || dstDir == "" {
 		return ErrInvalid

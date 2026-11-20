@@ -13,7 +13,6 @@ import (
 
 const fopenKeepCache uint32 = 1 << 1
 
-// Create 在指定父目录下原子创建常规文件。
 func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
 	msg := req.Msg
 	if err := validateWriteEpoch(msg.Epoch); err != nil {
@@ -56,7 +55,6 @@ func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.Crea
 	}), nil
 }
 
-// CreateTmpfile allocates an anonymous regular-file inode with no directory entry.
 func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storagev1.CreateTmpfileRequest]) (*connect.Response[storagev1.CreateTmpfileResponse], error) {
 	msg := req.Msg
 	if err := validateWriteEpoch(msg.GetEpoch()); err != nil {
@@ -91,7 +89,6 @@ func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storage
 	}), nil
 }
 
-// Fsync 同步并持久化文件节点与句柄关联的状态。
 func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.FsyncRequest]) (*connect.Response[storagev1.FsyncResponse], error) {
 	msg := req.Msg
 	if err := validateWriteEpoch(msg.Epoch); err != nil {
@@ -114,7 +111,6 @@ func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.Fsync
 	return connect.NewResponse(&storagev1.FsyncResponse{}), nil
 }
 
-// FsyncDir 同步并持久化目录节点与目录句柄关联的状态。
 func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.FsyncDirRequest]) (*connect.Response[storagev1.FsyncDirResponse], error) {
 	msg := req.Msg
 	if err := validateWriteEpoch(msg.Epoch); err != nil {
@@ -137,7 +133,6 @@ func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.Fs
 	return connect.NewResponse(&storagev1.FsyncDirResponse{}), nil
 }
 
-// ReadDir 读取指定目录的子项流（基本条目）。
 func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	msg := req.Msg
 	if msg.Fh > math.MaxInt64 {
@@ -170,7 +165,6 @@ func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.Rea
 	}), nil
 }
 
-// ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
 func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1.ReadDirPlusRequest]) (*connect.Response[storagev1.ReadDirPlusResponse], error) {
 	msg := req.Msg
 	if msg.Fh > math.MaxInt64 {
@@ -211,7 +205,6 @@ func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1
 	}), nil
 }
 
-// Fallocate 为常规文件扩展逻辑空间或清零指定区间。
 func (s *Server) Fallocate(ctx context.Context, req *connect.Request[storagev1.FallocateRequest]) (*connect.Response[storagev1.FallocateResponse], error) {
 	msg := req.Msg
 	if err := validateWriteEpoch(msg.Epoch); err != nil {

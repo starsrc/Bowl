@@ -1,4 +1,3 @@
-// Package testutil 提供存储模块端到端测试的客户端构造与错误断言辅助实现。
 package testutil
 
 import (
@@ -23,22 +22,18 @@ const (
 	expectedErrorDomain       = "bowl.storage"
 )
 
-// GetStorageServiceAddr 返回 `storage-service` 接入地址，默认值为 http://localhost:9000。
 func GetStorageServiceAddr() string {
 	return cmp.Or(os.Getenv("STORAGE_SERVICE_ADDR"), defaultStorageServiceAddr)
 }
 
-// GetStorageAdminAddr 返回 `storage-service` 内网管理接入地址，默认值为 http://127.0.0.1:9090。
 func GetStorageAdminAddr() string {
 	return cmp.Or(os.Getenv("STORAGE_ADMIN_ADDR"), "http://127.0.0.1:9090")
 }
 
-// NewStorageClient 创建指向默认 storage-service 地址的 ConnectRPC StorageService 客户端。
 func NewStorageClient(opts ...connect.ClientOption) storagev1connect.StorageServiceClient {
 	return NewStorageClientAt(GetStorageServiceAddr(), opts...)
 }
 
-// NewStorageClientAt 创建指向指定地址的 ConnectRPC StorageService 客户端。
 func NewStorageClientAt(addr string, opts ...connect.ClientOption) storagev1connect.StorageServiceClient {
 	client := &http.Client{
 		Timeout: 15 * time.Second,
@@ -46,7 +41,6 @@ func NewStorageClientAt(addr string, opts ...connect.ClientOption) storagev1conn
 	return storagev1connect.NewStorageServiceClient(client, addr, opts...)
 }
 
-// NewH2CStorageClient 创建启用明文 HTTP/2 (h2c) 与大流控窗口的 ConnectRPC 客户端。
 func NewH2CStorageClient(addr string, opts ...connect.ClientOption) storagev1connect.StorageServiceClient {
 	var protocols http.Protocols
 	protocols.SetUnencryptedHTTP2(true)
@@ -64,14 +58,10 @@ func NewH2CStorageClient(addr string, opts ...connect.ClientOption) storagev1con
 	return storagev1connect.NewStorageServiceClient(client, addr, opts...)
 }
 
-// ExtractErrorInfo 从 error 中提取 *errdetails.ErrorInfo 详情，
-// 委托给 serverx.ExtractErrorInfo。
 func ExtractErrorInfo(err error) *errdetails.ErrorInfo {
 	return serverx.ExtractErrorInfo(err)
 }
 
-// RequireConnectError 断言返回的错误符合 ConnectRPC 错误码及 POSIX 细粒度 ErrorInfo 契约。
-// 校验 connect.CodeOf(err) == wantCode，且 ErrorInfo.GetDomain() == "bowl.storage"、ErrorInfo.GetReason() == wantReason。
 func RequireConnectError(t testing.TB, err error, wantCode connect.Code, wantReason string) {
 	t.Helper()
 	require.Error(t, err, "预期产生 RPC 错误，实际为 nil")

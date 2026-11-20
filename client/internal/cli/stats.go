@@ -94,7 +94,6 @@ func normalizeStatsAdminAddr(raw string) (string, error) {
 	return trimmed, nil
 }
 
-// discoverAdminAddr resolves the admin HTTP address for the given mountpoint or sole active mount.
 func discoverAdminAddr(posArgs []string) (string, error) {
 	var meta mountMeta
 	if len(posArgs) == 1 {
@@ -128,7 +127,6 @@ func discoverAdminAddr(posArgs []string) (string, error) {
 	return meta.AdminAddr, nil
 }
 
-// fetchStats queries http://<addr>/debug/stats?format=<format>.
 func fetchStats(addr, format string) ([]byte, error) {
 	u := url.URL{Scheme: "http", Host: addr, Path: "/debug/stats", RawQuery: url.Values{"format": {format}}.Encode()}
 	ctx, cancel := context.WithTimeout(context.Background(), statsRequestTimeout)

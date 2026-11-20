@@ -1,0 +1,713 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/starsrc/bowl/client/internal/fusefs"
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
+)
+
+func TestRunFUSESignalUnmountLoop_GivenEBUSYOnSignal_LogsWarningAndRetriesOnTickerUntilCleanUnmount(t *testing.T) {
+	var logBuf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	sigCh := make(chan os.Signal, 2)
+	stopWait := make(chan struct{})
+	defer close(stopWait)
+
+	var calls atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runFUSESignalUnmountLoop(
+			context.Background(),
+			sigCh,
+			stopWait,
+			15*time.Millisecond,
+			"/mnt/busy-ticker",
+			logger,
+			func() error {
+				if calls.Add(1) < 3 {
+					return syscall.EBUSY
+				}
+				return nil
+			},
+		)
+	}()
+
+	sigCh <- syscall.SIGTERM
+
+	require.Eventually(t, func() bool {
+		return calls.Load() >= 3
+	}, time.Second, 5*time.Millisecond, "scene=ebusy_ticker_retry want>=3_calls got=%d", calls.Load())
+
+	time.Sleep(50 * time.Millisecond)
+	sigCh <- syscall.SIGINT
+	time.Sleep(30 * time.Millisecond)
+
+	require.Equal(t, int32(3), calls.Load(), "scene=stop_retry_after_nil want=3 got=%d", calls.Load())
+	logs := logBuf.String()
+	require.Contains(t, logs, `"level":"WARN"`)
+	require.Contains(t, logs, `"msg":"mount_unmount_busy"`)
+	require.Contains(t, logs, `"/mnt/busy-ticker"`)
+	require.Contains(t, logs, syscall.EBUSY.Error())
+}
+
+func TestRunFUSESignalUnmountLoop_GivenEBUSYOnSignal_RetriesOnSubsequentSignalBeforeTicker(t *testing.T) {
+	var logBuf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	sigCh := make(chan os.Signal, 2)
+	stopWait := make(chan struct{})
+	defer close(stopWait)
+
+	firstFailed := make(chan struct{})
+	var calls atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runFUSESignalUnmountLoop(
+			context.Background(),
+			sigCh,
+			stopWait,
+			5*time.Second,
+			"/mnt/busy-resignal",
+			logger,
+			func() error {
+				if calls.Add(1) == 1 {
+					close(firstFailed)
+					return syscall.EBUSY
+				}
+				return nil
+			},
+		)
+	}()
+
+	sigCh <- syscall.SIGINT
+	select {
+	case <-firstFailed:
+	case <-time.After(time.Second):
+		t.Fatal("scene=first_signal want=unmount_called got=timeout")
+	}
+
+	sigCh <- syscall.SIGTERM
+	require.Eventually(t, func() bool {
+		return calls.Load() == 2
+	}, time.Second, 5*time.Millisecond, "scene=second_signal_retry want=2 got=%d", calls.Load())
+
+	logs := logBuf.String()
+	require.Contains(t, logs, `"msg":"mount_unmount_busy"`)
+	require.Contains(t, logs, `"/mnt/busy-resignal"`)
+}
+
+func TestRunFUSESignalUnmountLoop_GivenCanceledContextAndEBUSY_NilsCtxDoneWithoutBusySpinAndStopsOnStopWait(t *testing.T) {
+	var logBuf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 2)
+	stopWait := make(chan struct{})
+
+	var calls atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runFUSESignalUnmountLoop(
+			ctx,
+			sigCh,
+			stopWait,
+			40*time.Millisecond,
+			"/mnt/busy-ctx",
+			logger,
+			func() error {
+				calls.Add(1)
+				return syscall.EBUSY
+			},
+		)
+	}()
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		return calls.Load() >= 2
+	}, time.Second, 5*time.Millisecond, "scene=ctx_cancel_retry want>=2 got=%d", calls.Load())
+
+	time.Sleep(60 * time.Millisecond)
+	close(stopWait)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scene=stopWait_exit want=loop_exited got=timeout")
+	}
+
+	finalCalls := calls.Load()
+	require.LessOrEqual(t, finalCalls, int32(10), "scene=no_busy_spin want<=10 got=%d", finalCalls)
+
+	time.Sleep(60 * time.Millisecond)
+	require.Equal(t, finalCalls, calls.Load(), "scene=no_calls_after_stopWait want=%d got=%d", finalCalls, calls.Load())
+	require.Contains(t, logBuf.String(), `"msg":"mount_unmount_busy"`)
+}
+
+type hookLogWriter struct {
+	mu      sync.Mutex
+	buf     strings.Builder
+	onWrite func(line string)
+}
+
+func (w *hookLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	chunk := string(p)
+	w.buf.WriteString(chunk)
+	if w.onWrite != nil {
+		w.onWrite(chunk)
+	}
+	return len(p), nil
+}
+
+func reserveLoopbackTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
+func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndStageBeforeRemovingMeta(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	mp := t.TempDir()
+	stageDir := t.TempDir()
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	fixedAddr := reserveLoopbackTCPAddr(t)
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "teardown-order-disk", 1<<30, 0)
+	storage.mountLeaseTTL = 30
+	withMountStorageFake(t, storage)
+
+	var (
+		stageInstDir           string
+		metaExistsAtUnmount    bool
+		readyStatusAtUnmount   int
+		sawUnmountComplete     bool
+		metaExistsAtComplete   bool
+		rebindErrAtComplete    error
+		stageStatErrAtComplete error
+	)
+
+	storage.onUnmountDisk = func(_ *storagev1.UnmountDiskRequest) {
+		_, metaExistsAtUnmount = findMountMeta(mp)
+		readyStatusAtUnmount, _ = fetchReadyzStatusAndBody(t, fixedAddr)
+	}
+
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, cfg *fusefs.Config, _ string, ready func()) error {
+		require.NotNil(t, cfg.StageSession)
+		stageInstDir = cfg.StageSession.InstanceDir()
+		ready()
+		status, _ := fetchReadyzStatusAndBody(t, fixedAddr)
+		require.Equal(t, http.StatusOK, status)
+		_, statErr := os.Stat(stageInstDir)
+		require.NoError(t, statErr)
+		return nil
+	})
+
+	logWriter := &hookLogWriter{
+		onWrite: func(chunk string) {
+			if !strings.Contains(chunk, "unmount_complete") {
+				return
+			}
+			sawUnmountComplete = true
+			_, metaExistsAtComplete = findMountMeta(mp)
+			rebindLn, err := net.Listen("tcp", fixedAddr)
+			rebindErrAtComplete = err
+			if rebindLn != nil {
+				_ = rebindLn.Close()
+			}
+			_, stageStatErrAtComplete = os.Stat(stageInstDir)
+		},
+	}
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: fixedAddr,
+		logLevel:  "info",
+		logFormat: "json",
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  stageDir,
+	}
+
+	err := runMount(context.Background(), opts, baseCfg, mp, logWriter, nil)
+
+	require.NoError(t, err)
+	require.True(t, metaExistsAtUnmount, "scene=during_unmount_rpc want=meta_exists got=false")
+	require.Equal(t, http.StatusOK, readyStatusAtUnmount, "scene=during_unmount_rpc want=admin_running_200 got=%d", readyStatusAtUnmount)
+	require.True(t, sawUnmountComplete, "scene=unmount_complete_logged want=true got=false")
+	require.False(t, metaExistsAtComplete, "scene=at_unmount_complete want=meta_removed got=true")
+	require.NoError(t, rebindErrAtComplete, "scene=at_meta_removal want=fixed_admin_addr_rebindable got=%v", rebindErrAtComplete)
+	require.ErrorIs(t, stageStatErrAtComplete, os.ErrNotExist, "scene=at_meta_removal want=stage_session_closed got=%v", stageStatErrAtComplete)
+}
+
+func TestAdminServerShutdown_GivenRepeatedCallsAndNilReceiver_IsIdempotentAndReleasesPort(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	var nilAdmin *adminServer
+	nilAdmin.shutdown(context.Background())
+
+	fixedAddr := reserveLoopbackTCPAddr(t)
+	obs, err := setupObservability(context.Background(), &mountOptions{
+		adminAddr: fixedAddr,
+		logLevel:  "info",
+		logFormat: "json",
+	}, &syncBuffer{})
+	require.NoError(t, err)
+	defer func() { _ = obs.Shutdown(context.Background()) }()
+
+	rawFS := fusefs.NewRawFS(nil, fusefs.Config{DiskID: testDiskID1, Mode: fusefs.MountModeRO})
+	admin, err := startAdminServer(fixedAddr, obs, rawFS, nil)
+	require.NoError(t, err)
+	require.NotNil(t, admin)
+
+	status, _ := fetchReadyzStatusAndBody(t, fixedAddr)
+	require.Equal(t, http.StatusOK, status)
+
+	admin.shutdown(context.Background())
+	admin.shutdown(context.Background())
+
+	ln, listenErr := net.Listen("tcp", fixedAddr)
+	require.NoError(t, listenErr, "scene=after_double_shutdown want=port_rebindable got=%v", listenErr)
+	require.NoError(t, ln.Close())
+}
+
+func readPipeWithDeadline(t *testing.T, r, w *os.File, timeout time.Duration) string {
+	t.Helper()
+	type readResult struct {
+		data string
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		b, err := io.ReadAll(r)
+		ch <- readResult{data: string(b), err: err}
+	}()
+	select {
+	case res := <-ch:
+		require.NoError(t, res.err)
+		return res.data
+	case <-time.After(timeout):
+		_ = w.Close()
+		<-ch
+		t.Fatalf("scene=readiness_pipe_eof want=writer_closed_within_%s got=timeout", timeout)
+		return ""
+	}
+}
+
+func TestMount_DaemonWorker_GivenPreWorkerValidationErrors_WritesERRToReadinessPipeAndExits1Silent(t *testing.T) {
+	validMP := t.TempDir()
+	missingMP := filepath.Join(t.TempDir(), "missing-mp")
+	mountedMP := canonicalMountpoint(t.TempDir())
+
+	cases := []struct {
+		name       string
+		mountInfo  string
+		args       []string
+		wantSubstr string
+	}{
+		{
+			name:       "InvalidLogLevel",
+			args:       []string{"mount", testDiskID1, validMP, "--log-level", "bogus"},
+			wantSubstr: "invalid --log-level",
+		},
+		{
+			name:       "InvalidDiskID",
+			args:       []string{"mount", "not-a-uuid", validMP},
+			wantSubstr: "invalid disk-id",
+		},
+		{
+			name:       "MissingMountpoint",
+			args:       []string{"mount", testDiskID1, missingMP},
+			wantSubstr: "does not exist or cannot be accessed",
+		},
+		{
+			name:       "AlreadyMountedTOCTOU",
+			mountInfo:  "100 30 0:50 / " + mountedMP + " rw - fuse.bowl bowl:" + testDiskID1 + " rw\n",
+			args:       []string{"mount", testDiskID1, mountedMP},
+			wantSubstr: "already mounted",
+		},
+		{
+			name:       "InvalidEndpoint",
+			args:       []string{"mount", testDiskID1, validMP, "--endpoint", "ftp://127.0.0.1:9000"},
+			wantSubstr: "invalid endpoint",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.mountInfo != "" {
+				withMountInfoContent(t, tc.mountInfo)
+			} else {
+				withMissingMountInfo(t)
+			}
+
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			defer func() { _ = r.Close() }()
+			withReadinessPipeStub(t, w)
+			t.Setenv("BOWL_DAEMON_WORKER", "1")
+
+			code, out, errOut := runCLI(tc.args...)
+
+			require.Equal(t, 1, code, "scene=%s want=1 got=%d stderr=%s", tc.name, code, errOut)
+			require.Empty(t, out, "scene=%s want=empty_stdout", tc.name)
+			require.Empty(t, errOut, "scene=%s want=silent_stderr got=%q", tc.name, errOut)
+
+			payload := readPipeWithDeadline(t, r, w, 500*time.Millisecond)
+			require.True(t, strings.HasPrefix(payload, "ERR:"), "scene=%s want=ERR_prefix got=%q", tc.name, payload)
+			require.Contains(t, payload, tc.wantSubstr, "scene=%s payload=%q", tc.name, payload)
+			require.True(t, strings.HasSuffix(payload, "\n"), "scene=%s want=trailing_newline got=%q", tc.name, payload)
+		})
+	}
+}
+
+func TestMount_DaemonWorker_GivenValidOptions_DoesNotTouchReadinessPipeBeforeRunDaemonWorker(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withStageDirTmpfsStub(t, false)
+
+	mp := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "happy-worker.log")
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "happy-worker-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+	stubMountServeFUSE(t, mp)
+	withRedirectDaemonStdioStub(t, func(*os.File) {})
+	withChdirStub(t, func(string) error { return nil })
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+
+	var pipeOpenCalls atomic.Int32
+	prev := readinessPipeFile
+	readinessPipeFile = func() *os.File {
+		pipeOpenCalls.Add(1)
+		return w
+	}
+	t.Cleanup(func() { readinessPipeFile = prev })
+	t.Setenv("BOWL_DAEMON_WORKER", "1")
+
+	code, out, errOut := runCLI("mount", testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off")
+
+	require.Equal(t, 0, code, "scene=worker_happy want=0 got=%d stderr=%s", code, errOut)
+	require.Empty(t, out)
+	require.Empty(t, errOut)
+	require.Equal(t, int32(1), pipeOpenCalls.Load(), "scene=worker_happy want=single_pipe_open_in_runDaemonWorker got=%d", pipeOpenCalls.Load())
+	payload := readPipeWithDeadline(t, r, w, 500*time.Millisecond)
+	require.Equal(t, "OK\n", payload)
+}
+
+func TestDaemonHelperProcess(_ *testing.T) {
+	mode := os.Getenv("BOWL_TEST_DAEMON_HELPER")
+	if mode == "" {
+		return
+	}
+	pipe := os.NewFile(3, "readiness-pipe")
+	readyFile := os.Getenv("BOWL_TEST_DAEMON_READY_FILE")
+	markerFile := os.Getenv("BOWL_TEST_DAEMON_MARKER_FILE")
+
+	writeFileFlag := func(path, content string) {
+		if path != "" {
+			_ = os.WriteFile(path, []byte(content), 0o600)
+		}
+	}
+
+	switch mode {
+	case "ok":
+		_, _ = fmt.Fprintln(pipe, "OK")
+		_ = pipe.Close()
+		time.Sleep(15 * time.Second)
+		os.Exit(0)
+	case "err":
+		_, _ = fmt.Fprintln(pipe, "ERR:disk busy")
+		_ = pipe.Close()
+		os.Exit(1)
+	case "eof":
+		_ = pipe.Close()
+		os.Exit(1)
+	case "hang_sleep":
+		writeFileFlag(readyFile, "ready")
+		time.Sleep(15 * time.Second)
+		os.Exit(0)
+	case "hang_term":
+		sigCh := make(chan os.Signal, 2)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		writeFileFlag(readyFile, "ready")
+		select {
+		case <-sigCh:
+			writeFileFlag(markerFile, "got_sigterm")
+			os.Exit(0)
+		case <-time.After(15 * time.Second):
+			os.Exit(2)
+		}
+	case "hang_ignore_term":
+		sigCh := make(chan os.Signal, 2)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		writeFileFlag(readyFile, "ready")
+		select {
+		case <-sigCh:
+			writeFileFlag(markerFile, "got_sigterm")
+		case <-time.After(15 * time.Second):
+		}
+		time.Sleep(15 * time.Second)
+		os.Exit(0)
+	default:
+		os.Exit(3)
+	}
+}
+
+func withDaemonHelperCommand(t *testing.T, mode, readyFile, markerFile string) *atomic.Pointer[exec.Cmd] {
+	t.Helper()
+	var captured atomic.Pointer[exec.Cmd]
+	prev := daemonCommandFn
+	daemonCommandFn = func(_ []string, w *os.File) (*exec.Cmd, error) {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
+		cmd.ExtraFiles = []*os.File{w}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.Env = append(
+			os.Environ(),
+			"BOWL_TEST_DAEMON_HELPER="+mode,
+			"BOWL_TEST_DAEMON_READY_FILE="+readyFile,
+			"BOWL_TEST_DAEMON_MARKER_FILE="+markerFile,
+		)
+		captured.Store(cmd)
+		return cmd, nil
+	}
+	t.Cleanup(func() {
+		daemonCommandFn = prev
+		if cmd := captured.Load(); cmd != nil && cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+	return &captured
+}
+
+func withDaemonTimeouts(t *testing.T, handshake, killGrace time.Duration) {
+	t.Helper()
+	prevHandshake := daemonHandshakeTimeout
+	prevKillGrace := daemonKillGrace
+	daemonHandshakeTimeout = handshake
+	daemonKillGrace = killGrace
+	t.Cleanup(func() {
+		daemonHandshakeTimeout = prevHandshake
+		daemonKillGrace = prevKillGrace
+	})
+}
+
+func withDaemonSignalStub(t *testing.T) (chan os.Signal, *atomic.Bool) {
+	t.Helper()
+	sigCh := make(chan os.Signal, 2)
+	var stopped atomic.Bool
+	prev := daemonSignalNotify
+	daemonSignalNotify = func() (<-chan os.Signal, func()) {
+		return sigCh, func() { stopped.Store(true) }
+	}
+	t.Cleanup(func() { daemonSignalNotify = prev })
+	return sigCh, &stopped
+}
+
+func runSpawnWithDeadline(t *testing.T, deadline time.Duration) (code int, stderr string) {
+	t.Helper()
+	type spawnRes struct {
+		code   int
+		stderr string
+	}
+	ch := make(chan spawnRes, 1)
+	go func() {
+		var buf strings.Builder
+		c := spawnDaemonProcess([]string{testDiskID1, "/mnt/test"}, &buf)
+		ch <- spawnRes{code: c, stderr: buf.String()}
+	}()
+	select {
+	case res := <-ch:
+		return res.code, res.stderr
+	case <-time.After(deadline):
+		t.Fatalf("scene=spawn_deadline want=completed_within_%s got=hung", deadline)
+		return 0, ""
+	}
+}
+
+func TestDaemonDefaults_FixedHandshakeTimeoutAndKillGrace(t *testing.T) {
+	require.Equal(t, 30*time.Second, daemonHandshakeTimeout)
+	require.Equal(t, 2*time.Second, daemonKillGrace)
+}
+
+func TestSpawnDaemonProcess_GivenOK_ReturnsZeroAndLeavesDetachedChildRunning(t *testing.T) {
+	withDaemonTimeouts(t, 5*time.Second, time.Second)
+	_, stopped := withDaemonSignalStub(t)
+	captured := withDaemonHelperCommand(t, "ok", "", "")
+
+	code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+
+	require.Equal(t, 0, code, "scene=spawn_ok want=0 got=%d stderr=%s", code, errOut)
+	require.Empty(t, errOut)
+	require.True(t, stopped.Load(), "scene=spawn_ok want=signal_stop_called got=false")
+
+	cmd := captured.Load()
+	require.NotNil(t, cmd)
+	require.NotNil(t, cmd.Process)
+	require.Nil(t, cmd.ProcessState, "scene=spawn_ok want=child_not_waited_detached")
+	require.NoError(t, syscall.Kill(cmd.Process.Pid, 0), "scene=spawn_ok want=detached_child_alive")
+}
+
+func TestSpawnDaemonProcess_GivenErrAndEOF_ReapsChildAndReturnsOne(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       string
+		wantSubstr string
+	}{
+		{
+			name:       "ExplicitERR",
+			mode:       "err",
+			wantSubstr: "background daemon failed to initialize: disk busy",
+		},
+		{
+			name:       "UnexpectedEOF",
+			mode:       "eof",
+			wantSubstr: "before completing mount handshake",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withDaemonTimeouts(t, 5*time.Second, time.Second)
+			_, stopped := withDaemonSignalStub(t)
+			captured := withDaemonHelperCommand(t, tc.mode, "", "")
+
+			code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+
+			require.Equal(t, 1, code, "scene=%s want=1 got=%d stderr=%s", tc.name, code, errOut)
+			require.Contains(t, errOut, tc.wantSubstr, "scene=%s", tc.name)
+			require.True(t, stopped.Load(), "scene=%s want=signal_stop_called got=false", tc.name)
+
+			cmd := captured.Load()
+			require.NotNil(t, cmd)
+			require.NotNil(t, cmd.ProcessState, "scene=%s want=child_reaped_by_cmd_wait got=nil_process_state", tc.name)
+			require.ErrorIs(t, syscall.Kill(cmd.Process.Pid, 0), syscall.ESRCH, "scene=%s want=child_reaped_no_zombie", tc.name)
+		})
+	}
+}
+
+func TestSpawnDaemonProcess_GivenHandshakeTimeout_TerminatesAndReapsChild(t *testing.T) {
+	withDaemonTimeouts(t, 200*time.Millisecond, 200*time.Millisecond)
+	_, stopped := withDaemonSignalStub(t)
+	captured := withDaemonHelperCommand(t, "hang_sleep", "", "")
+
+	code, errOut := runSpawnWithDeadline(t, 2*time.Second)
+
+	require.Equal(t, 1, code, "scene=handshake_timeout want=1 got=%d stderr=%s", code, errOut)
+	require.Contains(t, errOut, "timed out", "scene=handshake_timeout stderr=%s", errOut)
+	require.True(t, stopped.Load(), "scene=handshake_timeout want=signal_stop_called got=false")
+
+	cmd := captured.Load()
+	require.NotNil(t, cmd)
+	require.NotNil(t, cmd.ProcessState, "scene=handshake_timeout want=child_reaped")
+	require.ErrorIs(t, syscall.Kill(cmd.Process.Pid, 0), syscall.ESRCH, "scene=handshake_timeout want=child_reaped_no_zombie")
+}
+
+func TestSpawnDaemonProcess_GivenParentSignalAndChildExitsOnSIGTERM_TerminatesGracefullyAndReapsChild(t *testing.T) {
+	readyFile := filepath.Join(t.TempDir(), "ready")
+	markerFile := filepath.Join(t.TempDir(), "marker")
+	withDaemonTimeouts(t, 10*time.Second, 5*time.Second)
+	sigCh, stopped := withDaemonSignalStub(t)
+	captured := withDaemonHelperCommand(t, "hang_term", readyFile, markerFile)
+
+	go func() {
+		for range 200 {
+			if _, err := os.Stat(readyFile); err == nil {
+				sigCh <- syscall.SIGINT
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+	elapsed := time.Since(start)
+
+	require.Equal(t, 1, code, "scene=parent_sig_graceful want=1 got=%d stderr=%s", code, errOut)
+	require.Contains(t, errOut, "interrupted", "scene=parent_sig_graceful stderr=%s", errOut)
+	require.True(t, stopped.Load(), "scene=parent_sig_graceful want=signal_stop_called got=false")
+	require.Less(t, elapsed, 3*time.Second, "scene=parent_sig_graceful want=exited_before_kill_grace got=%s", elapsed)
+
+	markerBytes, readErr := os.ReadFile(markerFile)
+	require.NoError(t, readErr, "scene=parent_sig_graceful want=child_received_sigterm")
+	require.Equal(t, "got_sigterm", string(markerBytes))
+
+	cmd := captured.Load()
+	require.NotNil(t, cmd)
+	require.NotNil(t, cmd.ProcessState, "scene=parent_sig_graceful want=child_reaped")
+	require.ErrorIs(t, syscall.Kill(cmd.Process.Pid, 0), syscall.ESRCH, "scene=parent_sig_graceful want=no_zombie")
+}
+
+func TestSpawnDaemonProcess_GivenParentSignalAndChildIgnoresSIGTERM_EscalatesToSIGKILLAndReapsChild(t *testing.T) {
+	readyFile := filepath.Join(t.TempDir(), "ready")
+	markerFile := filepath.Join(t.TempDir(), "marker")
+	withDaemonTimeouts(t, 10*time.Second, 100*time.Millisecond)
+	sigCh, stopped := withDaemonSignalStub(t)
+	captured := withDaemonHelperCommand(t, "hang_ignore_term", readyFile, markerFile)
+
+	go func() {
+		for range 200 {
+			if _, err := os.Stat(readyFile); err == nil {
+				sigCh <- syscall.SIGTERM
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	code, errOut := runSpawnWithDeadline(t, 3*time.Second)
+
+	require.Equal(t, 1, code, "scene=sigkill_escalation want=1 got=%d stderr=%s", code, errOut)
+	require.Contains(t, errOut, "interrupted", "scene=sigkill_escalation stderr=%s", errOut)
+	require.True(t, stopped.Load(), "scene=sigkill_escalation want=signal_stop_called got=false")
+
+	markerBytes, readErr := os.ReadFile(markerFile)
+	require.NoError(t, readErr, "scene=sigkill_escalation want=child_received_sigterm_first")
+	require.Equal(t, "got_sigterm", string(markerBytes))
+
+	cmd := captured.Load()
+	require.NotNil(t, cmd)
+	require.NotNil(t, cmd.ProcessState, "scene=sigkill_escalation want=child_reaped")
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	require.True(t, ok)
+	require.Equal(t, syscall.SIGKILL, ws.Signal(), "scene=sigkill_escalation want=killed_by_SIGKILL got=%v", ws.Signal())
+	require.ErrorIs(t, syscall.Kill(cmd.Process.Pid, 0), syscall.ESRCH, "scene=sigkill_escalation want=no_zombie")
+}

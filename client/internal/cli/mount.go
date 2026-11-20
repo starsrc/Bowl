@@ -31,11 +31,12 @@ import (
 )
 
 const (
-	defaultAdminAddr        = "127.0.0.1:0"
-	adminAddrOff            = "off"
-	defaultTraceSampleRatio = 0.001
-	mountUnmountRPCTimeout  = 3 * time.Second
-	mountRenewRPCTimeout    = 5 * time.Second
+	defaultAdminAddr               = "127.0.0.1:0"
+	adminAddrOff                   = "off"
+	defaultTraceSampleRatio        = 0.001
+	mountUnmountRPCTimeout         = 3 * time.Second
+	mountRenewRPCTimeout           = 5 * time.Second
+	fuseSignalUnmountRetryInterval = 500 * time.Millisecond
 )
 
 type mountOptions struct {
@@ -339,6 +340,84 @@ func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mou
 	}
 }
 
+func runFUSESignalUnmountLoop(
+	ctx context.Context,
+	sigCh <-chan os.Signal,
+	stopWait <-chan struct{},
+	retryInterval time.Duration,
+	mountpoint string,
+	logger *slog.Logger,
+	unmount func() error,
+) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if retryInterval <= 0 {
+		retryInterval = fuseSignalUnmountRetryInterval
+	}
+
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+
+	var (
+		ticker  *time.Ticker
+		retryCh <-chan time.Time
+	)
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+
+	attemptUnmount := func() bool {
+		err := unmount()
+		if err == nil {
+			if ticker != nil {
+				ticker.Stop()
+				ticker = nil
+				retryCh = nil
+			}
+			return true
+		}
+		logger.Warn("mount_unmount_busy",
+			slog.String("mountpoint", mountpoint),
+			slog.String("error", err.Error()),
+		)
+		if ticker == nil {
+			ticker = time.NewTicker(retryInterval)
+			retryCh = ticker.C
+		}
+		return false
+	}
+
+	for {
+		select {
+		case <-stopWait:
+			return
+		default:
+		}
+		select {
+		case <-stopWait:
+			return
+		case <-sigCh:
+			if attemptUnmount() {
+				return
+			}
+		case <-ctxDone:
+			ctxDone = nil
+			if attemptUnmount() {
+				return
+			}
+		case <-retryCh:
+			if attemptUnmount() {
+				return
+			}
+		}
+	}
+}
+
 func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config, mountpoint string, ready func()) error {
 	opts := fusefs.BuildMountOptions(*cfg)
 
@@ -366,18 +445,15 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 	defer signal.Stop(sigCh)
 
 	stopWait := make(chan struct{})
+	loopDone := make(chan struct{})
 	go func() {
-		select {
-		case <-sigCh:
-			_ = server.Unmount()
-		case <-ctx.Done():
-			_ = server.Unmount()
-		case <-stopWait:
-		}
+		defer close(loopDone)
+		runFUSESignalUnmountLoop(ctx, sigCh, stopWait, fuseSignalUnmountRetryInterval, mountpoint, cfg.Logger, server.Unmount)
 	}()
 
 	<-serveDone
 	close(stopWait)
+	<-loopDone
 	return nil
 }
 
@@ -395,16 +471,24 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		}
 	}()
 
-	var stageSession *fusefs.StageDirSession
+	var (
+		stageSession   *fusefs.StageDirSession
+		closeStageOnce sync.Once
+	)
+	closeStage := func() {
+		closeStageOnce.Do(func() {
+			if stageSession != nil {
+				_ = stageSession.Close()
+			}
+		})
+	}
 	if baseCfg.IsStaged() {
 		var stageErr error
 		stageSession, stageErr = fusefs.OpenStageDirSession(baseCfg.StageDir)
 		if stageErr != nil {
 			return fmt.Errorf("initialize stage directory: %w", stageErr)
 		}
-		defer func() {
-			_ = stageSession.Close()
-		}()
+		defer closeStage()
 		if stageDirIsTmpfs(stageSession) {
 			logger.Warn("stage_dir_on_tmpfs", slog.String("stage_dir", baseCfg.StageDir))
 		}
@@ -449,11 +533,12 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
 		return err
 	}
-	defer func() {
+	shutdownAdmin := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		admin.shutdown(shutdownCtx)
-	}()
+	}
+	defer shutdownAdmin()
 
 	var (
 		metaPath  string
@@ -507,6 +592,8 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	} else {
 		unmountMountLease(client, cfg.DiskID, lease.mountID, min(mountUnmountRPCTimeout, remaining), logger)
 	}
+	shutdownAdmin()
+	closeStage()
 	if metaPath != "" {
 		_ = os.Remove(metaPath)
 	}
@@ -926,16 +1013,14 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 	return cmd
 }
 
-func executeMountValidated(
-	cmd *cobra.Command,
+func prepareMountExecution(
 	posArgs []string,
 	opts *mountOptions,
 	set mountFlagPresence,
 	foreground, allowOther, directIO, debug, statsFile bool,
-	rawArgs []string,
-) error {
+) (string, fusefs.Config, error) {
 	if valErr := applyEnvAndValidateOptions(opts, set, foreground); valErr != nil {
-		return usageExitErr(valErr, false)
+		return "", fusefs.Config{}, usageExitErr(valErr, false)
 	}
 
 	diskIDStr := posArgs[0]
@@ -943,52 +1028,52 @@ func executeMountValidated(
 
 	parsedUUID, err := uuid.Parse(diskIDStr)
 	if err != nil || parsedUUID == uuid.Nil {
-		return usageExitErr(fmt.Errorf("invalid disk-id %q: must be a valid non-nil UUID", diskIDStr), false)
+		return "", fusefs.Config{}, usageExitErr(fmt.Errorf("invalid disk-id %q: must be a valid non-nil UUID", diskIDStr), false)
 	}
 
 	absMountpoint, err := filepath.Abs(mountpoint)
 	if err != nil {
-		return usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
+		return "", fusefs.Config{}, usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
 	}
 	absMountpoint = filepath.Clean(absMountpoint)
 
 	canonMountpoint, mounted, err := ResolveMountPoint(absMountpoint)
 	if err != nil {
-		return runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
+		return "", fusefs.Config{}, runtimeExitErr(fmt.Errorf("failed to check mountpoint status: %w", err))
 	}
 	if !mounted {
 		fi, statErr := os.Stat(absMountpoint)
 		if statErr != nil {
-			return usageExitErr(fmt.Errorf("mountpoint %q does not exist or cannot be accessed: %w", absMountpoint, statErr), false)
+			return "", fusefs.Config{}, usageExitErr(fmt.Errorf("mountpoint %q does not exist or cannot be accessed: %w", absMountpoint, statErr), false)
 		}
 		if !fi.IsDir() {
-			return usageExitErr(fmt.Errorf("mountpoint %q is not a directory", absMountpoint), false)
+			return "", fusefs.Config{}, usageExitErr(fmt.Errorf("mountpoint %q is not a directory", absMountpoint), false)
 		}
 		canonMountpoint, err = filepath.EvalSymlinks(absMountpoint)
 		if err != nil {
-			return usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
+			return "", fusefs.Config{}, usageExitErr(fmt.Errorf("failed to resolve mountpoint path: %w", err), false)
 		}
 		canonMountpoint = filepath.Clean(canonMountpoint)
 	}
 
 	if opts.mode == fusefs.MountModeStaged {
 		if stageErr := validatePathNotInMountpoint("--stage-dir", opts.stageDir, absMountpoint, canonMountpoint); stageErr != nil {
-			return usageExitErr(stageErr, false)
+			return "", fusefs.Config{}, usageExitErr(stageErr, false)
 		}
 	}
 	if set.logFile {
 		if logErr := validatePathNotInMountpoint("--log-file", opts.logFile, absMountpoint, canonMountpoint); logErr != nil {
-			return usageExitErr(logErr, false)
+			return "", fusefs.Config{}, usageExitErr(logErr, false)
 		}
 	}
 
 	if mounted {
-		return runtimeExitErr(fmt.Errorf("mountpoint %q is already mounted", canonMountpoint))
+		return "", fusefs.Config{}, runtimeExitErr(fmt.Errorf("mountpoint %q is already mounted", canonMountpoint))
 	}
 
 	opts.endpoint, err = rpc.ResolveEndpoint(opts.endpoint)
 	if err != nil {
-		return usageExitErr(fmt.Errorf("invalid endpoint: %w", err), false)
+		return "", fusefs.Config{}, usageExitErr(fmt.Errorf("invalid endpoint: %w", err), false)
 	}
 	opts.token = rpc.ResolveToken(opts.token)
 
@@ -1008,9 +1093,29 @@ func executeMountValidated(
 	}
 
 	normalizeOTLPEnv()
+	return canonMountpoint, baseCfg, nil
+}
+
+func executeMountValidated(
+	cmd *cobra.Command,
+	posArgs []string,
+	opts *mountOptions,
+	set mountFlagPresence,
+	foreground, allowOther, directIO, debug, statsFile bool,
+	rawArgs []string,
+) error {
+	isWorker := os.Getenv("BOWL_DAEMON_WORKER") == "1"
+	canonMountpoint, baseCfg, err := prepareMountExecution(posArgs, opts, set, foreground, allowOther, directIO, debug, statsFile)
+	if err != nil {
+		if isWorker {
+			writeDaemonReadinessError(err)
+			return &cliExitError{code: 1, silent: true}
+		}
+		return err
+	}
 
 	stderr := cmd.ErrOrStderr()
-	if os.Getenv("BOWL_DAEMON_WORKER") == "1" {
+	if isWorker {
 		if code := runDaemonWorker(context.Background(), opts, &baseCfg, canonMountpoint); code != 0 {
 			return &cliExitError{code: code, silent: true}
 		}

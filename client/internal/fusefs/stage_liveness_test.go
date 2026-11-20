@@ -297,22 +297,71 @@ func TestRawFS_StageBarriers_CancelInterruptsWithEINTRWithoutIssuingServerRPCAnd
 		}, inbuf, &out, nil)
 	}, func(srv *fakeStorage) int64 { return srv.setAttrCalls.Load() })
 
-	runBarrierCase(t, "WriteSyncFallback", func(fs *fusefs.RawFS, cancel <-chan struct{}, nodeID, _ uint64) fuse.Status {
-		syncHandle := mustOpenFile(t, fs, nodeID, syscall.O_RDWR|syscall.O_SYNC)
-		defer fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: syncHandle.Fh})
-		_, st := fs.Write(cancel, &fuse.WriteIn{
-			InHeader: fuse.InHeader{NodeId: nodeID},
-			Fh:       syncHandle.Fh,
-			Offset:   14,
-			Size:     4,
-		}, []byte("sync"))
-		return st
-	}, func(srv *fakeStorage) int64 {
-		data, ok := srv.fileBytes(2)
-		if ok && strings.Contains(string(data), "sync") {
-			return 1
+	t.Run("WriteSyncFallback", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		var outage atomic.Bool
+		outage.Store(true)
+		uploadAttempted := make(chan struct{})
+		var attemptOnce sync.Once
+		var syncWriteSeen atomic.Bool
+		srv.writeHook = func(_ context.Context, req *storagev1.WriteRequest) (uint32, error) {
+			if string(req.GetData()) == "sync" {
+				syncWriteSeen.Store(true)
+			}
+			attemptOnce.Do(func() { close(uploadAttempted) })
+			if outage.Load() {
+				return 0, connect.NewError(connect.CodeUnavailable, errors.New("transient outage"))
+			}
+			return 0, nil
 		}
-		return 0
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+		t.Cleanup(func() {
+			outage.Store(false)
+			fs.OnUnmount()
+		})
+
+		f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "outage-WriteSyncFallback.bin", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, fs, f.NodeId, f.Fh, 0, []byte("staged-payload"))
+
+		syncHandle := mustOpenFile(t, fs, f.NodeId, syscall.O_RDWR|syscall.O_SYNC)
+		defer fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: syncHandle.Fh})
+
+		cancelCh := make(chan struct{})
+		statusCh := make(chan fuse.Status, 1)
+		go func() {
+			_, st := fs.Write(cancelCh, &fuse.WriteIn{
+				InHeader: fuse.InHeader{NodeId: f.NodeId},
+				Fh:       syncHandle.Fh,
+				Offset:   14,
+				Size:     4,
+			}, []byte("sync"))
+			statusCh <- st
+		}()
+
+		select {
+		case <-uploadAttempted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("background upload did not attempt Write RPC")
+		}
+
+		close(cancelCh)
+
+		select {
+		case gotSt := <-statusCh:
+			requireStatus(t, "WriteSyncFallback canceled during stage barrier", fuse.EINTR, gotSt)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("WriteSyncFallback hung in stage barrier after cancel closed")
+		}
+
+		require.False(t, syncWriteSeen.Load(), "WriteSyncFallback must not issue dependent direct Write RPC after barrier cancel")
+
+		outage.Store(false)
+		require.Eventually(t, func() bool {
+			data, ok := srv.fileBytes(f.NodeId)
+			return ok && string(data) == "staged-payload"
+		}, 3*time.Second, 10*time.Millisecond, "background upload retry must self-heal after foreground cancel")
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
 	})
 }
 
@@ -678,4 +727,39 @@ func TestRawFS_OnUnmount_TotalBudgetExhausted_SkipsPhase2AndReportsZeroRemaining
 	require.Zero(t, fs.UnmountRemainingBudget(), "remaining budget must be 0 after total timeout exhaustion")
 	require.Zero(t, srv.fsyncCalls.Load(), "Phase 2 Fsync must not run after total unmount budget is exhausted")
 	require.Zero(t, srv.fsyncDirCalls.Load(), "Phase 2 FsyncDir must not run after total unmount budget is exhausted")
+}
+
+func TestRawFS_OnUnmount_RepeatedCallWithFailedOrphanInReleaseQueue_DoesNotBlockOrReissueReclaim(t *testing.T) {
+	srv := newFakeStorage(t, withTTL(1.0, 1.0))
+	var attempt atomic.Int32
+	srv.reclaimOrphanHook = func(ctx context.Context, _ *storagev1.ReclaimOrphanRequest) error {
+		if attempt.Add(1) == 1 {
+			return connect.NewError(connect.CodeUnavailable, errors.New("transient"))
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	fs := newTestRawFS(t, srv,
+		withMode(fusefs.MountModeSync),
+		withDirectIO(false),
+		withUnmountTimeouts(80*time.Millisecond, 0, 0, 80*time.Millisecond),
+	)
+
+	f := mustCreateFile(t, fs, fuse.FUSE_ROOT_ID, "orphan-repeat.bin", syscall.O_RDWR, 0o644)
+	requireStatus(t, "Unlink open file", fuse.OK, fs.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "orphan-repeat.bin"))
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: f.NodeId}, Fh: f.Fh})
+
+	fs.OnUnmount()
+	require.Zero(t, fs.UnmountRemainingBudget(), "first OnUnmount must exhaust total unmount budget")
+	callsAfterFirst := srv.reclaimOrphanCalls.Load()
+	require.GreaterOrEqual(t, callsAfterFirst, int64(2))
+
+	startSecond := time.Now()
+	fs.OnUnmount()
+	elapsedSecond := time.Since(startSecond)
+
+	require.Less(t, elapsedSecond, 30*time.Millisecond, "repeated OnUnmount must not block again after budget expired: elapsed=%v", elapsedSecond)
+	require.Equal(t, callsAfterFirst, srv.reclaimOrphanCalls.Load(),
+		"repeated OnUnmount must not issue extra ReclaimOrphan RPCs: want=%d got=%d", callsAfterFirst, srv.reclaimOrphanCalls.Load())
 }

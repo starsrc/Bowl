@@ -932,7 +932,7 @@ func (c *StageCoordinator) drainingBytesLocked() uint64 {
 }
 
 func (c *StageCoordinator) sealActiveLocked(st *stageInode) bool {
-	if st == nil || st.active == nil || st.activeWriteBusy {
+	if st == nil || st.active == nil || st.activeWriteBusy || c.stopWorkers || c.aborted.Load() {
 		return false
 	}
 	it := st.active
@@ -1924,16 +1924,17 @@ func (c *StageCoordinator) barrierInodeLocked(ctx context.Context, st *stageInod
 	if c.aborted.Load() {
 		return nil
 	}
-	if !st.activeWriteBusy {
-		if !st.discarding {
-			c.sealActiveLocked(st)
-		}
-		if len(st.pending) == 0 && st.inflightHooks == 0 {
-			return nil
-		}
+	if !st.activeWriteBusy && !st.hasPendingLocked() {
+		return nil
 	}
 	if ctx != nil && ctx.Err() != nil {
 		return context.Cause(ctx)
+	}
+	if !st.activeWriteBusy && !st.discarding {
+		c.sealActiveLocked(st)
+		if len(st.pending) == 0 && st.inflightHooks == 0 {
+			return nil
+		}
 	}
 	stopWatch := c.watchContextBroadcast(ctx)
 	if stopWatch != nil {
@@ -2410,10 +2411,9 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 		}
 
 		drainCtx, drainCancel := context.WithCancel(parentCtx)
-		drainDone := make(chan struct{})
+		drainAbortedCh := make(chan bool, 1)
 		go func() {
-			_ = c.BarrierAll(drainCtx)
-			close(drainDone)
+			drainAbortedCh <- c.BarrierAll(drainCtx) != nil
 		}()
 
 		var stallTimer *time.Timer
@@ -2425,11 +2425,16 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 		}
 
 		var abortReason string
+		drainFinished := false
 		draining := true
 		for draining {
 			select {
-			case <-drainDone:
+			case drainAborted := <-drainAbortedCh:
+				drainFinished = true
 				draining = false
+				if drainAborted {
+					abortReason = "stage_timeout"
+				}
 			case <-c.progressCh:
 				if stallTimer != nil {
 					if !stallTimer.Stop() {
@@ -2477,14 +2482,16 @@ func (c *StageCoordinator) Clear(ctx context.Context, stallTimeout time.Duration
 					}
 				}
 			}
+			if c.abortCancel != nil {
+				c.abortCancel()
+			}
 			c.workerCond.Broadcast()
 			c.stateCond.Broadcast()
 			c.mu.Unlock()
 
-			if c.abortCancel != nil {
-				c.abortCancel()
+			if !drainFinished {
+				<-drainAbortedCh
 			}
-			<-drainDone
 			if droppedChunks > 0 {
 				c.activeLogger().ErrorContext(parentCtx, "stage_unmount_drain_aborted",
 					"reason", abortReason,

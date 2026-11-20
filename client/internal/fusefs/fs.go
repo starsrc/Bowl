@@ -846,12 +846,10 @@ func (fs *RawFS) OnUnmount() {
 	}
 	total := stageTotal + phase2Units
 
-	totalCtx, totalCancel := context.WithTimeout(opCtx, fs.cfg.UnmountTimeout)
-	defer totalCancel()
-	totalDeadline, _ := totalCtx.Deadline()
-
 	fs.unmountMu.Lock()
-	if fs.unmountDeadline.IsZero() {
+	totalDeadline := fs.unmountDeadline
+	if totalDeadline.IsZero() {
+		totalDeadline = time.Now().Add(fs.cfg.UnmountTimeout)
 		fs.unmountDeadline = totalDeadline
 	}
 	repeatNoop := fs.unmountState.completedOnce && total == 0
@@ -865,6 +863,9 @@ func (fs *RawFS) OnUnmount() {
 		fs.unmountState.total = total
 	}
 	fs.unmountMu.Unlock()
+
+	totalCtx, totalCancel := context.WithDeadline(opCtx, totalDeadline)
+	defer totalCancel()
 
 	stageCtx, stageCancel := context.WithTimeout(totalCtx, fs.cfg.UnmountStageTimeout)
 	fs.stage.Clear(stageCtx, fs.cfg.UnmountStageStallTimeout)
@@ -961,6 +962,9 @@ func (fs *RawFS) cleanupLocalStateOnUnmountLocked() {
 	clear(fs.orphanSpans)
 	clear(fs.statsSnapshots)
 	fs.stateMu.Unlock()
+	fs.releaseMu.Lock()
+	fs.releaseQueue = nil
+	fs.releaseMu.Unlock()
 	if fs.stageSession != nil {
 		_ = fs.stageSession.Close()
 	}

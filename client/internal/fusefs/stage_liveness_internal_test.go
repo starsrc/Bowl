@@ -1,15 +1,22 @@
 package fusefs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
@@ -243,4 +250,75 @@ func TestStageCoordinator_ConcurrentDiscardInodeAndWrite_NeverDetachesNewWrite(t
 		}
 	}
 	require.True(t, foundNew, "new write after concurrent DiscardInode must be flushed and uploaded")
+}
+
+func TestStageCoordinator_ClearWithExpiredContext_DispatchesZeroWritesAndCleansUp(t *testing.T) {
+	stageDir := t.TempDir()
+	var writeCalls atomic.Int32
+	writer := func(_ context.Context, _ uint64, _ uint64, data []byte) (uint32, *storagev1.Inode, error) {
+		writeCalls.Add(1)
+		return uint32(len(data)), nil, nil
+	}
+	coord := NewStageCoordinator(stageDir, DefaultStageSize, writer, nil, StageHooks{})
+
+	var logBuf bytes.Buffer
+	coord.bindLogger(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	_, _, err := coord.WriteForHandle(context.Background(), nil, 1, 100, 100, 0, []byte("expired-clear"), 1)
+	require.NoError(t, err)
+
+	expiredCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	coord.Clear(expiredCtx, 0)
+
+	require.Zero(t, writeCalls.Load(), "Clear with expired context must not seal or dispatch Write RPCs: got=%d", writeCalls.Load())
+	matches, globErr := filepath.Glob(filepath.Join(stageDir, "chunk-*.stage"))
+	require.NoError(t, globErr)
+	require.Empty(t, matches, "leftover stage chunk files must be removed after expired Clear")
+
+	foundAbortLog := false
+	for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "stage_unmount_drain_aborted" {
+			if dropped, ok := rec["dropped_chunks"].(float64); ok && int(dropped) == 1 {
+				foundAbortLog = true
+			}
+		}
+	}
+	require.True(t, foundAbortLog, "expired Clear must log stage_unmount_drain_aborted with dropped_chunks=1, got=%s", logBuf.String())
+}
+
+func TestStageCoordinator_BarrierInodeWithPreCanceledContext_ReturnsCauseWithoutSealingActiveChunk(t *testing.T) {
+	stageDir := t.TempDir()
+	var writeCalls atomic.Int32
+	writer := func(_ context.Context, _ uint64, _ uint64, data []byte) (uint32, *storagev1.Inode, error) {
+		writeCalls.Add(1)
+		return uint32(len(data)), nil, nil
+	}
+	coord := NewStageCoordinator(stageDir, DefaultStageSize, writer, nil, StageHooks{})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		coord.Clear(ctx, 0)
+	})
+
+	_, _, err := coord.WriteForHandle(context.Background(), nil, 1, 100, 100, 0, []byte("pre-canceled"), 1)
+	require.NoError(t, err)
+
+	preCanceledCtx, cancelCause := context.WithCancelCause(context.Background())
+	cancelCause(rpc.ErrKernelInterrupted)
+
+	barrierErr := coord.BarrierInode(preCanceledCtx, 100)
+	require.ErrorIs(t, barrierErr, rpc.ErrKernelInterrupted)
+	require.Zero(t, writeCalls.Load(), "pre-canceled BarrierInode must not seal or upload active chunk: got=%d", writeCalls.Load())
+
+	coord.mu.Lock()
+	st := coord.inodes[100]
+	activeStillPresent := st != nil && st.active != nil && len(coord.queue) == 0
+	coord.mu.Unlock()
+	require.True(t, activeStillPresent, "active chunk must remain unsealed after pre-canceled BarrierInode")
 }

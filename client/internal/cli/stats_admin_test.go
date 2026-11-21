@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 func newTestSamplerProvider(exporter sdktrace.SpanExporter, ratio float64) *sdktrace.TracerProvider {
@@ -518,4 +523,314 @@ func TestAdminMux_Readyz_GivenHealthyExpiredHealedFencedAndLeaseFree_ReportsExpe
 	leaseFreeMux := newAdminMux(obs, leaseFreeFS, leaseFreeTracker)
 	code, body = queryReadyz(leaseFreeMux)
 	require.Equal(t, http.StatusOK, code, "body=%s", body)
+}
+
+func TestRunMount_GivenOccupiedAdminAddrAndForce_FailsWithoutCallingMountDisk(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	occupiedLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = occupiedLn.Close() }()
+
+	mp := t.TempDir()
+	stageDir := t.TempDir()
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "occupied-admin-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: occupiedLn.Addr().String(),
+		logLevel:  "info",
+		logFormat: "json",
+		force:     true,
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  stageDir,
+	}
+
+	mountErr := runMount(context.Background(), opts, baseCfg, mp, &syncBuffer{}, nil)
+
+	require.Error(t, mountErr)
+	require.Contains(t, mountErr.Error(), "listen on admin address")
+	require.Empty(t, storage.getMountReqs(), "scene=occupied_admin_addr want=zero_MountDisk_RPCs")
+	require.Empty(t, storage.getUnmountReqs(), "scene=occupied_admin_addr want=zero_UnmountDisk_RPCs")
+	requireStorageEpochZero(t, storage, "occupied_admin_addr_no_force_preemption")
+	requireEmptyDir(t, stageDir, "occupied_admin_addr_stage_cleanup")
+}
+
+func TestRunMount_GivenPreBoundAdminAddr_BindsBeforeHandshakeAndClosesListenerOnHandshakeFailure(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	fixedAddr := reserveLoopbackTCPAddr(t)
+	mp := t.TempDir()
+	stageDir := t.TempDir()
+
+	var rebindErrDuringHandshake error
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "prebind-admin-disk", 1<<30, 0)
+	storage.onMountDisk = func(_ context.Context, _ *storagev1.MountDiskRequest) error {
+		ln, err := net.Listen("tcp", fixedAddr)
+		rebindErrDuringHandshake = err
+		if ln != nil {
+			_ = ln.Close()
+		}
+		return errors.New("simulated handshake failure")
+	}
+	withMountStorageFake(t, storage)
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: fixedAddr,
+		logLevel:  "info",
+		logFormat: "json",
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  stageDir,
+	}
+
+	mountErr := runMount(context.Background(), opts, baseCfg, mp, &syncBuffer{}, nil)
+
+	require.Error(t, mountErr)
+	require.Error(t, rebindErrDuringHandshake, "scene=during_mountHandshake want=admin_addr_already_bound")
+	ln, listenErr := net.Listen("tcp", fixedAddr)
+	require.NoError(t, listenErr, "scene=after_handshake_failure want=prebound_admin_listener_closed got=%v", listenErr)
+	require.NoError(t, ln.Close())
+	requireEmptyDir(t, stageDir, "prebound_handshake_failure_stage_cleanup")
+}
+
+func TestLoopbackAdminAddr_GivenWildcardAndExplicitHosts_NormalizesExpectedAddresses(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: ":9090", want: "127.0.0.1:9090"},
+		{in: "0.0.0.0:9090", want: "127.0.0.1:9090"},
+		{in: "[::]:9090", want: "[::1]:9090"},
+		{in: "[0:0:0:0:0:0:0:0]:9090", want: "[::1]:9090"},
+		{in: "127.0.0.1:9090", want: "127.0.0.1:9090"},
+		{in: "[::1]:9090", want: "[::1]:9090"},
+		{in: "10.0.1.5:9090", want: "10.0.1.5:9090"},
+		{in: "localhost:9090", want: "localhost:9090"},
+		{in: "off", want: "off"},
+		{in: "", want: ""},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, loopbackAdminAddr(tc.in), "in=%q", tc.in)
+	}
+}
+
+func TestMount_GivenWildcardAdminAddr_PersistsLoopbackMetaAndLogsRawListenAddr(t *testing.T) {
+	cases := []struct {
+		name         string
+		listenAddr   string
+		probeNetwork string
+	}{
+		{
+			name:         "EmptyHostWildcard",
+			listenAddr:   ":0",
+			probeNetwork: "tcp",
+		},
+		{
+			name:         "IPv4Wildcard",
+			listenAddr:   "0.0.0.0:0",
+			probeNetwork: "tcp4",
+		},
+		{
+			name:         "IPv6Wildcard",
+			listenAddr:   "[::]:0",
+			probeNetwork: "tcp6",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probe, probeErr := net.Listen(tc.probeNetwork, tc.listenAddr)
+			if probeErr != nil {
+				t.Skipf("network %s unavailable: %v", tc.probeNetwork, probeErr)
+			}
+			_ = probe.Close()
+
+			withCleanOTelAndLogger(t)
+			withStageDirTmpfsStub(t, false)
+			withMissingMountInfo(t)
+			withTempMountMetaDirs(t, t.TempDir())
+
+			mp := t.TempDir()
+			storage := newFakeStorage()
+			storage.seedDisk(testDiskID1, "wildcard-admin-disk", 1<<30, 0)
+			withMountStorageFake(t, storage)
+
+			var gotMeta mountMeta
+			var metaFound bool
+			var readyzStatus int
+			withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+				ready()
+				gotMeta, metaFound = findMountMeta(mp)
+				if metaFound {
+					readyzStatus, _ = fetchReadyzStatusAndBody(t, gotMeta.AdminAddr)
+				}
+				return nil
+			})
+
+			var logBuf syncBuffer
+			opts := &mountOptions{
+				endpoint:  "http://127.0.0.1:9000",
+				adminAddr: tc.listenAddr,
+				logLevel:  "info",
+				logFormat: "json",
+			}
+			baseCfg := &fusefs.Config{
+				DiskID: testDiskID1,
+				Mode:   fusefs.MountModeRO,
+			}
+
+			err := runMount(context.Background(), opts, baseCfg, mp, &logBuf, nil)
+			require.NoError(t, err)
+			require.True(t, metaFound)
+			require.Equal(t, http.StatusOK, readyzStatus)
+
+			var loggedAdminAddr string
+			for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+				var rec map[string]any
+				if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "mount_ready" {
+					if v, ok := rec["admin_addr"].(string); ok {
+						loggedAdminAddr = v
+					}
+				}
+			}
+			require.NotEmpty(t, loggedAdminAddr, "scene=%s want=mount_ready_admin_addr_logged", tc.name)
+			logHost, logPort, logSplitErr := net.SplitHostPort(loggedAdminAddr)
+			require.NoError(t, logSplitErr)
+			logIP := net.ParseIP(logHost)
+			require.NotNil(t, logIP)
+			require.True(t, logIP.IsUnspecified(), "scene=%s want=raw_unspecified_listen_addr_in_log got=%s", tc.name, loggedAdminAddr)
+
+			metaHost, metaPort, splitErr := net.SplitHostPort(gotMeta.AdminAddr)
+			require.NoError(t, splitErr)
+			require.Equal(t, logPort, metaPort)
+			wantMetaHost := "::1"
+			if logIP.To4() != nil {
+				wantMetaHost = "127.0.0.1"
+			}
+			require.Equal(t, wantMetaHost, metaHost, "scene=%s want_meta_host=%s got=%s", tc.name, wantMetaHost, gotMeta.AdminAddr)
+		})
+	}
+}
+
+func TestStats_GivenWildcardAdminAddrAndLegacyMeta_NormalizesToLoopbackAndKeepsDefaultProxyHandling(t *testing.T) {
+	require.Same(t, http.DefaultClient, statsHTTPClient)
+
+	_, mux := setupTestObsAndMux(t)
+	lastURL := withStatsMuxTransport(t, mux)
+
+	flagCases := []struct {
+		name    string
+		rawAddr string
+		wantURL string
+	}{
+		{name: "EmptyHost", rawAddr: ":19090", wantURL: "http://127.0.0.1:19090/debug/stats?format=text"},
+		{name: "IPv4Wildcard", rawAddr: "0.0.0.0:19090", wantURL: "http://127.0.0.1:19090/debug/stats?format=text"},
+		{name: "IPv6Wildcard", rawAddr: "[::]:19090", wantURL: "http://[::1]:19090/debug/stats?format=text"},
+		{name: "ExplicitLoopback", rawAddr: "127.0.0.1:19090", wantURL: "http://127.0.0.1:19090/debug/stats?format=text"},
+		{name: "ExplicitNonLoopback", rawAddr: "10.0.1.5:19090", wantURL: "http://10.0.1.5:19090/debug/stats?format=text"},
+	}
+
+	for _, tc := range flagCases {
+		t.Run("Flag_"+tc.name, func(t *testing.T) {
+			code, out, errOut := runCLI("stats", "--admin-addr", tc.rawAddr)
+			require.Equal(t, 0, code, "scene=%s stderr=%s", tc.name, errOut)
+			require.Empty(t, errOut)
+			require.NotEmpty(t, out)
+			require.Equal(t, tc.wantURL, *lastURL, "scene=%s", tc.name)
+		})
+	}
+
+	metaCases := []struct {
+		name      string
+		adminAddr string
+		wantURL   string
+	}{
+		{name: "LegacyEmptyHost", adminAddr: ":19091", wantURL: "http://127.0.0.1:19091/debug/stats?format=text"},
+		{name: "LegacyIPv4Wildcard", adminAddr: "0.0.0.0:19092", wantURL: "http://127.0.0.1:19092/debug/stats?format=text"},
+		{name: "LegacyIPv6Wildcard", adminAddr: "[::]:19093", wantURL: "http://[::1]:19093/debug/stats?format=text"},
+		{name: "LegacyExplicitHost", adminAddr: "10.0.1.5:19094", wantURL: "http://10.0.1.5:19094/debug/stats?format=text"},
+	}
+
+	for _, tc := range metaCases {
+		t.Run("Meta_"+tc.name, func(t *testing.T) {
+			metaDir := t.TempDir()
+			withTempMountMetaDirs(t, metaDir)
+			mp := t.TempDir()
+			_, err := writeMountMeta(&mountMeta{
+				Mountpoint: mp,
+				PID:        os.Getpid(),
+				DiskID:     testDiskID1,
+				AdminAddr:  tc.adminAddr,
+				StartedAt:  time.Now().UTC(),
+			})
+			require.NoError(t, err)
+
+			code, out, errOut := runCLI("stats", mp)
+			require.Equal(t, 0, code, "scene=%s stderr=%s", tc.name, errOut)
+			require.Empty(t, errOut)
+			require.NotEmpty(t, out)
+			require.Equal(t, tc.wantURL, *lastURL, "scene=%s", tc.name)
+		})
+	}
+
+	t.Run("DefaultClientBypassesProxyForNormalizedLoopbackAndRespectsProxyForNonLoopback", func(t *testing.T) {
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		require.NoError(t, err)
+
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAdminProxyHelperProcess$")
+		cmd.Env = append(
+			os.Environ(),
+			"BOWL_TEST_PROXY_HELPER_PORT="+port,
+			"HTTP_PROXY=http://127.0.0.1:1",
+			"http_proxy=http://127.0.0.1:1",
+			"NO_PROXY=",
+			"no_proxy=",
+		)
+		out, runErr := cmd.CombinedOutput()
+		require.NoError(t, runErr, "scene=proxy_helper_subprocess output=%s", string(out))
+	})
+}
+
+func TestAdminProxyHelperProcess(t *testing.T) {
+	port := os.Getenv("BOWL_TEST_PROXY_HELPER_PORT")
+	if port == "" {
+		return
+	}
+	require.Same(t, http.DefaultClient, statsHTTPClient)
+	require.Same(t, http.DefaultClient, umountHTTPClient)
+
+	code, out, errOut := runCLI("stats", "--admin-addr", "0.0.0.0:"+port)
+	require.Equal(t, 0, code, "scene=stats_wildcard_under_http_proxy stderr=%s", errOut)
+	require.Empty(t, errOut)
+	require.NotEmpty(t, out)
+
+	prog, ok := fetchUnmountProgress(normalizeUmountAdminAddr("0.0.0.0:"+port), time.Second)
+	require.True(t, ok, "scene=umount_wildcard_under_http_proxy")
+	require.Equal(t, fusefs.UnmountProgress{}, prog)
+
+	remoteReq, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://10.0.1.5:19090/debug/stats", http.NoBody)
+	require.NoError(t, reqErr)
+	proxyURL, proxyErr := http.ProxyFromEnvironment(remoteReq)
+	require.NoError(t, proxyErr)
+	require.Equal(t, &url.URL{Scheme: "http", Host: "127.0.0.1:1"}, proxyURL)
 }

@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
+	"github.com/starsrc/bowl/client/internal/rpc"
 )
 
 type daemonHandshakeOutcome struct {
@@ -55,7 +56,7 @@ var (
 	readinessPipeFile      = func() *os.File { return os.NewFile(3, "readiness-pipe") }
 	redirectDaemonStdio    = defaultRedirectDaemonStdio
 	daemonHandshakeTimeout = 30 * time.Second
-	daemonKillGrace        = 2 * time.Second
+	daemonKillGrace        = 5 * time.Second
 	daemonSignalNotify     = defaultDaemonSignalNotify
 	daemonCommandFn        = defaultDaemonCommand
 )
@@ -66,16 +67,85 @@ func defaultDaemonSignalNotify() (sigCh <-chan os.Signal, stop func()) {
 	return ch, func() { signal.Stop(ch) }
 }
 
+func mountFlagTakesSeparateValue(arg string) bool {
+	switch arg {
+	case "--endpoint",
+		"--log-file",
+		"--mode",
+		"--stage-size",
+		"--stage-dir",
+		"--unmount-timeout",
+		"--unmount-stage-timeout",
+		"--unmount-stage-stall-timeout",
+		"--unmount-fsync-timeout",
+		"--admin-addr",
+		"--log-level",
+		"--log-format",
+		"--trace-sample-ratio":
+		return true
+	default:
+		return false
+	}
+}
+
+func scrubDaemonTokenArgs(args []string) (filtered []string, token string) {
+	filtered = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			filtered = append(filtered, args[i:]...)
+			break
+		}
+		if arg == "--token" {
+			if i+1 < len(args) {
+				token = args[i+1]
+				i++
+			}
+			continue
+		}
+		if val, ok := strings.CutPrefix(arg, "--token="); ok {
+			token = val
+			continue
+		}
+		filtered = append(filtered, arg)
+		if mountFlagTakesSeparateValue(arg) && i+1 < len(args) {
+			i++
+			filtered = append(filtered, args[i])
+		}
+	}
+	return filtered, token
+}
+
+func buildDaemonEnv(baseEnv []string, token string) []string {
+	trimmedToken := strings.TrimSpace(token)
+	env := make([]string, 0, len(baseEnv)+2)
+	for _, entry := range baseEnv {
+		if trimmedToken != "" && strings.HasPrefix(entry, rpc.EnvToken+"=") {
+			continue
+		}
+		if strings.HasPrefix(entry, "BOWL_DAEMON_WORKER=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	if trimmedToken != "" {
+		env = append(env, rpc.EnvToken+"="+trimmedToken)
+	}
+	env = append(env, "BOWL_DAEMON_WORKER=1")
+	return env
+}
+
 func defaultDaemonCommand(args []string, w *os.File) (*exec.Cmd, error) {
 	binPath, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve executable path: %w", err)
 	}
-	subArgs := append([]string{"mount"}, args...)
+	scrubbedArgs, token := scrubDaemonTokenArgs(args)
+	subArgs := append([]string{"mount"}, scrubbedArgs...)
 	cmd := exec.Command(binPath, subArgs...)
 	cmd.ExtraFiles = []*os.File{w}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = append(os.Environ(), "BOWL_DAEMON_WORKER=1")
+	cmd.Env = buildDaemonEnv(os.Environ(), token)
 	return cmd, nil
 }
 
@@ -90,7 +160,10 @@ func terminateAndReapDaemonChild(cmd *exec.Cmd, grace time.Duration) {
 		return
 	}
 	if grace <= 0 {
-		grace = 2 * time.Second
+		grace = daemonKillGrace
+	}
+	if grace <= 0 {
+		grace = 5 * time.Second
 	}
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 
@@ -194,6 +267,9 @@ func writeDaemonReadinessError(err error) {
 }
 
 func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, mountpoint string) int {
+	workerCtx, stopSignals := mountSignalContext(ctx)
+	defer stopSignals()
+
 	pipeWriter := readinessPipeFile()
 	notifyErr := func(err error) {
 		if pipeWriter != nil {
@@ -210,6 +286,11 @@ func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Co
 		}
 	}
 
+	if err := workerCtx.Err(); err != nil {
+		notifyErr(err)
+		return 1
+	}
+
 	logF, _, err := ResolveLogFile(opts.logFile, baseCfg.DiskID)
 	if err != nil {
 		notifyErr(err)
@@ -224,7 +305,7 @@ func runDaemonWorker(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Co
 
 	redirectDaemonStdio(logF)
 
-	if mountErr := runMount(ctx, opts, baseCfg, mountpoint, logF, notifyOK); mountErr != nil {
+	if mountErr := runMount(workerCtx, opts, baseCfg, mountpoint, logF, notifyOK); mountErr != nil {
 		notifyErr(mountErr)
 		fmt.Fprintf(logF, "Error: mount failed: %v\n", mountErr)
 		_ = logF.Sync()

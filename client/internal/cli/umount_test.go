@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1301,4 +1303,73 @@ func TestUmount_GivenBowlMountsAndBowlStackedOverNonBowl_InvokesUnmountTool(t *t
 			require.Equal(t, tc.wantArgs, *binArgs)
 		})
 	}
+}
+
+func TestUmount_GivenWildcardLegacyMetaAdminAddr_NormalizesToLoopbackAndKeepsDefaultClient(t *testing.T) {
+	require.Same(t, http.DefaultClient, umountHTTPClient)
+
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{raw: ":9090", want: "127.0.0.1:9090"},
+		{raw: "0.0.0.0:9090", want: "127.0.0.1:9090"},
+		{raw: "[::]:9090", want: "[::1]:9090"},
+		{raw: "http://0.0.0.0:9090/", want: "127.0.0.1:9090"},
+		{raw: "http://[::]:9090/", want: "[::1]:9090"},
+		{raw: "127.0.0.1:9090", want: "127.0.0.1:9090"},
+		{raw: "10.0.1.5:9090", want: "10.0.1.5:9090"},
+		{raw: "off", want: "off"},
+		{raw: "", want: ""},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, normalizeUmountAdminAddr(tc.raw), "raw=%q", tc.raw)
+	}
+
+	metaDir := t.TempDir()
+	metaPath := filepath.Join(metaDir, "legacy.json")
+	require.NoError(t, os.WriteFile(metaPath, []byte("{}"), 0o600))
+
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/debug/unmount" {
+			http.NotFound(w, r)
+			return
+		}
+		if polls.Add(1) >= 2 {
+			_ = os.Remove(metaPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(fusefs.UnmountProgress{Active: true, Completed: 1, Total: 2})
+	}))
+	defer srv.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	require.NoError(t, err)
+
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("http_proxy", "http://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	prevPoll := umountProgressPollInterval
+	prevDrain := umountDrainPollInterval
+	prevTimeout := umountDrainTimeout
+	umountProgressPollInterval = 10 * time.Millisecond
+	umountDrainPollInterval = 10 * time.Millisecond
+	umountDrainTimeout = 2 * time.Second
+	t.Cleanup(func() {
+		umountProgressPollInterval = prevPoll
+		umountDrainPollInterval = prevDrain
+		umountDrainTimeout = prevTimeout
+	})
+
+	var stderr bytes.Buffer
+	err = waitMountMetaDrained(&stderr, metaPath, &mountMeta{
+		PID:       os.Getpid(),
+		AdminAddr: "0.0.0.0:" + port,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, polls.Load(), int32(2))
+	require.Contains(t, stderr.String(), "Syncing to cloud:")
 }

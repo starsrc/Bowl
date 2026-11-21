@@ -31,12 +31,13 @@ import (
 )
 
 const (
-	defaultAdminAddr               = "127.0.0.1:0"
-	adminAddrOff                   = "off"
-	defaultTraceSampleRatio        = 0.001
-	mountUnmountRPCTimeout         = 3 * time.Second
-	mountRenewRPCTimeout           = 5 * time.Second
-	fuseSignalUnmountRetryInterval = 500 * time.Millisecond
+	defaultAdminAddr                = "127.0.0.1:0"
+	adminAddrOff                    = "off"
+	defaultTraceSampleRatio         = 0.001
+	mountUnmountRPCTimeout          = 3 * time.Second
+	mountRenewRPCTimeout            = 5 * time.Second
+	fuseSignalUnmountRetryInterval  = 500 * time.Millisecond
+	fuseStartupUnmountRetryInterval = 200 * time.Millisecond
 )
 
 type mountOptions struct {
@@ -443,6 +444,18 @@ func runFUSESignalUnmountLoop(
 	}
 }
 
+func unmountUntilStopped(
+	stopWait <-chan struct{},
+	retryInterval time.Duration,
+	mountpoint string,
+	logger *slog.Logger,
+	unmount func() error,
+) {
+	abortCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runFUSESignalUnmountLoop(abortCtx, nil, stopWait, retryInterval, mountpoint, logger, unmount)
+}
+
 func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config, mountpoint string, ready func()) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -464,26 +477,31 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 
 	waitStop := make(chan struct{})
 	waitWatchDone := make(chan struct{})
-	var ctxDone <-chan struct{}
-	if ctx != nil {
-		ctxDone = ctx.Done()
-	}
+	waitUnmounted := false
 	go func() {
 		defer close(waitWatchDone)
-		select {
-		case <-waitStop:
-		case <-ctxDone:
-			_ = server.Unmount()
-		}
+		runFUSESignalUnmountLoop(ctx, nil, waitStop, fuseStartupUnmountRetryInterval, mountpoint, cfg.Logger, func() error {
+			unmountErr := server.Unmount()
+			if unmountErr == nil {
+				waitUnmounted = true
+			}
+			return unmountErr
+		})
 	}()
 
 	waitErr := server.WaitMount()
 	close(waitStop)
 	<-waitWatchDone
 
-	if waitErr != nil {
-		_ = server.Unmount()
+	unmountUntilServeDone := func() {
+		if !waitUnmounted {
+			unmountUntilStopped(serveDone, fuseStartupUnmountRetryInterval, mountpoint, cfg.Logger, server.Unmount)
+		}
 		<-serveDone
+	}
+
+	if waitErr != nil {
+		unmountUntilServeDone()
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -491,8 +509,7 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 	}
 	if ctx != nil {
 		if cancelErr := ctx.Err(); cancelErr != nil {
-			_ = server.Unmount()
-			<-serveDone
+			unmountUntilServeDone()
 			return cancelErr
 		}
 	}
@@ -679,7 +696,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	shutdownAdmin()
 	closeStage()
 	if metaPath != "" {
-		_ = os.Remove(metaPath)
+		removeOwnedMountMeta(metaPath, selfPID, startedAt)
 	}
 	if serveErr != nil {
 		return serveErr

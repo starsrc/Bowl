@@ -756,11 +756,12 @@ func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServ
 }
 
 type fakeFUSEMountServer struct {
-	unmountCh   chan struct{}
-	unmountOnce sync.Once
-	unmountCnt  atomic.Int32
-	serveExited atomic.Bool
-	waitMountFn func(unmountCh <-chan struct{}) error
+	unmountCh       chan struct{}
+	unmountOnce     sync.Once
+	unmountCnt      atomic.Int32
+	serveExited     atomic.Bool
+	waitMountFn     func(unmountCh <-chan struct{}) error
+	busyUnmountLeft atomic.Int32
 }
 
 func newFakeFUSEMountServer(waitFn func(unmountCh <-chan struct{}) error) *fakeFUSEMountServer {
@@ -784,8 +785,16 @@ func (s *fakeFUSEMountServer) WaitMount() error {
 
 func (s *fakeFUSEMountServer) Unmount() error {
 	s.unmountCnt.Add(1)
+	if s.busyUnmountLeft.Add(-1) >= 0 {
+		return syscall.EBUSY
+	}
 	s.unmountOnce.Do(func() { close(s.unmountCh) })
 	return nil
+}
+
+func (s *fakeFUSEMountServer) forceRelease() {
+	s.busyUnmountLeft.Store(0)
+	s.unmountOnce.Do(func() { close(s.unmountCh) })
 }
 
 func withNewFUSEServerStub(t *testing.T, fn func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error)) {
@@ -890,6 +899,221 @@ func TestDefaultServeFUSE_GivenCancelAcrossStartupWindows_UnmountsWithoutCalling
 		require.False(t, readyCalled.Load(), "scene=post_wait_cancel want=ready_not_called")
 		require.GreaterOrEqual(t, fakeSrv.unmountCnt.Load(), int32(1))
 		require.True(t, fakeSrv.serveExited.Load())
+	})
+}
+
+func TestDefaultServeFUSE_GivenCancelWithEBUSY_RetriesUntilUnmountSucceeds(t *testing.T) {
+	t.Run("RetryIntervalsPreserveStep49AndStep57", func(t *testing.T) {
+		require.Equal(t, 500*time.Millisecond, fuseSignalUnmountRetryInterval, "scene=post_ready_retry_interval want=500ms got=%s", fuseSignalUnmountRetryInterval)
+		require.Equal(t, 200*time.Millisecond, fuseStartupUnmountRetryInterval, "scene=startup_retry_interval want=200ms got=%s", fuseStartupUnmountRetryInterval)
+	})
+
+	t.Run("CanceledDuringWaitMount", func(t *testing.T) {
+		var logBuf syncBuffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		waitEntered := make(chan struct{})
+		fakeSrv := newFakeFUSEMountServer(func(unmountCh <-chan struct{}) error {
+			close(waitEntered)
+			<-unmountCh
+			return errors.New("unmounted during wait")
+		})
+		fakeSrv.busyUnmountLeft.Store(2)
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			return fakeSrv, nil
+		})
+
+		var readyCalled atomic.Bool
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-wait-cancel", func() {
+				readyCalled.Store(true)
+			})
+		}()
+
+		select {
+		case <-waitEntered:
+		case <-time.After(time.Second):
+			fakeSrv.forceRelease()
+			t.Fatal("scene=ebusy_wait_mount_enter want=entered got=timeout")
+		}
+		cancel()
+
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(1500 * time.Millisecond):
+			fakeSrv.forceRelease()
+			gotErr := <-errCh
+			t.Fatalf("scene=ebusy_wait_cancel want=retried_until_unmount got=hung unmountCnt=%d err=%v", fakeSrv.unmountCnt.Load(), gotErr)
+		}
+
+		require.False(t, readyCalled.Load(), "scene=ebusy_wait_cancel want=ready_not_called")
+		require.Equal(t, int32(3), fakeSrv.unmountCnt.Load(), "scene=ebusy_wait_cancel want=3_unmount_attempts got=%d", fakeSrv.unmountCnt.Load())
+		require.True(t, fakeSrv.serveExited.Load())
+		logs := logBuf.String()
+		require.Contains(t, logs, `"msg":"mount_unmount_busy"`)
+		require.Contains(t, logs, `"/mnt/ebusy-wait-cancel"`)
+		require.Contains(t, logs, syscall.EBUSY.Error())
+	})
+
+	t.Run("WaitMountError", func(t *testing.T) {
+		var logBuf syncBuffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		fakeSrv := newFakeFUSEMountServer(func(<-chan struct{}) error {
+			return errors.New("mount wait failed")
+		})
+		fakeSrv.busyUnmountLeft.Store(2)
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			return fakeSrv, nil
+		})
+
+		var readyCalled atomic.Bool
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- defaultServeFUSE(context.Background(), nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-wait-err", func() {
+				readyCalled.Store(true)
+			})
+		}()
+
+		select {
+		case err := <-errCh:
+			require.ErrorContains(t, err, "wait for mount readiness")
+			require.ErrorContains(t, err, "mount wait failed")
+		case <-time.After(1500 * time.Millisecond):
+			fakeSrv.forceRelease()
+			gotErr := <-errCh
+			t.Fatalf("scene=ebusy_wait_err want=retried_until_unmount got=hung unmountCnt=%d err=%v", fakeSrv.unmountCnt.Load(), gotErr)
+		}
+
+		require.False(t, readyCalled.Load(), "scene=ebusy_wait_err want=ready_not_called")
+		require.Equal(t, int32(3), fakeSrv.unmountCnt.Load(), "scene=ebusy_wait_err want=3_unmount_attempts got=%d", fakeSrv.unmountCnt.Load())
+		require.True(t, fakeSrv.serveExited.Load())
+		logs := logBuf.String()
+		require.Contains(t, logs, `"msg":"mount_unmount_busy"`)
+		require.Contains(t, logs, `"/mnt/ebusy-wait-err"`)
+		require.Contains(t, logs, syscall.EBUSY.Error())
+	})
+
+	t.Run("CanceledAfterWaitMountBeforeReady", func(t *testing.T) {
+		var logBuf syncBuffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		fakeSrv := newFakeFUSEMountServer(func(<-chan struct{}) error {
+			cancel()
+			return nil
+		})
+		fakeSrv.busyUnmountLeft.Store(2)
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			return fakeSrv, nil
+		})
+
+		var readyCalled atomic.Bool
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1, Logger: logger}, "/mnt/ebusy-post-wait", func() {
+				readyCalled.Store(true)
+			})
+		}()
+
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(1500 * time.Millisecond):
+			fakeSrv.forceRelease()
+			gotErr := <-errCh
+			t.Fatalf("scene=ebusy_post_wait want=retried_until_unmount got=hung unmountCnt=%d err=%v", fakeSrv.unmountCnt.Load(), gotErr)
+		}
+
+		require.False(t, readyCalled.Load(), "scene=ebusy_post_wait want=ready_not_called")
+		require.Equal(t, int32(3), fakeSrv.unmountCnt.Load(), "scene=ebusy_post_wait want=3_unmount_attempts got=%d", fakeSrv.unmountCnt.Load())
+		require.True(t, fakeSrv.serveExited.Load())
+		logs := logBuf.String()
+		require.Contains(t, logs, `"msg":"mount_unmount_busy"`)
+		require.Contains(t, logs, `"/mnt/ebusy-post-wait"`)
+		require.Contains(t, logs, syscall.EBUSY.Error())
+	})
+
+	t.Run("RunMountCleansLeaseAdminAndStageAfterEBUSYRetry", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		withTempMountMetaDirs(t, t.TempDir())
+
+		mp := t.TempDir()
+		stageDir := t.TempDir()
+		fixedAddr := reserveLoopbackTCPAddr(t)
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "ebusy-startup-disk", 1<<30, 0)
+		storage.mountLeaseTTL = 30
+		withMountStorageFake(t, storage)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		waitEntered := make(chan struct{})
+		fakeSrv := newFakeFUSEMountServer(func(unmountCh <-chan struct{}) error {
+			close(waitEntered)
+			<-unmountCh
+			return errors.New("unmounted after retry")
+		})
+		fakeSrv.busyUnmountLeft.Store(2)
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			return fakeSrv, nil
+		})
+
+		var logBuf syncBuffer
+		var onReadyCalled atomic.Bool
+		opts := &mountOptions{
+			endpoint:  "http://127.0.0.1:9000",
+			adminAddr: fixedAddr,
+			logLevel:  "info",
+			logFormat: "json",
+		}
+		baseCfg := &fusefs.Config{
+			DiskID:    testDiskID1,
+			Mode:      fusefs.MountModeStaged,
+			StageSize: fusefs.DefaultStageSize,
+			StageDir:  stageDir,
+		}
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- runMount(ctx, opts, baseCfg, mp, &logBuf, func() {
+				onReadyCalled.Store(true)
+			})
+		}()
+
+		select {
+		case <-waitEntered:
+		case <-time.After(time.Second):
+			fakeSrv.forceRelease()
+			t.Fatal("scene=run_mount_ebusy_wait_enter want=entered got=timeout")
+		}
+		cancel()
+
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(1500 * time.Millisecond):
+			fakeSrv.forceRelease()
+			gotErr := <-errCh
+			t.Fatalf("scene=run_mount_ebusy want=clean_teardown got=hung unmountCnt=%d err=%v", fakeSrv.unmountCnt.Load(), gotErr)
+		}
+
+		require.False(t, onReadyCalled.Load(), "scene=run_mount_ebusy want=onReady_not_called")
+		require.Equal(t, int32(3), fakeSrv.unmountCnt.Load())
+		require.Len(t, storage.getMountReqs(), 1)
+		require.Len(t, storage.getUnmountReqs(), 1, "scene=run_mount_ebusy want=lease_released_via_UnmountDisk")
+		requireEmptyDir(t, stageDir, "run_mount_ebusy_stage_cleanup")
+		ln, listenErr := net.Listen("tcp", fixedAddr)
+		require.NoError(t, listenErr, "scene=run_mount_ebusy want=admin_addr_released got=%v", listenErr)
+		require.NoError(t, ln.Close())
+		logs := logBuf.String()
+		require.Contains(t, logs, `"msg":"mount_unmount_busy"`)
+		require.Contains(t, logs, mp)
 	})
 }
 

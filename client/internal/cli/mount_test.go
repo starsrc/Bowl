@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -2249,5 +2250,144 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 		require.Contains(t, errOut, "unmount")
 		require.Contains(t, errOut, "--force")
 		requireEmptyDir(t, stageDir, "err_disk_mounted_stage_cleanup")
+	})
+}
+
+func TestMount_Teardown_GivenOverwrittenMountMeta_PreservesNewInstanceAndRemovesOwn(t *testing.T) {
+	t.Run("PreservesNewInstanceWithDifferentPID", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		metaDir := t.TempDir()
+		withTempMountMetaDirs(t, metaDir)
+		mp := t.TempDir()
+		canonMP := canonicalMountpoint(mp)
+		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "mount-a-disk", 1<<30, 0)
+		withMountStorageFake(t, storage)
+
+		mountB := mountMeta{
+			Mountpoint: canonMP,
+			PID:        os.Getpid() + 10000,
+			DiskID:     testDiskID2,
+			AdminAddr:  "127.0.0.1:29991",
+			StartedAt:  time.Now().UTC().Add(time.Second),
+		}
+		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			ready()
+			_, err := writeMountMeta(&mountB)
+			require.NoError(t, err)
+			return nil
+		})
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		require.Equal(t, 0, code, "scene=teardown_diff_pid stderr=%s", errOut)
+
+		raw, readErr := os.ReadFile(metaFile)
+		require.NoError(t, readErr, "scene=teardown_diff_pid want=mountB_meta_preserved got=%v", readErr)
+		var got mountMeta
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.Equal(t, mountB.PID, got.PID)
+		require.Equal(t, mountB.DiskID, got.DiskID)
+		require.Equal(t, mountB.AdminAddr, got.AdminAddr)
+		require.True(t, mountB.StartedAt.Equal(got.StartedAt))
+	})
+
+	t.Run("PreservesNewInstanceWithSamePIDDifferentStartedAt", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		metaDir := t.TempDir()
+		withTempMountMetaDirs(t, metaDir)
+		mp := t.TempDir()
+		canonMP := canonicalMountpoint(mp)
+		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "mount-a-same-pid", 1<<30, 0)
+		withMountStorageFake(t, storage)
+
+		mountB := mountMeta{
+			Mountpoint: canonMP,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID2,
+			AdminAddr:  "127.0.0.1:29992",
+			StartedAt:  time.Now().UTC().Add(time.Minute),
+		}
+		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			ready()
+			_, err := writeMountMeta(&mountB)
+			require.NoError(t, err)
+			return nil
+		})
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		require.Equal(t, 0, code, "scene=teardown_same_pid_new_started_at stderr=%s", errOut)
+
+		raw, readErr := os.ReadFile(metaFile)
+		require.NoError(t, readErr, "scene=teardown_same_pid_new_started_at want=mountB_meta_preserved got=%v", readErr)
+		var got mountMeta
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.Equal(t, mountB.PID, got.PID)
+		require.Equal(t, mountB.DiskID, got.DiskID)
+		require.True(t, mountB.StartedAt.Equal(got.StartedAt))
+	})
+
+	t.Run("PreservesUnparseableFile", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		metaDir := t.TempDir()
+		withTempMountMetaDirs(t, metaDir)
+		mp := t.TempDir()
+		canonMP := canonicalMountpoint(mp)
+		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "mount-a-corrupt", 1<<30, 0)
+		withMountStorageFake(t, storage)
+
+		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			ready()
+			require.NoError(t, os.WriteFile(metaFile, []byte("{corrupt"), 0o644))
+			return nil
+		})
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		require.Equal(t, 0, code, "scene=teardown_corrupt stderr=%s", errOut)
+
+		raw, readErr := os.ReadFile(metaFile)
+		require.NoError(t, readErr, "scene=teardown_corrupt want=file_not_deleted got=%v", readErr)
+		require.Equal(t, "{corrupt", string(raw))
+	})
+
+	t.Run("RemovesOwnMountMetaWhenUnchanged", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		metaDir := t.TempDir()
+		withTempMountMetaDirs(t, metaDir)
+		mp := t.TempDir()
+		canonMP := canonicalMountpoint(mp)
+		metaFile := filepath.Join(metaDir, mountMetaFileName(canonMP))
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "mount-a-own", 1<<30, 0)
+		withMountStorageFake(t, storage)
+
+		withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, ready func()) error {
+			ready()
+			_, statErr := os.Stat(metaFile)
+			require.NoError(t, statErr)
+			return nil
+		})
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--mode=ro", "--admin-addr", "off")
+		require.Equal(t, 0, code, "scene=teardown_own stderr=%s", errOut)
+
+		_, statErr := os.Stat(metaFile)
+		require.ErrorIs(t, statErr, os.ErrNotExist, "scene=teardown_own want=own_meta_removed got=%v", statErr)
 	})
 }

@@ -48,6 +48,7 @@ var mappings = []errorMapping{
 	{sentinel: ErrNoBaseSnapshot, code: codes.FailedPrecondition, reason: "EINVAL"},
 	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: ErrSnapshotInUse, code: codes.FailedPrecondition, reason: "EBUSY"},
 	{sentinel: db.ErrStaleBaseSnapshot, code: codes.Aborted, reason: "EBUSY"},
 }
 

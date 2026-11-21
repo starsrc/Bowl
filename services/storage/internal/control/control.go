@@ -64,6 +64,7 @@ var (
 	ErrIO                = store.ErrIO
 	ErrCrossLineage      = db.ErrCrossLineage
 	ErrStaleBaseSnapshot = db.ErrStaleBaseSnapshot
+	ErrSnapshotInUse     = db.ErrSnapshotInUse
 	ErrAmbiguousLCA      = errors.New("ambiguous lowest common ancestor (criss-cross merge)")
 	ErrNoBaseSnapshot    = errors.New("disk has no base snapshot in lineage")
 	ErrConcurrentMerge   = errors.New("concurrent write or epoch change on target disk during merge")
@@ -185,6 +186,10 @@ type Manager interface {
 	DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDiskResult, error)
 	ReadSnapshotNode(ctx context.Context, params *ReadSnapshotNodeParams) (*store.ReadNodeResult, error)
 	MergeDisk(ctx context.Context, params *MergeDiskParams) (*MergeDiskResult, error)
+	CreateSnapshot(ctx context.Context, params CreateSnapshotParams) (*Snapshot, error)
+	ListSnapshots(ctx context.Context, params ListSnapshotsParams) (*ListSnapshotsResult, error)
+	DeleteSnapshot(ctx context.Context, params DeleteSnapshotParams) error
+	PruneSnapshots(ctx context.Context, params PruneSnapshotsParams) (*PruneSnapshotsResult, error)
 	Actor(ctx context.Context, diskID string) (*store.StoreActor, error)
 	Collector() prometheus.Collector
 

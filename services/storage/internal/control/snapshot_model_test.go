@@ -103,19 +103,36 @@ func TestDeleteDisk_RecursiveSubtree_MountGateAtomicAndPhysicalCleanup(t *testin
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: greatB2.DiskID, MountID: b2Mnt.MountID}))
 
 	lineageID := uuid.MustParse(rootDisk.DiskID)
+	rootID := uuid.MustParse(rootDisk.DiskID)
+	rootRow, err := memDB.GetDisk(ctx, rootID)
+	require.NoError(t, err)
 	b2ID := uuid.MustParse(greatB2.DiskID)
 	b2Row, err := memDB.GetDisk(ctx, b2ID)
 	require.NoError(t, err)
-	manualSnapID := uuid.Must(uuid.NewV7())
+
+	b2ManualSnapID := uuid.Must(uuid.NewV7())
 	require.NoError(t, memDB.SeedSnapshot(db.SnapshotRecord{
 		LineageID:        lineageID,
-		SnapshotID:       manualSnapID,
+		SnapshotID:       b2ManualSnapID,
 		SourceDiskID:     b2ID,
 		ParentSnapshotID: b2Row.BaseSnapshotID,
 		Kind:             db.SnapshotKindManual,
+		Name:             "b2-manual",
 	}, uuid.Nil))
-	manualDir := filepath.Join(rootDir, "snapshots", manualSnapID.String())
-	require.NoError(t, os.MkdirAll(manualDir, 0o755))
+	b2ManualDir := filepath.Join(rootDir, "snapshots", b2ManualSnapID.String())
+	require.NoError(t, os.MkdirAll(b2ManualDir, 0o755))
+
+	rootManualSnapID := uuid.Must(uuid.NewV7())
+	require.NoError(t, memDB.SeedSnapshot(db.SnapshotRecord{
+		LineageID:        lineageID,
+		SnapshotID:       rootManualSnapID,
+		SourceDiskID:     rootID,
+		ParentSnapshotID: rootRow.BaseSnapshotID,
+		Kind:             db.SnapshotKindManual,
+		Name:             "root-manual",
+	}, uuid.Nil))
+	rootManualDir := filepath.Join(rootDir, "snapshots", rootManualSnapID.String())
+	require.NoError(t, os.MkdirAll(rootManualDir, 0o755))
 
 	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: branchB.DiskID, Recursive: true}))
 
@@ -130,12 +147,14 @@ func TestDeleteDisk_RecursiveSubtree_MountGateAtomicAndPhysicalCleanup(t *testin
 		require.NoError(t, gErr)
 	}
 
-	_, manualStatErr := os.Stat(manualDir)
-	require.NoError(t, manualStatErr, "manual snapshot directory on disk must survive recursive delete")
-	require.InDelta(t, 2.0, gatherCounterValue(t, reg, "bowl_storage_control_snapshots_reclaimed_total"), 1e-9,
-		"recursive delete must reclaim 2 unreachable fork snapshots and increment metric")
+	_, b2ManualStatErr := os.Stat(b2ManualDir)
+	require.ErrorIs(t, b2ManualStatErr, os.ErrNotExist, "deleted disk manual snapshot directory must be reclaimed")
+	_, rootManualStatErr := os.Stat(rootManualDir)
+	require.NoError(t, rootManualStatErr, "surviving disk manual snapshot directory must survive recursive delete")
+	require.InDelta(t, 3.0, gatherCounterValue(t, reg, "bowl_storage_control_snapshots_reclaimed_total"), 1e-9,
+		"recursive delete must reclaim 2 unreachable fork snapshots + 1 deleted disk manual snapshot")
 	require.InDelta(t, 3.0, gatherGaugeValue(t, reg, "bowl_storage_snapshots_active"), 1e-9,
-		"2 reachable fork snapshots + 1 manual snapshot must remain on disk")
+		"2 reachable fork snapshots + 1 surviving disk manual snapshot must remain on disk")
 }
 
 func TestMergeDisk_AlreadyUpToDate_NoOpPreservesEpochMountsSupportsDryRunAndMaxBytes(t *testing.T) {

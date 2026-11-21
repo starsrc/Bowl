@@ -64,6 +64,10 @@ var storageMessages = []proto.Message{
 	&storagev1.DiffDiskRequest{},
 	&storagev1.ReadSnapshotNodeRequest{},
 	&storagev1.MergeDiskRequest{},
+	&storagev1.CreateSnapshotRequest{},
+	&storagev1.ListSnapshotsRequest{},
+	&storagev1.DeleteSnapshotRequest{},
+	&storagev1.PruneSnapshotsRequest{},
 
 	&storagev1.MountDiskResponse{},
 	&storagev1.RenewMountResponse{},
@@ -105,12 +109,17 @@ var storageMessages = []proto.Message{
 	&storagev1.DiffDiskResponse{},
 	&storagev1.ReadSnapshotNodeResponse{},
 	&storagev1.MergeDiskResponse{},
+	&storagev1.CreateSnapshotResponse{},
+	&storagev1.ListSnapshotsResponse{},
+	&storagev1.DeleteSnapshotResponse{},
+	&storagev1.PruneSnapshotsResponse{},
 
 	&storagev1.DirEntry{},
 	&storagev1.DirEntryPlus{},
 	&storagev1.Inode{},
 	&storagev1.InodeAttribute{},
 	&storagev1.Disk{},
+	&storagev1.Snapshot{},
 	&storagev1.MountLease{},
 	&storagev1.DiffNodeSummary{},
 	&storagev1.DiffEntry{},
@@ -451,6 +460,15 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.ForkDiskRequest.source_disk_id",
 		"storage.v1.ForkDiskRequest.max_bytes",
 		"storage.v1.ForkDiskResponse.disk",
+		"storage.v1.CreateSnapshotRequest.disk_id",
+		"storage.v1.CreateSnapshotResponse.snapshot",
+		"storage.v1.ListSnapshotsRequest.disk_id",
+		"storage.v1.ListSnapshotsRequest.kind",
+		"storage.v1.ListSnapshotsRequest.page_size",
+		"storage.v1.ListSnapshotsRequest.page_token",
+		"storage.v1.DeleteSnapshotRequest.disk_id",
+		"storage.v1.DeleteSnapshotRequest.snapshot_id",
+		"storage.v1.PruneSnapshotsRequest.disk_id",
 		"storage.v1.StatFSRequest.ino":
 		return 10, ReasonInvalidArgument
 
@@ -477,7 +495,8 @@ func classifyViolationInternal(v *protovalidate.Violation) (priority int, reason
 		"storage.v1.Disk.name",
 		"storage.v1.CreateDiskRequest.name",
 		"storage.v1.UpdateDiskRequest.name",
-		"storage.v1.ForkDiskRequest.name":
+		"storage.v1.ForkDiskRequest.name",
+		"storage.v1.CreateSnapshotRequest.name":
 		if isMaxLen {
 			return 20, ReasonNameTooLong
 		}

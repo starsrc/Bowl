@@ -495,17 +495,41 @@ func TestValidator_UnmountDiskRequest(t *testing.T) {
 func TestValidator_SnapshotRequests(t *testing.T) {
 	t.Run("CreateSnapshotRequest", func(t *testing.T) {
 		invalidCases := []struct {
-			name string
-			req  *storagev1.CreateSnapshotRequest
+			name   string
+			req    *storagev1.CreateSnapshotRequest
+			reason string
 		}{
-			{name: "invalid_disk_id", req: &storagev1.CreateSnapshotRequest{DiskId: "bad-uuid"}},
-			{name: "nil_disk_id", req: &storagev1.CreateSnapshotRequest{DiskId: testValidationNilUUID}},
-			{name: "name_exceeds_255_bytes", req: &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: strings.Repeat("a", 256)}},
-			{name: "name_contains_nul", req: &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: "snap\x001"}},
+			{
+				name:   "invalid_disk_id",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: "bad-uuid"},
+				reason: validator.ReasonInvalidArgument,
+			},
+			{
+				name:   "nil_disk_id",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: testValidationNilUUID},
+				reason: validator.ReasonInvalidArgument,
+			},
+			{
+				name:   "name_exceeds_255_bytes",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: strings.Repeat("a", 256)},
+				reason: validator.ReasonNameTooLong,
+			},
+			{
+				name:   "invalid_disk_id_overrides_overlong_name",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: "bad-uuid", Name: strings.Repeat("a", 256)},
+				reason: validator.ReasonInvalidArgument,
+			},
+			{
+				name:   "name_contains_nul",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: "snap\x001"},
+				reason: validator.ReasonInvalidArgument,
+			},
 		}
 		for _, tc := range invalidCases {
 			t.Run("reject/"+tc.name, func(t *testing.T) {
-				assertValidationRejected(t, tc.req)
+				called, err := runValidationIntercept(t, tc.req)
+				require.False(t, called, "非法请求必须在校验拦截器短路返回")
+				requireConnectErrorCodeAndReason(t, err, connect.CodeInvalidArgument, tc.reason)
 			})
 		}
 

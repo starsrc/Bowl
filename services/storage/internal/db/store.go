@@ -791,7 +791,7 @@ func (s *SQLStore) ListSnapshots(ctx context.Context, query ListSnapshotsQuery) 
 		}
 		page = buildListSnapshotsPage(disks, snaps, query.Kind, pageSize, hasCursor, cursorTime, cursorSnapID)
 		return nil
-	}, tx.WithDefaultRetry())
+	}, tx.WithIsoLevel(tx.RepeatableRead), tx.WithReadOnly(), tx.WithDefaultRetry())
 	if err != nil {
 		return ListSnapshotsPage{}, mapPGXErr(err)
 	}

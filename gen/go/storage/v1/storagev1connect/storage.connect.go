@@ -130,6 +130,18 @@ const (
 	// StorageServiceMergeDiskProcedure is the fully-qualified name of the StorageService's MergeDisk
 	// RPC.
 	StorageServiceMergeDiskProcedure = "/storage.v1.StorageService/MergeDisk"
+	// StorageServiceCreateSnapshotProcedure is the fully-qualified name of the StorageService's
+	// CreateSnapshot RPC.
+	StorageServiceCreateSnapshotProcedure = "/storage.v1.StorageService/CreateSnapshot"
+	// StorageServiceListSnapshotsProcedure is the fully-qualified name of the StorageService's
+	// ListSnapshots RPC.
+	StorageServiceListSnapshotsProcedure = "/storage.v1.StorageService/ListSnapshots"
+	// StorageServiceDeleteSnapshotProcedure is the fully-qualified name of the StorageService's
+	// DeleteSnapshot RPC.
+	StorageServiceDeleteSnapshotProcedure = "/storage.v1.StorageService/DeleteSnapshot"
+	// StorageServicePruneSnapshotsProcedure is the fully-qualified name of the StorageService's
+	// PruneSnapshots RPC.
+	StorageServicePruneSnapshotsProcedure = "/storage.v1.StorageService/PruneSnapshots"
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
@@ -324,6 +336,14 @@ type StorageServiceClient interface {
 	ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error)
 	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
+	// CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
+	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error)
+	// ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
+	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
+	// DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
+	DeleteSnapshot(context.Context, *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error)
+	// PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
+	PruneSnapshots(context.Context, *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. By
@@ -577,6 +597,30 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("MergeDisk")),
 			connect.WithClientOptions(opts...),
 		),
+		createSnapshot: connect.NewClient[v1.CreateSnapshotRequest, v1.CreateSnapshotResponse](
+			httpClient,
+			baseURL+StorageServiceCreateSnapshotProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("CreateSnapshot")),
+			connect.WithClientOptions(opts...),
+		),
+		listSnapshots: connect.NewClient[v1.ListSnapshotsRequest, v1.ListSnapshotsResponse](
+			httpClient,
+			baseURL+StorageServiceListSnapshotsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListSnapshots")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteSnapshot: connect.NewClient[v1.DeleteSnapshotRequest, v1.DeleteSnapshotResponse](
+			httpClient,
+			baseURL+StorageServiceDeleteSnapshotProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DeleteSnapshot")),
+			connect.WithClientOptions(opts...),
+		),
+		pruneSnapshots: connect.NewClient[v1.PruneSnapshotsRequest, v1.PruneSnapshotsResponse](
+			httpClient,
+			baseURL+StorageServicePruneSnapshotsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("PruneSnapshots")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -622,6 +666,10 @@ type storageServiceClient struct {
 	diffDisk         *connect.Client[v1.DiffDiskRequest, v1.DiffDiskResponse]
 	readSnapshotNode *connect.Client[v1.ReadSnapshotNodeRequest, v1.ReadSnapshotNodeResponse]
 	mergeDisk        *connect.Client[v1.MergeDiskRequest, v1.MergeDiskResponse]
+	createSnapshot   *connect.Client[v1.CreateSnapshotRequest, v1.CreateSnapshotResponse]
+	listSnapshots    *connect.Client[v1.ListSnapshotsRequest, v1.ListSnapshotsResponse]
+	deleteSnapshot   *connect.Client[v1.DeleteSnapshotRequest, v1.DeleteSnapshotResponse]
+	pruneSnapshots   *connect.Client[v1.PruneSnapshotsRequest, v1.PruneSnapshotsResponse]
 }
 
 // Lookup calls storage.v1.StorageService.Lookup.
@@ -824,6 +872,26 @@ func (c *storageServiceClient) MergeDisk(ctx context.Context, req *connect.Reque
 	return c.mergeDisk.CallUnary(ctx, req)
 }
 
+// CreateSnapshot calls storage.v1.StorageService.CreateSnapshot.
+func (c *storageServiceClient) CreateSnapshot(ctx context.Context, req *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error) {
+	return c.createSnapshot.CallUnary(ctx, req)
+}
+
+// ListSnapshots calls storage.v1.StorageService.ListSnapshots.
+func (c *storageServiceClient) ListSnapshots(ctx context.Context, req *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error) {
+	return c.listSnapshots.CallUnary(ctx, req)
+}
+
+// DeleteSnapshot calls storage.v1.StorageService.DeleteSnapshot.
+func (c *storageServiceClient) DeleteSnapshot(ctx context.Context, req *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error) {
+	return c.deleteSnapshot.CallUnary(ctx, req)
+}
+
+// PruneSnapshots calls storage.v1.StorageService.PruneSnapshots.
+func (c *storageServiceClient) PruneSnapshots(ctx context.Context, req *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error) {
+	return c.pruneSnapshots.CallUnary(ctx, req)
+}
+
 // StorageServiceHandler is an implementation of the storage.v1.StorageService service.
 type StorageServiceHandler interface {
 	// Lookup 执行单级目录项查找。
@@ -1016,6 +1084,14 @@ type StorageServiceHandler interface {
 	ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error)
 	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
+	// CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
+	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error)
+	// ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
+	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
+	// DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
+	DeleteSnapshot(context.Context, *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error)
+	// PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
+	PruneSnapshots(context.Context, *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error)
 }
 
 // NewStorageServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1265,6 +1341,30 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("MergeDisk")),
 		connect.WithHandlerOptions(opts...),
 	)
+	storageServiceCreateSnapshotHandler := connect.NewUnaryHandler(
+		StorageServiceCreateSnapshotProcedure,
+		svc.CreateSnapshot,
+		connect.WithSchema(storageServiceMethods.ByName("CreateSnapshot")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceListSnapshotsHandler := connect.NewUnaryHandler(
+		StorageServiceListSnapshotsProcedure,
+		svc.ListSnapshots,
+		connect.WithSchema(storageServiceMethods.ByName("ListSnapshots")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceDeleteSnapshotHandler := connect.NewUnaryHandler(
+		StorageServiceDeleteSnapshotProcedure,
+		svc.DeleteSnapshot,
+		connect.WithSchema(storageServiceMethods.ByName("DeleteSnapshot")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServicePruneSnapshotsHandler := connect.NewUnaryHandler(
+		StorageServicePruneSnapshotsProcedure,
+		svc.PruneSnapshots,
+		connect.WithSchema(storageServiceMethods.ByName("PruneSnapshots")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/storage.v1.StorageService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case StorageServiceLookupProcedure:
@@ -1347,6 +1447,14 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceReadSnapshotNodeHandler.ServeHTTP(w, r)
 		case StorageServiceMergeDiskProcedure:
 			storageServiceMergeDiskHandler.ServeHTTP(w, r)
+		case StorageServiceCreateSnapshotProcedure:
+			storageServiceCreateSnapshotHandler.ServeHTTP(w, r)
+		case StorageServiceListSnapshotsProcedure:
+			storageServiceListSnapshotsHandler.ServeHTTP(w, r)
+		case StorageServiceDeleteSnapshotProcedure:
+			storageServiceDeleteSnapshotHandler.ServeHTTP(w, r)
+		case StorageServicePruneSnapshotsProcedure:
+			storageServicePruneSnapshotsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1514,4 +1622,20 @@ func (UnimplementedStorageServiceHandler) ReadSnapshotNode(context.Context, *con
 
 func (UnimplementedStorageServiceHandler) MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.MergeDisk is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CreateSnapshot is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListSnapshots is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) DeleteSnapshot(context.Context, *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DeleteSnapshot is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) PruneSnapshots(context.Context, *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.PruneSnapshots is not implemented"))
 }

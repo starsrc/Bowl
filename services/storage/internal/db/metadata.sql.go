@@ -143,10 +143,11 @@ INSERT INTO disk_snapshots (
     parent_snapshot_id,
     merge_parent_snapshot_id,
     created_at,
-    kind
+    kind,
+    name
 )
-VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6)
-RETURNING snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind
+VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6, $7)
+RETURNING snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind, name
 `
 
 type CreateDiskSnapshotParams struct {
@@ -156,6 +157,7 @@ type CreateDiskSnapshotParams struct {
 	ParentSnapshotID      pgtype.UUID `json:"parent_snapshot_id"`
 	MergeParentSnapshotID pgtype.UUID `json:"merge_parent_snapshot_id"`
 	Kind                  string      `json:"kind"`
+	Name                  string      `json:"name"`
 }
 
 func (q *Queries) CreateDiskSnapshot(ctx context.Context, arg CreateDiskSnapshotParams) (DiskSnapshot, error) {
@@ -166,6 +168,7 @@ func (q *Queries) CreateDiskSnapshot(ctx context.Context, arg CreateDiskSnapshot
 		arg.ParentSnapshotID,
 		arg.MergeParentSnapshotID,
 		arg.Kind,
+		arg.Name,
 	)
 	var i DiskSnapshot
 	err := row.Scan(
@@ -176,6 +179,7 @@ func (q *Queries) CreateDiskSnapshot(ctx context.Context, arg CreateDiskSnapshot
 		&i.MergeParentSnapshotID,
 		&i.CreatedAt,
 		&i.Kind,
+		&i.Name,
 	)
 	return i, err
 }
@@ -439,6 +443,28 @@ func (q *Queries) GetMountLeaseForUpdate(ctx context.Context, arg GetMountLeaseF
 	return i, err
 }
 
+const getSnapshotByID = `-- name: GetSnapshotByID :one
+SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind, name
+FROM disk_snapshots
+WHERE snapshot_id = $1
+`
+
+func (q *Queries) GetSnapshotByID(ctx context.Context, snapshotID pgtype.UUID) (DiskSnapshot, error) {
+	row := q.db.QueryRow(ctx, getSnapshotByID, snapshotID)
+	var i DiskSnapshot
+	err := row.Scan(
+		&i.SnapshotID,
+		&i.LineageID,
+		&i.SourceDiskID,
+		&i.ParentSnapshotID,
+		&i.MergeParentSnapshotID,
+		&i.CreatedAt,
+		&i.Kind,
+		&i.Name,
+	)
+	return i, err
+}
+
 const listActiveMountLeases = `-- name: ListActiveMountLeases :many
 SELECT disk_id, mount_id, read_only, epoch, expires_at, created_at, updated_at
 FROM disk_mounts
@@ -610,7 +636,7 @@ func (q *Queries) ListLineageDisksForUpdate(ctx context.Context, lineageID pgtyp
 }
 
 const listLineageSnapshots = `-- name: ListLineageSnapshots :many
-SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind
+SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind, name
 FROM disk_snapshots
 WHERE lineage_id = $1
 ORDER BY created_at ASC, snapshot_id ASC
@@ -633,6 +659,7 @@ func (q *Queries) ListLineageSnapshots(ctx context.Context, lineageID pgtype.UUI
 			&i.MergeParentSnapshotID,
 			&i.CreatedAt,
 			&i.Kind,
+			&i.Name,
 		); err != nil {
 			return nil, err
 		}

@@ -59,6 +59,10 @@ const (
 	StorageService_DiffDisk_FullMethodName         = "/storage.v1.StorageService/DiffDisk"
 	StorageService_ReadSnapshotNode_FullMethodName = "/storage.v1.StorageService/ReadSnapshotNode"
 	StorageService_MergeDisk_FullMethodName        = "/storage.v1.StorageService/MergeDisk"
+	StorageService_CreateSnapshot_FullMethodName   = "/storage.v1.StorageService/CreateSnapshot"
+	StorageService_ListSnapshots_FullMethodName    = "/storage.v1.StorageService/ListSnapshots"
+	StorageService_DeleteSnapshot_FullMethodName   = "/storage.v1.StorageService/DeleteSnapshot"
+	StorageService_PruneSnapshots_FullMethodName   = "/storage.v1.StorageService/PruneSnapshots"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -257,6 +261,14 @@ type StorageServiceClient interface {
 	ReadSnapshotNode(ctx context.Context, in *ReadSnapshotNodeRequest, opts ...grpc.CallOption) (*ReadSnapshotNodeResponse, error)
 	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(ctx context.Context, in *MergeDiskRequest, opts ...grpc.CallOption) (*MergeDiskResponse, error)
+	// CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
+	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
+	// ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
+	ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error)
+	// DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
+	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
+	// PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
+	PruneSnapshots(ctx context.Context, in *PruneSnapshotsRequest, opts ...grpc.CallOption) (*PruneSnapshotsResponse, error)
 }
 
 type storageServiceClient struct {
@@ -667,6 +679,46 @@ func (c *storageServiceClient) MergeDisk(ctx context.Context, in *MergeDiskReque
 	return out, nil
 }
 
+func (c *storageServiceClient) CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateSnapshotResponse)
+	err := c.cc.Invoke(ctx, StorageService_CreateSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSnapshotsResponse)
+	err := c.cc.Invoke(ctx, StorageService_ListSnapshots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSnapshotResponse)
+	err := c.cc.Invoke(ctx, StorageService_DeleteSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *storageServiceClient) PruneSnapshots(ctx context.Context, in *PruneSnapshotsRequest, opts ...grpc.CallOption) (*PruneSnapshotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PruneSnapshotsResponse)
+	err := c.cc.Invoke(ctx, StorageService_PruneSnapshots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StorageServiceServer is the server API for StorageService service.
 // All implementations must embed UnimplementedStorageServiceServer
 // for forward compatibility.
@@ -863,6 +915,14 @@ type StorageServiceServer interface {
 	ReadSnapshotNode(context.Context, *ReadSnapshotNodeRequest) (*ReadSnapshotNodeResponse, error)
 	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *MergeDiskRequest) (*MergeDiskResponse, error)
+	// CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
+	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
+	// ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
+	ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error)
+	// DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
+	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
+	// PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
+	PruneSnapshots(context.Context, *PruneSnapshotsRequest) (*PruneSnapshotsResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
 
@@ -992,6 +1052,18 @@ func (UnimplementedStorageServiceServer) ReadSnapshotNode(context.Context, *Read
 }
 func (UnimplementedStorageServiceServer) MergeDisk(context.Context, *MergeDiskRequest) (*MergeDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MergeDisk not implemented")
+}
+func (UnimplementedStorageServiceServer) CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSnapshot not implemented")
+}
+func (UnimplementedStorageServiceServer) ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSnapshots not implemented")
+}
+func (UnimplementedStorageServiceServer) DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSnapshot not implemented")
+}
+func (UnimplementedStorageServiceServer) PruneSnapshots(context.Context, *PruneSnapshotsRequest) (*PruneSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PruneSnapshots not implemented")
 }
 func (UnimplementedStorageServiceServer) mustEmbedUnimplementedStorageServiceServer() {}
 func (UnimplementedStorageServiceServer) testEmbeddedByValue()                        {}
@@ -1734,6 +1806,78 @@ func _StorageService_MergeDisk_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StorageService_CreateSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).CreateSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_CreateSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).CreateSnapshot(ctx, req.(*CreateSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_ListSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).ListSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_ListSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).ListSnapshots(ctx, req.(*ListSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_DeleteSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).DeleteSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_DeleteSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).DeleteSnapshot(ctx, req.(*DeleteSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StorageService_PruneSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PruneSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StorageServiceServer).PruneSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StorageService_PruneSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StorageServiceServer).PruneSnapshots(ctx, req.(*PruneSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StorageService_ServiceDesc is the grpc.ServiceDesc for StorageService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1900,6 +2044,22 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MergeDisk",
 			Handler:    _StorageService_MergeDisk_Handler,
+		},
+		{
+			MethodName: "CreateSnapshot",
+			Handler:    _StorageService_CreateSnapshot_Handler,
+		},
+		{
+			MethodName: "ListSnapshots",
+			Handler:    _StorageService_ListSnapshots_Handler,
+		},
+		{
+			MethodName: "DeleteSnapshot",
+			Handler:    _StorageService_DeleteSnapshot_Handler,
+		},
+		{
+			MethodName: "PruneSnapshots",
+			Handler:    _StorageService_PruneSnapshots_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -28,6 +28,7 @@ var (
 	ErrCrossLineage      = errors.New("db: cross lineage")
 	ErrStaleBaseSnapshot = errors.New("db: stale base snapshot")
 	ErrStaleEpoch        = errors.New("db: stale epoch")
+	ErrSnapshotInUse     = errors.New("db: snapshot is protected by active lineage")
 )
 
 type SegmentKind uint8
@@ -65,6 +66,8 @@ type SnapshotRecord struct {
 	MergeParentSnapshotID uuid.UUID
 	SourceDiskID          uuid.UUID
 	Kind                  SnapshotKind
+	Name                  string
+	Protected             bool
 	CreatedAt             time.Time
 }
 
@@ -140,6 +143,24 @@ type ListDisksPage struct {
 	NextPageToken string
 }
 
+type CreateSnapshotInput struct {
+	DiskID     uuid.UUID
+	SnapshotID uuid.UUID
+	Name       string
+}
+
+type ListSnapshotsQuery struct {
+	DiskID    uuid.UUID
+	Kind      SnapshotKind
+	PageSize  uint32
+	PageToken string
+}
+
+type ListSnapshotsPage struct {
+	Snapshots     []SnapshotRecord
+	NextPageToken string
+}
+
 type SegmentRange struct {
 	First int64
 	Last  int64
@@ -152,6 +173,10 @@ type Store interface {
 	ListDisks(ctx context.Context, query ListDisksQuery) (ListDisksPage, error)
 	ListLineageDisks(ctx context.Context, lineageID uuid.UUID) ([]DiskRecord, error)
 	ListLineageSnapshots(ctx context.Context, lineageID uuid.UUID) ([]SnapshotRecord, error)
+	CreateSnapshot(ctx context.Context, arg CreateSnapshotInput) (SnapshotRecord, error)
+	ListSnapshots(ctx context.Context, query ListSnapshotsQuery) (ListSnapshotsPage, error)
+	DeleteSnapshot(ctx context.Context, diskID, snapshotID uuid.UUID) (SnapshotRecord, error)
+	PruneSnapshots(ctx context.Context, diskID uuid.UUID, dryRun bool) ([]SnapshotRecord, error)
 	UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error)
 	UpdateDiskUsage(ctx context.Context, diskID uuid.UUID, usedBytes, usedInodes uint64) error
 	MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRecord, error)
@@ -236,6 +261,7 @@ func toSnapshotRecord(s *DiskSnapshot) SnapshotRecord {
 		MergeParentSnapshotID: fromPGUUID(s.MergeParentSnapshotID),
 		SourceDiskID:          fromPGUUID(s.SourceDiskID),
 		Kind:                  SnapshotKind(s.Kind),
+		Name:                  s.Name,
 		CreatedAt:             s.CreatedAt.Time.UTC(),
 	}
 }
@@ -413,6 +439,11 @@ func computeReclaimableSnapshots(survivingDisks []DiskRecord, snapshots []Snapsh
 		return nil, 0
 	}
 
+	survivingDiskSet := make(map[uuid.UUID]struct{}, len(survivingDisks))
+	for i := range survivingDisks {
+		survivingDiskSet[survivingDisks[i].DiskID] = struct{}{}
+	}
+
 	if len(survivingDisks) >= 2 {
 		byID := make(map[uuid.UUID]SnapshotRecord, len(snapshots))
 		for i := range snapshots {
@@ -449,7 +480,11 @@ func computeReclaimableSnapshots(survivingDisks []DiskRecord, snapshots []Snapsh
 		for i := range snapshots {
 			snap := snapshots[i]
 			if snap.Kind == SnapshotKindManual {
-				remainingSnapshots++
+				if _, owned := survivingDiskSet[snap.SourceDiskID]; owned {
+					remainingSnapshots++
+					continue
+				}
+				toDelete = append(toDelete, snap.SnapshotID)
 				continue
 			}
 			if _, ok := reachable[snap.SnapshotID]; ok {
@@ -464,8 +499,10 @@ func computeReclaimableSnapshots(survivingDisks []DiskRecord, snapshots []Snapsh
 	for i := range snapshots {
 		snap := snapshots[i]
 		if snap.Kind == SnapshotKindManual {
-			remainingSnapshots++
-			continue
+			if _, owned := survivingDiskSet[snap.SourceDiskID]; owned {
+				remainingSnapshots++
+				continue
+			}
 		}
 		toDelete = append(toDelete, snap.SnapshotID)
 	}
@@ -659,6 +696,280 @@ func (s *SQLStore) ListLineageSnapshots(ctx context.Context, lineageID uuid.UUID
 		snapshots = append(snapshots, toSnapshotRecord(&rows[i]))
 	}
 	return snapshots, nil
+}
+
+func (s *SQLStore) CreateSnapshot(ctx context.Context, arg CreateSnapshotInput) (SnapshotRecord, error) {
+	if arg.DiskID == uuid.Nil || arg.SnapshotID == uuid.Nil {
+		return SnapshotRecord{}, fmt.Errorf("%w: disk id and snapshot id cannot be nil uuid", ErrInvalidArgument)
+	}
+	pgDisk := toPGUUID(arg.DiskID)
+	pgSnap := toPGUUID(arg.SnapshotID)
+
+	var created DiskSnapshot
+	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
+		diskRow, getErr := q.GetDisk(ctx, pgDisk)
+		if getErr != nil {
+			return mapPGXErr(getErr)
+		}
+		if _, lockErr := q.LockDiskLineage(ctx, diskRow.LineageID); lockErr != nil {
+			return mapPGXErr(lockErr)
+		}
+		lockedDisk, lockDiskErr := q.GetDiskForUpdate(ctx, pgDisk)
+		if lockDiskErr != nil {
+			return mapPGXErr(lockDiskErr)
+		}
+		row, snapErr := q.CreateDiskSnapshot(ctx, CreateDiskSnapshotParams{
+			SnapshotID:       pgSnap,
+			LineageID:        lockedDisk.LineageID,
+			SourceDiskID:     pgDisk,
+			ParentSnapshotID: lockedDisk.BaseSnapshotID,
+			Kind:             string(SnapshotKindManual),
+			Name:             arg.Name,
+		})
+		if snapErr != nil {
+			return snapErr
+		}
+		created = row
+		return nil
+	}, tx.WithDefaultRetry())
+	if err != nil {
+		return SnapshotRecord{}, mapPGXErr(err)
+	}
+	return toSnapshotRecord(&created), nil
+}
+
+func (s *SQLStore) ListSnapshots(ctx context.Context, query ListSnapshotsQuery) (ListSnapshotsPage, error) {
+	if query.DiskID == uuid.Nil {
+		return ListSnapshotsPage{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+	if err := validateSnapshotKindFilter(query.Kind); err != nil {
+		return ListSnapshotsPage{}, err
+	}
+	pageSize, err := normalizeSnapshotPageSize(query.PageSize)
+	if err != nil {
+		return ListSnapshotsPage{}, err
+	}
+
+	var (
+		hasCursor    bool
+		cursorTime   time.Time
+		cursorSnapID uuid.UUID
+	)
+	if query.PageToken != "" {
+		ts, id, decErr := decodeSnapshotPageCursor(query.PageToken)
+		if decErr != nil {
+			return ListSnapshotsPage{}, decErr
+		}
+		hasCursor = true
+		cursorTime = ts
+		cursorSnapID = id
+	}
+
+	pgDisk := toPGUUID(query.DiskID)
+	var page ListSnapshotsPage
+	err = s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
+		diskRow, getErr := q.GetDisk(ctx, pgDisk)
+		if getErr != nil {
+			return mapPGXErr(getErr)
+		}
+		diskRows, disksErr := q.ListLineageDisks(ctx, diskRow.LineageID)
+		if disksErr != nil {
+			return mapPGXErr(disksErr)
+		}
+		snapRows, snapsErr := q.ListLineageSnapshots(ctx, diskRow.LineageID)
+		if snapsErr != nil {
+			return mapPGXErr(snapsErr)
+		}
+
+		disks := make([]DiskRecord, 0, len(diskRows))
+		for i := range diskRows {
+			disks = append(disks, toDiskRecord(&diskRows[i]))
+		}
+		snaps := make([]SnapshotRecord, 0, len(snapRows))
+		for i := range snapRows {
+			snaps = append(snaps, toSnapshotRecord(&snapRows[i]))
+		}
+		page = buildListSnapshotsPage(disks, snaps, query.Kind, pageSize, hasCursor, cursorTime, cursorSnapID)
+		return nil
+	}, tx.WithDefaultRetry())
+	if err != nil {
+		return ListSnapshotsPage{}, mapPGXErr(err)
+	}
+	return page, nil
+}
+
+func (s *SQLStore) DeleteSnapshot(ctx context.Context, diskID, snapshotID uuid.UUID) (SnapshotRecord, error) {
+	if diskID == uuid.Nil || snapshotID == uuid.Nil {
+		return SnapshotRecord{}, fmt.Errorf("%w: disk id and snapshot id cannot be nil uuid", ErrInvalidArgument)
+	}
+	pgDisk := toPGUUID(diskID)
+	pgSnap := toPGUUID(snapshotID)
+
+	var deleted SnapshotRecord
+	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
+		diskRow, getErr := q.GetDisk(ctx, pgDisk)
+		if getErr != nil {
+			return mapPGXErr(getErr)
+		}
+		lineageID := diskRow.LineageID
+
+		if _, lockErr := q.LockDiskLineage(ctx, lineageID); lockErr != nil {
+			return mapPGXErr(lockErr)
+		}
+		lockedDisks, lockDisksErr := q.ListLineageDisksForUpdate(ctx, lineageID)
+		if lockDisksErr != nil {
+			return mapPGXErr(lockDisksErr)
+		}
+		diskRecords := make([]DiskRecord, 0, len(lockedDisks))
+		diskPresent := false
+		for i := range lockedDisks {
+			rec := toDiskRecord(&lockedDisks[i])
+			if rec.DiskID == diskID {
+				diskPresent = true
+			}
+			diskRecords = append(diskRecords, rec)
+		}
+		if !diskPresent {
+			return ErrNotFound
+		}
+
+		targetRow, snapErr := q.GetSnapshotByID(ctx, pgSnap)
+		if snapErr != nil {
+			return mapPGXErr(snapErr)
+		}
+		if fromPGUUID(targetRow.LineageID) != fromPGUUID(lineageID) {
+			return ErrCrossLineage
+		}
+
+		snapRows, listErr := q.ListLineageSnapshots(ctx, lineageID)
+		if listErr != nil {
+			return listErr
+		}
+		snapRecords := make([]SnapshotRecord, 0, len(snapRows))
+		for i := range snapRows {
+			snapRecords = append(snapRecords, toSnapshotRecord(&snapRows[i]))
+		}
+
+		hull := ComputeActiveLCAHull(diskRecords, snapRecords)
+		if _, protected := hull[snapshotID]; protected {
+			return ErrSnapshotInUse
+		}
+
+		pgSnapIDs := []pgtype.UUID{pgSnap}
+		if clearErr := q.ClearSnapshotParentByIDs(ctx, ClearSnapshotParentByIDsParams{
+			LineageID:   lineageID,
+			SnapshotIds: pgSnapIDs,
+		}); clearErr != nil {
+			return clearErr
+		}
+		if clearErr := q.ClearSnapshotMergeParentByIDs(ctx, ClearSnapshotMergeParentByIDsParams{
+			LineageID:   lineageID,
+			SnapshotIds: pgSnapIDs,
+		}); clearErr != nil {
+			return clearErr
+		}
+		deletedIDs, delErr := q.DeleteSnapshotsByIDs(ctx, DeleteSnapshotsByIDsParams{
+			LineageID:   lineageID,
+			SnapshotIds: pgSnapIDs,
+		})
+		if delErr != nil {
+			return delErr
+		}
+		if len(deletedIDs) == 0 {
+			return ErrNotFound
+		}
+
+		deleted = toSnapshotRecord(&targetRow)
+		deleted.Protected = false
+		return nil
+	}, tx.WithDefaultRetry())
+	if err != nil {
+		return SnapshotRecord{}, mapPGXErr(err)
+	}
+	return deleted, nil
+}
+
+func (s *SQLStore) PruneSnapshots(ctx context.Context, diskID uuid.UUID, dryRun bool) ([]SnapshotRecord, error) {
+	if diskID == uuid.Nil {
+		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+	pgDisk := toPGUUID(diskID)
+
+	var result []SnapshotRecord
+	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
+		result = nil
+		diskRow, getErr := q.GetDisk(ctx, pgDisk)
+		if getErr != nil {
+			return mapPGXErr(getErr)
+		}
+		lineageID := diskRow.LineageID
+
+		if _, lockErr := q.LockDiskLineage(ctx, lineageID); lockErr != nil {
+			return mapPGXErr(lockErr)
+		}
+		lockedDisks, lockDisksErr := q.ListLineageDisksForUpdate(ctx, lineageID)
+		if lockDisksErr != nil {
+			return mapPGXErr(lockDisksErr)
+		}
+		diskRecords := make([]DiskRecord, 0, len(lockedDisks))
+		diskPresent := false
+		for i := range lockedDisks {
+			rec := toDiskRecord(&lockedDisks[i])
+			if rec.DiskID == diskID {
+				diskPresent = true
+			}
+			diskRecords = append(diskRecords, rec)
+		}
+		if !diskPresent {
+			return ErrNotFound
+		}
+
+		snapRows, listErr := q.ListLineageSnapshots(ctx, lineageID)
+		if listErr != nil {
+			return listErr
+		}
+		snapRecords := make([]SnapshotRecord, 0, len(snapRows))
+		for i := range snapRows {
+			snapRecords = append(snapRecords, toSnapshotRecord(&snapRows[i]))
+		}
+
+		candidates := selectPrunableSnapshots(diskRecords, snapRecords)
+		if dryRun || len(candidates) == 0 {
+			result = candidates
+			return nil
+		}
+
+		ids := make([]uuid.UUID, 0, len(candidates))
+		for i := range candidates {
+			ids = append(ids, candidates[i].SnapshotID)
+		}
+		pgSnapIDs := toPGUUIDSlice(ids)
+		if clearErr := q.ClearSnapshotParentByIDs(ctx, ClearSnapshotParentByIDsParams{
+			LineageID:   lineageID,
+			SnapshotIds: pgSnapIDs,
+		}); clearErr != nil {
+			return clearErr
+		}
+		if clearErr := q.ClearSnapshotMergeParentByIDs(ctx, ClearSnapshotMergeParentByIDsParams{
+			LineageID:   lineageID,
+			SnapshotIds: pgSnapIDs,
+		}); clearErr != nil {
+			return clearErr
+		}
+		if _, delErr := q.DeleteSnapshotsByIDs(ctx, DeleteSnapshotsByIDsParams{
+			LineageID:   lineageID,
+			SnapshotIds: pgSnapIDs,
+		}); delErr != nil {
+			return delErr
+		}
+
+		result = candidates
+		return nil
+	}, tx.WithDefaultRetry())
+	if err != nil {
+		return nil, mapPGXErr(err)
+	}
+	return result, nil
 }
 
 func (s *SQLStore) UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error) {

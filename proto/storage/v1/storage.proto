@@ -238,6 +238,18 @@ service StorageService {
 
   // MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
   rpc MergeDisk(MergeDiskRequest) returns (MergeDiskResponse);
+
+  // CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  // ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+
+  // DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+
+  // PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
+  rpc PruneSnapshots(PruneSnapshotsRequest) returns (PruneSnapshotsResponse);
 }
 
 // LookupRequest 定义 Lookup 接口输入参数。
@@ -2251,4 +2263,126 @@ message MergeDiskResponse {
 
   // 冲突报告（无冲突或非冲突失败时可能为空）。
   optional MergeConflictReport conflict_report = 6;
+}
+
+// SnapshotKind identifies how a snapshot was created.
+enum SnapshotKind {
+  SNAPSHOT_KIND_UNSPECIFIED = 0;
+  SNAPSHOT_KIND_FORK = 1;
+  SNAPSHOT_KIND_MERGE = 2;
+  SNAPSHOT_KIND_MANUAL = 3;
+}
+
+// Snapshot describes a disk-anchored immutable snapshot without exposing lineage identifiers.
+message Snapshot {
+  string snapshot_id = 1;
+  string source_disk_id = 2;
+  string parent_snapshot_id = 3;
+  string merge_parent_snapshot_id = 4;
+  SnapshotKind kind = 5;
+  string name = 6;
+  bool protected = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// CreateSnapshotRequest defines input parameters for CreateSnapshot.
+message CreateSnapshotRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "create_snapshot_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  string name = 2 [
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).cel = {
+      id: "create_snapshot_name_no_nul"
+      message: "name cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// CreateSnapshotResponse returns the created manual snapshot.
+message CreateSnapshotResponse {
+  Snapshot snapshot = 1 [(buf.validate.field).required = true];
+}
+
+// ListSnapshotsRequest defines input parameters for ListSnapshots.
+message ListSnapshotsRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "list_snapshots_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  SnapshotKind kind = 2 [(buf.validate.field).enum.defined_only = true];
+
+  uint32 page_size = 3 [(buf.validate.field).uint32.lte = 1000];
+
+  string page_token = 4 [
+    (buf.validate.field).string.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "list_snapshots_page_token_no_nul"
+      message: "page_token cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// ListSnapshotsResponse returns a page of lineage snapshots and the next cursor token.
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+  string next_page_token = 2;
+}
+
+// DeleteSnapshotRequest defines input parameters for DeleteSnapshot.
+message DeleteSnapshotRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "delete_snapshot_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  string snapshot_id = 2 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "delete_snapshot_snapshot_id_not_nil"
+      message: "snapshot_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// DeleteSnapshotResponse defines the empty output for DeleteSnapshot.
+message DeleteSnapshotResponse {}
+
+// PruneSnapshotsRequest defines input parameters for PruneSnapshots.
+message PruneSnapshotsRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "prune_snapshots_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  bool dry_run = 2;
+}
+
+// PruneSnapshotsResponse returns the pruned or candidate snapshots and count.
+message PruneSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+  uint32 reclaimed_count = 2;
+  bool dry_run = 3;
 }

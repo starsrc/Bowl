@@ -70,6 +70,19 @@ func TestInspectBranchStat_ReadOnlyAndOrphans(t *testing.T) {
 	require.Equal(t, uint64(1), epoch)
 	require.GreaterOrEqual(t, nextSeq, uint64(4))
 	require.True(t, hasOrphans)
+
+	aligned, err := store.AlignBranchStat(dir, 128<<20, 7, nextSeq+10, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(128<<20), aligned.MaxBytes)
+	require.Equal(t, uint64(7), aligned.WriterEpoch)
+	require.Equal(t, nextSeq+10, aligned.NextWriteSeq)
+
+	full, _, err := store.InspectBranchStatFull(dir)
+	require.NoError(t, err)
+	require.Equal(t, aligned, full)
+
+	_, err = store.AlignBranchStat(dir, 1, 8, nextSeq+11, nil)
+	require.ErrorIs(t, err, store.ErrQuotaShrinkBelowUsed)
 }
 
 func TestDiffTrees_Slice1_WriteSeqPruning_NestedSubdir_And_SparseBlocks(t *testing.T) {
@@ -194,7 +207,7 @@ func TestDiffTrees_Slice1_WriteSeqPruning_NestedSubdir_And_SparseBlocks(t *testi
 	_ = bytes.Equal
 }
 
-func TestDiffTrees_Slice2_All12Conflicts_AutoMerge_Ordering_Pagination_And_ReadCommitNodeSlice(t *testing.T) {
+func TestDiffTrees_Slice2_All12Conflicts_AutoMerge_Ordering_Pagination_And_ReadSnapshotNodeSlice(t *testing.T) {
 	ctx := context.Background()
 	pool := newSharedSegmentPool(200, 1)
 
@@ -276,7 +289,7 @@ func TestDiffTrees_Slice2_All12Conflicts_AutoMerge_Ordering_Pagination_And_ReadC
 		sameEditIno = createReg(store.RootIno, "same_edit.txt", "v0")
 	})
 
-	resReg1, err := store.ReadCommitNodeSlice(baseDir, regIno, 0, 600)
+	resReg1, err := store.ReadSnapshotNodeSlice(baseDir, regIno, 0, 600)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1024), resReg1.FileSize)
 	require.False(t, resReg1.EOF)
@@ -286,20 +299,20 @@ func TestDiffTrees_Slice2_All12Conflicts_AutoMerge_Ordering_Pagination_And_ReadC
 	require.Equal(t, []byte("XYZ"), resReg1.Data[512:515])
 	require.True(t, bytes.Equal(make([]byte, 85), resReg1.Data[515:600]))
 
-	resReg2, err := store.ReadCommitNodeSlice(baseDir, regIno, 600, 1024)
+	resReg2, err := store.ReadSnapshotNodeSlice(baseDir, regIno, 600, 1024)
 	require.NoError(t, err)
 	require.True(t, resReg2.EOF)
 	require.Len(t, resReg2.Data, 424)
 	require.True(t, bytes.Equal(make([]byte, 424), resReg2.Data))
 
-	resSym, err := store.ReadCommitNodeSlice(baseDir, symIno, 0, 100)
+	resSym, err := store.ReadSnapshotNodeSlice(baseDir, symIno, 0, 100)
 	require.NoError(t, err)
 	require.Equal(t, []byte("/target/path"), resSym.SymlinkTarget)
 	require.True(t, resSym.EOF)
 
-	_, err = store.ReadCommitNodeSlice(baseDir, dirIno, 0, 10)
+	_, err = store.ReadSnapshotNodeSlice(baseDir, dirIno, 0, 10)
 	require.ErrorIs(t, err, store.ErrIsDir)
-	_, err = store.ReadCommitNodeSlice(baseDir, orphanIno, 0, 10)
+	_, err = store.ReadSnapshotNodeSlice(baseDir, orphanIno, 0, 10)
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	target := openTestBranch(t, targetDir, pool)
@@ -918,7 +931,7 @@ func TestDiffMerge_Slice4_VerifierFindings(t *testing.T) {
 		require.Equal(t, []byte("must-survive"), got)
 	})
 
-	t.Run("Finding5_ReadCommitNodeSlice_SizeLimit", func(t *testing.T) {
+	t.Run("Finding5_ReadSnapshotNodeSlice_SizeLimit", func(t *testing.T) {
 		pool := newSharedSegmentPool(450, 1)
 		var fIno uint64
 		baseDir, _, _ := makeSeededFork(t, pool, func(ctx context.Context, base *store.StoreActor) {
@@ -926,7 +939,7 @@ func TestDiffMerge_Slice4_VerifierFindings(t *testing.T) {
 			require.NoError(t, err)
 			fIno = f.Ino
 		})
-		_, err := store.ReadCommitNodeSlice(baseDir, fIno, 0, store.MaxReadNodeSliceBytes+1)
+		_, err := store.ReadSnapshotNodeSlice(baseDir, fIno, 0, store.MaxReadNodeSliceBytes+1)
 		require.ErrorIs(t, err, store.ErrInvalid)
 	})
 

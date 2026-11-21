@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,30 +44,30 @@ const (
 )
 
 var (
-	ErrInvalidArgument = store.ErrInvalid
-	ErrNameTooLong     = store.ErrNameTooLong
-	ErrNotFound        = store.ErrNotFound
-	ErrInvalidShrink   = store.ErrQuotaShrinkBelowUsed
-	ErrStaleEpoch      = store.ErrStaleEpoch
-	ErrClosed          = store.ErrClosed
-	ErrAlreadyExists   = store.ErrExist
-	ErrNotDir          = store.ErrNotDir
-	ErrIsDir           = store.ErrIsDir
-	ErrNotEmpty        = store.ErrNotEmpty
-	ErrPerm            = store.ErrPerm
-	ErrNoData          = store.ErrNoData
-	ErrNoSpace         = store.ErrNoSpace
-	ErrNotSupported    = store.ErrNotSupported
-	ErrRange           = store.ErrRange
-	ErrTooManyLinks    = store.ErrTooManyLinks
-	ErrFileTooLarge    = store.ErrFileTooLarge
-	ErrIO              = store.ErrIO
-	ErrCrossLineage    = db.ErrCrossLineage
-	ErrStaleBaseCommit = db.ErrStaleBaseCommit
-	ErrAmbiguousLCA    = errors.New("ambiguous lowest common ancestor (criss-cross merge)")
-	ErrNoBaseCommit    = errors.New("disk has no base commit in lineage")
-	ErrConcurrentMerge = errors.New("concurrent write or epoch change on target disk during merge")
-	ErrDiskMounted     = errors.New("disk is currently mounted")
+	ErrInvalidArgument   = store.ErrInvalid
+	ErrNameTooLong       = store.ErrNameTooLong
+	ErrNotFound          = store.ErrNotFound
+	ErrInvalidShrink     = store.ErrQuotaShrinkBelowUsed
+	ErrStaleEpoch        = store.ErrStaleEpoch
+	ErrClosed            = store.ErrClosed
+	ErrAlreadyExists     = store.ErrExist
+	ErrNotDir            = store.ErrNotDir
+	ErrIsDir             = store.ErrIsDir
+	ErrNotEmpty          = store.ErrNotEmpty
+	ErrPerm              = store.ErrPerm
+	ErrNoData            = store.ErrNoData
+	ErrNoSpace           = store.ErrNoSpace
+	ErrNotSupported      = store.ErrNotSupported
+	ErrRange             = store.ErrRange
+	ErrTooManyLinks      = store.ErrTooManyLinks
+	ErrFileTooLarge      = store.ErrFileTooLarge
+	ErrIO                = store.ErrIO
+	ErrCrossLineage      = db.ErrCrossLineage
+	ErrStaleBaseSnapshot = db.ErrStaleBaseSnapshot
+	ErrAmbiguousLCA      = errors.New("ambiguous lowest common ancestor (criss-cross merge)")
+	ErrNoBaseSnapshot    = errors.New("disk has no base snapshot in lineage")
+	ErrConcurrentMerge   = errors.New("concurrent write or epoch change on target disk during merge")
+	ErrDiskMounted       = errors.New("disk is currently mounted")
 )
 
 type AtimeMode = store.AtimeMode
@@ -114,6 +115,11 @@ type UpdateDiskParams struct {
 	DiskID   string
 	Name     *string
 	MaxBytes *uint64
+}
+
+type DeleteDiskParams struct {
+	DiskID    string
+	Recursive bool
 }
 
 type MountDiskParams struct {
@@ -170,14 +176,14 @@ type Manager interface {
 	GetDisk(ctx context.Context, diskID string) (*Disk, error)
 	ListDisks(ctx context.Context, params ListDisksParams) (*ListDisksResult, error)
 	UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Disk, error)
-	DeleteDisk(ctx context.Context, diskID string) error
+	DeleteDisk(ctx context.Context, params DeleteDiskParams) error
 	MountDisk(ctx context.Context, params MountDiskParams) (*MountDiskResult, error)
 	RenewMount(ctx context.Context, params RenewMountParams) (*RenewMountResult, error)
 	UnmountDisk(ctx context.Context, params UnmountDiskParams) error
 	ListMounts(ctx context.Context, diskID string) ([]MountLeaseInfo, error)
 	EvictMounts(ctx context.Context, params EvictMountsParams) (*EvictMountsResult, error)
 	DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDiskResult, error)
-	ReadCommitNode(ctx context.Context, params *ReadCommitNodeParams) (*store.ReadNodeResult, error)
+	ReadSnapshotNode(ctx context.Context, params *ReadSnapshotNodeParams) (*store.ReadNodeResult, error)
 	MergeDisk(ctx context.Context, params *MergeDiskParams) (*MergeDiskResult, error)
 	Actor(ctx context.Context, diskID string) (*store.StoreActor, error)
 	Collector() prometheus.Collector
@@ -218,7 +224,7 @@ type manager struct {
 	diskLocksMu sync.Mutex
 	diskLocks   map[string]*diskLockEntry
 
-	lineageCommitMu         sync.RWMutex
+	lineageSnapshotMu       sync.RWMutex
 	beforePhase2CutoverHook func()
 
 	poolMu sync.RWMutex
@@ -408,8 +414,8 @@ func (m *manager) diskDir(diskID string) string {
 	return filepath.Join(m.storageRoot, "disks", diskID)
 }
 
-func (m *manager) commitDir(commitID string) string {
-	return filepath.Join(m.storageRoot, "commits", commitID)
+func (m *manager) snapshotDir(snapshotID string) string {
+	return filepath.Join(m.storageRoot, "snapshots", snapshotID)
 }
 
 func (m *manager) newSegmentAllocators(lineageID uuid.UUID) (store.InodeSegmentAllocator, store.PackSegmentAllocator) {
@@ -606,7 +612,7 @@ func assembleDiskFromRecord(row *db.DiskRecord) *Disk {
 }
 
 func (m *manager) openDiskActor(ctx context.Context, opts store.Options) (*store.StoreActor, error) {
-	if !opts.ReadOnly && !strings.HasPrefix(opts.DiskID, "commit:") && m.store != nil {
+	if !opts.ReadOnly && !strings.HasPrefix(opts.DiskID, "snapshot:") && m.store != nil {
 		if reconcileErr := m.reconcilePendingMergeLocked(ctx, opts.DiskID); reconcileErr != nil {
 			return nil, reconcileErr
 		}
@@ -866,7 +872,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		}
 	}
 
-	commitUUID, err := uuid.NewV7()
+	snapshotUUID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
 	}
@@ -874,7 +880,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	if err != nil {
 		return nil, err
 	}
-	commitID := commitUUID.String()
+	snapshotID := snapshotUUID.String()
 	childDiskID := childUUID.String()
 	if childDiskID == sourceDiskID {
 		return nil, ErrIO
@@ -883,22 +889,22 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	unlockChild := m.lockDisk(ctx, childDiskID)
 	defer unlockChild()
 
-	commitDir := m.commitDir(commitID)
+	snapDir := m.snapshotDir(snapshotID)
 	ckStart := time.Now()
-	ckStats, err := sourceActor.Checkpoint(ctx, commitDir)
+	ckStats, err := sourceActor.Checkpoint(ctx, snapDir)
 	m.collector.observeForkStage(ctx, "checkpoint", time.Since(ckStart))
 	if err != nil {
-		return nil, fmt.Errorf("固化源盘基准切面: %w", err)
+		return nil, fmt.Errorf("固化源盘基准快照: %w", err)
 	}
 
-	removeCommitDirOnRollback := func(stage string) {
-		if removeErr := m.removeAll(commitDir); removeErr != nil {
+	removeSnapshotDirOnRollback := func(stage string) {
+		if removeErr := m.removeAll(snapDir); removeErr != nil {
 			m.collector.incCleanupError()
-			m.logger.WarnContext(ctx, "fork disk rollback remove commit dir failed",
+			m.logger.WarnContext(ctx, "fork disk rollback remove snapshot dir failed",
 				"stage", stage,
 				"source_disk_id", sourceDiskID,
-				"commit_id", commitID,
-				"dir", commitDir,
+				"snapshot_id", snapshotID,
+				"dir", snapDir,
 				"err", removeErr,
 			)
 		}
@@ -908,17 +914,17 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	if ckStats.HasOrphans {
 		sanStart := time.Now()
 		sanitizedStat, sanErr := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
-			Dir:       commitDir,
-			CommitID:  commitID,
-			Cache:     cache,
-			Logger:    m.baseLogger,
-			Metrics:   m.storeMetrics,
-			OpenActor: m.openDiskActor,
+			Dir:        snapDir,
+			SnapshotID: snapshotID,
+			Cache:      cache,
+			Logger:     m.baseLogger,
+			Metrics:    m.storeMetrics,
+			OpenActor:  m.openDiskActor,
 		})
 		m.collector.observeForkStage(ctx, "sanitize", time.Since(sanStart))
 		if sanErr != nil {
-			removeCommitDirOnRollback("sanitize")
-			return nil, fmt.Errorf("净化基准切面孤儿节点: %w", sanErr)
+			removeSnapshotDirOnRollback("sanitize")
+			return nil, fmt.Errorf("净化基准快照孤儿节点: %w", sanErr)
 		}
 		effectiveUsedBytes = sanitizedStat.UsedBytes
 	}
@@ -926,7 +932,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	targetMaxBytes := ckStats.MaxBytes
 	if params.MaxBytes != nil {
 		if *params.MaxBytes < effectiveUsedBytes {
-			removeCommitDirOnRollback("quota_check")
+			removeSnapshotDirOnRollback("quota_check")
 			return nil, ErrInvalidShrink
 		}
 		targetMaxBytes = *params.MaxBytes
@@ -934,10 +940,10 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 
 	childDir := m.diskDir(childDiskID)
 	cloneStart := time.Now()
-	err = store.CloneCheckpointDir(ctx, commitDir, childDir)
+	err = store.CloneCheckpointDir(ctx, snapDir, childDir)
 	m.collector.observeForkStage(ctx, "clone_dir", time.Since(cloneStart))
 	if err != nil {
-		removeCommitDirOnRollback("clone")
+		removeSnapshotDirOnRollback("clone")
 		return nil, fmt.Errorf("克隆派生子盘目录: %w", err)
 	}
 
@@ -971,7 +977,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	m.collector.observeForkStage(ctx, "open_child", time.Since(openChildStart))
 	if err != nil {
 		removeChildDirOnRollback("open_child")
-		removeCommitDirOnRollback("open_child")
+		removeSnapshotDirOnRollback("open_child")
 		return nil, fmt.Errorf("打开派生子盘存储实例: %w", err)
 	}
 
@@ -979,7 +985,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	if err != nil {
 		_ = childActor.CloseDiscard()
 		removeChildDirOnRollback("statfs")
-		removeCommitDirOnRollback("statfs")
+		removeSnapshotDirOnRollback("statfs")
 		return nil, err
 	}
 
@@ -988,11 +994,11 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 		txCtxWrap = ctx
 	)
 	if ctx != nil && trace.SpanFromContext(ctx).IsRecording() {
-		txCtxWrap, txSpan = otel.GetTracerProvider().Tracer(controlInstrumentationName).Start(ctx, "control.ForkCommitTx",
+		txCtxWrap, txSpan = otel.GetTracerProvider().Tracer(controlInstrumentationName).Start(ctx, "control.ForkSnapshotTx",
 			trace.WithAttributes(
 				attribute.String("source_disk_id", sourceDiskID),
 				attribute.String("disk.id", childDiskID),
-				attribute.String("bowl.commit_id", commitID),
+				attribute.String("bowl.snapshot_id", snapshotID),
 			),
 		)
 	}
@@ -1000,7 +1006,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	childRow, err := m.store.ForkDisk(txCtxWrap, db.ForkDiskInput{
 		SourceDiskID: sourceUUID,
 		ChildDiskID:  childUUID,
-		CommitID:     commitUUID,
+		SnapshotID:   snapshotUUID,
 		Name:         params.Name,
 		MaxBytes:     targetMaxBytes,
 		UsedBytes:    childStat.UsedBytes,
@@ -1026,7 +1032,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 			)
 		}
 		removeChildDirOnRollback("tx")
-		removeCommitDirOnRollback("tx")
+		removeSnapshotDirOnRollback("tx")
 		return nil, fmt.Errorf("派生磁盘: %w", err)
 	}
 
@@ -1060,7 +1066,7 @@ func (m *manager) ForkDisk(ctx context.Context, params ForkDiskParams) (_ *Disk,
 	m.logger.InfoContext(ctx, "disk forked",
 		"disk_id", childDiskID,
 		"source_disk_id", sourceDiskID,
-		"commit_id", commitID,
+		"snapshot_id", snapshotID,
 		"name", params.Name,
 		"max_bytes", targetMaxBytes,
 		"epoch", childActor.WriterEpoch(),
@@ -1231,12 +1237,112 @@ func (m *manager) UpdateDisk(ctx context.Context, params UpdateDiskParams) (*Dis
 	return assembleDiskFromRecord(&updatedRow), nil
 }
 
-func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
-	id, err := parseDiskID(diskID)
+func (m *manager) lockDisks(ctx context.Context, diskIDs []string) func() {
+	if len(diskIDs) == 0 {
+		return func() {}
+	}
+	sorted := slices.Clone(diskIDs)
+	slices.Sort(sorted)
+	sorted = slices.Compact(sorted)
+	unlocks := make([]func(), 0, len(sorted))
+	for _, id := range sorted {
+		unlocks = append(unlocks, m.lockDisk(ctx, id))
+	}
+	return func() {
+		for _, unlock := range slices.Backward(unlocks) {
+			unlock()
+		}
+	}
+}
+
+func collectSubtreeUUIDs(disks []db.DiskRecord, rootID uuid.UUID) ([]uuid.UUID, bool) {
+	foundRoot := false
+	childrenByParent := make(map[uuid.UUID][]uuid.UUID)
+	for i := range disks {
+		d := disks[i]
+		if d.DiskID == rootID {
+			foundRoot = true
+		}
+		if d.ParentDiskID != uuid.Nil {
+			childrenByParent[d.ParentDiskID] = append(childrenByParent[d.ParentDiskID], d.DiskID)
+		}
+	}
+	if !foundRoot {
+		return nil, false
+	}
+	visited := map[uuid.UUID]struct{}{rootID: {}}
+	queue := []uuid.UUID{rootID}
+	out := []uuid.UUID{rootID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, childID := range childrenByParent[cur] {
+			if _, seen := visited[childID]; seen {
+				continue
+			}
+			visited[childID] = struct{}{}
+			out = append(out, childID)
+			queue = append(queue, childID)
+		}
+	}
+	slices.SortFunc(out, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return out, true
+}
+
+func (m *manager) lockDeleteTargets(ctx context.Context, rootID uuid.UUID, recursive bool) ([]uuid.UUID, func(), error) {
+	if !recursive {
+		unlock := m.lockDisk(ctx, rootID.String())
+		return []uuid.UUID{rootID}, unlock, nil
+	}
+
+	for {
+		row, getErr := m.store.GetDisk(ctx, rootID)
+		if getErr != nil {
+			return nil, nil, mapDBErr(getErr)
+		}
+		lineageDisks, listErr := m.store.ListLineageDisks(ctx, row.LineageID)
+		if listErr != nil {
+			return nil, nil, mapDBErr(listErr)
+		}
+		subtree, found := collectSubtreeUUIDs(lineageDisks, rootID)
+		if !found {
+			return nil, nil, ErrNotFound
+		}
+		keys := make([]string, len(subtree))
+		for i, tid := range subtree {
+			keys[i] = tid.String()
+		}
+
+		unlock := m.lockDisks(ctx, keys)
+		if openErr := m.ensureOpen(); openErr != nil {
+			unlock()
+			return nil, nil, openErr
+		}
+		verifyDisks, verifyErr := m.store.ListLineageDisks(ctx, row.LineageID)
+		if verifyErr != nil {
+			unlock()
+			return nil, nil, mapDBErr(verifyErr)
+		}
+		verifiedSubtree, stillFound := collectSubtreeUUIDs(verifyDisks, rootID)
+		if !stillFound {
+			unlock()
+			return nil, nil, ErrNotFound
+		}
+		if slices.Equal(subtree, verifiedSubtree) {
+			return verifiedSubtree, unlock, nil
+		}
+		unlock()
+	}
+}
+
+func (m *manager) DeleteDisk(ctx context.Context, params DeleteDiskParams) error {
+	id, err := parseDiskID(params.DiskID)
 	if err != nil {
 		return err
 	}
-	diskID = id.String()
+	diskID := id.String()
 	if openErr := m.ensureOpen(); openErr != nil {
 		return openErr
 	}
@@ -1245,27 +1351,46 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		return recErr
 	}
 
-	unlockDisk := m.lockDisk(ctx, diskID)
-	defer unlockDisk()
+	targetIDs, unlockTargets, err := m.lockDeleteTargets(ctx, id, params.Recursive)
+	if err != nil {
+		return err
+	}
+	defer unlockTargets()
 
 	if openErr := m.ensureOpen(); openErr != nil {
 		return openErr
 	}
-	if gateErr := m.checkDeleteMountGate(ctx, id); gateErr != nil {
-		return gateErr
+	for _, tid := range targetIDs {
+		if gateErr := m.checkDeleteMountGate(ctx, tid); gateErr != nil {
+			return gateErr
+		}
 	}
-	if recErr := m.reconcilePendingMergeLocked(ctx, diskID); recErr != nil {
-		return recErr
+	for _, tid := range targetIDs {
+		if recErr := m.reconcilePendingMergeLocked(ctx, tid.String()); recErr != nil {
+			return recErr
+		}
 	}
 
-	commitsToClean, err := m.store.DeleteDisk(ctx, id)
+	delRes, err := m.store.DeleteDisk(ctx, id, params.Recursive)
 	if err != nil {
 		return mapDBErr(err)
 	}
 
+	deletedKeys := make([]string, 0, len(delRes.DeletedDiskIDs))
+	for _, did := range delRes.DeletedDiskIDs {
+		if did != uuid.Nil {
+			deletedKeys = append(deletedKeys, did.String())
+		}
+	}
+
+	evicted := make(map[string]*actorEntry, len(deletedKeys))
 	m.poolMu.Lock()
-	entry := m.actors[diskID]
-	delete(m.actors, diskID)
+	for _, dk := range deletedKeys {
+		if entry := m.actors[dk]; entry != nil {
+			evicted[dk] = entry
+			delete(m.actors, dk)
+		}
+	}
 	m.poolMu.Unlock()
 
 	var (
@@ -1273,70 +1398,73 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 		mode        = actorModeRW
 		cleanupErrs []error
 	)
-	if entry != nil && entry.actor != nil {
-		actor := entry.actor
-		epoch = actor.WriterEpoch()
-		mode = actorModeLabel(actor.ReadOnly())
-		if closeErr := actor.CloseDiscard(); closeErr != nil {
-			m.collector.incCleanupError()
-			m.logger.WarnContext(ctx, "delete disk actor close failed",
-				"disk_id", diskID,
-				"epoch", epoch,
-				"mode", mode,
-				"err", closeErr,
-			)
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("关闭磁盘存储实例: %w", closeErr))
+	for _, dk := range deletedKeys {
+		if entry := evicted[dk]; entry != nil && entry.actor != nil {
+			actor := entry.actor
+			if dk == diskID {
+				epoch = actor.WriterEpoch()
+				mode = actorModeLabel(actor.ReadOnly())
+			}
+			if closeErr := actor.CloseDiscard(); closeErr != nil {
+				m.collector.incCleanupError()
+				m.logger.WarnContext(ctx, "delete disk actor close failed",
+					"disk_id", dk,
+					"epoch", actor.WriterEpoch(),
+					"mode", actorModeLabel(actor.ReadOnly()),
+					"err", closeErr,
+				)
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("关闭磁盘存储实例 %s: %w", dk, closeErr))
+			}
 		}
+
+		dir := m.diskDir(dk)
+		if removeErr := m.removeAll(dir); removeErr != nil {
+			m.collector.incCleanupError()
+			m.logger.WarnContext(ctx, "delete disk directory cleanup failed",
+				"disk_id", dk,
+				"dir", dir,
+				"err", removeErr,
+			)
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("清理磁盘存储目录 %s: %w", dk, removeErr))
+		}
+		m.cleanupPendingMergeArtifactsForDisk(ctx, dk)
 	}
 
-	dir := m.diskDir(diskID)
-	if removeErr := m.removeAll(dir); removeErr != nil {
-		m.collector.incCleanupError()
-		m.logger.WarnContext(ctx, "delete disk directory cleanup failed",
-			"disk_id", diskID,
-			"dir", dir,
-			"epoch", epoch,
-			"mode", mode,
-			"err", removeErr,
-		)
-		cleanupErrs = append(cleanupErrs, fmt.Errorf("清理磁盘存储目录: %w", removeErr))
-	}
-	m.cleanupPendingMergeArtifactsForDisk(ctx, diskID)
-
-	if len(commitsToClean) > 0 {
+	snapshotsToClean := delRes.ReclaimedSnapshotIDs
+	if len(snapshotsToClean) > 0 {
 		var reclaimSpan trace.Span
 		if ctx != nil && trace.SpanFromContext(ctx).IsRecording() {
-			_, reclaimSpan = otel.GetTracerProvider().Tracer(controlInstrumentationName).Start(ctx, "control.ReclaimCommits",
+			_, reclaimSpan = otel.GetTracerProvider().Tracer(controlInstrumentationName).Start(ctx, "control.ReclaimSnapshots",
 				trace.WithAttributes(
 					attribute.String("disk.id", diskID),
-					attribute.Int("reclaimed_commits", len(commitsToClean)),
+					attribute.Int("reclaimed_snapshots", len(snapshotsToClean)),
 				),
 			)
 		}
 		var reclaimErrs []error
-		m.lineageCommitMu.Lock()
-		for _, cID := range commitsToClean {
-			if cID == uuid.Nil {
+		m.lineageSnapshotMu.Lock()
+		for _, sID := range snapshotsToClean {
+			if sID == uuid.Nil {
 				continue
 			}
-			cidStr := cID.String()
-			cDir := m.commitDir(cidStr)
-			if removeErr := m.removeAll(cDir); removeErr != nil {
+			sidStr := sID.String()
+			sDir := m.snapshotDir(sidStr)
+			if removeErr := m.removeAll(sDir); removeErr != nil {
 				m.collector.incCleanupError()
-				m.logger.WarnContext(ctx, "delete disk commit directory cleanup failed",
+				m.logger.WarnContext(ctx, "delete disk snapshot directory cleanup failed",
 					"disk_id", diskID,
-					"commit_id", cidStr,
-					"dir", cDir,
+					"snapshot_id", sidStr,
+					"dir", sDir,
 					"err", removeErr,
 				)
-				rErr := fmt.Errorf("清理切面快照目录 %s: %w", cidStr, removeErr)
+				rErr := fmt.Errorf("清理快照目录 %s: %w", sidStr, removeErr)
 				cleanupErrs = append(cleanupErrs, rErr)
 				reclaimErrs = append(reclaimErrs, rErr)
 			} else {
-				m.collector.addCommitsReclaimed(1)
+				m.collector.addSnapshotsReclaimed(1)
 			}
 		}
-		m.lineageCommitMu.Unlock()
+		m.lineageSnapshotMu.Unlock()
 		if reclaimSpan != nil {
 			if errJoined := errors.Join(reclaimErrs...); errJoined != nil {
 				reclaimSpan.RecordError(errJoined)
@@ -1352,7 +1480,9 @@ func (m *manager) DeleteDisk(ctx context.Context, diskID string) error {
 
 	m.logger.InfoContext(ctx, "disk deleted",
 		"disk_id", diskID,
-		"reclaimed_commits", len(commitsToClean),
+		"recursive", params.Recursive,
+		"deleted_disks", len(deletedKeys),
+		"reclaimed_snapshots", len(snapshotsToClean),
 		"epoch", epoch,
 		"mode", mode,
 	)

@@ -75,25 +75,25 @@ func requireAllDataTransportsConfig(t *testing.T, rt *shardedRoundTripper, wantB
 	}
 }
 
-func TestShardedRoundTripper_GivenReadWriteAndReadCommitNodeTraffic_DistributesRoundRobinAcross8DataShards(t *testing.T) {
+func TestShardedRoundTripper_GivenReadWriteAndReadSnapshotNodeTraffic_DistributesRoundRobinAcross8DataShards(t *testing.T) {
 
 	rt, controlRT, metaRT, dataRTs := buildTestShardedRoundTripper()
 
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
+	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadSnapshotNodeProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceReadCommitNodeProcedure)
+	dispatchRoundTrip(t, rt, "/prefix"+storagev1connect.StorageServiceReadSnapshotNodeProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
+	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadSnapshotNodeProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
+	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadSnapshotNodeProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceWriteProcedure)
-	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadCommitNodeProcedure)
+	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadSnapshotNodeProcedure)
 	dispatchRoundTrip(t, rt, storagev1connect.StorageServiceReadProcedure)
 
 	require.Zero(t, controlRT.calls.Load(), "bulk data traffic must not use controlTransport")
@@ -260,8 +260,8 @@ func (h *tierTestStorageHandler) Write(_ context.Context, req *connect.Request[s
 	return connect.NewResponse(&storagev1.WriteResponse{Size: uint32(len(req.Msg.GetData()))}), nil
 }
 
-func (h *tierTestStorageHandler) ReadCommitNode(_ context.Context, _ *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
-	return connect.NewResponse(&storagev1.ReadCommitNodeResponse{Data: []byte("ok")}), nil
+func (h *tierTestStorageHandler) ReadSnapshotNode(_ context.Context, _ *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
+	return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{Data: []byte("ok")}), nil
 }
 
 type recordedProcedureAddrs struct {
@@ -330,8 +330,8 @@ func runRepeatedBulkCalls(t *testing.T, ctx context.Context, client storagev1con
 		require.NoError(t, readErr)
 		_, writeErr := client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{Ino: 1, Data: []byte("ab")}))
 		require.NoError(t, writeErr)
-		_, commitErr := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{Ino: 1, Size: 4}))
-		require.NoError(t, commitErr)
+		_, snapErr := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{Ino: 1, Size: 4}))
+		require.NoError(t, snapErr)
 	}
 }
 
@@ -381,14 +381,14 @@ func TestNewClient_GivenControlMetaAndBulkTraffic_IsolatesThreeTransportTiers(t 
 	dataAddrs := recorder.AddrSet(
 		storagev1connect.StorageServiceReadProcedure,
 		storagev1connect.StorageServiceWriteProcedure,
-		storagev1connect.StorageServiceReadCommitNodeProcedure,
+		storagev1connect.StorageServiceReadSnapshotNodeProcedure,
 	)
-	commitNodeAddrs := recorder.AddrSet(storagev1connect.StorageServiceReadCommitNodeProcedure)
+	snapNodeAddrs := recorder.AddrSet(storagev1connect.StorageServiceReadSnapshotNodeProcedure)
 
 	require.Len(t, controlAddrs, 1, "control RPCs must share one dedicated TCP connection")
 	require.Len(t, metaAddrs, 1, "metadata and disk RPCs must share one dedicated TCP connection")
 	require.Len(t, dataAddrs, HTTP2DataConnectionShards, "bulk data RPCs must span 8 TCP connections")
-	require.Len(t, commitNodeAddrs, HTTP2DataConnectionShards, "ReadCommitNode must span all 8 data TCP connections")
+	require.Len(t, snapNodeAddrs, HTTP2DataConnectionShards, "ReadSnapshotNode must span all 8 data TCP connections")
 	requireDisjointAddrSets(t, "control", controlAddrs, "meta", metaAddrs)
 	requireDisjointAddrSets(t, "control", controlAddrs, "data", dataAddrs)
 	requireDisjointAddrSets(t, "meta", metaAddrs, "data", dataAddrs)

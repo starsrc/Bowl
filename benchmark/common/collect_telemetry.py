@@ -1056,10 +1056,10 @@ def extract_server_prom_snapshot(
             "pack_physical_bytes": _sum_prom_metric(post_p, "bowl_storage_pack_physical_bytes"),
             "pack_referenced_bytes": _sum_prom_metric(post_p, "bowl_storage_pack_referenced_bytes"),
             "data_dir_physical_bytes": _sum_prom_metric(post_p, "bowl_storage_data_dir_physical_bytes"),
-            "commits_active": _sum_prom_metric(post_p, "bowl_storage_commits_active"),
-            "commits_physical_bytes": _sum_prom_metric(post_p, "bowl_storage_commits_physical_bytes"),
-            "commits_reclaimed": _sum_prom_metric(
-                post_p, "bowl_storage_control_commits_reclaimed_total", pre_parsed=pre_p
+            "snapshots_active": _sum_prom_metric(post_p, "bowl_storage_snapshots_active"),
+            "snapshots_physical_bytes": _sum_prom_metric(post_p, "bowl_storage_snapshots_physical_bytes"),
+            "snapshots_reclaimed": _sum_prom_metric(
+                post_p, "bowl_storage_control_snapshots_reclaimed_total", pre_parsed=pre_p
             ),
             "forks_by_result": _sum_prom_metric(
                 post_p, "bowl_storage_control_forks_total", "result", pre_parsed=pre_p

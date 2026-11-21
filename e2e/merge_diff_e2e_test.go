@@ -97,7 +97,7 @@ func e2eOverwriteFile(
 	require.NoError(t, err)
 }
 
-func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *testing.T) {
+func TestE2E_DiffReadSnapshotNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -142,8 +142,8 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 		SourceDiskId: featID,
 	}))
 	require.NoError(t, err)
-	lcaCommitID := diffTwoWay.Msg.GetLcaCommitId()
-	require.NotEmpty(t, lcaCommitID)
+	lcaSnapshotID := diffTwoWay.Msg.GetLcaSnapshotId()
+	require.NotEmpty(t, lcaSnapshotID)
 	require.Equal(t, uint64(1), diffTwoWay.Msg.GetSummary().GetAdded())
 	require.Equal(t, uint64(1), diffTwoWay.Msg.GetSummary().GetModified())
 
@@ -158,16 +158,16 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	require.Equal(t, []byte("shared.txt"), diffThreeWay.Msg.GetEntries()[0].GetPath())
 	require.Equal(t, storagev1.ConflictKind_CONFLICT_KIND_CONTENT, diffThreeWay.Msg.GetEntries()[0].GetConflict())
 
-	commitSlice, err := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
-		DiskId:   featID,
-		CommitId: lcaCommitID,
-		Ino:      sharedIno,
-		Offset:   0,
-		Size:     1024,
+	snapshotSlice, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
+		DiskId:     featID,
+		SnapshotId: lcaSnapshotID,
+		Ino:        sharedIno,
+		Offset:     0,
+		Size:       1024,
 	}))
 	require.NoError(t, err)
-	require.Equal(t, []byte("base-shared\n"), commitSlice.Msg.GetData())
-	require.True(t, commitSlice.Msg.GetEof())
+	require.Equal(t, []byte("base-shared\n"), snapshotSlice.Msg.GetData())
+	require.True(t, snapshotSlice.Msg.GetEof())
 
 	dryResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
@@ -176,7 +176,7 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 		DryRun:       true,
 	}))
 	require.NoError(t, err)
-	require.Empty(t, dryResp.Msg.GetMergeCommitId())
+	require.Empty(t, dryResp.Msg.GetMergeSnapshotId())
 
 	_, busyBothErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
 		SourceDiskId: featID,
@@ -224,7 +224,7 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 		}
 	}
 	require.NotNil(t, report)
-	require.Equal(t, lcaCommitID, report.GetLcaCommitId())
+	require.Equal(t, lcaSnapshotID, report.GetLcaSnapshotId())
 	require.Equal(t, uint64(1), report.GetTotalConflicts())
 
 	mergeResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
@@ -236,7 +236,7 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 		},
 	}))
 	require.NoError(t, err)
-	require.NotEmpty(t, mergeResp.Msg.GetMergeCommitId())
+	require.NotEmpty(t, mergeResp.Msg.GetMergeSnapshotId())
 
 	_, staleErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    mainID,
@@ -300,7 +300,7 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 		Force:        true,
 	}))
 	require.NoError(t, err)
-	require.NotEmpty(t, forceMergeResp.Msg.GetMergeCommitId())
+	require.NotEmpty(t, forceMergeResp.Msg.GetMergeSnapshotId())
 
 	_, fencedErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    mainID,
@@ -329,4 +329,123 @@ func TestE2E_DiffReadCommitNodeAndMergeDisk_WithPostgreSQLAndWriterFence(t *test
 	}))
 	require.NoError(t, err)
 	require.Equal(t, []byte("feat2-forced\n"), readFeat2.Msg.GetData())
+}
+
+func TestE2E_DeleteDiskIndependentVsRecursiveAndMergeFastForwardNoOp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := testutil.NewStorageClient()
+	suffix := time.Now().UnixNano()
+
+	rootResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     fmt.Sprintf("e2e-snap-root-%d", suffix),
+		MaxBytes: 64 << 20,
+	}))
+	require.NoError(t, err)
+	rootID := rootResp.Msg.GetDisk().GetDiskId()
+	e2eRegisterDiskCleanup(t, client, rootID)
+
+	rootMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: rootID}))
+	require.NoError(t, err)
+	e2eWriteNewFile(t, ctx, client, rootID, rootMnt.Msg.GetEpoch(), "seed.txt", []byte("seed-v1\n"))
+	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  rootID,
+		MountId: rootMnt.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	branchResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
+		SourceDiskId: rootID,
+		Name:         fmt.Sprintf("e2e-snap-branch-%d", suffix),
+	}))
+	require.NoError(t, err)
+	branchID := branchResp.Msg.GetDisk().GetDiskId()
+	e2eRegisterDiskCleanup(t, client, branchID)
+
+	noopResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
+		SourceDiskId: branchID,
+		TargetDiskId: rootID,
+	}))
+	require.NoError(t, err)
+	require.NotEmpty(t, noopResp.Msg.GetLcaSnapshotId())
+	require.Equal(t, noopResp.Msg.GetLcaSnapshotId(), noopResp.Msg.GetMergeSnapshotId())
+
+	branchMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: branchID}))
+	require.NoError(t, err)
+	e2eWriteNewFile(t, ctx, client, branchID, branchMnt.Msg.GetEpoch(), "ff.txt", []byte("fast-forward\n"))
+	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  branchID,
+		MountId: branchMnt.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	ffResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
+		SourceDiskId: branchID,
+		TargetDiskId: rootID,
+	}))
+	require.NoError(t, err)
+	require.NotEmpty(t, ffResp.Msg.GetMergeSnapshotId())
+	require.NotEqual(t, ffResp.Msg.GetLcaSnapshotId(), ffResp.Msg.GetMergeSnapshotId())
+
+	lookupFF, err := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+		DiskId:    rootID,
+		ParentIno: 1,
+		Name:      []byte("ff.txt"),
+	}))
+	require.NoError(t, err)
+	readFF, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: rootID,
+		Ino:    lookupFF.Msg.GetInode().GetIno(),
+		Offset: 0,
+		Size:   100,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, []byte("fast-forward\n"), readFF.Msg.GetData())
+
+	childResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
+		SourceDiskId: branchID,
+		Name:         fmt.Sprintf("e2e-snap-child-%d", suffix),
+	}))
+	require.NoError(t, err)
+	childID := childResp.Msg.GetDisk().GetDiskId()
+	e2eRegisterDiskCleanup(t, client, childID)
+
+	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId:    rootID,
+		Recursive: false,
+	}))
+	require.NoError(t, err)
+
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: branchID}))
+	require.NoError(t, err)
+
+	childMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: childID}))
+	require.NoError(t, err)
+
+	_, busyRecErr := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId:    branchID,
+		Recursive: true,
+	}))
+	testutil.RequireConnectError(t, busyRecErr, connect.CodeAborted, "EBUSY")
+
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: branchID}))
+	require.NoError(t, err)
+
+	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  childID,
+		MountId: childMnt.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId:    branchID,
+		Recursive: true,
+	}))
+	require.NoError(t, err)
+
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: branchID}))
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: childID}))
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }

@@ -11,29 +11,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const clearLineageBaseCommits = `-- name: ClearLineageBaseCommits :exec
+const clearDisksBaseSnapshotByIDs = `-- name: ClearDisksBaseSnapshotByIDs :exec
 UPDATE disks
-SET base_commit_id = NULL
-WHERE lineage_id = $1
-  AND base_commit_id IS NOT NULL
+SET base_snapshot_id = NULL
+WHERE lineage_id = $1::uuid
+  AND base_snapshot_id = ANY($2::uuid[])
 `
 
-func (q *Queries) ClearLineageBaseCommits(ctx context.Context, lineageID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, clearLineageBaseCommits, lineageID)
+type ClearDisksBaseSnapshotByIDsParams struct {
+	LineageID   pgtype.UUID   `json:"lineage_id"`
+	SnapshotIds []pgtype.UUID `json:"snapshot_ids"`
+}
+
+func (q *Queries) ClearDisksBaseSnapshotByIDs(ctx context.Context, arg ClearDisksBaseSnapshotByIDsParams) error {
+	_, err := q.db.Exec(ctx, clearDisksBaseSnapshotByIDs, arg.LineageID, arg.SnapshotIds)
 	return err
 }
 
-const countDisksByLineage = `-- name: CountDisksByLineage :one
-SELECT COUNT(*)
-FROM disks
-WHERE lineage_id = $1
+const clearSnapshotMergeParentByIDs = `-- name: ClearSnapshotMergeParentByIDs :exec
+UPDATE disk_snapshots
+SET merge_parent_snapshot_id = NULL
+WHERE lineage_id = $1::uuid
+  AND merge_parent_snapshot_id = ANY($2::uuid[])
 `
 
-func (q *Queries) CountDisksByLineage(ctx context.Context, lineageID pgtype.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countDisksByLineage, lineageID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
+type ClearSnapshotMergeParentByIDsParams struct {
+	LineageID   pgtype.UUID   `json:"lineage_id"`
+	SnapshotIds []pgtype.UUID `json:"snapshot_ids"`
+}
+
+func (q *Queries) ClearSnapshotMergeParentByIDs(ctx context.Context, arg ClearSnapshotMergeParentByIDsParams) error {
+	_, err := q.db.Exec(ctx, clearSnapshotMergeParentByIDs, arg.LineageID, arg.SnapshotIds)
+	return err
+}
+
+const clearSnapshotParentByIDs = `-- name: ClearSnapshotParentByIDs :exec
+UPDATE disk_snapshots
+SET parent_snapshot_id = NULL
+WHERE lineage_id = $1::uuid
+  AND parent_snapshot_id = ANY($2::uuid[])
+`
+
+type ClearSnapshotParentByIDsParams struct {
+	LineageID   pgtype.UUID   `json:"lineage_id"`
+	SnapshotIds []pgtype.UUID `json:"snapshot_ids"`
+}
+
+func (q *Queries) ClearSnapshotParentByIDs(ctx context.Context, arg ClearSnapshotParentByIDsParams) error {
+	_, err := q.db.Exec(ctx, clearSnapshotParentByIDs, arg.LineageID, arg.SnapshotIds)
+	return err
 }
 
 const createDisk = `-- name: CreateDisk :one
@@ -42,7 +68,7 @@ INSERT INTO disks (
     name,
     lineage_id,
     parent_disk_id,
-    base_commit_id,
+    base_snapshot_id,
     max_bytes,
     used_bytes,
     used_inodes,
@@ -50,18 +76,18 @@ INSERT INTO disks (
     updated_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 `
 
 type CreateDiskParams struct {
-	DiskID       pgtype.UUID `json:"disk_id"`
-	Name         string      `json:"name"`
-	LineageID    pgtype.UUID `json:"lineage_id"`
-	ParentDiskID pgtype.UUID `json:"parent_disk_id"`
-	BaseCommitID pgtype.UUID `json:"base_commit_id"`
-	MaxBytes     int64       `json:"max_bytes"`
-	UsedBytes    int64       `json:"used_bytes"`
-	UsedInodes   int64       `json:"used_inodes"`
+	DiskID         pgtype.UUID `json:"disk_id"`
+	Name           string      `json:"name"`
+	LineageID      pgtype.UUID `json:"lineage_id"`
+	ParentDiskID   pgtype.UUID `json:"parent_disk_id"`
+	BaseSnapshotID pgtype.UUID `json:"base_snapshot_id"`
+	MaxBytes       int64       `json:"max_bytes"`
+	UsedBytes      int64       `json:"used_bytes"`
+	UsedInodes     int64       `json:"used_inodes"`
 }
 
 func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, error) {
@@ -70,7 +96,7 @@ func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, e
 		arg.Name,
 		arg.LineageID,
 		arg.ParentDiskID,
-		arg.BaseCommitID,
+		arg.BaseSnapshotID,
 		arg.MaxBytes,
 		arg.UsedBytes,
 		arg.UsedInodes,
@@ -83,51 +109,10 @@ func (q *Queries) CreateDisk(ctx context.Context, arg CreateDiskParams) (Disk, e
 		&i.UpdatedAt,
 		&i.LineageID,
 		&i.ParentDiskID,
-		&i.BaseCommitID,
+		&i.BaseSnapshotID,
 		&i.MaxBytes,
 		&i.UsedBytes,
 		&i.UsedInodes,
-	)
-	return i, err
-}
-
-const createDiskCommit = `-- name: CreateDiskCommit :one
-INSERT INTO disk_commits (
-    commit_id,
-    lineage_id,
-    source_disk_id,
-    parent_commit_id,
-    merge_parent_commit_id,
-    created_at
-)
-VALUES ($1, $2, $3, $4, $5, clock_timestamp())
-RETURNING commit_id, lineage_id, source_disk_id, parent_commit_id, merge_parent_commit_id, created_at
-`
-
-type CreateDiskCommitParams struct {
-	CommitID            pgtype.UUID `json:"commit_id"`
-	LineageID           pgtype.UUID `json:"lineage_id"`
-	SourceDiskID        pgtype.UUID `json:"source_disk_id"`
-	ParentCommitID      pgtype.UUID `json:"parent_commit_id"`
-	MergeParentCommitID pgtype.UUID `json:"merge_parent_commit_id"`
-}
-
-func (q *Queries) CreateDiskCommit(ctx context.Context, arg CreateDiskCommitParams) (DiskCommit, error) {
-	row := q.db.QueryRow(ctx, createDiskCommit,
-		arg.CommitID,
-		arg.LineageID,
-		arg.SourceDiskID,
-		arg.ParentCommitID,
-		arg.MergeParentCommitID,
-	)
-	var i DiskCommit
-	err := row.Scan(
-		&i.CommitID,
-		&i.LineageID,
-		&i.SourceDiskID,
-		&i.ParentCommitID,
-		&i.MergeParentCommitID,
-		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -146,6 +131,51 @@ func (q *Queries) CreateDiskLineage(ctx context.Context, lineageID pgtype.UUID) 
 		&i.NextIno,
 		&i.NextPackID,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const createDiskSnapshot = `-- name: CreateDiskSnapshot :one
+INSERT INTO disk_snapshots (
+    snapshot_id,
+    lineage_id,
+    source_disk_id,
+    parent_snapshot_id,
+    merge_parent_snapshot_id,
+    created_at,
+    kind
+)
+VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6)
+RETURNING snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind
+`
+
+type CreateDiskSnapshotParams struct {
+	SnapshotID            pgtype.UUID `json:"snapshot_id"`
+	LineageID             pgtype.UUID `json:"lineage_id"`
+	SourceDiskID          pgtype.UUID `json:"source_disk_id"`
+	ParentSnapshotID      pgtype.UUID `json:"parent_snapshot_id"`
+	MergeParentSnapshotID pgtype.UUID `json:"merge_parent_snapshot_id"`
+	Kind                  string      `json:"kind"`
+}
+
+func (q *Queries) CreateDiskSnapshot(ctx context.Context, arg CreateDiskSnapshotParams) (DiskSnapshot, error) {
+	row := q.db.QueryRow(ctx, createDiskSnapshot,
+		arg.SnapshotID,
+		arg.LineageID,
+		arg.SourceDiskID,
+		arg.ParentSnapshotID,
+		arg.MergeParentSnapshotID,
+		arg.Kind,
+	)
+	var i DiskSnapshot
+	err := row.Scan(
+		&i.SnapshotID,
+		&i.LineageID,
+		&i.SourceDiskID,
+		&i.ParentSnapshotID,
+		&i.MergeParentSnapshotID,
+		&i.CreatedAt,
+		&i.Kind,
 	)
 	return i, err
 }
@@ -193,19 +223,6 @@ func (q *Queries) CreateMountLease(ctx context.Context, arg CreateMountLeasePara
 	return i, err
 }
 
-const deleteDisk = `-- name: DeleteDisk :execrows
-DELETE FROM disks
-WHERE disk_id = $1
-`
-
-func (q *Queries) DeleteDisk(ctx context.Context, diskID pgtype.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteDisk, diskID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const deleteDiskLineage = `-- name: DeleteDiskLineage :exec
 DELETE FROM disk_lineages
 WHERE lineage_id = $1
@@ -242,6 +259,25 @@ func (q *Queries) DeleteDiskMountLeases(ctx context.Context, diskID pgtype.UUID)
 	return items, nil
 }
 
+const deleteDisksByIDs = `-- name: DeleteDisksByIDs :execrows
+DELETE FROM disks
+WHERE lineage_id = $1::uuid
+  AND disk_id = ANY($2::uuid[])
+`
+
+type DeleteDisksByIDsParams struct {
+	LineageID pgtype.UUID   `json:"lineage_id"`
+	DiskIds   []pgtype.UUID `json:"disk_ids"`
+}
+
+func (q *Queries) DeleteDisksByIDs(ctx context.Context, arg DeleteDisksByIDsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDisksByIDs, arg.LineageID, arg.DiskIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteExpiredDiskMountLeases = `-- name: DeleteExpiredDiskMountLeases :exec
 DELETE FROM disk_mounts
 WHERE disk_id = $1
@@ -256,32 +292,6 @@ type DeleteExpiredDiskMountLeasesParams struct {
 func (q *Queries) DeleteExpiredDiskMountLeases(ctx context.Context, arg DeleteExpiredDiskMountLeasesParams) error {
 	_, err := q.db.Exec(ctx, deleteExpiredDiskMountLeases, arg.DiskID, arg.ExpiresAt)
 	return err
-}
-
-const deleteLineageCommits = `-- name: DeleteLineageCommits :many
-DELETE FROM disk_commits
-WHERE lineage_id = $1
-RETURNING commit_id
-`
-
-func (q *Queries) DeleteLineageCommits(ctx context.Context, lineageID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, deleteLineageCommits, lineageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []pgtype.UUID
-	for rows.Next() {
-		var commit_id pgtype.UUID
-		if err := rows.Scan(&commit_id); err != nil {
-			return nil, err
-		}
-		items = append(items, commit_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const deleteMountLease = `-- name: DeleteMountLease :execrows
@@ -303,6 +313,38 @@ func (q *Queries) DeleteMountLease(ctx context.Context, arg DeleteMountLeasePara
 	return result.RowsAffected(), nil
 }
 
+const deleteSnapshotsByIDs = `-- name: DeleteSnapshotsByIDs :many
+DELETE FROM disk_snapshots
+WHERE lineage_id = $1::uuid
+  AND snapshot_id = ANY($2::uuid[])
+RETURNING snapshot_id
+`
+
+type DeleteSnapshotsByIDsParams struct {
+	LineageID   pgtype.UUID   `json:"lineage_id"`
+	SnapshotIds []pgtype.UUID `json:"snapshot_ids"`
+}
+
+func (q *Queries) DeleteSnapshotsByIDs(ctx context.Context, arg DeleteSnapshotsByIDsParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, deleteSnapshotsByIDs, arg.LineageID, arg.SnapshotIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var snapshot_id pgtype.UUID
+		if err := rows.Scan(&snapshot_id); err != nil {
+			return nil, err
+		}
+		items = append(items, snapshot_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const deleteSupersededRWMountLeases = `-- name: DeleteSupersededRWMountLeases :exec
 DELETE FROM disk_mounts
 WHERE disk_id = $1
@@ -321,7 +363,7 @@ func (q *Queries) DeleteSupersededRWMountLeases(ctx context.Context, arg DeleteS
 }
 
 const getDisk = `-- name: GetDisk :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1
 `
@@ -336,7 +378,7 @@ func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 		&i.UpdatedAt,
 		&i.LineageID,
 		&i.ParentDiskID,
-		&i.BaseCommitID,
+		&i.BaseSnapshotID,
 		&i.MaxBytes,
 		&i.UsedBytes,
 		&i.UsedInodes,
@@ -345,7 +387,7 @@ func (q *Queries) GetDisk(ctx context.Context, diskID pgtype.UUID) (Disk, error)
 }
 
 const getDiskForUpdate = `-- name: GetDiskForUpdate :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1
 FOR UPDATE
@@ -361,7 +403,7 @@ func (q *Queries) GetDiskForUpdate(ctx context.Context, diskID pgtype.UUID) (Dis
 		&i.UpdatedAt,
 		&i.LineageID,
 		&i.ParentDiskID,
-		&i.BaseCommitID,
+		&i.BaseSnapshotID,
 		&i.MaxBytes,
 		&i.UsedBytes,
 		&i.UsedInodes,
@@ -439,7 +481,7 @@ func (q *Queries) ListActiveMountLeases(ctx context.Context, arg ListActiveMount
 }
 
 const listDisks = `-- name: ListDisks :many
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE (NOT $1::boolean)
    OR (created_at, disk_id) < ($2::timestamptz, $3::uuid)
@@ -475,7 +517,7 @@ func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, e
 			&i.UpdatedAt,
 			&i.LineageID,
 			&i.ParentDiskID,
-			&i.BaseCommitID,
+			&i.BaseSnapshotID,
 			&i.MaxBytes,
 			&i.UsedBytes,
 			&i.UsedInodes,
@@ -490,29 +532,107 @@ func (q *Queries) ListDisks(ctx context.Context, arg ListDisksParams) ([]Disk, e
 	return items, nil
 }
 
-const listLineageCommits = `-- name: ListLineageCommits :many
-SELECT commit_id, lineage_id, source_disk_id, parent_commit_id, merge_parent_commit_id, created_at
-FROM disk_commits
+const listLineageDisks = `-- name: ListLineageDisks :many
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
+FROM disks
 WHERE lineage_id = $1
-ORDER BY created_at ASC, commit_id ASC
+ORDER BY disk_id ASC
 `
 
-func (q *Queries) ListLineageCommits(ctx context.Context, lineageID pgtype.UUID) ([]DiskCommit, error) {
-	rows, err := q.db.Query(ctx, listLineageCommits, lineageID)
+func (q *Queries) ListLineageDisks(ctx context.Context, lineageID pgtype.UUID) ([]Disk, error) {
+	rows, err := q.db.Query(ctx, listLineageDisks, lineageID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DiskCommit
+	var items []Disk
 	for rows.Next() {
-		var i DiskCommit
+		var i Disk
 		if err := rows.Scan(
-			&i.CommitID,
+			&i.DiskID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LineageID,
+			&i.ParentDiskID,
+			&i.BaseSnapshotID,
+			&i.MaxBytes,
+			&i.UsedBytes,
+			&i.UsedInodes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLineageDisksForUpdate = `-- name: ListLineageDisksForUpdate :many
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
+FROM disks
+WHERE lineage_id = $1
+ORDER BY disk_id ASC
+FOR UPDATE
+`
+
+func (q *Queries) ListLineageDisksForUpdate(ctx context.Context, lineageID pgtype.UUID) ([]Disk, error) {
+	rows, err := q.db.Query(ctx, listLineageDisksForUpdate, lineageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Disk
+	for rows.Next() {
+		var i Disk
+		if err := rows.Scan(
+			&i.DiskID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LineageID,
+			&i.ParentDiskID,
+			&i.BaseSnapshotID,
+			&i.MaxBytes,
+			&i.UsedBytes,
+			&i.UsedInodes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLineageSnapshots = `-- name: ListLineageSnapshots :many
+SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind
+FROM disk_snapshots
+WHERE lineage_id = $1
+ORDER BY created_at ASC, snapshot_id ASC
+`
+
+func (q *Queries) ListLineageSnapshots(ctx context.Context, lineageID pgtype.UUID) ([]DiskSnapshot, error) {
+	rows, err := q.db.Query(ctx, listLineageSnapshots, lineageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DiskSnapshot
+	for rows.Next() {
+		var i DiskSnapshot
+		if err := rows.Scan(
+			&i.SnapshotID,
 			&i.LineageID,
 			&i.SourceDiskID,
-			&i.ParentCommitID,
-			&i.MergeParentCommitID,
+			&i.ParentSnapshotID,
+			&i.MergeParentSnapshotID,
 			&i.CreatedAt,
+			&i.Kind,
 		); err != nil {
 			return nil, err
 		}
@@ -655,45 +775,45 @@ func (q *Queries) ReservePackSegment(ctx context.Context, arg ReservePackSegment
 	return i, err
 }
 
-const setDiskBaseCommit = `-- name: SetDiskBaseCommit :exec
+const setDiskBaseSnapshot = `-- name: SetDiskBaseSnapshot :exec
 UPDATE disks
-SET base_commit_id = $2
+SET base_snapshot_id = $2
 WHERE disk_id = $1
 `
 
-type SetDiskBaseCommitParams struct {
-	DiskID       pgtype.UUID `json:"disk_id"`
-	BaseCommitID pgtype.UUID `json:"base_commit_id"`
+type SetDiskBaseSnapshotParams struct {
+	DiskID         pgtype.UUID `json:"disk_id"`
+	BaseSnapshotID pgtype.UUID `json:"base_snapshot_id"`
 }
 
-func (q *Queries) SetDiskBaseCommit(ctx context.Context, arg SetDiskBaseCommitParams) error {
-	_, err := q.db.Exec(ctx, setDiskBaseCommit, arg.DiskID, arg.BaseCommitID)
+func (q *Queries) SetDiskBaseSnapshot(ctx context.Context, arg SetDiskBaseSnapshotParams) error {
+	_, err := q.db.Exec(ctx, setDiskBaseSnapshot, arg.DiskID, arg.BaseSnapshotID)
 	return err
 }
 
-const setDiskBaseCommitAndTouch = `-- name: SetDiskBaseCommitAndTouch :one
+const setDiskBaseSnapshotAndTouch = `-- name: SetDiskBaseSnapshotAndTouch :one
 UPDATE disks
-SET base_commit_id = $2,
+SET base_snapshot_id = $2,
     max_bytes = COALESCE($3::bigint, max_bytes),
     used_bytes = COALESCE($4::bigint, used_bytes),
     used_inodes = COALESCE($5::bigint, used_inodes),
     updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 `
 
-type SetDiskBaseCommitAndTouchParams struct {
-	DiskID       pgtype.UUID `json:"disk_id"`
-	BaseCommitID pgtype.UUID `json:"base_commit_id"`
-	MaxBytes     pgtype.Int8 `json:"max_bytes"`
-	UsedBytes    pgtype.Int8 `json:"used_bytes"`
-	UsedInodes   pgtype.Int8 `json:"used_inodes"`
+type SetDiskBaseSnapshotAndTouchParams struct {
+	DiskID         pgtype.UUID `json:"disk_id"`
+	BaseSnapshotID pgtype.UUID `json:"base_snapshot_id"`
+	MaxBytes       pgtype.Int8 `json:"max_bytes"`
+	UsedBytes      pgtype.Int8 `json:"used_bytes"`
+	UsedInodes     pgtype.Int8 `json:"used_inodes"`
 }
 
-func (q *Queries) SetDiskBaseCommitAndTouch(ctx context.Context, arg SetDiskBaseCommitAndTouchParams) (Disk, error) {
-	row := q.db.QueryRow(ctx, setDiskBaseCommitAndTouch,
+func (q *Queries) SetDiskBaseSnapshotAndTouch(ctx context.Context, arg SetDiskBaseSnapshotAndTouchParams) (Disk, error) {
+	row := q.db.QueryRow(ctx, setDiskBaseSnapshotAndTouch,
 		arg.DiskID,
-		arg.BaseCommitID,
+		arg.BaseSnapshotID,
 		arg.MaxBytes,
 		arg.UsedBytes,
 		arg.UsedInodes,
@@ -706,7 +826,7 @@ func (q *Queries) SetDiskBaseCommitAndTouch(ctx context.Context, arg SetDiskBase
 		&i.UpdatedAt,
 		&i.LineageID,
 		&i.ParentDiskID,
-		&i.BaseCommitID,
+		&i.BaseSnapshotID,
 		&i.MaxBytes,
 		&i.UsedBytes,
 		&i.UsedInodes,
@@ -720,7 +840,7 @@ SET name = COALESCE($2::text, name),
     max_bytes = COALESCE($3::bigint, max_bytes),
     updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 `
 
 type UpdateDiskParams struct {
@@ -739,7 +859,7 @@ func (q *Queries) UpdateDisk(ctx context.Context, arg UpdateDiskParams) (Disk, e
 		&i.UpdatedAt,
 		&i.LineageID,
 		&i.ParentDiskID,
-		&i.BaseCommitID,
+		&i.BaseSnapshotID,
 		&i.MaxBytes,
 		&i.UsedBytes,
 		&i.UsedInodes,

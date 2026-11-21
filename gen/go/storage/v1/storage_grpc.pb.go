@@ -19,46 +19,46 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StorageService_Lookup_FullMethodName         = "/storage.v1.StorageService/Lookup"
-	StorageService_GetAttr_FullMethodName        = "/storage.v1.StorageService/GetAttr"
-	StorageService_SetAttr_FullMethodName        = "/storage.v1.StorageService/SetAttr"
-	StorageService_Mknod_FullMethodName          = "/storage.v1.StorageService/Mknod"
-	StorageService_Mkdir_FullMethodName          = "/storage.v1.StorageService/Mkdir"
-	StorageService_Symlink_FullMethodName        = "/storage.v1.StorageService/Symlink"
-	StorageService_Readlink_FullMethodName       = "/storage.v1.StorageService/Readlink"
-	StorageService_Link_FullMethodName           = "/storage.v1.StorageService/Link"
-	StorageService_Unlink_FullMethodName         = "/storage.v1.StorageService/Unlink"
-	StorageService_Rmdir_FullMethodName          = "/storage.v1.StorageService/Rmdir"
-	StorageService_Rename_FullMethodName         = "/storage.v1.StorageService/Rename"
-	StorageService_Create_FullMethodName         = "/storage.v1.StorageService/Create"
-	StorageService_CreateTmpfile_FullMethodName  = "/storage.v1.StorageService/CreateTmpfile"
-	StorageService_Read_FullMethodName           = "/storage.v1.StorageService/Read"
-	StorageService_Write_FullMethodName          = "/storage.v1.StorageService/Write"
-	StorageService_Fsync_FullMethodName          = "/storage.v1.StorageService/Fsync"
-	StorageService_FsyncDir_FullMethodName       = "/storage.v1.StorageService/FsyncDir"
-	StorageService_ReadDir_FullMethodName        = "/storage.v1.StorageService/ReadDir"
-	StorageService_ReadDirPlus_FullMethodName    = "/storage.v1.StorageService/ReadDirPlus"
-	StorageService_Fallocate_FullMethodName      = "/storage.v1.StorageService/Fallocate"
-	StorageService_SetXattr_FullMethodName       = "/storage.v1.StorageService/SetXattr"
-	StorageService_GetXattr_FullMethodName       = "/storage.v1.StorageService/GetXattr"
-	StorageService_ListXattr_FullMethodName      = "/storage.v1.StorageService/ListXattr"
-	StorageService_RemoveXattr_FullMethodName    = "/storage.v1.StorageService/RemoveXattr"
-	StorageService_MountDisk_FullMethodName      = "/storage.v1.StorageService/MountDisk"
-	StorageService_RenewMount_FullMethodName     = "/storage.v1.StorageService/RenewMount"
-	StorageService_UnmountDisk_FullMethodName    = "/storage.v1.StorageService/UnmountDisk"
-	StorageService_ListMounts_FullMethodName     = "/storage.v1.StorageService/ListMounts"
-	StorageService_EvictMounts_FullMethodName    = "/storage.v1.StorageService/EvictMounts"
-	StorageService_CreateDisk_FullMethodName     = "/storage.v1.StorageService/CreateDisk"
-	StorageService_GetDisk_FullMethodName        = "/storage.v1.StorageService/GetDisk"
-	StorageService_ListDisks_FullMethodName      = "/storage.v1.StorageService/ListDisks"
-	StorageService_UpdateDisk_FullMethodName     = "/storage.v1.StorageService/UpdateDisk"
-	StorageService_DeleteDisk_FullMethodName     = "/storage.v1.StorageService/DeleteDisk"
-	StorageService_ForkDisk_FullMethodName       = "/storage.v1.StorageService/ForkDisk"
-	StorageService_StatFS_FullMethodName         = "/storage.v1.StorageService/StatFS"
-	StorageService_ReclaimOrphan_FullMethodName  = "/storage.v1.StorageService/ReclaimOrphan"
-	StorageService_DiffDisk_FullMethodName       = "/storage.v1.StorageService/DiffDisk"
-	StorageService_ReadCommitNode_FullMethodName = "/storage.v1.StorageService/ReadCommitNode"
-	StorageService_MergeDisk_FullMethodName      = "/storage.v1.StorageService/MergeDisk"
+	StorageService_Lookup_FullMethodName           = "/storage.v1.StorageService/Lookup"
+	StorageService_GetAttr_FullMethodName          = "/storage.v1.StorageService/GetAttr"
+	StorageService_SetAttr_FullMethodName          = "/storage.v1.StorageService/SetAttr"
+	StorageService_Mknod_FullMethodName            = "/storage.v1.StorageService/Mknod"
+	StorageService_Mkdir_FullMethodName            = "/storage.v1.StorageService/Mkdir"
+	StorageService_Symlink_FullMethodName          = "/storage.v1.StorageService/Symlink"
+	StorageService_Readlink_FullMethodName         = "/storage.v1.StorageService/Readlink"
+	StorageService_Link_FullMethodName             = "/storage.v1.StorageService/Link"
+	StorageService_Unlink_FullMethodName           = "/storage.v1.StorageService/Unlink"
+	StorageService_Rmdir_FullMethodName            = "/storage.v1.StorageService/Rmdir"
+	StorageService_Rename_FullMethodName           = "/storage.v1.StorageService/Rename"
+	StorageService_Create_FullMethodName           = "/storage.v1.StorageService/Create"
+	StorageService_CreateTmpfile_FullMethodName    = "/storage.v1.StorageService/CreateTmpfile"
+	StorageService_Read_FullMethodName             = "/storage.v1.StorageService/Read"
+	StorageService_Write_FullMethodName            = "/storage.v1.StorageService/Write"
+	StorageService_Fsync_FullMethodName            = "/storage.v1.StorageService/Fsync"
+	StorageService_FsyncDir_FullMethodName         = "/storage.v1.StorageService/FsyncDir"
+	StorageService_ReadDir_FullMethodName          = "/storage.v1.StorageService/ReadDir"
+	StorageService_ReadDirPlus_FullMethodName      = "/storage.v1.StorageService/ReadDirPlus"
+	StorageService_Fallocate_FullMethodName        = "/storage.v1.StorageService/Fallocate"
+	StorageService_SetXattr_FullMethodName         = "/storage.v1.StorageService/SetXattr"
+	StorageService_GetXattr_FullMethodName         = "/storage.v1.StorageService/GetXattr"
+	StorageService_ListXattr_FullMethodName        = "/storage.v1.StorageService/ListXattr"
+	StorageService_RemoveXattr_FullMethodName      = "/storage.v1.StorageService/RemoveXattr"
+	StorageService_MountDisk_FullMethodName        = "/storage.v1.StorageService/MountDisk"
+	StorageService_RenewMount_FullMethodName       = "/storage.v1.StorageService/RenewMount"
+	StorageService_UnmountDisk_FullMethodName      = "/storage.v1.StorageService/UnmountDisk"
+	StorageService_ListMounts_FullMethodName       = "/storage.v1.StorageService/ListMounts"
+	StorageService_EvictMounts_FullMethodName      = "/storage.v1.StorageService/EvictMounts"
+	StorageService_CreateDisk_FullMethodName       = "/storage.v1.StorageService/CreateDisk"
+	StorageService_GetDisk_FullMethodName          = "/storage.v1.StorageService/GetDisk"
+	StorageService_ListDisks_FullMethodName        = "/storage.v1.StorageService/ListDisks"
+	StorageService_UpdateDisk_FullMethodName       = "/storage.v1.StorageService/UpdateDisk"
+	StorageService_DeleteDisk_FullMethodName       = "/storage.v1.StorageService/DeleteDisk"
+	StorageService_ForkDisk_FullMethodName         = "/storage.v1.StorageService/ForkDisk"
+	StorageService_StatFS_FullMethodName           = "/storage.v1.StorageService/StatFS"
+	StorageService_ReclaimOrphan_FullMethodName    = "/storage.v1.StorageService/ReclaimOrphan"
+	StorageService_DiffDisk_FullMethodName         = "/storage.v1.StorageService/DiffDisk"
+	StorageService_ReadSnapshotNode_FullMethodName = "/storage.v1.StorageService/ReadSnapshotNode"
+	StorageService_MergeDisk_FullMethodName        = "/storage.v1.StorageService/MergeDisk"
 )
 
 // StorageServiceClient is the client API for StorageService service.
@@ -233,12 +233,13 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(ctx context.Context, in *UpdateDiskRequest, opts ...grpc.CallOption) (*UpdateDiskResponse, error)
-	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+	// DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
+	// 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	DeleteDisk(ctx context.Context, in *DeleteDiskRequest, opts ...grpc.CallOption) (*DeleteDiskResponse, error)
 	// ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-	// 自动将源磁盘当前状态固化为不可变共同祖先切面，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
+	// 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
 	// 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
 	// 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
@@ -252,9 +253,9 @@ type StorageServiceClient interface {
 	ReclaimOrphan(ctx context.Context, in *ReclaimOrphanRequest, opts ...grpc.CallOption) (*ReclaimOrphanResponse, error)
 	// DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
 	DiffDisk(ctx context.Context, in *DiffDiskRequest, opts ...grpc.CallOption) (*DiffDiskResponse, error)
-	// ReadCommitNode 读取指定不可变提交切面中某个节点的元数据与文件内容切片或符号链接目标。
-	ReadCommitNode(ctx context.Context, in *ReadCommitNodeRequest, opts ...grpc.CallOption) (*ReadCommitNodeResponse, error)
-	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
+	// ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
+	ReadSnapshotNode(ctx context.Context, in *ReadSnapshotNodeRequest, opts ...grpc.CallOption) (*ReadSnapshotNodeResponse, error)
+	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(ctx context.Context, in *MergeDiskRequest, opts ...grpc.CallOption) (*MergeDiskResponse, error)
 }
 
@@ -646,10 +647,10 @@ func (c *storageServiceClient) DiffDisk(ctx context.Context, in *DiffDiskRequest
 	return out, nil
 }
 
-func (c *storageServiceClient) ReadCommitNode(ctx context.Context, in *ReadCommitNodeRequest, opts ...grpc.CallOption) (*ReadCommitNodeResponse, error) {
+func (c *storageServiceClient) ReadSnapshotNode(ctx context.Context, in *ReadSnapshotNodeRequest, opts ...grpc.CallOption) (*ReadSnapshotNodeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ReadCommitNodeResponse)
-	err := c.cc.Invoke(ctx, StorageService_ReadCommitNode_FullMethodName, in, out, cOpts...)
+	out := new(ReadSnapshotNodeResponse)
+	err := c.cc.Invoke(ctx, StorageService_ReadSnapshotNode_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -838,12 +839,13 @@ type StorageServiceServer interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *UpdateDiskRequest) (*UpdateDiskResponse, error)
-	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+	// DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
+	// 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	DeleteDisk(context.Context, *DeleteDiskRequest) (*DeleteDiskResponse, error)
 	// ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-	// 自动将源磁盘当前状态固化为不可变共同祖先切面，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
+	// 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
 	// 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
 	// 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
@@ -857,9 +859,9 @@ type StorageServiceServer interface {
 	ReclaimOrphan(context.Context, *ReclaimOrphanRequest) (*ReclaimOrphanResponse, error)
 	// DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
 	DiffDisk(context.Context, *DiffDiskRequest) (*DiffDiskResponse, error)
-	// ReadCommitNode 读取指定不可变提交切面中某个节点的元数据与文件内容切片或符号链接目标。
-	ReadCommitNode(context.Context, *ReadCommitNodeRequest) (*ReadCommitNodeResponse, error)
-	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
+	// ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
+	ReadSnapshotNode(context.Context, *ReadSnapshotNodeRequest) (*ReadSnapshotNodeResponse, error)
+	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *MergeDiskRequest) (*MergeDiskResponse, error)
 	mustEmbedUnimplementedStorageServiceServer()
 }
@@ -985,8 +987,8 @@ func (UnimplementedStorageServiceServer) ReclaimOrphan(context.Context, *Reclaim
 func (UnimplementedStorageServiceServer) DiffDisk(context.Context, *DiffDiskRequest) (*DiffDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DiffDisk not implemented")
 }
-func (UnimplementedStorageServiceServer) ReadCommitNode(context.Context, *ReadCommitNodeRequest) (*ReadCommitNodeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ReadCommitNode not implemented")
+func (UnimplementedStorageServiceServer) ReadSnapshotNode(context.Context, *ReadSnapshotNodeRequest) (*ReadSnapshotNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadSnapshotNode not implemented")
 }
 func (UnimplementedStorageServiceServer) MergeDisk(context.Context, *MergeDiskRequest) (*MergeDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MergeDisk not implemented")
@@ -1696,20 +1698,20 @@ func _StorageService_DiffDisk_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _StorageService_ReadCommitNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ReadCommitNodeRequest)
+func _StorageService_ReadSnapshotNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadSnapshotNodeRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(StorageServiceServer).ReadCommitNode(ctx, in)
+		return srv.(StorageServiceServer).ReadSnapshotNode(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: StorageService_ReadCommitNode_FullMethodName,
+		FullMethod: StorageService_ReadSnapshotNode_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(StorageServiceServer).ReadCommitNode(ctx, req.(*ReadCommitNodeRequest))
+		return srv.(StorageServiceServer).ReadSnapshotNode(ctx, req.(*ReadSnapshotNodeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1892,8 +1894,8 @@ var StorageService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _StorageService_DiffDisk_Handler,
 		},
 		{
-			MethodName: "ReadCommitNode",
-			Handler:    _StorageService_ReadCommitNode_Handler,
+			MethodName: "ReadSnapshotNode",
+			Handler:    _StorageService_ReadSnapshotNode_Handler,
 		},
 		{
 			MethodName: "MergeDisk",

@@ -201,7 +201,7 @@ func TestGivenSampledContextWhenRunningStoreAndForkOpsThenSpansLinksAndExemplarE
 	cpSpan.End()
 
 	require.NoError(t, store.CloneCheckpointDir(rootCtx, cpDir, childDir))
-	_, err = store.SanitizeCheckpoint(rootCtx, store.SanitizeOptions{Dir: childDir, CommitID: "obs-c1"})
+	_, err = store.SanitizeCheckpoint(rootCtx, store.SanitizeOptions{Dir: childDir, SnapshotID: "obs-c1"})
 	require.NoError(t, err)
 	rootSpan.End()
 
@@ -302,9 +302,9 @@ func TestGivenSlowThresholdAndWarnLoggerWhenRunningThenStructuredLogsAndPebbleEv
 	require.NoError(t, err)
 	require.NoError(t, store.CloneCheckpointDir(ctx, cpDir, sanDir))
 	_, err = store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
-		Dir:      sanDir,
-		CommitID: "commit-obs-log",
-		Logger:   logger,
+		Dir:        sanDir,
+		SnapshotID: "snapshot-obs-log",
+		Logger:     logger,
 	})
 	require.NoError(t, err)
 	require.NoError(t, actor.Close())
@@ -319,7 +319,7 @@ func TestGivenSlowThresholdAndWarnLoggerWhenRunningThenStructuredLogsAndPebbleEv
 		"close",
 	})
 	readFileMustContainAll(t, filepath.Join(sanDir, store.PebbleEventsLogFileName), []string{
-		"commit:commit-obs-log",
+		"snapshot:snapshot-obs-log",
 		"open_begin",
 		"close",
 	})

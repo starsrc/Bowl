@@ -124,9 +124,9 @@ const (
 	StorageServiceReclaimOrphanProcedure = "/storage.v1.StorageService/ReclaimOrphan"
 	// StorageServiceDiffDiskProcedure is the fully-qualified name of the StorageService's DiffDisk RPC.
 	StorageServiceDiffDiskProcedure = "/storage.v1.StorageService/DiffDisk"
-	// StorageServiceReadCommitNodeProcedure is the fully-qualified name of the StorageService's
-	// ReadCommitNode RPC.
-	StorageServiceReadCommitNodeProcedure = "/storage.v1.StorageService/ReadCommitNode"
+	// StorageServiceReadSnapshotNodeProcedure is the fully-qualified name of the StorageService's
+	// ReadSnapshotNode RPC.
+	StorageServiceReadSnapshotNodeProcedure = "/storage.v1.StorageService/ReadSnapshotNode"
 	// StorageServiceMergeDiskProcedure is the fully-qualified name of the StorageService's MergeDisk
 	// RPC.
 	StorageServiceMergeDiskProcedure = "/storage.v1.StorageService/MergeDisk"
@@ -300,12 +300,13 @@ type StorageServiceClient interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
-	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+	// DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
+	// 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
 	// ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-	// 自动将源磁盘当前状态固化为不可变共同祖先切面，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
+	// 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
 	// 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
 	// 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
@@ -319,9 +320,9 @@ type StorageServiceClient interface {
 	ReclaimOrphan(context.Context, *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error)
 	// DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
 	DiffDisk(context.Context, *connect.Request[v1.DiffDiskRequest]) (*connect.Response[v1.DiffDiskResponse], error)
-	// ReadCommitNode 读取指定不可变提交切面中某个节点的元数据与文件内容切片或符号链接目标。
-	ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error)
-	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
+	// ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
+	ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error)
+	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
 }
 
@@ -564,10 +565,10 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("DiffDisk")),
 			connect.WithClientOptions(opts...),
 		),
-		readCommitNode: connect.NewClient[v1.ReadCommitNodeRequest, v1.ReadCommitNodeResponse](
+		readSnapshotNode: connect.NewClient[v1.ReadSnapshotNodeRequest, v1.ReadSnapshotNodeResponse](
 			httpClient,
-			baseURL+StorageServiceReadCommitNodeProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("ReadCommitNode")),
+			baseURL+StorageServiceReadSnapshotNodeProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ReadSnapshotNode")),
 			connect.WithClientOptions(opts...),
 		),
 		mergeDisk: connect.NewClient[v1.MergeDiskRequest, v1.MergeDiskResponse](
@@ -581,46 +582,46 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // storageServiceClient implements StorageServiceClient.
 type storageServiceClient struct {
-	lookup         *connect.Client[v1.LookupRequest, v1.LookupResponse]
-	getAttr        *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
-	setAttr        *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
-	mknod          *connect.Client[v1.MknodRequest, v1.MknodResponse]
-	mkdir          *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
-	symlink        *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
-	readlink       *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
-	link           *connect.Client[v1.LinkRequest, v1.LinkResponse]
-	unlink         *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
-	rmdir          *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
-	rename         *connect.Client[v1.RenameRequest, v1.RenameResponse]
-	create         *connect.Client[v1.CreateRequest, v1.CreateResponse]
-	createTmpfile  *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
-	read           *connect.Client[v1.ReadRequest, v1.ReadResponse]
-	write          *connect.Client[v1.WriteRequest, v1.WriteResponse]
-	fsync          *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
-	fsyncDir       *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
-	readDir        *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
-	readDirPlus    *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
-	fallocate      *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
-	setXattr       *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
-	getXattr       *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
-	listXattr      *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
-	removeXattr    *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
-	mountDisk      *connect.Client[v1.MountDiskRequest, v1.MountDiskResponse]
-	renewMount     *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
-	unmountDisk    *connect.Client[v1.UnmountDiskRequest, v1.UnmountDiskResponse]
-	listMounts     *connect.Client[v1.ListMountsRequest, v1.ListMountsResponse]
-	evictMounts    *connect.Client[v1.EvictMountsRequest, v1.EvictMountsResponse]
-	createDisk     *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
-	getDisk        *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
-	listDisks      *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
-	updateDisk     *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
-	deleteDisk     *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
-	forkDisk       *connect.Client[v1.ForkDiskRequest, v1.ForkDiskResponse]
-	statFS         *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
-	reclaimOrphan  *connect.Client[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse]
-	diffDisk       *connect.Client[v1.DiffDiskRequest, v1.DiffDiskResponse]
-	readCommitNode *connect.Client[v1.ReadCommitNodeRequest, v1.ReadCommitNodeResponse]
-	mergeDisk      *connect.Client[v1.MergeDiskRequest, v1.MergeDiskResponse]
+	lookup           *connect.Client[v1.LookupRequest, v1.LookupResponse]
+	getAttr          *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
+	setAttr          *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
+	mknod            *connect.Client[v1.MknodRequest, v1.MknodResponse]
+	mkdir            *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
+	symlink          *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
+	readlink         *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
+	link             *connect.Client[v1.LinkRequest, v1.LinkResponse]
+	unlink           *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
+	rmdir            *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
+	rename           *connect.Client[v1.RenameRequest, v1.RenameResponse]
+	create           *connect.Client[v1.CreateRequest, v1.CreateResponse]
+	createTmpfile    *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
+	read             *connect.Client[v1.ReadRequest, v1.ReadResponse]
+	write            *connect.Client[v1.WriteRequest, v1.WriteResponse]
+	fsync            *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
+	fsyncDir         *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
+	readDir          *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
+	readDirPlus      *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
+	fallocate        *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
+	setXattr         *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
+	getXattr         *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
+	listXattr        *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
+	removeXattr      *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
+	mountDisk        *connect.Client[v1.MountDiskRequest, v1.MountDiskResponse]
+	renewMount       *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
+	unmountDisk      *connect.Client[v1.UnmountDiskRequest, v1.UnmountDiskResponse]
+	listMounts       *connect.Client[v1.ListMountsRequest, v1.ListMountsResponse]
+	evictMounts      *connect.Client[v1.EvictMountsRequest, v1.EvictMountsResponse]
+	createDisk       *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
+	getDisk          *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
+	listDisks        *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
+	updateDisk       *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
+	deleteDisk       *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
+	forkDisk         *connect.Client[v1.ForkDiskRequest, v1.ForkDiskResponse]
+	statFS           *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
+	reclaimOrphan    *connect.Client[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse]
+	diffDisk         *connect.Client[v1.DiffDiskRequest, v1.DiffDiskResponse]
+	readSnapshotNode *connect.Client[v1.ReadSnapshotNodeRequest, v1.ReadSnapshotNodeResponse]
+	mergeDisk        *connect.Client[v1.MergeDiskRequest, v1.MergeDiskResponse]
 }
 
 // Lookup calls storage.v1.StorageService.Lookup.
@@ -813,9 +814,9 @@ func (c *storageServiceClient) DiffDisk(ctx context.Context, req *connect.Reques
 	return c.diffDisk.CallUnary(ctx, req)
 }
 
-// ReadCommitNode calls storage.v1.StorageService.ReadCommitNode.
-func (c *storageServiceClient) ReadCommitNode(ctx context.Context, req *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error) {
-	return c.readCommitNode.CallUnary(ctx, req)
+// ReadSnapshotNode calls storage.v1.StorageService.ReadSnapshotNode.
+func (c *storageServiceClient) ReadSnapshotNode(ctx context.Context, req *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error) {
+	return c.readSnapshotNode.CallUnary(ctx, req)
 }
 
 // MergeDisk calls storage.v1.StorageService.MergeDisk.
@@ -991,12 +992,13 @@ type StorageServiceHandler interface {
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
 	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
-	// DeleteDisk 级联删除指定虚拟磁盘实体并强制回收其全部元数据节点。
+	// DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
+	// 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
 	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
 	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
 	// ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-	// 自动将源磁盘当前状态固化为不可变共同祖先切面，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
+	// 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
 	// 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
 	// 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
 	// 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
@@ -1010,9 +1012,9 @@ type StorageServiceHandler interface {
 	ReclaimOrphan(context.Context, *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error)
 	// DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
 	DiffDisk(context.Context, *connect.Request[v1.DiffDiskRequest]) (*connect.Response[v1.DiffDiskResponse], error)
-	// ReadCommitNode 读取指定不可变提交切面中某个节点的元数据与文件内容切片或符号链接目标。
-	ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error)
-	// MergeDisk 将源虚拟磁盘的变更三路合并至目标虚拟磁盘（支持 dry_run 预览与冲突解决策略）。
+	// ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
+	ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error)
+	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
 	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
 }
 
@@ -1251,10 +1253,10 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("DiffDisk")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceReadCommitNodeHandler := connect.NewUnaryHandler(
-		StorageServiceReadCommitNodeProcedure,
-		svc.ReadCommitNode,
-		connect.WithSchema(storageServiceMethods.ByName("ReadCommitNode")),
+	storageServiceReadSnapshotNodeHandler := connect.NewUnaryHandler(
+		StorageServiceReadSnapshotNodeProcedure,
+		svc.ReadSnapshotNode,
+		connect.WithSchema(storageServiceMethods.ByName("ReadSnapshotNode")),
 		connect.WithHandlerOptions(opts...),
 	)
 	storageServiceMergeDiskHandler := connect.NewUnaryHandler(
@@ -1341,8 +1343,8 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceReclaimOrphanHandler.ServeHTTP(w, r)
 		case StorageServiceDiffDiskProcedure:
 			storageServiceDiffDiskHandler.ServeHTTP(w, r)
-		case StorageServiceReadCommitNodeProcedure:
-			storageServiceReadCommitNodeHandler.ServeHTTP(w, r)
+		case StorageServiceReadSnapshotNodeProcedure:
+			storageServiceReadSnapshotNodeHandler.ServeHTTP(w, r)
 		case StorageServiceMergeDiskProcedure:
 			storageServiceMergeDiskHandler.ServeHTTP(w, r)
 		default:
@@ -1506,8 +1508,8 @@ func (UnimplementedStorageServiceHandler) DiffDisk(context.Context, *connect.Req
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DiffDisk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReadCommitNode is not implemented"))
+func (UnimplementedStorageServiceHandler) ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReadSnapshotNode is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error) {

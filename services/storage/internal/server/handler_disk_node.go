@@ -138,7 +138,10 @@ func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.
 }
 
 func (s *Server) DeleteDisk(ctx context.Context, req *connect.Request[storagev1.DeleteDiskRequest]) (*connect.Response[storagev1.DeleteDiskResponse], error) {
-	if err := s.control.DeleteDisk(ctx, req.Msg.DiskId); err != nil {
+	if err := s.control.DeleteDisk(ctx, control.DeleteDiskParams{
+		DiskID:    req.Msg.DiskId,
+		Recursive: req.Msg.Recursive,
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.DeleteDiskResponse{}), nil

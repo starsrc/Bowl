@@ -87,7 +87,7 @@ func overwriteTestFileViaRPC(
 	require.NoError(t, err)
 }
 
-func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T) {
+func TestServer_DiffReadSnapshotNodeAndMergeDisk_EndToEndWireContract(t *testing.T) {
 
 	ctx := context.Background()
 	_, client := newTestServerAndClient(t)
@@ -132,8 +132,8 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 		SourceDiskId: featID,
 	}))
 	require.NoError(t, err)
-	lcaCommitID := diffTwoWay.Msg.GetLcaCommitId()
-	require.NotEmpty(t, lcaCommitID)
+	lcaSnapshotID := diffTwoWay.Msg.GetLcaSnapshotId()
+	require.NotEmpty(t, lcaSnapshotID)
 	require.Equal(t, uint64(1), diffTwoWay.Msg.GetSummary().GetAdded())
 	require.Equal(t, uint64(1), diffTwoWay.Msg.GetSummary().GetModified())
 
@@ -147,23 +147,23 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 	require.NotEmpty(t, diffPage1.Msg.GetNextPageToken())
 	require.Equal(t, uint64(1), diffPage1.Msg.GetSummary().GetConflicts())
 
-	nodeSlice, err := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
-		DiskId:   featID,
-		CommitId: lcaCommitID,
-		Ino:      cfgIno,
-		Offset:   4,
-		Size:     16,
+	nodeSlice, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
+		DiskId:     featID,
+		SnapshotId: lcaSnapshotID,
+		Ino:        cfgIno,
+		Offset:     4,
+		Size:       16,
 	}))
 	require.NoError(t, err)
 	require.Equal(t, []byte("base\n"), nodeSlice.Msg.GetData())
 	require.True(t, nodeSlice.Msg.GetEof())
 
-	symSlice, err := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
-		DiskId:   featID,
-		CommitId: lcaCommitID,
-		Ino:      symResp.Msg.GetInode().GetIno(),
-		Offset:   0,
-		Size:     128,
+	symSlice, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
+		DiskId:     featID,
+		SnapshotId: lcaSnapshotID,
+		Ino:        symResp.Msg.GetInode().GetIno(),
+		Offset:     0,
+		Size:       128,
 	}))
 	require.NoError(t, err)
 	require.Equal(t, []byte("/cfg.ini"), symSlice.Msg.GetSymlinkTarget())
@@ -215,7 +215,7 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 		MaxBytes:     &overrideQuota,
 	}))
 	require.NoError(t, err)
-	require.Empty(t, dryResp.Msg.GetMergeCommitId())
+	require.Empty(t, dryResp.Msg.GetMergeSnapshotId())
 	require.Equal(t, overrideQuota, dryResp.Msg.GetTargetMaxBytes())
 
 	mergeResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
@@ -229,7 +229,7 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 		MaxBytes: &overrideQuota,
 	}))
 	require.NoError(t, err)
-	require.NotEmpty(t, mergeResp.Msg.GetMergeCommitId())
+	require.NotEmpty(t, mergeResp.Msg.GetMergeSnapshotId())
 	require.Equal(t, overrideQuota, mergeResp.Msg.GetDisk().GetMaxBytes())
 
 	_, staleErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
@@ -278,4 +278,61 @@ func TestServer_DiffReadCommitNodeAndMergeDisk_EndToEndWireContract(t *testing.T
 
 func TestToConnectError_ConcurrentMerge_MapsToAbortedEBUSY(t *testing.T) {
 	requireConnectErrorCodeAndReason(t, toConnectError(control.ErrConcurrentMerge), connect.CodeAborted, "EBUSY")
+}
+
+func TestServer_DeleteDiskRecursiveWireContract(t *testing.T) {
+	ctx := context.Background()
+	_, client := newTestServerAndClient(t)
+
+	rootResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     "root",
+		MaxBytes: 16 << 20,
+	}))
+	require.NoError(t, err)
+	rootID := rootResp.Msg.GetDisk().GetDiskId()
+
+	childResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
+		SourceDiskId: rootID,
+		Name:         "child",
+	}))
+	require.NoError(t, err)
+	childID := childResp.Msg.GetDisk().GetDiskId()
+
+	grandResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
+		SourceDiskId: childID,
+		Name:         "grand",
+	}))
+	require.NoError(t, err)
+	grandID := grandResp.Msg.GetDisk().GetDiskId()
+
+	grandMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		DiskId:   grandID,
+		ReadOnly: true,
+	}))
+	require.NoError(t, err)
+
+	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId:    childID,
+		Recursive: true,
+	}))
+	requireConnectErrorCodeAndReason(t, err, connect.CodeAborted, "EBUSY")
+
+	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+		DiskId:  grandID,
+		MountId: grandMnt.Msg.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId:    childID,
+		Recursive: true,
+	}))
+	require.NoError(t, err)
+
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: childID}))
+	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: grandID}))
+	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
+	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: rootID}))
+	require.NoError(t, err)
 }

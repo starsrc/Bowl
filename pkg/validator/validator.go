@@ -62,7 +62,7 @@ var storageMessages = []proto.Message{
 	&storagev1.ForkDiskRequest{},
 	&storagev1.StatFSRequest{},
 	&storagev1.DiffDiskRequest{},
-	&storagev1.ReadCommitNodeRequest{},
+	&storagev1.ReadSnapshotNodeRequest{},
 	&storagev1.MergeDiskRequest{},
 
 	&storagev1.MountDiskResponse{},
@@ -103,7 +103,7 @@ var storageMessages = []proto.Message{
 	&storagev1.ForkDiskResponse{},
 	&storagev1.StatFSResponse{},
 	&storagev1.DiffDiskResponse{},
-	&storagev1.ReadCommitNodeResponse{},
+	&storagev1.ReadSnapshotNodeResponse{},
 	&storagev1.MergeDiskResponse{},
 
 	&storagev1.DirEntry{},

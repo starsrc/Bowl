@@ -258,20 +258,20 @@ func TestForkDisk_CascadingDAG_MaintainsLineageAndParentLinks(t *testing.T) {
 
 	snap := memDB.Inspect()
 	require.Len(t, snap.Lineages, 1, "同源级联派生应共享 1 条血缘")
-	require.Len(t, snap.Commits, 3, "3 次 Fork 应产生 3 个基准切面")
-	c2 := snap.Commits[snap.Disks[idRoot].BaseCommitID]
-	c3 := snap.Commits[snap.Disks[idChild1].BaseCommitID]
-	c1 := snap.Commits[c2.ParentCommitID]
+	require.Len(t, snap.Snapshots, 3, "3 次 Fork 应产生 3 个基准快照")
+	s2 := snap.Snapshots[snap.Disks[idRoot].BaseSnapshotID]
+	s3 := snap.Snapshots[snap.Disks[idChild1].BaseSnapshotID]
+	s1 := snap.Snapshots[s2.ParentSnapshotID]
 
 	require.Equal(t, idRoot, snap.Disks[idGrand].LineageID, "GrandChild 应归属根盘血缘")
-	require.Equal(t, uuid.Nil, c1.ParentCommitID, "首次切面父切面应为空")
-	require.Equal(t, c1.CommitID, c2.ParentCommitID, "Root 二次切面应指向首次切面 C1")
-	require.Equal(t, c1.CommitID, c3.ParentCommitID, "Child1 级联切面应指向首次切面 C1")
-	require.Equal(t, c2.CommitID, snap.Disks[idChild2].BaseCommitID, "Child2 基准切面应为 C2")
-	require.Equal(t, c3.CommitID, snap.Disks[idGrand].BaseCommitID, "GrandChild 基准切面应为 C3")
+	require.Equal(t, uuid.Nil, s1.ParentSnapshotID, "首次快照父快照应为空")
+	require.Equal(t, s1.SnapshotID, s2.ParentSnapshotID, "Root 二次快照应指向首次快照 S1")
+	require.Equal(t, s1.SnapshotID, s3.ParentSnapshotID, "Child1 级联快照应指向首次快照 S1")
+	require.Equal(t, s2.SnapshotID, snap.Disks[idChild2].BaseSnapshotID, "Child2 基准快照应为 S2")
+	require.Equal(t, s3.SnapshotID, snap.Disks[idGrand].BaseSnapshotID, "GrandChild 基准快照应为 S3")
 }
 
-func TestForkDisk_QuotaShrinkWithoutOrphans_RejectsBeforeCreatingCommitDir(t *testing.T) {
+func TestForkDisk_QuotaShrinkWithoutOrphans_RejectsBeforeCreatingSnapshotDir(t *testing.T) {
 
 	ctx := context.Background()
 	rootDir := t.TempDir()
@@ -293,8 +293,8 @@ func TestForkDisk_QuotaShrinkWithoutOrphans_RejectsBeforeCreatingCommitDir(t *te
 	})
 
 	require.ErrorIs(t, err, ErrInvalidShrink, "配额缩容应返回 ErrInvalidShrink: want=%v got=%v", ErrInvalidShrink, err)
-	_, statErr := os.Stat(filepath.Join(rootDir, "commits"))
-	require.ErrorIs(t, statErr, os.ErrNotExist, "无孤儿前置快检拦截不得触发任何切面目录 I/O")
+	_, statErr := os.Stat(filepath.Join(rootDir, "snapshots"))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "无孤儿前置快检拦截不得触发任何快照目录 I/O")
 }
 
 func TestForkDisk_QuotaShrinkWithOrphans_SanitizesAndEnforcesEffectiveUsage(t *testing.T) {
@@ -323,9 +323,9 @@ func TestForkDisk_QuotaShrinkWithOrphans_SanitizesAndEnforcesEffectiveUsage(t *t
 	})
 
 	require.ErrorIs(t, shrinkErr, ErrInvalidShrink, "净化后配额仍不足应返回 ErrInvalidShrink")
-	commitEntries, readErr := os.ReadDir(filepath.Join(rootDir, "commits"))
-	require.NoError(t, readErr, "读取 commits 目录失败")
-	require.Empty(t, commitEntries, "配额拦截回滚后 commits/ 目录必须零残留")
+	snapEntries, readErr := os.ReadDir(filepath.Join(rootDir, "snapshots"))
+	require.NoError(t, readErr, "读取 snapshots 目录失败")
+	require.Empty(t, snapEntries, "配额拦截回滚后 snapshots/ 目录必须零残留")
 
 	forked, err := mgr.ForkDisk(ctx, ForkDiskParams{
 		SourceDiskID: srcDisk.DiskID,
@@ -374,7 +374,7 @@ func TestForkDisk_InvalidParams_RejectsWithSentinel(t *testing.T) {
 	}
 }
 
-func TestForkDisk_DBTxFailure_RollsBackChildDirCommitDirAndRegistry(t *testing.T) {
+func TestForkDisk_DBTxFailure_RollsBackChildDirSnapshotDirAndRegistry(t *testing.T) {
 
 	ctx := context.Background()
 	rootDir := t.TempDir()
@@ -397,16 +397,16 @@ func TestForkDisk_DBTxFailure_RollsBackChildDirCommitDirAndRegistry(t *testing.T
 	require.Len(t, diskDirEntries, 1, "事务回滚后 disks/ 下只能保留源盘目录: got=%d", len(diskDirEntries))
 	require.Equal(t, src.DiskID, diskDirEntries[0].Name())
 
-	commitDirEntries, readErr := os.ReadDir(filepath.Join(rootDir, "commits"))
-	require.NoError(t, readErr, "读取 commits 目录失败")
-	require.Empty(t, commitDirEntries, "事务回滚后 commits/ 下不得残留切面目录: got=%d", len(commitDirEntries))
+	snapDirEntries, readErr := os.ReadDir(filepath.Join(rootDir, "snapshots"))
+	require.NoError(t, readErr, "读取 snapshots 目录失败")
+	require.Empty(t, snapDirEntries, "事务回滚后 snapshots/ 下不得残留快照目录: got=%d", len(snapDirEntries))
 
 	listed, listErr := mgr.ListDisks(ctx, ListDisksParams{})
 	require.NoError(t, listErr, "ListDisks 失败")
 	require.Len(t, listed.Disks, 1, "回滚后应仅存源盘 1 块: got=%d", len(listed.Disks))
 }
 
-func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T) {
+func TestDeleteDisk_LineageSnapshotGC_ReclaimsSnapshotsAtSingleSurvivor(t *testing.T) {
 
 	ctx := context.Background()
 	rootDir := t.TempDir()
@@ -434,38 +434,38 @@ func TestDeleteDisk_LineageCommitGC_ReclaimsCommitsAtSingleSurvivor(t *testing.T
 	require.Equal(t, uint64(5), fileHardLinkCount(t, sharedPackPath), "二次 Fork 后硬链接计数应为 5")
 
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: rootDisk.DiskID, MountID: mnt.MountID}), "卸载根盘失败")
-	require.NoError(t, mgr.DeleteDisk(ctx, rootDisk.DiskID), "删除根盘失败")
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: rootDisk.DiskID}), "删除根盘失败")
 
 	snapAfterRoot := memDB.Inspect()
-	require.Len(t, snapAfterRoot.Commits, 2, "|D|==2 时必须保留全部切面 DAG")
-	commitDirsAfterRoot, err := os.ReadDir(filepath.Join(rootDir, "commits"))
-	require.NoError(t, err, "读取 commits 目录失败")
-	require.Len(t, commitDirsAfterRoot, 2)
+	require.Len(t, snapAfterRoot.Snapshots, 2, "|D|==2 时必须保留全部可达快照 DAG")
+	snapDirsAfterRoot, err := os.ReadDir(filepath.Join(rootDir, "snapshots"))
+	require.NoError(t, err, "读取 snapshots 目录失败")
+	require.Len(t, snapDirsAfterRoot, 2)
 	require.Equal(t, uint64(4), fileHardLinkCount(t, sharedPackPath))
 
-	require.NoError(t, mgr.DeleteDisk(ctx, child2.DiskID), "删除 sibling-2 失败")
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: child2.DiskID}), "删除 sibling-2 失败")
 
 	idChild1, err := parseDiskID(child1.DiskID)
 	require.NoError(t, err)
 	snapAfterSibling := memDB.Inspect()
-	require.Empty(t, snapAfterSibling.Commits, "|D|==1 时必须自动清空同血缘全部切面")
+	require.Empty(t, snapAfterSibling.Snapshots, "|D|==1 时必须自动清空同血缘全部 fork/merge 快照")
 	require.Len(t, snapAfterSibling.Lineages, 1, "唯一幸存盘仍在时血缘行必须保留")
-	require.Equal(t, uuid.Nil, snapAfterSibling.Disks[idChild1].BaseCommitID, "唯一幸存盘 base_commit_id 必须置空")
+	require.Equal(t, uuid.Nil, snapAfterSibling.Disks[idChild1].BaseSnapshotID, "唯一幸存盘 base_snapshot_id 必须置空")
 
-	commitDirsAfterSibling, err := os.ReadDir(filepath.Join(rootDir, "commits"))
-	require.NoError(t, err, "读取 commits 目录失败")
-	require.Empty(t, commitDirsAfterSibling, "|D|==1 时 commits/ 目录下切面必须全部清理")
+	snapDirsAfterSibling, err := os.ReadDir(filepath.Join(rootDir, "snapshots"))
+	require.NoError(t, err, "读取 snapshots 目录失败")
+	require.Empty(t, snapDirsAfterSibling, "|D|==1 时 snapshots/ 目录下快照必须全部清理")
 	require.Equal(t, uint64(1), fileHardLinkCount(t, sharedPackPath), "唯一幸存盘 .pack st_nlink 必须回落至 1")
 
 	child1Actor, err := mgr.Actor(ctx, child1.DiskID)
 	require.NoError(t, err, "获取幸存盘 StoreActor 失败")
 	require.Equal(t, packPayload, readRegularFile(t, ctx, child1Actor, "shared-pack.bin", store.BlobSize), "幸存盘数据必须完好可读")
 
-	require.NoError(t, mgr.DeleteDisk(ctx, child1.DiskID), "删除最后幸存盘失败")
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: child1.DiskID}), "删除最后幸存盘失败")
 
 	snapAfterLast := memDB.Inspect()
 	require.Empty(t, snapAfterLast.Disks)
-	require.Empty(t, snapAfterLast.Commits)
+	require.Empty(t, snapAfterLast.Snapshots)
 	require.Empty(t, snapAfterLast.Lineages, "|D|==0 时必须清除血缘记录")
 }
 
@@ -569,7 +569,7 @@ func TestForkDisk_Observability_ExportsDedupMetricsSpansAndAuditLogs(t *testing.
 	refBytes := gatherGaugeValue(t, reg, "bowl_storage_pack_referenced_bytes")
 	require.InDelta(t, float64(payloadSize), physBytes, 65536, "Fork 后物理占用应去重维持约 1 MiB: got=%v", physBytes)
 	require.GreaterOrEqual(t, refBytes, float64(3*payloadSize), "逻辑引用占用应累加 3 份盘: got=%v", refBytes)
-	require.InDelta(t, 2.0, gatherGaugeValue(t, reg, "bowl_storage_commits_active"), 1e-9, "应存在 2 个活跃切面")
+	require.InDelta(t, 2.0, gatherGaugeValue(t, reg, "bowl_storage_snapshots_active"), 1e-9, "应存在 2 个活跃快照")
 	require.GreaterOrEqual(t, gatherMetricSampleCount(t, reg, "bowl_storage_control_open_actor_duration_seconds", "result", "ok"), uint64(5))
 	require.Equal(t, uint64(2), gatherForkStageCount(t, reg, "checkpoint"))
 	require.Equal(t, uint64(2), gatherForkStageCount(t, reg, "sanitize"))
@@ -578,19 +578,19 @@ func TestForkDisk_Observability_ExportsDedupMetricsSpansAndAuditLogs(t *testing.
 	require.Equal(t, uint64(2), gatherForkStageCount(t, reg, "commit_tx"))
 	require.InDelta(t, 2.0, gatherForkCounter(t, reg, "ok"), 1e-9)
 
-	require.NoError(t, mgr.DeleteDisk(ctx, src.DiskID))
-	require.NoError(t, mgr.DeleteDisk(ctx, child1.DiskID))
-	require.NoError(t, mgr.DeleteDisk(ctx, child2.DiskID))
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: src.DiskID}))
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: child1.DiskID}))
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: child2.DiskID}))
 	rootSpan.End()
 
-	require.InDelta(t, 0.0, gatherGaugeValue(t, reg, "bowl_storage_commits_active"), 1e-9, "全删后 commits_active 应归零")
-	require.InDelta(t, 2.0, gatherCounterValue(t, reg, "bowl_storage_control_commits_reclaimed_total"), 1e-9, "应累计回收 2 个切面")
+	require.InDelta(t, 0.0, gatherGaugeValue(t, reg, "bowl_storage_snapshots_active"), 1e-9, "全删后 snapshots_active 应归零")
+	require.InDelta(t, 2.0, gatherCounterValue(t, reg, "bowl_storage_control_snapshots_reclaimed_total"), 1e-9, "应累计回收 2 个快照")
 
 	spans := exporter.GetSpans()
 	require.GreaterOrEqual(t, countSpansByName(spans, "control.ReserveSegment"), 1)
 	require.GreaterOrEqual(t, countSpansByName(spans, "control.OpenDiskActor"), 1)
-	require.GreaterOrEqual(t, countSpansByName(spans, "control.ForkCommitTx"), 1)
-	require.GreaterOrEqual(t, countSpansByName(spans, "control.ReclaimCommits"), 1)
+	require.GreaterOrEqual(t, countSpansByName(spans, "control.ForkSnapshotTx"), 1)
+	require.GreaterOrEqual(t, countSpansByName(spans, "control.ReclaimSnapshots"), 1)
 	require.GreaterOrEqual(t, countSpansByName(spans, "store.Checkpoint"), 1)
 	require.GreaterOrEqual(t, countSpansByName(spans, "store.SanitizeCheckpoint"), 1)
 	require.GreaterOrEqual(t, countSpansByName(spans, "store.CloneCheckpointDir"), 1)

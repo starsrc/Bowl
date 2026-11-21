@@ -39,7 +39,7 @@ func toConnectError(err error) error {
 		}); detailErr == nil {
 			connectErr.AddDetail(infoDetail)
 		}
-		if reportDetail, detailErr := connect.NewErrorDetail(toProtoMergeConflictReport(conflictErr.LCACommitID, &conflictErr.Report)); detailErr == nil {
+		if reportDetail, detailErr := connect.NewErrorDetail(toProtoMergeConflictReport(conflictErr.LCASnapshotID, &conflictErr.Report)); detailErr == nil {
 			connectErr.AddDetail(reportDetail)
 		}
 		return connectErr

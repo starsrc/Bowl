@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 
 	"github.com/starsrc/bowl/services/storage/internal/db"
@@ -20,28 +21,66 @@ import (
 
 const testDefaultMaxBytes uint64 = 16 << 20
 
+type seedManualSnapshotFn func(
+	t *testing.T,
+	ctx context.Context,
+	rec db.SnapshotRecord,
+	setBaseOnDiskID uuid.UUID,
+)
+
 type storeAdapter struct {
 	name     string
-	newStore func(t *testing.T) (db.Store, context.Context)
+	newStore func(t *testing.T) (db.Store, context.Context, seedManualSnapshotFn)
+}
+
+func pgUUID(id uuid.UUID) pgtype.UUID {
+	if id == uuid.Nil {
+		return pgtype.UUID{}
+	}
+	return pgtype.UUID{Bytes: id, Valid: true}
 }
 
 func storeAdapters() []storeAdapter {
 	return []storeAdapter{
 		{
 			name: "MemStore",
-			newStore: func(t *testing.T) (db.Store, context.Context) {
+			newStore: func(t *testing.T) (db.Store, context.Context, seedManualSnapshotFn) {
 				t.Helper()
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				t.Cleanup(cancel)
-				return db.NewMemStore(), ctx
+				mem := db.NewMemStore()
+				seeder := func(t *testing.T, _ context.Context, rec db.SnapshotRecord, setBaseOnDiskID uuid.UUID) {
+					t.Helper()
+					require.NoError(t, mem.SeedSnapshot(rec, setBaseOnDiskID))
+				}
+				return mem, ctx, seeder
 			},
 		},
 		{
 			name: "SQLStore",
-			newStore: func(t *testing.T) (db.Store, context.Context) {
+			newStore: func(t *testing.T) (db.Store, context.Context, seedManualSnapshotFn) {
 				t.Helper()
 				pool, ctx := setupMetaTestDB(t)
-				return db.NewStore(pool), ctx
+				q := db.New(pool)
+				seeder := func(t *testing.T, c context.Context, rec db.SnapshotRecord, setBaseOnDiskID uuid.UUID) {
+					t.Helper()
+					_, err := q.CreateDiskSnapshot(c, db.CreateDiskSnapshotParams{
+						SnapshotID:            pgUUID(rec.SnapshotID),
+						LineageID:             pgUUID(rec.LineageID),
+						SourceDiskID:          pgUUID(rec.SourceDiskID),
+						ParentSnapshotID:      pgUUID(rec.ParentSnapshotID),
+						MergeParentSnapshotID: pgUUID(rec.MergeParentSnapshotID),
+						Kind:                  string(rec.Kind),
+					})
+					require.NoError(t, err)
+					if setBaseOnDiskID != uuid.Nil {
+						require.NoError(t, q.SetDiskBaseSnapshot(c, db.SetDiskBaseSnapshotParams{
+							DiskID:         pgUUID(setBaseOnDiskID),
+							BaseSnapshotID: pgUUID(rec.SnapshotID),
+						}))
+					}
+				}
+				return db.NewStore(pool), ctx, seeder
 			},
 		},
 	}
@@ -51,8 +90,18 @@ func runStoreAdapters(t *testing.T, fn func(t *testing.T, s db.Store, ctx contex
 	t.Helper()
 	for _, adapter := range storeAdapters() {
 		t.Run(adapter.name, func(t *testing.T) {
-			s, ctx := adapter.newStore(t)
+			s, ctx, _ := adapter.newStore(t)
 			fn(t, s, ctx)
+		})
+	}
+}
+
+func runStoreAdaptersWithSeeder(t *testing.T, fn func(t *testing.T, s db.Store, ctx context.Context, seed seedManualSnapshotFn)) {
+	t.Helper()
+	for _, adapter := range storeAdapters() {
+		t.Run(adapter.name, func(t *testing.T) {
+			s, ctx, seeder := adapter.newStore(t)
+			fn(t, s, ctx, seeder)
 		})
 	}
 }
@@ -69,7 +118,7 @@ func runSubtests[T any](t *testing.T, cases []T, nameFn func(T) string, fn func(
 func mustNewUUIDv7(t *testing.T) uuid.UUID {
 	t.Helper()
 	id, err := uuid.NewV7()
-	require.NoError(t, err, "生成 UUIDv7 失败")
+	require.NoError(t, err, "generate UUIDv7 failed")
 	return id
 }
 
@@ -78,7 +127,7 @@ func createTestDisks(t *testing.T, ctx context.Context, s db.Store, names ...str
 	created := make([]db.DiskRecord, 0, len(names))
 	for _, name := range names {
 		rec, err := s.CreateDisk(ctx, mustNewUUIDv7(t), name, testDefaultMaxBytes)
-		require.NoError(t, err, "创建磁盘 %s 失败", name)
+		require.NoError(t, err, "create disk %s failed", name)
 		created = append(created, rec)
 	}
 	return created
@@ -90,11 +139,11 @@ func requireOrderedDesc(t *testing.T, disks []db.DiskRecord) {
 		prev, curr := disks[i-1], disks[i]
 		if prev.CreatedAt.Equal(curr.CreatedAt) {
 			require.Positive(t, bytes.Compare(prev.DiskID[:], curr.DiskID[:]),
-				"同微秒时间戳应按 DiskID 降序: prev=%s curr=%s", prev.DiskID, curr.DiskID)
+				"same timestamp must sort by DiskID desc: prev=%s curr=%s", prev.DiskID, curr.DiskID)
 			continue
 		}
 		require.True(t, prev.CreatedAt.After(curr.CreatedAt),
-			"磁盘列表应按 CreatedAt 降序: prev=%s curr=%s", prev.CreatedAt, curr.CreatedAt)
+			"disks must sort by CreatedAt desc: prev=%s curr=%s", prev.CreatedAt, curr.CreatedAt)
 	}
 }
 
@@ -102,6 +151,14 @@ func collectDiskIDs(disks []db.DiskRecord) []uuid.UUID {
 	ids := make([]uuid.UUID, 0, len(disks))
 	for i := range disks {
 		ids = append(ids, disks[i].DiskID)
+	}
+	return ids
+}
+
+func collectSnapshotIDs(snaps []db.SnapshotRecord) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(snaps))
+	for i := range snaps {
+		ids = append(ids, snaps[i].SnapshotID)
 	}
 	return ids
 }
@@ -124,7 +181,7 @@ func runConcurrentSegmentReserves(t *testing.T, ctx context.Context, s db.Store,
 	wg.Wait()
 
 	for i, err := range errs {
-		require.NoError(t, err, "并发预留号段 worker=%d 失败", i)
+		require.NoError(t, err, "concurrent reserve segment worker=%d failed", i)
 	}
 	return results
 }
@@ -136,9 +193,9 @@ func requireDisjointSortedSegments(t *testing.T, segs []db.SegmentRange, wantCou
 		return int(a.First - b.First)
 	})
 	for i, seg := range ordered {
-		require.Equal(t, wantCount, seg.Last-seg.First+1, "号段长度 want=%d, got=%d", wantCount, seg.Last-seg.First+1)
+		require.Equal(t, wantCount, seg.Last-seg.First+1, "segment length want=%d, got=%d", wantCount, seg.Last-seg.First+1)
 		if i > 0 {
-			require.Greater(t, seg.First, ordered[i-1].Last, "并发预留号段发生重叠: prev=%+v curr=%+v", ordered[i-1], seg)
+			require.Greater(t, seg.First, ordered[i-1].Last, "concurrent segments overlapped: prev=%+v curr=%+v", ordered[i-1], seg)
 		}
 	}
 }
@@ -146,7 +203,7 @@ func requireDisjointSortedSegments(t *testing.T, segs []db.SegmentRange, wantCou
 func runConcurrentForkAndDelete(t *testing.T, ctx context.Context, s db.Store, sourceID uuid.UUID) (forkErr, delErr error) {
 	t.Helper()
 	childID := mustNewUUIDv7(t)
-	commitID := mustNewUUIDv7(t)
+	snapID := mustNewUUIDv7(t)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -156,14 +213,14 @@ func runConcurrentForkAndDelete(t *testing.T, ctx context.Context, s db.Store, s
 		_, forkErr = s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: sourceID,
 			ChildDiskID:  childID,
-			CommitID:     commitID,
+			SnapshotID:   snapID,
 			Name:         "race-child",
 		})
 	}()
 	go func() {
 		defer wg.Done()
 		<-start
-		_, delErr = s.DeleteDisk(ctx, sourceID)
+		_, delErr = s.DeleteDisk(ctx, sourceID, false)
 	}()
 	close(start)
 	wg.Wait()
@@ -178,10 +235,10 @@ func runConcurrentForkDeleteRounds(t *testing.T, ctx context.Context, s db.Store
 		require.NoError(t, err)
 
 		forkErr, delErr := runConcurrentForkAndDelete(t, ctx, s, rootID)
-		require.NoError(t, delErr, "DeleteDisk 在并发 ForkDisk 下不应发生死锁或意外失败 (round=%d)", i)
+		require.NoError(t, delErr, "DeleteDisk under concurrent ForkDisk failed (round=%d)", i)
 		require.Condition(t, func() bool {
 			return forkErr == nil || errors.Is(forkErr, db.ErrNotFound)
-		}, "并发 ForkDisk 只能成功或因源盘已删返回 ErrNotFound (round=%d), got=%v", i, forkErr)
+		}, "concurrent ForkDisk must succeed or return ErrNotFound (round=%d), got=%v", i, forkErr)
 	}
 }
 
@@ -191,47 +248,47 @@ func TestStoreContract_GivenValidDisk_WhenCreatedUpdatedRead_ThenPersistsEndStat
 
 		created, err := s.CreateDisk(ctx, diskID, "alpha", 8<<20)
 		require.NoError(t, err)
-		require.Equal(t, diskID, created.DiskID, "DiskID want=%s, got=%s", diskID, created.DiskID)
-		require.Equal(t, uuid.Nil, created.ParentDiskID, "根盘 ParentDiskID 应为 Nil UUID, got=%s", created.ParentDiskID)
-		require.Equal(t, diskID, created.LineageID, "根盘 LineageID want=%s, got=%s", diskID, created.LineageID)
-		require.Equal(t, uuid.Nil, created.BaseCommitID, "根盘初始 BaseCommitID 应为 Nil UUID, got=%s", created.BaseCommitID)
-		require.Equal(t, "alpha", created.Name, "Name want=alpha, got=%s", created.Name)
-		require.Equal(t, uint64(8<<20), created.MaxBytes, "MaxBytes want=%d, got=%d", uint64(8<<20), created.MaxBytes)
-		require.Equal(t, uint64(0), created.UsedBytes, "UsedBytes want=0, got=%d", created.UsedBytes)
-		require.Equal(t, uint64(1), created.UsedInodes, "UsedInodes want=1, got=%d", created.UsedInodes)
-		require.False(t, created.CreatedAt.IsZero(), "CreatedAt 不应为零值")
-		require.Equal(t, created.CreatedAt.Truncate(time.Microsecond), created.CreatedAt, "CreatedAt 应为微秒精度")
+		require.Equal(t, diskID, created.DiskID)
+		require.Equal(t, uuid.Nil, created.ParentDiskID)
+		require.Equal(t, diskID, created.LineageID)
+		require.Equal(t, uuid.Nil, created.BaseSnapshotID)
+		require.Equal(t, "alpha", created.Name)
+		require.Equal(t, uint64(8<<20), created.MaxBytes)
+		require.Equal(t, uint64(0), created.UsedBytes)
+		require.Equal(t, uint64(1), created.UsedInodes)
+		require.False(t, created.CreatedAt.IsZero())
+		require.Equal(t, created.CreatedAt.Truncate(time.Microsecond), created.CreatedAt)
 
 		got, err := s.GetDisk(ctx, diskID)
 		require.NoError(t, err)
-		require.Equal(t, created, got, "GetDisk 返回应与 CreateDisk 一致")
+		require.Equal(t, created, got)
 
 		renamedName := "alpha-renamed"
 		updated, err := s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: diskID, Name: &renamedName})
 		require.NoError(t, err)
-		require.Equal(t, "alpha-renamed", updated.Name, "更新后 Name want=alpha-renamed, got=%s", updated.Name)
-		require.Equal(t, uint64(8<<20), updated.MaxBytes, "仅改名不得修改 MaxBytes")
-		require.Equal(t, created.CreatedAt, updated.CreatedAt, "UpdateDisk 不得篡改 CreatedAt")
-		require.False(t, updated.UpdatedAt.Before(created.UpdatedAt), "UpdatedAt 不得早于创建时间")
+		require.Equal(t, "alpha-renamed", updated.Name)
+		require.Equal(t, uint64(8<<20), updated.MaxBytes)
+		require.Equal(t, created.CreatedAt, updated.CreatedAt)
+		require.False(t, updated.UpdatedAt.Before(created.UpdatedAt))
 
 		newQuota := uint64(32 << 20)
 		resized, err := s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: diskID, MaxBytes: &newQuota})
 		require.NoError(t, err)
-		require.Equal(t, "alpha-renamed", resized.Name, "仅改配额不得修改 Name")
-		require.Equal(t, newQuota, resized.MaxBytes, "更新后 MaxBytes want=%d, got=%d", newQuota, resized.MaxBytes)
+		require.Equal(t, "alpha-renamed", resized.Name)
+		require.Equal(t, newQuota, resized.MaxBytes)
 
 		require.NoError(t, s.UpdateDiskUsage(ctx, diskID, 4096, 5))
 		reloaded, err := s.GetDisk(ctx, diskID)
 		require.NoError(t, err)
 		require.Equal(t, uint64(4096), reloaded.UsedBytes)
 		require.Equal(t, uint64(5), reloaded.UsedInodes)
-		require.Equal(t, resized.UpdatedAt, reloaded.UpdatedAt, "UpdateDiskUsage 不得改动 UpdatedAt")
+		require.Equal(t, resized.UpdatedAt, reloaded.UpdatedAt)
 
 		_, dupErr := s.CreateDisk(ctx, diskID, "alpha-dup", 8<<20)
-		require.Error(t, dupErr, "重复 DiskID 创建必须失败")
+		require.Error(t, dupErr)
 		afterDup, err := s.GetDisk(ctx, diskID)
 		require.NoError(t, err)
-		require.Equal(t, "alpha-renamed", afterDup.Name, "失败的重复创建不得覆盖已有记录")
+		require.Equal(t, "alpha-renamed", afterDup.Name)
 	})
 }
 
@@ -250,6 +307,8 @@ func TestStoreContract_GivenInvalidInputsOrMissingTargets_WhenCalled_ThenFailsFa
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.GetDisk(ctx, uuid.Nil)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.ListLineageDisks(ctx, uuid.Nil)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: uuid.Nil, Name: &badName})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: validID})
@@ -266,11 +325,13 @@ func TestStoreContract_GivenInvalidInputsOrMissingTargets_WhenCalled_ThenFailsFa
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		err = s.UpdateDiskUsage(ctx, validID, 0, overflowQuota)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
-		_, err = s.DeleteDisk(ctx, uuid.Nil)
+		_, err = s.DeleteDisk(ctx, uuid.Nil, false)
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+		_, err = s.DeleteDisk(ctx, uuid.Nil, true)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
-		_, err = s.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: validID, ChildDiskID: validID, CommitID: mustNewUUIDv7(t), Name: "self"})
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: validID, ChildDiskID: validID, SnapshotID: mustNewUUIDv7(t), Name: "self"})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.ReserveSegment(ctx, db.SegmentKindInode, uuid.Nil, 2, 10)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
@@ -289,9 +350,11 @@ func TestStoreContract_GivenInvalidInputsOrMissingTargets_WhenCalled_ThenFailsFa
 		require.ErrorIs(t, err, db.ErrNotFound)
 		err = s.UpdateDiskUsage(ctx, missingID, 128, 2)
 		require.ErrorIs(t, err, db.ErrNotFound)
-		_, err = s.DeleteDisk(ctx, missingID)
+		_, err = s.DeleteDisk(ctx, missingID, false)
 		require.ErrorIs(t, err, db.ErrNotFound)
-		_, err = s.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: missingID, ChildDiskID: mustNewUUIDv7(t), CommitID: mustNewUUIDv7(t), Name: "child"})
+		_, err = s.DeleteDisk(ctx, missingID, true)
+		require.ErrorIs(t, err, db.ErrNotFound)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: missingID, ChildDiskID: mustNewUUIDv7(t), SnapshotID: mustNewUUIDv7(t), Name: "child"})
 		require.ErrorIs(t, err, db.ErrNotFound)
 		_, err = s.ReserveSegment(ctx, db.SegmentKindInode, missingID, 2, 10)
 		require.ErrorIs(t, err, db.ErrNotFound)
@@ -317,7 +380,7 @@ func TestStoreContract_GivenMalformedPageTokens_WhenListDisksCalled_ThenReturnsE
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		runSubtests(t, badTokens, func(tc malformedTokenCase) string { return tc.name }, func(t *testing.T, tc malformedTokenCase) {
 			_, err := s.ListDisks(ctx, db.ListDisksQuery{PageSize: 10, PageToken: tc.token})
-			require.ErrorIs(t, err, db.ErrInvalidArgument, "畸形分页令牌 %s 应返回 ErrInvalidArgument", tc.name)
+			require.ErrorIs(t, err, db.ErrInvalidArgument, "malformed token %s must fail", tc.name)
 		})
 	})
 }
@@ -326,60 +389,60 @@ func TestStoreContract_GivenFiveDisks_WhenListedWithCursorPagination_ThenReturns
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		emptyPage, err := s.ListDisks(ctx, db.ListDisksQuery{PageSize: 0})
 		require.NoError(t, err)
-		require.Empty(t, emptyPage.Disks, "空库查询磁盘列表应为空")
-		require.Empty(t, emptyPage.NextPageToken, "空库 NextPageToken 应为空")
+		require.Empty(t, emptyPage.Disks)
+		require.Empty(t, emptyPage.NextPageToken)
 
 		created := createTestDisks(t, ctx, s, "d0", "d1", "d2", "d3", "d4")
 
 		fullPage, err := s.ListDisks(ctx, db.ListDisksQuery{PageSize: 0})
 		require.NoError(t, err)
-		require.Len(t, fullPage.Disks, 5, "PageSize=0 应回退默认 50 并返回全部 5 块盘")
+		require.Len(t, fullPage.Disks, 5)
 		require.Empty(t, fullPage.NextPageToken)
 		requireOrderedDesc(t, fullPage.Disks)
 
 		page1, err := s.ListDisks(ctx, db.ListDisksQuery{PageSize: 2})
 		require.NoError(t, err)
-		require.Len(t, page1.Disks, 2, "第 1 页条数 want=2, got=%d", len(page1.Disks))
-		require.NotEmpty(t, page1.NextPageToken, "第 1 页应返回下一页游标")
+		require.Len(t, page1.Disks, 2)
+		require.NotEmpty(t, page1.NextPageToken)
 
 		page2, err := s.ListDisks(ctx, db.ListDisksQuery{PageSize: 2, PageToken: page1.NextPageToken})
 		require.NoError(t, err)
-		require.Len(t, page2.Disks, 2, "第 2 页条数 want=2, got=%d", len(page2.Disks))
-		require.NotEmpty(t, page2.NextPageToken, "第 2 页应返回下一页游标")
+		require.Len(t, page2.Disks, 2)
+		require.NotEmpty(t, page2.NextPageToken)
 
 		page3, err := s.ListDisks(ctx, db.ListDisksQuery{PageSize: 2, PageToken: page2.NextPageToken})
 		require.NoError(t, err)
-		require.Len(t, page3.Disks, 1, "第 3 页条数 want=1, got=%d", len(page3.Disks))
-		require.Empty(t, page3.NextPageToken, "末页 NextPageToken 应为空")
+		require.Len(t, page3.Disks, 1)
+		require.Empty(t, page3.NextPageToken)
 
 		allPaged := slices.Concat(page1.Disks, page2.Disks, page3.Disks)
 		requireOrderedDesc(t, allPaged)
-		require.ElementsMatch(t, collectDiskIDs(created), collectDiskIDs(allPaged), "分页汇总盘集合应与创建集合完全一致")
+		require.ElementsMatch(t, collectDiskIDs(created), collectDiskIDs(allPaged))
 	})
 }
 
-func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaimsCommitsAndLineage(t *testing.T) {
+func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaimsSnapshotsAndLineage(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		rootID := mustNewUUIDv7(t)
 		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 		require.NoError(t, err)
 
-		c1ID, cm1ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		c1ID, s1ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		c1, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  c1ID,
-			CommitID:     cm1ID,
+			SnapshotID:   s1ID,
 			Name:         "child-1",
 		})
 		require.NoError(t, err)
-		require.Equal(t, rootID, c1.ParentDiskID, "子盘 ParentDiskID want=%s, got=%s", rootID, c1.ParentDiskID)
-		require.Equal(t, root.LineageID, c1.LineageID, "子盘必须继承源盘 LineageID")
+		require.Equal(t, rootID, c1.ParentDiskID)
+		require.Equal(t, root.LineageID, c1.LineageID)
 
-		c2ID, cm2ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		c2ID, s2ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		c2, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  c2ID,
-			CommitID:     cm2ID,
+			SnapshotID:   s2ID,
 			Name:         "child-2",
 		})
 		require.NoError(t, err)
@@ -388,50 +451,309 @@ func TestStoreContract_GivenForkedLineage_WhenDeletedInTriStateOrder_ThenReclaim
 		_, dupChildErr := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  c1ID,
-			CommitID:     mustNewUUIDv7(t),
+			SnapshotID:   mustNewUUIDv7(t),
 			Name:         "dup-child",
 		})
-		require.Error(t, dupChildErr, "重复 ChildDiskID ForkDisk 必须失败")
-		_, dupCommitErr := s.ForkDisk(ctx, db.ForkDiskInput{
+		require.Error(t, dupChildErr)
+		_, dupSnapErr := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  mustNewUUIDv7(t),
-			CommitID:     cm1ID,
-			Name:         "dup-commit",
+			SnapshotID:   s1ID,
+			Name:         "dup-snap",
 		})
-		require.Error(t, dupCommitErr, "重复 CommitID ForkDisk 必须失败")
+		require.Error(t, dupSnapErr)
 
-		reclaimed, err := s.DeleteDisk(ctx, rootID)
+		delRoot, err := s.DeleteDisk(ctx, rootID, false)
 		require.NoError(t, err)
-		require.Empty(t, reclaimed, "|D|==2 时不得提前回收任何切面")
+		require.Equal(t, []uuid.UUID{rootID}, delRoot.DeletedDiskIDs)
+		require.Empty(t, delRoot.ReclaimedSnapshotIDs, "all snapshots remain reachable when remaining==2")
 		_, err = s.GetDisk(ctx, rootID)
 		require.ErrorIs(t, err, db.ErrNotFound)
 
-		reclaimed, err = s.DeleteDisk(ctx, c2ID)
+		delC2, err := s.DeleteDisk(ctx, c2ID, false)
 		require.NoError(t, err)
-		require.ElementsMatch(t, []uuid.UUID{cm1ID, cm2ID}, reclaimed, "|D|==1 时应返回全部待清理切面")
+		require.Equal(t, []uuid.UUID{c2ID}, delC2.DeletedDiskIDs)
+		require.ElementsMatch(t, []uuid.UUID{s1ID, s2ID}, delC2.ReclaimedSnapshotIDs)
 
-		c3ID, cm3ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		c3ID, s3ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		c3, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: c1ID,
 			ChildDiskID:  c3ID,
-			CommitID:     cm3ID,
+			SnapshotID:   s3ID,
 			Name:         "child-3",
 		})
-		require.NoError(t, err, "幸存盘清空基准切面后再次 ForkDisk 必须成功")
+		require.NoError(t, err)
 		require.Equal(t, c1ID, c3.ParentDiskID)
 		require.Equal(t, root.LineageID, c3.LineageID)
 
-		reclaimed, err = s.DeleteDisk(ctx, c3ID)
+		delC3, err := s.DeleteDisk(ctx, c3ID, false)
 		require.NoError(t, err)
-		require.ElementsMatch(t, []uuid.UUID{cm3ID}, reclaimed)
+		require.ElementsMatch(t, []uuid.UUID{s3ID}, delC3.ReclaimedSnapshotIDs)
 
-		reclaimed, err = s.DeleteDisk(ctx, c1ID)
+		delC1, err := s.DeleteDisk(ctx, c1ID, false)
 		require.NoError(t, err)
-		require.Empty(t, reclaimed)
+		require.Empty(t, delC1.ReclaimedSnapshotIDs)
 		_, err = s.GetDisk(ctx, c1ID)
 		require.ErrorIs(t, err, db.ErrNotFound)
 		_, err = s.ReserveSegment(ctx, db.SegmentKindInode, root.LineageID, 2, 10)
-		require.ErrorIs(t, err, db.ErrNotFound, "|D|==0 清理血缘后 ReserveSegment 必须返回 ErrNotFound")
+		require.ErrorIs(t, err, db.ErrNotFound)
+	})
+}
+
+func TestStoreContract_GivenLineageTree_WhenDeleteDiskRecursiveAndIndependent_ThenReclaimsUnreachableAndDeletesSubtree(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
+		require.NoError(t, err)
+
+		bID, sB := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  bID,
+			SnapshotID:   sB,
+			Name:         "branch-b",
+		})
+		require.NoError(t, err)
+
+		cID, sC := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  cID,
+			SnapshotID:   sC,
+			Name:         "branch-c",
+		})
+		require.NoError(t, err)
+
+		b1ID, sB1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: bID,
+			ChildDiskID:  b1ID,
+			SnapshotID:   sB1,
+			Name:         "branch-b1",
+		})
+		require.NoError(t, err)
+
+		b2ID, sB2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: b1ID,
+			ChildDiskID:  b2ID,
+			SnapshotID:   sB2,
+			Name:         "branch-b2",
+		})
+		require.NoError(t, err)
+
+		listed, err := s.ListLineageDisks(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{rootID, bID, cID, b1ID, b2ID}, collectDiskIDs(listed))
+
+		recRes, err := s.DeleteDisk(ctx, bID, true)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{bID, b1ID, b2ID}, recRes.DeletedDiskIDs)
+		require.ElementsMatch(t, []uuid.UUID{sB1, sB2}, recRes.ReclaimedSnapshotIDs,
+			"remaining==2 (root,c) must reclaim unreachable fork snapshots sB1,sB2 while preserving reachable sB,sC")
+
+		survivingDisks, err := s.ListLineageDisks(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{rootID, cID}, collectDiskIDs(survivingDisks))
+
+		survivingSnaps, err := s.ListLineageSnapshots(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{sB, sC}, collectSnapshotIDs(survivingSnaps))
+
+		delRoot, err := s.DeleteDisk(ctx, rootID, false)
+		require.NoError(t, err)
+		require.Equal(t, []uuid.UUID{rootID}, delRoot.DeletedDiskIDs)
+		require.ElementsMatch(t, []uuid.UUID{sB, sC}, delRoot.ReclaimedSnapshotIDs)
+
+		gotC, err := s.GetDisk(ctx, cID)
+		require.NoError(t, err)
+		require.Equal(t, uuid.Nil, gotC.BaseSnapshotID)
+	})
+}
+
+func TestStoreContract_GivenManualSnapshotsAcrossAllTiers_WhenDeleteDiskCalled_ThenStrictlyPreservesManualAndGuardsLineage(t *testing.T) {
+	runStoreAdaptersWithSeeder(t, func(t *testing.T, s db.Store, ctx context.Context, seed seedManualSnapshotFn) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
+		require.NoError(t, err)
+
+		d1ID, sFork1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  d1ID,
+			SnapshotID:   sFork1,
+			Name:         "d1",
+		})
+		require.NoError(t, err)
+
+		d2ID, sFork2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: d1ID,
+			ChildDiskID:  d2ID,
+			SnapshotID:   sFork2,
+			Name:         "d2",
+		})
+		require.NoError(t, err)
+
+		d3ID, sFork3 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  d3ID,
+			SnapshotID:   sFork3,
+			Name:         "d3",
+		})
+		require.NoError(t, err)
+
+		sManualOnDeadBranch := mustNewUUIDv7(t)
+		seed(t, ctx, db.SnapshotRecord{
+			LineageID:        root.LineageID,
+			SnapshotID:       sManualOnDeadBranch,
+			SourceDiskID:     d2ID,
+			ParentSnapshotID: sFork2,
+			Kind:             db.SnapshotKindManual,
+		}, uuid.Nil)
+
+		sManualOnRoot := mustNewUUIDv7(t)
+		seed(t, ctx, db.SnapshotRecord{
+			LineageID:        root.LineageID,
+			SnapshotID:       sManualOnRoot,
+			SourceDiskID:     rootID,
+			ParentSnapshotID: sFork3,
+			Kind:             db.SnapshotKindManual,
+		}, rootID)
+
+		resTier2, err := s.DeleteDisk(ctx, d1ID, true)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{d1ID, d2ID}, resTier2.DeletedDiskIDs)
+		require.ElementsMatch(t, []uuid.UUID{sFork2}, resTier2.ReclaimedSnapshotIDs,
+			"tier remaining>=2 must reclaim unreachable sFork2 while preserving sManualOnDeadBranch")
+
+		snapsAfterTier2, err := s.ListLineageSnapshots(ctx, root.LineageID)
+		require.NoError(t, err)
+		snapByID := make(map[uuid.UUID]db.SnapshotRecord, len(snapsAfterTier2))
+		for _, snap := range snapsAfterTier2 {
+			snapByID[snap.SnapshotID] = snap
+		}
+		require.Contains(t, snapByID, sManualOnDeadBranch)
+		require.Equal(t, uuid.Nil, snapByID[sManualOnDeadBranch].ParentSnapshotID, "surviving manual snapshot FK to deleted fork must be cleared")
+		require.Contains(t, snapByID, sManualOnRoot)
+		require.Contains(t, snapByID, sFork1)
+		require.Contains(t, snapByID, sFork3)
+
+		resTier1, err := s.DeleteDisk(ctx, d3ID, false)
+		require.NoError(t, err)
+		require.Equal(t, []uuid.UUID{d3ID}, resTier1.DeletedDiskIDs)
+		require.ElementsMatch(t, []uuid.UUID{sFork1, sFork3}, resTier1.ReclaimedSnapshotIDs,
+			"tier remaining==1 must reclaim all fork/merge snapshots and preserve all manual snapshots")
+
+		gotRoot, err := s.GetDisk(ctx, rootID)
+		require.NoError(t, err)
+		require.Equal(t, sManualOnRoot, gotRoot.BaseSnapshotID,
+			"sole surviving disk whose base_snapshot_id is manual must keep it intact")
+
+		snapsAfterTier1, err := s.ListLineageSnapshots(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{sManualOnDeadBranch, sManualOnRoot}, collectSnapshotIDs(snapsAfterTier1))
+		for _, snap := range snapsAfterTier1 {
+			require.Equal(t, db.SnapshotKindManual, snap.Kind)
+			require.Equal(t, uuid.Nil, snap.ParentSnapshotID)
+			require.Equal(t, uuid.Nil, snap.MergeParentSnapshotID)
+		}
+
+		resTier0, err := s.DeleteDisk(ctx, rootID, false)
+		require.NoError(t, err)
+		require.Equal(t, []uuid.UUID{rootID}, resTier0.DeletedDiskIDs)
+		require.Empty(t, resTier0.ReclaimedSnapshotIDs)
+
+		snapsAfterTier0, err := s.ListLineageSnapshots(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uuid.UUID{sManualOnDeadBranch, sManualOnRoot}, collectSnapshotIDs(snapsAfterTier0),
+			"tier remaining==0 must preserve manual snapshots and not cascade delete lineage")
+
+		_, err = s.ReserveSegment(ctx, db.SegmentKindInode, root.LineageID, 2, 1)
+		require.NoError(t, err, "lineage row must remain alive when remaining_snapshots > 0")
+	})
+}
+
+func TestStoreContract_GivenFastForwardMerge_WhenExecuted_ThenPersistsSingleOrZeroMergeSnapshotsAndNeverAutoDeletes(t *testing.T) {
+	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
+		rootID := mustNewUUIDv7(t)
+		root, err := s.CreateDisk(ctx, rootID, "main", testDefaultMaxBytes)
+		require.NoError(t, err)
+
+		branchID, sFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: rootID,
+			ChildDiskID:  branchID,
+			SnapshotID:   sFork,
+			Name:         "feat",
+		})
+		require.NoError(t, err)
+
+		sFF1 := mustNewUUIDv7(t)
+		updated1, err := s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 branchID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: sFork,
+			ExpectedTargetBaseSnapshotID: sFork,
+			NewSourceSnapshotID:          sFF1,
+			NewMergeSnapshotID:           sFF1,
+			SkipSourceSnapshot:           false,
+			FastForward:                  true,
+			TargetMaxBytes:               32 << 20,
+			TargetUsedBytes:              4096,
+			TargetUsedInodes:             3,
+		})
+		require.NoError(t, err)
+		require.Equal(t, sFF1, updated1.BaseSnapshotID)
+		require.Equal(t, uint64(32<<20), updated1.MaxBytes)
+		require.Equal(t, uint64(4096), updated1.UsedBytes)
+		require.Equal(t, uint64(3), updated1.UsedInodes)
+
+		gotBranch, err := s.GetDisk(ctx, branchID)
+		require.NoError(t, err)
+		require.Equal(t, sFF1, gotBranch.BaseSnapshotID)
+
+		snaps1, err := s.ListLineageSnapshots(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.Len(t, snaps1, 2)
+		require.Equal(t, db.SnapshotKindFork, snaps1[0].Kind)
+		require.Equal(t, sFF1, snaps1[1].SnapshotID)
+		require.Equal(t, db.SnapshotKindMerge, snaps1[1].Kind)
+		require.Equal(t, sFork, snaps1[1].ParentSnapshotID)
+		require.Equal(t, uuid.Nil, snaps1[1].MergeParentSnapshotID)
+		require.Equal(t, branchID, snaps1[1].SourceDiskID)
+
+		branch2ID, sFork2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
+			SourceDiskID: branchID,
+			ChildDiskID:  branch2ID,
+			SnapshotID:   sFork2,
+			Name:         "feat-sub",
+		})
+		require.NoError(t, err)
+
+		updated2, err := s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 branchID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: sFork2,
+			ExpectedTargetBaseSnapshotID: sFF1,
+			NewSourceSnapshotID:          uuid.Nil,
+			NewMergeSnapshotID:           sFork2,
+			SkipSourceSnapshot:           true,
+			FastForward:                  true,
+			TargetMaxBytes:               32 << 20,
+			TargetUsedBytes:              8192,
+			TargetUsedInodes:             4,
+		})
+		require.NoError(t, err)
+		require.Equal(t, sFork2, updated2.BaseSnapshotID)
+
+		snaps2, err := s.ListLineageSnapshots(ctx, root.LineageID)
+		require.NoError(t, err)
+		require.Len(t, snaps2, 3, "fast-forward reuse must create 0 new snapshots and never auto-delete prior snapshots")
 	})
 }
 
@@ -447,15 +769,15 @@ func TestStoreContract_GivenSharedAndIsolatedLineages_WhenReserveSegmentCalled_T
 
 		r1, err := s.ReserveSegment(ctx, db.SegmentKindInode, root.LineageID, 1, 100)
 		require.NoError(t, err)
-		require.Equal(t, db.SegmentRange{First: 2, Last: 101}, r1, "首次 Inode 号段应从 2 起分配")
+		require.Equal(t, db.SegmentRange{First: 2, Last: 101}, r1)
 
 		r2, err := s.ReserveSegment(ctx, db.SegmentKindInode, root.LineageID, 500, 50)
 		require.NoError(t, err)
-		require.Equal(t, db.SegmentRange{First: 500, Last: 549}, r2, "minNext 超过水位线时应抬升起始号")
+		require.Equal(t, db.SegmentRange{First: 500, Last: 549}, r2)
 
 		p1, err := s.ReserveSegment(ctx, db.SegmentKindPack, root.LineageID, 0, 64)
 		require.NoError(t, err)
-		require.Equal(t, db.SegmentRange{First: 1, Last: 64}, p1, "首次 Pack 号段应从 1 起分配")
+		require.Equal(t, db.SegmentRange{First: 1, Last: 64}, p1)
 
 		p2, err := s.ReserveSegment(ctx, db.SegmentKindPack, root.LineageID, 1, 64)
 		require.NoError(t, err)
@@ -464,18 +786,18 @@ func TestStoreContract_GivenSharedAndIsolatedLineages_WhenReserveSegmentCalled_T
 		child, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  mustNewUUIDv7(t),
-			CommitID:     mustNewUUIDv7(t),
+			SnapshotID:   mustNewUUIDv7(t),
 			Name:         "seg-child",
 		})
 		require.NoError(t, err)
 
 		r3, err := s.ReserveSegment(ctx, db.SegmentKindInode, child.LineageID, 2, 10)
 		require.NoError(t, err)
-		require.Equal(t, db.SegmentRange{First: 550, Last: 559}, r3, "子盘应与源盘共享同一血缘号段单调递增")
+		require.Equal(t, db.SegmentRange{First: 550, Last: 559}, r3)
 
 		otherIno, err := s.ReserveSegment(ctx, db.SegmentKindInode, other.LineageID, 2, 5)
 		require.NoError(t, err)
-		require.Equal(t, db.SegmentRange{First: 2, Last: 6}, otherIno, "独立血缘号段应彼此隔离")
+		require.Equal(t, db.SegmentRange{First: 2, Last: 6}, otherIno)
 
 		concurrentSegs := runConcurrentSegmentReserves(t, ctx, s, db.SegmentKindInode, other.LineageID, 8, 10)
 		requireDisjointSortedSegments(t, concurrentSegs, 10)
@@ -488,60 +810,60 @@ func TestStoreContract_GivenConcurrentForkDelete_WhenExecuted_ThenConsistentWith
 	})
 }
 
-func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBaseCommitIDAndLineageCommits(t *testing.T) {
+func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBaseSnapshotIDAndLineageSnapshots(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
-		_, err := s.ListLineageCommits(ctx, uuid.Nil)
+		_, err := s.ListLineageSnapshots(ctx, uuid.Nil)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 
 		rootID := mustNewUUIDv7(t)
 		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 		require.NoError(t, err)
-		require.Equal(t, uuid.Nil, root.BaseCommitID)
+		require.Equal(t, uuid.Nil, root.BaseSnapshotID)
 
-		emptyCommits, err := s.ListLineageCommits(ctx, root.LineageID)
+		emptySnaps, err := s.ListLineageSnapshots(ctx, root.LineageID)
 		require.NoError(t, err)
-		require.Empty(t, emptyCommits, "未分叉血缘 Commit 列表应为空")
+		require.Empty(t, emptySnaps)
 
 		otherID := mustNewUUIDv7(t)
 		other, err := s.CreateDisk(ctx, otherID, "other", testDefaultMaxBytes)
 		require.NoError(t, err)
-		otherChildID, otherCmID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		otherChildID, otherSnapID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: otherID,
 			ChildDiskID:  otherChildID,
-			CommitID:     otherCmID,
+			SnapshotID:   otherSnapID,
 			Name:         "other-child",
 		})
 		require.NoError(t, err)
 
-		c1ID, cm1ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		c1ID, s1ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		c1, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  c1ID,
-			CommitID:     cm1ID,
+			SnapshotID:   s1ID,
 			Name:         "child-1",
 		})
 		require.NoError(t, err)
-		require.Equal(t, cm1ID, c1.BaseCommitID, "ForkDisk 返回子盘应填充 BaseCommitID")
+		require.Equal(t, s1ID, c1.BaseSnapshotID)
 
 		gotRoot, err := s.GetDisk(ctx, rootID)
 		require.NoError(t, err)
-		require.Equal(t, cm1ID, gotRoot.BaseCommitID, "GetDisk 源盘应填充更新后的 BaseCommitID")
+		require.Equal(t, s1ID, gotRoot.BaseSnapshotID)
 
 		gotC1, err := s.GetDisk(ctx, c1ID)
 		require.NoError(t, err)
-		require.Equal(t, cm1ID, gotC1.BaseCommitID, "GetDisk 子盘应填充 BaseCommitID")
+		require.Equal(t, s1ID, gotC1.BaseSnapshotID)
 
 		child1Renamed := "child-1-renamed"
 		renamedC1, err := s.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: c1ID, Name: &child1Renamed})
 		require.NoError(t, err)
-		require.Equal(t, cm1ID, renamedC1.BaseCommitID, "UpdateDisk 应保留并填充 BaseCommitID")
+		require.Equal(t, s1ID, renamedC1.BaseSnapshotID)
 
-		c2ID, cm2ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		c2ID, s2ID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  c2ID,
-			CommitID:     cm2ID,
+			SnapshotID:   s2ID,
 			Name:         "child-2",
 		})
 		require.NoError(t, err)
@@ -552,131 +874,137 @@ func TestStoreContract_GivenForkedDisks_WhenInspectedAndListed_ThenPopulatesBase
 		for i := range page.Disks {
 			byID[page.Disks[i].DiskID] = page.Disks[i]
 		}
-		require.Equal(t, cm2ID, byID[rootID].BaseCommitID, "ListDisks 应填充源盘最新 BaseCommitID")
-		require.Equal(t, cm1ID, byID[c1ID].BaseCommitID, "ListDisks 应填充 child-1 BaseCommitID")
-		require.Equal(t, cm2ID, byID[c2ID].BaseCommitID, "ListDisks 应填充 child-2 BaseCommitID")
+		require.Equal(t, s2ID, byID[rootID].BaseSnapshotID)
+		require.Equal(t, s1ID, byID[c1ID].BaseSnapshotID)
+		require.Equal(t, s2ID, byID[c2ID].BaseSnapshotID)
 
-		commits, err := s.ListLineageCommits(ctx, root.LineageID)
+		snaps, err := s.ListLineageSnapshots(ctx, root.LineageID)
 		require.NoError(t, err)
-		require.Len(t, commits, 2, "血缘 Commit 数量 want=2, got=%d", len(commits))
-		require.Equal(t, cm1ID, commits[0].CommitID)
-		require.Equal(t, root.LineageID, commits[0].LineageID)
-		require.Equal(t, uuid.Nil, commits[0].ParentCommitID)
-		require.Equal(t, uuid.Nil, commits[0].MergeParentCommitID)
-		require.Equal(t, rootID, commits[0].BaseDiskID)
-		require.False(t, commits[0].CreatedAt.IsZero())
+		require.Len(t, snaps, 2)
+		require.Equal(t, s1ID, snaps[0].SnapshotID)
+		require.Equal(t, root.LineageID, snaps[0].LineageID)
+		require.Equal(t, uuid.Nil, snaps[0].ParentSnapshotID)
+		require.Equal(t, uuid.Nil, snaps[0].MergeParentSnapshotID)
+		require.Equal(t, rootID, snaps[0].SourceDiskID)
+		require.Equal(t, db.SnapshotKindFork, snaps[0].Kind)
+		require.False(t, snaps[0].CreatedAt.IsZero())
 
-		require.Equal(t, cm2ID, commits[1].CommitID)
-		require.Equal(t, cm1ID, commits[1].ParentCommitID)
-		require.Equal(t, uuid.Nil, commits[1].MergeParentCommitID)
-		require.Equal(t, rootID, commits[1].BaseDiskID)
+		require.Equal(t, s2ID, snaps[1].SnapshotID)
+		require.Equal(t, s1ID, snaps[1].ParentSnapshotID)
+		require.Equal(t, uuid.Nil, snaps[1].MergeParentSnapshotID)
+		require.Equal(t, rootID, snaps[1].SourceDiskID)
+		require.Equal(t, db.SnapshotKindFork, snaps[1].Kind)
 
-		otherCommits, err := s.ListLineageCommits(ctx, other.LineageID)
+		otherSnaps, err := s.ListLineageSnapshots(ctx, other.LineageID)
 		require.NoError(t, err)
-		require.Len(t, otherCommits, 1, "其他血缘不应混入当前血缘 Commit")
-		require.Equal(t, otherCmID, otherCommits[0].CommitID)
+		require.Len(t, otherSnaps, 1)
+		require.Equal(t, otherSnapID, otherSnaps[0].SnapshotID)
 	})
 }
 
-func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGAndAdvancesBaseCommits(t *testing.T) {
+func TestStoreContract_GivenSameLineageDisks_WhenMergeDiskCalled_ThenUpdatesDAGAndAdvancesBaseSnapshots(t *testing.T) {
 	runStoreAdapters(t, func(t *testing.T, s db.Store, ctx context.Context) {
 		rootID := mustNewUUIDv7(t)
 		root, err := s.CreateDisk(ctx, rootID, "main", testDefaultMaxBytes)
 		require.NoError(t, err)
 
-		branchID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		branchID, snapFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  branchID,
-			CommitID:     cmFork,
+			SnapshotID:   snapFork,
 			Name:         "feature",
 		})
 		require.NoError(t, err)
 
-		cmSrc1, cmMerge1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		snapSrc1, snapMerge1 := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		merged1, err := s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               branchID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          cmSrc1,
-			NewMergeCommitID:           cmMerge1,
-			SkipSourceCommit:           false,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 branchID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          snapSrc1,
+			NewMergeSnapshotID:           snapMerge1,
+			SkipSourceSnapshot:           false,
 		})
 		require.NoError(t, err)
 		require.Equal(t, rootID, merged1.DiskID)
-		require.Equal(t, cmMerge1, merged1.BaseCommitID)
+		require.Equal(t, snapMerge1, merged1.BaseSnapshotID)
 		require.False(t, merged1.UpdatedAt.Before(root.UpdatedAt))
 
 		gotBranch, err := s.GetDisk(ctx, branchID)
 		require.NoError(t, err)
-		require.Equal(t, cmSrc1, gotBranch.BaseCommitID, "常规合并后源盘 BaseCommitID 应推进为 NewSourceCommitID")
+		require.Equal(t, snapSrc1, gotBranch.BaseSnapshotID)
 
 		gotRoot, err := s.GetDisk(ctx, rootID)
 		require.NoError(t, err)
-		require.Equal(t, cmMerge1, gotRoot.BaseCommitID, "常规合并后目标盘 BaseCommitID 应推进为 NewMergeCommitID")
+		require.Equal(t, snapMerge1, gotRoot.BaseSnapshotID)
 
-		commits, err := s.ListLineageCommits(ctx, root.LineageID)
+		snaps, err := s.ListLineageSnapshots(ctx, root.LineageID)
 		require.NoError(t, err)
-		require.Len(t, commits, 3)
-		require.Equal(t, cmFork, commits[0].CommitID)
+		require.Len(t, snaps, 3)
+		require.Equal(t, snapFork, snaps[0].SnapshotID)
+		require.Equal(t, db.SnapshotKindFork, snaps[0].Kind)
 
-		require.Equal(t, cmSrc1, commits[1].CommitID)
-		require.Equal(t, cmFork, commits[1].ParentCommitID)
-		require.Equal(t, uuid.Nil, commits[1].MergeParentCommitID)
-		require.Equal(t, branchID, commits[1].BaseDiskID)
+		require.Equal(t, snapSrc1, snaps[1].SnapshotID)
+		require.Equal(t, snapFork, snaps[1].ParentSnapshotID)
+		require.Equal(t, uuid.Nil, snaps[1].MergeParentSnapshotID)
+		require.Equal(t, branchID, snaps[1].SourceDiskID)
+		require.Equal(t, db.SnapshotKindMerge, snaps[1].Kind)
 
-		require.Equal(t, cmMerge1, commits[2].CommitID)
-		require.Equal(t, cmFork, commits[2].ParentCommitID)
-		require.Equal(t, cmSrc1, commits[2].MergeParentCommitID)
-		require.Equal(t, rootID, commits[2].BaseDiskID)
+		require.Equal(t, snapMerge1, snaps[2].SnapshotID)
+		require.Equal(t, snapFork, snaps[2].ParentSnapshotID)
+		require.Equal(t, snapSrc1, snaps[2].MergeParentSnapshotID)
+		require.Equal(t, rootID, snaps[2].SourceDiskID)
+		require.Equal(t, db.SnapshotKindMerge, snaps[2].Kind)
 
-		cmMerge2 := mustNewUUIDv7(t)
+		snapMerge2 := mustNewUUIDv7(t)
 		merged2, err := s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               branchID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmSrc1,
-			ExpectedTargetBaseCommitID: cmMerge1,
-			NewMergeCommitID:           cmMerge2,
-			SkipSourceCommit:           true,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 branchID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapSrc1,
+			ExpectedTargetBaseSnapshotID: snapMerge1,
+			NewMergeSnapshotID:           snapMerge2,
+			SkipSourceSnapshot:           true,
 		})
 		require.NoError(t, err)
-		require.Equal(t, cmMerge2, merged2.BaseCommitID)
+		require.Equal(t, snapMerge2, merged2.BaseSnapshotID)
 
 		gotBranchAfterSkip, err := s.GetDisk(ctx, branchID)
 		require.NoError(t, err)
-		require.Equal(t, cmSrc1, gotBranchAfterSkip.BaseCommitID, "SkipSourceCommit=true 不得推进源盘 BaseCommitID")
+		require.Equal(t, snapSrc1, gotBranchAfterSkip.BaseSnapshotID)
 
-		commitsAfterSkip, err := s.ListLineageCommits(ctx, root.LineageID)
+		snapsAfterSkip, err := s.ListLineageSnapshots(ctx, root.LineageID)
 		require.NoError(t, err)
-		require.Len(t, commitsAfterSkip, 4)
-		lastCommit := commitsAfterSkip[3]
-		require.Equal(t, cmMerge2, lastCommit.CommitID)
-		require.Equal(t, cmMerge1, lastCommit.ParentCommitID)
-		require.Equal(t, cmSrc1, lastCommit.MergeParentCommitID)
-		require.Equal(t, rootID, lastCommit.BaseDiskID)
+		require.Len(t, snapsAfterSkip, 4)
+		lastSnap := snapsAfterSkip[3]
+		require.Equal(t, snapMerge2, lastSnap.SnapshotID)
+		require.Equal(t, snapMerge1, lastSnap.ParentSnapshotID)
+		require.Equal(t, snapSrc1, lastSnap.MergeParentSnapshotID)
+		require.Equal(t, rootID, lastSnap.SourceDiskID)
+		require.Equal(t, db.SnapshotKindMerge, lastSnap.Kind)
 
-		cmMerge3 := uuid.MustParse("01900000-0000-7000-8000-000000000001")
-		cmSrc3 := uuid.MustParse("01900000-0000-7000-8000-000000000002")
+		snapMerge3 := uuid.MustParse("01900000-0000-7000-8000-000000000001")
+		snapSrc3 := uuid.MustParse("01900000-0000-7000-8000-000000000002")
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               branchID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmSrc1,
-			ExpectedTargetBaseCommitID: cmMerge2,
-			NewSourceCommitID:          cmSrc3,
-			NewMergeCommitID:           cmMerge3,
-			SkipSourceCommit:           false,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 branchID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapSrc1,
+			ExpectedTargetBaseSnapshotID: snapMerge2,
+			NewSourceSnapshotID:          snapSrc3,
+			NewMergeSnapshotID:           snapMerge3,
+			SkipSourceSnapshot:           false,
 		})
 		require.NoError(t, err)
 
-		commitsAfterNonMono, err := s.ListLineageCommits(ctx, root.LineageID)
+		snapsAfterNonMono, err := s.ListLineageSnapshots(ctx, root.LineageID)
 		require.NoError(t, err)
-		require.Len(t, commitsAfterNonMono, 6)
-		require.Equal(t, cmSrc3, commitsAfterNonMono[4].CommitID, "父切面 cmSrc3 必须排在子切面 cmMerge3 之前")
-		require.Equal(t, cmMerge3, commitsAfterNonMono[5].CommitID, "子切面 cmMerge3 必须排在父切面 cmSrc3 之后")
+		require.Len(t, snapsAfterNonMono, 6)
+		require.Equal(t, snapSrc3, snapsAfterNonMono[4].SnapshotID)
+		require.Equal(t, snapMerge3, snapsAfterNonMono[5].SnapshotID)
 	})
 }
 
@@ -686,11 +1014,11 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		root, err := s.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 		require.NoError(t, err)
 
-		childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		childID, snapFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  childID,
-			CommitID:     cmFork,
+			SnapshotID:   snapFork,
 			Name:         "child",
 		})
 		require.NoError(t, err)
@@ -698,11 +1026,11 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		otherID := mustNewUUIDv7(t)
 		_, err = s.CreateDisk(ctx, otherID, "other", testDefaultMaxBytes)
 		require.NoError(t, err)
-		otherChildID, otherForkCm := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		otherChildID, otherForkSnap := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		_, err = s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: otherID,
 			ChildDiskID:  otherChildID,
-			CommitID:     otherForkCm,
+			SnapshotID:   otherForkSnap,
 			Name:         "other-child",
 		})
 		require.NoError(t, err)
@@ -710,136 +1038,161 @@ func TestStoreContract_GivenInvalidOrConflictingMergeInputs_WhenMergeDiskCalled_
 		_, err = s.MergeDisk(ctx, nil)
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               rootID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 rootID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: uuid.Nil,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewMergeCommitID:           mustNewUUIDv7(t),
-			SkipSourceCommit:           true,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: uuid.Nil,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
+			SkipSourceSnapshot:           true,
 		})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: uuid.Nil,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
-			SkipSourceCommit:           false,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: uuid.Nil,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
+			SkipSourceSnapshot:           false,
 		})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewMergeCommitID:           mustNewUUIDv7(t),
-			SkipSourceCommit:           false,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
+			SkipSourceSnapshot:           false,
 		})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
-		sameCommit := mustNewUUIDv7(t)
+		sameSnap := mustNewUUIDv7(t)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          sameCommit,
-			NewMergeCommitID:           sameCommit,
-			SkipSourceCommit:           false,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          sameSnap,
+			NewMergeSnapshotID:           sameSnap,
+			SkipSourceSnapshot:           false,
 		})
 		require.ErrorIs(t, err, db.ErrInvalidArgument)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               otherID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: otherForkCm,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
+			FastForward:                  true,
+		})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          uuid.Nil,
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
+			SkipSourceSnapshot:           true,
+			FastForward:                  true,
+		})
+		require.ErrorIs(t, err, db.ErrInvalidArgument)
+
+		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 otherID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: otherForkSnap,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
 		require.ErrorIs(t, err, db.ErrCrossLineage)
 
 		missingID := mustNewUUIDv7(t)
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               missingID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 missingID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
 		require.ErrorIs(t, err, db.ErrDiskNotFound)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               missingID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 missingID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
 		require.ErrorIs(t, err, db.ErrDiskNotFound)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  missingID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    missingID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
 		require.ErrorIs(t, err, db.ErrDiskNotFound)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: mustNewUUIDv7(t),
-			ExpectedTargetBaseCommitID: cmFork,
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: mustNewUUIDv7(t),
+			ExpectedTargetBaseSnapshotID: snapFork,
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
-		require.ErrorIs(t, err, db.ErrStaleBaseCommit)
+		require.ErrorIs(t, err, db.ErrStaleBaseSnapshot)
 
 		_, err = s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: mustNewUUIDv7(t),
-			NewSourceCommitID:          mustNewUUIDv7(t),
-			NewMergeCommitID:           mustNewUUIDv7(t),
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: mustNewUUIDv7(t),
+			NewSourceSnapshotID:          mustNewUUIDv7(t),
+			NewMergeSnapshotID:           mustNewUUIDv7(t),
 		})
-		require.ErrorIs(t, err, db.ErrStaleBaseCommit)
+		require.ErrorIs(t, err, db.ErrStaleBaseSnapshot)
 
 		gotRoot, err := s.GetDisk(ctx, rootID)
 		require.NoError(t, err)
-		require.Equal(t, cmFork, gotRoot.BaseCommitID, "失败合并后目标盘 BaseCommitID 不得变化")
+		require.Equal(t, snapFork, gotRoot.BaseSnapshotID)
 		gotChild, err := s.GetDisk(ctx, childID)
 		require.NoError(t, err)
-		require.Equal(t, cmFork, gotChild.BaseCommitID, "失败合并后源盘 BaseCommitID 不得变化")
-		commits, err := s.ListLineageCommits(ctx, root.LineageID)
+		require.Equal(t, snapFork, gotChild.BaseSnapshotID)
+		snaps, err := s.ListLineageSnapshots(ctx, root.LineageID)
 		require.NoError(t, err)
-		require.Len(t, commits, 1, "失败合并后血缘不得残留任何新 Commit")
-		require.Equal(t, cmFork, commits[0].CommitID)
+		require.Len(t, snaps, 1)
+		require.Equal(t, snapFork, snaps[0].SnapshotID)
 	})
 }
 
@@ -850,11 +1203,11 @@ func TestStoreContract_GivenForkAndMergeWithQuotaAndUsage_WhenExecuted_ThenPersi
 		require.NoError(t, err)
 		require.NoError(t, s.UpdateDiskUsage(ctx, rootID, 8192, 4))
 
-		childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		childID, snapFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		child, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  childID,
-			CommitID:     cmFork,
+			SnapshotID:   snapFork,
 			Name:         "child-explicit",
 			MaxBytes:     32 << 20,
 			UsedBytes:    4096,
@@ -865,11 +1218,11 @@ func TestStoreContract_GivenForkAndMergeWithQuotaAndUsage_WhenExecuted_ThenPersi
 		require.Equal(t, uint64(4096), child.UsedBytes)
 		require.Equal(t, uint64(3), child.UsedInodes)
 
-		inheritedID, cmFork2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		inheritedID, snapFork2 := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		inherited, err := s.ForkDisk(ctx, db.ForkDiskInput{
 			SourceDiskID: rootID,
 			ChildDiskID:  inheritedID,
-			CommitID:     cmFork2,
+			SnapshotID:   snapFork2,
 			Name:         "child-inherited",
 		})
 		require.NoError(t, err)
@@ -877,18 +1230,18 @@ func TestStoreContract_GivenForkAndMergeWithQuotaAndUsage_WhenExecuted_ThenPersi
 		require.Equal(t, uint64(8192), inherited.UsedBytes)
 		require.Equal(t, uint64(4), inherited.UsedInodes)
 
-		cmSrc, cmMerge := mustNewUUIDv7(t), mustNewUUIDv7(t)
+		snapSrc, snapMerge := mustNewUUIDv7(t), mustNewUUIDv7(t)
 		merged, err := s.MergeDisk(ctx, &db.MergeDiskInput{
-			LineageID:                  root.LineageID,
-			SourceDiskID:               childID,
-			TargetDiskID:               rootID,
-			ExpectedSourceBaseCommitID: cmFork,
-			ExpectedTargetBaseCommitID: cmFork2,
-			NewSourceCommitID:          cmSrc,
-			NewMergeCommitID:           cmMerge,
-			TargetMaxBytes:             64 << 20,
-			TargetUsedBytes:            12288,
-			TargetUsedInodes:           6,
+			LineageID:                    root.LineageID,
+			SourceDiskID:                 childID,
+			TargetDiskID:                 rootID,
+			ExpectedSourceBaseSnapshotID: snapFork,
+			ExpectedTargetBaseSnapshotID: snapFork2,
+			NewSourceSnapshotID:          snapSrc,
+			NewMergeSnapshotID:           snapMerge,
+			TargetMaxBytes:               64 << 20,
+			TargetUsedBytes:              12288,
+			TargetUsedInodes:             6,
 		})
 		require.NoError(t, err)
 		require.Equal(t, uint64(64<<20), merged.MaxBytes)
@@ -1048,7 +1401,7 @@ func TestStoreContract_GivenMountLeases_WhenCreatedRenewedListedDeletedPrunedAnd
 
 		prunedExpiredRO, err := s.PruneExpiredMountLeases(ctx, t0.Add(30*time.Second))
 		require.NoError(t, err)
-		require.Equal(t, int64(1), prunedExpiredRO, "failed expired RenewMountLease must leave row intact until pruned")
+		require.Equal(t, int64(1), prunedExpiredRO)
 
 		activeAt30, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(30*time.Second))
 		require.NoError(t, err)
@@ -1120,7 +1473,7 @@ func TestStoreContract_GivenMountLeases_WhenCreatedRenewedListedDeletedPrunedAnd
 		require.NoError(t, err)
 		require.Equal(t, []db.MountLeaseRecord{liveKeep}, remaining)
 
-		_, err = s.DeleteDisk(ctx, diskID)
+		_, err = s.DeleteDisk(ctx, diskID, false)
 		require.NoError(t, err)
 		afterDelete, err := s.ListActiveMountLeases(ctx, diskID, t0.Add(60*time.Second))
 		require.NoError(t, err)

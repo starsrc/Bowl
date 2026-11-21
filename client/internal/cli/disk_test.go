@@ -135,6 +135,8 @@ func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testin
 	requireCLIError2(t, "unknown flag: --y", "disk", "delete", testDiskID1, "--y")
 	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--yes=abc")
 	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "-y=bad")
+	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "-r=bad")
+	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--recursive=bad")
 	requireCLIError2(t, "Error:", "disk", "delete", testDiskID1, "--json=bad")
 
 	requireCLIError2(t, "accepts 1 arg(s), received 0", "disk", "mounts")
@@ -385,6 +387,9 @@ func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) 
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &delRes))
 	require.Equal(t, testDiskID1, delRes.DiskID)
 	require.True(t, delRes.Deleted)
+	require.False(t, delRes.Recursive)
+	require.NotNil(t, storage.lastDeleteReq)
+	require.False(t, storage.lastDeleteReq.GetRecursive())
 
 	withDiskStdin(t, strings.NewReader("YES\n"))
 	code, textOut, errOut := runCLI("disk", "delete", testDiskID2)
@@ -392,6 +397,27 @@ func TestDiskDelete_GivenYesFlagJSONAndInteractiveYES_DeletesDisk(t *testing.T) 
 	require.Equal(t, 0, code)
 	require.Contains(t, errOut, "Delete virtual disk "+testDiskID2+"? This action is irreversible [y/N]: ")
 	require.Equal(t, "Deleted virtual disk "+testDiskID2+"\n", textOut)
+	require.False(t, storage.lastDeleteReq.GetRecursive())
+
+	storage.seedDisk(testDiskID1, "d1-rec", 1<<30, 0)
+	storage.seedDisk(testDiskID2, "d2-rec", 1<<30, 0)
+
+	code, jsonOut, errOut = runCLI("disk", "delete", testDiskID1, "-r", "-y", "--json")
+	require.Equal(t, 0, code)
+	require.Empty(t, errOut)
+	var recRes diskDeleteJSON
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &recRes))
+	require.Equal(t, testDiskID1, recRes.DiskID)
+	require.True(t, recRes.Deleted)
+	require.True(t, recRes.Recursive)
+	require.True(t, storage.lastDeleteReq.GetRecursive())
+
+	withDiskStdin(t, strings.NewReader("y\n"))
+	code, textOut, errOut = runCLI("disk", "delete", testDiskID2, "--recursive")
+	require.Equal(t, 0, code)
+	require.Contains(t, errOut, "Delete virtual disk "+testDiskID2+" and all forked descendants? This action is irreversible [y/N]: ")
+	require.Equal(t, "Deleted virtual disk "+testDiskID2+"\n", textOut)
+	require.True(t, storage.lastDeleteReq.GetRecursive())
 }
 
 func TestDisk_GivenJSONFalseFlag_KeepsHumanOutput(t *testing.T) {

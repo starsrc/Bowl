@@ -18,8 +18,9 @@ import (
 )
 
 type diskDeleteJSON struct {
-	DiskID  string `json:"disk_id"`
-	Deleted bool   `json:"deleted"`
+	DiskID    string `json:"disk_id"`
+	Deleted   bool   `json:"deleted"`
+	Recursive bool   `json:"recursive,omitempty"`
 }
 
 var diskDeleteSpec = diskSubcommandSpec{
@@ -32,13 +33,15 @@ var diskDeleteSpec = diskSubcommandSpec{
 	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
 		a := &diskDeleteAdapter{}
 		cmd.Flags().BoolVarP(&a.yes, "yes", "y", false, "Skip interactive confirmation prompt")
+		cmd.Flags().BoolVarP(&a.recursive, "recursive", "r", false, "Recursively delete this disk and all forked descendant disks")
 		return a
 	},
 }
 
 type diskDeleteAdapter struct {
-	diskID string
-	yes    bool
+	diskID    string
+	yes       bool
+	recursive bool
 }
 
 func (a *diskDeleteAdapter) finalize(_ *cobra.Command, posArgs []string) (bool, error) {
@@ -47,7 +50,10 @@ func (a *diskDeleteAdapter) finalize(_ *cobra.Command, posArgs []string) (bool, 
 }
 
 func (a *diskDeleteAdapter) spanAttrs() []attribute.KeyValue {
-	return []attribute.KeyValue{attribute.String("bowl.disk_id", a.diskID)}
+	return []attribute.KeyValue{
+		attribute.String("bowl.disk_id", a.diskID),
+		attribute.Bool("bowl.recursive", a.recursive),
+	}
 }
 
 func (a *diskDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIError {
@@ -66,7 +72,11 @@ func (a *diskDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIEr
 	}
 
 	if !a.yes {
-		fmt.Fprintf(stderr, "Delete virtual disk %s? This action is irreversible [y/N]: ", a.diskID)
+		if a.recursive {
+			fmt.Fprintf(stderr, "Delete virtual disk %s and all forked descendants? This action is irreversible [y/N]: ", a.diskID)
+		} else {
+			fmt.Fprintf(stderr, "Delete virtual disk %s? This action is irreversible [y/N]: ", a.diskID)
+		}
 		line, readErr := bufio.NewReader(ports.stdin).ReadString('\n')
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return &diskCLIError{
@@ -86,7 +96,8 @@ func (a *diskDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIEr
 
 func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
 	_, err := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
-		DiskId: a.diskID,
+		DiskId:    a.diskID,
+		Recursive: a.recursive,
 	}))
 	if err != nil {
 		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
@@ -102,8 +113,9 @@ func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.
 
 	return diskOutcome{
 		jsonPayload: diskDeleteJSON{
-			DiskID:  a.diskID,
-			Deleted: true,
+			DiskID:    a.diskID,
+			Deleted:   true,
+			Recursive: a.recursive,
 		},
 		renderHuman: func(w io.Writer) {
 			fmt.Fprintf(w, "Deleted virtual disk %s\n", a.diskID)

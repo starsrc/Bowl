@@ -386,8 +386,8 @@ func TestGivenCheckpointWithUnpromotedTmpfileOrphansWhenSanitizedThenStatFSResto
 	require.Equalf(t, uint64(8192), ckStats.LogicalBytes, "checkpoint LogicalBytes mismatch: want=8192 got=%d", ckStats.LogicalBytes)
 
 	sanitized, err := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
-		Dir:      ckDir,
-		CommitID: "tmpfile-sanitize",
+		Dir:        ckDir,
+		SnapshotID: "tmpfile-sanitize",
 	})
 	require.NoErrorf(t, err, "SanitizeCheckpoint failed")
 

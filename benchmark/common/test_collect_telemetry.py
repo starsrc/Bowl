@@ -380,7 +380,7 @@ class CollectTelemetryContractTest(unittest.TestCase):
             post_path = Path(tmp) / "post.prom"
             pre_path.write_text(
                 'bowl_storage_control_forks_total{result="ok"} 1\n'
-                'bowl_storage_control_commits_reclaimed_total 0\n',
+                'bowl_storage_control_snapshots_reclaimed_total 0\n',
                 encoding="utf-8",
             )
             post_path.write_text(
@@ -388,9 +388,9 @@ class CollectTelemetryContractTest(unittest.TestCase):
                     'bowl_storage_pack_physical_bytes 1048576',
                     'bowl_storage_pack_referenced_bytes 4194304',
                     'bowl_storage_data_dir_physical_bytes 2097152',
-                    'bowl_storage_commits_active 3',
-                    'bowl_storage_commits_physical_bytes 1048576',
-                    'bowl_storage_control_commits_reclaimed_total 2',
+                    'bowl_storage_snapshots_active 3',
+                    'bowl_storage_snapshots_physical_bytes 1048576',
+                    'bowl_storage_control_snapshots_reclaimed_total 2',
                     'bowl_storage_control_forks_total{result="ok"} 4',
                     'bowl_storage_control_forks_total{result="error"} 1',
                     'bowl_storage_actor_tick_phase_duration_seconds_bucket{phase="checkpoint",le="0.05"} 3',
@@ -415,8 +415,8 @@ class CollectTelemetryContractTest(unittest.TestCase):
             self.assertEqual(cg["pack_physical_bytes"], 1048576.0)
             self.assertEqual(cg["pack_referenced_bytes"], 4194304.0)
             self.assertEqual(cg["data_dir_physical_bytes"], 2097152.0)
-            self.assertEqual(cg["commits_active"], 3.0)
-            self.assertEqual(cg["commits_reclaimed"], 2.0)
+            self.assertEqual(cg["snapshots_active"], 3.0)
+            self.assertEqual(cg["snapshots_reclaimed"], 2.0)
             self.assertEqual(cg["forks_by_result"], {"ok": 3.0, "error": 1.0})
             self.assertEqual(snap["control_fork_stage_ms"][0]["group"], "sanitize")
             self.assertEqual(snap["actor_tick_phase_ms"][0]["group"], "checkpoint")

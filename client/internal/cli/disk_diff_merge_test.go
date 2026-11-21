@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	testCommitID1 = "01950000-0000-7000-8000-0000000000aa"
+	testSnapshotID1 = "01950000-0000-7000-8000-0000000000aa"
 )
 
 func TestDiskDiffMerge_GivenHelpAndRoutingArgs_ReturnsExpectedUsage(t *testing.T) {
@@ -54,7 +54,7 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 
 	storage := newFakeStorage()
 	storage.diffResponse = &storagev1.DiffDiskResponse{
-		LcaCommitId: testCommitID1,
+		LcaSnapshotId: testSnapshotID1,
 		Summary: &storagev1.DiffSummary{
 			Added:     1,
 			Modified:  1,
@@ -109,7 +109,8 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 	require.Equal(t, uint32(20), storage.lastDiffReq.GetPageSize())
 	require.Equal(t, "cursor-1", storage.lastDiffReq.GetPageToken())
 
-	require.Contains(t, out, testCommitID1)
+	require.Contains(t, out, "LCA Snapshot:")
+	require.Contains(t, out, testSnapshotID1)
 	require.Contains(t, out, "/new.txt")
 	require.Contains(t, out, "/conflict.txt")
 	require.Contains(t, out, "CONTENT")
@@ -124,7 +125,7 @@ func TestDiskDiff_GivenEntriesAndPagination_RendersSummaryTableAndJSON(t *testin
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
 	require.Equal(t, testDiskID1, parsed.SourceDiskID)
 	require.Equal(t, testDiskID2, parsed.TargetDiskID)
-	require.Equal(t, testCommitID1, parsed.LCACommitID)
+	require.Equal(t, testSnapshotID1, parsed.LCASnapshotID)
 	require.Equal(t, uint64(1), parsed.Summary.Added)
 	require.Equal(t, uint64(1), parsed.Summary.Modified)
 	require.Equal(t, uint64(1), parsed.Summary.Deleted)
@@ -140,19 +141,19 @@ func TestDiskDiff_GivenPatchMode_RendersUnifiedTextSymlinkAndBinaryDiffs(t *test
 	storage := newFakeStorage()
 	baseText := "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\n"
 	srcText := "line1\nline2-edited\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n"
-	storage.seedCommitFile(testDiskID1, testCommitID1, 100, 0o100644, []byte(baseText))
+	storage.seedSnapshotFile(testDiskID1, testSnapshotID1, 100, 0o100644, []byte(baseText))
 	storage.seedLiveFile(testDiskID1, 100, []byte(srcText))
 
-	storage.seedCommitSymlink(testDiskID1, testCommitID1, 101, "/old/target")
+	storage.seedSnapshotSymlink(testDiskID1, testSnapshotID1, 101, "/old/target")
 	storage.seedLiveSymlink(testDiskID1, 101, "/new/target")
 
-	storage.seedCommitFile(testDiskID1, testCommitID1, 102, 0o100644, []byte{0x01, 0x00, 0x02})
+	storage.seedSnapshotFile(testDiskID1, testSnapshotID1, 102, 0o100644, []byte{0x01, 0x00, 0x02})
 	storage.seedLiveFile(testDiskID1, 102, []byte{0x01, 0x00, 0x03})
 
 	storage.seedLiveFile(testDiskID1, 103, []byte("brand new line\n"))
 
 	storage.diffResponse = &storagev1.DiffDiskResponse{
-		LcaCommitId: testCommitID1,
+		LcaSnapshotId: testSnapshotID1,
 		Summary: &storagev1.DiffSummary{
 			Added:    1,
 			Modified: 3,
@@ -189,7 +190,7 @@ func TestDiskDiff_GivenPatchMode_RendersUnifiedTextSymlinkAndBinaryDiffs(t *test
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
-	require.GreaterOrEqual(t, storage.readCommitCalls, 3)
+	require.GreaterOrEqual(t, storage.readSnapshotCalls, 3)
 	require.GreaterOrEqual(t, storage.readCalls, 3)
 	require.Equal(t, 1, storage.readlinkCalls)
 
@@ -216,11 +217,11 @@ func TestDiskDiff_GivenPatchLargeFileOver4MiB_ReadsMultipleChunks(t *testing.T) 
 	largePrefix := strings.Repeat("a\n", 2*1024*1024+100)
 	baseData := []byte(largePrefix + "tail-old\n")
 	srcData := []byte(largePrefix + "tail-new\n")
-	storage.seedCommitFile(testDiskID1, testCommitID1, 200, 0o100644, baseData)
+	storage.seedSnapshotFile(testDiskID1, testSnapshotID1, 200, 0o100644, baseData)
 	storage.seedLiveFile(testDiskID1, 200, srcData)
 	storage.diffResponse = &storagev1.DiffDiskResponse{
-		LcaCommitId: testCommitID1,
-		Summary:     &storagev1.DiffSummary{Modified: 1},
+		LcaSnapshotId: testSnapshotID1,
+		Summary:       &storagev1.DiffSummary{Modified: 1},
 		Entries: []*storagev1.DiffEntry{
 			{
 				Path:   []byte("/big.txt"),
@@ -236,7 +237,7 @@ func TestDiskDiff_GivenPatchLargeFileOver4MiB_ReadsMultipleChunks(t *testing.T) 
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
-	require.GreaterOrEqual(t, storage.readCommitCalls, 2)
+	require.GreaterOrEqual(t, storage.readSnapshotCalls, 2)
 	require.GreaterOrEqual(t, storage.readCalls, 2)
 	require.Contains(t, out, "-tail-old")
 	require.Contains(t, out, "+tail-new")
@@ -394,7 +395,7 @@ func TestDiskMerge_GivenFlagsAndDryRun_PropagatesOptionsAndRendersOutputs(t *tes
 	require.False(t, parsed.DryRun)
 	require.Equal(t, testDiskID1, parsed.SourceDiskID)
 	require.Equal(t, testDiskID2, parsed.TargetDiskID)
-	require.NotEmpty(t, parsed.MergeCommitID)
+	require.NotEmpty(t, parsed.MergeSnapshotID)
 	require.NotNil(t, parsed.Disk)
 	require.Equal(t, testDiskID2, parsed.Disk.DiskID)
 
@@ -419,7 +420,7 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 	conflictErr.AddDetail(errInfoDetail)
 
 	reportDetail, err := connect.NewErrorDetail(&storagev1.MergeConflictReport{
-		LcaCommitId:        testCommitID1,
+		LcaSnapshotId:      testSnapshotID1,
 		TotalConflicts:     3,
 		ConflictsTruncated: true,
 		Conflicts: []*storagev1.MergeConflict{
@@ -449,7 +450,7 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 	require.Equal(t, 1, code)
 	require.Empty(t, out)
 	require.Contains(t, errOut, "ECONFLICT")
-	require.Contains(t, errOut, testCommitID1)
+	require.Contains(t, errOut, testSnapshotID1)
 	require.Contains(t, errOut, "3")
 	require.Contains(t, errOut, "/src/main.go")
 	require.Contains(t, errOut, "CONTENT")
@@ -468,7 +469,7 @@ func TestDiskMerge_GivenECONFLICTReport_RendersHumanGuidanceAndStructuredJSONWit
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
 	require.False(t, parsed.Merged)
 	require.NotNil(t, parsed.ConflictReport)
-	require.Equal(t, testCommitID1, parsed.ConflictReport.LCACommitID)
+	require.Equal(t, testSnapshotID1, parsed.ConflictReport.LCASnapshotID)
 	require.Equal(t, uint64(3), parsed.ConflictReport.TotalConflicts)
 	require.True(t, parsed.ConflictReport.ConflictsTruncated)
 	require.Len(t, parsed.ConflictReport.Conflicts, 2)
@@ -541,8 +542,8 @@ func TestDiskDiff_GivenTargetThreeWayPatchAndDeletions_DiffsTargetAgainstSource(
 	storage.seedLiveFile(testDiskID1, 302, []byte("source-v2\n"))
 	storage.seedLiveSymlink(testDiskID2, 303, "/gone/target")
 	storage.diffResponse = &storagev1.DiffDiskResponse{
-		LcaCommitId: testCommitID1,
-		Summary:     &storagev1.DiffSummary{Modified: 1, Deleted: 1},
+		LcaSnapshotId: testSnapshotID1,
+		Summary:       &storagev1.DiffSummary{Modified: 1, Deleted: 1},
 		Entries: []*storagev1.DiffEntry{
 			{
 				Path:     []byte("/app.conf"),
@@ -565,7 +566,7 @@ func TestDiskDiff_GivenTargetThreeWayPatchAndDeletions_DiffsTargetAgainstSource(
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
-	require.Equal(t, 0, storage.readCommitCalls)
+	require.Equal(t, 0, storage.readSnapshotCalls)
 	require.Contains(t, out, "-target-v1")
 	require.Contains(t, out, "+source-v2")
 	require.Contains(t, out, "+++ /dev/null (symlink)")
@@ -614,11 +615,11 @@ func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts
 
 	storage := newFakeStorage()
 	storage.mergeResponse = &storagev1.MergeDiskResponse{
-		LcaCommitId:        testCommitID1,
+		LcaSnapshotId:      testSnapshotID1,
 		EstimatedUsedBytes: 2048,
 		TargetMaxBytes:     4096,
 		ConflictReport: &storagev1.MergeConflictReport{
-			LcaCommitId:    testCommitID1,
+			LcaSnapshotId:  testSnapshotID1,
 			TotalConflicts: 1,
 			Conflicts: []*storagev1.MergeConflict{
 				{
@@ -652,7 +653,7 @@ func TestDiskMerge_GivenDryRunWithConflictReport_ReturnsExit1AndRendersConflicts
 	require.NoError(t, json.Unmarshal([]byte(out), &payload))
 	require.True(t, payload.DryRun)
 	require.False(t, payload.Merged)
-	require.Equal(t, testCommitID1, payload.LCACommitID)
+	require.Equal(t, testSnapshotID1, payload.LCASnapshotID)
 	require.NotNil(t, payload.ConflictReport)
 	require.EqualValues(t, 1, payload.ConflictReport.TotalConflicts)
 	require.Len(t, payload.ConflictReport.Conflicts, 1)
@@ -663,7 +664,7 @@ func TestDiskMerge_GivenDryRunQuietWithoutConflicts_PrintsTargetDiskIDAndExit0(t
 
 	storage := newFakeStorage()
 	storage.mergeResponse = &storagev1.MergeDiskResponse{
-		LcaCommitId:        testCommitID1,
+		LcaSnapshotId:      testSnapshotID1,
 		EstimatedUsedBytes: 1024,
 		TargetMaxBytes:     4096,
 	}
@@ -682,8 +683,8 @@ func TestDiskDiff_GivenSpecialFilePatch_SkipsTextDiffAndReportsTypeChange(t *tes
 	storage := newFakeStorage()
 	storage.seedLiveFile(testDiskID1, 402, []byte("now-a-regular-file\n"))
 	storage.diffResponse = &storagev1.DiffDiskResponse{
-		LcaCommitId: testCommitID1,
-		Summary:     &storagev1.DiffSummary{Modified: 2, Added: 1},
+		LcaSnapshotId: testSnapshotID1,
+		Summary:       &storagev1.DiffSummary{Modified: 2, Added: 1},
 		Entries: []*storagev1.DiffEntry{
 			{
 				Path:   []byte("/pipe-to-file"),

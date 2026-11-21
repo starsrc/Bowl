@@ -856,7 +856,7 @@ func TestObservability_ClassifyStorageLogLevel_MapsProceduresAndCodes(t *testing
 		{name: "RenewMount高频续期成功降级Debug", procedure: storagev1connect.StorageServiceRenewMountProcedure, want: slog.LevelDebug},
 		{name: "MergeDisk变更控制面保持Info", procedure: storagev1connect.StorageServiceMergeDiskProcedure, want: slog.LevelInfo},
 		{name: "DiffDisk只读控制面降级Debug", procedure: storagev1connect.StorageServiceDiffDiskProcedure, want: slog.LevelDebug},
-		{name: "ReadCommitNode只读控制面降级Debug", procedure: storagev1connect.StorageServiceReadCommitNodeProcedure, want: slog.LevelDebug},
+		{name: "ReadSnapshotNode只读控制面降级Debug", procedure: storagev1connect.StorageServiceReadSnapshotNodeProcedure, want: slog.LevelDebug},
 		{name: "Lookup未命中降级Debug", procedure: storagev1connect.StorageServiceLookupProcedure, code: connect.CodeNotFound, err: connect.NewError(connect.CodeNotFound, nil), want: slog.LevelDebug},
 		{name: "Read客户端取消降级Debug", procedure: storagev1connect.StorageServiceReadProcedure, code: connect.CodeCanceled, err: connect.NewError(connect.CodeCanceled, context.Canceled), want: slog.LevelDebug},
 		{name: "ForkDisk未命中保持Warn", procedure: storagev1connect.StorageServiceForkDiskProcedure, code: connect.CodeNotFound, err: connect.NewError(connect.CodeNotFound, nil), want: slog.LevelWarn},
@@ -871,13 +871,13 @@ func TestObservability_ClassifyStorageLogLevel_MapsProceduresAndCodes(t *testing
 
 func TestObservability_MergeDiffProcedures_RegisteredInMetricsControlAndSampler(t *testing.T) {
 	require.Equal(t, storagev1connect.StorageServiceDiffDiskProcedure, normalizeProcedure(storagev1connect.StorageServiceDiffDiskProcedure))
-	require.Equal(t, storagev1connect.StorageServiceReadCommitNodeProcedure, normalizeProcedure(storagev1connect.StorageServiceReadCommitNodeProcedure))
+	require.Equal(t, storagev1connect.StorageServiceReadSnapshotNodeProcedure, normalizeProcedure(storagev1connect.StorageServiceReadSnapshotNodeProcedure))
 	require.Equal(t, storagev1connect.StorageServiceMergeDiskProcedure, normalizeProcedure(storagev1connect.StorageServiceMergeDiskProcedure))
 	require.Equal(t, storagev1connect.StorageServiceListMountsProcedure, normalizeProcedure(storagev1connect.StorageServiceListMountsProcedure))
 	require.Equal(t, storagev1connect.StorageServiceEvictMountsProcedure, normalizeProcedure(storagev1connect.StorageServiceEvictMountsProcedure))
 
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceDiffDiskProcedure))
-	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceReadCommitNodeProcedure))
+	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceReadSnapshotNodeProcedure))
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceMergeDiskProcedure))
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceRenewMountProcedure))
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceUnmountDiskProcedure))
@@ -890,7 +890,7 @@ func TestObservability_MergeDiffProcedures_RegisteredInMetricsControlAndSampler(
 	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceListMountsProcedure))
 	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceRenewMountProcedure))
 	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceDiffDiskProcedure))
-	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceReadCommitNodeProcedure))
+	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceReadSnapshotNodeProcedure))
 }
 
 func TestObservability_DiffAndMerge_ExtractsTargetDiskIDIntoLogsAndSpans(t *testing.T) {

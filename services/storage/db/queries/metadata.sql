@@ -27,23 +27,24 @@ RETURNING
     (next_pack_id - @count::bigint)::bigint AS first_pack_id,
     (next_pack_id - 1)::bigint AS last_pack_id;
 
--- name: CreateDiskCommit :one
-INSERT INTO disk_commits (
-    commit_id,
+-- name: CreateDiskSnapshot :one
+INSERT INTO disk_snapshots (
+    snapshot_id,
     lineage_id,
     source_disk_id,
-    parent_commit_id,
-    merge_parent_commit_id,
-    created_at
+    parent_snapshot_id,
+    merge_parent_snapshot_id,
+    created_at,
+    kind
 )
-VALUES ($1, $2, $3, $4, $5, clock_timestamp())
-RETURNING commit_id, lineage_id, source_disk_id, parent_commit_id, merge_parent_commit_id, created_at;
+VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6)
+RETURNING snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind;
 
--- name: ListLineageCommits :many
-SELECT commit_id, lineage_id, source_disk_id, parent_commit_id, merge_parent_commit_id, created_at
-FROM disk_commits
+-- name: ListLineageSnapshots :many
+SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind
+FROM disk_snapshots
 WHERE lineage_id = $1
-ORDER BY created_at ASC, commit_id ASC;
+ORDER BY created_at ASC, snapshot_id ASC;
 
 -- name: CreateDisk :one
 INSERT INTO disks (
@@ -51,7 +52,7 @@ INSERT INTO disks (
     name,
     lineage_id,
     parent_disk_id,
-    base_commit_id,
+    base_snapshot_id,
     max_bytes,
     used_bytes,
     used_inodes,
@@ -59,23 +60,36 @@ INSERT INTO disks (
     updated_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes;
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes;
 
 -- name: GetDisk :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1;
 
 -- name: ListDisks :many
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE (NOT @has_cursor::boolean)
    OR (created_at, disk_id) < (@cursor_created_at::timestamptz, @cursor_disk_id::uuid)
 ORDER BY created_at DESC, disk_id DESC
 LIMIT @page_limit::int;
 
+-- name: ListLineageDisks :many
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
+FROM disks
+WHERE lineage_id = $1
+ORDER BY disk_id ASC;
+
+-- name: ListLineageDisksForUpdate :many
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
+FROM disks
+WHERE lineage_id = $1
+ORDER BY disk_id ASC
+FOR UPDATE;
+
 -- name: GetDiskForUpdate :one
-SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes
+SELECT disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes
 FROM disks
 WHERE disk_id = $1
 FOR UPDATE;
@@ -86,7 +100,7 @@ SET name = COALESCE(sqlc.narg('name')::text, name),
     max_bytes = COALESCE(sqlc.narg('max_bytes')::bigint, max_bytes),
     updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes;
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes;
 
 -- name: UpdateDiskUsage :execrows
 UPDATE disks
@@ -94,44 +108,53 @@ SET used_bytes = $2,
     used_inodes = $3
 WHERE disk_id = $1;
 
--- name: SetDiskBaseCommit :exec
+-- name: SetDiskBaseSnapshot :exec
 UPDATE disks
-SET base_commit_id = $2
+SET base_snapshot_id = $2
 WHERE disk_id = $1;
 
--- name: SetDiskBaseCommitAndTouch :one
+-- name: SetDiskBaseSnapshotAndTouch :one
 UPDATE disks
-SET base_commit_id = $2,
+SET base_snapshot_id = $2,
     max_bytes = COALESCE(sqlc.narg('max_bytes')::bigint, max_bytes),
     used_bytes = COALESCE(sqlc.narg('used_bytes')::bigint, used_bytes),
     used_inodes = COALESCE(sqlc.narg('used_inodes')::bigint, used_inodes),
     updated_at = clock_timestamp()
 WHERE disk_id = $1
-RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_commit_id, max_bytes, used_bytes, used_inodes;
+RETURNING disk_id, name, created_at, updated_at, lineage_id, parent_disk_id, base_snapshot_id, max_bytes, used_bytes, used_inodes;
 
--- name: ClearLineageBaseCommits :exec
+-- name: ClearDisksBaseSnapshotByIDs :exec
 UPDATE disks
-SET base_commit_id = NULL
-WHERE lineage_id = $1
-  AND base_commit_id IS NOT NULL;
+SET base_snapshot_id = NULL
+WHERE lineage_id = @lineage_id::uuid
+  AND base_snapshot_id = ANY(@snapshot_ids::uuid[]);
 
--- name: DeleteLineageCommits :many
-DELETE FROM disk_commits
-WHERE lineage_id = $1
-RETURNING commit_id;
+-- name: ClearSnapshotParentByIDs :exec
+UPDATE disk_snapshots
+SET parent_snapshot_id = NULL
+WHERE lineage_id = @lineage_id::uuid
+  AND parent_snapshot_id = ANY(@snapshot_ids::uuid[]);
 
--- name: CountDisksByLineage :one
-SELECT COUNT(*)
-FROM disks
-WHERE lineage_id = $1;
+-- name: ClearSnapshotMergeParentByIDs :exec
+UPDATE disk_snapshots
+SET merge_parent_snapshot_id = NULL
+WHERE lineage_id = @lineage_id::uuid
+  AND merge_parent_snapshot_id = ANY(@snapshot_ids::uuid[]);
+
+-- name: DeleteSnapshotsByIDs :many
+DELETE FROM disk_snapshots
+WHERE lineage_id = @lineage_id::uuid
+  AND snapshot_id = ANY(@snapshot_ids::uuid[])
+RETURNING snapshot_id;
+
+-- name: DeleteDisksByIDs :execrows
+DELETE FROM disks
+WHERE lineage_id = @lineage_id::uuid
+  AND disk_id = ANY(@disk_ids::uuid[]);
 
 -- name: DeleteDiskLineage :exec
 DELETE FROM disk_lineages
 WHERE lineage_id = $1;
-
--- name: DeleteDisk :execrows
-DELETE FROM disks
-WHERE disk_id = $1;
 
 -- name: CreateMountLease :one
 INSERT INTO disk_mounts (

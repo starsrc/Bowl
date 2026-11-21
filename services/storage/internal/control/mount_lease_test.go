@@ -106,7 +106,7 @@ func TestMountLease_IssueUnmountAndRejectOnlineTargetMerge(t *testing.T) {
 		Strategy:     store.MergeStrategyFail,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, res.MergeCommitID)
+	require.NotEmpty(t, res.MergeSnapshotID)
 }
 
 func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t *testing.T) {
@@ -138,7 +138,7 @@ func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t
 		DryRun:       true,
 	})
 	require.NoError(t, err)
-	require.Empty(t, dryRes.MergeCommitID)
+	require.Empty(t, dryRes.MergeSnapshotID)
 
 	_, err = mgr.MergeDisk(ctx, &MergeDiskParams{
 		SourceDiskID: source.DiskID,
@@ -169,7 +169,7 @@ func TestMountLease_SourceRWRejects_SourceROAllows_DryRunAllowsWithoutClearing(t
 		Strategy:     store.MergeStrategyFail,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, res.MergeCommitID)
+	require.NotEmpty(t, res.MergeSnapshotID)
 }
 
 func TestMountLease_RenewAndVirtualClockExpiration(t *testing.T) {
@@ -218,7 +218,7 @@ func TestMountLease_RenewAndVirtualClockExpiration(t *testing.T) {
 		Strategy:     store.MergeStrategyFail,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, res.MergeCommitID)
+	require.NotEmpty(t, res.MergeSnapshotID)
 }
 
 func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
@@ -312,7 +312,7 @@ func TestMountLease_RestartRebuildAndForcePreemption(t *testing.T) {
 		Force:        true,
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, mergeRes.MergeCommitID)
+	require.NotEmpty(t, mergeRes.MergeSnapshotID)
 
 	newTActor, err := mgr2.Actor(ctx, target.DiskID)
 	require.NoError(t, err)
@@ -371,10 +371,10 @@ func TestMountLease_DeleteDiskClearsLeasesAndCustomTTLApplies(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(5), mnt.LeaseTTLSeconds)
 
-	requireDiskMountedStatus(t, mgr.DeleteDisk(ctx, disk.DiskID))
+	requireDiskMountedStatus(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID}))
 
 	clk.Advance(6 * time.Second)
-	require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID}))
 
 	_, err = mgr.RenewMount(ctx, RenewMountParams{
 		DiskID:   disk.DiskID,
@@ -523,19 +523,19 @@ func TestDeleteDisk_MountLeaseGate_RejectsActiveRWOrROAndAllowsAfterUnmountOrExp
 	roMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: disk.DiskID, ReadOnly: true})
 	require.NoError(t, err)
 
-	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	err = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID})
 	requireDiskMountedStatus(t, err)
 	_, err = mgr.GetDisk(ctx, disk.DiskID)
 	require.NoError(t, err)
 
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: rwMnt.MountID}))
-	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	err = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID})
 	requireDiskMountedStatus(t, err)
 	_, err = mgr.GetDisk(ctx, disk.DiskID)
 	require.NoError(t, err)
 
 	require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: roMnt.MountID}))
-	require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID}))
 	_, err = mgr.GetDisk(ctx, disk.DiskID)
 	require.ErrorIs(t, err, ErrNotFound)
 
@@ -543,11 +543,11 @@ func TestDeleteDisk_MountLeaseGate_RejectsActiveRWOrROAndAllowsAfterUnmountOrExp
 	require.NoError(t, err)
 	expMnt, err := mgr.MountDisk(ctx, MountDiskParams{DiskID: expiringDisk.DiskID, ReadOnly: false})
 	require.NoError(t, err)
-	err = mgr.DeleteDisk(ctx, expiringDisk.DiskID)
+	err = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: expiringDisk.DiskID})
 	requireDiskMountedStatus(t, err)
 
 	clk.Advance(31 * time.Second)
-	require.NoError(t, mgr.DeleteDisk(ctx, expiringDisk.DiskID))
+	require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: expiringDisk.DiskID}))
 	_, err = mgr.RenewMount(ctx, RenewMountParams{
 		DiskID:   expiringDisk.DiskID,
 		MountID:  expMnt.MountID,
@@ -583,7 +583,7 @@ func TestDeleteDisk_ConcurrentWithMountROAndRenew_SerializesWithoutLeakedLease(t
 		)
 		wg.Go(func() {
 			<-start
-			deleteErr = mgr.DeleteDisk(ctx, disk.DiskID)
+			deleteErr = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID})
 		})
 		wg.Go(func() {
 			<-start
@@ -611,7 +611,7 @@ func TestDeleteDisk_ConcurrentWithMountROAndRenew_SerializesWithoutLeakedLease(t
 			if mountErr == nil {
 				require.NoError(t, mgr.UnmountDisk(ctx, UnmountDiskParams{DiskID: disk.DiskID, MountID: mountRes.MountID}))
 			}
-			require.NoError(t, mgr.DeleteDisk(ctx, disk.DiskID))
+			require.NoError(t, mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID}))
 		}
 	}
 }
@@ -811,5 +811,5 @@ func TestEvictMounts_SingleRO_SingleRW_AllAndRestartFencing(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), actor2.WriterEpoch())
 
-	require.NoError(t, mgr2.DeleteDisk(ctx, disk.DiskID))
+	require.NoError(t, mgr2.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID}))
 }

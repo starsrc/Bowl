@@ -124,7 +124,7 @@ func isControlPlaneProcedure(procedure string) bool {
 		storagev1connect.StorageServiceListMountsProcedure, "ListMounts",
 		storagev1connect.StorageServiceEvictMountsProcedure, "EvictMounts",
 		storagev1connect.StorageServiceDiffDiskProcedure, "DiffDisk",
-		storagev1connect.StorageServiceReadCommitNodeProcedure, "ReadCommitNode",
+		storagev1connect.StorageServiceReadSnapshotNodeProcedure, "ReadSnapshotNode",
 		storagev1connect.StorageServiceMergeDiskProcedure, "MergeDisk",
 		storagev1connect.StorageServiceReclaimOrphanProcedure, "ReclaimOrphan":
 		return true

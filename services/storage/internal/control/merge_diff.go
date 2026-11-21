@@ -27,18 +27,18 @@ type DiffDiskParams struct {
 }
 
 type DiffDiskResult struct {
-	LCACommitID   string
+	LCASnapshotID string
 	Summary       store.DiffSummary
 	Entries       []store.DiffEntry
 	NextPageToken string
 }
 
-type ReadCommitNodeParams struct {
-	DiskID   string
-	CommitID string
-	Ino      uint64
-	Offset   uint64
-	Size     uint32
+type ReadSnapshotNodeParams struct {
+	DiskID     string
+	SnapshotID string
+	Ino        uint64
+	Offset     uint64
+	Size       uint32
 }
 
 type MergeDiskParams struct {
@@ -53,16 +53,16 @@ type MergeDiskParams struct {
 
 type MergeDiskResult struct {
 	Disk               *Disk
-	LCACommitID        string
-	MergeCommitID      string
+	LCASnapshotID      string
+	MergeSnapshotID    string
 	EstimatedUsedBytes uint64
 	TargetMaxBytes     uint64
 }
 
 type MergeConflictError struct {
-	LCACommitID string
-	Report      store.MergeConflictReport
-	Err         error
+	LCASnapshotID string
+	Report        store.MergeConflictReport
+	Err           error
 }
 
 func (e *MergeConflictError) Error() string {
@@ -82,16 +82,16 @@ func (e *MergeConflictError) Unwrap() error {
 	return e.Err
 }
 
-func (m *manager) stagingMergeDir(diskID string, commitID uuid.UUID) string {
-	return filepath.Join(m.storageRoot, "disks", diskID+".merge."+commitID.String())
+func (m *manager) stagingMergeDir(diskID string, snapshotID uuid.UUID) string {
+	return filepath.Join(m.storageRoot, "disks", diskID+".merge."+snapshotID.String())
 }
 
-func (m *manager) oldMergeDir(diskID string, commitID uuid.UUID) string {
-	return filepath.Join(m.storageRoot, "disks", diskID+".old."+commitID.String())
+func (m *manager) oldMergeDir(diskID string, snapshotID uuid.UUID) string {
+	return filepath.Join(m.storageRoot, "disks", diskID+".old."+snapshotID.String())
 }
 
-func (m *manager) srcCommitMarkerPath(diskID string, mergeCommitID, srcCommitID uuid.UUID) string {
-	return filepath.Join(m.storageRoot, "disks", fmt.Sprintf("%s.srccommit.%s.%s", diskID, mergeCommitID.String(), srcCommitID.String()))
+func (m *manager) srcSnapshotMarkerPath(diskID string, mergeSnapshotID, srcSnapshotID uuid.UUID) string {
+	return filepath.Join(m.storageRoot, "disks", fmt.Sprintf("%s.srcsnap.%s.%s", diskID, mergeSnapshotID.String(), srcSnapshotID.String()))
 }
 
 func (m *manager) tmpSnapshotPath(prefix string) string {
@@ -108,13 +108,13 @@ func syncDirPath(dir string) error {
 	return errors.Join(syncErr, closeErr)
 }
 
-func parseCommitID(commitID string) (uuid.UUID, error) {
-	id, err := uuid.Parse(commitID)
+func parseSnapshotID(snapshotID string) (uuid.UUID, error) {
+	id, err := uuid.Parse(snapshotID)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("%w: invalid commit id %q", ErrInvalidArgument, commitID)
+		return uuid.Nil, fmt.Errorf("%w: invalid snapshot id %q", ErrInvalidArgument, snapshotID)
 	}
 	if id == uuid.Nil {
-		return uuid.Nil, fmt.Errorf("%w: commit id cannot be nil uuid", ErrInvalidArgument)
+		return uuid.Nil, fmt.Errorf("%w: snapshot id cannot be nil uuid", ErrInvalidArgument)
 	}
 	return id, nil
 }
@@ -148,21 +148,21 @@ func (m *manager) snapshotDiskForInspect(
 	ctx context.Context,
 	row *db.DiskRecord,
 	prefix string,
-) (snapDir string, hasOrphans bool, cleanup func(), err error) {
+) (snapDir string, stats store.CheckpointStats, cleanup func(), err error) {
 	entry, err := m.getOrOpenActorWithRecordLocked(ctx, row)
 	if err != nil {
-		return "", false, nil, err
+		return "", store.CheckpointStats{}, nil, err
 	}
 	diskID := row.DiskID.String()
 	tmpRoot := filepath.Join(m.storageRoot, ".tmp")
 	if mkErr := os.MkdirAll(tmpRoot, 0o755); mkErr != nil {
-		return "", false, nil, mkErr
+		return "", store.CheckpointStats{}, nil, mkErr
 	}
 	snapDir = m.tmpSnapshotPath(prefix)
-	stats, err := entry.actor.Checkpoint(ctx, snapDir)
+	stats, err = entry.actor.Checkpoint(ctx, snapDir)
 	if err != nil {
 		_ = m.removeAll(snapDir)
-		return "", false, nil, err
+		return "", store.CheckpointStats{}, nil, err
 	}
 	cleanup = func() {
 		if rmErr := m.removeAll(snapDir); rmErr != nil {
@@ -174,25 +174,25 @@ func (m *manager) snapshotDiskForInspect(
 			)
 		}
 	}
-	return snapDir, stats.HasOrphans, cleanup, nil
+	return snapDir, stats, cleanup, nil
 }
 
-func findLCA(commits []db.CommitRecord, commitA, commitB uuid.UUID) (uuid.UUID, error) {
-	if commitA == uuid.Nil || commitB == uuid.Nil {
-		return uuid.Nil, ErrNoBaseCommit
+func findLCA(snapshots []db.SnapshotRecord, snapA, snapB uuid.UUID) (uuid.UUID, error) {
+	if snapA == uuid.Nil || snapB == uuid.Nil {
+		return uuid.Nil, ErrNoBaseSnapshot
 	}
-	byID := make(map[uuid.UUID]db.CommitRecord, len(commits))
-	for _, c := range commits {
-		byID[c.CommitID] = c
+	byID := make(map[uuid.UUID]db.SnapshotRecord, len(snapshots))
+	for _, s := range snapshots {
+		byID[s.SnapshotID] = s
 	}
-	if _, ok := byID[commitA]; !ok {
-		return uuid.Nil, fmt.Errorf("%w: commit %s not found in lineage", ErrNotFound, commitA)
+	if _, ok := byID[snapA]; !ok {
+		return uuid.Nil, fmt.Errorf("%w: snapshot %s not found in lineage", ErrNotFound, snapA)
 	}
-	if _, ok := byID[commitB]; !ok {
-		return uuid.Nil, fmt.Errorf("%w: commit %s not found in lineage", ErrNotFound, commitB)
+	if _, ok := byID[snapB]; !ok {
+		return uuid.Nil, fmt.Errorf("%w: snapshot %s not found in lineage", ErrNotFound, snapB)
 	}
-	if commitA == commitB {
-		return commitA, nil
+	if snapA == snapB {
+		return snapA, nil
 	}
 
 	collectAncestors := func(start uuid.UUID) map[uuid.UUID]struct{} {
@@ -212,18 +212,18 @@ func findLCA(commits []db.CommitRecord, commitA, commitB uuid.UUID) (uuid.UUID, 
 				continue
 			}
 			visited[cur] = struct{}{}
-			if rec.ParentCommitID != uuid.Nil {
-				queue = append(queue, rec.ParentCommitID)
+			if rec.ParentSnapshotID != uuid.Nil {
+				queue = append(queue, rec.ParentSnapshotID)
 			}
-			if rec.MergeParentCommitID != uuid.Nil {
-				queue = append(queue, rec.MergeParentCommitID)
+			if rec.MergeParentSnapshotID != uuid.Nil {
+				queue = append(queue, rec.MergeParentSnapshotID)
 			}
 		}
 		return visited
 	}
 
-	ancA := collectAncestors(commitA)
-	ancB := collectAncestors(commitB)
+	ancA := collectAncestors(snapA)
+	ancB := collectAncestors(snapB)
 
 	common := make(map[uuid.UUID]struct{})
 	for id := range ancA {
@@ -232,20 +232,20 @@ func findLCA(commits []db.CommitRecord, commitA, commitB uuid.UUID) (uuid.UUID, 
 		}
 	}
 	if len(common) == 0 {
-		return uuid.Nil, fmt.Errorf("%w: commits %s and %s share no common ancestor", ErrNoBaseCommit, commitA, commitB)
+		return uuid.Nil, fmt.Errorf("%w: snapshots %s and %s share no common ancestor", ErrNoBaseSnapshot, snapA, snapB)
 	}
 
 	dominated := make(map[uuid.UUID]bool, len(common))
 	for id := range common {
 		rec := byID[id]
-		if rec.ParentCommitID != uuid.Nil {
-			if _, ok := common[rec.ParentCommitID]; ok {
-				dominated[rec.ParentCommitID] = true
+		if rec.ParentSnapshotID != uuid.Nil {
+			if _, ok := common[rec.ParentSnapshotID]; ok {
+				dominated[rec.ParentSnapshotID] = true
 			}
 		}
-		if rec.MergeParentCommitID != uuid.Nil {
-			if _, ok := common[rec.MergeParentCommitID]; ok {
-				dominated[rec.MergeParentCommitID] = true
+		if rec.MergeParentSnapshotID != uuid.Nil {
+			if _, ok := common[rec.MergeParentSnapshotID]; ok {
+				dominated[rec.MergeParentSnapshotID] = true
 			}
 		}
 	}
@@ -257,10 +257,10 @@ func findLCA(commits []db.CommitRecord, commitA, commitB uuid.UUID) (uuid.UUID, 
 		}
 	}
 	if len(mca) == 0 {
-		return uuid.Nil, fmt.Errorf("%w: malformed commit DAG cycle detected", ErrNoBaseCommit)
+		return uuid.Nil, fmt.Errorf("%w: malformed snapshot DAG cycle detected", ErrNoBaseSnapshot)
 	}
 	if len(mca) > 1 {
-		return uuid.Nil, fmt.Errorf("%w: %d maximal common ancestors found between %s and %s", ErrAmbiguousLCA, len(mca), commitA, commitB)
+		return uuid.Nil, fmt.Errorf("%w: %d maximal common ancestors found between %s and %s", ErrAmbiguousLCA, len(mca), snapA, snapB)
 	}
 	return mca[0], nil
 }
@@ -313,7 +313,7 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 		return nil, mapDBErr(err)
 	}
 
-	var lcaCommitID uuid.UUID
+	var lcaSnapshotID uuid.UUID
 	var targetRow db.DiskRecord
 	if hasTarget {
 		targetRow, err = m.store.GetDisk(ctx, targetID)
@@ -323,22 +323,22 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 		if sourceRow.LineageID != targetRow.LineageID {
 			return nil, fmt.Errorf("%w: source lineage %s != target lineage %s", ErrCrossLineage, sourceRow.LineageID, targetRow.LineageID)
 		}
-		if sourceRow.BaseCommitID == uuid.Nil || targetRow.BaseCommitID == uuid.Nil {
-			return nil, ErrNoBaseCommit
+		if sourceRow.BaseSnapshotID == uuid.Nil || targetRow.BaseSnapshotID == uuid.Nil {
+			return nil, ErrNoBaseSnapshot
 		}
-		commits, listErr := m.store.ListLineageCommits(ctx, sourceRow.LineageID)
+		snapshots, listErr := m.store.ListLineageSnapshots(ctx, sourceRow.LineageID)
 		if listErr != nil {
 			return nil, mapDBErr(listErr)
 		}
-		lcaCommitID, err = findLCA(commits, sourceRow.BaseCommitID, targetRow.BaseCommitID)
+		lcaSnapshotID, err = findLCA(snapshots, sourceRow.BaseSnapshotID, targetRow.BaseSnapshotID)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		if sourceRow.BaseCommitID == uuid.Nil {
-			return nil, ErrNoBaseCommit
+		if sourceRow.BaseSnapshotID == uuid.Nil {
+			return nil, ErrNoBaseSnapshot
 		}
-		lcaCommitID = sourceRow.BaseCommitID
+		lcaSnapshotID = sourceRow.BaseSnapshotID
 	}
 
 	sourceSnapDir, _, cleanupSrc, err := m.snapshotDiskForInspect(ctx, &sourceRow, "diff-src")
@@ -357,11 +357,11 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 		defer cleanupTgt()
 	}
 
-	m.lineageCommitMu.RLock()
-	defer m.lineageCommitMu.RUnlock()
+	m.lineageSnapshotMu.RLock()
+	defer m.lineageSnapshotMu.RUnlock()
 
 	diffRes, err := store.DiffTrees(ctx, &store.DiffOptions{
-		BaseRoot:      m.commitDir(lcaCommitID.String()),
+		BaseRoot:      m.snapshotDir(lcaSnapshotID.String()),
 		TargetRoot:    targetSnapDir,
 		SourceRoot:    sourceSnapDir,
 		PathPrefix:    params.PathPrefix,
@@ -375,14 +375,14 @@ func (m *manager) DiffDisk(ctx context.Context, params *DiffDiskParams) (*DiffDi
 	}
 
 	return &DiffDiskResult{
-		LCACommitID:   lcaCommitID.String(),
+		LCASnapshotID: lcaSnapshotID.String(),
 		Summary:       diffRes.Summary,
 		Entries:       diffRes.Entries,
 		NextPageToken: diffRes.NextPageToken,
 	}, nil
 }
 
-func (m *manager) ReadCommitNode(ctx context.Context, params *ReadCommitNodeParams) (*store.ReadNodeResult, error) {
+func (m *manager) ReadSnapshotNode(ctx context.Context, params *ReadSnapshotNodeParams) (*store.ReadNodeResult, error) {
 	if params == nil {
 		return nil, fmt.Errorf("%w: params cannot be nil", ErrInvalidArgument)
 	}
@@ -390,7 +390,7 @@ func (m *manager) ReadCommitNode(ctx context.Context, params *ReadCommitNodePara
 	if err != nil {
 		return nil, err
 	}
-	commitID, err := parseCommitID(params.CommitID)
+	snapshotID, err := parseSnapshotID(params.SnapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -405,34 +405,265 @@ func (m *manager) ReadCommitNode(ctx context.Context, params *ReadCommitNodePara
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
-	commits, err := m.store.ListLineageCommits(ctx, diskRow.LineageID)
+	snapshots, err := m.store.ListLineageSnapshots(ctx, diskRow.LineageID)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
 	belongsToLineage := false
-	for _, c := range commits {
-		if c.CommitID == commitID {
+	for _, s := range snapshots {
+		if s.SnapshotID == snapshotID {
 			belongsToLineage = true
 			break
 		}
 	}
 
-	m.lineageCommitMu.RLock()
-	defer m.lineageCommitMu.RUnlock()
+	m.lineageSnapshotMu.RLock()
+	defer m.lineageSnapshotMu.RUnlock()
 
-	cDir := m.commitDir(commitID.String())
+	sDir := m.snapshotDir(snapshotID.String())
 	if !belongsToLineage {
-		if _, statErr := os.Stat(cDir); statErr == nil {
-			return nil, fmt.Errorf("%w: commit %s does not belong to disk lineage %s", ErrCrossLineage, commitID, diskRow.LineageID)
+		if _, statErr := os.Stat(sDir); statErr == nil {
+			return nil, fmt.Errorf("%w: snapshot %s does not belong to disk lineage %s", ErrCrossLineage, snapshotID, diskRow.LineageID)
 		}
-		return nil, fmt.Errorf("%w: commit %s not found in lineage %s", ErrNotFound, commitID, diskRow.LineageID)
+		return nil, fmt.Errorf("%w: snapshot %s not found in lineage %s", ErrNotFound, snapshotID, diskRow.LineageID)
 	}
 
-	res, err := store.ReadCommitNodeSlice(cDir, params.Ino, params.Offset, params.Size)
+	res, err := store.ReadSnapshotNodeSlice(sDir, params.Ino, params.Offset, params.Size)
 	if err != nil {
 		return nil, mapInspectErr(err)
 	}
 	return res, nil
+}
+
+type mergeCutoverParams struct {
+	sourceRow          *db.DiskRecord
+	targetRow          *db.DiskRecord
+	lcaSnapshotID      uuid.UUID
+	newSourceSnapID    uuid.UUID
+	newMergeSnapID     uuid.UUID
+	skipSourceSnapshot bool
+	fastForward        bool
+	epoch0             uint64
+	nextWriteSeq0      uint64
+	targetMaxBytes     uint64
+	usedBytes          uint64
+	inodes             uint64
+	stagingDir         string
+	srcMarkerPath      string
+	cache              *pebble.Cache
+	cleanupUncommitted func()
+}
+
+func (m *manager) mergeAlreadyUpToDate(
+	ctx context.Context,
+	targetRow *db.DiskRecord,
+	lcaSnapshotID uuid.UUID,
+	params *MergeDiskParams,
+) (*MergeDiskResult, error) {
+	targetEntry, err := m.getOrOpenActorWithRecordLocked(ctx, targetRow)
+	if err != nil {
+		return nil, err
+	}
+	liveStat, err := targetEntry.actor.StatFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	effectiveMaxBytes := liveStat.TotalBytes
+	if params.MaxBytes != nil {
+		if *params.MaxBytes < liveStat.UsedBytes {
+			return nil, ErrInvalidShrink
+		}
+		effectiveMaxBytes = *params.MaxBytes
+	}
+
+	if params.DryRun {
+		return &MergeDiskResult{
+			LCASnapshotID:      lcaSnapshotID.String(),
+			MergeSnapshotID:    targetRow.BaseSnapshotID.String(),
+			EstimatedUsedBytes: liveStat.UsedBytes,
+			TargetMaxBytes:     effectiveMaxBytes,
+		}, nil
+	}
+
+	updatedTargetRow := *targetRow
+	if params.MaxBytes != nil {
+		updatedRow, updateErr := m.store.UpdateDisk(ctx, db.UpdateDiskInput{
+			DiskID:   targetRow.DiskID,
+			MaxBytes: params.MaxBytes,
+		})
+		if updateErr != nil {
+			return nil, mapDBErr(updateErr)
+		}
+		if maxErr := targetEntry.actor.UpdateMaxBytes(ctx, *params.MaxBytes); maxErr != nil {
+			if _, rbErr := m.store.UpdateDisk(context.WithoutCancel(ctx), db.UpdateDiskInput{
+				DiskID:   targetRow.DiskID,
+				MaxBytes: &targetRow.MaxBytes,
+			}); rbErr != nil {
+				m.logger.WarnContext(ctx, "merge no-op quota rollback pg failed",
+					"disk_id", targetRow.DiskID.String(),
+					"err", rbErr,
+				)
+			}
+			return nil, maxErr
+		}
+		liveStat, err = targetEntry.actor.StatFS(ctx)
+		if err != nil {
+			return nil, err
+		}
+		updatedTargetRow = updatedRow
+	}
+
+	return &MergeDiskResult{
+		Disk:               assembleDisk(&updatedTargetRow, &liveStat),
+		LCASnapshotID:      lcaSnapshotID.String(),
+		MergeSnapshotID:    targetRow.BaseSnapshotID.String(),
+		EstimatedUsedBytes: liveStat.UsedBytes,
+		TargetMaxBytes:     effectiveMaxBytes,
+	}, nil
+}
+
+func (m *manager) commitAndSwapMergedTarget(ctx context.Context, cp *mergeCutoverParams) (*MergeDiskResult, error) {
+	targetKey := cp.targetRow.DiskID.String()
+
+	if m.beforePhase2CutoverHook != nil {
+		m.beforePhase2CutoverHook()
+	}
+
+	m.poolMu.Lock()
+	if m.closed {
+		m.poolMu.Unlock()
+		cp.cleanupUncommitted()
+		return nil, ErrClosed
+	}
+	oldTargetEntry := m.actors[targetKey]
+	if oldTargetEntry != nil {
+		delete(m.actors, targetKey)
+	}
+	m.poolMu.Unlock()
+
+	if oldTargetEntry != nil {
+		if closeErr := oldTargetEntry.actor.Close(); closeErr != nil {
+			cp.cleanupUncommitted()
+			return nil, fmt.Errorf("关闭旧目标盘实例: %w", closeErr)
+		}
+	}
+
+	tgtDir := m.diskDir(targetKey)
+	epoch1, nextWriteSeq1, _, err := store.InspectBranchStat(tgtDir)
+	if err != nil {
+		cp.cleanupUncommitted()
+		return nil, mapInspectErr(err)
+	}
+	if epoch1 != cp.epoch0 || nextWriteSeq1 != cp.nextWriteSeq0 {
+		cp.cleanupUncommitted()
+		return nil, fmt.Errorf(
+			"%w: target disk watermark changed during merge ((%d,%d) != (%d,%d))",
+			ErrConcurrentMerge, epoch1, nextWriteSeq1, cp.epoch0, cp.nextWriteSeq0,
+		)
+	}
+
+	updatedTargetRow, err := m.store.MergeDisk(ctx, &db.MergeDiskInput{
+		LineageID:                    cp.sourceRow.LineageID,
+		SourceDiskID:                 cp.sourceRow.DiskID,
+		TargetDiskID:                 cp.targetRow.DiskID,
+		ExpectedSourceBaseSnapshotID: cp.sourceRow.BaseSnapshotID,
+		ExpectedTargetBaseSnapshotID: cp.targetRow.BaseSnapshotID,
+		NewSourceSnapshotID:          cp.newSourceSnapID,
+		NewMergeSnapshotID:           cp.newMergeSnapID,
+		SkipSourceSnapshot:           cp.skipSourceSnapshot,
+		FastForward:                  cp.fastForward,
+		TargetMaxBytes:               cp.targetMaxBytes,
+		TargetUsedBytes:              cp.usedBytes,
+		TargetUsedInodes:             cp.inodes,
+	})
+	if err != nil {
+		cp.cleanupUncommitted()
+		return nil, mapDBErr(err)
+	}
+	if cp.srcMarkerPath != "" {
+		_ = os.Remove(cp.srcMarkerPath)
+	}
+
+	oldDir := m.oldMergeDir(targetKey, cp.newMergeSnapID)
+	_ = m.removeAll(oldDir)
+	if err = os.Rename(tgtDir, oldDir); err != nil {
+		return nil, fmt.Errorf("归档旧目标盘目录: %w", err)
+	}
+	if err = os.Rename(cp.stagingDir, tgtDir); err != nil {
+		return nil, fmt.Errorf("原子替换目标盘目录: %w", err)
+	}
+	disksRoot := filepath.Join(m.storageRoot, "disks")
+	if syncErr := syncDirPath(disksRoot); syncErr != nil {
+		return nil, fmt.Errorf("持久化目录切换元数据: %w", syncErr)
+	}
+	if rmErr := m.removeAll(oldDir); rmErr != nil {
+		m.collector.incCleanupError()
+		m.logger.WarnContext(ctx, "remove archived old target directory failed",
+			"disk_id", targetKey,
+			"dir", oldDir,
+			"err", rmErr,
+		)
+	}
+
+	inoAlloc, packAlloc := m.newSegmentAllocators(updatedTargetRow.LineageID)
+	newTargetActor, err := m.openDiskActor(ctx, store.Options{
+		Dir:           tgtDir,
+		DiskID:        targetKey,
+		MaxBytes:      cp.targetMaxBytes,
+		AtimeMode:     m.atimeMode,
+		MaxPackSize:   m.maxPackSize,
+		Cache:         cp.cache,
+		Logger:        m.baseLogger,
+		Metrics:       m.storeMetrics,
+		InoAllocator:  inoAlloc,
+		PackAllocator: packAlloc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("重新打开合并后目标盘实例: %w", err)
+	}
+
+	newTargetEntry := newActorEntry(
+		updatedTargetRow.DiskID,
+		newTargetActor,
+		m.currentTime().UnixNano(),
+		updatedTargetRow.UsedBytes,
+		updatedTargetRow.UsedInodes,
+	)
+
+	m.poolMu.Lock()
+	if m.closed {
+		m.poolMu.Unlock()
+		_ = newTargetActor.Close()
+		return nil, ErrClosed
+	}
+	m.actors[targetKey] = newTargetEntry
+	m.poolMu.Unlock()
+
+	if _, clearErr := m.clearDiskMounts(ctx, cp.targetRow.DiskID); clearErr != nil {
+		m.logger.WarnContext(ctx, "merge disk clear mount leases failed",
+			"disk_id", targetKey,
+			"err", clearErr,
+		)
+	}
+	if flushErr := m.flushEntryUsage(ctx, newTargetEntry); flushErr != nil {
+		m.logger.WarnContext(ctx, "merge disk usage flush failed",
+			"disk_id", targetKey,
+			"err", flushErr,
+		)
+	}
+
+	stat, statErr := newTargetActor.StatFS(ctx)
+	if statErr != nil {
+		return nil, fmt.Errorf("查询合并后目标盘容量统计: %w", statErr)
+	}
+	return &MergeDiskResult{
+		Disk:               assembleDisk(&updatedTargetRow, &stat),
+		LCASnapshotID:      cp.lcaSnapshotID.String(),
+		MergeSnapshotID:    cp.newMergeSnapID.String(),
+		EstimatedUsedBytes: cp.usedBytes,
+		TargetMaxBytes:     cp.targetMaxBytes,
+	}, nil
 }
 
 func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*MergeDiskResult, error) {
@@ -490,15 +721,15 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	if sourceRow.LineageID != targetRow.LineageID {
 		return nil, fmt.Errorf("%w: source lineage %s != target lineage %s", ErrCrossLineage, sourceRow.LineageID, targetRow.LineageID)
 	}
-	if sourceRow.BaseCommitID == uuid.Nil || targetRow.BaseCommitID == uuid.Nil {
-		return nil, ErrNoBaseCommit
+	if sourceRow.BaseSnapshotID == uuid.Nil || targetRow.BaseSnapshotID == uuid.Nil {
+		return nil, ErrNoBaseSnapshot
 	}
 
-	commits, err := m.store.ListLineageCommits(ctx, sourceRow.LineageID)
+	snapshots, err := m.store.ListLineageSnapshots(ctx, sourceRow.LineageID)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
-	lcaCommitID, err := findLCA(commits, sourceRow.BaseCommitID, targetRow.BaseCommitID)
+	lcaSnapshotID, err := findLCA(snapshots, sourceRow.BaseSnapshotID, targetRow.BaseSnapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +740,7 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		}
 	}
 
-	sourceSnapDir, srcHasOrphans, cleanupSrc, err := m.snapshotDiskForInspect(ctx, &sourceRow, "merge-src")
+	sourceSnapDir, srcStats, cleanupSrc, err := m.snapshotDiskForInspect(ctx, &sourceRow, "merge-src")
 	if err != nil {
 		return nil, err
 	}
@@ -521,53 +752,282 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	}
 	defer cleanupTgt()
 
-	epoch0, nextWriteSeq0, _, err := store.InspectBranchStat(targetSnapDir)
+	tgtBranchStat0, _, err := store.InspectBranchStatFull(targetSnapDir)
 	if err != nil {
 		return nil, mapInspectErr(err)
 	}
+	epoch0 := tgtBranchStat0.WriterEpoch
+	nextWriteSeq0 := tgtBranchStat0.NextWriteSeq
 
-	newMergeCommitID := uuid.Must(uuid.NewV7())
-	stagingDir := m.stagingMergeDir(targetKey, newMergeCommitID)
-	var (
-		newSourceCommitID uuid.UUID
-		srcCommitDir      string
-		mergeCommitDir    string
-		srcMarkerPath     string
-		skipSourceCommit  bool
+	m.lineageSnapshotMu.RLock()
+	lcaDir := m.snapshotDir(lcaSnapshotID.String())
+	srcBaseDir := m.snapshotDir(sourceRow.BaseSnapshotID.String())
+	srcDiffRes, srcDiffErr := store.DiffTrees(ctx, &store.DiffOptions{
+		BaseRoot:   srcBaseDir,
+		SourceRoot: sourceSnapDir,
+		PageSize:   1,
+		Cache:      cache,
+	})
+	if srcDiffErr != nil {
+		m.lineageSnapshotMu.RUnlock()
+		return nil, mapInspectErr(srcDiffErr)
+	}
+	skipSourceSnapshot := srcDiffRes.Summary.Added == 0 && srcDiffRes.Summary.Modified == 0 && srcDiffRes.Summary.Deleted == 0
+
+	if sourceRow.BaseSnapshotID == lcaSnapshotID && skipSourceSnapshot {
+		m.lineageSnapshotMu.RUnlock()
+		return m.mergeAlreadyUpToDate(ctx, &targetRow, lcaSnapshotID, params)
+	}
+
+	isFastForward := false
+	if targetRow.BaseSnapshotID == lcaSnapshotID {
+		tgtDiffRes, tgtDiffErr := store.DiffTrees(ctx, &store.DiffOptions{
+			BaseRoot:   lcaDir,
+			SourceRoot: targetSnapDir,
+			PageSize:   1,
+			Cache:      cache,
+		})
+		if tgtDiffErr != nil {
+			m.lineageSnapshotMu.RUnlock()
+			return nil, mapInspectErr(tgtDiffErr)
+		}
+		if tgtDiffRes.Summary.Added == 0 && tgtDiffRes.Summary.Modified == 0 && tgtDiffRes.Summary.Deleted == 0 {
+			isFastForward = true
+		}
+	}
+
+	if isFastForward {
+		return m.mergeFastForwardLocked(
+			ctx,
+			&sourceRow,
+			&targetRow,
+			lcaSnapshotID,
+			sourceSnapDir,
+			srcStats,
+			skipSourceSnapshot,
+			tgtBranchStat0,
+			overrideMaxBytes,
+			params.DryRun,
+			cache,
+		)
+	}
+
+	return m.mergeThreeWayLocked(
+		ctx,
+		&sourceRow,
+		&targetRow,
+		lcaSnapshotID,
+		sourceSnapDir,
+		targetSnapDir,
+		srcStats.HasOrphans,
+		skipSourceSnapshot,
+		epoch0,
+		nextWriteSeq0,
+		strategy,
+		params,
+		overrideMaxBytes,
+		cache,
 	)
+}
 
-	cleanupUncommittedDirs := func() {
+func (m *manager) mergeFastForwardLocked(
+	ctx context.Context,
+	sourceRow *db.DiskRecord,
+	targetRow *db.DiskRecord,
+	lcaSnapshotID uuid.UUID,
+	sourceSnapDir string,
+	srcStats store.CheckpointStats,
+	skipSourceSnapshot bool,
+	tgtBranchStat0 store.BranchStat,
+	overrideMaxBytes uint64,
+	dryRun bool,
+	cache *pebble.Cache,
+) (*MergeDiskResult, error) {
+	srcLiveStat, _, err := store.InspectBranchStatFull(sourceSnapDir)
+	if err != nil {
+		m.lineageSnapshotMu.RUnlock()
+		return nil, mapInspectErr(err)
+	}
+	srcNextWriteSeq := srcLiveStat.NextWriteSeq
+
+	var srcUsedBytes, srcInodes uint64
+	if skipSourceSnapshot {
+		sffStat, _, statErr := store.InspectBranchStatFull(m.snapshotDir(sourceRow.BaseSnapshotID.String()))
+		if statErr != nil {
+			m.lineageSnapshotMu.RUnlock()
+			return nil, mapInspectErr(statErr)
+		}
+		srcUsedBytes = sffStat.LogicalBytes
+		srcInodes = sffStat.Inodes
+		srcNextWriteSeq = max(srcNextWriteSeq, sffStat.NextWriteSeq)
+	} else {
+		if srcStats.HasOrphans {
+			sanStat, sanErr := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
+				Dir:        sourceSnapDir,
+				SnapshotID: filepath.Base(sourceSnapDir),
+				Cache:      cache,
+				Logger:     m.baseLogger,
+				Metrics:    m.storeMetrics,
+				OpenActor:  m.openDiskActor,
+			})
+			if sanErr != nil {
+				m.lineageSnapshotMu.RUnlock()
+				return nil, fmt.Errorf("净化快进源盘孤儿节点: %w", sanErr)
+			}
+			srcUsedBytes = sanStat.UsedBytes
+			srcInodes = sanStat.Files
+			sanBranchStat, _, bErr := store.InspectBranchStatFull(sourceSnapDir)
+			if bErr != nil {
+				m.lineageSnapshotMu.RUnlock()
+				return nil, mapInspectErr(bErr)
+			}
+			srcNextWriteSeq = max(srcNextWriteSeq, sanBranchStat.NextWriteSeq)
+		} else {
+			srcUsedBytes = srcLiveStat.LogicalBytes
+			srcInodes = srcLiveStat.Inodes
+		}
+	}
+
+	targetMaxBytes := tgtBranchStat0.MaxBytes
+	if targetMaxBytes == 0 {
+		targetMaxBytes = targetRow.MaxBytes
+	}
+	if overrideMaxBytes > 0 {
+		targetMaxBytes = overrideMaxBytes
+		if srcUsedBytes > targetMaxBytes {
+			m.lineageSnapshotMu.RUnlock()
+			return nil, ErrInvalidShrink
+		}
+	} else if targetMaxBytes > 0 && srcUsedBytes > targetMaxBytes {
+		m.lineageSnapshotMu.RUnlock()
+		return nil, ErrNoSpace
+	}
+
+	if dryRun {
+		m.lineageSnapshotMu.RUnlock()
+		return &MergeDiskResult{
+			LCASnapshotID:      lcaSnapshotID.String(),
+			EstimatedUsedBytes: srcUsedBytes,
+			TargetMaxBytes:     targetMaxBytes,
+		}, nil
+	}
+
+	targetKey := targetRow.DiskID.String()
+	var (
+		ffSnapID         uuid.UUID
+		newSourceSnapID  uuid.UUID
+		ffCreatedSnapDir string
+		srcMarkerPath    string
+		stagingDir       string
+	)
+	cleanupUncommitted := func() {
 		if stagingDir != "" {
 			_ = m.removeAll(stagingDir)
 		}
-		if mergeCommitDir != "" {
-			_ = m.removeAll(mergeCommitDir)
-		}
-		if srcCommitDir != "" {
-			_ = m.removeAll(srcCommitDir)
+		if ffCreatedSnapDir != "" {
+			_ = m.removeAll(ffCreatedSnapDir)
 		}
 		if srcMarkerPath != "" {
 			_ = os.Remove(srcMarkerPath)
 		}
 	}
 
-	m.lineageCommitMu.RLock()
-	baseCommitDir := m.commitDir(sourceRow.BaseCommitID.String())
-	srcDiffRes, srcDiffErr := store.DiffTrees(ctx, &store.DiffOptions{
-		BaseRoot:   baseCommitDir,
-		SourceRoot: sourceSnapDir,
-		PageSize:   1,
-		Cache:      cache,
-	})
-	if srcDiffErr != nil {
-		m.lineageCommitMu.RUnlock()
-		cleanupUncommittedDirs()
-		return nil, mapInspectErr(srcDiffErr)
-	}
-	if srcDiffRes.Summary.Added == 0 && srcDiffRes.Summary.Modified == 0 && srcDiffRes.Summary.Deleted == 0 {
-		skipSourceCommit = true
+	if skipSourceSnapshot {
+		ffSnapID = sourceRow.BaseSnapshotID
 	} else {
-		newSourceCommitID = uuid.Must(uuid.NewV7())
+		ffSnapID = uuid.Must(uuid.NewV7())
+		newSourceSnapID = ffSnapID
+		srcMarkerPath = m.srcSnapshotMarkerPath(targetKey, ffSnapID, ffSnapID)
+		if mkErr := os.WriteFile(srcMarkerPath, nil, 0o644); mkErr != nil {
+			m.lineageSnapshotMu.RUnlock()
+			cleanupUncommitted()
+			return nil, fmt.Errorf("写入快进快照崩溃恢复标记: %w", mkErr)
+		}
+		_ = syncDirPath(filepath.Dir(srcMarkerPath))
+		ffCreatedSnapDir = m.snapshotDir(ffSnapID.String())
+		if cloneErr := store.CloneCheckpointDir(ctx, sourceSnapDir, ffCreatedSnapDir); cloneErr != nil {
+			m.lineageSnapshotMu.RUnlock()
+			cleanupUncommitted()
+			return nil, fmt.Errorf("物化快进快照目录: %w", cloneErr)
+		}
+	}
+
+	stagingDir = m.stagingMergeDir(targetKey, ffSnapID)
+	if cloneErr := store.CloneCheckpointDir(ctx, m.snapshotDir(ffSnapID.String()), stagingDir); cloneErr != nil {
+		m.lineageSnapshotMu.RUnlock()
+		cleanupUncommitted()
+		return nil, fmt.Errorf("零拷贝构造快进暂存目录: %w", cloneErr)
+	}
+	m.lineageSnapshotMu.RUnlock()
+
+	nextWriteSeqFF := max(tgtBranchStat0.NextWriteSeq, srcNextWriteSeq) + 1
+	if _, alignErr := store.AlignBranchStat(stagingDir, targetMaxBytes, tgtBranchStat0.WriterEpoch+1, nextWriteSeqFF, cache); alignErr != nil {
+		cleanupUncommitted()
+		return nil, mapInspectErr(alignErr)
+	}
+
+	return m.commitAndSwapMergedTarget(ctx, &mergeCutoverParams{
+		sourceRow:          sourceRow,
+		targetRow:          targetRow,
+		lcaSnapshotID:      lcaSnapshotID,
+		newSourceSnapID:    newSourceSnapID,
+		newMergeSnapID:     ffSnapID,
+		skipSourceSnapshot: skipSourceSnapshot,
+		fastForward:        true,
+		epoch0:             tgtBranchStat0.WriterEpoch,
+		nextWriteSeq0:      tgtBranchStat0.NextWriteSeq,
+		targetMaxBytes:     targetMaxBytes,
+		usedBytes:          srcUsedBytes,
+		inodes:             srcInodes,
+		stagingDir:         stagingDir,
+		srcMarkerPath:      srcMarkerPath,
+		cache:              cache,
+		cleanupUncommitted: cleanupUncommitted,
+	})
+}
+
+func (m *manager) mergeThreeWayLocked(
+	ctx context.Context,
+	sourceRow *db.DiskRecord,
+	targetRow *db.DiskRecord,
+	lcaSnapshotID uuid.UUID,
+	sourceSnapDir string,
+	targetSnapDir string,
+	srcHasOrphans bool,
+	skipSourceSnapshot bool,
+	epoch0 uint64,
+	nextWriteSeq0 uint64,
+	strategy store.MergeStrategy,
+	params *MergeDiskParams,
+	overrideMaxBytes uint64,
+	cache *pebble.Cache,
+) (*MergeDiskResult, error) {
+	targetKey := targetRow.DiskID.String()
+	newMergeSnapID := uuid.Must(uuid.NewV7())
+	stagingDir := m.stagingMergeDir(targetKey, newMergeSnapID)
+	var (
+		newSourceSnapID uuid.UUID
+		srcSnapDir      string
+		mergeSnapDir    string
+		srcMarkerPath   string
+	)
+	if !skipSourceSnapshot {
+		newSourceSnapID = uuid.Must(uuid.NewV7())
+	}
+
+	cleanupUncommitted := func() {
+		if stagingDir != "" {
+			_ = m.removeAll(stagingDir)
+		}
+		if mergeSnapDir != "" {
+			_ = m.removeAll(mergeSnapDir)
+		}
+		if srcSnapDir != "" {
+			_ = m.removeAll(srcSnapDir)
+		}
+		if srcMarkerPath != "" {
+			_ = os.Remove(srcMarkerPath)
+		}
 	}
 
 	var (
@@ -579,7 +1039,7 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 	}
 
 	mergeRes, err := store.MergeTrees(ctx, &store.MergeOptions{
-		BaseRoot:            m.commitDir(lcaCommitID.String()),
+		BaseRoot:            m.snapshotDir(lcaSnapshotID.String()),
 		TargetRoot:          targetSnapDir,
 		SourceRoot:          sourceSnapDir,
 		StagingDir:          stagingDir,
@@ -593,202 +1053,83 @@ func (m *manager) MergeDisk(ctx context.Context, params *MergeDiskParams) (*Merg
 		Cache:               cache,
 	})
 	if err != nil {
-		m.lineageCommitMu.RUnlock()
-		cleanupUncommittedDirs()
+		m.lineageSnapshotMu.RUnlock()
+		cleanupUncommitted()
 		if conflictErr, ok := errors.AsType[*store.ErrMergeConflict](err); ok {
 			return nil, &MergeConflictError{
-				LCACommitID: lcaCommitID.String(),
-				Report:      conflictErr.Report,
-				Err:         conflictErr,
+				LCASnapshotID: lcaSnapshotID.String(),
+				Report:        conflictErr.Report,
+				Err:           conflictErr,
 			}
 		}
 		return nil, mapInspectErr(err)
 	}
 
 	if params.DryRun {
-		m.lineageCommitMu.RUnlock()
-		cleanupUncommittedDirs()
+		m.lineageSnapshotMu.RUnlock()
+		cleanupUncommitted()
 		return &MergeDiskResult{
-			LCACommitID:        lcaCommitID.String(),
+			LCASnapshotID:      lcaSnapshotID.String(),
 			EstimatedUsedBytes: mergeRes.UsedBytes,
 			TargetMaxBytes:     mergeRes.TargetMaxBytes,
 		}, nil
 	}
 
-	mergeCommitDir = m.commitDir(newMergeCommitID.String())
-	if cloneErr := store.CloneCheckpointDir(ctx, stagingDir, mergeCommitDir); cloneErr != nil {
-		m.lineageCommitMu.RUnlock()
-		cleanupUncommittedDirs()
-		return nil, fmt.Errorf("物化合并切面目录: %w", cloneErr)
+	mergeSnapDir = m.snapshotDir(newMergeSnapID.String())
+	if cloneErr := store.CloneCheckpointDir(ctx, stagingDir, mergeSnapDir); cloneErr != nil {
+		m.lineageSnapshotMu.RUnlock()
+		cleanupUncommitted()
+		return nil, fmt.Errorf("物化合并快照目录: %w", cloneErr)
 	}
-	if !skipSourceCommit {
-		srcMarkerPath = m.srcCommitMarkerPath(targetKey, newMergeCommitID, newSourceCommitID)
+	if !skipSourceSnapshot {
+		srcMarkerPath = m.srcSnapshotMarkerPath(targetKey, newMergeSnapID, newSourceSnapID)
 		if mkErr := os.WriteFile(srcMarkerPath, nil, 0o644); mkErr != nil {
-			m.lineageCommitMu.RUnlock()
-			cleanupUncommittedDirs()
-			return nil, fmt.Errorf("写入源提交崩溃恢复标记: %w", mkErr)
+			m.lineageSnapshotMu.RUnlock()
+			cleanupUncommitted()
+			return nil, fmt.Errorf("写入源快照崩溃恢复标记: %w", mkErr)
 		}
 		_ = syncDirPath(filepath.Dir(srcMarkerPath))
-		srcCommitDir = m.commitDir(newSourceCommitID.String())
-		if cloneErr := store.CloneCheckpointDir(ctx, sourceSnapDir, srcCommitDir); cloneErr != nil {
-			m.lineageCommitMu.RUnlock()
-			cleanupUncommittedDirs()
-			return nil, fmt.Errorf("物化源盘提交切面目录: %w", cloneErr)
+		srcSnapDir = m.snapshotDir(newSourceSnapID.String())
+		if cloneErr := store.CloneCheckpointDir(ctx, sourceSnapDir, srcSnapDir); cloneErr != nil {
+			m.lineageSnapshotMu.RUnlock()
+			cleanupUncommitted()
+			return nil, fmt.Errorf("物化源盘快照目录: %w", cloneErr)
 		}
 		if srcHasOrphans {
 			if _, sanErr := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{
-				Dir:       srcCommitDir,
-				CommitID:  newSourceCommitID.String(),
-				Cache:     cache,
-				Logger:    m.baseLogger,
-				Metrics:   m.storeMetrics,
-				OpenActor: m.openDiskActor,
+				Dir:        srcSnapDir,
+				SnapshotID: newSourceSnapID.String(),
+				Cache:      cache,
+				Logger:     m.baseLogger,
+				Metrics:    m.storeMetrics,
+				OpenActor:  m.openDiskActor,
 			}); sanErr != nil {
-				m.lineageCommitMu.RUnlock()
-				cleanupUncommittedDirs()
-				return nil, fmt.Errorf("净化源盘提交切面孤儿节点: %w", sanErr)
+				m.lineageSnapshotMu.RUnlock()
+				cleanupUncommitted()
+				return nil, fmt.Errorf("净化源盘快照孤儿节点: %w", sanErr)
 			}
 		}
 	}
-	m.lineageCommitMu.RUnlock()
+	m.lineageSnapshotMu.RUnlock()
 
-	if m.beforePhase2CutoverHook != nil {
-		m.beforePhase2CutoverHook()
-	}
-
-	m.poolMu.Lock()
-	if m.closed {
-		m.poolMu.Unlock()
-		cleanupUncommittedDirs()
-		return nil, ErrClosed
-	}
-	oldTargetEntry := m.actors[targetKey]
-	if oldTargetEntry != nil {
-		delete(m.actors, targetKey)
-	}
-	m.poolMu.Unlock()
-
-	if oldTargetEntry != nil {
-		if closeErr := oldTargetEntry.actor.Close(); closeErr != nil {
-			cleanupUncommittedDirs()
-			return nil, fmt.Errorf("关闭旧目标盘实例: %w", closeErr)
-		}
-	}
-
-	tgtDir := m.diskDir(targetKey)
-	epoch1, nextWriteSeq1, _, err := store.InspectBranchStat(tgtDir)
-	if err != nil {
-		cleanupUncommittedDirs()
-		return nil, mapInspectErr(err)
-	}
-	if epoch1 != epoch0 || nextWriteSeq1 != nextWriteSeq0 {
-		cleanupUncommittedDirs()
-		return nil, fmt.Errorf(
-			"%w: target disk watermark changed during merge ((%d,%d) != (%d,%d))",
-			ErrConcurrentMerge, epoch1, nextWriteSeq1, epoch0, nextWriteSeq0,
-		)
-	}
-
-	updatedTargetRow, err := m.store.MergeDisk(ctx, &db.MergeDiskInput{
-		LineageID:                  sourceRow.LineageID,
-		SourceDiskID:               sourceID,
-		TargetDiskID:               targetID,
-		ExpectedSourceBaseCommitID: sourceRow.BaseCommitID,
-		ExpectedTargetBaseCommitID: targetRow.BaseCommitID,
-		NewSourceCommitID:          newSourceCommitID,
-		NewMergeCommitID:           newMergeCommitID,
-		SkipSourceCommit:           skipSourceCommit,
-		TargetMaxBytes:             mergeRes.TargetMaxBytes,
-		TargetUsedBytes:            mergeRes.UsedBytes,
-		TargetUsedInodes:           mergeRes.Inodes,
+	return m.commitAndSwapMergedTarget(ctx, &mergeCutoverParams{
+		sourceRow:          sourceRow,
+		targetRow:          targetRow,
+		lcaSnapshotID:      lcaSnapshotID,
+		newSourceSnapID:    newSourceSnapID,
+		newMergeSnapID:     newMergeSnapID,
+		skipSourceSnapshot: skipSourceSnapshot,
+		fastForward:        false,
+		epoch0:             epoch0,
+		nextWriteSeq0:      nextWriteSeq0,
+		targetMaxBytes:     mergeRes.TargetMaxBytes,
+		usedBytes:          mergeRes.UsedBytes,
+		inodes:             mergeRes.Inodes,
+		stagingDir:         stagingDir,
+		srcMarkerPath:      srcMarkerPath,
+		cache:              cache,
+		cleanupUncommitted: cleanupUncommitted,
 	})
-	if err != nil {
-		cleanupUncommittedDirs()
-		return nil, mapDBErr(err)
-	}
-	if srcMarkerPath != "" {
-		_ = os.Remove(srcMarkerPath)
-	}
-
-	oldDir := m.oldMergeDir(targetKey, newMergeCommitID)
-	_ = m.removeAll(oldDir)
-	if err = os.Rename(tgtDir, oldDir); err != nil {
-		return nil, fmt.Errorf("归档旧目标盘目录: %w", err)
-	}
-	if err = os.Rename(stagingDir, tgtDir); err != nil {
-		return nil, fmt.Errorf("原子替换目标盘目录: %w", err)
-	}
-	disksRoot := filepath.Join(m.storageRoot, "disks")
-	if syncErr := syncDirPath(disksRoot); syncErr != nil {
-		return nil, fmt.Errorf("持久化目录切换元数据: %w", syncErr)
-	}
-	if rmErr := m.removeAll(oldDir); rmErr != nil {
-		m.collector.incCleanupError()
-		m.logger.WarnContext(ctx, "remove archived old target directory failed",
-			"disk_id", targetKey,
-			"dir", oldDir,
-			"err", rmErr,
-		)
-	}
-
-	inoAlloc, packAlloc = m.newSegmentAllocators(updatedTargetRow.LineageID)
-	newTargetActor, err := m.openDiskActor(ctx, store.Options{
-		Dir:           tgtDir,
-		DiskID:        targetKey,
-		MaxBytes:      mergeRes.TargetMaxBytes,
-		AtimeMode:     m.atimeMode,
-		MaxPackSize:   m.maxPackSize,
-		Cache:         cache,
-		Logger:        m.baseLogger,
-		Metrics:       m.storeMetrics,
-		InoAllocator:  inoAlloc,
-		PackAllocator: packAlloc,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("重新打开合并后目标盘实例: %w", err)
-	}
-
-	newTargetEntry := newActorEntry(
-		updatedTargetRow.DiskID,
-		newTargetActor,
-		m.currentTime().UnixNano(),
-		updatedTargetRow.UsedBytes,
-		updatedTargetRow.UsedInodes,
-	)
-
-	m.poolMu.Lock()
-	if m.closed {
-		m.poolMu.Unlock()
-		_ = newTargetActor.Close()
-		return nil, ErrClosed
-	}
-	m.actors[targetKey] = newTargetEntry
-	m.poolMu.Unlock()
-
-	if _, clearErr := m.clearDiskMounts(ctx, targetID); clearErr != nil {
-		m.logger.WarnContext(ctx, "merge disk clear mount leases failed",
-			"disk_id", targetKey,
-			"err", clearErr,
-		)
-	}
-	if flushErr := m.flushEntryUsage(ctx, newTargetEntry); flushErr != nil {
-		m.logger.WarnContext(ctx, "merge disk usage flush failed",
-			"disk_id", targetKey,
-			"err", flushErr,
-		)
-	}
-
-	stat, statErr := newTargetActor.StatFS(ctx)
-	if statErr != nil {
-		return nil, fmt.Errorf("查询合并后目标盘容量统计: %w", statErr)
-	}
-	return &MergeDiskResult{
-		Disk:               assembleDisk(&updatedTargetRow, &stat),
-		LCACommitID:        lcaCommitID.String(),
-		MergeCommitID:      newMergeCommitID.String(),
-		EstimatedUsedBytes: mergeRes.UsedBytes,
-		TargetMaxBytes:     mergeRes.TargetMaxBytes,
-	}, nil
 }
 
 func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string) error {
@@ -803,9 +1144,9 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 
 	mergePrefix := diskID + ".merge."
 	oldPrefix := diskID + ".old."
-	srcPrefix := diskID + ".srccommit."
-	pendingCommitIDs := make(map[uuid.UUID]struct{})
-	linkedSrcCommits := make(map[uuid.UUID][]uuid.UUID)
+	srcPrefix := diskID + ".srcsnap."
+	pendingSnapIDs := make(map[uuid.UUID]struct{})
+	linkedSrcSnaps := make(map[uuid.UUID][]uuid.UUID)
 	markerPaths := make(map[uuid.UUID][]string)
 	var rawLeftovers []string
 
@@ -813,19 +1154,19 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 		name := e.Name()
 		switch {
 		case strings.HasPrefix(name, mergePrefix):
-			cid, parseErr := uuid.Parse(strings.TrimPrefix(name, mergePrefix))
-			if parseErr != nil || cid == uuid.Nil {
+			sid, parseErr := uuid.Parse(strings.TrimPrefix(name, mergePrefix))
+			if parseErr != nil || sid == uuid.Nil {
 				rawLeftovers = append(rawLeftovers, filepath.Join(disksRoot, name))
 				continue
 			}
-			pendingCommitIDs[cid] = struct{}{}
+			pendingSnapIDs[sid] = struct{}{}
 		case strings.HasPrefix(name, oldPrefix):
-			cid, parseErr := uuid.Parse(strings.TrimPrefix(name, oldPrefix))
-			if parseErr != nil || cid == uuid.Nil {
+			sid, parseErr := uuid.Parse(strings.TrimPrefix(name, oldPrefix))
+			if parseErr != nil || sid == uuid.Nil {
 				rawLeftovers = append(rawLeftovers, filepath.Join(disksRoot, name))
 				continue
 			}
-			pendingCommitIDs[cid] = struct{}{}
+			pendingSnapIDs[sid] = struct{}{}
 		case strings.HasPrefix(name, srcPrefix):
 			rest := strings.TrimPrefix(name, srcPrefix)
 			parts := strings.Split(rest, ".")
@@ -833,22 +1174,22 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 				rawLeftovers = append(rawLeftovers, filepath.Join(disksRoot, name))
 				continue
 			}
-			mergeCID, errMerge := uuid.Parse(parts[0])
-			srcCID, errSrc := uuid.Parse(parts[1])
-			if errMerge != nil || errSrc != nil || mergeCID == uuid.Nil || srcCID == uuid.Nil {
+			mergeSID, errMerge := uuid.Parse(parts[0])
+			srcSID, errSrc := uuid.Parse(parts[1])
+			if errMerge != nil || errSrc != nil || mergeSID == uuid.Nil || srcSID == uuid.Nil {
 				rawLeftovers = append(rawLeftovers, filepath.Join(disksRoot, name))
 				continue
 			}
-			pendingCommitIDs[mergeCID] = struct{}{}
-			linkedSrcCommits[mergeCID] = append(linkedSrcCommits[mergeCID], srcCID)
-			markerPaths[mergeCID] = append(markerPaths[mergeCID], filepath.Join(disksRoot, name))
+			pendingSnapIDs[mergeSID] = struct{}{}
+			linkedSrcSnaps[mergeSID] = append(linkedSrcSnaps[mergeSID], srcSID)
+			markerPaths[mergeSID] = append(markerPaths[mergeSID], filepath.Join(disksRoot, name))
 		}
 	}
 
 	for _, dir := range rawLeftovers {
 		_ = m.removeAll(dir)
 	}
-	if len(pendingCommitIDs) == 0 {
+	if len(pendingSnapIDs) == 0 {
 		return nil
 	}
 
@@ -859,10 +1200,10 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 	row, err := m.store.GetDisk(ctx, parsedDiskID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			for cid := range pendingCommitIDs {
-				_ = m.removeAll(m.stagingMergeDir(diskID, cid))
-				_ = m.removeAll(m.oldMergeDir(diskID, cid))
-				for _, mp := range markerPaths[cid] {
+			for sid := range pendingSnapIDs {
+				_ = m.removeAll(m.stagingMergeDir(diskID, sid))
+				_ = m.removeAll(m.oldMergeDir(diskID, sid))
+				for _, mp := range markerPaths[sid] {
 					_ = os.Remove(mp)
 				}
 			}
@@ -871,33 +1212,33 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 		return mapDBErr(err)
 	}
 
-	knownCommits := make(map[uuid.UUID]struct{})
-	commits, listErr := m.store.ListLineageCommits(ctx, row.LineageID)
+	knownSnapshots := make(map[uuid.UUID]struct{})
+	snapshots, listErr := m.store.ListLineageSnapshots(ctx, row.LineageID)
 	if listErr == nil {
-		for _, c := range commits {
-			knownCommits[c.CommitID] = struct{}{}
+		for _, s := range snapshots {
+			knownSnapshots[s.SnapshotID] = struct{}{}
 		}
 	}
 
-	orderedCIDs := make([]uuid.UUID, 0, len(pendingCommitIDs))
-	if _, hasBase := pendingCommitIDs[row.BaseCommitID]; hasBase && row.BaseCommitID != uuid.Nil {
-		orderedCIDs = append(orderedCIDs, row.BaseCommitID)
+	orderedSIDs := make([]uuid.UUID, 0, len(pendingSnapIDs))
+	if _, hasBase := pendingSnapIDs[row.BaseSnapshotID]; hasBase && row.BaseSnapshotID != uuid.Nil {
+		orderedSIDs = append(orderedSIDs, row.BaseSnapshotID)
 	}
-	var restCIDs []uuid.UUID
-	for cid := range pendingCommitIDs {
-		if cid != row.BaseCommitID {
-			restCIDs = append(restCIDs, cid)
+	var restSIDs []uuid.UUID
+	for sid := range pendingSnapIDs {
+		if sid != row.BaseSnapshotID {
+			restSIDs = append(restSIDs, sid)
 		}
 	}
-	slices.SortFunc(restCIDs, func(a, b uuid.UUID) int {
+	slices.SortFunc(restSIDs, func(a, b uuid.UUID) int {
 		return strings.Compare(a.String(), b.String())
 	})
-	orderedCIDs = append(orderedCIDs, restCIDs...)
+	orderedSIDs = append(orderedSIDs, restSIDs...)
 
 	tgtDir := m.diskDir(diskID)
-	for _, cid := range orderedCIDs {
-		stagingDir := m.stagingMergeDir(diskID, cid)
-		oldDir := m.oldMergeDir(diskID, cid)
+	for _, sid := range orderedSIDs {
+		stagingDir := m.stagingMergeDir(diskID, sid)
+		oldDir := m.oldMergeDir(diskID, sid)
 
 		_, tgtErr := os.Stat(tgtDir)
 		tgtExists := tgtErr == nil
@@ -907,7 +1248,7 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 		_, oldErr := os.Stat(oldDir)
 		oldExists := oldErr == nil
 
-		shouldRollForward := (row.BaseCommitID == cid) || (tgtMissing && stagingExists && oldExists)
+		shouldRollForward := (row.BaseSnapshotID == sid) || (tgtMissing && stagingExists && oldExists)
 		if shouldRollForward {
 			if stagingExists {
 				if tgtExists {
@@ -930,20 +1271,20 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 			_ = m.removeAll(stagingDir)
 			_ = m.removeAll(oldDir)
 			if listErr == nil {
-				m.lineageCommitMu.Lock()
-				if _, committed := knownCommits[cid]; !committed {
-					_ = m.removeAll(m.commitDir(cid.String()))
+				m.lineageSnapshotMu.Lock()
+				if _, committed := knownSnapshots[sid]; !committed {
+					_ = m.removeAll(m.snapshotDir(sid.String()))
 				}
-				for _, srcCID := range linkedSrcCommits[cid] {
-					if _, committed := knownCommits[srcCID]; !committed {
-						_ = m.removeAll(m.commitDir(srcCID.String()))
+				for _, srcSID := range linkedSrcSnaps[sid] {
+					if _, committed := knownSnapshots[srcSID]; !committed {
+						_ = m.removeAll(m.snapshotDir(srcSID.String()))
 					}
 				}
-				m.lineageCommitMu.Unlock()
+				m.lineageSnapshotMu.Unlock()
 			}
 		}
 
-		for _, mp := range markerPaths[cid] {
+		for _, mp := range markerPaths[sid] {
 			_ = os.Remove(mp)
 		}
 	}
@@ -963,7 +1304,7 @@ func (m *manager) reconcileOtherPendingMergesBeforeDelete(ctx context.Context, d
 	otherDiskSet := make(map[string]struct{})
 	for _, e := range entries {
 		name := e.Name()
-		for _, marker := range []string{".merge.", ".old.", ".srccommit."} {
+		for _, marker := range []string{".merge.", ".old.", ".srcsnap."} {
 			if prefix, _, found := strings.Cut(name, marker); found && prefix != "" && prefix != deletingDiskID {
 				if parsed, parseErr := uuid.Parse(prefix); parseErr == nil && parsed != uuid.Nil {
 					otherDiskSet[parsed.String()] = struct{}{}
@@ -1003,7 +1344,7 @@ func (m *manager) cleanupPendingMergeArtifactsForDisk(ctx context.Context, diskI
 		name := e.Name()
 		if strings.HasPrefix(name, diskID+".merge.") ||
 			strings.HasPrefix(name, diskID+".old.") ||
-			strings.HasPrefix(name, diskID+".srccommit.") {
+			strings.HasPrefix(name, diskID+".srcsnap.") {
 			p := filepath.Join(disksRoot, name)
 			if rmErr := m.removeAll(p); rmErr != nil {
 				m.collector.incCleanupError()

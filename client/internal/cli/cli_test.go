@@ -89,46 +89,47 @@ func (r errReader) Read(_ []byte) (int, error) {
 type fakeStorage struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 
-	mu              sync.Mutex
-	disks           map[string]*storagev1.Disk
-	mounted         map[string]bool
-	mountLeases     map[string]map[string]*storagev1.MountLease
-	nextSeq         int
-	epochSeq        uint64
-	lastAuth        string
-	lastTraceparent string
-	lastRequestID   string
-	deleteCalls     int
-	updateCalls     int
-	diffCalls       int
-	readCommitCalls int
-	readCalls       int
-	readlinkCalls   int
-	mergeCalls      int
-	listMountsCalls int
-	evictCalls      int
-	lastDiffReq     *storagev1.DiffDiskRequest
-	lastMergeReq    *storagev1.MergeDiskRequest
-	lastEvictReq    *storagev1.EvictMountsRequest
-	diffResponse    *storagev1.DiffDiskResponse
-	commitNodes     map[string]*storagev1.ReadCommitNodeResponse
-	liveFiles       map[string][]byte
-	liveSymlinks    map[string][]byte
-	mergeResponse   *storagev1.MergeDiskResponse
-	forcedErr       map[string]error
-	returnNilDisk   map[string]bool
-	mountZeroRoot   bool
-	mountZeroEpoch  bool
-	mountIDSeq      int
-	mountLeaseTTL   uint32
-	mountReqs       []*storagev1.MountDiskRequest
-	renewReqs       []*storagev1.RenewMountRequest
-	unmountReqs     []*storagev1.UnmountDiskRequest
-	renewErr        error
-	unmountErr      error
-	onMountDisk     func(context.Context, *storagev1.MountDiskRequest) error
-	onRenewMount    func(*storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error)
-	onUnmountDisk   func(*storagev1.UnmountDiskRequest)
+	mu                sync.Mutex
+	disks             map[string]*storagev1.Disk
+	mounted           map[string]bool
+	mountLeases       map[string]map[string]*storagev1.MountLease
+	nextSeq           int
+	epochSeq          uint64
+	lastAuth          string
+	lastTraceparent   string
+	lastRequestID     string
+	deleteCalls       int
+	updateCalls       int
+	diffCalls         int
+	readSnapshotCalls int
+	readCalls         int
+	readlinkCalls     int
+	mergeCalls        int
+	listMountsCalls   int
+	evictCalls        int
+	lastDeleteReq     *storagev1.DeleteDiskRequest
+	lastDiffReq       *storagev1.DiffDiskRequest
+	lastMergeReq      *storagev1.MergeDiskRequest
+	lastEvictReq      *storagev1.EvictMountsRequest
+	diffResponse      *storagev1.DiffDiskResponse
+	snapshotNodes     map[string]*storagev1.ReadSnapshotNodeResponse
+	liveFiles         map[string][]byte
+	liveSymlinks      map[string][]byte
+	mergeResponse     *storagev1.MergeDiskResponse
+	forcedErr         map[string]error
+	returnNilDisk     map[string]bool
+	mountZeroRoot     bool
+	mountZeroEpoch    bool
+	mountIDSeq        int
+	mountLeaseTTL     uint32
+	mountReqs         []*storagev1.MountDiskRequest
+	renewReqs         []*storagev1.RenewMountRequest
+	unmountReqs       []*storagev1.UnmountDiskRequest
+	renewErr          error
+	unmountErr        error
+	onMountDisk       func(context.Context, *storagev1.MountDiskRequest) error
+	onRenewMount      func(*storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error)
+	onUnmountDisk     func(*storagev1.UnmountDiskRequest)
 }
 
 func newFakeStorage() *fakeStorage {
@@ -136,7 +137,7 @@ func newFakeStorage() *fakeStorage {
 		disks:         make(map[string]*storagev1.Disk),
 		mounted:       make(map[string]bool),
 		mountLeases:   make(map[string]map[string]*storagev1.MountLease),
-		commitNodes:   make(map[string]*storagev1.ReadCommitNodeResponse),
+		snapshotNodes: make(map[string]*storagev1.ReadSnapshotNodeResponse),
 		liveFiles:     make(map[string][]byte),
 		liveSymlinks:  make(map[string][]byte),
 		forcedErr:     make(map[string]error),
@@ -348,6 +349,7 @@ func (f *fakeStorage) DeleteDisk(_ context.Context, req *connect.Request[storage
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleteCalls++
+	f.lastDeleteReq = req.Msg
 	f.recordHeaders(req.Header())
 	if err := f.forcedErr["DeleteDisk"]; err != nil {
 		return nil, err
@@ -557,28 +559,28 @@ func (f *fakeStorage) getUnmountReqs() []*storagev1.UnmountDiskRequest {
 	return out
 }
 
-func fakeCommitNodeKey(diskID, commitID string, ino uint64) string {
-	return fmt.Sprintf("%s|%s|%d", diskID, commitID, ino)
+func fakeSnapshotNodeKey(diskID, snapshotID string, ino uint64) string {
+	return fmt.Sprintf("%s|%s|%d", diskID, snapshotID, ino)
 }
 
 func fakeLiveNodeKey(diskID string, ino uint64) string {
 	return fmt.Sprintf("%s|%d", diskID, ino)
 }
 
-func (f *fakeStorage) seedCommitFile(diskID, commitID string, ino uint64, mode uint32, data []byte) {
+func (f *fakeStorage) seedSnapshotFile(diskID, snapshotID string, ino uint64, mode uint32, data []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.commitNodes[fakeCommitNodeKey(diskID, commitID, ino)] = &storagev1.ReadCommitNodeResponse{
+	f.snapshotNodes[fakeSnapshotNodeKey(diskID, snapshotID, ino)] = &storagev1.ReadSnapshotNodeResponse{
 		Mode:     mode,
 		FileSize: uint64(len(data)),
 		Data:     append([]byte(nil), data...),
 	}
 }
 
-func (f *fakeStorage) seedCommitSymlink(diskID, commitID string, ino uint64, target string) {
+func (f *fakeStorage) seedSnapshotSymlink(diskID, snapshotID string, ino uint64, target string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.commitNodes[fakeCommitNodeKey(diskID, commitID, ino)] = &storagev1.ReadCommitNodeResponse{
+	f.snapshotNodes[fakeSnapshotNodeKey(diskID, snapshotID, ino)] = &storagev1.ReadSnapshotNodeResponse{
 		Mode:          0o120777,
 		FileSize:      uint64(len(target)),
 		SymlinkTarget: []byte(target),
@@ -615,20 +617,20 @@ func (f *fakeStorage) DiffDisk(_ context.Context, req *connect.Request[storagev1
 	return connect.NewResponse(f.diffResponse), nil
 }
 
-func (f *fakeStorage) ReadCommitNode(_ context.Context, req *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
+func (f *fakeStorage) ReadSnapshotNode(_ context.Context, req *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.readCommitCalls++
+	f.readSnapshotCalls++
 	f.recordHeaders(req.Header())
-	if err := f.forcedErr["ReadCommitNode"]; err != nil {
+	if err := f.forcedErr["ReadSnapshotNode"]; err != nil {
 		return nil, err
 	}
-	node, ok := f.commitNodes[fakeCommitNodeKey(req.Msg.GetDiskId(), req.Msg.GetCommitId(), req.Msg.GetIno())]
+	node, ok := f.snapshotNodes[fakeSnapshotNodeKey(req.Msg.GetDiskId(), req.Msg.GetSnapshotId(), req.Msg.GetIno())]
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("commit node not found"))
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("snapshot node not found"))
 	}
 	if len(node.GetSymlinkTarget()) > 0 || node.GetMode()&0o170000 == 0o120000 {
-		return connect.NewResponse(&storagev1.ReadCommitNodeResponse{
+		return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{
 			Mode:          node.GetMode(),
 			FileSize:      node.GetFileSize(),
 			Eof:           true,
@@ -638,7 +640,7 @@ func (f *fakeStorage) ReadCommitNode(_ context.Context, req *connect.Request[sto
 	data := node.GetData()
 	off := int(req.Msg.GetOffset())
 	if off >= len(data) {
-		return connect.NewResponse(&storagev1.ReadCommitNodeResponse{
+		return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{
 			Mode:     node.GetMode(),
 			FileSize: uint64(len(data)),
 			Eof:      true,
@@ -648,7 +650,7 @@ func (f *fakeStorage) ReadCommitNode(_ context.Context, req *connect.Request[sto
 	if sz := int(req.Msg.GetSize()); sz > 0 && off+sz < end {
 		end = off + sz
 	}
-	return connect.NewResponse(&storagev1.ReadCommitNodeResponse{
+	return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{
 		Mode:     node.GetMode(),
 		FileSize: uint64(len(data)),
 		Data:     append([]byte(nil), data[off:end]...),
@@ -723,15 +725,15 @@ func (f *fakeStorage) MergeDisk(_ context.Context, req *connect.Request[storagev
 			maxB = req.Msg.GetMaxBytes()
 		}
 		return connect.NewResponse(&storagev1.MergeDiskResponse{
-			LcaCommitId:        "01950000-0000-7000-8000-000000000090",
+			LcaSnapshotId:      "01950000-0000-7000-8000-000000000090",
 			EstimatedUsedBytes: target.GetUsedBytes() + 4096,
 			TargetMaxBytes:     maxB,
 		}), nil
 	}
 	return connect.NewResponse(&storagev1.MergeDiskResponse{
 		Disk:               target,
-		LcaCommitId:        "01950000-0000-7000-8000-000000000090",
-		MergeCommitId:      "01950000-0000-7000-8000-000000000091",
+		LcaSnapshotId:      "01950000-0000-7000-8000-000000000090",
+		MergeSnapshotId:    "01950000-0000-7000-8000-000000000091",
 		EstimatedUsedBytes: target.GetUsedBytes(),
 		TargetMaxBytes:     target.GetMaxBytes(),
 	}), nil

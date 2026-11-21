@@ -17,30 +17,30 @@ import (
 var _ Store = (*MemStore)(nil)
 
 type MemDiskView struct {
-	DiskID       uuid.UUID
-	ParentDiskID uuid.UUID
-	LineageID    uuid.UUID
-	BaseCommitID uuid.UUID
-	Name         string
-	MaxBytes     uint64
-	UsedBytes    uint64
-	UsedInodes   uint64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	DiskID         uuid.UUID
+	ParentDiskID   uuid.UUID
+	LineageID      uuid.UUID
+	BaseSnapshotID uuid.UUID
+	Name           string
+	MaxBytes       uint64
+	UsedBytes      uint64
+	UsedInodes     uint64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 func (v *MemDiskView) toRecord() DiskRecord {
 	return DiskRecord{
-		DiskID:       v.DiskID,
-		ParentDiskID: v.ParentDiskID,
-		LineageID:    v.LineageID,
-		BaseCommitID: v.BaseCommitID,
-		Name:         v.Name,
-		MaxBytes:     v.MaxBytes,
-		UsedBytes:    v.UsedBytes,
-		UsedInodes:   v.UsedInodes,
-		CreatedAt:    v.CreatedAt,
-		UpdatedAt:    v.UpdatedAt,
+		DiskID:         v.DiskID,
+		ParentDiskID:   v.ParentDiskID,
+		LineageID:      v.LineageID,
+		BaseSnapshotID: v.BaseSnapshotID,
+		Name:           v.Name,
+		MaxBytes:       v.MaxBytes,
+		UsedBytes:      v.UsedBytes,
+		UsedInodes:     v.UsedInodes,
+		CreatedAt:      v.CreatedAt,
+		UpdatedAt:      v.UpdatedAt,
 	}
 }
 
@@ -51,30 +51,32 @@ type MemLineageView struct {
 	CreatedAt  time.Time
 }
 
-type MemCommitView struct {
-	CommitID            uuid.UUID
-	LineageID           uuid.UUID
-	SourceDiskID        uuid.UUID
-	ParentCommitID      uuid.UUID
-	MergeParentCommitID uuid.UUID
-	CreatedAt           time.Time
+type MemSnapshotView struct {
+	SnapshotID            uuid.UUID
+	LineageID             uuid.UUID
+	SourceDiskID          uuid.UUID
+	ParentSnapshotID      uuid.UUID
+	MergeParentSnapshotID uuid.UUID
+	Kind                  SnapshotKind
+	CreatedAt             time.Time
 }
 
-func (v *MemCommitView) toRecord() CommitRecord {
-	return CommitRecord{
-		LineageID:           v.LineageID,
-		CommitID:            v.CommitID,
-		ParentCommitID:      v.ParentCommitID,
-		MergeParentCommitID: v.MergeParentCommitID,
-		BaseDiskID:          v.SourceDiskID,
-		CreatedAt:           v.CreatedAt,
+func (v *MemSnapshotView) toRecord() SnapshotRecord {
+	return SnapshotRecord{
+		LineageID:             v.LineageID,
+		SnapshotID:            v.SnapshotID,
+		ParentSnapshotID:      v.ParentSnapshotID,
+		MergeParentSnapshotID: v.MergeParentSnapshotID,
+		SourceDiskID:          v.SourceDiskID,
+		Kind:                  v.Kind,
+		CreatedAt:             v.CreatedAt,
 	}
 }
 
-type MemSnapshot struct {
+type MemState struct {
 	Disks             map[uuid.UUID]MemDiskView
 	Lineages          map[uuid.UUID]MemLineageView
-	Commits           map[uuid.UUID]MemCommitView
+	Snapshots         map[uuid.UUID]MemSnapshotView
 	Mounts            map[uuid.UUID]map[uuid.UUID]MountLeaseRecord
 	InodeReserveCalls int
 	PackReserveCalls  int
@@ -85,7 +87,7 @@ type MemStore struct {
 	mu                sync.Mutex
 	disks             map[uuid.UUID]MemDiskView
 	lineages          map[uuid.UUID]MemLineageView
-	commits           map[uuid.UUID]MemCommitView
+	snapshots         map[uuid.UUID]MemSnapshotView
 	mounts            map[uuid.UUID]map[uuid.UUID]MountLeaseRecord
 	lastTS            time.Time
 	failNextWrite     error
@@ -96,10 +98,10 @@ type MemStore struct {
 
 func NewMemStore() *MemStore {
 	return &MemStore{
-		disks:    make(map[uuid.UUID]MemDiskView),
-		lineages: make(map[uuid.UUID]MemLineageView),
-		commits:  make(map[uuid.UUID]MemCommitView),
-		mounts:   make(map[uuid.UUID]map[uuid.UUID]MountLeaseRecord),
+		disks:     make(map[uuid.UUID]MemDiskView),
+		lineages:  make(map[uuid.UUID]MemLineageView),
+		snapshots: make(map[uuid.UUID]MemSnapshotView),
+		mounts:    make(map[uuid.UUID]map[uuid.UUID]MountLeaseRecord),
 	}
 }
 
@@ -109,17 +111,53 @@ func (m *MemStore) SetFailNextWrite(err error) {
 	m.failNextWrite = err
 }
 
-func (m *MemStore) Inspect() MemSnapshot {
+func (m *MemStore) SeedSnapshot(rec SnapshotRecord, setBaseOnDiskID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec.SnapshotID == uuid.Nil || rec.LineageID == uuid.Nil || rec.SourceDiskID == uuid.Nil {
+		return ErrInvalidArgument
+	}
+	if _, linOK := m.lineages[rec.LineageID]; !linOK {
+		return ErrNotFound
+	}
+	if _, dup := m.snapshots[rec.SnapshotID]; dup {
+		return errors.New("db: snapshot already exists")
+	}
+	now := rec.CreatedAt
+	if now.IsZero() {
+		now = m.nextNowLocked()
+	}
+	m.snapshots[rec.SnapshotID] = MemSnapshotView{
+		SnapshotID:            rec.SnapshotID,
+		LineageID:             rec.LineageID,
+		SourceDiskID:          rec.SourceDiskID,
+		ParentSnapshotID:      rec.ParentSnapshotID,
+		MergeParentSnapshotID: rec.MergeParentSnapshotID,
+		Kind:                  rec.Kind,
+		CreatedAt:             now,
+	}
+	if setBaseOnDiskID != uuid.Nil {
+		d, ok := m.disks[setBaseOnDiskID]
+		if !ok {
+			return ErrNotFound
+		}
+		d.BaseSnapshotID = rec.SnapshotID
+		m.disks[setBaseOnDiskID] = d
+	}
+	return nil
+}
+
+func (m *MemStore) Inspect() MemState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	mountsCopy := make(map[uuid.UUID]map[uuid.UUID]MountLeaseRecord, len(m.mounts))
 	for diskID, diskMounts := range m.mounts {
 		mountsCopy[diskID] = maps.Clone(diskMounts)
 	}
-	return MemSnapshot{
+	return MemState{
 		Disks:             maps.Clone(m.disks),
 		Lineages:          maps.Clone(m.lineages),
-		Commits:           maps.Clone(m.commits),
+		Snapshots:         maps.Clone(m.snapshots),
 		Mounts:            mountsCopy,
 		InodeReserveCalls: m.inodeReserveCalls,
 		PackReserveCalls:  m.packReserveCalls,
@@ -214,8 +252,8 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	if _, childExists := m.disks[arg.ChildDiskID]; childExists {
 		return DiskRecord{}, errors.New("db: child disk already exists")
 	}
-	if _, commitExists := m.commits[arg.CommitID]; commitExists {
-		return DiskRecord{}, errors.New("db: commit already exists")
+	if _, snapExists := m.snapshots[arg.SnapshotID]; snapExists {
+		return DiskRecord{}, errors.New("db: snapshot already exists")
 	}
 
 	childMaxBytes := srcRow.MaxBytes
@@ -230,27 +268,28 @@ func (m *MemStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	}
 
 	now := m.nextNowLocked()
-	m.commits[arg.CommitID] = MemCommitView{
-		CommitID:       arg.CommitID,
-		LineageID:      srcRow.LineageID,
-		SourceDiskID:   arg.SourceDiskID,
-		ParentCommitID: srcRow.BaseCommitID,
-		CreatedAt:      now,
+	m.snapshots[arg.SnapshotID] = MemSnapshotView{
+		SnapshotID:       arg.SnapshotID,
+		LineageID:        srcRow.LineageID,
+		SourceDiskID:     arg.SourceDiskID,
+		ParentSnapshotID: srcRow.BaseSnapshotID,
+		Kind:             SnapshotKindFork,
+		CreatedAt:        now,
 	}
-	srcRow.BaseCommitID = arg.CommitID
+	srcRow.BaseSnapshotID = arg.SnapshotID
 	m.disks[arg.SourceDiskID] = srcRow
 
 	childRow := MemDiskView{
-		DiskID:       arg.ChildDiskID,
-		ParentDiskID: arg.SourceDiskID,
-		LineageID:    srcRow.LineageID,
-		BaseCommitID: arg.CommitID,
-		Name:         arg.Name,
-		MaxBytes:     childMaxBytes,
-		UsedBytes:    childUsedBytes,
-		UsedInodes:   childUsedInodes,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		DiskID:         arg.ChildDiskID,
+		ParentDiskID:   arg.SourceDiskID,
+		LineageID:      srcRow.LineageID,
+		BaseSnapshotID: arg.SnapshotID,
+		Name:           arg.Name,
+		MaxBytes:       childMaxBytes,
+		UsedBytes:      childUsedBytes,
+		UsedInodes:     childUsedInodes,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	m.disks[arg.ChildDiskID] = childRow
 	return childRow.toRecord(), nil
@@ -334,7 +373,7 @@ func (m *MemStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDis
 	}, nil
 }
 
-func (m *MemStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) ([]CommitRecord, error) {
+func (m *MemStore) ListLineageDisks(ctx context.Context, lineageID uuid.UUID) ([]DiskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -345,25 +384,54 @@ func (m *MemStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	ordered := make([]MemCommitView, 0)
-	for cid := range m.commits {
-		c := m.commits[cid]
-		if c.LineageID == lineageID {
-			ordered = append(ordered, c)
+	ordered := make([]MemDiskView, 0)
+	for id := range m.disks {
+		d := m.disks[id]
+		if d.LineageID == lineageID {
+			ordered = append(ordered, d)
 		}
 	}
-	slices.SortFunc(ordered, func(a, b MemCommitView) int {
+	slices.SortFunc(ordered, func(a, b MemDiskView) int {
+		return bytes.Compare(a.DiskID[:], b.DiskID[:])
+	})
+
+	disks := make([]DiskRecord, 0, len(ordered))
+	for i := range ordered {
+		disks = append(disks, ordered[i].toRecord())
+	}
+	return disks, nil
+}
+
+func (m *MemStore) ListLineageSnapshots(ctx context.Context, lineageID uuid.UUID) ([]SnapshotRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if lineageID == uuid.Nil {
+		return nil, fmt.Errorf("%w: lineage id cannot be nil uuid", ErrInvalidArgument)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ordered := make([]MemSnapshotView, 0)
+	for sid := range m.snapshots {
+		s := m.snapshots[sid]
+		if s.LineageID == lineageID {
+			ordered = append(ordered, s)
+		}
+	}
+	slices.SortFunc(ordered, func(a, b MemSnapshotView) int {
 		if cmp := a.CreatedAt.Compare(b.CreatedAt); cmp != 0 {
 			return cmp
 		}
-		return bytes.Compare(a.CommitID[:], b.CommitID[:])
+		return bytes.Compare(a.SnapshotID[:], b.SnapshotID[:])
 	})
 
-	commits := make([]CommitRecord, 0, len(ordered))
+	snapshots := make([]SnapshotRecord, 0, len(ordered))
 	for i := range ordered {
-		commits = append(commits, ordered[i].toRecord())
+		snapshots = append(snapshots, ordered[i].toRecord())
 	}
-	return commits, nil
+	return snapshots, nil
 }
 
 func (m *MemStore) UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error) {
@@ -448,44 +516,78 @@ func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	if srcRow.LineageID != input.LineageID || tgtRow.LineageID != input.LineageID {
 		return DiskRecord{}, ErrCrossLineage
 	}
-	if srcRow.BaseCommitID != input.ExpectedSourceBaseCommitID ||
-		tgtRow.BaseCommitID != input.ExpectedTargetBaseCommitID {
-		return DiskRecord{}, ErrStaleBaseCommit
-	}
-	if !input.SkipSourceCommit {
-		if _, exists := m.commits[input.NewSourceCommitID]; exists {
-			return DiskRecord{}, errors.New("db: commit already exists")
-		}
-	}
-	if _, exists := m.commits[input.NewMergeCommitID]; exists {
-		return DiskRecord{}, errors.New("db: commit already exists")
+	if srcRow.BaseSnapshotID != input.ExpectedSourceBaseSnapshotID ||
+		tgtRow.BaseSnapshotID != input.ExpectedTargetBaseSnapshotID {
+		return DiskRecord{}, ErrStaleBaseSnapshot
 	}
 
-	srcFinalCommitID := input.ExpectedSourceBaseCommitID
-	if !input.SkipSourceCommit {
-		srcNow := m.nextNowLocked()
-		m.commits[input.NewSourceCommitID] = MemCommitView{
-			CommitID:       input.NewSourceCommitID,
-			LineageID:      input.LineageID,
-			SourceDiskID:   input.SourceDiskID,
-			ParentCommitID: input.ExpectedSourceBaseCommitID,
-			CreatedAt:      srcNow,
+	if input.FastForward {
+		ffSnapID := input.NewMergeSnapshotID
+		if !input.SkipSourceSnapshot {
+			if _, exists := m.snapshots[ffSnapID]; exists {
+				return DiskRecord{}, errors.New("db: snapshot already exists")
+			}
+			ffNow := m.nextNowLocked()
+			m.snapshots[ffSnapID] = MemSnapshotView{
+				SnapshotID:       ffSnapID,
+				LineageID:        input.LineageID,
+				SourceDiskID:     input.SourceDiskID,
+				ParentSnapshotID: input.ExpectedSourceBaseSnapshotID,
+				Kind:             SnapshotKindMerge,
+				CreatedAt:        ffNow,
+			}
+			srcRow.BaseSnapshotID = ffSnapID
+			m.disks[input.SourceDiskID] = srcRow
 		}
-		srcRow.BaseCommitID = input.NewSourceCommitID
+		tgtRow.BaseSnapshotID = ffSnapID
+		if input.TargetMaxBytes > 0 {
+			tgtRow.MaxBytes = input.TargetMaxBytes
+		}
+		if input.TargetUsedInodes > 0 {
+			tgtRow.UsedBytes = input.TargetUsedBytes
+			tgtRow.UsedInodes = input.TargetUsedInodes
+		}
+		tgtRow.UpdatedAt = m.nextNowLocked()
+		m.disks[input.TargetDiskID] = tgtRow
+		return tgtRow.toRecord(), nil
+	}
+
+	if !input.SkipSourceSnapshot {
+		if _, exists := m.snapshots[input.NewSourceSnapshotID]; exists {
+			return DiskRecord{}, errors.New("db: snapshot already exists")
+		}
+	}
+	if _, exists := m.snapshots[input.NewMergeSnapshotID]; exists {
+		return DiskRecord{}, errors.New("db: snapshot already exists")
+	}
+
+	srcFinalSnapshotID := input.ExpectedSourceBaseSnapshotID
+	if !input.SkipSourceSnapshot {
+		srcNow := m.nextNowLocked()
+		m.snapshots[input.NewSourceSnapshotID] = MemSnapshotView{
+			SnapshotID:       input.NewSourceSnapshotID,
+			LineageID:        input.LineageID,
+			SourceDiskID:     input.SourceDiskID,
+			ParentSnapshotID: input.ExpectedSourceBaseSnapshotID,
+			Kind:             SnapshotKindMerge,
+			CreatedAt:        srcNow,
+		}
+		srcRow.BaseSnapshotID = input.NewSourceSnapshotID
 		m.disks[input.SourceDiskID] = srcRow
-		srcFinalCommitID = input.NewSourceCommitID
+		srcFinalSnapshotID = input.NewSourceSnapshotID
 	}
 
 	mergeNow := m.nextNowLocked()
-	m.commits[input.NewMergeCommitID] = MemCommitView{
-		CommitID:            input.NewMergeCommitID,
-		LineageID:           input.LineageID,
-		SourceDiskID:        input.TargetDiskID,
-		ParentCommitID:      input.ExpectedTargetBaseCommitID,
-		MergeParentCommitID: srcFinalCommitID,
-		CreatedAt:           mergeNow,
+	m.snapshots[input.NewMergeSnapshotID] = MemSnapshotView{
+		SnapshotID:            input.NewMergeSnapshotID,
+		LineageID:             input.LineageID,
+		SourceDiskID:          input.TargetDiskID,
+		ParentSnapshotID:      input.ExpectedTargetBaseSnapshotID,
+		MergeParentSnapshotID: srcFinalSnapshotID,
+		Kind:                  SnapshotKindMerge,
+		CreatedAt:             mergeNow,
 	}
-	tgtRow.BaseCommitID = input.NewMergeCommitID
+	tgtRow.BaseSnapshotID = input.NewMergeSnapshotID
 	if input.TargetMaxBytes > 0 {
 		tgtRow.MaxBytes = input.TargetMaxBytes
 	}
@@ -498,66 +600,113 @@ func (m *MemStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	return tgtRow.toRecord(), nil
 }
 
-func (m *MemStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUID, error) {
+func (m *MemStore) DeleteDisk(ctx context.Context, diskID uuid.UUID, recursive bool) (DeleteDiskResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return DeleteDiskResult{}, err
 	}
 	if diskID == uuid.Nil {
-		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+		return DeleteDiskResult{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.consumeFailNextWriteLocked(); err != nil {
-		return nil, err
+		return DeleteDiskResult{}, err
 	}
 
 	row, ok := m.disks[diskID]
 	if !ok {
-		return nil, ErrNotFound
+		return DeleteDiskResult{}, ErrNotFound
 	}
 	lineageID := row.LineageID
 	if _, linOK := m.lineages[lineageID]; !linOK {
-		return nil, ErrNotFound
+		return DeleteDiskResult{}, ErrNotFound
 	}
 
-	delete(m.disks, diskID)
-	delete(m.mounts, diskID)
-
-	var remaining int
+	lineageDisks := make([]DiskRecord, 0)
 	for id := range m.disks {
-		if m.disks[id].LineageID == lineageID {
-			remaining++
+		d := m.disks[id]
+		if d.LineageID == lineageID {
+			lineageDisks = append(lineageDisks, d.toRecord())
 		}
 	}
 
-	var commitsToClean []uuid.UUID
-	switch remaining {
-	case 1:
+	toDeleteDiskIDs, found := collectSubtreeDiskIDs(lineageDisks, diskID, recursive)
+	if !found {
+		return DeleteDiskResult{}, ErrNotFound
+	}
+
+	deletedDiskSet := make(map[uuid.UUID]struct{}, len(toDeleteDiskIDs))
+	for _, id := range toDeleteDiskIDs {
+		deletedDiskSet[id] = struct{}{}
+		delete(m.disks, id)
+		delete(m.mounts, id)
+	}
+
+	survivingDisks := make([]DiskRecord, 0, len(lineageDisks)-len(toDeleteDiskIDs))
+	for i := range lineageDisks {
+		if _, removed := deletedDiskSet[lineageDisks[i].DiskID]; !removed {
+			survivingDisks = append(survivingDisks, lineageDisks[i])
+		}
+	}
+
+	lineageSnaps := make([]SnapshotRecord, 0)
+	for sid := range m.snapshots {
+		s := m.snapshots[sid]
+		if s.LineageID == lineageID {
+			lineageSnaps = append(lineageSnaps, s.toRecord())
+		}
+	}
+
+	toDeleteSnapIDs, remainingSnaps := computeReclaimableSnapshots(survivingDisks, lineageSnaps)
+	if len(toDeleteSnapIDs) > 0 {
+		delSnapSet := make(map[uuid.UUID]struct{}, len(toDeleteSnapIDs))
+		for _, sid := range toDeleteSnapIDs {
+			delSnapSet[sid] = struct{}{}
+		}
 		for id := range m.disks {
 			d := m.disks[id]
-			if d.LineageID == lineageID && d.BaseCommitID != uuid.Nil {
-				d.BaseCommitID = uuid.Nil
+			if d.LineageID != lineageID {
+				continue
+			}
+			if _, cleared := delSnapSet[d.BaseSnapshotID]; cleared {
+				d.BaseSnapshotID = uuid.Nil
 				m.disks[id] = d
 			}
 		}
-		commitsToClean = m.deleteLineageCommitsLocked(lineageID)
-	case 0:
-		commitsToClean = m.deleteLineageCommitsLocked(lineageID)
-		delete(m.lineages, lineageID)
-	}
-	return commitsToClean, nil
-}
-
-func (m *MemStore) deleteLineageCommitsLocked(lineageID uuid.UUID) []uuid.UUID {
-	var deleted []uuid.UUID
-	for cid := range m.commits {
-		if m.commits[cid].LineageID == lineageID {
-			deleted = append(deleted, cid)
-			delete(m.commits, cid)
+		for sid := range m.snapshots {
+			if _, deleting := delSnapSet[sid]; deleting {
+				continue
+			}
+			s := m.snapshots[sid]
+			if s.LineageID != lineageID {
+				continue
+			}
+			changed := false
+			if _, cleared := delSnapSet[s.ParentSnapshotID]; cleared {
+				s.ParentSnapshotID = uuid.Nil
+				changed = true
+			}
+			if _, cleared := delSnapSet[s.MergeParentSnapshotID]; cleared {
+				s.MergeParentSnapshotID = uuid.Nil
+				changed = true
+			}
+			if changed {
+				m.snapshots[sid] = s
+			}
+		}
+		for _, sid := range toDeleteSnapIDs {
+			delete(m.snapshots, sid)
 		}
 	}
-	return deleted
+
+	if len(survivingDisks) == 0 && remainingSnaps == 0 {
+		delete(m.lineages, lineageID)
+	}
+	return DeleteDiskResult{
+		DeletedDiskIDs:       toDeleteDiskIDs,
+		ReclaimedSnapshotIDs: toDeleteSnapIDs,
+	}, nil
 }
 
 func (m *MemStore) ReserveSegment(ctx context.Context, kind SegmentKind, lineageID uuid.UUID, minNext, count int64) (SegmentRange, error) {

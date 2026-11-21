@@ -9,25 +9,16 @@ import (
 )
 
 type Disk struct {
-	DiskID       pgtype.UUID        `json:"disk_id"`
-	Name         string             `json:"name"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
-	LineageID    pgtype.UUID        `json:"lineage_id"`
-	ParentDiskID pgtype.UUID        `json:"parent_disk_id"`
-	BaseCommitID pgtype.UUID        `json:"base_commit_id"`
-	MaxBytes     int64              `json:"max_bytes"`
-	UsedBytes    int64              `json:"used_bytes"`
-	UsedInodes   int64              `json:"used_inodes"`
-}
-
-type DiskCommit struct {
-	CommitID            pgtype.UUID        `json:"commit_id"`
-	LineageID           pgtype.UUID        `json:"lineage_id"`
-	SourceDiskID        pgtype.UUID        `json:"source_disk_id"`
-	ParentCommitID      pgtype.UUID        `json:"parent_commit_id"`
-	MergeParentCommitID pgtype.UUID        `json:"merge_parent_commit_id"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	DiskID         pgtype.UUID        `json:"disk_id"`
+	Name           string             `json:"name"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	LineageID      pgtype.UUID        `json:"lineage_id"`
+	ParentDiskID   pgtype.UUID        `json:"parent_disk_id"`
+	BaseSnapshotID pgtype.UUID        `json:"base_snapshot_id"`
+	MaxBytes       int64              `json:"max_bytes"`
+	UsedBytes      int64              `json:"used_bytes"`
+	UsedInodes     int64              `json:"used_inodes"`
 }
 
 type DiskLineage struct {
@@ -45,4 +36,14 @@ type DiskMount struct {
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DiskSnapshot struct {
+	SnapshotID            pgtype.UUID        `json:"snapshot_id"`
+	LineageID             pgtype.UUID        `json:"lineage_id"`
+	SourceDiskID          pgtype.UUID        `json:"source_disk_id"`
+	ParentSnapshotID      pgtype.UUID        `json:"parent_snapshot_id"`
+	MergeParentSnapshotID pgtype.UUID        `json:"merge_parent_snapshot_id"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	Kind                  string             `json:"kind"`
 }

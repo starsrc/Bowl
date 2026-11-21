@@ -289,6 +289,24 @@ func validateAdminAddr(addr string) error {
 	return nil
 }
 
+func loopbackAdminAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "" {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsUnspecified() {
+		return addr
+	}
+	if ip.To4() != nil {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return net.JoinHostPort("::1", port)
+}
+
 type adminServer struct {
 	ln           net.Listener
 	srv          *http.Server
@@ -305,13 +323,20 @@ func newAdminMux(obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracke
 	return mux
 }
 
-func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) (*adminServer, error) {
+func listenAdminAddr(addr string) (net.Listener, error) {
 	if strings.EqualFold(addr, adminAddrOff) {
 		return nil, nil
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen on admin address %q: %w", addr, err)
+	}
+	return ln, nil
+}
+
+func serveAdminListener(ln net.Listener, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) *adminServer {
+	if ln == nil {
+		return nil
 	}
 	mux := newAdminMux(obs, fs, tracker)
 
@@ -324,7 +349,15 @@ func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker
 			obs.Logger().Warn("admin_server_stopped", "error", serveErr.Error())
 		}
 	}()
-	return &adminServer{ln: ln, srv: srv}, nil
+	return &adminServer{ln: ln, srv: srv}
+}
+
+func startAdminServer(addr string, obs *clientRuntime, fs *fusefs.RawFS, tracker *mountLeaseTracker) (*adminServer, error) {
+	ln, err := listenAdminAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+	return serveAdminListener(ln, obs, fs, tracker), nil
 }
 
 func (a *adminServer) addr() string {

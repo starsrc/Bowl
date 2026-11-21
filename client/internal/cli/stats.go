@@ -91,7 +91,7 @@ func normalizeStatsAdminAddr(raw string) (string, error) {
 	if _, _, err := net.SplitHostPort(trimmed); err != nil {
 		return "", fmt.Errorf("invalid --admin-addr %q: %w", raw, err)
 	}
-	return trimmed, nil
+	return loopbackAdminAddr(trimmed), nil
 }
 
 func discoverAdminAddr(posArgs []string) (string, error) {
@@ -124,10 +124,11 @@ func discoverAdminAddr(posArgs []string) (string, error) {
 	if meta.AdminAddr == "" || strings.EqualFold(meta.AdminAddr, adminAddrOff) {
 		return "", fmt.Errorf("admin endpoint is disabled for mountpoint %q", meta.Mountpoint)
 	}
-	return meta.AdminAddr, nil
+	return loopbackAdminAddr(meta.AdminAddr), nil
 }
 
 func fetchStats(addr, format string) ([]byte, error) {
+	addr = loopbackAdminAddr(addr)
 	u := url.URL{Scheme: "http", Host: addr, Path: "/debug/stats", RawQuery: url.Values{"format": {format}}.Encode()}
 	ctx, cancel := context.WithTimeout(context.Background(), statsRequestTimeout)
 	defer cancel()

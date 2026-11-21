@@ -74,8 +74,33 @@ type mountFlagPresence struct {
 	unmountFsyncTimeout      bool
 }
 
+type fuseMountServer interface {
+	Serve()
+	WaitMount() error
+	Unmount() error
+}
+
+func defaultNewFUSEServer(fs *fusefs.RawFS, mountpoint string, opts *fuse.MountOptions) (fuseMountServer, error) {
+	return fuse.NewServer(fs, mountpoint, opts)
+}
+
+func defaultMountSignalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	sigCtx, stopNotify := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+	guardCh := make(chan os.Signal, 2)
+	signal.Notify(guardCh, syscall.SIGINT, syscall.SIGTERM)
+	return sigCtx, func() {
+		stopNotify()
+		signal.Stop(guardCh)
+	}
+}
+
 var (
 	serveFUSE                 = defaultServeFUSE
+	newFUSEServer             = defaultNewFUSEServer
+	mountSignalContext        = defaultMountSignalContext
 	mountHTTPClient           *http.Client
 	mountRenewIntervalFn      = defaultMountRenewInterval
 	mountRenewRetryIntervalFn = defaultMountRenewRetryInterval
@@ -419,9 +444,14 @@ func runFUSESignalUnmountLoop(
 }
 
 func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config, mountpoint string, ready func()) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	opts := fusefs.BuildMountOptions(*cfg)
 
-	server, err := fuse.NewServer(fs, mountpoint, opts)
+	server, err := newFUSEServer(fs, mountpoint, opts)
 	if err != nil {
 		return fmt.Errorf("create FUSE server: %w", err)
 	}
@@ -432,12 +462,43 @@ func defaultServeFUSE(ctx context.Context, fs *fusefs.RawFS, cfg *fusefs.Config,
 		server.Serve()
 	}()
 
-	if waitErr := server.WaitMount(); waitErr != nil {
+	waitStop := make(chan struct{})
+	waitWatchDone := make(chan struct{})
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+	go func() {
+		defer close(waitWatchDone)
+		select {
+		case <-waitStop:
+		case <-ctxDone:
+			_ = server.Unmount()
+		}
+	}()
+
+	waitErr := server.WaitMount()
+	close(waitStop)
+	<-waitWatchDone
+
+	if waitErr != nil {
 		_ = server.Unmount()
 		<-serveDone
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("wait for mount readiness: %w", waitErr)
 	}
-	fs.BindMountpoint(mountpoint)
+	if ctx != nil {
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			_ = server.Unmount()
+			<-serveDone
+			return cancelErr
+		}
+	}
+	if fs != nil {
+		fs.BindMountpoint(mountpoint)
+	}
 	ready()
 
 	sigCh := make(chan os.Signal, 2)
@@ -470,6 +531,20 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			logger.Warn("observability_shutdown_failed", slog.String("error", shutdownErr.Error()))
 		}
 	}()
+
+	adminLn, err := listenAdminAddr(opts.adminAddr)
+	if err != nil {
+		return err
+	}
+	var closeAdminLnOnce sync.Once
+	closeAdminLn := func() {
+		closeAdminLnOnce.Do(func() {
+			if adminLn != nil {
+				_ = adminLn.Close()
+			}
+		})
+	}
+	defer closeAdminLn()
 
 	var (
 		stageSession   *fusefs.StageDirSession
@@ -510,6 +585,10 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	if err != nil {
 		return err
 	}
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
+		return cancelErr
+	}
 	leaseTracker := newMountLeaseTracker(lease, mountNowFn)
 	cfg.Logger = logger
 	cfg.Metrics = fusefs.NewMetrics()
@@ -528,11 +607,9 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		return fmt.Errorf("register metrics collector: %w", regErr)
 	}
 
-	admin, err := startAdminServer(opts.adminAddr, obs, rawFS, leaseTracker)
-	if err != nil {
-		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
-		return err
-	}
+	ln := adminLn
+	adminLn = nil
+	admin := serveAdminListener(ln, obs, rawFS, leaseTracker)
 	shutdownAdmin := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -551,7 +628,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			Mountpoint:       mountpoint,
 			PID:              selfPID,
 			DiskID:           cfg.DiskID,
-			AdminAddr:        admin.addr(),
+			AdminAddr:        loopbackAdminAddr(admin.addr()),
 			StartedAt:        startedAt,
 			UnmountTimeoutMs: rawFS.Config().UnmountTimeout.Milliseconds(),
 		}
@@ -572,6 +649,13 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		if onReady != nil {
 			onReady()
 		}
+	}
+
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		unmountMountLease(client, cfg.DiskID, lease.mountID, mountUnmountRPCTimeout, logger)
+		shutdownAdmin()
+		closeStage()
+		return cancelErr
 	}
 
 	stopRenew := startMountLeaseRenewer(client, cfg, lease, rawFS, leaseTracker, logger)
@@ -1129,7 +1213,7 @@ func executeMountValidated(
 		return nil
 	}
 
-	runnerCtx, runnerCancel := context.WithCancel(context.Background())
+	runnerCtx, runnerCancel := mountSignalContext(context.Background())
 	defer runnerCancel()
 
 	if mountErr := runMount(runnerCtx, opts, &baseCfg, canonMountpoint, stderr, nil); mountErr != nil {

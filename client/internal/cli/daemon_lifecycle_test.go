@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stretchr/testify/require"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
@@ -485,6 +487,28 @@ func TestDaemonHelperProcess(_ *testing.T) {
 		}
 		time.Sleep(15 * time.Second)
 		os.Exit(0)
+	case "signal_double_term":
+		sigCtx, stop := defaultMountSignalContext(context.Background())
+		writeFileFlag(readyFile, "ready")
+		select {
+		case <-sigCtx.Done():
+			writeFileFlag(markerFile, "first_canceled")
+		case <-time.After(10 * time.Second):
+			stop()
+			os.Exit(2)
+		}
+		releaseFile := os.Getenv("BOWL_TEST_DAEMON_RELEASE_FILE")
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(releaseFile); err == nil {
+				writeFileFlag(markerFile, "survived_second_signal")
+				stop()
+				os.Exit(0)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		stop()
+		os.Exit(4)
 	default:
 		os.Exit(3)
 	}
@@ -564,7 +588,640 @@ func runSpawnWithDeadline(t *testing.T, deadline time.Duration) (code int, stder
 
 func TestDaemonDefaults_FixedHandshakeTimeoutAndKillGrace(t *testing.T) {
 	require.Equal(t, 30*time.Second, daemonHandshakeTimeout)
-	require.Equal(t, 2*time.Second, daemonKillGrace)
+	require.Equal(t, 5*time.Second, daemonKillGrace)
+}
+
+func TestTerminateAndReapDaemonChild_GivenNonPositiveGrace_UsesDaemonKillGraceFallback(t *testing.T) {
+	readyFile := filepath.Join(t.TempDir(), "ready")
+	markerFile := filepath.Join(t.TempDir(), "marker")
+	withDaemonTimeouts(t, 10*time.Second, 150*time.Millisecond)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = append(
+		os.Environ(),
+		"BOWL_TEST_DAEMON_HELPER=hang_ignore_term",
+		"BOWL_TEST_DAEMON_READY_FILE="+readyFile,
+		"BOWL_TEST_DAEMON_MARKER_FILE="+markerFile,
+	)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(readyFile)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	start := time.Now()
+	terminateAndReapDaemonChild(cmd, 0)
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, 1*time.Second, "scene=grace_fallback_uses_daemonKillGrace want<1s got=%s", elapsed)
+	require.NotNil(t, cmd.ProcessState)
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	require.True(t, ok)
+	require.Equal(t, syscall.SIGKILL, ws.Signal())
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	onClose func()
+}
+
+func (c *cancelOnCloseReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return err
+}
+
+func TestRunMount_GivenCancelDuringHandshake_AbortsRPCAndCleansStageAndAdminListener(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	mp := t.TempDir()
+	stageDir := t.TempDir()
+	fixedAddr := reserveLoopbackTCPAddr(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "cancel-during-handshake", 1<<30, 0)
+	storage.mountLeaseTTL = 30
+	storage.onMountDisk = func(rpcCtx context.Context, _ *storagev1.MountDiskRequest) error {
+		cancel()
+		<-rpcCtx.Done()
+		return rpcCtx.Err()
+	}
+	withMountStorageFake(t, storage)
+
+	var serveCalled atomic.Bool
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
+		serveCalled.Store(true)
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: fixedAddr,
+		logLevel:  "info",
+		logFormat: "json",
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  stageDir,
+	}
+
+	err := runMount(ctx, opts, baseCfg, mp, &syncBuffer{}, nil)
+
+	require.Error(t, err)
+	require.False(t, serveCalled.Load(), "scene=cancel_during_handshake want=serveFUSE_not_called got=true")
+	requireEmptyDir(t, stageDir, "cancel_during_handshake_stage_cleanup")
+	ln, listenErr := net.Listen("tcp", fixedAddr)
+	require.NoError(t, listenErr, "scene=cancel_during_handshake want=admin_addr_released got=%v", listenErr)
+	require.NoError(t, ln.Close())
+}
+
+func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServeFUSE(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withStageDirTmpfsStub(t, false)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+
+	mp := t.TempDir()
+	stageDir := t.TempDir()
+	fixedAddr := reserveLoopbackTCPAddr(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "cancel-after-handshake", 1<<30, 0)
+	storage.mountLeaseTTL = 30
+	withMountStorageFake(t, storage)
+
+	baseTransport := mountHTTPClient.Transport
+	mountHTTPClient = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			resp, err := baseTransport.RoundTrip(req)
+			if err != nil {
+				return nil, err
+			}
+			if strings.HasSuffix(req.URL.Path, "/MountDisk") {
+				resp.Body = &cancelOnCloseReadCloser{
+					ReadCloser: resp.Body,
+					onClose:    cancel,
+				}
+			}
+			return resp, nil
+		}),
+	}
+
+	var serveCalled atomic.Bool
+	withServeFUSEStub(t, func(_ context.Context, _ *fusefs.RawFS, _ *fusefs.Config, _ string, _ func()) error {
+		serveCalled.Store(true)
+		return nil
+	})
+
+	opts := &mountOptions{
+		endpoint:  "http://127.0.0.1:9000",
+		adminAddr: fixedAddr,
+		logLevel:  "info",
+		logFormat: "json",
+	}
+	baseCfg := &fusefs.Config{
+		DiskID:    testDiskID1,
+		Mode:      fusefs.MountModeStaged,
+		StageSize: fusefs.DefaultStageSize,
+		StageDir:  stageDir,
+	}
+
+	err := runMount(ctx, opts, baseCfg, mp, &syncBuffer{}, nil)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, serveCalled.Load(), "scene=cancel_after_handshake want=serveFUSE_not_called got=true")
+	require.Len(t, storage.getMountReqs(), 1)
+	require.Len(t, storage.getUnmountReqs(), 1, "scene=cancel_after_handshake want=lease_released_via_UnmountDisk")
+	requireEmptyDir(t, stageDir, "cancel_after_handshake_stage_cleanup")
+	ln, listenErr := net.Listen("tcp", fixedAddr)
+	require.NoError(t, listenErr, "scene=cancel_after_handshake want=admin_addr_released got=%v", listenErr)
+	require.NoError(t, ln.Close())
+}
+
+type fakeFUSEMountServer struct {
+	unmountCh   chan struct{}
+	unmountOnce sync.Once
+	unmountCnt  atomic.Int32
+	serveExited atomic.Bool
+	waitMountFn func(unmountCh <-chan struct{}) error
+}
+
+func newFakeFUSEMountServer(waitFn func(unmountCh <-chan struct{}) error) *fakeFUSEMountServer {
+	return &fakeFUSEMountServer{
+		unmountCh:   make(chan struct{}),
+		waitMountFn: waitFn,
+	}
+}
+
+func (s *fakeFUSEMountServer) Serve() {
+	<-s.unmountCh
+	s.serveExited.Store(true)
+}
+
+func (s *fakeFUSEMountServer) WaitMount() error {
+	if s.waitMountFn != nil {
+		return s.waitMountFn(s.unmountCh)
+	}
+	return nil
+}
+
+func (s *fakeFUSEMountServer) Unmount() error {
+	s.unmountCnt.Add(1)
+	s.unmountOnce.Do(func() { close(s.unmountCh) })
+	return nil
+}
+
+func withNewFUSEServerStub(t *testing.T, fn func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error)) {
+	t.Helper()
+	prev := newFUSEServer
+	newFUSEServer = fn
+	t.Cleanup(func() { newFUSEServer = prev })
+}
+
+func withMountSignalContextStub(t *testing.T, fn func(context.Context) (context.Context, context.CancelFunc)) {
+	t.Helper()
+	prev := mountSignalContext
+	mountSignalContext = fn
+	t.Cleanup(func() { mountSignalContext = prev })
+}
+
+func TestDefaultServeFUSE_GivenCancelAcrossStartupWindows_UnmountsWithoutCallingReady(t *testing.T) {
+	t.Run("CanceledBeforeNewServer", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		var created atomic.Bool
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			created.Store(true)
+			return newFakeFUSEMountServer(nil), nil
+		})
+
+		var readyCalled atomic.Bool
+		err := defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/pre-cancel", func() {
+			readyCalled.Store(true)
+		})
+
+		require.ErrorIs(t, err, context.Canceled)
+		require.False(t, created.Load(), "scene=pre_new_server want=newFUSEServer_not_called")
+		require.False(t, readyCalled.Load(), "scene=pre_new_server want=ready_not_called")
+	})
+
+	t.Run("CanceledDuringWaitMount", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		waitEntered := make(chan struct{})
+		fakeSrv := newFakeFUSEMountServer(func(unmountCh <-chan struct{}) error {
+			close(waitEntered)
+			<-unmountCh
+			return errors.New("unmounted during wait")
+		})
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			return fakeSrv, nil
+		})
+
+		var readyCalled atomic.Bool
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/wait-cancel", func() {
+				readyCalled.Store(true)
+			})
+		}()
+
+		select {
+		case <-waitEntered:
+		case <-time.After(time.Second):
+			t.Fatal("scene=wait_mount_enter want=entered got=timeout")
+		}
+		cancel()
+
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			_ = fakeSrv.Unmount()
+			t.Fatal("scene=wait_mount_cancel want=unblocked_within_1s got=hung")
+		}
+		require.False(t, readyCalled.Load(), "scene=wait_mount_cancel want=ready_not_called")
+		require.GreaterOrEqual(t, fakeSrv.unmountCnt.Load(), int32(1))
+		require.True(t, fakeSrv.serveExited.Load())
+	})
+
+	t.Run("CanceledAfterWaitMountBeforeReady", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		fakeSrv := newFakeFUSEMountServer(func(<-chan struct{}) error {
+			cancel()
+			return nil
+		})
+		withNewFUSEServerStub(t, func(*fusefs.RawFS, string, *fuse.MountOptions) (fuseMountServer, error) {
+			return fakeSrv, nil
+		})
+
+		var readyCalled atomic.Bool
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- defaultServeFUSE(ctx, nil, &fusefs.Config{DiskID: testDiskID1}, "/mnt/post-wait-cancel", func() {
+				readyCalled.Store(true)
+			})
+		}()
+
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			_ = fakeSrv.Unmount()
+			t.Fatal("scene=post_wait_cancel want=returned_within_1s got=hung")
+		}
+		require.False(t, readyCalled.Load(), "scene=post_wait_cancel want=ready_not_called")
+		require.GreaterOrEqual(t, fakeSrv.unmountCnt.Load(), int32(1))
+		require.True(t, fakeSrv.serveExited.Load())
+	})
+}
+
+func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeHandshakeAndCleansUp(t *testing.T) {
+	t.Run("Foreground", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		withTempMountMetaDirs(t, t.TempDir())
+
+		mp := t.TempDir()
+		stageDir := t.TempDir()
+
+		var sigInstallCalls atomic.Int32
+		var sigStopCalls atomic.Int32
+		sigCtx, sigCancel := context.WithCancel(context.Background())
+		withMountSignalContextStub(t, func(_ context.Context) (context.Context, context.CancelFunc) {
+			sigInstallCalls.Add(1)
+			ctx, cancel := context.WithCancel(sigCtx)
+			return ctx, func() {
+				sigStopCalls.Add(1)
+				cancel()
+			}
+		})
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "fg-early-sig", 1<<30, 0)
+		withMountStorageFake(t, storage)
+		baseTransport := mountHTTPClient.Transport
+		mountHTTPClient = &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				resp, err := baseTransport.RoundTrip(req)
+				if err != nil {
+					return nil, err
+				}
+				if strings.HasSuffix(req.URL.Path, "/MountDisk") {
+					resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, onClose: sigCancel}
+				}
+				return resp, nil
+			}),
+		}
+
+		var serveCalled atomic.Bool
+		withServeFUSEStub(t, func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error {
+			serveCalled.Store(true)
+			return nil
+		})
+
+		code, _, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")
+
+		require.Equal(t, 1, code, "scene=fg_early_sig stderr=%s", errOut)
+		require.Equal(t, int32(1), sigInstallCalls.Load(), "scene=fg_early_sig want=mountSignalContext_installed")
+		require.Equal(t, int32(1), sigStopCalls.Load(), "scene=fg_early_sig want=mountSignalContext_stopped")
+		require.False(t, serveCalled.Load())
+		require.Len(t, storage.getUnmountReqs(), 1)
+		requireEmptyDir(t, stageDir, "fg_early_sig_stage_cleanup")
+	})
+
+	t.Run("DaemonWorker", func(t *testing.T) {
+		withCleanOTelAndLogger(t)
+		withStageDirTmpfsStub(t, false)
+		withMissingMountInfo(t)
+		withTempMountMetaDirs(t, t.TempDir())
+		withRedirectDaemonStdioStub(t, func(*os.File) {})
+		withChdirStub(t, func(string) error { return nil })
+
+		mp := t.TempDir()
+		stageDir := t.TempDir()
+		logPath := filepath.Join(t.TempDir(), "worker-early-sig.log")
+
+		var sigInstallCalls atomic.Int32
+		var sigStopCalls atomic.Int32
+		sigCtx, sigCancel := context.WithCancel(context.Background())
+		withMountSignalContextStub(t, func(_ context.Context) (context.Context, context.CancelFunc) {
+			sigInstallCalls.Add(1)
+			ctx, cancel := context.WithCancel(sigCtx)
+			return ctx, func() {
+				sigStopCalls.Add(1)
+				cancel()
+			}
+		})
+
+		storage := newFakeStorage()
+		storage.seedDisk(testDiskID1, "worker-early-sig", 1<<30, 0)
+		withMountStorageFake(t, storage)
+		baseTransport := mountHTTPClient.Transport
+		mountHTTPClient = &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				resp, err := baseTransport.RoundTrip(req)
+				if err != nil {
+					return nil, err
+				}
+				if strings.HasSuffix(req.URL.Path, "/MountDisk") {
+					resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, onClose: sigCancel}
+				}
+				return resp, nil
+			}),
+		}
+
+		var serveCalled atomic.Bool
+		withServeFUSEStub(t, func(context.Context, *fusefs.RawFS, *fusefs.Config, string, func()) error {
+			serveCalled.Store(true)
+			return nil
+		})
+
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer func() { _ = r.Close() }()
+		withReadinessPipeStub(t, w)
+		t.Setenv("BOWL_DAEMON_WORKER", "1")
+
+		code, _, _ := runCLI("mount", testDiskID1, mp, "--stage-dir", stageDir, "--log-file", logPath, "--admin-addr", "off")
+
+		require.Equal(t, 1, code)
+		require.Equal(t, int32(1), sigInstallCalls.Load(), "scene=worker_early_sig want=mountSignalContext_installed")
+		require.Equal(t, int32(1), sigStopCalls.Load(), "scene=worker_early_sig want=mountSignalContext_stopped")
+		require.False(t, serveCalled.Load())
+		require.Len(t, storage.getUnmountReqs(), 1)
+		requireEmptyDir(t, stageDir, "worker_early_sig_stage_cleanup")
+		payload := readPipeWithDeadline(t, r, w, 500*time.Millisecond)
+		require.True(t, strings.HasPrefix(payload, "ERR:"), "scene=worker_early_sig payload=%q", payload)
+	})
+}
+
+func TestMountSignalContext_GivenSecondSignalDuringTeardown_CapturesWithoutDefaultKill(t *testing.T) {
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
+	markerFile := filepath.Join(dir, "marker")
+	releaseFile := filepath.Join(dir, "release")
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = append(
+		os.Environ(),
+		"BOWL_TEST_DAEMON_HELPER=signal_double_term",
+		"BOWL_TEST_DAEMON_READY_FILE="+readyFile,
+		"BOWL_TEST_DAEMON_MARKER_FILE="+markerFile,
+		"BOWL_TEST_DAEMON_RELEASE_FILE="+releaseFile,
+	)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Signal(syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(readyFile)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	require.Eventually(t, func() bool {
+		b, err := os.ReadFile(markerFile)
+		return err == nil && string(b) == "first_canceled"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, os.WriteFile(releaseFile, []byte("go"), 0o600))
+
+	err := cmd.Wait()
+	require.NoError(t, err, "scene=second_signal_during_teardown want=clean_exit_0 got=%v", err)
+	markerBytes, readErr := os.ReadFile(markerFile)
+	require.NoError(t, readErr)
+	require.Equal(t, "survived_second_signal", string(markerBytes))
+}
+
+func envEntriesForKey(env []string, key string) []string {
+	prefix := key + "="
+	var out []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func TestDefaultDaemonCommand_GivenTokenFlagsAndEnv_ScrubsArgvAndSetsBowlTokenEnv(t *testing.T) {
+	cases := []struct {
+		name             string
+		inheritedToken   string
+		setInherited     bool
+		args             []string
+		wantSubArgs      []string
+		wantBowlTokenEnv []string
+	}{
+		{
+			name:             "SplitTokenFlag",
+			args:             []string{"--token", "secret-split", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=secret-split"},
+		},
+		{
+			name:             "EqualsTokenFlagOverridesInheritedEnv",
+			inheritedToken:   "old-env-tok",
+			setInherited:     true,
+			args:             []string{"--token=  secret-eq  ", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=secret-eq"},
+		},
+		{
+			name:             "RepeatedTokenFlagsLastWins",
+			inheritedToken:   "old-env-tok",
+			setInherited:     true,
+			args:             []string{"--token", "first", "--mode=ro", "--token=second", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", "--mode=ro", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=second"},
+		},
+		{
+			name:             "WhitespaceTokenLeavesInheritedEnvUntouched",
+			inheritedToken:   "keep-env",
+			setInherited:     true,
+			args:             []string{"--token", "   ", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
+		},
+		{
+			name:             "EmptyEqualsTokenLeavesInheritedEnvUntouched",
+			inheritedToken:   "keep-env",
+			setInherited:     true,
+			args:             []string{"--token=", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
+		},
+		{
+			name:             "RepeatedTokenEndingBlankLeavesInheritedEnvUntouched",
+			inheritedToken:   "keep-env",
+			setInherited:     true,
+			args:             []string{"--token", "first", "--token", "   ", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
+		},
+		{
+			name:             "NoTokenFlagPreservesInheritedEnv",
+			inheritedToken:   "keep-env",
+			setInherited:     true,
+			args:             []string{"--mode=ro", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", "--mode=ro", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
+		},
+		{
+			name:             "StopsScanningAtDoubleDash",
+			args:             []string{"--token", "real-tok", "--", testDiskID1, "--token", "--token=literal"},
+			wantSubArgs:      []string{"mount", "--", testDiskID1, "--token", "--token=literal"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=real-tok"},
+		},
+		{
+			name:             "TokenAfterDoubleDashOnlyNotTouched",
+			inheritedToken:   "keep-env",
+			setInherited:     true,
+			args:             []string{"--", testDiskID1, "--token=literal"},
+			wantSubArgs:      []string{"mount", "--", testDiskID1, "--token=literal"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
+		},
+		{
+			name:             "OtherFlagValueMatchingTokenFlagNotScrubbed",
+			args:             []string{"--log-file", "--token", "--token", "real-tok", testDiskID1, "/mnt/data"},
+			wantSubArgs:      []string{"mount", "--log-file", "--token", testDiskID1, "/mnt/data"},
+			wantBowlTokenEnv: []string{"BOWL_TOKEN=real-tok"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setInherited {
+				t.Setenv("BOWL_TOKEN", tc.inheritedToken)
+			} else {
+				prev, existed := os.LookupEnv("BOWL_TOKEN")
+				require.NoError(t, os.Unsetenv("BOWL_TOKEN"))
+				t.Cleanup(func() {
+					if existed {
+						_ = os.Setenv("BOWL_TOKEN", prev)
+					} else {
+						_ = os.Unsetenv("BOWL_TOKEN")
+					}
+				})
+			}
+
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			defer func() {
+				_ = r.Close()
+				_ = w.Close()
+			}()
+
+			cmd, cmdErr := defaultDaemonCommand(tc.args, w)
+			require.NoError(t, cmdErr)
+			require.Equal(t, tc.wantSubArgs, cmd.Args[1:], "scene=%s", tc.name)
+			require.Equal(t, tc.wantBowlTokenEnv, envEntriesForKey(cmd.Env, "BOWL_TOKEN"), "scene=%s", tc.name)
+			require.Equal(t, []string{"BOWL_DAEMON_WORKER=1"}, envEntriesForKey(cmd.Env, "BOWL_DAEMON_WORKER"), "scene=%s", tc.name)
+		})
+	}
+}
+
+func TestMount_DaemonWorker_GivenScrubbedTokenInEnv_AuthenticatesWithRPCWithoutTokenFlag(t *testing.T) {
+	withCleanOTelAndLogger(t)
+	withMissingMountInfo(t)
+	withTempMountMetaDirs(t, t.TempDir())
+	withStageDirTmpfsStub(t, false)
+	withRedirectDaemonStdioStub(t, func(*os.File) {})
+	withChdirStub(t, func(string) error { return nil })
+
+	mp := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "token-worker.log")
+	t.Setenv("BOWL_TOKEN", "old-env-secret")
+
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = pr.Close() }()
+
+	cmd, cmdErr := defaultDaemonCommand([]string{testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off", "--token", "daemon-secret"}, pw)
+	require.NoError(t, cmdErr)
+	require.NotContains(t, cmd.Args, "--token")
+	require.NotContains(t, cmd.Args, "daemon-secret")
+	require.Equal(t, []string{"BOWL_TOKEN=daemon-secret"}, envEntriesForKey(cmd.Env, "BOWL_TOKEN"))
+
+	storage := newFakeStorage()
+	storage.seedDisk(testDiskID1, "token-worker-disk", 1<<30, 0)
+	withMountStorageFake(t, storage)
+	stubMountServeFUSE(t, mp)
+	withReadinessPipeStub(t, pw)
+	t.Setenv("BOWL_TOKEN", "daemon-secret")
+	t.Setenv("BOWL_DAEMON_WORKER", "1")
+
+	code, _, errOut := runCLI(cmd.Args[1:]...)
+
+	require.Equal(t, 0, code, "scene=worker_token_env stderr=%s", errOut)
+	require.Equal(t, "Bearer daemon-secret", storage.lastAuth)
+	require.Equal(t, "OK\n", readPipeWithDeadline(t, pr, pw, 500*time.Millisecond))
 }
 
 func TestSpawnDaemonProcess_GivenOK_ReturnsZeroAndLeavesDetachedChildRunning(t *testing.T) {

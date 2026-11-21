@@ -80,7 +80,7 @@ func normalizeUmountAdminAddr(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	trimmed = strings.TrimPrefix(trimmed, "http://")
 	trimmed = strings.TrimSuffix(trimmed, "/")
-	return trimmed
+	return loopbackAdminAddr(trimmed)
 }
 
 func fetchUnmountProgress(addr string, timeout time.Duration) (fusefs.UnmountProgress, bool) {

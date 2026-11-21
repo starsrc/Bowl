@@ -126,6 +126,7 @@ type fakeStorage struct {
 	unmountReqs     []*storagev1.UnmountDiskRequest
 	renewErr        error
 	unmountErr      error
+	onMountDisk     func(context.Context, *storagev1.MountDiskRequest) error
 	onRenewMount    func(*storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error)
 	onUnmountDisk   func(*storagev1.UnmountDiskRequest)
 }
@@ -362,11 +363,21 @@ func (f *fakeStorage) DeleteDisk(_ context.Context, req *connect.Request[storage
 	return connect.NewResponse(&storagev1.DeleteDiskResponse{}), nil
 }
 
-func (f *fakeStorage) MountDisk(_ context.Context, req *connect.Request[storagev1.MountDiskRequest]) (*connect.Response[storagev1.MountDiskResponse], error) {
+func (f *fakeStorage) MountDisk(ctx context.Context, req *connect.Request[storagev1.MountDiskRequest]) (*connect.Response[storagev1.MountDiskResponse], error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.recordHeaders(req.Header())
 	f.mountReqs = append(f.mountReqs, req.Msg)
+	hook := f.onMountDisk
+	f.mu.Unlock()
+
+	if hook != nil {
+		if err := hook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.forcedErr["MountDisk"]; err != nil {
 		return nil, err
 	}

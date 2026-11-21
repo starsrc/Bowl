@@ -69,11 +69,23 @@ func findUmountCommand(absMountpoint string, force bool) (binPath string, cmdArg
 	return "", nil, false
 }
 
-func isMountMetaDrained(metaPath string, pid int) bool {
-	if _, err := os.Stat(metaPath); errors.Is(err, os.ErrNotExist) {
+func isMountMetaDrained(metaPath string, meta *mountMeta) bool {
+	if meta == nil || meta.PID <= 0 {
 		return true
 	}
-	return pid > 0 && !processAlive(pid)
+	data, err := os.ReadFile(metaPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err == nil {
+		var cur mountMeta
+		if json.Unmarshal(data, &cur) == nil && cur.PID > 0 {
+			if cur.PID != meta.PID || (!meta.StartedAt.IsZero() && !cur.StartedAt.Equal(meta.StartedAt)) {
+				return true
+			}
+		}
+	}
+	return !mountMetaProcessAlive(*meta)
 }
 
 func normalizeUmountAdminAddr(raw string) string {
@@ -250,13 +262,11 @@ func waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) er
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	var pid int
 	var rawAdminAddr string
 	if meta != nil {
-		pid = meta.PID
 		rawAdminAddr = meta.AdminAddr
 	}
-	if isMountMetaDrained(metaPath, pid) {
+	if isMountMetaDrained(metaPath, meta) {
 		return nil
 	}
 
@@ -272,7 +282,7 @@ func waitMountMetaDrained(stderr io.Writer, metaPath string, meta *mountMeta) er
 	var lastPollAt time.Time
 
 	for {
-		if isMountMetaDrained(metaPath, pid) {
+		if isMountMetaDrained(metaPath, meta) {
 			reporter.finish(false)
 			return nil
 		}

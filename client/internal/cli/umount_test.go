@@ -1373,3 +1373,173 @@ func TestUmount_GivenWildcardLegacyMetaAdminAddr_NormalizesToLoopbackAndKeepsDef
 	require.GreaterOrEqual(t, polls.Load(), int32(2))
 	require.Contains(t, stderr.String(), "Syncing to cloud:")
 }
+
+func TestUmount_GivenMountMetaOverwrittenByRemount_TreatsOldInstanceAsDrained(t *testing.T) {
+	t.Run("OverwrittenByDifferentPID", func(t *testing.T) {
+		mp := "/mnt/bowl-remount-diff-pid"
+		metaDir := t.TempDir()
+		withTempMountMetaDirs(t, metaDir)
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		withUmountDrainStub(t, 300*time.Millisecond, 5*time.Millisecond)
+
+		startedA := time.Now().UTC()
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "off",
+			StartedAt:  startedA,
+		})
+		require.NoError(t, err)
+
+		mountB := mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid() + 20000,
+			DiskID:     testDiskID2,
+			AdminAddr:  "off",
+			StartedAt:  startedA.Add(time.Second),
+		}
+		_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		prevRun := runCommand
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				_, _ = writeMountMeta(&mountB)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() { runCommand = prevRun })
+
+		code, out, errOut := runCLI("umount", mp)
+		require.Equal(t, 0, code, "scene=remount_diff_pid want=0 got=%d stderr=%s", code, errOut)
+		require.Empty(t, out)
+		require.Empty(t, errOut)
+
+		raw, readErr := os.ReadFile(metaPath)
+		require.NoError(t, readErr)
+		var got mountMeta
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.Equal(t, mountB.PID, got.PID)
+	})
+
+	t.Run("OverwrittenBySamePIDNewStartedAt", func(t *testing.T) {
+		mp := "/mnt/bowl-remount-same-pid"
+		metaDir := t.TempDir()
+		withTempMountMetaDirs(t, metaDir)
+		withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+		withUmountDrainStub(t, 300*time.Millisecond, 5*time.Millisecond)
+
+		startedA := time.Now().UTC()
+		metaPath, err := writeMountMeta(&mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "off",
+			StartedAt:  startedA,
+		})
+		require.NoError(t, err)
+
+		mountB := mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID2,
+			AdminAddr:  "off",
+			StartedAt:  startedA.Add(2 * time.Second),
+		}
+		_, _ = withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+		prevRun := runCommand
+		runCommand = func(_ string, _ ...string) ([]byte, error) {
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				_, _ = writeMountMeta(&mountB)
+			}()
+			return nil, nil
+		}
+		t.Cleanup(func() { runCommand = prevRun })
+
+		code, out, errOut := runCLI("umount", mp)
+		require.Equal(t, 0, code, "scene=remount_same_pid want=0 got=%d stderr=%s", code, errOut)
+		require.Empty(t, out)
+		require.Empty(t, errOut)
+
+		raw, readErr := os.ReadFile(metaPath)
+		require.NoError(t, readErr)
+		var got mountMeta
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.True(t, mountB.StartedAt.Equal(got.StartedAt))
+	})
+}
+
+func TestUmount_GivenCorruptOrZeroPIDMountMeta_SkipsDrainWaitAndExits0(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "CorruptJSON", content: "{not-valid-json"},
+		{name: "ZeroPID", content: `{"mountpoint":"/mnt/bowl-bad-meta","pid":0,"disk_id":"` + testDiskID1 + `"}`},
+		{name: "NegativePID", content: `{"mountpoint":"/mnt/bowl-bad-meta","pid":-7,"disk_id":"` + testDiskID1 + `"}`},
+		{name: "DeadPID", content: `{"mountpoint":"/mnt/bowl-bad-meta","pid":99999999,"disk_id":"` + testDiskID1 + `"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mp := "/mnt/bowl-bad-meta"
+			metaDir := t.TempDir()
+			withTempMountMetaDirs(t, metaDir)
+			withMountInfoContent(t, "100 30 0:50 / "+mp+" rw - fuse.bowl bowl:"+testDiskID1+" rw\n")
+			withUmountDrainStub(t, 200*time.Millisecond, 5*time.Millisecond)
+			withUmountToolStub(t, "fusermount3", "/usr/bin/fusermount3", nil, nil)
+
+			metaPath := filepath.Join(metaDir, mountMetaFileName(mp))
+			require.NoError(t, os.WriteFile(metaPath, []byte(tc.content), 0o644))
+
+			gotPath, gotMeta, ok := resolveUmountMountMeta(mp)
+			require.False(t, ok, "scene=%s want=ok_false got=ok_true path=%s pid=%d", tc.name, gotPath, gotMeta.PID)
+			require.Empty(t, gotPath)
+			require.Zero(t, gotMeta.PID)
+
+			start := time.Now()
+			code, out, errOut := runCLI("umount", mp)
+			elapsed := time.Since(start)
+
+			require.Equal(t, 0, code, "scene=%s want=0 got=%d stderr=%s", tc.name, code, errOut)
+			require.Empty(t, out)
+			require.Empty(t, errOut)
+			require.Less(t, elapsed, 150*time.Millisecond, "scene=%s want=no_drain_timeout_wait got=%s", tc.name, elapsed)
+		})
+	}
+
+	t.Run("CorruptInFirstDirFallsThroughToLiveInSecondDir", func(t *testing.T) {
+		mp := "/mnt/bowl-corrupt-then-live"
+		dir1 := t.TempDir()
+		dir2 := t.TempDir()
+		withTempMountMetaDirs(t, dir1, dir2)
+
+		require.NoError(t, os.WriteFile(filepath.Join(dir1, mountMetaFileName(mp)), []byte("{broken"), 0o644))
+		liveBytes, err := json.Marshal(mountMeta{
+			Mountpoint: mp,
+			PID:        os.Getpid(),
+			DiskID:     testDiskID1,
+			AdminAddr:  "off",
+			StartedAt:  time.Now().UTC(),
+		})
+		require.NoError(t, err)
+		livePath := filepath.Join(dir2, mountMetaFileName(mp))
+		require.NoError(t, os.WriteFile(livePath, liveBytes, 0o644))
+
+		gotPath, gotMeta, ok := resolveUmountMountMeta(mp)
+		require.True(t, ok)
+		require.Equal(t, livePath, gotPath)
+		require.Equal(t, os.Getpid(), gotMeta.PID)
+	})
+
+	t.Run("WaitMountMetaDrainedWithNilOrZeroPIDReturnsImmediately", func(t *testing.T) {
+		metaPath := filepath.Join(t.TempDir(), "existing.json")
+		require.NoError(t, os.WriteFile(metaPath, []byte(`{"pid":0}`), 0o644))
+		withUmountDrainStub(t, 200*time.Millisecond, 5*time.Millisecond)
+
+		require.NoError(t, waitMountMetaDrained(nil, metaPath, nil))
+		require.NoError(t, waitMountMetaDrained(nil, metaPath, &mountMeta{PID: 0}))
+		require.NoError(t, waitMountMetaDrained(nil, metaPath, &mountMeta{PID: -1}))
+	})
+}

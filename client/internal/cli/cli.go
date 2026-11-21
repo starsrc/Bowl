@@ -80,6 +80,7 @@ func newRootCmd(args []string, stdout, stderr io.Writer) *cobra.Command {
 
 	rootCmd.AddCommand(
 		newDiskCmd(defaultDiskPorts()),
+		newSnapshotCmd(defaultDiskPorts()),
 		newMountCmd(mountArgs),
 		newUmountCmd(),
 		newStatsCmd(),

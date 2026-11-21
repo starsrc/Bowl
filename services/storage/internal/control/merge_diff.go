@@ -182,8 +182,8 @@ func findLCA(snapshots []db.SnapshotRecord, snapA, snapB uuid.UUID) (uuid.UUID, 
 		return uuid.Nil, ErrNoBaseSnapshot
 	}
 	byID := make(map[uuid.UUID]db.SnapshotRecord, len(snapshots))
-	for _, s := range snapshots {
-		byID[s.SnapshotID] = s
+	for i := range snapshots {
+		byID[snapshots[i].SnapshotID] = snapshots[i]
 	}
 	if _, ok := byID[snapA]; !ok {
 		return uuid.Nil, fmt.Errorf("%w: snapshot %s not found in lineage", ErrNotFound, snapA)
@@ -410,8 +410,8 @@ func (m *manager) ReadSnapshotNode(ctx context.Context, params *ReadSnapshotNode
 		return nil, mapDBErr(err)
 	}
 	belongsToLineage := false
-	for _, s := range snapshots {
-		if s.SnapshotID == snapshotID {
+	for i := range snapshots {
+		if snapshots[i].SnapshotID == snapshotID {
 			belongsToLineage = true
 			break
 		}
@@ -1215,8 +1215,8 @@ func (m *manager) reconcilePendingMergeLocked(ctx context.Context, diskID string
 	knownSnapshots := make(map[uuid.UUID]struct{})
 	snapshots, listErr := m.store.ListLineageSnapshots(ctx, row.LineageID)
 	if listErr == nil {
-		for _, s := range snapshots {
-			knownSnapshots[s.SnapshotID] = struct{}{}
+		for i := range snapshots {
+			knownSnapshots[snapshots[i].SnapshotID] = struct{}{}
 		}
 	}
 

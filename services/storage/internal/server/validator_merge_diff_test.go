@@ -45,6 +45,14 @@ func runValidationIntercept(t *testing.T, msg any) (bool, error) {
 		req = connect.NewRequest(m)
 	case *storagev1.UnmountDiskRequest:
 		req = connect.NewRequest(m)
+	case *storagev1.CreateSnapshotRequest:
+		req = connect.NewRequest(m)
+	case *storagev1.ListSnapshotsRequest:
+		req = connect.NewRequest(m)
+	case *storagev1.DeleteSnapshotRequest:
+		req = connect.NewRequest(m)
+	case *storagev1.PruneSnapshotsRequest:
+		req = connect.NewRequest(m)
 	default:
 		t.Fatalf("不支持的校验测试消息类型: %T", msg)
 	}
@@ -481,5 +489,118 @@ func TestValidator_UnmountDiskRequest(t *testing.T) {
 			DiskId:  testValidationTargetDiskID,
 			MountId: testMountID,
 		})
+	})
+}
+
+func TestValidator_SnapshotRequests(t *testing.T) {
+	t.Run("CreateSnapshotRequest", func(t *testing.T) {
+		invalidCases := []struct {
+			name   string
+			req    *storagev1.CreateSnapshotRequest
+			reason string
+		}{
+			{
+				name:   "invalid_disk_id",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: "bad-uuid"},
+				reason: validator.ReasonInvalidArgument,
+			},
+			{
+				name:   "nil_disk_id",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: testValidationNilUUID},
+				reason: validator.ReasonInvalidArgument,
+			},
+			{
+				name:   "name_exceeds_255_bytes",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: strings.Repeat("a", 256)},
+				reason: validator.ReasonNameTooLong,
+			},
+			{
+				name:   "invalid_disk_id_overrides_overlong_name",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: "bad-uuid", Name: strings.Repeat("a", 256)},
+				reason: validator.ReasonInvalidArgument,
+			},
+			{
+				name:   "name_contains_nul",
+				req:    &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: "snap\x001"},
+				reason: validator.ReasonInvalidArgument,
+			},
+		}
+		for _, tc := range invalidCases {
+			t.Run("reject/"+tc.name, func(t *testing.T) {
+				called, err := runValidationIntercept(t, tc.req)
+				require.False(t, called, "非法请求必须在校验拦截器短路返回")
+				requireConnectErrorCodeAndReason(t, err, connect.CodeInvalidArgument, tc.reason)
+			})
+		}
+
+		assertValidationAccepted(t, &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID})
+		assertValidationAccepted(t, &storagev1.CreateSnapshotRequest{DiskId: testValidationSourceDiskID, Name: strings.Repeat("b", 255)})
+	})
+
+	t.Run("ListSnapshotsRequest", func(t *testing.T) {
+		invalidCases := []struct {
+			name string
+			req  *storagev1.ListSnapshotsRequest
+		}{
+			{name: "invalid_disk_id", req: &storagev1.ListSnapshotsRequest{DiskId: "bad-uuid"}},
+			{name: "nil_disk_id", req: &storagev1.ListSnapshotsRequest{DiskId: testValidationNilUUID}},
+			{name: "undefined_kind_enum", req: &storagev1.ListSnapshotsRequest{DiskId: testValidationSourceDiskID, Kind: storagev1.SnapshotKind(99)}},
+			{name: "page_size_exceeds_1000", req: &storagev1.ListSnapshotsRequest{DiskId: testValidationSourceDiskID, PageSize: 1001}},
+			{name: "page_token_contains_nul", req: &storagev1.ListSnapshotsRequest{DiskId: testValidationSourceDiskID, PageToken: "tok\x00en"}},
+			{name: "page_token_exceeds_4096", req: &storagev1.ListSnapshotsRequest{DiskId: testValidationSourceDiskID, PageToken: strings.Repeat("t", 4097)}},
+		}
+		for _, tc := range invalidCases {
+			t.Run("reject/"+tc.name, func(t *testing.T) {
+				assertValidationRejected(t, tc.req)
+			})
+		}
+
+		assertValidationAccepted(t, &storagev1.ListSnapshotsRequest{DiskId: testValidationSourceDiskID})
+		assertValidationAccepted(t, &storagev1.ListSnapshotsRequest{
+			DiskId:    testValidationSourceDiskID,
+			Kind:      storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL,
+			PageSize:  1000,
+			PageToken: strings.Repeat("k", 4096),
+		})
+	})
+
+	t.Run("DeleteSnapshotRequest", func(t *testing.T) {
+		invalidCases := []struct {
+			name string
+			req  *storagev1.DeleteSnapshotRequest
+		}{
+			{name: "invalid_disk_id", req: &storagev1.DeleteSnapshotRequest{DiskId: "bad-uuid", SnapshotId: testValidationSnapshotID}},
+			{name: "nil_disk_id", req: &storagev1.DeleteSnapshotRequest{DiskId: testValidationNilUUID, SnapshotId: testValidationSnapshotID}},
+			{name: "invalid_snapshot_id", req: &storagev1.DeleteSnapshotRequest{DiskId: testValidationSourceDiskID, SnapshotId: "bad-uuid"}},
+			{name: "nil_snapshot_id", req: &storagev1.DeleteSnapshotRequest{DiskId: testValidationSourceDiskID, SnapshotId: testValidationNilUUID}},
+		}
+		for _, tc := range invalidCases {
+			t.Run("reject/"+tc.name, func(t *testing.T) {
+				assertValidationRejected(t, tc.req)
+			})
+		}
+
+		assertValidationAccepted(t, &storagev1.DeleteSnapshotRequest{
+			DiskId:     testValidationSourceDiskID,
+			SnapshotId: testValidationSnapshotID,
+		})
+	})
+
+	t.Run("PruneSnapshotsRequest", func(t *testing.T) {
+		invalidCases := []struct {
+			name string
+			req  *storagev1.PruneSnapshotsRequest
+		}{
+			{name: "invalid_disk_id", req: &storagev1.PruneSnapshotsRequest{DiskId: "bad-uuid"}},
+			{name: "nil_disk_id", req: &storagev1.PruneSnapshotsRequest{DiskId: testValidationNilUUID}},
+		}
+		for _, tc := range invalidCases {
+			t.Run("reject/"+tc.name, func(t *testing.T) {
+				assertValidationRejected(t, tc.req)
+			})
+		}
+
+		assertValidationAccepted(t, &storagev1.PruneSnapshotsRequest{DiskId: testValidationSourceDiskID, DryRun: true})
+		assertValidationAccepted(t, &storagev1.PruneSnapshotsRequest{DiskId: testValidationSourceDiskID, DryRun: false})
 	})
 }

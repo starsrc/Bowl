@@ -1777,6 +1777,22 @@ func (s *fakeStorage) MergeDisk(context.Context, *connect.Request[storagev1.Merg
 	return nil, s.failFast("MergeDisk")
 }
 
+func (s *fakeStorage) CreateSnapshot(context.Context, *connect.Request[storagev1.CreateSnapshotRequest]) (*connect.Response[storagev1.CreateSnapshotResponse], error) {
+	return nil, s.failFast("CreateSnapshot")
+}
+
+func (s *fakeStorage) ListSnapshots(context.Context, *connect.Request[storagev1.ListSnapshotsRequest]) (*connect.Response[storagev1.ListSnapshotsResponse], error) {
+	return nil, s.failFast("ListSnapshots")
+}
+
+func (s *fakeStorage) DeleteSnapshot(context.Context, *connect.Request[storagev1.DeleteSnapshotRequest]) (*connect.Response[storagev1.DeleteSnapshotResponse], error) {
+	return nil, s.failFast("DeleteSnapshot")
+}
+
+func (s *fakeStorage) PruneSnapshots(context.Context, *connect.Request[storagev1.PruneSnapshotsRequest]) (*connect.Response[storagev1.PruneSnapshotsResponse], error) {
+	return nil, s.failFast("PruneSnapshots")
+}
+
 type rawFSOption func(*fusefs.Config)
 
 func withMode(mode string) rawFSOption {

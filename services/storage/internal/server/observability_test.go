@@ -855,6 +855,10 @@ func TestObservability_ClassifyStorageLogLevel_MapsProceduresAndCodes(t *testing
 		{name: "EvictMounts变更控制面保持Info", procedure: storagev1connect.StorageServiceEvictMountsProcedure, want: slog.LevelInfo},
 		{name: "RenewMount高频续期成功降级Debug", procedure: storagev1connect.StorageServiceRenewMountProcedure, want: slog.LevelDebug},
 		{name: "MergeDisk变更控制面保持Info", procedure: storagev1connect.StorageServiceMergeDiskProcedure, want: slog.LevelInfo},
+		{name: "CreateSnapshot变更控制面保持Info", procedure: storagev1connect.StorageServiceCreateSnapshotProcedure, want: slog.LevelInfo},
+		{name: "DeleteSnapshot变更控制面保持Info", procedure: storagev1connect.StorageServiceDeleteSnapshotProcedure, want: slog.LevelInfo},
+		{name: "PruneSnapshots变更控制面保持Info", procedure: storagev1connect.StorageServicePruneSnapshotsProcedure, want: slog.LevelInfo},
+		{name: "ListSnapshots只读控制面降级Debug", procedure: storagev1connect.StorageServiceListSnapshotsProcedure, want: slog.LevelDebug},
 		{name: "DiffDisk只读控制面降级Debug", procedure: storagev1connect.StorageServiceDiffDiskProcedure, want: slog.LevelDebug},
 		{name: "ReadSnapshotNode只读控制面降级Debug", procedure: storagev1connect.StorageServiceReadSnapshotNodeProcedure, want: slog.LevelDebug},
 		{name: "Lookup未命中降级Debug", procedure: storagev1connect.StorageServiceLookupProcedure, code: connect.CodeNotFound, err: connect.NewError(connect.CodeNotFound, nil), want: slog.LevelDebug},
@@ -875,6 +879,10 @@ func TestObservability_MergeDiffProcedures_RegisteredInMetricsControlAndSampler(
 	require.Equal(t, storagev1connect.StorageServiceMergeDiskProcedure, normalizeProcedure(storagev1connect.StorageServiceMergeDiskProcedure))
 	require.Equal(t, storagev1connect.StorageServiceListMountsProcedure, normalizeProcedure(storagev1connect.StorageServiceListMountsProcedure))
 	require.Equal(t, storagev1connect.StorageServiceEvictMountsProcedure, normalizeProcedure(storagev1connect.StorageServiceEvictMountsProcedure))
+	require.Equal(t, storagev1connect.StorageServiceCreateSnapshotProcedure, normalizeProcedure(storagev1connect.StorageServiceCreateSnapshotProcedure))
+	require.Equal(t, storagev1connect.StorageServiceListSnapshotsProcedure, normalizeProcedure(storagev1connect.StorageServiceListSnapshotsProcedure))
+	require.Equal(t, storagev1connect.StorageServiceDeleteSnapshotProcedure, normalizeProcedure(storagev1connect.StorageServiceDeleteSnapshotProcedure))
+	require.Equal(t, storagev1connect.StorageServicePruneSnapshotsProcedure, normalizeProcedure(storagev1connect.StorageServicePruneSnapshotsProcedure))
 
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceDiffDiskProcedure))
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceReadSnapshotNodeProcedure))
@@ -883,10 +891,18 @@ func TestObservability_MergeDiffProcedures_RegisteredInMetricsControlAndSampler(
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceUnmountDiskProcedure))
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceListMountsProcedure))
 	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceEvictMountsProcedure))
+	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceCreateSnapshotProcedure))
+	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceListSnapshotsProcedure))
+	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServiceDeleteSnapshotProcedure))
+	require.True(t, isControlPlaneProcedure(storagev1connect.StorageServicePruneSnapshotsProcedure))
 
 	require.True(t, isSampledControlSpanName(storagev1connect.StorageServiceMergeDiskProcedure))
 	require.True(t, isSampledControlSpanName(storagev1connect.StorageServiceUnmountDiskProcedure))
 	require.True(t, isSampledControlSpanName(storagev1connect.StorageServiceEvictMountsProcedure))
+	require.True(t, isSampledControlSpanName(storagev1connect.StorageServiceCreateSnapshotProcedure))
+	require.True(t, isSampledControlSpanName(storagev1connect.StorageServiceDeleteSnapshotProcedure))
+	require.True(t, isSampledControlSpanName(storagev1connect.StorageServicePruneSnapshotsProcedure))
+	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceListSnapshotsProcedure))
 	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceListMountsProcedure))
 	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceRenewMountProcedure))
 	require.False(t, isSampledControlSpanName(storagev1connect.StorageServiceDiffDiskProcedure))

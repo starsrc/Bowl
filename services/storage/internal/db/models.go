@@ -46,4 +46,5 @@ type DiskSnapshot struct {
 	MergeParentSnapshotID pgtype.UUID        `json:"merge_parent_snapshot_id"`
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	Kind                  string             `json:"kind"`
+	Name                  string             `json:"name"`
 }

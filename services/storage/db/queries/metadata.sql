@@ -35,13 +35,19 @@ INSERT INTO disk_snapshots (
     parent_snapshot_id,
     merge_parent_snapshot_id,
     created_at,
-    kind
+    kind,
+    name
 )
-VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6)
-RETURNING snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind;
+VALUES ($1, $2, $3, $4, $5, clock_timestamp(), $6, $7)
+RETURNING snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind, name;
+
+-- name: GetSnapshotByID :one
+SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind, name
+FROM disk_snapshots
+WHERE snapshot_id = $1;
 
 -- name: ListLineageSnapshots :many
-SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind
+SELECT snapshot_id, lineage_id, source_disk_id, parent_snapshot_id, merge_parent_snapshot_id, created_at, kind, name
 FROM disk_snapshots
 WHERE lineage_id = $1
 ORDER BY created_at ASC, snapshot_id ASC;

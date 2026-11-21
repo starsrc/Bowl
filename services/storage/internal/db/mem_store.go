@@ -58,6 +58,7 @@ type MemSnapshotView struct {
 	ParentSnapshotID      uuid.UUID
 	MergeParentSnapshotID uuid.UUID
 	Kind                  SnapshotKind
+	Name                  string
 	CreatedAt             time.Time
 }
 
@@ -69,6 +70,7 @@ func (v *MemSnapshotView) toRecord() SnapshotRecord {
 		MergeParentSnapshotID: v.MergeParentSnapshotID,
 		SourceDiskID:          v.SourceDiskID,
 		Kind:                  v.Kind,
+		Name:                  v.Name,
 		CreatedAt:             v.CreatedAt,
 	}
 }
@@ -134,6 +136,7 @@ func (m *MemStore) SeedSnapshot(rec SnapshotRecord, setBaseOnDiskID uuid.UUID) e
 		ParentSnapshotID:      rec.ParentSnapshotID,
 		MergeParentSnapshotID: rec.MergeParentSnapshotID,
 		Kind:                  rec.Kind,
+		Name:                  rec.Name,
 		CreatedAt:             now,
 	}
 	if setBaseOnDiskID != uuid.Nil {
@@ -432,6 +435,206 @@ func (m *MemStore) ListLineageSnapshots(ctx context.Context, lineageID uuid.UUID
 		snapshots = append(snapshots, ordered[i].toRecord())
 	}
 	return snapshots, nil
+}
+
+func (m *MemStore) collectLineageStateLocked(lineageID uuid.UUID) ([]DiskRecord, []SnapshotRecord) {
+	disks := make([]DiskRecord, 0)
+	for id := range m.disks {
+		d := m.disks[id]
+		if d.LineageID == lineageID {
+			disks = append(disks, d.toRecord())
+		}
+	}
+	snaps := make([]SnapshotRecord, 0)
+	for sid := range m.snapshots {
+		s := m.snapshots[sid]
+		if s.LineageID == lineageID {
+			snaps = append(snaps, s.toRecord())
+		}
+	}
+	return disks, snaps
+}
+
+func (m *MemStore) deleteSnapshotsLocked(lineageID uuid.UUID, snapIDs []uuid.UUID) {
+	delSet := make(map[uuid.UUID]struct{}, len(snapIDs))
+	for _, sid := range snapIDs {
+		delSet[sid] = struct{}{}
+	}
+	for sid := range m.snapshots {
+		if _, deleting := delSet[sid]; deleting {
+			continue
+		}
+		s := m.snapshots[sid]
+		if s.LineageID != lineageID {
+			continue
+		}
+		changed := false
+		if _, cleared := delSet[s.ParentSnapshotID]; cleared {
+			s.ParentSnapshotID = uuid.Nil
+			changed = true
+		}
+		if _, cleared := delSet[s.MergeParentSnapshotID]; cleared {
+			s.MergeParentSnapshotID = uuid.Nil
+			changed = true
+		}
+		if changed {
+			m.snapshots[sid] = s
+		}
+	}
+	for _, sid := range snapIDs {
+		delete(m.snapshots, sid)
+	}
+}
+
+func (m *MemStore) CreateSnapshot(ctx context.Context, arg CreateSnapshotInput) (SnapshotRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return SnapshotRecord{}, err
+	}
+	if arg.DiskID == uuid.Nil || arg.SnapshotID == uuid.Nil {
+		return SnapshotRecord{}, fmt.Errorf("%w: disk id and snapshot id cannot be nil uuid", ErrInvalidArgument)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return SnapshotRecord{}, err
+	}
+
+	diskRow, ok := m.disks[arg.DiskID]
+	if !ok {
+		return SnapshotRecord{}, ErrNotFound
+	}
+	if _, linOK := m.lineages[diskRow.LineageID]; !linOK {
+		return SnapshotRecord{}, ErrNotFound
+	}
+	if _, exists := m.snapshots[arg.SnapshotID]; exists {
+		return SnapshotRecord{}, errors.New("db: snapshot already exists")
+	}
+
+	view := MemSnapshotView{
+		SnapshotID:       arg.SnapshotID,
+		LineageID:        diskRow.LineageID,
+		SourceDiskID:     arg.DiskID,
+		ParentSnapshotID: diskRow.BaseSnapshotID,
+		Kind:             SnapshotKindManual,
+		Name:             arg.Name,
+		CreatedAt:        m.nextNowLocked(),
+	}
+	m.snapshots[arg.SnapshotID] = view
+	return view.toRecord(), nil
+}
+
+func (m *MemStore) ListSnapshots(ctx context.Context, query ListSnapshotsQuery) (ListSnapshotsPage, error) {
+	if err := ctx.Err(); err != nil {
+		return ListSnapshotsPage{}, err
+	}
+	if query.DiskID == uuid.Nil {
+		return ListSnapshotsPage{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+	if err := validateSnapshotKindFilter(query.Kind); err != nil {
+		return ListSnapshotsPage{}, err
+	}
+	pageSize, err := normalizeSnapshotPageSize(query.PageSize)
+	if err != nil {
+		return ListSnapshotsPage{}, err
+	}
+
+	var (
+		hasCursor    bool
+		cursorTime   time.Time
+		cursorSnapID uuid.UUID
+	)
+	if query.PageToken != "" {
+		ts, id, decErr := decodeSnapshotPageCursor(query.PageToken)
+		if decErr != nil {
+			return ListSnapshotsPage{}, decErr
+		}
+		hasCursor = true
+		cursorTime = ts
+		cursorSnapID = id
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	diskRow, ok := m.disks[query.DiskID]
+	if !ok {
+		return ListSnapshotsPage{}, ErrNotFound
+	}
+	disks, snaps := m.collectLineageStateLocked(diskRow.LineageID)
+	return buildListSnapshotsPage(disks, snaps, query.Kind, pageSize, hasCursor, cursorTime, cursorSnapID), nil
+}
+
+func (m *MemStore) DeleteSnapshot(ctx context.Context, diskID, snapshotID uuid.UUID) (SnapshotRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return SnapshotRecord{}, err
+	}
+	if diskID == uuid.Nil || snapshotID == uuid.Nil {
+		return SnapshotRecord{}, fmt.Errorf("%w: disk id and snapshot id cannot be nil uuid", ErrInvalidArgument)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.consumeFailNextWriteLocked(); err != nil {
+		return SnapshotRecord{}, err
+	}
+
+	diskRow, ok := m.disks[diskID]
+	if !ok {
+		return SnapshotRecord{}, ErrNotFound
+	}
+	targetView, snapOK := m.snapshots[snapshotID]
+	if !snapOK {
+		return SnapshotRecord{}, ErrNotFound
+	}
+	if targetView.LineageID != diskRow.LineageID {
+		return SnapshotRecord{}, ErrCrossLineage
+	}
+
+	disks, snaps := m.collectLineageStateLocked(diskRow.LineageID)
+	hull := ComputeActiveLCAHull(disks, snaps)
+	if _, protected := hull[snapshotID]; protected {
+		return SnapshotRecord{}, ErrSnapshotInUse
+	}
+
+	m.deleteSnapshotsLocked(diskRow.LineageID, []uuid.UUID{snapshotID})
+	rec := targetView.toRecord()
+	rec.Protected = false
+	return rec, nil
+}
+
+func (m *MemStore) PruneSnapshots(ctx context.Context, diskID uuid.UUID, dryRun bool) ([]SnapshotRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if diskID == uuid.Nil {
+		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !dryRun {
+		if err := m.consumeFailNextWriteLocked(); err != nil {
+			return nil, err
+		}
+	}
+
+	diskRow, ok := m.disks[diskID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	disks, snaps := m.collectLineageStateLocked(diskRow.LineageID)
+	candidates := selectPrunableSnapshots(disks, snaps)
+	if dryRun || len(candidates) == 0 {
+		return candidates, nil
+	}
+
+	ids := make([]uuid.UUID, 0, len(candidates))
+	for i := range candidates {
+		ids = append(ids, candidates[i].SnapshotID)
+	}
+	m.deleteSnapshotsLocked(diskRow.LineageID, ids)
+	return candidates, nil
 }
 
 func (m *MemStore) UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error) {

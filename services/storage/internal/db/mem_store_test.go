@@ -114,6 +114,14 @@ func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testin
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.ListLineageSnapshots(ctx, id)
 	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.CreateSnapshot(ctx, db.CreateSnapshotInput{DiskID: id, SnapshotID: mustNewUUIDv7(t), Name: "c"})
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.ListSnapshots(ctx, db.ListSnapshotsQuery{DiskID: id})
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.DeleteSnapshot(ctx, id, mustNewUUIDv7(t))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.PruneSnapshots(ctx, id, false)
+	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.MergeDisk(ctx, &db.MergeDiskInput{
 		LineageID:           id,
 		SourceDiskID:        id,
@@ -204,4 +212,44 @@ func TestDBModule_GivenInvalidOrValidPoolConfig_WhenOpenPoolOrFxValidated_ThenMa
 		MetricsEnabled: false,
 	}
 	require.NoError(t, fx.ValidateApp(fx.Supply(poolCfg), db.Module), "db.Module fx validation should succeed")
+}
+
+func TestMemStore_GivenInjectedWriteError_WhenSnapshotMutatorsCalled_ThenRollBackWithoutBreakingDryRun(t *testing.T) {
+	ctx := context.Background()
+	mem := db.NewMemStore()
+
+	rootID := mustNewUUIDv7(t)
+	_, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
+	require.NoError(t, err)
+
+	injected := errors.New("injected snapshot write error")
+	mem.SetFailNextWrite(injected)
+	_, err = mem.CreateSnapshot(ctx, db.CreateSnapshotInput{
+		DiskID:     rootID,
+		SnapshotID: mustNewUUIDv7(t),
+		Name:       "failed",
+	})
+	require.ErrorIs(t, err, injected)
+	require.Empty(t, mem.Inspect().Snapshots)
+
+	snapID := mustNewUUIDv7(t)
+	_, err = mem.CreateSnapshot(ctx, db.CreateSnapshotInput{
+		DiskID:     rootID,
+		SnapshotID: snapID,
+		Name:       "ok",
+	})
+	require.NoError(t, err)
+
+	mem.SetFailNextWrite(injected)
+	_, err = mem.DeleteSnapshot(ctx, rootID, snapID)
+	require.ErrorIs(t, err, injected)
+	require.Len(t, mem.Inspect().Snapshots, 1)
+
+	mem.SetFailNextWrite(injected)
+	candidates, err := mem.PruneSnapshots(ctx, rootID, true)
+	require.NoError(t, err, "dry_run must not consume write failure hook")
+	require.Empty(t, candidates)
+
+	_, err = mem.PruneSnapshots(ctx, rootID, false)
+	require.ErrorIs(t, err, injected)
 }

@@ -76,6 +76,10 @@ var knownProcedures = map[string]string{
 	storagev1connect.StorageServiceDiffDiskProcedure:         storagev1connect.StorageServiceDiffDiskProcedure,
 	storagev1connect.StorageServiceReadSnapshotNodeProcedure: storagev1connect.StorageServiceReadSnapshotNodeProcedure,
 	storagev1connect.StorageServiceMergeDiskProcedure:        storagev1connect.StorageServiceMergeDiskProcedure,
+	storagev1connect.StorageServiceCreateSnapshotProcedure:   storagev1connect.StorageServiceCreateSnapshotProcedure,
+	storagev1connect.StorageServiceListSnapshotsProcedure:    storagev1connect.StorageServiceListSnapshotsProcedure,
+	storagev1connect.StorageServiceDeleteSnapshotProcedure:   storagev1connect.StorageServiceDeleteSnapshotProcedure,
+	storagev1connect.StorageServicePruneSnapshotsProcedure:   storagev1connect.StorageServicePruneSnapshotsProcedure,
 	storagev1connect.StorageServiceStatFSProcedure:           storagev1connect.StorageServiceStatFSProcedure,
 	storagev1connect.StorageServiceReclaimOrphanProcedure:    storagev1connect.StorageServiceReclaimOrphanProcedure,
 }

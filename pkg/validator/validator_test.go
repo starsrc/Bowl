@@ -784,3 +784,94 @@ func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenRe
 		assertValidationReason(t, gotErr, validator.ReasonInvalidArgument)
 	})
 }
+
+func TestStorageValidator_GivenSnapshotMessages_WhenValidated_ThenEnforcesReasonsAndPriority(t *testing.T) {
+	v, err := validator.NewStorageValidator()
+	require.NoError(t, err)
+
+	now := timestamppb.Now()
+	validSnap := &storagev1.Snapshot{
+		SnapshotId:   testParentDiskID,
+		SourceDiskId: testValidDiskID,
+		Kind:         storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL,
+		Name:         "before-upgrade",
+		CreatedAt:    now,
+	}
+
+	validCases := []struct {
+		name string
+		msg  proto.Message
+	}{
+		{name: "create_snapshot_unnamed", msg: &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID}},
+		{name: "create_snapshot_max_name", msg: &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID, Name: strings.Repeat("a", testMaxNameBytes)}},
+		{name: "create_snapshot_resp", msg: &storagev1.CreateSnapshotResponse{Snapshot: validSnap}},
+		{name: "list_snapshots_req", msg: &storagev1.ListSnapshotsRequest{DiskId: testValidDiskID, Kind: storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL, PageSize: 1000}},
+		{name: "list_snapshots_resp", msg: &storagev1.ListSnapshotsResponse{Snapshots: []*storagev1.Snapshot{validSnap}}},
+		{name: "delete_snapshot_req", msg: &storagev1.DeleteSnapshotRequest{DiskId: testValidDiskID, SnapshotId: testParentDiskID}},
+		{name: "delete_snapshot_resp", msg: &storagev1.DeleteSnapshotResponse{}},
+		{name: "prune_snapshots_req", msg: &storagev1.PruneSnapshotsRequest{DiskId: testValidDiskID, DryRun: true}},
+		{name: "prune_snapshots_resp", msg: &storagev1.PruneSnapshotsResponse{Snapshots: []*storagev1.Snapshot{validSnap}, ReclaimedCount: 1, DryRun: true}},
+	}
+	for _, tc := range validCases {
+		t.Run("valid/"+tc.name, func(t *testing.T) {
+			require.NoError(t, v.Validate(tc.msg))
+		})
+	}
+
+	invalidCases := []struct {
+		name       string
+		msg        proto.Message
+		wantReason string
+	}{
+		{
+			name:       "create_snapshot_overlong_name",
+			msg:        &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID, Name: strings.Repeat("a", testMaxNameBytes+1)},
+			wantReason: validator.ReasonNameTooLong,
+		},
+		{
+			name:       "create_snapshot_bad_disk_id_overrides_overlong_name",
+			msg:        &storagev1.CreateSnapshotRequest{DiskId: testNilUUID, Name: strings.Repeat("a", testMaxNameBytes+1)},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "create_snapshot_nul_name",
+			msg:        &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID, Name: "bad\x00name"},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "create_snapshot_resp_missing_snapshot",
+			msg:        &storagev1.CreateSnapshotResponse{},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "list_snapshots_nil_disk_id",
+			msg:        &storagev1.ListSnapshotsRequest{DiskId: testNilUUID},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "list_snapshots_invalid_kind",
+			msg:        &storagev1.ListSnapshotsRequest{DiskId: testValidDiskID, Kind: storagev1.SnapshotKind(99)},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "list_snapshots_page_size_over_1000",
+			msg:        &storagev1.ListSnapshotsRequest{DiskId: testValidDiskID, PageSize: 1001},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "delete_snapshot_nil_snapshot_id",
+			msg:        &storagev1.DeleteSnapshotRequest{DiskId: testValidDiskID, SnapshotId: testNilUUID},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "prune_snapshots_nil_disk_id",
+			msg:        &storagev1.PruneSnapshotsRequest{DiskId: testNilUUID},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run("invalid/"+tc.name, func(t *testing.T) {
+			assertValidationReason(t, v.Validate(tc.msg), tc.wantReason)
+		})
+	}
+}

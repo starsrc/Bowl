@@ -50,6 +50,7 @@ type diskSubcommandSpec struct {
 	args         cobra.PositionalArgs
 	uuidLabel    string
 	allowQuiet   bool
+	quietHelp    string
 	spanName     string
 	timeout      time.Duration
 	buildAdapter func(cmd *cobra.Command) diskRequestAdapter
@@ -68,6 +69,7 @@ type diskOutcome struct {
 	jsonPayload   any
 	renderHuman   func(w io.Writer)
 	setSpanDiskID bool
+	spanAttrs     []attribute.KeyValue
 }
 
 type diskCLIError struct {
@@ -308,7 +310,11 @@ func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts) *cobra.Command
 	adapter = spec.buildAdapter(cmd)
 	flags := cmd.Flags()
 	if spec.allowQuiet {
-		flags.BoolVarP(&quiet, "quiet", "q", false, "Quiet mode, output only the disk ID")
+		quietUsage := spec.quietHelp
+		if quietUsage == "" {
+			quietUsage = "Quiet mode, output only the disk ID"
+		}
+		flags.BoolVarP(&quiet, "quiet", "q", false, quietUsage)
 	}
 	flags.BoolVar(&jsonOut, "json", false, "Output result in JSON format")
 	flags.StringVar(&endpoint, "endpoint", "", "StorageService base URL, defaults to $BOWL_STORAGE_ENDPOINT or http://127.0.0.1:9000")
@@ -381,6 +387,9 @@ func runDiskValidated(
 
 	if outcome.setSpanDiskID && outcome.disk != nil {
 		span.SetAttributes(attribute.String("bowl.disk_id", outcome.disk.GetDiskId()))
+	}
+	if len(outcome.spanAttrs) > 0 {
+		span.SetAttributes(outcome.spanAttrs...)
 	}
 
 	if quiet {

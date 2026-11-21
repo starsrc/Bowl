@@ -65,6 +65,7 @@ func TestToStatus_SentinelErrors_MapsToExpectedGRPCCodeAndErrorInfo(t *testing.T
 		{name: "磁盘无基准快照记录", err: ErrNoBaseSnapshot, wantCode: codes.FailedPrecondition, wantReason: "EINVAL"},
 		{name: "并发合并写入中止", err: ErrConcurrentMerge, wantCode: codes.Aborted, wantReason: "EBUSY"},
 		{name: "磁盘处于挂载租约中", err: ErrDiskMounted, wantCode: codes.Aborted, wantReason: "EBUSY"},
+		{name: "快照受活跃血缘保护", err: ErrSnapshotInUse, wantCode: codes.FailedPrecondition, wantReason: "EBUSY"},
 		{name: "数据库基准快照过期", err: db.ErrStaleBaseSnapshot, wantCode: codes.Aborted, wantReason: "EBUSY"},
 		{
 			name: "合并未决冲突",

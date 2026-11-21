@@ -89,47 +89,57 @@ func (r errReader) Read(_ []byte) (int, error) {
 type fakeStorage struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 
-	mu                sync.Mutex
-	disks             map[string]*storagev1.Disk
-	mounted           map[string]bool
-	mountLeases       map[string]map[string]*storagev1.MountLease
-	nextSeq           int
-	epochSeq          uint64
-	lastAuth          string
-	lastTraceparent   string
-	lastRequestID     string
-	deleteCalls       int
-	updateCalls       int
-	diffCalls         int
-	readSnapshotCalls int
-	readCalls         int
-	readlinkCalls     int
-	mergeCalls        int
-	listMountsCalls   int
-	evictCalls        int
-	lastDeleteReq     *storagev1.DeleteDiskRequest
-	lastDiffReq       *storagev1.DiffDiskRequest
-	lastMergeReq      *storagev1.MergeDiskRequest
-	lastEvictReq      *storagev1.EvictMountsRequest
-	diffResponse      *storagev1.DiffDiskResponse
-	snapshotNodes     map[string]*storagev1.ReadSnapshotNodeResponse
-	liveFiles         map[string][]byte
-	liveSymlinks      map[string][]byte
-	mergeResponse     *storagev1.MergeDiskResponse
-	forcedErr         map[string]error
-	returnNilDisk     map[string]bool
-	mountZeroRoot     bool
-	mountZeroEpoch    bool
-	mountIDSeq        int
-	mountLeaseTTL     uint32
-	mountReqs         []*storagev1.MountDiskRequest
-	renewReqs         []*storagev1.RenewMountRequest
-	unmountReqs       []*storagev1.UnmountDiskRequest
-	renewErr          error
-	unmountErr        error
-	onMountDisk       func(context.Context, *storagev1.MountDiskRequest) error
-	onRenewMount      func(*storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error)
-	onUnmountDisk     func(*storagev1.UnmountDiskRequest)
+	mu                    sync.Mutex
+	disks                 map[string]*storagev1.Disk
+	mounted               map[string]bool
+	mountLeases           map[string]map[string]*storagev1.MountLease
+	nextSeq               int
+	epochSeq              uint64
+	lastAuth              string
+	lastTraceparent       string
+	lastRequestID         string
+	deleteCalls           int
+	updateCalls           int
+	diffCalls             int
+	readSnapshotCalls     int
+	readCalls             int
+	readlinkCalls         int
+	mergeCalls            int
+	listMountsCalls       int
+	evictCalls            int
+	createSnapshotCalls   int
+	listSnapshotsCalls    int
+	deleteSnapshotCalls   int
+	pruneSnapshotsCalls   int
+	lastDeleteReq         *storagev1.DeleteDiskRequest
+	lastDiffReq           *storagev1.DiffDiskRequest
+	lastMergeReq          *storagev1.MergeDiskRequest
+	lastEvictReq          *storagev1.EvictMountsRequest
+	lastCreateSnapshotReq *storagev1.CreateSnapshotRequest
+	lastListSnapshotsReq  *storagev1.ListSnapshotsRequest
+	lastDeleteSnapshotReq *storagev1.DeleteSnapshotRequest
+	lastPruneSnapshotsReq *storagev1.PruneSnapshotsRequest
+	diffResponse          *storagev1.DiffDiskResponse
+	snapshots             map[string]*storagev1.Snapshot
+	snapshotNodes         map[string]*storagev1.ReadSnapshotNodeResponse
+	liveFiles             map[string][]byte
+	liveSymlinks          map[string][]byte
+	mergeResponse         *storagev1.MergeDiskResponse
+	forcedErr             map[string]error
+	returnNilDisk         map[string]bool
+	returnNilSnapshot     bool
+	mountZeroRoot         bool
+	mountZeroEpoch        bool
+	mountIDSeq            int
+	mountLeaseTTL         uint32
+	mountReqs             []*storagev1.MountDiskRequest
+	renewReqs             []*storagev1.RenewMountRequest
+	unmountReqs           []*storagev1.UnmountDiskRequest
+	renewErr              error
+	unmountErr            error
+	onMountDisk           func(context.Context, *storagev1.MountDiskRequest) error
+	onRenewMount          func(*storagev1.RenewMountRequest) (*storagev1.RenewMountResponse, error)
+	onUnmountDisk         func(*storagev1.UnmountDiskRequest)
 }
 
 func newFakeStorage() *fakeStorage {
@@ -137,6 +147,7 @@ func newFakeStorage() *fakeStorage {
 		disks:         make(map[string]*storagev1.Disk),
 		mounted:       make(map[string]bool),
 		mountLeases:   make(map[string]map[string]*storagev1.MountLease),
+		snapshots:     make(map[string]*storagev1.Snapshot),
 		snapshotNodes: make(map[string]*storagev1.ReadSnapshotNodeResponse),
 		liveFiles:     make(map[string][]byte),
 		liveSymlinks:  make(map[string][]byte),
@@ -739,6 +750,161 @@ func (f *fakeStorage) MergeDisk(_ context.Context, req *connect.Request[storagev
 	}), nil
 }
 
+func (f *fakeStorage) seedSnapshot(s *storagev1.Snapshot) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapshots[s.GetSnapshotId()] = s
+}
+
+func (f *fakeStorage) CreateSnapshot(_ context.Context, req *connect.Request[storagev1.CreateSnapshotRequest]) (*connect.Response[storagev1.CreateSnapshotResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createSnapshotCalls++
+	f.lastCreateSnapshotReq = req.Msg
+	f.recordHeaders(req.Header())
+	if err := f.forcedErr["CreateSnapshot"]; err != nil {
+		return nil, err
+	}
+	if f.returnNilSnapshot {
+		return connect.NewResponse(&storagev1.CreateSnapshotResponse{}), nil
+	}
+	diskID := req.Msg.GetDiskId()
+	if _, ok := f.disks[diskID]; !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("disk not found"))
+	}
+	f.nextSeq++
+	snapID := fmt.Sprintf("01950000-0000-7000-a000-%012d", f.nextSeq)
+	snap := &storagev1.Snapshot{
+		SnapshotId:   snapID,
+		SourceDiskId: diskID,
+		Kind:         storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL,
+		Name:         req.Msg.GetName(),
+		Protected:    false,
+		CreatedAt:    timestamppb.New(time.Date(2026, 11, 21, 10, 0, f.nextSeq, 0, time.UTC)),
+	}
+	f.snapshots[snapID] = snap
+	return connect.NewResponse(&storagev1.CreateSnapshotResponse{Snapshot: snap}), nil
+}
+
+func (f *fakeStorage) ListSnapshots(_ context.Context, req *connect.Request[storagev1.ListSnapshotsRequest]) (*connect.Response[storagev1.ListSnapshotsResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listSnapshotsCalls++
+	f.lastListSnapshotsReq = req.Msg
+	f.recordHeaders(req.Header())
+	if err := f.forcedErr["ListSnapshots"]; err != nil {
+		return nil, err
+	}
+	diskID := req.Msg.GetDiskId()
+	if _, ok := f.disks[diskID]; !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("disk not found"))
+	}
+	var ids []string
+	for id, snap := range f.snapshots {
+		if snap.GetSourceDiskId() != diskID {
+			continue
+		}
+		if req.Msg.GetKind() != storagev1.SnapshotKind_SNAPSHOT_KIND_UNSPECIFIED && snap.GetKind() != req.Msg.GetKind() {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+
+	start := 0
+	if req.Msg.GetPageToken() != "" {
+		for idx, id := range ids {
+			if id == req.Msg.GetPageToken() {
+				start = idx
+				break
+			}
+		}
+	}
+	limit := int(req.Msg.GetPageSize())
+	if limit <= 0 {
+		limit = 50
+	}
+	end := min(start+limit, len(ids))
+	out := make([]*storagev1.Snapshot, 0, end-start)
+	for _, id := range ids[start:end] {
+		out = append(out, f.snapshots[id])
+	}
+	var nextToken string
+	if end < len(ids) {
+		nextToken = ids[end]
+	}
+	return connect.NewResponse(&storagev1.ListSnapshotsResponse{
+		Snapshots:     out,
+		NextPageToken: nextToken,
+	}), nil
+}
+
+func (f *fakeStorage) DeleteSnapshot(_ context.Context, req *connect.Request[storagev1.DeleteSnapshotRequest]) (*connect.Response[storagev1.DeleteSnapshotResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteSnapshotCalls++
+	f.lastDeleteSnapshotReq = req.Msg
+	f.recordHeaders(req.Header())
+	if err := f.forcedErr["DeleteSnapshot"]; err != nil {
+		return nil, err
+	}
+	diskID := req.Msg.GetDiskId()
+	if _, ok := f.disks[diskID]; !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("disk not found"))
+	}
+	snapID := req.Msg.GetSnapshotId()
+	snap, ok := f.snapshots[snapID]
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("snapshot not found"))
+	}
+	if snap.GetSourceDiskId() != diskID {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("cross-lineage snapshot"))
+	}
+	if snap.GetProtected() {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("snapshot is protected"))
+	}
+	delete(f.snapshots, snapID)
+	return connect.NewResponse(&storagev1.DeleteSnapshotResponse{}), nil
+}
+
+func (f *fakeStorage) PruneSnapshots(_ context.Context, req *connect.Request[storagev1.PruneSnapshotsRequest]) (*connect.Response[storagev1.PruneSnapshotsResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruneSnapshotsCalls++
+	f.lastPruneSnapshotsReq = req.Msg
+	f.recordHeaders(req.Header())
+	if err := f.forcedErr["PruneSnapshots"]; err != nil {
+		return nil, err
+	}
+	diskID := req.Msg.GetDiskId()
+	if _, ok := f.disks[diskID]; !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("disk not found"))
+	}
+	var ids []string
+	for id, snap := range f.snapshots {
+		if snap.GetSourceDiskId() != diskID {
+			continue
+		}
+		if snap.GetProtected() || snap.GetKind() == storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+	out := make([]*storagev1.Snapshot, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, f.snapshots[id])
+		if !req.Msg.GetDryRun() {
+			delete(f.snapshots, id)
+		}
+	}
+	return connect.NewResponse(&storagev1.PruneSnapshotsResponse{
+		Snapshots:      out,
+		ReclaimedCount: uint32(len(out)),
+		DryRun:         req.Msg.GetDryRun(),
+	}), nil
+}
+
 func newFakeStorageHTTPClient(f *fakeStorage) *http.Client {
 	path, connectHandler := storagev1connect.NewStorageServiceHandler(f)
 	mux := http.NewServeMux()
@@ -852,7 +1018,7 @@ func TestExecute_GivenHelpFlags_PrintsNativeScopeAndReturns0(t *testing.T) {
 		require.Equal(t, 0, code, "args=%v stderr=%s", args, errOut)
 		require.Empty(t, errOut)
 		require.Contains(t, out, "Available Commands:")
-		for _, wantCmd := range []string{"disk", "mount", "umount", "stats", "version", "help", "completion"} {
+		for _, wantCmd := range []string{"disk", "snapshot", "mount", "umount", "stats", "version", "help", "completion"} {
 			require.Contains(t, out, wantCmd, "args=%v", args)
 		}
 		require.NotContains(t, out, "sandbox", "args=%v", args)
@@ -867,6 +1033,11 @@ func TestExecute_GivenHelpSubcommand_PrintsTargetHelpAndReturns0(t *testing.T) {
 		{args: []string{"help", "disk"}, wantSubstr: "bowl disk [command]"},
 		{args: []string{"help", "disk", "create"}, wantSubstr: "bowl disk create"},
 		{args: []string{"help", "disk", "update"}, wantSubstr: "update, resize"},
+		{args: []string{"help", "snapshot"}, wantSubstr: "bowl snapshot [command]"},
+		{args: []string{"help", "snapshot", "create"}, wantSubstr: "bowl snapshot create <disk-id>"},
+		{args: []string{"help", "snapshot", "list"}, wantSubstr: "list, ls"},
+		{args: []string{"help", "snapshot", "delete"}, wantSubstr: "delete, rm"},
+		{args: []string{"help", "snapshot", "prune"}, wantSubstr: "bowl snapshot prune <disk-id>"},
 		{args: []string{"help", "mount"}, wantSubstr: "bowl mount <disk-id> <mountpoint>"},
 		{args: []string{"help", "umount"}, wantSubstr: "umount, unmount"},
 		{args: []string{"help", "stats"}, wantSubstr: "bowl stats [mountpoint]"},

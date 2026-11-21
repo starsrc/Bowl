@@ -289,7 +289,7 @@ func TestGivenOrphanInCheckpointWhenSanitizedThenOrphanPacksDroppedWithoutAffect
 	require.Truef(t, stats.HasOrphans, "带未关闭孤儿的 Checkpoint 应标记 HasOrphans=true")
 
 	require.NoError(t, store.CloneCheckpointDir(ctx, cpDir, sanDir))
-	sanStatFS, err := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{Dir: sanDir, CommitID: "commit-san-1"})
+	sanStatFS, err := store.SanitizeCheckpoint(ctx, store.SanitizeOptions{Dir: sanDir, SnapshotID: "snapshot-san-1"})
 	require.NoError(t, err)
 
 	require.Equalf(t, uint64(store.BlobSize), sanStatFS.UsedBytes, "净化后 StatFS UsedBytes 应只剩活文件")

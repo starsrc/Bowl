@@ -33,7 +33,7 @@ type mergeConflictJSON struct {
 }
 
 type mergeConflictReportJSON struct {
-	LCACommitID        string              `json:"lca_commit_id,omitempty"`
+	LCASnapshotID      string              `json:"lca_snapshot_id,omitempty"`
 	TotalConflicts     uint64              `json:"total_conflicts"`
 	ConflictsTruncated bool                `json:"conflicts_truncated"`
 	Conflicts          []mergeConflictJSON `json:"conflicts"`
@@ -44,8 +44,8 @@ type diskMergeJSON struct {
 	TargetDiskID       string                   `json:"target_disk_id"`
 	DryRun             bool                     `json:"dry_run"`
 	Merged             bool                     `json:"merged"`
-	LCACommitID        string                   `json:"lca_commit_id,omitempty"`
-	MergeCommitID      string                   `json:"merge_commit_id,omitempty"`
+	LCASnapshotID      string                   `json:"lca_snapshot_id,omitempty"`
+	MergeSnapshotID    string                   `json:"merge_snapshot_id,omitempty"`
 	EstimatedUsedBytes uint64                   `json:"estimated_used_bytes"`
 	TargetMaxBytes     uint64                   `json:"target_max_bytes"`
 	Disk               *diskJSON                `json:"disk,omitempty"`
@@ -240,8 +240,8 @@ func (a *diskMergeAdapter) invoke(ctx context.Context, client storagev1connect.S
 		TargetDiskID:       a.targetDiskID,
 		DryRun:             a.dryRun,
 		Merged:             !a.dryRun,
-		LCACommitID:        msg.GetLcaCommitId(),
-		MergeCommitID:      msg.GetMergeCommitId(),
+		LCASnapshotID:      msg.GetLcaSnapshotId(),
+		MergeSnapshotID:    msg.GetMergeSnapshotId(),
 		EstimatedUsedBytes: msg.GetEstimatedUsedBytes(),
 		TargetMaxBytes:     msg.GetTargetMaxBytes(),
 		Disk:               diskPtr,
@@ -250,8 +250,8 @@ func (a *diskMergeAdapter) invoke(ctx context.Context, client storagev1connect.S
 
 	if report != nil && (report.GetTotalConflicts() > 0 || len(report.GetConflicts()) > 0) {
 		payload.Merged = false
-		if payload.LCACommitID == "" && reportJSON != nil {
-			payload.LCACommitID = reportJSON.LCACommitID
+		if payload.LCASnapshotID == "" && reportJSON != nil {
+			payload.LCASnapshotID = reportJSON.LCASnapshotID
 		}
 		return diskOutcome{}, &diskCLIError{
 			exitCode:    1,
@@ -286,7 +286,7 @@ func (a *diskMergeAdapter) mapMergeRPCError(err error) *diskCLIError {
 			TargetDiskID:   a.targetDiskID,
 			DryRun:         a.dryRun,
 			Merged:         false,
-			LCACommitID:    reportJSON.LCACommitID,
+			LCASnapshotID:  reportJSON.LCASnapshotID,
 			ConflictReport: reportJSON,
 		}
 		return &diskCLIError{
@@ -360,7 +360,7 @@ func toMergeConflictReportJSON(r *storagev1.MergeConflictReport) *mergeConflictR
 		})
 	}
 	return &mergeConflictReportJSON{
-		LCACommitID:        r.GetLcaCommitId(),
+		LCASnapshotID:      r.GetLcaSnapshotId(),
 		TotalConflicts:     r.GetTotalConflicts(),
 		ConflictsTruncated: r.GetConflictsTruncated(),
 		Conflicts:          items,
@@ -375,11 +375,11 @@ func renderDiskMergeHuman(w io.Writer, res *diskMergeJSON, disk *storagev1.Disk)
 	}
 	fmt.Fprintf(w, "Source Disk:    %s\n", res.SourceDiskID)
 	fmt.Fprintf(w, "Target Disk:    %s\n", res.TargetDiskID)
-	if res.LCACommitID != "" {
-		fmt.Fprintf(w, "LCA Commit:     %s\n", res.LCACommitID)
+	if res.LCASnapshotID != "" {
+		fmt.Fprintf(w, "LCA Snapshot:   %s\n", res.LCASnapshotID)
 	}
-	if res.MergeCommitID != "" {
-		fmt.Fprintf(w, "Merge Commit:   %s\n", res.MergeCommitID)
+	if res.MergeSnapshotID != "" {
+		fmt.Fprintf(w, "Merge Snapshot: %s\n", res.MergeSnapshotID)
 	}
 	fmt.Fprintf(
 		w,
@@ -400,8 +400,8 @@ func renderMergeConflictHuman(w io.Writer, sourceDiskID, targetDiskID string, re
 	} else {
 		fmt.Fprintf(w, "Error: merge aborted with ECONFLICT: %d unresolved conflicts detected\n", report.TotalConflicts)
 	}
-	if report.LCACommitID != "" {
-		fmt.Fprintf(w, "LCA Commit: %s\n", report.LCACommitID)
+	if report.LCASnapshotID != "" {
+		fmt.Fprintf(w, "LCA Snapshot: %s\n", report.LCASnapshotID)
 	}
 	if len(report.Conflicts) > 0 {
 		fmt.Fprintln(w)

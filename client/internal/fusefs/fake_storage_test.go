@@ -1769,8 +1769,8 @@ func (s *fakeStorage) DiffDisk(context.Context, *connect.Request[storagev1.DiffD
 	return nil, s.failFast("DiffDisk")
 }
 
-func (s *fakeStorage) ReadCommitNode(context.Context, *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
-	return nil, s.failFast("ReadCommitNode")
+func (s *fakeStorage) ReadSnapshotNode(context.Context, *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
+	return nil, s.failFast("ReadSnapshotNode")
 }
 
 func (s *fakeStorage) MergeDisk(context.Context, *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {

@@ -80,7 +80,7 @@ func toStoreMergeStrategy(s storagev1.MergeStrategy) (store.MergeStrategy, error
 	}
 }
 
-func toProtoMergeConflictReport(lcaCommitID string, report *store.MergeConflictReport) *storagev1.MergeConflictReport {
+func toProtoMergeConflictReport(lcaSnapshotID string, report *store.MergeConflictReport) *storagev1.MergeConflictReport {
 	if report == nil {
 		return nil
 	}
@@ -95,7 +95,7 @@ func toProtoMergeConflictReport(lcaCommitID string, report *store.MergeConflictR
 		})
 	}
 	return &storagev1.MergeConflictReport{
-		LcaCommitId:        lcaCommitID,
+		LcaSnapshotId:      lcaSnapshotID,
 		TotalConflicts:     report.TotalConflicts,
 		Conflicts:          conflicts,
 		ConflictsTruncated: report.ConflictsTruncated,
@@ -132,7 +132,7 @@ func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.Di
 	}
 
 	return connect.NewResponse(&storagev1.DiffDiskResponse{
-		LcaCommitId: res.LCACommitID,
+		LcaSnapshotId: res.LCASnapshotID,
 		Summary: &storagev1.DiffSummary{
 			Added:     res.Summary.Added,
 			Modified:  res.Summary.Modified,
@@ -144,19 +144,19 @@ func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.Di
 	}), nil
 }
 
-func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
-	res, err := s.control.ReadCommitNode(ctx, &control.ReadCommitNodeParams{
-		DiskID:   req.Msg.DiskId,
-		CommitID: req.Msg.CommitId,
-		Ino:      req.Msg.Ino,
-		Offset:   req.Msg.Offset,
-		Size:     req.Msg.Size,
+func (s *Server) ReadSnapshotNode(ctx context.Context, req *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
+	res, err := s.control.ReadSnapshotNode(ctx, &control.ReadSnapshotNodeParams{
+		DiskID:     req.Msg.DiskId,
+		SnapshotID: req.Msg.SnapshotId,
+		Ino:        req.Msg.Ino,
+		Offset:     req.Msg.Offset,
+		Size:       req.Msg.Size,
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
-	return connect.NewResponse(&storagev1.ReadCommitNodeResponse{
+	return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{
 		Mode:          res.Mode,
 		FileSize:      res.FileSize,
 		Data:          res.Data,
@@ -197,8 +197,8 @@ func (s *Server) MergeDisk(ctx context.Context, req *connect.Request[storagev1.M
 
 	return connect.NewResponse(&storagev1.MergeDiskResponse{
 		Disk:               toProtoDisk(res.Disk),
-		LcaCommitId:        res.LCACommitID,
-		MergeCommitId:      res.MergeCommitID,
+		LcaSnapshotId:      res.LCASnapshotID,
+		MergeSnapshotId:    res.MergeSnapshotID,
 		EstimatedUsedBytes: res.EstimatedUsedBytes,
 		TargetMaxBytes:     res.TargetMaxBytes,
 	}), nil

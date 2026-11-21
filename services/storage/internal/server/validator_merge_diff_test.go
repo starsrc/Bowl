@@ -18,7 +18,7 @@ import (
 const (
 	testValidationSourceDiskID = "11111111-1111-7111-8111-111111111111"
 	testValidationTargetDiskID = "22222222-2222-7222-8222-222222222222"
-	testValidationCommitID     = "33333333-3333-7333-8333-333333333333"
+	testValidationSnapshotID   = "33333333-3333-7333-8333-333333333333"
 	testValidationNilUUID      = "00000000-0000-0000-0000-000000000000"
 )
 
@@ -37,7 +37,7 @@ func runValidationIntercept(t *testing.T, msg any) (bool, error) {
 	switch m := msg.(type) {
 	case *storagev1.DiffDiskRequest:
 		req = connect.NewRequest(m)
-	case *storagev1.ReadCommitNodeRequest:
+	case *storagev1.ReadSnapshotNodeRequest:
 		req = connect.NewRequest(m)
 	case *storagev1.MergeDiskRequest:
 		req = connect.NewRequest(m)
@@ -153,42 +153,42 @@ func TestValidation_DiffDiskRequest(t *testing.T) {
 	}
 }
 
-func TestValidation_ReadCommitNodeRequest(t *testing.T) {
+func TestValidation_ReadSnapshotNodeRequest(t *testing.T) {
 	invalidCases := []struct {
 		name string
-		req  *storagev1.ReadCommitNodeRequest
+		req  *storagev1.ReadSnapshotNodeRequest
 	}{
 		{
 			name: "非法_disk_id",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: "bad-uuid", CommitId: testValidationCommitID, Ino: 1},
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: "bad-uuid", SnapshotId: testValidationSnapshotID, Ino: 1},
 		},
 		{
 			name: "全零_nil_disk_id",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationNilUUID, CommitId: testValidationCommitID, Ino: 1},
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationNilUUID, SnapshotId: testValidationSnapshotID, Ino: 1},
 		},
 		{
-			name: "非法_commit_id",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationSourceDiskID, CommitId: "bad-uuid", Ino: 1},
+			name: "非法_snapshot_id",
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationSourceDiskID, SnapshotId: "bad-uuid", Ino: 1},
 		},
 		{
-			name: "全零_nil_commit_id",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationSourceDiskID, CommitId: testValidationNilUUID, Ino: 1},
+			name: "全零_nil_snapshot_id",
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationSourceDiskID, SnapshotId: testValidationNilUUID, Ino: 1},
 		},
 		{
 			name: "ino_为零",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationSourceDiskID, CommitId: testValidationCommitID, Ino: 0},
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationSourceDiskID, SnapshotId: testValidationSnapshotID, Ino: 0},
 		},
 		{
 			name: "ino_溢出_MaxInt64",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationSourceDiskID, CommitId: testValidationCommitID, Ino: uint64(math.MaxInt64) + 1},
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationSourceDiskID, SnapshotId: testValidationSnapshotID, Ino: uint64(math.MaxInt64) + 1},
 		},
 		{
 			name: "offset_溢出_MaxInt64",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationSourceDiskID, CommitId: testValidationCommitID, Ino: 1, Offset: uint64(math.MaxInt64) + 1},
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationSourceDiskID, SnapshotId: testValidationSnapshotID, Ino: 1, Offset: uint64(math.MaxInt64) + 1},
 		},
 		{
 			name: "size_超过_4MiB",
-			req:  &storagev1.ReadCommitNodeRequest{DiskId: testValidationSourceDiskID, CommitId: testValidationCommitID, Ino: 1, Size: (4 << 20) + 1},
+			req:  &storagev1.ReadSnapshotNodeRequest{DiskId: testValidationSourceDiskID, SnapshotId: testValidationSnapshotID, Ino: 1, Size: (4 << 20) + 1},
 		},
 	}
 
@@ -200,26 +200,26 @@ func TestValidation_ReadCommitNodeRequest(t *testing.T) {
 
 	validCases := []struct {
 		name string
-		req  *storagev1.ReadCommitNodeRequest
+		req  *storagev1.ReadSnapshotNodeRequest
 	}{
 		{
 			name: "最小合法边界",
-			req: &storagev1.ReadCommitNodeRequest{
-				DiskId:   testValidationSourceDiskID,
-				CommitId: testValidationCommitID,
-				Ino:      1,
-				Offset:   0,
-				Size:     0,
+			req: &storagev1.ReadSnapshotNodeRequest{
+				DiskId:     testValidationSourceDiskID,
+				SnapshotId: testValidationSnapshotID,
+				Ino:        1,
+				Offset:     0,
+				Size:       0,
 			},
 		},
 		{
 			name: "最大合法边界",
-			req: &storagev1.ReadCommitNodeRequest{
-				DiskId:   testValidationSourceDiskID,
-				CommitId: testValidationCommitID,
-				Ino:      math.MaxInt64,
-				Offset:   math.MaxInt64,
-				Size:     4 << 20,
+			req: &storagev1.ReadSnapshotNodeRequest{
+				DiskId:     testValidationSourceDiskID,
+				SnapshotId: testValidationSnapshotID,
+				Ino:        math.MaxInt64,
+				Offset:     math.MaxInt64,
+				Size:       4 << 20,
 			},
 		},
 	}

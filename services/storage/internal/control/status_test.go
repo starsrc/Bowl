@@ -62,10 +62,10 @@ func TestToStatus_SentinelErrors_MapsToExpectedGRPCCodeAndErrorInfo(t *testing.T
 		{name: "实例已关闭", err: ErrClosed, wantCode: codes.Internal, wantReason: "EIO"},
 		{name: "跨血缘操作拒绝", err: ErrCrossLineage, wantCode: codes.FailedPrecondition, wantReason: "EXDEV"},
 		{name: "多公共祖先 Criss-Cross 拒绝", err: ErrAmbiguousLCA, wantCode: codes.FailedPrecondition, wantReason: "EINVAL"},
-		{name: "磁盘无基准提交记录", err: ErrNoBaseCommit, wantCode: codes.FailedPrecondition, wantReason: "EINVAL"},
+		{name: "磁盘无基准快照记录", err: ErrNoBaseSnapshot, wantCode: codes.FailedPrecondition, wantReason: "EINVAL"},
 		{name: "并发合并写入中止", err: ErrConcurrentMerge, wantCode: codes.Aborted, wantReason: "EBUSY"},
 		{name: "磁盘处于挂载租约中", err: ErrDiskMounted, wantCode: codes.Aborted, wantReason: "EBUSY"},
-		{name: "数据库基准提交过期", err: db.ErrStaleBaseCommit, wantCode: codes.Aborted, wantReason: "EBUSY"},
+		{name: "数据库基准快照过期", err: db.ErrStaleBaseSnapshot, wantCode: codes.Aborted, wantReason: "EBUSY"},
 		{
 			name: "合并未决冲突",
 			err: &MergeConflictError{

@@ -45,10 +45,10 @@ var mappings = []errorMapping{
 	{sentinel: store.ErrClosed, code: codes.Internal, reason: "EIO"},
 	{sentinel: ErrCrossLineage, code: codes.FailedPrecondition, reason: "EXDEV"},
 	{sentinel: ErrAmbiguousLCA, code: codes.FailedPrecondition, reason: "EINVAL"},
-	{sentinel: ErrNoBaseCommit, code: codes.FailedPrecondition, reason: "EINVAL"},
+	{sentinel: ErrNoBaseSnapshot, code: codes.FailedPrecondition, reason: "EINVAL"},
 	{sentinel: ErrConcurrentMerge, code: codes.Aborted, reason: "EBUSY"},
 	{sentinel: ErrDiskMounted, code: codes.Aborted, reason: "EBUSY"},
-	{sentinel: db.ErrStaleBaseCommit, code: codes.Aborted, reason: "EBUSY"},
+	{sentinel: db.ErrStaleBaseSnapshot, code: codes.Aborted, reason: "EBUSY"},
 }
 
 func ToStatus(err error) *status.Status {

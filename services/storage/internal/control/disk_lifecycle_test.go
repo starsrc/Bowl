@@ -371,7 +371,7 @@ func TestDeleteDisk_ExistingDisk_RemovesDBRecordAndPhysicalDirectory(t *testing.
 	disk, err := mgr.CreateDisk(ctx, CreateDiskParams{Name: "to-delete", MaxBytes: 4 << 20})
 	require.NoError(t, err, "创建磁盘失败")
 
-	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	err = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID})
 
 	require.NoError(t, err, "DeleteDisk 失败")
 	_, getErr := mgr.GetDisk(ctx, disk.DiskID)
@@ -399,7 +399,7 @@ func TestDeleteDisk_InvalidOrMissingID_ReturnsExpectedSentinel(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := mgr.DeleteDisk(ctx, tc.diskID)
+			err := mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: tc.diskID})
 			require.ErrorIs(t, err, tc.wantErr, "DeleteDisk(%q) 错误不匹配: want=%v got=%v", tc.diskID, tc.wantErr, err)
 		})
 	}
@@ -421,7 +421,7 @@ func TestDeleteDisk_DirCleanupFailure_ReturnsErrorAndIncrementsCleanupMetric(t *
 	removeErr := errors.New("simulated remove dir failure")
 	mgr.removeAll = func(string) error { return removeErr }
 
-	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	err = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID})
 
 	require.ErrorIs(t, err, removeErr, "目录清理失败应向上暴露错误: want=%v got=%v", removeErr, err)
 	cleanupErrs := gatherCounterValue(t, reg, "bowl_storage_control_cleanup_errors_total")
@@ -457,5 +457,5 @@ func TestManagerOptions_AccessorsAndCollector_ReflectConfiguredValues(t *testing
 	require.True(t, mgr.OpenDirCache(), "OpenDirCache 应为 true")
 	require.Equal(t, AtimeModeRelAtime, mgr.AtimeMode(), "AtimeMode 不匹配")
 	require.InDelta(t, 0.0, gatherMetricLabelValue(t, reg, "bowl_storage_disks_loaded", "mode", "rw"), 1e-9, "初始加载 rw 实例数应为 0")
-	require.InDelta(t, 0.0, gatherGaugeValue(t, reg, "bowl_storage_commits_active"), 1e-9, "初始 commits_active 应为 0")
+	require.InDelta(t, 0.0, gatherGaugeValue(t, reg, "bowl_storage_snapshots_active"), 1e-9, "初始 snapshots_active 应为 0")
 }

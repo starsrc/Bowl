@@ -41,7 +41,7 @@ local.file_match "pebble_events" {
 			log_source = "pebble_events",
 		},
 		{
-			__path__   = "/var/lib/bowl/data/commits/*/pebble_events.log",
+			__path__   = "/var/lib/bowl/data/snapshots/*/pebble_events.log",
 			service    = "storage-service",
 			component  = "pebble",
 			log_source = "pebble_events",
@@ -61,7 +61,7 @@ loki.process "bowl" {
 			component      = "component",
 			disk_id        = "disk_id",
 			source_disk_id = "source_disk_id",
-			commit_id      = "commit_id",
+			snapshot_id    = "snapshot_id",
 			trace_id       = "trace_id",
 			request_id     = "request_id",
 		}
@@ -78,7 +78,7 @@ loki.process "bowl" {
 		values = {
 			disk_id        = "",
 			source_disk_id = "",
-			commit_id      = "",
+			snapshot_id    = "",
 			trace_id       = "",
 			request_id     = "",
 		}

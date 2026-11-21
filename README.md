@@ -88,7 +88,7 @@ flowchart LR
 
 | 分层 | 载体 | 职责边界 |
 | --- | --- | --- |
-| **全局控制面** | PostgreSQL 18（`services/storage/db`） | 磁盘配额、`writer_epoch`、挂载租约、`disk_lineages` 与 `disk_commits` DAG |
+| **全局控制面** | PostgreSQL 18（`services/storage/db`） | 磁盘配额、`writer_epoch`、挂载租约、`disk_lineages` 与 `disk_snapshots` DAG |
 | **单盘数据面** | `StoreActor`（Pebble KV + `.pack`） | 单盘全部 Inode、目录项、扩展属性、`256 KiB` 块映射与局部变更索引 |
 | **客户端网关** | `bowl` CLI + Linux FUSE 守护进程 | VFS 请求转化、本地句柄/锁表维护、分片 RPC 调度与挂载租约心跳续期 |
 

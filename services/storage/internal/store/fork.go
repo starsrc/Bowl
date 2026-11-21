@@ -177,12 +177,12 @@ func (s *StoreActor) execCheckpointCmd(ctx context.Context, cmd *writeCmd) error
 }
 
 type SanitizeOptions struct {
-	Dir       string
-	CommitID  string
-	Cache     *pebble.Cache
-	Logger    *slog.Logger
-	Metrics   *Metrics
-	OpenActor func(context.Context, Options) (*StoreActor, error)
+	Dir        string
+	SnapshotID string
+	Cache      *pebble.Cache
+	Logger     *slog.Logger
+	Metrics    *Metrics
+	OpenActor  func(context.Context, Options) (*StoreActor, error)
 }
 
 func SanitizeCheckpoint(ctx context.Context, opts SanitizeOptions) (st StatFSResult, retErr error) {
@@ -195,14 +195,14 @@ func SanitizeCheckpoint(ctx context.Context, opts SanitizeOptions) (st StatFSRes
 	var span trace.Span
 	if isSpanRecording(ctx) {
 		ctx, span = startChildSpan(ctx, "store.SanitizeCheckpoint",
-			attribute.String("bowl.commit_id", opts.CommitID),
+			attribute.String("bowl.snapshot_id", opts.SnapshotID),
 		)
 		defer func() { finishSpan(span, retErr) }()
 	}
 
-	diskID := "commit:" + opts.CommitID
-	if opts.CommitID == "" {
-		diskID = "commit:" + filepath.Base(filepath.Clean(opts.Dir))
+	diskID := "snapshot:" + opts.SnapshotID
+	if opts.SnapshotID == "" {
+		diskID = "snapshot:" + filepath.Base(filepath.Clean(opts.Dir))
 	}
 
 	openFn := opts.OpenActor

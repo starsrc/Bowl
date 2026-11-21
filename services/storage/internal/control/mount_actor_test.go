@@ -308,7 +308,7 @@ func TestClose_IdempotentAndFencesSubsequentOperations(t *testing.T) {
 	_, err = mgr.UpdateDisk(ctx, UpdateDiskParams{DiskID: disk.DiskID, Name: &newName})
 	require.ErrorIs(t, err, ErrClosed, "关闭后 UpdateDisk 应返回 ErrClosed: got=%v", err)
 
-	err = mgr.DeleteDisk(ctx, disk.DiskID)
+	err = mgr.DeleteDisk(ctx, DeleteDiskParams{DiskID: disk.DiskID})
 	require.ErrorIs(t, err, ErrClosed, "关闭后 DeleteDisk 应返回 ErrClosed: got=%v", err)
 
 	snap := memDB.Inspect()

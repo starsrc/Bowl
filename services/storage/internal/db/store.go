@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,12 +22,12 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("db: not found")
-	ErrDiskNotFound    = ErrNotFound
-	ErrInvalidArgument = errors.New("db: invalid argument")
-	ErrCrossLineage    = errors.New("db: cross lineage")
-	ErrStaleBaseCommit = errors.New("db: stale base commit")
-	ErrStaleEpoch      = errors.New("db: stale epoch")
+	ErrNotFound          = errors.New("db: not found")
+	ErrDiskNotFound      = ErrNotFound
+	ErrInvalidArgument   = errors.New("db: invalid argument")
+	ErrCrossLineage      = errors.New("db: cross lineage")
+	ErrStaleBaseSnapshot = errors.New("db: stale base snapshot")
+	ErrStaleEpoch        = errors.New("db: stale epoch")
 )
 
 type SegmentKind uint8
@@ -35,26 +37,35 @@ const (
 	SegmentKindPack
 )
 
+type SnapshotKind string
+
+const (
+	SnapshotKindFork   SnapshotKind = "fork"
+	SnapshotKindMerge  SnapshotKind = "merge"
+	SnapshotKindManual SnapshotKind = "manual"
+)
+
 type DiskRecord struct {
-	DiskID       uuid.UUID
-	ParentDiskID uuid.UUID
-	LineageID    uuid.UUID
-	BaseCommitID uuid.UUID
-	Name         string
-	MaxBytes     uint64
-	UsedBytes    uint64
-	UsedInodes   uint64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	DiskID         uuid.UUID
+	ParentDiskID   uuid.UUID
+	LineageID      uuid.UUID
+	BaseSnapshotID uuid.UUID
+	Name           string
+	MaxBytes       uint64
+	UsedBytes      uint64
+	UsedInodes     uint64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
-type CommitRecord struct {
-	LineageID           uuid.UUID
-	CommitID            uuid.UUID
-	ParentCommitID      uuid.UUID
-	MergeParentCommitID uuid.UUID
-	BaseDiskID          uuid.UUID
-	CreatedAt           time.Time
+type SnapshotRecord struct {
+	LineageID             uuid.UUID
+	SnapshotID            uuid.UUID
+	ParentSnapshotID      uuid.UUID
+	MergeParentSnapshotID uuid.UUID
+	SourceDiskID          uuid.UUID
+	Kind                  SnapshotKind
+	CreatedAt             time.Time
 }
 
 type MountLeaseRecord struct {
@@ -68,7 +79,7 @@ type MountLeaseRecord struct {
 type ForkDiskInput struct {
 	SourceDiskID uuid.UUID
 	ChildDiskID  uuid.UUID
-	CommitID     uuid.UUID
+	SnapshotID   uuid.UUID
 	Name         string
 	MaxBytes     uint64
 	UsedBytes    uint64
@@ -82,17 +93,23 @@ type UpdateDiskInput struct {
 }
 
 type MergeDiskInput struct {
-	LineageID                  uuid.UUID
-	SourceDiskID               uuid.UUID
-	TargetDiskID               uuid.UUID
-	ExpectedSourceBaseCommitID uuid.UUID
-	ExpectedTargetBaseCommitID uuid.UUID
-	NewSourceCommitID          uuid.UUID
-	NewMergeCommitID           uuid.UUID
-	SkipSourceCommit           bool
-	TargetMaxBytes             uint64
-	TargetUsedBytes            uint64
-	TargetUsedInodes           uint64
+	LineageID                    uuid.UUID
+	SourceDiskID                 uuid.UUID
+	TargetDiskID                 uuid.UUID
+	ExpectedSourceBaseSnapshotID uuid.UUID
+	ExpectedTargetBaseSnapshotID uuid.UUID
+	NewSourceSnapshotID          uuid.UUID
+	NewMergeSnapshotID           uuid.UUID
+	SkipSourceSnapshot           bool
+	FastForward                  bool
+	TargetMaxBytes               uint64
+	TargetUsedBytes              uint64
+	TargetUsedInodes             uint64
+}
+
+type DeleteDiskResult struct {
+	DeletedDiskIDs       []uuid.UUID
+	ReclaimedSnapshotIDs []uuid.UUID
 }
 
 type CreateMountLeaseInput struct {
@@ -133,11 +150,12 @@ type Store interface {
 	ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord, error)
 	GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, error)
 	ListDisks(ctx context.Context, query ListDisksQuery) (ListDisksPage, error)
-	ListLineageCommits(ctx context.Context, lineageID uuid.UUID) ([]CommitRecord, error)
+	ListLineageDisks(ctx context.Context, lineageID uuid.UUID) ([]DiskRecord, error)
+	ListLineageSnapshots(ctx context.Context, lineageID uuid.UUID) ([]SnapshotRecord, error)
 	UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error)
 	UpdateDiskUsage(ctx context.Context, diskID uuid.UUID, usedBytes, usedInodes uint64) error
 	MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRecord, error)
-	DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUID, error)
+	DeleteDisk(ctx context.Context, diskID uuid.UUID, recursive bool) (DeleteDiskResult, error)
 	ReserveSegment(ctx context.Context, kind SegmentKind, lineageID uuid.UUID, minNext, count int64) (SegmentRange, error)
 	CreateMountLease(ctx context.Context, arg CreateMountLeaseInput) (MountLeaseRecord, error)
 	RenewMountLease(ctx context.Context, arg RenewMountLeaseInput) (MountLeaseRecord, error)
@@ -170,6 +188,16 @@ func toPGUUID(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
 }
 
+func toPGUUIDSlice(ids []uuid.UUID) []pgtype.UUID {
+	out := make([]pgtype.UUID, 0, len(ids))
+	for _, id := range ids {
+		if id != uuid.Nil {
+			out = append(out, toPGUUID(id))
+		}
+	}
+	return out
+}
+
 func fromPGUUID(id pgtype.UUID) uuid.UUID {
 	if !id.Valid {
 		return uuid.Nil
@@ -187,27 +215,28 @@ func fromPGTime(t pgtype.Timestamptz) time.Time {
 
 func toDiskRecord(d *Disk) DiskRecord {
 	return DiskRecord{
-		DiskID:       fromPGUUID(d.DiskID),
-		ParentDiskID: fromPGUUID(d.ParentDiskID),
-		LineageID:    fromPGUUID(d.LineageID),
-		BaseCommitID: fromPGUUID(d.BaseCommitID),
-		Name:         d.Name,
-		MaxBytes:     uint64(max(0, d.MaxBytes)),
-		UsedBytes:    uint64(max(0, d.UsedBytes)),
-		UsedInodes:   uint64(max(0, d.UsedInodes)),
-		CreatedAt:    d.CreatedAt.Time.UTC(),
-		UpdatedAt:    d.UpdatedAt.Time.UTC(),
+		DiskID:         fromPGUUID(d.DiskID),
+		ParentDiskID:   fromPGUUID(d.ParentDiskID),
+		LineageID:      fromPGUUID(d.LineageID),
+		BaseSnapshotID: fromPGUUID(d.BaseSnapshotID),
+		Name:           d.Name,
+		MaxBytes:       uint64(max(0, d.MaxBytes)),
+		UsedBytes:      uint64(max(0, d.UsedBytes)),
+		UsedInodes:     uint64(max(0, d.UsedInodes)),
+		CreatedAt:      d.CreatedAt.Time.UTC(),
+		UpdatedAt:      d.UpdatedAt.Time.UTC(),
 	}
 }
 
-func toCommitRecord(c *DiskCommit) CommitRecord {
-	return CommitRecord{
-		LineageID:           fromPGUUID(c.LineageID),
-		CommitID:            fromPGUUID(c.CommitID),
-		ParentCommitID:      fromPGUUID(c.ParentCommitID),
-		MergeParentCommitID: fromPGUUID(c.MergeParentCommitID),
-		BaseDiskID:          fromPGUUID(c.SourceDiskID),
-		CreatedAt:           c.CreatedAt.Time.UTC(),
+func toSnapshotRecord(s *DiskSnapshot) SnapshotRecord {
+	return SnapshotRecord{
+		LineageID:             fromPGUUID(s.LineageID),
+		SnapshotID:            fromPGUUID(s.SnapshotID),
+		ParentSnapshotID:      fromPGUUID(s.ParentSnapshotID),
+		MergeParentSnapshotID: fromPGUUID(s.MergeParentSnapshotID),
+		SourceDiskID:          fromPGUUID(s.SourceDiskID),
+		Kind:                  SnapshotKind(s.Kind),
+		CreatedAt:             s.CreatedAt.Time.UTC(),
 	}
 }
 
@@ -222,7 +251,7 @@ func toMountLeaseRecord(m *DiskMount) MountLeaseRecord {
 }
 
 func validateForkDiskInput(arg ForkDiskInput) error {
-	if arg.SourceDiskID == uuid.Nil || arg.ChildDiskID == uuid.Nil || arg.CommitID == uuid.Nil || arg.SourceDiskID == arg.ChildDiskID {
+	if arg.SourceDiskID == uuid.Nil || arg.ChildDiskID == uuid.Nil || arg.SnapshotID == uuid.Nil || arg.SourceDiskID == arg.ChildDiskID {
 		return fmt.Errorf("%w: invalid fork disk identifiers", ErrInvalidArgument)
 	}
 	if arg.MaxBytes > math.MaxInt64 || arg.UsedBytes > math.MaxInt64 || arg.UsedInodes > math.MaxInt64 {
@@ -267,18 +296,36 @@ func validateMergeDiskInput(input *MergeDiskInput) error {
 	if input.SourceDiskID == input.TargetDiskID {
 		return fmt.Errorf("%w: source and target disk ids must differ", ErrInvalidArgument)
 	}
-	if input.ExpectedSourceBaseCommitID == uuid.Nil || input.ExpectedTargetBaseCommitID == uuid.Nil {
-		return fmt.Errorf("%w: expected source and target base commit ids cannot be nil uuid", ErrInvalidArgument)
+	if input.ExpectedSourceBaseSnapshotID == uuid.Nil || input.ExpectedTargetBaseSnapshotID == uuid.Nil {
+		return fmt.Errorf("%w: expected source and target base snapshot ids cannot be nil uuid", ErrInvalidArgument)
 	}
-	if input.NewMergeCommitID == uuid.Nil {
-		return fmt.Errorf("%w: new merge commit id cannot be nil uuid", ErrInvalidArgument)
-	}
-	if !input.SkipSourceCommit {
-		if input.NewSourceCommitID == uuid.Nil {
-			return fmt.Errorf("%w: new source commit id cannot be nil uuid", ErrInvalidArgument)
+	if input.FastForward {
+		if input.SkipSourceSnapshot {
+			if input.NewSourceSnapshotID != uuid.Nil {
+				return fmt.Errorf("%w: fast-forward with skip source snapshot must not pass new source snapshot id", ErrInvalidArgument)
+			}
+			if input.NewMergeSnapshotID != input.ExpectedSourceBaseSnapshotID {
+				return fmt.Errorf("%w: fast-forward reuse requires new merge snapshot id equal expected source base snapshot id", ErrInvalidArgument)
+			}
+		} else {
+			if input.NewSourceSnapshotID == uuid.Nil {
+				return fmt.Errorf("%w: fast-forward requires new source snapshot id", ErrInvalidArgument)
+			}
+			if input.NewMergeSnapshotID != input.NewSourceSnapshotID {
+				return fmt.Errorf("%w: fast-forward requires new merge snapshot id equal new source snapshot id", ErrInvalidArgument)
+			}
 		}
-		if input.NewSourceCommitID == input.NewMergeCommitID {
-			return fmt.Errorf("%w: new source and merge commit ids must differ", ErrInvalidArgument)
+	} else {
+		if input.NewMergeSnapshotID == uuid.Nil {
+			return fmt.Errorf("%w: new merge snapshot id cannot be nil uuid", ErrInvalidArgument)
+		}
+		if !input.SkipSourceSnapshot {
+			if input.NewSourceSnapshotID == uuid.Nil {
+				return fmt.Errorf("%w: new source snapshot id cannot be nil uuid", ErrInvalidArgument)
+			}
+			if input.NewSourceSnapshotID == input.NewMergeSnapshotID {
+				return fmt.Errorf("%w: new source and merge snapshot ids must differ", ErrInvalidArgument)
+			}
 		}
 	}
 	if input.TargetMaxBytes > math.MaxInt64 || input.TargetUsedBytes > math.MaxInt64 || input.TargetUsedInodes > math.MaxInt64 {
@@ -321,6 +368,110 @@ func mapPGXErr(err error) error {
 	return err
 }
 
+func collectSubtreeDiskIDs(disks []DiskRecord, rootID uuid.UUID, recursive bool) ([]uuid.UUID, bool) {
+	foundRoot := false
+	childrenByParent := make(map[uuid.UUID][]uuid.UUID)
+	for i := range disks {
+		d := disks[i]
+		if d.DiskID == rootID {
+			foundRoot = true
+		}
+		if recursive && d.ParentDiskID != uuid.Nil {
+			childrenByParent[d.ParentDiskID] = append(childrenByParent[d.ParentDiskID], d.DiskID)
+		}
+	}
+	if !foundRoot {
+		return nil, false
+	}
+	if !recursive {
+		return []uuid.UUID{rootID}, true
+	}
+
+	visited := map[uuid.UUID]struct{}{rootID: {}}
+	queue := []uuid.UUID{rootID}
+	out := []uuid.UUID{rootID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, childID := range childrenByParent[cur] {
+			if _, seen := visited[childID]; seen {
+				continue
+			}
+			visited[childID] = struct{}{}
+			out = append(out, childID)
+			queue = append(queue, childID)
+		}
+	}
+	slices.SortFunc(out, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return out, true
+}
+
+func computeReclaimableSnapshots(survivingDisks []DiskRecord, snapshots []SnapshotRecord) (toDelete []uuid.UUID, remainingSnapshots int) {
+	if len(snapshots) == 0 {
+		return nil, 0
+	}
+
+	if len(survivingDisks) >= 2 {
+		byID := make(map[uuid.UUID]SnapshotRecord, len(snapshots))
+		for i := range snapshots {
+			byID[snapshots[i].SnapshotID] = snapshots[i]
+		}
+		reachable := make(map[uuid.UUID]struct{})
+		queue := make([]uuid.UUID, 0, len(survivingDisks))
+		for i := range survivingDisks {
+			if baseID := survivingDisks[i].BaseSnapshotID; baseID != uuid.Nil {
+				queue = append(queue, baseID)
+			}
+		}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			if cur == uuid.Nil {
+				continue
+			}
+			if _, seen := reachable[cur]; seen {
+				continue
+			}
+			rec, ok := byID[cur]
+			if !ok {
+				continue
+			}
+			reachable[cur] = struct{}{}
+			if rec.ParentSnapshotID != uuid.Nil {
+				queue = append(queue, rec.ParentSnapshotID)
+			}
+			if rec.MergeParentSnapshotID != uuid.Nil {
+				queue = append(queue, rec.MergeParentSnapshotID)
+			}
+		}
+		for i := range snapshots {
+			snap := snapshots[i]
+			if snap.Kind == SnapshotKindManual {
+				remainingSnapshots++
+				continue
+			}
+			if _, ok := reachable[snap.SnapshotID]; ok {
+				remainingSnapshots++
+				continue
+			}
+			toDelete = append(toDelete, snap.SnapshotID)
+		}
+		return toDelete, remainingSnapshots
+	}
+
+	for i := range snapshots {
+		snap := snapshots[i]
+		if snap.Kind == SnapshotKindManual {
+			remainingSnapshots++
+			continue
+		}
+		toDelete = append(toDelete, snap.SnapshotID)
+	}
+	return toDelete, remainingSnapshots
+}
+
 func (s *SQLStore) CreateDisk(ctx context.Context, diskID uuid.UUID, name string, maxBytes uint64) (DiskRecord, error) {
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
@@ -360,7 +511,7 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 	}
 	pgSource := toPGUUID(arg.SourceDiskID)
 	pgChild := toPGUUID(arg.ChildDiskID)
-	pgCommit := toPGUUID(arg.CommitID)
+	pgSnapshot := toPGUUID(arg.SnapshotID)
 
 	var childRow Disk
 	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
@@ -375,17 +526,18 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 		if lockSrcErr != nil {
 			return mapPGXErr(lockSrcErr)
 		}
-		if _, commitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
-			CommitID:       pgCommit,
-			LineageID:      lockedSource.LineageID,
-			SourceDiskID:   pgSource,
-			ParentCommitID: lockedSource.BaseCommitID,
-		}); commitErr != nil {
-			return commitErr
+		if _, snapErr := q.CreateDiskSnapshot(ctx, CreateDiskSnapshotParams{
+			SnapshotID:       pgSnapshot,
+			LineageID:        lockedSource.LineageID,
+			SourceDiskID:     pgSource,
+			ParentSnapshotID: lockedSource.BaseSnapshotID,
+			Kind:             string(SnapshotKindFork),
+		}); snapErr != nil {
+			return snapErr
 		}
-		if setErr := q.SetDiskBaseCommit(ctx, SetDiskBaseCommitParams{
-			DiskID:       pgSource,
-			BaseCommitID: pgCommit,
+		if setErr := q.SetDiskBaseSnapshot(ctx, SetDiskBaseSnapshotParams{
+			DiskID:         pgSource,
+			BaseSnapshotID: pgSnapshot,
 		}); setErr != nil {
 			return setErr
 		}
@@ -402,14 +554,14 @@ func (s *SQLStore) ForkDisk(ctx context.Context, arg ForkDiskInput) (DiskRecord,
 		}
 
 		created, createErr := q.CreateDisk(ctx, CreateDiskParams{
-			DiskID:       pgChild,
-			Name:         arg.Name,
-			LineageID:    lockedSource.LineageID,
-			ParentDiskID: pgSource,
-			BaseCommitID: pgCommit,
-			MaxBytes:     childMaxBytes,
-			UsedBytes:    childUsedBytes,
-			UsedInodes:   childUsedInodes,
+			DiskID:         pgChild,
+			Name:           arg.Name,
+			LineageID:      lockedSource.LineageID,
+			ParentDiskID:   pgSource,
+			BaseSnapshotID: pgSnapshot,
+			MaxBytes:       childMaxBytes,
+			UsedBytes:      childUsedBytes,
+			UsedInodes:     childUsedInodes,
 		})
 		if createErr != nil {
 			return createErr
@@ -479,19 +631,34 @@ func (s *SQLStore) ListDisks(ctx context.Context, query ListDisksQuery) (ListDis
 	}, nil
 }
 
-func (s *SQLStore) ListLineageCommits(ctx context.Context, lineageID uuid.UUID) ([]CommitRecord, error) {
+func (s *SQLStore) ListLineageDisks(ctx context.Context, lineageID uuid.UUID) ([]DiskRecord, error) {
 	if lineageID == uuid.Nil {
 		return nil, fmt.Errorf("%w: lineage id cannot be nil uuid", ErrInvalidArgument)
 	}
-	rows, err := s.queries.ListLineageCommits(ctx, toPGUUID(lineageID))
+	rows, err := s.queries.ListLineageDisks(ctx, toPGUUID(lineageID))
 	if err != nil {
 		return nil, mapPGXErr(err)
 	}
-	commits := make([]CommitRecord, 0, len(rows))
+	disks := make([]DiskRecord, 0, len(rows))
 	for i := range rows {
-		commits = append(commits, toCommitRecord(&rows[i]))
+		disks = append(disks, toDiskRecord(&rows[i]))
 	}
-	return commits, nil
+	return disks, nil
+}
+
+func (s *SQLStore) ListLineageSnapshots(ctx context.Context, lineageID uuid.UUID) ([]SnapshotRecord, error) {
+	if lineageID == uuid.Nil {
+		return nil, fmt.Errorf("%w: lineage id cannot be nil uuid", ErrInvalidArgument)
+	}
+	rows, err := s.queries.ListLineageSnapshots(ctx, toPGUUID(lineageID))
+	if err != nil {
+		return nil, mapPGXErr(err)
+	}
+	snapshots := make([]SnapshotRecord, 0, len(rows))
+	for i := range rows {
+		snapshots = append(snapshots, toSnapshotRecord(&rows[i]))
+	}
+	return snapshots, nil
 }
 
 func (s *SQLStore) UpdateDisk(ctx context.Context, input UpdateDiskInput) (DiskRecord, error) {
@@ -583,45 +750,69 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 		if fromPGUUID(sourceRow.LineageID) != input.LineageID || fromPGUUID(curTargetRow.LineageID) != input.LineageID {
 			return ErrCrossLineage
 		}
-		if fromPGUUID(sourceRow.BaseCommitID) != input.ExpectedSourceBaseCommitID ||
-			fromPGUUID(curTargetRow.BaseCommitID) != input.ExpectedTargetBaseCommitID {
-			return ErrStaleBaseCommit
+		if fromPGUUID(sourceRow.BaseSnapshotID) != input.ExpectedSourceBaseSnapshotID ||
+			fromPGUUID(curTargetRow.BaseSnapshotID) != input.ExpectedTargetBaseSnapshotID {
+			return ErrStaleBaseSnapshot
 		}
 
-		srcFinalCommitID := input.ExpectedSourceBaseCommitID
-		if !input.SkipSourceCommit {
-			pgNewSrc := toPGUUID(input.NewSourceCommitID)
-			if _, srcCommitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
-				CommitID:       pgNewSrc,
-				LineageID:      pgLineage,
-				SourceDiskID:   pgSource,
-				ParentCommitID: toPGUUID(input.ExpectedSourceBaseCommitID),
-			}); srcCommitErr != nil {
-				return srcCommitErr
+		var pgTargetBase pgtype.UUID
+		if input.FastForward {
+			pgTargetBase = toPGUUID(input.NewMergeSnapshotID)
+			if !input.SkipSourceSnapshot {
+				if _, srcSnapErr := q.CreateDiskSnapshot(ctx, CreateDiskSnapshotParams{
+					SnapshotID:       pgTargetBase,
+					LineageID:        pgLineage,
+					SourceDiskID:     pgSource,
+					ParentSnapshotID: toPGUUID(input.ExpectedSourceBaseSnapshotID),
+					Kind:             string(SnapshotKindMerge),
+				}); srcSnapErr != nil {
+					return srcSnapErr
+				}
+				if setSrcErr := q.SetDiskBaseSnapshot(ctx, SetDiskBaseSnapshotParams{
+					DiskID:         pgSource,
+					BaseSnapshotID: pgTargetBase,
+				}); setSrcErr != nil {
+					return setSrcErr
+				}
 			}
-			if setSrcErr := q.SetDiskBaseCommit(ctx, SetDiskBaseCommitParams{
-				DiskID:       pgSource,
-				BaseCommitID: pgNewSrc,
-			}); setSrcErr != nil {
-				return setSrcErr
+		} else {
+			srcFinalSnapshotID := input.ExpectedSourceBaseSnapshotID
+			if !input.SkipSourceSnapshot {
+				pgNewSrc := toPGUUID(input.NewSourceSnapshotID)
+				if _, srcSnapErr := q.CreateDiskSnapshot(ctx, CreateDiskSnapshotParams{
+					SnapshotID:       pgNewSrc,
+					LineageID:        pgLineage,
+					SourceDiskID:     pgSource,
+					ParentSnapshotID: toPGUUID(input.ExpectedSourceBaseSnapshotID),
+					Kind:             string(SnapshotKindMerge),
+				}); srcSnapErr != nil {
+					return srcSnapErr
+				}
+				if setSrcErr := q.SetDiskBaseSnapshot(ctx, SetDiskBaseSnapshotParams{
+					DiskID:         pgSource,
+					BaseSnapshotID: pgNewSrc,
+				}); setSrcErr != nil {
+					return setSrcErr
+				}
+				srcFinalSnapshotID = input.NewSourceSnapshotID
 			}
-			srcFinalCommitID = input.NewSourceCommitID
+
+			pgTargetBase = toPGUUID(input.NewMergeSnapshotID)
+			if _, mergeSnapErr := q.CreateDiskSnapshot(ctx, CreateDiskSnapshotParams{
+				SnapshotID:            pgTargetBase,
+				LineageID:             pgLineage,
+				SourceDiskID:          pgTarget,
+				ParentSnapshotID:      toPGUUID(input.ExpectedTargetBaseSnapshotID),
+				MergeParentSnapshotID: toPGUUID(srcFinalSnapshotID),
+				Kind:                  string(SnapshotKindMerge),
+			}); mergeSnapErr != nil {
+				return mergeSnapErr
+			}
 		}
 
-		pgNewMerge := toPGUUID(input.NewMergeCommitID)
-		if _, mergeCommitErr := q.CreateDiskCommit(ctx, CreateDiskCommitParams{
-			CommitID:            pgNewMerge,
-			LineageID:           pgLineage,
-			SourceDiskID:        pgTarget,
-			ParentCommitID:      toPGUUID(input.ExpectedTargetBaseCommitID),
-			MergeParentCommitID: toPGUUID(srcFinalCommitID),
-		}); mergeCommitErr != nil {
-			return mergeCommitErr
-		}
-
-		touchParams := SetDiskBaseCommitAndTouchParams{
-			DiskID:       pgTarget,
-			BaseCommitID: pgNewMerge,
+		touchParams := SetDiskBaseSnapshotAndTouchParams{
+			DiskID:         pgTarget,
+			BaseSnapshotID: pgTargetBase,
 		}
 		if input.TargetMaxBytes > 0 {
 			touchParams.MaxBytes = pgtype.Int8{Int64: int64(input.TargetMaxBytes), Valid: true}
@@ -630,7 +821,7 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 			touchParams.UsedBytes = pgtype.Int8{Int64: int64(input.TargetUsedBytes), Valid: true}
 			touchParams.UsedInodes = pgtype.Int8{Int64: int64(input.TargetUsedInodes), Valid: true}
 		}
-		updatedTarget, touchErr := q.SetDiskBaseCommitAndTouch(ctx, touchParams)
+		updatedTarget, touchErr := q.SetDiskBaseSnapshotAndTouch(ctx, touchParams)
 		if touchErr != nil {
 			return touchErr
 		}
@@ -643,15 +834,15 @@ func (s *SQLStore) MergeDisk(ctx context.Context, input *MergeDiskInput) (DiskRe
 	return toDiskRecord(&targetRow), nil
 }
 
-func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUID, error) {
+func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID, recursive bool) (DeleteDiskResult, error) {
 	if diskID == uuid.Nil {
-		return nil, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
+		return DeleteDiskResult{}, fmt.Errorf("%w: disk id cannot be nil uuid", ErrInvalidArgument)
 	}
 	pgID := toPGUUID(diskID)
 
-	var commitsToClean []uuid.UUID
+	var result DeleteDiskResult
 	err := s.tx.ExecTxWithOptions(ctx, func(q *Queries) error {
-		commitsToClean = nil
+		result = DeleteDiskResult{}
 
 		diskRow, getErr := q.GetDisk(ctx, pgID)
 		if getErr != nil {
@@ -662,48 +853,99 @@ func (s *SQLStore) DeleteDisk(ctx context.Context, diskID uuid.UUID) ([]uuid.UUI
 		if _, lockErr := q.LockDiskLineage(ctx, lineageID); lockErr != nil {
 			return mapPGXErr(lockErr)
 		}
-		if _, lockDiskErr := q.GetDiskForUpdate(ctx, pgID); lockDiskErr != nil {
-			return mapPGXErr(lockDiskErr)
+		lockedDisks, lockDisksErr := q.ListLineageDisksForUpdate(ctx, lineageID)
+		if lockDisksErr != nil {
+			return mapPGXErr(lockDisksErr)
+		}
+		lineageRecords := make([]DiskRecord, 0, len(lockedDisks))
+		for i := range lockedDisks {
+			lineageRecords = append(lineageRecords, toDiskRecord(&lockedDisks[i]))
 		}
 
-		count, delErr := q.DeleteDisk(ctx, pgID)
-		if delErr != nil {
-			return delErr
-		}
-		if count == 0 {
+		toDeleteDiskIDs, found := collectSubtreeDiskIDs(lineageRecords, diskID, recursive)
+		if !found {
 			return ErrNotFound
 		}
 
-		remaining, cntErr := q.CountDisksByLineage(ctx, lineageID)
-		if cntErr != nil {
-			return cntErr
+		deletedCount, delErr := q.DeleteDisksByIDs(ctx, DeleteDisksByIDsParams{
+			LineageID: lineageID,
+			DiskIds:   toPGUUIDSlice(toDeleteDiskIDs),
+		})
+		if delErr != nil {
+			return delErr
 		}
-		switch remaining {
-		case 1:
-			if clearErr := q.ClearLineageBaseCommits(ctx, lineageID); clearErr != nil {
+		if deletedCount == 0 {
+			return ErrNotFound
+		}
+
+		deletedSet := make(map[uuid.UUID]struct{}, len(toDeleteDiskIDs))
+		for _, id := range toDeleteDiskIDs {
+			deletedSet[id] = struct{}{}
+		}
+		survivingDisks := make([]DiskRecord, 0, len(lineageRecords)-len(toDeleteDiskIDs))
+		for i := range lineageRecords {
+			if _, removed := deletedSet[lineageRecords[i].DiskID]; !removed {
+				survivingDisks = append(survivingDisks, lineageRecords[i])
+			}
+		}
+
+		snapRows, listErr := q.ListLineageSnapshots(ctx, lineageID)
+		if listErr != nil {
+			return listErr
+		}
+		snapRecords := make([]SnapshotRecord, 0, len(snapRows))
+		for i := range snapRows {
+			snapRecords = append(snapRecords, toSnapshotRecord(&snapRows[i]))
+		}
+
+		toDeleteSnapIDs, remainingSnaps := computeReclaimableSnapshots(survivingDisks, snapRecords)
+		var reclaimed []uuid.UUID
+		if len(toDeleteSnapIDs) > 0 {
+			pgSnapIDs := toPGUUIDSlice(toDeleteSnapIDs)
+			if clearErr := q.ClearDisksBaseSnapshotByIDs(ctx, ClearDisksBaseSnapshotByIDsParams{
+				LineageID:   lineageID,
+				SnapshotIds: pgSnapIDs,
+			}); clearErr != nil {
 				return clearErr
 			}
-			deletedCommits, cleanErr := q.DeleteLineageCommits(ctx, lineageID)
+			if clearErr := q.ClearSnapshotParentByIDs(ctx, ClearSnapshotParentByIDsParams{
+				LineageID:   lineageID,
+				SnapshotIds: pgSnapIDs,
+			}); clearErr != nil {
+				return clearErr
+			}
+			if clearErr := q.ClearSnapshotMergeParentByIDs(ctx, ClearSnapshotMergeParentByIDsParams{
+				LineageID:   lineageID,
+				SnapshotIds: pgSnapIDs,
+			}); clearErr != nil {
+				return clearErr
+			}
+			deletedSnaps, cleanErr := q.DeleteSnapshotsByIDs(ctx, DeleteSnapshotsByIDsParams{
+				LineageID:   lineageID,
+				SnapshotIds: pgSnapIDs,
+			})
 			if cleanErr != nil {
 				return cleanErr
 			}
-			commitsToClean = toUUIDSlice(deletedCommits)
-		case 0:
-			deletedCommits, cleanErr := q.DeleteLineageCommits(ctx, lineageID)
-			if cleanErr != nil {
-				return cleanErr
-			}
-			commitsToClean = toUUIDSlice(deletedCommits)
+			reclaimed = toUUIDSlice(deletedSnaps)
+		}
+
+		if len(survivingDisks) == 0 && remainingSnaps == 0 {
 			if delLinErr := q.DeleteDiskLineage(ctx, lineageID); delLinErr != nil {
 				return delLinErr
 			}
 		}
+
+		result = DeleteDiskResult{
+			DeletedDiskIDs:       toDeleteDiskIDs,
+			ReclaimedSnapshotIDs: reclaimed,
+		}
 		return nil
 	}, tx.WithDefaultRetry())
 	if err != nil {
-		return nil, mapPGXErr(err)
+		return DeleteDiskResult{}, mapPGXErr(err)
 	}
-	return commitsToClean, nil
+	return result, nil
 }
 
 func toUUIDSlice(items []pgtype.UUID) []uuid.UUID {

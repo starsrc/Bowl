@@ -16,12 +16,12 @@ type devInoKey struct {
 }
 
 type storageRootUsage struct {
-	PackPhysicalBytes    uint64
-	CommitsActive        int
-	CommitsPhysicalBytes uint64
-	DataDirPhysicalBytes uint64
-	VolumeTotalBytes     uint64
-	VolumeAvailableBytes uint64
+	PackPhysicalBytes      uint64
+	SnapshotsActive        int
+	SnapshotsPhysicalBytes uint64
+	DataDirPhysicalBytes   uint64
+	VolumeTotalBytes       uint64
+	VolumeAvailableBytes   uint64
 }
 
 func scanStorageRootUsage(root string) storageRootUsage {
@@ -39,7 +39,7 @@ func scanStorageRootUsage(root string) storageRootUsage {
 
 	allSeen := make(map[devInoKey]struct{})
 	packSeen := make(map[devInoKey]struct{})
-	commitSeen := make(map[devInoKey]struct{})
+	snapshotSeen := make(map[devInoKey]struct{})
 
 	_ = filepath.WalkDir(cleanRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -47,8 +47,8 @@ func scanStorageRootUsage(root string) storageRootUsage {
 		}
 		if d.IsDir() {
 			rel, relErr := filepath.Rel(cleanRoot, path)
-			if relErr == nil && isDirectCommitSubdir(rel) {
-				usage.CommitsActive++
+			if relErr == nil && isDirectSnapshotSubdir(rel) {
+				usage.SnapshotsActive++
 			}
 			return nil
 		}
@@ -74,8 +74,8 @@ func scanStorageRootUsage(root string) storageRootUsage {
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || st == nil {
 			usage.DataDirPhysicalBytes += fileBytes
-			if isCommitTreePath(slashRel) {
-				usage.CommitsPhysicalBytes += fileBytes
+			if isSnapshotTreePath(slashRel) {
+				usage.SnapshotsPhysicalBytes += fileBytes
 			}
 			if isManagedPackPath(slashRel) {
 				usage.PackPhysicalBytes += fileBytes
@@ -91,10 +91,10 @@ func scanStorageRootUsage(root string) storageRootUsage {
 			allSeen[key] = struct{}{}
 			usage.DataDirPhysicalBytes += fileBytes
 		}
-		if isCommitTreePath(slashRel) {
-			if _, exists := commitSeen[key]; !exists {
-				commitSeen[key] = struct{}{}
-				usage.CommitsPhysicalBytes += fileBytes
+		if isSnapshotTreePath(slashRel) {
+			if _, exists := snapshotSeen[key]; !exists {
+				snapshotSeen[key] = struct{}{}
+				usage.SnapshotsPhysicalBytes += fileBytes
 			}
 		}
 		if isManagedPackPath(slashRel) {
@@ -109,24 +109,24 @@ func scanStorageRootUsage(root string) storageRootUsage {
 	return usage
 }
 
-func isDirectCommitSubdir(rel string) bool {
+func isDirectSnapshotSubdir(rel string) bool {
 	slash := filepath.ToSlash(rel)
-	if !strings.HasPrefix(slash, "commits/") {
+	if !strings.HasPrefix(slash, "snapshots/") {
 		return false
 	}
-	rest := strings.TrimPrefix(slash, "commits/")
+	rest := strings.TrimPrefix(slash, "snapshots/")
 	return rest != "" && !strings.Contains(rest, "/")
 }
 
-func isCommitTreePath(slashRel string) bool {
-	return strings.HasPrefix(slashRel, "commits/")
+func isSnapshotTreePath(slashRel string) bool {
+	return strings.HasPrefix(slashRel, "snapshots/")
 }
 
 func isManagedPackPath(slashRel string) bool {
 	if !strings.HasSuffix(slashRel, ".pack") {
 		return false
 	}
-	if !strings.HasPrefix(slashRel, "disks/") && !strings.HasPrefix(slashRel, "commits/") {
+	if !strings.HasPrefix(slashRel, "disks/") && !strings.HasPrefix(slashRel, "snapshots/") {
 		return false
 	}
 	return filepath.Base(filepath.Dir(slashRel)) == "packs"

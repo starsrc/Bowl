@@ -59,7 +59,7 @@ type diffSummaryJSON struct {
 type diskDiffJSON struct {
 	SourceDiskID  string          `json:"source_disk_id"`
 	TargetDiskID  string          `json:"target_disk_id,omitempty"`
-	LCACommitID   string          `json:"lca_commit_id,omitempty"`
+	LCASnapshotID string          `json:"lca_snapshot_id,omitempty"`
 	Summary       diffSummaryJSON `json:"summary"`
 	Entries       []diffEntryJSON `json:"entries"`
 	NextPageToken string          `json:"next_page_token"`
@@ -170,14 +170,14 @@ func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.St
 	}
 
 	msg := resp.Msg
-	lcaCommitID := msg.GetLcaCommitId()
+	lcaSnapshotID := msg.GetLcaSnapshotId()
 	entries := msg.GetEntries()
 	summary := msg.GetSummary()
 
 	patches := make([]string, len(entries))
 	if a.patch {
 		for idx, entry := range entries {
-			patchStr, patchErr := a.renderEntryPatch(ctx, client, lcaCommitID, entry)
+			patchStr, patchErr := a.renderEntryPatch(ctx, client, lcaSnapshotID, entry)
 			if patchErr != nil {
 				return diskOutcome{}, mapDiskRPCError(patchErr, diskRPCErrorPolicy{
 					defaultOp: fmt.Sprintf("read diff content for %s failed", string(entry.GetPath())),
@@ -201,9 +201,9 @@ func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.St
 	}
 
 	payload := diskDiffJSON{
-		SourceDiskID: a.sourceDiskID,
-		TargetDiskID: a.targetDiskID,
-		LCACommitID:  lcaCommitID,
+		SourceDiskID:  a.sourceDiskID,
+		TargetDiskID:  a.targetDiskID,
+		LCASnapshotID: lcaSnapshotID,
 		Summary: diffSummaryJSON{
 			Added:     summary.GetAdded(),
 			Modified:  summary.GetModified(),
@@ -291,8 +291,8 @@ func conflictKindLabel(c storagev1.ConflictKind) string {
 }
 
 func renderDiskDiffHuman(w io.Writer, res *diskDiffJSON, withPatch bool) {
-	if res.LCACommitID != "" {
-		fmt.Fprintf(w, "LCA Commit: %s\n", res.LCACommitID)
+	if res.LCASnapshotID != "" {
+		fmt.Fprintf(w, "LCA Snapshot: %s\n", res.LCASnapshotID)
 	}
 	fmt.Fprintf(
 		w,
@@ -346,7 +346,7 @@ type nodeContentSnapshot struct {
 func (a *diskDiffAdapter) renderEntryPatch(
 	ctx context.Context,
 	client storagev1connect.StorageServiceClient,
-	lcaCommitID string,
+	lcaSnapshotID string,
 	entry *storagev1.DiffEntry,
 ) (string, error) {
 	relPath := strings.TrimPrefix(string(entry.GetPath()), "/")
@@ -366,10 +366,10 @@ func (a *diskDiffAdapter) renderEntryPatch(
 			return "", err
 		}
 	} else if entry.GetBase() != nil {
-		if lcaCommitID == "" {
-			return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing lca_commit_id: cannot read ancestor snapshot content\n", relPath, relPath), nil
+		if lcaSnapshotID == "" {
+			return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing lca_snapshot_id: cannot read ancestor snapshot content\n", relPath, relPath), nil
 		}
-		left, err = fetchCommitNode(ctx, client, a.sourceDiskID, lcaCommitID, entry.GetBase())
+		left, err = fetchSnapshotNode(ctx, client, a.sourceDiskID, lcaSnapshotID, entry.GetBase())
 		if err != nil {
 			return "", err
 		}
@@ -459,10 +459,10 @@ func isModeRegularOrDefault(mode uint32) bool {
 	return normalizeFileType(mode) == posixIFRG
 }
 
-func fetchCommitNode(
+func fetchSnapshotNode(
 	ctx context.Context,
 	client storagev1connect.StorageServiceClient,
-	diskID, commitID string,
+	diskID, snapshotID string,
 	summary *storagev1.DiffNodeSummary,
 ) (nodeContentSnapshot, error) {
 	if summary == nil {
@@ -482,12 +482,12 @@ func fetchCommitNode(
 	var buf []byte
 	var offset uint64
 	for {
-		resp, err := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
-			DiskId:   diskID,
-			CommitId: commitID,
-			Ino:      summary.GetIno(),
-			Offset:   offset,
-			Size:     readNodeChunkSize,
+		resp, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
+			DiskId:     diskID,
+			SnapshotId: snapshotID,
+			Ino:        summary.GetIno(),
+			Offset:     offset,
+			Size:       readNodeChunkSize,
 		}))
 		if err != nil {
 			return nodeContentSnapshot{}, err

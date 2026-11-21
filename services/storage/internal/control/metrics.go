@@ -53,22 +53,22 @@ type storageEngineCollector struct {
 
 	disksLoadedDesc *prometheus.Desc
 
-	logicalBytesDesc         *prometheus.Desc
-	inodesDesc               *prometheus.Desc
-	packPhysicalBytesDesc    *prometheus.Desc
-	packReferencedBytesDesc  *prometheus.Desc
-	packLiveBytesDesc        *prometheus.Desc
-	packLowWatermarkDesc     *prometheus.Desc
-	packPendingDeadDesc      *prometheus.Desc
-	packOpenFDsDesc          *prometheus.Desc
-	hotCacheBytesDesc        *prometheus.Desc
-	hotCacheBlocksDesc       *prometheus.Desc
-	pebbleStallActiveDesc    *prometheus.Desc
-	dataDirPhysicalBytesDesc *prometheus.Desc
-	commitsActiveDesc        *prometheus.Desc
-	commitsPhysicalBytesDesc *prometheus.Desc
-	volumeTotalBytesDesc     *prometheus.Desc
-	volumeAvailableBytesDesc *prometheus.Desc
+	logicalBytesDesc           *prometheus.Desc
+	inodesDesc                 *prometheus.Desc
+	packPhysicalBytesDesc      *prometheus.Desc
+	packReferencedBytesDesc    *prometheus.Desc
+	packLiveBytesDesc          *prometheus.Desc
+	packLowWatermarkDesc       *prometheus.Desc
+	packPendingDeadDesc        *prometheus.Desc
+	packOpenFDsDesc            *prometheus.Desc
+	hotCacheBytesDesc          *prometheus.Desc
+	hotCacheBlocksDesc         *prometheus.Desc
+	pebbleStallActiveDesc      *prometheus.Desc
+	dataDirPhysicalBytesDesc   *prometheus.Desc
+	snapshotsActiveDesc        *prometheus.Desc
+	snapshotsPhysicalBytesDesc *prometheus.Desc
+	volumeTotalBytesDesc       *prometheus.Desc
+	volumeAvailableBytesDesc   *prometheus.Desc
 
 	pebbleWALBytesInDesc          *prometheus.Desc
 	pebbleWALBytesWrittenDesc     *prometheus.Desc
@@ -88,33 +88,33 @@ type storageEngineCollector struct {
 	pebbleBlockCacheHitsDesc   *prometheus.Desc
 	pebbleBlockCacheMissesDesc *prometheus.Desc
 
-	controlActorLoadsDesc       *prometheus.Desc
-	controlActorEvictionsDesc   *prometheus.Desc
-	controlCleanupErrorsDesc    *prometheus.Desc
-	controlForksDesc            *prometheus.Desc
-	controlCommitsReclaimedDesc *prometheus.Desc
-	openActorDurVec             *prometheus.HistogramVec
-	openActorOK                 prometheus.Observer
-	openActorErr                prometheus.Observer
-	forkStageDurVec             *prometheus.HistogramVec
-	forkStageCheckpoint         prometheus.Observer
-	forkStageSanitize           prometheus.Observer
-	forkStageCloneDir           prometheus.Observer
-	forkStageOpenChild          prometheus.Observer
-	forkStageCommitTx           prometheus.Observer
-	segmentReserveDurVec        *prometheus.HistogramVec
-	segmentInodeOK              prometheus.Observer
-	segmentInodeErr             prometheus.Observer
-	segmentPackOK               prometheus.Observer
-	segmentPackErr              prometheus.Observer
+	controlActorLoadsDesc         *prometheus.Desc
+	controlActorEvictionsDesc     *prometheus.Desc
+	controlCleanupErrorsDesc      *prometheus.Desc
+	controlForksDesc              *prometheus.Desc
+	controlSnapshotsReclaimedDesc *prometheus.Desc
+	openActorDurVec               *prometheus.HistogramVec
+	openActorOK                   prometheus.Observer
+	openActorErr                  prometheus.Observer
+	forkStageDurVec               *prometheus.HistogramVec
+	forkStageCheckpoint           prometheus.Observer
+	forkStageSanitize             prometheus.Observer
+	forkStageCloneDir             prometheus.Observer
+	forkStageOpenChild            prometheus.Observer
+	forkStageCommitTx             prometheus.Observer
+	segmentReserveDurVec          *prometheus.HistogramVec
+	segmentInodeOK                prometheus.Observer
+	segmentInodeErr               prometheus.Observer
+	segmentPackOK                 prometheus.Observer
+	segmentPackErr                prometheus.Observer
 
-	actorLoadsRW     atomic.Uint64
-	actorLoadsRO     atomic.Uint64
-	actorEvictions   atomic.Uint64
-	cleanupErrors    atomic.Uint64
-	forksOK          atomic.Uint64
-	forksErr         atomic.Uint64
-	commitsReclaimed atomic.Uint64
+	actorLoadsRW       atomic.Uint64
+	actorLoadsRO       atomic.Uint64
+	actorEvictions     atomic.Uint64
+	cleanupErrors      atomic.Uint64
+	forksOK            atomic.Uint64
+	forksErr           atomic.Uint64
+	snapshotsReclaimed atomic.Uint64
 }
 
 func newStorageEngineCollector() *storageEngineCollector {
@@ -157,7 +157,7 @@ func newStorageEngineCollector() *storageEngineCollector {
 		),
 		packPhysicalBytesDesc: prometheus.NewDesc(
 			"bowl_storage_pack_physical_bytes",
-			"Total deduplicated physical bytes occupied by pack files across disks and commits directories.",
+			"Total deduplicated physical bytes occupied by pack files across disks and snapshots directories.",
 			nil,
 			nil,
 		),
@@ -211,19 +211,19 @@ func newStorageEngineCollector() *storageEngineCollector {
 		),
 		dataDirPhysicalBytesDesc: prometheus.NewDesc(
 			"bowl_storage_data_dir_physical_bytes",
-			"Total deduplicated physical bytes across the entire storage data directory (disks and commits).",
+			"Total deduplicated physical bytes across the entire storage data directory (disks and snapshots).",
 			nil,
 			nil,
 		),
-		commitsActiveDesc: prometheus.NewDesc(
-			"bowl_storage_commits_active",
-			"Current number of active fork base commit directories under commits/.",
+		snapshotsActiveDesc: prometheus.NewDesc(
+			"bowl_storage_snapshots_active",
+			"Current number of active snapshot directories under snapshots/.",
 			nil,
 			nil,
 		),
-		commitsPhysicalBytesDesc: prometheus.NewDesc(
-			"bowl_storage_commits_physical_bytes",
-			"Total deduplicated physical bytes across files retained inside commits/ directories.",
+		snapshotsPhysicalBytesDesc: prometheus.NewDesc(
+			"bowl_storage_snapshots_physical_bytes",
+			"Total deduplicated physical bytes across files retained inside snapshots/ directories.",
 			nil,
 			nil,
 		),
@@ -359,9 +359,9 @@ func newStorageEngineCollector() *storageEngineCollector {
 			[]string{"result"},
 			nil,
 		),
-		controlCommitsReclaimedDesc: prometheus.NewDesc(
-			"bowl_storage_control_commits_reclaimed_total",
-			"Total number of unreferenced fork commit directories physically reclaimed by DeleteDisk.",
+		controlSnapshotsReclaimedDesc: prometheus.NewDesc(
+			"bowl_storage_control_snapshots_reclaimed_total",
+			"Total number of unreferenced snapshot directories physically reclaimed by DeleteDisk.",
 			nil,
 			nil,
 		),
@@ -495,11 +495,11 @@ func (c *storageEngineCollector) incForkResult(ok bool) {
 	c.forksErr.Add(1)
 }
 
-func (c *storageEngineCollector) addCommitsReclaimed(n uint64) {
+func (c *storageEngineCollector) addSnapshotsReclaimed(n uint64) {
 	if c == nil || n == 0 {
 		return
 	}
-	c.commitsReclaimed.Add(n)
+	c.snapshotsReclaimed.Add(n)
 }
 
 func (c *storageEngineCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -520,8 +520,8 @@ func (c *storageEngineCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.hotCacheBlocksDesc
 	ch <- c.pebbleStallActiveDesc
 	ch <- c.dataDirPhysicalBytesDesc
-	ch <- c.commitsActiveDesc
-	ch <- c.commitsPhysicalBytesDesc
+	ch <- c.snapshotsActiveDesc
+	ch <- c.snapshotsPhysicalBytesDesc
 	ch <- c.volumeTotalBytesDesc
 	ch <- c.volumeAvailableBytesDesc
 
@@ -547,7 +547,7 @@ func (c *storageEngineCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.controlActorEvictionsDesc
 	ch <- c.controlCleanupErrorsDesc
 	ch <- c.controlForksDesc
-	ch <- c.controlCommitsReclaimedDesc
+	ch <- c.controlSnapshotsReclaimedDesc
 	c.openActorDurVec.Describe(ch)
 	c.forkStageDurVec.Describe(ch)
 	c.segmentReserveDurVec.Describe(ch)
@@ -705,8 +705,8 @@ func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.hotCacheBlocksDesc, prometheus.GaugeValue, float64(hotCacheBlocks))
 	ch <- prometheus.MustNewConstMetric(c.pebbleStallActiveDesc, prometheus.GaugeValue, float64(pebbleStallActive))
 	ch <- prometheus.MustNewConstMetric(c.dataDirPhysicalBytesDesc, prometheus.GaugeValue, float64(usage.DataDirPhysicalBytes))
-	ch <- prometheus.MustNewConstMetric(c.commitsActiveDesc, prometheus.GaugeValue, float64(usage.CommitsActive))
-	ch <- prometheus.MustNewConstMetric(c.commitsPhysicalBytesDesc, prometheus.GaugeValue, float64(usage.CommitsPhysicalBytes))
+	ch <- prometheus.MustNewConstMetric(c.snapshotsActiveDesc, prometheus.GaugeValue, float64(usage.SnapshotsActive))
+	ch <- prometheus.MustNewConstMetric(c.snapshotsPhysicalBytesDesc, prometheus.GaugeValue, float64(usage.SnapshotsPhysicalBytes))
 	ch <- prometheus.MustNewConstMetric(c.volumeTotalBytesDesc, prometheus.GaugeValue, float64(usage.VolumeTotalBytes))
 	ch <- prometheus.MustNewConstMetric(c.volumeAvailableBytesDesc, prometheus.GaugeValue, float64(usage.VolumeAvailableBytes))
 
@@ -734,7 +734,7 @@ func (c *storageEngineCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.controlCleanupErrorsDesc, prometheus.CounterValue, float64(c.cleanupErrors.Load()))
 	ch <- prometheus.MustNewConstMetric(c.controlForksDesc, prometheus.CounterValue, float64(c.forksOK.Load()), "ok")
 	ch <- prometheus.MustNewConstMetric(c.controlForksDesc, prometheus.CounterValue, float64(c.forksErr.Load()), "error")
-	ch <- prometheus.MustNewConstMetric(c.controlCommitsReclaimedDesc, prometheus.CounterValue, float64(c.commitsReclaimed.Load()))
+	ch <- prometheus.MustNewConstMetric(c.controlSnapshotsReclaimedDesc, prometheus.CounterValue, float64(c.snapshotsReclaimed.Load()))
 	c.openActorDurVec.Collect(ch)
 	c.forkStageDurVec.Collect(ch)
 	c.segmentReserveDurVec.Collect(ch)

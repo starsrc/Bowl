@@ -244,20 +244,79 @@ func openReadOnlyForInspect(dir string, cache *pebble.Cache) (*StoreActor, func(
 }
 
 func InspectBranchStat(rootDir string) (writerEpoch, nextWriteSeq uint64, hasOrphans bool, err error) {
-	actor, cleanup, err := openReadOnlyForInspect(rootDir, nil)
+	st, orphans, err := InspectBranchStatFull(rootDir)
 	if err != nil {
 		return 0, 0, false, err
+	}
+	return st.WriterEpoch, st.NextWriteSeq, orphans, nil
+}
+
+func InspectBranchStatFull(rootDir string) (stat BranchStat, hasOrphans bool, err error) {
+	actor, cleanup, err := openReadOnlyForInspect(rootDir, nil)
+	if err != nil {
+		return BranchStat{}, false, err
 	}
 	defer cleanup()
 
 	orphans, err := actor.hasOrphansInDB()
 	if err != nil {
-		return 0, 0, false, err
+		return BranchStat{}, false, err
 	}
-	return actor.stat.WriterEpoch, actor.stat.NextWriteSeq, orphans, nil
+	return actor.stat, orphans, nil
 }
 
-func ReadCommitNodeSlice(rootDir string, ino, offset uint64, size uint32) (*ReadNodeResult, error) {
+func AlignBranchStat(rootDir string, maxBytes, writerEpoch, nextWriteSeq uint64, cache *pebble.Cache) (BranchStat, error) {
+	if rootDir == "" || maxBytes == 0 || maxBytes > uint64(math.MaxInt64) {
+		return BranchStat{}, ErrInvalid
+	}
+	var owned *pebble.Cache
+	if cache == nil {
+		owned = pebble.NewCache(inspectReadOnlyCacheSize)
+		cache = owned
+		defer owned.Unref()
+	}
+	pdb, err := pebble.Open(rootDir, NewPebbleOptions(cache, false))
+	if err != nil {
+		return BranchStat{}, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = pdb.Close()
+		}
+	}()
+
+	st, err := readBranchStatFromDB(pdb)
+	if err != nil {
+		return BranchStat{}, err
+	}
+	if st.LogicalBytes > maxBytes {
+		return BranchStat{}, ErrQuotaShrinkBelowUsed
+	}
+	st.MaxBytes = maxBytes
+	st.WriterEpoch = writerEpoch
+	st.NextWriteSeq = nextWriteSeq
+
+	batch := pdb.NewBatch()
+	defer func() { _ = batch.Close() }()
+	BatchSetStatDeferred(batch, st)
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return BranchStat{}, err
+	}
+	if err := pdb.Flush(); err != nil {
+		return BranchStat{}, err
+	}
+	if err := pdb.Close(); err != nil {
+		return BranchStat{}, err
+	}
+	closed = true
+	if err := syncDirPath(rootDir); err != nil {
+		return BranchStat{}, err
+	}
+	return st, nil
+}
+
+func ReadSnapshotNodeSlice(rootDir string, ino, offset uint64, size uint32) (*ReadNodeResult, error) {
 	if rootDir == "" || ino == 0 || ino > uint64(math.MaxInt64) || offset > MaxFileSize || size > MaxReadNodeSliceBytes {
 		return nil, ErrInvalid
 	}

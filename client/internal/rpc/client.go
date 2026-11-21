@@ -179,7 +179,7 @@ func isBulkDataProcedure(urlPath string) bool {
 		urlPath,
 		storagev1connect.StorageServiceReadProcedure,
 		storagev1connect.StorageServiceWriteProcedure,
-		storagev1connect.StorageServiceReadCommitNodeProcedure,
+		storagev1connect.StorageServiceReadSnapshotNodeProcedure,
 	)
 }
 

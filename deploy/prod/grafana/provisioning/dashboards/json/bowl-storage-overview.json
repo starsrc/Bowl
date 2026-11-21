@@ -10,22 +10,22 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "驻留血缘切面数 (Commits Active)",
+      "title": "驻留快照数 (Snapshots Active)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "targets": [
-        { "expr": "bowl_storage_commits_active", "refId": "A" }
+        { "expr": "bowl_storage_snapshots_active", "refId": "A" }
       ]
     },
     {
       "id": 2,
       "type": "stat",
-      "title": "驻留切面物理占用 (Bytes)",
+      "title": "驻留快照物理占用 (Bytes)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
       "fieldConfig": { "defaults": { "unit": "bytes" } },
       "targets": [
-        { "expr": "bowl_storage_commits_physical_bytes", "refId": "A" }
+        { "expr": "bowl_storage_snapshots_physical_bytes", "refId": "A" }
       ]
     },
     {
@@ -119,8 +119,8 @@
           "refId": "A"
         },
         {
-          "expr": "rate(bowl_storage_control_commits_reclaimed_total[5m])",
-          "legendFormat": "commits_reclaimed/s",
+          "expr": "rate(bowl_storage_control_snapshots_reclaimed_total[5m])",
+          "legendFormat": "snapshots_reclaimed/s",
           "refId": "B"
         }
       ]
@@ -128,12 +128,12 @@
     {
       "id": 9,
       "type": "logs",
-      "title": "控制面与 Pebble 切面结构化日志 (Loki)",
+      "title": "控制面与 Pebble 快照结构化日志 (Loki)",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
       "targets": [
         {
-          "expr": "{service=\"storage-service\"} | json | line_format \"[{{.level}}] {{.component}} {{.msg}} disk_id={{.disk_id}} source_disk_id={{.source_disk_id}} commit_id={{.commit_id}} trace_id={{.trace_id}}\"",
+          "expr": "{service=\"storage-service\"} | json | line_format \"[{{.level}}] {{.component}} {{.msg}} disk_id={{.disk_id}} source_disk_id={{.source_disk_id}} snapshot_id={{.snapshot_id}} trace_id={{.trace_id}}\"",
           "refId": "A"
         }
       ]

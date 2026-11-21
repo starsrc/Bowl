@@ -5075,7 +5075,9 @@ func (x *UpdateDiskResponse) GetDisk() *Disk {
 type DeleteDiskRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
-	DiskId        string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
+	// 是否递归删除目标磁盘及其全部派生后代磁盘（默认 false 仅独立删除目标磁盘）。
+	Recursive     bool `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5115,6 +5117,13 @@ func (x *DeleteDiskRequest) GetDiskId() string {
 		return x.DiskId
 	}
 	return ""
+}
+
+func (x *DeleteDiskRequest) GetRecursive() bool {
+	if x != nil {
+		return x.Recursive
+	}
+	return false
 }
 
 // DeleteDiskResponse 定义 DeleteDisk 接口输出参数。
@@ -5875,8 +5884,8 @@ func (x *DiffDiskRequest) GetPageToken() string {
 // DiffDiskResponse 定义 DiffDisk 接口输出参数。
 type DiffDiskResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 最近共同祖先提交标识。
-	LcaCommitId string `protobuf:"bytes,1,opt,name=lca_commit_id,json=lcaCommitId,proto3" json:"lca_commit_id,omitempty"`
+	// 最近共同祖先快照标识。
+	LcaSnapshotId string `protobuf:"bytes,1,opt,name=lca_snapshot_id,json=lcaSnapshotId,proto3" json:"lca_snapshot_id,omitempty"`
 	// 差异与冲突统计摘要。
 	Summary *DiffSummary `protobuf:"bytes,2,opt,name=summary,proto3" json:"summary,omitempty"`
 	// 当前页差异条目列表。
@@ -5917,9 +5926,9 @@ func (*DiffDiskResponse) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{84}
 }
 
-func (x *DiffDiskResponse) GetLcaCommitId() string {
+func (x *DiffDiskResponse) GetLcaSnapshotId() string {
 	if x != nil {
-		return x.LcaCommitId
+		return x.LcaSnapshotId
 	}
 	return ""
 }
@@ -5945,13 +5954,13 @@ func (x *DiffDiskResponse) GetNextPageToken() string {
 	return ""
 }
 
-// ReadCommitNodeRequest 定义 ReadCommitNode 接口输入参数。
-type ReadCommitNodeRequest struct {
+// ReadSnapshotNodeRequest 定义 ReadSnapshotNode 接口输入参数。
+type ReadSnapshotNodeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 所属虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
 	DiskId string `protobuf:"bytes,1,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`
-	// 目标不可变提交切面唯一标识符（UUID 格式，非全零 nil UUID）。
-	CommitId string `protobuf:"bytes,2,opt,name=commit_id,json=commitId,proto3" json:"commit_id,omitempty"`
+	// 目标不可变快照唯一标识符（UUID 格式，非全零 nil UUID）。
+	SnapshotId string `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
 	// 目标节点 Inode 编号（必须在 int64 正数区间内）。
 	Ino uint64 `protobuf:"varint,3,opt,name=ino,proto3" json:"ino,omitempty"`
 	// 读取起始偏移量（必须在 int64 非负区间内）。
@@ -5962,20 +5971,20 @@ type ReadCommitNodeRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ReadCommitNodeRequest) Reset() {
-	*x = ReadCommitNodeRequest{}
+func (x *ReadSnapshotNodeRequest) Reset() {
+	*x = ReadSnapshotNodeRequest{}
 	mi := &file_storage_v1_storage_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ReadCommitNodeRequest) String() string {
+func (x *ReadSnapshotNodeRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ReadCommitNodeRequest) ProtoMessage() {}
+func (*ReadSnapshotNodeRequest) ProtoMessage() {}
 
-func (x *ReadCommitNodeRequest) ProtoReflect() protoreflect.Message {
+func (x *ReadSnapshotNodeRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_storage_v1_storage_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -5987,48 +5996,48 @@ func (x *ReadCommitNodeRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ReadCommitNodeRequest.ProtoReflect.Descriptor instead.
-func (*ReadCommitNodeRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ReadSnapshotNodeRequest.ProtoReflect.Descriptor instead.
+func (*ReadSnapshotNodeRequest) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{85}
 }
 
-func (x *ReadCommitNodeRequest) GetDiskId() string {
+func (x *ReadSnapshotNodeRequest) GetDiskId() string {
 	if x != nil {
 		return x.DiskId
 	}
 	return ""
 }
 
-func (x *ReadCommitNodeRequest) GetCommitId() string {
+func (x *ReadSnapshotNodeRequest) GetSnapshotId() string {
 	if x != nil {
-		return x.CommitId
+		return x.SnapshotId
 	}
 	return ""
 }
 
-func (x *ReadCommitNodeRequest) GetIno() uint64 {
+func (x *ReadSnapshotNodeRequest) GetIno() uint64 {
 	if x != nil {
 		return x.Ino
 	}
 	return 0
 }
 
-func (x *ReadCommitNodeRequest) GetOffset() uint64 {
+func (x *ReadSnapshotNodeRequest) GetOffset() uint64 {
 	if x != nil {
 		return x.Offset
 	}
 	return 0
 }
 
-func (x *ReadCommitNodeRequest) GetSize() uint32 {
+func (x *ReadSnapshotNodeRequest) GetSize() uint32 {
 	if x != nil {
 		return x.Size
 	}
 	return 0
 }
 
-// ReadCommitNodeResponse 定义 ReadCommitNode 接口输出参数。
-type ReadCommitNodeResponse struct {
+// ReadSnapshotNodeResponse 定义 ReadSnapshotNode 接口输出参数。
+type ReadSnapshotNodeResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 节点 POSIX 文件模式位。
 	Mode uint32 `protobuf:"varint,1,opt,name=mode,proto3" json:"mode,omitempty"`
@@ -6044,20 +6053,20 @@ type ReadCommitNodeResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ReadCommitNodeResponse) Reset() {
-	*x = ReadCommitNodeResponse{}
+func (x *ReadSnapshotNodeResponse) Reset() {
+	*x = ReadSnapshotNodeResponse{}
 	mi := &file_storage_v1_storage_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ReadCommitNodeResponse) String() string {
+func (x *ReadSnapshotNodeResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ReadCommitNodeResponse) ProtoMessage() {}
+func (*ReadSnapshotNodeResponse) ProtoMessage() {}
 
-func (x *ReadCommitNodeResponse) ProtoReflect() protoreflect.Message {
+func (x *ReadSnapshotNodeResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_storage_v1_storage_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -6069,40 +6078,40 @@ func (x *ReadCommitNodeResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ReadCommitNodeResponse.ProtoReflect.Descriptor instead.
-func (*ReadCommitNodeResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ReadSnapshotNodeResponse.ProtoReflect.Descriptor instead.
+func (*ReadSnapshotNodeResponse) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{86}
 }
 
-func (x *ReadCommitNodeResponse) GetMode() uint32 {
+func (x *ReadSnapshotNodeResponse) GetMode() uint32 {
 	if x != nil {
 		return x.Mode
 	}
 	return 0
 }
 
-func (x *ReadCommitNodeResponse) GetFileSize() uint64 {
+func (x *ReadSnapshotNodeResponse) GetFileSize() uint64 {
 	if x != nil {
 		return x.FileSize
 	}
 	return 0
 }
 
-func (x *ReadCommitNodeResponse) GetData() []byte {
+func (x *ReadSnapshotNodeResponse) GetData() []byte {
 	if x != nil {
 		return x.Data
 	}
 	return nil
 }
 
-func (x *ReadCommitNodeResponse) GetEof() bool {
+func (x *ReadSnapshotNodeResponse) GetEof() bool {
 	if x != nil {
 		return x.Eof
 	}
 	return false
 }
 
-func (x *ReadCommitNodeResponse) GetSymlinkTarget() []byte {
+func (x *ReadSnapshotNodeResponse) GetSymlinkTarget() []byte {
 	if x != nil {
 		return x.SymlinkTarget
 	}
@@ -6116,7 +6125,7 @@ type MergeConflict struct {
 	Path []byte `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// 冲突类型。
 	Kind ConflictKind `protobuf:"varint,2,opt,name=kind,proto3,enum=storage.v1.ConflictKind" json:"kind,omitempty"`
-	// 共同祖先切面中的节点摘要（若存在）。
+	// 共同祖先快照中的节点摘要（若存在）。
 	Base *DiffNodeSummary `protobuf:"bytes,3,opt,name=base,proto3,oneof" json:"base,omitempty"`
 	// 目标磁盘中的节点摘要（若存在）。
 	Target *DiffNodeSummary `protobuf:"bytes,4,opt,name=target,proto3,oneof" json:"target,omitempty"`
@@ -6194,8 +6203,8 @@ func (x *MergeConflict) GetSource() *DiffNodeSummary {
 // MergeConflictReport 汇总合并冲突报告。
 type MergeConflictReport struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 最近共同祖先提交标识。
-	LcaCommitId string `protobuf:"bytes,1,opt,name=lca_commit_id,json=lcaCommitId,proto3" json:"lca_commit_id,omitempty"`
+	// 最近共同祖先快照标识。
+	LcaSnapshotId string `protobuf:"bytes,1,opt,name=lca_snapshot_id,json=lcaSnapshotId,proto3" json:"lca_snapshot_id,omitempty"`
 	// 冲突总数（可能大于当前响应携带的截断列表长度）。
 	TotalConflicts uint64 `protobuf:"varint,2,opt,name=total_conflicts,json=totalConflicts,proto3" json:"total_conflicts,omitempty"`
 	// 冲突明细列表。
@@ -6236,9 +6245,9 @@ func (*MergeConflictReport) Descriptor() ([]byte, []int) {
 	return file_storage_v1_storage_proto_rawDescGZIP(), []int{88}
 }
 
-func (x *MergeConflictReport) GetLcaCommitId() string {
+func (x *MergeConflictReport) GetLcaSnapshotId() string {
 	if x != nil {
-		return x.LcaCommitId
+		return x.LcaSnapshotId
 	}
 	return ""
 }
@@ -6369,10 +6378,10 @@ type MergeDiskResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 合并后更新的目标虚拟磁盘实体（dry_run 或冲突中止时可能为空）。
 	Disk *Disk `protobuf:"bytes,1,opt,name=disk,proto3,oneof" json:"disk,omitempty"`
-	// 最近共同祖先提交标识。
-	LcaCommitId string `protobuf:"bytes,2,opt,name=lca_commit_id,json=lcaCommitId,proto3" json:"lca_commit_id,omitempty"`
-	// 合并产生的新提交标识（dry_run 或冲突中止时为空）。
-	MergeCommitId string `protobuf:"bytes,3,opt,name=merge_commit_id,json=mergeCommitId,proto3" json:"merge_commit_id,omitempty"`
+	// 最近共同祖先快照标识。
+	LcaSnapshotId string `protobuf:"bytes,2,opt,name=lca_snapshot_id,json=lcaSnapshotId,proto3" json:"lca_snapshot_id,omitempty"`
+	// 合并产生或复用的快照标识（dry_run 且非幂等无变更短路或冲突中止时为空）。
+	MergeSnapshotId string `protobuf:"bytes,3,opt,name=merge_snapshot_id,json=mergeSnapshotId,proto3" json:"merge_snapshot_id,omitempty"`
 	// 预估或实际合并后的目标盘已用字节数。
 	EstimatedUsedBytes uint64 `protobuf:"varint,4,opt,name=estimated_used_bytes,json=estimatedUsedBytes,proto3" json:"estimated_used_bytes,omitempty"`
 	// 合并后目标盘的容量配额上限字节数。
@@ -6420,16 +6429,16 @@ func (x *MergeDiskResponse) GetDisk() *Disk {
 	return nil
 }
 
-func (x *MergeDiskResponse) GetLcaCommitId() string {
+func (x *MergeDiskResponse) GetLcaSnapshotId() string {
 	if x != nil {
-		return x.LcaCommitId
+		return x.LcaSnapshotId
 	}
 	return ""
 }
 
-func (x *MergeDiskResponse) GetMergeCommitId() string {
+func (x *MergeDiskResponse) GetMergeSnapshotId() string {
 	if x != nil {
-		return x.MergeCommitId
+		return x.MergeSnapshotId
 	}
 	return ""
 }
@@ -6895,10 +6904,11 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\n" +
 	"_max_bytes\"B\n" +
 	"\x12UpdateDiskResponse\x12,\n" +
-	"\x04disk\x18\x01 \x01(\v2\x10.storage.v1.DiskB\x06\xbaH\x03\xc8\x01\x01R\x04disk\"\xa5\x01\n" +
+	"\x04disk\x18\x01 \x01(\v2\x10.storage.v1.DiskB\x06\xbaH\x03\xc8\x01\x01R\x04disk\"\xc3\x01\n" +
 	"\x11DeleteDiskRequest\x12\x8f\x01\n" +
 	"\adisk_id\x18\x01 \x01(\tBv\xbaHs\xba\x01k\n" +
-	"\x1bdelete_disk_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\"\x14\n" +
+	"\x1bdelete_disk_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x1c\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\"\x14\n" +
 	"\x12DeleteDiskResponse\"\xee\x02\n" +
 	"\x0fForkDiskRequest\x12\xa9\x01\n" +
 	"\x0esource_disk_id\x18\x01 \x01(\tB\x82\x01\xbaH\x7f\xba\x01w\n" +
@@ -6969,23 +6979,24 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"page_token\x18\x06 \x01(\tBd\xbaHa\xba\x01Y\n" +
 	"\x1bdiff_disk_page_token_no_nul\x12\"page_token cannot contain NUL byte\x1a\x16!this.contains('\\x00')r\x03\x18\x80 R\tpageToken:\xad\x01\xbaH\xa9\x01\x1a\xa6\x01\n" +
 	"!diff_disk_source_not_equal_target\x123source_disk_id and target_disk_id must be different\x1aLhas(this.target_disk_id) ? this.source_disk_id != this.target_disk_id : trueB\x11\n" +
-	"\x0f_target_disk_id\"\xc2\x01\n" +
-	"\x10DiffDiskResponse\x12\"\n" +
-	"\rlca_commit_id\x18\x01 \x01(\tR\vlcaCommitId\x121\n" +
+	"\x0f_target_disk_id\"\xc6\x01\n" +
+	"\x10DiffDiskResponse\x12&\n" +
+	"\x0flca_snapshot_id\x18\x01 \x01(\tR\rlcaSnapshotId\x121\n" +
 	"\asummary\x18\x02 \x01(\v2\x17.storage.v1.DiffSummaryR\asummary\x12/\n" +
 	"\aentries\x18\x03 \x03(\v2\x15.storage.v1.DiffEntryR\aentries\x12&\n" +
-	"\x0fnext_page_token\x18\x04 \x01(\tR\rnextPageToken\"\xbb\x03\n" +
-	"\x15ReadCommitNodeRequest\x12\x94\x01\n" +
-	"\adisk_id\x18\x01 \x01(\tB{\xbaHx\xba\x01p\n" +
-	" read_commit_node_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\x9c\x01\n" +
-	"\tcommit_id\x18\x02 \x01(\tB\x7f\xbaH|\xba\x01t\n" +
-	"\"read_commit_node_commit_id_not_nil\x12\x1ecommit_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\bcommitId\x12#\n" +
+	"\x0fnext_page_token\x18\x04 \x01(\tR\rnextPageToken\"\xcb\x03\n" +
+	"\x17ReadSnapshotNodeRequest\x12\x96\x01\n" +
+	"\adisk_id\x18\x01 \x01(\tB}\xbaHz\xba\x01r\n" +
+	"\"read_snapshot_node_disk_id_not_nil\x12\x1cdisk_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\x06diskId\x12\xa8\x01\n" +
+	"\vsnapshot_id\x18\x02 \x01(\tB\x86\x01\xbaH\x82\x01\xba\x01z\n" +
+	"&read_snapshot_node_snapshot_id_not_nil\x12 snapshot_id must not be nil UUID\x1a.this != '00000000-0000-0000-0000-000000000000'r\x03\xb0\x01\x01R\n" +
+	"snapshotId\x12#\n" +
 	"\x03ino\x18\x03 \x01(\x04B\x11\xbaH\x0e2\f\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7f \x00R\x03ino\x12'\n" +
 	"\x06offset\x18\x04 \x01(\x04B\x0f\xbaH\f2\n" +
 	"\x18\xff\xff\xff\xff\xff\xff\xff\xff\x7fR\x06offset\x12\x1e\n" +
 	"\x04size\x18\x05 \x01(\rB\n" +
-	"\xbaH\a*\x05\x18\x80\x80\x80\x02R\x04size\"\x96\x01\n" +
-	"\x16ReadCommitNodeResponse\x12\x12\n" +
+	"\xbaH\a*\x05\x18\x80\x80\x80\x02R\x04size\"\x98\x01\n" +
+	"\x18ReadSnapshotNodeResponse\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x1b\n" +
 	"\tfile_size\x18\x02 \x01(\x04R\bfileSize\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x10\n" +
@@ -6999,9 +7010,9 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x06source\x18\x05 \x01(\v2\x1b.storage.v1.DiffNodeSummaryH\x02R\x06source\x88\x01\x01B\a\n" +
 	"\x05_baseB\t\n" +
 	"\a_targetB\t\n" +
-	"\a_source\"\xcc\x01\n" +
-	"\x13MergeConflictReport\x12\"\n" +
-	"\rlca_commit_id\x18\x01 \x01(\tR\vlcaCommitId\x12'\n" +
+	"\a_source\"\xd0\x01\n" +
+	"\x13MergeConflictReport\x12&\n" +
+	"\x0flca_snapshot_id\x18\x01 \x01(\tR\rlcaSnapshotId\x12'\n" +
 	"\x0ftotal_conflicts\x18\x02 \x01(\x04R\x0etotalConflicts\x127\n" +
 	"\tconflicts\x18\x03 \x03(\v2\x19.storage.v1.MergeConflictR\tconflicts\x12/\n" +
 	"\x13conflicts_truncated\x18\x04 \x01(\bR\x12conflictsTruncated\"\xf9\a\n" +
@@ -7021,11 +7032,11 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x0e2\x19.storage.v1.MergeStrategyR\x05value:\x028\x01:\x8c\x01\xbaH\x88\x01\x1a\x85\x01\n" +
 	"\"merge_disk_source_not_equal_target\x123source_disk_id and target_disk_id must be different\x1a*this.source_disk_id != this.target_disk_idB\f\n" +
 	"\n" +
-	"_max_bytes\"\xd2\x02\n" +
+	"_max_bytes\"\xda\x02\n" +
 	"\x11MergeDiskResponse\x12)\n" +
-	"\x04disk\x18\x01 \x01(\v2\x10.storage.v1.DiskH\x00R\x04disk\x88\x01\x01\x12\"\n" +
-	"\rlca_commit_id\x18\x02 \x01(\tR\vlcaCommitId\x12&\n" +
-	"\x0fmerge_commit_id\x18\x03 \x01(\tR\rmergeCommitId\x120\n" +
+	"\x04disk\x18\x01 \x01(\v2\x10.storage.v1.DiskH\x00R\x04disk\x88\x01\x01\x12&\n" +
+	"\x0flca_snapshot_id\x18\x02 \x01(\tR\rlcaSnapshotId\x12*\n" +
+	"\x11merge_snapshot_id\x18\x03 \x01(\tR\x0fmergeSnapshotId\x120\n" +
 	"\x14estimated_used_bytes\x18\x04 \x01(\x04R\x12estimatedUsedBytes\x12(\n" +
 	"\x10target_max_bytes\x18\x05 \x01(\x04R\x0etargetMaxBytes\x12M\n" +
 	"\x0fconflict_report\x18\x06 \x01(\v2\x1f.storage.v1.MergeConflictReportH\x01R\x0econflictReport\x88\x01\x01B\a\n" +
@@ -7055,7 +7066,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x1aMERGE_STRATEGY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13MERGE_STRATEGY_FAIL\x10\x01\x12\x17\n" +
 	"\x13MERGE_STRATEGY_OURS\x10\x02\x12\x19\n" +
-	"\x15MERGE_STRATEGY_THEIRS\x10\x032\xb7\x16\n" +
+	"\x15MERGE_STRATEGY_THEIRS\x10\x032\xbd\x16\n" +
 	"\x0eStorageService\x12?\n" +
 	"\x06Lookup\x12\x19.storage.v1.LookupRequest\x1a\x1a.storage.v1.LookupResponse\x12B\n" +
 	"\aGetAttr\x12\x1a.storage.v1.GetAttrRequest\x1a\x1b.storage.v1.GetAttrResponse\x12B\n" +
@@ -7099,8 +7110,8 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\bForkDisk\x12\x1b.storage.v1.ForkDiskRequest\x1a\x1c.storage.v1.ForkDiskResponse\x12?\n" +
 	"\x06StatFS\x12\x19.storage.v1.StatFSRequest\x1a\x1a.storage.v1.StatFSResponse\x12T\n" +
 	"\rReclaimOrphan\x12 .storage.v1.ReclaimOrphanRequest\x1a!.storage.v1.ReclaimOrphanResponse\x12E\n" +
-	"\bDiffDisk\x12\x1b.storage.v1.DiffDiskRequest\x1a\x1c.storage.v1.DiffDiskResponse\x12W\n" +
-	"\x0eReadCommitNode\x12!.storage.v1.ReadCommitNodeRequest\x1a\".storage.v1.ReadCommitNodeResponse\x12H\n" +
+	"\bDiffDisk\x12\x1b.storage.v1.DiffDiskRequest\x1a\x1c.storage.v1.DiffDiskResponse\x12]\n" +
+	"\x10ReadSnapshotNode\x12#.storage.v1.ReadSnapshotNodeRequest\x1a$.storage.v1.ReadSnapshotNodeResponse\x12H\n" +
 	"\tMergeDisk\x12\x1c.storage.v1.MergeDiskRequest\x1a\x1d.storage.v1.MergeDiskResponseB5Z3github.com/starsrc/bowl/gen/go/storage/v1;storagev1b\x06proto3"
 
 var (
@@ -7118,102 +7129,102 @@ func file_storage_v1_storage_proto_rawDescGZIP() []byte {
 var file_storage_v1_storage_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_storage_v1_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 92)
 var file_storage_v1_storage_proto_goTypes = []any{
-	(DiffKind)(0),                  // 0: storage.v1.DiffKind
-	(ConflictKind)(0),              // 1: storage.v1.ConflictKind
-	(MergeStrategy)(0),             // 2: storage.v1.MergeStrategy
-	(*LookupRequest)(nil),          // 3: storage.v1.LookupRequest
-	(*LookupResponse)(nil),         // 4: storage.v1.LookupResponse
-	(*GetAttrRequest)(nil),         // 5: storage.v1.GetAttrRequest
-	(*GetAttrResponse)(nil),        // 6: storage.v1.GetAttrResponse
-	(*SetAttrRequest)(nil),         // 7: storage.v1.SetAttrRequest
-	(*SetAttrResponse)(nil),        // 8: storage.v1.SetAttrResponse
-	(*MknodRequest)(nil),           // 9: storage.v1.MknodRequest
-	(*MknodResponse)(nil),          // 10: storage.v1.MknodResponse
-	(*MkdirRequest)(nil),           // 11: storage.v1.MkdirRequest
-	(*MkdirResponse)(nil),          // 12: storage.v1.MkdirResponse
-	(*SymlinkRequest)(nil),         // 13: storage.v1.SymlinkRequest
-	(*SymlinkResponse)(nil),        // 14: storage.v1.SymlinkResponse
-	(*ReadlinkRequest)(nil),        // 15: storage.v1.ReadlinkRequest
-	(*ReadlinkResponse)(nil),       // 16: storage.v1.ReadlinkResponse
-	(*LinkRequest)(nil),            // 17: storage.v1.LinkRequest
-	(*LinkResponse)(nil),           // 18: storage.v1.LinkResponse
-	(*UnlinkRequest)(nil),          // 19: storage.v1.UnlinkRequest
-	(*UnlinkResponse)(nil),         // 20: storage.v1.UnlinkResponse
-	(*RmdirRequest)(nil),           // 21: storage.v1.RmdirRequest
-	(*RmdirResponse)(nil),          // 22: storage.v1.RmdirResponse
-	(*RenameRequest)(nil),          // 23: storage.v1.RenameRequest
-	(*RenameResponse)(nil),         // 24: storage.v1.RenameResponse
-	(*CreateRequest)(nil),          // 25: storage.v1.CreateRequest
-	(*CreateResponse)(nil),         // 26: storage.v1.CreateResponse
-	(*CreateTmpfileRequest)(nil),   // 27: storage.v1.CreateTmpfileRequest
-	(*CreateTmpfileResponse)(nil),  // 28: storage.v1.CreateTmpfileResponse
-	(*ReadRequest)(nil),            // 29: storage.v1.ReadRequest
-	(*ReadResponse)(nil),           // 30: storage.v1.ReadResponse
-	(*WriteRequest)(nil),           // 31: storage.v1.WriteRequest
-	(*WriteResponse)(nil),          // 32: storage.v1.WriteResponse
-	(*FsyncRequest)(nil),           // 33: storage.v1.FsyncRequest
-	(*FsyncResponse)(nil),          // 34: storage.v1.FsyncResponse
-	(*FsyncDirRequest)(nil),        // 35: storage.v1.FsyncDirRequest
-	(*FsyncDirResponse)(nil),       // 36: storage.v1.FsyncDirResponse
-	(*DirEntry)(nil),               // 37: storage.v1.DirEntry
-	(*ReadDirRequest)(nil),         // 38: storage.v1.ReadDirRequest
-	(*ReadDirResponse)(nil),        // 39: storage.v1.ReadDirResponse
-	(*DirEntryPlus)(nil),           // 40: storage.v1.DirEntryPlus
-	(*ReadDirPlusRequest)(nil),     // 41: storage.v1.ReadDirPlusRequest
-	(*ReadDirPlusResponse)(nil),    // 42: storage.v1.ReadDirPlusResponse
-	(*FallocateRequest)(nil),       // 43: storage.v1.FallocateRequest
-	(*FallocateResponse)(nil),      // 44: storage.v1.FallocateResponse
-	(*SetXattrRequest)(nil),        // 45: storage.v1.SetXattrRequest
-	(*SetXattrResponse)(nil),       // 46: storage.v1.SetXattrResponse
-	(*GetXattrRequest)(nil),        // 47: storage.v1.GetXattrRequest
-	(*GetXattrResponse)(nil),       // 48: storage.v1.GetXattrResponse
-	(*ListXattrRequest)(nil),       // 49: storage.v1.ListXattrRequest
-	(*ListXattrResponse)(nil),      // 50: storage.v1.ListXattrResponse
-	(*RemoveXattrRequest)(nil),     // 51: storage.v1.RemoveXattrRequest
-	(*RemoveXattrResponse)(nil),    // 52: storage.v1.RemoveXattrResponse
-	(*MountDiskRequest)(nil),       // 53: storage.v1.MountDiskRequest
-	(*MountDiskResponse)(nil),      // 54: storage.v1.MountDiskResponse
-	(*RenewMountRequest)(nil),      // 55: storage.v1.RenewMountRequest
-	(*RenewMountResponse)(nil),     // 56: storage.v1.RenewMountResponse
-	(*UnmountDiskRequest)(nil),     // 57: storage.v1.UnmountDiskRequest
-	(*UnmountDiskResponse)(nil),    // 58: storage.v1.UnmountDiskResponse
-	(*MountLease)(nil),             // 59: storage.v1.MountLease
-	(*ListMountsRequest)(nil),      // 60: storage.v1.ListMountsRequest
-	(*ListMountsResponse)(nil),     // 61: storage.v1.ListMountsResponse
-	(*EvictMountsRequest)(nil),     // 62: storage.v1.EvictMountsRequest
-	(*EvictMountsResponse)(nil),    // 63: storage.v1.EvictMountsResponse
-	(*Inode)(nil),                  // 64: storage.v1.Inode
-	(*InodeAttribute)(nil),         // 65: storage.v1.InodeAttribute
-	(*Disk)(nil),                   // 66: storage.v1.Disk
-	(*CreateDiskRequest)(nil),      // 67: storage.v1.CreateDiskRequest
-	(*CreateDiskResponse)(nil),     // 68: storage.v1.CreateDiskResponse
-	(*GetDiskRequest)(nil),         // 69: storage.v1.GetDiskRequest
-	(*GetDiskResponse)(nil),        // 70: storage.v1.GetDiskResponse
-	(*ListDisksRequest)(nil),       // 71: storage.v1.ListDisksRequest
-	(*ListDisksResponse)(nil),      // 72: storage.v1.ListDisksResponse
-	(*UpdateDiskRequest)(nil),      // 73: storage.v1.UpdateDiskRequest
-	(*UpdateDiskResponse)(nil),     // 74: storage.v1.UpdateDiskResponse
-	(*DeleteDiskRequest)(nil),      // 75: storage.v1.DeleteDiskRequest
-	(*DeleteDiskResponse)(nil),     // 76: storage.v1.DeleteDiskResponse
-	(*ForkDiskRequest)(nil),        // 77: storage.v1.ForkDiskRequest
-	(*ForkDiskResponse)(nil),       // 78: storage.v1.ForkDiskResponse
-	(*StatFSRequest)(nil),          // 79: storage.v1.StatFSRequest
-	(*StatFSResponse)(nil),         // 80: storage.v1.StatFSResponse
-	(*ReclaimOrphanRequest)(nil),   // 81: storage.v1.ReclaimOrphanRequest
-	(*ReclaimOrphanResponse)(nil),  // 82: storage.v1.ReclaimOrphanResponse
-	(*DiffNodeSummary)(nil),        // 83: storage.v1.DiffNodeSummary
-	(*DiffEntry)(nil),              // 84: storage.v1.DiffEntry
-	(*DiffSummary)(nil),            // 85: storage.v1.DiffSummary
-	(*DiffDiskRequest)(nil),        // 86: storage.v1.DiffDiskRequest
-	(*DiffDiskResponse)(nil),       // 87: storage.v1.DiffDiskResponse
-	(*ReadCommitNodeRequest)(nil),  // 88: storage.v1.ReadCommitNodeRequest
-	(*ReadCommitNodeResponse)(nil), // 89: storage.v1.ReadCommitNodeResponse
-	(*MergeConflict)(nil),          // 90: storage.v1.MergeConflict
-	(*MergeConflictReport)(nil),    // 91: storage.v1.MergeConflictReport
-	(*MergeDiskRequest)(nil),       // 92: storage.v1.MergeDiskRequest
-	(*MergeDiskResponse)(nil),      // 93: storage.v1.MergeDiskResponse
-	nil,                            // 94: storage.v1.MergeDiskRequest.PathStrategiesEntry
-	(*timestamppb.Timestamp)(nil),  // 95: google.protobuf.Timestamp
+	(DiffKind)(0),                    // 0: storage.v1.DiffKind
+	(ConflictKind)(0),                // 1: storage.v1.ConflictKind
+	(MergeStrategy)(0),               // 2: storage.v1.MergeStrategy
+	(*LookupRequest)(nil),            // 3: storage.v1.LookupRequest
+	(*LookupResponse)(nil),           // 4: storage.v1.LookupResponse
+	(*GetAttrRequest)(nil),           // 5: storage.v1.GetAttrRequest
+	(*GetAttrResponse)(nil),          // 6: storage.v1.GetAttrResponse
+	(*SetAttrRequest)(nil),           // 7: storage.v1.SetAttrRequest
+	(*SetAttrResponse)(nil),          // 8: storage.v1.SetAttrResponse
+	(*MknodRequest)(nil),             // 9: storage.v1.MknodRequest
+	(*MknodResponse)(nil),            // 10: storage.v1.MknodResponse
+	(*MkdirRequest)(nil),             // 11: storage.v1.MkdirRequest
+	(*MkdirResponse)(nil),            // 12: storage.v1.MkdirResponse
+	(*SymlinkRequest)(nil),           // 13: storage.v1.SymlinkRequest
+	(*SymlinkResponse)(nil),          // 14: storage.v1.SymlinkResponse
+	(*ReadlinkRequest)(nil),          // 15: storage.v1.ReadlinkRequest
+	(*ReadlinkResponse)(nil),         // 16: storage.v1.ReadlinkResponse
+	(*LinkRequest)(nil),              // 17: storage.v1.LinkRequest
+	(*LinkResponse)(nil),             // 18: storage.v1.LinkResponse
+	(*UnlinkRequest)(nil),            // 19: storage.v1.UnlinkRequest
+	(*UnlinkResponse)(nil),           // 20: storage.v1.UnlinkResponse
+	(*RmdirRequest)(nil),             // 21: storage.v1.RmdirRequest
+	(*RmdirResponse)(nil),            // 22: storage.v1.RmdirResponse
+	(*RenameRequest)(nil),            // 23: storage.v1.RenameRequest
+	(*RenameResponse)(nil),           // 24: storage.v1.RenameResponse
+	(*CreateRequest)(nil),            // 25: storage.v1.CreateRequest
+	(*CreateResponse)(nil),           // 26: storage.v1.CreateResponse
+	(*CreateTmpfileRequest)(nil),     // 27: storage.v1.CreateTmpfileRequest
+	(*CreateTmpfileResponse)(nil),    // 28: storage.v1.CreateTmpfileResponse
+	(*ReadRequest)(nil),              // 29: storage.v1.ReadRequest
+	(*ReadResponse)(nil),             // 30: storage.v1.ReadResponse
+	(*WriteRequest)(nil),             // 31: storage.v1.WriteRequest
+	(*WriteResponse)(nil),            // 32: storage.v1.WriteResponse
+	(*FsyncRequest)(nil),             // 33: storage.v1.FsyncRequest
+	(*FsyncResponse)(nil),            // 34: storage.v1.FsyncResponse
+	(*FsyncDirRequest)(nil),          // 35: storage.v1.FsyncDirRequest
+	(*FsyncDirResponse)(nil),         // 36: storage.v1.FsyncDirResponse
+	(*DirEntry)(nil),                 // 37: storage.v1.DirEntry
+	(*ReadDirRequest)(nil),           // 38: storage.v1.ReadDirRequest
+	(*ReadDirResponse)(nil),          // 39: storage.v1.ReadDirResponse
+	(*DirEntryPlus)(nil),             // 40: storage.v1.DirEntryPlus
+	(*ReadDirPlusRequest)(nil),       // 41: storage.v1.ReadDirPlusRequest
+	(*ReadDirPlusResponse)(nil),      // 42: storage.v1.ReadDirPlusResponse
+	(*FallocateRequest)(nil),         // 43: storage.v1.FallocateRequest
+	(*FallocateResponse)(nil),        // 44: storage.v1.FallocateResponse
+	(*SetXattrRequest)(nil),          // 45: storage.v1.SetXattrRequest
+	(*SetXattrResponse)(nil),         // 46: storage.v1.SetXattrResponse
+	(*GetXattrRequest)(nil),          // 47: storage.v1.GetXattrRequest
+	(*GetXattrResponse)(nil),         // 48: storage.v1.GetXattrResponse
+	(*ListXattrRequest)(nil),         // 49: storage.v1.ListXattrRequest
+	(*ListXattrResponse)(nil),        // 50: storage.v1.ListXattrResponse
+	(*RemoveXattrRequest)(nil),       // 51: storage.v1.RemoveXattrRequest
+	(*RemoveXattrResponse)(nil),      // 52: storage.v1.RemoveXattrResponse
+	(*MountDiskRequest)(nil),         // 53: storage.v1.MountDiskRequest
+	(*MountDiskResponse)(nil),        // 54: storage.v1.MountDiskResponse
+	(*RenewMountRequest)(nil),        // 55: storage.v1.RenewMountRequest
+	(*RenewMountResponse)(nil),       // 56: storage.v1.RenewMountResponse
+	(*UnmountDiskRequest)(nil),       // 57: storage.v1.UnmountDiskRequest
+	(*UnmountDiskResponse)(nil),      // 58: storage.v1.UnmountDiskResponse
+	(*MountLease)(nil),               // 59: storage.v1.MountLease
+	(*ListMountsRequest)(nil),        // 60: storage.v1.ListMountsRequest
+	(*ListMountsResponse)(nil),       // 61: storage.v1.ListMountsResponse
+	(*EvictMountsRequest)(nil),       // 62: storage.v1.EvictMountsRequest
+	(*EvictMountsResponse)(nil),      // 63: storage.v1.EvictMountsResponse
+	(*Inode)(nil),                    // 64: storage.v1.Inode
+	(*InodeAttribute)(nil),           // 65: storage.v1.InodeAttribute
+	(*Disk)(nil),                     // 66: storage.v1.Disk
+	(*CreateDiskRequest)(nil),        // 67: storage.v1.CreateDiskRequest
+	(*CreateDiskResponse)(nil),       // 68: storage.v1.CreateDiskResponse
+	(*GetDiskRequest)(nil),           // 69: storage.v1.GetDiskRequest
+	(*GetDiskResponse)(nil),          // 70: storage.v1.GetDiskResponse
+	(*ListDisksRequest)(nil),         // 71: storage.v1.ListDisksRequest
+	(*ListDisksResponse)(nil),        // 72: storage.v1.ListDisksResponse
+	(*UpdateDiskRequest)(nil),        // 73: storage.v1.UpdateDiskRequest
+	(*UpdateDiskResponse)(nil),       // 74: storage.v1.UpdateDiskResponse
+	(*DeleteDiskRequest)(nil),        // 75: storage.v1.DeleteDiskRequest
+	(*DeleteDiskResponse)(nil),       // 76: storage.v1.DeleteDiskResponse
+	(*ForkDiskRequest)(nil),          // 77: storage.v1.ForkDiskRequest
+	(*ForkDiskResponse)(nil),         // 78: storage.v1.ForkDiskResponse
+	(*StatFSRequest)(nil),            // 79: storage.v1.StatFSRequest
+	(*StatFSResponse)(nil),           // 80: storage.v1.StatFSResponse
+	(*ReclaimOrphanRequest)(nil),     // 81: storage.v1.ReclaimOrphanRequest
+	(*ReclaimOrphanResponse)(nil),    // 82: storage.v1.ReclaimOrphanResponse
+	(*DiffNodeSummary)(nil),          // 83: storage.v1.DiffNodeSummary
+	(*DiffEntry)(nil),                // 84: storage.v1.DiffEntry
+	(*DiffSummary)(nil),              // 85: storage.v1.DiffSummary
+	(*DiffDiskRequest)(nil),          // 86: storage.v1.DiffDiskRequest
+	(*DiffDiskResponse)(nil),         // 87: storage.v1.DiffDiskResponse
+	(*ReadSnapshotNodeRequest)(nil),  // 88: storage.v1.ReadSnapshotNodeRequest
+	(*ReadSnapshotNodeResponse)(nil), // 89: storage.v1.ReadSnapshotNodeResponse
+	(*MergeConflict)(nil),            // 90: storage.v1.MergeConflict
+	(*MergeConflictReport)(nil),      // 91: storage.v1.MergeConflictReport
+	(*MergeDiskRequest)(nil),         // 92: storage.v1.MergeDiskRequest
+	(*MergeDiskResponse)(nil),        // 93: storage.v1.MergeDiskResponse
+	nil,                              // 94: storage.v1.MergeDiskRequest.PathStrategiesEntry
+	(*timestamppb.Timestamp)(nil),    // 95: google.protobuf.Timestamp
 }
 var file_storage_v1_storage_proto_depIdxs = []int32{
 	64, // 0: storage.v1.LookupResponse.inode:type_name -> storage.v1.Inode
@@ -7300,7 +7311,7 @@ var file_storage_v1_storage_proto_depIdxs = []int32{
 	79, // 81: storage.v1.StorageService.StatFS:input_type -> storage.v1.StatFSRequest
 	81, // 82: storage.v1.StorageService.ReclaimOrphan:input_type -> storage.v1.ReclaimOrphanRequest
 	86, // 83: storage.v1.StorageService.DiffDisk:input_type -> storage.v1.DiffDiskRequest
-	88, // 84: storage.v1.StorageService.ReadCommitNode:input_type -> storage.v1.ReadCommitNodeRequest
+	88, // 84: storage.v1.StorageService.ReadSnapshotNode:input_type -> storage.v1.ReadSnapshotNodeRequest
 	92, // 85: storage.v1.StorageService.MergeDisk:input_type -> storage.v1.MergeDiskRequest
 	4,  // 86: storage.v1.StorageService.Lookup:output_type -> storage.v1.LookupResponse
 	6,  // 87: storage.v1.StorageService.GetAttr:output_type -> storage.v1.GetAttrResponse
@@ -7340,7 +7351,7 @@ var file_storage_v1_storage_proto_depIdxs = []int32{
 	80, // 121: storage.v1.StorageService.StatFS:output_type -> storage.v1.StatFSResponse
 	82, // 122: storage.v1.StorageService.ReclaimOrphan:output_type -> storage.v1.ReclaimOrphanResponse
 	87, // 123: storage.v1.StorageService.DiffDisk:output_type -> storage.v1.DiffDiskResponse
-	89, // 124: storage.v1.StorageService.ReadCommitNode:output_type -> storage.v1.ReadCommitNodeResponse
+	89, // 124: storage.v1.StorageService.ReadSnapshotNode:output_type -> storage.v1.ReadSnapshotNodeResponse
 	93, // 125: storage.v1.StorageService.MergeDisk:output_type -> storage.v1.MergeDiskResponse
 	86, // [86:126] is the sub-list for method output_type
 	46, // [46:86] is the sub-list for method input_type

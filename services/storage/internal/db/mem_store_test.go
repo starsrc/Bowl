@@ -27,27 +27,27 @@ func TestMemStore_GivenInjectedWriteError_WhenForkDiskCalled_ThenRollsBackAtomic
 	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{
 		SourceDiskID: rootID,
 		ChildDiskID:  mustNewUUIDv7(t),
-		CommitID:     mustNewUUIDv7(t),
+		SnapshotID:   mustNewUUIDv7(t),
 		Name:         "fail-child",
 	})
 	require.ErrorIs(t, err, injected)
 
 	snapAfterFail := mem.Inspect()
-	require.Len(t, snapAfterFail.Disks, 1, "注入写失败后盘数量 want=1, got=%d", len(snapAfterFail.Disks))
-	require.Empty(t, snapAfterFail.Commits, "注入写失败后不得残留切面记录")
+	require.Len(t, snapAfterFail.Disks, 1, "disk count after injected failure want=1, got=%d", len(snapAfterFail.Disks))
+	require.Empty(t, snapAfterFail.Snapshots, "injected failure must not leave snapshot records")
 
 	childID := mustNewUUIDv7(t)
 	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{
 		SourceDiskID: rootID,
 		ChildDiskID:  childID,
-		CommitID:     mustNewUUIDv7(t),
+		SnapshotID:   mustNewUUIDv7(t),
 		Name:         "recovered-child",
 	})
 	require.NoError(t, err)
 
 	snapRecovered := mem.Inspect()
-	require.Len(t, snapRecovered.Disks, 2, "恢复后盘数量 want=2, got=%d", len(snapRecovered.Disks))
-	require.Len(t, snapRecovered.Commits, 1, "恢复后切面数量 want=1, got=%d", len(snapRecovered.Commits))
+	require.Len(t, snapRecovered.Disks, 2, "disk count after recovery want=2, got=%d", len(snapRecovered.Disks))
+	require.Len(t, snapRecovered.Snapshots, 1, "snapshot count after recovery want=1, got=%d", len(snapRecovered.Snapshots))
 }
 
 func TestMemStore_GivenInjectedWriteError_WhenMergeDiskCalled_ThenRollsBackAtomically(t *testing.T) {
@@ -58,11 +58,11 @@ func TestMemStore_GivenInjectedWriteError_WhenMergeDiskCalled_ThenRollsBackAtomi
 	root, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 	require.NoError(t, err)
 
-	childID, cmFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
+	childID, snapFork := mustNewUUIDv7(t), mustNewUUIDv7(t)
 	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{
 		SourceDiskID: rootID,
 		ChildDiskID:  childID,
-		CommitID:     cmFork,
+		SnapshotID:   snapFork,
 		Name:         "child",
 	})
 	require.NoError(t, err)
@@ -70,20 +70,20 @@ func TestMemStore_GivenInjectedWriteError_WhenMergeDiskCalled_ThenRollsBackAtomi
 	injected := errors.New("injected merge write error")
 	mem.SetFailNextWrite(injected)
 	_, err = mem.MergeDisk(ctx, &db.MergeDiskInput{
-		LineageID:                  root.LineageID,
-		SourceDiskID:               childID,
-		TargetDiskID:               rootID,
-		ExpectedSourceBaseCommitID: cmFork,
-		ExpectedTargetBaseCommitID: cmFork,
-		NewSourceCommitID:          mustNewUUIDv7(t),
-		NewMergeCommitID:           mustNewUUIDv7(t),
+		LineageID:                    root.LineageID,
+		SourceDiskID:                 childID,
+		TargetDiskID:                 rootID,
+		ExpectedSourceBaseSnapshotID: snapFork,
+		ExpectedTargetBaseSnapshotID: snapFork,
+		NewSourceSnapshotID:          mustNewUUIDv7(t),
+		NewMergeSnapshotID:           mustNewUUIDv7(t),
 	})
 	require.ErrorIs(t, err, injected)
 
 	snapAfterFail := mem.Inspect()
-	require.Len(t, snapAfterFail.Commits, 1, "注入写失败后不得残留新 Commit")
-	require.Equal(t, cmFork, snapAfterFail.Disks[rootID].BaseCommitID)
-	require.Equal(t, cmFork, snapAfterFail.Disks[childID].BaseCommitID)
+	require.Len(t, snapAfterFail.Snapshots, 1, "injected failure must not leave new snapshots")
+	require.Equal(t, snapFork, snapAfterFail.Disks[rootID].BaseSnapshotID)
+	require.Equal(t, snapFork, snapAfterFail.Disks[childID].BaseSnapshotID)
 }
 
 func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testing.T) {
@@ -98,26 +98,28 @@ func TestMemStore_GivenCanceledContext_WhenMethodsCalled_ThenFailsFast(t *testin
 
 	_, err := mem.CreateDisk(ctx, id, "canceled", testDefaultMaxBytes)
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: id, ChildDiskID: mustNewUUIDv7(t), CommitID: mustNewUUIDv7(t), Name: "c"})
+	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{SourceDiskID: id, ChildDiskID: mustNewUUIDv7(t), SnapshotID: mustNewUUIDv7(t), Name: "c"})
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.GetDisk(ctx, id)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.ListDisks(ctx, db.ListDisksQuery{})
 	require.ErrorIs(t, err, context.Canceled)
+	_, err = mem.ListLineageDisks(ctx, id)
+	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.UpdateDisk(ctx, db.UpdateDiskInput{DiskID: id, Name: &name})
 	require.ErrorIs(t, err, context.Canceled)
 	err = mem.UpdateDiskUsage(ctx, id, 0, 1)
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = mem.DeleteDisk(ctx, id)
+	_, err = mem.DeleteDisk(ctx, id, false)
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = mem.ListLineageCommits(ctx, id)
+	_, err = mem.ListLineageSnapshots(ctx, id)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.MergeDisk(ctx, &db.MergeDiskInput{
-		LineageID:         id,
-		SourceDiskID:      id,
-		TargetDiskID:      mustNewUUIDv7(t),
-		NewSourceCommitID: mustNewUUIDv7(t),
-		NewMergeCommitID:  mustNewUUIDv7(t),
+		LineageID:           id,
+		SourceDiskID:        id,
+		TargetDiskID:        mustNewUUIDv7(t),
+		NewSourceSnapshotID: mustNewUUIDv7(t),
+		NewMergeSnapshotID:  mustNewUUIDv7(t),
 	})
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = mem.ReserveSegment(ctx, db.SegmentKindInode, id, 2, 10)
@@ -167,7 +169,7 @@ func TestMemStore_GivenReserveAndUsageCalls_WhenInspected_ThenTracksCountersAndM
 	require.Len(t, snap.Mounts[rootID], 1)
 }
 
-func TestMemStore_GivenTriStateDelete_WhenInspected_ThenClearsSurvivorBaseCommit(t *testing.T) {
+func TestMemStore_GivenTriStateDelete_WhenInspected_ThenClearsSurvivorBaseSnapshot(t *testing.T) {
 	ctx := context.Background()
 	mem := db.NewMemStore()
 
@@ -175,31 +177,31 @@ func TestMemStore_GivenTriStateDelete_WhenInspected_ThenClearsSurvivorBaseCommit
 	_, err := mem.CreateDisk(ctx, rootID, "root", testDefaultMaxBytes)
 	require.NoError(t, err)
 
-	childID, cmID := mustNewUUIDv7(t), mustNewUUIDv7(t)
+	childID, snapID := mustNewUUIDv7(t), mustNewUUIDv7(t)
 	_, err = mem.ForkDisk(ctx, db.ForkDiskInput{
 		SourceDiskID: rootID,
 		ChildDiskID:  childID,
-		CommitID:     cmID,
+		SnapshotID:   snapID,
 		Name:         "child",
 	})
 	require.NoError(t, err)
-	require.Equal(t, cmID, mem.Inspect().Disks[childID].BaseCommitID)
+	require.Equal(t, snapID, mem.Inspect().Disks[childID].BaseSnapshotID)
 
-	_, err = mem.DeleteDisk(ctx, rootID)
+	_, err = mem.DeleteDisk(ctx, rootID, false)
 	require.NoError(t, err)
 	snapAfterDelete := mem.Inspect()
-	require.Equal(t, uuid.Nil, snapAfterDelete.Disks[childID].BaseCommitID, "|D|==1 后幸存盘 BaseCommitID 应清空为 Nil UUID")
-	require.Empty(t, snapAfterDelete.Commits)
+	require.Equal(t, uuid.Nil, snapAfterDelete.Disks[childID].BaseSnapshotID, "remaining==1 must clear survivor BaseSnapshotID")
+	require.Empty(t, snapAfterDelete.Snapshots)
 }
 
 func TestDBModule_GivenInvalidOrValidPoolConfig_WhenOpenPoolOrFxValidated_ThenMatchesContract(t *testing.T) {
 	_, err := db.OpenPool(config.DBPoolConfig{DSN: "://bad-dsn"})
-	require.Error(t, err, "非法 DSN 调用 OpenPool 必须返回错误")
+	require.Error(t, err, "invalid DSN must return error")
 
 	poolCfg := config.DBPoolConfig{
 		DSN:            resolveMetaTestDSN(),
 		TracingEnabled: true,
 		MetricsEnabled: false,
 	}
-	require.NoError(t, fx.ValidateApp(fx.Supply(poolCfg), db.Module), "db.Module 依赖图校验应通过")
+	require.NoError(t, fx.ValidateApp(fx.Supply(poolCfg), db.Module), "db.Module fx validation should succeed")
 }

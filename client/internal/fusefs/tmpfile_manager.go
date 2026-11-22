@@ -32,7 +32,7 @@ const (
 
 type TmpMaterializer interface {
 	CreateTmpInode(ctx context.Context, parentIno uint64, name string, mode, uid, gid uint32) (inode *storagev1.Inode, entryTimeout, attrTimeout float64, status fuse.Status)
-	PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent)
+	PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent) fuse.Status
 }
 
 type managedTmpFile struct {
@@ -729,9 +729,11 @@ func (m *TmpFileManager) Link(ctx context.Context, ino, newParentKernelIno uint6
 		Xattrs: stagedXattrs,
 	}
 	m.installAliasLocked(ino, tmp, serverIno)
+	if pSt := mat.PromoteTmpfile(ctx, serverIno, ino, hostFile, meta, extents); pSt != fuse.OK {
+		return TmpLinkResult{}, true, pSt
+	}
 	tmp.named = true
 	tmp.lookups++
-	mat.PromoteTmpfile(ctx, serverIno, ino, hostFile, meta, extents)
 	m.metrics.Load().incTmpPromote()
 
 	m.fillEntryOut(out, mergedInode, entryTimeout, attrTimeout)

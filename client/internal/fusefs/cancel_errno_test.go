@@ -5,6 +5,7 @@ import (
 	"errors"
 	"syscall"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -141,5 +142,86 @@ func TestRawFS_GivenPreClosedOrGraceExpiredCancel_ReturnsEINTR(t *testing.T) {
 
 		requireStatus(t, "grace-expired cancel Lookup", fuse.EINTR, st)
 		require.ErrorIs(t, sawCause, rpc.ErrKernelInterrupted)
+	})
+}
+
+func TestLinkTmp_GivenPreClosedOrMidMknodCancel_CompletesWithoutEINTRAndPromotesFullPayload(t *testing.T) {
+	t.Run("GivenStagedTmpfileWithPayload_WhenLinkHasPreClosedCancel_ThenMknodAndPromoteSucceedWithFullPayload", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpOut))
+		payload := []byte("staged-tmpfile-preclosed-cancel-payload")
+		mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, payload)
+
+		var linkOut fuse.EntryOut
+		st := fs.Link(newClosedCancelChan(), &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: tmpOut.NodeId,
+		}, "preclosed-tmp.bin", &linkOut)
+
+		requireStatus(t, "linkTmp with pre-closed cancel", fuse.OK, st)
+		requireStatus(t, "Fsync promoted tmpfile", fuse.OK, fs.Fsync(nil, &fuse.FsyncIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+		}))
+		require.Equal(t, int64(1), srv.mknodCalls.Load())
+		requireBytesMatch(t, "promoted payload after pre-closed cancel", payload, mustReadAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, len(payload)))
+		serverIno, mapSt := fs.ToServerIno(tmpOut.NodeId)
+		requireStatus(t, "ToServerIno", fuse.OK, mapSt)
+		gotBytes, ok := srv.fileBytes(serverIno)
+		require.True(t, ok)
+		requireBytesMatch(t, "server persisted payload", payload, gotBytes)
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		fs.Forget(tmpOut.NodeId, 2)
+	})
+
+	t.Run("GivenStagedTmpfileWithPayload_WhenCancelClosesMidMknodBeyondGrace_ThenMknodCompletesAndPromotesFullPayload", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		cancelCh := make(chan struct{})
+		var mknodCtxErr error
+		srv.mknodHook = func(ctx context.Context, _ *storagev1.MknodRequest) error {
+			close(cancelCh)
+			time.Sleep(30 * time.Millisecond)
+			mknodCtxErr = ctx.Err()
+			return mknodCtxErr
+		}
+		fs := newTestRawFS(t, srv, withDirectIO(false))
+
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o644,
+		}, &tmpOut))
+		payload := []byte("staged-tmpfile-mid-mknod-cancel-payload")
+		mustWriteAt(t, fs, tmpOut.NodeId, tmpOut.Fh, 0, payload)
+
+		var linkOut fuse.EntryOut
+		st := fs.Link(cancelCh, &fuse.LinkIn{
+			InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Oldnodeid: tmpOut.NodeId,
+		}, "mid-cancel-tmp.bin", &linkOut)
+
+		require.NoError(t, mknodCtxErr, "scene=linktmp_mid_mknod_cancel_detached want=nil got=%v", mknodCtxErr)
+		requireStatus(t, "linkTmp with mid-Mknod cancel >15ms", fuse.OK, st)
+		requireStatus(t, "Fsync promoted tmpfile", fuse.OK, fs.Fsync(nil, &fuse.FsyncIn{
+			InHeader: fuse.InHeader{NodeId: tmpOut.NodeId},
+			Fh:       tmpOut.Fh,
+		}))
+		serverIno, mapSt := fs.ToServerIno(tmpOut.NodeId)
+		requireStatus(t, "ToServerIno", fuse.OK, mapSt)
+		gotBytes, ok := srv.fileBytes(serverIno)
+		require.True(t, ok)
+		requireBytesMatch(t, "server persisted payload after mid-Mknod cancel", payload, gotBytes)
+
+		fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: tmpOut.NodeId}, Fh: tmpOut.Fh})
+		fs.Forget(tmpOut.NodeId, 2)
 	})
 }

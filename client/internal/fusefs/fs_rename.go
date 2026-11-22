@@ -111,23 +111,26 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 
 		unlock := fs.inodeLocks.lock(target)
 		defer unlock()
-		if target != source &&
-			input.Flags&(renameExchange|renameNoReplace) == 0 &&
-			fs.topologySeq.Load() != seq0 &&
-			(fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes()) {
-			refreshed, st := fs.getInodeWithContext(barrierCtx, nil, target)
-			switch st {
-			case fuse.OK:
-				targetAttr = refreshed.inode
-			case fuse.ENOENT:
-				targetAttr = nil
-				targetKnown = false
-			default:
-				return st
+		if target != source && input.Flags&(renameExchange|renameNoReplace) == 0 {
+			needRevalidate := fs.topologySeq.Load() != seq0 &&
+				(fs.handles.AnyOpen() || fs.stage.HasAnyPending() || fs.hasDirtyInodes())
+			needOpenTargetAttr := fs.handles.IsOpen(target) && (targetAttr == nil || targetAttr.GetAttr() == nil)
+			if needRevalidate || needOpenTargetAttr {
+				refreshed, refSt := fs.getInodeWithContext(barrierCtx, nil, target)
+				switch refSt {
+				case fuse.OK:
+					targetAttr = refreshed.inode
+				case fuse.ENOENT:
+					targetAttr = nil
+					targetKnown = false
+				default:
+					return refSt
+				}
 			}
 		}
 	}
-	targetOpen := target != 0 && fs.handles.IsOpen(target)
+	targetIsDir := targetAttr != nil && targetAttr.GetAttr() != nil && targetAttr.GetAttr().GetMode()&syscall.S_IFMT == syscall.S_IFDIR
+	targetOpen := target != 0 && !targetIsDir && fs.handles.IsOpen(target)
 
 	var protoFlags uint32
 	if (input.Flags & renameNoReplace) != 0 {
@@ -212,6 +215,9 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		fs.cache.invalidateInode(source)
 	}
 	if target != 0 && target != source {
+		if input.Flags&renameExchange == 0 && dstIsDir {
+			fs.handles.MarkRemovedDir(target, targetAttr)
+		}
 		fs.cache.invalidateInode(target)
 		if input.Flags&renameExchange == 0 && (dstIsDir || (!dstTypeKnown && (!sourceTypeKnown || sourceIsDir))) {
 			fs.cache.invalidateDir(target)

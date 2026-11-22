@@ -794,3 +794,65 @@ func TestVFS_KernelNativePosixAndFlockLocks(t *testing.T) {
 		require.NoError(t, unix.FcntlFlock(uintptr(fd2), unix.F_OFD_SETLK, &lkSet2))
 	})
 }
+
+func TestVFS_RemovedOpenDir_RmdirAndOverwriteRenameSemantics(t *testing.T) {
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+	disk := createTestDisk(t, client)
+	mountpoint, stop := mountWithCleanup(t, endpoint, disk.GetDiskId())
+	defer stop()
+
+	verifyRemovedOpenDir := func(t *testing.T, label string, dirFile *os.File) {
+		t.Helper()
+		closed := false
+		defer func() {
+			if !closed {
+				_ = dirFile.Close()
+			}
+		}()
+
+		var st unix.Stat_t
+		require.NoError(t, unix.Fstat(int(dirFile.Fd()), &st), "%s fstat", label)
+		require.Zero(t, st.Nlink, "%s removed open dir nlink must be 0", label)
+		require.NoError(t, dirFile.Sync(), "%s fsync on removed open dir", label)
+
+		entries, err := dirFile.Readdir(-1)
+		require.Empty(t, entries, "%s Readdir on removed open dir must be empty", label)
+		if err != nil {
+			require.ErrorIs(t, err, syscall.ENOENT, "%s Readdir on removed open dir may only return EOF or VFS IS_DEADDIR ENOENT", label)
+		}
+
+		tmpFD, tmpErr := unix.Openat(int(dirFile.Fd()), ".", unix.O_TMPFILE|unix.O_RDWR, 0o600)
+		if tmpFD >= 0 {
+			_ = unix.Close(tmpFD)
+		}
+		require.ErrorIs(t, tmpErr, syscall.ENOENT, "%s O_TMPFILE on removed open dir must return ENOENT", label)
+		closed = true
+		require.NoError(t, dirFile.Close(), "%s close removed open dir", label)
+	}
+
+	t.Run("RmdirOnOpenEmptyDir", func(t *testing.T) {
+		dirPath := filepath.Join(mountpoint, "open-rmdir-dir")
+		require.NoError(t, os.Mkdir(dirPath, 0o755))
+		dirFile, err := os.Open(dirPath)
+		require.NoError(t, err)
+		require.NoError(t, os.Remove(dirPath))
+		verifyRemovedOpenDir(t, "rmdir", dirFile)
+	})
+
+	t.Run("OverwriteRenameOnOpenEmptyDir", func(t *testing.T) {
+		srcPath := filepath.Join(mountpoint, "open-rename-src")
+		dstPath := filepath.Join(mountpoint, "open-rename-dst")
+		require.NoError(t, os.Mkdir(srcPath, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(srcPath, "marker.txt"), []byte("new-dir"), 0o644))
+		require.NoError(t, os.Mkdir(dstPath, 0o755))
+		dstFile, err := os.Open(dstPath)
+		require.NoError(t, err)
+		require.NoError(t, unix.Rename(srcPath, dstPath))
+		verifyRemovedOpenDir(t, "overwrite-rename", dstFile)
+
+		gotMarker, err := os.ReadFile(filepath.Join(dstPath, "marker.txt"))
+		require.NoError(t, err)
+		require.Equal(t, []byte("new-dir"), gotMarker)
+	})
+}

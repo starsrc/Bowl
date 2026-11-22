@@ -1,6 +1,7 @@
 package fusefs_test
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 const (
@@ -676,5 +678,127 @@ func TestRename_ParentNlinkAndDirCacheCoherence(t *testing.T) {
 		}, "peek-src", "peek-dst"))
 
 		require.Equal(t, attrHitsBefore, fs.Snapshot().NamespaceCache.AttrHits)
+	})
+}
+
+func TestRemovedOpenDir_OverwriteRenameAndRmdir_PreservesPOSIXSemanticsWithoutLeakingOrphan(t *testing.T) {
+	t.Run("GivenOpenEmptyDir_WhenOverwriteRenameReplacesIt_ThenTargetOpenFalseAndDirHandleServesRemovedSemantics", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
+		_ = mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "dirA", 0o755)
+		dirB := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "dirB", 0o755)
+
+		var dirHandle fuse.OpenOut
+		requireStatus(t, "OpenDir dirB", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+		}, &dirHandle))
+
+		sawTargetOpen := true
+		srv.renameHook = func(_ context.Context, req *storagev1.RenameRequest) error {
+			sawTargetOpen = req.GetTargetOpenInClient()
+			return nil
+		}
+
+		requireStatus(t, "overwrite Rename dirA->dirB", fuse.OK, fs.Rename(nil, &fuse.RenameIn{
+			InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+			Newdir:   fuse.FUSE_ROOT_ID,
+		}, "dirA", "dirB"))
+		require.False(t, sawTargetOpen, "scene=overwrite_rename_open_dir_target_open want=false got=true")
+
+		var removedAttr fuse.AttrOut
+		requireStatus(t, "GetAttr overwritten open dir", fuse.OK, fs.GetAttr(nil, &fuse.GetAttrIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+		}, &removedAttr))
+		require.Zero(t, removedAttr.Nlink, "scene=overwrite_rename_open_dir_nlink want=0 got=%d", removedAttr.Nlink)
+
+		requireStatus(t, "FsyncDir overwritten open dir", fuse.OK, fs.FsyncDir(nil, &fuse.FsyncIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+			Fh:       dirHandle.Fh,
+		}))
+
+		readDirBefore := srv.readDirPlusCalls.Load()
+		plainList := fuse.NewDirEntryList(make([]byte, 4096), 0)
+		requireStatus(t, "ReadDir overwritten open dir", fuse.OK, fs.ReadDir(nil, &fuse.ReadIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+			Fh:       dirHandle.Fh,
+			Size:     4096,
+		}, plainList))
+		require.Empty(t, plainList.Bytes())
+
+		plusList := fuse.NewDirEntryList(make([]byte, 4096), 0)
+		requireStatus(t, "ReadDirPlus overwritten open dir", fuse.OK, fs.ReadDirPlus(nil, &fuse.ReadIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+			Fh:       dirHandle.Fh,
+			Size:     4096,
+		}, plusList))
+		require.Empty(t, plusList.Bytes())
+		require.Equal(t, readDirBefore, srv.readDirPlusCalls.Load(), "scene=overwrite_rename_removed_dir_zero_readdir_rpcs want=%d got=%d", readDirBefore, srv.readDirPlusCalls.Load())
+
+		var tmpOut fuse.CreateOut
+		requireStatus(t, "Tmpfile on overwritten open dir", fuse.ENOENT, fs.Tmpfile(nil, &fuse.CreateIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+			Flags:    uint32(syscall.O_RDWR),
+			Mode:     0o600,
+		}, &tmpOut))
+
+		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirB.NodeId}, Fh: dirHandle.Fh})
+		var afterRelease fuse.AttrOut
+		requireStatus(t, "GetAttr after ReleaseDir", fuse.ENOENT, fs.GetAttr(nil, &fuse.GetAttrIn{
+			InHeader: fuse.InHeader{NodeId: dirB.NodeId},
+		}, &afterRelease))
+	})
+
+	t.Run("GivenOpenEmptyDir_WhenRmdirRemovesIt_ThenReadDirAndReadDirPlusReturnEmptyWithZeroRPCs", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		fs := newTestRawFS(t, srv)
+		dir := mustMkdir(t, fs, fuse.FUSE_ROOT_ID, "rmdir-empty-read", 0o755)
+
+		var dirHandle fuse.OpenOut
+		requireStatus(t, "OpenDir", fuse.OK, fs.OpenDir(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+		}, &dirHandle))
+		requireStatus(t, "Rmdir", fuse.OK, fs.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "rmdir-empty-read"))
+
+		readDirBefore := srv.readDirPlusCalls.Load()
+		plainList := fuse.NewDirEntryList(make([]byte, 4096), 0)
+		requireStatus(t, "ReadDir removed dir", fuse.OK, fs.ReadDir(nil, &fuse.ReadIn{
+			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			Fh:       dirHandle.Fh,
+			Size:     4096,
+		}, plainList))
+		require.Empty(t, plainList.Bytes())
+
+		plusList := fuse.NewDirEntryList(make([]byte, 4096), 0)
+		requireStatus(t, "ReadDirPlus removed dir", fuse.OK, fs.ReadDirPlus(nil, &fuse.ReadIn{
+			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			Fh:       dirHandle.Fh,
+			Size:     4096,
+		}, plusList))
+		require.Empty(t, plusList.Bytes())
+		require.Equal(t, readDirBefore, srv.readDirPlusCalls.Load(), "scene=rmdir_removed_dir_zero_readdir_rpcs want=%d got=%d", readDirBefore, srv.readDirPlusCalls.Load())
+
+		fs.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dir.NodeId}, Fh: dirHandle.Fh})
+	})
+
+	t.Run("GivenReadOnlyMount_WhenOpenOpenDirAndReleaseDirRun_ThenInodeLocksAreSkipped", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		dirIno := srv.seedDir(1, "ro-dir", 0o755)
+		fileIno := srv.seedFile(1, "ro-file.txt", 0o644, []byte("ro"))
+		roFS := newTestRawFS(t, srv, withMode(fusefs.MountModeRO))
+
+		var fileOut, dirOut fuse.OpenOut
+		requireStatus(t, "RO Open", fuse.OK, roFS.Open(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: fileIno},
+			Flags:    uint32(syscall.O_RDONLY),
+		}, &fileOut))
+		requireStatus(t, "RO OpenDir", fuse.OK, roFS.OpenDir(nil, &fuse.OpenIn{
+			InHeader: fuse.InHeader{NodeId: dirIno},
+		}, &dirOut))
+		roFS.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dirIno}, Fh: dirOut.Fh})
+
+		snap := roFS.Snapshot()
+		require.Zero(t, snap.InodeLocks.FastAcquisitions)
+		require.Zero(t, snap.InodeLocks.ContendedAcquisitions)
+		roFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: fileIno}, Fh: fileOut.Fh})
 	})
 }

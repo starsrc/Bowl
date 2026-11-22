@@ -148,6 +148,11 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 
 	child, _ := fs.cache.entry(header.NodeId, name)
 	var inode *storagev1.Inode
+	if child != 0 {
+		if cached, ok := fs.cache.peekInode(child); ok {
+			inode = cached.inode
+		}
+	}
 	if fs.handles.AnyOpen() {
 		cached, st := fs.lookupInodeWithContext(opCtx, cancel, header.NodeId, name)
 		if st != fuse.OK {
@@ -155,6 +160,26 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 		}
 		inode = cached.inode
 		child = fs.ToKernelIno(inode.GetIno())
+	}
+	if child != 0 {
+		unlock := fs.inodeLocks.lock(child)
+		defer unlock()
+		if fs.handles.IsOpen(child) && (inode == nil || inode.GetAttr() == nil) {
+			if cached, ok := fs.cache.peekInode(child); ok {
+				inode = cached.inode
+			}
+			if inode == nil || inode.GetAttr() == nil {
+				refreshed, st := fs.getInodeWithContext(opCtx, cancel, child)
+				switch st {
+				case fuse.OK:
+					inode = refreshed.inode
+				case fuse.ENOENT:
+					inode = nil
+				default:
+					return st
+				}
+			}
+		}
 	}
 	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
 	defer cancelFunc()

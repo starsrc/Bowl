@@ -751,3 +751,443 @@ func TestUnlinkAndRename_RevalidationFastPathAndEdgeStatuses(t *testing.T) {
 		require.Zero(t, srv.renameCalls.Load(), "scene=eio_aborts_rename_rpc want=0 got=%d", srv.renameCalls.Load())
 	})
 }
+
+func installFirstRenameGate(srv *fakeStorage, targetName string) (entered <-chan struct{}, release func()) {
+	enteredCh := make(chan struct{})
+	gate, unblock := newTestGate()
+	var once sync.Once
+	srv.renameHook = func(_ context.Context, req *storagev1.RenameRequest) error {
+		if string(req.GetNewName()) == targetName {
+			once.Do(func() {
+				close(enteredCh)
+				<-gate
+			})
+		}
+		return nil
+	}
+	return enteredCh, unblock
+}
+
+func installFirstGetAttrGate(srv *fakeStorage, targetIno uint64) (entered <-chan struct{}, release func()) {
+	enteredCh := make(chan struct{})
+	gate, unblock := newTestGate()
+	var once sync.Once
+	srv.getAttrHook = func(_ context.Context, req *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error) {
+		if req.GetIno() == targetIno {
+			once.Do(func() {
+				close(enteredCh)
+				<-gate
+			})
+		}
+		return nil, nil
+	}
+	return enteredCh, unblock
+}
+
+func waitForAtomicInt64AtLeast(t *testing.T, counter interface{ Load() int64 }, minVal int64, scene string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		if counter.Load() >= minVal {
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("scene=%s want>=%d got=%d", scene, minVal, counter.Load())
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestOpen_ConcurrentWithUnlinkAndOverwriteRename_PreservesOrphanOrReturnsENOENT(t *testing.T) {
+	t.Run("GivenCachedSingleLinkFile_WhenUnlinkWinsLock_ThenOpenReturnsENOENTWithZeroDanglingHandles", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		created := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "unlink-wins.bin", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, syncFS, created.NodeId, created.Fh, 0, []byte("unlink-wins-data"))
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+
+		unlinkEntered, unblockUnlink := installFirstUnlinkGate(srv, "unlink-wins.bin")
+		defer unblockUnlink()
+
+		unlinkStCh := make(chan fuse.Status, 1)
+		go func() {
+			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "unlink-wins.bin")
+		}()
+		<-unlinkEntered
+
+		var openOut fuse.OpenOut
+		openStCh := make(chan fuse.Status, 1)
+		go func() {
+			openStCh <- syncFS.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: created.NodeId},
+				Flags:    uint32(syscall.O_RDONLY),
+			}, &openOut)
+		}()
+		time.Sleep(20 * time.Millisecond)
+
+		unblockUnlink()
+		requireStatus(t, "Unlink", fuse.OK, <-unlinkStCh)
+		requireStatus(t, "racing Open after Unlink", fuse.ENOENT, <-openStCh)
+		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles, "scene=open_after_unlink_dangling_handles want=0")
+		require.False(t, srv.hasNode(created.NodeId))
+	})
+
+	t.Run("GivenCachedSingleLinkFile_WhenOpenWinsLock_ThenUnlinkMarksOrphanAndReadSucceedsUntilRelease", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		created := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "open-wins-unlink.bin", syscall.O_RDWR, 0o644)
+		payload := []byte("open-wins-payload")
+		mustWriteAt(t, syncFS, created.NodeId, created.Fh, 0, payload)
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+		requireStatus(t, "invalidate cached inode via SetXAttr", fuse.OK, syncFS.SetXAttr(
+			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: created.NodeId}}, "user.k", []byte("v"),
+		))
+
+		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, created.NodeId)
+		defer releaseGetAttr()
+
+		var sawOpenInClient bool
+		srv.unlinkHook = func(_ context.Context, req *storagev1.UnlinkRequest) error {
+			sawOpenInClient = req.GetOpenInClient()
+			return nil
+		}
+
+		var openOut fuse.OpenOut
+		openStCh := make(chan fuse.Status, 1)
+		go func() {
+			openStCh <- syncFS.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: created.NodeId},
+				Flags:    uint32(syscall.O_RDONLY),
+			}, &openOut)
+		}()
+		<-getAttrEntered
+
+		lookupsBefore := srv.lookupCalls.Load()
+		unlinkStCh := make(chan fuse.Status, 1)
+		go func() {
+			unlinkStCh <- syncFS.Unlink(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "open-wins-unlink.bin")
+		}()
+		waitForAtomicInt64AtLeast(t, &srv.lookupCalls, lookupsBefore+1, "unlink_lookup_before_lock")
+		time.Sleep(20 * time.Millisecond)
+
+		releaseGetAttr()
+		requireStatus(t, "Open wins lock", fuse.OK, <-openStCh)
+		requireStatus(t, "Unlink after Open", fuse.OK, <-unlinkStCh)
+		require.True(t, sawOpenInClient, "scene=open_wins_unlink_flag want=true got=false")
+		require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes)
+		requireBytesMatch(t, "Read orphan after Open wins Unlink", payload, mustReadAt(t, syncFS, created.NodeId, openOut.Fh, 0, len(payload)))
+
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: openOut.Fh})
+		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load())
+		require.False(t, srv.hasNode(created.NodeId))
+	})
+
+	t.Run("GivenCachedSingleLinkFile_WhenOverwriteRenameWinsLock_ThenOpenReturnsENOENTWithZeroDanglingHandles", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		src := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "ren-src.bin", syscall.O_RDWR, 0o644)
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: src.NodeId}, Fh: src.Fh})
+		target := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "ren-target.bin", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, syncFS, target.NodeId, target.Fh, 0, []byte("victim"))
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: target.Fh})
+
+		renameEntered, unblockRename := installFirstRenameGate(srv, "ren-target.bin")
+		defer unblockRename()
+
+		renameStCh := make(chan fuse.Status, 1)
+		go func() {
+			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
+				InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+				Newdir:   fuse.FUSE_ROOT_ID,
+			}, "ren-src.bin", "ren-target.bin")
+		}()
+		<-renameEntered
+
+		var openOut fuse.OpenOut
+		openStCh := make(chan fuse.Status, 1)
+		go func() {
+			openStCh <- syncFS.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: target.NodeId},
+				Flags:    uint32(syscall.O_RDONLY),
+			}, &openOut)
+		}()
+		time.Sleep(20 * time.Millisecond)
+
+		unblockRename()
+		requireStatus(t, "overwrite Rename", fuse.OK, <-renameStCh)
+		requireStatus(t, "racing Open after overwrite Rename", fuse.ENOENT, <-openStCh)
+		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles, "scene=open_after_rename_dangling_handles want=0")
+		require.False(t, srv.hasNode(target.NodeId))
+	})
+
+	t.Run("GivenCachedSingleLinkFile_WhenOpenWinsLock_ThenOverwriteRenameMarksOrphanAndReadSucceedsUntilRelease", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		src := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "ren-ow-src.bin", syscall.O_RDWR, 0o644)
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: src.NodeId}, Fh: src.Fh})
+		target := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "ren-ow-target.bin", syscall.O_RDWR, 0o644)
+		payload := []byte("rename-open-wins")
+		mustWriteAt(t, syncFS, target.NodeId, target.Fh, 0, payload)
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: target.Fh})
+		requireStatus(t, "invalidate target inode via SetXAttr", fuse.OK, syncFS.SetXAttr(
+			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: target.NodeId}}, "user.k", []byte("v"),
+		))
+
+		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, target.NodeId)
+		defer releaseGetAttr()
+
+		var sawTargetOpen bool
+		srv.renameHook = func(_ context.Context, req *storagev1.RenameRequest) error {
+			sawTargetOpen = req.GetTargetOpenInClient()
+			return nil
+		}
+
+		var openOut fuse.OpenOut
+		openStCh := make(chan fuse.Status, 1)
+		go func() {
+			openStCh <- syncFS.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: target.NodeId},
+				Flags:    uint32(syscall.O_RDONLY),
+			}, &openOut)
+		}()
+		<-getAttrEntered
+
+		lookupsBefore := srv.lookupCalls.Load()
+		renameStCh := make(chan fuse.Status, 1)
+		go func() {
+			renameStCh <- syncFS.Rename(nil, &fuse.RenameIn{
+				InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+				Newdir:   fuse.FUSE_ROOT_ID,
+			}, "ren-ow-src.bin", "ren-ow-target.bin")
+		}()
+		waitForAtomicInt64AtLeast(t, &srv.lookupCalls, lookupsBefore+1, "rename_lookup_before_lock")
+		time.Sleep(20 * time.Millisecond)
+
+		releaseGetAttr()
+		requireStatus(t, "Open wins lock", fuse.OK, <-openStCh)
+		requireStatus(t, "overwrite Rename after Open", fuse.OK, <-renameStCh)
+		require.True(t, sawTargetOpen, "scene=open_wins_rename_flag want=true got=false")
+		require.Equal(t, 1, syncFS.Snapshot().Queues.OrphanInodes)
+		requireBytesMatch(t, "Read orphan after Open wins Rename", payload, mustReadAt(t, syncFS, target.NodeId, openOut.Fh, 0, len(payload)))
+
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: target.NodeId}, Fh: openOut.Fh})
+		require.Equal(t, int64(1), srv.reclaimOrphanCalls.Load())
+		require.False(t, srv.hasNode(target.NodeId))
+	})
+}
+
+func TestOpen_ParallelNonTruncSharesRLockAndOTruncTakesExclusiveLock(t *testing.T) {
+	t.Run("GivenCacheMissFile_WhenTwoNonTruncOpensRunInParallel_ThenBothEnterGetAttrConcurrently", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(0, 0))
+		ino := srv.seedFile(1, "parallel-open.bin", 0o644, []byte("abc"))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		bothEntered := make(chan struct{})
+		var active sync.Mutex
+		inFlight := 0
+		maxInFlight := 0
+		srv.getAttrHook = func(ctx context.Context, req *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error) {
+			if req.GetIno() != ino {
+				return nil, nil
+			}
+			active.Lock()
+			inFlight++
+			if inFlight > maxInFlight {
+				maxInFlight = inFlight
+			}
+			if inFlight == 2 {
+				close(bothEntered)
+			}
+			active.Unlock()
+
+			select {
+			case <-bothEntered:
+			case <-time.After(2 * time.Second):
+			case <-ctx.Done():
+			}
+
+			active.Lock()
+			inFlight--
+			active.Unlock()
+			return nil, nil
+		}
+
+		var out1, out2 fuse.OpenOut
+		st1Ch := make(chan fuse.Status, 1)
+		st2Ch := make(chan fuse.Status, 1)
+		go func() {
+			st1Ch <- syncFS.Open(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: ino}, Flags: uint32(syscall.O_RDONLY)}, &out1)
+		}()
+		go func() {
+			st2Ch <- syncFS.Open(nil, &fuse.OpenIn{InHeader: fuse.InHeader{NodeId: ino}, Flags: uint32(syscall.O_RDONLY)}, &out2)
+		}()
+
+		requireStatus(t, "first parallel Open", fuse.OK, <-st1Ch)
+		requireStatus(t, "second parallel Open", fuse.OK, <-st2Ch)
+		require.Equal(t, 2, maxInFlight, "scene=parallel_non_trunc_open_rlock want=2 got=%d", maxInFlight)
+
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: out1.Fh})
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: ino}, Fh: out2.Fh})
+	})
+
+	t.Run("GivenFile_WhenOpenWithOTruncHoldsSetAttr_ThenConcurrentOpenBlocksUntilTruncFinishes", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		created := mustCreateFile(t, syncFS, fuse.FUSE_ROOT_ID, "trunc-excl.bin", syscall.O_RDWR, 0o644)
+		mustWriteAt(t, syncFS, created.NodeId, created.Fh, 0, []byte("before-trunc"))
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: created.Fh})
+
+		setAttrEntered := make(chan struct{})
+		setAttrGate, releaseSetAttr := newTestGate()
+		defer releaseSetAttr()
+		var once sync.Once
+		srv.setAttrHook = func(_ context.Context, _ *storagev1.SetAttrRequest) error {
+			once.Do(func() {
+				close(setAttrEntered)
+				<-setAttrGate
+			})
+			return nil
+		}
+
+		var truncOut, rdOut fuse.OpenOut
+		truncStCh := make(chan fuse.Status, 1)
+		go func() {
+			truncStCh <- syncFS.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: created.NodeId},
+				Flags:    uint32(syscall.O_WRONLY | syscall.O_TRUNC),
+			}, &truncOut)
+		}()
+		<-setAttrEntered
+
+		rdStCh := make(chan fuse.Status, 1)
+		go func() {
+			rdStCh <- syncFS.Open(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: created.NodeId},
+				Flags:    uint32(syscall.O_RDONLY),
+			}, &rdOut)
+		}()
+
+		select {
+		case st := <-rdStCh:
+			t.Fatalf("scene=open_otrunc_exclusive_lock want=blocked got=early_return(%v)", st)
+		case <-time.After(25 * time.Millisecond):
+		}
+
+		releaseSetAttr()
+		requireStatus(t, "Open O_TRUNC", fuse.OK, <-truncStCh)
+		requireStatus(t, "blocked Open O_RDONLY", fuse.OK, <-rdStCh)
+		require.GreaterOrEqual(t, syncFS.Snapshot().InodeLocks.ContendedAcquisitions, uint64(1))
+
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: truncOut.Fh})
+		syncFS.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: created.NodeId}, Fh: rdOut.Fh})
+	})
+}
+
+func installFirstRmdirGate(srv *fakeStorage, targetName string) (entered <-chan struct{}, release func()) {
+	enteredCh := make(chan struct{})
+	gate, unblock := newTestGate()
+	var once sync.Once
+	srv.rmdirHook = func(_ context.Context, req *storagev1.RmdirRequest) error {
+		if string(req.GetName()) == targetName {
+			once.Do(func() {
+				close(enteredCh)
+				<-gate
+			})
+		}
+		return nil
+	}
+	return enteredCh, unblock
+}
+
+func TestOpenDir_ConcurrentWithRmdir_PopulatesRemovedDirOrReturnsENOENT(t *testing.T) {
+	t.Run("GivenCachedDir_WhenRmdirWinsLock_ThenOpenDirWaitsAndReturnsENOENTWithZeroDanglingHandles", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		dir := mustMkdir(t, syncFS, fuse.FUSE_ROOT_ID, "rmdir-wins-dir", 0o755)
+		rmdirEntered, unblockRmdir := installFirstRmdirGate(srv, "rmdir-wins-dir")
+		defer unblockRmdir()
+
+		rmdirStCh := make(chan fuse.Status, 1)
+		go func() {
+			rmdirStCh <- syncFS.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "rmdir-wins-dir")
+		}()
+		<-rmdirEntered
+
+		var dirOut fuse.OpenOut
+		openDirStCh := make(chan fuse.Status, 1)
+		go func() {
+			openDirStCh <- syncFS.OpenDir(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			}, &dirOut)
+		}()
+		time.Sleep(20 * time.Millisecond)
+
+		unblockRmdir()
+		requireStatus(t, "Rmdir", fuse.OK, <-rmdirStCh)
+		requireStatus(t, "racing OpenDir after Rmdir", fuse.ENOENT, <-openDirStCh)
+		require.Zero(t, syncFS.Snapshot().Handles.OpenDirs, "scene=opendir_after_rmdir_dangling_handles want=0")
+	})
+
+	t.Run("GivenDirWithCachedEntryAndNilInode_WhenOpenDirWinsLock_ThenRmdirPopulatesInodeAndMarksRemovedDir", func(t *testing.T) {
+		srv := newFakeStorage(t, withTTL(1.0, 1.0))
+		syncFS := newTestRawFS(t, srv, withMode(fusefs.MountModeSync))
+
+		dir := mustMkdir(t, syncFS, fuse.FUSE_ROOT_ID, "opendir-wins-dir", 0o755)
+		requireStatus(t, "invalidate dir inode cache via SetXAttr", fuse.OK, syncFS.SetXAttr(
+			nil, &fuse.SetXAttrIn{InHeader: fuse.InHeader{NodeId: dir.NodeId}}, "user.k", []byte("v"),
+		))
+		require.Zero(t, syncFS.Snapshot().Handles.OpenDirs)
+		require.Zero(t, syncFS.Snapshot().Handles.OpenFiles)
+
+		getAttrEntered, releaseGetAttr := installFirstGetAttrGate(srv, dir.NodeId)
+		defer releaseGetAttr()
+
+		var dirOut fuse.OpenOut
+		openDirStCh := make(chan fuse.Status, 1)
+		go func() {
+			openDirStCh <- syncFS.OpenDir(nil, &fuse.OpenIn{
+				InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			}, &dirOut)
+		}()
+		<-getAttrEntered
+
+		rmdirStCh := make(chan fuse.Status, 1)
+		go func() {
+			rmdirStCh <- syncFS.Rmdir(nil, &fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID}, "opendir-wins-dir")
+		}()
+		time.Sleep(20 * time.Millisecond)
+
+		releaseGetAttr()
+		requireStatus(t, "OpenDir wins lock", fuse.OK, <-openDirStCh)
+		requireStatus(t, "Rmdir after OpenDir", fuse.OK, <-rmdirStCh)
+
+		var removedAttr fuse.AttrOut
+		requireStatus(t, "GetAttr removed open dir", fuse.OK, syncFS.GetAttr(nil, &fuse.GetAttrIn{
+			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+		}, &removedAttr))
+		require.Zero(t, removedAttr.Nlink, "scene=opendir_wins_rmdir_nlink want=0 got=%d", removedAttr.Nlink)
+
+		readDirBefore := srv.readDirPlusCalls.Load()
+		list := fuse.NewDirEntryList(make([]byte, 4096), 0)
+		requireStatus(t, "ReadDir removed open dir", fuse.OK, syncFS.ReadDir(nil, &fuse.ReadIn{
+			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+			Fh:       dirOut.Fh,
+			Size:     4096,
+		}, list))
+		require.Empty(t, list.Bytes())
+		require.Equal(t, readDirBefore, srv.readDirPlusCalls.Load())
+
+		syncFS.ReleaseDir(&fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: dir.NodeId}, Fh: dirOut.Fh})
+		var afterRelease fuse.AttrOut
+		requireStatus(t, "GetAttr after ReleaseDir", fuse.ENOENT, syncFS.GetAttr(nil, &fuse.GetAttrIn{
+			InHeader: fuse.InHeader{NodeId: dir.NodeId},
+		}, &afterRelease))
+	})
+}

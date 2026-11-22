@@ -1456,12 +1456,12 @@ func (c *StageCoordinator) PromoteTmpfile(
 	file *os.File,
 	meta StagePromotedMeta,
 	extents []stageExtent,
-) {
+) error {
 	if c == nil {
 		if file != nil {
 			_ = file.Close()
 		}
-		return
+		return nil
 	}
 
 	var xattrsCopy []StagedXattr
@@ -1499,11 +1499,15 @@ func (c *StageCoordinator) PromoteTmpfile(
 	c.mu.Lock()
 	for {
 		if c.aborted.Load() {
+			abortErr := c.abortErr
 			c.mu.Unlock()
 			if file != nil {
 				_ = file.Close()
 			}
-			return
+			if abortErr == nil {
+				return syscall.EBUSY
+			}
+			return abortErr
 		}
 		if existing := c.inodes[serverIno]; existing != nil && existing.discarding {
 			c.stateCond.Wait()
@@ -1564,6 +1568,7 @@ func (c *StageCoordinator) PromoteTmpfile(
 	c.usedBytes += totalExtentBytes
 	c.workerCond.Broadcast()
 	c.mu.Unlock()
+	return nil
 }
 
 type readChunkSnapshot struct {

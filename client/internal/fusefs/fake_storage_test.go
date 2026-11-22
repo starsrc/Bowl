@@ -112,6 +112,7 @@ type fakeStorage struct {
 	fsyncHook         func(context.Context, *storagev1.FsyncRequest) error
 	fsyncDirHook      func(context.Context, *storagev1.FsyncDirRequest) error
 	unlinkHook        func(context.Context, *storagev1.UnlinkRequest) error
+	rmdirHook         func(context.Context, *storagev1.RmdirRequest) error
 	linkHook          func(context.Context, *storagev1.LinkRequest) error
 	readDirPlusHook   func(context.Context, *storagev1.ReadDirPlusRequest) ([]*storagev1.DirEntryPlus, error)
 	reclaimOrphanHook func(context.Context, *storagev1.ReclaimOrphanRequest) error
@@ -921,6 +922,11 @@ func (s *fakeStorage) Rmdir(ctx context.Context, req *connect.Request[storagev1.
 	}
 	if err := s.checkEpoch("Rmdir", req.Msg.GetEpoch()); err != nil {
 		return nil, err
+	}
+	if s.rmdirHook != nil {
+		if err := s.rmdirHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
 	}
 	name := string(req.Msg.GetName())
 	if name == "." {

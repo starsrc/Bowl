@@ -27,6 +27,10 @@ func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	if !fs.cfg.IsReadOnly() {
+		unlock := fs.inodeLocks.rlock(input.NodeId)
+		defer unlock()
+	}
 	cached, status := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
 	if status != fuse.OK {
 		return status
@@ -44,6 +48,9 @@ func (fs *RawFS) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{}, input *fuse.ReadIn) (cachedDir, fuse.Status) {
 	if _, status := fs.checkedHandle(input.NodeId, input.Fh, true); status != fuse.OK {
 		return cachedDir{}, status
+	}
+	if _, removed := fs.handles.RemovedDir(input.NodeId); removed {
+		return cachedDir{}, fuse.OK
 	}
 	if !fs.IsFenced() {
 		if cached, ok := fs.cache.dir(input.NodeId); ok {
@@ -242,6 +249,14 @@ func (fs *RawFS) ReleaseDir(input *fuse.ReleaseIn) {
 	h, ok := fs.handles.Get(input.Fh)
 	if !ok || !h.IsDir || h.Ino != input.NodeId {
 		return
+	}
+	if !fs.cfg.IsReadOnly() {
+		unlock := fs.inodeLocks.lock(input.NodeId)
+		defer unlock()
+		h, ok = fs.handles.Get(input.Fh)
+		if !ok || !h.IsDir || h.Ino != input.NodeId {
+			return
+		}
 	}
 	fs.handles.Release(input.Fh)
 }

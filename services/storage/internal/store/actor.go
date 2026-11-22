@@ -9,7 +9,6 @@ import (
 	"math"
 	"os"
 	"runtime/pprof"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,7 +138,6 @@ type writeCmd struct {
 	spanCtx     trace.SpanContext
 	epoch       uint64
 	syncBarrier bool
-	syncIno     uint64
 	stagedBlobs []BlobRef
 }
 
@@ -164,7 +162,10 @@ type Options struct {
 	diskSlowThreshold         time.Duration
 	beforeTickHook            func()
 	beforeCompactRelocateHook func()
+	beforeWALSyncHook         func()
+	walApplyErrHook           func() error
 	syncFileHook              func(packID uint64)
+	syncFileErrHook           func(packID uint64) error
 	removePackHook            func(packID uint64)
 }
 
@@ -193,6 +194,11 @@ func NewPebbleOptions(cache *pebble.Cache, readOnly bool) *pebble.Options {
 		ReadOnly:           readOnly,
 		ErrorIfNotExists:   readOnly,
 	}
+}
+
+type packMetaUndo struct {
+	existed bool
+	meta    PackMeta
 }
 
 type StoreActor struct {
@@ -224,6 +230,8 @@ type StoreActor struct {
 	stat                   BranchStat
 	packStats              map[uint64]PackMeta
 	dirtyPackStats         map[uint64]struct{}
+	tickPackUndo           map[uint64]packMetaUndo
+	recordingPackUndo      bool
 	totalPackPhysicalBytes uint64
 	totalPackLiveBytes     uint64
 	lowWatermarkCount      int
@@ -264,6 +272,8 @@ type StoreActor struct {
 	blobs                     *blobStore
 	beforeTickHook            func()
 	beforeCompactRelocateHook func()
+	beforeWALSyncHook         func()
+	walApplyErrHook           func() error
 	inFlightMu                sync.Mutex
 	inFlightPacks             map[uint64]int
 	deadPacksMu               sync.Mutex
@@ -327,6 +337,8 @@ func Open(opts Options) (*StoreActor, error) {
 		slowTickThreshold:         slowTickThresh,
 		beforeTickHook:            opts.beforeTickHook,
 		beforeCompactRelocateHook: opts.beforeCompactRelocateHook,
+		beforeWALSyncHook:         opts.beforeWALSyncHook,
+		walApplyErrHook:           opts.walApplyErrHook,
 	}
 	s.maxBytes.Store(opts.MaxBytes)
 	s.maxInodes.Store(opts.MaxInodes)
@@ -374,6 +386,7 @@ func Open(opts Options) (*StoreActor, error) {
 		opts.Metrics,
 		opts.PackAllocator,
 		opts.syncFileHook,
+		opts.syncFileErrHook,
 		opts.removePackHook,
 	)
 
@@ -896,7 +909,6 @@ func (s *StoreActor) releaseCmd(cmd *writeCmd) {
 	cmd.spanCtx = trace.SpanContext{}
 	cmd.epoch = 0
 	cmd.syncBarrier = false
-	cmd.syncIno = 0
 	cmd.stagedBlobs = cmd.stagedBlobs[:0]
 	s.cmdPool.Put(cmd)
 }
@@ -1141,13 +1153,27 @@ func (s *StoreActor) processTick() {
 		)
 	}
 
+	prevStat := s.stat
+	prevMaxBytes := s.maxBytes.Load()
+	prevLastActivePackID := s.lastActivePackID
+	prevPackPhys := s.totalPackPhysicalBytes
+	prevPackLive := s.totalPackLiveBytes
+	prevLowWatermark := s.lowWatermarkCount
+	var prevDirtyPacks []uint64
+	if len(s.dirtyPackStats) > 0 {
+		prevDirtyPacks = make([]uint64, 0, len(s.dirtyPackStats))
+		for packID := range s.dirtyPackStats {
+			prevDirtyPacks = append(prevDirtyPacks, packID)
+		}
+	}
+	s.recordingPackUndo = true
+
 	var (
-		hasSyncBarrier  bool
-		hasCheckpoint   bool
-		fsyncFileInodes []uint64
-		mutated         bool
-		phaseADur       time.Duration
-		phaseBDur       time.Duration
+		hasSyncBarrier bool
+		hasCheckpoint  bool
+		mutated        bool
+		phaseADur      time.Duration
+		phaseBDur      time.Duration
 	)
 
 	for _, cmd := range cmds {
@@ -1169,7 +1195,7 @@ func (s *StoreActor) processTick() {
 
 		bStart := time.Now()
 		prevCount := s.batch.Count()
-		prevStat := s.stat
+		cmdPrevStat := s.stat
 		s.mutateCmd(cmd)
 		for _, ref := range cmd.stagedBlobs {
 			if meta, ok := s.packStats[ref.PackID]; ok && meta.LiveBytes == 0 {
@@ -1178,7 +1204,7 @@ func (s *StoreActor) processTick() {
 		}
 		s.unpinStagedBlobs(cmd.stagedBlobs)
 		cmd.stagedBlobs = cmd.stagedBlobs[:0]
-		if s.batch.Count() > prevCount || s.stat != prevStat || len(s.dirtyPackStats) > 0 || cmd.op == opUpdateMaxBytes {
+		if s.batch.Count() > prevCount || s.stat != cmdPrevStat || len(s.dirtyPackStats) > 0 || cmd.op == opUpdateMaxBytes {
 			mutated = true
 		}
 		if cmd.op == opCheckpoint {
@@ -1186,9 +1212,6 @@ func (s *StoreActor) processTick() {
 		}
 		if cmd.syncBarrier || cmd.op == opFsync || cmd.op == opFsyncDir {
 			hasSyncBarrier = true
-			if cmd.syncIno != 0 && !slices.Contains(fsyncFileInodes, cmd.syncIno) {
-				fsyncFileInodes = append(fsyncFileInodes, cmd.syncIno)
-			}
 		}
 		phaseBDur += time.Since(bStart)
 	}
@@ -1196,6 +1219,7 @@ func (s *StoreActor) processTick() {
 	var (
 		commitErr      error
 		deadPacks      []uint64
+		pendingAtime   map[uint64]int64
 		packSyncDur    time.Duration
 		walApplyDur    time.Duration
 		deadRemoveDur  time.Duration
@@ -1204,7 +1228,7 @@ func (s *StoreActor) processTick() {
 	sealStart := time.Now()
 	if mutated || s.batch.Count() > 0 || hasSyncBarrier || len(s.dirtyPackStats) > 0 {
 
-		s.flushDirtyAtimeToBatch(s.batch)
+		pendingAtime, _ = s.flushDirtyAtimeToBatch(s.batch)
 		var wrotePacks bool
 		deadPacks, wrotePacks = s.flushDirtyPackStatsToBatch(s.batch)
 		if wrotePacks {
@@ -1232,14 +1256,18 @@ func (s *StoreActor) processTick() {
 			if tickSpan != nil {
 				_, syncSpan = startChildSpan(tickCtx, "store.SyncBarrier",
 					attribute.Bool("has_batch", true),
-					attribute.Int("fsync_inodes", len(fsyncFileInodes)),
 				)
 			}
-			packSyncDur, walApplyDur, deadRemoveDur, reclaimedPacks, commitErr = s.commitWithSyncBarrier(fsyncFileInodes, deadPacks)
+			packSyncDur, walApplyDur, deadRemoveDur, reclaimedPacks, commitErr = s.commitWithSyncBarrier(deadPacks)
 			finishSpan(syncSpan, commitErr)
 		} else {
 			applyStart := time.Now()
-			commitErr = s.db.Apply(s.batch, pebble.NoSync)
+			if s.walApplyErrHook != nil {
+				commitErr = s.walApplyErrHook()
+			}
+			if commitErr == nil {
+				commitErr = s.db.Apply(s.batch, pebble.NoSync)
+			}
 			walApplyDur = time.Since(applyStart)
 			s.metrics.observePhaseWALApplyNoSync(walApplyDur)
 			if commitErr == nil {
@@ -1255,12 +1283,34 @@ func (s *StoreActor) processTick() {
 		if tickSpan != nil {
 			_, syncSpan = startChildSpan(tickCtx, "store.SyncBarrier",
 				attribute.Bool("has_batch", false),
-				attribute.Int("fsync_inodes", len(fsyncFileInodes)),
 			)
 		}
-		packSyncDur, walApplyDur, deadRemoveDur, reclaimedPacks, commitErr = s.syncBarrierWithoutBatch(fsyncFileInodes)
+		packSyncDur, walApplyDur, deadRemoveDur, reclaimedPacks, commitErr = s.syncBarrierWithoutBatch()
 		finishSpan(syncSpan, commitErr)
 	}
+
+	if commitErr != nil {
+		s.stat = prevStat
+		s.maxBytes.Store(prevMaxBytes)
+		s.lastActivePackID = prevLastActivePackID
+		for packID, undo := range s.tickPackUndo {
+			if undo.existed {
+				s.packStats[packID] = undo.meta
+			} else {
+				delete(s.packStats, packID)
+			}
+		}
+		s.totalPackPhysicalBytes = prevPackPhys
+		s.totalPackLiveBytes = prevPackLive
+		s.lowWatermarkCount = prevLowWatermark
+		clear(s.dirtyPackStats)
+		for _, packID := range prevDirtyPacks {
+			s.dirtyPackStats[packID] = struct{}{}
+		}
+		s.restoreDirtyAtime(pendingAtime)
+	}
+	s.recordingPackUndo = false
+	clear(s.tickPackUndo)
 
 	if len(s.batch.Repr()) > BatchResetMaxReprBytes || s.batch.Count() > BatchResetMaxCount {
 		s.batch = s.db.NewIndexedBatch()
@@ -1336,7 +1386,6 @@ func (s *StoreActor) processTick() {
 			"batch_size", batchSize,
 			"has_sync_barrier", hasSyncBarrier,
 			"has_checkpoint", hasCheckpoint,
-			"fsync_inodes", len(fsyncFileInodes),
 			"reclaimed_packs", reclaimedPacks,
 			"total_ms", totalDur.Milliseconds(),
 			"phase_a_ms", phaseADur.Milliseconds(),
@@ -1481,95 +1530,93 @@ func (s *StoreActor) mutateCmd(cmd *writeCmd) {
 	}
 }
 
-func (s *StoreActor) commitWithSyncBarrier(fsyncFileInodes, deadPacks []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
-	toReclaim := s.takePendingDeadPacks()
-	applyStart := time.Now()
-	if applyErr := s.db.ApplyNoSyncWait(s.batch, pebble.Sync); applyErr != nil {
-		walSyncDur = time.Since(applyStart)
-		s.metrics.observePhaseWALApplySync(walSyncDur)
-		s.restorePendingDeadPacks(toReclaim)
-		return 0, walSyncDur, 0, 0, applyErr
-	}
-
-	toReclaim = append(toReclaim, deadPacks...)
-	var dataErr error
-	if len(fsyncFileInodes) > 0 {
+func (s *StoreActor) commitWithSyncBarrier(deadPacks []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
+	if s.blobs != nil {
 		packStart := time.Now()
-		dataErr = s.syncFileInodes(fsyncFileInodes)
+		dataErr := s.blobs.syncWithTrigger(syncTriggerFsyncBarrier)
 		packSyncDur = time.Since(packStart)
 		s.metrics.observePhasePackSyncBarrier(packSyncDur)
+		if dataErr != nil {
+			return packSyncDur, 0, 0, 0, dataErr
+		}
 	}
 
-	walErr := s.batch.SyncWait()
-
+	toReclaim := s.takePendingDeadPacks()
+	if s.beforeWALSyncHook != nil {
+		s.beforeWALSyncHook()
+	}
+	applyStart := time.Now()
+	var walErr error
+	if s.walApplyErrHook != nil {
+		walErr = s.walApplyErrHook()
+	}
+	if walErr == nil {
+		walErr = s.db.Apply(s.batch, pebble.Sync)
+	}
 	walSyncDur = time.Since(applyStart)
 	s.metrics.observePhaseWALApplySync(walSyncDur)
 
 	if walErr != nil {
 		s.restorePendingDeadPacks(toReclaim)
-		s.walDirty.Store(true)
-	} else {
-		if dataErr == nil {
-			s.walDirty.Store(false)
-		}
-		if len(toReclaim) > 0 {
-			remStart := time.Now()
-			s.enqueueRemovePacks(toReclaim)
-			deadRemoveDur = time.Since(remStart)
-			reclaimed = len(toReclaim)
-		}
+		return packSyncDur, walSyncDur, 0, 0, walErr
 	}
-	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, errors.Join(dataErr, walErr)
+
+	s.walDirty.Store(false)
+	toReclaim = append(toReclaim, deadPacks...)
+	if len(toReclaim) > 0 {
+		remStart := time.Now()
+		s.enqueueRemovePacks(toReclaim)
+		deadRemoveDur = time.Since(remStart)
+		reclaimed = len(toReclaim)
+	}
+	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, nil
 }
 
-func (s *StoreActor) syncBarrierWithoutBatch(fsyncFileInodes []uint64) (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
-	toReclaim := s.takePendingDeadPacks()
-	wasDirty := s.walDirty.Swap(false)
-	needPackSync := len(fsyncFileInodes) > 0
-	needWALSync := wasDirty || len(toReclaim) > 0
-
-	var (
-		dataErr error
-		walErr  error
-	)
-	switch {
-	case needPackSync && needWALSync:
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			packStart := time.Now()
-			dataErr = s.syncFileInodes(fsyncFileInodes)
-			packSyncDur = time.Since(packStart)
-		})
-		walStart := time.Now()
-		walErr = s.db.LogData(nil, pebble.Sync)
-		walSyncDur = time.Since(walStart)
-		wg.Wait()
-	case needPackSync:
+func (s *StoreActor) syncBarrierWithoutBatch() (packSyncDur, walSyncDur, deadRemoveDur time.Duration, reclaimed int, err error) {
+	if s.blobs != nil {
 		packStart := time.Now()
-		dataErr = s.syncFileInodes(fsyncFileInodes)
+		dataErr := s.blobs.syncWithTrigger(syncTriggerFsyncBarrier)
 		packSyncDur = time.Since(packStart)
-	case needWALSync:
-		walStart := time.Now()
-		walErr = s.db.LogData(nil, pebble.Sync)
-		walSyncDur = time.Since(walStart)
-	}
-
-	if needPackSync {
 		s.metrics.observePhasePackSyncBarrier(packSyncDur)
-	}
-	if needWALSync {
-		s.metrics.observePhaseWALApplySync(walSyncDur)
-		if walErr != nil {
-			s.restorePendingDeadPacks(toReclaim)
-			s.walDirty.Store(true)
-		} else if len(toReclaim) > 0 {
-			remStart := time.Now()
-			s.enqueueRemovePacks(toReclaim)
-			deadRemoveDur = time.Since(remStart)
-			reclaimed = len(toReclaim)
+		if dataErr != nil {
+			return packSyncDur, 0, 0, 0, dataErr
 		}
 	}
-	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, errors.Join(dataErr, walErr)
+
+	toReclaim := s.takePendingDeadPacks()
+	wasDirty := s.walDirty.Swap(false)
+	if !wasDirty && len(toReclaim) == 0 {
+		return packSyncDur, 0, 0, 0, nil
+	}
+
+	if s.beforeWALSyncHook != nil {
+		s.beforeWALSyncHook()
+	}
+	walStart := time.Now()
+	var walErr error
+	if s.walApplyErrHook != nil {
+		walErr = s.walApplyErrHook()
+	}
+	if walErr == nil {
+		walErr = s.db.LogData(nil, pebble.Sync)
+	}
+	walSyncDur = time.Since(walStart)
+	s.metrics.observePhaseWALApplySync(walSyncDur)
+
+	if walErr != nil {
+		s.restorePendingDeadPacks(toReclaim)
+		if wasDirty {
+			s.walDirty.Store(true)
+		}
+		return packSyncDur, walSyncDur, 0, 0, walErr
+	}
+	if len(toReclaim) > 0 {
+		remStart := time.Now()
+		s.enqueueRemovePacks(toReclaim)
+		deadRemoveDur = time.Since(remStart)
+		reclaimed = len(toReclaim)
+	}
+	return packSyncDur, walSyncDur, deadRemoveDur, reclaimed, nil
 }
 
 func (s *StoreActor) takeDirtyAtime() map[uint64]int64 {
@@ -1583,10 +1630,23 @@ func (s *StoreActor) takeDirtyAtime() map[uint64]int64 {
 	return pending
 }
 
-func (s *StoreActor) flushDirtyAtimeToBatch(batch *pebble.Batch) bool {
+func (s *StoreActor) restoreDirtyAtime(pending map[uint64]int64) {
+	if len(pending) == 0 {
+		return
+	}
+	s.atimeMu.Lock()
+	for ino, ns := range pending {
+		if cur, ok := s.dirtyAtime[ino]; !ok || ns > cur {
+			s.dirtyAtime[ino] = ns
+		}
+	}
+	s.atimeMu.Unlock()
+}
+
+func (s *StoreActor) flushDirtyAtimeToBatch(batch *pebble.Batch) (map[uint64]int64, bool) {
 	pending := s.takeDirtyAtime()
 	if len(pending) == 0 {
-		return false
+		return nil, false
 	}
 	wrote := false
 	for ino, ns := range pending {
@@ -1603,12 +1663,12 @@ func (s *StoreActor) flushDirtyAtimeToBatch(batch *pebble.Batch) bool {
 		}
 		wrote = true
 	}
-	return wrote
+	return pending, wrote
 }
 
 func (s *StoreActor) flushOnClose() error {
 	var applyErr error
-	wroteAtime := s.flushDirtyAtimeToBatch(s.batch)
+	pendingAtime, wroteAtime := s.flushDirtyAtimeToBatch(s.batch)
 	deadPacks, wrotePacks := s.flushDirtyPackStatsToBatch(s.batch)
 	if wroteAtime || wrotePacks {
 		applyErr = s.db.Apply(s.batch, pebble.NoSync)
@@ -1617,6 +1677,8 @@ func (s *StoreActor) flushOnClose() error {
 			s.addPendingDeadPacks(deadPacks)
 			s.walDirty.Store(true)
 			s.publishAtomicStats()
+		} else {
+			s.restoreDirtyAtime(pendingAtime)
 		}
 	}
 	if applyErr != nil {

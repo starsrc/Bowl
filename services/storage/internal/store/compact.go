@@ -72,7 +72,7 @@ func (s *StoreActor) CompactPacks(ctx context.Context) error {
 				s.unpinPackIDs(candidates)
 				return readErr
 			}
-			newRef, writeErr := s.stageAppend(ctx, blobs, blk.ino, data, &staged)
+			newRef, writeErr := s.stageAppend(ctx, blobs, data, &staged)
 			if writeErr != nil {
 				s.unpinStagedBlobs(staged)
 				s.unpinPackIDs(candidates)
@@ -86,6 +86,12 @@ func (s *StoreActor) CompactPacks(ctx context.Context) error {
 			})
 		}
 
+		if syncErr := blobs.sync(); syncErr != nil {
+			s.unpinStagedBlobs(staged)
+			s.unpinPackIDs(candidates)
+			return syncErr
+		}
+
 		if s.beforeCompactRelocateHook != nil {
 			s.beforeCompactRelocateHook()
 		}
@@ -97,15 +103,9 @@ func (s *StoreActor) CompactPacks(ctx context.Context) error {
 		cmd.stagedBlobs = staged
 
 		relocErr := s.enqueueAndWait(ctx, cmd)
-		if relocErr != nil {
-			s.unpinPackIDs(candidates)
-			return relocErr
-		}
-
-		syncErr := blobs.sync()
 		s.unpinPackIDs(candidates)
-		if syncErr != nil {
-			return syncErr
+		if relocErr != nil {
+			return relocErr
 		}
 	}
 

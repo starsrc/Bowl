@@ -36,7 +36,7 @@ func (s *StoreActor) setAttrWithSize(ctx context.Context, ino uint64, req SetAtt
 				return Attribute{}, err
 			}
 			if oldOK && oldRef.Length > tailLen {
-				spec, err := s.prepareTruncateTailBlock(ctx, blobs, ino, tailBlock, oldRef, tailLen, &staged)
+				spec, err := s.prepareTruncateTailBlock(ctx, blobs, tailBlock, oldRef, tailLen, &staged)
 				if err != nil {
 					s.unpinStagedBlobs(staged)
 					return Attribute{}, err
@@ -62,7 +62,7 @@ func (s *StoreActor) setAttrWithSize(ctx context.Context, ino uint64, req SetAtt
 	return op.attr, nil
 }
 
-func (s *StoreActor) prepareTruncateTailBlock(ctx context.Context, blobs *blobStore, ino, blockIdx uint64, oldRef BlobRef, tailLen uint32, staged *[]BlobRef) (writeBlockSpec, error) {
+func (s *StoreActor) prepareTruncateTailBlock(ctx context.Context, blobs *blobStore, blockIdx uint64, oldRef BlobRef, tailLen uint32, staged *[]BlobRef) (writeBlockSpec, error) {
 	data := make([]byte, tailLen)
 	var readStart time.Time
 	if s.metrics != nil {
@@ -82,7 +82,7 @@ func (s *StoreActor) prepareTruncateTailBlock(ctx context.Context, blobs *blobSt
 			keep:     false,
 		}, nil
 	}
-	ref, err := s.stageAppend(ctx, blobs, ino, data, staged)
+	ref, err := s.stageAppend(ctx, blobs, data, staged)
 	if err != nil {
 		return writeBlockSpec{}, err
 	}
@@ -234,7 +234,7 @@ func (s *StoreActor) preparePunchPartialBlock(ctx context.Context, blobs *blobSt
 		}, true, nil
 	}
 
-	ref, err := s.stageAppend(ctx, blobs, ino, data, staged)
+	ref, err := s.stageAppend(ctx, blobs, data, staged)
 	if err != nil {
 		return writeBlockSpec{}, false, err
 	}

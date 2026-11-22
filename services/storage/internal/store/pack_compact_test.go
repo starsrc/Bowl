@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -65,10 +66,15 @@ func TestGivenWritesRollingAcrossThreePacksWhenClosedAndReopenedThenSyncTargetsA
 	_, _, err = actor.Write(ctx, f.Ino, 0, payload)
 	require.NoError(t, err)
 
+	require.Eventuallyf(t, func() bool {
+		return histogramSampleCount(t, reg, "bowl_storage_blob_sync_duration_seconds", map[string]string{"target": "pack_data", "trigger": "bg_rotate"}) >= 2
+	}, 5*time.Second, 5*time.Millisecond, "2 个已封口 pack 应完成 bg_rotate fdatasync")
+
 	require.NoError(t, actor.Close())
 
 	requirePackFileCount(t, dir, 3)
-	require.GreaterOrEqualf(t, histogramSampleCount(t, reg, "bowl_storage_blob_sync_duration_seconds", map[string]string{"target": "pack_data", "trigger": "bg_rotate"}), uint64(2), "2 个已封口 pack 应在 Close 排空前完成 bg_rotate fdatasync")
+	require.GreaterOrEqualf(t, histogramSampleCount(t, reg, "bowl_storage_blob_sync_duration_seconds", map[string]string{"target": "pack_data", "trigger": "flush_wal"}), uint64(1), "Close 排空前活跃 pack 应完成 flush_wal fdatasync")
+	require.GreaterOrEqualf(t, histogramSampleCount(t, reg, "bowl_storage_blob_sync_duration_seconds", map[string]string{"target": "packs_dir", "trigger": "flush_wal"}), uint64(1), "Close 排空前 packs 目录应完成 flush_wal fsync")
 
 	reopened, reg2 := newMeteredActor(t, &store.Options{Dir: dir, DiskID: "rollover-3", MaxPackSize: 2 * store.BlobSize})
 	got, err := reopened.Read(ctx, f.Ino, 0, 5*store.BlobSize)

@@ -107,7 +107,7 @@ func (s *StoreActor) writeFullBlocks(ctx context.Context, ino, offset uint64, da
 			attribute.String("write.mode", "full_block"),
 		)
 	}
-	refs, writeErr := s.stageAppendBlocks(ctx, blobs, ino, data, &staged)
+	refs, writeErr := s.stageAppendBlocks(ctx, blobs, data, &staged)
 	finishSpan(blobSpan, writeErr)
 	if writeErr != nil {
 		s.unpinStagedBlobs(staged)
@@ -223,7 +223,7 @@ func (s *StoreActor) preparePartialWriteBlock(ctx context.Context, blobs *blobSt
 				keep:     false,
 			}, nil
 		}
-		ref, err := s.stageAppend(ctx, blobs, ino, chunk, staged)
+		ref, err := s.stageAppend(ctx, blobs, chunk, staged)
 		if err != nil {
 			return writeBlockSpec{}, err
 		}
@@ -246,7 +246,7 @@ func (s *StoreActor) preparePartialWriteBlock(ctx context.Context, blobs *blobSt
 	}
 
 	if oldOK && inBlock >= int(oldRef.Length) {
-		if extRef, ok, extErr := s.stageExtendTail(blobs, ino, oldRef, uint32(inBlock), chunk, uint32(newLen), staged); extErr != nil {
+		if extRef, ok, extErr := s.stageExtendTail(blobs, oldRef, uint32(inBlock), chunk, uint32(newLen), staged); extErr != nil {
 			return writeBlockSpec{}, extErr
 		} else if ok {
 			var addedBytes uint64
@@ -294,7 +294,7 @@ func (s *StoreActor) preparePartialWriteBlock(ctx context.Context, blobs *blobSt
 		}, nil
 	}
 
-	ref, err := s.stageAppend(ctx, blobs, ino, merged, staged)
+	ref, err := s.stageAppend(ctx, blobs, merged, staged)
 	if err != nil {
 		return writeBlockSpec{}, err
 	}

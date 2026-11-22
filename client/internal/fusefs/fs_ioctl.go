@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"encoding/binary"
 	"syscall"
 
@@ -195,6 +196,9 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			return parseSt
 		}
 
+		unlock := fs.inodeLocks.lock(input.NodeId)
+		defer unlock()
+
 		if updatedInode, local, localSt := fs.tmpMgr.SetFlags(input.NodeId, protoFlags); local {
 			if localSt != fuse.OK {
 				return localSt
@@ -211,11 +215,12 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			return st
 		}
 		barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
-		defer barrierCancel()
-		if err := fs.stage.ResetInodeStream(barrierCtx, ino); err != nil {
-			return fs.stageErrToStatus(err)
+		resetErr := fs.stage.ResetInodeStream(barrierCtx, ino)
+		barrierCancel()
+		if resetErr != nil {
+			return fs.stageErrToStatus(resetErr)
 		}
-		ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
+		ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 		defer cancelFunc()
 
 		_, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
@@ -228,7 +233,6 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			return fs.ToStatus(err)
 		}
 		fs.markMetaDirty()
-		_ = fs.stage.ResetInodeStream(barrierCtx, ino)
 		if protoFlags&(ProtoFlagImmutable|ProtoFlagAppend) != 0 {
 			fs.setInodeSpecialFlag(input.NodeId, true)
 		} else {

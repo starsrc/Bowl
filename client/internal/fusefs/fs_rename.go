@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"syscall"
 
 	"connectrpc.com/connect"
@@ -147,7 +148,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		protoFlags |= unknown
 	}
 
-	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
 	epoch := fs.cache.version()

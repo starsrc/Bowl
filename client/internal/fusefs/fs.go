@@ -387,6 +387,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					if fs.IsFenced() {
 						return
 					}
+					fs.readAhead.InvalidateInode(ino)
 					fs.markMetaDirty()
 					fs.markDirty(ino)
 					if preserveMeta {

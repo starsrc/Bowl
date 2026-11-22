@@ -106,7 +106,12 @@ type fakeStorage struct {
 	getAttrHook       func(context.Context, *storagev1.GetAttrRequest) (*storagev1.GetAttrResponse, error)
 	setAttrHook       func(context.Context, *storagev1.SetAttrRequest) error
 	mknodHook         func(context.Context, *storagev1.MknodRequest) error
+	mkdirHook         func(context.Context, *storagev1.MkdirRequest) error
+	symlinkHook       func(context.Context, *storagev1.SymlinkRequest) error
+	createHook        func(context.Context, *storagev1.CreateRequest) error
+	fallocateHook     func(context.Context, *storagev1.FallocateRequest) error
 	setXattrHook      func(context.Context, *storagev1.SetXattrRequest) error
+	removeXattrHook   func(context.Context, *storagev1.RemoveXattrRequest) error
 	readHook          func(context.Context, *storagev1.ReadRequest) ([]byte, error)
 	writeHook         func(context.Context, *storagev1.WriteRequest) (uint32, error)
 	fsyncHook         func(context.Context, *storagev1.FsyncRequest) error
@@ -646,6 +651,11 @@ func (s *fakeStorage) Mkdir(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkEpoch("Mkdir", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	if s.mkdirHook != nil {
+		if err := s.mkdirHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
 	name := string(req.Msg.GetName())
 	if len(name) > fusefs.MaxFilenameBytes {
 		return nil, errnoError(connect.CodeInvalidArgument, "ENAMETOOLONG")
@@ -710,6 +720,11 @@ func (s *fakeStorage) Symlink(ctx context.Context, req *connect.Request[storagev
 	}
 	if err := s.checkEpoch("Symlink", req.Msg.GetEpoch()); err != nil {
 		return nil, err
+	}
+	if s.symlinkHook != nil {
+		if err := s.symlinkHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
 	}
 	name := string(req.Msg.GetName())
 	if len(name) > fusefs.MaxFilenameBytes {
@@ -1119,6 +1134,11 @@ func (s *fakeStorage) Create(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkEpoch("Create", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	if s.createHook != nil {
+		if err := s.createHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
 	name := string(req.Msg.GetName())
 	if len(name) > fusefs.MaxFilenameBytes {
 		return nil, errnoError(connect.CodeInvalidArgument, "ENAMETOOLONG")
@@ -1437,6 +1457,11 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 	if err := s.checkEpoch("Fallocate", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
+	if s.fallocateHook != nil {
+		if err := s.fallocateHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
+	}
 	if req.Msg.GetLength() == 0 {
 		return nil, errnoError(connect.CodeInvalidArgument, "EINVAL")
 	}
@@ -1590,6 +1615,11 @@ func (s *fakeStorage) RemoveXattr(ctx context.Context, req *connect.Request[stor
 	}
 	if err := s.checkEpoch("RemoveXattr", req.Msg.GetEpoch()); err != nil {
 		return nil, err
+	}
+	if s.removeXattrHook != nil {
+		if err := s.removeXattrHook(ctx, req.Msg); err != nil {
+			return nil, err
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"syscall"
 
 	"connectrpc.com/connect"
@@ -13,6 +14,9 @@ import (
 const (
 	fallocFlKeepSize  = 0x01
 	fallocFlPunchHole = 0x02
+
+	setAttrUpdateMask = fuse.FATTR_MODE | fuse.FATTR_UID | fuse.FATTR_GID | fuse.FATTR_SIZE |
+		fuse.FATTR_ATIME | fuse.FATTR_ATIME_NOW | fuse.FATTR_MTIME | fuse.FATTR_MTIME_NOW | fuse.FATTR_CTIME
 )
 
 func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fuse.AttrOut) (status fuse.Status) {
@@ -33,6 +37,12 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 	epoch := fs.cache.version()
+	valid := input.Valid
+	hasUpdate := valid&setAttrUpdateMask != 0
+	if hasUpdate {
+		unlock := fs.inodeLocks.lock(input.NodeId)
+		defer unlock()
+	}
 	if updatedInode, local, localSt := fs.tmpMgr.SetAttr(input.NodeId, input, func(fh uint64, needWrite bool) fuse.Status {
 		h, st := fs.checkedHandle(input.NodeId, fh, false)
 		if st != fuse.OK {
@@ -46,7 +56,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		out.SetTimeout(0)
 		if localSt == fuse.OK {
 			fs.recordInodeSpecial(input.NodeId, updatedInode)
-			if input.Valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
+			if valid&(fuse.FATTR_SIZE|fuse.FATTR_UID|fuse.FATTR_GID|fuse.FATTR_MODE) != 0 {
 				fs.caps.markAbsent(input.NodeId)
 			}
 		}
@@ -62,55 +72,44 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 		DiskId: fs.cfg.DiskID,
 		Epoch:  fs.cfg.Epoch,
 	}
-	hasUpdate := false
-	valid := input.Valid
 
 	if (valid & fuse.FATTR_MODE) != 0 {
 		mode := input.Mode
 		req.Mode = &mode
-		hasUpdate = true
 	}
 	if (valid & fuse.FATTR_UID) != 0 {
 		uid := input.Uid
 		req.Uid = &uid
-		hasUpdate = true
 	}
 	if (valid & fuse.FATTR_GID) != 0 {
 		gid := input.Gid
 		req.Gid = &gid
-		hasUpdate = true
 	}
 	if (valid & fuse.FATTR_SIZE) != 0 {
 		size := input.Size
 		req.Size = &size
-		hasUpdate = true
 	}
 
 	if (valid & fuse.FATTR_ATIME_NOW) != 0 {
 		req.AtimeNow = true
-		hasUpdate = true
 	} else if (valid & fuse.FATTR_ATIME) != 0 {
 		req.Atime = &timestamppb.Timestamp{
 			Seconds: int64(input.Atime),
 			Nanos:   int32(input.Atimensec),
 		}
-		hasUpdate = true
 	}
 
 	if (valid & fuse.FATTR_MTIME_NOW) != 0 {
 		req.MtimeNow = true
-		hasUpdate = true
 	} else if (valid & fuse.FATTR_MTIME) != 0 {
 		req.Mtime = &timestamppb.Timestamp{
 			Seconds: int64(input.Mtime),
 			Nanos:   int32(input.Mtimensec),
 		}
-		hasUpdate = true
 	}
 
 	if (valid & fuse.FATTR_CTIME) != 0 {
 		req.CtimeNow = true
-		hasUpdate = true
 	}
 
 	if (valid & fuse.FATTR_FH) != 0 {
@@ -133,11 +132,12 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	}
 
 	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
-	defer barrierCancel()
-	if err := fs.stage.ResetInodeStream(barrierCtx, ino); err != nil {
-		return fs.stageErrToStatus(err)
+	resetErr := fs.stage.ResetInodeStream(barrierCtx, ino)
+	barrierCancel()
+	if resetErr != nil {
+		return fs.stageErrToStatus(resetErr)
 	}
-	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
 	fs.readAhead.InvalidateInode(ino)
@@ -180,9 +180,8 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fuse.EACCES
 	}
 
-	ino, status := fs.ToServerIno(input.NodeId)
-	if status != fuse.OK {
-		return status
+	if _, st := fs.ToServerIno(input.NodeId); st != fuse.OK {
+		return st
 	}
 
 	handle, status := fs.checkedHandle(input.NodeId, input.Fh, false)
@@ -199,6 +198,9 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		return fuse.Status(syscall.EOPNOTSUPP)
 	}
 
+	unlock := fs.inodeLocks.lock(input.NodeId)
+	defer unlock()
+
 	if updatedInode, local, localSt := fs.tmpMgr.Allocate(input.NodeId, input.Offset, input.Length, input.Mode); local {
 		if localSt == fuse.OK {
 			fs.recordInodeSpecial(input.NodeId, updatedInode)
@@ -206,12 +208,17 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		}
 		return localSt
 	}
-	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
-	defer barrierCancel()
-	if err := fs.stage.ResetInodeStream(barrierCtx, ino); err != nil {
-		return fs.stageErrToStatus(err)
+	ino, status := fs.ToServerIno(input.NodeId)
+	if status != fuse.OK {
+		return status
 	}
-	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
+	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
+	resetErr := fs.stage.ResetInodeStream(barrierCtx, ino)
+	barrierCancel()
+	if resetErr != nil {
+		return fs.stageErrToStatus(resetErr)
+	}
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
 	req := &storagev1.FallocateRequest{

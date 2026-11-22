@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"syscall"
 
 	"connectrpc.com/connect"
@@ -73,11 +74,12 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 	}
 
 	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
-	defer barrierCancel()
-	if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
-		return fs.stageErrToStatus(err)
+	barrierErr := fs.stage.BarrierInode(barrierCtx, ino)
+	barrierCancel()
+	if barrierErr != nil {
+		return fs.stageErrToStatus(barrierErr)
 	}
-	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
 	_, err := fs.client.SetXattr(ctx, connect.NewRequest(&storagev1.SetXattrRequest{
@@ -230,11 +232,12 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 	}
 
 	barrierCtx, barrierCancel := fs.stageBarrierContext(opCtx, cancel)
-	defer barrierCancel()
-	if err := fs.stage.BarrierInode(barrierCtx, ino); err != nil {
-		return fs.stageErrToStatus(err)
+	barrierErr := fs.stage.BarrierInode(barrierCtx, ino)
+	barrierCancel()
+	if barrierErr != nil {
+		return fs.stageErrToStatus(barrierErr)
 	}
-	ctx, cancelFunc := fs.RPCContextFrom(barrierCtx, nil)
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
 	_, err := fs.client.RemoveXattr(ctx, connect.NewRequest(&storagev1.RemoveXattrRequest{

@@ -10,7 +10,7 @@ import (
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
-func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedTo, linkName string, out *fuse.EntryOut) (status fuse.Status) {
+func (fs *RawFS) Symlink(_ <-chan struct{}, header *fuse.InHeader, pointedTo, linkName string, out *fuse.EntryOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpSymlink)
 	opCtx, endSpan := fs.startFuseOp(OpSymlink)
 	defer func() {
@@ -36,7 +36,7 @@ func (fs *RawFS) Symlink(cancel <-chan struct{}, header *fuse.InHeader, pointedT
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 	epoch := fs.cache.version()
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 
 	resp, err := fs.client.Symlink(ctx, connect.NewRequest(&storagev1.SymlinkRequest{

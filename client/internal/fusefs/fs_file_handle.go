@@ -1,6 +1,7 @@
 package fusefs
 
 import (
+	"context"
 	"errors"
 	"syscall"
 
@@ -39,7 +40,7 @@ func ToProtoOpenFlags(sysFlags uint32) uint32 {
 	return protoFlags
 }
 
-func (fs *RawFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (status fuse.Status) {
+func (fs *RawFS) Create(_ <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) (status fuse.Status) {
 	start := fs.metrics.beginOp(OpCreate)
 	opCtx, endSpan := fs.startFuseOp(OpCreate)
 	defer func() {
@@ -66,7 +67,7 @@ func (fs *RawFS) Create(cancel <-chan struct{}, input *fuse.CreateIn, name strin
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
 	epoch := fs.cache.version()
-	ctx, cancelFunc := fs.RPCContextFrom(opCtx, cancel)
+	ctx, cancelFunc := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 	defer cancelFunc()
 	resp, err := fs.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		ParentIno: parentIno,
@@ -187,7 +188,8 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				barrierCancel()
 				return fs.stageErrToStatus(err)
 			}
-			ctx, done := fs.RPCContextFrom(barrierCtx, nil)
+			barrierCancel()
+			ctx, done := fs.RPCContextFrom(context.WithoutCancel(opCtx), nil)
 			zero := uint64(0)
 			resp, err := fs.client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
 				Ino:    ino,
@@ -196,7 +198,6 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				Epoch:  fs.cfg.Epoch,
 			}))
 			done()
-			barrierCancel()
 			fs.readAhead.InvalidateInode(ino)
 			if err != nil {
 				fs.cache.invalidateInode(input.NodeId)

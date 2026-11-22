@@ -296,19 +296,21 @@ func newRequestObservabilityInterceptor(
 			duration := clk.Since(start)
 
 			if err != nil && isStaleEpochError(err) {
-				metrics.incStaleEpoch()
-				if logger != nil && epochFenceLimiter.allow(clk.Now()) {
-					traceID := extractTraceID(ctx, req, err)
-					logger.LogAttrs(
-						context.Background(),
-						slog.LevelError,
-						"writer_epoch_fenced",
-						slog.String("procedure", req.Spec().Procedure),
-						slog.Uint64("local_epoch", extractRequestEpoch(req)),
-						slog.Uint64("req_id", reqID),
-						slog.String("trace_id", traceID),
-						slog.String("err", err.Error()),
-					)
+				if localEpoch := extractRequestEpoch(req); localEpoch > 0 {
+					metrics.incStaleEpoch()
+					if logger != nil && epochFenceLimiter.allow(clk.Now()) {
+						traceID := extractTraceID(ctx, req, err)
+						logger.LogAttrs(
+							context.Background(),
+							slog.LevelError,
+							"writer_epoch_fenced",
+							slog.String("procedure", req.Spec().Procedure),
+							slog.Uint64("local_epoch", localEpoch),
+							slog.Uint64("req_id", reqID),
+							slog.String("trace_id", traceID),
+							slog.String("err", err.Error()),
+						)
+					}
 				}
 			}
 

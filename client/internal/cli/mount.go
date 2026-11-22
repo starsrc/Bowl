@@ -597,6 +597,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	if err != nil {
 		return fmt.Errorf("create RPC client: %w", err)
 	}
+	defer rpc.CloseIdleConnections(client)
 
 	cfg, lease, err := mountHandshake(ctx, client, baseCfg, opts.force)
 	if err != nil {

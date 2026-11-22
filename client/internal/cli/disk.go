@@ -360,6 +360,7 @@ func runDiskValidated(
 		finishDiskCLISpanError(span, clientErr)
 		return &cliExitError{code: exitCode, err: clientErr}
 	}
+	defer rpc.CloseIdleConnections(client)
 
 	rpcCtx, rpcCancel := context.WithTimeout(spanCtx, spec.timeout)
 	defer rpcCancel()

@@ -3,8 +3,10 @@ package rpc
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,14 +65,22 @@ func requireAllDataShardIdleClosed(t *testing.T, dataRTs *[HTTP2DataConnectionSh
 
 func requireAllDataTransportsConfig(t *testing.T, rt *shardedRoundTripper, wantBuf int, wantHTTPS bool, wantTLS *tls.Config) {
 	t.Helper()
+	seenTLS := make(map[*tls.Config]struct{})
 	for i := range HTTP2DataConnectionShards {
 		tr, ok := rt.dataTransports[i].(*http.Transport)
 		require.True(t, ok, "data shard %d must be *http.Transport", i)
 		require.NotNil(t, tr.HTTP2, "data shard %d must set HTTP2Config", i)
 		require.Equal(t, wantBuf, tr.HTTP2.MaxReceiveBufferPerConnection, "data shard %d buffer mismatch", i)
+		require.Equal(t, HTTP2IdleConnTimeout, tr.IdleConnTimeout, "data shard %d IdleConnTimeout mismatch", i)
 		if wantHTTPS {
 			require.True(t, tr.ForceAttemptHTTP2, "data shard %d must enable ForceAttemptHTTP2", i)
-			require.Same(t, wantTLS, tr.TLSClientConfig, "data shard %d TLSConfig mismatch", i)
+			require.Equal(t, HTTP2TLSHandshakeTimeout, tr.TLSHandshakeTimeout, "data shard %d TLSHandshakeTimeout mismatch", i)
+			require.NotNil(t, tr.TLSClientConfig, "data shard %d TLSClientConfig must not be nil", i)
+			require.NotSame(t, wantTLS, tr.TLSClientConfig, "data shard %d must clone caller TLSConfig", i)
+			require.Equal(t, wantTLS.MinVersion, tr.TLSClientConfig.MinVersion, "data shard %d MinVersion mismatch", i)
+			_, dup := seenTLS[tr.TLSClientConfig]
+			require.False(t, dup, "data shard %d must not share TLSClientConfig with another shard", i)
+			seenTLS[tr.TLSClientConfig] = struct{}{}
 		}
 	}
 }
@@ -190,15 +200,19 @@ func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresIsolatedH2Buffers(t 
 	require.NoError(t, err)
 	defer h2cRT.CloseIdleConnections()
 
+	require.Equal(t, 90*time.Second, HTTP2IdleConnTimeout)
+	require.Equal(t, 10*time.Second, HTTP2TLSHandshakeTimeout)
 	controlH2C, ok := h2cRT.controlTransport.(*http.Transport)
 	require.True(t, ok)
 	require.Equal(t, 8<<20, HTTP2ControlMaxReceiveBufferPerConnection)
 	require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, controlH2C.HTTP2.MaxReceiveBufferPerConnection)
+	require.Equal(t, HTTP2IdleConnTimeout, controlH2C.IdleConnTimeout)
 
 	metaH2C, ok := h2cRT.metaTransport.(*http.Transport)
 	require.True(t, ok)
 	require.Equal(t, 32<<20, HTTP2MetaMaxReceiveBufferPerConnection)
 	require.Equal(t, HTTP2MetaMaxReceiveBufferPerConnection, metaH2C.HTTP2.MaxReceiveBufferPerConnection)
+	require.Equal(t, HTTP2IdleConnTimeout, metaH2C.IdleConnTimeout)
 	requireAllDataTransportsConfig(t, h2cRT, HTTP2DataMaxReceiveBufferPerConnection, false, nil)
 
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
@@ -209,15 +223,30 @@ func TestNewShardedRoundTripper_GivenHTTPAndHTTPS_ConfiguresIsolatedH2Buffers(t 
 	controlTLS, ok := tlsRT.controlTransport.(*http.Transport)
 	require.True(t, ok)
 	require.True(t, controlTLS.ForceAttemptHTTP2)
-	require.Same(t, tlsCfg, controlTLS.TLSClientConfig)
+	require.Equal(t, HTTP2TLSHandshakeTimeout, controlTLS.TLSHandshakeTimeout)
+	require.Equal(t, HTTP2IdleConnTimeout, controlTLS.IdleConnTimeout)
+	require.NotNil(t, controlTLS.TLSClientConfig)
+	require.NotSame(t, tlsCfg, controlTLS.TLSClientConfig)
+	require.Equal(t, uint16(tls.VersionTLS13), controlTLS.TLSClientConfig.MinVersion)
 	require.Equal(t, HTTP2ControlMaxReceiveBufferPerConnection, controlTLS.HTTP2.MaxReceiveBufferPerConnection)
 
 	metaTLS, ok := tlsRT.metaTransport.(*http.Transport)
 	require.True(t, ok)
 	require.True(t, metaTLS.ForceAttemptHTTP2)
-	require.Same(t, tlsCfg, metaTLS.TLSClientConfig)
+	require.Equal(t, HTTP2TLSHandshakeTimeout, metaTLS.TLSHandshakeTimeout)
+	require.Equal(t, HTTP2IdleConnTimeout, metaTLS.IdleConnTimeout)
+	require.NotNil(t, metaTLS.TLSClientConfig)
+	require.NotSame(t, tlsCfg, metaTLS.TLSClientConfig)
+	require.NotSame(t, controlTLS.TLSClientConfig, metaTLS.TLSClientConfig)
+	require.Equal(t, uint16(tls.VersionTLS13), metaTLS.TLSClientConfig.MinVersion)
 	require.Equal(t, HTTP2MetaMaxReceiveBufferPerConnection, metaTLS.HTTP2.MaxReceiveBufferPerConnection)
 	requireAllDataTransportsConfig(t, tlsRT, HTTP2DataMaxReceiveBufferPerConnection, true, tlsCfg)
+	for i := range HTTP2DataConnectionShards {
+		dataTr, dataOK := tlsRT.dataTransports[i].(*http.Transport)
+		require.True(t, dataOK)
+		require.NotSame(t, controlTLS.TLSClientConfig, dataTr.TLSClientConfig)
+		require.NotSame(t, metaTLS.TLSClientConfig, dataTr.TLSClientConfig)
+	}
 }
 
 type tierTestStorageHandler struct {
@@ -610,4 +639,163 @@ func TestNewClient_GivenBlackholedTCPConnectionAfterWarmup_EvictsViaPingWithin5s
 	require.Less(t, evictElapsed, 7500*time.Millisecond, "HTTP/2 PING eviction must complete near 5s")
 	require.NoError(t, followErr, "subsequent RPC must redial and succeed after dead connection eviction")
 	require.Equal(t, int64(2), proxy.Dials(), "client must redial once after PING evicts the dead connection")
+}
+
+func TestNewClient_GivenSharedTLSConfigAndConcurrentHTTPSRequests_ClonesTLSConfigAndClosesIdleConnections(t *testing.T) {
+	var (
+		connMu      sync.Mutex
+		openConns   = make(map[net.Conn]struct{})
+		openedTotal atomic.Int64
+		allClosedCh = make(chan struct{})
+		allClosed   atomic.Bool
+		expectClose atomic.Bool
+		h2Count     atomic.Int64
+	)
+
+	path, connectHandler := storagev1connect.NewStorageServiceHandler(
+		&tierTestStorageHandler{},
+		connect.WithCodec(newProtoBinaryCodec()),
+	)
+	mux := http.NewServeMux()
+	mux.Handle(path, connectHandler)
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 {
+			h2Count.Add(1)
+		}
+		mux.ServeHTTP(w, r)
+	})
+
+	srv := httptest.NewUnstartedServer(rootHandler)
+	srv.EnableHTTP2 = true
+	srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		connMu.Lock()
+		defer connMu.Unlock()
+		switch state {
+		case http.StateNew:
+			openConns[c] = struct{}{}
+			openedTotal.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			delete(openConns, c)
+			if expectClose.Load() && len(openConns) == 0 && allClosed.CompareAndSwap(false, true) {
+				close(allClosedCh)
+			}
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(srv.Certificate())
+	callerTLS := &tls.Config{
+		RootCAs:    certPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	client, err := NewClientFromConfig(ClientConfig{
+		Endpoint:    srv.URL,
+		TLSConfig:   callerTLS,
+		RetryConfig: &RetryConfig{Disable: true},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2+HTTP2DataConnectionShards*2)
+
+	wg.Go(func() {
+		_, callErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{DiskId: "disk-1", MountId: "mount-1"}))
+		errCh <- callErr
+	})
+
+	wg.Go(func() {
+		_, callErr := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{ParentIno: 1, Name: []byte("tls-check")}))
+		errCh <- callErr
+	})
+
+	for range HTTP2DataConnectionShards * 2 {
+		wg.Go(func() {
+			_, callErr := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 4}))
+			errCh <- callErr
+		})
+	}
+
+	wg.Wait()
+	close(errCh)
+	for callErr := range errCh {
+		require.NoError(t, callErr)
+	}
+
+	require.Empty(t, callerTLS.NextProtos, "caller TLSConfig must never be mutated by sharded transports")
+	require.GreaterOrEqual(t, h2Count.Load(), int64(2+HTTP2DataConnectionShards*2))
+	require.GreaterOrEqual(t, openedTotal.Load(), int64(2+HTTP2DataConnectionShards))
+
+	connMu.Lock()
+	expectClose.Store(true)
+	alreadyZero := len(openConns) == 0
+	connMu.Unlock()
+	if alreadyZero && allClosed.CompareAndSwap(false, true) {
+		close(allClosedCh)
+	}
+
+	CloseIdleConnections(client)
+
+	select {
+	case <-allClosedCh:
+	case <-time.After(2 * time.Second):
+		connMu.Lock()
+		remaining := len(openConns)
+		connMu.Unlock()
+		t.Fatalf("expected all owned HTTPS connections closed after CloseIdleConnections, %d still open", remaining)
+	}
+
+	CloseIdleConnections(nil)
+
+	customRT := &recordingRoundTripper{}
+	customClient, err := NewClientFromConfig(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: &http.Client{Transport: customRT},
+	})
+	require.NoError(t, err)
+	CloseIdleConnections(customClient)
+	require.Zero(t, customRT.idleClosed.Load(), "CloseIdleConnections must be a no-op for caller-owned HTTPClient")
+}
+
+func TestResolveEndpoint_GivenWhitespacePrefixAndMalformedURLs_NormalizesAndValidatesStrictly(t *testing.T) {
+	t.Run("trims explicit whitespace and preserves reverse-proxy path prefix", func(t *testing.T) {
+		got, err := ResolveEndpoint("  http://127.0.0.1:9000/  ")
+		require.NoError(t, err)
+		require.Equal(t, "http://127.0.0.1:9000", got)
+
+		gotPrefix, err := ResolveEndpoint(" http://127.0.0.1:9000/prefix/ ")
+		require.NoError(t, err)
+		require.Equal(t, "http://127.0.0.1:9000/prefix", gotPrefix)
+
+		gotHTTPS, err := ResolveEndpoint("\thttps://storage.bowl.local:9443/v1/api///\n")
+		require.NoError(t, err)
+		require.Equal(t, "https://storage.bowl.local:9443/v1/api", gotHTTPS)
+	})
+
+	t.Run("rejects empty hostname, userinfo, query, and fragment", func(t *testing.T) {
+		invalid := []struct {
+			name string
+			raw  string
+		}{
+			{name: "missing host", raw: "http://"},
+			{name: "port without hostname", raw: "http://:9000"},
+			{name: "query string", raw: "http://127.0.0.1:9000?a=b"},
+			{name: "trailing question mark", raw: "http://127.0.0.1:9000?"},
+			{name: "fragment", raw: "http://127.0.0.1:9000#frag"},
+			{name: "empty trailing fragment", raw: "http://127.0.0.1:9000#"},
+			{name: "empty trailing fragment after path", raw: "http://127.0.0.1:9000/prefix#"},
+			{name: "userinfo", raw: "http://user:pass@127.0.0.1:9000"},
+		}
+		for _, tc := range invalid {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := ResolveEndpoint(tc.raw)
+				require.Error(t, err, "ResolveEndpoint(%q) must return an error", tc.raw)
+			})
+		}
+	})
 }

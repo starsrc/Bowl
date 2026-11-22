@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,4 +288,107 @@ func TestObservability_GivenAbortedEBUSYError_DoesNotTriggerStaleEpochMetricOrLo
 	staleMF := requireMetricFamily(t, mfs, "bowl_client_stale_epoch_total")
 	require.InDelta(t, 0.0, staleMF.GetMetric()[0].GetCounter().GetValue(), 1e-9)
 	require.NotContains(t, logBuf.String(), "writer_epoch_fenced")
+}
+
+type scriptedFailedPreconditionEBUSYHandler struct {
+	storagev1connect.UnimplementedStorageServiceHandler
+	err error
+}
+
+func (h *scriptedFailedPreconditionEBUSYHandler) DeleteSnapshot(
+	_ context.Context,
+	_ *connect.Request[storagev1.DeleteSnapshotRequest],
+) (*connect.Response[storagev1.DeleteSnapshotResponse], error) {
+	return nil, h.err
+}
+
+func (h *scriptedFailedPreconditionEBUSYHandler) RenewMount(
+	_ context.Context,
+	_ *connect.Request[storagev1.RenewMountRequest],
+) (*connect.Response[storagev1.RenewMountResponse], error) {
+	return nil, h.err
+}
+
+func (h *scriptedFailedPreconditionEBUSYHandler) Write(
+	_ context.Context,
+	_ *connect.Request[storagev1.WriteRequest],
+) (*connect.Response[storagev1.WriteResponse], error) {
+	return nil, h.err
+}
+
+func TestObservability_GivenDeleteSnapshotEBUSYAndEpochRequests_OnlyFencesEpochCarryingRequests(t *testing.T) {
+	reg, _, _, _ := setupTestOTel(t)
+	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+	rpcMetrics := NewMetrics()
+	require.NoError(t, reg.Register(rpcMetrics))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	preconditionBusyErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("resource busy"))
+	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
+		Domain: "bowl.storage",
+		Reason: "EBUSY",
+	})
+	require.NoError(t, err)
+	preconditionBusyErr.AddDetail(detail)
+
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: newInMemoryHTTPClient(&scriptedFailedPreconditionEBUSYHandler{err: preconditionBusyErr}),
+		Logger:     logger,
+		Metrics:    rpcMetrics,
+	}, clk)
+	require.NoError(t, err)
+
+	_, err = client.DeleteSnapshot(context.Background(), connect.NewRequest(&storagev1.DeleteSnapshotRequest{
+		SnapshotId: "01950000-0000-7000-8000-000000000001",
+	}))
+	require.Error(t, err)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	staleMF := requireMetricFamily(t, mfs, "bowl_client_stale_epoch_total")
+	require.InDelta(t, 0.0, staleMF.GetMetric()[0].GetCounter().GetValue(), 1e-9, "DeleteSnapshot EBUSY must not increment stale epoch counter")
+	require.NotContains(t, logBuf.String(), "writer_epoch_fenced")
+
+	_, err = client.RenewMount(context.Background(), connect.NewRequest(&storagev1.RenewMountRequest{
+		DiskId:  "11111111-1111-4111-8111-111111111111",
+		MountId: "mount-1",
+		Epoch:   5,
+	}))
+	require.Error(t, err)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+
+	clk.Advance(2 * time.Second)
+
+	_, err = client.Write(context.Background(), connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: "11111111-1111-4111-8111-111111111111",
+		Epoch:  99,
+		Ino:    7,
+		Data:   []byte("payload"),
+	}))
+	require.Error(t, err)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+
+	mfs, err = reg.Gather()
+	require.NoError(t, err)
+	staleMF = requireMetricFamily(t, mfs, "bowl_client_stale_epoch_total")
+	require.InDelta(t, 2.0, staleMF.GetMetric()[0].GetCounter().GetValue(), 1e-9)
+
+	lines := strings.Split(strings.TrimSpace(logBuf.String()), "\n")
+	require.Len(t, lines, 2)
+
+	var renewLog map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &renewLog))
+	require.Equal(t, "writer_epoch_fenced", renewLog["msg"])
+	require.Equal(t, storagev1connect.StorageServiceRenewMountProcedure, renewLog["procedure"])
+	require.InDelta(t, float64(5), renewLog["local_epoch"], 1e-9)
+
+	var writeLog map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &writeLog))
+	require.Equal(t, "writer_epoch_fenced", writeLog["msg"])
+	require.Equal(t, storagev1connect.StorageServiceWriteProcedure, writeLog["procedure"])
+	require.InDelta(t, float64(99), writeLog["local_epoch"], 1e-9)
 }

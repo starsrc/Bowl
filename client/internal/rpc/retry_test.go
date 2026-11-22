@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"syscall"
 	"testing"
@@ -1105,4 +1106,280 @@ func TestRetry_GivenBackoffExceedingRemainingBudget_WhenRetryableFailureOccurs_E
 		require.Equal(t, 2, handler.calls)
 		require.Equal(t, []time.Duration{100 * time.Millisecond}, clk.Sleeps())
 	})
+}
+
+type failingReadCloser struct {
+	err error
+}
+
+func (f failingReadCloser) Read(_ []byte) (int, error) {
+	return 0, f.err
+}
+
+func (f failingReadCloser) Close() error {
+	return nil
+}
+
+type scriptedMidBodyErrTransport struct {
+	bodyErrs []error
+	next     http.RoundTripper
+	calls    int
+}
+
+func (s *scriptedMidBodyErrTransport) HTTPClient() *http.Client {
+	return &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			idx := s.calls
+			s.calls++
+			if idx < len(s.bodyErrs) {
+				header := make(http.Header)
+				header.Set("Content-Type", "application/proto")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       failingReadCloser{err: s.bodyErrs[idx]},
+					Request:    req,
+				}, nil
+			}
+			return s.next.RoundTrip(req)
+		}),
+	}
+}
+
+type scriptedListSnapshotsHandler struct {
+	storagev1connect.UnimplementedStorageServiceHandler
+	calls int
+	errs  []error
+}
+
+func (h *scriptedListSnapshotsHandler) ListSnapshots(
+	_ context.Context,
+	_ *connect.Request[storagev1.ListSnapshotsRequest],
+) (*connect.Response[storagev1.ListSnapshotsResponse], error) {
+	idx := h.calls
+	h.calls++
+	if idx < len(h.errs) && h.errs[idx] != nil {
+		return nil, h.errs[idx]
+	}
+	return connect.NewResponse(&storagev1.ListSnapshotsResponse{
+		Snapshots: []*storagev1.Snapshot{
+			{SnapshotId: "01950000-0000-7000-8000-000000000001"},
+		},
+	}), nil
+}
+
+func TestRetry_GivenListSnapshots_WhenUnavailableOrTransportDropRecovers_RetriesAndSucceeds(t *testing.T) {
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListSnapshotsProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateSnapshotProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceDeleteSnapshotProcedure))
+
+	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+	handler := &scriptedListSnapshotsHandler{
+		errs: []error{
+			connect.NewError(connect.CodeUnavailable, errors.New("list-snapshots-transient")),
+		},
+	}
+	innerClient := newInMemoryHTTPClient(handler)
+	transport := &scriptedMidBodyErrTransport{
+		bodyErrs: []error{
+			errors.New("http2: client connection lost"),
+		},
+		next: innerClient.Transport,
+	}
+	client, err := newClientWithClock(ClientConfig{
+		Endpoint:   "http://127.0.0.1:9000",
+		HTTPClient: transport.HTTPClient(),
+		RetryConfig: &RetryConfig{
+			InitialInterval: 50 * time.Millisecond,
+			Multiplier:      2.0,
+			MaxInterval:     500 * time.Millisecond,
+			RandFloat64:     func() float64 { return 1.0 },
+		},
+	}, clk)
+	require.NoError(t, err)
+
+	resp, err := client.ListSnapshots(context.Background(), connect.NewRequest(&storagev1.ListSnapshotsRequest{
+		DiskId: "11111111-1111-4111-8111-111111111111",
+	}))
+
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(t, "01950000-0000-7000-8000-000000000001", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(t, 3, transport.calls)
+	require.Equal(t, 2, handler.calls)
+	require.Equal(t, []time.Duration{50 * time.Millisecond, 100 * time.Millisecond}, clk.Sleeps())
+}
+
+func TestRetry_GivenIdempotentRead_WhenMidBodyHTTP2TransportErrorsRecover_RetriesAndSucceeds(t *testing.T) {
+	cases := []struct {
+		name    string
+		bodyErr error
+	}{
+		{
+			name:    "client connection lost",
+			bodyErr: errors.New("http2: client connection lost"),
+		},
+		{
+			name:    "server sent GOAWAY",
+			bodyErr: errors.New("http2: server sent GOAWAY"),
+		},
+		{
+			name:    "graceful shutdown GOAWAY",
+			bodyErr: errors.New("http2: Transport received Server's graceful shutdown GOAWAY"),
+		},
+		{
+			name:    "response body closed",
+			bodyErr: errors.New("http2: response body closed"),
+		},
+		{
+			name:    "peer RST_STREAM INTERNAL_ERROR",
+			bodyErr: errors.New("stream error: stream ID 3; INTERNAL_ERROR; received from peer"),
+		},
+		{
+			name:    "peer RST_STREAM PROTOCOL_ERROR",
+			bodyErr: errors.New("stream error: stream ID 5; PROTOCOL_ERROR; received from peer"),
+		},
+		{
+			name:    "peer RST_STREAM NO_ERROR",
+			bodyErr: errors.New("stream error: stream ID 7; NO_ERROR; received from peer"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+			handler := &scriptedReadHandler{}
+			innerClient := newInMemoryHTTPClient(handler)
+			transport := &scriptedMidBodyErrTransport{
+				bodyErrs: []error{tc.bodyErr},
+				next:     innerClient.Transport,
+			}
+			client, err := newClientWithClock(ClientConfig{
+				Endpoint:   "http://127.0.0.1:9000",
+				HTTPClient: transport.HTTPClient(),
+				RetryConfig: &RetryConfig{
+					InitialInterval: 50 * time.Millisecond,
+					RandFloat64:     func() float64 { return 1.0 },
+				},
+			}, clk)
+			require.NoError(t, err)
+
+			resp, err := client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
+
+			require.NoError(t, err)
+			payload := TakeReadPayload(resp.Msg)
+			require.Equal(t, []byte("ok"), payload.Data)
+			payload.Release()
+			require.Equal(t, 2, transport.calls)
+			require.Equal(t, []time.Duration{50 * time.Millisecond}, clk.Sleeps())
+		})
+	}
+}
+
+func TestRetry_GivenServerWireErrorOrUnknownLocalError_WhenIdempotentRead_DoesNotRetry(t *testing.T) {
+	t.Run("server wire errors do not retry", func(t *testing.T) {
+		wireErrors := []struct {
+			name string
+			err  error
+		}{
+			{
+				name: "wire CodeInternal",
+				err:  connect.NewWireError(connect.CodeInternal, errors.New("internal server failure")),
+			},
+			{
+				name: "wire CodeUnknown",
+				err:  connect.NewWireError(connect.CodeUnknown, errors.New("unknown server failure")),
+			},
+			{
+				name: "wire CodeInternal spoofing http2 text",
+				err:  connect.NewWireError(connect.CodeInternal, errors.New("http2: client connection lost")),
+			},
+			{
+				name: "wire CodeInternal spoofing peer RST_STREAM text",
+				err:  connect.NewWireError(connect.CodeInternal, errors.New("stream error: stream ID 3; INTERNAL_ERROR; received from peer")),
+			},
+		}
+
+		for _, tc := range wireErrors {
+			t.Run(tc.name, func(t *testing.T) {
+				require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, tc.err))
+			})
+		}
+
+		clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		handler := &scriptedReadHandler{
+			steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
+				func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
+					return nil, connect.NewError(connect.CodeInternal, errors.New("http2: client connection lost"))
+				},
+			},
+		}
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: newInMemoryHTTPClient(handler),
+		}, clk)
+		require.NoError(t, err)
+
+		_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
+
+		require.Error(t, err)
+		require.True(t, connect.IsWireError(err))
+		require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+		require.Equal(t, 1, handler.calls)
+		require.Empty(t, clk.Sleeps())
+	})
+
+	t.Run("unknown local non-transport error does not retry", func(t *testing.T) {
+		clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		handler := &scriptedReadHandler{}
+		innerClient := newInMemoryHTTPClient(handler)
+		transport := &scriptedMidBodyErrTransport{
+			bodyErrs: []error{errors.New("unexpected local decode error")},
+			next:     innerClient.Transport,
+		}
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: transport.HTTPClient(),
+		}, clk)
+		require.NoError(t, err)
+
+		_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
+
+		require.Error(t, err)
+		require.False(t, connect.IsWireError(err))
+		require.Equal(t, 1, transport.calls)
+		require.Empty(t, clk.Sleeps())
+		require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeInternal, errors.New("local failure"))))
+	})
+}
+
+func TestRetry_GivenNonIdempotentProcedures_WhenMidBodyHTTP2TransportErrorsOccur_DoesNotRetry(t *testing.T) {
+	bodyErrs := []error{
+		errors.New("http2: client connection lost"),
+		errors.New("http2: server sent GOAWAY"),
+		errors.New("stream error: stream ID 9; INTERNAL_ERROR; received from peer"),
+	}
+
+	for _, bodyErr := range bodyErrs {
+		clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
+		handler := &scriptedReadHandler{}
+		innerClient := newInMemoryHTTPClient(handler)
+		transport := &scriptedMidBodyErrTransport{
+			bodyErrs: []error{bodyErr},
+			next:     innerClient.Transport,
+		}
+		client, err := newClientWithClock(ClientConfig{
+			Endpoint:   "http://127.0.0.1:9000",
+			HTTPClient: transport.HTTPClient(),
+		}, clk)
+		require.NoError(t, err)
+
+		_, err = client.Write(context.Background(), connect.NewRequest(&storagev1.WriteRequest{Ino: 1, Data: []byte("abc")}))
+
+		require.Error(t, err)
+		require.Equal(t, 1, transport.calls)
+		require.Empty(t, clk.Sleeps())
+		require.False(t, shouldRetry(storagev1connect.StorageServiceCreateProcedure, err))
+		require.False(t, shouldRetry(storagev1connect.StorageServiceDeleteSnapshotProcedure, err))
+	}
 }

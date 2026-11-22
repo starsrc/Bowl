@@ -13,7 +13,7 @@ type inodeLocks struct {
 }
 
 type inodeLockEntry struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	refs int
 }
 
@@ -27,7 +27,7 @@ func (l *inodeLocks) activeEntries() int {
 	return len(l.entries)
 }
 
-func (l *inodeLocks) lock(ino uint64) func() {
+func (l *inodeLocks) acquireEntry(ino uint64) *inodeLockEntry {
 	l.mu.Lock()
 	if l.entries == nil {
 		l.entries = make(map[uint64]*inodeLockEntry)
@@ -39,7 +39,20 @@ func (l *inodeLocks) lock(ino uint64) func() {
 	}
 	entry.refs++
 	l.mu.Unlock()
+	return entry
+}
 
+func (l *inodeLocks) releaseEntry(ino uint64, entry *inodeLockEntry) {
+	l.mu.Lock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(l.entries, ino)
+	}
+	l.mu.Unlock()
+}
+
+func (l *inodeLocks) lock(ino uint64) func() {
+	entry := l.acquireEntry(ino)
 	if entry.mu.TryLock() {
 		l.metrics.Load().incInodeLockFast()
 	} else {
@@ -49,11 +62,21 @@ func (l *inodeLocks) lock(ino uint64) func() {
 	}
 	return func() {
 		entry.mu.Unlock()
-		l.mu.Lock()
-		entry.refs--
-		if entry.refs == 0 {
-			delete(l.entries, ino)
-		}
-		l.mu.Unlock()
+		l.releaseEntry(ino, entry)
+	}
+}
+
+func (l *inodeLocks) rlock(ino uint64) func() {
+	entry := l.acquireEntry(ino)
+	if entry.mu.TryRLock() {
+		l.metrics.Load().incInodeLockFast()
+	} else {
+		waitStart := time.Now()
+		entry.mu.RLock()
+		l.metrics.Load().observeInodeLockContended(time.Since(waitStart))
+	}
+	return func() {
+		entry.mu.RUnlock()
+		l.releaseEntry(ino, entry)
 	}
 }

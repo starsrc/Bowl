@@ -138,7 +138,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
-	if st, local := fs.linkTmp(opCtx, cancel, input, filename, out); local {
+	if st, local := fs.linkTmp(opCtx, input, filename, out); local {
 		return st
 	}
 	srcIno, status := fs.ToServerIno(input.Oldnodeid)

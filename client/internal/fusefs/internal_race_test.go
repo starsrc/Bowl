@@ -433,3 +433,52 @@ func TestNamespaceCache与InodeLocks_并发写查单调尺寸不变式与互斥�
 		require.Zero(t, locks.activeEntries(), "所有协程解锁后 inodeLocks 活跃条目必须归零")
 	})
 }
+
+func TestInodeLocks_RLockSharedConcurrencyAndExclusiveContentionMetrics(t *testing.T) {
+	var locks inodeLocks
+	m := NewMetrics()
+	locks.bindMetrics(m)
+
+	rUnlock1 := locks.rlock(77)
+	rUnlock2 := locks.rlock(77)
+	require.Equal(t, 1, locks.activeEntries())
+
+	wAcquired := make(chan struct{})
+	wRelease := make(chan struct{})
+	wDone := make(chan struct{})
+	go func() {
+		wUnlock := locks.lock(77)
+		close(wAcquired)
+		<-wRelease
+		wUnlock()
+		close(wDone)
+	}()
+	waitUntilInodeLockRefsAtLeast(t, &locks, 77, 3)
+
+	select {
+	case <-wAcquired:
+		t.Fatal("scene=rlock_blocks_exclusive_lock want=blocked got=acquired")
+	default:
+	}
+
+	rUnlock1()
+	rUnlock2()
+	<-wAcquired
+
+	rDone := make(chan struct{})
+	go func() {
+		rUnlock3 := locks.rlock(77)
+		rUnlock3()
+		close(rDone)
+	}()
+	waitUntilInodeLockRefsAtLeast(t, &locks, 77, 2)
+
+	close(wRelease)
+	<-wDone
+	<-rDone
+
+	snap := m.Snapshot()
+	require.Equal(t, uint64(2), snap.InodeLocks.FastAcquisitions)
+	require.Equal(t, uint64(2), snap.InodeLocks.ContendedAcquisitions)
+	require.Zero(t, locks.activeEntries())
+}

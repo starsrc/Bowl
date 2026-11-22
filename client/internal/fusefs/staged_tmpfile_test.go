@@ -1211,3 +1211,40 @@ func TestStagedTmpfile_LinkPromotion_ReplaysModeGidSortedXattrsFlagsInOrderAndUn
 		fs.Forget(tmpLookup.NodeId, 3)
 	})
 }
+
+func TestStagedTmpfile_LinkPromotion_WhenFencedBeforePromote_ReturnsEBUSYAndSkipsDirtyAndCache(t *testing.T) {
+	srv := newFakeStorage(t, withTTL(2.0, 2.0))
+	fs := newTestRawFS(t, srv, withDirectIO(false))
+
+	var tmpOut fuse.CreateOut
+	requireStatus(t, "Tmpfile", fuse.OK, fs.Tmpfile(nil, &fuse.CreateIn{
+		InHeader: fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Flags:    uint32(syscall.O_RDWR),
+		Mode:     0o644,
+	}, &tmpOut))
+	nodeID := tmpOut.NodeId
+	mustWriteAt(t, fs, nodeID, tmpOut.Fh, 0, []byte("fence-before-promote-payload"))
+
+	srv.mknodHook = func(_ context.Context, _ *storagev1.MknodRequest) error {
+		fs.Fence(fuse.EBUSY, "fenced between Mknod and PromoteTmpfile")
+		return nil
+	}
+
+	var linkOut fuse.EntryOut
+	st := fs.Link(nil, &fuse.LinkIn{
+		InHeader:  fuse.InHeader{NodeId: fuse.FUSE_ROOT_ID},
+		Oldnodeid: nodeID,
+	}, "fenced-promote.bin", &linkOut)
+
+	requireStatus(t, "fenced linkTmp", fuse.EBUSY, st)
+	require.Zero(t, linkOut.NodeId, "scene=fenced_linktmp_entryout want=0 got=%d", linkOut.NodeId)
+	snap := fs.Snapshot()
+	require.Zero(t, snap.Queues.DirtyInodes, "scene=fenced_linktmp_dirty want=0 got=%d", snap.Queues.DirtyInodes)
+	require.Zero(t, snap.TmpFile.Promotes, "scene=fenced_linktmp_promotes want=0 got=%d", snap.TmpFile.Promotes)
+	require.Zero(t, snap.TmpFile.ActiveFiles, "scene=fenced_linktmp_active_files want=0 got=%d", snap.TmpFile.ActiveFiles)
+	require.Zero(t, snap.TmpFile.ResidentBytes, "scene=fenced_linktmp_resident_bytes want=0 got=%d", snap.TmpFile.ResidentBytes)
+	require.Zero(t, snap.NamespaceCache.Entries, "scene=fenced_linktmp_cache_entries want=0 got=%d", snap.NamespaceCache.Entries)
+
+	fs.Release(nil, &fuse.ReleaseIn{InHeader: fuse.InHeader{NodeId: nodeID}, Fh: tmpOut.Fh})
+	fs.Forget(nodeID, 1)
+}

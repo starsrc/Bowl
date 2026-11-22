@@ -42,8 +42,8 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 	return resp.Msg.GetInode(), resp.Msg.GetEntryTimeoutSeconds(), resp.Msg.GetAttrTimeoutSeconds(), fuse.OK
 }
 
-func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent) {
-	m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, meta, extents)
+func (m *rawFSTmpMaterializer) PromoteTmpfile(ctx context.Context, serverIno, nodeID uint64, file *os.File, meta StagePromotedMeta, extents []stageExtent) fuse.Status {
+	return m.fs.stageErrToStatus(m.fs.stage.PromoteTmpfile(ctx, serverIno, nodeID, m.epoch, file, meta, extents))
 }
 
 func (fs *RawFS) Tmpfile(cancel <-chan struct{}, input *fuse.CreateIn, out *fuse.CreateOut) (status fuse.Status) {
@@ -173,13 +173,14 @@ func (fs *RawFS) Forget(nodeID, nlookup uint64) {
 	}
 }
 
-func (fs *RawFS) linkTmp(parentCtx context.Context, cancel <-chan struct{}, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (fuse.Status, bool) {
+func (fs *RawFS) linkTmp(parentCtx context.Context, input *fuse.LinkIn, filename string, out *fuse.EntryOut) (fuse.Status, bool) {
 	if fs.tmpMgr.getFile(input.Oldnodeid) == nil {
 		return fuse.OK, false
 	}
 	unlock := fs.inodeLocks.lock(input.Oldnodeid)
 	defer unlock()
-	ctx, done := fs.RPCContextFrom(parentCtx, cancel)
+	detachedCtx := context.WithoutCancel(parentCtx)
+	ctx, done := fs.RPCContextFrom(detachedCtx, nil)
 	defer done()
 	epoch := fs.cache.version()
 	mat := fs.newTmpMaterializer(epoch)

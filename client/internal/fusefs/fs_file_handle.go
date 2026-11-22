@@ -143,6 +143,15 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 	}
 	fs.lifecycleMu.RLock()
 	defer fs.lifecycleMu.RUnlock()
+	if !fs.cfg.IsReadOnly() {
+		if input.Flags&syscall.O_TRUNC != 0 {
+			unlock := fs.inodeLocks.lock(input.NodeId)
+			defer unlock()
+		} else {
+			unlock := fs.inodeLocks.rlock(input.NodeId)
+			defer unlock()
+		}
+	}
 	epoch := fs.cache.version()
 	cached, status := fs.getInodeWithContext(opCtx, cancel, input.NodeId)
 	if status != fuse.OK {

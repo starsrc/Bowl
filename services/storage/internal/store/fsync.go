@@ -60,9 +60,7 @@ func (s *StoreActor) validateFsyncCmd(cmd *writeCmd) error {
 }
 
 func (s *StoreActor) mutateFsyncCmd(cmd *writeCmd) {
-	op, _ := cmd.req.(*fsyncOp)
 	cmd.syncBarrier = true
-	cmd.syncIno = op.ino
 }
 
 func (s *StoreActor) validateFsyncDirCmd(cmd *writeCmd) error {
@@ -82,5 +80,4 @@ func (s *StoreActor) validateFsyncDirCmd(cmd *writeCmd) error {
 
 func (s *StoreActor) mutateFsyncDirCmd(cmd *writeCmd) {
 	cmd.syncBarrier = true
-	cmd.syncIno = 0
 }

@@ -15,7 +15,25 @@ func isLowWatermarkMeta(meta PackMeta) bool {
 	return meta.LiveBytes > 0 && meta.LiveBytes*2 <= meta.TotalBytes
 }
 
+func (s *StoreActor) recordPackUndo(packID uint64) {
+	if !s.recordingPackUndo {
+		return
+	}
+	if s.tickPackUndo == nil {
+		s.tickPackUndo = make(map[uint64]packMetaUndo)
+	}
+	if _, recorded := s.tickPackUndo[packID]; recorded {
+		return
+	}
+	prev, existed := s.packStats[packID]
+	s.tickPackUndo[packID] = packMetaUndo{
+		existed: existed,
+		meta:    prev,
+	}
+}
+
 func (s *StoreActor) setPackMeta(packID uint64, next PackMeta) {
+	s.recordPackUndo(packID)
 	if prev, ok := s.packStats[packID]; ok {
 		s.totalPackPhysicalBytes -= prev.TotalBytes
 		s.totalPackLiveBytes -= prev.LiveBytes
@@ -32,6 +50,7 @@ func (s *StoreActor) setPackMeta(packID uint64, next PackMeta) {
 }
 
 func (s *StoreActor) deletePackMeta(packID uint64) {
+	s.recordPackUndo(packID)
 	if prev, ok := s.packStats[packID]; ok {
 		s.totalPackPhysicalBytes -= prev.TotalBytes
 		s.totalPackLiveBytes -= prev.LiveBytes
@@ -197,8 +216,8 @@ func (s *StoreActor) activePackID() uint64 {
 	return 0
 }
 
-func (s *StoreActor) stageAppend(ctx context.Context, blobs *blobStore, ino uint64, data []byte, staged *[]BlobRef) (BlobRef, error) {
-	ref, err := blobs.append(ctx, ino, data)
+func (s *StoreActor) stageAppend(ctx context.Context, blobs *blobStore, data []byte, staged *[]BlobRef) (BlobRef, error) {
+	ref, err := blobs.append(ctx, data)
 	if err != nil {
 		return BlobRef{}, err
 	}
@@ -209,8 +228,8 @@ func (s *StoreActor) stageAppend(ctx context.Context, blobs *blobStore, ino uint
 	return ref, nil
 }
 
-func (s *StoreActor) stageAppendBlocks(ctx context.Context, blobs *blobStore, ino uint64, data []byte, staged *[]BlobRef) ([]BlobRef, error) {
-	refs, err := blobs.appendBlocks(ctx, ino, data)
+func (s *StoreActor) stageAppendBlocks(ctx context.Context, blobs *blobStore, data []byte, staged *[]BlobRef) ([]BlobRef, error) {
+	refs, err := blobs.appendBlocks(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -227,8 +246,8 @@ func (s *StoreActor) stageAppendBlocks(ctx context.Context, blobs *blobStore, in
 	return refs, nil
 }
 
-func (s *StoreActor) stageExtendTail(blobs *blobStore, ino uint64, oldRef BlobRef, patchOffset uint32, data []byte, newLen uint32, staged *[]BlobRef) (BlobRef, bool, error) {
-	extRef, ok, err := blobs.extendTail(ino, oldRef, patchOffset, data, newLen)
+func (s *StoreActor) stageExtendTail(blobs *blobStore, oldRef BlobRef, patchOffset uint32, data []byte, newLen uint32, staged *[]BlobRef) (BlobRef, bool, error) {
+	extRef, ok, err := blobs.extendTail(oldRef, patchOffset, data, newLen)
 	if err != nil || !ok {
 		return BlobRef{}, false, err
 	}
@@ -366,17 +385,6 @@ func (s *StoreActor) enqueueRemovePacks(packIDs []uint64) {
 	s.blobs.enqueueRemovePacks(packIDs)
 }
 
-func (s *StoreActor) syncFileInodes(inodes []uint64) error {
-	if s.blobs == nil || len(inodes) == 0 {
-		return nil
-	}
-	var err error
-	for _, ino := range inodes {
-		err = errors.Join(err, s.blobs.syncInode(ino))
-	}
-	return err
-}
-
 func (s *StoreActor) syncWALAndReclaimDeadPacks() error {
 	_, _, _, _, err := s.syncWALAndReclaimDeadPacksTimed()
 	return err
@@ -385,7 +393,8 @@ func (s *StoreActor) syncWALAndReclaimDeadPacks() error {
 func (s *StoreActor) syncWALAndReclaimDeadPacksTimed() (didWALSync bool, walDur time.Duration, reclaimed int, removeDur time.Duration, err error) {
 	toReclaim := s.takePendingDeadPacks()
 	wasDirty := s.walDirty.Swap(false)
-	if !wasDirty && len(toReclaim) == 0 {
+	blobsDirty := s.blobs != nil && s.blobs.hasDirty()
+	if !wasDirty && len(toReclaim) == 0 && !blobsDirty {
 		if s.blobs != nil {
 			remStart := time.Now()
 			s.blobs.waitPendingReclaims()
@@ -393,11 +402,32 @@ func (s *StoreActor) syncWALAndReclaimDeadPacksTimed() (didWALSync bool, walDur 
 		}
 		return false, 0, 0, removeDur, nil
 	}
+	if s.blobs != nil {
+		if syncErr := s.blobs.sync(); syncErr != nil {
+			s.restorePendingDeadPacks(toReclaim)
+			if wasDirty {
+				s.walDirty.Store(true)
+			}
+			return false, 0, 0, 0, syncErr
+		}
+	}
+	if s.beforeWALSyncHook != nil {
+		s.beforeWALSyncHook()
+	}
 	walStart := time.Now()
-	if syncErr := s.db.LogData(nil, pebble.Sync); syncErr != nil {
+	var syncErr error
+	if s.walApplyErrHook != nil {
+		syncErr = s.walApplyErrHook()
+	}
+	if syncErr == nil {
+		syncErr = s.db.LogData(nil, pebble.Sync)
+	}
+	if syncErr != nil {
 		walDur = time.Since(walStart)
 		s.restorePendingDeadPacks(toReclaim)
-		s.walDirty.Store(true)
+		if wasDirty {
+			s.walDirty.Store(true)
+		}
 		return true, walDur, 0, 0, syncErr
 	}
 	walDur = time.Since(walStart)

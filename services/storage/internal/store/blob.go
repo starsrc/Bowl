@@ -92,19 +92,18 @@ type blobStore struct {
 	activeFlushedTo    uint32
 	writeSeq           uint64
 	dirtyPacks         map[uint64]uint64
-	unownedDirty       map[uint64]uint64
-	inoPacks           map[uint64]map[uint64]uint64
 	dirtyNew           map[uint64]struct{}
 	dirDirty           bool
 	dirDirtySeq        uint64
 	syncFlights        map[uint64]*packSyncFlight
 	dirFlight          *dirSyncFlight
 
-	bgStarted    bool
-	bgQueue      []uint64
-	bgNotify     chan struct{}
-	bgDone       chan struct{}
-	syncFileHook func(packID uint64)
+	bgStarted       bool
+	bgQueue         []uint64
+	bgNotify        chan struct{}
+	bgDone          chan struct{}
+	syncFileHook    func(packID uint64)
+	syncFileErrHook func(packID uint64) error
 
 	wbStarted bool
 	wbCh      chan writebackHint
@@ -131,7 +130,9 @@ func newBlobStore(
 	logger *slog.Logger,
 	metrics *Metrics,
 	packAlloc PackSegmentAllocator,
-	syncFileHook, removePackHook func(uint64),
+	syncFileHook func(uint64),
+	syncFileErrHook func(uint64) error,
+	removePackHook func(uint64),
 ) *blobStore {
 	if logger == nil {
 		logger = slog.Default()
@@ -140,19 +141,18 @@ func newBlobStore(
 		maxPackSize = PackMaxSize
 	}
 	bs := &blobStore{
-		dir:            filepath.Join(base, "packs"),
-		logger:         logger,
-		metrics:        metrics,
-		maxPackSize:    maxPackSize,
-		packAlloc:      packAlloc,
-		dirtyPacks:     make(map[uint64]uint64),
-		unownedDirty:   make(map[uint64]uint64),
-		inoPacks:       make(map[uint64]map[uint64]uint64),
-		dirtyNew:       make(map[uint64]struct{}),
-		syncFlights:    make(map[uint64]*packSyncFlight),
-		packFiles:      make(map[uint64]*os.File),
-		syncFileHook:   syncFileHook,
-		removePackHook: removePackHook,
+		dir:             filepath.Join(base, "packs"),
+		logger:          logger,
+		metrics:         metrics,
+		maxPackSize:     maxPackSize,
+		packAlloc:       packAlloc,
+		dirtyPacks:      make(map[uint64]uint64),
+		dirtyNew:        make(map[uint64]struct{}),
+		syncFlights:     make(map[uint64]*packSyncFlight),
+		packFiles:       make(map[uint64]*os.File),
+		syncFileHook:    syncFileHook,
+		syncFileErrHook: syncFileErrHook,
+		removePackHook:  removePackHook,
 	}
 	maxID := bs.scanExistingPacks()
 	bs.minPackID = maxID
@@ -336,7 +336,7 @@ func packFilePath(dir string, packID uint64) string {
 	return dir + string(buf[:])
 }
 
-func (s *blobStore) append(ctx context.Context, ino uint64, data []byte) (BlobRef, error) {
+func (s *blobStore) append(ctx context.Context, data []byte) (BlobRef, error) {
 	if len(data) == 0 || len(data) > BlobSize {
 		return BlobRef{}, ErrInvalidValue
 	}
@@ -369,7 +369,7 @@ func (s *blobStore) append(ctx context.Context, ino uint64, data []byte) (BlobRe
 
 	s.activeOffset = offset + uint32(len(data))
 	wbHint, wbCh := s.takeWritebackHintLocked(packID, s.activeOffset)
-	s.markPackDirtyLocked(packID, ino)
+	s.markPackDirtyLocked(packID)
 	s.mu.Unlock()
 
 	s.dispatchWritebackHint(wbCh, wbHint)
@@ -383,7 +383,7 @@ func (s *blobStore) append(ctx context.Context, ino uint64, data []byte) (BlobRe
 	return ref, nil
 }
 
-func (s *blobStore) appendBlocks(ctx context.Context, ino uint64, data []byte) ([]BlobRef, error) {
+func (s *blobStore) appendBlocks(ctx context.Context, data []byte) ([]BlobRef, error) {
 	if len(data) == 0 || len(data)%BlobSize != 0 {
 		return nil, ErrInvalidValue
 	}
@@ -440,7 +440,7 @@ func (s *blobStore) appendBlocks(ctx context.Context, ino uint64, data []byte) (
 				overflowHints = append(overflowHints, h)
 			}
 		}
-		s.markPackDirtyLocked(packID, ino)
+		s.markPackDirtyLocked(packID)
 
 		for b := range batchBlocks {
 			refs = append(refs, BlobRef{
@@ -463,7 +463,7 @@ func (s *blobStore) appendBlocks(ctx context.Context, ino uint64, data []byte) (
 	return refs, nil
 }
 
-func (s *blobStore) extendTail(ino uint64, oldRef BlobRef, patchOffset uint32, patchData []byte, newLength uint32) (BlobRef, bool, error) {
+func (s *blobStore) extendTail(oldRef BlobRef, patchOffset uint32, patchData []byte, newLength uint32) (BlobRef, bool, error) {
 	if oldRef.PackID == 0 || oldRef.Length == 0 || newLength < oldRef.Length || newLength == 0 || newLength > BlobSize {
 		return BlobRef{}, false, ErrInvalidValue
 	}
@@ -517,7 +517,7 @@ func (s *blobStore) extendTail(ino uint64, oldRef BlobRef, patchOffset uint32, p
 
 	s.activeOffset = oldRef.Offset + newLength
 	wbHint, wbCh := s.takeWritebackHintLocked(packID, s.activeOffset)
-	s.markPackDirtyLocked(packID, ino)
+	s.markPackDirtyLocked(packID)
 	s.mu.Unlock()
 
 	s.dispatchWritebackHint(wbCh, wbHint)
@@ -667,20 +667,9 @@ func (s *blobStore) bgSyncLoop() {
 	}
 }
 
-func (s *blobStore) markPackDirtyLocked(packID, ino uint64) {
+func (s *blobStore) markPackDirtyLocked(packID uint64) {
 	s.writeSeq++
-	seq := s.writeSeq
-	s.dirtyPacks[packID] = seq
-	if ino == 0 {
-		s.unownedDirty[packID] = seq
-		return
-	}
-	set := s.inoPacks[ino]
-	if set == nil {
-		set = make(map[uint64]uint64)
-		s.inoPacks[ino] = set
-	}
-	set[packID] = seq
+	s.dirtyPacks[packID] = s.writeSeq
 }
 
 func (s *blobStore) markDirDirtyLocked() {
@@ -986,7 +975,18 @@ func (s *blobStore) evictHotPack(packID uint64) {
 	}
 }
 
+func (s *blobStore) hasDirty() bool {
+	s.mu.Lock()
+	dirty := len(s.dirtyPacks) > 0 || s.dirDirty
+	s.mu.Unlock()
+	return dirty
+}
+
 func (s *blobStore) sync() error {
+	return s.syncWithTrigger(syncTriggerFlushWAL)
+}
+
+func (s *blobStore) syncWithTrigger(trigger syncTrigger) error {
 	s.mu.Lock()
 	if len(s.dirtyPacks) == 0 && !s.dirDirty {
 		s.mu.Unlock()
@@ -998,7 +998,7 @@ func (s *blobStore) sync() error {
 	}
 	s.mu.Unlock()
 
-	return s.syncBatch(packs, syncTriggerFlushWAL)
+	return s.syncBatch(packs, trigger)
 }
 
 func (s *blobStore) sealAndSync(ctx context.Context, livePackIDs []uint64) error {
@@ -1073,44 +1073,11 @@ func (s *blobStore) sealAndSync(ctx context.Context, livePackIDs []uint64) error
 
 func (s *blobStore) clearDirtyTrackingOnSealLocked(packID uint64) {
 	delete(s.dirtyPacks, packID)
-	delete(s.unownedDirty, packID)
-	for owner, set := range s.inoPacks {
-		if _, ok := set[packID]; ok {
-			delete(set, packID)
-			if len(set) == 0 {
-				delete(s.inoPacks, owner)
-			}
-		}
-	}
 	if _, isNew := s.dirtyNew[packID]; isNew {
 		delete(s.dirtyNew, packID)
 		s.markDirDirtyLocked()
 	}
 	s.bgQueue = slices.DeleteFunc(s.bgQueue, func(id uint64) bool { return id == packID })
-}
-
-func (s *blobStore) syncInode(ino uint64) error {
-	s.mu.Lock()
-	var packs []uint64
-	set := s.inoPacks[ino]
-	if len(set) > 0 {
-		packs = make([]uint64, 0, len(set)+len(s.unownedDirty))
-		for packID := range set {
-			packs = append(packs, packID)
-		}
-	}
-	for packID := range s.unownedDirty {
-		if _, exists := set[packID]; !exists {
-			packs = append(packs, packID)
-		}
-	}
-	if len(packs) == 0 && !s.dirDirty {
-		s.mu.Unlock()
-		return nil
-	}
-	s.mu.Unlock()
-
-	return s.syncBatch(packs, syncTriggerFsyncBarrier)
 }
 
 func (s *blobStore) syncPackWithTrigger(packID uint64, trigger syncTrigger) error {
@@ -1142,6 +1109,7 @@ func (s *blobStore) syncPackWithTrigger(packID uint64, trigger syncTrigger) erro
 		}
 		s.syncFlights[packID] = flight
 		hook := s.syncFileHook
+		errHook := s.syncFileErrHook
 		s.mu.Unlock()
 
 		if hook != nil {
@@ -1149,23 +1117,28 @@ func (s *blobStore) syncPackWithTrigger(packID uint64, trigger syncTrigger) erro
 		}
 
 		var syncErr error
-		file, err := s.getOrOpenPackFile(packID)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			syncErr = nil
-		case err != nil:
-			syncErr = err
-		default:
-			var syncStart time.Time
-			if s.metrics != nil {
-				syncStart = time.Now()
-			}
-			err = syncFileData(file)
-			if s.metrics != nil {
-				s.metrics.observeBlobSync(syncTargetPackData, trigger, time.Since(syncStart))
-			}
-			if err != nil {
+		if errHook != nil {
+			syncErr = errHook(packID)
+		}
+		if syncErr == nil {
+			file, err := s.getOrOpenPackFile(packID)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				syncErr = nil
+			case err != nil:
 				syncErr = err
+			default:
+				var syncStart time.Time
+				if s.metrics != nil {
+					syncStart = time.Now()
+				}
+				err = syncFileData(file)
+				if s.metrics != nil {
+					s.metrics.observeBlobSync(syncTargetPackData, trigger, time.Since(syncStart))
+				}
+				if err != nil {
+					syncErr = err
+				}
 			}
 		}
 
@@ -1185,17 +1158,6 @@ func (s *blobStore) syncPackWithTrigger(packID uint64, trigger syncTrigger) erro
 func (s *blobStore) completePackSyncLocked(packID, syncedSeq uint64) {
 	if curSeq, ok := s.dirtyPacks[packID]; ok && curSeq <= syncedSeq {
 		delete(s.dirtyPacks, packID)
-	}
-	if curSeq, ok := s.unownedDirty[packID]; ok && curSeq <= syncedSeq {
-		delete(s.unownedDirty, packID)
-	}
-	for owner, set := range s.inoPacks {
-		if curSeq, ok := set[packID]; ok && curSeq <= syncedSeq {
-			delete(set, packID)
-			if len(set) == 0 {
-				delete(s.inoPacks, owner)
-			}
-		}
 	}
 	if _, isNew := s.dirtyNew[packID]; isNew {
 		delete(s.dirtyNew, packID)
@@ -1425,14 +1387,7 @@ func (s *blobStore) clearDirtyStateForPackLocked(packID uint64) {
 		s.activeFlushedTo = 0
 	}
 	delete(s.dirtyPacks, packID)
-	delete(s.unownedDirty, packID)
 	delete(s.dirtyNew, packID)
-	for owner, set := range s.inoPacks {
-		delete(set, packID)
-		if len(set) == 0 {
-			delete(s.inoPacks, owner)
-		}
-	}
 	s.bgQueue = slices.DeleteFunc(s.bgQueue, func(id uint64) bool { return id == packID })
 	s.markDirDirtyLocked()
 }

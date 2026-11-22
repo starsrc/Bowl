@@ -231,6 +231,7 @@ type StoreActor struct {
 	packStats              map[uint64]PackMeta
 	dirtyPackStats         map[uint64]struct{}
 	tickPackUndo           map[uint64]packMetaUndo
+	tickDiscardedAtime     map[uint64]int64
 	recordingPackUndo      bool
 	totalPackPhysicalBytes uint64
 	totalPackLiveBytes     uint64
@@ -878,6 +879,16 @@ func (s *StoreActor) discardDirtyAtime(ino uint64) {
 		return
 	}
 	s.atimeMu.Lock()
+	if s.recordingPackUndo {
+		if ns, ok := s.dirtyAtime[ino]; ok {
+			if s.tickDiscardedAtime == nil {
+				s.tickDiscardedAtime = make(map[uint64]int64)
+			}
+			if prev, exists := s.tickDiscardedAtime[ino]; !exists || ns > prev {
+				s.tickDiscardedAtime[ino] = ns
+			}
+		}
+	}
 	delete(s.dirtyAtime, ino)
 	s.atimeMu.Unlock()
 }
@@ -1169,11 +1180,12 @@ func (s *StoreActor) processTick() {
 	s.recordingPackUndo = true
 
 	var (
-		hasSyncBarrier bool
-		hasCheckpoint  bool
-		mutated        bool
-		phaseADur      time.Duration
-		phaseBDur      time.Duration
+		hasSyncBarrier  bool
+		hasCheckpoint   bool
+		mutated         bool
+		tickStagedBlobs []BlobRef
+		phaseADur       time.Duration
+		phaseBDur       time.Duration
 	)
 
 	for _, cmd := range cmds {
@@ -1183,6 +1195,9 @@ func (s *StoreActor) processTick() {
 		phaseADur += time.Since(aStart)
 		if err != nil {
 			bStart := time.Now()
+			if len(cmd.stagedBlobs) > 0 {
+				tickStagedBlobs = append(tickStagedBlobs, cmd.stagedBlobs...)
+			}
 			for _, ref := range cmd.stagedBlobs {
 				s.recordDeadBlobWrite(ref)
 			}
@@ -1197,6 +1212,9 @@ func (s *StoreActor) processTick() {
 		prevCount := s.batch.Count()
 		cmdPrevStat := s.stat
 		s.mutateCmd(cmd)
+		if len(cmd.stagedBlobs) > 0 {
+			tickStagedBlobs = append(tickStagedBlobs, cmd.stagedBlobs...)
+		}
 		for _, ref := range cmd.stagedBlobs {
 			if meta, ok := s.packStats[ref.PackID]; ok && meta.LiveBytes == 0 {
 				s.dirtyPackStats[ref.PackID] = struct{}{}
@@ -1307,10 +1325,17 @@ func (s *StoreActor) processTick() {
 		for _, packID := range prevDirtyPacks {
 			s.dirtyPackStats[packID] = struct{}{}
 		}
+		s.restoreDirtyAtime(s.tickDiscardedAtime)
 		s.restoreDirtyAtime(pendingAtime)
 	}
 	s.recordingPackUndo = false
 	clear(s.tickPackUndo)
+	clear(s.tickDiscardedAtime)
+	if commitErr != nil {
+		for _, ref := range tickStagedBlobs {
+			s.recordDeadBlobWrite(ref)
+		}
+	}
 
 	if len(s.batch.Repr()) > BatchResetMaxReprBytes || s.batch.Count() > BatchResetMaxCount {
 		s.batch = s.db.NewIndexedBatch()

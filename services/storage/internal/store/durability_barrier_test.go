@@ -543,7 +543,8 @@ func TestGivenCoalescedCreateWriteFsyncWhenPackSyncOrWALApplyReturnsEIOThenState
 			require.Equal(t, uint64(5), retryStatFS.Files)
 
 			retrySnap := actor.MetricsSnapshot()
-			require.Equal(t, 2, retrySnap.LowWatermarkPacks)
+			require.Equal(t, 3, retrySnap.LowWatermarkPacks)
+			require.Equal(t, uint64(7*BlobSize), retrySnap.PackPhysicalBytes)
 			require.Equal(t, uint64(4*BlobSize), retrySnap.PackLiveBytes)
 
 			gotSeedTail, err := actor.Read(ctx, seed.Ino, BlobSize, 2*BlobSize)
@@ -725,7 +726,10 @@ func TestGivenNonBarrierWriteTickWhenWALApplyReturnsEIOThenInMemoryStateRollsBac
 	stAfter, err := actor.StatFS(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(4*BlobSize), stAfter.UsedBytes)
-	require.Equal(t, 2, actor.MetricsSnapshot().LowWatermarkPacks)
+	snapAfter := actor.MetricsSnapshot()
+	require.Equal(t, 3, snapAfter.LowWatermarkPacks)
+	require.Equal(t, uint64(7*BlobSize), snapAfter.PackPhysicalBytes)
+	require.Equal(t, uint64(4*BlobSize), snapAfter.PackLiveBytes)
 }
 
 func TestGivenDirtyPackWhenFlushWALRunsThenPackAndPacksDirSyncBeforeWALAndEIOPreservesDeadPacksAndWALDirty(t *testing.T) {
@@ -1016,4 +1020,289 @@ func TestGivenPriorPendingDeadPackAndAbortedBatchDeadPackWhenBarrierWALApplyFail
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 	_, statErr = os.Stat(packFilePath(actor.blobs.dir, 2))
 	require.NoError(t, statErr)
+}
+
+func TestGivenDirtyAtimeWhenUnlinkSetAttrOrRmdirBarrierReturnsEIOThenDirtyAtimeSurvivesAndPersists(t *testing.T) {
+	cases := []struct {
+		name      string
+		injectWAL bool
+		runOp     func(ctx context.Context, actor *StoreActor, targetIno uint64) error
+	}{
+		{
+			name:      "Unlink_WALApplyEIO",
+			injectWAL: true,
+			runOp: func(ctx context.Context, actor *StoreActor, _ uint64) error {
+				return actor.Unlink(ctx, RootIno, []byte("target.bin"), false)
+			},
+		},
+		{
+			name:      "Unlink_PackSyncEIO",
+			injectWAL: false,
+			runOp: func(ctx context.Context, actor *StoreActor, _ uint64) error {
+				return actor.Unlink(ctx, RootIno, []byte("target.bin"), false)
+			},
+		},
+		{
+			name:      "SetAttrAtimeNow_WALApplyEIO",
+			injectWAL: true,
+			runOp: func(ctx context.Context, actor *StoreActor, targetIno uint64) error {
+				_, err := actor.SetAttr(ctx, targetIno, SetAttrReq{AtimeNow: true})
+				return err
+			},
+		},
+		{
+			name:      "Rmdir_WALApplyEIO",
+			injectWAL: true,
+			runOp: func(ctx context.Context, actor *StoreActor, _ uint64) error {
+				return actor.Rmdir(ctx, RootIno, []byte("targetdir"))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+
+			var (
+				packErrArmed  atomic.Bool
+				failNextWAL   atomic.Bool
+				walErrArmed   atomic.Bool
+				tickHookStage atomic.Int32
+				tickEntered   = make(chan struct{})
+				releaseTick   = make(chan struct{})
+				targetIno     atomic.Uint64
+				futureAtime   = time.Now().Add(4 * time.Hour).Truncate(time.Nanosecond)
+				actor         *StoreActor
+				err           error
+			)
+
+			actor, err = Open(Options{
+				Dir:       dir,
+				DiskID:    "disk-step25-discard-atime-" + tc.name,
+				MaxBytes:  64 << 20,
+				AtimeMode: AtimeModeStrictAtime,
+				syncFileErrHook: func(_ uint64) error {
+					if packErrArmed.Load() {
+						return ErrIO
+					}
+					return nil
+				},
+				beforeWALSyncHook: func() {
+					if failNextWAL.Swap(false) {
+						walErrArmed.Store(true)
+					}
+				},
+				walApplyErrHook: func() error {
+					if walErrArmed.Swap(false) {
+						return ErrIO
+					}
+					return nil
+				},
+				beforeTickHook: func() {
+					switch tickHookStage.Load() {
+					case 1:
+						if tickHookStage.CompareAndSwap(1, 2) {
+							close(tickEntered)
+							<-releaseTick
+						}
+					case 2:
+						if tickHookStage.CompareAndSwap(2, 3) {
+							actor.MarkAtimeDirty(targetIno.Load(), futureAtime)
+						}
+					}
+				},
+			})
+			require.NoError(t, err)
+
+			anchor := createAndWriteInternal(t, actor, "anchor.bin", 0x55, BlobSize)
+			var target Attribute
+			if tc.name == "Rmdir_WALApplyEIO" {
+				target, err = actor.Mkdir(ctx, MkdirReq{ParentIno: RootIno, Name: []byte("targetdir"), Mode: S_IFDIR | 0o755})
+				require.NoError(t, err)
+			} else {
+				target = createAndWriteInternal(t, actor, "target.bin", 0x66, BlobSize)
+			}
+			targetIno.Store(target.Ino)
+
+			var (
+				wg       sync.WaitGroup
+				gateErr  error
+				opErr    error
+				fsyncErr error
+			)
+			tickHookStage.Store(1)
+			wg.Go(func() {
+				_, gateErr = actor.Create(ctx, CreateReq{ParentIno: RootIno, Name: []byte("gate.bin"), Mode: S_IFREG | 0o644})
+			})
+			awaitValueInternal(t, tickEntered, 2*time.Second, "beforeTickHook did not fire", func() {
+				close(releaseTick)
+			})
+
+			wg.Go(func() {
+				opErr = tc.runOp(ctx, actor, target.Ino)
+			})
+			wg.Go(func() {
+				fsyncErr = actor.Fsync(ctx, anchor.Ino)
+			})
+			waitMailboxActiveAtLeast(t, actor, 2, 2*time.Second)
+
+			if tc.injectWAL {
+				failNextWAL.Store(true)
+			} else {
+				packErrArmed.Store(true)
+			}
+			close(releaseTick)
+			wg.Wait()
+
+			require.NoError(t, gateErr)
+			require.ErrorIs(t, opErr, ErrIO)
+			require.ErrorIs(t, fsyncErr, ErrIO)
+
+			packErrArmed.Store(false)
+			failNextWAL.Store(false)
+			walErrArmed.Store(false)
+
+			actor.atimeMu.Lock()
+			gotDirty := actor.dirtyAtime[target.Ino]
+			actor.atimeMu.Unlock()
+			require.Equal(t, futureAtime.UnixNano(), gotDirty)
+
+			gotAttr, err := actor.GetAttr(ctx, target.Ino)
+			require.NoError(t, err)
+			require.Equal(t, futureAtime.UnixNano(), gotAttr.Atime)
+
+			require.NoError(t, actor.Close())
+
+			reopened, err := Open(Options{
+				Dir:    dir,
+				DiskID: "disk-step25-discard-atime-" + tc.name,
+			})
+			require.NoError(t, err)
+			defer func() { require.NoError(t, reopened.Close()) }()
+
+			persistedAttr, err := reopened.GetAttr(ctx, target.Ino)
+			require.NoError(t, err)
+			require.Equal(t, futureAtime.UnixNano(), persistedAttr.Atime)
+
+			require.NoError(t, tc.runOp(ctx, reopened, target.Ino))
+		})
+	}
+}
+
+func TestGivenRolledBackWriteFillingDeadPackWhenRetriedAndFlushedThenDeadPackDeleted(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	var walErrArmed atomic.Bool
+	actor, err := Open(Options{
+		Dir:         dir,
+		DiskID:      "disk-step25-deadpack-leak",
+		MaxBytes:    64 << 20,
+		MaxPackSize: BlobSize,
+		walApplyErrHook: func() error {
+			if walErrArmed.Swap(false) {
+				return ErrIO
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	defer func() {
+		walErrArmed.Store(false)
+		require.NoError(t, actor.Close())
+	}()
+
+	seed := createAndWriteInternal(t, actor, "seed.bin", 0x11, BlobSize)
+	require.NoError(t, actor.FlushWAL())
+	_, statErr := os.Stat(packFilePath(actor.blobs.dir, 1))
+	require.NoError(t, statErr)
+
+	walErrArmed.Store(true)
+	_, _, err = actor.Write(ctx, seed.Ino, BlobSize, bytes.Repeat([]byte{0x22}, BlobSize))
+	require.ErrorIs(t, err, ErrIO)
+
+	_, statErr = os.Stat(packFilePath(actor.blobs.dir, 2))
+	require.NoError(t, statErr)
+	require.Equal(t, uint64(BlobSize), actor.MetricsSnapshot().PackPhysicalBytes)
+	require.Equal(t, uint64(BlobSize), actor.MetricsSnapshot().PackLiveBytes)
+
+	_, _, err = actor.Write(ctx, seed.Ino, BlobSize, bytes.Repeat([]byte{0x33}, BlobSize))
+	require.NoError(t, err)
+	require.NoError(t, actor.FlushWAL())
+
+	_, statErr = os.Stat(packFilePath(actor.blobs.dir, 2))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, statErr = os.Stat(packFilePath(actor.blobs.dir, 3))
+	require.NoError(t, statErr)
+
+	got, err := actor.Read(ctx, seed.Ino, BlobSize, BlobSize)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0x33}, BlobSize), got)
+}
+
+func TestGivenRolledBackWriteHalfFillingSealedPackWhenRetriedReopenedAndCompactedThenHalfDeadPackReclaimed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	var walErrArmed atomic.Bool
+	actor, err := Open(Options{
+		Dir:         dir,
+		DiskID:      "disk-step25-halfdead-compact",
+		MaxBytes:    64 << 20,
+		MaxPackSize: 2 * BlobSize,
+		walApplyErrHook: func() error {
+			if walErrArmed.Swap(false) {
+				return ErrIO
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	seed := createAndWriteInternal(t, actor, "seed.bin", 0x11, 2*BlobSize)
+	anchor := createAndWriteInternal(t, actor, "anchor.bin", 0x22, BlobSize)
+	require.NoError(t, actor.FlushWAL())
+
+	walErrArmed.Store(true)
+	_, _, err = actor.Write(ctx, seed.Ino, BlobSize, bytes.Repeat([]byte{0x77}, 2*BlobSize))
+	require.ErrorIs(t, err, ErrIO)
+
+	retryPayload := bytes.Repeat([]byte{0x88}, 2*BlobSize)
+	_, _, err = actor.Write(ctx, seed.Ino, BlobSize, retryPayload)
+	require.NoError(t, err)
+	require.Equal(t, 3, actor.MetricsSnapshot().LowWatermarkPacks)
+	require.Equal(t, uint64(7*BlobSize), actor.MetricsSnapshot().PackPhysicalBytes)
+	require.NoError(t, actor.Close())
+
+	reopened, err := Open(Options{
+		Dir:         dir,
+		DiskID:      "disk-step25-halfdead-compact",
+		MaxBytes:    64 << 20,
+		MaxPackSize: 2 * BlobSize,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reopened.Close()) }()
+
+	require.Equal(t, 3, reopened.MetricsSnapshot().LowWatermarkPacks)
+	require.NoError(t, reopened.CompactPacks(ctx))
+
+	_, statErr := os.Stat(packFilePath(reopened.blobs.dir, 1))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, statErr = os.Stat(packFilePath(reopened.blobs.dir, 2))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, statErr = os.Stat(packFilePath(reopened.blobs.dir, 3))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+
+	gotAnchor, err := reopened.Read(ctx, anchor.Ino, 0, BlobSize)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0x22}, BlobSize), gotAnchor)
+
+	gotSeedHead, err := reopened.Read(ctx, seed.Ino, 0, BlobSize)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0x11}, BlobSize), gotSeedHead)
+
+	gotSeedTail, err := reopened.Read(ctx, seed.Ino, BlobSize, 2*BlobSize)
+	require.NoError(t, err)
+	require.Equal(t, retryPayload, gotSeedTail)
 }

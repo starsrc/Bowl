@@ -43,6 +43,10 @@ const (
 	HTTP2SendPingTimeout = 3 * time.Second
 
 	HTTP2PingTimeout = 2 * time.Second
+
+	HTTP2TLSHandshakeTimeout = 10 * time.Second
+
+	HTTP2IdleConnTimeout = 90 * time.Second
 )
 
 type ClientConfig struct {
@@ -62,7 +66,8 @@ type ClientConfig struct {
 }
 
 func ResolveEndpoint(endpoint string) (string, error) {
-	if strings.TrimSpace(endpoint) == "" {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
 		endpoint = strings.TrimSpace(os.Getenv(EnvStorageEndpoint))
 	}
 	if endpoint == "" {
@@ -79,8 +84,17 @@ func ResolveEndpoint(endpoint string) (string, error) {
 		return "", fmt.Errorf("unsupported storage endpoint scheme %q: only http and https are supported", u.Scheme)
 	}
 
-	if u.Host == "" {
+	if u.Hostname() == "" {
 		return "", fmt.Errorf("storage endpoint %q missing host", endpoint)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("storage endpoint %q must not contain userinfo", endpoint)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("storage endpoint %q must not contain query parameters", endpoint)
+	}
+	if u.Fragment != "" || strings.Contains(endpoint, "#") {
+		return "", fmt.Errorf("storage endpoint %q must not contain a fragment", endpoint)
 	}
 
 	return strings.TrimRight(endpoint, "/"), nil
@@ -130,8 +144,9 @@ func newHTTPTransport(endpoint string, tlsConfig *tls.Config, maxRecvBufPerConn 
 				}
 				return newH2CoalesceConn(conn), nil
 			},
-			Protocols: &protocols,
-			HTTP2:     h2Cfg,
+			IdleConnTimeout: HTTP2IdleConnTimeout,
+			Protocols:       &protocols,
+			HTTP2:           h2Cfg,
 		}, nil
 	}
 
@@ -147,11 +162,13 @@ func newHTTPTransport(endpoint string, tlsConfig *tls.Config, maxRecvBufPerConn 
 			}
 			return conn, nil
 		},
-		ForceAttemptHTTP2: true,
-		HTTP2:             h2Cfg,
+		TLSHandshakeTimeout: HTTP2TLSHandshakeTimeout,
+		IdleConnTimeout:     HTTP2IdleConnTimeout,
+		ForceAttemptHTTP2:   true,
+		HTTP2:               h2Cfg,
 	}
 	if tlsConfig != nil {
-		tlsTransport.TLSClientConfig = tlsConfig
+		tlsTransport.TLSClientConfig = tlsConfig.Clone()
 	}
 	return tlsTransport, nil
 }
@@ -185,6 +202,26 @@ func isBulkDataProcedure(urlPath string) bool {
 
 type idleConnCloser interface {
 	CloseIdleConnections()
+}
+
+type ownedTransportClient struct {
+	storagev1connect.StorageServiceClient
+	closer idleConnCloser
+}
+
+func (c *ownedTransportClient) CloseIdleConnections() {
+	if c != nil && c.closer != nil {
+		c.closer.CloseIdleConnections()
+	}
+}
+
+func CloseIdleConnections(client storagev1connect.StorageServiceClient) {
+	if client == nil {
+		return
+	}
+	if closer, ok := client.(idleConnCloser); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 type shardedRoundTripper struct {
@@ -267,12 +304,14 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 
 	token := ResolveToken(cfg.Token)
 
+	var ownedCloser idleConnCloser
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		tr, trErr := newShardedRoundTripper(endpoint, cfg.TLSConfig)
 		if trErr != nil {
 			return nil, trErr
 		}
+		ownedCloser = tr
 		httpClient = &http.Client{
 			Transport: tr,
 		}
@@ -295,6 +334,9 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 		),
 	)
 	if err != nil {
+		if ownedCloser != nil {
+			ownedCloser.CloseIdleConnections()
+		}
 		return nil, fmt.Errorf("create otelconnect interceptor: %w", err)
 	}
 	interceptors = append(interceptors, otelInterceptor, serverx.NewErrorReasonInterceptor())
@@ -327,7 +369,14 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 		clientOpts = append(clientOpts, opts...)
 	}
 
-	return storagev1connect.NewStorageServiceClient(httpClient, endpoint, clientOpts...), nil
+	client := storagev1connect.NewStorageServiceClient(httpClient, endpoint, clientOpts...)
+	if ownedCloser != nil {
+		return &ownedTransportClient{
+			StorageServiceClient: client,
+			closer:               ownedCloser,
+		}, nil
+	}
+	return client, nil
 }
 
 func NewClient(endpoint, token string, opts ...connect.ClientOption) (storagev1connect.StorageServiceClient, error) {

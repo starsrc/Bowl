@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,6 +62,7 @@ var idempotentProcedures = map[string]struct{}{
 	storagev1connect.StorageServiceGetDiskProcedure:          {},
 	storagev1connect.StorageServiceListDisksProcedure:        {},
 	storagev1connect.StorageServiceDiffDiskProcedure:         {},
+	storagev1connect.StorageServiceListSnapshotsProcedure:    {},
 	storagev1connect.StorageServiceReadSnapshotNodeProcedure: {},
 	storagev1connect.StorageServiceRenewMountProcedure:       {},
 	storagev1connect.StorageServiceUnmountDiskProcedure:      {},
@@ -130,7 +132,7 @@ func isDialError(err error) bool {
 }
 
 func isTransportError(err error) bool {
-	if err == nil {
+	if err == nil || connect.IsWireError(err) {
 		return false
 	}
 
@@ -141,8 +143,25 @@ func isTransportError(err error) bool {
 		return true
 	}
 
-	var opErr *net.OpError
-	return errors.As(err, &opErr)
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return true
+	}
+
+	return isHTTP2TransportError(err)
+}
+
+func isHTTP2TransportError(err error) bool {
+	msg := err.Error()
+	if strings.Contains(msg, "http2: client connection lost") ||
+		strings.Contains(msg, "http2: server sent GOAWAY") ||
+		strings.Contains(msg, "http2: Transport received Server's graceful shutdown GOAWAY") ||
+		strings.Contains(msg, "http2: response body closed") {
+		return true
+	}
+	if connectErr, ok := errors.AsType[*connect.Error](err); ok && connectErr.Code() == connect.CodeInternal {
+		return strings.Contains(msg, "stream error: ") && strings.Contains(msg, "; received from peer")
+	}
+	return false
 }
 
 func shouldRetry(procedure string, err error) bool {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,7 +56,7 @@ type h2CoalesceConn struct {
 	afterFunc  func(d time.Duration, f func()) coalesceTimer
 	timer      coalesceTimer
 	asyncErr   error
-	closed     bool
+	closed     atomic.Bool
 }
 
 func defaultCoalesceAfterFunc(d time.Duration, f func()) coalesceTimer {
@@ -96,7 +97,7 @@ func writeFull(w io.Writer, buf []byte) (int, error) {
 
 func (c *h2CoalesceConn) flushOnTimer() {
 	c.mu.Lock()
-	if c.closed || c.pendingLen == 0 || c.asyncErr != nil {
+	if c.closed.Load() || c.pendingLen == 0 || c.asyncErr != nil {
 		c.mu.Unlock()
 		return
 	}
@@ -121,7 +122,7 @@ func (c *h2CoalesceConn) Write(p []byte) (int, error) {
 	if c.asyncErr != nil {
 		return 0, c.asyncErr
 	}
-	if c.closed {
+	if c.closed.Load() {
 		return c.Conn.Write(p)
 	}
 
@@ -170,12 +171,13 @@ func (c *h2CoalesceConn) Write(p []byte) (int, error) {
 }
 
 func (c *h2CoalesceConn) Close() error {
+	c.closed.Store(true)
+	closeErr := c.Conn.Close()
 	c.mu.Lock()
-	c.closed = true
 	if c.timer != nil {
 		c.timer.Stop()
 	}
 	c.pendingLen = 0
 	c.mu.Unlock()
-	return c.Conn.Close()
+	return closeErr
 }

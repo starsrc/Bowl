@@ -334,3 +334,192 @@ func TestH2CoalesceConn_WhenClosed_StopsTimerAndClosesUnderlyingConn(t *testing.
 	require.True(t, raw.IsClosed())
 	require.Nil(t, newH2CoalesceConn(nil))
 }
+
+type blockingWriteNetConn struct {
+	net.Conn
+	blockWrites  atomic.Bool
+	writeEntered chan struct{}
+	enterOnce    sync.Once
+	closedCh     chan struct{}
+	closeOnce    sync.Once
+}
+
+func newBlockingWriteNetConn(inner net.Conn) *blockingWriteNetConn {
+	return &blockingWriteNetConn{
+		Conn:         inner,
+		writeEntered: make(chan struct{}),
+		closedCh:     make(chan struct{}),
+	}
+}
+
+func (c *blockingWriteNetConn) ArmBlockWrites() {
+	c.blockWrites.Store(true)
+}
+
+func (c *blockingWriteNetConn) Write(p []byte) (int, error) {
+	if c.blockWrites.Load() {
+		c.enterOnce.Do(func() {
+			close(c.writeEntered)
+		})
+		<-c.closedCh
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *blockingWriteNetConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closedCh)
+	})
+	return c.Conn.Close()
+}
+
+func TestH2CoalesceConn_GivenBlockedWrite_WhenCloseCalledConcurrently_UnblocksWriteWithErrClosed(t *testing.T) {
+	raw := newBlockingWriteNetConn(&recordingNetConn{})
+	raw.ArmBlockWrites()
+	conn := newH2CoalesceConn(raw)
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("non-holdable-frame-payload"))
+		writeErrCh <- err
+	}()
+
+	select {
+	case <-raw.writeEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for Write to enter underlying conn")
+	}
+
+	closeErrCh := make(chan error, 1)
+	go func() {
+		closeErrCh <- conn.Close()
+	}()
+
+	select {
+	case closeErr := <-closeErrCh:
+		require.NoError(t, closeErr)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close deadlocked while Write was blocked in underlying conn")
+	}
+
+	select {
+	case writeErr := <-writeErrCh:
+		require.ErrorIs(t, writeErr, net.ErrClosed)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Write did not unblock after Close")
+	}
+}
+
+func TestH2CoalesceConn_GivenBlockedTimerFlush_WhenCloseCalledConcurrently_UnblocksFlushWithoutDeadlock(t *testing.T) {
+	raw := newBlockingWriteNetConn(&recordingNetConn{})
+	var createdTimer *manualCoalesceTimer
+	conn := newH2CoalesceConnWithAfterFunc(raw, func(_ time.Duration, f func()) coalesceTimer {
+		createdTimer = &manualCoalesceTimer{fn: f}
+		return createdTimer
+	})
+	headers := buildTestH2HeadersFrame(13, h2FlagHeadersEndHeaders, []byte("hdr"))
+
+	_, err := conn.Write(headers)
+	require.NoError(t, err)
+
+	raw.ArmBlockWrites()
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		createdTimer.Fire()
+	}()
+
+	select {
+	case <-raw.writeEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for flushOnTimer to enter underlying conn")
+	}
+
+	closeErrCh := make(chan error, 1)
+	go func() {
+		closeErrCh <- conn.Close()
+	}()
+
+	select {
+	case closeErr := <-closeErrCh:
+		require.NoError(t, closeErr)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close deadlocked while flushOnTimer was blocked in underlying conn")
+	}
+
+	select {
+	case <-flushDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("flushOnTimer did not unblock after Close")
+	}
+}
+
+func TestH2CoalesceConn_GivenBlackholedH2CWrite_EvictsViaPingWithoutDeadlock(t *testing.T) {
+	serverURL := startEchoH2CServer(t)
+	var dials atomic.Int64
+	var firstConn *blockingWriteNetConn
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{
+		Protocols: &protocols,
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: 100 * time.Millisecond,
+			PingTimeout:     100 * time.Millisecond,
+		},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			rawConn, dialErr := dialer.DialContext(ctx, network, addr)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			if dials.Add(1) == 1 {
+				firstConn = newBlockingWriteNetConn(rawConn)
+				return newH2CoalesceConn(firstConn), nil
+			}
+			return newH2CoalesceConn(rawConn), nil
+		},
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr}
+
+	requireWarmupH2CGet(t, client, serverURL)
+	require.Equal(t, int64(1), dials.Load())
+	require.NotNil(t, firstConn)
+
+	firstConn.ArmBlockWrites()
+
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelReq()
+	reqErrCh := make(chan error, 1)
+	go func() {
+		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, serverURL, strings.NewReader("blocked-payload"))
+		if reqErr != nil {
+			reqErrCh <- reqErr
+			return
+		}
+		resp, doErr := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		reqErrCh <- doErr
+	}()
+
+	select {
+	case <-firstConn.writeEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for h2c request to block in underlying Write")
+	}
+
+	select {
+	case reqErr := <-reqErrCh:
+		require.Error(t, reqErr)
+		require.NotErrorIs(t, reqErr, context.DeadlineExceeded, "HTTP/2 PING must evict blocked conn before 2s request deadline")
+	case <-time.After(2 * time.Second):
+		t.Fatal("blackholed h2c write deadlocked instead of being evicted by HTTP/2 PING")
+	}
+
+	requireFollowUpH2CPostsSucceed(t, client, serverURL, 3)
+	require.Equal(t, int64(2), dials.Load())
+}

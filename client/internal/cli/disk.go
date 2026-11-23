@@ -25,7 +25,7 @@ import (
 const MaxDiskNameBytes = 255
 
 type diskPorts struct {
-	newClient      func(endpoint, token string) (storagev1connect.StorageServiceClient, int, error)
+	newClient      func(endpoint string) (storagev1connect.StorageServiceClient, int, error)
 	findMountpoint func(diskID string) (DiskMountInfo, error)
 	stdin          io.Reader
 }
@@ -225,16 +225,14 @@ func mapDiskRPCError(err error, policy diskRPCErrorPolicy) *diskCLIError {
 	}
 }
 
-func newDiskStorageClient(endpoint, token string) (storagev1connect.StorageServiceClient, int, error) {
+func newDiskStorageClient(endpoint string) (storagev1connect.StorageServiceClient, int, error) {
 	resolvedEndpoint, err := rpc.ResolveEndpoint(endpoint)
 	if err != nil {
 		return nil, 2, fmt.Errorf("invalid endpoint: %w", err)
 	}
-	resolvedToken := rpc.ResolveToken(token)
 
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
 		Endpoint:   resolvedEndpoint,
-		Token:      resolvedToken,
 		HTTPClient: diskHTTPClient,
 	})
 	if err != nil {
@@ -282,7 +280,6 @@ func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts) *cobra.Command
 		quiet    bool
 		jsonOut  bool
 		endpoint string
-		token    string
 		adapter  diskRequestAdapter
 	)
 
@@ -303,7 +300,7 @@ func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts) *cobra.Command
 			if showUsage, err := adapter.finalize(cmd, posArgs); err != nil {
 				return usageExitErr(err, showUsage)
 			}
-			return runDiskValidated(spec, adapter, ports, quiet, jsonOut, endpoint, token, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runDiskValidated(spec, adapter, ports, quiet, jsonOut, endpoint, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 
@@ -318,7 +315,6 @@ func newDiskSubcommand(spec *diskSubcommandSpec, ports diskPorts) *cobra.Command
 	}
 	flags.BoolVar(&jsonOut, "json", false, "Output result in JSON format")
 	flags.StringVar(&endpoint, "endpoint", "", "StorageService base URL, defaults to $BOWL_STORAGE_ENDPOINT or http://127.0.0.1:9000")
-	flags.StringVar(&token, "token", "", "Access token, defaults to $BOWL_TOKEN")
 
 	return cmd
 }
@@ -328,7 +324,7 @@ func runDiskValidated(
 	adapter diskRequestAdapter,
 	ports diskPorts,
 	quiet, jsonOut bool,
-	endpoint, token string,
+	endpoint string,
 	stdout, stderr io.Writer,
 ) error {
 	if ports.newClient == nil {
@@ -355,7 +351,7 @@ func runDiskValidated(
 	)
 	defer finishSpan()
 
-	client, exitCode, clientErr := ports.newClient(endpoint, token)
+	client, exitCode, clientErr := ports.newClient(endpoint)
 	if clientErr != nil {
 		finishDiskCLISpanError(span, clientErr)
 		return &cliExitError{code: exitCode, err: clientErr}

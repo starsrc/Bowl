@@ -26,8 +26,6 @@ const (
 
 	EnvStorageEndpoint = "BOWL_STORAGE_ENDPOINT"
 
-	EnvToken = "BOWL_TOKEN"
-
 	HTTP2MaxReadFrameSize = 1 << 20
 
 	HTTP2MaxReceiveBufferPerStream = 8 << 20
@@ -51,8 +49,6 @@ const (
 
 type ClientConfig struct {
 	Endpoint string
-
-	Token string
 
 	HTTPClient *http.Client
 
@@ -98,13 +94,6 @@ func ResolveEndpoint(endpoint string) (string, error) {
 	}
 
 	return strings.TrimRight(endpoint, "/"), nil
-}
-
-func ResolveToken(token string) string {
-	if strings.TrimSpace(token) != "" {
-		return strings.TrimSpace(token)
-	}
-	return strings.TrimSpace(os.Getenv(EnvToken))
 }
 
 func newHTTPTransport(endpoint string, tlsConfig *tls.Config, maxRecvBufPerConn int) (*http.Transport, error) {
@@ -302,8 +291,6 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 		return nil, err
 	}
 
-	token := ResolveToken(cfg.Token)
-
 	var ownedCloser idleConnCloser
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -339,24 +326,17 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 		}
 		return nil, fmt.Errorf("create otelconnect interceptor: %w", err)
 	}
-	interceptors = append(interceptors, otelInterceptor, serverx.NewErrorReasonInterceptor())
-
-	if token != "" {
-		authInterceptor := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+	interceptors = append(
+		interceptors,
+		otelInterceptor,
+		serverx.NewErrorReasonInterceptor(),
+		connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 			return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-				req.Header().Set("Authorization", "Bearer "+token)
+				req.Header().Set("Accept-Encoding", "identity")
 				return next(ctx, req)
 			}
-		})
-		interceptors = append(interceptors, authInterceptor)
-	}
-
-	interceptors = append(interceptors, connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			req.Header().Set("Accept-Encoding", "identity")
-			return next(ctx, req)
-		}
-	}))
+		}),
+	)
 
 	clientOpts := []connect.ClientOption{
 		connect.WithCodec(newProtoBinaryCodec()),
@@ -377,11 +357,4 @@ func newClientWithClock(cfg ClientConfig, clk rpcClock, opts ...connect.ClientOp
 		}, nil
 	}
 	return client, nil
-}
-
-func NewClient(endpoint, token string, opts ...connect.ClientOption) (storagev1connect.StorageServiceClient, error) {
-	return NewClientFromConfig(ClientConfig{
-		Endpoint: endpoint,
-		Token:    token,
-	}, opts...)
 }

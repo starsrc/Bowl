@@ -42,7 +42,6 @@ const (
 
 type mountOptions struct {
 	endpoint                 string
-	token                    string
 	logFile                  string
 	adminAddr                string
 	logLevel                 string
@@ -241,7 +240,6 @@ func permanentRenewFenceStatus(err error) (fuse.Status, connect.Code, bool) {
 	switch code {
 	case connect.CodeFailedPrecondition,
 		connect.CodeNotFound,
-		connect.CodeUnauthenticated,
 		connect.CodePermissionDenied,
 		connect.CodeInvalidArgument,
 		connect.CodeUnimplemented:
@@ -589,7 +587,6 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 	rpcMetrics := rpc.NewMetrics()
 	client, err := rpc.NewClientFromConfig(rpc.ClientConfig{
 		Endpoint:   opts.endpoint,
-		Token:      opts.token,
 		HTTPClient: mountHTTPClient,
 		Logger:     logger,
 		Metrics:    rpcMetrics,
@@ -1092,7 +1089,6 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 
 	flags := cmd.Flags()
 	flags.StringVar(&opts.endpoint, "endpoint", "", "StorageService base URL, defaults to $BOWL_STORAGE_ENDPOINT or http://127.0.0.1:9000")
-	flags.StringVar(&opts.token, "token", "", "Access token, defaults to $BOWL_TOKEN")
 	flags.BoolVarP(&foreground, "foreground", "f", false, "Run in foreground, log to stderr, and exit on SIGINT or SIGTERM")
 	flags.BoolVar(&opts.force, "force", false, "Preempt an active read-write mount lease on the disk")
 	flags.StringVar(&opts.logFile, "log-file", "", "Log file path for background daemon mode")
@@ -1177,7 +1173,6 @@ func prepareMountExecution(
 	if err != nil {
 		return "", fusefs.Config{}, usageExitErr(fmt.Errorf("invalid endpoint: %w", err), false)
 	}
-	opts.token = rpc.ResolveToken(opts.token)
 
 	baseCfg := fusefs.Config{
 		DiskID:                   diskIDStr,

@@ -165,15 +165,12 @@ func TestShardedRoundTripper_WhenCloseIdleConnectionsCalled_ForwardsToControlMet
 	requireAllDataShardIdleClosed(t, dataRTs, 1)
 }
 
-func TestNewClient_GivenEndpointAndTokenConfig_ResolvesAndInjectsHeaders(t *testing.T) {
-
+func TestNewClientFromConfig_GivenEndpointAndBowlTokenEnv_ResolvesEndpointAndOmitsAuthorizationHeader(t *testing.T) {
 	t.Setenv(EnvStorageEndpoint, "http://10.0.0.5:9001/")
-	t.Setenv(EnvToken, "env-secret")
+	t.Setenv("BOWL_TOKEN", "env-secret")
 	resolvedEP, epErr := ResolveEndpoint("")
 	require.NoError(t, epErr)
 	require.Equal(t, "http://10.0.0.5:9001", resolvedEP)
-	require.Equal(t, "env-secret", ResolveToken(""))
-	require.Equal(t, "explicit-tok", ResolveToken("  explicit-tok  "))
 
 	_, badSchemeErr := ResolveEndpoint("ftp://127.0.0.1:9000")
 	require.Error(t, badSchemeErr)
@@ -183,14 +180,13 @@ func TestNewClient_GivenEndpointAndTokenConfig_ResolvesAndInjectsHeaders(t *test
 	handler := &scriptedReadHandler{}
 	client, err := NewClientFromConfig(ClientConfig{
 		Endpoint:   "http://127.0.0.1:9000/",
-		Token:      "tok-123",
 		HTTPClient: newInMemoryHTTPClient(handler),
 	})
 	require.NoError(t, err)
 	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
 
 	require.NoError(t, err)
-	require.Equal(t, "Bearer tok-123", handler.lastAuth)
+	require.Empty(t, handler.lastAuth)
 	require.Equal(t, "identity", handler.lastAcceptEnc)
 }
 

@@ -91,7 +91,7 @@ func TestMapError_GivenConnectCodesWithoutErrorInfo_MapsDeterministically(t *tes
 	requireCodeMapping(t, connect.CodeFailedPrecondition, syscall.EBUSY)
 	requireCodeMapping(t, connect.CodeOutOfRange, syscall.EIO)
 	requireCodeMapping(t, connect.CodeDataLoss, syscall.EIO)
-	requireCodeMapping(t, connect.CodeUnauthenticated, syscall.EACCES)
+	requireCodeMapping(t, connect.CodeUnauthenticated, syscall.EIO)
 }
 
 func TestMapError_GivenNilAndTransportErrors_MapsExpectedErrno(t *testing.T) {

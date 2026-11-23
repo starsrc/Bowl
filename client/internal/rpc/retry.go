@@ -96,7 +96,6 @@ func isNeverRetryCode(code connect.Code) bool {
 		connect.CodeNotFound,
 		connect.CodeAlreadyExists,
 		connect.CodePermissionDenied,
-		connect.CodeUnauthenticated,
 		connect.CodeFailedPrecondition,
 		connect.CodeResourceExhausted,
 		connect.CodeAborted,

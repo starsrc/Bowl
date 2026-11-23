@@ -15,7 +15,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
-	"github.com/starsrc/bowl/client/internal/rpc"
 )
 
 type daemonHandshakeOutcome struct {
@@ -67,69 +66,13 @@ func defaultDaemonSignalNotify() (sigCh <-chan os.Signal, stop func()) {
 	return ch, func() { signal.Stop(ch) }
 }
 
-func mountFlagTakesSeparateValue(arg string) bool {
-	switch arg {
-	case "--endpoint",
-		"--log-file",
-		"--mode",
-		"--stage-size",
-		"--stage-dir",
-		"--unmount-timeout",
-		"--unmount-stage-timeout",
-		"--unmount-stage-stall-timeout",
-		"--unmount-fsync-timeout",
-		"--admin-addr",
-		"--log-level",
-		"--log-format",
-		"--trace-sample-ratio":
-		return true
-	default:
-		return false
-	}
-}
-
-func scrubDaemonTokenArgs(args []string) (filtered []string, token string) {
-	filtered = make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			filtered = append(filtered, args[i:]...)
-			break
-		}
-		if arg == "--token" {
-			if i+1 < len(args) {
-				token = args[i+1]
-				i++
-			}
-			continue
-		}
-		if val, ok := strings.CutPrefix(arg, "--token="); ok {
-			token = val
-			continue
-		}
-		filtered = append(filtered, arg)
-		if mountFlagTakesSeparateValue(arg) && i+1 < len(args) {
-			i++
-			filtered = append(filtered, args[i])
-		}
-	}
-	return filtered, token
-}
-
-func buildDaemonEnv(baseEnv []string, token string) []string {
-	trimmedToken := strings.TrimSpace(token)
-	env := make([]string, 0, len(baseEnv)+2)
+func buildDaemonEnv(baseEnv []string) []string {
+	env := make([]string, 0, len(baseEnv)+1)
 	for _, entry := range baseEnv {
-		if trimmedToken != "" && strings.HasPrefix(entry, rpc.EnvToken+"=") {
-			continue
-		}
 		if strings.HasPrefix(entry, "BOWL_DAEMON_WORKER=") {
 			continue
 		}
 		env = append(env, entry)
-	}
-	if trimmedToken != "" {
-		env = append(env, rpc.EnvToken+"="+trimmedToken)
 	}
 	env = append(env, "BOWL_DAEMON_WORKER=1")
 	return env
@@ -140,12 +83,11 @@ func defaultDaemonCommand(args []string, w *os.File) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve executable path: %w", err)
 	}
-	scrubbedArgs, token := scrubDaemonTokenArgs(args)
-	subArgs := append([]string{"mount"}, scrubbedArgs...)
+	subArgs := append([]string{"mount"}, args...)
 	cmd := exec.Command(binPath, subArgs...)
 	cmd.ExtraFiles = []*os.File{w}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = buildDaemonEnv(os.Environ(), token)
+	cmd.Env = buildDaemonEnv(os.Environ())
 	return cmd, nil
 }
 

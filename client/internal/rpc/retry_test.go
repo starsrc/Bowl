@@ -300,31 +300,6 @@ func TestRetry_GivenTerminalConnectCode_WhenIdempotentRead_NeverRetries(t *testi
 	require.Empty(t, clk.Sleeps())
 }
 
-func TestRetry_GivenUnauthenticatedCode_WhenIdempotentRead_NeverRetriesAndMapsEACCES(t *testing.T) {
-
-	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
-	handler := &scriptedReadHandler{
-		steps: []func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error){
-			func(context.Context, *connect.Request[storagev1.ReadRequest]) (*connect.Response[storagev1.ReadResponse], error) {
-				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("missing token"))
-			},
-		},
-	}
-	client, err := newClientWithClock(ClientConfig{
-		Endpoint:   "http://127.0.0.1:9000",
-		HTTPClient: newInMemoryHTTPClient(handler),
-	}, clk)
-	require.NoError(t, err)
-
-	_, err = client.Read(context.Background(), connect.NewRequest(&storagev1.ReadRequest{Ino: 1, Size: 2}))
-
-	require.Error(t, err)
-	require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
-	require.Equal(t, syscall.EACCES, MapError(err))
-	require.Equal(t, 1, handler.calls)
-	require.Empty(t, clk.Sleeps())
-}
-
 func TestRetry_GivenNonIdempotentWrite_WhenUnavailableOrTransportEOF_DoesNotRetry(t *testing.T) {
 
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
@@ -461,8 +436,8 @@ func TestRetry_GivenSyscallConnectError_ShouldRetryEvenForNonIdempotentProcedure
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeResourceExhausted, nil)))
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeAborted, nil)))
 	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeUnimplemented, nil)))
-	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodeUnauthenticated, io.ErrUnexpectedEOF)))
-	require.True(t, isNeverRetryCode(connect.CodeUnauthenticated))
+	require.False(t, shouldRetry(storagev1connect.StorageServiceReadProcedure, connect.NewError(connect.CodePermissionDenied, io.ErrUnexpectedEOF)))
+	require.False(t, isNeverRetryCode(connect.CodeUnauthenticated))
 }
 
 type scriptedDiffMergeHandler struct {

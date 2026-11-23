@@ -1294,106 +1294,28 @@ func envEntriesForKey(env []string, key string) []string {
 	return out
 }
 
-func TestDefaultDaemonCommand_GivenTokenFlagsAndEnv_ScrubsArgvAndSetsBowlTokenEnv(t *testing.T) {
+func TestDefaultDaemonCommand_GivenArgsAndEnv_PreservesArgsVerbatimAndSetsDaemonWorkerEnv(t *testing.T) {
 	cases := []struct {
-		name             string
-		inheritedToken   string
-		setInherited     bool
-		args             []string
-		wantSubArgs      []string
-		wantBowlTokenEnv []string
+		name        string
+		args        []string
+		wantSubArgs []string
 	}{
 		{
-			name:             "SplitTokenFlag",
-			args:             []string{"--token", "secret-split", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=secret-split"},
+			name:        "StandardMountFlags",
+			args:        []string{"--mode=ro", "--log-file", "/tmp/bowl.log", testDiskID1, "/mnt/data"},
+			wantSubArgs: []string{"mount", "--mode=ro", "--log-file", "/tmp/bowl.log", testDiskID1, "/mnt/data"},
 		},
 		{
-			name:             "EqualsTokenFlagOverridesInheritedEnv",
-			inheritedToken:   "old-env-tok",
-			setInherited:     true,
-			args:             []string{"--token=  secret-eq  ", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=secret-eq"},
-		},
-		{
-			name:             "RepeatedTokenFlagsLastWins",
-			inheritedToken:   "old-env-tok",
-			setInherited:     true,
-			args:             []string{"--token", "first", "--mode=ro", "--token=second", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", "--mode=ro", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=second"},
-		},
-		{
-			name:             "WhitespaceTokenLeavesInheritedEnvUntouched",
-			inheritedToken:   "keep-env",
-			setInherited:     true,
-			args:             []string{"--token", "   ", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
-		},
-		{
-			name:             "EmptyEqualsTokenLeavesInheritedEnvUntouched",
-			inheritedToken:   "keep-env",
-			setInherited:     true,
-			args:             []string{"--token=", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
-		},
-		{
-			name:             "RepeatedTokenEndingBlankLeavesInheritedEnvUntouched",
-			inheritedToken:   "keep-env",
-			setInherited:     true,
-			args:             []string{"--token", "first", "--token", "   ", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
-		},
-		{
-			name:             "NoTokenFlagPreservesInheritedEnv",
-			inheritedToken:   "keep-env",
-			setInherited:     true,
-			args:             []string{"--mode=ro", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", "--mode=ro", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
-		},
-		{
-			name:             "StopsScanningAtDoubleDash",
-			args:             []string{"--token", "real-tok", "--", testDiskID1, "--token", "--token=literal"},
-			wantSubArgs:      []string{"mount", "--", testDiskID1, "--token", "--token=literal"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=real-tok"},
-		},
-		{
-			name:             "TokenAfterDoubleDashOnlyNotTouched",
-			inheritedToken:   "keep-env",
-			setInherited:     true,
-			args:             []string{"--", testDiskID1, "--token=literal"},
-			wantSubArgs:      []string{"mount", "--", testDiskID1, "--token=literal"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=keep-env"},
-		},
-		{
-			name:             "OtherFlagValueMatchingTokenFlagNotScrubbed",
-			args:             []string{"--log-file", "--token", "--token", "real-tok", testDiskID1, "/mnt/data"},
-			wantSubArgs:      []string{"mount", "--log-file", "--token", testDiskID1, "/mnt/data"},
-			wantBowlTokenEnv: []string{"BOWL_TOKEN=real-tok"},
+			name:        "PreservesArbitraryArgsWithoutScrubbing",
+			args:        []string{"--mode=ro", "--token", "literal-val", "--", testDiskID1, "/mnt/data"},
+			wantSubArgs: []string{"mount", "--mode=ro", "--token", "literal-val", "--", testDiskID1, "/mnt/data"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.setInherited {
-				t.Setenv("BOWL_TOKEN", tc.inheritedToken)
-			} else {
-				prev, existed := os.LookupEnv("BOWL_TOKEN")
-				require.NoError(t, os.Unsetenv("BOWL_TOKEN"))
-				t.Cleanup(func() {
-					if existed {
-						_ = os.Setenv("BOWL_TOKEN", prev)
-					} else {
-						_ = os.Unsetenv("BOWL_TOKEN")
-					}
-				})
-			}
+			t.Setenv("BOWL_DAEMON_WORKER", "0")
+			t.Setenv("BOWL_TOKEN", "inherited-env")
 
 			r, w, err := os.Pipe()
 			require.NoError(t, err)
@@ -1405,13 +1327,13 @@ func TestDefaultDaemonCommand_GivenTokenFlagsAndEnv_ScrubsArgvAndSetsBowlTokenEn
 			cmd, cmdErr := defaultDaemonCommand(tc.args, w)
 			require.NoError(t, cmdErr)
 			require.Equal(t, tc.wantSubArgs, cmd.Args[1:], "scene=%s", tc.name)
-			require.Equal(t, tc.wantBowlTokenEnv, envEntriesForKey(cmd.Env, "BOWL_TOKEN"), "scene=%s", tc.name)
 			require.Equal(t, []string{"BOWL_DAEMON_WORKER=1"}, envEntriesForKey(cmd.Env, "BOWL_DAEMON_WORKER"), "scene=%s", tc.name)
+			require.Equal(t, []string{"BOWL_TOKEN=inherited-env"}, envEntriesForKey(cmd.Env, "BOWL_TOKEN"), "scene=%s", tc.name)
 		})
 	}
 }
 
-func TestMount_DaemonWorker_GivenScrubbedTokenInEnv_AuthenticatesWithRPCWithoutTokenFlag(t *testing.T) {
+func TestMount_DaemonWorker_GivenBowlTokenInEnv_IgnoresTokenAndSendsEmptyAuthorization(t *testing.T) {
 	withCleanOTelAndLogger(t)
 	withMissingMountInfo(t)
 	withTempMountMetaDirs(t, t.TempDir())
@@ -1421,30 +1343,28 @@ func TestMount_DaemonWorker_GivenScrubbedTokenInEnv_AuthenticatesWithRPCWithoutT
 
 	mp := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "token-worker.log")
-	t.Setenv("BOWL_TOKEN", "old-env-secret")
+	t.Setenv("BOWL_TOKEN", "daemon-secret")
 
 	pr, pw, err := os.Pipe()
 	require.NoError(t, err)
 	defer func() { _ = pr.Close() }()
 
-	cmd, cmdErr := defaultDaemonCommand([]string{testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off", "--token", "daemon-secret"}, pw)
+	cmd, cmdErr := defaultDaemonCommand([]string{testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off"}, pw)
 	require.NoError(t, cmdErr)
-	require.NotContains(t, cmd.Args, "--token")
-	require.NotContains(t, cmd.Args, "daemon-secret")
-	require.Equal(t, []string{"BOWL_TOKEN=daemon-secret"}, envEntriesForKey(cmd.Env, "BOWL_TOKEN"))
+	require.Equal(t, []string{"mount", testDiskID1, mp, "--mode=ro", "--log-file", logPath, "--admin-addr", "off"}, cmd.Args[1:])
+	require.Equal(t, []string{"BOWL_DAEMON_WORKER=1"}, envEntriesForKey(cmd.Env, "BOWL_DAEMON_WORKER"))
 
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "token-worker-disk", 1<<30, 0)
 	withMountStorageFake(t, storage)
 	stubMountServeFUSE(t, mp)
 	withReadinessPipeStub(t, pw)
-	t.Setenv("BOWL_TOKEN", "daemon-secret")
 	t.Setenv("BOWL_DAEMON_WORKER", "1")
 
 	code, _, errOut := runCLI(cmd.Args[1:]...)
 
-	require.Equal(t, 0, code, "scene=worker_token_env stderr=%s", errOut)
-	require.Equal(t, "Bearer daemon-secret", storage.lastAuth)
+	require.Equal(t, 0, code, "scene=worker_ignores_bowl_token_env stderr=%s", errOut)
+	require.Empty(t, storage.lastAuth)
 	require.Equal(t, "OK\n", readPipeWithDeadline(t, pr, pw, 500*time.Millisecond))
 }
 

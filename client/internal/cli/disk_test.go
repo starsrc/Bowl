@@ -85,7 +85,8 @@ func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testin
 	requireCLIError2(t, "flag needs an argument: --size", "disk", "fork", testDiskID1, "--size")
 	requireCLIError2(t, "flag needs an argument: --name", "disk", "fork", testDiskID1, "--name")
 	requireCLIError2(t, "flag needs an argument: --endpoint", "disk", "fork", testDiskID1, "--endpoint")
-	requireCLIError2(t, "flag needs an argument: --token", "disk", "fork", testDiskID1, "--token")
+	requireCLIError2(t, "unknown flag: --token", "disk", "fork", testDiskID1, "--token", "sec-tok")
+	requireCLIError2(t, "unknown flag: --token", "disk", "create", "--size", "1GiB", "--token", "sec-tok")
 	requireCLIError2(t, "cannot be used together", "disk", "fork", testDiskID1, "-q", "--json")
 	requireCLIError2(t, "invalid --size", "disk", "fork", testDiskID1, "--size=")
 	requireCLIError2(t, "invalid --size", "disk", "fork", testDiskID1, "--size", "0")
@@ -158,18 +159,18 @@ func TestDisk_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *testin
 	requireCLIError2(t, "Error:", "disk", "evict", testDiskID1, "--json=bad")
 }
 
-func TestDiskCreate_GivenValidSizeAndToken_CreatesDiskInQuietAndJSONModes(t *testing.T) {
-
+func TestDiskCreate_GivenValidSizeAndBowlTokenEnv_CreatesDiskInQuietAndJSONModesWithoutAuth(t *testing.T) {
+	t.Setenv("BOWL_TOKEN", "env-sec-tok")
 	storage := newFakeStorage()
 	withDiskStorageFake(t, storage)
 
-	code, quietOut, errOut := runCLI("disk", "create", "--size", "1GiB", "--name", "c1", "-q", "--token", "sec-tok")
+	code, quietOut, errOut := runCLI("disk", "create", "--size", "1GiB", "--name", "c1", "-q")
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
 	createdID := strings.TrimSpace(quietOut)
 	require.NotEmpty(t, createdID)
-	require.Equal(t, "Bearer sec-tok", storage.lastAuth)
+	require.Empty(t, storage.lastAuth)
 
 	code, jsonOut, errOut := runCLI("disk", "create", "--size=2GiB", "--name=c2", "--json")
 
@@ -183,20 +184,20 @@ func TestDiskCreate_GivenValidSizeAndToken_CreatesDiskInQuietAndJSONModes(t *tes
 }
 
 func TestDiskFork_GivenSeededSourceDisk_InheritsOrOverridesQuotaAndDisplaysParent(t *testing.T) {
-
+	t.Setenv("BOWL_TOKEN", "env-sec-tok")
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "root-disk", 1<<30, 4096)
 	withDiskStorageFake(t, storage)
 
-	code, out, errOut := runCLI("disk", "fork", testDiskID1, "--name", "branch-exp", "--token", "sec-tok")
+	code, out, errOut := runCLI("disk", "fork", testDiskID1, "--name", "branch-exp")
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)
-	require.Equal(t, "Bearer sec-tok", storage.lastAuth)
+	require.Empty(t, storage.lastAuth)
 	require.Contains(t, out, "Parent Disk:  "+testDiskID1+"\nName:         branch-exp\n")
 	require.Contains(t, out, "1.00 GiB")
 
-	code, jsonOut, errOut := runCLI("disk", "fork", "--name=json-branch", "--size=2GiB", "--json", "--token=tok2", "--", testDiskID1)
+	code, jsonOut, errOut := runCLI("disk", "fork", "--name=json-branch", "--size=2GiB", "--json", "--", testDiskID1)
 
 	require.Equal(t, 0, code)
 	require.Empty(t, errOut)

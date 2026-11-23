@@ -222,6 +222,7 @@ func TestMount_Help_GivenHelpFlag_PrintsUpdatedUsageWithoutLegacyRO(t *testing.T
 			require.Contains(t, out, "--stage-size")
 			require.Contains(t, out, "--stage-dir")
 			require.NotContains(t, out, "--ro")
+			require.NotContains(t, out, "--token")
 		})
 	}
 }
@@ -243,6 +244,7 @@ func TestMount_Validation_GivenInvalidFlagsOrArgs_Exits2(t *testing.T) {
 		{name: "UnknownFlag", args: []string{"mount", testDiskID1, validMP, "--bogus"}, wantSubstr: "unknown flag: --bogus"},
 		{name: "LegacyROFlag", args: []string{"mount", testDiskID1, validMP, "--ro"}, wantSubstr: "unknown flag: --ro"},
 		{name: "LegacyROFalseFlag", args: []string{"mount", testDiskID1, validMP, "--ro=false"}, wantSubstr: "unknown flag: --ro"},
+		{name: "LegacyTokenFlag", args: []string{"mount", testDiskID1, validMP, "--token", "mount-tok"}, wantSubstr: "unknown flag: --token"},
 		{name: "ShortLookalikeYesFlag", args: []string{"mount", testDiskID1, validMP, "-yes"}, wantSubstr: "unknown shorthand flag"},
 		{name: "LongYFlag", args: []string{"mount", testDiskID1, validMP, "--y"}, wantSubstr: "unknown flag: --y"},
 		{name: "TripleDashJSONFlag", args: []string{"mount", testDiskID1, validMP, "---json"}, wantSubstr: "bad flag syntax: ---json"},
@@ -699,6 +701,7 @@ func TestMount_ForegroundStaged_GivenExplicitFlags_AppliesStageConfigAndCleansIn
 	withMissingMountInfo(t)
 	withTempMountMetaDirs(t, t.TempDir())
 
+	t.Setenv("BOWL_TOKEN", "env-mount-tok")
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "mount-disk", 1<<30, 0)
 	withMountStorageFake(t, storage)
@@ -712,12 +715,11 @@ func TestMount_ForegroundStaged_GivenExplicitFlags_AppliesStageConfigAndCleansIn
 		"--log-level", "debug",
 		"--log-format", "json",
 		"--trace-sample-ratio", "0.5",
-		"--token", "mount-tok",
 	)
 
 	require.Equal(t, 0, code, "scene=foreground_staged want=0 got=%d stderr=%s", code, errOut)
 	require.Empty(t, out)
-	require.Equal(t, "Bearer mount-tok", storage.lastAuth)
+	require.Empty(t, storage.lastAuth)
 	require.Equal(t, fusefs.MountModeStaged, captured.cfg.Mode)
 	require.False(t, captured.cfg.IsReadOnly())
 	require.Equal(t, uint64(16_777_216), captured.cfg.StageSize)
@@ -1273,12 +1275,6 @@ func TestRunMount_LeaseRenewTerminalError_GivenAllPermanentCodes_FencesRawFSFlip
 			wantReason: "mount not found",
 		},
 		{
-			name:       "CodeUnauthenticated",
-			renewErr:   connect.NewError(connect.CodeUnauthenticated, errors.New("invalid token")),
-			wantStatus: fuse.Status(syscall.EACCES),
-			wantReason: "invalid token",
-		},
-		{
 			name:       "CodePermissionDenied",
 			renewErr:   connect.NewError(connect.CodePermissionDenied, errors.New("permission denied")),
 			wantStatus: fuse.EACCES,
@@ -1386,9 +1382,9 @@ func TestPermanentRenewFenceStatus_GivenErrorInfoOverrideAndPermanentCodes_Deleg
 	require.Equal(t, fuse.Status(syscall.EROFS), st)
 
 	st, code, permanent = permanentRenewFenceStatus(connect.NewError(connect.CodeUnauthenticated, errors.New("unauth")))
-	require.True(t, permanent)
+	require.False(t, permanent)
 	require.Equal(t, connect.CodeUnauthenticated, code)
-	require.Equal(t, fuse.EACCES, st)
+	require.Equal(t, fuse.OK, st)
 
 	st, code, permanent = permanentRenewFenceStatus(connect.NewError(connect.CodePermissionDenied, errors.New("denied")))
 	require.True(t, permanent)

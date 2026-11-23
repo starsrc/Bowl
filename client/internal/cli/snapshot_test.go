@@ -59,6 +59,7 @@ func TestSnapshot_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *te
 	requireCLIError2(t, "cannot exceed 255 bytes", "snapshot", "create", testDiskID1, "--name", strings.Repeat("a", 256))
 	requireCLIError2(t, "cannot contain NUL", "snapshot", "create", testDiskID1, "--name", "bad\x00name")
 	requireCLIError2(t, "invalid endpoint", "snapshot", "create", testDiskID1, "--endpoint", "ftp://127.0.0.1:9000")
+	requireCLIError2(t, "unknown flag: --token", "snapshot", "create", testDiskID1, "--token", "snap-tok")
 
 	requireCLIError2(t, "accepts 1 arg(s), received 0", "snapshot", "list")
 	requireCLIError2(t, "accepts 1 arg(s), received 2", "snapshot", "ls", testDiskID1, "extra")
@@ -90,14 +91,15 @@ func TestSnapshot_GivenInvalidValidationInputs_ReturnsExit2WithDiagnostics(t *te
 }
 
 func TestSnapshotCreate_GivenNamedUnnamedQuietAndJSON_RendersExpectedOutputs(t *testing.T) {
+	t.Setenv("BOWL_TOKEN", "env-snap-tok")
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "work", 1<<30, 0)
 	withDiskStorageFake(t, storage)
 
-	code, out, errOut := runCLI("snapshot", "create", testDiskID1, "--name", "before-upgrade", "--token", "snap-tok")
+	code, out, errOut := runCLI("snapshot", "create", testDiskID1, "--name", "before-upgrade")
 	require.Equal(t, 0, code, errOut)
 	require.Empty(t, errOut)
-	require.Equal(t, "Bearer snap-tok", storage.lastAuth)
+	require.Empty(t, storage.lastAuth)
 	require.Equal(t, "before-upgrade", storage.lastCreateSnapshotReq.GetName())
 	require.Contains(t, out, "Snapshot ID:")
 	require.Contains(t, out, "Source Disk:   "+testDiskID1)

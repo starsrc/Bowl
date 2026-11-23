@@ -323,21 +323,30 @@ func reachableCommitsFromReader(r pebbleReader) (map[uint64]struct{}, error) {
 	}
 
 	reachable := make(map[uint64]struct{})
-	for _, head := range heads {
-		cur := head
-		for cur != 0 {
-			if _, seen := reachable[cur]; seen {
-				break
+	stack := make([]uint64, 0, len(heads))
+	stack = append(stack, heads...)
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur == 0 {
+			continue
+		}
+		if _, seen := reachable[cur]; seen {
+			continue
+		}
+		reachable[cur] = struct{}{}
+		cmt, cmtErr := readCommitMeta(r, cur)
+		if cmtErr != nil {
+			if errors.Is(cmtErr, ErrNotFound) {
+				continue
 			}
-			reachable[cur] = struct{}{}
-			cmt, cmtErr := readCommitMeta(r, cur)
-			if cmtErr != nil {
-				if errors.Is(cmtErr, ErrNotFound) {
-					break
-				}
-				return nil, cmtErr
-			}
-			cur = cmt.ParentID
+			return nil, cmtErr
+		}
+		if cmt.ParentID != 0 {
+			stack = append(stack, cmt.ParentID)
+		}
+		if cmt.MergeParentID != 0 {
+			stack = append(stack, cmt.MergeParentID)
 		}
 	}
 	return reachable, nil

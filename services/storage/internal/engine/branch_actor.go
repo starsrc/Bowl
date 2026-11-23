@@ -55,6 +55,7 @@ const (
 	branchOpCommit
 	branchOpFork
 	branchOpReset
+	branchOpMerge
 	branchOpRelocate
 )
 
@@ -240,6 +241,8 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 		return a.execFork(batch, branch, cmd.req)
 	case branchOpReset:
 		return a.execReset(batch, branch, cmd.req)
+	case branchOpMerge:
+		return a.execMerge(batch, branch, cmd.req)
 	default:
 		return nil, ErrInvalid
 	}
@@ -783,8 +786,10 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 		return Inode{}, entryErr
 	}
 
+	wasEverLinked := target.Flags&InodeFlagEverLinked != 0
 	nowNano := a.disk.now().UnixNano()
 	target.Nlink++
+	target.Flags |= InodeFlagEverLinked
 	target.Ctime = nowNano
 	parent.Mtime = nowNano
 	parent.Ctime = nowNano
@@ -807,6 +812,14 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 	}
 	ent := Entry{Ino: target.Ino, Mode: target.Mode}
 	if setErr := batch.Set(LayerEntryKey(work, req.newParentIno, []byte(req.newName)), EncodeLiveEnvelope(EncodeEntry(ent)), nil); setErr != nil {
+		return Inode{}, setErr
+	}
+	if !wasEverLinked && target.ParentIno != 0 {
+		if setErr := batch.Set(LayerParentKey(work, target.Ino, target.ParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
+			return Inode{}, setErr
+		}
+	}
+	if setErr := batch.Set(LayerParentKey(work, target.Ino, req.newParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
 		return Inode{}, setErr
 	}
 	return target, nil
@@ -1130,6 +1143,20 @@ func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers 
 			if tbErr := tombstoneOrDecInode(batch, work, layers, dstIno, nowNano); tbErr != nil {
 				return tbErr
 			}
+		}
+	}
+
+	if !srcIsDir && (srcIno.Flags&InodeFlagEverLinked != 0 || srcIno.Nlink > 1) {
+		if srcIno.Flags&InodeFlagEverLinked == 0 {
+			srcIno.Flags |= InodeFlagEverLinked
+			if srcIno.ParentIno != 0 && srcIno.ParentIno != req.newParentIno {
+				if setErr := batch.Set(LayerParentKey(work, srcIno.Ino, srcIno.ParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
+					return setErr
+				}
+			}
+		}
+		if setErr := batch.Set(LayerParentKey(work, srcIno.Ino, req.newParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
+			return setErr
 		}
 	}
 

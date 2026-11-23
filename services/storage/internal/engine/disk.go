@@ -64,6 +64,8 @@ type DiskStore struct {
 	gcMu        sync.Mutex
 
 	beforeGCRelocateHook func(packID uint64, loc BlockRefLocation) error
+	beforeMergeExecHook  func(sourceBranch, targetBranch string) error
+	onDirVisitedHook     func(dirIno uint64)
 
 	gcCancel  context.CancelFunc
 	gcDone    chan struct{}

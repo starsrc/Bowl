@@ -34,12 +34,13 @@ type BranchMeta struct {
 }
 
 type CommitMeta struct {
-	ID        uint64
-	ParentID  uint64
-	LayerID   uint64
-	Kind      CommitKind
-	Message   string
-	CreatedAt int64
+	ID            uint64
+	ParentID      uint64
+	MergeParentID uint64
+	LayerID       uint64
+	Kind          CommitKind
+	Message       string
+	CreatedAt     int64
 }
 
 type MountMeta struct {
@@ -244,33 +245,35 @@ func DecodeBranchMeta(b []byte) (BranchMeta, error) {
 
 func EncodeCommitMeta(m CommitMeta) []byte {
 	msgLen := len(m.Message)
-	out := make([]byte, 1+8+8+8+1+8+4+msgLen)
+	out := make([]byte, 1+8+8+8+8+1+8+4+msgLen)
 	out[0] = codecVersion
 	binary.BigEndian.PutUint64(out[1:9], m.ID)
 	binary.BigEndian.PutUint64(out[9:17], m.ParentID)
-	binary.BigEndian.PutUint64(out[17:25], m.LayerID)
-	out[25] = byte(m.Kind)
-	binary.BigEndian.PutUint64(out[26:34], uint64(m.CreatedAt))
-	binary.BigEndian.PutUint32(out[34:38], uint32(msgLen))
-	copy(out[38:], m.Message)
+	binary.BigEndian.PutUint64(out[17:25], m.MergeParentID)
+	binary.BigEndian.PutUint64(out[25:33], m.LayerID)
+	out[33] = byte(m.Kind)
+	binary.BigEndian.PutUint64(out[34:42], uint64(m.CreatedAt))
+	binary.BigEndian.PutUint32(out[42:46], uint32(msgLen))
+	copy(out[46:], m.Message)
 	return out
 }
 
 func DecodeCommitMeta(b []byte) (CommitMeta, error) {
-	if len(b) < 38 || b[0] != codecVersion {
+	if len(b) < 46 || b[0] != codecVersion {
 		return CommitMeta{}, ErrInvalidValue
 	}
-	msgLen := int(binary.BigEndian.Uint32(b[34:38]))
-	if 38+msgLen != len(b) {
+	msgLen := int(binary.BigEndian.Uint32(b[42:46]))
+	if 46+msgLen != len(b) {
 		return CommitMeta{}, ErrInvalidValue
 	}
 	return CommitMeta{
-		ID:        binary.BigEndian.Uint64(b[1:9]),
-		ParentID:  binary.BigEndian.Uint64(b[9:17]),
-		LayerID:   binary.BigEndian.Uint64(b[17:25]),
-		Kind:      CommitKind(b[25]),
-		CreatedAt: int64(binary.BigEndian.Uint64(b[26:34])),
-		Message:   string(b[38:]),
+		ID:            binary.BigEndian.Uint64(b[1:9]),
+		ParentID:      binary.BigEndian.Uint64(b[9:17]),
+		MergeParentID: binary.BigEndian.Uint64(b[17:25]),
+		LayerID:       binary.BigEndian.Uint64(b[25:33]),
+		Kind:          CommitKind(b[33]),
+		CreatedAt:     int64(binary.BigEndian.Uint64(b[34:42])),
+		Message:       string(b[46:]),
 	}, nil
 }
 

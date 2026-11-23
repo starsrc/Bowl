@@ -13,6 +13,8 @@ const (
 	LayerOrphanKeyLen    = 26
 	LayerDataPrefixLen   = 25
 	LayerDataKeyLen      = 33
+	LayerParentPrefixLen = 27
+	LayerParentKeyLen    = 35
 	MetaCommitKeyLen     = 20
 	LayerDataSubPrefixOf = 17
 )
@@ -29,11 +31,15 @@ var (
 	layerOrphanTagBytes    = []byte(":orphan:")
 	layerDataTagBytes      = []byte(":data:")
 	layerDataSubPrefixOnly = []byte(":data:")
+	layerParentTagBytes    = []byte(":parent:")
 )
 
 func SplitKey(key []byte) int {
 	if len(key) < LayerDataPrefixLen || key[0] != 'l' || key[1] != ':' || key[10] != ':' {
 		return len(key)
+	}
+	if len(key) >= LayerParentPrefixLen && key[26] == ':' && bytes.Equal(key[10:18], layerParentTagBytes) {
+		return LayerParentPrefixLen
 	}
 	if len(key) >= LayerEntryPrefixLen && key[25] == ':' {
 		if bytes.Equal(key[10:17], layerEntryTagBytes) || bytes.Equal(key[10:17], layerXattrTagBytes) {
@@ -130,6 +136,13 @@ func LayerInodeKey(layerID, ino uint64) []byte {
 	return out
 }
 
+func DecodeLayerInodeKey(key []byte) (layerID, ino uint64, err error) {
+	if len(key) != LayerInodeKeyLen || !bytes.HasPrefix(key, layerKeyPrefixBytes) || !bytes.Equal(key[10:17], layerInodeTagBytes) {
+		return 0, 0, ErrInvalidKey
+	}
+	return binary.BigEndian.Uint64(key[2:10]), binary.BigEndian.Uint64(key[17:25]), nil
+}
+
 func LayerEntryPrefix(layerID, parent uint64) []byte {
 	out := make([]byte, LayerEntryPrefixLen)
 	copy(out, layerKeyPrefixBytes)
@@ -223,4 +236,32 @@ func DecodeLayerDataKey(key []byte) (layerID, ino, blockIdx uint64, err error) {
 		return 0, 0, 0, ErrInvalidKey
 	}
 	return binary.BigEndian.Uint64(key[2:10]), binary.BigEndian.Uint64(key[16:24]), binary.BigEndian.Uint64(key[25:33]), nil
+}
+
+func LayerParentPrefix(layerID, ino uint64) []byte {
+	out := make([]byte, LayerParentPrefixLen)
+	copy(out, layerKeyPrefixBytes)
+	binary.BigEndian.PutUint64(out[2:10], layerID)
+	copy(out[10:18], layerParentTagBytes)
+	binary.BigEndian.PutUint64(out[18:26], ino)
+	out[26] = ':'
+	return out
+}
+
+func LayerParentKey(layerID, ino, parentDirIno uint64) []byte {
+	out := make([]byte, LayerParentKeyLen)
+	copy(out, layerKeyPrefixBytes)
+	binary.BigEndian.PutUint64(out[2:10], layerID)
+	copy(out[10:18], layerParentTagBytes)
+	binary.BigEndian.PutUint64(out[18:26], ino)
+	out[26] = ':'
+	binary.BigEndian.PutUint64(out[27:35], parentDirIno)
+	return out
+}
+
+func DecodeLayerParentKey(key []byte) (layerID, ino, parentDirIno uint64, err error) {
+	if len(key) != LayerParentKeyLen || !bytes.HasPrefix(key, layerKeyPrefixBytes) || !bytes.Equal(key[10:18], layerParentTagBytes) || key[26] != ':' {
+		return 0, 0, 0, ErrInvalidKey
+	}
+	return binary.BigEndian.Uint64(key[2:10]), binary.BigEndian.Uint64(key[18:26]), binary.BigEndian.Uint64(key[27:35]), nil
 }

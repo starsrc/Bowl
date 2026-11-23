@@ -24,6 +24,8 @@ var (
 	ErrTooManyLinks   = errors.New("engine: too many links")
 	ErrFileTooLarge   = errors.New("engine: file too large")
 	ErrInodeExhausted = errors.New("engine: inode numbers exhausted")
+	ErrDirtyWorkLayer = errors.New("engine: dirty work layer")
+	ErrAmbiguousLCA   = errors.New("engine: ambiguous common ancestor")
 )
 
 const (
@@ -56,7 +58,12 @@ const (
 	MaxFileSize            uint64 = math.MaxInt64
 	MaxXattrNameBytes             = 255
 	MaxXattrValueBytes            = 65536
+	MaxXattrListBytes             = 65536
 	IDSegmentSize          uint64 = 4096
+)
+
+const (
+	InodeFlagEverLinked uint32 = 1 << 0
 )
 
 const (
@@ -75,4 +82,5 @@ const (
 	CommitKindInit   CommitKind = 1
 	CommitKindManual CommitKind = 2
 	CommitKindFork   CommitKind = 3
+	CommitKindMerge  CommitKind = 4
 )

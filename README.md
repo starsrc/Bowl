@@ -167,7 +167,7 @@ task down
 - **本地进程内句柄与锁**：打开句柄表、`flock` / `fcntl` 建议锁与未具名 `O_TMPFILE` 句柄状态维护在单个客户端实例本地（写暂存分片与匿名临时文件存放在 `--stage-dir` 宿主机磁盘），不跨主机同步。
 - **单节点数据面**：单盘的 `StoreActor`、Pebble 实例与 `.pack` 文件驻留在单个 `storage-service` 节点上，暂不支持跨节点分片与自动副本。
 - **FUSE 依赖 Linux 内核**：`bowl mount` / `umount` 需要 `/dev/fuse` 与 `fusermount3`；不支持 `RENAME_WHITEOUT`。
-- **服务端鉴权待补齐**：客户端已支持通过 `--token` / `$BOWL_TOKEN` 注入 Bearer Token，但服务端尚未内置鉴权拦截器，当前需依赖内网隔离或前端反代控制访问。
+- **暂未内置鉴权**：客户端与服务端均未内置鉴权机制，当前需依赖内网隔离或前端反代控制访问。
 
 ## 项目结构与开发测试
 

@@ -118,7 +118,7 @@ func MapError(err error) syscall.Errno {
 			return syscall.ENOENT
 		case connect.CodeAlreadyExists:
 			return syscall.EEXIST
-		case connect.CodePermissionDenied, connect.CodeUnauthenticated:
+		case connect.CodePermissionDenied:
 			return syscall.EACCES
 		case connect.CodeInvalidArgument:
 			return syscall.EINVAL

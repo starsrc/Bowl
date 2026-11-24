@@ -106,7 +106,7 @@ func TestStep3_CommitAndFork_CleanForkProducesZeroLayerPureMetadataCommit(t *tes
 	require.NoError(t, err)
 	require.Equal(t, []byte("committed"), got)
 
-	require.NoError(t, disk.Unlink(ctx, "feat-clean", RootIno, "base.txt"))
+	require.NoError(t, disk.Unlink(ctx, "feat-clean", RootIno, "base.txt", false))
 	_, _, err = disk.Lookup(ctx, "feat-clean", RootIno, "base.txt")
 	require.ErrorIs(t, err, ErrNotFound)
 

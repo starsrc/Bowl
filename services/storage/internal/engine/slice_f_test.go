@@ -160,7 +160,7 @@ func TestStep13_SparseParentIndex_HardlinkUnlinkWriteRenameAndMultiHopMerge(t *t
 	require.Equal(t, uint32(2), linked.Nlink)
 	require.NotZero(t, linked.Flags&InodeFlagEverLinked)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, dir1.Ino, "orig.txt"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, dir1.Ino, "orig.txt", false))
 	afterUnlink, err := disk.GetAttr(ctx, DefaultBranchName, f.Ino)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), afterUnlink.Nlink)
@@ -202,7 +202,12 @@ func TestStep13_SparseParentIndex_HardlinkUnlinkWriteRenameAndMultiHopMerge(t *t
 	_, _, err = disk.Fork(ctx, DefaultBranchName, "feat2", "fork hop2")
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Rename(ctx, "feat2", dir2.Ino, "alias.txt", dir3.Ino, "moved.txt"))
+	require.NoError(t, disk.Rename(ctx, "feat2", RenameReq{
+		OldParentIno: dir2.Ino,
+		OldName:      "alias.txt",
+		NewParentIno: dir3.Ino,
+		NewName:      "moved.txt",
+	}))
 	_, err = disk.Commit(ctx, "feat2", "rename ever-linked")
 	require.NoError(t, err)
 
@@ -254,7 +259,12 @@ func TestStep13_SparseParentIndex_HardlinkUnlinkWriteRenameAndMultiHopMerge(t *t
 	_, _, err = disk.Fork(ctx, DefaultBranchName, "feat-rename", "fork reg rename")
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Rename(ctx, "feat-rename", dir1.Ino, "reg.txt", dir2.Ino, "reg-moved.txt"))
+	require.NoError(t, disk.Rename(ctx, "feat-rename", RenameReq{
+		OldParentIno: dir1.Ino,
+		OldName:      "reg.txt",
+		NewParentIno: dir2.Ino,
+		NewName:      "reg-moved.txt",
+	}))
 	_, err = disk.Commit(ctx, "feat-rename", "rename reg")
 	require.NoError(t, err)
 
@@ -367,16 +377,16 @@ func TestStep13_ConflictKindsStrategiesPathStrategiesPrefixAndPagination(t *test
 	_, err = disk.Write(ctx, DefaultBranchName, modDelF.Ino, 0, []byte("ours-modified"))
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, box.Ino, "04_delmod.txt"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, box.Ino, "04_delmod.txt", false))
 
 	_, err = disk.Write(ctx, DefaultBranchName, tdmFile.Ino, 0, []byte("ours-inner"))
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, box.Ino, "06_type.txt"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, box.Ino, "06_type.txt", false))
 	_, err = disk.Symlink(ctx, DefaultBranchName, box.Ino, "06_type.txt", "/target/sym", 0, 0)
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, box.Ino, "07_dirfile"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, box.Ino, "07_dirfile", false))
 	_, err = disk.Mkdir(ctx, DefaultBranchName, box.Ino, "07_dirfile", 0o755, 0, 0)
 	require.NoError(t, err)
 
@@ -404,12 +414,12 @@ func TestStep13_ConflictKindsStrategiesPathStrategiesPrefixAndPagination(t *test
 	_, err = disk.Write(ctx, "feat", contentF.Ino, 0, []byte("theirs-content"))
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Unlink(ctx, "feat", box.Ino, "03_moddel.txt"))
+	require.NoError(t, disk.Unlink(ctx, "feat", box.Ino, "03_moddel.txt", false))
 
 	_, err = disk.Write(ctx, "feat", delModF.Ino, 0, []byte("theirs-modified"))
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Unlink(ctx, "feat", tdmDir.Ino, "inner.txt"))
+	require.NoError(t, disk.Unlink(ctx, "feat", tdmDir.Ino, "inner.txt", false))
 	require.NoError(t, disk.Rmdir(ctx, "feat", box.Ino, "05_tdm_dir"))
 
 	_, err = disk.Write(ctx, "feat", typeF.Ino, 0, []byte("theirs-reg-mod"))

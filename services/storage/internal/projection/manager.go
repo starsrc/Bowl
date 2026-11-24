@@ -946,19 +946,19 @@ func (m *ControlManager) DiffWork(ctx context.Context, diskID uuid.UUID, branch 
 	return entry.store.DiffWork(ctx, branch, opts)
 }
 
-func (m *ControlManager) ReadCommitNode(ctx context.Context, diskID uuid.UUID, commitID, ino uint64, offset int64, size int) ([]byte, error) {
+func (m *ControlManager) ReadCommitNode(ctx context.Context, diskID uuid.UUID, commitID, ino uint64, offset int64, size int) (engine.CommitNodeResult, error) {
 	if diskID == uuid.Nil {
-		return nil, engine.ErrInvalid
+		return engine.CommitNodeResult{}, engine.ErrInvalid
 	}
 	unlock := m.rlockDisk(diskID)
 	defer unlock()
 
 	entry, release, err := m.acquireDisk(diskID)
 	if err != nil {
-		return nil, err
+		return engine.CommitNodeResult{}, err
 	}
 	defer release()
-	return entry.store.ReadAtCommit(ctx, commitID, ino, offset, size)
+	return entry.store.ReadCommitNode(ctx, commitID, ino, offset, size)
 }
 
 func (m *ControlManager) Disk(ctx context.Context, diskID uuid.UUID) (*engine.DiskStore, error) {

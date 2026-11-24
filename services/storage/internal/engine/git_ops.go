@@ -57,6 +57,9 @@ func (a *BranchActor) execCommit(batch *pebble.Batch, branch BranchMeta, raw any
 	if err != nil {
 		return CommitMeta{}, err
 	}
+	if migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, newWorkLayerID, branch.HeadCommitID); migErr != nil {
+		return CommitMeta{}, migErr
+	}
 
 	nowNano := a.disk.now().UnixNano()
 	cmt := CommitMeta{
@@ -141,11 +144,6 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 		return nil, err
 	}
 
-	dirty, err := layerHasAnyKey(batch, branch.WorkLayerID)
-	if err != nil {
-		return nil, err
-	}
-
 	commitID, err := a.disk.allocCommitID()
 	if err != nil {
 		return nil, err
@@ -155,6 +153,14 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 		return nil, err
 	}
 	dstWorkID, err := a.disk.allocLayerID()
+	if err != nil {
+		return nil, err
+	}
+	if migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, srcNewWorkID, branch.HeadCommitID); migErr != nil {
+		return nil, migErr
+	}
+
+	dirty, err := layerHasAnyKey(batch, branch.WorkLayerID)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +275,7 @@ func (a *BranchActor) execReset(batch *pebble.Batch, branch BranchMeta, raw any)
 	return branch, nil
 }
 
-func (d *DiskStore) DeleteBranch(_ context.Context, branch string) error {
+func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 	if d.closing.Load() {
 		return ErrClosed
 	}
@@ -317,7 +323,7 @@ func (d *DiskStore) DeleteBranch(_ context.Context, branch string) error {
 			return delErr
 		}
 	}
-	return batch.Commit(pebble.Sync)
+	return d.commitBatchSync(ctx, batch)
 }
 
 func reachableCommitsFromReader(r pebbleReader) (map[uint64]struct{}, error) {
@@ -374,7 +380,7 @@ func reachableCommitsFromReader(r pebbleReader) (map[uint64]struct{}, error) {
 	return reachable, nil
 }
 
-func (d *DiskStore) DeleteCommit(_ context.Context, commitID uint64) error {
+func (d *DiskStore) DeleteCommit(ctx context.Context, commitID uint64) error {
 	if d.closing.Load() {
 		return ErrClosed
 	}
@@ -419,10 +425,10 @@ func (d *DiskStore) DeleteCommit(_ context.Context, commitID uint64) error {
 			return delErr
 		}
 	}
-	return batch.Commit(pebble.Sync)
+	return d.commitBatchSync(ctx, batch)
 }
 
-func (d *DiskStore) PruneCommits(_ context.Context) (int, error) {
+func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 	if d.closing.Load() {
 		return 0, ErrClosed
 	}
@@ -484,7 +490,7 @@ func (d *DiskStore) PruneCommits(_ context.Context) (int, error) {
 			}
 		}
 	}
-	if commitErr := batch.Commit(pebble.Sync); commitErr != nil {
+	if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
 		return 0, commitErr
 	}
 	return len(unreachable), nil

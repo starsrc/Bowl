@@ -179,9 +179,13 @@ func TestStep16_ControlManager_ReadWriteRoutingAndColdDiskZeroWakeup(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), diffWorkRes.Summary.Added)
 
-	data, err := coldMgr.ReadCommitNode(ctx, diskRec.DiskID, cmt1.CommitID, ino, 0, 64)
+	nodeRes, err := coldMgr.ReadCommitNode(ctx, diskRec.DiskID, cmt1.CommitID, ino, 0, 64)
 	require.NoError(t, err)
-	require.Equal(t, []byte("hello world"), data)
+	require.Equal(t, engine.ModeRegular|0o644, nodeRes.Mode)
+	require.Equal(t, uint64(len("hello world")), nodeRes.FileSize)
+	require.Equal(t, []byte("hello world"), nodeRes.Data)
+	require.True(t, nodeRes.EOF)
+	require.Empty(t, nodeRes.SymlinkTarget)
 
 	cmt2, err := coldMgr.Commit(ctx, diskRec.DiskID, "main", "commit during pg outage")
 	require.NoError(t, err)

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ type packOpKind uint8
 
 const (
 	packOpAppend packOpKind = iota + 1
+	packOpSync
 	packOpDelete
 	packOpWatermark
 	packOpSealActive
@@ -95,9 +97,16 @@ type PackActor struct {
 	activePackID       uint64
 	activeFile         *os.File
 	activeOffset       uint32
+	dirtyActive        bool
+	dirtyDir           bool
+	dirtyClosedPacks   map[uint64]struct{}
+	dirtyAtomic        atomic.Bool
 	packSizes          map[uint64]uint64
 	totalPhysicalBytes uint64
 	atomicPhysical     atomic.Uint64
+
+	syncFileHook func(packID uint64) error
+	syncDirHook  func(dir string) error
 
 	inFlightMu    sync.Mutex
 	inFlightPacks map[uint64]int
@@ -117,12 +126,13 @@ func newPackActor(dir string, maxPackSize uint32, maxBytes uint64) (*PackActor, 
 		return nil, err
 	}
 	p := &PackActor{
-		dir:           dir,
-		maxPackSize:   maxPackSize,
-		packSizes:     make(map[uint64]uint64),
-		inFlightPacks: make(map[uint64]int),
-		readFiles:     make(map[uint64]*packReadHandle),
-		loopDone:      make(chan struct{}),
+		dir:              dir,
+		maxPackSize:      maxPackSize,
+		dirtyClosedPacks: make(map[uint64]struct{}),
+		packSizes:        make(map[uint64]uint64),
+		inFlightPacks:    make(map[uint64]int),
+		readFiles:        make(map[uint64]*packReadHandle),
+		loopDone:         make(chan struct{}),
 	}
 	p.maxBytes.Store(maxBytes)
 	p.mb.notify = make(chan struct{}, 1)
@@ -306,6 +316,87 @@ func (p *PackActor) SealActive(ctx context.Context) error {
 	return p.submit(ctx, cmd)
 }
 
+func (p *PackActor) SyncActive(ctx context.Context) error {
+	cmd := &packCmd{
+		op:   packOpSync,
+		done: make(chan struct{}),
+	}
+	return p.submit(ctx, cmd)
+}
+
+func (p *PackActor) hasDirty() bool {
+	return p.dirtyAtomic.Load()
+}
+
+func (p *PackActor) updateDirtyAtomic() {
+	p.dirtyAtomic.Store(p.dirtyActive || p.dirtyDir || len(p.dirtyClosedPacks) > 0)
+}
+
+func (p *PackActor) syncPackFile(packID uint64, f *os.File) error {
+	if p.syncFileHook != nil {
+		if err := p.syncFileHook(packID); err != nil {
+			return err
+		}
+	}
+	return syncFileData(f)
+}
+
+func (p *PackActor) syncPacksDir() error {
+	if p.syncDirHook != nil {
+		if err := p.syncDirHook(p.dir); err != nil {
+			return err
+		}
+	}
+	return syncDir(p.dir)
+}
+
+func (p *PackActor) flushDirty() error {
+	if !p.dirtyActive && !p.dirtyDir && len(p.dirtyClosedPacks) == 0 {
+		return nil
+	}
+	if len(p.dirtyClosedPacks) > 0 {
+		ids := make([]uint64, 0, len(p.dirtyClosedPacks))
+		for id := range p.dirtyClosedPacks {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		for _, id := range ids {
+			handle, err := p.acquireReadHandle(id)
+			if errors.Is(err, ErrNotFound) {
+				delete(p.dirtyClosedPacks, id)
+				continue
+			}
+			if err != nil {
+				p.updateDirtyAtomic()
+				return err
+			}
+			syncErr := p.syncPackFile(id, handle.file)
+			handle.release()
+			if syncErr != nil {
+				p.updateDirtyAtomic()
+				return syncErr
+			}
+			delete(p.dirtyClosedPacks, id)
+		}
+	}
+	if p.dirtyActive && p.activeFile != nil {
+		if err := p.syncPackFile(p.activePackID, p.activeFile); err != nil {
+			p.updateDirtyAtomic()
+			return err
+		}
+		p.dirtyActive = false
+	}
+	if p.dirtyDir {
+		if err := p.syncPacksDir(); err != nil {
+			p.updateDirtyAtomic()
+			return err
+		}
+		p.dirtyDir = false
+	}
+	p.updateDirtyAtomic()
+	return nil
+}
+
 func (p *PackActor) runLoop() {
 	defer close(p.loopDone)
 	for {
@@ -316,7 +407,9 @@ func (p *PackActor) runLoop() {
 				closed := p.mb.closed
 				p.mb.mu.Unlock()
 				if closed {
-					p.closeErr = p.closeActivePack()
+					flushErr := p.flushDirty()
+					closeErr := p.closeActivePack()
+					p.closeErr = errors.Join(flushErr, closeErr)
 					return
 				}
 				break
@@ -330,44 +423,6 @@ func (p *PackActor) runLoop() {
 }
 
 func (p *PackActor) processTick(cmds []*packCmd) {
-	activeDirty := false
-	createdDir := false
-	pendingReceipts := make([]*packCmd, 0, len(cmds))
-
-	flushDirty := func() error {
-		if !activeDirty && !createdDir {
-			return nil
-		}
-		var syncErr error
-		if activeDirty && p.activeFile != nil {
-			if err := syncFileData(p.activeFile); err != nil {
-				syncErr = err
-			}
-		}
-		if createdDir {
-			if err := syncDir(p.dir); err != nil && syncErr == nil {
-				syncErr = err
-			}
-		}
-		activeDirty = false
-		createdDir = false
-		return syncErr
-	}
-
-	finishPending := func(syncErr error) {
-		for _, c := range pendingReceipts {
-			if syncErr != nil {
-				if c.op == packOpAppend && len(c.refs) > 0 {
-					p.ReleaseInFlight(c.refs)
-					c.refs = nil
-				}
-				c.err = syncErr
-			}
-			close(c.done)
-		}
-		pendingReceipts = pendingReceipts[:0]
-	}
-
 	for _, cmd := range cmds {
 		switch cmd.op {
 		case packOpAppend:
@@ -377,36 +432,47 @@ func (p *PackActor) processTick(cmds []*packCmd) {
 				close(cmd.done)
 				continue
 			}
-			activeDirty = true
+			p.dirtyActive = true
 			if created {
-				createdDir = true
+				p.dirtyDir = true
 			}
+			p.updateDirtyAtomic()
 			p.pinInFlight(refs)
 			cmd.refs = refs
-			pendingReceipts = append(pendingReceipts, cmd)
+			close(cmd.done)
+
+		case packOpSync:
+			cmd.err = p.flushDirty()
+			close(cmd.done)
 
 		case packOpSealActive:
-			syncErr := flushDirty()
-			finishPending(syncErr)
-			_ = p.closeActivePack()
+			if syncErr := p.flushDirty(); syncErr != nil {
+				cmd.err = syncErr
+				close(cmd.done)
+				continue
+			}
+			cmd.err = p.closeActivePack()
 			close(cmd.done)
 
 		case packOpWatermark:
-			syncErr := flushDirty()
-			finishPending(syncErr)
+			if syncErr := p.flushDirty(); syncErr != nil {
+				cmd.err = syncErr
+				close(cmd.done)
+				continue
+			}
 			cmd.watermark, cmd.sizes = p.computeWatermarkAndSizes()
 			close(cmd.done)
 
 		case packOpDelete:
-			syncErr := flushDirty()
-			finishPending(syncErr)
+			if syncErr := p.flushDirty(); syncErr != nil {
+				cmd.err = syncErr
+				close(cmd.done)
+				continue
+			}
 			cmd.err = p.execDeletePack(cmd.packID)
 			close(cmd.done)
 		}
 	}
-
-	syncErr := flushDirty()
-	finishPending(syncErr)
 }
 
 func (p *PackActor) execAppend(blocks [][]byte, quotaExempt bool) ([]BlobRef, bool, error) {
@@ -478,12 +544,16 @@ func (p *PackActor) closeActivePack() error {
 	if p.activeFile == nil {
 		return nil
 	}
-	syncErr := syncFileData(p.activeFile)
+	if p.dirtyActive && p.activePackID != 0 {
+		p.dirtyClosedPacks[p.activePackID] = struct{}{}
+		p.dirtyActive = false
+	}
 	closeErr := p.activeFile.Close()
 	p.activeFile = nil
 	p.activePackID = 0
 	p.activeOffset = 0
-	return errors.Join(syncErr, closeErr)
+	p.updateDirtyAtomic()
+	return closeErr
 }
 
 func (p *PackActor) computeWatermarkAndSizes() (watermark uint64, sizes map[uint64]uint64) {
@@ -525,6 +595,8 @@ func (p *PackActor) execDeletePack(packID uint64) error {
 	}
 
 	p.evictHotPack(packID)
+	delete(p.dirtyClosedPacks, packID)
+	p.updateDirtyAtomic()
 
 	p.filesMu.Lock()
 	if handle, ok := p.readFiles[packID]; ok {

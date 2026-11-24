@@ -20,9 +20,20 @@ type commitReq struct {
 }
 
 func (d *DiskStore) Commit(ctx context.Context, branch, message string) (CommitMeta, error) {
+	if d.closing.Load() {
+		return CommitMeta{}, ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := validateBranchName(branch); err != nil {
 		return CommitMeta{}, err
 	}
+
+	if lockErr := d.lockGCShared(ctx); lockErr != nil {
+		return CommitMeta{}, lockErr
+	}
+	defer d.unlockGCShared()
 
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
@@ -48,6 +59,11 @@ func (a *BranchActor) execCommit(batch *pebble.Batch, branch BranchMeta, raw any
 	req, ok := raw.(*commitReq)
 	if !ok {
 		return CommitMeta{}, ErrInvalid
+	}
+	if a.disk.beforeCommitExecHook != nil {
+		if hookErr := a.disk.beforeCommitExecHook(branch.Name); hookErr != nil {
+			return CommitMeta{}, hookErr
+		}
 	}
 	commitID, err := a.disk.allocCommitID()
 	if err != nil {
@@ -98,6 +114,12 @@ type forkResp struct {
 }
 
 func (d *DiskStore) Fork(ctx context.Context, srcBranch, newBranch, message string) (CommitMeta, BranchMeta, error) {
+	if d.closing.Load() {
+		return CommitMeta{}, BranchMeta{}, ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := validateBranchName(srcBranch); err != nil {
 		return CommitMeta{}, BranchMeta{}, err
 	}
@@ -107,6 +129,11 @@ func (d *DiskStore) Fork(ctx context.Context, srcBranch, newBranch, message stri
 	if srcBranch == newBranch {
 		return CommitMeta{}, BranchMeta{}, ErrExist
 	}
+
+	if lockErr := d.lockGCShared(ctx); lockErr != nil {
+		return CommitMeta{}, BranchMeta{}, lockErr
+	}
+	defer d.unlockGCShared()
 
 	d.branchRegMu.Lock()
 	defer d.branchRegMu.Unlock()
@@ -146,6 +173,11 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 		return nil, ErrExist
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
+	}
+	if a.disk.beforeForkExecHook != nil {
+		if hookErr := a.disk.beforeForkExecHook(branch.Name, req.newBranch); hookErr != nil {
+			return nil, hookErr
+		}
 	}
 
 	commitID, err := a.disk.allocCommitID()

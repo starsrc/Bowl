@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -98,27 +99,158 @@ func (d *DiskStore) sweepSealedPack(ctx context.Context, packID, totalBytes uint
 	return nil
 }
 
-func (d *DiskStore) lockGC(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
+type gcGate struct {
+	mu               sync.Mutex
+	activeShared     int
+	exclusiveHeld    bool
+	waitingExclusive int
+	notify           chan struct{}
+}
+
+func (g *gcGate) waitChLocked() <-chan struct{} {
+	if g.notify == nil {
+		g.notify = make(chan struct{})
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	select {
-	case d.gcMu <- struct{}{}:
-		if d.closing.Load() {
-			d.unlockGC()
-			return ErrClosed
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	return g.notify
+}
+
+func (g *gcGate) broadcastLocked() {
+	if g.notify != nil {
+		close(g.notify)
+		g.notify = nil
 	}
 }
 
-func (d *DiskStore) unlockGC() {
-	<-d.gcMu
+func (g *gcGate) lockShared(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for {
+		g.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			g.mu.Unlock()
+			return err
+		}
+		if !g.exclusiveHeld && g.waitingExclusive == 0 {
+			g.activeShared++
+			g.mu.Unlock()
+			return nil
+		}
+		waitCh := g.waitChLocked()
+		g.mu.Unlock()
+
+		select {
+		case <-waitCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (g *gcGate) unlockShared() {
+	g.mu.Lock()
+	g.activeShared--
+	if g.activeShared == 0 && g.waitingExclusive > 0 {
+		g.broadcastLocked()
+	}
+	g.mu.Unlock()
+}
+
+func (g *gcGate) lockExclusive(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		g.mu.Unlock()
+		return err
+	}
+	if !g.exclusiveHeld && g.activeShared == 0 {
+		g.exclusiveHeld = true
+		g.mu.Unlock()
+		return nil
+	}
+	g.waitingExclusive++
+	for {
+		if err := ctx.Err(); err != nil {
+			g.waitingExclusive--
+			if !g.exclusiveHeld && g.waitingExclusive == 0 {
+				g.broadcastLocked()
+			}
+			g.mu.Unlock()
+			return err
+		}
+		if !g.exclusiveHeld && g.activeShared == 0 {
+			g.waitingExclusive--
+			g.exclusiveHeld = true
+			g.mu.Unlock()
+			return nil
+		}
+		waitCh := g.waitChLocked()
+		g.mu.Unlock()
+
+		select {
+		case <-waitCh:
+			g.mu.Lock()
+		case <-ctx.Done():
+			g.mu.Lock()
+			g.waitingExclusive--
+			if !g.exclusiveHeld && g.waitingExclusive == 0 {
+				g.broadcastLocked()
+			}
+			g.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+}
+
+func (g *gcGate) unlockExclusive() {
+	g.mu.Lock()
+	g.exclusiveHeld = false
+	g.broadcastLocked()
+	g.mu.Unlock()
+}
+
+func (d *DiskStore) lockGCShared(ctx context.Context) error {
+	if d.closing.Load() {
+		return ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := d.gcGate.lockShared(ctx); err != nil {
+		return err
+	}
+	if d.closing.Load() {
+		d.unlockGCShared()
+		return ErrClosed
+	}
+	return nil
+}
+
+func (d *DiskStore) unlockGCShared() {
+	d.gcGate.unlockShared()
+}
+
+func (d *DiskStore) lockGCExclusive(ctx context.Context) error {
+	if d.closing.Load() {
+		return ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := d.gcGate.lockExclusive(ctx); err != nil {
+		return err
+	}
+	if d.closing.Load() {
+		d.unlockGCExclusive()
+		return ErrClosed
+	}
+	return nil
+}
+
+func (d *DiskStore) unlockGCExclusive() {
+	d.gcGate.unlockExclusive()
 }
 
 func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
@@ -129,10 +261,10 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 		ctx = context.Background()
 	}
 
-	if err := d.lockGC(ctx); err != nil {
+	if err := d.lockGCExclusive(ctx); err != nil {
 		return GCStats{}, err
 	}
-	defer d.unlockGC()
+	defer d.unlockGCExclusive()
 
 	insp, err := d.packs.GCInspectionSnapshot(ctx)
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 
 var diskGetSpec = diskSubcommandSpec{
 	use:       "get <disk-id>",
+	aliases:   []string{"view"},
 	short:     "Show details of a virtual disk",
 	args:      cobra.ExactArgs(1),
 	uuidLabel: "disk-id",
@@ -29,8 +30,8 @@ type diskGetAdapter struct {
 	diskID string
 }
 
-func (a *diskGetAdapter) finalize(_ *cobra.Command, posArgs []string) (bool, error) {
-	a.diskID = posArgs[0]
+func (a *diskGetAdapter) finalize(_ *cobra.Command, diskID string, _ []string) (bool, error) {
+	a.diskID = diskID
 	return false, nil
 }
 

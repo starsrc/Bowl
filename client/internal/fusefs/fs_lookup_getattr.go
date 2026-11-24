@@ -47,6 +47,7 @@ func (fs *RawFS) lookupInodeAfterCache(
 		ParentIno: parentIno,
 		Name:      []byte(name),
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 	}))
 	fenced := fs.IsFenced()
 	if !fenced && fs.cache.version() != epoch {
@@ -102,6 +103,7 @@ func (fs *RawFS) getInodeMissWithContext(parentCtx context.Context, cancel <-cha
 	resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
 		Ino:    serverIno,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 	}))
 	fenced := fs.IsFenced()
 	if !fenced && fs.cache.version() != epoch {
@@ -295,6 +297,7 @@ func (fs *RawFS) StatFs(cancel <-chan struct{}, in *fuse.InHeader, out *fuse.Sta
 	resp, err := fs.client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
 		Ino:    ino,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 	}))
 	if err != nil {
 		return fs.ToStatus(err)

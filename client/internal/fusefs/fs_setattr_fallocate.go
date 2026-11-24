@@ -70,6 +70,7 @@ func (fs *RawFS) SetAttr(cancel <-chan struct{}, input *fuse.SetAttrIn, out *fus
 	req := &storagev1.SetAttrRequest{
 		Ino:    ino,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}
 
@@ -228,6 +229,7 @@ func (fs *RawFS) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) (sta
 		Length: input.Length,
 		Mode:   input.Mode,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}
 

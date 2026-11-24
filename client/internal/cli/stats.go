@@ -19,9 +19,8 @@ const statsRequestTimeout = 5 * time.Second
 
 var statsHTTPClient = http.DefaultClient
 
-func newStatsCmd() *cobra.Command {
+func newStatsCmd(rootOpts *rootOptions) *cobra.Command {
 	var (
-		asJSON    bool
 		raw       bool
 		adminAddr string
 	)
@@ -31,12 +30,11 @@ func newStatsCmd() *cobra.Command {
 		Short: "Show FUSE statistics for a local mount process",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
-			return runStats(cmd, posArgs, asJSON, raw, adminAddr)
+			return runStats(cmd, posArgs, rootOpts.jsonOut, raw, adminAddr)
 		},
 	}
 
 	flags := cmd.Flags()
-	flags.BoolVar(&asJSON, "json", false, "Output statistics snapshot in JSON format")
 	flags.BoolVar(&raw, "raw", false, "Output statistics as .stats key-value pairs")
 	flags.StringVar(&adminAddr, "admin-addr", "", "Direct admin HTTP address as host:port, bypassing discovery")
 	return cmd

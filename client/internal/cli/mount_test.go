@@ -957,7 +957,7 @@ func TestMount_HandshakeErrors_GivenServerRejectsMount_ReturnsExit1AndCleansStag
 		setup      func(*fakeStorage)
 		wantSubstr string
 	}{
-		{name: "DiskNotFound", setup: noOpStorageSetup, wantSubstr: "disk not found: " + testDiskID1},
+		{name: "DiskNotFound", setup: noOpStorageSetup, wantSubstr: `disk ` + testDiskID1 + ` branch "main" not found`},
 		{name: "EmptyRootInode", setup: seedFaultyMountStorage(true, false), wantSubstr: "invalid root directory metadata"},
 		{name: "RWZeroEpoch", setup: seedFaultyMountStorage(false, true), wantSubstr: "valid write mount epoch"},
 	}
@@ -1189,7 +1189,7 @@ func TestRunMount_LeaseLifecycle_GivenCanceledCtx_RenewsAndUnmountsBeforeRemovin
 	withMountStorageFake(t, storage)
 
 	var metaExistsAtUnmount bool
-	storage.onUnmountDisk = func(_ *storagev1.UnmountDiskRequest) {
+	storage.onUnmountBranch = func(_ *storagev1.UnmountBranchRequest) {
 		_, metaExistsAtUnmount = findMountMeta(mp)
 	}
 
@@ -2236,7 +2236,7 @@ func TestMount_ForceHandshake_GivenForceFlagAndDaemonWorker_ForwardsForceAndForm
 
 		storage := newFakeStorage()
 		storage.seedDisk(testDiskID1, "busy-disk", 1<<30, 0)
-		storage.forcedErr["MountDisk"] = abortedBusyErr
+		storage.forcedErr["MountBranch"] = abortedBusyErr
 		withMountStorageFake(t, storage)
 
 		code, out, errOut := runCLI("mount", testDiskID1, mp, "-f", "--stage-dir", stageDir, "--admin-addr", "off")

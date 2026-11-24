@@ -58,12 +58,19 @@ func withTTL(entryTTL, attrTTL float64) fakeStorageOption {
 	}
 }
 
+func withStorageBranch(branch string) fakeStorageOption {
+	return func(s *fakeStorage) {
+		s.branch = branch
+	}
+}
+
 type fakeStorage struct {
 	tb       testing.TB
 	mu       sync.Mutex
 	rootIno  uint64
 	nextIno  uint64
 	diskID   string
+	branch   string
 	epoch    uint64
 	entryTTL float64
 	attrTTL  float64
@@ -133,6 +140,7 @@ func newFakeStorage(tb testing.TB, opts ...fakeStorageOption) *fakeStorage {
 		rootIno:  1,
 		nextIno:  100,
 		diskID:   "disk-test",
+		branch:   fusefs.DefaultBranch,
 		epoch:    1,
 		entryTTL: 1.0,
 		attrTTL:  1.0,
@@ -216,6 +224,14 @@ func (s *fakeStorage) checkDiskID(op, diskID string) error {
 	if s.diskID != "" && diskID != s.diskID {
 		s.tb.Errorf("契约违例：调用 %s 携带非法 DiskId，want=%q got=%q", op, s.diskID, diskID)
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unexpected disk_id %q", diskID))
+	}
+	return nil
+}
+
+func (s *fakeStorage) checkBranch(op, branch string) error {
+	if s.branch != "" && branch != s.branch {
+		s.tb.Errorf("contract violation: RPC %s carried unexpected Branch, want=%q got=%q", op, s.branch, branch)
+		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unexpected branch %q", branch))
 	}
 	return nil
 }
@@ -417,6 +433,9 @@ func (s *fakeStorage) Lookup(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkDiskID("Lookup", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Lookup", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if s.lookupHook != nil {
 		resp, err := s.lookupHook(ctx, req.Msg)
 		if err != nil {
@@ -459,6 +478,9 @@ func (s *fakeStorage) GetAttr(ctx context.Context, req *connect.Request[storagev
 	if err := s.checkDiskID("GetAttr", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("GetAttr", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if s.getAttrHook != nil {
 		resp, err := s.getAttrHook(ctx, req.Msg)
 		if err != nil {
@@ -486,6 +508,9 @@ func (s *fakeStorage) SetAttr(ctx context.Context, req *connect.Request[storagev
 		return nil, err
 	}
 	if err := s.checkDiskID("SetAttr", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("SetAttr", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("SetAttr", req.Msg.GetEpoch()); err != nil {
@@ -576,6 +601,9 @@ func (s *fakeStorage) Mknod(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkDiskID("Mknod", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Mknod", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Mknod", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -648,6 +676,9 @@ func (s *fakeStorage) Mkdir(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkDiskID("Mkdir", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Mkdir", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Mkdir", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -716,6 +747,9 @@ func (s *fakeStorage) Symlink(ctx context.Context, req *connect.Request[storagev
 		return nil, err
 	}
 	if err := s.checkDiskID("Symlink", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("Symlink", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("Symlink", req.Msg.GetEpoch()); err != nil {
@@ -787,6 +821,9 @@ func (s *fakeStorage) Readlink(ctx context.Context, req *connect.Request[storage
 	if err := s.checkDiskID("Readlink", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Readlink", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	node := s.nodes[req.Msg.GetIno()]
@@ -807,6 +844,9 @@ func (s *fakeStorage) Link(ctx context.Context, req *connect.Request[storagev1.L
 		return nil, err
 	}
 	if err := s.checkDiskID("Link", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("Link", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("Link", req.Msg.GetEpoch()); err != nil {
@@ -875,6 +915,9 @@ func (s *fakeStorage) Unlink(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkDiskID("Unlink", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Unlink", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Unlink", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -935,6 +978,9 @@ func (s *fakeStorage) Rmdir(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkDiskID("Rmdir", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Rmdir", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Rmdir", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -991,6 +1037,9 @@ func (s *fakeStorage) Rename(ctx context.Context, req *connect.Request[storagev1
 		return nil, err
 	}
 	if err := s.checkDiskID("Rename", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("Rename", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("Rename", req.Msg.GetEpoch()); err != nil {
@@ -1131,6 +1180,9 @@ func (s *fakeStorage) Create(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkDiskID("Create", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Create", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Create", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -1203,6 +1255,9 @@ func (s *fakeStorage) Read(ctx context.Context, req *connect.Request[storagev1.R
 		return nil, err
 	}
 	if err := s.checkDiskID("Read", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("Read", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if s.readHook != nil {
@@ -1281,6 +1336,9 @@ func (s *fakeStorage) Write(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkDiskID("Write", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Write", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Write", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -1311,6 +1369,9 @@ func (s *fakeStorage) Fsync(ctx context.Context, req *connect.Request[storagev1.
 	if err := s.checkDiskID("Fsync", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Fsync", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Fsync", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -1333,6 +1394,9 @@ func (s *fakeStorage) FsyncDir(ctx context.Context, req *connect.Request[storage
 		return nil, err
 	}
 	if err := s.checkDiskID("FsyncDir", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("FsyncDir", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("FsyncDir", req.Msg.GetEpoch()); err != nil {
@@ -1361,6 +1425,9 @@ func (s *fakeStorage) ReadDirPlus(ctx context.Context, req *connect.Request[stor
 		return nil, err
 	}
 	if err := s.checkDiskID("ReadDirPlus", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("ReadDirPlus", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if s.readDirPlusHook != nil {
@@ -1454,6 +1521,9 @@ func (s *fakeStorage) Fallocate(ctx context.Context, req *connect.Request[storag
 	if err := s.checkDiskID("Fallocate", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("Fallocate", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("Fallocate", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -1510,6 +1580,9 @@ func (s *fakeStorage) SetXattr(ctx context.Context, req *connect.Request[storage
 	if err := s.checkDiskID("SetXattr", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("SetXattr", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if err := s.checkEpoch("SetXattr", req.Msg.GetEpoch()); err != nil {
 		return nil, err
 	}
@@ -1564,6 +1637,9 @@ func (s *fakeStorage) GetXattr(ctx context.Context, req *connect.Request[storage
 	if err := s.checkDiskID("GetXattr", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("GetXattr", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	node := s.nodes[req.Msg.GetIno()]
@@ -1585,6 +1661,9 @@ func (s *fakeStorage) ListXattr(ctx context.Context, req *connect.Request[storag
 		return nil, err
 	}
 	if err := s.checkDiskID("ListXattr", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("ListXattr", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
@@ -1611,6 +1690,9 @@ func (s *fakeStorage) RemoveXattr(ctx context.Context, req *connect.Request[stor
 		return nil, err
 	}
 	if err := s.checkDiskID("RemoveXattr", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("RemoveXattr", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("RemoveXattr", req.Msg.GetEpoch()); err != nil {
@@ -1643,6 +1725,9 @@ func (s *fakeStorage) StatFS(ctx context.Context, req *connect.Request[storagev1
 	if err := s.checkDiskID("StatFS", req.Msg.GetDiskId()); err != nil {
 		return nil, err
 	}
+	if err := s.checkBranch("StatFS", req.Msg.GetBranch()); err != nil {
+		return nil, err
+	}
 	if s.statFSHook != nil {
 		if err := s.statFSHook(ctx, req.Msg); err != nil {
 			return nil, err
@@ -1663,6 +1748,9 @@ func (s *fakeStorage) ReclaimOrphan(ctx context.Context, req *connect.Request[st
 		return nil, err
 	}
 	if err := s.checkDiskID("ReclaimOrphan", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("ReclaimOrphan", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("ReclaimOrphan", req.Msg.GetEpoch()); err != nil {
@@ -1691,6 +1779,9 @@ func (s *fakeStorage) CreateTmpfile(ctx context.Context, req *connect.Request[st
 		return nil, err
 	}
 	if err := s.checkDiskID("CreateTmpfile", req.Msg.GetDiskId()); err != nil {
+		return nil, err
+	}
+	if err := s.checkBranch("CreateTmpfile", req.Msg.GetBranch()); err != nil {
 		return nil, err
 	}
 	if err := s.checkEpoch("CreateTmpfile", req.Msg.GetEpoch()); err != nil {
@@ -1757,16 +1848,16 @@ func (s *fakeStorage) ReadDir(context.Context, *connect.Request[storagev1.ReadDi
 	return nil, s.failFast("ReadDir")
 }
 
-func (s *fakeStorage) MountDisk(context.Context, *connect.Request[storagev1.MountDiskRequest]) (*connect.Response[storagev1.MountDiskResponse], error) {
-	return nil, s.failFast("MountDisk")
+func (s *fakeStorage) MountBranch(context.Context, *connect.Request[storagev1.MountBranchRequest]) (*connect.Response[storagev1.MountBranchResponse], error) {
+	return nil, s.failFast("MountBranch")
 }
 
 func (s *fakeStorage) RenewMount(context.Context, *connect.Request[storagev1.RenewMountRequest]) (*connect.Response[storagev1.RenewMountResponse], error) {
 	return nil, s.failFast("RenewMount")
 }
 
-func (s *fakeStorage) UnmountDisk(context.Context, *connect.Request[storagev1.UnmountDiskRequest]) (*connect.Response[storagev1.UnmountDiskResponse], error) {
-	return nil, s.failFast("UnmountDisk")
+func (s *fakeStorage) UnmountBranch(context.Context, *connect.Request[storagev1.UnmountBranchRequest]) (*connect.Response[storagev1.UnmountBranchResponse], error) {
+	return nil, s.failFast("UnmountBranch")
 }
 
 func (s *fakeStorage) ListMounts(context.Context, *connect.Request[storagev1.ListMountsRequest]) (*connect.Response[storagev1.ListMountsResponse], error) {
@@ -1797,36 +1888,56 @@ func (s *fakeStorage) DeleteDisk(context.Context, *connect.Request[storagev1.Del
 	return nil, s.failFast("DeleteDisk")
 }
 
-func (s *fakeStorage) ForkDisk(context.Context, *connect.Request[storagev1.ForkDiskRequest]) (*connect.Response[storagev1.ForkDiskResponse], error) {
-	return nil, s.failFast("ForkDisk")
+func (s *fakeStorage) ForkBranch(context.Context, *connect.Request[storagev1.ForkBranchRequest]) (*connect.Response[storagev1.ForkBranchResponse], error) {
+	return nil, s.failFast("ForkBranch")
 }
 
-func (s *fakeStorage) DiffDisk(context.Context, *connect.Request[storagev1.DiffDiskRequest]) (*connect.Response[storagev1.DiffDiskResponse], error) {
-	return nil, s.failFast("DiffDisk")
+func (s *fakeStorage) ListBranches(context.Context, *connect.Request[storagev1.ListBranchesRequest]) (*connect.Response[storagev1.ListBranchesResponse], error) {
+	return nil, s.failFast("ListBranches")
 }
 
-func (s *fakeStorage) ReadSnapshotNode(context.Context, *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
-	return nil, s.failFast("ReadSnapshotNode")
+func (s *fakeStorage) DeleteBranch(context.Context, *connect.Request[storagev1.DeleteBranchRequest]) (*connect.Response[storagev1.DeleteBranchResponse], error) {
+	return nil, s.failFast("DeleteBranch")
 }
 
-func (s *fakeStorage) MergeDisk(context.Context, *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
-	return nil, s.failFast("MergeDisk")
+func (s *fakeStorage) ResetBranch(context.Context, *connect.Request[storagev1.ResetBranchRequest]) (*connect.Response[storagev1.ResetBranchResponse], error) {
+	return nil, s.failFast("ResetBranch")
 }
 
-func (s *fakeStorage) CreateSnapshot(context.Context, *connect.Request[storagev1.CreateSnapshotRequest]) (*connect.Response[storagev1.CreateSnapshotResponse], error) {
-	return nil, s.failFast("CreateSnapshot")
+func (s *fakeStorage) MergeBranch(context.Context, *connect.Request[storagev1.MergeBranchRequest]) (*connect.Response[storagev1.MergeBranchResponse], error) {
+	return nil, s.failFast("MergeBranch")
 }
 
-func (s *fakeStorage) ListSnapshots(context.Context, *connect.Request[storagev1.ListSnapshotsRequest]) (*connect.Response[storagev1.ListSnapshotsResponse], error) {
-	return nil, s.failFast("ListSnapshots")
+func (s *fakeStorage) CreateCommit(context.Context, *connect.Request[storagev1.CreateCommitRequest]) (*connect.Response[storagev1.CreateCommitResponse], error) {
+	return nil, s.failFast("CreateCommit")
 }
 
-func (s *fakeStorage) DeleteSnapshot(context.Context, *connect.Request[storagev1.DeleteSnapshotRequest]) (*connect.Response[storagev1.DeleteSnapshotResponse], error) {
-	return nil, s.failFast("DeleteSnapshot")
+func (s *fakeStorage) ListCommits(context.Context, *connect.Request[storagev1.ListCommitsRequest]) (*connect.Response[storagev1.ListCommitsResponse], error) {
+	return nil, s.failFast("ListCommits")
 }
 
-func (s *fakeStorage) PruneSnapshots(context.Context, *connect.Request[storagev1.PruneSnapshotsRequest]) (*connect.Response[storagev1.PruneSnapshotsResponse], error) {
-	return nil, s.failFast("PruneSnapshots")
+func (s *fakeStorage) DeleteCommit(context.Context, *connect.Request[storagev1.DeleteCommitRequest]) (*connect.Response[storagev1.DeleteCommitResponse], error) {
+	return nil, s.failFast("DeleteCommit")
+}
+
+func (s *fakeStorage) PruneCommits(context.Context, *connect.Request[storagev1.PruneCommitsRequest]) (*connect.Response[storagev1.PruneCommitsResponse], error) {
+	return nil, s.failFast("PruneCommits")
+}
+
+func (s *fakeStorage) ReadCommitNode(context.Context, *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
+	return nil, s.failFast("ReadCommitNode")
+}
+
+func (s *fakeStorage) DiffBranches(context.Context, *connect.Request[storagev1.DiffBranchesRequest]) (*connect.Response[storagev1.DiffResponse], error) {
+	return nil, s.failFast("DiffBranches")
+}
+
+func (s *fakeStorage) DiffCommits(context.Context, *connect.Request[storagev1.DiffCommitsRequest]) (*connect.Response[storagev1.DiffResponse], error) {
+	return nil, s.failFast("DiffCommits")
+}
+
+func (s *fakeStorage) DiffWork(context.Context, *connect.Request[storagev1.DiffWorkRequest]) (*connect.Response[storagev1.DiffResponse], error) {
+	return nil, s.failFast("DiffWork")
 }
 
 type rawFSOption func(*fusefs.Config)
@@ -1895,6 +2006,7 @@ func newTestRawFS(t *testing.T, s *fakeStorage, opts ...rawFSOption) *fusefs.Raw
 	t.Helper()
 	cfg := fusefs.Config{
 		DiskID:              s.diskID,
+		Branch:              s.branch,
 		Epoch:               s.epoch,
 		RootIno:             s.rootIno,
 		RootInode:           s.rootInodeClone(),

@@ -285,8 +285,9 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		preemptResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+		preemptResp, err := client.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
 			DiskId:   diskID,
+			Branch:   "main",
 			ReadOnly: false,
 			Force:    true,
 		}))
@@ -294,7 +295,7 @@ func TestSyncMode_RegularFileWrites_ExecutesSynchronouslyWithZeroStageFilesAndSu
 		t.Cleanup(func() {
 			uCtx, uCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer uCancel()
-			_, _ = client.UnmountDisk(uCtx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+			_, _ = client.UnmountBranch(uCtx, connect.NewRequest(&storagev1.UnmountBranchRequest{
 				DiskId:  diskID,
 				MountId: preemptResp.Msg.GetMountId(),
 			}))

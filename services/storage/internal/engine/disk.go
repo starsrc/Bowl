@@ -66,7 +66,7 @@ type DiskStore struct {
 	commitActors map[uint64]*BranchActor
 
 	branchRegMu sync.RWMutex
-	gcMu        sync.Mutex
+	gcMu        chan struct{}
 
 	beforeGCRelocateHook   func(packID uint64, loc BlockRefLocation) error
 	beforeGCSealActiveHook func(packID uint64) error
@@ -171,6 +171,7 @@ func OpenDisk(opts DiskOptions) (*DiskStore, error) {
 		actorIdleTTL: opts.ActorIdleTTL,
 		branchActors: make(map[string]*BranchActor),
 		commitActors: make(map[uint64]*BranchActor),
+		gcMu:         make(chan struct{}, 1),
 	}
 
 	if err = d.loadOrBootstrapMeta(opts, defaultBlockSize); err != nil {

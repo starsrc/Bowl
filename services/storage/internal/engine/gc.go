@@ -98,17 +98,41 @@ func (d *DiskStore) sweepSealedPack(ctx context.Context, packID, totalBytes uint
 	return nil
 }
 
+func (d *DiskStore) lockGC(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case d.gcMu <- struct{}{}:
+		if d.closing.Load() {
+			d.unlockGC()
+			return ErrClosed
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *DiskStore) unlockGC() {
+	<-d.gcMu
+}
+
 func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 	if d.closing.Load() {
 		return GCStats{}, ErrClosed
 	}
-
-	d.gcMu.Lock()
-	defer d.gcMu.Unlock()
-
-	if d.closing.Load() {
-		return GCStats{}, ErrClosed
+	if ctx == nil {
+		ctx = context.Background()
 	}
+
+	if err := d.lockGC(ctx); err != nil {
+		return GCStats{}, err
+	}
+	defer d.unlockGC()
 
 	insp, err := d.packs.GCInspectionSnapshot(ctx)
 	if err != nil {

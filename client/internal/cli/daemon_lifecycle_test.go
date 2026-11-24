@@ -219,7 +219,7 @@ func TestRunMount_TeardownOrder_GivenFixedAdminAddrAndStagedMode_ClosesAdminAndS
 		stageStatErrAtComplete error
 	)
 
-	storage.onUnmountDisk = func(_ *storagev1.UnmountDiskRequest) {
+	storage.onUnmountBranch = func(_ *storagev1.UnmountBranchRequest) {
 		_, metaExistsAtUnmount = findMountMeta(mp)
 		readyStatusAtUnmount, _ = fetchReadyzStatusAndBody(t, fixedAddr)
 	}
@@ -655,7 +655,7 @@ func TestRunMount_GivenCancelDuringHandshake_AbortsRPCAndCleansStageAndAdminList
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "cancel-during-handshake", 1<<30, 0)
 	storage.mountLeaseTTL = 30
-	storage.onMountDisk = func(rpcCtx context.Context, _ *storagev1.MountDiskRequest) error {
+	storage.onMountBranch = func(rpcCtx context.Context, _ *storagev1.MountBranchRequest) error {
 		cancel()
 		<-rpcCtx.Done()
 		return rpcCtx.Err()
@@ -714,7 +714,7 @@ func TestRunMount_GivenCancelImmediatelyAfterHandshake_ReleasesLeaseAndSkipsServ
 			if err != nil {
 				return nil, err
 			}
-			if strings.HasSuffix(req.URL.Path, "/MountDisk") {
+			if strings.HasSuffix(req.URL.Path, "/MountBranch") {
 				resp.Body = &cancelOnCloseReadCloser{
 					ReadCloser: resp.Body,
 					onClose:    cancel,
@@ -1149,7 +1149,7 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 				if err != nil {
 					return nil, err
 				}
-				if strings.HasSuffix(req.URL.Path, "/MountDisk") {
+				if strings.HasSuffix(req.URL.Path, "/MountBranch") {
 					resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, onClose: sigCancel}
 				}
 				return resp, nil
@@ -1206,7 +1206,7 @@ func TestMount_EarlySignalContext_GivenForegroundAndDaemonWorker_InstallsBeforeH
 				if err != nil {
 					return nil, err
 				}
-				if strings.HasSuffix(req.URL.Path, "/MountDisk") {
+				if strings.HasSuffix(req.URL.Path, "/MountBranch") {
 					resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, onClose: sigCancel}
 				}
 				return resp, nil

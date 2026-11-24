@@ -156,6 +156,7 @@ func TestProtoBinaryCodec_GivenWriteRequests_MatchesStandardProtoAndZeroAllocs(t
 		Data:   []byte("small-write"),
 		DiskId: "11111111-1111-4111-8111-111111111111",
 		Epoch:  1,
+		Branch: "main",
 	}
 	bigReq := &storagev1.WriteRequest{
 		Ino:    9876543210,
@@ -164,6 +165,7 @@ func TestProtoBinaryCodec_GivenWriteRequests_MatchesStandardProtoAndZeroAllocs(t
 		Data:   payload4M,
 		DiskId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		Epoch:  777,
+		Branch: "feat/pay",
 	}
 
 	assertWriteRequestEquivalence(t, &storagev1.WriteRequest{})
@@ -174,8 +176,17 @@ func TestProtoBinaryCodec_GivenWriteRequests_MatchesStandardProtoAndZeroAllocs(t
 		Ino:    1,
 		DiskId: string([]byte{0xff, 0xfe}),
 		Epoch:  1,
+		Branch: "main",
 	})
 	require.Error(t, invalidErr)
+
+	_, invalidBranchErr := appender.MarshalAppend(nil, &storagev1.WriteRequest{
+		Ino:    1,
+		DiskId: "11111111-1111-4111-8111-111111111111",
+		Epoch:  1,
+		Branch: string([]byte{0xff, 0xfe}),
+	})
+	require.Error(t, invalidBranchErr)
 
 	readReq := &storagev1.ReadRequest{
 		Ino:    42,
@@ -183,6 +194,7 @@ func TestProtoBinaryCodec_GivenWriteRequests_MatchesStandardProtoAndZeroAllocs(t
 		Offset: 4096,
 		Size:   128 << 10,
 		DiskId: "11111111-1111-4111-8111-111111111111",
+		Branch: "main",
 	}
 	reusableBuf := make([]byte, 0, MaxReadPayloadSize+256)
 	var (

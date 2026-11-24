@@ -21,6 +21,7 @@ var diskCreateSpec = diskSubcommandSpec{
 	short:      "Create a new virtual disk",
 	args:       cobra.NoArgs,
 	allowQuiet: true,
+	quietHelp:  "Quiet mode, output only the created disk ID",
 	spanName:   "cli.disk.create",
 	timeout:    10 * time.Second,
 	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
@@ -38,7 +39,7 @@ type diskCreateAdapter struct {
 	maxBytes uint64
 }
 
-func (a *diskCreateAdapter) finalize(cmd *cobra.Command, _ []string) (bool, error) {
+func (a *diskCreateAdapter) finalize(cmd *cobra.Command, _ string, _ []string) (bool, error) {
 	if !cmd.Flags().Changed("size") || strings.TrimSpace(a.sizeRaw) == "" {
 		return true, errors.New("--size is required")
 	}

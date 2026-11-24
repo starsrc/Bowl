@@ -127,6 +127,14 @@ func LayerDataAllPrefix(layerID uint64) []byte {
 	return out
 }
 
+func LayerInodePrefix(layerID uint64) []byte {
+	out := make([]byte, 17)
+	copy(out, layerKeyPrefixBytes)
+	binary.BigEndian.PutUint64(out[2:10], layerID)
+	copy(out[10:17], layerInodeTagBytes)
+	return out
+}
+
 func LayerInodeKey(layerID, ino uint64) []byte {
 	out := make([]byte, LayerInodeKeyLen)
 	copy(out, layerKeyPrefixBytes)

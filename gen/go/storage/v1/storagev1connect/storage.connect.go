@@ -86,15 +86,20 @@ const (
 	// StorageServiceRemoveXattrProcedure is the fully-qualified name of the StorageService's
 	// RemoveXattr RPC.
 	StorageServiceRemoveXattrProcedure = "/storage.v1.StorageService/RemoveXattr"
-	// StorageServiceMountDiskProcedure is the fully-qualified name of the StorageService's MountDisk
-	// RPC.
-	StorageServiceMountDiskProcedure = "/storage.v1.StorageService/MountDisk"
+	// StorageServiceStatFSProcedure is the fully-qualified name of the StorageService's StatFS RPC.
+	StorageServiceStatFSProcedure = "/storage.v1.StorageService/StatFS"
+	// StorageServiceReclaimOrphanProcedure is the fully-qualified name of the StorageService's
+	// ReclaimOrphan RPC.
+	StorageServiceReclaimOrphanProcedure = "/storage.v1.StorageService/ReclaimOrphan"
+	// StorageServiceMountBranchProcedure is the fully-qualified name of the StorageService's
+	// MountBranch RPC.
+	StorageServiceMountBranchProcedure = "/storage.v1.StorageService/MountBranch"
 	// StorageServiceRenewMountProcedure is the fully-qualified name of the StorageService's RenewMount
 	// RPC.
 	StorageServiceRenewMountProcedure = "/storage.v1.StorageService/RenewMount"
-	// StorageServiceUnmountDiskProcedure is the fully-qualified name of the StorageService's
-	// UnmountDisk RPC.
-	StorageServiceUnmountDiskProcedure = "/storage.v1.StorageService/UnmountDisk"
+	// StorageServiceUnmountBranchProcedure is the fully-qualified name of the StorageService's
+	// UnmountBranch RPC.
+	StorageServiceUnmountBranchProcedure = "/storage.v1.StorageService/UnmountBranch"
 	// StorageServiceListMountsProcedure is the fully-qualified name of the StorageService's ListMounts
 	// RPC.
 	StorageServiceListMountsProcedure = "/storage.v1.StorageService/ListMounts"
@@ -115,235 +120,146 @@ const (
 	// StorageServiceDeleteDiskProcedure is the fully-qualified name of the StorageService's DeleteDisk
 	// RPC.
 	StorageServiceDeleteDiskProcedure = "/storage.v1.StorageService/DeleteDisk"
-	// StorageServiceForkDiskProcedure is the fully-qualified name of the StorageService's ForkDisk RPC.
-	StorageServiceForkDiskProcedure = "/storage.v1.StorageService/ForkDisk"
-	// StorageServiceStatFSProcedure is the fully-qualified name of the StorageService's StatFS RPC.
-	StorageServiceStatFSProcedure = "/storage.v1.StorageService/StatFS"
-	// StorageServiceReclaimOrphanProcedure is the fully-qualified name of the StorageService's
-	// ReclaimOrphan RPC.
-	StorageServiceReclaimOrphanProcedure = "/storage.v1.StorageService/ReclaimOrphan"
-	// StorageServiceDiffDiskProcedure is the fully-qualified name of the StorageService's DiffDisk RPC.
-	StorageServiceDiffDiskProcedure = "/storage.v1.StorageService/DiffDisk"
-	// StorageServiceReadSnapshotNodeProcedure is the fully-qualified name of the StorageService's
-	// ReadSnapshotNode RPC.
-	StorageServiceReadSnapshotNodeProcedure = "/storage.v1.StorageService/ReadSnapshotNode"
-	// StorageServiceMergeDiskProcedure is the fully-qualified name of the StorageService's MergeDisk
+	// StorageServiceForkBranchProcedure is the fully-qualified name of the StorageService's ForkBranch
 	// RPC.
-	StorageServiceMergeDiskProcedure = "/storage.v1.StorageService/MergeDisk"
-	// StorageServiceCreateSnapshotProcedure is the fully-qualified name of the StorageService's
-	// CreateSnapshot RPC.
-	StorageServiceCreateSnapshotProcedure = "/storage.v1.StorageService/CreateSnapshot"
-	// StorageServiceListSnapshotsProcedure is the fully-qualified name of the StorageService's
-	// ListSnapshots RPC.
-	StorageServiceListSnapshotsProcedure = "/storage.v1.StorageService/ListSnapshots"
-	// StorageServiceDeleteSnapshotProcedure is the fully-qualified name of the StorageService's
-	// DeleteSnapshot RPC.
-	StorageServiceDeleteSnapshotProcedure = "/storage.v1.StorageService/DeleteSnapshot"
-	// StorageServicePruneSnapshotsProcedure is the fully-qualified name of the StorageService's
-	// PruneSnapshots RPC.
-	StorageServicePruneSnapshotsProcedure = "/storage.v1.StorageService/PruneSnapshots"
+	StorageServiceForkBranchProcedure = "/storage.v1.StorageService/ForkBranch"
+	// StorageServiceListBranchesProcedure is the fully-qualified name of the StorageService's
+	// ListBranches RPC.
+	StorageServiceListBranchesProcedure = "/storage.v1.StorageService/ListBranches"
+	// StorageServiceDeleteBranchProcedure is the fully-qualified name of the StorageService's
+	// DeleteBranch RPC.
+	StorageServiceDeleteBranchProcedure = "/storage.v1.StorageService/DeleteBranch"
+	// StorageServiceResetBranchProcedure is the fully-qualified name of the StorageService's
+	// ResetBranch RPC.
+	StorageServiceResetBranchProcedure = "/storage.v1.StorageService/ResetBranch"
+	// StorageServiceMergeBranchProcedure is the fully-qualified name of the StorageService's
+	// MergeBranch RPC.
+	StorageServiceMergeBranchProcedure = "/storage.v1.StorageService/MergeBranch"
+	// StorageServiceCreateCommitProcedure is the fully-qualified name of the StorageService's
+	// CreateCommit RPC.
+	StorageServiceCreateCommitProcedure = "/storage.v1.StorageService/CreateCommit"
+	// StorageServiceListCommitsProcedure is the fully-qualified name of the StorageService's
+	// ListCommits RPC.
+	StorageServiceListCommitsProcedure = "/storage.v1.StorageService/ListCommits"
+	// StorageServiceDeleteCommitProcedure is the fully-qualified name of the StorageService's
+	// DeleteCommit RPC.
+	StorageServiceDeleteCommitProcedure = "/storage.v1.StorageService/DeleteCommit"
+	// StorageServicePruneCommitsProcedure is the fully-qualified name of the StorageService's
+	// PruneCommits RPC.
+	StorageServicePruneCommitsProcedure = "/storage.v1.StorageService/PruneCommits"
+	// StorageServiceReadCommitNodeProcedure is the fully-qualified name of the StorageService's
+	// ReadCommitNode RPC.
+	StorageServiceReadCommitNodeProcedure = "/storage.v1.StorageService/ReadCommitNode"
+	// StorageServiceDiffBranchesProcedure is the fully-qualified name of the StorageService's
+	// DiffBranches RPC.
+	StorageServiceDiffBranchesProcedure = "/storage.v1.StorageService/DiffBranches"
+	// StorageServiceDiffCommitsProcedure is the fully-qualified name of the StorageService's
+	// DiffCommits RPC.
+	StorageServiceDiffCommitsProcedure = "/storage.v1.StorageService/DiffCommits"
+	// StorageServiceDiffWorkProcedure is the fully-qualified name of the StorageService's DiffWork RPC.
+	StorageServiceDiffWorkProcedure = "/storage.v1.StorageService/DiffWork"
 )
 
 // StorageServiceClient is a client for the storage.v1.StorageService service.
 type StorageServiceClient interface {
-	// Lookup 执行单级目录项查找。
-	// 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
-	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Lookup resolves a single directory entry within a branch.
 	Lookup(context.Context, *connect.Request[v1.LookupRequest]) (*connect.Response[v1.LookupResponse], error)
-	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
-	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
-	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// GetAttr returns inode attributes and FUSE cache timeouts for an inode in a branch.
 	GetAttr(context.Context, *connect.Request[v1.GetAttrRequest]) (*connect.Response[v1.GetAttrResponse], error)
-	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
-	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
-	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
+	// SetAttr applies partial metadata updates to an inode in a branch.
 	SetAttr(context.Context, *connect.Request[v1.SetAttrRequest]) (*connect.Response[v1.SetAttrResponse], error)
-	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Mknod creates a regular file or special node under a parent directory in a branch.
 	Mknod(context.Context, *connect.Request[v1.MknodRequest]) (*connect.Response[v1.MknodResponse], error)
-	// Mkdir 在指定父目录下创建子目录。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Mkdir creates a subdirectory under a parent directory in a branch.
 	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
-	// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Symlink creates a symbolic link under a parent directory in a branch.
 	Symlink(context.Context, *connect.Request[v1.SymlinkRequest]) (*connect.Response[v1.SymlinkResponse], error)
-	// Readlink 获取符号链接节点指向的目标路径。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// Readlink returns the target path of a symbolic link in a branch.
 	Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error)
-	// Link creates a hard link in the target parent directory for an existing non-directory inode.
-	// It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
-	// Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
-	// The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
-	// The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
-	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
-	// The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
+	// Link creates a hard link in the target parent directory for an existing non-directory inode in a branch.
 	Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error)
-	// Unlink 删除指定父目录下的非目录项（解链）。
-	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 对 "." 或 ".."，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// Unlink removes a non-directory entry from a parent directory in a branch.
 	Unlink(context.Context, *connect.Request[v1.UnlinkRequest]) (*connect.Response[v1.UnlinkResponse], error)
-	// Rmdir 移除指定父目录下的空目录项。
-	// 若目标节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若目标目录非空，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
-	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
+	// Rmdir removes an empty subdirectory entry from a parent directory in a branch.
 	Rmdir(context.Context, *connect.Request[v1.RmdirRequest]) (*connect.Response[v1.RmdirResponse], error)
-	// Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
-	// 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
-	// 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
-	// 当 flags 为 RENAME_EXCHANGE (0x2) 时，要求源与目标均存在（任一不存在返回 NotFound / ENOENT），原子交换两个目录项的 Inode 绑定并执行双向祖先环检测。
-	// 若传入互斥组合（RENAME_NOREPLACE | RENAME_EXCHANGE）、RENAME_WHITEOUT (0x4) 或未知标志位，返回 InvalidArgument (EINVAL)。
-	// 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
-	// 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// Rename atomically renames, moves, or exchanges directory entries in a branch.
 	Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error)
-	// Create 在指定父目录下创建常规文件，文件句柄由客户端管理。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+	// Create creates a regular file under a parent directory in a branch.
 	Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error)
-	// CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
-	// If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
-	// When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
-	// When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
-	// The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
-	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
-	// The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
-	// The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
-	// The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
-	// The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
+	// CreateTmpfile allocates an anonymous regular-file inode with nlink == 0 in a branch.
 	CreateTmpfile(context.Context, *connect.Request[v1.CreateTmpfileRequest]) (*connect.Response[v1.CreateTmpfileResponse], error)
-	// Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
-	// 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// Read reads up to 4 MiB of file content at an offset in a branch.
 	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
-	// Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
-	// 遵循 POSIX pwrite(2) 语义，支持最大 4 MiB 单次写入。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// Write writes up to 4 MiB of file content at an offset in a branch.
 	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
-	// Fsync 同步并持久化文件节点与句柄关联的状态。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// Fsync flushes durable state for a file inode in a branch.
 	Fsync(context.Context, *connect.Request[v1.FsyncRequest]) (*connect.Response[v1.FsyncResponse], error)
-	// FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
-	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
+	// FsyncDir flushes durable state for a directory inode in a branch.
 	FsyncDir(context.Context, *connect.Request[v1.FsyncDirRequest]) (*connect.Response[v1.FsyncDirResponse], error)
-	// ReadDir 读取指定目录的子项流（基本条目）。
-	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+	// ReadDir returns basic directory entries for a directory in a branch.
 	ReadDir(context.Context, *connect.Request[v1.ReadDirRequest]) (*connect.Response[v1.ReadDirResponse], error)
-	// ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
-	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+	// ReadDirPlus returns directory entries with inline inode attributes and cache timeouts in a branch.
 	ReadDirPlus(context.Context, *connect.Request[v1.ReadDirPlusRequest]) (*connect.Response[v1.ReadDirPlusResponse], error)
-	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
-	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+	// Fallocate preallocates or deallocates byte ranges for a regular file in a branch.
 	Fallocate(context.Context, *connect.Request[v1.FallocateRequest]) (*connect.Response[v1.FallocateResponse], error)
-	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
-	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
-	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+	// SetXattr sets an extended attribute on an inode in a branch.
 	SetXattr(context.Context, *connect.Request[v1.SetXattrRequest]) (*connect.Response[v1.SetXattrResponse], error)
-	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
-	// 遵循 POSIX getxattr(2) 语义。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// GetXattr reads an extended attribute value from an inode in a branch.
 	GetXattr(context.Context, *connect.Request[v1.GetXattrRequest]) (*connect.Response[v1.GetXattrResponse], error)
-	// ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
-	// 遵循 POSIX listxattr(2) 语义。
-	// 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若无属性，返回空列表。
+	// ListXattr lists extended attribute names on an inode in a branch.
 	ListXattr(context.Context, *connect.Request[v1.ListXattrRequest]) (*connect.Response[v1.ListXattrResponse], error)
-	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
-	// 遵循 POSIX removexattr(2) 语义。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// RemoveXattr deletes an extended attribute from an inode in a branch.
 	RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error)
-	// MountDisk 执行单盘挂载握手。
-	// 可写挂载 (read_only = false) 在不存在未过期可写租约或显式指定 force = true 时原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode；
-	// 若已存在未过期可写租约且 force = false，返回 Aborted (映射至 POSIX EBUSY) 且不推进 WriterEpoch。
-	// 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
-	MountDisk(context.Context, *connect.Request[v1.MountDiskRequest]) (*connect.Response[v1.MountDiskResponse], error)
-	// RenewMount 为已建立的在线挂载软租约执行周期续期。
-	RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error)
-	// UnmountDisk 幂等释放指定的在线挂载软租约。
-	UnmountDisk(context.Context, *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error)
-	// ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
-	ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error)
-	// EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
-	EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error)
-	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
-	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
-	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
-	CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error)
-	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
-	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
-	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
-	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
-	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
-	// 支持按需单独或同时更新 name 与 max_bytes。
-	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
-	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
-	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
-	// DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
-	// 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
-	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
-	// ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-	// 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
-	// 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
-	// 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
-	ForkDisk(context.Context, *connect.Request[v1.ForkDiskRequest]) (*connect.Response[v1.ForkDiskResponse], error)
-	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
-	// 接收目标节点的 uint64 ino，查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
-	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// StatFS returns disk quota and 4096-byte block statistics for a branch.
 	StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error)
-	// ReclaimOrphan 回收最后一个本地句柄关闭的孤儿节点。
+	// ReclaimOrphan reclaims an orphan inode whose last client handle has closed in a branch.
 	ReclaimOrphan(context.Context, *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error)
-	// DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
-	DiffDisk(context.Context, *connect.Request[v1.DiffDiskRequest]) (*connect.Response[v1.DiffDiskResponse], error)
-	// ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
-	ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error)
-	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
-	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
-	// CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
-	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error)
-	// ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
-	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
-	// DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
-	DeleteSnapshot(context.Context, *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error)
-	// PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
-	PruneSnapshots(context.Context, *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error)
+	// MountBranch acquires a read-only or fenced read-write mount lease on a branch.
+	MountBranch(context.Context, *connect.Request[v1.MountBranchRequest]) (*connect.Response[v1.MountBranchResponse], error)
+	// RenewMount extends an active mount lease on a branch.
+	RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error)
+	// UnmountBranch idempotently releases an active mount lease by disk and mount ID.
+	UnmountBranch(context.Context, *connect.Request[v1.UnmountBranchRequest]) (*connect.Response[v1.UnmountBranchResponse], error)
+	// ListMounts returns unexpired mount leases for a disk or a single branch sorted by mount_id ascending.
+	ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error)
+	// EvictMounts removes one or more active mount leases for a disk or branch and fences writers when needed.
+	EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error)
+	// CreateDisk creates a virtual disk with its default branch and initial commit.
+	CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error)
+	// GetDisk returns disk metadata and byte usage.
+	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
+	// ListDisks lists virtual disks in descending creation order with cursor pagination.
+	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
+	// UpdateDisk updates a virtual disk name or byte quota limit.
+	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
+	// DeleteDisk deletes an unmounted virtual disk and all of its branches and commits.
+	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
+	// ForkBranch seals the source branch state into a fork commit and creates a new branch at that commit.
+	ForkBranch(context.Context, *connect.Request[v1.ForkBranchRequest]) (*connect.Response[v1.ForkBranchResponse], error)
+	// ListBranches lists all branches belonging to a disk.
+	ListBranches(context.Context, *connect.Request[v1.ListBranchesRequest]) (*connect.Response[v1.ListBranchesResponse], error)
+	// DeleteBranch deletes a non-default, unmounted branch from a disk.
+	DeleteBranch(context.Context, *connect.Request[v1.DeleteBranchRequest]) (*connect.Response[v1.DeleteBranchResponse], error)
+	// ResetBranch resets a branch head to a target commit and clears its work layer.
+	ResetBranch(context.Context, *connect.Request[v1.ResetBranchRequest]) (*connect.Response[v1.ResetBranchResponse], error)
+	// MergeBranch merges a source branch into a target branch with optional dry-run and conflict strategies.
+	MergeBranch(context.Context, *connect.Request[v1.MergeBranchRequest]) (*connect.Response[v1.MergeBranchResponse], error)
+	// CreateCommit seals the dirty work layer of a branch into a manual commit.
+	CreateCommit(context.Context, *connect.Request[v1.CreateCommitRequest]) (*connect.Response[v1.CreateCommitResponse], error)
+	// ListCommits lists commits for a disk in descending commit_id order with optional kind filter and pagination.
+	ListCommits(context.Context, *connect.Request[v1.ListCommitsRequest]) (*connect.Response[v1.ListCommitsResponse], error)
+	// DeleteCommit deletes a single unreachable commit from a disk.
+	DeleteCommit(context.Context, *connect.Request[v1.DeleteCommitRequest]) (*connect.Response[v1.DeleteCommitResponse], error)
+	// PruneCommits reclaims all unreachable commits on a disk.
+	PruneCommits(context.Context, *connect.Request[v1.PruneCommitsRequest]) (*connect.Response[v1.PruneCommitsResponse], error)
+	// ReadCommitNode reads node metadata and file data or symlink target from an immutable commit.
+	ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error)
+	// DiffBranches computes the three-way diff and conflicts between source and target branches.
+	DiffBranches(context.Context, *connect.Request[v1.DiffBranchesRequest]) (*connect.Response[v1.DiffResponse], error)
+	// DiffCommits computes the two-way diff between two commits on a disk.
+	DiffCommits(context.Context, *connect.Request[v1.DiffCommitsRequest]) (*connect.Response[v1.DiffResponse], error)
+	// DiffWork computes the two-way diff between a branch head commit and its live work layer.
+	DiffWork(context.Context, *connect.Request[v1.DiffWorkRequest]) (*connect.Response[v1.DiffResponse], error)
 }
 
 // NewStorageServiceClient constructs a client for the storage.v1.StorageService service. By
@@ -501,10 +417,22 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("RemoveXattr")),
 			connect.WithClientOptions(opts...),
 		),
-		mountDisk: connect.NewClient[v1.MountDiskRequest, v1.MountDiskResponse](
+		statFS: connect.NewClient[v1.StatFSRequest, v1.StatFSResponse](
 			httpClient,
-			baseURL+StorageServiceMountDiskProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("MountDisk")),
+			baseURL+StorageServiceStatFSProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("StatFS")),
+			connect.WithClientOptions(opts...),
+		),
+		reclaimOrphan: connect.NewClient[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse](
+			httpClient,
+			baseURL+StorageServiceReclaimOrphanProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ReclaimOrphan")),
+			connect.WithClientOptions(opts...),
+		),
+		mountBranch: connect.NewClient[v1.MountBranchRequest, v1.MountBranchResponse](
+			httpClient,
+			baseURL+StorageServiceMountBranchProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("MountBranch")),
 			connect.WithClientOptions(opts...),
 		),
 		renewMount: connect.NewClient[v1.RenewMountRequest, v1.RenewMountResponse](
@@ -513,10 +441,10 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("RenewMount")),
 			connect.WithClientOptions(opts...),
 		),
-		unmountDisk: connect.NewClient[v1.UnmountDiskRequest, v1.UnmountDiskResponse](
+		unmountBranch: connect.NewClient[v1.UnmountBranchRequest, v1.UnmountBranchResponse](
 			httpClient,
-			baseURL+StorageServiceUnmountDiskProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("UnmountDisk")),
+			baseURL+StorageServiceUnmountBranchProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("UnmountBranch")),
 			connect.WithClientOptions(opts...),
 		),
 		listMounts: connect.NewClient[v1.ListMountsRequest, v1.ListMountsResponse](
@@ -561,64 +489,82 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(storageServiceMethods.ByName("DeleteDisk")),
 			connect.WithClientOptions(opts...),
 		),
-		forkDisk: connect.NewClient[v1.ForkDiskRequest, v1.ForkDiskResponse](
+		forkBranch: connect.NewClient[v1.ForkBranchRequest, v1.ForkBranchResponse](
 			httpClient,
-			baseURL+StorageServiceForkDiskProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("ForkDisk")),
+			baseURL+StorageServiceForkBranchProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ForkBranch")),
 			connect.WithClientOptions(opts...),
 		),
-		statFS: connect.NewClient[v1.StatFSRequest, v1.StatFSResponse](
+		listBranches: connect.NewClient[v1.ListBranchesRequest, v1.ListBranchesResponse](
 			httpClient,
-			baseURL+StorageServiceStatFSProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("StatFS")),
+			baseURL+StorageServiceListBranchesProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListBranches")),
 			connect.WithClientOptions(opts...),
 		),
-		reclaimOrphan: connect.NewClient[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse](
+		deleteBranch: connect.NewClient[v1.DeleteBranchRequest, v1.DeleteBranchResponse](
 			httpClient,
-			baseURL+StorageServiceReclaimOrphanProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("ReclaimOrphan")),
+			baseURL+StorageServiceDeleteBranchProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DeleteBranch")),
 			connect.WithClientOptions(opts...),
 		),
-		diffDisk: connect.NewClient[v1.DiffDiskRequest, v1.DiffDiskResponse](
+		resetBranch: connect.NewClient[v1.ResetBranchRequest, v1.ResetBranchResponse](
 			httpClient,
-			baseURL+StorageServiceDiffDiskProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("DiffDisk")),
+			baseURL+StorageServiceResetBranchProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ResetBranch")),
 			connect.WithClientOptions(opts...),
 		),
-		readSnapshotNode: connect.NewClient[v1.ReadSnapshotNodeRequest, v1.ReadSnapshotNodeResponse](
+		mergeBranch: connect.NewClient[v1.MergeBranchRequest, v1.MergeBranchResponse](
 			httpClient,
-			baseURL+StorageServiceReadSnapshotNodeProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("ReadSnapshotNode")),
+			baseURL+StorageServiceMergeBranchProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("MergeBranch")),
 			connect.WithClientOptions(opts...),
 		),
-		mergeDisk: connect.NewClient[v1.MergeDiskRequest, v1.MergeDiskResponse](
+		createCommit: connect.NewClient[v1.CreateCommitRequest, v1.CreateCommitResponse](
 			httpClient,
-			baseURL+StorageServiceMergeDiskProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("MergeDisk")),
+			baseURL+StorageServiceCreateCommitProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("CreateCommit")),
 			connect.WithClientOptions(opts...),
 		),
-		createSnapshot: connect.NewClient[v1.CreateSnapshotRequest, v1.CreateSnapshotResponse](
+		listCommits: connect.NewClient[v1.ListCommitsRequest, v1.ListCommitsResponse](
 			httpClient,
-			baseURL+StorageServiceCreateSnapshotProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("CreateSnapshot")),
+			baseURL+StorageServiceListCommitsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ListCommits")),
 			connect.WithClientOptions(opts...),
 		),
-		listSnapshots: connect.NewClient[v1.ListSnapshotsRequest, v1.ListSnapshotsResponse](
+		deleteCommit: connect.NewClient[v1.DeleteCommitRequest, v1.DeleteCommitResponse](
 			httpClient,
-			baseURL+StorageServiceListSnapshotsProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("ListSnapshots")),
+			baseURL+StorageServiceDeleteCommitProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DeleteCommit")),
 			connect.WithClientOptions(opts...),
 		),
-		deleteSnapshot: connect.NewClient[v1.DeleteSnapshotRequest, v1.DeleteSnapshotResponse](
+		pruneCommits: connect.NewClient[v1.PruneCommitsRequest, v1.PruneCommitsResponse](
 			httpClient,
-			baseURL+StorageServiceDeleteSnapshotProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("DeleteSnapshot")),
+			baseURL+StorageServicePruneCommitsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("PruneCommits")),
 			connect.WithClientOptions(opts...),
 		),
-		pruneSnapshots: connect.NewClient[v1.PruneSnapshotsRequest, v1.PruneSnapshotsResponse](
+		readCommitNode: connect.NewClient[v1.ReadCommitNodeRequest, v1.ReadCommitNodeResponse](
 			httpClient,
-			baseURL+StorageServicePruneSnapshotsProcedure,
-			connect.WithSchema(storageServiceMethods.ByName("PruneSnapshots")),
+			baseURL+StorageServiceReadCommitNodeProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("ReadCommitNode")),
+			connect.WithClientOptions(opts...),
+		),
+		diffBranches: connect.NewClient[v1.DiffBranchesRequest, v1.DiffResponse](
+			httpClient,
+			baseURL+StorageServiceDiffBranchesProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DiffBranches")),
+			connect.WithClientOptions(opts...),
+		),
+		diffCommits: connect.NewClient[v1.DiffCommitsRequest, v1.DiffResponse](
+			httpClient,
+			baseURL+StorageServiceDiffCommitsProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DiffCommits")),
+			connect.WithClientOptions(opts...),
+		),
+		diffWork: connect.NewClient[v1.DiffWorkRequest, v1.DiffResponse](
+			httpClient,
+			baseURL+StorageServiceDiffWorkProcedure,
+			connect.WithSchema(storageServiceMethods.ByName("DiffWork")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -626,50 +572,55 @@ func NewStorageServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // storageServiceClient implements StorageServiceClient.
 type storageServiceClient struct {
-	lookup           *connect.Client[v1.LookupRequest, v1.LookupResponse]
-	getAttr          *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
-	setAttr          *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
-	mknod            *connect.Client[v1.MknodRequest, v1.MknodResponse]
-	mkdir            *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
-	symlink          *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
-	readlink         *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
-	link             *connect.Client[v1.LinkRequest, v1.LinkResponse]
-	unlink           *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
-	rmdir            *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
-	rename           *connect.Client[v1.RenameRequest, v1.RenameResponse]
-	create           *connect.Client[v1.CreateRequest, v1.CreateResponse]
-	createTmpfile    *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
-	read             *connect.Client[v1.ReadRequest, v1.ReadResponse]
-	write            *connect.Client[v1.WriteRequest, v1.WriteResponse]
-	fsync            *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
-	fsyncDir         *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
-	readDir          *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
-	readDirPlus      *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
-	fallocate        *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
-	setXattr         *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
-	getXattr         *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
-	listXattr        *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
-	removeXattr      *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
-	mountDisk        *connect.Client[v1.MountDiskRequest, v1.MountDiskResponse]
-	renewMount       *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
-	unmountDisk      *connect.Client[v1.UnmountDiskRequest, v1.UnmountDiskResponse]
-	listMounts       *connect.Client[v1.ListMountsRequest, v1.ListMountsResponse]
-	evictMounts      *connect.Client[v1.EvictMountsRequest, v1.EvictMountsResponse]
-	createDisk       *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
-	getDisk          *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
-	listDisks        *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
-	updateDisk       *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
-	deleteDisk       *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
-	forkDisk         *connect.Client[v1.ForkDiskRequest, v1.ForkDiskResponse]
-	statFS           *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
-	reclaimOrphan    *connect.Client[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse]
-	diffDisk         *connect.Client[v1.DiffDiskRequest, v1.DiffDiskResponse]
-	readSnapshotNode *connect.Client[v1.ReadSnapshotNodeRequest, v1.ReadSnapshotNodeResponse]
-	mergeDisk        *connect.Client[v1.MergeDiskRequest, v1.MergeDiskResponse]
-	createSnapshot   *connect.Client[v1.CreateSnapshotRequest, v1.CreateSnapshotResponse]
-	listSnapshots    *connect.Client[v1.ListSnapshotsRequest, v1.ListSnapshotsResponse]
-	deleteSnapshot   *connect.Client[v1.DeleteSnapshotRequest, v1.DeleteSnapshotResponse]
-	pruneSnapshots   *connect.Client[v1.PruneSnapshotsRequest, v1.PruneSnapshotsResponse]
+	lookup         *connect.Client[v1.LookupRequest, v1.LookupResponse]
+	getAttr        *connect.Client[v1.GetAttrRequest, v1.GetAttrResponse]
+	setAttr        *connect.Client[v1.SetAttrRequest, v1.SetAttrResponse]
+	mknod          *connect.Client[v1.MknodRequest, v1.MknodResponse]
+	mkdir          *connect.Client[v1.MkdirRequest, v1.MkdirResponse]
+	symlink        *connect.Client[v1.SymlinkRequest, v1.SymlinkResponse]
+	readlink       *connect.Client[v1.ReadlinkRequest, v1.ReadlinkResponse]
+	link           *connect.Client[v1.LinkRequest, v1.LinkResponse]
+	unlink         *connect.Client[v1.UnlinkRequest, v1.UnlinkResponse]
+	rmdir          *connect.Client[v1.RmdirRequest, v1.RmdirResponse]
+	rename         *connect.Client[v1.RenameRequest, v1.RenameResponse]
+	create         *connect.Client[v1.CreateRequest, v1.CreateResponse]
+	createTmpfile  *connect.Client[v1.CreateTmpfileRequest, v1.CreateTmpfileResponse]
+	read           *connect.Client[v1.ReadRequest, v1.ReadResponse]
+	write          *connect.Client[v1.WriteRequest, v1.WriteResponse]
+	fsync          *connect.Client[v1.FsyncRequest, v1.FsyncResponse]
+	fsyncDir       *connect.Client[v1.FsyncDirRequest, v1.FsyncDirResponse]
+	readDir        *connect.Client[v1.ReadDirRequest, v1.ReadDirResponse]
+	readDirPlus    *connect.Client[v1.ReadDirPlusRequest, v1.ReadDirPlusResponse]
+	fallocate      *connect.Client[v1.FallocateRequest, v1.FallocateResponse]
+	setXattr       *connect.Client[v1.SetXattrRequest, v1.SetXattrResponse]
+	getXattr       *connect.Client[v1.GetXattrRequest, v1.GetXattrResponse]
+	listXattr      *connect.Client[v1.ListXattrRequest, v1.ListXattrResponse]
+	removeXattr    *connect.Client[v1.RemoveXattrRequest, v1.RemoveXattrResponse]
+	statFS         *connect.Client[v1.StatFSRequest, v1.StatFSResponse]
+	reclaimOrphan  *connect.Client[v1.ReclaimOrphanRequest, v1.ReclaimOrphanResponse]
+	mountBranch    *connect.Client[v1.MountBranchRequest, v1.MountBranchResponse]
+	renewMount     *connect.Client[v1.RenewMountRequest, v1.RenewMountResponse]
+	unmountBranch  *connect.Client[v1.UnmountBranchRequest, v1.UnmountBranchResponse]
+	listMounts     *connect.Client[v1.ListMountsRequest, v1.ListMountsResponse]
+	evictMounts    *connect.Client[v1.EvictMountsRequest, v1.EvictMountsResponse]
+	createDisk     *connect.Client[v1.CreateDiskRequest, v1.CreateDiskResponse]
+	getDisk        *connect.Client[v1.GetDiskRequest, v1.GetDiskResponse]
+	listDisks      *connect.Client[v1.ListDisksRequest, v1.ListDisksResponse]
+	updateDisk     *connect.Client[v1.UpdateDiskRequest, v1.UpdateDiskResponse]
+	deleteDisk     *connect.Client[v1.DeleteDiskRequest, v1.DeleteDiskResponse]
+	forkBranch     *connect.Client[v1.ForkBranchRequest, v1.ForkBranchResponse]
+	listBranches   *connect.Client[v1.ListBranchesRequest, v1.ListBranchesResponse]
+	deleteBranch   *connect.Client[v1.DeleteBranchRequest, v1.DeleteBranchResponse]
+	resetBranch    *connect.Client[v1.ResetBranchRequest, v1.ResetBranchResponse]
+	mergeBranch    *connect.Client[v1.MergeBranchRequest, v1.MergeBranchResponse]
+	createCommit   *connect.Client[v1.CreateCommitRequest, v1.CreateCommitResponse]
+	listCommits    *connect.Client[v1.ListCommitsRequest, v1.ListCommitsResponse]
+	deleteCommit   *connect.Client[v1.DeleteCommitRequest, v1.DeleteCommitResponse]
+	pruneCommits   *connect.Client[v1.PruneCommitsRequest, v1.PruneCommitsResponse]
+	readCommitNode *connect.Client[v1.ReadCommitNodeRequest, v1.ReadCommitNodeResponse]
+	diffBranches   *connect.Client[v1.DiffBranchesRequest, v1.DiffResponse]
+	diffCommits    *connect.Client[v1.DiffCommitsRequest, v1.DiffResponse]
+	diffWork       *connect.Client[v1.DiffWorkRequest, v1.DiffResponse]
 }
 
 // Lookup calls storage.v1.StorageService.Lookup.
@@ -792,9 +743,19 @@ func (c *storageServiceClient) RemoveXattr(ctx context.Context, req *connect.Req
 	return c.removeXattr.CallUnary(ctx, req)
 }
 
-// MountDisk calls storage.v1.StorageService.MountDisk.
-func (c *storageServiceClient) MountDisk(ctx context.Context, req *connect.Request[v1.MountDiskRequest]) (*connect.Response[v1.MountDiskResponse], error) {
-	return c.mountDisk.CallUnary(ctx, req)
+// StatFS calls storage.v1.StorageService.StatFS.
+func (c *storageServiceClient) StatFS(ctx context.Context, req *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error) {
+	return c.statFS.CallUnary(ctx, req)
+}
+
+// ReclaimOrphan calls storage.v1.StorageService.ReclaimOrphan.
+func (c *storageServiceClient) ReclaimOrphan(ctx context.Context, req *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error) {
+	return c.reclaimOrphan.CallUnary(ctx, req)
+}
+
+// MountBranch calls storage.v1.StorageService.MountBranch.
+func (c *storageServiceClient) MountBranch(ctx context.Context, req *connect.Request[v1.MountBranchRequest]) (*connect.Response[v1.MountBranchResponse], error) {
+	return c.mountBranch.CallUnary(ctx, req)
 }
 
 // RenewMount calls storage.v1.StorageService.RenewMount.
@@ -802,9 +763,9 @@ func (c *storageServiceClient) RenewMount(ctx context.Context, req *connect.Requ
 	return c.renewMount.CallUnary(ctx, req)
 }
 
-// UnmountDisk calls storage.v1.StorageService.UnmountDisk.
-func (c *storageServiceClient) UnmountDisk(ctx context.Context, req *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error) {
-	return c.unmountDisk.CallUnary(ctx, req)
+// UnmountBranch calls storage.v1.StorageService.UnmountBranch.
+func (c *storageServiceClient) UnmountBranch(ctx context.Context, req *connect.Request[v1.UnmountBranchRequest]) (*connect.Response[v1.UnmountBranchResponse], error) {
+	return c.unmountBranch.CallUnary(ctx, req)
 }
 
 // ListMounts calls storage.v1.StorageService.ListMounts.
@@ -842,256 +803,171 @@ func (c *storageServiceClient) DeleteDisk(ctx context.Context, req *connect.Requ
 	return c.deleteDisk.CallUnary(ctx, req)
 }
 
-// ForkDisk calls storage.v1.StorageService.ForkDisk.
-func (c *storageServiceClient) ForkDisk(ctx context.Context, req *connect.Request[v1.ForkDiskRequest]) (*connect.Response[v1.ForkDiskResponse], error) {
-	return c.forkDisk.CallUnary(ctx, req)
+// ForkBranch calls storage.v1.StorageService.ForkBranch.
+func (c *storageServiceClient) ForkBranch(ctx context.Context, req *connect.Request[v1.ForkBranchRequest]) (*connect.Response[v1.ForkBranchResponse], error) {
+	return c.forkBranch.CallUnary(ctx, req)
 }
 
-// StatFS calls storage.v1.StorageService.StatFS.
-func (c *storageServiceClient) StatFS(ctx context.Context, req *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error) {
-	return c.statFS.CallUnary(ctx, req)
+// ListBranches calls storage.v1.StorageService.ListBranches.
+func (c *storageServiceClient) ListBranches(ctx context.Context, req *connect.Request[v1.ListBranchesRequest]) (*connect.Response[v1.ListBranchesResponse], error) {
+	return c.listBranches.CallUnary(ctx, req)
 }
 
-// ReclaimOrphan calls storage.v1.StorageService.ReclaimOrphan.
-func (c *storageServiceClient) ReclaimOrphan(ctx context.Context, req *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error) {
-	return c.reclaimOrphan.CallUnary(ctx, req)
+// DeleteBranch calls storage.v1.StorageService.DeleteBranch.
+func (c *storageServiceClient) DeleteBranch(ctx context.Context, req *connect.Request[v1.DeleteBranchRequest]) (*connect.Response[v1.DeleteBranchResponse], error) {
+	return c.deleteBranch.CallUnary(ctx, req)
 }
 
-// DiffDisk calls storage.v1.StorageService.DiffDisk.
-func (c *storageServiceClient) DiffDisk(ctx context.Context, req *connect.Request[v1.DiffDiskRequest]) (*connect.Response[v1.DiffDiskResponse], error) {
-	return c.diffDisk.CallUnary(ctx, req)
+// ResetBranch calls storage.v1.StorageService.ResetBranch.
+func (c *storageServiceClient) ResetBranch(ctx context.Context, req *connect.Request[v1.ResetBranchRequest]) (*connect.Response[v1.ResetBranchResponse], error) {
+	return c.resetBranch.CallUnary(ctx, req)
 }
 
-// ReadSnapshotNode calls storage.v1.StorageService.ReadSnapshotNode.
-func (c *storageServiceClient) ReadSnapshotNode(ctx context.Context, req *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error) {
-	return c.readSnapshotNode.CallUnary(ctx, req)
+// MergeBranch calls storage.v1.StorageService.MergeBranch.
+func (c *storageServiceClient) MergeBranch(ctx context.Context, req *connect.Request[v1.MergeBranchRequest]) (*connect.Response[v1.MergeBranchResponse], error) {
+	return c.mergeBranch.CallUnary(ctx, req)
 }
 
-// MergeDisk calls storage.v1.StorageService.MergeDisk.
-func (c *storageServiceClient) MergeDisk(ctx context.Context, req *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error) {
-	return c.mergeDisk.CallUnary(ctx, req)
+// CreateCommit calls storage.v1.StorageService.CreateCommit.
+func (c *storageServiceClient) CreateCommit(ctx context.Context, req *connect.Request[v1.CreateCommitRequest]) (*connect.Response[v1.CreateCommitResponse], error) {
+	return c.createCommit.CallUnary(ctx, req)
 }
 
-// CreateSnapshot calls storage.v1.StorageService.CreateSnapshot.
-func (c *storageServiceClient) CreateSnapshot(ctx context.Context, req *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error) {
-	return c.createSnapshot.CallUnary(ctx, req)
+// ListCommits calls storage.v1.StorageService.ListCommits.
+func (c *storageServiceClient) ListCommits(ctx context.Context, req *connect.Request[v1.ListCommitsRequest]) (*connect.Response[v1.ListCommitsResponse], error) {
+	return c.listCommits.CallUnary(ctx, req)
 }
 
-// ListSnapshots calls storage.v1.StorageService.ListSnapshots.
-func (c *storageServiceClient) ListSnapshots(ctx context.Context, req *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error) {
-	return c.listSnapshots.CallUnary(ctx, req)
+// DeleteCommit calls storage.v1.StorageService.DeleteCommit.
+func (c *storageServiceClient) DeleteCommit(ctx context.Context, req *connect.Request[v1.DeleteCommitRequest]) (*connect.Response[v1.DeleteCommitResponse], error) {
+	return c.deleteCommit.CallUnary(ctx, req)
 }
 
-// DeleteSnapshot calls storage.v1.StorageService.DeleteSnapshot.
-func (c *storageServiceClient) DeleteSnapshot(ctx context.Context, req *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error) {
-	return c.deleteSnapshot.CallUnary(ctx, req)
+// PruneCommits calls storage.v1.StorageService.PruneCommits.
+func (c *storageServiceClient) PruneCommits(ctx context.Context, req *connect.Request[v1.PruneCommitsRequest]) (*connect.Response[v1.PruneCommitsResponse], error) {
+	return c.pruneCommits.CallUnary(ctx, req)
 }
 
-// PruneSnapshots calls storage.v1.StorageService.PruneSnapshots.
-func (c *storageServiceClient) PruneSnapshots(ctx context.Context, req *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error) {
-	return c.pruneSnapshots.CallUnary(ctx, req)
+// ReadCommitNode calls storage.v1.StorageService.ReadCommitNode.
+func (c *storageServiceClient) ReadCommitNode(ctx context.Context, req *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error) {
+	return c.readCommitNode.CallUnary(ctx, req)
+}
+
+// DiffBranches calls storage.v1.StorageService.DiffBranches.
+func (c *storageServiceClient) DiffBranches(ctx context.Context, req *connect.Request[v1.DiffBranchesRequest]) (*connect.Response[v1.DiffResponse], error) {
+	return c.diffBranches.CallUnary(ctx, req)
+}
+
+// DiffCommits calls storage.v1.StorageService.DiffCommits.
+func (c *storageServiceClient) DiffCommits(ctx context.Context, req *connect.Request[v1.DiffCommitsRequest]) (*connect.Response[v1.DiffResponse], error) {
+	return c.diffCommits.CallUnary(ctx, req)
+}
+
+// DiffWork calls storage.v1.StorageService.DiffWork.
+func (c *storageServiceClient) DiffWork(ctx context.Context, req *connect.Request[v1.DiffWorkRequest]) (*connect.Response[v1.DiffResponse], error) {
+	return c.diffWork.CallUnary(ctx, req)
 }
 
 // StorageServiceHandler is an implementation of the storage.v1.StorageService service.
 type StorageServiceHandler interface {
-	// Lookup 执行单级目录项查找。
-	// 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
-	// 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Lookup resolves a single directory entry within a branch.
 	Lookup(context.Context, *connect.Request[v1.LookupRequest]) (*connect.Response[v1.LookupResponse], error)
-	// GetAttr 获取指定 Inode 的属性与内核缓存时效。
-	// 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
-	// 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// GetAttr returns inode attributes and FUSE cache timeouts for an inode in a branch.
 	GetAttr(context.Context, *connect.Request[v1.GetAttrRequest]) (*connect.Response[v1.GetAttrResponse], error)
-	// SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
-	// 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
-	// 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
+	// SetAttr applies partial metadata updates to an inode in a branch.
 	SetAttr(context.Context, *connect.Request[v1.SetAttrRequest]) (*connect.Response[v1.SetAttrResponse], error)
-	// Mknod 在指定父目录下创建常规文件或特殊设备节点。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Mknod creates a regular file or special node under a parent directory in a branch.
 	Mknod(context.Context, *connect.Request[v1.MknodRequest]) (*connect.Response[v1.MknodResponse], error)
-	// Mkdir 在指定父目录下创建子目录。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Mkdir creates a subdirectory under a parent directory in a branch.
 	Mkdir(context.Context, *connect.Request[v1.MkdirRequest]) (*connect.Response[v1.MkdirResponse], error)
-	// Symlink 在指定父目录下创建指向目标路径的符号链接节点。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+	// Symlink creates a symbolic link under a parent directory in a branch.
 	Symlink(context.Context, *connect.Request[v1.SymlinkRequest]) (*connect.Response[v1.SymlinkResponse], error)
-	// Readlink 获取符号链接节点指向的目标路径。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// Readlink returns the target path of a symbolic link in a branch.
 	Readlink(context.Context, *connect.Request[v1.ReadlinkRequest]) (*connect.Response[v1.ReadlinkResponse], error)
-	// Link creates a hard link in the target parent directory for an existing non-directory inode.
-	// It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
-	// Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
-	// The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
-	// The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
-	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
-	// The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
+	// Link creates a hard link in the target parent directory for an existing non-directory inode in a branch.
 	Link(context.Context, *connect.Request[v1.LinkRequest]) (*connect.Response[v1.LinkResponse], error)
-	// Unlink 删除指定父目录下的非目录项（解链）。
-	// 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 对 "." 或 ".."，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// Unlink removes a non-directory entry from a parent directory in a branch.
 	Unlink(context.Context, *connect.Request[v1.UnlinkRequest]) (*connect.Response[v1.UnlinkResponse], error)
-	// Rmdir 移除指定父目录下的空目录项。
-	// 若目标节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若目标目录非空，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
-	// 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
+	// Rmdir removes an empty subdirectory entry from a parent directory in a branch.
 	Rmdir(context.Context, *connect.Request[v1.RmdirRequest]) (*connect.Response[v1.RmdirResponse], error)
-	// Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
-	// 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
-	// 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
-	// 当 flags 为 RENAME_EXCHANGE (0x2) 时，要求源与目标均存在（任一不存在返回 NotFound / ENOENT），原子交换两个目录项的 Inode 绑定并执行双向祖先环检测。
-	// 若传入互斥组合（RENAME_NOREPLACE | RENAME_EXCHANGE）、RENAME_WHITEOUT (0x4) 或未知标志位，返回 InvalidArgument (EINVAL)。
-	// 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
-	// 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	// 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// Rename atomically renames, moves, or exchanges directory entries in a branch.
 	Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error)
-	// Create 在指定父目录下创建常规文件，文件句柄由客户端管理。
-	// 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-	// 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+	// Create creates a regular file under a parent directory in a branch.
 	Create(context.Context, *connect.Request[v1.CreateRequest]) (*connect.Response[v1.CreateResponse], error)
-	// CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
-	// If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
-	// When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
-	// When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
-	// The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
-	// The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
-	// The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
-	// The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
-	// The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
-	// The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
+	// CreateTmpfile allocates an anonymous regular-file inode with nlink == 0 in a branch.
 	CreateTmpfile(context.Context, *connect.Request[v1.CreateTmpfileRequest]) (*connect.Response[v1.CreateTmpfileResponse], error)
-	// Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
-	// 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// Read reads up to 4 MiB of file content at an offset in a branch.
 	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
-	// Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
-	// 遵循 POSIX pwrite(2) 语义，支持最大 4 MiB 单次写入。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+	// Write writes up to 4 MiB of file content at an offset in a branch.
 	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
-	// Fsync 同步并持久化文件节点与句柄关联的状态。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+	// Fsync flushes durable state for a file inode in a branch.
 	Fsync(context.Context, *connect.Request[v1.FsyncRequest]) (*connect.Response[v1.FsyncResponse], error)
-	// FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
-	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
+	// FsyncDir flushes durable state for a directory inode in a branch.
 	FsyncDir(context.Context, *connect.Request[v1.FsyncDirRequest]) (*connect.Response[v1.FsyncDirResponse], error)
-	// ReadDir 读取指定目录的子项流（基本条目）。
-	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+	// ReadDir returns basic directory entries for a directory in a branch.
 	ReadDir(context.Context, *connect.Request[v1.ReadDirRequest]) (*connect.Response[v1.ReadDirResponse], error)
-	// ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
-	// 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+	// ReadDirPlus returns directory entries with inline inode attributes and cache timeouts in a branch.
 	ReadDirPlus(context.Context, *connect.Request[v1.ReadDirPlusRequest]) (*connect.Response[v1.ReadDirPlusResponse], error)
-	// Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
-	// 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+	// Fallocate preallocates or deallocates byte ranges for a regular file in a branch.
 	Fallocate(context.Context, *connect.Request[v1.FallocateRequest]) (*connect.Response[v1.FallocateResponse], error)
-	// SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
-	// 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-	// 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
-	// 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+	// SetXattr sets an extended attribute on an inode in a branch.
 	SetXattr(context.Context, *connect.Request[v1.SetXattrRequest]) (*connect.Response[v1.SetXattrResponse], error)
-	// GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
-	// 遵循 POSIX getxattr(2) 语义。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+	// GetXattr reads an extended attribute value from an inode in a branch.
 	GetXattr(context.Context, *connect.Request[v1.GetXattrRequest]) (*connect.Response[v1.GetXattrResponse], error)
-	// ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
-	// 遵循 POSIX listxattr(2) 语义。
-	// 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若无属性，返回空列表。
+	// ListXattr lists extended attribute names on an inode in a branch.
 	ListXattr(context.Context, *connect.Request[v1.ListXattrRequest]) (*connect.Response[v1.ListXattrResponse], error)
-	// RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
-	// 遵循 POSIX removexattr(2) 语义。
-	// 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-	// 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+	// RemoveXattr deletes an extended attribute from an inode in a branch.
 	RemoveXattr(context.Context, *connect.Request[v1.RemoveXattrRequest]) (*connect.Response[v1.RemoveXattrResponse], error)
-	// MountDisk 执行单盘挂载握手。
-	// 可写挂载 (read_only = false) 在不存在未过期可写租约或显式指定 force = true 时原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode；
-	// 若已存在未过期可写租约且 force = false，返回 Aborted (映射至 POSIX EBUSY) 且不推进 WriterEpoch。
-	// 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
-	MountDisk(context.Context, *connect.Request[v1.MountDiskRequest]) (*connect.Response[v1.MountDiskResponse], error)
-	// RenewMount 为已建立的在线挂载软租约执行周期续期。
-	RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error)
-	// UnmountDisk 幂等释放指定的在线挂载软租约。
-	UnmountDisk(context.Context, *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error)
-	// ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
-	ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error)
-	// EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
-	EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error)
-	// CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
-	// 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
-	// 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
-	CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error)
-	// GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
-	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
-	// ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
-	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
-	// UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
-	// 支持按需单独或同时更新 name 与 max_bytes。
-	// 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
-	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
-	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
-	// DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
-	// 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
-	// 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
-	// ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-	// 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
-	// 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
-	// 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
-	ForkDisk(context.Context, *connect.Request[v1.ForkDiskRequest]) (*connect.Response[v1.ForkDiskResponse], error)
-	// StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
-	// 接收目标节点的 uint64 ino，查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
-	// 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-	// 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+	// StatFS returns disk quota and 4096-byte block statistics for a branch.
 	StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error)
-	// ReclaimOrphan 回收最后一个本地句柄关闭的孤儿节点。
+	// ReclaimOrphan reclaims an orphan inode whose last client handle has closed in a branch.
 	ReclaimOrphan(context.Context, *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error)
-	// DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
-	DiffDisk(context.Context, *connect.Request[v1.DiffDiskRequest]) (*connect.Response[v1.DiffDiskResponse], error)
-	// ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
-	ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error)
-	// MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
-	MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error)
-	// CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
-	CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error)
-	// ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
-	ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error)
-	// DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
-	DeleteSnapshot(context.Context, *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error)
-	// PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
-	PruneSnapshots(context.Context, *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error)
+	// MountBranch acquires a read-only or fenced read-write mount lease on a branch.
+	MountBranch(context.Context, *connect.Request[v1.MountBranchRequest]) (*connect.Response[v1.MountBranchResponse], error)
+	// RenewMount extends an active mount lease on a branch.
+	RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error)
+	// UnmountBranch idempotently releases an active mount lease by disk and mount ID.
+	UnmountBranch(context.Context, *connect.Request[v1.UnmountBranchRequest]) (*connect.Response[v1.UnmountBranchResponse], error)
+	// ListMounts returns unexpired mount leases for a disk or a single branch sorted by mount_id ascending.
+	ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error)
+	// EvictMounts removes one or more active mount leases for a disk or branch and fences writers when needed.
+	EvictMounts(context.Context, *connect.Request[v1.EvictMountsRequest]) (*connect.Response[v1.EvictMountsResponse], error)
+	// CreateDisk creates a virtual disk with its default branch and initial commit.
+	CreateDisk(context.Context, *connect.Request[v1.CreateDiskRequest]) (*connect.Response[v1.CreateDiskResponse], error)
+	// GetDisk returns disk metadata and byte usage.
+	GetDisk(context.Context, *connect.Request[v1.GetDiskRequest]) (*connect.Response[v1.GetDiskResponse], error)
+	// ListDisks lists virtual disks in descending creation order with cursor pagination.
+	ListDisks(context.Context, *connect.Request[v1.ListDisksRequest]) (*connect.Response[v1.ListDisksResponse], error)
+	// UpdateDisk updates a virtual disk name or byte quota limit.
+	UpdateDisk(context.Context, *connect.Request[v1.UpdateDiskRequest]) (*connect.Response[v1.UpdateDiskResponse], error)
+	// DeleteDisk deletes an unmounted virtual disk and all of its branches and commits.
+	DeleteDisk(context.Context, *connect.Request[v1.DeleteDiskRequest]) (*connect.Response[v1.DeleteDiskResponse], error)
+	// ForkBranch seals the source branch state into a fork commit and creates a new branch at that commit.
+	ForkBranch(context.Context, *connect.Request[v1.ForkBranchRequest]) (*connect.Response[v1.ForkBranchResponse], error)
+	// ListBranches lists all branches belonging to a disk.
+	ListBranches(context.Context, *connect.Request[v1.ListBranchesRequest]) (*connect.Response[v1.ListBranchesResponse], error)
+	// DeleteBranch deletes a non-default, unmounted branch from a disk.
+	DeleteBranch(context.Context, *connect.Request[v1.DeleteBranchRequest]) (*connect.Response[v1.DeleteBranchResponse], error)
+	// ResetBranch resets a branch head to a target commit and clears its work layer.
+	ResetBranch(context.Context, *connect.Request[v1.ResetBranchRequest]) (*connect.Response[v1.ResetBranchResponse], error)
+	// MergeBranch merges a source branch into a target branch with optional dry-run and conflict strategies.
+	MergeBranch(context.Context, *connect.Request[v1.MergeBranchRequest]) (*connect.Response[v1.MergeBranchResponse], error)
+	// CreateCommit seals the dirty work layer of a branch into a manual commit.
+	CreateCommit(context.Context, *connect.Request[v1.CreateCommitRequest]) (*connect.Response[v1.CreateCommitResponse], error)
+	// ListCommits lists commits for a disk in descending commit_id order with optional kind filter and pagination.
+	ListCommits(context.Context, *connect.Request[v1.ListCommitsRequest]) (*connect.Response[v1.ListCommitsResponse], error)
+	// DeleteCommit deletes a single unreachable commit from a disk.
+	DeleteCommit(context.Context, *connect.Request[v1.DeleteCommitRequest]) (*connect.Response[v1.DeleteCommitResponse], error)
+	// PruneCommits reclaims all unreachable commits on a disk.
+	PruneCommits(context.Context, *connect.Request[v1.PruneCommitsRequest]) (*connect.Response[v1.PruneCommitsResponse], error)
+	// ReadCommitNode reads node metadata and file data or symlink target from an immutable commit.
+	ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error)
+	// DiffBranches computes the three-way diff and conflicts between source and target branches.
+	DiffBranches(context.Context, *connect.Request[v1.DiffBranchesRequest]) (*connect.Response[v1.DiffResponse], error)
+	// DiffCommits computes the two-way diff between two commits on a disk.
+	DiffCommits(context.Context, *connect.Request[v1.DiffCommitsRequest]) (*connect.Response[v1.DiffResponse], error)
+	// DiffWork computes the two-way diff between a branch head commit and its live work layer.
+	DiffWork(context.Context, *connect.Request[v1.DiffWorkRequest]) (*connect.Response[v1.DiffResponse], error)
 }
 
 // NewStorageServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1245,10 +1121,22 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("RemoveXattr")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceMountDiskHandler := connect.NewUnaryHandler(
-		StorageServiceMountDiskProcedure,
-		svc.MountDisk,
-		connect.WithSchema(storageServiceMethods.ByName("MountDisk")),
+	storageServiceStatFSHandler := connect.NewUnaryHandler(
+		StorageServiceStatFSProcedure,
+		svc.StatFS,
+		connect.WithSchema(storageServiceMethods.ByName("StatFS")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceReclaimOrphanHandler := connect.NewUnaryHandler(
+		StorageServiceReclaimOrphanProcedure,
+		svc.ReclaimOrphan,
+		connect.WithSchema(storageServiceMethods.ByName("ReclaimOrphan")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceMountBranchHandler := connect.NewUnaryHandler(
+		StorageServiceMountBranchProcedure,
+		svc.MountBranch,
+		connect.WithSchema(storageServiceMethods.ByName("MountBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
 	storageServiceRenewMountHandler := connect.NewUnaryHandler(
@@ -1257,10 +1145,10 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("RenewMount")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceUnmountDiskHandler := connect.NewUnaryHandler(
-		StorageServiceUnmountDiskProcedure,
-		svc.UnmountDisk,
-		connect.WithSchema(storageServiceMethods.ByName("UnmountDisk")),
+	storageServiceUnmountBranchHandler := connect.NewUnaryHandler(
+		StorageServiceUnmountBranchProcedure,
+		svc.UnmountBranch,
+		connect.WithSchema(storageServiceMethods.ByName("UnmountBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
 	storageServiceListMountsHandler := connect.NewUnaryHandler(
@@ -1305,64 +1193,82 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 		connect.WithSchema(storageServiceMethods.ByName("DeleteDisk")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceForkDiskHandler := connect.NewUnaryHandler(
-		StorageServiceForkDiskProcedure,
-		svc.ForkDisk,
-		connect.WithSchema(storageServiceMethods.ByName("ForkDisk")),
+	storageServiceForkBranchHandler := connect.NewUnaryHandler(
+		StorageServiceForkBranchProcedure,
+		svc.ForkBranch,
+		connect.WithSchema(storageServiceMethods.ByName("ForkBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceStatFSHandler := connect.NewUnaryHandler(
-		StorageServiceStatFSProcedure,
-		svc.StatFS,
-		connect.WithSchema(storageServiceMethods.ByName("StatFS")),
+	storageServiceListBranchesHandler := connect.NewUnaryHandler(
+		StorageServiceListBranchesProcedure,
+		svc.ListBranches,
+		connect.WithSchema(storageServiceMethods.ByName("ListBranches")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceReclaimOrphanHandler := connect.NewUnaryHandler(
-		StorageServiceReclaimOrphanProcedure,
-		svc.ReclaimOrphan,
-		connect.WithSchema(storageServiceMethods.ByName("ReclaimOrphan")),
+	storageServiceDeleteBranchHandler := connect.NewUnaryHandler(
+		StorageServiceDeleteBranchProcedure,
+		svc.DeleteBranch,
+		connect.WithSchema(storageServiceMethods.ByName("DeleteBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceDiffDiskHandler := connect.NewUnaryHandler(
-		StorageServiceDiffDiskProcedure,
-		svc.DiffDisk,
-		connect.WithSchema(storageServiceMethods.ByName("DiffDisk")),
+	storageServiceResetBranchHandler := connect.NewUnaryHandler(
+		StorageServiceResetBranchProcedure,
+		svc.ResetBranch,
+		connect.WithSchema(storageServiceMethods.ByName("ResetBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceReadSnapshotNodeHandler := connect.NewUnaryHandler(
-		StorageServiceReadSnapshotNodeProcedure,
-		svc.ReadSnapshotNode,
-		connect.WithSchema(storageServiceMethods.ByName("ReadSnapshotNode")),
+	storageServiceMergeBranchHandler := connect.NewUnaryHandler(
+		StorageServiceMergeBranchProcedure,
+		svc.MergeBranch,
+		connect.WithSchema(storageServiceMethods.ByName("MergeBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceMergeDiskHandler := connect.NewUnaryHandler(
-		StorageServiceMergeDiskProcedure,
-		svc.MergeDisk,
-		connect.WithSchema(storageServiceMethods.ByName("MergeDisk")),
+	storageServiceCreateCommitHandler := connect.NewUnaryHandler(
+		StorageServiceCreateCommitProcedure,
+		svc.CreateCommit,
+		connect.WithSchema(storageServiceMethods.ByName("CreateCommit")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceCreateSnapshotHandler := connect.NewUnaryHandler(
-		StorageServiceCreateSnapshotProcedure,
-		svc.CreateSnapshot,
-		connect.WithSchema(storageServiceMethods.ByName("CreateSnapshot")),
+	storageServiceListCommitsHandler := connect.NewUnaryHandler(
+		StorageServiceListCommitsProcedure,
+		svc.ListCommits,
+		connect.WithSchema(storageServiceMethods.ByName("ListCommits")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceListSnapshotsHandler := connect.NewUnaryHandler(
-		StorageServiceListSnapshotsProcedure,
-		svc.ListSnapshots,
-		connect.WithSchema(storageServiceMethods.ByName("ListSnapshots")),
+	storageServiceDeleteCommitHandler := connect.NewUnaryHandler(
+		StorageServiceDeleteCommitProcedure,
+		svc.DeleteCommit,
+		connect.WithSchema(storageServiceMethods.ByName("DeleteCommit")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServiceDeleteSnapshotHandler := connect.NewUnaryHandler(
-		StorageServiceDeleteSnapshotProcedure,
-		svc.DeleteSnapshot,
-		connect.WithSchema(storageServiceMethods.ByName("DeleteSnapshot")),
+	storageServicePruneCommitsHandler := connect.NewUnaryHandler(
+		StorageServicePruneCommitsProcedure,
+		svc.PruneCommits,
+		connect.WithSchema(storageServiceMethods.ByName("PruneCommits")),
 		connect.WithHandlerOptions(opts...),
 	)
-	storageServicePruneSnapshotsHandler := connect.NewUnaryHandler(
-		StorageServicePruneSnapshotsProcedure,
-		svc.PruneSnapshots,
-		connect.WithSchema(storageServiceMethods.ByName("PruneSnapshots")),
+	storageServiceReadCommitNodeHandler := connect.NewUnaryHandler(
+		StorageServiceReadCommitNodeProcedure,
+		svc.ReadCommitNode,
+		connect.WithSchema(storageServiceMethods.ByName("ReadCommitNode")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceDiffBranchesHandler := connect.NewUnaryHandler(
+		StorageServiceDiffBranchesProcedure,
+		svc.DiffBranches,
+		connect.WithSchema(storageServiceMethods.ByName("DiffBranches")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceDiffCommitsHandler := connect.NewUnaryHandler(
+		StorageServiceDiffCommitsProcedure,
+		svc.DiffCommits,
+		connect.WithSchema(storageServiceMethods.ByName("DiffCommits")),
+		connect.WithHandlerOptions(opts...),
+	)
+	storageServiceDiffWorkHandler := connect.NewUnaryHandler(
+		StorageServiceDiffWorkProcedure,
+		svc.DiffWork,
+		connect.WithSchema(storageServiceMethods.ByName("DiffWork")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/storage.v1.StorageService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1415,12 +1321,16 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceListXattrHandler.ServeHTTP(w, r)
 		case StorageServiceRemoveXattrProcedure:
 			storageServiceRemoveXattrHandler.ServeHTTP(w, r)
-		case StorageServiceMountDiskProcedure:
-			storageServiceMountDiskHandler.ServeHTTP(w, r)
+		case StorageServiceStatFSProcedure:
+			storageServiceStatFSHandler.ServeHTTP(w, r)
+		case StorageServiceReclaimOrphanProcedure:
+			storageServiceReclaimOrphanHandler.ServeHTTP(w, r)
+		case StorageServiceMountBranchProcedure:
+			storageServiceMountBranchHandler.ServeHTTP(w, r)
 		case StorageServiceRenewMountProcedure:
 			storageServiceRenewMountHandler.ServeHTTP(w, r)
-		case StorageServiceUnmountDiskProcedure:
-			storageServiceUnmountDiskHandler.ServeHTTP(w, r)
+		case StorageServiceUnmountBranchProcedure:
+			storageServiceUnmountBranchHandler.ServeHTTP(w, r)
 		case StorageServiceListMountsProcedure:
 			storageServiceListMountsHandler.ServeHTTP(w, r)
 		case StorageServiceEvictMountsProcedure:
@@ -1435,26 +1345,32 @@ func NewStorageServiceHandler(svc StorageServiceHandler, opts ...connect.Handler
 			storageServiceUpdateDiskHandler.ServeHTTP(w, r)
 		case StorageServiceDeleteDiskProcedure:
 			storageServiceDeleteDiskHandler.ServeHTTP(w, r)
-		case StorageServiceForkDiskProcedure:
-			storageServiceForkDiskHandler.ServeHTTP(w, r)
-		case StorageServiceStatFSProcedure:
-			storageServiceStatFSHandler.ServeHTTP(w, r)
-		case StorageServiceReclaimOrphanProcedure:
-			storageServiceReclaimOrphanHandler.ServeHTTP(w, r)
-		case StorageServiceDiffDiskProcedure:
-			storageServiceDiffDiskHandler.ServeHTTP(w, r)
-		case StorageServiceReadSnapshotNodeProcedure:
-			storageServiceReadSnapshotNodeHandler.ServeHTTP(w, r)
-		case StorageServiceMergeDiskProcedure:
-			storageServiceMergeDiskHandler.ServeHTTP(w, r)
-		case StorageServiceCreateSnapshotProcedure:
-			storageServiceCreateSnapshotHandler.ServeHTTP(w, r)
-		case StorageServiceListSnapshotsProcedure:
-			storageServiceListSnapshotsHandler.ServeHTTP(w, r)
-		case StorageServiceDeleteSnapshotProcedure:
-			storageServiceDeleteSnapshotHandler.ServeHTTP(w, r)
-		case StorageServicePruneSnapshotsProcedure:
-			storageServicePruneSnapshotsHandler.ServeHTTP(w, r)
+		case StorageServiceForkBranchProcedure:
+			storageServiceForkBranchHandler.ServeHTTP(w, r)
+		case StorageServiceListBranchesProcedure:
+			storageServiceListBranchesHandler.ServeHTTP(w, r)
+		case StorageServiceDeleteBranchProcedure:
+			storageServiceDeleteBranchHandler.ServeHTTP(w, r)
+		case StorageServiceResetBranchProcedure:
+			storageServiceResetBranchHandler.ServeHTTP(w, r)
+		case StorageServiceMergeBranchProcedure:
+			storageServiceMergeBranchHandler.ServeHTTP(w, r)
+		case StorageServiceCreateCommitProcedure:
+			storageServiceCreateCommitHandler.ServeHTTP(w, r)
+		case StorageServiceListCommitsProcedure:
+			storageServiceListCommitsHandler.ServeHTTP(w, r)
+		case StorageServiceDeleteCommitProcedure:
+			storageServiceDeleteCommitHandler.ServeHTTP(w, r)
+		case StorageServicePruneCommitsProcedure:
+			storageServicePruneCommitsHandler.ServeHTTP(w, r)
+		case StorageServiceReadCommitNodeProcedure:
+			storageServiceReadCommitNodeHandler.ServeHTTP(w, r)
+		case StorageServiceDiffBranchesProcedure:
+			storageServiceDiffBranchesHandler.ServeHTTP(w, r)
+		case StorageServiceDiffCommitsProcedure:
+			storageServiceDiffCommitsHandler.ServeHTTP(w, r)
+		case StorageServiceDiffWorkProcedure:
+			storageServiceDiffWorkHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1560,16 +1476,24 @@ func (UnimplementedStorageServiceHandler) RemoveXattr(context.Context, *connect.
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.RemoveXattr is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) MountDisk(context.Context, *connect.Request[v1.MountDiskRequest]) (*connect.Response[v1.MountDiskResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.MountDisk is not implemented"))
+func (UnimplementedStorageServiceHandler) StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.StatFS is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) ReclaimOrphan(context.Context, *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReclaimOrphan is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) MountBranch(context.Context, *connect.Request[v1.MountBranchRequest]) (*connect.Response[v1.MountBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.MountBranch is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) RenewMount(context.Context, *connect.Request[v1.RenewMountRequest]) (*connect.Response[v1.RenewMountResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.RenewMount is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) UnmountDisk(context.Context, *connect.Request[v1.UnmountDiskRequest]) (*connect.Response[v1.UnmountDiskResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.UnmountDisk is not implemented"))
+func (UnimplementedStorageServiceHandler) UnmountBranch(context.Context, *connect.Request[v1.UnmountBranchRequest]) (*connect.Response[v1.UnmountBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.UnmountBranch is not implemented"))
 }
 
 func (UnimplementedStorageServiceHandler) ListMounts(context.Context, *connect.Request[v1.ListMountsRequest]) (*connect.Response[v1.ListMountsResponse], error) {
@@ -1600,42 +1524,54 @@ func (UnimplementedStorageServiceHandler) DeleteDisk(context.Context, *connect.R
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DeleteDisk is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ForkDisk(context.Context, *connect.Request[v1.ForkDiskRequest]) (*connect.Response[v1.ForkDiskResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ForkDisk is not implemented"))
+func (UnimplementedStorageServiceHandler) ForkBranch(context.Context, *connect.Request[v1.ForkBranchRequest]) (*connect.Response[v1.ForkBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ForkBranch is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) StatFS(context.Context, *connect.Request[v1.StatFSRequest]) (*connect.Response[v1.StatFSResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.StatFS is not implemented"))
+func (UnimplementedStorageServiceHandler) ListBranches(context.Context, *connect.Request[v1.ListBranchesRequest]) (*connect.Response[v1.ListBranchesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListBranches is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ReclaimOrphan(context.Context, *connect.Request[v1.ReclaimOrphanRequest]) (*connect.Response[v1.ReclaimOrphanResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReclaimOrphan is not implemented"))
+func (UnimplementedStorageServiceHandler) DeleteBranch(context.Context, *connect.Request[v1.DeleteBranchRequest]) (*connect.Response[v1.DeleteBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DeleteBranch is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) DiffDisk(context.Context, *connect.Request[v1.DiffDiskRequest]) (*connect.Response[v1.DiffDiskResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DiffDisk is not implemented"))
+func (UnimplementedStorageServiceHandler) ResetBranch(context.Context, *connect.Request[v1.ResetBranchRequest]) (*connect.Response[v1.ResetBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ResetBranch is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ReadSnapshotNode(context.Context, *connect.Request[v1.ReadSnapshotNodeRequest]) (*connect.Response[v1.ReadSnapshotNodeResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReadSnapshotNode is not implemented"))
+func (UnimplementedStorageServiceHandler) MergeBranch(context.Context, *connect.Request[v1.MergeBranchRequest]) (*connect.Response[v1.MergeBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.MergeBranch is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) MergeDisk(context.Context, *connect.Request[v1.MergeDiskRequest]) (*connect.Response[v1.MergeDiskResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.MergeDisk is not implemented"))
+func (UnimplementedStorageServiceHandler) CreateCommit(context.Context, *connect.Request[v1.CreateCommitRequest]) (*connect.Response[v1.CreateCommitResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CreateCommit is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) CreateSnapshot(context.Context, *connect.Request[v1.CreateSnapshotRequest]) (*connect.Response[v1.CreateSnapshotResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.CreateSnapshot is not implemented"))
+func (UnimplementedStorageServiceHandler) ListCommits(context.Context, *connect.Request[v1.ListCommitsRequest]) (*connect.Response[v1.ListCommitsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListCommits is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) ListSnapshots(context.Context, *connect.Request[v1.ListSnapshotsRequest]) (*connect.Response[v1.ListSnapshotsResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ListSnapshots is not implemented"))
+func (UnimplementedStorageServiceHandler) DeleteCommit(context.Context, *connect.Request[v1.DeleteCommitRequest]) (*connect.Response[v1.DeleteCommitResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DeleteCommit is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) DeleteSnapshot(context.Context, *connect.Request[v1.DeleteSnapshotRequest]) (*connect.Response[v1.DeleteSnapshotResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DeleteSnapshot is not implemented"))
+func (UnimplementedStorageServiceHandler) PruneCommits(context.Context, *connect.Request[v1.PruneCommitsRequest]) (*connect.Response[v1.PruneCommitsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.PruneCommits is not implemented"))
 }
 
-func (UnimplementedStorageServiceHandler) PruneSnapshots(context.Context, *connect.Request[v1.PruneSnapshotsRequest]) (*connect.Response[v1.PruneSnapshotsResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.PruneSnapshots is not implemented"))
+func (UnimplementedStorageServiceHandler) ReadCommitNode(context.Context, *connect.Request[v1.ReadCommitNodeRequest]) (*connect.Response[v1.ReadCommitNodeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.ReadCommitNode is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) DiffBranches(context.Context, *connect.Request[v1.DiffBranchesRequest]) (*connect.Response[v1.DiffResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DiffBranches is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) DiffCommits(context.Context, *connect.Request[v1.DiffCommitsRequest]) (*connect.Response[v1.DiffResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DiffCommits is not implemented"))
+}
+
+func (UnimplementedStorageServiceHandler) DiffWork(context.Context, *connect.Request[v1.DiffWorkRequest]) (*connect.Response[v1.DiffResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("storage.v1.StorageService.DiffWork is not implemented"))
 }

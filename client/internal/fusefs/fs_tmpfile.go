@@ -33,6 +33,7 @@ func (m *rawFSTmpMaterializer) CreateTmpInode(ctx context.Context, parentIno uin
 		Uid:       uid,
 		Gid:       gid,
 		DiskId:    m.fs.cfg.DiskID,
+		Branch:    m.fs.cfg.Branch,
 		Epoch:     m.fs.cfg.Epoch,
 	}))
 	if err != nil {
@@ -122,6 +123,7 @@ func (fs *RawFS) tmpfileSync(opCtx context.Context, parentIno uint64, input *fus
 		Gid:       input.Gid,
 		Exclusive: input.Flags&uint32(syscall.O_EXCL) != 0,
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {

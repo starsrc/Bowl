@@ -76,18 +76,14 @@ linters:
               desc: "公共基础包 pkg/ 禁止反向依赖客户端模块"
             - pkg: "github.com/starsrc/bowl/e2e"
               desc: "公共基础包 pkg/ 禁止依赖 E2E 测试模块"
-        store_layer:
+        engine_layer:
           files:
-            - "**/internal/store/**"
-            - "**/internal/pebblekv/**"
-            - "**/internal/readbuf/**"
+            - "**/internal/engine/**"
           deny:
-            - pkg: "github.com/starsrc/bowl/services/storage/internal/meta"
-              desc: "底层存储引擎包禁止反向依赖上层 meta 领域层"
             - pkg: "github.com/starsrc/bowl/services/storage/internal/server"
               desc: "底层存储引擎包禁止反向依赖上层 RPC server 层"
-            - pkg: "github.com/starsrc/bowl/services/storage/internal/db"
-              desc: "底层存储引擎包禁止依赖 PostgreSQL 控制面 db 层"
+            - pkg: "github.com/starsrc/bowl/services/storage/internal/projection"
+              desc: "底层存储引擎包禁止反向依赖控制面 projection 层"
         client_isolation:
           files:
             - "**/client/**"
@@ -140,17 +136,6 @@ linters:
         linters:
           - forbidigo
         text: "pgxpool\\.New"
-      - path: 'internal/store/actor\.go$'
-        linters:
-          - revive
-        text: "exported: type name will be used as store\\.StoreActor"
-      - path: 'internal/control/disk_usage_unix\.go$'
-        linters:
-          - nilerr
-      - path: 'internal/store/errors\.go$'
-        linters:
-          - revive
-        text: "var-naming: don't use ALL_CAPS in Go names"
       - path: 'internal/fusefs/fs_ioctl\.go$'
         linters:
           - revive

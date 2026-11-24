@@ -23,8 +23,10 @@ import (
 
 const (
 	testValidDiskID   = "11111111-1111-7111-8111-111111111111"
-	testParentDiskID  = "22222222-2222-7222-8222-222222222222"
+	testValidMountID  = "22222222-2222-7222-8222-222222222222"
 	testNilUUID       = "00000000-0000-0000-0000-000000000000"
+	testBranchMain    = "main"
+	testBranchFeat    = "feat"
 	testOverMaxInt64  = uint64(math.MaxInt64) + 1
 	testMaxReadWrite  = 4 << 20
 	testMaxNameBytes  = 255
@@ -34,12 +36,12 @@ const (
 
 func requireErrorInfo(t *testing.T, st *status.Status, wantReason string) {
 	t.Helper()
-	require.NotNil(t, st, "gRPC Status 不应为 nil")
-	require.Equal(t, codes.InvalidArgument, st.Code(), "gRPC 状态码 want=%s, got=%s", codes.InvalidArgument, st.Code())
+	require.NotNil(t, st, "gRPC status must not be nil")
+	require.Equal(t, codes.InvalidArgument, st.Code(), "gRPC code want=%s, got=%s", codes.InvalidArgument, st.Code())
 	details := st.Details()
-	require.Len(t, details, 1, "ErrorInfo 详情数量 want=1, got=%d", len(details))
+	require.Len(t, details, 1, "ErrorInfo details len want=1, got=%d", len(details))
 	info, ok := details[0].(*errdetails.ErrorInfo)
-	require.True(t, ok, "详情类型 want=*errdetails.ErrorInfo, got=%T", details[0])
+	require.True(t, ok, "detail type want=*errdetails.ErrorInfo, got=%T", details[0])
 	require.Equal(t, validator.ErrorDomain, info.GetDomain(), "ErrorInfo.Domain want=%s, got=%s", validator.ErrorDomain, info.GetDomain())
 	require.Equal(t, wantReason, info.GetReason(), "ErrorInfo.Reason want=%s, got=%s", wantReason, info.GetReason())
 }
@@ -55,24 +57,24 @@ func runSubtests[T any](t *testing.T, cases []T, nameFn func(T) string, runFn fu
 
 func assertValidationReason(t *testing.T, err error, wantReason string) {
 	t.Helper()
-	require.Error(t, err, "预期校验失败并映射为 %s，实际返回 nil", wantReason)
+	require.Error(t, err, "expected validation failure with reason %s, got nil", wantReason)
 
 	var pvErr *protovalidate.ValidationError
-	require.ErrorAs(t, err, &pvErr, "应支持 errors.As 提取内部 *protovalidate.ValidationError")
+	require.ErrorAs(t, err, &pvErr, "errors.As must unwrap *protovalidate.ValidationError")
 
 	reason, ok := validator.ErrnoReason(err)
-	require.True(t, ok, "validator.ErrnoReason 应识别校验错误: %v", err)
+	require.True(t, ok, "validator.ErrnoReason must recognize validation error: %v", err)
 	require.Equal(t, wantReason, reason, "ErrnoReason want=%s, got=%s", wantReason, reason)
 
 	requireErrorInfo(t, validator.ToStatus(err), wantReason)
 
 	grpcStatus, ok := status.FromError(err)
-	require.True(t, ok, "校验错误应实现 GRPCStatus(): %v", err)
+	require.True(t, ok, "validation error must implement GRPCStatus(): %v", err)
 	requireErrorInfo(t, grpcStatus, wantReason)
 
 	grpcErr := validator.ToGRPCError(err)
 	convertedStatus, ok := status.FromError(grpcErr)
-	require.True(t, ok, "ToGRPCError 返回值应可由 status.FromError 解析")
+	require.True(t, ok, "ToGRPCError output must parse with status.FromError")
 	requireErrorInfo(t, convertedStatus, wantReason)
 }
 
@@ -83,26 +85,31 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 	now := timestamppb.Now()
 	maxInt := uint64(math.MaxInt64)
 	renamed := "renamed"
-	parentID := testParentDiskID
 	maxBytes := uint64(1 << 30)
-	maxLimit := uint64(math.MaxInt64)
 
-	validRootDisk := &storagev1.Disk{
-		DiskId:    testValidDiskID,
-		Name:      "root-disk",
-		RootIno:   1,
-		MaxBytes:  maxBytes,
-		CreatedAt: now,
-		UpdatedAt: now,
+	validDisk := &storagev1.Disk{
+		DiskId:        testValidDiskID,
+		Name:          "root-disk",
+		DefaultBranch: testBranchMain,
+		MaxBytes:      maxBytes,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
-	validForkedDisk := &storagev1.Disk{
+	validBranch := &storagev1.Branch{
 		DiskId:       testValidDiskID,
-		Name:         "child-disk",
-		RootIno:      1,
-		MaxBytes:     maxBytes,
+		Name:         testBranchFeat,
+		HeadCommitId: 2,
+		WriterEpoch:  1,
 		CreatedAt:    now,
 		UpdatedAt:    now,
-		ParentDiskId: &parentID,
+	}
+	validCommit := &storagev1.Commit{
+		DiskId:    testValidDiskID,
+		CommitId:  2,
+		ParentId:  1,
+		Kind:      storagev1.CommitKind_COMMIT_KIND_FORK,
+		Message:   "fork feat",
+		CreatedAt: now,
 	}
 
 	type validCase struct {
@@ -112,16 +119,17 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 	cases := []validCase{
 		{
 			name: "lookup_non_utf8_binary_name",
-			msg:  &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: []byte{0xff, 0xfe, 0x80, 0x81}},
+			msg:  &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: testBranchMain, ParentIno: 1, Name: []byte{0xff, 0xfe, 0x80, 0x81}},
 		},
 		{
 			name: "lookup_max_255_bytes_name",
-			msg:  &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: bytes.Repeat([]byte("a"), testMaxNameBytes)},
+			msg:  &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: testBranchMain, ParentIno: 1, Name: bytes.Repeat([]byte("a"), testMaxNameBytes)},
 		},
 		{
 			name: "setxattr_flags_3_max_name_and_value",
 			msg: &storagev1.SetXattrRequest{
 				DiskId: testValidDiskID,
+				Branch: testBranchMain,
 				Epoch:  1,
 				Ino:    1,
 				Name:   bytes.Repeat([]byte("k"), testMaxNameBytes),
@@ -131,35 +139,51 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 		},
 		{
 			name: "create_max_int64_ino_and_max_int32_ids",
-			msg:  &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: maxInt, ParentIno: maxInt, Name: []byte("created"), Mode: 0o644, Uid: math.MaxInt32, Gid: math.MaxInt32},
+			msg:  &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: maxInt, ParentIno: maxInt, Name: []byte("created"), Mode: 0o644, Uid: math.MaxInt32, Gid: math.MaxInt32},
 		},
 		{
 			name: "read_4mib_and_max_int64_fields",
-			msg:  &storagev1.ReadRequest{DiskId: testValidDiskID, Ino: maxInt, Fh: maxInt, Offset: maxInt, Size: testMaxReadWrite},
+			msg:  &storagev1.ReadRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: maxInt, Fh: maxInt, Offset: maxInt, Size: testMaxReadWrite},
 		},
 		{
 			name: "write_4mib_payload",
-			msg:  &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Offset: 0, Data: bytes.Repeat([]byte("w"), testMaxReadWrite)},
+			msg:  &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Offset: 0, Data: bytes.Repeat([]byte("w"), testMaxReadWrite)},
 		},
 		{
 			name: "write_empty_payload_at_max_int64_offset",
-			msg:  &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: maxInt, Ino: maxInt, Fh: maxInt, Offset: maxInt},
+			msg:  &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: maxInt, Ino: maxInt, Fh: maxInt, Offset: maxInt},
 		},
 		{
 			name: "fallocate_max_int64_fields",
-			msg:  &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: maxInt, Ino: maxInt, Fh: maxInt, Offset: maxInt, Length: maxInt, Mode: 0},
+			msg:  &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: maxInt, Ino: maxInt, Fh: maxInt, Offset: maxInt, Length: maxInt, Mode: 0},
 		},
 		{
 			name: "symlink_max_4095_target",
-			msg:  &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("sym"), Target: bytes.Repeat([]byte("t"), testMaxTargetLen)},
+			msg:  &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("sym"), Target: bytes.Repeat([]byte("t"), testMaxTargetLen)},
 		},
 		{
-			name: "mount_disk_rw_and_ro",
-			msg:  &storagev1.MountDiskRequest{DiskId: testValidDiskID, ReadOnly: true},
+			name: "mount_branch_ro",
+			msg:  &storagev1.MountBranchRequest{DiskId: testValidDiskID, Branch: testBranchMain, ReadOnly: true},
 		},
 		{
-			name: "list_mounts_valid",
+			name: "renew_mount_ro",
+			msg:  &storagev1.RenewMountRequest{DiskId: testValidDiskID, Branch: testBranchMain, MountId: testValidMountID, ReadOnly: true, Epoch: 0},
+		},
+		{
+			name: "renew_mount_rw",
+			msg:  &storagev1.RenewMountRequest{DiskId: testValidDiskID, Branch: testBranchMain, MountId: testValidMountID, ReadOnly: false, Epoch: 1},
+		},
+		{
+			name: "unmount_branch_valid",
+			msg:  &storagev1.UnmountBranchRequest{DiskId: testValidDiskID, MountId: testValidMountID},
+		},
+		{
+			name: "list_mounts_whole_disk_valid",
 			msg:  &storagev1.ListMountsRequest{DiskId: testValidDiskID},
+		},
+		{
+			name: "list_mounts_branch_valid",
+			msg:  &storagev1.ListMountsRequest{DiskId: testValidDiskID, Branch: testBranchMain},
 		},
 		{
 			name: "evict_mounts_all_valid",
@@ -167,7 +191,7 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 		},
 		{
 			name: "evict_mounts_single_valid",
-			msg:  &storagev1.EvictMountsRequest{DiskId: testValidDiskID, MountId: new(testValidDiskID)},
+			msg:  &storagev1.EvictMountsRequest{DiskId: testValidDiskID, Branch: testBranchMain, MountId: new(testValidMountID)},
 		},
 		{
 			name: "create_disk_valid",
@@ -194,128 +218,203 @@ func TestStorageValidator_GivenValidExtremeRequests_WhenValidated_ThenSucceeds(t
 			msg:  &storagev1.DeleteDiskRequest{DiskId: testValidDiskID},
 		},
 		{
-			name: "fork_disk_minimal",
-			msg:  &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID},
+			name: "disk_entity",
+			msg:  validDisk,
 		},
 		{
-			name: "fork_disk_max_name_and_max_bytes",
-			msg:  &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: strings.Repeat("a", testMaxNameBytes), MaxBytes: &maxLimit},
+			name: "fork_branch_valid",
+			msg:  &storagev1.ForkBranchRequest{DiskId: testValidDiskID, SourceBranch: testBranchMain, NewBranch: testBranchFeat, Message: "fork"},
 		},
 		{
-			name: "root_disk_entity",
-			msg:  validRootDisk,
+			name: "fork_branch_response",
+			msg:  &storagev1.ForkBranchResponse{Commit: validCommit, Branch: validBranch},
 		},
 		{
-			name: "forked_disk_entity_and_response",
-			msg:  &storagev1.ForkDiskResponse{Disk: validForkedDisk},
+			name: "list_branches_valid",
+			msg:  &storagev1.ListBranchesRequest{DiskId: testValidDiskID},
+		},
+		{
+			name: "delete_branch_valid",
+			msg:  &storagev1.DeleteBranchRequest{DiskId: testValidDiskID, Branch: testBranchFeat},
+		},
+		{
+			name: "reset_branch_valid",
+			msg:  &storagev1.ResetBranchRequest{DiskId: testValidDiskID, Branch: testBranchFeat, TargetCommitId: 1},
+		},
+		{
+			name: "merge_branch_valid",
+			msg: &storagev1.MergeBranchRequest{
+				DiskId:         testValidDiskID,
+				SourceBranch:   testBranchFeat,
+				TargetBranch:   testBranchMain,
+				Strategy:       storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS,
+				PathStrategies: map[string]storagev1.MergeStrategy{"a/b": storagev1.MergeStrategy_MERGE_STRATEGY_OURS},
+				NoFastForward:  true,
+				Message:        "merge feat",
+			},
+		},
+		{
+			name: "create_commit_valid",
+			msg:  &storagev1.CreateCommitRequest{DiskId: testValidDiskID, Branch: testBranchMain, Message: strings.Repeat("m", 4096)},
+		},
+		{
+			name: "list_commits_valid",
+			msg:  &storagev1.ListCommitsRequest{DiskId: testValidDiskID, Kind: storagev1.CommitKind_COMMIT_KIND_MANUAL, PageSize: 1000},
+		},
+		{
+			name: "delete_commit_valid",
+			msg:  &storagev1.DeleteCommitRequest{DiskId: testValidDiskID, CommitId: 2},
+		},
+		{
+			name: "prune_commits_valid",
+			msg:  &storagev1.PruneCommitsRequest{DiskId: testValidDiskID},
+		},
+		{
+			name: "read_commit_node_valid",
+			msg:  &storagev1.ReadCommitNodeRequest{DiskId: testValidDiskID, CommitId: 1, Ino: 2, Offset: 0, Size: testMaxReadWrite},
+		},
+		{
+			name: "diff_branches_valid",
+			msg:  &storagev1.DiffBranchesRequest{DiskId: testValidDiskID, SourceBranch: testBranchFeat, TargetBranch: testBranchMain, PageSize: 1000},
+		},
+		{
+			name: "diff_commits_valid",
+			msg:  &storagev1.DiffCommitsRequest{DiskId: testValidDiskID, BaseCommitId: 1, SourceCommitId: 2, PageSize: 1000},
+		},
+		{
+			name: "diff_work_valid",
+			msg:  &storagev1.DiffWorkRequest{DiskId: testValidDiskID, Branch: testBranchMain, PageSize: 1000},
 		},
 	}
 
 	runSubtests(t, cases, func(tc validCase) string { return tc.name }, func(t *testing.T, tc validCase) {
-		require.NoError(t, v.Validate(tc.msg), "合法极限请求 %s 应通过校验", tc.name)
+		require.NoError(t, v.Validate(tc.msg), "valid extreme request %s must pass", tc.name)
 	})
 }
 
-func TestStorageValidator_GivenInvalidReadDataPlaneDiskID_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
+func TestStorageValidator_GivenInvalidReadDataPlaneDiskIDOrBranch_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err)
 
 	type readBuilder struct {
 		name  string
-		build func(diskID string) proto.Message
+		build func(diskID, branch string) proto.Message
 	}
 	builders := []readBuilder{
-		{name: "LookupRequest", build: func(id string) proto.Message {
-			return &storagev1.LookupRequest{DiskId: id, ParentIno: 1, Name: []byte("f")}
+		{name: "LookupRequest", build: func(id, br string) proto.Message {
+			return &storagev1.LookupRequest{DiskId: id, Branch: br, ParentIno: 1, Name: []byte("f")}
 		}},
-		{name: "GetAttrRequest", build: func(id string) proto.Message { return &storagev1.GetAttrRequest{DiskId: id, Ino: 1} }},
-		{name: "ReadlinkRequest", build: func(id string) proto.Message { return &storagev1.ReadlinkRequest{DiskId: id, Ino: 1} }},
-		{name: "ReadRequest", build: func(id string) proto.Message { return &storagev1.ReadRequest{DiskId: id, Ino: 1, Size: 64} }},
-		{name: "ReadDirRequest", build: func(id string) proto.Message { return &storagev1.ReadDirRequest{DiskId: id, Ino: 1, Limit: 16} }},
-		{name: "ReadDirPlusRequest", build: func(id string) proto.Message { return &storagev1.ReadDirPlusRequest{DiskId: id, Ino: 1, Limit: 16} }},
-		{name: "GetXattrRequest", build: func(id string) proto.Message {
-			return &storagev1.GetXattrRequest{DiskId: id, Ino: 1, Name: []byte("user.k")}
+		{name: "GetAttrRequest", build: func(id, br string) proto.Message {
+			return &storagev1.GetAttrRequest{DiskId: id, Branch: br, Ino: 1}
 		}},
-		{name: "ListXattrRequest", build: func(id string) proto.Message { return &storagev1.ListXattrRequest{DiskId: id, Ino: 1} }},
-		{name: "StatFSRequest", build: func(id string) proto.Message { return &storagev1.StatFSRequest{DiskId: id, Ino: 1} }},
+		{name: "ReadlinkRequest", build: func(id, br string) proto.Message {
+			return &storagev1.ReadlinkRequest{DiskId: id, Branch: br, Ino: 1}
+		}},
+		{name: "ReadRequest", build: func(id, br string) proto.Message {
+			return &storagev1.ReadRequest{DiskId: id, Branch: br, Ino: 1, Size: 64}
+		}},
+		{name: "ReadDirRequest", build: func(id, br string) proto.Message {
+			return &storagev1.ReadDirRequest{DiskId: id, Branch: br, Ino: 1, Limit: 16}
+		}},
+		{name: "ReadDirPlusRequest", build: func(id, br string) proto.Message {
+			return &storagev1.ReadDirPlusRequest{DiskId: id, Branch: br, Ino: 1, Limit: 16}
+		}},
+		{name: "GetXattrRequest", build: func(id, br string) proto.Message {
+			return &storagev1.GetXattrRequest{DiskId: id, Branch: br, Ino: 1, Name: []byte("user.k")}
+		}},
+		{name: "ListXattrRequest", build: func(id, br string) proto.Message {
+			return &storagev1.ListXattrRequest{DiskId: id, Branch: br, Ino: 1}
+		}},
+		{name: "StatFSRequest", build: func(id, br string) proto.Message {
+			return &storagev1.StatFSRequest{DiskId: id, Branch: br, Ino: 1}
+		}},
 	}
 
 	runSubtests(t, builders, func(b readBuilder) string { return b.name }, func(t *testing.T, b readBuilder) {
-		require.NoError(t, v.Validate(b.build(testValidDiskID)))
-		assertValidationReason(t, v.Validate(b.build("")), validator.ReasonInvalidArgument)
-		assertValidationReason(t, v.Validate(b.build("not-a-uuid")), validator.ReasonInvalidArgument)
-		assertValidationReason(t, v.Validate(b.build(testNilUUID)), validator.ReasonInvalidArgument)
+		require.NoError(t, v.Validate(b.build(testValidDiskID, testBranchMain)))
+		assertValidationReason(t, v.Validate(b.build("", testBranchMain)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build("not-a-uuid", testBranchMain)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testNilUUID, testBranchMain)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, "")), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, "bad\x00br")), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, strings.Repeat("b", 256))), validator.ReasonInvalidArgument)
 	})
 }
 
-func TestStorageValidator_GivenInvalidWriteDataPlaneDiskIDOrEpoch_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
+func TestStorageValidator_GivenInvalidWriteDataPlaneDiskIDBranchOrEpoch_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err)
 	mode := uint32(0o644)
 
 	type writeBuilder struct {
 		name  string
-		build func(diskID string, epoch uint64) proto.Message
+		build func(diskID, branch string, epoch uint64) proto.Message
 	}
 	builders := []writeBuilder{
-		{name: "SetAttrRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.SetAttrRequest{DiskId: id, Epoch: ep, Ino: 1, Mode: &mode}
+		{name: "SetAttrRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.SetAttrRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1, Mode: &mode}
 		}},
-		{name: "MknodRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.MknodRequest{DiskId: id, Epoch: ep, ParentIno: 1, Name: []byte("n"), Mode: 0o644}
+		{name: "MknodRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.MknodRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Name: []byte("n"), Mode: 0o644}
 		}},
-		{name: "MkdirRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.MkdirRequest{DiskId: id, Epoch: ep, ParentIno: 1, Name: []byte("d"), Mode: 0o755}
+		{name: "MkdirRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.MkdirRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Name: []byte("d"), Mode: 0o755}
 		}},
-		{name: "SymlinkRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.SymlinkRequest{DiskId: id, Epoch: ep, ParentIno: 1, Name: []byte("s"), Target: []byte("t")}
+		{name: "SymlinkRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.SymlinkRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Name: []byte("s"), Target: []byte("t")}
 		}},
-		{name: "LinkRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.LinkRequest{DiskId: id, Epoch: ep, Ino: 2, NewParentIno: 1, NewName: []byte("h")}
+		{name: "LinkRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.LinkRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 2, NewParentIno: 1, NewName: []byte("h")}
 		}},
-		{name: "UnlinkRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.UnlinkRequest{DiskId: id, Epoch: ep, ParentIno: 1, Name: []byte("f")}
+		{name: "UnlinkRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.UnlinkRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Name: []byte("f")}
 		}},
-		{name: "RmdirRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.RmdirRequest{DiskId: id, Epoch: ep, ParentIno: 1, Name: []byte("d")}
+		{name: "RmdirRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.RmdirRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Name: []byte("d")}
 		}},
-		{name: "RenameRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.RenameRequest{DiskId: id, Epoch: ep, OldParentIno: 1, OldName: []byte("a"), NewParentIno: 1, NewName: []byte("b")}
+		{name: "RenameRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.RenameRequest{DiskId: id, Branch: br, Epoch: ep, OldParentIno: 1, OldName: []byte("a"), NewParentIno: 1, NewName: []byte("b")}
 		}},
-		{name: "CreateRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.CreateRequest{DiskId: id, Epoch: ep, ParentIno: 1, Name: []byte("f"), Mode: 0o644}
+		{name: "CreateRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.CreateRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Name: []byte("f"), Mode: 0o644}
 		}},
-		{name: "WriteRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.WriteRequest{DiskId: id, Epoch: ep, Ino: 1, Data: []byte("hello")}
+		{name: "CreateTmpfileRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.CreateTmpfileRequest{DiskId: id, Branch: br, Epoch: ep, ParentIno: 1, Mode: 0o600}
 		}},
-		{name: "FsyncRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.FsyncRequest{DiskId: id, Epoch: ep, Ino: 1}
+		{name: "WriteRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.WriteRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1, Data: []byte("hello")}
 		}},
-		{name: "FsyncDirRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.FsyncDirRequest{DiskId: id, Epoch: ep, Ino: 1}
+		{name: "FsyncRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.FsyncRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1}
 		}},
-		{name: "FallocateRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.FallocateRequest{DiskId: id, Epoch: ep, Ino: 1, Length: 4096}
+		{name: "FsyncDirRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.FsyncDirRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1}
 		}},
-		{name: "SetXattrRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.SetXattrRequest{DiskId: id, Epoch: ep, Ino: 1, Name: []byte("user.k"), Value: []byte("v")}
+		{name: "FallocateRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.FallocateRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1, Length: 4096}
 		}},
-		{name: "RemoveXattrRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.RemoveXattrRequest{DiskId: id, Epoch: ep, Ino: 1, Name: []byte("user.k")}
+		{name: "SetXattrRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.SetXattrRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1, Name: []byte("user.k"), Value: []byte("v")}
 		}},
-		{name: "ReclaimOrphanRequest", build: func(id string, ep uint64) proto.Message {
-			return &storagev1.ReclaimOrphanRequest{DiskId: id, Epoch: ep, Ino: 1}
+		{name: "RemoveXattrRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.RemoveXattrRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1, Name: []byte("user.k")}
+		}},
+		{name: "ReclaimOrphanRequest", build: func(id, br string, ep uint64) proto.Message {
+			return &storagev1.ReclaimOrphanRequest{DiskId: id, Branch: br, Epoch: ep, Ino: 1}
 		}},
 	}
 
 	runSubtests(t, builders, func(b writeBuilder) string { return b.name }, func(t *testing.T, b writeBuilder) {
-		require.NoError(t, v.Validate(b.build(testValidDiskID, 1)))
-		require.NoError(t, v.Validate(b.build(testValidDiskID, math.MaxInt64)))
-		assertValidationReason(t, v.Validate(b.build("", 1)), validator.ReasonInvalidArgument)
-		assertValidationReason(t, v.Validate(b.build("not-a-uuid", 1)), validator.ReasonInvalidArgument)
-		assertValidationReason(t, v.Validate(b.build(testNilUUID, 1)), validator.ReasonInvalidArgument)
-		assertValidationReason(t, v.Validate(b.build(testValidDiskID, 0)), validator.ReasonInvalidArgument)
-		assertValidationReason(t, v.Validate(b.build(testValidDiskID, testOverMaxInt64)), validator.ReasonInvalidArgument)
+		require.NoError(t, v.Validate(b.build(testValidDiskID, testBranchMain, 1)))
+		require.NoError(t, v.Validate(b.build(testValidDiskID, testBranchMain, math.MaxInt64)))
+		assertValidationReason(t, v.Validate(b.build("", testBranchMain, 1)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build("not-a-uuid", testBranchMain, 1)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testNilUUID, testBranchMain, 1)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, "", 1)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, "bad\x00br", 1)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, strings.Repeat("b", 256), 1)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, testBranchMain, 0)), validator.ReasonInvalidArgument)
+		assertValidationReason(t, v.Validate(b.build(testValidDiskID, testBranchMain, testOverMaxInt64)), validator.ReasonInvalidArgument)
 	})
 }
 
@@ -332,37 +431,32 @@ func TestStorageValidator_GivenInvalidNamesXattrsOrTargets_WhenValidated_ThenMap
 		wantReason string
 	}
 	cases := []reasonCase{
-
-		{name: "lookup_name_too_long", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: long256Bytes}, wantReason: validator.ReasonNameTooLong},
-		{name: "lookup_name_has_nul", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: []byte("foo\x00bar")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "lookup_name_has_slash", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 1, Name: []byte("foo/bar")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "mkdir_256_slashes_too_long", msg: &storagev1.MkdirRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: bytes.Repeat([]byte("/"), 256), Mode: 0o755}, wantReason: validator.ReasonNameTooLong},
-		{name: "create_empty_name", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte{}}, wantReason: validator.ReasonInvalidArgument},
-		{name: "create_name_too_long", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: long256Bytes}, wantReason: validator.ReasonNameTooLong},
-		{name: "create_name_has_slash", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("bad/name")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "create_name_has_nul", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("bad\x00name")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "rename_new_name_too_long", msg: &storagev1.RenameRequest{DiskId: testValidDiskID, Epoch: 1, OldParentIno: 1, OldName: []byte("old"), NewParentIno: 1, NewName: long256Bytes}, wantReason: validator.ReasonNameTooLong},
+		{name: "lookup_name_too_long", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: testBranchMain, ParentIno: 1, Name: long256Bytes}, wantReason: validator.ReasonNameTooLong},
+		{name: "lookup_name_has_nul", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: testBranchMain, ParentIno: 1, Name: []byte("foo\x00bar")}, wantReason: validator.ReasonInvalidArgument},
+		{name: "lookup_name_has_slash", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: testBranchMain, ParentIno: 1, Name: []byte("foo/bar")}, wantReason: validator.ReasonInvalidArgument},
+		{name: "mkdir_256_slashes_too_long", msg: &storagev1.MkdirRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: bytes.Repeat([]byte("/"), 256), Mode: 0o755}, wantReason: validator.ReasonNameTooLong},
+		{name: "create_empty_name", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte{}}, wantReason: validator.ReasonInvalidArgument},
+		{name: "create_name_too_long", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: long256Bytes}, wantReason: validator.ReasonNameTooLong},
+		{name: "create_name_has_slash", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("bad/name")}, wantReason: validator.ReasonInvalidArgument},
+		{name: "create_name_has_nul", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("bad\x00name")}, wantReason: validator.ReasonInvalidArgument},
+		{name: "rename_new_name_too_long", msg: &storagev1.RenameRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, OldParentIno: 1, OldName: []byte("old"), NewParentIno: 1, NewName: long256Bytes}, wantReason: validator.ReasonNameTooLong},
 		{name: "create_disk_name_too_long", msg: &storagev1.CreateDiskRequest{Name: long256Str, MaxBytes: 1}, wantReason: validator.ReasonNameTooLong},
 		{name: "create_disk_name_has_nul", msg: &storagev1.CreateDiskRequest{Name: "a\x00b", MaxBytes: 1}, wantReason: validator.ReasonInvalidArgument},
 		{name: "update_disk_name_too_long", msg: &storagev1.UpdateDiskRequest{DiskId: testValidDiskID, Name: &long256Str}, wantReason: validator.ReasonNameTooLong},
 		{name: "update_disk_name_has_nul", msg: &storagev1.UpdateDiskRequest{DiskId: testValidDiskID, Name: new("a\x00b")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "fork_disk_name_too_long", msg: &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: long256Str}, wantReason: validator.ReasonNameTooLong},
-		{name: "fork_disk_name_has_nul", msg: &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: "a\x00b"}, wantReason: validator.ReasonInvalidArgument},
-
-		{name: "setxattr_empty_name", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte{}, Value: []byte("val")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "setxattr_invalid_flags", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte("user.k"), Value: []byte("v"), Flags: 4}, wantReason: validator.ReasonInvalidArgument},
-		{name: "setxattr_name_too_long", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: long256Bytes, Value: []byte("val")}, wantReason: validator.ReasonRange},
-		{name: "setxattr_name_has_nul", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte("user.a\x00b"), Value: []byte("val")}, wantReason: validator.ReasonInvalidArgument},
-		{name: "setxattr_value_too_long", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte("user.test"), Value: bytes.Repeat([]byte("v"), 65537)}, wantReason: validator.ReasonRange},
-		{name: "getxattr_nil_name", msg: &storagev1.GetXattrRequest{DiskId: testValidDiskID, Ino: 1, Name: nil}, wantReason: validator.ReasonInvalidArgument},
-		{name: "removexattr_name_too_long", msg: &storagev1.RemoveXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: long256Bytes}, wantReason: validator.ReasonRange},
+		{name: "setxattr_empty_name", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: []byte{}, Value: []byte("val")}, wantReason: validator.ReasonInvalidArgument},
+		{name: "setxattr_invalid_flags", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: []byte("user.k"), Value: []byte("v"), Flags: 4}, wantReason: validator.ReasonInvalidArgument},
+		{name: "setxattr_name_too_long", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: long256Bytes, Value: []byte("val")}, wantReason: validator.ReasonRange},
+		{name: "setxattr_name_has_nul", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: []byte("user.a\x00b"), Value: []byte("val")}, wantReason: validator.ReasonInvalidArgument},
+		{name: "setxattr_value_too_long", msg: &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: []byte("user.test"), Value: bytes.Repeat([]byte("v"), 65537)}, wantReason: validator.ReasonRange},
+		{name: "getxattr_nil_name", msg: &storagev1.GetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: 1, Name: nil}, wantReason: validator.ReasonInvalidArgument},
+		{name: "removexattr_name_too_long", msg: &storagev1.RemoveXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: long256Bytes}, wantReason: validator.ReasonRange},
 		{name: "listxattr_resp_empty_item", msg: &storagev1.ListXattrResponse{Names: [][]byte{[]byte("user.ok"), {}}}, wantReason: validator.ReasonInvalidArgument},
 		{name: "listxattr_resp_long_item", msg: &storagev1.ListXattrResponse{Names: [][]byte{long256Bytes}}, wantReason: validator.ReasonRange},
 		{name: "getxattr_resp_value_too_long", msg: &storagev1.GetXattrResponse{Value: bytes.Repeat([]byte("v"), 65537)}, wantReason: validator.ReasonRange},
-
-		{name: "symlink_target_too_long", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: bytes.Repeat([]byte("t"), 4096)}, wantReason: validator.ReasonNameTooLong},
-		{name: "symlink_target_empty", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: []byte{}}, wantReason: validator.ReasonInvalidArgument},
-		{name: "symlink_target_4095_plus_nul", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: append(bytes.Repeat([]byte("t"), 4095), 0)}, wantReason: validator.ReasonInvalidArgument},
+		{name: "symlink_target_too_long", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: bytes.Repeat([]byte("t"), 4096)}, wantReason: validator.ReasonNameTooLong},
+		{name: "symlink_target_empty", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: []byte{}}, wantReason: validator.ReasonInvalidArgument},
+		{name: "symlink_target_4095_plus_nul", msg: &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("link"), Target: append(bytes.Repeat([]byte("t"), 4095), 0)}, wantReason: validator.ReasonInvalidArgument},
 		{name: "readlink_resp_target_too_long", msg: &storagev1.ReadlinkResponse{Target: bytes.Repeat([]byte("t"), 4096)}, wantReason: validator.ReasonNameTooLong},
 		{name: "readlink_resp_target_4095_plus_nul", msg: &storagev1.ReadlinkResponse{Target: append(bytes.Repeat([]byte("t"), 4095), 0)}, wantReason: validator.ReasonInvalidArgument},
 	}
@@ -377,43 +471,49 @@ func TestStorageValidator_GivenOutOfRangeNumericOrControlFields_WhenValidated_Th
 	require.NoError(t, err)
 
 	now := timestamppb.Now()
-	type validCase struct {
+	type invalidCase struct {
 		name string
 		msg  proto.Message
 	}
-	cases := []validCase{
-		{name: "lookup_parent_ino_zero", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, ParentIno: 0, Name: []byte("test.txt")}},
-		{name: "create_parent_ino_zero", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 0, Name: []byte("c")}},
-		{name: "create_parent_ino_over_max_int64", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: testOverMaxInt64, Name: []byte("c")}},
-		{name: "create_uid_over_max_int32", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("c"), Uid: math.MaxInt32 + 1}},
-		{name: "create_gid_over_max_int32", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("c"), Gid: math.MaxInt32 + 1}},
-		{name: "read_ino_zero", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Ino: 0, Size: 1}},
-		{name: "read_size_over_4mib", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Ino: 1, Size: testMaxReadWrite + 1}},
-		{name: "read_ino_over_max_int64", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Ino: testOverMaxInt64, Size: 1}},
-		{name: "read_fh_over_max_int64", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Ino: 1, Fh: testOverMaxInt64, Size: 1}},
-		{name: "read_offset_over_max_int64", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Ino: 1, Offset: testOverMaxInt64, Size: 1}},
-		{name: "write_ino_zero", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 0, Data: []byte("x")}},
-		{name: "write_data_over_4mib", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Data: bytes.Repeat([]byte("w"), testMaxReadWrite+1)}},
-		{name: "write_offset_len_overflow", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Offset: math.MaxInt64, Data: []byte("x")}},
-		{name: "write_ino_over_max_int64", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: testOverMaxInt64, Data: []byte("x")}},
-		{name: "write_fh_over_max_int64", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Fh: testOverMaxInt64, Data: []byte("x")}},
-		{name: "write_offset_over_max_int64", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Offset: testOverMaxInt64}},
-		{name: "fallocate_ino_zero", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 0, Length: 1}},
-		{name: "fallocate_length_zero", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Length: 0}},
-		{name: "fallocate_ino_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: testOverMaxInt64, Length: 1}},
-		{name: "fallocate_fh_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Fh: testOverMaxInt64, Length: 1}},
-		{name: "fallocate_offset_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Offset: testOverMaxInt64, Length: 1}},
-		{name: "fallocate_length_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Length: testOverMaxInt64}},
-		{name: "setattr_no_updates", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1}},
-		{name: "setattr_atime_conflict", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Atime: now, AtimeNow: true}},
-		{name: "reclaim_orphan_ino_zero", msg: &storagev1.ReclaimOrphanRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 0}},
-		{name: "reclaim_orphan_ino_over_max_int64", msg: &storagev1.ReclaimOrphanRequest{DiskId: testValidDiskID, Epoch: 1, Ino: testOverMaxInt64}},
-		{name: "mount_disk_empty_id", msg: &storagev1.MountDiskRequest{}},
-		{name: "mount_disk_bad_id", msg: &storagev1.MountDiskRequest{DiskId: "bad"}},
-		{name: "mount_disk_nil_uuid", msg: &storagev1.MountDiskRequest{DiskId: testNilUUID}},
+	cases := []invalidCase{
+		{name: "lookup_parent_ino_zero", msg: &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: testBranchMain, ParentIno: 0, Name: []byte("test.txt")}},
+		{name: "create_parent_ino_zero", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 0, Name: []byte("c")}},
+		{name: "create_parent_ino_over_max_int64", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: testOverMaxInt64, Name: []byte("c")}},
+		{name: "create_uid_over_max_int32", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("c"), Uid: math.MaxInt32 + 1}},
+		{name: "create_gid_over_max_int32", msg: &storagev1.CreateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("c"), Gid: math.MaxInt32 + 1}},
+		{name: "read_ino_zero", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: 0, Size: 1}},
+		{name: "read_size_over_4mib", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: 1, Size: testMaxReadWrite + 1}},
+		{name: "read_ino_over_max_int64", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: testOverMaxInt64, Size: 1}},
+		{name: "read_fh_over_max_int64", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: 1, Fh: testOverMaxInt64, Size: 1}},
+		{name: "read_offset_over_max_int64", msg: &storagev1.ReadRequest{DiskId: testValidDiskID, Branch: testBranchMain, Ino: 1, Offset: testOverMaxInt64, Size: 1}},
+		{name: "write_ino_zero", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 0, Data: []byte("x")}},
+		{name: "write_data_over_4mib", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Data: bytes.Repeat([]byte("w"), testMaxReadWrite+1)}},
+		{name: "write_offset_len_overflow", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Offset: math.MaxInt64, Data: []byte("x")}},
+		{name: "write_ino_over_max_int64", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: testOverMaxInt64, Data: []byte("x")}},
+		{name: "write_fh_over_max_int64", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Fh: testOverMaxInt64, Data: []byte("x")}},
+		{name: "write_offset_over_max_int64", msg: &storagev1.WriteRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Offset: testOverMaxInt64}},
+		{name: "fallocate_ino_zero", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 0, Length: 1}},
+		{name: "fallocate_length_zero", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Length: 0}},
+		{name: "fallocate_ino_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: testOverMaxInt64, Length: 1}},
+		{name: "fallocate_fh_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Fh: testOverMaxInt64, Length: 1}},
+		{name: "fallocate_offset_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Offset: testOverMaxInt64, Length: 1}},
+		{name: "fallocate_length_over_max_int64", msg: &storagev1.FallocateRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Length: testOverMaxInt64}},
+		{name: "setattr_no_updates", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1}},
+		{name: "setattr_atime_conflict", msg: &storagev1.SetAttrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Atime: now, AtimeNow: true}},
+		{name: "reclaim_orphan_ino_zero", msg: &storagev1.ReclaimOrphanRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 0}},
+		{name: "reclaim_orphan_ino_over_max_int64", msg: &storagev1.ReclaimOrphanRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: testOverMaxInt64}},
+		{name: "mount_branch_empty_id", msg: &storagev1.MountBranchRequest{Branch: testBranchMain}},
+		{name: "mount_branch_bad_id", msg: &storagev1.MountBranchRequest{DiskId: "bad", Branch: testBranchMain}},
+		{name: "mount_branch_nil_uuid", msg: &storagev1.MountBranchRequest{DiskId: testNilUUID, Branch: testBranchMain}},
+		{name: "mount_branch_empty_branch", msg: &storagev1.MountBranchRequest{DiskId: testValidDiskID}},
+		{name: "renew_mount_empty_branch", msg: &storagev1.RenewMountRequest{DiskId: testValidDiskID, MountId: testValidMountID, ReadOnly: true}},
+		{name: "renew_mount_ro_nonzero_epoch", msg: &storagev1.RenewMountRequest{DiskId: testValidDiskID, Branch: testBranchMain, MountId: testValidMountID, ReadOnly: true, Epoch: 1}},
+		{name: "renew_mount_rw_zero_epoch", msg: &storagev1.RenewMountRequest{DiskId: testValidDiskID, Branch: testBranchMain, MountId: testValidMountID, ReadOnly: false, Epoch: 0}},
+		{name: "unmount_branch_nil_mount", msg: &storagev1.UnmountBranchRequest{DiskId: testValidDiskID, MountId: testNilUUID}},
 		{name: "list_mounts_empty_id", msg: &storagev1.ListMountsRequest{}},
 		{name: "list_mounts_bad_id", msg: &storagev1.ListMountsRequest{DiskId: "bad"}},
 		{name: "list_mounts_nil_uuid", msg: &storagev1.ListMountsRequest{DiskId: testNilUUID}},
+		{name: "list_mounts_nul_branch", msg: &storagev1.ListMountsRequest{DiskId: testValidDiskID, Branch: "a\x00b"}},
 		{name: "evict_mounts_empty_id", msg: &storagev1.EvictMountsRequest{}},
 		{name: "evict_mounts_bad_id", msg: &storagev1.EvictMountsRequest{DiskId: "bad"}},
 		{name: "evict_mounts_nil_uuid", msg: &storagev1.EvictMountsRequest{DiskId: testNilUUID}},
@@ -430,18 +530,35 @@ func TestStorageValidator_GivenOutOfRangeNumericOrControlFields_WhenValidated_Th
 		{name: "update_disk_zero_max_bytes", msg: &storagev1.UpdateDiskRequest{DiskId: testValidDiskID, MaxBytes: new(uint64(0))}},
 		{name: "update_disk_over_max_int64_bytes", msg: &storagev1.UpdateDiskRequest{DiskId: testValidDiskID, MaxBytes: new(testOverMaxInt64)}},
 		{name: "delete_disk_nil_uuid", msg: &storagev1.DeleteDiskRequest{DiskId: testNilUUID}},
-		{name: "fork_disk_empty", msg: &storagev1.ForkDiskRequest{}},
-		{name: "fork_disk_bad_source", msg: &storagev1.ForkDiskRequest{SourceDiskId: "bad"}},
-		{name: "fork_disk_nil_source", msg: &storagev1.ForkDiskRequest{SourceDiskId: testNilUUID}},
-		{name: "fork_disk_zero_max_bytes", msg: &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, MaxBytes: new(uint64(0))}},
-		{name: "fork_disk_over_max_int64_bytes", msg: &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, MaxBytes: new(testOverMaxInt64)}},
-		{name: "fork_disk_response_missing_disk", msg: &storagev1.ForkDiskResponse{}},
-		{name: "disk_parent_empty", msg: &storagev1.Disk{DiskId: testValidDiskID, RootIno: 1, MaxBytes: 1024, CreatedAt: now, UpdatedAt: now, ParentDiskId: new("")}},
-		{name: "disk_parent_bad_uuid", msg: &storagev1.Disk{DiskId: testValidDiskID, RootIno: 1, MaxBytes: 1024, CreatedAt: now, UpdatedAt: now, ParentDiskId: new("not-a-uuid")}},
-		{name: "disk_parent_nil_uuid", msg: &storagev1.Disk{DiskId: testValidDiskID, RootIno: 1, MaxBytes: 1024, CreatedAt: now, UpdatedAt: now, ParentDiskId: new(testNilUUID)}},
+		{name: "disk_missing_default_branch", msg: &storagev1.Disk{DiskId: testValidDiskID, MaxBytes: 1024, CreatedAt: now, UpdatedAt: now}},
+		{name: "fork_branch_same_name", msg: &storagev1.ForkBranchRequest{DiskId: testValidDiskID, SourceBranch: testBranchMain, NewBranch: testBranchMain}},
+		{name: "fork_branch_empty_source", msg: &storagev1.ForkBranchRequest{DiskId: testValidDiskID, SourceBranch: "", NewBranch: testBranchFeat}},
+		{name: "fork_branch_empty_new", msg: &storagev1.ForkBranchRequest{DiskId: testValidDiskID, SourceBranch: testBranchMain, NewBranch: ""}},
+		{name: "fork_branch_response_missing_fields", msg: &storagev1.ForkBranchResponse{}},
+		{name: "list_branches_nil_disk", msg: &storagev1.ListBranchesRequest{DiskId: testNilUUID}},
+		{name: "delete_branch_empty_branch", msg: &storagev1.DeleteBranchRequest{DiskId: testValidDiskID}},
+		{name: "reset_branch_zero_commit", msg: &storagev1.ResetBranchRequest{DiskId: testValidDiskID, Branch: testBranchMain, TargetCommitId: 0}},
+		{name: "reset_branch_over_max_commit", msg: &storagev1.ResetBranchRequest{DiskId: testValidDiskID, Branch: testBranchMain, TargetCommitId: testOverMaxInt64}},
+		{name: "merge_branch_same_branch", msg: &storagev1.MergeBranchRequest{DiskId: testValidDiskID, SourceBranch: testBranchMain, TargetBranch: testBranchMain}},
+		{name: "merge_branch_invalid_strategy", msg: &storagev1.MergeBranchRequest{DiskId: testValidDiskID, SourceBranch: testBranchFeat, TargetBranch: testBranchMain, Strategy: storagev1.MergeStrategy(99)}},
+		{name: "merge_branch_unspecified_path_strategy", msg: &storagev1.MergeBranchRequest{DiskId: testValidDiskID, SourceBranch: testBranchFeat, TargetBranch: testBranchMain, PathStrategies: map[string]storagev1.MergeStrategy{"a": storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED}}},
+		{name: "create_commit_empty_branch", msg: &storagev1.CreateCommitRequest{DiskId: testValidDiskID}},
+		{name: "create_commit_overlong_message", msg: &storagev1.CreateCommitRequest{DiskId: testValidDiskID, Branch: testBranchMain, Message: strings.Repeat("m", 4097)}},
+		{name: "create_commit_nul_message", msg: &storagev1.CreateCommitRequest{DiskId: testValidDiskID, Branch: testBranchMain, Message: "a\x00b"}},
+		{name: "list_commits_invalid_kind", msg: &storagev1.ListCommitsRequest{DiskId: testValidDiskID, Kind: storagev1.CommitKind(99)}},
+		{name: "list_commits_page_size_over_1000", msg: &storagev1.ListCommitsRequest{DiskId: testValidDiskID, PageSize: 1001}},
+		{name: "delete_commit_zero_id", msg: &storagev1.DeleteCommitRequest{DiskId: testValidDiskID, CommitId: 0}},
+		{name: "prune_commits_nil_disk", msg: &storagev1.PruneCommitsRequest{DiskId: testNilUUID}},
+		{name: "read_commit_node_zero_commit", msg: &storagev1.ReadCommitNodeRequest{DiskId: testValidDiskID, CommitId: 0, Ino: 1, Size: 64}},
+		{name: "read_commit_node_zero_ino", msg: &storagev1.ReadCommitNodeRequest{DiskId: testValidDiskID, CommitId: 1, Ino: 0, Size: 64}},
+		{name: "read_commit_node_size_over_4mib", msg: &storagev1.ReadCommitNodeRequest{DiskId: testValidDiskID, CommitId: 1, Ino: 1, Size: testMaxReadWrite + 1}},
+		{name: "diff_branches_same_branch", msg: &storagev1.DiffBranchesRequest{DiskId: testValidDiskID, SourceBranch: testBranchMain, TargetBranch: testBranchMain}},
+		{name: "diff_commits_same_commit", msg: &storagev1.DiffCommitsRequest{DiskId: testValidDiskID, BaseCommitId: 1, SourceCommitId: 1}},
+		{name: "diff_commits_zero_base", msg: &storagev1.DiffCommitsRequest{DiskId: testValidDiskID, BaseCommitId: 0, SourceCommitId: 2}},
+		{name: "diff_work_empty_branch", msg: &storagev1.DiffWorkRequest{DiskId: testValidDiskID}},
 	}
 
-	runSubtests(t, cases, func(tc validCase) string { return tc.name }, func(t *testing.T, tc validCase) {
+	runSubtests(t, cases, func(tc invalidCase) string { return tc.name }, func(t *testing.T, tc invalidCase) {
 		assertValidationReason(t, v.Validate(tc.msg), validator.ReasonInvalidArgument)
 	})
 }
@@ -462,92 +579,82 @@ func TestStorageValidator_GivenMultipleViolations_WhenValidated_ThenSelectsHighe
 	cases := []reasonCase{
 		{
 			name:       "lookup_bad_disk_id_beats_long_name",
-			msg:        &storagev1.LookupRequest{DiskId: "bad", ParentIno: 1, Name: long256Bytes},
+			msg:        &storagev1.LookupRequest{DiskId: "bad", Branch: testBranchMain, ParentIno: 1, Name: long256Bytes},
+			wantReason: validator.ReasonInvalidArgument,
+		},
+		{
+			name:       "lookup_empty_branch_beats_long_name",
+			msg:        &storagev1.LookupRequest{DiskId: testValidDiskID, Branch: "", ParentIno: 1, Name: long256Bytes},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "setxattr_bad_disk_id_beats_long_name",
-			msg:        &storagev1.SetXattrRequest{DiskId: "bad", Epoch: 1, Ino: 1, Name: long256Bytes, Value: []byte("val")},
+			msg:        &storagev1.SetXattrRequest{DiskId: "bad", Branch: testBranchMain, Epoch: 1, Ino: 1, Name: long256Bytes, Value: []byte("val")},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "setxattr_zero_epoch_beats_long_name",
-			msg:        &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 0, Ino: 1, Name: long256Bytes, Value: []byte("val")},
+			msg:        &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 0, Ino: 1, Name: long256Bytes, Value: []byte("val")},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "setxattr_name_max_len_beats_nul_byte",
-			msg:        &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: append(bytes.Repeat([]byte("a"), 255), 0), Value: []byte("val")},
+			msg:        &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: append(bytes.Repeat([]byte("a"), 255), 0), Value: []byte("val")},
 			wantReason: validator.ReasonRange,
 		},
 		{
 			name:       "setxattr_name_nul_beats_value_max_len",
-			msg:        &storagev1.SetXattrRequest{DiskId: testValidDiskID, Epoch: 1, Ino: 1, Name: []byte("bad\x00name"), Value: bytes.Repeat([]byte("v"), 65537)},
+			msg:        &storagev1.SetXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, Ino: 1, Name: []byte("bad\x00name"), Value: bytes.Repeat([]byte("v"), 65537)},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "getxattr_nil_uuid_beats_long_name",
-			msg:        &storagev1.GetXattrRequest{DiskId: testNilUUID, Ino: 1, Name: long256Bytes},
+			msg:        &storagev1.GetXattrRequest{DiskId: testNilUUID, Branch: testBranchMain, Ino: 1, Name: long256Bytes},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "removexattr_zero_epoch_beats_long_name",
-			msg:        &storagev1.RemoveXattrRequest{DiskId: testValidDiskID, Epoch: 0, Ino: 1, Name: long256Bytes},
+			msg:        &storagev1.RemoveXattrRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 0, Ino: 1, Name: long256Bytes},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "mkdir_zero_epoch_beats_long_name",
-			msg:        &storagev1.MkdirRequest{DiskId: testValidDiskID, Epoch: 0, ParentIno: 1, Name: long256Bytes, Mode: 0o755},
+			msg:        &storagev1.MkdirRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 0, ParentIno: 1, Name: long256Bytes, Mode: 0o755},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "rename_nil_uuid_beats_long_new_name",
-			msg:        &storagev1.RenameRequest{DiskId: testNilUUID, Epoch: 1, OldParentIno: 1, OldName: []byte("old"), NewParentIno: 1, NewName: long256Bytes},
+			msg:        &storagev1.RenameRequest{DiskId: testNilUUID, Branch: testBranchMain, Epoch: 1, OldParentIno: 1, OldName: []byte("old"), NewParentIno: 1, NewName: long256Bytes},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "rename_old_name_too_long_beats_empty_new_name",
-			msg:        &storagev1.RenameRequest{DiskId: testValidDiskID, Epoch: 1, OldParentIno: 1, OldName: long256Bytes, NewParentIno: 1, NewName: []byte{}},
+			msg:        &storagev1.RenameRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, OldParentIno: 1, OldName: long256Bytes, NewParentIno: 1, NewName: []byte{}},
 			wantReason: validator.ReasonNameTooLong,
 		},
 		{
 			name:       "rename_old_name_slash_beats_long_new_name",
-			msg:        &storagev1.RenameRequest{DiskId: testValidDiskID, Epoch: 1, OldParentIno: 1, OldName: []byte("a/b"), NewParentIno: 1, NewName: long256Bytes},
+			msg:        &storagev1.RenameRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, OldParentIno: 1, OldName: []byte("a/b"), NewParentIno: 1, NewName: long256Bytes},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "symlink_zero_epoch_beats_long_target",
-			msg:        &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 0, ParentIno: 1, Name: []byte("link"), Target: bytes.Repeat([]byte("t"), 4096)},
+			msg:        &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 0, ParentIno: 1, Name: []byte("link"), Target: bytes.Repeat([]byte("t"), 4096)},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
 			name:       "symlink_long_name_beats_empty_target",
-			msg:        &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: long256Bytes, Target: []byte{}},
+			msg:        &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: long256Bytes, Target: []byte{}},
 			wantReason: validator.ReasonNameTooLong,
 		},
 		{
 			name:       "symlink_name_slash_beats_long_target",
-			msg:        &storagev1.SymlinkRequest{DiskId: testValidDiskID, Epoch: 1, ParentIno: 1, Name: []byte("a/b"), Target: bytes.Repeat([]byte("t"), 4096)},
+			msg:        &storagev1.SymlinkRequest{DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1, ParentIno: 1, Name: []byte("a/b"), Target: bytes.Repeat([]byte("t"), 4096)},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 		{
-			name:       "fork_disk_bad_source_beats_long_name",
-			msg:        &storagev1.ForkDiskRequest{SourceDiskId: "bad", Name: long256Str},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "fork_disk_zero_max_bytes_beats_long_name",
-			msg:        &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: long256Str, MaxBytes: new(uint64(0))},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "fork_disk_name_max_len_beats_nul_byte",
-			msg:        &storagev1.ForkDiskRequest{SourceDiskId: testValidDiskID, Name: strings.Repeat("a", 255) + "\x00"},
-			wantReason: validator.ReasonNameTooLong,
-		},
-		{
-			name:       "disk_nil_parent_beats_long_name",
-			msg:        &storagev1.Disk{DiskId: testValidDiskID, Name: long256Str, RootIno: 1, MaxBytes: 1024, CreatedAt: now, UpdatedAt: now, ParentDiskId: new(testNilUUID)},
+			name:       "disk_empty_default_branch_beats_long_name",
+			msg:        &storagev1.Disk{DiskId: testValidDiskID, Name: long256Str, DefaultBranch: "", MaxBytes: 1024, CreatedAt: now, UpdatedAt: now},
 			wantReason: validator.ReasonInvalidArgument,
 		},
 	}
@@ -563,6 +670,7 @@ func TestStorageValidator_GivenExternalProtovalidateError_WhenTranslated_ThenMap
 
 	rawErr := rawValidator.Validate(&storagev1.SetXattrRequest{
 		DiskId: testValidDiskID,
+		Branch: testBranchMain,
 		Epoch:  1,
 		Ino:    1,
 		Name:   bytes.Repeat([]byte("a"), 256),
@@ -585,7 +693,7 @@ func TestStorageValidator_GivenNilOrNonValidationError_WhenTranslated_ThenReturn
 	require.False(t, ok)
 	require.Empty(t, plainReason)
 	unknownStatus := validator.ToStatus(plainErr)
-	require.Equal(t, codes.Unknown, unknownStatus.Code(), "非校验错误码 want=%s, got=%s", codes.Unknown, unknownStatus.Code())
+	require.Equal(t, codes.Unknown, unknownStatus.Code(), "non-validation error code want=%s, got=%s", codes.Unknown, unknownStatus.Code())
 
 	nilReason, ok := validator.ErrnoReason(nil)
 	require.False(t, ok)
@@ -601,6 +709,7 @@ func TestStorageValidator_GivenCodecRoundTrippedRequest_WhenValidated_ThenPreser
 
 	req := &storagev1.LookupRequest{
 		DiskId:    "bad-uuid",
+		Branch:    testBranchMain,
 		ParentIno: 1,
 		Name:      bytes.Repeat([]byte("n"), 256),
 	}
@@ -621,7 +730,6 @@ func TestStorageValidator_GivenCodecRoundTrippedRequest_WhenValidated_ThenPreser
 }
 
 func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucceeds(t *testing.T) {
-
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err, "create storage validator: want nil error, got=%v", err)
 
@@ -654,6 +762,7 @@ func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucc
 				Gid:       0,
 				Exclusive: false,
 				DiskId:    testValidDiskID,
+				Branch:    testBranchMain,
 				Epoch:     1,
 			},
 		},
@@ -666,6 +775,7 @@ func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucc
 				Gid:       1000,
 				Exclusive: true,
 				DiskId:    testValidDiskID,
+				Branch:    testBranchMain,
 				Epoch:     1,
 			},
 		},
@@ -678,6 +788,7 @@ func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucc
 				Gid:       math.MaxInt32,
 				Exclusive: false,
 				DiskId:    testValidDiskID,
+				Branch:    testBranchMain,
 				Epoch:     math.MaxInt64,
 			},
 		},
@@ -706,7 +817,6 @@ func TestStorageValidator_GivenValidCreateTmpfileMessages_WhenValidated_ThenSucc
 }
 
 func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenReturnsEINVAL(t *testing.T) {
-
 	v, err := validator.NewStorageValidator()
 	require.NoError(t, err, "create storage validator: want nil error, got=%v", err)
 
@@ -730,39 +840,43 @@ func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenRe
 	cases := []invalidCase{
 		{
 			name: "request_empty_disk_id",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: "", Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: "", Branch: testBranchMain, Epoch: 1},
 		},
 		{
 			name: "request_malformed_disk_id",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: "not-a-uuid", Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: "not-a-uuid", Branch: testBranchMain, Epoch: 1},
 		},
 		{
 			name: "request_nil_disk_id",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testNilUUID, Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testNilUUID, Branch: testBranchMain, Epoch: 1},
+		},
+		{
+			name: "request_empty_branch",
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Branch: "", Epoch: 1},
 		},
 		{
 			name: "request_epoch_zero",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Epoch: 0},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 0},
 		},
 		{
 			name: "request_epoch_over_max_int64",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Epoch: testOverMaxInt64},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, DiskId: testValidDiskID, Branch: testBranchMain, Epoch: testOverMaxInt64},
 		},
 		{
 			name: "request_parent_ino_zero",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 0, Mode: 0o600, DiskId: testValidDiskID, Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 0, Mode: 0o600, DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1},
 		},
 		{
 			name: "request_parent_ino_over_max_int64",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: testOverMaxInt64, Mode: 0o600, DiskId: testValidDiskID, Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: testOverMaxInt64, Mode: 0o600, DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1},
 		},
 		{
 			name: "request_uid_over_max_int32",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, Uid: math.MaxInt32 + 1, DiskId: testValidDiskID, Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, Uid: math.MaxInt32 + 1, DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1},
 		},
 		{
 			name: "request_gid_over_max_int32",
-			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, Gid: math.MaxInt32 + 1, DiskId: testValidDiskID, Epoch: 1},
+			msg:  &storagev1.CreateTmpfileRequest{ParentIno: 1, Mode: 0o600, Gid: math.MaxInt32 + 1, DiskId: testValidDiskID, Branch: testBranchMain, Epoch: 1},
 		},
 		{
 			name: "response_missing_inode",
@@ -783,95 +897,4 @@ func TestStorageValidator_GivenInvalidCreateTmpfileMessages_WhenValidated_ThenRe
 		require.Error(t, gotErr, "case=%s: want validation failure with reason %s, got nil", tc.name, validator.ReasonInvalidArgument)
 		assertValidationReason(t, gotErr, validator.ReasonInvalidArgument)
 	})
-}
-
-func TestStorageValidator_GivenSnapshotMessages_WhenValidated_ThenEnforcesReasonsAndPriority(t *testing.T) {
-	v, err := validator.NewStorageValidator()
-	require.NoError(t, err)
-
-	now := timestamppb.Now()
-	validSnap := &storagev1.Snapshot{
-		SnapshotId:   testParentDiskID,
-		SourceDiskId: testValidDiskID,
-		Kind:         storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL,
-		Name:         "before-upgrade",
-		CreatedAt:    now,
-	}
-
-	validCases := []struct {
-		name string
-		msg  proto.Message
-	}{
-		{name: "create_snapshot_unnamed", msg: &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID}},
-		{name: "create_snapshot_max_name", msg: &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID, Name: strings.Repeat("a", testMaxNameBytes)}},
-		{name: "create_snapshot_resp", msg: &storagev1.CreateSnapshotResponse{Snapshot: validSnap}},
-		{name: "list_snapshots_req", msg: &storagev1.ListSnapshotsRequest{DiskId: testValidDiskID, Kind: storagev1.SnapshotKind_SNAPSHOT_KIND_MANUAL, PageSize: 1000}},
-		{name: "list_snapshots_resp", msg: &storagev1.ListSnapshotsResponse{Snapshots: []*storagev1.Snapshot{validSnap}}},
-		{name: "delete_snapshot_req", msg: &storagev1.DeleteSnapshotRequest{DiskId: testValidDiskID, SnapshotId: testParentDiskID}},
-		{name: "delete_snapshot_resp", msg: &storagev1.DeleteSnapshotResponse{}},
-		{name: "prune_snapshots_req", msg: &storagev1.PruneSnapshotsRequest{DiskId: testValidDiskID, DryRun: true}},
-		{name: "prune_snapshots_resp", msg: &storagev1.PruneSnapshotsResponse{Snapshots: []*storagev1.Snapshot{validSnap}, ReclaimedCount: 1, DryRun: true}},
-	}
-	for _, tc := range validCases {
-		t.Run("valid/"+tc.name, func(t *testing.T) {
-			require.NoError(t, v.Validate(tc.msg))
-		})
-	}
-
-	invalidCases := []struct {
-		name       string
-		msg        proto.Message
-		wantReason string
-	}{
-		{
-			name:       "create_snapshot_overlong_name",
-			msg:        &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID, Name: strings.Repeat("a", testMaxNameBytes+1)},
-			wantReason: validator.ReasonNameTooLong,
-		},
-		{
-			name:       "create_snapshot_bad_disk_id_overrides_overlong_name",
-			msg:        &storagev1.CreateSnapshotRequest{DiskId: testNilUUID, Name: strings.Repeat("a", testMaxNameBytes+1)},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "create_snapshot_nul_name",
-			msg:        &storagev1.CreateSnapshotRequest{DiskId: testValidDiskID, Name: "bad\x00name"},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "create_snapshot_resp_missing_snapshot",
-			msg:        &storagev1.CreateSnapshotResponse{},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "list_snapshots_nil_disk_id",
-			msg:        &storagev1.ListSnapshotsRequest{DiskId: testNilUUID},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "list_snapshots_invalid_kind",
-			msg:        &storagev1.ListSnapshotsRequest{DiskId: testValidDiskID, Kind: storagev1.SnapshotKind(99)},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "list_snapshots_page_size_over_1000",
-			msg:        &storagev1.ListSnapshotsRequest{DiskId: testValidDiskID, PageSize: 1001},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "delete_snapshot_nil_snapshot_id",
-			msg:        &storagev1.DeleteSnapshotRequest{DiskId: testValidDiskID, SnapshotId: testNilUUID},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-		{
-			name:       "prune_snapshots_nil_disk_id",
-			msg:        &storagev1.PruneSnapshotsRequest{DiskId: testNilUUID},
-			wantReason: validator.ReasonInvalidArgument,
-		},
-	}
-	for _, tc := range invalidCases {
-		t.Run("invalid/"+tc.name, func(t *testing.T) {
-			assertValidationReason(t, v.Validate(tc.msg), tc.wantReason)
-		})
-	}
 }

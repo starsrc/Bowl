@@ -127,12 +127,56 @@ func readMountPoints() ([]mountPoint, error) {
 	return parseMountPointsFromReader(file)
 }
 
+func parseBowlMountSource(source string) (diskID, branch string, ok bool) {
+	rest, found := strings.CutPrefix(source, "bowl:")
+	if !found || rest == "" {
+		return "", "", false
+	}
+	if before, after, hasSep := strings.Cut(rest, "@"); hasSep {
+		return before, after, true
+	}
+	return rest, "", true
+}
+
 func findDiskMountpoint(points []mountPoint, diskID string) DiskMountInfo {
-	expectedSource := "bowl:" + strings.TrimSpace(diskID)
+	targetDiskID := strings.TrimSpace(diskID)
 	var found DiskMountInfo
 	for _, point := range points {
-		if !strings.EqualFold(point.source, expectedSource) {
+		parsedDiskID, _, ok := parseBowlMountSource(point.source)
+		if !ok || !strings.EqualFold(parsedDiskID, targetDiskID) {
 			continue
+		}
+		if !found.Mounted || !point.readOnly {
+			found = DiskMountInfo{
+				Mountpoint: point.path,
+				Mounted:    true,
+				ReadOnly:   point.readOnly,
+			}
+			if !point.readOnly {
+				return found
+			}
+		}
+	}
+	return found
+}
+
+func findBranchMountpoint(points []mountPoint, diskID, branch string) DiskMountInfo {
+	targetDiskID := strings.TrimSpace(diskID)
+	var found DiskMountInfo
+	for _, point := range points {
+		parsedDiskID, parsedBranch, ok := parseBowlMountSource(point.source)
+		if !ok || !strings.EqualFold(parsedDiskID, targetDiskID) {
+			continue
+		}
+		if parsedBranch != "" {
+			if parsedBranch != branch {
+				continue
+			}
+		} else {
+			meta, hasMeta := findMountMeta(point.path)
+			if !hasMeta || meta.Branch != branch {
+				continue
+			}
 		}
 		if !found.Mounted || !point.readOnly {
 			found = DiskMountInfo{
@@ -261,4 +305,12 @@ func FindDiskMountpoint(diskID string) (DiskMountInfo, error) {
 		return DiskMountInfo{}, err
 	}
 	return findDiskMountpoint(points, diskID), nil
+}
+
+func FindBranchMountpoint(diskID, branch string) (DiskMountInfo, error) {
+	points, err := readMountPoints()
+	if err != nil {
+		return DiskMountInfo{}, err
+	}
+	return findBranchMountpoint(points, diskID, branch), nil
 }

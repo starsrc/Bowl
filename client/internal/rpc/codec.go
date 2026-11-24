@@ -109,6 +109,9 @@ func writeRequestWireSize(msg *storagev1.WriteRequest) int {
 	if msg.Epoch != 0 {
 		n += 1 + protowire.SizeVarint(msg.Epoch)
 	}
+	if msg.Branch != "" {
+		n += 1 + protowire.SizeBytes(len(msg.Branch))
+	}
 	return n
 }
 
@@ -119,7 +122,7 @@ func marshalAppendWriteRequest(dst []byte, msg *storagev1.WriteRequest) ([]byte,
 		}
 		return dst, nil
 	}
-	if !utf8.ValidString(msg.DiskId) {
+	if !utf8.ValidString(msg.DiskId) || !utf8.ValidString(msg.Branch) {
 		return proto.MarshalOptions{}.MarshalAppend(dst, msg)
 	}
 
@@ -159,6 +162,10 @@ func marshalAppendWriteRequest(dst []byte, msg *storagev1.WriteRequest) ([]byte,
 	if msg.Epoch != 0 {
 		dst = protowire.AppendTag(dst, 6, protowire.VarintType)
 		dst = protowire.AppendVarint(dst, msg.Epoch)
+	}
+	if msg.Branch != "" {
+		dst = protowire.AppendTag(dst, 7, protowire.BytesType)
+		dst = protowire.AppendString(dst, msg.Branch)
 	}
 	return dst, nil
 }

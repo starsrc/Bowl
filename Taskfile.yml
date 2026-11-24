@@ -179,15 +179,3 @@ tasks:
     desc: "打印 storage 服务的 goose 迁移状态 (Status)"
     cmds:
       - goose -dir {{.STORAGE_MIGRATIONS_DIR}} postgres "{{.STORAGE_DB_DSN}}" status {{.CLI_ARGS}}
-
-  sqlc:storage:generate:
-    desc: "Generate sqlc code for storage service"
-    dir: services/storage
-    cmds:
-      - sqlc generate {{.CLI_ARGS}}
-
-  sqlc:generate:
-    desc: "Generate sqlc code across all services"
-    cmds:
-      - task: sqlc:storage:generate
-        vars: { CLI_ARGS: '{{.CLI_ARGS}}' }

@@ -6,34 +6,32 @@ import (
 	"connectrpc.com/connect"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/services/storage/internal/store"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
 func (s *Server) Link(ctx context.Context, req *connect.Request[storagev1.LinkRequest]) (*connect.Response[storagev1.LinkResponse], error) {
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.Link(ctx, store.LinkReq{
-		Ino:          req.Msg.GetIno(),
-		NewParentIno: req.Msg.GetNewParentIno(),
-		NewName:      req.Msg.GetNewName(),
-		Epoch:        req.Msg.GetEpoch(),
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var lErr error
+		inode, lErr = ds.Link(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno(), req.Msg.GetNewParentIno(), string(req.Msg.GetNewName()))
+		return lErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
 	return connect.NewResponse(&storagev1.LinkResponse{
-		Inode:               toProtoInode(&attr),
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		Inode:               toProtoInode(inode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -41,14 +39,14 @@ func (s *Server) Unlink(ctx context.Context, req *connect.Request[storagev1.Unli
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.Unlink(ctx, req.Msg.GetParentIno(), req.Msg.GetName(), req.Msg.GetOpenInClient(), req.Msg.GetEpoch()); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.Unlink(epochCtx, req.Msg.GetBranch(), req.Msg.GetParentIno(), string(req.Msg.GetName()), req.Msg.GetOpenInClient())
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -59,14 +57,14 @@ func (s *Server) Rmdir(ctx context.Context, req *connect.Request[storagev1.Rmdir
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.Rmdir(ctx, req.Msg.GetParentIno(), req.Msg.GetName(), req.Msg.GetEpoch()); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.Rmdir(epochCtx, req.Msg.GetBranch(), req.Msg.GetParentIno(), string(req.Msg.GetName()))
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -77,23 +75,21 @@ func (s *Server) Rename(ctx context.Context, req *connect.Request[storagev1.Rena
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	err = actor.Rename(ctx, store.RenameReq{
-		OldParentIno:     req.Msg.GetOldParentIno(),
-		OldName:          req.Msg.GetOldName(),
-		NewParentIno:     req.Msg.GetNewParentIno(),
-		NewName:          req.Msg.GetNewName(),
-		Flags:            req.Msg.GetFlags(),
-		TargetOpenHandle: req.Msg.GetTargetOpenInClient(),
-		Epoch:            req.Msg.GetEpoch(),
-	})
-	if err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.Rename(epochCtx, req.Msg.GetBranch(), engine.RenameReq{
+			OldParentIno:       req.Msg.GetOldParentIno(),
+			OldName:            string(req.Msg.GetOldName()),
+			NewParentIno:       req.Msg.GetNewParentIno(),
+			NewName:            string(req.Msg.GetNewName()),
+			Flags:              req.Msg.GetFlags(),
+			TargetOpenInClient: req.Msg.GetTargetOpenInClient(),
+		})
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -104,14 +100,14 @@ func (s *Server) SetXattr(ctx context.Context, req *connect.Request[storagev1.Se
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.SetXattr(ctx, req.Msg.GetIno(), req.Msg.GetName(), req.Msg.GetValue(), req.Msg.GetFlags(), req.Msg.GetEpoch()); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.SetXattr(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno(), string(req.Msg.GetName()), req.Msg.GetValue(), req.Msg.GetFlags())
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -119,14 +115,16 @@ func (s *Server) SetXattr(ctx context.Context, req *connect.Request[storagev1.Se
 }
 
 func (s *Server) GetXattr(ctx context.Context, req *connect.Request[storagev1.GetXattrRequest]) (*connect.Response[storagev1.GetXattrResponse], error) {
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	val, err := actor.GetXattr(ctx, req.Msg.GetIno(), req.Msg.GetName())
+	var val []byte
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var gErr error
+		val, gErr = ds.GetXattr(ctx, req.Msg.GetBranch(), req.Msg.GetIno(), string(req.Msg.GetName()))
+		return gErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -137,20 +135,27 @@ func (s *Server) GetXattr(ctx context.Context, req *connect.Request[storagev1.Ge
 }
 
 func (s *Server) ListXattr(ctx context.Context, req *connect.Request[storagev1.ListXattrRequest]) (*connect.Response[storagev1.ListXattrResponse], error) {
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	names, err := actor.ListXattr(ctx, req.Msg.GetIno())
+	var names []string
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var lErr error
+		names, lErr = ds.ListXattr(ctx, req.Msg.GetBranch(), req.Msg.GetIno())
+		return lErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
+	out := make([][]byte, len(names))
+	for i, n := range names {
+		out[i] = []byte(n)
+	}
+
 	return connect.NewResponse(&storagev1.ListXattrResponse{
-		Names: names,
+		Names: out,
 	}), nil
 }
 
@@ -158,14 +163,14 @@ func (s *Server) RemoveXattr(ctx context.Context, req *connect.Request[storagev1
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.RemoveXattr(ctx, req.Msg.GetIno(), req.Msg.GetName(), req.Msg.GetEpoch()); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.RemoveXattr(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno(), string(req.Msg.GetName()))
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -176,14 +181,14 @@ func (s *Server) ReclaimOrphan(ctx context.Context, req *connect.Request[storage
 	if err := validateWriteEpoch(req.Msg.GetEpoch()); err != nil {
 		return nil, toConnectError(err)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.GetDiskId())
+	diskID, err := parseRequiredUUID(req.Msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.PurgeOrphanInode(ctx, req.Msg.GetIno(), req.Msg.GetEpoch()); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.GetEpoch())
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.PurgeOrphanInode(epochCtx, req.Msg.GetBranch(), req.Msg.GetIno())
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.ReclaimOrphanResponse{}), nil

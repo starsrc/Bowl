@@ -234,6 +234,16 @@ func unmarshalWriteRequest(raw []byte, msg *storagev1.WriteRequest) error {
 			}
 			msg.Epoch = v
 			b = b[n:]
+		case 7:
+			if typ != protowire.BytesType {
+				return fallback()
+			}
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 || !utf8.Valid(v) {
+				return fallback()
+			}
+			msg.Branch = string(v)
+			b = b[n:]
 		default:
 			return fallback()
 		}

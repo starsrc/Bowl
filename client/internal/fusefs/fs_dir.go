@@ -78,6 +78,7 @@ func (fs *RawFS) readDirEntries(parentCtx context.Context, cancel <-chan struct{
 			Offset: offset,
 			Limit:  512,
 			DiskId: fs.cfg.DiskID,
+			Branch: fs.cfg.Branch,
 		}))
 		fenced := fs.IsFenced()
 		if !fenced && fs.cache.version() != epoch {
@@ -228,6 +229,7 @@ func (fs *RawFS) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) (status f
 		Fh:       0,
 		Datasync: input.FsyncFlags&1 != 0,
 		DiskId:   fs.cfg.DiskID,
+		Branch:   fs.cfg.Branch,
 		Epoch:    fs.cfg.Epoch,
 	}))
 	if err == nil || connect.CodeOf(err) == connect.CodeUnimplemented {

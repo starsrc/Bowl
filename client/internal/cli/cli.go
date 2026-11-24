@@ -4,11 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/starsrc/bowl/client/internal/version"
 )
+
+const EnvDiskID = "BOWL_DISK"
+
+type rootOptions struct {
+	endpoint string
+	jsonOut  bool
+	diskID   string
+}
 
 type cliExitError struct {
 	code      int
@@ -36,6 +46,41 @@ func runtimeExitErr(err error) error {
 	return &cliExitError{code: 1, err: err}
 }
 
+func resolveDiskScope(flagVal string) (string, error) {
+	raw := strings.TrimSpace(flagVal)
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv(EnvDiskID))
+	}
+	if raw == "" {
+		return "", fmt.Errorf("disk ID is required: pass -d/--disk or set %s", EnvDiskID)
+	}
+	return parseNonNilUUID(raw, "disk-id")
+}
+
+func extractMountDaemonArgs(args []string) []string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "--endpoint" || arg == "-d" || arg == "--disk" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if arg == "mount" {
+			out := make([]string, 0, len(args)-1)
+			out = append(out, args[:i]...)
+			out = append(out, args[i+1:]...)
+			return out
+		}
+		return nil
+	}
+	return nil
+}
+
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
@@ -48,6 +93,8 @@ func newVersionCmd() *cobra.Command {
 }
 
 func newRootCmd(args []string, stdout, stderr io.Writer) *cobra.Command {
+	rootOpts := &rootOptions{}
+
 	rootCmd := &cobra.Command{
 		Use:           "bowl",
 		Short:         "Distributed virtual disk Linux FUSE client",
@@ -66,6 +113,11 @@ func newRootCmd(args []string, stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
+	pflags := rootCmd.PersistentFlags()
+	pflags.StringVar(&rootOpts.endpoint, "endpoint", "", "StorageService base URL, defaults to $BOWL_STORAGE_ENDPOINT or http://127.0.0.1:9000")
+	pflags.BoolVar(&rootOpts.jsonOut, "json", false, "Output result in JSON format")
+	pflags.StringVarP(&rootOpts.diskID, "disk", "d", "", "Target virtual disk UUID, defaults to $BOWL_DISK")
+
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)
 	if args == nil {
@@ -73,17 +125,18 @@ func newRootCmd(args []string, stdout, stderr io.Writer) *cobra.Command {
 	}
 	rootCmd.SetArgs(args)
 
-	var mountArgs []string
-	if len(args) > 0 && args[0] == "mount" {
-		mountArgs = args[1:]
-	}
+	ports := defaultDiskPorts()
+	mountArgs := extractMountDaemonArgs(args)
 
 	rootCmd.AddCommand(
-		newDiskCmd(defaultDiskPorts()),
-		newSnapshotCmd(defaultDiskPorts()),
-		newMountCmd(mountArgs),
+		newDiskCmd(ports, rootOpts),
+		newBranchCmd(ports, rootOpts),
+		newCommitCmd(ports, rootOpts),
+		newLeaseCmd(ports, rootOpts),
+		newDiffCmd(ports, rootOpts),
+		newMountCmd(mountArgs, rootOpts),
 		newUmountCmd(),
-		newStatsCmd(),
+		newStatsCmd(rootOpts),
 		newVersionCmd(),
 	)
 

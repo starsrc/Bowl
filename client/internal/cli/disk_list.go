@@ -21,11 +21,14 @@ type diskListJSON struct {
 }
 
 var diskListSpec = diskSubcommandSpec{
-	use:      "list",
-	short:    "List virtual disks with pagination",
-	args:     cobra.NoArgs,
-	spanName: "cli.disk.list",
-	timeout:  10 * time.Second,
+	use:        "list",
+	aliases:    []string{"ls"},
+	short:      "List virtual disks with pagination",
+	args:       cobra.NoArgs,
+	allowQuiet: true,
+	quietHelp:  "Quiet mode, output only disk IDs one per line",
+	spanName:   "cli.disk.list",
+	timeout:    10 * time.Second,
 	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
 		a := &diskListAdapter{}
 		flags := cmd.Flags()
@@ -41,7 +44,7 @@ type diskListAdapter struct {
 	pageSize  uint32
 }
 
-func (a *diskListAdapter) finalize(cmd *cobra.Command, _ []string) (bool, error) {
+func (a *diskListAdapter) finalize(cmd *cobra.Command, _ string, _ []string) (bool, error) {
 	if cmd.Flags().Changed("limit") {
 		if a.limit < 1 || a.limit > 1000 {
 			return false, fmt.Errorf("invalid --limit %d: must be an integer in [1, 1000]", a.limit)
@@ -74,11 +77,16 @@ func (a *diskListAdapter) invoke(ctx context.Context, client storagev1connect.St
 	nextPageToken := resp.Msg.GetNextPageToken()
 
 	items := make([]diskJSON, 0, len(disks))
+	ids := make([]string, 0, len(disks))
 	for _, d := range disks {
-		items = append(items, toDiskJSON(d))
+		dj := toDiskJSON(d)
+		items = append(items, dj)
+		ids = append(ids, dj.DiskID)
 	}
 
 	return diskOutcome{
+		quietLines:    ids,
+		hasQuietLines: true,
 		jsonPayload: diskListJSON{
 			Disks:         items,
 			NextPageToken: nextPageToken,
@@ -91,15 +99,15 @@ func (a *diskListAdapter) invoke(ctx context.Context, client storagev1connect.St
 
 func renderDiskListTable(w io.Writer, items []diskJSON, nextPageToken string) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "DISK ID\tNAME\tUSED\tMAX\tUSAGE%\tINODES\tCREATED AT")
+	fmt.Fprintln(tw, "DISK ID\tNAME\tDEFAULT BRANCH\tUSED\tMAX\tUSAGE%\tCREATED AT")
 	for _, dj := range items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f%%\t%d\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.2f%%\t%s\n",
 			dj.DiskID,
 			dj.Name,
+			dj.DefaultBranch,
 			FormatSize(dj.UsedBytes),
 			FormatSize(dj.MaxBytes),
 			diskUsagePct(dj.UsedBytes, dj.MaxBytes),
-			dj.UsedInodes,
 			dj.CreatedAt,
 		)
 	}

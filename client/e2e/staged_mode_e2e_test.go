@@ -219,15 +219,23 @@ func (p *controllableStorageProxy) FsyncDirCalls() int64    { return p.fsyncDirC
 
 func readMountAdminAddr(t *testing.T, mountpoint string) string {
 	t.Helper()
-	data, err := os.ReadFile(mountMetaPath(t, mountpoint))
-	require.NoError(t, err)
-	var meta struct {
-		AdminAddr string `json:"admin_addr"`
-	}
-	require.NoError(t, json.Unmarshal(data, &meta))
-	require.NotEmpty(t, meta.AdminAddr)
-	require.NotEqual(t, "off", meta.AdminAddr)
-	return meta.AdminAddr
+	path := mountMetaPath(t, mountpoint)
+	var adminAddr string
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var meta struct {
+			AdminAddr string `json:"admin_addr"`
+		}
+		if json.Unmarshal(data, &meta) != nil || meta.AdminAddr == "" || meta.AdminAddr == "off" {
+			return false
+		}
+		adminAddr = meta.AdminAddr
+		return true
+	}, 3*time.Second, 10*time.Millisecond, "mount metadata file %s did not appear with valid admin_addr", path)
+	return adminAddr
 }
 
 func tryFetchDebugStats(adminAddr string) (fusefs.Snapshot, error) {
@@ -566,7 +574,7 @@ func requireDiskUsageUnchanged(t *testing.T, client storagev1connect.StorageServ
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
+	resp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Branch: "main", Ino: 1}))
 	require.NoError(t, err)
 	gotBytes := resp.Msg.GetUsedBytes()
 	gotInodes := resp.Msg.GetFiles()
@@ -578,7 +586,7 @@ func fetchDiskUsage(t *testing.T, client storagev1connect.StorageServiceClient, 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
+	resp, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Branch: "main", Ino: 1}))
 	require.NoError(t, err)
 	return resp.Msg.GetUsedBytes(), resp.Msg.GetFiles()
 }
@@ -1286,21 +1294,21 @@ func TestStagedMode_TmpfileXattrIoctlKillprivAndSGID_E2E(t *testing.T) {
 		rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer rpcCancel()
 		immLookup, err := client.Lookup(rpcCtx, connect.NewRequest(&storagev1.LookupRequest{
-			ParentIno: 1, Name: []byte("promoted-imm.bin"), DiskId: diskID,
+			ParentIno: 1, Name: []byte("promoted-imm.bin"), DiskId: diskID, Branch: "main",
 		}))
 		require.NoError(t, err)
 		immCapResp, err := client.GetXattr(rpcCtx, connect.NewRequest(&storagev1.GetXattrRequest{
-			Ino: immLookup.Msg.GetInode().GetIno(), Name: []byte("security.capability"), DiskId: diskID,
+			Ino: immLookup.Msg.GetInode().GetIno(), Name: []byte("security.capability"), DiskId: diskID, Branch: "main",
 		}))
 		require.NoError(t, err)
 		require.Equal(t, capVal, immCapResp.Msg.GetValue())
 
 		appLookup, err := client.Lookup(rpcCtx, connect.NewRequest(&storagev1.LookupRequest{
-			ParentIno: 1, Name: []byte("promoted-app.bin"), DiskId: diskID,
+			ParentIno: 1, Name: []byte("promoted-app.bin"), DiskId: diskID, Branch: "main",
 		}))
 		require.NoError(t, err)
 		_, appCapErr := client.GetXattr(rpcCtx, connect.NewRequest(&storagev1.GetXattrRequest{
-			Ino: appLookup.Msg.GetInode().GetIno(), Name: []byte("security.capability"), DiskId: diskID,
+			Ino: appLookup.Msg.GetInode().GetIno(), Name: []byte("security.capability"), DiskId: diskID, Branch: "main",
 		}))
 		require.Error(t, appCapErr)
 	})

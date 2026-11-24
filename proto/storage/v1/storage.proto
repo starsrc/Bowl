@@ -7,258 +7,160 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/starsrc/bowl/gen/go/storage/v1;storagev1";
 
-// StorageService 提供针对分布式文件系统的元数据操作与 FUSE 协议对接能力。
+// StorageService exposes branch-scoped POSIX metadata/data operations and Git-model disk control APIs.
 service StorageService {
-  // Lookup 执行单级目录项查找。
-  // 根据父目录 Inode 与目标子项名称获取对应的 Inode 元数据及内核缓存时效。
-  // 若父节点或目标子项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // Lookup resolves a single directory entry within a branch.
   rpc Lookup(LookupRequest) returns (LookupResponse);
 
-  // GetAttr 获取指定 Inode 的属性与内核缓存时效。
-  // 遵循 Linux FUSE FUSE_GETATTR 规范，支持已解链但仍打开的孤儿节点 (nlink == 0)。
-  // 若指定 Inode 不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // GetAttr returns inode attributes and FUSE cache timeouts for an inode in a branch.
   rpc GetAttr(GetAttrRequest) returns (GetAttrResponse);
 
-  // SetAttr 修改指定 Inode 的元数据属性（对接 Linux FUSE FUSE_SETATTR 协议）。
-  // 遵循按需部分更新语义。若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)；
-  // 若违反 POSIX 语义（如对目录设置大小），必须返回 gRPC 标准状态码 InvalidArgument 或相应错误。
+  // SetAttr applies partial metadata updates to an inode in a branch.
   rpc SetAttr(SetAttrRequest) returns (SetAttrResponse);
 
-  // Mknod 在指定父目录下创建常规文件或特殊设备节点。
-  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-  // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // Mknod creates a regular file or special node under a parent directory in a branch.
   rpc Mknod(MknodRequest) returns (MknodResponse);
 
-  // Mkdir 在指定父目录下创建子目录。
-  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-  // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // Mkdir creates a subdirectory under a parent directory in a branch.
   rpc Mkdir(MkdirRequest) returns (MkdirResponse);
 
-  // Symlink 在指定父目录下创建指向目标路径的符号链接节点。
-  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-  // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
+  // Symlink creates a symbolic link under a parent directory in a branch.
   rpc Symlink(SymlinkRequest) returns (SymlinkResponse);
 
-  // Readlink 获取符号链接节点指向的目标路径。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若节点存在但非符号链接类型，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // Readlink returns the target path of a symbolic link in a branch.
   rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
 
-  // Link creates a hard link in the target parent directory for an existing non-directory inode.
-  // It promotes a non-exclusive `O_TMPFILE` orphan with `nlink == 0` and `orphan:<ino>` marker `0x03` to `nlink = 1` and deletes the orphan marker atomically.
-  // Link rejects `O_TMPFILE | O_EXCL` orphans with `orphan:<ino>` marker `0x02` and unlinked open-file orphans with marker `0x01`, and returns `NotFound` with POSIX `ENOENT`.
-  // The server returns `AlreadyExists` with POSIX `EEXIST` if the target entry already exists.
-  // The server returns `NotFound` with POSIX `ENOENT` if the parent directory or source inode does not exist.
-  // The server returns `FailedPrecondition` with POSIX `ENOTDIR` if the target parent is not a directory.
-  // The server returns `PermissionDenied` with POSIX `EPERM` if the source inode is a directory.
+  // Link creates a hard link in the target parent directory for an existing non-directory inode in a branch.
   rpc Link(LinkRequest) returns (LinkResponse);
 
-  // Unlink 删除指定父目录下的非目录项（解链）。
-  // 若目标节点为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
-  // 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 对 "." 或 ".."，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // Unlink removes a non-directory entry from a parent directory in a branch.
   rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
 
-  // Rmdir 移除指定父目录下的空目录项。
-  // 若目标节点非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 若目标目录非空，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTEMPTY)。
-  // 若父节点不存在或目标目录项不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 对 "." 返回 InvalidArgument (EINVAL)；对 ".." 返回 FailedPrecondition (ENOTEMPTY)。
+  // Rmdir removes an empty subdirectory entry from a parent directory in a branch.
   rpc Rmdir(RmdirRequest) returns (RmdirResponse);
 
-  // Rename 执行原子文件/目录重命名、移动或双向交换（支持 FUSE_RENAME2 的 RENAME_NOREPLACE 与 RENAME_EXCHANGE）。
-  // 当 flags 为 0 时，执行传统覆盖重命名；若源与目标为同一路径或同一 Inode 的硬链接，执行无副作用短路成功返回。
-  // 当 flags 为 RENAME_NOREPLACE (0x1) 时，禁止覆盖已存在的目标项（包含同一路径或同一 Inode 的不同硬链接），若目标已存在则返回 AlreadyExists (EEXIST)。
-  // 当 flags 为 RENAME_EXCHANGE (0x2) 时，要求源与目标均存在（任一不存在返回 NotFound / ENOENT），原子交换两个目录项的 Inode 绑定并执行双向祖先环检测。
-  // 若传入互斥组合（RENAME_NOREPLACE | RENAME_EXCHANGE）、RENAME_WHITEOUT (0x4) 或未知标志位，返回 InvalidArgument (EINVAL)。
-  // 若源项或父目录不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父目录存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 当 flags 为 0 覆盖目标时：若源为目录而目标为非目录返回 FailedPrecondition (ENOTDIR)；若源为非目录而目标为目录返回 FailedPrecondition (EISDIR)；若源为目录而目标为非空目录返回 FailedPrecondition (ENOTEMPTY)。
-  // 若尝试将目录移动或交换为其自身或子孙目录，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-  // 对 "." 或 ".." 的重命名，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // Rename atomically renames, moves, or exchanges directory entries in a branch.
   rpc Rename(RenameRequest) returns (RenameResponse);
 
-  // Create 在指定父目录下创建常规文件，文件句柄由客户端管理。
-  // 若同名文件或目录项已存在，必须返回 gRPC 标准状态码 AlreadyExists (映射至 POSIX EEXIST)。
-  // 若父节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若父节点存在但非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 仅允许创建常规文件 (mode & S_IFMT 必须为 0 或 S_IFREG)。
+  // Create creates a regular file under a parent directory in a branch.
   rpc Create(CreateRequest) returns (CreateResponse);
 
-  // CreateTmpfile validates that the mount is writable and `parent_ino` refers to a live directory, then allocates an anonymous regular-file inode with `nlink == 0` and no directory entry.
-  // If the parent directory carries the `S_ISGID` bit, the allocated inode inherits the parent directory `gid`.
-  // When `exclusive` is true, matching `O_TMPFILE | O_EXCL`, the server records `orphan:<ino>` marker `0x02` so `Link` rejects promotion.
-  // When `exclusive` is false, the server records `orphan:<ino>` marker `0x03` so `Link` can later promote the inode to `nlink = 1`.
-  // The server returns `NotFound` with POSIX `ENOENT` if the disk or live parent directory does not exist.
-  // The server returns `FailedPrecondition` with POSIX `ENOTDIR` if `parent_ino` refers to a non-directory inode.
-  // The server returns `FailedPrecondition` with POSIX `EBUSY` if `epoch` is stale.
-  // The server returns `PermissionDenied` with POSIX `EPERM` if the disk is mounted read-only.
-  // The server returns `ResourceExhausted` with POSIX `ENOSPC` if disk inode, byte, or write-sequence limits are reached.
-  // The server returns `InvalidArgument` with POSIX `EINVAL` if `parent_ino`, `mode`, `uid`, `gid`, `disk_id`, or `epoch` is invalid.
+  // CreateTmpfile allocates an anonymous regular-file inode with nlink == 0 in a branch.
   rpc CreateTmpfile(CreateTmpfileRequest) returns (CreateTmpfileResponse);
 
-  // Read 读取指定文件的数据块内容（对接 Linux FUSE FUSE_READ 协议）。
-  // 遵循 POSIX pread(2) 语义，支持最大 4 MiB 单次读取。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  // Read reads up to 4 MiB of file content at an offset in a branch.
   rpc Read(ReadRequest) returns (ReadResponse);
 
-  // Write 向指定文件写入数据块内容（对接 Linux FUSE FUSE_WRITE 协议）。
-  // 遵循 POSIX pwrite(2) 语义，支持最大 4 MiB 单次写入。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若目标为目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EISDIR)。
+  // Write writes up to 4 MiB of file content at an offset in a branch.
   rpc Write(WriteRequest) returns (WriteResponse);
 
-  // Fsync 同步并持久化文件节点与句柄关联的状态。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
+  // Fsync flushes durable state for a file inode in a branch.
   rpc Fsync(FsyncRequest) returns (FsyncResponse);
 
-  // FsyncDir 同步并持久化目录节点与目录句柄关联的状态（对接 Linux FUSE FUSE_FSYNCDIR = 30 协议）。
-  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 支持对处于 rmdir-whilst-open 状态的孤儿目录 (nlink == 0) 幂等同步成功。
+  // FsyncDir flushes durable state for a directory inode in a branch.
   rpc FsyncDir(FsyncDirRequest) returns (FsyncDirResponse);
 
-  // ReadDir 读取指定目录的子项流（基本条目）。
-  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+  // ReadDir returns basic directory entries for a directory in a branch.
   rpc ReadDir(ReadDirRequest) returns (ReadDirResponse);
 
-  // ReadDirPlus 读取指定目录的子项流并附带完整 Inode 属性与缓存时效（扩展条目）。
-  // 若目标非目录，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX ENOTDIR)。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 处于 rmdir-whilst-open 状态的孤儿目录直接返回空列表。
+  // ReadDirPlus returns directory entries with inline inode attributes and cache timeouts in a branch.
   rpc ReadDirPlus(ReadDirPlusRequest) returns (ReadDirPlusResponse);
 
-  // Fallocate 为常规文件预分配物理空间或打洞去分配空间（对接 Linux FUSE FUSE_FALLOCATE 协议）。
-  // 遵循 Linux fallocate(2) 语义，支持空间预分配、保留大小分配及打洞释放空间。
+  // Fallocate preallocates or deallocates byte ranges for a regular file in a branch.
   rpc Fallocate(FallocateRequest) returns (FallocateResponse);
 
-  // SetXattr 设置指定 Inode 的扩展属性（对接 Linux FUSE FUSE_SETXATTR 协议）。
-  // 遵循 POSIX setxattr(2) 语义，支持 XATTR_CREATE (0x1) 与 XATTR_REPLACE (0x2) 标志位状态机。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，必须返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
-  // 若违反标志位约束，分别返回 AlreadyExists (EEXIST) 或 NotFound (ENODATA)。
-  // 若新增属性超出单节点 65536 字节配额，必须返回 gRPC 标准状态码 ResourceExhausted (映射至 POSIX ENOSPC)。
+  // SetXattr sets an extended attribute on an inode in a branch.
   rpc SetXattr(SetXattrRequest) returns (SetXattrResponse);
 
-  // GetXattr 获取指定 Inode 的扩展属性值（对接 Linux FUSE FUSE_GETXATTR 协议）。
-  // 遵循 POSIX getxattr(2) 语义。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-  // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
+  // GetXattr reads an extended attribute value from an inode in a branch.
   rpc GetXattr(GetXattrRequest) returns (GetXattrResponse);
 
-  // ListXattr 列出指定 Inode 的全部扩展属性名称列表（对接 Linux FUSE FUSE_LISTXATTR 协议）。
-  // 遵循 POSIX listxattr(2) 语义。
-  // 属性名称按原始字节序升序（BYTEA ASC）返回；不按调用方过滤（对齐 Linux 内核 FUSE 行为）。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若无属性，返回空列表。
+  // ListXattr lists extended attribute names on an inode in a branch.
   rpc ListXattr(ListXattrRequest) returns (ListXattrResponse);
 
-  // RemoveXattr 移除指定 Inode 的扩展属性（对接 Linux FUSE FUSE_REMOVEXATTR 协议）。
-  // 遵循 POSIX removexattr(2) 语义。
-  // 若节点不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若扩展属性不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENODATA)。
-  // 若对 user.* 属性操作非常规文件、非目录或非套接字节点，直接返回 gRPC 标准状态码 PermissionDenied (映射至 POSIX EPERM)。
+  // RemoveXattr deletes an extended attribute from an inode in a branch.
   rpc RemoveXattr(RemoveXattrRequest) returns (RemoveXattrResponse);
 
-  // MountDisk 执行单盘挂载握手。
-  // 可写挂载 (read_only = false) 在不存在未过期可写租约或显式指定 force = true 时原子递增并持久化 WriterEpoch，清理残留孤儿节点并返回新世代号与根 Inode；
-  // 若已存在未过期可写租约且 force = false，返回 Aborted (映射至 POSIX EBUSY) 且不推进 WriterEpoch。
-  // 只读挂载 (read_only = true) 校验目标磁盘存在并返回 epoch = 0 与根 Inode。
-  rpc MountDisk(MountDiskRequest) returns (MountDiskResponse);
-
-  // RenewMount 为已建立的在线挂载软租约执行周期续期。
-  rpc RenewMount(RenewMountRequest) returns (RenewMountResponse);
-
-  // UnmountDisk 幂等释放指定的在线挂载软租约。
-  rpc UnmountDisk(UnmountDiskRequest) returns (UnmountDiskResponse);
-
-  // ListMounts returns all unexpired mount leases for a disk sorted by mount_id ascending.
-  rpc ListMounts(ListMountsRequest) returns (ListMountsResponse);
-
-  // EvictMounts removes one or all active mount leases for a disk and fences writers when needed.
-  rpc EvictMounts(EvictMountsRequest) returns (EvictMountsResponse);
-
-  // CreateDisk 创建新的虚拟磁盘实体并原子创建其根目录 Inode。
-  // 分配全局唯一 UUIDv7 磁盘标识符与初始配额上限，创建根目录 Inode 并将其与磁盘一对一强绑定。
-  // 若指定参数非法（如 name 超过 255 字节或包含 '\x00'，或 max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL) 或相应错误。
-  rpc CreateDisk(CreateDiskRequest) returns (CreateDiskResponse);
-
-  // GetDisk 查询指定 disk_id 的虚拟磁盘实体详情与配额状态。
-  // 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-  rpc GetDisk(GetDiskRequest) returns (GetDiskResponse);
-
-  // ListDisks 分页列出系统中的虚拟磁盘实体（按创建时间倒序排列）。
-  rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
-
-  // UpdateDisk 更新指定虚拟磁盘的名称或容量配额上限。
-  // 支持按需单独或同时更新 name 与 max_bytes。
-  // 若新 max_bytes 小于当前已用空间 (used_bytes)，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
-  // 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若参数校验不通过（如 disk_id 格式非法、name 与 max_bytes 均未传、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL)。
-  rpc UpdateDisk(UpdateDiskRequest) returns (UpdateDiskResponse);
-
-  // DeleteDisk 删除指定虚拟磁盘实体（默认仅删除目标盘，可选 recursive=true 递归删除全部派生后代盘）。
-  // 若目标磁盘（或递归子树中任意磁盘）存在活跃挂载租约，返回 Aborted (EBUSY) 且原子不删任何磁盘。
-  // 若目标磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若 disk_id 格式非法或为全零 Nil UUID，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
-  rpc DeleteDisk(DeleteDiskRequest) returns (DeleteDiskResponse);
-
-  // ForkDisk 基于指定源虚拟磁盘当前已提交状态零拷贝派生新的虚拟磁盘实体。
-  // 自动将源磁盘当前状态固化为不可变共同祖先快照，并在不中断源磁盘在线读写的前提下克隆出独立子磁盘。
-  // 若源磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若显式指定的 max_bytes 小于孤儿节点净化后的初始已用空间，必须返回 gRPC 标准状态码 FailedPrecondition (映射至 POSIX EINVAL 缩容保护)。
-  // 若参数校验不通过（如 source_disk_id 格式非法或为全零 Nil UUID、name 超过 255 字节或包含 '\x00'、max_bytes 为 0/超出 int64 最大值），必须返回 InvalidArgument (映射至 POSIX EINVAL 或 ENAMETOOLONG)。
-  rpc ForkDisk(ForkDiskRequest) returns (ForkDiskResponse);
-
-  // StatFS 查询指定 Inode 所属虚拟磁盘的字节容量与 POSIX 4096 字节块统计信息（对接 Linux FUSE FUSE_STATFS = 17 协议）。
-  // 接收目标节点的 uint64 ino，查询所属 Disk 配额并返回 4096 字节块及已用 Inode 统计信息。
-  // 若目标 Inode 或其所属虚拟磁盘不存在，必须返回 gRPC 标准状态码 NotFound (映射至 POSIX ENOENT)。
-  // 若 ino 为 0 或超出 int64 正数最大值，必须返回 gRPC 标准状态码 InvalidArgument (映射至 POSIX EINVAL)。
+  // StatFS returns disk quota and 4096-byte block statistics for a branch.
   rpc StatFS(StatFSRequest) returns (StatFSResponse);
 
-  // ReclaimOrphan 回收最后一个本地句柄关闭的孤儿节点。
+  // ReclaimOrphan reclaims an orphan inode whose last client handle has closed in a branch.
   rpc ReclaimOrphan(ReclaimOrphanRequest) returns (ReclaimOrphanResponse);
 
-  // DiffDisk 计算源虚拟磁盘相对最近共同祖先与目标虚拟磁盘之间的差异与冲突列表。
-  rpc DiffDisk(DiffDiskRequest) returns (DiffDiskResponse);
+  // MountBranch acquires a read-only or fenced read-write mount lease on a branch.
+  rpc MountBranch(MountBranchRequest) returns (MountBranchResponse);
 
-  // ReadSnapshotNode 读取指定不可变快照中某个节点的元数据与文件内容切片或符号链接目标。
-  rpc ReadSnapshotNode(ReadSnapshotNodeRequest) returns (ReadSnapshotNodeResponse);
+  // RenewMount extends an active mount lease on a branch.
+  rpc RenewMount(RenewMountRequest) returns (RenewMountResponse);
 
-  // MergeDisk 将源虚拟磁盘的变更合并至目标虚拟磁盘（支持 Fast-Forward、幂等无变更短路、三路合并、dry_run 预览与冲突解决策略）。
-  rpc MergeDisk(MergeDiskRequest) returns (MergeDiskResponse);
+  // UnmountBranch idempotently releases an active mount lease by disk and mount ID.
+  rpc UnmountBranch(UnmountBranchRequest) returns (UnmountBranchResponse);
 
-  // CreateSnapshot creates a manual snapshot anchored to a disk without advancing its base snapshot.
-  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  // ListMounts returns unexpired mount leases for a disk or a single branch sorted by mount_id ascending.
+  rpc ListMounts(ListMountsRequest) returns (ListMountsResponse);
 
-  // ListSnapshots lists snapshots belonging to the disk lineage in descending creation order.
-  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  // EvictMounts removes one or more active mount leases for a disk or branch and fences writers when needed.
+  rpc EvictMounts(EvictMountsRequest) returns (EvictMountsResponse);
 
-  // DeleteSnapshot deletes a single unprotected snapshot belonging to the disk lineage.
-  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  // CreateDisk creates a virtual disk with its default branch and initial commit.
+  rpc CreateDisk(CreateDiskRequest) returns (CreateDiskResponse);
 
-  // PruneSnapshots reclaims unprotected fork and merge snapshots belonging to the disk lineage.
-  rpc PruneSnapshots(PruneSnapshotsRequest) returns (PruneSnapshotsResponse);
+  // GetDisk returns disk metadata and byte usage.
+  rpc GetDisk(GetDiskRequest) returns (GetDiskResponse);
+
+  // ListDisks lists virtual disks in descending creation order with cursor pagination.
+  rpc ListDisks(ListDisksRequest) returns (ListDisksResponse);
+
+  // UpdateDisk updates a virtual disk name or byte quota limit.
+  rpc UpdateDisk(UpdateDiskRequest) returns (UpdateDiskResponse);
+
+  // DeleteDisk deletes an unmounted virtual disk and all of its branches and commits.
+  rpc DeleteDisk(DeleteDiskRequest) returns (DeleteDiskResponse);
+
+  // ForkBranch seals the source branch state into a fork commit and creates a new branch at that commit.
+  rpc ForkBranch(ForkBranchRequest) returns (ForkBranchResponse);
+
+  // ListBranches lists all branches belonging to a disk.
+  rpc ListBranches(ListBranchesRequest) returns (ListBranchesResponse);
+
+  // DeleteBranch deletes a non-default, unmounted branch from a disk.
+  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse);
+
+  // ResetBranch resets a branch head to a target commit and clears its work layer.
+  rpc ResetBranch(ResetBranchRequest) returns (ResetBranchResponse);
+
+  // MergeBranch merges a source branch into a target branch with optional dry-run and conflict strategies.
+  rpc MergeBranch(MergeBranchRequest) returns (MergeBranchResponse);
+
+  // CreateCommit seals the dirty work layer of a branch into a manual commit.
+  rpc CreateCommit(CreateCommitRequest) returns (CreateCommitResponse);
+
+  // ListCommits lists commits for a disk in descending commit_id order with optional kind filter and pagination.
+  rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+
+  // DeleteCommit deletes a single unreachable commit from a disk.
+  rpc DeleteCommit(DeleteCommitRequest) returns (DeleteCommitResponse);
+
+  // PruneCommits reclaims all unreachable commits on a disk.
+  rpc PruneCommits(PruneCommitsRequest) returns (PruneCommitsResponse);
+
+  // ReadCommitNode reads node metadata and file data or symlink target from an immutable commit.
+  rpc ReadCommitNode(ReadCommitNodeRequest) returns (ReadCommitNodeResponse);
+
+  // DiffBranches computes the three-way diff and conflicts between source and target branches.
+  rpc DiffBranches(DiffBranchesRequest) returns (DiffResponse);
+
+  // DiffCommits computes the two-way diff between two commits on a disk.
+  rpc DiffCommits(DiffCommitsRequest) returns (DiffResponse);
+
+  // DiffWork computes the two-way diff between a branch head commit and its live work layer.
+  rpc DiffWork(DiffWorkRequest) returns (DiffResponse);
 }
 
-// LookupRequest 定义 Lookup 接口输入参数。
+// LookupRequest defines input parameters for Lookup.
 message LookupRequest {
-  // 父目录的 Inode 编号。根目录通常为 1。
   uint64 parent_ino = 1 [(buf.validate.field).uint64.gt = 0];
 
-  // 待查找的子项名称（文件或目录名）。
-  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
@@ -268,7 +170,6 @@ message LookupRequest {
     }
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -277,30 +178,34 @@ message LookupRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 4 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// LookupResponse 包含查找命中的节点元数据以及 FUSE 内核缓存有效时间。
+// LookupResponse returns the resolved inode and FUSE cache timeouts.
 message LookupResponse {
-  // 命中的目标 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
-// GetAttrRequest 定义 GetAttr 接口输入参数。
+// GetAttrRequest defines input parameters for GetAttr.
 message GetAttrRequest {
-  // 目标节点的 Inode 编号。
-  // 必须大于 0 且小于等于 int64 最大值 (9223372036854775807)，防止向数据库 BIGINT 转换时发生整型溢出。
   uint64 ino = 1 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 2 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -309,19 +214,27 @@ message GetAttrRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// GetAttrResponse 包含目标节点元数据以及 FUSE 属性缓存有效时间。
+// GetAttrResponse returns inode metadata and FUSE attribute cache timeout.
 message GetAttrResponse {
-  // 目标 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 }
 
-// SetAttrRequest 定义 SetAttr 接口输入参数。
-// 遵循按需部分更新语义，未显式设置的属性保持原值不变。
+// SetAttrRequest defines input parameters for SetAttr.
 message SetAttrRequest {
   option (buf.validate.message).cel = {
     id: "setattr_atime_conflict"
@@ -339,43 +252,25 @@ message SetAttrRequest {
     expression: "has(this.mode) || has(this.uid) || has(this.gid) || has(this.size) || has(this.atime) || has(this.mtime) || this.atime_now || this.mtime_now || this.ctime_now || has(this.flags)"
   };
 
-  // 待修改属性的目标 Inode 编号。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待修改的文件模式与权限位。
   optional uint32 mode = 2;
-
-  // 待修改的属主用户 ID。
   optional uint32 uid = 3 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 待修改的属组 ID。
   optional uint32 gid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 待修改的文件物理大小（字节数）。
   optional uint64 size = 5 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 待修改的最后访问时间。
   optional google.protobuf.Timestamp atime = 6;
-
-  // 待修改的最后修改时间。
   optional google.protobuf.Timestamp mtime = 7;
-
-  // 是否将最后访问时间设置为当前服务端时间。与 atime 互斥。
   bool atime_now = 8;
-
-  // 是否将最后修改时间设置为当前服务端时间。与 mtime 互斥。
   bool mtime_now = 9;
 
-  // 保留的兼容字段；句柄由客户端在本地管理。
   optional uint64 fh = 10 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 11 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -385,38 +280,40 @@ message SetAttrRequest {
     }
   ];
 
-  // 是否将状态变更时间设置为当前服务端时间。
   bool ctime_now = 12;
-
-  // 可选的文件系统标志位（如 chattr 所设）。
   optional uint32 flags = 13 [(buf.validate.field).uint32.lte = 2147483647];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 14 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 15 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// SetAttrResponse 包含更新后的 Inode 实体元数据及内核属性缓存时长。
+// SetAttrResponse returns the updated inode metadata and FUSE attribute cache timeout.
 message SetAttrResponse {
-  // 更新后的目标 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
 }
 
-// MknodRequest 定义 Mknod 接口输入参数。
+// MknodRequest defines input parameters for Mknod.
 message MknodRequest {
-  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待创建的新节点名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -427,19 +324,11 @@ message MknodRequest {
     }
   ];
 
-  // 节点模式位（包含文件类型及权限位）。
   uint32 mode = 3;
-
-  // 所属用户 ID。
   uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 所属组 ID。
   uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 特殊设备号（仅当创建字符/块设备文件时有效，其余节点为 0）。
   uint32 rdev = 6;
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 7 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -449,35 +338,38 @@ message MknodRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 8 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 9 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// MknodResponse 包含新创建节点的元数据以及 FUSE 内核缓存有效时间。
+// MknodResponse returns the newly created inode and FUSE cache timeouts.
 message MknodResponse {
-  // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
-// MkdirRequest 定义 Mkdir 接口输入参数。
+// MkdirRequest defines input parameters for Mkdir.
 message MkdirRequest {
-  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待创建的新目录名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -488,16 +380,10 @@ message MkdirRequest {
     }
   ];
 
-  // 目录模式位（包含可选的 S_IFDIR 文件类型位及权限位）。
   uint32 mode = 3;
-
-  // 所属用户 ID。
   uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 所属组 ID。
   uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 6 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -507,35 +393,38 @@ message MkdirRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 7 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 8 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// MkdirResponse 包含新创建目录的元数据以及 FUSE 内核缓存有效时间。
+// MkdirResponse returns the newly created directory inode and FUSE cache timeouts.
 message MkdirResponse {
-  // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
-// SymlinkRequest 定义 Symlink 接口输入参数。
+// SymlinkRequest defines input parameters for Symlink.
 message SymlinkRequest {
-  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待创建的符号链接名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -546,8 +435,6 @@ message SymlinkRequest {
     }
   ];
 
-  // 符号链接指向的目标路径。
-  // 长度必须在 1 到 4095 字节之间，且严禁包含空字节 '\x00'（允许包含路径分隔符 '/'）。
   bytes target = 3 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 4095,
@@ -558,13 +445,9 @@ message SymlinkRequest {
     }
   ];
 
-  // 所属用户 ID。
   uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 所属组 ID。
   uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 6 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -574,34 +457,38 @@ message SymlinkRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 7 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 8 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// SymlinkResponse 包含新创建符号链接的元数据以及 FUSE 内核缓存有效时间。
+// SymlinkResponse returns the newly created symlink inode and FUSE cache timeouts.
 message SymlinkResponse {
-  // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
-// ReadlinkRequest 定义 Readlink 接口输入参数。
+// ReadlinkRequest defines input parameters for Readlink.
 message ReadlinkRequest {
-  // 目标符号链接的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 2 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -610,11 +497,22 @@ message ReadlinkRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// ReadlinkResponse 包含符号链接指向的目标路径。
+// ReadlinkResponse returns the target path of a symbolic link.
 message ReadlinkResponse {
-  // 目标路径。
   bytes target = 1 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 4095,
@@ -626,22 +524,18 @@ message ReadlinkResponse {
   ];
 }
 
-// LinkRequest 定义 Link 接口输入参数。
+// LinkRequest defines input parameters for Link.
 message LinkRequest {
-  // 待创建硬链接的源节点 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 目标父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 new_parent_ino = 2 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待创建的新目录项名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes new_name = 3 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -652,7 +546,6 @@ message LinkRequest {
     }
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 4 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -662,35 +555,38 @@ message LinkRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 5 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// LinkResponse 包含硬链接创建后更新的源节点元数据及内核缓存时长。
+// LinkResponse returns the updated inode and FUSE cache timeouts.
 message LinkResponse {
-  // 硬链接计数递增后的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
-// UnlinkRequest 定义 Unlink 接口输入参数。
+// UnlinkRequest defines input parameters for Unlink.
 message UnlinkRequest {
-  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待删除的非目录项名称。
-  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
@@ -700,7 +596,6 @@ message UnlinkRequest {
     }
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -710,29 +605,36 @@ message UnlinkRequest {
     }
   ];
 
-  // 是否仍有本地打开句柄；省略时按未打开处理。
   optional bool open_in_client = 4;
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 5 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// UnlinkResponse 定义 Unlink 接口返回参数。
+// UnlinkResponse defines the empty output for Unlink.
 message UnlinkResponse {}
 
-// RmdirRequest 定义 Rmdir 接口输入参数。
+// RmdirRequest defines input parameters for Rmdir.
 message RmdirRequest {
-  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待移除的空目录项名称。
-  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
@@ -742,7 +644,6 @@ message RmdirRequest {
     }
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -752,26 +653,34 @@ message RmdirRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 4 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 5 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// RmdirResponse 定义 Rmdir 接口返回参数。
+// RmdirResponse defines the empty output for Rmdir.
 message RmdirResponse {}
 
-// RenameRequest 定义 Rename 接口输入参数。
+// RenameRequest defines input parameters for Rename.
 message RenameRequest {
-  // 源父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 old_parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待重命名的源项名称。
-  // 长度至多 255 字节，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes old_name = 2 [
     (buf.validate.field).bytes.max_len = 255,
     (buf.validate.field).cel = {
@@ -781,14 +690,11 @@ message RenameRequest {
     }
   ];
 
-  // 目标父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 new_parent_ino = 3 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 目标项新名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes new_name = 4 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -799,10 +705,8 @@ message RenameRequest {
     }
   ];
 
-  // 重命名标志位。
   uint32 flags = 5;
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 6 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -812,29 +716,36 @@ message RenameRequest {
     }
   ];
 
-  // 被覆盖的目标是否仍有本地打开句柄；省略时按未打开处理。
   optional bool target_open_in_client = 7;
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 8 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 9 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// RenameResponse 定义 Rename 接口返回参数。
+// RenameResponse defines the empty output for Rename.
 message RenameResponse {}
 
-// CreateRequest 定义 Create 接口输入参数。
+// CreateRequest defines input parameters for Create.
 message CreateRequest {
-  // 父目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 parent_ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待创建的新常规文件名称。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -845,19 +756,11 @@ message CreateRequest {
     }
   ];
 
-  // 节点模式位（包含可选的 S_IFREG 文件类型位及权限位）。
   uint32 mode = 3;
-
-  // 所属用户 ID。
   uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 所属组 ID。
   uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 打开标志位 (open flags, 如 O_CREAT, O_RDWR, O_WRONLY 等，严禁携带 O_TMPFILE = 0o20000000)。
   uint32 flags = 6;
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 7 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -867,52 +770,45 @@ message CreateRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 8 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 9 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// CreateResponse 包含新创建常规文件的元数据和 FUSE 内核缓存有效时间。
+// CreateResponse returns the newly created file inode and FUSE cache timeouts.
 message CreateResponse {
-  // 新创建的 Inode 实体元数据。
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // 保留的兼容字段；客户端自行分配文件句柄。
   uint64 fh = 2 [(buf.validate.field).uint64.gt = 0];
-
-  // 打开响应标志位 (open flags)。
   uint32 open_flags = 3;
-
-  // 目录项 (Entry) 在 FUSE 内核中的有效缓存时长（秒）。
   double entry_timeout_seconds = 4 [(buf.validate.field).double.gte = 0];
-
-  // 属性 (attr) 在 FUSE 内核中的有效缓存时长（秒）。
   double attr_timeout_seconds = 5 [(buf.validate.field).double.gte = 0];
 }
 
 // CreateTmpfileRequest defines input parameters for CreateTmpfile.
 message CreateTmpfileRequest {
-  // Parent directory inode number. The value must be between 1 and 9223372036854775807.
   uint64 parent_ino = 1 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // File mode bits containing optional S_IFREG type bits and POSIX permission bits.
   uint32 mode = 2;
-
-  // Owner user ID. The value must not exceed 2147483647.
   uint32 uid = 3 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // Owner group ID. The parent directory gid overrides this value when S_ISGID is set, and the value must not exceed 2147483647.
   uint32 gid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // When true for `O_TMPFILE | O_EXCL`, the server marks the orphan non-linkable so `Link` rejects promotion.
   bool exclusive = 5;
 
-  // Target virtual disk UUID. It must be a valid non-nil UUID.
   string disk_id = 6 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -922,43 +818,42 @@ message CreateTmpfileRequest {
     }
   ];
 
-  // Writer mount epoch fence. The value must be between 1 and 9223372036854775807.
   uint64 epoch = 7 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 8 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
 // CreateTmpfileResponse returns the newly allocated anonymous inode and FUSE kernel cache timeouts.
 message CreateTmpfileResponse {
-  // Allocated anonymous regular-file inode with `nlink == 0`.
   Inode inode = 1 [(buf.validate.field).required = true];
-
-  // FUSE kernel entry cache timeout in seconds.
   double entry_timeout_seconds = 2 [(buf.validate.field).double.gte = 0];
-
-  // FUSE kernel attribute cache timeout in seconds.
   double attr_timeout_seconds = 3 [(buf.validate.field).double.gte = 0];
 }
 
-// ReadRequest 定义 Read 接口输入参数。
+// ReadRequest defines input parameters for Read.
 message ReadRequest {
-  // 目标常规文件的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 保留的兼容字段；文件句柄由客户端在本地管理。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 读取起始偏移量（字节）。必须在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 读取字节数（最大 4194304，即 4 MiB）。
   uint32 size = 4 [(buf.validate.field).uint32.lte = 4194304];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 5 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -967,15 +862,26 @@ message ReadRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// ReadResponse 定义 Read 接口响应结果。
+// ReadResponse returns the bytes read from a file.
 message ReadResponse {
-  // 读取到的数据载荷。
   bytes data = 1;
 }
 
-// WriteRequest 定义 Write 接口输入参数。
+// WriteRequest defines input parameters for Write.
 message WriteRequest {
   option (buf.validate.message).cel = {
     id: "write_request_offset_len_overflow"
@@ -983,22 +889,15 @@ message WriteRequest {
     expression: "uint(this.offset) <= 9223372036854775807u - uint(size(this.data))"
   };
 
-  // 目标常规文件的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 保留的兼容字段；文件句柄由客户端在本地管理。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 写入起始偏移量（字节）。必须在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 写入的数据载荷（最大 4194304 字节，即 4 MiB）。
   bytes data = 4 [(buf.validate.field).bytes.max_len = 4194304];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 5 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1008,37 +907,40 @@ message WriteRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 6 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 7 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// WriteResponse 定义 Write 接口响应结果。
+// WriteResponse returns the number of written bytes and updated inode metadata.
 message WriteResponse {
-  // 实际写入的字节数。
   uint32 size = 1 [(buf.validate.field).uint32.lte = 4194304];
-
-  // 写入后更新的 Inode 实体元数据。
   Inode inode = 2 [(buf.validate.field).required = true];
 }
 
-// FsyncRequest 定义 Fsync 接口输入参数。
+// FsyncRequest defines input parameters for Fsync.
 message FsyncRequest {
-  // 目标文件节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 保留的兼容字段；句柄由客户端在本地管理。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 是否仅同步数据内容 (fdatasync 语义)。若为 true，仅同步文件数据而不强制刷写非必要元数据。
   bool datasync = 3;
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 4 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1048,31 +950,37 @@ message FsyncRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 5 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// FsyncResponse 定义 Fsync 接口响应结果。
+// FsyncResponse defines the empty output for Fsync.
 message FsyncResponse {}
 
-// FsyncDirRequest 定义 FsyncDir 接口输入参数。
+// FsyncDirRequest defines input parameters for FsyncDir.
 message FsyncDirRequest {
-  // 目标目录节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 待同步的目录 FileHandle。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 是否仅同步数据内容 (fdatasync 语义)。若为 true，仅同步目录数据而不强制刷写非必要元数据。
   bool datasync = 3;
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 4 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1082,23 +990,31 @@ message FsyncDirRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 5 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// FsyncDirResponse 定义 FsyncDir 接口响应结果。
+// FsyncDirResponse defines the empty output for FsyncDir.
 message FsyncDirResponse {}
 
-// DirEntry 定义 ReadDir 返回的基本目录项。
+// DirEntry describes a basic directory entry returned by ReadDir.
 message DirEntry {
-  // 子项对应的 Inode 编号。
   uint64 ino = 1 [(buf.validate.field).uint64.gt = 0];
 
-  // 子项名称（支持 "." 与 ".."）。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -1109,34 +1025,25 @@ message DirEntry {
     }
   ];
 
-  // 文件的模式位（包含文件类型与权限位）。
   uint32 mode = 3 [(buf.validate.field).uint32.gt = 0];
-
-  // 下一个条目的游标偏移量（单调递增，大于 0）。
   uint64 next_offset = 4 [(buf.validate.field).uint64.gt = 0];
 }
 
-// ReadDirRequest 定义 ReadDir 接口输入参数。
+// ReadDirRequest defines input parameters for ReadDir.
 message ReadDirRequest {
-  // 目标目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 保留的兼容字段；目录句柄由客户端在本地管理。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 读取起始游标偏移量。0 表示从头开始读取（包含 "." 与 ".."）。
   uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
 
-  // 单次最大读取条目数配额（最大 4096）。
   uint32 limit = 4 [
     (buf.validate.field).uint32.gt = 0,
     (buf.validate.field).uint32.lte = 4096
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 5 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1145,21 +1052,29 @@ message ReadDirRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// ReadDirResponse 定义 ReadDir 接口响应结果。
+// ReadDirResponse returns a batch of directory entries.
 message ReadDirResponse {
-  // 目录项列表。
   repeated DirEntry entries = 1;
 }
 
-// DirEntryPlus 定义 ReadDirPlus 返回的扩展目录项（内联属性与缓存时效）。
+// DirEntryPlus describes an extended directory entry with inline inode attributes.
 message DirEntryPlus {
-  // 子项对应的 Inode 编号。
   uint64 ino = 1 [(buf.validate.field).uint64.gt = 0];
 
-  // 子项名称（支持 "." 与 ".."）。
-  // 长度必须在 1 到 255 字节之间，且严禁包含路径分隔符 '/' 与空字节 '\x00'。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -1170,40 +1085,27 @@ message DirEntryPlus {
     }
   ];
 
-  // 下一个条目的游标偏移量（单调递增，大于 0）。
   uint64 next_offset = 3 [(buf.validate.field).uint64.gt = 0];
-
-  // 子项的完整 Inode 元数据。
   Inode inode = 4 [(buf.validate.field).required = true];
-
-  // 目录项在内核中的缓存有效时间（秒）。对 "." 与 ".." 固定为 0。
   double entry_timeout_seconds = 5 [(buf.validate.field).double.gte = 0];
-
-  // 属性在内核中的缓存有效时间（秒）。
   double attr_timeout_seconds = 6 [(buf.validate.field).double.gte = 0];
 }
 
-// ReadDirPlusRequest 定义 ReadDirPlus 接口输入参数。
+// ReadDirPlusRequest defines input parameters for ReadDirPlus.
 message ReadDirPlusRequest {
-  // 目标目录的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 保留的兼容字段；目录句柄由客户端在本地管理。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 读取起始游标偏移量。0 表示从头开始读取（包含 "." 与 ".."）。
   uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
 
-  // 单次最大读取条目数配额（最大 4096）。
   uint32 limit = 4 [
     (buf.validate.field).uint32.gt = 0,
     (buf.validate.field).uint32.lte = 4096
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 5 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1212,38 +1114,42 @@ message ReadDirPlusRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 6 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// ReadDirPlusResponse 定义 ReadDirPlus 接口响应结果。
+// ReadDirPlusResponse returns a batch of extended directory entries.
 message ReadDirPlusResponse {
-  // 扩展目录项列表。
   repeated DirEntryPlus entries = 1;
 }
 
-// FallocateRequest 定义 Fallocate 接口输入参数。
+// FallocateRequest defines input parameters for Fallocate.
 message FallocateRequest {
-  // 目标常规文件的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 保留的兼容字段；文件句柄由客户端在本地管理。
   uint64 fh = 2 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 操作起始偏移量（字节）。必须在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 offset = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
 
-  // 操作区间长度（字节）。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 length = 4 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // fallocate 模式位标志（支持 0、FALLOC_FL_KEEP_SIZE、FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE）。
   uint32 mode = 5;
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 6 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1253,27 +1159,34 @@ message FallocateRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 7 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 8 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// FallocateResponse 定义 Fallocate 接口响应结果。
+// FallocateResponse defines the empty output for Fallocate.
 message FallocateResponse {}
 
-// SetXattrRequest 定义 SetXattr 接口输入参数。
+// SetXattrRequest defines input parameters for SetXattr.
 message SetXattrRequest {
-  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 扩展属性名称。
-  // 长度必须在 1 到 255 字节之间：空名称（0 字节）或包含空字节 '\x00' 由校验器显式映射为 ErrorInfo.reason = "EINVAL"；
-  // 名称超过 255 字节显式映射为 ErrorInfo.reason = "ERANGE"。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -1284,15 +1197,9 @@ message SetXattrRequest {
     }
   ];
 
-  // 扩展属性值。
-  // 长度最大允许 65536 字节（超过 65536 字节由校验器显式映射为 ErrorInfo.reason = "ERANGE"）。
   bytes value = 3 [(buf.validate.field).bytes.max_len = 65536];
-
-  // 扩展属性标志位 (0: 默认覆盖或创建, 1: XATTR_CREATE, 2: XATTR_REPLACE, 3: XATTR_CREATE | XATTR_REPLACE)。
-  // flags = 3 允许进入领域层按目标属性存在性分别返回 EEXIST 或 ENODATA；flags > 3 在协议入口拒绝并返回 EINVAL。
   uint32 flags = 4 [(buf.validate.field).uint32.lte = 3];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 5 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1302,27 +1209,34 @@ message SetXattrRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 6 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 7 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// SetXattrResponse 定义 SetXattr 接口响应结果。
+// SetXattrResponse defines the empty output for SetXattr.
 message SetXattrResponse {}
 
-// GetXattrRequest 定义 GetXattr 接口输入参数。
+// GetXattrRequest defines input parameters for GetXattr.
 message GetXattrRequest {
-  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 扩展属性名称。
-  // 长度必须在 1 到 255 字节之间：空名称（0 字节）或包含空字节 '\x00' 由校验器显式映射为 ErrorInfo.reason = "EINVAL"；
-  // 名称超过 255 字节显式映射为 ErrorInfo.reason = "ERANGE"。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -1333,7 +1247,6 @@ message GetXattrRequest {
     }
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1342,24 +1255,32 @@ message GetXattrRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 4 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// GetXattrResponse 定义 GetXattr 接口响应结果。
+// GetXattrResponse returns the extended attribute value.
 message GetXattrResponse {
-  // 扩展属性值。
-  // 长度最大允许 65536 字节（超长违规由校验器显式映射为 ErrorInfo.reason = "ERANGE"）。
   bytes value = 1 [(buf.validate.field).bytes.max_len = 65536];
 }
 
-// ListXattrRequest 定义 ListXattr 接口输入参数。
+// ListXattrRequest defines input parameters for ListXattr.
 message ListXattrRequest {
-  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 2 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1368,12 +1289,22 @@ message ListXattrRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// ListXattrResponse 定义 ListXattr 接口响应结果。
+// ListXattrResponse returns extended attribute names sorted in ascending byte order.
 message ListXattrResponse {
-  // 节点绑定的扩展属性名称列表，按原始字节序升序（BYTEA ASC）排列。
-  // 每一项名称长度必须在 1 到 255 字节之间，且严禁包含空字节 '\x00'。
   repeated bytes names = 1 [(buf.validate.field).repeated.items = {
     bytes: {
       min_len: 1
@@ -1389,17 +1320,13 @@ message ListXattrResponse {
   }];
 }
 
-// RemoveXattrRequest 定义 RemoveXattr 接口输入参数。
+// RemoveXattrRequest defines input parameters for RemoveXattr.
 message RemoveXattrRequest {
-  // 目标节点的 Inode 编号。必须大于 0 且在 int64 正数范围内 (<= 9223372036854775807)。
   uint64 ino = 1 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 待移除的扩展属性名称。
-  // 长度必须在 1 到 255 字节之间：空名称（0 字节）或包含空字节 '\x00' 由校验器显式映射为 ErrorInfo.reason = "EINVAL"；
-  // 名称超过 255 字节显式映射为 ErrorInfo.reason = "ERANGE"。
   bytes name = 2 [
     (buf.validate.field).bytes.min_len = 1,
     (buf.validate.field).bytes.max_len = 255,
@@ -1410,7 +1337,6 @@ message RemoveXattrRequest {
     }
   ];
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1420,44 +1346,146 @@ message RemoveXattrRequest {
     }
   ];
 
-  // 写挂载世代号栅栏（必须大于 0 且在 int64 正数范围内）。
   uint64 epoch = 4 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
+
+  string branch = 5 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// RemoveXattrResponse 定义 RemoveXattr 接口响应结果。
+// RemoveXattrResponse defines the empty output for RemoveXattr.
 message RemoveXattrResponse {}
 
-// MountDiskRequest 定义 MountDisk 接口输入参数。
-message MountDiskRequest {
-  string disk_id = 1 [
+// StatFSRequest defines input parameters for StatFS.
+message StatFSRequest {
+  uint64 ino = 1 [
+    (buf.validate.field).uint64.gt = 0,
+    (buf.validate.field).uint64.lte = 9223372036854775807
+  ];
+
+  string disk_id = 2 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "mount_disk.disk_id_not_nil"
+      id: "statfs_disk_id_not_nil"
       message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
-  bool read_only = 2;
-  // 是否在磁盘存在未过期可写挂载租约时强制抢占并推进 WriterEpoch。
-  bool force = 3;
+
+  string branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
-// MountDiskResponse 定义 MountDisk 接口输出参数。
-message MountDiskResponse {
-  uint64 epoch = 1; // read_only=true 时为 0；read_only=false 时为递增后的权威 WriterEpoch (> 0)
+// StatFSResponse returns disk capacity and POSIX 4096-byte block statistics.
+message StatFSResponse {
+  uint64 total_bytes = 1;
+  uint64 used_bytes = 2;
+  uint64 avail_bytes = 3;
+  uint32 bsize = 4;
+  uint32 frsize = 5;
+  uint64 blocks = 6;
+  uint64 bfree = 7;
+  uint64 bavail = 8;
+  uint64 files = 9;
+  uint64 ffree = 10;
+  uint32 namelen = 11;
+}
+
+// ReclaimOrphanRequest defines input parameters for ReclaimOrphan.
+message ReclaimOrphanRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "reclaim_orphan_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  uint64 epoch = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  uint64 ino = 3 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  string branch = 4 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// ReclaimOrphanResponse defines the empty output for ReclaimOrphan.
+message ReclaimOrphanResponse {}
+
+// MountBranchRequest defines input parameters for MountBranch.
+message MountBranchRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "mount_branch_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  string branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  bool read_only = 3;
+  bool force = 4;
+}
+
+// MountBranchResponse returns the granted mount lease, writer epoch, and root inode.
+message MountBranchResponse {
+  uint64 epoch = 1;
   Inode root_inode = 2;
   double entry_timeout_seconds = 3;
   double attr_timeout_seconds = 4;
-  // 本次在线挂载实例的唯一标识符（UUID 格式）。
   string mount_id = 5;
-  // 在线挂载软租约的有效时长（秒）。
   uint32 lease_ttl_seconds = 6;
 }
 
-// RenewMountRequest 定义 RenewMount 接口输入参数。
+// RenewMountRequest defines input parameters for RenewMount.
 message RenewMountRequest {
   option (buf.validate.message).cel = {
     id: "renew_mount_epoch_matches_mode"
@@ -1465,7 +1493,6 @@ message RenewMountRequest {
     expression: "this.read_only ? this.epoch == 0u : this.epoch > 0u"
   };
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1475,8 +1502,19 @@ message RenewMountRequest {
     }
   ];
 
-  // 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。
-  string mount_id = 2 [
+  string branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  string mount_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
       id: "renew_mount_mount_id_not_nil"
@@ -1485,54 +1523,50 @@ message RenewMountRequest {
     }
   ];
 
-  // 是否为只读挂载。
-  bool read_only = 3;
-
-  // 写挂载世代号（只读挂载必须为 0；可写挂载必须大于 0 且在 int64 正数范围内）。
-  uint64 epoch = 4 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  bool read_only = 4;
+  uint64 epoch = 5 [(buf.validate.field).uint64.lte = 9223372036854775807];
 }
 
-// RenewMountResponse 定义 RenewMount 接口输出参数。
+// RenewMountResponse returns the renewed mount lease TTL in seconds.
 message RenewMountResponse {
-  // 续期后的在线挂载软租约有效时长（秒）。
   uint32 lease_ttl_seconds = 1;
 }
 
-// UnmountDiskRequest 定义 UnmountDisk 接口输入参数。
-message UnmountDiskRequest {
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+// UnmountBranchRequest defines input parameters for UnmountBranch.
+message UnmountBranchRequest {
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "unmount_disk_disk_id_not_nil"
+      id: "unmount_branch_disk_id_not_nil"
       message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 挂载实例唯一标识符（UUID 格式，非全零 nil UUID）。
   string mount_id = 2 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "unmount_disk_mount_id_not_nil"
+      id: "unmount_branch_mount_id_not_nil"
       message: "mount_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 }
 
-// UnmountDiskResponse 定义 UnmountDisk 接口输出参数。
-message UnmountDiskResponse {}
+// UnmountBranchResponse defines the empty output for UnmountBranch.
+message UnmountBranchResponse {}
 
-// MountLease describes an active mount lease on a virtual disk.
+// MountLease describes an active mount lease on a branch of a virtual disk.
 message MountLease {
   string mount_id = 1;
-  bool read_only = 2;
-  uint64 epoch = 3;
-  google.protobuf.Timestamp expires_at = 4;
+  string branch = 2;
+  bool read_only = 3;
+  uint64 epoch = 4;
+  google.protobuf.Timestamp mounted_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
 }
 
-// ListMountsRequest requests active mount leases for a virtual disk.
+// ListMountsRequest requests active mount leases for a disk or a specific branch.
 message ListMountsRequest {
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
@@ -1542,6 +1576,15 @@ message ListMountsRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string branch = 2 [
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 }
 
 // ListMountsResponse returns unexpired mount leases sorted by mount_id ascending.
@@ -1549,7 +1592,7 @@ message ListMountsResponse {
   repeated MountLease mounts = 1;
 }
 
-// EvictMountsRequest evicts one specific mount lease or all active mount leases for a virtual disk.
+// EvictMountsRequest evicts one or more active mount leases for a disk or branch.
 message EvictMountsRequest {
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
@@ -1560,7 +1603,16 @@ message EvictMountsRequest {
     }
   ];
 
-  optional string mount_id = 2 [
+  string branch = 2 [
+    (buf.validate.field).string.max_bytes = 255,
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  optional string mount_id = 3 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
       id: "evict_mounts_mount_id_not_nil"
@@ -1570,67 +1622,37 @@ message EvictMountsRequest {
   ];
 }
 
-// EvictMountsResponse returns the number of evicted leases and the fenced writer epoch if advanced.
+// EvictMountsResponse returns the evicted mount count and branches whose writer epoch advanced.
 message EvictMountsResponse {
   uint32 evicted_count = 1;
-  uint64 writer_epoch = 2;
+  repeated Branch updated_branches = 2;
 }
 
-// Inode 代表文件系统中的实体节点。
-
+// Inode represents a filesystem inode entity.
 message Inode {
-  // 节点的全局唯一持久化标识。
   uint64 ino = 1 [(buf.validate.field).uint64.gt = 0];
-
-  // Inode 代数版本，用于标识 Inode 复用生命周期，防止陈旧引用。
   uint64 generation = 2;
-
-  // 节点的 POSIX 物理属性集合。
   InodeAttribute attr = 3 [(buf.validate.field).required = true];
 }
 
-// InodeAttribute 包含遵循 POSIX 规范的节点物理属性。
+// InodeAttribute holds POSIX metadata attributes for an inode.
 message InodeAttribute {
-  // 文件的模式位（包含文件类型 S_IFREG, S_IFDIR 及权限位 0755, 0644 等）。
   uint32 mode = 1 [(buf.validate.field).uint32.gt = 0];
-
-  // 文件物理大小（字节数）。
   uint64 size = 2;
-
-  // 硬链接数量。文件默认为 1；目录通常至少为 2；已解链但仍处于打开状态的孤儿节点允许为 0。
   uint32 nlink = 3;
-
-  // 所属用户 ID。
   uint32 uid = 4 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 所属组 ID。
   uint32 gid = 5 [(buf.validate.field).uint32.lte = 2147483647];
-
-  // 特殊设备号（仅当为设备文件时有效，常规文件为 0）。
   uint32 rdev = 6;
-
-  // 块大小（字节数，默认 65536 即 0x10000）。
   uint32 blksize = 7;
-
-  // 占用的 512 字节块数量。
   uint64 blocks = 8;
-
-  // 最后访问时间。
   google.protobuf.Timestamp atime = 9 [(buf.validate.field).required = true];
-
-  // 最后修改时间。
   google.protobuf.Timestamp mtime = 10 [(buf.validate.field).required = true];
-
-  // 状态变更时间。
   google.protobuf.Timestamp ctime = 11 [(buf.validate.field).required = true];
-
-  // 文件系统标志位（如 chattr 所设）。
   uint32 flags = 12 [(buf.validate.field).uint32.lte = 2147483647];
 }
 
-// Disk 描述虚拟磁盘实体及其配额状态。
+// Disk describes a virtual disk entity and its quota usage.
 message Disk {
-  // 磁盘全局唯一标识符（UUID 字符串格式，非全零 nil UUID）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1640,7 +1662,6 @@ message Disk {
     }
   ];
 
-  // 磁盘名称（最大 255 字节，严禁包含空字节 '\x00'）。
   string name = 2 [
     (buf.validate.field).string.max_bytes = 255,
     (buf.validate.field).cel = {
@@ -1650,44 +1671,100 @@ message Disk {
     }
   ];
 
-  // 一对一绑定的根目录 Inode 编号（必须在 int64 正数区间内）。
-  uint64 root_ino = 3 [
-    (buf.validate.field).uint64.gt = 0,
-    (buf.validate.field).uint64.lte = 9223372036854775807
+  string default_branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "default_branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
   ];
 
-  // 容量配额上限字节数（必须在 int64 正数区间内）。
   uint64 max_bytes = 4 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 
-  // 磁盘实时已用逻辑字节数。
   uint64 used_bytes = 5 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  google.protobuf.Timestamp created_at = 6 [(buf.validate.field).required = true];
+  google.protobuf.Timestamp updated_at = 7 [(buf.validate.field).required = true];
+}
 
-  // 磁盘实时有效 Inode 数量。
-  uint64 used_inodes = 6 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 磁盘创建时间戳（必填）。
-  google.protobuf.Timestamp created_at = 7 [(buf.validate.field).required = true];
-
-  // 磁盘最后更新时间戳（必填）。
-  google.protobuf.Timestamp updated_at = 8 [(buf.validate.field).required = true];
-
-  // 派生源父磁盘唯一标识符（根磁盘未设置；派生磁盘为合法非全零 nil UUID）。
-  optional string parent_disk_id = 9 [
+// Branch describes a mutable branch within a virtual disk.
+message Branch {
+  string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "disk_parent_disk_id_not_nil"
-      message: "parent_disk_id must not be nil UUID"
+      id: "branch_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
+
+  string name = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "name cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  uint64 head_commit_id = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  uint64 writer_epoch = 4 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  google.protobuf.Timestamp created_at = 5 [(buf.validate.field).required = true];
+  google.protobuf.Timestamp updated_at = 6 [(buf.validate.field).required = true];
 }
 
-// CreateDiskRequest 定义 CreateDisk 接口输入参数。
+// CommitKind identifies how a commit was created.
+enum CommitKind {
+  COMMIT_KIND_UNSPECIFIED = 0;
+  COMMIT_KIND_INIT = 1;
+  COMMIT_KIND_MANUAL = 2;
+  COMMIT_KIND_FORK = 3;
+  COMMIT_KIND_MERGE = 4;
+}
+
+// Commit describes an immutable commit in a disk commit DAG.
+message Commit {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "commit_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  uint64 commit_id = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  uint64 parent_id = 3 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  uint64 merge_parent_id = 4 [(buf.validate.field).uint64.lte = 9223372036854775807];
+  CommitKind kind = 5 [(buf.validate.field).enum.defined_only = true];
+
+  string message = 6 [
+    (buf.validate.field).string.max_bytes = 4096,
+    (buf.validate.field).cel = {
+      id: "commit_message_no_nul"
+      message: "message cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  google.protobuf.Timestamp created_at = 7 [(buf.validate.field).required = true];
+}
+
+// CreateDiskRequest defines input parameters for CreateDisk.
 message CreateDiskRequest {
-  // 磁盘名称（最大 255 字节，严禁包含空字节 '\x00'）。
   string name = 1 [
     (buf.validate.field).string.max_bytes = 255,
     (buf.validate.field).cel = {
@@ -1697,22 +1774,19 @@ message CreateDiskRequest {
     }
   ];
 
-  // 容量配额上限字节数（必须在 int64 正数区间内）。
   uint64 max_bytes = 2 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 }
 
-// CreateDiskResponse 定义 CreateDisk 接口输出参数。
+// CreateDiskResponse returns the created disk entity.
 message CreateDiskResponse {
-  // 创建成功的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
 }
 
-// GetDiskRequest 定义 GetDisk 接口输入参数。
+// GetDiskRequest defines input parameters for GetDisk.
 message GetDiskRequest {
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1723,31 +1797,24 @@ message GetDiskRequest {
   ];
 }
 
-// GetDiskResponse 定义 GetDisk 接口输出参数。
+// GetDiskResponse returns the requested disk entity.
 message GetDiskResponse {
-  // 查询到的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
 }
 
-// ListDisksRequest 分页查询虚拟磁盘列表请求。
+// ListDisksRequest defines input parameters for ListDisks.
 message ListDisksRequest {
-  // 单页最大返回条数（为 0 时默认取 50，最大不超过 1000）。
   uint32 page_size = 1 [(buf.validate.field).uint32.lte = 1000];
-
-  // 游标分页令牌（为空表示从第一页开始查询）。
   string page_token = 2;
 }
 
-// ListDisksResponse 分页查询虚拟磁盘列表响应。
+// ListDisksResponse returns a page of disks sorted by created_at DESC, disk_id DESC.
 message ListDisksResponse {
-  // 当前页虚拟磁盘列表（按 created_at DESC, disk_id DESC 排序）。
   repeated Disk disks = 1;
-
-  // 下一页游标令牌（为空字符串表示已到达最后一页）。
   string next_page_token = 2;
 }
 
-// UpdateDiskRequest 定义 UpdateDisk 接口输入参数。
+// UpdateDiskRequest defines input parameters for UpdateDisk.
 message UpdateDiskRequest {
   option (buf.validate.message).cel = {
     id: "update_disk_has_update"
@@ -1755,7 +1822,6 @@ message UpdateDiskRequest {
     expression: "has(this.name) || has(this.max_bytes)"
   };
 
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1765,7 +1831,6 @@ message UpdateDiskRequest {
     }
   ];
 
-  // 待更新的磁盘名称（最大 255 字节，严禁包含空字节 '\x00'）。
   optional string name = 2 [
     (buf.validate.field).string.max_bytes = 255,
     (buf.validate.field).cel = {
@@ -1775,22 +1840,19 @@ message UpdateDiskRequest {
     }
   ];
 
-  // 待更新的容量配额上限（必须在 int64 正数区间内）。
   optional uint64 max_bytes = 3 [
     (buf.validate.field).uint64.gt = 0,
     (buf.validate.field).uint64.lte = 9223372036854775807
   ];
 }
 
-// UpdateDiskResponse 定义 UpdateDisk 接口输出参数。
+// UpdateDiskResponse returns the updated disk entity.
 message UpdateDiskResponse {
-  // 更新后的虚拟磁盘实体。
   Disk disk = 1 [(buf.validate.field).required = true];
 }
 
-// DeleteDiskRequest 定义 DeleteDisk 接口输入参数。
+// DeleteDiskRequest defines input parameters for DeleteDisk.
 message DeleteDiskRequest {
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
@@ -1799,418 +1861,571 @@ message DeleteDiskRequest {
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
-
-  // 是否递归删除目标磁盘及其全部派生后代磁盘（默认 false 仅独立删除目标磁盘）。
-  bool recursive = 2;
 }
 
-// DeleteDiskResponse 定义 DeleteDisk 接口输出参数。
+// DeleteDiskResponse defines the empty output for DeleteDisk.
 message DeleteDiskResponse {}
 
-// ForkDiskRequest 定义 ForkDisk 接口输入参数。
-message ForkDiskRequest {
-  // 派生源虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
-  string source_disk_id = 1 [
+// ForkBranchRequest defines input parameters for ForkBranch.
+message ForkBranchRequest {
+  option (buf.validate.message).cel = {
+    id: "fork_branch_source_not_equal_new"
+    message: "source_branch and new_branch must be different"
+    expression: "this.source_branch != this.new_branch"
+  };
+
+  string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "fork_disk_source_disk_id_not_nil"
-      message: "source_disk_id must not be nil UUID"
+      id: "fork_branch_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 新建派生磁盘名称（最大 255 字节，严禁包含空字节 '\x00'）。
-  string name = 2 [
-    (buf.validate.field).string.max_bytes = 255,
+  string source_branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
     (buf.validate.field).cel = {
-      id: "fork_disk_name_no_nul"
-      message: "name cannot contain NUL byte"
+      id: "branch_no_nul"
+      message: "source_branch cannot contain NUL byte"
       expression: "!this.contains('\\x00')"
     }
   ];
 
-  // 可选的新盘容量配额上限字节数（省略时继承源盘配额；指定时必须在 int64 正数区间内）。
-  optional uint64 max_bytes = 3 [
-    (buf.validate.field).uint64.gt = 0,
-    (buf.validate.field).uint64.lte = 9223372036854775807
-  ];
-}
-
-// ForkDiskResponse 定义 ForkDisk 接口输出参数。
-message ForkDiskResponse {
-  // 派生成功的虚拟磁盘实体。
-  Disk disk = 1 [(buf.validate.field).required = true];
-}
-
-// StatFSRequest 定义 StatFS 接口输入参数。
-message StatFSRequest {
-  // 目标节点 Inode 编号（必须在 int64 正数区间内）。
-  uint64 ino = 1 [
-    (buf.validate.field).uint64.gt = 0,
-    (buf.validate.field).uint64.lte = 9223372036854775807
-  ];
-
-  // 目标磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
-  string disk_id = 2 [
-    (buf.validate.field).string.uuid = true,
+  string new_branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
     (buf.validate.field).cel = {
-      id: "statfs_disk_id_not_nil"
-      message: "disk_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
+      id: "branch_no_nul"
+      message: "new_branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  string message = 4 [
+    (buf.validate.field).string.max_bytes = 4096,
+    (buf.validate.field).cel = {
+      id: "commit_message_no_nul"
+      message: "message cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
     }
   ];
 }
 
-// StatFSResponse 定义 StatFS 接口输出参数，对齐 Linux FUSE FUSE_STATFS = 17 协议与 4096 字节块统计语义。
-message StatFSResponse {
-  // 磁盘总容量字节数。
-  uint64 total_bytes = 1;
-
-  // 当前已使用容量字节数。
-  uint64 used_bytes = 2;
-
-  // 当前剩余可用容量字节数。
-  uint64 avail_bytes = 3;
-
-  // 文件系统基础块大小（字节，固定为 4096）。
-  uint32 bsize = 4;
-
-  // 文件系统基本分配单元大小（字节，固定为 4096）。
-  uint32 frsize = 5;
-
-  // 总数据块数量（基于 4096 字节块换算，至少为 1）。
-  uint64 blocks = 6;
-
-  // 空闲数据块数量。
-  uint64 bfree = 7;
-
-  // 非特权用户可用数据块数量。
-  uint64 bavail = 8;
-
-  // 当前已使用的 Inode 数量（反映 used_inodes）。
-  uint64 files = 9;
-
-  // 空闲 Inode 数量（不设限时填 0）。
-  uint64 ffree = 10;
-
-  // 文件名最大长度（字节，固定为 255）。
-  uint32 namelen = 11;
+// ForkBranchResponse returns the fork commit and newly created branch.
+message ForkBranchResponse {
+  Commit commit = 1 [(buf.validate.field).required = true];
+  Branch branch = 2 [(buf.validate.field).required = true];
 }
 
-// ReclaimOrphanRequest 定义 ReclaimOrphan 接口输入参数。
-message ReclaimOrphanRequest {
+// ListBranchesRequest defines input parameters for ListBranches.
+message ListBranchesRequest {
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "reclaim_orphan_disk_id_not_nil"
+      id: "list_branches_disk_id_not_nil"
       message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
-  uint64 epoch = 2 [(buf.validate.field).uint64 = {
-    gt: 0
-    lte: 9223372036854775807
-  }];
-  uint64 ino = 3 [(buf.validate.field).uint64 = {
-    gt: 0
-    lte: 9223372036854775807
-  }];
 }
 
-// ReclaimOrphanResponse 定义 ReclaimOrphan 接口输出参数。
-message ReclaimOrphanResponse {}
-
-// DiffKind 表示目录树条目在三路或两路差异比较中的变更类型。
-enum DiffKind {
-  // 未指定变更类型。
-  DIFF_KIND_UNSPECIFIED = 0;
-  // 新增条目。
-  DIFF_KIND_ADDED = 1;
-  // 修改条目。
-  DIFF_KIND_MODIFIED = 2;
-  // 删除条目。
-  DIFF_KIND_DELETED = 3;
+// ListBranchesResponse returns all branches belonging to a disk.
+message ListBranchesResponse {
+  repeated Branch branches = 1;
 }
 
-// ConflictKind 表示三路合并或差异检测中识别出的冲突类型。
-enum ConflictKind {
-  // 无冲突。
-  CONFLICT_KIND_UNSPECIFIED = 0;
-  // 双边新增同名条目冲突（Add/Add）。
-  CONFLICT_KIND_ADD_ADD = 1;
-  // 常规文件内容双边修改冲突（Content）。
-  CONFLICT_KIND_CONTENT = 2;
-  // 目标盘修改而源盘删除冲突（Modify/Delete）。
-  CONFLICT_KIND_MODIFY_DELETE = 3;
-  // 目标盘删除而源盘修改冲突（Delete/Modify）。
-  CONFLICT_KIND_DELETE_MODIFY = 4;
-  // 目录树删除与子树修改冲突（Tree Delete/Modify）。
-  CONFLICT_KIND_TREE_DELETE_MODIFY = 5;
-  // 节点类型不匹配冲突（Type）。
-  CONFLICT_KIND_TYPE = 6;
-  // 目录与文件同名冲突（Dir/File）。
-  CONFLICT_KIND_DIR_FILE = 7;
-  // POSIX 元数据属性冲突（Attr）。
-  CONFLICT_KIND_ATTR = 8;
-  // 扩展属性冲突（Xattr）。
-  CONFLICT_KIND_XATTR = 9;
-  // 扩展属性配额或容量限制冲突（Xattr Quota）。
-  CONFLICT_KIND_XATTR_QUOTA = 10;
-  // 安全扩展属性冲突（Security Xattr）。
-  CONFLICT_KIND_SECURITY_ATTR = 11;
-  // 硬链接拓扑冲突（Hardlink）。
-  CONFLICT_KIND_HARDLINK = 12;
-}
-
-// MergeStrategy 表示磁盘合并时对冲突条目的解决策略。
-enum MergeStrategy {
-  // 未指定策略（服务端按 FAIL 语义处理）。
-  MERGE_STRATEGY_UNSPECIFIED = 0;
-  // 遇到任何未显式覆盖的冲突即中止并报告冲突（默认语义）。
-  MERGE_STRATEGY_FAIL = 1;
-  // 冲突时保留目标盘（ours）版本。
-  MERGE_STRATEGY_OURS = 2;
-  // 冲突时采用源盘（theirs）版本。
-  MERGE_STRATEGY_THEIRS = 3;
-}
-
-// DiffNodeSummary 描述差异或冲突条目的节点关键元数据摘要。
-message DiffNodeSummary {
-  // 节点 Inode 编号。
-  uint64 ino = 1;
-
-  // POSIX 文件模式位（包含文件类型与权限位）。
-  uint32 mode = 2;
-
-  // 节点逻辑字节大小。
-  uint64 size = 3;
-}
-
-// DiffEntry 描述单条路径的差异与冲突详情。
-message DiffEntry {
-  // 变更或冲突项的相对路径字节序列。
-  bytes path = 1;
-
-  // 变更类型。
-  DiffKind kind = 2;
-
-  // 冲突类型（无冲突时为 CONFLICT_KIND_UNSPECIFIED）。
-  ConflictKind conflict = 3;
-
-  // 共同祖先切面中的节点摘要（若存在）。
-  optional DiffNodeSummary base = 4;
-
-  // 目标磁盘中的节点摘要（若存在）。
-  optional DiffNodeSummary target = 5;
-
-  // 源磁盘中的节点摘要（若存在）。
-  optional DiffNodeSummary source = 6;
-}
-
-// DiffSummary 汇总差异比较的各项条目统计计数。
-message DiffSummary {
-  // 新增条目数量。
-  uint64 added = 1;
-
-  // 修改条目数量。
-  uint64 modified = 2;
-
-  // 删除条目数量。
-  uint64 deleted = 3;
-
-  // 冲突条目数量。
-  uint64 conflicts = 4;
-}
-
-// DiffDiskRequest 定义 DiffDisk 接口输入参数。
-message DiffDiskRequest {
-  option (buf.validate.message).cel = {
-    id: "diff_disk_source_not_equal_target"
-    message: "source_disk_id and target_disk_id must be different"
-    expression: "has(this.target_disk_id) ? this.source_disk_id != this.target_disk_id : true"
-  };
-
-  // 源虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
-  string source_disk_id = 1 [
+// DeleteBranchRequest defines input parameters for DeleteBranch.
+message DeleteBranchRequest {
+  string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "diff_disk_source_disk_id_not_nil"
-      message: "source_disk_id must not be nil UUID"
+      id: "delete_branch_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 可选的目标虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID；省略时仅做两路差异或相对祖先比较）。
-  optional string target_disk_id = 2 [
+  string branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// DeleteBranchResponse defines the empty output for DeleteBranch.
+message DeleteBranchResponse {}
+
+// ResetBranchRequest defines input parameters for ResetBranch.
+message ResetBranchRequest {
+  string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "diff_disk_target_disk_id_not_nil"
-      message: "target_disk_id must not be nil UUID"
+      id: "reset_branch_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 可选的路径前缀过滤条件（最大 4096 字节，严禁包含空字节 '\x00'）。
-  bytes path_prefix = 3 [
-    (buf.validate.field).bytes.max_len = 4096,
+  string branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
     (buf.validate.field).cel = {
-      id: "diff_disk_path_prefix_no_nul"
-      message: "path_prefix cannot contain NUL byte"
-      expression: "!this.contains(b'\\x00')"
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
     }
   ];
 
-  // 是否仅返回存在冲突的条目。
-  bool conflicts_only = 4;
+  uint64 target_commit_id = 3 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
 
-  // 单页最大返回条数（最大不超过 1000）。
-  uint32 page_size = 5 [(buf.validate.field).uint32.lte = 1000];
+// ResetBranchResponse returns the updated branch metadata after reset.
+message ResetBranchResponse {
+  Branch branch = 1 [(buf.validate.field).required = true];
+}
 
-  // 游标分页令牌（最大 4096 字符，严禁包含空字节 '\x00'）。
-  string page_token = 6 [
+// CreateCommitRequest defines input parameters for CreateCommit.
+message CreateCommitRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "create_commit_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  string branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  string message = 3 [
+    (buf.validate.field).string.max_bytes = 4096,
+    (buf.validate.field).cel = {
+      id: "commit_message_no_nul"
+      message: "message cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// CreateCommitResponse returns the newly created commit.
+message CreateCommitResponse {
+  Commit commit = 1 [(buf.validate.field).required = true];
+}
+
+// ListCommitsRequest defines input parameters for ListCommits.
+message ListCommitsRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "list_commits_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  CommitKind kind = 2 [(buf.validate.field).enum.defined_only = true];
+  uint32 page_size = 3 [(buf.validate.field).uint32.lte = 1000];
+
+  string page_token = 4 [
     (buf.validate.field).string.max_len = 4096,
     (buf.validate.field).cel = {
-      id: "diff_disk_page_token_no_nul"
+      id: "list_commits_page_token_no_nul"
       message: "page_token cannot contain NUL byte"
       expression: "!this.contains('\\x00')"
     }
   ];
 }
 
-// DiffDiskResponse 定义 DiffDisk 接口输出参数。
-message DiffDiskResponse {
-  // 最近共同祖先快照标识。
-  string lca_snapshot_id = 1;
-
-  // 差异与冲突统计摘要。
-  DiffSummary summary = 2;
-
-  // 当前页差异条目列表。
-  repeated DiffEntry entries = 3;
-
-  // 下一页游标令牌（为空字符串表示已到达最后一页）。
-  string next_page_token = 4;
+// ListCommitsResponse returns a page of commits and the next cursor token.
+message ListCommitsResponse {
+  repeated Commit commits = 1;
+  string next_page_token = 2;
 }
 
-// ReadSnapshotNodeRequest 定义 ReadSnapshotNode 接口输入参数。
-message ReadSnapshotNodeRequest {
-  // 所属虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
+// DeleteCommitRequest defines input parameters for DeleteCommit.
+message DeleteCommitRequest {
   string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "read_snapshot_node_disk_id_not_nil"
+      id: "delete_commit_disk_id_not_nil"
       message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 目标不可变快照唯一标识符（UUID 格式，非全零 nil UUID）。
-  string snapshot_id = 2 [
+  uint64 commit_id = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+}
+
+// DeleteCommitResponse defines the empty output for DeleteCommit.
+message DeleteCommitResponse {}
+
+// PruneCommitsRequest defines input parameters for PruneCommits.
+message PruneCommitsRequest {
+  string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "read_snapshot_node_snapshot_id_not_nil"
-      message: "snapshot_id must not be nil UUID"
+      id: "prune_commits_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+}
+
+// PruneCommitsResponse returns the number of reclaimed unreachable commits.
+message PruneCommitsResponse {
+  uint32 reclaimed_count = 1;
+}
+
+// ReadCommitNodeRequest defines input parameters for ReadCommitNode.
+message ReadCommitNodeRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "read_commit_node_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 目标节点 Inode 编号（必须在 int64 正数区间内）。
+  uint64 commit_id = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
   uint64 ino = 3 [(buf.validate.field).uint64 = {
     gt: 0
     lte: 9223372036854775807
   }];
 
-  // 读取起始偏移量（必须在 int64 非负区间内）。
   uint64 offset = 4 [(buf.validate.field).uint64.lte = 9223372036854775807];
-
-  // 单次请求读取的字节大小上限（最大 4 MiB，即 4194304 字节）。
   uint32 size = 5 [(buf.validate.field).uint32.lte = 4194304];
 }
 
-// ReadSnapshotNodeResponse 定义 ReadSnapshotNode 接口输出参数。
-message ReadSnapshotNodeResponse {
-  // 节点 POSIX 文件模式位。
+// ReadCommitNodeResponse returns node metadata and file data or symlink target from a commit.
+message ReadCommitNodeResponse {
   uint32 mode = 1;
-
-  // 文件总字节大小。
   uint64 file_size = 2;
-
-  // 本次读取的文件内容字节切片。
   bytes data = 3;
-
-  // 是否已读取至文件末尾。
   bool eof = 4;
-
-  // 若目标节点为符号链接，返回其目标路径字节序列。
   bytes symlink_target = 5;
 }
 
-// MergeConflict 描述合并过程中发现的单个路径冲突详情。
-message MergeConflict {
-  // 冲突路径字节序列。
+// DiffKind identifies the change type of a path entry in a diff.
+enum DiffKind {
+  DIFF_KIND_UNSPECIFIED = 0;
+  DIFF_KIND_ADDED = 1;
+  DIFF_KIND_MODIFIED = 2;
+  DIFF_KIND_DELETED = 3;
+}
+
+// ConflictKind identifies the conflict category detected during three-way diff or merge.
+enum ConflictKind {
+  CONFLICT_KIND_UNSPECIFIED = 0;
+  CONFLICT_KIND_ADD_ADD = 1;
+  CONFLICT_KIND_CONTENT = 2;
+  CONFLICT_KIND_MODIFY_DELETE = 3;
+  CONFLICT_KIND_DELETE_MODIFY = 4;
+  CONFLICT_KIND_TREE_DELETE_MODIFY = 5;
+  CONFLICT_KIND_TYPE = 6;
+  CONFLICT_KIND_DIR_FILE = 7;
+  CONFLICT_KIND_ATTR = 8;
+  CONFLICT_KIND_XATTR = 9;
+  CONFLICT_KIND_XATTR_QUOTA = 10;
+  CONFLICT_KIND_SECURITY_ATTR = 11;
+  CONFLICT_KIND_HARDLINK = 12;
+}
+
+// MergeStrategy controls conflict resolution during MergeBranch.
+enum MergeStrategy {
+  MERGE_STRATEGY_UNSPECIFIED = 0;
+  MERGE_STRATEGY_FAIL = 1;
+  MERGE_STRATEGY_OURS = 2;
+  MERGE_STRATEGY_THEIRS = 3;
+}
+
+// DiffNodeSummary describes key inode metadata for one side of a diff or conflict entry.
+message DiffNodeSummary {
+  uint64 ino = 1;
+  uint32 mode = 2;
+  uint64 size = 3;
+}
+
+// DiffEntry describes a single path change and optional conflict detail.
+message DiffEntry {
   bytes path = 1;
+  DiffKind kind = 2;
+  ConflictKind conflict = 3;
+  optional DiffNodeSummary base = 4;
+  optional DiffNodeSummary target = 5;
+  optional DiffNodeSummary source = 6;
+}
 
-  // 冲突类型。
+// DiffSummary aggregates diff entry counts.
+message DiffSummary {
+  uint64 added = 1;
+  uint64 modified = 2;
+  uint64 deleted = 3;
+  uint64 conflicts = 4;
+}
+
+// DiffBranchesRequest defines input parameters for DiffBranches.
+message DiffBranchesRequest {
+  option (buf.validate.message).cel = {
+    id: "diff_branches_source_not_equal_target"
+    message: "source_branch and target_branch must be different"
+    expression: "this.source_branch != this.target_branch"
+  };
+
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "diff_branches_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  string source_branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "source_branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  string target_branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "target_branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  bytes path_prefix = 4 [
+    (buf.validate.field).bytes.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "diff_path_prefix_no_nul"
+      message: "path_prefix cannot contain NUL byte"
+      expression: "!this.contains(b'\\x00')"
+    }
+  ];
+
+  bool conflicts_only = 5;
+  uint32 page_size = 6 [(buf.validate.field).uint32.lte = 1000];
+
+  string page_token = 7 [
+    (buf.validate.field).string.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "diff_page_token_no_nul"
+      message: "page_token cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// DiffCommitsRequest defines input parameters for DiffCommits.
+message DiffCommitsRequest {
+  option (buf.validate.message).cel = {
+    id: "diff_commits_base_not_equal_source"
+    message: "base_commit_id and source_commit_id must be different"
+    expression: "this.base_commit_id != this.source_commit_id"
+  };
+
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "diff_commits_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  uint64 base_commit_id = 2 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  uint64 source_commit_id = 3 [(buf.validate.field).uint64 = {
+    gt: 0
+    lte: 9223372036854775807
+  }];
+
+  bytes path_prefix = 4 [
+    (buf.validate.field).bytes.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "diff_path_prefix_no_nul"
+      message: "path_prefix cannot contain NUL byte"
+      expression: "!this.contains(b'\\x00')"
+    }
+  ];
+
+  bool conflicts_only = 5;
+  uint32 page_size = 6 [(buf.validate.field).uint32.lte = 1000];
+
+  string page_token = 7 [
+    (buf.validate.field).string.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "diff_page_token_no_nul"
+      message: "page_token cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// DiffWorkRequest defines input parameters for DiffWork.
+message DiffWorkRequest {
+  string disk_id = 1 [
+    (buf.validate.field).string.uuid = true,
+    (buf.validate.field).cel = {
+      id: "diff_work_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
+      expression: "this != '00000000-0000-0000-0000-000000000000'"
+    }
+  ];
+
+  string branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+
+  bytes path_prefix = 3 [
+    (buf.validate.field).bytes.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "diff_path_prefix_no_nul"
+      message: "path_prefix cannot contain NUL byte"
+      expression: "!this.contains(b'\\x00')"
+    }
+  ];
+
+  bool conflicts_only = 4;
+  uint32 page_size = 5 [(buf.validate.field).uint32.lte = 1000];
+
+  string page_token = 6 [
+    (buf.validate.field).string.max_len = 4096,
+    (buf.validate.field).cel = {
+      id: "diff_page_token_no_nul"
+      message: "page_token cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
+}
+
+// DiffResponse is shared by DiffBranches, DiffCommits, and DiffWork.
+message DiffResponse {
+  uint64 base_commit_id = 1;
+  uint64 target_commit_id = 2;
+  uint64 source_commit_id = 3;
+  DiffSummary summary = 4;
+  repeated DiffEntry entries = 5;
+  string next_page_token = 6;
+}
+
+// MergeConflict describes a single conflicted path encountered during MergeBranch.
+message MergeConflict {
+  bytes path = 1;
   ConflictKind kind = 2;
-
-  // 共同祖先快照中的节点摘要（若存在）。
   optional DiffNodeSummary base = 3;
-
-  // 目标磁盘中的节点摘要（若存在）。
   optional DiffNodeSummary target = 4;
-
-  // 源磁盘中的节点摘要（若存在）。
   optional DiffNodeSummary source = 5;
 }
 
-// MergeConflictReport 汇总合并冲突报告。
+// MergeConflictReport summarizes merge conflicts returned when MergeBranch fails on conflict.
 message MergeConflictReport {
-  // 最近共同祖先快照标识。
-  string lca_snapshot_id = 1;
-
-  // 冲突总数（可能大于当前响应携带的截断列表长度）。
+  uint64 lca_commit_id = 1;
   uint64 total_conflicts = 2;
-
-  // 冲突明细列表。
   repeated MergeConflict conflicts = 3;
-
-  // 冲突列表是否因数量过多而被截断。
   bool conflicts_truncated = 4;
 }
 
-// MergeDiskRequest 定义 MergeDisk 接口输入参数。
-message MergeDiskRequest {
+// MergeBranchRequest defines input parameters for MergeBranch.
+message MergeBranchRequest {
   option (buf.validate.message).cel = {
-    id: "merge_disk_source_not_equal_target"
-    message: "source_disk_id and target_disk_id must be different"
-    expression: "this.source_disk_id != this.target_disk_id"
+    id: "merge_branch_source_not_equal_target"
+    message: "source_branch and target_branch must be different"
+    expression: "this.source_branch != this.target_branch"
   };
 
-  // 源虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID）。
-  string source_disk_id = 1 [
+  string disk_id = 1 [
     (buf.validate.field).string.uuid = true,
     (buf.validate.field).cel = {
-      id: "merge_disk_source_disk_id_not_nil"
-      message: "source_disk_id must not be nil UUID"
+      id: "merge_branch_disk_id_not_nil"
+      message: "disk_id must not be nil UUID"
       expression: "this != '00000000-0000-0000-0000-000000000000'"
     }
   ];
 
-  // 目标虚拟磁盘唯一标识符（UUID 格式，非全零 nil UUID，且不能与 source_disk_id 相同）。
-  string target_disk_id = 2 [
-    (buf.validate.field).string.uuid = true,
+  string source_branch = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
     (buf.validate.field).cel = {
-      id: "merge_disk_target_disk_id_not_nil"
-      message: "target_disk_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
+      id: "branch_no_nul"
+      message: "source_branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
     }
   ];
 
-  // 全局默认冲突解决策略（UNSPECIFIED 服务端按 FAIL 语义处理）。
-  MergeStrategy strategy = 3 [(buf.validate.field).enum.defined_only = true];
+  string target_branch = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_bytes: 255
+    },
+    (buf.validate.field).cel = {
+      id: "branch_no_nul"
+      message: "target_branch cannot contain NUL byte"
+      expression: "!this.contains('\\x00')"
+    }
+  ];
 
-  // 按路径前缀或精确路径覆盖的冲突解决策略映射。
-  map<string, MergeStrategy> path_strategies = 4 [
+  MergeStrategy strategy = 4 [(buf.validate.field).enum.defined_only = true];
+
+  map<string, MergeStrategy> path_strategies = 5 [
     (buf.validate.field).map.max_pairs = 4096,
     (buf.validate.field).map.keys = {
       string: {
@@ -2219,7 +2434,7 @@ message MergeDiskRequest {
       }
       cel: [
         {
-          id: "merge_disk_path_strategies_key_no_nul"
+          id: "merge_branch_path_strategies_key_no_nul"
           message: "path_strategies key cannot contain NUL byte"
           expression: "!this.contains('\\x00')"
         }
@@ -2231,158 +2446,27 @@ message MergeDiskRequest {
     }
   ];
 
-  // 是否仅执行预演检查而不实际提交合并结果。
-  bool dry_run = 5;
+  bool dry_run = 6;
+  bool no_fast_forward = 7;
 
-  // 可选的合并后目标盘容量配额上限字节数（指定时必须在 int64 正数区间内）。
-  optional uint64 max_bytes = 6 [
-    (buf.validate.field).uint64.gt = 0,
-    (buf.validate.field).uint64.lte = 9223372036854775807
-  ];
-
-  // 是否忽略在线挂载软租约门禁强制执行合并。
-  bool force = 7;
-}
-
-// MergeDiskResponse 定义 MergeDisk 接口输出参数。
-message MergeDiskResponse {
-  // 合并后更新的目标虚拟磁盘实体（dry_run 或冲突中止时可能为空）。
-  optional Disk disk = 1;
-
-  // 最近共同祖先快照标识。
-  string lca_snapshot_id = 2;
-
-  // 合并产生或复用的快照标识（dry_run 且非幂等无变更短路或冲突中止时为空）。
-  string merge_snapshot_id = 3;
-
-  // 预估或实际合并后的目标盘已用字节数。
-  uint64 estimated_used_bytes = 4;
-
-  // 合并后目标盘的容量配额上限字节数。
-  uint64 target_max_bytes = 5;
-
-  // 冲突报告（无冲突或非冲突失败时可能为空）。
-  optional MergeConflictReport conflict_report = 6;
-}
-
-// SnapshotKind identifies how a snapshot was created.
-enum SnapshotKind {
-  SNAPSHOT_KIND_UNSPECIFIED = 0;
-  SNAPSHOT_KIND_FORK = 1;
-  SNAPSHOT_KIND_MERGE = 2;
-  SNAPSHOT_KIND_MANUAL = 3;
-}
-
-// Snapshot describes a disk-anchored immutable snapshot without exposing lineage identifiers.
-message Snapshot {
-  string snapshot_id = 1;
-  string source_disk_id = 2;
-  string parent_snapshot_id = 3;
-  string merge_parent_snapshot_id = 4;
-  SnapshotKind kind = 5;
-  string name = 6;
-  bool protected = 7;
-  google.protobuf.Timestamp created_at = 8;
-}
-
-// CreateSnapshotRequest defines input parameters for CreateSnapshot.
-message CreateSnapshotRequest {
-  string disk_id = 1 [
-    (buf.validate.field).string.uuid = true,
+  string message = 8 [
+    (buf.validate.field).string.max_bytes = 4096,
     (buf.validate.field).cel = {
-      id: "create_snapshot_disk_id_not_nil"
-      message: "disk_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
-
-  string name = 2 [
-    (buf.validate.field).string.max_bytes = 255,
-    (buf.validate.field).cel = {
-      id: "create_snapshot_name_no_nul"
-      message: "name cannot contain NUL byte"
+      id: "commit_message_no_nul"
+      message: "message cannot contain NUL byte"
       expression: "!this.contains('\\x00')"
     }
   ];
 }
 
-// CreateSnapshotResponse returns the created manual snapshot.
-message CreateSnapshotResponse {
-  Snapshot snapshot = 1 [(buf.validate.field).required = true];
-}
-
-// ListSnapshotsRequest defines input parameters for ListSnapshots.
-message ListSnapshotsRequest {
-  string disk_id = 1 [
-    (buf.validate.field).string.uuid = true,
-    (buf.validate.field).cel = {
-      id: "list_snapshots_disk_id_not_nil"
-      message: "disk_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
-
-  SnapshotKind kind = 2 [(buf.validate.field).enum.defined_only = true];
-
-  uint32 page_size = 3 [(buf.validate.field).uint32.lte = 1000];
-
-  string page_token = 4 [
-    (buf.validate.field).string.max_len = 4096,
-    (buf.validate.field).cel = {
-      id: "list_snapshots_page_token_no_nul"
-      message: "page_token cannot contain NUL byte"
-      expression: "!this.contains('\\x00')"
-    }
-  ];
-}
-
-// ListSnapshotsResponse returns a page of lineage snapshots and the next cursor token.
-message ListSnapshotsResponse {
-  repeated Snapshot snapshots = 1;
-  string next_page_token = 2;
-}
-
-// DeleteSnapshotRequest defines input parameters for DeleteSnapshot.
-message DeleteSnapshotRequest {
-  string disk_id = 1 [
-    (buf.validate.field).string.uuid = true,
-    (buf.validate.field).cel = {
-      id: "delete_snapshot_disk_id_not_nil"
-      message: "disk_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
-
-  string snapshot_id = 2 [
-    (buf.validate.field).string.uuid = true,
-    (buf.validate.field).cel = {
-      id: "delete_snapshot_snapshot_id_not_nil"
-      message: "snapshot_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
-}
-
-// DeleteSnapshotResponse defines the empty output for DeleteSnapshot.
-message DeleteSnapshotResponse {}
-
-// PruneSnapshotsRequest defines input parameters for PruneSnapshots.
-message PruneSnapshotsRequest {
-  string disk_id = 1 [
-    (buf.validate.field).string.uuid = true,
-    (buf.validate.field).cel = {
-      id: "prune_snapshots_disk_id_not_nil"
-      message: "disk_id must not be nil UUID"
-      expression: "this != '00000000-0000-0000-0000-000000000000'"
-    }
-  ];
-
-  bool dry_run = 2;
-}
-
-// PruneSnapshotsResponse returns the pruned or candidate snapshots and count.
-message PruneSnapshotsResponse {
-  repeated Snapshot snapshots = 1;
-  uint32 reclaimed_count = 2;
-  bool dry_run = 3;
+// MergeBranchResponse returns the merge outcome, updated branch/commit, or conflict report.
+message MergeBranchResponse {
+  uint64 lca_commit_id = 1;
+  uint64 commit_id = 2;
+  bool fast_forward = 3;
+  bool up_to_date = 4;
+  uint64 writer_epoch = 5;
+  optional Branch branch = 6;
+  optional Commit commit = 7;
+  optional MergeConflictReport conflict_report = 8;
 }

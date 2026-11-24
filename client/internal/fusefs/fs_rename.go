@@ -160,6 +160,7 @@ func (fs *RawFS) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName, n
 		Flags:              protoFlags,
 		TargetOpenInClient: &targetOpen,
 		DiskId:             fs.cfg.DiskID,
+		Branch:             fs.cfg.Branch,
 		Epoch:              fs.cfg.Epoch,
 	}))
 	if err != nil {

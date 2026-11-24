@@ -39,16 +39,18 @@ func isSampledControlSpanName(name string) bool {
 	trimmed := strings.TrimPrefix(name, "/")
 	switch trimmed {
 	case strings.TrimPrefix(storagev1connect.StorageServiceCreateDiskProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServiceForkDiskProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceUpdateDiskProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceDeleteDiskProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServiceMountDiskProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServiceUnmountDiskProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceMountBranchProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceUnmountBranchProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceEvictMountsProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServiceMergeDiskProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServiceCreateSnapshotProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServiceDeleteSnapshotProcedure, "/"),
-		strings.TrimPrefix(storagev1connect.StorageServicePruneSnapshotsProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceForkBranchProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceDeleteBranchProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceResetBranchProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceMergeBranchProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceCreateCommitProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServiceDeleteCommitProcedure, "/"),
+		strings.TrimPrefix(storagev1connect.StorageServicePruneCommitsProcedure, "/"),
 		strings.TrimPrefix(storagev1connect.StorageServiceReclaimOrphanProcedure, "/"):
 		return true
 	default:

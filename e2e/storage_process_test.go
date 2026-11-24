@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -61,8 +63,8 @@ func buildStorageBinary(t *testing.T) string {
 	build := exec.CommandContext(ctx, "go", "-C", "../services/storage", "build", "-o", binary, "./cmd")
 	build.Env = append(os.Environ(), "GOWORK=off")
 	output, err := build.CombinedOutput()
-	require.NoError(t, ctx.Err(), "编译 `storage-service` 超时: %s", output)
-	require.NoError(t, err, "编译 `storage-service` 失败: %s", output)
+	require.NoError(t, ctx.Err(), "building storage-service timed out: %s", output)
+	require.NoError(t, err, "building storage-service failed: %s", output)
 	return binary
 }
 
@@ -112,9 +114,9 @@ func runStorageProcessExpectFailure(t *testing.T, binary string, env []string) (
 	cmd := exec.CommandContext(ctx, binary)
 	cmd.Env = append(append(os.Environ(), "OTEL_ENABLED=false"), env...)
 	output, err := cmd.CombinedOutput()
-	require.NoError(t, ctx.Err(), "`storage-service` 未在超时内退出: %s", output)
+	require.NoError(t, ctx.Err(), "storage-service did not exit within timeout: %s", output)
 	var exitErr *exec.ExitError
-	require.ErrorAs(t, err, &exitErr, "`storage-service` 必须以非零退出码失败: %s", output)
+	require.ErrorAs(t, err, &exitErr, "storage-service must exit with non-zero status: %s", output)
 	return exitErr.ExitCode(), string(output)
 }
 
@@ -151,11 +153,11 @@ func startStorageDaemon(t *testing.T, binary, dataDir string) (pubURL, adminURL 
 	pubURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(pubPort))
 	adminURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adminPort))
 	readyBody := waitHTTPStatus(t, adminURL+"/readyz", http.StatusOK)
-	require.Contains(t, readyBody, `"postgres":"ok"`, "管理端 `/readyz` 必须报告 PostgreSQL 就绪")
+	require.Contains(t, readyBody, `"postgres":"ok"`, "admin /readyz must report PostgreSQL ready")
 
 	stopAndWait = func() int {
 		require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
-		require.NoError(t, cmd.Wait(), "SIGTERM 必须触发零退出码优雅停机: %s", logs.String())
+		require.NoError(t, cmd.Wait(), "SIGTERM must trigger graceful zero-exit shutdown: %s", logs.String())
 		return cmd.ProcessState.ExitCode()
 	}
 	return pubURL, adminURL, logs, stopAndWait
@@ -175,7 +177,7 @@ func waitHTTPStatus(t *testing.T, rawURL string, wantStatus int) string {
 		require.NoError(c, readErr)
 		require.Equal(c, wantStatus, resp.StatusCode)
 		bodyText = string(raw)
-	}, 30*time.Second, 25*time.Millisecond, "等待 %s 返回状态码 %d 超时", rawURL, wantStatus)
+	}, 30*time.Second, 25*time.Millisecond, "waiting for %s status %d timed out", rawURL, wantStatus)
 	return bodyText
 }
 
@@ -190,7 +192,7 @@ func getHTTPStatusAndBody(t *testing.T, rawURL string, wantStatus int) string {
 	defer func() { _ = resp.Body.Close() }()
 	raw, readErr := io.ReadAll(resp.Body)
 	require.NoError(t, readErr)
-	require.Equal(t, wantStatus, resp.StatusCode, "GET %s 状态码不匹配: want=%d got=%d body=%s", rawURL, wantStatus, resp.StatusCode, string(raw))
+	require.Equal(t, wantStatus, resp.StatusCode, "GET %s status mismatch: want=%d got=%d body=%s", rawURL, wantStatus, resp.StatusCode, string(raw))
 	return string(raw)
 }
 
@@ -200,7 +202,7 @@ func TestStorageProcess_RejectsInvalidStartupConfig(t *testing.T) {
 	t.Run("missing DSN", func(t *testing.T) {
 		pubPort, adminPort := freeTCPPortPair(t)
 		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(pubPort, adminPort, t.TempDir(), ""))
-		require.NotZero(t, exitCode, "缺少 `DB_DSN` 必须非零退出: %s", output)
+		require.NotZero(t, exitCode, "missing DB_DSN must exit non-zero: %s", output)
 		require.Contains(t, output, "DB_DSN")
 	})
 
@@ -212,13 +214,20 @@ func TestStorageProcess_RejectsInvalidStartupConfig(t *testing.T) {
 		require.True(t, ok)
 		adminPort := freeTCPPort(t)
 		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(tcpAddr.Port, adminPort, t.TempDir(), storageTestDSN()))
-		require.NotZero(t, exitCode, "端口冲突必须非零退出: %s", output)
+		require.NotZero(t, exitCode, "port conflict must exit non-zero: %s", output)
 		require.Contains(t, output, "address already in use")
+	})
+
+	t.Run("unreachable postgres", func(t *testing.T) {
+		pubPort, adminPort := freeTCPPortPair(t)
+		closedPGPort := freeTCPPort(t)
+		unreachableDSN := fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/bowl?sslmode=disable&connect_timeout=2", closedPGPort)
+		exitCode, output := runStorageProcessExpectFailure(t, binary, storageProcessEnv(pubPort, adminPort, t.TempDir(), unreachableDSN))
+		require.NotZero(t, exitCode, "unreachable PostgreSQL must fail fast on boot: %s", output)
 	})
 }
 
 func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
-
 	binary := buildStorageBinary(t)
 	dataDir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), storageLifecycleTimeout)
@@ -244,6 +253,7 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	diskID := created.Msg.GetDisk().GetDiskId()
+	require.Equal(t, testutil.DefaultBranch, created.Msg.GetDisk().GetDefaultBranch())
 	t.Cleanup(func() {
 		cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stopCleanup()
@@ -258,23 +268,27 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	require.True(t, dirInfo.IsDir())
 
 	const tracedReqID = "e2e-req-trace-42"
-	tracedMount := connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID})
+	tracedMount := connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
+	})
 	tracedMount.Header().Set("X-Request-Id", tracedReqID)
-	mount1, err := client1.MountDisk(ctx, tracedMount)
+	mount1, err := client1.MountBranch(ctx, tracedMount)
 	require.NoError(t, err)
 	epoch1 := mount1.Msg.GetEpoch()
-	require.Equal(t, uint64(1), epoch1)
+	require.Positive(t, epoch1)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		assert.Contains(c, logs1.String(), `"request_id":"`+tracedReqID+`"`)
-	}, 5*time.Second, 15*time.Millisecond, "进程标准输出结构化日志必须携带入站 `X-Request-Id`")
+	}, 5*time.Second, 15*time.Millisecond, "structured stdout logs must carry inbound X-Request-Id")
 
 	fileResp, err := client1.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    diskID,
+		Branch:    testutil.DefaultBranch,
 		Epoch:     epoch1,
 		ParentIno: 1,
 		Name:      []byte("persisted.bin"),
-		Mode:      0o644,
+		Mode:      0o100644,
 	}))
 	require.NoError(t, err)
 	fileIno := fileResp.Msg.GetInode().GetIno()
@@ -282,18 +296,42 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	persistedPayload := []byte("persisted-across-sigterm")
 	_, err = client1.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
 		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
 		Epoch:  epoch1,
 		Ino:    fileIno,
 		Data:   persistedPayload,
 	}))
 	require.NoError(t, err)
 
-	mount2, err := client1.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
+	commitResp, err := client1.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  testutil.DefaultBranch,
+		Message: "pre-restart-commit",
+	}))
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), mount2.Msg.GetEpoch())
+	preRestartCommitID := commitResp.Msg.GetCommit().GetCommitId()
+
+	forkResp, err := client1.ForkBranch(ctx, connect.NewRequest(&storagev1.ForkBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: testutil.DefaultBranch,
+		NewBranch:    "feat",
+		Message:      "pre-restart-fork",
+	}))
+	require.NoError(t, err)
+	forkCommitID := forkResp.Msg.GetCommit().GetCommitId()
+
+	mount2, err := client1.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
+		Force:  true,
+	}))
+	require.NoError(t, err)
+	epoch2 := mount2.Msg.GetEpoch()
+	require.Equal(t, epoch1+1, epoch2)
 
 	_, err = client1.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
 		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
 		Epoch:  epoch1,
 		Ino:    fileIno,
 		Data:   []byte("stale"),
@@ -303,10 +341,9 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	metricsBody := getHTTPStatusAndBody(t, adminURL1+"/metrics", http.StatusOK)
 	require.Contains(t, metricsBody, "bowl_storage_disks_loaded")
 	require.Contains(t, metricsBody, "bowl_storage_logical_bytes")
-	require.Contains(t, metricsBody, "bowl_storage_inodes")
 	require.Contains(t, metricsBody, "rpc_server_call_duration")
 	require.Regexp(t, `(?m)^rpc_server_call_duration[^\n]*rpc_error_reason="EBUSY"`, metricsBody)
-	require.NotContains(t, metricsBody, diskID, "高基数 `disk_id` 严禁泄露至公开 Prometheus 指标")
+	require.NotContains(t, metricsBody, diskID, "high-cardinality disk_id must not leak into Prometheus metrics")
 	require.NotContains(t, metricsBody, "disk_id=")
 	require.NotContains(t, metricsBody, "bowl_disk_id=")
 	require.NotContains(t, metricsBody, "bowl_ino=")
@@ -318,27 +355,61 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 
 	gotAfterRestart, err := client2.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)
-	require.Equal(t, uint64(len(persistedPayload)), gotAfterRestart.Msg.GetDisk().GetUsedBytes())
+	require.Equal(t, testutil.DefaultBranch, gotAfterRestart.Msg.GetDisk().GetDefaultBranch())
+	require.GreaterOrEqual(t, gotAfterRestart.Msg.GetDisk().GetUsedBytes(), uint64(len(persistedPayload)))
 
-	readAfterRestart, err := client2.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+	readMainAfterRestart, err := client2.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
 		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
 		Ino:    fileIno,
 		Size:   uint32(len(persistedPayload)),
 	}))
 	require.NoError(t, err)
-	require.Equal(t, persistedPayload, readAfterRestart.Msg.GetData())
+	require.Equal(t, persistedPayload, readMainAfterRestart.Msg.GetData())
 
-	_, err = client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
+	readFeatAfterRestart, err := client2.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: diskID,
+		Branch: "feat",
+		Ino:    fileIno,
+		Size:   uint32(len(persistedPayload)),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, persistedPayload, readFeatAfterRestart.Msg.GetData())
+
+	branchesAfterRestart, err := client2.ListBranches(ctx, connect.NewRequest(&storagev1.ListBranchesRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Len(t, branchesAfterRestart.Msg.GetBranches(), 2)
+	require.True(t, slices.ContainsFunc(branchesAfterRestart.Msg.GetBranches(), func(b *storagev1.Branch) bool {
+		return b.GetName() == "feat" && b.GetHeadCommitId() == forkCommitID
+	}))
+
+	commitsAfterRestart, err := client2.ListCommits(ctx, connect.NewRequest(&storagev1.ListCommitsRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.True(t, slices.ContainsFunc(commitsAfterRestart.Msg.GetCommits(), func(c *storagev1.Commit) bool {
+		return c.GetCommitId() == preRestartCommitID && c.GetMessage() == "pre-restart-commit"
+	}))
+	require.True(t, slices.ContainsFunc(commitsAfterRestart.Msg.GetCommits(), func(c *storagev1.Commit) bool {
+		return c.GetCommitId() == forkCommitID && c.GetKind() == storagev1.CommitKind_COMMIT_KIND_FORK
+	}))
+
+	_, err = client2.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
+	}))
 	testutil.RequireConnectError(t, err, connect.CodeAborted, "EBUSY")
 
-	mount3, err := client2.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, Force: true}))
+	mount3, err := client2.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: testutil.DefaultBranch,
+		Force:  true,
+	}))
 	require.NoError(t, err)
-	require.Equal(t, uint64(3), mount3.Msg.GetEpoch(), "重启后写入世代号必须在持久化世代 2 基础上递增至 3")
+	require.Equal(t, epoch2+1, mount3.Msg.GetEpoch(), "writer epoch must increment from persisted epoch after restart")
 
 	_, err = client2.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	testutil.RequireConnectError(t, err, connect.CodeAborted, "EBUSY")
 
-	_, err = client2.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+	_, err = client2.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
 		DiskId:  diskID,
 		MountId: mount3.Msg.GetMountId(),
 	}))
@@ -347,7 +418,7 @@ func TestStorageProcess_DualPortAdminAndRestartRecovery(t *testing.T) {
 	_, err = client2.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)
 	_, deletedStatErr := os.Stat(diskDir)
-	require.ErrorIs(t, deletedStatErr, os.ErrNotExist, "`DeleteDisk` 必须彻底删除本地磁盘物理目录")
+	require.ErrorIs(t, deletedStatErr, os.ErrNotExist, "DeleteDisk must remove physical disk directory")
 
 	_, err = client2.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
 	testutil.RequireConnectError(t, err, connect.CodeNotFound, "ENOENT")

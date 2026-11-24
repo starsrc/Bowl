@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"cmp"
+	"errors"
 	"net/http"
 	"os"
 	"testing"
@@ -14,12 +15,14 @@ import (
 
 	"github.com/starsrc/pkg/serverx"
 
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
 const (
 	defaultStorageServiceAddr = "http://localhost:9000"
 	expectedErrorDomain       = "bowl.storage"
+	DefaultBranch             = "main"
 )
 
 func GetStorageServiceAddr() string {
@@ -64,13 +67,33 @@ func ExtractErrorInfo(err error) *errdetails.ErrorInfo {
 
 func RequireConnectError(t testing.TB, err error, wantCode connect.Code, wantReason string) {
 	t.Helper()
-	require.Error(t, err, "预期产生 RPC 错误，实际为 nil")
+	require.Error(t, err, "expected RPC error, got nil")
 
 	code := connect.CodeOf(err)
-	assert.Equal(t, wantCode, code, "RPC 错误码不匹配，want %v, got %v (err: %v)", wantCode, code, err)
+	assert.Equal(t, wantCode, code, "unexpected RPC code: want %v, got %v (err: %v)", wantCode, code, err)
 
 	info := ExtractErrorInfo(err)
-	require.NotNil(t, info, "RPC 错误详情中必须携带 *errdetails.ErrorInfo (err: %v)", err)
-	assert.Equal(t, expectedErrorDomain, info.GetDomain(), "ErrorInfo Domain 必须为 %s", expectedErrorDomain)
-	assert.Equal(t, wantReason, info.GetReason(), "ErrorInfo Reason 不匹配，want %s, got %s", wantReason, info.GetReason())
+	require.NotNil(t, info, "RPC error must carry *errdetails.ErrorInfo (err: %v)", err)
+	assert.Equal(t, expectedErrorDomain, info.GetDomain(), "ErrorInfo domain must be %s", expectedErrorDomain)
+	assert.Equal(t, wantReason, info.GetReason(), "ErrorInfo reason mismatch: want %s, got %s", wantReason, info.GetReason())
+}
+
+func RequireMergeConflictReport(t testing.TB, err error) *storagev1.MergeConflictReport {
+	t.Helper()
+	RequireConnectError(t, err, connect.CodeAborted, "ECONFLICT")
+
+	connErr, ok := errors.AsType[*connect.Error](err)
+	require.True(t, ok, "expected *connect.Error, got %T", err)
+
+	for _, detail := range connErr.Details() {
+		val, valErr := detail.Value()
+		if valErr != nil {
+			continue
+		}
+		if report, isReport := val.(*storagev1.MergeConflictReport); isReport {
+			return report
+		}
+	}
+	require.Fail(t, "MergeConflictReport detail not found on ECONFLICT error")
+	return nil
 }

@@ -21,7 +21,6 @@
 | 禁止手改路径 | 生成方式 | 源定义 |
 | --- | --- | --- |
 | `gen/**` | `task buf:generate` | `proto/storage/v1/storage.proto`、`buf.gen.yaml` |
-| `services/storage/internal/db/db.go`、`models.go`、`metadata.sql.go` | `task sqlc:generate` | `services/storage/db/migrations/`、`services/storage/db/queries/` |
 
 ## 3. 测试与质量守门
 

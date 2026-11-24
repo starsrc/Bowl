@@ -669,7 +669,109 @@ func (d *DiskStore) GetCommit(commitID uint64) (CommitMeta, error) {
 	return meta, nil
 }
 
+type DiskMetricsSnapshot struct {
+	UsedBytes          uint64
+	Inodes             uint64
+	ActiveBranchActors int
+	Pebble             *pebble.Metrics
+}
+
+func (d *DiskStore) allocatedInodes() uint64 {
+	cur := d.nextIno.Load()
+	if cur <= RootIno {
+		return 1
+	}
+	return cur - 1
+}
+
+func (d *DiskStore) MetricsSnapshot() DiskMetricsSnapshot {
+	if d.closing.Load() {
+		return DiskMetricsSnapshot{}
+	}
+	d.actorsMu.Lock()
+	branchCount := len(d.branchActors)
+	d.actorsMu.Unlock()
+
+	var used uint64
+	if d.packs != nil {
+		used = d.packs.PhysicalBytes()
+	}
+	var pm *pebble.Metrics
+	if d.db != nil && !d.closing.Load() {
+		pm = d.db.Metrics()
+	}
+	return DiskMetricsSnapshot{
+		UsedBytes:          used,
+		Inodes:             d.allocatedInodes(),
+		ActiveBranchActors: branchCount,
+		Pebble:             pm,
+	}
+}
+
 func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
+	return d.buildStatFS(d.allocatedInodes())
+}
+
+func (d *DiskStore) StatFSBranch(_ context.Context, branch string) (StatFSResult, error) {
+	if d.closing.Load() {
+		return StatFSResult{}, ErrClosed
+	}
+	if err := validateBranchName(branch); err != nil {
+		return StatFSResult{}, err
+	}
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	_, layers, err := resolveBranchLayers(snap, branch)
+	if err != nil {
+		return StatFSResult{}, err
+	}
+	liveInodes, err := countLiveInodes(snap, layers)
+	if err != nil {
+		return StatFSResult{}, err
+	}
+	return d.buildStatFS(liveInodes)
+}
+
+func countLiveInodes(r pebbleReader, layers []uint64) (uint64, error) {
+	seen := make(map[uint64]struct{})
+	var liveCount uint64
+	for _, layerID := range layers {
+		prefix := LayerInodePrefix(layerID)
+		iter, err := r.NewIter(&pebble.IterOptions{
+			LowerBound: prefix,
+			UpperBound: PrefixUpperBound(prefix),
+		})
+		if err != nil {
+			return 0, err
+		}
+		for iter.First(); iter.Valid(); iter.Next() {
+			_, ino, decErr := DecodeLayerInodeKey(iter.Key())
+			if decErr != nil {
+				_ = iter.Close()
+				return 0, decErr
+			}
+			if _, ok := seen[ino]; ok {
+				continue
+			}
+			seen[ino] = struct{}{}
+			tag, _, envErr := DecodeEnvelope(iter.Value())
+			if envErr != nil {
+				_ = iter.Close()
+				return 0, envErr
+			}
+			if tag == TagLive {
+				liveCount++
+			}
+		}
+		if closeErr := iter.Close(); closeErr != nil {
+			return 0, closeErr
+		}
+	}
+	return liveCount, nil
+}
+
+func (d *DiskStore) buildStatFS(files uint64) (StatFSResult, error) {
 	if d.closing.Load() {
 		return StatFSResult{}, ErrClosed
 	}
@@ -694,6 +796,8 @@ func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
 		Blocks:     blocks,
 		Bfree:      bavail,
 		Bavail:     bavail,
+		Files:      files,
+		Ffree:      0,
 		Namelen:    MaxFileNameBytes,
 	}, nil
 }

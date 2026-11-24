@@ -77,6 +77,7 @@ func (fs *RawFS) Create(_ <-chan struct{}, input *fuse.CreateIn, name string, ou
 		Gid:       input.Gid,
 		Flags:     ToProtoOpenFlags(input.Flags),
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
@@ -195,6 +196,7 @@ func (fs *RawFS) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.Open
 				Ino:    ino,
 				Size:   &zero,
 				DiskId: fs.cfg.DiskID,
+				Branch: fs.cfg.Branch,
 				Epoch:  fs.cfg.Epoch,
 			}))
 			done()
@@ -324,6 +326,7 @@ func (fs *RawFS) Fsync(cancel <-chan struct{}, input *fuse.FsyncIn) (status fuse
 		Fh:       0,
 		Datasync: input.FsyncFlags&1 != 0,
 		DiskId:   fs.cfg.DiskID,
+		Branch:   fs.cfg.Branch,
 		Epoch:    fs.cfg.Epoch,
 	}))
 	if err == nil || connect.CodeOf(err) == connect.CodeUnimplemented {

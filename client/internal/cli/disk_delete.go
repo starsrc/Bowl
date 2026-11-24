@@ -1,12 +1,9 @@
 package cli
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -18,14 +15,14 @@ import (
 )
 
 type diskDeleteJSON struct {
-	DiskID    string `json:"disk_id"`
-	Deleted   bool   `json:"deleted"`
-	Recursive bool   `json:"recursive,omitempty"`
+	DiskID  string `json:"disk_id"`
+	Deleted bool   `json:"deleted"`
 }
 
 var diskDeleteSpec = diskSubcommandSpec{
 	use:       "delete <disk-id>",
-	short:     "Delete a virtual disk",
+	aliases:   []string{"rm"},
+	short:     "Delete a virtual disk and all its branches and commits",
 	args:      cobra.ExactArgs(1),
 	uuidLabel: "disk-id",
 	spanName:  "cli.disk.delete",
@@ -33,26 +30,23 @@ var diskDeleteSpec = diskSubcommandSpec{
 	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
 		a := &diskDeleteAdapter{}
 		cmd.Flags().BoolVarP(&a.yes, "yes", "y", false, "Skip interactive confirmation prompt")
-		cmd.Flags().BoolVarP(&a.recursive, "recursive", "r", false, "Recursively delete this disk and all forked descendant disks")
 		return a
 	},
 }
 
 type diskDeleteAdapter struct {
-	diskID    string
-	yes       bool
-	recursive bool
+	diskID string
+	yes    bool
 }
 
-func (a *diskDeleteAdapter) finalize(_ *cobra.Command, posArgs []string) (bool, error) {
-	a.diskID = posArgs[0]
+func (a *diskDeleteAdapter) finalize(_ *cobra.Command, diskID string, _ []string) (bool, error) {
+	a.diskID = diskID
 	return false, nil
 }
 
 func (a *diskDeleteAdapter) spanAttrs() []attribute.KeyValue {
 	return []attribute.KeyValue{
 		attribute.String("bowl.disk_id", a.diskID),
-		attribute.Bool("bowl.recursive", a.recursive),
 	}
 }
 
@@ -72,23 +66,8 @@ func (a *diskDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIEr
 	}
 
 	if !a.yes {
-		if a.recursive {
-			fmt.Fprintf(stderr, "Delete virtual disk %s and all forked descendants? This action is irreversible [y/N]: ", a.diskID)
-		} else {
-			fmt.Fprintf(stderr, "Delete virtual disk %s? This action is irreversible [y/N]: ", a.diskID)
-		}
-		line, readErr := bufio.NewReader(ports.stdin).ReadString('\n')
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return &diskCLIError{
-				exitCode: 1,
-				msg:      fmt.Sprintf("read confirmation input: %v", readErr),
-			}
-		}
-		answer := strings.ToLower(strings.TrimSpace(line))
-		if answer != "y" && answer != "yes" {
-			fmt.Fprintln(stderr, "Operation canceled")
-			return &diskCLIError{exitCode: 1}
-		}
+		prompt := fmt.Sprintf("Delete virtual disk %s and all its branches and commits? This action is irreversible [y/N]: ", a.diskID)
+		return confirmInteractive(ports.stdin, stderr, prompt)
 	}
 
 	return nil
@@ -96,8 +75,7 @@ func (a *diskDeleteAdapter) preRPC(ports diskPorts, stderr io.Writer) *diskCLIEr
 
 func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
 	_, err := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
-		DiskId:    a.diskID,
-		Recursive: a.recursive,
+		DiskId: a.diskID,
 	}))
 	if err != nil {
 		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
@@ -106,16 +84,15 @@ func (a *diskDeleteAdapter) invoke(ctx context.Context, client storagev1connect.
 			checkInvalidArg:  true,
 			checkEBUSYReason: true,
 			preconditionMsg: func(id string, _ error) string {
-				return fmt.Sprintf("disk %s is still mounted with an active client session; unmount it, or run `bowl disk mounts %s` / `bowl disk evict %s` before deleting", id, id, id)
+				return fmt.Sprintf("disk %s is still mounted with an active client session; unmount it, or run `bowl lease list -d %s` / `bowl lease evict -d %s` before deleting", id, id, id)
 			},
 		})
 	}
 
 	return diskOutcome{
 		jsonPayload: diskDeleteJSON{
-			DiskID:    a.diskID,
-			Deleted:   true,
-			Recursive: a.recursive,
+			DiskID:  a.diskID,
+			Deleted: true,
 		},
 		renderHuman: func(w io.Writer) {
 			fmt.Fprintf(w, "Deleted virtual disk %s\n", a.diskID)

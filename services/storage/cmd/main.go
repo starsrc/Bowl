@@ -13,8 +13,7 @@ import (
 	"github.com/starsrc/pkg/observability/obsfx"
 
 	"github.com/starsrc/bowl/services/storage/internal/config"
-	"github.com/starsrc/bowl/services/storage/internal/control"
-	"github.com/starsrc/bowl/services/storage/internal/db"
+	"github.com/starsrc/bowl/services/storage/internal/projection"
 	"github.com/starsrc/bowl/services/storage/internal/server"
 )
 
@@ -39,8 +38,7 @@ func run(ctx context.Context, opts ...fx.Option) error {
 		fx.Supply(cfg),
 		config.Module,
 		obsfx.Module,
-		db.Module,
-		control.Module,
+		projection.Module,
 		server.Module,
 		fx.NopLogger,
 		fx.Provide(func() context.Context { return ctx }),

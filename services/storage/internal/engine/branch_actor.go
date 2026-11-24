@@ -57,6 +57,9 @@ const (
 	branchOpReset
 	branchOpMerge
 	branchOpRelocate
+	branchOpMount
+	branchOpRenewMount
+	branchOpEvictMount
 )
 
 type writeCmd struct {
@@ -208,7 +211,7 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cmd.epoch != 0 && cmd.epoch != branch.WriterEpoch {
+	if cmd.epoch != 0 && cmd.epoch != branch.WriterEpoch && !isMountBranchOp(cmd.op) {
 		return nil, ErrStaleEpoch
 	}
 
@@ -243,9 +246,19 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 		return a.execReset(batch, branch, cmd.req)
 	case branchOpMerge:
 		return a.execMerge(batch, branch, cmd.req)
+	case branchOpMount:
+		return a.execMountBranch(batch, branch, cmd.req)
+	case branchOpRenewMount:
+		return a.execRenewMount(batch, branch, cmd.req)
+	case branchOpEvictMount:
+		return a.execEvictMount(batch, branch, cmd.req)
 	default:
 		return nil, ErrInvalid
 	}
+}
+
+func isMountBranchOp(op branchOpKind) bool {
+	return op == branchOpMount || op == branchOpRenewMount || op == branchOpEvictMount
 }
 
 func (d *DiskStore) acquireBranchActor(branchName string) (*BranchActor, func(), error) {

@@ -166,6 +166,24 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		return nil, ErrInvalid
 	}
 
+	gateNow := a.disk.now().UnixNano()
+	tgtMounted, err := hasActiveMountOnReader(batch, branch.Name, gateNow, false)
+	if err != nil {
+		return nil, err
+	}
+	if tgtMounted {
+		return nil, ErrDiskMounted
+	}
+	if req.opts.SourceBranch != branch.Name {
+		srcMounted, srcMountErr := hasActiveMountOnReader(batch, req.opts.SourceBranch, gateNow, true)
+		if srcMountErr != nil {
+			return nil, srcMountErr
+		}
+		if srcMounted {
+			return nil, ErrDiskMounted
+		}
+	}
+
 	if a.disk.beforeMergeExecHook != nil {
 		if hookErr := a.disk.beforeMergeExecHook(req.opts.SourceBranch, branch.Name); hookErr != nil {
 			return nil, hookErr

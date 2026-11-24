@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -401,10 +402,13 @@ func TestStep11_Merge_DefaultFastForwardNoFastForwardAndUpToDateNoOp(t *testing.
 	dir := t.TempDir()
 	ctx := context.Background()
 
+	clk := newStepClock(time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC))
+
 	disk, err := OpenDisk(DiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-step11-ff",
 		BlockSize: 4096,
+		Now:       clk.Now,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -421,9 +425,10 @@ func TestStep11_Merge_DefaultFastForwardNoFastForwardAndUpToDateNoOp(t *testing.
 	cFeat, err := disk.Commit(ctx, "feat", "feat commit")
 	require.NoError(t, err)
 
-	mount, err := disk.RegisterMount(ctx, DefaultBranchName)
+	mount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
 	staleCtx := WithWriterEpoch(ctx, mount.WriterEpoch)
+	clk.Advance(31 * time.Second)
 
 	nextCmtBefore := disk.nextCmtID.Load()
 	nextLayerBefore := disk.nextLayerID.Load()

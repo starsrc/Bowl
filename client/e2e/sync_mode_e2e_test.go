@@ -418,7 +418,7 @@ func TestSyncMode_TmpfileLifecycle_SupportsLargeWritesFallocateFsyncLinkatExclus
 	require.Zero(t, finalSnap.Stage.CapacityBytes)
 
 	afterPromBytes, afterPromInodes := fetchDiskUsage(t, client, diskID)
-	require.GreaterOrEqual(t, afterPromBytes, baseBytes+writtenLen, "scene=sync_promoted_used_bytes want>=%d got=%d", baseBytes+writtenLen, afterPromBytes)
+	require.Equal(t, baseBytes+writtenLen-holeLen, afterPromBytes, "scene=sync_promoted_used_bytes want=%d got=%d", baseBytes+writtenLen-holeLen, afterPromBytes)
 	require.Equal(t, baseInodes+1, afterPromInodes, "scene=sync_promoted_used_inodes want=%d got=%d", baseInodes+1, afterPromInodes)
 
 	stopMount()

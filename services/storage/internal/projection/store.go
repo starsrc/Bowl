@@ -26,9 +26,6 @@ var (
 	ErrNotFound        = errors.New("projection: not found")
 	ErrInvalidArgument = errors.New("projection: invalid argument")
 	ErrUnavailable     = errors.New("projection: unavailable")
-	ErrBarrierTimeout  = errors.New("projection: flush barrier timeout")
-	ErrDiskDirty       = errors.New("projection: disk projection dirty")
-	ErrQueueClosed     = errors.New("projection: queue closed")
 )
 
 type DiskRecord struct {

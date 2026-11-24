@@ -50,10 +50,7 @@ var errorMappings = []errorMapping{
 	{sentinel: engine.ErrInvalidValue, code: codes.InvalidArgument, reason: "EINVAL"},
 	{sentinel: projection.ErrInvalidArgument, code: codes.InvalidArgument, reason: "EINVAL"},
 	{sentinel: engine.ErrClosed, code: codes.Internal, reason: "EIO"},
-	{sentinel: projection.ErrQueueClosed, code: codes.Internal, reason: "EIO"},
 	{sentinel: projection.ErrUnavailable, code: codes.Unavailable, reason: "EIO"},
-	{sentinel: projection.ErrBarrierTimeout, code: codes.Unavailable, reason: "EIO"},
-	{sentinel: projection.ErrDiskDirty, code: codes.Unavailable, reason: "EIO"},
 }
 
 func ToStatus(err error) *status.Status {

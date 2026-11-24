@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +29,7 @@ const (
 type DiskOptions struct {
 	Dir          string
 	DiskID       string
+	Name         string
 	MaxBytes     uint64
 	BlockSize    uint32
 	MaxPackSize  uint32
@@ -96,9 +99,19 @@ func newPebbleOptions(cache *pebble.Cache) *pebble.Options {
 	}
 }
 
+func validateDiskName(name string) error {
+	if len(name) > MaxFileNameBytes || strings.ContainsRune(name, '\x00') {
+		return ErrInvalid
+	}
+	return nil
+}
+
 func OpenDisk(opts DiskOptions) (*DiskStore, error) {
 	if opts.Dir == "" {
 		return nil, ErrInvalid
+	}
+	if err := validateDiskName(opts.Name); err != nil {
+		return nil, err
 	}
 	blockSize := opts.BlockSize
 	if blockSize != 0 {
@@ -197,6 +210,7 @@ func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) erro
 		}
 		if opts.MaxBytes > 0 && opts.MaxBytes != meta.MaxBytes {
 			meta.MaxBytes = opts.MaxBytes
+			meta.UpdatedAt = d.now().UnixNano()
 			if setErr := d.db.Set(MetaDiskKey(), EncodeDiskMeta(meta), pebble.Sync); setErr != nil {
 				return setErr
 			}
@@ -224,6 +238,7 @@ func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) erro
 
 	meta := DiskMeta{
 		DiskID:        diskID,
+		Name:          opts.Name,
 		DefaultBranch: DefaultBranchName,
 		MaxBytes:      opts.MaxBytes,
 		BlockSize:     blockSize,
@@ -231,6 +246,7 @@ func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) erro
 		ReservedLayer: mainWorkID + IDSegmentSize,
 		ReservedCmt:   initCommitID + IDSegmentSize,
 		CreatedAt:     nowNano,
+		UpdatedAt:     nowNano,
 	}
 
 	rootInode := Inode{
@@ -386,6 +402,58 @@ func (d *DiskStore) DiskMeta() DiskMeta {
 	return d.meta
 }
 
+func (d *DiskStore) UpdateDiskMeta(ctx context.Context, name *string, maxBytes *uint64) (DiskMeta, error) {
+	if d.closing.Load() {
+		return DiskMeta{}, ErrClosed
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return DiskMeta{}, err
+		}
+	}
+	if name == nil && maxBytes == nil {
+		return DiskMeta{}, ErrInvalid
+	}
+	if name != nil {
+		if err := validateDiskName(*name); err != nil {
+			return DiskMeta{}, err
+		}
+	}
+	if maxBytes != nil {
+		if *maxBytes == 0 || *maxBytes > math.MaxInt64 {
+			return DiskMeta{}, ErrInvalid
+		}
+	}
+
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
+
+	if d.closing.Load() {
+		return DiskMeta{}, ErrClosed
+	}
+	if maxBytes != nil && *maxBytes < d.packs.PhysicalBytes() {
+		return DiskMeta{}, ErrQuotaShrinkBelowUsed
+	}
+
+	metaCopy := d.meta
+	if name != nil {
+		metaCopy.Name = *name
+	}
+	if maxBytes != nil {
+		metaCopy.MaxBytes = *maxBytes
+	}
+	metaCopy.UpdatedAt = d.now().UnixNano()
+
+	if err := d.db.Set(MetaDiskKey(), EncodeDiskMeta(metaCopy), pebble.Sync); err != nil {
+		return DiskMeta{}, err
+	}
+	d.meta = metaCopy
+	if maxBytes != nil {
+		d.packs.SetMaxBytes(*maxBytes)
+	}
+	return metaCopy, nil
+}
+
 func (d *DiskStore) GetBranch(name string) (BranchMeta, error) {
 	if d.closing.Load() {
 		return BranchMeta{}, ErrClosed
@@ -412,8 +480,12 @@ func (d *DiskStore) ListBranches() ([]BranchMeta, error) {
 	if d.closing.Load() {
 		return nil, ErrClosed
 	}
+	return listBranchesFromReader(d.db)
+}
+
+func listBranchesFromReader(r pebbleReader) ([]BranchMeta, error) {
 	prefix := MetaBranchPrefix()
-	iter, err := d.db.NewIter(&pebble.IterOptions{
+	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: PrefixUpperBound(prefix),
 	})
@@ -436,6 +508,93 @@ func (d *DiskStore) ListBranches() ([]BranchMeta, error) {
 		return out[i].Name < out[j].Name
 	})
 	return out, nil
+}
+
+func (d *DiskStore) ListCommits() ([]CommitMeta, error) {
+	if d.closing.Load() {
+		return nil, ErrClosed
+	}
+	return listCommitsFromReader(d.db)
+}
+
+func listCommitsFromReader(r pebbleReader) ([]CommitMeta, error) {
+	prefix := MetaCommitPrefix()
+	iter, err := r.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: PrefixUpperBound(prefix),
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []CommitMeta
+	for iter.First(); iter.Valid(); iter.Next() {
+		meta, decErr := DecodeCommitMeta(iter.Value())
+		if decErr != nil {
+			_ = iter.Close()
+			return nil, decErr
+		}
+		out = append(out, meta)
+	}
+	if closeErr := iter.Close(); closeErr != nil {
+		return nil, closeErr
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
+}
+
+func readDiskMeta(r pebbleReader) (DiskMeta, error) {
+	val, closer, err := r.Get(MetaDiskKey())
+	if errors.Is(err, pebble.ErrNotFound) {
+		return DiskMeta{}, ErrNotFound
+	}
+	if err != nil {
+		return DiskMeta{}, err
+	}
+	meta, decErr := DecodeDiskMeta(val)
+	closeErr := closer.Close()
+	if decErr != nil || closeErr != nil {
+		return DiskMeta{}, errors.Join(decErr, closeErr)
+	}
+	return meta, nil
+}
+
+func (d *DiskStore) SnapshotControlMeta(now time.Time) (ControlSnapshot, error) {
+	if d.closing.Load() {
+		return ControlSnapshot{}, ErrClosed
+	}
+	if now.IsZero() {
+		now = d.now()
+	}
+
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	usedBytes := d.packs.PhysicalBytes()
+	diskMeta, err := readDiskMeta(snap)
+	if err != nil {
+		return ControlSnapshot{}, err
+	}
+	branches, err := listBranchesFromReader(snap)
+	if err != nil {
+		return ControlSnapshot{}, err
+	}
+	commits, err := listCommitsFromReader(snap)
+	if err != nil {
+		return ControlSnapshot{}, err
+	}
+	mounts, err := listActiveMountsFromReader(snap, "", now.UnixNano())
+	if err != nil {
+		return ControlSnapshot{}, err
+	}
+	return ControlSnapshot{
+		Disk:      diskMeta,
+		UsedBytes: usedBytes,
+		Branches:  branches,
+		Commits:   commits,
+		Mounts:    mounts,
+	}, nil
 }
 
 func (d *DiskStore) GetCommit(commitID uint64) (CommitMeta, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -190,10 +191,13 @@ func TestStep8_Reset_RollsBackWorkingLayerFencesStaleEpochAndAllowsUndoReset(t *
 	dir := t.TempDir()
 	ctx := context.Background()
 
+	clk := newStepClock(time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC))
+
 	disk, err := OpenDisk(DiskOptions{
 		Dir:       dir,
 		DiskID:    "disk-reset",
 		BlockSize: 4096,
+		Now:       clk.Now,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -212,12 +216,14 @@ func TestStep8_Reset_RollsBackWorkingLayerFencesStaleEpochAndAllowsUndoReset(t *
 	c2, err := disk.Commit(ctx, DefaultBranchName, "c2")
 	require.NoError(t, err)
 
-	mount, err := disk.RegisterMount(ctx, DefaultBranchName)
+	mount, err := disk.MountBranch(ctx, DefaultBranchName, false, false, 30*time.Second)
 	require.NoError(t, err)
 	staleCtx := WithWriterEpoch(ctx, mount.WriterEpoch)
 
 	_, err = disk.Write(staleCtx, DefaultBranchName, f.Ino, 0, []byte("dirty-uncommitted"))
 	require.NoError(t, err)
+
+	clk.Advance(31 * time.Second)
 
 	resetMeta, err := disk.Reset(ctx, DefaultBranchName, c1.ID)
 	require.NoError(t, err)

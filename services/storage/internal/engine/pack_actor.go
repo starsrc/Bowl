@@ -194,6 +194,10 @@ func (p *PackActor) MaxBytes() uint64 {
 	return p.maxBytes.Load()
 }
 
+func (p *PackActor) SetMaxBytes(maxBytes uint64) {
+	p.maxBytes.Store(maxBytes)
+}
+
 func (p *PackActor) submit(ctx context.Context, cmd *packCmd) error {
 	p.mb.mu.Lock()
 	if p.mb.closed {

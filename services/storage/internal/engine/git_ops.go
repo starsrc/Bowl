@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/google/uuid"
 )
 
 func validateBranchName(name string) error {
@@ -237,8 +236,15 @@ func (a *BranchActor) execReset(batch *pebble.Batch, branch BranchMeta, raw any)
 	if !ok {
 		return BranchMeta{}, ErrInvalid
 	}
-	if _, err := readCommitMeta(batch, req.targetCommitID); err != nil {
+	mounted, err := hasActiveMountOnReader(batch, branch.Name, a.disk.now().UnixNano(), false)
+	if err != nil {
 		return BranchMeta{}, err
+	}
+	if mounted {
+		return BranchMeta{}, ErrDiskMounted
+	}
+	if _, cmtErr := readCommitMeta(batch, req.targetCommitID); cmtErr != nil {
+		return BranchMeta{}, cmtErr
 	}
 	newWorkID, err := a.disk.allocLayerID()
 	if err != nil {
@@ -281,6 +287,17 @@ func (d *DiskStore) DeleteBranch(_ context.Context, branch string) error {
 	if err != nil {
 		return err
 	}
+	mounted, err := hasActiveMountOnReader(d.db, branch, d.now().UnixNano(), false)
+	if err != nil {
+		return err
+	}
+	if mounted {
+		return ErrDiskMounted
+	}
+	staleMounts, err := listAllMountsFromReader(d.db, branch)
+	if err != nil {
+		return err
+	}
 	d.removeBranchActor(branch)
 
 	batch := d.db.NewBatch()
@@ -288,6 +305,11 @@ func (d *DiskStore) DeleteBranch(_ context.Context, branch string) error {
 
 	if delErr := batch.Delete(MetaBranchKey(branch), nil); delErr != nil {
 		return delErr
+	}
+	for _, m := range staleMounts {
+		if delErr := batch.Delete(MetaMountKey(m.ID), nil); delErr != nil {
+			return delErr
+		}
 	}
 	if bm.WorkLayerID != 0 {
 		start, end := LayerRangeBounds(bm.WorkLayerID)
@@ -466,56 +488,4 @@ func (d *DiskStore) PruneCommits(_ context.Context) (int, error) {
 		return 0, commitErr
 	}
 	return len(unreachable), nil
-}
-
-func (d *DiskStore) RegisterMount(_ context.Context, branch string) (MountMeta, error) {
-	if d.closing.Load() {
-		return MountMeta{}, ErrClosed
-	}
-	bm, err := d.GetBranch(branch)
-	if err != nil {
-		return MountMeta{}, err
-	}
-	mount := MountMeta{
-		ID:          uuid.NewString(),
-		BranchName:  branch,
-		WriterEpoch: bm.WriterEpoch,
-		MountedAt:   d.now().UnixNano(),
-	}
-	if setErr := d.db.Set(MetaMountKey(mount.ID), EncodeMountMeta(mount), pebble.Sync); setErr != nil {
-		return MountMeta{}, setErr
-	}
-	return mount, nil
-}
-
-func (d *DiskStore) GetMount(mountID string) (MountMeta, error) {
-	if d.closing.Load() {
-		return MountMeta{}, ErrClosed
-	}
-	if mountID == "" {
-		return MountMeta{}, ErrInvalid
-	}
-	val, closer, err := d.db.Get(MetaMountKey(mountID))
-	if errors.Is(err, pebble.ErrNotFound) {
-		return MountMeta{}, ErrNotFound
-	}
-	if err != nil {
-		return MountMeta{}, err
-	}
-	meta, decErr := DecodeMountMeta(val)
-	closeErr := closer.Close()
-	if decErr != nil || closeErr != nil {
-		return MountMeta{}, errors.Join(decErr, closeErr)
-	}
-	return meta, nil
-}
-
-func (d *DiskStore) Unmount(_ context.Context, mountID string) error {
-	if d.closing.Load() {
-		return ErrClosed
-	}
-	if mountID == "" {
-		return ErrInvalid
-	}
-	return d.db.Delete(MetaMountKey(mountID), pebble.Sync)
 }

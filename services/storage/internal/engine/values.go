@@ -15,6 +15,7 @@ const (
 
 type DiskMeta struct {
 	DiskID        string
+	Name          string
 	DefaultBranch string
 	MaxBytes      uint64
 	BlockSize     uint32
@@ -22,6 +23,7 @@ type DiskMeta struct {
 	ReservedLayer uint64
 	ReservedCmt   uint64
 	CreatedAt     int64
+	UpdatedAt     int64
 }
 
 type BranchMeta struct {
@@ -46,8 +48,24 @@ type CommitMeta struct {
 type MountMeta struct {
 	ID          string
 	BranchName  string
+	ReadOnly    bool
 	WriterEpoch uint64
 	MountedAt   int64
+	ExpiresAt   int64
+}
+
+type EvictMountsResult struct {
+	EvictedCount    uint32
+	EvictedMountIDs []string
+	UpdatedBranches []BranchMeta
+}
+
+type ControlSnapshot struct {
+	Disk      DiskMeta
+	UsedBytes uint64
+	Branches  []BranchMeta
+	Commits   []CommitMeta
+	Mounts    []MountMeta
 }
 
 type Inode struct {
@@ -147,8 +165,9 @@ func DecodeEnvelope(raw []byte) (tag byte, payload []byte, err error) {
 
 func EncodeDiskMeta(m DiskMeta) []byte {
 	diskIDLen := len(m.DiskID)
+	nameLen := len(m.Name)
 	defBranchLen := len(m.DefaultBranch)
-	out := make([]byte, 1+4+diskIDLen+4+defBranchLen+8+4+8+8+8+8)
+	out := make([]byte, 1+4+diskIDLen+4+nameLen+4+defBranchLen+52)
 	off := 0
 	out[off] = codecVersion
 	off++
@@ -156,6 +175,10 @@ func EncodeDiskMeta(m DiskMeta) []byte {
 	off += 4
 	copy(out[off:off+diskIDLen], m.DiskID)
 	off += diskIDLen
+	binary.BigEndian.PutUint32(out[off:off+4], uint32(nameLen))
+	off += 4
+	copy(out[off:off+nameLen], m.Name)
+	off += nameLen
 	binary.BigEndian.PutUint32(out[off:off+4], uint32(defBranchLen))
 	off += 4
 	copy(out[off:off+defBranchLen], m.DefaultBranch)
@@ -171,30 +194,40 @@ func EncodeDiskMeta(m DiskMeta) []byte {
 	binary.BigEndian.PutUint64(out[off:off+8], m.ReservedCmt)
 	off += 8
 	binary.BigEndian.PutUint64(out[off:off+8], uint64(m.CreatedAt))
+	off += 8
+	binary.BigEndian.PutUint64(out[off:off+8], uint64(m.UpdatedAt))
 	return out
 }
 
 func DecodeDiskMeta(b []byte) (DiskMeta, error) {
-	if len(b) < 1+4+4+44 || b[0] != codecVersion {
+	if len(b) < 1+4+4+4+52 || b[0] != codecVersion {
 		return DiskMeta{}, ErrInvalidValue
 	}
 	off := 1
 	diskIDLen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	if off+diskIDLen+4 > len(b) {
+	if diskIDLen < 0 || off+diskIDLen+4 > len(b) {
 		return DiskMeta{}, ErrInvalidValue
 	}
 	diskID := string(b[off : off+diskIDLen])
 	off += diskIDLen
+	nameLen := int(binary.BigEndian.Uint32(b[off : off+4]))
+	off += 4
+	if nameLen < 0 || off+nameLen+4 > len(b) {
+		return DiskMeta{}, ErrInvalidValue
+	}
+	name := string(b[off : off+nameLen])
+	off += nameLen
 	defBranchLen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	if off+defBranchLen+44 != len(b) {
+	if defBranchLen < 0 || off+defBranchLen+52 != len(b) {
 		return DiskMeta{}, ErrInvalidValue
 	}
 	defBranch := string(b[off : off+defBranchLen])
 	off += defBranchLen
 	m := DiskMeta{
 		DiskID:        diskID,
+		Name:          name,
 		DefaultBranch: defBranch,
 		MaxBytes:      binary.BigEndian.Uint64(b[off : off+8]),
 		BlockSize:     binary.BigEndian.Uint32(b[off+8 : off+12]),
@@ -202,6 +235,7 @@ func DecodeDiskMeta(b []byte) (DiskMeta, error) {
 		ReservedLayer: binary.BigEndian.Uint64(b[off+20 : off+28]),
 		ReservedCmt:   binary.BigEndian.Uint64(b[off+28 : off+36]),
 		CreatedAt:     int64(binary.BigEndian.Uint64(b[off+36 : off+44])),
+		UpdatedAt:     int64(binary.BigEndian.Uint64(b[off+44 : off+52])),
 	}
 	return m, nil
 }
@@ -280,7 +314,7 @@ func DecodeCommitMeta(b []byte) (CommitMeta, error) {
 func EncodeMountMeta(m MountMeta) []byte {
 	idLen := len(m.ID)
 	branchLen := len(m.BranchName)
-	out := make([]byte, 1+4+idLen+4+branchLen+16)
+	out := make([]byte, 1+4+idLen+4+branchLen+25)
 	off := 0
 	out[off] = codecVersion
 	off++
@@ -292,35 +326,47 @@ func EncodeMountMeta(m MountMeta) []byte {
 	off += 4
 	copy(out[off:off+branchLen], m.BranchName)
 	off += branchLen
+	if m.ReadOnly {
+		out[off] = 1
+	}
+	off++
 	binary.BigEndian.PutUint64(out[off:off+8], m.WriterEpoch)
 	binary.BigEndian.PutUint64(out[off+8:off+16], uint64(m.MountedAt))
+	binary.BigEndian.PutUint64(out[off+16:off+24], uint64(m.ExpiresAt))
 	return out
 }
 
 func DecodeMountMeta(b []byte) (MountMeta, error) {
-	if len(b) < 1+4+4+16 || b[0] != codecVersion {
+	if len(b) < 1+4+4+25 || b[0] != codecVersion {
 		return MountMeta{}, ErrInvalidValue
 	}
 	off := 1
 	idLen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	if off+idLen+4 > len(b) {
+	if idLen < 0 || off+idLen+4 > len(b) {
 		return MountMeta{}, ErrInvalidValue
 	}
 	id := string(b[off : off+idLen])
 	off += idLen
 	branchLen := int(binary.BigEndian.Uint32(b[off : off+4]))
 	off += 4
-	if off+branchLen+16 != len(b) {
+	if branchLen < 0 || off+branchLen+25 != len(b) {
 		return MountMeta{}, ErrInvalidValue
 	}
 	branchName := string(b[off : off+branchLen])
 	off += branchLen
+	if b[off] != 0 && b[off] != 1 {
+		return MountMeta{}, ErrInvalidValue
+	}
+	readOnly := b[off] == 1
+	off++
 	return MountMeta{
 		ID:          id,
 		BranchName:  branchName,
+		ReadOnly:    readOnly,
 		WriterEpoch: binary.BigEndian.Uint64(b[off : off+8]),
 		MountedAt:   int64(binary.BigEndian.Uint64(b[off+8 : off+16])),
+		ExpiresAt:   int64(binary.BigEndian.Uint64(b[off+16 : off+24])),
 	}, nil
 }
 

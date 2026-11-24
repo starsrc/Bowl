@@ -13,6 +13,10 @@ import (
 )
 
 func (m *ControlManager) ReconcileDisk(ctx context.Context, diskID uuid.UUID) error {
+	return m.reconcileDisk(ctx, diskID, false, false)
+}
+
+func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, onlyIfDirty, onlyIfCatalog bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -29,11 +33,15 @@ func (m *ControlManager) ReconcileDisk(ctx context.Context, diskID uuid.UUID) er
 	unlock := m.lockDisk(diskID)
 	defer unlock()
 
-	if err := m.queue.WaitLaneIdle(ctx, diskID, m.opTimeout); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	gen, hasDirty := m.queue.DirtyGeneration(diskID)
+	st, hasDirty := m.queue.dirtyInfo(diskID)
+	if onlyIfDirty && (!hasDirty || (onlyIfCatalog && !st.catalog)) {
+		return nil
+	}
+	gen := st.gen
 
 	m.poolMu.RLock()
 	if m.closed {
@@ -166,7 +174,7 @@ func (m *ControlManager) ReconcileDirtyDisks(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := m.ReconcileDisk(ctx, diskID); err != nil {
+		if err := m.reconcileDisk(ctx, diskID, true, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -259,7 +267,6 @@ func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, diskID uuid.UUID,
 	}
 
 	if st, stErr := entry.store.StatFS(ctx); stErr == nil {
-		_ = m.queue.WaitDisk(ctx, diskID, m.barrierTimeout)
 		m.queue.RecordUsage(diskID, st.UsedBytes)
 		m.queue.FlushBatches(ctx)
 	}

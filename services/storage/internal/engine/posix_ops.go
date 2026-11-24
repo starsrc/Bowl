@@ -340,7 +340,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 		_ = snap.Close()
 
 		if len(toAppend) > 0 {
-			refs, appErr := d.packs.AppendBlocks(ctx, toAppend, false)
+			refs, appErr := d.packs.AppendBlocks(ctx, toAppend)
 			if appErr != nil {
 				return appErr
 			}
@@ -366,7 +366,7 @@ func (d *DiskStore) Fallocate(ctx context.Context, branch string, ino, offset, l
 	return err
 }
 
-func (a *BranchActor) execFallocate(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) error {
+func (a *BranchActor) execFallocate(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) error {
 	req, ok := raw.(*fallocateReq)
 	if !ok {
 		return ErrInvalid
@@ -395,20 +395,55 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, branch BranchMeta, laye
 		newSize = end
 	}
 
+	var (
+		fullDropBlks   []uint64
+		workOwnedDelta int64
+		logicalDelta   int64
+	)
 	if req.zeroRange {
 		fullStart := (req.offset + blkSize - 1) / blkSize
 		if end >= blkSize {
 			fullEnd := (end / blkSize) - 1
 			if fullStart <= fullEnd {
-				liveBlks, listErr := overlayListLiveBlocksRange(batch, layers, inode.Ino, fullStart, fullEnd)
+				liveBlks, dropWork, dropEff, listErr := overlayCollectLiveBlocksRange(batch, layers, inode.Ino, fullStart, fullEnd)
 				if listErr != nil {
 					return listErr
 				}
-				for _, blkIdx := range liveBlks {
-					if setErr := batch.Set(LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
-						return setErr
-					}
-				}
+				fullDropBlks = liveBlks
+				workOwnedDelta -= int64(dropWork)
+				logicalDelta -= int64(dropEff)
+			}
+		}
+		for _, upd := range req.partialUpdates {
+			oldWorkLen, workErr := readLayerDataRefLen(batch, work, inode.Ino, upd.blockIdx)
+			if workErr != nil {
+				return workErr
+			}
+			oldEffLen, effErr := overlayGetDataRefLen(batch, layers, inode.Ino, upd.blockIdx)
+			if effErr != nil {
+				return effErr
+			}
+			if upd.tombstone {
+				workOwnedDelta -= int64(oldWorkLen)
+				logicalDelta -= int64(oldEffLen)
+			} else {
+				newLen := uint64(upd.ref.Length)
+				workOwnedDelta += int64(newLen) - int64(oldWorkLen)
+				logicalDelta += int64(newLen) - int64(oldEffLen)
+			}
+		}
+	}
+
+	if workOwnedDelta > 0 {
+		if resErr := quota.reserve(uint64(workOwnedDelta)); resErr != nil {
+			return resErr
+		}
+	}
+
+	if req.zeroRange {
+		for _, blkIdx := range fullDropBlks {
+			if setErr := batch.Set(LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
+				return setErr
 			}
 		}
 		for _, upd := range req.partialUpdates {
@@ -441,5 +476,17 @@ func (a *BranchActor) execFallocate(batch *pebble.Batch, branch BranchMeta, laye
 	if err != nil {
 		return err
 	}
-	return batch.Set(LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil)
+	if setErr := batch.Set(LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
+		return setErr
+	}
+	if workOwnedDelta != 0 || logicalDelta != 0 {
+		applyBranchByteDeltas(&branch, workOwnedDelta, logicalDelta)
+		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+			return setErr
+		}
+	}
+	if workOwnedDelta < 0 {
+		quota.release(uint64(-workOwnedDelta))
+	}
+	return nil
 }

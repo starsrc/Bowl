@@ -278,27 +278,72 @@ func overlayListXattr(r pebbleReader, layers []uint64, ino uint64) ([]string, er
 	return names, nil
 }
 
-func overlayListLiveBlocks(r pebbleReader, layers []uint64, ino, minBlockIdx uint64) ([]uint64, error) {
-	return overlayListLiveBlocksRange(r, layers, ino, minBlockIdx, math.MaxUint64)
+func readLayerDataRefLen(r pebbleReader, layerID, ino, blockIdx uint64) (uint64, error) {
+	val, closer, err := r.Get(LayerDataKey(layerID, ino, blockIdx))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	tag, payload, decErr := DecodeEnvelope(val)
+	var ref BlobRef
+	if decErr == nil && tag == TagLive {
+		ref, decErr = DecodeBlobRef(payload)
+	}
+	closeErr := closer.Close()
+	if decErr != nil || closeErr != nil {
+		return 0, errors.Join(decErr, closeErr)
+	}
+	if tag != TagLive {
+		return 0, nil
+	}
+	return uint64(ref.Length), nil
 }
 
-func overlayListLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBlockIdx, maxBlockIdx uint64) ([]uint64, error) {
+func overlayGetDataRefLen(r pebbleReader, layers []uint64, ino, blockIdx uint64) (uint64, error) {
+	ref, exists, err := overlayGetDataRef(r, layers, ino, blockIdx)
+	if err != nil || !exists {
+		return 0, err
+	}
+	return uint64(ref.Length), nil
+}
+
+func saturatingSub(a, b uint64) uint64 {
+	if a <= b {
+		return 0
+	}
+	return a - b
+}
+
+func applySignedDelta(base uint64, delta int64) uint64 {
+	if delta >= 0 {
+		return base + uint64(delta)
+	}
+	return saturatingSub(base, uint64(-delta))
+}
+
+func applyBranchByteDeltas(branch *BranchMeta, workOwnedDelta, logicalDelta int64) {
+	branch.WorkOwnedBytes = applySignedDelta(branch.WorkOwnedBytes, workOwnedDelta)
+	branch.LogicalBytes = applySignedDelta(branch.LogicalBytes, logicalDelta)
+}
+
+func overlayCollectLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBlockIdx, maxBlockIdx uint64) (live []uint64, workBytes, effBytes uint64, err error) {
 	seen := make(map[uint64]struct{})
-	var live []uint64
-	for _, layerID := range layers {
+	for i, layerID := range layers {
 		prefix := LayerDataPrefix(layerID, ino)
-		iter, err := r.NewIter(&pebble.IterOptions{
+		iter, iterErr := r.NewIter(&pebble.IterOptions{
 			LowerBound: prefix,
 			UpperBound: PrefixUpperBound(prefix),
 		})
-		if err != nil {
-			return nil, err
+		if iterErr != nil {
+			return nil, 0, 0, iterErr
 		}
 		for iter.First(); iter.Valid(); iter.Next() {
 			_, _, blkIdx, decKeyErr := DecodeLayerDataKey(iter.Key())
 			if decKeyErr != nil {
 				_ = iter.Close()
-				return nil, decKeyErr
+				return nil, 0, 0, decKeyErr
 			}
 			if blkIdx < minBlockIdx || blkIdx > maxBlockIdx {
 				continue
@@ -307,20 +352,30 @@ func overlayListLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBlockId
 				continue
 			}
 			seen[blkIdx] = struct{}{}
-			tag, _, decErr := DecodeEnvelope(iter.Value())
+			tag, payload, decErr := DecodeEnvelope(iter.Value())
 			if decErr != nil {
 				_ = iter.Close()
-				return nil, decErr
+				return nil, 0, 0, decErr
 			}
 			if tag == TagLive {
+				ref, refErr := DecodeBlobRef(payload)
+				if refErr != nil {
+					_ = iter.Close()
+					return nil, 0, 0, refErr
+				}
+				blen := uint64(ref.Length)
+				if i == 0 {
+					workBytes += blen
+				}
+				effBytes += blen
 				live = append(live, blkIdx)
 			}
 		}
 		if closeErr := iter.Close(); closeErr != nil {
-			return nil, closeErr
+			return nil, 0, 0, closeErr
 		}
 	}
-	return live, nil
+	return live, workBytes, effBytes, nil
 }
 
 func layerHasAnyKey(r pebbleReader, layerID uint64) (bool, error) {

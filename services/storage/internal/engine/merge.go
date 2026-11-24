@@ -239,8 +239,14 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 
 	nowNano := a.disk.now().UnixNano()
 	if lca == oldTargetHead && !req.opts.NoFastForward {
+		srcHeadCmt, cmtErr := readCommitMeta(srcReader, srcBranch.HeadCommitID)
+		if cmtErr != nil {
+			return nil, cmtErr
+		}
 		branch.HeadCommitID = srcBranch.HeadCommitID
 		branch.WriterEpoch++
+		branch.WorkOwnedBytes = 0
+		branch.LogicalBytes = srcHeadCmt.LogicalBytes
 		branch.UpdatedAt = nowNano
 		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 			return nil, setErr
@@ -255,7 +261,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 		}, nil
 	}
 
-	_, targetLayers, err := resolveCommitLayers(batch, oldTargetHead)
+	targetHeadCmt, targetLayers, err := resolveCommitLayers(batch, oldTargetHead)
 	if err != nil {
 		return nil, err
 	}
@@ -321,17 +327,22 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 	if msg == "" {
 		msg = "merge " + req.opts.SourceBranch + " into " + branch.Name
 	}
+	mergeLogical := applySignedDelta(targetHeadCmt.LogicalBytes, plan.logicalDelta)
 	cmt := CommitMeta{
 		ID:            commitID,
 		ParentID:      oldTargetHead,
 		MergeParentID: srcBranch.HeadCommitID,
 		LayerID:       mergeLayerID,
 		Kind:          CommitKindMerge,
+		OwnedBytes:    0,
+		LogicalBytes:  mergeLogical,
 		Message:       msg,
 		CreatedAt:     nowNano,
 	}
 	branch.HeadCommitID = commitID
 	branch.WriterEpoch++
+	branch.WorkOwnedBytes = 0
+	branch.LogicalBytes = mergeLogical
 	branch.UpdatedAt = nowNano
 
 	if setErr := batch.Set(MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
@@ -399,8 +410,9 @@ type plannedInodeWrite struct {
 }
 
 type deltaMergePlan struct {
-	summary DiffSummary
-	deltaKV map[string][]byte
+	summary      DiffSummary
+	deltaKV      map[string][]byte
+	logicalDelta int64
 }
 
 type deltaMergeBuilder struct {
@@ -412,6 +424,7 @@ type deltaMergeBuilder struct {
 	conflicts       []MergeConflict
 	summary         DiffSummary
 	deltaKV         map[string][]byte
+	logicalDelta    int64
 	dirInoByPath    map[string]uint64
 	keptTargetInos  map[uint64]bool
 	claimedInos     map[uint64]bool
@@ -673,8 +686,9 @@ func (d *DiskStore) planDeltaMerge(
 	}
 
 	return &deltaMergePlan{
-		summary: b.summary,
-		deltaKV: b.deltaKV,
+		summary:      b.summary,
+		deltaKV:      b.deltaKV,
+		logicalDelta: b.logicalDelta,
 	}, nil
 }
 
@@ -1360,8 +1374,9 @@ func (b *deltaMergeBuilder) tombstoneTargetNonDir(ino uint64) error {
 	if err != nil {
 		return err
 	}
-	for blkIdx := range refs {
+	for blkIdx, ref := range refs {
 		b.putDelta(LayerDataKey(0, ino, blkIdx), EncodeTombstone())
+		b.logicalDelta -= int64(ref.Length)
 	}
 	return nil
 }
@@ -1519,11 +1534,17 @@ func (b *deltaMergeBuilder) writePlannedDataRefs(finalIno uint64, w *plannedInod
 	for blkIdx, ref := range desired {
 		if eRef, ok := existing[blkIdx]; !ok || eRef != ref {
 			b.putDelta(LayerDataKey(0, finalIno, blkIdx), EncodeLiveEnvelope(EncodeBlobRef(ref)))
+			var oldLen uint64
+			if ok {
+				oldLen = uint64(eRef.Length)
+			}
+			b.logicalDelta += int64(ref.Length) - int64(oldLen)
 		}
 	}
-	for blkIdx := range existing {
+	for blkIdx, eRef := range existing {
 		if _, ok := desired[blkIdx]; !ok {
 			b.putDelta(LayerDataKey(0, finalIno, blkIdx), EncodeTombstone())
+			b.logicalDelta -= int64(eRef.Length)
 		}
 	}
 	return nil

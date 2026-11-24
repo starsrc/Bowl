@@ -29,7 +29,7 @@ func TestStep6_GC_SealedWatermarkProtectsActiveAndInFlightPacks(t *testing.T) {
 	})
 
 	blk := bytes.Repeat([]byte{0x11}, 4096)
-	inFlightRefs, err := disk.packs.AppendBlocks(ctx, [][]byte{blk}, false)
+	inFlightRefs, err := disk.packs.AppendBlocks(ctx, [][]byte{blk})
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), inFlightRefs[0].PackID)
 
@@ -98,10 +98,12 @@ func TestStep6_GC_ReapsDeadPacksAfterResetAndPruneCommits(t *testing.T) {
 
 	stats, err := disk.RunGC(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, stats.PacksDeleted)
-	require.Equal(t, uint64(8192), stats.BytesReclaimed)
+	require.Equal(t, 2, stats.PacksDeleted)
+	require.Equal(t, uint64(12288), stats.BytesReclaimed)
 
 	_, statErr := os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, statErr = os.Stat(packFilePath(filepath.Join(dir, "packs"), 2))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
@@ -301,15 +303,21 @@ func TestStep6_GC_AbortsPackDeleteWhenAnyRelocationFailsAndRetriesCleanly(t *tes
 	disk.beforeGCRelocateHook = nil
 	statsRetry, err := disk.RunGC(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, statsRetry.PacksDeleted)
-	require.Equal(t, 1, statsRetry.BlocksRelocated)
+	require.Equal(t, 2, statsRetry.PacksDeleted)
+	require.Equal(t, 2, statsRetry.BlocksRelocated)
 
 	_, statErr = os.Stat(packFilePath(filepath.Join(dir, "packs"), 1))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, statErr = os.Stat(packFilePath(filepath.Join(dir, "packs"), 2))
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 
 	gotAfterRetry, err := disk.Read(ctx, DefaultBranchName, fKeep.Ino, 0, 4096)
 	require.NoError(t, err)
 	require.Equal(t, keepPayload, gotAfterRetry)
+
+	gotSealAfterRetry, err := disk.Read(ctx, DefaultBranchName, fSeal.Ino, 0, 4096)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0x66}, 4096), gotSealAfterRetry)
 }
 
 func TestStep7_GC_QuotaExemptRelocationReclaimsSpaceOnFullDisk(t *testing.T) {

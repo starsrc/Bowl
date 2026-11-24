@@ -37,6 +37,7 @@ type DiskOptions struct {
 	Now          func() time.Time
 	ActorIdleTTL time.Duration
 	GCInterval   time.Duration
+	EnableGCWake bool
 }
 
 type DiskStore struct {
@@ -48,8 +49,9 @@ type DiskStore struct {
 	blockSize    uint32
 	actorIdleTTL time.Duration
 
-	metaMu sync.RWMutex
-	meta   DiskMeta
+	metaMu    sync.RWMutex
+	meta      DiskMeta
+	usedBytes atomic.Uint64
 
 	allocMu     sync.Mutex
 	nextIno     atomic.Uint64
@@ -66,14 +68,16 @@ type DiskStore struct {
 	branchRegMu sync.RWMutex
 	gcMu        sync.Mutex
 
-	beforeGCRelocateHook func(packID uint64, loc BlockRefLocation) error
-	beforeMergeExecHook  func(sourceBranch, targetBranch string) error
-	onDirVisitedHook     func(dirIno uint64)
-	walCommitHook        func(sync bool)
-	beforeTickHook       func()
+	beforeGCRelocateHook   func(packID uint64, loc BlockRefLocation) error
+	beforeGCSealActiveHook func(packID uint64) error
+	beforeMergeExecHook    func(sourceBranch, targetBranch string) error
+	onDirVisitedHook       func(dirIno uint64)
+	walCommitHook          func(sync bool)
+	beforeTickHook         func()
 
 	gcCancel  context.CancelFunc
 	gcDone    chan struct{}
+	gcWake    chan struct{}
 	closing   atomic.Bool
 	closeOnce sync.Once
 	closeErr  error
@@ -184,7 +188,7 @@ func OpenDisk(opts DiskOptions) (*DiskStore, error) {
 		return nil, ErrInvalid
 	}
 
-	packs, err := newPackActor(packsDir, maxPackSize, d.meta.MaxBytes)
+	packs, err := newPackActor(packsDir, maxPackSize)
 	if err != nil {
 		_ = db.Close()
 		if ownedCache != nil {
@@ -193,10 +197,11 @@ func OpenDisk(opts DiskOptions) (*DiskStore, error) {
 		return nil, err
 	}
 	d.packs = packs
-	if opts.GCInterval > 0 {
+	if opts.GCInterval > 0 || opts.EnableGCWake {
 		gcCtx, gcCancel := context.WithCancel(context.Background())
 		d.gcCancel = gcCancel
 		d.gcDone = make(chan struct{})
+		d.gcWake = make(chan struct{}, 1)
 		go d.runBackgroundGC(gcCtx, opts.GCInterval)
 	}
 	return d, nil
@@ -220,7 +225,7 @@ func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) erro
 		d.meta = meta
 		d.blockSize = meta.BlockSize
 		d.initAllocatorsFromMeta(meta)
-		return nil
+		return d.recoverUsedBytes()
 	}
 	if !errors.Is(err, pebble.ErrNotFound) {
 		return err
@@ -304,6 +309,7 @@ func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) erro
 	}
 
 	d.meta = meta
+	d.usedBytes.Store(0)
 	d.nextIno.Store(RootIno + 1)
 	d.resIno.Store(meta.ReservedIno)
 	d.nextLayerID.Store(mainWorkID + 1)
@@ -311,6 +317,69 @@ func (d *DiskStore) loadOrBootstrapMeta(opts DiskOptions, blockSize uint32) erro
 	d.nextCmtID.Store(initCommitID + 1)
 	d.resCmtID.Store(meta.ReservedCmt)
 	return nil
+}
+
+func (d *DiskStore) recoverUsedBytes() error {
+	branches, err := listBranchesFromReader(d.db)
+	if err != nil {
+		return err
+	}
+	commits, err := listCommitsFromReader(d.db)
+	if err != nil {
+		return err
+	}
+	var total uint64
+	for _, b := range branches {
+		total += b.WorkOwnedBytes
+	}
+	for _, c := range commits {
+		total += c.OwnedBytes
+	}
+	d.usedBytes.Store(total)
+	return nil
+}
+
+func (d *DiskStore) UsedBytes() uint64 {
+	return d.usedBytes.Load()
+}
+
+func (d *DiskStore) PackPhysicalBytes() uint64 {
+	if d.packs == nil {
+		return 0
+	}
+	return d.packs.PhysicalBytes()
+}
+
+func (d *DiskStore) reserveQuota(delta uint64) error {
+	if delta == 0 {
+		return nil
+	}
+	d.metaMu.RLock()
+	maxB := d.meta.MaxBytes
+	for {
+		cur := d.usedBytes.Load()
+		if maxB > 0 && (cur > maxB || delta > maxB-cur) {
+			d.metaMu.RUnlock()
+			return ErrNoSpace
+		}
+		if d.usedBytes.CompareAndSwap(cur, cur+delta) {
+			d.metaMu.RUnlock()
+			return nil
+		}
+	}
+}
+
+func (d *DiskStore) releaseQuota(delta uint64) {
+	if delta == 0 {
+		return
+	}
+	for {
+		cur := d.usedBytes.Load()
+		next := saturatingSub(cur, delta)
+		if d.usedBytes.CompareAndSwap(cur, next) {
+			return
+		}
+	}
 }
 
 func (d *DiskStore) initAllocatorsFromMeta(meta DiskMeta) {
@@ -481,7 +550,7 @@ func (d *DiskStore) UpdateDiskMeta(ctx context.Context, name *string, maxBytes *
 	if d.closing.Load() {
 		return DiskMeta{}, ErrClosed
 	}
-	if maxBytes != nil && *maxBytes < d.packs.PhysicalBytes() {
+	if maxBytes != nil && *maxBytes < d.UsedBytes() {
 		return DiskMeta{}, ErrQuotaShrinkBelowUsed
 	}
 
@@ -498,9 +567,6 @@ func (d *DiskStore) UpdateDiskMeta(ctx context.Context, name *string, maxBytes *
 		return DiskMeta{}, err
 	}
 	d.meta = metaCopy
-	if maxBytes != nil {
-		d.packs.SetMaxBytes(*maxBytes)
-	}
 	return metaCopy, nil
 }
 
@@ -621,7 +687,7 @@ func (d *DiskStore) SnapshotControlMeta(now time.Time) (ControlSnapshot, error) 
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	usedBytes := d.packs.PhysicalBytes()
+	usedBytes := d.UsedBytes()
 	diskMeta, err := readDiskMeta(snap)
 	if err != nil {
 		return ControlSnapshot{}, err
@@ -671,6 +737,7 @@ func (d *DiskStore) GetCommit(commitID uint64) (CommitMeta, error) {
 
 type DiskMetricsSnapshot struct {
 	UsedBytes          uint64
+	PackPhysicalBytes  uint64
 	Inodes             uint64
 	ActiveBranchActors int
 	Pebble             *pebble.Metrics
@@ -692,16 +759,13 @@ func (d *DiskStore) MetricsSnapshot() DiskMetricsSnapshot {
 	branchCount := len(d.branchActors)
 	d.actorsMu.Unlock()
 
-	var used uint64
-	if d.packs != nil {
-		used = d.packs.PhysicalBytes()
-	}
 	var pm *pebble.Metrics
 	if d.db != nil && !d.closing.Load() {
 		pm = d.db.Metrics()
 	}
 	return DiskMetricsSnapshot{
-		UsedBytes:          used,
+		UsedBytes:          d.UsedBytes(),
+		PackPhysicalBytes:  d.PackPhysicalBytes(),
 		Inodes:             d.allocatedInodes(),
 		ActiveBranchActors: branchCount,
 		Pebble:             pm,
@@ -709,7 +773,8 @@ func (d *DiskStore) MetricsSnapshot() DiskMetricsSnapshot {
 }
 
 func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
-	return d.buildStatFS(d.allocatedInodes())
+	used := d.UsedBytes()
+	return d.buildStatFS(d.allocatedInodes(), used, used)
 }
 
 func (d *DiskStore) StatFSBranch(_ context.Context, branch string) (StatFSResult, error) {
@@ -722,7 +787,7 @@ func (d *DiskStore) StatFSBranch(_ context.Context, branch string) (StatFSResult
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	_, layers, err := resolveBranchLayers(snap, branch)
+	branchMeta, layers, err := resolveBranchLayers(snap, branch)
 	if err != nil {
 		return StatFSResult{}, err
 	}
@@ -730,7 +795,7 @@ func (d *DiskStore) StatFSBranch(_ context.Context, branch string) (StatFSResult
 	if err != nil {
 		return StatFSResult{}, err
 	}
-	return d.buildStatFS(liveInodes)
+	return d.buildStatFS(liveInodes, branchMeta.LogicalBytes, d.UsedBytes())
 }
 
 func countLiveInodes(r pebbleReader, layers []uint64) (uint64, error) {
@@ -771,30 +836,35 @@ func countLiveInodes(r pebbleReader, layers []uint64) (uint64, error) {
 	return liveCount, nil
 }
 
-func (d *DiskStore) buildStatFS(files uint64) (StatFSResult, error) {
+func (d *DiskStore) buildStatFS(files, usedBytes, diskUsedBytes uint64) (StatFSResult, error) {
 	if d.closing.Load() {
 		return StatFSResult{}, ErrClosed
 	}
-	used := d.packs.PhysicalBytes()
-	total := d.packs.MaxBytes()
-	var avail uint64
-	if total > used {
-		avail = total - used
-	}
+	total := d.DiskMeta().MaxBytes
+	branchFreeBytes := saturatingSub(total, usedBytes)
+	diskAvailBytes := saturatingSub(total, diskUsedBytes)
+	avail := min(branchFreeBytes, diskAvailBytes)
+
 	const blockSz = uint64(DefaultStatFSBlockSize)
 	blocks := total / blockSz
 	if blocks == 0 && total > 0 {
 		blocks = 1
 	}
-	bavail := avail / blockSz
+	var usedBlocks uint64
+	if usedBytes > 0 {
+		usedBlocks = (usedBytes-1)/blockSz + 1
+	}
+	bfree := saturatingSub(blocks, usedBlocks)
+	bavail := min(bfree, avail/blockSz)
+
 	return StatFSResult{
 		TotalBytes: total,
-		UsedBytes:  used,
+		UsedBytes:  usedBytes,
 		AvailBytes: avail,
 		Bsize:      DefaultStatFSBlockSize,
 		Frsize:     DefaultStatFSBlockSize,
 		Blocks:     blocks,
-		Bfree:      bavail,
+		Bfree:      bfree,
 		Bavail:     bavail,
 		Files:      files,
 		Ffree:      0,

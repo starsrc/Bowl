@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sort"
 	"time"
@@ -32,18 +33,69 @@ type activeLayerInfo struct {
 	isCommit   bool
 }
 
+func (d *DiskStore) TriggerGC() {
+	if d.closing.Load() || d.gcWake == nil {
+		return
+	}
+	select {
+	case d.gcWake <- struct{}{}:
+	default:
+	}
+}
+
 func (d *DiskStore) runBackgroundGC(ctx context.Context, interval time.Duration) {
 	defer close(d.gcDone)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	var tickCh <-chan time.Time
+	if interval > 0 {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		tickCh = ticker.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tickCh:
+			_, _ = d.RunGC(ctx)
+		case <-d.gcWake:
 			_, _ = d.RunGC(ctx)
 		}
 	}
+}
+
+func sumLiveRefBytes(refMap map[BlobRef][]BlockRefLocation) uint64 {
+	var liveBytes uint64
+	for ref := range refMap {
+		liveBytes += uint64(ref.Length)
+	}
+	return liveBytes
+}
+
+func (d *DiskStore) sweepSealedPack(ctx context.Context, packID, totalBytes uint64, refMap map[BlobRef][]BlockRefLocation, stats *GCStats) error {
+	liveBytes := sumLiveRefBytes(refMap)
+	if liveBytes == 0 {
+		if delErr := d.packs.DeletePack(ctx, packID); delErr != nil {
+			return delErr
+		}
+		stats.PacksDeleted++
+		stats.BytesReclaimed += totalBytes
+		return nil
+	}
+	if liveBytes*2 > totalBytes {
+		return nil
+	}
+	relocated, skipped, relocErr := d.relocatePack(ctx, packID, refMap)
+	stats.BlocksRelocated += relocated
+	stats.BlocksSkipped += skipped
+	if relocErr != nil {
+		return relocErr
+	}
+	if delErr := d.packs.DeletePack(ctx, packID); delErr != nil {
+		return delErr
+	}
+	stats.PacksDeleted++
+	stats.BytesReclaimed += totalBytes
+	return nil
 }
 
 func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
@@ -58,15 +110,26 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 		return GCStats{}, ErrClosed
 	}
 
-	watermark, packSizes, err := d.packs.SealedWatermarkAndSizes(ctx)
+	insp, err := d.packs.GCInspectionSnapshot(ctx)
 	if err != nil {
 		return GCStats{}, err
 	}
-	if watermark == 0 || len(packSizes) == 0 {
+	watermark := insp.Watermark
+	packSizes := insp.SealedSizes
+	activePackID := insp.ActivePackID
+	activePackSize := insp.ActivePackSize
+	inspectActive := activePackID != 0 && activePackSize > 0 && !insp.ActiveInFlight
+	if (watermark == 0 || len(packSizes) == 0) && !inspectActive {
 		return GCStats{}, nil
 	}
 
-	packLiveRefs, err := d.scanLiveRefsAtSnapshot(watermark, packSizes)
+	candidatePacks := make(map[uint64]uint64, len(packSizes)+1)
+	maps.Copy(candidatePacks, packSizes)
+	if inspectActive {
+		candidatePacks[activePackID] = activePackSize
+	}
+
+	packLiveRefs, err := d.scanLiveRefsAtSnapshot(candidatePacks)
 	if err != nil {
 		return GCStats{}, err
 	}
@@ -78,8 +141,9 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 	slices.Sort(packIDs)
 
 	var (
-		stats    GCStats
-		firstErr error
+		stats            GCStats
+		firstErr         error
+		sealedToRelocate []uint64
 	)
 
 	for _, packID := range packIDs {
@@ -92,10 +156,7 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 
 		totalBytes := packSizes[packID]
 		refMap := packLiveRefs[packID]
-		var liveBytes uint64
-		for ref := range refMap {
-			liveBytes += uint64(ref.Length)
-		}
+		liveBytes := sumLiveRefBytes(refMap)
 		stats.PacksScanned++
 
 		if liveBytes == 0 {
@@ -110,34 +171,57 @@ func (d *DiskStore) RunGC(ctx context.Context) (GCStats, error) {
 			continue
 		}
 
-		if liveBytes*2 > totalBytes {
-			continue
+		if liveBytes*2 <= totalBytes {
+			sealedToRelocate = append(sealedToRelocate, packID)
 		}
+	}
 
-		relocated, skipped, relocErr := d.relocatePack(ctx, packID, refMap)
-		stats.BlocksRelocated += relocated
-		stats.BlocksSkipped += skipped
-		if relocErr != nil {
-			if firstErr == nil {
-				firstErr = relocErr
+	if inspectActive && ctx.Err() == nil {
+		stats.PacksScanned++
+		activeLiveBytes := sumLiveRefBytes(packLiveRefs[activePackID])
+		if activeLiveBytes*2 <= activePackSize {
+			if d.beforeGCSealActiveHook != nil {
+				if hookErr := d.beforeGCSealActiveHook(activePackID); hookErr != nil && firstErr == nil {
+					firstErr = hookErr
+				}
 			}
-			continue
+			if firstErr == nil {
+				sealed, sealErr := d.packs.SealActiveIf(ctx, activePackID)
+				if sealErr != nil {
+					firstErr = sealErr
+				} else if sealed {
+					postWatermark, postSizes, postErr := d.packs.SealedWatermarkAndSizes(ctx)
+					if postErr != nil {
+						firstErr = postErr
+					} else if postSize, ok := postSizes[activePackID]; ok && activePackID <= postWatermark {
+						postRefs, scanErr := d.scanLiveRefsAtSnapshot(map[uint64]uint64{activePackID: postSize})
+						if scanErr != nil {
+							firstErr = scanErr
+						} else if sweepErr := d.sweepSealedPack(ctx, activePackID, postSize, postRefs[activePackID], &stats); sweepErr != nil {
+							firstErr = sweepErr
+						}
+					}
+				}
+			}
 		}
+	}
 
-		if delErr := d.packs.DeletePack(ctx, packID); delErr != nil {
+	for _, packID := range sealedToRelocate {
+		if ctx.Err() != nil {
 			if firstErr == nil {
-				firstErr = delErr
+				firstErr = ctx.Err()
 			}
-			continue
+			break
 		}
-		stats.PacksDeleted++
-		stats.BytesReclaimed += totalBytes
+		if sweepErr := d.sweepSealedPack(ctx, packID, packSizes[packID], packLiveRefs[packID], &stats); sweepErr != nil && firstErr == nil {
+			firstErr = sweepErr
+		}
 	}
 
 	return stats, firstErr
 }
 
-func (d *DiskStore) scanLiveRefsAtSnapshot(watermark uint64, packSizes map[uint64]uint64) (map[uint64]map[BlobRef][]BlockRefLocation, error) {
+func (d *DiskStore) scanLiveRefsAtSnapshot(packSizes map[uint64]uint64) (map[uint64]map[BlobRef][]BlockRefLocation, error) {
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
@@ -169,9 +253,6 @@ func (d *DiskStore) scanLiveRefsAtSnapshot(watermark uint64, packSizes map[uint6
 			if refErr != nil {
 				_ = iter.Close()
 				return nil, refErr
-			}
-			if ref.PackID > watermark {
-				continue
 			}
 			if _, candidate := packSizes[ref.PackID]; !candidate {
 				continue
@@ -278,7 +359,7 @@ func (d *DiskStore) relocatePack(ctx context.Context, packID uint64, refMap map[
 		payloads = append(payloads, data)
 	}
 
-	newRefs, err := d.packs.AppendBlocks(ctx, payloads, true)
+	newRefs, err := d.packs.AppendBlocks(ctx, payloads)
 	if err != nil {
 		return 0, 0, err
 	}

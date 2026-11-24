@@ -171,7 +171,7 @@ func (d *DiskStore) MountBranch(ctx context.Context, branch string, readOnly, fo
 	return mount, nil
 }
 
-func (a *BranchActor) execMountBranch(batch *pebble.Batch, branch BranchMeta, raw any) (MountMeta, error) {
+func (a *BranchActor) execMountBranch(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, raw any) (MountMeta, error) {
 	req, ok := raw.(*mountBranchReq)
 	if !ok {
 		return MountMeta{}, ErrInvalid
@@ -213,14 +213,18 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, branch BranchMeta, ra
 				return MountMeta{}, delErr
 			}
 		}
-		if sweepErr := sweepOrphansInWorkLayer(batch, branch.WorkLayerID, branch.HeadCommitID); sweepErr != nil {
+		freedWork, freedLogical, sweepErr := sweepOrphansInWorkLayer(batch, branch.WorkLayerID, branch.HeadCommitID)
+		if sweepErr != nil {
 			return MountMeta{}, sweepErr
 		}
+		branch.WorkOwnedBytes = saturatingSub(branch.WorkOwnedBytes, freedWork)
+		branch.LogicalBytes = saturatingSub(branch.LogicalBytes, freedLogical)
 		branch.WriterEpoch++
 		branch.UpdatedAt = nowNano
 		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 			return MountMeta{}, setErr
 		}
+		quota.release(freedWork)
 		epoch = branch.WriterEpoch
 	}
 

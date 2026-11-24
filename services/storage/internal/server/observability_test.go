@@ -321,6 +321,7 @@ func TestObservability_EndToEndRPC_ExportsFineBucketMetricsSpansAndJSONLogs(t *t
 		"go_goroutines",
 		"bowl_storage_disks_loaded",
 		"bowl_storage_logical_bytes",
+		"bowl_storage_pack_physical_bytes",
 		"bowl_storage_inodes",
 		"bowl_storage_http_request_duration_seconds_bucket",
 		"rpc_server_call_duration_seconds_bucket",

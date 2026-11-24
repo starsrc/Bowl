@@ -27,12 +27,14 @@ type DiskMeta struct {
 }
 
 type BranchMeta struct {
-	Name         string
-	HeadCommitID uint64
-	WorkLayerID  uint64
-	WriterEpoch  uint64
-	CreatedAt    int64
-	UpdatedAt    int64
+	Name           string
+	HeadCommitID   uint64
+	WorkLayerID    uint64
+	WriterEpoch    uint64
+	WorkOwnedBytes uint64
+	LogicalBytes   uint64
+	CreatedAt      int64
+	UpdatedAt      int64
 }
 
 type CommitMeta struct {
@@ -41,6 +43,8 @@ type CommitMeta struct {
 	MergeParentID uint64
 	LayerID       uint64
 	Kind          CommitKind
+	OwnedBytes    uint64
+	LogicalBytes  uint64
 	Message       string
 	CreatedAt     int64
 }
@@ -261,7 +265,7 @@ func DecodeDiskMeta(b []byte) (DiskMeta, error) {
 
 func EncodeBranchMeta(m BranchMeta) []byte {
 	nameLen := len(m.Name)
-	out := make([]byte, 1+4+nameLen+40)
+	out := make([]byte, 1+4+nameLen+56)
 	off := 0
 	out[off] = codecVersion
 	off++
@@ -272,51 +276,57 @@ func EncodeBranchMeta(m BranchMeta) []byte {
 	binary.BigEndian.PutUint64(out[off:off+8], m.HeadCommitID)
 	binary.BigEndian.PutUint64(out[off+8:off+16], m.WorkLayerID)
 	binary.BigEndian.PutUint64(out[off+16:off+24], m.WriterEpoch)
-	binary.BigEndian.PutUint64(out[off+24:off+32], uint64(m.CreatedAt))
-	binary.BigEndian.PutUint64(out[off+32:off+40], uint64(m.UpdatedAt))
+	binary.BigEndian.PutUint64(out[off+24:off+32], m.WorkOwnedBytes)
+	binary.BigEndian.PutUint64(out[off+32:off+40], m.LogicalBytes)
+	binary.BigEndian.PutUint64(out[off+40:off+48], uint64(m.CreatedAt))
+	binary.BigEndian.PutUint64(out[off+48:off+56], uint64(m.UpdatedAt))
 	return out
 }
 
 func DecodeBranchMeta(b []byte) (BranchMeta, error) {
-	if len(b) < 1+4+40 || b[0] != codecVersion {
+	if len(b) < 1+4+56 || b[0] != codecVersion {
 		return BranchMeta{}, ErrInvalidValue
 	}
 	nameLen := int(binary.BigEndian.Uint32(b[1:5]))
-	if 5+nameLen+40 != len(b) {
+	if 5+nameLen+56 != len(b) {
 		return BranchMeta{}, ErrInvalidValue
 	}
 	off := 5 + nameLen
 	return BranchMeta{
-		Name:         string(b[5:off]),
-		HeadCommitID: binary.BigEndian.Uint64(b[off : off+8]),
-		WorkLayerID:  binary.BigEndian.Uint64(b[off+8 : off+16]),
-		WriterEpoch:  binary.BigEndian.Uint64(b[off+16 : off+24]),
-		CreatedAt:    int64(binary.BigEndian.Uint64(b[off+24 : off+32])),
-		UpdatedAt:    int64(binary.BigEndian.Uint64(b[off+32 : off+40])),
+		Name:           string(b[5:off]),
+		HeadCommitID:   binary.BigEndian.Uint64(b[off : off+8]),
+		WorkLayerID:    binary.BigEndian.Uint64(b[off+8 : off+16]),
+		WriterEpoch:    binary.BigEndian.Uint64(b[off+16 : off+24]),
+		WorkOwnedBytes: binary.BigEndian.Uint64(b[off+24 : off+32]),
+		LogicalBytes:   binary.BigEndian.Uint64(b[off+32 : off+40]),
+		CreatedAt:      int64(binary.BigEndian.Uint64(b[off+40 : off+48])),
+		UpdatedAt:      int64(binary.BigEndian.Uint64(b[off+48 : off+56])),
 	}, nil
 }
 
 func EncodeCommitMeta(m CommitMeta) []byte {
 	msgLen := len(m.Message)
-	out := make([]byte, 1+8+8+8+8+1+8+4+msgLen)
+	out := make([]byte, 1+8+8+8+8+1+8+8+8+4+msgLen)
 	out[0] = codecVersion
 	binary.BigEndian.PutUint64(out[1:9], m.ID)
 	binary.BigEndian.PutUint64(out[9:17], m.ParentID)
 	binary.BigEndian.PutUint64(out[17:25], m.MergeParentID)
 	binary.BigEndian.PutUint64(out[25:33], m.LayerID)
 	out[33] = byte(m.Kind)
-	binary.BigEndian.PutUint64(out[34:42], uint64(m.CreatedAt))
-	binary.BigEndian.PutUint32(out[42:46], uint32(msgLen))
-	copy(out[46:], m.Message)
+	binary.BigEndian.PutUint64(out[34:42], m.OwnedBytes)
+	binary.BigEndian.PutUint64(out[42:50], m.LogicalBytes)
+	binary.BigEndian.PutUint64(out[50:58], uint64(m.CreatedAt))
+	binary.BigEndian.PutUint32(out[58:62], uint32(msgLen))
+	copy(out[62:], m.Message)
 	return out
 }
 
 func DecodeCommitMeta(b []byte) (CommitMeta, error) {
-	if len(b) < 46 || b[0] != codecVersion {
+	if len(b) < 62 || b[0] != codecVersion {
 		return CommitMeta{}, ErrInvalidValue
 	}
-	msgLen := int(binary.BigEndian.Uint32(b[42:46]))
-	if 46+msgLen != len(b) {
+	msgLen := int(binary.BigEndian.Uint32(b[58:62]))
+	if 62+msgLen != len(b) {
 		return CommitMeta{}, ErrInvalidValue
 	}
 	return CommitMeta{
@@ -325,8 +335,10 @@ func DecodeCommitMeta(b []byte) (CommitMeta, error) {
 		MergeParentID: binary.BigEndian.Uint64(b[17:25]),
 		LayerID:       binary.BigEndian.Uint64(b[25:33]),
 		Kind:          CommitKind(b[33]),
-		CreatedAt:     int64(binary.BigEndian.Uint64(b[34:42])),
-		Message:       string(b[46:]),
+		OwnedBytes:    binary.BigEndian.Uint64(b[34:42]),
+		LogicalBytes:  binary.BigEndian.Uint64(b[42:50]),
+		CreatedAt:     int64(binary.BigEndian.Uint64(b[50:58])),
+		Message:       string(b[62:]),
 	}, nil
 }
 

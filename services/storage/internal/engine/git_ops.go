@@ -57,21 +57,25 @@ func (a *BranchActor) execCommit(batch *pebble.Batch, branch BranchMeta, raw any
 	if err != nil {
 		return CommitMeta{}, err
 	}
-	if migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, newWorkLayerID, branch.HeadCommitID); migErr != nil {
+	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, newWorkLayerID, branch.HeadCommitID)
+	if migErr != nil {
 		return CommitMeta{}, migErr
 	}
 
 	nowNano := a.disk.now().UnixNano()
 	cmt := CommitMeta{
-		ID:        commitID,
-		ParentID:  branch.HeadCommitID,
-		LayerID:   branch.WorkLayerID,
-		Kind:      CommitKindManual,
-		Message:   req.message,
-		CreatedAt: nowNano,
+		ID:           commitID,
+		ParentID:     branch.HeadCommitID,
+		LayerID:      branch.WorkLayerID,
+		Kind:         CommitKindManual,
+		OwnedBytes:   saturatingSub(branch.WorkOwnedBytes, migratedOwned),
+		LogicalBytes: saturatingSub(branch.LogicalBytes, orphanEff),
+		Message:      req.message,
+		CreatedAt:    nowNano,
 	}
 	branch.HeadCommitID = commitID
 	branch.WorkLayerID = newWorkLayerID
+	branch.WorkOwnedBytes = migratedOwned
 	branch.UpdatedAt = nowNano
 
 	if setErr := batch.Set(MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
@@ -156,7 +160,8 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 	if err != nil {
 		return nil, err
 	}
-	if migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, srcNewWorkID, branch.HeadCommitID); migErr != nil {
+	migratedOwned, orphanEff, migErr := migrateOrphansAcrossLayerSwap(batch, branch.WorkLayerID, srcNewWorkID, branch.HeadCommitID)
+	if migErr != nil {
 		return nil, migErr
 	}
 
@@ -166,31 +171,39 @@ func (a *BranchActor) execFork(batch *pebble.Batch, branch BranchMeta, raw any) 
 	}
 
 	var commitLayerID uint64
+	var commitOwned uint64
 	if dirty {
 		commitLayerID = branch.WorkLayerID
+		commitOwned = saturatingSub(branch.WorkOwnedBytes, migratedOwned)
 	}
+	commitLogical := saturatingSub(branch.LogicalBytes, orphanEff)
 
 	nowNano := a.disk.now().UnixNano()
 	cmt := CommitMeta{
-		ID:        commitID,
-		ParentID:  branch.HeadCommitID,
-		LayerID:   commitLayerID,
-		Kind:      CommitKindFork,
-		Message:   req.message,
-		CreatedAt: nowNano,
+		ID:           commitID,
+		ParentID:     branch.HeadCommitID,
+		LayerID:      commitLayerID,
+		Kind:         CommitKindFork,
+		OwnedBytes:   commitOwned,
+		LogicalBytes: commitLogical,
+		Message:      req.message,
+		CreatedAt:    nowNano,
 	}
 
 	branch.HeadCommitID = commitID
 	branch.WorkLayerID = srcNewWorkID
+	branch.WorkOwnedBytes = migratedOwned
 	branch.UpdatedAt = nowNano
 
 	dstBranch := BranchMeta{
-		Name:         req.newBranch,
-		HeadCommitID: commitID,
-		WorkLayerID:  dstWorkID,
-		WriterEpoch:  1,
-		CreatedAt:    nowNano,
-		UpdatedAt:    nowNano,
+		Name:           req.newBranch,
+		HeadCommitID:   commitID,
+		WorkLayerID:    dstWorkID,
+		WriterEpoch:    1,
+		WorkOwnedBytes: 0,
+		LogicalBytes:   commitLogical,
+		CreatedAt:      nowNano,
+		UpdatedAt:      nowNano,
 	}
 
 	if setErr := batch.Set(MetaCommitKey(commitID), EncodeCommitMeta(cmt), nil); setErr != nil {
@@ -234,10 +247,11 @@ func (d *DiskStore) Reset(ctx context.Context, branch string, targetCommitID uin
 	if !ok {
 		return BranchMeta{}, ErrInvalidValue
 	}
+	d.TriggerGC()
 	return bm, nil
 }
 
-func (a *BranchActor) execReset(batch *pebble.Batch, branch BranchMeta, raw any) (BranchMeta, error) {
+func (a *BranchActor) execReset(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, raw any) (BranchMeta, error) {
 	req, ok := raw.(*resetReq)
 	if !ok {
 		return BranchMeta{}, ErrInvalid
@@ -249,7 +263,8 @@ func (a *BranchActor) execReset(batch *pebble.Batch, branch BranchMeta, raw any)
 	if mounted {
 		return BranchMeta{}, ErrDiskMounted
 	}
-	if _, cmtErr := readCommitMeta(batch, req.targetCommitID); cmtErr != nil {
+	targetCmt, cmtErr := readCommitMeta(batch, req.targetCommitID)
+	if cmtErr != nil {
 		return BranchMeta{}, cmtErr
 	}
 	newWorkID, err := a.disk.allocLayerID()
@@ -264,14 +279,18 @@ func (a *BranchActor) execReset(batch *pebble.Batch, branch BranchMeta, raw any)
 		}
 	}
 
+	freedWork := branch.WorkOwnedBytes
 	branch.HeadCommitID = req.targetCommitID
 	branch.WorkLayerID = newWorkID
 	branch.WriterEpoch++
+	branch.WorkOwnedBytes = 0
+	branch.LogicalBytes = targetCmt.LogicalBytes
 	branch.UpdatedAt = a.disk.now().UnixNano()
 
 	if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
 		return BranchMeta{}, setErr
 	}
+	quota.release(freedWork)
 	return branch, nil
 }
 
@@ -306,6 +325,11 @@ func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 	}
 	d.removeBranchActor(branch)
 
+	bm, err = d.GetBranch(branch)
+	if err != nil {
+		return err
+	}
+
 	batch := d.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 
@@ -323,7 +347,12 @@ func (d *DiskStore) DeleteBranch(ctx context.Context, branch string) error {
 			return delErr
 		}
 	}
-	return d.commitBatchSync(ctx, batch)
+	if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
+		return commitErr
+	}
+	d.releaseQuota(bm.WorkOwnedBytes)
+	d.TriggerGC()
+	return nil
 }
 
 func reachableCommitsFromReader(r pebbleReader) (map[uint64]struct{}, error) {
@@ -425,7 +454,12 @@ func (d *DiskStore) DeleteCommit(ctx context.Context, commitID uint64) error {
 			return delErr
 		}
 	}
-	return d.commitBatchSync(ctx, batch)
+	if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
+		return commitErr
+	}
+	d.releaseQuota(cmt.OwnedBytes)
+	d.TriggerGC()
+	return nil
 }
 
 func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
@@ -476,6 +510,7 @@ func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 	batch := d.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 
+	var freedBytes uint64
 	for _, cmt := range unreachable {
 		if cmt.LayerID != 0 {
 			d.removeCommitActor(cmt.LayerID)
@@ -489,9 +524,12 @@ func (d *DiskStore) PruneCommits(ctx context.Context) (int, error) {
 				return 0, delErr
 			}
 		}
+		freedBytes += cmt.OwnedBytes
 	}
 	if commitErr := d.commitBatchSync(ctx, batch); commitErr != nil {
 		return 0, commitErr
 	}
+	d.releaseQuota(freedBytes)
+	d.TriggerGC()
 	return len(unreachable), nil
 }

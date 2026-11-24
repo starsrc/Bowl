@@ -205,6 +205,48 @@ func isSyncBarrierOp(op branchOpKind) bool {
 	}
 }
 
+type tickQuotaTracker struct {
+	disk     *DiskStore
+	reserved uint64
+	released uint64
+}
+
+func (q *tickQuotaTracker) reserve(delta uint64) error {
+	if delta == 0 {
+		return nil
+	}
+	if delta <= q.released {
+		q.released -= delta
+		return nil
+	}
+	extra := delta - q.released
+	if err := q.disk.reserveQuota(extra); err != nil {
+		return err
+	}
+	q.released = 0
+	q.reserved += extra
+	return nil
+}
+
+func (q *tickQuotaTracker) release(delta uint64) {
+	q.released += delta
+}
+
+func (q *tickQuotaTracker) onCommit() {
+	if q.released > 0 {
+		q.disk.releaseQuota(q.released)
+		q.released = 0
+	}
+}
+
+func (q *tickQuotaTracker) onRollback() {
+	if q.reserved > 0 {
+		q.disk.releaseQuota(q.reserved)
+		q.reserved = 0
+	}
+	q.released = 0
+}
+
 func (a *BranchActor) processTick(cmds []*writeCmd) {
 	if a.disk.beforeTickHook != nil {
 		a.disk.beforeTickHook()
@@ -213,10 +255,11 @@ func (a *BranchActor) processTick(cmds []*writeCmd) {
 	batch := a.disk.db.NewIndexedBatch()
 	defer func() { _ = batch.Close() }()
 
+	quota := &tickQuotaTracker{disk: a.disk}
 	succeeded := make([]*writeCmd, 0, len(cmds))
 	syncBarrier := false
 	for _, cmd := range cmds {
-		resp, err := a.execCmd(batch, cmd)
+		resp, err := a.execCmd(batch, quota, cmd)
 		if err != nil {
 			cmd.err = err
 			continue
@@ -249,10 +292,13 @@ func (a *BranchActor) processTick(cmds []*writeCmd) {
 		commitErr = batch.Commit(pebble.NoSync)
 	}
 	if commitErr != nil {
+		quota.onRollback()
 		for _, cmd := range succeeded {
 			cmd.resp = nil
 			cmd.err = commitErr
 		}
+	} else {
+		quota.onCommit()
 	}
 
 	a.lastActiveNano.Store(a.disk.now().UnixNano())
@@ -261,7 +307,7 @@ func (a *BranchActor) processTick(cmds []*writeCmd) {
 	}
 }
 
-func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
+func (a *BranchActor) execCmd(batch *pebble.Batch, quota *tickQuotaTracker, cmd *writeCmd) (any, error) {
 	if cmd.op == branchOpRelocate {
 		return a.execRelocate(batch, cmd.req)
 	}
@@ -287,27 +333,27 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 	case branchOpCreateTmpfile:
 		return a.execCreateTmpfile(batch, branch, layers, cmd.req)
 	case branchOpPurgeOrphan:
-		return nil, a.execPurgeOrphan(batch, branch, layers, cmd.req)
+		return nil, a.execPurgeOrphan(batch, quota, branch, layers, cmd.req)
 	case branchOpSymlink:
 		return a.execSymlink(batch, branch, layers, cmd.req)
 	case branchOpLink:
 		return a.execLink(batch, branch, layers, cmd.req)
 	case branchOpUnlink:
-		return nil, a.execUnlink(batch, branch, layers, cmd.req)
+		return nil, a.execUnlink(batch, quota, branch, layers, cmd.req)
 	case branchOpRmdir:
 		return nil, a.execRmdir(batch, branch, layers, cmd.req)
 	case branchOpRename:
-		return nil, a.execRename(batch, branch, layers, cmd.req)
+		return nil, a.execRename(batch, quota, branch, layers, cmd.req)
 	case branchOpSetAttr:
-		return a.execSetAttr(batch, branch, layers, cmd.req)
+		return a.execSetAttr(batch, quota, branch, layers, cmd.req)
 	case branchOpSetXattr:
 		return nil, a.execSetXattr(batch, branch, layers, cmd.req)
 	case branchOpRemoveXattr:
 		return nil, a.execRemoveXattr(batch, branch, layers, cmd.req)
 	case branchOpWrite:
-		return a.execWrite(batch, branch, layers, cmd.req)
+		return a.execWrite(batch, quota, branch, layers, cmd.req)
 	case branchOpFallocate:
-		return nil, a.execFallocate(batch, branch, layers, cmd.req)
+		return nil, a.execFallocate(batch, quota, branch, layers, cmd.req)
 	case branchOpFsync:
 		return nil, a.execFsync(batch, layers, cmd.req)
 	case branchOpFsyncDir:
@@ -317,11 +363,11 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 	case branchOpFork:
 		return a.execFork(batch, branch, cmd.req)
 	case branchOpReset:
-		return a.execReset(batch, branch, cmd.req)
+		return a.execReset(batch, quota, branch, cmd.req)
 	case branchOpMerge:
 		return a.execMerge(batch, branch, cmd.req)
 	case branchOpMount:
-		return a.execMountBranch(batch, branch, cmd.req)
+		return a.execMountBranch(batch, quota, branch, cmd.req)
 	case branchOpRenewMount:
 		return a.execRenewMount(batch, branch, cmd.req)
 	case branchOpEvictMount:
@@ -1010,7 +1056,7 @@ func (d *DiskStore) Unlink(ctx context.Context, branch string, parentIno uint64,
 	return err
 }
 
-func (a *BranchActor) execUnlink(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) error {
+func (a *BranchActor) execUnlink(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) error {
 	req, ok := raw.(*unlinkReq)
 	if !ok {
 		return ErrInvalid
@@ -1076,42 +1122,54 @@ func (a *BranchActor) execUnlink(batch *pebble.Batch, branch BranchMeta, layers 
 		return batch.Set(LayerOrphanKey(work, target.Ino), []byte{OrphanUnlinked}, nil)
 	}
 
-	return tombstoneOrDecInode(batch, work, layers, target, nowNano)
+	freedWork, freedLogical, tbErr := tombstoneOrDecInode(batch, work, layers, target, nowNano)
+	if tbErr != nil {
+		return tbErr
+	}
+	if freedWork > 0 || freedLogical > 0 {
+		branch.WorkOwnedBytes = saturatingSub(branch.WorkOwnedBytes, freedWork)
+		branch.LogicalBytes = saturatingSub(branch.LogicalBytes, freedLogical)
+		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+			return setErr
+		}
+		quota.release(freedWork)
+	}
+	return nil
 }
 
-func tombstoneOrDecInode(batch *pebble.Batch, work uint64, layers []uint64, target Inode, nowNano int64) error {
+func tombstoneOrDecInode(batch *pebble.Batch, work uint64, layers []uint64, target Inode, nowNano int64) (freedWork, freedLogical uint64, err error) {
 	if target.Nlink > 1 {
 		target.Nlink--
 		target.Ctime = nowNano
-		raw, err := EncodeInode(target)
-		if err != nil {
-			return err
+		raw, encErr := EncodeInode(target)
+		if encErr != nil {
+			return 0, 0, encErr
 		}
-		return batch.Set(LayerInodeKey(work, target.Ino), EncodeLiveEnvelope(raw), nil)
+		return 0, 0, batch.Set(LayerInodeKey(work, target.Ino), EncodeLiveEnvelope(raw), nil)
 	}
 
-	if err := batch.Set(LayerInodeKey(work, target.Ino), EncodeTombstone(), nil); err != nil {
-		return err
+	if setErr := batch.Set(LayerInodeKey(work, target.Ino), EncodeTombstone(), nil); setErr != nil {
+		return 0, 0, setErr
 	}
 	xnames, err := overlayListXattr(batch, layers, target.Ino)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	for _, xname := range xnames {
 		if setErr := batch.Set(LayerXattrKey(work, target.Ino, []byte(xname)), EncodeTombstone(), nil); setErr != nil {
-			return setErr
+			return 0, 0, setErr
 		}
 	}
-	liveBlks, err := overlayListLiveBlocks(batch, layers, target.Ino, 0)
+	liveBlks, dropWork, dropEff, err := overlayCollectLiveBlocksRange(batch, layers, target.Ino, 0, math.MaxUint64)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	for _, blkIdx := range liveBlks {
 		if setErr := batch.Set(LayerDataKey(work, target.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
-			return setErr
+			return 0, 0, setErr
 		}
 	}
-	return nil
+	return dropWork, dropEff, nil
 }
 
 type rmdirReq struct {
@@ -1276,7 +1334,7 @@ func (d *DiskStore) Rename(ctx context.Context, branch string, req RenameReq) er
 	return err
 }
 
-func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) error {
+func (a *BranchActor) execRename(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) error {
 	req, ok := raw.(*RenameReq)
 	if !ok {
 		return ErrInvalid
@@ -1526,8 +1584,17 @@ func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers 
 				return setErr
 			}
 		default:
-			if tbErr := tombstoneOrDecInode(batch, work, layers, dstIno, nowNano); tbErr != nil {
+			freedWork, freedLogical, tbErr := tombstoneOrDecInode(batch, work, layers, dstIno, nowNano)
+			if tbErr != nil {
 				return tbErr
+			}
+			if freedWork > 0 || freedLogical > 0 {
+				branch.WorkOwnedBytes = saturatingSub(branch.WorkOwnedBytes, freedWork)
+				branch.LogicalBytes = saturatingSub(branch.LogicalBytes, freedLogical)
+				if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+					return setErr
+				}
+				quota.release(freedWork)
 			}
 		}
 	}
@@ -1713,7 +1780,7 @@ func (d *DiskStore) SetAttr(ctx context.Context, branch string, ino uint64, req 
 					cmdReq.tailTombstone = true
 					cmdReq.tailBlkIdx = tailBlk
 				} else {
-					refs, appErr := d.packs.AppendBlocks(ctx, [][]byte{trimmed}, false)
+					refs, appErr := d.packs.AppendBlocks(ctx, [][]byte{trimmed})
 					if appErr != nil {
 						return Inode{}, appErr
 					}
@@ -1740,7 +1807,7 @@ func (d *DiskStore) SetAttr(ctx context.Context, branch string, ino uint64, req 
 	return out, nil
 }
 
-func (a *BranchActor) execSetAttr(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) (Inode, error) {
+func (a *BranchActor) execSetAttr(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) (Inode, error) {
 	cmdReq, ok := raw.(*setAttrCmdReq)
 	if !ok {
 		return Inode{}, ErrInvalid
@@ -1781,33 +1848,67 @@ func (a *BranchActor) execSetAttr(batch *pebble.Batch, branch BranchMeta, layers
 	} else if req.Mtime != nil {
 		inode.Mtime = *req.Mtime
 	}
+
+	var (
+		dropBlks       []uint64
+		workOwnedDelta int64
+		logicalDelta   int64
+	)
 	if req.Size != nil {
 		newSize := *req.Size
 		blkSize := uint64(a.disk.blockSize)
 		if newSize < inode.Size {
 			firstDropBlk := (newSize + blkSize - 1) / blkSize
-			liveBlks, listErr := overlayListLiveBlocks(batch, layers, inode.Ino, firstDropBlk)
+			liveBlks, dropWork, dropEff, listErr := overlayCollectLiveBlocksRange(batch, layers, inode.Ino, firstDropBlk, math.MaxUint64)
 			if listErr != nil {
 				return Inode{}, listErr
 			}
-			for _, blkIdx := range liveBlks {
-				if setErr := batch.Set(LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
-					return Inode{}, setErr
-				}
-			}
+			dropBlks = liveBlks
+			workOwnedDelta -= int64(dropWork)
+			logicalDelta -= int64(dropEff)
 			if cmdReq.hasTailRef {
+				oldWorkLen, workErr := readLayerDataRefLen(batch, work, inode.Ino, cmdReq.tailBlkIdx)
+				if workErr != nil {
+					return Inode{}, workErr
+				}
+				oldEffLen, effErr := overlayGetDataRefLen(batch, layers, inode.Ino, cmdReq.tailBlkIdx)
+				if effErr != nil {
+					return Inode{}, effErr
+				}
 				if cmdReq.tailTombstone {
-					if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeTombstone(), nil); setErr != nil {
-						return Inode{}, setErr
-					}
+					workOwnedDelta -= int64(oldWorkLen)
+					logicalDelta -= int64(oldEffLen)
 				} else {
-					if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeLiveEnvelope(EncodeBlobRef(cmdReq.tailRef)), nil); setErr != nil {
-						return Inode{}, setErr
-					}
+					newLen := uint64(cmdReq.tailRef.Length)
+					workOwnedDelta += int64(newLen) - int64(oldWorkLen)
+					logicalDelta += int64(newLen) - int64(oldEffLen)
 				}
 			}
 		}
 		inode.Size = newSize
+	}
+
+	if workOwnedDelta > 0 {
+		if resErr := quota.reserve(uint64(workOwnedDelta)); resErr != nil {
+			return Inode{}, resErr
+		}
+	}
+
+	for _, blkIdx := range dropBlks {
+		if setErr := batch.Set(LayerDataKey(work, inode.Ino, blkIdx), EncodeTombstone(), nil); setErr != nil {
+			return Inode{}, setErr
+		}
+	}
+	if req.Size != nil && cmdReq.hasTailRef {
+		if cmdReq.tailTombstone {
+			if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeTombstone(), nil); setErr != nil {
+				return Inode{}, setErr
+			}
+		} else {
+			if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeLiveEnvelope(EncodeBlobRef(cmdReq.tailRef)), nil); setErr != nil {
+				return Inode{}, setErr
+			}
+		}
 	}
 	if req.Size != nil || req.UID != nil || req.GID != nil || req.Mode != nil {
 		if capErr := clearSecurityCapability(batch, work, layers, inode.Ino); capErr != nil {
@@ -1823,6 +1924,15 @@ func (a *BranchActor) execSetAttr(batch *pebble.Batch, branch BranchMeta, layers
 	}
 	if setErr := batch.Set(LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
 		return Inode{}, setErr
+	}
+	if workOwnedDelta != 0 || logicalDelta != 0 {
+		applyBranchByteDeltas(&branch, workOwnedDelta, logicalDelta)
+		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+			return Inode{}, setErr
+		}
+	}
+	if workOwnedDelta < 0 {
+		quota.release(uint64(-workOwnedDelta))
 	}
 	return inode, nil
 }
@@ -2106,7 +2216,7 @@ func (d *DiskStore) WriteWithAttr(ctx context.Context, branch string, ino uint64
 	}
 	_ = snap.Close()
 
-	refs, err := d.packs.AppendBlocks(ctx, payloads, false)
+	refs, err := d.packs.AppendBlocks(ctx, payloads)
 	if err != nil {
 		return 0, Inode{}, err
 	}
@@ -2137,7 +2247,7 @@ func (d *DiskStore) WriteWithAttr(ctx context.Context, branch string, ino uint64
 	return len(data), outInode, nil
 }
 
-func (a *BranchActor) execWrite(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) (Inode, error) {
+func (a *BranchActor) execWrite(batch *pebble.Batch, quota *tickQuotaTracker, branch BranchMeta, layers []uint64, raw any) (Inode, error) {
 	req, ok := raw.(*writeDataReq)
 	if !ok {
 		return Inode{}, ErrInvalid
@@ -2154,14 +2264,22 @@ func (a *BranchActor) execWrite(batch *pebble.Batch, branch BranchMeta, layers [
 	}
 
 	work := branch.WorkLayerID
+	var (
+		workOwnedDelta int64
+		logicalDelta   int64
+	)
 	for _, upd := range req.updates {
-		if setErr := batch.Set(LayerDataKey(work, req.ino, upd.blockIdx), EncodeLiveEnvelope(EncodeBlobRef(upd.ref)), nil); setErr != nil {
-			return Inode{}, setErr
+		oldWorkLen, workErr := readLayerDataRefLen(batch, work, req.ino, upd.blockIdx)
+		if workErr != nil {
+			return Inode{}, workErr
 		}
-	}
-
-	if capErr := clearSecurityCapability(batch, work, layers, inode.Ino); capErr != nil {
-		return Inode{}, capErr
+		oldEffLen, effErr := overlayGetDataRefLen(batch, layers, req.ino, upd.blockIdx)
+		if effErr != nil {
+			return Inode{}, effErr
+		}
+		newLen := uint64(upd.ref.Length)
+		workOwnedDelta += int64(newLen) - int64(oldWorkLen)
+		logicalDelta += int64(newLen) - int64(oldEffLen)
 	}
 
 	nowNano := a.disk.now().UnixNano()
@@ -2177,8 +2295,34 @@ func (a *BranchActor) execWrite(batch *pebble.Batch, branch BranchMeta, layers [
 	if err != nil {
 		return Inode{}, err
 	}
+
+	if workOwnedDelta > 0 {
+		if resErr := quota.reserve(uint64(workOwnedDelta)); resErr != nil {
+			return Inode{}, resErr
+		}
+	}
+
+	for _, upd := range req.updates {
+		if setErr := batch.Set(LayerDataKey(work, req.ino, upd.blockIdx), EncodeLiveEnvelope(EncodeBlobRef(upd.ref)), nil); setErr != nil {
+			return Inode{}, setErr
+		}
+	}
+
+	if capErr := clearSecurityCapability(batch, work, layers, inode.Ino); capErr != nil {
+		return Inode{}, capErr
+	}
+
 	if setErr := batch.Set(LayerInodeKey(work, inode.Ino), EncodeLiveEnvelope(encoded), nil); setErr != nil {
 		return Inode{}, setErr
+	}
+	if workOwnedDelta != 0 || logicalDelta != 0 {
+		applyBranchByteDeltas(&branch, workOwnedDelta, logicalDelta)
+		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
+			return Inode{}, setErr
+		}
+	}
+	if workOwnedDelta < 0 {
+		quota.release(uint64(-workOwnedDelta))
 	}
 	return inode, nil
 }

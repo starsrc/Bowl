@@ -22,6 +22,8 @@ const (
 
 	DefaultActorIdleTTL = 5 * time.Minute
 
+	DefaultGCInterval = 30 * time.Second
+
 	DefaultDataDir = "/tmp/bowl-storage-data"
 )
 
@@ -33,6 +35,7 @@ type MetaConfig struct {
 	OpenKeepCacheVal          bool          `env:"STORAGE_OPEN_KEEP_CACHE" envDefault:"false"`
 	OpenDirCacheVal           bool          `env:"STORAGE_OPEN_DIR_CACHE" envDefault:"false"`
 	ActorIdleTTLVal           time.Duration `env:"STORAGE_ACTOR_IDLE_TTL" envDefault:"5m"`
+	GCIntervalVal             time.Duration `env:"STORAGE_GC_INTERVAL" envDefault:"30s"`
 	DataDirVal                string        `env:"DATA_DIR"`
 	StorageDataDirVal         string        `env:"STORAGE_DATA_DIR"`
 }
@@ -66,6 +69,10 @@ func (c *MetaConfig) OpenDirCache() bool {
 
 func (c *MetaConfig) ActorIdleTTL() time.Duration {
 	return c.ActorIdleTTLVal
+}
+
+func (c *MetaConfig) GCInterval() time.Duration {
+	return c.GCIntervalVal
 }
 
 func (c *MetaConfig) DataDir() string {
@@ -107,6 +114,9 @@ func (c *MetaConfig) Validate() error {
 	}
 	if c.ActorIdleTTLVal < 0 {
 		return fmt.Errorf("invalid actor idle ttl %s: must be non-negative", c.ActorIdleTTLVal)
+	}
+	if c.GCIntervalVal < 0 {
+		return fmt.Errorf("invalid gc interval %s: must be non-negative", c.GCIntervalVal)
 	}
 
 	return nil

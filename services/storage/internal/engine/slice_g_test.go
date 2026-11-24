@@ -86,7 +86,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	c1, err := disk.Commit(ctx, DefaultBranchName, "first data commit")
 	require.NoError(t, err)
 
-	used := disk.packs.PhysicalBytes()
+	used := disk.UsedBytes()
 	require.GreaterOrEqual(t, used, uint64(8192))
 
 	clk.Advance(5 * time.Second)
@@ -128,7 +128,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	updated, err = disk.UpdateDiskMeta(ctx, nil, &exactQuota)
 	require.NoError(t, err)
 	require.Equal(t, exactQuota, updated.MaxBytes)
-	require.Equal(t, exactQuota, disk.packs.MaxBytes())
+	require.Equal(t, exactQuota, disk.DiskMeta().MaxBytes)
 	require.Equal(t, clk.Now().UnixNano(), updated.UpdatedAt)
 
 	_, err = disk.Write(ctx, DefaultBranchName, f.Ino, int64(len(payload)), make([]byte, 4096))
@@ -141,7 +141,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	require.NoError(t, err)
 	require.Equal(t, finalName, updated.Name)
 	require.Equal(t, grownQuota, updated.MaxBytes)
-	require.Equal(t, grownQuota, disk.packs.MaxBytes())
+	require.Equal(t, grownQuota, disk.DiskMeta().MaxBytes)
 
 	_, err = disk.Write(ctx, DefaultBranchName, f.Ino, int64(len(payload)), make([]byte, 4096))
 	require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestStep15_DiskMeta_NameUpdatedAtUpdateDiskMetaShrinkGuardAndControlSnapsho
 	snap, err := disk.SnapshotControlMeta(clk.Now())
 	require.NoError(t, err)
 	require.Equal(t, updated, snap.Disk)
-	require.Equal(t, disk.packs.PhysicalBytes(), snap.UsedBytes)
+	require.Equal(t, disk.UsedBytes(), snap.UsedBytes)
 	require.Len(t, snap.Branches, 2)
 	require.Equal(t, featBranch.Name, snap.Branches[0].Name)
 	require.Equal(t, DefaultBranchName, snap.Branches[1].Name)

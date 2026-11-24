@@ -556,3 +556,190 @@ func TestHandlerFS_StaleEpochFencesAllMutatingPOSIXRPCs(t *testing.T) {
 		})
 	}
 }
+
+func TestStep30_31_Handler_MetadataQuotaAndExt4BranchStatFS(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t, nil)
+
+	const (
+		quotaBytes = uint64(4 << 20)
+		chunkSize  = uint64(64 << 10)
+		twoMiB     = uint64(2 << 20)
+		oneMiB     = uint64(1 << 20)
+	)
+	disk := env.createDisk(t, "quota-statfs-disk", quotaBytes)
+	diskID := disk.GetDiskId()
+	branch := defaultBranch()
+	mount := env.mountBranchRW(t, diskID, branch, false)
+	epoch := mount.GetEpoch()
+
+	chunk := make([]byte, chunkSize)
+	for i := range chunk {
+		chunk[i] = byte(i%251 + 1)
+	}
+
+	createAndWrite := func(name string, size uint64) uint64 {
+		t.Helper()
+		cResp, cErr := env.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+			DiskId:    diskID,
+			Branch:    branch,
+			ParentIno: engine.RootIno,
+			Name:      []byte(name),
+			Mode:      0o644,
+			Epoch:     epoch,
+		}))
+		require.NoError(t, cErr)
+		ino := cResp.Msg.GetInode().GetIno()
+		for off := uint64(0); off < size; off += chunkSize {
+			n := min(chunkSize, size-off)
+			_, wErr := env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+				DiskId: diskID,
+				Branch: branch,
+				Ino:    ino,
+				Offset: off,
+				Data:   chunk[:n],
+				Epoch:  epoch,
+			}))
+			require.NoError(t, wErr)
+		}
+		return ino
+	}
+
+	createAndWrite("a.bin", twoMiB)
+	bIno := createAndWrite("b.bin", oneMiB)
+	createAndWrite("c.bin", oneMiB)
+
+	gotDisk, err := env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, quotaBytes, gotDisk.Msg.GetDisk().GetMaxBytes())
+	require.Equal(t, quotaBytes, gotDisk.Msg.GetDisk().GetUsedBytes())
+
+	st1, err := env.client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Branch: branch,
+		Ino:    engine.RootIno,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, quotaBytes, st1.Msg.GetTotalBytes())
+	require.Equal(t, quotaBytes, st1.Msg.GetUsedBytes())
+	require.Zero(t, st1.Msg.GetAvailBytes())
+	frsize := uint64(st1.Msg.GetFrsize())
+	require.Equal(t, quotaBytes, st1.Msg.GetBlocks()*frsize)
+	require.Equal(t, quotaBytes, (st1.Msg.GetBlocks()-st1.Msg.GetBfree())*frsize)
+	require.Zero(t, st1.Msg.GetBavail())
+
+	overflowFile, err := env.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Branch:    branch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("overflow.bin"),
+		Mode:      0o644,
+		Epoch:     epoch,
+	}))
+	require.NoError(t, err)
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: branch,
+		Ino:    overflowFile.Msg.GetInode().GetIno(),
+		Offset: 0,
+		Data:   chunk,
+		Epoch:  epoch,
+	}))
+	requireConnectErr(t, err, connect.CodeResourceExhausted, "ENOSPC")
+
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: branch,
+		Ino:    bIno,
+		Offset: 0,
+		Data:   chunk,
+		Epoch:  epoch,
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  branch,
+		Message: "commit-4m",
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.Unlink(ctx, connect.NewRequest(&storagev1.UnlinkRequest{
+		DiskId:    diskID,
+		Branch:    branch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("a.bin"),
+		Epoch:     epoch,
+	}))
+	require.NoError(t, err)
+
+	stAfterUnlink, err := env.client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Branch: branch,
+		Ino:    engine.RootIno,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, quotaBytes, stAfterUnlink.Msg.GetTotalBytes())
+	require.Equal(t, twoMiB, stAfterUnlink.Msg.GetUsedBytes())
+	require.Zero(t, stAfterUnlink.Msg.GetAvailBytes())
+	require.Equal(t, twoMiB, (stAfterUnlink.Msg.GetBlocks()-stAfterUnlink.Msg.GetBfree())*frsize)
+	require.Zero(t, stAfterUnlink.Msg.GetBavail())
+
+	diskAfterUnlink, err := env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, quotaBytes, diskAfterUnlink.Msg.GetDisk().GetUsedBytes())
+
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: branch,
+		Ino:    overflowFile.Msg.GetInode().GetIno(),
+		Offset: 0,
+		Data:   chunk,
+		Epoch:  epoch,
+	}))
+	requireConnectErr(t, err, connect.CodeResourceExhausted, "ENOSPC")
+
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  diskID,
+		MountId: mount.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.ResetBranch(ctx, connect.NewRequest(&storagev1.ResetBranchRequest{
+		DiskId:         diskID,
+		Branch:         branch,
+		TargetCommitId: 1,
+	}))
+	require.NoError(t, err)
+
+	diskAfterReset, err := env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, quotaBytes, diskAfterReset.Msg.GetDisk().GetUsedBytes())
+
+	pruneResp, err := env.client.PruneCommits(ctx, connect.NewRequest(&storagev1.PruneCommitsRequest{
+		DiskId: diskID,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), pruneResp.Msg.GetReclaimedCount())
+
+	diskAfterPrune, err := env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Zero(t, diskAfterPrune.Msg.GetDisk().GetUsedBytes())
+
+	stAfterPrune, err := env.client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{
+		DiskId: diskID,
+		Branch: branch,
+		Ino:    engine.RootIno,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, quotaBytes, stAfterPrune.Msg.GetTotalBytes())
+	require.Zero(t, stAfterPrune.Msg.GetUsedBytes())
+	require.Equal(t, quotaBytes, stAfterPrune.Msg.GetAvailBytes())
+
+	mount2 := env.mountBranchRW(t, diskID, branch, false)
+	epoch = mount2.GetEpoch()
+	createAndWrite("reclaimed.bin", oneMiB)
+	diskFinal, err := env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, oneMiB, diskFinal.Msg.GetDisk().GetUsedBytes())
+}

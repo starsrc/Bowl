@@ -68,7 +68,7 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 	require.NoError(t, err)
 
 	payload := bytes.Repeat([]byte{0x5a}, 4096)
-	refs, err := disk.packs.AppendBlocks(ctx, [][]byte{payload}, false)
+	refs, err := disk.packs.AppendBlocks(ctx, [][]byte{payload})
 	require.NoError(t, err)
 	require.Len(t, refs, 1)
 	disk.packs.ReleaseInFlight(refs)
@@ -86,12 +86,13 @@ func TestStep1_OpenDisk_ReopenPersistsDiskMetaAndRecoversPackAccounting(t *testi
 
 	require.Equal(t, "disk-persist", reopened.DiskMeta().DiskID)
 	require.Equal(t, uint64(64<<10), reopened.DiskMeta().MaxBytes)
+	require.Equal(t, uint64(4096), reopened.PackPhysicalBytes())
 
 	stat, err := reopened.StatFS(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(64<<10), stat.TotalBytes)
-	require.Equal(t, uint64(4096), stat.UsedBytes)
-	require.Equal(t, uint64(64<<10-4096), stat.AvailBytes)
+	require.Zero(t, stat.UsedBytes)
+	require.Equal(t, uint64(64<<10), stat.AvailBytes)
 
 	got, err := reopened.packs.ReadBlock(refs[0])
 	require.NoError(t, err)
@@ -181,7 +182,7 @@ func TestStep4_PackActor_CoalescesConcurrentWritesAndServesLockFreeReads(t *test
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			gotRefs, appendErr := disk.packs.AppendBlocks(ctx, [][]byte{payloads[idx]}, false)
+			gotRefs, appendErr := disk.packs.AppendBlocks(ctx, [][]byte{payloads[idx]})
 			if appendErr != nil {
 				errs[idx] = appendErr
 				return
@@ -201,7 +202,7 @@ func TestStep4_PackActor_CoalescesConcurrentWritesAndServesLockFreeReads(t *test
 	}
 }
 
-func TestStep7_PackActor_EnforcesDiskWidePhysicalQuotaAndAllowsQuotaExemptGCWrite(t *testing.T) {
+func TestStep30_MetadataQuota_EnforcesDiskWideLimitAndReclaimsImmediatelyOnUnlink(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ctx := context.Background()
@@ -219,15 +220,19 @@ func TestStep7_PackActor_EnforcesDiskWidePhysicalQuotaAndAllowsQuotaExemptGCWrit
 	})
 
 	blk := bytes.Repeat([]byte{0xab}, 4096)
-	refs1, err := disk.packs.AppendBlocks(ctx, [][]byte{blk}, false)
+	f1, err := disk.Create(ctx, DefaultBranchName, RootIno, "a.bin", 0o644, 0, 0)
 	require.NoError(t, err)
-	disk.packs.ReleaseInFlight(refs1)
-
-	refs2, err := disk.packs.AppendBlocks(ctx, [][]byte{blk}, false)
+	_, err = disk.Write(ctx, DefaultBranchName, f1.Ino, 0, blk)
 	require.NoError(t, err)
-	disk.packs.ReleaseInFlight(refs2)
 
-	_, err = disk.packs.AppendBlocks(ctx, [][]byte{blk}, false)
+	f2, err := disk.Create(ctx, DefaultBranchName, RootIno, "b.bin", 0o644, 0, 0)
+	require.NoError(t, err)
+	_, err = disk.Write(ctx, DefaultBranchName, f2.Ino, 0, blk)
+	require.NoError(t, err)
+
+	f3, err := disk.Create(ctx, DefaultBranchName, RootIno, "c.bin", 0o644, 0, 0)
+	require.NoError(t, err)
+	_, err = disk.Write(ctx, DefaultBranchName, f3.Ino, 0, blk)
 	require.ErrorIs(t, err, ErrNoSpace)
 
 	stat, err := disk.StatFS(ctx)
@@ -236,20 +241,13 @@ func TestStep7_PackActor_EnforcesDiskWidePhysicalQuotaAndAllowsQuotaExemptGCWrit
 	require.Equal(t, uint64(8192), stat.UsedBytes)
 	require.Zero(t, stat.AvailBytes)
 
-	gcRefs, err := disk.packs.AppendBlocks(ctx, [][]byte{blk}, true)
-	require.NoError(t, err)
-	require.Len(t, gcRefs, 1)
-	disk.packs.ReleaseInFlight(gcRefs)
-
-	require.NoError(t, disk.packs.DeletePack(ctx, refs1[0].PackID))
-	require.NoError(t, disk.packs.DeletePack(ctx, refs2[0].PackID))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "a.bin", false))
 
 	statAfter, err := disk.StatFS(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(4096), statAfter.UsedBytes)
 	require.Equal(t, uint64(4096), statAfter.AvailBytes)
 
-	refsAfter, err := disk.packs.AppendBlocks(ctx, [][]byte{blk}, false)
+	_, err = disk.Write(ctx, DefaultBranchName, f3.Ino, 0, blk)
 	require.NoError(t, err)
-	disk.packs.ReleaseInFlight(refsAfter)
 }

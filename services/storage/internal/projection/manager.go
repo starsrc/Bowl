@@ -25,6 +25,7 @@ const (
 	DefaultBarrierTimeout    = 200 * time.Millisecond
 	DefaultReconcileInterval = 5 * time.Second
 	DefaultSharedCacheBytes  = 64 << 20
+	DefaultGCInterval        = 30 * time.Second
 )
 
 type ManagerOptions struct {
@@ -36,6 +37,9 @@ type ManagerOptions struct {
 	FlushInterval           time.Duration
 	ReconcileInterval       time.Duration
 	ActorIdleTTL            time.Duration
+	GCInterval              time.Duration
+	DisablePeriodicGC       bool
+	DisableGC               bool
 	DiskQueueSize           int
 	OpTimeout               time.Duration
 	SharedCacheBytes        int64
@@ -66,6 +70,8 @@ type ControlManager struct {
 	barrierTimeout    time.Duration
 	reconcileInterval time.Duration
 	actorIdleTTL      time.Duration
+	gcInterval        time.Duration
+	disableGC         bool
 	opTimeout         time.Duration
 
 	slotsMu sync.Mutex
@@ -124,6 +130,12 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 	if cacheBytes <= 0 {
 		cacheBytes = DefaultSharedCacheBytes
 	}
+	gcInterval := opts.GCInterval
+	if opts.DisableGC || opts.DisablePeriodicGC {
+		gcInterval = 0
+	} else if gcInterval <= 0 {
+		gcInterval = DefaultGCInterval
+	}
 
 	cache := pebble.NewCache(cacheBytes)
 	q := NewQueue(opts.Store, QueueConfig{
@@ -144,6 +156,8 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 		barrierTimeout:    barrierTimeout,
 		reconcileInterval: reconcileInterval,
 		actorIdleTTL:      opts.ActorIdleTTL,
+		gcInterval:        gcInterval,
+		disableGC:         opts.DisableGC,
 		opTimeout:         opTimeout,
 		slots:             make(map[uuid.UUID]*diskSlot),
 		disks:             make(map[uuid.UUID]*diskEntry),
@@ -269,8 +283,16 @@ func (m *ControlManager) isClosed() bool {
 	return closed
 }
 
-func (m *ControlManager) openDiskRaw(diskID uuid.UUID, name string, maxBytes uint64) (*engine.DiskStore, error) {
+func (m *ControlManager) openDiskRaw(diskID uuid.UUID, name string, maxBytes uint64, enableBackgroundGC bool) (*engine.DiskStore, error) {
 	m.openCount.Add(1)
+	var (
+		gcInterval   time.Duration
+		enableGCWake bool
+	)
+	if enableBackgroundGC && !m.disableGC {
+		gcInterval = m.gcInterval
+		enableGCWake = true
+	}
 	return engine.OpenDisk(engine.DiskOptions{
 		Dir:          m.diskDir(diskID),
 		DiskID:       diskID.String(),
@@ -279,6 +301,8 @@ func (m *ControlManager) openDiskRaw(diskID uuid.UUID, name string, maxBytes uin
 		Cache:        m.cache,
 		Now:          m.now,
 		ActorIdleTTL: m.actorIdleTTL,
+		GCInterval:   gcInterval,
+		EnableGCWake: enableGCWake,
 	})
 }
 
@@ -324,7 +348,7 @@ func (m *ControlManager) acquireDisk(diskID uuid.UUID) (*diskEntry, func(), erro
 		return nil, nil, engine.ErrNotFound
 	}
 
-	ds, err := m.openDiskRaw(diskID, "", 0)
+	ds, err := m.openDiskRaw(diskID, "", 0, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -392,7 +416,7 @@ func (m *ControlManager) withDiskReadOnly(diskID uuid.UUID, fn func(*engine.Disk
 	if !diskExistsOnFS(m.diskDir(diskID)) {
 		return ErrNotFound
 	}
-	ds, err := m.openDiskRaw(diskID, "", 0)
+	ds, err := m.openDiskRaw(diskID, "", 0, false)
 	if err != nil {
 		return err
 	}
@@ -425,7 +449,7 @@ func (m *ControlManager) CreateDisk(ctx context.Context, name string, maxBytes u
 		return DiskRecord{}, engine.ErrClosed
 	}
 
-	ds, err := m.openDiskRaw(diskID, name, maxBytes)
+	ds, err := m.openDiskRaw(diskID, name, maxBytes, true)
 	if err != nil {
 		_ = os.RemoveAll(m.diskDir(diskID))
 		return DiskRecord{}, err
@@ -490,13 +514,29 @@ func (m *ControlManager) UpdateDisk(ctx context.Context, diskID uuid.UUID, name 
 	if err != nil {
 		return DiskRecord{}, err
 	}
-	var usedBytes uint64
-	if st, stErr := entry.store.StatFS(ctx); stErr == nil {
-		usedBytes = st.UsedBytes
-	}
+	usedBytes := entry.store.UsedBytes()
+	entry.lastSampledUsed.Store(usedBytes)
+	entry.hasSampled.Store(true)
 	diskRec := diskMetaToRecord(diskID, meta, usedBytes)
 	m.queue.EnqueueUpdateDisk(diskRec)
 	return diskRec, nil
+}
+
+func (m *ControlManager) enqueueDiskUsageUpdate(diskID uuid.UUID, entry *diskEntry) {
+	used := entry.store.UsedBytes()
+	entry.lastSampledUsed.Store(used)
+	entry.hasSampled.Store(true)
+	m.queue.EnqueueUpdateDisk(diskMetaToRecord(diskID, entry.store.DiskMeta(), used))
+}
+
+func (m *ControlManager) openDiskUsedBytes(diskID uuid.UUID) (uint64, bool) {
+	m.poolMu.RLock()
+	defer m.poolMu.RUnlock()
+	entry, ok := m.disks[diskID]
+	if !ok || entry == nil || entry.store == nil {
+		return 0, false
+	}
+	return entry.store.UsedBytes(), true
 }
 
 func (m *ControlManager) DeleteDisk(ctx context.Context, diskID uuid.UUID) error {
@@ -539,7 +579,7 @@ func (m *ControlManager) DeleteDisk(ctx context.Context, diskID uuid.UUID) error
 		if !diskExistsOnFS(m.diskDir(diskID)) {
 			return engine.ErrNotFound
 		}
-		ds, err := m.openDiskRaw(diskID, "", 0)
+		ds, err := m.openDiskRaw(diskID, "", 0, false)
 		if err != nil {
 			return err
 		}
@@ -614,6 +654,7 @@ func (m *ControlManager) DeleteBranch(ctx context.Context, diskID uuid.UUID, bra
 		return delErr
 	}
 	m.queue.EnqueueDeleteBranch(diskID, branch)
+	m.enqueueDiskUsageUpdate(diskID, entry)
 	return nil
 }
 
@@ -668,6 +709,7 @@ func (m *ControlManager) ResetBranch(ctx context.Context, diskID uuid.UUID, bran
 	}
 	brRec := branchMetaToRecord(diskID, br)
 	m.queue.EnqueueUpsertBranchAndCommit(diskID, []BranchRecord{brRec}, nil, nil)
+	m.enqueueDiskUsageUpdate(diskID, entry)
 	return brRec, nil
 }
 
@@ -737,6 +779,7 @@ func (m *ControlManager) DeleteCommit(ctx context.Context, diskID uuid.UUID, com
 		return delErr
 	}
 	m.queue.EnqueueDeleteCommits(diskID, []uint64{commitID})
+	m.enqueueDiskUsageUpdate(diskID, entry)
 	return nil
 }
 
@@ -763,6 +806,8 @@ func (m *ControlManager) PruneCommits(ctx context.Context, diskID uuid.UUID) (in
 			m.queue.MarkDirty(diskID)
 			return pruned, nil
 		}
+		entry.lastSampledUsed.Store(rawSnap.UsedBytes)
+		entry.hasSampled.Store(true)
 		m.queue.EnqueueReplaceDiskSnapshot(controlSnapshotToDiskSnapshot(diskID, rawSnap))
 	}
 	return pruned, nil
@@ -1025,6 +1070,15 @@ func (m *ControlManager) ListDisks(ctx context.Context, q ListDisksQuery) (ListD
 		}
 		return ListDisksPage{}, err
 	}
+	if len(page.Disks) > 0 {
+		m.poolMu.RLock()
+		for i := range page.Disks {
+			if entry, ok := m.disks[page.Disks[i].DiskID]; ok && entry != nil && entry.store != nil {
+				page.Disks[i].UsedBytes = entry.store.UsedBytes()
+			}
+		}
+		m.poolMu.RUnlock()
+	}
 	return page, nil
 }
 
@@ -1062,6 +1116,9 @@ func (m *ControlManager) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRec
 			return m.fallbackGetDisk(ctx, diskID)
 		}
 		return DiskRecord{}, err
+	}
+	if used, ok := m.openDiskUsedBytes(diskID); ok {
+		rec.UsedBytes = used
 	}
 	return rec, nil
 }

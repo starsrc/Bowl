@@ -64,6 +64,7 @@ var isolatedConfigEnvKeys = []string{
 	"STORAGE_OPEN_KEEP_CACHE",
 	"STORAGE_OPEN_DIR_CACHE",
 	"STORAGE_ACTOR_IDLE_TTL",
+	"STORAGE_GC_INTERVAL",
 	"DATA_DIR",
 	"STORAGE_DATA_DIR",
 }
@@ -142,6 +143,7 @@ func TestConfigLoad_GivenMinimalRequiredEnv_WhenLoaded_ThenAppliesDefaults(t *te
 	require.False(t, cfg.Meta.OpenKeepCache(), "默认应关闭文件页缓存保留")
 	require.False(t, cfg.Meta.OpenDirCache(), "默认应关闭目录缓存保留")
 	require.Equal(t, config.DefaultActorIdleTTL, cfg.Meta.ActorIdleTTL(), "默认空闲淘汰时长 want=%s, got=%s", config.DefaultActorIdleTTL, cfg.Meta.ActorIdleTTL())
+	require.Equal(t, config.DefaultGCInterval, cfg.Meta.GCInterval(), "默认 GC 间隔 want=%s, got=%s", config.DefaultGCInterval, cfg.Meta.GCInterval())
 	require.Equal(t, config.DefaultDataDir, cfg.Meta.DataDir(), "默认数据目录 want=%s, got=%s", config.DefaultDataDir, cfg.Meta.DataDir())
 }
 
@@ -159,6 +161,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 		wantOpenKeepCache  bool
 		wantOpenDirCache   bool
 		wantActorIdleTTL   time.Duration
+		wantGCInterval     time.Duration
 		wantDataDir        string
 		wantOtelSampleRate float64
 	}
@@ -178,6 +181,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 				"STORAGE_OPEN_KEEP_CACHE":           "true",
 				"STORAGE_OPEN_DIR_CACHE":            "true",
 				"STORAGE_ACTOR_IDLE_TTL":            "0",
+				"STORAGE_GC_INTERVAL":               "0",
 				"STORAGE_DATA_DIR":                  "/var/lib/bowl-fallback",
 				"OTEL_TRACES_SAMPLER_ARG":           "0",
 				"OTEL_TRACES_EXPORTER":              "none",
@@ -193,6 +197,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 			wantOpenKeepCache:  true,
 			wantOpenDirCache:   true,
 			wantActorIdleTTL:   0,
+			wantGCInterval:     0,
 			wantDataDir:        "/var/lib/bowl-fallback",
 			wantOtelSampleRate: 0,
 		},
@@ -206,6 +211,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 				"STORAGE_ATTR_TIMEOUT_SECONDS":      "3600",
 				"STORAGE_DIR_ENTRY_TIMEOUT_SECONDS": "60",
 				"STORAGE_ACTOR_IDLE_TTL":            "15m",
+				"STORAGE_GC_INTERVAL":               "2m",
 				"DATA_DIR":                          "/var/lib/bowl-primary",
 				"STORAGE_DATA_DIR":                  "/var/lib/bowl-ignored",
 				"OTEL_TRACES_SAMPLER_ARG":           "1.0",
@@ -221,6 +227,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 			wantOpenKeepCache:  false,
 			wantOpenDirCache:   false,
 			wantActorIdleTTL:   15 * time.Minute,
+			wantGCInterval:     2 * time.Minute,
 			wantDataDir:        "/var/lib/bowl-primary",
 			wantOtelSampleRate: 1.0,
 		},
@@ -242,6 +249,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 			wantOpenKeepCache:  false,
 			wantOpenDirCache:   false,
 			wantActorIdleTTL:   5 * time.Minute,
+			wantGCInterval:     config.DefaultGCInterval,
 			wantDataDir:        config.DefaultDataDir,
 			wantOtelSampleRate: 1.0,
 		},
@@ -264,6 +272,7 @@ func TestConfigLoad_GivenExtremeValidEnv_WhenLoaded_ThenPreservesExplicitValues(
 		require.Equal(t, tc.wantOpenKeepCache, cfg.Meta.OpenKeepCache(), "OpenKeepCache want=%v, got=%v", tc.wantOpenKeepCache, cfg.Meta.OpenKeepCache())
 		require.Equal(t, tc.wantOpenDirCache, cfg.Meta.OpenDirCache(), "OpenDirCache want=%v, got=%v", tc.wantOpenDirCache, cfg.Meta.OpenDirCache())
 		require.Equal(t, tc.wantActorIdleTTL, cfg.Meta.ActorIdleTTL(), "ActorIdleTTL want=%s, got=%s", tc.wantActorIdleTTL, cfg.Meta.ActorIdleTTL())
+		require.Equal(t, tc.wantGCInterval, cfg.Meta.GCInterval(), "GCInterval want=%s, got=%s", tc.wantGCInterval, cfg.Meta.GCInterval())
 		require.Equal(t, tc.wantDataDir, cfg.Meta.DataDir(), "DataDir want=%s, got=%s", tc.wantDataDir, cfg.Meta.DataDir())
 		require.InDelta(t, tc.wantOtelSampleRate, cfg.SampleRatio(), 0, "SampleRatio want=%v, got=%v", tc.wantOtelSampleRate, cfg.SampleRatio())
 	})
@@ -424,6 +433,14 @@ func TestConfigLoad_GivenInvalidEnvValues_WhenLoaded_ThenReturnsError(t *testing
 		{
 			name: "actor_idle_ttl_malformed",
 			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_ACTOR_IDLE_TTL": "not-a-duration"},
+		},
+		{
+			name: "gc_interval_negative",
+			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_GC_INTERVAL": "-1s"},
+		},
+		{
+			name: "gc_interval_malformed",
+			env:  map[string]string{"DB_DSN": validTestDSN, "STORAGE_GC_INTERVAL": "not-a-duration"},
 		},
 		{
 			name: "otel_sample_ratio_negative",

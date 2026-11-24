@@ -32,12 +32,64 @@ func TestProjectionModule_GivenInvalidOrValidPoolConfig_WhenOpenPoolOrFxValidate
 		AttrTimeoutSecondsVal:     config.DefaultAttrTimeoutSeconds,
 		DirEntryTimeoutSecondsVal: config.DefaultDirEntryTimeoutSeconds,
 		ActorIdleTTLVal:           config.DefaultActorIdleTTL,
+		GCIntervalVal:             config.DefaultGCInterval,
 		StorageDataDirVal:         t.TempDir(),
 	}
 	require.NoError(t, fx.ValidateApp(
 		fx.Supply(poolCfg, metaCfg),
 		Module,
 	))
+}
+
+func TestProvideControlManager_WiresGCIntervalFromMetaConfig(t *testing.T) {
+	ctx := context.Background()
+
+	periodicMgr, err := ProvideControlManager(ControlManagerParams{
+		Store: NewMemStore(),
+		MetaCfg: &config.MetaConfig{
+			StorageDataDirVal: t.TempDir(),
+			GCIntervalVal:     15 * time.Millisecond,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, periodicMgr.Close(context.Background())) })
+	require.Equal(t, 15*time.Millisecond, periodicMgr.gcInterval)
+	require.False(t, periodicMgr.disableGC)
+
+	zeroPeriodicMgr, err := ProvideControlManager(ControlManagerParams{
+		Store: NewMemStore(),
+		MetaCfg: &config.MetaConfig{
+			StorageDataDirVal: t.TempDir(),
+			GCIntervalVal:     0,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, zeroPeriodicMgr.Close(context.Background())) })
+	require.Zero(t, zeroPeriodicMgr.gcInterval)
+	require.False(t, zeroPeriodicMgr.disableGC)
+
+	disk, err := periodicMgr.CreateDisk(ctx, "gc-wired", 4*1024*1024)
+	require.NoError(t, err)
+	require.NoError(t, periodicMgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
+		f, cErr := ds.Create(ctx, engine.DefaultBranchName, engine.RootIno, "dead.bin", 0o644, 0, 0)
+		if cErr != nil {
+			return cErr
+		}
+		if _, wErr := ds.Write(ctx, engine.DefaultBranchName, f.Ino, 0, make([]byte, 32*1024)); wErr != nil {
+			return wErr
+		}
+		return ds.Unlink(ctx, engine.DefaultBranchName, engine.RootIno, "dead.bin", false)
+	}))
+	require.Eventually(t, func() bool {
+		var phys uint64
+		if wErr := periodicMgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
+			phys = ds.PackPhysicalBytes()
+			return nil
+		}); wErr != nil {
+			return false
+		}
+		return phys == 0
+	}, 3*time.Second, 15*time.Millisecond)
 }
 
 func TestStorageMetricsCollector_ExportsEngineMetricsWithoutDiskIDLabels(t *testing.T) {
@@ -85,6 +137,7 @@ func TestStorageMetricsCollector_ExportsEngineMetricsWithoutDiskIDLabels(t *test
 
 	require.Contains(t, text, "bowl_storage_disks_loaded 1")
 	require.Contains(t, text, "bowl_storage_logical_bytes ")
+	require.Contains(t, text, "bowl_storage_pack_physical_bytes ")
 	require.Contains(t, text, "bowl_storage_inodes ")
 	require.Contains(t, text, "bowl_storage_branch_actors_loaded 1")
 	require.Contains(t, text, "bowl_storage_pebble_block_cache_bytes ")

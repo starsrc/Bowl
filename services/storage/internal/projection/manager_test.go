@@ -942,3 +942,245 @@ func TestStep15_19_PGIntegration_ControlManagerLifecycleAndRebuild(t *testing.T)
 	require.Len(t, rebuiltMounts, 1)
 	require.Equal(t, activeRO.MountID, rebuiltMounts[0].MountID)
 }
+
+func totalPackFileBytes(t *testing.T, storageRoot string, diskID uuid.UUID) uint64 {
+	t.Helper()
+	packsDir := filepath.Join(storageRoot, "disks", diskID.String(), "packs")
+	entries, err := os.ReadDir(packsDir)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	require.NoError(t, err)
+	var total uint64
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".pack" {
+			continue
+		}
+		info, statErr := entry.Info()
+		require.NoError(t, statErr)
+		total += uint64(max(int64(0), info.Size()))
+	}
+	return total
+}
+
+func TestStep28_ControlManager_ResidentDiskRunsBackgroundGCAndColdReadDoesNot(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := projection.NewMemStore()
+
+	seedMgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             root,
+		Store:                   store,
+		DisableStartupReconcile: true,
+		DisableGC:               true,
+	})
+	require.NoError(t, err)
+
+	disk, err := seedMgr.CreateDisk(ctx, "gc-disk", 16<<20)
+	require.NoError(t, err)
+	writeFileOnBranch(t, ctx, seedMgr, disk.DiskID, "main", "dead.bin", make([]byte, 64*1024))
+	require.NoError(t, seedMgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
+		return ds.Unlink(ctx, "main", engine.RootIno, "dead.bin", false)
+	}))
+	require.NoError(t, seedMgr.Close(ctx))
+
+	deadPackBytesBefore := totalPackFileBytes(t, root, disk.DiskID)
+	require.GreaterOrEqual(t, deadPackBytesBefore, uint64(64*1024))
+
+	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             root,
+		Store:                   store,
+		GCInterval:              15 * time.Millisecond,
+		DisableStartupReconcile: true,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, coldMgr.Close(ctx)) }()
+
+	require.NoError(t, coldMgr.ReconcileDisk(ctx, disk.DiskID))
+	require.False(t, coldMgr.IsOpen(disk.DiskID))
+	require.Equal(t, deadPackBytesBefore, totalPackFileBytes(t, root, disk.DiskID))
+
+	store.SetHooks(projection.MemStoreHooks{
+		BeforeRead: func(context.Context, string) error {
+			return projection.ErrUnavailable
+		},
+	})
+	gotFallback, err := coldMgr.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Zero(t, gotFallback.UsedBytes)
+	require.False(t, coldMgr.IsOpen(disk.DiskID))
+	require.Equal(t, deadPackBytesBefore, totalPackFileBytes(t, root, disk.DiskID))
+
+	store.SetHooks(projection.MemStoreHooks{})
+
+	require.NoError(t, coldMgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
+		require.GreaterOrEqual(t, ds.PackPhysicalBytes(), uint64(64*1024))
+		return nil
+	}))
+	require.True(t, coldMgr.IsOpen(disk.DiskID))
+
+	require.Eventually(t, func() bool {
+		var phys uint64
+		if wErr := coldMgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
+			phys = ds.PackPhysicalBytes()
+			return nil
+		}); wErr != nil {
+			return false
+		}
+		return phys == 0 && totalPackFileBytes(t, root, disk.DiskID) == 0
+	}, 3*time.Second, 15*time.Millisecond)
+
+	wakeRoot := t.TempDir()
+	wakeStore := projection.NewMemStore()
+	wakeMgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             wakeRoot,
+		Store:                   wakeStore,
+		DisablePeriodicGC:       true,
+		DisableStartupReconcile: true,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, wakeMgr.Close(ctx)) }()
+
+	wakeDisk, err := wakeMgr.CreateDisk(ctx, "gc-wake-disk", 16<<20)
+	require.NoError(t, err)
+	writeFileOnBranch(t, ctx, wakeMgr, wakeDisk.DiskID, "main", "commit.bin", make([]byte, 64*1024))
+	_, err = wakeMgr.Commit(ctx, wakeDisk.DiskID, "main", "c2")
+	require.NoError(t, err)
+	_, err = wakeMgr.ResetBranch(ctx, wakeDisk.DiskID, "main", 1)
+	require.NoError(t, err)
+	pruned, err := wakeMgr.PruneCommits(ctx, wakeDisk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned)
+
+	require.Eventually(t, func() bool {
+		var phys uint64
+		if wErr := wakeMgr.WithDisk(ctx, wakeDisk.DiskID, func(ds *engine.DiskStore) error {
+			phys = ds.PackPhysicalBytes()
+			return nil
+		}); wErr != nil {
+			return false
+		}
+		return phys == 0 && totalPackFileBytes(t, wakeRoot, wakeDisk.DiskID) == 0
+	}, 3*time.Second, 15*time.Millisecond)
+}
+
+func TestStep30_ControlManager_InstantUsedBytesOnUnlinkResetDeleteBranchCommitPruneAndZeroColdWakeup(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := projection.NewMemStore()
+
+	mgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             root,
+		Store:                   store,
+		BarrierTimeout:          500 * time.Millisecond,
+		FlushInterval:           10 * time.Minute,
+		ReconcileInterval:       10 * time.Minute,
+		DisableStartupReconcile: true,
+		DisableGC:               true,
+	})
+	require.NoError(t, err)
+
+	disk, err := mgr.CreateDisk(ctx, "instant-used", 16<<20)
+	require.NoError(t, err)
+
+	assertVisibleUsed := func(want uint64) {
+		t.Helper()
+		got, gErr := mgr.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, gErr)
+		require.Equal(t, want, got.UsedBytes)
+
+		page, lErr := mgr.ListDisks(ctx, projection.ListDisksQuery{})
+		require.NoError(t, lErr)
+		require.Len(t, page.Disks, 1)
+		require.Equal(t, want, page.Disks[0].UsedBytes)
+	}
+
+	assertPGUsed := func(want uint64) {
+		t.Helper()
+		pgRec, gErr := store.GetDisk(ctx, disk.DiskID)
+		require.NoError(t, gErr)
+		require.Equal(t, want, pgRec.UsedBytes)
+	}
+
+	assertVisibleUsed(0)
+
+	writeFileOnBranch(t, ctx, mgr, disk.DiskID, "main", "temp.bin", make([]byte, 64*1024))
+	assertVisibleUsed(64 * 1024)
+
+	require.NoError(t, mgr.WithDisk(ctx, disk.DiskID, func(ds *engine.DiskStore) error {
+		return ds.Unlink(ctx, "main", engine.RootIno, "temp.bin", false)
+	}))
+	assertVisibleUsed(0)
+
+	writeFileOnBranch(t, ctx, mgr, disk.DiskID, "main", "base.bin", make([]byte, 64*1024))
+	baseCmt, err := mgr.Commit(ctx, disk.DiskID, "main", "base")
+	require.NoError(t, err)
+	assertVisibleUsed(64 * 1024)
+
+	writeFileOnBranch(t, ctx, mgr, disk.DiskID, "main", "dirty.bin", make([]byte, 32*1024))
+	assertVisibleUsed(96 * 1024)
+
+	_, err = mgr.ResetBranch(ctx, disk.DiskID, "main", baseCmt.CommitID)
+	require.NoError(t, err)
+	assertVisibleUsed(64 * 1024)
+	assertPGUsed(64 * 1024)
+
+	forkCmt, _, err := mgr.ForkBranch(ctx, disk.DiskID, "main", "feat", "fork feat")
+	require.NoError(t, err)
+	writeFileOnBranch(t, ctx, mgr, disk.DiskID, "feat", "feat-work.bin", make([]byte, 32*1024))
+	assertVisibleUsed(96 * 1024)
+
+	require.NoError(t, mgr.DeleteBranch(ctx, disk.DiskID, "feat"))
+	assertVisibleUsed(64 * 1024)
+	assertPGUsed(64 * 1024)
+
+	writeFileOnBranch(t, ctx, mgr, disk.DiskID, "main", "del-cmt.bin", make([]byte, 32*1024))
+	delCmt, err := mgr.Commit(ctx, disk.DiskID, "main", "delete me")
+	require.NoError(t, err)
+	assertVisibleUsed(96 * 1024)
+	_, err = mgr.ResetBranch(ctx, disk.DiskID, "main", forkCmt.CommitID)
+	require.NoError(t, err)
+	assertVisibleUsed(96 * 1024)
+
+	require.NoError(t, mgr.DeleteCommit(ctx, disk.DiskID, delCmt.CommitID))
+	assertVisibleUsed(64 * 1024)
+	assertPGUsed(64 * 1024)
+
+	writeFileOnBranch(t, ctx, mgr, disk.DiskID, "main", "prune-cmt.bin", make([]byte, 32*1024))
+	_, err = mgr.Commit(ctx, disk.DiskID, "main", "prune me")
+	require.NoError(t, err)
+	_, err = mgr.ResetBranch(ctx, disk.DiskID, "main", forkCmt.CommitID)
+	require.NoError(t, err)
+	assertVisibleUsed(96 * 1024)
+
+	pruned, err := mgr.PruneCommits(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned)
+	assertVisibleUsed(64 * 1024)
+	assertPGUsed(64 * 1024)
+
+	require.NoError(t, mgr.Close(ctx))
+
+	coldMgr, err := projection.NewControlManager(projection.ManagerOptions{
+		StorageRoot:             root,
+		Store:                   store,
+		BarrierTimeout:          500 * time.Millisecond,
+		DisableStartupReconcile: true,
+		DisableGC:               true,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, coldMgr.Close(ctx)) }()
+
+	opensBefore := coldMgr.OpenCount()
+	coldGot, err := coldMgr.GetDisk(ctx, disk.DiskID)
+	require.NoError(t, err)
+	require.Equal(t, uint64(64*1024), coldGot.UsedBytes)
+
+	coldList, err := coldMgr.ListDisks(ctx, projection.ListDisksQuery{})
+	require.NoError(t, err)
+	require.Len(t, coldList.Disks, 1)
+	require.Equal(t, uint64(64*1024), coldList.Disks[0].UsedBytes)
+
+	require.Equal(t, opensBefore, coldMgr.OpenCount())
+	require.False(t, coldMgr.IsOpen(disk.DiskID))
+}

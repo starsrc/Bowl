@@ -28,19 +28,25 @@ const (
 	packOpSync
 	packOpDelete
 	packOpWatermark
+	packOpGCInspect
 	packOpSealActive
+	packOpSealActiveIf
 )
 
 type packCmd struct {
-	op          packOpKind
-	blocks      [][]byte
-	quotaExempt bool
-	packID      uint64
-	refs        []BlobRef
-	watermark   uint64
-	sizes       map[uint64]uint64
-	err         error
-	done        chan struct{}
+	op             packOpKind
+	blocks         [][]byte
+	packID         uint64
+	expectedPackID uint64
+	refs           []BlobRef
+	watermark      uint64
+	sizes          map[uint64]uint64
+	activePackID   uint64
+	activePackSize uint64
+	activeInFlight bool
+	sealed         bool
+	err            error
+	done           chan struct{}
 }
 
 type hotBlob struct {
@@ -83,7 +89,6 @@ func (h *packReadHandle) release() {
 type PackActor struct {
 	dir         string
 	maxPackSize uint32
-	maxBytes    atomic.Uint64
 
 	mb struct {
 		mu       sync.Mutex
@@ -121,7 +126,7 @@ type PackActor struct {
 	closeErr  error
 }
 
-func newPackActor(dir string, maxPackSize uint32, maxBytes uint64) (*PackActor, error) {
+func newPackActor(dir string, maxPackSize uint32) (*PackActor, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -134,7 +139,6 @@ func newPackActor(dir string, maxPackSize uint32, maxBytes uint64) (*PackActor, 
 		readFiles:        make(map[uint64]*packReadHandle),
 		loopDone:         make(chan struct{}),
 	}
-	p.maxBytes.Store(maxBytes)
 	p.mb.notify = make(chan struct{}, 1)
 
 	if err := p.recoverExistingPacks(); err != nil {
@@ -200,14 +204,6 @@ func (p *PackActor) PhysicalBytes() uint64 {
 	return p.atomicPhysical.Load()
 }
 
-func (p *PackActor) MaxBytes() uint64 {
-	return p.maxBytes.Load()
-}
-
-func (p *PackActor) SetMaxBytes(maxBytes uint64) {
-	p.maxBytes.Store(maxBytes)
-}
-
 func (p *PackActor) submit(ctx context.Context, cmd *packCmd) error {
 	p.mb.mu.Lock()
 	if p.mb.closed {
@@ -233,7 +229,7 @@ func (p *PackActor) submit(ctx context.Context, cmd *packCmd) error {
 	}
 }
 
-func (p *PackActor) AppendBlocks(ctx context.Context, blocks [][]byte, quotaExempt bool) ([]BlobRef, error) {
+func (p *PackActor) AppendBlocks(ctx context.Context, blocks [][]byte) ([]BlobRef, error) {
 	if len(blocks) == 0 {
 		return nil, ErrInvalidValue
 	}
@@ -243,10 +239,9 @@ func (p *PackActor) AppendBlocks(ctx context.Context, blocks [][]byte, quotaExem
 		}
 	}
 	cmd := &packCmd{
-		op:          packOpAppend,
-		blocks:      blocks,
-		quotaExempt: quotaExempt,
-		done:        make(chan struct{}),
+		op:     packOpAppend,
+		blocks: blocks,
+		done:   make(chan struct{}),
 	}
 	if err := p.submit(ctx, cmd); err != nil {
 		return nil, err
@@ -308,12 +303,52 @@ func (p *PackActor) SealedWatermarkAndSizes(ctx context.Context) (watermark uint
 	return cmd.watermark, cmd.sizes, nil
 }
 
+type PackGCInspection struct {
+	Watermark      uint64
+	SealedSizes    map[uint64]uint64
+	ActivePackID   uint64
+	ActivePackSize uint64
+	ActiveInFlight bool
+}
+
+func (p *PackActor) GCInspectionSnapshot(ctx context.Context) (PackGCInspection, error) {
+	cmd := &packCmd{
+		op:   packOpGCInspect,
+		done: make(chan struct{}),
+	}
+	if err := p.submit(ctx, cmd); err != nil {
+		return PackGCInspection{}, err
+	}
+	return PackGCInspection{
+		Watermark:      cmd.watermark,
+		SealedSizes:    cmd.sizes,
+		ActivePackID:   cmd.activePackID,
+		ActivePackSize: cmd.activePackSize,
+		ActiveInFlight: cmd.activeInFlight,
+	}, nil
+}
+
 func (p *PackActor) SealActive(ctx context.Context) error {
 	cmd := &packCmd{
 		op:   packOpSealActive,
 		done: make(chan struct{}),
 	}
 	return p.submit(ctx, cmd)
+}
+
+func (p *PackActor) SealActiveIf(ctx context.Context, expectedPackID uint64) (bool, error) {
+	if expectedPackID == 0 {
+		return false, nil
+	}
+	cmd := &packCmd{
+		op:             packOpSealActiveIf,
+		expectedPackID: expectedPackID,
+		done:           make(chan struct{}),
+	}
+	if err := p.submit(ctx, cmd); err != nil {
+		return false, err
+	}
+	return cmd.sealed, nil
 }
 
 func (p *PackActor) SyncActive(ctx context.Context) error {
@@ -426,7 +461,7 @@ func (p *PackActor) processTick(cmds []*packCmd) {
 	for _, cmd := range cmds {
 		switch cmd.op {
 		case packOpAppend:
-			refs, created, err := p.execAppend(cmd.blocks, cmd.quotaExempt)
+			refs, created, err := p.execAppend(cmd.blocks)
 			if err != nil {
 				cmd.err = err
 				close(cmd.done)
@@ -454,6 +489,24 @@ func (p *PackActor) processTick(cmds []*packCmd) {
 			cmd.err = p.closeActivePack()
 			close(cmd.done)
 
+		case packOpSealActiveIf:
+			if p.activePackID != cmd.expectedPackID {
+				cmd.sealed = false
+				close(cmd.done)
+				continue
+			}
+			if syncErr := p.flushDirty(); syncErr != nil {
+				cmd.err = syncErr
+				close(cmd.done)
+				continue
+			}
+			if closeErr := p.closeActivePack(); closeErr != nil {
+				cmd.err = closeErr
+			} else {
+				cmd.sealed = true
+			}
+			close(cmd.done)
+
 		case packOpWatermark:
 			if syncErr := p.flushDirty(); syncErr != nil {
 				cmd.err = syncErr
@@ -461,6 +514,22 @@ func (p *PackActor) processTick(cmds []*packCmd) {
 				continue
 			}
 			cmd.watermark, cmd.sizes = p.computeWatermarkAndSizes()
+			close(cmd.done)
+
+		case packOpGCInspect:
+			if syncErr := p.flushDirty(); syncErr != nil {
+				cmd.err = syncErr
+				close(cmd.done)
+				continue
+			}
+			cmd.watermark, cmd.sizes = p.computeWatermarkAndSizes()
+			cmd.activePackID = p.activePackID
+			if p.activePackID != 0 {
+				cmd.activePackSize = p.packSizes[p.activePackID]
+				p.inFlightMu.Lock()
+				cmd.activeInFlight = p.inFlightPacks[p.activePackID] > 0
+				p.inFlightMu.Unlock()
+			}
 			close(cmd.done)
 
 		case packOpDelete:
@@ -475,18 +544,7 @@ func (p *PackActor) processTick(cmds []*packCmd) {
 	}
 }
 
-func (p *PackActor) execAppend(blocks [][]byte, quotaExempt bool) ([]BlobRef, bool, error) {
-	var totalDelta uint64
-	for _, blk := range blocks {
-		totalDelta += uint64(len(blk))
-	}
-	maxB := p.maxBytes.Load()
-	if !quotaExempt && maxB > 0 {
-		if p.totalPhysicalBytes > maxB || totalDelta > maxB-p.totalPhysicalBytes {
-			return nil, false, ErrNoSpace
-		}
-	}
-
+func (p *PackActor) execAppend(blocks [][]byte) ([]BlobRef, bool, error) {
 	refs := make([]BlobRef, 0, len(blocks))
 	createdDir := false
 

@@ -183,6 +183,18 @@ func (q *Queue) EnqueueDeleteMounts(diskID uuid.UUID, mountIDs []uuid.UUID, upda
 	})
 }
 
+func (q *Queue) EnqueueReplaceDiskSnapshot(snap DiskSnapshot) {
+	cp := DiskSnapshot{
+		Disk:     snap.Disk,
+		Branches: slices.Clone(snap.Branches),
+		Commits:  slices.Clone(snap.Commits),
+		Mounts:   slices.Clone(snap.Mounts),
+	}
+	q.enqueue(cp.Disk.DiskID, false, func(ctx context.Context, store Store) error {
+		return store.ReplaceDiskSnapshot(ctx, cp)
+	})
+}
+
 func (q *Queue) enqueue(diskID uuid.UUID, isCatalog bool, apply func(context.Context, Store) error) {
 	if diskID == uuid.Nil {
 		return
@@ -306,6 +318,16 @@ func (q *Queue) IsDirty(diskID uuid.UUID) bool {
 	return ok
 }
 
+func (q *Queue) DirtyGeneration(diskID uuid.UUID) (uint64, bool) {
+	if diskID == uuid.Nil {
+		return 0, false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	gen, ok := q.dirty[diskID]
+	return gen, ok
+}
+
 func (q *Queue) HasDirtyDisks() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -375,12 +397,14 @@ func (q *Queue) FlushBatches(ctx context.Context) {
 
 func (q *Queue) flushBatches(ctx context.Context) {
 	q.batchMu.Lock()
-	usageMap := q.usageBuf
-	if len(usageMap) > 0 {
+	var usageMap map[uuid.UUID]uint64
+	if len(q.usageBuf) > 0 {
+		usageMap = q.usageBuf
 		q.usageBuf = make(map[uuid.UUID]uint64)
 	}
-	renewMap := q.renewBuf
-	if len(renewMap) > 0 {
+	var renewMap map[mountBatchKey]time.Time
+	if len(q.renewBuf) > 0 {
+		renewMap = q.renewBuf
 		q.renewBuf = make(map[mountBatchKey]time.Time)
 	}
 	q.batchMu.Unlock()
@@ -466,6 +490,44 @@ func (q *Queue) WaitDisk(ctx context.Context, diskID uuid.UUID, timeout time.Dur
 				return ErrDiskDirty
 			}
 			if lane.flushedSeq >= targetSeq {
+				q.mu.Unlock()
+				return nil
+			}
+			notify = lane.notify
+			q.mu.Unlock()
+		case <-timer.C:
+			return ErrBarrierTimeout
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (q *Queue) WaitLaneIdle(ctx context.Context, diskID uuid.UUID, timeout time.Duration) error {
+	if diskID == uuid.Nil {
+		return nil
+	}
+	q.mu.Lock()
+	lane := q.disks[diskID]
+	if lane == nil || lane.flushedSeq >= lane.enqueuedSeq {
+		q.mu.Unlock()
+		return nil
+	}
+	targetSeq := lane.enqueuedSeq
+	notify := lane.notify
+	q.mu.Unlock()
+
+	if timeout <= 0 {
+		return ErrBarrierTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-notify:
+			q.mu.Lock()
+			if lane.flushedSeq >= targetSeq || q.closed {
 				q.mu.Unlock()
 				return nil
 			}

@@ -709,6 +709,69 @@ func (d *DiskStore) MetricsSnapshot() DiskMetricsSnapshot {
 }
 
 func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
+	return d.buildStatFS(d.allocatedInodes())
+}
+
+func (d *DiskStore) StatFSBranch(_ context.Context, branch string) (StatFSResult, error) {
+	if d.closing.Load() {
+		return StatFSResult{}, ErrClosed
+	}
+	if err := validateBranchName(branch); err != nil {
+		return StatFSResult{}, err
+	}
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	_, layers, err := resolveBranchLayers(snap, branch)
+	if err != nil {
+		return StatFSResult{}, err
+	}
+	liveInodes, err := countLiveInodes(snap, layers)
+	if err != nil {
+		return StatFSResult{}, err
+	}
+	return d.buildStatFS(liveInodes)
+}
+
+func countLiveInodes(r pebbleReader, layers []uint64) (uint64, error) {
+	seen := make(map[uint64]struct{})
+	var liveCount uint64
+	for _, layerID := range layers {
+		prefix := LayerInodePrefix(layerID)
+		iter, err := r.NewIter(&pebble.IterOptions{
+			LowerBound: prefix,
+			UpperBound: PrefixUpperBound(prefix),
+		})
+		if err != nil {
+			return 0, err
+		}
+		for iter.First(); iter.Valid(); iter.Next() {
+			_, ino, decErr := DecodeLayerInodeKey(iter.Key())
+			if decErr != nil {
+				_ = iter.Close()
+				return 0, decErr
+			}
+			if _, ok := seen[ino]; ok {
+				continue
+			}
+			seen[ino] = struct{}{}
+			tag, _, envErr := DecodeEnvelope(iter.Value())
+			if envErr != nil {
+				_ = iter.Close()
+				return 0, envErr
+			}
+			if tag == TagLive {
+				liveCount++
+			}
+		}
+		if closeErr := iter.Close(); closeErr != nil {
+			return 0, closeErr
+		}
+	}
+	return liveCount, nil
+}
+
+func (d *DiskStore) buildStatFS(files uint64) (StatFSResult, error) {
 	if d.closing.Load() {
 		return StatFSResult{}, ErrClosed
 	}
@@ -733,7 +796,7 @@ func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
 		Blocks:     blocks,
 		Bfree:      bavail,
 		Bavail:     bavail,
-		Files:      d.allocatedInodes(),
+		Files:      files,
 		Ffree:      0,
 		Namelen:    MaxFileNameBytes,
 	}, nil

@@ -369,7 +369,7 @@ func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.Stat
 			return attrErr
 		}
 		var stErr error
-		res, stErr = ds.StatFS(ctx)
+		res, stErr = ds.StatFSBranch(ctx, req.Msg.Branch)
 		return stErr
 	})
 	if err != nil {

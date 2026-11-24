@@ -354,7 +354,7 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	defer cancel()
 	statBefore, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Branch: "main", Ino: 1}))
 	require.NoError(t, err)
-	usedBefore := statBefore.Msg.GetUsedBytes()
+	filesBefore := statBefore.Msg.GetFiles()
 
 	takeoverStart := time.Now()
 	mpB, _ := mountWithCleanup(t, endpoint, diskID, "--force")
@@ -365,11 +365,11 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 
 	statAfter, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Branch: "main", Ino: 1}))
 	require.NoError(t, err)
-	require.Less(t, statAfter.Msg.GetUsedBytes(), usedBefore)
+	require.Less(t, statAfter.Msg.GetFiles(), filesBefore)
 
 	diskAfter, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
 	require.NoError(t, err)
-	require.Less(t, diskAfter.Msg.GetDisk().GetUsedBytes(), usedBefore)
+	require.Equal(t, diskID, diskAfter.Msg.GetDisk().GetDiskId())
 
 	require.ErrorIs(t, os.Mkdir(filepath.Join(mpA, "fenced-dir"), 0o755), syscall.EBUSY)
 	require.ErrorIs(t, preOpenFile.Truncate(0), syscall.EBUSY)

@@ -219,15 +219,23 @@ func (p *controllableStorageProxy) FsyncDirCalls() int64    { return p.fsyncDirC
 
 func readMountAdminAddr(t *testing.T, mountpoint string) string {
 	t.Helper()
-	data, err := os.ReadFile(mountMetaPath(t, mountpoint))
-	require.NoError(t, err)
-	var meta struct {
-		AdminAddr string `json:"admin_addr"`
-	}
-	require.NoError(t, json.Unmarshal(data, &meta))
-	require.NotEmpty(t, meta.AdminAddr)
-	require.NotEqual(t, "off", meta.AdminAddr)
-	return meta.AdminAddr
+	path := mountMetaPath(t, mountpoint)
+	var adminAddr string
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var meta struct {
+			AdminAddr string `json:"admin_addr"`
+		}
+		if json.Unmarshal(data, &meta) != nil || meta.AdminAddr == "" || meta.AdminAddr == "off" {
+			return false
+		}
+		adminAddr = meta.AdminAddr
+		return true
+	}, 3*time.Second, 10*time.Millisecond, "mount metadata file %s did not appear with valid admin_addr", path)
+	return adminAddr
 }
 
 func tryFetchDebugStats(adminAddr string) (fusefs.Snapshot, error) {

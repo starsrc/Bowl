@@ -146,10 +146,13 @@ func TestClientE2E_MergeMountGateAndEvictFencing(t *testing.T) {
 		const wantContent = "live-fuse-payload\n"
 		require.NoError(t, os.WriteFile(filepath.Join(featMP, "feat-live.txt"), []byte(wantContent), 0o644))
 
-		blockedOut := runBowlExpectExit(t, 1, "branch", "merge", featBranch, "-d", diskID, "--endpoint", endpoint, "--into", "main")
-		require.Contains(t, blockedOut, "EDIRTY")
+		mountedBlockedOut := runBowlExpectExit(t, 1, "branch", "merge", featBranch, "-d", diskID, "--endpoint", endpoint, "--into", "main")
+		require.Contains(t, mountedBlockedOut, "bowl lease list")
 
 		runBowlSuccess(t, "umount", featMP)
+		dirtyBlockedOut := runBowlExpectExit(t, 1, "branch", "merge", featBranch, "-d", diskID, "--endpoint", endpoint, "--into", "main")
+		require.Contains(t, dirtyBlockedOut, "EDIRTY")
+
 		runBowlSuccess(t, "commit", "create", "-d", diskID, "--branch", featBranch, "--endpoint", endpoint, "-q")
 		mergeOut := runBowlSuccess(t, "branch", "merge", featBranch, "-d", diskID, "--endpoint", endpoint, "--into", "main")
 		require.Contains(t, mergeOut, diskID)

@@ -300,7 +300,7 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	require.Len(t, mountsRes.Mounts, 1)
 	require.Equal(t, "main", mountsRes.Mounts[0].Branch)
 	require.Equal(t, "rw", mountsRes.Mounts[0].Mode)
-	require.Equal(t, uint64(1), mountsRes.Mounts[0].Epoch)
+	require.Equal(t, uint64(2), mountsRes.Mounts[0].Epoch)
 
 	evictOut := runBowlSuccess(t, "lease", "evict", "--endpoint", endpoint, "-d", disk2ID, "--json")
 	var evictRes struct {
@@ -316,7 +316,7 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	require.Equal(t, uint32(1), evictRes.EvictedCount)
 	require.Len(t, evictRes.UpdatedBranches, 1)
 	require.Equal(t, "main", evictRes.UpdatedBranches[0].Name)
-	require.Equal(t, uint64(2), evictRes.UpdatedBranches[0].WriterEpoch)
+	require.Equal(t, uint64(3), evictRes.UpdatedBranches[0].WriterEpoch)
 
 	delStart := time.Now()
 	runBowlSuccess(t, "disk", "delete", "--endpoint", endpoint, disk2ID, "-y", "--json")

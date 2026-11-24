@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,13 +15,14 @@ import (
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/starsrc/bowl/client/internal/fusefs"
 	"github.com/starsrc/bowl/client/internal/rpc"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
 const (
-	diskDiffTimeout       = 60 * time.Second
+	diffRPCTimeout        = 60 * time.Second
 	maxDiffPathBytes      = 4096
 	maxDiffPageTokenBytes = 4096
 	readNodeChunkSize     = 4 << 20
@@ -32,6 +34,28 @@ const (
 	posixIFRG = 0o100000
 	posixIFLN = 0o120000
 )
+
+type diffMode uint8
+
+const (
+	diffModeUnspecified diffMode = iota
+	diffModeBranches
+	diffModeCommits
+	diffModeWork
+)
+
+func (m diffMode) String() string {
+	switch m {
+	case diffModeBranches:
+		return "branches"
+	case diffModeCommits:
+		return "commits"
+	case diffModeWork:
+		return "work"
+	default:
+		return "unspecified"
+	}
+}
 
 type diffNodeSummaryJSON struct {
 	Ino  uint64 `json:"ino"`
@@ -56,26 +80,37 @@ type diffSummaryJSON struct {
 	Conflicts uint64 `json:"conflicts"`
 }
 
-type diskDiffJSON struct {
-	SourceDiskID  string          `json:"source_disk_id"`
-	TargetDiskID  string          `json:"target_disk_id,omitempty"`
-	LCASnapshotID string          `json:"lca_snapshot_id,omitempty"`
-	Summary       diffSummaryJSON `json:"summary"`
-	Entries       []diffEntryJSON `json:"entries"`
-	NextPageToken string          `json:"next_page_token"`
+type diffResultJSON struct {
+	Mode           string          `json:"mode"`
+	DiskID         string          `json:"disk_id"`
+	Branch         string          `json:"branch,omitempty"`
+	TargetBranch   string          `json:"target_branch,omitempty"`
+	SourceBranch   string          `json:"source_branch,omitempty"`
+	BaseCommitID   uint64          `json:"base_commit_id,omitempty"`
+	TargetCommitID uint64          `json:"target_commit_id,omitempty"`
+	SourceCommitID uint64          `json:"source_commit_id,omitempty"`
+	Summary        diffSummaryJSON `json:"summary"`
+	Entries        []diffEntryJSON `json:"entries"`
+	NextPageToken  string          `json:"next_page_token"`
 }
 
-var diskDiffSpec = diskSubcommandSpec{
-	use:       "diff <source-disk-id>",
-	short:     "Show differences and conflicts between disks or against the common ancestor",
-	args:      cobra.ExactArgs(1),
-	uuidLabel: "source-disk-id",
-	spanName:  "cli.disk.diff",
-	timeout:   diskDiffTimeout,
+func newDiffCmd(ports diskPorts, rootOpts *rootOptions) *cobra.Command {
+	return newDiskSubcommand(&diffCmdSpec, ports, rootOpts)
+}
+
+var diffCmdSpec = diskSubcommandSpec{
+	use:              "diff [<target>..<source>]",
+	short:            "Show differences between branches, commits, or a branch working layer",
+	args:             cobra.MaximumNArgs(1),
+	requireDiskScope: true,
+	spanName:         "cli.diff",
+	timeout:          diffRPCTimeout,
 	buildAdapter: func(cmd *cobra.Command) diskRequestAdapter {
-		a := &diskDiffAdapter{}
+		a := &diffAdapter{}
 		flags := cmd.Flags()
-		flags.StringVar(&a.targetRaw, "target", "", "Target virtual disk UUID; omit to compare with the lowest common ancestor")
+		flags.StringVar(&a.commitsRaw, "commits", "", "Compare two commits as <base>..<source>")
+		flags.BoolVar(&a.work, "work", false, "Compare a branch working layer against its head commit")
+		flags.StringVar(&a.branch, "branch", fusefs.DefaultBranch, "Branch name for --work diff mode")
 		flags.StringVar(&a.prefix, "prefix", "", "Path prefix filter up to 4096 bytes")
 		flags.BoolVar(&a.conflictsOnly, "conflicts-only", false, "Return only entries with conflicts")
 		flags.BoolVarP(&a.patch, "patch", "p", false, "Render unified line diffs, symlink changes, and binary notices")
@@ -85,30 +120,107 @@ var diskDiffSpec = diskSubcommandSpec{
 	},
 }
 
-type diskDiffAdapter struct {
-	sourceDiskID  string
-	targetRaw     string
-	targetDiskID  string
-	prefix        string
-	conflictsOnly bool
-	patch         bool
-	limit         int
-	pageSize      uint32
-	pageToken     string
+type diffAdapter struct {
+	diskID         string
+	mode           diffMode
+	targetBranch   string
+	sourceBranch   string
+	commitsRaw     string
+	baseCommitID   uint64
+	sourceCommitID uint64
+	work           bool
+	branch         string
+	prefix         string
+	conflictsOnly  bool
+	patch          bool
+	limit          int
+	pageSize       uint32
+	pageToken      string
 }
 
-func (a *diskDiffAdapter) finalize(cmd *cobra.Command, posArgs []string) (bool, error) {
-	a.sourceDiskID = posArgs[0]
+func splitRangePair(raw, label string) (left, right string, err error) {
+	if strings.Count(raw, "..") != 1 {
+		return "", "", fmt.Errorf("invalid %s %q: expected <left>..<right>", label, raw)
+	}
+	left, right, _ = strings.Cut(raw, "..")
+	if left == "" || right == "" {
+		return "", "", fmt.Errorf("invalid %s %q: both sides of '..' are required", label, raw)
+	}
+	return left, right, nil
+}
+
+func (a *diffAdapter) finalize(cmd *cobra.Command, diskID string, posArgs []string) (bool, error) {
+	a.diskID = diskID
 	flags := cmd.Flags()
-	if flags.Changed("target") {
-		if _, err := parseNonNilUUID(a.targetRaw, "target-disk-id"); err != nil {
+
+	hasPos := len(posArgs) > 0
+	hasCommits := flags.Changed("commits")
+	hasWork := a.work
+
+	modeCount := 0
+	if hasPos {
+		modeCount++
+	}
+	if hasCommits {
+		modeCount++
+	}
+	if hasWork {
+		modeCount++
+	}
+	if modeCount == 0 {
+		return true, errors.New("specify one diff mode: <target>..<source>, --commits <base>..<source>, or --work")
+	}
+	if modeCount > 1 {
+		return false, errors.New("cannot combine <target>..<source>, --commits, and --work")
+	}
+	if flags.Changed("branch") && !hasWork {
+		return false, errors.New("--branch can only be used with --work")
+	}
+
+	switch {
+	case hasPos:
+		target, source, err := splitRangePair(posArgs[0], "branch range")
+		if err != nil {
 			return false, err
 		}
-		if a.targetRaw == a.sourceDiskID {
-			return false, errors.New("target disk cannot be the same as source disk")
+		if err := validateBranchName(target, "target branch"); err != nil {
+			return false, err
 		}
-		a.targetDiskID = a.targetRaw
+		if err := validateBranchName(source, "source branch"); err != nil {
+			return false, err
+		}
+		if target == source {
+			return false, errors.New("target branch and source branch must be different")
+		}
+		a.mode = diffModeBranches
+		a.targetBranch = target
+		a.sourceBranch = source
+	case hasCommits:
+		baseRaw, sourceRaw, err := splitRangePair(a.commitsRaw, "--commits")
+		if err != nil {
+			return false, err
+		}
+		baseID, err := parsePositiveCommitID(baseRaw, "base commit ID")
+		if err != nil {
+			return false, err
+		}
+		sourceID, err := parsePositiveCommitID(sourceRaw, "source commit ID")
+		if err != nil {
+			return false, err
+		}
+		if baseID == sourceID {
+			return false, errors.New("base commit ID and source commit ID must be different")
+		}
+		a.mode = diffModeCommits
+		a.baseCommitID = baseID
+		a.sourceCommitID = sourceID
+	case hasWork:
+		if err := validateBranchName(a.branch, "--branch"); err != nil {
+			return false, err
+		}
+		a.mode = diffModeWork
 	}
+
 	if len(a.prefix) > maxDiffPathBytes {
 		return false, fmt.Errorf("--prefix cannot exceed %d bytes", maxDiffPathBytes)
 	}
@@ -130,56 +242,104 @@ func (a *diskDiffAdapter) finalize(cmd *cobra.Command, posArgs []string) (bool, 
 	return false, nil
 }
 
-func (a *diskDiffAdapter) spanAttrs() []attribute.KeyValue {
+func (a *diffAdapter) spanAttrs() []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
-		attribute.String("bowl.source_disk_id", a.sourceDiskID),
+		attribute.String("bowl.disk_id", a.diskID),
+		attribute.String("bowl.diff_mode", a.mode.String()),
 	}
-	if a.targetDiskID != "" {
-		attrs = append(attrs, attribute.String("bowl.target_disk_id", a.targetDiskID))
+	switch a.mode {
+	case diffModeBranches:
+		attrs = append(attrs,
+			attribute.String("bowl.target_branch", a.targetBranch),
+			attribute.String("bowl.source_branch", a.sourceBranch),
+		)
+	case diffModeCommits:
+		attrs = append(attrs,
+			attribute.String("bowl.base_commit_id", strconv.FormatUint(a.baseCommitID, 10)),
+			attribute.String("bowl.source_commit_id", strconv.FormatUint(a.sourceCommitID, 10)),
+		)
+	case diffModeWork:
+		attrs = append(attrs, attribute.String("bowl.branch", a.branch))
 	}
 	return attrs
 }
 
-func (a *diskDiffAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
+func (a *diffAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
 	return nil
 }
 
-func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
-	var targetPtr *string
-	if a.targetDiskID != "" {
-		targetPtr = &a.targetDiskID
-	}
+func (a *diffAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
 	var prefixBytes []byte
 	if a.prefix != "" {
 		prefixBytes = []byte(a.prefix)
 	}
 
-	resp, err := client.DiffDisk(ctx, connect.NewRequest(&storagev1.DiffDiskRequest{
-		SourceDiskId:  a.sourceDiskID,
-		TargetDiskId:  targetPtr,
-		PathPrefix:    prefixBytes,
-		ConflictsOnly: a.conflictsOnly,
-		PageSize:      a.pageSize,
-		PageToken:     a.pageToken,
-	}))
+	var (
+		msg *storagev1.DiffResponse
+		err error
+	)
+	switch a.mode {
+	case diffModeBranches:
+		var resp *connect.Response[storagev1.DiffResponse]
+		resp, err = client.DiffBranches(ctx, connect.NewRequest(&storagev1.DiffBranchesRequest{
+			DiskId:        a.diskID,
+			SourceBranch:  a.sourceBranch,
+			TargetBranch:  a.targetBranch,
+			PathPrefix:    prefixBytes,
+			ConflictsOnly: a.conflictsOnly,
+			PageSize:      a.pageSize,
+			PageToken:     a.pageToken,
+		}))
+		if err == nil {
+			msg = resp.Msg
+		}
+	case diffModeCommits:
+		var resp *connect.Response[storagev1.DiffResponse]
+		resp, err = client.DiffCommits(ctx, connect.NewRequest(&storagev1.DiffCommitsRequest{
+			DiskId:         a.diskID,
+			BaseCommitId:   a.baseCommitID,
+			SourceCommitId: a.sourceCommitID,
+			PathPrefix:     prefixBytes,
+			ConflictsOnly:  a.conflictsOnly,
+			PageSize:       a.pageSize,
+			PageToken:      a.pageToken,
+		}))
+		if err == nil {
+			msg = resp.Msg
+		}
+	case diffModeWork:
+		var resp *connect.Response[storagev1.DiffResponse]
+		resp, err = client.DiffWork(ctx, connect.NewRequest(&storagev1.DiffWorkRequest{
+			DiskId:        a.diskID,
+			Branch:        a.branch,
+			PathPrefix:    prefixBytes,
+			ConflictsOnly: a.conflictsOnly,
+			PageSize:      a.pageSize,
+			PageToken:     a.pageToken,
+		}))
+		if err == nil {
+			msg = resp.Msg
+		}
+	}
 	if err != nil {
 		return diskOutcome{}, mapDiskRPCError(err, diskRPCErrorPolicy{
-			defaultOp:       "diff disks failed",
+			diskID:          a.diskID,
+			branch:          a.branch,
+			defaultOp:       "diff failed",
 			checkInvalidArg: true,
 		})
 	}
 
-	msg := resp.Msg
-	lcaSnapshotID := msg.GetLcaSnapshotId()
 	entries := msg.GetEntries()
 	summary := msg.GetSummary()
 
 	patches := make([]string, len(entries))
 	if a.patch {
 		for idx, entry := range entries {
-			patchStr, patchErr := a.renderEntryPatch(ctx, client, lcaSnapshotID, entry)
+			patchStr, patchErr := a.renderEntryPatch(ctx, client, msg, entry)
 			if patchErr != nil {
 				return diskOutcome{}, mapDiskRPCError(patchErr, diskRPCErrorPolicy{
+					diskID:    a.diskID,
 					defaultOp: fmt.Sprintf("read diff content for %s failed", string(entry.GetPath())),
 				})
 			}
@@ -200,10 +360,12 @@ func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.St
 		})
 	}
 
-	payload := diskDiffJSON{
-		SourceDiskID:  a.sourceDiskID,
-		TargetDiskID:  a.targetDiskID,
-		LCASnapshotID: lcaSnapshotID,
+	payload := diffResultJSON{
+		Mode:           a.mode.String(),
+		DiskID:         a.diskID,
+		BaseCommitID:   msg.GetBaseCommitId(),
+		TargetCommitID: msg.GetTargetCommitId(),
+		SourceCommitID: msg.GetSourceCommitId(),
 		Summary: diffSummaryJSON{
 			Added:     summary.GetAdded(),
 			Modified:  summary.GetModified(),
@@ -213,11 +375,18 @@ func (a *diskDiffAdapter) invoke(ctx context.Context, client storagev1connect.St
 		Entries:       jsonEntries,
 		NextPageToken: msg.GetNextPageToken(),
 	}
+	switch a.mode {
+	case diffModeBranches:
+		payload.TargetBranch = a.targetBranch
+		payload.SourceBranch = a.sourceBranch
+	case diffModeWork:
+		payload.Branch = a.branch
+	}
 
 	return diskOutcome{
 		jsonPayload: payload,
 		renderHuman: func(w io.Writer) {
-			renderDiskDiffHuman(w, &payload, a.patch)
+			renderDiffHuman(w, &payload, a.patch)
 		},
 	}, nil
 }
@@ -290,13 +459,19 @@ func conflictKindLabel(c storagev1.ConflictKind) string {
 	}
 }
 
-func renderDiskDiffHuman(w io.Writer, res *diskDiffJSON, withPatch bool) {
-	if res.LCASnapshotID != "" {
-		fmt.Fprintf(w, "LCA Snapshot: %s\n", res.LCASnapshotID)
+func renderDiffHuman(w io.Writer, res *diffResultJSON, withPatch bool) {
+	if res.BaseCommitID > 0 {
+		fmt.Fprintf(w, "Base Commit:   %d\n", res.BaseCommitID)
+	}
+	if res.TargetCommitID > 0 {
+		fmt.Fprintf(w, "Target Commit: %d\n", res.TargetCommitID)
+	}
+	if res.SourceCommitID > 0 {
+		fmt.Fprintf(w, "Source Commit: %d\n", res.SourceCommitID)
 	}
 	fmt.Fprintf(
 		w,
-		"Summary:    +%d ~%d -%d (conflicts: %d)\n",
+		"Summary:       +%d ~%d -%d (conflicts: %d)\n",
 		res.Summary.Added,
 		res.Summary.Modified,
 		res.Summary.Deleted,
@@ -343,10 +518,17 @@ type nodeContentSnapshot struct {
 	symlinkTarget string
 }
 
-func (a *diskDiffAdapter) renderEntryPatch(
+func leftDiffSummary(entry *storagev1.DiffEntry) *storagev1.DiffNodeSummary {
+	if entry.GetTarget() != nil {
+		return entry.GetTarget()
+	}
+	return entry.GetBase()
+}
+
+func (a *diffAdapter) renderEntryPatch(
 	ctx context.Context,
 	client storagev1connect.StorageServiceClient,
-	lcaSnapshotID string,
+	resp *storagev1.DiffResponse,
 	entry *storagev1.DiffEntry,
 ) (string, error) {
 	relPath := strings.TrimPrefix(string(entry.GetPath()), "/")
@@ -360,24 +542,64 @@ func (a *diskDiffAdapter) renderEntryPatch(
 		err   error
 	)
 
-	if a.targetDiskID != "" {
-		left, err = fetchLiveDiskNode(ctx, client, a.targetDiskID, entry.GetTarget())
+	switch a.mode {
+	case diffModeBranches:
+		if entry.GetTarget() != nil {
+			targetCommitID := resp.GetTargetCommitId()
+			if targetCommitID == 0 {
+				return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing target_commit_id: cannot read target commit content\n", relPath, relPath), nil
+			}
+			left, err = fetchCommitNode(ctx, client, a.diskID, targetCommitID, entry.GetTarget())
+			if err != nil {
+				return "", err
+			}
+		}
+		if entry.GetSource() != nil {
+			sourceCommitID := resp.GetSourceCommitId()
+			if sourceCommitID == 0 {
+				return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing source_commit_id: cannot read source commit content\n", relPath, relPath), nil
+			}
+			right, err = fetchCommitNode(ctx, client, a.diskID, sourceCommitID, entry.GetSource())
+			if err != nil {
+				return "", err
+			}
+		}
+	case diffModeCommits:
+		if leftSum := leftDiffSummary(entry); leftSum != nil {
+			baseCommitID := resp.GetBaseCommitId()
+			if baseCommitID == 0 {
+				baseCommitID = a.baseCommitID
+			}
+			left, err = fetchCommitNode(ctx, client, a.diskID, baseCommitID, leftSum)
+			if err != nil {
+				return "", err
+			}
+		}
+		if entry.GetSource() != nil {
+			sourceCommitID := resp.GetSourceCommitId()
+			if sourceCommitID == 0 {
+				sourceCommitID = a.sourceCommitID
+			}
+			right, err = fetchCommitNode(ctx, client, a.diskID, sourceCommitID, entry.GetSource())
+			if err != nil {
+				return "", err
+			}
+		}
+	case diffModeWork:
+		if leftSum := leftDiffSummary(entry); leftSum != nil {
+			baseCommitID := resp.GetBaseCommitId()
+			if baseCommitID == 0 {
+				return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing base_commit_id: cannot read head commit content\n", relPath, relPath), nil
+			}
+			left, err = fetchCommitNode(ctx, client, a.diskID, baseCommitID, leftSum)
+			if err != nil {
+				return "", err
+			}
+		}
+		right, err = fetchLiveBranchNode(ctx, client, a.diskID, a.branch, entry.GetSource())
 		if err != nil {
 			return "", err
 		}
-	} else if entry.GetBase() != nil {
-		if lcaSnapshotID == "" {
-			return fmt.Sprintf("--- a/%s\n+++ b/%s\nmissing lca_snapshot_id: cannot read ancestor snapshot content\n", relPath, relPath), nil
-		}
-		left, err = fetchSnapshotNode(ctx, client, a.sourceDiskID, lcaSnapshotID, entry.GetBase())
-		if err != nil {
-			return "", err
-		}
-	}
-
-	right, err = fetchLiveDiskNode(ctx, client, a.sourceDiskID, entry.GetSource())
-	if err != nil {
-		return "", err
 	}
 
 	if !left.present && !right.present {
@@ -459,10 +681,11 @@ func isModeRegularOrDefault(mode uint32) bool {
 	return normalizeFileType(mode) == posixIFRG
 }
 
-func fetchSnapshotNode(
+func fetchCommitNode(
 	ctx context.Context,
 	client storagev1connect.StorageServiceClient,
-	diskID, snapshotID string,
+	diskID string,
+	commitID uint64,
 	summary *storagev1.DiffNodeSummary,
 ) (nodeContentSnapshot, error) {
 	if summary == nil {
@@ -482,12 +705,12 @@ func fetchSnapshotNode(
 	var buf []byte
 	var offset uint64
 	for {
-		resp, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
-			DiskId:     diskID,
-			SnapshotId: snapshotID,
-			Ino:        summary.GetIno(),
-			Offset:     offset,
-			Size:       readNodeChunkSize,
+		resp, err := client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
+			DiskId:   diskID,
+			CommitId: commitID,
+			Ino:      summary.GetIno(),
+			Offset:   offset,
+			Size:     readNodeChunkSize,
 		}))
 		if err != nil {
 			return nodeContentSnapshot{}, err
@@ -521,10 +744,10 @@ func fetchSnapshotNode(
 	}, nil
 }
 
-func fetchLiveDiskNode(
+func fetchLiveBranchNode(
 	ctx context.Context,
 	client storagev1connect.StorageServiceClient,
-	diskID string,
+	diskID, branch string,
 	summary *storagev1.DiffNodeSummary,
 ) (nodeContentSnapshot, error) {
 	if summary == nil {
@@ -537,6 +760,7 @@ func fetchLiveDiskNode(
 	if isModeSymlink(summary.GetMode()) {
 		resp, err := client.Readlink(ctx, connect.NewRequest(&storagev1.ReadlinkRequest{
 			DiskId: diskID,
+			Branch: branch,
 			Ino:    summary.GetIno(),
 		}))
 		if err != nil {
@@ -566,6 +790,7 @@ func fetchLiveDiskNode(
 		want := uint32(min(uint64(readNodeChunkSize), totalSize-offset))
 		resp, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
 			DiskId: diskID,
+			Branch: branch,
 			Ino:    summary.GetIno(),
 			Offset: offset,
 			Size:   want,

@@ -42,6 +42,7 @@ const (
 
 type mountOptions struct {
 	endpoint                 string
+	branch                   string
 	logFile                  string
 	adminAddr                string
 	logLevel                 string
@@ -193,17 +194,23 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer rpcCancel()
 
-	resp, err := client.MountDisk(rpcCtx, connect.NewRequest(&storagev1.MountDiskRequest{
+	branch := baseCfg.Branch
+	if branch == "" {
+		branch = fusefs.DefaultBranch
+	}
+
+	resp, err := client.MountBranch(rpcCtx, connect.NewRequest(&storagev1.MountBranchRequest{
 		DiskId:   baseCfg.DiskID,
+		Branch:   branch,
 		ReadOnly: baseCfg.IsReadOnly(),
 		Force:    force,
 	}))
 	if err != nil {
 		if connectErr, ok := errors.AsType[*connect.Error](err); ok && connectErr.Code() == connect.CodeNotFound {
-			return nil, mountLeaseInfo{}, fmt.Errorf("disk not found: %s", baseCfg.DiskID)
+			return nil, mountLeaseInfo{}, fmt.Errorf("disk %s branch %q not found: %w", baseCfg.DiskID, branch, err)
 		}
 		if isDiskMountedError(err) {
-			return nil, mountLeaseInfo{}, fmt.Errorf("disk %s already has an active read-write mount; unmount it first or pass --force to preempt: %w", baseCfg.DiskID, err)
+			return nil, mountLeaseInfo{}, fmt.Errorf("disk %s branch %q already has an active read-write mount; unmount it first or pass --force to preempt: %w", baseCfg.DiskID, branch, err)
 		}
 		return nil, mountLeaseInfo{}, fmt.Errorf("mount handshake failed: %w", err)
 	}
@@ -219,6 +226,7 @@ func mountHandshake(ctx context.Context, client storagev1connect.StorageServiceC
 	}
 
 	cfg := *baseCfg
+	cfg.Branch = branch
 	cfg.Epoch = epoch
 	cfg.RootIno = rootInode.GetIno()
 	cfg.RootInode = rootInode
@@ -299,6 +307,7 @@ func startMountLeaseRenewer(
 			rpcCtx, rpcCancel := context.WithTimeout(renewCtx, mountRenewRPCTimeout)
 			resp, err := client.RenewMount(rpcCtx, connect.NewRequest(&storagev1.RenewMountRequest{
 				DiskId:   cfg.DiskID,
+				Branch:   cfg.Branch,
 				MountId:  lease.mountID,
 				ReadOnly: cfg.IsReadOnly(),
 				Epoch:    cfg.Epoch,
@@ -352,11 +361,11 @@ func unmountMountLease(client storagev1connect.StorageServiceClient, diskID, mou
 	}
 	unmountCtx, unmountCancel := context.WithTimeout(context.Background(), timeout)
 	defer unmountCancel()
-	if _, err := client.UnmountDisk(unmountCtx, connect.NewRequest(&storagev1.UnmountDiskRequest{
+	if _, err := client.UnmountBranch(unmountCtx, connect.NewRequest(&storagev1.UnmountBranchRequest{
 		DiskId:  diskID,
 		MountId: mountID,
 	})); err != nil {
-		logger.Warn("unmount_disk_rpc_failed",
+		logger.Warn("unmount_branch_rpc_failed",
 			slog.String("disk_id", diskID),
 			slog.String("mount_id", mountID),
 			slog.String("error", err.Error()),
@@ -643,6 +652,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			Mountpoint:       mountpoint,
 			PID:              selfPID,
 			DiskID:           cfg.DiskID,
+			Branch:           cfg.Branch,
 			AdminAddr:        loopbackAdminAddr(admin.addr()),
 			StartedAt:        startedAt,
 			UnmountTimeoutMs: rawFS.Config().UnmountTimeout.Milliseconds(),
@@ -656,6 +666,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 			slog.String("mountpoint", mountpoint),
 			slog.String("server_addr", opts.endpoint),
 			slog.String("disk_id", cfg.DiskID),
+			slog.String("branch", cfg.Branch),
 			slog.Uint64("epoch", cfg.Epoch),
 			slog.Uint64("root_ino", cfg.RootIno),
 			slog.String("admin_addr", admin.addr()),
@@ -707,6 +718,7 @@ func runMount(ctx context.Context, opts *mountOptions, baseCfg *fusefs.Config, m
 		slog.String("mountpoint", mountpoint),
 		slog.String("server_addr", opts.endpoint),
 		slog.String("disk_id", cfg.DiskID),
+		slog.String("branch", cfg.Branch),
 		slog.Uint64("epoch", cfg.Epoch),
 		slog.Int("pid", selfPID),
 		slog.Int64("uptime_ms", uptimeMs),
@@ -724,6 +736,9 @@ func firstNonEmptyEnv(keys ...string) string {
 }
 
 func applyEnvAndValidateOptions(o *mountOptions, set mountFlagPresence, foreground bool) error {
+	if err := validateBranchName(o.branch, "--branch"); err != nil {
+		return err
+	}
 	if set.logFile {
 		if foreground {
 			return errors.New("--log-file cannot be set with -f/--foreground")
@@ -1043,7 +1058,7 @@ func validatePathNotInMountpoint(flagName, targetPath, rawMP, canonMP string) er
 	return nil
 }
 
-func newMountCmd(rawArgs []string) *cobra.Command {
+func newMountCmd(rawArgs []string, rootOpts *rootOptions) *cobra.Command {
 	var (
 		foreground bool
 		allowOther bool
@@ -1052,6 +1067,7 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 		statsFile  bool
 	)
 	opts := mountOptions{
+		branch:                   fusefs.DefaultBranch,
 		adminAddr:                defaultAdminAddr,
 		logLevel:                 "info",
 		logFormat:                "json",
@@ -1065,9 +1081,10 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "mount <disk-id> <mountpoint>",
-		Short: "Mount a remote virtual disk to a local directory",
+		Short: "Mount a remote virtual disk branch to a local directory",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, posArgs []string) error {
+			opts.endpoint = rootOpts.endpoint
 			flags := cmd.Flags()
 			set := mountFlagPresence{
 				logFile:                  flags.Changed("log-file"),
@@ -1088,9 +1105,9 @@ func newMountCmd(rawArgs []string) *cobra.Command {
 	}
 
 	flags := cmd.Flags()
-	flags.StringVar(&opts.endpoint, "endpoint", "", "StorageService base URL, defaults to $BOWL_STORAGE_ENDPOINT or http://127.0.0.1:9000")
+	flags.StringVar(&opts.branch, "branch", fusefs.DefaultBranch, "Target branch name to mount")
 	flags.BoolVarP(&foreground, "foreground", "f", false, "Run in foreground, log to stderr, and exit on SIGINT or SIGTERM")
-	flags.BoolVar(&opts.force, "force", false, "Preempt an active read-write mount lease on the disk")
+	flags.BoolVar(&opts.force, "force", false, "Preempt an active read-write mount lease on the branch")
 	flags.StringVar(&opts.logFile, "log-file", "", "Log file path for background daemon mode")
 	flags.BoolVar(&allowOther, "allow-other", false, "Allow other local users to access the mountpoint")
 	flags.StringVar(&opts.mode, "mode", fusefs.MountModeStaged, "Mount mode: staged, sync, or ro; defaults to $BOWL_MOUNT_MODE or staged")
@@ -1176,6 +1193,7 @@ func prepareMountExecution(
 
 	baseCfg := fusefs.Config{
 		DiskID:                   diskIDStr,
+		Branch:                   opts.branch,
 		Mode:                     opts.mode,
 		DirectIO:                 directIO,
 		AllowOther:               allowOther,

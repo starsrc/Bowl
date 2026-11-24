@@ -17,7 +17,7 @@ import (
 
 var diskUpdateSpec = diskSubcommandSpec{
 	use:       "update <disk-id>",
-	aliases:   []string{"resize"},
+	aliases:   []string{"edit"},
 	short:     "Update a virtual disk name or capacity quota",
 	args:      cobra.ExactArgs(1),
 	uuidLabel: "disk-id",
@@ -40,8 +40,8 @@ type diskUpdateAdapter struct {
 	sizePtr *uint64
 }
 
-func (a *diskUpdateAdapter) finalize(cmd *cobra.Command, posArgs []string) (bool, error) {
-	a.diskID = posArgs[0]
+func (a *diskUpdateAdapter) finalize(cmd *cobra.Command, diskID string, _ []string) (bool, error) {
+	a.diskID = diskID
 	flags := cmd.Flags()
 	if flags.Changed("size") {
 		maxBytes, err := ParseSize(a.sizeRaw)
@@ -72,7 +72,6 @@ func (a *diskUpdateAdapter) preRPC(_ diskPorts, _ io.Writer) *diskCLIError {
 }
 
 func (a *diskUpdateAdapter) invoke(ctx context.Context, client storagev1connect.StorageServiceClient) (diskOutcome, *diskCLIError) {
-
 	if a.sizePtr != nil {
 		newMaxBytes := *a.sizePtr
 		getResp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{

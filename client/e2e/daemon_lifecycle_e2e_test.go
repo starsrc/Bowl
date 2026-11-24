@@ -94,10 +94,12 @@ func TestDaemonLifecycle_MountAdminStatsAndUmount(t *testing.T) {
 		AdminAddr string `json:"admin_addr"`
 		PID       int    `json:"pid"`
 		DiskID    string `json:"disk_id"`
+		Branch    string `json:"branch"`
 	}
 	require.NoError(t, json.Unmarshal(metaBytes, &meta))
 	require.Equal(t, daemonPID, meta.PID)
 	require.Equal(t, disk.GetDiskId(), meta.DiskID)
+	require.Equal(t, "main", meta.Branch)
 	require.NotEmpty(t, meta.AdminAddr)
 
 	healthCode, healthBody := httpGetStatusAndBody(t, "http://"+meta.AdminAddr+"/healthz")
@@ -279,14 +281,15 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 
 	blockedAfterKillOut := runBowlExpectExit(t, 1, "disk", "delete", "--endpoint", endpoint, disk2ID, "-y")
 	require.Contains(t, blockedAfterKillOut, "still mounted")
-	require.Contains(t, blockedAfterKillOut, "bowl disk mounts")
-	require.Contains(t, blockedAfterKillOut, "bowl disk evict")
+	require.Contains(t, blockedAfterKillOut, "bowl lease list")
+	require.Contains(t, blockedAfterKillOut, "bowl lease evict")
 
-	mountsOut := runBowlSuccess(t, "disk", "mounts", "--endpoint", endpoint, disk2ID, "--json")
+	mountsOut := runBowlSuccess(t, "lease", "list", "--endpoint", endpoint, "-d", disk2ID, "--json")
 	var mountsRes struct {
 		DiskID string `json:"disk_id"`
 		Mounts []struct {
 			MountID   string `json:"mount_id"`
+			Branch    string `json:"branch"`
 			Mode      string `json:"mode"`
 			Epoch     uint64 `json:"epoch"`
 			ExpiresAt string `json:"expires_at"`
@@ -295,19 +298,25 @@ func TestDaemonLifecycle_RemountRecoveryAndKill9Delete(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(mountsOut), &mountsRes))
 	require.Equal(t, disk2ID, mountsRes.DiskID)
 	require.Len(t, mountsRes.Mounts, 1)
+	require.Equal(t, "main", mountsRes.Mounts[0].Branch)
 	require.Equal(t, "rw", mountsRes.Mounts[0].Mode)
 	require.Equal(t, uint64(1), mountsRes.Mounts[0].Epoch)
 
-	evictOut := runBowlSuccess(t, "disk", "evict", "--endpoint", endpoint, disk2ID, "--json")
+	evictOut := runBowlSuccess(t, "lease", "evict", "--endpoint", endpoint, "-d", disk2ID, "--json")
 	var evictRes struct {
-		DiskID       string `json:"disk_id"`
-		EvictedCount uint32 `json:"evicted_count"`
-		WriterEpoch  uint64 `json:"writer_epoch"`
+		DiskID          string `json:"disk_id"`
+		EvictedCount    uint32 `json:"evicted_count"`
+		UpdatedBranches []struct {
+			Name        string `json:"name"`
+			WriterEpoch uint64 `json:"writer_epoch"`
+		} `json:"updated_branches"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(evictOut), &evictRes))
 	require.Equal(t, disk2ID, evictRes.DiskID)
 	require.Equal(t, uint32(1), evictRes.EvictedCount)
-	require.Equal(t, uint64(2), evictRes.WriterEpoch)
+	require.Len(t, evictRes.UpdatedBranches, 1)
+	require.Equal(t, "main", evictRes.UpdatedBranches[0].Name)
+	require.Equal(t, uint64(2), evictRes.UpdatedBranches[0].WriterEpoch)
 
 	delStart := time.Now()
 	runBowlSuccess(t, "disk", "delete", "--endpoint", endpoint, disk2ID, "-y", "--json")

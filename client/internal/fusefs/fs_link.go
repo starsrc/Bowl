@@ -46,6 +46,7 @@ func (fs *RawFS) Symlink(_ <-chan struct{}, header *fuse.InHeader, pointedTo, li
 		Uid:       header.Uid,
 		Gid:       header.Gid,
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
@@ -101,6 +102,7 @@ func (fs *RawFS) Readlink(cancel <-chan struct{}, header *fuse.InHeader) (target
 	resp, err := fs.client.Readlink(ctx, connect.NewRequest(&storagev1.ReadlinkRequest{
 		Ino:    ino,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 	}))
 	fenced := fs.IsFenced()
 	if !fenced && fs.cache.version() != epoch {
@@ -167,6 +169,7 @@ func (fs *RawFS) Link(cancel <-chan struct{}, input *fuse.LinkIn, filename strin
 		NewParentIno: newParentIno,
 		NewName:      []byte(filename),
 		DiskId:       fs.cfg.DiskID,
+		Branch:       fs.cfg.Branch,
 		Epoch:        fs.cfg.Epoch,
 	}))
 	if err != nil {

@@ -238,15 +238,15 @@ func TestObservability_GivenSlowAttemptAndExhaustedRetry_EmitsSlowAndExhaustedLo
 	require.Contains(t, logOutput, `"msg":"rpc_retry_exhausted_eio"`)
 }
 
-type scriptedMountDiskHandler struct {
+type scriptedMountBranchHandler struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 	mountErr error
 }
 
-func (h *scriptedMountDiskHandler) MountDisk(
+func (h *scriptedMountBranchHandler) MountBranch(
 	_ context.Context,
-	_ *connect.Request[storagev1.MountDiskRequest],
-) (*connect.Response[storagev1.MountDiskResponse], error) {
+	_ *connect.Request[storagev1.MountBranchRequest],
+) (*connect.Response[storagev1.MountBranchResponse], error) {
 	return nil, h.mountErr
 }
 
@@ -260,7 +260,7 @@ func TestObservability_GivenAbortedEBUSYError_DoesNotTriggerStaleEpochMetricOrLo
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
 
-	abortedBusyErr := connect.NewError(connect.CodeAborted, errors.New("disk is currently mounted"))
+	abortedBusyErr := connect.NewError(connect.CodeAborted, errors.New("branch is currently mounted"))
 	detail, err := connect.NewErrorDetail(&errdetails.ErrorInfo{
 		Domain: "bowl.storage",
 		Reason: "EBUSY",
@@ -270,14 +270,15 @@ func TestObservability_GivenAbortedEBUSYError_DoesNotTriggerStaleEpochMetricOrLo
 
 	client, err := newClientWithClock(ClientConfig{
 		Endpoint:   "http://127.0.0.1:9000",
-		HTTPClient: newInMemoryHTTPClient(&scriptedMountDiskHandler{mountErr: abortedBusyErr}),
+		HTTPClient: newInMemoryHTTPClient(&scriptedMountBranchHandler{mountErr: abortedBusyErr}),
 		Logger:     logger,
 		Metrics:    rpcMetrics,
 	}, clk)
 	require.NoError(t, err)
 
-	_, err = client.MountDisk(context.Background(), connect.NewRequest(&storagev1.MountDiskRequest{
+	_, err = client.MountBranch(context.Background(), connect.NewRequest(&storagev1.MountBranchRequest{
 		DiskId: "11111111-1111-4111-8111-111111111111",
+		Branch: "main",
 	}))
 
 	require.Error(t, err)
@@ -295,10 +296,10 @@ type scriptedFailedPreconditionEBUSYHandler struct {
 	err error
 }
 
-func (h *scriptedFailedPreconditionEBUSYHandler) DeleteSnapshot(
+func (h *scriptedFailedPreconditionEBUSYHandler) DeleteCommit(
 	_ context.Context,
-	_ *connect.Request[storagev1.DeleteSnapshotRequest],
-) (*connect.Response[storagev1.DeleteSnapshotResponse], error) {
+	_ *connect.Request[storagev1.DeleteCommitRequest],
+) (*connect.Response[storagev1.DeleteCommitResponse], error) {
 	return nil, h.err
 }
 
@@ -316,7 +317,7 @@ func (h *scriptedFailedPreconditionEBUSYHandler) Write(
 	return nil, h.err
 }
 
-func TestObservability_GivenDeleteSnapshotEBUSYAndEpochRequests_OnlyFencesEpochCarryingRequests(t *testing.T) {
+func TestObservability_GivenDeleteCommitEBUSYAndEpochRequests_OnlyFencesEpochCarryingRequests(t *testing.T) {
 	reg, _, _, _ := setupTestOTel(t)
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	rpcMetrics := NewMetrics()
@@ -341,8 +342,9 @@ func TestObservability_GivenDeleteSnapshotEBUSYAndEpochRequests_OnlyFencesEpochC
 	}, clk)
 	require.NoError(t, err)
 
-	_, err = client.DeleteSnapshot(context.Background(), connect.NewRequest(&storagev1.DeleteSnapshotRequest{
-		SnapshotId: "01950000-0000-7000-8000-000000000001",
+	_, err = client.DeleteCommit(context.Background(), connect.NewRequest(&storagev1.DeleteCommitRequest{
+		DiskId:   "11111111-1111-4111-8111-111111111111",
+		CommitId: 1,
 	}))
 	require.Error(t, err)
 	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
@@ -350,7 +352,7 @@ func TestObservability_GivenDeleteSnapshotEBUSYAndEpochRequests_OnlyFencesEpochC
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
 	staleMF := requireMetricFamily(t, mfs, "bowl_client_stale_epoch_total")
-	require.InDelta(t, 0.0, staleMF.GetMetric()[0].GetCounter().GetValue(), 1e-9, "DeleteSnapshot EBUSY must not increment stale epoch counter")
+	require.InDelta(t, 0.0, staleMF.GetMetric()[0].GetCounter().GetValue(), 1e-9, "DeleteCommit EBUSY must not increment stale epoch counter")
 	require.NotContains(t, logBuf.String(), "writer_epoch_fenced")
 
 	_, err = client.RenewMount(context.Background(), connect.NewRequest(&storagev1.RenewMountRequest{

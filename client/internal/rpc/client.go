@@ -174,9 +174,9 @@ func matchesProcedure(urlPath string, procedures ...string) bool {
 func isControlProcedure(urlPath string) bool {
 	return matchesProcedure(
 		urlPath,
-		storagev1connect.StorageServiceMountDiskProcedure,
+		storagev1connect.StorageServiceMountBranchProcedure,
 		storagev1connect.StorageServiceRenewMountProcedure,
-		storagev1connect.StorageServiceUnmountDiskProcedure,
+		storagev1connect.StorageServiceUnmountBranchProcedure,
 	)
 }
 
@@ -185,7 +185,7 @@ func isBulkDataProcedure(urlPath string) bool {
 		urlPath,
 		storagev1connect.StorageServiceReadProcedure,
 		storagev1connect.StorageServiceWriteProcedure,
-		storagev1connect.StorageServiceReadSnapshotNodeProcedure,
+		storagev1connect.StorageServiceReadCommitNodeProcedure,
 	)
 }
 

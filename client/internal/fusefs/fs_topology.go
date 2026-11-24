@@ -47,6 +47,7 @@ func (fs *RawFS) Mkdir(_ <-chan struct{}, input *fuse.MkdirIn, name string, out 
 		Uid:       input.Uid,
 		Gid:       input.Gid,
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
@@ -105,6 +106,7 @@ func (fs *RawFS) Mknod(_ <-chan struct{}, input *fuse.MknodIn, name string, out 
 		Gid:       input.Gid,
 		Rdev:      input.Rdev,
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
@@ -189,6 +191,7 @@ func (fs *RawFS) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name strin
 		ParentIno: parentIno,
 		Name:      []byte(name),
 		DiskId:    fs.cfg.DiskID,
+		Branch:    fs.cfg.Branch,
 		Epoch:     fs.cfg.Epoch,
 	}))
 	if err != nil {
@@ -295,6 +298,7 @@ func (fs *RawFS) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name stri
 		Name:         []byte(name),
 		OpenInClient: &open,
 		DiskId:       fs.cfg.DiskID,
+		Branch:       fs.cfg.Branch,
 		Epoch:        fs.cfg.Epoch,
 	}))
 	if err != nil {

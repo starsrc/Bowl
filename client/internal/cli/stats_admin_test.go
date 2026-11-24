@@ -578,7 +578,7 @@ func TestRunMount_GivenPreBoundAdminAddr_BindsBeforeHandshakeAndClosesListenerOn
 	var rebindErrDuringHandshake error
 	storage := newFakeStorage()
 	storage.seedDisk(testDiskID1, "prebind-admin-disk", 1<<30, 0)
-	storage.onMountDisk = func(_ context.Context, _ *storagev1.MountDiskRequest) error {
+	storage.onMountBranch = func(_ context.Context, _ *storagev1.MountBranchRequest) error {
 		ln, err := net.Listen("tcp", fixedAddr)
 		rebindErrDuringHandshake = err
 		if ln != nil {

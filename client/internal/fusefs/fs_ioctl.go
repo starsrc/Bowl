@@ -165,6 +165,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			resp, err := fs.client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{
 				Ino:    ino,
 				DiskId: fs.cfg.DiskID,
+				Branch: fs.cfg.Branch,
 			}))
 			if err != nil {
 				return fs.ToStatus(err)
@@ -227,6 +228,7 @@ func (fs *RawFS) Ioctl(cancel <-chan struct{}, input *fuse.IoctlIn, inbuf []byte
 			Ino:    ino,
 			Flags:  &protoFlags,
 			DiskId: fs.cfg.DiskID,
+			Branch: fs.cfg.Branch,
 			Epoch:  fs.cfg.Epoch,
 		}))
 		if err != nil {

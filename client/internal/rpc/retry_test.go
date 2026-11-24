@@ -51,16 +51,26 @@ func TestIsIdempotentProcedure_GivenWhitelistAndMutatingProcedures_ReturnsExpect
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListXattrProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceStatFSProcedure))
 
-	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffDiskProcedure))
-	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceReadSnapshotNodeProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListBranchesProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffBranchesProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffCommitsProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffWorkProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListCommitsProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceReadCommitNodeProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceRenewMountProcedure))
-	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceUnmountDiskProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceUnmountBranchProcedure))
 	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListMountsProcedure))
 
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMountBranchProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceEvictMountsProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateDiskProcedure))
-	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceForkDiskProcedure))
-	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMergeDiskProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceForkBranchProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceDeleteBranchProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceResetBranchProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceMergeBranchProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateCommitProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceDeleteCommitProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServicePruneCommitsProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateProcedure))
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateTmpfileProcedure), "CreateTmpfile is non-idempotent")
 	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceWriteProcedure))
@@ -445,32 +455,32 @@ type scriptedDiffMergeHandler struct {
 
 	diffCalls  int
 	diffErrs   []error
-	snapCalls  int
-	snapErrs   []error
+	nodeCalls  int
+	nodeErrs   []error
 	mergeCalls int
 	mergeErrs  []error
-	mergeStep  func(context.Context, *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error)
+	mergeStep  func(context.Context, *connect.Request[storagev1.MergeBranchRequest]) (*connect.Response[storagev1.MergeBranchResponse], error)
 }
 
-func (h *scriptedDiffMergeHandler) DiffDisk(_ context.Context, _ *connect.Request[storagev1.DiffDiskRequest]) (*connect.Response[storagev1.DiffDiskResponse], error) {
+func (h *scriptedDiffMergeHandler) DiffBranches(_ context.Context, _ *connect.Request[storagev1.DiffBranchesRequest]) (*connect.Response[storagev1.DiffResponse], error) {
 	idx := h.diffCalls
 	h.diffCalls++
 	if idx < len(h.diffErrs) && h.diffErrs[idx] != nil {
 		return nil, h.diffErrs[idx]
 	}
-	return connect.NewResponse(&storagev1.DiffDiskResponse{LcaSnapshotId: "01950000-0000-7000-8000-000000000099"}), nil
+	return connect.NewResponse(&storagev1.DiffResponse{BaseCommitId: 99}), nil
 }
 
-func (h *scriptedDiffMergeHandler) ReadSnapshotNode(_ context.Context, _ *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
-	idx := h.snapCalls
-	h.snapCalls++
-	if idx < len(h.snapErrs) && h.snapErrs[idx] != nil {
-		return nil, h.snapErrs[idx]
+func (h *scriptedDiffMergeHandler) ReadCommitNode(_ context.Context, _ *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
+	idx := h.nodeCalls
+	h.nodeCalls++
+	if idx < len(h.nodeErrs) && h.nodeErrs[idx] != nil {
+		return nil, h.nodeErrs[idx]
 	}
-	return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{Data: []byte("snapshot-data"), Eof: true}), nil
+	return connect.NewResponse(&storagev1.ReadCommitNodeResponse{Data: []byte("commit-data"), Eof: true}), nil
 }
 
-func (h *scriptedDiffMergeHandler) MergeDisk(ctx context.Context, req *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
+func (h *scriptedDiffMergeHandler) MergeBranch(ctx context.Context, req *connect.Request[storagev1.MergeBranchRequest]) (*connect.Response[storagev1.MergeBranchResponse], error) {
 	idx := h.mergeCalls
 	h.mergeCalls++
 	if h.mergeStep != nil {
@@ -479,18 +489,18 @@ func (h *scriptedDiffMergeHandler) MergeDisk(ctx context.Context, req *connect.R
 	if idx < len(h.mergeErrs) && h.mergeErrs[idx] != nil {
 		return nil, h.mergeErrs[idx]
 	}
-	return connect.NewResponse(&storagev1.MergeDiskResponse{MergeSnapshotId: "01950000-0000-7000-8000-000000000088"}), nil
+	return connect.NewResponse(&storagev1.MergeBranchResponse{CommitId: 88}), nil
 }
 
-func TestRetry_GivenDiffAndReadSnapshotNode_WhenUnavailableRecovers_RetriesAndSucceeds(t *testing.T) {
+func TestRetry_GivenDiffAndReadCommitNode_WhenUnavailableRecovers_RetriesAndSucceeds(t *testing.T) {
 
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedDiffMergeHandler{
 		diffErrs: []error{
 			connect.NewError(connect.CodeUnavailable, errors.New("diff-transient")),
 		},
-		snapErrs: []error{
-			connect.NewError(connect.CodeUnavailable, errors.New("snapshot-transient")),
+		nodeErrs: []error{
+			connect.NewError(connect.CodeUnavailable, errors.New("commit-node-transient")),
 		},
 	}
 	client, err := newClientWithClock(ClientConfig{
@@ -503,19 +513,19 @@ func TestRetry_GivenDiffAndReadSnapshotNode_WhenUnavailableRecovers_RetriesAndSu
 	}, clk)
 	require.NoError(t, err)
 
-	diffResp, err := client.DiffDisk(context.Background(), connect.NewRequest(&storagev1.DiffDiskRequest{}))
+	diffResp, err := client.DiffBranches(context.Background(), connect.NewRequest(&storagev1.DiffBranchesRequest{}))
 	require.NoError(t, err)
-	require.Equal(t, "01950000-0000-7000-8000-000000000099", diffResp.Msg.GetLcaSnapshotId())
+	require.Equal(t, uint64(99), diffResp.Msg.GetBaseCommitId())
 	require.Equal(t, 2, handler.diffCalls)
 
-	snapResp, err := client.ReadSnapshotNode(context.Background(), connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{Ino: 1}))
+	nodeResp, err := client.ReadCommitNode(context.Background(), connect.NewRequest(&storagev1.ReadCommitNodeRequest{Ino: 1}))
 	require.NoError(t, err)
-	require.Equal(t, []byte("snapshot-data"), snapResp.Msg.GetData())
-	require.Equal(t, 2, handler.snapCalls)
+	require.Equal(t, []byte("commit-data"), nodeResp.Msg.GetData())
+	require.Equal(t, 2, handler.nodeCalls)
 	require.Equal(t, []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}, clk.Sleeps())
 }
 
-func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetriesDialError(t *testing.T) {
+func TestRetry_GivenMergeBranch_WhenUnavailableOrTransportEOF_DoesNotRetryButRetriesDialError(t *testing.T) {
 
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
 	handler := &scriptedDiffMergeHandler{
@@ -529,7 +539,7 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 	}, clk)
 	require.NoError(t, err)
 
-	_, err = client.MergeDisk(context.Background(), connect.NewRequest(&storagev1.MergeDiskRequest{}))
+	_, err = client.MergeBranch(context.Background(), connect.NewRequest(&storagev1.MergeBranchRequest{}))
 
 	require.Error(t, err)
 	require.Equal(t, 1, handler.mergeCalls)
@@ -546,7 +556,7 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 	}, clk)
 	require.NoError(t, err)
 
-	_, err = client2.MergeDisk(context.Background(), connect.NewRequest(&storagev1.MergeDiskRequest{}))
+	_, err = client2.MergeBranch(context.Background(), connect.NewRequest(&storagev1.MergeBranchRequest{}))
 	require.Error(t, err)
 	require.Equal(t, 1, transport.calls)
 
@@ -566,9 +576,9 @@ func TestRetry_GivenMergeDisk_WhenUnavailableOrTransportEOF_DoesNotRetryButRetri
 	}, clk)
 	require.NoError(t, err)
 
-	mergeResp, err := client3.MergeDisk(context.Background(), connect.NewRequest(&storagev1.MergeDiskRequest{}))
+	mergeResp, err := client3.MergeBranch(context.Background(), connect.NewRequest(&storagev1.MergeBranchRequest{}))
 	require.NoError(t, err)
-	require.Equal(t, "01950000-0000-7000-8000-000000000088", mergeResp.Msg.GetMergeSnapshotId())
+	require.Equal(t, uint64(88), mergeResp.Msg.GetCommitId())
 	require.Equal(t, 2, dialAttempts)
 	require.Equal(t, []time.Duration{40 * time.Millisecond}, clk.Sleeps())
 }
@@ -585,13 +595,13 @@ func TestRetry_GivenCallerDeadlineLongerThanMaxElapsedTime_WhenFirstAttemptTakes
 	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
 
 	handler := &scriptedDiffMergeHandler{
-		mergeStep: func(ctx context.Context, _ *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
+		mergeStep: func(ctx context.Context, _ *connect.Request[storagev1.MergeBranchRequest]) (*connect.Response[storagev1.MergeBranchResponse], error) {
 			clk.Advance(35 * time.Second)
 			if err := ctx.Err(); err != nil {
 				return nil, connect.NewError(connect.CodeDeadlineExceeded, err)
 			}
-			return connect.NewResponse(&storagev1.MergeDiskResponse{
-				MergeSnapshotId: "01950000-0000-7000-8000-000000000088",
+			return connect.NewResponse(&storagev1.MergeBranchResponse{
+				CommitId: 88,
 			}), nil
 		},
 	}
@@ -610,16 +620,16 @@ func TestRetry_GivenCallerDeadlineLongerThanMaxElapsedTime_WhenFirstAttemptTakes
 	callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
 	defer cancel()
 
-	resp, err := client.MergeDisk(callerCtx, connect.NewRequest(&storagev1.MergeDiskRequest{}))
+	resp, err := client.MergeBranch(callerCtx, connect.NewRequest(&storagev1.MergeBranchRequest{}))
 
 	require.NoError(t, err, "scene=caller_60s_deadline_35s_merge want=nil got=%v", err)
-	require.Equal(t, "01950000-0000-7000-8000-000000000088", resp.Msg.GetMergeSnapshotId())
+	require.Equal(t, uint64(88), resp.Msg.GetCommitId())
 	require.Equal(t, 1, handler.mergeCalls)
 	require.Empty(t, clk.Sleeps())
 
 	mfs, gatherErr := reg.Gather()
 	require.NoError(t, gatherErr)
-	proc := storagev1connect.StorageServiceMergeDiskProcedure
+	proc := storagev1connect.StorageServiceMergeBranchProcedure
 	require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retries_total", proc), 1e-9)
 	require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
 	require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "ok"))
@@ -676,7 +686,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 		require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
 	})
 
-	t.Run("caller 60s deadline slow first MergeDisk attempt", func(t *testing.T) {
+	t.Run("caller 60s deadline slow first MergeBranch attempt", func(t *testing.T) {
 
 		start := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 		clk := newAutoAdvanceClock(start)
@@ -688,7 +698,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 		logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
 
 		handler := &scriptedDiffMergeHandler{
-			mergeStep: func(ctx context.Context, _ *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
+			mergeStep: func(ctx context.Context, _ *connect.Request[storagev1.MergeBranchRequest]) (*connect.Response[storagev1.MergeBranchResponse], error) {
 				clk.Advance(61 * time.Second)
 				return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
 			},
@@ -708,7 +718,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 		callerCtx, cancel := clk.WithDeadline(context.Background(), start.Add(60*time.Second))
 		defer cancel()
 
-		_, err = client.MergeDisk(callerCtx, connect.NewRequest(&storagev1.MergeDiskRequest{}))
+		_, err = client.MergeBranch(callerCtx, connect.NewRequest(&storagev1.MergeBranchRequest{}))
 
 		require.Error(t, err)
 		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
@@ -717,7 +727,7 @@ func TestRetry_GivenSlowFirstAttemptWithoutRetryableErrors_WhenDeadlineExpires_R
 
 		mfs, gatherErr := reg.Gather()
 		require.NoError(t, gatherErr)
-		proc := storagev1connect.StorageServiceMergeDiskProcedure
+		proc := storagev1connect.StorageServiceMergeBranchProcedure
 		require.InDelta(t, 0.0, counterValueForProcedure(mfs, "bowl_client_rpc_retry_exhausted_total", proc), 1e-9)
 		require.Equal(t, uint64(1), histogramCountForProcedureCode(mfs, "bowl_client_rpc_logical_duration_seconds", proc, "deadline_exceeded"))
 		require.NotContains(t, logBuf.String(), "rpc_retry_exhausted_eio")
@@ -1121,37 +1131,42 @@ func (s *scriptedMidBodyErrTransport) HTTPClient() *http.Client {
 	}
 }
 
-type scriptedListSnapshotsHandler struct {
+type scriptedListCommitsHandler struct {
 	storagev1connect.UnimplementedStorageServiceHandler
 	calls int
 	errs  []error
 }
 
-func (h *scriptedListSnapshotsHandler) ListSnapshots(
+func (h *scriptedListCommitsHandler) ListCommits(
 	_ context.Context,
-	_ *connect.Request[storagev1.ListSnapshotsRequest],
-) (*connect.Response[storagev1.ListSnapshotsResponse], error) {
+	_ *connect.Request[storagev1.ListCommitsRequest],
+) (*connect.Response[storagev1.ListCommitsResponse], error) {
 	idx := h.calls
 	h.calls++
 	if idx < len(h.errs) && h.errs[idx] != nil {
 		return nil, h.errs[idx]
 	}
-	return connect.NewResponse(&storagev1.ListSnapshotsResponse{
-		Snapshots: []*storagev1.Snapshot{
-			{SnapshotId: "01950000-0000-7000-8000-000000000001"},
+	return connect.NewResponse(&storagev1.ListCommitsResponse{
+		Commits: []*storagev1.Commit{
+			{CommitId: 1},
 		},
 	}), nil
 }
 
-func TestRetry_GivenListSnapshots_WhenUnavailableOrTransportDropRecovers_RetriesAndSucceeds(t *testing.T) {
-	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListSnapshotsProcedure))
-	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateSnapshotProcedure))
-	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceDeleteSnapshotProcedure))
+func TestRetry_GivenListCommits_WhenUnavailableOrTransportDropRecovers_RetriesAndSucceeds(t *testing.T) {
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListCommitsProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceListBranchesProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffBranchesProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffCommitsProcedure))
+	require.True(t, IsIdempotentProcedure(storagev1connect.StorageServiceDiffWorkProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceCreateCommitProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServiceDeleteCommitProcedure))
+	require.False(t, IsIdempotentProcedure(storagev1connect.StorageServicePruneCommitsProcedure))
 
 	clk := newAutoAdvanceClock(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC))
-	handler := &scriptedListSnapshotsHandler{
+	handler := &scriptedListCommitsHandler{
 		errs: []error{
-			connect.NewError(connect.CodeUnavailable, errors.New("list-snapshots-transient")),
+			connect.NewError(connect.CodeUnavailable, errors.New("list-commits-transient")),
 		},
 	}
 	innerClient := newInMemoryHTTPClient(handler)
@@ -1173,13 +1188,13 @@ func TestRetry_GivenListSnapshots_WhenUnavailableOrTransportDropRecovers_Retries
 	}, clk)
 	require.NoError(t, err)
 
-	resp, err := client.ListSnapshots(context.Background(), connect.NewRequest(&storagev1.ListSnapshotsRequest{
+	resp, err := client.ListCommits(context.Background(), connect.NewRequest(&storagev1.ListCommitsRequest{
 		DiskId: "11111111-1111-4111-8111-111111111111",
 	}))
 
 	require.NoError(t, err)
-	require.Len(t, resp.Msg.GetSnapshots(), 1)
-	require.Equal(t, "01950000-0000-7000-8000-000000000001", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Len(t, resp.Msg.GetCommits(), 1)
+	require.Equal(t, uint64(1), resp.Msg.GetCommits()[0].GetCommitId())
 	require.Equal(t, 3, transport.calls)
 	require.Equal(t, 2, handler.calls)
 	require.Equal(t, []time.Duration{50 * time.Millisecond, 100 * time.Millisecond}, clk.Sleeps())
@@ -1355,6 +1370,6 @@ func TestRetry_GivenNonIdempotentProcedures_WhenMidBodyHTTP2TransportErrorsOccur
 		require.Equal(t, 1, transport.calls)
 		require.Empty(t, clk.Sleeps())
 		require.False(t, shouldRetry(storagev1connect.StorageServiceCreateProcedure, err))
-		require.False(t, shouldRetry(storagev1connect.StorageServiceDeleteSnapshotProcedure, err))
+		require.False(t, shouldRetry(storagev1connect.StorageServiceDeleteCommitProcedure, err))
 	}
 }

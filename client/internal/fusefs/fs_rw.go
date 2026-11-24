@@ -76,6 +76,7 @@ func (fs *RawFS) Read(cancel <-chan struct{}, input *fuse.ReadIn, buf []byte) (r
 			Offset: offset,
 			Size:   length,
 			DiskId: fs.cfg.DiskID,
+			Branch: fs.cfg.Branch,
 		}))
 		if rpcErr != nil {
 			return rpc.ReadPayload{}, rpcErr
@@ -265,6 +266,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			Offset: input.Offset,
 			Data:   data,
 			DiskId: fs.cfg.DiskID,
+			Branch: fs.cfg.Branch,
 			Epoch:  fs.cfg.Epoch,
 		}))
 		if err != nil {
@@ -303,6 +305,7 @@ func (fs *RawFS) writeData(opCtx context.Context, cancel <-chan struct{}, input 
 			Offset: curOffset,
 			Data:   chunk,
 			DiskId: fs.cfg.DiskID,
+			Branch: fs.cfg.Branch,
 			Epoch:  fs.cfg.Epoch,
 		}))
 		chunkCancel()

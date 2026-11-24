@@ -30,18 +30,31 @@ import (
 
 	"github.com/starsrc/bowl/client/internal/fusefs"
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
-type forkDiskJSON struct {
-	DiskID       string `json:"disk_id"`
-	ParentDiskID string `json:"parent_disk_id"`
-	Name         string `json:"name"`
-	MaxBytes     uint64 `json:"max_bytes"`
-	UsedBytes    uint64 `json:"used_bytes"`
+type diskCreateJSON struct {
+	DiskID        string `json:"disk_id"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch"`
+	MaxBytes      uint64 `json:"max_bytes"`
+	UsedBytes     uint64 `json:"used_bytes"`
 }
 
-func startIsolatedForkTrigger(t *testing.T, client storagev1connect.StorageServiceClient) func(sourceDiskID, childName string) forkDiskJSON {
+type forkBranchJSON struct {
+	Branch struct {
+		DiskID       string `json:"disk_id"`
+		Name         string `json:"name"`
+		HeadCommitID uint64 `json:"head_commit_id"`
+		WriterEpoch  uint64 `json:"writer_epoch"`
+	} `json:"branch"`
+	Commit struct {
+		CommitID uint64 `json:"commit_id"`
+		DiskID   string `json:"disk_id"`
+		Kind     string `json:"kind"`
+	} `json:"commit"`
+}
+
+func startIsolatedForkTrigger(t *testing.T) func(diskID, fromBranch, newBranch string) forkBranchJSON {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), mountProcessTimeout)
 	t.Cleanup(cancel)
@@ -67,12 +80,13 @@ for line in sys.stdin:
 	})
 	reader := bufio.NewReader(stdoutPipe)
 
-	return func(sourceDiskID, childName string) forkDiskJSON {
+	return func(diskID, fromBranch, newBranch string) forkBranchJSON {
 		t.Helper()
 		argv := []string{
-			getBowlBin(), "disk", "fork", sourceDiskID,
+			getBowlBin(), "branch", "create", newBranch,
+			"-d", diskID,
+			"--from", fromBranch,
 			"--endpoint", getStorageEndpoint(),
-			"--name", childName,
 			"--json",
 		}
 		reqBytes, mErr := json.Marshal(map[string]any{"argv": argv})
@@ -81,32 +95,32 @@ for line in sys.stdin:
 		require.NoError(t, wErr)
 
 		respLine, rErr := reader.ReadBytes('\n')
-		require.NoError(t, rErr, "隔离进程执行 `bowl disk fork` 失败: %s", stderrBuf.String())
+		require.NoError(t, rErr, "隔离进程执行 `bowl branch create` 失败: %s", stderrBuf.String())
 		var res struct {
 			Code   int    `json:"code"`
 			Stdout string `json:"stdout"`
 			Stderr string `json:"stderr"`
 		}
 		require.NoError(t, json.Unmarshal(respLine, &res))
-		require.Zero(t, res.Code, "`bowl disk fork` 失败: stdout=%s stderr=%s", res.Stdout, res.Stderr)
+		require.Zero(t, res.Code, "`bowl branch create` 失败: stdout=%s stderr=%s", res.Stdout, res.Stderr)
 
-		var forked forkDiskJSON
-		require.NoError(t, json.Unmarshal([]byte(res.Stdout), &forked), "解析 fork JSON 失败: %s", res.Stdout)
-		require.NotEmpty(t, forked.DiskID)
-		require.Equal(t, sourceDiskID, forked.ParentDiskID)
-		registerDiskCleanup(t, client, forked.DiskID)
+		var forked forkBranchJSON
+		require.NoError(t, json.Unmarshal([]byte(res.Stdout), &forked), "解析 branch create JSON 失败: %s", res.Stdout)
+		require.Equal(t, diskID, forked.Branch.DiskID)
+		require.Equal(t, newBranch, forked.Branch.Name)
+		require.Positive(t, forked.Commit.CommitID)
 		return forked
 	}
 }
 
-func forkOnlineDisk(t *testing.T, client storagev1connect.StorageServiceClient, sourceDiskID, childName string) forkDiskJSON {
+func forkOnlineBranch(t *testing.T, diskID, fromBranch, newBranch string) forkBranchJSON {
 	t.Helper()
-	out := runBowlSuccess(t, "disk", "fork", sourceDiskID, "--endpoint", getStorageEndpoint(), "--name", childName, "--json")
-	var forked forkDiskJSON
+	out := runBowlSuccess(t, "branch", "create", newBranch, "-d", diskID, "--from", fromBranch, "--endpoint", getStorageEndpoint(), "--json")
+	var forked forkBranchJSON
 	require.NoError(t, json.Unmarshal([]byte(out), &forked))
-	require.NotEmpty(t, forked.DiskID)
-	require.Equal(t, sourceDiskID, forked.ParentDiskID)
-	registerDiskCleanup(t, client, forked.DiskID)
+	require.Equal(t, diskID, forked.Branch.DiskID)
+	require.Equal(t, newBranch, forked.Branch.Name)
+	require.Positive(t, forked.Commit.CommitID)
 	return forked
 }
 
@@ -142,7 +156,7 @@ func expectedGitTrackedContent(slot, commitNum int) string {
 }
 
 type gitForkSnap struct {
-	child           forkDiskJSON
+	branchName      string
 	committedBefore int64
 }
 
@@ -212,7 +226,7 @@ func runGitCommitWorker(repoDir string, totalCommits, trackedSlots int, lastComm
 	return errCh
 }
 
-func captureGitForks(t *testing.T, client storagev1connect.StorageServiceClient, parentID string, lastCommittedN *atomic.Int64, thresholds []int64) []gitForkSnap {
+func captureGitForks(t *testing.T, diskID string, lastCommittedN *atomic.Int64, thresholds []int64) []gitForkSnap {
 	t.Helper()
 	snaps := make([]gitForkSnap, 0, len(thresholds))
 	for i, minCommit := range thresholds {
@@ -220,16 +234,17 @@ func captureGitForks(t *testing.T, client storagev1connect.StorageServiceClient,
 			return lastCommittedN.Load() >= minCommit
 		}, 30*time.Second, 10*time.Millisecond, "等待 Git 提交推进至 commit-%d 超时", minCommit)
 		before := lastCommittedN.Load()
-		child := forkOnlineDisk(t, client, parentID, fmt.Sprintf("e2e-git-fork-child-%d", i+1))
-		snaps = append(snaps, gitForkSnap{child: child, committedBefore: before})
+		branchName := fmt.Sprintf("e2e-git-fork-child-%d", i+1)
+		_ = forkOnlineBranch(t, diskID, "main", branchName)
+		snaps = append(snaps, gitForkSnap{branchName: branchName, committedBefore: before})
 	}
 	return snaps
 }
 
-func verifyGitChildForks(t *testing.T, endpoint string, snaps []gitForkSnap, trackedSlots int) {
+func verifyGitChildForks(t *testing.T, endpoint, diskID string, snaps []gitForkSnap, trackedSlots int) {
 	t.Helper()
 	for idx, snap := range snaps {
-		childMnt, stopChild := mountWithCleanup(t, endpoint, snap.child.DiskID)
+		childMnt, stopChild := mountWithCleanup(t, endpoint, diskID, "--branch", snap.branchName)
 		childRepo := filepath.Join(childMnt, "repo")
 
 		require.NoError(t, filepath.WalkDir(filepath.Join(childRepo, ".git"), func(p string, d fs.DirEntry, err error) error {
@@ -337,7 +352,7 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	statBefore, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
+	statBefore, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Branch: "main", Ino: 1}))
 	require.NoError(t, err)
 	usedBefore := statBefore.Msg.GetUsedBytes()
 
@@ -345,10 +360,10 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	mpB, _ := mountWithCleanup(t, endpoint, diskID, "--force")
 	require.Less(t, time.Since(takeoverStart), 3*time.Second, "新可写挂载必须零等待立即接管")
 
-	_, orphanAttrErr := client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Ino: orphanIno}))
+	_, orphanAttrErr := client.GetAttr(ctx, connect.NewRequest(&storagev1.GetAttrRequest{DiskId: diskID, Branch: "main", Ino: orphanIno}))
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(orphanAttrErr))
 
-	statAfter, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Ino: 1}))
+	statAfter, err := client.StatFS(ctx, connect.NewRequest(&storagev1.StatFSRequest{DiskId: diskID, Branch: "main", Ino: 1}))
 	require.NoError(t, err)
 	require.Less(t, statAfter.Msg.GetUsedBytes(), usedBefore)
 
@@ -367,22 +382,22 @@ func TestMultiClient_ReadOnlyAndWriterEpochPreemption(t *testing.T) {
 	require.Equal(t, []byte("before-takeover"), gotPreOpen)
 }
 
-func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
+func TestOnlineFork_DualMountIsolationAndParentBranchDelete(t *testing.T) {
 	client := newTestStorageClient(t)
 	endpoint := getStorageEndpoint()
 
 	createOut := runBowlSuccess(t, "disk", "create", "--endpoint", endpoint, "--size", "2GiB", "--name", "e2e-fork-parent", "--json")
-	var parentDisk forkDiskJSON
+	var parentDisk diskCreateJSON
 	require.NoError(t, json.Unmarshal([]byte(createOut), &parentDisk))
-	parentID := parentDisk.DiskID
-	registerDiskCleanup(t, client, parentID)
+	diskID := parentDisk.DiskID
+	registerDiskCleanup(t, client, diskID)
 
 	parentMnt := t.TempDir()
-	runBowlSuccess(t, "mount", "--endpoint", endpoint, parentID, parentMnt)
+	runBowlSuccess(t, "mount", "--endpoint", endpoint, "--branch", "main", diskID, parentMnt)
 	parentPID := findBowlDaemonPID(t, parentMnt)
 	t.Cleanup(func() { _ = exec.Command(getBowlBin(), "umount", "-f", parentMnt).Run() })
 
-	triggerIsolatedFork := startIsolatedForkTrigger(t, client)
+	triggerIsolatedFork := startIsolatedForkTrigger(t)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(parentMnt, "app"), 0o755))
 	baseCfg := []byte("{\"env\":\"staging\"}\n")
@@ -415,12 +430,10 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	t.Cleanup(func() { _ = stagedF.Close() })
 	writeStaged32KiBChunks(t, stagedF, stagedData)
 
-	childDisk := triggerIsolatedFork(parentID, "e2e-fork-child")
-	childID := childDisk.DiskID
-	require.Equal(t, uint64(len(baseCfg)+len(largePayload)), childDisk.UsedBytes,
-		"子盘 `used_bytes` 必须仅包含已落盘存活文件，排除孤儿与未刷阶段缓冲")
+	childBranch := "e2e-fork-child"
+	_ = triggerIsolatedFork(diskID, "main", childBranch)
 
-	childMnt, stopChild := mountWithCleanup(t, endpoint, childID, "--direct-io")
+	childMnt, stopChild := mountWithCleanup(t, endpoint, diskID, "--branch", childBranch, "--direct-io")
 
 	gotChildLarge, err := os.ReadFile(filepath.Join(childMnt, "large.bin"))
 	require.NoError(t, err)
@@ -449,17 +462,23 @@ func TestOnlineFork_DualMountIsolationAndParentDelete(t *testing.T) {
 	_, err = os.Stat(filepath.Join(parentMnt, "only_child.txt"))
 	require.ErrorIs(t, err, os.ErrNotExist)
 
+	grandchildBranch := "e2e-fork-grandchild"
+	_ = triggerIsolatedFork(diskID, childBranch, grandchildBranch)
+	grandchildMnt, stopGrandchild := mountWithCleanup(t, endpoint, diskID, "--branch", grandchildBranch, "--direct-io")
+
 	require.NoError(t, orphanF.Close())
 	runBowlSuccess(t, "umount", parentMnt)
 	waitForUnmount(t, parentMnt)
 	waitForProcessExit(t, parentPID)
-	runBowlSuccess(t, "disk", "delete", "--endpoint", endpoint, parentID, "-y")
 
-	gotChildAfterParentDel, err := os.ReadFile(filepath.Join(childMnt, "large.bin"))
-	require.NoError(t, err)
-	require.Equal(t, largePayload, gotChildAfterParentDel)
-	require.NoError(t, os.WriteFile(filepath.Join(childMnt, "after_parent_del.txt"), []byte("alive"), 0o644))
 	stopChild()
+	runBowlSuccess(t, "branch", "delete", childBranch, "-d", diskID, "--endpoint", endpoint, "-y")
+
+	gotGrandchildAfterParentDel, err := os.ReadFile(filepath.Join(grandchildMnt, "large.bin"))
+	require.NoError(t, err)
+	require.Equal(t, largePayload, gotGrandchildAfterParentDel)
+	require.NoError(t, os.WriteFile(filepath.Join(grandchildMnt, "after_parent_del.txt"), []byte("alive"), 0o644))
+	stopGrandchild()
 }
 
 func TestOnlineFork_RealGitCommitLoop(t *testing.T) {
@@ -467,12 +486,12 @@ func TestOnlineFork_RealGitCommitLoop(t *testing.T) {
 	endpoint := getStorageEndpoint()
 
 	createOut := runBowlSuccess(t, "disk", "create", "--endpoint", endpoint, "--size", "2GiB", "--name", "e2e-git-fork-parent", "--json")
-	var parentDisk forkDiskJSON
+	var parentDisk diskCreateJSON
 	require.NoError(t, json.Unmarshal([]byte(createOut), &parentDisk))
-	parentID := parentDisk.DiskID
-	registerDiskCleanup(t, client, parentID)
+	diskID := parentDisk.DiskID
+	registerDiskCleanup(t, client, diskID)
 
-	parentMnt, _ := mountWithCleanup(t, endpoint, parentID)
+	parentMnt, _ := mountWithCleanup(t, endpoint, diskID, "--branch", "main")
 	repoDir := filepath.Join(parentMnt, "repo")
 	const trackedSlots = 5
 	const totalCommits = 20
@@ -480,11 +499,11 @@ func TestOnlineFork_RealGitCommitLoop(t *testing.T) {
 
 	var lastCommittedN atomic.Int64
 	workerErrCh := runGitCommitWorker(repoDir, totalCommits, trackedSlots, &lastCommittedN)
-	snaps := captureGitForks(t, client, parentID, &lastCommittedN, []int64{3, 9, 15})
+	snaps := captureGitForks(t, diskID, &lastCommittedN, []int64{3, 9, 15})
 	require.NoError(t, <-workerErrCh, "父盘 Git 连续提交循环失败")
 	require.Equal(t, int64(totalCommits), lastCommittedN.Load())
 
-	verifyGitChildForks(t, endpoint, snaps, trackedSlots)
+	verifyGitChildForks(t, endpoint, diskID, snaps, trackedSlots)
 
 	parentFsck := strings.ToLower(runGitCmd(t, repoDir, "fsck", "--full"))
 	require.NotContains(t, parentFsck, "error:")
@@ -731,6 +750,7 @@ func TestMultiClient_ReadOnlyObservesSecurityCapabilityAfterInitialMiss(t *testi
 
 	roRawFS := fusefs.NewRawFS(client, fusefs.Config{
 		DiskID:              diskID,
+		Branch:              fusefs.DefaultBranch,
 		RootIno:             1,
 		Mode:                fusefs.MountModeRO,
 		EntryTimeoutSeconds: 1.0,

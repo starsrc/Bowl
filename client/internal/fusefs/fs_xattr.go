@@ -88,6 +88,7 @@ func (fs *RawFS) SetXAttr(cancel <-chan struct{}, input *fuse.SetXAttrIn, attr s
 		Value:  data,
 		Flags:  input.Flags,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}))
 	fs.cache.invalidateInode(input.NodeId)
@@ -147,6 +148,7 @@ func (fs *RawFS) GetXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr st
 		Ino:    ino,
 		Name:   []byte(attr),
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 	}))
 	if err != nil {
 		status = fs.ToStatus(err)
@@ -194,6 +196,7 @@ func (fs *RawFS) ListXAttr(cancel <-chan struct{}, header *fuse.InHeader, dest [
 	resp, err := fs.client.ListXattr(ctx, connect.NewRequest(&storagev1.ListXattrRequest{
 		Ino:    ino,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 	}))
 	if err != nil {
 		return 0, fs.ToStatus(err)
@@ -244,6 +247,7 @@ func (fs *RawFS) RemoveXAttr(cancel <-chan struct{}, header *fuse.InHeader, attr
 		Ino:    ino,
 		Name:   []byte(attr),
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}))
 	fs.cache.invalidateInode(header.NodeId)

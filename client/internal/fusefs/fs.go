@@ -27,6 +27,8 @@ import (
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 )
 
+const DefaultBranch = "main"
+
 const DefaultReleaseRetryInterval = 200 * time.Millisecond
 
 const DefaultRPCTimeout = 30 * time.Second
@@ -63,6 +65,7 @@ var _ fuse.RawFileSystem = (*RawFS)(nil)
 
 type Config struct {
 	DiskID                   string
+	Branch                   string
 	Epoch                    uint64
 	RootIno                  uint64
 	RootInode                *storagev1.Inode
@@ -190,6 +193,9 @@ func NewRawFS(client storagev1connect.StorageServiceClient, cfg Config) *RawFS {
 }
 
 func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn func() time.Time) *RawFS {
+	if cfg.Branch == "" {
+		cfg.Branch = DefaultBranch
+	}
 	cfg.Mode = cfg.EffectiveMode()
 	if cfg.UnmountTimeout <= 0 {
 		cfg.UnmountTimeout = DefaultUnmountTimeout
@@ -311,6 +317,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					Offset: offset,
 					Data:   data,
 					DiskId: fs.cfg.DiskID,
+					Branch: fs.cfg.Branch,
 					Epoch:  fs.cfg.Epoch,
 				}))
 				if err != nil {
@@ -336,6 +343,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 					Mode:   &mode,
 					Gid:    &gid,
 					DiskId: fs.cfg.DiskID,
+					Branch: fs.cfg.Branch,
 					Epoch:  fs.cfg.Epoch,
 				}))
 				if err != nil {
@@ -353,6 +361,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 						Value:  xa.Value,
 						Flags:  0,
 						DiskId: fs.cfg.DiskID,
+						Branch: fs.cfg.Branch,
 						Epoch:  fs.cfg.Epoch,
 					})); xErr != nil {
 						fs.fenceIfStaleEpoch(xErr)
@@ -368,6 +377,7 @@ func newRawFS(client storagev1connect.StorageServiceClient, cfg Config, nowFn fu
 						Ino:    ino,
 						Flags:  &flags,
 						DiskId: fs.cfg.DiskID,
+						Branch: fs.cfg.Branch,
 						Epoch:  fs.cfg.Epoch,
 					}))
 					if fErr != nil {
@@ -1017,6 +1027,7 @@ func (fs *RawFS) syncDirtyInodeOnUnmount(opCtx context.Context, ino uint64, repe
 	_, err := fs.client.Fsync(ctx, connect.NewRequest(&storagev1.FsyncRequest{
 		Ino:    ino,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}))
 	done()
@@ -1042,6 +1053,7 @@ func (fs *RawFS) syncRootDirOnUnmount(opCtx context.Context, repeatNoop bool) {
 	_, err := fs.client.FsyncDir(ctx, connect.NewRequest(&storagev1.FsyncDirRequest{
 		Ino:    rootIno,
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 	}))
 	done()
@@ -1250,6 +1262,7 @@ func (fs *RawFS) tryReclaim(parent context.Context, item *reclaimRetryItem, from
 	defer cancel()
 	req := &storagev1.ReclaimOrphanRequest{
 		DiskId: fs.cfg.DiskID,
+		Branch: fs.cfg.Branch,
 		Epoch:  fs.cfg.Epoch,
 		Ino:    item.ino,
 	}
@@ -1411,8 +1424,13 @@ func BuildMountOptions(cfg Config) *fuse.MountOptions {
 		disabledCaps = fuse.CAP_WRITEBACK_CACHE
 	}
 
+	fsName := "bowl:" + cfg.DiskID
+	if cfg.Branch != "" {
+		fsName += "@" + cfg.Branch
+	}
+
 	return &fuse.MountOptions{
-		FsName:        "bowl:" + cfg.DiskID,
+		FsName:        fsName,
 		Name:          "bowl",
 		Options:       options,
 		AllowOther:    cfg.AllowOther,

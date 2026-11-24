@@ -24,6 +24,7 @@ type mountMeta struct {
 	PID              int       `json:"pid"`
 	ProcStartTicks   uint64    `json:"proc_start_ticks,omitempty"`
 	DiskID           string    `json:"disk_id"`
+	Branch           string    `json:"branch,omitempty"`
 	AdminAddr        string    `json:"admin_addr"`
 	StartedAt        time.Time `json:"started_at"`
 	UnmountTimeoutMs int64     `json:"unmount_timeout_ms,omitempty"`

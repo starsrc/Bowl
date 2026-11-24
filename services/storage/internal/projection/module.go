@@ -8,7 +8,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
 
-	"github.com/starsrc/pkg/observability"
 	"github.com/starsrc/pkg/observability/obsfx"
 	"github.com/starsrc/pkg/tx"
 
@@ -25,7 +24,6 @@ func OpenPool(cfg config.DBPoolConfig) (*pgxpool.Pool, error) {
 
 type PoolParams struct {
 	fx.In
-	Ready     observability.Ready `optional:"true"`
 	Lifecycle fx.Lifecycle
 	Config    config.DBPoolConfig
 }

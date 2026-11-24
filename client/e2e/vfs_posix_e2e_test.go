@@ -20,8 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
+
+	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
 )
 
 func TestVFS_PosixRWDirectMmapExecAndTmpfile(t *testing.T) {
@@ -855,4 +858,87 @@ func TestVFS_RemovedOpenDir_RmdirAndOverwriteRenameSemantics(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []byte("new-dir"), gotMarker)
 	})
+}
+
+func TestVFS_Step31_StatfsExt4BranchUsageAndQuotaCap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	client := newTestStorageClient(t)
+	endpoint := getStorageEndpoint()
+
+	const (
+		quotaBytes = uint64(8 << 20)
+		fourMiB    = uint64(4 << 20)
+		twoMiB     = uint64(2 << 20)
+		sixMiB     = uint64(6 << 20)
+	)
+	created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
+		Name:     fmt.Sprintf("e2e-statfs-step31-%d", time.Now().UnixNano()),
+		MaxBytes: quotaBytes,
+	}))
+	require.NoError(t, err)
+	diskID := created.Msg.GetDisk().GetDiskId()
+	registerDiskCleanup(t, client, diskID)
+
+	statfsBytes := func(mp string) (total, used, avail uint64) {
+		t.Helper()
+		var st unix.Statfs_t
+		require.NoError(t, unix.Statfs(mp, &st))
+		frsize := uint64(st.Frsize)
+		require.Positive(t, frsize)
+		return st.Blocks * frsize, (st.Blocks - st.Bfree) * frsize, st.Bavail * frsize
+	}
+
+	mountpoint, stop := mountWithCleanup(t, endpoint, diskID)
+
+	total, used, avail := statfsBytes(mountpoint)
+	require.Equal(t, quotaBytes, total)
+	require.Zero(t, used)
+	require.Equal(t, quotaBytes, avail)
+
+	aPath := filepath.Join(mountpoint, "a.bin")
+	bPath := filepath.Join(mountpoint, "b.bin")
+	require.NoError(t, os.WriteFile(aPath, deterministicPayload("step31-a", int(fourMiB)), 0o644))
+	require.NoError(t, os.WriteFile(bPath, deterministicPayload("step31-b", int(twoMiB)), 0o644))
+
+	total, used, avail = statfsBytes(mountpoint)
+	require.Equal(t, quotaBytes, total)
+	require.Equal(t, sixMiB, used)
+	require.Equal(t, twoMiB, avail)
+
+	runBowlSuccess(t, "commit", "create", "-d", diskID, "--branch", "main", "--endpoint", endpoint, "-m", "step31-6m", "-q")
+
+	require.NoError(t, os.Remove(aPath))
+
+	total, used, avail = statfsBytes(mountpoint)
+	require.Equal(t, quotaBytes, total)
+	require.Equal(t, twoMiB, used)
+	require.Equal(t, twoMiB, avail)
+
+	diskAfterUnlink, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Equal(t, sixMiB, diskAfterUnlink.Msg.GetDisk().GetUsedBytes())
+
+	stop()
+
+	_, err = client.ResetBranch(ctx, connect.NewRequest(&storagev1.ResetBranchRequest{
+		DiskId:         diskID,
+		Branch:         "main",
+		TargetCommitId: 1,
+	}))
+	require.NoError(t, err)
+
+	runBowlSuccess(t, "commit", "prune", "-d", diskID, "--endpoint", endpoint, "-y")
+
+	diskAfterPrune, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
+	require.NoError(t, err)
+	require.Zero(t, diskAfterPrune.Msg.GetDisk().GetUsedBytes())
+
+	remountMP, stopRemount := mountWithCleanup(t, endpoint, diskID)
+	defer stopRemount()
+	total, used, avail = statfsBytes(remountMP)
+	require.Equal(t, quotaBytes, total)
+	require.Zero(t, used)
+	require.Equal(t, quotaBytes, avail)
 }

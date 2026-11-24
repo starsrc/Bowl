@@ -62,7 +62,7 @@ func (m *ControlManager) ReconcileDisk(ctx context.Context, diskID uuid.UUID) er
 		rawSnap, err = entry.store.SnapshotControlMeta(now)
 	} else {
 		var ds *engine.DiskStore
-		ds, err = m.openDiskRaw(diskID, "", 0)
+		ds, err = m.openDiskRaw(diskID, "", 0, false)
 		if err == nil {
 			rawSnap, err = ds.SnapshotControlMeta(now)
 			closeErr := ds.Close()

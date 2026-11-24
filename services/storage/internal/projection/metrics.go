@@ -14,6 +14,7 @@ type StorageMetricsCollector struct {
 
 	disksLoadedDesc               *prometheus.Desc
 	logicalBytesDesc              *prometheus.Desc
+	packPhysicalBytesDesc         *prometheus.Desc
 	inodesDesc                    *prometheus.Desc
 	branchActorsLoadedDesc        *prometheus.Desc
 	pebbleWALBytesInDesc          *prometheus.Desc
@@ -45,6 +46,12 @@ func NewStorageMetricsCollector(mgr *ControlManager) *StorageMetricsCollector {
 		logicalBytesDesc: prometheus.NewDesc(
 			"bowl_storage_logical_bytes",
 			"Total used bytes across all loaded disks.",
+			nil,
+			nil,
+		),
+		packPhysicalBytesDesc: prometheus.NewDesc(
+			"bowl_storage_pack_physical_bytes",
+			"Total physical pack file bytes across all loaded disks.",
 			nil,
 			nil,
 		),
@@ -159,6 +166,7 @@ func (c *StorageMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	}
 	ch <- c.disksLoadedDesc
 	ch <- c.logicalBytesDesc
+	ch <- c.packPhysicalBytesDesc
 	ch <- c.inodesDesc
 	ch <- c.branchActorsLoadedDesc
 	ch <- c.pebbleWALBytesInDesc
@@ -214,6 +222,7 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 
 	var (
 		logicalBytes        uint64
+		packPhysicalBytes   uint64
 		inodes              uint64
 		branchActors        int
 		walBytesIn          uint64
@@ -232,6 +241,7 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, ds := range stores {
 		snap := ds.MetricsSnapshot()
 		logicalBytes += snap.UsedBytes
+		packPhysicalBytes += snap.PackPhysicalBytes
 		inodes += snap.Inodes
 		branchActors += snap.ActiveBranchActors
 		if pm := snap.Pebble; pm != nil {
@@ -255,6 +265,7 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(c.disksLoadedDesc, prometheus.GaugeValue, float64(len(stores)))
 	ch <- prometheus.MustNewConstMetric(c.logicalBytesDesc, prometheus.GaugeValue, float64(logicalBytes))
+	ch <- prometheus.MustNewConstMetric(c.packPhysicalBytesDesc, prometheus.GaugeValue, float64(packPhysicalBytes))
 	ch <- prometheus.MustNewConstMetric(c.inodesDesc, prometheus.GaugeValue, float64(inodes))
 	ch <- prometheus.MustNewConstMetric(c.branchActorsLoadedDesc, prometheus.GaugeValue, float64(branchActors))
 	ch <- prometheus.MustNewConstMetric(c.pebbleWALBytesInDesc, prometheus.CounterValue, float64(walBytesIn))

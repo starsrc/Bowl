@@ -426,8 +426,14 @@ func (d *DiskStore) Lookup(_ context.Context, branch string, parentIno uint64, n
 	if d.closing.Load() {
 		return Entry{}, Inode{}, ErrClosed
 	}
-	if err := validateName(name); err != nil {
-		return Entry{}, Inode{}, err
+	if parentIno == 0 || parentIno > math.MaxInt64 {
+		return Entry{}, Inode{}, ErrInvalid
+	}
+	if len(name) > MaxFileNameBytes {
+		return Entry{}, Inode{}, ErrNameTooLong
+	}
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\x00') {
+		return Entry{}, Inode{}, ErrInvalid
 	}
 	snap := d.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
@@ -443,6 +449,31 @@ func (d *DiskStore) Lookup(_ context.Context, branch string, parentIno uint64, n
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return Entry{}, Inode{}, ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return Entry{}, Inode{}, ErrNotFound
+	}
+	if name == "" {
+		return Entry{}, Inode{}, ErrNotFound
+	}
+	if name == "." {
+		return Entry{Ino: parent.Ino, Mode: parent.Mode}, parent, nil
+	}
+	if name == ".." {
+		if parentIno == RootIno {
+			return Entry{Ino: parent.Ino, Mode: parent.Mode}, parent, nil
+		}
+		if parent.ParentIno == 0 || parent.ParentIno == parentIno {
+			return Entry{}, Inode{}, ErrNotFound
+		}
+		grandparent, gpErr := overlayGetInode(snap, layers, parent.ParentIno)
+		if gpErr != nil {
+			return Entry{}, Inode{}, gpErr
+		}
+		if grandparent.Nlink == 0 {
+			return Entry{}, Inode{}, ErrNotFound
+		}
+		return Entry{Ino: grandparent.Ino, Mode: grandparent.Mode}, grandparent, nil
+	}
 	ent, err := overlayGetEntry(snap, layers, parentIno, []byte(name))
 	if err != nil {
 		return Entry{}, Inode{}, err
@@ -450,6 +481,9 @@ func (d *DiskStore) Lookup(_ context.Context, branch string, parentIno uint64, n
 	inode, err := overlayGetInode(snap, layers, ent.Ino)
 	if err != nil {
 		return Entry{}, Inode{}, err
+	}
+	if inode.Nlink == 0 {
+		return Entry{}, Inode{}, ErrNotFound
 	}
 	return ent, inode, nil
 }

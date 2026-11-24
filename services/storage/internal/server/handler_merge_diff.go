@@ -6,11 +6,10 @@ import (
 	"connectrpc.com/connect"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/services/storage/internal/control"
-	"github.com/starsrc/bowl/services/storage/internal/store"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
-func toProtoDiffNodeSummary(s *store.DiffNodeSummary) *storagev1.DiffNodeSummary {
+func toProtoDiffNodeSummary(s *engine.DiffNodeSummary) *storagev1.DiffNodeSummary {
 	if s == nil {
 		return nil
 	}
@@ -21,66 +20,66 @@ func toProtoDiffNodeSummary(s *store.DiffNodeSummary) *storagev1.DiffNodeSummary
 	}
 }
 
-func toProtoDiffKind(k store.DiffKind) storagev1.DiffKind {
+func toProtoDiffKind(k engine.DiffKind) storagev1.DiffKind {
 	switch k {
-	case store.DiffKindAdded:
+	case engine.DiffKindAdded:
 		return storagev1.DiffKind_DIFF_KIND_ADDED
-	case store.DiffKindModified:
+	case engine.DiffKindModified:
 		return storagev1.DiffKind_DIFF_KIND_MODIFIED
-	case store.DiffKindDeleted:
+	case engine.DiffKindDeleted:
 		return storagev1.DiffKind_DIFF_KIND_DELETED
 	default:
 		return storagev1.DiffKind_DIFF_KIND_UNSPECIFIED
 	}
 }
 
-func toProtoConflictKind(k store.ConflictKind) storagev1.ConflictKind {
+func toProtoConflictKind(k engine.ConflictKind) storagev1.ConflictKind {
 	switch k {
-	case store.ConflictAddAdd:
+	case engine.ConflictAddAdd:
 		return storagev1.ConflictKind_CONFLICT_KIND_ADD_ADD
-	case store.ConflictContent:
+	case engine.ConflictContent:
 		return storagev1.ConflictKind_CONFLICT_KIND_CONTENT
-	case store.ConflictModifyDelete:
+	case engine.ConflictModifyDelete:
 		return storagev1.ConflictKind_CONFLICT_KIND_MODIFY_DELETE
-	case store.ConflictDeleteModify:
+	case engine.ConflictDeleteModify:
 		return storagev1.ConflictKind_CONFLICT_KIND_DELETE_MODIFY
-	case store.ConflictTreeDeleteModify:
+	case engine.ConflictTreeDeleteModify:
 		return storagev1.ConflictKind_CONFLICT_KIND_TREE_DELETE_MODIFY
-	case store.ConflictType:
+	case engine.ConflictType:
 		return storagev1.ConflictKind_CONFLICT_KIND_TYPE
-	case store.ConflictDirFile:
+	case engine.ConflictDirFile:
 		return storagev1.ConflictKind_CONFLICT_KIND_DIR_FILE
-	case store.ConflictAttr:
+	case engine.ConflictAttr:
 		return storagev1.ConflictKind_CONFLICT_KIND_ATTR
-	case store.ConflictXattr:
+	case engine.ConflictXattr:
 		return storagev1.ConflictKind_CONFLICT_KIND_XATTR
-	case store.ConflictXattrQuota:
+	case engine.ConflictXattrQuota:
 		return storagev1.ConflictKind_CONFLICT_KIND_XATTR_QUOTA
-	case store.ConflictSecurityAttr:
+	case engine.ConflictSecurityAttr:
 		return storagev1.ConflictKind_CONFLICT_KIND_SECURITY_ATTR
-	case store.ConflictHardlink:
+	case engine.ConflictHardlink:
 		return storagev1.ConflictKind_CONFLICT_KIND_HARDLINK
 	default:
 		return storagev1.ConflictKind_CONFLICT_KIND_UNSPECIFIED
 	}
 }
 
-func toStoreMergeStrategy(s storagev1.MergeStrategy) (store.MergeStrategy, error) {
+func toEngineMergeStrategy(s storagev1.MergeStrategy) (engine.MergeStrategy, error) {
 	switch s {
 	case storagev1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED:
-		return store.MergeStrategyUnspecified, nil
+		return engine.MergeStrategyUnspecified, nil
 	case storagev1.MergeStrategy_MERGE_STRATEGY_FAIL:
-		return store.MergeStrategyFail, nil
+		return engine.MergeStrategyFail, nil
 	case storagev1.MergeStrategy_MERGE_STRATEGY_OURS:
-		return store.MergeStrategyOurs, nil
+		return engine.MergeStrategyOurs, nil
 	case storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS:
-		return store.MergeStrategyTheirs, nil
+		return engine.MergeStrategyTheirs, nil
 	default:
-		return store.MergeStrategyUnspecified, store.ErrInvalid
+		return engine.MergeStrategyUnspecified, engine.ErrInvalid
 	}
 }
 
-func toProtoMergeConflictReport(lcaSnapshotID string, report *store.MergeConflictReport) *storagev1.MergeConflictReport {
+func toProtoMergeConflictReport(report *engine.MergeConflictReport) *storagev1.MergeConflictReport {
 	if report == nil {
 		return nil
 	}
@@ -95,30 +94,14 @@ func toProtoMergeConflictReport(lcaSnapshotID string, report *store.MergeConflic
 		})
 	}
 	return &storagev1.MergeConflictReport{
-		LcaSnapshotId:      lcaSnapshotID,
+		LcaCommitId:        report.LCACommitID,
 		TotalConflicts:     report.TotalConflicts,
 		Conflicts:          conflicts,
 		ConflictsTruncated: report.ConflictsTruncated,
 	}
 }
 
-func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.DiffDiskRequest]) (*connect.Response[storagev1.DiffDiskResponse], error) {
-	var targetDiskID string
-	if req.Msg.TargetDiskId != nil {
-		targetDiskID = *req.Msg.TargetDiskId
-	}
-	res, err := s.control.DiffDisk(ctx, &control.DiffDiskParams{
-		SourceDiskID:  req.Msg.SourceDiskId,
-		TargetDiskID:  targetDiskID,
-		PathPrefix:    req.Msg.PathPrefix,
-		ConflictsOnly: req.Msg.ConflictsOnly,
-		PageSize:      req.Msg.PageSize,
-		PageToken:     req.Msg.PageToken,
-	})
-	if err != nil {
-		return nil, toConnectError(err)
-	}
-
+func toProtoDiffResponse(res *engine.DiffResult) *storagev1.DiffResponse {
 	entries := make([]*storagev1.DiffEntry, 0, len(res.Entries))
 	for _, e := range res.Entries {
 		entries = append(entries, &storagev1.DiffEntry{
@@ -130,9 +113,10 @@ func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.Di
 			Source:   toProtoDiffNodeSummary(e.Source),
 		})
 	}
-
-	return connect.NewResponse(&storagev1.DiffDiskResponse{
-		LcaSnapshotId: res.LCASnapshotID,
+	return &storagev1.DiffResponse{
+		BaseCommitId:   res.BaseCommitID,
+		TargetCommitId: res.TargetCommitID,
+		SourceCommitId: res.SourceCommitID,
 		Summary: &storagev1.DiffSummary{
 			Added:     res.Summary.Added,
 			Modified:  res.Summary.Modified,
@@ -141,22 +125,77 @@ func (s *Server) DiffDisk(ctx context.Context, req *connect.Request[storagev1.Di
 		},
 		Entries:       entries,
 		NextPageToken: res.NextPageToken,
-	}), nil
+	}
 }
 
-func (s *Server) ReadSnapshotNode(ctx context.Context, req *connect.Request[storagev1.ReadSnapshotNodeRequest]) (*connect.Response[storagev1.ReadSnapshotNodeResponse], error) {
-	res, err := s.control.ReadSnapshotNode(ctx, &control.ReadSnapshotNodeParams{
-		DiskID:     req.Msg.DiskId,
-		SnapshotID: req.Msg.SnapshotId,
-		Ino:        req.Msg.Ino,
-		Offset:     req.Msg.Offset,
-		Size:       req.Msg.Size,
+func (s *Server) DiffBranches(ctx context.Context, req *connect.Request[storagev1.DiffBranchesRequest]) (*connect.Response[storagev1.DiffResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	res, err := s.manager.Diff(ctx, diskID, engine.DiffOptions{
+		SourceBranch:  req.Msg.SourceBranch,
+		TargetBranch:  req.Msg.TargetBranch,
+		PathPrefix:    req.Msg.PathPrefix,
+		ConflictsOnly: req.Msg.ConflictsOnly,
+		PageSize:      req.Msg.PageSize,
+		PageToken:     req.Msg.PageToken,
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
+	return connect.NewResponse(toProtoDiffResponse(res)), nil
+}
 
-	return connect.NewResponse(&storagev1.ReadSnapshotNodeResponse{
+func (s *Server) DiffCommits(ctx context.Context, req *connect.Request[storagev1.DiffCommitsRequest]) (*connect.Response[storagev1.DiffResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	res, err := s.manager.DiffCommits(ctx, diskID, engine.DiffCommitsOptions{
+		BaseCommitID:   req.Msg.BaseCommitId,
+		SourceCommitID: req.Msg.SourceCommitId,
+		PathPrefix:     req.Msg.PathPrefix,
+		ConflictsOnly:  req.Msg.ConflictsOnly,
+		PageSize:       req.Msg.PageSize,
+		PageToken:      req.Msg.PageToken,
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	return connect.NewResponse(toProtoDiffResponse(res)), nil
+}
+
+func (s *Server) DiffWork(ctx context.Context, req *connect.Request[storagev1.DiffWorkRequest]) (*connect.Response[storagev1.DiffResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	res, err := s.manager.DiffWork(ctx, diskID, req.Msg.Branch, engine.DiffWorkOptions{
+		PathPrefix:    req.Msg.PathPrefix,
+		ConflictsOnly: req.Msg.ConflictsOnly,
+		PageSize:      req.Msg.PageSize,
+		PageToken:     req.Msg.PageToken,
+	})
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	return connect.NewResponse(toProtoDiffResponse(res)), nil
+}
+
+func (s *Server) ReadCommitNode(ctx context.Context, req *connect.Request[storagev1.ReadCommitNodeRequest]) (*connect.Response[storagev1.ReadCommitNodeResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	if req.Msg.Size > maxReadWriteSize {
+		return nil, toConnectError(engine.ErrInvalid)
+	}
+	res, err := s.manager.ReadCommitNode(ctx, diskID, req.Msg.CommitId, req.Msg.Ino, int64(req.Msg.Offset), int(req.Msg.Size))
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	return connect.NewResponse(&storagev1.ReadCommitNodeResponse{
 		Mode:          res.Mode,
 		FileSize:      res.FileSize,
 		Data:          res.Data,
@@ -165,16 +204,20 @@ func (s *Server) ReadSnapshotNode(ctx context.Context, req *connect.Request[stor
 	}), nil
 }
 
-func (s *Server) MergeDisk(ctx context.Context, req *connect.Request[storagev1.MergeDiskRequest]) (*connect.Response[storagev1.MergeDiskResponse], error) {
-	strategy, err := toStoreMergeStrategy(req.Msg.Strategy)
+func (s *Server) MergeBranch(ctx context.Context, req *connect.Request[storagev1.MergeBranchRequest]) (*connect.Response[storagev1.MergeBranchResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	var pathStrategies map[string]store.MergeStrategy
+	strategy, err := toEngineMergeStrategy(req.Msg.Strategy)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	var pathStrategies map[string]engine.MergeStrategy
 	if len(req.Msg.PathStrategies) > 0 {
-		pathStrategies = make(map[string]store.MergeStrategy, len(req.Msg.PathStrategies))
+		pathStrategies = make(map[string]engine.MergeStrategy, len(req.Msg.PathStrategies))
 		for p, ps := range req.Msg.PathStrategies {
-			mapped, mapErr := toStoreMergeStrategy(ps)
+			mapped, mapErr := toEngineMergeStrategy(ps)
 			if mapErr != nil {
 				return nil, toConnectError(mapErr)
 			}
@@ -182,24 +225,38 @@ func (s *Server) MergeDisk(ctx context.Context, req *connect.Request[storagev1.M
 		}
 	}
 
-	res, err := s.control.MergeDisk(ctx, &control.MergeDiskParams{
-		SourceDiskID:   req.Msg.SourceDiskId,
-		TargetDiskID:   req.Msg.TargetDiskId,
+	res, err := s.manager.MergeBranch(ctx, diskID, engine.MergeOptions{
+		SourceBranch:   req.Msg.SourceBranch,
+		TargetBranch:   req.Msg.TargetBranch,
 		Strategy:       strategy,
 		PathStrategies: pathStrategies,
 		DryRun:         req.Msg.DryRun,
-		Force:          req.Msg.Force,
-		MaxBytes:       req.Msg.MaxBytes,
+		NoFastForward:  req.Msg.NoFastForward,
+		Message:        req.Msg.Message,
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
-	return connect.NewResponse(&storagev1.MergeDiskResponse{
-		Disk:               toProtoDisk(res.Disk),
-		LcaSnapshotId:      res.LCASnapshotID,
-		MergeSnapshotId:    res.MergeSnapshotID,
-		EstimatedUsedBytes: res.EstimatedUsedBytes,
-		TargetMaxBytes:     res.TargetMaxBytes,
-	}), nil
+	resp := &storagev1.MergeBranchResponse{
+		LcaCommitId: res.BaseCommitID,
+		CommitId:    res.CommitID,
+		FastForward: res.FastForward,
+		UpToDate:    res.UpToDate,
+		WriterEpoch: res.WriterEpoch,
+	}
+	if !req.Msg.DryRun {
+		_ = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+			if br, brErr := ds.GetBranch(req.Msg.TargetBranch); brErr == nil {
+				resp.Branch = toProtoBranchFromEngine(diskID, br)
+			}
+			if res.CommitID != 0 {
+				if cmt, cmtErr := ds.GetCommit(res.CommitID); cmtErr == nil {
+					resp.Commit = toProtoCommitFromEngine(diskID, cmt)
+				}
+			}
+			return nil
+		})
+	}
+	return connect.NewResponse(resp), nil
 }

@@ -2073,7 +2073,7 @@ func (d *DiskStore) DiffWork(ctx context.Context, branch string, opts DiffWorkOp
 	return d.diffViews(ctx, diffRunParams{
 		baseCommitID:         bm.HeadCommitID,
 		targetCommitID:       bm.HeadCommitID,
-		sourceCommitID:       bm.HeadCommitID,
+		sourceCommitID:       0,
 		baseView:             baseView,
 		targetView:           baseView,
 		sourceView:           layerView{r: snap, layers: sourceLayers},

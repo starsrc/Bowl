@@ -2,631 +2,234 @@ package server
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genproto/googleapis/rpc/errdetails"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
-	"github.com/starsrc/bowl/services/storage/internal/control"
-	"github.com/starsrc/bowl/services/storage/internal/db"
-	"github.com/starsrc/bowl/services/storage/internal/store"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
-type memoryRoundTripper struct {
-	handler http.Handler
-}
-
-func (rt memoryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	rec := httptest.NewRecorder()
-	rt.handler.ServeHTTP(rec, req)
-	res := rec.Result()
-	res.Request = req
-	return res, nil
-}
-
-func newTestServerAndClient(t *testing.T, opts ...control.Option) (*Server, storagev1connect.StorageServiceClient) {
-	t.Helper()
-	ctrlOpts := append([]control.Option{control.WithStorageRoot(t.TempDir())}, opts...)
-	mgr := control.New(db.NewMemStore(), ctrlOpts...)
-	t.Cleanup(func() { _ = mgr.Close() })
-
-	srv, err := New(Params{
-		Config: config.ServerConfig{
-			ServerPort:         0,
-			InternalServerPort: 0,
-			ServerReadMaxBytes: 8 << 20,
-		},
-		Control: mgr,
-	})
-	require.NoError(t, err, "初始化 Server 失败")
-
-	httpClient := &http.Client{Transport: memoryRoundTripper{handler: srv.Handler()}}
-	client := storagev1connect.NewStorageServiceClient(httpClient, "http://storage.local")
-	return srv, client
-}
-
-func requireConnectErrorCodeAndReason(t *testing.T, err error, wantCode connect.Code, wantReason string) {
-	t.Helper()
-	require.Error(t, err, "预期返回 Connect 错误，但得到 nil")
-	gotCode := connect.CodeOf(err)
-	require.Equal(t, wantCode, gotCode, "Connect 状态码不匹配: want=%v got=%v err=%v", wantCode, gotCode, err)
-	info := ExtractErrorInfo(err)
-	require.NotNil(t, info, "错误应携带 google.rpc.ErrorInfo 详情: err=%v", err)
-	require.Equal(t, control.ErrorDomain, info.GetDomain(), "ErrorInfo 领域不匹配: want=%q got=%q", control.ErrorDomain, info.GetDomain())
-	require.Equal(t, wantReason, info.GetReason(), "ErrorInfo reason 不匹配: want=%q got=%q", wantReason, info.GetReason())
-}
-
-func findDiskByID(disks []*storagev1.Disk, diskID string) *storagev1.Disk {
-	for _, d := range disks {
-		if d.GetDiskId() == diskID {
-			return d
-		}
-	}
-	return nil
-}
-
-func TestServerDiskRPC_LifecycleCRUD_SucceedsEndToEnd(t *testing.T) {
-
+func TestHandlerDisk_LifecycleAndQuotaGuards(t *testing.T) {
 	ctx := context.Background()
-	_, client := newTestServerAndClient(t, control.WithEntryTimeout(2.5), control.WithAttrTimeout(3.5))
+	env := newTestEnv(t, nil)
 
-	createResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "rpc-disk",
-		MaxBytes: 16 << 20,
+	d1 := env.createDisk(t, "disk-one", 4*1024*1024)
+	require.NotEmpty(t, d1.GetDiskId())
+	require.Equal(t, "disk-one", d1.GetName())
+	require.Equal(t, defaultBranch(), d1.GetDefaultBranch())
+	require.Equal(t, uint64(4*1024*1024), d1.GetMaxBytes())
+	require.Zero(t, d1.GetUsedBytes())
+
+	d2 := env.createDisk(t, "disk-two", 8*1024*1024)
+	d3 := env.createDisk(t, "disk-three", 16*1024*1024)
+
+	gotResp, err := env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{
+		DiskId: d2.GetDiskId(),
 	}))
+	require.NoError(t, err)
+	require.Equal(t, d2.GetDiskId(), gotResp.Msg.GetDisk().GetDiskId())
+	require.Equal(t, "disk-two", gotResp.Msg.GetDisk().GetName())
 
-	require.NoError(t, err, "CreateDisk RPC 失败")
-	created := createResp.Msg.GetDisk()
-	require.NotNil(t, created, "CreateDisk 必须返回 Disk 实体")
-	diskID := created.GetDiskId()
-	require.NotEmpty(t, diskID, "DiskId 不能为空")
-	require.Equal(t, "rpc-disk", created.GetName())
-	require.Equal(t, uint64(1), created.GetRootIno())
-	require.Equal(t, uint64(16<<20), created.GetMaxBytes())
-	require.Nil(t, created.ParentDiskId, "根盘不应设置 ParentDiskId")
+	page1, err := env.client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{
+		PageSize: 2,
+	}))
+	require.NoError(t, err)
+	require.Len(t, page1.Msg.GetDisks(), 2)
+	require.NotEmpty(t, page1.Msg.GetNextPageToken())
 
-	getResp, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
-	require.NoError(t, err, "GetDisk RPC 失败")
-	require.Equal(t, diskID, getResp.Msg.GetDisk().GetDiskId())
+	page2, err := env.client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{
+		PageSize:  2,
+		PageToken: page1.Msg.GetNextPageToken(),
+	}))
+	require.NoError(t, err)
+	require.Len(t, page2.Msg.GetDisks(), 1)
+	require.Empty(t, page2.Msg.GetNextPageToken())
 
-	listResp, err := client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{PageSize: 10}))
-	require.NoError(t, err, "ListDisks RPC 失败")
-	require.NotNil(t, findDiskByID(listResp.Msg.GetDisks(), diskID), "ListDisks 结果必须包含新建磁盘")
+	listed := []string{
+		page1.Msg.GetDisks()[0].GetDiskId(),
+		page1.Msg.GetDisks()[1].GetDiskId(),
+		page2.Msg.GetDisks()[0].GetDiskId(),
+	}
+	require.ElementsMatch(t, []string{d1.GetDiskId(), d2.GetDiskId(), d3.GetDiskId()}, listed)
 
-	newName := "rpc-disk-renamed"
-	newQuota := uint64(32 << 20)
-	updateResp, err := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{
-		DiskId:   diskID,
+	newName := "disk-one-renamed"
+	newQuota := uint64(2 * 1024 * 1024)
+	updResp, err := env.client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{
+		DiskId:   d1.GetDiskId(),
 		Name:     &newName,
 		MaxBytes: &newQuota,
 	}))
-	require.NoError(t, err, "UpdateDisk RPC 失败")
-	require.Equal(t, "rpc-disk-renamed", updateResp.Msg.GetDisk().GetName())
-	require.Equal(t, uint64(32<<20), updateResp.Msg.GetDisk().GetMaxBytes())
+	require.NoError(t, err)
+	require.Equal(t, newName, updResp.Msg.GetDisk().GetName())
+	require.Equal(t, newQuota, updResp.Msg.GetDisk().GetMaxBytes())
 
-	rwMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
-	require.NoError(t, err, "可写 MountDisk RPC 失败")
-	require.Equal(t, uint64(1), rwMount.Msg.GetEpoch())
-	require.Equal(t, uint64(1), rwMount.Msg.GetRootInode().GetIno())
-	require.InDelta(t, 2.5, rwMount.Msg.GetEntryTimeoutSeconds(), 1e-9)
-	require.InDelta(t, 3.5, rwMount.Msg.GetAttrTimeoutSeconds(), 1e-9)
-
-	roMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, ReadOnly: true}))
-	require.NoError(t, err, "只读 MountDisk RPC 失败")
-	require.Equal(t, uint64(0), roMount.Msg.GetEpoch())
-
-	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
-	requireConnectErrorCodeAndReason(t, err, connect.CodeAborted, "EBUSY")
-
-	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{DiskId: diskID, MountId: rwMount.Msg.GetMountId()}))
-	require.NoError(t, err, "UnmountDisk RW RPC 失败")
-	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{DiskId: diskID, MountId: roMount.Msg.GetMountId()}))
-	require.NoError(t, err, "UnmountDisk RO RPC 失败")
-
-	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
-	require.NoError(t, err, "DeleteDisk RPC 失败")
-
-	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: diskID}))
-	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
-}
-
-func TestServerDiskRPC_ListMountsAndEvictMounts_EnforcesDeleteGateAndFencesWriter(t *testing.T) {
-	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
-
-	createResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "rpc-evict-disk",
-		MaxBytes: 16 << 20,
+	mount := env.mountBranchRW(t, d1.GetDiskId(), defaultBranch(), false)
+	createdFile, err := env.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    d1.GetDiskId(),
+		Branch:    defaultBranch(),
+		ParentIno: engine.RootIno,
+		Name:      []byte("blob.bin"),
+		Mode:      0o644,
+		Epoch:     mount.GetEpoch(),
 	}))
 	require.NoError(t, err)
-	diskID := createResp.Msg.GetDisk().GetDiskId()
 
-	emptyMounts, err := client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{DiskId: diskID}))
-	require.NoError(t, err)
-	require.Empty(t, emptyMounts.Msg.GetMounts())
-
-	rwMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
-	require.NoError(t, err)
-	roMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID, ReadOnly: true}))
-	require.NoError(t, err)
-
-	listResp, err := client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{DiskId: diskID}))
-	require.NoError(t, err)
-	require.Len(t, listResp.Msg.GetMounts(), 2)
-	require.Less(t, listResp.Msg.GetMounts()[0].GetMountId(), listResp.Msg.GetMounts()[1].GetMountId())
-	for _, m := range listResp.Msg.GetMounts() {
-		require.NotNil(t, m.GetExpiresAt())
-	}
-
-	roID := roMount.Msg.GetMountId()
-	evictRO, err := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{
-		DiskId:  diskID,
-		MountId: &roID,
-	}))
-	require.NoError(t, err)
-	require.Equal(t, uint32(1), evictRO.Msg.GetEvictedCount())
-	require.Equal(t, uint64(0), evictRO.Msg.GetWriterEpoch())
-
-	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
-	requireConnectErrorCodeAndReason(t, err, connect.CodeAborted, "EBUSY")
-
-	evictAll, err := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{
-		DiskId: diskID,
-	}))
-	require.NoError(t, err)
-	require.Equal(t, uint32(1), evictAll.Msg.GetEvictedCount())
-	require.Equal(t, uint64(2), evictAll.Msg.GetWriterEpoch())
-
-	_, staleErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
-		DiskId:   diskID,
-		MountId:  rwMount.Msg.GetMountId(),
-		ReadOnly: false,
-		Epoch:    rwMount.Msg.GetEpoch(),
-	}))
-	requireConnectErrorCodeAndReason(t, staleErr, connect.CodeFailedPrecondition, "EBUSY")
-
-	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: diskID}))
-	require.NoError(t, err)
-}
-
-func TestServerDiskRPC_ForkDisk_CreatesIsolatedChildWithParentDiskID(t *testing.T) {
-
-	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
-
-	srcResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "fork-src",
-		MaxBytes: 16 << 20,
-	}))
-	require.NoError(t, err, "CreateDisk 失败")
-	srcID := srcResp.Msg.GetDisk().GetDiskId()
-
-	mntResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: srcID}))
-	require.NoError(t, err, "MountDisk 失败")
-
-	fileResp, err := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
-		DiskId:    srcID,
-		Epoch:     mntResp.Msg.GetEpoch(),
-		ParentIno: 1,
-		Name:      []byte("seed.bin"),
-		Mode:      store.S_IFREG | 0o644,
-	}))
-	require.NoError(t, err, "Create 文件失败")
-	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
-		DiskId: srcID,
-		Epoch:  mntResp.Msg.GetEpoch(),
-		Ino:    fileResp.Msg.GetInode().GetIno(),
+	payload := make([]byte, 8192)
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: d1.GetDiskId(),
+		Branch: defaultBranch(),
+		Ino:    createdFile.Msg.GetInode().GetIno(),
 		Offset: 0,
-		Data:   []byte("seed-data"),
+		Data:   payload,
+		Epoch:  mount.GetEpoch(),
 	}))
-	require.NoError(t, err, "Write 写入失败")
+	require.NoError(t, err)
 
-	forkResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
-		SourceDiskId: srcID,
-		Name:         "fork-child",
+	tooSmall := uint64(1024)
+	_, err = env.client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{
+		DiskId:   d1.GetDiskId(),
+		MaxBytes: &tooSmall,
 	}))
+	requireConnectErr(t, err, connect.CodeFailedPrecondition, "EINVAL")
 
-	require.NoError(t, err, "ForkDisk RPC 失败")
-	forked := forkResp.Msg.GetDisk()
-	require.NotNil(t, forked)
-	require.Equal(t, srcID, forked.GetParentDiskId(), "派生盘 ParentDiskId 不匹配")
-	require.Equal(t, uint64(9), forked.GetUsedBytes(), "派生盘 UsedBytes 不匹配: want=9 got=%d", forked.GetUsedBytes())
+	_, err = env.client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId: d1.GetDiskId(),
+	}))
+	requireConnectErr(t, err, connect.CodeAborted, "EBUSY")
+
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  d1.GetDiskId(),
+		MountId: mount.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
+		DiskId: d1.GetDiskId(),
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{
+		DiskId: d1.GetDiskId(),
+	}))
+	requireConnectErr(t, err, connect.CodeNotFound, "ENOENT")
 }
 
-func TestServerDiskRPC_ValidationErrors_MapsToExpectedConnectCodeAndReason(t *testing.T) {
-
+func TestHandlerMount_LeasesEpochFencingAndEvictMounts(t *testing.T) {
 	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
-
-	validUUID := "018f0000-0000-7000-8000-000000000001"
-	nilUUID := "00000000-0000-0000-0000-000000000000"
-	tooLongName := strings.Repeat("d", 256)
-	newValidName := "valid"
-	zeroQuota := uint64(0)
-
-	cases := []struct {
-		name       string
-		invoke     func() error
-		wantReason string
-	}{
-		{
-			name: "CreateDisk 配额为零",
-			invoke: func() error {
-				_, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{Name: "x", MaxBytes: 0}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "CreateDisk 配额溢出 MaxInt64",
-			invoke: func() error {
-				_, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{Name: "x", MaxBytes: uint64(math.MaxInt64) + 1}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "CreateDisk 名称超长",
-			invoke: func() error {
-				_, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{Name: tooLongName, MaxBytes: 4096}))
-				return err
-			},
-			wantReason: "ENAMETOOLONG",
-		},
-		{
-			name: "CreateDisk 名称含 NUL",
-			invoke: func() error {
-				_, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{Name: "bad\x00name", MaxBytes: 4096}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "GetDisk 非法 UUID",
-			invoke: func() error {
-				_, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: "bad-uuid"}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "GetDisk 全零 Nil UUID",
-			invoke: func() error {
-				_, err := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: nilUUID}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "ListDisks PageSize 越界",
-			invoke: func() error {
-				_, err := client.ListDisks(ctx, connect.NewRequest(&storagev1.ListDisksRequest{PageSize: 1001}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "UpdateDisk 未传任何更新字段",
-			invoke: func() error {
-				_, err := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{DiskId: validUUID}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "UpdateDisk 名称超长",
-			invoke: func() error {
-				_, err := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{DiskId: validUUID, Name: &tooLongName}))
-				return err
-			},
-			wantReason: "ENAMETOOLONG",
-		},
-		{
-			name: "UpdateDisk 配额为零",
-			invoke: func() error {
-				_, err := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{DiskId: validUUID, MaxBytes: &zeroQuota}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "DeleteDisk 非法 UUID",
-			invoke: func() error {
-				_, err := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: "invalid"}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "ForkDisk 全零源盘 UUID",
-			invoke: func() error {
-				_, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{SourceDiskId: nilUUID, Name: newValidName}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "MountDisk 全零 UUID",
-			invoke: func() error {
-				_, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: nilUUID}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "ListMounts 非法 UUID",
-			invoke: func() error {
-				_, err := client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{DiskId: "bad"}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "ListMounts 全零 UUID",
-			invoke: func() error {
-				_, err := client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{DiskId: nilUUID}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "EvictMounts 非法 DiskID",
-			invoke: func() error {
-				_, err := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: "bad"}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "EvictMounts 非法 MountID",
-			invoke: func() error {
-				badMount := "bad"
-				_, err := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: validUUID, MountId: &badMount}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-		{
-			name: "EvictMounts 全零 MountID",
-			invoke: func() error {
-				_, err := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: validUUID, MountId: &nilUUID}))
-				return err
-			},
-			wantReason: "EINVAL",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.invoke()
-			requireConnectErrorCodeAndReason(t, err, connect.CodeInvalidArgument, tc.wantReason)
-		})
-	}
-}
-
-func TestServerDiskRPC_DomainErrors_MapsToExpectedConnectCodeAndReason(t *testing.T) {
-
-	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
-
-	srcResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "domain-err-disk",
-		MaxBytes: 16 << 20,
-	}))
-	require.NoError(t, err, "CreateDisk 失败")
-	diskID := srcResp.Msg.GetDisk().GetDiskId()
-
-	mntResp, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: diskID}))
-	require.NoError(t, err, "MountDisk 失败")
-	fileResp, err := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
-		DiskId:    diskID,
-		Epoch:     mntResp.Msg.GetEpoch(),
-		ParentIno: 1,
-		Name:      []byte("used.bin"),
-		Mode:      store.S_IFREG | 0o644,
-	}))
-	require.NoError(t, err, "Create 文件失败")
-	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
-		DiskId: diskID,
-		Epoch:  mntResp.Msg.GetEpoch(),
-		Ino:    fileResp.Msg.GetInode().GetIno(),
-		Offset: 0,
-		Data:   make([]byte, 8192),
-	}))
-	require.NoError(t, err, "Write 写入失败")
-
-	missingID := "018f0000-0000-7000-8000-000000009999"
-	shrinkQuota := uint64(4096)
-	newName := "x"
-
-	cases := []struct {
-		name       string
-		invoke     func() error
-		wantCode   connect.Code
-		wantReason string
-	}{
-		{
-			name: "GetDisk 不存在",
-			invoke: func() error {
-				_, gErr := client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: missingID}))
-				return gErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "DeleteDisk 不存在",
-			invoke: func() error {
-				_, dErr := client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{DiskId: missingID}))
-				return dErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "MountDisk 不存在",
-			invoke: func() error {
-				_, mErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: missingID}))
-				return mErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "ListMounts 不存在",
-			invoke: func() error {
-				_, lErr := client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{DiskId: missingID}))
-				return lErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "EvictMounts 不存在",
-			invoke: func() error {
-				_, eErr := client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{DiskId: missingID}))
-				return eErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "ForkDisk 源盘不存在",
-			invoke: func() error {
-				_, fErr := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{SourceDiskId: missingID, Name: "child"}))
-				return fErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "UpdateDisk 不存在",
-			invoke: func() error {
-				_, uErr := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{DiskId: missingID, Name: &newName}))
-				return uErr
-			},
-			wantCode:   connect.CodeNotFound,
-			wantReason: "ENOENT",
-		},
-		{
-			name: "UpdateDisk 缩容低于已用空间",
-			invoke: func() error {
-				_, uErr := client.UpdateDisk(ctx, connect.NewRequest(&storagev1.UpdateDiskRequest{DiskId: diskID, MaxBytes: &shrinkQuota}))
-				return uErr
-			},
-			wantCode:   connect.CodeFailedPrecondition,
-			wantReason: "EINVAL",
-		},
-		{
-			name: "ForkDisk 缩容低于已用空间",
-			invoke: func() error {
-				_, fErr := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{SourceDiskId: diskID, Name: "small", MaxBytes: &shrinkQuota}))
-				return fErr
-			},
-			wantCode:   connect.CodeFailedPrecondition,
-			wantReason: "EINVAL",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			requireConnectErrorCodeAndReason(t, tc.invoke(), tc.wantCode, tc.wantReason)
-		})
-	}
-}
-
-func TestServerErrors_ToConnectError_MapsSentinelsContextAndGRPCStatus(t *testing.T) {
-
-	stWithInfo, err := status.New(codes.PermissionDenied, "perm denied").WithDetails(&errdetails.ErrorInfo{
-		Reason: "EPERM",
-		Domain: control.ErrorDomain,
+	env := newTestEnv(t, &config.MetaConfig{
+		AtimeModeVal:              config.DefaultAtimeMode,
+		EntryTimeoutSecondsVal:    2.5,
+		AttrTimeoutSecondsVal:     3.5,
+		DirEntryTimeoutSecondsVal: 4.5,
 	})
-	require.NoError(t, err, "构造测试 status 失败")
 
-	require.NoError(t, ToConnectError(nil), "nil 错误转换必须返回 nil")
-	require.NoError(t, StatusToConnectError(nil), "nil status 转换必须返回 nil")
+	disk := env.createDisk(t, "mount-disk", 4*1024*1024)
+	diskID := disk.GetDiskId()
 
-	cancelErr := ToConnectError(fmt.Errorf("client aborted: %w", context.Canceled))
-	require.Equal(t, connect.CodeCanceled, connect.CodeOf(cancelErr))
-	require.ErrorIs(t, cancelErr, context.Canceled)
-
-	deadlineErr := ToConnectError(fmt.Errorf("rpc timed out: %w", context.DeadlineExceeded))
-	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(deadlineErr))
-	require.ErrorIs(t, deadlineErr, context.DeadlineExceeded)
-
-	requireConnectErrorCodeAndReason(t, ToConnectError(store.ErrStaleEpoch), connect.CodeFailedPrecondition, "EBUSY")
-	requireConnectErrorCodeAndReason(t, StatusToConnectError(stWithInfo), connect.CodePermissionDenied, "EPERM")
-
-	unknownErr := ToConnectError(errors.New("opaque failure"))
-	require.Equal(t, connect.CodeUnknown, connect.CodeOf(unknownErr))
-	require.Nil(t, ExtractErrorInfo(unknownErr))
-}
-
-func TestServerDiskRPC_MountDisk_NonForceRejectsActiveRWAndForcePreempts(t *testing.T) {
-
-	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
-
-	created, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "mount-force-rpc-disk",
-		MaxBytes: 16 << 20,
+	_, err := env.client.ForkBranch(ctx, connect.NewRequest(&storagev1.ForkBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: defaultBranch(),
+		NewBranch:    "feat",
+		Message:      "fork feat",
 	}))
 	require.NoError(t, err)
-	diskID := created.Msg.GetDisk().GetDiskId()
 
-	roMount, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+	ro1, err := env.client.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
 		DiskId:   diskID,
+		Branch:   defaultBranch(),
 		ReadOnly: true,
 	}))
 	require.NoError(t, err)
-	require.Zero(t, roMount.Msg.GetEpoch())
+	require.Zero(t, ro1.Msg.GetEpoch())
+	require.Equal(t, engine.RootIno, ro1.Msg.GetRootInode().GetIno())
+	require.InDelta(t, 4.5, ro1.Msg.GetEntryTimeoutSeconds(), 1e-9)
+	require.InDelta(t, 3.5, ro1.Msg.GetAttrTimeoutSeconds(), 1e-9)
+	require.Equal(t, uint32(30), ro1.Msg.GetLeaseTtlSeconds())
 
-	rw1, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+	rw1 := env.mountBranchRW(t, diskID, defaultBranch(), false)
+	require.Greater(t, rw1.GetEpoch(), uint64(1))
+	require.Equal(t, engine.RootIno, rw1.GetRootInode().GetIno())
+
+	_, err = env.client.MountBranch(ctx, connect.NewRequest(&storagev1.MountBranchRequest{
+		DiskId: diskID,
+		Branch: defaultBranch(),
+	}))
+	requireConnectErr(t, err, connect.CodeAborted, "EBUSY")
+
+	renewRO, err := env.client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
+		DiskId:   diskID,
+		Branch:   defaultBranch(),
+		MountId:  ro1.Msg.GetMountId(),
+		ReadOnly: true,
+		Epoch:    0,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint32(30), renewRO.Msg.GetLeaseTtlSeconds())
+
+	renewRW, err := env.client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
+		DiskId:   diskID,
+		Branch:   defaultBranch(),
+		MountId:  rw1.GetMountId(),
+		ReadOnly: false,
+		Epoch:    rw1.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint32(30), renewRW.Msg.GetLeaseTtlSeconds())
+
+	rw2 := env.mountBranchRW(t, diskID, defaultBranch(), true)
+	require.Equal(t, rw1.GetEpoch()+1, rw2.GetEpoch())
+
+	_, err = env.client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
+		DiskId:   diskID,
+		Branch:   defaultBranch(),
+		MountId:  rw1.GetMountId(),
+		ReadOnly: false,
+		Epoch:    rw1.GetEpoch(),
+	}))
+	requireConnectErr(t, err, connect.CodeFailedPrecondition, "EBUSY")
+
+	featRW := env.mountBranchRW(t, diskID, "feat", false)
+
+	allMounts, err := env.client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{
 		DiskId: diskID,
 	}))
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), rw1.Msg.GetEpoch())
+	require.Len(t, allMounts.Msg.GetMounts(), 3)
 
-	_, busyErr := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+	featMounts, err := env.client.ListMounts(ctx, connect.NewRequest(&storagev1.ListMountsRequest{
 		DiskId: diskID,
-	}))
-
-	requireConnectErrorCodeAndReason(t, busyErr, connect.CodeAborted, "EBUSY")
-	_, err = client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
-		DiskId:    diskID,
-		Epoch:     rw1.Msg.GetEpoch(),
-		ParentIno: 1,
-		Name:      []byte("still-owner.txt"),
-		Mode:      store.S_IFREG | 0o644,
+		Branch: "feat",
 	}))
 	require.NoError(t, err)
+	require.Len(t, featMounts.Msg.GetMounts(), 1)
+	require.Equal(t, featRW.GetMountId(), featMounts.Msg.GetMounts()[0].GetMountId())
+	require.Equal(t, "feat", featMounts.Msg.GetMounts()[0].GetBranch())
 
-	rw2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
+	evictFeat, err := env.client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{
 		DiskId: diskID,
-		Force:  true,
+		Branch: "feat",
 	}))
-
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), rw2.Msg.GetEpoch())
+	require.Equal(t, uint32(1), evictFeat.Msg.GetEvictedCount())
+	require.Len(t, evictFeat.Msg.GetUpdatedBranches(), 1)
+	require.Equal(t, "feat", evictFeat.Msg.GetUpdatedBranches()[0].GetName())
+	require.Equal(t, featRW.GetEpoch()+1, evictFeat.Msg.GetUpdatedBranches()[0].GetWriterEpoch())
 
-	_, fencedErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
-		DiskId:    diskID,
-		Epoch:     rw1.Msg.GetEpoch(),
-		ParentIno: 1,
-		Name:      []byte("fenced.txt"),
-		Mode:      store.S_IFREG | 0o644,
+	evictRest, err := env.client.EvictMounts(ctx, connect.NewRequest(&storagev1.EvictMountsRequest{
+		DiskId: diskID,
 	}))
-	requireConnectErrorCodeAndReason(t, fencedErr, connect.CodeFailedPrecondition, "EBUSY")
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), evictRest.Msg.GetEvictedCount())
+	require.Len(t, evictRest.Msg.GetUpdatedBranches(), 1)
+	require.Equal(t, defaultBranch(), evictRest.Msg.GetUpdatedBranches()[0].GetName())
+	require.Equal(t, rw2.GetEpoch()+1, evictRest.Msg.GetUpdatedBranches()[0].GetWriterEpoch())
+
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  diskID,
+		MountId: rw2.GetMountId(),
+	}))
+	require.NoError(t, err)
 }

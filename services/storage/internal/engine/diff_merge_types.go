@@ -179,6 +179,7 @@ type MergeConflict struct {
 }
 
 type MergeConflictReport struct {
+	LCACommitID        uint64
 	TotalConflicts     uint64
 	Conflicts          []MergeConflict
 	ConflictsTruncated bool

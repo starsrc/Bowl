@@ -525,8 +525,18 @@ type mkdirReq struct {
 }
 
 func (d *DiskStore) Mkdir(ctx context.Context, branch string, parentIno uint64, name string, mode, uid, gid uint32) (Inode, error) {
+	if parentIno == 0 || parentIno > math.MaxInt64 {
+		return Inode{}, ErrInvalid
+	}
 	if err := validateName(name); err != nil {
 		return Inode{}, err
+	}
+	if mode > 0o177777 || uid > math.MaxInt32 || gid > math.MaxInt32 {
+		return Inode{}, ErrInvalid
+	}
+	modeType := mode & ModeTypeMask
+	if modeType != 0 && modeType != ModeDir {
+		return Inode{}, ErrInvalid
 	}
 	actor, release, err := d.acquireBranchActor(branch)
 	if err != nil {
@@ -635,8 +645,18 @@ type createReq struct {
 }
 
 func (d *DiskStore) Create(ctx context.Context, branch string, parentIno uint64, name string, mode, uid, gid uint32) (Inode, error) {
+	if parentIno == 0 || parentIno > math.MaxInt64 {
+		return Inode{}, ErrInvalid
+	}
 	if err := validateName(name); err != nil {
 		return Inode{}, err
+	}
+	if mode > 0o177777 || uid > math.MaxInt32 || gid > math.MaxInt32 {
+		return Inode{}, ErrInvalid
+	}
+	modeType := mode & ModeTypeMask
+	if modeType != 0 && modeType != ModeRegular {
+		return Inode{}, ErrInvalid
 	}
 	actor, release, err := d.acquireBranchActor(branch)
 	if err != nil {
@@ -1979,26 +1999,38 @@ func validateWritableRegularInode(inode Inode, offset, dataLen uint64) error {
 }
 
 func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset int64, data []byte) (int, error) {
+	n, _, err := d.WriteWithAttr(ctx, branch, ino, offset, data)
+	return n, err
+}
+
+func (d *DiskStore) WriteWithAttr(ctx context.Context, branch string, ino uint64, offset int64, data []byte) (int, Inode, error) {
 	if ino == 0 || ino > math.MaxInt64 || offset < 0 {
-		return 0, ErrInvalid
+		return 0, Inode{}, ErrInvalid
 	}
 	if uint64(offset) > MaxFileSize || uint64(len(data)) > MaxFileSize-uint64(offset) {
-		return 0, ErrFileTooLarge
+		return 0, Inode{}, ErrFileTooLarge
 	}
 
 	actor, release, err := d.acquireBranchActor(branch)
 	if err != nil {
-		return 0, err
+		return 0, Inode{}, err
 	}
 	defer release()
 
 	if len(data) == 0 {
-		_, err = actor.submit(ctx, branchOpWrite, &writeDataReq{
+		resp, subErr := actor.submit(ctx, branchOpWrite, &writeDataReq{
 			ino:     ino,
 			offset:  uint64(offset),
 			dataLen: 0,
 		})
-		return 0, err
+		if subErr != nil {
+			return 0, Inode{}, subErr
+		}
+		outInode, ok := resp.(Inode)
+		if !ok {
+			return 0, Inode{}, ErrInvalidValue
+		}
+		return 0, outInode, nil
 	}
 
 	mu := &actor.inodeLocks[ino&0xff]
@@ -2009,20 +2041,20 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 	branchMeta, layers, layerErr := resolveBranchLayers(snap, branch)
 	if layerErr != nil {
 		_ = snap.Close()
-		return 0, layerErr
+		return 0, Inode{}, layerErr
 	}
 	if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != branchMeta.WriterEpoch {
 		_ = snap.Close()
-		return 0, ErrStaleEpoch
+		return 0, Inode{}, ErrStaleEpoch
 	}
 	curInode, inoErr := overlayGetInode(snap, layers, ino)
 	if inoErr != nil {
 		_ = snap.Close()
-		return 0, inoErr
+		return 0, Inode{}, inoErr
 	}
 	if valErr := validateWritableRegularInode(curInode, uint64(offset), uint64(len(data))); valErr != nil {
 		_ = snap.Close()
-		return 0, valErr
+		return 0, Inode{}, valErr
 	}
 
 	blkSize := uint64(d.blockSize)
@@ -2053,13 +2085,13 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 			oldRef, exists, refErr := overlayGetDataRef(snap, layers, ino, blkIdx)
 			if refErr != nil {
 				_ = snap.Close()
-				return 0, refErr
+				return 0, Inode{}, refErr
 			}
 			if exists {
 				existingData, refErr = d.packs.ReadBlock(oldRef)
 				if refErr != nil {
 					_ = snap.Close()
-					return 0, refErr
+					return 0, Inode{}, refErr
 				}
 			}
 		}
@@ -2076,7 +2108,7 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 
 	refs, err := d.packs.AppendBlocks(ctx, payloads, false)
 	if err != nil {
-		return 0, err
+		return 0, Inode{}, err
 	}
 	defer d.packs.ReleaseInFlight(refs)
 
@@ -2088,7 +2120,7 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 		}
 	}
 
-	_, err = actor.submit(ctx, branchOpWrite, &writeDataReq{
+	resp, err := actor.submit(ctx, branchOpWrite, &writeDataReq{
 		ino:     ino,
 		offset:  startOff,
 		dataLen: uint64(len(data)),
@@ -2096,9 +2128,13 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 		updates: updates,
 	})
 	if err != nil {
-		return 0, err
+		return 0, Inode{}, err
 	}
-	return len(data), nil
+	outInode, ok := resp.(Inode)
+	if !ok {
+		return 0, Inode{}, ErrInvalidValue
+	}
+	return len(data), outInode, nil
 }
 
 func (a *BranchActor) execWrite(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) (Inode, error) {

@@ -2,337 +2,371 @@ package server
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/services/storage/internal/control"
-	"github.com/starsrc/bowl/services/storage/internal/store"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
-func createTestFileViaRPC(
-	t *testing.T,
-	ctx context.Context,
-	client interface {
-		Create(context.Context, *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error)
-		Write(context.Context, *connect.Request[storagev1.WriteRequest]) (*connect.Response[storagev1.WriteResponse], error)
-	},
-	diskID string,
-	epoch uint64,
-	name string,
-	data []byte,
-) uint64 {
+func extractConflictReport(t *testing.T, err error) *storagev1.MergeConflictReport {
 	t.Helper()
-	createResp, err := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	for _, detail := range connectErr.Details() {
+		if val, vErr := detail.Value(); vErr == nil {
+			if report, ok := val.(*storagev1.MergeConflictReport); ok {
+				return report
+			}
+		}
+	}
+	return nil
+}
+
+func TestHandlerDiffAndReadCommitNode_Step24Contract(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(t, nil)
+
+	disk := env.createDisk(t, "diff-disk", 8*1024*1024)
+	diskID := disk.GetDiskId()
+	mainBranch := defaultBranch()
+
+	mount := env.mountBranchRW(t, diskID, mainBranch, false)
+	epoch := mount.GetEpoch()
+
+	fResp, err := env.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
 		DiskId:    diskID,
-		ParentIno: control.RootIno,
-		Name:      []byte(name),
-		Mode:      store.S_IFREG | 0o644,
+		Branch:    mainBranch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("readme.txt"),
+		Mode:      0o644,
 		Epoch:     epoch,
 	}))
 	require.NoError(t, err)
-	ino := createResp.Msg.GetInode().GetIno()
-	if len(data) > 0 {
-		_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
-			DiskId: diskID,
-			Ino:    ino,
-			Offset: 0,
-			Data:   data,
-			Epoch:  epoch,
-		}))
-		require.NoError(t, err)
-	}
-	return ino
-}
+	fileIno := fResp.Msg.GetInode().GetIno()
 
-func overwriteTestFileViaRPC(
-	t *testing.T,
-	ctx context.Context,
-	client interface {
-		Lookup(context.Context, *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error)
-		Write(context.Context, *connect.Request[storagev1.WriteRequest]) (*connect.Response[storagev1.WriteResponse], error)
-		SetAttr(context.Context, *connect.Request[storagev1.SetAttrRequest]) (*connect.Response[storagev1.SetAttrResponse], error)
-	},
-	diskID string,
-	epoch uint64,
-	name string,
-	data []byte,
-) {
-	t.Helper()
-	lookupResp, err := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+		Ino:    fileIno,
+		Data:   []byte("base-content-0123456789"),
+		Epoch:  epoch,
+	}))
+	require.NoError(t, err)
+
+	symResp, err := env.client.Symlink(ctx, connect.NewRequest(&storagev1.SymlinkRequest{
 		DiskId:    diskID,
-		ParentIno: control.RootIno,
-		Name:      []byte(name),
+		Branch:    mainBranch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("link.txt"),
+		Target:    []byte("readme.txt"),
+		Epoch:     epoch,
 	}))
 	require.NoError(t, err)
-	ino := lookupResp.Msg.GetInode().GetIno()
-	_, err = client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+	symIno := symResp.Msg.GetInode().GetIno()
+
+	workDiff, err := env.client.DiffWork(ctx, connect.NewRequest(&storagev1.DiffWorkRequest{
 		DiskId: diskID,
-		Ino:    ino,
-		Offset: 0,
-		Data:   data,
-		Epoch:  epoch,
+		Branch: mainBranch,
 	}))
 	require.NoError(t, err)
-	size := uint64(len(data))
-	_, err = client.SetAttr(ctx, connect.NewRequest(&storagev1.SetAttrRequest{
-		DiskId: diskID,
-		Ino:    ino,
-		Size:   &size,
-		Epoch:  epoch,
+	require.Zero(t, workDiff.Msg.GetSourceCommitId())
+	require.Equal(t, uint64(2), workDiff.Msg.GetSummary().GetAdded())
+
+	c1Resp, err := env.client.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  mainBranch,
+		Message: "base",
 	}))
 	require.NoError(t, err)
+	c1ID := c1Resp.Msg.GetCommit().GetCommitId()
+
+	nodeChunk1, err := env.client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
+		DiskId:   diskID,
+		CommitId: c1ID,
+		Ino:      fileIno,
+		Offset:   0,
+		Size:     4,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, []byte("base"), nodeChunk1.Msg.GetData())
+	require.False(t, nodeChunk1.Msg.GetEof())
+	require.Equal(t, uint64(23), nodeChunk1.Msg.GetFileSize())
+
+	nodeChunkEOF, err := env.client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
+		DiskId:   diskID,
+		CommitId: c1ID,
+		Ino:      fileIno,
+		Offset:   13,
+		Size:     100,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, []byte("0123456789"), nodeChunkEOF.Msg.GetData())
+	require.True(t, nodeChunkEOF.Msg.GetEof())
+
+	symNode, err := env.client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
+		DiskId:   diskID,
+		CommitId: c1ID,
+		Ino:      symIno,
+		Size:     64,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, []byte("readme.txt"), symNode.Msg.GetSymlinkTarget())
+
+	_, err = env.client.ReadCommitNode(ctx, connect.NewRequest(&storagev1.ReadCommitNodeRequest{
+		DiskId:   diskID,
+		CommitId: 99999,
+		Ino:      fileIno,
+		Size:     64,
+	}))
+	requireConnectErr(t, err, connect.CodeNotFound, "ENOENT")
+
+	commitsDiff, err := env.client.DiffCommits(ctx, connect.NewRequest(&storagev1.DiffCommitsRequest{
+		DiskId:         diskID,
+		BaseCommitId:   1,
+		SourceCommitId: c1ID,
+		PageSize:       1,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), commitsDiff.Msg.GetBaseCommitId())
+	require.Equal(t, c1ID, commitsDiff.Msg.GetSourceCommitId())
+	require.Len(t, commitsDiff.Msg.GetEntries(), 1)
+	require.NotEmpty(t, commitsDiff.Msg.GetNextPageToken())
+
+	commitsDiff2, err := env.client.DiffCommits(ctx, connect.NewRequest(&storagev1.DiffCommitsRequest{
+		DiskId:         diskID,
+		BaseCommitId:   1,
+		SourceCommitId: c1ID,
+		PageSize:       1,
+		PageToken:      commitsDiff.Msg.GetNextPageToken(),
+	}))
+	require.NoError(t, err)
+	require.Len(t, commitsDiff2.Msg.GetEntries(), 1)
+	require.Empty(t, commitsDiff2.Msg.GetNextPageToken())
 }
 
-func TestServer_DiffReadSnapshotNodeAndMergeDisk_EndToEndWireContract(t *testing.T) {
-
+func TestHandlerMergeBranch_FFNoFFConflictsAndGuards(t *testing.T) {
 	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
+	env := newTestEnv(t, nil)
 
-	mainResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "main",
-		MaxBytes: 32 << 20,
+	disk := env.createDisk(t, "merge-disk", 8*1024*1024)
+	diskID := disk.GetDiskId()
+	mainBranch := defaultBranch()
+
+	mainMount := env.mountBranchRW(t, diskID, mainBranch, false)
+	fResp, err := env.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Branch:    mainBranch,
+		ParentIno: engine.RootIno,
+		Name:      []byte("shared.txt"),
+		Mode:      0o644,
+		Epoch:     mainMount.GetEpoch(),
 	}))
 	require.NoError(t, err)
-	mainID := mainResp.Msg.GetDisk().GetDiskId()
-
-	mainMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID}))
-	require.NoError(t, err)
-	mainEpoch := mainMnt.Msg.GetEpoch()
-
-	cfgIno := createTestFileViaRPC(t, ctx, client, mainID, mainEpoch, "cfg.ini", []byte("key=base\n"))
-	symResp, err := client.Symlink(ctx, connect.NewRequest(&storagev1.SymlinkRequest{
-		DiskId:    mainID,
-		ParentIno: control.RootIno,
-		Name:      []byte("cur.ini"),
-		Target:    []byte("/cfg.ini"),
-		Epoch:     mainEpoch,
-	}))
-	require.NoError(t, err)
-
-	forkResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
-		SourceDiskId: mainID,
-		Name:         "feature",
-	}))
-	require.NoError(t, err)
-	featID := forkResp.Msg.GetDisk().GetDiskId()
-
-	featMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: featID}))
-	require.NoError(t, err)
-	featEpoch := featMnt.Msg.GetEpoch()
-
-	overwriteTestFileViaRPC(t, ctx, client, mainID, mainEpoch, "cfg.ini", []byte("key=main\n"))
-	overwriteTestFileViaRPC(t, ctx, client, featID, featEpoch, "cfg.ini", []byte("key=feature\n"))
-	createTestFileViaRPC(t, ctx, client, featID, featEpoch, "feature.txt", []byte("feat-content\n"))
-
-	diffTwoWay, err := client.DiffDisk(ctx, connect.NewRequest(&storagev1.DiffDiskRequest{
-		SourceDiskId: featID,
-	}))
-	require.NoError(t, err)
-	lcaSnapshotID := diffTwoWay.Msg.GetLcaSnapshotId()
-	require.NotEmpty(t, lcaSnapshotID)
-	require.Equal(t, uint64(1), diffTwoWay.Msg.GetSummary().GetAdded())
-	require.Equal(t, uint64(1), diffTwoWay.Msg.GetSummary().GetModified())
-
-	diffPage1, err := client.DiffDisk(ctx, connect.NewRequest(&storagev1.DiffDiskRequest{
-		SourceDiskId: featID,
-		TargetDiskId: &mainID,
-		PageSize:     1,
-	}))
-	require.NoError(t, err)
-	require.Len(t, diffPage1.Msg.GetEntries(), 1)
-	require.NotEmpty(t, diffPage1.Msg.GetNextPageToken())
-	require.Equal(t, uint64(1), diffPage1.Msg.GetSummary().GetConflicts())
-
-	nodeSlice, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
-		DiskId:     featID,
-		SnapshotId: lcaSnapshotID,
-		Ino:        cfgIno,
-		Offset:     4,
-		Size:       16,
-	}))
-	require.NoError(t, err)
-	require.Equal(t, []byte("base\n"), nodeSlice.Msg.GetData())
-	require.True(t, nodeSlice.Msg.GetEof())
-
-	symSlice, err := client.ReadSnapshotNode(ctx, connect.NewRequest(&storagev1.ReadSnapshotNodeRequest{
-		DiskId:     featID,
-		SnapshotId: lcaSnapshotID,
-		Ino:        symResp.Msg.GetInode().GetIno(),
-		Offset:     0,
-		Size:       128,
-	}))
-	require.NoError(t, err)
-	require.Equal(t, []byte("/cfg.ini"), symSlice.Msg.GetSymlinkTarget())
-
-	_, busyErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
-		SourceDiskId: featID,
-		TargetDiskId: mainID,
-	}))
-	requireConnectErrorCodeAndReason(t, busyErr, connect.CodeAborted, "EBUSY")
-
-	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
-		DiskId:  featID,
-		MountId: featMnt.Msg.GetMountId(),
+	sharedIno := fResp.Msg.GetInode().GetIno()
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+		Ino:    sharedIno,
+		Data:   []byte("base"),
+		Epoch:  mainMount.GetEpoch(),
 	}))
 	require.NoError(t, err)
 
-	_, mergeErr := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
-		SourceDiskId: featID,
-		TargetDiskId: mainID,
-		Force:        true,
+	_, err = env.client.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  mainBranch,
+		Message: "base commit",
 	}))
-	requireConnectErrorCodeAndReason(t, mergeErr, connect.CodeAborted, "ECONFLICT")
+	require.NoError(t, err)
 
-	connectErr, ok := errors.AsType[*connect.Error](mergeErr)
-	require.True(t, ok)
-	var conflictReport *storagev1.MergeConflictReport
-	for _, detail := range connectErr.Details() {
-		msg, valErr := detail.Value()
-		if valErr != nil {
-			continue
-		}
-		if report, isReport := msg.(*storagev1.MergeConflictReport); isReport {
-			conflictReport = report
-			break
-		}
-	}
-	require.NotNil(t, conflictReport, "ECONFLICT 响应必须附带 *storagev1.MergeConflictReport Detail")
-	require.Equal(t, uint64(1), conflictReport.GetTotalConflicts())
-	require.Len(t, conflictReport.GetConflicts(), 1)
-	require.Equal(t, []byte("cfg.ini"), conflictReport.GetConflicts()[0].GetPath())
-	require.Equal(t, storagev1.ConflictKind_CONFLICT_KIND_CONTENT, conflictReport.GetConflicts()[0].GetKind())
+	forkResp, err := env.client.ForkBranch(ctx, connect.NewRequest(&storagev1.ForkBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: mainBranch,
+		NewBranch:    "feat",
+		Message:      "fork feat",
+	}))
+	require.NoError(t, err)
+	lcaCommitID := forkResp.Msg.GetCommit().GetCommitId()
 
-	overrideQuota := uint64(64 << 20)
-	dryResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
-		SourceDiskId: featID,
-		TargetDiskId: mainID,
+	featMount := env.mountBranchRW(t, diskID, "feat", false)
+	featFile, err := env.client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
+		DiskId:    diskID,
+		Branch:    "feat",
+		ParentIno: engine.RootIno,
+		Name:      []byte("feat.txt"),
+		Mode:      0o644,
+		Epoch:     featMount.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: "feat",
+		Ino:    featFile.Msg.GetInode().GetIno(),
+		Data:   []byte("from-feat"),
+		Epoch:  featMount.GetEpoch(),
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "feat",
+		TargetBranch: mainBranch,
+	}))
+	requireConnectErr(t, err, connect.CodeAborted, "EBUSY")
+
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  diskID,
+		MountId: mainMount.GetMountId(),
+	}))
+	require.NoError(t, err)
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  diskID,
+		MountId: featMount.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	_, err = env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "feat",
+		TargetBranch: mainBranch,
+	}))
+	requireConnectErr(t, err, connect.CodeFailedPrecondition, "EDIRTY")
+
+	_, err = env.client.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  "feat",
+		Message: "feat commit",
+	}))
+	require.NoError(t, err)
+
+	ffResp, err := env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "feat",
+		TargetBranch: mainBranch,
+	}))
+	require.NoError(t, err)
+	require.True(t, ffResp.Msg.GetFastForward())
+	require.False(t, ffResp.Msg.GetUpToDate())
+	require.Equal(t, lcaCommitID, ffResp.Msg.GetLcaCommitId())
+	require.NotNil(t, ffResp.Msg.GetBranch())
+	require.NotNil(t, ffResp.Msg.GetCommit())
+
+	upToDateResp, err := env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "feat",
+		TargetBranch: mainBranch,
+	}))
+	require.NoError(t, err)
+	require.True(t, upToDateResp.Msg.GetUpToDate())
+
+	divFork, err := env.client.ForkBranch(ctx, connect.NewRequest(&storagev1.ForkBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: mainBranch,
+		NewBranch:    "conflict-branch",
+	}))
+	require.NoError(t, err)
+	conflictLCA := divFork.Msg.GetCommit().GetCommitId()
+
+	mMain := env.mountBranchRW(t, diskID, mainBranch, false)
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+		Ino:    sharedIno,
+		Data:   []byte("main-edit"),
+		Epoch:  mMain.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	_, err = env.client.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  mainBranch,
+		Message: "main edit",
+	}))
+	require.NoError(t, err)
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  diskID,
+		MountId: mMain.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	mConflict := env.mountBranchRW(t, diskID, "conflict-branch", false)
+	_, err = env.client.Write(ctx, connect.NewRequest(&storagev1.WriteRequest{
+		DiskId: diskID,
+		Branch: "conflict-branch",
+		Ino:    sharedIno,
+		Data:   []byte("conflict-edit"),
+		Epoch:  mConflict.GetEpoch(),
+	}))
+	require.NoError(t, err)
+	_, err = env.client.CreateCommit(ctx, connect.NewRequest(&storagev1.CreateCommitRequest{
+		DiskId:  diskID,
+		Branch:  "conflict-branch",
+		Message: "conflict edit",
+	}))
+	require.NoError(t, err)
+	_, err = env.client.UnmountBranch(ctx, connect.NewRequest(&storagev1.UnmountBranchRequest{
+		DiskId:  diskID,
+		MountId: mConflict.GetMountId(),
+	}))
+	require.NoError(t, err)
+
+	diffBr, err := env.client.DiffBranches(ctx, connect.NewRequest(&storagev1.DiffBranchesRequest{
+		DiskId:        diskID,
+		SourceBranch:  "conflict-branch",
+		TargetBranch:  mainBranch,
+		ConflictsOnly: true,
+	}))
+	require.NoError(t, err)
+	require.Equal(t, conflictLCA, diffBr.Msg.GetBaseCommitId())
+	require.Equal(t, uint64(1), diffBr.Msg.GetSummary().GetConflicts())
+
+	_, err = env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "conflict-branch",
+		TargetBranch: mainBranch,
+	}))
+	requireConnectErr(t, err, connect.CodeAborted, "ECONFLICT")
+	report := extractConflictReport(t, err)
+	require.NotNil(t, report)
+	require.Equal(t, conflictLCA, report.GetLcaCommitId())
+	require.Equal(t, uint64(1), report.GetTotalConflicts())
+	require.Len(t, report.GetConflicts(), 1)
+	require.Equal(t, []byte("shared.txt"), report.GetConflicts()[0].GetPath())
+
+	dryResp, err := env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "conflict-branch",
+		TargetBranch: mainBranch,
 		Strategy:     storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS,
 		DryRun:       true,
-		MaxBytes:     &overrideQuota,
 	}))
 	require.NoError(t, err)
-	require.Empty(t, dryResp.Msg.GetMergeSnapshotId())
-	require.Equal(t, overrideQuota, dryResp.Msg.GetTargetMaxBytes())
+	require.Equal(t, conflictLCA, dryResp.Msg.GetLcaCommitId())
+	require.Zero(t, dryResp.Msg.GetCommitId())
 
-	mergeResp, err := client.MergeDisk(ctx, connect.NewRequest(&storagev1.MergeDiskRequest{
-		SourceDiskId: featID,
-		TargetDiskId: mainID,
-		Strategy:     storagev1.MergeStrategy_MERGE_STRATEGY_FAIL,
+	resolvedResp, err := env.client.MergeBranch(ctx, connect.NewRequest(&storagev1.MergeBranchRequest{
+		DiskId:       diskID,
+		SourceBranch: "conflict-branch",
+		TargetBranch: mainBranch,
 		PathStrategies: map[string]storagev1.MergeStrategy{
-			"/cfg.ini": storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS,
+			"shared.txt": storagev1.MergeStrategy_MERGE_STRATEGY_THEIRS,
 		},
-		Force:    true,
-		MaxBytes: &overrideQuota,
+		Message: "resolve theirs",
 	}))
 	require.NoError(t, err)
-	require.NotEmpty(t, mergeResp.Msg.GetMergeSnapshotId())
-	require.Equal(t, overrideQuota, mergeResp.Msg.GetDisk().GetMaxBytes())
+	require.False(t, resolvedResp.Msg.GetFastForward())
+	require.NotZero(t, resolvedResp.Msg.GetCommitId())
+	require.Equal(t, storagev1.CommitKind_COMMIT_KIND_MERGE, resolvedResp.Msg.GetCommit().GetKind())
+	require.NotZero(t, resolvedResp.Msg.GetCommit().GetMergeParentId())
 
-	_, staleErr := client.Create(ctx, connect.NewRequest(&storagev1.CreateRequest{
-		DiskId:    mainID,
-		ParentIno: control.RootIno,
-		Name:      []byte("stale.txt"),
-		Mode:      store.S_IFREG | 0o644,
-		Epoch:     mainEpoch,
-	}))
-	requireConnectErrorCodeAndReason(t, staleErr, connect.CodeFailedPrecondition, "EBUSY")
-
-	lookupFeat, err := client.Lookup(ctx, connect.NewRequest(&storagev1.LookupRequest{
-		DiskId:    mainID,
-		ParentIno: control.RootIno,
-		Name:      []byte("feature.txt"),
+	readResolved, err := env.client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
+		DiskId: diskID,
+		Branch: mainBranch,
+		Ino:    sharedIno,
+		Size:   64,
 	}))
 	require.NoError(t, err)
-	readFeat, err := client.Read(ctx, connect.NewRequest(&storagev1.ReadRequest{
-		DiskId: mainID,
-		Ino:    lookupFeat.Msg.GetInode().GetIno(),
-		Offset: 0,
-		Size:   100,
-	}))
-	require.NoError(t, err)
-	require.Equal(t, []byte("feat-content\n"), readFeat.Msg.GetData())
-
-	_, renewStaleErr := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
-		DiskId:   mainID,
-		MountId:  mainMnt.Msg.GetMountId(),
-		ReadOnly: false,
-		Epoch:    mainEpoch,
-	}))
-	requireConnectErrorCodeAndReason(t, renewStaleErr, connect.CodeFailedPrecondition, "EBUSY")
-
-	mainMnt2, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{DiskId: mainID}))
-	require.NoError(t, err)
-	renewResp, err := client.RenewMount(ctx, connect.NewRequest(&storagev1.RenewMountRequest{
-		DiskId:   mainID,
-		MountId:  mainMnt2.Msg.GetMountId(),
-		ReadOnly: false,
-		Epoch:    mainMnt2.Msg.GetEpoch(),
-	}))
-	require.NoError(t, err)
-	require.Equal(t, uint32(30), renewResp.Msg.GetLeaseTtlSeconds())
-}
-
-func TestToConnectError_ConcurrentMerge_MapsToAbortedEBUSY(t *testing.T) {
-	requireConnectErrorCodeAndReason(t, toConnectError(control.ErrConcurrentMerge), connect.CodeAborted, "EBUSY")
-}
-
-func TestServer_DeleteDiskRecursiveWireContract(t *testing.T) {
-	ctx := context.Background()
-	_, client := newTestServerAndClient(t)
-
-	rootResp, err := client.CreateDisk(ctx, connect.NewRequest(&storagev1.CreateDiskRequest{
-		Name:     "root",
-		MaxBytes: 16 << 20,
-	}))
-	require.NoError(t, err)
-	rootID := rootResp.Msg.GetDisk().GetDiskId()
-
-	childResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
-		SourceDiskId: rootID,
-		Name:         "child",
-	}))
-	require.NoError(t, err)
-	childID := childResp.Msg.GetDisk().GetDiskId()
-
-	grandResp, err := client.ForkDisk(ctx, connect.NewRequest(&storagev1.ForkDiskRequest{
-		SourceDiskId: childID,
-		Name:         "grand",
-	}))
-	require.NoError(t, err)
-	grandID := grandResp.Msg.GetDisk().GetDiskId()
-
-	grandMnt, err := client.MountDisk(ctx, connect.NewRequest(&storagev1.MountDiskRequest{
-		DiskId:   grandID,
-		ReadOnly: true,
-	}))
-	require.NoError(t, err)
-
-	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
-		DiskId:    childID,
-		Recursive: true,
-	}))
-	requireConnectErrorCodeAndReason(t, err, connect.CodeAborted, "EBUSY")
-
-	_, err = client.UnmountDisk(ctx, connect.NewRequest(&storagev1.UnmountDiskRequest{
-		DiskId:  grandID,
-		MountId: grandMnt.Msg.GetMountId(),
-	}))
-	require.NoError(t, err)
-
-	_, err = client.DeleteDisk(ctx, connect.NewRequest(&storagev1.DeleteDiskRequest{
-		DiskId:    childID,
-		Recursive: true,
-	}))
-	require.NoError(t, err)
-
-	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: childID}))
-	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
-	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: grandID}))
-	requireConnectErrorCodeAndReason(t, err, connect.CodeNotFound, "ENOENT")
-	_, err = client.GetDisk(ctx, connect.NewRequest(&storagev1.GetDiskRequest{DiskId: rootID}))
-	require.NoError(t, err)
+	require.Equal(t, []byte("conflict-edit"), readResolved.Msg.GetData())
 }

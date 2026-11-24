@@ -40,6 +40,11 @@ func (d *DiskStore) Merge(ctx context.Context, opts MergeOptions) (*MergeResult,
 		return d.mergeDryRun(ctx, opts, normStrategies)
 	}
 
+	if lockErr := d.lockGC(ctx); lockErr != nil {
+		return nil, lockErr
+	}
+	defer d.unlockGC()
+
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
 

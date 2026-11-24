@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -30,12 +31,25 @@ func writerEpochFromContext(ctx context.Context) uint64 {
 }
 
 type SetAttrReq struct {
-	Mode  *uint32
-	UID   *uint32
-	GID   *uint32
-	Size  *uint64
-	Atime *int64
-	Mtime *int64
+	Mode     *uint32
+	UID      *uint32
+	GID      *uint32
+	Size     *uint64
+	Atime    *int64
+	Mtime    *int64
+	AtimeNow bool
+	MtimeNow bool
+	CtimeNow bool
+	Flags    *uint32
+}
+
+type RenameReq struct {
+	OldParentIno       uint64
+	OldName            string
+	NewParentIno       uint64
+	NewName            string
+	Flags              uint32
+	TargetOpenInClient bool
 }
 
 type branchOpKind uint8
@@ -43,6 +57,9 @@ type branchOpKind uint8
 const (
 	branchOpMkdir branchOpKind = iota + 1
 	branchOpCreate
+	branchOpMknod
+	branchOpCreateTmpfile
+	branchOpPurgeOrphan
 	branchOpSymlink
 	branchOpLink
 	branchOpUnlink
@@ -52,6 +69,9 @@ const (
 	branchOpSetXattr
 	branchOpRemoveXattr
 	branchOpWrite
+	branchOpFallocate
+	branchOpFsync
+	branchOpFsyncDir
 	branchOpCommit
 	branchOpFork
 	branchOpReset
@@ -167,11 +187,34 @@ func (a *BranchActor) runLoop() {
 	}
 }
 
+func isSyncBarrierOp(op branchOpKind) bool {
+	switch op {
+	case branchOpFsync,
+		branchOpFsyncDir,
+		branchOpCommit,
+		branchOpFork,
+		branchOpReset,
+		branchOpMerge,
+		branchOpMount,
+		branchOpRenewMount,
+		branchOpEvictMount,
+		branchOpRelocate:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *BranchActor) processTick(cmds []*writeCmd) {
+	if a.disk.beforeTickHook != nil {
+		a.disk.beforeTickHook()
+	}
+
 	batch := a.disk.db.NewIndexedBatch()
 	defer func() { _ = batch.Close() }()
 
 	succeeded := make([]*writeCmd, 0, len(cmds))
+	syncBarrier := false
 	for _, cmd := range cmds {
 		resp, err := a.execCmd(batch, cmd)
 		if err != nil {
@@ -180,11 +223,30 @@ func (a *BranchActor) processTick(cmds []*writeCmd) {
 		}
 		cmd.resp = resp
 		succeeded = append(succeeded, cmd)
+		if isSyncBarrierOp(cmd.op) {
+			syncBarrier = true
+		}
 	}
 
 	var commitErr error
-	if batch.Count() > 0 {
-		commitErr = batch.Commit(pebble.Sync)
+	if syncBarrier {
+		if syncErr := a.disk.packs.SyncActive(context.Background()); syncErr != nil {
+			commitErr = syncErr
+		} else {
+			if a.disk.walCommitHook != nil {
+				a.disk.walCommitHook(true)
+			}
+			if batch.Count() > 0 {
+				commitErr = batch.Commit(pebble.Sync)
+			} else {
+				commitErr = a.disk.db.LogData(nil, pebble.Sync)
+			}
+		}
+	} else if batch.Count() > 0 {
+		if a.disk.walCommitHook != nil {
+			a.disk.walCommitHook(false)
+		}
+		commitErr = batch.Commit(pebble.NoSync)
 	}
 	if commitErr != nil {
 		for _, cmd := range succeeded {
@@ -220,6 +282,12 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 		return a.execMkdir(batch, branch, layers, cmd.req)
 	case branchOpCreate:
 		return a.execCreate(batch, branch, layers, cmd.req)
+	case branchOpMknod:
+		return a.execMknod(batch, branch, layers, cmd.req)
+	case branchOpCreateTmpfile:
+		return a.execCreateTmpfile(batch, branch, layers, cmd.req)
+	case branchOpPurgeOrphan:
+		return nil, a.execPurgeOrphan(batch, branch, layers, cmd.req)
 	case branchOpSymlink:
 		return a.execSymlink(batch, branch, layers, cmd.req)
 	case branchOpLink:
@@ -238,6 +306,12 @@ func (a *BranchActor) execCmd(batch *pebble.Batch, cmd *writeCmd) (any, error) {
 		return nil, a.execRemoveXattr(batch, branch, layers, cmd.req)
 	case branchOpWrite:
 		return a.execWrite(batch, branch, layers, cmd.req)
+	case branchOpFallocate:
+		return nil, a.execFallocate(batch, branch, layers, cmd.req)
+	case branchOpFsync:
+		return nil, a.execFsync(batch, layers, cmd.req)
+	case branchOpFsyncDir:
+		return nil, a.execFsyncDir(batch, layers, cmd.req)
 	case branchOpCommit:
 		return a.execCommit(batch, branch, cmd.req)
 	case branchOpFork:
@@ -489,6 +563,9 @@ func (a *BranchActor) execMkdir(batch *pebble.Batch, branch BranchMeta, layers [
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return Inode{}, ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return Inode{}, ErrNotFound
+	}
 	if _, entryErr := overlayGetEntry(batch, layers, req.parentIno, []byte(req.name)); entryErr == nil {
 		return Inode{}, ErrExist
 	} else if !errors.Is(entryErr, ErrNotFound) {
@@ -502,14 +579,20 @@ func (a *BranchActor) execMkdir(batch *pebble.Batch, branch BranchMeta, layers [
 	if err != nil {
 		return Inode{}, err
 	}
+	mode := req.mode
+	gid := req.gid
+	if parent.Mode&ModeSetGID != 0 {
+		gid = parent.GID
+		mode |= ModeSetGID
+	}
 	nowNano := a.disk.now().UnixNano()
 	child := Inode{
 		Ino:        inoNum,
 		ParentIno:  req.parentIno,
-		Mode:       req.mode,
+		Mode:       mode,
 		Nlink:      2,
 		UID:        req.uid,
-		GID:        req.gid,
+		GID:        gid,
 		Size:       DefaultDirSize,
 		Atime:      nowNano,
 		Mtime:      nowNano,
@@ -590,6 +673,9 @@ func (a *BranchActor) execCreate(batch *pebble.Batch, branch BranchMeta, layers 
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return Inode{}, ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return Inode{}, ErrNotFound
+	}
 	if _, entryErr := overlayGetEntry(batch, layers, req.parentIno, []byte(req.name)); entryErr == nil {
 		return Inode{}, ErrExist
 	} else if !errors.Is(entryErr, ErrNotFound) {
@@ -600,6 +686,10 @@ func (a *BranchActor) execCreate(batch *pebble.Batch, branch BranchMeta, layers 
 	if err != nil {
 		return Inode{}, err
 	}
+	gid := req.gid
+	if parent.Mode&ModeSetGID != 0 {
+		gid = parent.GID
+	}
 	nowNano := a.disk.now().UnixNano()
 	child := Inode{
 		Ino:        inoNum,
@@ -607,7 +697,7 @@ func (a *BranchActor) execCreate(batch *pebble.Batch, branch BranchMeta, layers 
 		Mode:       req.mode,
 		Nlink:      1,
 		UID:        req.uid,
-		GID:        req.gid,
+		GID:        gid,
 		Atime:      nowNano,
 		Mtime:      nowNano,
 		Ctime:      nowNano,
@@ -689,6 +779,9 @@ func (a *BranchActor) execSymlink(batch *pebble.Batch, branch BranchMeta, layers
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return Inode{}, ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return Inode{}, ErrNotFound
+	}
 	if _, entryErr := overlayGetEntry(batch, layers, req.parentIno, []byte(req.name)); entryErr == nil {
 		return Inode{}, ErrExist
 	} else if !errors.Is(entryErr, ErrNotFound) {
@@ -699,6 +792,10 @@ func (a *BranchActor) execSymlink(batch *pebble.Batch, branch BranchMeta, layers
 	if err != nil {
 		return Inode{}, err
 	}
+	gid := req.gid
+	if parent.Mode&ModeSetGID != 0 {
+		gid = parent.GID
+	}
 	nowNano := a.disk.now().UnixNano()
 	child := Inode{
 		Ino:           inoNum,
@@ -706,7 +803,7 @@ func (a *BranchActor) execSymlink(batch *pebble.Batch, branch BranchMeta, layers
 		Mode:          ModeSymlink | 0o777,
 		Nlink:         1,
 		UID:           req.uid,
-		GID:           req.gid,
+		GID:           gid,
 		Size:          uint64(len(req.target)),
 		Atime:         nowNano,
 		Mtime:         nowNano,
@@ -776,16 +873,6 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 	if !ok {
 		return Inode{}, ErrInvalid
 	}
-	target, err := overlayGetInode(batch, layers, req.ino)
-	if err != nil {
-		return Inode{}, err
-	}
-	if target.Mode&ModeTypeMask == ModeDir {
-		return Inode{}, ErrIsDir
-	}
-	if target.Nlink >= MaxNlink {
-		return Inode{}, ErrTooManyLinks
-	}
 	parent, err := overlayGetInode(batch, layers, req.newParentIno)
 	if err != nil {
 		return Inode{}, err
@@ -793,6 +880,36 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return Inode{}, ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return Inode{}, ErrNotFound
+	}
+	target, err := overlayGetInode(batch, layers, req.ino)
+	if err != nil {
+		return Inode{}, err
+	}
+	if target.Mode&ModeTypeMask == ModeDir {
+		return Inode{}, ErrPerm
+	}
+	if target.Nlink >= MaxNlink {
+		return Inode{}, ErrTooManyLinks
+	}
+
+	work := branch.WorkLayerID
+	promoteOrphan := false
+	if target.Nlink == 0 {
+		if target.Mode&ModeTypeMask != ModeRegular {
+			return Inode{}, ErrNotFound
+		}
+		kind, hasOrphan, orphanErr := readLayerOrphanKind(batch, work, target.Ino)
+		if orphanErr != nil {
+			return Inode{}, orphanErr
+		}
+		if !hasOrphan || kind != OrphanTmpfileLinkable {
+			return Inode{}, ErrNotFound
+		}
+		promoteOrphan = true
+	}
+
 	if _, entryErr := overlayGetEntry(batch, layers, req.newParentIno, []byte(req.newName)); entryErr == nil {
 		return Inode{}, ErrExist
 	} else if !errors.Is(entryErr, ErrNotFound) {
@@ -801,9 +918,15 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 
 	wasEverLinked := target.Flags&InodeFlagEverLinked != 0
 	nowNano := a.disk.now().UnixNano()
-	target.Nlink++
-	target.Flags |= InodeFlagEverLinked
+	if promoteOrphan {
+		target.Nlink = 1
+		target.ParentIno = req.newParentIno
+	} else {
+		target.Nlink++
+		target.Flags |= InodeFlagEverLinked
+	}
 	target.Ctime = nowNano
+	target.WriteSeq++
 	parent.Mtime = nowNano
 	parent.Ctime = nowNano
 
@@ -816,7 +939,6 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 		return Inode{}, err
 	}
 
-	work := branch.WorkLayerID
 	if setErr := batch.Set(LayerInodeKey(work, target.Ino), EncodeLiveEnvelope(targetRaw), nil); setErr != nil {
 		return Inode{}, setErr
 	}
@@ -826,6 +948,12 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 	ent := Entry{Ino: target.Ino, Mode: target.Mode}
 	if setErr := batch.Set(LayerEntryKey(work, req.newParentIno, []byte(req.newName)), EncodeLiveEnvelope(EncodeEntry(ent)), nil); setErr != nil {
 		return Inode{}, setErr
+	}
+	if promoteOrphan {
+		if delErr := batch.Delete(LayerOrphanKey(work, target.Ino), nil); delErr != nil {
+			return Inode{}, delErr
+		}
+		return target, nil
 	}
 	if !wasEverLinked && target.ParentIno != 0 {
 		if setErr := batch.Set(LayerParentKey(work, target.Ino, target.ParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
@@ -839,11 +967,12 @@ func (a *BranchActor) execLink(batch *pebble.Batch, branch BranchMeta, layers []
 }
 
 type unlinkReq struct {
-	parentIno uint64
-	name      string
+	parentIno    uint64
+	name         string
+	openInClient bool
 }
 
-func (d *DiskStore) Unlink(ctx context.Context, branch string, parentIno uint64, name string) error {
+func (d *DiskStore) Unlink(ctx context.Context, branch string, parentIno uint64, name string, openInClient bool) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
@@ -854,8 +983,9 @@ func (d *DiskStore) Unlink(ctx context.Context, branch string, parentIno uint64,
 	defer release()
 
 	_, err = actor.submit(ctx, branchOpUnlink, &unlinkReq{
-		parentIno: parentIno,
-		name:      name,
+		parentIno:    parentIno,
+		name:         name,
+		openInClient: openInClient,
 	})
 	return err
 }
@@ -872,6 +1002,9 @@ func (a *BranchActor) execUnlink(batch *pebble.Batch, branch BranchMeta, layers 
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return ErrNotFound
+	}
 	ent, err := overlayGetEntry(batch, layers, req.parentIno, []byte(req.name))
 	if err != nil {
 		return err
@@ -879,6 +1012,15 @@ func (a *BranchActor) execUnlink(batch *pebble.Batch, branch BranchMeta, layers 
 	target, err := overlayGetInode(batch, layers, ent.Ino)
 	if err != nil {
 		return err
+	}
+	if target.Nlink == 0 {
+		return ErrNotFound
+	}
+	if target.Ino == RootIno {
+		return ErrInvalid
+	}
+	if target.Flags&FlagImmutable != 0 {
+		return ErrPerm
 	}
 	if target.Mode&ModeTypeMask == ModeDir {
 		return ErrIsDir
@@ -898,6 +1040,20 @@ func (a *BranchActor) execUnlink(batch *pebble.Batch, branch BranchMeta, layers 
 	}
 	if setErr := batch.Set(LayerInodeKey(work, parent.Ino), EncodeLiveEnvelope(parentRaw), nil); setErr != nil {
 		return setErr
+	}
+
+	if target.Nlink <= 1 && req.openInClient {
+		target.Nlink = 0
+		target.Ctime = nowNano
+		target.WriteSeq++
+		rawTarget, encErr := EncodeInode(target)
+		if encErr != nil {
+			return encErr
+		}
+		if setErr := batch.Set(LayerInodeKey(work, target.Ino), EncodeLiveEnvelope(rawTarget), nil); setErr != nil {
+			return setErr
+		}
+		return batch.Set(LayerOrphanKey(work, target.Ino), []byte{OrphanUnlinked}, nil)
 	}
 
 	return tombstoneOrDecInode(batch, work, layers, target, nowNano)
@@ -944,6 +1100,9 @@ type rmdirReq struct {
 }
 
 func (d *DiskStore) Rmdir(ctx context.Context, branch string, parentIno uint64, name string) error {
+	if name == ".." {
+		return ErrNotEmpty
+	}
 	if err := validateName(name); err != nil {
 		return err
 	}
@@ -972,6 +1131,9 @@ func (a *BranchActor) execRmdir(batch *pebble.Batch, branch BranchMeta, layers [
 	if parent.Mode&ModeTypeMask != ModeDir {
 		return ErrNotDir
 	}
+	if parent.Nlink == 0 {
+		return ErrNotFound
+	}
 	ent, err := overlayGetEntry(batch, layers, req.parentIno, []byte(req.name))
 	if err != nil {
 		return err
@@ -979,6 +1141,12 @@ func (a *BranchActor) execRmdir(batch *pebble.Batch, branch BranchMeta, layers [
 	target, err := overlayGetInode(batch, layers, ent.Ino)
 	if err != nil {
 		return err
+	}
+	if target.Ino == RootIno {
+		return ErrInvalid
+	}
+	if target.Flags&FlagImmutable != 0 {
+		return ErrPerm
 	}
 	if target.Mode&ModeTypeMask != ModeDir {
 		return ErrNotDir
@@ -1023,18 +1191,59 @@ func (a *BranchActor) execRmdir(batch *pebble.Batch, branch BranchMeta, layers [
 	return nil
 }
 
-type renameReq struct {
-	oldParentIno uint64
-	oldName      string
-	newParentIno uint64
-	newName      string
+func isOverlaySubdirectory(r pebbleReader, layers []uint64, childIno, ancestorIno uint64) (bool, error) {
+	seen := make(map[uint64]struct{})
+	for cur := childIno; ; {
+		if cur == ancestorIno {
+			return true, nil
+		}
+		if cur == RootIno || cur == 0 {
+			return false, nil
+		}
+		if _, ok := seen[cur]; ok {
+			return false, ErrInvalid
+		}
+		seen[cur] = struct{}{}
+		anc, err := overlayGetInode(r, layers, cur)
+		if err != nil {
+			return false, err
+		}
+		if anc.ParentIno == cur {
+			return false, nil
+		}
+		cur = anc.ParentIno
+	}
 }
 
-func (d *DiskStore) Rename(ctx context.Context, branch string, oldParentIno uint64, oldName string, newParentIno uint64, newName string) error {
-	if err := validateName(oldName); err != nil {
+func recordEverLinkedParent(batch *pebble.Batch, work uint64, ino *Inode, newParentIno uint64) error {
+	if ino.Mode&ModeTypeMask == ModeDir {
+		return nil
+	}
+	if ino.Flags&InodeFlagEverLinked == 0 && ino.Nlink <= 1 {
+		return nil
+	}
+	if ino.Flags&InodeFlagEverLinked == 0 {
+		ino.Flags |= InodeFlagEverLinked
+		if ino.ParentIno != 0 && ino.ParentIno != newParentIno {
+			if setErr := batch.Set(LayerParentKey(work, ino.Ino, ino.ParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
+				return setErr
+			}
+		}
+	}
+	return batch.Set(LayerParentKey(work, ino.Ino, newParentIno), EncodeLiveEnvelope(nil), nil)
+}
+
+func (d *DiskStore) Rename(ctx context.Context, branch string, req RenameReq) error {
+	if req.OldParentIno == 0 || req.OldParentIno > math.MaxInt64 || req.NewParentIno == 0 || req.NewParentIno > math.MaxInt64 {
+		return ErrInvalid
+	}
+	if req.Flags&^(RenameNoReplace|RenameExchange) != 0 || req.Flags == (RenameNoReplace|RenameExchange) {
+		return ErrInvalid
+	}
+	if err := validateName(req.OldName); err != nil {
 		return err
 	}
-	if err := validateName(newName); err != nil {
+	if err := validateName(req.NewName); err != nil {
 		return err
 	}
 	actor, release, err := d.acquireBranchActor(branch)
@@ -1043,80 +1252,203 @@ func (d *DiskStore) Rename(ctx context.Context, branch string, oldParentIno uint
 	}
 	defer release()
 
-	_, err = actor.submit(ctx, branchOpRename, &renameReq{
-		oldParentIno: oldParentIno,
-		oldName:      oldName,
-		newParentIno: newParentIno,
-		newName:      newName,
-	})
+	_, err = actor.submit(ctx, branchOpRename, &req)
 	return err
 }
 
 func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers []uint64, raw any) error {
-	req, ok := raw.(*renameReq)
+	req, ok := raw.(*RenameReq)
 	if !ok {
 		return ErrInvalid
 	}
-	oldParent, err := overlayGetInode(batch, layers, req.oldParentIno)
+	oldParent, err := overlayGetInode(batch, layers, req.OldParentIno)
 	if err != nil {
 		return err
 	}
 	if oldParent.Mode&ModeTypeMask != ModeDir {
 		return ErrNotDir
 	}
+	if oldParent.Nlink == 0 {
+		return ErrNotFound
+	}
+	crossParent := req.OldParentIno != req.NewParentIno
 	newParent := oldParent
-	if req.newParentIno != req.oldParentIno {
-		newParent, err = overlayGetInode(batch, layers, req.newParentIno)
+	if crossParent {
+		newParent, err = overlayGetInode(batch, layers, req.NewParentIno)
 		if err != nil {
 			return err
 		}
 		if newParent.Mode&ModeTypeMask != ModeDir {
 			return ErrNotDir
 		}
+		if newParent.Nlink == 0 {
+			return ErrNotFound
+		}
 	}
 
-	srcEnt, err := overlayGetEntry(batch, layers, req.oldParentIno, []byte(req.oldName))
+	srcEnt, err := overlayGetEntry(batch, layers, req.OldParentIno, []byte(req.OldName))
 	if err != nil {
 		return err
-	}
-	if req.oldParentIno == req.newParentIno && req.oldName == req.newName {
-		return nil
 	}
 	srcIno, err := overlayGetInode(batch, layers, srcEnt.Ino)
 	if err != nil {
 		return err
 	}
-	srcIsDir := srcIno.Mode&ModeTypeMask == ModeDir
-
-	if srcIsDir && req.oldParentIno != req.newParentIno {
-		cur := req.newParentIno
-		for cur != RootIno && cur != 0 {
-			if cur == srcIno.Ino {
-				return ErrInvalid
-			}
-			anc, ancErr := overlayGetInode(batch, layers, cur)
-			if ancErr != nil {
-				return ancErr
-			}
-			if anc.ParentIno == cur {
-				break
-			}
-			cur = anc.ParentIno
+	if srcIno.Nlink == 0 {
+		return ErrNotFound
+	}
+	if srcIno.Ino == RootIno {
+		return ErrInvalid
+	}
+	if !crossParent && req.OldName == req.NewName {
+		if req.Flags == RenameNoReplace {
+			return ErrExist
 		}
+		return nil
+	}
+	if srcIno.Flags&FlagImmutable != 0 {
+		return ErrPerm
 	}
 
+	var dstEnt Entry
 	var dstIno Inode
 	hasDst := false
-	dstEnt, dstErr := overlayGetEntry(batch, layers, req.newParentIno, []byte(req.newName))
+	dstEnt, dstErr := overlayGetEntry(batch, layers, req.NewParentIno, []byte(req.NewName))
 	if dstErr == nil {
-		if dstEnt.Ino == srcEnt.Ino {
-			return nil
-		}
 		dstIno, err = overlayGetInode(batch, layers, dstEnt.Ino)
 		if err != nil {
 			return err
 		}
-		dstIsDir := dstIno.Mode&ModeTypeMask == ModeDir
+		if dstIno.Nlink == 0 {
+			return ErrNotFound
+		}
+		if dstIno.Ino == RootIno {
+			return ErrInvalid
+		}
+		if dstIno.Flags&FlagImmutable != 0 {
+			return ErrPerm
+		}
+		if req.Flags == RenameNoReplace {
+			return ErrExist
+		}
+		if dstIno.Ino == srcIno.Ino {
+			return nil
+		}
+		hasDst = true
+	} else if !errors.Is(dstErr, ErrNotFound) {
+		return dstErr
+	}
+
+	if !hasDst && req.Flags == RenameExchange {
+		return ErrNotFound
+	}
+
+	srcIsDir := srcIno.Mode&ModeTypeMask == ModeDir
+	dstIsDir := hasDst && dstIno.Mode&ModeTypeMask == ModeDir
+
+	if srcIsDir && crossParent {
+		isSub, subErr := isOverlaySubdirectory(batch, layers, req.NewParentIno, srcIno.Ino)
+		if subErr != nil {
+			return subErr
+		}
+		if isSub {
+			return ErrInvalid
+		}
+	}
+
+	work := branch.WorkLayerID
+	nowNano := a.disk.now().UnixNano()
+
+	if req.Flags == RenameExchange {
+		if dstIsDir && crossParent {
+			isSub, subErr := isOverlaySubdirectory(batch, layers, req.OldParentIno, dstIno.Ino)
+			if subErr != nil {
+				return subErr
+			}
+			if isSub {
+				return ErrInvalid
+			}
+		}
+		if crossParent && srcIsDir && !dstIsDir && newParent.Nlink >= MaxNlink {
+			return ErrTooManyLinks
+		}
+		if crossParent && !srcIsDir && dstIsDir && oldParent.Nlink >= MaxNlink {
+			return ErrTooManyLinks
+		}
+
+		if setErr := batch.Set(LayerEntryKey(work, req.OldParentIno, []byte(req.OldName)), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: dstIno.Ino, Mode: dstIno.Mode})), nil); setErr != nil {
+			return setErr
+		}
+		if setErr := batch.Set(LayerEntryKey(work, req.NewParentIno, []byte(req.NewName)), EncodeLiveEnvelope(EncodeEntry(Entry{Ino: srcIno.Ino, Mode: srcIno.Mode})), nil); setErr != nil {
+			return setErr
+		}
+		if recErr := recordEverLinkedParent(batch, work, &srcIno, req.NewParentIno); recErr != nil {
+			return recErr
+		}
+		if recErr := recordEverLinkedParent(batch, work, &dstIno, req.OldParentIno); recErr != nil {
+			return recErr
+		}
+		if crossParent {
+			if srcIsDir || srcIno.Nlink == 1 {
+				srcIno.ParentIno = req.NewParentIno
+			}
+			if dstIsDir || dstIno.Nlink == 1 {
+				dstIno.ParentIno = req.OldParentIno
+			}
+			if srcIsDir != dstIsDir {
+				if srcIsDir {
+					if oldParent.Nlink > 2 {
+						oldParent.Nlink--
+					}
+					newParent.Nlink++
+				} else {
+					oldParent.Nlink++
+					if newParent.Nlink > 2 {
+						newParent.Nlink--
+					}
+				}
+			}
+		}
+		srcIno.Ctime = nowNano
+		srcIno.WriteSeq++
+		dstIno.Ctime = nowNano
+		dstIno.WriteSeq++
+		srcRaw, encErr := EncodeInode(srcIno)
+		if encErr != nil {
+			return encErr
+		}
+		dstRaw, encErr := EncodeInode(dstIno)
+		if encErr != nil {
+			return encErr
+		}
+		if setErr := batch.Set(LayerInodeKey(work, srcIno.Ino), EncodeLiveEnvelope(srcRaw), nil); setErr != nil {
+			return setErr
+		}
+		if setErr := batch.Set(LayerInodeKey(work, dstIno.Ino), EncodeLiveEnvelope(dstRaw), nil); setErr != nil {
+			return setErr
+		}
+		oldParent.Mtime = nowNano
+		oldParent.Ctime = nowNano
+		oldParentRaw, encErr := EncodeInode(oldParent)
+		if encErr != nil {
+			return encErr
+		}
+		if setErr := batch.Set(LayerInodeKey(work, oldParent.Ino), EncodeLiveEnvelope(oldParentRaw), nil); setErr != nil {
+			return setErr
+		}
+		if crossParent {
+			newParent.Mtime = nowNano
+			newParent.Ctime = nowNano
+			newParentRaw, newEncErr := EncodeInode(newParent)
+			if newEncErr != nil {
+				return newEncErr
+			}
+			return batch.Set(LayerInodeKey(work, newParent.Ino), EncodeLiveEnvelope(newParentRaw), nil)
+		}
+		return nil
+	}
+
+	if hasDst {
 		if srcIsDir && !dstIsDir {
 			return ErrNotDir
 		}
@@ -1132,49 +1464,61 @@ func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers 
 				return ErrNotEmpty
 			}
 		}
-		hasDst = true
-	} else if !errors.Is(dstErr, ErrNotFound) {
-		return dstErr
+	}
+	if srcIsDir && crossParent && !hasDst && newParent.Nlink >= MaxNlink {
+		return ErrTooManyLinks
 	}
 
-	work := branch.WorkLayerID
-	nowNano := a.disk.now().UnixNano()
-
-	if setErr := batch.Set(LayerEntryKey(work, req.oldParentIno, []byte(req.oldName)), EncodeTombstone(), nil); setErr != nil {
+	if setErr := batch.Set(LayerEntryKey(work, req.OldParentIno, []byte(req.OldName)), EncodeTombstone(), nil); setErr != nil {
 		return setErr
 	}
-	if setErr := batch.Set(LayerEntryKey(work, req.newParentIno, []byte(req.newName)), EncodeLiveEnvelope(EncodeEntry(srcEnt)), nil); setErr != nil {
+	if setErr := batch.Set(LayerEntryKey(work, req.NewParentIno, []byte(req.NewName)), EncodeLiveEnvelope(EncodeEntry(srcEnt)), nil); setErr != nil {
 		return setErr
 	}
 
 	if hasDst {
-		if dstIno.Mode&ModeTypeMask == ModeDir {
+		switch {
+		case dstIsDir:
 			if setErr := batch.Set(LayerInodeKey(work, dstIno.Ino), EncodeTombstone(), nil); setErr != nil {
 				return setErr
 			}
-		} else {
+			xnames, xErr := overlayListXattr(batch, layers, dstIno.Ino)
+			if xErr != nil {
+				return xErr
+			}
+			for _, xname := range xnames {
+				if setErr := batch.Set(LayerXattrKey(work, dstIno.Ino, []byte(xname)), EncodeTombstone(), nil); setErr != nil {
+					return setErr
+				}
+			}
+		case dstIno.Nlink <= 1 && req.TargetOpenInClient:
+			dstIno.Nlink = 0
+			dstIno.Ctime = nowNano
+			dstIno.WriteSeq++
+			dstRaw, encErr := EncodeInode(dstIno)
+			if encErr != nil {
+				return encErr
+			}
+			if setErr := batch.Set(LayerInodeKey(work, dstIno.Ino), EncodeLiveEnvelope(dstRaw), nil); setErr != nil {
+				return setErr
+			}
+			if setErr := batch.Set(LayerOrphanKey(work, dstIno.Ino), []byte{OrphanUnlinked}, nil); setErr != nil {
+				return setErr
+			}
+		default:
 			if tbErr := tombstoneOrDecInode(batch, work, layers, dstIno, nowNano); tbErr != nil {
 				return tbErr
 			}
 		}
 	}
 
-	if !srcIsDir && (srcIno.Flags&InodeFlagEverLinked != 0 || srcIno.Nlink > 1) {
-		if srcIno.Flags&InodeFlagEverLinked == 0 {
-			srcIno.Flags |= InodeFlagEverLinked
-			if srcIno.ParentIno != 0 && srcIno.ParentIno != req.newParentIno {
-				if setErr := batch.Set(LayerParentKey(work, srcIno.Ino, srcIno.ParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
-					return setErr
-				}
-			}
-		}
-		if setErr := batch.Set(LayerParentKey(work, srcIno.Ino, req.newParentIno), EncodeLiveEnvelope(nil), nil); setErr != nil {
-			return setErr
-		}
+	if recErr := recordEverLinkedParent(batch, work, &srcIno, req.NewParentIno); recErr != nil {
+		return recErr
 	}
 
-	srcIno.ParentIno = req.newParentIno
+	srcIno.ParentIno = req.NewParentIno
 	srcIno.Ctime = nowNano
+	srcIno.WriteSeq++
 	srcRaw, err := EncodeInode(srcIno)
 	if err != nil {
 		return err
@@ -1183,7 +1527,7 @@ func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers 
 		return setErr
 	}
 
-	if req.oldParentIno == req.newParentIno {
+	if !crossParent {
 		if hasDst && srcIsDir && oldParent.Nlink > 2 {
 			oldParent.Nlink--
 		}
@@ -1224,16 +1568,72 @@ func (a *BranchActor) execRename(batch *pebble.Batch, branch BranchMeta, layers 
 }
 
 type setAttrCmdReq struct {
-	ino        uint64
-	req        SetAttrReq
-	hasTailRef bool
-	tailBlkIdx uint64
-	tailRef    BlobRef
+	ino           uint64
+	req           SetAttrReq
+	hasTailRef    bool
+	tailTombstone bool
+	tailBlkIdx    uint64
+	tailRef       BlobRef
+}
+
+func validateSetAttrReq(req SetAttrReq) error {
+	if req.Mode == nil && req.UID == nil && req.GID == nil && req.Size == nil &&
+		req.Atime == nil && req.Mtime == nil && !req.AtimeNow && !req.MtimeNow &&
+		!req.CtimeNow && req.Flags == nil {
+		return ErrInvalid
+	}
+	if (req.Atime != nil && req.AtimeNow) || (req.Mtime != nil && req.MtimeNow) {
+		return ErrInvalid
+	}
+	if req.Mode != nil && *req.Mode > 0o177777 {
+		return ErrInvalid
+	}
+	if req.UID != nil && *req.UID > math.MaxInt32 {
+		return ErrInvalid
+	}
+	if req.GID != nil && *req.GID > math.MaxInt32 {
+		return ErrInvalid
+	}
+	if req.Size != nil && *req.Size > MaxFileSize {
+		return ErrFileTooLarge
+	}
+	if req.Flags != nil && *req.Flags > math.MaxInt32 {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validateSetAttrInode(inode Inode, req SetAttrReq) error {
+	fileType := inode.Mode & ModeTypeMask
+	if req.Size != nil {
+		if fileType == ModeDir {
+			return ErrIsDir
+		}
+		if fileType != ModeRegular {
+			return ErrInvalid
+		}
+	}
+	if inode.Flags&FlagImmutable != 0 && (req.Flags == nil || *req.Flags&FlagImmutable != 0) {
+		return ErrPerm
+	}
+	if inode.Flags&FlagAppend != 0 && req.Size != nil {
+		return ErrPerm
+	}
+	if req.Mode != nil {
+		inputType := *req.Mode & ModeTypeMask
+		if fileType == ModeSymlink || (inputType != 0 && inputType != fileType) {
+			return ErrInvalid
+		}
+	}
+	return nil
 }
 
 func (d *DiskStore) SetAttr(ctx context.Context, branch string, ino uint64, req SetAttrReq) (Inode, error) {
-	if ino == 0 {
+	if ino == 0 || ino > math.MaxInt64 {
 		return Inode{}, ErrInvalid
+	}
+	if err := validateSetAttrReq(req); err != nil {
+		return Inode{}, err
 	}
 	actor, release, err := d.acquireBranchActor(branch)
 	if err != nil {
@@ -1253,23 +1653,24 @@ func (d *DiskStore) SetAttr(ctx context.Context, branch string, ino uint64, req 
 		defer mu.Unlock()
 
 		newSize := *req.Size
-		if newSize > MaxFileSize {
-			return Inode{}, ErrFileTooLarge
-		}
 		snap := d.db.NewSnapshot()
-		_, layers, layerErr := resolveBranchLayers(snap, branch)
+		branchMeta, layers, layerErr := resolveBranchLayers(snap, branch)
 		if layerErr != nil {
 			_ = snap.Close()
 			return Inode{}, layerErr
+		}
+		if epoch := writerEpochFromContext(ctx); epoch != 0 && epoch != branchMeta.WriterEpoch {
+			_ = snap.Close()
+			return Inode{}, ErrStaleEpoch
 		}
 		curInode, inoErr := overlayGetInode(snap, layers, ino)
 		if inoErr != nil {
 			_ = snap.Close()
 			return Inode{}, inoErr
 		}
-		if curInode.Mode&ModeTypeMask != ModeRegular {
+		if valErr := validateSetAttrInode(curInode, req); valErr != nil {
 			_ = snap.Close()
-			return Inode{}, ErrIsDir
+			return Inode{}, valErr
 		}
 		blkSize := uint64(d.blockSize)
 		if newSize < curInode.Size && newSize%blkSize != 0 {
@@ -1287,15 +1688,21 @@ func (d *DiskStore) SetAttr(ctx context.Context, branch string, ino uint64, req 
 				}
 				trimmed := make([]byte, tailLen)
 				copy(trimmed, oldData[:tailLen])
-				refs, appErr := d.packs.AppendBlocks(ctx, [][]byte{trimmed}, false)
-				if appErr != nil {
-					return Inode{}, appErr
+				if isAllZero(trimmed) {
+					cmdReq.hasTailRef = true
+					cmdReq.tailTombstone = true
+					cmdReq.tailBlkIdx = tailBlk
+				} else {
+					refs, appErr := d.packs.AppendBlocks(ctx, [][]byte{trimmed}, false)
+					if appErr != nil {
+						return Inode{}, appErr
+					}
+					stagedRefs = refs
+					defer d.packs.ReleaseInFlight(stagedRefs)
+					cmdReq.hasTailRef = true
+					cmdReq.tailBlkIdx = tailBlk
+					cmdReq.tailRef = refs[0]
 				}
-				stagedRefs = refs
-				defer d.packs.ReleaseInFlight(stagedRefs)
-				cmdReq.hasTailRef = true
-				cmdReq.tailBlkIdx = tailBlk
-				cmdReq.tailRef = refs[0]
 			}
 		} else {
 			_ = snap.Close()
@@ -1323,11 +1730,17 @@ func (a *BranchActor) execSetAttr(batch *pebble.Batch, branch BranchMeta, layers
 		return Inode{}, err
 	}
 	req := cmdReq.req
+	if valErr := validateSetAttrInode(inode, req); valErr != nil {
+		return Inode{}, valErr
+	}
 	nowNano := a.disk.now().UnixNano()
 	work := branch.WorkLayerID
+	fileType := inode.Mode & ModeTypeMask
 
 	if req.Mode != nil {
-		inode.Mode = (inode.Mode & ModeTypeMask) | (*req.Mode & ModePermMask)
+		inode.Mode = fileType | (*req.Mode & ModePermMask)
+	} else if fileType != ModeDir && (req.UID != nil || req.GID != nil || req.Size != nil) {
+		inode.Mode &^= ModeSetUID | ModeSetGID
 	}
 	if req.UID != nil {
 		inode.UID = *req.UID
@@ -1335,16 +1748,20 @@ func (a *BranchActor) execSetAttr(batch *pebble.Batch, branch BranchMeta, layers
 	if req.GID != nil {
 		inode.GID = *req.GID
 	}
-	if req.Atime != nil {
+	if req.Flags != nil {
+		inode.Flags = (*req.Flags) | (inode.Flags & InodeFlagEverLinked)
+	}
+	if req.AtimeNow {
+		inode.Atime = nowNano
+	} else if req.Atime != nil {
 		inode.Atime = *req.Atime
 	}
-	if req.Mtime != nil {
+	if req.MtimeNow || (req.Size != nil && req.Mtime == nil) {
+		inode.Mtime = nowNano
+	} else if req.Mtime != nil {
 		inode.Mtime = *req.Mtime
 	}
 	if req.Size != nil {
-		if inode.Mode&ModeTypeMask != ModeRegular {
-			return Inode{}, ErrIsDir
-		}
 		newSize := *req.Size
 		blkSize := uint64(a.disk.blockSize)
 		if newSize < inode.Size {
@@ -1359,16 +1776,26 @@ func (a *BranchActor) execSetAttr(batch *pebble.Batch, branch BranchMeta, layers
 				}
 			}
 			if cmdReq.hasTailRef {
-				if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeLiveEnvelope(EncodeBlobRef(cmdReq.tailRef)), nil); setErr != nil {
-					return Inode{}, setErr
+				if cmdReq.tailTombstone {
+					if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeTombstone(), nil); setErr != nil {
+						return Inode{}, setErr
+					}
+				} else {
+					if setErr := batch.Set(LayerDataKey(work, inode.Ino, cmdReq.tailBlkIdx), EncodeLiveEnvelope(EncodeBlobRef(cmdReq.tailRef)), nil); setErr != nil {
+						return Inode{}, setErr
+					}
 				}
 			}
 		}
 		inode.Size = newSize
-		inode.Mtime = nowNano
-		inode.WriteSeq++
+	}
+	if req.Size != nil || req.UID != nil || req.GID != nil || req.Mode != nil {
+		if capErr := clearSecurityCapability(batch, work, layers, inode.Ino); capErr != nil {
+			return Inode{}, capErr
+		}
 	}
 	inode.Ctime = nowNano
+	inode.WriteSeq++
 
 	encoded, err := EncodeInode(inode)
 	if err != nil {
@@ -1424,6 +1851,9 @@ func (a *BranchActor) execSetXattr(batch *pebble.Batch, branch BranchMeta, layer
 	if err != nil {
 		return err
 	}
+	if strings.HasPrefix(req.name, "user.") && !isAllowedUserXattrFileType(inode.Mode) {
+		return ErrPerm
+	}
 	_, curErr := overlayGetXattr(batch, layers, req.ino, []byte(req.name))
 	exists := curErr == nil
 	if curErr != nil && !errors.Is(curErr, ErrNoData) {
@@ -1435,12 +1865,29 @@ func (a *BranchActor) execSetXattr(batch *pebble.Batch, branch BranchMeta, layer
 	if req.flags&XattrReplace != 0 && !exists {
 		return ErrNoData
 	}
+	if !exists {
+		existingNames, listErr := overlayListXattr(batch, layers, req.ino)
+		if listErr != nil {
+			return listErr
+		}
+		total := len(req.name) + 1
+		for _, existingName := range existingNames {
+			total += len(existingName) + 1
+			if total > MaxXattrListBytes {
+				return ErrNoSpace
+			}
+		}
+		if total > MaxXattrListBytes {
+			return ErrNoSpace
+		}
+	}
 
 	work := branch.WorkLayerID
 	if setErr := batch.Set(LayerXattrKey(work, req.ino, []byte(req.name)), EncodeLiveEnvelope(req.value), nil); setErr != nil {
 		return setErr
 	}
 	inode.Ctime = a.disk.now().UnixNano()
+	inode.WriteSeq++
 	encoded, err := EncodeInode(inode)
 	if err != nil {
 		return err
@@ -1482,6 +1929,9 @@ func (a *BranchActor) execRemoveXattr(batch *pebble.Batch, branch BranchMeta, la
 	if err != nil {
 		return err
 	}
+	if strings.HasPrefix(req.name, "user.") && !isAllowedUserXattrFileType(inode.Mode) {
+		return ErrPerm
+	}
 	if _, curErr := overlayGetXattr(batch, layers, req.ino, []byte(req.name)); curErr != nil {
 		return curErr
 	}
@@ -1490,6 +1940,7 @@ func (a *BranchActor) execRemoveXattr(batch *pebble.Batch, branch BranchMeta, la
 		return setErr
 	}
 	inode.Ctime = a.disk.now().UnixNano()
+	inode.WriteSeq++
 	encoded, err := EncodeInode(inode)
 	if err != nil {
 		return err
@@ -1504,12 +1955,31 @@ type writeBlockUpdate struct {
 
 type writeDataReq struct {
 	ino     uint64
+	offset  uint64
+	dataLen uint64
 	endSize uint64
 	updates []writeBlockUpdate
 }
 
+func validateWritableRegularInode(inode Inode, offset, dataLen uint64) error {
+	switch inode.Mode & ModeTypeMask {
+	case ModeDir:
+		return ErrIsDir
+	case ModeRegular:
+	default:
+		return ErrInvalid
+	}
+	if inode.Flags&FlagImmutable != 0 {
+		return ErrPerm
+	}
+	if dataLen > 0 && inode.Flags&FlagAppend != 0 && offset != inode.Size {
+		return ErrPerm
+	}
+	return nil
+}
+
 func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset int64, data []byte) (int, error) {
-	if ino == 0 || offset < 0 {
+	if ino == 0 || ino > math.MaxInt64 || offset < 0 {
 		return 0, ErrInvalid
 	}
 	if uint64(offset) > MaxFileSize || uint64(len(data)) > MaxFileSize-uint64(offset) {
@@ -1523,14 +1993,12 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 	defer release()
 
 	if len(data) == 0 {
-		curInode, attrErr := d.GetAttr(ctx, branch, ino)
-		if attrErr != nil {
-			return 0, attrErr
-		}
-		if curInode.Mode&ModeTypeMask != ModeRegular {
-			return 0, ErrIsDir
-		}
-		return 0, nil
+		_, err = actor.submit(ctx, branchOpWrite, &writeDataReq{
+			ino:     ino,
+			offset:  uint64(offset),
+			dataLen: 0,
+		})
+		return 0, err
 	}
 
 	mu := &actor.inodeLocks[ino&0xff]
@@ -1552,9 +2020,9 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 		_ = snap.Close()
 		return 0, inoErr
 	}
-	if curInode.Mode&ModeTypeMask != ModeRegular {
+	if valErr := validateWritableRegularInode(curInode, uint64(offset), uint64(len(data))); valErr != nil {
 		_ = snap.Close()
-		return 0, ErrIsDir
+		return 0, valErr
 	}
 
 	blkSize := uint64(d.blockSize)
@@ -1622,6 +2090,8 @@ func (d *DiskStore) Write(ctx context.Context, branch string, ino uint64, offset
 
 	_, err = actor.submit(ctx, branchOpWrite, &writeDataReq{
 		ino:     ino,
+		offset:  startOff,
+		dataLen: uint64(len(data)),
 		endSize: endOff,
 		updates: updates,
 	})
@@ -1640,8 +2110,11 @@ func (a *BranchActor) execWrite(batch *pebble.Batch, branch BranchMeta, layers [
 	if err != nil {
 		return Inode{}, err
 	}
-	if inode.Mode&ModeTypeMask != ModeRegular {
-		return Inode{}, ErrIsDir
+	if valErr := validateWritableRegularInode(inode, req.offset, req.dataLen); valErr != nil {
+		return Inode{}, valErr
+	}
+	if req.dataLen == 0 {
+		return inode, nil
 	}
 
 	work := branch.WorkLayerID
@@ -1651,10 +2124,15 @@ func (a *BranchActor) execWrite(batch *pebble.Batch, branch BranchMeta, layers [
 		}
 	}
 
+	if capErr := clearSecurityCapability(batch, work, layers, inode.Ino); capErr != nil {
+		return Inode{}, capErr
+	}
+
 	nowNano := a.disk.now().UnixNano()
 	if req.endSize > inode.Size {
 		inode.Size = req.endSize
 	}
+	inode.Mode &^= ModeSetUID | ModeSetGID
 	inode.Mtime = nowNano
 	inode.Ctime = nowNano
 	inode.WriteSeq++

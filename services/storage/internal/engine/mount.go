@@ -213,6 +213,9 @@ func (a *BranchActor) execMountBranch(batch *pebble.Batch, branch BranchMeta, ra
 				return MountMeta{}, delErr
 			}
 		}
+		if sweepErr := sweepOrphansInWorkLayer(batch, branch.WorkLayerID, branch.HeadCommitID); sweepErr != nil {
+			return MountMeta{}, sweepErr
+		}
 		branch.WriterEpoch++
 		branch.UpdatedAt = nowNano
 		if setErr := batch.Set(MetaBranchKey(branch.Name), EncodeBranchMeta(branch), nil); setErr != nil {
@@ -333,7 +336,7 @@ func (d *DiskStore) Unmount(ctx context.Context, mountID string) error {
 	}
 	d.branchRegMu.RLock()
 	defer d.branchRegMu.RUnlock()
-	return d.db.Delete(MetaMountKey(mountID), pebble.Sync)
+	return d.deleteKeySync(ctx, MetaMountKey(mountID))
 }
 
 func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (EvictMountsResult, error) {
@@ -373,7 +376,7 @@ func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (Ev
 		}
 		res, evictErr := d.evictMountsOnBranch(ctx, mount.BranchName, mountID, false)
 		if errors.Is(evictErr, ErrNotFound) {
-			if delErr := d.db.Delete(MetaMountKey(mountID), pebble.Sync); delErr != nil {
+			if delErr := d.deleteKeySync(ctx, MetaMountKey(mountID)); delErr != nil {
 				return EvictMountsResult{}, delErr
 			}
 			var count uint32
@@ -425,7 +428,7 @@ func (d *DiskStore) EvictMounts(ctx context.Context, branch, mountID string) (Ev
 					total.EvictedCount++
 				}
 			}
-			commitErr := orphanBatch.Commit(pebble.Sync)
+			commitErr := d.commitBatchSync(ctx, orphanBatch)
 			_ = orphanBatch.Close()
 			if commitErr != nil {
 				return EvictMountsResult{}, commitErr
@@ -607,7 +610,7 @@ func (d *DiskStore) PruneExpiredMounts(now time.Time) ([]string, error) {
 			return nil, delErr
 		}
 	}
-	if commitErr := batch.Commit(pebble.Sync); commitErr != nil {
+	if commitErr := d.commitBatchSync(context.Background(), batch); commitErr != nil {
 		return nil, commitErr
 	}
 	sort.Strings(expired)

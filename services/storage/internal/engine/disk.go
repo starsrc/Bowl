@@ -69,6 +69,8 @@ type DiskStore struct {
 	beforeGCRelocateHook func(packID uint64, loc BlockRefLocation) error
 	beforeMergeExecHook  func(sourceBranch, targetBranch string) error
 	onDirVisitedHook     func(dirIno uint64)
+	walCommitHook        func(sync bool)
+	beforeTickHook       func()
 
 	gcCancel  context.CancelFunc
 	gcDone    chan struct{}
@@ -359,7 +361,7 @@ func (d *DiskStore) allocFromSegment(nextAtom, resAtom *atomic.Uint64, updateMet
 		d.metaMu.Lock()
 		metaCopy := d.meta
 		updateMeta(&metaCopy, newRes)
-		err := d.db.Set(MetaDiskKey(), EncodeDiskMeta(metaCopy), pebble.Sync)
+		err := d.setKeySync(context.Background(), MetaDiskKey(), EncodeDiskMeta(metaCopy))
 		if err != nil {
 			d.metaMu.Unlock()
 			d.allocMu.Unlock()
@@ -371,6 +373,46 @@ func (d *DiskStore) allocFromSegment(nextAtom, resAtom *atomic.Uint64, updateMet
 		resAtom.Store(newRes)
 		d.allocMu.Unlock()
 	}
+}
+
+func (d *DiskStore) syncPacksBeforeWAL(ctx context.Context) error {
+	if d.packs == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.packs.SyncActive(ctx)
+}
+
+func (d *DiskStore) commitBatchSync(ctx context.Context, batch *pebble.Batch) error {
+	if err := d.syncPacksBeforeWAL(ctx); err != nil {
+		return err
+	}
+	if d.walCommitHook != nil {
+		d.walCommitHook(true)
+	}
+	return batch.Commit(pebble.Sync)
+}
+
+func (d *DiskStore) setKeySync(ctx context.Context, key, val []byte) error {
+	if err := d.syncPacksBeforeWAL(ctx); err != nil {
+		return err
+	}
+	if d.walCommitHook != nil {
+		d.walCommitHook(true)
+	}
+	return d.db.Set(key, val, pebble.Sync)
+}
+
+func (d *DiskStore) deleteKeySync(ctx context.Context, key []byte) error {
+	if err := d.syncPacksBeforeWAL(ctx); err != nil {
+		return err
+	}
+	if d.walCommitHook != nil {
+		d.walCommitHook(true)
+	}
+	return d.db.Delete(key, pebble.Sync)
 }
 
 func (d *DiskStore) Close() error {
@@ -386,7 +428,15 @@ func (d *DiskStore) Close() error {
 			packErr = d.packs.Close()
 		}
 		if d.db != nil {
-			dbErr = d.db.Close()
+			if packErr == nil {
+				if d.walCommitHook != nil {
+					d.walCommitHook(true)
+				}
+				if logErr := d.db.LogData(nil, pebble.Sync); logErr != nil {
+					dbErr = logErr
+				}
+			}
+			dbErr = errors.Join(dbErr, d.db.Close())
 		}
 		if d.ownedCache != nil {
 			d.ownedCache.Unref()
@@ -444,7 +494,7 @@ func (d *DiskStore) UpdateDiskMeta(ctx context.Context, name *string, maxBytes *
 	}
 	metaCopy.UpdatedAt = d.now().UnixNano()
 
-	if err := d.db.Set(MetaDiskKey(), EncodeDiskMeta(metaCopy), pebble.Sync); err != nil {
+	if err := d.setKeySync(ctx, MetaDiskKey(), EncodeDiskMeta(metaCopy)); err != nil {
 		return DiskMeta{}, err
 	}
 	d.meta = metaCopy

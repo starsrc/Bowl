@@ -201,6 +201,14 @@ func DecodeLayerXattrKey(key []byte) (layerID, ino uint64, name []byte, err erro
 	return binary.BigEndian.Uint64(key[2:10]), binary.BigEndian.Uint64(key[17:25]), name, nil
 }
 
+func LayerOrphanPrefix(layerID uint64) []byte {
+	out := make([]byte, 18)
+	copy(out, layerKeyPrefixBytes)
+	binary.BigEndian.PutUint64(out[2:10], layerID)
+	copy(out[10:18], layerOrphanTagBytes)
+	return out
+}
+
 func LayerOrphanKey(layerID, ino uint64) []byte {
 	out := make([]byte, LayerOrphanKeyLen)
 	copy(out, layerKeyPrefixBytes)
@@ -208,6 +216,13 @@ func LayerOrphanKey(layerID, ino uint64) []byte {
 	copy(out[10:18], layerOrphanTagBytes)
 	binary.BigEndian.PutUint64(out[18:26], ino)
 	return out
+}
+
+func DecodeLayerOrphanKey(key []byte) (layerID, ino uint64, err error) {
+	if len(key) != LayerOrphanKeyLen || !bytes.HasPrefix(key, layerKeyPrefixBytes) || !bytes.Equal(key[10:18], layerOrphanTagBytes) {
+		return 0, 0, ErrInvalidKey
+	}
+	return binary.BigEndian.Uint64(key[2:10]), binary.BigEndian.Uint64(key[18:26]), nil
 }
 
 func LayerDataPrefix(layerID, ino uint64) []byte {

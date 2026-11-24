@@ -129,7 +129,12 @@ func TestStep3_POSIXOverlay_FileDirXattrUnlinkRenameAndPersistenceAcrossReopen(t
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), linked.Nlink)
 
-	require.NoError(t, disk.Rename(ctx, DefaultBranchName, subDir.Ino, "report.bin", RootIno, "moved.bin"))
+	require.NoError(t, disk.Rename(ctx, DefaultBranchName, RenameReq{
+		OldParentIno: subDir.Ino,
+		OldName:      "report.bin",
+		NewParentIno: RootIno,
+		NewName:      "moved.bin",
+	}))
 	_, _, err = disk.Lookup(ctx, DefaultBranchName, subDir.Ino, "report.bin")
 	require.ErrorIs(t, err, ErrNotFound)
 
@@ -137,7 +142,7 @@ func TestStep3_POSIXOverlay_FileDirXattrUnlinkRenameAndPersistenceAcrossReopen(t
 	_, _, err = disk.Lookup(ctx, DefaultBranchName, RootIno, "docs")
 	require.ErrorIs(t, err, ErrNotFound)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "hard.bin"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "hard.bin", false))
 	stillAlive, err := disk.GetAttr(ctx, DefaultBranchName, f.Ino)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), stillAlive.Nlink)
@@ -221,7 +226,7 @@ func TestStep3_OverlayReads_WalkLayerChainAndMaskTombstonesInReadDirAndXattr(t *
 	require.NoError(t, err)
 	require.Equal(t, []string{"user.base"}, xnames)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "from-base.txt"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "from-base.txt", false))
 	entriesAfter, err := disk.ReadDir(ctx, DefaultBranchName, RootIno)
 	require.NoError(t, err)
 	require.Equal(t, []string{"in-work.txt"}, dirEntryNames(entriesAfter))

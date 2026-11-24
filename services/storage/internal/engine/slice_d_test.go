@@ -141,7 +141,7 @@ func TestStep6_GC_RelocatesLowWatermarkPackAcrossWorkingAndImmutableCommitLayers
 	_, err = disk.Write(ctx, DefaultBranchName, fDead.Ino, 0, bytes.Repeat([]byte{0xc3}, 8192))
 	require.NoError(t, err)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "ephemeral.bin"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "ephemeral.bin", false))
 
 	fSeal, err := disk.Create(ctx, DefaultBranchName, RootIno, "seal.bin", 0o644, 0, 0)
 	require.NoError(t, err)
@@ -216,7 +216,7 @@ func TestStep6_GC_CASSkipsConcurrentlyOverwrittenWorkingBlockWithoutClobbering(t
 	require.NoError(t, err)
 	_, err = disk.Write(ctx, DefaultBranchName, fDead.Ino, 0, bytes.Repeat([]byte{0x20}, 4096))
 	require.NoError(t, err)
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "dead.bin"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "dead.bin", false))
 
 	fSeal, err := disk.Create(ctx, DefaultBranchName, RootIno, "seal.bin", 0o644, 0, 0)
 	require.NoError(t, err)
@@ -272,7 +272,7 @@ func TestStep6_GC_AbortsPackDeleteWhenAnyRelocationFailsAndRetriesCleanly(t *tes
 	require.NoError(t, err)
 	_, err = disk.Write(ctx, DefaultBranchName, fDrop.Ino, 0, bytes.Repeat([]byte{0x88}, 4096))
 	require.NoError(t, err)
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "drop.bin"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "drop.bin", false))
 
 	fSeal, err := disk.Create(ctx, DefaultBranchName, RootIno, "seal.bin", 0o644, 0, 0)
 	require.NoError(t, err)
@@ -352,7 +352,7 @@ func TestStep7_GC_QuotaExemptRelocationReclaimsSpaceOnFullDisk(t *testing.T) {
 	_, err = disk.Write(ctx, DefaultBranchName, fExtra.Ino, 0, bytes.Repeat([]byte{0xdd}, 4096))
 	require.ErrorIs(t, err, ErrNoSpace)
 
-	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "drop.bin"))
+	require.NoError(t, disk.Unlink(ctx, DefaultBranchName, RootIno, "drop.bin", false))
 
 	_, err = disk.RunGC(ctx)
 	require.NoError(t, err)

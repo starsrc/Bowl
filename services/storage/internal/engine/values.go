@@ -92,9 +92,26 @@ type Entry struct {
 }
 
 type DirEntry struct {
-	Name string
-	Ino  uint64
-	Mode uint32
+	Name       string
+	Ino        uint64
+	Mode       uint32
+	NextOffset uint64
+}
+
+type DirEntryPlus struct {
+	Name       string
+	Ino        uint64
+	Mode       uint32
+	NextOffset uint64
+	Inode      Inode
+}
+
+type CommitNodeResult struct {
+	Mode          uint32
+	FileSize      uint64
+	Data          []byte
+	EOF           bool
+	SymlinkTarget []byte
 }
 
 type BlobRef struct {

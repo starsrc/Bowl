@@ -15,6 +15,8 @@ var (
 	ErrInvalid              = errors.New("engine: invalid argument")
 	ErrInvalidKey           = errors.New("engine: invalid key")
 	ErrInvalidValue         = errors.New("engine: invalid value")
+	ErrPerm                 = errors.New("engine: operation not permitted")
+	ErrNotSupported         = errors.New("engine: operation not supported")
 	ErrNoData               = errors.New("engine: no data available")
 	ErrNoSpace              = errors.New("engine: no space left on device")
 	ErrStaleEpoch           = errors.New("engine: stale writer epoch")
@@ -61,11 +63,32 @@ const (
 	MaxXattrNameBytes             = 255
 	MaxXattrValueBytes            = 65536
 	MaxXattrListBytes             = 65536
+	MaxReadDirLimit        uint32 = 4096
 	IDSegmentSize          uint64 = 4096
 )
 
 const (
-	InodeFlagEverLinked uint32 = 1 << 0
+	FlagImmutable       uint32 = 0x1
+	FlagAppend          uint32 = 0x2
+	InodeFlagEverLinked uint32 = 1 << 31
+)
+
+const (
+	OrphanUnlinked        byte = 0x01
+	OrphanTmpfileExcl     byte = 0x02
+	OrphanTmpfileLinkable byte = 0x03
+)
+
+const (
+	RenameNoReplace uint32 = 0x1
+	RenameExchange  uint32 = 0x2
+	RenameWhiteout  uint32 = 0x4
+)
+
+const (
+	FallocKeepSize  uint32 = 0x01
+	FallocPunchHole uint32 = 0x02
+	FallocZeroRange uint32 = 0x10
 )
 
 const (

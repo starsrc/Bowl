@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"sort"
+	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -277,6 +279,10 @@ func overlayListXattr(r pebbleReader, layers []uint64, ino uint64) ([]string, er
 }
 
 func overlayListLiveBlocks(r pebbleReader, layers []uint64, ino, minBlockIdx uint64) ([]uint64, error) {
+	return overlayListLiveBlocksRange(r, layers, ino, minBlockIdx, math.MaxUint64)
+}
+
+func overlayListLiveBlocksRange(r pebbleReader, layers []uint64, ino, minBlockIdx, maxBlockIdx uint64) ([]uint64, error) {
 	seen := make(map[uint64]struct{})
 	var live []uint64
 	for _, layerID := range layers {
@@ -294,7 +300,7 @@ func overlayListLiveBlocks(r pebbleReader, layers []uint64, ino, minBlockIdx uin
 				_ = iter.Close()
 				return nil, decKeyErr
 			}
-			if blkIdx < minBlockIdx {
+			if blkIdx < minBlockIdx || blkIdx > maxBlockIdx {
 				continue
 			}
 			if _, exists := seen[blkIdx]; exists {
@@ -338,6 +344,10 @@ func (d *DiskStore) readInodeFromLayers(r pebbleReader, layers []uint64, ino uin
 }
 
 func (d *DiskStore) readDataFromLayers(r pebbleReader, layers []uint64, ino uint64, offset int64, size int) ([]byte, error) {
+	return d.readDataFromLayersInto(r, layers, ino, offset, size, nil)
+}
+
+func (d *DiskStore) readDataFromLayersInto(r pebbleReader, layers []uint64, ino uint64, offset int64, size int, dst []byte) ([]byte, error) {
 	if offset < 0 || size < 0 {
 		return nil, ErrInvalid
 	}
@@ -345,22 +355,36 @@ func (d *DiskStore) readDataFromLayers(r pebbleReader, layers []uint64, ino uint
 	if err != nil {
 		return nil, err
 	}
-	if inode.Mode&ModeTypeMask != ModeRegular {
+	switch inode.Mode & ModeTypeMask {
+	case ModeDir:
 		return nil, ErrIsDir
+	case ModeRegular:
+	default:
+		return nil, ErrInvalid
 	}
+	return d.readRegularDataInto(r, layers, inode, offset, size, dst)
+}
+
+func (d *DiskStore) readRegularDataInto(r pebbleReader, layers []uint64, inode Inode, offset int64, size int, dst []byte) ([]byte, error) {
 	if size == 0 || uint64(offset) >= inode.Size {
 		return []byte{}, nil
 	}
 	end := min(uint64(offset)+uint64(size), inode.Size)
 	outLen := int(end - uint64(offset))
-	out := make([]byte, outLen)
+	var out []byte
+	if cap(dst) >= outLen {
+		out = dst[:outLen]
+		clear(out)
+	} else {
+		out = make([]byte, outLen)
+	}
 
 	blkSize := uint64(d.blockSize)
 	startBlk := uint64(offset) / blkSize
 	endBlk := (end - 1) / blkSize
 
 	for blkIdx := startBlk; blkIdx <= endBlk; blkIdx++ {
-		ref, ok, refErr := overlayGetDataRef(r, layers, ino, blkIdx)
+		ref, ok, refErr := overlayGetDataRef(r, layers, inode.Ino, blkIdx)
 		if refErr != nil {
 			return nil, refErr
 		}
@@ -451,6 +475,211 @@ func (d *DiskStore) ReadDir(_ context.Context, branch string, parentIno uint64) 
 	return overlayReadDir(snap, layers, parentIno)
 }
 
+func (d *DiskStore) Readlink(_ context.Context, branch string, ino uint64) ([]byte, error) {
+	if d.closing.Load() {
+		return nil, ErrClosed
+	}
+	if ino == 0 || ino > math.MaxInt64 {
+		return nil, ErrInvalid
+	}
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	_, layers, err := resolveBranchLayers(snap, branch)
+	if err != nil {
+		return nil, err
+	}
+	inode, err := overlayGetInode(snap, layers, ino)
+	if err != nil {
+		return nil, err
+	}
+	if inode.Mode&ModeTypeMask != ModeSymlink {
+		return nil, ErrInvalid
+	}
+	return append([]byte(nil), inode.SymlinkTarget...), nil
+}
+
+func (d *DiskStore) ReadDirPage(_ context.Context, branch string, parentIno, offset uint64, limit uint32) ([]DirEntry, error) {
+	if d.closing.Load() {
+		return nil, ErrClosed
+	}
+	if parentIno == 0 || parentIno > math.MaxInt64 || limit == 0 || limit > MaxReadDirLimit || offset > math.MaxInt64 {
+		return nil, ErrInvalid
+	}
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	_, layers, err := resolveBranchLayers(snap, branch)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := overlayGetInode(snap, layers, parentIno)
+	if err != nil {
+		return nil, err
+	}
+	if dir.Mode&ModeTypeMask != ModeDir {
+		return nil, ErrNotDir
+	}
+	if dir.Nlink == 0 {
+		return []DirEntry{}, nil
+	}
+
+	maxCount := int(limit)
+	entries := make([]DirEntry, 0, min(maxCount, 16))
+	if offset < 1 && len(entries) < maxCount {
+		entries = append(entries, DirEntry{
+			Name:       ".",
+			Ino:        dir.Ino,
+			Mode:       dir.Mode,
+			NextOffset: 1,
+		})
+	}
+	if offset < 2 && len(entries) < maxCount {
+		dotDotIno := dir.Ino
+		dotDotMode := dir.Mode
+		if parentIno != RootIno && dir.ParentIno > 0 {
+			parent, readErr := overlayGetInode(snap, layers, dir.ParentIno)
+			if readErr == nil {
+				dotDotIno = parent.Ino
+				dotDotMode = parent.Mode
+			} else if !errors.Is(readErr, ErrNotFound) {
+				return nil, readErr
+			}
+		}
+		entries = append(entries, DirEntry{
+			Name:       "..",
+			Ino:        dotDotIno,
+			Mode:       dotDotMode,
+			NextOffset: 2,
+		})
+	}
+	if len(entries) == maxCount {
+		return entries, nil
+	}
+
+	children, err := overlayReadDir(snap, layers, parentIno)
+	if err != nil {
+		return nil, err
+	}
+	var skip uint64
+	if offset > 2 {
+		skip = offset - 2
+	}
+	if skip >= uint64(len(children)) {
+		return entries, nil
+	}
+	next := max(offset, uint64(2))
+	for _, ch := range children[skip:] {
+		if len(entries) >= maxCount {
+			break
+		}
+		next++
+		entries = append(entries, DirEntry{
+			Name:       ch.Name,
+			Ino:        ch.Ino,
+			Mode:       ch.Mode,
+			NextOffset: next,
+		})
+	}
+	return entries, nil
+}
+
+func (d *DiskStore) ReadDirPlus(_ context.Context, branch string, parentIno, offset uint64, limit uint32) ([]DirEntryPlus, error) {
+	if d.closing.Load() {
+		return nil, ErrClosed
+	}
+	if parentIno == 0 || parentIno > math.MaxInt64 || limit == 0 || limit > MaxReadDirLimit || offset > math.MaxInt64 {
+		return nil, ErrInvalid
+	}
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	_, layers, err := resolveBranchLayers(snap, branch)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := overlayGetInode(snap, layers, parentIno)
+	if err != nil {
+		return nil, err
+	}
+	if dir.Mode&ModeTypeMask != ModeDir {
+		return nil, ErrNotDir
+	}
+	if dir.Nlink == 0 {
+		return []DirEntryPlus{}, nil
+	}
+
+	maxCount := int(limit)
+	entries := make([]DirEntryPlus, 0, min(maxCount, 16))
+	if offset < 1 && len(entries) < maxCount {
+		entries = append(entries, DirEntryPlus{
+			Name:       ".",
+			Ino:        dir.Ino,
+			Mode:       dir.Mode,
+			NextOffset: 1,
+			Inode:      dir,
+		})
+	}
+	if offset < 2 && len(entries) < maxCount {
+		dotDot := dir
+		if parentIno != RootIno && dir.ParentIno > 0 {
+			parent, readErr := overlayGetInode(snap, layers, dir.ParentIno)
+			if readErr == nil {
+				dotDot = parent
+			} else if !errors.Is(readErr, ErrNotFound) {
+				return nil, readErr
+			}
+		}
+		entries = append(entries, DirEntryPlus{
+			Name:       "..",
+			Ino:        dotDot.Ino,
+			Mode:       dotDot.Mode,
+			NextOffset: 2,
+			Inode:      dotDot,
+		})
+	}
+	if len(entries) == maxCount {
+		return entries, nil
+	}
+
+	children, err := overlayReadDir(snap, layers, parentIno)
+	if err != nil {
+		return nil, err
+	}
+	var skip uint64
+	if offset > 2 {
+		skip = offset - 2
+	}
+	if skip >= uint64(len(children)) {
+		return entries, nil
+	}
+	next := max(offset, uint64(2))
+	for _, ch := range children[skip:] {
+		if len(entries) >= maxCount {
+			break
+		}
+		next++
+		childInode, getErr := overlayGetInode(snap, layers, ch.Ino)
+		if errors.Is(getErr, ErrNotFound) {
+			continue
+		}
+		if getErr != nil {
+			return nil, getErr
+		}
+		if childInode.Nlink == 0 {
+			continue
+		}
+		entries = append(entries, DirEntryPlus{
+			Name:       ch.Name,
+			Ino:        childInode.Ino,
+			Mode:       childInode.Mode,
+			NextOffset: next,
+			Inode:      childInode,
+		})
+	}
+	return entries, nil
+}
+
 func (d *DiskStore) GetXattr(_ context.Context, branch string, ino uint64, name string) ([]byte, error) {
 	if d.closing.Load() {
 		return nil, ErrClosed
@@ -465,8 +694,12 @@ func (d *DiskStore) GetXattr(_ context.Context, branch string, ino uint64, name 
 	if err != nil {
 		return nil, err
 	}
-	if _, err = overlayGetInode(snap, layers, ino); err != nil {
+	inode, err := overlayGetInode(snap, layers, ino)
+	if err != nil {
 		return nil, err
+	}
+	if strings.HasPrefix(name, "user.") && !isAllowedUserXattrFileType(inode.Mode) {
+		return nil, ErrNoData
 	}
 	return overlayGetXattr(snap, layers, ino, []byte(name))
 }
@@ -488,7 +721,11 @@ func (d *DiskStore) ListXattr(_ context.Context, branch string, ino uint64) ([]s
 	return overlayListXattr(snap, layers, ino)
 }
 
-func (d *DiskStore) Read(_ context.Context, branch string, ino uint64, offset int64, size int) ([]byte, error) {
+func (d *DiskStore) Read(ctx context.Context, branch string, ino uint64, offset int64, size int) ([]byte, error) {
+	return d.ReadInto(ctx, branch, ino, offset, size, nil)
+}
+
+func (d *DiskStore) ReadInto(_ context.Context, branch string, ino uint64, offset int64, size int, dst []byte) ([]byte, error) {
 	if d.closing.Load() {
 		return nil, ErrClosed
 	}
@@ -499,7 +736,7 @@ func (d *DiskStore) Read(_ context.Context, branch string, ino uint64, offset in
 	if err != nil {
 		return nil, err
 	}
-	return d.readDataFromLayers(snap, layers, ino, offset, size)
+	return d.readDataFromLayersInto(snap, layers, ino, offset, size, dst)
 }
 
 func (d *DiskStore) GetAttrAtCommit(_ context.Context, commitID, ino uint64) (Inode, error) {
@@ -567,4 +804,50 @@ func (d *DiskStore) ReadAtCommit(_ context.Context, commitID, ino uint64, offset
 		return nil, err
 	}
 	return d.readDataFromLayers(snap, layers, ino, offset, size)
+}
+
+func (d *DiskStore) ReadCommitNode(_ context.Context, commitID, ino uint64, offset int64, size int) (CommitNodeResult, error) {
+	if d.closing.Load() {
+		return CommitNodeResult{}, ErrClosed
+	}
+	if commitID == 0 || ino == 0 || ino > math.MaxInt64 || offset < 0 || size < 0 {
+		return CommitNodeResult{}, ErrInvalid
+	}
+	snap := d.db.NewSnapshot()
+	defer func() { _ = snap.Close() }()
+
+	_, layers, err := resolveCommitLayers(snap, commitID)
+	if err != nil {
+		return CommitNodeResult{}, err
+	}
+	inode, err := overlayGetInode(snap, layers, ino)
+	if err != nil {
+		return CommitNodeResult{}, err
+	}
+
+	switch inode.Mode & ModeTypeMask {
+	case ModeDir:
+		return CommitNodeResult{}, ErrIsDir
+	case ModeSymlink:
+		return CommitNodeResult{
+			Mode:          inode.Mode,
+			FileSize:      inode.Size,
+			EOF:           true,
+			SymlinkTarget: append([]byte(nil), inode.SymlinkTarget...),
+		}, nil
+	case ModeRegular:
+		data, readErr := d.readRegularDataInto(snap, layers, inode, offset, size, nil)
+		if readErr != nil {
+			return CommitNodeResult{}, readErr
+		}
+		eof := uint64(offset) >= inode.Size || uint64(offset)+uint64(len(data)) >= inode.Size
+		return CommitNodeResult{
+			Mode:     inode.Mode,
+			FileSize: inode.Size,
+			Data:     data,
+			EOF:      eof,
+		}, nil
+	default:
+		return CommitNodeResult{}, ErrInvalid
+	}
 }

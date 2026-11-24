@@ -17,7 +17,8 @@ import (
 
 	"github.com/starsrc/bowl/gen/go/storage/v1/storagev1connect"
 	"github.com/starsrc/bowl/services/storage/internal/config"
-	"github.com/starsrc/bowl/services/storage/internal/control"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
+	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
 
 var _ storagev1connect.StorageServiceHandler = (*Server)(nil)
@@ -31,8 +32,8 @@ const (
 )
 
 type Server struct {
-	storagev1connect.UnimplementedStorageServiceHandler
-	control     control.Manager
+	manager     *projection.ControlManager
+	metaCfg     config.MetaConfig
 	config      config.ServerConfig
 	logger      *slog.Logger
 	httpMetrics *HTTPMetrics
@@ -69,8 +70,8 @@ func (s *Server) AdminHTTPServer() *http.Server {
 	return s.adminServer
 }
 
-func (s *Server) Control() control.Manager {
-	return s.control
+func (s *Server) Manager() *projection.ControlManager {
+	return s.manager
 }
 
 func (s *Server) Addr() string {
@@ -90,11 +91,35 @@ func (s *Server) AdminAddr() string {
 	return ""
 }
 
+func (s *Server) entryTimeoutForMode(mode uint32) float64 {
+	if mode&engine.ModeTypeMask == engine.ModeDir {
+		return s.metaCfg.DirEntryTimeoutSeconds()
+	}
+	return s.metaCfg.EntryTimeoutSeconds()
+}
+
+func (s *Server) attrTimeoutSeconds() float64 {
+	return s.metaCfg.AttrTimeoutSeconds()
+}
+
+func (s *Server) leaseTTLSeconds() uint32 {
+	if s.manager == nil {
+		return uint32(projection.DefaultMountLeaseTTL.Seconds())
+	}
+	secs := int64(s.manager.MountLeaseTTL().Seconds())
+	if secs <= 0 {
+		return uint32(projection.DefaultMountLeaseTTL.Seconds())
+	}
+	return uint32(secs)
+}
+
 type Params struct {
 	fx.In
 
 	Config        config.ServerConfig
-	Control       control.Manager
+	MetaCfg       *config.MetaConfig `optional:"true"`
+	MetaVal       config.MetaConfig  `optional:"true"`
+	Manager       *projection.ControlManager
 	Observability serverx.ObservabilityConfig    `optional:"true"`
 	Telemetry     telemetry.Config               `optional:"true"`
 	AdminCfg      observability.AdminRouteConfig `optional:"true"`
@@ -107,6 +132,18 @@ type Params struct {
 	Logger        *slog.Logger                   `optional:"true"`
 	Lifecycle     fx.Lifecycle                   `optional:"true"`
 	Shutdowner    fx.Shutdowner                  `optional:"true"`
+}
+
+func defaultMetaConfig() config.MetaConfig {
+	return config.MetaConfig{
+		AtimeModeVal:              config.DefaultAtimeMode,
+		EntryTimeoutSecondsVal:    config.DefaultEntryTimeoutSeconds,
+		AttrTimeoutSecondsVal:     config.DefaultAttrTimeoutSeconds,
+		DirEntryTimeoutSecondsVal: config.DefaultDirEntryTimeoutSeconds,
+		OpenKeepCacheVal:          config.DefaultOpenKeepCache,
+		OpenDirCacheVal:           config.DefaultOpenDirCache,
+		ActorIdleTTLVal:           config.DefaultActorIdleTTL,
+	}
 }
 
 func New(p Params) (*Server, error) {
@@ -142,8 +179,17 @@ func New(p Params) (*Server, error) {
 		httpMetrics = NewHTTPMetrics()
 	}
 
+	metaCfg := defaultMetaConfig()
+	switch {
+	case p.MetaCfg != nil:
+		metaCfg = *p.MetaCfg
+	case p.MetaVal != (config.MetaConfig{}):
+		metaCfg = p.MetaVal
+	}
+
 	srv := &Server{
-		control:     p.Control,
+		manager:     p.Manager,
+		metaCfg:     metaCfg,
 		config:      p.Config,
 		logger:      logger,
 		httpMetrics: httpMetrics,

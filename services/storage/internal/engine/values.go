@@ -146,6 +146,8 @@ type StatFSResult struct {
 	Blocks     uint64
 	Bfree      uint64
 	Bavail     uint64
+	Files      uint64
+	Ffree      uint64
 	Namelen    uint32
 }
 

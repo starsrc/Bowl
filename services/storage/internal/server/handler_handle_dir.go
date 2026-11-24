@@ -1,57 +1,54 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"math"
 
 	"connectrpc.com/connect"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/services/storage/internal/store"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
-const fopenKeepCache uint32 = 1 << 1
+const (
+	fopenKeepCache uint32 = 1 << 1
+	oTmpfileFlag   uint32 = 0o20000000
+)
 
 func (s *Server) Create(ctx context.Context, req *connect.Request[storagev1.CreateRequest]) (*connect.Response[storagev1.CreateResponse], error) {
 	msg := req.Msg
 	if err := validateWriteEpoch(msg.Epoch); err != nil {
 		return nil, toConnectError(err)
 	}
-	if msg.Uid > math.MaxInt32 || msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
+	if msg.Uid > math.MaxInt32 || msg.Gid > math.MaxInt32 || msg.Flags&oTmpfileFlag != 0 {
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.DiskId)
+	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.Create(ctx, store.CreateReq{
-		ParentIno: msg.ParentIno,
-		Name:      msg.Name,
-		Mode:      msg.Mode,
-		UID:       msg.Uid,
-		GID:       msg.Gid,
-		Flags:     msg.Flags,
-		Epoch:     msg.Epoch,
+	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var cErr error
+		inode, cErr = ds.Create(epochCtx, msg.Branch, msg.ParentIno, string(msg.Name), msg.Mode, msg.Uid, msg.Gid)
+		return cErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
 	var openFlags uint32
-	if s.control.OpenKeepCache() {
+	if s.metaCfg.OpenKeepCache() {
 		openFlags = fopenKeepCache
 	}
 
 	return connect.NewResponse(&storagev1.CreateResponse{
-		Inode:               toProtoInode(&attr),
+		Inode:               toProtoInode(inode),
 		Fh:                  1,
 		OpenFlags:           openFlags,
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -61,31 +58,27 @@ func (s *Server) CreateTmpfile(ctx context.Context, req *connect.Request[storage
 		return nil, toConnectError(err)
 	}
 	if msg.GetUid() > math.MaxInt32 || msg.GetGid() > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.GetDiskId())
+	diskID, err := parseRequiredUUID(msg.GetDiskId())
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.CreateTmpfile(ctx, store.CreateTmpfileReq{
-		ParentIno: msg.GetParentIno(),
-		Mode:      msg.GetMode(),
-		UID:       msg.GetUid(),
-		GID:       msg.GetGid(),
-		Exclusive: msg.GetExclusive(),
-		Epoch:     msg.GetEpoch(),
+	epochCtx := engine.WithWriterEpoch(ctx, msg.GetEpoch())
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var cErr error
+		inode, cErr = ds.CreateTmpfile(epochCtx, msg.GetBranch(), msg.GetParentIno(), msg.GetMode(), msg.GetUid(), msg.GetGid(), msg.GetExclusive())
+		return cErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
 	return connect.NewResponse(&storagev1.CreateTmpfileResponse{
-		Inode:               toProtoInode(&attr),
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		Inode:               toProtoInode(inode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -95,16 +88,16 @@ func (s *Server) Fsync(ctx context.Context, req *connect.Request[storagev1.Fsync
 		return nil, toConnectError(err)
 	}
 	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.DiskId)
+	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.Fsync(ctx, msg.Ino, msg.Epoch); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.Fsync(epochCtx, msg.Branch, msg.Ino)
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -117,16 +110,16 @@ func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.Fs
 		return nil, toConnectError(err)
 	}
 	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.DiskId)
+	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.FsyncDir(ctx, msg.Ino, msg.Epoch); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.FsyncDir(epochCtx, msg.Branch, msg.Ino)
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 
@@ -136,16 +129,18 @@ func (s *Server) FsyncDir(ctx context.Context, req *connect.Request[storagev1.Fs
 func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.ReadDirRequest]) (*connect.Response[storagev1.ReadDirResponse], error) {
 	msg := req.Msg
 	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.DiskId)
+	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	res, err := actor.ReadDir(ctx, msg.Ino, msg.Offset, msg.Limit)
+	var res []engine.DirEntry
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var rErr error
+		res, rErr = ds.ReadDirPage(ctx, msg.Branch, msg.Ino, msg.Offset, msg.Limit)
+		return rErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -154,7 +149,7 @@ func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.Rea
 	for i, e := range res {
 		entries[i] = &storagev1.DirEntry{
 			Ino:        e.Ino,
-			Name:       e.Name,
+			Name:       []byte(e.Name),
 			Mode:       e.Mode,
 			NextOffset: e.NextOffset,
 		}
@@ -168,33 +163,35 @@ func (s *Server) ReadDir(ctx context.Context, req *connect.Request[storagev1.Rea
 func (s *Server) ReadDirPlus(ctx context.Context, req *connect.Request[storagev1.ReadDirPlusRequest]) (*connect.Response[storagev1.ReadDirPlusResponse], error) {
 	msg := req.Msg
 	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.DiskId)
+	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	res, err := actor.ReadDirPlus(ctx, msg.Ino, msg.Offset, msg.Limit)
+	var res []engine.DirEntryPlus
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var rErr error
+		res, rErr = ds.ReadDirPlus(ctx, msg.Branch, msg.Ino, msg.Offset, msg.Limit)
+		return rErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 
-	attrTimeout := s.control.AttrTimeoutSeconds()
+	attrTimeout := s.attrTimeoutSeconds()
 	entries := make([]*storagev1.DirEntryPlus, len(res))
 	for i := range res {
 		e := &res[i]
-		entryTimeout := s.control.EntryTimeoutForMode(e.Attr.Mode)
-		if bytes.Equal(e.Name, []byte(".")) || bytes.Equal(e.Name, []byte("..")) {
+		entryTimeout := s.entryTimeoutForMode(e.Inode.Mode)
+		if e.Name == "." || e.Name == ".." {
 			entryTimeout = 0
 		}
 		entries[i] = &storagev1.DirEntryPlus{
 			Ino:                 e.Ino,
-			Name:                e.Name,
+			Name:                []byte(e.Name),
 			NextOffset:          e.NextOffset,
-			Inode:               toProtoInode(&e.Attr),
+			Inode:               toProtoInode(e.Inode),
 			EntryTimeoutSeconds: entryTimeout,
 			AttrTimeoutSeconds:  attrTimeout,
 		}
@@ -211,16 +208,16 @@ func (s *Server) Fallocate(ctx context.Context, req *connect.Request[storagev1.F
 		return nil, toConnectError(err)
 	}
 	if msg.Fh > math.MaxInt64 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, msg.DiskId)
+	diskID, err := parseRequiredUUID(msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if err := actor.Fallocate(ctx, msg.Ino, msg.Offset, msg.Length, msg.Mode, msg.Epoch); err != nil {
+	epochCtx := engine.WithWriterEpoch(ctx, msg.Epoch)
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		return ds.Fallocate(epochCtx, msg.Branch, msg.Ino, msg.Offset, msg.Length, msg.Mode)
+	}); err != nil {
 		return nil, toConnectError(err)
 	}
 

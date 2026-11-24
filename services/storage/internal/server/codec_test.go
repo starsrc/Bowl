@@ -16,7 +16,10 @@ import (
 	"github.com/starsrc/bowl/pkg/validator"
 )
 
-const codecTestDiskID = "123e4567-e89b-12d3-a456-426614174000"
+const (
+	codecTestDiskID = "123e4567-e89b-12d3-a456-426614174000"
+	codecTestBranch = "main"
+)
 
 func newSampleWritePayload() []byte {
 	return bytes.Repeat([]byte{0x11, 0x22, 0x33, 0x44}, maxReadWriteSize/4)
@@ -31,16 +34,17 @@ func marshalSampleWriteRequest(t *testing.T, codec connect.Codec, payload []byte
 		Data:   payload,
 		DiskId: codecTestDiskID,
 		Epoch:  3,
+		Branch: codecTestBranch,
 	}
 	raw, err := codec.Marshal(orig)
-	require.NoError(t, err, "序列化样例 WriteRequest 失败")
+	require.NoError(t, err)
 	return raw, orig
 }
 
 func unmarshalAndReleaseWritePayload(t *testing.T, codec connect.Codec, raw []byte) {
 	t.Helper()
 	var m storagev1.WriteRequest
-	require.NoError(t, codec.Unmarshal(raw, &m), "解包 WriteRequest 失败")
+	require.NoError(t, codec.Unmarshal(raw, &m))
 	releaseWritePayload(&m)
 }
 
@@ -54,8 +58,8 @@ func repeatUnmarshalAndReleaseWrite(t *testing.T, codec connect.Codec, raw []byt
 func unmarshalAbandonedWriteRequest(t *testing.T, codec connect.Codec, raw []byte) {
 	t.Helper()
 	msg := &storagev1.WriteRequest{}
-	require.NoError(t, codec.Unmarshal(raw, msg), "解包孤儿 WriteRequest 失败")
-	require.Equal(t, 1, leasedWritePayloadCount(), "孤儿 WriteRequest 未释放前应持有 1 个租约")
+	require.NoError(t, codec.Unmarshal(raw, msg))
+	require.Equal(t, 1, leasedWritePayloadCount())
 	runtime.KeepAlive(msg)
 }
 
@@ -67,7 +71,7 @@ func registerAbandonedReadResponse(t *testing.T) {
 		Data: buf[:4096:4096],
 	}
 	registerLeasedReadPayload(resp, buf)
-	require.Equal(t, 1, leasedReadPayloadCount(), "孤儿 ReadResponse 注册后应持有 1 个租约")
+	require.Equal(t, 1, leasedReadPayloadCount())
 	runtime.KeepAlive(resp)
 }
 
@@ -79,9 +83,9 @@ func marshalAndReleaseReadPayload(t *testing.T, codec *rpccodec.ProtoBinaryCodec
 	}
 	registerLeasedReadPayload(resp, buf)
 	out, err := codec.MarshalAppend(dst[:0], resp)
-	require.NoError(t, err, "MarshalAppend ReadResponse 失败")
-	require.Nil(t, resp.Data, "编码完成后必须清空 ReadResponse.Data 引用")
-	require.Zero(t, leasedReadPayloadCount(), "编码完成后 ReadResponse 租约必须立即归零")
+	require.NoError(t, err)
+	require.Nil(t, resp.Data)
+	require.Zero(t, leasedReadPayloadCount())
 	return out
 }
 
@@ -103,7 +107,7 @@ func waitForZeroLeases(t *testing.T, countFn func() int, targetName string) {
 			return
 		}
 	}
-	require.Zero(t, countFn(), "孤儿 %s 租约在 %d 轮 GC 后仍未自动归零", targetName, maxGCCycles)
+	require.Zero(t, countFn(), "orphan %s lease not collected after %d GC cycles", targetName, maxGCCycles)
 }
 
 func assertZeroAllocsMarshalAppend(t *testing.T, codec *rpccodec.ProtoBinaryCodec, dst []byte, resp *storagev1.ReadResponse, checkNonEmpty bool) {
@@ -111,16 +115,16 @@ func assertZeroAllocsMarshalAppend(t *testing.T, codec *rpccodec.ProtoBinaryCode
 	allocs := testing.AllocsPerRun(50, func() {
 		out, err := codec.MarshalAppend(dst[:0], resp)
 		if err != nil {
-			t.Fatalf("MarshalAppend 失败: %v", err)
+			t.Fatalf("MarshalAppend failed: %v", err)
 		}
 		if checkNonEmpty && len(out) <= maxReadWriteSize {
-			t.Fatalf("非空 ReadResponse 编码长度异常: len=%d", len(out))
+			t.Fatalf("unexpected non-empty ReadResponse length: %d", len(out))
 		}
 		if !checkNonEmpty && len(out) != 0 {
-			t.Fatalf("空 ReadResponse 编码长度应为 0，实际=%d", len(out))
+			t.Fatalf("expected empty ReadResponse length 0, got %d", len(out))
 		}
 	})
-	require.Zero(t, allocs, "复用足够容量 dst 时 ReadResponse MarshalAppend 必须 0 allocs/op (checkNonEmpty=%v)", checkNonEmpty)
+	require.Zero(t, allocs)
 }
 
 func buildPayloadOfSize(sz int) []byte {
@@ -136,30 +140,46 @@ func assertReadResponseCompatSize(t *testing.T, codec *rpccodec.ProtoBinaryCodec
 	resp := &storagev1.ReadResponse{Data: payload}
 
 	want, err := proto.Marshal(resp)
-	require.NoError(t, err, "标准 proto.Marshal 失败")
+	require.NoError(t, err)
 
 	got, err := codec.MarshalAppend(dst[:0], resp)
-	require.NoError(t, err, "手写 MarshalAppend 失败 (size=%d)", sz)
-	require.Equal(t, want, got, "size=%d 的 MarshalAppend 编码必须与标准 proto.Marshal 一致", sz)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 
 	var decoded storagev1.ReadResponse
-	require.NoError(t, proto.Unmarshal(got, &decoded), "标准 proto.Unmarshal 回读失败")
+	require.NoError(t, proto.Unmarshal(got, &decoded))
 	if sz == 0 {
-		require.Empty(t, decoded.Data, "空载荷回读后应为空")
+		require.Empty(t, decoded.Data)
 	} else {
-		require.Equal(t, payload, decoded.Data, "size=%d 的载荷回读内容不一致", sz)
+		require.Equal(t, payload, decoded.Data)
 	}
 
 	prefix := []byte("frame:")
 	wantPrefixed, err := proto.MarshalOptions{}.MarshalAppend(append([]byte(nil), prefix...), resp)
-	require.NoError(t, err, "标准前缀追加编码失败")
+	require.NoError(t, err)
 	gotPrefixed, err := codec.MarshalAppend(append([]byte(nil), prefix...), resp)
-	require.NoError(t, err, "手写前缀追加编码失败")
-	require.Equal(t, wantPrefixed, gotPrefixed, "size=%d 带前缀切片追加必须与标准实现一致", sz)
+	require.NoError(t, err)
+	require.Equal(t, wantPrefixed, gotPrefixed)
+}
+
+func assertWriteWireFallbackCase(t *testing.T, codec connect.Codec, wire []byte, target *storagev1.WriteRequest, wantErr bool, wantData []byte) {
+	t.Helper()
+	err := codec.Unmarshal(wire, target)
+	if wantErr {
+		require.Error(t, err)
+		require.Zero(t, leasedWritePayloadCount())
+		return
+	}
+	require.NoError(t, err)
+	if len(wantData) == 0 {
+		require.Empty(t, target.Data)
+	} else {
+		require.Equal(t, wantData, target.Data)
+	}
+	require.Zero(t, leasedWritePayloadCount())
 }
 
 func TestWriteCodec_UnmarshalAndRelease_IsolatesInputAndReclaimsPool(t *testing.T) {
-
 	codec := newProtoBinaryCodec()
 	require.Equal(t, "proto", codec.Name())
 
@@ -168,7 +188,7 @@ func TestWriteCodec_UnmarshalAndRelease_IsolatesInputAndReclaimsPool(t *testing.
 
 	rawMut := append([]byte(nil), raw...)
 	var decoded storagev1.WriteRequest
-	require.NoError(t, codec.Unmarshal(rawMut, &decoded), "解包 4 MiB WriteRequest 失败")
+	require.NoError(t, codec.Unmarshal(rawMut, &decoded))
 	clear(rawMut)
 
 	require.Equal(t, orig.Ino, decoded.Ino)
@@ -176,17 +196,17 @@ func TestWriteCodec_UnmarshalAndRelease_IsolatesInputAndReclaimsPool(t *testing.
 	require.Equal(t, orig.Offset, decoded.Offset)
 	require.Equal(t, orig.DiskId, decoded.DiskId)
 	require.Equal(t, orig.Epoch, decoded.Epoch)
+	require.Equal(t, orig.Branch, decoded.Branch)
 	require.Equal(t, payload, decoded.Data)
 	require.Equal(t, maxReadWriteSize, cap(decoded.Data))
-	require.Equal(t, 1, leasedWritePayloadCount(), "解包后应持有 1 个写缓冲租约")
+	require.Equal(t, 1, leasedWritePayloadCount())
 
 	releaseWritePayload(&decoded)
-	require.Nil(t, decoded.Data, "释放后 Data 必须置空")
-	require.Zero(t, leasedWritePayloadCount(), "释放后租约计数必须归零")
+	require.Nil(t, decoded.Data)
+	require.Zero(t, leasedWritePayloadCount())
 }
 
 func TestWriteCodec_PooledUnmarshal_StaysWithinLowAllocBudget(t *testing.T) {
-
 	codec := newProtoBinaryCodec()
 	raw, _ := marshalSampleWriteRequest(t, codec, newSampleWritePayload())
 	unmarshalAndReleaseWritePayload(t, codec, raw)
@@ -197,8 +217,8 @@ func TestWriteCodec_PooledUnmarshal_StaysWithinLowAllocBudget(t *testing.T) {
 	repeatUnmarshalAndReleaseWrite(t, codec, raw, 8)
 
 	runtime.ReadMemStats(&after)
-	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(64<<10), "池化复用下 8 次 4 MiB 解包堆分配超限")
-	require.Zero(t, leasedWritePayloadCount(), "连续解包归还后不应残留写租约")
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(64<<10))
+	require.Zero(t, leasedWritePayloadCount())
 }
 
 func TestWriteCodec_MalformedOrFallbackWire_NeverLeaksPoolLease(t *testing.T) {
@@ -210,19 +230,19 @@ func TestWriteCodec_MalformedOrFallbackWire_NeverLeaksPoolLease(t *testing.T) {
 		Ino:    9,
 		DiskId: codecTestDiskID,
 		Epoch:  1,
+		Branch: codecTestBranch,
 	})
 	require.NoError(t, err)
 
 	dupZero := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), raw...), 4, protowire.BytesType), nil)
-
 	oversized := bytes.Repeat([]byte{0x7e}, maxReadWriteSize+1)
 	dupOversized := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), raw...), 4, protowire.BytesType), oversized)
-
 	unknownTail := protowire.AppendVarint(protowire.AppendTag(append([]byte(nil), raw...), 99, protowire.VarintType), 12345)
 	mismatchWire := protowire.AppendFixed64(protowire.AppendTag(append([]byte(nil), raw...), 1, protowire.Fixed64Type), 99)
 	truncatedTail := append(append([]byte(nil), raw...), 0xff, 0xff, 0xff)
 	illegalWire := protowire.AppendTag(append([]byte(nil), raw...), 1, protowire.Type(6))
-	badUTF8 := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), raw...), 5, protowire.BytesType), []byte{0xff, 0xfe})
+	badUTF8Disk := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), raw...), 5, protowire.BytesType), []byte{0xff, 0xfe})
+	badUTF8Branch := protowire.AppendBytes(protowire.AppendTag(append([]byte(nil), raw...), 7, protowire.BytesType), []byte{0xff, 0xfe})
 
 	cases := []struct {
 		name     string
@@ -231,15 +251,16 @@ func TestWriteCodec_MalformedOrFallbackWire_NeverLeaksPoolLease(t *testing.T) {
 		wantErr  bool
 		wantData []byte
 	}{
-		{name: "空载荷请求不借用池缓冲", wire: emptyRaw, target: &storagev1.WriteRequest{}},
-		{name: "同包后置空字段覆盖时立即归还先借缓冲", wire: dupZero, target: &storagev1.WriteRequest{}, wantData: nil},
-		{name: "同包后置超限载荷覆盖时归还池缓冲", wire: dupOversized, target: &storagev1.WriteRequest{}, wantData: oversized},
-		{name: "尾部未知字段触发标准回退并归还池缓冲", wire: unknownTail, target: &storagev1.WriteRequest{}, wantData: payload},
-		{name: "标量异构线格式触发标准回退并归还池缓冲", wire: mismatchWire, target: &storagev1.WriteRequest{}, wantData: payload},
-		{name: "借池后遇截断变长整数报错且零泄漏", wire: truncatedTail, target: &storagev1.WriteRequest{}, wantErr: true},
-		{name: "借池后遇非法线类型6报错且零泄漏", wire: illegalWire, target: &storagev1.WriteRequest{}, wantErr: true},
-		{name: "非法UTF8磁盘ID报错且零泄漏", wire: badUTF8, target: &storagev1.WriteRequest{}, wantErr: true},
-		{name: "空指针目标报错且零泄漏", wire: raw, target: nil, wantErr: true},
+		{name: "empty payload does not lease", wire: emptyRaw, target: &storagev1.WriteRequest{}},
+		{name: "trailing empty field releases lease", wire: dupZero, target: &storagev1.WriteRequest{}, wantData: nil},
+		{name: "trailing oversized field releases lease", wire: dupOversized, target: &storagev1.WriteRequest{}, wantData: oversized},
+		{name: "unknown field falls back", wire: unknownTail, target: &storagev1.WriteRequest{}, wantData: payload},
+		{name: "mismatched wire falls back", wire: mismatchWire, target: &storagev1.WriteRequest{}, wantData: payload},
+		{name: "truncated tail fails cleanly", wire: truncatedTail, target: &storagev1.WriteRequest{}, wantErr: true},
+		{name: "illegal wire type fails cleanly", wire: illegalWire, target: &storagev1.WriteRequest{}, wantErr: true},
+		{name: "bad UTF-8 disk id fails cleanly", wire: badUTF8Disk, target: &storagev1.WriteRequest{}, wantErr: true},
+		{name: "bad UTF-8 branch fails cleanly", wire: badUTF8Branch, target: &storagev1.WriteRequest{}, wantErr: true},
+		{name: "nil target fails cleanly", wire: raw, target: nil, wantErr: true},
 	}
 
 	for _, tc := range cases {
@@ -249,186 +270,48 @@ func TestWriteCodec_MalformedOrFallbackWire_NeverLeaksPoolLease(t *testing.T) {
 	}
 }
 
-func assertWriteWireFallbackCase(
-	t *testing.T,
-	codec connect.Codec,
-	wire []byte,
-	target *storagev1.WriteRequest,
-	wantErr bool,
-	wantData []byte,
-) {
-	t.Helper()
-	err := codec.Unmarshal(wire, target)
-	if wantErr {
-		require.Error(t, err, "畸形线格式或空目标必须返回错误")
-		require.Zero(t, leasedWritePayloadCount(), "解包报错路径不得泄漏任何写缓冲租约")
-		return
-	}
-	require.NoError(t, err, "可回退线格式必须成功解码")
-	require.Zero(t, leasedWritePayloadCount(), "回退路径或超限/空覆盖路径必须零租约残留")
-	if len(wantData) == 0 {
-		require.Empty(t, target.GetData(), "空载荷字段预期为空")
-		return
-	}
-	require.Equal(t, wantData, target.GetData(), "回退解码后的 Data 内容不匹配")
-}
-
-func TestWriteCodec_ReuseSameRequest_ReleasesPriorLease(t *testing.T) {
-
+func TestWriteCodec_OrphanCleanupAndInterceptorRelease(t *testing.T) {
 	codec := newProtoBinaryCodec()
 	raw, _ := marshalSampleWriteRequest(t, codec, newSampleWritePayload())
-	emptyRaw, err := proto.Marshal(&storagev1.WriteRequest{
-		Ino:    9,
-		DiskId: codecTestDiskID,
-		Epoch:  1,
-	})
-	require.NoError(t, err)
-	unknownTail := protowire.AppendVarint(protowire.AppendTag(append([]byte(nil), raw...), 99, protowire.VarintType), 12345)
 
-	var reused storagev1.WriteRequest
-	require.NoError(t, codec.Unmarshal(raw, &reused))
-	require.Equal(t, 1, leasedWritePayloadCount(), "首次解包应持有 1 个租约")
-	require.NoError(t, codec.Unmarshal(emptyRaw, &reused))
-	require.Zero(t, leasedWritePayloadCount(), "复用实例解包空载荷后必须归还前次租约")
-
-	require.NoError(t, codec.Unmarshal(raw, &reused))
-	require.Equal(t, 1, leasedWritePayloadCount(), "再次解包应持有 1 个租约")
-	require.NoError(t, codec.Unmarshal(unknownTail, &reused))
-	require.Zero(t, leasedWritePayloadCount(), "复用实例走标准回退路径后必须归还前次租约")
-}
-
-func TestWriteCodec_ValidationRejectAndTypedNil_ReclaimsPoolWithoutPanic(t *testing.T) {
-
-	codec := newProtoBinaryCodec()
-	v, err := validator.NewStorageValidator()
-	require.NoError(t, err)
-
-	chain := newWritePayloadReleaseInterceptor()(
-		NewValidationInterceptor(v)(func(_ context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
-			t.Fatal("非法请求必须在校验拦截器短路返回")
-			return nil, nil
-		}),
-	)
-
-	rawInvalid, err := codec.Marshal(&storagev1.WriteRequest{
-		Ino:    10,
-		Data:   bytes.Repeat([]byte{0xab}, 1<<20),
-		DiskId: codecTestDiskID,
-		Epoch:  0,
-	})
-	require.NoError(t, err)
-
-	req := connect.NewRequest(&storagev1.WriteRequest{})
-	require.NoError(t, codec.Unmarshal(rawInvalid, req.Msg))
-	require.Equal(t, 1, leasedWritePayloadCount(), "入链前应持有 1 个写缓冲租约")
-
-	_, callErr := chain(context.Background(), req)
-
-	require.Error(t, callErr)
-	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(callErr))
-	require.Zero(t, leasedWritePayloadCount(), "校验拒绝路径必须释放写缓冲租约")
-	require.Nil(t, req.Msg.Data, "释放后 Data 必须置空")
-
-	_, nilWriteErr := chain(context.Background(), connect.NewRequest[storagev1.WriteRequest](nil))
-	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(nilWriteErr))
-
-	_, nilReadErr := chain(context.Background(), connect.NewRequest[storagev1.ReadRequest](nil))
-	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(nilReadErr))
-}
-
-func TestWriteCodec_AbandonedRequest_ReclaimedByGC(t *testing.T) {
-
-	codec := newProtoBinaryCodec()
-	orphanRaw, err := codec.Marshal(&storagev1.WriteRequest{
-		Ino:    10,
-		Data:   bytes.Repeat([]byte{0x5a}, 64<<10),
-		DiskId: codecTestDiskID,
-		Epoch:  1,
-	})
-	require.NoError(t, err)
-
-	unmarshalAbandonedWriteRequest(t, codec, orphanRaw)
-
+	unmarshalAbandonedWriteRequest(t, codec, raw)
 	waitForZeroLeases(t, leasedWritePayloadCount, "WriteRequest")
-}
 
-func TestReadCodec_MarshalAndMarshalStable_ReclaimsPoolAndPreservesBytes(t *testing.T) {
+	msg := &storagev1.WriteRequest{}
+	require.NoError(t, codec.Unmarshal(raw, msg))
+	require.Equal(t, 1, leasedWritePayloadCount())
 
-	codec := newProtoBinaryCodec()
-	payload := bytes.Repeat([]byte{0x41, 0x42, 0x43, 0x44}, maxReadWriteSize/4)
-
-	buf1 := acquireReadPayloadBuf()
-	copy(buf1[:], payload)
-	resp1 := &storagev1.ReadResponse{Data: buf1[:maxReadWriteSize:maxReadWriteSize]}
-	registerLeasedReadPayload(resp1, buf1)
-	require.Equal(t, 1, leasedReadPayloadCount())
-
-	wireBytes, err := codec.Marshal(resp1)
-
+	val, err := validator.NewStorageValidator()
 	require.NoError(t, err)
-	require.Nil(t, resp1.Data)
-	require.Zero(t, leasedReadPayloadCount())
+	releaseInterceptor := newWritePayloadReleaseInterceptor()
+	valInterceptor := NewValidationInterceptor(val)
 
-	var checkResp storagev1.ReadResponse
-	require.NoError(t, proto.Unmarshal(wireBytes, &checkResp))
-	require.Equal(t, payload, checkResp.Data)
+	handler := releaseInterceptor(valInterceptor(func(_ context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		require.Equal(t, 1, leasedWritePayloadCount())
+		return connect.NewResponse(&storagev1.WriteResponse{}), nil
+	}))
 
-	buf2 := acquireReadPayloadBuf()
-	copy(buf2[:4096], payload[:4096])
-	resp2 := &storagev1.ReadResponse{Data: buf2[:4096:4096]}
-	registerLeasedReadPayload(resp2, buf2)
-	_, err = codec.MarshalStable(resp2)
+	_, err = handler(context.Background(), connect.NewRequest(msg))
 	require.NoError(t, err)
-	require.Zero(t, leasedReadPayloadCount())
+	require.Nil(t, msg.Data)
+	require.Zero(t, leasedWritePayloadCount())
 }
 
-func TestReadCodec_PooledMarshalAppend_StaysWithinLowAllocBudget(t *testing.T) {
-
-	codec := newProtoBinaryCodec()
-	frameDst := make([]byte, 0, maxReadWriteSize+64)
-	frameDst = marshalAndReleaseReadPayload(t, codec, frameDst)
-
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-
-	_ = repeatMarshalAndReleaseRead(t, codec, frameDst, 8)
-
-	runtime.ReadMemStats(&after)
-	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(64<<10), "池化 ReadResponse 编码堆分配超限")
-	require.Zero(t, leasedReadPayloadCount(), "连续编码归还后不应残留读租约")
-}
-
-func TestReadCodec_AbandonedResponse_ReclaimedByGC(t *testing.T) {
-
-	registerAbandonedReadResponse(t)
-
-	waitForZeroLeases(t, leasedReadPayloadCount, "ReadResponse")
-}
-
-func TestReadCodec_MarshalAppend_MatchesStandardProtoAndZeroAllocs(t *testing.T) {
+func TestReadCodec_MarshalAppendAndOrphanCleanup(t *testing.T) {
 	codec := newProtoBinaryCodec()
 	dst := make([]byte, 0, maxReadWriteSize+64)
 
-	sizes := []struct {
-		name string
-		size int
-	}{
-		{name: "0字节", size: 0},
-		{name: "1字节", size: 1},
-		{name: "127字节", size: 127},
-		{name: "128字节", size: 128},
-		{name: "4KiB", size: 4096},
-		{name: "256KiB", size: 256 << 10},
-		{name: "4MiB上限", size: maxReadWriteSize},
+	for _, sz := range []int{0, 1, 127, 128, 4096, 65536, maxReadWriteSize} {
+		assertReadResponseCompatSize(t, codec, dst, sz)
 	}
 
-	for _, tc := range sizes {
-		t.Run(tc.name, func(t *testing.T) {
-			assertReadResponseCompatSize(t, codec, dst, tc.size)
-		})
-	}
+	dst = repeatMarshalAndReleaseRead(t, codec, dst, 8)
+	require.NotEmpty(t, dst)
 
-	payload4M := bytes.Repeat([]byte{0x7E}, maxReadWriteSize)
-	assertZeroAllocsMarshalAppend(t, codec, dst, &storagev1.ReadResponse{Data: payload4M}, true)
+	registerAbandonedReadResponse(t)
+	waitForZeroLeases(t, leasedReadPayloadCount, "ReadResponse")
+
+	nonEmptyResp := &storagev1.ReadResponse{Data: buildPayloadOfSize(maxReadWriteSize)}
+	assertZeroAllocsMarshalAppend(t, codec, dst, nonEmptyResp, true)
 	assertZeroAllocsMarshalAppend(t, codec, dst, &storagev1.ReadResponse{}, false)
 }

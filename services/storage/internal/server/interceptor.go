@@ -29,27 +29,26 @@ const (
 
 	headerRequestID = "X-Request-Id"
 
-	attrKeyBowlDiskID       = "bowl.disk_id"
-	attrKeyBowlSourceDiskID = "bowl.source_disk_id"
-	attrKeyBowlEpoch        = "bowl.epoch"
-	attrKeyBowlIno          = "bowl.ino"
-	attrKeyBowlRequestID    = "bowl.request_id"
+	attrKeyBowlDiskID    = "bowl.disk_id"
+	attrKeyBowlBranch    = "bowl.branch"
+	attrKeyBowlEpoch     = "bowl.epoch"
+	attrKeyBowlIno       = "bowl.ino"
+	attrKeyBowlRequestID = "bowl.request_id"
 
-	logKeyDiskID       = "disk_id"
-	logKeySourceDiskID = "source_disk_id"
-	logKeyEpoch        = "epoch"
-	logKeyIno          = "ino"
-	logKeyRequestID    = "request_id"
+	logKeyDiskID    = "disk_id"
+	logKeyBranch    = "branch"
+	logKeyEpoch     = "epoch"
+	logKeyIno       = "ino"
+	logKeyRequestID = "request_id"
 )
 
 type (
-	diskIDGetter       interface{ GetDiskId() string }
-	targetDiskIDGetter interface{ GetTargetDiskId() string }
-	sourceDiskIDGetter interface{ GetSourceDiskId() string }
-	epochGetter        interface{ GetEpoch() uint64 }
-	inoGetter          interface{ GetIno() uint64 }
-	diskRespGetter     interface{ GetDisk() *storagev1.Disk }
-	inodeRespGetter    interface {
+	diskIDGetter    interface{ GetDiskId() string }
+	branchGetter    interface{ GetBranch() string }
+	epochGetter     interface{ GetEpoch() uint64 }
+	inoGetter       interface{ GetIno() uint64 }
+	diskRespGetter  interface{ GetDisk() *storagev1.Disk }
+	inodeRespGetter interface {
 		GetInode() *storagev1.Inode
 	}
 	rootInodeRespGetter interface {
@@ -83,20 +82,21 @@ func classifyStorageLogLevel(procedure string, code connect.Code, err error) slo
 	if err == nil {
 		switch procedure {
 		case storagev1connect.StorageServiceCreateDiskProcedure, "CreateDisk",
-			storagev1connect.StorageServiceForkDiskProcedure, "ForkDisk",
 			storagev1connect.StorageServiceUpdateDiskProcedure, "UpdateDisk",
 			storagev1connect.StorageServiceDeleteDiskProcedure, "DeleteDisk",
-			storagev1connect.StorageServiceMountDiskProcedure, "MountDisk",
-			storagev1connect.StorageServiceUnmountDiskProcedure, "UnmountDisk",
+			storagev1connect.StorageServiceMountBranchProcedure, "MountBranch",
+			storagev1connect.StorageServiceUnmountBranchProcedure, "UnmountBranch",
 			storagev1connect.StorageServiceEvictMountsProcedure, "EvictMounts",
-			storagev1connect.StorageServiceMergeDiskProcedure, "MergeDisk",
-			storagev1connect.StorageServiceCreateSnapshotProcedure, "CreateSnapshot",
-			storagev1connect.StorageServiceDeleteSnapshotProcedure, "DeleteSnapshot",
-			storagev1connect.StorageServicePruneSnapshotsProcedure, "PruneSnapshots",
+			storagev1connect.StorageServiceForkBranchProcedure, "ForkBranch",
+			storagev1connect.StorageServiceDeleteBranchProcedure, "DeleteBranch",
+			storagev1connect.StorageServiceResetBranchProcedure, "ResetBranch",
+			storagev1connect.StorageServiceMergeBranchProcedure, "MergeBranch",
+			storagev1connect.StorageServiceCreateCommitProcedure, "CreateCommit",
+			storagev1connect.StorageServiceDeleteCommitProcedure, "DeleteCommit",
+			storagev1connect.StorageServicePruneCommitsProcedure, "PruneCommits",
 			storagev1connect.StorageServiceReclaimOrphanProcedure, "ReclaimOrphan":
 			return slog.LevelInfo
 		default:
-
 			return slog.LevelDebug
 		}
 	}
@@ -116,23 +116,28 @@ func classifyStorageLogLevel(procedure string, code connect.Code, err error) slo
 func isControlPlaneProcedure(procedure string) bool {
 	switch procedure {
 	case storagev1connect.StorageServiceCreateDiskProcedure, "CreateDisk",
-		storagev1connect.StorageServiceForkDiskProcedure, "ForkDisk",
 		storagev1connect.StorageServiceGetDiskProcedure, "GetDisk",
 		storagev1connect.StorageServiceListDisksProcedure, "ListDisks",
 		storagev1connect.StorageServiceUpdateDiskProcedure, "UpdateDisk",
 		storagev1connect.StorageServiceDeleteDiskProcedure, "DeleteDisk",
-		storagev1connect.StorageServiceMountDiskProcedure, "MountDisk",
+		storagev1connect.StorageServiceMountBranchProcedure, "MountBranch",
 		storagev1connect.StorageServiceRenewMountProcedure, "RenewMount",
-		storagev1connect.StorageServiceUnmountDiskProcedure, "UnmountDisk",
+		storagev1connect.StorageServiceUnmountBranchProcedure, "UnmountBranch",
 		storagev1connect.StorageServiceListMountsProcedure, "ListMounts",
 		storagev1connect.StorageServiceEvictMountsProcedure, "EvictMounts",
-		storagev1connect.StorageServiceDiffDiskProcedure, "DiffDisk",
-		storagev1connect.StorageServiceReadSnapshotNodeProcedure, "ReadSnapshotNode",
-		storagev1connect.StorageServiceMergeDiskProcedure, "MergeDisk",
-		storagev1connect.StorageServiceCreateSnapshotProcedure, "CreateSnapshot",
-		storagev1connect.StorageServiceListSnapshotsProcedure, "ListSnapshots",
-		storagev1connect.StorageServiceDeleteSnapshotProcedure, "DeleteSnapshot",
-		storagev1connect.StorageServicePruneSnapshotsProcedure, "PruneSnapshots",
+		storagev1connect.StorageServiceForkBranchProcedure, "ForkBranch",
+		storagev1connect.StorageServiceListBranchesProcedure, "ListBranches",
+		storagev1connect.StorageServiceDeleteBranchProcedure, "DeleteBranch",
+		storagev1connect.StorageServiceResetBranchProcedure, "ResetBranch",
+		storagev1connect.StorageServiceMergeBranchProcedure, "MergeBranch",
+		storagev1connect.StorageServiceCreateCommitProcedure, "CreateCommit",
+		storagev1connect.StorageServiceListCommitsProcedure, "ListCommits",
+		storagev1connect.StorageServiceDeleteCommitProcedure, "DeleteCommit",
+		storagev1connect.StorageServicePruneCommitsProcedure, "PruneCommits",
+		storagev1connect.StorageServiceReadCommitNodeProcedure, "ReadCommitNode",
+		storagev1connect.StorageServiceDiffBranchesProcedure, "DiffBranches",
+		storagev1connect.StorageServiceDiffCommitsProcedure, "DiffCommits",
+		storagev1connect.StorageServiceDiffWorkProcedure, "DiffWork",
 		storagev1connect.StorageServiceReclaimOrphanProcedure, "ReclaimOrphan":
 		return true
 	default:
@@ -140,19 +145,14 @@ func isControlPlaneProcedure(procedure string) bool {
 	}
 }
 
-func extractStorageFields(req connect.AnyRequest, res connect.AnyResponse, err error) (diskID, sourceDiskID string, epoch, ino uint64) {
+func extractStorageFields(req connect.AnyRequest, res connect.AnyResponse, err error) (diskID, branch string, epoch, ino uint64) {
 	if req != nil {
 		msg := req.Any()
 		if g, ok := msg.(diskIDGetter); ok {
 			diskID = g.GetDiskId()
 		}
-		if diskID == "" {
-			if g, ok := msg.(targetDiskIDGetter); ok {
-				diskID = g.GetTargetDiskId()
-			}
-		}
-		if g, ok := msg.(sourceDiskIDGetter); ok {
-			sourceDiskID = g.GetSourceDiskId()
+		if g, ok := msg.(branchGetter); ok {
+			branch = g.GetBranch()
 		}
 		if g, ok := msg.(epochGetter); ok {
 			epoch = g.GetEpoch()
@@ -182,7 +182,7 @@ func extractStorageFields(req connect.AnyRequest, res connect.AnyResponse, err e
 			}
 		}
 	}
-	return diskID, sourceDiskID, epoch, ino
+	return diskID, branch, epoch, ino
 }
 
 func extractRequestID(req connect.AnyRequest) string {
@@ -193,17 +193,17 @@ func extractRequestID(req connect.AnyRequest) string {
 }
 
 func extractStorageAttrs(_ context.Context, req connect.AnyRequest, res connect.AnyResponse, err error) []slog.Attr {
-	diskID, sourceDiskID, epoch, ino := extractStorageFields(req, res, err)
+	diskID, branch, epoch, ino := extractStorageFields(req, res, err)
 	reqID := extractRequestID(req)
-	if diskID == "" && sourceDiskID == "" && epoch == 0 && ino == 0 && reqID == "" {
+	if diskID == "" && branch == "" && epoch == 0 && ino == 0 && reqID == "" {
 		return nil
 	}
 	attrs := make([]slog.Attr, 0, 5)
 	if diskID != "" {
 		attrs = append(attrs, slog.String(logKeyDiskID, diskID))
 	}
-	if sourceDiskID != "" {
-		attrs = append(attrs, slog.String(logKeySourceDiskID, sourceDiskID))
+	if branch != "" {
+		attrs = append(attrs, slog.String(logKeyBranch, branch))
 	}
 	if epoch != 0 {
 		attrs = append(attrs, slog.Uint64(logKeyEpoch, epoch))
@@ -243,7 +243,7 @@ func newStorageObservabilityInterceptorWithClock(
 			duration := now().Sub(start)
 
 			if span := trace.SpanFromContext(ctx); span.IsRecording() {
-				diskID, sourceDiskID, epoch, ino := extractStorageFields(req, res, err)
+				diskID, branch, epoch, ino := extractStorageFields(req, res, err)
 				reqID := extractRequestID(req)
 				var kv [5]attribute.KeyValue
 				n := 0
@@ -251,8 +251,8 @@ func newStorageObservabilityInterceptorWithClock(
 					kv[n] = attribute.String(attrKeyBowlDiskID, diskID)
 					n++
 				}
-				if sourceDiskID != "" {
-					kv[n] = attribute.String(attrKeyBowlSourceDiskID, sourceDiskID)
+				if branch != "" {
+					kv[n] = attribute.String(attrKeyBowlBranch, branch)
 					n++
 				}
 				if epoch != 0 && epoch <= math.MaxInt64 {
@@ -303,7 +303,7 @@ func logSlowStorageRPC(
 	if err != nil {
 		code = connect.CodeOf(err).String()
 	}
-	attrs := make([]slog.Attr, 0, 7)
+	attrs := make([]slog.Attr, 0, 8)
 	attrs = append(attrs,
 		slog.String(slogx.DefaultProcedureKey, procedure),
 		slog.Duration(slogx.DefaultDurationKey, duration),

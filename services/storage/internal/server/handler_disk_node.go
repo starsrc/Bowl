@@ -6,73 +6,193 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	storagev1 "github.com/starsrc/bowl/gen/go/storage/v1"
-	"github.com/starsrc/bowl/services/storage/internal/control"
-	"github.com/starsrc/bowl/services/storage/internal/store"
+	"github.com/starsrc/bowl/services/storage/internal/engine"
+	"github.com/starsrc/bowl/services/storage/internal/projection"
 )
+
+func parseRequiredUUID(raw string) (uuid.UUID, error) {
+	id, err := uuid.Parse(raw)
+	if err != nil || id == uuid.Nil {
+		return uuid.Nil, engine.ErrInvalid
+	}
+	return id, nil
+}
+
+func parseOptionalUUID(raw *string) (uuid.UUID, error) {
+	if raw == nil || *raw == "" {
+		return uuid.Nil, nil
+	}
+	return parseRequiredUUID(*raw)
+}
 
 func validateWriteEpoch(epoch uint64) error {
 	if epoch == 0 || epoch > math.MaxInt64 {
-		return store.ErrInvalid
+		return engine.ErrInvalid
 	}
 	return nil
 }
 
-func toProtoAttribute(attr *store.Attribute) *storagev1.InodeAttribute {
+func toProtoAttribute(inode engine.Inode) *storagev1.InodeAttribute {
+	size := inode.Size
+	fileType := inode.Mode & engine.ModeTypeMask
+	if fileType == engine.ModeDir && size == 0 {
+		size = engine.DefaultDirSize
+	}
+	var blocks uint64
+	switch fileType {
+	case engine.ModeDir, engine.ModeRegular, engine.ModeSymlink:
+		blocks = (size + 511) / 512
+	}
+	var rdev uint32
+	if fileType == engine.ModeChar || fileType == engine.ModeBlock {
+		rdev = inode.Rdev
+	}
 	return &storagev1.InodeAttribute{
-		Mode:    attr.Mode,
-		Size:    attr.Size,
-		Nlink:   attr.Nlink,
-		Uid:     attr.UID,
-		Gid:     attr.GID,
-		Rdev:    attr.Rdev,
-		Blksize: attr.Blksize,
-		Blocks:  attr.Blocks,
-		Atime:   timestamppb.New(time.Unix(0, attr.Atime).UTC()),
-		Mtime:   timestamppb.New(time.Unix(0, attr.Mtime).UTC()),
-		Ctime:   timestamppb.New(time.Unix(0, attr.Ctime).UTC()),
-		Flags:   attr.Flags,
+		Mode:    inode.Mode,
+		Size:    size,
+		Nlink:   inode.Nlink,
+		Uid:     inode.UID,
+		Gid:     inode.GID,
+		Rdev:    rdev,
+		Blksize: engine.DefaultBlockSize,
+		Blocks:  blocks,
+		Atime:   timestamppb.New(time.Unix(0, inode.Atime).UTC()),
+		Mtime:   timestamppb.New(time.Unix(0, inode.Mtime).UTC()),
+		Ctime:   timestamppb.New(time.Unix(0, inode.Ctime).UTC()),
+		Flags:   inode.Flags &^ engine.InodeFlagEverLinked,
 	}
 }
 
-func toProtoInode(attr *store.Attribute) *storagev1.Inode {
-	if attr == nil {
-		return nil
-	}
+func toProtoInode(inode engine.Inode) *storagev1.Inode {
 	return &storagev1.Inode{
-		Ino:        attr.Ino,
-		Generation: attr.Generation,
-		Attr:       toProtoAttribute(attr),
+		Ino:        inode.Ino,
+		Generation: inode.Generation,
+		Attr:       toProtoAttribute(inode),
 	}
 }
 
-func toProtoDisk(d *control.Disk) *storagev1.Disk {
-	if d == nil {
-		return nil
+func toProtoDisk(d projection.DiskRecord) *storagev1.Disk {
+	return &storagev1.Disk{
+		DiskId:        d.DiskID.String(),
+		Name:          d.Name,
+		DefaultBranch: d.DefaultBranch,
+		MaxBytes:      d.MaxBytes,
+		UsedBytes:     d.UsedBytes,
+		CreatedAt:     timestamppb.New(d.CreatedAt),
+		UpdatedAt:     timestamppb.New(d.UpdatedAt),
 	}
-	pb := &storagev1.Disk{
-		DiskId:     d.DiskID,
-		Name:       d.Name,
-		RootIno:    d.RootIno,
-		MaxBytes:   d.MaxBytes,
-		UsedBytes:  d.UsedBytes,
-		UsedInodes: d.UsedInodes,
-		CreatedAt:  timestamppb.New(d.CreatedAt),
-		UpdatedAt:  timestamppb.New(d.UpdatedAt),
+}
+
+func toProtoBranch(b projection.BranchRecord) *storagev1.Branch {
+	return &storagev1.Branch{
+		DiskId:       b.DiskID.String(),
+		Name:         b.Name,
+		HeadCommitId: b.HeadCommitID,
+		WriterEpoch:  b.WriterEpoch,
+		CreatedAt:    timestamppb.New(b.CreatedAt),
+		UpdatedAt:    timestamppb.New(b.UpdatedAt),
 	}
-	if d.ParentDiskID != "" {
-		pb.ParentDiskId = &d.ParentDiskID
+}
+
+func toProtoBranchFromEngine(diskID uuid.UUID, b engine.BranchMeta) *storagev1.Branch {
+	return &storagev1.Branch{
+		DiskId:       diskID.String(),
+		Name:         b.Name,
+		HeadCommitId: b.HeadCommitID,
+		WriterEpoch:  b.WriterEpoch,
+		CreatedAt:    timestamppb.New(time.Unix(0, b.CreatedAt).UTC().Truncate(time.Microsecond)),
+		UpdatedAt:    timestamppb.New(time.Unix(0, b.UpdatedAt).UTC().Truncate(time.Microsecond)),
 	}
-	return pb
+}
+
+func toProtoCommitKind(kind string) storagev1.CommitKind {
+	switch kind {
+	case projection.CommitKindInit:
+		return storagev1.CommitKind_COMMIT_KIND_INIT
+	case projection.CommitKindManual:
+		return storagev1.CommitKind_COMMIT_KIND_MANUAL
+	case projection.CommitKindFork:
+		return storagev1.CommitKind_COMMIT_KIND_FORK
+	case projection.CommitKindMerge:
+		return storagev1.CommitKind_COMMIT_KIND_MERGE
+	default:
+		return storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED
+	}
+}
+
+func toProtoCommitKindFromEngine(kind engine.CommitKind) storagev1.CommitKind {
+	switch kind {
+	case engine.CommitKindInit:
+		return storagev1.CommitKind_COMMIT_KIND_INIT
+	case engine.CommitKindManual:
+		return storagev1.CommitKind_COMMIT_KIND_MANUAL
+	case engine.CommitKindFork:
+		return storagev1.CommitKind_COMMIT_KIND_FORK
+	case engine.CommitKindMerge:
+		return storagev1.CommitKind_COMMIT_KIND_MERGE
+	default:
+		return storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED
+	}
+}
+
+func toProjectionCommitKind(kind storagev1.CommitKind) (string, error) {
+	switch kind {
+	case storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED:
+		return "", nil
+	case storagev1.CommitKind_COMMIT_KIND_INIT:
+		return projection.CommitKindInit, nil
+	case storagev1.CommitKind_COMMIT_KIND_MANUAL:
+		return projection.CommitKindManual, nil
+	case storagev1.CommitKind_COMMIT_KIND_FORK:
+		return projection.CommitKindFork, nil
+	case storagev1.CommitKind_COMMIT_KIND_MERGE:
+		return projection.CommitKindMerge, nil
+	default:
+		return "", projection.ErrInvalidArgument
+	}
+}
+
+func toProtoCommit(c projection.CommitRecord) *storagev1.Commit {
+	return &storagev1.Commit{
+		DiskId:        c.DiskID.String(),
+		CommitId:      c.CommitID,
+		ParentId:      c.ParentID,
+		MergeParentId: c.MergeParentID,
+		Kind:          toProtoCommitKind(c.Kind),
+		Message:       c.Message,
+		CreatedAt:     timestamppb.New(c.CreatedAt),
+	}
+}
+
+func toProtoCommitFromEngine(diskID uuid.UUID, c engine.CommitMeta) *storagev1.Commit {
+	return &storagev1.Commit{
+		DiskId:        diskID.String(),
+		CommitId:      c.ID,
+		ParentId:      c.ParentID,
+		MergeParentId: c.MergeParentID,
+		Kind:          toProtoCommitKindFromEngine(c.Kind),
+		Message:       c.Message,
+		CreatedAt:     timestamppb.New(time.Unix(0, c.CreatedAt).UTC().Truncate(time.Microsecond)),
+	}
+}
+
+func toProtoMountLease(m projection.MountRecord) *storagev1.MountLease {
+	return &storagev1.MountLease{
+		MountId:   m.MountID.String(),
+		Branch:    m.BranchName,
+		ReadOnly:  m.ReadOnly,
+		Epoch:     m.WriterEpoch,
+		MountedAt: timestamppb.New(m.MountedAt),
+		ExpiresAt: timestamppb.New(m.ExpiresAt),
+	}
 }
 
 func (s *Server) CreateDisk(ctx context.Context, req *connect.Request[storagev1.CreateDiskRequest]) (*connect.Response[storagev1.CreateDiskResponse], error) {
-	disk, err := s.control.CreateDisk(ctx, control.CreateDiskParams{
-		Name:     req.Msg.Name,
-		MaxBytes: req.Msg.MaxBytes,
-	})
+	disk, err := s.manager.CreateDisk(ctx, req.Msg.Name, req.Msg.MaxBytes)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -81,22 +201,12 @@ func (s *Server) CreateDisk(ctx context.Context, req *connect.Request[storagev1.
 	}), nil
 }
 
-func (s *Server) ForkDisk(ctx context.Context, req *connect.Request[storagev1.ForkDiskRequest]) (*connect.Response[storagev1.ForkDiskResponse], error) {
-	disk, err := s.control.ForkDisk(ctx, control.ForkDiskParams{
-		SourceDiskID: req.Msg.SourceDiskId,
-		Name:         req.Msg.Name,
-		MaxBytes:     req.Msg.MaxBytes,
-	})
+func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	return connect.NewResponse(&storagev1.ForkDiskResponse{
-		Disk: toProtoDisk(disk),
-	}), nil
-}
-
-func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.GetDiskRequest]) (*connect.Response[storagev1.GetDiskResponse], error) {
-	disk, err := s.control.GetDisk(ctx, req.Msg.DiskId)
+	disk, err := s.manager.GetDisk(ctx, diskID)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -106,29 +216,29 @@ func (s *Server) GetDisk(ctx context.Context, req *connect.Request[storagev1.Get
 }
 
 func (s *Server) ListDisks(ctx context.Context, req *connect.Request[storagev1.ListDisksRequest]) (*connect.Response[storagev1.ListDisksResponse], error) {
-	res, err := s.control.ListDisks(ctx, control.ListDisksParams{
+	page, err := s.manager.ListDisks(ctx, projection.ListDisksQuery{
 		PageSize:  req.Msg.PageSize,
 		PageToken: req.Msg.PageToken,
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	protoDisks := make([]*storagev1.Disk, 0, len(res.Disks))
-	for _, d := range res.Disks {
-		protoDisks = append(protoDisks, toProtoDisk(d))
+	disks := make([]*storagev1.Disk, 0, len(page.Disks))
+	for _, d := range page.Disks {
+		disks = append(disks, toProtoDisk(d))
 	}
 	return connect.NewResponse(&storagev1.ListDisksResponse{
-		Disks:         protoDisks,
-		NextPageToken: res.NextPageToken,
+		Disks:         disks,
+		NextPageToken: page.NextPageToken,
 	}), nil
 }
 
 func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.UpdateDiskRequest]) (*connect.Response[storagev1.UpdateDiskResponse], error) {
-	disk, err := s.control.UpdateDisk(ctx, control.UpdateDiskParams{
-		DiskID:   req.Msg.DiskId,
-		Name:     req.Msg.Name,
-		MaxBytes: req.Msg.MaxBytes,
-	})
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	disk, err := s.manager.UpdateDisk(ctx, diskID, req.Msg.Name, req.Msg.MaxBytes)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -138,72 +248,87 @@ func (s *Server) UpdateDisk(ctx context.Context, req *connect.Request[storagev1.
 }
 
 func (s *Server) DeleteDisk(ctx context.Context, req *connect.Request[storagev1.DeleteDiskRequest]) (*connect.Response[storagev1.DeleteDiskResponse], error) {
-	if err := s.control.DeleteDisk(ctx, control.DeleteDiskParams{
-		DiskID:    req.Msg.DiskId,
-		Recursive: req.Msg.Recursive,
-	}); err != nil {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	if err = s.manager.DeleteDisk(ctx, diskID); err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.DeleteDiskResponse{}), nil
 }
 
-func (s *Server) MountDisk(ctx context.Context, req *connect.Request[storagev1.MountDiskRequest]) (*connect.Response[storagev1.MountDiskResponse], error) {
-	res, err := s.control.MountDisk(ctx, control.MountDiskParams{
-		DiskID:   req.Msg.DiskId,
-		ReadOnly: req.Msg.ReadOnly,
-		Force:    req.Msg.Force,
-	})
+func (s *Server) MountBranch(ctx context.Context, req *connect.Request[storagev1.MountBranchRequest]) (*connect.Response[storagev1.MountBranchResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	return connect.NewResponse(&storagev1.MountDiskResponse{
-		Epoch:               res.Epoch,
-		RootInode:           toProtoInode(&res.RootAttr),
-		EntryTimeoutSeconds: res.EntryTimeoutSeconds,
-		AttrTimeoutSeconds:  res.AttrTimeoutSeconds,
-		MountId:             res.MountID,
-		LeaseTtlSeconds:     res.LeaseTTLSeconds,
+	mountRec, err := s.manager.MountBranch(ctx, diskID, req.Msg.Branch, req.Msg.ReadOnly, req.Msg.Force)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	var rootInode engine.Inode
+	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var attrErr error
+		rootInode, attrErr = ds.GetAttr(ctx, req.Msg.Branch, engine.RootIno)
+		return attrErr
+	}); err != nil {
+		return nil, toConnectError(err)
+	}
+	return connect.NewResponse(&storagev1.MountBranchResponse{
+		Epoch:               mountRec.WriterEpoch,
+		RootInode:           toProtoInode(rootInode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(rootInode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
+		MountId:             mountRec.MountID.String(),
+		LeaseTtlSeconds:     s.leaseTTLSeconds(),
 	}), nil
 }
 
 func (s *Server) RenewMount(ctx context.Context, req *connect.Request[storagev1.RenewMountRequest]) (*connect.Response[storagev1.RenewMountResponse], error) {
-	res, err := s.control.RenewMount(ctx, control.RenewMountParams{
-		DiskID:   req.Msg.DiskId,
-		MountID:  req.Msg.MountId,
-		ReadOnly: req.Msg.ReadOnly,
-		Epoch:    req.Msg.Epoch,
-	})
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
+	mountID, err := parseRequiredUUID(req.Msg.MountId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	if _, err = s.manager.RenewMount(ctx, diskID, req.Msg.Branch, mountID, req.Msg.ReadOnly, req.Msg.Epoch); err != nil {
+		return nil, toConnectError(err)
+	}
 	return connect.NewResponse(&storagev1.RenewMountResponse{
-		LeaseTtlSeconds: res.LeaseTTLSeconds,
+		LeaseTtlSeconds: s.leaseTTLSeconds(),
 	}), nil
 }
 
-func (s *Server) UnmountDisk(ctx context.Context, req *connect.Request[storagev1.UnmountDiskRequest]) (*connect.Response[storagev1.UnmountDiskResponse], error) {
-	if err := s.control.UnmountDisk(ctx, control.UnmountDiskParams{
-		DiskID:  req.Msg.DiskId,
-		MountID: req.Msg.MountId,
-	}); err != nil {
+func (s *Server) UnmountBranch(ctx context.Context, req *connect.Request[storagev1.UnmountBranchRequest]) (*connect.Response[storagev1.UnmountBranchResponse], error) {
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
 		return nil, toConnectError(err)
 	}
-	return connect.NewResponse(&storagev1.UnmountDiskResponse{}), nil
+	mountID, err := parseRequiredUUID(req.Msg.MountId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	if err = s.manager.UnmountBranch(ctx, diskID, mountID); err != nil {
+		return nil, toConnectError(err)
+	}
+	return connect.NewResponse(&storagev1.UnmountBranchResponse{}), nil
 }
 
 func (s *Server) ListMounts(ctx context.Context, req *connect.Request[storagev1.ListMountsRequest]) (*connect.Response[storagev1.ListMountsResponse], error) {
-	leases, err := s.control.ListMounts(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	leases, err := s.manager.ListMounts(ctx, diskID, req.Msg.Branch)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	mounts := make([]*storagev1.MountLease, 0, len(leases))
 	for _, lease := range leases {
-		mounts = append(mounts, &storagev1.MountLease{
-			MountId:   lease.MountID,
-			ReadOnly:  lease.ReadOnly,
-			Epoch:     lease.Epoch,
-			ExpiresAt: timestamppb.New(lease.ExpiresAt),
-		})
+		mounts = append(mounts, toProtoMountLease(lease))
 	}
 	return connect.NewResponse(&storagev1.ListMountsResponse{
 		Mounts: mounts,
@@ -211,31 +336,42 @@ func (s *Server) ListMounts(ctx context.Context, req *connect.Request[storagev1.
 }
 
 func (s *Server) EvictMounts(ctx context.Context, req *connect.Request[storagev1.EvictMountsRequest]) (*connect.Response[storagev1.EvictMountsResponse], error) {
-	res, err := s.control.EvictMounts(ctx, control.EvictMountsParams{
-		DiskID:  req.Msg.DiskId,
-		MountID: req.Msg.GetMountId(),
-	})
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
+	mountID, err := parseOptionalUUID(req.Msg.MountId)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	res, err := s.manager.EvictMounts(ctx, diskID, req.Msg.Branch, mountID)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	updatedBranches := make([]*storagev1.Branch, 0, len(res.UpdatedBranches))
+	for _, br := range res.UpdatedBranches {
+		updatedBranches = append(updatedBranches, toProtoBranchFromEngine(diskID, br))
+	}
 	return connect.NewResponse(&storagev1.EvictMountsResponse{
-		EvictedCount: res.EvictedCount,
-		WriterEpoch:  res.WriterEpoch,
+		EvictedCount:    res.EvictedCount,
+		UpdatedBranches: updatedBranches,
 	}), nil
 }
 
 func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.StatFSRequest]) (*connect.Response[storagev1.StatFSResponse], error) {
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	if _, err = actor.GetAttr(ctx, req.Msg.Ino); err != nil {
-		return nil, toConnectError(err)
-	}
-	res, err := actor.StatFS(ctx)
+	var res engine.StatFSResult
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		if _, attrErr := ds.GetAttr(ctx, req.Msg.Branch, req.Msg.Ino); attrErr != nil {
+			return attrErr
+		}
+		var stErr error
+		res, stErr = ds.StatFS(ctx)
+		return stErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
@@ -255,39 +391,43 @@ func (s *Server) StatFS(ctx context.Context, req *connect.Request[storagev1.Stat
 }
 
 func (s *Server) Lookup(ctx context.Context, req *connect.Request[storagev1.LookupRequest]) (*connect.Response[storagev1.LookupResponse], error) {
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	_, attr, err := actor.Lookup(ctx, req.Msg.ParentIno, req.Msg.Name)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var lErr error
+		_, inode, lErr = ds.Lookup(ctx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name))
+		return lErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.LookupResponse{
-		Inode:               toProtoInode(&attr),
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		Inode:               toProtoInode(inode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
 func (s *Server) GetAttr(ctx context.Context, req *connect.Request[storagev1.GetAttrRequest]) (*connect.Response[storagev1.GetAttrResponse], error) {
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.GetAttr(ctx, req.Msg.Ino)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var gErr error
+		inode, gErr = ds.GetAttr(ctx, req.Msg.Branch, req.Msg.Ino)
+		return gErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.GetAttrResponse{
-		Inode:              toProtoInode(&attr),
-		AttrTimeoutSeconds: s.control.AttrTimeoutSeconds(),
+		Inode:              toProtoInode(inode),
+		AttrTimeoutSeconds: s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -296,16 +436,13 @@ func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.Set
 		return nil, toConnectError(err)
 	}
 	if req.Msg.Fh != nil && (*req.Msg.Fh == 0 || *req.Msg.Fh > math.MaxInt64) {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	input := store.SetAttrReq{
+	input := engine.SetAttrReq{
 		Mode:     req.Msg.Mode,
 		UID:      req.Msg.Uid,
 		GID:      req.Msg.Gid,
@@ -314,24 +451,29 @@ func (s *Server) SetAttr(ctx context.Context, req *connect.Request[storagev1.Set
 		MtimeNow: req.Msg.MtimeNow,
 		CtimeNow: req.Msg.CtimeNow,
 		Flags:    req.Msg.Flags,
-		Epoch:    req.Msg.Epoch,
 	}
 	if req.Msg.Atime != nil {
-		atime := req.Msg.Atime.AsTime()
-		input.Atime = &atime
+		ns := req.Msg.Atime.AsTime().UnixNano()
+		input.Atime = &ns
 	}
 	if req.Msg.Mtime != nil {
-		mtime := req.Msg.Mtime.AsTime()
-		input.Mtime = &mtime
+		ns := req.Msg.Mtime.AsTime().UnixNano()
+		input.Mtime = &ns
 	}
 
-	attr, err := actor.SetAttr(ctx, req.Msg.Ino, input, req.Msg.Epoch)
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var sErr error
+		inode, sErr = ds.SetAttr(epochCtx, req.Msg.Branch, req.Msg.Ino, input)
+		return sErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.SetAttrResponse{
-		Inode:              toProtoInode(&attr),
-		AttrTimeoutSeconds: s.control.AttrTimeoutSeconds(),
+		Inode:              toProtoInode(inode),
+		AttrTimeoutSeconds: s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -340,31 +482,26 @@ func (s *Server) Mknod(ctx context.Context, req *connect.Request[storagev1.Mknod
 		return nil, toConnectError(err)
 	}
 	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.Mknod(ctx, store.MknodReq{
-		ParentIno: req.Msg.ParentIno,
-		Name:      req.Msg.Name,
-		Mode:      req.Msg.Mode,
-		UID:       req.Msg.Uid,
-		GID:       req.Msg.Gid,
-		Rdev:      req.Msg.Rdev,
-		Epoch:     req.Msg.Epoch,
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var mErr error
+		inode, mErr = ds.Mknod(epochCtx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name), req.Msg.Mode, req.Msg.Uid, req.Msg.Gid, req.Msg.Rdev)
+		return mErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.MknodResponse{
-		Inode:               toProtoInode(&attr),
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		Inode:               toProtoInode(inode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -373,30 +510,26 @@ func (s *Server) Mkdir(ctx context.Context, req *connect.Request[storagev1.Mkdir
 		return nil, toConnectError(err)
 	}
 	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.Mkdir(ctx, store.MkdirReq{
-		ParentIno: req.Msg.ParentIno,
-		Name:      req.Msg.Name,
-		Mode:      req.Msg.Mode,
-		UID:       req.Msg.Uid,
-		GID:       req.Msg.Gid,
-		Epoch:     req.Msg.Epoch,
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var mErr error
+		inode, mErr = ds.Mkdir(epochCtx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name), req.Msg.Mode, req.Msg.Uid, req.Msg.Gid)
+		return mErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.MkdirResponse{
-		Inode:               toProtoInode(&attr),
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		Inode:               toProtoInode(inode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
@@ -405,42 +538,40 @@ func (s *Server) Symlink(ctx context.Context, req *connect.Request[storagev1.Sym
 		return nil, toConnectError(err)
 	}
 	if req.Msg.Uid > math.MaxInt32 || req.Msg.Gid > math.MaxInt32 {
-		return nil, toConnectError(store.ErrInvalid)
+		return nil, toConnectError(engine.ErrInvalid)
 	}
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	attr, err := actor.Symlink(ctx, store.SymlinkReq{
-		ParentIno: req.Msg.ParentIno,
-		Name:      req.Msg.Name,
-		Target:    req.Msg.Target,
-		UID:       req.Msg.Uid,
-		GID:       req.Msg.Gid,
-		Epoch:     req.Msg.Epoch,
+	epochCtx := engine.WithWriterEpoch(ctx, req.Msg.Epoch)
+	var inode engine.Inode
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var sErr error
+		inode, sErr = ds.Symlink(epochCtx, req.Msg.Branch, req.Msg.ParentIno, string(req.Msg.Name), string(req.Msg.Target), req.Msg.Uid, req.Msg.Gid)
+		return sErr
 	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}
 	return connect.NewResponse(&storagev1.SymlinkResponse{
-		Inode:               toProtoInode(&attr),
-		EntryTimeoutSeconds: s.control.EntryTimeoutForMode(attr.Mode),
-		AttrTimeoutSeconds:  s.control.AttrTimeoutSeconds(),
+		Inode:               toProtoInode(inode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(inode.Mode),
+		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
 	}), nil
 }
 
 func (s *Server) Readlink(ctx context.Context, req *connect.Request[storagev1.ReadlinkRequest]) (*connect.Response[storagev1.ReadlinkResponse], error) {
-	actor, err := s.control.Actor(ctx, req.Msg.DiskId)
+	diskID, err := parseRequiredUUID(req.Msg.DiskId)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, toConnectError(ctxErr)
-	}
-	target, err := actor.Readlink(ctx, req.Msg.Ino)
+	var target []byte
+	err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
+		var rErr error
+		target, rErr = ds.Readlink(ctx, req.Msg.Branch, req.Msg.Ino)
+		return rErr
+	})
 	if err != nil {
 		return nil, toConnectError(err)
 	}

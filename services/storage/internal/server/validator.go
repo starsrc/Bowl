@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"math"
+	"strings"
 
 	"buf.build/go/protovalidate"
 	"connectrpc.com/connect"
@@ -36,6 +37,10 @@ func isValidNonNilUUID(s string) bool {
 	return nonZero
 }
 
+func isValidRequiredBranch(s string) bool {
+	return len(s) >= 1 && len(s) <= 255 && !strings.ContainsRune(s, '\x00')
+}
+
 func isValidFastPathDataReq(anyMsg any) bool {
 	switch m := anyMsg.(type) {
 	case *storagev1.WriteRequest:
@@ -49,7 +54,8 @@ func isValidFastPathDataReq(anyMsg any) bool {
 			dataLen <= maxReadWriteSize &&
 			m.Offset <= uint64(math.MaxInt64)-dataLen &&
 			m.Epoch > 0 && m.Epoch <= math.MaxInt64 &&
-			isValidNonNilUUID(m.DiskId)
+			isValidNonNilUUID(m.DiskId) &&
+			isValidRequiredBranch(m.Branch)
 	case *storagev1.ReadRequest:
 		if m == nil {
 			return false
@@ -58,7 +64,8 @@ func isValidFastPathDataReq(anyMsg any) bool {
 			m.Fh <= math.MaxInt64 &&
 			m.Offset <= math.MaxInt64 &&
 			m.Size <= maxReadWriteSize &&
-			isValidNonNilUUID(m.DiskId)
+			isValidNonNilUUID(m.DiskId) &&
+			isValidRequiredBranch(m.Branch)
 	default:
 		return false
 	}

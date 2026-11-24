@@ -669,6 +669,45 @@ func (d *DiskStore) GetCommit(commitID uint64) (CommitMeta, error) {
 	return meta, nil
 }
 
+type DiskMetricsSnapshot struct {
+	UsedBytes          uint64
+	Inodes             uint64
+	ActiveBranchActors int
+	Pebble             *pebble.Metrics
+}
+
+func (d *DiskStore) allocatedInodes() uint64 {
+	cur := d.nextIno.Load()
+	if cur <= RootIno {
+		return 1
+	}
+	return cur - 1
+}
+
+func (d *DiskStore) MetricsSnapshot() DiskMetricsSnapshot {
+	if d.closing.Load() {
+		return DiskMetricsSnapshot{}
+	}
+	d.actorsMu.Lock()
+	branchCount := len(d.branchActors)
+	d.actorsMu.Unlock()
+
+	var used uint64
+	if d.packs != nil {
+		used = d.packs.PhysicalBytes()
+	}
+	var pm *pebble.Metrics
+	if d.db != nil && !d.closing.Load() {
+		pm = d.db.Metrics()
+	}
+	return DiskMetricsSnapshot{
+		UsedBytes:          used,
+		Inodes:             d.allocatedInodes(),
+		ActiveBranchActors: branchCount,
+		Pebble:             pm,
+	}
+}
+
 func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
 	if d.closing.Load() {
 		return StatFSResult{}, ErrClosed
@@ -694,6 +733,8 @@ func (d *DiskStore) StatFS(_ context.Context) (StatFSResult, error) {
 		Blocks:     blocks,
 		Bfree:      bavail,
 		Bavail:     bavail,
+		Files:      d.allocatedInodes(),
+		Ffree:      0,
 		Namelen:    MaxFileNameBytes,
 	}, nil
 }

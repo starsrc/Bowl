@@ -961,6 +961,30 @@ func (m *ControlManager) ReadCommitNode(ctx context.Context, diskID uuid.UUID, c
 	return entry.store.ReadCommitNode(ctx, commitID, ino, offset, size)
 }
 
+func (m *ControlManager) MountLeaseTTL() time.Duration {
+	return m.mountLeaseTTL
+}
+
+func (m *ControlManager) WithDisk(ctx context.Context, diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
+	if diskID == uuid.Nil {
+		return engine.ErrInvalid
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	unlock := m.rlockDisk(diskID)
+	defer unlock()
+
+	entry, release, err := m.acquireDisk(diskID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn(entry.store)
+}
+
 func (m *ControlManager) Disk(ctx context.Context, diskID uuid.UUID) (*engine.DiskStore, error) {
 	if diskID == uuid.Nil {
 		return nil, engine.ErrInvalid

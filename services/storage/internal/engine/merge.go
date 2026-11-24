@@ -140,6 +140,7 @@ func (d *DiskStore) mergeDryRun(ctx context.Context, opts MergeOptions, normStra
 
 	plan, err := d.planDeltaMerge(
 		ctx,
+		lca,
 		layerView{r: snap, layers: baseLayers},
 		layerView{r: snap, layers: targetLayers},
 		layerView{r: snap, layers: sourceLayers},
@@ -278,6 +279,7 @@ func (a *BranchActor) execMerge(batch *pebble.Batch, branch BranchMeta, raw any)
 
 	plan, err := a.disk.planDeltaMerge(
 		context.Background(),
+		lca,
 		baseView,
 		targetView,
 		sourceView,
@@ -426,6 +428,7 @@ type deltaMergeBuilder struct {
 
 func (d *DiskStore) planDeltaMerge(
 	ctx context.Context,
+	lcaCommitID uint64,
 	baseView, targetView, sourceView layerView,
 	targetIsBase bool,
 	opts MergeOptions,
@@ -644,6 +647,7 @@ func (d *DiskStore) planDeltaMerge(
 		}
 		return nil, &ErrMergeConflict{
 			Report: MergeConflictReport{
+				LCACommitID:        lcaCommitID,
 				TotalConflicts:     total,
 				Conflicts:          samples,
 				ConflictsTruncated: truncated,

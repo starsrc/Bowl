@@ -497,3 +497,69 @@ func TestClose_GivenConcurrentWithDiskAndLifecycleOps_WhenClosing_ThenDrainsAllS
 		require.ErrorIs(t, mgr.WithDisk(ctx, id, func(*engine.DiskStore) error { return nil }), engine.ErrClosed)
 	}
 }
+
+func TestPanicSafety_GivenCallbackPanicInWithDiskOrColdReadOnly_WhenRecovered_ThenReleasesStripeLocks(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	mgr, err := NewControlManager(ManagerOptions{
+		StorageRoot:             root,
+		Store:                   NewMemStore(),
+		FlushInterval:           time.Hour,
+		ReconcileInterval:       time.Hour,
+		DisableStartupReconcile: true,
+		DisableGC:               true,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, mgr.Close(ctx)) }()
+
+	hotDisk, err := mgr.CreateDisk(ctx, "panic-hot", 16<<20)
+	require.NoError(t, err)
+
+	func() {
+		defer func() {
+			require.Equal(t, "boom-hot", recover())
+		}()
+		_ = mgr.WithDisk(ctx, hotDisk.DiskID, func(*engine.DiskStore) error {
+			panic("boom-hot")
+		})
+	}()
+
+	hotDone := make(chan error, 1)
+	go func() {
+		renamed := "panic-hot-after"
+		_, uErr := mgr.UpdateDisk(ctx, hotDisk.DiskID, &renamed, nil)
+		hotDone <- uErr
+	}()
+	select {
+	case uErr := <-hotDone:
+		require.NoError(t, uErr)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("UpdateDisk deadlocked after panic inside WithDisk callback")
+	}
+
+	coldID := uuid.New()
+	seedColdDisk(t, root, coldID, "panic-cold")
+	require.False(t, mgr.IsOpen(coldID))
+
+	func() {
+		defer func() {
+			require.Equal(t, "boom-cold", recover())
+		}()
+		_ = mgr.withDiskReadOnly(coldID, func(*engine.DiskStore) error {
+			panic("boom-cold")
+		})
+	}()
+
+	coldDone := make(chan error, 1)
+	go func() {
+		coldDone <- mgr.withDiskReadOnly(coldID, func(*engine.DiskStore) error {
+			return nil
+		})
+	}()
+	select {
+	case rErr := <-coldDone:
+		require.NoError(t, rErr)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cold withDiskReadOnly deadlocked after panic inside cold callback")
+	}
+}

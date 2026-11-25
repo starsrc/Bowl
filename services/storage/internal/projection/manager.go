@@ -444,7 +444,7 @@ func (m *ControlManager) withEntry(diskID uuid.UUID, exclusive bool, fn func(*di
 	return err
 }
 
-func (m *ControlManager) withTempDisk(diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
+func (m *ControlManager) withTempDisk(diskID uuid.UUID, fn func(*engine.DiskStore) error) (retErr error) {
 	if !diskExistsOnFS(m.diskDir(diskID)) {
 		return engine.ErrNotFound
 	}
@@ -452,12 +452,13 @@ func (m *ControlManager) withTempDisk(diskID uuid.UUID, fn func(*engine.DiskStor
 	if err != nil {
 		return err
 	}
-	fnErr := fn(ds)
-	closeErr := m.closeDisk(ds)
-	if fnErr != nil {
-		return fnErr
-	}
-	return closeErr
+	defer func() {
+		closeErr := m.closeDisk(ds)
+		if retErr == nil {
+			retErr = closeErr
+		}
+	}()
+	return fn(ds)
 }
 
 func (m *ControlManager) withDiskReadOnly(diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
@@ -474,6 +475,10 @@ func (m *ControlManager) withDiskReadOnly(diskID uuid.UUID, fn func(*engine.Disk
 		return err
 	}
 
+	return m.withDiskReadOnlyCold(slot, diskID, fn)
+}
+
+func (m *ControlManager) withDiskReadOnlyCold(slot *diskSlot, diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
 	slot.openMu.Lock()
 	if m.closed.Load() {
 		slot.openMu.Unlock()
@@ -485,9 +490,8 @@ func (m *ControlManager) withDiskReadOnly(diskID uuid.UUID, fn func(*engine.Disk
 		m.touchLastUsed(entry)
 		return err
 	}
-	err := m.withTempDisk(diskID, fn)
-	slot.openMu.Unlock()
-	return err
+	defer slot.openMu.Unlock()
+	return m.withTempDisk(diskID, fn)
 }
 
 func (m *ControlManager) CreateDisk(ctx context.Context, name string, maxBytes uint64) (DiskRecord, error) {
@@ -1043,14 +1047,14 @@ func (m *ControlManager) WithDisk(ctx context.Context, diskID uuid.UUID, fn func
 	}
 	slot := m.getSlot(diskID)
 	slot.opMu.RLock()
+	defer slot.opMu.RUnlock()
+
 	entry, err := m.acquireOpenEntry(slot, diskID)
 	if err != nil {
-		slot.opMu.RUnlock()
 		return err
 	}
 	err = fn(entry.store)
 	m.touchLastUsed(entry)
-	slot.opMu.RUnlock()
 	return err
 }
 

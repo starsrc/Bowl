@@ -30,8 +30,9 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 		return err
 	}
 
-	unlock := m.lockDisk(diskID)
-	defer unlock()
+	slot := m.getSlot(diskID)
+	slot.opMu.Lock()
+	defer slot.opMu.Unlock()
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -43,15 +44,12 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 	}
 	gen := st.gen
 
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
+	if m.closed.Load() {
 		return engine.ErrClosed
 	}
-	entry, isOpen := m.disks[diskID]
-	m.poolMu.RUnlock()
+	entry := lookupOpenEntry(slot, diskID)
 
-	if !isOpen && !diskExistsOnFS(m.diskDir(diskID)) {
+	if entry == nil && !diskExistsOnFS(m.diskDir(diskID)) {
 		if err := m.store.DeleteDisk(ctx, diskID); err != nil {
 			return err
 		}
@@ -66,18 +64,14 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 		err     error
 	)
 	now := m.now()
-	if isOpen {
+	if entry != nil {
 		rawSnap, err = entry.store.SnapshotControlMeta(now)
 	} else {
-		var ds *engine.DiskStore
-		ds, err = m.openDiskRaw(diskID, "", 0, false)
-		if err == nil {
-			rawSnap, err = ds.SnapshotControlMeta(now)
-			closeErr := ds.Close()
-			if err == nil {
-				err = closeErr
-			}
-		}
+		err = m.withTempDisk(diskID, func(ds *engine.DiskStore) error {
+			var sErr error
+			rawSnap, sErr = ds.SnapshotControlMeta(now)
+			return sErr
+		})
 	}
 	if err != nil {
 		return err
@@ -137,11 +131,13 @@ func (m *ControlManager) ReconcileAll(ctx context.Context) error {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			unlock := m.lockDisk(id)
-			m.poolMu.RLock()
-			_, isOpen := m.disks[id]
-			m.poolMu.RUnlock()
-			exists := isOpen || diskExistsOnFS(m.diskDir(id))
+			slot := m.getSlot(id)
+			slot.opMu.Lock()
+			if m.closed.Load() {
+				slot.opMu.Unlock()
+				return engine.ErrClosed
+			}
+			exists := lookupOpenEntry(slot, id) != nil || diskExistsOnFS(m.diskDir(id))
 			if !exists {
 				gen, hasDirty := m.queue.DirtyGeneration(id)
 				if delErr := m.store.DeleteDisk(ctx, id); delErr != nil {
@@ -150,7 +146,7 @@ func (m *ControlManager) ReconcileAll(ctx context.Context) error {
 					m.queue.ClearDirty(id, gen)
 				}
 			}
-			unlock()
+			slot.opMu.Unlock()
 		}
 	}
 
@@ -185,31 +181,27 @@ func (m *ControlManager) SampleOpenDiskUsage(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.poolMu.RLock()
-	ids := make([]uuid.UUID, 0, len(m.disks))
-	for id := range m.disks {
-		ids = append(ids, id)
-	}
-	m.poolMu.RUnlock()
-
-	for _, diskID := range ids {
+	for i := range m.slots {
 		if ctx.Err() != nil {
 			return
 		}
-		unlock := m.rlockDisk(diskID)
-		m.poolMu.RLock()
-		entry, ok := m.disks[diskID]
-		m.poolMu.RUnlock()
-		if ok {
-			if st, stErr := entry.store.StatFS(ctx); stErr == nil {
-				if !entry.hasSampled.Load() || entry.lastSampledUsed.Load() != st.UsedBytes {
-					entry.lastSampledUsed.Store(st.UsedBytes)
-					entry.hasSampled.Store(true)
-					m.queue.RecordUsage(diskID, st.UsedBytes)
+		if entries := m.slots[i].disks.Load(); entries == nil || len(*entries) == 0 {
+			continue
+		}
+		m.slots[i].opMu.RLock()
+		if !m.closed.Load() {
+			if entries := m.slots[i].disks.Load(); entries != nil {
+				for _, item := range *entries {
+					used := item.entry.store.UsedBytes()
+					usedInt64 := int64(used)
+					if item.entry.lastSampledUsed.Load() != usedInt64 {
+						item.entry.lastSampledUsed.Store(usedInt64)
+						m.queue.RecordUsage(item.id, used)
+					}
 				}
 			}
 		}
-		unlock()
+		m.slots[i].opMu.RUnlock()
 	}
 }
 
@@ -221,37 +213,48 @@ func (m *ControlManager) EvictIdleDisks(ctx context.Context) int {
 		ctx = context.Background()
 	}
 
-	m.poolMu.RLock()
-	ids := make([]uuid.UUID, 0, len(m.disks))
-	for id := range m.disks {
-		ids = append(ids, id)
-	}
-	m.poolMu.RUnlock()
-
 	evicted := 0
 	ttlNano := m.actorIdleTTL.Nanoseconds()
-	for _, diskID := range ids {
+	var (
+		hasNow  bool
+		nowNano int64
+	)
+	for i := range m.slots {
 		if ctx.Err() != nil {
 			break
 		}
-		if m.tryEvictIdleDisk(ctx, diskID, ttlNano) {
-			evicted++
+		entries := m.slots[i].disks.Load()
+		if entries == nil || len(*entries) == 0 {
+			continue
+		}
+		if !hasNow {
+			nowNano = m.now().UnixNano()
+			hasNow = true
+		}
+		for _, item := range *entries {
+			if ctx.Err() != nil {
+				break
+			}
+			if nowNano-item.entry.lastUsedNano.Load() < ttlNano {
+				continue
+			}
+			if m.tryEvictIdleDisk(ctx, &m.slots[i], item.id, ttlNano) {
+				evicted++
+			}
 		}
 	}
 	return evicted
 }
 
-func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, diskID uuid.UUID, ttlNano int64) bool {
-	unlock := m.lockDisk(diskID)
-	defer unlock()
+func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, slot *diskSlot, diskID uuid.UUID, ttlNano int64) bool {
+	slot.opMu.Lock()
+	defer slot.opMu.Unlock()
 
-	m.poolMu.RLock()
-	entry, ok := m.disks[diskID]
-	m.poolMu.RUnlock()
-	if !ok {
+	if m.closed.Load() {
 		return false
 	}
-	if entry.inFlight.Load() > 0 {
+	entry := lookupOpenEntry(slot, diskID)
+	if entry == nil {
 		return false
 	}
 
@@ -266,28 +269,33 @@ func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, diskID uuid.UUID,
 		return false
 	}
 
-	if st, stErr := entry.store.StatFS(ctx); stErr == nil {
-		m.queue.RecordUsage(diskID, st.UsedBytes)
-		m.queue.FlushBatches(ctx)
-	}
+	m.queue.RecordUsage(diskID, entry.store.UsedBytes())
+	flushCtx, cancel := context.WithTimeout(ctx, m.syncWriteTimeout)
+	m.queue.FlushBatches(flushCtx)
+	cancel()
 
-	m.poolMu.Lock()
-	delete(m.disks, diskID)
-	m.poolMu.Unlock()
-
+	slot.remove(diskID)
 	_ = entry.store.Close()
 	return true
 }
 
-func (m *ControlManager) runReconcileLoop() {
-	ticker := time.NewTicker(m.reconcileInterval)
-	defer ticker.Stop()
+func (m *ControlManager) runMaintenanceLoop() {
+	reconcileTicker := time.NewTicker(m.reconcileInterval)
+	defer reconcileTicker.Stop()
+
+	var evictCh <-chan time.Time
+	if m.actorIdleTTL > 0 {
+		interval := min(max(m.actorIdleTTL/2, 5*time.Millisecond), time.Second)
+		evictTicker := time.NewTicker(interval)
+		defer evictTicker.Stop()
+		evictCh = evictTicker.C
+	}
 
 	for {
 		select {
 		case <-m.bgCtx.Done():
 			return
-		case <-ticker.C:
+		case <-reconcileTicker.C:
 			opCtx, cancel := context.WithTimeout(m.bgCtx, m.opTimeout)
 			m.SampleOpenDiskUsage(opCtx)
 			_ = m.ReconcileDirtyDisks(opCtx)
@@ -295,20 +303,7 @@ func (m *ControlManager) runReconcileLoop() {
 				_, _ = m.store.PruneExpiredMounts(opCtx, m.now())
 			}
 			cancel()
-		}
-	}
-}
-
-func (m *ControlManager) runEvictLoop() {
-	interval := min(max(m.actorIdleTTL/2, 5*time.Millisecond), time.Second)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.bgCtx.Done():
-			return
-		case <-ticker.C:
+		case <-evictCh:
 			opCtx, cancel := context.WithTimeout(m.bgCtx, m.opTimeout)
 			m.EvictIdleDisks(opCtx)
 			cancel()

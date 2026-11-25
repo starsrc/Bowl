@@ -3,7 +3,6 @@ package projection
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,17 +37,14 @@ type Queue struct {
 	closed   bool
 	dirty    map[uuid.UUID]dirtyState
 	dirtyGen uint64
-
-	batchMu  sync.Mutex
 	usageBuf map[uuid.UUID]uint64
 	renewBuf map[mountBatchKey]time.Time
 
-	isClosed    atomic.Bool
 	drainCtx    context.Context
 	drainCancel context.CancelFunc
 	stopBatcher chan struct{}
 	batchDone   chan struct{}
-	closeDone   chan struct{}
+	closeOnce   sync.Once
 	closeErr    error
 }
 
@@ -74,7 +70,6 @@ func NewQueue(store Store, cfg QueueConfig) *Queue {
 		drainCancel:   drainCancel,
 		stopBatcher:   make(chan struct{}),
 		batchDone:     make(chan struct{}),
-		closeDone:     make(chan struct{}),
 	}
 	go q.runBatcher()
 	return q
@@ -173,25 +168,29 @@ func (q *Queue) ClearDirty(diskID uuid.UUID, gen uint64) bool {
 }
 
 func (q *Queue) RecordUsage(diskID uuid.UUID, usedBytes uint64) {
-	if diskID == uuid.Nil || q.isClosed.Load() {
+	if diskID == uuid.Nil {
 		return
 	}
-	q.batchMu.Lock()
-	q.usageBuf[diskID] = usedBytes
-	q.batchMu.Unlock()
+	q.mu.Lock()
+	if !q.closed {
+		q.usageBuf[diskID] = usedBytes
+	}
+	q.mu.Unlock()
 }
 
 func (q *Queue) RecordMountRenew(diskID, mountID uuid.UUID, expiresAt time.Time) {
-	if diskID == uuid.Nil || mountID == uuid.Nil || q.isClosed.Load() {
+	if diskID == uuid.Nil || mountID == uuid.Nil {
 		return
 	}
 	ts := normalizeTimestamp(expiresAt)
 	key := mountBatchKey{diskID: diskID, mountID: mountID}
-	q.batchMu.Lock()
-	if prev, ok := q.renewBuf[key]; !ok || ts.After(prev) {
-		q.renewBuf[key] = ts
+	q.mu.Lock()
+	if !q.closed {
+		if prev, ok := q.renewBuf[key]; !ok || ts.After(prev) {
+			q.renewBuf[key] = ts
+		}
 	}
-	q.batchMu.Unlock()
+	q.mu.Unlock()
 }
 
 func (q *Queue) runBatcher() {
@@ -215,7 +214,7 @@ func (q *Queue) FlushBatches(ctx context.Context) {
 }
 
 func (q *Queue) flushBatches(ctx context.Context) {
-	q.batchMu.Lock()
+	q.mu.Lock()
 	var usageMap map[uuid.UUID]uint64
 	if len(q.usageBuf) > 0 {
 		usageMap = q.usageBuf
@@ -226,7 +225,7 @@ func (q *Queue) flushBatches(ctx context.Context) {
 		renewMap = q.renewBuf
 		q.renewBuf = make(map[mountBatchKey]time.Time)
 	}
-	q.batchMu.Unlock()
+	q.mu.Unlock()
 
 	if len(usageMap) > 0 {
 		updates := make([]DiskUsageUpdate, 0, len(usageMap))
@@ -280,38 +279,30 @@ func (q *Queue) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	q.mu.Lock()
-	if q.closed {
+	q.closeOnce.Do(func() {
+		q.mu.Lock()
+		q.closed = true
+		close(q.stopBatcher)
 		q.mu.Unlock()
-		<-q.closeDone
-		return q.closeErr
-	}
-	q.closed = true
-	q.isClosed.Store(true)
-	close(q.stopBatcher)
-	q.mu.Unlock()
 
-	var closeErr error
-	select {
-	case <-q.batchDone:
-	case <-ctx.Done():
-		closeErr = ctx.Err()
-		q.drainCancel()
-		<-q.batchDone
-	}
-
-	if closeErr == nil {
-		q.flushBatches(ctx)
-		if ctx.Err() != nil {
+		var closeErr error
+		select {
+		case <-q.batchDone:
+		case <-ctx.Done():
 			closeErr = ctx.Err()
+			q.drainCancel()
+			<-q.batchDone
 		}
-	}
 
-	q.mu.Lock()
-	q.closeErr = closeErr
-	q.mu.Unlock()
+		if closeErr == nil {
+			q.flushBatches(ctx)
+			if ctx.Err() != nil {
+				closeErr = ctx.Err()
+			}
+		}
 
-	q.drainCancel()
-	close(q.closeDone)
-	return closeErr
+		q.drainCancel()
+		q.closeErr = closeErr
+	})
+	return q.closeErr
 }

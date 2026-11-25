@@ -3,8 +3,6 @@ package projection
 import (
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
 var _ prometheus.Collector = (*StorageMetricsCollector)(nil)
@@ -192,35 +190,9 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	var (
-		stores []*engine.DiskStore
-		cache  *pebble.Cache
-	)
-	if m := c.mgr; m != nil {
-		m.poolMu.RLock()
-		if !m.closed {
-			if len(m.disks) > 0 {
-				stores = make([]*engine.DiskStore, 0, len(m.disks))
-				for _, entry := range m.disks {
-					if entry != nil && entry.store != nil {
-						stores = append(stores, entry.store)
-					}
-				}
-			}
-			if m.cache != nil {
-				m.cache.Ref()
-				cache = m.cache
-			}
-		}
-		m.poolMu.RUnlock()
-	}
-
-	var cacheMetrics pebble.CacheMetrics
-	if cache != nil {
-		cacheMetrics = cache.Metrics()
-		cache.Unref()
-	}
-
-	var (
+		cache               *pebble.Cache
+		cacheMetrics        pebble.CacheMetrics
+		disksLoaded         int
 		logicalBytes        uint64
 		packPhysicalBytes   uint64
 		inodes              uint64
@@ -238,32 +210,64 @@ func (c *StorageMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 		openTableIters      int64
 	)
 
-	for _, ds := range stores {
-		snap := ds.MetricsSnapshot()
-		logicalBytes += snap.UsedBytes
-		packPhysicalBytes += snap.PackPhysicalBytes
-		inodes += snap.Inodes
-		branchActors += snap.ActiveBranchActors
-		if pm := snap.Pebble; pm != nil {
-			walBytesIn += pm.WAL.BytesIn
-			walBytesWritten += pm.WAL.BytesWritten
-			if pm.Levels[0].Sublevels > maxL0Sublevels {
-				maxL0Sublevels = pm.Levels[0].Sublevels
+	if m := c.mgr; m != nil {
+		m.slots[0].opMu.RLock()
+		if !m.closed.Load() && m.cache != nil {
+			m.cache.Ref()
+			cache = m.cache
+		}
+		m.slots[0].opMu.RUnlock()
+
+		if cache != nil {
+			defer cache.Unref()
+		}
+
+		for i := range m.slots {
+			if entries := m.slots[i].disks.Load(); entries == nil || len(*entries) == 0 {
+				continue
 			}
-			l0Tables += pm.Levels[0].TablesCount
-			if ra := pm.ReadAmp(); ra > maxReadAmp {
-				maxReadAmp = ra
+			m.slots[i].opMu.RLock()
+			if !m.closed.Load() {
+				if entries := m.slots[i].disks.Load(); entries != nil {
+					for _, item := range *entries {
+						if item.entry == nil || item.entry.store == nil {
+							continue
+						}
+						disksLoaded++
+						snap := item.entry.store.MetricsSnapshot()
+						logicalBytes += snap.UsedBytes
+						packPhysicalBytes += snap.PackPhysicalBytes
+						inodes += snap.Inodes
+						branchActors += snap.ActiveBranchActors
+						if pm := snap.Pebble; pm != nil {
+							walBytesIn += pm.WAL.BytesIn
+							walBytesWritten += pm.WAL.BytesWritten
+							if pm.Levels[0].Sublevels > maxL0Sublevels {
+								maxL0Sublevels = pm.Levels[0].Sublevels
+							}
+							l0Tables += pm.Levels[0].TablesCount
+							if ra := pm.ReadAmp(); ra > maxReadAmp {
+								maxReadAmp = ra
+							}
+							compactionDebtBytes += pm.Compact.EstimatedDebt
+							compactionsInProg += pm.Compact.NumInProgress
+							flushesInProg += pm.Flush.NumInProgress
+							filterHits += pm.Filter.Hits
+							filterMisses += pm.Filter.Misses
+							openTableIters += pm.TableIters
+						}
+					}
+				}
 			}
-			compactionDebtBytes += pm.Compact.EstimatedDebt
-			compactionsInProg += pm.Compact.NumInProgress
-			flushesInProg += pm.Flush.NumInProgress
-			filterHits += pm.Filter.Hits
-			filterMisses += pm.Filter.Misses
-			openTableIters += pm.TableIters
+			m.slots[i].opMu.RUnlock()
+		}
+
+		if cache != nil {
+			cacheMetrics = cache.Metrics()
 		}
 	}
 
-	ch <- prometheus.MustNewConstMetric(c.disksLoadedDesc, prometheus.GaugeValue, float64(len(stores)))
+	ch <- prometheus.MustNewConstMetric(c.disksLoadedDesc, prometheus.GaugeValue, float64(disksLoaded))
 	ch <- prometheus.MustNewConstMetric(c.logicalBytesDesc, prometheus.GaugeValue, float64(logicalBytes))
 	ch <- prometheus.MustNewConstMetric(c.packPhysicalBytesDesc, prometheus.GaugeValue, float64(packPhysicalBytes))
 	ch <- prometheus.MustNewConstMetric(c.inodesDesc, prometheus.GaugeValue, float64(inodes))

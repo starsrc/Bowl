@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -51,9 +50,15 @@ const (
 	diskSlotCacheLine = 64
 )
 
+type stripeDisk struct {
+	id    uuid.UUID
+	entry *diskEntry
+}
+
 type diskSlotCore struct {
 	opMu   sync.RWMutex
 	openMu sync.Mutex
+	disks  atomic.Pointer[[]stripeDisk]
 }
 
 type diskSlot struct {
@@ -64,31 +69,27 @@ type diskSlot struct {
 type diskEntry struct {
 	store           *engine.DiskStore
 	lastUsedNano    atomic.Int64
-	inFlight        atomic.Int64
-	lastSampledUsed atomic.Uint64
-	hasSampled      atomic.Bool
+	lastSampledUsed atomic.Int64
 }
 
 type ControlManager struct {
-	storageRoot       string
 	disksDir          string
 	store             Store
 	queue             *Queue
 	cache             *pebble.Cache
 	now               func() time.Time
+	closeDisk         func(*engine.DiskStore) error
 	mountLeaseTTL     time.Duration
 	syncWriteTimeout  time.Duration
 	reconcileInterval time.Duration
 	actorIdleTTL      time.Duration
+	touchIntervalNano int64
 	gcInterval        time.Duration
 	disableGC         bool
 	opTimeout         time.Duration
 
-	slots [diskSlotStripes]diskSlot
-
-	poolMu sync.RWMutex
-	closed bool
-	disks  map[uuid.UUID]*diskEntry
+	slots  [diskSlotStripes]diskSlot
+	closed atomic.Bool
 
 	openCount atomic.Int64
 
@@ -145,6 +146,10 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 	} else if gcInterval <= 0 {
 		gcInterval = DefaultGCInterval
 	}
+	var touchIntervalNano int64
+	if opts.ActorIdleTTL > 0 {
+		touchIntervalNano = max(opts.ActorIdleTTL.Nanoseconds()/8, int64(1))
+	}
 
 	cache := pebble.NewCache(cacheBytes)
 	q := NewQueue(opts.Store, QueueConfig{
@@ -154,20 +159,20 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	m := &ControlManager{
-		storageRoot:       opts.StorageRoot,
 		disksDir:          disksDir,
 		store:             opts.Store,
 		queue:             q,
 		cache:             cache,
 		now:               nowFn,
+		closeDisk:         (*engine.DiskStore).Close,
 		mountLeaseTTL:     leaseTTL,
 		syncWriteTimeout:  syncWriteTimeout,
 		reconcileInterval: reconcileInterval,
 		actorIdleTTL:      opts.ActorIdleTTL,
+		touchIntervalNano: touchIntervalNano,
 		gcInterval:        gcInterval,
 		disableGC:         opts.DisableGC,
 		opTimeout:         opTimeout,
-		disks:             make(map[uuid.UUID]*diskEntry),
 		bgCtx:             bgCtx,
 		bgCancel:          bgCancel,
 		startupDone:       make(chan struct{}),
@@ -182,11 +187,7 @@ func NewControlManager(opts ManagerOptions) (*ControlManager, error) {
 		})
 	}
 
-	m.bgWG.Go(m.runReconcileLoop)
-
-	if m.actorIdleTTL > 0 {
-		m.bgWG.Go(m.runEvictLoop)
-	}
+	m.bgWG.Go(m.runMaintenanceLoop)
 
 	return m, nil
 }
@@ -200,10 +201,10 @@ func (m *ControlManager) OpenCount() int64 {
 }
 
 func (m *ControlManager) IsOpen(diskID uuid.UUID) bool {
-	m.poolMu.RLock()
-	_, ok := m.disks[diskID]
-	m.poolMu.RUnlock()
-	return ok
+	if m.closed.Load() {
+		return false
+	}
+	return lookupOpenEntry(m.getSlot(diskID), diskID) != nil
 }
 
 func (m *ControlManager) WaitStartupReconcile(ctx context.Context) error {
@@ -223,29 +224,33 @@ func (m *ControlManager) Close(ctx context.Context) error {
 		m.bgCancel()
 		m.bgWG.Wait()
 
-		m.poolMu.Lock()
-		m.closed = true
-		openEntries := make(map[uuid.UUID]*diskEntry, len(m.disks))
-		maps.Copy(openEntries, m.disks)
-		clear(m.disks)
-		m.poolMu.Unlock()
+		m.closed.Store(true)
 
-		for id, entry := range openEntries {
-			if st, stErr := entry.store.StatFS(ctx); stErr == nil {
-				m.queue.RecordUsage(id, st.UsedBytes)
+		var detached []stripeDisk
+		for i := range m.slots {
+			m.slots[i].opMu.Lock()
+			if entries := m.slots[i].disks.Swap(nil); entries != nil {
+				detached = append(detached, *entries...)
 			}
+			m.slots[i].opMu.Unlock()
+		}
+
+		for _, item := range detached {
+			m.queue.RecordUsage(item.id, item.entry.store.UsedBytes())
 		}
 
 		var errs []error
 		if qErr := m.queue.Close(ctx); qErr != nil {
 			errs = append(errs, qErr)
 		}
-		for _, entry := range openEntries {
-			if cErr := entry.store.Close(); cErr != nil {
+		for _, item := range detached {
+			if cErr := item.entry.store.Close(); cErr != nil {
 				errs = append(errs, cErr)
 			}
 		}
-		m.cache.Unref()
+		if m.cache != nil {
+			m.cache.Unref()
+		}
 		m.closeErr = errors.Join(errs...)
 	})
 	return m.closeErr
@@ -277,23 +282,84 @@ func (m *ControlManager) getSlot(diskID uuid.UUID) *diskSlot {
 	return &m.slots[diskSlotIndex(diskID)]
 }
 
-func (m *ControlManager) lockDisk(diskID uuid.UUID) func() {
-	slot := m.getSlot(diskID)
-	slot.opMu.Lock()
-	return slot.opMu.Unlock
+func lookupOpenEntry(slot *diskSlot, diskID uuid.UUID) *diskEntry {
+	entries := slot.disks.Load()
+	if entries == nil {
+		return nil
+	}
+	for _, item := range *entries {
+		if item.id == diskID {
+			return item.entry
+		}
+	}
+	return nil
 }
 
-func (m *ControlManager) rlockDisk(diskID uuid.UUID) func() {
-	slot := m.getSlot(diskID)
-	slot.opMu.RLock()
-	return slot.opMu.RUnlock
+func (s *diskSlot) upsert(diskID uuid.UUID, entry *diskEntry) {
+	cur := s.disks.Load()
+	var next []stripeDisk
+	if cur != nil {
+		next = make([]stripeDisk, len(*cur), len(*cur)+1)
+		copy(next, *cur)
+		for i := range next {
+			if next[i].id == diskID {
+				next[i].entry = entry
+				s.disks.Store(&next)
+				return
+			}
+		}
+	} else {
+		next = make([]stripeDisk, 0, 1)
+	}
+	next = append(next, stripeDisk{id: diskID, entry: entry})
+	s.disks.Store(&next)
 }
 
-func (m *ControlManager) isClosed() bool {
-	m.poolMu.RLock()
-	closed := m.closed
-	m.poolMu.RUnlock()
-	return closed
+func (s *diskSlot) remove(diskID uuid.UUID) (*diskEntry, bool) {
+	cur := s.disks.Load()
+	if cur == nil {
+		return nil, false
+	}
+	old := *cur
+	idx := -1
+	for i := range old {
+		if old[i].id == diskID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, false
+	}
+	removed := old[idx].entry
+	if len(old) == 1 {
+		s.disks.Store(nil)
+		return removed, true
+	}
+	next := make([]stripeDisk, 0, len(old)-1)
+	next = append(next, old[:idx]...)
+	next = append(next, old[idx+1:]...)
+	s.disks.Store(&next)
+	return removed, true
+}
+
+func (m *ControlManager) newDiskEntry(ds *engine.DiskStore, sampledUsed int64) *diskEntry {
+	entry := &diskEntry{store: ds}
+	entry.lastSampledUsed.Store(sampledUsed)
+	if m.actorIdleTTL > 0 {
+		entry.lastUsedNano.Store(m.now().UnixNano())
+	}
+	return entry
+}
+
+func (m *ControlManager) touchLastUsed(entry *diskEntry) {
+	if m.actorIdleTTL <= 0 {
+		return
+	}
+	nowNano := m.now().UnixNano()
+	if nowNano-entry.lastUsedNano.Load() >= m.touchIntervalNano {
+		entry.lastUsedNano.Store(nowNano)
+	}
 }
 
 func (m *ControlManager) openDiskRaw(diskID uuid.UUID, name string, maxBytes uint64, enableBackgroundGC bool) (*engine.DiskStore, error) {
@@ -319,122 +385,113 @@ func (m *ControlManager) openDiskRaw(diskID uuid.UUID, name string, maxBytes uin
 	})
 }
 
-func (m *ControlManager) acquireDisk(diskID uuid.UUID) (*diskEntry, func(), error) {
-	nowNano := m.now().UnixNano()
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
-		return nil, nil, engine.ErrClosed
+func (m *ControlManager) acquireOpenEntry(slot *diskSlot, diskID uuid.UUID) (*diskEntry, error) {
+	if m.closed.Load() {
+		return nil, engine.ErrClosed
 	}
-	if entry, ok := m.disks[diskID]; ok {
-		entry.inFlight.Add(1)
-		entry.lastUsedNano.Store(nowNano)
-		m.poolMu.RUnlock()
-		return entry, func() {
-			entry.lastUsedNano.Store(m.now().UnixNano())
-			entry.inFlight.Add(-1)
-		}, nil
+	if entry := lookupOpenEntry(slot, diskID); entry != nil {
+		return entry, nil
 	}
-	m.poolMu.RUnlock()
+	return m.openEntrySlow(slot, diskID)
+}
 
-	slot := m.getSlot(diskID)
+func (m *ControlManager) openEntrySlow(slot *diskSlot, diskID uuid.UUID) (*diskEntry, error) {
 	slot.openMu.Lock()
 	defer slot.openMu.Unlock()
 
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
-		return nil, nil, engine.ErrClosed
+	if m.closed.Load() {
+		return nil, engine.ErrClosed
 	}
-	if entry, ok := m.disks[diskID]; ok {
-		entry.inFlight.Add(1)
-		entry.lastUsedNano.Store(nowNano)
-		m.poolMu.RUnlock()
-		return entry, func() {
-			entry.lastUsedNano.Store(m.now().UnixNano())
-			entry.inFlight.Add(-1)
-		}, nil
+	if entry := lookupOpenEntry(slot, diskID); entry != nil {
+		return entry, nil
 	}
-	m.poolMu.RUnlock()
-
 	if !diskExistsOnFS(m.diskDir(diskID)) {
-		return nil, nil, engine.ErrNotFound
+		return nil, engine.ErrNotFound
 	}
 
 	ds, err := m.openDiskRaw(diskID, "", 0, true)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	entry := &diskEntry{store: ds}
-	entry.lastUsedNano.Store(m.now().UnixNano())
-	entry.inFlight.Add(1)
-
-	m.poolMu.Lock()
-	if m.closed {
-		m.poolMu.Unlock()
-		_ = ds.Close()
-		return nil, nil, engine.ErrClosed
+	entry := m.newDiskEntry(ds, -1)
+	if m.closed.Load() {
+		_ = m.closeDisk(ds)
+		return nil, engine.ErrClosed
 	}
-	m.disks[diskID] = entry
-	m.poolMu.Unlock()
-
-	return entry, func() {
-		entry.lastUsedNano.Store(m.now().UnixNano())
-		entry.inFlight.Add(-1)
-	}, nil
+	slot.upsert(diskID, entry)
+	return entry, nil
 }
 
-func (m *ControlManager) withDiskReadOnly(diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
+func (m *ControlManager) withEntry(diskID uuid.UUID, exclusive bool, fn func(*diskEntry) error) error {
+	if diskID == uuid.Nil {
+		return engine.ErrInvalid
+	}
 	slot := m.getSlot(diskID)
-	slot.opMu.RLock()
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
-		slot.opMu.RUnlock()
-		return engine.ErrClosed
+	if exclusive {
+		slot.opMu.Lock()
+		defer slot.opMu.Unlock()
+	} else {
+		slot.opMu.RLock()
+		defer slot.opMu.RUnlock()
 	}
-	if entry, ok := m.disks[diskID]; ok {
-		entry.inFlight.Add(1)
-		entry.lastUsedNano.Store(m.now().UnixNano())
-		m.poolMu.RUnlock()
-		err := fn(entry.store)
-		entry.lastUsedNano.Store(m.now().UnixNano())
-		entry.inFlight.Add(-1)
-		slot.opMu.RUnlock()
+	entry, err := m.acquireOpenEntry(slot, diskID)
+	if err != nil {
 		return err
 	}
-	m.poolMu.RUnlock()
-	slot.opMu.RUnlock()
+	err = fn(entry)
+	m.touchLastUsed(entry)
+	return err
+}
 
-	slot.opMu.Lock()
-	defer slot.opMu.Unlock()
-
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
-		return engine.ErrClosed
-	}
-	if entry, ok := m.disks[diskID]; ok {
-		entry.inFlight.Add(1)
-		entry.lastUsedNano.Store(m.now().UnixNano())
-		m.poolMu.RUnlock()
-		err := fn(entry.store)
-		entry.lastUsedNano.Store(m.now().UnixNano())
-		entry.inFlight.Add(-1)
-		return err
-	}
-	m.poolMu.RUnlock()
-
+func (m *ControlManager) withTempDisk(diskID uuid.UUID, fn func(*engine.DiskStore) error) (retErr error) {
 	if !diskExistsOnFS(m.diskDir(diskID)) {
-		return ErrNotFound
+		return engine.ErrNotFound
 	}
 	ds, err := m.openDiskRaw(diskID, "", 0, false)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = ds.Close() }()
+	defer func() {
+		closeErr := m.closeDisk(ds)
+		if retErr == nil {
+			retErr = closeErr
+		}
+	}()
 	return fn(ds)
+}
+
+func (m *ControlManager) withDiskReadOnly(diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
+	slot := m.getSlot(diskID)
+	slot.opMu.RLock()
+	defer slot.opMu.RUnlock()
+
+	if m.closed.Load() {
+		return engine.ErrClosed
+	}
+	if entry := lookupOpenEntry(slot, diskID); entry != nil {
+		err := fn(entry.store)
+		m.touchLastUsed(entry)
+		return err
+	}
+
+	return m.withDiskReadOnlyCold(slot, diskID, fn)
+}
+
+func (m *ControlManager) withDiskReadOnlyCold(slot *diskSlot, diskID uuid.UUID, fn func(*engine.DiskStore) error) error {
+	slot.openMu.Lock()
+	if m.closed.Load() {
+		slot.openMu.Unlock()
+		return engine.ErrClosed
+	}
+	if entry := lookupOpenEntry(slot, diskID); entry != nil {
+		slot.openMu.Unlock()
+		err := fn(entry.store)
+		m.touchLastUsed(entry)
+		return err
+	}
+	defer slot.openMu.Unlock()
+	return m.withTempDisk(diskID, fn)
 }
 
 func (m *ControlManager) CreateDisk(ctx context.Context, name string, maxBytes uint64) (DiskRecord, error) {
@@ -455,10 +512,11 @@ func (m *ControlManager) CreateDisk(ctx context.Context, name string, maxBytes u
 		return DiskRecord{}, err
 	}
 
-	unlock := m.lockDisk(diskID)
-	defer unlock()
+	slot := m.getSlot(diskID)
+	slot.opMu.Lock()
+	defer slot.opMu.Unlock()
 
-	if m.isClosed() {
+	if m.closed.Load() {
 		return DiskRecord{}, engine.ErrClosed
 	}
 
@@ -471,39 +529,27 @@ func (m *ControlManager) CreateDisk(ctx context.Context, name string, maxBytes u
 	meta := ds.DiskMeta()
 	mainBranch, brErr := ds.GetBranch(meta.DefaultBranch)
 	if brErr != nil {
-		_ = ds.Close()
+		_ = m.closeDisk(ds)
 		_ = os.RemoveAll(m.diskDir(diskID))
 		return DiskRecord{}, brErr
 	}
 	initCommit, cmtErr := ds.GetCommit(mainBranch.HeadCommitID)
 	if cmtErr != nil {
-		_ = ds.Close()
+		_ = m.closeDisk(ds)
 		_ = os.RemoveAll(m.diskDir(diskID))
 		return DiskRecord{}, cmtErr
 	}
-	st, stErr := ds.StatFS(ctx)
-	if stErr != nil {
-		_ = ds.Close()
-		_ = os.RemoveAll(m.diskDir(diskID))
-		return DiskRecord{}, stErr
-	}
+	usedBytes := ds.UsedBytes()
 
-	entry := &diskEntry{store: ds}
-	entry.lastUsedNano.Store(m.now().UnixNano())
-	entry.lastSampledUsed.Store(st.UsedBytes)
-	entry.hasSampled.Store(true)
-
-	m.poolMu.Lock()
-	if m.closed {
-		m.poolMu.Unlock()
-		_ = ds.Close()
+	entry := m.newDiskEntry(ds, int64(usedBytes))
+	if m.closed.Load() {
+		_ = m.closeDisk(ds)
 		_ = os.RemoveAll(m.diskDir(diskID))
 		return DiskRecord{}, engine.ErrClosed
 	}
-	m.disks[diskID] = entry
-	m.poolMu.Unlock()
+	slot.upsert(diskID, entry)
 
-	diskRec := diskMetaToRecord(diskID, meta, st.UsedBytes)
+	diskRec := diskMetaToRecord(diskID, meta, usedBytes)
 	branchRec := branchMetaToRecord(diskID, mainBranch)
 	commitRec := commitMetaToRecord(diskID, initCommit)
 	m.syncProject(ctx, diskID, true, func(pgCtx context.Context, store Store) error {
@@ -513,29 +559,23 @@ func (m *ControlManager) CreateDisk(ctx context.Context, name string, maxBytes u
 }
 
 func (m *ControlManager) UpdateDisk(ctx context.Context, diskID uuid.UUID, name *string, maxBytes *uint64) (DiskRecord, error) {
-	if diskID == uuid.Nil {
-		return DiskRecord{}, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return DiskRecord{}, err
-	}
-	defer release()
-
-	meta, err := entry.store.UpdateDiskMeta(ctx, name, maxBytes)
-	if err != nil {
-		return DiskRecord{}, err
-	}
-	usedBytes := entry.store.UsedBytes()
-	entry.lastSampledUsed.Store(usedBytes)
-	entry.hasSampled.Store(true)
-	diskRec := diskMetaToRecord(diskID, meta, usedBytes)
-	m.syncProject(ctx, diskID, true, func(pgCtx context.Context, store Store) error {
-		return store.UpdateDisk(pgCtx, diskRec)
+	var diskRec DiskRecord
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		meta, uErr := entry.store.UpdateDiskMeta(ctx, name, maxBytes)
+		if uErr != nil {
+			return uErr
+		}
+		usedBytes := entry.store.UsedBytes()
+		entry.lastSampledUsed.Store(int64(usedBytes))
+		diskRec = diskMetaToRecord(diskID, meta, usedBytes)
+		m.syncProject(ctx, diskID, true, func(pgCtx context.Context, store Store) error {
+			return store.UpdateDisk(pgCtx, diskRec)
+		})
+		return nil
 	})
+	if err != nil {
+		return DiskRecord{}, err
+	}
 	return diskRec, nil
 }
 
@@ -561,16 +601,22 @@ func (m *ControlManager) syncProject(ctx context.Context, diskID uuid.UUID, isCa
 
 func (m *ControlManager) snapshotDiskUsageRecord(diskID uuid.UUID, entry *diskEntry) DiskRecord {
 	used := entry.store.UsedBytes()
-	entry.lastSampledUsed.Store(used)
-	entry.hasSampled.Store(true)
+	entry.lastSampledUsed.Store(int64(used))
 	return diskMetaToRecord(diskID, entry.store.DiskMeta(), used)
 }
 
 func (m *ControlManager) openDiskUsedBytes(diskID uuid.UUID) (uint64, bool) {
-	m.poolMu.RLock()
-	defer m.poolMu.RUnlock()
-	entry, ok := m.disks[diskID]
-	if !ok || entry == nil || entry.store == nil {
+	if m.closed.Load() {
+		return 0, false
+	}
+	slot := m.getSlot(diskID)
+	slot.opMu.RLock()
+	defer slot.opMu.RUnlock()
+	if m.closed.Load() {
+		return 0, false
+	}
+	entry := lookupOpenEntry(slot, diskID)
+	if entry == nil || entry.store == nil {
 		return 0, false
 	}
 	return entry.store.UsedBytes(), true
@@ -586,19 +632,17 @@ func (m *ControlManager) DeleteDisk(ctx context.Context, diskID uuid.UUID) error
 		}
 	}
 
-	unlock := m.lockDisk(diskID)
-	defer unlock()
+	slot := m.getSlot(diskID)
+	slot.opMu.Lock()
+	defer slot.opMu.Unlock()
 
-	m.poolMu.RLock()
-	if m.closed {
-		m.poolMu.RUnlock()
+	if m.closed.Load() {
 		return engine.ErrClosed
 	}
-	entry, isOpen := m.disks[diskID]
-	m.poolMu.RUnlock()
+	entry := lookupOpenEntry(slot, diskID)
 
 	now := m.now()
-	if isOpen {
+	if entry != nil {
 		mounted, err := entry.store.HasActiveMounts("", now)
 		if err != nil {
 			return err
@@ -606,27 +650,19 @@ func (m *ControlManager) DeleteDisk(ctx context.Context, diskID uuid.UUID) error
 		if mounted {
 			return engine.ErrDiskMounted
 		}
-		m.poolMu.Lock()
-		delete(m.disks, diskID)
-		m.poolMu.Unlock()
-		if closeErr := entry.store.Close(); closeErr != nil {
+		slot.remove(diskID)
+		if closeErr := m.closeDisk(entry.store); closeErr != nil {
 			return closeErr
 		}
 	} else {
-		if !diskExistsOnFS(m.diskDir(diskID)) {
-			return engine.ErrNotFound
-		}
-		ds, err := m.openDiskRaw(diskID, "", 0, false)
+		var mounted bool
+		err := m.withTempDisk(diskID, func(ds *engine.DiskStore) error {
+			var mErr error
+			mounted, mErr = ds.HasActiveMounts("", now)
+			return mErr
+		})
 		if err != nil {
 			return err
-		}
-		mounted, mErr := ds.HasActiveMounts("", now)
-		closeErr := ds.Close()
-		if mErr != nil {
-			return mErr
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 		if mounted {
 			return engine.ErrDiskMounted
@@ -643,283 +679,228 @@ func (m *ControlManager) DeleteDisk(ctx context.Context, diskID uuid.UUID) error
 }
 
 func (m *ControlManager) ForkBranch(ctx context.Context, diskID uuid.UUID, srcBranch, newBranch, message string) (CommitRecord, BranchRecord, error) {
-	if diskID == uuid.Nil {
-		return CommitRecord{}, BranchRecord{}, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
+	var (
+		cmtRec   CommitRecord
+		newBrRec BranchRecord
+	)
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		cmt, newBr, fErr := entry.store.Fork(ctx, srcBranch, newBranch, message)
+		if fErr != nil {
+			return fErr
+		}
+		cmtRec = commitMetaToRecord(diskID, cmt)
+		newBrRec = branchMetaToRecord(diskID, newBr)
 
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return CommitRecord{}, BranchRecord{}, err
-	}
-	defer release()
-
-	cmt, newBr, err := entry.store.Fork(ctx, srcBranch, newBranch, message)
-	if err != nil {
-		return CommitRecord{}, BranchRecord{}, err
-	}
-	cmtRec := commitMetaToRecord(diskID, cmt)
-	newBrRec := branchMetaToRecord(diskID, newBr)
-
-	srcBr, srcErr := entry.store.GetBranch(srcBranch)
-	if srcErr != nil {
-		m.queue.MarkDirty(diskID, false)
-		return cmtRec, newBrRec, nil
-	}
-	branches := []BranchRecord{branchMetaToRecord(diskID, srcBr), newBrRec}
-	commits := []CommitRecord{cmtRec}
-	m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-		return store.UpsertBranchAndCommit(pgCtx, branches, commits, nil)
+		if srcBr, srcErr := entry.store.GetBranch(srcBranch); srcErr == nil {
+			branches := []BranchRecord{branchMetaToRecord(diskID, srcBr), newBrRec}
+			commits := []CommitRecord{cmtRec}
+			m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+				return store.UpsertBranchAndCommit(pgCtx, branches, commits, nil)
+			})
+		} else {
+			m.queue.MarkDirty(diskID, false)
+		}
+		return nil
 	})
+	if err != nil {
+		return CommitRecord{}, BranchRecord{}, err
+	}
 	return cmtRec, newBrRec, nil
 }
 
 func (m *ControlManager) DeleteBranch(ctx context.Context, diskID uuid.UUID, branch string) error {
-	if diskID == uuid.Nil {
-		return engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	if delErr := entry.store.DeleteBranch(ctx, branch); delErr != nil {
-		return delErr
-	}
-	diskRec := m.snapshotDiskUsageRecord(diskID, entry)
-	m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-		if err := store.DeleteBranch(pgCtx, diskID, branch); err != nil {
-			return err
+	return m.withEntry(diskID, true, func(entry *diskEntry) error {
+		if delErr := entry.store.DeleteBranch(ctx, branch); delErr != nil {
+			return delErr
 		}
-		return store.UpdateDisk(pgCtx, diskRec)
+		diskRec := m.snapshotDiskUsageRecord(diskID, entry)
+		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+			if err := store.DeleteBranch(pgCtx, diskID, branch); err != nil {
+				return err
+			}
+			return store.UpdateDisk(pgCtx, diskRec)
+		})
+		return nil
 	})
-	return nil
 }
 
 func (m *ControlManager) Commit(ctx context.Context, diskID uuid.UUID, branch, message string) (CommitRecord, error) {
-	if diskID == uuid.Nil {
-		return CommitRecord{}, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return CommitRecord{}, err
-	}
-	defer release()
-
-	cmt, err := entry.store.Commit(ctx, branch, message)
-	if err != nil {
-		return CommitRecord{}, err
-	}
-	cmtRec := commitMetaToRecord(diskID, cmt)
-	br, brErr := entry.store.GetBranch(branch)
-	if brErr != nil {
-		m.queue.MarkDirty(diskID, false)
-		return cmtRec, nil
-	}
-	branches := []BranchRecord{branchMetaToRecord(diskID, br)}
-	commits := []CommitRecord{cmtRec}
-	m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-		return store.UpsertBranchAndCommit(pgCtx, branches, commits, nil)
+	var cmtRec CommitRecord
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		cmt, cErr := entry.store.Commit(ctx, branch, message)
+		if cErr != nil {
+			return cErr
+		}
+		cmtRec = commitMetaToRecord(diskID, cmt)
+		if br, brErr := entry.store.GetBranch(branch); brErr == nil {
+			branches := []BranchRecord{branchMetaToRecord(diskID, br)}
+			commits := []CommitRecord{cmtRec}
+			m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+				return store.UpsertBranchAndCommit(pgCtx, branches, commits, nil)
+			})
+		} else {
+			m.queue.MarkDirty(diskID, false)
+		}
+		return nil
 	})
+	if err != nil {
+		return CommitRecord{}, err
+	}
 	return cmtRec, nil
 }
 
 func (m *ControlManager) ResetBranch(ctx context.Context, diskID uuid.UUID, branch string, targetCommitID uint64) (BranchRecord, error) {
-	if diskID == uuid.Nil {
-		return BranchRecord{}, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return BranchRecord{}, err
-	}
-	defer release()
-
-	br, err := entry.store.Reset(ctx, branch, targetCommitID)
-	if err != nil {
-		return BranchRecord{}, err
-	}
-	brRec := branchMetaToRecord(diskID, br)
-	diskRec := m.snapshotDiskUsageRecord(diskID, entry)
-	m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-		if err := store.UpsertBranchAndCommit(pgCtx, []BranchRecord{brRec}, nil, nil); err != nil {
-			return err
+	var brRec BranchRecord
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		br, rErr := entry.store.Reset(ctx, branch, targetCommitID)
+		if rErr != nil {
+			return rErr
 		}
-		return store.UpdateDisk(pgCtx, diskRec)
+		brRec = branchMetaToRecord(diskID, br)
+		diskRec := m.snapshotDiskUsageRecord(diskID, entry)
+		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+			if err := store.UpsertBranchAndCommit(pgCtx, []BranchRecord{brRec}, nil, nil); err != nil {
+				return err
+			}
+			return store.UpdateDisk(pgCtx, diskRec)
+		})
+		return nil
 	})
+	if err != nil {
+		return BranchRecord{}, err
+	}
 	return brRec, nil
 }
 
 func (m *ControlManager) MergeBranch(ctx context.Context, diskID uuid.UUID, opts engine.MergeOptions) (*engine.MergeResult, error) {
-	if diskID == uuid.Nil {
-		return nil, engine.ErrInvalid
-	}
-	if opts.DryRun {
-		unlock := m.rlockDisk(diskID)
-		defer unlock()
-		entry, release, err := m.acquireDisk(diskID)
-		if err != nil {
-			return nil, err
+	var res *engine.MergeResult
+	err := m.withEntry(diskID, !opts.DryRun, func(entry *diskEntry) error {
+		var mErr error
+		res, mErr = entry.store.Merge(ctx, opts)
+		if mErr != nil {
+			return mErr
 		}
-		defer release()
-		return entry.store.Merge(ctx, opts)
-	}
-
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
-	res, err := entry.store.Merge(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	if !res.UpToDate {
+		if opts.DryRun || res.UpToDate {
+			return nil
+		}
 		tgtBr, brErr := entry.store.GetBranch(opts.TargetBranch)
-		if brErr != nil {
-			m.queue.MarkDirty(diskID, false)
-			return res, nil
-		}
-		branches := []BranchRecord{branchMetaToRecord(diskID, tgtBr)}
-		var commits []CommitRecord
-		if !res.FastForward && res.CommitID != 0 {
-			cmt, cmtErr := entry.store.GetCommit(res.CommitID)
-			if cmtErr != nil {
-				m.queue.MarkDirty(diskID, false)
-				return res, nil
+		if brErr == nil {
+			branches := []BranchRecord{branchMetaToRecord(diskID, tgtBr)}
+			var commits []CommitRecord
+			ready := true
+			if !res.FastForward && res.CommitID != 0 {
+				if cmt, cmtErr := entry.store.GetCommit(res.CommitID); cmtErr == nil {
+					commits = []CommitRecord{commitMetaToRecord(diskID, cmt)}
+				} else {
+					ready = false
+				}
 			}
-			commits = []CommitRecord{commitMetaToRecord(diskID, cmt)}
+			if ready {
+				m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+					return store.UpsertBranchAndCommit(pgCtx, branches, commits, nil)
+				})
+			} else {
+				m.queue.MarkDirty(diskID, false)
+			}
+		} else {
+			m.queue.MarkDirty(diskID, false)
 		}
-		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-			return store.UpsertBranchAndCommit(pgCtx, branches, commits, nil)
-		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return res, nil
 }
 
 func (m *ControlManager) DeleteCommit(ctx context.Context, diskID uuid.UUID, commitID uint64) error {
-	if diskID == uuid.Nil {
-		return engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	if delErr := entry.store.DeleteCommit(ctx, commitID); delErr != nil {
-		return delErr
-	}
-	diskRec := m.snapshotDiskUsageRecord(diskID, entry)
-	m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-		if err := store.DeleteCommits(pgCtx, diskID, []uint64{commitID}); err != nil {
-			return err
+	return m.withEntry(diskID, true, func(entry *diskEntry) error {
+		if delErr := entry.store.DeleteCommit(ctx, commitID); delErr != nil {
+			return delErr
 		}
-		return store.UpdateDisk(pgCtx, diskRec)
+		diskRec := m.snapshotDiskUsageRecord(diskID, entry)
+		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+			if err := store.DeleteCommits(pgCtx, diskID, []uint64{commitID}); err != nil {
+				return err
+			}
+			return store.UpdateDisk(pgCtx, diskRec)
+		})
+		return nil
 	})
-	return nil
 }
 
 func (m *ControlManager) PruneCommits(ctx context.Context, diskID uuid.UUID) (int, error) {
-	if diskID == uuid.Nil {
-		return 0, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return 0, err
-	}
-	defer release()
-
-	pruned, err := entry.store.PruneCommits(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if pruned > 0 {
-		rawSnap, snapErr := entry.store.SnapshotControlMeta(m.now())
-		if snapErr != nil {
-			m.queue.MarkDirty(diskID, false)
-			return pruned, nil
+	var pruned int
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		var pErr error
+		pruned, pErr = entry.store.PruneCommits(ctx)
+		if pErr != nil {
+			return pErr
 		}
-		entry.lastSampledUsed.Store(rawSnap.UsedBytes)
-		entry.hasSampled.Store(true)
-		snap := controlSnapshotToDiskSnapshot(diskID, rawSnap)
-		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-			return store.ReplaceDiskSnapshot(pgCtx, snap)
-		})
+		if pruned > 0 {
+			if rawSnap, snapErr := entry.store.SnapshotControlMeta(m.now()); snapErr == nil {
+				entry.lastSampledUsed.Store(int64(rawSnap.UsedBytes))
+				snap := controlSnapshotToDiskSnapshot(diskID, rawSnap)
+				m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+					return store.ReplaceDiskSnapshot(pgCtx, snap)
+				})
+			} else {
+				m.queue.MarkDirty(diskID, false)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return pruned, nil
 }
 
 func (m *ControlManager) MountBranch(ctx context.Context, diskID uuid.UUID, branch string, readOnly, force bool) (MountRecord, error) {
-	if diskID == uuid.Nil {
-		return MountRecord{}, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return MountRecord{}, err
-	}
-	defer release()
-
-	var deletedRWIDs []uuid.UUID
-	if !readOnly {
-		if existing, listErr := entry.store.ListMounts(branch, m.now()); listErr == nil {
-			for _, em := range existing {
-				if !em.ReadOnly {
-					if parsed, pErr := uuid.Parse(em.ID); pErr == nil && parsed != uuid.Nil {
-						deletedRWIDs = append(deletedRWIDs, parsed)
+	var mountRec MountRecord
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		var deletedRWIDs []uuid.UUID
+		if !readOnly {
+			if existing, listErr := entry.store.ListMounts(branch, m.now()); listErr == nil {
+				for _, em := range existing {
+					if !em.ReadOnly {
+						if parsed, pErr := uuid.Parse(em.ID); pErr == nil && parsed != uuid.Nil {
+							deletedRWIDs = append(deletedRWIDs, parsed)
+						}
 					}
 				}
 			}
 		}
-	}
 
-	mm, err := entry.store.MountBranch(ctx, branch, readOnly, force, m.mountLeaseTTL)
+		mm, mErr := entry.store.MountBranch(ctx, branch, readOnly, force, m.mountLeaseTTL)
+		if mErr != nil {
+			return mErr
+		}
+		rec, convErr := mountMetaToRecord(diskID, mm)
+		if convErr != nil {
+			m.queue.MarkDirty(diskID, false)
+			return convErr
+		}
+		mountRec = rec
+
+		if !readOnly {
+			if br, brErr := entry.store.GetBranch(branch); brErr == nil {
+				brRec := branchMetaToRecord(diskID, br)
+				m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+					return store.UpsertMount(pgCtx, mountRec, &brRec, deletedRWIDs)
+				})
+			} else {
+				m.queue.MarkDirty(diskID, false)
+			}
+		} else {
+			m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+				return store.UpsertMount(pgCtx, mountRec, nil, nil)
+			})
+		}
+		return nil
+	})
 	if err != nil {
 		return MountRecord{}, err
-	}
-	mountRec, convErr := mountMetaToRecord(diskID, mm)
-	if convErr != nil {
-		m.queue.MarkDirty(diskID, false)
-		return MountRecord{}, convErr
-	}
-
-	if !readOnly {
-		br, brErr := entry.store.GetBranch(branch)
-		if brErr != nil {
-			m.queue.MarkDirty(diskID, false)
-			return mountRec, nil
-		}
-		brRec := branchMetaToRecord(diskID, br)
-		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-			return store.UpsertMount(pgCtx, mountRec, &brRec, deletedRWIDs)
-		})
-	} else {
-		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-			return store.UpsertMount(pgCtx, mountRec, nil, nil)
-		})
 	}
 	return mountRec, nil
 }
@@ -928,24 +909,23 @@ func (m *ControlManager) RenewMount(ctx context.Context, diskID uuid.UUID, branc
 	if diskID == uuid.Nil || mountID == uuid.Nil {
 		return MountRecord{}, engine.ErrInvalid
 	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
+	var mountRec MountRecord
+	err := m.withEntry(diskID, false, func(entry *diskEntry) error {
+		mm, rErr := entry.store.RenewMount(ctx, branch, mountID.String(), readOnly, epoch, m.mountLeaseTTL)
+		if rErr != nil {
+			return rErr
+		}
+		rec, convErr := mountMetaToRecord(diskID, mm)
+		if convErr != nil {
+			return convErr
+		}
+		mountRec = rec
+		m.queue.RecordMountRenew(diskID, mountRec.MountID, mountRec.ExpiresAt)
+		return nil
+	})
 	if err != nil {
 		return MountRecord{}, err
 	}
-	defer release()
-
-	mm, err := entry.store.RenewMount(ctx, branch, mountID.String(), readOnly, epoch, m.mountLeaseTTL)
-	if err != nil {
-		return MountRecord{}, err
-	}
-	mountRec, convErr := mountMetaToRecord(diskID, mm)
-	if convErr != nil {
-		return MountRecord{}, convErr
-	}
-	m.queue.RecordMountRenew(diskID, mountRec.MountID, mountRec.ExpiresAt)
 	return mountRec, nil
 }
 
@@ -953,122 +933,103 @@ func (m *ControlManager) UnmountBranch(ctx context.Context, diskID, mountID uuid
 	if diskID == uuid.Nil || mountID == uuid.Nil {
 		return engine.ErrInvalid
 	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	if umErr := entry.store.Unmount(ctx, mountID.String()); umErr != nil {
-		return umErr
-	}
-	m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-		return store.DeleteMounts(pgCtx, diskID, []uuid.UUID{mountID}, nil)
+	return m.withEntry(diskID, true, func(entry *diskEntry) error {
+		if umErr := entry.store.Unmount(ctx, mountID.String()); umErr != nil {
+			return umErr
+		}
+		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+			return store.DeleteMounts(pgCtx, diskID, []uuid.UUID{mountID}, nil)
+		})
+		return nil
 	})
-	return nil
 }
 
 func (m *ControlManager) EvictMounts(ctx context.Context, diskID uuid.UUID, branch string, mountID uuid.UUID) (engine.EvictMountsResult, error) {
-	if diskID == uuid.Nil {
-		return engine.EvictMountsResult{}, engine.ErrInvalid
-	}
-	unlock := m.lockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
-	if err != nil {
-		return engine.EvictMountsResult{}, err
-	}
-	defer release()
-
-	mountIDStr := ""
-	if mountID != uuid.Nil {
-		mountIDStr = mountID.String()
-	}
-	res, err := entry.store.EvictMounts(ctx, branch, mountIDStr)
-	if err != nil {
-		return engine.EvictMountsResult{}, err
-	}
-
-	evictedUUIDs := make([]uuid.UUID, 0, len(res.EvictedMountIDs))
-	for _, rawID := range res.EvictedMountIDs {
-		if parsed, pErr := uuid.Parse(rawID); pErr == nil && parsed != uuid.Nil {
-			evictedUUIDs = append(evictedUUIDs, parsed)
+	var res engine.EvictMountsResult
+	err := m.withEntry(diskID, true, func(entry *diskEntry) error {
+		mountIDStr := ""
+		if mountID != uuid.Nil {
+			mountIDStr = mountID.String()
 		}
-	}
-	updatedBranches := make([]BranchRecord, 0, len(res.UpdatedBranches))
-	for _, b := range res.UpdatedBranches {
-		updatedBranches = append(updatedBranches, branchMetaToRecord(diskID, b))
-	}
-	if len(evictedUUIDs) > 0 || len(updatedBranches) > 0 {
-		m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
-			return store.DeleteMounts(pgCtx, diskID, evictedUUIDs, updatedBranches)
-		})
+		var eErr error
+		res, eErr = entry.store.EvictMounts(ctx, branch, mountIDStr)
+		if eErr != nil {
+			return eErr
+		}
+
+		evictedUUIDs := make([]uuid.UUID, 0, len(res.EvictedMountIDs))
+		for _, rawID := range res.EvictedMountIDs {
+			if parsed, pErr := uuid.Parse(rawID); pErr == nil && parsed != uuid.Nil {
+				evictedUUIDs = append(evictedUUIDs, parsed)
+			}
+		}
+		updatedBranches := make([]BranchRecord, 0, len(res.UpdatedBranches))
+		for _, b := range res.UpdatedBranches {
+			updatedBranches = append(updatedBranches, branchMetaToRecord(diskID, b))
+		}
+		if len(evictedUUIDs) > 0 || len(updatedBranches) > 0 {
+			m.syncProject(ctx, diskID, false, func(pgCtx context.Context, store Store) error {
+				return store.DeleteMounts(pgCtx, diskID, evictedUUIDs, updatedBranches)
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return engine.EvictMountsResult{}, err
 	}
 	return res, nil
 }
 
 func (m *ControlManager) Diff(ctx context.Context, diskID uuid.UUID, opts engine.DiffOptions) (*engine.DiffResult, error) {
-	if diskID == uuid.Nil {
-		return nil, engine.ErrInvalid
-	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
+	var res *engine.DiffResult
+	err := m.withEntry(diskID, false, func(entry *diskEntry) error {
+		var dErr error
+		res, dErr = entry.store.Diff(ctx, opts)
+		return dErr
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	return entry.store.Diff(ctx, opts)
+	return res, nil
 }
 
 func (m *ControlManager) DiffCommits(ctx context.Context, diskID uuid.UUID, opts engine.DiffCommitsOptions) (*engine.DiffResult, error) {
-	if diskID == uuid.Nil {
-		return nil, engine.ErrInvalid
-	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
+	var res *engine.DiffResult
+	err := m.withEntry(diskID, false, func(entry *diskEntry) error {
+		var dErr error
+		res, dErr = entry.store.DiffCommits(ctx, opts)
+		return dErr
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	return entry.store.DiffCommits(ctx, opts)
+	return res, nil
 }
 
 func (m *ControlManager) DiffWork(ctx context.Context, diskID uuid.UUID, branch string, opts engine.DiffWorkOptions) (*engine.DiffResult, error) {
-	if diskID == uuid.Nil {
-		return nil, engine.ErrInvalid
-	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
+	var res *engine.DiffResult
+	err := m.withEntry(diskID, false, func(entry *diskEntry) error {
+		var dErr error
+		res, dErr = entry.store.DiffWork(ctx, branch, opts)
+		return dErr
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	return entry.store.DiffWork(ctx, branch, opts)
+	return res, nil
 }
 
 func (m *ControlManager) ReadCommitNode(ctx context.Context, diskID uuid.UUID, commitID, ino uint64, offset int64, size int) (engine.CommitNodeResult, error) {
-	if diskID == uuid.Nil {
-		return engine.CommitNodeResult{}, engine.ErrInvalid
-	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
+	var res engine.CommitNodeResult
+	err := m.withEntry(diskID, false, func(entry *diskEntry) error {
+		var rErr error
+		res, rErr = entry.store.ReadCommitNode(ctx, commitID, ino, offset, size)
+		return rErr
+	})
 	if err != nil {
 		return engine.CommitNodeResult{}, err
 	}
-	defer release()
-	return entry.store.ReadCommitNode(ctx, commitID, ino, offset, size)
+	return res, nil
 }
 
 func (m *ControlManager) MountLeaseTTL() time.Duration {
@@ -1084,15 +1045,17 @@ func (m *ControlManager) WithDisk(ctx context.Context, diskID uuid.UUID, fn func
 			return err
 		}
 	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
+	slot := m.getSlot(diskID)
+	slot.opMu.RLock()
+	defer slot.opMu.RUnlock()
 
-	entry, release, err := m.acquireDisk(diskID)
+	entry, err := m.acquireOpenEntry(slot, diskID)
 	if err != nil {
 		return err
 	}
-	defer release()
-	return fn(entry.store)
+	err = fn(entry.store)
+	m.touchLastUsed(entry)
+	return err
 }
 
 func (m *ControlManager) Disk(ctx context.Context, diskID uuid.UUID) (*engine.DiskStore, error) {
@@ -1104,15 +1067,15 @@ func (m *ControlManager) Disk(ctx context.Context, diskID uuid.UUID) (*engine.Di
 			return nil, err
 		}
 	}
-	unlock := m.rlockDisk(diskID)
-	defer unlock()
-
-	entry, release, err := m.acquireDisk(diskID)
+	var ds *engine.DiskStore
+	err := m.withEntry(diskID, false, func(entry *diskEntry) error {
+		ds = entry.store
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	return entry.store, nil
+	return ds, nil
 }
 
 func (m *ControlManager) ListDisks(ctx context.Context, q ListDisksQuery) (ListDisksPage, error) {
@@ -1142,20 +1105,53 @@ func (m *ControlManager) ListDisks(ctx context.Context, q ListDisksQuery) (ListD
 		}
 		return ListDisksPage{}, err
 	}
-	if len(page.Disks) > 0 {
-		m.poolMu.RLock()
-		for i := range page.Disks {
-			if entry, ok := m.disks[page.Disks[i].DiskID]; ok && entry != nil && entry.store != nil {
-				page.Disks[i].UsedBytes = entry.store.UsedBytes()
-			}
+	for i := range page.Disks {
+		if used, ok := m.openDiskUsedBytes(page.Disks[i].DiskID); ok {
+			page.Disks[i].UsedBytes = used
 		}
-		m.poolMu.RUnlock()
 	}
 	return page, nil
 }
 
 func (m *ControlManager) shouldFallbackToPebble(diskID uuid.UUID) bool {
 	return m.store == nil || m.queue.IsDirty(diskID)
+}
+
+func readWithFallback[T any](
+	ctx context.Context,
+	m *ControlManager,
+	diskID uuid.UUID,
+	pgRead func(context.Context) (T, error),
+	pebbleRead func(*engine.DiskStore) (T, error),
+) (T, error) {
+	runFallback := func() (T, error) {
+		var zero, out T
+		err := m.withDiskReadOnly(diskID, func(ds *engine.DiskStore) error {
+			var rErr error
+			out, rErr = pebbleRead(ds)
+			return rErr
+		})
+		if err != nil {
+			if errors.Is(err, engine.ErrNotFound) {
+				return zero, ErrNotFound
+			}
+			return zero, err
+		}
+		return out, nil
+	}
+
+	if m.shouldFallbackToPebble(diskID) {
+		return runFallback()
+	}
+	res, err := pgRead(ctx)
+	if err != nil {
+		if ctx.Err() == nil && IsUnavailable(err) {
+			return runFallback()
+		}
+		var zero T
+		return zero, err
+	}
+	return res, nil
 }
 
 func (m *ControlManager) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, error) {
@@ -1165,39 +1161,24 @@ func (m *ControlManager) GetDisk(ctx context.Context, diskID uuid.UUID) (DiskRec
 	if diskID == uuid.Nil {
 		return DiskRecord{}, fmt.Errorf("%w: disk_id cannot be nil", ErrInvalidArgument)
 	}
-	if m.shouldFallbackToPebble(diskID) {
-		return m.fallbackGetDisk(ctx, diskID)
-	}
-	rec, err := m.store.GetDisk(ctx, diskID)
-	if err != nil {
-		if ctx.Err() == nil && IsUnavailable(err) {
-			return m.fallbackGetDisk(ctx, diskID)
-		}
-		return DiskRecord{}, err
-	}
-	if used, ok := m.openDiskUsedBytes(diskID); ok {
-		rec.UsedBytes = used
-	}
-	return rec, nil
-}
-
-func (m *ControlManager) fallbackGetDisk(ctx context.Context, diskID uuid.UUID) (DiskRecord, error) {
-	var rec DiskRecord
-	err := m.withDiskReadOnly(diskID, func(ds *engine.DiskStore) error {
-		st, stErr := ds.StatFS(ctx)
-		if stErr != nil {
-			return stErr
-		}
-		rec = diskMetaToRecord(diskID, ds.DiskMeta(), st.UsedBytes)
-		return nil
-	})
-	if err != nil {
-		if errors.Is(err, engine.ErrNotFound) {
-			return DiskRecord{}, ErrNotFound
-		}
-		return DiskRecord{}, err
-	}
-	return rec, nil
+	return readWithFallback(
+		ctx,
+		m,
+		diskID,
+		func(pgCtx context.Context) (DiskRecord, error) {
+			rec, err := m.store.GetDisk(pgCtx, diskID)
+			if err != nil {
+				return DiskRecord{}, err
+			}
+			if used, ok := m.openDiskUsedBytes(diskID); ok {
+				rec.UsedBytes = used
+			}
+			return rec, nil
+		},
+		func(ds *engine.DiskStore) (DiskRecord, error) {
+			return diskMetaToRecord(diskID, ds.DiskMeta(), ds.UsedBytes()), nil
+		},
+	)
 }
 
 func (m *ControlManager) ListBranches(ctx context.Context, diskID uuid.UUID) ([]BranchRecord, error) {
@@ -1207,39 +1188,25 @@ func (m *ControlManager) ListBranches(ctx context.Context, diskID uuid.UUID) ([]
 	if diskID == uuid.Nil {
 		return nil, fmt.Errorf("%w: disk_id cannot be nil", ErrInvalidArgument)
 	}
-	if m.shouldFallbackToPebble(diskID) {
-		return m.fallbackListBranches(diskID)
-	}
-	branches, err := m.store.ListBranches(ctx, diskID)
-	if err != nil {
-		if ctx.Err() == nil && IsUnavailable(err) {
-			return m.fallbackListBranches(diskID)
-		}
-		return nil, err
-	}
-	return branches, nil
-}
-
-func (m *ControlManager) fallbackListBranches(diskID uuid.UUID) ([]BranchRecord, error) {
-	var out []BranchRecord
-	err := m.withDiskReadOnly(diskID, func(ds *engine.DiskStore) error {
-		raw, lErr := ds.ListBranches()
-		if lErr != nil {
-			return lErr
-		}
-		out = make([]BranchRecord, 0, len(raw))
-		for _, b := range raw {
-			out = append(out, branchMetaToRecord(diskID, b))
-		}
-		return nil
-	})
-	if err != nil {
-		if errors.Is(err, engine.ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return out, nil
+	return readWithFallback(
+		ctx,
+		m,
+		diskID,
+		func(pgCtx context.Context) ([]BranchRecord, error) {
+			return m.store.ListBranches(pgCtx, diskID)
+		},
+		func(ds *engine.DiskStore) ([]BranchRecord, error) {
+			raw, err := ds.ListBranches()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]BranchRecord, 0, len(raw))
+			for _, b := range raw {
+				out = append(out, branchMetaToRecord(diskID, b))
+			}
+			return out, nil
+		},
+	)
 }
 
 func (m *ControlManager) ListCommits(ctx context.Context, q ListCommitsQuery) (ListCommitsPage, error) {
@@ -1268,54 +1235,41 @@ func (m *ControlManager) ListCommits(ctx context.Context, q ListCommitsQuery) (L
 		hasCursor = true
 	}
 
-	if m.shouldFallbackToPebble(q.DiskID) {
-		return m.fallbackListCommits(q, limit, hasCursor, cursorID)
-	}
-	page, err := m.store.ListCommits(ctx, q)
-	if err != nil {
-		if ctx.Err() == nil && IsUnavailable(err) {
-			return m.fallbackListCommits(q, limit, hasCursor, cursorID)
-		}
-		return ListCommitsPage{}, err
-	}
-	return page, nil
-}
-
-func (m *ControlManager) fallbackListCommits(q ListCommitsQuery, limit uint32, hasCursor bool, cursorID uint64) (ListCommitsPage, error) {
-	var page ListCommitsPage
-	err := m.withDiskReadOnly(q.DiskID, func(ds *engine.DiskStore) error {
-		raw, lErr := ds.ListCommits()
-		if lErr != nil {
-			return lErr
-		}
-		filtered := make([]CommitRecord, 0, min(len(raw), int(limit)+1))
-		for _, c := range raw {
-			rec := commitMetaToRecord(q.DiskID, c)
-			if q.Kind != "" && rec.Kind != q.Kind {
-				continue
+	return readWithFallback(
+		ctx,
+		m,
+		q.DiskID,
+		func(pgCtx context.Context) (ListCommitsPage, error) {
+			return m.store.ListCommits(pgCtx, q)
+		},
+		func(ds *engine.DiskStore) (ListCommitsPage, error) {
+			raw, lErr := ds.ListCommits()
+			if lErr != nil {
+				return ListCommitsPage{}, lErr
 			}
-			if hasCursor && rec.CommitID >= cursorID {
-				continue
+			filtered := make([]CommitRecord, 0, min(len(raw), int(limit)+1))
+			for _, c := range raw {
+				rec := commitMetaToRecord(q.DiskID, c)
+				if q.Kind != "" && rec.Kind != q.Kind {
+					continue
+				}
+				if hasCursor && rec.CommitID >= cursorID {
+					continue
+				}
+				filtered = append(filtered, rec)
+				if len(filtered) > int(limit) {
+					break
+				}
 			}
-			filtered = append(filtered, rec)
+			var page ListCommitsPage
 			if len(filtered) > int(limit) {
-				break
+				filtered = filtered[:limit]
+				page.NextPageToken = EncodeCommitPageCursor(filtered[len(filtered)-1].CommitID)
 			}
-		}
-		if len(filtered) > int(limit) {
-			filtered = filtered[:limit]
-			page.NextPageToken = EncodeCommitPageCursor(filtered[len(filtered)-1].CommitID)
-		}
-		page.Commits = filtered
-		return nil
-	})
-	if err != nil {
-		if errors.Is(err, engine.ErrNotFound) {
-			return ListCommitsPage{}, ErrNotFound
-		}
-		return ListCommitsPage{}, err
-	}
-	return page, nil
+			page.Commits = filtered
+			return page, nil
+		},
+	)
 }
 
 func (m *ControlManager) ListMounts(ctx context.Context, diskID uuid.UUID, branchName string) ([]MountRecord, error) {
@@ -1326,50 +1280,36 @@ func (m *ControlManager) ListMounts(ctx context.Context, diskID uuid.UUID, branc
 		return nil, fmt.Errorf("%w: disk_id cannot be nil", ErrInvalidArgument)
 	}
 	now := m.now()
-	if m.shouldFallbackToPebble(diskID) {
-		return m.fallbackListMounts(diskID, branchName, now)
-	}
-	mounts, err := m.store.ListMounts(ctx, diskID, branchName, now)
-	if err != nil {
-		if ctx.Err() == nil && IsUnavailable(err) {
-			return m.fallbackListMounts(diskID, branchName, now)
-		}
-		return nil, err
-	}
-	return mounts, nil
-}
-
-func (m *ControlManager) fallbackListMounts(diskID uuid.UUID, branchName string, now time.Time) ([]MountRecord, error) {
 	cutoff := normalizeTimestamp(now)
-	var out []MountRecord
-	err := m.withDiskReadOnly(diskID, func(ds *engine.DiskStore) error {
-		raw, lErr := ds.ListMounts(branchName, now)
-		if lErr != nil {
-			return lErr
-		}
-		out = make([]MountRecord, 0, len(raw))
-		for _, mm := range raw {
-			rec, convErr := mountMetaToRecord(diskID, mm)
-			if convErr != nil {
-				continue
+	return readWithFallback(
+		ctx,
+		m,
+		diskID,
+		func(pgCtx context.Context) ([]MountRecord, error) {
+			return m.store.ListMounts(pgCtx, diskID, branchName, now)
+		},
+		func(ds *engine.DiskStore) ([]MountRecord, error) {
+			raw, lErr := ds.ListMounts(branchName, now)
+			if lErr != nil {
+				return nil, lErr
 			}
-			if !rec.ExpiresAt.After(cutoff) {
-				continue
+			out := make([]MountRecord, 0, len(raw))
+			for _, mm := range raw {
+				rec, convErr := mountMetaToRecord(diskID, mm)
+				if convErr != nil {
+					continue
+				}
+				if !rec.ExpiresAt.After(cutoff) {
+					continue
+				}
+				out = append(out, rec)
 			}
-			out = append(out, rec)
-		}
-		slices.SortFunc(out, func(a, b MountRecord) int {
-			return compareUUID(a.MountID, b.MountID)
-		})
-		return nil
-	})
-	if err != nil {
-		if errors.Is(err, engine.ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return out, nil
+			slices.SortFunc(out, func(a, b MountRecord) int {
+				return compareUUID(a.MountID, b.MountID)
+			})
+			return out, nil
+		},
+	)
 }
 
 func nanoToTime(ns int64) time.Time {

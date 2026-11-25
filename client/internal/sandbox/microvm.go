@@ -70,6 +70,8 @@ type vmState struct {
 	Paused       bool   `json:"paused"`
 	// Block 为真时系统盘是盘里的 BlockImage 文件,以块设备交给虚机;否则整块盘经 virtio-fs 当根。
 	Block bool `json:"block"`
+	// Local 为真时系统盘是状态目录里的一个本机镜像文件,不经过 Bowl。
+	Local bool `json:"local,omitempty"`
 }
 
 // BlockImage 是块设备模板盘里那个 ext4 镜像的文件名,放在盘的根上。
@@ -93,7 +95,7 @@ func (m *MicroVM) Create(ctx context.Context, spec *CreateSpec) error {
 	if spec.ID == "" {
 		return errors.New("沙箱 ID 不能为空")
 	}
-	if spec.ClientBinary == "" {
+	if spec.ClientBinary == "" && spec.LocalImage == "" {
 		return errors.New("缺少宿主机上的 bowl 客户端路径")
 	}
 	id := StripID(spec.ID)
@@ -108,6 +110,15 @@ func (m *MicroVM) Create(ctx context.Context, spec *CreateSpec) error {
 		ID: id, Template: spec.Image, Endpoint: spec.HostEndpoint, ClientBinary: spec.ClientBinary,
 		Created: time.Now().UTC().Format(time.RFC3339),
 		CPUs:    cmp.Or(spec.CPUs, m.CPUs, 1), MemoryMiB: cmp.Or(spec.MemoryMiB, m.MemoryMiB, 1024),
+		Local: spec.LocalImage != "",
+	}
+	if st.Local {
+		// 文件系统支持 reflink(XFS、btrfs)时这一步不复制数据;否则是一次稀疏的整份复制。
+		dst := blockDevicePath(filepath.Join(dir, "root"))
+		if out, err := exec.CommandContext(ctx, "cp", "--reflink=auto", "--sparse=always", spec.LocalImage, dst).CombinedOutput(); err != nil { //nolint:gosec // 路径由调用方构造
+			_ = os.RemoveAll(dir)
+			return fmt.Errorf("复制模板镜像: %w: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 	if err := m.start(ctx, &st, spec.Token); err != nil {
 		_ = m.Remove(context.WithoutCancel(ctx), id)
@@ -193,6 +204,9 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 // attachSystemDisk 把沙箱的盘接成虚机的系统盘:现在是宿主机挂载、再由 virtiofsd 传进去。
 // M8 换成块设备时只改这里和 detachSystemDisk。
 func (m *MicroVM) attachSystemDisk(ctx context.Context, st *vmState, token, root string) error {
+	if st.Local {
+		return nil
+	}
 	// --allow-other:virtiofsd 以虚机里进程的身份访问挂载点,不加的话虚机里非 root 用户全被 FUSE 拒掉。
 	cmd := exec.CommandContext(ctx, st.ClientBinary, "mount", st.ID, root, "--allow-other", //nolint:gosec // 路径来自调用方配置
 		"--endpoint", st.Endpoint, "--log-file", filepath.Join(m.dir(st.ID), "mount.log"))
@@ -335,7 +349,7 @@ func (m *MicroVM) Info(_ context.Context, id string) (Info, error) {
 	return Info{
 		ID: id, Status: vmStatus(&st), Image: st.Template, Created: st.Created,
 		Container: "pid " + strconv.Itoa(st.VMPid), Endpoint: st.Endpoint, MountPath: "/",
-		Address: guestIP(st.NetIndex), CPUs: st.CPUs, MemoryMiB: st.MemoryMiB, Block: st.Block,
+		Address: guestIP(st.NetIndex), CPUs: st.CPUs, MemoryMiB: st.MemoryMiB, Block: st.Block, Local: st.Local,
 		Mounts: []Mount{{DiskID: id, Path: "/"}},
 	}, nil
 }

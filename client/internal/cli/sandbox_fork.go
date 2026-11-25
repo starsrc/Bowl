@@ -24,6 +24,9 @@ func sboxFork(src, name, binary, token string, log io.Writer) (newID string, for
 	if err != nil {
 		return "", 0, runtimeExitErr(err)
 	}
+	if info.Local {
+		return "", 0, runtimeExitErr(fmt.Errorf("sandbox %s runs on a local image, not a Bowl disk; fork needs a Bowl disk", src))
+	}
 	client, code, err := newDiskStorageClient(info.Endpoint, token)
 	if err != nil {
 		return "", 0, &cliExitError{code: code, err: err}

@@ -64,6 +64,9 @@ func newTemplateCreateCmd() *cobra.Command {
 			if block && sboxRuntimeName != runtimeMicroVM {
 				return usageExitErr(errors.New("--block templates boot only on the microvm runtime"), false)
 			}
+			if sboxLocal {
+				return createLocalTemplate(cmd, image, name, int64(maxBytes)) //nolint:gosec // a disk size
+			}
 			// microvm mounts the disk on this host with the host's bowl; the Docker runtimes inject a
 			// Linux client into a helper container and build one when --binary is empty.
 			if binary == "" && sboxRuntimeName == runtimeMicroVM {
@@ -105,6 +108,26 @@ func newTemplateCreateCmd() *cobra.Command {
 		"inside a helper container otherwise (default: build one)")
 	addSandboxStorageFlags(cmd, &endpoint, &token)
 	return cmd
+}
+
+// createLocalTemplate builds the template as an ext4 image in the state directory.
+func createLocalTemplate(cmd *cobra.Command, image, name string, sizeBytes int64) error {
+	vm := &sandbox.MicroVM{StateDir: sboxStateDir}
+	dir := vm.LocalTemplateDir(name)
+	if _, err := os.Stat(dir); err == nil {
+		return runtimeExitErr(fmt.Errorf("local template %q already exists; remove %s first", name, dir))
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return runtimeExitErr(err)
+	}
+	start := time.Now()
+	if err := vm.BuildBlockImage(context.Background(), image, runtime.GOARCH, dir, sizeBytes, cmd.ErrOrStderr()); err != nil {
+		_ = os.RemoveAll(dir)
+		return runtimeExitErr(err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Local template %s is ready in %s\n  Use:   bowl-sandbox --local create --template %s\n",
+		name, time.Since(start).Round(time.Millisecond), name)
+	return nil
 }
 
 // fillTemplate unpacks the image and the guest agent into the new disk and unmounts it, which

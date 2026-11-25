@@ -9,13 +9,13 @@ import (
 )
 
 const (
-	DefaultFlushInterval = 5 * time.Second
-	DefaultOpTimeout     = 10 * time.Second
+	defaultFlushInterval = 5 * time.Second
+	defaultOpTimeout     = 10 * time.Second
 )
 
-type QueueConfig struct {
-	FlushInterval time.Duration
-	OpTimeout     time.Duration
+type queueConfig struct {
+	flushInterval time.Duration
+	opTimeout     time.Duration
 }
 
 type dirtyState struct {
@@ -28,7 +28,7 @@ type mountBatchKey struct {
 	mountID uuid.UUID
 }
 
-type Queue struct {
+type queue struct {
 	store         Store
 	flushInterval time.Duration
 	opTimeout     time.Duration
@@ -48,18 +48,18 @@ type Queue struct {
 	closeErr    error
 }
 
-func NewQueue(store Store, cfg QueueConfig) *Queue {
-	flushInterval := cfg.FlushInterval
+func newQueue(store Store, cfg queueConfig) *queue {
+	flushInterval := cfg.flushInterval
 	if flushInterval <= 0 {
-		flushInterval = DefaultFlushInterval
+		flushInterval = defaultFlushInterval
 	}
-	opTimeout := cfg.OpTimeout
+	opTimeout := cfg.opTimeout
 	if opTimeout <= 0 {
-		opTimeout = DefaultOpTimeout
+		opTimeout = defaultOpTimeout
 	}
 
 	drainCtx, drainCancel := context.WithCancel(context.Background())
-	q := &Queue{
+	q := &queue{
 		store:         store,
 		flushInterval: flushInterval,
 		opTimeout:     opTimeout,
@@ -75,7 +75,7 @@ func NewQueue(store Store, cfg QueueConfig) *Queue {
 	return q
 }
 
-func (q *Queue) markDirtyLocked(diskID uuid.UUID, isCatalog bool) uint64 {
+func (q *queue) markDirtyLocked(diskID uuid.UUID, isCatalog bool) uint64 {
 	q.dirtyGen++
 	existing := q.dirty[diskID]
 	q.dirty[diskID] = dirtyState{
@@ -85,7 +85,7 @@ func (q *Queue) markDirtyLocked(diskID uuid.UUID, isCatalog bool) uint64 {
 	return q.dirtyGen
 }
 
-func (q *Queue) MarkDirty(diskID uuid.UUID, isCatalog bool) uint64 {
+func (q *queue) markDirty(diskID uuid.UUID, isCatalog bool) uint64 {
 	if diskID == uuid.Nil {
 		return 0
 	}
@@ -94,7 +94,7 @@ func (q *Queue) MarkDirty(diskID uuid.UUID, isCatalog bool) uint64 {
 	return q.markDirtyLocked(diskID, isCatalog)
 }
 
-func (q *Queue) IsDirty(diskID uuid.UUID) bool {
+func (q *queue) isDirty(diskID uuid.UUID) bool {
 	if diskID == uuid.Nil {
 		return false
 	}
@@ -104,7 +104,7 @@ func (q *Queue) IsDirty(diskID uuid.UUID) bool {
 	return ok
 }
 
-func (q *Queue) DirtyGeneration(diskID uuid.UUID) (uint64, bool) {
+func (q *queue) dirtyGeneration(diskID uuid.UUID) (uint64, bool) {
 	if diskID == uuid.Nil {
 		return 0, false
 	}
@@ -114,7 +114,7 @@ func (q *Queue) DirtyGeneration(diskID uuid.UUID) (uint64, bool) {
 	return st.gen, ok
 }
 
-func (q *Queue) dirtyInfo(diskID uuid.UUID) (dirtyState, bool) {
+func (q *queue) dirtyInfo(diskID uuid.UUID) (dirtyState, bool) {
 	if diskID == uuid.Nil {
 		return dirtyState{}, false
 	}
@@ -124,13 +124,13 @@ func (q *Queue) dirtyInfo(diskID uuid.UUID) (dirtyState, bool) {
 	return st, ok
 }
 
-func (q *Queue) HasDirtyDisks() bool {
+func (q *queue) hasDirtyDisks() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.dirty) > 0
 }
 
-func (q *Queue) TakeDirtyDisks() map[uuid.UUID]uint64 {
+func (q *queue) takeDirtyDisks() map[uuid.UUID]uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	out := make(map[uuid.UUID]uint64, len(q.dirty))
@@ -140,7 +140,7 @@ func (q *Queue) TakeDirtyDisks() map[uuid.UUID]uint64 {
 	return out
 }
 
-func (q *Queue) TakeDirtyCatalogDisks() map[uuid.UUID]uint64 {
+func (q *queue) takeDirtyCatalogDisks() map[uuid.UUID]uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var out map[uuid.UUID]uint64
@@ -156,7 +156,7 @@ func (q *Queue) TakeDirtyCatalogDisks() map[uuid.UUID]uint64 {
 	return out
 }
 
-func (q *Queue) ClearDirty(diskID uuid.UUID, gen uint64) bool {
+func (q *queue) clearDirty(diskID uuid.UUID, gen uint64) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	st, ok := q.dirty[diskID]
@@ -167,7 +167,7 @@ func (q *Queue) ClearDirty(diskID uuid.UUID, gen uint64) bool {
 	return true
 }
 
-func (q *Queue) RecordUsage(diskID uuid.UUID, usedBytes uint64) {
+func (q *queue) recordUsage(diskID uuid.UUID, usedBytes uint64) {
 	if diskID == uuid.Nil {
 		return
 	}
@@ -178,7 +178,7 @@ func (q *Queue) RecordUsage(diskID uuid.UUID, usedBytes uint64) {
 	q.mu.Unlock()
 }
 
-func (q *Queue) RecordMountRenew(diskID, mountID uuid.UUID, expiresAt time.Time) {
+func (q *queue) recordMountRenew(diskID, mountID uuid.UUID, expiresAt time.Time) {
 	if diskID == uuid.Nil || mountID == uuid.Nil {
 		return
 	}
@@ -193,7 +193,7 @@ func (q *Queue) RecordMountRenew(diskID, mountID uuid.UUID, expiresAt time.Time)
 	q.mu.Unlock()
 }
 
-func (q *Queue) runBatcher() {
+func (q *queue) runBatcher() {
 	defer close(q.batchDone)
 	ticker := time.NewTicker(q.flushInterval)
 	defer ticker.Stop()
@@ -209,11 +209,7 @@ func (q *Queue) runBatcher() {
 	}
 }
 
-func (q *Queue) FlushBatches(ctx context.Context) {
-	q.flushBatches(ctx)
-}
-
-func (q *Queue) flushBatches(ctx context.Context) {
+func (q *queue) flushBatches(ctx context.Context) {
 	q.mu.Lock()
 	var usageMap map[uuid.UUID]uint64
 	if len(q.usageBuf) > 0 {
@@ -275,7 +271,7 @@ func (q *Queue) flushBatches(ctx context.Context) {
 	}
 }
 
-func (q *Queue) Close(ctx context.Context) error {
+func (q *queue) close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}

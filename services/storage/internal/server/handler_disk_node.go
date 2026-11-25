@@ -98,17 +98,6 @@ func toProtoBranch(b projection.BranchRecord) *storagev1.Branch {
 	}
 }
 
-func toProtoBranchFromEngine(diskID uuid.UUID, b engine.BranchMeta) *storagev1.Branch {
-	return &storagev1.Branch{
-		DiskId:       diskID.String(),
-		Name:         b.Name,
-		HeadCommitId: b.HeadCommitID,
-		WriterEpoch:  b.WriterEpoch,
-		CreatedAt:    timestamppb.New(time.Unix(0, b.CreatedAt).UTC().Truncate(time.Microsecond)),
-		UpdatedAt:    timestamppb.New(time.Unix(0, b.UpdatedAt).UTC().Truncate(time.Microsecond)),
-	}
-}
-
 func toProtoCommitKind(kind string) storagev1.CommitKind {
 	switch kind {
 	case projection.CommitKindInit:
@@ -118,21 +107,6 @@ func toProtoCommitKind(kind string) storagev1.CommitKind {
 	case projection.CommitKindFork:
 		return storagev1.CommitKind_COMMIT_KIND_FORK
 	case projection.CommitKindMerge:
-		return storagev1.CommitKind_COMMIT_KIND_MERGE
-	default:
-		return storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED
-	}
-}
-
-func toProtoCommitKindFromEngine(kind engine.CommitKind) storagev1.CommitKind {
-	switch kind {
-	case engine.CommitKindInit:
-		return storagev1.CommitKind_COMMIT_KIND_INIT
-	case engine.CommitKindManual:
-		return storagev1.CommitKind_COMMIT_KIND_MANUAL
-	case engine.CommitKindFork:
-		return storagev1.CommitKind_COMMIT_KIND_FORK
-	case engine.CommitKindMerge:
 		return storagev1.CommitKind_COMMIT_KIND_MERGE
 	default:
 		return storagev1.CommitKind_COMMIT_KIND_UNSPECIFIED
@@ -165,18 +139,6 @@ func toProtoCommit(c projection.CommitRecord) *storagev1.Commit {
 		Kind:          toProtoCommitKind(c.Kind),
 		Message:       c.Message,
 		CreatedAt:     timestamppb.New(c.CreatedAt),
-	}
-}
-
-func toProtoCommitFromEngine(diskID uuid.UUID, c engine.CommitMeta) *storagev1.Commit {
-	return &storagev1.Commit{
-		DiskId:        diskID.String(),
-		CommitId:      c.ID,
-		ParentId:      c.ParentID,
-		MergeParentId: c.MergeParentID,
-		Kind:          toProtoCommitKindFromEngine(c.Kind),
-		Message:       c.Message,
-		CreatedAt:     timestamppb.New(time.Unix(0, c.CreatedAt).UTC().Truncate(time.Microsecond)),
 	}
 }
 
@@ -263,24 +225,16 @@ func (s *Server) MountBranch(ctx context.Context, req *connect.Request[storagev1
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	mountRec, err := s.manager.MountBranch(ctx, diskID, req.Msg.Branch, req.Msg.ReadOnly, req.Msg.Force)
+	res, err := s.manager.MountBranch(ctx, diskID, req.Msg.Branch, req.Msg.ReadOnly, req.Msg.Force)
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	var rootInode engine.Inode
-	if err = s.manager.WithDisk(ctx, diskID, func(ds *engine.DiskStore) error {
-		var attrErr error
-		rootInode, attrErr = ds.GetAttr(ctx, req.Msg.Branch, engine.RootIno)
-		return attrErr
-	}); err != nil {
-		return nil, toConnectError(err)
-	}
 	return connect.NewResponse(&storagev1.MountBranchResponse{
-		Epoch:               mountRec.WriterEpoch,
-		RootInode:           toProtoInode(rootInode),
-		EntryTimeoutSeconds: s.entryTimeoutForMode(rootInode.Mode),
+		Epoch:               res.Mount.WriterEpoch,
+		RootInode:           toProtoInode(res.RootInode),
+		EntryTimeoutSeconds: s.entryTimeoutForMode(res.RootInode.Mode),
 		AttrTimeoutSeconds:  s.attrTimeoutSeconds(),
-		MountId:             mountRec.MountID.String(),
+		MountId:             res.Mount.MountID.String(),
 		LeaseTtlSeconds:     s.leaseTTLSeconds(),
 	}), nil
 }
@@ -350,7 +304,7 @@ func (s *Server) EvictMounts(ctx context.Context, req *connect.Request[storagev1
 	}
 	updatedBranches := make([]*storagev1.Branch, 0, len(res.UpdatedBranches))
 	for _, br := range res.UpdatedBranches {
-		updatedBranches = append(updatedBranches, toProtoBranchFromEngine(diskID, br))
+		updatedBranches = append(updatedBranches, toProtoBranch(br))
 	}
 	return connect.NewResponse(&storagev1.EvictMountsResponse{
 		EvictedCount:    res.EvictedCount,

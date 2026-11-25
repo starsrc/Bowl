@@ -56,7 +56,7 @@ func TestStripedLocks_LayoutAndUUIDv7Distribution(t *testing.T) {
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -102,7 +102,7 @@ func TestStripedLocks_CollidingDisksConcurrentSafety(t *testing.T) {
 		FlushInterval:           time.Hour,
 		ReconcileInterval:       time.Hour,
 		DisableStartupReconcile: true,
-		DisableGC:               true,
+		GCMode:                  GCModeDisabled,
 	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, mgr.Close(ctx)) }()
@@ -114,8 +114,8 @@ func TestStripedLocks_CollidingDisksConcurrentSafety(t *testing.T) {
 
 	seedColdDisk(t, root, diskA, "collide-a")
 	seedColdDisk(t, root, diskB, "collide-b")
-	require.False(t, mgr.IsOpen(diskA))
-	require.False(t, mgr.IsOpen(diskB))
+	require.False(t, mgr.isOpen(diskA))
+	require.False(t, mgr.isOpen(diskB))
 
 	startCold := make(chan struct{})
 	enteredA := make(chan struct{})
@@ -159,11 +159,11 @@ func TestStripedLocks_CollidingDisksConcurrentSafety(t *testing.T) {
 	for cErr := range coldErrs {
 		require.NoError(t, cErr)
 	}
-	require.True(t, mgr.IsOpen(diskA))
-	require.True(t, mgr.IsOpen(diskB))
+	require.True(t, mgr.isOpen(diskA))
+	require.True(t, mgr.isOpen(diskB))
 
-	require.NoError(t, mgr.ReconcileDisk(ctx, diskA))
-	require.NoError(t, mgr.ReconcileDisk(ctx, diskB))
+	require.NoError(t, mgr.reconcileDisk(ctx, diskA, false, false))
+	require.NoError(t, mgr.reconcileDisk(ctx, diskB, false, false))
 
 	const rounds = 6
 	mutErrs := make(chan error, 4)
@@ -271,8 +271,8 @@ func TestStripedLocks_CollidingDisksConcurrentSafety(t *testing.T) {
 		require.NoError(t, dErr)
 	}
 
-	require.False(t, mgr.IsOpen(diskA))
-	require.False(t, mgr.IsOpen(diskB))
+	require.False(t, mgr.isOpen(diskA))
+	require.False(t, mgr.isOpen(diskB))
 	_, err = mgr.GetDisk(ctx, diskA)
 	require.ErrorIs(t, err, ErrNotFound)
 	_, err = mgr.GetDisk(ctx, diskB)

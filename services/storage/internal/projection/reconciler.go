@@ -12,10 +12,6 @@ import (
 	"github.com/starsrc/bowl/services/storage/internal/engine"
 )
 
-func (m *ControlManager) ReconcileDisk(ctx context.Context, diskID uuid.UUID) error {
-	return m.reconcileDisk(ctx, diskID, false, false)
-}
-
 func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, onlyIfDirty, onlyIfCatalog bool) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -54,7 +50,7 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 			return err
 		}
 		if hasDirty {
-			m.queue.ClearDirty(diskID, gen)
+			m.queue.clearDirty(diskID, gen)
 		}
 		return nil
 	}
@@ -82,12 +78,12 @@ func (m *ControlManager) reconcileDisk(ctx context.Context, diskID uuid.UUID, on
 		return repErr
 	}
 	if hasDirty {
-		m.queue.ClearDirty(diskID, gen)
+		m.queue.clearDirty(diskID, gen)
 	}
 	return nil
 }
 
-func (m *ControlManager) ReconcileAll(ctx context.Context) error {
+func (m *ControlManager) reconcileAll(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -118,7 +114,7 @@ func (m *ControlManager) ReconcileAll(ctx context.Context) error {
 		if !diskExistsOnFS(m.diskDir(diskID)) {
 			continue
 		}
-		if recErr := m.ReconcileDisk(ctx, diskID); recErr != nil {
+		if recErr := m.reconcileDisk(ctx, diskID, false, false); recErr != nil {
 			errs = append(errs, recErr)
 		}
 	}
@@ -139,11 +135,11 @@ func (m *ControlManager) ReconcileAll(ctx context.Context) error {
 			}
 			exists := lookupOpenEntry(slot, id) != nil || diskExistsOnFS(m.diskDir(id))
 			if !exists {
-				gen, hasDirty := m.queue.DirtyGeneration(id)
+				gen, hasDirty := m.queue.dirtyGeneration(id)
 				if delErr := m.store.DeleteDisk(ctx, id); delErr != nil {
 					errs = append(errs, delErr)
 				} else if hasDirty {
-					m.queue.ClearDirty(id, gen)
+					m.queue.clearDirty(id, gen)
 				}
 			}
 			slot.opMu.Unlock()
@@ -157,14 +153,14 @@ func (m *ControlManager) ReconcileAll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (m *ControlManager) ReconcileDirtyDisks(ctx context.Context) error {
+func (m *ControlManager) reconcileDirtyDisks(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if m.store == nil {
 		return nil
 	}
-	dirty := m.queue.TakeDirtyDisks()
+	dirty := m.queue.takeDirtyDisks()
 	var errs []error
 	for diskID := range dirty {
 		if err := ctx.Err(); err != nil {
@@ -177,7 +173,7 @@ func (m *ControlManager) ReconcileDirtyDisks(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (m *ControlManager) SampleOpenDiskUsage(ctx context.Context) {
+func (m *ControlManager) sampleOpenDiskUsage(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -196,7 +192,7 @@ func (m *ControlManager) SampleOpenDiskUsage(ctx context.Context) {
 					usedInt64 := int64(used)
 					if item.entry.lastSampledUsed.Load() != usedInt64 {
 						item.entry.lastSampledUsed.Store(usedInt64)
-						m.queue.RecordUsage(item.id, used)
+						m.queue.recordUsage(item.id, used)
 					}
 				}
 			}
@@ -205,7 +201,7 @@ func (m *ControlManager) SampleOpenDiskUsage(ctx context.Context) {
 	}
 }
 
-func (m *ControlManager) EvictIdleDisks(ctx context.Context) int {
+func (m *ControlManager) evictIdleDisks(ctx context.Context) int {
 	if m.actorIdleTTL <= 0 {
 		return 0
 	}
@@ -269,9 +265,9 @@ func (m *ControlManager) tryEvictIdleDisk(ctx context.Context, slot *diskSlot, d
 		return false
 	}
 
-	m.queue.RecordUsage(diskID, entry.store.UsedBytes())
+	m.queue.recordUsage(diskID, entry.store.UsedBytes())
 	flushCtx, cancel := context.WithTimeout(ctx, m.syncWriteTimeout)
-	m.queue.FlushBatches(flushCtx)
+	m.queue.flushBatches(flushCtx)
 	cancel()
 
 	slot.remove(diskID)
@@ -297,15 +293,15 @@ func (m *ControlManager) runMaintenanceLoop() {
 			return
 		case <-reconcileTicker.C:
 			opCtx, cancel := context.WithTimeout(m.bgCtx, m.opTimeout)
-			m.SampleOpenDiskUsage(opCtx)
-			_ = m.ReconcileDirtyDisks(opCtx)
+			m.sampleOpenDiskUsage(opCtx)
+			_ = m.reconcileDirtyDisks(opCtx)
 			if m.store != nil {
 				_, _ = m.store.PruneExpiredMounts(opCtx, m.now())
 			}
 			cancel()
 		case <-evictCh:
 			opCtx, cancel := context.WithTimeout(m.bgCtx, m.opTimeout)
-			m.EvictIdleDisks(opCtx)
+			m.evictIdleDisks(opCtx)
 			cancel()
 		}
 	}

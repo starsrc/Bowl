@@ -112,15 +112,19 @@ func (m *MicroVM) Create(ctx context.Context, spec *CreateSpec) error {
 		CPUs:    cmp.Or(spec.CPUs, m.CPUs, 1), MemoryMiB: cmp.Or(spec.MemoryMiB, m.MemoryMiB, 1024),
 		Local: spec.LocalImage != "",
 	}
+	boot := func() error { return m.start(ctx, &st, spec.Token) }
 	if st.Local {
-		// 文件系统支持 reflink(XFS、btrfs)时这一步不复制数据;否则是一次稀疏的整份复制。
-		dst := blockDevicePath(filepath.Join(dir, "root"))
-		if out, err := exec.CommandContext(ctx, "cp", "--reflink=auto", "--sparse=always", spec.LocalImage, dst).CombinedOutput(); err != nil { //nolint:gosec // 路径由调用方构造
+		tplDir, src := filepath.Dir(spec.LocalImage), spec.LocalImage
+		if snap := m.snapshotFor(tplDir, st.CPUs, st.MemoryMiB); snap != "" {
+			src = filepath.Join(tplDir, snapshotDisk)
+			boot = func() error { return m.restore(ctx, &st, snap) }
+		}
+		if err := copyImage(ctx, src, blockDevicePath(filepath.Join(dir, "root"))); err != nil {
 			_ = os.RemoveAll(dir)
-			return fmt.Errorf("复制模板镜像: %w: %s", err, strings.TrimSpace(string(out)))
+			return err
 		}
 	}
-	if err := m.start(ctx, &st, spec.Token); err != nil {
+	if err := boot(); err != nil {
 		_ = m.Remove(context.WithoutCancel(ctx), id)
 		return err
 	}
@@ -173,9 +177,14 @@ func (m *MicroVM) start(ctx context.Context, st *vmState, token string) error {
 		}
 	}
 
+	// virtiofsd 要和虚机共享内存;块设备根不需要,而且私有内存的快照才能写时复制地恢复。
+	memShared := ",shared=on"
+	if st.Block {
+		memShared = ""
+	}
 	vm, err := startDetached(filepath.Join(dir, "vm.log"), m.cloudHypervisor(), append(append([]string{
 		"--kernel", m.kernel()}, rootArgs...),
-		"--memory", "size="+strconv.Itoa(st.MemoryMiB)+"M,shared=on",
+		"--memory", "size="+strconv.Itoa(st.MemoryMiB)+"M"+memShared,
 		"--cpus", "boot="+strconv.Itoa(st.CPUs),
 		"--vsock", "cid=3,socket="+filepath.Join(dir, "vsock.sock"),
 		"--api-socket", filepath.Join(dir, "api.sock"),
@@ -366,14 +375,6 @@ func (m *MicroVM) Exec(ctx context.Context, id, cwd string, argv []string, opts 
 		return 2, errors.New("缺少要执行的命令")
 	}
 	cwd = cmp.Or(cwd, opts.Cwd, microVMWorkdir)
-	conn, rd, err := dialGuest(ctx, filepath.Join(m.dir(id), "vsock.sock"))
-	if err != nil {
-		return 1, err
-	}
-	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-
 	reqBody := execRequest{Argv: argv, Cwd: cwd, Env: opts.Env, TTY: opts.TTY}
 	if f, ok := in.(*os.File); ok && opts.TTY && term.IsTerminal(int(f.Fd())) { //nolint:gosec // fd 不会溢出 int
 		fd := int(f.Fd()) //nolint:gosec // 同上
@@ -384,6 +385,18 @@ func (m *MicroVM) Exec(ctx context.Context, id, cwd string, argv []string, opts 
 			defer func() { _ = term.Restore(fd, old) }()
 		}
 	}
+	return m.run(ctx, id, &reqBody, in, out, errOut)
+}
+
+// run 把一个请求发给虚机里的代理,转发标准流,返回退出码。
+func (m *MicroVM) run(ctx context.Context, id string, reqBody *execRequest, in io.Reader, out, errOut io.Writer) (int, error) {
+	conn, rd, err := dialGuest(ctx, filepath.Join(m.dir(id), "vsock.sock"))
+	if err != nil {
+		return 1, err
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	req, err := json.Marshal(reqBody)
 	if err != nil {
 		return 1, err
@@ -694,7 +707,7 @@ func waitFor(ctx context.Context, timeout time.Duration, ok func() bool) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }
